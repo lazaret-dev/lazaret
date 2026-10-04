@@ -5,7 +5,7 @@
 
 import { resolve, isAbsolute } from "node:path";
 import { readFileSync } from "node:fs";
-import { SEV_ORDER } from "./scanner/rules.js";
+import { SEV_ORDER, HARDENING_RULES } from "./scanner/rules.js";
 import { computeMetrics, worstSevRating, maintainabilityRating } from "./scanner/metrics.js";
 import { ENGINE_VERSION, ENGINE_MARKER, HTML_ENGINE_MARKER } from "./lib/fs.js";
 import { cmpCodePoints, pyStrip, isPrintable, pyFloatRepr } from "./lib/pycompat.js";
@@ -58,8 +58,12 @@ export function buildResult(root, files, issues) {
   }
   let supply = 0, crossFile = 0;
   // INFO supply-chain entries are inventory (a project's own prepare hook,
-  // shared semantics 3), not indicators.
-  for (const i of issues) { if (i.rule.startsWith("SC-") && i.sev !== "INFO") supply++; if (i.rule.startsWith("X-")) crossFile++; }
+  // shared semantics 3), not indicators; nor is a CI file's hardening check
+  // below CRITICAL (HARDENING_RULES).
+  for (const i of issues) {
+    if (i.rule.startsWith("SC-") && i.sev !== "INFO" && (!HARDENING_RULES.has(i.rule) || i.sev === "CRITICAL")) supply++;
+    if (i.rule.startsWith("X-")) crossFile++;
+  }
   conds.push({ label: "No supply-chain indicators", ok: supply === 0 });
   conds.push({ label: CROSS_FILE_LABEL, ok: crossFile === 0 });
   return {

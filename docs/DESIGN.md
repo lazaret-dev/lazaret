@@ -276,6 +276,15 @@ set on Python and JavaScript (Go's standard library measures 2 to 13% with
 its six-line windows, popular crates 4 to 54%), while they count in the
 lines of code the maintainability rating divides by.
 
+**CI files' hardening (0.1.9, S-4).** `scan_config_file` runs
+`ghworkflow.hardening` on a workflow and `gitlabci.hardening` on a GitLab CI
+file (both twins), each kind's rule from `hardening_rule`. These are
+practices, not the worms' shapes: `build_result` counts one against the
+supply-chain condition only when it is CRITICAL (`core.HARDENING_RULES`,
+`rules.js` `HARDENING_RULES`), so a repository is not failed for running
+`actions/checkout@v4`. Like every SC- finding they take no suppression
+marker: a hardening check a team accepts stays a hotspot in the report.
+
 ### b. Interprocedural / cross-file taint (`flow.py` / `flow.js`)
 
 Whole-program analysis that follows untrusted data through function calls and

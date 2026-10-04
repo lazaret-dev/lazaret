@@ -23,7 +23,9 @@ import { truncatedIssue, normalizeNewlines, treeJoin } from "../lib/fs.js";
 import { assigned13, pinUnicode } from "../lib/unicode13.js";
 import { documentationToken, keyMaterial, secretCol, redactConfigValues } from "../lib/configsecrets.js";
 import { configKind, ownerDir, entries as autorunEntries, localCommand } from "../lib/autorun.js";
-import { isWorkflow, findings as workflowFindings } from "../lib/ghworkflow.js";
+import { isWorkflow, findings as workflowFindings, hardening as workflowHardening,
+  hardeningRule as workflowHardeningRule } from "../lib/ghworkflow.js";
+import { isGitlabCi, hardening as gitlabHardening, hardeningRule as gitlabHardeningRule } from "../lib/gitlabci.js";
 import { agentHijackInCommand, installScriptRisk, followHook, nodeCandidates, spawnedScripts, scriptLang, packValues,
   scanDependencyFile, scanRules, NativeExhausted } from "../lib/native.js";
 
@@ -683,7 +685,8 @@ const WORKFLOW_BACKDOOR_WHY =
 /** SC-WORKFLOW-SECRETS / SC-WORKFLOW-BACKDOOR for a GitHub Actions workflow (core.workflow_issues). */
 export function workflowIssues(path, lines) {
   const out = [];
-  for (const [kind, line, d] of workflowFindings(lines.join("\n"))) {
+  const text = lines.join("\n");
+  for (const [kind, line, d] of workflowFindings(text)) {
     if (kind === "secrets") {
       const sent = d.how !== null;
       out.push(mkIssue({
@@ -709,7 +712,13 @@ export function workflowIssues(path, lines) {
         ref: "CWE-94 · Supply chain" }, path, line, lines));
     }
   }
+  for (const [kind, line, d] of workflowHardening(text)) out.push(mkIssue(workflowHardeningRule(kind, d), path, line, lines));
   return out;
+}
+
+/** A GitLab CI file's hardening checks (core.gitlab_issues). */
+export function gitlabIssues(path, lines) {
+  return gitlabHardening(lines.join("\n")).map(([kind, line, d]) => mkIssue(gitlabHardeningRule(kind, d), path, line, lines));
 }
 
 /**
@@ -746,6 +755,7 @@ export function scanConfigFile(path, rawContent, read = null) {
   try {
     if (configKind(path) !== null) issues.push(...autorunIssues(path, lines, read));
     if (isWorkflow(path)) issues.push(...workflowIssues(path, lines));
+    else if (isGitlabCi(path)) issues.push(...gitlabIssues(path, lines));
     for (let i = 0; i < lines.length; i++) {
       if (Date.now() > deadline) throw new ScanBudgetExceeded();
       const line = lines[i];

@@ -70,6 +70,20 @@ project is pre-1.0, so the 0.x API may still change.
   those, and with its six-line windows Go's standard library measures 2 to 13% and
   twenty popular crates 4 to 54%. On those crates and Go's standard library the scan
   reports test keys and vectors, base64 test data and TODO markers.
+- **CI files' hardening, in project scans.** A project's GitHub Actions workflows get six
+  checks: an action, reusable workflow or image not pinned to a commit or a digest
+  (SC-WORKFLOW-UNPINNED), a `pull_request_target` job that checks out the pull request's
+  code (SC-WORKFLOW-PR-CHECKOUT), a build cache in a release workflow (SC-WORKFLOW-CACHE),
+  write permissions for every job or none set (SC-WORKFLOW-PERMISSIONS), a job that can
+  request an OIDC token and installs dependencies (SC-WORKFLOW-OIDC-INSTALL), and
+  `curl … | sh` (SC-WORKFLOW-PIPE-SHELL). Its GitLab CI files (`.gitlab-ci.yml`,
+  `*.gitlab-ci.yml`, a `.yml` under `.gitlab/`) get five: remote, project and component
+  includes not pinned (SC-GITLAB-INCLUDE), images without a digest (SC-GITLAB-IMAGE),
+  `curl … | sh` (SC-GITLAB-PIPE-SHELL), a merge request's text run as code
+  (SC-GITLAB-MR-TEXT), and a job with a publishing credential that installs
+  dependencies (SC-GITLAB-TOKEN-INSTALL). Both packages report them, as security
+  hotspots. Only a CRITICAL one fails the gate's supply-chain condition: a pull request's
+  code checked out by `pull_request_target`, or a file included over plain http.
 
 ### Changed
 

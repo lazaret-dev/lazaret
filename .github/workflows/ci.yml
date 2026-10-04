@@ -138,7 +138,7 @@ jobs:
           python -m unittest tests.architecture.test_js_parity tests.architecture.test_js_parity_config \
             tests.architecture.test_js_parity_core \
             tests.architecture.test_js_parity_eval tests.architecture.test_js_parity_flow \
-            tests.architecture.test_js_parity_go_rust \
+            tests.architecture.test_js_parity_ci_hardening tests.architecture.test_js_parity_go_rust \
             tests.architecture.test_js_parity_gyp tests.architecture.test_js_parity_lexing \
             tests.architecture.test_js_parity_limits tests.architecture.test_js_parity_lookalike \
             tests.architecture.test_js_parity_persistence tests.architecture.test_js_parity_taint \

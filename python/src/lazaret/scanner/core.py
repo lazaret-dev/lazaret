@@ -64,7 +64,8 @@ from lazaret.scanner import taintspec  # taint-config validation shared by both 
 from lazaret.scanner import _unicode13  # the Unicode every engine reads source text in
 from lazaret.scanner import configsecrets  # config and data files: credentials only
 from lazaret.scanner import autorun  # editor and AI-agent settings that run commands (SC-AUTORUN)
-from lazaret.scanner import ghworkflow  # the workflows the Shai-Hulud worms planted (SC-WORKFLOW-*)
+from lazaret.scanner import ghworkflow  # GitHub Actions workflows: the worms' shapes, hardening (SC-WORKFLOW-*)
+from lazaret.scanner import gitlabci  # GitLab CI files: hardening (SC-GITLAB-*)
 from lazaret.scanner import frameworks  # web framework models shared by both taint engines
 from lazaret.scanner import _native, engine  # the native engine: every detector below
 
@@ -4262,11 +4263,26 @@ _WORKFLOW_BACKDOOR_WHY = (
     "machine.")
 
 
+#: The CI files' hardening checks (0.1.9: ghworkflow.hardening and
+#: gitlabci.hardening): the practices a pipeline should follow, not the shapes
+#: of one that was tampered with. They are reported, and only a CRITICAL one
+#: (a pull_request_target job that runs a pull request's code, a file included
+#: over plain http) counts against the gate's supply-chain condition: most
+#: repositories run an action at a version tag or set no permissions, and that
+#: condition is for indicators (build_result).
+HARDENING_RULES = frozenset({
+    "SC-WORKFLOW-UNPINNED", "SC-WORKFLOW-PR-CHECKOUT", "SC-WORKFLOW-CACHE", "SC-WORKFLOW-PERMISSIONS",
+    "SC-WORKFLOW-OIDC-INSTALL", "SC-WORKFLOW-PIPE-SHELL",
+    "SC-GITLAB-INCLUDE", "SC-GITLAB-IMAGE", "SC-GITLAB-PIPE-SHELL", "SC-GITLAB-MR-TEXT", "SC-GITLAB-TOKEN-INSTALL"})
+
+
 def workflow_issues(path, lines):
     """SC-WORKFLOW-SECRETS / SC-WORKFLOW-BACKDOOR for a GitHub Actions workflow
-    (ghworkflow.is_workflow(path)) whose text is lines."""
+    (ghworkflow.is_workflow(path)) whose text is lines, and its hardening
+    checks (HARDENING_RULES)."""
     out = []
-    for kind, line, d in ghworkflow.findings("\n".join(lines)):
+    text = "\n".join(lines)
+    for kind, line, d in ghworkflow.findings(text):
         if kind == "secrets":
             sent = d["how"] is not None
             out.append(mk_issue({
@@ -4291,7 +4307,16 @@ def workflow_issues(path, lines):
                 "fix": ("Delete the workflow unless you wrote it, and remove any runner you did not register. "
                         "Otherwise pass the text through an environment variable and quote it in the script."),
                 "ref": "CWE-94 · Supply chain"}, path, line, lines))
+    for kind, line, d in ghworkflow.hardening(text):
+        out.append(mk_issue(ghworkflow.hardening_rule(kind, d), path, line, lines))
     return out
+
+
+def gitlab_issues(path, lines):
+    """A GitLab CI file's hardening checks (gitlabci.is_gitlab_ci(path);
+    HARDENING_RULES)."""
+    return [mk_issue(gitlabci.hardening_rule(kind, d), path, line, lines)
+            for kind, line, d in gitlabci.hardening("\n".join(lines))]
 
 
 def tree_reader(files, configs):
@@ -4315,8 +4340,8 @@ def scan_config_file(path, content, read=None):
     every line, S-SECRET outside comments. Nothing else runs — it is not
     code. Suppression markers work in the file's comments, as in code. An
     editor's or AI agent's settings that run commands also get SC-AUTORUN
-    (read: see autorun_issues), and a GitHub Actions workflow the
-    SC-WORKFLOW-* checks."""
+    (read: see autorun_issues), a GitHub Actions workflow the
+    SC-WORKFLOW-* checks and a GitLab CI file the SC-GITLAB-* ones."""
     lines = source_lines(_unicode13.pin(content), "cfg")
     content = "\n".join(lines)
     ctx = _ConfigCtx(lines, "cfg", content, time.monotonic() + SCAN_TIME_BUDGET, False)
@@ -4329,6 +4354,8 @@ def scan_config_file(path, content, read=None):
                 issues.extend(autorun_issues(path, lines, read))
             if ghworkflow.is_workflow(path):
                 issues.extend(workflow_issues(path, lines))
+            elif gitlabci.is_gitlab_ci(path):
+                issues.extend(gitlab_issues(path, lines))
             for i, line in enumerate(lines):
                 ctx.check_time()
                 if not line or line.isspace():
@@ -6938,8 +6965,10 @@ def build_result(root, files, issues):
     for i in issues:
         per_file[i["file"]] = per_file.get(i["file"], 0) + 1
     # INFO supply-chain entries are inventory (e.g. a project's own prepare
-    # hook, shared semantics 3), not indicators.
-    supply = sum(1 for i in issues if i["rule"].startswith("SC-") and i["sev"] != "INFO")
+    # hook, shared semantics 3), not indicators; nor is a CI file's hardening
+    # check below CRITICAL (HARDENING_RULES).
+    supply = sum(1 for i in issues if i["rule"].startswith("SC-") and i["sev"] != "INFO"
+                 and (i["rule"] not in HARDENING_RULES or i["sev"] == "CRITICAL"))
     conds.append({"label": "No supply-chain indicators", "ok": supply == 0})
     cross_file = sum(1 for i in issues if i["rule"].startswith("X-"))
     conds.append({"label": "No cross-file taint flows", "ok": cross_file == 0})
