@@ -14,7 +14,6 @@
     "native/NOTICE",
     "README.md",
     "LICENSE",
-    "LICENSE-PYTHON",
     "LICENSE-UNICODE",
     "NOTICE",
     "!**/.*",
@@ -40,7 +39,7 @@
     "typosquatting"
   ],
   "author": "John A. Booth",
-  "license": "Apache-2.0 AND Python-2.0.1 AND Unicode-3.0",
+  "license": "Apache-2.0 AND Unicode-3.0",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/lazaret-dev/lazaret.git"

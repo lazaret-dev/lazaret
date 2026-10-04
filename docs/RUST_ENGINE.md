@@ -50,7 +50,7 @@ Decisions (fixed):
 | Rule source | **The pack is the source.** `rust/crates/lazaret-engine/rules/lazaret-rules.json` holds the engine's patterns, sets, limits and finding texts and is edited by hand (it was extracted from `core.py`, which no longer holds them). `scripts/make_rust_tables.py` keeps it in its canonical form, and `--check` holds it there: every pattern compiles with Python's `re` (the syntax the engine reads), its `rule_set` is the registry's `ENGINE_VERSION`, and the values core still keeps for the Python side (the reasons the registry ranks, the walk's limits) are the pack's. Python reads the pack through the engine (`engine.pack_value`, `engine.pack_pattern`). |
 | Engine shape | Generic engine plus data: declarative rules come from the pack, the algorithms are Rust functions (ported from core's, function for function, until the refactor; rebuilt on the parsers in the phases that follow, §8). |
 | Calls | Whole files, batched: one crossing of the boundary per batch of files, read on threads (`std::thread`), answers in input order. |
-| License | The engine is Lazaret's own work, Apache-2.0, with Unicode data under the Unicode License v3: the crates are `Apache-2.0 AND Unicode-3.0`. Its translations of CPython code are retired (P-16). The platform wheels and the npm package still carry CPython's license and declare `Apache-2.0 AND Python-2.0.1 AND Unicode-3.0` while the CPython codec names they hold are settled (§11). |
+| License | The engine is Lazaret's own work, Apache-2.0, with Unicode data under the Unicode License v3: the crates are `Apache-2.0 AND Unicode-3.0`. Its translations of CPython code are retired (P-16). The platform wheels, the sdist and the npm package are `Apache-2.0 AND Unicode-3.0` too (§11). |
 
 ## 2. Using it
 
@@ -145,7 +145,7 @@ Decisions (fixed):
 rust/
   Cargo.toml                 workspace; release: lto, codegen-units=1, panic=unwind, strip;
                              wasm: release with panic=abort (the WebAssembly build)
-  NOTICE, LICENSE-PYTHON     the engine's notices (and what was CPython's), CPython's license (§11)
+  NOTICE                     the engine's notices, and what was CPython's (§11)
   LICENSE-UNICODE            the Unicode License v3, for generated/unicode13.rs and
                              pyparse/unidata.rs (§11)
   crates/lazaret-engine/     #![forbid(unsafe_code)], no dependencies, no I/O
@@ -298,9 +298,9 @@ python/_build/lazaret_build.py dist/ --platform <tag>=<built library>`
 (repeatable; it also writes the sdist), or `LAZARET_NATIVE_LIBRARY` and
 `LAZARET_WHEEL_PLATFORM` for the PEP 517 hook, gives
 `lazaret-<v>-py3-none-<tag>.whl`: the package's files,
-`lazaret/_native/<library>`, and `rust/LICENSE-PYTHON` and `rust/NOTICE` as
-license files beside `LICENSE` and `LICENSE-UNICODE`, with
-`License-Expression: Apache-2.0 AND Python-2.0.1 AND Unicode-3.0` and
+`lazaret/_native/<library>`, and `rust/NOTICE` as a license file beside
+`LICENSE` and `LICENSE-UNICODE`, with
+`License-Expression: Apache-2.0 AND Unicode-3.0` and
 `Root-Is-Purelib: false`. The sdist carries the engine's sources under
 `rust/` (the workspace's `Cargo.toml` and `Cargo.lock`, each crate's
 `Cargo.toml`, `src/**/*.rs` and `rules/*.json`, and the notices; not the
@@ -803,20 +803,17 @@ So:
   not translated from CPython's parser. `rust/LICENSE-UNICODE` is the same
   text as the Python and npm packages' `LICENSE-UNICODE`.
 - `rust/Cargo.toml` declares `Apache-2.0 AND Unicode-3.0`.
-- The packages that carry the engine keep CPython's license for now: every
-  wheel carries the compiled engine and the sdist its source, each with
-  `LICENSE-PYTHON` (CPython 3.14.0's LICENSE, unchanged; a test pins its
-  SHA-256) and `NOTICE` as license files (the wheels'
+- The packages that carry the engine are `Apache-2.0 AND Unicode-3.0`
+  too: every wheel carries the compiled engine and the sdist its source,
+  each with `NOTICE` as a license file (the wheels'
   `.dist-info/licenses/`, the sdist's root) beside `LICENSE` and
-  `LICENSE-UNICODE`, and declares `Apache-2.0 AND Python-2.0.1 AND
-  Unicode-3.0`; the npm package carries `native/lazaret.wasm` with
+  `LICENSE-UNICODE`; the npm package carries `native/lazaret.wasm` with
   `rust/NOTICE` as `native/NOTICE` (both written by `npm run build`),
-  `LICENSE-PYTHON` and `LICENSE-UNICODE`, its own `NOTICE` (the CPython
-  codec names of `src/lib/codecs.js`, the Unicode tables of its
-  JavaScript), and declares the same. Whether the codec names, which the
-  npm package and the dashboard list to read a coding cookie as Python
-  does, need CPython's license is the open question; without it, every
-  package would be `Apache-2.0 AND Unicode-3.0`.
+  `LICENSE-UNICODE` and its own `NOTICE` (the Unicode tables of its
+  JavaScript). The codec names the npm package and the dashboard list to
+  read a coding cookie as Python does are what Python's codecs answer to:
+  facts about Python, not CPython's code, so no package carries CPython's
+  license (until 0.1.9 they carried it, with `Python-2.0.1`).
   `check_native_library.py --dist` checks the sdist and the wheels before a
   release, and `release.yml` fails a tarball without `native/lazaret.wasm`
   or `native/NOTICE`.

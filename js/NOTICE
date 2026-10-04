@@ -3,7 +3,7 @@ Lazaret for npm: notices
 
 This package is Lazaret's own work, licensed under the Apache License 2.0
 (LICENSE), except for the parts listed below. The package's license is
-Apache-2.0 AND Python-2.0.1 AND Unicode-3.0.
+Apache-2.0 AND Unicode-3.0.
 
 
 The native engine
@@ -20,19 +20,6 @@ native/NOTICE (the engine's own notice, rust/NOTICE) says what they were.
     Copyright © 1991-2026 Unicode, Inc.
 
 
-Codec names from CPython
-------------------------
-
-src/lib/codecs.js lists, in PY_CODEC_ALIASES, the codec names CPython's
-encodings package resolves (encodings.aliases and its modules), under
-CPython's license (https://github.com/python/cpython): the Python Software
-Foundation License Version 2 (the PSF License) and the older licenses of
-CPython's license stack, in LICENSE-PYTHON (CPython 3.14.0's LICENSE file,
-unchanged; SPDX: Python-2.0.1).
-
-    Copyright (c) 2001 Python Software Foundation; All Rights Reserved
-
-
 Unicode data
 ------------
 
@@ -46,3 +33,11 @@ Unicode Consortium's mapping tables. They are Unicode data, distributed under
 the Unicode License v3 (LICENSE-UNICODE; SPDX: Unicode-3.0):
 
     Copyright © 1991-2026 Unicode, Inc.
+
+
+Codec names
+-----------
+
+src/lib/codecs.js also lists, in PY_CODEC_ALIASES, the names Python's codecs
+answer to, read from Python by scripts/make_codec_tables.py so that a coding
+cookie is read as Python reads it. They are facts about Python, not its code.

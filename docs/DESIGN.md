@@ -1115,14 +1115,13 @@ hold that. A store that outlives the run is the next step (P-2b).
 - **What ships** is narrow: the wheel/sdist contain only `src/lazaret/` and
   their license files, `LICENSE` and `LICENSE-UNICODE` (the Unicode 13.0
   table and the dashboard's codec table are Unicode data: `Apache-2.0 AND
-  Unicode-3.0`); a platform wheel adds the native library and two more,
-  `rust/LICENSE-PYTHON` and `rust/NOTICE` (`Apache-2.0 AND Python-2.0.1
-  AND Unicode-3.0`: the engine is Lazaret's own since P-16, and CPython's
-  license stays while the CPython codec names are settled); the npm package
-  only `bin/`, `src/`, the engine (`native/lazaret.wasm` and its
-  `native/NOTICE`, `rust/NOTICE`) and its license files (`LICENSE-PYTHON`
-  and `NOTICE` for CPython's codec names, `LICENSE-UNICODE`: `Apache-2.0
-  AND Python-2.0.1 AND Unicode-3.0`).
+  Unicode-3.0`); a platform wheel adds the native library and the
+  engine's notice, `rust/NOTICE` (the engine is Lazaret's own since P-16,
+  with Unicode data); the npm package only `bin/`, `src/`, the engine
+  (`native/lazaret.wasm` and its `native/NOTICE`, `rust/NOTICE`) and its
+  license files (`NOTICE`, `LICENSE-UNICODE`). Every package is
+  `Apache-2.0 AND Unicode-3.0`: the codec names the npm package and the
+  dashboard list are facts about Python, not CPython's code.
   `tests/architecture/test_notices.py` and `test_rust_notices.py` hold the
   notices to the code. `scripts/make_bundle.py` builds a reproducible
   source tarball from tracked files only and refuses credential files.

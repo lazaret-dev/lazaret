@@ -101,12 +101,12 @@ METADATA = {
 REQUIRES_DIST: list[str] = []
 
 # Every wheel carries the native engine, and the sdist its source, with
-# its notice. The engine is Lazaret's own work since P-16 (rust/NOTICE);
-# each still carries CPython's LICENSE, and says so in its license
-# expression, while the project settles whether the CPython codec names
-# the packages hold (the dashboard's here, the npm package's) need it.
-NATIVE_LICENSE_EXPRESSION = "Apache-2.0 AND Python-2.0.1 AND Unicode-3.0"
-NATIVE_LICENSE_FILES = {"LICENSE-PYTHON": RUST / "LICENSE-PYTHON", "NOTICE": RUST / "NOTICE"}
+# its notice (rust/NOTICE): the engine is Lazaret's own work since P-16,
+# with Unicode data. The codec names the dashboard lists (what Python's
+# codecs answer to) are facts about Python, not CPython's code, so the
+# packages are Apache-2.0 AND Unicode-3.0, as the engine is.
+NATIVE_LICENSE_EXPRESSION = "Apache-2.0 AND Unicode-3.0"
+NATIVE_LICENSE_FILES = {"NOTICE": RUST / "NOTICE"}
 
 CONSOLE_SCRIPTS = {
     "lazaret": "lazaret._cli:main",
@@ -119,7 +119,7 @@ CONSOLE_SCRIPTS = {
 SDIST_TOP_FILES = ["pyproject.toml", "README.md", "LICENSE", "LICENSE-UNICODE"]
 # The Rust workspace in the sdist (under rust/): these files, and for each
 # crate under crates/ its Cargo.toml, src/**/*.rs and rules/*.json.
-RUST_TOP_FILES = ["Cargo.toml", "Cargo.lock", "LICENSE-PYTHON", "LICENSE-UNICODE", "NOTICE"]
+RUST_TOP_FILES = ["Cargo.toml", "Cargo.lock", "LICENSE-UNICODE", "NOTICE"]
 RUST_CRATE_DIRS = {"src": (".rs",), "rules": (".json",)}
 # The oldest macOS a library built here supports (the release wheels' tags):
 # cargo is given it as MACOSX_DEPLOYMENT_TARGET.
@@ -138,7 +138,7 @@ _SKIP_DIRS = {"__pycache__"}
 # Files packed with LF line endings whatever the checkout has (a Windows
 # checkout with core.autocrlf would otherwise change every member's bytes).
 _TEXT_SUFFIXES = (".py", ".sql", ".html", ".md", ".toml", ".txt", ".json", ".rs", ".lock")
-_TEXT_NAMES = frozenset({"LICENSE", "LICENSE-PYTHON", "LICENSE-UNICODE", "NOTICE", "PKG-INFO", "py.typed"})
+_TEXT_NAMES = frozenset({"LICENSE", "LICENSE-UNICODE", "NOTICE", "PKG-INFO", "py.typed"})
 # Zip "made by" system: 3 = Unix. zipfile defaults to 0 (MS-DOS) on Windows,
 # which would change every central-directory record there.
 _ZIP_CREATE_SYSTEM = 3

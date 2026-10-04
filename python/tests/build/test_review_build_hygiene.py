@@ -126,7 +126,7 @@ class AllowlistTests(unittest.TestCase):
         with tarfile.open(self.tree.sdist()) as tf:
             base = f"lazaret-{self.tree.b.version()}/"
             names = sorted(n[len(base):] for n in tf.getnames())
-        self.assertEqual(names, sorted(["LICENSE", "LICENSE-UNICODE", "LICENSE-PYTHON", "NOTICE", "PKG-INFO",
+        self.assertEqual(names, sorted(["LICENSE", "LICENSE-UNICODE", "NOTICE", "PKG-INFO",
                                         "README.md", "pyproject.toml", "_build/lazaret_build.py"]
                                        + ["src/" + n for n in expected] + self.tree.rust_files()))
 
@@ -269,9 +269,9 @@ class MetadataTests(unittest.TestCase):
     def test_pep_639_license_fields(self):
         self.assertEqual(self.headers[0], "Metadata-Version: 2.4")
         # the Unicode 13.0 table and the dashboard's Unicode and codec tables are Unicode data (0.1.8);
-        # the native engine translates CPython code (rust/NOTICE), and every artifact carries it
-        self.assertEqual(self.field("License-Expression"), ["Apache-2.0 AND Python-2.0.1 AND Unicode-3.0"])
-        self.assertEqual(self.field("License-File"), ["LICENSE", "LICENSE-UNICODE", "LICENSE-PYTHON", "NOTICE"])
+        # the native engine is Lazaret's own with Unicode data (rust/NOTICE), and every artifact carries it
+        self.assertEqual(self.field("License-Expression"), ["Apache-2.0 AND Unicode-3.0"])
+        self.assertEqual(self.field("License-File"), ["LICENSE", "LICENSE-UNICODE", "NOTICE"])
         self.assertEqual(self.field("License"), [])      # superseded by License-Expression
         self.assertEqual([c for c in self.field("Classifier") if c.startswith("License ::")], [])
         # License-File paths resolve in both artifacts

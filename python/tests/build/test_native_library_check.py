@@ -582,10 +582,15 @@ class DistTests(unittest.TestCase):
         meta = f"{dist_info}/METADATA"
 
         def plain_apache(m):
-            m[meta] = m[meta].replace(b"Apache-2.0 AND Python-2.0.1", b"Apache-2.0")
+            m[meta] = m[meta].replace(b"Apache-2.0 AND Unicode-3.0", b"Apache-2.0")
+
+        def names_cpythons_license(m):
+            m[meta] = m[meta].replace(b"License-File: NOTICE\n", b"License-File: NOTICE\nLicense-File: LICENSE-PYTHON\n")
+            m[f"{dist_info}/licenses/LICENSE-PYTHON"] = b"a license the release does not ship\n"
 
         for change, words in (
-                (plain_apache, ["License-Expression is Apache-2.0", "Python-2.0.1"]),
+                (plain_apache, ["License-Expression is Apache-2.0", "Unicode-3.0"]),
+                (names_cpythons_license, ["License-Files the release does not ship", "LICENSE-PYTHON"]),
                 (lambda m: m.pop(f"{dist_info}/licenses/NOTICE"), ["NOTICE", "not at"]),
                 (lambda m: m.update({f"{dist_info}/licenses/NOTICE": b"edited\n"}), ["NOTICE is not rust/NOTICE"]),
                 (lambda m: m.update({meta: m[meta].replace(b"Summary: ", b"Summary: Changed ")}),
@@ -596,11 +601,11 @@ class DistTests(unittest.TestCase):
                 self.assertProblem(d, ["win_amd64"] + words)
         base = f"lazaret-{self.version}/"
         d = self.copy()
-        self.rewrite_sdist(d, lambda m: m.pop(base + "LICENSE-PYTHON"))
-        self.assertProblem(d, [self.sdist(), "LICENSE-PYTHON"])
+        self.rewrite_sdist(d, lambda m: m.pop(base + "NOTICE"))
+        self.assertProblem(d, [self.sdist(), "NOTICE"])
         d = self.copy()
         self.rewrite_sdist(d, lambda m: m.update({base + "PKG-INFO": m[base + "PKG-INFO"].replace(
-            b"Apache-2.0 AND Python-2.0.1", b"Apache-2.0")}))
+            b"Apache-2.0 AND Unicode-3.0", b"Apache-2.0")}))
         self.assertProblem(d, [self.sdist(), "License-Expression is Apache-2.0"])
 
     def test_records_and_stray_files(self):

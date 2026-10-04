@@ -247,9 +247,11 @@ project is pre-1.0, so the 0.x API may still change.
   and held to Python's shlex (on the hooks corpus and 30,000 random commands), the
   final-sigma rule of `str.lower()` follows the Unicode Standard's definition, and `re`'s
   extra case equivalences are derived from Unicode's case mappings. Every answer is the
-  same. The engine's notice says what was CPython's, and its crates are
-  `Apache-2.0 AND Unicode-3.0`; the wheels, the sdist and the npm package keep CPython's
-  license for now, for the CPython codec names they hold.
+  same. The engine's notice says what was CPython's. Its crates, the wheels, the sdist and
+  the npm package are `Apache-2.0 AND Unicode-3.0`, and none carries CPython's license
+  (`LICENSE-PYTHON`) any more: the codec names the npm package and the dashboard list, to
+  read a coding cookie as Python does, are what Python's codecs answer to, facts about
+  Python rather than CPython's code.
 
 ### Fixed
 

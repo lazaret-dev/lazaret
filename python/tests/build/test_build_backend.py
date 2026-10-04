@@ -104,7 +104,7 @@ class BuildTests(unittest.TestCase):
         meta = read_member(self.wheel, f"lazaret-{self.version}.dist-info/METADATA").decode()
         self.assertIn(f"Version: {self.version}\n", meta)
         self.assertIn("Requires-Python: >=3.10\n", meta)
-        self.assertIn("License-Expression: Apache-2.0 AND Python-2.0.1 AND Unicode-3.0\n", meta)   # PEP 639
+        self.assertIn("License-Expression: Apache-2.0 AND Unicode-3.0\n", meta)   # PEP 639
         self.assertNotIn("Requires-Dist", meta)
 
     def test_record_hashes_match(self):
@@ -179,13 +179,13 @@ class BuildTests(unittest.TestCase):
         with tarfile.open(self.sdist) as t:
             self.assertFalse([n for n in t.getnames() if "/_native/" in n])
 
-    def test_every_artifact_carries_cpythons_license_and_the_notice(self):
-        """Every wheel carries CPython's LICENSE and the engine's notice
-        (rust/NOTICE) as license files and declares both licenses, and so
-        does the sdist, which carries the engine's source (the files at its
-        root, where PKG-INFO's License-File finds them). The engine is
-        Lazaret's own since P-16; CPython's license stays while the CPython
-        codec names the packages hold are settled."""
+    def test_every_artifact_carries_the_engines_notice(self):
+        """Every wheel carries the engine's notice (rust/NOTICE) as a license
+        file beside LICENSE and LICENSE-UNICODE and declares Apache-2.0 AND
+        Unicode-3.0, and so does the sdist, which carries the engine's source
+        (the files at its root, where PKG-INFO's License-File finds them). The
+        engine is Lazaret's own since P-16, and no artifact carries CPython's
+        license (the codec names the dashboard lists are facts about Python)."""
         dist_info = f"lazaret-{self.version}.dist-info"
         with tempfile.TemporaryDirectory() as d:
             lib = pathlib.Path(d, "built.so")
@@ -194,23 +194,22 @@ class BuildTests(unittest.TestCase):
             for wheel in (self.wheel, platform_wheel):
                 with self.subTest(wheel=os.path.basename(wheel)):
                     meta = read_member(wheel, f"{dist_info}/METADATA").decode()
-                    self.assertIn("License-Expression: Apache-2.0 AND Python-2.0.1 AND Unicode-3.0\n", meta)
+                    self.assertIn("License-Expression: Apache-2.0 AND Unicode-3.0\n", meta)
                     self.assertEqual(re.findall(r"^License-File: (.+)$", meta, re.M),
-                                     ["LICENSE", "LICENSE-UNICODE", "LICENSE-PYTHON", "NOTICE"])
-                    for name in ("LICENSE-PYTHON", "NOTICE"):
-                        self.assertEqual(read_member(wheel, f"{dist_info}/licenses/{name}"),
-                                         pathlib.Path(_support.REPO_ROOT, "rust", name).read_bytes())
-                    self.assertIn(b"Copyright (c) 2001 Python Software Foundation; All Rights Reserved",
-                                  read_member(wheel, f"{dist_info}/licenses/LICENSE-PYTHON"))
+                                     ["LICENSE", "LICENSE-UNICODE", "NOTICE"])
+                    self.assertEqual(read_member(wheel, f"{dist_info}/licenses/NOTICE"),
+                                     pathlib.Path(_support.REPO_ROOT, "rust", "NOTICE").read_bytes())
+                    with zipfile.ZipFile(wheel) as z:
+                        self.assertFalse([n for n in z.namelist() if n.endswith("LICENSE-PYTHON")])
             with unittest.mock.patch.dict(self.b.NATIVE_LICENSE_FILES, {"NOTICE": pathlib.Path(d, "missing")}):
                 with self.assertRaises(RuntimeError) as cm:                 # no notices, no platform wheel
                     self.b.build_platform_wheel(d, "win_amd64", str(lib))
                 self.assertIn("missing", str(cm.exception))
         base = f"lazaret-{self.version}/"
         with tarfile.open(self.sdist) as t:
-            for name in ("LICENSE-PYTHON", "NOTICE"):
-                self.assertEqual(t.extractfile(base + name).read(),
-                                 pathlib.Path(_support.REPO_ROOT, "rust", name).read_bytes())
+            self.assertEqual(t.extractfile(base + "NOTICE").read(),
+                             pathlib.Path(_support.REPO_ROOT, "rust", "NOTICE").read_bytes())
+            self.assertFalse([n for n in t.getnames() if n.endswith("LICENSE-PYTHON")])
             pkg_info = t.extractfile(base + "PKG-INFO").read().decode()
         self.assertEqual(pkg_info, read_member(self.wheel, f"{dist_info}/METADATA").decode())
 
@@ -287,10 +286,10 @@ class BuildTests(unittest.TestCase):
         base = f"lazaret-{self.version}/"
         with tarfile.open(self.sdist) as tf:
             names = tf.getnames()
-            for must in ("PKG-INFO", "pyproject.toml", "_build/lazaret_build.py", "LICENSE", "LICENSE-PYTHON",
+            for must in ("PKG-INFO", "pyproject.toml", "_build/lazaret_build.py", "LICENSE", "LICENSE-UNICODE",
                          "NOTICE", "src/lazaret/scanner/core.py", "src/lazaret/registry/schema.sql",
                          # the engine's sources, which pip compiles where no platform wheel fits
-                         "rust/Cargo.toml", "rust/Cargo.lock", "rust/NOTICE", "rust/LICENSE-PYTHON",
+                         "rust/Cargo.toml", "rust/Cargo.lock", "rust/NOTICE", "rust/LICENSE-UNICODE",
                          "rust/crates/lazaret-engine/Cargo.toml", "rust/crates/lazaret-engine/src/lib.rs",
                          "rust/crates/lazaret-engine/rules/lazaret-rules.json",
                          "rust/crates/lazaret-ffi/Cargo.toml", "rust/crates/lazaret-ffi/src/lib.rs"):

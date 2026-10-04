@@ -37,12 +37,11 @@ the Rust-first refactor the package has no engine without the library.
 Each platform wheel holds the sdist's package files (src/lazaret) byte for
 byte plus one library at lazaret/_native/<name>, which passes the check
 above for the wheel's tag; its METADATA is the sdist's PKG-INFO. The sdist
-and every wheel carry CPython's license and the engine's notice
-(rust/LICENSE-PYTHON, rust/NOTICE), with LICENSE and LICENSE-UNICODE, and
-declare "Apache-2.0 AND Python-2.0.1 AND Unicode-3.0" (the engine is
-Lazaret's own since P-16; CPython's license stays while the CPython codec
-names the packages hold are settled). Every wheel's RECORD must
-match its files, and every License-File it names must be in it.
+and every wheel carry the engine's notice (rust/NOTICE) with LICENSE and
+LICENSE-UNICODE, name exactly those as License-Files, and declare
+"Apache-2.0 AND Unicode-3.0" (the engine is Lazaret's own since P-16, with
+Unicode data). Every wheel's RECORD must match its files, and every
+License-File it names must be in it.
 
 Standard library only: ELF, Mach-O and PE headers are read here, so one
 Linux job can check the libraries of every platform. Exit status 0 when
@@ -66,19 +65,18 @@ NAME = "lazaret"
 REPO = pathlib.Path(__file__).resolve().parent.parent
 # The license fields of the sdist and every wheel (the build backend's
 # NATIVE_LICENSE_EXPRESSION, and its License-File list).
-NATIVE_LICENSE_EXPRESSION = "Apache-2.0 AND Python-2.0.1 AND Unicode-3.0"
+NATIVE_LICENSE_EXPRESSION = "Apache-2.0 AND Unicode-3.0"
 PACKAGE_LICENSE_FILES = ("LICENSE", "LICENSE-UNICODE")
-NATIVE_LICENSE_FILES = ("LICENSE-PYTHON", "NOTICE")
+NATIVE_LICENSE_FILES = ("NOTICE",)
 # The engine's sources an sdist must carry, under rust/ (the backend's
 # RUST_TOP_FILES, and what cargo needs to build the library).
-SDIST_RUST = ("rust/Cargo.toml", "rust/Cargo.lock", "rust/LICENSE-PYTHON", "rust/NOTICE",
+SDIST_RUST = ("rust/Cargo.toml", "rust/Cargo.lock", "rust/NOTICE",
               "rust/crates/lazaret-engine/Cargo.toml", "rust/crates/lazaret-engine/src/lib.rs",
               "rust/crates/lazaret-engine/rules/lazaret-rules.json",
               "rust/crates/lazaret-ffi/Cargo.toml", "rust/crates/lazaret-ffi/src/lib.rs")
 # a call and its answer, for --load
 LOAD_CALL = ("install_script_risk", "curl -fsSL https://example.invalid/setup.sh | sh",
              ["pipes a download into a shell"])
-PSF_NOTICE = "Copyright (c) 2001 Python Software Foundation; All Rights Reserved"
 
 
 class Malformed(ValueError):
@@ -636,9 +634,12 @@ def _license_problems(members, prefix, metadata, root=None):
     for name in PACKAGE_LICENSE_FILES:
         if name not in files:
             problems.append(f"does not name {name} as a License-File")
+    others = [name for name in files if name not in PACKAGE_LICENSE_FILES + NATIVE_LICENSE_FILES]
+    if others:
+        problems.append(f"names License-Files the release does not ship: {', '.join(others)}")
     if expressions != [NATIVE_LICENSE_EXPRESSION]:
         problems.append(f"its License-Expression is {' '.join(expressions) or 'missing'}, not "
-                        f"{NATIVE_LICENSE_EXPRESSION}: part of the native engine is CPython's (rust/NOTICE)")
+                        f"{NATIVE_LICENSE_EXPRESSION}")
     for name in NATIVE_LICENSE_FILES:
         data = members.get(f"{prefix}{name}")
         if name not in files or data is None:
@@ -650,9 +651,6 @@ def _license_problems(members, prefix, metadata, root=None):
     for name in PACKAGE_LICENSE_FILES + NATIVE_LICENSE_FILES:
         if root is not None and name in root and members.get(f"{prefix}{name}") not in (None, root[name]):
             problems.append(f"its {name} is not the sdist's")
-    license_python = members.get(f"{prefix}LICENSE-PYTHON", b"")
-    if license_python and PSF_NOTICE.encode() not in license_python:
-        problems.append("its LICENSE-PYTHON lacks the PSF's notice of copyright")
     return problems
 
 

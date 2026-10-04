@@ -8,12 +8,8 @@ crates' license is Apache-2.0 AND Unicode-3.0.
 
 The compiled engine ships in Lazaret's platform wheels and, compiled to
 WebAssembly, in the npm package (as native/lazaret.wasm, this file as
-native/NOTICE), each with LICENSE-UNICODE. Those packages also carry
-CPython's license, LICENSE-PYTHON in this directory (CPython 3.14.0's
-LICENSE file, unchanged; SPDX: Python-2.0.1), and declare
-Apache-2.0 AND Python-2.0.1 AND Unicode-3.0, until the project settles
-whether the codec names they hold outside the engine, which are CPython's
-(js/NOTICE), need it.
+native/NOTICE), each with LICENSE-UNICODE. Those packages are
+Apache-2.0 AND Unicode-3.0 too.
 
 
 What was CPython's

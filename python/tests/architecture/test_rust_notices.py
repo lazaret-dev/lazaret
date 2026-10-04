@@ -7,13 +7,12 @@ under CPython's license: the port of sre (pyre/), the shell tokenizer
 (generated/unicode13.rs). They are retired. rust/NOTICE says so and lists
 no translated file; no engine file carries CPython's license header or says
 it is ported from CPython; the crates declare Apache-2.0 AND Unicode-3.0.
-The packages that carry the engine (the wheels, the sdist, the npm package)
-keep CPython's license, rust/LICENSE-PYTHON (CPython 3.14.0's LICENSE,
-unchanged), until the project settles whether the CPython codec names they
-hold outside the engine need it (js/NOTICE; test_notices.py).
+So do the packages that carry the engine (the wheels, the sdist, the npm
+package): the codec names they hold outside the engine are what Python's
+codecs answer to, facts about Python, not CPython's code, so none carries
+CPython's license (they did in 0.1.8; js/NOTICE, test_notices.py).
 """
 
-import hashlib
 import os
 import re
 import unittest
@@ -24,11 +23,9 @@ RUST = os.path.join(_support.REPO_ROOT, "rust")
 SRC = os.path.join(RUST, "crates", "lazaret-engine", "src")
 # the crates' license: Lazaret's, and the Unicode data of generated/unicode13.rs and pyparse/unidata.rs
 CRATES = "Apache-2.0 AND Unicode-3.0"
-# the packages' (python/_build, scripts/check_native_library.py), until the codec names are settled
-PACKAGES = "Apache-2.0 AND Python-2.0.1 AND Unicode-3.0"
+# the packages' (python/_build, scripts/check_native_library.py): the same
+PACKAGES = CRATES
 PSF = "Copyright (c) 2001 Python Software Foundation; All Rights Reserved"
-# CPython v3.14.0's LICENSE: replace it only with another release's LICENSE, whole.
-LICENSE_PYTHON_SHA256 = "b0e25a78cffb43f4d92de8b61ccfa1f1f98ecbc22330b54b5251e7b6ba010231"
 # the terms of the SRE library's notices, which went with pyre/
 CNRI = "For any other use, please contact Secret Labs"
 
@@ -48,14 +45,14 @@ def engine_files():
 
 
 class NoticeTests(unittest.TestCase):
-    def test_license_python_is_cpythons_unchanged(self):
-        with open(os.path.join(RUST, "LICENSE-PYTHON"), "rb") as f:
-            data = f.read()
-        self.assertEqual(hashlib.sha256(data).hexdigest(), LICENSE_PYTHON_SHA256,
-                         "rust/LICENSE-PYTHON is CPython 3.14.0's LICENSE file, unchanged")
-        text = data.decode("ascii")
-        for part in (PSF, "PYTHON SOFTWARE FOUNDATION LICENSE VERSION 2", "CNRI LICENSE AGREEMENT FOR PYTHON 1.6.1"):
-            self.assertIn(part, text)
+    def test_no_package_carries_cpythons_license(self):
+        for rel in ("rust/LICENSE-PYTHON", "js/LICENSE-PYTHON", "python/LICENSE-PYTHON"):
+            with self.subTest(rel):
+                self.assertFalse(os.path.exists(os.path.join(_support.REPO_ROOT, *rel.split("/"))))
+        notice = read(RUST, "NOTICE")
+        self.assertNotIn("LICENSE-PYTHON", notice)
+        self.assertNotIn("Python-2.0.1", notice)
+        self.assertIn(f"Those packages are {PACKAGES} too.", " ".join(notice.split()))
 
     def test_the_notice_says_the_engine_is_lazarets_own(self):
         notice = read(RUST, "NOTICE")
@@ -97,8 +94,8 @@ class NoticeTests(unittest.TestCase):
                                        "lazaret_build_for_notices")
         self.assertEqual(backend.NATIVE_LICENSE_EXPRESSION, PACKAGES)
         self.assertEqual({k: os.path.realpath(v) for k, v in backend.NATIVE_LICENSE_FILES.items()},
-                         {"LICENSE-PYTHON": os.path.realpath(os.path.join(RUST, "LICENSE-PYTHON")),
-                          "NOTICE": os.path.realpath(os.path.join(RUST, "NOTICE"))})
+                         {"NOTICE": os.path.realpath(os.path.join(RUST, "NOTICE"))})
+        self.assertNotIn("LICENSE-PYTHON", backend.RUST_TOP_FILES)
         check = _support.load_script(os.path.join(_support.REPO_ROOT, "scripts", "check_native_library.py"),
                                      "check_native_library_for_notices")
         self.assertEqual(check.NATIVE_LICENSE_EXPRESSION, PACKAGES)
