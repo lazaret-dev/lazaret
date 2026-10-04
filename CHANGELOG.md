@@ -229,10 +229,14 @@ project is pre-1.0, so the 0.x API may still change.
   The other rewritten patterns answer as before: on the benchmark's 945 releases and
   the 1,205 popular ones, every verdict and every finding is the same. Scans take as
   long as before (the engine's five main calls on 1,500 installed files: 8.1 s, against
-  8.2 s), and playwright-core's two bundles 4% to 6% fewer instructions. A taint
-  configuration's own patterns run on linre where it runs them, on the backtracking
-  matcher otherwise. The registry's rule set is 2.28.0, so stored verdicts are scanned
-  again.
+  8.2 s), and playwright-core's two bundles 4% to 6% fewer instructions. The port of
+  CPython's backtracking matcher is retired, and with it the SRE library's notices in the
+  engine's license files (which left any use beyond CNRI's Python 1.6 license to Secret
+  Labs AB). A taint configuration's patterns must be ones linre runs: `--taint-config`
+  rejects one it does not (a conditional, an atomic group or a possessive repeat, a
+  repeat of what can match the empty string, a `\N{…}` escape), with the reason, as it
+  already rejected patterns that could backtrack. The registry's rule set is 2.28.0, so
+  stored verdicts are scanned again.
 
 ### Fixed
 

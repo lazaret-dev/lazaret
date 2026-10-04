@@ -13,9 +13,9 @@ The native engine
                           the repository), compiled to WebAssembly
 
 The engine is Lazaret's own work too, except for its translations of
-CPython code (https://github.com/python/cpython) — its regular expression
-engine (CPython's sre), the shell tokenizer (shlex) and the Final_Sigma rule
-of str.lower() — which are distributed under CPython's license: the Python
+CPython code (https://github.com/python/cpython) — the shell tokenizer
+(shlex), the Final_Sigma rule of str.lower() and re's table of extra case
+equivalences — which are distributed under CPython's license: the Python
 Software Foundation License Version 2 and the older licenses of CPython's
 license stack, in LICENSE-PYTHON (CPython 3.14.0's LICENSE file, unchanged;
 SPDX: Python-2.0.1); and for the Unicode 13.0 data it holds, distributed

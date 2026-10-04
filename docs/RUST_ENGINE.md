@@ -45,12 +45,12 @@ Decisions (fixed):
 
 | Topic | Decision |
 |---|---|
-| Dependencies | **No external crates.** Own regex engines (a port of CPython's sre; linre, §14), JSON, Unicode tables, parsers. `Cargo.lock` lists only the workspace; `scripts/check_rust_deps.py` fails CI otherwise. |
+| Dependencies | **No external crates.** Own regex engine (linre, §14; until P-16 also a port of CPython's sre), JSON, Unicode tables, parsers. `Cargo.lock` lists only the workspace; `scripts/check_rust_deps.py` fails CI otherwise. |
 | Bindings | **C ABI + ctypes** for Python (no compiled extension, one library per platform serves every Python version); **WebAssembly** for Node (Node's own `WebAssembly`, no imports, no npm dependency). |
 | Rule source | **The pack is the source.** `rust/crates/lazaret-engine/rules/lazaret-rules.json` holds the engine's patterns, sets, limits and finding texts and is edited by hand (it was extracted from `core.py`, which no longer holds them). `scripts/make_rust_tables.py` keeps it in its canonical form, and `--check` holds it there: every pattern compiles with Python's `re` (the syntax the engine reads), its `rule_set` is the registry's `ENGINE_VERSION`, and the values core still keeps for the Python side (the reasons the registry ranks, the walk's limits) are the pack's. Python reads the pack through the engine (`engine.pack_value`, `engine.pack_pattern`). |
 | Engine shape | Generic engine plus data: declarative rules come from the pack, the algorithms are Rust functions (ported from core's, function for function, until the refactor; rebuilt on the parsers in the phases that follow, §8). |
 | Calls | Whole files, batched: one crossing of the boundary per batch of files, read on threads (`std::thread`), answers in input order. |
-| License | Lazaret's code is Apache-2.0; the translations of CPython code (the regex engine, shlex, the Final_Sigma rule) are also under CPython's license, and the Unicode 13.0 tables are Unicode data, under the Unicode License v3, so the crates, the platform wheels and the npm package are `Apache-2.0 AND Python-2.0.1 AND Unicode-3.0` (§11). |
+| License | Lazaret's code is Apache-2.0; the translations of CPython code (shlex, the Final_Sigma rule, `re`'s table of extra case equivalences) are also under CPython's license, and the Unicode 13.0 tables are Unicode data, under the Unicode License v3, so the crates, the platform wheels and the npm package are `Apache-2.0 AND Python-2.0.1 AND Unicode-3.0` (§11). |
 
 ## 2. Using it
 
@@ -157,10 +157,11 @@ rust/
     src/pack.rs              the pack: values by core's names, patterns compiled on first use
     src/json.rs, pystr.rs    JSON; Python str semantics on code points ([u32])
     src/unicode.rs           Python 3.10 / Unicode 13.0 predicates (generated/unicode13.rs)
-    src/pyre/                CPython's sre: parser, compiler, matcher (see §6)
-    src/linre/               a linear-time regex engine with re's answers, which every pattern it
-                             accepts runs on (§14): parser, sets, programs, lazy DFAs,
-                             backtracker, Pike VM, prefilters
+    src/pyre.rs              re's calls as the engine's code makes them, on linre (§6)
+    src/linre/               a linear-time regex engine with re's answers, which every pattern
+                             runs on (§14): parser, sets, programs, lazy DFAs, memoized and
+                             swept lookaheads, backtracker, Pike VM, prefilters
+    src/scan.rs              pystr's find: a string by its rarest character
     src/hooks.rs             shlex, _hook_tokens, follow_hook, node_candidates, node -e, #!
     src/signs.rs             install_script_risk, import_time_risk(+severity), decoded_view
                              (and string_array_line), spawned_scripts, and the detectors they
@@ -417,7 +418,7 @@ sets` lists the sets; `files:LIST` records real files the way
 `test_snapshot_scanfile` reads them. The registry's `ENGINE_VERSION` (the
 pack's `rule_set`) is bumped with any change to what a verdict records.
 A run of a set also fails when the engine built, on the way, a pattern
-linre does not run (`linre.fallbacks`, §14), so every pattern the engine
+linre does not run (`linre.refused`, §14), so every pattern the engine
 builds is held to linear time.
 
 | Module | Records | On |
@@ -437,7 +438,7 @@ Twins the engine is still compared with, call for call:
 
 | Module | Compares | On |
 |---|---|---|
-| `test_rust_parity_regex` | pyre against Python's `re`: every pack pattern and 126 hand-written probes, search/match/fullmatch/finditer/sub/split with pos/endpos | Python 3.10–3.14 |
+| `test_rust_parity_regex` | pyre (on linre) against Python's `re`: every pack pattern and the hand-written probes (those linre refuses, refused for a known reason), search/match/fullmatch/finditer/sub/split with pos/endpos, `sub`'s templates, `re.escape` | Python 3.10–3.14 |
 | `test_wasm_parity`, `test_wasm_parity_signs`, `_crossfile` | the WebAssembly build the npm package ships against the platform library, call for call, byte for byte: `hooks_view`, `signs_view`, `scan_file` (dependency mode), `scan_rules`, and the npm binding's `cross_file` against the Python package's | the hooks corpus, the scan_file corpus, this repository's files, the follower's stream |
 | `test_wasm_parity_jsparse` | the parser in the WebAssembly build against the library, byte for byte | the snippets, this repository's JavaScript, soups, every construct that nests at its deepest |
 | `test_wasm_parity_jsflow` | the JavaScript taint pass in the WebAssembly build against the library, byte for byte | `test_snapshot_js_flow`'s sets; every construct that nests at its deepest, request data followed through it |
@@ -495,87 +496,45 @@ PYTHONPATH=src:. python3 -m unittest tests.architecture.test_wasm_parity_pyflow 
 python3 ../scripts/make_rust_tables.py --check && python3 ../scripts/check_rust_deps.py
 ```
 
-## 6. The regex engine (`pyre/`)
+## 6. The regex interface (`pyre.rs`)
 
-Since P-16 every search of the engine's own patterns runs on linre (§14),
-and pyre's matcher answers only `pyre.probe` (`"backtracking": true`) and a
-taint configuration's patterns linre does not run. What the engine still
-takes from pyre: its parser and compiler, which check a pattern as Python's
-`re` does (a pattern `re` rejects is an error, with its message); the set
-patterns it answers without a matcher (below); and the required-literal
-strings `scan_file`'s per-line gates read (`need`). P-16's second part
-retires it, linre's own parser and prefilters in its place.
+`pyre` is Python's `re` as the engine's code calls it — compile, search,
+match, fullmatch, finditer, findall, sub with a function or a template,
+split, `re.escape` — over linre (§14), which runs every pattern in time
+linear in the text with `re`'s answers. A pattern linre does not run is an
+error, as one Python rejects is. Until P-16 pyre was a port of CPython's
+sre (`re/_parser.py`, `re/_compiler.py`, `_sre/sre_lib.h`: its parse, its
+program and its backtracking order, with speedups sre lacks — a
+first-character filter, per-operation tables, a required-literal
+prefilter, leads, anchored scans, set patterns answered without the
+matcher), which ran every pattern until phase 2 and those linre refused
+until P-16; linre has its own of each. The templates of `sub` follow `re`'s
+documented rules (`\1`, `\g<name>`, `\0` and octal escapes, the
+character escapes, a bad escape an error), held to Python's by
+`test_rust_parity_regex`.
 
-A port of CPython's `re/_parser.py`, `re/_compiler.py` and `_sre/sre_lib.h`
-(3.11–3.14 semantics; 3.10-only differences are version-gated in the tests):
-the same code words as `re._compiler`, SRE(match) as an explicit context
-stack (no recursion), MARK and REPEAT handling, sre's literal-prefix and
-charset scans, one budget tick per op. `\B` on an empty string follows
-3.10–3.13 (no pack pattern uses `\B`; a test keeps it so).
-
-Answer-preserving speedups sre lacks, each a skip of work that cannot lead to
-a match (the soundness argument is in each module's doc, and hand-written
-probes in `test_rust_parity_regex` hold it):
-
-- a **first-character filter** (`first.rs`): start positions no possible
-  first consuming op accepts are skipped (JUMPs followed out of
-  alternatives; a leading lookahead's first op counts; a path that can end
-  without consuming gives no filter);
-- per-op tables (`prog.rs`): ASCII bitsets for the IN ops and sre's INFO
-  charset, tail first-sets for REPEAT_ONE/MIN_REPEAT_ONE and first-sets per
-  BRANCH alternative (sre does both only for a literal lead);
-- a **required-literal prefilter** (`literal.rs`): strings one of which must
-  lie inside every match, from runs of literals and small literal-only sets
-  (`(?i)s` is `[s ſ]`), joined across a BRANCH's alternatives and never
-  taken from a lookaround (which may look outside `[pos, endpos)`); a text
-  holding none of them has no match. Unused under 2 characters or over 64
-  strings; about 170 pack patterns get one
-  (`cargo run --release --example show_need -- NAME` prints them);
-- **leads** (`literal.rs`): the strings every match starts with; a search
-  tries only where one starts, found with a two-character filter, and a
-  need that is the lead's own strings is not scanned for twice;
-- a search's start set (`first.rs`) keeps the zero-width tests a match
-  makes before its first character — a one-character lookbehind
-  (`(?<![\w$.])` before a name, `(?<![^\n])` at a line's start) and the
-  position tests (`\b`, `^`, `$`) — so the matcher is entered at the first
-  letter of a name, not at every letter;
-- **anchored scans** (`scan.rs`): a literal string — a need, a lead, sre's
-  literal prefix (each place it occurs, overlapping ones too: the places
-  sre's own scan tries) — is looked for by its character that is rarest in
-  source text (a static guess: it changes only how fast, never what is
-  found), sixteen characters at a time, and checked only where that
-  character is; `pystr`'s find (core's `in` and `find`) the same way, a
-  short text character by character;
-- a pattern that starts with `^` under MULTILINE is tried only where a
-  line starts (every other start fails at its first operation), jumping
-  from line to line;
-- a **set pattern** — one character of a set of literals and ranges
-  (`[/'"`]`, a lexer's next interesting character) or the longest run of
-  them (`[ \t\n]*`), with no groups and no IGNORECASE — is answered without
-  the matcher (`Simple` in `mod.rs`: search and match only);
-- mechanics: the dispatch phase is an inner loop, and matcher buffers are
-  pooled per thread.
-
-`Regex::need()` exposes the prefilter's strings: `scan_file` reads them
-for all of a file's per-line patterns in one pass (`Gates`, a bit per
-pattern and line), and a line holding none of a pattern's strings is not
-searched for it (a line whose match text differs from the file's text — NFKC,
-decoded escapes, comments cut out — always is). The calls that run many
-searches over one whole text (the import-time and install-script tests, the
-decoded view, the import-time code) read a **text gate** first
-(`textgate.rs`): the text's pairs of characters, and its triples hashed
-into a table sized to it, so a need, a needle or a find whose string has a
-pair or triple the text lacks answers at once. For a text of 64 K to 8 M
-characters, the gate also lists where each pair of ASCII characters
-stands, the first time a search over the whole text asks for it. A search
-for a set of strings over 4,096 characters or more of such a text (a
-lead, a need, a literal prefix) then visits the places of the pairs its
-strings have at their rarest column, in order. It tries each place as a
-scan tries the places it stops at, so its answer is the scan's: on a
-bundle the scans had read the text some 40 to 60 times. The gate also
-keeps, until it closes, what a call's tests make of the whole text more
-than once (`memo`: the lexers' tokens, the download tests' lines that
-hold a write, the assignments three tests read).
+`Regex::need()` gives linre's strings one of which every match holds (or
+those every match starts with): `scan_file` reads them for all of a file's
+per-line patterns in one pass (`Gates`, a bit per pattern and line), and a
+line holding none of a pattern's strings is not searched for it (a line
+whose match text differs from the file's text — NFKC, decoded escapes,
+comments cut out — always is). The calls that run many searches over one
+whole text (the import-time and install-script tests, the decoded view,
+the import-time code) read a **text gate** first (`textgate.rs`): the
+text's pairs of characters, and its triples hashed into a table sized to
+it, so a need, a needle or a find whose string has a pair or triple the
+text lacks answers at once. For a text of 64 K to 8 M characters, the gate
+also lists where each pair of ASCII characters stands, the first time a
+search over the whole text asks for it. A search for a set of strings over
+4,096 characters or more of such a text (a lead, a need, a literal prefix)
+then visits the places of the pairs its strings have at their rarest
+column, in order. It tries each place as a scan tries the places it stops
+at, so its answer is the scan's: on a bundle the scans had read the text
+some 40 to 60 times. The gate also keeps, until it closes, what a call's
+tests make of the whole text more than once (`memo`: the lexers' tokens,
+the download tests' lines that hold a write, the assignments three tests
+read). `pystr`'s `find` and `in` scan for a string by its rarest character
+(`scan.rs`).
 
 Beyond the regex engine, a few patterns core runs on every line or every
 token are matched or prefiltered by hand, each written for one pattern text
@@ -593,10 +552,6 @@ blanks, a quote and an `e` or `F`). The text follower reads
 each use). `test_snapshot_lexer`'s recorded outputs
 hold what the loops answer (`test_rust_parity_lexer`, which compared them
 with `re` and failed when one was mutated, retired with the Python engine).
-
-It still loses to sre on patterns that could start almost anywhere
-(`_XF_JS_MEMBER_RE`, `_PY_DOC_HEAD_RE`); core only calls those with
-`.match(text, pos)`, so their whole-text search time doesn't matter.
 
 ## 7. Performance
 
@@ -694,7 +649,7 @@ the worker threads gain least on a project scan: one thread already keeps
 1.4 cores busy (V8's compiler and garbage collector run beside it), and the
 cross-file flow analysis (about 1 s of the 616-file project, against 3.8 s
 for its per-file scans) runs on the main thread after the per-file scans.
-SQL-DYNAMIC, which `re` and pyre run in quadratic time on a line of many
+SQL-DYNAMIC, which `re` runs (and pyre's sre port ran) in quadratic time on a line of many
 `EXEC("` (13.9 s for one such file), is matched by hand in linear time
 (`linear.rs`), as the twin did (`linear.js`).
 
@@ -727,7 +682,7 @@ benchmark:
 | 1 | The Rust engine is the reference: the Python engine, `--engine` and the pure wheel retired; the recorded outputs (§5); the pack as the source of the rules; every wheel a platform wheel, the sdist compiled by pip where none fits; an unanswered file SC-TRUNCATED in both packages | Done |
 | 2 | Decoding, lexers and bytes in the engine: source decoding (BOMs, UTF-16, coding cookies), one token substrate for the detectors | Done (tag `rust-first-phase2`): the lexers (§15: every caller's comments and literals, both packages), the self-read on them, the decoded view on string values (§15). Moved: the data flow, the dead drop, the secret endpoints and received code to phase 3 (they follow names: scopes); bytes to phase 4 (with linre over bytes); source decoding to after phase 3 (the packages' decoders already agree, held by their parity tests, and owning the CJK codecs would put their tables in the WebAssembly module) |
 | 3 | Parsers, scopes and flow: the detectors on bindings over the JavaScript and Python trees (§12, §13), constant folding of strings, the cross-file follower on them, project mode's passes (taint, SQL, function metrics) in the engine; the npm package's twins of them retired | The parsers done; project mode's JavaScript taint ported onto `js_parse`'s trees (§16: `js_flow`), both packages ask the engine for it, and jsflow.py, jsflow.js and the readers they used are retired (11,357 lines); Python's taint ported onto `py_parse`'s trees (§17: `py_flow`), both packages ask the engine for it (the npm package had no port of it), and flow.py's own pass is retired (1,505 lines); the passes and the parser held to their recorded outputs; the supply-chain data flow and received code on JavaScript's trees (§18: local data sent, reported by the strongest send; received data run, loaded or deserialized, from the script's own address) and on Python's (§19), benchmark-gated; a file written then run, and decoded code run, on both trees (§20). Next: the cross-file follower on bindings and project mode's last passes (SQL, function metrics, intra-file taint). The dead drop, the secret endpoints and the self-read stay on the text detectors for now: on the benchmark's JavaScript they fire in few files, and no examined miss comes from their windows |
-| 4 | Linear-time matching: the pack's patterns on linre (§14), pyre and the shlex port retired, current Unicode | Every pattern runs on linre (P-16, rule set 2.28.0): the pack's 666, its lexers' tables included, and those the engine builds as it scans; a pattern linre would not run is an error. Lookaheads of unbounded width run with a memo, a quote matched again as branches; a name matched again and counts past what a program holds are checked in code; two patterns read further than before. Next (P-16's second part): pyre retired (linre's parser and prefilters in place of its own), a taint configuration's patterns held to what linre runs, the shlex port retired; then current Unicode |
+| 4 | Linear-time matching: the pack's patterns on linre (§14), pyre and the shlex port retired, current Unicode | Every pattern runs on linre (P-16, rule set 2.28.0): the pack's 666, its lexers' tables included, and those the engine builds as it scans. Lookaheads of unbounded width run with a memo, and a sweep where the walks would cost more; a quote matched again as branches; a name matched again and counts past what a program holds are checked in code; two patterns read further than before. pyre's port of sre retired (P-16's second part): pyre is re's interface to linre, a pattern linre does not run is an error (a built one fails its call closed), and a taint configuration's patterns are held to what linre runs. Next: the shlex port retired, the Final_Sigma rule and the casefix table from Unicode's data; then current Unicode |
 | 5 | One call per file, a content cache (SHA-256), the guard's scan in a child process that fails closed, archive ambiguity checks | Not started |
 
 ## 9. Known issues
@@ -739,9 +694,8 @@ benchmark:
   bound it in the pack (a reviewed difference of the recorded outputs).
 - The budget (4e9 steps per call) discards an exhausted answer: in both
   packages the call's file is SC-TRUNCATED (CRITICAL), on hostile input only
-  (no file of the corpora or the benchmark comes near the budget). pyre
-  charges its steps in batches of 4,096 per search, so short searches cost
-  nothing against it, and linre what its automata read (§14); a call's
+  (no file of the corpora or the benchmark comes near the budget). linre
+  charges a sixteenth of what its automata read (§14); a call's
   `budget` argument sets another (`engine.WORK_BUDGET`
   in Python, `setWorkBudget` in npm; the tests use a small one).
   `cross_file` gives each package its own budget: a package that spends it
@@ -772,8 +726,6 @@ benchmark:
   normalize both sides through JSON first.
 - Python 3.10 has no atomic groups or possessive repeats: those regex probes
   are version-gated. The pack holds no integer beyond i64.
-- The matcher's macros are defined inside its `'main: loop` so that
-  `continue 'main` resolves; keep them there.
 - Patterns built at run time are compiled into a per-thread cache cleared at
   512 entries, like `re`'s; each thread compiles its own.
 - Measuring: single runs vary ±15% on shared machines; compare best of 3, or
@@ -800,9 +752,10 @@ only.
    holdout's aggregates.
 2. Phases 2–5 (§8): decoding and the token substrate; the detectors on
    bindings over the parsers' trees, project mode's passes in the engine
-   and the npm engine's twins of them (`js/src/scanner/`) retired; pyre and
-   the shlex port retired (every pattern runs on linre since P-16, §14);
-   one call per file, a content cache, the guard's scan isolated.
+   and the npm engine's twins of them (`js/src/scanner/`) retired; the
+   shlex port retired, and current Unicode (pyre's sre port is retired:
+   every pattern runs on linre since P-16, §14); one call per file, a
+   content cache, the guard's scan isolated.
 3. The rest of the npm engine's twins: the manifest, workflow and settings
    checks (`supplychain.js`, `ghworkflow.js`, `autorun.js`), the
    config-file credentials; the dashboard keeps its own script until it can
@@ -816,20 +769,21 @@ only.
 ## 11. Licensing
 
 The engine is Lazaret's own work under Apache-2.0, except for its
-translations of CPython code: pyre's parser, compiler, constants and
-matcher (`Lib/re/_parser.py`, `_compiler.py`, `_constants.py`,
-`Modules/_sre/sre_lib.h`), parts of `pyre/mod.rs` (`parse_template` and the
-Pattern methods of `sre.c`), `shlex_split` in `hooks.rs` (`Lib/shlex.py`),
+translations of CPython code: `shlex_split` in `hooks.rs` (`Lib/shlex.py`),
 `capital_sigma` in `unicode.rs` (`handle_capital_sigma` in
 `Objects/unicodeobject.c`), and the `_casefix` table in `unicode13.rs`.
 Those are derivative works of CPython and are distributed under CPython's
 license as well: the PSF License Version 2 and the older licenses of its
-stack, among them CNRI's Python 1.6 license, which the SRE files' Secret
-Labs notices name.
+stack. Until P-16 pyre was a translation of sre too (`Lib/re/_parser.py`,
+`_compiler.py`, `_constants.py`, `Modules/_sre`), whose files carried the
+SRE library's notices: they allowed its redistribution under CNRI's Python
+1.6 license and asked any other use to contact Secret Labs AB. With every
+pattern on linre, Lazaret's own (§14), that translation is retired, and
+with it those terms; pyre (`pyre.rs`) is re's interface to linre.
 
-- `rust/NOTICE` lists them, repeats the originals' notices (Secret Labs AB
-  1997-2001 and 1998-2001, the PSF's) and summarizes the changes (section 3
-  of the PSF License asks for that when the work is distributed).
+- `rust/NOTICE` lists them, repeats the originals' notices (the PSF's and
+  `unicodeobject.c`'s) and summarizes the changes (section 3 of the PSF
+  License asks for that when the work is distributed).
 - `rust/LICENSE-PYTHON` is CPython 3.14.0's LICENSE, unchanged (a test pins
   its SHA-256; take a newer one whole, never edited).
 - Each translated file starts with `// SPDX-License-Identifier: Apache-2.0
@@ -861,11 +815,9 @@ Labs notices name.
 `tests/architecture/test_rust_notices.py` keeps all of this in place, and
 fails on a Rust file that says it is ported or translated from CPython
 without a notice: a new translation gets a header and a line in
-`rust/NOTICE`. The Secret Labs notices say the SRE library "can be
-redistributed under CNRI's Python 1.6 license. For any other use, please
-contact Secret Labs AB"; Lazaret distributes the translation under
-CPython's own terms with every notice kept, the usual reading, and a
-commercial use may want a lawyer's view of that sentence.
+`rust/NOTICE`. What is left to retire for the engine to be Lazaret's own
+throughout (phase 4): the shlex port, and the Final_Sigma rule and the
+casefix table, which Unicode's own data can give.
 
 ## 12. The JavaScript parser
 
@@ -1249,37 +1201,38 @@ whatever the text holds. It is written from `re`'s documented and observed
 behaviour, not translated from CPython (whose sources were read for the
 rules, as for any reimplementation), so it needs no line in `rust/NOTICE`.
 **The engine runs every one of its patterns on it** (P-16; patterns linre
-accepted ran there since the Rust-first refactor's phase 2):
-`pyre::Regex::new` compiles its pattern with linre too, and search, match,
-fullmatch, finditer, sub and split run there and come back as pyre's
-matches. Only patterns pyre answers without a matcher (one character of a
-set, or a run of them) stay on pyre. A pattern linre would not run is an
-error there, as one Python rejects is: none of the pack's is
-(`test_linre`), and one the engine builds as it scans (`rxutil::dynamic`:
-names escaped into a template) is answered by sre's matcher and noted
-(`linre.fallbacks`; a run of the recorded outputs, §5, fails on one, and
-none is). A taint configuration's own patterns (`rxutil::dynamic_user`)
-run on linre when it runs them, on sre's matcher otherwise. A linre search
-charges the call's work budget a sixteenth of the characters its automata
-read (the DFAs, the Pike VM, the backtracker for groups), as pyre charges a
-scan: a search the text gate answers, or a scan for the strings the
-pattern needs, costs nothing (pyre's cost nothing either), a match that
+accepted ran there since the Rust-first refactor's phase 2): pyre (§6) is
+`re`'s interface to it, and a pattern linre does not run is an error there,
+as one Python rejects is. None of the pack's is (`test_linre`). One the
+engine builds as it scans (`rxutil::dynamic`: names escaped into a
+template) fails its call closed: the call's budget is spent, so both
+packages make the file SC-TRUNCATED, and it is noted (`linre.refused`; a
+run of the recorded outputs, §5, fails on one, and none is; it would take
+names of tens of thousands of characters). A taint configuration's own
+patterns (`rxutil::dynamic_user`) are held to what linre runs when the
+configuration is read (`taintspec`: a pattern linre refuses is a rejected
+rule, with the reason), and one that is not never matches. Before P-16 the
+patterns linre refused ran on pyre's port of sre's backtracking matcher.
+A linre search charges the call's work budget a sixteenth of the
+characters its automata read (the DFAs, the Pike VM, the backtracker for
+groups), as pyre's port charged its scans: a search the text gate answers,
+or a scan for the strings the pattern needs, costs nothing, a match that
 fails what the DFA read before it died. So the budget still bounds a call,
-and no file needs more of it on linre than on pyre (a 9 MB `typescript.js`
-needs less than 1e8 of the 4e9 steps on both; charging every search the
-whole span it covered, as the first wiring did, spent the budget on the
-largest files — `typescript.js`, `pnpm.cjs`, the benchmark's 11 MB
-obfuscated bundles — in seconds of work). A memoized lookahead's walks
+and no file needs more of it on linre than it did on sre's port (a 9 MB
+`typescript.js` needs less than 1e8 of the 4e9 steps on both; charging
+every search the whole span it covered, as the first wiring did, spent the
+budget on the largest files — `typescript.js`, `pnpm.cjs`, the benchmark's
+11 MB obfuscated bundles — in seconds of work). A memoized lookahead's walks
 (below) are charged the same way, a step a character. `pyre.probe` runs a
-pattern as the engine runs it (`"backtracking": true`: on sre's matcher
-alone). Three calls expose
-linre itself: `linre.probe` (pyre.probe's arguments and answer — search,
-match, fullmatch, finditer with every group, sub with `<…>` and split, at
-`pos` and `endpos`, with `gate` — or `{"error", "refused"}`),
-`linre.check` (`{"names": […]}`, or nothing for the whole pack: each
-pattern accepted, with its program's size, its lookarounds and the strings
-it scans for, or refused and why) and `linre.fallbacks` (the patterns the
-engine built since the last call that linre would not run, at most 64).
+pattern through pyre, as the engine's code does (`sub` with a template
+too). Three calls expose linre itself: `linre.probe` (pyre.probe's
+arguments and answer — search, match, fullmatch, finditer with every
+group, sub with `<…>` and split, at `pos` and `endpos`, with `gate` — or
+`{"error", "refused"}`), `linre.check` (`{"names": […]}`, or nothing for
+the whole pack: each pattern accepted, with its program's size, its
+lookarounds and the strings it scans for, or refused and why) and
+`linre.refused` (the patterns the engine built since the last call that
+linre refused, at most 64).
 
 **What it runs.** Literals and every escape of str patterns; classes with
 ranges, negation and `\w \d \s \W \D \S`; `.` with and without DOTALL;
@@ -1309,16 +1262,16 @@ through, lastindex the last group closed); finditer's rule after an empty
 match; a lookbehind reads before `pos`, nothing reads past `endpos`, and a
 match that starts past `endpos` (`match(s, 5, 2)`) answers as sre's does
 (an empty pattern and MULTILINE's `$` match there, a one-character repeat
-fails); `\b` and `\B` hold nowhere in an empty window at 0 (3.10–3.13, as
-pyre); IGNORECASE and ASCII as sre compiles them, with unicode.rs's Unicode
+fails); `\b` and `\B` hold nowhere in an empty window at 0 (as 3.10–3.13
+do); IGNORECASE and ASCII as sre compiles them, with unicode.rs's Unicode
 13.0 tables (sre's lower and upper and its case fixes; a class is tested on
 the lowercased character, or as written when it holds no cased character;
 a range past the Basic Multilingual Plane on the lowercase and on its
 uppercase). Where Python versions differ — an astral letter written in a
 class under IGNORECASE, which 3.10–3.12 match in neither case, and an
-astral range under ASCII and IGNORECASE — linre answers as 3.13 and later,
-and pyre, do. A text is code points: a lone surrogate is a character like
-any other.
+astral range under ASCII and IGNORECASE — linre answers as 3.13 and later
+do (as pyre's sre port did). A text is code points: a lone surrogate is a
+character like any other.
 
 **How it runs.** The parser keeps what `re`'s parser keeps where it changes
 an answer (a one-character class is a literal, the item alternatives begin
@@ -1393,8 +1346,8 @@ again only after as many steps more); the anchored tries cost at most
 visits each (instruction, position) once; the Pike VM is O(n·m). So
 O(n·m) at worst: linear in the text for every accepted pattern, whatever
 the text. No recursion on the text, and no panic on any text of any u32
-values. Compiling costs more than pyre's: the 300 patterns of a scan take
-113 ms against pyre's 35 ms.
+values. Compiling: the 300 patterns of a scan take 113 ms (pyre's sre port
+took 35 ms; until P-16 each pattern was compiled by both).
 
 **Tests.** `cargo test --release` (`linre/tests.rs`, `linre/charset.rs`):
 the syntax the pack uses compiles, Python's errors are errors, each refusal
@@ -1405,8 +1358,10 @@ the backtracker alone (sre's search: a try from each start in turn) — on
 which compile), on random texts of letters, the edge characters and lone
 surrogates, in windows too; 20,000 seeded garbage patterns and texts of
 arbitrary u32 values without a panic; and adversarial texts of 20,000
-repetitions read at once. Since P-16, against sre's matcher (pyre's, run
-alone): lookaheads of unbounded width — 25 of the pack's shapes and others
+repetitions read at once. Since P-16, against the answers recorded from
+sre's matcher (pyre's port, before P-16's second part retired it) on the
+same seeded inputs, a digest per test, and the matchers against each other:
+lookaheads of unbounded width — 25 of the pack's shapes and others
 on 400 texts each, in windows too, and 3,000 seeded random patterns with
 one (over 1,500 of which compile) — each walked and swept; three that meet
 thousands of sets, on texts of 3,000 characters; and one-character
@@ -1437,7 +1392,7 @@ PYTHONPATH=src:. python3 -m unittest tests.architecture.test_linre_linear  # ~3 
   and symbols, lone surrogates), at 0, in windows (inside the text, and past
   each other) and with a text gate: 140,000 texts. And `linre.check`: every
   pattern of the pack is accepted (the recorded-output modules, §5, fail a
-  run that built a pattern linre does not run: `linre.fallbacks`).
+  run that built a pattern linre does not run: `linre.refused`).
 - `test_linre_b` and `_c` (half of the patterns each): texts sampled from
   each pattern's parse tree (`_linre_inputs.sample`: a branch, a repeat's
   count at or next to its bounds, a class's member — a range's ends, a
@@ -1445,14 +1400,19 @@ PYTHONPATH=src:. python3 -m unittest tests.architecture.test_linre_linear  # ~3 
   IGNORECASE, what a lookbehind wants before and a lookahead after), some
   of them mutated: about two thirds of them match, and many others nearly
   do. 80,000 texts.
-- `test_linre_d`: pyre's hand-written patterns (each construct `re`
-  supports for str patterns: linre runs 124 of the 141 and refuses the rest
-  for a known reason), about 100 of linre's own (lookarounds of several
-  characters, nested and at a window's ends; anchors; flags; IGNORECASE
-  past ASCII; astral characters; counted and lazy repeats at their bounds;
-  empty matches; lastindex; the literal scans' corners), and linre against
-  pyre on 300 random classes of astral and other letters under IGNORECASE
-  and ASCII: 110,000 texts.
+- `test_linre_d`: the parity test's hand-written patterns (each construct
+  `re` supports for str patterns: linre runs 124 of the 141 and refuses the
+  rest for a known reason), about 100 of linre's own (lookarounds of
+  several characters, nested and at a window's ends; anchors; flags;
+  IGNORECASE past ASCII; astral characters; counted and lazy repeats at
+  their bounds; empty matches; lastindex; the literal scans' corners), and,
+  on Python 3.13 and later, 300 random classes of astral and other letters
+  under IGNORECASE and ASCII: 110,000 texts.
+- `test_linre_e`: what P-16 added, on the shapes `linre/tests.rs` holds to
+  sre's recorded answers: the 25 lookaheads of unbounded width and 600
+  random patterns with one, the three of many sets on texts of 1,500
+  characters, the 14 one-character backreferences, and the backreferences
+  still refused.
 - `test_linre_linear`: linear time, below.
 
 Every text goes through search, match, fullmatch, finditer, sub and split
@@ -1461,22 +1421,24 @@ in both, at 0 and in windows: no difference, on Python 3.10, 3.11, 3.12 and
 short: `re` itself takes exponential time on a near miss of some of them.)
 
 **Linear time.** Pack patterns on texts that make a backtracking matcher
-backtrack, through `pyre.probe` and `linre.probe` (all six operations), best
-of three:
+backtrack, through a backtracking matcher (pyre's port of sre when this was
+measured, in phase 2; Python's `re` in the test since P-16) and
+`linre.probe` (all six operations), best of three:
 
-| Pattern, text | pyre | linre |
+| Pattern, text | sre (pyre's port) | linre |
 |---|---|---|
 | `_SVC_LAUNCHCTL_RE`, "launchctl" + " --a" × k + " x" (`-{1,2}[\w-]+` reads "--a" two ways: 2^k paths) | k = 10: 2.1 ms; 12: 7.7 ms; 14: 30 ms; 16: 120 ms | k = 1,000: 0.5 ms; 100,000: 12 ms |
 | `_DD_PARAM_RE`, n blanks (two `\s*` in a row, from every start: n³) | n = 100: 5.9 ms; 200: 35 ms; 400: 226 ms | n = 100,000: 2.5 ms; 200,000: 4.9 ms |
 | `_JSON_COLON_RE` (`[ \t\n\r]*:`), n blanks (n²) | n = 1,000: 8.3 ms; 2,000: 33 ms; 4,000: 135 ms | n = 100,000: 2.5 ms; 200,000: 4.9 ms |
 
 `_LD_CALLED_RE` (`\s*\(`) and `_DL_JOIN_CHAIN_RE` grow as `_JSON_COLON_RE`
-does. The test asserts the growth (pyre: more than eightfold for two more
+does. The test asserts the growth (`re`: more than eightfold for two more
 pieces, more than tenfold for four times the text; linre: less than
 eightfold for four times the text) and that linre reads a million
 characters of each in under 2 s.
 
-**Measurements.** Every regex call of a scan of the 1,500-file sample (22
+**Measurements** (phase 2, pyre's sre port against linre). Every regex
+call of a scan of the 1,500-file sample (22
 MB): the scanner's calls recorded with their texts, `pos`, `endpos` and
 text gate, then replayed through both engines in one process, one thread,
 release build, three runs. 300 patterns, 1,465,383 calls, the same answers

@@ -1,6 +1,5 @@
-"""The Rust engine's `re` (crates/lazaret-engine/src/pyre) against Python's:
-each pattern as the engine runs it (on linre, src/linre, where linre accepts
-it) and on pyre's backtracking matcher alone (pyre.probe's "backtracking").
+"""The Rust engine's `re` (crates/lazaret-engine/src/pyre.rs: re's calls as
+the engine's code makes them, on linre, src/linre) against Python's.
 
 Every pattern of the rule pack — every compiled pattern of
 lazaret.scanner.core, with its flags — is compiled by both, and each entry
@@ -10,7 +9,9 @@ and fullmatch (at 0 and at a pos/endpos inside the text), finditer's every
 match with every group's span and lastindex, sub with a function, and
 split. Then a set of hand-written patterns covers what core's may not:
 backreferences, conditionals, empty-match loops, nested repeats with
-groups, lookbehind at the start, inline flags, verbose mode, re.I folding.
+groups, lookbehind at the start, inline flags, verbose mode, re.I folding;
+those linre does not run are refused for a known reason (REFUSED). And
+re.sub's templates, and re.escape.
 
 Skipped where the native library is not built (LAZARET_NATIVE_LIB or the
 wheel's lazaret/_native/).
@@ -84,28 +85,39 @@ def py_probe(rx, texts, pos=0, endpos=None, template=None):
     return {"groups": rx.groups, "results": out}
 
 
-def compare(testcase, src, flags, texts, gate=False, **kw):
-    """Assert that both engines answer alike; returns the number of texts.
-    The texts travel as JSON, which reads a high surrogate next to a low one
-    as the character they encode: each is compared as JSON leaves it.
-    `gate`: each text's searches ask a text gate (rust/…/src/textgate.rs)."""
+# why linre refuses a hand-written pattern (P-16 retired the backtracking
+# matcher that ran them): what a group matched, whether it matched, sre's
+# own rules for empty loops, atomic groups and possessive repeats
+REFUSED = ("linre does not run it: a backreference", "linre does not run it: a conditional group",
+           "linre does not run it: a repeat whose body can match the empty string",
+           "linre does not run it: a capturing group inside a positive lookaround",
+           "linre does not run it: an atomic group", "linre does not run it: a possessive repeat")
+
+
+def compare(testcase, src, flags, texts, gate=False, refused_ok=False, **kw):
+    """Assert that both engines answer alike; returns the number of texts
+    (0 for a pattern linre refuses, where `refused_ok` allows it, for a
+    reason in REFUSED). The texts travel as JSON, which reads a high
+    surrogate next to a low one as the character they encode: each is
+    compared as JSON leaves it. `gate`: each text's searches ask a text gate
+    (rust/…/src/textgate.rs)."""
     texts = [json.loads(json.dumps(t)) for t in texts]
     rx = re.compile(src, flag_bits(flags))
-    want = py_probe(rx, texts, **kw)
     args = {"pattern": src, "flags": flags, "texts": texts}
     args.update({k: v for k, v in kw.items() if v is not None})
     if gate:
         args["gate"] = True
-    # as the engine runs the pattern (on linre where linre accepts it), and on sre's matcher alone
-    for backtracking in (False, True):
-        got = _native.call("pyre.probe", dict(args, backtracking=True) if backtracking else args)
-        if got != want:
-            testcase.assertNotIn("error", got, f"{src!r}: {got.get('error')}")
-            for t, a, b in zip(texts, want["results"], got["results"]):
-                for key in a:
-                    testcase.assertEqual(a[key], b.get(key), f"pattern {src!r} flags {flags!r} {key} on {t!r} {kw} "
-                                                             f"(backtracking: {backtracking})")
-            testcase.assertEqual(want, got)
+    got = _native.call("pyre.probe", args)
+    if refused_ok and got.get("refused"):
+        testcase.assertTrue(got["error"].startswith(REFUSED), got["error"])
+        return 0
+    want = py_probe(rx, texts, **kw)
+    if got != want:
+        testcase.assertNotIn("error", got, f"{src!r}: {got.get('error')}")
+        for t, a, b in zip(texts, want["results"], got["results"]):
+            for key in a:
+                testcase.assertEqual(a[key], b.get(key), f"pattern {src!r} flags {flags!r} {key} on {t!r} {kw}")
+        testcase.assertEqual(want, got)
     return len(texts)
 
 
@@ -126,8 +138,9 @@ HANDWRITTEN = [
     (r"(?m)^(?:[ \t]*#.*\n)+", ""), (r"\\", ""), (r"[\\\]]", ""), (r"(\w+)\s+\1", "i"),
     (r"(?<=\d{2})x", ""), (r"(?<![a-z]{3})y", "i"), (r"(?:a|b|c|d)+", ""), (r"ab|ac|ad", ""),
     (r"foo|foobar", ""), (r"[ab]|[cd]|e", ""), (r"é", "i"), (r"É+", "i"), (r"Σ+", "i"), (r"ς", "i"),
-    # where the engine skips a start, an alternative or a backtracking step
-    # by the characters what follows can begin with (pyre/first.rs, prog.rs)
+    # where a matcher skips a start, an alternative or a step by the
+    # characters what follows can begin with (written for pyre's sre port,
+    # linre's prefilters and DFAs now)
     (r"(?:(?<=a)b|(c)|(?=d)d|)e", ""), (r"(?:(?!a)\w|a)+", ""), (r"x(?:\s*y|z?)w", ""),
     (r"(?:\bfoo|(?<![\w])bar)\(", ""), (r"(?:ab|ǆ|ſt)x", "i"), (r"(?:a|b?)c", ""), (r"(?:(a)|(b))\2?c", ""),
     (r"a*(?:b|c)", ""), (r"\w*?(?=x)x", ""), (r"\s*(?:$|;)", ""), (r"a+?(?:b|$)", ""), (r"[a-z]*(?<=c)d", ""),
@@ -136,15 +149,15 @@ HANDWRITTEN = [
     (r"(?=ab)a", ""), (r"(?=a|)b?", ""), (r"(?=\w{2})", ""), (r"(?=a*)b", ""), (r"(?=)a", ""),
     (r"(?=(a))\1b", ""), (r"(?:^|x)y", "m"), (r"(?:(?<=a)|^)b", ""), (r"(?:^|(?<=\s))//", ""), (r"(?=[ſ])s", "i"),
     # where a search stops early on text that holds none of the strings every
-    # match holds (pyre/literal.rs)
+    # match holds (linre/literal.rs)
     (r"ngrok|pastebin", "i"), (r"kiss", "i"), (r"st\b", "i"), (r"x(?:ab|cd)+y", ""), (r"(?:ab)+", ""),
     (r"a(?=bc)bc", ""), (r"(?<=ab)cd", ""), (r"(?<!ab)cd", ""), (r"(?:foo|ba(?:r|z))qux", ""), (r"ab|a", ""),
     (r"(?:ab|cd)?ef", ""), (r"ab*cd", ""), (r"a[bc]d", ""), (r"a[bB]D", "i"), (r"(?:ab){2}", ""),
     (r"\b(?:nc|ncat|netcat)\s", ""), (r"x(?:y|)z", ""), (r"ab(?:\w|cd)", ""), (r"(?i)Ab(?:[sS]|c)", ""),
     (r"(a)(?(1)bc|de)fg", ""), (r"\bab\b\w*", "a"), (r"(?>ab|c)d", "") if sys.version_info >= (3, 11) else (r"ab", ""),
     # where a search tries only where a string every match starts with
-    # starts (pyre/literal.rs), or where the zero-width tests a match makes
-    # before its first character hold (pyre/first.rs)
+    # starts, or where the zero-width tests a match makes before its first
+    # character hold (linre/literal.rs, prefilter.rs)
     (r"(?<![\w$.])foo\(", ""), (r"(?<=[ab])c", ""), (r"(?<![^\n])x=", ""), (r"(?:(?<![^\n])|[;{]|=>)[ \t]*(\w+)=", ""),
     (r"\b(?:open|read)\(", ""), (r"(?:\$\(|`)\s*id\b", ""), (r"HTTPS?Connection|requests|\"https\"", ""),
     (r"(?:Foo|bar)baz", "i"), (r"(?:ab|ǆ)c", "i"), (r"(?=ab)(?:ab|ac)", ""), (r"(?<!x)(?:ab|cd)", ""),
@@ -198,12 +211,15 @@ class RegexParityTests(unittest.TestCase):
 
     def test_handwritten(self):
         rnd = random.Random(7)
+        ran = 0
         for src, flags in HANDWRITTEN:
             with self.subTest(pattern=src, flags=flags):
                 texts = HANDWRITTEN_TEXTS + corpus.texts_for(src, rnd, count=60, most=8)
-                compare(self, src, flags, texts)
-                compare(self, src, flags, texts, pos=2, endpos=5)
-                compare(self, src, flags, texts, pos=5, endpos=2)
+                if compare(self, src, flags, texts, refused_ok=True):
+                    ran += 1
+                    compare(self, src, flags, texts, pos=2, endpos=5)
+                    compare(self, src, flags, texts, pos=5, endpos=2)
+        self.assertGreater(ran, 120)
 
     def test_non_boundary(self):
         texts = [t for t in HANDWRITTEN_TEXTS if t]

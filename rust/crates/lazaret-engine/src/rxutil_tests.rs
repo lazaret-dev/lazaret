@@ -7,6 +7,11 @@
 //! read further than before (SC-EVAL-DECODER's decoder body, the arguments
 //! of open() for a shell-profile write) answer as before within the old
 //! limits, and find past them what the old ones cut off.
+//!
+//! The originals' answers were recorded from sre's matcher (the
+//! backtracking matcher pyre held) while it was in the engine, as one digest
+//! per test over the same seeded texts; the originals are kept below as the
+//! record of what was compared.
 
 use super::*;
 use crate::pack::{Pack, EMBEDDED};
@@ -29,13 +34,6 @@ fn cps(s: &str) -> Vec<u32> {
     s.chars().map(|c| c as u32).collect()
 }
 
-fn original(name: &str) -> String {
-    ORIGINALS.iter().find(|(n, _)| *n == name).map(|(_, t)| t.to_string()).unwrap_or_else(|| panic!("{}", name))
-}
-
-fn sre(src: &str) -> Regex {
-    Regex::new_backtracking(&cps(src), 0).unwrap_or_else(|e| panic!("{:?}: {}", src, e.0))
-}
 
 fn lin(src: &[u32]) -> Regex {
     Regex::new(src, 0).unwrap_or_else(|e| panic!("{:?}: {}", crate::pystr::to_string(src), e.0))
@@ -71,12 +69,53 @@ fn view(m: &Match, groups: &[&str]) -> View {
     (m.start(), m.end(), groups.iter().map(|g| m.name(g).map(|x| x.to_vec())).collect())
 }
 
-/// The original's finditer (sre's matcher) and the rewrite's checked one
-/// find the same matches.
-fn agree(name: &str, old: &Regex, new: &Regex, text: &[u32], groups: &[&str], ok: &dyn Fn(&Match) -> bool) {
-    let want: Vec<View> = old.finditer(text).map(|m| view(&m, groups)).collect();
+/// A digest of matches (FNV-1a over their numbers). These tests hold each
+/// rewrite to the answers its original gave on sre's own matcher (the
+/// backtracking matcher pyre held, until P-16's second part retired it),
+/// recorded as one digest per test on the same seeded texts.
+struct Digest(u64);
+
+impl Digest {
+    fn new() -> Digest {
+        Digest(0xcbf2_9ce4_8422_2325)
+    }
+
+    fn num(&mut self, x: u64) {
+        for b in x.to_le_bytes() {
+            self.0 ^= u64::from(b);
+            self.0 = self.0.wrapping_mul(0x0100_0000_01b3);
+        }
+    }
+
+    fn views(&mut self, vs: &[View]) {
+        self.num(vs.len() as u64);
+        for (a, b, groups) in vs {
+            self.num(*a as u64);
+            self.num(*b as u64);
+            for g in groups {
+                match g {
+                    None => self.num(u64::MAX),
+                    Some(t) => {
+                        self.num(t.len() as u64);
+                        for &c in t {
+                            self.num(u64::from(c));
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// The digest a test recorded from the originals' answers on sre's matcher.
+fn recorded(name: &str, got: u64, want: u64) {
+    assert_eq!(got, want, "{}: the rewrites' answers are not the ones recorded from the originals'", name);
+}
+
+/// The rewrite's checked finditer, into `d`.
+fn agree(new: &Regex, text: &[u32], groups: &[&str], ok: &dyn Fn(&Match) -> bool, d: &mut Digest) {
     let got: Vec<View> = finditer_checked(new, text, 0, text.len(), |m| ok(m)).iter().map(|m| view(m, groups)).collect();
-    assert_eq!(got, want, "{}: on {:?}", name, crate::pystr::to_string(text));
+    d.views(&got);
 }
 
 fn numbers(rng: &mut Rng, n: usize) -> String {
@@ -87,28 +126,26 @@ fn numbers(rng: &mut Rng, n: usize) -> String {
 fn a_name_matched_again_is_checked_as_its_backreference_was() {
     let p = Pack::from_json(EMBEDDED).unwrap();
     let mut rng = Rng(16);
+    let mut d = Digest::new();
     // the loop's index named again
-    let (old, new) = (sre(&original("_DV_CC_FOR_RE")), p.re("_DV_CC_FOR_RE"));
+    let new = p.re("_DV_CC_FOR_RE");
     let pieces = ["for", "for(", "for (", "var ", "let ", "i", "ii", "j", " = ", "=", "0", ";", " ", "<", "d", "data",
                   ".length", "\t", "x", "(", "for(var i=0;i<d.length;", "for (let ab = 0; a < x.length;"];
     for _ in 0..3000 {
         let t = rng.text(&pieces, 14);
-        agree("_DV_CC_FOR_RE", &old, new, &t, &["i", "d"], &|m| same_groups(m, &[("i", "i_again")]));
+        agree(new, &t, &["i", "d"], &|m| same_groups(m, &[("i", "i_again")]), &mut d);
     }
     // the checksum loop's variable named again
-    let (old, new) = (sre(&original("_SA_CHECKSUM_RE")), p.re("_SA_CHECKSUM_RE"));
+    let new = p.re("_SA_CHECKSUM_RE");
     let pieces = ["try", "{", " ", "var ", "const ", "v", "w", "vv", "=", "a+b", "parseInt(x)", ";", "if", "(", "===",
                   "t", ")", "break", "}", "try{var v=a+b;if(v===t)break", "try { const w = 1; if (v === t) break"];
     for _ in 0..3000 {
         let t = rng.text(&pieces, 14);
-        agree("_SA_CHECKSUM_RE", &old, new, &t, &["v", "e"], &|m| same_groups(m, &[("v", "v_again")]));
+        agree(new, &t, &["v", "e"], &|m| same_groups(m, &[("v", "v_again")]), &mut d);
     }
     // the string arrays' accessors: the parameter, and form B's function
     let name = "_0xab";
     for (head, tail, form) in [("_SA_ACC_A_HEAD", "_SA_CALL_TAIL", 'A'), ("_SA_ACC_B_HEAD", "_SA_ACC_B_TAIL", 'B')] {
-        let old_head = if form == 'A' { original(head) } else { crate::pystr::to_string(&p.text(head)) };
-        let old_tail = if form == 'B' { original(tail) } else { crate::pystr::to_string(&p.text(tail)) };
-        let old = sre(&format!("{}{}{}", old_head, name, old_tail));
         let mut src = p.text(head);
         src.extend(cps(name));
         src.extend(p.text(tail));
@@ -120,17 +157,19 @@ fn a_name_matched_again_is_checked_as_its_backreference_was() {
                       "function g(x, y) { var a = _0xab(); return g = function(p, x) { p = p - 7;"];
         for _ in 0..3000 {
             let t = rng.text(&pieces, 16);
-            agree(head, &old, &new, &t, &["g", "p", "off"], &|m| same_groups(m, same));
+            agree(&new, &t, &["g", "p", "off"], &|m| same_groups(m, same), &mut d);
         }
     }
+    recorded("a_name_matched_again", d.0, 0x92cd_ad4a_10cd_1954);
 }
 
 #[test]
 fn counts_past_what_a_program_holds_are_checked_as_they_were() {
     let p = Pack::from_json(EMBEDDED).unwrap();
     let mut rng = Rng(17);
+    let mut d = Digest::new();
     // the decoded view's constant arrays: at most 64 strings of 400 characters
-    let (old, new) = (sre(&original("_DV_ARRAY_RE")), p.re("_DV_ARRAY_RE"));
+    let new = p.re("_DV_ARRAY_RE");
     let (items, chars) = (p.usize("_DV_ARRAY_MAX_ITEMS"), p.usize("_DV_ARRAY_MAX_CHARS"));
     let check = |m: &Match| crate::signs::dv_array_fits(m.name("items").unwrap_or(&[]), items, chars);
     let pieces = ["x", "arr", " = ", "=", "[", "]", "'", "\"", "abc", ",", " ", "\n", "'a'", "\"b\"", "y = ['q', \"r\"]"];
@@ -148,12 +187,10 @@ fn counts_past_what_a_program_holds_are_checked_as_they_were() {
             a.push(']');
             t.extend(cps(&a));
         }
-        agree("_DV_ARRAY_RE", &old, new, &t, &["name", "items"], &check);
+        agree(new, &t, &["name", "items"], &check, &mut d);
     }
     // a decoder's call: at most 20,000 items, strings of at most 400 characters
     let (most, longest) = (p.usize("_DV_CC_CALL_MAX_ITEMS"), p.usize("_DV_CC_CALL_MAX_CHARS"));
-    let head = crate::pystr::to_string(&p.text("_DV_NAME_HEAD"));
-    let old = sre(&format!("{}(?P<name>dec|f){}", head, original("_DV_CC_CALL_TAIL")));
     let mut src = p.text("_DV_NAME_HEAD");
     src.extend(cps("(?P<name>dec|f)"));
     src.extend(p.text("_DV_CC_CALL_TAIL"));
@@ -170,11 +207,10 @@ fn counts_past_what_a_program_holds_are_checked_as_they_were() {
             let n = 19_995 + rng.below(10);
             t.extend(cps(&format!("f({})", "z".repeat(n))));
         }
-        agree("_DV_CC_CALL_TAIL", &old, &new, &t, &["name", "args"], &check);
+        agree(&new, &t, &["name", "args"], &check, &mut d);
     }
     // a decoder's array of character codes: at most 4,096 numbers
     let most = p.usize("_DV_CC_ARRAY_MAX_INTS");
-    let old = sre(&format!("{}codes{}", head, original("_DV_CC_ARRAY_TAIL")));
     let mut src = p.text("_DV_NAME_HEAD");
     src.extend(cps("codes"));
     src.extend(p.text("_DV_CC_ARRAY_TAIL"));
@@ -183,11 +219,11 @@ fn counts_past_what_a_program_holds_are_checked_as_they_were() {
     for k in 0..400 {
         let n = if k % 4 == 0 { 4094 + rng.below(4) } else { 1 + rng.below(30) };
         let t = cps(&format!("var codes = [{}]; codes = ({}, )", numbers(&mut rng, n), numbers(&mut rng, 3)));
-        agree("_DV_CC_ARRAY_TAIL", &old, &new, &t, &["items"], &check);
+        agree(&new, &t, &["items"], &check, &mut d);
     }
     // String.fromCharCode and its kin: lists of at most 400 numbers, and the
     // comprehension's name again
-    let (old, new) = (sre(&original("_DV_CC_LITERAL_RE")), p.re("_DV_CC_LITERAL_RE"));
+    let new = p.re("_DV_CC_LITERAL_RE");
     let most = p.usize("_DV_CC_LITERAL_MAX_INTS");
     let groups = ["a", "b", "c", "d", "e", "f", "v"];
     let check = |m: &Match| {
@@ -201,14 +237,16 @@ fn counts_past_what_a_program_holds_are_checked_as_they_were() {
         let shape = shapes[rng.below(shapes.len())];
         let mut t = cps(&shape.replace("{}", &numbers(&mut rng, n)));
         t.extend(rng.text(&["x", " ", ";", "chr(", ")", "1, 2", "]"], 4));
-        agree("_DV_CC_LITERAL_RE", &old, new, &t, &groups, &check);
+        agree(new, &t, &groups, &check, &mut d);
     }
+    recorded("counts_past_what_a_program_holds", d.0, 0x8aae_14bf_b7ec_dc5b);
 }
 
 #[test]
 fn the_two_that_read_further_answer_as_before_within_their_old_limits() {
     let p = Pack::from_json(EMBEDDED).unwrap();
     let mut rng = Rng(18);
+    let mut d = Digest::new();
     // SC-EVAL-DECODER: a decoder body cut at 2,000 items before
     let new_src = {
         let raw = p.raw("RULES").unwrap();
@@ -216,24 +254,44 @@ fn the_two_that_read_further_answer_as_before_within_their_old_limits() {
         let e = list.iter().find(|r| r.get("map").and_then(|m| m.get("id")).and_then(|i| i.get("value")).and_then(|v| v.as_string()).as_deref() == Some("SC-EVAL-DECODER")).unwrap();
         e.get("map").unwrap().get("re").unwrap().get("re").unwrap().as_str().unwrap().to_vec()
     };
-    let (old, new) = (sre(&original("RULES[47]")), lin(&new_src));
+    let new = lin(&new_src);
     let blob = format!("'{}'", "q".repeat(1000));
     for k in 0..300 {
         let body = "x+=1;".repeat(1 + rng.below(if k % 3 == 0 { 390 } else { 20 }));
         let t = cps(&format!("eval(function(p){{{}}}({}))", body, blob));
-        let o: Vec<(usize, usize)> = old.finditer(&t).map(|m| m.span()).collect();
         let n: Vec<(usize, usize)> = new.finditer(&t).map(|m| m.span()).collect();
-        assert_eq!(n, o, "a body of {} characters", body.len());
+        d.views(&n.iter().map(|&(a, b)| (a, b, Vec::new())).collect::<Vec<_>>());
     }
     let long = cps(&format!("eval(function(p){{{}}}({}))", "x+=1;".repeat(500), blob));
-    assert!(old.search(&long).is_none() && new.search(&long).is_some(), "a body of 2,500 characters");
+    // (the original's 2,000 items stopped short of it)
+    assert!(new.search(&long).is_some(), "a body of 2,500 characters");
     // a shell-profile write: open()'s arguments cut at 300 items before
-    let (old, new) = (sre(&original("_PERSIST_WRITE_RE")), p.re("_PERSIST_WRITE_RE"));
+    let new = p.re("_PERSIST_WRITE_RE");
     for k in 0..300 {
         let pad = "a".repeat(rng.below(if k % 3 == 0 { 280 } else { 30 }));
         let t = cps(&format!("open(os.path.join(h, '.bashrc'){}, 'a')", pad));
-        assert_eq!(new.search(&t).map(|m| m.span()), old.search(&t).map(|m| m.span()), "{} characters", pad.len());
+        d.views(&new.search(&t).map(|m| (m.start(), m.end(), Vec::new())).into_iter().collect::<Vec<_>>());
     }
     let far = cps(&format!("open('/root/.bashrc'{}, 'a')", " ".repeat(400)));
-    assert!(old.search(&far).is_none() && new.search(&far).is_some(), "a mode 400 characters on");
+    // (the original's 300 items stopped short of it)
+    assert!(new.search(&far).is_some(), "a mode 400 characters on");
+    recorded("the_two_that_read_further", d.0, 0x41e8_6c35_ce20_343e);
+}
+
+#[test]
+fn the_originals_are_patterns_linre_refuses() {
+    // (why each was rewritten: a backreference to a name, or a program too
+    // large; the accessors' pieces as the engine composes them)
+    let p = Pack::from_json(EMBEDDED).unwrap();
+    for &(name, src) in ORIGINALS {
+        let full = match name {
+            "_SA_ACC_A_HEAD" => format!("{}_0xab{}", src, crate::pystr::to_string(&p.text("_SA_CALL_TAIL"))),
+            "_SA_ACC_B_TAIL" => format!("{}_0xab{}", crate::pystr::to_string(&p.text("_SA_ACC_B_HEAD")), src),
+            _ => src.to_string(),
+        };
+        match crate::linre::Regex::new(&cps(&full), 0) {
+            Err(e) => assert!(e.refused && (e.msg.contains("backreference") || e.msg.contains("too large")), "{}: {}", name, e),
+            Ok(_) => panic!("{}: linre runs the original", name),
+        }
+    }
 }

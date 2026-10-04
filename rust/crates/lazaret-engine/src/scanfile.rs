@@ -21,7 +21,7 @@ use crate::filectx::{FileCtx, Lang};
 use crate::findings::{self, Arg, Finding, RuleText, Snippets};
 use crate::json::Value;
 use crate::pack::Pack;
-use crate::pyre::literal::Need;
+use crate::linre::literal::LitSet as Need;
 use crate::pyre::{self, Regex};
 use crate::pystr::{self, PyStr};
 use crate::rxutil;

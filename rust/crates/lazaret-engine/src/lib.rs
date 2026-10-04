@@ -34,6 +34,7 @@ pub mod quickhash;
 pub mod received;
 pub mod rsparse;
 pub mod rxutil;
+pub mod scan;
 pub mod scanfile;
 pub mod shell;
 pub mod signs;

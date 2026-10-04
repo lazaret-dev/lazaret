@@ -2,7 +2,8 @@
 
 The npm package ships the native engine compiled to WebAssembly
 (js/native/lazaret.wasm, 0.1.8), which holds translations of CPython code
-(its regex engine, shlex) and Unicode 13.0 data, so the package carries
+(shlex, the Final_Sigma rule, re's case equivalences; until P-16 its regex
+engine too) and Unicode 13.0 data, so the package carries
 CPython's LICENSE (js/LICENSE-PYTHON, the same file as rust/LICENSE-PYTHON),
 the engine's own NOTICE beside the module (js/native/NOTICE: rust/NOTICE,
 which says what was translated and what changed) and a NOTICE of its own,

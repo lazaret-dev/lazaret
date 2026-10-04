@@ -44,7 +44,7 @@ enum StrScan {
 
 fn str_scan_of(rx: &Regex) -> Option<StrScan> {
     let text = pystr::to_string(&rx.pattern);
-    let flags = rx.flags & !crate::pyre::constants::FLAG_UNICODE;
+    let flags = rx.flags & !crate::pyre::UNICODE;
     let dotall = flags == crate::pyre::DOTALL;
     for q in ['\'', '"', '`'] {
         let found = if text == format!(r"{q}(?:[^{q}\\\n]|\\.)*{q}?") && dotall {

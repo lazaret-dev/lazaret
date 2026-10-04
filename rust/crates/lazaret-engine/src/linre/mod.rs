@@ -273,6 +273,13 @@ impl Regex {
         }
     }
 
+    /// Strings one of which every match holds: those it scans for (the
+    /// need), or else those every match starts with (the lead). None when
+    /// it has none worth a scan.
+    pub fn required(&self) -> Option<&literal::LitSet> {
+        self.inner.need.as_ref().or(self.inner.lead.as_ref())
+    }
+
     /// The group number of a named group.
     pub fn group_index(&self, name: &str) -> Option<usize> {
         let n: Vec<u32> = name.chars().map(|c| c as u32).collect();

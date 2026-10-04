@@ -94,9 +94,11 @@ class LinreHandwrittenTests(unittest.TestCase):
             with self.subTest(pattern=src, flags=flags):
                 self.check(src, flags, rnd)
 
-    def test_astral_classes_as_pyre(self):
+    @unittest.skipUnless(sys.version_info >= (3, 13), "3.10-3.12 match an astral letter's case differently")
+    def test_astral_classes_as_re_313(self):
         # where Python versions differ (an astral letter in a class under
-        # re.I; an astral range under re.A and re.I), linre answers as pyre
+        # re.I; an astral range under re.A and re.I), linre answers as 3.13
+        # and later do (and as pyre's sre port did, before P-16 retired it)
         letters = ["\U00010400", "\U00010401", "\U00010427", "\U00010428", "\U0001044f", "\U0001F600", "\U0001E900",
                    "\U0001E922", "A", "a", "k", "K", "ſ", "s"]
         texts = ["".join(letters), "".join(reversed(letters))] + letters
@@ -109,9 +111,7 @@ class LinreHandwrittenTests(unittest.TestCase):
             src = "[" + ("^" if rnd.random() < 0.3 else "") + "".join(items) + "]+"
             flags = rnd.choice(["i", "ai", ""])
             with self.subTest(pattern=src, flags=flags):
-                args = {"pattern": src, "flags": flags, "texts": texts}
-                self.assertEqual(_native.call("linre.probe", args),
-                                 _native.call("pyre.probe", dict(args, backtracking=True)))
+                inputs.compare(self, src, flags, texts)
 
     def test_longer_texts(self):
         # matches far into a text, across the literal scans' and the DFAs'

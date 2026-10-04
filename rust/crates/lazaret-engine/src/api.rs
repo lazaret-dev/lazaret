@@ -70,7 +70,7 @@ pub const CALLS: &[&str] = &[
     // the Python parser (Python 3.13's ast trees)
     "py_parse",
     // linre, the linear-time regex engine the patterns run on
-    "linre.probe", "linre.check", "linre.fallbacks",
+    "linre.probe", "linre.check", "linre.refused",
     // the lexers (lex/): a text read once into its language's tokens
     "lex.tokens", "lex.structure",
     // phase 3: project mode's cross-file JavaScript taint (jsflow/)
@@ -501,9 +501,9 @@ fn dispatch(name: &str, args: &Value, text: &[u32]) -> Result<Value, CallError> 
         "pyre.probe" => probe(args, text)?,
         "linre.probe" => linre_probe(args, text)?,
         "linre.check" => linre_check(p, args),
-        // the patterns the engine built that linre would not run, since the
-        // last call (none, the tests hold)
-        "linre.fallbacks" => Value::Arr(crate::rxutil::take_fallbacks().iter().map(|s| Value::str(s)).collect()),
+        // the patterns the engine built that linre refused (each failed its
+        // call closed), since the last call: none, the tests hold
+        "linre.refused" => Value::Arr(crate::rxutil::take_refused().iter().map(|s| Value::str(s)).collect()),
         "shlex_split" => match hooks::shlex_split(text) {
             Some(t) => strs(&t),
             None => Value::Null,
@@ -1146,17 +1146,22 @@ fn opt_match(m: Option<pyre::Match>) -> Value {
 /// pyre.probe: every entry point of a pattern on each text of `texts` (or
 /// on the text), for the differential tests against Python's `re`:
 /// search / match / fullmatch at pos..endpos, finditer, findall, sub with a
-/// function and with a template, split. The pattern runs as the engine runs
-/// it (on linre where linre accepts it); `"backtracking": true`, on sre's
-/// backtracking matcher alone.
+/// function and with a template, split, as the engine's code calls them
+/// (pyre, on linre). A pattern Python rejects is `{"error"}`; one linre does
+/// not run, `{"error", "refused": true}`. (`"backtracking": true` asked for
+/// sre's matcher alone until P-16 retired it: an error now.)
 fn probe(args: &Value, text: &[u32]) -> Result<Value, CallError> {
     let pattern = arg_str(args, "pattern")?;
     let flags = opt_str(args, "flags").map(|f| pyre::flags_from_letters(&crate::pystr::to_string(&f))).unwrap_or(0);
-    let backtracking = matches!(args.get("backtracking"), Some(Value::Bool(true)));
-    let compiled = if backtracking { Regex::new_backtracking(&pattern, flags) } else { Regex::new_user(&pattern, flags) };
-    let rx = match compiled {
+    if matches!(args.get("backtracking"), Some(Value::Bool(true))) {
+        return Err(CallError::BadArgs("pyre.probe: there is no backtracking matcher (P-16: every pattern runs on linre)".into()));
+    }
+    let rx = match Regex::new(&pattern, flags) {
         Ok(rx) => rx,
-        Err(e) => return Ok(Value::obj(vec![("error", Value::str(&e.0))])),
+        Err(e) => {
+            let refused = e.0.starts_with("linre does not run it");
+            return Ok(Value::obj(vec![("error", Value::str(&e.0)), ("refused", Value::Bool(refused))]));
+        }
     };
     let texts: Vec<Vec<u32>> = match args.get("texts").and_then(|t| t.as_arr()) {
         Some(items) => items.iter().filter_map(|v| v.as_str().map(|s| s.to_vec())).collect(),

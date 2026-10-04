@@ -1,5 +1,5 @@
-"""linre's time grows linearly with the text; pyre's — the native engine's
-re, which backtracks as sre does — does not, on texts that make it backtrack.
+"""linre's time grows linearly with the text; Python's re's — sre, which
+backtracks — does not, on texts that make it backtrack.
 
 Patterns of the rule pack, each on a text of one piece repeated:
 - `_SVC_LAUNCHCTL_RE` on "launchctl" and " --a" k times, then " x": in
@@ -11,31 +11,42 @@ Patterns of the rule pack, each on a text of one piece repeated:
 - `_JSON_COLON_RE`, `_LD_CALLED_RE`, `_DL_JOIN_CHAIN_RE` on spaces: a
   leading `\\s*` (or `[ \\t]*`) runs to the end from every start: the square.
 
-Each is timed through the same call (pyre.probe and linre.probe: search,
-match, fullmatch, finditer, sub and split), the best of a few runs. pyre's
-time grows fourfold or more when the text doubles (exponential: when two
-pieces are added); linre's about twofold, its time on a text four times
-longer at most eight times its time, and on a million characters well
-under a second. Skipped where the native library is not built.
+Each is timed on the same calls (search, match, fullmatch, finditer, sub
+and split: re's own, and linre.probe's), the best of a few runs. re's time
+grows fourfold or more when the text doubles (exponential: when two pieces
+are added); linre's about twofold, its time on a text four times longer at
+most eight times its time, and on a million characters well under a
+second. (Until P-16 the backtracking side was pyre's port of sre, which
+the engine ran these patterns on before linre.) Skipped where the native
+library is not built.
 """
+import re
 import time
 import unittest
 
 from lazaret.scanner import _native
-from tests.architecture.test_rust_parity_regex import pack_patterns
+from tests.architecture.test_rust_parity_regex import flag_bits, pack_patterns
 
 LAUNCHCTL = ("_SVC_LAUNCHCTL_RE", lambda k: "launchctl" + " --a" * k + " x")
 SPACES = [(name, lambda n: " " * n) for name in ("_DD_PARAM_RE", "_JSON_COLON_RE", "_LD_CALLED_RE", "_DL_JOIN_CHAIN_RE")]
 
 
 def seconds(engine, src, flags, text, runs=3):
+    """The best of `runs` timings of the six calls on `text`, by Python's re
+    ("re") or by linre (linre.probe)."""
     best = float("inf")
+    if engine == "re":
+        rx = re.compile(src, flag_bits(flags))
+        for _ in range(runs):
+            start = time.perf_counter()
+            rx.search(text), rx.match(text), rx.fullmatch(text), list(rx.finditer(text))
+            rx.sub(lambda m: "<" + m.group() + ">", text), rx.split(text)
+            best = min(best, time.perf_counter() - start)
+        return best
     args = {"pattern": src, "flags": flags, "texts": [text]}
-    if engine == "pyre":
-        args["backtracking"] = True          # (sre's matcher: the engine runs these patterns on linre)
     for _ in range(runs):
         start = time.perf_counter()
-        got = _native.call(engine + ".probe", args)
+        got = _native.call("linre.probe", args)
         best = min(best, time.perf_counter() - start)
     assert "error" not in got, got
     return best
@@ -53,28 +64,27 @@ class LinreLinearTimeTests(unittest.TestCase):
         # does not pass for growth
         return [seconds(engine, src, flags, make(n), runs=7 if engine == "linre" else 3) for n in sizes]
 
-    def test_pyre_backtracks_exponentially_linre_does_not(self):
+    def test_re_backtracks_exponentially_linre_does_not(self):
         name, make = LAUNCHCTL
-        p = self.grows("pyre", name, make, [10, 12, 14])
-        self.assertGreater(p[2] / p[0], 8, f"pyre {p}")             # 2^k: fourfold for each two pieces
+        p = self.grows("re", name, make, [10, 12, 14])
+        self.assertGreater(p[2] / p[0], 8, f"re {p}")               # 2^k: fourfold for each two pieces
         lin = self.grows("linre", name, make, [40_000, 160_000])
         self.assertLess(lin[1] / lin[0], 8, f"linre {lin}")        # 4x the text: about 4x the time
         self.assertLess(self.grows("linre", name, make, [14])[0], p[2])
 
-    def test_pyre_backtracks_polynomially_linre_does_not(self):
+    def test_re_backtracks_polynomially_linre_does_not(self):
         for name, make in SPACES:
             with self.subTest(pattern=name):
-                # (the cube: pyre takes 0.2 s on 400; the square, 1 s on 8,000: long enough that a
-                # loaded machine's noise does not hide the growth)
+                # (long enough that a loaded machine's noise does not hide the growth)
                 small = 100 if name == "_DD_PARAM_RE" else 2000
-                p = self.grows("pyre", name, make, [small, 4 * small])
-                self.assertGreater(p[1] / p[0], 10, f"pyre {p}")    # the square: 16x, the cube: 64x
+                p = self.grows("re", name, make, [small, 4 * small])
+                self.assertGreater(p[1] / p[0], 10, f"re {p}")      # the square: 16x, the cube: 64x
                 lin = self.grows("linre", name, make, [200_000, 800_000])
                 self.assertLess(lin[1] / lin[0], 8, f"linre {lin}")
                 self.assertLess(self.grows("linre", name, make, [4 * small])[0] * 5, p[1])
 
     def test_a_million_characters(self):
-        # what pyre would take hours on (by the growth above), linre reads at once
+        # what re would take hours on (by the growth above), linre reads at once
         for name, make in [(LAUNCHCTL[0], lambda n: LAUNCHCTL[1](n // 4))] + SPACES:
             with self.subTest(pattern=name):
                 src, flags = self.pack[name]

@@ -28,8 +28,8 @@ BATCH = 1500                     # calls per crossing of the boundary
 UPDATE = "LAZARET_SNAPSHOT_UPDATE"
 
 
-class Fallback(AssertionError):
-    """The engine built a pattern linre would not run (P-16)."""
+class Refused(AssertionError):
+    """The engine built a pattern linre refused (P-16)."""
 
 
 def run(calls, threads=2):
@@ -37,16 +37,16 @@ def run(calls, threads=2):
     batch's own result ({"ok": …}, or {"error": …} where the call failed).
 
     Every pattern the engine builds on the way must be one linre runs, in
-    linear time (P-16): one it had to answer on sre's matcher instead is in
-    linre.fallbacks, and fails the run that built it."""
-    _native.call("linre.fallbacks", {})
+    linear time (P-16): one it refused failed its call closed, is in
+    linre.refused, and fails the run that built it."""
+    _native.call("linre.refused", {})
     out = []
     for i in range(0, len(calls), BATCH):
         part = [[c, a, t] for c, a, t in calls[i:i + BATCH]]
         out.extend(_native.call("batch", {"calls": part, "threads": threads}))
-    fallbacks = _native.call("linre.fallbacks", {})
-    if fallbacks:
-        raise Fallback("patterns linre does not run, built while running the set: " + "; ".join(fallbacks[:5]))
+    refused = _native.call("linre.refused", {})
+    if refused:
+        raise Refused("patterns linre refused, built while running the set: " + "; ".join(refused[:5]))
     return out
 
 

@@ -479,6 +479,23 @@ impl LitSet {
         self.shortest
     }
 
+    /// The ASCII characters a string can start with (for a caller's own
+    /// scan: scan_file's per-line gates).
+    pub fn first_ascii(&self) -> u128 {
+        self.by_first.iter().enumerate().filter(|(_, v)| !v.is_empty()).fold(0u128, |m, (c, _)| m | (1u128 << c))
+    }
+
+    /// Can a string start with a character past ASCII?
+    pub fn first_other(&self) -> bool {
+        self.first_other
+    }
+
+    /// Does one of the strings start at text[i] and end by `end`?
+    #[inline]
+    pub fn starts_at(&self, text: &[u32], i: usize, end: usize) -> bool {
+        self.at(text, i, end)
+    }
+
     /// The strings, for a person (`|` between them, `[…]` for a unit of
     /// several characters).
     pub fn describe(&self) -> String {

@@ -604,28 +604,65 @@ fn a_search_by_pairs_answers_as_the_scan_does() {
 
 // ------------------------------------------------- unbounded lookaheads
 
-/// A text for a message.
-fn show(text: &[u32]) -> String {
-    text.iter().map(|&c| char::from_u32(c).unwrap_or('\u{FFFD}')).collect()
+/// linre's answers on a text, in a window: search, match, fullmatch, then
+/// finditer's matches (at most 300).
+fn answers(re: &Regex, text: &[u32], pos: isize, endpos: isize) -> Vec<View> {
+    let mut out = vec![view(re.search_at(text, pos, endpos)), view(re.match_at(text, pos, endpos)), view(re.fullmatch_at(text, pos, endpos))];
+    out.extend(re.finditer_at(text, pos, endpos).take(300).map(|m| view(Some(m))));
+    out
 }
 
-/// A match of sre's own matcher (pyre, backtracking) as a View.
-fn view_sre(m: Option<crate::pyre::Match>, groups: usize) -> View {
-    m.map(|m| (m.start() as isize, m.end() as isize, m.lastindex, (1..=groups).map(|k| (m.start_of(k), m.end_of(k))).collect()))
+/// A digest of answers (FNV-1a over their numbers). The tests below hold
+/// linre to answers recorded from sre's own matcher (the backtracking
+/// matcher pyre held, until P-16's second part retired it) on the same
+/// seeded inputs: each test's digest is the one those answers gave.
+/// Python's `re` holds the same shapes in test_linre_e.py, where a
+/// difference shows.
+struct Digest(u64);
+
+impl Digest {
+    fn new() -> Digest {
+        Digest(0xcbf2_9ce4_8422_2325)
+    }
+
+    fn num(&mut self, x: i64) {
+        for b in x.to_le_bytes() {
+            self.0 ^= u64::from(b);
+            self.0 = self.0.wrapping_mul(0x0100_0000_01b3);
+        }
+    }
+
+    fn views(&mut self, vs: &[View]) {
+        self.num(vs.len() as i64);
+        for v in vs {
+            match v {
+                None => self.num(-7),
+                Some((a, b, last, groups)) => {
+                    for x in [*a, *b, *last, groups.len() as isize] {
+                        self.num(x as i64);
+                    }
+                    for &(x, y) in groups {
+                        self.num(x as i64);
+                        self.num(y as i64);
+                    }
+                }
+            }
+        }
+    }
 }
 
-/// linre answers as sre's backtracking matcher (pyre.probe's) does: search,
-/// match, fullmatch and finditer, in a window.
-fn agree_with_sre(src: &str, re: &Regex, sre: &crate::pyre::Regex, text: &[u32], pos: isize, endpos: isize) {
-    let g = re.groups();
-    assert_eq!(g, sre.groups, "{:?}", src);
-    let ctx = || format!("{:?} on {:?} [{}, {}]", src, show(text), pos, endpos);
-    assert_eq!(view(re.search_at(text, pos, endpos)), view_sre(sre.search_at(text, pos, endpos), g), "search: {}", ctx());
-    assert_eq!(view(re.match_at(text, pos, endpos)), view_sre(sre.match_at(text, pos, endpos), g), "match: {}", ctx());
-    assert_eq!(view(re.fullmatch_at(text, pos, endpos)), view_sre(sre.fullmatch_at(text, pos, endpos), g), "fullmatch: {}", ctx());
-    let got: Vec<View> = re.finditer_at(text, pos, endpos).take(300).map(|m| view(Some(m))).collect();
-    let want: Vec<View> = sre.finditer_at(text, pos, endpos).take(300).map(|m| view_sre(Some(m), g)).collect();
-    assert_eq!(got, want, "finditer: {}", ctx());
+/// The digest a test recorded from sre's answers.
+fn recorded(name: &str, got: u64, want: u64) {
+    assert_eq!(got, want, "{}: linre's answers are not the ones recorded from sre's (test_linre_e.py compares them with re's)", name);
+}
+
+/// linre's answers on a text, in a window, into `d`; and the matchers'
+/// own agreement (`agree`: the public calls, the Pike VM alone, the
+/// backtracker alone).
+fn agree_recorded(src: &str, re: &Regex, text: &[u32], pos: isize, endpos: isize, d: &mut Digest) {
+    let _ = src;
+    agree(re, text, pos, endpos);
+    d.views(&answers(re, text, pos, endpos));
 }
 
 /// The shapes of the pack's lookaheads of unbounded width, and others.
@@ -680,35 +717,39 @@ fn look_text(rng: &mut Rng, most: usize) -> Vec<u32> {
 
 /// `f` with the memoized lookaheads walked (as a search runs them until
 /// their walks have cost enough), then swept the first time each is tried
-/// (`looks::sweep`): the same answers both ways.
-fn walked_and_swept(mut f: impl FnMut(bool)) {
+/// (`looks::sweep`): the same answers both ways (`f`'s digest).
+fn walked_and_swept(mut f: impl FnMut(&mut Digest)) -> u64 {
+    let mut out = Vec::new();
     for at_once in [false, true] {
         super::looks::SWEEP_AT_ONCE.with(|s| s.set(at_once));
-        f(at_once);
+        let mut d = Digest::new();
+        f(&mut d);
+        out.push(d.0);
     }
     super::looks::SWEEP_AT_ONCE.with(|s| s.set(false));
+    assert_eq!(out[0], out[1], "walked and swept, other answers");
+    out[0]
 }
 
 #[test]
 fn unbounded_lookaheads_answer_as_sre() {
-    walked_and_swept(|_| {
+    let d = walked_and_swept(|d| {
         let mut rng = Rng(20261004);
         for &(src, flags) in UNBOUNDED_LOOKAHEADS {
             let re = Regex::compile(src, flags).unwrap_or_else(|e| panic!("{:?}: {}", src, e));
-            let cps: Vec<u32> = src.chars().map(|c| c as u32).collect();
-            let sre = crate::pyre::Regex::new_backtracking(&cps, flags).unwrap();
             for k in 0..400 {
                 let t = look_text(&mut rng, if k < 300 { 8 } else { 30 });
                 let n = t.len() as isize;
-                agree_with_sre(src, &re, &sre, &t, 0, n);
+                agree_recorded(src, &re, &t, 0, n, d);
                 if k % 4 == 0 {
                     let a = rng.below(t.len() + 1) as isize;
                     let b = rng.below(t.len() + 2) as isize;
-                    agree_with_sre(src, &re, &sre, &t, a, b);
+                    agree_recorded(src, &re, &t, a, b, d);
                 }
             }
         }
     });
+    recorded("unbounded_lookaheads", d, 0xbcb5_466d_a0bb_673e);
 }
 
 /// A random pattern with lookaheads of unbounded width in it.
@@ -740,7 +781,7 @@ fn random_lookahead_pattern(rng: &mut Rng, depth: usize) -> String {
 
 #[test]
 fn random_unbounded_lookaheads_answer_as_sre() {
-    walked_and_swept(|_| {
+    let d = walked_and_swept(|d| {
         let mut rng = Rng(4242);
         let mut compiled = 0;
         for _ in 0..3000 {
@@ -750,25 +791,21 @@ fn random_unbounded_lookaheads_answer_as_sre() {
                 Ok(re) => re,
                 Err(_) => continue,
             };
-            let cps: Vec<u32> = src.chars().map(|c| c as u32).collect();
-            let sre = match crate::pyre::Regex::new_backtracking(&cps, 0) {
-                Ok(r) => r,
-                Err(_) => continue,
-            };
             compiled += 1;
             for k in 0..8 {
                 let t = random_text(&mut rng, 7);
                 let n = t.len() as isize;
-                agree_with_sre(&src, &re, &sre, &t, 0, n);
+                agree_recorded(&src, &re, &t, 0, n, d);
                 if k % 2 == 0 {
                     let a = rng.below(t.len() + 1) as isize;
                     let b = rng.below(t.len() + 2) as isize;
-                    agree_with_sre(&src, &re, &sre, &t, a, b);
+                    agree_recorded(&src, &re, &t, a, b, d);
                 }
             }
         }
         assert!(compiled > 1500, "{}", compiled);
     });
+    recorded("random_unbounded_lookaheads", d, 0xc8c7_7a04_588c_69fc);
 }
 
 /// The memos (and sweeps) a finditer's searches share are about its own
@@ -784,9 +821,8 @@ fn a_finditer_never_reads_what_was_learnt_of_another_text() {
         // the same buffer, the b made a c: no walk finds one, every a matches
         let n = t.len();
         t[n - 1] = 0x63;
-        assert_eq!(re.finditer(&t).count(), 200);
-        let sre = crate::pyre::Regex::new_backtracking(&cps(r"a(?![^b]*b)"), 0).unwrap();
-        agree_with_sre(r"a(?![^b]*b)", &re, &sre, &t, 0, n as isize);
+        let spans: Vec<(usize, usize)> = re.finditer(&t).map(|m| m.span()).collect();
+        assert_eq!(spans, (0..200).map(|k| (2 * k, 2 * k + 1)).collect::<Vec<_>>());
     });
 }
 
@@ -806,19 +842,21 @@ fn lookaheads_of_many_sets_are_swept() {
         t.extend(cps("baaaaaaaaaaaaa"));
         t
     };
+    let mut all = Digest::new();
     for &src in cases {
         let re = Regex::compile(src, 0).unwrap();
-        let sre = crate::pyre::Regex::new_backtracking(&cps(src), 0).unwrap();
-        let mut rng = Rng(77);
         // (3,000 characters: the walks cost enough to be swept part of the
         // way through a finditer)
-        walked_and_swept(|_| {
+        let d = walked_and_swept(|d| {
+            let mut rng = Rng(77);
             for _ in 0..3 {
                 let t = ab(&mut rng, 3000);
-                agree_with_sre(src, &re, &sre, &t, 0, t.len() as isize);
-                agree_with_sre(src, &re, &sre, &t, 1000, 2500);
+                agree_recorded(src, &re, &t, 0, t.len() as isize, d);
+                agree_recorded(src, &re, &t, 1000, 2500, d);
             }
         });
+        all.num(d as i64);
+        let mut rng = Rng(78);
         let (small, large) = (ab(&mut rng, 20_000), ab(&mut rng, 80_000));
         let mut count = (0, 0);
         let t1 = timed(|| count.0 = re.finditer(&small).count());
@@ -828,6 +866,7 @@ fn lookaheads_of_many_sets_are_swept() {
         assert!(t4 < 8.0 * t1 + 0.05, "{:?}: {:.4}s for 20k, {:.4}s for 80k", src, t1, t4);
         assert!(t4 < 2.0, "{:?} took {:.3}s", src, t4);
     }
+    recorded("lookaheads_of_many_sets", all.0, 0xd567_2083_f902_9fe5);
 }
 
 /// Seconds a closure takes (the best of three).
@@ -921,10 +960,9 @@ const BACKREF_PIECES: &[&str] = &[
 #[test]
 fn one_character_backreferences_answer_as_sre() {
     let mut rng = Rng(9);
+    let mut d = Digest::new();
     for &(src, flags) in CHAR_BACKREFS {
         let re = Regex::compile(src, flags).unwrap_or_else(|e| panic!("{:?}: {}", src, e));
-        let cps: Vec<u32> = src.chars().map(|c| c as u32).collect();
-        let sre = crate::pyre::Regex::new_backtracking(&cps, flags).unwrap();
         for k in 0..500 {
             let n = rng.below(if k < 400 { 10 } else { 30 });
             let mut t = Vec::new();
@@ -932,13 +970,14 @@ fn one_character_backreferences_answer_as_sre() {
                 t.extend(rng.pick(BACKREF_PIECES).chars().map(|c| c as u32));
             }
             let len = t.len() as isize;
-            agree_with_sre(src, &re, &sre, &t, 0, len);
+            agree_recorded(src, &re, &t, 0, len, &mut d);
             if k % 5 == 0 {
                 let a = rng.below(t.len() + 1) as isize;
-                agree_with_sre(src, &re, &sre, &t, a, len);
+                agree_recorded(src, &re, &t, a, len, &mut d);
             }
         }
     }
+    recorded("one_character_backreferences", d.0, 0xae4b_cc42_ed1c_2142);
     for &(src, flags) in STILL_REFUSED {
         match Regex::compile(src, flags) {
             Err(e) => assert!(e.refused && e.msg.contains("backreference"), "{:?}: {}", src, e),

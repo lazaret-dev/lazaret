@@ -11,32 +11,36 @@ thread_local! {
     static CACHE: RefCell<HashMap<(Vec<u32>, u32, bool), Rc<Regex>>> = RefCell::new(HashMap::new());
 }
 
-/// Patterns the engine built that linre would not run (each compiled on
-/// sre's matcher instead): none should be (linre.fallbacks, which the tests
-/// read after their scans). At most FALLBACKS_KEPT are kept.
-static FALLBACKS: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
-const FALLBACKS_KEPT: usize = 64;
+/// Patterns the engine built that linre refused: none should be (the tests
+/// read `linre.refused` after their scans). At most REFUSED_KEPT are kept.
+static REFUSED: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+const REFUSED_KEPT: usize = 64;
 
-/// The patterns linre would not run since the last call (and forget them).
-pub fn take_fallbacks() -> Vec<String> {
-    FALLBACKS.lock().map(|mut f| std::mem::take(&mut *f)).unwrap_or_default()
+/// The patterns linre refused since the last call (and forget them).
+pub fn take_refused() -> Vec<String> {
+    REFUSED.lock().map(|mut f| std::mem::take(&mut *f)).unwrap_or_default()
 }
 
 fn never() -> Regex {
-    Regex::compile("(?!)", 0).unwrap_or_else(|_| panic!("pyre cannot compile (?!)"))
+    Regex::compile("(?!)", 0).unwrap_or_else(|_| panic!("linre cannot compile (?!)"))
 }
 
 /// re.compile(src, flags) for a pattern built at run time (names escaped
 /// into pattern text core composes), on linre. A pattern Python rejects is
 /// one that never matches (core's never fail: they escape what they
-/// insert); one linre would not run is answered by sre's matcher and noted
-/// (take_fallbacks), so a pattern the tests missed is still answered right.
+/// insert). One linre refuses (none of the corpora's makes one: its names
+/// would have to be tens of thousands of characters) fails its call
+/// closed: the call's work budget is spent, so the call answers nothing
+/// and both packages make the file SC-TRUNCATED, as a hostile text that
+/// spends the budget does, rather than a pattern that silently never
+/// matches. It is noted (take_refused) and not kept, so every call that
+/// builds it fails.
 pub fn dynamic(src: Vec<u32>, flags: u32) -> Rc<Regex> {
     compiled(src, flags, false)
 }
 
-/// The same for a pattern a user wrote (a taint configuration's): linre's
-/// when it runs it, sre's otherwise, and not noted.
+/// The same for a pattern a user wrote (a taint configuration's, which
+/// taintspec holds to what linre runs): one linre refuses never matches.
 pub fn dynamic_user(src: Vec<u32>, flags: u32) -> Rc<Regex> {
     compiled(src, flags, true)
 }
@@ -51,28 +55,23 @@ fn compiled(src: Vec<u32>, flags: u32, user: bool) -> Rc<Regex> {
         if c.len() >= 512 {
             c.clear();
         }
-        let rx = if user {
-            Regex::new_user(&key.0, flags).unwrap_or_else(|_| never())
-        } else {
-            match Regex::new(&key.0, flags) {
-                Ok(rx) => rx,
-                Err(e) => match Regex::new_user(&key.0, flags) {
-                    Ok(rx) => {
-                        let what = format!("{}: {}", crate::pystr::to_string(&key.0), e.0);
-                        // (LAZARET_LINRE_FALLBACKS: say so on stderr too, for the gates' runs)
-                        if std::env::var_os("LAZARET_LINRE_FALLBACKS").is_some() {
-                            eprintln!("LINRE-FALLBACK {}", what);
-                        }
-                        if let Ok(mut f) = FALLBACKS.lock() {
-                            if f.len() < FALLBACKS_KEPT {
-                                f.push(what);
-                            }
-                        }
-                        rx
+        let rx = match Regex::new(&key.0, flags) {
+            Ok(rx) => rx,
+            Err(e) if !user && e.0.starts_with("linre does not run it") => {
+                let what = format!("{}: {}", crate::pystr::to_string(&key.0), e.0);
+                // (LAZARET_LINRE_REFUSED: say so on stderr too, for the gates' runs)
+                if std::env::var_os("LAZARET_LINRE_REFUSED").is_some() {
+                    eprintln!("LINRE-REFUSED {}", what);
+                }
+                if let Ok(mut f) = REFUSED.lock() {
+                    if f.len() < REFUSED_KEPT {
+                        f.push(what);
                     }
-                    Err(_) => never(),
-                },
+                }
+                crate::budget::spend(u64::MAX);
+                return Rc::new(never());
             }
+            Err(_) => never(),
         };
         let rx = Rc::new(rx);
         c.insert(key, rx.clone());

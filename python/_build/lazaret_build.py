@@ -101,10 +101,10 @@ METADATA = {
 REQUIRES_DIST: list[str] = []
 
 # Every wheel carries the native engine, and the sdist its source, part of
-# which is a Rust translation of CPython's regular expression engine and
-# shlex (rust/NOTICE), distributed under CPython's license: so each carries
-# CPython's LICENSE and the notice, as license files, and says so in its
-# license expression.
+# which is a Rust translation of CPython code (shlex, the Final_Sigma rule,
+# re's extra case equivalences; rust/NOTICE), distributed under CPython's
+# license: so each carries CPython's LICENSE and the notice, as license
+# files, and says so in its license expression.
 NATIVE_LICENSE_EXPRESSION = "Apache-2.0 AND Python-2.0.1 AND Unicode-3.0"
 NATIVE_LICENSE_FILES = {"LICENSE-PYTHON": RUST / "LICENSE-PYTHON", "NOTICE": RUST / "NOTICE"}
 

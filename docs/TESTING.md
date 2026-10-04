@@ -297,7 +297,7 @@ the right answer. See `test_review_received_code.py::test_bounded_work` and
 `::test_new_sinks_stay_bounded` for the shape. The engine's patterns run on
 linre, in time linear in the text whatever it holds (P-16): a pattern linre
 would not run fails `test_linre` (the pack's) or the recorded-output runs
-(one the engine builds as it scans, through `linre.fallbacks`), so write it
+(one the engine builds as it scans, through `linre.refused`), so write it
 another way (`docs/RUST_ENGINE.md` §14 has the ways it was done). What a
 detector reads around a match still needs its own bound. The npm package's
 remaining JavaScript regexes are the tighter constraint — V8 overflows its

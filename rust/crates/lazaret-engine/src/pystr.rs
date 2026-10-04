@@ -107,12 +107,12 @@ pub fn find_str(h: &[u32], needle: &str, start: usize) -> Option<usize> {
             return None;
         }
         // (each place the needle's rarest character is, in order: pyre/scan.rs)
-        let at = crate::pyre::scan::rarest(nb);
+        let at = crate::scan::rarest(nb);
         let c = nb[at] as u32;
         let stop = last_start + at + 1;
         let mut p = start + at;
         while p < stop {
-            let q = crate::pyre::scan::find1(h, p, stop, c)?;
+            let q = crate::scan::find1(h, p, stop, c)?;
             if needle_eq(h, q - at, nb) {
                 return Some(q - at);
             }
@@ -154,7 +154,7 @@ pub fn find_in(h: &[u32], n: &[u32], start: usize, end: usize) -> Option<usize> 
         return None; // (the text lacks one of its pairs: textgate.rs)
     }
     // (each place the needle's rarest character is, in order: pyre/scan.rs)
-    let lit = crate::pyre::scan::Literal::new(n);
+    let lit = crate::scan::Literal::new(n);
     lit.find(h, n, start, end)
 }
 

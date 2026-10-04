@@ -460,7 +460,7 @@ impl<'p> Xf<'p> {
                 .all(|n| p.strs(n).iter().all(|x| !x.is_empty() && !x.contains(&c('\n')))),
             py_body_plain: ["'", "\""].iter().all(|q| {
                 let rx = p.map_re("_XF_PY_BODY_RE", q);
-                rx.pattern == u(&format!(r"(?:[^\\{}]|\\.)*", q)) && rx.flags & !crate::pyre::constants::FLAG_UNICODE == 0
+                rx.pattern == u(&format!(r"(?:[^\\{}]|\\.)*", q)) && rx.flags & !crate::pyre::UNICODE == 0
             }),
             redact,
             neumaier,
@@ -1648,7 +1648,7 @@ fn line_matches<'s>(rx: &'s Regex, text: &'s [u32], word: &str) -> Vec<crate::py
     let mut head = u(r"^[ \t]*");
     head.extend(u(word));
     head.extend(u(r"[ \t]+"));
-    if rx.flags & crate::pyre::constants::FLAG_MULTILINE == 0 || !rx.pattern.starts_with(&head) {
+    if rx.flags & crate::pyre::MULTILINE == 0 || !rx.pattern.starts_with(&head) {
         return rx.finditer(text).collect();
     }
     let w = u(word);
@@ -1668,7 +1668,7 @@ fn line_matches<'s>(rx: &'s Regex, text: &'s [u32], word: &str) -> Vec<crate::py
                 }
             }
         }
-        match crate::pyre::scan::find1(text, line, text.len(), c('\n')) {
+        match crate::scan::find1(text, line, text.len(), c('\n')) {
             Some(nl) => line = nl + 1,
             None => break,
         }

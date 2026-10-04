@@ -27,6 +27,7 @@ import unittest
 from tests import _support
 from lazaret.scanner import core as lazaret
 from lazaret.scanner import flow as lazaret_flow
+from lazaret.scanner import _native
 from lazaret.scanner import taintspec
 
 PY = sys.executable or "python3"
@@ -251,6 +252,22 @@ class ValidatorUnit(unittest.TestCase):
         for pat in (r"mylib\.read_untrusted", r"request\.(args|form)", r"\bexec_\w+\s*\(", "(a|b)+"):
             with self.subTest(pat=pat):
                 self.assertIsNotNone(taintspec.check_pattern(pat)[0])
+
+    @unittest.skipUnless(_native.available(), "native engine not built")
+    def test_patterns_linre_does_not_run_are_rejected(self):
+        # the static check passes these, but linre, which runs a config's
+        # patterns in the cross-file taint passes, does not (P-16: there is
+        # no backtracking matcher to run them): rejected with its reason
+        cases = [("(?:a?)*b", "empty string"), ("(?<=a{1001})b", "lookbehind wider than 1000"),
+                 (r"\w{40000}", "too large")]
+        if sys.version_info >= (3, 11):
+            cases.append(("(?>ab)c", "atomic group"))
+        for pat, why in cases:
+            with self.subTest(pat=pat):
+                gp, reason = taintspec.check_pattern(pat)
+                self.assertIsNone(gp)
+                self.assertIn("linear-time regex engine does not run it", reason)
+                self.assertIn(why, reason)
 
     def test_match_text_is_capped(self):
         gp, _ = taintspec.check_pattern("needle")

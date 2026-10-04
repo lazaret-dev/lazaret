@@ -287,8 +287,9 @@ wasm32-unknown-unknown`, and writes `native/lazaret.wasm` from the
 repository's `rust/`), then `npm test` (built-in `node --test` runner).
 
 Licensed under Apache-2.0, with two parts that are not Lazaret's own (see
-`NOTICE`): the native engine's regular expression engine and shell tokenizer
-are translations of CPython's (`native/NOTICE` lists them), under CPython's
+`NOTICE`): the native engine's shell tokenizer, its Final_Sigma rule of
+`str.lower()` and its table of `re`'s extra case equivalences are
+translations of CPython's (`native/NOTICE` lists them), under CPython's
 license (`LICENSE-PYTHON`), and the Unicode 13.0 and codec tables are
 Unicode data, under the Unicode License v3 (`LICENSE-UNICODE`). The
 package's license is `Apache-2.0 AND Python-2.0.1 AND Unicode-3.0`.

@@ -584,7 +584,7 @@ enum NameTokens<'t> {
 impl<'t> NameTokens<'t> {
     fn of(p: &'t Pack, text: &'t [u32], lo: usize, hi: usize) -> NameTokens<'t> {
         let re = p.re("_LD_NAME_TOKEN_RE");
-        if pystr::eq(&re.pattern, NAME_TOKEN_SRC) && re.flags == crate::pyre::constants::FLAG_UNICODE {
+        if pystr::eq(&re.pattern, NAME_TOKEN_SRC) && re.flags == crate::pyre::UNICODE {
             NameTokens::Hand { text, i: lo, hi: hi.min(text.len()) }
         } else {
             NameTokens::Pattern(re.finditer_at(text, lo as isize, hi as isize))

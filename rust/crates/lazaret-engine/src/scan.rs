@@ -1,9 +1,9 @@
-//! Finding characters fast: the scans a search runs before it matches (a
-//! literal prefix, the strings a match must hold or start with: literal.rs).
-//! A scan looks for the character of a string that is rarest in source text
-//! (a static guess: the choice changes only how fast, never what is found),
-//! sixteen characters at a time, and checks the string only where it finds
-//! one.
+//! Finding characters and strings fast, for `pystr`'s `find` and `in` (and
+//! the cross-file follower's line scans). A scan looks for the character of
+//! a string that is rarest in source text (a static guess: the choice
+//! changes only how fast, never what is found), sixteen characters at a
+//! time, and checks the string only where it finds one. (linre has its own
+//! scans for the strings its patterns need: linre/literal.rs.)
 
 /// How common an ASCII character is in source code (a guess; higher is more
 /// common). Characters outside ASCII are never anchors.
@@ -33,77 +33,7 @@ fn freq(c: u32) -> u32 {
     }
 }
 
-/// The cost of scanning for any of the ASCII characters in `mask`.
-pub fn mask_cost(mask: u128) -> u32 {
-    let mut cost = 0;
-    let mut m = mask;
-    while m != 0 {
-        cost += freq(m.trailing_zeros());
-        m &= m - 1;
-    }
-    cost
-}
-
 const W: usize = 16;
-
-/// What a scan looks for: one to three characters, or any of a set of ASCII
-/// characters.
-#[derive(Clone, Debug)]
-pub enum Chars {
-    One(u32),
-    Two(u32, u32),
-    Three(u32, u32, u32),
-    Mask(Box<[bool; 128]>),
-}
-
-impl Chars {
-    /// For the ASCII characters of `mask` (not empty).
-    pub fn of_mask(mask: u128) -> Chars {
-        let mut list = Vec::new();
-        let mut m = mask;
-        while m != 0 {
-            list.push(m.trailing_zeros());
-            m &= m - 1;
-        }
-        match list[..] {
-            [a] => Chars::One(a),
-            [a, b] => Chars::Two(a, b),
-            [a, b, c] => Chars::Three(a, b, c),
-            _ => {
-                let mut t = Box::new([false; 128]);
-                for c in list {
-                    t[c as usize] = true;
-                }
-                Chars::Mask(t)
-            }
-        }
-    }
-
-    #[cfg(test)]
-    fn has(&self, c: u32) -> bool {
-        match self {
-            Chars::One(a) => c == *a,
-            Chars::Two(a, b) => c == *a || c == *b,
-            Chars::Three(a, b, d) => c == *a || c == *b || c == *d,
-            Chars::Mask(t) => c < 128 && t[c as usize],
-        }
-    }
-
-    /// The first i in [from, to) where s[i] is one of the characters.
-    #[inline]
-    pub fn find(&self, s: &[u32], from: usize, to: usize) -> Option<usize> {
-        let to = to.min(s.len());
-        if from >= to {
-            return None;
-        }
-        match self {
-            Chars::One(a) => find_by(s, from, to, |c| c == *a),
-            Chars::Two(a, b) => find_by(s, from, to, |c| (c == *a) | (c == *b)),
-            Chars::Three(a, b, d) => find_by(s, from, to, |c| (c == *a) | (c == *b) | (c == *d)),
-            Chars::Mask(t) => find_by(s, from, to, |c| (c < 128) & t[(c & 127) as usize]),
-        }
-    }
-}
 
 #[inline(always)]
 fn find_by(s: &[u32], from: usize, to: usize, hit: impl Fn(u32) -> bool) -> Option<usize> {
@@ -212,11 +142,9 @@ mod tests {
     fn finds_what_a_plain_scan_finds() {
         let text = cps(&format!("{}export xx exp export{}", "a".repeat(37), "é".repeat(20)));
         for (from, to) in [(0, text.len()), (38, text.len()), (0, 40), (41, 60), (70, 72)] {
-            for chars in [Chars::of_mask(1 << b'x'), Chars::of_mask((1 << b'x') | (1 << b'p')),
-                          Chars::of_mask((1 << b'x') | (1 << b'p') | (1 << b'q')),
-                          Chars::of_mask((1 << b'x') | (1 << b'p') | (1 << b'q') | (1 << b'z'))] {
-                let want = (from..to.min(text.len())).find(|&i| chars.has(text[i]));
-                assert_eq!(chars.find(&text, from, to), want, "{:?} {}..{}", chars, from, to);
+            for c in [b'x', b'p', b'q'] {
+                let want = (from..to.min(text.len())).find(|&i| text[i] == u32::from(c));
+                assert_eq!(find1(&text, from, to, u32::from(c)), want, "{} {}..{}", c as char, from, to);
             }
             for lit in ["export", "xx", "exp", "é", "aex", "export xx exp export"] {
                 let lit = cps(lit);

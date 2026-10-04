@@ -25,14 +25,9 @@ FILE_EXPRESSION = "Apache-2.0 AND Python-2.0.1"
 PSF = "Copyright (c) 2001 Python Software Foundation; All Rights Reserved"
 # CPython v3.14.0's LICENSE: replace it only with another release's LICENSE, whole.
 LICENSE_PYTHON_SHA256 = "b0e25a78cffb43f4d92de8b61ccfa1f1f98ecbc22330b54b5251e7b6ba010231"
-# file -> the Secret Labs line of what it translates (None: CPython's notice only)
+# file -> the lines of its original's notice it repeats (none: CPython's notice only). P-16 retired
+# pyre/, the translation of sre, whose files carried the SRE library's notices (Secret Labs AB, CNRI)
 TRANSLATED = {
-    "pyre/parser.rs": ["Copyright (c) 1998-2001 by Secret Labs AB.  All rights reserved."],
-    "pyre/compiler.rs": ["Copyright (c) 1997-2001 by Secret Labs AB.  All rights reserved."],
-    "pyre/constants.rs": ["Copyright (c) 1998-2001 by Secret Labs AB.  All rights reserved."],
-    "pyre/matcher.rs": ["Copyright (c) 1997-2001 by Secret Labs AB.  All rights reserved."],
-    "pyre/mod.rs": ["Copyright (c) 1998-2001 by Secret Labs AB.  All rights reserved.",
-                    "Copyright (c) 1997-2001 by Secret Labs AB.  All rights reserved."],
     "hooks.rs": [],
     "unicode.rs": [],
 }
@@ -72,11 +67,13 @@ class NoticeTests(unittest.TestCase):
         self.assertIn(EXPRESSION, notice)
         listed = set(re.findall(r"crates/lazaret-engine/src/(\S+\.rs)", notice))
         self.assertEqual(listed, set(TRANSLATED) | {"generated/unicode13.rs"})
-        for source in ("Lib/re/__init__.py", "Lib/re/_parser.py", "Lib/re/_compiler.py", "Lib/re/_constants.py",
-                       "Modules/_sre/sre_lib.h", "Modules/_sre/sre.c", "Objects/unicodeobject.c"):
+        for source in ("Objects/unicodeobject.c",):
             with self.subTest(source=source):
                 self.assertIn(f"\n{source}", notice)                  # its notices are repeated
         self.assertIn("Summary of the changes", notice)
+        # (no SRE notice is left: the translation of sre is retired, and with it the SRE library's terms)
+        self.assertNotIn(CNRI.replace("\n", "\n    # "), notice)
+        self.assertNotIn("pyre/", notice.split("Lazaret's own")[0])
 
     def test_each_translated_file_carries_its_notices(self):
         for name, lines in TRANSLATED.items():

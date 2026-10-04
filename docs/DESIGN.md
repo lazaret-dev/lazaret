@@ -99,9 +99,8 @@ credentials).
   everything they read — `scan_file` in dependency mode, findings included,
   its rules part in project mode (`scan_rules`) and the cross-file follower
   (`cross_file`), with Python `re` semantics (linre, a linear-time engine
-  with `re`'s answers, for every pattern of the rules and every one the
-  engine builds; its own port of sre only for a taint configuration's
-  patterns linre does not run) and its patterns and finding texts in a rule pack
+  with `re`'s answers, for every pattern) and its patterns and finding texts
+  in a rule pack
   (`rust/crates/lazaret-engine/rules/lazaret-rules.json`, the source of the
   rules). It was ported from core function for function and held to it by
   differential tests on every field (zero differences) until the Rust-first
@@ -1154,7 +1153,7 @@ hold that. A store that outlives the run is the next step (P-2b).
 | `js/src/lib/native.js`, `js/scripts/build-wasm.js` | The npm package's native engine (WebAssembly: the loader, one call, the pack's values) and its build (`npm run build`) |
 | `js/src/lib/supplychain.js`, `js/src/deps.js`, `js/src/scanner/flow.js`, `js/src/index.js`, `js/src/pool.js` | Install-hook checks, `--deps`, flow twin, npm CLI, its worker threads |
 | `python/tests/architecture/test_js_parity*.py` | The package-parity guards (need `npm run build`) |
-| `rust/crates/lazaret-engine`, `lazaret-ffi` | The native engine (supply-chain tests, `scan_file`, the cross-file follower, sre port, the rule pack: **the source of the rules**), its C ABI and its WebAssembly exports (`docs/RUST_ENGINE.md`) |
+| `rust/crates/lazaret-engine`, `lazaret-ffi` | The native engine (supply-chain tests, `scan_file`, the cross-file follower, linre, the rule pack: **the source of the rules**), its C ABI and its WebAssembly exports (`docs/RUST_ENGINE.md`) |
 | `python/src/lazaret/scanner/engine.py`, `_native.py` | The engine's calls: batching and threads, the work budget, an unanswered file SC-TRUNCATED; the ctypes loader |
 | `python/tests/architecture/test_snapshot_*.py`, `snapshots/`, `_snapshots.py`, `scripts/snapshot.py`, `test_wasm_parity*.py`, `hooks_corpus.py`, `scanfile_corpus.py`, `crossfile_corpus.py` | The engine's recorded outputs (and the tool that records and compares them), the WebAssembly build's parity, and their corpora |
 | `scripts/make_rust_tables.py`, `check_rust_deps.py` | The rule pack's canonical form and checks (`--check`); no crate from outside the workspace |
