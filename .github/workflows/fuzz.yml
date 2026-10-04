@@ -1,0 +1,58 @@
+# A weekly fuzz of the readers of untrusted input (0.1.9, X-1): the archive reader, the XML reader, the lockfile readers,
+# the registry modules and the answers secret verification reads (34 targets in scripts/fuzz), each for two minutes on a
+# seed taken from the run, on the oldest and the newest Python (about 70 minutes a job).
+# Own file, not ci.yml: a schedule runs only from the default branch, and this job reads no pull request.
+# Same rules as ci.yml: actions pinned to full commit SHAs, contents: read, no secrets, no restored caches.
+# A finding that is not in fuzz_targets.KNOWN fails the job; its input and account are in the `fuzz-findings` artifact,
+# and `python3 scripts/fuzz/fuzz.py --replay FILE TARGET` reproduces it. `--hard-limit` ends the job with every thread's
+# stack if one input hangs, and the input is then the file in `pending.bin`.
+name: Fuzz
+
+on:
+  schedule:
+    - cron: "23 4 * * 0"
+  workflow_dispatch:
+    inputs:
+      seconds:
+        description: "Seconds per target"
+        default: "120"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fuzz
+  cancel-in-progress: false
+
+jobs:
+  fuzz:
+    name: Fuzz (Python ${{ matrix.python }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.10", "3.13"]
+    env:
+      SECONDS_PER_TARGET: ${{ inputs.seconds || '120' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Fuzz every target
+        run: >
+          python scripts/fuzz/fuzz.py --seed "$GITHUB_RUN_ID" --seconds "$SECONDS_PER_TARGET" --hard-limit 120
+          --pending "$RUNNER_TEMP/pending.bin" --findings "$RUNNER_TEMP/findings" --json "$RUNNER_TEMP/fuzz.json"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: fuzz-findings-${{ matrix.python }}
+          path: |
+            ${{ runner.temp }}/findings
+            ${{ runner.temp }}/fuzz.json
+            ${{ runner.temp }}/pending.bin
+          if-no-files-found: ignore
+          retention-days: 90

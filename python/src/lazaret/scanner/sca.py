@@ -1,17 +1,18 @@
 #!/usr/bin/env python3
 """Lazaret SCA — dependency CVE scanner (card "Identify CVE Scanning Features").
 
-Given an installed code base (a project directory), inventory the npm and PyPI
-modules that are actually installed/declared there, then match each module@version
-against a CVE bundle and emit Lazaret-shaped VULN findings. The bundle is built
-from public feeds by --update-bundle (sca_feeds.py: OSV advisories with
-affected-version ranges, CISA's KEV catalog, FIRST's EPSS scores).
+Given an installed code base (a project directory), inventory the npm, PyPI,
+Go and Rust modules that are actually installed/declared there, then match each
+module@version against a CVE bundle and emit Lazaret-shaped VULN findings. The
+bundle is built from public feeds by --update-bundle (sca_feeds.py: OSV
+advisories with affected-version ranges, CISA's KEV catalog, FIRST's EPSS
+scores).
 
     lazaret-sca --update-bundle [--bundle cve-bundle.json]      # download a fresh bundle
     lazaret-sca <project-dir> --bundle cve-bundle.json [options]
     lazaret-sca <project-dir> --bundle cve-bundle.json --update-bundle   # both, in order
 
-What "inventory" means (both ecosystems, both direct evidence and declared pins):
+What "inventory" means (every ecosystem, both direct evidence and declared pins):
   npm   - node_modules/**/package.json (nested node_modules too; the INSTALLED truth)
           package-lock.json / npm-shrinkwrap.json (v1 nested dependencies,
           v2/v3 packages incl. node_modules/a/node_modules/b), yarn.lock (v1
@@ -24,6 +25,24 @@ What "inventory" means (both ecosystems, both direct evidence and declared pins)
           requirements*.txt and requirements/*.txt (following -r/-c),
           pyproject.toml ([project], [dependency-groups], [tool.poetry]),
           poetry.lock, Pipfile.lock, uv.lock, pylock.toml (PEP 751), setup.py
+  go    - go.mod: every `require` (indirect ones too), with the `replace`
+          lines applied: a replacement by a version of the module is that
+          version, by another module is that module (the one required is
+          kept with no version, so its advisories are reported unknown), by a
+          directory is the project's own code and is not inventoried
+          go.sum, only for a module whose `go` directive is before 1.17 (its
+          go.mod does not list what the build needs): the highest version of
+          each module that has a zip hash
+          vendor/modules.txt                           (what a vendored build builds)
+          A path whose first element has no dot (`stdlib`, `toolchain`) is
+          not a module Go can fetch. The standard library is not inventoried:
+          go.mod names a minimum Go version, not the toolchain.
+  crates - Cargo.lock: a crate from a registry at the version locked, one
+          from git (or any other source) with no version; a crate with no
+          source is a path dependency or a workspace member, the project's own
+          Cargo.toml dependencies, dev- and build-dependencies, target tables
+          and [workspace.dependencies]: `=1.2.3` is a version, any other
+          requirement is a range, kept with no version
   Several versions of one package are all kept (a nested lodash@4.17.11 is
   not hidden by a top-level lodash@4.17.21). A package whose version cannot
   be read (a range or wildcard specifier, a git/url/file dependency) is kept
@@ -51,7 +70,12 @@ Matching:
   - Two kinds of package entry. An EXACT entry ("exact": true, what
     --update-bundle writes from OSV) is a package-manager name: it matches
     only its own ecosystem and its own name (exact_name_key: PEP 503 for
-    pypi, the name as written for npm).
+    pypi, the name as written for npm and for a Go module path, lowercase with
+    `_` as `-` for a crate). A Go module or a crate is matched by an exact
+    entry only, and ordered as SemVer orders versions (a Go pseudo-version
+    included): a crate called `ws` is not under npm's `ws` advisories.
+    Advisories are module- and crate-level, as the others are: one about a
+    single function reports every use of an affected version.
   - Any other entry is taken as a CPE product name, whose ecosystem is only
     a hint: it matches on the normalized package NAME in either ecosystem,
     because CPE product names (cryptography, requests, ws, lodash) are how
@@ -79,6 +103,11 @@ baseline handling. Issue dicts carry the same keys as lazaret.mk_issue plus
 'cve' extras under i['detail'] (cve, package, installed, range, fix hint,
 epss, kev).
 
+A bundle made before OSV's Go or crates.io advisories were in it knows nothing
+of them: when the inventory has Go modules or crates and the bundle's `sources`
+lack `osv:go` or `osv:crates`, a gate condition fails ("CVE bundle covers the Go
+and Rust dependencies found"). A project without them has no such condition.
+
 Exit codes (mirror the lazaret CLI): 0 ok / 1 gate failed (--ci) / 2 usage /
 3 report or bundle output error / 4 bundle problem (invalid, unreadable, no
 advisories; with --update-bundle, a feed that can't be downloaded or read) /
@@ -99,16 +128,25 @@ import re
 import stat
 import sys
 import tokenize
+import warnings
 
 # audit H1: lazaret.sanitize_term() is the canonical terminal-control
 # neutralizer; sca output interpolates inventory names/versions and CVE-bundle
 # fields, so it needs the helper.
 from lazaret.scanner import core as lazaret  # noqa: E402
+from lazaret.scanner import gomod  # noqa: E402
 from lazaret.scanner import reports as lazaret_report  # noqa: E402
 
 EXIT_BUNDLE = 4
 EXIT_INTERNAL = 5
 SCA_REPORT_NAME = "lazaret-sca.json"
+
+#: The ecosystems a dependency, and a bundle entry, can be of.
+ECOSYSTEMS = ("npm", "pypi", "go", "crates")
+#: Those whose names are matched only against an exact bundle entry (a package-manager name, as OSV records it). A Go
+#: module path or a crate name is not a CPE product name: a loose match on the name would put a crate called `ws` or
+#: `requests` under an npm or PyPI advisory.
+EXACT_ONLY = ("go", "crates")
 
 # ---------------------------------------------------------------------------
 # Version engine — PEP 440 and semver 2.0 (the first version of this engine
@@ -199,6 +237,8 @@ def _semver_key(v, ignore_local=False):
 def _schemes(ecosystem, *versions):
     if ecosystem == "pypi":
         return (_pep440_key, _semver_key)
+    if ecosystem in EXACT_ONLY:                     # (Go modules and crates are versioned with SemVer, and nothing else)
+        return (_semver_key,)
     if ecosystem == "npm":
         return (_semver_key, _pep440_key)
     if any("-" in str(v) for v in versions):
@@ -342,9 +382,15 @@ def normalize_pkg(name, ecosystem=None):
 
     npm scoped packages fold '@scope/pkg' to 'scope-pkg' (never to the bare
     'pkg'); separators fold PEP 503 style (runs of '-', '_', '.' become one
-    '-'); pypi's python- prefix / -python suffix aliases fold together.
+    '-'); pypi's python- prefix / -python suffix aliases fold together. A Go
+    module path is kept as written and a crate name folds only case and `_`:
+    they are the registries' own identities.
     """
+    if ecosystem == "go":
+        return str(name or "").strip()               # (a module path is case-sensitive, and `.` `-` `_` are not alike in it)
     n = str(name or "").strip().lower()
+    if ecosystem == "crates":
+        return n.replace("_", "-")                   # (crates.io holds one of `a-b` and `a_b`)
     if n.startswith("@") and "/" in n:
         scope, tail = n[1:].split("/", 1)
         n = scope + "-" + tail.replace("/", "-")     # '@babel/core' -> 'babel-core'
@@ -370,7 +416,7 @@ def name_variants(name, ecosystem):
     definitions) must not match lodash CVEs.
     """
     n = str(name or "").strip().lower()
-    out = {normalize_pkg(n, ecosystem)}
+    out = {normalize_pkg(name if ecosystem == "go" else n, ecosystem)}
     if ecosystem == "pypi":
         base = normalize_pkg(n)
         out.add("python-" + base)                      # raw alias key, NOT prefix-stripped
@@ -384,10 +430,14 @@ def exact_name_key(name, ecosystem):
     records it) matches on: the PEP 503 name for pypi, the name as written
     for npm. No aliases and no case folding for npm — legacy npm names are
     case-sensitive (JSONStream and jsonstream are different packages) — and
-    a scoped name is never its unscoped namesake."""
+    a scoped name is never its unscoped namesake. A Go module path is as
+    written; a crate name is lowercase with `_` read as `-` (crates.io keeps
+    only one of the two)."""
     n = str(name or "").strip()
     if ecosystem == "pypi":
         return re.sub(r"[-_.]+", "-", n).lower()
+    if ecosystem == "crates":
+        return n.lower().replace("_", "-")
     return n
 
 
@@ -1125,6 +1175,9 @@ def _scan_requirements(path, root, out, warn, seen, depth=0):
     requirements-prod.txt -> requirements/prod.txt) is followed when it
     resolves inside the project; anything that is skipped is counted in a
     warning, never silently dropped."""
+    if "\0" in path:                                # an include named with a NUL byte: no such file
+        warn("requirements includes not found")
+        return
     real = os.path.realpath(path)
     if real in seen:
         return
@@ -1176,13 +1229,17 @@ def _tomllib():
 
 def load_toml(text):
     """Parse TOML: tomllib on 3.11+, else the conservative subset parser
-    below (Python 3.10). Raises ValueError on invalid input."""
+    below (Python 3.10). Raises ValueError on invalid input, and on input nested
+    too deeply to read (tomllib has no depth limit of its own: `[[[[…` raises
+    RecursionError, which the callers, that catch ValueError, would not see)."""
     lib = _tomllib()
     if lib is not None:
         try:
             return lib.loads(text)
         except lib.TOMLDecodeError as exc:
             raise ValueError(str(exc)) from None
+        except RecursionError:
+            raise ValueError("TOML: RecursionError") from None
     return toml_subset_loads(text)
 
 
@@ -1773,14 +1830,16 @@ def _setup_py_requirements(text):
     """install_requires of setup.py, read without running it (ast, or the
     tokenizer when the file is not Python 3): -> (requirements, complete).
     complete is False when part of the value is computed at run time."""
-    try:
-        tree = ast.parse(text)
-    except (SyntaxError, ValueError, MemoryError, RecursionError):
-        return _setup_py_tokens(text)
-    try:
-        return _setup_py_ast(tree)
-    except RecursionError:
-        return _setup_py_tokens(text)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")              # a bad escape in a string is the file's business, not stderr's
+        try:
+            tree = ast.parse(text)
+        except (SyntaxError, ValueError, MemoryError, RecursionError):
+            return _setup_py_tokens(text)
+        try:
+            return _setup_py_ast(tree)
+        except RecursionError:
+            return _setup_py_tokens(text)
 
 
 def _scan_setup_py(root, out, warn):
@@ -1832,6 +1891,232 @@ def scan_pypi_declared(root, warn=None):
     return out
 
 
+# ----- go -----
+
+MAX_GO_SUM_LINES = 1_000_000
+MAX_GO_MODULES = 200_000
+
+
+def _go_replacement(candidates, version):
+    """(new path, new version) of the replacement that applies to `version` of a module, or None: one written for that
+    version, else one written for every version. `candidates` are the (old version, new path, new version) of the
+    `replace` lines of the module; a new version of "" is a directory."""
+    exact = wild = None
+    for old_version, new, new_version in candidates:
+        if old_version == version and exact is None:
+            exact = (new, new_version)
+        elif old_version == "" and wild is None:
+            wild = (new, new_version)
+    return exact or wild
+
+
+def _go_built(path, version, replacement, where):
+    """What a requirement (of go.mod, or an entry of vendor/modules.txt) puts in the build: [(name, version, where)].
+    With no replacement it is the module itself. A replacement by a directory is the project's own code: nothing. A
+    replacement by a module is that module at its version; and when it is another module than the one required (a
+    fork, which is vulnerable or is not) the one required is kept with no version, so an advisory for it is reported as
+    unknown, never as clear."""
+    if replacement is None:
+        return [(path, version, where)]
+    new, new_version = replacement
+    if not new_version:
+        return []
+    out = [(new, new_version, "%s (replaces %s)" % (where, path[:80]))]
+    if new != path:
+        out.append((path, "", "%s (replaced by %s)" % (where, new[:80])))
+    return out
+
+
+def _go_add(out, warn, built):
+    """Add what `_go_built` returned, as Go inventory. A path whose first element has no dot is not a module Go can
+    fetch (`module.CheckPath`): `stdlib` and `toolchain` are what OSV calls Go itself, and a go.mod that requires them
+    must not be read as requiring that."""
+    for name, version, where in built:
+        if "." in name.split("/", 1)[0]:
+            out.append(("go", name, version, where))
+        else:
+            warn("Go module path(s) without a dot in the first element (not inventoried)")
+
+
+def _scan_go_mod(root, out, warn):
+    """go.mod: every `require`, with the `replace` lines applied. -> True when go.mod does not list every module the
+    build needs: absent or unreadable, or a `go` directive before 1.17 (which keeps the modules a dependency needs out
+    of it; go.sum is read for those). The `go` directive's own version is the standard library's, which go.mod does
+    not pin: it is not inventoried."""
+    path = os.path.join(root, "go.mod")
+    text = _read_text(path, cap=gomod.MAX_GOMOD)
+    if text is None:
+        _unusable(warn, path)
+        return True
+    got = gomod.parse(text)
+    replaces = {}
+    for old, old_version, new, new_version in got["replace"]:
+        replaces.setdefault(old, []).append((old_version, new, new_version))
+    for name, version, _indirect in got["require"]:
+        replacement = _go_replacement(replaces.get(name, ()), version)
+        _go_add(out, warn, _go_built(name, version, replacement, "go.mod"))
+    return not gomod.go_at_least(got["go"], 1, 17)
+
+
+def _go_sum_modules(text):
+    """go.sum -> {module path: its highest version that has a zip hash}: a module version whose source was fetched. A
+    `/go.mod` line is only the module's go.mod, which the build reads without building the module."""
+    best = {}
+    for n, line in enumerate(text.split("\n")):
+        if n >= MAX_GO_SUM_LINES:
+            break
+        fields = line.split()
+        if len(fields) != 3 or not fields[2].startswith("h1:") or fields[1].endswith("/go.mod"):
+            continue
+        version = gomod.canonical_version(fields[1])
+        key = version_key(version, "go") if version else None
+        if key is None:
+            continue
+        old = best.get(fields[0])
+        if old is None and len(best) >= MAX_GO_MODULES:
+            continue
+        if old is None or key > old[0]:
+            best[fields[0]] = (key, version)
+    return {name: version for name, (_key, version) in best.items()}
+
+
+def _scan_go_sum(root, out, warn):
+    path = os.path.join(root, "go.sum")
+    text = _read_text(path)
+    if text is None:
+        _unusable(warn, path)
+        return
+    _go_add(out, warn, [(name, version, "go.sum") for name, version in sorted(_go_sum_modules(text).items())])
+
+
+def _scan_go_vendor(root, out, warn):
+    """vendor/modules.txt: the modules `go build -mod=vendor` builds, a `# module version` line each (with
+    `=> replacement [version]` when it is replaced)."""
+    vendor = os.path.join(root, "vendor")
+    path = os.path.join(vendor, "modules.txt")
+    if os.path.islink(vendor) or not os.path.lexists(path):
+        return
+    text = _read_text(path)
+    if text is None:
+        _unusable(warn, path)
+        return
+    for n, line in enumerate(text.split("\n")):
+        if n >= MAX_GO_SUM_LINES:
+            break
+        if not line.startswith("# "):
+            continue
+        f = line[2:].split()
+        version = gomod.canonical_version(f[1]) if len(f) >= 2 else ""
+        if not version or len(f) not in (2, 4, 5) or (len(f) > 2 and f[2] != "=>"):
+            continue
+        replacement = None
+        if len(f) > 2:
+            new_version = gomod.canonical_version(f[4]) if len(f) == 5 else ""
+            if len(f) == 5 and not new_version:
+                continue
+            replacement = (f[3], new_version)
+        _go_add(out, warn, _go_built(f[0], version, replacement, "vendor/modules.txt"))
+
+
+def scan_go(root, warn=None):
+    """go.mod (with its `replace` lines), go.sum for a module whose go.mod before Go 1.17 does not list what it needs,
+    and vendor/modules.txt. A module replaced by a directory is the project's own code, not inventoried."""
+    warn = _warn_fn(warn)
+    out = Inventory()
+    if _scan_go_mod(root, out, warn):
+        _scan_go_sum(root, out, warn)
+    _scan_go_vendor(root, out, warn)
+    return out
+
+
+# ----- crates (Rust) -----
+
+_CARGO_EXACT_RE = re.compile(r"=\s*(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?)")
+_CARGO_DEPENDENCIES = ("dependencies", "dev-dependencies", "dev_dependencies", "build-dependencies", "build_dependencies")
+
+
+def _scan_cargo_lock(root, out, warn):
+    """Cargo.lock: one [[package]] per crate. A crate with no `source` is a path dependency or a member of the
+    workspace: the project's own, not inventoried. One from a registry has the version it was locked at; one from git
+    (or any other source) is kept with no version, as only a registry release is the version its advisories name."""
+    path = os.path.join(root, "Cargo.lock")
+    doc = _load_lock_toml(path, warn)
+    if doc is None:
+        return
+    for pkg in _lock_packages(doc, "package", path, warn):
+        source = pkg.get("source")
+        if not isinstance(source, str) or not source:
+            continue
+        version = pkg.get("version")
+        version = version.strip() if isinstance(version, str) else ""
+        if source.startswith(("registry+", "sparse+")):
+            out.append(("crates", pkg["name"], version, "Cargo.lock"))
+        else:
+            out.append(("crates", pkg["name"], "", "Cargo.lock (%s source)" % ("git" if source.startswith("git+") else "other")))
+
+
+def _cargo_dependency(name, spec, section, out):
+    """One entry of a dependencies table of Cargo.toml: a version written as `=1.2.3` is one; any other requirement is
+    a range, kept with no version. A path dependency is the project's own; a `workspace = true` one is named by the
+    workspace's table, which is read too."""
+    package, req = name, None
+    if isinstance(spec, str):
+        req = spec
+    elif isinstance(spec, dict):
+        if spec.get("workspace") is True or "path" in spec:
+            return
+        if isinstance(spec.get("package"), str) and spec["package"]:
+            package = spec["package"]
+        if "git" in spec:
+            out.append(("crates", package, "", "Cargo.toml(%s) git" % section))
+            return
+        req = spec.get("version")
+    if not isinstance(req, str):
+        out.append(("crates", package, "", "Cargo.toml(%s) no version" % section))
+        return
+    exact = _CARGO_EXACT_RE.fullmatch(req.strip())
+    if exact:
+        out.append(("crates", package, exact.group(1), "Cargo.toml(%s)" % section))
+    else:
+        out.append(("crates", package, "", "Cargo.toml(%s) range: %s" % (section, req[:40])))
+
+
+def _scan_cargo_toml(root, out, warn):
+    path = os.path.join(root, "Cargo.toml")
+    text = _read_text(path, cap=5 * 1024 * 1024)
+    if text is None:
+        _unusable(warn, path)
+        return
+    try:
+        doc = load_toml(text)
+    except ValueError:
+        warn("unparseable Cargo.toml file(s)")
+        return
+    holders = [("", doc), ("workspace.", doc.get("workspace"))]
+    target = doc.get("target")
+    if isinstance(target, dict):
+        holders.extend(("target.", t) for t in list(target.values())[:200])
+    for prefix, holder in holders:
+        if not isinstance(holder, dict):
+            continue
+        for section in _CARGO_DEPENDENCIES:
+            table = holder.get(section)
+            if isinstance(table, dict):
+                for name, spec in table.items():
+                    if isinstance(name, str) and name:
+                        _cargo_dependency(name, spec, prefix + section, out)
+
+
+def scan_crates(root, warn=None):
+    """Cargo.lock (the locked truth) and the root Cargo.toml's dependencies, its `[workspace.dependencies]` and its
+    target-specific ones (the declared truth; the lock covers the workspace members)."""
+    warn = _warn_fn(warn)
+    out = Inventory()
+    _scan_cargo_lock(root, out, warn)
+    _scan_cargo_toml(root, out, warn)
+    return out
+
+
 # ---------------------------------------------------------------------------
 # CVE bundle (built by --update-bundle, sca_feeds.py) — loading, validation + index
 # ---------------------------------------------------------------------------
@@ -1842,6 +2127,96 @@ def _num(v):
 
 def _strs(v):
     return [x for x in v if isinstance(x, str)] if isinstance(v, list) else []
+
+
+def normalize_advisory(raw, warn, ordinal):
+    """One bundle advisory as the scanner uses it: every field type-checked
+    and normalized (`warn(kind)` counts what was dropped or coerced), or None
+    for an entry that is not an advisory. `ordinal` names an advisory that has
+    no id. CveBundle and the indexed bundle (sca_index.py) both read through
+    this, so a hostile advisory is cleaned the same way from either file."""
+    w = warn
+    if not isinstance(raw, dict):
+        w("malformed advisory entries skipped")
+        return None
+    cve = raw.get("cve") or raw.get("id")
+    if not isinstance(cve, str) or not cve:
+        w("advisory entries without a 'cve' id (kept as 'advisory#N')")
+        cve = "advisory#%d" % ordinal
+    adv = {
+        "cve": cve,
+        "title": raw.get("title") if isinstance(raw.get("title"), str) else None,
+        "severity": raw.get("severity") if isinstance(raw.get("severity"), str) else None,
+        "cvss": _num(raw.get("cvss")),
+        "epss": _num(raw.get("epss")),
+        "epssPercentile": _num(raw.get("epssPercentile")),
+        "knownExploited": raw.get("knownExploited") is True,
+        "malicious": raw.get("malicious") is True,
+        "ransomware": raw.get("ransomware") is True,
+        "dueDate": raw.get("dueDate") if isinstance(raw.get("dueDate"), str) else None,
+        "published": raw.get("published") if isinstance(raw.get("published"), str) else None,
+        "cwes": _strs(raw.get("cwes")),
+        "refs": _strs(raw.get("refs")),
+        "sources": _strs(raw.get("sources")),
+        "packages": [],
+    }
+    for f in ("cvss", "epss", "epssPercentile"):
+        if raw.get(f) is not None and adv[f] is None:
+            w("non-numeric %s values ignored" % f)
+    pkgs = raw.get("packages")
+    if not isinstance(pkgs, list):
+        if pkgs is not None:
+            w("advisories with a malformed 'packages' list skipped")
+        return adv
+    for p in pkgs:
+        if not isinstance(p, dict) or not isinstance(p.get("name"), str) or not p["name"].strip():
+            w("malformed advisory package entries skipped")
+            continue
+        eco = p.get("ecosystem") if p.get("ecosystem") in ECOSYSTEMS else None
+        exact = p.get("exact") is True
+        if exact and eco is None:
+            w("exact package entries without a known ecosystem (matched by name)")
+            exact = False
+        ranges = p.get("ranges")
+        if ranges is None:
+            ranges = []
+        if not isinstance(ranges, list) or not all(isinstance(r, dict) for r in ranges):
+            w("malformed affected-version ranges (verdict: unknown)")
+            ranges = None                      # -> SCA-CVE-UNKNOWN on a name match
+        adv["packages"].append({"name": p["name"], "ecosystem": eco, "ranges": ranges,
+                                "exact": exact,
+                                "vendor": p.get("vendor") if isinstance(p.get("vendor"), str) else None})
+    return adv
+
+
+def bundle_header(doc, warn):
+    """-> (advisories, generated_at, sources, counts) of a bundle document:
+    the part of reading one that is the same for every way of storing it.
+    Structural problems (not an object, wrong bundleVersion, 'advisories' not
+    a list) raise ValueError; a field of the wrong type is dropped and counted
+    through `warn`."""
+    if not isinstance(doc, dict) or doc.get("bundleVersion") != 1:
+        raise ValueError("not a Lazaret CVE bundle (bundleVersion != 1)")
+    advisories = doc.get("advisories")
+    if advisories is None:
+        advisories = []
+    if not isinstance(advisories, list):
+        raise ValueError("CVE bundle 'advisories' is %s, not a list"
+                         % type(advisories).__name__)
+    gen = doc.get("generatedAt")
+    generated_at = gen if isinstance(gen, str) else None
+    if gen is not None and not isinstance(gen, str):
+        warn("non-text generatedAt values")
+    sources = doc.get("sources")
+    source_list = _strs(sources)
+    if sources is not None and (not isinstance(sources, list) or len(source_list) != len(sources)):
+        warn("non-text bundle source entries")
+    counts = doc.get("counts")
+    return advisories, generated_at, source_list, counts if isinstance(counts, dict) else {}
+
+
+#: The first bytes of an indexed bundle (sca_index.MAGIC; a test holds the two equal).
+INDEX_MAGIC = b"LZSCAIDX"
 
 
 class CveBundle:
@@ -1857,25 +2232,8 @@ class CveBundle:
     """
 
     def __init__(self, doc):
-        if not isinstance(doc, dict) or doc.get("bundleVersion") != 1:
-            raise ValueError("not a Lazaret CVE bundle (bundleVersion != 1)")
-        advisories = doc.get("advisories")
-        if advisories is None:
-            advisories = []
-        if not isinstance(advisories, list):
-            raise ValueError("CVE bundle 'advisories' is %s, not a list"
-                             % type(advisories).__name__)
         self.warnings = _Warnings()
-        gen = doc.get("generatedAt")
-        self.generated_at = gen if isinstance(gen, str) else None
-        if gen is not None and not isinstance(gen, str):
-            self.warnings("non-text generatedAt values")
-        sources = doc.get("sources")
-        self.sources = _strs(sources)
-        if sources is not None and (not isinstance(sources, list) or len(self.sources) != len(sources)):
-            self.warnings("non-text bundle source entries")
-        counts = doc.get("counts")
-        self.counts = counts if isinstance(counts, dict) else {}
+        advisories, self.generated_at, self.sources, self.counts = bundle_header(doc, self.warnings)
         self.advisories = []
         self._index = {}            # loose name key -> [(adv, pkg)] (CPE product names)
         self._exact = {}            # (ecosystem, exact_name_key) -> [(adv, pkg)]
@@ -1895,85 +2253,51 @@ class CveBundle:
                     self._index.setdefault(key, []).append((adv, pkg))
 
     def _advisory(self, raw):
-        w = self.warnings
-        if not isinstance(raw, dict):
-            w("malformed advisory entries skipped")
-            return None
-        cve = raw.get("cve") or raw.get("id")
-        if not isinstance(cve, str) or not cve:
-            w("advisory entries without a 'cve' id (kept as 'advisory#N')")
-            cve = "advisory#%d" % (len(self.advisories) + 1)
-        adv = {
-            "cve": cve,
-            "title": raw.get("title") if isinstance(raw.get("title"), str) else None,
-            "severity": raw.get("severity") if isinstance(raw.get("severity"), str) else None,
-            "cvss": _num(raw.get("cvss")),
-            "epss": _num(raw.get("epss")),
-            "epssPercentile": _num(raw.get("epssPercentile")),
-            "knownExploited": raw.get("knownExploited") is True,
-            "malicious": raw.get("malicious") is True,
-            "ransomware": raw.get("ransomware") is True,
-            "dueDate": raw.get("dueDate") if isinstance(raw.get("dueDate"), str) else None,
-            "published": raw.get("published") if isinstance(raw.get("published"), str) else None,
-            "cwes": _strs(raw.get("cwes")),
-            "refs": _strs(raw.get("refs")),
-            "sources": _strs(raw.get("sources")),
-            "packages": [],
-        }
-        for f in ("cvss", "epss", "epssPercentile"):
-            if raw.get(f) is not None and adv[f] is None:
-                w("non-numeric %s values ignored" % f)
-        pkgs = raw.get("packages")
-        if not isinstance(pkgs, list):
-            if pkgs is not None:
-                w("advisories with a malformed 'packages' list skipped")
-            return adv
-        for p in pkgs:
-            if not isinstance(p, dict) or not isinstance(p.get("name"), str) or not p["name"].strip():
-                w("malformed advisory package entries skipped")
-                continue
-            eco = p.get("ecosystem") if p.get("ecosystem") in ("npm", "pypi") else None
-            exact = p.get("exact") is True
-            if exact and eco is None:
-                w("exact package entries without an npm/pypi ecosystem (matched by name)")
-                exact = False
-            ranges = p.get("ranges")
-            if ranges is None:
-                ranges = []
-            if not isinstance(ranges, list) or not all(isinstance(r, dict) for r in ranges):
-                w("malformed affected-version ranges (verdict: unknown)")
-                ranges = None                      # -> SCA-CVE-UNKNOWN on a name match
-            adv["packages"].append({"name": p["name"], "ecosystem": eco, "ranges": ranges,
-                                    "exact": exact,
-                                    "vendor": p.get("vendor") if isinstance(p.get("vendor"), str) else None})
-        return adv
+        return normalize_advisory(raw, self.warnings, len(self.advisories) + 1)
 
     def advisories_for(self, name, ecosystem=None):
         """Every (advisory, package entry) pair that names this dependency,
         each once, in bundle order — never in the iteration order of the
         name_variants() set, which changes with PYTHONHASHSEED. Loose
-        entries match any of the name's lookup keys; exact entries only
-        their own ecosystem and exact name."""
+        entries match any of the name's lookup keys (a Go module or a crate
+        has none: only an exact entry names one); exact entries only their
+        own ecosystem and exact name."""
         found = {}
-        for key in name_variants(name, ecosystem):
-            for pair in self._index.get(key, []):
-                found.setdefault((id(pair[0]), id(pair[1])), pair)
+        if ecosystem not in EXACT_ONLY:
+            for key in name_variants(name, ecosystem):
+                for pair in self._index.get(key, []):
+                    found.setdefault((id(pair[0]), id(pair[1])), pair)
         if self._exact:
-            for eco in ((ecosystem,) if ecosystem in ("npm", "pypi") else ("npm", "pypi")):
+            for eco in ((ecosystem,) if ecosystem in ECOSYSTEMS else ECOSYSTEMS):
                 for pair in self._exact.get((eco, exact_name_key(name, eco)), []):
                     found.setdefault((id(pair[0]), id(pair[1])), pair)
         return [found[k] for k in sorted(found, key=self._order.__getitem__)]
 
     @classmethod
     def load(cls, path):
+        """The bundle at `path`: a JSON document (this class) or an indexed
+        bundle (sca_index.IndexedBundle, told apart by its first bytes; it
+        answers the same calls and reads only what a scan asks about)."""
         try:
             with open(path, "rb") as f:
-                doc = lazaret.json_loads_bounded(f.read().decode("utf-8"))
+                indexed = f.read(len(INDEX_MAGIC)) == INDEX_MAGIC
+                if not indexed:
+                    f.seek(0)
+                    doc = lazaret.json_loads_bounded(f.read().decode("utf-8"))
         except (OSError, ValueError, MemoryError) as e:
             # ValueError covers a deeply nested bundle (JsonTooDeep), bad
             # UTF-8 and the int-digit limit.
             raise ValueError("cannot read CVE bundle %s: %s" % (path, e)) from None
+        if indexed:
+            from lazaret.scanner import sca_index        # imports this module
+            try:
+                return sca_index.IndexedBundle.open(path)
+            except OSError as e:
+                raise ValueError("cannot read CVE bundle %s: %s" % (path, e)) from None
         return cls(doc)
+
+    def close(self):
+        """Nothing to release (an indexed bundle keeps its file open)."""
 
 
 _ISO_RE = re.compile(
@@ -2053,6 +2377,8 @@ def fix_hint(adv, pkg, ecosystem=None):
         if best is None or compare_versions(hi, best, ecosystem) > 0:
             best = hi
     if best:
+        if ecosystem == "go" and not best.startswith("v"):
+            best = "v" + best                       # (OSV writes a Go version without the `v` a module is required at)
         return "Upgrade to >= %s" % best
     return "See the advisory references for patched versions"
 
@@ -2138,6 +2464,8 @@ def match_inventory(inventory, bundle):
 # continuously and EPSS daily, so a bundle older than this fails a quality-gate
 # freshness condition (override or disable with --max-age).
 BUNDLE_MAX_AGE_DAYS = 7
+
+_ECOSYSTEM_LABEL = {"go": "Go", "crates": "Rust"}
 
 SCA_RULES = {
     "SCA-CVE-KEV": {
@@ -2245,6 +2573,13 @@ def build_sca_result(root, bundle, issues, inventory, stats, out_dir=None, max_a
          "ok": not any(i["rule"] == "SCA-CVE" for i in issues)},
         {"label": "CVE bundle fresh (age ≤ %d days)" % max_age,
          "ok": bundle_is_fresh(bundle.generated_at, max_age)},
+    ]
+    found = [eco for eco in EXACT_ONLY if stats.get(eco)]
+    if found:
+        # A bundle made before OSV's Go or crates.io advisories were in it knows nothing of them: it is not a clear.
+        conds.append({"label": "CVE bundle covers the %s dependencies found" % " and ".join(_ECOSYSTEM_LABEL[e] for e in found),
+                      "ok": all("osv:" + eco in bundle.sources for eco in found)})
+    conds += [
         {"label": "All dependency versions resolvable",
          "ok": not any(i["rule"] == "SCA-CVE-UNKNOWN" for i in issues)},
         {"label": "Dependency inventory non-empty",
@@ -2256,6 +2591,7 @@ def build_sca_result(root, bundle, issues, inventory, stats, out_dir=None, max_a
     metrics = {
         "files": 1, "depFiles": 0, "ncloc": 0, "comments": 0, "dupPct": 0.0,
         "npmDeps": stats.get("npm", 0), "pypiDeps": stats.get("pypi", 0),
+        **{eco + "Deps": stats[eco] for eco in EXACT_ONLY if stats.get(eco)},
         "advisories": len(bundle.advisories),
         "bundleGeneratedAt": bundle.generated_at,
         "bundleAgeDays": age_days,
@@ -2288,9 +2624,9 @@ DEFAULT_BUNDLE = "cve-bundle.json"
 def parse_args(argv):
     ap = argparse.ArgumentParser(
         prog="lazaret-sca",
-        description="Lazaret SCA — inventory npm/pypi dependencies of an installed code "
-                    "base and match them against a CVE bundle built from OSV, CISA KEV "
-                    "and EPSS data (--update-bundle downloads a fresh one).")
+        description="Lazaret SCA — inventory npm, PyPI, Go and Rust dependencies of an "
+                    "installed code base and match them against a CVE bundle built from "
+                    "OSV, CISA KEV and EPSS data (--update-bundle downloads a fresh one).")
     ap.add_argument("--version", action="version", version=f"lazaret-sca {lazaret.VERSION}")
     ap.add_argument("directory", nargs="?",
                     help="project directory (the installed code base); optional with "
@@ -2322,14 +2658,14 @@ def parse_args(argv):
                     help="print the dependency inventory and exit (no matching)")
     upd = ap.add_argument_group(
         "updating the bundle",
-        "Download OSV advisories (npm and PyPI), CISA's KEV catalog and EPSS scores, "
+        "Download OSV advisories (npm, PyPI, Go and crates.io), CISA's KEV catalog and EPSS scores, "
         "and write a fresh bundle to --bundle. Nothing is written unless every feed "
         "was read. Given a directory too, the scan runs after the update. The "
         "locations can be https URLs, file: URLs or local paths (a mirror).")
     upd.add_argument("--update-bundle", action="store_true",
                      help="download the feeds and (re)write the bundle")
     upd.add_argument("--osv-url", metavar="URL",
-                     help="OSV export location; {ecosystem} becomes npm and PyPI "
+                     help="OSV export location; {ecosystem} becomes npm, PyPI, Go and crates.io "
                           "(default https://storage.googleapis.com/osv-vulnerabilities/"
                           "{ecosystem}/all.zip)")
     upd.add_argument("--kev-url", metavar="URL",
@@ -2341,6 +2677,10 @@ def parse_args(argv):
     upd.add_argument("--no-epss", action="store_true",
                      help="build the bundle without EPSS scores (they are shown with "
                           "findings and change no severity)")
+    upd.add_argument("--bundle-format", choices=("json", "index"), default=None,
+                     help="what to write: json (default; one document, diffable) or index "
+                          "(a file a scan reads only the needed parts of: lazaret-sca "
+                          "loads it in milliseconds, not seconds)")
     args = ap.parse_args(argv)
     if args.update_bundle:
         if args.bundle is None:
@@ -2349,7 +2689,8 @@ def parse_args(argv):
             ap.error("--epss-url and --no-epss contradict each other")
     else:
         given = [flag for flag, value in (("--osv-url", args.osv_url), ("--kev-url", args.kev_url),
-                                          ("--epss-url", args.epss_url), ("--no-epss", args.no_epss))
+                                          ("--epss-url", args.epss_url), ("--no-epss", args.no_epss),
+                                          ("--bundle-format", args.bundle_format))
                  if value]
         if given:
             ap.error("%s only apply with --update-bundle" % ", ".join(given))
@@ -2368,6 +2709,8 @@ def scan_all(root, extra_site_packages=None, warn=None):
     inv.extend(scan_npm_declared(root, warn))
     inv.extend(scan_pypi_installed(root, extra_site_packages, warn))
     inv.extend(scan_pypi_declared(root, warn))
+    inv.extend(scan_go(root, warn))
+    inv.extend(scan_crates(root, warn))
     return inv.dedup()
 
 
@@ -2440,8 +2783,13 @@ def _main(argv=None):
     inv = scan_all(args.directory, args.site_packages, warn)
     stats = {"npm": sum(1 for d in inv if d[0] == "npm"),
              "pypi": sum(1 for d in inv if d[0] == "pypi")}
+    for eco in EXACT_ONLY:                              # (named only when there are some: a project without Go says nothing of Go)
+        found = sum(1 for d in inv if d[0] == eco)
+        if found:
+            stats[eco] = found
     print("Lazaret SCA — %s" % lazaret.sanitize_term(os.path.abspath(args.directory)))
-    print("  inventory: %d npm · %d pypi modules" % (stats["npm"], stats["pypi"]))
+    print("  inventory: %d npm · %d pypi%s modules" % (
+        stats["npm"], stats["pypi"], "".join(" · %d %s" % (stats[eco], eco) for eco in EXACT_ONLY if eco in stats)))
     for line in warn.lines():
         print("  warning: inventory: %s" % lazaret.sanitize_term(line), file=sys.stderr)
     if args.inventory_only:
@@ -2469,7 +2817,15 @@ def _main(argv=None):
     for line in bundle.warnings.lines():
         print("  warning: CVE bundle: %s" % lazaret.sanitize_term(line), file=sys.stderr)
 
-    matches, unknown = match_inventory(inv, bundle)
+    try:
+        matches, unknown = match_inventory(inv, bundle)
+    except ValueError as e:
+        # an indexed bundle is read as the scan asks (a record can be damaged
+        # when the file was opened fine): never an answer built on it.
+        print("error: %s" % lazaret.sanitize_term(e), file=sys.stderr)
+        return EXIT_BUNDLE
+    finally:
+        bundle.close()
     issues = []
     for adv, pkg, dep, hit in sorted(matches, key=lambda m: (m[0].get("cve") or "")):
         if adv.get("knownExploited") is True:
