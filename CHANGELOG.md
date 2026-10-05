@@ -44,6 +44,28 @@ project is pre-1.0, so the 0.x API may still change.
   `#[cfg(all(…, test))]` is a test's; and the reverse-shell and DNS-lookup signs ask what
   the text detectors ask (a shell or an interpreter; a name built with a public domain).
 
+- **A Go module's code is read for what it does (G-1, first part).** Go runs nothing at
+  install, but a package's `init` functions and the initializers of its package-level
+  variables run when any program that imports it starts, and a cgo preamble's C with a
+  constructor runs then too: the engine now reads that code with the import-time test
+  (SC-IMPORT-RISK), and the rest of a module's code, a command's `main` included, with the
+  test of which only the strong reasons count (SC-USE-RISK). As the Rust reader does, it
+  evaluates the code rather than matching patterns: it follows a package's functions,
+  methods and closures across its files and into the module's other packages, every
+  function init code reaches by name however deep, and the strings the code builds (`+`,
+  `fmt.Sprintf`, `strings.Join`, a string array read by index, byte slices, base64 and hex,
+  a loop that decodes a byte slice), and records the processes started, the data sent, the
+  DNS lookups (TXT records too), the files written and run, and the plugins and DLLs
+  loaded. The documented techniques are found on inert samples: the 2025 typosquats'
+  `wget -O - … | /bin/bash &` built from a string array, and their Windows variant; a DNS
+  TXT record's command run by an init goroutine; a base64 command; a download written,
+  made executable and run; a fetched wiper script run; a reverse shell; a cgo constructor;
+  credentials and the whole environment sent. Go's standard library and the modules it
+  vendors give no finding. `//go:generate` and `//go:linkname` are listed, not judged; test
+  files, `testdata/`, `vendor/` and files built only for `ignore` are not read. This is the
+  engine side (`go_package`); nothing calls it yet, so no scan's verdict changes. A shell's
+  or cmd's script is now read command by command by both readers, so a file one command
+  writes and the next runs is seen.
 - **Where a run's time goes: `--timings`.** `lazaret-registry` and `lazaret guard` print on
   stderr the seconds spent in the network, reading archives, the engine (by call: the
   file scan, the import-time test, the cross-file follower, …), the package manager (the

@@ -685,7 +685,7 @@ benchmark:
 | 4 | Linear-time matching: the pack's patterns on linre (§14), pyre and the shlex port retired, current Unicode | Every pattern runs on linre (P-16, rule set 2.28.0): the pack's 666, its lexers' tables included, and those the engine builds as it scans. Lookaheads of unbounded width run with a memo, and a sweep where the walks would cost more; a quote matched again as branches; a name matched again and counts past what a program holds are checked in code; two patterns read further than before. pyre's port of sre retired (P-16's second part): pyre is re's interface to linre, a pattern linre does not run is an error (a built one fails its call closed), and a taint configuration's patterns are held to what linre runs. The shlex port is written anew from shlex's documentation, and the Final_Sigma rule and the casefix table come from Unicode's definition and data (P-16's third part): the engine holds no CPython code. Next: current Unicode |
 | 5 | One call per file, a content cache (SHA-256), the guard's scan in a child process that fails closed, archive ambiguity checks | Not started |
 
-A parallel track brings Go and Rust up to Python's and JavaScript's level (R-1, G-1, §21): the Rust reader (`rs_crate`) is built; Go's reader and the registry and guard wiring follow.
+A parallel track brings Go and Rust up to Python's and JavaScript's level (R-1, G-1, §21, §22): the Rust reader (`rs_crate`) and the Go reader (`go_package`) are built; the registry and guard wiring follows.
 
 ## 9. Known issues
 
@@ -2370,5 +2370,90 @@ RR-11 in `audits/lazaret-go-rust-code-review-2026-10-04.md`.)
 Nothing changes for Python, JavaScript, Go or any other scan: `rs_crate` is a
 new call, and the install-script and import-time tests take a model's facts only
 when one is given (the text path is untouched, held identical on the benchmark
-and the recorded snapshots). The call that reads Go (`go_package`) and the
-registry and guard wiring that drops the INCOMPLETE verdict follow.
+and the recorded snapshots). The call that reads Go is §22's; the registry and
+guard wiring that drops the INCOMPLETE verdict follows.
+
+## 22. The Go reader (G-1)
+
+`go_package` reads a Go module's files for what their code does when a program
+that imports the module's packages starts, and when it is used, so that `lazaret
+guard go` and the registry can judge a module instead of marking it INCOMPLETE.
+The reader is `crates/lazaret-engine/src/goread/`, on `goparse`'s trees (the
+tree `go/parser` builds, §15) and `goparse::hooks`, and on the values, events and
+facts it shares with the Rust reader (`model/`).
+
+Go runs nothing at install, but a package's code still runs at moments its user
+did not choose. Each is read with the test Python's and JavaScript's code of the
+same moment gets:
+
+- **at start**: every `init` function and the initializer of every package-level
+  variable that calls something run when any program that imports the package
+  starts, the analog of import-time code: the import-time test (SC-IMPORT-RISK;
+  the strong reasons CRITICAL, the rest MAJOR). So does a cgo preamble's C with
+  a constructor (`__attribute__((constructor))`, `.init_array`), or C that init
+  code calls;
+- **when used**: everything else, a command's `main` included: the import-time
+  test of which only the strong reasons count (SC-USE-RISK);
+- `//go:generate` runs only when someone runs `go generate`, and
+  `//go:linkname` runs nothing: both are listed in the answer (`generate`,
+  `linkname`), never judged.
+
+A module is its packages, one per folder, each read as one unit, as Go compiles
+it: a package's functions, methods, types and package-level names are found
+across its files, and a call of another of the module's packages (an import of
+the module's path, `module` in the call; or, with none given, an import that
+ends in one of the module's folders) is followed there. What no build of a
+dependent reads is left out: `_test.go` files, files whose names start with `_`
+or `.`, `testdata/`, `vendor/` (other modules, read on their own) and files
+constrained to `ignore`. A folder whose name starts with `_` or `.` is read: an
+import can name it. A `.go` file the parser refuses could not be built, so
+nothing in it runs; the answer lists it (`unparsed`) for the text rules.
+
+`eval.rs` evaluates the code as the Rust reader does (§21), on the tree: a value
+is the text the code builds (`+`, `fmt.Sprintf` with `fmt`'s verbs,
+`strings.Join`, `Replace`, `Repeat`, a string array read by index — the 2025
+typosquats' shape —, a byte slice read as a string, `[]byte` and `[]rune`,
+base64 with a standard or a custom alphabet, hex, `url.QueryUnescape`,
+`strings.Map`), the data it carries and the handle it is. Both branches of an
+`if` and every case of a `switch` are read; a loop is read once, or for each
+item of a list it knows (a few, or all of them up to 4,096 when its body only
+computes: a decoder's loop, `data[i] ^= key[i]`, is run index by index); a
+goroutine and a deferred call are read where they are written; a closure sees
+and changes its function's names. Package-level variables are read when first
+used, constants with their `iota`, and `//go:embed`'s variables hold the bytes a
+build puts in them. The APIs it knows are the standard library's (`os/exec`,
+`os`, `os/user`, `io`, `bufio`, `net`, `net/http`, `crypto/tls`, `syscall`,
+`plugin`, `path/filepath`, `strings`, `bytes`, `strconv`, `fmt`,
+`encoding/base64`, `encoding/hex`, `compress/*`, `net/url`) and
+`golang.org/x/sys/windows`'s: processes started (with a shell's input set to a
+script, and `SysProcAttr`), requests and their bodies, connections, DNS lookups
+(TXT records among them: the `shopsprint/decimal` shape), files written, made
+executable, renamed and run, plugins and DLLs loaded. The init code's reading
+starts from the initializers and the `init` functions in Go's order, then reads
+on its own every function they reach by name, however deep.
+
+`cread.rs` reads the C a cgo package compiles in: the preamble (the comment
+before `import "C"`, its contents read as C where they are) and the package's
+`.c` and `.h` files. It is not a C parser: it reads the calls that run a
+program or load a library (`system`, `popen`, the `exec` family,
+`posix_spawn`, `WinExec`, `ShellExecute`, `CreateProcess`, `dlopen`,
+`LoadLibrary`) with the strings they are given (adjacent literals joined, C's
+escapes, a `#define`d string), and whether the C has a constructor.
+
+What every reader shares changed with it (`model/events.rs`): a shell's or
+cmd's script is read command by command, so a file one command writes and the
+next runs (`wget -O /tmp/x … && bash /tmp/x`, `certutil … %TEMP%\u.exe &&
+%TEMP%\u.exe`) is a file written then run, in Rust's reading too; certutil,
+bitsadmin and PowerShell's `Invoke-WebRequest -OutFile` downloads are read
+wherever they are; and `wget -O -` (standard output) writes no file.
+
+The bounds are the Rust reader's (§21), built in from the start: `goparse`'s
+trees are an arena (dropping one recurses into nothing), chains (`a + b + …`,
+`if … else if …`) are walked rather than recursed through, the evaluator's
+nesting stops at `MAX_NEST`, a reading records at most `MAX_EVENTS` events and
+makes at most `MAX_CLOSURES` closures, the text a step copies is charged to its
+steps, and a reading cut short has its text read by the text test as well.
+
+Go's standard library and the modules it vendors (`golang.org/x/…`), each
+package folder read as a module, give no finding at either moment (717 folders,
+6,121 files, 7 s). Nothing calls `go_package` yet, so no scan's answer changes.

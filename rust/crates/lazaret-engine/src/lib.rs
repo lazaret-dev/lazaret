@@ -16,6 +16,7 @@ pub mod findings;
 pub mod flow;
 pub mod generated;
 pub mod goparse;
+pub mod goread;
 pub mod hooks;
 pub mod json;
 pub mod jsflow;

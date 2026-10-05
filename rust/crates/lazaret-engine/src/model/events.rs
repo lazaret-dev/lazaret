@@ -241,8 +241,9 @@ pub fn quote_word(w: &[u32]) -> PyStr {
 }
 
 
-/// A download a command writes to a file: (the file, the address), for curl `-o`, wget `-O`,
-/// PowerShell's `-OutFile` and certutil.
+/// A download a command writes to a file: (the file, the address), for curl `-o`, wget `-O`, PowerShell's
+/// `Invoke-WebRequest -OutFile`, certutil and bitsadmin. (A shell's or cmd's script is read command by command, by
+/// [`run_events`].)
 pub fn download_target(c: &CmdState) -> Option<(Val, Val)> {
     let prog = pystr::lower(&c.prog.text_or_unknown());
     let base: PyStr = prog.iter().rposition(|&ch| ch == '/' as u32 || ch == '\\' as u32).map(|k| prog[k + 1..].to_vec()).unwrap_or(prog.clone());
@@ -263,34 +264,73 @@ pub fn download_target(c: &CmdState) -> Option<(Val, Val)> {
         }
         return None;
     }
-    if eqs(&base, "certutil") {
+    if eqs(&base, "certutil") || eqs(&base, "bitsadmin") {
         let url = url()?;
         let last = args.last()?.clone();
         return Some((last, url));
     }
-    if let Some(script) = shell_script(c) {
-        // a shell's own download: curl -o, wget -O, Invoke-WebRequest -OutFile
-        let s = script.text_or_unknown();
-        let low = pystr::lower(&s);
-        for (flag, curl) in [("-o ", true), ("-outfile ", false), ("--output ", true)] {
-            if let Some(k) = pystr::find_str(&low, flag, 0) {
-                if curl && !(pystr::find_str(&low, "curl", 0).is_some() || pystr::find_str(&low, "wget", 0).is_some()) {
-                    continue;
-                }
-                let rest = &s[k + flag.len()..];
-                let word: PyStr = rest.iter().take_while(|&&c| !matches!(char::from_u32(c), Some(' ' | ';' | '&' | '|' | '"' | '\'' | '\n'))).copied().collect();
-                if !word.is_empty() {
-                    let urls = pystr::find_str(&s, "http", 0).map(|k| {
-                        s[k..].iter().take_while(|&&c| !matches!(char::from_u32(c), Some(' ' | ';' | '&' | '|' | '"' | '\'' | '\n'))).copied().collect::<PyStr>()
-                    });
-                    let mut path = Val::text(word);
-                    path.add_kinds(&script);
-                    return Some((path, urls.map(Val::text).unwrap_or_default()));
-                }
+    if ["invoke-webrequest", "iwr", "invoke-restmethod", "irm", "start-bitstransfer"].iter().any(|w| eqs(&base, w)) {
+        for (k, a) in args.iter().enumerate() {
+            let t = pystr::lower(&a.text_or_unknown());
+            if eqs(&t, "-outfile") || eqs(&t, "-destination") || eqs(&t, "-o") {
+                let path = args.get(k + 1)?.clone();
+                return Some((path, url().unwrap_or_default()));
             }
         }
     }
     None
+}
+
+/// The simple commands of a script as a shell or cmd runs them one after another (`a && b; c | d`): each as its
+/// words, quotes taken off. At most 64 commands of 256 words.
+pub fn script_commands(script: &[u32]) -> Vec<Vec<PyStr>> {
+    let mut cmds: Vec<Vec<PyStr>> = Vec::new();
+    let mut words: Vec<PyStr> = Vec::new();
+    let mut word: PyStr = Vec::new();
+    let mut in_word = false;
+    let mut quote: Option<u32> = None;
+    let flush_word = |words: &mut Vec<PyStr>, word: &mut PyStr, in_word: &mut bool| {
+        if *in_word && words.len() < 256 {
+            words.push(std::mem::take(word));
+        }
+        word.clear();
+        *in_word = false;
+    };
+    for &c in script {
+        if cmds.len() >= 64 {
+            break;
+        }
+        if let Some(q) = quote {
+            if c == q {
+                quote = None;
+            } else {
+                word.push(c);
+            }
+            continue;
+        }
+        match char::from_u32(c) {
+            Some('\'' | '"') => {
+                quote = Some(c);
+                in_word = true;
+            }
+            Some(' ' | '\t' | '\r') => flush_word(&mut words, &mut word, &mut in_word),
+            Some(';' | '\n' | '|' | '&' | '(' | ')') => {
+                flush_word(&mut words, &mut word, &mut in_word);
+                if !words.is_empty() {
+                    cmds.push(std::mem::take(&mut words));
+                }
+            }
+            _ => {
+                word.push(c);
+                in_word = true;
+            }
+        }
+    }
+    flush_word(&mut words, &mut word, &mut in_word);
+    if !words.is_empty() && cmds.len() < 64 {
+        cmds.push(words);
+    }
+    cmds
 }
 
 
@@ -416,14 +456,35 @@ pub fn decoded_unknown(v: &Val, at: u32) -> Val {
 pub fn run_events(c: &CmdState) -> Vec<Ev> {
     let line = command_line(c);
     let script = shell_script(c);
-    let mut out = vec![Ev::Run { file: c.file, at: c.at, line, prog: c.prog.clone(), args: c.args.clone(), script, conn_io: c.conn_io, hidden: c.hidden }];
+    let mut out = vec![Ev::Run { file: c.file, at: c.at, line, prog: c.prog.clone(), args: c.args.clone(), script: script.clone(), conn_io: c.conn_io, hidden: c.hidden }];
+    push_download(&mut out, c);
+    // a shell's or cmd's script, command by command: the download each writes, and each command run when there are
+    // several (`certutil … %TEMP%\\u.exe && %TEMP%\\u.exe`: a file written by one and run by the next)
+    if let Some(text) = script.as_ref().and_then(|v| v.s.clone()) {
+        let sv = script.unwrap_or_default();
+        let subs = script_commands(&text);
+        let several = subs.len() > 1;
+        for words in subs {
+            let mut it = words.into_iter().map(|w| Val::text(w).with_kinds(&sv));
+            let Some(prog) = it.next() else { continue };
+            let sub = CmdState { prog, args: it.collect(), file: c.file, at: c.at, hidden: c.hidden, ..CmdState::default() };
+            push_download(&mut out, &sub);
+            if several {
+                out.push(Ev::Run { file: c.file, at: c.at, line: command_line(&sub), prog: sub.prog.clone(), args: sub.args.clone(), script: shell_script(&sub), conn_io: false, hidden: c.hidden });
+            }
+        }
+    }
+    out
+}
+
+/// The address a command contacts and the file it writes, for a download it writes to a file.
+fn push_download(out: &mut Vec<Ev>, c: &CmdState) {
     if let Some((path, url)) = download_target(c) {
         let mut data = Val::source(K_RECEIVED, url.text_or_unknown(), c.at);
         data.add_kinds(&url);
         out.push(Ev::Send { file: c.file, at: c.at, data: url.clone(), dest: url.clone(), in_address: true });
         out.push(Ev::Write { file: c.file, at: c.at, path, data, append: false });
     }
-    out
 }
 
 /// The events of data sent to an address: the address itself (what it holds is in the request), and the

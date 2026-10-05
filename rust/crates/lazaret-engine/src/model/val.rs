@@ -45,6 +45,16 @@ pub enum Obj {
     Curl(u32),
     /// The list of the environment's variables (`env::vars()`).
     EnvVars,
+    /// Go: the values a call of several results gives, its items in order (`data, err := f()`).
+    Tuple,
+    /// Go: a map, or a struct literal with its fields named: its items are [key, value] pairs.
+    Map,
+    /// Go: a base64 encoding (`base64.StdEncoding`); its text, when it has one, is a custom alphabet.
+    B64,
+    /// Go: the user `os/user` gives (its `Username`, its `HomeDir`).
+    User,
+    /// Go: a `SysProcAttr` that hides the process's window or detaches it.
+    Hidden,
 }
 
 /// A value.
