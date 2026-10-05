@@ -1,6 +1,6 @@
 {
  "format": 1,
- "rule_set": "2.29.0",
+ "rule_set": "2.30.0",
  "source": "lazaret.scanner.core, extracted by scripts/make_rust_tables.py \u2014 do not edit",
  "values": {
   "ALWAYS_PRUNE_DIRS": {
@@ -12586,7 +12586,7 @@
   },
   "_PIPE_SCAN_RE": {
    "flags": "",
-   "re": "\\|\\s*(?:sudo\\s+)?(?:ba|z|da|k)?sh\\b|[\\n|;&]|\\b(?:curl|wget)\\b"
+   "re": "\\|\\s*(?:sudo\\s+)?(?:[\\w.~-]*/)*(?:env\\s+)?(?:ba|z|da|k)?sh\\b|[\\n|;&]|\\b(?:curl|wget)\\b"
   },
   "_PIPE_SHELL_RULE": {
    "map": {

@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-kZWpsziHylSBgkWkHMH9I7RiIgzUL/ulT3pLyxqdgfg='; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-wN9w5cLLLYrCML0Sg7O/4oEP0iAZJhWhNLm7iZ7A9bY='; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'">
 <title>Lazaret — Security &amp; Quality Review</title>
 <style>
   :root{
@@ -3858,7 +3858,7 @@ function extractFunctions(lines, lang) {
 
 
 // `curl … | sh` / `wget … | bash`, read in one left-to-right pass (core's comment)
-const PIPE_SCAN_SRC = String.raw`\|\s*(?:sudo\s+)?(?:ba|z|da|k)?sh\b|[\n|;&]|\b(?:curl|wget)\b`;
+const PIPE_SCAN_SRC = String.raw`\|\s*(?:sudo\s+)?(?:[\w.~-]*\/)*(?:env\s+)?(?:ba|z|da|k)?sh\b|[\n|;&]|\b(?:curl|wget)\b`;
 const PIPE_SCAN_RE = pyRe(PIPE_SCAN_SRC, "g");
 
 /** twin of core._pipes_download_to_shell: a pipe into a shell after curl or wget in the same command */

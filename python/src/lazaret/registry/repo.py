@@ -86,6 +86,9 @@ MAX_MEMBER = _env_number("LAZARET_MAX_SOURCE_BYTES", 16_000_000)
 MAX_FILES = 20_000         # files per package (numpy's sdist alone has >4,000)
 SAMPLE = 8192              # header/entropy sample read from oversized files
 # Stored scans from another engine version are scanned again (has_scan).
+# 2.30: a download piped into a shell named by its path (`| /bin/bash`,
+#      `| /usr/bin/env sh`) is one: the pipe test read only a bare shell's name,
+#      so the 2025 Go typosquats' `wget -O - … | /bin/bash &` was not one
 # 2.29: the Go/Rust review's archive fix (RM-1): a tar member of a type that
 #      cargo or pip unpacks as a file (a device, a FIFO, a type tar does not
 #      know) is read as one, and is SC-ARCHIVE-TYPE; it was left out unread,
@@ -217,7 +220,7 @@ SAMPLE = 8192              # header/entropy sample read from oversized files
 #      entry points and hook targets, Python install scripts
 # 2.3: verdict tiers, decoded hex, install-script inspection; 2.2:
 #      verdict-integrity; 2.1: binary-artifact awareness
-ENGINE_VERSION = "2.29.0"
+ENGINE_VERSION = "2.30.0"
 
 # ---------------- The content memo (P-2a, registry/contentcache.py) ----------------
 # One per scan_package run: the engine answers once for content several of a

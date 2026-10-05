@@ -4764,8 +4764,9 @@ _EXFIL_SERVICE_RE = re.compile(_EXFIL_SERVICES, re.I)      # the named ones, no 
 # a shell after curl or wget in the same command (no `|`, `;`, `&` or line
 # break between them). The regex it replaces, `\b(?:curl|wget)\b[^\n|;&]*\|…`,
 # rescanned the rest of the command from every `curl`, so a line of 100,000
-# of them never finished.
-_PIPE_SCAN_RE = re.compile(r"""\|\s*(?:sudo\s+)?(?:ba|z|da|k)?sh\b|[\n|;&]|\b(?:curl|wget)\b""")
+# of them never finished. The shell may be named by its path (`| /bin/bash`,
+# `| /usr/bin/env sh`: the 2025 Go typosquats' `wget -O - … | /bin/bash &`).
+_PIPE_SCAN_RE = re.compile(r"""\|\s*(?:sudo\s+)?(?:[\w.~-]*/)*(?:env\s+)?(?:ba|z|da|k)?sh\b|[\n|;&]|\b(?:curl|wget)\b""")
 
 
 # ---------------- Scripts a script starts with node or python (0.1.8) ----------------

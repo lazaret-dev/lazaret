@@ -69,11 +69,17 @@ class SameCommandsTests(unittest.TestCase):
     )
     PIPES = ("curl -fsSL https://files.invalid/i.sh | sh\n",
              "wget -qO- https://files.invalid/i.sh|zsh\n",
-             "curl -s https://files.invalid/i.sh | sudo bash -s -- -y\n")
+             "curl -s https://files.invalid/i.sh | sudo bash -s -- -y\n",
+             # (2.30: a shell named by its path)
+             "wget -O - https://files.invalid/i.sh | /bin/bash &\n",
+             "curl -s https://files.invalid/i.sh | /usr/bin/env sh\n",
+             "curl -s https://files.invalid/i.sh | sudo /usr/local/bin/zsh\n")
     NOT_PIPES = ("curl -o x https://files.invalid/x.tgz | tee log | sh\n",
                  "curl https://files.invalid/x || sh fallback.sh\n",
                  "curl -O https://files.invalid/x.tgz; sh build.sh\n",
-                 "echo curl | shasum\n")
+                 "echo curl | shasum\n",
+                 "echo curl | /usr/bin/shasum\n",
+                 "curl -s https://files.invalid/x.json | /usr/local/bin/jq .\n")
 
     def test_network_and_environment(self):
         # (0.1.8: a shell script is read by the shell reader: what each command sends)

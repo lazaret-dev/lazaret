@@ -288,6 +288,11 @@ project is pre-1.0, so the 0.x API may still change.
 
 ### Fixed
 
+- **A download piped into a shell named by its path.** The install-script and
+  import-time tests read `curl … | sh` and `wget … | bash`, but not a shell named by its
+  path: `wget -O - … | /bin/bash &` (the 2025 Go typosquats' command), `| /usr/bin/env
+  sh` or `| sudo /usr/local/bin/zsh`. They are now, in every language's tests (rule set
+  2.30.0, so stored verdicts are scanned again).
 - **The Go/Rust review (Oct 4): the guard checks what cargo and go use, and its own
   folders, servers and programs are the user's.** A review of the 0.1.9 Go and Rust
   work (`lazaret guard go` and `cargo`, the registry's Go and crates modules, the SCA
