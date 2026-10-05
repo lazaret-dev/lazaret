@@ -87,6 +87,10 @@ MAX_MEMBER = _env_number("LAZARET_MAX_SOURCE_BYTES", 16_000_000)
 MAX_FILES = 20_000         # files per package (numpy's sdist alone has >4,000)
 SAMPLE = 8192              # header/entropy sample read from oversized files
 # Stored scans from another engine version are scanned again (has_scan).
+# 2.31: a Go module's and a crate's code is read (Part C: the Go and Rust
+#      readers, G-1 and R-1, in registry and guard scans), so a module or a
+#      crate is OK, WARN or SUSPICIOUS for what its code does; it was
+#      INCOMPLETE whatever it held (SC-UNREAD-CODE, N-1)
 # 2.30: a download piped into a shell named by its path (`| /bin/bash`,
 #      `| /usr/bin/env sh`) is one: the pipe test read only a bare shell's name,
 #      so the 2025 Go typosquats' `wget -O - … | /bin/bash &` was not one
@@ -221,7 +225,7 @@ SAMPLE = 8192              # header/entropy sample read from oversized files
 #      entry points and hook targets, Python install scripts
 # 2.3: verdict tiers, decoded hex, install-script inspection; 2.2:
 #      verdict-integrity; 2.1: binary-artifact awareness
-ENGINE_VERSION = "2.30.0"
+ENGINE_VERSION = "2.31.0"
 
 # ---------------- The content memo (P-2a, registry/contentcache.py) ----------------
 # One per scan_package run: the engine answers once for content several of a
@@ -1422,24 +1426,33 @@ VERDICT_RANK = {"OK": 0, "WARN": 1, "INCOMPLETE": 2, "SUSPICIOUS": 3}
 # Rules that mean "not fully scanned": they make a scan INCOMPLETE instead
 # of counting as indicators.
 TRUNCATION_RULES = ("SC-TRUNCATED", "SC-MANIFEST-UNPARSEABLE", "SC-UNREAD-CODE")
-# N-1 (0.1.9): code in a language the engine has no detectors for yet, by the
-# artifact that ships it. A Go module's .go files and a crate's .rs files run
-# when it is built or used (init functions, package initializers and cgo; a
-# build script and procedural macros, then the code), and nothing reads what
-# they do yet. Such an artifact is never OK: one SC-UNREAD-CODE finding says
-# what was not read, and the verdict is INCOMPLETE. Its checksum, age, archive
-# and other files are checked as before. Test code the build never compiles
-# is left out (a Go *_test.go file, a testdata/ directory or one Go ignores; a
-# crate's tests/, benches/ and examples/).
-UNREAD_CODE = {"gomod": ("Go", ".go"), "crate": ("Rust", ".rs")}
+# N-1 (0.1.9): code in a language the engine has no detectors for, by the
+# artifact that ships it: such an artifact is never OK, one SC-UNREAD-CODE
+# finding says what was not read, and the verdict is INCOMPLETE. A Go
+# module's .go files and a crate's .rs files were such code until the Go and
+# Rust readers (G-1, R-1) were wired in (Part C): they are read now
+# (PACKAGE_CODE), so none is left here; the finding stays for code a reader
+# could not hold (_package_code).
+UNREAD_CODE = {}
 UNREAD_CODE_RULE = "SC-UNREAD-CODE"
+# The code a module or a crate is read for, by artifact: (its language, the
+# extensions of its source, the extensions of the other files its reader
+# reads). A Go module's .go files are read with its cgo packages' C (.c, .h);
+# a crate's .rs files. Each source file gets the file rules too (dependency
+# mode, as a package's JavaScript and Python do).
+PACKAGE_CODE = {"gomod": ("go", (".go",), (".c", ".h")), "crate": ("rs", (".rs",), ())}
+# The most a reader takes of one module or crate, in characters: the reader
+# holds all of it at once (the text, each file's tree), so a larger one is
+# not read and the scan is INCOMPLETE (aws-sdk-go v1, Go's largest module in
+# common use, is 207 million characters of Go and peaks at 2.4 GB read).
+PACKAGE_CODE_CHARS = 300_000_000
 # Directory names that hold tests / fixtures (exact names, case-insensitive).
 # Weaker findings in them are listed as INFO unless the file is reachable from
 # an entry point (main/bin/exports, an install hook, setup.py).
 TEST_DIR_NAMES = {"test", "tests", "testing", "__tests__", "spec", "specs", "fixtures",
                   "__fixtures__", "testdata", "test_data", "test-data", "test-fixtures",
                   "unittests", "test cases"}
-_TEST_FILE_RE = re.compile(r"(?:^test_.*\.py|.*_test\.py|.*\.(?:test|spec)\.[cm]?[jt]sx?)$", re.I)
+_TEST_FILE_RE = re.compile(r"(?:^test_.*\.py|.*_test\.(?:py|go)|.*\.(?:test|spec)\.[cm]?[jt]sx?)$", re.I)
 
 
 def is_test_path(rel):
@@ -1733,21 +1746,27 @@ class _OutOfTime(Exception):
 
 
 def _unread_code(artifact, rel):
-    """Is `rel`, a member of an `artifact`, code that runs when it is built
-    or used, in a language nothing reads yet (UNREAD_CODE)?"""
+    """Is `rel`, a member of an `artifact`, code in a language nothing reads
+    (UNREAD_CODE), and not test code its build leaves out?"""
     lang = UNREAD_CODE.get(artifact)
-    if lang is None or not rel.lower().endswith(lang[1]):
-        return False
-    parts = rel.replace("\\", "/").split("/")
+    return lang is not None and rel.lower().endswith(lang[1]) and not is_test_path(rel)
+
+
+def _never_built(artifact, rel):
+    """Is `rel`, a source file of a Go module or a crate, one no build of a
+    dependent compiles, as the readers say (goread/rsread never_built): a Go
+    *_test.go file, a file named with "_" or "." first, one under testdata/
+    or vendor/; a crate's tests/, benches/ and examples/. Neither the reader
+    nor the file rules read it: the toolchain never runs it in a dependent
+    (rivo/uniseg's line-break tests hold escaped URLs)."""
     if artifact == "gomod":
-        # in the module: below its "<path>@<version>" root; go ignores testdata/
-        # and directories whose names start with "." or "_"
-        root = next((k for k, p in enumerate(parts) if "@" in p), -1)
-        inside = parts[root + 1:-1]
-        return not parts[-1].lower().endswith("_test.go") and not any(
-            p.lower() == "testdata" or p[:1] in "._" for p in inside)
-    # a crate (iter_archive gives its paths below its "<name>-<version>" root)
-    return not (len(parts) > 1 and parts[0] in ("tests", "benches", "examples"))
+        parts = _go_root_file(rel).split("/")
+        name = parts[-1]
+        return (name[:1] in "_." or name.lower().endswith("_test.go")
+                or any(p in ("testdata", "vendor") for p in parts[:-1]))
+    if artifact == "crate":
+        return rel.split("/", 1)[0] in ("tests", "benches", "examples")
+    return False
 
 
 def _go_root_file(rel):
@@ -1763,20 +1782,48 @@ def _unread_code_issue(artifact, rels):
     """The SC-UNREAD-CODE finding for an artifact whose code in `rels`
     (sorted) nothing reads (N-1)."""
     lang, _ext = UNREAD_CODE[artifact]
-    what, runs = (("module", "init functions, package initializers, cgo") if artifact == "gomod"
-                  else ("crate", "its build script, procedural macros"))
-    # (a module's path in it: past its "<path>@<version>" root)
-    root = (lambda r: r.split("@", 1)[-1].split("/", 1)[-1]) if artifact == "gomod" else (lambda r: r)
-    shown = ", ".join(root(r) for r in rels[:3]) + (", …" if len(rels) > 3 else "")
+    shown = ", ".join(rels[:3]) + (", …" if len(rels) > 3 else "")
     return {"rule": UNREAD_CODE_RULE, "name": f"{lang} code not read", "type": "HOTSPOT", "sev": "MAJOR",
             "msg": (f"{len(rels)} {lang} file{'' if len(rels) == 1 else 's'} not read ({shown}): Lazaret has no "
-                    f"{lang} detectors yet, so what runs when the {what} is built or used ({runs}) was not "
-                    f"checked, and the {what} can't be cleared."),
-            "why": (f"A {lang} {what}'s code runs on the machine that builds it. Its checksum, age and archive "
-                    "were checked, and its other files were read; what its code does was not, so a clean "
+                    f"{lang} detectors yet, so what that code does when the package is built or used was not "
+                    "checked, and the package can't be cleared."),
+            "why": (f"A package's {lang} code runs on the machine that builds or uses it. The package's checksum, age "
+                    "and archive were checked, and its other files were read; what its code does was not, so a clean "
                     "verdict would say more than the scan knows."),
-            "fix": f"Review the {what}'s code, or wait for Lazaret's {lang} detectors.",
+            "fix": f"Review the package's {lang} code.",
             "ref": "CWE-506 · Supply chain", "file": rels[0], "line": 1, "snippet": [], "snipStart": 1}
+
+
+_PACKAGE_RULE_NAMES = {"SC-INSTALL-HOOK": "Install hook", "SC-IMPORT-RISK": "Risky import-time code",
+                       "SC-USE-RISK": "Hostile code the package runs when used",
+                       "SC-GO-GENERATE": "A go:generate command"}
+_BUILD_SCRIPT_WHY = ("cargo compiles and runs a dependency's build script with the user's privileges, before anything "
+                     "is reviewed, whenever a crate that depends on it is built: the Rust twin of an npm install hook "
+                     "and an sdist's setup.py, where proc-macro1 and rustdecimal ran their payloads.")
+_PROC_MACRO_WHY = ("A procedural macro is a program the compiler loads and runs, with the user's privileges, while it "
+                   "builds every crate that uses the macro: the moment of a build script, an install hook's twin.")
+_GO_START_WHY = ("Go runs nothing when a module is downloaded, but a package's init functions and the initializers of "
+                 "its package-level variables run when any program that imports the package starts, and so does a "
+                 "cgo constructor: where Go malware puts its payload (the 2025 typosquats ran `wget -O - … | "
+                 "/bin/bash` from init). Collecting credentials or the whole environment next to a network call is "
+                 "the shape of a stealer; MAJOR where the code may have a reason, CRITICAL for code no library "
+                 "needs: code fetched and run, a reverse shell, a beacon to a data-capture service.")
+_RUST_START_WHY = ("A function marked #[ctor], placed in a load section (.init_array) or exported as C's main runs "
+                   "before Rust's own main in every program the crate is linked into: an import-time payload's "
+                   "place. MAJOR where the code may have a reason; CRITICAL for code no library needs.")
+_USE_RISK_WHY = ("A payload need not run on install or import to reach you: a logger's constructor, a middleware or a "
+                 "script the package spawns runs it the first time your code uses the package. These are the shapes "
+                 "no library needs: code fetched and run, a reverse shell, hidden PowerShell, credentials sent to an "
+                 "exfiltration service, a beacon to a data-capture service.")
+_GO_GENERATE_WHY = ("A //go:generate line names a command for go generate to run. Nothing runs it when the module is "
+                    "built or imported; it runs when someone runs go generate in the module's folders, which is a "
+                    "developer's step, so it is listed rather than judged.")
+
+
+def _show(text, limit):
+    """`text` on one line, at most `limit` characters."""
+    text = " ".join(str(text).split())
+    return text if len(text) <= limit else text[:limit - 1] + "…"
 
 
 class _ArtifactScan:
@@ -2022,6 +2069,9 @@ class _ArtifactScan:
             self.scan_source(rel, text, "py")
             return
         lang = lazaret.dep_source_lang(ext)
+        code = PACKAGE_CODE.get(self.artifact)
+        if lang is None and code is not None and ext in code[1] and not _never_built(self.artifact, rel):
+            lang = code[0]                       # a Go module's .go, a crate's .rs (Part C)
         if lang is not None:
             text, extra = lazaret.decode_member(rel, raw)
             self.add_decode_issues(extra)
@@ -2598,6 +2648,125 @@ class _ArtifactScan:
             if issue is not None:
                 self.issues.append(issue)
 
+    def _go_mods(self):
+        """[(rel, text, gomod.parse's answer)] of the go.mod in a Go module's root
+        directory ("<path>@<version>/"; the member paths have lost the host, so
+        its module line names the module). Go refuses a zip with another root;
+        this reads each."""
+        out = []
+        for rel in sorted(r for r in self.deferred if _go_root_file(r) == "go.mod"):
+            text = self.deferred[rel].decode("utf-8", "replace")
+            out.append((rel, text, _gomod.parse(text)))
+        return out
+
+    def _package_code(self):
+        """Part C (0.1.9): a Go module's or a crate's code read for what it
+        does, by the engine's readers (G-1: engine.go_package; R-1:
+        engine.rs_crate), with the tests a package's JavaScript and Python
+        get for the same moment and the same reasons and severities:
+        - Go: the code a package's init functions, package-level variables'
+          initializers and cgo constructors reach runs when any program that
+          imports the package starts: the import-time test (SC-IMPORT-RISK);
+        - Rust: a build script, and a procedural-macro crate's code, run on
+          the machine that builds a dependent: the install-script test
+          (SC-INSTALL-HOOK, CRITICAL); #[ctor] and load sections run before
+          a program's main: the import-time test;
+        - the rest runs when the module's or the crate's code is called: its
+          strong reasons are SC-USE-RISK (CRITICAL), as for _use_time_code,
+          within the same bounds (useTime says how much was read).
+        A module's //go:generate commands are listed (SC-GO-GENERATE, INFO):
+        they run only when someone runs go generate. Code larger than
+        PACKAGE_CODE_CHARS is not read (SC-TRUNCATED: INCOMPLETE)."""
+        code = PACKAGE_CODE.get(self.artifact)
+        if code is None:
+            return
+        lang, _exts, others = code
+        rels = sorted(rel for rel, (text, lg) in self.sources.items() if lg == lang and text is not None)
+        if not rels:
+            return
+        texts = {rel: self.sources[rel][0] for rel in rels}
+        for rel in sorted(self.deferred):
+            if os.path.splitext(rel)[1].lower() in others:
+                texts[rel] = self.deferred[rel].decode("utf-8", "replace")
+        order = sorted(texts)
+        place = _go_root_file if self.artifact == "gomod" else (lambda r: r)
+        files = [(place(rel), texts[rel]) for rel in order]
+        size = sum(len(t) for _p, t in files)
+        what = "module" if self.artifact == "gomod" else "crate"
+        if size > PACKAGE_CODE_CHARS:
+            self.truncate(rels[0], f"the {what}'s code ({size:,} characters) is more than the reader takes at once "
+                                   f"({PACKAGE_CODE_CHARS:,}), so it was not read")
+            return
+        self._deadline(rels[0])
+        if self.artifact == "gomod":
+            mods = self._go_mods()
+            module = mods[0][2]["module"] if mods else None
+            answer = _engine.go_package(files, module=module, use_file_chars=USE_RISK_MAX_CHARS,
+                                        use_chars=USE_RISK_CHARS)
+            build = macros = None
+        else:
+            from lazaret.registry.ecosystems import crates as _crates
+            manifest = self.deferred.get("Cargo.toml", b"").decode("utf-8", "replace")
+            script, lib, proc_macro = _crates.ECOSYSTEM.layout({"Cargo.toml": manifest}, self.members)
+            answer = _engine.rs_crate(files, build=script, proc_macro=proc_macro, lib=lib,
+                                      use_file_chars=USE_RISK_MAX_CHARS, use_chars=USE_RISK_CHARS)
+            build, macros = answer.get("build"), answer.get("macros")
+        at = lambda f: order[f["file"]] if 0 <= f.get("file", -1) < len(order) else rels[0]
+
+        def issue(rule, sev, rel, line, msg, why, fix):
+            self.issues.append(lazaret.mk_issue({"id": rule, "name": _PACKAGE_RULE_NAMES[rule], "type": "HOTSPOT",
+                                                 "sev": sev, "msg": msg, "why": why, "fix": fix,
+                                                 "ref": "CWE-506 · Supply chain"},
+                                                rel, line, (texts.get(rel) or "").split("\n")))
+
+        for found, how, why in ((build, "is the crate's build script: cargo runs it on the machine that builds any "
+                                        "crate that depends on it", _BUILD_SCRIPT_WHY),
+                                (macros, "is a procedural macro: it runs inside the compiler of every crate that uses "
+                                         "it", _PROC_MACRO_WHY)):
+            if found and found.get("reasons"):
+                rel = at(found)
+                issue("SC-INSTALL-HOOK", "CRITICAL", rel, found.get("line") or 1,
+                      f"{rel} {how}, and it {'; and '.join(found['reasons'])}.", why,
+                      "Do not build with this crate; report it to crates.io.")
+        start_how, start_why = (("runs when any program that imports its package starts (init functions, "
+                                 "package-level variables' initializers, cgo constructors)", _GO_START_WHY)
+                                if self.artifact == "gomod" else
+                                ("runs before a program's main (#[ctor], a load section, an exported main)",
+                                 _RUST_START_WHY))
+        for found in answer.get("start") or []:
+            reasons = found.get("reasons") or []
+            if reasons:
+                rel = at(found)
+                issue("SC-IMPORT-RISK", lazaret.import_time_severity(reasons), rel, found.get("line") or 1,
+                      f"{rel} {start_how}, and it {'; and '.join(reasons)}.", start_why,
+                      "Read that code: what does it run, and where does it send what it collects?")
+        for found in answer.get("uses") or []:
+            strong = [r for r in found.get("reasons") or [] if r.startswith(lazaret._STRONG_IMPORT_REASONS)]
+            if strong:
+                rel = at(found)
+                issue("SC-USE-RISK", "CRITICAL", rel, found.get("line") or 1,
+                      f"{rel} {'; and '.join(strong)}. Nothing runs it at build or start: it runs when the "
+                      f"{what}'s code is called.", _USE_RISK_WHY,
+                      f"Don't use the {what}; report it to its registry.")
+        generate = answer.get("generate") or []
+        if generate:
+            k, line, cmd = generate[0]
+            rel = order[k] if 0 <= k < len(order) else rels[0]
+            more = f" (and {len(generate) - 1:,} more)" if len(generate) > 1 else ""
+            issue("SC-GO-GENERATE", "INFO", rel, line,
+                  f"{rel} has `{_show(cmd, 200)}`{more}: go generate runs such commands when someone runs it in "
+                  f"the module's folders; a build never does.", _GO_GENERATE_WHY,
+                  "Read the commands before running go generate in this module.")
+        read = answer.get("useRead") or {}
+        mine = {"files": int(read.get("files", 0)), "ofFiles": int(read.get("ofFiles", 0)),
+                "chars": int(read.get("chars", 0)), "ofChars": int(read.get("ofChars", 0)),
+                "boundChars": USE_RISK_CHARS}
+        if self.use_time is None:
+            self.use_time = mine
+        else:
+            for key in ("files", "ofFiles", "chars", "ofChars"):
+                self.use_time[key] = self.use_time.get(key, 0) + mine[key]
+
     def _lookalike_names(self):
         """SC-TYPOSQUAT (MAJOR, 0.1.8): the release's own name, or a
         dependency it declares, one change from a popular package's
@@ -2607,12 +2776,7 @@ class _ArtifactScan:
         (0.1.9, N-3): the module line of the module's go.mod and the paths
         it requires."""
         if self.artifact == "gomod":
-            # the go.mod in the module's root directory ("<path>@<version>/"; the
-            # member paths have lost the host, so its module line names the module).
-            # Go refuses a zip with another root; this one reads each.
-            for rel in sorted(r for r in self.deferred if _go_root_file(r) == "go.mod"):
-                text = self.deferred[rel].decode("utf-8", "replace")
-                parsed = _gomod.parse(text)
+            for rel, text, parsed in self._go_mods():
                 deps = {p for p, _v, _i in parsed["require"]} | {p for p, _i in parsed["unversioned"]}
                 self.issues.extend(_lookalike.issues("go", parsed["module"], deps, rel, text))
             return
@@ -2712,6 +2876,8 @@ class _ArtifactScan:
             reachable = self._phase("the files the entry points load", self._reachable)
             self._phase("the import-time code", self._import_time_code,
                         reachable if reachable is not None else set(self.entries))
+            if self.artifact in PACKAGE_CODE:
+                self._phase(f"the {'module' if self.artifact == 'gomod' else 'crate'}'s code", self._package_code)
             self._phase("the agent-hijack check", self._agent_hijack)
             self._phase("the package's names", self._lookalike_names)
             self._phase("the dependencies nothing uses", self._unused_dependencies)

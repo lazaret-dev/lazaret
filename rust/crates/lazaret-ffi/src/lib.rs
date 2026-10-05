@@ -111,7 +111,7 @@ fn handle_inner(req: &[u8]) -> (i32, String) {
         Some(t) => t,
         None => return error(STATUS_ERROR, "text is not UTF-8"),
     };
-    match api::call(name, &args, &text) {
+    match api::call_owned(name, &args, text) {
         Ok(v) => (STATUS_OK, json::write(&v)),
         Err(CallError::Exhausted) => error(STATUS_EXHAUSTED, "work budget spent"),
         Err(CallError::Unknown(n)) => error(STATUS_ERROR, &format!("unknown call {}", n)),

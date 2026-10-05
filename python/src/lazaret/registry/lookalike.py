@@ -32,8 +32,8 @@ browser polyfills, so they are not compared.
 Go module paths (0.1.9, N-3) are compared part by part, since anyone can
 create an owner on GitHub but only its owner can add a repository to it: a
 path is one of a well-known module's when its owner is one change from that
-module's, differs from it only in its separators, or gains or loses a word
-like "-go" (GO_AFFIXES), with the repository the same (github.com/shopsprint/
+module's, differs from it only in its separators, or gains a word like "-go"
+(GO_AFFIXES), with the repository the same (github.com/shopsprint/
 decimal and github.com/boltdb-go/bolt, both published to squat on
 github.com/shopspring/decimal and github.com/boltdb/bolt); when its host is
 one change from the module's, with the rest the same (githab.com/spf13/
@@ -68,8 +68,10 @@ _DATA = {}
 #: github.com/go-NAME/NAME and gopkg.in/OWNER/NAME.vN github.com/OWNER/NAME.
 GO_FORGES = frozenset({"github.com", "gitlab.com", "bitbucket.org", "codeberg.org", "gitee.com", "git.sr.ht",
                        "gitea.com", "framagit.org", "salsa.debian.org", "launchpad.net", "gopkg.in"})
-#: Words an owner may gain or lose, with or without a separator:
-#: boltdb-go for boltdb, sql-driver for go-sql-driver.
+#: Words an owner may gain, with or without a separator: boltdb-go for
+#: boltdb. (Not lose: an author who moved a module to an organization so
+#: named left the old path, github.com/xdg/scram for github.com/xdg-go/scram,
+#: in the go.mod of the modules that required it, Shopify/sarama's among them.)
 GO_AFFIXES = ("go", "golang", "dev", "lib", "libs", "pkg", "io", "hq", "official", "org", "team", "labs", "oss",
               "inc", "sdk")
 MIN_GO_OWNER = 4
@@ -286,8 +288,6 @@ def _go_change(mine, theirs, affixes=True):
             for piece, after in ((sep + word, True), (word + sep, False)):
                 if mine == (theirs + piece if after else piece + theirs):
                     return f'is "{theirs}" with "{piece}" added'
-                if theirs == (mine + piece if after else piece + mine):
-                    return f'is "{theirs}" without its "{piece}"'
     return None
 
 

@@ -779,7 +779,7 @@ class BuildCommandTests(FlowCase):
         # (with --locked: cargo builds the lock that was checked, and stops rather than resolve to crates it was not: CG-9)
         self.assertEqual(self.commands(), [["update", "--workspace"], ["build", "--locked", "--release"]])
         self.assertIn("lazaret guard: 2 crates to check (Cargo.lock)\n", out)
-        self.assertIn("lazaret guard: checked 2 INCOMPLETE", out)
+        self.assertIn("lazaret guard: checked 2 OK", out)
         self.assertNotIn("installed but not checked", out)
         self.assertIn('name = "good"', self.read(self.lock))                               # (the resolution stays)
 
@@ -1040,7 +1040,7 @@ class LockedAndPlanTests(FlowCase):
         self.assertEqual((doc["tool"], doc["command"], doc["blocked"], doc["exitCode"], doc["installed"]),
                          ("cargo", ["build"], 1, 1, False))
         self.assertEqual({(p["ecosystem"], p["name"], p["verdict"]) for p in doc["packages"]},
-                         {("crates", "leaf", "INCOMPLETE"), ("crates", "evil", "SUSPICIOUS")})
+                         {("crates", "leaf", "OK"), ("crates", "evil", "SUSPICIOUS")})
 
     def test_json_says_whether_the_command_ran_and_what_it_returned(self):
         report = os.path.join(self.tmp, "report.json")
@@ -1072,9 +1072,24 @@ class ResolvingCommandTests(FlowCase):
         self.assertEqual(code, 0, out)
         self.assertEqual(self.commands(), [["add", "good"]])
         self.assertIn("1 crate to check (what the command added to Cargo.lock)", out)
-        self.assertIn("checked 1 INCOMPLETE", out)
+        self.assertIn("checked 1 OK", out)
         self.assertIn('good = "1"', self.read(self.manifest))
         self.assertEqual(self.requested("/dl/"), ["/dl/good/good-1.0.0.crate"])               # (leaf was there before: not fetched)
+
+    def test_a_crate_whose_build_script_runs_a_download_is_blocked(self):
+        """Part C (0.1.9): a crate's Rust code is read (it was SC-UNREAD-CODE, INCOMPLETE, and built): a build script that runs a
+        download through a shell is SUSPICIOUS, and the guard blocks the crate before cargo builds it."""
+        before = self.lock_of(("leaf", "1.0.0"))
+        self.write(self.lock, before)
+        self.plan = {"add": [["append", self.manifest, 'buildevil = "1"\n'],
+                             ["lock", self.lock_of(("leaf", "1.0.0"), ("buildevil", "1.0.0"))]]}
+        report = os.path.join(self.tmp, "report.json")
+        code, out = self.run_guard("--json", report, "cargo", "add", "buildevil")
+        self.assertEqual(code, 1, out)
+        self.assertIn("BLOCKED    buildevil@1.0.0: SUSPICIOUS", out)
+        self.assertEqual(self.read(self.lock), before)
+        (pkg,) = json.loads(self.read(report))["packages"]
+        self.assertTrue(any("SC-INSTALL-HOOK" in i and "build.rs" in i for i in pkg["indicators"]), pkg)
 
     def test_json_says_an_add_was_made(self):
         self.write(self.lock, self.lock_of(("leaf", "1.0.0")))
@@ -1266,7 +1281,7 @@ class InstallTests(FlowCase):
         self.assertEqual(self.commands()[-1], ["install", "good@=1.0.0", "foo_bar@=0.2.0"])
         self.assertEqual(sorted(p for p in self.requested("/dl/")), ["/dl/foo_bar/foo_bar-0.2.0.crate", "/dl/good/good-1.0.0.crate",
                                                                     "/dl/leaf/leaf-1.0.0.crate"])
-        self.assertEqual(sorted(c for c in out.split("\n") if "checked" in c), ["lazaret guard: checked 3 INCOMPLETE"])
+        self.assertEqual(sorted(c for c in out.split("\n") if "checked" in c), ["lazaret guard: checked 3 OK"])
 
     def test_the_options_after_install_go_to_cargo_as_given(self):
         self.plan = {"install": self.unpack("good-1.0.0", "leaf-1.0.0")}
@@ -1333,7 +1348,7 @@ class InstallTests(FlowCase):
         self.plan = {"install": self.unpack("good-1.0.0", "leaf-1.0.0")}
         code, out = self.run_guard("cargo", "install", "--locked", "good")
         self.assertEqual(code, 0, out)
-        self.assertIn("checked 2 INCOMPLETE", out)
+        self.assertIn("checked 2 OK", out)
 
     def test_locked_and_a_hostile_crate_in_the_published_lock_blocks(self):
         published = cs.lock_text([("tool", "3.0.0", None, ["evil"]), ("evil", "1.0.0", self.sums["evil"], [])])
@@ -1422,7 +1437,7 @@ class RealCargoTests(TmpCase):
         code, out = self.guard("cargo", "build")
         self.assertEqual(code, 0, out)
         self.assertIn("lazaret guard: 2 crates to check (Cargo.lock)\n", out)
-        self.assertIn("lazaret guard: checked 2 INCOMPLETE", out)
+        self.assertIn("lazaret guard: checked 2 OK", out)
         self.assertNotIn("installed but not checked", out)
         self.assertTrue(os.path.isdir(os.path.join(self.tmp, "target", "debug")))
         self.assertTrue(os.path.isdir(os.path.join(self.home, "registry", "src")))
@@ -1468,7 +1483,7 @@ class RealCargoTests(TmpCase):
         root = os.path.join(self.tmp, "root")
         code, out = self.guard("cargo", "install", "--root", root, "tool")
         self.assertEqual(code, 0, out)
-        self.assertIn("lazaret guard: checked 2 INCOMPLETE", out)
+        self.assertIn("lazaret guard: checked 2 OK", out)
         self.assertTrue(os.path.exists(os.path.join(root, "bin", "tool")))
 
     def test_cargo_install_of_a_tool_with_a_hostile_dependency_installs_nothing(self):

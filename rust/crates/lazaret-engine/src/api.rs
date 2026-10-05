@@ -166,6 +166,33 @@ pub fn call(name: &str, args: &Value, text: &[u32]) -> Result<Value, CallError> 
     }
 }
 
+/// `call`, given the text to keep: a module's or a crate's reading (go_package, rs_crate) holds every file of it
+/// at once, so it takes the text as it is rather than a copy of each file (a copy doubled what 200 MB of Go held:
+/// aws-sdk-go's 207 million characters were 1.7 GB of text in the engine before a tree was built). The other
+/// calls borrow it.
+pub fn call_owned(name: &str, args: &Value, text: Vec<u32>) -> Result<Value, CallError> {
+    if name != "go_package" && name != "rs_crate" {
+        return call(name, args, &text);
+    }
+    let steps = match args.get("budget").and_then(|b| b.as_i64()) {
+        Some(b) if b > 0 => b as u64,
+        _ => crate::budget::DEFAULT_STEPS,
+    };
+    let mut text = Some(text);
+    let out = crate::budget::call_with(steps, || {
+        let text = text.take().unwrap_or_default();
+        if name == "go_package" {
+            go_package(args, text)
+        } else {
+            rs_crate(args, text)
+        }
+    });
+    match out {
+        Ok(r) => r,
+        Err(_) => Err(CallError::Exhausted),
+    }
+}
+
 /// batch: {"calls": [[name, args, text], …], "threads": n} ->
 /// [{"ok": value} | {"error": …, "exhausted": bool}]: many calls in one
 /// crossing of the boundary, each with its own budget, answered in the
@@ -377,8 +404,8 @@ fn dispatch(name: &str, args: &Value, text: &[u32]) -> Result<Value, CallError> 
         }
         "pyre.escape" => Value::Str(pyre::escape(text)),
         "cross_file" => cross_file(p, args, text)?,
-        "rs_crate" => rs_crate(p, args, text)?,
-        "go_package" => go_package(args, text)?,
+        "rs_crate" => rs_crate(args, text.to_vec())?,
+        "go_package" => go_package(args, text.to_vec())?,
         "js_flow" => js_flow(args, text)?,
         "py_flow" => py_flow(args, text)?,
         "js_parse" | "js_parse_file" => {
@@ -898,25 +925,32 @@ fn cross_file(p: &Pack, args: &Value, text: &[u32]) -> Result<Value, CallError> 
 /// "uses": [finding, …], "read": [file index, …], "useRead": {files, chars,
 /// ofFiles, ofChars}}. A finding is {"file": index, "reasons": [str, …],
 /// "line": n}. Each crate gets the call's budget (crate::rsread::read_crate).
-fn rs_crate(_p: &Pack, args: &Value, text: &[u32]) -> Result<Value, CallError> {
-    use crate::rsread::{read_crate, Found, Options};
-    let bad = |m: &str| CallError::BadArgs(format!("rs_crate: {}", m));
-    let items = args.get("files").and_then(|f| f.as_arr()).ok_or_else(|| bad("files"))?;
-    let mut files: Vec<(PyStr, PyStr)> = Vec::with_capacity(items.len());
+/// The files of a package's call: [[path, length], …], their contents the text, concatenated -> (path, where its
+/// contents start, where they end), or the reason the arguments are refused.
+fn package_files(args: &Value, text_len: usize) -> Result<Vec<(PyStr, usize, usize)>, &'static str> {
+    let items = args.get("files").and_then(|f| f.as_arr()).ok_or("files")?;
+    let mut files = Vec::with_capacity(items.len());
     let mut at = 0usize;
     for item in items {
-        let parts = item.as_arr().ok_or_else(|| bad("a file is not [path, length]"))?;
-        let path = parts.first().and_then(|v| v.as_str()).ok_or_else(|| bad("a file's path"))?.to_vec();
-        let len = parts.get(1).and_then(|v| v.as_i64()).filter(|&n| n >= 0).ok_or_else(|| bad("a file's length"))? as usize;
-        if at + len > text.len() {
-            return Err(bad("the files' lengths run past the text"));
+        let parts = item.as_arr().ok_or("a file is not [path, length]")?;
+        let path = parts.first().and_then(|v| v.as_str()).ok_or("a file's path")?.to_vec();
+        let len = parts.get(1).and_then(|v| v.as_i64()).filter(|&n| n >= 0).ok_or("a file's length")? as usize;
+        if at + len > text_len {
+            return Err("the files' lengths run past the text");
         }
-        files.push((path, text[at..at + len].to_vec()));
+        files.push((path, at, at + len));
         at += len;
     }
-    if at != text.len() {
-        return Err(bad("the files' lengths do not add up to the text"));
+    if at != text_len {
+        return Err("the files' lengths do not add up to the text");
     }
+    Ok(files)
+}
+
+fn rs_crate(args: &Value, text: Vec<u32>) -> Result<Value, CallError> {
+    use crate::rsread::{read_crate, Found, Options};
+    let bad = |m: &str| CallError::BadArgs(format!("rs_crate: {}", m));
+    let files = package_files(args, text.len()).map_err(bad)?;
     let flag = |k: &str, d: bool| match args.get(k) {
         Some(Value::Bool(b)) => *b,
         _ => d,
@@ -930,7 +964,7 @@ fn rs_crate(_p: &Pack, args: &Value, text: &[u32]) -> Result<Value, CallError> {
     }
     let answer = on_own_stack(move || {
         let pack = crate::pack::current();
-        let refs: Vec<(PyStr, &[u32])> = files.iter().map(|(p, t)| (p.clone(), t.as_slice())).collect();
+        let refs: Vec<(PyStr, &[u32])> = files.iter().map(|(p, a, b)| (p.clone(), &text[*a..*b])).collect();
         read_crate(&pack, &refs, &opts)
     });
     let finding = |f: &Found| {
@@ -969,25 +1003,10 @@ fn rs_crate(_p: &Pack, args: &Value, text: &[u32]) -> Result<Value, CallError> {
 /// line, text], …], "useRead": {files, chars, ofFiles, ofChars}}. A finding
 /// is {"file": index, "reasons": [str, …], "line": n}. Each module gets the
 /// call's budget (crate::goread::read_module).
-fn go_package(args: &Value, text: &[u32]) -> Result<Value, CallError> {
+fn go_package(args: &Value, text: Vec<u32>) -> Result<Value, CallError> {
     use crate::goread::{read_module, Found, Options};
     let bad = |m: &str| CallError::BadArgs(format!("go_package: {}", m));
-    let items = args.get("files").and_then(|f| f.as_arr()).ok_or_else(|| bad("files"))?;
-    let mut files: Vec<(PyStr, PyStr)> = Vec::with_capacity(items.len());
-    let mut at = 0usize;
-    for item in items {
-        let parts = item.as_arr().ok_or_else(|| bad("a file is not [path, length]"))?;
-        let path = parts.first().and_then(|v| v.as_str()).ok_or_else(|| bad("a file's path"))?.to_vec();
-        let len = parts.get(1).and_then(|v| v.as_i64()).filter(|&n| n >= 0).ok_or_else(|| bad("a file's length"))? as usize;
-        if at + len > text.len() {
-            return Err(bad("the files' lengths run past the text"));
-        }
-        files.push((path, text[at..at + len].to_vec()));
-        at += len;
-    }
-    if at != text.len() {
-        return Err(bad("the files' lengths do not add up to the text"));
-    }
+    let files = package_files(args, text.len()).map_err(bad)?;
     let mut opts = Options { module: opt_str(args, "module"), ..Options::default() };
     if let Some(n) = opt_int(args, "use_file_chars").filter(|&n| n >= 0) {
         opts.use_file_chars = n as usize;
@@ -997,7 +1016,7 @@ fn go_package(args: &Value, text: &[u32]) -> Result<Value, CallError> {
     }
     let answer = on_own_stack(move || {
         let pack = crate::pack::current();
-        let refs: Vec<(PyStr, &[u32])> = files.iter().map(|(p, t)| (p.clone(), t.as_slice())).collect();
+        let refs: Vec<(PyStr, &[u32])> = files.iter().map(|(p, a, b)| (p.clone(), &text[*a..*b])).collect();
         read_module(&pack, &refs, &opts)
     });
     let finding = |f: &Found| {

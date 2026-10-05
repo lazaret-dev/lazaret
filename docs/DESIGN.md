@@ -830,17 +830,34 @@ ecosystem, name, version and digest and is discarded when `ENGINE_VERSION`
 changes. Scans run in `spawn` worker processes (`--jobs`), downloads in
 threads; a stuck worker is terminated at exit.
 
-**What is not read is said (N-1, 0.1.9).** `guard go` and `guard cargo` scan
-a module's zip and a crate's archive like any other (`gomod`, `crate`
-artifacts), but the engine has no Go or Rust detectors yet, so the code that
-runs when they are built or used is not read. `repo._scan_artifact` counts
-it (`UNREAD_CODE`, `_unread_code`: a Go module's `.go` files but its tests,
-`testdata/` and the directories go ignores; a crate's `.rs` files but its
-`tests/`, `benches/` and `examples/`) and adds one SC-UNREAD-CODE finding,
-which `decide_verdict` counts with the truncation rules: INCOMPLETE, never
-OK. A guard that said OK for a crate whose `build.rs` it never read would
-say more than it knows (the readiness review's finding 2). When the Go and
-Rust detectors land, `UNREAD_CODE` loses their entries.
+**What is not read is said (N-1, 0.1.9).** Code in a language the engine
+has no reader for is counted (`UNREAD_CODE`, `_unread_code`: not its test
+code) and gets one SC-UNREAD-CODE finding, which `decide_verdict` counts with
+the truncation rules: INCOMPLETE, never OK. A guard that said OK for a crate
+whose `build.rs` it never read would say more than it knows (the readiness
+review's finding 2). A Go module's `.go` files and a crate's `.rs` files were
+such code until Part C; `UNREAD_CODE` has no entry now.
+
+**A module's and a crate's code (Part C, 0.1.9).** `_ArtifactScan` reads a
+`gomod` artifact's `.go` files and a `crate`'s `.rs` files as source
+(`PACKAGE_CODE`): each gets the file rules in dependency mode, as a
+package's JavaScript and Python do, and `_package_code` hands them all to
+the engine's reader of the language (`engine.go_package` with the cgo
+packages' `.c` and `.h` files and the root `go.mod`'s module path;
+`engine.rs_crate` with the build script, the library's root and whether it
+is a procedural macro, from `Cargo.toml` as cargo reads it:
+`ecosystems/crates.py`'s `layout`). What the readers find is a finding of
+the test the same moment gets in JavaScript and Python: what Go's init code
+reaches and a Rust `#[ctor]` are SC-IMPORT-RISK (`import_time_severity`); a
+build script and a procedural-macro crate are SC-INSTALL-HOOK, CRITICAL; the
+strong reasons of the rest are SC-USE-RISK, read within `USE_RISK_CHARS` as
+`_use_time_code` reads (its counts join `useTime`). `//go:generate` lines are
+listed (SC-GO-GENERATE, INFO). A file no build of a dependent compiles (Go's
+`*_test.go`, `testdata/`, `vendor/`, a name with `_` or `.` first; a crate's
+`tests/`, `benches/`, `examples/`: `_never_built`) gets neither the reader
+nor the file rules. A package over `PACKAGE_CODE_CHARS` (300 million
+characters) is not read (SC-TRUNCATED): the reader holds all of it at once,
+and aws-sdk-go v1's 207 million characters of Go peak at 2.4 GB.
 
 **Go and Cargo (0.1.9).** go can be pointed at a proxy, so the Go guard is a
 proxy (`LocalGoProxy`, 127.0.0.1, for the one command) that relays the

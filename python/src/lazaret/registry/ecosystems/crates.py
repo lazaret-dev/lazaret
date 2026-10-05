@@ -236,22 +236,34 @@ class Crates(base.Ecosystem):
             return None
         return base.finish_member_path(value.replace("\\", "/"))[0]
 
-    def run_targets(self, kind, manifests, members):
+    def layout(self, manifests, members):
+        """(its build script, its library's root, whether that is a procedural macro) of a crate whose Cargo.toml
+        is in `manifests` and whose files are `members`: the build script is `build.rs` or the path `package.build`
+        names (none when it is `false`, or when the file is not in the crate), the library's root `src/lib.rs` or
+        `[lib] path` (None when not in the crate)."""
         present = {m for m in (members or ()) if isinstance(m, str)}
         doc = self._cargo(manifests)
         pkg = doc.get("package") if isinstance(doc.get("package"), dict) else doc.get("project")
         pkg = pkg if isinstance(pkg, dict) else {}
-        entries, scripts = set(), set()
-        build = pkg.get("build")
+        build, script = pkg.get("build"), None
         if build is not False:
             script = self._path(build) if isinstance(build, str) else "build.rs"
-            if script in present:
-                scripts.add(script)
+            script = script if script in present else None
         lib = doc.get("lib") if isinstance(doc.get("lib"), dict) else {}
         root = self._path(lib.get("path")) if isinstance(lib.get("path"), str) else "src/lib.rs"
-        if root in present:
+        root = root if root in present else None
+        return script, root, root is not None and (lib.get("proc-macro") is True or lib.get("proc_macro") is True)
+
+    def run_targets(self, kind, manifests, members):
+        present = {m for m in (members or ()) if isinstance(m, str)}
+        doc = self._cargo(manifests)
+        entries, scripts = set(), set()
+        script, root, proc_macro = self.layout(manifests, members)
+        if script:
+            scripts.add(script)
+        if root:
             entries.add(root)
-            if lib.get("proc-macro") is True or lib.get("proc_macro") is True:
+            if proc_macro:
                 scripts.add(root)                              # (it runs inside the compiler of every crate that uses it)
         bins = doc.get("bin") if isinstance(doc.get("bin"), list) else []
         for b in bins:

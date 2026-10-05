@@ -70,7 +70,7 @@ project is pre-1.0, so the 0.x API may still change.
   requires, like a well-known module's is SC-TYPOSQUAT (MAJOR), as an npm or PyPI name is:
   its owner one character from that module's owner (`github.com/shopsprint/decimal` for
   `github.com/shopspring/decimal`), with its separators changed, or with a word like
-  `-go` added or taken away (`github.com/boltdb-go/bolt` for `github.com/boltdb/bolt`),
+  `-go` added (`github.com/boltdb-go/bolt` for `github.com/boltdb/bolt`),
   the repository the same; its host one character from the module's, the rest the same;
   a gopkg.in name one character from one (`gopkg.in/yanl.v3`). Anyone can create an owner
   on GitHub, and only its owner can add a repository to it, so the owner is where a
@@ -85,6 +85,26 @@ project is pre-1.0, so the 0.x API may still change.
   vendors give none. The guard and the registry read the `go.mod` in a module zip's root;
   `scripts/update-popular-names.py --go` rebuilds the list from local copies of its
   sources.
+- **A Go module's and a crate's code is read where they are scanned (Part C, rule set 2.31.0).**
+  `lazaret guard go`, `lazaret guard cargo` and the registry's scans of a module zip or a
+  `.crate` hand its code to the engine's Go and Rust readers (above), and a module or a
+  crate is OK, WARN or SUSPICIOUS for what that code does: it was INCOMPLETE whatever it
+  held (SC-UNREAD-CODE, N-1), and passed by default. What a Go package's `init`
+  functions, package-level initializers and cgo constructors reach is SC-IMPORT-RISK; a
+  crate's build script and a procedural macro are SC-INSTALL-HOOK, CRITICAL, and a
+  `#[ctor]` SC-IMPORT-RISK; the strong reasons of the rest are SC-USE-RISK, read within
+  the same 24,000,000 characters as a package's JavaScript and Python. `//go:generate`
+  commands are listed (SC-GO-GENERATE, INFO). Every `.go` and `.rs` file gets the file
+  rules too, except test code no build of a dependent compiles (`*_test.go`, `testdata/`,
+  `vendor/`, a file named with `_` or `.` first; `tests/`, `benches/`, `examples/`), which
+  is not read at all: rivo/uniseg's line-break tests hold escaped URLs. A module or a crate
+  over 300 million characters is INCOMPLETE: a reader holds all of it at once, and the call
+  now takes its text without copying each file (aws-sdk-go v1's 207 million characters
+  peak at 2.4 GB, from 3.0 GB). On Ubuntu 24.04's packaged Go modules and crates whose
+  licences allow reading them (1,953 and 2,120), none is SUSPICIOUS; 39 and 30 are WARN,
+  for base64 and hex constants, test vectors outside test folders, archives and binaries,
+  every one read; 2 are INCOMPLETE (Debian packs aws-sdk-go-v2's and azure-sdk-for-go's
+  modules as one tree). The npm and PyPI scans are unchanged.
 - **Where a run's time goes: `--timings`.** `lazaret-registry` and `lazaret guard` print on
   stderr the seconds spent in the network, reading archives, the engine (by call: the
   file scan, the import-time test, the cross-file follower, …), the package manager (the

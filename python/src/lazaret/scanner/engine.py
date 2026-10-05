@@ -189,6 +189,46 @@ def install_script_risk(text, shell=True, command=False, lang=None):
     return _native.call("install_script_risk", args, text)
 
 
+def _package_call(name, files, args):
+    """One reading of a whole package (go_package, rs_crate): `files`, [(path, text)], cross the boundary as one text
+    with each file's length, and the answer's file indexes are theirs (raises _native.NativeError when the engine
+    could not answer)."""
+    args = dict(_budget(args), files=[[path, len(text)] for path, text in files])
+    return _native.call(name, args, "".join(text for _path, text in files))
+
+
+def go_package(files, module=None, use_file_chars=None, use_chars=None):
+    """The Go reader (G-1, docs/RUST_ENGINE.md section 22) on a module's files: [(path below the module's root, text)]
+    of its .go files and its cgo packages' .c and .h files; `module` is its go.mod's module path. -> {"start": [{"file",
+    "reasons", "line"}, …] (what init code reaches: the import-time test), "uses": […] (the rest: every reason, of
+    which SC-USE-RISK counts the strong ones), "read", "unparsed", "generate", "linkname", "useRead"}."""
+    args = {}
+    if module:
+        args["module"] = module
+    if use_file_chars is not None:
+        args["use_file_chars"] = int(use_file_chars)
+    if use_chars is not None:
+        args["use_chars"] = int(use_chars)
+    return _package_call("go_package", files, args)
+
+
+def rs_crate(files, build=None, proc_macro=False, lib=None, use_file_chars=None, use_chars=None):
+    """The Rust reader (R-1, docs/RUST_ENGINE.md section 21) on a crate's .rs files: [(path below the crate's root,
+    text)]; `build` is its build script's path, `proc_macro` whether its library is a procedural macro, `lib` its
+    library's root. -> {"build": finding or None (the install-script test), "macros": finding or None, "start":
+    [finding, …] (#[ctor], load sections: the import-time test), "uses": […] (the rest), "read", "useRead"}."""
+    args = {"proc_macro": bool(proc_macro)}
+    if build:
+        args["build"] = build
+    if lib:
+        args["lib"] = lib
+    if use_file_chars is not None:
+        args["use_file_chars"] = int(use_file_chars)
+    if use_chars is not None:
+        args["use_chars"] = int(use_chars)
+    return _package_call("rs_crate", files, args)
+
+
 def spawned_scripts(text, lang=None):
     """[(base, path)] of the package scripts `text` (in `lang`, when known)
     starts (raises _native.NativeError when the engine could not answer)."""

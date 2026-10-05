@@ -2367,11 +2367,13 @@ before its payload hides nothing the text shows. (The bounds, the readings of
 every function of a moment and the fallback are the review of Oct 4, RR-1 to
 RR-11 in `audits/lazaret-go-rust-code-review-2026-10-04.md`.)
 
-Nothing changes for Python, JavaScript, Go or any other scan: `rs_crate` is a
-new call, and the install-script and import-time tests take a model's facts only
-when one is given (the text path is untouched, held identical on the benchmark
-and the recorded snapshots). The call that reads Go is §22's; the registry and
-guard wiring that drops the INCOMPLETE verdict follows.
+Nothing changes for Python or JavaScript: the install-script and import-time
+tests take a model's facts only when one is given (the text path is untouched,
+held identical on the benchmark and the recorded snapshots). The registry and
+the guard call `rs_crate` on every crate they scan (Part C, `repo.py`'s
+`_package_code`); the call takes the request's text as it is, without a copy
+of each file (`api::call_owned`). On Ubuntu 24.04's 2,122 packaged crates
+whose licences allow it, it reads 34,000 files in 26 s and finds nothing.
 
 ## 22. The Go reader (G-1)
 
@@ -2456,4 +2458,7 @@ steps, and a reading cut short has its text read by the text test as well.
 
 Go's standard library and the modules it vendors (`golang.org/x/…`), each
 package folder read as a module, give no finding at either moment (717 folders,
-6,121 files, 7 s). Nothing calls `go_package` yet, so no scan's answer changes.
+6,121 files, 7 s), and neither do Ubuntu 24.04's 1,953 packaged Go modules whose licences allow
+it (114,000 files, 49 s). The registry and the guard call `go_package` on every module zip they scan
+(Part C), with the text as it came (`api::call_owned`: the copy of each file it made doubled what a
+module held; aws-sdk-go v1, 207 million characters, now peaks at 2.4 GB, from 3.0 GB).

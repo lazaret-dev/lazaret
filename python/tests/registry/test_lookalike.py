@@ -9,8 +9,8 @@ package's own npm scope. Archives are built in memory; nothing runs.
 
 0.1.9 (N-3): a Go module's path, or one its go.mod requires, like a
 well-known module's (awesome-go's and Debian's): its owner one change from
-that module's, its separators changed or a word like "-go" added or taken
-away, with the repository the same; its host one change, with the rest the
+that module's, its separators changed or a word like "-go" added, with the
+repository the same; its host one change, with the rest the
 same; a gopkg.in name one change. Not a well-known module's owner or host,
 nor one of the module's own, nor a short owner with a short repository, nor
 another owner's module of the same name (a fork).
@@ -160,8 +160,6 @@ class GoLookalikeTests(unittest.TestCase):
                                               'is one change from "shopspring" (a character changed)'),
             "github.com/boltdb-go/bolt": ("github.com/boltdb/bolt", "owner", "boltdb-go",
                                           'is "boltdb" with "-go" added'),
-            "github.com/sql-driver/mysql": ("github.com/go-sql-driver/mysql", "owner", "sql-driver",
-                                            'is "go-sql-driver" without its "go-"'),
             "github.com/Spf-13/cobra/v2": ("github.com/spf13/cobra", "owner", "spf-13",
                                            'differs from "spf13" only in its separators'),
             "github.com/go-rediss/redis/v9": ("github.com/go-redis/redis", "owner", "go-rediss",
@@ -196,6 +194,9 @@ class GoLookalikeTests(unittest.TestCase):
                      "example.com/shopsprint", "x" * 600, "no-dot/x", "github.com/a b/c", "", None,
                      "go.uber.org/zapp", "golang.org/x/nett",   # a domain's owner owns every path below it
                      "google.golang.org/grpcc",
+                     # a word taken away: an author who moved a module to an organization so named left the old path
+                     # in what required it (Shopify/sarama's go.mod: github.com/xdg/scram, now github.com/xdg-go/scram)
+                     "github.com/xdg/scram", "github.com/sql-driver/mysql",
                      "github.com/spf24/cobra", "github.com/spf32/cobra"):     # two characters changed, not swapped
             with self.subTest(path):
                 self.assertIsNone(lookalike.go_lookalike(path))
