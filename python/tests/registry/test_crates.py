@@ -254,7 +254,9 @@ class ResolveTests(unittest.TestCase):
         for asked in ("1.2.3", "1.2.3+build.5", "1.2.3+other"):
             res, _ = resolve("demo", asked, doc)
             self.assertEqual(res[0], "1.2.3+build.5", asked)
-            self.assertEqual(res.artifacts[0]["url"], "https://static.crates.io/crates/demo/demo-1.2.3%2Bbuild.5.crate")
+            # (the version as cargo inserts it in the download URL: its `+` as it is, RM-3)
+            self.assertEqual(res.artifacts[0]["url"], "https://static.crates.io/crates/demo/demo-1.2.3+build.5.crate")
+            self.assertEqual(base.Fetch(crates.Crates(), None).check_url(res.artifacts[0]["url"]), res.artifacts[0]["url"])
             self.assertEqual(res.artifacts[0]["filename"], "demo-1.2.3+build.5.crate")
 
     def test_a_version_the_index_does_not_list_is_a_spec_error_that_names_it_safely(self):

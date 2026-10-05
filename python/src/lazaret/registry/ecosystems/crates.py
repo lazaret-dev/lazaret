@@ -163,7 +163,9 @@ class Crates(base.Ecosystem):
             rec = self._latest(records, name)
         crate = self.check_name(rec["name"])
         filename = f"{crate}-{rec['vers']}.crate"
-        url = f"https://{DOWNLOAD_HOST}/crates/{self.segment(crate)}/{self.segment(crate)}-{self.segment(rec['vers'])}.crate"
+        # (the name and the version as cargo inserts them, a version's `+` as it is (RM-3): both are checked, a name
+        # of [A-Za-z0-9_-] and a SemVer version, so neither holds a character a URL path would need escaped)
+        url = f"https://{DOWNLOAD_HOST}/crates/{crate}/{filename}"
         art = {"url": url, "container": "tgz", "artifact": "crate", "entry": rec, "filename": filename}
         return base.Resolution(rec["vers"], [art], [], {"name": crate, "yanked": rec["yanked"],
                                                        "rust_version": rec["rust_version"], "links": rec["links"]})
