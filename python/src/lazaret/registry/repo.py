@@ -64,6 +64,7 @@ from lazaret.registry import contentcache as _cache     # noqa: E402
 from lazaret.registry import lookalike as _lookalike    # noqa: E402
 from lazaret.registry import unused_deps as _unused     # noqa: E402
 from lazaret.scanner import engine as _engine           # noqa: E402
+from lazaret.scanner import gomod as _gomod             # noqa: E402
 from lazaret.scanner import timings                     # noqa: E402
 from lazaret.safexml import ElementTree as _safe_ET     # noqa: E402
 
@@ -1749,6 +1750,15 @@ def _unread_code(artifact, rel):
     return not (len(parts) > 1 and parts[0] in ("tests", "benches", "examples"))
 
 
+def _go_root_file(rel):
+    """The path of a Go module's member below its "<path>@<version>" root
+    directory (the member paths start below the module path's host; a
+    module whose path is a host alone has its root stripped)."""
+    parts = rel.split("/")
+    root = next((k for k, p in enumerate(parts) if "@" in p), -1)
+    return "/".join(parts[root + 1:])
+
+
 def _unread_code_issue(artifact, rels):
     """The SC-UNREAD-CODE finding for an artifact whose code in `rels`
     (sorted) nothing reads (N-1)."""
@@ -2043,7 +2053,9 @@ class _ArtifactScan:
             if kind == "sh":
                 self.shell[rel] = text
                 return
-        if self.deferred_bytes + len(raw) <= DEFERRED_TEXT_BUDGET:
+        if self.deferred_bytes + len(raw) <= DEFERRED_TEXT_BUDGET or (
+                # a module's go.mod (Go's limit is 16 MiB) is read for its names whatever came before it
+                self.artifact == "gomod" and len(raw) <= _gomod.MAX_GOMOD and _go_root_file(rel) == "go.mod"):
             self.deferred[rel] = raw
             self.deferred_bytes += len(raw)
         else:
@@ -2591,7 +2603,19 @@ class _ArtifactScan:
         dependency it declares, one change from a popular package's
         (registry/lookalike.py). npm: package.json's name, dependencies and
         optionalDependencies; PyPI: the Name and Requires-Dist (optional
-        extras left out) of a wheel's METADATA or an sdist's PKG-INFO."""
+        extras left out) of a wheel's METADATA or an sdist's PKG-INFO; Go
+        (0.1.9, N-3): the module line of the module's go.mod and the paths
+        it requires."""
+        if self.artifact == "gomod":
+            # the go.mod in the module's root directory ("<path>@<version>/"; the
+            # member paths have lost the host, so its module line names the module).
+            # Go refuses a zip with another root; this one reads each.
+            for rel in sorted(r for r in self.deferred if _go_root_file(r) == "go.mod"):
+                text = self.deferred[rel].decode("utf-8", "replace")
+                parsed = _gomod.parse(text)
+                deps = {p for p, _v, _i in parsed["require"]} | {p for p, _i in parsed["unversioned"]}
+                self.issues.extend(_lookalike.issues("go", parsed["module"], deps, rel, text))
+            return
         if self.artifact == "wheel":
             rel = next((r for r in sorted(self.deferred) if r.count("/") == 1
                         and r.endswith(".dist-info/METADATA")), None)

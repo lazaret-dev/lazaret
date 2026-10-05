@@ -66,6 +66,25 @@ project is pre-1.0, so the 0.x API may still change.
   engine side (`go_package`); nothing calls it yet, so no scan's verdict changes. A shell's
   or cmd's script is now read command by command by both readers, so a file one command
   writes and the next runs is seen.
+- **Look-alike Go module paths (N-3, Go).** A Go module's own path, or one its `go.mod`
+  requires, like a well-known module's is SC-TYPOSQUAT (MAJOR), as an npm or PyPI name is:
+  its owner one character from that module's owner (`github.com/shopsprint/decimal` for
+  `github.com/shopspring/decimal`), with its separators changed, or with a word like
+  `-go` added or taken away (`github.com/boltdb-go/bolt` for `github.com/boltdb/bolt`),
+  the repository the same; its host one character from the module's, the rest the same;
+  a gopkg.in name one character from one (`gopkg.in/yanl.v3`). Anyone can create an owner
+  on GitHub, and only its owner can add a repository to it, so the owner is where a
+  squatter differs. The well-known modules are the 4,893 that awesome-go lists (MIT) or
+  Debian packages (the `Go-Import-Path` of Ubuntu 24.04's indices, which carry Debian's Go
+  packages), compared lower-cased and without a major version: no registry publishes Go
+  downloads. An owner or host of one of them is never a look-alike, nor is a module of the
+  module's own owner, nor a two- or three-character owner with a repository shorter than
+  five (`lib/pq`); another owner's module of the same name is a fork, not flagged. Of the
+  4,893, two would be flagged without themselves (`pions/webrtc`, pion's old name, and
+  `gopkg.in/macaron.v1`, next to `macaroon.v1`); Go's own `go.mod` files and the modules it
+  vendors give none. The guard and the registry read the `go.mod` in a module zip's root;
+  `scripts/update-popular-names.py --go` rebuilds the list from local copies of its
+  sources.
 - **Where a run's time goes: `--timings`.** `lazaret-registry` and `lazaret guard` print on
   stderr the seconds spent in the network, reading archives, the engine (by call: the
   file scan, the import-time test, the cross-file follower, …), the package manager (the
