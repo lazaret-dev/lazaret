@@ -45,6 +45,7 @@ pub mod strarr;
 pub mod textgate;
 pub mod token;
 pub mod unicode;
+pub mod vendor;
 
 /// The engine's version (the workspace's).
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

@@ -596,6 +596,9 @@
     }
    ]
   },
+  "PACKAGE_CODE_CHARS": {
+   "value": 300000000
+  },
   "PREVIEW_MAX": {
    "value": 60
   },
@@ -4285,6 +4288,12 @@
     }
    ]
   },
+  "USE_RISK_CHARS": {
+   "value": 24000000
+  },
+  "USE_RISK_MAX_CHARS": {
+   "value": 8000000
+  },
   "VALID_CATEGORIES": {
    "list": [
     {
@@ -4312,6 +4321,16 @@
      "value": "template injection"
     }
    ]
+  },
+  "VENDOR_CODE": {
+   "map": {
+    "cargo": {
+     "value": ".rs"
+    },
+    "go": {
+     "value": ".go"
+    }
+   }
   },
   "_AGENT_BIN_CMD_RE": {
    "flags": "",
@@ -4507,6 +4526,9 @@
    "flags": "",
    "re": "[()\\[\\]{}]"
   },
+  "_BUILD_SCRIPT_WHY": {
+   "value": "cargo compiles and runs a dependency's build script with the user's privileges, before anything is reviewed, whenever a crate that depends on it is built: the Rust twin of an npm install hook and an sdist's setup.py, where proc-macro1 and rustdecimal ran their payloads."
+  },
   "_CAPPED_RULE": {
    "map": {
     "fix": {
@@ -4646,6 +4668,16 @@
      ]
     }
    }
+  },
+  "_CGO_EXTS": {
+   "list": [
+    {
+     "value": ".c"
+    },
+    {
+     "value": ".h"
+    }
+   ]
   },
   "_CHARCODE_CALL_TAIL_RE": {
    "flags": "",
@@ -10100,6 +10132,12 @@
   "_GLOBAL_OBJECT": {
    "value": "(?:(?:window|globalThis|self|global|top|parent|frames)\\s*\\.\\s*)?"
   },
+  "_GO_GENERATE_WHY": {
+   "value": "A //go:generate line names a command for go generate to run. Nothing runs it when the module is built or imported; it runs when someone runs go generate in the module's folders, which is a developer's step, so it is listed rather than judged."
+  },
+  "_GO_START_WHY": {
+   "value": "Go runs nothing when a module is downloaded, but a package's init functions and the initializers of its package-level variables run when any program that imports the package starts, and so does a cgo constructor: where Go malware puts its payload (the 2025 typosquats ran `wget -O - \u2026 | /bin/bash` from init). Collecting credentials or the whole environment next to a network call is the shape of a stealer; MAJOR where the code may have a reason, CRITICAL for code no library needs: code fetched and run, a reverse shell, a beacon to a data-capture service."
+  },
   "_GUARD_BLOCK_LINES": {
    "value": 12
   },
@@ -12387,6 +12425,25 @@
   "_OFFSCREEN_WHY": {
    "value": "A long run of blanks pushes code past the right edge of editors, diffs and code review, while the interpreter runs it all the same: @react-native-aria/radio 0.2.14 hid its loader 731 columns right. No formatter puts code there."
   },
+  "_PACKAGE_RULE_NAMES": {
+   "map": {
+    "SC-GO-GENERATE": {
+     "value": "A go:generate command"
+    },
+    "SC-IMPORT-RISK": {
+     "value": "Risky import-time code"
+    },
+    "SC-INSTALL-HOOK": {
+     "value": "Install hook"
+    },
+    "SC-USE-RISK": {
+     "value": "Hostile code the package runs when used"
+    }
+   }
+  },
+  "_PACKAGE_USE_RISK_WHY": {
+   "value": "A payload need not run on install or import to reach you: a logger's constructor, a middleware or a script the package spawns runs it the first time your code uses the package. These are the shapes no library needs: code fetched and run, a reverse shell, hidden PowerShell, credentials sent to an exfiltration service, a beacon to a data-capture service."
+  },
   "_PARAM_RE": {
    "flags": "",
    "re": "\\s*\\*{0,2}\\s*([A-Za-z_]\\w*)\\s*"
@@ -12619,6 +12676,9 @@
   "_PLAIN_NAME_RE": {
    "flags": "",
    "re": "^[A-Za-z_][A-Za-z0-9_]*$"
+  },
+  "_PROC_MACRO_WHY": {
+   "value": "A procedural macro is a program the compiler loads and runs, with the user's privileges, while it builds every crate that uses the macro: the moment of a build script, an install hook's twin."
   },
   "_PS_CRADLE_RE": {
    "flags": "i",
@@ -12901,6 +12961,9 @@
    "flags": "i",
    "re": "\\.(?:[cm]?[jt]s|[jt]sx)$"
   },
+  "_RUST_START_WHY": {
+   "value": "A function marked #[ctor], placed in a load section (.init_array) or exported as C's main runs before Rust's own main in every program the crate is linked into: an import-time payload's place. MAJOR where the code may have a reason; CRITICAL for code no library needs."
+  },
   "_SAME_SITE_RE": {
    "flags": "",
    "re": "\\s*[rRuUfF]{0,2}[\"'`](?:/(?![/\\\\\"'`{$])|https?://[^/\"'`?#\\\\\\s{}$]+/)"
@@ -13163,6 +13226,15 @@
   "_SC_SINK_WORD_RE": {
    "flags": "",
    "re": "\\b(?:eval|exec|execSync|Function|runIn(?:This|New)?Context)\\b|\\[\\s*['\\\"`](?:e(?:['\\\"`]\\s*\\+\\s*['\\\"`])?v(?:['\\\"`]\\s*\\+\\s*['\\\"`])?a(?:['\\\"`]\\s*\\+\\s*['\\\"`])?l|F(?:['\\\"`]\\s*\\+\\s*['\\\"`])?u(?:['\\\"`]\\s*\\+\\s*['\\\"`])?n(?:['\\\"`]\\s*\\+\\s*['\\\"`])?c(?:['\\\"`]\\s*\\+\\s*['\\\"`])?t(?:['\\\"`]\\s*\\+\\s*['\\\"`])?i(?:['\\\"`]\\s*\\+\\s*['\\\"`])?o(?:['\\\"`]\\s*\\+\\s*['\\\"`])?n)['\\\"`]\\s*\\]"
+  },
+  "_SDIST_BUILD_WHY": {
+   "value": "pip builds an sdist's Rust extension with cargo when it installs the sdist (maturin, setuptools-rust), and cargo compiles and runs the crate's build script with the user's privileges before anything is reviewed: the moment of setup.py, and where proc-macro1 and rustdecimal ran their payloads on crates.io."
+  },
+  "_SDIST_PROC_MACRO_WHY": {
+   "value": "A procedural macro is a program the compiler loads and runs, with the user's privileges, while pip builds the sdist's Rust extension: the moment of setup.py."
+  },
+  "_SDIST_START_WHY": {
+   "value": "A function marked #[ctor] or placed in a load section (.init_array) runs when the package's Rust extension module is loaded, at import, before any of its code is called: an import-time payload's place. MAJOR where the code may have a reason; CRITICAL for code no library needs."
   },
   "_SECRETS_DUMP_RE": {
    "flags": "i",
@@ -14989,6 +15061,12 @@
     "utf-7",
     "utf7"
    ]
+  },
+  "_VENDOR_PROBE": {
+   "value": 256
+  },
+  "_VENDOR_TEXT_CAP": {
+   "value": 4194304
   },
   "_VIEW_CALL_RE": {
    "flags": "",

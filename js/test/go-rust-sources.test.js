@@ -2,8 +2,8 @@
 // package reads them (tests/scanner/test_go_rust_sources.py): their comments
 // and literals as each language's lexer reads them, the rules that list the
 // two languages (S-SECRET, S-TOKEN, S-BIDI, Q-TODO) and the families every
-// text gets. A dependency tree's Go and Rust files are not read yet (twin of
-// core.DEP_LANGS), and duplication is measured on Python, JavaScript and SQL
+// text gets. A dependency tree's Go and Rust files are read only in a Go or cargo vendor tree (twin of
+// core.DEP_LANGS; test/vendored-code.test.js), and duplication is measured on Python, JavaScript and SQL
 // (twin of core.DUP_LANGS). Fake credentials built by concatenation; inert.
 
 import { test } from "node:test";

@@ -229,6 +229,19 @@ def rs_crate(files, build=None, proc_macro=False, lib=None, use_file_chars=None,
     return _package_call("rs_crate", files, args)
 
 
+def cargo_layout(text):
+    """What a crate's Cargo.toml says of the files that run, as the engine reads TOML (vendor.rs): {"build": a path,
+    False (`build = false`) or None (not said), "lib": `lib.path` or None, "proc_macro": `lib.proc-macro` or None}.
+    A --deps scan's reading of a vendored crate (core.cargo_layout); the npm package asks the same."""
+    return _native.call("cargo_layout", {}, text)
+
+
+def go_vendored_modules(text):
+    """The module paths a vendor/modules.txt says are vendored (a `# path version` line followed by its annotations
+    and packages), longest first (vendor.rs)."""
+    return _native.call("go_vendored_modules", {}, text)
+
+
 def spawned_scripts(text, lang=None):
     """[(base, path)] of the package scripts `text` (in `lang`, when known)
     starts (raises _native.NativeError when the engine could not answer)."""

@@ -125,14 +125,20 @@ from the environment and sent to the API host only; `LAZARET_GITLAB_URL` names a
 than gitlab.com (https only). Nothing in the repository is run. A ref that cannot be resolved or a
 repository that cannot be fetched is exit 2. The npm package has no `github:` form.
 
-**What gets scanned:** `.py .pyw .js .jsx .ts .tsx .mts .cts .mjs .cjs .sql` sources (a `.ts`/`.mts` that is an MPEG transport stream is video, not TypeScript), `.go` and `.rs` sources (since 0.1.9, a project's own: hardcoded credentials (S-SECRET reads `name = "…"` and `name: "…"`, not yet Go's `:=` or Rust's typed constants), token formats (S-TOKEN), Trojan Source characters (S-BIDI), TODO markers, and the obfuscation and encoding checks every text gets — hex-escaped text, invisible characters, base64 blobs, high-entropy literals — with comments and strings read as Go and Rust read them; a dependency tree's or a package's Go and Rust files are not read yet, and their lines count in the metrics but not in the duplication), scripts whose `#!` line names
+**What gets scanned:** `.py .pyw .js .jsx .ts .tsx .mts .cts .mjs .cjs .sql` sources (a `.ts`/`.mts` that is an MPEG transport stream is video, not TypeScript), `.go` and `.rs` sources (since 0.1.9, a project's own: hardcoded credentials (S-SECRET reads `name = "…"` and `name: "…"`, not yet Go's `:=` or Rust's typed constants), token formats (S-TOKEN), Trojan Source characters (S-BIDI), TODO markers, and the obfuscation and encoding checks every text gets — hex-escaped text, invisible characters, base64 blobs, high-entropy literals — with comments and strings read as Go and Rust read them; their lines count in the metrics but not in the duplication; a package's are read with the engine's Go and Rust readers, and so is a Go or `cargo vendor` tree with `--deps`, below), scripts whose `#!` line names
 Node (or bun, deno, ts-node, tsx) or Python, whatever their name (`bin/cli`, a hook's `./setup`), `package.json`, `binding.gyp`
 and every other `.gyp`/`.gypi` file (install hooks), `.pth` files (their `import` lines run at every Python start: SC-PTH-EXEC), config and data files for credentials (see Secrets below) — and editor and AI-agent settings for the commands they run, GitHub Actions workflows for the shapes the Shai-Hulud worms planted (see Persistence targets) — and every other regular file by magic bytes (executables, shared objects, nested
 archives, opaque blobs — see Binary artifacts). `.git` is always skipped. `node_modules`,
 `bower_components` and `site-packages` are pruned unless `--deps`; `vendor`, `venv`, `.venv` and `env`
 are pruned only when they look like dependency trees (a `pyvenv.cfg`, `modules.txt`, `autoload.php`,
-`package.json` or `*.dist-info`/`*.egg-info` directly inside) — otherwise they are first-party code and
-scanned. `dist/`, `build/` and `migrations/` are scanned. `__pycache__` is not scanned as source, but every
+`package.json` or `*.dist-info`/`*.egg-info` directly inside, or for `vendor` since 0.1.9 a crate directory
+with `cargo vendor`'s `.cargo-checksum.json`) — otherwise they are first-party code and
+scanned. With `--deps`, a Go `vendor/` and a `cargo vendor` tree are read as the registry reads a module zip and
+a `.crate` (since 0.1.9): the file rules on each `.go` and `.rs` file a build compiles (not `*_test.go`,
+`testdata/`, a crate's `tests/`, `benches/`, `examples/`), and the engine's Go and Rust readers on each module
+`vendor/modules.txt` lists and each crate, its `Cargo.toml` read for the build script and the library: what a
+Go package's `init` code reaches is SC-IMPORT-RISK, a build script or a procedural macro SC-INSTALL-HOOK
+(CRITICAL), the strong reasons of the rest SC-USE-RISK. `dist/`, `build/` and `migrations/` are scanned. `__pycache__` is not scanned as source, but every
 `.pyc` in it is checked: an unchecked-hash pyc (PEP 552; Python runs it without looking at the source) is
 SC-PYC-UNCHECKED (CRITICAL), and one with no matching source is SC-PYC-ORPHAN (MAJOR). Every pruned tree
 is listed as a Q-SKIPPED-TREE note, so the coverage gap is visible.

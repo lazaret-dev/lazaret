@@ -69,6 +69,8 @@ pub const CALLS: &[&str] = &[
     "rs_crate",
     // 0.1.9 (G-1): a Go module's code read for what its init code and the rest do
     "go_package",
+    // 0.1.9 (Part C): what a vendored crate's Cargo.toml and a vendor/modules.txt say (vendor.rs), for --deps
+    "cargo_layout", "go_vendored_modules",
     // the JavaScript parser (jsparse.py's trees)
     "js_parse", "js_parse_file",
     // the Python parser (Python 3.13's ast trees)
@@ -406,6 +408,19 @@ fn dispatch(name: &str, args: &Value, text: &[u32]) -> Result<Value, CallError> 
         "cross_file" => cross_file(p, args, text)?,
         "rs_crate" => rs_crate(args, text.to_vec())?,
         "go_package" => go_package(args, text.to_vec())?,
+        "cargo_layout" => {
+            let l = crate::vendor::cargo_layout(text);
+            Value::obj(vec![
+                ("build", match l.build {
+                    Some(crate::vendor::Build::Path(p)) => Value::Str(p),
+                    Some(crate::vendor::Build::Off) => Value::Bool(false),
+                    None => Value::Null,
+                }),
+                ("lib", l.lib_path.map(Value::Str).unwrap_or(Value::Null)),
+                ("proc_macro", l.proc_macro.map(Value::Bool).unwrap_or(Value::Null)),
+            ])
+        }
+        "go_vendored_modules" => strs(&crate::vendor::vendored_modules(text)),
         "js_flow" => js_flow(args, text)?,
         "py_flow" => py_flow(args, text)?,
         "js_parse" | "js_parse_file" => {

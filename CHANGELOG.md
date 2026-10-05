@@ -118,6 +118,20 @@ project is pre-1.0, so the 0.x API may still change.
   `static.crates.io`), redirects included, through the registry's bounded, timed fetch.
   `repo.SpecError`, `FetchError`, `DigestError` and `Resolution` are now the registry
   modules' classes (X-2's first step). No `discover` and no SC-NEW-DEPENDENCY for them yet.
+- **`--deps` reads a Go `vendor/` and a `cargo vendor` tree (Part C).** A vendor directory
+  with a `modules.txt` (`go mod vendor`) holds the Go modules a build compiles, and one whose
+  crate directories hold a `.cargo-checksum.json` (`cargo vendor`) the crates; a `--deps`
+  scan, in both packages, reads them as the registry reads a module zip and a `.crate`: the
+  file rules on each `.go` and `.rs` file a build compiles, the engine's Go reader on each
+  module `vendor/modules.txt` lists (a file of none, with its package's directory, cgo's C
+  files included) and its Rust reader on each crate. What a Go package's `init` code
+  reaches is SC-IMPORT-RISK, a build script and a procedural macro SC-INSTALL-HOOK
+  (CRITICAL), the strong reasons of the rest SC-USE-RISK. A crate's `Cargo.toml` is read
+  by the engine (`cargo_layout`: TOML's tables, keys, strings and arrays, so a description
+  holding `[lib]` is not read as one), the same answer as the registry's reading on all
+  2,122 of Ubuntu's licence-checked crates. A `cargo vendor` tree is a dependency tree now:
+  without `--deps` it is pruned, as `node_modules` is, where it was read as the project's
+  own code.
 - **The Rust crate inside a PyPI sdist is read (Part C, N-17).** A maturin or
   setuptools-rust sdist ships its crate (or a workspace of crates), and pip has cargo build
   it when it installs the sdist: each directory of the sdist with a `Cargo.toml` is a crate,

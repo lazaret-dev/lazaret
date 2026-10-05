@@ -25,15 +25,16 @@ import { join, resolve, sep } from "node:path";
 import { scanFile } from "./scanner/scan.js";
 import { followHook, persistenceReasons, installScriptRisk, importTimeRisk, importTimeSeverity, agentHijack,
   agentHijackInCommand, nodeCandidates, shebangLang, spawnedScripts, scriptLang, packValues, crossFileIssues,
-  NativeError } from "./lib/native.js";
+  NativeError, NativeExhausted, goPackage, rsCrate, cargoLayout, goVendoredModules, codePoints } from "./lib/native.js";
 import { HOOK_COMMANDS, loadManifest, scInstallHookIssue } from "./lib/supplychain.js";
 import { readBounded, truncatedIssue, scanErrorIssue, strerror, normalizeNewlines, decodeMember, treeJoin,
-  MAX_FILE_BYTES } from "./lib/fs.js";
-import { looksBinary, HEADER_SAMPLE } from "./lib/binary.js";
+  MAX_FILE_BYTES, normpathRel } from "./lib/fs.js";
+import { looksBinary, HEADER_SAMPLE, pyExt } from "./lib/binary.js";
 import { mkIssue } from "./lib/issue.js";
 import { REDACT, redactText, registerScanContext, SECRET_SKIP_RE } from "./lib/redact.js";
 import { mapTasks } from "./pool.js";
-import { pyStrip, pyStripChars, pyRepr, cmpCodePoints, pyEntries, pyRe } from "./lib/pycompat.js";
+import { pyStrip, pyStripChars, pyRepr, cmpCodePoints, pyEntries, pyRe, cpLen, cpPrefix, isPySpace } from "./lib/pycompat.js";
+import { EXHAUSTED } from "./scanner/scan.js";
 
 const DEP_IMPORT_RISK_WHY = "An installed package's code runs with the application's privileges when it is loaded " +
   "or its command runs. Collecting credentials or the whole environment next to a network call is the shape of an " +
@@ -318,6 +319,8 @@ export function dependencyChecks(root, files, manifests, issues, { exclude = [],
     if (found) out.push(found);
     if (agent) out.push(agent);
   }
+  // (0.1.9, Part C) the vendored Go modules' and crates' code, by the engine's readers (vendoredCode)
+  for (const i of vendoredCode(tree, files)) out.push(i);
   // Cross-file received code (both engines since 0.1.8; the native engine's follower, crossfile.rs):
   // a value received in one file of a package and run in another. Skips the files already flagged
   // CRITICAL single-file (on a worker the follower skipped none: a skipped file's findings are
@@ -333,6 +336,225 @@ export function dependencyChecks(root, files, manifests, issues, { exclude = [],
     }
   }
   return { issues: out, files: extra };
+}
+
+// ---- Go modules and crates: the readers' findings, and --deps's vendor trees (0.1.9, Part C) ----
+// Twin of core's section of the same name: a Go project's vendor/ (vendor/modules.txt) and a Rust project's (cargo
+// vendor: a .cargo-checksum.json in each crate's directory) are read as the registry reads a module zip and a .crate,
+// the file rules on each .go and .rs file a build compiles (lib/fs.js collectFiles) and the engine's Go and Rust readers
+// here, on each vendored module (the paths vendor/modules.txt lists) or crate.
+
+const LAYOUT_ROOT_RE = /^(?:[A-Za-z]:)?\/+/;
+
+/** A path a Cargo.toml names, relative to the crate's root (core._layout_path): drive roots and leading slashes off,
+ * normalized; null for one with a `..` or none at all. */
+function layoutPath(value) {
+  if (typeof value !== "string" || cpLen(value) > 512) return null;
+  let rest = value.split("\\").join("/");
+  for (;;) {
+    const stripped = rest.replace(LAYOUT_ROOT_RE, "");
+    if (stripped === rest) break;
+    rest = stripped;
+  }
+  if (rest.split("/").includes("..")) return null;
+  const norm = rest ? normpathRel(rest) : "";
+  return norm === "" || norm === "." ? null : norm;
+}
+
+/** [the build script, the library's root, whether it is a procedural macro] of a vendored crate whose Cargo.toml text
+ * is `manifest` and whose .rs files are `members` (paths below its root): the engine's reading of the manifest
+ * (cargoLayout), resolved as the registry resolves its own. Twin of core.cargo_layout. */
+export function crateLayout(manifest, members) {
+  const said = cargoLayout(manifest || "");
+  const present = new Set(members || []);
+  const build = said.build, lib = said.lib;
+  const script = build === false ? null : typeof build === "string" ? layoutPath(build) : "build.rs";
+  let root = typeof lib === "string" ? layoutPath(lib) : "src/lib.rs";
+  root = root !== null && present.has(root) ? root : null;
+  return [script !== null && present.has(script) ? script : null, root, root !== null && said.proc_macro === true];
+}
+
+/** `text` on one line, at most `limit` characters (core._one_line). */
+function oneLine(text, limit) {
+  const words = [];
+  let word = "";
+  for (const ch of String(text)) {
+    if (isPySpace(ch)) {
+      if (word) words.push(word);
+      word = "";
+    } else word += ch;
+  }
+  if (word) words.push(word);
+  const joined = words.join(" ");
+  return cpLen(joined) <= limit ? joined : cpPrefix(joined, limit - 1) + "…";
+}
+
+/** [issues, what its use-time step read] of a reader's answer (goPackage, rsCrate) for the files `order` (their paths,
+ * in the order the reader was given them; `texts`: path -> text). `what`: "module", "crate" or "sdist". Twin of
+ * core.package_reader_issues. */
+export function packageReaderIssues(answer, order, texts, what) {
+  const [names, buildWhy, macroWhy, sdistBuildWhy, sdistMacroWhy, goStartWhy, rustStartWhy, sdistStartWhy, useWhy,
+    generateWhy, strongReasons] = packValues("_PACKAGE_RULE_NAMES", "_BUILD_SCRIPT_WHY", "_PROC_MACRO_WHY",
+    "_SDIST_BUILD_WHY", "_SDIST_PROC_MACRO_WHY", "_GO_START_WHY", "_RUST_START_WHY", "_SDIST_START_WHY",
+    "_PACKAGE_USE_RISK_WHY", "_GO_GENERATE_WHY", "_STRONG_IMPORT_REASONS");
+  const issues = [];
+  const at = (found) => {
+    const k = typeof found.file === "number" ? found.file : -1;
+    return k >= 0 && k < order.length ? order[k] : order[0];
+  };
+  const issue = (rule, sev, path, line, msg, why, fix) => {
+    const lines = (texts.get(path) ?? "").split("\n");
+    registerScanContext(lines, SECRET_SKIP_RE);       // (the file's own literals too: core's _Redactor(lines))
+    issues.push(mkIssue({ id: rule, name: names[rule], type: "HOTSPOT", sev, msg, why, fix,
+      ref: "CWE-506 · Supply chain" }, path, line, lines));
+  };
+  const sdist = what === "sdist";
+  const hooks = [
+    [answer.build, sdist ? "is the build script of a Rust crate in this sdist: pip has cargo build the crate when it " +
+      "installs the sdist, and cargo runs the script on that machine"
+      : "is the crate's build script: cargo runs it on the machine that builds any crate that depends on it",
+    sdist ? sdistBuildWhy : buildWhy],
+    [answer.macros, sdist ? "is a procedural macro of a Rust crate in this sdist: it runs inside the compiler when pip " +
+      "builds the sdist" : "is a procedural macro: it runs inside the compiler of every crate that uses it",
+    sdist ? sdistMacroWhy : macroWhy],
+  ];
+  for (const [found, how, why] of hooks) {
+    if (found && found.reasons && found.reasons.length) {
+      const path = at(found);
+      issue("SC-INSTALL-HOOK", "CRITICAL", path, found.line || 1, `${path} ${how}, and it ${found.reasons.join("; and ")}.`,
+        why, sdist ? "Do not install this sdist; report it to PyPI." : "Do not build with this crate; report it to crates.io.");
+    }
+  }
+  const [startHow, startWhy] = {
+    module: ["runs when any program that imports its package starts (init functions, package-level variables' " +
+      "initializers, cgo constructors)", goStartWhy],
+    crate: ["runs before a program's main (#[ctor], a load section, an exported main)", rustStartWhy],
+    sdist: ["runs when the package's Rust extension is loaded, before any of its code is called (#[ctor], a load " +
+      "section)", sdistStartWhy],
+  }[what];
+  for (const found of answer.start || []) {
+    const reasons = found.reasons || [];
+    if (reasons.length) {
+      const path = at(found);
+      issue("SC-IMPORT-RISK", importTimeSeverity(reasons), path, found.line || 1,
+        `${path} ${startHow}, and it ${reasons.join("; and ")}.`, startWhy,
+        "Read that code: what does it run, and where does it send what it collects?");
+    }
+  }
+  const whose = { module: "the module's code", crate: "the crate's code", sdist: "the package's Rust code" }[what];
+  for (const found of answer.uses || []) {
+    const strong = (found.reasons || []).filter((r) => strongReasons.some((p) => r.startsWith(p)));
+    if (strong.length) {
+      const path = at(found);
+      issue("SC-USE-RISK", "CRITICAL", path, found.line || 1,
+        `${path} ${strong.join("; and ")}. Nothing runs it at ${sdist ? "build or load" : "build or start"}: it runs ` +
+        `when ${whose} is called.`, useWhy,
+        sdist ? "Don't use the package; report it to PyPI." : `Don't use the ${what}; report it to its registry.`);
+    }
+  }
+  const generate = answer.generate || [];
+  if (generate.length) {
+    const [k, line, cmd] = generate[0];
+    const path = k >= 0 && k < order.length ? order[k] : order[0];
+    const more = generate.length > 1 ? ` (and ${withCommas(generate.length - 1)} more)` : "";
+    issue("SC-GO-GENERATE", "INFO", path, line,
+      `${path} has \`${oneLine(cmd, 200)}\`${more}: go generate runs such commands when someone runs it in the ` +
+      "module's folders; a build never does.", generateWhy, "Read the commands before running go generate in this module.");
+  }
+  const read = answer.useRead || {};
+  return [issues, Object.fromEntries(["files", "ofFiles", "chars", "ofChars"].map((key) => [key, Number(read[key] || 0)]))];
+}
+
+/** The text of a regular file of the tree ("/"-separated rel), read through no link, at most `cap` bytes; null
+ * otherwise (core._vendor_text). */
+function vendorText(tree, rel, cap) {
+  if (!tree.isFile(rel)) return null;
+  let data;
+  try { data = readBounded(join(tree.root, ...rel.split("/")), cap + 1); } catch { return null; }
+  return data.length > cap ? null : new TextDecoder("utf-8", { ignoreBOM: true }).decode(data);
+}
+
+/** The module paths vendor/modules.txt says are vendored, longest first (core._vendored_modules). */
+const vendoredModules = (text) => (text ? goVendoredModules(text) : []);
+
+/** [[rel, text]] of the .c and .h files directly in `folder` (a vendored Go package's directory, "/"-separated):
+ * what the Go reader reads with its cgo preambles. Regular files only, through no link (core._cgo_texts). */
+function cgoTexts(tree, folder, exts) {
+  const where = folder ? join(tree.root, ...folder.split("/")) : tree.root;
+  let names;
+  try { names = readdirSync(where); } catch { return []; }
+  const out = [];
+  for (const name of names.filter((n) => exts.includes(pyExt(n).toLowerCase())).sort(cmpCodePoints)) {
+    const rel = folder ? `${folder}/${name}` : name;
+    if (!tree.isFile(rel)) continue;
+    let data;
+    try { data = readBounded(join(where, name), tree.maxFileBytes + 1); } catch { continue; }
+    if (data.length <= tree.maxFileBytes && !looksBinary(data.subarray(0, HEADER_SAMPLE))) {
+      out.push([rel, new TextDecoder("utf-8", { ignoreBOM: true }).decode(data)]);
+    }
+  }
+  return out;
+}
+
+/** The readers on a --deps scan's vendored Go modules and crates (see the section comment): each module
+ * vendor/modules.txt lists (a file of none is read with its package's directory), each crate of a cargo vendor tree.
+ * A module or a crate over PACKAGE_CODE_CHARS is SC-TRUNCATED, and so is one the engine could not answer about.
+ * Twin of core._vendored_code. */
+export function vendoredCode(tree, files) {
+  const [codeChars, useFileChars, useChars, textCap, cgoExts] = packValues("PACKAGE_CODE_CHARS", "USE_RISK_MAX_CHARS",
+    "USE_RISK_CHARS", "_VENDOR_TEXT_CAP", "_CGO_EXTS");
+  const units = new Map();                  // key -> {lang, top, unit, module, members}
+  const listed = new Map();
+  for (const f of files) {
+    if (!f.vendor || (f.lang !== "go" && f.lang !== "rs")) continue;
+    const path = posix(f.path), top = posix(f.vendor);
+    const below = path.slice(top.length + 1);
+    let unit, module = null;
+    if (f.lang === "go") {
+      if (!listed.has(top)) listed.set(top, vendoredModules(vendorText(tree, `${top}/modules.txt`, textCap)));
+      module = listed.get(top).find((m) => below === m || below.startsWith(m + "/")) ?? null;
+      unit = module !== null ? module : dirname(below);
+    } else unit = below.split("/")[0];
+    const key = JSON.stringify([f.lang, top, unit, module]);
+    if (!units.has(key)) units.set(key, { lang: f.lang, top, unit, module, members: [] });
+    units.get(key).members.push(f);
+  }
+  const cmpUnits = (a, b) => cmpCodePoints(a.lang, b.lang) || cmpCodePoints(a.top, b.top) || cmpCodePoints(a.unit, b.unit);
+  const out = [];
+  for (const { lang, top, unit, module, members } of [...units.values()].sort(cmpUnits)) {
+    const base = unit ? `${top}/${unit}` : top;
+    const sorted = [...members].sort((a, b) => cmpCodePoints(posix(a.path), posix(b.path)));
+    const named = sorted.map((f) => [f.path, posix(f.path).slice(base.length + 1), f.content]);
+    if (lang === "go") {
+      const folders = [...new Set(sorted.map((f) => dirname(posix(f.path))))].sort(cmpCodePoints);
+      for (const folder of folders) {
+        for (const [rel, text] of cgoTexts(tree, folder, cgoExts)) named.push([native(rel), rel.slice(base.length + 1), text]);
+      }
+    }
+    const order = named.map(([p]) => p);
+    const texts = new Map(named.map(([p, , t]) => [p, t]));
+    const size = named.reduce((n, [, , t]) => n + codePoints(t), 0);
+    const what = lang === "go" ? "module" : "crate";
+    if (size > codeChars) {
+      out.push(truncatedIssue(order[0], `the vendored ${what}'s code (${withCommas(size)} characters) is more than the ` +
+        `reader takes at once (${withCommas(codeChars)}), so it was not read`));
+      continue;
+    }
+    let answer;
+    try {
+      const pairs = named.map(([, r, t]) => [r, t]);
+      if (lang === "go") answer = goPackage(pairs, { module, useFileChars, useChars });
+      else {
+        const [script, lib, procMacro] = crateLayout(vendorText(tree, `${base}/Cargo.toml`, textCap), pairs.map(([r]) => r));
+        answer = rsCrate(pairs, { build: script, procMacro, lib, useFileChars, useChars });
+      }
+    } catch (e) {                               // one module must never kill the run
+      out.push(e instanceof NativeExhausted ? truncatedIssue(order[0], EXHAUSTED) : scanErrorIssue(order[0], e));
+      continue;
+    }
+    for (const i of packageReaderIssues(answer, order, texts, what)[0]) out.push(i);
+  }
+  return out;
 }
 
 /** A task of dependencyChecks, as a worker of pool.js runs it (pool-worker.js), run here. */

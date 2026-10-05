@@ -452,6 +452,44 @@ class EngineParityTests(unittest.TestCase):
         finally:
             shutil.rmtree(root, ignore_errors=True)
 
+    def test_vendored_code_agrees(self):
+        """--deps reads a Go vendor tree and a cargo vendor tree with the engine's readers (0.1.9, Part C;
+        tests/scanner/test_vendored_code.py has the samples): both engines find the same, and prune both trees
+        without --deps."""
+        from tests.registry import test_package_code as samples
+        from tests.scanner import test_vendored_code as vendored
+        files = dict(vendored.GO_PROJECT, **{
+            "vendor/example.test/evil/e.go": vendored.go_file("evil", samples.INIT_GO),
+            "vendor/example.test/evil/u.go": vendored.go_file("evil", samples.USE_GO),
+            "vendor/example.test/evil/e_test.go": vendored.go_file("evil", samples.INIT_GO),
+            "vendor/example.test/ok/sub/c.go": vendored.go_file("sub", samples.CGO_GO),
+            "vendor/example.test/ok/sub/g.go": f'package sub\n\n//go:generate stringer -type=K\nvar blob = "{vendored.BLOB}"\n',
+            "vendor/example.test/other/x/e.go": vendored.go_file("x", samples.INIT_GO),
+            "rust/Cargo.toml": vendored.RUST_PROJECT["Cargo.toml"], "rust/src/main.rs": "fn main() {}\n"})
+        files.update({f"rust/{rel}": text for rel, text in dict(
+            **vendored.crate("buildevil", {"build.rs": samples.BUILD_RS, "src/lib.rs": samples.CLEAN_RS}),
+            **vendored.crate("macro", {"src/lib.rs": samples.MACRO_RS},
+                             '[package]\nname = "macro"\nversion = "1.0.0"\n\n[lib]\nproc-macro = true\n'),
+            **vendored.crate("gen", {"tools/gen.rs": samples.BUILD_RS, "src/lib.rs": samples.USE_RS},
+                             '[package]\nname = "gen"\nbuild = "tools/gen.rs"\n'),
+            **vendored.crate("c", {"src/lib.rs": samples.CTOR_RS, "tests/t.rs": samples.CTOR_RS})).items()})
+        root = tempfile.mkdtemp(prefix="lz-parity-vendor-")
+        try:
+            for rel, text in files.items():
+                path = os.path.join(root, *rel.split("/"))
+                os.makedirs(os.path.dirname(path), exist_ok=True)
+                with open(path, "w", encoding="utf-8") as fh:
+                    fh.write(text)
+            for deps in (True, False):
+                js, py = both(root, deps=deps)
+                with self.subTest(deps=deps):
+                    self.assert_same(js, py, label=f"vendored code (deps={deps})")
+                    rules = collections.Counter(i["rule"] for i in js[1]["issues"] if i["rule"].startswith("SC-"))
+                    self.assertEqual(dict(rules), {"SC-IMPORT-RISK": 4, "SC-USE-RISK": 2, "SC-INSTALL-HOOK": 3,
+                                                   "SC-B64": 1, "SC-GO-GENERATE": 1} if deps else {})
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
     def test_manifest_depth_limit_agrees(self):
         """Both engines check a manifest's nesting (brackets outside strings)
         against the same limit, 500, before parsing it. The Python engine

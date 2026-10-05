@@ -125,8 +125,10 @@ resolving to one file. Writes are atomic
   strings read as Go and Rust read them: hardcoded credentials (`S-SECRET`),
   token formats (`S-TOKEN`), Trojan Source characters (`S-BIDI`), TODO markers
   and the obfuscation and encoding checks every text gets. Their lines count
-  in the metrics but not in the duplication; a dependency tree's Go and Rust
-  files are not read yet.
+  in the metrics but not in the duplication. With `--deps`, a Go `vendor/` and a
+  `cargo vendor` tree are read with the engine's Go and Rust readers (since 0.1.9:
+  init code, build scripts, procedural macros); another dependency tree's Go and
+  Rust files are not.
 - GitHub Actions workflows and GitLab CI files: the shapes the worms planted,
   and since 0.1.9 the hardening checks (`SC-WORKFLOW-*`: an action not pinned
   to a commit, `pull_request_target` checking out the pull request's code, a

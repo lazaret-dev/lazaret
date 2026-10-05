@@ -10,9 +10,10 @@ comments, S-TOKEN, S-BIDI and Q-TODO), with the families every text gets
 (hidden text in hex escapes, invisible characters, base64 blobs, high-entropy
 literals, long lines) and the suppression markers (`// lazaret-ignore`).
 
-What is not read yet: a package's Go and Rust files (registry and guard
-scans) and a dependency tree's (--deps), until the engine has its Go and
-Rust detectors; and the duplication measure, which counts Python,
+A package's Go and Rust files (registry and guard scans) and a Go or cargo
+vendor tree's (--deps) are read with the engine's readers since Part C
+(tests/registry/test_package_code.py, tests/scanner/test_vendored_code.py);
+another dependency tree's are not. The duplication measure counts Python,
 JavaScript and SQL lines (core.DUP_LANGS). Credentials are fakes built by
 concatenation; nothing is executed.
 """

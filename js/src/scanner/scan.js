@@ -525,7 +525,7 @@ export function scanFile(file) {
   const suppressed = makeSuppressor(lines, lang, { lex: ctx.lex });
   return capIssues(path, issues.filter((i) => !suppressed(i)), lines);
 }
-const EXHAUSTED = "reading it spent the engine's work budget (a pattern that backtracks without end on this text)";
+export const EXHAUSTED = "reading it spent the engine's work budget (a pattern that backtracks without end on this text)";
 
 /** What core's _scan_file does after _scan_rules in project mode: SQL statements without WHERE, taint, the SQL-sink pass, function metrics. */
 function projectPasses(path, content, lines, lang, ctx, issues) {

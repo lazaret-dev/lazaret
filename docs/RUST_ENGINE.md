@@ -685,7 +685,7 @@ benchmark:
 | 4 | Linear-time matching: the pack's patterns on linre (§14), pyre and the shlex port retired, current Unicode | Every pattern runs on linre (P-16, rule set 2.28.0): the pack's 666, its lexers' tables included, and those the engine builds as it scans. Lookaheads of unbounded width run with a memo, and a sweep where the walks would cost more; a quote matched again as branches; a name matched again and counts past what a program holds are checked in code; two patterns read further than before. pyre's port of sre retired (P-16's second part): pyre is re's interface to linre, a pattern linre does not run is an error (a built one fails its call closed), and a taint configuration's patterns are held to what linre runs. The shlex port is written anew from shlex's documentation, and the Final_Sigma rule and the casefix table come from Unicode's definition and data (P-16's third part): the engine holds no CPython code. Next: current Unicode |
 | 5 | One call per file, a content cache (SHA-256), the guard's scan in a child process that fails closed, archive ambiguity checks | Not started |
 
-A parallel track brings Go and Rust up to Python's and JavaScript's level (R-1, G-1, §21, §22): the Rust reader (`rs_crate`) and the Go reader (`go_package`) are built; the registry and guard wiring follows.
+A parallel track brings Go and Rust up to Python's and JavaScript's level (R-1, G-1, §21, §22): the Rust reader (`rs_crate`) and the Go reader (`go_package`) are built, and the registry, the guard and `--deps` call them (Part C; §23 for what `--deps` reads of a vendored manifest).
 
 ## 9. Known issues
 
@@ -2462,3 +2462,23 @@ package folder read as a module, give no finding at either moment (717 folders,
 it (114,000 files, 49 s). The registry and the guard call `go_package` on every module zip they scan
 (Part C), with the text as it came (`api::call_owned`: the copy of each file it made doubled what a
 module held; aws-sdk-go v1, 207 million characters, now peaks at 2.4 GB, from 3.0 GB).
+
+## 23. A vendored dependency's manifest (Part C)
+
+`vendor.rs` reads what a `--deps` scan needs of a vendored dependency's manifest, once for both packages (core.py's
+`_vendored_code`, the npm package's `deps.js` `vendoredCode`), so that the two CLIs read a Go `vendor/` and a
+`cargo vendor` tree alike:
+
+- `cargo_layout` (text: a crate's `Cargo.toml`) -> `{"build": a path, false or null, "lib": a path or null,
+  "proc_macro": a boolean or null}`: `package.build` (or `project.build`), `lib.path` and `lib.proc-macro`, read as TOML
+  writes them: tables and arrays of tables (whose keys are not these), dotted and quoted keys, inline tables, basic and
+  literal strings on one line or several, arrays over several lines and comments. What a string or an array holds is
+  never read as a line of its own (a description holding `[lib]` and `proc-macro = true` is a description), a line it
+  cannot read is left and the next one read, the first value given wins, and values nested more than 32 deep end the
+  reading (cargo refuses a manifest that deep). On the 2,122 crates of Ubuntu 24.04's licence-checked `librust-*-dev`
+  packages it says what the registry's reading says (Python's TOML, `crates.Crates.layout`) for every one.
+- `go_vendored_modules` (text: a `vendor/modules.txt`) -> the module paths it says are vendored (a `# path version`
+  line followed by its annotations or packages; a `# ` line with nothing after it is a replacement `go mod vendor`
+  records but does not use), longest first: a file belongs to the module whose path is the longest prefix of its own.
+
+Both are linear in the text, and nothing in them panics on any input (`vendor::tests`).

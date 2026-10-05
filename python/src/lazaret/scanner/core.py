@@ -2936,8 +2936,10 @@ EXTS = {".py": "py", ".pyw": "py", ".js": "js", ".jsx": "js", ".ts": "js", ".tsx
 #: The languages a package's files (registry and guard scans) and a
 #: dependency tree's (--deps) are read in. A project's own Go and Rust files
 #: are read (S-4: its secrets, tokens, bidi controls and the families every
-#: text gets); a package's wait for the engine's Go and Rust detectors, and
-#: are classified as any other file until then.
+#: text gets); a package's are read by the engine's readers where the
+#: package is a Go module or a crate (registry/repo.py PACKAGE_CODE; with
+#: --deps, a Go or cargo vendor tree: VENDOR_CODE), and classified as any
+#: other file elsewhere.
 DEP_LANGS = frozenset({"py", "js", "sql"})
 
 
@@ -5859,9 +5861,15 @@ def encoding_issues(path, text, info):
 def _dep_tree_kind(name, path):
     """True when directory `name` at `path` is a dependency tree: always for
     node_modules / bower_components / site-packages; for vendor / venv /
-    .venv / env only when a marker (DEP_TREE_MARKERS) sits directly inside."""
+    .venv / env only when a marker (DEP_TREE_MARKERS) sits directly inside.
+    A vendor directory of Go's or cargo's is "go" or "cargo" (_vendor_kind):
+    --deps reads its code (0.1.9, Part C)."""
     if name in DEP_TREE_DIRS:
         return True
+    if name == "vendor":
+        kind = _vendor_kind(path)
+        if kind is not None:
+            return kind
     markers = DEP_TREE_MARKERS.get(name)
     if markers is None:
         return False
@@ -5941,7 +5949,9 @@ def _collect_file(path, rel, st, in_dep, col):
     size = st.st_size
     manifest = name in MANIFEST_NAMES or ext in GYP_EXTS
     pth = not manifest and ext == PTH_EXT
-    lang = None if manifest or pth else dep_source_lang(ext) if in_dep else EXTS.get(ext)
+    vendor = in_dep if isinstance(in_dep, tuple) else None      # (a vendor tree's kind, its rel)
+    lang = (None if manifest or pth else (_vendor_lang(vendor, rel, ext) or dep_source_lang(ext)) if in_dep
+            else EXTS.get(ext))
     issues = col["issues"]
     if not manifest and not pth and lang is None:
         # FIX-SPEC 9: every non-source regular file is classified by magic
@@ -5990,7 +6000,7 @@ def _collect_file(path, rel, st, in_dep, col):
             issues.append(disguised)
         return
     if manifest:
-        col["manifests"].append({"path": disp, "dep": in_dep,
+        col["manifests"].append({"path": disp, "dep": bool(in_dep),
                                  "content": normalize_newlines(data.decode("utf-8", "replace"))})
         return
     if pth:                # only the .pth check runs on it (decoded as the registry does)
@@ -6009,7 +6019,10 @@ def _collect_file(path, rel, st, in_dep, col):
     disguised = disguised_binary(disp, data)     # a program under a source file's name (0.1.8)
     if disguised:
         issues.append(disguised)
-    col["files"].append({"path": disp, "content": text, "lang": lang, "dep": in_dep})
+    entry = {"path": disp, "content": text, "lang": lang, "dep": bool(in_dep)}
+    if vendor is not None and lang in ("go", "rs"):
+        entry["vendor"] = _fs_display(vendor[1])                # (its module or crate is read whole: _vendored_code)
+    col["files"].append(entry)
 
 
 def _collect_config(path, disp, size, col):
@@ -6111,6 +6124,8 @@ def _collect(root, excludes=(), include_deps=False):
             if dep and not in_dep and not include_deps:
                 _count_skipped_tree(root, e.path, _fs_display(rel), col["skipped"])
                 continue
+            if isinstance(dep, str):
+                dep = (dep, rel)                # a Go or cargo vendor tree: its kind and where it is
             push.append((rel, dep))
         stack.extend(reversed(push))       # pop order = sorted, depth-first (like os.walk)
     return col
@@ -6263,6 +6278,334 @@ class _DependencyTree:
         return next((c for c in candidates[6:] if self.is_file(c)), None)
 
 
+# ---------------- Go modules and crates: the readers' findings, and --deps's vendor trees (0.1.9, Part C) ----------------
+# The engine's Go reader (go_package) and Rust reader (rs_crate) read a module or a crate whole, for what its code does
+# and when it runs. The registry (registry/repo.py) reads a module zip, a .crate and the crate inside an sdist with them;
+# a --deps scan reads a Go project's vendor/ (`go mod vendor`: vendor/modules.txt) and a Rust project's (`cargo vendor`:
+# a .cargo-checksum.json in each crate's directory) the same way: the file rules in dependency mode on each .go and .rs
+# file a build compiles (never_built: not the others), and the reader on each vendored module (the paths
+# vendor/modules.txt lists) or crate (each directory of the vendor tree). A vendor tree of cargo's is a dependency tree
+# now: without --deps it is pruned, as node_modules is. Twin of the npm engine's js/src/deps.js (vendoredCode).
+#: The most a reader takes of one module or crate, in characters: it holds all of it at once (registry/repo.py's too).
+PACKAGE_CODE_CHARS = 300_000_000
+#: The use-time share of a module or a crate (SC-USE-RISK): no file over USE_RISK_MAX_CHARS, USE_RISK_CHARS in all,
+#: smallest first (registry/repo.py's numbers for a release file).
+USE_RISK_MAX_CHARS = 8_000_000
+USE_RISK_CHARS = 24_000_000
+VENDOR_CODE = {"go": ".go", "cargo": ".rs"}
+_VENDOR_PROBE = 256                         # the directories of a vendor tree looked at for a .cargo-checksum.json
+_VENDOR_TEXT_CAP = 4 << 20                  # a modules.txt or a Cargo.toml read, at most
+_CGO_EXTS = (".c", ".h")
+
+
+def never_built(kind, rel):
+    """Is `rel` ('/'-separated, below a Go module's root for "go", a crate's
+    for "crate") a file no build of a dependent compiles, as the readers say
+    (goread/rsread never_built): a Go *_test.go file, a name with "_" or "."
+    first, one under testdata/ or vendor/; a crate's tests/, benches/ and
+    examples/. Neither the readers nor the file rules read it."""
+    if kind == "go":
+        parts = rel.split("/")
+        name = parts[-1]
+        return (name[:1] in ("_", ".") or name.lower().endswith("_test.go")
+                or any(p in ("testdata", "vendor") for p in parts[:-1]))
+    if kind == "crate":
+        return rel.split("/", 1)[0] in ("tests", "benches", "examples")
+    return False
+
+
+def _vendor_kind(path):
+    """"go" when the vendor directory at `path` is Go's (vendor/modules.txt,
+    as DEP_TREE_MARKERS has it), "cargo" when it is cargo's (a regular
+    .cargo-checksum.json in one of its first _VENDOR_PROBE directories), else
+    None. No link is followed."""
+    try:
+        with os.scandir(path) as it:
+            entries = sorted(it, key=lambda e: e.name)
+    except OSError:
+        return None
+    if any(e.name == "modules.txt" for e in entries):
+        return "go"
+    for e in [e for e in entries if e.is_dir(follow_symlinks=False)][:_VENDOR_PROBE]:
+        try:
+            st = os.lstat(os.path.join(e.path, ".cargo-checksum.json"))
+        except OSError:
+            continue
+        if _stat.S_ISREG(st.st_mode):
+            return "cargo"
+    return None
+
+
+def _vendor_lang(vendor, rel, ext):
+    """"go" or "rs" for a file of a Go or cargo vendor tree (`vendor`: its
+    kind and its rel) that a build compiles, else None."""
+    if vendor is None or ext != VENDOR_CODE.get(vendor[0]):
+        return None
+    below = rel[len(vendor[1]) + 1:].replace(os.sep, "/")
+    if vendor[0] == "go":
+        return None if never_built("go", below) else "go"
+    _crate, _, inside = below.partition("/")
+    return None if not inside or never_built("crate", inside) else "rs"
+
+
+_LAYOUT_ROOT_RE = re.compile(r"^(?:[A-Za-z]:)?/+")
+
+
+def _layout_path(value):
+    """A path a Cargo.toml names, relative to the crate's root as the
+    registry reads it (base.finish_member_path): drive roots and leading
+    slashes off, normalized; None for one with a `..` or none at all."""
+    if not isinstance(value, str) or len(value) > 512:
+        return None
+    rest = value.replace("\\", "/")
+    while True:
+        stripped = _LAYOUT_ROOT_RE.sub("", rest)
+        if stripped == rest:
+            break
+        rest = stripped
+    if ".." in rest.split("/"):
+        return None
+    norm = posixpath.normpath(rest) if rest else ""
+    return None if norm in ("", ".") else norm
+
+
+def cargo_layout(manifest, members):
+    """(the build script, the library's root, whether it is a procedural
+    macro) of a vendored crate whose Cargo.toml text is `manifest` and whose
+    .rs files are `members` (paths below its root): what the engine reads of
+    the manifest (engine.cargo_layout, the npm package's too), resolved as
+    the registry's crates.Crates.layout resolves its reading: `build.rs`
+    unless `build` names another file or is false, `src/lib.rs` unless
+    `lib.path` names another, each only when the crate has it."""
+    said = engine.cargo_layout(manifest or "")
+    present = set(members or ())
+    build, lib = said.get("build"), said.get("lib")
+    script = None if build is False else (_layout_path(build) if isinstance(build, str) else "build.rs")
+    root = _layout_path(lib) if isinstance(lib, str) else "src/lib.rs"
+    root = root if root in present else None
+    return (script if script in present else None, root, root is not None and said.get("proc_macro") is True)
+
+
+_PACKAGE_RULE_NAMES = {"SC-INSTALL-HOOK": "Install hook", "SC-IMPORT-RISK": "Risky import-time code",
+                       "SC-USE-RISK": "Hostile code the package runs when used",
+                       "SC-GO-GENERATE": "A go:generate command"}
+_BUILD_SCRIPT_WHY = ("cargo compiles and runs a dependency's build script with the user's privileges, before anything "
+                     "is reviewed, whenever a crate that depends on it is built: the Rust twin of an npm install hook "
+                     "and an sdist's setup.py, where proc-macro1 and rustdecimal ran their payloads.")
+_PROC_MACRO_WHY = ("A procedural macro is a program the compiler loads and runs, with the user's privileges, while it "
+                   "builds every crate that uses the macro: the moment of a build script, an install hook's twin.")
+_SDIST_BUILD_WHY = ("pip builds an sdist's Rust extension with cargo when it installs the sdist (maturin, "
+                    "setuptools-rust), and cargo compiles and runs the crate's build script with the user's "
+                    "privileges before anything is reviewed: the moment of setup.py, and where proc-macro1 and "
+                    "rustdecimal ran their payloads on crates.io.")
+_SDIST_PROC_MACRO_WHY = ("A procedural macro is a program the compiler loads and runs, with the user's privileges, "
+                         "while pip builds the sdist's Rust extension: the moment of setup.py.")
+_GO_START_WHY = ("Go runs nothing when a module is downloaded, but a package's init functions and the initializers of "
+                 "its package-level variables run when any program that imports the package starts, and so does a "
+                 "cgo constructor: where Go malware puts its payload (the 2025 typosquats ran `wget -O - … | "
+                 "/bin/bash` from init). Collecting credentials or the whole environment next to a network call is "
+                 "the shape of a stealer; MAJOR where the code may have a reason, CRITICAL for code no library "
+                 "needs: code fetched and run, a reverse shell, a beacon to a data-capture service.")
+_RUST_START_WHY = ("A function marked #[ctor], placed in a load section (.init_array) or exported as C's main runs "
+                   "before Rust's own main in every program the crate is linked into: an import-time payload's "
+                   "place. MAJOR where the code may have a reason; CRITICAL for code no library needs.")
+_SDIST_START_WHY = ("A function marked #[ctor] or placed in a load section (.init_array) runs when the package's "
+                    "Rust extension module is loaded, at import, before any of its code is called: an import-time "
+                    "payload's place. MAJOR where the code may have a reason; CRITICAL for code no library needs.")
+_PACKAGE_USE_RISK_WHY = ("A payload need not run on install or import to reach you: a logger's constructor, a "
+                         "middleware or a script the package spawns runs it the first time your code uses the "
+                         "package. These are the shapes no library needs: code fetched and run, a reverse shell, "
+                         "hidden PowerShell, credentials sent to an exfiltration service, a beacon to a data-capture "
+                         "service.")
+_GO_GENERATE_WHY = ("A //go:generate line names a command for go generate to run. Nothing runs it when the module is "
+                    "built or imported; it runs when someone runs go generate in the module's folders, which is a "
+                    "developer's step, so it is listed rather than judged.")
+
+
+def _one_line(text, limit):
+    """`text` on one line, at most `limit` characters."""
+    text = " ".join(str(text).split())
+    return text if len(text) <= limit else text[:limit - 1] + "…"
+
+
+def package_reader_issues(answer, order, texts, what):
+    """The findings of a reader's answer (engine.go_package, engine.rs_crate)
+    for the files `order` (their paths, in the order the reader was given
+    them; `texts`: path -> text) -> (issues, what its use-time step read).
+    `what`: "module" (a Go module's), "crate" (a crate's) or "sdist" (the
+    crate inside an sdist, N-17), for the words. A build script and a
+    procedural macro are SC-INSTALL-HOOK, CRITICAL for any reason; what runs
+    at start (Go's init code, #[ctor]) the import-time test; the strong
+    reasons of the rest SC-USE-RISK; //go:generate SC-GO-GENERATE (INFO)."""
+    issues = []
+
+    def at(found):
+        return order[found["file"]] if 0 <= found.get("file", -1) < len(order) else order[0]
+
+    def issue(rule, sev, path, line, msg, why, fix):
+        lines = (texts.get(path) or "").split("\n")
+        issues.append(mk_issue({"id": rule, "name": _PACKAGE_RULE_NAMES[rule], "type": "HOTSPOT", "sev": sev,
+                                "msg": msg, "why": why, "fix": fix, "ref": "CWE-506 · Supply chain"},
+                               path, line, lines, redactor=_Redactor(lines)))      # (the file's own literals too)
+
+    sdist = what == "sdist"
+    for found, how, why in (
+            (answer.get("build"),
+             "is the build script of a Rust crate in this sdist: pip has cargo build the crate when it installs "
+             "the sdist, and cargo runs the script on that machine" if sdist else
+             "is the crate's build script: cargo runs it on the machine that builds any crate that depends on it",
+             _SDIST_BUILD_WHY if sdist else _BUILD_SCRIPT_WHY),
+            (answer.get("macros"),
+             "is a procedural macro of a Rust crate in this sdist: it runs inside the compiler when pip builds "
+             "the sdist" if sdist else
+             "is a procedural macro: it runs inside the compiler of every crate that uses it",
+             _SDIST_PROC_MACRO_WHY if sdist else _PROC_MACRO_WHY)):
+        if found and found.get("reasons"):
+            path = at(found)
+            issue("SC-INSTALL-HOOK", "CRITICAL", path, found.get("line") or 1,
+                  f"{path} {how}, and it {'; and '.join(found['reasons'])}.", why,
+                  "Do not install this sdist; report it to PyPI." if sdist else
+                  "Do not build with this crate; report it to crates.io.")
+    start_how, start_why = {
+        "module": ("runs when any program that imports its package starts (init functions, package-level "
+                   "variables' initializers, cgo constructors)", _GO_START_WHY),
+        "crate": ("runs before a program's main (#[ctor], a load section, an exported main)", _RUST_START_WHY),
+        "sdist": ("runs when the package's Rust extension is loaded, before any of its code is called (#[ctor], "
+                  "a load section)", _SDIST_START_WHY)}[what]
+    for found in answer.get("start") or []:
+        reasons = found.get("reasons") or []
+        if reasons:
+            path = at(found)
+            issue("SC-IMPORT-RISK", import_time_severity(reasons), path, found.get("line") or 1,
+                  f"{path} {start_how}, and it {'; and '.join(reasons)}.", start_why,
+                  "Read that code: what does it run, and where does it send what it collects?")
+    whose = {"module": "the module's code", "crate": "the crate's code", "sdist": "the package's Rust code"}[what]
+    for found in answer.get("uses") or []:
+        strong = [r for r in found.get("reasons") or [] if r.startswith(_STRONG_IMPORT_REASONS)]
+        if strong:
+            path = at(found)
+            issue("SC-USE-RISK", "CRITICAL", path, found.get("line") or 1,
+                  f"{path} {'; and '.join(strong)}. Nothing runs it at "
+                  f"{'build or load' if sdist else 'build or start'}: it runs when {whose} is called.",
+                  _PACKAGE_USE_RISK_WHY,
+                  "Don't use the package; report it to PyPI." if sdist else
+                  f"Don't use the {what}; report it to its registry.")
+    generate = answer.get("generate") or []
+    if generate:
+        k, line, cmd = generate[0]
+        path = order[k] if 0 <= k < len(order) else order[0]
+        more = f" (and {len(generate) - 1:,} more)" if len(generate) > 1 else ""
+        issue("SC-GO-GENERATE", "INFO", path, line,
+              f"{path} has `{_one_line(cmd, 200)}`{more}: go generate runs such commands when someone runs it in "
+              f"the module's folders; a build never does.", _GO_GENERATE_WHY,
+              "Read the commands before running go generate in this module.")
+    read = answer.get("useRead") or {}
+    return issues, {key: int(read.get(key, 0)) for key in ("files", "ofFiles", "chars", "ofChars")}
+
+
+def _vendor_text(tree, rel):
+    """The text of a regular file of the tree ('/'-separated rel), read
+    through no link, at most _VENDOR_TEXT_CAP bytes; None otherwise."""
+    if not tree.is_file(rel):
+        return None
+    try:
+        data = _read_prefix(os.path.join(tree.root, *rel.split("/")), _VENDOR_TEXT_CAP + 1)
+    except (OSError, ValueError):
+        return None
+    return None if len(data) > _VENDOR_TEXT_CAP else data.decode("utf-8", "replace")
+
+
+def _vendored_modules(text):
+    """The module paths vendor/modules.txt says are vendored, longest first
+    (engine.go_vendored_modules: a `# path version …` line followed by its
+    annotations and packages)."""
+    return engine.go_vendored_modules(text) if text else []
+
+
+def _cgo_texts(tree, folder):
+    """[(rel, text)] of the .c and .h files directly in `folder` (a vendored
+    Go package's directory, '/'-separated): what the Go reader reads with its
+    cgo preambles. Regular files only, through no link, each at most
+    SOURCE_SIZE_CAP bytes."""
+    where = os.path.join(tree.root, *folder.split("/")) if folder else tree.root
+    out = []
+    try:
+        with os.scandir(where) as it:
+            names = sorted(e.name for e in it if os.path.splitext(e.name)[1].lower() in _CGO_EXTS)
+    except OSError:
+        return out
+    for name in names:
+        rel = f"{folder}/{name}" if folder else name
+        if not tree.is_file(rel):
+            continue
+        try:
+            data = _read_prefix(os.path.join(where, name), SOURCE_SIZE_CAP + 1)
+        except (OSError, ValueError):
+            continue
+        if len(data) <= SOURCE_SIZE_CAP and not looks_binary(data[:HEADER_SAMPLE_BYTES]):
+            out.append((rel, data.decode("utf-8", "replace")))
+    return out
+
+
+def _vendored_code(tree, files, should_stop=None):
+    """The readers on a --deps scan's vendored Go modules and crates (see the
+    section comment) -> (issues, stopped): each module vendor/modules.txt
+    lists (a file of none is read with its package's directory), each crate
+    of a cargo vendor tree. A module or a crate over PACKAGE_CODE_CHARS is
+    SC-TRUNCATED, and so is one the engine could not answer about."""
+    units = {}
+    listed = {}
+    for f in files:
+        top = f.get("vendor")
+        if not top or f["lang"] not in ("go", "rs"):
+            continue
+        path, top = f["path"].replace(os.sep, "/"), top.replace(os.sep, "/")
+        below = path[len(top) + 1:]
+        if f["lang"] == "go":
+            if top not in listed:
+                listed[top] = _vendored_modules(_vendor_text(tree, f"{top}/modules.txt"))
+            module = next((m for m in listed[top] if below == m or below.startswith(m + "/")), None)
+            unit = module if module is not None else posixpath.dirname(below)
+            units.setdefault(("go", top, unit, module), []).append(f)
+        else:
+            units.setdefault(("rs", top, below.split("/", 1)[0], None), []).append(f)
+    out = []
+    for (lang, top, unit, module), members in sorted(units.items(), key=lambda kv: kv[0][:3]):
+        if should_stop is not None:
+            stopped = should_stop()
+            if stopped:
+                return out, stopped
+        base = f"{top}/{unit}" if unit else top
+        members = sorted(members, key=lambda f: f["path"].replace(os.sep, "/"))
+        named = [(f["path"], f["path"].replace(os.sep, "/")[len(base) + 1:], f["content"]) for f in members]
+        if lang == "go":
+            for folder in sorted({posixpath.dirname(f["path"].replace(os.sep, "/")) for f in members}):
+                named.extend((_fs_display(rel.replace("/", os.sep)), rel[len(base) + 1:], text)
+                             for rel, text in _cgo_texts(tree, folder))
+        order = [p for p, _r, _t in named]
+        texts = {p: t for p, _r, t in named}
+        size = sum(len(t) for _p, _r, t in named)
+        what = "module" if lang == "go" else "crate"
+        if size > PACKAGE_CODE_CHARS:
+            out.append(truncated_issue(order[0], f"the vendored {what}'s code ({size:,} characters) is more than the "
+                                                 f"reader takes at once ({PACKAGE_CODE_CHARS:,}), so it was not read"))
+            continue
+        try:
+            if lang == "go":
+                answer = engine.go_package([(r, t) for _p, r, t in named], module=module,
+                                           use_file_chars=USE_RISK_MAX_CHARS, use_chars=USE_RISK_CHARS)
+            else:
+                script, lib, proc_macro = cargo_layout(_vendor_text(tree, f"{base}/Cargo.toml"),
+                                                       [r for _p, r, _t in named])
+                answer = engine.rs_crate([(r, t) for _p, r, t in named], build=script, proc_macro=proc_macro, lib=lib,
+                                         use_file_chars=USE_RISK_MAX_CHARS, use_chars=USE_RISK_CHARS)
+        except Exception as exc:                # one module must never kill the run
+            out.append(engine.error_issue(order[0], exc))
+            continue
+        out.extend(package_reader_issues(answer, order, texts, what)[0])
+    return out, None
+
+
 # ---------------- Cross-file received code (the engine's cross_file, 0.1.8) ----------------
 # The follower is the native engine's (engine.cross_file_issues); what stays
 # here is how a --deps scan groups the dependency files into packages.
@@ -6407,6 +6750,12 @@ def dependency_checks(root, files, manifests, issues, excludes=(), should_stop=N
                 out.append(found)
             if agent is not None:
                 out.append(agent)
+    # (0.1.9, Part C) the vendored Go modules' and crates' code, by the
+    # engine's readers (_vendored_code)
+    found, stopped = _vendored_code(tree, files, should_stop)
+    out.extend(found)
+    if stopped:
+        return out, extra, stopped
     # Cross-file received code (0.1.8): a value received in one file of a
     # package and run in another, by the native engine's follower (it reads
     # the packages on threads: engine.cross_file_issues). Reached

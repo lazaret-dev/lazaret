@@ -1534,7 +1534,7 @@ PACKAGE_CODE = {"gomod": ("go", (".go",), (".c", ".h")), "crate": ("rs", (".rs",
 # holds all of it at once (the text, each file's tree), so a larger one is
 # not read and the scan is INCOMPLETE (aws-sdk-go v1, Go's largest module in
 # common use, is 207 million characters of Go and peaks at 2.4 GB read).
-PACKAGE_CODE_CHARS = 300_000_000
+PACKAGE_CODE_CHARS = lazaret.PACKAGE_CODE_CHARS        # (300,000,000; --deps reads with core's)
 # Directory names that hold tests / fixtures (exact names, case-insensitive).
 # Weaker findings in them are listed as INFO unless the file is reachable from
 # an entry point (main/bin/exports, an install hook, setup.py).
@@ -1582,8 +1582,8 @@ USE_RISK_SKIP_DIRS = {"example", "examples", "doc", "docs", "demo", "demos", "sa
 # next's made its scan 32 s instead of 14 s. What it did not read is not "not
 # scanned" — the rules of the file scan read every file — so the verdict is
 # not INCOMPLETE; the artifact's "useTime" says how much it read.
-USE_RISK_MAX_CHARS = 8_000_000
-USE_RISK_CHARS = 24_000_000
+USE_RISK_MAX_CHARS = lazaret.USE_RISK_MAX_CHARS        # (8,000,000)
+USE_RISK_CHARS = lazaret.USE_RISK_CHARS                # (24,000,000)
 # The native engine reads a batch of files at a time; the archive's deadline
 # (Budget) is checked between batches, which hold at most
 # USE_RISK_BATCH_CHARS characters (or one file) in this step.
@@ -1843,18 +1843,15 @@ def _unread_code(artifact, rel):
 
 def _never_built(artifact, rel):
     """Is `rel`, a source file of a Go module or a crate, one no build of a
-    dependent compiles, as the readers say (goread/rsread never_built): a Go
+    dependent compiles, as the readers say (core.never_built: a Go
     *_test.go file, a file named with "_" or "." first, one under testdata/
-    or vendor/; a crate's tests/, benches/ and examples/. Neither the reader
+    or vendor/; a crate's tests/, benches/ and examples/)? Neither the reader
     nor the file rules read it: the toolchain never runs it in a dependent
     (rivo/uniseg's line-break tests hold escaped URLs)."""
     if artifact == "gomod":
-        parts = _go_root_file(rel).split("/")
-        name = parts[-1]
-        return (name[:1] in "_." or name.lower().endswith("_test.go")
-                or any(p in ("testdata", "vendor") for p in parts[:-1]))
+        return lazaret.never_built("go", _go_root_file(rel))
     if artifact == "crate":
-        return rel.split("/", 1)[0] in ("tests", "benches", "examples")
+        return lazaret.never_built("crate", rel)
     return False
 
 
@@ -1881,47 +1878,6 @@ def _unread_code_issue(artifact, rels):
                     "verdict would say more than the scan knows."),
             "fix": f"Review the package's {lang} code.",
             "ref": "CWE-506 · Supply chain", "file": rels[0], "line": 1, "snippet": [], "snipStart": 1}
-
-
-_PACKAGE_RULE_NAMES = {"SC-INSTALL-HOOK": "Install hook", "SC-IMPORT-RISK": "Risky import-time code",
-                       "SC-USE-RISK": "Hostile code the package runs when used",
-                       "SC-GO-GENERATE": "A go:generate command"}
-_BUILD_SCRIPT_WHY = ("cargo compiles and runs a dependency's build script with the user's privileges, before anything "
-                     "is reviewed, whenever a crate that depends on it is built: the Rust twin of an npm install hook "
-                     "and an sdist's setup.py, where proc-macro1 and rustdecimal ran their payloads.")
-_PROC_MACRO_WHY = ("A procedural macro is a program the compiler loads and runs, with the user's privileges, while it "
-                   "builds every crate that uses the macro: the moment of a build script, an install hook's twin.")
-_GO_START_WHY = ("Go runs nothing when a module is downloaded, but a package's init functions and the initializers of "
-                 "its package-level variables run when any program that imports the package starts, and so does a "
-                 "cgo constructor: where Go malware puts its payload (the 2025 typosquats ran `wget -O - … | "
-                 "/bin/bash` from init). Collecting credentials or the whole environment next to a network call is "
-                 "the shape of a stealer; MAJOR where the code may have a reason, CRITICAL for code no library "
-                 "needs: code fetched and run, a reverse shell, a beacon to a data-capture service.")
-_RUST_START_WHY = ("A function marked #[ctor], placed in a load section (.init_array) or exported as C's main runs "
-                   "before Rust's own main in every program the crate is linked into: an import-time payload's "
-                   "place. MAJOR where the code may have a reason; CRITICAL for code no library needs.")
-_USE_RISK_WHY = ("A payload need not run on install or import to reach you: a logger's constructor, a middleware or a "
-                 "script the package spawns runs it the first time your code uses the package. These are the shapes "
-                 "no library needs: code fetched and run, a reverse shell, hidden PowerShell, credentials sent to an "
-                 "exfiltration service, a beacon to a data-capture service.")
-_SDIST_BUILD_WHY = ("pip builds an sdist's Rust extension with cargo when it installs the sdist (maturin, "
-                    "setuptools-rust), and cargo compiles and runs the crate's build script with the user's "
-                    "privileges before anything is reviewed: the moment of setup.py, and where proc-macro1 and "
-                    "rustdecimal ran their payloads on crates.io.")
-_SDIST_PROC_MACRO_WHY = ("A procedural macro is a program the compiler loads and runs, with the user's privileges, "
-                         "while pip builds the sdist's Rust extension: the moment of setup.py.")
-_SDIST_START_WHY = ("A function marked #[ctor] or placed in a load section (.init_array) runs when the package's "
-                    "Rust extension module is loaded, at import, before any of its code is called: an import-time "
-                    "payload's place. MAJOR where the code may have a reason; CRITICAL for code no library needs.")
-_GO_GENERATE_WHY = ("A //go:generate line names a command for go generate to run. Nothing runs it when the module is "
-                    "built or imported; it runs when someone runs go generate in the module's folders, which is a "
-                    "developer's step, so it is listed rather than judged.")
-
-
-def _show(text, limit):
-    """`text` on one line, at most `limit` characters."""
-    text = " ".join(str(text).split())
-    return text if len(text) <= limit else text[:limit - 1] + "…"
 
 
 class _ArtifactScan:
@@ -2914,71 +2870,12 @@ class _ArtifactScan:
     def _reader_findings(self, answer, order, texts, what):
         """The findings of a package reader's answer (go_package, rs_crate)
         for the files `order` (archive paths, in the order the reader was
-        given them; `texts` their text): `what` is "module", "crate" or
-        "sdist" (a crate inside an sdist, N-17), for the words."""
-        at = lambda f: order[f["file"]] if 0 <= f.get("file", -1) < len(order) else order[0]
-
-        def issue(rule, sev, rel, line, msg, why, fix):
-            self.issues.append(lazaret.mk_issue({"id": rule, "name": _PACKAGE_RULE_NAMES[rule], "type": "HOTSPOT",
-                                                 "sev": sev, "msg": msg, "why": why, "fix": fix,
-                                                 "ref": "CWE-506 · Supply chain"},
-                                                rel, line, (texts.get(rel) or "").split("\n")))
-
-        sdist = what == "sdist"
-        for found, how, why in (
-                (answer.get("build"),
-                 "is the build script of a Rust crate in this sdist: pip has cargo build the crate when it installs "
-                 "the sdist, and cargo runs the script on that machine" if sdist else
-                 "is the crate's build script: cargo runs it on the machine that builds any crate that depends on it",
-                 _SDIST_BUILD_WHY if sdist else _BUILD_SCRIPT_WHY),
-                (answer.get("macros"),
-                 "is a procedural macro of a Rust crate in this sdist: it runs inside the compiler when pip builds "
-                 "the sdist" if sdist else
-                 "is a procedural macro: it runs inside the compiler of every crate that uses it",
-                 _SDIST_PROC_MACRO_WHY if sdist else _PROC_MACRO_WHY)):
-            if found and found.get("reasons"):
-                rel = at(found)
-                issue("SC-INSTALL-HOOK", "CRITICAL", rel, found.get("line") or 1,
-                      f"{rel} {how}, and it {'; and '.join(found['reasons'])}.", why,
-                      "Do not install this sdist; report it to PyPI." if sdist else
-                      "Do not build with this crate; report it to crates.io.")
-        start_how, start_why = {
-            "module": ("runs when any program that imports its package starts (init functions, package-level "
-                       "variables' initializers, cgo constructors)", _GO_START_WHY),
-            "crate": ("runs before a program's main (#[ctor], a load section, an exported main)", _RUST_START_WHY),
-            "sdist": ("runs when the package's Rust extension is loaded, before any of its code is called (#[ctor], "
-                      "a load section)", _SDIST_START_WHY)}[what]
-        for found in answer.get("start") or []:
-            reasons = found.get("reasons") or []
-            if reasons:
-                rel = at(found)
-                issue("SC-IMPORT-RISK", lazaret.import_time_severity(reasons), rel, found.get("line") or 1,
-                      f"{rel} {start_how}, and it {'; and '.join(reasons)}.", start_why,
-                      "Read that code: what does it run, and where does it send what it collects?")
-        whose = {"module": "the module's code", "crate": "the crate's code", "sdist": "the package's Rust code"}[what]
-        for found in answer.get("uses") or []:
-            strong = [r for r in found.get("reasons") or [] if r.startswith(lazaret._STRONG_IMPORT_REASONS)]
-            if strong:
-                rel = at(found)
-                issue("SC-USE-RISK", "CRITICAL", rel, found.get("line") or 1,
-                      f"{rel} {'; and '.join(strong)}. Nothing runs it at "
-                      f"{'build or load' if sdist else 'build or start'}: it runs when {whose} is called.",
-                      _USE_RISK_WHY,
-                      "Don't use the package; report it to PyPI." if sdist else
-                      f"Don't use the {what}; report it to its registry.")
-        generate = answer.get("generate") or []
-        if generate:
-            k, line, cmd = generate[0]
-            rel = order[k] if 0 <= k < len(order) else order[0]
-            more = f" (and {len(generate) - 1:,} more)" if len(generate) > 1 else ""
-            issue("SC-GO-GENERATE", "INFO", rel, line,
-                  f"{rel} has `{_show(cmd, 200)}`{more}: go generate runs such commands when someone runs it in "
-                  f"the module's folders; a build never does.", _GO_GENERATE_WHY,
-                  "Read the commands before running go generate in this module.")
-        read = answer.get("useRead") or {}
-        mine = {"files": int(read.get("files", 0)), "ofFiles": int(read.get("ofFiles", 0)),
-                "chars": int(read.get("chars", 0)), "ofChars": int(read.get("ofChars", 0)),
-                "boundChars": USE_RISK_CHARS}
+        given them; `texts` their text): core.package_reader_issues, with
+        `what` "module", "crate" or "sdist" (a crate inside an sdist, N-17)
+        for the words; what its use-time step read goes to useTime."""
+        issues, read = lazaret.package_reader_issues(answer, order, texts, what)
+        self.issues.extend(issues)
+        mine = dict(read, boundChars=USE_RISK_CHARS)
         if self.use_time is None:
             self.use_time = mine
         else:

@@ -304,6 +304,35 @@ export function crossFileIssues(files, skipPaths = new Set(), { who = "Dependenc
   return out;
 }
 
+// ---- Go modules and crates (0.1.9): the readers, and what a vendored manifest says ----
+
+/** The Go reader (G-1; the Python package's engine.go_package) on a module's files, [[path below the module's root,
+ * text]] of its .go files and its cgo packages' .c and .h files; `module`: its path. */
+export function goPackage(files, { module = null, useFileChars = null, useChars = null } = {}) {
+  const args = { files: files.map(([path, text]) => [path, codePoints(text)]) };
+  if (module) args.module = module;
+  if (useFileChars !== null) args.use_file_chars = useFileChars;
+  if (useChars !== null) args.use_chars = useChars;
+  return call("go_package", args, files.map(([, text]) => text));
+}
+
+/** The Rust reader (R-1; engine.rs_crate) on a crate's .rs files, [[path below the crate's root, text]]: `build` its
+ * build script's path, `procMacro` whether its library is a procedural macro, `lib` its library's root. */
+export function rsCrate(files, { build = null, procMacro = false, lib = null, useFileChars = null, useChars = null } = {}) {
+  const args = { proc_macro: Boolean(procMacro), files: files.map(([path, text]) => [path, codePoints(text)]) };
+  if (build) args.build = build;
+  if (lib) args.lib = lib;
+  if (useFileChars !== null) args.use_file_chars = useFileChars;
+  if (useChars !== null) args.use_chars = useChars;
+  return call("rs_crate", args, files.map(([, text]) => text));
+}
+
+/** What a crate's Cargo.toml says of its build script and library ({build: a path, false or null, lib, proc_macro});
+ * engine.cargo_layout. */
+export const cargoLayout = (text) => call("cargo_layout", {}, text);
+/** The module paths a vendor/modules.txt says are vendored, longest first (engine.go_vendored_modules). */
+export const goVendoredModules = (text) => call("go_vendored_modules", {}, text);
+
 // ---- the cross-file JavaScript taint pass ----
 
 /**
