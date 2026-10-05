@@ -1904,6 +1904,15 @@ _USE_RISK_WHY = ("A payload need not run on install or import to reach you: a lo
                  "script the package spawns runs it the first time your code uses the package. These are the shapes "
                  "no library needs: code fetched and run, a reverse shell, hidden PowerShell, credentials sent to an "
                  "exfiltration service, a beacon to a data-capture service.")
+_SDIST_BUILD_WHY = ("pip builds an sdist's Rust extension with cargo when it installs the sdist (maturin, "
+                    "setuptools-rust), and cargo compiles and runs the crate's build script with the user's "
+                    "privileges before anything is reviewed: the moment of setup.py, and where proc-macro1 and "
+                    "rustdecimal ran their payloads on crates.io.")
+_SDIST_PROC_MACRO_WHY = ("A procedural macro is a program the compiler loads and runs, with the user's privileges, "
+                         "while pip builds the sdist's Rust extension: the moment of setup.py.")
+_SDIST_START_WHY = ("A function marked #[ctor] or placed in a load section (.init_array) runs when the package's "
+                    "Rust extension module is loaded, at import, before any of its code is called: an import-time "
+                    "payload's place. MAJOR where the code may have a reason; CRITICAL for code no library needs.")
 _GO_GENERATE_WHY = ("A //go:generate line names a command for go generate to run. Nothing runs it when the module is "
                     "built or imported; it runs when someone runs go generate in the module's folders, which is a "
                     "developer's step, so it is listed rather than judged.")
@@ -1946,6 +1955,9 @@ class _ArtifactScan:
         self.unused_dependencies = []  # npm: registry names no file uses (_unused_dependencies)
         self.use_time = None       # what SC-USE-RISK's step read (_use_time_code), None: not run
         self.unread_code = []      # N-1: members whose code nothing reads yet (UNREAD_CODE)
+        self.code_text = {}        # rel -> raw: what a reader reads besides the scanned sources (a Go
+        self.code_bytes = 0        # module's cgo C; an sdist's .rs and Cargo.toml files, N-17), kept
+        self.code_dropped = set()  # within PACKAGE_CODE_CHARS bytes (code_dropped: not kept)
 
     # ---- bookkeeping ----
     def truncate(self, rel, detail):
@@ -2100,8 +2112,12 @@ class _ArtifactScan:
             self.unread_code.append(rel)
         base = os.path.basename(rel)
         ext = os.path.splitext(base)[1].lower()
+        code = PACKAGE_CODE.get(self.artifact)
         wants_text = (base in _MANIFEST_NAMES or lazaret.dep_source_lang(ext) is not None
-                      or ext in (".pth", ".gyp", ".gypi"))
+                      or ext in (".pth", ".gyp", ".gypi")
+                      # a file a reader reads: a Go module's .go and cgo C, a crate's .rs (an
+                      # sdist's .rs is known to be a crate's only at the end: _sdist_crates)
+                      or (code is not None and ext in code[1] + code[2] and not _never_built(self.artifact, rel)))
         if reason == "member":
             self.oversize.add(rel)
             if wants_text and not (ext in lazaret.MPEG_TS_EXTS and lazaret._mpeg_ts(raw[:512])):
@@ -2149,6 +2165,15 @@ class _ArtifactScan:
         if base == "pyproject.toml":
             self.manifests[rel] = raw.decode("utf-8", "replace")
             return
+        if ((self.artifact == "sdist" and (ext == ".rs" or base == "Cargo.toml"))
+                or (code is not None and ext in code[2] and not _never_built(self.artifact, rel))) \
+                and not lazaret.looks_binary(raw[:2048]):
+            # read by a package reader at the end (_package_code, _sdist_crates), whatever text came
+            # before: a Go module's cgo C, and the files of a Rust crate inside an sdist (N-17), which
+            # cargo builds when pip builds the sdist; which crate a file is in is known once every
+            # Cargo.toml is
+            self._keep_code(rel, raw)
+            return
         if ext == ".pth":
             text = raw.decode("utf-8-sig", "replace")
             try:
@@ -2158,7 +2183,6 @@ class _ArtifactScan:
             self.scan_source(rel, text, "py")
             return
         lang = lazaret.dep_source_lang(ext)
-        code = PACKAGE_CODE.get(self.artifact)
         if lang is None and code is not None and ext in code[1] and not _never_built(self.artifact, rel):
             lang = code[0]                       # a Go module's .go, a crate's .rs (Part C)
         if lang is not None:
@@ -2199,6 +2223,15 @@ class _ArtifactScan:
             self.deferred_bytes += len(raw)
         else:
             self.dropped.add(rel)
+
+    def _keep_code(self, rel, raw):
+        """Keep a file a package reader reads (code_text), within PACKAGE_CODE_CHARS bytes in all: the
+        reader holds a package at once, and one larger is not read anyway (code_dropped)."""
+        if self.code_bytes + len(raw) <= PACKAGE_CODE_CHARS:
+            self.code_text[rel] = raw
+            self.code_bytes += len(raw)
+        else:
+            self.code_dropped.add(rel)
 
     # ---- pass 2: what runs ----
     def _find(self, candidates):
@@ -2765,7 +2798,8 @@ class _ArtifactScan:
           within the same bounds (useTime says how much was read).
         A module's //go:generate commands are listed (SC-GO-GENERATE, INFO):
         they run only when someone runs go generate. Code larger than
-        PACKAGE_CODE_CHARS is not read (SC-TRUNCATED: INCOMPLETE)."""
+        PACKAGE_CODE_CHARS is not read (SC-TRUNCATED: INCOMPLETE), and so is
+        a module whose cgo C was not all kept."""
         code = PACKAGE_CODE.get(self.artifact)
         if code is None:
             return
@@ -2773,17 +2807,18 @@ class _ArtifactScan:
         rels = sorted(rel for rel, (text, lg) in self.sources.items() if lg == lang and text is not None)
         if not rels:
             return
+        what = "module" if self.artifact == "gomod" else "crate"
         texts = {rel: self.sources[rel][0] for rel in rels}
-        for rel in sorted(self.deferred):
+        for rel in sorted(self.code_text):
             if os.path.splitext(rel)[1].lower() in others:
-                texts[rel] = self.deferred[rel].decode("utf-8", "replace")
+                texts[rel] = self.code_text[rel].decode("utf-8", "replace")
         order = sorted(texts)
         place = _go_root_file if self.artifact == "gomod" else (lambda r: r)
         files = [(place(rel), texts[rel]) for rel in order]
         size = sum(len(t) for _p, t in files)
-        what = "module" if self.artifact == "gomod" else "crate"
-        if size > PACKAGE_CODE_CHARS:
-            self.truncate(rels[0], f"the {what}'s code ({size:,} characters) is more than the reader takes at once "
+        if size > PACKAGE_CODE_CHARS or self.code_dropped:
+            amount = f"{size:,} characters" if not self.code_dropped else "its C files not all kept"
+            self.truncate(rels[0], f"the {what}'s code ({amount}) is more than the reader takes at once "
                                    f"({PACKAGE_CODE_CHARS:,}), so it was not read")
             return
         self._deadline(rels[0])
@@ -2792,15 +2827,96 @@ class _ArtifactScan:
             module = mods[0][2]["module"] if mods else None
             answer = _engine.go_package(files, module=module, use_file_chars=USE_RISK_MAX_CHARS,
                                         use_chars=USE_RISK_CHARS)
-            build = macros = None
         else:
             from lazaret.registry.ecosystems import crates as _crates
             manifest = self.deferred.get("Cargo.toml", b"").decode("utf-8", "replace")
             script, lib, proc_macro = _crates.ECOSYSTEM.layout({"Cargo.toml": manifest}, self.members)
             answer = _engine.rs_crate(files, build=script, proc_macro=proc_macro, lib=lib,
                                       use_file_chars=USE_RISK_MAX_CHARS, use_chars=USE_RISK_CHARS)
-            build, macros = answer.get("build"), answer.get("macros")
-        at = lambda f: order[f["file"]] if 0 <= f.get("file", -1) < len(order) else rels[0]
+        self._reader_findings(answer, order, texts, what)
+
+    def _sdist_crates(self):
+        """N-17 (Part C): the Rust crates inside an sdist. A maturin or
+        setuptools-rust project ships its crate (or a workspace of them), and
+        pip has cargo build it when it installs the sdist; each is read as a
+        crate's code is (_package_code): every .rs file with the file rules,
+        each crate with the Rust reader. A crate is a directory with a
+        Cargo.toml, a .rs file is in the nearest one above it, and one in
+        none is not built by cargo, nor are a crate's tests/, benches/ and
+        examples/: those are not read. A build script and a procedural macro
+        run when pip builds the sdist (SC-INSTALL-HOOK, CRITICAL, as
+        setup.py's code); #[ctor] and load sections when the extension module
+        is loaded (SC-IMPORT-RISK); the strong reasons of the rest are
+        SC-USE-RISK, the crates sharing one USE_RISK_CHARS. A crate's file
+        that was not kept (over the member limit, or past PACKAGE_CODE_CHARS
+        in all) makes the sdist INCOMPLETE."""
+        manifests = {posixpath.dirname(rel): raw for rel, raw in self.code_text.items()
+                     if posixpath.basename(rel) == "Cargo.toml"}
+        unkept = {posixpath.dirname(rel) for rel in self.code_dropped if posixpath.basename(rel) == "Cargo.toml"}
+
+        def crate_of(rel):
+            folder = posixpath.dirname(rel)
+            while True:
+                if folder in manifests or folder in unkept:
+                    return folder
+                if not folder:
+                    return None
+                folder = posixpath.dirname(folder)
+
+        def inside(root, rel):
+            return rel[len(root) + 1:] if root else rel
+
+        crates = {}
+        for rel in sorted(set(self.code_text) | self.code_dropped | {r for r in self.oversize if r.endswith(".rs")}):
+            if not rel.endswith(".rs"):
+                continue
+            root = crate_of(rel)
+            if root is None or _never_built("crate", inside(root, rel)):
+                continue                                  # not a file cargo builds
+            if rel in self.oversize:
+                self.truncate(rel, f"{rel} is the code of a Rust crate this sdist builds, and it is larger than the "
+                                   f"{MAX_MEMBER:,}-byte source-scan limit")
+            elif rel in self.code_dropped or root in unkept:
+                self.truncate(rel, f"{rel} is the code of a Rust crate this sdist builds, and the sdist's Rust is more "
+                                   f"than the {PACKAGE_CODE_CHARS:,} characters a reader takes")
+            else:
+                crates.setdefault(root, []).append(rel)
+        if not crates:
+            return
+        # the file rules, a batch at a time (as the first pass reads sources)
+        for root in sorted(crates):
+            for rel in crates[root]:
+                self._deadline(rel)
+                text, extra = lazaret.decode_member(rel, self.code_text[rel])
+                self.add_decode_issues(extra)
+                self.sources[rel] = (text, "rs")
+                self.pending.append((rel, text, "rs"))
+                if len(self.pending) >= _engine.BATCH:
+                    self.scan_pending()
+        self.scan_pending()
+        if self._suspicious():
+            room = 0                                       # (no use-time reading once SUSPICIOUS, as _use_time_code)
+        else:
+            room = USE_RISK_CHARS
+        from lazaret.registry.ecosystems import crates as _crates
+        for root in sorted(crates):
+            order = crates[root]
+            texts = {rel: self.sources[rel][0] for rel in order}
+            files = [(inside(root, rel), texts[rel]) for rel in order]
+            manifest = manifests[root].decode("utf-8", "replace")
+            script, lib, proc_macro = _crates.ECOSYSTEM.layout({"Cargo.toml": manifest}, [p for p, _t in files])
+            self._deadline(order[0])
+            answer = _engine.rs_crate(files, build=script, proc_macro=proc_macro, lib=lib,
+                                      use_file_chars=USE_RISK_MAX_CHARS, use_chars=max(0, room))
+            room -= int((answer.get("useRead") or {}).get("chars", 0))
+            self._reader_findings(answer, order, texts, "sdist")
+
+    def _reader_findings(self, answer, order, texts, what):
+        """The findings of a package reader's answer (go_package, rs_crate)
+        for the files `order` (archive paths, in the order the reader was
+        given them; `texts` their text): `what` is "module", "crate" or
+        "sdist" (a crate inside an sdist, N-17), for the words."""
+        at = lambda f: order[f["file"]] if 0 <= f.get("file", -1) < len(order) else order[0]
 
         def issue(rule, sev, rel, line, msg, why, fix):
             self.issues.append(lazaret.mk_issue({"id": rule, "name": _PACKAGE_RULE_NAMES[rule], "type": "HOTSPOT",
@@ -2808,20 +2924,30 @@ class _ArtifactScan:
                                                  "ref": "CWE-506 · Supply chain"},
                                                 rel, line, (texts.get(rel) or "").split("\n")))
 
-        for found, how, why in ((build, "is the crate's build script: cargo runs it on the machine that builds any "
-                                        "crate that depends on it", _BUILD_SCRIPT_WHY),
-                                (macros, "is a procedural macro: it runs inside the compiler of every crate that uses "
-                                         "it", _PROC_MACRO_WHY)):
+        sdist = what == "sdist"
+        for found, how, why in (
+                (answer.get("build"),
+                 "is the build script of a Rust crate in this sdist: pip has cargo build the crate when it installs "
+                 "the sdist, and cargo runs the script on that machine" if sdist else
+                 "is the crate's build script: cargo runs it on the machine that builds any crate that depends on it",
+                 _SDIST_BUILD_WHY if sdist else _BUILD_SCRIPT_WHY),
+                (answer.get("macros"),
+                 "is a procedural macro of a Rust crate in this sdist: it runs inside the compiler when pip builds "
+                 "the sdist" if sdist else
+                 "is a procedural macro: it runs inside the compiler of every crate that uses it",
+                 _SDIST_PROC_MACRO_WHY if sdist else _PROC_MACRO_WHY)):
             if found and found.get("reasons"):
                 rel = at(found)
                 issue("SC-INSTALL-HOOK", "CRITICAL", rel, found.get("line") or 1,
                       f"{rel} {how}, and it {'; and '.join(found['reasons'])}.", why,
+                      "Do not install this sdist; report it to PyPI." if sdist else
                       "Do not build with this crate; report it to crates.io.")
-        start_how, start_why = (("runs when any program that imports its package starts (init functions, "
-                                 "package-level variables' initializers, cgo constructors)", _GO_START_WHY)
-                                if self.artifact == "gomod" else
-                                ("runs before a program's main (#[ctor], a load section, an exported main)",
-                                 _RUST_START_WHY))
+        start_how, start_why = {
+            "module": ("runs when any program that imports its package starts (init functions, package-level "
+                       "variables' initializers, cgo constructors)", _GO_START_WHY),
+            "crate": ("runs before a program's main (#[ctor], a load section, an exported main)", _RUST_START_WHY),
+            "sdist": ("runs when the package's Rust extension is loaded, before any of its code is called (#[ctor], "
+                      "a load section)", _SDIST_START_WHY)}[what]
         for found in answer.get("start") or []:
             reasons = found.get("reasons") or []
             if reasons:
@@ -2829,18 +2955,21 @@ class _ArtifactScan:
                 issue("SC-IMPORT-RISK", lazaret.import_time_severity(reasons), rel, found.get("line") or 1,
                       f"{rel} {start_how}, and it {'; and '.join(reasons)}.", start_why,
                       "Read that code: what does it run, and where does it send what it collects?")
+        whose = {"module": "the module's code", "crate": "the crate's code", "sdist": "the package's Rust code"}[what]
         for found in answer.get("uses") or []:
             strong = [r for r in found.get("reasons") or [] if r.startswith(lazaret._STRONG_IMPORT_REASONS)]
             if strong:
                 rel = at(found)
                 issue("SC-USE-RISK", "CRITICAL", rel, found.get("line") or 1,
-                      f"{rel} {'; and '.join(strong)}. Nothing runs it at build or start: it runs when the "
-                      f"{what}'s code is called.", _USE_RISK_WHY,
+                      f"{rel} {'; and '.join(strong)}. Nothing runs it at "
+                      f"{'build or load' if sdist else 'build or start'}: it runs when {whose} is called.",
+                      _USE_RISK_WHY,
+                      "Don't use the package; report it to PyPI." if sdist else
                       f"Don't use the {what}; report it to its registry.")
         generate = answer.get("generate") or []
         if generate:
             k, line, cmd = generate[0]
-            rel = order[k] if 0 <= k < len(order) else rels[0]
+            rel = order[k] if 0 <= k < len(order) else order[0]
             more = f" (and {len(generate) - 1:,} more)" if len(generate) > 1 else ""
             issue("SC-GO-GENERATE", "INFO", rel, line,
                   f"{rel} has `{_show(cmd, 200)}`{more}: go generate runs such commands when someone runs it in "
@@ -2967,6 +3096,8 @@ class _ArtifactScan:
                         reachable if reachable is not None else set(self.entries))
             if self.artifact in PACKAGE_CODE:
                 self._phase(f"the {'module' if self.artifact == 'gomod' else 'crate'}'s code", self._package_code)
+            if self.artifact == "sdist" and (self.code_text or self.code_dropped):
+                self._phase("the Rust crates' code", self._sdist_crates)
             self._phase("the agent-hijack check", self._agent_hijack)
             self._phase("the package's names", self._lookalike_names)
             self._phase("the dependencies nothing uses", self._unused_dependencies)
@@ -2986,7 +3117,7 @@ class _ArtifactScan:
             self.issues.append(_unread_code_issue(self.artifact, sorted(self.unread_code)))
         _demote_test_findings(self.issues, reachable if reachable is not None else self.entries)
         # F9b: the decompressed sources are no longer needed
-        self.sources, self.deferred, self.shell = {}, {}, {}
+        self.sources, self.deferred, self.shell, self.code_text = {}, {}, {}, {}
 
 
 _PY_LOCAL_IMPORT_RE = re.compile(r"^\s*(?:from\s+([A-Za-z_][\w.]*)\s+import\b|import\s+([A-Za-z_][\w.]*))", re.M)

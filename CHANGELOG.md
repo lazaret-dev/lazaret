@@ -97,7 +97,9 @@ project is pre-1.0, so the 0.x API may still change.
   commands are listed (SC-GO-GENERATE, INFO). Every `.go` and `.rs` file gets the file
   rules too, except test code no build of a dependent compiles (`*_test.go`, `testdata/`,
   `vendor/`, a file named with `_` or `.` first; `tests/`, `benches/`, `examples/`), which
-  is not read at all: rivo/uniseg's line-break tests hold escaped URLs. A module or a crate
+  is not read at all: rivo/uniseg's line-break tests hold escaped URLs. A `.go` or `.rs` file
+  over `--max-source-bytes` makes the scan INCOMPLETE, and a module's cgo C files are kept
+  for the reader outside the text budget other files share. A module or a crate
   over 300 million characters is INCOMPLETE: a reader holds all of it at once, and the call
   now takes its text without copying each file (aws-sdk-go v1's 207 million characters
   peak at 2.4 GB, from 3.0 GB). On Ubuntu 24.04's packaged Go modules and crates whose
@@ -116,6 +118,17 @@ project is pre-1.0, so the 0.x API may still change.
   `static.crates.io`), redirects included, through the registry's bounded, timed fetch.
   `repo.SpecError`, `FetchError`, `DigestError` and `Resolution` are now the registry
   modules' classes (X-2's first step). No `discover` and no SC-NEW-DEPENDENCY for them yet.
+- **The Rust crate inside a PyPI sdist is read (Part C, N-17).** A maturin or
+  setuptools-rust sdist ships its crate (or a workspace of crates), and pip has cargo build
+  it when it installs the sdist: each directory of the sdist with a `Cargo.toml` is a crate,
+  a `.rs` file belongs to the nearest one above it, and each crate is read as a `.crate` is
+  (the file rules on every `.rs` file it builds; the Rust reader on the crate). Its build
+  script and procedural macros are SC-INSTALL-HOOK, CRITICAL, as `setup.py`'s code; a
+  `#[ctor]` runs when the extension module is loaded (SC-IMPORT-RISK); the strong reasons of
+  the rest are SC-USE-RISK, the sdist's crates sharing one use-time share. A crate's file
+  that could not be kept makes the sdist INCOMPLETE. Of 72 popular PyPI sdists with a crate
+  (permissive licences only), two more are WARN (a table of 200 digits; hex test vectors in
+  `#[test]` functions) and none SUSPICIOUS for its Rust; their scans took 28 s instead of 11.
 - **Where a run's time goes: `--timings`.** `lazaret-registry` and `lazaret guard` print on
   stderr the seconds spent in the network, reading archives, the engine (by call: the
   file scan, the import-time test, the cross-file follower, …), the package manager (the

