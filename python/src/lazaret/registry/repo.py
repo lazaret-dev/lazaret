@@ -1,15 +1,18 @@
 #!/usr/bin/env python3
-"""Lazaret registry scanner — audit npm / PyPI packages for supply-chain compromise.
+"""Lazaret registry scanner — audit npm / PyPI packages, Go modules and crates for supply-chain compromise.
 
-Fetches package archives from registry.npmjs.org / pypi.org, scans them
-in memory (never extracted to disk — immune to tar-slip), and tracks scan
-state in a database so you can do full or incremental sweeps.
+Fetches package archives from registry.npmjs.org / pypi.org (and Go modules
+from proxy.golang.org, crates from static.crates.io), scans them in memory
+(never extracted to disk — immune to tar-slip), and tracks scan state in a
+database so you can do full or incremental sweeps.
 
 Usage:
     lazaret-registry add npm:express pypi:requests      # track packages
     lazaret-registry scan npm:left-pad                  # scan latest version
     lazaret-registry scan npm:left-pad@1.3.0            # scan specific version
     lazaret-registry scan pypi:six --full               # full ruleset, not just supply-chain
+    lazaret-registry scan go:github.com/pkg/errors@v0.9.1   # a Go module version
+    lazaret-registry scan crates:serde                  # the latest crate release
     lazaret-registry scan-all                           # scan latest of every tracked package
     lazaret-registry list                               # tracked packages + last verdicts
     lazaret-registry report npm:left-pad@1.3.0          # stored findings for a scan
@@ -26,7 +29,11 @@ State backends (--db or LAZARET_DB env):
                        for one-time setup. Don't reuse an existing application DB.
 
 Package specs: npm:<name>[@version]  |  pypi:<name>[@version or ==version]
+               go:<module path>[@version]  |  crates:<name>[@version]
 Scoped npm packages work: npm:@scope/pkg@1.0.0
+A Go module is the zip the module proxy serves, checked against the h1: hash
+the Go checksum database publishes; a crate is the .crate crates.io serves,
+checked against its index's SHA-256. Neither has `discover` yet.
 PyPI releases are judged on every file pip may install: the sdist and each
 distinct wheel (up to --max-artifacts files and --max-download-bytes in
 total); the verdict is the worst of them.
@@ -63,6 +70,7 @@ from lazaret import safexml as _safexml                 # noqa: E402
 from lazaret.registry import contentcache as _cache     # noqa: E402
 from lazaret.registry import lookalike as _lookalike    # noqa: E402
 from lazaret.registry import unused_deps as _unused     # noqa: E402
+from lazaret.registry.ecosystems import base as _base   # noqa: E402
 from lazaret.scanner import engine as _engine           # noqa: E402
 from lazaret.scanner import gomod as _gomod             # noqa: E402
 from lazaret.scanner import timings                     # noqa: E402
@@ -280,21 +288,16 @@ _NPM_NAME_PART_RE = re.compile(r"^[a-zA-Z0-9~-][a-zA-Z0-9._~-]*$")
 _PYPI_NAME_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$")   # PEP 508
 
 
-class SpecError(ValueError):
-    """Invalid ecosystem / package name / version."""
-
-
-class FetchError(ValueError):
-    """A fetch was refused (bad scheme/host) or exceeded a size budget.
-    `status` is the HTTP status when the server answered with an error."""
-    status = None
-
-
-class DigestError(ValueError):
-    """A downloaded artifact failed its registry-published integrity check.
-
-    Fail-closed: the scan stops and nothing is persisted for that package.
-    """
+# The errors are the registry modules' (registry/ecosystems/base.py; X-2's
+# first step): one class each, so what a Go or crates.io module raises is what
+# this file and its callers catch. SpecError: invalid ecosystem / package name
+# / version. FetchError: a fetch refused (scheme, host) or over its budget, with
+# `status` the HTTP status when the server answered with an error. DigestError:
+# a download failed its registry-published integrity check; fail closed, the
+# scan stops and nothing is persisted for that package.
+SpecError = _base.SpecError
+FetchError = _base.FetchError
+DigestError = _base.DigestError
 
 
 class FeedError(ValueError):
@@ -310,6 +313,27 @@ class ScanCancelled(Exception):
 
 
 # ---------------- Package spec parsing ----------------
+#: The ecosystems whose names, versions, resolving and digest live in a
+#: registry module (registry/ecosystems; Part C wires them in, X-2's part):
+#: `go:<module path>[@version]` and `crates:<name>[@version]`. npm and PyPI
+#: keep their code in this file until X-2 moves it.
+MODULE_ECOSYSTEMS = ("go", "crates")
+ECOSYSTEMS = ("npm", "pypi") + MODULE_ECOSYSTEMS
+
+
+def registry_module(eco):
+    """The registry module of `eco` (golang.ECOSYSTEM, crates.ECOSYSTEM), or
+    None for npm, PyPI and anything else. Imported when first asked for: a
+    sweep of npm and PyPI packages never loads them."""
+    if eco == "go":
+        from lazaret.registry.ecosystems import golang
+        return golang.ECOSYSTEM
+    if eco == "crates":
+        from lazaret.registry.ecosystems import crates
+        return crates.ECOSYSTEM
+    return None
+
+
 def _check_npm_name(name):
     """npm's naming rules (validate-npm-package-name), restricted to URL-safe
     ASCII: an optional @scope/, at most 214 characters, no leading '.' or
@@ -338,6 +362,9 @@ def _check_name(eco, name):
     end up interpolated into URLs and persisted — so traversal segments, path
     separators and control characters must never be accepted.
     """
+    module = registry_module(eco)
+    if module is not None:
+        return module.check_name(name)
     if not isinstance(name, str) or not name:
         raise SpecError(f"{eco}: empty package name")
     if eco == "npm":
@@ -357,6 +384,9 @@ def valid_name(eco, name):
 
 def _check_version(eco, version):
     """Same guarantee for pinned versions; None (== latest) passes through."""
+    module = registry_module(eco)
+    if module is not None:
+        return module.check_version(version)
     if version is None:
         return None
     if not isinstance(version, str) or not version.strip():
@@ -368,13 +398,19 @@ def _check_version(eco, version):
 
 
 def parse_spec(spec):
-    """'npm:@scope/pkg@1.2.3' -> ('npm', '@scope/pkg', '1.2.3'); version may be None."""
+    """'npm:@scope/pkg@1.2.3' -> ('npm', '@scope/pkg', '1.2.3'); version may be None.
+    'go:github.com/pkg/errors@v0.9.1' and 'crates:serde@1.0.0' are read by
+    their registry module (a Go version is v1.2.3; a crate's has no v)."""
     if not isinstance(spec, str) or ":" not in spec:
-        raise SpecError(f"Spec must be npm:<name> or pypi:<name> — got {spec!r}")
+        raise SpecError(f"Spec must be npm:<name>, pypi:<name>, go:<module> or crates:<name> — got {spec!r}")
     eco, rest = spec.split(":", 1)
     eco = eco.strip().lower()
-    if eco not in ("npm", "pypi"):
-        raise SpecError(f"Unknown ecosystem {eco!r} (use npm or pypi)")
+    if eco not in ECOSYSTEMS:
+        raise SpecError(f"Unknown ecosystem {eco!r} (use npm, pypi, go or crates)")
+    module = registry_module(eco)
+    if module is not None:
+        name, ver = module.parse_spec(rest)
+        return eco, name, ver
     rest = rest.strip().replace("==", "@")
     if rest.startswith("@"):                      # scoped npm package
         if eco != "npm":
@@ -436,8 +472,10 @@ def _fetch(url, max_bytes=MAX_DOWNLOAD_BYTES, timeout=DOWNLOAD_TIMEOUT, accept=N
         return _fetch_bytes(url, max_bytes, timeout, accept, data, content_type)
 
 
-def _fetch_bytes(url, max_bytes, timeout, accept, data, content_type):
-    _validated_url(url)
+def _fetch_bytes(url, max_bytes, timeout, accept, data, content_type, opener=None, validate=None):
+    """`opener` and `validate` default to this file's (_OPENER, _validated_url);
+    a registry module's fetch passes its own (module_transport)."""
+    (validate or _validated_url)(url)
     headers = {"User-Agent": USER_AGENT}
     if accept:
         headers["Accept"] = accept
@@ -445,7 +483,7 @@ def _fetch_bytes(url, max_bytes, timeout, accept, data, content_type):
         headers["Content-Type"] = content_type
     req = urllib.request.Request(url, data=data, headers=headers)
     try:
-        with _OPENER.open(req, timeout=timeout) as r:
+        with (opener or _OPENER).open(req, timeout=timeout) as r:
             buf = bytearray()
             while True:
                 chunk = r.read(64 * 1024)
@@ -464,6 +502,47 @@ def _fetch_bytes(url, max_bytes, timeout, accept, data, content_type):
         raise FetchError(f"URL error fetching {url}: {exc.reason}") from exc
     except OSError as exc:                     # includes socket timeouts
         raise FetchError(f"network error fetching {url}: {exc}") from exc
+
+
+class _ModuleRedirects(urllib.request.HTTPRedirectHandler):
+    """_RegistryOpener for a registry module's fetches: every redirect is
+    checked by the module's own rule (`base.Fetch.check_url`: https, one of
+    the module's hosts, no credentials), at most MAX_REDIRECTS hops."""
+
+    max_redirections = MAX_REDIRECTS
+
+    def __init__(self, check):
+        super().__init__()
+        self._check = check
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        try:
+            self._check(newurl)
+        except FetchError as exc:
+            raise urllib.error.URLError(f"redirect blocked: {exc}")
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+def _module_opener(check):
+    return urllib.request.build_opener(_ModuleRedirects(check))
+
+
+def module_transport(url, max_bytes=MAX_DOWNLOAD_BYTES, accept=None, timeout=DOWNLOAD_TIMEOUT,
+                     check_redirect=None):
+    """The transport a registry module's `base.Fetch` is given (X-2): _fetch's
+    bounded, timed read, with the module's URL rule (`check_redirect`, which
+    `Fetch` passes) for the URL and for every redirect. The network seam for
+    go: and crates: (tests patch it with recorded responses)."""
+    if check_redirect is None:
+        raise FetchError("a registry module's fetch needs the module's URL rule")
+    with timings.span("network", "fetch"):
+        return _fetch_bytes(url, max_bytes, timeout, accept, None, None,
+                            opener=_module_opener(check_redirect), validate=check_redirect)
+
+
+def module_fetch(module):
+    """A `base.Fetch` for a registry module, over module_transport."""
+    return _base.Fetch(module, module_transport)
 
 
 def http_json(url, accept=None):
@@ -501,22 +580,15 @@ def http_bytes(url):
 
 
 # ---------------- Registry metadata ----------------
-class Resolution(tuple):
-    """(version, url, container_format, artifact_kind, meta_entry) — the
-    primary artifact, unpackable as before — plus .artifacts: every artifact
-    to scan, as dicts {url, container, artifact, entry, filename}, and
-    .skipped: files of the release that are not scanned, as dicts {filename,
-    packagetype, installable, size, reason}; `installable` means pip may
-    install the file anyway (scan_package counts it as not scanned)."""
-
-    def __new__(cls, version, artifacts, skipped=(), info=None):
-        first = artifacts[0]
-        self = super().__new__(cls, (version, first["url"], first["container"],
-                                     first["artifact"], first["entry"]))
-        self.artifacts = list(artifacts)
-        self.skipped = list(skipped)
-        self.info = info if isinstance(info, dict) else {}      # PyPI: the release's metadata
-        return self
+# (version, url, container_format, artifact_kind, meta_entry) — the primary
+# artifact, unpackable as before — plus .artifacts: every artifact to scan, as
+# dicts {url, container, artifact, entry, filename}, and .skipped: files of
+# the release that are not scanned, as dicts {filename, packagetype,
+# installable, size, reason}; `installable` means pip may install the file
+# anyway (scan_package counts it as not scanned). .info: PyPI's release
+# metadata; a Go module's path and root, a crate's spelling and yanked flag.
+# The registry modules' class (base.py), as the errors are.
+Resolution = _base.Resolution
 
 
 def resolve_npm(name, version):
@@ -659,7 +731,10 @@ def pypi_latest_from_feed(name):
 
 def resolve(eco, name, version):
     """Registry metadata for one package version (network seam: tests patch
-    resolve_npm / resolve_pypi)."""
+    resolve_npm / resolve_pypi, and module_transport for go and crates)."""
+    module = registry_module(eco)
+    if module is not None:
+        return module.resolve(name, version, module_fetch(module))
     return (resolve_npm if eco == "npm" else resolve_pypi)(name, version)
 
 
@@ -716,6 +791,20 @@ def verify_digest(data, meta_entry, eco, name, version):
             f"refusing to scan an unverified artifact (possible CDN/mirror "
             f"compromise or man-in-the-middle)")
     return alg, want
+
+
+def _module_digest(module, data, meta_entry, eco, name, version):
+    """verify_digest for a registry module's download: the module's check (a Go
+    module's h1: from the checksum database, a crate's SHA-256 from the index),
+    which fails closed in verify_digest's words. A module that resolves always
+    has a digest to check (resolve fails without one); None only when the
+    release names none, as verify_digest's."""
+    try:
+        return module.verify(data, meta_entry, name, version)
+    except DigestError as exc:
+        raise DigestError(
+            f"{eco}:{name}@{version} SC-DIGEST-MISMATCH: {exc} — refusing to scan an "
+            f"unverified artifact (possible CDN/mirror compromise or man-in-the-middle)") from None
 
 
 # ---------------- In-memory archive reading ----------------
@@ -3300,8 +3389,8 @@ def new_dependency_issues(eco, name, version, resolved, unused=()):
     """SC-NEW-DEPENDENCY findings for one release (best effort: [] when the
     registry can't say). unused: the registry names of the dependencies no
     file of the release names (the artifact scan's unusedDependencies)."""
-    if os.environ.get("LAZARET_NO_DEPENDENCY_HISTORY"):
-        return []
+    if os.environ.get("LAZARET_NO_DEPENDENCY_HISTORY") or eco not in ("npm", "pypi"):
+        return []                        # (a crate's: N-3's second part, from the sparse index)
     try:
         if eco == "npm":
             previous, found = npm_new_dependencies(name, version, resolved[4])
@@ -3343,6 +3432,7 @@ def scan_package(eco, name, version=None, full=False, *, resolved=None, deadline
     also gets SCAN_TIMEOUT. cancel: callable; True stops the scan with
     ScanCancelled."""
     started = time.monotonic()
+    module = registry_module(eco)       # go and crates: their module downloads and checks
     if resolved is None:
         resolved = resolve(eco, name, version)
     version, url, container, artifact, meta_entry = resolved
@@ -3386,12 +3476,16 @@ def scan_package(eco, name, version=None, full=False, *, resolved=None, deadline
         if downloaded >= byte_budget or (size is not None and downloaded + size > byte_budget):
             skipped.append((ref.get("filename"), "budget", size))
             continue
-        data = http_bytes(ref["url"])
+        if module is None:
+            data = http_bytes(ref["url"])
+        else:
+            data = module_fetch(module).bytes(ref["url"], MAX_DOWNLOAD_BYTES)
         downloaded += max(len(data), size or 0)
         # G15: verify the artifact against the registry-published digest BEFORE
         # scanning anything — a mismatch raises and nothing is persisted under
         # this name/version.
-        digest = verify_digest(data, ref["entry"], eco, name, version)
+        digest = (verify_digest(data, ref["entry"], eco, name, version) if module is None
+                  else _module_digest(module, data, ref["entry"], eco, name, version))
         stop = time.monotonic() + SCAN_TIMEOUT
         if deadline is not None and deadline < stop:
             # the caller's deadline comes first: say so, not "120 s exceeded"
@@ -5031,11 +5125,13 @@ def _finish_sweep(errors, bad, ci):
 def main():
     global SCAN_TIMEOUT, MAX_ARTIFACTS, MAX_PACKAGE_DOWNLOAD_BYTES, MAX_MEMBER
     lazaret.configure_stdio()
-    ap = argparse.ArgumentParser(prog="lazaret-registry", description="Lazaret npm/PyPI registry scanner")
+    ap = argparse.ArgumentParser(prog="lazaret-registry",
+                                 description="Lazaret registry scanner: npm, PyPI, Go modules and crates")
     ap.add_argument("--version", action="version",
                     version=f"lazaret-registry {lazaret.VERSION} (engine: {_engine.describe()})")
     ap.add_argument("command", choices=["add", "scan", "scan-all", "list", "report", "discover"])
-    ap.add_argument("specs", nargs="*", help="npm:<name>[@ver] or pypi:<name>[@ver]")
+    ap.add_argument("specs", nargs="*", help="npm:<name>[@ver], pypi:<name>[@ver], go:<module>[@vX.Y.Z] "
+                                             "or crates:<name>[@ver]")
     ap.add_argument("--db", default=os.environ.get("LAZARET_DB", "lazaret-registry.db"),
                     help="SQLite path (or sqlite:PATH), postgres:// URL or libpq "
                          "'host=… dbname=…' string (env LAZARET_DB)")

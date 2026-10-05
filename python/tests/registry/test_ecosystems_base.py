@@ -396,7 +396,8 @@ class TheseBrokenModulesAreCaught(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 class SameAsRepoTests(unittest.TestCase):
-    """Until `repo.py` re-exports these (X-2), the copies in `base.py` are held to its numbers and shapes."""
+    """`repo.py` re-exports the errors and `Resolution` (X-2's first step, Part C); the numbers it keeps are held to
+    `base.py`'s."""
 
     def test_the_numbers_are_repos(self):
         self.assertEqual(base.MAX_DOCUMENT_BYTES, repo.MAX_FEED_BYTES)
@@ -407,12 +408,13 @@ class SameAsRepoTests(unittest.TestCase):
         self.assertEqual(base.VERSION_RE.pattern, repo.NAME_RE.pattern)
         self.assertEqual(base.VERSION_RE.flags, repo.NAME_RE.flags)
 
-    def test_the_errors_are_the_same_kind_of_error(self):
+    def test_the_errors_are_the_same_errors(self):
         for ours, theirs in ((base.SpecError, repo.SpecError), (base.FetchError, repo.FetchError),
                              (base.DigestError, repo.DigestError)):
-            self.assertEqual(ours.__name__, theirs.__name__)
-            self.assertEqual([c.__name__ for c in ours.__mro__[1:]], [c.__name__ for c in theirs.__mro__[1:]])
+            self.assertIs(ours, theirs)
+            self.assertEqual(ours.__mro__[1:], (ValueError,) + ValueError.__mro__[1:])
         self.assertIsNone(base.FetchError.status)
+        self.assertIs(base.Resolution, repo.Resolution)
 
     def test_resolution_is_repos_shape(self):
         art = [{"url": "https://a/x", "container": "tgz", "artifact": "npm", "entry": {"k": 1}, "filename": "x"},

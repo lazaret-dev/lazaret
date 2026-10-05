@@ -189,7 +189,7 @@ line yourself.
 
 ```
 lazaret.scanner    rules, taint, cross-file flow, CLI            (lazaret)
-lazaret.registry   npm / PyPI package auditing                   (lazaret-registry)
+lazaret.registry   npm / PyPI / Go / crates.io package auditing  (lazaret-registry)
 lazaret.registry.guard  pre-install guard for npm/pnpm/yarn/bun/pip/uv   (lazaret guard, lazaret-guard)
 lazaret.registry.pmsettings  the package managers' registries, indexes and credentials (guard)
 lazaret.mcp        MCP server                                    (lazaret-mcp)
@@ -669,7 +669,12 @@ the technique, whatever the tool's names. It won back 41 of the holdout's
 
 `lazaret-registry` fetches and audits an npm/PyPI artifact with the same rule
 pack, discovering install hooks and start-up files and running the import-time
-checks. `lazaret-sca --update-bundle` builds a CVE bundle from public feeds
+checks. Since 0.1.9 it also takes `go:` and `crates:` specs: their registry
+modules (`registry/ecosystems`; the readers are RUST_ENGINE.md §21, §22) resolve,
+download and check them through `repo.module_transport` (`_fetch` with the
+module's own URL rule), and `scan_package` scans them as the guard does; the
+errors and `Resolution` are the modules' classes, re-exported (X-2's first
+step). `lazaret-sca --update-bundle` builds a CVE bundle from public feeds
 (OSV, CISA KEV, EPSS) parsed with `lazaret.safexml`; Lazaret ships no
 vulnerability database of its own. The registry always redacts what it stores.
 

@@ -1,11 +1,11 @@
 """What the registry modules share (0.1.9, wave 2): the errors, `Resolution`, the checked fetch seam and the
 `Ecosystem` class that PyPI, npm, Go and crates.io each fill in.
 
-Design: `specs/lazaret-registry-module-interface-2026-10-03.md`. This file is written ahead of `repo.py`'s part of X-2
-(which is the 0.1.8 agent's): until `repo.py` re-exports `SpecError`, `FetchError`, `DigestError` and `Resolution`
-from here, the classes below are separate classes from `repo.py`'s, with the same names and the same meaning, and
-nothing in `repo.py` raises or catches these. `tests/registry/test_ecosystems_base.py` holds the copies to `repo.py`'s
-constants and to `repo.Resolution`'s shape, so a drift shows up as a failing test and not as a surprise in X-2.
+Design: `specs/lazaret-registry-module-interface-2026-10-03.md`. `repo.py` re-exports `SpecError`, `FetchError`,
+`DigestError` and `Resolution` from here (X-2's first step, in 0.1.9's Part C), so what a module raises is what `repo.py`
+and its callers catch, and supplies the transport (`repo.module_transport`) for the Go and crates.io modules, which
+`lazaret-registry go:… crates:…` resolves, downloads and checks through. `tests/registry/test_ecosystems_base.py` holds
+the numbers below to `repo.py`'s.
 
 The rules every module keeps (the conformance tests, `tests/registry/ecosystem_contract.py`, check them for each):
 https and the module's own hosts only, redirects included; names and versions validated before a URL is built and
@@ -233,8 +233,8 @@ class Fetch:
     no credentials in the URL, a bounded length, or `FetchError` before any request; the transport's redirects go
     through the same check; each host's `rate` is kept (the interval between requests to it) from any number of
     threads. The bytes come from `transport(url, max_bytes=…, accept=…, timeout=…, check_redirect=…)`, which
-    `repo.py` supplies in X-2 (its `_fetch`) and tests supply from recorded responses; it returns the body as bytes
-    and raises `FetchError` for a failed or over-budget request.
+    `repo.py` supplies (`module_transport`: its `_fetch` with this URL rule) and tests supply from recorded
+    responses; it returns the body as bytes and raises `FetchError` for a failed or over-budget request.
 
     A document is decoded here: UTF-8 text, JSON with the bounded reader, JSON lines with a bound per line."""
 

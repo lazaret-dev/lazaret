@@ -104,7 +104,8 @@ python/
 │   │                       the provider table, the one HTTPS transport, AWS
 │   │                       request signing; not called by a scan yet
 │   ├── registry/
-│   │   ├── repo.py         npm / PyPI package auditing (`lazaret-registry`)
+│   │   ├── repo.py         npm / PyPI / Go / crates.io package auditing
+│   │   │                   (`lazaret-registry`)
 │   │   ├── guard.py        the install guard (`lazaret guard`, `lazaret-guard`):
 │   │   │                   checks what npm / pnpm / yarn / Bun / pip / uv / go /
 │   │   │                   cargo would install

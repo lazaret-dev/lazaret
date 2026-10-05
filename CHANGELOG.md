@@ -105,6 +105,17 @@ project is pre-1.0, so the 0.x API may still change.
   for base64 and hex constants, test vectors outside test folders, archives and binaries,
   every one read; 2 are INCOMPLETE (Debian packs aws-sdk-go-v2's and azure-sdk-for-go's
   modules as one tree). The npm and PyPI scans are unchanged.
+- **`lazaret-registry scan go:<module>[@version]` and `crates:<name>[@version]` (Part C).**
+  `add`, `scan`, `scan-all`, `report` and the MCP server's `scan_package` take Go modules
+  and crates as they take npm and PyPI packages. The registry modules resolve them (the
+  module proxy's `@latest` or `.info`; crates.io's sparse index, latest being the highest
+  version that is not yanked) and check the download before anything is scanned: a Go
+  module zip against the `h1:` hash the Go checksum database publishes, a `.crate` against
+  the SHA-256 its index lists, failing closed with SC-DIGEST-MISMATCH. Their fetches go
+  only to the module's own hosts (`proxy.golang.org`, `sum.golang.org`; `index.crates.io`,
+  `static.crates.io`), redirects included, through the registry's bounded, timed fetch.
+  `repo.SpecError`, `FetchError`, `DigestError` and `Resolution` are now the registry
+  modules' classes (X-2's first step). No `discover` and no SC-NEW-DEPENDENCY for them yet.
 - **Where a run's time goes: `--timings`.** `lazaret-registry` and `lazaret guard` print on
   stderr the seconds spent in the network, reading archives, the engine (by call: the
   file scan, the import-time test, the cross-file follower, …), the package manager (the

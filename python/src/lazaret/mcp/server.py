@@ -131,16 +131,18 @@ TOOLS = [
     },
     {
         "name": "scan_package",
-        "description": ("Fetch and scan a public npm or PyPI package for supply-chain "
-                        "compromise (obfuscation, install hooks, secrets) and vulnerabilities. "
-                        "The archive is scanned in memory. Result is recorded in the registry "
-                        "state DB. spec examples: 'npm:left-pad@1.3.0', 'pypi:requests', "
-                        "'npm:@babel/core'."),
+        "description": ("Fetch and scan a public npm or PyPI package, Go module or crate for "
+                        "supply-chain compromise (obfuscation, install hooks, secrets) and "
+                        "vulnerabilities. The archive is scanned in memory. Result is recorded in "
+                        "the registry state DB. spec examples: 'npm:left-pad@1.3.0', "
+                        "'pypi:requests', 'npm:@babel/core', 'go:github.com/pkg/errors@v0.9.1', "
+                        "'crates:serde'."),
         "inputSchema": {
             "type": "object",
             "properties": {
                 "spec": {"type": "string",
-                         "description": "npm:<name>[@version] or pypi:<name>[@version]"},
+                         "description": ("npm:<name>[@version], pypi:<name>[@version], "
+                                         "go:<module path>[@vX.Y.Z] or crates:<name>[@version]")},
                 "full": {"type": "boolean",
                          "description": "Run the full ruleset (default: supply-chain/secret rules only)"},
             },
@@ -149,7 +151,7 @@ TOOLS = [
     },
     {
         "name": "registry_status",
-        "description": ("List tracked npm/PyPI packages and the verdict of their most recent "
+        "description": ("List tracked packages and the verdict of their most recent "
                         "scan (OK / WARN / INCOMPLETE / SUSPICIOUS) from the registry state DB."),
         "inputSchema": {"type": "object", "properties": {}},
     },
