@@ -1157,9 +1157,27 @@ TLS. Trust anchors: `SSL_CERT_FILE`, the system bundle, or what Python's
 `ssl` loads (Windows' store); `SSL_CERT_DIR` alone is not read. The library
 has not had an independent review, which Lazaret had asked for before
 relying on its TLS; decision 12 (John, Oct 6) made it the default anyway,
-with urllib one variable away. Still on urllib: the guard's fetcher and
-`keepalive.py`, `sources.py`, the SCA feeds and secret verification (the
-next part of NET-1), then the Go checksum database check on `lazaret-verify`.
+with urllib one variable away.
+
+The other callers (NET-1's second part): the guard's `Fetcher.open` (and so
+`fetch`, `fetch_to_file`, the Go relay) and the pip index's relay send an
+https request without credentials through it, with the fetcher's hosts (and
+the URL's own, already checked) as the rule, or no host rule for a redirect
+where `https_redirects` lets one go to any https host; `_NativeResponse`
+reads like urllib's response (`headers.get`, `read`, TooLarge over the
+budget). `sources._http` sends a request without a token, `sca_feeds.fetch`
+a feed's download (no host rule: a feed may move, https only). What stays on
+urllib: plain http (a registry served on this machine), and every request
+that carries credentials: a private registry's token or a URL's own
+`user:password@` in the guard, `GITHUB_TOKEN` and `GITLAB_TOKEN` in sources,
+and secret verification, which sends the secret it checks. Two reasons: a
+redirect hop gets only its own host's credentials through urllib's hook
+(the guard adds the next host's; tiny_https drops a caller's
+`Authorization` on a change of origin and has no hook to add one, its
+backlog's B-75 "left" part), and secrets are what an unreviewed TLS stack
+would cost most. `keepalive.py` (`--keepalive`) pools urllib's connections
+and is moot for the native transport, which pools its own. Next: the Go
+checksum database check on `lazaret-verify`.
 
 ## 6. How to add or change a rule — the loop
 

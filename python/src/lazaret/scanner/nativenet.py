@@ -220,14 +220,15 @@ def _proxy_for(url):
     return proxy
 
 
-def _spec(url, hosts, method, headers, max_bytes, timeout, max_redirects, total_timeout, h2=None):
-    if not hosts:
+def _spec(url, hosts, method, headers, max_bytes, timeout, max_redirects, total_timeout, h2=None, proxy=None):
+    if hosts is not None and not hosts:
         raise NetError("setup", "a request needs the hosts its caller may reach")
     return json.dumps({
         "method": method, "url": url, "headers": [[str(n), str(v)] for n, v in (headers or ())],
-        "hosts": sorted(hosts), "max_bytes": int(max_bytes), "timeout_ms": max(1, int(timeout * 1000)),
+        "hosts": sorted(hosts or ()), "any_host": hosts is None, "max_bytes": int(max_bytes),
+        "timeout_ms": max(1, int(timeout * 1000)),
         "total_timeout_ms": None if total_timeout is None else max(1, int(total_timeout * 1000)),
-        "max_redirects": int(max_redirects), "proxy": _proxy_for(url),
+        "max_redirects": int(max_redirects), "proxy": _proxy_for(url) if proxy is None else proxy,
         "http2": http2(max_bytes) if h2 is None else bool(h2),
     }, ensure_ascii=True, separators=(",", ":")).encode("ascii")
 
@@ -265,14 +266,16 @@ def _head(answer):
 
 
 def request(url, *, hosts, method="GET", headers=(), data=None, max_bytes, timeout, max_redirects=3,
-            total_timeout=None, h2=None):
+            total_timeout=None, h2=None, proxy=None):
     """Send one request and read its body whole (at most `max_bytes`): a `Reply`, whatever its status. NetError when
-    no response came; UsePython when Python's transport is to send it. `h2`: offer HTTP/2 (True), or not (False);
-    None: as `http2` says for the budget."""
+    no response came; UsePython when Python's transport is to send it. `hosts`: the hosts the URL and every redirect
+    may go to, or None for any (https, the URL limits, still hold: a caller that checked the first URL itself). `h2`:
+    offer HTTP/2 (True), or not (False); None: as `http2` says for the budget. `proxy`: "direct", "env" or a proxy's
+    URL; None: as urllib would choose."""
     lib = _setup()
     if lib is None or disabled():
         raise UsePython(why_not() or "the native transport is not available")
-    spec = _spec(url, hosts, method, headers, max_bytes, timeout, max_redirects, total_timeout, h2)
+    spec = _spec(url, hosts, method, headers, max_bytes, timeout, max_redirects, total_timeout, h2, proxy)
     meta, meta_len, body, body_len = ctypes.c_void_p(), ctypes.c_size_t(), ctypes.c_void_p(), ctypes.c_size_t()
     status = lib.lazaret_net_request(spec, len(spec), data, len(data or b""), ctypes.byref(meta), ctypes.byref(meta_len),
                                      ctypes.byref(body), ctypes.byref(body_len))
@@ -334,14 +337,14 @@ class Stream:
             pass
 
 
-def open_stream(url, *, hosts, method="GET", headers=(), data=None, max_bytes, timeout, max_redirects=3, total_timeout=None,
-         h2=None):
+def open_stream(url, *, hosts, method="GET", headers=(), data=None, max_bytes, timeout, max_redirects=3,
+                total_timeout=None, h2=None, proxy=None):
     """Send one request and return once its head is in: a `Stream` (the body read with `read`), whatever its
-    status. NetError, UsePython and `h2` as `request`."""
+    status. NetError, UsePython, `hosts`, `h2` and `proxy` as `request`."""
     lib = _setup()
     if lib is None or disabled():
         raise UsePython(why_not() or "the native transport is not available")
-    spec = _spec(url, hosts, method, headers, max_bytes, timeout, max_redirects, total_timeout, h2)
+    spec = _spec(url, hosts, method, headers, max_bytes, timeout, max_redirects, total_timeout, h2, proxy)
     meta, meta_len, handle = ctypes.c_void_p(), ctypes.c_size_t(), ctypes.c_uint64()
     status = lib.lazaret_net_open(spec, len(spec), data, len(data or b""), ctypes.byref(meta), ctypes.byref(meta_len),
                                   ctypes.byref(handle))

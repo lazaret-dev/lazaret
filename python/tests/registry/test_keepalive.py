@@ -27,6 +27,7 @@ from unittest import mock
 
 from lazaret.registry import guard, keepalive, pmsettings, repo
 from lazaret.scanner import timings
+from tests import _support
 
 BODY = bytes(range(256)) * 4000                      # about 1 MB
 
@@ -1063,6 +1064,7 @@ class RedirectTests(unittest.TestCase):
         self.assertEqual(body["user-agent"], guard.USER_AGENT)
 
 
+@mock.patch.dict(os.environ, _support.PYTHON_TRANSPORT)        # (the pool is urllib's)
 class FallbackTests(unittest.TestCase):
     def test_a_request_the_pool_cannot_carry_goes_through_urllib(self):
         server = Server()

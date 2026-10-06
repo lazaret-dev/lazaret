@@ -138,8 +138,11 @@ pub struct Request {
     pub url: String,
     pub headers: Vec<(String, String)>,
     pub body: Vec<u8>,
-    /// The caller's hosts (see the module documentation); required.
+    /// The caller's hosts (see the module documentation); required unless `any_host`.
     pub hosts: Vec<String>,
+    /// No host rule: any host, on the first URL and every hop (a caller that checked the first URL itself and lets
+    /// a redirect go to any https host: a feed that moved, a proxy's storage). The URL limits still hold.
+    pub any_host: bool,
     /// The most bytes the body may have.
     pub max_bytes: u64,
     /// For connecting, and for each read and write.
@@ -160,6 +163,7 @@ impl Request {
             headers: Vec::new(),
             body: Vec::new(),
             hosts: hosts.iter().map(|h| h.to_string()).collect(),
+            any_host: false,
             max_bytes: 64 * 1024 * 1024,
             timeout: Duration::from_secs(30),
             total_timeout: None,
@@ -244,16 +248,19 @@ fn base() -> Result<Client, Failure> {
 }
 
 fn client_for(req: &Request) -> Result<Client, Failure> {
-    if req.hosts.is_empty() {
+    if req.hosts.is_empty() && !req.any_host {
         return Err(Failure::Setup("a request needs the hosts its caller may reach".to_string()));
     }
     if req.max_bytes > MAX_BODY {
         return Err(Failure::Setup(format!("a budget of more than {MAX_BODY} bytes")));
     }
-    let rules = HostRules::new(&req.hosts).map_err(classify)?.one_label_wildcards(true).default_port_only(true);
+    let mut client = base()?;
+    if !req.any_host {
+        let rules = HostRules::new(&req.hosts).map_err(classify)?.one_label_wildcards(true).default_port_only(true);
+        client = client.allowed_hosts(rules);
+    }
     let timeout = if req.timeout.is_zero() { Duration::from_secs(30) } else { req.timeout };
-    let mut client = base()?
-        .allowed_hosts(rules)
+    let mut client = client
         .url_limits(UrlLimits::strict())
         .timeout(timeout)
         .connect_timeout(timeout)

@@ -299,8 +299,13 @@ class ChoiceTests(unittest.TestCase):
             spec = json.loads(nativenet._spec("https://a.example/x", {"b.example", "a.example"}, "GET",
                                               [("Accept", "x")], 10, 2.5, 3, None))
         self.assertEqual(spec, {"method": "GET", "url": "https://a.example/x", "headers": [["Accept", "x"]],
-                                "hosts": ["a.example", "b.example"], "max_bytes": 10, "timeout_ms": 2500,
-                                "total_timeout_ms": None, "max_redirects": 3, "proxy": "direct", "http2": True})
+                                "hosts": ["a.example", "b.example"], "any_host": False, "max_bytes": 10,
+                                "timeout_ms": 2500, "total_timeout_ms": None, "max_redirects": 3, "proxy": "direct",
+                                "http2": True})
+        spec = json.loads(nativenet._spec("https://a.example/x", None, "GET", [], 10, 1, 3, None, None, "direct"))
+        self.assertEqual((spec["hosts"], spec["any_host"], spec["proxy"]), ([], True, "direct"), "no host rule")
+        with self.assertRaises(nativenet.NetError):
+            nativenet._spec("https://a.example/x", [], "GET", [], 10, 1, 3, None, None, "direct")
 
     def test_documents_go_over_http2_and_downloads_over_http11(self):
         def offered(budget, mode=None, h2=None):

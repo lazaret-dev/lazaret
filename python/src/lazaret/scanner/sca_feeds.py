@@ -80,6 +80,7 @@ import zlib
 
 import lazaret as _lazaret_pkg          # __version__ (the package root imports nothing)
 from lazaret.scanner import core as lazaret
+from lazaret.scanner import nativenet
 from lazaret.scanner import reports as lazaret_report
 from lazaret.scanner import sca
 
@@ -181,6 +182,23 @@ def _copy(src, dst, max_bytes, location):
         dst.write(chunk)
 
 
+def _fetch_native(location, dst, max_bytes):
+    """fetch's download through the native transport (NET-1, scanner/nativenet.py): any https host, on every
+    redirect too (a feed that moves, as urllib's _HttpsRedirects allows), at most MAX_REDIRECTS, the budget held as
+    it comes."""
+    try:
+        with nativenet.open_stream(location, hosts=None, headers=[("User-Agent", USER_AGENT)], max_bytes=max_bytes,
+                                   timeout=READ_TIMEOUT, max_redirects=MAX_REDIRECTS) as resp:
+            if not 200 <= resp.status < 300:
+                raise FeedError("HTTP %s from %s" % (resp.status, location))
+            return _copy(resp, dst, max_bytes, location)
+    except nativenet.NetError as exc:
+        if exc.kind == "too-large":
+            raise FeedError("%s is larger than the %d MiB budget for this feed"
+                            % (location, max_bytes >> 20)) from None
+        raise FeedError("cannot fetch %s: %s" % (location, exc)) from None
+
+
 def fetch(location, dst, max_bytes):
     """Copy the resource at `location` (an https URL, a file: URL or a local
     path) into binary file object `dst`; returns the byte count. Any failure
@@ -193,6 +211,11 @@ def fetch(location, dst, max_bytes):
         if urllib.parse.urlsplit(location).scheme.lower() != "https":
             raise FeedError("%s: only https URLs, file: URLs and local paths are accepted"
                             % location)
+        if nativenet.chosen(location):
+            try:
+                return _fetch_native(location, dst, max_bytes)
+            except nativenet.UsePython:
+                pass                    # (urllib below: a server without TLS 1.3, a proxy reached over TLS)
         req = urllib.request.Request(location, headers={"User-Agent": USER_AGENT})
         with _OPENER.open(req, timeout=READ_TIMEOUT) as resp:
             return _copy(resp, dst, max_bytes, location)

@@ -30,8 +30,12 @@ project is pre-1.0, so the 0.x API may still change.
   the one urllib would use. Python's urllib takes the request where the native library is missing,
   for a server that offers no TLS 1.3 (from then on for that host), for a proxy reached over TLS,
   and when `LAZARET_NETWORK=python` asks for it. tiny_https has not had an independent review (its
-  README says so). The guard, the `github:` and `gitlab:` sources, the SCA feeds and secret
-  verification still use urllib. Building the native library now needs Rust 1.87 or later.
+  README says so). The guard's https downloads and relays (any https host on a redirect where the
+  guard allows one), the `github:` and `gitlab:` sources and the SCA feeds' downloads go through
+  it too. A request that carries credentials stays on urllib: a private registry's token,
+  `GITHUB_TOKEN` or `GITLAB_TOKEN`, a secret being verified (urllib's redirect hook gives a hop
+  only its own host's credentials, which tiny_https has no hook for yet), as does plain http to a
+  registry on this machine. Building the native library now needs Rust 1.87 or later.
 - **VS Code extensions in `lazaret-registry` (E-1's second part): `openvsx:namespace.name[@version]`
   and `vscode:publisher.name[@version]`.** Every `.vsix` the version is published for, one per
   target platform the editor installs, is downloaded and scanned as `lazaret FILE.vsix` scans

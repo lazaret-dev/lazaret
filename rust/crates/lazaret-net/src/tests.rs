@@ -286,6 +286,12 @@ fn the_url_rules_hold() {
     req.hosts.clear();
     assert!(matches!(fetch(&req), Err(Failure::Setup(_))), "a request without a rule");
     let mut req = request(&server, "/");
+    req.hosts = vec!["elsewhere.invalid".to_string()];
+    req.any_host = true;
+    assert_eq!(fetch(&req).unwrap().body, b"ok", "no host rule when the caller says any host");
+    req.url = format!("http://localhost:{}/", server.port);
+    assert!(matches!(fetch(&req), Err(Failure::Refused(_))), "the URL limits hold without a host rule");
+    let mut req = request(&server, "/");
     req.hosts = vec!["localhost".to_string()];
     assert!(matches!(fetch(&req), Err(Failure::Refused(_))), "an entry without a port is the default port only");
     let mut req = request(&server, "/");
@@ -294,7 +300,7 @@ fn the_url_rules_hold() {
     let mut req = request(&server, "/");
     req.headers = vec![("X-Bad".into(), "a\r\nInjected: 1".into())];
     assert!(matches!(fetch(&req), Err(Failure::Setup(_))));
-    assert_eq!(server.connections.load(Ordering::SeqCst), 0, "nothing was sent for any of them");
+    assert_eq!(server.connections.load(Ordering::SeqCst), 1, "only the any-host request was sent");
 }
 
 #[test]

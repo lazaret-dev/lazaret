@@ -178,7 +178,7 @@ mod native {
 /// ```text
 /// {"method": "GET", "url": "https://…", "headers": [["Accept", "…"], …], "hosts": ["registry.npmjs.org", …],
 ///  "max_bytes": 5242880, "timeout_ms": 30000, "total_timeout_ms": null, "max_redirects": 3,
-///  "proxy": "env" | "direct" | "http://host:port", "http2": true}
+///  "proxy": "env" | "direct" | "http://host:port", "http2": true, "any_host": false}
 /// ```
 ///
 /// The answer is JSON too, in a buffer the library allocates: `{"status": 200, "version": "HTTP/2", "headers":
@@ -237,6 +237,7 @@ pub mod net {
             headers: pairs("headers")?,
             body: body.to_vec(),
             hosts,
+            any_host: matches!(spec.get("any_host"), Some(Value::Bool(true))),
             max_bytes,
             timeout: millis(spec.get("timeout_ms"), "timeout")?.unwrap_or(Duration::from_secs(30)),
             total_timeout: millis(spec.get("total_timeout_ms"), "total timeout")?,

@@ -57,6 +57,7 @@ from collections import namedtuple
 
 from lazaret.registry import repo as _repo
 from lazaret.scanner import core as _core
+from lazaret.scanner import nativenet as _net
 
 __all__ = ["SourceError", "Source", "Checkout", "parse_source", "checkout", "scanned_checkout",
            "archive_commit", "gitlab_base"]
@@ -212,7 +213,31 @@ def _explain(status, headers, url, what, has_token, kind):
 
 
 def _http(url, headers, max_bytes, hosts, auth_host, what="fetch", has_token=False, kind="github"):
-    """The real fetch: a byte-budgeted read through `_Hop`."""
+    """The real fetch: a byte-budgeted read, through the native transport (NET-1, scanner/nativenet.py: `hosts` the
+    rule for the URL and every redirect) when no token goes with it, else through `_Hop`, which takes a token off a
+    redirect to another host. A request with a token stays on urllib: secrets go over OpenSSL (DESIGN.md §5j)."""
+    tokened = any(k.lower() in ("authorization", "private-token") for k in headers)
+    if not tokened and _net.chosen(url):
+        try:
+            reply = _net.request(url, hosts=sorted(hosts), headers=list(headers.items()), max_bytes=max_bytes,
+                                 timeout=_repo.DOWNLOAD_TIMEOUT, max_redirects=_repo.MAX_REDIRECTS)
+        except _net.UsePython:
+            pass                                 # (urllib below: a server without TLS 1.3, a proxy over TLS)
+        except _net.NetError as exc:
+            if exc.kind == "too-large":
+                raise SourceError(f"{what}: response exceeds the {max_bytes // (1024 * 1024)}MB budget") from None
+            if exc.kind == "refused":
+                raise SourceError(f"{what}: redirect blocked ({exc})") from None
+            if exc.kind in ("timeout", "network"):
+                raise SourceError(f"{what}: network error ({exc.kind})") from None
+            raise SourceError(f"{what}: {exc}") from None
+        else:
+            if 200 <= reply.status < 300:
+                return reply.body
+            err = SourceError(_explain(reply.status, {k.lower(): v for k, v in reply.headers}, url, what, has_token,
+                                       kind))
+            err.status = reply.status
+            raise err
     opener = urllib.request.build_opener(_Hop(hosts, auth_host))
     req = urllib.request.Request(url, headers=headers)
     try:

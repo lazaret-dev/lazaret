@@ -81,6 +81,7 @@ import base64
 import collections
 import concurrent.futures
 import datetime
+import email.message
 import email.utils
 import fnmatch
 import glob
@@ -109,7 +110,7 @@ import urllib.parse
 import urllib.request
 
 from lazaret.scanner import core as lazaret
-from lazaret.scanner import gomod, programs, sca, timings
+from lazaret.scanner import gomod, nativenet, programs, sca, timings
 from lazaret.registry import cargosrc, goproxy, keepalive as keepalive_, pmsettings, repo, scanpool
 from lazaret.registry.ecosystems import crates, golang
 
@@ -233,6 +234,42 @@ class TooLarge(repo.FetchError):
     a message: a message is text a server can choose)."""
 
 
+#: the most a stream of the native transport carries when its reader gives no budget of its own (lazaret-net's MAX_BODY)
+NATIVE_STREAM_MAX = 2 * 1024 * 1024 * 1024
+
+
+class _NativeResponse:
+    """A response of the native transport (NET-1, scanner/nativenet.py) read as urllib's is: `status`, `headers.get`
+    in any case, `read(n)` (a failed read is an OSError, which the fetcher's callers turn into FetchError; a body over
+    the budget is TooLarge), and a context manager."""
+
+    def __init__(self, stream, shown, max_bytes):
+        self._stream, self._shown, self._max = stream, shown, max_bytes
+        self.status, self.url = stream.status, stream.url
+        self.headers = email.message.Message()
+        for name, value in stream.headers:
+            self.headers[name] = value
+
+    def read(self, n=-1):
+        try:
+            if n is None or n < 0:
+                return b"".join(iter(self._stream))
+            return self._stream.read(n)
+        except nativenet.NetError as exc:
+            if exc.kind == "too-large":
+                raise TooLarge(f"response over {self._max // (1024 * 1024)}MB: {self._shown}") from None
+            raise OSError(f"{exc.kind}: {exc}") from None
+
+    def close(self):
+        self._stream.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.close()
+
+
 class Fetcher:
     """Fetches from the named hosts only: https, or plain http to a loopback
     host (a registry served on this machine) or to a host the package
@@ -328,10 +365,44 @@ class Fetcher:
         err.status = code
         return err
 
-    def open(self, url, accept=None, timeout=repo.DOWNLOAD_TIMEOUT):
-        """The open response for url (the caller closes it); FetchError."""
+    def _open_native(self, req, clean, timeout, max_bytes):
+        """The request through the native transport (NET-1): its hosts the rule for the URL and every redirect (any
+        https host for a redirect with `https_redirects`, the first URL being checked already), no proxy for this
+        machine. None, for urllib: a plain-http URL, a request with credentials (they stay on OpenSSL, and only
+        urllib's redirect hook gives a hop its own host's credentials), or one the native transport is not to send."""
+        parts = urllib.parse.urlsplit(clean)
+        if parts.scheme != "https" or "@" in parts.netloc or req.has_header("Authorization") \
+                or not nativenet.chosen(clean):
+            return None
+        with self.lock:
+            hosts = None if self.https_redirects else sorted(self.hosts | {netloc(clean)})
+        budget = min(max_bytes or NATIVE_STREAM_MAX, NATIVE_STREAM_MAX)
+        try:
+            with timings.span("network", "request"):
+                stream = nativenet.open_stream(clean, hosts=hosts, headers=req.header_items(), max_bytes=budget,
+                                               timeout=timeout, max_redirects=repo.MAX_REDIRECTS,
+                                               proxy="direct" if _is_loopback(parts.hostname) else None)
+        except nativenet.UsePython:
+            return None
+        except nativenet.NetError as exc:
+            if exc.kind == "too-large":
+                raise TooLarge(f"response over {budget // (1024 * 1024)}MB: {clean}") from None
+            if exc.kind == "refused":
+                raise repo.FetchError(f"URL error fetching {clean}: redirect blocked: {exc}") from None
+            raise repo.FetchError(f"network error fetching {clean}: {exc}") from None
+        if not 200 <= stream.status < 300:
+            stream.close()
+            raise self._http_error(stream.status, clean, req)
+        return _NativeResponse(stream, clean, budget)
+
+    def open(self, url, accept=None, timeout=repo.DOWNLOAD_TIMEOUT, max_bytes=None):
+        """The open response for url (the caller closes it); FetchError. `max_bytes`: the most its body may have (the
+        native transport holds it as it reads; the caller holds it too)."""
         self.check(url)
         req, clean = self.request(url, accept)
+        native = self._open_native(req, clean, timeout, max_bytes)
+        if native is not None:
+            return native
         if self.pool is not None:
             try:
                 return self._open_kept(req, clean, timeout)
@@ -388,7 +459,7 @@ class Fetcher:
         """-> (body, response headers). TooLarge for a response over `max_bytes`."""
         clean = pmsettings.shown(url)
         too_big = f"response over {max_bytes // (1024 * 1024)}MB: {clean}"
-        with self.open(url, accept, timeout) as r:
+        with self.open(url, accept, timeout, max_bytes) as r:
             try:
                 length = r.headers.get("Content-Length")
                 if length and length.isdigit() and int(length) > max_bytes:
@@ -417,7 +488,7 @@ class Fetcher:
         clean = pmsettings.shown(url)
         too_big = f"response over {max_bytes // (1024 * 1024)}MB: {clean}"
         digest, size = hashlib.sha256(), 0
-        with self.open(url, None, timeout) as r, open(path, "wb") as out:
+        with self.open(url, None, timeout, max_bytes) as r, open(path, "wb") as out:
             try:
                 length = r.headers.get("Content-Length")
                 if length and length.isdigit() and int(length) > max_bytes:
@@ -1705,8 +1776,10 @@ def make_index_server(index, gate=None):
         def _relay(self, url):
             index.fetcher.check(url)
             req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
-            with timings.span("network", "request"):
-                response = index.fetcher._opener(url).open(req, timeout=repo.DOWNLOAD_TIMEOUT)
+            response = index.fetcher._open_native(req, url, repo.DOWNLOAD_TIMEOUT, None)    # (NET-1; None: urllib)
+            if response is None:
+                with timings.span("network", "request"):
+                    response = index.fetcher._opener(url).open(req, timeout=repo.DOWNLOAD_TIMEOUT)
             with response as r:
                 self.send_response(200)
                 self.send_header("Content-Type", "application/octet-stream")
