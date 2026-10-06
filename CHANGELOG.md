@@ -387,6 +387,20 @@ project is pre-1.0, so the 0.x API may still change.
 
 ### Fixed
 
+- **Code read back from the file itself, in Python, is read on the tree (N-19).** rumdl
+  0.2.78, a popular PyPI package, was SUSPICIOUS for two maintainer scripts: each gives
+  argparse its docstring as the usage text and runs `gh` with arguments
+  (`subprocess.run(["gh", *args])`). The text follower behind "runs code it reads back
+  from its own file" follows names across a whole file, so it took `main()`'s `args` for
+  `run_gh`'s parameter of that name, and gh's arguments for code run. A Python text is now
+  read on its tree, as its sends and its received code are: what it reads back from
+  itself (`open(__file__)`, `Path(__file__).read_text()`, `__doc__`, its loader's source,
+  a data file shipped with it, read or named by a path) is followed through its scopes and
+  calls to what each call runs (`exec`, a shell, an interpreter's `-c`); a program given
+  it as arguments or input runs that program, and a parser of a usage text
+  (`argparse.ArgumentParser`, `optparse`, `docopt`) gives the command line, not the text.
+  A text the tree can't read, and JavaScript, keep the text follower. Rule set 2.32.0, so
+  stored verdicts are scanned again.
 - **A download piped into a shell named by its path.** The install-script and
   import-time tests read `curl … | sh` and `wget … | bash`, but not a shell named by its
   path: `wget -O - … | /bin/bash &` (the 2025 Go typosquats' command), `| /usr/bin/env

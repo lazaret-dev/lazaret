@@ -408,7 +408,13 @@ JavaScript twin, `js/src/lib/received.js`, was retired in 0.1.8).
   running what it reads back, or what it reads from a data file next to it,
   is CRITICAL on its own (`runs_own_source_at`; reads, runners and names
   inside string literals don't count, so a code template in a string is not
-  one).
+  one). A Python text is read on its tree (0.1.9, N-19: the supply-chain
+  model's `K_OWN`, given where those reads start): what it reads back is
+  followed through its scopes and calls to what each call runs, so a
+  function's parameter is not the module's variable of that name, a program
+  given it as arguments runs that program, and a usage text's parser
+  (`argparse`, `optparse`, `docopt`) gives the command line; the text
+  follower answers for a text the tree can't read, and for JavaScript.
 
 **The second reading (0.1.8).** When the first reading finds nothing, a text of
 up to `_DL_LOGICAL_MAX_CHARS` (1,000,000) characters is read once more as

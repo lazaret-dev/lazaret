@@ -489,6 +489,32 @@ class SelfReadTests(unittest.TestCase):
                 self.assertIn(self.OWN, core.install_script_risk(text))
                 self.assertEqual(core.import_time_severity([self.OWN]), "CRITICAL")
 
+    def test_a_usage_text_and_a_program_given_arguments(self):
+        """rumdl 0.2.78 (N-19): its maintainer scripts give argparse their
+        docstring as the usage text and run gh with arguments. The text
+        follower took the module's `args` for a function's parameter of that
+        name and gh's arguments for code run; Python is read on its tree."""
+        rumdl = ('"""Update the used-by table.\n\nRe-verify every repo the table already lists.\n"""\n'
+                 "import argparse, subprocess\n\n"
+                 "def run_gh(args, timeout=60):\n"
+                 '    result = subprocess.run(["gh", *args], capture_output=True, text=True, timeout=timeout)\n'
+                 "    return result.returncode\n\n"
+                 "def main():\n"
+                 '    parser = argparse.ArgumentParser(description=__doc__.split("\\n")[1])\n'
+                 '    parser.add_argument("--repo")\n'
+                 "    args = parser.parse_args()\n"
+                 '    run_gh(["api", f"repos/{args.repo}"])\n')
+        self.assertGreaterEqual(core.runs_own_source_at(rumdl), 0)      # the text follower alone
+        self.assertEqual(core.import_time_risk(rumdl, "py"), ([], None))
+        for text in ("'''Usage: tool <cmd>'''\nfrom docopt import docopt\nimport os\nargs = docopt(__doc__)\n"
+                     "os.system('git ' + args['<cmd>'])\n",
+                     "src = open(__file__).read()\nprint(len(src))\n\ndef f(src):\n    exec(src)\n\nf('print(1)')\n"):
+            with self.subTest(text[:30]):
+                self.assertEqual(core.import_time_risk(text, "py"), ([], None))
+        # what it reads back, run through a function of its own, still counts
+        text = "def run(src):\n    exec(src)\n\nrun(open(__file__).read()[100:])\n"
+        self.assertEqual(core.import_time_risk(text, "py"), ([self.OWN], 2))
+
     def test_code_run_from_a_data_file_shipped_with_it(self):
         for text in ('import os\nexec(open(os.path.join(os.path.dirname(__file__), "logo.png")).read())\n',
                      'from pathlib import Path\nblob = (Path(__file__).parent / "data.bin").read_bytes()\n'

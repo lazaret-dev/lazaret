@@ -1019,6 +1019,20 @@ fn lexed(lang: Option<&str>) -> bool {
     matches!(lang, Some("js" | "py"))
 }
 
+/// Where a text runs code it reads back from itself (its own file, its docstring, a data file shipped with it): a
+/// Python text (`tree`) on its tree, where the supply-chain model follows what it reads back through its scopes and
+/// calls to what each call runs (N-19: `subprocess.run(["gh", *args])` runs gh, not code; a function's parameter is
+/// not the module's variable of that name); any other text, and one the tree can't read, by `runs_own_source_at` with
+/// `lang`.
+fn own_source_run_at(p: &Pack, text: &[u32], tree: Option<&str>, lang: Option<&str>) -> isize {
+    if tree == Some("py") {
+        if let Some(at) = crate::pyflow::supply::own_run(text) {
+            return at.map_or(-1, |a| a as isize);
+        }
+    }
+    runs_own_source_at(p, text, lang)
+}
+
 /// core.runs_own_source_at. `lang`: the text's language, when the lexers
 /// read it (what is code is then the lexers' reading: `prose_spans`).
 pub fn runs_own_source_at(p: &Pack, text: &[u32], lang: Option<&str>) -> isize {
@@ -3587,7 +3601,7 @@ fn install_script_risk_of(p: &Pack, text: &[u32], shell: bool, command: bool, la
     if let Some(ip) = ip {
         reasons.push(cat(&[&u("contacts an address typical of data exfiltration ("), &ip, &u(")")]));
     }
-    if model.is_none() && runs_own_source_at(p, text, None) >= 0 {
+    if model.is_none() && own_source_run_at(p, text, lang, None) >= 0 {
         reasons.push(u("runs code it reads back from its own file or a data file shipped with it"));
     }
     // (0.1.8) data read from the machine and sent, whatever the address; the
@@ -4097,7 +4111,7 @@ fn import_time_risk_of(p: &Pack, text: &[u32], lang: Option<&str>, model: Option
         signs.push((at as usize, u("opens a reverse shell")));
     }
     let host = p.re("_HOST_INFO_RE").search(text).map(|m| m.start());
-    let at = if model.is_some() { -1 } else { runs_own_source_at(p, text, lang) };
+    let at = if model.is_some() { -1 } else { own_source_run_at(p, text, lang, lang) };
     if at >= 0 {
         signs.push((at as usize, u("runs code it reads back from its own file or a data file shipped with it")));
     }

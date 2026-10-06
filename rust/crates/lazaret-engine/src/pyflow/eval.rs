@@ -970,7 +970,8 @@ impl<'p> Analyzer<'p> {
         };
         let line = self.line(e);
         if self.supply {
-            return self.sc_call(e, &res, &recv, &pos, starred.as_ref(), &kws, dstar.as_ref());
+            let v = self.sc_call(e, &res, &recv, &pos, starred.as_ref(), &kws, dstar.as_ref())?;
+            return Ok(self.sc_own_call(e, v));
         }
 
         let class = res.class;

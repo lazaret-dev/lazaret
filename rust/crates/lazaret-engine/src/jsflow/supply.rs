@@ -69,15 +69,20 @@ pub const K_CARVED: u16 = 1 << 12;
 /// not local data: a file opened for writing (what: the keys of its path,
 /// one per line: [`path_keys`])
 pub const K_WFILE: u16 = 1 << 13;
+/// not local data: what the script reads back from itself (its own file,
+/// its docstring, its loader's source) or from a data file shipped with it,
+/// and the paths of those files (Python's model, 0.1.9: N-19); run as code,
+/// it is code the script reads back from its own file
+pub const K_OWN: u16 = 1 << 14;
 
 /// The kinds' names (the text follower's strings), by bit index.
-pub const KIND_NAMES: [&str; 14] = [
+pub const KIND_NAMES: [&str; 15] = [
     "identity", "environment", "environment", "file", "report", "credentials", "address", "path", "file", "received",
-    "decoded", "bytes", "carved", "written",
+    "decoded", "bytes", "carved", "written", "own",
 ];
 
 /// The kinds a send of local data never reports.
-pub(crate) const NOT_LOCAL: u16 = K_PATH | K_RECEIVED | K_DECODED | K_BYTES | K_CARVED | K_WFILE;
+pub(crate) const NOT_LOCAL: u16 = K_PATH | K_RECEIVED | K_DECODED | K_BYTES | K_CARVED | K_WFILE | K_OWN;
 
 /// What a file written then run held: code or a program the script decodes,
 /// one it carves out of another file, one it downloads.

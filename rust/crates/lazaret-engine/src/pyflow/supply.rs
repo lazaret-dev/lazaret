@@ -24,7 +24,7 @@ use crate::flow::LiteralTest;
 use crate::jsflow::supply::{
     bit_index, cred_store, decoded_at, downloads, harvest_of, host_prefix, interp_name, kind_bit, record_written, received_cat,
     first_drop, is_flag, run_parts, script_interp, text_key, value_key, written_at, Answer, DropRun, Part, Written, DESERIALIZE, ENV_NAME, EVAL_FLAGS, EXEC_CMD, HARVEST, INTERPRETERS,
-    KIND_NAMES, K_ADDRESS, K_BYTES, K_CARVED, K_CREDENTIALS, K_CRED_FILE, K_ENV, K_FILE, K_DECODED, K_IDENTITY, K_PATH,
+    KIND_NAMES, K_ADDRESS, K_BYTES, K_CARVED, K_CREDENTIALS, K_CRED_FILE, K_ENV, K_FILE, K_DECODED, K_IDENTITY, K_OWN, K_PATH,
     K_RECEIVED, K_WFILE, K_WHOLE_ENV, LOAD_NAME, NOT_LOCAL, OBJ_CLIENT, OBJ_CONN, OBJ_ENV, READ_PATH, RUN_CODE, SEND_ADDR,
     SEND_DATA, STRONG_IN_ADDRESS,
 };
@@ -182,6 +182,8 @@ pub struct Supply {
     /// the files the script writes code or a program to (a run of one is
     /// a dropper's)
     pub written: RefCell<Vec<Written>>,
+    /// where the script reads itself back (`own_starts`), sorted
+    pub own_starts: Vec<u32>,
 }
 
 /// A function's own assignments: what `name = value` gives each name, and
@@ -197,7 +199,6 @@ impl Supply {
         let lit = LiteralTest::new(&pack, text);
         let whole = pack.text("_LD_WHOLE_ENV");
         Supply {
-            pack,
             text: text.to_vec(),
             lit,
             outside: RefCell::new(HashSet::new()),
@@ -210,6 +211,8 @@ impl Supply {
             alias_memo: RefCell::new(HashMap::new()),
             fn_index: RefCell::new(HashMap::new()),
             written: RefCell::new(Vec::new()),
+            own_starts: own_starts(&pack, text),
+            pack,
         }
     }
 
@@ -222,6 +225,39 @@ impl Supply {
         let hi = (hi as usize).min(self.text.len()).max(lo);
         &self.text[lo..hi]
     }
+}
+
+/// Where a Python text reads itself back (N-19): the starts of `_SELF_READ_RE`'s matches (a read of its own file,
+/// its docstring, its loader's source), `_SIBLING_DATA_RE`'s (a read of a data file shipped with it) and
+/// `_SIBLING_PATH_RE`'s (such a file's path), sorted: the text follower's forms, which the model gives `K_OWN` at the
+/// call whose callee starts one, or the name (`__doc__`, `__file__`) that does.
+fn own_starts(p: &Pack, text: &[u32]) -> Vec<u32> {
+    if !["__file__", "__doc__", "__loader__"].iter().any(|w| pystr::contains(text, w)) {
+        return Vec::new();
+    }
+    let mut out: Vec<u32> = Vec::new();
+    for name in ["_SELF_READ_RE", "_SIBLING_DATA_RE", "_SIBLING_PATH_RE"] {
+        out.extend(p.re(name).finditer(text).map(|m| m.start() as u32));
+    }
+    out.sort_unstable();
+    out.dedup();
+    out
+}
+
+/// A value without one kind of source (`jsflow::supply::sc_without`'s, for a [`Taint`]).
+fn taint_without(v: Taint, bit: u16) -> Taint {
+    let sc = match v.sc.as_ref() {
+        Some(sc) if sc.kinds & bit != 0 => sc.clone(),
+        _ => return v,
+    };
+    let kinds = sc.kinds & !bit;
+    let sc = if kinds == 0 {
+        None
+    } else {
+        let idx = bit_index(bit);
+        Some(Rc::new(Sc { kinds, firsts: sc.firsts.iter().filter(|f| f.0 != idx).cloned().collect() }))
+    };
+    Taint { sc, ..v }
 }
 
 /// The send a call is: which of its positional arguments are addresses
@@ -337,6 +373,9 @@ const PATH_WRAPPERS: &Table = &Table::new(&[
 const PATH_TYPES: &Table = &Table::new(&["Path", "PurePath", "PosixPath", "WindowsPath"]);
 /// Calls that run code (`_DL_RUNNER`'s Python).
 const RUNNERS: &Table = &Table::new(&["exec", "eval", "builtins.exec", "builtins.eval", "execfile", "__builtins__.exec", "__builtins__.eval"]);
+/// Parsers of a command line given its usage text (`ArgumentParser(description=__doc__)`, `docopt(__doc__)`): what
+/// they give is the command line's, never the text's (N-19).
+const USAGE_PARSERS: &Table = &Table::new(&["argparse.ArgumentParser", "optparse.OptionParser", "docopt.docopt"]);
 /// Calls that load a module by name.
 const IMPORTERS: &Table = &Table::new(&["importlib.import_module", "__import__", "builtins.__import__", "importlib.__import__"]);
 /// Deserializers that run code in what they read (`_DL_DESERIAL`).
@@ -730,6 +769,15 @@ impl<'p> Analyzer<'p> {
             return None;
         }
         let text = self.p.name_text(name).to_vec();
+        // (the script read back: its docstring, or its file in a data file's path: `own_starts`)
+        if eq(&text, "__doc__") || eq(&text, "__file__") {
+            let at = self.start(e);
+            if !self.sc_own_in(at, at + 1) {
+                return None;
+            }
+            let what = if eq(&text, "__doc__") { "its docstring" } else { "a file shipped with it" };
+            return Some(self.sc_source(K_OWN, u(what), at, 0));
+        }
         if !eq(&text, "environ") && !eq(&text, "environb") {
             return None;
         }
@@ -739,6 +787,35 @@ impl<'p> Analyzer<'p> {
             return Some(self.sc_source(K_WHOLE_ENV, whole, self.start(e), OBJ_ENV));
         }
         None
+    }
+
+    /// supply mode: does a read of the script itself start in `[lo, hi)` (`own_starts`)?
+    fn sc_own_in(&self, lo: u32, hi: u32) -> bool {
+        let sup = self.sup();
+        let k = sup.own_starts.partition_point(|&s| s < lo);
+        k < sup.own_starts.len() && sup.own_starts[k] < hi
+    }
+
+    /// supply mode, a call's value (N-19): what the script reads back from itself when an own read starts in the
+    /// callee (`open(__file__)`, `Path(__file__).read_text()`, `__loader__.get_source(…)`, a data file's read: its
+    /// value and every call it is the callee's receiver of); none out of a parser of a usage text (its command line).
+    pub(super) fn sc_own_call(&mut self, call: NodeId, v: Taint) -> Taint {
+        let (func, lo) = {
+            let t = self.t();
+            (a_(t, call), t.node(call).start)
+        };
+        if self.sup().own_starts.is_empty() {
+            return v;
+        }
+        let hi = self.t().node(func).end;
+        if self.sc_own_in(lo, hi) {
+            return v.union(&self.sc_source(K_OWN, u("its own file"), lo, 0));
+        }
+        let names = self.sc_names(func);
+        if any_of(&names, USAGE_PARSERS) {
+            return taint_without(v, K_OWN);
+        }
+        v
     }
 
     /// supply mode: a variable of a function around this one (a closure's).
@@ -1017,6 +1094,10 @@ impl<'p> Analyzer<'p> {
                     if let Some(name) = received_cat(cat) {
                         self.findings.push(Out::Received { at, cat: name });
                     }
+                }
+                // (code the script reads back from itself, run: N-19)
+                if cat == RUN_CODE && sc.kinds & K_OWN != 0 {
+                    self.findings.push(Out::Own { at });
                 }
                 // (code the script decodes, run)
                 if cat == RUN_CODE {
@@ -1987,6 +2068,10 @@ impl<'p> Analyzer<'p> {
                     return Some(self.sc_source(K_FILE, what, at, 0));
                 }
             }
+            // (a file shipped with it: what it holds is the script's own)
+            if recv.sc.as_ref().is_some_and(|s| s.kinds & K_OWN != 0) {
+                return Some(self.sc_source(K_OWN, u("a file shipped with it"), at, 0));
+            }
             if first.is_none() || !is_one(&lastname, &["open", "glob"]) {
                 return None;
             }
@@ -2009,13 +2094,17 @@ impl<'p> Analyzer<'p> {
             }
             if path_made {
                 // (a path given a path: still that path; anything else, not local data)
-                return Some(pos.first().filter(|v| v.sc.as_ref().is_some_and(|s| s.kinds & K_PATH != 0)).map(|v| v.plain()).unwrap_or_else(Taint::empty));
+                return Some(pos.first().filter(|v| v.sc.as_ref().is_some_and(|s| s.kinds & (K_PATH | K_OWN) != 0)).map(|v| v.plain()).unwrap_or_else(Taint::empty));
             }
             // (a path outside the package given it: a name, a parameter)
             if let Some(sc) = pos.first().and_then(|v| v.sc.clone()) {
                 if let Some((_, what, _)) = sc.firsts.iter().find(|(k, _, _)| (1u16 << k) == K_PATH) {
                     return Some(self.sc_source(K_FILE, pystr::upto(what, 60).to_vec(), at, 0));
                 }
+            }
+            // (a file shipped with it: what it holds is the script's own)
+            if pos.first().and_then(|v| v.sc.as_ref()).is_some_and(|s| s.kinds & K_OWN != 0) {
+                return Some(self.sc_source(K_OWN, u("a file shipped with it"), at, 0));
             }
             // (a parameter: the script's own reader, for its callers)
             if let Some(v) = pos.first() {
@@ -2290,6 +2379,10 @@ impl<'p> Analyzer<'p> {
                                         if let Some(name) = received_cat(c) {
                                             self.findings.push(Out::Received { at: loc.1, cat: name });
                                         }
+                                    }
+                                    // (code the script reads back from itself, run by the callee)
+                                    if c == RUN_CODE && sc.kinds & K_OWN != 0 {
+                                        self.findings.push(Out::Own { at: loc.1 });
                                     }
                                     // (code the script decodes, run by the callee)
                                     if c == RUN_CODE {
@@ -3200,6 +3293,9 @@ pub struct Facts {
     /// the first file the script writes, then runs, holding code or a
     /// program it decodes, carves out of another file or downloads
     pub dropped: Option<DropRun>,
+    /// the first code it reads back from itself (its file, its docstring, a
+    /// data file shipped with it) and runs: the run's offset (N-19)
+    pub own: Option<usize>,
 }
 
 /// The largest text the tree reads (larger: the text followers).
@@ -3246,6 +3342,12 @@ pub fn decoded_runs(text: &[u32]) -> Option<Vec<(usize, usize)>> {
     facts(text).map(|f| f.decoded.clone())
 }
 
+/// Code a Python text reads back from itself and runs, read on its tree: Some(the first run's offset, or None), or
+/// None when the tree could not say (N-19: in place of the text follower's `runs_own_source_at`).
+pub fn own_run(text: &[u32]) -> Option<Option<usize>> {
+    facts(text).map(|f| f.own)
+}
+
 /// A file a Python text writes, then runs (a dropper's), read on its tree:
 /// Some(the first, or None), or None when the tree could not say.
 pub fn dropped_run(text: &[u32]) -> Option<Option<DropRun>> {
@@ -3271,6 +3373,7 @@ fn facts_here(text: &[u32]) -> Option<Facts> {
     let mut best: Option<((bool, bool, u32), &'static str, PyStr)> = None;
     let mut first: Option<(u32, &'static str)> = None;
     let mut decoded: Vec<(usize, usize)> = Vec::new();
+    let mut own: Option<usize> = None;
     let dropped = first_drop(text, &findings);
     for f in findings {
         match f {
@@ -3286,6 +3389,7 @@ fn facts_here(text: &[u32]) -> Option<Facts> {
                 }
             }
             Out::Decoded { at, from } => decoded.push((at as usize, from as usize)),
+            Out::Own { at } => own = Some(own.map_or(at as usize, |o: usize| o.min(at as usize))),
             _ => {}
         }
     }
@@ -3299,7 +3403,7 @@ fn facts_here(text: &[u32]) -> Option<Facts> {
         let at = (at as usize).min(text.len());
         (text[..at].iter().filter(|&&c| c == 0x0A).count() + 1, cat)
     });
-    Some(Facts { sent, received, decoded, dropped })
+    Some(Facts { sent, received, decoded, dropped, own })
 }
 
 #[cfg(test)]
@@ -3731,5 +3835,59 @@ mod tests {
         assert_eq!(sent(&named), found("environment", "NPM_TOKEN"));
         let whole = format!("import os, requests\ndef load(environ=os.environ):\n    {}load()\n", post("str(environ)"));
         assert_eq!(sent(&whole), found("environment", "the whole environment"));
+    }
+
+    /// The line of a text's first run of code it reads back from itself (N-19), if any.
+    fn own(src: &str) -> Option<usize> {
+        read(src).own.map(|at| src.chars().take(at).filter(|&c| c == '\n').count() + 1)
+    }
+
+    #[test]
+    fn own_code_run() {
+        // its own file, its docstring, its loader's source; a data file shipped with it, read or named
+        assert_eq!(own("exec(open(__file__).read().split('#PAYLOAD')[1])\n"), Some(1));
+        assert_eq!(own("'''cHJpbnQoMSk='''\nimport base64\nexec(base64.b64decode(__doc__))\n"), Some(3));
+        assert_eq!(own("'''eJw='''\nimport base64, zlib\ncode = zlib.decompress(base64.b64decode(__doc__))\nexec(code)\n"), Some(4));
+        assert_eq!(own("from pathlib import Path\nexec(Path(__file__).read_text().split('#')[-1])\n"), Some(2));
+        assert_eq!(own("exec(__loader__.get_source(__name__).split('##')[1])\n"), Some(1));
+        assert_eq!(own("import os\nexec(open(os.path.join(os.path.dirname(__file__), 'logo.png'), 'rb').read()[1024:])\n"), Some(2));
+        let named = "import os\np = os.path.join(os.path.dirname(__file__), 'data.bin')\nwith open(p) as f:\n    exec(f.read())\n";
+        assert_eq!(own(named), Some(4));
+        let parent = "from pathlib import Path\nd = Path(__file__).parent / 'blob.dat'\nexec(d.read_bytes()[64:])\n";
+        assert_eq!(own(parent), Some(3));
+        // through a function, a shell, an interpreter's -c
+        assert_eq!(own("def run(src):\n    exec(src)\n\nrun(open(__file__).read()[100:])\n"), Some(2));
+        assert_eq!(own("import os\nos.system(open(os.path.join(os.path.dirname(__file__), 'cmd.txt')).read())\n"), Some(2));
+        assert_eq!(own("import subprocess, sys\nsubprocess.run([sys.executable, '-c', open(__file__).read()[500:]])\n"), Some(2));
+    }
+
+    #[test]
+    fn own_not_code_run() {
+        // rumdl 0.2.78's maintainer script (N-19): a usage text from the docstring, and gh run with arguments
+        let rumdl = concat!(
+            "\"\"\"Update the used-by table.\n\nRe-verify every repo the table already lists.\n\"\"\"\n",
+            "import argparse, subprocess\n\n",
+            "def run_gh(args, timeout=60):\n",
+            "    result = subprocess.run([\"gh\", *args], capture_output=True, text=True, timeout=timeout, check=False)\n",
+            "    return result.returncode, result.stdout, result.stderr\n\n",
+            "def main():\n",
+            "    parser = argparse.ArgumentParser(description=__doc__.split(\"\\n\")[1])\n",
+            "    parser.add_argument(\"--repo\")\n",
+            "    args = parser.parse_args()\n",
+            "    run_gh([\"api\", f\"repos/{args.repo}\"])\n\n",
+            "if __name__ == \"__main__\":\n    main()\n",
+        );
+        assert_eq!(own(rumdl), None);
+        // a command line parsed from the usage text, given to a shell
+        assert_eq!(own("'''Usage: tool <cmd>'''\nfrom docopt import docopt\nimport os\nargs = docopt(__doc__)\nos.system('git ' + args['<cmd>'])\n"), None);
+        let build = "'''Build.'''\nimport argparse, os\nparser = argparse.ArgumentParser(description=__doc__)\nparser.add_argument('target')\nargs = parser.parse_args()\nos.system('make ' + args.target)\n";
+        assert_eq!(own(build), None);
+        // its docstring printed; its version file run (a module, not a data file)
+        assert_eq!(own("'''Tool.'''\nimport sys\nprint(__doc__)\nsys.exit(__doc__)\n"), None);
+        assert_eq!(own("import os\nexec(open(os.path.join(os.path.dirname(__file__), 'version.py')).read())\n"), None);
+        // a function's parameter is not the module's variable of that name
+        assert_eq!(own("src = open(__file__).read()\nprint(len(src))\n\ndef f(src):\n    exec(src)\n\nf('print(1)')\n"), None);
+        // a program run with it as input or arguments runs that program
+        assert_eq!(own("import subprocess\nsubprocess.run(['wc', '-l'], input=open(__file__).read(), text=True)\n"), None);
     }
 }

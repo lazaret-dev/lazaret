@@ -1160,7 +1160,7 @@ fn js_flow(args: &Value, text: &[u32]) -> Result<Value, CallError> {
                     Value::str(fix),
                 ]),
                 // (the supply-chain model's; project mode never gives one)
-                Out::Send { .. } | Out::Received { .. } | Out::Decoded { .. } | Out::Dropped { .. } => Value::Null,
+                Out::Send { .. } | Out::Received { .. } | Out::Decoded { .. } | Out::Dropped { .. } | Out::Own { .. } => Value::Null,
             })
             .collect(),
     ))
@@ -1259,7 +1259,7 @@ fn flow_out(out: Vec<crate::jsflow::Out>, max_file: usize) -> Value {
                     Value::str(fix),
                 ]),
                 // (the supply-chain model's; project mode never gives one)
-                Out::Send { .. } | Out::Received { .. } | Out::Decoded { .. } | Out::Dropped { .. } => Value::Null,
+                Out::Send { .. } | Out::Received { .. } | Out::Decoded { .. } | Out::Dropped { .. } | Out::Own { .. } => Value::Null,
             })
             .collect(),
     )

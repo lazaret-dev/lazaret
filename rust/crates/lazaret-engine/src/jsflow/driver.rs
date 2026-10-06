@@ -210,6 +210,10 @@ pub enum Out {
     /// write's, what it held: `K_DECODED`, `K_CARVED` or `K_RECEIVED`, the
     /// carved file, the interpreter)
     Dropped { at: u32, from: u32, kinds: u16, what: PyStr, interp: Option<PyStr> },
+    /// the supply-chain model (Python's): what the script reads back from
+    /// its own file, its docstring or a data file shipped with it, reaching
+    /// code run (the run's offset)
+    Own { at: u32 },
 }
 
 fn commas(n: u64) -> String {
