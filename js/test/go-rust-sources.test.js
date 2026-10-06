@@ -15,6 +15,7 @@ import { collectFiles, detectLang, scanFile, computeMetrics } from "../src/index
 import { EXTS, DEP_LANGS } from "../src/lib/fs.js";
 import { DUP_LANGS } from "../src/scanner/metrics.js";
 import { commentSpans } from "../src/lib/lexer.js";
+import { redactContextLine } from "../src/lib/redact.js";
 
 const AWS = "AKIA" + "ABCDEFGHIJKLMNOP";
 
@@ -81,6 +82,17 @@ test("Go's and Rust's declarations of a credential (G-4, R-4), and crates.io's A
   const t = scanFile({ path: "src/t.rs", content: `pub const CRATES_IO: &str = "${tok}";\n`, lang: "rs" });
   assert.deepEqual(t.map((i) => i.rule).filter((r) => r.startsWith("S-")), ["S-TOKEN"]);
   assert.ok(!JSON.stringify(t).includes(tok));
+  // a "cio" inside a longer run is chance
+  for (const text of [`const X: &str = "A${tok}";\n`, `const X: &str = "${tok}9";\n`]) {
+    assert.ok(!scanFile({ path: "src/x.rs", content: text, lang: "rs" }).some((i) => i.rule === "S-TOKEN"), text);
+  }
+  // nor on another finding's context line
+  const c = scanFile({ path: "src/c.rs", lang: "rs",
+    content: `fn f() { let password = "hunter22hunter"; }\nfn g() -> &'static str { "${tok}" }\n` });
+  assert.deepEqual(c.map((i) => i.rule).filter((r) => r.startsWith("S-")).sort(), ["S-SECRET", "S-TOKEN"]);
+  assert.ok(!JSON.stringify(c).includes(tok));
+  // the context-line redaction on its own, as for a token no rule flagged
+  assert.equal(redactContextLine(`h(${tok});`), "h([redacted]);");
 });
 
 test("duplication is measured on Python, JavaScript and SQL lines", () => {

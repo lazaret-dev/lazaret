@@ -87,6 +87,8 @@ test("a .netrc's password tokens (N-12) and crates.io's API tokens (R-4)", () =>
   for (const name of [".netrc", "_netrc", "home/.NETRC"]) {
     assert.deepEqual(found(name, netrc), [["S-SECRET", 1], ["S-SECRET", 5]], name);
   }
+  assert.deepEqual(found(".netrc", `machine h.invalid login app_password password ${PASS}\n`), [["S-SECRET", 1]]);
+  assert.ok(!JSON.stringify(scanConfigFile(".netrc", `login app_password password ${PASS}\n`)).includes(PASS));
   assert.deepEqual(found("notes.cfg", `hint = the password ${PASS} is not this\n`), []);
   assert.ok(!JSON.stringify(scanConfigFile(".netrc", netrc)).includes(PASS));
   assert.equal(secretCol(`machine h login u password ${PASS}`, true), 27);

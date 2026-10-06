@@ -223,6 +223,9 @@ class NetrcAndCratesTokens(unittest.TestCase):
         for name in (".netrc", "_netrc", "home/.NETRC"):
             with self.subTest(name):
                 self.assertEqual(found(name, text), [("S-SECRET", 1), ("S-SECRET", 5)])
+        # the keyword is a whole token: a login ending in "password" is not one
+        self.assertEqual(found(".netrc", f"machine h.invalid login app_password password {PASS}\n"), [("S-SECRET", 1)])
+        self.assertNotIn(PASS, json.dumps(core.scan_config_file(".netrc", f"login app_password password {PASS}\n")))
         # another config file's prose is not a .netrc's token
         self.assertEqual(found("notes.cfg", f"hint = the password {PASS} is not this\n"), [])
         # the snippet never shows the password, on its line or a line around it
@@ -234,6 +237,14 @@ class NetrcAndCratesTokens(unittest.TestCase):
         self.assertEqual(found("credentials.toml", f'[registry]\ntoken = "{tok}"\n'), [("S-SECRET", 2), ("S-TOKEN", 2)])
         got = core.scan_file("src/lib.rs", f'pub const CRATES_IO: &str = "{tok}";\n', "rs")
         self.assertEqual([i["rule"] for i in got if i["rule"].startswith("S-")], ["S-TOKEN"])
+        self.assertNotIn(tok, json.dumps(got))
+        # in code too, a "cio" inside a longer run is chance
+        for text in (f'const X: &str = "A{tok}";\n', f'const X: &str = "{tok}9";\n'):
+            with self.subTest(text):
+                self.assertNotIn("S-TOKEN", [i["rule"] for i in core.scan_file("src/x.rs", text, "rs")])
+        # nor on another finding's context line
+        got = core.scan_file("src/lib.rs", f'fn f() {{ let password = "hunter22hunter"; }}\nfn g() -> &\'static str {{ "{tok}" }}\n', "rs")
+        self.assertEqual(sorted(i["rule"] for i in got if i["rule"].startswith("S-")), ["S-SECRET", "S-TOKEN"])
         self.assertNotIn(tok, json.dumps(got))
         # inside a longer run (base64, an identifier) it is chance, not a token
         for text in (f'x = "A{tok}"\n', f'x = "{tok}9"\n', f'x = "{tok[:-1]}"\n'):

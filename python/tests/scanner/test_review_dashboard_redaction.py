@@ -20,7 +20,8 @@ LITERAL = "q8Z3vN5mR1tY7wK2pL9xB4cJ6hF0dS"          # flagged by the entropy rul
 GH_TOKEN = "gho_" + "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8"
 PEM_BODY = ["MIIEowIBAAKCAQEAu1SU1LfVLPHCozMxH2Mo4lgOEePzNm0tRgeLezV6ffAt0gun",
             "VTLw7onLRnrq0/IzW7yWR7QkrmBL7jTKEn5u+qKhbwKfBstIs+bMY2Zkp18gnTxK"]
-SECRETS = [AWS, PASSWORD, LITERAL, GH_TOKEN, "hunter2", "s3cr3tpw"] + PEM_BODY
+CRATES = "cio" + "Zq8vN3pL0wX7rT2mK9sB4hF6jD1aE5cG"   # crates.io's API token shape (0.1.9, R-4)
+SECRETS = [AWS, PASSWORD, LITERAL, GH_TOKEN, CRATES, "hunter2", "s3cr3tpw"] + PEM_BODY
 
 PY = "\n".join([
     "import os",
@@ -36,6 +37,8 @@ PY = "\n".join([
     PEM_BODY[1],
     '-----END RSA PRIVATE KEY-----"""',
     "eval(user_input)",                        # its snippet shows PEM body lines
+    f'cargo_token = "{CRATES}"',               # S-TOKEN, and the next finding's context line
+    "os.system(cmd3)",
     "",
 ])
 SQL = "\n".join([
@@ -80,6 +83,14 @@ class DashboardRedactionTests(unittest.TestCase):
         self.assertEqual(ev["snippet"][:2], ["[redacted]", "[redacted]"])        # PEM body line + END line
         (cmd2,) = [i for i in self.issues("S-OSCMD-PY") if i["line"] == 8]
         self.assertIn('"Authorization": "[redacted]"', cmd2["snippet"][1])
+
+    def test_a_crates_io_token(self):
+        self.assertIn(14, [i["line"] for i in self.issues("S-TOKEN")])
+        (cmd3,) = [i for i in self.issues("S-OSCMD-PY") if i["line"] == 15]
+        self.assertIn('cargo_token = "[redacted]"', cmd3["snippet"])
+        # the context-line redaction on its own, as for a token no rule flagged
+        (line,) = dash.run([{"op": "eval", "expr": f"redactContextLine('h({CRATES});')"}])
+        self.assertEqual(line, "h([redacted]);")
 
     def test_sql_credentials_are_matched_case_insensitively(self):
         (grant,) = self.issues("SQL-GRANT-ALL")
