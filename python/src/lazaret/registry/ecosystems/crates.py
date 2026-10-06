@@ -265,7 +265,9 @@ class Crates(base.Ecosystem):
         """(its build script, its library's root, whether that is a procedural macro) of a crate whose Cargo.toml
         is in `manifests` and whose files are `members`: the build script is `build.rs` or the path `package.build`
         names (none when it is `false`, or when the file is not in the crate), the library's root `src/lib.rs` or
-        `[lib] path` (None when not in the crate)."""
+        `[lib] path` (None when not in the crate). The library is a procedural macro when `[lib] proc-macro` is true
+        or its `crate-type` holds "proc-macro": cargo builds it as one either way, `proc-macro = false` or not
+        (cargo 1.95, no warning), and runs it inside the compiler of every crate that uses it."""
         present = {m for m in (members or ()) if isinstance(m, str)}
         doc = self._cargo(manifests)
         pkg = doc.get("package") if isinstance(doc.get("package"), dict) else doc.get("project")
@@ -277,7 +279,10 @@ class Crates(base.Ecosystem):
         lib = doc.get("lib") if isinstance(doc.get("lib"), dict) else {}
         root = self._path(lib.get("path")) if isinstance(lib.get("path"), str) else "src/lib.rs"
         root = root if root in present else None
-        return script, root, root is not None and (lib.get("proc-macro") is True or lib.get("proc_macro") is True)
+        types = lib.get("crate-type", lib.get("crate_type"))
+        macro = (lib.get("proc-macro") is True or lib.get("proc_macro") is True
+                 or isinstance(types, list) and "proc-macro" in types[:16])
+        return script, root, root is not None and macro
 
     def run_targets(self, kind, manifests, members):
         present = {m for m in (members or ()) if isinstance(m, str)}

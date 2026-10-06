@@ -509,6 +509,14 @@ class RunTargetsTests(unittest.TestCase):
         self.assertEqual(t.install_scripts, frozenset())
         t = self.run_targets(MANIFEST + "[lib]\nproc-macro = \"true\"\n", ["src/lib.rs"])
         self.assertEqual(t.install_scripts, frozenset())
+        # crate-type = ["proc-macro"]: cargo builds a procedural macro too, proc-macro = false or not
+        for lib in ('crate-type = ["proc-macro"]', "crate_type = ['proc-macro']",
+                    'proc-macro = false\ncrate-type = ["proc-macro"]'):
+            with self.subTest(lib):
+                t = self.run_targets(MANIFEST + f"[lib]\n{lib}\n", ["src/lib.rs"])
+                self.assertEqual(t.install_scripts, frozenset({"src/lib.rs"}))
+        t = self.run_targets(MANIFEST + '[lib]\ncrate-type = ["rlib", "cdylib"]\n', ["src/lib.rs"])
+        self.assertEqual(t.install_scripts, frozenset())
 
     def test_binaries_are_entries_declared_or_found(self):
         manifest = MANIFEST + "[[bin]]\nname = \"t\"\npath = \"tools/t.rs\"\n[[bin]]\nname = \"u\"\npath = \"tools/missing.rs\"\n"

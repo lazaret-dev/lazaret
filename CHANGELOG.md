@@ -429,6 +429,17 @@ project is pre-1.0, so the 0.x API may still change.
 
 ### Fixed
 
+- **A library declared `crate-type = ["proc-macro"]` is a procedural macro.** Cargo builds
+  a library whose crate types hold `"proc-macro"` as a procedural macro, whatever
+  `proc-macro` says, and runs it inside the compiler of every crate that uses it (checked
+  with cargo 1.95). The readers of a crate's `Cargo.toml` (registry and guard scans, and
+  `--deps`) read only `proc-macro`, so the functions of such a crate that its
+  `#[proc_macro]` entry points do not reach were read as code that runs when called
+  (SC-USE-RISK, strong reasons only), not as build-time code. Both readers read
+  `crate-type` now, and the Rust reader takes a crate with a `#[proc_macro]` function as a
+  procedural-macro crate whatever its manifest says (rustc builds such a function in no
+  other kind of crate). No crate of the Go and Rust benign sets uses that spelling. Rule
+  set 2.34.0.
 - **Code read back from the file itself, in Python, is read on the tree (N-19).** rumdl
   0.2.78, a popular PyPI package, was SUSPICIOUS for two maintainer scripts: each gives
   argparse its docstring as the usage text and runs `gh` with arguments

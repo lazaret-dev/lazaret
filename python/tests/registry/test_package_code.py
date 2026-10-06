@@ -291,6 +291,12 @@ class RustTests(unittest.TestCase):
         (issue,) = [i for i in res["issues"] if i["rule"] == "SC-INSTALL-HOOK"]
         self.assertTrue(issue["msg"].startswith("src/lib.rs is a procedural macro: it runs inside the compiler of every "
                                                 "crate that uses it, and it "), issue["msg"])
+        # crate-type = ["proc-macro"]: cargo builds it as one too, proc-macro = false or not
+        for lib in ('crate-type = ["proc-macro"]', 'proc-macro = false\ncrate-type = ["proc-macro"]'):
+            with self.subTest(lib):
+                res = rust({"src/lib.rs": MACRO_RS}, f'[package]\nname = "c"\nversion = "1.0.0"\n\n[lib]\n{lib}\n')
+                self.assertEqual((res["verdict"], [i["rule"] for i in res["issues"] if i["rule"] == "SC-INSTALL-HOOK"]),
+                                 ("SUSPICIOUS", ["SC-INSTALL-HOOK"]))
 
     def test_a_ctor(self):
         res = rust({"src/lib.rs": CTOR_RS})

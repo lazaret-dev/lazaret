@@ -108,6 +108,10 @@ class CargoVendorTests(VendoredCodeTests):
         self.assertEqual(self.scan(files), [("SC-INSTALL-HOOK", "CRITICAL", "vendor/buildevil/build.rs", 5),
                                             ("SC-INSTALL-HOOK", "CRITICAL", "vendor/macro/src/lib.rs", 5)])
         self.assertEqual(self.scan(files, deps=False), [("Q-SKIPPED-TREE", "INFO", "vendor", 1)])
+        # a library whose crate types hold "proc-macro" is one too
+        files = dict(RUST_PROJECT, **crate("macro", {"src/lib.rs": samples.MACRO_RS},
+                                           '[package]\nname = "macro"\nversion = "1.0.0"\n\n[lib]\ncrate-type = ["proc-macro"]\n'))
+        self.assertEqual(self.scan(files), [("SC-INSTALL-HOOK", "CRITICAL", "vendor/macro/src/lib.rs", 5)])
 
     def test_the_manifest_says_which_build_script(self):
         manifest = '[package]\nname = "c"\nversion = "1.0.0"\nbuild = "tools/gen.rs"\n'
@@ -166,6 +170,11 @@ class ManifestTests(unittest.TestCase):
         '[package]\nname = "x"\n[[bin]]\npath = "src/x.rs"\n[target.\'cfg(unix)\'.dependencies]\nbuild = "no.rs"\n',
         '[lib]\nproc_macro = true\npath = "/src/x.rs"\n',
         '[lib]\npath = "../outside.rs"\n',
+        # crate-type = ["proc-macro"]: a procedural macro to cargo, proc-macro = false or not
+        '[lib]\ncrate-type = ["proc-macro"]\n',
+        'lib = { crate_type = [ "proc-macro" ], path = "src/x.rs" }\n',
+        '[lib]\nproc-macro = false\ncrate-type = [\n  "proc-macro",\n]\n',
+        '[lib]\ncrate-type = ["rlib", "cdylib"]\n',
     )
     MEMBERS = ("build.rs", "tools/gen.rs", "src/lib.rs", "src/x.rs")
 

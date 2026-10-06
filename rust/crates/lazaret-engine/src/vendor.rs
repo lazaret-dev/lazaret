@@ -6,7 +6,8 @@
 //! two answer alike:
 //!
 //! - [`cargo_layout`]: what a crate's `Cargo.toml` says of its build script (`package.build`: a path, or `false`) and
-//!   its library (`lib.path`, `lib.proc-macro`), read as TOML reads them: tables and arrays of tables, dotted and
+//!   its library (`lib.path`, `lib.proc-macro`, and `lib.crate-type`: a `"proc-macro"` among its crate types makes
+//!   the library a procedural macro whatever `proc-macro` says, as cargo builds it), read as TOML reads them: tables and arrays of tables, dotted and
 //!   quoted keys, inline tables, the four kinds of strings, arrays over several lines and comments. Only those keys are
 //!   kept; a line this reader cannot read is left, and the next one read. Cargo refuses a manifest that is not TOML, so
 //!   a crate with one is never built; what is read of it here does not matter.
@@ -22,6 +23,8 @@ use crate::pystr::PyStr;
 pub const MAX_DEPTH: usize = 32;
 /// The lines of a `modules.txt` read, at most.
 pub const MAX_MODULE_LINES: usize = 200_000;
+/// The strings an array keeps (`lib.crate-type`'s), at most; the rest are read and dropped.
+pub const MAX_ARRAY_STRINGS: usize = 16;
 
 /// What `package.build` says.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -45,6 +48,8 @@ enum Val {
     Str(PyStr),
     Bool(bool),
     Table(Vec<(Vec<PyStr>, Val)>),
+    /// An array's strings (the first MAX_ARRAY_STRINGS; its other values are not kept).
+    Strs(Vec<PyStr>),
     Other,
 }
 
@@ -265,6 +270,7 @@ impl<'a> Toml<'a> {
                     self.i = self.s.len();
                     return Val::Other;
                 }
+                let mut strs = Vec::new();
                 loop {
                     self.ws_lines();
                     if self.is(0, ']') {
@@ -272,7 +278,11 @@ impl<'a> Toml<'a> {
                         break;
                     }
                     let before = self.i;
-                    let _ = self.value(depth + 1);
+                    if let Val::Str(item) = self.value(depth + 1) {
+                        if strs.len() < MAX_ARRAY_STRINGS {
+                            strs.push(item);
+                        }
+                    }
                     self.ws_lines();
                     if self.is(0, ',') {
                         self.i += 1;
@@ -283,7 +293,7 @@ impl<'a> Toml<'a> {
                         break;
                     }
                 }
-                Val::Other
+                Val::Strs(strs)
             }
             Some('{') => {
                 self.i += 1;
@@ -366,6 +376,10 @@ fn record(layout: &mut Layout, key: &[String], v: &Val) {
         (["package", "build"], Val::Bool(false)) if layout.build.is_none() => layout.build = Some(Build::Off),
         (["lib", "path"], Val::Str(p)) if layout.lib_path.is_none() => layout.lib_path = Some(p.clone()),
         (["lib", "proc-macro" | "proc_macro"], Val::Bool(b)) if layout.proc_macro.is_none() => layout.proc_macro = Some(*b),
+        // (cargo builds a library whose crate types hold "proc-macro" as a procedural macro, `proc-macro = false` or not)
+        (["lib", "crate-type" | "crate_type"], Val::Strs(types)) if types.iter().any(|t| t == &crate::pystr::u("proc-macro")) => {
+            layout.proc_macro = Some(true)
+        }
         _ => {}
     }
 }
@@ -464,6 +478,26 @@ mod tests {
                     version = \"1.0.0\"\nbuild = \"build.rs\"\nautobins = false\n\n[lib]\nname = \"serde_derive\"\n\
                     path = \"src/lib.rs\"\nproc-macro = true\n\n[dependencies.proc-macro2]\nversion = \"1.0\"\n";
         assert_eq!(layout(text), (path("build.rs"), Some("src/lib.rs".into()), Some(true)));
+    }
+
+    #[test]
+    fn a_library_whose_crate_types_hold_proc_macro_is_one() {
+        // cargo builds it as a procedural macro and runs it inside the compiler of every user
+        for text in [
+            "[lib]\ncrate-type = [\"proc-macro\"]\n",
+            "[lib]\ncrate_type = ['proc-macro']\n",
+            "lib = { path = \"src/m.rs\", crate-type = [\n  \"proc-macro\", # the macro\n] }\n",
+            "[lib]\nproc-macro = false\ncrate-type = [\"proc-macro\"]\n",
+            "[lib]\ncrate-type = [\"proc-macro\"]\nproc-macro = false\n",
+        ] {
+            assert_eq!(layout(text).2, Some(true), "{text}");
+        }
+        assert_eq!(layout("[lib]\ncrate-type = [\"rlib\", \"cdylib\"]\n").2, None);
+        assert_eq!(layout("[package]\ncrate-type = [\"proc-macro\"]\n").2, None);           // (only [lib]'s)
+        assert_eq!(layout("[lib]\nproc-macro = false\n").2, Some(false));
+        // an array's other values, and arrays nested in it, are read past
+        assert_eq!(layout("[lib]\ncrate-type = [1, [\"x\"], { a = 1 }, \"proc-macro\"]\npath = \"l.rs\"\n"),
+                   (None, Some("l.rs".into()), Some(true)));
     }
 
     #[test]

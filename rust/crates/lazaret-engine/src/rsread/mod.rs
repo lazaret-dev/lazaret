@@ -364,7 +364,10 @@ pub fn read_crate(p: &Pack, files: &[(PyStr, &[u32])], opts: &Options) -> Answer
             }
         }
     }
-    if opts.proc_macro || !macro_roots.is_empty() {
+    // (rustc builds a `#[proc_macro…]` function in a procedural-macro crate only, so a crate with one is such a crate
+    // whatever its manifest was read to say: a library declared `crate-type = ["proc-macro"]`, cargo's other spelling)
+    let macro_crate = opts.proc_macro || !macro_roots.is_empty();
+    if macro_crate {
         let mut m = Model::new(&krate, p);
         m.max_steps = BUILD_STEPS;
         for &(f, i) in &macro_roots {
@@ -373,9 +376,7 @@ pub fn read_crate(p: &Pack, files: &[(PyStr, &[u32])], opts: &Options) -> Answer
         m.flush_cmds();
         // (a procedural macro crate's library is all build-time code: its other functions read alone, RR-10, and its
         // text read whole)
-        if opts.proc_macro {
-            read_rest(&mut m, &unit_fns(&krate, UNIT_LIB), |_, _, _| {});
-        }
+        read_rest(&mut m, &unit_fns(&krate, UNIT_LIB), |_, _, _| {});
         owned.extend(m.reached.iter().copied());
         if let Some(root) = lib_root.or_else(|| macro_roots.first().map(|r| r.0 as usize)) {
             let files_of: Vec<usize> = (0..krate.files.len()).filter(|&k| krate.files[k].unit == UNIT_LIB).collect();
@@ -419,7 +420,7 @@ pub fn read_crate(p: &Pack, files: &[(PyStr, &[u32])], opts: &Options) -> Answer
         }
     }
     // ---- the rest: the functions no moment above reached, when used
-    if !opts.proc_macro {
+    if !macro_crate {
         let (uses, read) = use_findings(p, &krate, &owned, opts);
         answer.uses = uses;
         answer.use_read = read;

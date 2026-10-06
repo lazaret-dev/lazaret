@@ -95,6 +95,14 @@ MAX_MEMBER = _env_number("LAZARET_MAX_SOURCE_BYTES", 16_000_000)
 MAX_FILES = 20_000         # files per package (numpy's sdist alone has >4,000)
 SAMPLE = 8192              # header/entropy sample read from oversized files
 # Stored scans from another engine version are scanned again (has_scan).
+# 2.34: a library whose `crate-type` holds "proc-macro" is a procedural macro
+#      (cargo builds it as one, `proc-macro = false` or not), so its code is
+#      read as code that runs at build; it was read as code run when called
+# 2.33: S-SECRET reads Go's `:=` and `var … string =`, Rust's typed constants
+#      and byte and raw literals; S-TOKEN reads crates.io's `cio` tokens; a
+#      .netrc's passwords are S-SECRET (Part E: G-4, R-4, N-12)
+# 2.32: Python's "runs code it reads back from its own file" is read on the
+#      tree (N-19): a parameter is not the module's variable of its name
 # 2.31: a Go module's and a crate's code is read (Part C: the Go and Rust
 #      readers, G-1 and R-1, in registry and guard scans), so a module or a
 #      crate is OK, WARN or SUSPICIOUS for what its code does; it was
@@ -233,7 +241,7 @@ SAMPLE = 8192              # header/entropy sample read from oversized files
 #      entry points and hook targets, Python install scripts
 # 2.3: verdict tiers, decoded hex, install-script inspection; 2.2:
 #      verdict-integrity; 2.1: binary-artifact awareness
-ENGINE_VERSION = "2.33.0"
+ENGINE_VERSION = "2.34.0"
 
 # ---------------- The content memo (P-2a, registry/contentcache.py) ----------------
 # One per scan_package run: the engine answers once for content several of a

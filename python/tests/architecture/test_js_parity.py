@@ -470,6 +470,8 @@ class EngineParityTests(unittest.TestCase):
             **vendored.crate("buildevil", {"build.rs": samples.BUILD_RS, "src/lib.rs": samples.CLEAN_RS}),
             **vendored.crate("macro", {"src/lib.rs": samples.MACRO_RS},
                              '[package]\nname = "macro"\nversion = "1.0.0"\n\n[lib]\nproc-macro = true\n'),
+            **vendored.crate("macro2", {"src/lib.rs": samples.MACRO_RS},          # (cargo's other spelling, rule set 2.34)
+                             '[package]\nname = "macro2"\nversion = "1.0.0"\n\n[lib]\ncrate-type = ["proc-macro"]\n'),
             **vendored.crate("gen", {"tools/gen.rs": samples.BUILD_RS, "src/lib.rs": samples.USE_RS},
                              '[package]\nname = "gen"\nbuild = "tools/gen.rs"\n'),
             **vendored.crate("c", {"src/lib.rs": samples.CTOR_RS, "tests/t.rs": samples.CTOR_RS})).items()})
@@ -485,7 +487,7 @@ class EngineParityTests(unittest.TestCase):
                 with self.subTest(deps=deps):
                     self.assert_same(js, py, label=f"vendored code (deps={deps})")
                     rules = collections.Counter(i["rule"] for i in js[1]["issues"] if i["rule"].startswith("SC-"))
-                    self.assertEqual(dict(rules), {"SC-IMPORT-RISK": 4, "SC-USE-RISK": 2, "SC-INSTALL-HOOK": 3,
+                    self.assertEqual(dict(rules), {"SC-IMPORT-RISK": 4, "SC-USE-RISK": 2, "SC-INSTALL-HOOK": 4,
                                                    "SC-B64": 1, "SC-GO-GENERATE": 1} if deps else {})
         finally:
             shutil.rmtree(root, ignore_errors=True)
