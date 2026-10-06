@@ -160,9 +160,10 @@ class NameAndPathTests(unittest.TestCase):
 
     def test_the_module_declares_what_it_reaches(self):
         eco = crates.Crates()
+        # (the API only for a crate's owners, SC-NEW-DEPENDENCY's, at one request a second: the crawler policy's)
         self.assertEqual((eco.id, eco.hosts, eco.artifact_kinds, eco.rate, eco.manifest_names),
-                         ("crates", frozenset({"index.crates.io", "static.crates.io"}), ("crate",), {},
-                          frozenset({"Cargo.toml"})))
+                         ("crates", frozenset({"index.crates.io", "static.crates.io", "crates.io"}), ("crate",),
+                          {"crates.io": 1.0}, frozenset({"Cargo.toml"})))
         self.assertIsInstance(crates.ECOSYSTEM, crates.Crates)
         self.assertEqual(crates.MAX_NAME, 64)
         self.assertEqual(crates.MAX_INDEX_BYTES, 64 * 1024 * 1024)
@@ -305,8 +306,16 @@ class ResolveTests(unittest.TestCase):
         big = {"default": ["f%d" % i for i in range(5000)]}
         res, _ = resolve("demo", None, index(line("1.0.0", features=big, features2=big)))
         entry = res.artifacts[0]["entry"]
-        self.assertEqual(set(entry), {"name", "vers", "cksum", "yanked", "deps", "rust_version", "links"})
+        self.assertEqual(set(entry), {"name", "vers", "cksum", "yanked", "deps", "rust_version", "links", "pubtime"})
         self.assertLess(len(json.dumps(entry)), 400)
+
+    def test_a_lines_publishing_time_is_kept_when_it_is_one(self):
+        for value, kept in (("2026-05-02T10:00:00Z", "2026-05-02T10:00:00Z"), (None, None), (17, None), ("x" * 41, None)):
+            with self.subTest(value):
+                rec = json.loads(line("1.0.0"))
+                rec["pubtime"] = value
+                res, _ = resolve("demo", None, (json.dumps(rec) + "\n").encode())
+                self.assertEqual(res.artifacts[0]["entry"]["pubtime"], kept)
 
     def test_a_missing_index_file_is_a_404_fetch_error(self):
         eco = crates.Crates()

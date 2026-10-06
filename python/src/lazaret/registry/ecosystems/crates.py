@@ -20,9 +20,10 @@ and saying which of its files run when it is built.
                  crate, the library root; those are `install_scripts`. `entries` are the library root and the binaries.
                  Nothing runs when a crate is merely loaded, so `startup` is empty.
 
-Only the two CDN hosts are declared (they have no rate limit; the 1 request per second of crates.io's crawler policy is for
-its API, which this module does not use). The module reads the index with `fetch.json_lines` and keeps, for each version,
-only what it needs: the `features` of a large crate are most of its index file. No Rust is run and no build is started."""
+The two CDN hosts have no rate limit. The API (`crates.io`) is declared for one question only, who owns a crate
+(`owners`, for SC-NEW-DEPENDENCY: a release that adds a brand-new crate of strangers), and paced at one request a second,
+as crates.io's crawler policy asks. The module reads the index with `fetch.json_lines` and keeps, for each version, only
+what it needs: the `features` of a large crate are most of its index file. No Rust is run and no build is started."""
 
 import hashlib
 import re
@@ -30,10 +31,12 @@ import re
 from lazaret.registry.ecosystems import base
 from lazaret.scanner import sca
 
-__all__ = ["Crates", "ECOSYSTEM", "index_path", "semver_key", "MAX_NAME", "MAX_INDEX_BYTES"]
+__all__ = ["Crates", "ECOSYSTEM", "index_path", "semver_key", "MAX_NAME", "MAX_INDEX_BYTES", "INDEX_HOST", "API_HOST"]
 
 INDEX_HOST = "index.crates.io"
 DOWNLOAD_HOST = "static.crates.io"
+API_HOST = "crates.io"
+MAX_OWNERS = 200
 MAX_NAME = 64
 MAX_VERSION = 100
 MAX_INDEX_BYTES = 64 * 1024 * 1024        # the larger crates' index files are tens of MB (thousands of versions, long feature lists)
@@ -98,18 +101,20 @@ def _reduce(rec):
         if kind not in _KINDS or not (package is None or isinstance(package, str)):
             raise base.FetchError("crates: an index line has a dependency with a wrong kind or package")
         kept.append((package or dep["name"], kind))
-    rust_version, links = rec.get("rust_version"), rec.get("links")
+    rust_version, links, pubtime = rec.get("rust_version"), rec.get("links"), rec.get("pubtime")
     return {"name": name, "vers": vers, "cksum": cksum.lower(), "yanked": yanked, "deps": kept,
             "rust_version": rust_version if isinstance(rust_version, str) and len(rust_version) <= 40 else None,
-            "links": links if isinstance(links, str) and len(links) <= 100 else None}
+            "links": links if isinstance(links, str) and len(links) <= 100 else None,
+            # (when crates.io published the version, as the index says: RFC 3339, since 2025 on every line)
+            "pubtime": pubtime if isinstance(pubtime, str) and len(pubtime) <= 40 else None}
 
 
 class Crates(base.Ecosystem):
     id = "crates"
     title = "crates.io"
-    hosts = frozenset({INDEX_HOST, DOWNLOAD_HOST})
+    hosts = frozenset({INDEX_HOST, DOWNLOAD_HOST, API_HOST})
     artifact_kinds = ("crate",)
-    rate = {}
+    rate = {API_HOST: 1.0}
     manifest_names = frozenset({"Cargo.toml"})
 
     # ---- names and versions
@@ -140,21 +145,39 @@ class Crates(base.Ecosystem):
         return True
 
     # ---- the network
-    def resolve(self, name, version, fetch):
+    def records(self, name, fetch):
+        """The index's versions of crate `name`, oldest first, each as `_reduce` keeps it; FetchError for an index file
+        that lists no version, too many, another crate's or one twice."""
         name = self.check_name(name)
-        want = self.check_version(version)
         records = fetch.json_lines(f"https://{INDEX_HOST}/{index_path(name)}", max_bytes=MAX_INDEX_BYTES, select=_reduce)
         if not records:
             raise base.FetchError("crates: the index file lists no versions")
         if len(records) > MAX_VERSIONS:
             raise base.FetchError("crates: the index file lists too many versions")
-        by_core = {}
+        seen = set()
         for rec in records:
             if rec["name"].lower() != name.lower():
                 raise base.FetchError("crates: the index file lists another crate")
-            if _core(rec["vers"]) in by_core:
+            if _core(rec["vers"]) in seen:
                 raise base.FetchError("crates: the index file lists a version twice")
-            by_core[_core(rec["vers"])] = rec
+            seen.add(_core(rec["vers"]))
+        return records
+
+    def owners(self, name, fetch):
+        """The logins crates.io lists as the owners of crate `name` (users and teams: `dtolnay`,
+        `github:serde-rs:publish`), from its API; FetchError when it doesn't answer."""
+        name = self.check_name(name)
+        doc = fetch.json(f"https://{API_HOST}/api/v1/crates/{name}/owners", accept="application/json")
+        users = doc.get("users") if isinstance(doc, dict) else None
+        if not isinstance(users, list):
+            raise base.FetchError("crates: the owners answer has no list of users")
+        return {u["login"] for u in users[:MAX_OWNERS] if isinstance(u, dict) and isinstance(u.get("login"), str)}
+
+    def resolve(self, name, version, fetch):
+        name = self.check_name(name)
+        want = self.check_version(version)
+        records = self.records(name, fetch)
+        by_core = {_core(rec["vers"]): rec for rec in records}
         if want is not None:
             rec = by_core.get(_core(want))
             if rec is None:

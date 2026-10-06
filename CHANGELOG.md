@@ -11,6 +11,29 @@ project is pre-1.0, so the 0.x API may still change.
 
 ### Added
 
+- **Crate names like a popular crate's, and a crate release's brand-new dependencies (N-3's
+  second part).** A crate's name, or a crate its `Cargo.toml` depends on to build (its
+  `[dependencies]` and `[build-dependencies]`, per target too; not `[dev-dependencies]`,
+  never built for a user), one change from one of the 5,000 crates crates.io counts the
+  most downloads of in 90 days is SC-TYPOSQUAT (MAJOR), as npm's and PyPI's names are:
+  `proc-macro1` for `proc-macro2`, `rustdecimal` for `rust_decimal` (2022's CrateDepression
+  squat), `reqwset` for `reqwest`. Names are folded as crates.io folds them (case, and `_`
+  as `-`), so `serde_json` and `serde-json` are one name. The crates the lists know are
+  never flagged: the 20,000 with the most recent downloads, the 20,000 with the most
+  downloads of all time and the crates Debian packages. A `crates:` scan also compares the
+  release with the version crates.io published before it, from the sparse index alone (its
+  lines are in publishing order, each with its `pubtime`): a crate it adds as a normal or
+  build dependency, first published less than 7 days before the release, is
+  SC-NEW-DEPENDENCY (CRITICAL; MAJOR under 30 days), unless an owner of the release's crate
+  owns it too (crates.io's API, one request a second, as its crawler policy asks; when the
+  API doesn't answer, the finding names no owner). The list comes from crates.io's API
+  (`scripts/fetch-top-crates.py`, names only) and Ubuntu 24.04's source package indices;
+  `scripts/update-popular-names.py --crates` rebuilds it. **Measured** before each set was
+  added to the known names: Ubuntu's 2,317 packaged crates (8,186 dependencies) gave 7
+  findings; the crates ranked 15,001 to 20,000 by recent downloads, 84 of 5,000; the 3,366
+  of the all-time 20,000 outside the recent 20,000, 75 (21 of them gitoxide's renamed
+  `git-*` crates); the 2,000 newest crates (Oct 3 to 6, 2026), 9. The API pages no further
+  than 20,000 crates, so the long tail past both lists is unmeasured.
 - **A crate's Rust code is read for what it does (R-1, first part).** The engine had no
   Rust detectors, so a crate's `.rs` code was never read and `lazaret guard cargo` and the
   registry marked a crate INCOMPLETE. The engine now reads it, with the test that Python's

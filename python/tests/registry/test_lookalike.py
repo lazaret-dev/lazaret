@@ -14,6 +14,11 @@ repository the same; its host one change, with the rest the
 same; a gopkg.in name one change. Not a well-known module's owner or host,
 nor one of the module's own, nor a short owner with a short repository, nor
 another owner's module of the same name (a fork).
+
+0.1.9 (N-3's second part): a crate's name, or a crate its Cargo.toml
+depends on to build, one change from one of the 5,000 crates crates.io
+counts the most downloads of in 90 days, compared as crates.io names them
+(lower-cased, "_" as "-"). Not a [dev-dependencies] crate.
 """
 import json
 import lzma
@@ -303,6 +308,68 @@ class GoLookalikeRegistryTests(unittest.TestCase):
         self.assertEqual(typos(res), [])
 
 
+def scan_crate(files, name="x", version="1.0.0"):
+    """A crate's .crate scanned as the guard and the registry scan one."""
+    from tests.registry import _cargo_support
+    budget = repo.Budget(deadline=time.monotonic() + 120, deadline_detail="scan time budget exceeded")
+    return repo._scan_artifact(_cargo_support.crate_tgz(name, version, files), "tgz", "crate", False, budget)
+
+
+class CratesLookalikeTests(unittest.TestCase):
+    def test_names_like_a_popular_crates(self):
+        for name, target, how in (("proc-macro1", "proc-macro2", "a character changed"),
+                                  ("rustdecimal", "rust-decimal", "its separators changed"),
+                                  ("reqwset", "reqwest", "two characters swapped"),
+                                  ("tokyo", "tokio", "a character changed"),
+                                  ("Serde_Jsom", "serde-json", "a character changed")):
+            with self.subTest(name):
+                self.assertEqual(lookalike.lookalike("crates", name), (target, how))
+
+    def test_not_a_lookalike(self):
+        # crates.io's one name (case, - and _), a popular crate, one the list knows, a target under five
+        # characters (libc), two changes (faster_log for fast_log)
+        for name in ("serde_json", "Serde-JSON", "rust_decimal", "tokio", "proc-macro2", "arrow2", "lbc", "faster_log",
+                     "", "x" * 100):
+            with self.subTest(name):
+                self.assertIsNone(lookalike.lookalike("crates", name))
+
+    def test_the_crates_list(self):
+        with open(lookalike.__file__.replace("lookalike.py", "popular_names.json"), encoding="utf-8") as f:
+            sec = json.load(f)["crates"]
+        self.assertEqual(len(sec["targets"]), 5000)
+        self.assertEqual(len(set(sec["targets"])), 5000)
+        self.assertTrue(all(t == lookalike.normalize("crates", t) for t in sec["targets"] + sec["known"]))
+        self.assertLess(sec["targets"].index("proc-macro2"), 50)
+        self.assertEqual(sec["known"], sorted(sec["known"]))
+        bare = lookalike.tables(sec["targets"], ())
+        for name in sec["known"]:
+            self.assertIsNotNone(lookalike.lookalike("crates", name, bare), name)
+            self.assertIsNone(lookalike.lookalike("crates", name), name)
+        self.assertIn("crates.io", sec["source"])
+        self.assertTrue(sec["license"])
+
+    def test_the_findings(self):
+        toml = ('[package]\nname = "rustdecimal"\nversion = "1.0.0"\n\n[dependencies.proc-macro1]\nversion = "1"\n\n'
+                '[dependencies.http]\nversion = "0.1"\npackage = "reqwset"\n\n[target."cfg(unix)".build-dependencies]\n'
+                'tokyo = "1"\n\n[dev-dependencies.serde_jsom]\nversion = "1"\n')
+        res = scan_crate({"Cargo.toml": toml}, name="rustdecimal")
+        self.assertEqual(typos(res), [
+            ("Cargo.toml", 2, "MAJOR", 'The package is named "rustdecimal", one change from "rust-decimal" (its '
+                                       'separators changed), one of the 5,000 most-downloaded crates.'),
+            ("Cargo.toml", 5, "MAJOR", 'Depends on "proc-macro1", one change from "proc-macro2" (a character changed), '
+                                       'one of the 5,000 most-downloaded crates.'),
+            ("Cargo.toml", 10, "MAJOR", 'Depends on "reqwset", one change from "reqwest" (two characters swapped), '
+                                        'one of the 5,000 most-downloaded crates.'),
+            ("Cargo.toml", 13, "MAJOR", 'Depends on "tokyo", one change from "tokio" (a character changed), one of '
+                                        'the 5,000 most-downloaded crates.')])
+
+    def test_popular_crates_stay_quiet(self):
+        toml = ('[package]\nname = "reqwest"\nversion = "0.12.9"\n\n[dependencies]\nbase64 = "0.22"\nbytes = "1"\n'
+                'futures-core = "0.3"\nhttp = "1"\nhyper = "1"\nserde = "1"\nserde_json = "1"\ntokio = "1"\n'
+                'url = "2.4"\nrustls = { version = "0.23", optional = true }\n')
+        self.assertEqual(typos(scan_crate({"Cargo.toml": toml}, name="reqwest", version="0.12.9")), [])
+
+
 class PopularNamesScriptTests(unittest.TestCase):
     """scripts/update-popular-names.py's Go list, on small copies of its sources."""
 
@@ -330,6 +397,30 @@ class PopularNamesScriptTests(unittest.TestCase):
                    "github.com/coreos/etcd\n")
         self.assertEqual(self.script.ubuntu_go_paths(sources), [
             "gopkg.in/check.v1", "launchpad.net/gocheck", "go.etcd.io/etcd", "github.com/coreos/etcd"])
+
+    def test_the_crates_section(self):
+        def page(path, names):
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump({"crates": [{"name": n} for n in names], "meta": {}}, f)
+
+        with tempfile.TemporaryDirectory() as d:
+            page(os.path.join(d, "recent-0001.json"), ["Proc-Macro2", "serde_json", "tokio"])
+            page(os.path.join(d, "recent-0002.json"), ["tokyo", "serde-json"])
+            page(os.path.join(d, "alltime-0001.json"), ["proc-macro1x", "serde-jsom", "tokio"])
+            index = os.path.join(d, "Sources.xz")
+            with open(index, "wb") as f:
+                f.write(lzma.compress(b"Package: rust-proc-macro3\nBinary: librust-proc-macro3-dev\n\n"
+                                      b"Package: golang-x\nGo-Import-Path: example.com/x\n"))
+            with unittest.mock.patch.object(self.script, "TARGETS", 3):
+                sec = self.script.crates_section(d, [index])["crates"]
+                without = self.script.crates_section(d)["crates"]
+        # ranked as the recent pages list them, crates.io's one name each; known: tokyo (recent), serde-jsom (all
+        # time), proc-macro3 (Debian's), each one change from a target
+        self.assertEqual(sec["targets"], ["proc-macro2", "serde-json", "tokio"])
+        self.assertEqual(sec["known"], ["proc-macro3", "serde-jsom", "tokyo"])
+        self.assertEqual(without["known"], ["serde-jsom", "tokyo"])
+        self.assertIn("2 and 1 pages", sec["source"])
+        self.assertIn("rust-*", sec["source"])
 
     def test_the_go_section(self):
         with tempfile.TemporaryDirectory() as d:

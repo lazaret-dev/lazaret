@@ -2889,11 +2889,22 @@ class _ArtifactScan:
         optionalDependencies; PyPI: the Name and Requires-Dist (optional
         extras left out) of a wheel's METADATA or an sdist's PKG-INFO; Go
         (0.1.9, N-3): the module line of the module's go.mod and the paths
-        it requires."""
+        it requires; a crate (N-3's second part): its Cargo.toml's name and
+        the crates it depends on to build (not [dev-dependencies]; a renamed
+        one by the name crates.io knows it by)."""
         if self.artifact == "gomod":
             for rel, text, parsed in self._go_mods():
                 deps = {p for p, _v, _i in parsed["require"]} | {p for p, _i in parsed["unversioned"]}
                 self.issues.extend(_lookalike.issues("go", parsed["module"], deps, rel, text))
+            return
+        if self.artifact == "crate":
+            from lazaret.registry.ecosystems import crates as _crates
+            raw = self.deferred.get("Cargo.toml")
+            if raw is not None:
+                text = raw.decode("utf-8", "replace")
+                declared = _crates.ECOSYSTEM.declared("crate", {"Cargo.toml": text}, self.members)
+                self.issues.extend(_lookalike.issues("crates", declared.name, set(declared.dependencies),
+                                                     "Cargo.toml", text))
             return
         if self.artifact == "wheel":
             rel = next((r for r in sorted(self.deferred) if r.count("/") == 1
@@ -3178,7 +3189,13 @@ def _always_redacted(fn):
 # maintainer of the package also maintains; (the detection round) on PyPI
 # one an owner or maintainer of the project also owns or maintains, or its
 # organization owns (the JSON API's "ownership"); an optional extra's
-# requirement (PyPI); a git, file or URL dependency. Best effort: a document over the
+# requirement (PyPI); a git, file or URL dependency. A crate (0.1.9, N-3's
+# second part) is compared with the version crates.io published before it
+# from the sparse index alone (its lines are in publishing order, each with
+# its `pubtime`, and a crate's first line is when it was published), its
+# normal and build dependencies only (a dev dependency is never built for a
+# user); a crate an owner of the release's crate also owns (crates.io's API,
+# one request a second) is not counted. Best effort: a document over the
 # metadata budget (an established package's) or a registry that does not
 # answer is not a finding, and a release with no dependencies costs no
 # request. LAZARET_NO_DEPENDENCY_HISTORY=1 turns it off (an offline scan).
@@ -3413,15 +3430,68 @@ def pypi_new_dependencies(name, version, info, fetch=None):
     return previous, found
 
 
+def crates_new_dependencies(name, version, resolved, fetch=None):
+    """-> (previous version, [(dependency, age, its owners)]) for the crates a
+    release adds as normal or build dependencies that are recent (see
+    above). `resolved`: the crates module's Resolution of the release."""
+    from lazaret.registry.ecosystems import crates as _crates
+    module = registry_module("crates")
+    fetch = fetch or module_fetch(module)
+    try:
+        entry = resolved.artifacts[0]["entry"]
+        mine = {n for n, kind in entry["deps"] if kind in ("normal", "build")}
+    except (AttributeError, IndexError, KeyError, TypeError):
+        return None, []
+    when = _iso_time(entry.get("pubtime"))
+    if not mine or when is None:
+        return None, []
+    records = module.records(name, fetch)
+    prerelease = lambda v: _crates.semver_key(v)[3] == 0              # noqa: E731
+    times = {r["vers"]: r["pubtime"] for r in records if r.get("pubtime")}
+    _when, previous = _previous_release(times, entry["vers"], times, prerelease)
+    if previous is None:
+        return None, []
+    prev = next(r for r in records if r["vers"] == previous)
+    added = sorted(mine - {n for n, kind in prev["deps"] if kind in ("normal", "build")})
+    ours, found = None, []
+    for dep in added:
+        if len(found) >= NEW_DEP_LOOKUPS:
+            break
+        try:
+            firsts = [t for t in (_iso_time(r.get("pubtime")) for r in module.records(dep, fetch)) if t is not None]
+        except (FetchError, SpecError):
+            continue                     # unreachable, or not a crate the index names
+        if not firsts:
+            continue
+        age = max(when - min(firsts), datetime.timedelta(0))
+        if age >= NEW_DEP_RECENT:
+            continue
+        try:
+            theirs = module.owners(dep, fetch)
+        except (FetchError, SpecError):
+            theirs = set()               # (the API did not answer: counted, with no owners named)
+        if ours is None:
+            try:
+                ours = module.owners(name, fetch)
+            except (FetchError, SpecError):
+                ours = set()
+        if ours & theirs:
+            continue                     # the crate's own owners'
+        found.append((dep, age, sorted(theirs)))
+    return previous, found
+
+
 def new_dependency_issues(eco, name, version, resolved, unused=()):
     """SC-NEW-DEPENDENCY findings for one release (best effort: [] when the
     registry can't say). unused: the registry names of the dependencies no
     file of the release names (the artifact scan's unusedDependencies)."""
-    if os.environ.get("LAZARET_NO_DEPENDENCY_HISTORY") or eco not in ("npm", "pypi"):
-        return []                        # (a crate's: N-3's second part, from the sparse index)
+    if os.environ.get("LAZARET_NO_DEPENDENCY_HISTORY") or eco not in ("npm", "pypi", "crates"):
+        return []
     try:
         if eco == "npm":
             previous, found = npm_new_dependencies(name, version, resolved[4])
+        elif eco == "crates":
+            previous, found = crates_new_dependencies(name, version, resolved)
         else:
             previous, found = pypi_new_dependencies(name, version, getattr(resolved, "info", None))
     except (FetchError, ValueError):

@@ -22,17 +22,28 @@ Each list is read from a local copy (nothing is downloaded here):
         packages, from the Go-Import-Path field of Ubuntu 24.04's source
         package indices (UBUNTU_SOURCES), which carry Debian's Go packages:
         module paths only.
+  crates  crates.io's API, /api/v1/crates?sort=recent-downloads (the last
+        90 days' downloads; the targets) and ?sort=downloads (all of them;
+        known names only): the pages scripts/fetch-top-crates.py saves
+        (the API is the only ranked list crates.io publishes; its crawler
+        policy's one request a second is kept there). Crate names only.
+        Given Ubuntu's source package indices too, the crates Debian
+        packages (its rust-* source packages) are known names as well:
+        real crates, vetted by Debian, that the check must not flag.
 
-For npm and PyPI the file keeps the TARGETS, the first 5,000 names by
+For npm, PyPI and crates the file keeps the TARGETS, the first 5,000 names by
 downloads, and the KNOWN names: those of the whole list (17,000-odd for npm,
 15,000 for PyPI) that are one change from a target — real packages the
 check must not flag. A name of the list that is no target's look-alike can
-never be flagged, so it need not be kept. PyPI names are PEP 503-normalized.
+never be flagged, so it need not be kept. PyPI names are PEP 503-normalized,
+crate names lower-cased with "_" as "-" (one crate to crates.io): the 20,000
+by recent downloads and the 20,000 by all downloads (all the API pages
+through) read, and Debian's.
 For Go every module of the two lists is a target, as lookalike.go_path()
 writes it (lower-cased, without a major version), sorted.
 
 Usage: python3 scripts/update-popular-names.py [NPM_LIB_DIR TOP_PYPI_JSON]
-           [--go AWESOME_GO_README UBUNTU_SOURCES...] [--check]
+           [--crates PAGES_DIR [UBUNTU_SOURCES...]] [--go AWESOME_GO_README UBUNTU_SOURCES...] [--check]
 A list not given is kept as it is in the file. An Ubuntu index may be
 xz-compressed. --check compares with the file in the tree instead of
 writing it (exit 1 on any difference). Standard library only.
@@ -94,9 +105,9 @@ def section(eco, ranked, everything):
 
 
 ABOUT = ("Names for the registry's look-alike check (SC-TYPOSQUAT, lazaret/registry/lookalike.py): the "
-         f"{TARGETS:,} most-downloaded packages of npm and of PyPI (targets), and the other popular ones that are one "
-         "change from a target (known); the Go modules awesome-go lists and Debian packages (targets). Written by "
-         "scripts/update-popular-names.py.")
+         f"{TARGETS:,} most-downloaded packages of npm, of PyPI and of crates.io (targets), and the other popular ones "
+         "that are one change from a target (known); the Go modules awesome-go lists and Debian packages (targets). "
+         "Written by scripts/update-popular-names.py.")
 
 
 def npm_pypi_sections(npm_lib, top_pypi):
@@ -121,6 +132,57 @@ def npm_pypi_sections(npm_lib, top_pypi):
                         "15,000 that are one change from one of them"),
             "targets": pypi_targets, "known": pypi_known},
     }
+
+
+def debian_crates(text):
+    """The crates a source package index's rust-* packages carry (Debian's crates, named as Debian names them:
+    lower-cased, "_" as "-")."""
+    out = []
+    for line in text.split("\n"):
+        if line.startswith("Package: rust-"):
+            out.append(line[len("Package: rust-"):].strip())
+    return out
+
+
+def _crate_pages(paths, digest):
+    names = []
+    for page in paths:
+        raw = page.read_bytes()
+        digest.update(raw)
+        names += [lookalike.normalize("crates", c["name"]) for c in json.loads(raw)["crates"]
+                  if isinstance(c, dict) and isinstance(c.get("name"), str)]
+    return names
+
+
+def crates_section(pages_dir, sources=()):
+    """The crates list from fetch-top-crates.py's pages (recent-0001.json, …, in order: by recent downloads, the
+    targets; alltime-0001.json, …: known names), and the crates Debian packages (`sources`: Ubuntu's source package
+    indices) as known names."""
+    pages = sorted(pathlib.Path(pages_dir).glob("recent-*.json"))
+    alltime = sorted(pathlib.Path(pages_dir).glob("alltime-*.json"))
+    if not pages:
+        raise SystemExit(f"no recent-*.json in {pages_dir}")
+    digest = hashlib.sha256()
+    names = _crate_pages(pages, digest)
+    older = _crate_pages(alltime, digest)
+    debian, sums = [], []
+    for src in sources:
+        raw, text = _read_index(src)
+        sums.append(hashlib.sha256(raw).hexdigest()[:16])
+        debian += [lookalike.normalize("crates", n) for n in debian_crates(text)]
+    targets, known = section("crates", names, names + older + debian)
+    debian_text = (f", and the rust-* source packages of {UBUNTU_SOURCES} (sha256 {', '.join(s + '…' for s in sums)}), "
+                   "which carry the crates Debian packages" if sources else "")
+    return {"crates": {
+        "source": (f"crates.io's API, https://crates.io/api/v1/crates?sort=recent-downloads (downloads of the last "
+                   f"90 days) and ?sort=downloads, {len(pages)} and {len(alltime)} pages of 100 saved by "
+                   f"scripts/fetch-top-crates.py (sha256 {digest.hexdigest()[:16]}…){debian_text}"),
+        "license": "crate names, which are facts about the crates; no text of the API's answers or the indices is kept",
+        "changes": (f"crate names only, lower-cased with '_' as '-': the first {TARGETS:,} by recent downloads, and "
+                    f"those of the {len(unique(names)):,}, of the {len(unique(older)):,} by all downloads"
+                    + (f" and of Debian's {len(unique(debian)):,}" if sources else "")
+                    + " that are one change from one of them"),
+        "targets": targets, "known": known}}
 
 
 def link_path(url):
@@ -207,13 +269,14 @@ def go_section(readme, sources):
         "targets": targets}}
 
 
-def build(current, npm_lib=None, top_pypi=None, go=None):
+def build(current, npm_lib=None, top_pypi=None, go=None, crates=None):
     """The file: `current` (the file's data) with the lists given rebuilt."""
     out = {"_about": ABOUT}
     if npm_lib is not None:
         out.update(npm_pypi_sections(npm_lib, top_pypi))
     else:
         out.update({eco: current[eco] for eco in ("npm", "pypi")})
+    out.update(crates_section(*crates) if crates is not None else {"crates": current["crates"]})
     out.update(go_section(*go) if go is not None else {"go": current["go"]})
     return out
 
@@ -221,19 +284,28 @@ def build(current, npm_lib=None, top_pypi=None, go=None):
 def main(argv):
     configure_stdio()
     args = [a for a in argv if a != "--check"]
+    crates = None
+    if "--crates" in args:
+        at = args.index("--crates")
+        end = next((k for k in range(at + 1, len(args)) if args[k].startswith("--")), len(args))
+        if end == at + 1:
+            print(__doc__.split("\n\n")[-1].strip(), file=sys.stderr)
+            return 2
+        crates, args = (args[at + 1], args[at + 2:end]), args[:at] + args[end:]
     go = None
     if "--go" in args:
         at = args.index("--go")
         args, files = args[:at], args[at + 1:]
         go = (files[0], files[1:]) if len(files) >= 2 else ()          # (the README, then the indices)
-    if len(args) not in ((0, 2) if go is not None else (2,)) or go == ():
+    if len(args) not in ((0, 2) if go is not None or crates is not None else (2,)) or go == ():
         print(__doc__.split("\n\n")[-1].strip(), file=sys.stderr)
         return 2
     current = json.loads(OUT.read_text(encoding="utf-8")) if OUT.exists() else {}
-    if (not args and ("npm" not in current or "pypi" not in current)) or (go is None and "go" not in current):
+    if ((not args and ("npm" not in current or "pypi" not in current)) or (go is None and "go" not in current)
+            or (crates is None and "crates" not in current)):
         print(f"{OUT.relative_to(ROOT)} has no list to keep: give every source", file=sys.stderr)
         return 2
-    text = json.dumps(build(current, *args, go=go), indent=1, ensure_ascii=False) + "\n"
+    text = json.dumps(build(current, *args, go=go, crates=crates), indent=1, ensure_ascii=False) + "\n"
     if "--check" in argv:
         now = OUT.read_text(encoding="utf-8") if OUT.exists() else ""
         if now != text:
@@ -244,7 +316,8 @@ def main(argv):
     OUT.write_text(text, encoding="utf-8")
     data = json.loads(text)
     print(f"wrote {OUT.relative_to(ROOT)}: npm {len(data['npm']['targets'])} targets, {len(data['npm']['known'])} "
-          f"known; PyPI {len(data['pypi']['targets'])} targets, {len(data['pypi']['known'])} known; Go "
+          f"known; PyPI {len(data['pypi']['targets'])} targets, {len(data['pypi']['known'])} known; crates "
+          f"{len(data['crates']['targets'])} targets, {len(data['crates']['known'])} known; Go "
           f"{len(data['go']['targets'])} modules")
     return 0
 

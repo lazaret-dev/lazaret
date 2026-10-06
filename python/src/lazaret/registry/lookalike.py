@@ -47,6 +47,18 @@ MIN_GO_OWNER characters unless the repository has MIN_GO_REPO (rs/zerolog,
 aws/aws-sdk-go). A module of another owner with the same repository name is
 not one: most are forks.
 
+Crate names (0.1.9, N-3's second part) are compared as npm's and PyPI's
+are, with the 5,000 crates crates.io counts the most downloads of in the
+last 90 days as targets (popular_names.json's "crates"): proc-macro1 for
+proc-macro2, rustdecimal for rust_decimal (2022's CrateDepression squat). A
+crate's name is folded as crates.io folds it, lower-cased with "_" as "-"
+(rust_decimal and rust-decimal are one crate there, so that is no change);
+a separator dropped or added is still one (rustdecimal). The name compared
+is the crate's own and each crate its Cargo.toml depends on to build
+([dependencies], [build-dependencies] and their per-target tables, a
+renamed one by the name crates.io knows it by); a [dev-dependencies] crate
+is never built for a user of the crate.
+
 The lists and their licences: scripts/update-popular-names.py, and the
 "source" fields of popular_names.json.
 """
@@ -61,7 +73,7 @@ MAX_NAME = 214                       # npm's longest name; a longer one is not c
 _ALPHABET = "abcdefghijklmnopqrstuvwxyz0123456789-._"
 _SEP_RE = re.compile(r"[-_.]")
 _PEP503_RE = re.compile(r"[-_.]+")
-_ECO_TEXT = {"npm": "npm packages", "pypi": "PyPI projects"}
+_ECO_TEXT = {"npm": "npm packages", "pypi": "PyPI projects", "crates": "crates"}
 _DATA = {}
 #: Go module hosts where anyone can create an owner (a user, an organization,
 #: a group), so that a path is host/owner/repository; gopkg.in/NAME.vN is
@@ -90,11 +102,14 @@ _BUILTIN_BARE = {_SEP_RE.sub("", b): b for b in NODE_BUILTINS}
 
 def normalize(eco, name):
     """The name as the registry compares it: npm's lower-cased, PyPI's
-    PEP 503-normalized, a Go module path as go_path() writes it ("" for
-    one it does not compare)."""
+    PEP 503-normalized, a crate's lower-cased with "_" as "-" (crates.io's
+    one name), a Go module path as go_path() writes it ("" for one it does
+    not compare)."""
     if eco == "go":
         return go_path(name) or ""
     name = name.strip()
+    if eco == "crates":
+        return name.lower().replace("_", "-")
     return _PEP503_RE.sub("-", name).lower() if eco == "pypi" else name.lower()
 
 
@@ -102,7 +117,7 @@ def _load():
     if not _DATA:
         with open(os.path.join(os.path.dirname(__file__), "popular_names.json"), encoding="utf-8") as f:
             raw = json.load(f)
-        for eco in ("npm", "pypi"):
+        for eco in ("npm", "pypi", "crates"):
             _DATA[eco] = tables(raw[eco]["targets"], raw[eco]["known"])
         _DATA["go"] = go_tables(raw["go"]["targets"])
     return _DATA
@@ -323,10 +338,12 @@ def go_lookalike(path, data=None, own=None):
 
 
 def _line_of(text, needles):
-    """The 1-based line of the first of `needles` found in text, else 1."""
+    """The 1-based line of the first of `needles` found in text, else 1 (a
+    needle that starts with a line break: the line after it)."""
     for needle in needles:
         at = text.find(needle) if text and needle else -1
         if at >= 0:
+            at += len(needle) - len(needle.lstrip("\n"))
             return text.count("\n", 0, at) + 1
     return 1
 
@@ -414,7 +431,8 @@ def issues(eco, name, deps, rel, text=""):
     found = _found(eco, name) if name else None
     if found is not None:
         target, how, builtin = found
-        line = _line_of(text, [f'"name": {json.dumps(name)}', f'"name":{json.dumps(name)}', f"Name: {name}"])
+        line = _line_of(text, [f'"name": {json.dumps(name)}', f'"name":{json.dumps(name)}', f"Name: {name}",
+                               f"name = {json.dumps(name)}"])
         out.append(lazaret.mk_issue(
             {"id": "SC-TYPOSQUAT", "name": "A name like a popular package's", "type": "HOTSPOT", "sev": "MAJOR",
              "msg": f'The package is named "{name}", ' + whose(target, how, builtin),
@@ -427,7 +445,8 @@ def issues(eco, name, deps, rel, text=""):
         if found is None:
             continue
         target, how, builtin = found
-        line = _line_of(text, [json.dumps(dep) + ":", f"Requires-Dist: {dep}"])
+        line = _line_of(text, [json.dumps(dep) + ":", f"Requires-Dist: {dep}", f"package = {json.dumps(dep)}",
+                               f"dependencies.{dep}]", f"\n{dep} ="])
         out.append(lazaret.mk_issue(
             {"id": "SC-TYPOSQUAT", "name": "A name like a popular package's", "type": "HOTSPOT", "sev": "MAJOR",
              "msg": f'Depends on "{dep}", ' + whose(target, how, builtin),

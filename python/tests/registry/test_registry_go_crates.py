@@ -258,6 +258,96 @@ class ScanTests(unittest.TestCase):
             self.assertEqual(repo.scan_package("crates", "fnv", "1.0.7", resolved=resolved)["verdict"], "OK")
 
 
+API = "https://crates.io/api/v1/crates/"
+
+
+def history_line(name, version, pubtime, deps=()):
+    """An index line with its publishing time; deps: (name, kind) pairs."""
+    return json.dumps({"name": name, "vers": version, "cksum": "0" * 64, "features": {}, "yanked": False,
+                       "pubtime": pubtime, "deps": [{"name": d, "req": "^1", "features": [], "optional": False,
+                                                     "default_features": True, "target": None, "kind": k}
+                                                    for d, k in deps]}).encode() + b"\n"
+
+
+def owners(*logins):
+    return json.dumps({"users": [{"id": k, "login": login, "kind": "user"} for k, login in enumerate(logins)]}).encode()
+
+
+class NewCrateDependencyTests(unittest.TestCase):
+    """SC-NEW-DEPENDENCY for a crate (0.1.9, N-3's second part): the release compared with the one crates.io published
+    before it, from the sparse index's lines and their `pubtime`; a crate an owner of the release's also owns (the API's
+    owners) is not counted."""
+
+    def responses(self, added=("freshdep", "normal"), first="2026-05-01T09:00:00Z", app_owners=("alice",),
+                  dep_owners=("mallory",)):
+        out = {INDEX + crates.index_path("app"): (
+                   history_line("app", "1.0.0", "2026-03-01T10:00:00Z", [("serde", "normal")])
+                   + history_line("app", "1.0.1", "2026-05-02T10:00:00Z", [("serde", "normal"), added])),
+               INDEX + crates.index_path(added[0]): history_line(added[0], "0.1.0", first)}
+        if app_owners is not None:
+            out[API + "app/owners"] = owners(*app_owners)
+        if dep_owners is not None:
+            out[API + added[0] + "/owners"] = owners(*dep_owners)
+        return out
+
+    def issues(self, responses):
+        transport, patch = served(responses)
+        with patch:
+            resolved = repo.resolve("crates", "app", "1.0.1")
+            return [(i["rule"], i["sev"], i["msg"]) for i in repo.new_dependency_issues("crates", "app", "1.0.1",
+                                                                                         resolved)], transport
+
+    def test_a_crate_published_the_day_before_by_a_stranger(self):
+        found, transport = self.issues(self.responses())
+        self.assertEqual(found, [("SC-NEW-DEPENDENCY", "CRITICAL",
+                                  'Adds a dependency on "freshdep", which 1.0.0 did not have: a package first published '
+                                  "25 hours before this release by mallory, who does not maintain this one.")])
+        # the index for times, the API for the owners only, at most one request a second there
+        self.assertEqual(sorted({u.split("/")[2] for u in transport.urls()}), ["crates.io", "index.crates.io"])
+        self.assertEqual(crates.ECOSYSTEM.rate, {"crates.io": 1.0})
+
+    def test_a_build_dependency_counts_and_a_dev_dependency_does_not(self):
+        found, _ = self.issues(self.responses(added=("freshdep", "build")))
+        self.assertEqual([sev for _r, sev, _m in found], ["CRITICAL"])
+        found, transport = self.issues(self.responses(added=("freshdep", "dev")))
+        self.assertEqual(found, [])
+        self.assertNotIn(API + "freshdep/owners", transport.urls())
+
+    def test_what_is_not_counted(self):
+        # one of the crate's own owners'; a crate a month old; one already there before
+        self.assertEqual(self.issues(self.responses(dep_owners=("mallory", "alice")))[0], [])
+        self.assertEqual(self.issues(self.responses(first="2026-03-15T00:00:00Z"))[0], [])
+        same = self.responses(added=("serde", "normal"))
+        self.assertEqual(self.issues(same)[0], [])
+        with mock.patch.dict(os.environ, {"LAZARET_NO_DEPENDENCY_HISTORY": "1"}):
+            self.assertEqual(self.issues(self.responses())[0], [])
+
+    def test_a_crate_is_as_old_as_its_first_version(self):
+        responses = self.responses()
+        responses[INDEX + crates.index_path("freshdep")] = (history_line("freshdep", "0.0.1", "2025-01-01T00:00:00Z")
+                                                           + history_line("freshdep", "0.1.0", "2026-05-01T09:00:00Z"))
+        self.assertEqual(self.issues(responses)[0], [])
+
+    def test_a_release_is_compared_with_the_release_before_it(self):
+        # (a pre-release between them is skipped, as for npm and PyPI)
+        responses = self.responses()
+        responses[INDEX + crates.index_path("app")] = (
+            history_line("app", "1.0.0", "2026-03-01T10:00:00Z", [("serde", "normal")])
+            + history_line("app", "1.0.1-beta.1", "2026-05-02T09:00:00Z", [("serde", "normal"), ("freshdep", "normal")])
+            + history_line("app", "1.0.1", "2026-05-02T10:00:00Z", [("serde", "normal"), ("freshdep", "normal")]))
+        found, _ = self.issues(responses)
+        self.assertEqual([m.split(":", 1)[0] for _r, _s, m in found],
+                         ['Adds a dependency on "freshdep", which 1.0.0 did not have'])
+
+    def test_a_week_old_crate_is_major_and_an_unanswered_api_names_no_owner(self):
+        found, _ = self.issues(self.responses(first="2026-04-20T10:00:00Z"))
+        self.assertEqual([sev for _r, sev, _m in found], ["MAJOR"])
+        found, _ = self.issues(self.responses(app_owners=None, dep_owners=None))
+        self.assertEqual(found, [("SC-NEW-DEPENDENCY", "CRITICAL",
+                                  'Adds a dependency on "freshdep", which 1.0.0 did not have: a package first published '
+                                  "25 hours before this release.")])
+
+
 @unittest.skipUnless(_native.available(), f"native engine not built ({_native.load_error()})")
 class SweepTests(unittest.TestCase):
     def setUp(self):
