@@ -36,6 +36,14 @@ project is pre-1.0, so the 0.x API may still change.
   `GITHUB_TOKEN` or `GITLAB_TOKEN`, a secret being verified (urllib's redirect hook gives a hop
   only its own host's credentials, which tiny_https has no hook for yet), as does plain http to a
   registry on this machine. Building the native library now needs Rust 1.87 or later.
+- **The Go checksum database's answers are checked as the go command checks them (NET-1).** A
+  `go:` module's `h1:` hash comes from `sum.golang.org`'s lookup, and that answer is now verified
+  through tiny_https's pure part in the native library: the signature on the database's tree head
+  (the key Go pins), the head's agreement with the newest one the run has accepted, and the
+  record's place in the tree, proved from the database's tiles (a partial tile the database no
+  longer serves is read from the full one, as Go does). An answer that does not check out stops
+  the module (fail closed). Without the native library, the lookup is as good as the TLS that
+  brought it, as before.
 - **VS Code extensions in `lazaret-registry` (E-1's second part): `openvsx:namespace.name[@version]`
   and `vscode:publisher.name[@version]`.** Every `.vsix` the version is published for, one per
   target platform the editor installs, is downloaded and scanned as `lazaret FILE.vsix` scans

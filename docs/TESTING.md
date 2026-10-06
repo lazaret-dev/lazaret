@@ -140,7 +140,12 @@ Notes:
   tiny_https --lib` takes about 25 s after a 3-minute build, and its
   `go_vectors`, `cms_vectors`, `sigstore_real`, `sigstore_synthetic` and
   `rekor_real` tests a second each); after taking a new drop
-  (`scripts/sync_tiny_https.py`), run them and the gates.
+  (`scripts/sync_tiny_https.py`), run them and the gates. The Go checksum
+  database's check (`golang.verify_lookup`) is tested on tiny_https's capture
+  of the real `sum.golang.org` (`tests.registry.test_golang_sumdb`); the Go
+  tests whose lookups are signed with a test key or not at all
+  (`test_golang`, `test_registry_go_crates`, the `go-resolve` fuzz target)
+  read them unchecked, `verify_lookup` patched in `setUpModule`.
 
 ---
 

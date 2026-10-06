@@ -12,6 +12,7 @@ version = "0.1.8"
 dependencies = [
  "lazaret-engine",
  "lazaret-net",
+ "lazaret-verify",
 ]
 
 [[package]]

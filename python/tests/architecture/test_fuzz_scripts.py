@@ -26,6 +26,7 @@ import xml.etree.ElementTree as StdET
 import zlib
 from unittest import mock
 
+from lazaret.scanner import _native
 from tests import _support
 
 FUZZ = os.path.join(_support.REPO_ROOT, "scripts", "fuzz")
@@ -41,7 +42,7 @@ EXPECTED_TARGETS = ["archive-tgz", "archive-tbz2", "archive-txz", "archive-zip",
                     "sca-package-lock-json", "sca-yarn-lock", "sca-pnpm-lock-yaml", "sca-bun-lock", "sca-poetry-lock",
                     "sca-uv-lock", "sca-pylock-toml", "sca-pipfile-lock", "sca-requirements-txt", "sca-pyproject-toml",
                     "sca-setup-py", "sca-go-mod", "sca-go-sum", "sca-vendor-modules-txt", "sca-cargo-lock", "sca-cargo-toml", "sca-bundle-index", "sca-bundle-doc", "crates-index", "crates-manifest", "go-zip", "go-mod", "go-sumdb",
-                    "go-resolve", "ecosystem-names", "ecosystem-member-path", "verify-answers", "verify-credentials"]
+                    "go-sumdb-check", "go-resolve", "ecosystem-names", "ecosystem-member-path", "verify-answers", "verify-credentials"]
 
 
 def fake(run, seeds=(b"abc",), name="fake", **options):
@@ -953,6 +954,26 @@ class RegistryModulePromisesAreLive(unittest.TestCase):
         self.assertEqual(run((golang, "parse_lookup", self.every_other(real, lambda text, name, version: dict(good, h1=elsewhere)))),
                          "go-sumdb-deterministic")
 
+    @unittest.skipUnless(_native.available(), f"native engine not built ({_native.load_error()})")
+    def test_the_go_sumdb_check_promises(self):
+        from lazaret.registry.ecosystems import base, golang
+        seeds = fuzz_targets.check_seeds()
+        real, changed = seeds[0], seeds[1]
+        run = lambda data, *patches: self.promise("go-sumdb-check", data, *patches)      # noqa: E731
+        V = lambda value: (golang, "verify_lookup", value)                                 # noqa: E731
+
+        def failing(*args):
+            raise base.FetchError("x" * 700)
+        self.assertEqual(run(real, V(failing)), "go-sumdb-check-message")
+        self.assertEqual(run(real, V(lambda *args: None)), "go-sumdb-check-checked")
+        self.assertEqual(run(changed, V(lambda *args: True)), "go-sumdb-check-only-what-was-signed")
+        elsewhere = lambda tile, fetch: fetch.bytes("https://sum.golang.org/lookup/x.example/m@v1.0.0")    # noqa: E731
+        self.assertEqual(run(real, (golang, "_fetch_tile", elsewhere)), "go-sumdb-check-requests")
+        def refused(*args):
+            raise base.FetchError("go: refused")
+        self.assertEqual(run(real, V(self.every_other(golang.verify_lookup, refused))), "go-sumdb-check-deterministic")
+
+    @mock.patch("lazaret.registry.ecosystems.golang.verify_lookup", new=lambda name, version, lookup, record, fetch: None)
     def test_the_go_resolve_promises(self):
         from lazaret.registry.ecosystems import base, golang
         eco = golang.Go()

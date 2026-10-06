@@ -1176,8 +1176,40 @@ redirect hop gets only its own host's credentials through urllib's hook
 `Authorization` on a change of origin and has no hook to add one, its
 backlog's B-75 "left" part), and secrets are what an unreviewed TLS stack
 would cost most. `keepalive.py` (`--keepalive`) pools urllib's connections
-and is moot for the native transport, which pools its own. Next: the Go
-checksum database check on `lazaret-verify`.
+and is moot for the native transport, which pools its own.
+
+The Go checksum database (NET-1's third part). `golang.verify_lookup`
+checks a `/lookup/<module>@<version>` answer as the go command's client does
+(`golang.org/x/mod/sumdb`), through the native library's `verify.go_sumdb`
+(lazaret-ffi's `verify` module, over `lazaret-verify`'s `gosum`: tiny_https's
+`sumdb::Check` and `tlog`). The tree head the lookup carries must have the
+signature of the key Go pins (`SUMDB_KEY`, `cmd/go/internal/modfetch`'s
+`knownGOSUMDB`); it is checked against the newest head this process has
+accepted before (a prefix proof, either way round), so the database cannot
+show one run two histories; and the record is proved in that tree. The call
+is made twice: first it names the tiles the proofs read (at most 64; their
+paths and sizes are checked before any is fetched), then, given them, it
+checks. Tiles come from `sum.golang.org` through the module's `Fetch` (its
+host rule and budgets); a partial tile the database no longer serves is read
+from the full one, whose first hashes are the same, as Go does. Tiles that
+passed are kept for the process (1,024 at most) and are checked again each
+time they are used: their bytes never change, and a kept tile proves nothing
+by being kept. The hashes `parse_lookup` read must be lines of the record the
+check vouched for, and its number the same. Anything that does not hold is a
+FetchError and the module is not resolved (fail closed, as `go` fails with a
+security error). `info["sumdb"]` is "verified"; it says "tls" only where the
+native library is missing or is one from before the check. What the go
+command does and this does not: keep the newest head between runs (its
+`$GOPATH/pkg/sumdb`), so each run starts from the lookup's own head; and
+honour `GOSUMDB`, `GONOSUMDB` and `GOPRIVATE` (the registry resolves public
+modules through `proxy.golang.org` and checks them against `sum.golang.org`
+only). The guard's Go relay is not affected: there the go command checks
+the database itself. Tested on tiny_https's capture of the real database
+(`golang.org/x/mod` v0.17.0's lookup, a head served a little before it and
+the seven tiles Go's client reads): `tests/registry/test_golang_sumdb.py`,
+lazaret-ffi's and lazaret-verify's own tests, and the `go-sumdb-check` fuzz
+target (that answer changed: whatever the bytes, an answer that passes says
+what the database signed).
 
 ## 6. How to add or change a rule — the loop
 

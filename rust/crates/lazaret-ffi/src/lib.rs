@@ -18,7 +18,9 @@
 //! Native builds export `lazaret_engine_call`, read by Python's ctypes
 //! (lazaret/scanner/_native.py), and the network layer's calls
 //! (`lazaret_net_request`, `_open`, `_read`, `_close`, `_configure`: see
-//! [`net`]), which only the native library has. WebAssembly builds (wasm32-unknown-unknown,
+//! [`net`]), which only the native library has; its `lazaret_engine_call`
+//! also answers the `verify.*` calls ([`verify`]: the Go checksum database's
+//! check, on tiny_https's pure part). WebAssembly builds (wasm32-unknown-unknown,
 //! loaded by Node's built-in WebAssembly: js/src/lib/native.js) export
 //! `lazaret_alloc`, `lazaret_call` and `lazaret_free` instead, the same
 //! request and answer in the module's memory. A panic never crosses the
@@ -115,6 +117,10 @@ fn handle_inner(req: &[u8]) -> (i32, String) {
         Some(t) => t,
         None => return error(STATUS_ERROR, "text is not UTF-8"),
     };
+    #[cfg(not(target_arch = "wasm32"))]
+    if let Some(answer) = verify::call(name, &args) {
+        return answer;
+    }
     match api::call_owned(name, &args, text) {
         Ok(v) => (STATUS_OK, json::write(&v)),
         Err(CallError::Exhausted) => error(STATUS_EXHAUSTED, "work budget spent"),
@@ -439,6 +445,84 @@ pub mod net {
     }
 }
 
+/// The calls the native library answers itself, over tiny_https's pure part (`lazaret-verify`), before the engine's:
+/// `verify.go_sumdb` checks the Go checksum database's answer for a module (NET-1; lazaret/registry/ecosystems/golang.py).
+///
+/// ```text
+/// {"module": "golang.org/x/mod", "version": "v0.17.0", "key": "sum.golang.org+033de0ae+…", "lookup": "<the body of
+///  /lookup/…>", "head": null | "<a signed tree head kept from before>", "tiles": null | {"tile/8/0/…": "<base64>", …}}
+/// ```
+///
+/// Without `tiles` the answer names those to fetch, `{"needed": [{"path", "full", "len", "full_len"}, …]}`; with them,
+/// `{"verified": true, "lines": [the record's lines for the module's files], "record": "<the whole record>", "id": n,
+/// "size": n, "latest": "<the newest signed tree head>"}`, or an error (status 1) when anything does not hold.
+#[cfg(not(target_arch = "wasm32"))]
+pub mod verify {
+    use super::*;
+    use lazaret_verify::{gosum, pem};
+
+    pub fn call(name: &str, args: &Value) -> Option<(i32, String)> {
+        if name != "verify.go_sumdb" {
+            return None;
+        }
+        let r = catch_unwind(AssertUnwindSafe(|| go_sumdb(args)));
+        Some(match r {
+            Ok(Ok(v)) => (STATUS_OK, json::write(&v)),
+            Ok(Err(m)) => error(STATUS_ERROR, &m),
+            Err(_) => error(STATUS_PANIC, "panic in the checksum database check"),
+        })
+    }
+
+    fn text(args: &Value, key: &str) -> Result<String, String> {
+        args.get(key).and_then(Value::as_string).ok_or_else(|| format!("verify.go_sumdb needs {key}"))
+    }
+
+    fn go_sumdb(args: &Value) -> Result<Value, String> {
+        let (module, version, key, lookup) = (text(args, "module")?, text(args, "version")?, text(args, "key")?,
+                                              text(args, "lookup")?);
+        let head = match args.get("head") {
+            None | Some(Value::Null) => None,
+            Some(v) => Some(v.as_string().ok_or("verify.go_sumdb: head is not text")?),
+        };
+        let head = head.as_ref().map(|h| h.as_bytes());
+        let tiles = match args.get("tiles") {
+            None | Some(Value::Null) => None,
+            Some(Value::Obj(items)) => {
+                let mut out = Vec::new();
+                for (path, data) in items {
+                    let path = lazaret_engine::pystr::to_string(path);
+                    let b64 = data.as_string().ok_or_else(|| format!("tile {path} is not base64 text"))?;
+                    let bytes = pem::base64_decode_strict(&b64).ok_or_else(|| format!("tile {path} is not base64"))?;
+                    out.push((path, bytes));
+                }
+                Some(out)
+            }
+            Some(_) => return Err("verify.go_sumdb: tiles is not an object".into()),
+        };
+        match tiles {
+            None => {
+                let needed = gosum::tiles_needed(&key, head, &module, &version, lookup.as_bytes())?;
+                let list = needed.iter().map(|t| Value::obj(vec![
+                    ("path", Value::str(&t.path)), ("full", Value::str(&t.full_path)),
+                    ("len", Value::Int(t.len as i64)), ("full_len", Value::Int(t.full_len as i64)),
+                ])).collect();
+                Ok(Value::obj(vec![("needed", Value::Arr(list))]))
+            }
+            Some(tiles) => {
+                let v = gosum::verify(&key, head, &module, &version, lookup.as_bytes(), &tiles)?;
+                Ok(Value::obj(vec![
+                    ("verified", Value::Bool(true)),
+                    ("lines", Value::Arr(v.lines.iter().map(|l| Value::str(l)).collect())),
+                    ("record", Value::str(&v.record)),
+                    ("id", Value::Int(v.id as i64)),
+                    ("size", Value::Int(v.size as i64)),
+                    ("latest", Value::str(&String::from_utf8_lossy(&v.latest_note))),
+                ]))
+            }
+        }
+    }
+}
+
 #[cfg(target_arch = "wasm32")]
 mod wasm {
     use super::*;
@@ -511,5 +595,80 @@ mod tests {
         assert_eq!(s, STATUS_ERROR);
         let (s, _) = handle(b"\xff\xff\xff\xff");
         assert_eq!(s, STATUS_ERROR);
+    }
+
+    /// `verify.go_sumdb` (native only), on tiny_https's capture of the real sum.golang.org (its
+    /// tests/data/sumdb/README.txt): the lookup of golang.org/x/mod@v0.17.0, an older head and the seven tiles.
+    #[cfg(not(target_arch = "wasm32"))]
+    mod go_sumdb {
+        use super::*;
+
+        const LOOKUP: &str = include_str!("../../tiny_https/tests/data/sumdb/lookup.txt");
+        const LATEST: &str = include_str!("../../tiny_https/tests/data/sumdb/latest.txt");
+        const TILES: [(&str, &[u8]); 7] = [
+            ("tile/8/0/x097/482", include_bytes!("../../tiny_https/tests/data/sumdb/tile/8/0/x097/482")),
+            ("tile/8/0/x260/730.p/101", include_bytes!("../../tiny_https/tests/data/sumdb/tile/8/0/x260/730.p/101")),
+            ("tile/8/1/380", include_bytes!("../../tiny_https/tests/data/sumdb/tile/8/1/380")),
+            ("tile/8/1/x001/018.p/122", include_bytes!("../../tiny_https/tests/data/sumdb/tile/8/1/x001/018.p/122")),
+            ("tile/8/2/001", include_bytes!("../../tiny_https/tests/data/sumdb/tile/8/2/001")),
+            ("tile/8/2/003.p/250", include_bytes!("../../tiny_https/tests/data/sumdb/tile/8/2/003.p/250")),
+            ("tile/8/3/000.p/3", include_bytes!("../../tiny_https/tests/data/sumdb/tile/8/3/000.p/3")),
+        ];
+        const KEY: &str = "sum.golang.org+033de0ae+Ac4zctda0e5eza+HJyk9SxEdh+s3Ux18htTTAD8OuAn8";
+
+        fn go_sumdb(head: Option<&str>, tiles: Option<Vec<(&str, Vec<u8>)>>) -> (i32, Value) {
+            let mut args = vec![("module", Value::str("golang.org/x/mod")), ("version", Value::str("v0.17.0")),
+                                ("key", Value::str(KEY)), ("lookup", Value::str(LOOKUP)),
+                                ("head", head.map_or(Value::Null, Value::str))];
+            if let Some(tiles) = tiles {
+                let items = tiles.iter().map(|(p, d)| (*p, Value::str(&lazaret_verify::pem::base64_encode(d)))).collect();
+                args.push(("tiles", Value::obj(items)));
+            }
+            let (s, a) = handle(&request("verify.go_sumdb", &json::write(&Value::obj(args)), b""));
+            (s, json::parse_str(&a).unwrap())
+        }
+
+        #[test]
+        fn the_checksum_database_check_names_the_tiles_then_vouches_for_the_record() {
+            let (s, a) = go_sumdb(Some(LATEST), None);
+            assert_eq!(s, STATUS_OK, "{}", json::write(&a));
+            let mut named: Vec<String> = a.get("needed").and_then(Value::as_arr).unwrap().iter()
+                .map(|t| t.get("path").and_then(Value::as_string).unwrap()).collect();
+            named.sort();
+            let mut want: Vec<String> = TILES.iter().map(|(p, _)| p.to_string()).collect();
+            want.sort();
+            assert_eq!(named, want);
+            let (s, a) = go_sumdb(Some(LATEST), Some(TILES.iter().map(|(p, d)| (*p, d.to_vec())).collect()));
+            assert_eq!(s, STATUS_OK, "{}", json::write(&a));
+            assert_eq!(a.get("verified"), Some(&Value::Bool(true)));
+            let lines: Vec<String> = a.get("lines").and_then(Value::as_arr).unwrap().iter()
+                .map(|l| l.as_string().unwrap()).collect();
+            assert_eq!(lines, vec!["golang.org/x/mod v0.17.0 h1:zY54UmvipHiNd+pm+m0x9KhZ9hl1/7QNMyxXbc6ICqA="]);
+            assert!(a.get("record").and_then(Value::as_string).unwrap()
+                .contains("golang.org/x/mod v0.17.0/go.mod h1:hTbmBsO62+eylJbnUtE2MGJUyE7QWk4xUqPFrRgJ+7c="));
+            assert_eq!(a.get("id"), Some(&Value::Int(24955599)));
+            assert_eq!(a.get("size"), Some(&Value::Int(66746981)));
+            assert!(a.get("latest").and_then(Value::as_string).unwrap().starts_with("go.sum database tree\n66746981\n"));
+        }
+
+        #[test]
+        fn the_checksum_database_check_refuses_what_does_not_hold() {
+            let all = || TILES.iter().map(|(p, d)| (*p, d.to_vec())).collect::<Vec<_>>();
+            let mut changed = all();
+            changed[2].1[7] ^= 0x10;
+            let (s, a) = go_sumdb(Some(LATEST), Some(changed));
+            assert_eq!(s, STATUS_ERROR, "a changed tile: {}", json::write(&a));
+            let (s, _) = go_sumdb(Some(LATEST), Some(all()[1..].to_vec()));
+            assert_eq!(s, STATUS_ERROR, "a missing tile");
+            let (s, _) = go_sumdb(Some(&LATEST.replace("66746896", "66746897")), None);
+            assert_eq!(s, STATUS_ERROR, "a head that is not signed");
+            // a tile that is not base64, and arguments missing
+            let (s, a) = handle(&request("verify.go_sumdb", &format!(
+                "{{\"module\": \"m\", \"version\": \"v1.0.0\", \"key\": \"{KEY}\", \"lookup\": \"x\", \"tiles\": {{\"tile/8/0/000\": \"!\"}}}}"), b""));
+            assert_eq!(s, STATUS_ERROR, "{a}");
+            let (s, a) = handle(&request("verify.go_sumdb", "{}", b""));
+            assert_eq!(s, STATUS_ERROR);
+            assert!(a.contains("needs module"), "{a}");
+        }
     }
 }

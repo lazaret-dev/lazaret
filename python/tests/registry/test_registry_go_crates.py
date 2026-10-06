@@ -37,6 +37,14 @@ def recorded(name):
         return fh.read()
 
 
+def setUpModule():
+    # The checksum database's answers here are signed with a test key, or not at all, and no tiles are served: their
+    # check (`golang.verify_lookup`) is test_golang_sumdb.py's, on the real database's answers.
+    patcher = mock.patch.object(golang, "verify_lookup", return_value=None)
+    patcher.start()
+    unittest.addModuleCleanup(patcher.stop)
+
+
 FNV_CRATE = recorded("fnv-1.0.7.crate")
 FNV_INDEX = recorded("fnv.index")
 

@@ -955,6 +955,71 @@ def go_sumdb_start():
     return run, lambda: None
 
 
+# ---- Go: the checksum database's answer checked (NET-1): the real database's answer, changed
+SUMDB_CAPTURE = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "rust", "crates",
+                             "tiny_https", "tests", "data", "sumdb")
+CHECK_NAME, CHECK_VERSION = "golang.org/x/mod", "v0.17.0"
+CHECK_TILES = ("tile/8/0/x097/482", "tile/8/0/x260/730.p/101", "tile/8/1/380", "tile/8/1/x001/018.p/122", "tile/8/2/001",
+               "tile/8/2/003.p/250", "tile/8/3/000.p/3")
+CHECK_WORDS = (b"\n", b"\n\n", b"\xe2\x80\x94 ", b"sum.golang.org", b"go.sum database tree\n", b"h1:", b"/go.mod", b"24955599",
+               b"66746981", b"66746896", b"=", b" ", CHECK_NAME.encode(), CHECK_VERSION.encode())
+
+
+def sumdb_capture(rel):
+    """A file of tiny_https's capture of the real sum.golang.org (its tests/data/sumdb/README.txt)."""
+    with open(os.path.join(SUMDB_CAPTURE, *rel.split("/")), "rb") as fh:
+        return fh.read()
+
+
+def check_seeds():
+    lookup = sumdb_capture("lookup.txt")
+    return [lookup, lookup.replace(b"h1:zY54", b"h1:zY55"), lookup.replace(b"\n66746981\n", b"\n66746982\n"),
+            lookup.replace(b"24955599\n", b"24955598\n", 1), lookup + "\u2014 other.example AAAAAAAA\n".encode("utf-8"),
+            lookup.replace(b"/go.mod", b"/go.sum")]
+
+
+def go_sumdb_check_start():
+    from lazaret.registry.ecosystems import base, golang
+    true = golang.parse_lookup(sumdb_capture("lookup.txt").decode("utf-8"), CHECK_NAME, CHECK_VERSION)
+    tiles = {f"https://sum.golang.org/{path}": sumdb_capture(path) for path in CHECK_TILES}
+    latest = sumdb_capture("latest.txt").decode("utf-8")
+
+    def attempt(text, head):
+        """-> (True, None, "refused" or "unread"; what parse_lookup read; the URLs asked), in a fresh process's memory
+        or one that kept the head the database served a little before the lookup."""
+        fetch, asked = served(golang.Go(), tiles.get)
+        state = golang._Sumdb()
+        if head:
+            state.latest = (66746896, latest)
+        saved, golang._SUMDB = golang._SUMDB, state
+        try:
+            try:
+                record = golang.parse_lookup(text, CHECK_NAME, CHECK_VERSION)
+            except base.FetchError:
+                return "unread", None, asked
+            try:
+                return golang.verify_lookup(CHECK_NAME, CHECK_VERSION, text, record, fetch), record, asked
+            except base.FetchError as exc:
+                refusal(exc, "go-sumdb-check-message")
+                return "refused", record, asked
+        finally:
+            golang._SUMDB = saved
+
+    def run(data):
+        text = data.decode("utf-8", "replace")
+        head = zlib.crc32(data) % 2 == 0
+        outcome, record, asked = attempt(text, head)
+        check(len(asked) <= 2 * golang.MAX_SUMDB_TILES and all(url_text_ok(u) and u.startswith("https://sum.golang.org/tile/8/")
+                                                               for u in asked), "go-sumdb-check-requests", repr(asked)[:200])
+        if outcome not in ("unread", "refused"):
+            check(outcome is True, "go-sumdb-check-checked", f"{outcome!r} (None: no native library that checks)")
+            check(record == true, "go-sumdb-check-only-what-was-signed", repr(record)[:200])
+        again = attempt(text, head)
+        check(again[0] == outcome and again[1] == record, "go-sumdb-check-deterministic", "two checks of one answer differ")
+
+    return run, lambda: None
+
+
 # ---- Go: the proxy's `.info` answer (the checksum database answers for whatever version it is told of)
 INFO_SEEDS = [b'{"Version":"v1.0.0","Time":"2016-01-10T10:55:54Z"}', b'{"Version":"v0.1.0-alpha.1","Time":"2020-01-01T00:00:00Z","Origin":'
               b'{"VCS":"git","URL":"https://example.invalid/m","Hash":"' + b"a" * 40 + b'"}}', b'{"Version":"v2.0.0+incompatible"}',
@@ -982,7 +1047,20 @@ def go_resolve_start():
             return None
         return served(eco, answer)
 
+    def unchecked(name, version, lookup, record, fetch):
+        return None
+
     def run(data):
+        # (the database here answers for whatever it is asked, unsigned, and serves no tiles: its signature and proof are
+        # not what this target is about, so a lookup is read as one the check could not be made for (NET-1's
+        # golang.verify_lookup; tests/registry/test_golang_sumdb.py checks it on the real database's answers))
+        saved, golang.verify_lookup = golang.verify_lookup, unchecked
+        try:
+            resolved(data)
+        finally:
+            golang.verify_lookup = saved
+
+    def resolved(data):
         name = names[zlib.crc32(data) % len(names)]
         wanted = (None, "v1.0.0", "v0.1.0-alpha.1", "v2.0.0+incompatible", "v3.0.0")[(zlib.crc32(data) >> 8) % 5]
         fetch, asked = serve(data)
@@ -1116,6 +1194,8 @@ register("crates-manifest", "crates.io: run_targets and declared over a crate's 
 register("go-zip", "Go: the h1: hash of a module zip (zip_h1) and verify against it", go_zip_seeds, go_zip_start, GO_ZIP_WORDS, max_len=16384)
 register("go-mod", "Go: parse_gomod and declared over a go.mod", lambda: list(GOMOD_SEEDS), go_mod_start, GOMOD_WORDS, max_len=8192)
 register("go-sumdb", "Go: parse_lookup over the checksum database's response", lambda: list(SUMDB_SEEDS), go_sumdb_start, SUMDB_WORDS, max_len=4096)
+register("go-sumdb-check", "Go: verify_lookup over the real checksum database's answer, changed (its tiles served as captured)",
+         check_seeds, go_sumdb_check_start, CHECK_WORDS, max_len=4096)
 register("go-resolve", "Go: Go.resolve over the proxy's .info answer (the checksum database answers for what it is told of)",
          lambda: list(INFO_SEEDS), go_resolve_start, INFO_WORDS, max_len=4096)
 register("ecosystem-names", "crates.io and Go: check_name, identity, check_version, parse_spec and segment over a name and a version",

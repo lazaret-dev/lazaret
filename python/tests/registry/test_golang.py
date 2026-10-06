@@ -10,7 +10,8 @@
   digest, `go.mod` dependencies, the member rules, what runs, and the bounds.
 What was not recorded: the module proxy's own responses (it could not be reached when this was written). `.info` is the
 document `go help goproxy` describes; the checksum database response is made by the code of Go's checksum database server
-over the real hashes, signed with a test key. Nothing here opens a socket."""
+over the real hashes, signed with a test key, so its signature and proof are not checked here (`setUpModule`; the check is
+test_golang_sumdb.py's, on the real database's answers). Nothing here opens a socket."""
 
 import hashlib
 import io
@@ -50,6 +51,15 @@ DIFFLIB_ROOT = f"{MOD}@v1.0.0/"
 # The document the proxy answers `.info` and `@latest` with (`go help goproxy`): the tag's commit time.
 INFO = json.dumps({"Version": "v1.0.0", "Time": "2016-01-10T10:55:54Z"}).encode("utf-8")
 HASH_A, HASH_B = "h1:" + "A" * 43 + "=", "h1:" + "B" * 43 + "="
+
+
+def setUpModule():
+    # The lookups here are made by Go's server code with a test key (golden.json's `vkey`) or by `lookup_text`, and no
+    # tiles are served: the check of a lookup's signature and proof (`verify_lookup`) is test_golang_sumdb.py's, on the
+    # real database's answers. Here a resolve reads the lookup as one the check could not be made for ("tls").
+    patcher = mock.patch.object(golang, "verify_lookup", return_value=None)
+    patcher.start()
+    unittest.addModuleCleanup(patcher.stop)
 
 
 def difflib_responses():

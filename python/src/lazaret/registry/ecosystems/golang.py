@@ -14,10 +14,13 @@ checksum database's `h1:` hash, and saying which of its files are built into a p
     the digest   `h1:` is NOT a hash of the zip. It is the SHA-256 of a list with one line per member, sorted by name: the
                  hex SHA-256 of the member, two spaces and the name (`golang.org/x/mod/sumdb/dirhash`). `zip_h1` computes
                  it from the zip, and `verify` compares it with the line `sum.golang.org/lookup/<module>@<version>`
-                 returns: a host other than the one that served the zip, over TLS. That is the trust the PyPI and npm
-                 digests have (a swapped or corrupted download is caught; a compromised registry is not). The lookup also
-                 carries the database's signed tree head. Checking the signature needs Ed25519 and the inclusion proof
-                 needs the database's tiles; neither is done, and `info["sumdb"]` says "tls" so a report can say so.
+                 returns: a host other than the one that served the zip. The lookup is checked as the go command checks
+                 it (`verify_lookup`, since 0.1.9: NET-1, the native library over tiny_https): the signed tree head it
+                 carries has the signature of the key Go pins (`SUMDB_KEY`), it agrees with the newest head this process
+                 accepted before, and the record is in that tree, proved by the database's tiles. So an answer the
+                 database did not sign (forged or altered, whoever served it) is caught, not only a swapped download;
+                 `info["sumdb"]` is "verified". Without the native library (or with one from before the check) the
+                 lookup is as good as the TLS that brought it, and `info["sumdb"]` says "tls" so a report can say so.
     the archive  Go's `modzip.Unzip` extracts every member as a regular file, whatever its mode (so `links_extracted` is
                  False), and refuses the whole zip for a member outside the root or with a path `CheckFilePath` rejects.
                  `member_path` says which members that is. Case collisions between members are not checked here.
@@ -32,15 +35,18 @@ Verified against Go's own code: `scripts/gooracle/` is a program over golang.org
 version, a member path, a zip and a go.mod what Go answers, and `tests/registry/recorded/go/` holds its answers for a
 long list, real module zips built by Go from their git tags with the `h1:` that the published go.sum files carry, and a
 lookup response made by Go's own checksum database server. The module proxy itself was not reachable from where this
-was written: its response formats are the documented protocol (`go help goproxy`), not recordings.
+was written: its response formats are the documented protocol (`go help goproxy`), not recordings. The lookup's check
+is tested on a capture of the real `sum.golang.org` (tiny_https's tests/data/sumdb: a lookup, a tree head kept from
+before and the seven tiles Go's own client reads for them; `tests/registry/test_golang_sumdb.py`).
 
-Standard library, and `base`. No Go is run and nothing is built."""
+Standard library, `base`, and the native library for the lookup's check. No Go is run and nothing is built."""
 
 import base64
 import hashlib
 import io
 import re
 import struct
+import threading
 import unicodedata
 import urllib.parse
 import zipfile
@@ -50,7 +56,8 @@ from lazaret.registry.ecosystems import base
 from lazaret.scanner import gomod
 
 __all__ = ["Go", "ECOSYSTEM", "check_module_path", "split_path_version", "check_path_major", "escape", "file_path_problem",
-           "unescape", "zip_h1", "file_h1", "parse_lookup", "parse_gomod", "is_pseudo_version", "canonical_version", "MAX_NAME", "MAX_ZIP_CONTENT"]
+           "unescape", "zip_h1", "file_h1", "parse_lookup", "verify_lookup", "parse_gomod", "is_pseudo_version", "canonical_version",
+           "MAX_NAME", "MAX_ZIP_CONTENT", "SUMDB_KEY"]
 
 PROXY_HOST = "proxy.golang.org"
 SUMDB_HOST = "sum.golang.org"
@@ -61,6 +68,11 @@ MAX_GOMOD = gomod.MAX_GOMOD                # zip.MaxGoMod
 MAX_ENTRIES = 250_000                      # members of one zip (the biggest modules have tens of thousands)
 MAX_REQUIRES = gomod.MAX_REQUIRES
 MAX_LOOKUP_BYTES = 64 * 1024
+#: the checksum database's verifier key, the one the go command pins (cmd/go/internal/modfetch, `knownGOSUMDB`)
+SUMDB_KEY = "sum.golang.org+033de0ae+Ac4zctda0e5eza+HJyk9SxEdh+s3Ux18htTTAD8OuAn8"
+MAX_SUMDB_TILES = 64                       # the most one check reads (lazaret-verify's gosum::MAX_TILES)
+MAX_TILE_BYTES = 8192                      # a full tile: 2^8 hashes of 32 bytes
+SUMDB_TILES_KEPT = 1024                    # tiles kept for the process (8 MiB at most)
 
 _NUM, _PRE, _BUILD = gomod.NUM, gomod.PRE, gomod.BUILD
 _SEMVER = rf"v{_NUM}\.{_NUM}\.{_NUM}(?:-{_PRE}(?:\.{_PRE})*)?"
@@ -338,6 +350,107 @@ def parse_lookup(text, name, version):
     return {"id": int(first), "h1": found[version], "gomod_h1": found.get(version + "/go.mod")}
 
 
+# ---------------------------------------------------------------- the checksum database's proof (NET-1)
+_TILE_PATH_RE = re.compile(r"tile/8/[0-9]{1,2}/(?:x[0-9]{3}/){0,7}[0-9]{3}(?:\.p/[0-9]{1,3})?")
+
+
+class _Sumdb:
+    """What this process's checks keep: the newest signed tree head one has accepted, which the next check is given
+    (so the database cannot show this process two histories: `Check::add_head`), and the tiles that passed. A tile's
+    bytes never change, and each is checked again, against the signed tree, whenever it is used."""
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.latest = None                   # (tree size, the signed note)
+        self.tiles = {}                      # tile path -> bytes
+
+    def head(self):
+        with self.lock:
+            return None if self.latest is None else self.latest[1]
+
+    def tile(self, path):
+        with self.lock:
+            return self.tiles.get(path)
+
+    def keep(self, size, note, tiles):
+        with self.lock:
+            if self.latest is None or size > self.latest[0]:
+                self.latest = (size, note)
+            for path, data in tiles.items():
+                if path not in self.tiles and len(self.tiles) >= SUMDB_TILES_KEPT:
+                    self.tiles.pop(next(iter(self.tiles)))
+                self.tiles[path] = data
+
+
+_SUMDB = _Sumdb()
+
+
+def _tile_ok(tile):
+    return (isinstance(tile, dict) and all(isinstance(tile.get(k), str) and len(tile[k]) <= 64 and _TILE_PATH_RE.fullmatch(tile[k])
+                                           for k in ("path", "full"))
+            and all(type(tile.get(k)) is int for k in ("len", "full_len"))
+            and 0 < tile["len"] <= tile["full_len"] <= MAX_TILE_BYTES)
+
+
+def _fetch_tile(tile, fetch):
+    """A tile from the database: the one named, or, when the database no longer serves that partial tile (it has filled
+    since), the full one, whose first hashes are the same. The go command does the same (sumdb.Client.readTile)."""
+    try:
+        return fetch.bytes(f"https://{SUMDB_HOST}/{tile['path']}", max_bytes=tile["len"])
+    except base.FetchError:
+        if tile["full"] == tile["path"]:
+            raise
+    return fetch.bytes(f"https://{SUMDB_HOST}/{tile['full']}", max_bytes=tile["full_len"])
+
+
+def _not_checked(name, version, exc):
+    reason = "".join(c if c.isprintable() else "?" for c in str(exc).partition(": ")[2])[:200]
+    return base.FetchError(f"go: the checksum database's answer for {base.show(name, 60)} {base.show(version)} does not check "
+                           f"out ({reason})")
+
+
+def verify_lookup(name, version, lookup, record, fetch):
+    """The checksum database's answer for `name@version` (`lookup`, the response; `record`, what `parse_lookup` read of
+    it) checked as the go command checks it, by the native library's `verify.go_sumdb` (tiny_https's sumdb and tlog):
+    the signed tree head the lookup carries has the signature of the database's key (`SUMDB_KEY`), it is consistent
+    with the newest head this process accepted before, and the record is in that tree, proved by the tiles the check
+    names, which come from the database through `fetch` and are each checked against the signed root. The hashes
+    `parse_lookup` read must be lines of that record. -> True when all of that holds; None when this install cannot
+    check (no native library, or one from before the check): the lookup is then as good as the TLS that brought it.
+    FetchError when the check fails or a tile cannot be had: fail closed, nothing the lookup says is used."""
+    from lazaret.scanner import _native
+    if not _native.available():
+        return None
+    args = {"module": name, "version": version, "key": SUMDB_KEY, "lookup": lookup, "head": _SUMDB.head()}
+    try:
+        needed = _native.call("verify.go_sumdb", args)
+    except _native.NativeError as exc:
+        if "unknown call" in str(exc):
+            return None                                       # (a native library from before 0.1.9's check)
+        raise _not_checked(name, version, exc) from None
+    needed = needed.get("needed") if isinstance(needed, dict) else None
+    if not isinstance(needed, list) or len(needed) > MAX_SUMDB_TILES or not all(_tile_ok(t) for t in needed):
+        raise base.FetchError("go: the checksum database check named tiles it cannot have")
+    tiles = {}
+    for tile in needed:
+        tiles[tile["path"]] = _SUMDB.tile(tile["path"]) or _fetch_tile(tile, fetch)
+    args["tiles"] = {path: base64.b64encode(data).decode("ascii") for path, data in tiles.items()}
+    try:
+        got = _native.call("verify.go_sumdb", args)
+    except _native.NativeError as exc:
+        raise _not_checked(name, version, exc) from None
+    if not (isinstance(got, dict) and got.get("verified") is True and isinstance(got.get("lines"), list)
+            and isinstance(got.get("record"), str) and type(got.get("id")) is int and type(got.get("size")) is int
+            and isinstance(got.get("latest"), str)):
+        raise base.FetchError("go: the checksum database check gave an answer it does not give")
+    signed = got["record"].split("\n")
+    if (got["id"] != record["id"] or f"{name} {version} {record['h1']}" not in got["lines"]
+            or (record["gomod_h1"] is not None and f"{name} {version}/go.mod {record['gomod_h1']}" not in signed)):
+        raise base.FetchError("go: the checksum database's signed record is not the one its response reads as")
+    _SUMDB.keep(got["size"], got["latest"], tiles)
+    return True
+
+
 # ---------------------------------------------------------------- go.mod
 _tokens = gomod.tokens                                                # (the lexer is shared with the inventory: scanner/gomod.py)
 
@@ -418,13 +531,15 @@ class Go(base.Ecosystem):
         if (want is not None and found != want) or not check_path_major(found, path_major):
             raise base.FetchError("go: the proxy answered for another version than the one asked for")
         stamp = doc.get("Time")
-        record = parse_lookup(fetch.text(f"https://{SUMDB_HOST}/lookup/{escape(name)}@{escape(found)}", max_bytes=MAX_LOOKUP_BYTES),
-                              name, found)
+        lookup = fetch.text(f"https://{SUMDB_HOST}/lookup/{escape(name)}@{escape(found)}", max_bytes=MAX_LOOKUP_BYTES)
+        record = parse_lookup(lookup, name, found)
+        checked = verify_lookup(name, found, lookup, record, fetch)
         entry = {"h1": record["h1"], "gomod_h1": record["gomod_h1"]}
         art = {"url": proxy + f"@v/{escape(found)}.zip", "container": "zip", "artifact": "gomod", "entry": entry,
                "filename": f"{name.rsplit('/', 1)[-1]}@{found}.zip"}
         return base.Resolution(found, [art], [], {
-            "module": name, "root": f"{name}@{found}/", "pseudo": is_pseudo_version(found), "sumdb": "tls",
+            "module": name, "root": f"{name}@{found}/", "pseudo": is_pseudo_version(found),
+            "sumdb": "verified" if checked else "tls",
             "time": stamp if isinstance(stamp, str) and _TIME_RE.fullmatch(stamp) else None})
 
     def verify(self, data, entry, name, version):
