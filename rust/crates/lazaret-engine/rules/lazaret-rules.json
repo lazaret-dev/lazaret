@@ -1,6 +1,6 @@
 {
  "format": 1,
- "rule_set": "2.37.0",
+ "rule_set": "2.38.0",
  "source": "lazaret.scanner.core, extracted by scripts/make_rust_tables.py \u2014 do not edit",
  "values": {
   "ALWAYS_PRUNE_DIRS": {
@@ -4759,7 +4759,7 @@
   },
   "_CRED_STORE_RE": {
    "flags": "i",
-   "re": "\\.ssh\\b|\\bid_(?:rsa|ed25519|ecdsa|dsa)\\b(?!\\.pub)|\\.git-credentials|Local Storage"
+   "re": "\\.ssh\\b|\\bid_(?:rsa|ed25519|ecdsa|dsa)\\b(?!\\.pub)|\\.git-credentials|Local Storage|\\.aws(?:[/\\\\]|[\"'`]\\s*[,/+]\\s*[\"'`][/\\\\]?)(?:credentials|config)\\b|\\.aws(?:[/\\\\]|[\"'`]\\s*[,/+]\\s*[\"'`][/\\\\]?)sso(?:[/\\\\]|[\"'`]\\s*[,/+]\\s*[\"'`][/\\\\]?)cache\\b|\\.kube(?:[/\\\\]|[\"'`]\\s*[,/+]\\s*[\"'`][/\\\\]?)config\\b|\\.docker(?:[/\\\\]|[\"'`]\\s*[,/+]\\s*[\"'`][/\\\\]?)config\\.json\\b|\\bgcloud(?:[/\\\\]|[\"'`]\\s*[,/+]\\s*[\"'`][/\\\\]?)(?:credentials\\.db|access_tokens\\.db|legacy_credentials)\\b|\\bapplication_default_credentials\\.json\\b|\\.azure(?:[/\\\\]|[\"'`]\\s*[,/+]\\s*[\"'`][/\\\\]?)(?:accessTokens\\.json|msal_token_cache)|\\.npmrc\\b|\\.pypirc\\b|[._]netrc\\b|\\.cargo(?:[/\\\\]|[\"'`]\\s*[,/+]\\s*[\"'`][/\\\\]?)credentials\\b|\\bgh(?:[/\\\\]|[\"'`]\\s*[,/+]\\s*[\"'`][/\\\\]?)hosts\\.yml\\b|\\.vault-token\\b|\\.terraform\\.d(?:[/\\\\]|[\"'`]\\s*[,/+]\\s*[\"'`][/\\\\]?)credentials\\b"
   },
   "_CRED_SWEEP_MAX": {
    "value": 200

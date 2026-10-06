@@ -299,6 +299,20 @@ pub(crate) fn cred_store(p: &Pack, what: &[u32]) -> bool {
     p.re("_CRED_STORE_RE").search(what).is_some() && p.re("_PUBLIC_KEY_FILE_RE").search(what).is_none()
 }
 
+/// A path's text as a source keeps it: its first 60 characters; but when only the whole text names a credential store,
+/// "…" and the 59 that end with that name, so that what is shown, and graded from it, still names the store (GR-7:
+/// `path.join(os.homedir(), '.config', 'gcloud', 'application_default_credentials.json')`).
+pub(crate) fn shown_what(p: &Pack, text: &[u32]) -> PyStr {
+    let head = pystr::upto(text, 60);
+    if head.len() == text.len() || cred_store(p, head) || !cred_store(p, text) {
+        return head.to_vec();
+    }
+    let end = p.re("_CRED_STORE_RE").search(text).map(|m| m.end()).unwrap_or(text.len());
+    let mut out = vec![0x2026];
+    out.extend_from_slice(&text[end.saturating_sub(59)..end]);
+    out
+}
+
 /// The kind's bit for a kind name (the text follower's, and shell.rs's).
 pub(crate) fn kind_bit(kind: &str, what: &[u32], whole: &[u32]) -> u16 {
     match kind {
@@ -1031,7 +1045,7 @@ impl<'p> Eval<'p> {
         if sup.p().re("_LD_FS_ROOT_RE").match_(span).is_none() && sup.p().re("_LD_CRED_FILE_RE").match_(span).is_none() {
             return V::empty();
         }
-        self.sc_source(K_PATH, pystr::upto(value, 60).to_vec(), n.start, a.line(node), 0)
+        self.sc_source(K_PATH, shown_what(sup.p(), value), n.start, a.line(node), 0)
     }
 
     /// An identifier no declaration binds (an implicit global, or one the
@@ -1114,7 +1128,7 @@ impl<'p> Eval<'p> {
                         Some(pl) => pl.group(2).unwrap_or(&[]).to_vec(),
                         None => arg.to_vec(),
                     };
-                    return Some(self.sc_source(K_FILE, pystr::upto(&what, 60).to_vec(), at, line, 0));
+                    return Some(self.sc_source(K_FILE, shown_what(p, &what), at, line, 0));
                 }
                 // (a path outside the package given it: a parameter, a name)
                 if let Some(sc) = args.first().and_then(|v| v.sc.clone()) {

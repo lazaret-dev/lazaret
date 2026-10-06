@@ -22,7 +22,7 @@ use super::eval::{key, Analyzer};
 use super::*;
 use crate::flow::LiteralTest;
 use crate::jsflow::supply::{
-    bit_index, cred_store, decoded_at, downloads, harvest_of, host_prefix, interp_name, kind_bit, record_written, received_cat,
+    bit_index, cred_store, shown_what, decoded_at, downloads, harvest_of, host_prefix, interp_name, kind_bit, record_written, received_cat,
     first_drop, is_flag, run_parts, script_interp, text_key, value_key, written_at, Answer, DropRun, Part, Written, DESERIALIZE, ENV_NAME, EVAL_FLAGS, EXEC_CMD, HARVEST, INTERPRETERS,
     KIND_NAMES, K_ADDRESS, K_BYTES, K_CARVED, K_CREDENTIALS, K_CRED_FILE, K_ENV, K_FILE, K_DECODED, K_IDENTITY, K_OWN, K_PATH,
     K_RECEIVED, K_WFILE, K_WHOLE_ENV, LOAD_NAME, NOT_LOCAL, OBJ_CLIENT, OBJ_CONN, OBJ_ENV, READ_PATH, RUN_CODE, SEND_ADDR,
@@ -863,7 +863,7 @@ impl<'p> Analyzer<'p> {
         if sup.p().re("_LD_FS_ROOT_RE").match_(span).is_none() && sup.p().re("_LD_CRED_FILE_RE").match_(span).is_none() {
             return Taint::empty();
         }
-        self.sc_source(K_PATH, pystr::upto(&value, 60).to_vec(), lo, 0)
+        self.sc_source(K_PATH, shown_what(sup.p(), &value), lo, 0)
     }
 
     /// supply mode: an attribute: os.environ (the whole environment, the
@@ -1961,11 +1961,11 @@ impl<'p> Analyzer<'p> {
         if self.t().kind(arg) == Kind::Name {
             if let Some(v) = sup.outside_values.borrow().get(pystr::strip(&text)) {
                 if cred_store(p, v) {
-                    return pystr::upto(v, 60).to_vec();
+                    return shown_what(p, v);
                 }
             }
         }
-        pystr::upto(&what, 60).to_vec()
+        shown_what(p, &what)
     }
 
     /// A call that reads local data: its value, if it is one.

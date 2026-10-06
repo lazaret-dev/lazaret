@@ -884,7 +884,7 @@ fn ld_sources(p: &Pack, text: &[u32], lit: &LiteralTest, outside: &HashSet<PyStr
                 } else {
                     pystr::concat(&[name, &u("("), first, &u(")")])
                 };
-                out.push((m.start(), m.end() + alen, m.end() as isize, "file", pystr::upto(&what, 60).to_vec()));
+                out.push((m.start(), m.end() + alen, m.end() as isize, "file", crate::jsflow::supply::shown_what(p, &what)));
             }
         }
     }
