@@ -454,6 +454,29 @@ project is pre-1.0, so the 0.x API may still change.
 
 ### Fixed
 
+- **SC-B64 passes over runs that are not base64 data, and an emoji's repeated
+  presentation selector is not SC-HIDDEN-UNICODE (G-5, N-23).** SC-B64 reported any
+  quoted run of 200 base64 characters or more, and in Go and Rust code most such runs
+  are not data: Go's `stringer` name tables (letters alone), big numbers and test
+  vectors (digits alone, or hex digits, after `0x` or not) and test strings that
+  repeat a short period. It was the rule behind 24 of the 39 WARNs of Ubuntu's Go
+  modules and 11 of the 30 of its crates. Base64 of 150 bytes or more mixes letters
+  and digits and does not repeat itself, so a run of one class of characters up to
+  16,384 long and a period of up to 64 characters repeated are passed over, and a run
+  after them on the line that can be data is still reported. A longer run of one class
+  is reported as before: that is what a payload written in hex is (three of the
+  benchmark's malicious PyPI releases carry one of 270,000 hex digits or more; the
+  longest run of the benign sets is 9,327 digits). SC-HIDDEN-UNICODE took an emoji's
+  presentation selector written twice (U+2622 and U+FE0F twice, in the aes crate) for
+  a run of selectors carrying data; one selector repeated up to four times carries
+  none, and GlassWorm's encoding, a run of many different selectors, is still found.
+  WARN to OK: 12 of Ubuntu's Go modules and 8 of its crates, 3 of the popular crates
+  (aes, aws-lc-rs, crc), Go's vendored x/tools, 4 popular npm and PyPI releases
+  (monaco-editor, prettier, modal, notebook) and one benign release of the benchmark
+  (google-adk); no malicious verdict moves. `stringer` tables of mixed case
+  (`AttrSiblingAttrLocation…`) and base64 that is data (keys, certificates, test
+  messages) are still SC-B64. The npm package (the engine) and the dashboard read both
+  the same way. Rule set 2.35.0.
 - **A library declared `crate-type = ["proc-macro"]` is a procedural macro.** Cargo builds
   a library whose crate types hold `"proc-macro"` as a procedural macro, whatever
   `proc-macro` says, and runs it inside the compiler of every crate that uses it (checked

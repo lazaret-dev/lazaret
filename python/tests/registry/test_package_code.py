@@ -33,6 +33,7 @@ from unittest import mock
 
 from lazaret.registry import repo
 from lazaret.scanner import _native
+from tests.registry._review_support import B64_DATA
 
 GO_MOD = "module example.test/m\n\ngo 1.21\n"
 
@@ -225,7 +226,7 @@ class GoTests(unittest.TestCase):
 
     def test_files_no_build_compiles_get_no_file_rules_either(self):
         # (rivo/uniseg's line-break tests hold escaped URLs: SC-HEXSTR CRITICAL, in a file no dependent ever builds)
-        blob = "Zm9v" * 80                                                   # (base64, 320 characters)
+        blob = B64_DATA                                                      # (base64, 320 characters)
         escaped = "\\x68\\x74\\x74\\x70\\x3a\\x2f\\x2f"                                  # ("http://", escaped)
         for name in ("m_test.go", "testdata/x.go", "_gen.go"):
             with self.subTest(name=name):
@@ -393,7 +394,7 @@ class SdistCrateTests(unittest.TestCase):
         self.assertEqual(res["useTime"]["ofFiles"], 1)                      # (lib.rs; the module is import-time code)
 
     def test_what_cargo_does_not_build_is_not_read(self):
-        blob = CTOR_RS + 'pub const K: &str = "' + "Zm9v" * 80 + '";\n'          # (the reader's and the file rules')
+        blob = CTOR_RS + 'pub const K: &str = "' + B64_DATA + '";\n'             # (the reader's and the file rules')
         for files in ({"src/lib.rs": CLEAN_RS, "tests/t.rs": blob}, {"src/lib.rs": CLEAN_RS, "benches/b.rs": blob},
                       {"src/lib.rs": CLEAN_RS, "examples/e.rs": blob},
                       {"src/lib.rs": CLEAN_RS, "crates/x/Cargo.toml": CARGO, "crates/x/tests/t.rs": blob},
@@ -406,7 +407,7 @@ class SdistCrateTests(unittest.TestCase):
         self.assertEqual((res["verdict"], [i["rule"] for i in res["issues"]]), ("WARN", ["SC-B64"]))
 
     def test_the_files_get_the_file_rules(self):
-        res = sdist({"src/lib.rs": CLEAN_RS + 'pub const K: &str = "' + "Zm9v" * 80 + '";\n'})
+        res = sdist({"src/lib.rs": CLEAN_RS + 'pub const K: &str = "' + B64_DATA + '";\n'})
         self.assertEqual(res["verdict"], "WARN", res["issues"])
 
     def test_the_order_of_the_members_does_not_matter(self):

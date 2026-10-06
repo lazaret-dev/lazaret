@@ -575,12 +575,62 @@ fn lookalike_name(p: &Pack, code: &[u32], lang: Lang, word_in: &dyn Fn(&[u32]) -
     None
 }
 
+/// The column of the first quoted run B64_BLOB_RE finds in `line` that can be
+/// base64 data (G-5): not digits alone, hex digits alone (after a `0x` or
+/// not) or letters alone (a table of names: Go's stringer writes them) up to
+/// `plain_max` characters, nor a period of at most `period_max` characters
+/// repeated (a test string). Base64 of 150 bytes or more mixes letters and
+/// digits and does not repeat itself; those are what Go's own tree, Ubuntu's
+/// Go modules and the popular crates hold under the rule (Part F: 24 of 39 Go
+/// WARNs, 11 of 30 crates'), the longest 9,327 digits. A longer run of one
+/// class is reported: it is what a payload written in hex is (three of the
+/// benchmark's malicious PyPI releases hold one of 270,000 hex digits or more).
+fn b64_blob_col(re: &Regex, line: &[u32], plain_max: usize, period_max: usize) -> Option<usize> {
+    for m in re.finditer(line) {
+        let run = m.group0();
+        let mut body = &run[1..run.len() - 1];
+        while body.last() == Some(&('=' as u32)) {
+            body = &body[..body.len() - 1];
+        }
+        if !b64_plain(body, plain_max, period_max) {
+            return Some(m.start());
+        }
+    }
+    None
+}
+
+/// Is `body` (the characters of a B64_BLOB_RE run, its quotes and `=` taken
+/// off) one of the runs b64_blob_col passes over? A period is checked from
+/// the shortest, each stopping at its first mismatch; a period carries no
+/// more than one period's characters, however long the run.
+fn b64_plain(body: &[u32], plain_max: usize, period_max: usize) -> bool {
+    let digit = |c: u32| (0x30..=0x39).contains(&c);
+    let hex = |c: u32| digit(c) || (0x41..=0x46).contains(&c) || (0x61..=0x66).contains(&c);
+    let letter = |c: u32| (0x41..=0x5a).contains(&c) || (0x61..=0x7a).contains(&c);
+    let hex_body = if body.len() > 2 && body[0] == '0' as u32 && (body[1] == 'x' as u32 || body[1] == 'X' as u32) {
+        &body[2..]
+    } else {
+        body
+    };
+    if body.len() <= plain_max
+        && (body.iter().all(|&c| digit(c)) || hex_body.iter().all(|&c| hex(c)) || body.iter().all(|&c| letter(c)))
+    {
+        return true;
+    }
+    (1..=period_max.min(body.len() / 2)).any(|k| (k..body.len()).all(|i| body[i] == body[i - k]))
+}
+
 /// core.hidden_unicode_run: (column, run) of the first run of invisible
-/// carrier characters that is not a flag emoji.
+/// carrier characters that is not a flag emoji, nor an emoji's presentation
+/// selector repeated (N-23: U+2622 and U+FE0F twice, in a top-100 crate; one
+/// character repeated a few times carries no data, and GlassWorm's encoding
+/// is a run of many different selectors).
 fn hidden_unicode_run(p: &Pack, line: &[u32]) -> Option<(usize, PyStr)> {
     let base = p.text("_FLAG_EMOJI_BASE");
     let tag_start = p.text("_TAG_START")[0];
     let tag_end = p.text("_TAG_END")[0];
+    let presentation = p.text("_PRESENTATION_SELECTORS");
+    let repeat_max = p.usize("_PRESENTATION_REPEAT_MAX");
     for m in p.re("_HIDDEN_RUN_RE").finditer(line) {
         let run = m.group0();
         let flag = m.start() > 0
@@ -588,7 +638,8 @@ fn hidden_unicode_run(p: &Pack, line: &[u32]) -> Option<(usize, PyStr)> {
             && line[m.start() - 1] == base[0]
             && run.last() == Some(&tag_end)
             && run.iter().all(|&c| (tag_start..=tag_end).contains(&c));
-        if !flag {
+        let repeated = run.len() <= repeat_max && presentation.contains(&run[0]) && run.iter().all(|&c| c == run[0]);
+        if !flag && !repeated {
             return Some((m.start(), run.to_vec()));
         }
     }
@@ -1160,6 +1211,8 @@ pub fn findings_of(ctx: &FileCtx, lang_name: Option<&str>, opts: &Options, snipp
     needs.push(need_of(&decode));
     let gates = Gates::new(ctx, &needs);
     let b64_filter = written_for(p, "B64_BLOB_RE", B64_BLOB_TEXT);
+    let b64_plain_max = p.usize("_B64_PLAIN_MAX");
+    let b64_period_max = p.usize("_B64_PERIOD_MAX");
     let entropy_filter = written_for(p, "ENTROPY_VALUE_RE", ENTROPY_VALUE_TEXT);
     let js_name = if lang == Lang::Js { "js" } else { "py" };
     let join = Join::new(p);
@@ -1296,9 +1349,9 @@ pub fn findings_of(ctx: &FileCtx, lang_name: Option<&str>, opts: &Options, snipp
             }
         }
         if !b64_filter || line.len() >= 202 {
-            if let Some(bm) = b64_re.search(line) {
+            if let Some(col) = b64_blob_col(b64_re, line, b64_plain_max, b64_period_max) {
                 if !pystr::contains(line, "sourceMappingURL") {
-                    out.push(Finding::new(b64.clone(), i + 1, Some(bm.start())));
+                    out.push(Finding::new(b64.clone(), i + 1, Some(col)));
                 }
             }
         }

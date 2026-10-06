@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-/Ysx2yB8nR8ri4L+C45cfarZSkCgezKyA0WFQ6CoabU='; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-Xu/c4/pQq0K6ME+FnfWxW32Rchq25pIjVQHT/5snOiE='; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'">
 <title>Lazaret — Security &amp; Quality Review</title>
 <style>
   :root{
@@ -4246,6 +4246,33 @@ function lookalikeIssue(found, path, lineNo, lines) {
     ref: "CWE-1007 · CVE-2021-42694" }, path, lineNo, lines, col);
 }
 
+// ---- Base64 blobs (SC-B64): the runs that can be base64 data (G-5); twin of the engine's b64_blob_col ----
+const B64_BLOB_ALL = new RegExp(B64_BLOB_RE.source, B64_BLOB_RE.flags + "g"), B64_PLAIN_MAX = 16384, B64_PERIOD_MAX = 64;
+/** Is `body` (a run's characters, quotes and `=` off) digits alone, hex alone (after `0x` or not) or letters alone, up
+ * to B64_PLAIN_MAX characters, or a period of at most B64_PERIOD_MAX characters repeated? Base64 of 150 bytes or more
+ * is none of these; a longer run of one class is what a payload written in hex is. */
+function b64Plain(body) {
+  const hexBody = /^0[xX]./.test(body) ? body.slice(2) : body;
+  if (body.length <= B64_PLAIN_MAX && (/^[0-9]+$/.test(body) || /^[0-9A-Fa-f]+$/.test(hexBody) || /^[A-Za-z]+$/.test(body))) {
+    return true;
+  }
+  for (let k = 1; k <= Math.min(B64_PERIOD_MAX, Math.floor(body.length / 2)); k++) {
+    let i = k;
+    while (i < body.length && body[i] === body[i - k]) i++;
+    if (i === body.length) return true;
+  }
+  return false;
+}
+/** The UTF-16 index of the first B64_BLOB_RE run in `line` that can be base64 data, else null. */
+function b64BlobCol(line) {
+  B64_BLOB_ALL.lastIndex = 0;
+  let m;
+  while ((m = B64_BLOB_ALL.exec(line))) {
+    if (!b64Plain(m[0].slice(1, -1).replace(/=+$/, ""))) return m.index;
+  }
+  return null;
+}
+
 // ---- Invisible-character payload (SC-HIDDEN-UNICODE); twins of core ----
 // Carrier chars in UTF-16: VS1 (BMP U+FE00-FE0F), or an astral char in
 // U+E0000-E01EF, which all share the high surrogate 0xDB40 with a low
@@ -4264,12 +4291,21 @@ function hiddenFlagEmoji(line, index, run) {
   return last === HIDDEN_TAG_END && cps.every((c) => { const o = c.codePointAt(0); return o >= HIDDEN_TAG_START && o <= HIDDEN_TAG_END; });
 }
 
-/** [col, run] (col a UTF-16 index) for the first non-flag-emoji carrier run in `line`, else null. Twin of core.hidden_unicode_run. */
+/** Is the run an emoji's presentation selector (U+FE0E, U+FE0F) repeated, at most 4 times? One character repeated
+ * carries no data (N-23). Twin of the engine's hidden_unicode_run. */
+const PRESENTATION_SELECTORS = "\uFE0E\uFE0F", PRESENTATION_REPEAT_MAX = 4;
+function hiddenPresentationRepeat(run) {
+  const cps = [...run];
+  return cps.length <= PRESENTATION_REPEAT_MAX && PRESENTATION_SELECTORS.includes(cps[0]) && cps.every((c) => c === cps[0]);
+}
+
+/** [col, run] (col a UTF-16 index) for the first carrier run in `line` that is neither a flag emoji nor a presentation
+ * selector repeated, else null. Twin of core.hidden_unicode_run. */
 function hiddenUnicodeRun(line) {
   HIDDEN_RUN_RE.lastIndex = 0;
   let m;
   while ((m = HIDDEN_RUN_RE.exec(line))) {
-    if (!hiddenFlagEmoji(line, m.index, m[0])) return [m.index, m[0]];
+    if (!hiddenFlagEmoji(line, m.index, m[0]) && !hiddenPresentationRepeat(m[0])) return [m.index, m[0]];
   }
   return null;
 }
@@ -4859,13 +4895,13 @@ function scanLines(path, content, lines, lang, ctx, issues) {
         why: "fromCharCode chains hide payloads from static review.",
         fix: "Decode and review what string is being built.",
         ref: "CWE-506 · Supply chain" }, path, i + 1, lines, cmCol));
-    const bm = B64_BLOB_RE.exec(line);
-    if (bm && !line.includes("sourceMappingURL"))
+    const b64Col = b64BlobCol(line);
+    if (b64Col !== null && !line.includes("sourceMappingURL"))
       issues.push(mkIssue({ id: "SC-B64", name: "Large base64 blob", type: "HOTSPOT", sev: "MAJOR",
         msg: "Base64 blob (200+ chars) embedded in code.",
         why: "Embedded encoded blobs can carry second-stage payloads.",
         fix: "Decode and verify the content; move legitimate assets to data files.",
-        ref: "CWE-506 · Supply chain" }, path, i + 1, lines, bm.index));
+        ref: "CWE-506 · Supply chain" }, path, i + 1, lines, b64Col));
     if (lang === "js" || lang === "py") {
       const off = offscreenCode(line, lang);
       if (off !== null && pyStrip(ctx.namesCode(i)) !== "") issues.push(offscreenIssue(path, i + 1, lines, off));

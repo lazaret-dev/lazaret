@@ -28,7 +28,7 @@ import unittest
 
 from lazaret.registry import repo
 from tests.registry._review_support import (
-    DECODE_EXEC_JS, EXFIL_JS, hooks, issues, manifest, scan_bytes, scan_npm, tar_member)
+    B64_DATA, DECODE_EXEC_JS, EXFIL_JS, hooks, issues, manifest, scan_bytes, scan_npm, tar_member)
 
 PNG = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR" + b"\x00" * 13 + b"\x00\x00\x00\x00IEND\xaeB`\x82"
 BLOB = bytes((i * 7919) % 256 for i in range(4096))
@@ -194,7 +194,7 @@ class DirectoryMainTests(unittest.TestCase):
     def test_without_a_main_the_index_file(self):
         # the index file is still the entry point: a weaker finding in it
         # counts although it sits in a test/ directory
-        blob = "const p = '" + "QUJD" * 150 + "';\n"
+        blob = "const p = '" + B64_DATA + "';\n"
         res = scan_npm({"package.json": manifest(main="test"), "test/package.json": manifest(),
                         "test/index.js": blob})
         self.assertEqual(res["verdict"], "WARN", res["verdictReason"])

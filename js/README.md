@@ -89,7 +89,8 @@ resolving to one file. Writes are atomic
   `SC-PIPE-SHELL`); and a run of invisible characters carrying hidden bytes
   — variation selectors or tag characters, the GlassWorm carrier
   (`SC-HIDDEN-UNICODE`, CRITICAL when the file also runs code from a string,
-  else MAJOR; a flag emoji is left alone). Since 0.1.8: code that renames its
+  else MAJOR; a flag emoji, or an emoji's presentation selector written up
+  to four times, is left alone). Since 0.1.8: code that renames its
   package and runs `npm publish`, the registry floods' `auto.js`
   (`SC-SELF-PUBLISH`, CRITICAL); code after a run of 150 or more blanks on a
   line, where editors and review don't show it (`SC-OFFSCREEN-CODE`, CRITICAL

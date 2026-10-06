@@ -65,8 +65,13 @@ test("obfuscation: hex-hidden text and base64 blob flagged (SC-HEXSTR / SC-B64)"
   // escaped binary data (NUL bytes, UTF-8 sequences) is not obfuscation
   const binary = 'x = b"' + "\\x00\\xc3\\xa4".repeat(4) + '"\n';
   assert.ok(!scan("t.py", binary).includes("SC-HEXSTR"));
-  const b64 = 'x = "' + "A".repeat(250) + '"\n';   // 200+ consecutive base64 chars
+  const data = Buffer.from(Array.from({ length: 240 }, (_, i) => (i * 7919) % 256)).toString("base64");
+  const b64 = 'x = "' + data + '"\n';   // 200+ consecutive base64 chars that are data (G-5: not one class, not a period)
   assert.ok(scan("t.js", b64).includes("SC-B64"));
+  // G-5: hex digits alone are passed over up to 16,384, and reported past it (a payload written in hex)
+  const hexOf = (n) => Array.from({ length: Math.ceil(n / 2) }, (_, i) => ((i * 7919 + (i >> 8)) % 256).toString(16).padStart(2, "0")).join("").slice(0, n);
+  assert.ok(!scan("t.js", 'x = "' + hexOf(16384) + '"\n').includes("SC-B64"));
+  assert.ok(scan("t.js", 'x = "' + hexOf(16385) + '"\n').includes("SC-B64"));
 });
 
 test("entropy: high-entropy literal flagged (S-ENTROPY), placeholder skipped", () => {

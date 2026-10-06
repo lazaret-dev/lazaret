@@ -18,13 +18,14 @@ from unittest import mock
 from lazaret.registry.ecosystems import crates
 from lazaret.scanner import _native, core, engine
 from tests.registry import test_package_code as samples
+from tests.registry._review_support import B64_DATA
 
 MODULES_TXT = ("# example.test/evil v1.0.0\n## explicit; go 1.21\nexample.test/evil\n"
                "# example.test/ok v1.2.0\n## explicit\nexample.test/ok/sub\n")
 GO_PROJECT = {"go.mod": "module example.test/app\n\ngo 1.21\n", "main.go": "package main\n\nfunc main() {}\n",
               "vendor/modules.txt": MODULES_TXT}
 RUST_PROJECT = {"Cargo.toml": '[package]\nname = "app"\nversion = "0.1.0"\n', "src/main.rs": "fn main() {}\n"}
-BLOB = "Zm9v" * 80
+BLOB = B64_DATA
 
 
 def go_file(package, text):

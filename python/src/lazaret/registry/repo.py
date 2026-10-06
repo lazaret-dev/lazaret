@@ -96,6 +96,11 @@ MAX_MEMBER = _env_number("LAZARET_MAX_SOURCE_BYTES", 16_000_000)
 MAX_FILES = 20_000         # files per package (numpy's sdist alone has >4,000)
 SAMPLE = 8192              # header/entropy sample read from oversized files
 # Stored scans from another engine version are scanned again (has_scan).
+# 2.35: two false positives of the file rules in Go and Rust code: SC-B64
+#      passes over a run of digits, hex digits or letters alone (up to 16,384
+#      characters) and a short period repeated (name tables, test vectors:
+#      G-5), and an emoji's presentation selector repeated (U+FE0F twice after
+#      U+2622 in a popular crate) is not SC-HIDDEN-UNICODE (N-23)
 # 2.34: a library whose `crate-type` holds "proc-macro" is a procedural macro
 #      (cargo builds it as one, `proc-macro = false` or not), so its code is
 #      read as code that runs at build; it was read as code run when called
@@ -242,7 +247,7 @@ SAMPLE = 8192              # header/entropy sample read from oversized files
 #      entry points and hook targets, Python install scripts
 # 2.3: verdict tiers, decoded hex, install-script inspection; 2.2:
 #      verdict-integrity; 2.1: binary-artifact awareness
-ENGINE_VERSION = "2.34.0"
+ENGINE_VERSION = "2.35.0"
 
 # ---------------- The content memo (P-2a, registry/contentcache.py) ----------------
 # One per scan_package run: the engine answers once for content several of a

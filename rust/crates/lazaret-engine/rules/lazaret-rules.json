@@ -1,6 +1,6 @@
 {
  "format": 1,
- "rule_set": "2.34.0",
+ "rule_set": "2.35.0",
  "source": "lazaret.scanner.core, extracted by scripts/make_rust_tables.py \u2014 do not edit",
  "values": {
   "ALWAYS_PRUNE_DIRS": {
@@ -4465,6 +4465,12 @@
   },
   "_AUTORUN_WHY": {
    "value": "Editors and AI coding agents run these commands on their own \u2014 when the folder is opened, a session starts or the agent uses a tool \u2014 with your privileges, without asking each time. The 2026 Shai-Hulud worms (Mini Shai-Hulud, the keyv wave) committed a Claude Code SessionStart hook and a VS Code folder-open task to every repository they reached, so opening a checkout ran the worm."
+  },
+  "_B64_PERIOD_MAX": {
+   "value": 64
+  },
+  "_B64_PLAIN_MAX": {
+   "value": 16384
   },
   "_B64_RULE": {
    "map": {
@@ -12677,6 +12683,12 @@
   "_PLAIN_NAME_RE": {
    "flags": "",
    "re": "^[A-Za-z_][A-Za-z0-9_]*$"
+  },
+  "_PRESENTATION_REPEAT_MAX": {
+   "value": 4
+  },
+  "_PRESENTATION_SELECTORS": {
+   "value": "\ufe0e\ufe0f"
   },
   "_PROC_MACRO_WHY": {
    "value": "A procedural macro is a program the compiler loads and runs, with the user's privileges, while it builds every crate that uses the macro: the moment of a build script, an install hook's twin."

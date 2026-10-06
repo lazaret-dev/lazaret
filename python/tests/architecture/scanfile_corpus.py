@@ -36,7 +36,12 @@ PEM_END = "-----END RSA " + "PRIVATE KEY-----"
 PEM_BODY = "MIIEow" + "IBAAKCAQEAx3k9Qm2Zp7Lw4Yb8Nc1Rt5Vs6Ug0Hj2Kd3Fe4" + "Ab" * 8
 ENTROPY = ["Zx8Qw3Er5Ty7Ui9Op1As2Df", "q9W2e8R3t7Y4u6I5o0P1a2S3d4F5g6H7", "Ab3+De5/Gh7=Jk9Lm1No3Pq5",
            "4f8a1c9e2b7d3a6f0c5e8b2d9a7f1c3e", "hunter2hunter2"]
-B64 = "QUJD" * 55
+# base64 data: 220 characters of a run that is no single class and no short period, which SC-B64 reports (G-5
+# passes over "QUJD" * 55, a period of four letters, which this was)
+B64 = __import__("base64").b64encode(bytes((i * 7919) % 256 for i in range(165))).decode()
+# runs of base64 characters that are not base64 data (G-5): hex, hex after 0x, a name table, digits, a short period
+PLAIN = ["fd0c71ecb7ed16a9" * 14, "0x" + "E0A67598CD1B763B" * 13, "SundayMondayTuesdayWednesdayThursdayFriday" * 5,
+         "1336927655" * 22, "01234567890ABCDEFGHIJK" * 10]
 LONG_PAD = "x" * 150
 
 
@@ -99,6 +104,8 @@ CURATED = [
                     "String.fromCharCode(...bytes);\n"),
     ("b64.js", f"const blob = \"{B64}\";\n//# sourceMappingURL=data:application/json;base64,\"{B64}\"\n"),
     ("b64.py", f"BLOB = '{B64}'\n"),
+    ("b64_plain.js", "".join(f"const p{i} = \"{run}\";\n" for i, run in enumerate(PLAIN))
+                     + f"const both = [\"{PLAIN[2]}\", \"{B64}\"];\n"),
     ("offscreen.js", "module.exports = 1;" + " " * 200 + "require('child_process').exec(atob(p));\n"
                      "const s = 'x" + " " * 200 + "y';\n"),
     ("offscreen.py", "import os" + " " * 180 + ";os.system('id')\nx = 1" + "\t" * 170 + "; print(x)\n"),
@@ -217,6 +224,8 @@ GO_RS_CURATED = [
     ("hex.rs", f"let a = \"{_hex('hello world, all readable')}\";\nlet n = \"\\x65\\x76al\";\n"),
     ("b64.go", f"var blob = \"{B64}\"\nvar raw = `{B64}`\n"),
     ("b64.rs", f"const BLOB: &str = \"{B64}\";\nlet raw = r\"{B64}\";\n"),
+    ("b64_plain.go", "".join(f"var p{i} = \"{run}\"\n" for i, run in enumerate(PLAIN))
+                     + f"var both = []string{{\"{PLAIN[0]}\", \"{B64}\"}}\n"),
     ("markers.go", f"var a = \"{AWS}\" // lazaret-ignore: S-TOKEN\n// nosec\nvar b = \"{GHP}\"\n"
                    f"var c = \"// nosec\"; var d = \"{AWS}\"\n/* lazaret-ignore */ var e = \"{AWS}\"\n"),
     ("markers.rs", f"let a = \"{AWS}\"; // lazaret-ignore: S-TOKEN\n/// nosec\nlet b = \"{GHP}\";\n"

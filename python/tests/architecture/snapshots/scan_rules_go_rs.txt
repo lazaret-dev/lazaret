@@ -1,17 +1,17 @@
-# scan_rules_go_rs: 1548 outputs, a hash per 100 (tests/architecture/_snapshots.py)
-80b1a870516fb3b0
-e7c815e01af0ade8
-b0123305547599e9
-c9d9ce04ceaa431f
-0f094df73b9a9786
-5257cfdd8a479d51
-7cb6a4dca1cb3ff0
-6540aa72508ead37
-257fdc6f36e26327
-35b7081857106d9a
-b737cf759cd43f6a
-6ce2cb6c48e55afe
-f739c20562336c21
-64f49ae44bb7de94
-669388cd2b4b0be6
-cf8028dc63285178
+# scan_rules_go_rs: 1550 outputs, a hash per 100 (tests/architecture/_snapshots.py)
+a98d12d2ae4aa69c
+49f6504eea74426a
+21a456f3e5fc2687
+cd6a4717daa0bdf4
+b58b6d4e9e9f39b5
+f095a092ebf39852
+b69dc4dc24d3133a
+bb809ac6d8795619
+cc5fe82efc3210d3
+d0d17582c0da9bda
+ab641040e62725fc
+297f6874d7c0e04c
+5b8a5d87aced357b
+98a6d384bcfa00c3
+91fb01f984a1c753
+acc471922abae9ec
