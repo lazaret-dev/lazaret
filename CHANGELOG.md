@@ -11,6 +11,18 @@ project is pre-1.0, so the 0.x API may still change.
 
 ### Added
 
+- **Credentials in Go's and Rust's declarations, crates.io's tokens and a `.netrc`'s
+  passwords (G-4, R-4, N-12).** S-SECRET read `name = "…"` and `name: "…"`, so Go's
+  `apiKey := "…"` and `var password string = "…"` and Rust's `const API_KEY: &str = "…"`,
+  `static SECRET: &'static str = "…"` and `b"…"`/`r#"…"#` literals went unreported; they are
+  reported now, and so is a Python `b"…"`, `r"…"` or `rb"…"` literal given a credential's
+  name, which S-SECRET skipped too (TypeScript's `apiKey: string = "…"` and Python's
+  `password: str = "…"` annotations are still not read). crates.io's API tokens (`cio` and 32 letters and digits, a whole run: a `cio`
+  inside base64 is chance) are S-TOKEN, in code and in config files such as
+  `~/.cargo/credentials.toml`, and are redacted wherever a snippet would show one. A
+  `.netrc`'s (or `_netrc`'s) password tokens, `machine HOST login USER password PASS` with
+  blanks between them, are S-SECRET when the value looks like a credential, and never shown.
+  The npm package and the dashboard read them the same way. Rule set 2.33.0.
 - **Crate names like a popular crate's, and a crate release's brand-new dependencies (N-3's
   second part).** A crate's name, or a crate its `Cargo.toml` depends on to build (its
   `[dependencies]` and `[build-dependencies]`, per target too; not `[dev-dependencies]`,

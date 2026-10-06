@@ -16,8 +16,10 @@ count in no code metric (core.scan_config_file):
             passwd, passphrase, secret, token, api_key, access_key,
             private_key or secret_key, or it ends in a pass / pwd / auth
             segment (DB_PASS, .npmrc's _auth) — whose value is a literal that
-            looks like one (secret_value), outside comments; and a password
-            in a URL's userinfo (postgres://user:password@db.host/…).
+            looks like one (secret_value), outside comments; a password
+            in a URL's userinfo (postgres://user:password@db.host/…); and in
+            a .netrc (0.1.9, N-12), whose tokens are separated by blanks
+            (`machine HOST login USER password PASS`), a password token's.
 
 This module holds the pure parts (names, matching, comments, redaction); the
 npm engine has a twin (js/src/lib/configsecrets.js). Every pattern here runs
@@ -38,6 +40,8 @@ CONFIG_NAMES = frozenset((
     ".env", ".envrc", ".npmrc", ".pypirc", ".netrc", "_netrc", ".git-credentials", ".dockercfg",
     "dockerfile", "containerfile", "id_rsa", "id_dsa", "id_ecdsa", "id_ed25519",
 ))
+#: A .netrc's names (curl's, git's, pip's and ftp's credentials; _netrc on Windows).
+NETRC_NAMES = frozenset((".netrc", "_netrc"))
 #: Lockfiles: generated, full of integrity hashes, never where a credential is kept.
 CONFIG_SKIP_NAMES = frozenset((
     "package-lock.json", "npm-shrinkwrap.json", "pnpm-lock.yaml", "packages.lock.json",
@@ -200,9 +204,17 @@ WEBHOOK_RE = re.compile(
     r"|https://(?:ptb\.|canary\.)?discord(?:app)?\.com/api/webhooks/[0-9]{5,20}/[A-Za-z0-9_\-]{20,100}")
 
 
-def secret_col(code):
+#: A .netrc's password token and its value: a run without blanks, or "…" quoted.
+NETRC_PASSWORD_RE = re.compile(r'(?<![^ \t])password[ \t]+("[^"\n]*"|[^\s"]+)')
+
+
+def secret_col(code, netrc=False):
     """Column of the first credential S-SECRET reports on a config line (its
-    comment text removed), else None."""
+    comment text removed), else None. `netrc`: the line is a .netrc's."""
+    if netrc:
+        for m in NETRC_PASSWORD_RE.finditer(code):
+            if secret_value(m.group(1)):
+                return m.start(1)
     for m in KV_RE.finditer(code):
         value = m.group(3)
         if value[0] not in "\"'":
@@ -224,11 +236,14 @@ def secret_col(code):
     return None
 
 
-def redact_values(line):
+def redact_values(line, netrc=False):
     """`line` with the value of every credential-named key replaced by
     [redacted] — whatever the value looks like, unless it is a reference or
     a template ($VAR, {{…}}, <…>, %…): a snippet's context lines are shown
-    only as far as they cannot carry a credential."""
+    only as far as they cannot carry a credential. `netrc`: a .netrc's line,
+    whose password tokens' values are redacted too."""
+    if netrc:
+        line = NETRC_PASSWORD_RE.sub(lambda m: m.group(0)[:m.start(1) - m.start(0)] + "[redacted]", line)
     out, pos = [], 0
     for m in KV_RE.finditer(line):
         value = unquote(m.group(3))

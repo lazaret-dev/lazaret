@@ -80,6 +80,26 @@ test("scanConfigFile: tokens everywhere, secrets outside comments, markers in co
   assert.ok(!JSON.stringify(issues).includes(PASS));
 });
 
+test("a .netrc's password tokens (N-12) and crates.io's API tokens (R-4)", () => {
+  const found = (path, text) => scanConfigFile(path, text).map((i) => [i.rule, i.line]).sort();
+  const netrc = `machine api.example.invalid login alice password ${PASS}\nmachine ftp.example.invalid\n  login bob\n`
+    + `  password changeme\ndefault login anon password "${PASS}"\n# password ${PASS}\n`;
+  for (const name of [".netrc", "_netrc", "home/.NETRC"]) {
+    assert.deepEqual(found(name, netrc), [["S-SECRET", 1], ["S-SECRET", 5]], name);
+  }
+  assert.deepEqual(found("notes.cfg", `hint = the password ${PASS} is not this\n`), []);
+  assert.ok(!JSON.stringify(scanConfigFile(".netrc", netrc)).includes(PASS));
+  assert.equal(secretCol(`machine h login u password ${PASS}`, true), 27);
+  assert.equal(secretCol(`machine h login u password ${PASS}`), -1);
+  assert.equal(redactConfigValues(`machine h login u password ${PASS} account x`, true),
+    "machine h login u password [redacted] account x");
+  const tok = "cio" + "Zq8vN3pL0wX7rT2mK9sB4hF6jD1aE5cG";
+  assert.deepEqual(found("credentials.toml", `[registry]\ntoken = "${tok}"\n`), [["S-SECRET", 2], ["S-TOKEN", 2]]);
+  for (const text of [`x = "A${tok}"\n`, `x = "${tok}9"\n`, `x = "${tok.slice(0, -1)}"\n`]) {
+    assert.ok(!found("a.toml", text).some(([r]) => r === "S-TOKEN"), text);
+  }
+});
+
 test("linear time on hostile lines", () => {
   for (const line of ["a".repeat(2_000_000), "a=".repeat(1_000_000), 'k="'.repeat(700_000),
     "x://".repeat(500_000), "a:b@".repeat(500_000), ("-".repeat(127) + "=").repeat(15_000)]) {

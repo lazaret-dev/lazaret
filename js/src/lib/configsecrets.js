@@ -127,10 +127,23 @@ export const LOCAL_HOSTS = new Set(["localhost", "127.0.0.1", "0.0.0.0", "host.d
 // Webhook URLs that carry their own secret (Slack, Discord).
 const WEBHOOK_RE = pyRe(String.raw`https://hooks\.slack\.com/services/T[A-Z0-9]{8,12}/B[A-Z0-9]{8,12}/[A-Za-z0-9]{20,32}|https://(?:ptb\.|canary\.)?discord(?:app)?\.com/api/webhooks/[0-9]{5,20}/[A-Za-z0-9_\-]{20,100}`);
 
-/** Column (UTF-16) of the first credential S-SECRET reports on a config line (comments removed), else -1. */
-export function secretCol(code) {
-  KV_RE.lastIndex = 0;
+// A .netrc's names, and its password token and value (configsecrets.NETRC_NAMES, NETRC_PASSWORD_RE).
+export const NETRC_NAMES = new Set([".netrc", "_netrc"]);
+const NETRC_PASSWORD_RE = pyRe(String.raw`(?<![^ \t])password[ \t]+("[^"\n]*"|[^\s"]+)`, "gd");
+
+/**
+ * Column (UTF-16) of the first credential S-SECRET reports on a config line (comments removed), else -1.
+ * `netrc`: the line is a .netrc's.
+ */
+export function secretCol(code, netrc = false) {
   let m;
+  if (netrc) {
+    NETRC_PASSWORD_RE.lastIndex = 0;
+    while ((m = NETRC_PASSWORD_RE.exec(code))) {
+      if (secretValue(m[1])) return m.indices[1][0];
+    }
+  }
+  KV_RE.lastIndex = 0;
   while ((m = KV_RE.exec(code))) {
     const value = m[3], end = m.indices[3][1];
     if (value[0] !== '"' && value[0] !== "'") {
@@ -152,8 +165,12 @@ export function secretCol(code) {
 }
 
 /** `line` with the value of every credential-named key replaced by [redacted] (configsecrets.redact_values). */
-export function redactConfigValues(line) {
+export function redactConfigValues(line, netrc = false) {
   if (typeof line !== "string") return line;
+  if (netrc) {
+    NETRC_PASSWORD_RE.lastIndex = 0;
+    line = line.replace(NETRC_PASSWORD_RE, (whole, value) => whole.slice(0, whole.length - value.length) + "[redacted]");
+  }
   let out = "", pos = 0, any = false, m;
   KV_RE.lastIndex = 0;
   while ((m = KV_RE.exec(line))) {

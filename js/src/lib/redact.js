@@ -54,11 +54,12 @@ export function entropySecretish(v) {
 //   AKIA[0-9A-Z]{16}|gh[pousr]_[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9]{22}_[A-Za-z0-9]{59}
 //   |xox[baprs]-[A-Za-z0-9-]{10,}
 //   |sk_live_[A-Za-z0-9]{16,}|AIza[0-9A-Za-z_\-]{35}
-//   |-----BEGIN [A-Z ]*PRIVATE KEY-----|eyJ[A-Za-z0-9_\-]{10,}\.eyJ[A-Za-z0-9_\-]{10,}
+//   |-----BEGIN [A-Z ]*PRIVATE KEY-----|(?<![A-Za-z0-9])cio[A-Za-z0-9]{32}(?![A-Za-z0-9])
+//   |eyJ[A-Za-z0-9_\-]{10,}\.eyJ[A-Za-z0-9_\-]{10,}
 // but without the backtracking blow-up of the JWT alternative on a run of
 // "eyJeyJeyJ…" (every head rescanned the whole run: quadratic).
-const HEAD_RE = /AKIA|gh[pousr]_|github_pat_|xox[baprs]-|sk_live_|AIza|-----BEGIN |eyJ/g;
-const HEAD_RE_REDACT = /AKIA|gh[pousr]_|github_pat_|xox[baprs]-|sk_live_|AIza|-----BEGIN |eyJ/g;
+const HEAD_RE = /AKIA|gh[pousr]_|github_pat_|xox[baprs]-|sk_live_|AIza|-----BEGIN |cio|eyJ/g;
+const HEAD_RE_REDACT = /AKIA|gh[pousr]_|github_pat_|xox[baprs]-|sk_live_|AIza|-----BEGIN |cio|eyJ/g;
 const PEM_END_G = /-----END [A-Z ]*PRIVATE KEY-----/g;
 const isPat = (c) => isAlnum(c) || c === 95;                     // [A-Za-z0-9_]
 const isUpperDigit = (c) => (c >= 48 && c <= 57) || (c >= 65 && c <= 90);
@@ -103,6 +104,11 @@ export function findSecretToken(s, from = 0, { redact = false } = {}) {
         else if (fixedRun(s, p + 4, 36, isAlnum)) end = p + 40;
         break;
       case "x": { const e = runEnd(s, p + 5, isXox); if (e - (p + 5) >= 10) end = e; break; }
+      case "c":                                                    // crates.io's API token: a whole run
+        if ((p === 0 || !isAlnum(s.charCodeAt(p - 1))) && fixedRun(s, p + 3, 32, isAlnum) && !isAlnum(s.charCodeAt(p + 35))) {
+          end = p + 35;
+        }
+        break;
       case "s": { const e = runEnd(s, p + 8, isAlnum); if (e - (p + 8) >= 16) end = e; break; }
       case "-": {
         const r = runEnd(s, p + 11, isPemName);
@@ -147,7 +153,7 @@ function redactTokens(s) {
 
 // _SECRET_LINE_PATTERNS[1:] (the token pattern is findSecretToken above).
 const SQL_CRED_LINE_RE = pyRe(String.raw`(?:IDENTIFIED\s+BY\s+['\"][^'\"]+['\"]|PASSWORD\s*=?\s*['\"][^'\"]+['\"]|IDENTIFIED\s+BY\s+PASSWORD)`, "gi");
-const ASSIGN_LINE_RE = pyRe(String.raw`(?:password|passwd|pwd|secret|api[_-]?key|access[_-]?key|auth[_-]?token|private[_-]?key)\s*[:=]\s*[\"'][^\"']{4,}[\"']`, "gi");
+const ASSIGN_LINE_RE = pyRe(String.raw`(?:password|passwd|pwd|secret|api[_-]?key|access[_-]?key|auth[_-]?token|private[_-]?key)\s*(?::=|[:=]|:\s*&(?:'static\s+)?(?:str|\[u8\])\s*=|[ \t]+string\s*=)\s*(?:b|rb|r#*|br#*)?[\"'][^\"']{4,}[\"']`, "gi");
 // credentials in a URL's userinfo: scheme://user:password@host, scheme://token@host
 const URL_USERINFO_RE = pyRe(String.raw`(?<=://)[^/\s@'\"]+(?=@)`, "g");
 export const REDACTED = "[redacted]";

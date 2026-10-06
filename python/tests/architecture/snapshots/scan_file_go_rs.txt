@@ -1,8 +1,8 @@
 # scan_file_go_rs: 1548 outputs, a hash per 100 (tests/architecture/_snapshots.py)
-ffb4f2af3c40634b
+02bbd3ec42eaf909
 d078e14e59f5504a
 8f99065098f9929c
-83d5592daef43f3b
+9acd1c83a3edea39
 a471a9758070843e
 184b82b65effcc53
 f1803eaef6f2d08d
@@ -10,8 +10,8 @@ f1803eaef6f2d08d
 5d76faf97f4885b0
 7d959399dfdca77f
 ea149002d8b84d55
-d457e82750fa8fc7
-d266b61048be614e
+d9611dd5418f8c2c
+8adbf028cc6d3e95
 58fe5d5b457f5498
-d92b387d643effc1
+7e428b6aaa98466b
 79b190d9fbde25ba

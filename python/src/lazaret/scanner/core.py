@@ -475,17 +475,20 @@ TYPE_LABEL = {"VULN": "Vulnerability", "HOTSPOT": "Security Hotspot",
 # _TokenPattern has the part of re.Pattern the scanner uses (pattern, flags,
 # search, finditer, sub with a literal replacement).
 _JWT_ALT = r"eyJ[A-Za-z0-9_\-]{10,}\.eyJ[A-Za-z0-9_\-]{10,}"
+# crates.io's API tokens (0.1.9, R-4): "cio" and 32 letters and digits, a whole run of them (in a run of base64 or
+# a longer name, a "cio" is chance)
+_CRATES_TOKEN_ALT = r"(?<![A-Za-z0-9])cio[A-Za-z0-9]{32}(?![A-Za-z0-9])"
 _JWT_CHARS = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-")
 _JWT_RUN_RE = re.compile(r"[A-Za-z0-9_\-]*")
 _JWT_CANDIDATE_RE = re.compile(r"(?<![A-Za-z0-9_\-])(?=[A-Za-z0-9_\-]{13,}\.eyJ[A-Za-z0-9_\-]{10})")
 _TOKEN_ALTS = (       # S-TOKEN, in pattern order
     r"AKIA[0-9A-Z]{16}", r"gh[pousr]_[A-Za-z0-9]{36}", r"github_pat_[A-Za-z0-9]{22}_[A-Za-z0-9]{59}",
     r"xox[baprs]-[A-Za-z0-9-]{10,}", r"sk_live_[A-Za-z0-9]{16,}", r"AIza[0-9A-Za-z_\-]{35}",
-    r"-----BEGIN [A-Z ]*PRIVATE KEY-----", _JWT_ALT)
+    r"-----BEGIN [A-Z ]*PRIVATE KEY-----", _CRATES_TOKEN_ALT, _JWT_ALT)
 _TOKEN_REDACT_ALTS = (    # the redaction list's first pattern (_SECRET_LINE_PATTERNS[0])
     r"AKIA[0-9A-Z]{16}", r"gh[pousr]_[A-Za-z0-9]{36,}", r"github_pat_[A-Za-z0-9_]{22,}",
     r"xox[baprs]-[A-Za-z0-9-]{10,}", r"sk_live_[A-Za-z0-9]{16,}", r"AIza[0-9A-Za-z_\-]{35}",
-    r"-----BEGIN [A-Z ]*PRIVATE KEY-----(?:.*?-----END [A-Z ]*PRIVATE KEY-----|.*)", _JWT_ALT)
+    r"-----BEGIN [A-Z ]*PRIVATE KEY-----(?:.*?-----END [A-Z ]*PRIVATE KEY-----|.*)", _CRATES_TOKEN_ALT, _JWT_ALT)
 
 
 def _jwt_in_run(s, start, run_end):
@@ -709,8 +712,11 @@ R("S-YAML", "Unsafe yaml.load", "VULN", "CRITICAL", ("py",),
   "Full YAML loading executes constructors from the document.",
   "Use yaml.safe_load() or Loader=yaml.SafeLoader.",
   "CWE-502"),
+# (0.1.9, G-4 and R-4: Go's `apiKey := "…"` and `var secret string = "…"`, Rust's
+# `const API_KEY: &str = "…"`, `static SECRET: &'static str = "…"`, a byte or raw string)
 R("S-SECRET", "Hardcoded credential", "VULN", "BLOCKER", ("py", "js", "go", "rs"),
-  r"(password|passwd|pwd|secret|api[_-]?key|access[_-]?key|auth[_-]?token|private[_-]?key)\s*[:=]\s*[\"'][^\"']{4,}[\"']",
+  r"(password|passwd|pwd|secret|api[_-]?key|access[_-]?key|auth[_-]?token|private[_-]?key)"
+  r"\s*(?::=|[:=]|:\s*&(?:'static\s+)?(?:str|\[u8\])\s*=|[ \t]+string\s*=)\s*(?:b|rb|r#*|br#*)?[\"'][^\"']{4,}[\"']",
   "Credential appears to be hardcoded in source.",
   "Secrets in code leak through version control, logs, and builds; rotation requires a deploy.",
   "Load secrets from environment variables or a secrets manager, and rotate this one now.",
@@ -3364,7 +3370,10 @@ class _FileCtx(_Redactor):
 class _ConfigCtx(_FileCtx):
     """A config file's context (scan_config_file): a line any snippet shows
     also has the value of every credential-named key redacted — a .env's
-    `DB_PASS=hunter2` matches none of the code patterns."""
+    `DB_PASS=hunter2` matches none of the code patterns — and a .netrc's
+    password tokens (`netrc`)."""
+
+    netrc = False
 
     def redacted(self, k):
         r = self._red.get(k)
@@ -3375,7 +3384,7 @@ class _ConfigCtx(_FileCtx):
                 r = REDACTED
             else:
                 r = self.secrets().redact(
-                    _redact_context_line(configsecrets.redact_values(self.lines[k])))
+                    _redact_context_line(configsecrets.redact_values(self.lines[k], self.netrc)))
             self._red[k] = r
         return r
 
@@ -3401,7 +3410,8 @@ _SECRET_LINE_PATTERNS = [
     re.compile(r"(?:IDENTIFIED\s+BY\s+['\"][^'\"]+['\"]|PASSWORD\s*=?\s*['\"][^'\"]+['\"]"
                r"|IDENTIFIED\s+BY\s+PASSWORD)", re.I),
     re.compile(r"(?:password|passwd|pwd|secret|api[_-]?key|access[_-]?key|auth[_-]?token|"
-               r"private[_-]?key)\s*[:=]\s*[\"'][^\"']{4,}[\"']", re.I),
+               r"private[_-]?key)\s*(?::=|[:=]|:\s*&(?:'static\s+)?(?:str|\[u8\])\s*=|[ \t]+string\s*=)\s*"
+               r"(?:b|rb|r#*|br#*)?[\"'][^\"']{4,}[\"']", re.I),
     # credentials in a URL's userinfo: scheme://user:password@host, scheme://token@host
     re.compile(r"(?<=://)[^/\s@'\"]+(?=@)"),
 ]
@@ -4347,6 +4357,7 @@ def scan_config_file(path, content, read=None):
     lines = source_lines(_unicode13.pin(content), "cfg")
     content = "\n".join(lines)
     ctx = _ConfigCtx(lines, "cfg", content, time.monotonic() + SCAN_TIME_BUDGET, False)
+    ctx.netrc = os.path.basename(path.replace("\\", "/")).lower() in configsecrets.NETRC_NAMES
     outer = getattr(_TLS, "ctx", None)
     _TLS.ctx = ctx
     try:
@@ -4366,7 +4377,7 @@ def scan_config_file(path, content, read=None):
                 if col is not None:
                     issues.append(mk_issue(_TOKEN_RULE, path, i + 1, lines, col))
                 if not ctx.cmask[i]:
-                    col = configsecrets.secret_col(ctx.code[i])
+                    col = configsecrets.secret_col(ctx.code[i], ctx.netrc)
                     if col is not None:
                         issues.append(mk_issue(CONFIG_SECRET_RULE, path, i + 1, lines, col))
         except _ScanBudgetExceeded:

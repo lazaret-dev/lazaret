@@ -94,6 +94,24 @@ def tgz(files):
     return buf.getvalue()
 
 
+# 0.1.9 (G-4, R-4): Go's short declarations and typed vars, Rust's typed constants and statics, byte and raw strings
+SECRETS_GO = (
+    "package main\n\nimport \"os\"\n\n"                       # 1-4
+    "func main() {\n"                                              # 5
+    "\tapiKey := \"k9Fq2LmZp7Rt\"\n"                              # 6 S-SECRET
+    "\tvar password string = \"hunter22hunter\"\n"                # 7 S-SECRET
+    "\tsecret := os.Getenv(\"SECRET\")\n"                         # 8 nothing: the environment
+    "\tkeyName := \"api_key\"\n"                                  # 9 nothing: not a credential's name
+    "\t_, _, _, _ = apiKey, password, secret, keyName\n"
+    "}\n")
+SECRETS_RS = (
+    "const API_KEY: &str = \"k9Fq2LmZp7Rt\";\n"                    # 1 S-SECRET
+    "static SECRET: &'static str = \"zq81Lmn0Pw\";\n"               # 2 S-SECRET
+    "pub const PRIVATE_KEY: &[u8] = b\"MIIEowIBAAKC\";\n"           # 3 S-SECRET
+    "fn f() -> usize { let password: &str = r#\"hunter22hunter\"#; password.len() }\n"   # 4 S-SECRET
+    "const SECRET_LEN: usize = 32;\n")                             # 5 nothing
+
+
 class LanguageTableTests(unittest.TestCase):
     def test_extensions(self):
         self.assertEqual((core.EXTS[".go"], core.EXTS[".rs"]), ("go", "rs"))
@@ -124,6 +142,15 @@ class ProjectScanTests(unittest.TestCase):
         self.assertEqual(found(res), WANT)
         self.assertEqual((res["metrics"]["files"], res["metrics"]["ncloc"], res["metrics"]["comments"]), (2, 21, 5))
         self.assertFalse(res["pass"])
+
+    def test_go_and_rust_declarations_of_a_credential(self):
+        res = self.scan({"main.go": SECRETS_GO, "src/lib.rs": SECRETS_RS})
+        self.assertEqual([(r, f, line) for r, f, line in found(res) if r == "S-SECRET"], [
+            ("S-SECRET", "main.go", 6), ("S-SECRET", "main.go", 7), ("S-SECRET", "src/lib.rs", 1),
+            ("S-SECRET", "src/lib.rs", 2), ("S-SECRET", "src/lib.rs", 3), ("S-SECRET", "src/lib.rs", 4)])
+        shown = json.dumps(res["issues"])
+        for raw in ("k9Fq2LmZp7Rt", "hunter22hunter", "zq81Lmn0Pw", "MIIEowIBAAKC"):
+            self.assertNotIn(raw, shown)
 
     def test_collection(self):
         with tempfile.TemporaryDirectory() as root:

@@ -21,7 +21,7 @@ import { cpLen, cpPrefix, pyRepr, pyLstrip, pyStrip, isPySpace } from "../lib/py
 import { findSecretToken, registerScanContext, REDACT } from "../lib/redact.js";
 import { truncatedIssue, normalizeNewlines, treeJoin } from "../lib/fs.js";
 import { assigned13, pinUnicode } from "../lib/unicode13.js";
-import { documentationToken, keyMaterial, secretCol, redactConfigValues } from "../lib/configsecrets.js";
+import { documentationToken, keyMaterial, secretCol, redactConfigValues, NETRC_NAMES } from "../lib/configsecrets.js";
 import { configKind, ownerDir, entries as autorunEntries, localCommand } from "../lib/autorun.js";
 import { isWorkflow, findings as workflowFindings, hardening as workflowHardening,
   hardeningRule as workflowHardeningRule } from "../lib/ghworkflow.js";
@@ -749,7 +749,8 @@ export function scanConfigFile(path, rawContent, read = null) {
   const content = pinUnicode(normalizeSource(rawContent, "cfg"));
   const lines = content.split("\n");
   const lex = lexLines(lines, "cfg", content);
-  registerScanContext(lines, SECRET_SKIP_RE, redactConfigValues);
+  const netrc = NETRC_NAMES.has(path.replace(/\\/g, "/").split("/").pop().toLowerCase());
+  registerScanContext(lines, SECRET_SKIP_RE, (line) => redactConfigValues(line, netrc));
   const deadline = Date.now() + timeBudgetMs;
   const issues = [];
   try {
@@ -763,7 +764,7 @@ export function scanConfigFile(path, rawContent, read = null) {
       let col = configTokenCol(line, lines, i);
       if (col >= 0) issues.push(mkIssue(TOKEN_RULE(), path, i + 1, lines, col));
       if (!lex.comment[i]) {
-        col = secretCol(lex.code[i]);
+        col = secretCol(lex.code[i], netrc);
         if (col >= 0) issues.push(mkIssue(CONFIG_SECRET_RULE, path, i + 1, lines, col));
       }
     }

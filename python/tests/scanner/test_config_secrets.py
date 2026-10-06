@@ -211,6 +211,36 @@ class ScanConfigFile(unittest.TestCase):
         self.assertTrue(all(i["sev"] == "BLOCKER" and i["type"] == "VULN" for i in issues))
 
 
+class NetrcAndCratesTokens(unittest.TestCase):
+    """0.1.9: a .netrc's password tokens (N-12: `machine HOST login USER password PASS`, blanks between the
+    tokens, no key = value), and crates.io's API tokens (R-4: "cio" and 32 letters and digits; cargo keeps one in
+    ~/.cargo/credentials.toml)."""
+
+    def test_a_netrc_password(self):
+        text = (f"machine api.example.invalid login alice password {PASS}\n"
+                "machine ftp.example.invalid\n  login bob\n  password changeme\n"
+                f"default login anon password \"{PASS}\"\n# password {PASS}\n")
+        for name in (".netrc", "_netrc", "home/.NETRC"):
+            with self.subTest(name):
+                self.assertEqual(found(name, text), [("S-SECRET", 1), ("S-SECRET", 5)])
+        # another config file's prose is not a .netrc's token
+        self.assertEqual(found("notes.cfg", f"hint = the password {PASS} is not this\n"), [])
+        # the snippet never shows the password, on its line or a line around it
+        self.assertNotIn(PASS, json.dumps(core.scan_config_file(".netrc", text)))
+
+    def test_a_crates_io_token(self):
+        tok = "cio" + "Zq8vN3pL0wX7rT2mK9sB4hF6jD1aE5cG"
+        self.assertEqual(len(tok), 35)
+        self.assertEqual(found("credentials.toml", f'[registry]\ntoken = "{tok}"\n'), [("S-SECRET", 2), ("S-TOKEN", 2)])
+        got = core.scan_file("src/lib.rs", f'pub const CRATES_IO: &str = "{tok}";\n', "rs")
+        self.assertEqual([i["rule"] for i in got if i["rule"].startswith("S-")], ["S-TOKEN"])
+        self.assertNotIn(tok, json.dumps(got))
+        # inside a longer run (base64, an identifier) it is chance, not a token
+        for text in (f'x = "A{tok}"\n', f'x = "{tok}9"\n', f'x = "{tok[:-1]}"\n'):
+            with self.subTest(text):
+                self.assertNotIn("S-TOKEN", [r for r, _ in found("a.toml", text)])
+
+
 class ProjectScan(unittest.TestCase):
     def setUp(self):
         self.root = tree({

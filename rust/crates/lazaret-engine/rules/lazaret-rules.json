@@ -1,6 +1,6 @@
 {
  "format": 1,
- "rule_set": "2.32.0",
+ "rule_set": "2.33.0",
  "source": "lazaret.scanner.core, extracted by scripts/make_rust_tables.py \u2014 do not edit",
  "values": {
   "ALWAYS_PRUNE_DIRS": {
@@ -1142,7 +1142,7 @@
       },
       "re": {
        "flags": "i",
-       "re": "(password|passwd|pwd|secret|api[_-]?key|access[_-]?key|auth[_-]?token|private[_-]?key)\\s*[:=]\\s*[\\\"'][^\\\"']{4,}[\\\"']"
+       "re": "(password|passwd|pwd|secret|api[_-]?key|access[_-]?key|auth[_-]?token|private[_-]?key)\\s*(?::=|[:=]|:\\s*&(?:'static\\s+)?(?:str|\\[u8\\])\\s*=|[ \\t]+string\\s*=)\\s*(?:b|rb|r#*|br#*)?[\\\"'][^\\\"']{4,}[\\\"']"
       },
       "ref": {
        "value": "CWE-798 \u00b7 OWASP A07"
@@ -2081,7 +2081,7 @@
       },
       "re": {
        "flags": "",
-       "re": "AKIA[0-9A-Z]{16}|gh[pousr]_[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9]{22}_[A-Za-z0-9]{59}|xox[baprs]-[A-Za-z0-9-]{10,}|sk_live_[A-Za-z0-9]{16,}|AIza[0-9A-Za-z_\\-]{35}|-----BEGIN [A-Z ]*PRIVATE KEY-----|eyJ[A-Za-z0-9_\\-]{10,}\\.eyJ[A-Za-z0-9_\\-]{10,}",
+       "re": "AKIA[0-9A-Z]{16}|gh[pousr]_[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9]{22}_[A-Za-z0-9]{59}|xox[baprs]-[A-Za-z0-9-]{10,}|sk_live_[A-Za-z0-9]{16,}|AIza[0-9A-Za-z_\\-]{35}|-----BEGIN [A-Z ]*PRIVATE KEY-----|(?<![A-Za-z0-9])cio[A-Za-z0-9]{32}(?![A-Za-z0-9])|eyJ[A-Za-z0-9_\\-]{10,}\\.eyJ[A-Za-z0-9_\\-]{10,}",
        "token": [
         "AKIA[0-9A-Z]{16}",
         "gh[pousr]_[A-Za-z0-9]{36}",
@@ -2090,6 +2090,7 @@
         "sk_live_[A-Za-z0-9]{16,}",
         "AIza[0-9A-Za-z_\\-]{35}",
         "-----BEGIN [A-Z ]*PRIVATE KEY-----",
+        "(?<![A-Za-z0-9])cio[A-Za-z0-9]{32}(?![A-Za-z0-9])",
         "eyJ[A-Za-z0-9_\\-]{10,}\\.eyJ[A-Za-z0-9_\\-]{10,}"
        ]
       },
@@ -13247,7 +13248,7 @@
    "list": [
     {
      "flags": "",
-     "re": "AKIA[0-9A-Z]{16}|gh[pousr]_[A-Za-z0-9]{36,}|github_pat_[A-Za-z0-9_]{22,}|xox[baprs]-[A-Za-z0-9-]{10,}|sk_live_[A-Za-z0-9]{16,}|AIza[0-9A-Za-z_\\-]{35}|-----BEGIN [A-Z ]*PRIVATE KEY-----(?:.*?-----END [A-Z ]*PRIVATE KEY-----|.*)|eyJ[A-Za-z0-9_\\-]{10,}\\.eyJ[A-Za-z0-9_\\-]{10,}",
+     "re": "AKIA[0-9A-Z]{16}|gh[pousr]_[A-Za-z0-9]{36,}|github_pat_[A-Za-z0-9_]{22,}|xox[baprs]-[A-Za-z0-9-]{10,}|sk_live_[A-Za-z0-9]{16,}|AIza[0-9A-Za-z_\\-]{35}|-----BEGIN [A-Z ]*PRIVATE KEY-----(?:.*?-----END [A-Z ]*PRIVATE KEY-----|.*)|(?<![A-Za-z0-9])cio[A-Za-z0-9]{32}(?![A-Za-z0-9])|eyJ[A-Za-z0-9_\\-]{10,}\\.eyJ[A-Za-z0-9_\\-]{10,}",
      "token": [
       "AKIA[0-9A-Z]{16}",
       "gh[pousr]_[A-Za-z0-9]{36,}",
@@ -13256,6 +13257,7 @@
       "sk_live_[A-Za-z0-9]{16,}",
       "AIza[0-9A-Za-z_\\-]{35}",
       "-----BEGIN [A-Z ]*PRIVATE KEY-----(?:.*?-----END [A-Z ]*PRIVATE KEY-----|.*)",
+      "(?<![A-Za-z0-9])cio[A-Za-z0-9]{32}(?![A-Za-z0-9])",
       "eyJ[A-Za-z0-9_\\-]{10,}\\.eyJ[A-Za-z0-9_\\-]{10,}"
      ]
     },
@@ -13265,7 +13267,7 @@
     },
     {
      "flags": "i",
-     "re": "(?:password|passwd|pwd|secret|api[_-]?key|access[_-]?key|auth[_-]?token|private[_-]?key)\\s*[:=]\\s*[\\\"'][^\\\"']{4,}[\\\"']"
+     "re": "(?:password|passwd|pwd|secret|api[_-]?key|access[_-]?key|auth[_-]?token|private[_-]?key)\\s*(?::=|[:=]|:\\s*&(?:'static\\s+)?(?:str|\\[u8\\])\\s*=|[ \\t]+string\\s*=)\\s*(?:b|rb|r#*|br#*)?[\\\"'][^\\\"']{4,}[\\\"']"
     },
     {
      "flags": "",
@@ -14896,6 +14898,9 @@
      "value": "-----BEGIN [A-Z ]*PRIVATE KEY-----"
     },
     {
+     "value": "(?<![A-Za-z0-9])cio[A-Za-z0-9]{32}(?![A-Za-z0-9])"
+    },
+    {
      "value": "eyJ[A-Za-z0-9_\\-]{10,}\\.eyJ[A-Za-z0-9_\\-]{10,}"
     }
    ]
@@ -14936,6 +14941,9 @@
     },
     {
      "value": "-----BEGIN [A-Z ]*PRIVATE KEY-----(?:.*?-----END [A-Z ]*PRIVATE KEY-----|.*)"
+    },
+    {
+     "value": "(?<![A-Za-z0-9])cio[A-Za-z0-9]{32}(?![A-Za-z0-9])"
     },
     {
      "value": "eyJ[A-Za-z0-9_\\-]{10,}\\.eyJ[A-Za-z0-9_\\-]{10,}"

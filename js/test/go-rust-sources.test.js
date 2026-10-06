@@ -67,6 +67,22 @@ test("the rules that list Go and Rust, outside comments where they say so", () =
   assert.deepEqual(scanFile({ path: "l.rs", content: rs }).map((i) => [i.rule, i.line]), [["S-SECRET", 2]]);
 });
 
+test("Go's and Rust's declarations of a credential (G-4, R-4), and crates.io's API tokens", () => {
+  const go = 'package main\n\nfunc main() {\n\tapiKey := "k9Fq2LmZp7Rt"\n\tvar password string = "hunter22hunter"\n'
+    + '\tkeyName := "api_key"\n\t_, _, _ = apiKey, password, keyName\n}\n';
+  assert.deepEqual(scanFile({ path: "main.go", content: go, lang: "go" }).filter((i) => i.rule === "S-SECRET")
+    .map((i) => i.line), [4, 5]);
+  const rs = 'const API_KEY: &str = "k9Fq2LmZp7Rt";\nstatic SECRET: &\'static str = "zq81Lmn0Pw";\n'
+    + 'pub const PRIVATE_KEY: &[u8] = b"MIIEowIBAAKC";\nfn f() -> usize { let password: &str = r#"hunter22hunter"#; password.len() }\n'
+    + "const SECRET_LEN: usize = 32;\n";
+  const got = scanFile({ path: "src/lib.rs", content: rs, lang: "rs" });
+  assert.deepEqual(got.filter((i) => i.rule === "S-SECRET").map((i) => i.line), [1, 2, 3, 4]);
+  const tok = "cio" + "Zq8vN3pL0wX7rT2mK9sB4hF6jD1aE5cG";
+  const t = scanFile({ path: "src/t.rs", content: `pub const CRATES_IO: &str = "${tok}";\n`, lang: "rs" });
+  assert.deepEqual(t.map((i) => i.rule).filter((r) => r.startsWith("S-")), ["S-TOKEN"]);
+  assert.ok(!JSON.stringify(t).includes(tok));
+});
+
 test("duplication is measured on Python, JavaScript and SQL lines", () => {
   let block = "";
   for (let k = 0; k < 8; k++) block += `    let v${k} = compute(${k}, "step ${k}");\n`;
