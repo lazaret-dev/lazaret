@@ -96,6 +96,8 @@ MAX_MEMBER = _env_number("LAZARET_MAX_SOURCE_BYTES", 16_000_000)
 MAX_FILES = 20_000         # files per package (numpy's sdist alone has >4,000)
 SAMPLE = 8192              # header/entropy sample read from oversized files
 # Stored scans from another engine version are scanned again (has_scan).
+# 2.36: an npm manifest or a binding.gyp inside a Go module or a crate: its
+#      hooks are inventory (INFO), as npm never installs from there (N-18)
 # 2.35: two false positives of the file rules in Go and Rust code: SC-B64
 #      passes over a run of digits, hex digits or letters alone (up to 16,384
 #      characters) and a short period repeated (name tables, test vectors:
@@ -247,7 +249,7 @@ SAMPLE = 8192              # header/entropy sample read from oversized files
 #      entry points and hook targets, Python install scripts
 # 2.3: verdict tiers, decoded hex, install-script inspection; 2.2:
 #      verdict-integrity; 2.1: binary-artifact awareness
-ENGINE_VERSION = "2.35.0"
+ENGINE_VERSION = "2.36.0"
 
 # ---------------- The content memo (P-2a, registry/contentcache.py) ----------------
 # One per scan_package run: the engine answers once for content several of a
@@ -2338,6 +2340,7 @@ class _ArtifactScan:
                     self.truncated += 1
                 if self.artifact == "vsix" and i["rule"] == "SC-INSTALL-HOOK" and not vsix_hook_runs(i["cmd"]):
                     _vsix_inert_hook(i)
+                self._npm_never_installs(i)
                 self.issues.append(i)
             return
         # (an extension's binding.gyp is data: VS Code builds nothing, E-1)
@@ -2354,6 +2357,7 @@ class _ArtifactScan:
             for i in found:
                 if i["rule"] == "SC-MANIFEST-UNPARSEABLE":
                     self.truncated += 1
+                self._npm_never_installs(i)
                 self.issues.append(i)
             return
         if base == "pyproject.toml":
@@ -2417,6 +2421,19 @@ class _ArtifactScan:
             self.deferred_bytes += len(raw)
         else:
             self.dropped.add(rel)
+
+    def _npm_never_installs(self, issue):
+        """N-18: an npm manifest or a binding.gyp inside a Go module or a crate
+        (a web front end's, an npm wrapper of the crate's binary) is not one npm
+        installs from there, so its hooks, the implicit `node-gyp rebuild`
+        among them, are inventory: INFO, with the reason. A hostile command
+        stays CRITICAL, and a hook is still followed to the script it names,
+        which escalates it when the script looks hostile (a build script can
+        run npm there)."""
+        if self.artifact in PACKAGE_CODE and issue["rule"] == "SC-INSTALL-HOOK" and issue["sev"] not in STRONG_SEVERITIES:
+            issue["sev"] = "INFO"
+            what = "Go module" if self.artifact == "gomod" else "crate"
+            issue["msg"] = issue["msg"].rstrip() + f" (npm never installs a package from inside a {what}: listed, not counted)"
 
     def _keep_code(self, rel, raw):
         """Keep a file a package reader reads (code_text), within PACKAGE_CODE_CHARS bytes in all: the
@@ -2544,8 +2561,9 @@ class _ArtifactScan:
             return
         if any(isinstance(scripts.get(h), str) and scripts[h].strip() for h in ("install", "preinstall")):
             return
-        self.issues.append(lazaret._sc_install_hook_issue(
-            "binding.gyp", 1, [], "install (implicit)", "node-gyp rebuild", False))
+        issue = lazaret._sc_install_hook_issue("binding.gyp", 1, [], "install (implicit)", "node-gyp rebuild", False)
+        self._npm_never_installs(issue)
+        self.issues.append(issue)
 
     def _entry_point_manifests(self):
         """The root package.json's entry points and its implicit node-gyp hook."""
