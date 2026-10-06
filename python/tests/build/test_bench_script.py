@@ -2,7 +2,8 @@
 scans over a manifest of release files, and the comparison of two runs (in
 full, or in counts only for a holdout set). The releases here are built in
 the test: a plain package and one whose install hook pipes a download into
-a shell (inert text: the host is .invalid, nothing is run).
+a shell (inert text: the host is .invalid, nothing is run); and Go modules
+and crates (0.1.9, N-2), plain ones and the guard tests' inert samples.
 """
 import contextlib
 import io
@@ -14,6 +15,8 @@ import unittest
 
 from lazaret.scanner import _native
 from tests import _support
+from tests.registry._cargo_support import BUILD_EVIL_RS, crate_tgz
+from tests.registry._go_support import CLEAN_GO, INIT_EVIL_GO, module_zip
 from tests.registry._review_support import manifest, tarball
 
 SCRIPT = os.path.join(_support.REPO_ROOT, "scripts", "bench.py")
@@ -71,6 +74,30 @@ class BenchTests(unittest.TestCase):
         self.assertEqual(self.quietly("run", self.manifest, out)[0], 0)
         rows = {r["id"]: r for r in self.b.read_jsonl(out)}
         self.assertEqual(rows["plain"], {"id": "plain", "cat": "benign", "error": "harness timeout"})
+
+    def test_go_modules_and_crates_scanned_as_the_guard_scans_them(self):
+        releases = {
+            "go-plain": ("benign", "zip", "gomod",
+                         module_zip("example.invalid/plain", "v1.0.0",
+                                    {"plain.go": CLEAN_GO.format(name="plain", func="F", n=1)})[0]),
+            "go-init": ("malicious_intent", "zip", "gomod",
+                        module_zip("example.invalid/initevil", "v1.0.0", {"init.go": INIT_EVIL_GO})[0]),
+            "crate-plain": ("benign", "tgz", "crate", crate_tgz("plain", "1.0.0", {})),
+            "crate-build": ("malicious_intent", "tgz", "crate", crate_tgz("buildevil", "1.0.0", {
+                "build.rs": BUILD_EVIL_RS})),
+        }
+        rows = []
+        for name, (cat, container, kind, data) in releases.items():
+            path = self.dir / name
+            path.write_bytes(data)
+            rows.append({"id": name, "cat": cat, "artifact_path": str(path), "container": container, "kind": kind})
+        self.manifest.write_text("".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
+        out = self.dir / "run.jsonl"
+        self.assertEqual(self.quietly("run", self.manifest, out, "--stop-after", 60)[0], 0)
+        got = {r["id"]: (r["verdict"], [s[0] for s in r["strong"]]) for r in self.b.read_jsonl(out)}
+        self.assertEqual({k: v[0] for k, v in got.items()},
+                         {"go-plain": "OK", "go-init": "SUSPICIOUS", "crate-plain": "OK", "crate-build": "SUSPICIOUS"})
+        self.assertTrue(got["go-init"][1] and got["crate-build"][1])
 
     def test_compare(self):
         before, after = self.dir / "before.jsonl", self.dir / "after.jsonl"

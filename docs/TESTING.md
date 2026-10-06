@@ -52,7 +52,8 @@ redeem an earlier red.
 6. **The benchmark**, for a change to detection: the registry scans of the
    benchmark's releases before and after the change (`scripts/bench.py`,
    §4: every difference read), and the holdout's (`compare
-   --aggregate-only`).
+   --aggregate-only`); for a change to what Go or Rust code is read for,
+   the Go and Rust sets too (§4).
 7. **Docs** (`README.md`, this doc / `STRUCTURE.md` / `DESIGN.md` if the
    architecture moved, `CHANGELOG.md`), then commit (one logical change: the
    native engine with its recorded outputs, the Python side, and a
@@ -265,10 +266,12 @@ samples themselves are kept outside the repository (`STRUCTURE.md` §6).
 popular packages are mostly small libraries, and they did not hold the nine
 popular releases 0.1.8 made SUSPICIOUS (vite, vitest, monaco-editor,
 coverage, numba, future, sympy, ipython, kubernetes: B-1).
-`scripts/popular/releases.jsonl` pins 1,205 more: the latest releases, on
-Oct 3, 2026, of popular npm and PyPI packages the benchmark does not hold,
-each the one file the guard scans (npm's tarball; for PyPI the file pip
-installs on Linux x86-64), by version and sha256.
+`scripts/popular/releases.jsonl` pins 1,703 more: the latest releases, on
+Oct 3, 2026, of 1,205 popular npm and PyPI packages the benchmark does not
+hold, and on Oct 6, 2026, of the 500 most-downloaded crates (498: two are
+under licences the set does not take, MPL-2.0 and CDLA-Permissive-2.0), each
+the one file the guard scans (npm's tarball; for PyPI the file pip installs
+on Linux x86-64; a crate's `.crate`), by version and sha256.
 
 ```
 python3 scripts/popular/popular.py fetch --cache DIR --manifest DIR/manifest.jsonl
@@ -276,19 +279,67 @@ python3 scripts/bench.py run DIR/manifest.jsonl RUN.jsonl      # looped under a 
 python3 scripts/bench.py compare BEFORE.jsonl RUN.jsonl
 ```
 
-`fetch` downloads them once (about 630 MB; a file already in DIR is hashed
-again, other bytes than the pinned ones are refused). Run the set before and
-after a detection change and before a release, as the benchmark: no release
-may be SUSPICIOUS, and every verdict or strong finding that moves is read.
-0.1.8 makes the nine SUSPICIOUS on it, and 0.1.9 none (36 WARN, and 1
-INCOMPLETE: sharp's 16 MB libvips library, counted as unscanned code). At
-each release, refresh it: `popular.py pin --top 800,400 --exclude FILE
---cache DIR` takes the latest release of the first 800 npm and 400 PyPI
-names of `python/src/lazaret/registry/popular_names.json` (the most
-downloaded), less the benchmark's benign names, which FILE lists, and
-rewrites the file; a new release of a popular package is what this set
-exists to catch. `popular.py pin npm:vite@8.3.2 …` adds or moves single
-releases, and `popular.py check` validates the file.
+`fetch` downloads them once (about 710 MB; a file already in DIR is hashed
+again, other bytes than the pinned ones are refused; `--only crates` takes
+one ecosystem's). Run the set before and after a detection change and
+before a release, as the benchmark: no release may be SUSPICIOUS, and every
+verdict or strong finding that moves is read. 0.1.8 makes the nine
+SUSPICIOUS on it, and 0.1.9 none of the npm and PyPI releases (36 WARN, and
+1 INCOMPLETE: sharp's 16 MB libvips library, counted as unscanned code) nor
+of the crates (20 WARN: 13 for the prebuilt libraries and objects they ship,
+the windows and winapi import libraries, ring's and aws-lc-sys's assembly
+and wit-bindgen's WebAssembly; 5 for test data, SC-B64, SC-HEXSTR,
+SC-OPAQUE-BLOB and SC-NESTED-ARCHIVE; 2 for an emoji with a doubled
+variation selector, SC-HIDDEN-UNICODE). At each release, refresh it:
+`popular.py pin --top 800,400,500 --exclude FILE --cache DIR` takes the
+latest release of the first 800 npm, 400 PyPI and 500 crates names of
+`python/src/lazaret/registry/popular_names.json` (the most downloaded),
+less the benchmark's benign names, which FILE lists, and rewrites the file
+(crates.io's API is asked once a second, so the crates take about ten
+minutes; a crate under a licence Apache-2.0 can't take in is left out,
+since this set's findings are read); a new release of a popular package is
+what this set exists to catch. `popular.py pin npm:vite@8.3.2 crates:syn …`
+adds or moves single releases, and `popular.py check` validates the file.
+
+**The Go and Rust sets (N-2).** No Go registry publishes downloads, and Go's
+module proxy can't be reached from everywhere the gate runs, so the Go and
+Rust code the gate holds quiet, beside the popular crates, is what a
+distribution packages and what Go ships. `scripts/popular/packaged.py`
+packs both, each module or crate as its registry serves it (a module zip,
+a `.crate`), for `bench.py`:
+
+```
+python3 scripts/popular/packaged.py ubuntu --debs DEBS --cache DIR --manifest DIR/ubuntu.jsonl --left-out DIR/left.jsonl
+python3 scripts/popular/packaged.py gostd --cache DIR --manifest DIR/gostd.jsonl
+python3 scripts/bench.py run DIR/ubuntu.jsonl RUN.jsonl        # looped under a 45 s timeout, as above
+```
+
+`ubuntu` takes every `golang-*-dev` and `librust-*-dev` package of Ubuntu
+24.04's universe (noble's index, pinned by sha256: the release pocket never
+changes; about 575 MB of `.deb`s, fetched once into DEBS and checked
+against the index), keeping a package only when its DEP-5 copyright file
+names licences Apache-2.0 can take in: of 4,746 packages, 4,040, with 1,953
+Go modules and 2,151 crates. `gostd` packs Go's `std`, `cmd` and the
+modules they vendor (`go env GOROOT`). The gate is the popular set's: none
+SUSPICIOUS, every WARN read. On 0.1.9 (rule set 2.33.0, Go 1.24.7) none is
+SUSPICIOUS; Ubuntu's Go modules give 39 WARN and 3 INCOMPLETE (Debian packs
+aws-sdk-go-v2 and azure-sdk-for-go each as one tree, past the archive's
+20,000 files and the reader's 300 million characters, and go-git-fixtures'
+65 MB `data.go` runs past the deadline), its crates 30 WARN, Go's own 4 of
+18 (the race detector's and BoringCrypto's `.syso` objects, and SC-B64 on
+`stringer`'s name tables). Most of the Go WARNs, and a third of the
+crates', are SC-B64 on runs that are not base64 (backlog G-5): `stringer`'s
+tables, decimal and hex literals, repeated test strings.
+
+**The Go and Rust malicious set** is run offline by John: real samples
+can't be fetched from the sandbox (crates.io deletes them; OSV and Go's
+proxy are out of its reach), and none is written in it. A sample is a
+manifest line with `"kind": "gomod"` (a module zip, `path@version/` inside,
+`"container": "zip"`) or `"kind": "crate"` (a `.crate`, `name-version/`
+inside, `"container": "tgz"`) and a category other than `"benign"`; the
+gate is each one SUSPICIOUS for its documented reason. Until then, the
+reader tests' single-technique samples (`goread/tests.rs`,
+`rsread/tests.rs`) and the guard tests' are the coverage set.
 
 ---
 

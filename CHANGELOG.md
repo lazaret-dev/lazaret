@@ -11,6 +11,13 @@ project is pre-1.0, so the 0.x API may still change.
 
 ### Added
 
+- **For contributors: the Go and Rust benign sets (N-2).** The release gate's popular set
+  holds the 500 most-downloaded crates too (498: two are under licences it does not take),
+  pinned by version and sha256 as its npm and PyPI releases are, and
+  `scripts/popular/packaged.py` packs the Go modules and crates Ubuntu 24.04 packages (1,953
+  and 2,151, licence-checked) and Go's own `std`, `cmd` and vendored modules, each as its
+  registry serves it, for `scripts/bench.py`. None is SUSPICIOUS, and every WARN is read
+  (`docs/TESTING.md` §4). The Go and Rust malicious set is run offline.
 - **Credentials in Go's and Rust's declarations, crates.io's tokens and a `.netrc`'s
   passwords (G-4, R-4, N-12).** S-SECRET read `name = "…"` and `name: "…"`, so Go's
   `apiKey := "…"` and `var password string = "…"` and Rust's `const API_KEY: &str = "…"`,

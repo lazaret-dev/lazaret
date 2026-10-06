@@ -4,12 +4,14 @@ The pinned file is checked as it is in the tree (valid, and holding the nine pop
 SUSPICIOUS, at the versions the sweep found them). Resolving, pinning and fetching run against a stand-in for
 the registries: nothing here goes on the network."""
 
+import argparse
 import contextlib
 import hashlib
 import io
 import json
 import os
 import tempfile
+import time
 import unittest
 import urllib.error
 
@@ -20,6 +22,8 @@ pop = _support.load_script(os.path.join(POPULAR, "popular.py"), "popular_set")
 
 NPM_FILES = "https://registry.npmjs.org/"
 PY_FILES = "https://files.pythonhosted.org/packages/ab/cd/"
+CRATE_FILES = "https://static.crates.io/crates/"
+API = "https://crates.io/api/v1/crates/"
 
 
 def sha(data):
@@ -44,6 +48,9 @@ def row(eco="npm", name="left-pad", version="1.3.0", data=b"tarball", **over):
     if eco == "npm":
         filename = f"{name.rsplit('/', 1)[-1]}-{version}.tgz"
         url, ck = f"{NPM_FILES}{name}/-/{filename}", ("tgz", "npm")
+    elif eco == "crates":
+        filename = f"{name}-{version}.crate"
+        url, ck = f"{CRATE_FILES}{name}/{filename}", ("tgz", "crate")
     else:
         filename = f"{name}-{version}-py3-none-any.whl"
         url, ck = PY_FILES + filename, ("zip", "wheel")
@@ -60,6 +67,7 @@ class PinnedFileTests(unittest.TestCase):
         ecos = [r["ecosystem"] for r in rows]
         self.assertGreater(ecos.count("npm"), 700)
         self.assertGreater(ecos.count("pypi"), 350)
+        self.assertGreater(ecos.count("crates"), 450)
 
     def test_it_holds_the_releases_0_1_8_made_suspicious(self):
         ids = {r["id"] for r in pop.read_releases()}
@@ -122,6 +130,15 @@ class ValidateTests(unittest.TestCase):
         self.assertEqual(pop.container_kind("pypi", "a-1.zip"), ("zip", "sdist"))
         self.assertIsNone(pop.container_kind("pypi", "a-1.egg"))
         self.assertIsNone(pop.container_kind("npm", "a-1.zip"))
+        self.assertEqual(pop.container_kind("crates", "serde-1.0.228.crate"), ("tgz", "crate"))
+        self.assertIsNone(pop.container_kind("crates", "serde-1.0.228.tgz"))
+
+    def test_a_crate_only_from_static_crates_io(self):
+        good = row("crates", "serde", "1.0.228")
+        self.assertEqual(self.problems(good), [])
+        self.assertIn("is not https on static.crates.io",
+                      self.problems(row("crates", "serde", "1.0.228",
+                                        url="https://crates.io/api/v1/crates/serde/1.0.228/download"))[0])
 
 
 class PickTests(unittest.TestCase):
@@ -204,6 +221,82 @@ class ResolveAndPinTests(unittest.TestCase):
             self.assertEqual(os.listdir(cache), [])
 
 
+class CratesTests(unittest.TestCase):
+    """A crate's release: crates.io's default version by the name crates.io spells, its licence, its checksum."""
+
+    def setUp(self):
+        old = pop.API_INTERVAL
+        pop.API_INTERVAL = 0
+        self.addCleanup(setattr, pop, "API_INTERVAL", old)
+
+    def registry(self, data, licence="MIT OR Apache-2.0", checksum=None, yanked=False, extra=None):
+        version = {"num": "0.6.4", "checksum": checksum or sha(data), "license": licence, "yanked": yanked,
+                   "crate_size": len(data), "crate": "rand_core"}
+        meta = {"crate": {"name": "rand_core", "default_version": "0.6.4", "max_version": "0.7.0-pre"},
+                "versions": [version, dict(version, num="0.5.1")]}
+        pages = {API + "rand-core": json.dumps(meta).encode(), API + "rand_core": json.dumps(meta).encode(),
+                 CRATE_FILES + "rand_core/rand_core-0.6.4.crate": data}
+        pages.update(extra or {})
+        return Registry(pages)
+
+    def test_the_default_version_under_the_name_crates_io_spells(self):
+        data = b"\x1f\x8b crate bytes"
+        with tempfile.TemporaryDirectory() as cache:
+            got = pop.pin_one("crates", "rand-core", None, cache, self.registry(data))
+        self.assertEqual(got, {"id": "crates:rand_core@0.6.4", "ecosystem": "crates", "name": "rand_core",
+                               "version": "0.6.4", "filename": "rand_core-0.6.4.crate",
+                               "url": CRATE_FILES + "rand_core/rand_core-0.6.4.crate", "container": "tgz",
+                               "kind": "crate", "sha256": sha(data), "bytes": len(data)})
+        self.assertEqual(pop.validate([got]), [])
+
+    def test_a_version_the_crates_answer_leaves_out_and_build_metadata(self):
+        data = b"wasi crate"
+        version = {"num": "0.1.0+wasi-snapshot", "checksum": sha(data), "license": "Apache-2.0 WITH LLVM-exception",
+                   "yanked": False, "crate_size": len(data)}
+        reg = Registry({API + "wasi": json.dumps({"crate": {"name": "wasi", "default_version": "0.2.0"},
+                                                  "versions": []}).encode(),
+                        API + "wasi/0.1.0%2Bwasi-snapshot": json.dumps({"version": version}).encode(),
+                        CRATE_FILES + "wasi/wasi-0.1.0+wasi-snapshot.crate": data})
+        with tempfile.TemporaryDirectory() as cache:
+            got = pop.pin_one("crates", "wasi", "0.1.0+wasi-snapshot", cache, reg)
+        self.assertEqual((got["id"], got["filename"]), ("crates:wasi@0.1.0+wasi-snapshot",
+                                                         "wasi-0.1.0+wasi-snapshot.crate"))
+        self.assertEqual(pop.validate([got]), [])
+
+    def test_what_is_not_pinned(self):
+        data = b"crate"
+        with tempfile.TemporaryDirectory() as cache:
+            for reg, version, text in (
+                    (self.registry(data, licence="GPL-3.0-only"), None, "licence 'GPL-3.0-only' is not one"),
+                    (self.registry(data, licence=None), None, "licence None"),
+                    (self.registry(data, yanked=True), "0.5.1", "yanked"),
+                    (self.registry(data), "9.9.9", "404"),
+                    (self.registry(data, checksum="3" * 64), None, "not the file the registry lists")):
+                with self.subTest(text=text), self.assertRaisesRegex(pop.PinError, text):
+                    pop.pin_one("crates", "rand_core", version, cache, reg)
+            self.assertEqual(os.listdir(cache), [])
+
+    def test_crates_io_is_asked_once_a_second(self):
+        pop.API_INTERVAL = 0.2
+        reg = self.registry(b"x")
+        with tempfile.TemporaryDirectory() as cache:
+            started = time.monotonic()
+            for _ in range(3):
+                pop.pin_one("crates", "rand-core", None, cache, reg)
+        self.assertGreaterEqual(time.monotonic() - started, 0.4)
+
+    def test_the_licences_a_crate_may_be_under(self):
+        for expr, ok in (("MIT OR Apache-2.0", True), ("MIT/Apache-2.0", True), ("Unlicense/MIT", True),
+                         ("(MIT OR Apache-2.0) AND Unicode-3.0", True), ("Apache-2.0 WITH LLVM-exception", True),
+                         ("MIT OR GPL-3.0", True), ("Apache-2.0+", True), ("Zlib OR Apache-2.0 OR MIT", True),
+                         ("GPL-3.0", False), ("MIT AND GPL-2.0", False), ("MPL-2.0", False), ("GPL-2.0+", False),
+                         ("Apache-2.0 WITH Classpath-exception-2.0", False), ("CDLA-Permissive-2.0", False),
+                         ("", False), (None, False), ("MIT OR", False), ("(MIT", False), ("MIT)", False),
+                         ("(" * 5000 + "MIT" + ")" * 5000, False), (" OR ".join(["MIT"] * 40), False)):
+            with self.subTest(expr=expr):
+                self.assertEqual(pop.licence_ok(expr), ok)
+
+
 class FetchTests(unittest.TestCase):
     def test_fetched_once_named_by_sha256_and_hashed_again(self):
         data = b"the pinned bytes"
@@ -271,11 +364,26 @@ class NamesAndSpecsTests(unittest.TestCase):
             with open(exclude, "w", encoding="utf-8") as fh:
                 fh.write("npm:debug\n# the benchmark's\nTyping_Extensions\n")
             got = pop.top_names({"npm": 2, "pypi": 2}, pop.read_exclude(exclude), names)
-        self.assertEqual(got, [("npm", "semver"), ("npm", "chalk"), ("pypi", "boto3"), ("pypi", "six")])
+            self.assertEqual(got, [("npm", "semver"), ("npm", "chalk"), ("pypi", "boto3"), ("pypi", "six")])
+            with open(names, "w", encoding="utf-8") as fh:
+                json.dump({"npm": {"targets": ["semver"]}, "pypi": {"targets": ["six"]},
+                           "crates": {"targets": ["syn", "rand-core", "serde"]}}, fh)
+            with open(exclude, "w", encoding="utf-8") as fh:
+                fh.write("crates:rand_core\n")
+            got = pop.top_names(pop.parse_top("1,0,2"), pop.read_exclude(exclude), names)
+        self.assertEqual(got, [("npm", "semver"), ("crates", "syn"), ("crates", "serde")])
+
+    def test_top_counts(self):
+        self.assertEqual(pop.parse_top("800,400"), {"npm": 800, "pypi": 400})
+        self.assertEqual(pop.parse_top("800,400,500"), {"npm": 800, "pypi": 400, "crates": 500})
+        for bad in ("800", "1,2,3,4", "a,b", "1,-1"):
+            with self.subTest(top=bad), self.assertRaises(argparse.ArgumentTypeError):
+                pop.parse_top(bad)
 
     def test_specs(self):
         self.assertEqual(pop.parse_spec("npm:@babel/parser@7.29.9"), ("npm", "@babel/parser", "7.29.9"))
         self.assertEqual(pop.parse_spec("pypi:sympy"), ("pypi", "sympy", None))
+        self.assertEqual(pop.parse_spec("crates:rand_core@0.6.4"), ("crates", "rand_core", "0.6.4"))
         for bad in ("gem:rails@7", "npm:", "lodash@4"):
             with self.subTest(spec=bad), self.assertRaises(ValueError):
                 pop.parse_spec(bad)

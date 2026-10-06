@@ -5,32 +5,42 @@ The benchmark's benign set is 429 popular packages, mostly small libraries,
 and it did not hold the nine popular releases 0.1.8 made SUSPICIOUS (vite,
 vitest, monaco-editor, coverage, numba, future, sympy, ipython,
 kubernetes). This set is the latest releases of most-downloaded npm and PyPI
-packages the benchmark does not hold, pinned by version and sha256 in
-releases.jsonl beside this script, each the one file the guard scans: npm's
-tarball, and for PyPI the file pip would install on Linux x86-64 (a wheel
-for any platform, then a manylinux x86-64 wheel for CPython 3.11 or the
-stable ABI, then any manylinux x86-64 wheel, else the sdist).
+packages the benchmark does not hold, and of the most-downloaded crates
+(0.1.9, N-2), pinned by version and sha256 in releases.jsonl beside this
+script, each the one file the guard scans: npm's tarball, for PyPI the file
+pip would install on Linux x86-64 (a wheel for any platform, then a
+manylinux x86-64 wheel for CPython 3.11 or the stable ABI, then any
+manylinux x86-64 wheel, else the sdist), and a crate's .crate.
 
     python3 scripts/popular/popular.py fetch --cache DIR --manifest DIR/manifest.jsonl
     python3 scripts/bench.py run DIR/manifest.jsonl RUN.jsonl      (looped, as for the benchmark)
     python3 scripts/bench.py compare BEFORE.jsonl RUN.jsonl
 
-    python3 scripts/popular/popular.py pin --top 800,400 --exclude FILE --cache DIR    (refresh, each release)
-    python3 scripts/popular/popular.py pin npm:vite@8.3.2 pypi:sympy --cache DIR       (add or move some)
+    python3 scripts/popular/popular.py pin --top 800,400,500 --exclude FILE --cache DIR    (refresh, each release)
+    python3 scripts/popular/popular.py pin npm:vite@8.3.2 pypi:sympy crates:syn --cache DIR (add or move some)
     python3 scripts/popular/popular.py check
 
 `fetch` downloads each pinned file into DIR, named by its sha256 (a file
 already there is hashed again), refuses bytes that are not the pinned ones,
 and writes a manifest for scripts/bench.py, every release in the category
-"benign". `pin --top N,M` takes the first N npm and M PyPI names of
-python/src/lazaret/registry/popular_names.json (the most downloaded), less
-the names --exclude lists (one per line, "npm:name", "pypi:name", or a bare
-name for both: the benchmark's benign set), resolves each one's latest
-release, downloads its file into DIR to hash it, and writes releases.jsonl
-anew; a name whose release can't be pinned (no file, a file over the size
-limit, a registry error) is reported and left out. With specs, `pin`
-pins those releases (the latest one when a spec names no version) and keeps
-the others. `check` validates releases.jsonl.
+"benign". `pin --top N,M,K` takes the first N npm, M PyPI and K crates
+names of python/src/lazaret/registry/popular_names.json (the most
+downloaded), less the names --exclude lists (one per line, "npm:name",
+"pypi:name", "crates:name", or a bare name for all: the benchmark's benign
+set), resolves each one's latest release, downloads its file into DIR to
+hash it, and writes releases.jsonl anew; a name whose release can't be
+pinned (no file, a file over the size limit, a registry error) is reported
+and left out. With specs, `pin` pins those releases (the latest one when a
+spec names no version) and keeps the others. `check` validates
+releases.jsonl.
+
+A crate's release is crates.io's default version (the highest stable one
+not yanked), read from crates.io's API at one request a second (its crawler
+policy), with the sha256 the registry lists; its .crate comes from
+static.crates.io. A crate is pinned only under licences Apache-2.0's terms
+can take in (LICENCES: MIT, Apache-2.0, the BSD licences, ISC, Zlib, …),
+since the findings on this set are read, and code under other licences is
+not reviewed.
 
 Only https from the registries' own hosts is fetched. Standard library only;
 nothing is unpacked or run here (bench.py scans in memory).
@@ -43,6 +53,7 @@ import os
 import pathlib
 import re
 import sys
+import time
 import urllib.parse
 import urllib.request
 
@@ -51,18 +62,28 @@ ROOT = HERE.parent.parent
 RELEASES = HERE / "releases.jsonl"
 NAMES = ROOT / "python" / "src" / "lazaret" / "registry" / "popular_names.json"
 
-ECOSYSTEMS = ("npm", "pypi")
+ECOSYSTEMS = ("npm", "pypi", "crates")
 NPM_REGISTRY = "https://registry.npmjs.org/"
 PYPI_JSON = "https://pypi.org/pypi/"
+CRATES_API = "https://crates.io/api/v1/crates/"
+CRATES_FILES = "https://static.crates.io/crates/"
 #: the hosts a pinned file may come from, by ecosystem
-FILE_HOSTS = {"npm": ("registry.npmjs.org",), "pypi": ("files.pythonhosted.org",)}
+FILE_HOSTS = {"npm": ("registry.npmjs.org",), "pypi": ("files.pythonhosted.org",), "crates": ("static.crates.io",)}
+#: seconds between two requests to crates.io's API (its crawler policy: one a second)
+API_INTERVAL = 1.0
+#: the licences a pinned crate may be under (SPDX ids, lower case; "+" or "-or-later" is the same licence): ones
+#: Apache-2.0's terms can take in, since the set's findings are read; LICENCE_EXCEPTIONS may follow WITH
+LICENCES = frozenset(("mit", "mit-0", "apache-2.0", "bsd-2-clause", "bsd-3-clause", "0bsd", "isc", "zlib",
+                      "unicode-3.0", "unicode-dfs-2016", "bsl-1.0", "cc0-1.0", "unlicense"))
+LICENCE_EXCEPTIONS = frozenset(("llvm-exception",))
+MAX_LICENCE_TOKENS = 64
 MAX_FILE_BYTES = 100 << 20         # a release file larger than this is not pinned (torch, tensorflow)
 MAX_META_BYTES = 64 << 20          # a registry's JSON answer
 FETCH_TIMEOUT = 90
-USER_AGENT = "lazaret-popular-set"
+USER_AGENT = "lazaret-popular-set (https://lazaret.dev)"
 FIELDS = ("id", "ecosystem", "name", "version", "filename", "url", "container", "kind", "sha256", "bytes")
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
-SPEC_RE = re.compile(r"^(npm|pypi):((?:@[^/@\s]+/)?[^@\s]+)(?:@([^@\s]+))?$")
+SPEC_RE = re.compile(r"^(npm|pypi|crates):((?:@[^/@\s]+/)?[^@\s]+)(?:@([^@\s]+))?$")
 
 EXIT_OK, EXIT_INVALID, EXIT_USAGE, EXIT_FETCH = 0, 1, 2, 3
 
@@ -85,6 +106,8 @@ def container_kind(eco, filename):
     low = filename.lower()
     if eco == "npm":
         return ("tgz", "npm") if low.endswith(".tgz") else None
+    if eco == "crates":
+        return ("tgz", "crate") if low.endswith(".crate") else None
     if low.endswith(".whl"):
         return "zip", "wheel"
     if low.endswith((".tar.gz", ".tgz")):
@@ -97,6 +120,66 @@ def container_kind(eco, filename):
 def url_allowed(url, eco):
     parts = urllib.parse.urlsplit(url)
     return parts.scheme == "https" and (parts.hostname or "") in FILE_HOSTS.get(eco, ())
+
+
+def licence_ok(expr):
+    """True when the SPDX expression `expr` (crates.io's `license`, where "/" is the old OR) lets the code be taken
+    under LICENCES alone: an OR needs one side, an AND both, "X WITH Y" a LICENCE_EXCEPTIONS exception. No
+    expression, or one that can't be read (or of more than MAX_LICENCE_TOKENS words), is False."""
+    tokens = re.findall(r"[()/]|[^\s()/]+", expr or "")
+    if len(tokens) > MAX_LICENCE_TOKENS:                # the registry's text: no deep nesting read
+        return False
+    pos = 0
+
+    def at(*words):
+        return pos < len(tokens) and tokens[pos].lower() in words
+
+    def one():
+        nonlocal pos
+        if pos >= len(tokens):
+            raise ValueError("an expression ends early")
+        tok = tokens[pos]
+        pos += 1
+        if tok == "(":
+            ok = either()
+            if not at(")"):
+                raise ValueError("no )")
+            pos += 1
+            return ok
+        if tok in (")", "/") or tok.lower() in ("and", "or", "with"):
+            raise ValueError(f"{tok} out of place")
+        name = tok.lower()
+        name = name[:-1] if name.endswith("+") else name[:-len("-or-later")] if name.endswith("-or-later") else name
+        ok = name in LICENCES
+        if at("with"):
+            pos += 1
+            if pos >= len(tokens):
+                raise ValueError("WITH and no exception")
+            ok = ok and tokens[pos].lower() in LICENCE_EXCEPTIONS
+            pos += 1
+        return ok
+
+    def both():
+        nonlocal pos
+        ok = one()
+        while at("and"):
+            pos += 1
+            ok = one() and ok
+        return ok
+
+    def either():
+        nonlocal pos
+        ok = both()
+        while at("or", "/"):
+            pos += 1
+            ok = both() or ok
+        return ok
+
+    try:
+        ok = either()
+    except ValueError:
+        return False
+    return ok and pos == len(tokens)
 
 
 def validate(rows):
@@ -165,6 +248,18 @@ def get_json(url, opener=urllib.request.urlopen):
         return json.loads(get(url, MAX_META_BYTES, opener))
     except ValueError as exc:
         raise PinError(f"{url}: not JSON ({exc})") from exc
+
+
+_api_last = [float("-inf")]
+
+
+def crates_api(path, opener=urllib.request.urlopen):
+    """crates.io's API answer at `path`, at most one request each API_INTERVAL seconds."""
+    wait = _api_last[0] + API_INTERVAL - time.monotonic()
+    if wait > 0:
+        time.sleep(wait)
+    _api_last[0] = time.monotonic()
+    return get_json(CRATES_API + path, opener)
 
 
 def sha256_file(path):
@@ -240,6 +335,33 @@ def pypi_pick(files):
     return None
 
 
+def resolve_crate(name, version=None, opener=urllib.request.urlopen):
+    """-> (the crate's name as crates.io spells it, version, its .crate's url, the sha256 crates.io lists): the
+    default version (the highest stable one not yanked) unless `version` is given. PinError for a release that is
+    yanked, over the size limit, or under a licence LICENCES does not take."""
+    meta = crates_api(urllib.parse.quote(name, safe=""), opener)
+    crate = meta.get("crate") or {}
+    canonical = crate.get("name")
+    want = version or crate.get("default_version") or crate.get("max_stable_version") or crate.get("max_version")
+    if not isinstance(canonical, str) or not isinstance(want, str) or not want:
+        raise PinError(f"crates:{name}: no release in the registry's answer")
+    entry = next((v for v in meta.get("versions") or () if isinstance(v, dict) and v.get("num") == want), None)
+    if entry is None:                                  # an old version the crate's answer leaves out
+        entry = crates_api(f"{urllib.parse.quote(canonical, safe='')}/{urllib.parse.quote(want, safe='')}",
+                           opener).get("version") or {}
+    if entry.get("num") != want:
+        raise PinError(f"crates:{canonical}@{want}: no such release")
+    if entry.get("yanked"):
+        raise PinError(f"crates:{canonical}@{want}: yanked")
+    if not licence_ok(entry.get("license")):
+        raise PinError(f"crates:{canonical}@{want}: licence {entry.get('license')!r} is not one the set takes")
+    if (entry.get("crate_size") or 0) > MAX_FILE_BYTES:
+        raise PinError(f"crates:{canonical}@{want}: over {MAX_FILE_BYTES >> 20} MiB")
+    q = urllib.parse.quote(canonical, safe="")
+    url = f"{CRATES_FILES}{q}/{q}-{urllib.parse.quote(want, safe='+')}.crate"     # "+": semver's build metadata
+    return canonical, want, url, entry.get("checksum")
+
+
 def resolve(eco, name, version=None, opener=urllib.request.urlopen):
     """-> the release's row, without sha256 and bytes (and with "expect_sha256" when the registry gives it)."""
     if eco == "npm":
@@ -260,6 +382,8 @@ def resolve(eco, name, version=None, opener=urllib.request.urlopen):
         url, expect = picked.get("url"), (picked.get("digests") or {}).get("sha256")
         if (picked.get("size") or 0) > MAX_FILE_BYTES:
             raise PinError(f"pypi:{name}@{version}: {picked['filename']} is over {MAX_FILE_BYTES >> 20} MiB")
+    elif eco == "crates":
+        name, version, url, expect = resolve_crate(name, version, opener)
     else:
         raise PinError(f"unknown ecosystem {eco!r}")
     filename = urllib.parse.urlsplit(url).path.rsplit("/", 1)[-1]
@@ -287,7 +411,8 @@ def pin_one(eco, name, version, cache, opener=urllib.request.urlopen):
 
 # ---- which names
 def read_exclude(path):
-    """-> {(eco, name)}: "npm:name", "pypi:name", or a bare name for both; # starts a comment."""
+    """-> {(eco, name)}: "npm:name", "pypi:name", "crates:name", or a bare name for every ecosystem; # starts a
+    comment."""
     out = set()
     with open(path, encoding="utf-8") as fh:
         for line in fh:
@@ -303,9 +428,11 @@ def read_exclude(path):
 
 
 def normal(eco, name):
-    """A name as the registry compares it (PEP 503 for PyPI; npm names are lower case)."""
+    """A name as the registry compares it (PEP 503 for PyPI; npm names are lower case; crates.io takes - for _)."""
     name = name.strip().lower()
-    return re.sub(r"[-_.]+", "-", name) if eco == "pypi" else name
+    if eco == "pypi":
+        return re.sub(r"[-_.]+", "-", name)
+    return name.replace("_", "-") if eco == "crates" else name
 
 
 def top_names(counts, exclude=frozenset(), names_path=NAMES):
@@ -315,6 +442,8 @@ def top_names(counts, exclude=frozenset(), names_path=NAMES):
     out = []
     for eco in ECOSYSTEMS:
         want = counts.get(eco, 0)
+        if want <= 0:
+            continue
         for name in data[eco]["targets"]:
             if want <= 0:
                 break
@@ -334,12 +463,14 @@ def parse_spec(spec):
 
 def parse_top(text):
     try:
-        npm, pypi = (int(x) for x in text.split(","))
+        counts = [int(x) for x in text.split(",")]
     except ValueError:
-        raise argparse.ArgumentTypeError("--top takes N,M (npm names, PyPI names)") from None
-    if npm < 0 or pypi < 0:
+        counts = []
+    if len(counts) not in (2, 3):
+        raise argparse.ArgumentTypeError("--top takes N,M[,K] (npm names, PyPI names, crates names)")
+    if min(counts) < 0:
         raise argparse.ArgumentTypeError("--top takes counts of 0 or more")
-    return {"npm": npm, "pypi": pypi}
+    return dict(zip(ECOSYSTEMS, counts))
 
 
 def bench_manifest(rows, paths):
@@ -364,7 +495,7 @@ def cmd_check(args):
     for p in problems:
         _say(p)
     counts = {eco: sum(1 for r in rows if isinstance(r, dict) and r.get("ecosystem") == eco) for eco in ECOSYSTEMS}
-    print(f"{len(rows)} releases ({counts['npm']} npm, {counts['pypi']} PyPI); "
+    print(f"{len(rows)} releases ({counts['npm']} npm, {counts['pypi']} PyPI, {counts['crates']} crates); "
           f"{len(problems)} problem{'' if len(problems) == 1 else 's'}")
     return EXIT_INVALID if problems else EXIT_OK
 
@@ -398,7 +529,7 @@ def cmd_fetch(args, opener=urllib.request.urlopen):
 
 def cmd_pin(args, opener=urllib.request.urlopen):
     if bool(args.specs) == bool(args.top):
-        _say("error: pin takes specs or --top N,M (not both)")
+        _say("error: pin takes specs or --top N,M[,K] (not both)")
         return EXIT_USAGE
     try:
         if args.top:
@@ -440,7 +571,8 @@ def build_parser():
     f.set_defaults(func=cmd_fetch)
     n = sub.add_parser("pin", help="resolve releases, hash their files and write the pinned file")
     n.add_argument("specs", nargs="*", metavar="ecosystem:name[@version]")
-    n.add_argument("--top", type=parse_top, help="N,M: the first N npm and M PyPI popular names (replaces the file)")
+    n.add_argument("--top", type=parse_top,
+                   help="N,M[,K]: the first N npm, M PyPI and K crates popular names (replaces the file)")
     n.add_argument("--exclude", help="names to leave out of --top, one per line")
     n.add_argument("--cache", required=True, help="where the downloaded files go, named by sha256")
     n.set_defaults(func=cmd_pin)
