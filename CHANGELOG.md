@@ -454,6 +454,13 @@ project is pre-1.0, so the 0.x API may still change.
 
 ### Fixed
 
+- **`lazaret guard --plan cargo …` runs none of the project's programs (GR-1).** When it
+  updates a lock, cargo asks the compiler its version, through the wrappers and the
+  compiler a project's `.cargo/config.toml` names (`build.rustc-wrapper`,
+  `build.rustc-workspace-wrapper`, `build.rustc`; checked with cargo 1.95), so a dry run
+  ran them. Under `--plan` the guard's cargo commands set them aside (`--config`), and
+  the compiler cargo finds by itself answers; without `--plan` the command runs as the
+  project configures it, as cargo would run it.
 - **The cloud's and the registries' credential files are credential stores (GR-7).** A
   file read and sent is a harvest ("reads credentials or the whole environment and sends
   data over the network", and an exfiltration service's address counts as where it went)

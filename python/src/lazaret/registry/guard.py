@@ -57,7 +57,9 @@ unpacked already too, is read from cargo's cache or fetched from where cargo fet
 it: source replacement, [registries], include, --config), checked against the lockfile's checksum and scanned in memory as a
 `.crate`; a SUSPICIOUS one, one that could not be checked or one younger than --min-age (the index's `pubtime`, else
 crates.io's API) blocks the command and Cargo.toml and Cargo.lock are put back. Only then does cargo fetch and build, with
---locked (`cargo install NAME@=VERSION`), which is when build scripts and procedural macros run. Cargo.lock lists the crates
+--locked (`cargo install NAME@=VERSION`), which is when build scripts and procedural macros run. Under --plan, the compiler
+and the wrappers the project's configuration names, which cargo runs to learn the compiler's version while it
+resolves, are set aside (CARGO_PLAN_CONFIG): a dry run runs none of the project's programs. Cargo.lock lists the crates
 of every platform, so the guard checks those cargo would not build here too (a verdict is kept by checksum: once). A crate
 from git, a vendor folder or a local registry, from a registry with a git index, or from one that wants credentials, is
 INCOMPLETE, not checked. Not wrapped: `cargo install` of a git repository or a folder, --registry, --index, and the
@@ -3993,10 +3995,17 @@ def _check_install(ctx, relay, exe, env, folder, packages, private):
 
 
 # ---------------- Cargo crates (0.1.9) ----------------
-#: commands that are the resolution themselves (they edit Cargo.toml or Cargo.lock and run no crate's code, though cargo may run a
-#: program the project's own configuration names, a rustc wrapper, to learn the compiler's version); every other command
-#: the guard wraps first resolves, with `cargo update --workspace`, then checks, then runs
+#: commands that are the resolution themselves (they edit Cargo.toml or Cargo.lock and run no crate's code, though cargo runs
+#: the compiler, or a wrapper, the project's own configuration names to learn its version: not under --plan,
+#: CARGO_PLAN_CONFIG); every other command the guard wraps first resolves, with `cargo update --workspace`, then checks,
+#: then runs
 CARGO_RESOLVES = frozenset(("add", "update", "generate-lockfile"))
+#: what --plan gives every cargo command it runs (GR-1): while it resolves, cargo asks the compiler its version (`rustc -vV`)
+#: through the project's `build.rustc-wrapper`, `build.rustc-workspace-wrapper` and `build.rustc` (checked with cargo 1.95,
+#: editions 2021 and 2024), programs the project's configuration names; a dry run runs none of them, and the compiler cargo
+#: finds by itself (PATH's rustc, rustup's) answers. Without --plan the command runs as the project configures it.
+CARGO_PLAN_CONFIG = ("--config", 'build.rustc-wrapper=""', "--config", 'build.rustc-workspace-wrapper=""',
+                     "--config", 'build.rustc="rustc"')
 CARGO_BUILDS = frozenset(("build", "b", "check", "c", "clippy", "doc", "d", "test", "t", "bench", "run", "r", "fix", "fetch",
                           "vendor", "rustc", "rustdoc", "package"))
 CRATES_API = "https://crates.io/api/v1/crates/"
@@ -4011,6 +4020,11 @@ def cargo_toolchain(args):
     """(["+nightly"] or [], the rest): rustup's toolchain choice comes before the command and goes before every command the
     guard runs."""
     return ([args[0]], list(args[1:])) if args and args[0].startswith("+") else ([], list(args))
+
+
+def cargo_plan_config(ctx):
+    """The `--config` options of the cargo commands the guard runs: CARGO_PLAN_CONFIG under --plan, else none."""
+    return list(CARGO_PLAN_CONFIG) if ctx.opts.plan else []
 
 
 def cargo_workspace(exe, tc, env, cwd, manifest):
@@ -4230,12 +4244,12 @@ def guard_cargo(ctx, args):
     restored, proc = [], None
     try:
         if sub in CARGO_RESOLVES:
-            proc = run_tool([exe, *tc, *rest], env, cwd=cwd)
+            proc = run_tool([exe, *tc, sub, *cargo_plan_config(ctx), *rest[1:]], env, cwd=cwd)
             if proc.returncode != 0:
                 return finish(ctx, installed=False, restored=snap.restore(), code=proc.returncode)
         elif not project.locked:
-            resolve = [exe, *tc, "update", "--workspace"] + (["--manifest-path", project.manifest_path] if project.manifest_path else []) \
-                + (["--offline"] if project.offline else [])
+            resolve = [exe, *tc, "update", *cargo_plan_config(ctx), "--workspace"] \
+                + (["--manifest-path", project.manifest_path] if project.manifest_path else []) + (["--offline"] if project.offline else [])
             proc = run_tool(resolve, env, cwd=cwd, capture=True)
             if proc.returncode != 0:
                 show_failure(ctx, f"resolving (cargo {sub})", proc)
@@ -4277,7 +4291,8 @@ def cargo_scratch_lock(ctx, exe, tc, env, scratch, name, req, offline, cwd):
                 f'[dependencies]\n{name} = {json.dumps(req or "*")}\n')
     with open(os.path.join(scratch, "src", "lib.rs"), "w", encoding="utf-8") as f:
         f.write("")
-    argv = [exe, *tc, "generate-lockfile", "--manifest-path", os.path.join(scratch, "Cargo.toml")] + (["--offline"] if offline else [])
+    argv = [exe, *tc, "generate-lockfile", *cargo_plan_config(ctx), "--manifest-path", os.path.join(scratch, "Cargo.toml")] \
+        + (["--offline"] if offline else [])
     proc = run_tool(argv, env, cwd=cwd, capture=True)
     if proc.returncode != 0:
         show_failure(ctx, f"resolving (cargo install {name})", proc)
@@ -4379,7 +4394,7 @@ def cargo_crate_lock(ctx, exe, tc, env, folder, data, root, offline, cwd):
     if not own_workspace:
         with open(manifest, "a", encoding="utf-8") as f:
             f.write("\n[workspace]\n")
-    argv = [exe, *tc, "generate-lockfile", "--manifest-path", manifest] + (["--offline"] if offline else [])
+    argv = [exe, *tc, "generate-lockfile", *cargo_plan_config(ctx), "--manifest-path", manifest] + (["--offline"] if offline else [])
     proc = run_tool(argv, env, cwd=cwd, capture=True)
     if proc.returncode != 0:
         show_failure(ctx, f"resolving (cargo install {root.name}, the crate's own lock)", proc)

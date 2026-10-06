@@ -1021,7 +1021,7 @@ class LockedAndPlanTests(FlowCase):
         self.plan = {"update": [["lock", self.lock_of(("leaf", "1.0.0"))]]}
         code, out = self.run_guard("--plan", "cargo", "build")
         self.assertEqual(code, 0, out)
-        self.assertEqual(self.commands(), [["update", "--workspace"]])
+        self.assertEqual(self.commands(), [["update", *guard.CARGO_PLAN_CONFIG, "--workspace"]])   # (GR-1)
         self.assertIn("nothing blocked (--plan: nothing was installed; Cargo.lock put back)", out)
         self.assertEqual(self.read(self.lock), OLD_LOCK)
 
@@ -1029,7 +1029,7 @@ class LockedAndPlanTests(FlowCase):
         self.plan = {"update": [["lock", self.lock_of(("evil", "1.0.0"))]]}
         code, out = self.run_guard("--plan", "cargo", "build")
         self.assertEqual(code, 1, out)
-        self.assertEqual(self.commands(), [["update", "--workspace"]])
+        self.assertEqual(self.commands(), [["update", *guard.CARGO_PLAN_CONFIG, "--workspace"]])
 
     def test_json_says_what_was_checked(self):
         self.plan = {"update": [["lock", self.lock_of(("leaf", "1.0.0"), ("evil", "1.0.0"))]]}
@@ -1441,6 +1441,34 @@ class RealCargoTests(TmpCase):
         self.assertNotIn("installed but not checked", out)
         self.assertTrue(os.path.isdir(os.path.join(self.tmp, "target", "debug")))
         self.assertTrue(os.path.isdir(os.path.join(self.home, "registry", "src")))
+
+    def test_a_plan_runs_no_compiler_or_wrapper_the_project_names(self):
+        """GR-1: cargo asks the compiler's version while it resolves (`rustc -vV`), through the project's
+        build.rustc-wrapper, build.rustc-workspace-wrapper and build.rustc; under --plan it runs none of them. Without
+        --plan the command runs as the project configures it, and cargo runs them."""
+        marker = os.path.join(self.tmp, "ran.log")
+        script = os.path.join(self.tmp, "wrap.sh")
+        with open(script, "w", encoding="utf-8") as f:
+            f.write(f'#!/bin/sh\necho "$*" >> "{marker}"\nif [ "$1" = "-vV" ]; then exec rustc "$@"; fi\nexec "$@"\n')
+        os.chmod(script, 0o755)
+        os.makedirs(os.path.join(self.dir, ".cargo"))
+        # (cargo 1.95 asks the compiler when it updates a lock that exists)
+        lock = 'version = 4\n\n[[package]]\nname = "app"\nversion = "0.1.0"\n'
+        for k, key in enumerate(("rustc-wrapper", "rustc-workspace-wrapper", "rustc")):
+            with self.subTest(key=key):
+                self.write(".cargo/config.toml", f'[build]\n{key} = "{script}"\n')
+                self.write("Cargo.lock", lock)
+                # (each run with a target folder of its own: cargo keeps what the compiler said there)
+                self.env["CARGO_TARGET_DIR"] = os.path.join(self.tmp, f"target-{k}")
+                code, out = self.guard("cargo", "update")
+                self.assertEqual(code, 0, out)
+                self.assertTrue(os.path.exists(marker), "cargo itself runs what the project names")
+                os.remove(marker)
+                self.env["CARGO_TARGET_DIR"] = os.path.join(self.tmp, f"target-{k}-plan")
+                self.write("Cargo.lock", lock)
+                code, out = self.guard("--plan", "cargo", "update")
+                self.assertEqual(code, 0, out)
+                self.assertFalse(os.path.exists(marker), gs.read(marker))
 
     def test_a_hostile_dependency_never_reaches_cargo(self):
         self.depend("parent")
