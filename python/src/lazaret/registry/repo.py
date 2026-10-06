@@ -340,15 +340,18 @@ class ScanCancelled(Exception):
 #: The ecosystems whose names, versions, resolving and digest live in a
 #: registry module (registry/ecosystems; Part C wires them in, X-2's part):
 #: `go:<module path>[@version]`, `crates:<name>[@version]` and, since E-1's
-#: second part, `openvsx:<namespace>.<name>[@version]` (a VS Code extension).
-#: npm and PyPI keep their code in this file until X-2 moves it.
-MODULE_ECOSYSTEMS = ("go", "crates", "openvsx")
+#: second part, `openvsx:<namespace>.<name>[@version]` and
+#: `vscode:<publisher>.<name>[@version]` (a VS Code extension from Open VSX or
+#: the Visual Studio Marketplace). npm and PyPI keep their code in this file
+#: until X-2 moves it.
+MODULE_ECOSYSTEMS = ("go", "crates", "openvsx", "vscode")
 ECOSYSTEMS = ("npm", "pypi") + MODULE_ECOSYSTEMS
 
 
 def registry_module(eco):
     """The registry module of `eco` (golang.ECOSYSTEM, crates.ECOSYSTEM,
-    openvsx.ECOSYSTEM), or None for npm, PyPI and anything else. Imported when
+    openvsx.ECOSYSTEM, vsmarketplace.ECOSYSTEM), or None for npm, PyPI and
+    anything else. Imported when
     first asked for: a sweep of npm and PyPI packages never loads them."""
     if eco == "go":
         from lazaret.registry.ecosystems import golang
@@ -359,6 +362,9 @@ def registry_module(eco):
     if eco == "openvsx":
         from lazaret.registry.ecosystems import openvsx
         return openvsx.ECOSYSTEM
+    if eco == "vscode":
+        from lazaret.registry.ecosystems import vsmarketplace
+        return vsmarketplace.ECOSYSTEM
     return None
 
 
@@ -428,15 +434,16 @@ def _check_version(eco, version):
 def parse_spec(spec):
     """'npm:@scope/pkg@1.2.3' -> ('npm', '@scope/pkg', '1.2.3'); version may be None.
     'go:github.com/pkg/errors@v0.9.1', 'crates:serde@1.0.0' and
-    'openvsx:redhat.vscode-yaml@1.0.0' are read by their registry module (a Go
+    'openvsx:redhat.vscode-yaml@1.0.0' and 'vscode:redhat.vscode-yaml@1.0.0' are
+    read by their registry module (a Go
     version is v1.2.3; a crate's has no v)."""
     if not isinstance(spec, str) or ":" not in spec:
-        raise SpecError(f"Spec must be npm:<name>, pypi:<name>, go:<module>, crates:<name> or "
-                        f"openvsx:<namespace>.<name> — got {spec!r}")
+        raise SpecError(f"Spec must be npm:<name>, pypi:<name>, go:<module>, crates:<name>, "
+                        f"openvsx:<namespace>.<name> or vscode:<publisher>.<name> — got {spec!r}")
     eco, rest = spec.split(":", 1)
     eco = eco.strip().lower()
     if eco not in ECOSYSTEMS:
-        raise SpecError(f"Unknown ecosystem {eco!r} (use npm, pypi, go, crates or openvsx)")
+        raise SpecError(f"Unknown ecosystem {eco!r} (use npm, pypi, go, crates, openvsx or vscode)")
     module = registry_module(eco)
     if module is not None:
         name, ver = module.parse_spec(rest)
@@ -558,15 +565,17 @@ def _module_opener(check):
 
 
 def module_transport(url, max_bytes=MAX_DOWNLOAD_BYTES, accept=None, timeout=DOWNLOAD_TIMEOUT,
-                     check_redirect=None):
+                     check_redirect=None, data=None, content_type=None):
     """The transport a registry module's `base.Fetch` is given (X-2): _fetch's
     bounded, timed read, with the module's URL rule (`check_redirect`, which
-    `Fetch` passes) for the URL and for every redirect. The network seam for
-    go: and crates: (tests patch it with recorded responses)."""
+    `Fetch` passes) for the URL and for every redirect; `data` and
+    `content_type` make it a POST (the Marketplace's gallery query). The
+    network seam for go:, crates:, openvsx: and vscode: (tests patch it with
+    recorded responses)."""
     if check_redirect is None:
         raise FetchError("a registry module's fetch needs the module's URL rule")
     with timings.span("network", "fetch"):
-        return _fetch_bytes(url, max_bytes, timeout, accept, None, None,
+        return _fetch_bytes(url, max_bytes, timeout, accept, data, content_type,
                             opener=_module_opener(check_redirect), validate=check_redirect)
 
 
@@ -4031,19 +4040,44 @@ def _extension_fields(eco, resolved, brings, startup, kinds):
         return {}
     info = getattr(resolved, "info", None)
     info = info if isinstance(info, dict) else {}
-    registry = {k: info.get(k) for k in ("verified", "unrelatedPublisher", "publishedBy", "provider", "preRelease",
-                                         "deprecated", "timestamp") if k in info}
+    keys = REGISTRY_INFO_KEYS.get(eco, ())
+    registry = {k: info.get(k) for k in keys if k in info}
     return {"extensionDependencies": sorted(brings), "startupEvent": startup,
-            **({"registryInfo": registry} if eco == "openvsx" else {})}
+            **({"registryInfo": registry} if keys else {})}
+
+
+#: what a VS Code extension's registry says of its publisher, kept in the
+#: result (`registryInfo`): Open VSX's namespace and publisher, the
+#: Marketplace's publisher, its verified domain, the install count, and that
+#: it publishes no digest (`digest`: None)
+REGISTRY_INFO_KEYS = {
+    "openvsx": ("verified", "unrelatedPublisher", "publishedBy", "provider", "preRelease", "deprecated", "timestamp"),
+    "vscode": ("publisher", "publisherDisplayName", "verified", "domain", "installs", "preRelease", "lastUpdated",
+               "digest"),
+}
 
 
 def registry_lines(res):
-    """What print_scan says of an extension's publisher, from `registryInfo`
-    (Open VSX): the namespace verified or not, who published the version, a
-    pre-release, deprecated."""
+    """What print_scan says of an extension's publisher, from `registryInfo`:
+    Open VSX's namespace verified or not, who published the version, a
+    pre-release, deprecated; the Marketplace's publisher's domain verified or
+    not, the install count, a pre-release, and that it publishes no digest."""
     info = res.get("registryInfo") or {}
     if not info:
         return []
+    if res.get("ecosystem") == "vscode":
+        name = "Visual Studio Marketplace"
+        if info.get("verified"):
+            line = f"{name}: the publisher's domain is verified" + (f" ({info['domain']})" if info.get("domain") else "")
+        else:
+            line = f"{name}: the publisher's domain is not verified"
+        if isinstance(info.get("installs"), int):
+            line += f"; {info['installs']:,} installs"
+        lines = [line]
+        if info.get("preRelease"):
+            lines.append(f"{name}: a pre-release version")
+        lines.append(f"{name}: no digest is published, so the files were scanned unverified")
+        return lines
     who = info.get("publishedBy")
     by = f", published by {who}" + (f" ({info['provider']})" if info.get("provider") else "") if who else ""
     if info.get("verified"):
@@ -5637,13 +5671,14 @@ def main():
     global SCAN_TIMEOUT, MAX_ARTIFACTS, MAX_PACKAGE_DOWNLOAD_BYTES, MAX_MEMBER
     lazaret.configure_stdio()
     ap = argparse.ArgumentParser(prog="lazaret-registry",
-                                 description="Lazaret registry scanner: npm, PyPI, Go modules, crates and Open VSX "
-                                             "extensions")
+                                 description="Lazaret registry scanner: npm, PyPI, Go modules, crates and VS Code "
+                                             "extensions (Open VSX, the Visual Studio Marketplace)")
     ap.add_argument("--version", action="version",
                     version=f"lazaret-registry {lazaret.VERSION} (engine: {_engine.describe()})")
     ap.add_argument("command", choices=["add", "scan", "scan-all", "list", "report", "discover"])
     ap.add_argument("specs", nargs="*", help="npm:<name>[@ver], pypi:<name>[@ver], go:<module>[@vX.Y.Z], "
-                                             "crates:<name>[@ver] or openvsx:<namespace>.<name>[@ver]")
+                                             "crates:<name>[@ver], openvsx:<namespace>.<name>[@ver] or "
+                                             "vscode:<publisher>.<name>[@ver]")
     ap.add_argument("--db", default=os.environ.get("LAZARET_DB", "lazaret-registry.db"),
                     help="SQLite path (or sqlite:PATH), postgres:// URL or libpq "
                          "'host=… dbname=…' string (env LAZARET_DB)")

@@ -70,7 +70,8 @@ MEMBER_ATOMS = ("", ".", "..", "/", "//", "\\", "a", "a/b", "../a", "a/../b", "/
                 "a\\..\\b", "a/./b", "./a", "a//b", "a/b/", "\0", "a\0b", "\u202e", "%2e%2e/x", "..%2fa", "a" * 5000,
                 "../" * 100 + "x", "x/" * 1000, "a/..", "a/../..", "/../a", "~/a", "$HOME/a", "CON", "a:b")
 
-HOSTS_RE = re.compile(r"^[a-z0-9]([a-z0-9.-]*[a-z0-9])?(:[0-9]{1,5})?$")
+#: a host[:port], or `*.` and a domain: one DNS label before it (`base.host_allowed`; the Marketplace's CDN hosts)
+HOSTS_RE = re.compile(r"^(\*\.)?[a-z0-9]([a-z0-9.-]*[a-z0-9])?(:[0-9]{1,5})?$")
 
 
 def _host_of(url):
@@ -128,7 +129,7 @@ class EcosystemContract:
         asked = []
         lock = threading.Lock()
 
-        def transport(url, *, max_bytes, accept, timeout, check_redirect):
+        def transport(url, *, max_bytes, accept, timeout, check_redirect, data=None, content_type=None):
             with lock:
                 asked.append(url)
             body = responses.get(url, default)
@@ -146,6 +147,10 @@ class EcosystemContract:
         name, good = self.GOOD_SPEC
         fetch, asked = self.fetch_for(self.responses())
         return self.eco.resolve(name, good if version == "spec" else version, fetch), fetch, asked
+
+    def plain_host(self):
+        """The first of the module's hosts that is one host (not a `*.` entry)."""
+        return min(h for h in self.eco.hosts if not h.startswith("*."))
 
     def assertRefusal(self, call, exc=base.SpecError):
         """`call()` raises `exc`, and its message is a sentence of printable text, not a copy of the input."""
@@ -274,7 +279,7 @@ class EcosystemContract:
 
     # ---- a name in a URL
     def test_a_checked_name_and_version_cannot_change_where_a_url_goes(self):
-        host = sorted(self.eco.hosts)[0]
+        host = self.plain_host()
         for value in tuple(self.GOOD_NAMES) + tuple(self.GOOD_VERSIONS):
             with self.subTest(value=value):
                 seg = self.eco.segment(value)
@@ -311,14 +316,14 @@ class EcosystemContract:
             parts = urllib.parse.urlsplit(art["url"])
             self.assertEqual(parts.scheme, "https")
             self.assertTrue(printable(art["url"]) and art["url"].isascii())
-            self.assertIn(parts.netloc.lower(), self.eco.hosts, "an artifact on a host the module did not declare")
+            self.assertTrue(base.host_allowed(self.eco.hosts, parts.netloc.lower()), "an artifact on a host the module did not declare")
         for item in res.skipped:
             self.assertEqual(set(item), {"filename", "packagetype", "installable", "size", "reason"})
             self.assertTrue(printable(item["reason"]))
         for url in asked:
             parts = urllib.parse.urlsplit(url)
             self.assertEqual(parts.scheme, "https")
-            self.assertIn(parts.netloc.lower(), self.eco.hosts, "a request to a host the module did not declare")
+            self.assertTrue(base.host_allowed(self.eco.hosts, parts.netloc.lower()), "a request to a host the module did not declare")
 
     def test_resolve_gives_the_documented_shape_from_recorded_responses(self):
         res, fetch, asked = self.resolve_good()
@@ -349,7 +354,7 @@ class EcosystemContract:
                     fetch, asked = self.fetch_for({}, default=body)
                     caught = self.assertRefusal(lambda: self.eco.resolve(name, want, fetch), ValueError)
                     for line in asked:
-                        self.assertIn(_host_of(line), {h.split(":")[0] for h in self.eco.hosts})
+                        self.assertTrue(base.host_allowed({h.split(":")[0] for h in self.eco.hosts}, _host_of(line)))
 
     def test_resolve_survives_a_transport_that_fails_in_its_own_words(self):
         name, version = self.GOOD_SPEC
@@ -369,10 +374,10 @@ class EcosystemContract:
 
     def test_a_document_that_names_an_artifact_on_another_host_is_refused(self):
         name, version = self.GOOD_SPEC
-        for url in ("https://evil.example/pkg.tgz", "http://%s/pkg.tgz" % sorted(self.eco.hosts)[0],
-                    "file:///etc/passwd", "https://%s@evil.example/p.tgz" % sorted(self.eco.hosts)[0],
-                    "//evil.example/pkg.tgz", "https://%s.evil.example/p.tgz" % sorted(self.eco.hosts)[0],
-                    "https://evil.example/%s/p.tgz" % sorted(self.eco.hosts)[0]):
+        for url in ("https://evil.example/pkg.tgz", "http://%s/pkg.tgz" % self.plain_host(),
+                    "file:///etc/passwd", "https://%s@evil.example/p.tgz" % self.plain_host(),
+                    "//evil.example/pkg.tgz", "https://%s.evil.example/p.tgz" % self.plain_host(),
+                    "https://evil.example/%s/p.tgz" % self.plain_host()):
             responses = self.hostile_responses(url)
             if responses is None:
                 self.skipTest("the module builds its artifact URL itself and reads none from a document")

@@ -1082,10 +1082,32 @@ host `openvsx.eclipsecontent.org` its file URLs redirect to). The result's
 `registryInfo` says whether the namespace is verified, who published the
 version, a pre-release, deprecated; `extensionDependencies` and
 `startupEvent` come from the files' `package.json`. Requests to the API are
-paced (0.5 s), as Open VSX asks of anonymous clients. The Visual Studio
-Marketplace has no module: its terms of use tie its extensions to
-Microsoft's products (a decision for the project), and it publishes no
-digest.
+paced (0.5 s), as Open VSX asks of anonymous clients.
+
+**The Visual Studio Marketplace (`ecosystems/vsmarketplace.py`, E-1's second
+part, decision 11).** `lazaret-registry scan vscode:publisher.name[@version]`
+resolves through the gallery query VS Code sends (a POST to
+`https://marketplace.visualstudio.com/_apis/public/gallery/extensionquery`:
+the extension by name among VS Code's, unpublished ones and versions that
+failed validation left out, with its versions' files, properties and asset
+URIs and its statistics; with no version asked for, the latest release and
+pre-release only, of which VS Code installs the release). A version is one
+entry per target platform; each entry's `VSIXPackage` file, on its
+publisher's CDN host (`<publisher>.gallerycdn.vsassets.io`, else the
+fallback `<publisher>.gallery.vsassets.io` with the platform asked for), is
+scanned as Open VSX's are, the worst deciding. The module's hosts hold
+`*.` entries for those: `base.host_allowed` takes exactly one DNS label
+before the domain, on port 443, for a request and every redirect, and
+`base.Fetch.post_json` sends the query (the transport's `data`, a POST's
+only). The Marketplace publishes no digest (it signs each package, a
+`.sigzip` VS Code checks with vsce-sign; not checked here), so a download
+is scanned unverified: `verify` gives None, and `registryInfo.digest` is None
+and `print_scan` says so, beside the publisher's verified domain and the
+install count; `extensionDependencies` and `extensionPack` are the
+version's properties. Its terms of use tie its extensions to Microsoft's
+products; scanning it is the project's decision 11. The sandbox cannot reach
+it, so the tests build the gallery's answers in the shape VS Code's gallery
+service reads.
 
 ## 6. How to add or change a rule — the loop
 

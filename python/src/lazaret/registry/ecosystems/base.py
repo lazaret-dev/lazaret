@@ -16,6 +16,7 @@ Standard library, and `scanner.core` for the bounded JSON reader. No import of `
 
 import collections
 import http.client
+import json
 import posixpath
 import re
 import threading
@@ -25,6 +26,7 @@ import urllib.parse
 from lazaret.scanner import core as lazaret
 
 __all__ = ["SpecError", "FetchError", "DigestError", "Resolution", "RunTargets", "Declared", "Ecosystem", "Fetch", "DownloadBudget",
+           "host_allowed",
            "MAX_DOCUMENT_BYTES", "MAX_ARTIFACT_BYTES", "MAX_REDIRECTS", "METADATA_TIMEOUT", "DOWNLOAD_TIMEOUT",
            "VERSION_RE", "show", "ascii_name", "HOSTILE_NAMES", "HOSTILE_VERSIONS", "finish_member_path", "top_directory_stripped",
            "root_stripped"]
@@ -228,6 +230,23 @@ class DownloadBudget:
             self._left += n
 
 
+#: one DNS label: what a `*.` entry of a module's hosts stands for
+_LABEL_RE = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?")
+
+
+def host_allowed(hosts, netloc):
+    """Is `netloc` (a lowercase host[:port]) one of a module's `hosts`: one of them, or one DNS label before a `*.`
+    entry's domain, on the default port (`*.gallerycdn.vsassets.io`: a Marketplace publisher's CDN host)?"""
+    if netloc in hosts:
+        return True
+    if ":" in netloc:
+        return False
+    for h in hosts:
+        if h.startswith("*.") and netloc.endswith(h[1:]) and _LABEL_RE.fullmatch(netloc[:-len(h) + 1]):
+            return True
+    return False
+
+
 class Fetch:
     """The only way a module reaches the network. It is bound to one ecosystem's `hosts`: https, one of those hosts,
     no credentials in the URL, a bounded length, or `FetchError` before any request; the transport's redirects go
@@ -266,7 +285,7 @@ class Fetch:
             raise FetchError(f"registry URL with credentials blocked: {show(url)}")
         host = (parts.hostname or "").lower()
         netloc = host if port in (None, 443) else f"{host}:{port}"
-        if not host or netloc not in self.hosts:
+        if not host or not host_allowed(self.hosts, netloc):
             raise FetchError(f"registry host not allowlisted: {show(parts.netloc)}")
         return url
 
@@ -282,7 +301,7 @@ class Fetch:
         if start > now:
             self._sleep(start - now)
 
-    def _get(self, url, max_bytes, accept, timeout, budget=None):
+    def _get(self, url, max_bytes, accept, timeout, budget=None, data=None):
         self.check_url(url)
         if budget is not None and not budget.reserve(max_bytes):           # (taken before any request, in one step)
             raise FetchError(f"the release's download budget is spent: {show(url)}")
@@ -291,8 +310,11 @@ class Fetch:
             self._wait_turn(url)
             self.requests.append(url)
             try:
+                # (a POST's body, and only then, as `data` with its type: a transport that reads documents only
+                # never sees one)
+                extra = {} if data is None else {"data": data, "content_type": "application/json"}
                 body = self._transport(url, max_bytes=max_bytes, accept=accept, timeout=timeout,
-                                       check_redirect=self.check_url)
+                                       check_redirect=self.check_url, **extra)
             except FetchError:
                 raise
             except (OSError, ValueError, http.client.HTTPException) as exc:    # (a transport that did not say it in our words)
@@ -322,6 +344,13 @@ class Fetch:
 
     def json(self, url, max_bytes=MAX_DOCUMENT_BYTES, accept=None):
         raw = self._get(url, max_bytes, accept, METADATA_TIMEOUT)
+        return self._loads(raw, url)
+
+    def post_json(self, url, body, max_bytes=MAX_DOCUMENT_BYTES, accept=None):
+        """The JSON document a POST of `body` (as JSON) to `url` answers (the Marketplace's gallery query): the URL rule,
+        the pacing and the bounds of `json`."""
+        data = json.dumps(body, separators=(",", ":"), ensure_ascii=True).encode("ascii")
+        raw = self._get(url, max_bytes, accept, METADATA_TIMEOUT, data=data)
         return self._loads(raw, url)
 
     def json_lines(self, url, max_bytes=MAX_DOCUMENT_BYTES, accept=None, select=None):

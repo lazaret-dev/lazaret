@@ -1,0 +1,249 @@
+"""The Visual Studio Marketplace (0.1.9, E-1's second part; decision 11 of the 0.1.9 backlog): resolving a VS Code
+extension to its `.vsix` files, one per platform it is published for, through the Marketplace's public gallery API,
+the way VS Code asks it.
+
+    names        `publisher.name`, VS Code's identifier pattern (as `openvsx.py`'s); the Marketplace and the editor
+                 compare them without case, and `identity` lowercases.
+    versions     the base rule (`[A-Za-z0-9._-]`, at most 100 characters); the editor's are SemVer.
+    the API      POST `https://marketplace.visualstudio.com/_apis/public/gallery/extensionquery`, the query VS Code
+                 sends: the extension by its name (filter type 7, `publisher.name`) among VS Code's (filter type 8,
+                 `Microsoft.VisualStudio.Code`), unpublished ones left out (filter type 12, flag 4096), with its
+                 versions, their files, properties and asset URIs, and its statistics (query flags 1, 2, 16, 128,
+                 256); versions that failed the Marketplace's validation are left out (32). With no version asked
+                 for, the latest release and the latest pre-release only (65536): VS Code installs the release, so
+                 that is the one taken, and the pre-release when no release exists. A version is one entry per
+                 target platform it is published for (`targetPlatform`; an entry without one is universal).
+    the files    each entry's `Microsoft.VisualStudio.Services.VSIXPackage` file, on the publisher's CDN host
+                 (`<publisher>.gallerycdn.vsassets.io`), else the entry's fallback asset URI and that asset name
+                 (`<publisher>.gallery.vsassets.io`, as VS Code falls back), its target platform asked for; a URL
+                 from the answer is checked as any request is (https, these hosts) before it is taken.
+    no digest    the Marketplace publishes no digest for a download (it signs each package, a `.sigzip` that VS
+                 Code checks with vsce-sign; that signature is not checked here), so its files are scanned
+                 unverified, and the result says so (`registryInfo.digest` is None).
+    what it says the publisher, whether its domain is verified, the install count, a pre-release, and the
+                 extensions the version needs (`Microsoft.VisualStudio.Code.ExtensionDependencies`) and packs
+                 (`Microsoft.VisualStudio.Code.ExtensionPack`), as `publisher.name` in lowercase.
+    the archive  as Open VSX's: a zip, and what is under `extension/` is the extension (`member_path`).
+
+The Marketplace's terms of use say its extensions may be installed and used only with Microsoft's Visual Studio
+products; scanning it is the 0.1.9 backlog's decision 11 (not legal advice). Requests to the API are paced (`rate`).
+Every platform's file is scanned, as Open VSX's are; a platform the editor does not install is listed (`skipped`).
+Nothing is run."""
+
+import re
+
+from lazaret.registry.ecosystems import base
+from lazaret.registry.ecosystems.openvsx import TARGET_PLATFORMS
+
+__all__ = ["Marketplace", "ECOSYSTEM", "API_HOST", "QUERY_URL", "CDN_SUFFIX", "FALLBACK_SUFFIX", "VSIX_ASSET", "QUERY_FLAGS",
+           "LATEST_ONLY_FLAG", "MAX_PART"]
+
+API_HOST = "marketplace.visualstudio.com"
+QUERY_URL = f"https://{API_HOST}/_apis/public/gallery/extensionquery"
+#: VS Code's own Accept header for the query
+ACCEPT = "application/json;api-version=3.0-preview.1"
+CDN_SUFFIX = ".gallerycdn.vsassets.io"
+FALLBACK_SUFFIX = ".gallery.vsassets.io"
+VSIX_ASSET = "Microsoft.VisualStudio.Services.VSIXPackage"
+DEPENDENCIES = "Microsoft.VisualStudio.Code.ExtensionDependencies"
+EXTENSION_PACK = "Microsoft.VisualStudio.Code.ExtensionPack"
+PRE_RELEASE = "Microsoft.VisualStudio.Code.PreRelease"
+#: IncludeVersions | IncludeFiles | IncludeVersionProperties | ExcludeNonValidated | IncludeAssetUri | IncludeStatistics
+QUERY_FLAGS = 1 | 2 | 16 | 32 | 128 | 256
+#: IncludeLatestPrereleaseAndStableVersionOnly
+LATEST_ONLY_FLAG = 65536
+#: filter types: the extension's name, the product it is for, flags to leave out (Unpublished)
+FILTER_NAME, FILTER_TARGET, FILTER_EXCLUDE_FLAGS = 7, 8, 12
+MAX_PART = 128
+MAX_QUERY_BYTES = 32 * 1024 * 1024       # every version of a busy extension, each per platform with its files
+MAX_VERSIONS = 20000                     # the entries of one answer that are read
+MAX_PLATFORMS = 32                       # the files of one version that are scanned or listed
+MAX_LISTED = 500                         # the extensions it needs, the members of its pack
+
+_PART_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9-]*")
+_NAME_CHAR = re.compile(r"[A-Za-z0-9.-]")
+_PLATFORM_RE = re.compile(r"[a-z0-9]{1,16}(?:-[a-z0-9]{1,16}){0,3}")
+
+
+def _text(value, limit=200):
+    return value if isinstance(value, str) and len(value) <= limit else None
+
+
+def _properties(entry):
+    """A version entry's properties ({key: value}, text only)."""
+    props = entry.get("properties")
+    out = {}
+    if isinstance(props, list):
+        for p in props[:200]:
+            if isinstance(p, dict) and isinstance(p.get("key"), str) and isinstance(p.get("value"), str):
+                out.setdefault(p["key"], p["value"])
+    return out
+
+
+class Marketplace(base.Ecosystem):
+    id = "vscode"
+    title = "Visual Studio Marketplace"
+    #: the API's host, and the publishers' CDN and fallback asset hosts (`<publisher>.…`, Microsoft's domains)
+    hosts = frozenset({API_HOST, "*" + CDN_SUFFIX, "*" + FALLBACK_SUFFIX})
+    artifact_kinds = ("vsix",)
+    rate = {API_HOST: 0.5}
+    manifest_names = frozenset({"package.json"})
+
+    # ---- names and versions
+    def check_name(self, name):
+        name = base.ascii_name(name, "extension name", _NAME_CHAR, 2 * MAX_PART + 1, self.id)
+        parts = name.split(".")
+        if len(parts) != 2 or not all(_PART_RE.fullmatch(p) and len(p) <= MAX_PART for p in parts):
+            raise base.SpecError("vscode: an extension is publisher.name, each part a letter or a digit and then "
+                                 "letters, digits or '-'")
+        return name
+
+    def identity(self, name):
+        return self.check_name(name).lower()
+
+    @staticmethod
+    def _ids(text):
+        """The extensions a property lists (comma-separated `publisher.name`), lowercase; others left out."""
+        out = set()
+        if not isinstance(text, str):
+            return out
+        for item in text.split(",")[:MAX_LISTED]:
+            item = item.strip()
+            parts = item.split(".")
+            if len(parts) == 2 and all(_PART_RE.fullmatch(p) and len(p) <= MAX_PART for p in parts):
+                out.add(item.lower())
+        return out
+
+    # ---- the network
+    def _query(self, name, fetch, latest):
+        """The extension's entry from the gallery's answer, its shape checked: one extension, this one (its publisher's
+        and its own name, without case), and its version entries. FetchError otherwise."""
+        body = {"filters": [{"criteria": [{"filterType": FILTER_TARGET, "value": "Microsoft.VisualStudio.Code"},
+                                          {"filterType": FILTER_NAME, "value": name},
+                                          {"filterType": FILTER_EXCLUDE_FLAGS, "value": "4096"}],
+                             "pageNumber": 1, "pageSize": 1, "sortBy": 0, "sortOrder": 0}],
+                "assetTypes": [], "flags": QUERY_FLAGS | (LATEST_ONLY_FLAG if latest else 0)}
+        doc = fetch.post_json(QUERY_URL, body, max_bytes=MAX_QUERY_BYTES, accept=ACCEPT)
+        results = doc.get("results") if isinstance(doc, dict) else None
+        first = results[0] if isinstance(results, list) and results else None
+        exts = first.get("extensions") if isinstance(first, dict) else None
+        if not isinstance(exts, list):
+            raise base.FetchError("vscode: the Marketplace's answer is not a list of extensions")
+        if not exts:
+            raise base.FetchError("vscode: the Marketplace has no such extension")
+        ext = exts[0]
+        publisher = ext.get("publisher") if isinstance(ext, dict) else None
+        pub = publisher.get("publisherName") if isinstance(publisher, dict) else None
+        got = ext.get("extensionName") if isinstance(ext, dict) else None
+        if not (isinstance(pub, str) and isinstance(got, str) and f"{pub}.{got}".lower() == name.lower()):
+            raise base.FetchError("vscode: the Marketplace's answer is about another extension")
+        versions = ext.get("versions")
+        if not isinstance(versions, list) or not versions:
+            raise base.FetchError("vscode: the Marketplace's answer lists no version")
+        return ext
+
+    def resolve(self, name, version, fetch):
+        name = self.check_name(name)
+        want = self.check_version(version)
+        ext = self._query(name, fetch, latest=want is None)
+        entries = []
+        for v in ext["versions"][:MAX_VERSIONS]:
+            if not isinstance(v, dict):
+                continue
+            try:
+                got = self.check_version(v.get("version")) if isinstance(v.get("version"), str) else None
+            except base.SpecError:
+                got = None
+            if got is not None:
+                entries.append(v)
+        if want is not None:
+            chosen = [v for v in entries if v["version"] == want]
+            if not chosen:
+                raise base.FetchError("vscode: the Marketplace has no such version of the extension")
+        else:
+            # (newest first, as the gallery answers; the release VS Code installs, else a pre-release)
+            releases = [v for v in entries if _properties(v).get(PRE_RELEASE, "").lower() != "true"]
+            pool = releases or entries
+            if not pool:
+                raise base.FetchError("vscode: the Marketplace's answer has no version that is one")
+            chosen = [v for v in pool if v["version"] == pool[0]["version"]]
+        version = chosen[0]["version"]
+        pub, got = ext["publisher"]["publisherName"], ext["extensionName"]
+        artifacts, skipped, seen = [], [], set()
+        for v in sorted(chosen, key=lambda e: str(e.get("targetPlatform") or "universal"))[:MAX_PLATFORMS]:
+            platform = v.get("targetPlatform") or "universal"
+            if not isinstance(platform, str) or not _PLATFORM_RE.fullmatch(platform):
+                raise base.FetchError("vscode: the Marketplace's answer names a file for a platform that is not one")
+            if platform in seen:
+                continue
+            seen.add(platform)
+            filename = f"{pub}.{got}-{version}" + ("" if platform == "universal" else f"@{platform}") + ".vsix"
+            if platform not in TARGET_PLATFORMS:
+                skipped.append({"filename": filename, "packagetype": "vsix", "installable": False, "size": None,
+                                "reason": "a target platform the editor does not install"})
+                continue
+            artifacts.append({"url": fetch.check_url(self._vsix_url(v, platform)), "container": "zip", "artifact": "vsix",
+                              "entry": {"platform": platform}, "filename": filename})
+        if not artifacts:
+            raise base.FetchError("vscode: the version has no file for a platform the editor installs")
+        props = _properties(chosen[0])
+        publisher = ext["publisher"]
+        installs = None
+        stats = ext.get("statistics")
+        if isinstance(stats, list):
+            for s in stats[:100]:
+                if isinstance(s, dict) and s.get("statisticName") == "install" and isinstance(s.get("value"), (int, float)) \
+                        and not isinstance(s.get("value"), bool):
+                    installs = int(s["value"])
+                    break
+        brings = {}
+        for key, prop in (("dependencies", DEPENDENCIES), ("bundledExtensions", EXTENSION_PACK)):
+            brings[key] = sorted(set().union(*(self._ids(_properties(v).get(prop)) for v in chosen)))
+        info = {"name": f"{pub}.{got}", "publisher": _text(pub, 100), "publisherDisplayName": _text(publisher.get("displayName"), 100),
+                "verified": publisher.get("isDomainVerified") is True, "domain": _text(publisher.get("domain"), 200),
+                "installs": installs, "preRelease": props.get(PRE_RELEASE, "").lower() == "true",
+                "lastUpdated": _text(chosen[0].get("lastUpdated"), 40), "digest": None, **brings}
+        return base.Resolution(version, artifacts, skipped, info)
+
+    @staticmethod
+    def _vsix_url(entry, platform):
+        """The `.vsix` of one version entry: its VSIXPackage file, else its fallback asset URI and that asset's name
+        (with the target platform asked for, as VS Code asks)."""
+        files = entry.get("files")
+        if isinstance(files, list):
+            for f in files[:100]:
+                if isinstance(f, dict) and f.get("assetType") == VSIX_ASSET and isinstance(f.get("source"), str):
+                    return f["source"]
+        fallback = entry.get("fallbackAssetUri")
+        if not isinstance(fallback, str) or not fallback:
+            raise base.FetchError("vscode: the Marketplace's answer names no file for the version")
+        return f"{fallback.rstrip('/')}/{VSIX_ASSET}" + ("" if platform == "universal" else f"?targetPlatform={platform}")
+
+    def verify(self, data, entry, name, version):
+        """The Marketplace publishes no digest for a download: nothing to check (None), and the result says so."""
+        return None
+
+    def dependencies(self, resolved, fetch):
+        """The extensions a version brings: those it needs to activate (`extensionDependencies`) and the members of its
+        pack (`extensionPack`), as the Marketplace lists them, `publisher.name` in lowercase."""
+        info = getattr(resolved, "info", None)
+        if not isinstance(info, dict):
+            return None
+        return tuple(sorted(set(info.get("dependencies") or ()) | set(info.get("bundledExtensions") or ())))
+
+    # ---- archives
+    def container(self, filename):
+        return "zip" if isinstance(filename, str) and filename.lower().endswith(".vsix") else None
+
+    def member_path(self, kind, name, root=None):
+        """VS Code unpacks what is under `extension/` and nothing else."""
+        parts = [x for x in str(name).replace("\\", "/").split("/") if x not in ("", ".")]
+        if len(parts) < 2 or parts[0] != "extension":
+            return None, None
+        return base.finish_member_path("/".join(parts[1:]))
+
+    def links_extracted(self, kind):
+        return False
+
+
+ECOSYSTEM = Marketplace()

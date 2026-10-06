@@ -119,11 +119,12 @@ class SpecTests(unittest.TestCase):
     def test_the_errors_name_every_ecosystem(self):
         with self.assertRaises(repo.SpecError) as caught:
             repo.parse_spec("cargo:fnv")
-        self.assertIn("use npm, pypi, go, crates or openvsx", str(caught.exception))
+        self.assertIn("use npm, pypi, go, crates, openvsx or vscode", str(caught.exception))
         with self.assertRaises(repo.SpecError) as caught:
             repo.parse_spec("fnv")
-        self.assertIn("go:<module>, crates:<name> or openvsx:<namespace>.<name>", str(caught.exception))
-        self.assertEqual(repo.ECOSYSTEMS, ("npm", "pypi", "go", "crates", "openvsx"))
+        self.assertIn("go:<module>, crates:<name>, openvsx:<namespace>.<name> or vscode:<publisher>.<name>",
+                      str(caught.exception))
+        self.assertEqual(repo.ECOSYSTEMS, ("npm", "pypi", "go", "crates", "openvsx", "vscode"))
 
     def test_names_and_versions_are_the_modules(self):
         self.assertTrue(repo.valid_name("go", "github.com/pkg/errors"))

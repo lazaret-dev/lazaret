@@ -11,14 +11,18 @@ project is pre-1.0, so the 0.x API may still change.
 
 ### Added
 
-- **Open VSX extensions in `lazaret-registry` (E-1's second part): `openvsx:namespace.name[@version]`.**
-  Every `.vsix` the version is published for, one per target platform the editor installs, is
-  downloaded, checked against the SHA-256 Open VSX publishes beside it (never scanned when it
-  does not match: SC-DIGEST-MISMATCH), and scanned as `lazaret FILE.vsix` scans one; the
-  worst platform decides. The result says whether the namespace is verified and who
-  published the version, what the extension brings and what starts it with the editor. The
-  MCP server's `scan_package` takes the spec too. The Visual Studio Marketplace has no
-  module.
+- **VS Code extensions in `lazaret-registry` (E-1's second part): `openvsx:namespace.name[@version]`
+  and `vscode:publisher.name[@version]`.** Every `.vsix` the version is published for, one per
+  target platform the editor installs, is downloaded and scanned as `lazaret FILE.vsix` scans
+  one; the worst platform decides. From Open VSX, each file is first checked against the
+  SHA-256 Open VSX publishes beside it (never scanned when it does not match:
+  SC-DIGEST-MISMATCH), and the result says whether the namespace is verified and who
+  published the version. From the Visual Studio Marketplace, the extension is resolved through
+  the gallery query VS Code sends (the latest release, as VS Code installs it, or the version
+  asked for), and the result says whether the publisher's domain is verified and how many
+  installs it has; the Marketplace publishes no digest, so its files are scanned unverified,
+  and the result says that too. Both say what the extension brings and what starts it with
+  the editor. The MCP server's `scan_package` takes both specs.
 - **VS Code extensions: `lazaret FILE.vsix` and `lazaret --extensions` (E-1's first part).**
   An extension runs in the editor's extension host, Node with all of your access and no
   sandbox. A `.vsix`, or an extension an editor has installed, is now read as the registry
