@@ -1089,8 +1089,57 @@ pub fn scan_file(p: &Pack, text: &[u32], lang_name: Option<&str>, jsx: bool, opt
     let ctx = FileCtx::new(p, text, lang, jsx);
     let lines: Vec<&[u32]> = (0..ctx.len()).map(|i| ctx.line(i)).collect();
     let snippets = Snippets::new(p, lines, opts.redact, opts.neumaier);
-    let found = findings_of(&ctx, lang_name, opts, &snippets);
+    let mut found = findings_of(&ctx, lang_name, opts, &snippets);
+    if lang == Lang::Rs && opts.dep && !found.is_empty() {
+        if let Some(test_only) = rs_test_only_lines(&ctx) {
+            found.retain(|f| !test_only.get(f.line.wrapping_sub(1)).copied().unwrap_or(false));
+        }
+    }
     findings::cap(p, &snippets, found).iter().map(|f| snippets.issue(f)).collect()
+}
+
+/// N-20: the lines of a dependency's Rust file that hold only code no dependent builds, as `*_test.go` is a Go
+/// file none builds: the items under `#[cfg(test)]` (or `cfg(all(…, test))`), `#[test]`, `#[bench]` and the like,
+/// with their attributes (the Rust reader's test items, `rsread::test_items`), an item whose own inner attributes
+/// are such a `cfg`, or the whole file under its `#![cfg(test)]`. A line is left out only when all of its text,
+/// blanks aside, is in such an item; a file the parser could not read whole leaves none out (None).
+fn rs_test_only_lines(ctx: &FileCtx) -> Option<Vec<bool>> {
+    let src = &ctx.content;
+    let tree = crate::rsparse::parse(src);
+    if tree.problems != 0 {
+        return None;
+    }
+    let only_in_tests = |attrs: &[crate::rsparse::Attr]| attrs.iter().any(|a| crate::rsread::cfg_only_in_tests(&tree, src, a));
+    let (first, count) = tree.crate_attrs;
+    if only_in_tests(&tree.attrs[first as usize..(first + count) as usize]) {
+        return Some(vec![true; ctx.len()]);
+    }
+    let mut tests = crate::rsread::test_items(&tree, src);
+    for k in 0..tree.items.len() {
+        let parent = tree.items[k].parent;
+        if only_in_tests(tree.inner_attrs_of(k)) || (parent != crate::rsparse::NONE && tests.contains(&parent)) {
+            tests.insert(k as u32);
+        }
+    }
+    if tests.is_empty() {
+        return None;
+    }
+    let mut covered = vec![false; src.len()];
+    for &k in &tests {
+        let it = &tree.items[k as usize];
+        let start = tree.attrs_of(k as usize).iter().map(|a| tree.toks[a.tok_start as usize].start).fold(it.start, u32::min);
+        let (start, end) = ((start as usize).min(src.len()), (it.end as usize).min(src.len()));
+        covered[start..end.max(start)].iter_mut().for_each(|c| *c = true);
+    }
+    let blank = |c: u32| c == ' ' as u32 || c == '\t' as u32 || c == 0x0B || c == 0x0C;
+    Some(
+        (0..ctx.len())
+            .map(|i| {
+                let (s, e) = (ctx.starts[i], ctx.end_of(i));
+                (s..e).any(|j| covered[j]) && (s..e).all(|j| covered[j] || blank(src[j]))
+            })
+            .collect(),
+    )
 }
 
 /// core._scan_rules in project mode: the findings of the pattern rules and

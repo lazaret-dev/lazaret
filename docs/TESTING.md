@@ -286,9 +286,9 @@ before a release, as the benchmark: no release may be SUSPICIOUS, and every
 verdict or strong finding that moves is read. 0.1.8 makes the nine
 SUSPICIOUS on it, and 0.1.9 none of the npm and PyPI releases (32 WARN, and
 1 INCOMPLETE: sharp's 16 MB libvips library, counted as unscanned code) nor
-of the crates (17 WARN: 13 for the prebuilt libraries and objects they ship,
+of the crates (16 WARN: 13 for the prebuilt libraries and objects they ship,
 the windows and winapi import libraries, ring's and aws-lc-sys's assembly
-and wit-bindgen's WebAssembly; 4 for test data, SC-HEXSTR, SC-OPAQUE-BLOB
+and wit-bindgen's WebAssembly; 3 for test data, SC-HEXSTR, SC-OPAQUE-BLOB
 and SC-NESTED-ARCHIVE). At each release, refresh it:
 `popular.py pin --top 800,400,500 --exclude FILE --cache DIR` takes the
 latest release of the first 800 npm, 400 PyPI and 500 crates names of
@@ -320,11 +320,11 @@ against the index), keeping a package only when its DEP-5 copyright file
 names licences Apache-2.0 can take in: of 4,746 packages, 4,040, with 1,953
 Go modules and 2,151 crates. `gostd` packs Go's `std`, `cmd` and the
 modules they vendor (`go env GOROOT`). The gate is the popular set's: none
-SUSPICIOUS, every WARN read. On 0.1.9 (rule set 2.36.0, Go 1.24.7) none is
+SUSPICIOUS, every WARN read. On 0.1.9 (rule set 2.37.0, Go 1.24.7) none is
 SUSPICIOUS; Ubuntu's Go modules give 27 WARN and 3 INCOMPLETE (Debian packs
 aws-sdk-go-v2 and azure-sdk-for-go each as one tree, past the archive's
 20,000 files and the reader's 300 million characters, and go-git-fixtures'
-65 MB `data.go` runs past the deadline), its crates 20 WARN, Go's own 3 of
+65 MB `data.go` runs past the deadline), its crates 16 WARN, Go's own 3 of
 18 (the race detector's and BoringCrypto's `.syso` objects, and SC-B64 on
 `stringer`'s name tables of mixed case). Before rule set 2.35.0, SC-B64 was
 behind 24 of the 39 Go WARNs and 11 of the 30 crates', on runs that are not

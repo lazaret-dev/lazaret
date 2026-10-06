@@ -148,25 +148,27 @@ fn only_in_tests(compact: &str) -> bool {
     &inner[start..] == "test"
 }
 
-/// The items inside `#[cfg(test)]`, `#[test]` and the like, and what they hold.
-fn test_items(tree: &Tree, src: &[u32]) -> HashSet<u32> {
+/// Is `a` a `cfg` attribute whose predicate is true only when tests are built (`only_in_tests`)?
+pub(crate) fn cfg_only_in_tests(tree: &Tree, src: &[u32], a: &rsparse::Attr) -> bool {
+    if tree.attr_path(src, a) != "cfg" {
+        return false;
+    }
+    let Some((o, c)) = tree.attr_args(src, a) else { return false };
+    let inner: String = (o + 1..c).map(|t| tree.text(src, t)).collect::<Vec<_>>().join(" ");
+    let compact: String = inner.split_whitespace().collect();
+    only_in_tests(&compact)
+}
+
+/// The items inside `#[cfg(test)]`, `#[test]` and the like, and what they hold. The file rules leave the same
+/// items out of a dependency's code (`scanfile::rs_test_only_lines`, N-20).
+pub(crate) fn test_items(tree: &Tree, src: &[u32]) -> HashSet<u32> {
     let mut out = HashSet::new();
     for (k, it) in tree.items.iter().enumerate() {
-        let _ = it;
         let mut test = false;
         for a in tree.attrs_of(k) {
             let path = tree.attr_path(src, a);
-            if path == "test" || path == "bench" || path.ends_with("::test") {
+            if path == "test" || path == "bench" || path.ends_with("::test") || cfg_only_in_tests(tree, src, a) {
                 test = true;
-            }
-            if path == "cfg" {
-                if let Some((o, c)) = tree.attr_args(src, a) {
-                    let inner: String = (o + 1..c).map(|t| tree.text(src, t)).collect::<Vec<_>>().join(" ");
-                    let compact: String = inner.split_whitespace().collect();
-                    if only_in_tests(&compact) {
-                        test = true;
-                    }
-                }
             }
         }
         if test || (it.parent != NONE && out.contains(&it.parent)) {

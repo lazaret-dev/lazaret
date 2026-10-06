@@ -454,6 +454,16 @@ project is pre-1.0, so the 0.x API may still change.
 
 ### Fixed
 
+- **A dependency's Rust test code is left out of the file rules (N-20).** What
+  `#[cfg(test)]` (or `cfg(all(…, test))`), `#[test]`, `#[bench]` or `#[tokio::test]` marks
+  in a crate's `src/` is compiled only for the crate's own tests, never into a dependent,
+  as its `tests/` folder and Go's `*_test.go` are not. The Rust reader already left it
+  out, but the file rules read it, and its test vectors and keys were WARNs. In registry
+  and guard scans and `--deps`, in both packages, a line whose text is all in such an
+  item, or every line of a file under its own `#![cfg(test)]`, gives no finding now; a
+  line that also holds other code, and a file the parser can't read whole, are read as
+  before, and a project's own tests are still read. WARN to OK: rustls among the popular
+  crates, and charset, dns-parser, mailparse and rustls among Ubuntu's. Rule set 2.37.0.
 - **An npm manifest inside a crate or a Go module is not npm's (N-18).** A `package.json`
   or a `binding.gyp` in a crate or a Go module (an npm wrapper of a crate's binary, an
   editor extension kept beside the code) was read for install hooks as an npm package's,

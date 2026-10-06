@@ -318,6 +318,14 @@ class RustTests(unittest.TestCase):
                 res = rust({name: CTOR_RS, "src/lib.rs": CLEAN_RS})
                 self.assertEqual((res["verdict"], found(res)), ("OK", []))
 
+    def test_test_items_in_src_are_not_read_by_the_file_rules(self):
+        """N-20: what #[cfg(test)] or #[test] marks is never built into a dependent, as tests/ is not."""
+        tests = '#[cfg(test)]\nmod tests {\n    const V: &str = "' + B64_DATA + '";\n}\n'
+        res = rust({"src/lib.rs": CLEAN_RS + tests})
+        self.assertEqual((res["verdict"], found(res)), ("OK", []))
+        res = rust({"src/lib.rs": CLEAN_RS + tests + 'pub const K: &str = "' + B64_DATA + '";\n'})
+        self.assertEqual((res["verdict"], found(res)), ("WARN", [("SC-B64", "MAJOR", "src/lib.rs", 6)]))
+
     def test_a_clean_crate_with_a_build_script_is_ok(self):
         res = rust({"build.rs": PROBE_RS, "src/lib.rs": CLEAN_RS})
         self.assertEqual((res["verdict"], found(res)), ("OK", []))

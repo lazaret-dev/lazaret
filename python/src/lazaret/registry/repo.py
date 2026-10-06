@@ -96,6 +96,9 @@ MAX_MEMBER = _env_number("LAZARET_MAX_SOURCE_BYTES", 16_000_000)
 MAX_FILES = 20_000         # files per package (numpy's sdist alone has >4,000)
 SAMPLE = 8192              # header/entropy sample read from oversized files
 # Stored scans from another engine version are scanned again (has_scan).
+# 2.37: a dependency's Rust test items (what #[cfg(test)], #[test] or
+#      #[bench] marks in src/, or a file's #![cfg(test)]) are left out of the
+#      file rules, as tests/ is (N-20)
 # 2.36: an npm manifest or a binding.gyp inside a Go module or a crate: its
 #      hooks are inventory (INFO), as npm never installs from there (N-18)
 # 2.35: two false positives of the file rules in Go and Rust code: SC-B64
@@ -249,7 +252,7 @@ SAMPLE = 8192              # header/entropy sample read from oversized files
 #      entry points and hook targets, Python install scripts
 # 2.3: verdict tiers, decoded hex, install-script inspection; 2.2:
 #      verdict-integrity; 2.1: binary-artifact awareness
-ENGINE_VERSION = "2.36.0"
+ENGINE_VERSION = "2.37.0"
 
 # ---------------- The content memo (P-2a, registry/contentcache.py) ----------------
 # One per scan_package run: the engine answers once for content several of a

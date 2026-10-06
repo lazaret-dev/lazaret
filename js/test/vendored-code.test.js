@@ -105,6 +105,13 @@ test("Rust: a ctor; tests, benches and examples not read; a vendor directory tha
     [["SC-B64", "MAJOR", "vendor/y/src/lib.rs", 2]]);
 });
 
+test("Rust: a vendored crate's test items are left out of the file rules (N-20)", () => {
+  const tests = `#[cfg(test)]\nmod tests {\n    const V: &str = "${BLOB}";\n}\n`;
+  assert.deepEqual(scan({ ...RUST_PROJECT, ...crate("c", { "src/lib.rs": CLEAN_RS + tests }) }), []);
+  assert.deepEqual(scan({ ...RUST_PROJECT, ...crate("c", { "src/lib.rs": CLEAN_RS + tests + `pub const K: &str = "${BLOB}";\n` }) }),
+    [["SC-B64", "MAJOR", "vendor/c/src/lib.rs", 6]]);
+});
+
 test("the helpers: a vendor tree's kind, what is never built, a manifest's layout", () => {
   const root = tree({ "go/vendor/modules.txt": "", "cargo/vendor/c/.cargo-checksum.json": "{}", "plain/vendor/y/x.rs": "",
     "elsewhere.json": "{}" });

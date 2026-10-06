@@ -240,6 +240,9 @@ GO_RS_CURATED = [
     ("quotes.go", f"s := \"*/\"; /* \"{AWS}\" */\nr := '`'; t := `\"{GHP}\"`\n"),
     ("unclosed.go", f"var a = \"{AWS}\nvar b = `{GHP}\n"),
     ("unclosed.rs", f"let a = \"{AWS}\n/* {GHP}\n"),
+    # N-20: in dependency mode (scan_file) a Rust file's test items are left out; a project's own are read
+    ("test_items.rs", f"pub const K: &str = \"{B64}\";\n#[cfg(test)]\nmod tests {{\n    const V: &str = \"{B64}\";\n"
+                      f"    #[test]\n    fn t() {{ let k = \"{AWS}\"; }}\n}}\n"),
 ]
 # pieces of Go and Rust, for their random stream
 GO_RS_CODE = ["func ", "fn ", "let ", "let mut ", "var ", "const ", "pub ", "impl ", "struct ", "type ", " := ", " = ",
