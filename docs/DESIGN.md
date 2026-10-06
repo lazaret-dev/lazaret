@@ -1068,6 +1068,25 @@ folder of more names than `MAX_FILES` is not listed whole (INCOMPLETE).
 prints a package. `_cli.py` hands it a command line with `--extensions` or
 a word that names a `.vsix` file.
 
+**Open VSX (`ecosystems/openvsx.py`, E-1's second part).**
+`lazaret-registry scan openvsx:namespace.name[@version]` resolves through
+the registry's API (`https://open-vsx.org/api/<namespace>/<name>[/<version>]`):
+its `downloads` map gives a `.vsix` per target platform, and every one the
+editor installs (VS Code's TargetPlatform values) is scanned, the worst
+deciding, as a PyPI release's wheels are; a platform the editor does not
+know is listed in `skippedArtifacts`, not scanned. Each file is checked
+against the SHA-256 Open VSX publishes beside it (`<file>.sha256`, from the
+platform's own document) before anything is read, and a file URL from an
+answer is held to the module's two hosts (`open-vsx.org`, and the content
+host `openvsx.eclipsecontent.org` its file URLs redirect to). The result's
+`registryInfo` says whether the namespace is verified, who published the
+version, a pre-release, deprecated; `extensionDependencies` and
+`startupEvent` come from the files' `package.json`. Requests to the API are
+paced (0.5 s), as Open VSX asks of anonymous clients. The Visual Studio
+Marketplace has no module: its terms of use tie its extensions to
+Microsoft's products (a decision for the project), and it publishes no
+digest.
+
 ## 6. How to add or change a rule — the loop
 
 This is the working method. Follow it; it is why the tool has stayed trustworthy.
@@ -1246,7 +1265,7 @@ hold that. A store that outlives the run is the next step (P-2b).
 | `python/src/lazaret/{registry,mcp,pg,safexml}/` | Registry auditor, MCP server, Postgres client, safe XML |
 | `python/src/lazaret/registry/guard.py`, `python/src/lazaret/_cli.py` | The install guard (`lazaret guard`) and the `lazaret` command's dispatch |
 | `python/src/lazaret/registry/pmsettings.py` | The package managers' own settings as the guard reads them: registries, indexes, credentials by host |
-| `python/src/lazaret/registry/goproxy.py`, `cargosrc.py`, `scanpool.py`, `ecosystems/` | The Go guard's proxy protocol, the Cargo guard's sources and lockfile, the guard's scan workers, the crates.io and Go module auditors |
+| `python/src/lazaret/registry/goproxy.py`, `cargosrc.py`, `scanpool.py`, `ecosystems/` | The Go guard's proxy protocol, the Cargo guard's sources and lockfile, the guard's scan workers, the crates.io, Go module and Open VSX auditors |
 | `python/src/lazaret/registry/sources.py`, `sourcescan.py`, `actions.py` | A repository at a commit (`lazaret scan github:…`), its scan and report `source`; a workflow's actions asked of GitHub |
 | `python/src/lazaret/registry/extensions.py` | VS Code extensions: `lazaret FILE.vsix` and `lazaret --extensions` (the editors' installed extensions), read with the editor's rules for what runs |
 | `rust/crates/lazaret-engine/src/lex/`, `goparse/`, `rsparse/` | The lexers (JavaScript, Python, Go, Rust), the Go parser and the Rust item reader, with their hooks (not used by a scan yet) |

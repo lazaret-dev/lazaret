@@ -119,7 +119,8 @@ python/
 │   │   ├── pmsettings.py   the package managers' registries, indexes and credentials
 │   │   ├── contentcache.py one engine answer for bytes a release's files share
 │   │   ├── ecosystems/     one module per registry behind one interface (`base.py`):
-│   │   │                   crates.io (`crates.py`), Go modules (`golang.py`)
+│   │   │                   crates.io (`crates.py`), Go modules (`golang.py`),
+│   │   │                   Open VSX (`openvsx.py`)
 │   │   ├── sources.py      a GitHub or GitLab repository at a commit, fetched and
 │   │   │                   read into a directory
 │   │   ├── sourcescan.py   `lazaret scan github:…` / `gitlab:…`: the scan of a

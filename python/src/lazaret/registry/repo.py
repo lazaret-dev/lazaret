@@ -324,22 +324,26 @@ class ScanCancelled(Exception):
 # ---------------- Package spec parsing ----------------
 #: The ecosystems whose names, versions, resolving and digest live in a
 #: registry module (registry/ecosystems; Part C wires them in, X-2's part):
-#: `go:<module path>[@version]` and `crates:<name>[@version]`. npm and PyPI
-#: keep their code in this file until X-2 moves it.
-MODULE_ECOSYSTEMS = ("go", "crates")
+#: `go:<module path>[@version]`, `crates:<name>[@version]` and, since E-1's
+#: second part, `openvsx:<namespace>.<name>[@version]` (a VS Code extension).
+#: npm and PyPI keep their code in this file until X-2 moves it.
+MODULE_ECOSYSTEMS = ("go", "crates", "openvsx")
 ECOSYSTEMS = ("npm", "pypi") + MODULE_ECOSYSTEMS
 
 
 def registry_module(eco):
-    """The registry module of `eco` (golang.ECOSYSTEM, crates.ECOSYSTEM), or
-    None for npm, PyPI and anything else. Imported when first asked for: a
-    sweep of npm and PyPI packages never loads them."""
+    """The registry module of `eco` (golang.ECOSYSTEM, crates.ECOSYSTEM,
+    openvsx.ECOSYSTEM), or None for npm, PyPI and anything else. Imported when
+    first asked for: a sweep of npm and PyPI packages never loads them."""
     if eco == "go":
         from lazaret.registry.ecosystems import golang
         return golang.ECOSYSTEM
     if eco == "crates":
         from lazaret.registry.ecosystems import crates
         return crates.ECOSYSTEM
+    if eco == "openvsx":
+        from lazaret.registry.ecosystems import openvsx
+        return openvsx.ECOSYSTEM
     return None
 
 
@@ -408,14 +412,16 @@ def _check_version(eco, version):
 
 def parse_spec(spec):
     """'npm:@scope/pkg@1.2.3' -> ('npm', '@scope/pkg', '1.2.3'); version may be None.
-    'go:github.com/pkg/errors@v0.9.1' and 'crates:serde@1.0.0' are read by
-    their registry module (a Go version is v1.2.3; a crate's has no v)."""
+    'go:github.com/pkg/errors@v0.9.1', 'crates:serde@1.0.0' and
+    'openvsx:redhat.vscode-yaml@1.0.0' are read by their registry module (a Go
+    version is v1.2.3; a crate's has no v)."""
     if not isinstance(spec, str) or ":" not in spec:
-        raise SpecError(f"Spec must be npm:<name>, pypi:<name>, go:<module> or crates:<name> — got {spec!r}")
+        raise SpecError(f"Spec must be npm:<name>, pypi:<name>, go:<module>, crates:<name> or "
+                        f"openvsx:<namespace>.<name> — got {spec!r}")
     eco, rest = spec.split(":", 1)
     eco = eco.strip().lower()
     if eco not in ECOSYSTEMS:
-        raise SpecError(f"Unknown ecosystem {eco!r} (use npm, pypi, go or crates)")
+        raise SpecError(f"Unknown ecosystem {eco!r} (use npm, pypi, go, crates or openvsx)")
     module = registry_module(eco)
     if module is not None:
         name, ver = module.parse_spec(rest)
@@ -3882,6 +3888,7 @@ def scan_package(eco, name, version=None, full=False, *, resolved=None, deadline
         else:
             not_installed.append((s.get("filename"), "not-installable", size))
     per, all_issues, truncated, unused = [], [], 0, set()
+    brings, startup = set(), None           # a VS Code extension's (E-1): what it brings, what starts it with the editor
     multi = len(refs) > 1
     downloaded = 0
     memo = new_memo()                      # (the release's files share the engine's answers: P-2a)
@@ -3926,6 +3933,8 @@ def scan_package(eco, name, version=None, full=False, *, resolved=None, deadline
             all_issues.append(issue)
         truncated += r["truncated"]
         unused.update(r.get("unusedDependencies") or ())
+        brings.update(r.get("extensionDependencies") or ())
+        startup = startup or r.get("startupEvent")
         per.append({"filename": ref.get("filename"), "kind": ref["artifact"], "url": ref["url"],
                     "archiveBytes": len(data), "digest": digest,
                     **{k: r[k] for k in ("verdict", "verdictReason", "filesScanned",
@@ -3961,7 +3970,7 @@ def scan_package(eco, name, version=None, full=False, *, resolved=None, deadline
     # This defensive sweep exists so the registry path cannot regress.
     all_issues = lazaret.redact_result({"issues": list(all_issues)})["issues"]
     kinds = [p["kind"] for p in per]
-    artifact_label = kinds[0] if len(kinds) == 1 else (
+    artifact_label = kinds[0] if len(kinds) == 1 else f"{len(kinds)} vsix files" if set(kinds) == {"vsix"} else (
         "+".join(filter(None, ["sdist" if "sdist" in kinds else "",
                                f"{kinds.count('wheel')} wheel{'s' if kinds.count('wheel') != 1 else ''}"
                                if "wheel" in kinds else ""])))
@@ -3977,7 +3986,46 @@ def scan_package(eco, name, version=None, full=False, *, resolved=None, deadline
             "skippedArtifacts": [{"filename": f, "reason": kind, "declaredBytes": size}
                                  for f, kind, size in skipped + not_installed],
             "useTime": use_time_total([p["useTime"] for p in per]),
-            "scannedAt": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")}
+            "scannedAt": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
+            **_extension_fields(eco, resolved, brings, startup, kinds)}
+
+
+def _extension_fields(eco, resolved, brings, startup, kinds):
+    """A VS Code extension's result fields (E-1): the extensions it brings (as
+    its package.json says, every platform's file together), the activation
+    event that starts it with the editor, and what the registry says of its
+    publisher (Open VSX: whether the namespace is verified, who published it,
+    a pre-release, deprecated). {} for any other package."""
+    if "vsix" not in kinds:
+        return {}
+    info = getattr(resolved, "info", None)
+    info = info if isinstance(info, dict) else {}
+    registry = {k: info.get(k) for k in ("verified", "unrelatedPublisher", "publishedBy", "provider", "preRelease",
+                                         "deprecated", "timestamp") if k in info}
+    return {"extensionDependencies": sorted(brings), "startupEvent": startup,
+            **({"registryInfo": registry} if eco == "openvsx" else {})}
+
+
+def registry_lines(res):
+    """What print_scan says of an extension's publisher, from `registryInfo`
+    (Open VSX): the namespace verified or not, who published the version, a
+    pre-release, deprecated."""
+    info = res.get("registryInfo") or {}
+    if not info:
+        return []
+    who = info.get("publishedBy")
+    by = f", published by {who}" + (f" ({info['provider']})" if info.get("provider") else "") if who else ""
+    if info.get("verified"):
+        lines = [f"Open VSX: the namespace is verified{by}"]
+    else:
+        lines = [f"Open VSX: the namespace is not verified (Open VSX has not confirmed who owns it){by}"]
+    if info.get("unrelatedPublisher"):
+        lines.append("Open VSX: the publisher is not a member of the namespace")
+    if info.get("preRelease"):
+        lines.append("Open VSX: a pre-release version")
+    if info.get("deprecated"):
+        lines.append("Open VSX: the extension is deprecated")
+    return lines
 
 
 def use_time_total(parts):
@@ -4557,6 +4605,8 @@ def print_scan(res, top=15):
         print(f"  {lazaret.sanitize_term(res['location'])}")
     if res.get("verdictReason"):
         print(f"  {lazaret.sanitize_term(res['verdictReason'])}")
+    for line in registry_lines(res):
+        print(f"  {lazaret.sanitize_term(line)}")
     if res.get("startupEvent"):
         print(f"  starts with the editor (activation event {lazaret.sanitize_term(res['startupEvent'])!r})")
     if res.get("extensionDependencies"):
@@ -5556,12 +5606,13 @@ def main():
     global SCAN_TIMEOUT, MAX_ARTIFACTS, MAX_PACKAGE_DOWNLOAD_BYTES, MAX_MEMBER
     lazaret.configure_stdio()
     ap = argparse.ArgumentParser(prog="lazaret-registry",
-                                 description="Lazaret registry scanner: npm, PyPI, Go modules and crates")
+                                 description="Lazaret registry scanner: npm, PyPI, Go modules, crates and Open VSX "
+                                             "extensions")
     ap.add_argument("--version", action="version",
                     version=f"lazaret-registry {lazaret.VERSION} (engine: {_engine.describe()})")
     ap.add_argument("command", choices=["add", "scan", "scan-all", "list", "report", "discover"])
-    ap.add_argument("specs", nargs="*", help="npm:<name>[@ver], pypi:<name>[@ver], go:<module>[@vX.Y.Z] "
-                                             "or crates:<name>[@ver]")
+    ap.add_argument("specs", nargs="*", help="npm:<name>[@ver], pypi:<name>[@ver], go:<module>[@vX.Y.Z], "
+                                             "crates:<name>[@ver] or openvsx:<namespace>.<name>[@ver]")
     ap.add_argument("--db", default=os.environ.get("LAZARET_DB", "lazaret-registry.db"),
                     help="SQLite path (or sqlite:PATH), postgres:// URL or libpq "
                          "'host=… dbname=…' string (env LAZARET_DB)")

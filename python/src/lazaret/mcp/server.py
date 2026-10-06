@@ -131,18 +131,19 @@ TOOLS = [
     },
     {
         "name": "scan_package",
-        "description": ("Fetch and scan a public npm or PyPI package, Go module or crate for "
-                        "supply-chain compromise (obfuscation, install hooks, secrets) and "
+        "description": ("Fetch and scan a public npm or PyPI package, Go module, crate or Open VSX "
+                        "extension for supply-chain compromise (obfuscation, install hooks, secrets) and "
                         "vulnerabilities. The archive is scanned in memory. Result is recorded in "
                         "the registry state DB. spec examples: 'npm:left-pad@1.3.0', "
                         "'pypi:requests', 'npm:@babel/core', 'go:github.com/pkg/errors@v0.9.1', "
-                        "'crates:serde'."),
+                        "'crates:serde', 'openvsx:redhat.vscode-yaml'."),
         "inputSchema": {
             "type": "object",
             "properties": {
                 "spec": {"type": "string",
                          "description": ("npm:<name>[@version], pypi:<name>[@version], "
-                                         "go:<module path>[@vX.Y.Z] or crates:<name>[@version]")},
+                                         "go:<module path>[@vX.Y.Z], crates:<name>[@version] or "
+                                         "openvsx:<namespace>.<name>[@version]")},
                 "full": {"type": "boolean",
                          "description": "Run the full ruleset (default: supply-chain/secret rules only)"},
             },
