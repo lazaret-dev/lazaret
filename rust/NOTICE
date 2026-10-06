@@ -40,6 +40,17 @@ extra case equivalences are derived from Unicode's case mappings
 (scripts/make_rust_tables.py). Tests hold each to Python's own answers.
 
 
+tiny_https
+----------
+
+The native library (the platform wheels' library, not the WebAssembly
+build) also holds tiny_https, the HTTPS/TLS library Lazaret's network layer
+is built on (crates/lazaret-net, crates/lazaret-verify). It is in
+crates/tiny_https as it was handed over to the project, under the Apache
+License 2.0 (crates/tiny_https/LICENSE), Lazaret's own licence; where it
+came from and how a new drop is taken is in crates/tiny_https/LAZARET.md.
+
+
 Unicode data
 ------------
 

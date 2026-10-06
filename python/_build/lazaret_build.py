@@ -121,6 +121,13 @@ SDIST_TOP_FILES = ["pyproject.toml", "README.md", "LICENSE", "LICENSE-UNICODE"]
 # crate under crates/ its Cargo.toml, src/**/*.rs and rules/*.json.
 RUST_TOP_FILES = ["Cargo.toml", "Cargo.lock", "LICENSE-UNICODE", "NOTICE"]
 RUST_CRATE_DIRS = {"src": (".rs",), "rules": (".json",)}
+# tiny_https (taken into rust/crates as it was handed over: NET-1) also
+# carries its LICENSE and the test and example sources its manifest declares
+# (cargo reads every target of a manifest before it builds any), but not its
+# test data, its test vectors in src/ or its documents: the library is built
+# from the sdist, its tests are not.
+RUST_VENDORED = {"tiny_https": {"files": ("LICENSE",), "dirs": {"tests": (".rs",), "examples": (".rs",)},
+                                "skip_suffixes": {"src": (".txt",)}, "skip_top": {"tests": {"data"}}}}
 # The oldest macOS a library built here supports (the release wheels' tags):
 # cargo is given it as MACOSX_DEPLOYMENT_TARGET.
 MACOS_MINIMUM = {"arm64": (11, 0), "x86_64": (10, 12)}
@@ -298,14 +305,16 @@ def _normalize(name: str, data: bytes) -> bytes:
 
 
 def _allowlisted(base: pathlib.Path, suffixes: tuple[str, ...], names=frozenset(),
-                 label: str = "", skip_top=frozenset()) -> list[pathlib.Path]:
+                 label: str = "", skip_top=frozenset(), skip_suffixes=()) -> list[pathlib.Path]:
     """Every allowlisted file under base, sorted by its POSIX relative path.
 
     Raises UnexpectedFilesError naming every other file: dotfiles and
     dot-directories (.env, .DS_Store, ._* AppleDouble twins, .x.swp), anything
     with another suffix (x.orig, core.py~, a stray .pyc outside __pycache__)
     and symlinks, which could pull in files from outside the tree.
-    `skip_top`: directories directly under base that are not walked."""
+    `skip_top`: directories directly under base that are not walked.
+    `skip_suffixes`: files that are left out without a word (a vendored
+    library's test vectors)."""
     ok: list[pathlib.Path] = []
     bad: list[str] = []
     for dirpath, dirnames, filenames in os.walk(base):      # never follows symlinks
@@ -323,6 +332,8 @@ def _allowlisted(base: pathlib.Path, suffixes: tuple[str, ...], names=frozenset(
                 bad.append(rel.as_posix() + " (not a regular file)")
             elif any(part.startswith(".") for part in rel.parts):
                 bad.append(rel.as_posix())
+            elif skip_suffixes and fn.endswith(skip_suffixes):
+                continue
             elif not (fn in names or fn.endswith(suffixes)):
                 bad.append(rel.as_posix())
             else:
@@ -361,9 +372,16 @@ def _rust_files() -> list[tuple[str, pathlib.Path]]:
         if not manifest.is_file() or manifest.is_symlink():
             raise RuntimeError(f"{manifest} is missing")
         out.append((f"crates/{crate.name}/Cargo.toml", manifest))
-        for sub, suffixes in RUST_CRATE_DIRS.items():
+        vendored = RUST_VENDORED.get(crate.name, {})
+        for name in vendored.get("files", ()):
+            if not (crate / name).is_file() or (crate / name).is_symlink():
+                raise RuntimeError(f"{crate / name} is missing")
+            out.append((f"crates/{crate.name}/{name}", crate / name))
+        for sub, suffixes in {**RUST_CRATE_DIRS, **vendored.get("dirs", {})}.items():
             if (crate / sub).is_dir():
-                for path in _allowlisted(crate / sub, suffixes, label=f"rust/crates/{crate.name}/{sub}"):
+                for path in _allowlisted(crate / sub, suffixes, label=f"rust/crates/{crate.name}/{sub}",
+                                         skip_top=vendored.get("skip_top", {}).get(sub, frozenset()),
+                                         skip_suffixes=vendored.get("skip_suffixes", {}).get(sub, ())):
                     out.append((path.relative_to(RUST).as_posix(), path))
     return sorted(out)
 

@@ -74,6 +74,7 @@ from lazaret.registry import unused_deps as _unused     # noqa: E402
 from lazaret.registry.ecosystems import base as _base   # noqa: E402
 from lazaret.scanner import engine as _engine           # noqa: E402
 from lazaret.scanner import gomod as _gomod             # noqa: E402
+from lazaret.scanner import nativenet as _net           # noqa: E402
 from lazaret.scanner import timings                     # noqa: E402
 from lazaret.safexml import ElementTree as _safe_ET     # noqa: E402
 
@@ -509,18 +510,33 @@ def _fetch(url, max_bytes=MAX_DOWNLOAD_BYTES, timeout=DOWNLOAD_TIMEOUT, accept=N
         return _fetch_bytes(url, max_bytes, timeout, accept, data, content_type)
 
 
-def _fetch_bytes(url, max_bytes, timeout, accept, data, content_type, opener=None, validate=None):
+def _fetch_bytes(url, max_bytes, timeout, accept, data, content_type, opener=None, validate=None, hosts=None):
     """`opener` and `validate` default to this file's (_OPENER, _validated_url);
-    a registry module's fetch passes its own (module_transport)."""
+    a registry module's fetch passes its own (module_transport). The request
+    goes through the native transport (NET-1, scanner/nativenet.py: the
+    default since 0.1.9) with `hosts` as the rule for the URL and every
+    redirect (REGISTRY_HOSTS when the rule is this file's), and through
+    urllib when the native transport is not here or is not to be used: no
+    library, LAZARET_NETWORK=python, a server without TLS 1.3, a rule given
+    only as a function, or an opener given by the caller."""
     (validate or _validated_url)(url)
     headers = {"User-Agent": USER_AGENT}
     if accept:
         headers["Accept"] = accept
     if content_type:
         headers["Content-Type"] = content_type
+    if hosts is None and opener is None and validate is None:
+        hosts = REGISTRY_HOSTS
+    if hosts is not None and opener is None and _net.chosen(url):
+        try:
+            return _native_body(url, hosts, headers, data, max_bytes, timeout)
+        except _net.UsePython:
+            pass                               # (urllib below: a server without TLS 1.3, a proxy reached over TLS)
+    if opener is None:
+        opener = _OPENER if validate is None else _module_opener(validate)
     req = urllib.request.Request(url, data=data, headers=headers)
     try:
-        with (opener or _OPENER).open(req, timeout=timeout) as r:
+        with opener.open(req, timeout=timeout) as r:
             buf = bytearray()
             while True:
                 chunk = r.read(64 * 1024)
@@ -539,6 +555,28 @@ def _fetch_bytes(url, max_bytes, timeout, accept, data, content_type, opener=Non
         raise FetchError(f"URL error fetching {url}: {exc.reason}") from exc
     except OSError as exc:                     # includes socket timeouts
         raise FetchError(f"network error fetching {url}: {exc}") from exc
+
+
+def _native_body(url, hosts, headers, data, max_bytes, timeout):
+    """The body of one request through the native transport, in _fetch_bytes'
+    words: FetchError (with `.status` for an HTTP error) as urllib's path
+    raises it; nativenet.UsePython when urllib is to send it."""
+    try:
+        reply = _net.request(url, hosts=hosts, method="GET" if data is None else "POST", headers=list(headers.items()),
+                             data=data, max_bytes=max_bytes, timeout=timeout, max_redirects=MAX_REDIRECTS)
+    except _net.NetError as exc:
+        if exc.kind == "too-large":
+            raise FetchError(f"response exceeds {max_bytes // (1024 * 1024)}MB budget: {url}") from None
+        if exc.kind in ("timeout", "network"):
+            raise FetchError(f"network error fetching {url}: {exc}") from None
+        if exc.kind == "refused":
+            raise FetchError(f"URL error fetching {url}: redirect blocked: {exc}") from None
+        raise FetchError(f"URL error fetching {url}: {exc}") from None
+    if not 200 <= reply.status < 300:
+        err = FetchError(f"HTTP {reply.status} fetching {url}")
+        err.status = reply.status
+        raise err
+    return reply.body
 
 
 class _ModuleRedirects(urllib.request.HTTPRedirectHandler):
@@ -570,13 +608,27 @@ def module_transport(url, max_bytes=MAX_DOWNLOAD_BYTES, accept=None, timeout=DOW
     bounded, timed read, with the module's URL rule (`check_redirect`, which
     `Fetch` passes) for the URL and for every redirect; `data` and
     `content_type` make it a POST (the Marketplace's gallery query). The
-    network seam for go:, crates:, openvsx: and vscode: (tests patch it with
-    recorded responses)."""
+    native transport sends it with the module's hosts as its rule (NET-1),
+    urllib where that is not to be used (_fetch_bytes). The network seam for
+    go:, crates:, openvsx: and vscode: (tests patch it with recorded
+    responses)."""
     if check_redirect is None:
         raise FetchError("a registry module's fetch needs the module's URL rule")
     with timings.span("network", "fetch"):
+        hosts = _module_hosts(check_redirect)
+        if hosts is not None and _net.chosen(url):
+            return _fetch_bytes(url, max_bytes, timeout, accept, data, content_type, validate=check_redirect,
+                                hosts=hosts)
         return _fetch_bytes(url, max_bytes, timeout, accept, data, content_type,
                             opener=_module_opener(check_redirect), validate=check_redirect)
+
+
+def _module_hosts(check):
+    """The hosts of a module's URL rule when it is `base.Fetch.check_url` (the
+    rule the native transport applies to every hop as data); None for a rule
+    given only as a function, which urllib applies hop by hop."""
+    owner = getattr(check, "__self__", None)
+    return owner.hosts if isinstance(owner, _base.Fetch) and check == owner.check_url else None
 
 
 def module_fetch(module):

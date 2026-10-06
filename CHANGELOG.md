@@ -11,6 +11,27 @@ project is pre-1.0, so the 0.x API may still change.
 
 ### Added
 
+- **Lazaret's own HTTPS client, the registry's default transport (NET-1).** tiny_https, a TLS 1.3
+  and HTTP library written on Rust's standard library alone (no dependencies, Apache-2.0), is in the
+  repository (`rust/crates/tiny_https`, taken as it was handed over by `scripts/sync_tiny_https.py`,
+  which also takes the next drop and checks the copy against its recorded hashes). Two crates sit on
+  it: `lazaret-verify`, its pure part (signatures, certificate chains, transparency logs and
+  attestations: no I/O, no `unsafe`, usable by the engine and in WebAssembly), and `lazaret-net`,
+  the network layer the native library exports to Python (`lazaret_net_*`). `lazaret-registry`'s
+  and the registry modules' requests now go through it: each caller's rule is checked on the first
+  URL and on every redirect before anything connects (https only, the caller's hosts, a `*.` host
+  being one DNS label on the default port, no credentials in a URL, at most 2,048 printable ASCII
+  characters), with the caller's byte budget, timeouts and redirect limit. Connections are kept and
+  shared: documents go over HTTP/2 where the server offers it and downloads over HTTP/1.1, as
+  measured on the registries (`LAZARET_HTTP=2` or `1.1` picks one for everything). Against the real
+  registries, 200 npm documents fetched by 16 threads took 0.6 s instead of 8.3 s, and 100 npm
+  tarballs by 8 threads 0.4 s instead of 2.9 s. Trust anchors come from `SSL_CERT_FILE`, then the
+  system's CA bundle, then what Python's `ssl` loads (the system store on Windows); the proxy is
+  the one urllib would use. Python's urllib takes the request where the native library is missing,
+  for a server that offers no TLS 1.3 (from then on for that host), for a proxy reached over TLS,
+  and when `LAZARET_NETWORK=python` asks for it. tiny_https has not had an independent review (its
+  README says so). The guard, the `github:` and `gitlab:` sources, the SCA feeds and secret
+  verification still use urllib. Building the native library now needs Rust 1.87 or later.
 - **VS Code extensions in `lazaret-registry` (E-1's second part): `openvsx:namespace.name[@version]`
   and `vscode:publisher.name[@version]`.** Every `.vsix` the version is published for, one per
   target platform the editor installs, is downloaded and scanned as `lazaret FILE.vsix` scans

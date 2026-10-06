@@ -1109,6 +1109,58 @@ products; scanning it is the project's decision 11. The sandbox cannot reach
 it, so the tests build the gallery's answers in the shape VS Code's gallery
 service reads.
 
+### j. The network: Lazaret's own HTTPS client (`nativenet.py`, `lazaret-net`, 0.1.9, NET-1)
+
+tiny_https, an HTTPS client written on Rust's standard library alone (TLS
+1.3, X.509, HTTP/1.1 with a keep-alive pool, HTTP/2 and HTTP/3; and pure
+verifiers: the Go checksum database, Sigstore bundles, CMS), is in the
+repository as it was handed over (`rust/crates/tiny_https`;
+`scripts/sync_tiny_https.py` takes a drop and `--verify` checks the copy
+against `vendored.sha256`, so a local edit cannot slip in). Lazaret takes it
+in as two crates, the split its consumer asked of it: `lazaret-verify`, its
+pure part (`default-features = false`: no I/O, no `unsafe`, WebAssembly),
+which the engine may use, and `lazaret-net`, which only the native library
+links (`lazaret-ffi`, not for wasm32). `check_rust_deps.py` holds that line.
+
+`lazaret-net` makes one shared client per process (a forked child makes its
+own and leaves the parent's connections alone) and a clone per request with
+the caller's rule: `HostRules` with `one_label_wildcards` and
+`default_port_only` (the registry modules' `host_allowed`, applied by the
+client to the first URL and to every redirect before it connects),
+`UrlLimits::strict` (https, no credentials, printable ASCII, 2,048 bytes),
+the timeouts, the redirect limit and the byte budget (a declared length over
+it fails at once). The C ABI (`lazaret_net_request`, `_open`/`_read`/`_close`
+for a body read in pieces, `_configure` for trust anchors) takes the request
+as JSON and gives the head as JSON and the body as bytes. Python's side is
+`scanner/nativenet.py`: `repo._fetch_bytes` and `repo.module_transport` send
+through it, with REGISTRY_HOSTS or the module's `Fetch.hosts` as the rule
+(a rule given only as a function goes through urllib, which can apply it
+hop by hop), and turn its failures into the FetchError texts urllib's path
+gives.
+
+The protocol was measured on Lazaret's own traffic against the real
+registries (fresh processes, cold connections): a burst of 200 npm documents
+from 16 threads took 0.61–0.68 s over HTTP/2, 0.64–0.91 s over HTTP/1.1 and
+8.3 s over urllib; 100 npm tarballs from 8 threads 0.43, 0.40 and 2.85 s; one
+47 MB wheel a median 0.55 s over HTTP/2 and 0.35 s over HTTP/1.1; six wheels
+at once (58 MB) 0.69 and 0.26 s. One HTTP/2 connection, read and decrypted by
+one thread, is slower for bulk than HTTP/1.1's parallel connections, and the
+gain over urllib is reuse whichever protocol is used. So a document (a
+budget of at most 32 MiB) is offered h2 and a download goes over HTTP/1.1
+(`LAZARET_HTTP` overrides); both keep their connections.
+
+What falls back to urllib: no native library, or one without the network
+layer; `LAZARET_NETWORK=python`; a server that offers no TLS 1.3 (tiny_https
+speaks 1.3 only; OpenSSL then negotiates with its downgrade protection, and
+the host goes to urllib for the rest of the process); a proxy reached over
+TLS. Trust anchors: `SSL_CERT_FILE`, the system bundle, or what Python's
+`ssl` loads (Windows' store); `SSL_CERT_DIR` alone is not read. The library
+has not had an independent review, which Lazaret had asked for before
+relying on its TLS; decision 12 (John, Oct 6) made it the default anyway,
+with urllib one variable away. Still on urllib: the guard's fetcher and
+`keepalive.py`, `sources.py`, the SCA feeds and secret verification (the
+next part of NET-1), then the Go checksum database check on `lazaret-verify`.
+
 ## 6. How to add or change a rule — the loop
 
 This is the working method. Follow it; it is why the tool has stayed trustworthy.

@@ -11,4 +11,23 @@ name = "lazaret-ffi"
 version = "0.1.8"
 dependencies = [
  "lazaret-engine",
+ "lazaret-net",
 ]
+
+[[package]]
+name = "lazaret-net"
+version = "0.1.8"
+dependencies = [
+ "tiny_https",
+]
+
+[[package]]
+name = "lazaret-verify"
+version = "0.1.8"
+dependencies = [
+ "tiny_https",
+]
+
+[[package]]
+name = "tiny_https"
+version = "0.1.0"

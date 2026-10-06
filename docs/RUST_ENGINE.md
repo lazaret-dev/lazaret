@@ -225,10 +225,19 @@ rust/
                              (Python's nesting limits), tree.rs (the arena), out.rs (JSON)
     examples/                profiling tools (profile_calls, profile_scanfile, pattern_times,
                              pattern_stats, show_need, jsparse_bench, pyparse_bench, pyflow_bench)
-  crates/lazaret-ffi/        cdylib liblazaret_native: the only `unsafe` (the C ABI; the
-                             WebAssembly exports)
+  crates/lazaret-ffi/        cdylib liblazaret_native: Lazaret's only `unsafe` (the C ABI; the
+                             WebAssembly exports; natively, the network layer's `lazaret_net_*`)
+  crates/lazaret-verify/     tiny_https's pure part (no I/O, no `unsafe`, wasm32): signatures,
+                             certificate chains, transparency logs, attestations (NET-1)
+  crates/lazaret-net/        the network layer on tiny_https: Lazaret's host rule on every hop,
+                             URL limits, budgets; native library only (NET-1, DESIGN.md §5j)
+  crates/tiny_https/         the HTTPS/TLS library, taken as it was handed over
+                             (scripts/sync_tiny_https.py; LAZARET.md, vendored.sha256); not a
+                             default member: `cargo test -p tiny_https` runs its own tests
   .cargo/config.toml         the WebAssembly build's stack (8 MiB, placed first)
 python/src/lazaret/scanner/_native.py   ctypes loader and one call (NativeError, NativeExhausted)
+python/src/lazaret/scanner/nativenet.py the network layer from Python: the default transport, urllib
+                                        behind it (NET-1)
 js/src/lib/native.js                    the npm package's loader: WebAssembly, one call, the pack's
                                         values, a wrapper per call the npm engine makes
 js/scripts/build-wasm.js                `npm run build`: native/lazaret.wasm and native/NOTICE
@@ -312,7 +321,11 @@ platform wheel fits), `pip install .` in `python/`, or the backend run
 without `--platform`, compiles the engine: `cargo build --release --offline
 --locked -p lazaret-ffi` in the sdist's (or the checkout's) `rust/`, with
 `MACOSX_DEPLOYMENT_TARGET` set to the release wheels' minimum on macOS and
-the C runtime linked statically on Windows. The backend then loads the
+the C runtime linked statically on Windows. Since NET-1 the library holds the
+network layer too (`lazaret-net` on tiny_https, whose sources the sdist
+carries: its manifest, licence and the test and example sources cargo reads,
+not its test data), and building it needs Rust 1.87 or later (tiny_https's
+SIMD kernels call the architecture intrinsics as safe functions). The backend then loads the
 library to check that it is this release's and loads in this Python, and
 tags the wheel for this machine (`linux_x86_64`, `win_amd64`,
 `macosx_11_0_arm64` …). Without cargo it stops and says to install Rust

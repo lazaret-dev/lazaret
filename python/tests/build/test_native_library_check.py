@@ -107,22 +107,27 @@ def _uleb(n):
 
 def export_trie(names):
     """A dyld export trie as ld64 writes one: the names' shared prefix on one
-    edge from the root, then an edge per name (all offsets below 128)."""
+    edge from the root, then an edge per name (offsets in ULEB128, one byte
+    or more: each node's place depends on the lengths before it, so they are
+    settled by going round until they hold)."""
     prefix = os.path.commonprefix(list(names)) if len(names) > 1 else ""
     leaf = b"\x02\x00\x10\x00"                  # terminal: flags 0, address 0x10; no children
     tails = [n[len(prefix):] for n in names]
-    inner_size = 2 + sum(len(t) + 2 for t in tails)
+    root, inner_at = b"", 0
     if prefix:
-        root = b"\x00\x01" + prefix.encode() + b"\0"
-        inner_at = len(root) + 1
-        root += _uleb(inner_at)
-    else:
-        root, inner_at = b"", 0
-    leaves_at = inner_at + inner_size
-    inner = b"\x00" + bytes([len(tails)])
-    for i, tail in enumerate(tails):
-        inner += tail.encode() + b"\0" + _uleb(leaves_at + 4 * i)
-    assert len(inner) == inner_size
+        while True:
+            root = b"\x00\x01" + prefix.encode() + b"\0" + _uleb(inner_at)
+            if len(root) == inner_at:
+                break
+            inner_at = len(root)
+    leaves_at = inner_at
+    while True:
+        inner = b"\x00" + bytes([len(tails)])
+        for i, tail in enumerate(tails):
+            inner += tail.encode() + b"\0" + _uleb(leaves_at + 4 * i)
+        if inner_at + len(inner) == leaves_at:
+            break
+        leaves_at = inner_at + len(inner)
     return root + inner + leaf * len(tails)
 
 

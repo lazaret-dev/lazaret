@@ -9,6 +9,14 @@ with no `source`: nothing from crates.io, git or another registry) and each
 member's Cargo.toml (every dependency, dev- and build-dependency is a
 `path` to another member). CI runs it; exit 1 names what is wrong.
 
+It also holds the line between the engine and the network (NET-1): tiny_https
+(rust/crates/tiny_https, taken as it was handed over) is depended on only by
+lazaret-verify, without its `net` feature (`default-features = false`: no
+I/O, no `unsafe`), and by lazaret-net; lazaret-net only by lazaret-ffi, and
+only for targets other than WebAssembly; and the engine (lazaret-engine)
+depends on neither tiny_https nor lazaret-net, so the engine may use the pure
+verification part (through lazaret-verify) and never the sockets.
+
 Usage: python3 scripts/check_rust_deps.py. Standard library only.
 """
 import os
@@ -70,6 +78,54 @@ def lock_problems(names, lock=None):
     return problems
 
 
+def manifest_dependencies(directory):
+    """(section header, its kind, dependency, value) for each dependency line of
+    a member's Cargo.toml (`dependencies`, `dev-dependencies`,
+    `build-dependencies`, a target's too)."""
+    section = header = None
+    for raw in (directory / "Cargo.toml").read_text(encoding="utf-8").splitlines():
+        line = raw.split("#", 1)[0].strip() if not raw.strip().startswith("[target.") else raw.strip()
+        if not line:
+            continue
+        m = _SECTION_RE.match(line)
+        if m:
+            section, header = m.group(1), line
+            continue
+        if _TABLE_RE.match(line):
+            section = header = None
+            continue
+        if section is None:
+            continue
+        k = _KEY_RE.match(line)
+        if k:
+            yield header, section, k.group(1), k.group(2)
+
+
+#: who may depend on the library and on the network crate (NET-1)
+_NATIVE_ONLY = "[target.'cfg(not(target_arch = \"wasm32\"))'.dependencies]"
+
+
+def purity_problems(names):
+    """The dependencies that cross the line between the engine and the network
+    (see the module documentation)."""
+    problems = []
+    for name, directory in names.items():
+        for header, section, dep, value in manifest_dependencies(directory):
+            if dep == "tiny_https":
+                if name == "lazaret-verify" and section == "dependencies":
+                    if not re.search(r"\bdefault-features\s*=\s*false\b", value):
+                        problems.append("lazaret-verify: tiny_https without default-features = false (its pure part "
+                                        "only: no I/O, no unsafe)")
+                elif name != "lazaret-net":
+                    problems.append(f"{name}: {header} tiny_https (only lazaret-verify, the pure part, and "
+                                    "lazaret-net depend on the library)")
+            elif dep == "lazaret-net":
+                if name != "lazaret-ffi" or header != _NATIVE_ONLY:
+                    problems.append(f"{name}: {header} lazaret-net (only the native library, lazaret-ffi, links the "
+                                    f"network, under {_NATIVE_ONLY})")
+    return problems
+
+
 def manifest_problems(name, directory, names):
     """The dependencies of one member's Cargo.toml that are not path
     dependencies on another member."""
@@ -105,6 +161,7 @@ def main(argv=None):
     problems = lock_problems(names)
     for name, directory in names.items():
         problems += manifest_problems(name, directory, names)
+    problems += purity_problems(names)
     for p in problems:
         print(f"error: {p}", file=sys.stderr)
     if problems:

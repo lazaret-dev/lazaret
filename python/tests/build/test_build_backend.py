@@ -292,10 +292,22 @@ class BuildTests(unittest.TestCase):
                          "rust/Cargo.toml", "rust/Cargo.lock", "rust/NOTICE", "rust/LICENSE-UNICODE",
                          "rust/crates/lazaret-engine/Cargo.toml", "rust/crates/lazaret-engine/src/lib.rs",
                          "rust/crates/lazaret-engine/rules/lazaret-rules.json",
-                         "rust/crates/lazaret-ffi/Cargo.toml", "rust/crates/lazaret-ffi/src/lib.rs"):
+                         "rust/crates/lazaret-ffi/Cargo.toml", "rust/crates/lazaret-ffi/src/lib.rs",
+                         # the network layer (NET-1), and the library it is built on, which ships with its licence
+                         "rust/crates/lazaret-net/Cargo.toml", "rust/crates/lazaret-net/src/lib.rs",
+                         "rust/crates/lazaret-verify/Cargo.toml", "rust/crates/lazaret-verify/src/lib.rs",
+                         "rust/crates/tiny_https/Cargo.toml", "rust/crates/tiny_https/LICENSE",
+                         "rust/crates/tiny_https/src/lib.rs", "rust/crates/tiny_https/src/http/hostrules.rs"):
                 self.assertIn(base + must, names)
-            self.assertFalse([n for n in names if "/tests/" in n or "__pycache__" in n or "/target/" in n
-                              or "/examples/" in n or "/." in n or n.endswith((".so", ".dll", ".dylib"))])
+            # tiny_https's test and example sources ship (cargo reads every target its manifest declares before it
+            # builds any), and nothing else of its tests: no data, no vectors, no documents
+            vendored = base + "rust/crates/tiny_https/"
+            self.assertFalse([n for n in names if ("/tests/" in n or "/examples/" in n)
+                              and not (n.startswith(vendored) and n.endswith(".rs") and "/tests/data/" not in n)])
+            self.assertFalse([n for n in names if n.startswith(vendored) and n.endswith((".md", ".txt", ".json", ".der",
+                                                                                          ".pem", ".sha256"))])
+            self.assertFalse([n for n in names if "__pycache__" in n or "/target/" in n
+                              or "/." in n or n.endswith((".so", ".dll", ".dylib"))])
             with tempfile.TemporaryDirectory() as d:
                 tf.extractall(d, filter="data") if hasattr(tarfile, "data_filter") else tf.extractall(d)
                 # a wheel built from the sdist (with the same library) is the one built from the repo

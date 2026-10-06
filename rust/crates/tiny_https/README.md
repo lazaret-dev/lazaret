@@ -1,0 +1,561 @@
+# tiny_https
+
+An HTTPS client for Rust built from scratch with **zero dependencies** (only `std`).
+
+## Status
+
+A working HTTPS client: you can `get`/`post` over TLS 1.3 with full certificate validation, over HTTP/1.1 (with a keep-alive pool and streaming bodies) or, when you ask for it, HTTP/2 or HTTP/3.
+
+| Layer | State |
+|-------|-------|
+| Crypto: SHA-256/384/512, HMAC, HKDF, AES-128/256-GCM, ChaCha20-Poly1305, X25519, ECDH on P-256/P-384 (constant time), RSA (PKCS#1 v1.5 and PSS verify), ECDSA P-256/P-384 verify, Ed25519 verify (rules of Go's `crypto/ed25519`), bignum | Tested against RFC/NIST vectors and OpenSSL-generated signatures; all 122 supported self-signatures among the 128 real roots in a system CA bundle verify |
+| ASN.1/DER, PEM, X.509 chain validation for TLS servers and for other purposes (code signing, time stamping, e-mail, any), hostname matching | Fixture tests (expiry, wrong host, non-CA issuer, pathLen, name constraints on DNS, e-mail, URI and IP names, wrong purpose, validation at a past time, tampering); a real Sigstore Fulcio chain (root, intermediate and a leaf from a real npm provenance attestation, validated at its logged time) and a real Apple Mac App Store code-signing chain; 127 of 128 real roots parse |
+| TLS 1.3 client (handshake, HelloRetryRequest, record layer, KeyUpdate in both directions, ALPN) | Interoperates with `openssl s_server` (RSA/P-256/P-384 keys x 3 cipher suites, and servers that accept only P-256 or P-384 key exchange, which force a HelloRetryRequest) and with a third-party TLS gateway; reproduces the RFC 8448 handshake trace byte for byte |
+| HTTP/1.1 client, keep-alive pool, streaming bodies, redirects, CONNECT proxy | Unit tests, HTTPS tests against OpenSSL, and tests against the in-crate TLS server (tickets, rekeys, stale connections) |
+| HTTP/2 client (opt-in, blocking `Client`): HPACK, framing, flow control, one shared connection per origin | HPACK checked against Go's and Python's implementations in both directions; 15 tests against Go's own HTTP/2 server; the in-crate server (below) against curl, Go and python-h2; 4 fuzz targets; real servers (pypi.org, npm) answer it over h2 |
+| TLS 1.3 / HTTP/2 server (`server` feature, **for tests and tools only**) | Against `openssl s_client`, curl and Go's `crypto/tls`: 36 checks; its HTTP/2 against curl, Go and python-h2: 21 checks |
+| QUIC client transport for HTTP/3 (`net` feature, work in progress: B-91): packet and header protection (all three TLS 1.3 suites, key update, AEAD limits), the frame codec, transport parameters, the TLS 1.3 handshake in CRYPTO frames, Retry and Version Negotiation, loss recovery (RFC 9002) with NewReno and pacing, streams with flow control, closing and draining, the idle timeout; sans-IO, one `Connection` per path | The RFC 9001 appendix vectors; 72 packets made by aioquic 1.3.0 (each also under the next key generation) open, and what is sealed here is read by it; 1,745 frame payloads read by quic-go's own parser and by this one with the same result; a live handshake, requests (`GET`, bulk, `POST` echo) and the close against an aioquic server, with Retry, and through a relay that drops and delays datagrams (`examples/quic_probe.rs`, `tools/quic_interop_server.py`); 7 fuzz targets, three of which run models (a set of numbers, a map of bytes, a list of outstanding packets) beside the code, and one a whole connection against the test server over a network that loses, duplicates, corrupts and reorders; 32 deliberate bugs in the packet protection, each caught by a test, and 21 in the buffers, flow control, transport parameters, loss recovery and connection, each caught by a fuzz target (`fuzz/mutate.py`; two more change nothing that anyone could see) |
+| HTTP/3 (`net` feature, opt-in on the blocking `Client` with `http3`: B-91): the client side described in the next section, over QPACK (RFC 9204: static and dynamic tables, the encoder and decoder streams, blocked streams, the required insert count), the frame reader of RFC 9114 (request and control streams, the rules for frames that may not be there, field-section limits) and the client connection on `quic::Connection` (control stream and SETTINGS both ways, the QPACK streams, request streams with trailers and `content-length` checked, interim responses, GOAWAY, streams of unknown types, push refused, flow-controlled reads, a bounded write buffer, a response that waits for the table) | QPACK: the static table checked against ls-qpack's (the library under aioquic), the examples of RFC 9204 appendix B, ls-qpack's output as a fixture and live in both directions with sections and instructions late, out of order and cut (`tools/qpack_interop.py`; it found that ls-qpack misreads the required insert count when the announced capacity is less than the maximum, so the encoder announces the maximum); the frame reader against a second parser that has the whole stream before it, under every cutting of the bytes; the connection against a model server (well-made responses, a table filled, delayed and acknowledged, resets, GOAWAY, bytes that mean nothing) with every request the client wrote decoded by a reference decoder: 148,000 responses read back byte for byte; 5 fuzz targets (`h3_qpack`, `h3_qpack_exchange`, `h3_qpack_encoder`, `h3_frames`, `h3_connection`); 58 deliberate bugs, each caught by a fuzz target or a unit test (`fuzz/mutate.py`); and over a UDP socket with a reader and a timer thread per connection, the Alt-Svc cache (RFC 7838) and the fallback to TCP | QPACK: the static table checked against ls-qpack's (the library under aioquic), the examples of RFC 9204 appendix B, ls-qpack's output as a fixture and live in both directions with sections and instructions late, out of order and cut (`tools/qpack_interop.py`; it found that ls-qpack misreads the required insert count when the announced capacity is less than the maximum, so the encoder announces the maximum); the frame reader against a second parser that has the whole stream before it, under every cutting of the bytes; the connection against a model server (well-made responses, a table filled, delayed and acknowledged, resets, GOAWAY, bytes that mean nothing) with every request the client wrote decoded by a reference decoder: 148,000 responses read back byte for byte; 5 fuzz targets (`h3_qpack`, `h3_qpack_exchange`, `h3_qpack_encoder`, `h3_frames`, `h3_connection`); 58 deliberate bugs, each caught by a fuzz target or a unit test (`fuzz/mutate.py`); the client against aioquic (`tests/h3_client_interop.rs`, 21 tests: bodies of every size, parallel streams on one connection, redirects, resets, size limits, Alt-Svc heeded and taken back, a network that refuses or silently drops UDP costing one try, a connection that dies under a request) and 11 unit tests of the registry's rules; the Alt-Svc parser by a sixth fuzz target (`alt_svc`) and 12 more deliberate bugs in the client's use of HTTP/3, each caught by a test |
+| Revocation: OCSP stapling, CRLs (supplied or fetched), must-staple, soft-fail / hard-fail | Fixture tests (45 files from an independent implementation), a scripted TLS server, and `openssl s_server` / `ocsp` / `ca`; not yet run against real public CAs (B-65) |
+| Transparency logs: signed notes, Merkle inclusion and consistency proofs, tiles, the Go checksum database check (pure, no I/O) | Real `sum.golang.org` data (signed tree heads, a lookup, the seven tiles, real 26- and 17-hash proofs) verifies; 2,070 damaged and valid cases judged by Go's own `sumdb` packages and replayed; a made-up two-history log for forks; every tile authenticated (Go before x/mod 0.40 did not: CVE-2026-56865); 3 fuzz targets |
+| Sigstore attestations: npm provenance and publish attestations, PyPI PEP 740 provenance, bundles v0.1 to v0.3 (strict JSON, DSSE, Fulcio identity, Rekor signed entry timestamps and inclusion proofs, RFC 3161 time stamps; pure, no I/O, no clock) | The six real npm attestations of three `sigstore` releases (one per bundle format, two with a Rekor shard that has since closed) and PyPI's real provenance verify against Sigstore's production trusted root and npm's keys, and every member and string of every one, removed or changed in turn (about 1,700 changes), makes it fail unless nothing authenticates it; 86 bundles from a Sigstore of our own cover time stamps, an Ed25519 log, every key type and 62 refusals, each for the reason it was made for (and 600 more changes on four of them); 3 fuzz targets (`json`, `sigstore`, `trust_root`) |
+| CMS / PKCS#7 signatures (Java `META-INF/*.RSA`, `.p7s`, S/MIME) and RFC 3161 time stamps: BER reader, signer verification (RSA PKCS#1 and PSS, ECDSA P-256/P-384, Ed25519), chain to the caller's roots at the signature's time (pure, no I/O) | 45 messages made by OpenSSL and the JDK's `jarsigner` verify; 1,886 damaged messages judged by `openssl cms -verify` and replayed, each region of a message pinned as exactly OpenSSL's verdict, stricter, or deliberately more lenient; 2 fuzz targets; not Authenticode yet (B-70 phase 2, B-80) |
+
+Not yet verified against real public CA chains from a normal network: see `BACKLOG.md` (B-06, B-08).
+Test run at last check: 1,133 unit (including the mutation fuzzers; 13 more are ignored by default: 9 timing tests, two long random runs, a live QPACK peer and a replay of fuzz inputs; 255 of them also run without the `net` feature), 2 Go-vector, 1 CMS-vector, 13 real Sigstore, 5 synthetic Sigstore, 3 real Rekor, 36 OpenSSL interop, 15 HTTP/2 client against Go's server, 22 HTTP/3 client against aioquic (they skip without `python3` and aioquic), 1 real-root, 10 doc tests, no warnings; `tools/server_interop.sh` (36 checks) and `tools/h2_interop.sh` (21) pass.
+
+## Security warning
+
+This is hand-written, unaudited cryptography. Nothing has had an independent side-channel or code review. Do not use
+it to protect sensitive data until the hardening items in the backlog are done. Revocation is checked only with the
+evidence the server staples and the CRLs you supply or let the library fetch, and by default a missing answer is
+ignored (soft-fail); see Revocation below.
+
+## Async
+
+The standard library has no asynchronous sockets, DNS or timers, so there is no event loop in this crate. Two layers
+give async code what it needs without one, and both work with any executor (they use only `std::task::Waker`):
+
+* **Thread-backed, no setup.** `Client::get_async`, `head_async`, `post_async` and `RequestBuilder::send_async` run the
+  ordinary blocking request (redirects, proxy tunnelling, every timeout) on a small worker pool (`asyncio::Pool`,
+  16 threads by default, `Client::pool` to choose another) and return a future. Dropping the future abandons the
+  request, and one that has not started is never sent.
+* **True async over your own transport.** The TLS client is a sans-IO state machine, `tls::ClientConnection` (bytes in,
+  bytes out, no I/O inside), which the blocking `TlsStream` and the async `asyncio::AsyncTlsStream` both drive; the
+  HTTP response parser is sans-IO too. `asyncio::AsyncRead` and `AsyncWrite` have the shape of the `futures-io`
+  traits. `Client::into_async()` gives an `AsyncClient` with the same requests, redirects, proxy CONNECT, limits and
+  TLS settings; it opens connections through the `Connect` trait. The default, `ThreadConnector`, needs nothing (it
+  runs resolution, connecting and each socket read and write on the pool, one thread hand-off per operation); to use a
+  runtime's own sockets, implement `Connect` for a small adapter. For tokio, forward each `poll_*` to the stream's
+  own method (`tokio::io::ReadBuf` wraps the `&mut [u8]`).
+
+`AsyncClient` speaks HTTP/1.1 only; HTTP/2 (below) is for the blocking `Client`, and for the `*_async` methods that run it on the pool (B-72 part 2 in `BACKLOG.md`).
+
+`asyncio::block_on` is a minimal executor for tests, examples and small programs (`examples/async_get.rs`).
+`Client::total_timeout` limits a whole request, redirects included. There is no timer in the standard library, so
+`AsyncClient` cannot time out a connector it does not control: `ThreadConnector` enforces `connect_timeout`, `timeout`
+and `total_timeout` on its sockets; for another connector use your executor's timeout around the future (B-61).
+`AsyncTlsStream` cannot send close_notify when dropped (sending needs the executor): call `close()`.
+
+## Connections, streaming and HTTP/2
+
+Connections are kept alive and reused: the clones of a `Client` share a pool keyed by scheme, host, port and proxy, a connection goes
+back to it when its response was read to the end, and a request that fails on a connection that had gone stale is sent again once if
+its method may be repeated (`keep_alive`, `pool_idle_timeout` and `pool_max_idle_per_host` tune it; `keep_alive(false)` turns it off).
+`send_stream` and `get_stream` return a `ResponseStream` as soon as the headers are in, a `Read` over the body, so a download can be
+hashed and unpacked on the way without holding it in memory (`max_body_bytes` and the timeouts still apply).
+
+HTTP/2 is off by default. `Client::http2(true)` offers `h2` and `http/1.1` in the TLS handshake; a server that picks `h2` gets **one
+connection per origin that all requests share** (up to the number of concurrent streams it allows, then another), and anything else
+is spoken to in HTTP/1.1 as before:
+
+```rust
+let client = tiny_https::Client::new()?.http2(true);
+let resp = client.get("https://example.com/")?;
+println!("{} {}", resp.version, resp.status);        // "HTTP/2 200"
+```
+
+Requests and responses look the same as over HTTP/1.1, except that the reason phrase is empty, header names are lower case and
+trailers are dropped. The windows are 8 MiB per stream and 32 MiB per connection: a body read in pieces (`send_stream`) holds no more than
+that unread, and a body read whole (`send`) is kept as it arrives, up to `max_body_bytes`, and handed over without another copy. Server
+push is refused and priorities are ignored. A connection has two threads (a reader and a writer) for as long as it is open (a request is read by its own caller when nobody else is reading, whether it is answered whole or read in pieces, as an HTTP/1.1 request is, and the reader thread steps aside for it: B-86), and it is
+decrypted on one thread, about 0.9 GB/s here, so one HTTP/2 connection costs about what one HTTP/1.1 connection costs for a big download, and
+eight big downloads at once take one core's time over HTTP/2 where eight HTTP/1.1 connections spread over several. The layers
+are sans-IO (`src/http/h2/`: HPACK, frames, the connection state machine), so an async driver can be built on them (B-72 part 2).
+
+Speed, against Go's `net/http` client on the same server and the same two cores (`bash tools/bench_h2.sh`; medians; the server is Go's, pinned to
+one core, and its HTTP/2 costs it more CPU than its HTTP/1.1 does, which is most of why the HTTP/2 wall times below are above the HTTP/1.1 ones):
+
+| CPU time in ms (wall time in ms) | ours HTTP/1.1 | Go HTTP/1.1 | ours HTTP/2 | Go HTTP/2 |
+|---|---|---|---|---|
+| one 100 MB download, read whole | 110 (120) | 127 (132) | 120 (131) | 168 (189) |
+| one 100 MB download, read in pieces of 64 KiB | 50 (90) | 69 (84) | 80 (132) | 164 (183) |
+| 8 x 47 MB at once | 430 (348) | 462 (382) | 420 (474) | 638 (601) |
+| 2000 small requests, one thread | 60 (170) | 185 (253) | 70 (223) | 213 (300) |
+| 4000 small requests, 8 threads | 90 (140) | 168 (170) | 150 (274) | 271 (337) |
+| 128 requests at once, 20 ms round trip, nothing connected yet | 140 (200) | 137 (209) | 20 (63) | 149 (213) |
+| one 47 MB download, 20 ms round trip | 50 (121) | 57 (122) | 50 (199) | 99 (310) |
+
+(The numbers are from one run on one machine; rows compare with each other, not with the numbers of other machines or earlier runs.)
+
+Where HTTP/2 helps most is many requests to an origin that has no connection yet: one handshake and one connection instead of one each.
+For one big stream or a run of small requests on a fast local path HTTP/1.1 is as fast or faster, on this server. A run of small requests costs HTTP/2 about a sixth more CPU than HTTP/1.1 here, and a download read in pieces about half as much again (80 ms against 50 for 100 MB): the two HTTP/2 servers tried (Go's and Node's) send the head and the body of a response in two TCP segments, so whoever reads has one wake-up more per response, and a piece is copied once more on its way to the caller (B-86, B-87). Eight threads on one connection cost more than eight connections do (B-89).
+`cargo run --release --example fetch -- --http2 --parallel 8 URL` shows the sharing and the time.
+
+
+## HTTP/3 (opt-in)
+
+HTTP/3 is the caller's option and is off by default. Without it the order is what it was: HTTP/2 for a server that picks `h2` (if
+`http2(true)` is on), else HTTP/1.1. `Client::http3(true)` makes the client use QUIC (over UDP) for an origin that has said it offers it, in
+an `Alt-Svc` field of an ordinary response (`alt-svc: h3=":443"; ma=86400`: RFC 7838; the first alternative for `h3` counts, `clear` and `ma=0`
+take it back, the lifetime is at most 30 days and 24 hours when there is none). The first request to an origin goes over TCP, as it would without
+the option, and learns that; the ones after it go over QUIC, on **one connection per origin that all requests share** (another when the server's limit
+on concurrent streams is reached):
+
+```rust
+let client = tiny_https::Client::new()?.http2(true).http3(true);
+let first = client.get("https://example.com/")?;     // TCP: HTTP/2 or HTTP/1.1
+let next = client.get("https://example.com/")?;      // QUIC, if the origin offered it
+println!("{} then {}", first.version, next.version); // "HTTP/2 then HTTP/3"
+```
+
+`http3_eager(true)` (which turns the option on) tries QUIC for an origin nobody has spoken of, at the host and port of the request: for a client
+that talks to servers it knows speak HTTP/3. The server is authenticated as the origin's name, as for TLS over TCP, even when the alternative is
+at another host. A request through a proxy is never sent over QUIC (the proxies tunnel TCP), and neither is one while `keep_alive` is off.
+
+QUIC is not always possible (a network that drops UDP; a firewall that lets TCP through only), and the fallback is built so that it costs little:
+the handshake of an alternative that was only advertised is given 3 seconds at most (or `connect_timeout`, if that is shorter), an origin that
+could not be reached is left to TCP for five minutes and twice as long after each failure that follows (to a day), the requests that come while
+the first one dials go over TCP at once, a request that is refused or that a lost connection cut off in a way that allows another try is sent again
+(a request that may be repeated that was lost on a connection that had just been made goes over TCP, and the origin is left to TCP), and a
+`clear` from the origin closes the connection once its requests are done. The response is as over HTTP/2: no reason phrase, lower-case header names,
+trailers dropped; `Response::version` is `HttpVersion::Http3`. A connection has two threads (a reader and a timer) while it is open and is closed
+when it has been idle for `pool_idle_timeout`, when the server says to go away, when the network ends it and when the last clone of the client is dropped.
+
+Not done: the async client (`AsyncClient`) does not speak HTTP/3 (the `*_async` methods of `Client` do), and there is no 0-RTT, no connection migration,
+no stream priorities, no path-MTU discovery (the datagrams it sends are 1200 bytes, the least a QUIC path has to carry), and no UDP batching: a download over a clean fast
+link is slower over this than over HTTP/2 until those and CUBIC are in (B-91). `examples/fetch.rs --http3` (or `--alt-svc`) asks for it from the command line.
+
+
+## Host rules
+
+A client can be limited to the hosts a caller (a module, a plug-in) is allowed to talk to. `Client::allowed_hosts(HostRules::new(["api.example.com", "*.cdn.example.net"])?)`
+is applied to the URL of the request and to **every redirect that is followed**, before anything is sent to that host: a request or a redirect to
+a host the rule does not name is an `Error::Http` whose message begins `host not allowed`, and nothing connects. An entry is a host, a host with a
+port (`api.example.com:8443`, `[::1]:8443`), an IPv4 or IPv6 address, or a wildcard `*.example.com`, which allows what is under the domain and **not the
+domain itself** (it needs an entry of its own); a wildcard needs a domain of two labels at least (`*.com` is refused), and an entry that is not
+one of these is an error when the rule is made, not a rule that quietly does something else. The host compared is the one the client will
+connect to, as the URL gives it (the part after the last `@`, lower case, ASCII: an internationalized name is matched in its `xn--` form, and
+an address written as `2130706433` does not match the entry for the address it means).
+
+The rule is loose unless it is told otherwise, and a caller that wants it tight says so with two switches and a set of limits on the URL:
+
+| | default | switch |
+|---|---|---|
+| `*.example.com` matches | one label or more (`a.example.com`, `a.b.example.com`) | `one_label_wildcards(true)`: exactly one valid label (`[a-z0-9]`, inner `-`, at most 63 bytes), so `a.example.com` and not `a.b.example.com`, `evilexample.com` or an `_` name |
+| a host with no port in its entry matches | any port | `default_port_only(true)`: the scheme's default port only (`:443` counts as the default); a wildcard never matches an explicit port, and a host on another port needs an entry of its own, `host:port` |
+| the URL | anything the parser takes | `Client::url_limits(UrlLimits::strict())`: https only, no `user:password@`, printable ASCII only (no space or control character, nothing over `~`), at most 2,048 bytes; each can be asked for alone (`https_only`, `refuse_credentials`, `printable_ascii_only`, `max_length`) and the message of a refusal begins `URL not allowed` |
+
+The rule of a module that reaches the Marketplace's hosts (`<publisher>.gallerycdn.vsassets.io`, `<publisher>.gallery.vsassets.io`, and no other
+host) is therefore
+`client.clone().allowed_hosts(HostRules::new(["marketplace.visualstudio.com", "*.gallerycdn.vsassets.io", "*.gallery.vsassets.io"])?.one_label_wildcards(true).default_port_only(true)).url_limits(UrlLimits::strict())`,
+and it holds on the first URL and on every hop. The text of a URL is judged as it came: the caller's string, and for a redirect the `Location` value as
+well as the URL it resolves to.
+
+Clones of a client share their connections, so `client.clone().allowed_hosts(rules)` is a client for one caller, and the limits of `timeout`,
+`total_timeout`, `max_redirects`, `max_body_bytes` and `url_limits` are set on the clone the same way; the async client and the `*_async` methods apply the
+rule too, and with HTTP/3 on, an `Alt-Svc` alternative is used only if the rule allows its host and port (the origin's own host when it names none). A POST
+with a JSON body is `request("POST", url).header("Accept", "application/json").header("Content-Type", "application/json").body(json)`:
+the caller's `Accept` replaces the default `*/*`, a 307 or 308 repeats the method and the body, a 303 (or a 302 of a POST) makes a GET with no body, and
+credentials are dropped when a redirect changes the origin.
+
+## Revocation
+
+`ClientConfig` carries a revocation policy (`tiny_https::revocation`). The default, **soft-fail**, asks the server for
+a stapled OCSP response (RFC 6066 `status_request`, carried in the Certificate message in TLS 1.3), checks the staple
+and any CRLs you give it, and fails the handshake (alert `certificate_revoked`) if any of them shows a certificate on
+the path to be revoked. Evidence that is missing, damaged, out of date or signed by the wrong key is ignored, except
+for a leaf marked *must-staple* (RFC 7633), whose staple must be valid. **Hard-fail** also requires positive proof for
+the leaf (a "good" staple or a covering CRL that does not list it) and refuses the connection (alert
+`bad_certificate_status_response`) without it. **Off** does not check and does not ask for a staple.
+
+```rust
+use tiny_https::http::HttpCrlSource;
+use tiny_https::revocation::{Crl, Revocation, RevocationMode};
+use std::sync::Arc;
+
+// strict: need proof, and download the CRL named in the certificate (plain http, cached until nextUpdate)
+let strict = Revocation::hard_fail().with_crl_source(Arc::new(HttpCrlSource::new()));
+// or supply a list you already hold
+let mine = Revocation::soft_fail().with_crl(Crl::from_pem(&std::fs::read_to_string("issuer.crl.pem")?)?);
+let cfg = ClientConfig::new(store).with_revocation(strict);   // or .revocation_mode(RevocationMode::Off)
+```
+
+Every response and list is verified (signature by the certificate's issuer or a delegated OCSP signer, validity
+window, name and serial, and for CRLs the issuing-distribution-point scope) before it counts, so it does not matter how
+it arrived. CRLs the library cannot interpret completely (delta, indirect, per-reason partitions) are refused rather
+than misread. It never contacts an OCSP responder itself, and `CrlSource::fetch` is blocking, so with the async client
+supply CRLs up front. Details and the list of what is not done: the module documentation and backlog B-63 and B-64.
+
+## Constant-time status
+
+X25519, the P-256/P-384 key exchange (`src/crypto/ecdh.rs`), GHASH, Poly1305, ChaCha20 and AES contain no
+secret-dependent branches or table lookups, and a statistical timing harness (`src/crypto/timing.rs`, dudect style,
+with deliberately leaky positive controls) found no timing dependence on keys or data on x86-64 or on an Apple M5 Max
+(backlog B-24, B-58). The harness earned its keep on the P-256/P-384 code: the first version showed |t| above 100
+because LLVM had turned a mask-based conditional subtraction back into a branch on the data; the masks now go
+through `black_box` and all eight comparisons read below 3. Verification-only ECDSA (`ecdsa.rs`) handles public
+values only and is variable time by design.
+
+AES used to be a byte-indexed S-box table, which is exposed to cache-timing attacks, and the harness saw it on one
+x86-64 host (a zero or all-ones key against random keys, |t| 17 to 69). It is now either the CPU's own AES
+instructions (AES-NI, or the ARMv8 AES instructions; found at run time and self-tested) or, where there are none, a
+bitsliced circuit with no tables (B-20, B-41). Both pass the same harness: |t| stays under 3.5 on the key and data
+rows for AES-128 and AES-256 on x86-64. GHASH uses PCLMULQDQ / PMULL, or integer multiplications on spaced-out
+operands (`bmul64`) on other CPUs; that fallback assumes the CPU's integer multiplier takes the same time for any
+operands, which holds on mainstream desktop, server and phone cores but not on some small embedded ones.
+RSA, ECDSA and Ed25519 are verification only and handle public data (the Ed25519 code is variable time by design; the field arithmetic it shares with X25519 is the constant-time code, in `crypto/fe25519.rs`).
+
+## Features
+
+`net` (on by default) is TLS, the HTTP client, sockets, OS randomness, the SIMD kernels and the wiping of secrets: everything
+that does I/O or needs `unsafe`. With `default-features = false` you get only the pure part: ASN.1, PEM, X.509 path
+validation (the caller passes the trust anchors and the time), OCSP and CRL checking, SHA-1/SHA-2, big numbers, RSA,
+ECDSA and Ed25519 verification, signed notes, Merkle proofs, the Go checksum database check, and CMS / PKCS#7 signatures with RFC 3161 time stamps. That build has `#![forbid(unsafe_code)]`, does no I/O, starts no threads, reads no clock or
+environment variable, has no dependencies, and compiles for `wasm32-unknown-unknown`.
+
+```toml
+tiny_https = { version = "0.1", default-features = false }   # verification only
+```
+
+`server` (off by default, and always built for this crate's own tests) adds a TLS 1.3 server with an HTTP/1.1 and HTTP/2 server on top of it
+(`tls::server`, `tls::pki`, `crypto::ed25519_sign`, `http::h2_server`, and `cargo run --features server --example serve`). It exists so that
+tests and tools have a real peer to talk to: keep-alive, streaming and HTTP/2 are tested against it, and `tools/server_interop.sh` and
+`tools/h2_interop.sh` check it against OpenSSL, curl, Go and python-h2. **It is not for production**: its Ed25519 signing is not constant
+time, it resumes nothing, has one certificate, and has had no review.
+
+The line is drawn so that the pure part could move unchanged into a crate of its own, with the `net` part in a second crate that
+depends on it: the pure part never mentions the `net` part, and the `net` part adds nothing to the pure part's types (its error type
+wraps the pure one, and the things that touch the operating system are free functions in `sys`, not methods on pure types).
+`sh tools/check_features.sh` checks this (no `unsafe`, no I/O, no feature or target `cfg` in the pure files, no mention of
+`net` modules; then builds and tests the pure part, natively and for wasm32). Without the feature the library has no
+`Client`, `tls`, `http`, `asyncio`, `sys`, `error` or `zeroize` module, and `crypto` has only `sha1`/`sha2`, `bignum`, `rsa`, `ecdsa`, `ed25519` and the field arithmetic `fe25519`.
+
+## Layout
+
+```
+Pure part (always built; the whole crate with `default-features = false`):
+src/asn1.rs        strict DER reader
+src/pem.rs         PEM and Base64
+src/ber.rs         BER reader (indefinite lengths, constructed strings) that can rewrite what it read as strict DER
+src/x509.rs        certificates, trust store, chain validation for any purpose, hostname checks
+src/cms.rs         CMS / PKCS#7 SignedData and RFC 3161 time-stamp token verification
+src/revocation.rs  OCSP staple and CRL verification, revocation policy (CrlSource trait)
+src/note.rs        signed notes (c2sp.org/signed-note, Go's `note.Open`): the envelope of tree heads
+src/tlog.rs        Merkle inclusion and consistency proofs (RFC 9162), tiles, authenticated tile reading
+src/sumdb.rs       the Go checksum database check (`Check`, sans-IO), lookup paths, tree head and record parsing
+src/json.rs        strict I-JSON reader (duplicate names, bad UTF-8, lone surrogates and non-RFC 8259 numbers are errors; 64-bit integers from decimal strings) and canonical writer
+src/trust_root.rs  Sigstore's `trusted_root.json` and npm's key list: logs, Fulcio and time-stamp authorities, keys, validity periods
+src/sigstore.rs    Sigstore bundle verification (v0.1 to v0.3, npm attestations, PyPI's PEP 740): DSSE, Fulcio identity, Rekor entries, time stamps, in-toto subject
+src/verify_error.rs  the error type of the pure part
+src/util.rs        hex, constant-time compare, byte reader
+src/crypto/        SHA-1 (OCSP certificate IDs, and reporting weak CMS signatures), SHA-2, big numbers, RSA, ECDSA and Ed25519 verification, the 2^255-19 field (also used by X25519)
+
+Behind the `net` feature (default):
+src/tls/           TLS 1.3 client: messages, cipher suites and record cipher, `ClientConnection` (sans-IO state machine), `TlsStream` (blocking driver)
+src/http/          URL parsing, sans-IO response parser, HTTP/1.1 framing, Client and AsyncClient (redirects, CONNECT proxy, keep-alive pool, streaming bodies), HttpCrlSource
+src/http/h2/       HTTP/2 client layers that do no I/O: Huffman, HPACK, frames, the connection state machine (flow control, streams, GOAWAY)
+src/http/h2_transport.rs  the blocking client's HTTP/2 transport: one shared connection per origin, a reader and a writer thread
+src/asyncio/       worker pool and futures, AsyncRead/AsyncWrite, AsyncTlsStream, ThreadedStream, block_on
+src/quic/         QUIC (RFC 9000, 9001, 9002) client transport for HTTP/3, sans-IO: wire primitives, packet headers, packet and header protection, frames, transport parameters, the TLS handshake in CRYPTO frames, range sets, send and receive buffers, loss recovery, NewReno and pacing, streams and flow control, `Connection`
+src/http/h3/       HTTP/3 pieces that do no I/O (B-91): QPACK (static table, encoder and decoder with the dynamic table and blocked streams), the frame reader, the client connection over a `Transport` (`quic::Connection` is one)
+src/http/h3_transport.rs  the blocking client's HTTP/3 transport: a UDP socket, a reader and a timer thread per connection, the registry of connections and Alt-Svc alternatives with its backoff
+src/http/altsvc.rs  the `Alt-Svc` field (RFC 7838)
+src/http/hostrules.rs  `HostRules`: the hosts a client may reach (one-label wildcards, default port only), applied to the request and every redirect
+src/tls/server.rs, pki.rs, src/crypto/ed25519_sign.rs, src/http/h2_server.rs   the `server` feature: a TLS 1.3 and HTTP/2 server for tests and tools (not for production)
+src/crypto/        HMAC/HKDF, AEAD ciphers (ChaCha20-Poly1305, AES-GCM, with the SIMD kernels), X25519, ECDH on P-256/P-384, OS randomness (the files `crypto/mod.rs` lists under "behind net")
+src/error.rs       the error type of the net side (wraps the pure one)
+src/sys.rs         the clock and the CA bundle files
+src/zeroize.rs     wiping secrets (the only `unsafe` outside the SIMD kernels and OS randomness)
+
+examples/       fetch (curl-like; `--http2`, `--http3` (QUIC first, TCP if that fails), `--alt-svc` (QUIC where the origin said it offers it), `--parallel N`, `--max-bytes N`), serve (the test server: HTTP/1.1 and HTTP/2 over TLS 1.3, needs `--features server`), async_get, probe (negotiation report), sumdb (look a module up in the Go checksum database), cms_verify (check a CMS / PKCS#7 signature file), sigstore_verify (check Sigstore attestations of a file) and bench
+tests/          OpenSSL interop tests, the HTTP/2 client against Go's server (h2_client_interop.rs), the HTTP/3 client against aioquic (h3_client_interop.rs), replays of vectors judged by Go (go_vectors.rs) and by OpenSSL (cms_vectors.rs) and fixtures (tests/data)
+tools/          generators for test vectors and fixtures (Python, uses the `cryptography` package; the CMS ones also run the `openssl` command line tool and the JDK's `jarsigner`), check_features.sh, go_oracle.sh (runs Go's sumdb packages as an independent judge), server_interop.sh and h2_interop.sh (the test server against OpenSSL, curl, Go and python-h2), h2_oracle_server.go (Go's HTTP/2 server for `tests/h2_client_interop.rs`), bench_h2.sh with bench_client.go and bench_delay_proxy.go (the benchmark against Go's client above), hpack_oracle.* and h2_frame_oracle.py (HPACK and frames against Go, Python and hyperframe), gen_quic_vectors.py (packets made by aioquic), quicgo_oracle/ (frame payloads read by quic-go's parser), quic_interop_server.py (an aioquic HTTP/3 server, with an HTTPS side on TCP that advertises it, for `examples/quic_probe.rs` and `tests/h3_client_interop.rs`) and qpack_interop.py (QPACK against ls-qpack)
+fuzz/           coverage-guided fuzzer (std-only, stable Rust) and its 40 targets: `sh fuzz/run_all.sh 3600`
+```
+
+## Usage
+
+```rust
+let client = tiny_https::Client::new()?          // trusts the OS CA bundle (or SSL_CERT_FILE)
+    .proxy_from_env();                           // optional: HTTPS_PROXY / NO_PROXY
+let resp = client.get("https://example.com/")?;
+println!("{} {}", resp.status, resp.text());
+
+let resp = client.request("POST", "https://example.com/api")
+    .header("Content-Type", "application/json")
+    .body(br#"{"hello":"world"}"#.to_vec())
+    .send()?;
+```
+
+On Windows there is no CA bundle file; load one explicitly with
+`tiny_https::sys::trust_store_from_pem_file("cacert.pem")` and `Client::with_tls_config(ClientConfig::new(store))`.
+
+Try it: `cargo run --release --example fetch -- -i https://example.com/`
+
+### Verifying a chain for something other than TLS
+
+`TrustStore::verify_chain` is the chain checker without the TLS in it, and it is in the pure part (no clock, no I/O):
+the caller picks the purpose, the time to validate at and the anchors, and reads what the certificate says about its holder.
+A Sigstore (Fulcio) signing certificate lives for ten minutes, so it is checked at the time of the signature:
+
+```rust
+use tiny_https::asn1::oid_from_string;
+use tiny_https::x509::{Purpose, TrustStore, VerifyOptions};
+
+let mut anchors = TrustStore::empty();                       // the caller's anchors: Fulcio roots, a code-signing root...
+anchors.add_pem(&fulcio_root_pem);
+let chain = [leaf_der, intermediate_der];                    // leaf first; the rest in any order
+let options = VerifyOptions::new(Purpose::CodeSigning, signed_at_unix_seconds);   // not "now"; no host name
+let ok = anchors.verify_chain(&chain, &options)?;            // ok.leaf, and ok.path from the leaf to the anchor
+
+let workflow: Vec<&str> = ok.leaf.uris().collect();          // SAN URIs; e-mail names: email_addresses()
+let issuer = ok.leaf.extension(&oid_from_string("1.3.6.1.4.1.57264.1.8").unwrap()).and_then(|e| e.der_string());
+```
+
+`Purpose` is `ServerAuth`, `ClientAuth`, `CodeSigning`, `EmailProtection`, `TimeStamping`, `OcspSigning`, `Oid(..)` or `Any`.
+The leaf and every CA above it must allow the purpose (or have no extendedKeyUsage extension, except that the leaf must name it
+unless `allow_missing_leaf_eku` is set); every certificate must be valid at the time; CAs need keyCertSign, pathLen and name
+constraints (DNS, e-mail, URI and IP names) are enforced; RSA keys below the store's minimum are refused. A critical extension
+this code does not know refuses the chain unless the caller lists it with `with_critical_extension` (for those it interprets
+itself). What the certificate says (every SAN entry, every extension with its critical flag) is for the caller to compare;
+nothing is matched but the host name, if one is given. Revocation is separate (`revocation`). `verify_server_chain` is the
+`VerifyOptions::tls_server` case of the same code.
+
+### Ed25519
+
+`tiny_https::crypto::ed25519::verify(public_key, message, signature) -> bool` is in the pure part, and Ed25519 keys and
+signatures work in certificates, CRLs, OCSP responses and TLS 1.3 (`PublicKey::Ed25519`, `SigAlg::Ed25519`, signature scheme
+0x0807; RFC 8410 requires the algorithm parameters to be absent, so a NULL there is refused). Signing is not here.
+
+Implementations disagree about some Ed25519 signatures, so this one follows a single reference exactly: Go's
+`crypto/ed25519`, the one the Go checksum database and `go` itself use. A signature verifies if and only if it is 64
+bytes with the top three bits of S clear, S is below the group order L (so `S + L` is refused), the key decodes (a
+non-canonical `y` of `p` or more and a zero `x` with the sign bit set are accepted, as Go and `ref10` do), and
+`[S]B - [k]A` encodes to exactly the bytes of R, where `k` is the hash reduced modulo L. That is the cofactorless
+equation, so a torsion component in R or in the key is rejected unless it cancels, and R is never decoded, so a
+non-canonical R never verifies. A key of small order is accepted as a key (with the identity as key and R and S = 0,
+every message verifies), exactly as in Go.
+
+The rules are pinned by 1,048 generated vectors, each with Go's verdict (go1.24; `tools/ed25519_vectors.py` regenerates
+them; the 14 x 14 combinations of small-order keys and R values, mixed-order keys whose acceptance depends on reducing
+`k`, torsion in R, malleable S, bit flips, keys off the curve), 128 known-answer signatures from the original Ed25519
+test set (RFC 8032 TEST 1 and TEST 2 among them), and the group arithmetic against an independent Python implementation.
+OpenSSL gives the same verdict on every vector. Five deliberate deviations (strict decoding of `y`, rejecting
+`x = 0` with the sign bit, a cofactored equation, no canonical-S check, an unreduced `k`) each make the tests fail.
+
+### Transparency logs and the Go checksum database
+
+Three pure modules (they build without `net`, for wasm32 too). `note` reads signed notes (the format of c2sp.org/signed-note, as
+Go's `note.Open` does: a text, a blank line, signature lines; a bad signature by a key you gave fails the whole note; signatures by
+keys you did not give are kept aside as unverified; Ed25519 keys). `tlog` holds Merkle trees: `verify_inclusion` and
+`verify_consistency` (RFC 9162), tiles with the path syntax of Go's checksum database, and tile reading in which **every tile is
+authenticated**, the right edge against the signed root and each other tile against its entry in its parent. `sumdb` puts them
+together as Go's client does, without any I/O:
+
+```rust
+use tiny_https::sumdb::{self, Check};
+use tiny_https::tlog::TileSet;
+
+let mut check = Check::new(sumdb::verifier());                  // the pinned key of sum.golang.org
+// check.add_head(&saved_note)?;                                // the head kept from the last run, if any
+check.add_lookup("golang.org/x/mod", "v0.17.0", &lookup_response)?;   // GET /lookup/golang.org/x/mod@v0.17.0
+let mut tiles = TileSet::new();
+for tile in check.tiles_needed()? {
+    // fetch GET /<tile.path()> (a partial tile that is gone is served as the full one: tile.full()), then
+    // tiles.insert(tile, data)?;
+}
+let outcome = check.finish(&tiles)?;                            // nothing is vouched for before this succeeds
+// outcome.records[0].lines are the go.sum lines; keep outcome.latest_note for next time
+```
+
+`cargo run --release --example sumdb -- golang.org/x/mod v0.17.0` does all of it through `Client` (`--state FILE` keeps the
+tree head between runs, so a log that later rewrites history is caught as a fork). A log that has shown two histories is
+`tlog::Error::Fork`; a tile that does not hash to its parent's entry is `TileDoesNotMatchParent`. Go's own client before x/mod
+0.40.0 (Go before 1.25.13) did not check some tiles against their parents (CVE-2026-56865), which let a server swap a leaf tile;
+this code replays that attack against real tiles and refuses it.
+
+Where Go is lenient this is not (documented in `sumdb`): Base64 must be canonical, record numbers and tree sizes are plain
+decimals, lookup paths use only the characters real module paths use, and two signed heads of one size with different roots are a
+fork without reading any tile. What the tests rest on: real `sum.golang.org` data captured on 2026-10-05 (`tests/data/sumdb`,
+see its README), real 26- and 17-hash proofs made by Go from the real tiles, 1,641 note, tree head and record cases and 430 proof
+cases each judged by Go's `sumdb/note` and `sumdb/tlog` (`tools/go_oracle.sh` runs them from the local Go toolchain; nothing of
+Go's is in this repository; `sh tools/gen_sumdb_vectors.sh` and `sh tools/gen_tlog_vectors.sh` regenerate them, and
+`tests/go_vectors.rs` replays them), a made-up log in two histories for fork tests, and three fuzz targets. Not here: signature
+the `h1:` hash of a module's files. (Notes are verified with Ed25519 and, for Rekor's checkpoints, ECDSA P-256.)
+
+### CMS / PKCS#7 signatures and time stamps
+
+`ber` and `cms` are pure too. `ber` reads BER: indefinite lengths, constructed strings and non-minimal lengths, which is what Java
+and `openssl smime` write, and re-encodes what it read as strict DER, which is what a signature over signed attributes covers.
+`cms` reads SignedData (RFC 5652; the PKCS#7 of RFC 2315 that JAR files and Authenticode still use is the same bytes) and checks
+every signer: the certificate is found by issuer and serial number or key identifier, the signed attributes carry the digest of
+the content and its type, the signature over them (or over the content, when there are none) verifies with the certificate's key
+(RSA PKCS#1 v1.5 and PSS, ECDSA P-256 and P-384, Ed25519), and the certificate chains to *your* roots for the purpose you name:
+
+```rust
+use tiny_https::cms::{Options, SignedData};
+use tiny_https::x509::{Purpose, TrustStore};
+
+let sd = SignedData::parse(&bytes)?;                          // BER or DER (strip PEM armor first: `pem::parse`)
+let mut roots = TrustStore::empty();
+roots.add_pem(&root_pem);
+let options = Options::new(&roots, Purpose::CodeSigning, now_unix_seconds);   // the caller's clock: the pure part has none
+for signer in sd.verify(Some(&manifest), &options)? {          // `None` when the message carries its own content
+    // signer.chain (leaf and path), signer.chain_time, signer.timestamp, signer.weaknesses
+}
+```
+
+`SignedData::verify_signature` is the arithmetic alone (digest and signature, no trust), for a scanner that wants to report "signed
+with this key" before it knows whether anyone trusts it. An RFC 3161 time stamp on a signature (`timeStampToken`, or Microsoft's
+attribute for the same thing) is verified against the time-stamp authority's chain, and then *its* time is the time the signer's chain
+is validated at, so a code-signing certificate that expired after the signature was made still counts (`Options::timestamps`: ignore,
+verify (default), require). The `signingTime` the signer wrote is reported and never believed. SHA-1 is checked like any other
+digest and reported as a `Weakness`, but refused unless `Options::allow_sha1` is set, so a SHA-1 signature is never accepted by
+accident; MD5, DSA and SHA-3 are refused by name. `cargo run --release --example cms_verify -- --detached META-INF/MANIFEST.SF
+--cacert root.pem META-INF/CERT.RSA` prints the signers, chains, time stamps and weaknesses of a file.
+
+Where this is stricter than OpenSSL it says so (`tests/cms_vectors.rs` lists every region of a message and how the two may differ):
+version numbers and the signer identifier's issuer must be byte-exact, the content type attribute must be present once and equal
+the content's type, `CMSAlgorithmProtection` (if present) must match the algorithms actually used, and anything after the message
+but zero padding is refused. Where it is more lenient: the message's list of digest algorithms is ignored (it is only a hint for
+one-pass readers, and OpenSSL refuses a message whose list lacks the signer's digest). What the tests rest on: 45 messages made by
+OpenSSL (`openssl cms`, `smime`, streamed BER, time-stamp tokens from `openssl ts`) and the JDK's `jarsigner` (the only source of an
+Ed25519 CMS signature that OpenSSL 3.0 could not make), 1,886 damaged variants of 18 of them each with OpenSSL's own verdict,
+negative tests (wrong purpose, wrong time, rogue time-stamp authority, a time-stamp authority without the time-stamping key usage,
+a swapped algorithm, a content type that disagrees), and two fuzz targets (`ber`, `cms`). Not here yet: Authenticode
+(`SpcIndirectDataContent`, nested and counter signatures, the PE image digest; B-70 phase 2, which waits for real signed binaries,
+B-80), the ESS signing-certificate attribute of a time-stamp token, the rule that a time-stamp authority's only key usage is
+time stamping, revocation of the signer, and Apple's code-signature blobs.
+
+### Sigstore attestations
+
+`sigstore` (with `trust_root` for Sigstore's `trusted_root.json` and npm's key list, and `json`, a strict I-JSON reader and
+canonical writer) is pure too: you bring bytes, the trust to check them against and the digest of the artifact; nothing reads a
+clock, opens a file or fetches anything. What comes back is facts, and whether they are the ones you wanted is your policy.
+
+```rust
+use tiny_https::sigstore::{ArtifactDigest, Bundle, DigestAlgorithm, Signer, Trust};
+use tiny_https::trust_root::{KeyRing, TrustedRoot};
+
+let root = TrustedRoot::parse(&trusted_root_json)?;            // from Sigstore's TUF repository: you fetch and verify it
+let npm_keys = KeyRing::from_npm_keys(&registry_keys_json)?;   // GET /-/npm/v1/keys, only for npm's publish attestations
+let trust = Trust::new(&root).with_keys(&npm_keys);
+let digest = ArtifactDigest::of(DigestAlgorithm::Sha512, &tarball);   // npm's subject digest; PyPI's is SHA-256
+for a in Bundle::parse_npm_attestations(&registry_response)? {        // or Bundle::parse (one bundle), Bundle::parse_pep740
+    let v = a.verify(&trust, &digest)?;
+    // v.signer: Signer::Certificate(identity) with identity.issuer, .uris, .repository(), .git_ref(),
+    //           .source_repository_digest, .build_config_uri, ... (every Fulcio extension), or Signer::Key { id, .. }
+    // v.statement: the in-toto statement (predicate_type, subjects, predicate); v.matched_subject
+    // v.verified_time, v.times: Unix seconds the logs and time-stamp authorities vouch for, and which did
+    // v.entries: every log entry that was authenticated (log index, log, kind, signed entry timestamp, inclusion proof)
+}
+```
+
+The bundle formats are v0.1, v0.2 and v0.3 (a certificate chain, a single certificate or a key hint; signed entry timestamps,
+inclusion proofs or both) and PyPI's PEP 740 provenance, all through one verifier. It checks that the DSSE envelope is an in-toto
+statement signed by the key of the certificate (RSA, ECDSA P-256/P-384 or Ed25519) or of the ring; that every Rekor entry is
+about *this* envelope (the body holds the same signature, certificate or key and payload hash), is authenticated by the log's
+signed entry timestamp or by an inclusion proof to a checkpoint the log signed (ECDSA P-256 as Rekor v1 signs, or Ed25519 as
+Rekor v2 does), or both, and that a promise or proof which is present is right even if the other is; that every RFC 3161 time
+stamp is over the signature and by a time-stamp authority the root lists; and that the signer's certificate chain verifies to a
+Fulcio authority for code signing (or the key's validity holds) **at a time those logs and authorities vouch for**, never now:
+an entry's `integratedTime` is believed only when a signed entry timestamp covers it. That is how npm's first registry key,
+which expired in January 2025, still verifies the publish attestations it signed in 2022 and 2024. With no such time the answer
+is `NoVerifiedTime`, which is what a bundle with a proof and no time stamp gets.
+
+The strictness is on purpose: JSON is read as I-JSON (duplicate names, bad UTF-8 and lone surrogates are errors, numbers follow
+RFC 8259, 64-bit integers are decimal strings or exact integers), Base64 must be the canonical padded form, a bundle of a format
+that needs a proof or promise and has none is malformed, not weaker, and the label the npm registry puts on an attestation must
+be the predicate type of the statement that was signed. Not verified: signed certificate timestamps in the certificate,
+`messageSignature` bundles (a signature over an artifact's digest, with no statement), Rekor v2 entry types, the envelope hash
+Rekor records, consistency between checkpoints, and the identity the caller wants (that is policy). `cargo run --release
+--example sigstore_verify -- --root tests/data/sigstore/trusted_root.json --npm-keys tests/data/sigstore/npm-registry-keys.json
+--npm tests/data/sigstore/sigstore-4.0.0.attestations.json tests/data/sigstore/sigstore-4.0.0.tgz` prints what the two real
+attestations of that release prove. What the tests rest on is in `tests/data/sigstore/README.txt`: six real npm attestations
+(three bundle formats, a closed Rekor shard, a key that had expired) and PyPI's real PEP 740 provenance verify; each of their
+members and strings, removed or changed in turn, breaks them unless nothing authenticates it; 86 bundles made by
+`tools/gen_sigstore_fixtures.py` from a Sigstore of our own reach what real data does not.
+
+## Portability
+
+Pure `std`, no build script, no external crates. All integer conversions are explicit
+little/big-endian, so the code does not depend on the host byte order.
+
+Speed-critical code has per-architecture backends with a portable fallback. ChaCha20 and Poly1305 are chosen at
+compile time; AES-GCM is chosen at run time, because the instructions are an optional extension of the CPU:
+
+| Target | ChaCha20 keystream | Poly1305 | AES-GCM |
+|--------|--------------------|----------|---------|
+| x86-64 (Intel Macs, Windows, Linux) | SSE2, four blocks per step | 3 x 44-bit limbs | AES-NI + PCLMULQDQ if the CPU has them |
+| aarch64 (Apple Silicon, ARM servers, Windows on ARM) | NEON, four blocks per step | 3 x 44-bit limbs | ARMv8 AES + PMULL if the CPU has them |
+| anything else, including 32-bit targets | portable one-block loop | 3 x 44-bit on 64-bit pointers, 5 x 26-bit on 32-bit | bitsliced AES + `bmul64` GHASH |
+
+The AES instructions are detected with `is_x86_feature_detected!` / `is_aarch64_feature_detected!` the first time a
+key is made, and checked with a self-test (FIPS 197 answers, and the CTR and GHASH code against the portable code);
+if anything disagrees the process uses the portable path. `tiny_https::crypto::aes::hardware_accelerated()` says which
+one is in use, and `examples/bench.rs` prints it. The ClientHello offers AES-GCM first when it is hardware
+accelerated and ChaCha20-Poly1305 first when it is not (the bitsliced AES is about 30 times slower than the
+hardware, and slower than ChaCha20).
+`RUSTFLAGS="--cfg tiny_https_portable"` forces the portable path on every target. The SIMD
+kernels (AES, GHASH, ChaCha20), the volatile write that wipes secrets and the OS random-number calls are the only places that use `unsafe`.
+
+The unit tests have been run natively on x86-64 and, before the async work, on an Apple M5 Max (aarch64 macOS), and
+under qemu-user for aarch64 and 32-bit ARM at an earlier revision. The aarch64 AES / PMULL code compiles for Linux
+and macOS but has not run on ARM hardware yet: run `sh tools/native_check.sh` on an ARM machine to confirm it. One
+unit test fails if a CPU that has the instructions ends up on the portable path, which is what a broken hardware path
+looks like from outside, because the self-test then switches it off. Nothing has been run on Windows yet (backlog B-58).
+
+## Running the tests
+
+`sh tools/native_check.sh` runs everything below plus the benchmark and the timing tests on the current machine and writes
+a short `native_report.txt` (`--quick` skips the benchmark and timing runs).
+
+Run suites one at a time and keep each under 45 seconds:
+
+```
+cargo test --lib
+cargo test --lib --no-default-features   # the pure part alone (255 tests)
+cargo test --test go_vectors             # notes, tree heads, records and Merkle proofs against Go's verdicts (pure)
+cargo test --test cms_vectors            # damaged CMS messages against OpenSSL's verdicts (pure)
+sh tools/check_features.sh               # the line between the pure part and `net`; builds for wasm32 if the target is installed
+cargo test --test interop_openssl     # needs the `openssl` command line tool; skipped otherwise
+cargo test --test h2_client_interop   # the HTTP/2 client against Go's server; builds it with `go`, skipped if there is none
+AIOQUIC_PATH=/dir cargo test --test h3_client_interop   # the HTTP/3 client against aioquic (pip install --target /dir aioquic==1.3.0); skipped if python3 or openssl is missing
+sh tools/server_interop.sh            # the test TLS server against OpenSSL, curl and Go (36 checks)
+sh tools/h2_interop.sh                # its HTTP/2 against curl, Go and python-h2 (PYTHONPATH may point at h2 and hyperframe)
+cargo test --test system_roots        # checks the system CA bundle, if present
+cargo test --doc
+```
+
+The test vectors in `src/crypto/test_vectors.rs` and `src/crypto/aead_vectors.rs` and the certificates in
+`tests/data/` were generated with Python's `cryptography` package (OpenSSL underneath) by the scripts in
+`tools/`. They contain public data only.
+
+`fuzz/` is a coverage-guided fuzzer with no dependencies and no nightly compiler (LLVM's edge counters, which stable
+`rustc` can emit, drive the mutation); `sh fuzz/run_all.sh 3600` fuzzes every parser for an hour on all cores. See
+`fuzz/README.md` for what each target asserts and what it has found so far. It is kept out of the package
+(`exclude` in `Cargo.toml`) and out of the normal build.
+
+`cargo test --lib` includes deterministic mutation fuzzers (damaged certificates, chains, PEM, DER, signatures,
+signed notes, checksum database data, Merkle proofs, BER and CMS messages, HTTP responses, URLs, and fuzzed handshake flights and records sent through a scripted TLS server). Tampered
+chains must be rejected and nothing may panic. `TINY_HTTPS_FUZZ_SCALE=10 cargo test --lib`
+runs ten times as many iterations.
+
+The timing tests are `#[ignore]`d because they depend on the machine. Run them one at a time on a quiet machine:
+`cargo test --release --lib crypto::timing::x25519 -- --ignored --nocapture` (also `ecdh`, `ghash`, `poly1305`,
+`aead_and_mac`, `aes`, `harness`).
+
+## Licence
+
+Apache License, Version 2.0; see `LICENSE`.

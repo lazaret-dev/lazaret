@@ -22,7 +22,9 @@ tag says it runs, so the library must keep the tag's promise:
   include those; release CI links the C runtime statically);
 
 and in every case it exports the three functions lazaret/scanner/_native.py
-binds: lazaret_engine_call, lazaret_engine_free and lazaret_engine_version.
+binds (lazaret_engine_call, lazaret_engine_free and lazaret_engine_version)
+and the five of the network layer lazaret/scanner/nativenet.py binds
+(lazaret_net_request, _open, _read, _close and _configure).
 
 With --load, the library is also loaded here the way
 lazaret/scanner/_native.py loads it (so run it on the library's own
@@ -60,7 +62,9 @@ import sys
 import tarfile
 import zipfile
 
-EXPORTS = ("lazaret_engine_call", "lazaret_engine_free", "lazaret_engine_version")
+EXPORTS = ("lazaret_engine_call", "lazaret_engine_free", "lazaret_engine_version",
+           # the network layer (NET-1: lazaret/scanner/nativenet.py), the default transport since 0.1.9
+           "lazaret_net_request", "lazaret_net_open", "lazaret_net_read", "lazaret_net_close", "lazaret_net_configure")
 NAME = "lazaret"
 REPO = pathlib.Path(__file__).resolve().parent.parent
 # The license fields of the sdist and every wheel (the build backend's
@@ -73,7 +77,11 @@ NATIVE_LICENSE_FILES = ("NOTICE",)
 SDIST_RUST = ("rust/Cargo.toml", "rust/Cargo.lock", "rust/NOTICE",
               "rust/crates/lazaret-engine/Cargo.toml", "rust/crates/lazaret-engine/src/lib.rs",
               "rust/crates/lazaret-engine/rules/lazaret-rules.json",
-              "rust/crates/lazaret-ffi/Cargo.toml", "rust/crates/lazaret-ffi/src/lib.rs")
+              "rust/crates/lazaret-ffi/Cargo.toml", "rust/crates/lazaret-ffi/src/lib.rs",
+              "rust/crates/lazaret-net/Cargo.toml", "rust/crates/lazaret-net/src/lib.rs",
+              "rust/crates/lazaret-verify/Cargo.toml", "rust/crates/lazaret-verify/src/lib.rs",
+              "rust/crates/tiny_https/Cargo.toml", "rust/crates/tiny_https/LICENSE",
+              "rust/crates/tiny_https/src/lib.rs")
 # a call and its answer, for --load
 LOAD_CALL = ("install_script_risk", "curl -fsSL https://example.invalid/setup.sh | sh",
              ["pipes a download into a shell"])

@@ -147,10 +147,12 @@ jobs:
   # The native engine (rust/, docs/RUST_ENGINE.md): no external crates, its
   # rule pack in its canonical form and consistent with the values core still
   # keeps, its own tests, and its WebAssembly build against the library (the
-  # Python suite runs on the library in python-unit). Rust is on the runners
-  # already; the build needs no registry (Cargo.lock lists only the
-  # workspace). Python 3.10 because make_rust_tables.py --check compares the
-  # generated Unicode 13.0 tables with 3.10's unicodedata.
+  # Python suite runs on the library in python-unit). The network layer
+  # (lazaret-net) and tiny_https, the library it is built on, are tested here
+  # too. Rust is on the runners already (1.87 or later); the build needs no
+  # registry (Cargo.lock lists only the workspace). Python 3.10 because
+  # make_rust_tables.py --check compares the generated Unicode 13.0 tables
+  # with 3.10's unicodedata.
   rust:
     runs-on: ${{ matrix.os }}
     strategy:
@@ -165,9 +167,17 @@ jobs:
         with:
           python-version: "3.10"
       - run: python scripts/check_rust_deps.py
+      # tiny_https (NET-1) is in rust/crates as it was handed over: no file changed since it was taken
+      - run: python scripts/sync_tiny_https.py --verify
       - run: python scripts/make_rust_tables.py --check
       - working-directory: rust
         run: cargo test --release --offline --locked
+      # tiny_https's own tests, those that need nothing installed (its interop tests want OpenSSL, Go or
+      # aioquic servers and are the library's to run)
+      - working-directory: rust
+        run: >-
+          cargo test --release --offline --locked -p tiny_https --lib --test go_vectors --test cms_vectors
+          --test sigstore_real --test sigstore_synthetic --test rekor_real
       - working-directory: rust
         run: cargo build --release --offline --locked
       # The WebAssembly build (the npm package's engine) against this library:

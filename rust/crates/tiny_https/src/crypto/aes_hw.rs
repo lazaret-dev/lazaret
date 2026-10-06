@@ -1,0 +1,853 @@
+//! Hardware AES and carry-less multiplication: AES-NI and PCLMULQDQ on x86-64, the ARMv8
+//! Cryptography Extensions (AES and PMULL) on aarch64.
+//!
+//! The instructions are found at run time (`is_x86_feature_detected!`,
+//! `is_aarch64_feature_detected!`), not assumed from the build target, so a generic binary uses
+//! them wherever they exist. The first use also runs a self-test (FIPS 197 known answers, plus the
+//! CTR and GHASH code against the portable implementations); if anything disagrees the hardware
+//! path is switched off for the process and [`super::aes_ct`] is used instead. Both are free of
+//! secret-dependent memory accesses and branches.
+//!
+//! This is the only module in the library with `unsafe` that is not a plain pointer write: the
+//! intrinsics are `unsafe fn`s with a CPU feature precondition. Every call site is in this file
+//! or reaches it through [`available`], and `Keys` cannot be built unless [`available`] is true.
+//!
+//! In builds for other CPUs, or with `--cfg tiny_https_portable`, the same API exists but
+//! [`available`] is `false` and nothing here is compiled in.
+
+#[cfg(all(any(target_arch = "x86_64", target_arch = "aarch64"), not(tiny_https_portable)))]
+mod real {
+    use super::super::aes::{Aes, Backend};
+    use super::super::{aes_ct, ghash};
+    use crate::zeroize::Zeroize;
+    use std::sync::OnceLock;
+
+    #[cfg(target_arch = "x86_64")]
+    mod arch {
+        use core::arch::x86_64::*;
+
+        pub(super) fn cpu_supports() -> bool {
+            std::is_x86_feature_detected!("aes")
+                && std::is_x86_feature_detected!("pclmulqdq")
+                && std::is_x86_feature_detected!("sse2")
+                && std::is_x86_feature_detected!("ssse3")
+        }
+
+        #[inline(always)]
+        fn lanes(nonce: &[u8; 12]) -> [i32; 3] {
+            [
+                i32::from_le_bytes([nonce[0], nonce[1], nonce[2], nonce[3]]),
+                i32::from_le_bytes([nonce[4], nonce[5], nonce[6], nonce[7]]),
+                i32::from_le_bytes([nonce[8], nonce[9], nonce[10], nonce[11]]),
+            ]
+        }
+
+        #[target_feature(enable = "aes,sse2")]
+        unsafe fn load_keys(rk: &[[u8; 16]; 15], nr: usize) -> [__m128i; 15] {
+            let mut out = [_mm_setzero_si128(); 15];
+            for r in 0..=nr {
+                out[r] = _mm_loadu_si128(rk[r].as_ptr() as *const __m128i);
+            }
+            out
+        }
+
+        #[target_feature(enable = "aes,sse2")]
+        unsafe fn encrypt_one(rks: &[__m128i; 15], nr: usize, block: __m128i) -> __m128i {
+            let mut s = _mm_xor_si128(block, rks[0]);
+            for r in 1..nr {
+                s = _mm_aesenc_si128(s, rks[r]);
+            }
+            _mm_aesenclast_si128(s, rks[nr])
+        }
+
+        /// # Safety
+        /// The CPU must support AES-NI.
+        #[target_feature(enable = "aes,sse2")]
+        pub(super) unsafe fn encrypt_block(rk: &[[u8; 16]; 15], nr: usize, block: &[u8; 16]) -> [u8; 16] {
+            let rks = load_keys(rk, nr);
+            let ct = encrypt_one(&rks, nr, _mm_loadu_si128(block.as_ptr() as *const __m128i));
+            let mut out = [0u8; 16];
+            _mm_storeu_si128(out.as_mut_ptr() as *mut __m128i, ct);
+            out
+        }
+
+        /// CTR keystream XOR, eight blocks in flight.
+        ///
+        /// # Safety
+        /// The CPU must support AES-NI.
+        #[target_feature(enable = "aes,sse2")]
+        pub(super) unsafe fn ctr_xor(rk: &[[u8; 16]; 15], nr: usize, nonce: &[u8; 12], counter: u32, data: &mut [u8]) {
+            use crate::zeroize::Zeroize;
+            let rks = load_keys(rk, nr);
+            let n = lanes(nonce);
+            let mut ctr = counter;
+            let mut chunks = data.chunks_exact_mut(128);
+            for chunk in &mut chunks {
+                let mut s = [_mm_setzero_si128(); 8];
+                for i in 0..8 {
+                    let c = ctr.wrapping_add(i as u32);
+                    // the counter is big endian in the last four bytes of the block
+                    s[i] = _mm_xor_si128(_mm_set_epi32(c.swap_bytes() as i32, n[2], n[1], n[0]), rks[0]);
+                }
+                for r in 1..nr {
+                    for i in 0..8 {
+                        s[i] = _mm_aesenc_si128(s[i], rks[r]);
+                    }
+                }
+                for i in 0..8 {
+                    let ks = _mm_aesenclast_si128(s[i], rks[nr]);
+                    let p = chunk.as_mut_ptr().add(16 * i) as *mut __m128i;
+                    _mm_storeu_si128(p, _mm_xor_si128(_mm_loadu_si128(p), ks));
+                }
+                ctr = ctr.wrapping_add(8);
+            }
+            for chunk in chunks.into_remainder().chunks_mut(16) {
+                let ks = encrypt_one(&rks, nr, _mm_set_epi32(ctr.swap_bytes() as i32, n[2], n[1], n[0]));
+                let mut buf = [0u8; 16];
+                _mm_storeu_si128(buf.as_mut_ptr() as *mut __m128i, ks);
+                for (d, k) in chunk.iter_mut().zip(buf.iter()) {
+                    *d ^= k;
+                }
+                buf.zeroize();
+                ctr = ctr.wrapping_add(1);
+            }
+        }
+
+        // ------------------------------------------------------------------------------------------ GCM in one pass
+        //
+        // AES-GCM as AES-NI and PCLMULQDQ do it best: the keystream of eight blocks in flight, and the hash of the
+        // data eight blocks at a time with the products of all eight summed before the one reduction (the blocks
+        // are multiplied by H^8, H^7, ... H, so that the sum is what eight single steps would have made). The
+        // hash of one group of blocks is independent of the keystream of the next, so the processor does both
+        // together. Blocks are kept byte-reversed (the form in which the 128-bit integer is the polynomial with
+        // x^0 at the top bit, which is what the carry-less product wants; see `reduce`).
+
+        /// The block with its bytes in the other order.
+        #[inline]
+        #[target_feature(enable = "ssse3,sse2")]
+        unsafe fn bswap(x: __m128i) -> __m128i {
+            _mm_shuffle_epi8(x, _mm_set_epi8(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15))
+        }
+
+        /// Eight blocks at `p`, byte-reversed.
+        #[inline]
+        #[target_feature(enable = "ssse3,sse2")]
+        unsafe fn load8_be(p: *const u8) -> [__m128i; 8] {
+            let mut x = [_mm_setzero_si128(); 8];
+            for i in 0..8 {
+                x[i] = bswap(_mm_loadu_si128(p.add(16 * i) as *const __m128i));
+            }
+            x
+        }
+
+        /// The three sums of 64 x 64 bit carry-less products that products of 128-bit values are made of: the low
+        /// halves, the high halves, and the two cross terms together.
+        #[derive(Clone, Copy)]
+        struct Sums {
+            lo: __m128i,
+            mid: __m128i,
+            hi: __m128i,
+        }
+
+        #[inline]
+        #[target_feature(enable = "pclmulqdq,sse2")]
+        unsafe fn no_sums() -> Sums {
+            let z = _mm_setzero_si128();
+            Sums { lo: z, mid: z, hi: z }
+        }
+
+        /// Adds the product of `a` and `h` (unreduced) to the sums.
+        #[inline]
+        #[target_feature(enable = "pclmulqdq,sse2")]
+        unsafe fn mac(s: &mut Sums, a: __m128i, h: __m128i) {
+            s.lo = _mm_xor_si128(s.lo, _mm_clmulepi64_si128::<0x00>(a, h));
+            s.hi = _mm_xor_si128(s.hi, _mm_clmulepi64_si128::<0x11>(a, h));
+            s.mid = _mm_xor_si128(s.mid, _mm_xor_si128(_mm_clmulepi64_si128::<0x10>(a, h), _mm_clmulepi64_si128::<0x01>(a, h)));
+        }
+
+        /// The 255-bit sum of products, shifted into place and reduced modulo x^128 + x^7 + x^2 + x + 1.
+        ///
+        /// With the blocks byte-reversed, bit j of the integer is the coefficient of x^(127 - j), so the product of
+        /// two of them has bit m for x^(254 - m): the 256-bit result is shifted left by one to put the high half's
+        /// bit j at x^(127 - j) again, and what is in the low half (the terms from x^128 up) is folded back with
+        /// x^128 = x^7 + x^2 + x + 1 in two steps (the first leaves up to seven terms past x^127, the second takes
+        /// those). This is the reduction of Gueron and Kounavis, "Intel Carry-Less Multiplication Instruction and
+        /// its Usage for Computing the GCM Mode".
+        #[inline]
+        #[target_feature(enable = "pclmulqdq,sse2")]
+        unsafe fn fold(s: Sums) -> __m128i {
+            let mut lo = _mm_xor_si128(s.lo, _mm_slli_si128::<8>(s.mid));
+            let mut hi = _mm_xor_si128(s.hi, _mm_srli_si128::<8>(s.mid));
+            // the shift left by one bit across the 256 bits
+            let carry_lo = _mm_srli_epi32::<31>(lo);
+            let carry_hi = _mm_srli_epi32::<31>(hi);
+            lo = _mm_slli_epi32::<1>(lo);
+            hi = _mm_slli_epi32::<1>(hi);
+            let across = _mm_srli_si128::<12>(carry_lo);
+            lo = _mm_or_si128(lo, _mm_slli_si128::<4>(carry_lo));
+            hi = _mm_or_si128(_mm_or_si128(hi, _mm_slli_si128::<4>(carry_hi)), across);
+            // first step of the reduction
+            let t = _mm_xor_si128(_mm_xor_si128(_mm_slli_epi32::<31>(lo), _mm_slli_epi32::<30>(lo)), _mm_slli_epi32::<25>(lo));
+            let t_hi = _mm_srli_si128::<4>(t);
+            lo = _mm_xor_si128(lo, _mm_slli_si128::<12>(t));
+            // second step
+            let r = _mm_xor_si128(_mm_xor_si128(_mm_srli_epi32::<1>(lo), _mm_srli_epi32::<2>(lo)), _mm_xor_si128(_mm_srli_epi32::<7>(lo), t_hi));
+            _mm_xor_si128(hi, _mm_xor_si128(lo, r))
+        }
+
+        /// The product of two blocks (byte-reversed), reduced.
+        #[inline]
+        #[target_feature(enable = "pclmulqdq,sse2")]
+        unsafe fn gfmul(a: __m128i, b: __m128i) -> __m128i {
+            let mut s = no_sums();
+            mac(&mut s, a, b);
+            fold(s)
+        }
+
+        /// H^1 ... H^8 for the hash subkey block `h` (the encryption of the zero block, as the cipher gave it), in
+        /// the form [`ghash8`] uses.
+        ///
+        /// # Safety
+        /// The CPU must support AES-NI's companions: PCLMULQDQ, SSSE3 and SSE2.
+        #[target_feature(enable = "pclmulqdq,sse2,ssse3")]
+        pub(super) unsafe fn powers(h: &[u8; 16]) -> [u128; 8] {
+            let h1 = bswap(_mm_loadu_si128(h.as_ptr() as *const __m128i));
+            let mut p = [h1; 8];
+            for i in 1..8 {
+                p[i] = gfmul(p[i - 1], h1);
+            }
+            let mut out = [0u128; 8];
+            for i in 0..8 {
+                _mm_storeu_si128(out.as_mut_ptr().add(i) as *mut __m128i, p[i]);
+            }
+            out
+        }
+
+        #[inline]
+        #[target_feature(enable = "sse2")]
+        unsafe fn load_powers(pow: &[u128; 8]) -> [__m128i; 8] {
+            let mut h = [_mm_setzero_si128(); 8];
+            for i in 0..8 {
+                h[i] = _mm_loadu_si128(pow.as_ptr().add(i) as *const __m128i);
+            }
+            h
+        }
+
+        /// `acc` with eight blocks (byte-reversed) absorbed: ((acc ^ x0) H^8 ^ x1 H^7 ^ ... ^ x7 H).
+        #[inline]
+        #[target_feature(enable = "pclmulqdq,sse2")]
+        unsafe fn ghash8(acc: __m128i, x: &[__m128i; 8], h: &[__m128i; 8]) -> __m128i {
+            let mut s = no_sums();
+            mac(&mut s, _mm_xor_si128(x[0], acc), h[7]);
+            for j in 1..8 {
+                mac(&mut s, x[j], h[7 - j]);
+            }
+            fold(s)
+        }
+
+        /// `acc` with the first `n` (1 to 8) of the blocks absorbed.
+        #[inline]
+        #[target_feature(enable = "pclmulqdq,sse2")]
+        unsafe fn ghash_n(acc: __m128i, x: &[__m128i; 8], n: usize, h: &[__m128i; 8]) -> __m128i {
+            let mut s = no_sums();
+            mac(&mut s, _mm_xor_si128(x[0], acc), h[n - 1]);
+            for j in 1..n {
+                mac(&mut s, x[j], h[n - 1 - j]);
+            }
+            fold(s)
+        }
+
+        /// `acc` with `data` absorbed, a last partial block zero-padded.
+        #[target_feature(enable = "pclmulqdq,sse2,ssse3")]
+        unsafe fn absorb(mut acc: __m128i, data: &[u8], h: &[__m128i; 8]) -> __m128i {
+            let mut chunks = data.chunks_exact(128);
+            for c in &mut chunks {
+                acc = ghash8(acc, &load8_be(c.as_ptr()), h);
+            }
+            let rest = chunks.remainder();
+            if !rest.is_empty() {
+                let mut buf = [0u8; 128];
+                buf[..rest.len()].copy_from_slice(rest);
+                acc = ghash_n(acc, &load8_be(buf.as_ptr()), rest.len().div_ceil(16), h);
+            }
+            acc
+        }
+
+        /// The GHASH value S for `acc` after the lengths block: the hash is done.
+        #[inline]
+        #[target_feature(enable = "pclmulqdq,sse2,ssse3")]
+        unsafe fn finish(acc: __m128i, aad_len: usize, data_len: usize, h: &[__m128i; 8]) -> [u8; 16] {
+            // the block is the two bit counts, big-endian, A first; byte-reversed that is C in the low half
+            let lens = _mm_set_epi64x((aad_len as u64 * 8) as i64, (data_len as u64 * 8) as i64);
+            let s = bswap(gfmul(_mm_xor_si128(acc, lens), h[0]));
+            let mut out = [0u8; 16];
+            _mm_storeu_si128(out.as_mut_ptr() as *mut __m128i, s);
+            out
+        }
+
+        /// The keystream of eight blocks, counters `ctr` to `ctr + 7`.
+        #[inline]
+        #[target_feature(enable = "aes,sse2")]
+        unsafe fn keystream8<const NR: usize>(rks: &[__m128i; 15], n: &[i32; 3], ctr: u32) -> [__m128i; 8] {
+            let mut s = [_mm_setzero_si128(); 8];
+            for i in 0..8 {
+                let c = ctr.wrapping_add(i as u32);
+                // the counter is big endian in the last four bytes of the block
+                s[i] = _mm_xor_si128(_mm_set_epi32(c.swap_bytes() as i32, n[2], n[1], n[0]), rks[0]);
+            }
+            for r in 1..NR {
+                for i in 0..8 {
+                    s[i] = _mm_aesenc_si128(s[i], rks[r]);
+                }
+            }
+            for i in 0..8 {
+                s[i] = _mm_aesenclast_si128(s[i], rks[NR]);
+            }
+            s
+        }
+
+        /// Encrypts `data` in place (counters from 2) and returns the GHASH value S of `aad` and the ciphertext.
+        #[target_feature(enable = "aes,pclmulqdq,sse2,ssse3")]
+        unsafe fn seal_impl<const NR: usize>(rk: &[[u8; 16]; 15], nonce: &[u8; 12], aad: &[u8], data: &mut [u8], pow: &[u128; 8]) -> [u8; 16] {
+            use crate::zeroize::Zeroize;
+            let rks = load_keys(rk, NR);
+            let n = lanes(nonce);
+            let h = load_powers(pow);
+            let mut acc = absorb(_mm_setzero_si128(), aad, &h);
+            let total = data.len();
+            let base = data.as_mut_ptr();
+            let mut ctr = 2u32;
+            let mut off = 0usize;
+            // the group encrypted last time round, whose ciphertext is hashed while this one is being encrypted
+            let mut prev: Option<usize> = None;
+            while total - off >= 128 {
+                let p = base.add(off);
+                let ks = keystream8::<NR>(&rks, &n, ctr);
+                for i in 0..8 {
+                    let q = p.add(16 * i) as *mut __m128i;
+                    _mm_storeu_si128(q, _mm_xor_si128(_mm_loadu_si128(q), ks[i]));
+                }
+                if let Some(o) = prev {
+                    acc = ghash8(acc, &load8_be(base.add(o)), &h);
+                }
+                prev = Some(off);
+                off += 128;
+                ctr = ctr.wrapping_add(8);
+            }
+            if let Some(o) = prev {
+                acc = ghash8(acc, &load8_be(base.add(o)), &h);
+            }
+            let rem = total - off;
+            if rem > 0 {
+                let mut buf = [0u8; 128];
+                buf[..rem].copy_from_slice(&data[off..]);
+                let ks = keystream8::<NR>(&rks, &n, ctr);
+                for i in 0..8 {
+                    let q = buf.as_mut_ptr().add(16 * i) as *mut __m128i;
+                    _mm_storeu_si128(q, _mm_xor_si128(_mm_loadu_si128(q), ks[i]));
+                }
+                data[off..].copy_from_slice(&buf[..rem]);
+                // what is hashed is the ciphertext and zeros: the keystream over the padding is dropped
+                buf[rem..].fill(0);
+                acc = ghash_n(acc, &load8_be(buf.as_ptr()), rem.div_ceil(16), &h);
+                buf.zeroize();
+            }
+            finish(acc, aad.len(), total, &h)
+        }
+
+        /// Decrypts `data` in place (counters from 2) and returns the GHASH value S of `aad` and the ciphertext it
+        /// was. (The caller checks the tag, and puts the ciphertext back if it is wrong.)
+        #[target_feature(enable = "aes,pclmulqdq,sse2,ssse3")]
+        unsafe fn open_impl<const NR: usize>(rk: &[[u8; 16]; 15], nonce: &[u8; 12], aad: &[u8], data: &mut [u8], pow: &[u128; 8]) -> [u8; 16] {
+            use crate::zeroize::Zeroize;
+            let rks = load_keys(rk, NR);
+            let n = lanes(nonce);
+            let h = load_powers(pow);
+            let mut acc = absorb(_mm_setzero_si128(), aad, &h);
+            let total = data.len();
+            let base = data.as_mut_ptr();
+            let mut ctr = 2u32;
+            let mut off = 0usize;
+            while total - off >= 128 {
+                let p = base.add(off);
+                let mut c = [_mm_setzero_si128(); 8];
+                for i in 0..8 {
+                    c[i] = _mm_loadu_si128(p.add(16 * i) as *const __m128i);
+                }
+                // the hash of the ciphertext and the keystream do not depend on each other
+                let mut x = c;
+                for v in x.iter_mut() {
+                    *v = bswap(*v);
+                }
+                acc = ghash8(acc, &x, &h);
+                let ks = keystream8::<NR>(&rks, &n, ctr);
+                for i in 0..8 {
+                    _mm_storeu_si128(p.add(16 * i) as *mut __m128i, _mm_xor_si128(c[i], ks[i]));
+                }
+                off += 128;
+                ctr = ctr.wrapping_add(8);
+            }
+            let rem = total - off;
+            if rem > 0 {
+                let mut buf = [0u8; 128];
+                buf[..rem].copy_from_slice(&data[off..]);
+                acc = ghash_n(acc, &load8_be(buf.as_ptr()), rem.div_ceil(16), &h);
+                let ks = keystream8::<NR>(&rks, &n, ctr);
+                for i in 0..8 {
+                    let q = buf.as_mut_ptr().add(16 * i) as *mut __m128i;
+                    _mm_storeu_si128(q, _mm_xor_si128(_mm_loadu_si128(q), ks[i]));
+                }
+                data[off..].copy_from_slice(&buf[..rem]);
+                buf.zeroize();
+            }
+            finish(acc, aad.len(), total, &h)
+        }
+
+        /// # Safety
+        /// The CPU must support AES-NI, PCLMULQDQ, SSSE3 and SSE2. `nr` is 10 or 14.
+        pub(super) unsafe fn gcm_seal(rk: &[[u8; 16]; 15], nr: usize, nonce: &[u8; 12], aad: &[u8], data: &mut [u8], pow: &[u128; 8]) -> [u8; 16] {
+            match nr {
+                10 => seal_impl::<10>(rk, nonce, aad, data, pow),
+                14 => seal_impl::<14>(rk, nonce, aad, data, pow),
+                _ => unreachable!("AES keys have 10 or 14 rounds"),
+            }
+        }
+
+        /// # Safety
+        /// As for [`gcm_seal`].
+        pub(super) unsafe fn gcm_open(rk: &[[u8; 16]; 15], nr: usize, nonce: &[u8; 12], aad: &[u8], data: &mut [u8], pow: &[u128; 8]) -> [u8; 16] {
+            match nr {
+                10 => open_impl::<10>(rk, nonce, aad, data, pow),
+                14 => open_impl::<14>(rk, nonce, aad, data, pow),
+                _ => unreachable!("AES keys have 10 or 14 rounds"),
+            }
+        }
+
+        /// 64 x 64 -> 128 bit carry-less product.
+        ///
+        /// # Safety
+        /// The CPU must support PCLMULQDQ.
+        #[target_feature(enable = "pclmulqdq,sse2")]
+        #[inline]
+        pub(crate) unsafe fn clmul64(a: u64, b: u64) -> u128 {
+            let r = _mm_clmulepi64_si128::<0x00>(_mm_cvtsi64_si128(a as i64), _mm_cvtsi64_si128(b as i64));
+            let lo = _mm_cvtsi128_si64(r) as u64;
+            let hi = _mm_cvtsi128_si64(_mm_unpackhi_epi64(r, r)) as u64;
+            ((hi as u128) << 64) | lo as u128
+        }
+
+        /// # Safety
+        /// The CPU must support PCLMULQDQ.
+        #[target_feature(enable = "pclmulqdq,sse2")]
+        pub(super) unsafe fn ghash(h: u128, aad: &[u8], ct: &[u8]) -> u128 {
+            crate::crypto::ghash::hash_with::<true>(h, aad, ct)
+        }
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    mod arch {
+        use core::arch::aarch64::*;
+
+        pub(super) fn cpu_supports() -> bool {
+            std::arch::is_aarch64_feature_detected!("aes") && std::arch::is_aarch64_feature_detected!("pmull")
+        }
+
+        #[target_feature(enable = "neon,aes")]
+        unsafe fn load_keys(rk: &[[u8; 16]; 15], nr: usize) -> [uint8x16_t; 15] {
+            let mut out = [vdupq_n_u8(0); 15];
+            for r in 0..=nr {
+                out[r] = vld1q_u8(rk[r].as_ptr());
+            }
+            out
+        }
+
+        #[target_feature(enable = "neon,aes")]
+        unsafe fn counter_block(nonce: &[u8; 12], ctr: u32) -> uint8x16_t {
+            let mut b = [0u8; 16];
+            b[..12].copy_from_slice(nonce);
+            b[12..].copy_from_slice(&ctr.to_be_bytes());
+            vld1q_u8(b.as_ptr())
+        }
+
+        #[target_feature(enable = "neon,aes")]
+        unsafe fn encrypt_one(rks: &[uint8x16_t; 15], nr: usize, block: uint8x16_t) -> uint8x16_t {
+            let mut s = block;
+            // AESE xors in the round key, then SubBytes and ShiftRows; AESMC is MixColumns
+            for r in 0..nr - 1 {
+                s = vaesmcq_u8(vaeseq_u8(s, rks[r]));
+            }
+            s = vaeseq_u8(s, rks[nr - 1]);
+            veorq_u8(s, rks[nr])
+        }
+
+        /// # Safety
+        /// The CPU must support the ARMv8 AES instructions.
+        #[target_feature(enable = "neon,aes")]
+        pub(super) unsafe fn encrypt_block(rk: &[[u8; 16]; 15], nr: usize, block: &[u8; 16]) -> [u8; 16] {
+            let rks = load_keys(rk, nr);
+            let ct = encrypt_one(&rks, nr, vld1q_u8(block.as_ptr()));
+            let mut out = [0u8; 16];
+            vst1q_u8(out.as_mut_ptr(), ct);
+            out
+        }
+
+        /// CTR keystream XOR, eight blocks in flight.
+        ///
+        /// # Safety
+        /// The CPU must support the ARMv8 AES instructions.
+        #[target_feature(enable = "neon,aes")]
+        pub(super) unsafe fn ctr_xor(rk: &[[u8; 16]; 15], nr: usize, nonce: &[u8; 12], counter: u32, data: &mut [u8]) {
+            use crate::zeroize::Zeroize;
+            let rks = load_keys(rk, nr);
+            let mut ctr = counter;
+            let mut chunks = data.chunks_exact_mut(128);
+            for chunk in &mut chunks {
+                let mut s = [vdupq_n_u8(0); 8];
+                for i in 0..8 {
+                    s[i] = counter_block(nonce, ctr.wrapping_add(i as u32));
+                }
+                for r in 0..nr - 1 {
+                    for i in 0..8 {
+                        s[i] = vaesmcq_u8(vaeseq_u8(s[i], rks[r]));
+                    }
+                }
+                for i in 0..8 {
+                    let ks = veorq_u8(vaeseq_u8(s[i], rks[nr - 1]), rks[nr]);
+                    let p = chunk.as_mut_ptr().add(16 * i);
+                    vst1q_u8(p, veorq_u8(vld1q_u8(p), ks));
+                }
+                ctr = ctr.wrapping_add(8);
+            }
+            for chunk in chunks.into_remainder().chunks_mut(16) {
+                let ks = encrypt_one(&rks, nr, counter_block(nonce, ctr));
+                let mut buf = [0u8; 16];
+                vst1q_u8(buf.as_mut_ptr(), ks);
+                for (d, k) in chunk.iter_mut().zip(buf.iter()) {
+                    *d ^= k;
+                }
+                buf.zeroize();
+                ctr = ctr.wrapping_add(1);
+            }
+        }
+
+        /// 64 x 64 -> 128 bit carry-less product (PMULL).
+        ///
+        /// # Safety
+        /// The CPU must support PMULL on 64-bit operands (the `aes` feature).
+        #[target_feature(enable = "neon,aes")]
+        #[inline]
+        pub(crate) unsafe fn clmul64(a: u64, b: u64) -> u128 {
+            vmull_p64(a, b)
+        }
+
+        /// # Safety
+        /// The CPU must support PMULL on 64-bit operands (the `aes` feature).
+        #[target_feature(enable = "neon,aes")]
+        pub(super) unsafe fn ghash(h: u128, aad: &[u8], ct: &[u8]) -> u128 {
+            crate::crypto::ghash::hash_with::<true>(h, aad, ct)
+        }
+    }
+
+    pub(crate) use arch::clmul64;
+
+    /// The expanded key as round-key bytes, which the instructions load directly.
+    #[derive(Clone)]
+    pub(crate) struct Keys {
+        rk: [[u8; 16]; aes_ct::MAX_ROUND_KEYS],
+        rounds: usize,
+    }
+
+    impl Drop for Keys {
+        fn drop(&mut self) {
+            self.wipe();
+        }
+    }
+
+    impl Keys {
+        /// Panics if the hardware path is not [`available`].
+        pub(crate) fn new(key: &[u8]) -> Keys {
+            assert!(available(), "hardware AES is not available on this CPU");
+            Keys::new_unchecked(key)
+        }
+
+        fn new_unchecked(key: &[u8]) -> Keys {
+            // the key schedule is the constant-time portable one, so a key never touches a table
+            let (rk, rounds) = aes_ct::expand_key(key);
+            Keys { rk, rounds }
+        }
+
+        pub(crate) fn wipe(&mut self) {
+            self.rk.zeroize();
+            self.rounds = 0;
+        }
+
+        #[cfg(test)]
+        pub(crate) fn is_wiped(&self) -> bool {
+            self.rounds == 0 && self.rk.iter().flatten().all(|&b| b == 0)
+        }
+
+        pub(crate) fn encrypt_block(&self, block: &[u8; 16]) -> [u8; 16] {
+            debug_assert!(self.rounds != 0, "key was wiped");
+            // SAFETY: a `Keys` exists only if `available()` was true (`new`) or if the self-test
+            // is checking the CPU features itself (`new_unchecked` in `selftest`).
+            unsafe { arch::encrypt_block(&self.rk, self.rounds, block) }
+        }
+
+        pub(crate) fn ctr_xor(&self, nonce: &[u8; 12], counter: u32, data: &mut [u8]) {
+            debug_assert!(self.rounds != 0, "key was wiped");
+            // SAFETY: as in `encrypt_block`.
+            unsafe { arch::ctr_xor(&self.rk, self.rounds, nonce, counter, data) }
+        }
+    }
+
+    /// GHASH of `aad` and `ct` under the reflected hash key `h` (see [`ghash`]), on the CPU's
+    /// carry-less multiplier. Panics if the hardware path is not available.
+    pub(crate) fn ghash_hw(h: u128, aad: &[u8], ct: &[u8]) -> u128 {
+        assert!(available(), "hardware GHASH is not available on this CPU");
+        // SAFETY: `available()` implies PCLMULQDQ / PMULL.
+        unsafe { arch::ghash(h, aad, ct) }
+    }
+
+    /// H^1 ... H^8 for the hash subkey block, which the one-pass GCM below needs; `None` where it has no such path
+    /// (then [`Keys::gcm_seal`] and [`Keys::gcm_open`] are not to be called either).
+    pub(crate) type Powers = [u128; 8];
+
+    pub(crate) fn ghash_powers(h: &[u8; 16]) -> Option<Powers> {
+        #[cfg(target_arch = "x86_64")]
+        {
+            assert!(available(), "hardware GHASH is not available on this CPU");
+            // SAFETY: `available()` implies the instructions.
+            Some(unsafe { arch::powers(h) })
+        }
+        #[cfg(not(target_arch = "x86_64"))]
+        {
+            let _ = h;
+            None
+        }
+    }
+
+    impl Keys {
+        /// AES-GCM encryption in one pass over `data` (in place, counters from 2): the GHASH value S of `aad` and the
+        /// ciphertext, or `None` where this CPU has no one-pass path (the caller then does the two steps).
+        pub(crate) fn gcm_seal(&self, nonce: &[u8; 12], aad: &[u8], data: &mut [u8], pow: &Powers) -> Option<[u8; 16]> {
+            debug_assert!(self.rounds != 0, "key was wiped");
+            #[cfg(target_arch = "x86_64")]
+            {
+                // SAFETY: as in `encrypt_block`; the powers exist only where `available()` was true.
+                Some(unsafe { arch::gcm_seal(&self.rk, self.rounds, nonce, aad, data, pow) })
+            }
+            #[cfg(not(target_arch = "x86_64"))]
+            {
+                let _ = (nonce, aad, data, pow);
+                None
+            }
+        }
+
+        /// The same for decryption: `data` becomes the plaintext, and S is of the ciphertext it was. The tag is not checked
+        /// here: if it is wrong the caller must put the ciphertext back (`ctr_xor` again does).
+        pub(crate) fn gcm_open(&self, nonce: &[u8; 12], aad: &[u8], data: &mut [u8], pow: &Powers) -> Option<[u8; 16]> {
+            debug_assert!(self.rounds != 0, "key was wiped");
+            #[cfg(target_arch = "x86_64")]
+            {
+                // SAFETY: as in `gcm_seal`.
+                Some(unsafe { arch::gcm_open(&self.rk, self.rounds, nonce, aad, data, pow) })
+            }
+            #[cfg(not(target_arch = "x86_64"))]
+            {
+                let _ = (nonce, aad, data, pow);
+                None
+            }
+        }
+    }
+
+    /// Whether this CPU has the instructions at all (without the self-test).
+    pub(crate) fn cpu_supports() -> bool {
+        arch::cpu_supports()
+    }
+
+    static AVAILABLE: OnceLock<bool> = OnceLock::new();
+
+    /// True if the hardware path may be used: the CPU has the instructions and the self-test passed.
+    pub(crate) fn available() -> bool {
+        *AVAILABLE.get_or_init(|| cpu_supports() && selftest())
+    }
+
+    /// Known answers for AES, and the hardware CTR and GHASH against the portable code.
+    fn selftest() -> bool {
+        // FIPS 197 appendix C.1 and C.3
+        let pt: [u8; 16] = core::array::from_fn(|i| (0x11 * i) as u8);
+        let k128: [u8; 16] = core::array::from_fn(|i| i as u8);
+        let k256: [u8; 32] = core::array::from_fn(|i| i as u8);
+        let ct128 = [0x69, 0xc4, 0xe0, 0xd8, 0x6a, 0x7b, 0x04, 0x30, 0xd8, 0xcd, 0xb7, 0x80, 0x70, 0xb4, 0xc5, 0x5a];
+        let ct256 = [0x8e, 0xa2, 0xb7, 0xca, 0x51, 0x67, 0x45, 0xbf, 0xea, 0xfc, 0x49, 0x90, 0x4b, 0x49, 0x60, 0x89];
+        if Keys::new_unchecked(&k128).encrypt_block(&pt) != ct128 || Keys::new_unchecked(&k256).encrypt_block(&pt) != ct256 {
+            return false;
+        }
+        // CTR: lengths around the 8-block unrolling, a wrapping counter, both key sizes
+        let nonce: [u8; 12] = core::array::from_fn(|i| (i * 7 + 1) as u8);
+        for key in [&k128[..], &k256[..]] {
+            let hw = Keys::new_unchecked(key);
+            let soft = Aes::with_backend(key, Backend::Portable);
+            for len in [0usize, 5, 16, 100, 128, 131, 300] {
+                let data: Vec<u8> = (0..len).map(|i| (i * 31 + 7) as u8).collect();
+                let (mut a, mut b) = (data.clone(), data);
+                hw.ctr_xor(&nonce, 0xffff_fffd, &mut a);
+                soft.ctr_xor(&nonce, 0xffff_fffd, &mut b);
+                if a != b {
+                    return false;
+                }
+            }
+        }
+        // GHASH with a hash key and data that exercise every bit position
+        let h = 0x0123_4567_89ab_cdef_fedc_ba98_7654_3210_u128 ^ ((0xe100_0000_0000_0000_u128) << 64);
+        let aad: Vec<u8> = (0..21).map(|i| (i * 13 + 5) as u8).collect();
+        let ct: Vec<u8> = (0..70).map(|i| (i * 29 + 3) as u8).collect();
+        // SAFETY: `cpu_supports()` was true on the way into the self-test
+        let hw = unsafe { arch::ghash(h, &aad, &ct) };
+        if hw != ghash::hash_with::<false>(h, &aad, &ct) {
+            return false;
+        }
+        one_pass_matches_the_portable_code(&k128, SELFTEST_LENGTHS, SELFTEST_AAD_LENGTHS)
+            && one_pass_matches_the_portable_code(&k256, SELFTEST_LENGTHS, SELFTEST_AAD_LENGTHS)
+    }
+
+    /// What the self-test (which runs once in every process that uses AES-GCM, before its first record) tries the
+    /// one-pass GCM on: one length for each way through the code (empty, a partial block, a block and a bit, exactly a
+    /// group of eight blocks, a group and a tail, a few groups and a tail) and additional data of the sizes TLS uses
+    /// (none, and the 5 bytes of a record header) and a longer one. The portable code it is compared with is the slow
+    /// constant-time one, so the sweep over every length is a unit test (`one_pass_matches_the_portable_code_for_all_the_lengths`)
+    /// and not part of every process's start.
+    #[cfg(target_arch = "x86_64")]
+    const SELFTEST_LENGTHS: &[usize] = &[0, 17, 128, 257, 1000];
+    #[cfg(target_arch = "x86_64")]
+    const SELFTEST_AAD_LENGTHS: &[usize] = &[0, 5, 130];
+    #[cfg(not(target_arch = "x86_64"))]
+    const SELFTEST_LENGTHS: &[usize] = &[];
+    #[cfg(not(target_arch = "x86_64"))]
+    const SELFTEST_AAD_LENGTHS: &[usize] = &[];
+
+    /// The one-pass GCM (x86-64) against the portable CTR and GHASH: S and the data, both ways, for the given
+    /// lengths of data and of additional data.
+    #[cfg(target_arch = "x86_64")]
+    fn one_pass_matches_the_portable_code(key: &[u8], lens: &[usize], aad_lens: &[usize]) -> bool {
+        let soft = Aes::with_backend(key, Backend::Portable);
+        let h_block = soft.encrypt_block(&[0u8; 16]);
+        let h = u128::from_be_bytes(h_block).reverse_bits();
+        // SAFETY: `cpu_supports()` was true on the way into the self-test
+        let pow = unsafe { arch::powers(&h_block) };
+        let hw = Keys::new_unchecked(key);
+        let nonce: [u8; 12] = core::array::from_fn(|i| (i * 11 + 3) as u8);
+        for &len in lens {
+            for &aad_len in aad_lens {
+                let aad: Vec<u8> = (0..aad_len).map(|i| (i * 13 + 5) as u8).collect();
+                let plain: Vec<u8> = (0..len).map(|i| (i * 31 + 7) as u8).collect();
+                // the portable code: CTR from 2, then GHASH of the ciphertext
+                let mut want = plain.clone();
+                soft.ctr_xor(&nonce, 2, &mut want);
+                let want_s = ghash::hash_with::<false>(h, &aad, &want).to_be_bytes();
+                // SAFETY: as above
+                let mut sealed = plain.clone();
+                let s = unsafe { arch::gcm_seal(&hw.rk, hw.rounds, &nonce, &aad, &mut sealed, &pow) };
+                if sealed != want || s != want_s {
+                    return false;
+                }
+                let mut opened = want.clone();
+                // SAFETY: as above
+                let s = unsafe { arch::gcm_open(&hw.rk, hw.rounds, &nonce, &aad, &mut opened, &pow) };
+                if opened != plain || s != want_s {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
+    #[cfg(not(target_arch = "x86_64"))]
+    fn one_pass_matches_the_portable_code(_key: &[u8], _lens: &[usize], _aad_lens: &[usize]) -> bool {
+        true
+    }
+
+    /// Every length around the groups of eight blocks and the usual sizes of additional data, both key sizes: the
+    /// sweep the start-up self-test is a sample of.
+    #[cfg(all(test, target_arch = "x86_64"))]
+    #[test]
+    fn one_pass_matches_the_portable_code_for_all_the_lengths() {
+        if !cpu_supports() {
+            return;
+        }
+        let k128: [u8; 16] = core::array::from_fn(|i| i as u8);
+        let k256: [u8; 32] = core::array::from_fn(|i| i as u8);
+        let lens = [0usize, 1, 15, 16, 17, 100, 127, 128, 129, 255, 256, 257, 1000, 2049];
+        let aads = [0usize, 5, 16, 29, 130];
+        assert!(one_pass_matches_the_portable_code(&k128, &lens, &aads));
+        assert!(one_pass_matches_the_portable_code(&k256, &lens, &aads));
+    }
+}
+
+#[cfg(all(any(target_arch = "x86_64", target_arch = "aarch64"), not(tiny_https_portable)))]
+pub(crate) use real::{available, clmul64, ghash_hw, ghash_powers, Keys, Powers};
+#[cfg(all(test, any(target_arch = "x86_64", target_arch = "aarch64"), not(tiny_https_portable)))]
+pub(crate) use real::cpu_supports;
+
+/// The same API for builds without the hardware path: never available, and `Keys` cannot exist.
+#[cfg(not(all(any(target_arch = "x86_64", target_arch = "aarch64"), not(tiny_https_portable))))]
+#[allow(dead_code)]
+mod none {
+    #[derive(Clone)]
+    pub(crate) enum Keys {}
+
+    impl Keys {
+        pub(crate) fn new(_key: &[u8]) -> Keys {
+            panic!("hardware AES is not available in this build")
+        }
+        pub(crate) fn wipe(&mut self) {
+            match *self {}
+        }
+        #[cfg(test)]
+        pub(crate) fn is_wiped(&self) -> bool {
+            match *self {}
+        }
+        pub(crate) fn encrypt_block(&self, _block: &[u8; 16]) -> [u8; 16] {
+            match *self {}
+        }
+        pub(crate) fn ctr_xor(&self, _nonce: &[u8; 12], _counter: u32, _data: &mut [u8]) {
+            match *self {}
+        }
+        pub(crate) fn gcm_seal(&self, _nonce: &[u8; 12], _aad: &[u8], _data: &mut [u8], _pow: &Powers) -> Option<[u8; 16]> {
+            match *self {}
+        }
+        pub(crate) fn gcm_open(&self, _nonce: &[u8; 12], _aad: &[u8], _data: &mut [u8], _pow: &Powers) -> Option<[u8; 16]> {
+            match *self {}
+        }
+    }
+
+    pub(crate) type Powers = [u128; 8];
+
+    pub(crate) fn ghash_powers(_h: &[u8; 16]) -> Option<Powers> {
+        None
+    }
+
+    pub(crate) fn available() -> bool {
+        false
+    }
+
+    #[cfg(test)]
+    pub(crate) fn cpu_supports() -> bool {
+        false
+    }
+
+    pub(crate) fn ghash_hw(_h: u128, _aad: &[u8], _ct: &[u8]) -> u128 {
+        unreachable!("hardware GHASH is not available in this build")
+    }
+
+    /// # Safety
+    /// Never callable: only reached through `hash_with::<true>`, which needs [`available`].
+    pub(crate) unsafe fn clmul64(_a: u64, _b: u64) -> u128 {
+        unreachable!("hardware carry-less multiplication is not available in this build")
+    }
+}
+
+#[cfg(not(all(any(target_arch = "x86_64", target_arch = "aarch64"), not(tiny_https_portable))))]
+pub(crate) use none::{available, clmul64, ghash_hw, ghash_powers, Keys, Powers};
+#[cfg(all(test, not(all(any(target_arch = "x86_64", target_arch = "aarch64"), not(tiny_https_portable)))))]
+pub(crate) use none::cpu_supports;

@@ -1,6 +1,6 @@
 [package]
 name = "lazaret-ffi"
-description = "C ABI over lazaret-engine: loaded by Python's ctypes and, as WebAssembly, by Node"
+description = "C ABI over lazaret-engine (and, natively, lazaret-net): loaded by Python's ctypes and, as WebAssembly, by Node"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -15,3 +15,8 @@ path = "src/lib.rs"
 
 [dependencies]
 lazaret-engine = { path = "../lazaret-engine" }
+
+# The network layer (NET-1), in the native library only: the WebAssembly build has no sockets, and the engine
+# itself never links it (scripts/check_rust_deps.py).
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+lazaret-net = { path = "../lazaret-net" }

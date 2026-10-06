@@ -22,6 +22,7 @@ from lazaret.registry.ecosystems import base, crates, golang
 from lazaret.scanner import _native
 from tests.registry import _cargo_support, _go_support
 from tests.registry import test_golang as recorded_go
+from tests import _support
 
 HERE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "recorded", "crates")
 INDEX = "https://index.crates.io/"
@@ -415,6 +416,7 @@ class McpTests(unittest.TestCase):
         self.assertIn("crates:<name>", spec["description"])
 
 
+@mock.patch.dict(os.environ, _support.PYTHON_TRANSPORT)
 class TransportTests(unittest.TestCase):
     """`module_transport`: _fetch's bounded read, with the module's URL rule for the URL and every redirect."""
 

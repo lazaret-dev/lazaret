@@ -1,5 +1,7 @@
-//! The C ABI of Lazaret's native engine: the only `unsafe` code of the
-//! project, and all of it in this file.
+//! The C ABI of Lazaret's native engine and of its network layer: the only
+//! `unsafe` code of Lazaret's own, and all of it in this file (tiny_https,
+//! taken into rust/crates as it was handed over, has its own: its SIMD
+//! kernels, randomness and the wiping of secrets).
 //!
 //! One call carries everything: a request buffer
 //!
@@ -14,7 +16,9 @@
 //! allocates and the caller hands back to `lazaret_engine_free`.
 //!
 //! Native builds export `lazaret_engine_call`, read by Python's ctypes
-//! (lazaret/scanner/_native.py). WebAssembly builds (wasm32-unknown-unknown,
+//! (lazaret/scanner/_native.py), and the network layer's calls
+//! (`lazaret_net_request`, `_open`, `_read`, `_close`, `_configure`: see
+//! [`net`]), which only the native library has. WebAssembly builds (wasm32-unknown-unknown,
 //! loaded by Node's built-in WebAssembly: js/src/lib/native.js) export
 //! `lazaret_alloc`, `lazaret_call` and `lazaret_free` instead, the same
 //! request and answer in the module's memory. A panic never crosses the
@@ -163,6 +167,274 @@ mod native {
         if !p.is_null() {
             drop(Box::from_raw(std::ptr::slice_from_raw_parts_mut(p, len)));
         }
+    }
+}
+
+/// The network layer's C ABI (NET-1), native builds only: Lazaret's requests to registries, feeds and APIs over
+/// tiny_https (`lazaret-net`), read by the Python package (lazaret/registry/nativenet.py).
+///
+/// A request is JSON, with its body (a POST's) apart:
+///
+/// ```text
+/// {"method": "GET", "url": "https://…", "headers": [["Accept", "…"], …], "hosts": ["registry.npmjs.org", …],
+///  "max_bytes": 5242880, "timeout_ms": 30000, "total_timeout_ms": null, "max_redirects": 3,
+///  "proxy": "env" | "direct" | "http://host:port", "http2": true}
+/// ```
+///
+/// The answer is JSON too, in a buffer the library allocates: `{"status": 200, "version": "HTTP/2", "headers":
+/// [[name, value], …], "url": "…"}` with the body in a second buffer (status 0), or `{"kind": "refused" |
+/// "too-large" | "tls-version" | "tls" | "timeout" | "network" | "http" | "setup", "error": "…"}` (status 1).
+/// Every buffer goes back to `lazaret_engine_free`. A panic never crosses the boundary (status 3).
+#[cfg(not(target_arch = "wasm32"))]
+pub mod net {
+    use super::*;
+    use lazaret_net::{Failure, Proxy, Request, Stream};
+    use std::collections::HashMap;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+
+    fn text(v: Option<&Value>, what: &str) -> Result<String, String> {
+        v.and_then(Value::as_string).ok_or_else(|| format!("the request has no {what}"))
+    }
+
+    fn millis(v: Option<&Value>, what: &str) -> Result<Option<Duration>, String> {
+        match v {
+            None | Some(Value::Null) => Ok(None),
+            Some(Value::Int(n)) if *n > 0 && *n <= 86_400_000 => Ok(Some(Duration::from_millis(*n as u64))),
+            _ => Err(format!("the request's {what} is not a number of milliseconds")),
+        }
+    }
+
+    /// The request a JSON description and a body make.
+    pub fn request_of(spec: &Value, body: &[u8]) -> Result<Request, String> {
+        let pairs = |key: &str| -> Result<Vec<(String, String)>, String> {
+            let mut out = Vec::new();
+            for item in spec.get(key).and_then(Value::as_arr).unwrap_or(&[]) {
+                match item.as_arr() {
+                    Some([n, v]) => out.push((text(Some(n), "header name")?, text(Some(v), "header value")?)),
+                    _ => return Err(format!("the request's {key} are not pairs")),
+                }
+            }
+            Ok(out)
+        };
+        let hosts = spec.get("hosts").and_then(Value::as_arr).unwrap_or(&[])
+            .iter().map(|h| text(Some(h), "host")).collect::<Result<Vec<_>, _>>()?;
+        let proxy = match spec.get("proxy") {
+            None | Some(Value::Null) => Proxy::Env,
+            Some(v) => match text(Some(v), "proxy")?.as_str() {
+                "env" => Proxy::Env,
+                "direct" => Proxy::Direct,
+                url => Proxy::Url(url.to_string()),
+            },
+        };
+        let max_bytes = spec.get("max_bytes").and_then(Value::as_i64).filter(|n| *n >= 0)
+            .ok_or("the request has no byte budget")? as u64;
+        let max_redirects = spec.get("max_redirects").and_then(Value::as_i64).filter(|n| (0..=10).contains(n)).unwrap_or(3) as usize;
+        Ok(Request {
+            method: text(spec.get("method"), "method")?,
+            url: text(spec.get("url"), "URL")?,
+            headers: pairs("headers")?,
+            body: body.to_vec(),
+            hosts,
+            max_bytes,
+            timeout: millis(spec.get("timeout_ms"), "timeout")?.unwrap_or(Duration::from_secs(30)),
+            total_timeout: millis(spec.get("total_timeout_ms"), "total timeout")?,
+            max_redirects,
+            proxy,
+            http2: !matches!(spec.get("http2"), Some(Value::Bool(false))),
+        })
+    }
+
+    pub fn failure(f: &Failure) -> String {
+        json::write(&Value::obj(vec![("kind", Value::str(f.kind())), ("error", Value::str(&f.message()))]))
+    }
+
+    fn head(status: u16, version: &str, headers: &[(String, String)], url: &str) -> String {
+        let headers = headers.iter().map(|(n, v)| Value::Arr(vec![Value::str(n), Value::str(v)])).collect();
+        json::write(&Value::obj(vec![("status", Value::Int(status as i64)), ("version", Value::str(version)),
+                                     ("headers", Value::Arr(headers)), ("url", Value::str(url))]))
+    }
+
+    /// (status, answer, body) for one request description.
+    pub fn handle_request(spec: &[u8], body: &[u8]) -> (i32, String, Vec<u8>) {
+        let r = catch_unwind(AssertUnwindSafe(|| {
+            let spec = match std::str::from_utf8(spec).ok().map(json::parse_str) {
+                Some(Ok(v)) => v,
+                _ => return (STATUS_ERROR, failure(&Failure::Setup("the request is not JSON".into())), Vec::new()),
+            };
+            let req = match request_of(&spec, body) {
+                Ok(r) => r,
+                Err(m) => return (STATUS_ERROR, failure(&Failure::Setup(m)), Vec::new()),
+            };
+            match lazaret_net::fetch(&req) {
+                Ok(reply) => (STATUS_OK, head(reply.status, &reply.version, &reply.headers, &reply.url), reply.body),
+                Err(f) => (STATUS_ERROR, failure(&f), Vec::new()),
+            }
+        }));
+        r.unwrap_or_else(|_| (STATUS_PANIC, failure(&Failure::Setup("panic in the network layer".into())), Vec::new()))
+    }
+
+    static STREAMS: Mutex<Option<HashMap<u64, Arc<Mutex<Stream>>>>> = Mutex::new(None);
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+
+    fn streams() -> std::sync::MutexGuard<'static, Option<HashMap<u64, Arc<Mutex<Stream>>>>> {
+        STREAMS.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
+    /// (status, answer, handle) for a request whose body is read in pieces.
+    pub fn handle_open(spec: &[u8], body: &[u8]) -> (i32, String, u64) {
+        let r = catch_unwind(AssertUnwindSafe(|| {
+            let spec = match std::str::from_utf8(spec).ok().map(json::parse_str) {
+                Some(Ok(v)) => v,
+                _ => return (STATUS_ERROR, failure(&Failure::Setup("the request is not JSON".into())), 0),
+            };
+            let req = match request_of(&spec, body) {
+                Ok(r) => r,
+                Err(m) => return (STATUS_ERROR, failure(&Failure::Setup(m)), 0),
+            };
+            match lazaret_net::open(&req) {
+                Ok(stream) => {
+                    let answer = head(stream.status, &stream.version, &stream.headers, &stream.url);
+                    let id = NEXT.fetch_add(1, Ordering::Relaxed);
+                    streams().get_or_insert_with(HashMap::new).insert(id, Arc::new(Mutex::new(stream)));
+                    (STATUS_OK, answer, id)
+                }
+                Err(f) => (STATUS_ERROR, failure(&f), 0),
+            }
+        }));
+        r.unwrap_or_else(|_| (STATUS_PANIC, failure(&Failure::Setup("panic in the network layer".into())), 0))
+    }
+
+    /// (status, bytes read, answer on failure) for the next piece of a stream's body.
+    pub fn handle_read(id: u64, buf: &mut [u8]) -> (i32, usize, String) {
+        let stream = streams().as_ref().and_then(|m| m.get(&id).cloned());
+        let Some(stream) = stream else {
+            return (STATUS_ERROR, 0, failure(&Failure::Setup("no such stream".into())));
+        };
+        let r = catch_unwind(AssertUnwindSafe(|| stream.lock().unwrap_or_else(|p| p.into_inner()).read(buf)));
+        match r {
+            Ok(Ok(n)) => (STATUS_OK, n, String::new()),
+            Ok(Err(f)) => (STATUS_ERROR, 0, failure(&f)),
+            Err(_) => (STATUS_PANIC, 0, failure(&Failure::Setup("panic in the network layer".into()))),
+        }
+    }
+
+    pub fn handle_close(id: u64) {
+        let stream = streams().as_mut().and_then(|m| m.remove(&id));
+        drop(stream);
+    }
+
+    pub fn handle_configure(roots: &[u8]) -> (i32, String) {
+        let r = catch_unwind(AssertUnwindSafe(|| {
+            let pem = if roots.is_empty() { None } else { std::str::from_utf8(roots).ok() };
+            if !roots.is_empty() && pem.is_none() {
+                return (STATUS_ERROR, failure(&Failure::Setup("the trust anchors are not PEM text".into())));
+            }
+            match lazaret_net::configure(pem) {
+                Ok(()) => (STATUS_OK, "{}".to_string()),
+                Err(f) => (STATUS_ERROR, failure(&f)),
+            }
+        }));
+        r.unwrap_or_else(|_| (STATUS_PANIC, failure(&Failure::Setup("panic in the network layer".into()))))
+    }
+
+    /// # Safety
+    /// `p` is null or points to `len` readable bytes.
+    unsafe fn bytes<'a>(p: *const u8, len: usize) -> &'a [u8] {
+        if p.is_null() || len == 0 {
+            &[]
+        } else {
+            std::slice::from_raw_parts(p, len)
+        }
+    }
+
+    /// # Safety
+    /// `out` and `out_len` are writable.
+    unsafe fn give(data: Vec<u8>, out: *mut *mut u8, out_len: *mut usize) {
+        let boxed: Box<[u8]> = data.into_boxed_slice();
+        *out_len = boxed.len();
+        *out = Box::into_raw(boxed) as *mut u8;
+    }
+
+    /// One request, its body read whole: the answer in `*meta`, the response body in `*body`.
+    ///
+    /// # Safety
+    /// `spec` points to `spec_len` readable bytes, `req_body` to `req_body_len` (or is null); the four out
+    /// pointers are writable.
+    #[no_mangle]
+    pub unsafe extern "C" fn lazaret_net_request(spec: *const u8, spec_len: usize, req_body: *const u8, req_body_len: usize,
+                                                 meta: *mut *mut u8, meta_len: *mut usize, body: *mut *mut u8,
+                                                 body_len: *mut usize) -> i32 {
+        if spec.is_null() || meta.is_null() || meta_len.is_null() || body.is_null() || body_len.is_null() {
+            return STATUS_ERROR;
+        }
+        let (status, answer, data) = handle_request(bytes(spec, spec_len), bytes(req_body, req_body_len));
+        give(answer.into_bytes(), meta, meta_len);
+        give(data, body, body_len);
+        status
+    }
+
+    /// A request whose body is read with `lazaret_net_read`: the answer (the head) in `*meta`, the stream's
+    /// handle in `*handle`, to be given back to `lazaret_net_close`.
+    ///
+    /// # Safety
+    /// As `lazaret_net_request`; `handle` is writable.
+    #[no_mangle]
+    pub unsafe extern "C" fn lazaret_net_open(spec: *const u8, spec_len: usize, req_body: *const u8, req_body_len: usize,
+                                              meta: *mut *mut u8, meta_len: *mut usize, handle: *mut u64) -> i32 {
+        if spec.is_null() || meta.is_null() || meta_len.is_null() || handle.is_null() {
+            return STATUS_ERROR;
+        }
+        let (status, answer, id) = handle_open(bytes(spec, spec_len), bytes(req_body, req_body_len));
+        give(answer.into_bytes(), meta, meta_len);
+        *handle = id;
+        status
+    }
+
+    /// The next bytes of a stream's body into `buf` (`*n` of them; 0 at its end). On failure (status 1) the
+    /// answer is in `*meta`; on success `*meta` is null.
+    ///
+    /// # Safety
+    /// `buf` points to `cap` writable bytes; `n`, `meta` and `meta_len` are writable.
+    #[no_mangle]
+    pub unsafe extern "C" fn lazaret_net_read(handle: u64, buf: *mut u8, cap: usize, n: *mut usize, meta: *mut *mut u8,
+                                              meta_len: *mut usize) -> i32 {
+        if buf.is_null() || n.is_null() || meta.is_null() || meta_len.is_null() {
+            return STATUS_ERROR;
+        }
+        let out = std::slice::from_raw_parts_mut(buf, cap);
+        let (status, got, answer) = handle_read(handle, out);
+        *n = got;
+        if answer.is_empty() {
+            *meta = std::ptr::null_mut();
+            *meta_len = 0;
+        } else {
+            give(answer.into_bytes(), meta, meta_len);
+        }
+        status
+    }
+
+    /// Ends a stream (its connection is closed unless its body was read to the end).
+    #[no_mangle]
+    pub extern "C" fn lazaret_net_close(handle: u64) {
+        let _ = catch_unwind(|| handle_close(handle));
+    }
+
+    /// The trust anchors for the requests from now on: PEM text, or nothing for the system's CA bundle. The
+    /// answer in `*meta`.
+    ///
+    /// # Safety
+    /// `roots` points to `roots_len` readable bytes (or is null); `meta` and `meta_len` are writable.
+    #[no_mangle]
+    pub unsafe extern "C" fn lazaret_net_configure(roots: *const u8, roots_len: usize, meta: *mut *mut u8,
+                                                   meta_len: *mut usize) -> i32 {
+        if meta.is_null() || meta_len.is_null() {
+            return STATUS_ERROR;
+        }
+        let (status, answer) = handle_configure(bytes(roots, roots_len));
+        give(answer.into_bytes(), meta, meta_len);
+        status
     }
 }
 

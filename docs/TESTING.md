@@ -128,6 +128,19 @@ Notes:
   (~1 s), `_jsparse.py` (~18 s), `_jsflow.py` (~10 s), `_pyparse.py` and
   `_pyflow.py` (~5 s) also need the WebAssembly build (`npm run build`), and
   skip without it.
+- **The network layer (NET-1).** With the native library the registry's
+  requests go through `lazaret-net` (`lazaret/scanner/nativenet.py`). A test
+  that fakes urllib's opener (`repo._OPENER`, `repo._module_opener`) asks for
+  Python's transport: `@mock.patch.dict(os.environ, _support.PYTHON_TRANSPORT)`
+  on the class. `tests.scanner.test_nativenet` runs the native client against
+  an HTTPS server Python's `ssl` serves on 127.0.0.1, with a root the `openssl`
+  command makes when the module starts (it skips without `openssl`), and
+  `cargo test -p lazaret-net` against tiny_https's own TLS 1.3 and HTTP/2
+  test server. tiny_https's tests are its own (`cargo test --release -p
+  tiny_https --lib` takes about 25 s after a 3-minute build, and its
+  `go_vectors`, `cms_vectors`, `sigstore_real`, `sigstore_synthetic` and
+  `rekor_real` tests a second each); after taking a new drop
+  (`scripts/sync_tiny_https.py`), run them and the gates.
 
 ---
 

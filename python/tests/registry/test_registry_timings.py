@@ -17,6 +17,7 @@ from unittest import mock
 
 from lazaret.registry import guard, repo
 from lazaret.scanner import _native, timings
+from tests import _support
 
 
 def tgz(files):
@@ -76,6 +77,7 @@ class EngineCallTests(unittest.TestCase):
         self.assertIs(timings.span("engine", "x"), timings.span("network"))   # the shared no-op span
 
 
+@mock.patch.dict(os.environ, _support.PYTHON_TRANSPORT)
 class RegistryTests(unittest.TestCase):
     def test_a_fetch_is_the_network(self):
         class Response(io.BytesIO):
