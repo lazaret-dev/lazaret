@@ -11,6 +11,23 @@ project is pre-1.0, so the 0.x API may still change.
 
 ### Added
 
+- **VS Code extensions: `lazaret FILE.vsix` and `lazaret --extensions` (E-1's first part).**
+  An extension runs in the editor's extension host, Node with all of your access and no
+  sandbox. A `.vsix`, or an extension an editor has installed, is now read as the registry
+  reads an npm package, with the editor's rules for what runs and when: its `main` and
+  `browser` modules and what they load get the import-time test (SC-IMPORT-RISK, which says
+  when the editor starts them at every start: `*`, `onStartupFinished`); the rest of its code
+  gets the use-time test; `vscode:uninstall`, the one script VS Code runs (`node` and a file,
+  once the extension has been uninstalled), gets the install-hook test, and a command VS Code
+  would not run is listed only. npm's scripts, a bundled package's scripts and a `binding.gyp`
+  never run, so they are not hooks, and only the members under `extension/` are the
+  extension's. The extensions it brings (`extensionDependencies`, `extensionPack`) are
+  listed. `lazaret --extensions` scans what VS Code, VS Code Insiders, VSCodium, Cursor,
+  Windsurf, Kiro, Positron, code-server and the VS Code and Cursor servers have installed (and
+  the folder `VSCODE_EXTENSIONS` names), or the folders and `.vsix` files given; an installed
+  extension's folder reads as its `.vsix` does, and a link out of it is not followed
+  (INCOMPLETE). `--ci`, `--json`, `--quiet`. `scripts/bench.py` takes `vsix` releases. The
+  npm package does not scan extensions yet.
 - **For contributors: the Go and Rust benign sets (N-2).** The release gate's popular set
   holds the 500 most-downloaded crates too (498: two are under licences it does not take),
   pinned by version and sha256 as its npm and PyPI releases are, and

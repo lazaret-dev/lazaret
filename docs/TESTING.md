@@ -341,6 +341,18 @@ gate is each one SUSPICIOUS for its documented reason. Until then, the
 reader tests' single-technique samples (`goread/tests.rs`,
 `rsread/tests.rs`) and the guard tests' are the coverage set.
 
+**VS Code extensions (E-1).** `bench.py` takes a `.vsix` as `"kind": "vsix"`
+(`extension/` inside, `"container": "zip"`), scanned as `lazaret FILE.vsix`
+scans it. The extensions' benign set (the most-installed Open VSX
+extensions, pinned by sha256) is E-1's part 4, and their malicious set
+(GlassWorm's and the other campaigns' samples) is run offline by John, as
+the Go and Rust one is: neither registry can be reached from the sandbox.
+Until then, `tests/registry/test_vsix.py`'s single-technique fragments are
+the coverage set, and the popular set's npm releases wrapped as extensions
+(their `package.json` given a publisher and an engine) check that the
+editor's rules add no false positive to npm's: on 0.1.9, 782 OK, 19 WARN,
+none SUSPICIOUS, none above its npm verdict.
+
 ---
 
 ## 5. Bounded-work checks

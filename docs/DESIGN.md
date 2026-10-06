@@ -1027,6 +1027,47 @@ rules that read them). The parsers come next, for the detectors (G-1, R-1):
 
 ---
 
+### i. VS Code extensions (`extensions.py`, 0.1.9, E-1)
+
+An extension runs in the editor's extension host: Node, with all of the
+user's access, no sandbox and no prompt, started with the editor (`*`,
+`onStartupFinished`) or on an event, and updated by the editor. It is read
+as the registry reads an npm package, artifact kind `vsix`, with the
+editor's rules for what runs and when instead of npm's:
+
+- what VS Code installs is what is under `extension/` in the `.vsix`
+  (`canonical_member_path`); the package's own files (`[Content_Types].xml`,
+  `extension.vsixmanifest`, a signature) are not the extension's;
+- `main` and `browser` are the entries (an extension with neither runs no
+  code: there is no `index.js` default), and they and what they load get
+  the import-time test, whose finding says when the editor starts them at
+  every start; the rest of the code gets the use-time test;
+- `vscode:uninstall` is the one script VS Code runs: `node` and a file,
+  split on single spaces (`vsix_hook_runs`, VS Code's `parseScript`), once
+  the extension has been uninstalled, at the editor's next start. It gets
+  the install-hook test and its findings speak of the editor; any other
+  command, which VS Code logs and skips, is inventory (INFO). npm's
+  lifecycle scripts, a bundled package's and a `binding.gyp` never run;
+- `extensionDependencies` and `extensionPack` are what it brings (lowercase
+  `publisher.name`, the first 500 of each). SC-TYPOSQUAT on those names, and
+  SC-NEW-DEPENDENCY, come with the registry modules (E-1's parts 2 and 3);
+  npm's look-alike test does not apply to an extension's names.
+
+An installed extension is a folder (`<home>/.vscode/extensions/
+publisher.name-version[-platform]`, and the same under each fork's data
+folder). `repo.iter_folder` yields its files as `iter_archive` yields an
+archive's members, under the same limits, in a fixed order, and
+`repo.scan_members` scans either, so a folder and its `.vsix` give the same
+findings. Nothing is followed out of the folder: a link to a file inside it
+is read as that file; a link to a folder, out of the folder or to nothing
+is not followed, and the scan is INCOMPLETE, since Node would follow it to
+code no scan read; a FIFO, a socket or a device is never opened; and a
+folder of more names than `MAX_FILES` is not listed whole (INCOMPLETE).
+`extensions.py` finds the folders (`EDITORS`, code-server's, the folder
+`VSCODE_EXTENSIONS` names), scans each and prints it as `lazaret-registry`
+prints a package. `_cli.py` hands it a command line with `--extensions` or
+a word that names a `.vsix` file.
+
 ## 6. How to add or change a rule — the loop
 
 This is the working method. Follow it; it is why the tool has stayed trustworthy.
@@ -1207,6 +1248,7 @@ hold that. A store that outlives the run is the next step (P-2b).
 | `python/src/lazaret/registry/pmsettings.py` | The package managers' own settings as the guard reads them: registries, indexes, credentials by host |
 | `python/src/lazaret/registry/goproxy.py`, `cargosrc.py`, `scanpool.py`, `ecosystems/` | The Go guard's proxy protocol, the Cargo guard's sources and lockfile, the guard's scan workers, the crates.io and Go module auditors |
 | `python/src/lazaret/registry/sources.py`, `sourcescan.py`, `actions.py` | A repository at a commit (`lazaret scan github:…`), its scan and report `source`; a workflow's actions asked of GitHub |
+| `python/src/lazaret/registry/extensions.py` | VS Code extensions: `lazaret FILE.vsix` and `lazaret --extensions` (the editors' installed extensions), read with the editor's rules for what runs |
 | `rust/crates/lazaret-engine/src/lex/`, `goparse/`, `rsparse/` | The lexers (JavaScript, Python, Go, Rust), the Go parser and the Rust item reader, with their hooks (not used by a scan yet) |
 | `js/src/lib/native.js`, `js/scripts/build-wasm.js` | The npm package's native engine (WebAssembly: the loader, one call, the pack's values) and its build (`npm run build`) |
 | `js/src/lib/supplychain.js`, `js/src/deps.js`, `js/src/scanner/flow.js`, `js/src/index.js`, `js/src/pool.js` | Install-hook checks, `--deps`, flow twin, npm CLI, its worker threads |

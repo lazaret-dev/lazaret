@@ -53,6 +53,7 @@ import lzma
 import os
 import posixpath
 import re
+import stat
 import struct
 import sys
 import tarfile
@@ -1014,6 +1015,45 @@ class Member(tuple):
 _DRIVE_ROOT_RE = re.compile(r"^(?:[A-Za-z]:)?/+")
 
 
+#: The directory of a .vsix VS Code unpacks into the extension's folder (E-1).
+VSIX_ROOT = "extension"
+#: The one script of an extension's package.json VS Code runs (`node` and a file, once the extension has been
+#: uninstalled, at the editor's next start: vsix_hook_runs). npm's lifecycle scripts never run: the editor runs no
+#: npm install.
+VSIX_HOOKS = ("vscode:uninstall",)
+#: Activation events that start an extension with the editor, every time.
+VSIX_STARTUP_EVENTS = frozenset(("*", "onStartupFinished"))
+#: An extension's identifier, `publisher.name` (VS Code's EXTENSION_IDENTIFIER_PATTERN).
+VSCODE_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9-]*\.[A-Za-z0-9][A-Za-z0-9-]*")
+MAX_VSIX_DEPENDENCIES = 500
+
+
+def vsix_hook_runs(cmd):
+    """Does VS Code run this vscode:uninstall command? Only `node <file> [arguments]`: it splits the
+    command on single spaces and forks the file (the extension's folder joined with the second word)
+    with the rest as arguments, and logs and skips any other command (extensionLifecycle.ts,
+    parseScript)."""
+    parts = cmd.split(" ")
+    return len(parts) >= 2 and parts[0] == "node" and bool(parts[1])
+
+
+def _vsix_inert_hook(issue):
+    """A vscode:uninstall command VS Code does not run (vsix_hook_runs): inventory, not followed."""
+    cmd = issue.pop("cmd", None) or ""
+    issue["sev"] = "INFO"
+    issue["name"] = "Uninstall hook"
+    issue["msg"] = f'"vscode:uninstall" script is not one VS Code runs (it runs only `node <file>`): {cmd!r}.'
+    issue["why"] = ("VS Code runs an extension's vscode:uninstall script only when it is `node` and a file of the "
+                    "extension; it logs any other command and runs nothing. Listed for inventory.")
+    issue["fix"] = "Nothing runs it; read it all the same if the extension is unfamiliar."
+
+
+#: Why an extension's vscode:uninstall script matters (E-1), before the reason it was found for.
+_VSIX_HOOK_RUNS = ("VS Code runs an extension's vscode:uninstall script (`node` and a file of the extension) once "
+                   "the extension has been uninstalled, at the editor's next start, with the user's privileges "
+                   "and nobody watching")
+
+
 def canonical_member_path(name, artifact=None):
     """Where an extractor puts an archive member, relative to the package
     root. -> (rel or None, problem or None).
@@ -1023,6 +1063,10 @@ def canonical_member_path(name, artifact=None):
     'setup.js'), strip absolute roots, refuse '..'; a member that ends up as
     the package root itself (a top-level file) is not extracted.
     wheel: paths are install paths, nothing stripped.
+    vsix (a VS Code extension, 0.1.9, E-1): VS Code unpacks the members under
+    `extension/` into the extension's folder, and nothing else (the package's
+    `[Content_Types].xml`, `extension.vsixmanifest` and signature stay in
+    the archive): those are not extracted.
     sdist (and the legacy default): '.' / empty segments dropped, then the
     top directory. Backslashes count as separators (npm on Windows)."""
     p = str(name).replace("\\", "/")
@@ -1030,6 +1074,11 @@ def canonical_member_path(name, artifact=None):
         rest = "/".join(p.split("/")[1:])
     elif artifact == "wheel":
         rest = p
+    elif artifact == "vsix":
+        parts = [x for x in p.split("/") if x not in ("", ".")]
+        if len(parts) < 2 or parts[0] != VSIX_ROOT:
+            return None, None
+        rest = "/".join(parts[1:])
     else:
         parts = [x for x in p.split("/") if x not in ("", ".")]
         rest = "/".join(parts[1:]) if len(parts) > 1 else (parts[0] if parts else "")
@@ -1138,6 +1187,168 @@ def _timed_members(members):
             yield member
     finally:
         members.close()
+
+
+def iter_folder(root, *, budget=None):
+    """Yield Member(relative_path, real_size, raw_bytes, reason) for every
+    file of a folder, as iter_archive does for an archive: an installed VS
+    Code extension (0.1.9, E-1), whose files are its folder's. The same
+    limits hold (MAX_FILES files, MAX_MEMBER bytes of a file read, the
+    budget's bytes and deadline), and the order is fixed (each folder's
+    names in code point order, depth first).
+
+    `root` may be a link (an extension under development is often linked
+    into the editor's folder), but nothing in it is followed out of it:
+      - a link to a regular file inside the folder is read as that file, as
+        an archive's link is;
+      - any other link (to a folder, out of the folder, or to nothing) is
+        not followed, and the scan says so ("corrupt", with the link's
+        path and why): Node would follow it to code no scan read;
+      - a FIFO, a socket or a device is never opened (no code is loaded
+        from one) and is passed over.
+    A file or folder that cannot be read is "corrupt" too, and so is a
+    root that is not a folder."""
+    budget = budget if budget is not None else Budget()
+    yield from _timed_members(_walk_folder(os.path.realpath(root), budget))
+
+
+#: How a folder's files are opened: never through a link (a link is resolved first and its target opened), never
+#: waiting on a FIFO, never translating line ends (Windows).
+_FOLDER_OPEN_FLAGS = (os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+                      | getattr(os, "O_BINARY", 0))
+
+
+def _os_reason(exc):
+    return exc.strerror or type(exc).__name__
+
+
+def _inside(base, path):
+    """Is `path` (a real path) `base` or below it?"""
+    try:
+        return os.path.commonpath([base, path]) == base
+    except ValueError:                          # (another drive, on Windows)
+        return False
+
+
+def _folder_listing(path):
+    """A folder's entries, by name in code point order: at most MAX_FILES + 1
+    of them, so a folder of millions of names is not held whole to be
+    sorted (as _zip_preflight refuses a zip that declares too many)."""
+    out = []
+    with os.scandir(path) as entries:
+        for entry in entries:
+            out.append(entry)
+            if len(out) > MAX_FILES:
+                break
+    return sorted(out, key=lambda e: e.name)
+
+
+def _read_regular(path, limit, budget):
+    """(the first `limit` bytes, charged to `budget`) of the regular file at
+    `path`, or None when what is there is not a regular file once opened.
+    OSError when it cannot be read; ArchiveLimit past the budget."""
+    fd = os.open(path, _FOLDER_OPEN_FLAGS)
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return None
+        chunks, want = [], limit
+        while want > 0:
+            budget.check()
+            chunk = os.read(fd, min(want, _OUTPUT_CHUNK))
+            if not chunk:
+                break
+            budget.charge(len(chunk))
+            chunks.append(chunk)
+            want -= len(chunk)
+        return b"".join(chunks)
+    finally:
+        os.close(fd)
+
+
+def _folder_link(base, entry):
+    """The file a link in the folder is read as, or (None, why it is not followed); None, None for a link to
+    something that holds no code (a FIFO, a socket, a device), which is passed over."""
+    target = os.path.realpath(entry.path)
+    if not os.path.exists(target):
+        return None, "a link to nothing"
+    if not _inside(base, target):
+        return None, "a link out of the folder"
+    if os.path.isdir(target):
+        return None, "a link to a folder"
+    if os.path.isfile(target):
+        return target, None
+    return None, None
+
+
+def _walk_folder(base, budget):
+    count, last = 0, "(folder)"
+    try:
+        listing = _folder_listing(base)
+    except OSError as exc:
+        yield Member("(folder)", 0, b"", "corrupt", f"the folder could not be read ({_os_reason(exc)})")
+        return
+    if len(listing) > MAX_FILES:
+        yield Member("(folder)", 0, b"", "files", f"the folder holds more than {MAX_FILES:,} names")
+        return
+    stack = [("", iter(listing))]
+    while stack:
+        prefix, entries = stack[-1]
+        entry = next(entries, None)
+        if entry is None:
+            stack.pop()
+            continue
+        rel = prefix + entry.name
+        try:
+            budget.check()
+        except ArchiveLimit as lim:
+            yield Member(last, 0, b"", lim.reason, lim.detail)
+            return
+        try:
+            if entry.is_symlink():
+                path, why = _folder_link(base, entry)
+                if path is None:
+                    if why:
+                        yield Member(rel, 0, b"", "corrupt", f"{rel} is {why}, which the scan does not follow")
+                    continue
+            elif entry.is_dir(follow_symlinks=False):
+                try:
+                    listing = _folder_listing(entry.path)
+                except OSError as exc:
+                    yield Member(rel, 0, b"", "corrupt", f"the folder {rel} could not be read ({_os_reason(exc)})")
+                    continue
+                if len(listing) > MAX_FILES:
+                    yield Member(rel, 0, b"", "files", f"the folder {rel} holds more than {MAX_FILES:,} names")
+                    return
+                stack.append((rel + "/", iter(listing)))
+                continue
+            elif entry.is_file(follow_symlinks=False):
+                path = entry.path
+            else:
+                continue                          # a FIFO, a socket, a device: no code
+        except OSError as exc:
+            yield Member(rel, 0, b"", "corrupt", f"{rel} could not be read ({_os_reason(exc)})")
+            continue
+        count += 1
+        if count > MAX_FILES:
+            yield Member(rel, 0, b"", "files", f"the folder holds more than {MAX_FILES:,} files (stopped at {rel})")
+            return
+        last = rel
+        try:
+            raw = _read_regular(path, MAX_MEMBER + 1, budget)
+        except ArchiveLimit as lim:
+            detail = lim.detail or (f"the folder's files are more than {budget.limit:,} bytes in all (stopped at "
+                                    f"{rel})" if lim.reason == "total" else "")
+            yield Member(rel, 0, b"", lim.reason, detail)
+            return
+        except OSError as exc:
+            yield Member(rel, 0, b"", "corrupt", f"{rel} could not be read ({_os_reason(exc)})")
+            continue
+        if raw is None:
+            continue                              # (it was swapped for something else than a file)
+        if len(raw) > MAX_MEMBER:
+            yield Member(rel, SAMPLE, raw[:SAMPLE], "member")
+            continue
+        yield Member(rel, len(raw), raw, None)
 
 
 def _iter_tar(data, container, artifact, budget, anomalies):
@@ -1467,9 +1678,9 @@ def _iter_zip(data, artifact, budget, anomalies):
                     # alike), so those bytes are what is scanned. Lazaret used to
                     # read them as a link target and skip the entry when no
                     # member had that name: code pip installs went unscanned.
-                    anomalies.append(("ziplink", rel, "pip installs its stored bytes as a regular "
-                                                      "file, which is what was scanned; unzip "
-                                                      "would create a symlink instead"))
+                    anomalies.append(("ziplink", rel, f"{'VS Code' if artifact == 'vsix' else 'pip'} installs "
+                                                      "its stored bytes as a regular file, which is what was "
+                                                      "scanned; unzip would create a symlink instead"))
                 _note_member(seen, rel, anomalies)
                 last = rel
                 try:
@@ -1790,8 +2001,8 @@ def _archive_issue(kind, path, detail):
                  "A symlink or hardlink pointing outside the extraction directory can make "
                  "the installer read or overwrite files elsewhere on the machine."),
         "ziplink": ("SC-ARCHIVE-LINK", "Zip entry marked as a symlink",
-                    "pip ignores the mark and installs the entry's bytes as a regular file, "
-                    "while unzip creates a symlink: the same archive installs differently, and "
+                    "pip (and VS Code, for an extension) ignores the mark and installs the entry's bytes as a "
+                    "regular file, while unzip creates a symlink: the same archive installs differently, and "
                     "no packaging tool produces one."),
         "path": ("SC-ARCHIVE-PATH", "Unsafe archive path",
                  "An entry with '..' in its path tries to escape the extraction directory; "
@@ -1917,6 +2128,9 @@ class _ArtifactScan:
         self.startup = set()       # a wheel's sitecustomize / usercustomize
         self.unread = False        # a member the archive's limits left unread
         self.unused_dependencies = []  # npm: registry names no file uses (_unused_dependencies)
+        self.extension_dependencies = []   # vsix: the extensions it brings (_vsix_entry_points)
+        self.vsix_startup = None   # vsix: the activation event that starts it with the editor, if any
+        self.vsix_identity = None  # vsix: its package.json's publisher, name and version
         self.use_time = None       # what SC-USE-RISK's step read (_use_time_code), None: not run
         self.unread_code = []      # N-1: members whose code nothing reads yet (UNREAD_CODE)
         self.code_text = {}        # rel -> raw: what a reader reads besides the scanned sources (a Go
@@ -2078,7 +2292,7 @@ class _ArtifactScan:
         ext = os.path.splitext(base)[1].lower()
         code = PACKAGE_CODE.get(self.artifact)
         wants_text = (base in _MANIFEST_NAMES or lazaret.dep_source_lang(ext) is not None
-                      or ext in (".pth", ".gyp", ".gypi")
+                      or ext == ".pth" or (ext in (".gyp", ".gypi") and self.artifact != "vsix")
                       # a file a reader reads: a Go module's .go and cgo C, a crate's .rs (an
                       # sdist's .rs is known to be a crate's only at the end: _sdist_crates)
                       or (code is not None and ext in code[1] + code[2] and not _never_built(self.artifact, rel)))
@@ -2101,17 +2315,22 @@ class _ArtifactScan:
             self.add_decode_issues(extra, keep_encoding=False)
             self.manifests[rel] = text
             self._deadline(rel)
+            # (a VS Code extension: the editor runs no npm script, only the root's vscode:uninstall, E-1)
+            hooks = None if self.artifact != "vsix" else VSIX_HOOKS if rel == "package.json" else ()
             try:
-                found = lazaret.scan_manifest(rel, text, registry=True)
+                found = lazaret.scan_manifest(rel, text, registry=True, hooks=hooks)
             except _engine.NativeError as exc:
                 self._unanswered(rel, exc)
                 return
             for i in found:
                 if i["rule"] == "SC-MANIFEST-UNPARSEABLE":
                     self.truncated += 1
+                if self.artifact == "vsix" and i["rule"] == "SC-INSTALL-HOOK" and not vsix_hook_runs(i["cmd"]):
+                    _vsix_inert_hook(i)
                 self.issues.append(i)
             return
-        if base in ("binding.gyp",) or ext in (".gyp", ".gypi"):
+        # (an extension's binding.gyp is data: VS Code builds nothing, E-1)
+        if self.artifact != "vsix" and (base == "binding.gyp" or ext in (".gyp", ".gypi")):
             text, extra = lazaret.decode_member(rel, raw)
             self.add_decode_issues(extra, keep_encoding=False)
             self.manifests[rel] = text
@@ -2325,9 +2544,40 @@ class _ArtifactScan:
             data, _problems = lazaret.load_manifest(rel, text)
             if data is None:
                 continue
-            if rel == "package.json":
+            if rel == "package.json" and self.artifact == "vsix":
+                self._vsix_entry_points(rel, data)
+            elif rel == "package.json":
                 self._entry_points(rel, data)
                 self._implicit_gyp_hook(rel, data)
+
+    def _vsix_entry_points(self, manifest_rel, data):
+        """A VS Code extension's code entries (E-1): `main` (the desktop's Node
+        host) and `browser` (the web worker host), which the editor loads, and
+        whose `activate` it calls, when it activates the extension; an
+        extension with neither runs no code. `*` and `onStartupFinished` in
+        `activationEvents` mean at every start. And the extensions it brings:
+        an extension pack's members are installed with it, and its
+        `extensionDependencies` are what it needs to activate."""
+        base = posixpath.dirname(manifest_rel)
+        self.vsix_identity = {key: data.get(key) if isinstance(data.get(key), str) else None
+                              for key in ("publisher", "name", "version")}
+        for key in ("main", "browser"):
+            target = data.get(key)
+            if isinstance(target, str) and target.strip():
+                rel = self._resolve(_rel_join(base, target))
+                if rel:
+                    self.entries.add(rel)
+                    self._text_of(rel, "js", False)
+        events = data.get("activationEvents")
+        events = [e for e in events[:1000] if isinstance(e, str)] if isinstance(events, list) else []
+        self.vsix_startup = next((e for e in events if e in VSIX_STARTUP_EVENTS), None)
+        found = set()
+        for key in ("extensionDependencies", "extensionPack"):
+            listed = data.get(key)
+            if isinstance(listed, list):
+                found.update(v.lower() for v in listed[:MAX_VSIX_DEPENDENCIES]
+                             if isinstance(v, str) and VSCODE_ID_RE.fullmatch(v))
+        self.extension_dependencies = sorted(found)
 
     def _follow_hooks(self):
         """Follow each install hook to the scripts it runs; escalate the hook
@@ -2370,6 +2620,27 @@ class _ArtifactScan:
                         issue["sev"] = "CRITICAL"
                         issue["msg"] = (f"Install hook runs {target}, which starts {started}, which "
                                         f"{'; and '.join(more)}.")
+
+    def _vsix_hook_words(self):
+        """An extension's vscode:uninstall findings in the editor's words, once
+        _follow_hooks has read the script (E-1): VS Code runs it when the
+        extension has been uninstalled, not npm at install."""
+        for issue in self.issues:
+            if issue["rule"] != "SC-INSTALL-HOOK" or issue["file"] != "package.json" or issue["sev"] == "INFO":
+                continue
+            msg = issue["msg"]
+            for old, new in (("Install hook command ", "The vscode:uninstall command "),
+                             ("Install hook runs ", "The vscode:uninstall script runs ")):
+                if msg.startswith(old):
+                    msg = new + msg[len(old):]
+            issue["msg"] = msg.replace(" at install time: ", " when VS Code uninstalls the extension: ", 1)
+            issue["name"] = "Uninstall hook"
+            if issue["sev"] in STRONG_SEVERITIES:
+                issue["why"] = _VSIX_HOOK_RUNS + ", and this command does what malicious install hooks do."
+            else:
+                issue["why"] = _VSIX_HOOK_RUNS + (". A few extensions use it to clean up after themselves, so on "
+                                                  "its own it is a capability to review, not evidence of malice.")
+            issue["fix"] = "Read the script it runs before installing the extension."
 
     def _started_scripts(self, rel, text, cwd, into):
         """[(rel, text)] for the package scripts `rel` starts with node or
@@ -2564,13 +2835,20 @@ class _ArtifactScan:
             reasons, line = risk
             if not reasons:
                 continue
+            when, runs = "runs when the package is loaded", (
+                "Code the package's entry points reach (in a wheel or an sdist, its top-level modules and what "
+                "they import) runs whenever the package is imported or its command runs.")
+            if self.artifact == "vsix":
+                when = ("runs when the editor activates the extension" + (
+                    f" (at every start: activation event {self.vsix_startup!r})" if self.vsix_startup else ""))
+                runs = ("An extension's main module (and its browser one) and the modules they load run in the "
+                        "editor's extension host, with all of the user's access, when the editor activates the "
+                        "extension: at every start for the activation events '*' and 'onStartupFinished'.")
             self.issues.append(lazaret.mk_issue(
                 {"id": "SC-IMPORT-RISK", "name": "Risky import-time code", "type": "HOTSPOT",
                  "sev": lazaret.import_time_severity(reasons),
-                 "msg": f"{rel} runs when the package is loaded, and it {'; and '.join(reasons)}.",
-                 "why": ("Code the package's entry points reach (in a wheel or an sdist, its "
-                         "top-level modules and what they import) runs whenever the package is "
-                         "imported or its command runs. Collecting credentials or the whole "
+                 "msg": f"{rel} {when}, and it {'; and '.join(reasons)}.",
+                 "why": (f"{runs} Collecting credentials or the whole "
                          "environment next to a network call is the shape of an import-time "
                          "stealer; SDKs read the few variables they need. MAJOR where the file "
                          "may have a reason; CRITICAL for code no library needs — code fetched "
@@ -2664,17 +2942,26 @@ class _ArtifactScan:
             strong = [r for r in reasons if r.startswith(lazaret._STRONG_IMPORT_REASONS)]
             if not strong:
                 continue
+            if self.artifact == "vsix":
+                later = ("The editor does not load it when it activates the extension: it runs when the "
+                         "extension's code calls it.")
+                where = ("a command, a debug adapter, a language server or a script the extension starts runs it "
+                         "when the extension is used")
+                fix = "Uninstall the extension; report it to the marketplace that serves it."
+            else:
+                later = "Nothing loads it at install or import: it runs when the package's code calls it."
+                where = ("a logger's constructor, a middleware or a script the package spawns runs it the first "
+                         "time your code uses the package")
+                fix = "Don't use the package; report it to the registry."
             self.issues.append(lazaret.mk_issue(
                 {"id": "SC-USE-RISK", "name": "Hostile code the package runs when used", "type": "HOTSPOT",
                  "sev": "CRITICAL",
-                 "msg": f"{rel} {'; and '.join(strong)}. Nothing loads it at install or import: it runs when "
-                        f"the package's code calls it.",
-                 "why": ("A payload need not run on install or import to reach you: a logger's constructor, a "
-                         "middleware or a script the package spawns runs it the first time your code uses the "
-                         "package. These are the shapes no library needs: code fetched and run, a reverse shell, "
+                 "msg": f"{rel} {'; and '.join(strong)}. {later}",
+                 "why": (f"A payload need not run on install or import to reach you: {where}. These are the "
+                         "shapes no library needs: code fetched and run, a reverse shell, "
                          "hidden PowerShell, credentials sent to an exfiltration service, a beacon to a "
                          "data-capture service."),
-                 "fix": "Don't use the package; report it to the registry.",
+                 "fix": fix,
                  "ref": "CWE-506 · Supply chain"}, rel, line, text.split("\n")))
 
     def _cross_file_code(self):
@@ -2899,7 +3186,11 @@ class _ArtifactScan:
         (0.1.9, N-3): the module line of the module's go.mod and the paths
         it requires; a crate (N-3's second part): its Cargo.toml's name and
         the crates it depends on to build (not [dev-dependencies]; a renamed
-        one by the name crates.io knows it by)."""
+        one by the name crates.io knows it by). Not a VS Code extension's yet:
+        its names are `publisher.name` (E-1's third part), and the npm
+        packages it bundles are not installed from npm."""
+        if self.artifact == "vsix":
+            return
         if self.artifact == "gomod":
             for rel, text, parsed in self._go_mods():
                 deps = {p for p, _v, _i in parsed["require"]} | {p for p, _i in parsed["unversioned"]}
@@ -3031,6 +3322,8 @@ class _ArtifactScan:
             pass                              # recorded: the archive is INCOMPLETE
         if self.unread_code:
             self.issues.append(_unread_code_issue(self.artifact, sorted(self.unread_code)))
+        if self.artifact == "vsix":
+            self._vsix_hook_words()
         _demote_test_findings(self.issues, reachable if reachable is not None else self.entries)
         # F9b: the decompressed sources are no longer needed
         self.sources, self.deferred, self.shell, self.code_text = {}, {}, {}, {}
@@ -3078,24 +3371,47 @@ def _scan_artifact(data, container, artifact, full, budget, memo=None):
     """Scan one archive -> per-artifact result fields (issues, counts, verdict).
     `memo`: the engine's answers by content, shared with the release's other
     files (contentcache.Memo; none by default)."""
-    st = _ArtifactScan(artifact, full, budget, memo)
     anomalies = []
+    return scan_members(iter_archive(data, container, artifact, budget=budget, anomalies=anomalies),
+                        anomalies, artifact, full, budget, memo)
+
+
+def scan_members(members, anomalies, artifact, full, budget, memo=None):
+    """Scan a package's files -> per-artifact result fields (_scan_artifact):
+    `members` yields them as iter_archive does (Member), from an archive or a
+    folder (iter_folder: an installed VS Code extension, E-1), and
+    `anomalies` is the list the reader adds its (kind, path, detail) to.
+    A VS Code extension's result says which extensions it brings
+    (`extensionDependencies`), the activation event that starts it with the
+    editor (`startupEvent`, None when none does) and who it says it is
+    (`manifest`: its package.json's publisher, name and version, each None
+    when it is not a string; None when the scan did not get that far)."""
+    st = _ArtifactScan(artifact, full, budget, memo)
     try:
-        for m in iter_archive(data, container, artifact, budget=budget, anomalies=anomalies):
+        for m in members:
             st.member(m)
             if st.out_of_time("(archive)"):          # between members
                 break
     except _OutOfTime:
         pass                             # inside a member: recorded where it stopped
-    except ArchiveLimit as lim:          # (defensive: iter_archive yields its limits)
+    except ArchiveLimit as lim:          # (defensive: the readers yield their limits)
         st.truncate("(archive)", lim.detail or st.limit_detail(lim.reason, "(archive)"))
+    finally:
+        close = getattr(members, "close", None)
+        if close is not None:
+            close()                      # (a reader stopped early lets go of its archive or folder now)
     st.finish(anomalies)
     issues = st.issues
     verdict, reason, strong, weak = decide_verdict(issues, st.truncated)
-    return {"issues": issues, "filesScanned": st.files_scanned, "binaryArtifacts": st.binaries,
-            "truncated": st.truncated, "verdict": verdict, "verdictReason": reason,
-            "strongIndicators": strong, "weakIndicators": weak,
-            "unusedDependencies": st.unused_dependencies, "useTime": st.use_time}
+    out = {"issues": issues, "filesScanned": st.files_scanned, "binaryArtifacts": st.binaries,
+           "truncated": st.truncated, "verdict": verdict, "verdictReason": reason,
+           "strongIndicators": strong, "weakIndicators": weak,
+           "unusedDependencies": st.unused_dependencies, "useTime": st.use_time}
+    if artifact == "vsix":
+        out["extensionDependencies"] = st.extension_dependencies
+        out["startupEvent"] = st.vsix_startup
+        out["manifest"] = st.vsix_identity
+    return out
 
 
 def _fmt_bytes(n):
@@ -4237,8 +4553,16 @@ def print_scan(res, top=15):
     print(f"\n{lazaret.sanitize_term(res['ecosystem'])}:"
           f"{lazaret.sanitize_term(res['name'])}@"
           f"{lazaret.sanitize_term(res['version'])}  {v}")
+    if res.get("location"):
+        print(f"  {lazaret.sanitize_term(res['location'])}")
     if res.get("verdictReason"):
         print(f"  {lazaret.sanitize_term(res['verdictReason'])}")
+    if res.get("startupEvent"):
+        print(f"  starts with the editor (activation event {lazaret.sanitize_term(res['startupEvent'])!r})")
+    if res.get("extensionDependencies"):
+        brings = res["extensionDependencies"]
+        print(f"  brings {len(brings)} extension{'s' if len(brings) != 1 else ''}: "
+              f"{lazaret.sanitize_term(', '.join(brings[:10]))}{', …' if len(brings) > 10 else ''}")
     print(f"  {res['filesScanned']} source files · {res.get('binaryArtifacts', 0)} binary "
           f"artifacts · {res['archiveBytes']//1024} KB {res.get('artifact','')} "
           f"· profile: {res['profile']}")

@@ -54,6 +54,8 @@ lazaret . --baseline prev.json      # mark issues not in a previous report as ne
 lazaret . --no-redact-secrets       # keep credential lines in reports (default: redacted)
 lazaret . --taint-config taint.json # extend the taint model (see "Custom taint config")
 lazaret scan github:owner/repo@v1.2.3  # a repository at a commit (also gitlab:group/project@ref)
+lazaret extension.vsix                # a VS Code extension's package
+lazaret --extensions                  # the extensions VS Code, Cursor, VSCodium… have installed
 ```
 
 **Secret redaction (on by default):** credentials are replaced with a
@@ -124,6 +126,24 @@ limit) is said after the report and makes the result `incomplete`; with `--ci` t
 from the environment and sent to the API host only; `LAZARET_GITLAB_URL` names a GitLab instance other
 than gitlab.com (https only). Nothing in the repository is run. A ref that cannot be resolved or a
 repository that cannot be fetched is exit 2. The npm package has no `github:` form.
+
+**VS Code extensions (`.vsix`, `--extensions`).** `lazaret FILE.vsix` scans an extension's package, and
+`lazaret --extensions` the extensions installed for VS Code, VS Code Insiders, VSCodium, Cursor, Windsurf,
+Kiro, Positron and code-server, and on a remote host for the VS Code and Cursor servers (each keeps them in
+`~/<its folder>/extensions`; the folder `VSCODE_EXTENSIONS` names is read too). `lazaret --extensions PATH …`
+scans the extension folders, extensions folders and `.vsix` files you name. An extension runs in the
+editor's extension host with all of your access, so it is read as `lazaret-registry` reads an npm package
+(see *Registry scanning*), with the editor's rules for what runs: its `main` and `browser` modules and what
+they load run when the editor activates it (at every start for the activation events `*` and
+`onStartupFinished`, which the result says) and get the import-time test; the rest of its code gets the
+use-time test; and `vscode:uninstall`, the one script VS Code runs (`node` and a file, once the extension
+has been uninstalled), gets the install-hook test. npm's scripts, a bundled package's scripts and a
+`binding.gyp` never run, so they are not hooks. The result lists the extensions it brings
+(`extensionDependencies`, `extensionPack`). An installed extension is read as its `.vsix` would be, and a
+link out of its folder is not followed (the verdict is INCOMPLETE). Each extension gets a registry verdict
+(OK, WARN, INCOMPLETE or SUSPICIOUS); `--ci` exits 1 when one is SUSPICIOUS or INCOMPLETE, `--json PATH`
+writes them all (under the report rules above), and `--quiet` prints only those that are not OK. Nothing is
+run. The npm package has no extension scan yet.
 
 **What gets scanned:** `.py .pyw .js .jsx .ts .tsx .mts .cts .mjs .cjs .sql` sources (a `.ts`/`.mts` that is an MPEG transport stream is video, not TypeScript), `.go` and `.rs` sources (since 0.1.9, a project's own: hardcoded credentials (S-SECRET reads `name = "…"` and `name: "…"`, Go's `name := "…"` and `var name string = "…"`, and Rust's `const`/`static NAME: &str = "…"`, byte and raw literals included), token formats (S-TOKEN), Trojan Source characters (S-BIDI), TODO markers, and the obfuscation and encoding checks every text gets — hex-escaped text, invisible characters, base64 blobs, high-entropy literals — with comments and strings read as Go and Rust read them; their lines count in the metrics but not in the duplication; a package's are read with the engine's Go and Rust readers, and so is a Go or `cargo vendor` tree with `--deps`, below), scripts whose `#!` line names
 Node (or bun, deno, ts-node, tsx) or Python, whatever their name (`bin/cli`, a hook's `./setup`), `package.json`, `binding.gyp`

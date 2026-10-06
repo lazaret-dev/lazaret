@@ -4974,7 +4974,7 @@ def is_dependency_manifest(path):
     return any(part in DEP_MARKERS for part in parts)
 
 
-def scan_manifest(path, content, registry=False):
+def scan_manifest(path, content, registry=False, hooks=None):
     """Check package.json / pyproject.toml install hooks — the primary
     supply-chain attack vector.
 
@@ -4991,7 +4991,9 @@ def scan_manifest(path, content, registry=False):
     checkout also counts preprepare, prepare, postprepare, and there a
     prepare-family hook with neither a reason nor a hint is INFO (the
     project's own build step, e.g. `husky install`), while a hostile one
-    stays CRITICAL."""
+    stays CRITICAL. `hooks`: the scripts that run, when they are not npm's
+    (a VS Code extension's vscode:uninstall, 0.1.9, E-1; none for a
+    package.json the tool that installs it never reads for scripts)."""
     data, issues = load_manifest(path, content)
     if data is None:
         return issues
@@ -5000,7 +5002,7 @@ def scan_manifest(path, content, registry=False):
     scripts = data.get("scripts")
     if isinstance(scripts, dict):
         key_lines = None
-        for hook in (NPM_INSTALL_SCRIPTS if registry else NPM_LOCAL_INSTALL_SCRIPTS):
+        for hook in (hooks if hooks is not None else NPM_INSTALL_SCRIPTS if registry else NPM_LOCAL_INSTALL_SCRIPTS):
             cmd = scripts.get(hook)
             if not isinstance(cmd, str) or not cmd.strip():
                 continue

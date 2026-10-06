@@ -1,8 +1,9 @@
 """The `lazaret` command: `lazaret guard <npm|pnpm|yarn|bun|pip|uv|uvx|go|cargo> …` checks what a
 package manager is about to install (lazaret.registry.guard); `lazaret hook [FILE …]` checks what a
-commit holds (lazaret.scanner.hook); `lazaret [scan] github:owner/repo[@ref]` (or `gitlab:`) scans a
-repository at a commit (lazaret.registry.sourcescan); anything else scans a project
-(lazaret.scanner.core). This module sits above the layers: it imports only the
+commit holds (lazaret.scanner.hook); `lazaret [scan] FILE.vsix …` and `lazaret [scan] --extensions
+[PATH …]` scan VS Code extensions (lazaret.registry.extensions); `lazaret [scan] github:owner/repo[@ref]`
+(or `gitlab:`) scans a repository at a commit (lazaret.registry.sourcescan); anything else scans a
+project (lazaret.scanner.core). This module sits above the layers: it imports only the
 one it hands the command line to."""
 import os
 import sys
@@ -33,6 +34,13 @@ def is_hook(argv):
         a == "--staged" or (not a.startswith("-") and os.path.isfile(a)) for a in argv[1:])
 
 
+def is_extensions(argv):
+    """Is this command line a scan of VS Code extensions? `--extensions`
+    among its words, or a word that names a `.vsix` file."""
+    return "--extensions" in argv or any(
+        a.lower().endswith(".vsix") and not a.startswith("-") and os.path.isfile(a) for a in argv)
+
+
 def is_source(argv):
     """Does any argument name a GitHub or GitLab source (and no file or folder
     of that name)? Only a first look, with nothing imported: whether it is the
@@ -48,6 +56,9 @@ def main(argv=None):
     if is_hook(argv):
         from lazaret.scanner import hook
         return hook.main(argv[1:])
+    if is_extensions(argv):
+        from lazaret.registry import extensions
+        return extensions.main(argv)
     if is_source(argv):
         from lazaret.registry import sourcescan
         return sourcescan.main(argv)

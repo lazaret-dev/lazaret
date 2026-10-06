@@ -10,7 +10,9 @@ MANIFEST is JSON lines, one release each: "id"; "artifact_path", the
 release file as the registry serves it; "container" (tgz, zip) and "kind"
 (npm, sdist, wheel; gomod, a module zip as Go's proxy serves it, path@version/
 inside, container zip; crate, a .crate as crates.io serves it,
-name-version/ inside, container tgz); and "cat", the release's category,
+name-version/ inside, container tgz; vsix, a VS Code extension's .vsix as
+the Marketplace and Open VSX serve it, extension/ inside, container zip);
+and "cat", the release's category,
 where "benign" marks a package that should pass and anything else a
 malicious release. (lz_path, lz_container and lz_kind are read too: the
 names the corpus preparation writes.) scripts/popular/ writes the benign

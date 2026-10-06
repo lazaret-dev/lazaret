@@ -2,8 +2,10 @@
 scans over a manifest of release files, and the comparison of two runs (in
 full, or in counts only for a holdout set). The releases here are built in
 the test: a plain package and one whose install hook pipes a download into
-a shell (inert text: the host is .invalid, nothing is run); and Go modules
-and crates (0.1.9, N-2), plain ones and the guard tests' inert samples.
+a shell (inert text: the host is .invalid, nothing is run); Go modules
+and crates (0.1.9, N-2), plain ones and the guard tests' inert samples; and
+VS Code extensions (E-1), a plain one and one whose main module sends the
+environment to a documentation address.
 """
 import contextlib
 import io
@@ -17,7 +19,7 @@ from lazaret.scanner import _native
 from tests import _support
 from tests.registry._cargo_support import BUILD_EVIL_RS, crate_tgz
 from tests.registry._go_support import CLEAN_GO, INIT_EVIL_GO, module_zip
-from tests.registry._review_support import manifest, tarball
+from tests.registry._review_support import EXFIL_JS, manifest, tarball, zipball
 
 SCRIPT = os.path.join(_support.REPO_ROOT, "scripts", "bench.py")
 
@@ -98,6 +100,27 @@ class BenchTests(unittest.TestCase):
         self.assertEqual({k: v[0] for k, v in got.items()},
                          {"go-plain": "OK", "go-init": "SUSPICIOUS", "crate-plain": "OK", "crate-build": "SUSPICIOUS"})
         self.assertTrue(got["go-init"][1] and got["crate-build"][1])
+
+    def test_vs_code_extensions_scanned_as_the_editor_runs_them(self):
+        def vsix(**files):
+            return zipball({"extension.vsixmanifest": "<PackageManifest/>",
+                            **{"extension/" + p: c for p, c in files.items()}})
+        releases = {
+            "ext-plain": ("benign", vsix(**{"package.json": manifest(publisher="p", main="e.js"),
+                                            "e.js": "exports.activate = () => 1;\n"})),
+            "ext-main": ("malicious_intent", vsix(**{"package.json": manifest(publisher="p", main="e.js"),
+                                                     "e.js": EXFIL_JS})),
+        }
+        rows = []
+        for name, (cat, data) in releases.items():
+            path = self.dir / f"{name}.vsix"
+            path.write_bytes(data)
+            rows.append({"id": name, "cat": cat, "artifact_path": str(path), "container": "zip", "kind": "vsix"})
+        self.manifest.write_text("".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
+        out = self.dir / "run.jsonl"
+        self.assertEqual(self.quietly("run", self.manifest, out, "--stop-after", 60)[0], 0)
+        got = {r["id"]: (r["verdict"], [s[0] for s in r["strong"]]) for r in self.b.read_jsonl(out)}
+        self.assertEqual(got, {"ext-plain": ("OK", []), "ext-main": ("SUSPICIOUS", ["SC-IMPORT-RISK"])})
 
     def test_compare(self):
         before, after = self.dir / "before.jsonl", self.dir / "after.jsonl"

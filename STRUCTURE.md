@@ -124,6 +124,8 @@ python/
 │   │   │                   read into a directory
 │   │   ├── sourcescan.py   `lazaret scan github:…` / `gitlab:…`: the scan of a
 │   │   │                   checkout, and the report's `source`
+│   │   ├── extensions.py   `lazaret FILE.vsix` / `lazaret --extensions`: VS Code
+│   │   │                   extensions, as files and as the editors installed them
 │   │   ├── actions.py      what a workflow's `uses:` point to, asked of GitHub
 │   │   │                   (`python -m lazaret.registry.actions`)
 │   │   └── schema.sql      PostgreSQL setup for the state DB
