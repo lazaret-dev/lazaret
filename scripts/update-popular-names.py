@@ -158,8 +158,8 @@ def crates_section(pages_dir, sources=()):
     """The crates list from fetch-top-crates.py's pages (recent-0001.json, …, in order: by recent downloads, the
     targets; alltime-0001.json, …: known names), and the crates Debian packages (`sources`: Ubuntu's source package
     indices) as known names."""
-    pages = sorted(pathlib.Path(pages_dir).glob("recent-*.json"))
-    alltime = sorted(pathlib.Path(pages_dir).glob("alltime-*.json"))
+    pages = sorted(pathlib.Path(pages_dir).glob("recent-*.json"), key=lambda p: p.as_posix())
+    alltime = sorted(pathlib.Path(pages_dir).glob("alltime-*.json"), key=lambda p: p.as_posix())
     if not pages:
         raise SystemExit(f"no recent-*.json in {pages_dir}")
     digest = hashlib.sha256()

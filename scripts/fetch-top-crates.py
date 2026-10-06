@@ -40,7 +40,16 @@ def fetch(sort, page):
     return body, len(data["crates"])
 
 
+def _configure_stdio():
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(errors="backslashreplace")
+        except (AttributeError, ValueError):
+            pass
+
+
 def main(argv):
+    _configure_stdio()
     if not argv or len(argv) > 2:
         print(__doc__.strip().split("\n\n")[-1], file=sys.stderr)
         return 2
