@@ -44,6 +44,20 @@ project is pre-1.0, so the 0.x API may still change.
   longer serves is read from the full one, as Go does). An answer that does not check out stops
   the module (fail closed). Without the native library, the lookup is as good as the TLS that
   brought it, as before.
+- **npm's and PyPI's provenance as findings (NET-1).** An npm release's attestations
+  (`dist.attestations`: npm's publish attestation and SLSA provenance) and each PyPI file's PEP 740
+  provenance are verified by the native library against Sigstore's trusted root and npm's keys
+  (shipped with the package), with the file's digest, and the release is compared with the one
+  before it: SC-PROVENANCE-INVALID (CRITICAL) for an attestation that is not about the file or
+  not signed by its signer's key; SC-PROVENANCE-DROPPED (MAJOR) when the release before had
+  provenance and this one has none, as with ultralytics 8.3.45 and 8.3.46;
+  SC-PROVENANCE-REPO-CHANGED (MAJOR) when it was built from another owner's repository (by the
+  repository's and owner's IDs, which a rename keeps; INFO for a repository of the same owner);
+  SC-PROVENANCE-UNCHECKED (INFO) for one that could not be checked for a reason that is not the
+  file's. On the popular set's 1,205 releases, one is WARN for it (why-is-node-running 3.2.2). The result's `provenance` says who built the release, and the
+  terminal shows it. `lazaret-registry` and the MCP tool; not the guard yet.
+  `LAZARET_NO_PROVENANCE=1` turns it off; `LAZARET_SIGSTORE_ROOT` and `LAZARET_NPM_KEYS` name
+  newer trust.
 - **VS Code extensions in `lazaret-registry` (E-1's second part): `openvsx:namespace.name[@version]`
   and `vscode:publisher.name[@version]`.** Every `.vsix` the version is published for, one per
   target platform the editor installs, is downloaded and scanned as `lazaret FILE.vsix` scans

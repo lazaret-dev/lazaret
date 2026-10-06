@@ -1020,6 +1020,57 @@ def go_sumdb_check_start():
     return run, lambda: None
 
 
+# ---- npm's attestations checked (NET-1's provenance): the real registry's answer for the npm package sigstore, changed
+SIGSTORE_CAPTURE = os.path.join(os.path.dirname(SUMDB_CAPTURE), "sigstore")
+PROVENANCE_WORDS = (b'"attestations"', b'"predicateType"', b'"bundle"', b'"mediaType"', b'"dsseEnvelope"', b'"payload"',
+                    b'"signatures"', b'"verificationMaterial"', b'"tlogEntries"', b'"logIndex"', b'"inclusionProof"',
+                    b'"certificate"', b'"rawBytes"', b'"publicKey"', b'"hint"', b'null', b'true', b'[]', b'{}', b'"', b"=",
+                    b"https://slsa.dev/provenance/v1", b"application/vnd.dev.sigstore.bundle.v0.3+json")
+
+
+def provenance_capture(name):
+    with open(os.path.join(SIGSTORE_CAPTURE, name), "rb") as fh:
+        return fh.read()
+
+
+def provenance_seeds():
+    return [provenance_capture(f"sigstore-{v}.attestations.json") for v in ("4.0.0", "2.2.0")] + [b'{"attestations": []}']
+
+
+def provenance_start():
+    from lazaret.registry import provenance
+    tarballs = {v: hashlib.sha512(provenance_capture(f"sigstore-{v}.tgz")).hexdigest() for v in ("4.0.0", "2.2.0")}
+    # who really signed: the CI of sigstore/sigstore-js, and npm's two keys
+    repository = "https://github.com/sigstore/sigstore-js"
+    keys = {"SHA256:jl3bwswu80PjjokCgh0o2w5c2U4LhQAE57gj9cz1kzA", "SHA256:DhQ8wR5APBvFHLF/+Tc+AYvPOdTpcIDqOhxsBHRwC7U"}
+
+    def attempt(text, digest):
+        try:
+            return provenance.verify("npm", text, digest)
+        except provenance.Unchecked as exc:
+            check(str(exc).isprintable() and len(str(exc)) <= 200, "provenance-message", repr(str(exc))[:160])
+            return None
+
+    def run(data):
+        text = data.decode("utf-8", "replace")
+        digest = tarballs["4.0.0" if zlib.crc32(data) % 2 == 0 else "2.2.0"]
+        found = attempt(text, digest)
+        if found is not None:
+            check(isinstance(found, list), "provenance-shape", type(found).__name__)
+            for a in found:
+                check(a.get("outcome") in ("verified", "invalid", "unchecked") and isinstance(a.get("predicateType"), str),
+                      "provenance-shape", repr(a)[:160])
+                if a["outcome"] != "verified":
+                    check(isinstance(a.get("reason"), str) and a["reason"].isprintable(), "provenance-shape", repr(a)[:160])
+                    continue
+                signer = a.get("signer") or {}
+                check(signer.get("repository") == repository if signer.get("kind") == "certificate" else signer.get("id") in keys,
+                      "provenance-only-who-signed", repr(signer)[:200])
+        check(attempt(text, digest) == found, "provenance-deterministic", "two checks of one document differ")
+
+    return run, lambda: None
+
+
 # ---- Go: the proxy's `.info` answer (the checksum database answers for whatever version it is told of)
 INFO_SEEDS = [b'{"Version":"v1.0.0","Time":"2016-01-10T10:55:54Z"}', b'{"Version":"v0.1.0-alpha.1","Time":"2020-01-01T00:00:00Z","Origin":'
               b'{"VCS":"git","URL":"https://example.invalid/m","Hash":"' + b"a" * 40 + b'"}}', b'{"Version":"v2.0.0+incompatible"}',
@@ -1196,6 +1247,8 @@ register("go-mod", "Go: parse_gomod and declared over a go.mod", lambda: list(GO
 register("go-sumdb", "Go: parse_lookup over the checksum database's response", lambda: list(SUMDB_SEEDS), go_sumdb_start, SUMDB_WORDS, max_len=4096)
 register("go-sumdb-check", "Go: verify_lookup over the real checksum database's answer, changed (its tiles served as captured)",
          check_seeds, go_sumdb_check_start, CHECK_WORDS, max_len=4096)
+register("provenance-npm", "npm: provenance.verify over the real attestations of sigstore 4.0.0 and 2.2.0, changed",
+         provenance_seeds, provenance_start, PROVENANCE_WORDS, max_len=65536)
 register("go-resolve", "Go: Go.resolve over the proxy's .info answer (the checksum database answers for what it is told of)",
          lambda: list(INFO_SEEDS), go_resolve_start, INFO_WORDS, max_len=4096)
 register("ecosystem-names", "crates.io and Go: check_name, identity, check_version, parse_spec and segment over a name and a version",

@@ -70,6 +70,7 @@ from lazaret.scanner import core as lazaret  # noqa: E402
 from lazaret import safexml as _safexml                 # noqa: E402
 from lazaret.registry import contentcache as _cache     # noqa: E402
 from lazaret.registry import lookalike as _lookalike    # noqa: E402
+from lazaret.registry import provenance as _provenance  # noqa: E402
 from lazaret.registry import unused_deps as _unused     # noqa: E402
 from lazaret.registry.ecosystems import base as _base   # noqa: E402
 from lazaret.scanner import engine as _engine           # noqa: E402
@@ -3981,6 +3982,7 @@ def scan_package(eco, name, version=None, full=False, *, resolved=None, deadline
             not_installed.append((s.get("filename"), "not-installable", size))
     per, all_issues, truncated, unused = [], [], 0, set()
     brings, startup = set(), None           # a VS Code extension's (E-1): what it brings, what starts it with the editor
+    attested = []                           # (file, digest) the provenance check is given (npm: SHA-512; PyPI: SHA-256)
     multi = len(refs) > 1
     downloaded = 0
     memo = new_memo()                      # (the release's files share the engine's answers: P-2a)
@@ -4007,6 +4009,8 @@ def scan_package(eco, name, version=None, full=False, *, resolved=None, deadline
         # this name/version.
         digest = (verify_digest(data, ref["entry"], eco, name, version) if module is None
                   else _module_digest(module, data, ref["entry"], eco, name, version))
+        if eco in ("npm", "pypi") and _provenance.enabled():
+            attested.append((ref.get("filename"), (hashlib.sha512 if eco == "npm" else hashlib.sha256)(data).hexdigest()))
         stop = time.monotonic() + SCAN_TIMEOUT
         if deadline is not None and deadline < stop:
             # the caller's deadline comes first: say so, not "120 s exceeded"
@@ -4033,6 +4037,8 @@ def scan_package(eco, name, version=None, full=False, *, resolved=None, deadline
                                          "binaryArtifacts", "truncated",
                                          "strongIndicators", "weakIndicators", "useTime")}})
     all_issues.extend(new_dependency_issues(eco, name, version, resolved, unused))
+    provenance_issues, provenance = _provenance.check_release(eco, name, version, resolved, attested, _provenance_fetch)
+    all_issues.extend(provenance_issues)
     skip_issues, skip_label = _skipped_summary(skipped, byte_budget, limit)
     # one part per release file left out; skip_issues holds one finding per
     # REASON, and used to be counted instead ("1 part" for 3 skipped files)
@@ -4079,7 +4085,13 @@ def scan_package(eco, name, version=None, full=False, *, resolved=None, deadline
                                  for f, kind, size in skipped + not_installed],
             "useTime": use_time_total([p["useTime"] for p in per]),
             "scannedAt": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
+            **({"provenance": provenance} if provenance is not None else {}),
             **_extension_fields(eco, resolved, brings, startup, kinds)}
+
+
+def _provenance_fetch(url, max_bytes, accept):
+    """The provenance check's fetch (registry/provenance.py): `_fetch` with the metadata timeout."""
+    return _fetch(url, max_bytes=max_bytes, timeout=METADATA_TIMEOUT, **({"accept": accept} if accept else {}))
 
 
 def _extension_fields(eco, resolved, brings, startup, kinds):
@@ -4724,6 +4736,9 @@ def print_scan(res, top=15):
         print(f"  {lazaret.sanitize_term(res['verdictReason'])}")
     for line in registry_lines(res):
         print(f"  {lazaret.sanitize_term(line)}")
+    provenance = _provenance.line(res.get("provenance"))
+    if provenance:
+        print(f"  {lazaret.sanitize_term(provenance)}")
     if res.get("startupEvent"):
         print(f"  starts with the editor (activation event {lazaret.sanitize_term(res['startupEvent'])!r})")
     if res.get("extensionDependencies"):

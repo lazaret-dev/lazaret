@@ -227,10 +227,12 @@ rust/
                              pattern_stats, show_need, jsparse_bench, pyparse_bench, pyflow_bench)
   crates/lazaret-ffi/        cdylib liblazaret_native: Lazaret's only `unsafe` (the C ABI; the
                              WebAssembly exports; natively, the network layer's `lazaret_net_*`
-                             and the `verify.*` calls: `verify.go_sumdb`)
+                             and the `verify.*` calls: `verify.go_sumdb`, `verify.sigstore`)
   crates/lazaret-verify/     tiny_https's pure part (no I/O, no `unsafe`, wasm32): signatures,
                              certificate chains, transparency logs, attestations; `gosum`, the
-                             Go checksum database's lookup checked in two steps (NET-1)
+                             Go checksum database's lookup checked in two steps; `provenance`,
+                             npm's and PyPI's attestations of a file: verified, invalid or
+                             unchecked (NET-1)
   crates/lazaret-net/        the network layer on tiny_https: Lazaret's host rule on every hop,
                              URL limits, budgets; native library only (NET-1, DESIGN.md §5j)
   crates/tiny_https/         the HTTPS/TLS library, taken as it was handed over

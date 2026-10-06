@@ -20,7 +20,8 @@
 //! (`lazaret_net_request`, `_open`, `_read`, `_close`, `_configure`: see
 //! [`net`]), which only the native library has; its `lazaret_engine_call`
 //! also answers the `verify.*` calls ([`verify`]: the Go checksum database's
-//! check, on tiny_https's pure part). WebAssembly builds (wasm32-unknown-unknown,
+//! check and npm's and PyPI's attestations, on tiny_https's pure part).
+//! WebAssembly builds (wasm32-unknown-unknown,
 //! loaded by Node's built-in WebAssembly: js/src/lib/native.js) export
 //! `lazaret_alloc`, `lazaret_call` and `lazaret_free` instead, the same
 //! request and answer in the module's memory. A panic never crosses the
@@ -446,7 +447,8 @@ pub mod net {
 }
 
 /// The calls the native library answers itself, over tiny_https's pure part (`lazaret-verify`), before the engine's:
-/// `verify.go_sumdb` checks the Go checksum database's answer for a module (NET-1; lazaret/registry/ecosystems/golang.py).
+/// `verify.go_sumdb` checks the Go checksum database's answer for a module (NET-1; lazaret/registry/ecosystems/golang.py),
+/// and `verify.sigstore` npm's or PyPI's attestations of a file (NET-1's provenance; lazaret/registry/provenance.py).
 ///
 /// ```text
 /// {"module": "golang.org/x/mod", "version": "v0.17.0", "key": "sum.golang.org+033de0ae+…", "lookup": "<the body of
@@ -462,19 +464,86 @@ pub mod verify {
     use lazaret_verify::{gosum, pem};
 
     pub fn call(name: &str, args: &Value) -> Option<(i32, String)> {
-        if name != "verify.go_sumdb" {
-            return None;
-        }
-        let r = catch_unwind(AssertUnwindSafe(|| go_sumdb(args)));
+        let run: fn(&Value) -> Result<Value, String> = match name {
+            "verify.go_sumdb" => go_sumdb,
+            "verify.sigstore" => sigstore,
+            _ => return None,
+        };
+        let r = catch_unwind(AssertUnwindSafe(|| run(args)));
         Some(match r {
             Ok(Ok(v)) => (STATUS_OK, json::write(&v)),
             Ok(Err(m)) => error(STATUS_ERROR, &m),
-            Err(_) => error(STATUS_PANIC, "panic in the checksum database check"),
+            Err(_) => error(STATUS_PANIC, &format!("panic in {name}")),
         })
     }
 
     fn text(args: &Value, key: &str) -> Result<String, String> {
-        args.get(key).and_then(Value::as_string).ok_or_else(|| format!("verify.go_sumdb needs {key}"))
+        args.get(key).and_then(Value::as_string).ok_or_else(|| format!("needs {key}"))
+    }
+
+    fn opt_str(v: &Option<String>) -> Value {
+        v.as_deref().map_or(Value::Null, Value::str)
+    }
+
+    /// Lower-case or upper-case hex, nothing else.
+    fn unhex(s: &str) -> Option<Vec<u8>> {
+        if s.len() % 2 != 0 {
+            return None;
+        }
+        s.as_bytes().chunks(2).map(|p| Some(((p[0] as char).to_digit(16)? * 16 + (p[1] as char).to_digit(16)?) as u8)).collect()
+    }
+
+    /// `verify.sigstore`: npm's or PyPI's attestations of one file (NET-1's provenance findings).
+    ///
+    /// ```text
+    /// {"registry": "npm" | "pypi", "document": "<the registry's answer>", "digest": "<hex: the tarball's SHA-512,
+    ///  or the file's SHA-256>", "root": "<Sigstore's trusted_root.json>", "npm_keys": null | "<npm's key list>"}
+    /// ```
+    ///
+    /// -> `{"attestations": [{"predicateType", "outcome": "verified" | "invalid" | "unchecked", "reason",
+    /// "signer": {"kind": "certificate", "issuer", "repository", "repositoryId", "owner", "ownerId", "workflow",
+    /// "ref", "commit", "runner", "trigger", "names"} | {"kind": "key", "id"}, "time", "format"}, …]}`; an error
+    /// (status 1) when the document is not attestations or the trust cannot be read.
+    fn sigstore(args: &Value) -> Result<Value, String> {
+        use lazaret_verify::provenance::{self, Outcome, Registry, Who};
+        let registry = match text(args, "registry")?.as_str() {
+            "npm" => Registry::Npm,
+            "pypi" => Registry::PyPI,
+            other => return Err(format!("no registry {other:?}")),
+        };
+        let (document, root) = (text(args, "document")?, text(args, "root")?);
+        let digest = unhex(&text(args, "digest")?).ok_or("the digest is not hex")?;
+        let keys = match args.get("npm_keys") {
+            None | Some(Value::Null) => None,
+            Some(v) => Some(v.as_string().ok_or("npm_keys is not text")?),
+        };
+        let (root, ring) = provenance::trust(root.as_bytes(), keys.as_deref().map(str::as_bytes))?;
+        let checked = provenance::check(registry, document.as_bytes(), &digest, &root, &ring)?;
+        let list = checked.into_iter().map(|c| {
+            let mut fields = vec![("predicateType", Value::str(&c.predicate_type))];
+            match c.outcome {
+                Outcome::Verified { who, time, format } => {
+                    let signer = match who {
+                        Who::Certificate { issuer, repository, repository_id, owner, owner_id, workflow, git_ref, commit,
+                                           runner, trigger, names } => Value::obj(vec![
+                            ("kind", Value::str("certificate")), ("issuer", opt_str(&issuer)),
+                            ("repository", opt_str(&repository)), ("repositoryId", opt_str(&repository_id)),
+                            ("owner", opt_str(&owner)), ("ownerId", opt_str(&owner_id)), ("workflow", opt_str(&workflow)),
+                            ("ref", opt_str(&git_ref)), ("commit", opt_str(&commit)), ("runner", opt_str(&runner)),
+                            ("trigger", opt_str(&trigger)),
+                            ("names", Value::Arr(names.iter().map(|n| Value::str(n)).collect())),
+                        ]),
+                        Who::Key { id } => Value::obj(vec![("kind", Value::str("key")), ("id", Value::str(&id))]),
+                    };
+                    fields.extend([("outcome", Value::str("verified")), ("signer", signer), ("time", Value::Int(time)),
+                                   ("format", Value::str(format))]);
+                }
+                Outcome::Invalid(reason) => fields.extend([("outcome", Value::str("invalid")), ("reason", Value::str(&reason))]),
+                Outcome::Unchecked(reason) => fields.extend([("outcome", Value::str("unchecked")), ("reason", Value::str(&reason))]),
+            }
+            Value::obj(fields)
+        }).collect();
+        Ok(Value::obj(vec![("attestations", Value::Arr(list))]))
     }
 
     fn go_sumdb(args: &Value) -> Result<Value, String> {
@@ -669,6 +738,67 @@ mod tests {
             let (s, a) = handle(&request("verify.go_sumdb", "{}", b""));
             assert_eq!(s, STATUS_ERROR);
             assert!(a.contains("needs module"), "{a}");
+        }
+    }
+
+    /// `verify.sigstore` (native only), on tiny_https's real Sigstore data (its tests/data/sigstore/README.txt).
+    #[cfg(not(target_arch = "wasm32"))]
+    mod sigstore_call {
+        use super::*;
+
+        const ROOT: &str = include_str!("../../tiny_https/tests/data/sigstore/trusted_root.json");
+        const NPM_KEYS: &str = include_str!("../../tiny_https/tests/data/sigstore/npm-registry-keys.json");
+        const ATTESTATIONS: &str = include_str!("../../tiny_https/tests/data/sigstore/sigstore-4.0.0.attestations.json");
+        const TARBALL: &[u8] = include_bytes!("../../tiny_https/tests/data/sigstore/sigstore-4.0.0.tgz");
+
+        fn call(registry: &str, digest: &str, keys: Option<&str>) -> (i32, Value) {
+            let args = Value::obj(vec![("registry", Value::str(registry)), ("document", Value::str(ATTESTATIONS)),
+                                       ("digest", Value::str(digest)), ("root", Value::str(ROOT)),
+                                       ("npm_keys", keys.map_or(Value::Null, Value::str))]);
+            let (s, a) = handle(&request("verify.sigstore", &json::write(&args), b""));
+            (s, json::parse_str(&a).unwrap())
+        }
+
+        fn sha512_hex(data: &[u8]) -> String {
+            use lazaret_verify::sigstore::{ArtifactDigest, DigestAlgorithm};
+            lazaret_verify::util::hex(ArtifactDigest::of(DigestAlgorithm::Sha512, data).bytes())
+        }
+
+        #[test]
+        fn npm_attestations_verify_and_say_who_built_the_file() {
+            let (s, a) = call("npm", &sha512_hex(TARBALL), Some(NPM_KEYS));
+            assert_eq!(s, STATUS_OK, "{}", json::write(&a));
+            let list = a.get("attestations").and_then(Value::as_arr).unwrap();
+            assert_eq!(list.len(), 2);
+            for item in list {
+                assert_eq!(item.get("outcome").and_then(Value::as_string).as_deref(), Some("verified"), "{}", json::write(item));
+            }
+            let signer = list[1].get("signer").unwrap();
+            assert_eq!(signer.get("kind").and_then(Value::as_string).as_deref(), Some("certificate"));
+            assert_eq!(signer.get("repository").and_then(Value::as_string).as_deref(), Some("https://github.com/sigstore/sigstore-js"));
+            assert_eq!(list[0].get("signer").and_then(|s| s.get("kind")).and_then(Value::as_string).as_deref(), Some("key"));
+            // upper-case hex is the same digest
+            let (s, _) = call("npm", &sha512_hex(TARBALL).to_uppercase(), Some(NPM_KEYS));
+            assert_eq!(s, STATUS_OK);
+        }
+
+        #[test]
+        fn another_file_is_invalid_and_bad_arguments_are_errors() {
+            let (s, a) = call("npm", &sha512_hex(b"another file"), Some(NPM_KEYS));
+            assert_eq!(s, STATUS_OK);
+            for item in a.get("attestations").and_then(Value::as_arr).unwrap() {
+                assert_eq!(item.get("outcome").and_then(Value::as_string).as_deref(), Some("invalid"));
+                assert!(item.get("reason").and_then(Value::as_string).unwrap().contains("subject"));
+            }
+            let (s, a) = call("npm", &sha512_hex(TARBALL), None);              // (npm's own attestation needs its key)
+            assert_eq!(s, STATUS_OK);
+            let list = a.get("attestations").and_then(Value::as_arr).unwrap();
+            assert_eq!(list[0].get("outcome").and_then(Value::as_string).as_deref(), Some("unchecked"));
+            assert_eq!(list[1].get("outcome").and_then(Value::as_string).as_deref(), Some("verified"));
+            assert_eq!(call("cargo", &sha512_hex(TARBALL), None).0, STATUS_ERROR);
+            assert_eq!(call("npm", "xyz", None).0, STATUS_ERROR);
+            assert_eq!(call("npm", "abc", None).0, STATUS_ERROR);
+            assert_eq!(call("pypi", &sha512_hex(TARBALL), None).0, STATUS_ERROR, "not PEP 740 provenance, nor a SHA-256");
         }
     }
 }

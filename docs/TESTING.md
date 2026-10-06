@@ -146,6 +146,13 @@ Notes:
   tests whose lookups are signed with a test key or not at all
   (`test_golang`, `test_registry_go_crates`, the `go-resolve` fuzz target)
   read them unchecked, `verify_lookup` patched in `setUpModule`.
+  `tests/__init__.py` turns the provenance check off for the whole suite
+  (`LAZARET_NO_PROVENANCE=1`, unless the environment sets it): a scan asks
+  the registry for a release's attestations and for the release before it,
+  and the tests scan made-up releases that must not reach the network.
+  `tests.registry.test_provenance` turns it on over tiny_https's real npm
+  and PyPI attestations (sigstore 0.2.0, 2.2.0 and 4.0.0; pypi-attestations
+  0.0.30), with the registries' other documents built in their shapes.
 
 ---
 

@@ -42,7 +42,7 @@ EXPECTED_TARGETS = ["archive-tgz", "archive-tbz2", "archive-txz", "archive-zip",
                     "sca-package-lock-json", "sca-yarn-lock", "sca-pnpm-lock-yaml", "sca-bun-lock", "sca-poetry-lock",
                     "sca-uv-lock", "sca-pylock-toml", "sca-pipfile-lock", "sca-requirements-txt", "sca-pyproject-toml",
                     "sca-setup-py", "sca-go-mod", "sca-go-sum", "sca-vendor-modules-txt", "sca-cargo-lock", "sca-cargo-toml", "sca-bundle-index", "sca-bundle-doc", "crates-index", "crates-manifest", "go-zip", "go-mod", "go-sumdb",
-                    "go-sumdb-check", "go-resolve", "ecosystem-names", "ecosystem-member-path", "verify-answers", "verify-credentials"]
+                    "go-sumdb-check", "provenance-npm", "go-resolve", "ecosystem-names", "ecosystem-member-path", "verify-answers", "verify-credentials"]
 
 
 def fake(run, seeds=(b"abc",), name="fake", **options):
@@ -972,6 +972,30 @@ class RegistryModulePromisesAreLive(unittest.TestCase):
         def refused(*args):
             raise base.FetchError("go: refused")
         self.assertEqual(run(real, V(self.every_other(golang.verify_lookup, refused))), "go-sumdb-check-deterministic")
+
+    @unittest.skipUnless(_native.available(), f"native engine not built ({_native.load_error()})")
+    def test_the_provenance_promises(self):
+        from lazaret.registry import provenance
+        real = fuzz_targets.provenance_seeds()[0]
+        run = lambda data, *patches: self.promise("provenance-npm", data, *patches)        # noqa: E731
+        V = lambda value: (provenance, "verify", value)                                     # noqa: E731
+
+        def unchecked(*args):
+            raise provenance.Unchecked("x" * 300)
+        self.assertEqual(run(real, V(unchecked)), "provenance-message")
+        self.assertEqual(run(real, V(lambda *args: [{"outcome": "maybe", "predicateType": "p"}])), "provenance-shape")
+        self.assertEqual(run(real, V(lambda *args: [{"outcome": "verified", "predicateType": "p",
+                                                     "signer": {"kind": "certificate", "repository": "https://github.com/evil/x"}}])),
+                         "provenance-only-who-signed")
+        self.assertEqual(run(real, V(lambda *args: [{"outcome": "verified", "predicateType": "p",
+                                                     "signer": {"kind": "key", "id": "SHA256:other"}}])),
+                         "provenance-only-who-signed")
+        calls = []
+
+        def every_other(*args):
+            calls.append(1)
+            return [] if len(calls) % 2 else [{"outcome": "unchecked", "predicateType": "p", "reason": "r"}]
+        self.assertEqual(run(real, V(every_other)), "provenance-deterministic")
 
     @mock.patch("lazaret.registry.ecosystems.golang.verify_lookup", new=lambda name, version, lookup, record, fetch: None)
     def test_the_go_resolve_promises(self):

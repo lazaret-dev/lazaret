@@ -1211,6 +1211,47 @@ lazaret-ffi's and lazaret-verify's own tests, and the `go-sumdb-check` fuzz
 target (that answer changed: whatever the bytes, an answer that passes says
 what the database signed).
 
+Provenance (NET-1's fifth item; `registry/provenance.py`). npm lists a
+version's attestations in `dist.attestations` (npm's own publish
+attestation, signed with the registry's key, and SLSA provenance, signed
+through Sigstore by the CI that built the tarball), and PyPI's Simple API
+names each file's PEP 740 provenance. After a file's digest check,
+`scan_package` hands its digest (npm: the tarball's SHA-512; PyPI: the
+file's SHA-256) to `provenance.check_release`, which fetches the
+attestations and has the native library check them (`verify.sigstore`,
+lazaret-verify's `provenance` over tiny_https's `sigstore`): the signature
+by the certificate or key, the chain to Sigstore's CA at a time a
+transparency log or time-stamp authority vouches for, the log entries, and
+a subject with the file's digest. The outcome is one of three, and the line
+between the last two is the point: verified (with the signer: issuer,
+repository URI and the numeric repository and owner IDs GitHub puts in the
+certificate, workflow, ref, commit, runner); invalid, only when no subject
+has the file's digest or the signature is not by the signer's key, which
+no age of the trust explains (SC-PROVENANCE-INVALID, CRITICAL); unchecked,
+for everything else, a log, authority or key the shipped trust does not
+know among them (SC-PROVENANCE-UNCHECKED, INFO). The release before it
+(npm: the highest lower SemVer version in the abbreviated packument, a
+pre-release only for a pre-release; PyPI: the release uploaded last before
+it, skipping releases whose every file is yanked) is compared: it had
+provenance and this one has none, SC-PROVENANCE-DROPPED; both verified,
+from repositories with different IDs (or URIs, without IDs) of different
+owners, SC-PROVENANCE-REPO-CHANGED (both MAJOR; decision 13 asks whether
+DROPPED should be CRITICAL). A repository of the same owner is INFO: on the
+popular set's 1,205 releases the two changes of repository were both
+within their owner (scikit-learn 1.9.1 from its release repository,
+@rolldown/pluginutils 1.0.1 from a new plugins repository), and the one
+drop was why-is-node-running 3.2.2, after two releases with provenance;
+259 npm and 171 PyPI releases verified, none invalid or unchecked. The
+trust is package data (`registry/sigstore/`: Sigstore's production
+trusted root as sigstore-python 4.5.0 embeds it, npm's key list), checked
+against recorded hashes by a test; a root only gains keys and authorities,
+so an older copy can only fail to know something new, which is unchecked,
+never invalid. Lazaret does no TUF: `LAZARET_SIGSTORE_ROOT` and
+`LAZARET_NPM_KEYS` name copies fetched by something that does. Best effort
+like SC-NEW-DEPENDENCY's history: a registry that does not answer flags
+nothing, and the result's `provenance` says what was not checked. The
+guard does not run it (its installs would wait on the requests).
+
 ## 6. How to add or change a rule — the loop
 
 This is the working method. Follow it; it is why the tool has stayed trustworthy.
