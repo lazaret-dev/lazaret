@@ -30,7 +30,7 @@ __all__ = ["SpecError", "FetchError", "TooLarge", "NotFound", "DigestError", "Re
            "host_allowed",
            "MAX_DOCUMENT_BYTES", "MAX_ARTIFACT_BYTES", "MAX_REDIRECTS", "METADATA_TIMEOUT", "DOWNLOAD_TIMEOUT",
            "VERSION_RE", "show", "ascii_name", "HOSTILE_NAMES", "HOSTILE_VERSIONS", "finish_member_path", "top_directory_stripped",
-           "root_stripped"]
+           "root_stripped", "VSIX_PREFIX", "vsix_member_path"]
 
 # The numbers `repo.py` has today (a test holds them equal).
 MAX_DOCUMENT_BYTES = 5 * 1024 * 1024        # repo.MAX_FEED_BYTES: a metadata document
@@ -155,6 +155,24 @@ def finish_member_path(rest):
     if norm in ("", "."):
         return None, None
     return norm, None
+
+
+#: What VS Code's extractor keeps of a `.vsix`: the members whose names begin with these letters, which it takes off
+#: (`extract(…, {sourcePath: 'extension'})` in its `zip.ts` builds the pattern `^extension`, with no `/` after it).
+VSIX_PREFIX = "extension"
+
+
+def vsix_member_path(name):
+    """Where VS Code writes a `.vsix` member in the extension's folder (the review of Oct 7): a name that begins with
+    `extension` loses those letters, a `/` after them or not (`extension/out/a.js` is `out/a.js`, and so is
+    `extensionout/a.js`; `extension.vsixmanifest` is `.vsixmanifest`), and any other is not extracted. Backslashes are
+    slashes (yauzl's reading); then `finish_member_path` (`.` and empty elements drop out as Node's `path.join` drops
+    them, a `..` element is a problem: yauzl refuses the archive). -> (rel, None); (None, problem); (None, None) for a
+    member not extracted."""
+    p = str(name).replace("\\", "/")
+    if not p.startswith(VSIX_PREFIX):
+        return None, None
+    return finish_member_path(p[len(VSIX_PREFIX):])
 
 
 def top_directory_stripped(name):

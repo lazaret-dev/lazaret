@@ -1105,9 +1105,18 @@ user's access, no sandbox and no prompt, started with the editor (`*`,
 as the registry reads an npm package, artifact kind `vsix`, with the
 editor's rules for what runs and when instead of npm's:
 
-- what VS Code installs is what is under `extension/` in the `.vsix`
-  (`canonical_member_path`); the package's own files (`[Content_Types].xml`,
-  `extension.vsixmanifest`, a signature) are not the extension's;
+- what VS Code installs is every member of the `.vsix` whose name begins
+  with `extension`, those letters taken off whether a `/` follows them or
+  not (its extractor matches `^extension`: `extensionout/a.js` is
+  `out/a.js`, and `extension.vsixmanifest` is the folder's `.vsixmanifest`),
+  each by the name VS Code's zip reader, yauzl, gives it (an Info-ZIP
+  Unicode Path field's, when one applies: `zip_entry_names`); the rest
+  (`[Content_Types].xml`, a signature) is not the extension's. A name that
+  begins with `extension` and no `/` (the manifest aside), and an entry with
+  two names, are SC-ARCHIVE-PATH (MAJOR), and the guard refuses a file with
+  more than one entry written as `package.json` (the editor checks the
+  first and the extension runs with the last). The review of Oct 7 found
+  both: such a file used to be OK, its code never read;
 - `main` and `browser` are the entries (an extension with neither runs no
   code: there is no `index.js` default), and they and what they load get
   the import-time test, whose finding says when the editor starts them at

@@ -23,7 +23,8 @@ the way VS Code asks it.
     what it says the publisher, whether its domain is verified, the install count, a pre-release, and the
                  extensions the version needs (`Microsoft.VisualStudio.Code.ExtensionDependencies`) and packs
                  (`Microsoft.VisualStudio.Code.ExtensionPack`), as `publisher.name` in lowercase.
-    the archive  as Open VSX's: a zip, and what is under `extension/` is the extension (`member_path`).
+    the archive  as Open VSX's: a zip, and every member whose name begins with `extension` is the extension's
+                 (`member_path`).
 
 The Marketplace's terms of use say its extensions may be installed and used only with Microsoft's Visual Studio
 products; scanning it is the 0.1.9 backlog's decision 11 (not legal advice). Requests to the API are paced (`rate`).
@@ -338,11 +339,9 @@ class Marketplace(base.Ecosystem):
         return "zip" if isinstance(filename, str) and filename.lower().endswith(".vsix") else None
 
     def member_path(self, kind, name, root=None):
-        """VS Code unpacks what is under `extension/` and nothing else."""
-        parts = [x for x in str(name).replace("\\", "/").split("/") if x not in ("", ".")]
-        if len(parts) < 2 or parts[0] != "extension":
-            return None, None
-        return base.finish_member_path("/".join(parts[1:]))
+        """VS Code unpacks every member whose name begins with `extension`, those letters taken off, and nothing else
+        (`base.vsix_member_path`)."""
+        return base.vsix_member_path(name)
 
     def links_extracted(self, kind):
         return False

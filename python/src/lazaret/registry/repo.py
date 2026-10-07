@@ -266,7 +266,7 @@ SAMPLE = 8192              # header/entropy sample read from oversized files
 #      entry points and hook targets, Python install scripts
 # 2.3: verdict tiers, decoded hex, install-script inspection; 2.2:
 #      verdict-integrity; 2.1: binary-artifact awareness
-ENGINE_VERSION = "2.40.0"
+ENGINE_VERSION = "2.41.0"
 
 # ---------------- The content memo (P-2a, registry/contentcache.py) ----------------
 # One per scan_package run: the engine answers once for content several of a
@@ -1106,8 +1106,11 @@ class Member(tuple):
 _DRIVE_ROOT_RE = re.compile(r"^(?:[A-Za-z]:)?/+")
 
 
-#: The directory of a .vsix VS Code unpacks into the extension's folder (E-1).
-VSIX_ROOT = "extension"
+#: What begins the name of every .vsix member VS Code unpacks into the extension's folder (E-1; a `/` after it or
+#: not: `_base.vsix_member_path`).
+VSIX_ROOT = _base.VSIX_PREFIX
+#: The package's manifest, which every .vsix holds and VS Code writes into the extension's folder as `.vsixmanifest`
+VSIX_MANIFEST = "extension.vsixmanifest"
 #: The one script of an extension's package.json VS Code runs (`node` and a file, once the extension has been
 #: uninstalled, at the editor's next start: vsix_hook_runs). npm's lifecycle scripts never run: the editor runs no
 #: npm install.
@@ -1154,10 +1157,12 @@ def canonical_member_path(name, artifact=None):
     'setup.js'), strip absolute roots, refuse '..'; a member that ends up as
     the package root itself (a top-level file) is not extracted.
     wheel: paths are install paths, nothing stripped.
-    vsix (a VS Code extension, 0.1.9, E-1): VS Code unpacks the members under
-    `extension/` into the extension's folder, and nothing else (the package's
-    `[Content_Types].xml`, `extension.vsixmanifest` and signature stay in
-    the archive): those are not extracted.
+    vsix (a VS Code extension, 0.1.9, E-1): VS Code unpacks every member whose
+    name begins with `extension` into the extension's folder, those letters
+    taken off whether a `/` follows them or not (`extension/out/a.js` is
+    `out/a.js`, `extensionout/a.js` too, `extension.vsixmanifest` is
+    `.vsixmanifest`), and nothing else (`[Content_Types].xml`, a signature):
+    `_base.vsix_member_path`, the review of Oct 7.
     sdist, action (a GitHub Action's repository as GitHub's archive of a
     commit holds it, under one top directory, 0.1.9, N-4) and the legacy
     default: '.' / empty segments dropped, then the top directory.
@@ -1168,10 +1173,7 @@ def canonical_member_path(name, artifact=None):
     elif artifact == "wheel":
         rest = p
     elif artifact == "vsix":
-        parts = [x for x in p.split("/") if x not in ("", ".")]
-        if len(parts) < 2 or parts[0] != VSIX_ROOT:
-            return None, None
-        rest = "/".join(parts[1:])
+        return _base.vsix_member_path(p)
     else:
         parts = [x for x in p.split("/") if x not in ("", ".")]
         rest = "/".join(parts[1:]) if len(parts) > 1 else (parts[0] if parts else "")
@@ -1596,6 +1598,97 @@ def _zip_is_symlink(info):
     return (info.external_attr >> 16) & 0o170000 == 0o120000
 
 
+#: The Info-ZIP Unicode Path extra field: an entry's name again, in UTF-8, after the CRC-32 of its header's name bytes
+_UNICODE_PATH = 0x7075
+#: yauzl's CP437 (VS Code's zip reader) has graphic characters for 0x01-0x1F and 0x7F, where Python's codec has the
+#: control characters
+_YAUZL_CP437 = str.maketrans(dict(zip(map(chr, [*range(1, 32), 127]), "☺☻♥♦♣♠•◘○◙♂♀♪♫☼►◄↕‼¶§▬↨↑↓→←∟↔▲▼⌂")))
+#: The artifacts pip extracts with zipfile, whose reading of names changed in Python 3.12
+_PIP_ZIPS = ("wheel", "sdist")
+
+
+def _zip_extra_fields(extra):
+    """An entry's extra data split into its fields, [(id, data)], as zipfile and yauzl split it (zipfile has refused
+    an archive whose field runs past the end; what is left after the last whole field is no field)."""
+    fields, i = [], 0
+    while len(extra) - i >= 4:
+        tp, ln = struct.unpack_from("<HH", extra, i)
+        fields.append((tp, extra[i + 4:i + 4 + ln]))
+        i += 4 + ln
+    return fields
+
+
+def zip_entry_names(info):
+    """The names a zip entry goes by, by who reads it (the review of Oct 7) -> (header, vscode, from_field, pip312,
+    refused312):
+    - header: the name in its header as zipfile reads it (UTF-8 when its flag says so, else CP437) and kept it before
+      Python 3.12 (cut at a NUL): what pip installs it as on those versions;
+    - vscode: the name yauzl gives it, which VS Code extracts: the first Info-ZIP Unicode Path field (0x7075) of
+      version 1 that holds a name and whose CRC-32 is that of the header's name bytes, read as UTF-8 (a bad sequence
+      replaced), else the header's (yauzl's CP437 has graphic characters for the control bytes); backslashes are
+      slashes. `from_field` says it came from such a field;
+    - pip312: the name zipfile gives it from Python 3.12, which pip installs it as there: the last such field whose
+      name is UTF-8 and not empty, cut at a NUL, else `header`;
+    - refused312: why zipfile from Python 3.12 refuses the whole archive over this entry (a Unicode Path field too short
+      to read, or one that applies with a name that is not UTF-8), else None.
+    Read from the header's name and the extra data as they are, so the answer is the same on every Python."""
+    utf8 = bool(info.flag_bits & 0x800)
+    raw = info.orig_filename.encode("utf-8" if utf8 else "cp437")
+    header = info.orig_filename.split("\0", 1)[0]
+    crc = zlib.crc32(raw) & 0xFFFFFFFF
+    vscode = pip312 = refused = None
+    for tp, data in _zip_extra_fields(info.extra):
+        if tp != _UNICODE_PATH:
+            continue
+        if len(data) < 5:
+            refused = refused or "a Unicode path field too short to read"
+            continue
+        version, field_crc = struct.unpack_from("<BL", data)
+        if version != 1 or field_crc != crc:
+            continue
+        if vscode is None and len(data) > 5:
+            vscode = data[5:].decode("utf-8", "replace")
+        try:
+            name = data[5:].decode("utf-8")
+        except UnicodeDecodeError:
+            refused = refused or "a Unicode path field whose name is not UTF-8"
+            continue
+        if name:
+            pip312 = name.split("\0", 1)[0]
+    from_field = vscode is not None
+    if vscode is None:
+        vscode = info.orig_filename if utf8 else info.orig_filename.translate(_YAUZL_CP437)
+    return header, vscode.replace("\\", "/"), from_field, header if pip312 is None else pip312, refused
+
+
+def _zip_member_names(info, artifact, anomalies):
+    """The names `artifact`'s installer extracts a zip entry under (zip_entry_names): VS Code's for a .vsix, pip's
+    for a wheel or a zip sdist (the header's, and the Unicode Path field's when pip from Python 3.12 reads another), the
+    header's for the rest (Go's archive/zip reads no Unicode Path field). A directory's name is left out. Two names
+    for one entry are an anomaly, and so is an entry that makes zipfile from Python 3.12 refuse the archive: pip there
+    installs nothing of it, and Lazaret there reads none of it (INCOMPLETE). -> (names, refused or None)."""
+    header, vscode, from_field, pip312, refused312 = zip_entry_names(info)
+    refused = None
+    if artifact == "vsix":
+        names = [vscode]
+        if from_field and vscode != header.replace("\\", "/"):
+            anomalies.append(("unicode", vscode, f"its header names it {header[:200]!r}, and VS Code extracts it under "
+                                                 f"the name its Unicode path field gives"))
+        rel, _problem = _base.vsix_member_path(vscode)
+        if rel is not None and not vscode.startswith(VSIX_ROOT + "/") and vscode != VSIX_MANIFEST:
+            anomalies.append(("vsixname", vscode, f"VS Code installs it as {rel[:200]!r}"))
+    elif artifact in _PIP_ZIPS:
+        names = [header] if pip312 == header else [header, pip312]
+        if pip312 != header:
+            anomalies.append(("unicode", pip312, f"its header names it {header[:200]!r}: pip installs it under that "
+                                                 f"name before Python 3.12, and under this one from 3.12"))
+    else:
+        names = [header]
+    if refused312:
+        refused = f"zipfile from Python 3.12 refuses the archive: {refused312}"
+    return [n for n in names if not n.endswith("/")], refused
+
+
 _ZIP_EOCD_SIG, _ZIP64_LOC_SIG, _ZIP64_EOCD_SIG = b"PK\x05\x06", b"PK\x06\x07", b"PK\x06\x06"
 _ZIP_CD_SIG = b"PK\x01\x02"
 _ZIP_EOCD = struct.Struct("<4s4H2LH")            # 22 bytes
@@ -1705,7 +1798,9 @@ def _zip_overlaps(data, infos):
             continue
         sig, n_name, n_extra = _ZIP_LOCAL.unpack_from(data, at)
         if sig == b"PK\x03\x04":
-            spans.append((at, at + _ZIP_LOCAL.size + n_name + n_extra + info.compress_size, info.filename))
+            # (the header's name: zipfile from Python 3.12 may give another, its Unicode Path field's)
+            spans.append((at, at + _ZIP_LOCAL.size + n_name + n_extra + info.compress_size,
+                          info.orig_filename.split("\0", 1)[0]))
     out, reach = [], -1
     for at, end, name in sorted(spans):
         if at < reach:
@@ -1748,44 +1843,54 @@ def _iter_zip(data, artifact, budget, anomalies):
         try:
             for info in infos:
                 budget.check()
-                if not info.filename:
-                    # no extractor can place it, and Python 3.10's is_dir()
-                    # raised IndexError on it (F-6); 3.11+ dropped it silently
-                    anomalies.append(("noname", "(archive)", "an entry with no name, which was not read"))
+                names, refused = _zip_member_names(info, artifact, anomalies)
+                if refused:
+                    # (pip on Python 3.12 and later installs nothing of it, and Lazaret there reads none of it)
+                    yield Member(last, 0, b"", "corrupt", refused)
+                if not any(names):
+                    if not info.orig_filename.split("\0", 1)[0]:
+                        # no extractor can place an entry no reader names (a
+                        # Unicode path field can name one whose header does not),
+                        # and Python 3.10's is_dir() raised IndexError on it (F-6)
+                        anomalies.append(("noname", "(archive)", "an entry with no name, which was not read"))
                     continue
-                if info.is_dir():
+                rels = []
+                for name in names:
+                    rel, problem = canonical_member_path(name, artifact)
+                    if problem:
+                        anomalies.append(("path", name, problem))
+                    elif rel is not None and rel not in rels:
+                        rels.append(rel)
+                if not rels:
                     continue
-                rel, problem = canonical_member_path(info.filename, artifact)
-                if problem:
-                    anomalies.append(("path", info.filename, problem))
-                    continue
-                if rel is None:
-                    continue
-                count += 1
-                if count > MAX_FILES:
-                    yield Member(rel, 0, b"", "files")
-                    return
-                if _zip_is_symlink(info):
-                    # pip ignores a zip entry's symlink mode bits: it installs
-                    # the stored bytes as a regular file (wheels and zip sdists
-                    # alike), so those bytes are what is scanned. Lazaret used to
-                    # read them as a link target and skip the entry when no
-                    # member had that name: code pip installs went unscanned.
-                    anomalies.append(("ziplink", rel, f"{'VS Code' if artifact == 'vsix' else 'pip'} installs "
-                                                      "its stored bytes as a regular file, which is what was "
-                                                      "scanned; unzip would create a symlink instead"))
-                _note_member(seen, rel, anomalies)
-                last = rel
+                for rel in rels:
+                    count += 1
+                    if count > MAX_FILES:
+                        yield Member(rel, 0, b"", "files")
+                        return
+                    if _zip_is_symlink(info):
+                        # pip ignores a zip entry's symlink mode bits: it installs
+                        # the stored bytes as a regular file (wheels and zip sdists
+                        # alike), so those bytes are what is scanned. Lazaret used to
+                        # read them as a link target and skip the entry when no
+                        # member had that name: code pip installs went unscanned.
+                        anomalies.append(("ziplink", rel, f"{'VS Code' if artifact == 'vsix' else 'pip'} installs "
+                                                          "its stored bytes as a regular file, which is what was "
+                                                          "scanned; unzip would create a symlink instead"))
+                    _note_member(seen, rel, anomalies)
+                last = rels[0]
                 try:
-                    raw = read(info, rel, MAX_MEMBER + 1)     # bounded, real bytes
+                    raw = read(info, last, MAX_MEMBER + 1)     # bounded, real bytes
                 except _ZIP_READ_ERRORS as exc:
                     why = str(exc) if str(exc).startswith("an LZMA dictionary") else type(exc).__name__
-                    yield Member(rel, 0, b"", "corrupt", f"member {rel} could not be read ({why})")
+                    for rel in rels:
+                        yield Member(rel, 0, b"", "corrupt", f"member {rel} could not be read ({why})")
                     continue
-                if len(raw) > MAX_MEMBER:
-                    yield Member(rel, SAMPLE, raw[:SAMPLE], "member")
-                    continue
-                yield Member(rel, len(raw), raw, None)
+                for rel in rels:
+                    if len(raw) > MAX_MEMBER:
+                        yield Member(rel, SAMPLE, raw[:SAMPLE], "member")
+                    else:
+                        yield Member(rel, len(raw), raw, None)
         except ArchiveLimit as lim:
             yield Member(last, 0, b"", lim.reason, lim.detail)
 
@@ -2103,6 +2208,16 @@ def _archive_issue(kind, path, detail):
         "noname": ("SC-ARCHIVE-PATH", "Unnamed archive entry",
                    "No extractor can place an entry with no name: installers fail on it or skip it, so "
                    "its bytes are neither installed nor reviewed, and no packaging tool produces one."),
+        "unicode": ("SC-ARCHIVE-PATH", "Archive entry with two names",
+                    "A zip entry's Info-ZIP Unicode Path field names it otherwise than its header: VS Code and "
+                    "pip from Python 3.12 install it under the field's name, older pips and most listings show "
+                    "the header's, so what a reviewer sees is not what gets installed. The entry was scanned "
+                    "under each name an installer uses; no packaging tool writes one."),
+        "vsixname": ("SC-ARCHIVE-PATH", "Extension file outside extension/",
+                     "VS Code extracts every entry of a .vsix whose name begins with 'extension', with a '/' "
+                     "after it or not: 'extensionout/a.js' is installed as 'out/a.js'. A listing shows it "
+                     "outside the extension, and no packaging tool writes one. It was scanned where VS Code "
+                     "writes it."),
         "overlap": ("SC-ARCHIVE-OVERLAP", "Overlapping archive entries",
                     "Two entries of the zip archive share their bytes: the shape of a zip bomb (one "
                     "compressed stream counted many times), and no packaging tool produces one."),

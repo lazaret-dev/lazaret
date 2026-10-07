@@ -83,7 +83,9 @@ class OpenVSXContract(EcosystemContract, unittest.TestCase):
                        "a." + "b" * 129, "a/b.c", "redhat.vscode yaml")
     MEMBER_PATHS = (("vsix", "extension/package.json", None, ("package.json", None)),
                     ("vsix", "extension/./dist//a.js", None, ("dist/a.js", None)),
-                    ("vsix", "extension.vsixmanifest", None, (None, None)),
+                    ("vsix", "extension.vsixmanifest", None, (".vsixmanifest", None)),
+                    ("vsix", "extensionout/a.js", None, ("out/a.js", None)),
+                    ("vsix", "extension", None, (None, None)),
                     ("vsix", "[Content_Types].xml", None, (None, None)),
                     ("vsix", "Extension/a.js", None, (None, None)),
                     ("vsix", "extension/../a.js", None, (None, "path contains '..'")))

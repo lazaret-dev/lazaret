@@ -133,8 +133,9 @@ project is pre-1.0, so the 0.x API may still change.
   gets the use-time test; `vscode:uninstall`, the one script VS Code runs (`node` and a file,
   once the extension has been uninstalled), gets the install-hook test, and a command VS Code
   would not run is listed only. npm's scripts, a bundled package's scripts and a `binding.gyp`
-  never run, so they are not hooks, and only the members under `extension/` are the
-  extension's. The extensions it brings (`extensionDependencies`, `extensionPack`) are
+  never run, so they are not hooks, and only the members VS Code writes into the
+  extension's folder are the extension's: every one whose name begins with `extension`, as
+  VS Code's zip reader names it. The extensions it brings (`extensionDependencies`, `extensionPack`) are
   listed. `lazaret --extensions` scans what VS Code, VS Code Insiders, VSCodium, Cursor,
   Windsurf, Kiro, Positron, code-server and the VS Code and Cursor servers have installed (and
   the folder `VSCODE_EXTENSIONS` names), or the folders and `.vsix` files given; an installed
@@ -588,6 +589,19 @@ project is pre-1.0, so the 0.x API may still change.
 
 ### Fixed
 
+- **A `.vsix` is read by the names VS Code extracts, and a zip by the names its installer reads (the
+  review of Oct 7; rule set 2.41.0).** VS Code writes every entry of a `.vsix` whose name begins with
+  `extension` into the extension's folder, a `/` after it or not, so `extensionout/extension.js` is
+  installed as `out/extension.js`; Lazaret read only `extension/…`, and an extension that hid the file
+  its manifest starts that way scanned OK with the file unread. And VS Code's zip reader, like zipfile
+  from Python 3.12 (so pip there), takes an entry's name from its Info-ZIP Unicode Path field when the
+  field's checksum matches the header's name, which Lazaret on Python 3.10 and 3.11 did not read: an
+  entry could be scanned as `notes.txt` and installed as `x.pth` or as the extension's main file. Every
+  `.vsix` and zip entry is now read under the names its installer uses (both of a wheel's when pip's
+  versions differ), the same on every Python; a name that begins with `extension` and no `/`, and an
+  entry with two names, are SC-ARCHIVE-PATH (MAJOR); an archive zipfile from Python 3.12 refuses over a
+  bad field is INCOMPLETE; and `lazaret guard code` reads the manifest the editor checks and refuses a
+  file with more than one entry written as `package.json`.
 - **A file over the per-file download limit that its registry declares no size for is INCOMPLETE, not an
   error (N-21).** A Go module's zip (the proxy declares no size before the download), a crate or an npm
   tarball found over the 200 MiB limit as it came made `lazaret-registry scan` fail; it is now left out

@@ -29,7 +29,7 @@ from lazaret.registry import repo
 from lazaret.registry.ecosystems import base, openvsx, vsmarketplace as vsm
 from lazaret.scanner import _native
 from tests.registry import test_vsmarketplace as tvm
-from tests.registry._review_support import EXFIL_JS
+from tests.registry._review_support import EXFIL_JS, unicode_path, zip_entries
 from tests.registry.test_guard import options
 from tests.registry.test_vsix import ext_manifest, vsix
 
@@ -331,6 +331,21 @@ class ManifestTests(unittest.TestCase):
         for what, data in cases.items():
             with self.subTest(what=what), self.assertRaises(ValueError):
                 E.vsix_manifest(data)
+
+    def test_the_names_the_editor_reads(self):
+        # the review of Oct 7: VS Code reads a .vsix with yauzl, which takes an entry's Unicode path field, and it
+        # writes every entry whose name begins with 'extension' (a '/' after it or not)
+        doc = ext_manifest(name="b", publisher="a", version="1.0.0")
+        named = zip_entries([("extension.vsixmanifest", "<x/>", b""),
+                             ("assets/m.json", doc, unicode_path("assets/m.json", "extension/package.json"))])
+        self.assertEqual(E.vsix_manifest(named).id, "a.b")
+        wrong_crc = zip_entries([("assets/m.json", doc, unicode_path("assets/m.json", "extension/package.json", crc=7))])
+        with self.assertRaisesRegex(ValueError, "no extension/package.json"):
+            E.vsix_manifest(wrong_crc)
+        # the editor checks extension/package.json; the extension runs with the last entry written as package.json
+        later = vsix({"package.json": doc}, extra={"extensionpackage.json": ext_manifest(name="c", publisher="a")})
+        with self.assertRaisesRegex(ValueError, "more than one of its entries is written as the extension's package"):
+            E.vsix_manifest(later)
 
 
 class ArgsTests(unittest.TestCase):

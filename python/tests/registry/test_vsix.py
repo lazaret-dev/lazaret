@@ -1,7 +1,9 @@
 """VS Code extensions (0.1.9, E-1's first part): a `.vsix`, and an installed
 extension's folder, read with the editor's rules for what runs and when.
 
-- What VS Code installs: the members under `extension/`, and nothing else.
+- What VS Code installs: every member whose name begins with `extension`,
+  those letters taken off (a `/` after them or not), by the name yauzl gives
+  it (a Unicode path field's, when one applies), and nothing else.
 - What runs: `main` and `browser`, and what they load, when the editor
   activates the extension (the import-time test; at every start for `*` and
   `onStartupFinished`); everything else when the extension's code calls it
@@ -31,10 +33,11 @@ from unittest import mock
 from lazaret import _cli
 from lazaret.registry import extensions, repo
 from tests import _support
-from tests.registry._review_support import DECODE_EXEC_JS, ELF, EXFIL_JS, issues, manifest, rules, zipball
+from tests.registry._review_support import (DECODE_EXEC_JS, ELF, EXFIL_JS, issues, manifest, rules, unicode_path,
+                                            zip_entries, zipball)
 from tests.scanner.test_review_hidden_unicode import vs
 
-#: The files a .vsix holds besides the extension (VS Code installs none of them).
+#: The files a .vsix holds besides the extension (VS Code installs the manifest, as `.vsixmanifest`).
 PACKAGING = {"[Content_Types].xml": '<?xml version="1.0" encoding="utf-8"?><Types/>',
              "extension.vsixmanifest": '<?xml version="1.0" encoding="utf-8"?><PackageManifest/>'}
 GLASSWORM_SHAPE = ("const s = v => [...v].map(w => w.codePointAt(0));\n"
@@ -89,14 +92,72 @@ class TempDirTest(unittest.TestCase):
 
 
 class WhatVSCodeInstallsTests(unittest.TestCase):
-    def test_only_the_members_under_extension_are_read(self):
-        self.assertEqual(repo.canonical_member_path("extension/out/a.js", "vsix"), ("out/a.js", None))
-        self.assertEqual(repo.canonical_member_path("extension//out/./a.js", "vsix"), ("out/a.js", None))
-        for name in ("extension.vsixmanifest", "[Content_Types].xml", "Extension/out/a.js", "extension",
-                     "other/extension/a.js", ".signature.p7s"):
+    def test_every_member_whose_name_begins_with_extension(self):
+        # VS Code's extract(…, {sourcePath: 'extension'}) builds /^extension/: no '/' is needed after it (the review
+        # of Oct 7; an installed extension's folder holds the package's manifest as .vsixmanifest)
+        for name, rel in (("extension/out/a.js", "out/a.js"), ("extension//out/./a.js", "out/a.js"),
+                          ("extensionout/a.js", "out/a.js"), ("extension2/a.js", "2/a.js"),
+                          ("extension.vsixmanifest", ".vsixmanifest"), ("extension\\out\\a.js", "out/a.js")):
+            with self.subTest(name=name):
+                self.assertEqual(repo.canonical_member_path(name, "vsix"), (rel, None))
+        for name in ("[Content_Types].xml", "Extension/out/a.js", "extension", "extension/", "other/extension/a.js",
+                     ".signature.p7s", "./extension/a.js", "/extension/a.js"):
             with self.subTest(name=name):
                 self.assertEqual(repo.canonical_member_path(name, "vsix"), (None, None))
         self.assertEqual(repo.canonical_member_path("extension/../a.js", "vsix"), (None, "path contains '..'"))
+
+    def test_a_name_with_no_slash_after_extension_is_installed_and_read(self):
+        # the shape the review found: a listing shows the file outside the extension, and VS Code writes it as the
+        # file the manifest starts (it used to be OK: never read)
+        files = {"package.json": ext_manifest(main="./out/extension", activationEvents=["onStartupFinished"])}
+        res = scan(files, extra={"extensionout/extension.js": EXFIL_JS})
+        self.assertEqual(res["verdict"], "SUSPICIOUS")
+        self.assertIn("out/extension.js", {i["file"] for i in issues(res, "SC-IMPORT-RISK")})
+        named = [i for i in issues(res, "SC-ARCHIVE-PATH") if i["name"] == "Extension file outside extension/"]
+        self.assertEqual([i["file"] for i in named], ["extensionout/extension.js"])
+        self.assertIn("VS Code installs it as 'out/extension.js'", named[0]["msg"])
+
+    def test_the_package_manifest_is_the_folders_vsixmanifest(self):
+        names = [m[0] for m in repo.iter_archive(vsix({"package.json": ext_manifest()}), "zip", "vsix")]
+        self.assertEqual(sorted(names), [".vsixmanifest", "package.json"])
+        res = scan({"package.json": ext_manifest()})
+        self.assertEqual((res["verdict"], res["issues"]), ("OK", []))
+
+    def entries(self, payload_extra, header="assets/readme.txt"):
+        return zip_entries([("[Content_Types].xml", PACKAGING["[Content_Types].xml"], b""),
+                            ("extension.vsixmanifest", PACKAGING["extension.vsixmanifest"], b""),
+                            ("extension/package.json",
+                             ext_manifest(main="./out/extension", activationEvents=["onStartupFinished"]), b""),
+                            (header, EXFIL_JS, payload_extra)])
+
+    def test_a_unicode_path_field_names_the_file_vs_code_writes(self):
+        # yauzl (VS Code's zip reader) takes an entry's Info-ZIP Unicode Path field when its CRC-32 is the header
+        # name's: the header said assets/readme.txt (not extracted), VS Code writes out/extension.js
+        field = unicode_path("assets/readme.txt", "extension/out/extension.js")
+        res = repo._scan_artifact(self.entries(field), "zip", "vsix", False, repo.Budget())
+        self.assertEqual(res["verdict"], "SUSPICIOUS")
+        self.assertIn("out/extension.js", {i["file"] for i in issues(res, "SC-IMPORT-RISK")})
+        two = [i for i in issues(res, "SC-ARCHIVE-PATH") if i["name"] == "Archive entry with two names"]
+        self.assertEqual([i["file"] for i in two], ["extension/out/extension.js"])
+        self.assertIn("'assets/readme.txt'", two[0]["msg"])
+        # a field whose CRC-32 is not the header name's is not read (yauzl, and zipfile from Python 3.12)
+        wrong = unicode_path("assets/readme.txt", "extension/out/extension.js", crc=1)
+        res = repo._scan_artifact(self.entries(wrong), "zip", "vsix", False, repo.Budget())
+        self.assertEqual((res["verdict"], rules(res)), ("OK", set()))
+        # nor one of another version
+        other = unicode_path("assets/readme.txt", "extension/out/extension.js", version=2)
+        res = repo._scan_artifact(self.entries(other), "zip", "vsix", False, repo.Budget())
+        self.assertEqual(res["verdict"], "OK")
+
+    def test_two_entries_written_as_package_json(self):
+        # the editor checks extension/package.json when it installs, and the extension runs with the last entry
+        # written as package.json
+        res = scan({"package.json": ext_manifest(main="./a.js"), "a.js": "module.exports = 1;\n",
+                    "b.js": EXFIL_JS},
+                   extra={"extensionpackage.json": ext_manifest(main="./b.js", activationEvents=["*"])})
+        self.assertEqual(res["verdict"], "SUSPICIOUS")
+        self.assertEqual({i["file"] for i in issues(res, "SC-IMPORT-RISK")}, {"b.js"})
+        self.assertEqual([i["file"] for i in issues(res, "SC-ARCHIVE-DUP")], ["package.json"])
 
     def test_code_outside_extension_is_not_the_extensions(self):
         res = scan({"package.json": ext_manifest()}, extra={"payload/x.js": DECODE_EXEC_JS})

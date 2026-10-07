@@ -20,6 +20,7 @@ installers do.
 
 import bz2
 import gzip
+import io
 import lzma
 import os
 import shutil
@@ -34,7 +35,7 @@ from unittest import mock
 from lazaret.registry import repo
 from tests.registry._review_support import (
     DECODE_EXEC_JS, DECODE_EXEC_PY, EXFIL_JS, hooks, issues, manifest, rules, scan_bytes,
-    scan_wheel, tar_member, zipball)
+    scan_wheel, tar_member, unicode_path, zip_entries, zipball)
 
 HOOKED = hooks(postinstall="node index.js").encode()
 PAYLOAD = DECODE_EXEC_JS.encode()
@@ -227,6 +228,73 @@ class LinkTests(unittest.TestCase):
         link = issues(res, "SC-ARCHIVE-LINK")
         self.assertEqual([(i["file"], i["sev"]) for i in link], [("x/helper.py", "MAJOR")])
         self.assertIn("Zip entry marked as a symlink", link[0]["msg"])
+
+
+class UnicodePathTests(unittest.TestCase):
+    """A zip entry's Info-ZIP Unicode Path field (0x7075) names it again (the review of Oct 7). zipfile reads it from
+    Python 3.12, so pip installs the entry under the field's name there and under its header's before; yauzl (VS
+    Code's reader) reads it too. Lazaret reads both names on every Python."""
+
+    PTH = "import os; os.system('true')\n"
+
+    def wheel(self, extra, header="x/notes.txt"):
+        return zip_entries([("x/__init__.py", "", b""), (header, self.PTH, extra)])
+
+    def test_the_names_an_entry_goes_by(self):
+        import zipfile
+        data = zip_entries([("x/notes.txt", "", unicode_path("x/notes.txt", "x.pth")),
+                            ("x/a.txt", "", unicode_path("x/a.txt", "x/b.txt", crc=7)),
+                            ("x/c.txt", "", b""),
+                            ("x/d\x01.txt", "", b"")])
+        with zipfile.ZipFile(io.BytesIO(data)) as zf:
+            names = [repo.zip_entry_names(i) for i in zf.infolist()]
+        self.assertEqual(names, [("x/notes.txt", "x.pth", True, "x.pth", None),
+                                 ("x/a.txt", "x/a.txt", False, "x/a.txt", None),
+                                 ("x/c.txt", "x/c.txt", False, "x/c.txt", None),
+                                 ("x/d\x01.txt", "x/d\u263a.txt", False, "x/d\x01.txt", None)])
+
+    def test_a_wheel_entry_pip_installs_under_another_name_from_python_3_12(self):
+        res = scan_bytes(self.wheel(unicode_path("x/notes.txt", "x.pth")), container="zip", artifact="wheel",
+                         eco="pypi")
+        self.assertIn("x.pth", {i["file"] for i in issues(res, "SC-PTH-EXEC")})
+        two = [i for i in issues(res, "SC-ARCHIVE-PATH") if i["name"] == "Archive entry with two names"]
+        self.assertEqual([(i["file"], i["sev"]) for i in two], [("x.pth", "MAJOR")])
+        self.assertIn("'x/notes.txt'", two[0]["msg"])
+        # an entry whose header has no name, which a field names (it used to be passed over as nameless)
+        res = scan_bytes(self.wheel(unicode_path("", "x.pth"), header=""), container="zip", artifact="wheel",
+                         eco="pypi")
+        self.assertIn("x.pth", {i["file"] for i in issues(res, "SC-PTH-EXEC")})
+        # a zip sdist too (pip extracts it with zipfile)
+        sdist = zip_entries([("x-1.0/PKG-INFO", "Name: x\n", b""),
+                             ("x-1.0/docs/notes.txt", DECODE_EXEC_PY, unicode_path("x-1.0/docs/notes.txt",
+                                                                                   "x-1.0/setup.py"))])
+        res = scan_bytes(sdist, container="zip", artifact="sdist", eco="pypi")
+        self.assertEqual(res["verdict"], "SUSPICIOUS")
+        self.assertIn("setup.py", {i["file"] for i in issues(res, "SC-EVAL-DECODE")})
+
+    def test_a_field_that_does_not_apply_is_not_read(self):
+        for extra in (unicode_path("x/notes.txt", "x.pth", crc=7), unicode_path("x/notes.txt", "x.pth", version=2),
+                      unicode_path("x/notes.txt", "")):
+            with self.subTest(extra=extra):
+                res = scan_bytes(self.wheel(extra), container="zip", artifact="wheel", eco="pypi")
+                self.assertEqual(res["verdict"], "OK", res["issues"])
+
+    def test_a_field_zipfile_from_python_3_12_refuses_is_incomplete(self):
+        # pip from Python 3.12 installs nothing of the wheel, and Lazaret there reads none of it: INCOMPLETE on
+        # every Python
+        short = b"\x75\x70\x03\x00\x01\x00\x00"
+        for extra in (short, unicode_path("x/notes.txt", b"x\xff.pth")):
+            with self.subTest(extra=extra):
+                res = scan_bytes(self.wheel(extra), container="zip", artifact="wheel", eco="pypi")
+                self.assertEqual(res["verdict"], "INCOMPLETE", res["issues"])
+
+    def test_a_go_module_zip_is_read_by_its_header_names(self):
+        # Go's archive/zip reads no Unicode Path field
+        data = zip_entries([("example.com/m@v1.0.0/go.mod", "module example.com/m\n", b""),
+                            ("example.com/m@v1.0.0/notes.txt", "", unicode_path("example.com/m@v1.0.0/notes.txt",
+                                                                                "example.com/m@v1.0.0/x.go"))])
+        names = [m[0].rsplit("/", 1)[-1] for m in repo.iter_archive(data, "zip", "gomod")]
+        self.assertEqual(sorted(names), ["go.mod", "notes.txt"])
 
 
 def typed_member(name, data, typ):

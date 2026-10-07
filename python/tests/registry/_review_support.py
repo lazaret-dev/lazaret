@@ -8,8 +8,10 @@ import gzip
 import io
 import json
 import stat
+import struct
 import tarfile
 import zipfile
+import zlib
 from unittest import mock
 
 from lazaret.registry import repo
@@ -109,6 +111,26 @@ def zipball(files, symlinks=None):
             info = zipfile.ZipInfo(path)
             info.external_attr = (stat.S_IFLNK | 0o777) << 16
             zf.writestr(info, target)
+    return buf.getvalue()
+
+
+def unicode_path(header, name, crc=None, version=1):
+    """An Info-ZIP Unicode Path extra field (0x7075) giving an entry whose header names it `header` the name `name`
+    (bytes as they are when `name` is bytes); its CRC-32 is that of the header's name unless `crc` is given."""
+    data = struct.pack("<BL", version, zlib.crc32(header.encode()) if crc is None else crc)
+    data += name if isinstance(name, bytes) else name.encode()
+    return struct.pack("<HH", 0x7075, len(data)) + data
+
+
+def zip_entries(entries):
+    """[(header name, content, extra field bytes)] -> zip bytes, the entries in that order (deflated)."""
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for name, content, extra in entries:
+            info = zipfile.ZipInfo(name)
+            info.compress_type = zipfile.ZIP_DEFLATED
+            info.extra = extra
+            zf.writestr(info, content)
     return buf.getvalue()
 
 

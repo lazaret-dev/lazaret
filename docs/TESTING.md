@@ -388,7 +388,8 @@ reader tests' single-technique samples (`goread/tests.rs`,
 **VS Code extensions (E-1).** `bench.py` takes a `.vsix` as `"kind": "vsix"`
 (`extension/` inside, `"container": "zip"`), scanned as `lazaret FILE.vsix`
 scans it. The extensions' benign set (the most-installed Open VSX
-extensions, pinned by sha256) is E-1's part 4, and their malicious set
+extensions, pinned by sha256: `popular.py pin --top 0,0,0,N`, above) is
+E-1's part 4, and their malicious set
 (GlassWorm's and the other campaigns' samples) is run offline by John, as
 the Go and Rust one is: neither registry can be reached from the sandbox.
 Until then, `tests/registry/test_vsix.py`'s single-technique fragments are

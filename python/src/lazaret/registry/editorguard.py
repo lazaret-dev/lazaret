@@ -201,25 +201,40 @@ def read_manifest(doc):
 
 
 def vsix_manifest(data):
-    """The Manifest of a `.vsix` (its `extension/package.json`, the one entry of that name the editor reads);
-    ValueError when there is none, two, or one that is not an extension's."""
+    """The Manifest of a `.vsix`: its `extension/package.json`, the entry the editor reads by that name when it installs
+    the file, by the name yauzl gives an entry (`repo.zip_entry_names`: a Unicode path field's, when one applies).
+    ValueError when there is none, when more than one entry is written as the extension's package.json (the editor
+    checks the first and the extension runs with the last: `repo.canonical_member_path`'s `vsix` rule), or when it is
+    not an extension's."""
     reason = repo._zip_preflight(data)
     if reason:
         raise ValueError(reason)
+    problem, raw = None, b""
     try:
         with zipfile.ZipFile(io.BytesIO(data)) as zf:
-            infos = [i for i in zf.infolist() if i.filename == "extension/package.json"]
-            if len(infos) != 1:
-                raise ValueError("it has no extension/package.json" if not infos else
-                                 "it has two extension/package.json entries")
-            if infos[0].file_size > MAX_MANIFEST:
-                raise ValueError("its package.json is larger than the guard reads")
-            with zf.open(infos[0]) as f:
-                raw = f.read(MAX_MANIFEST + 1)
+            infos, written = [], 0
+            for info in zf.infolist():
+                name = repo.zip_entry_names(info)[1]
+                if name.endswith("/"):
+                    continue
+                if name == "extension/package.json":
+                    infos.append(info)
+                written += repo.canonical_member_path(name, "vsix")[0] == "package.json"
+            if not infos:
+                problem = "it has no extension/package.json"
+            elif written > 1:
+                problem = "more than one of its entries is written as the extension's package.json"
+            elif infos[0].file_size > MAX_MANIFEST:
+                problem = "its package.json is larger than the guard reads"
+            else:
+                with zf.open(infos[0]) as f:
+                    raw = f.read(MAX_MANIFEST + 1)
     except repo._ZIP_READ_ERRORS as exc:
         raise ValueError(f"it is not a zip the guard can read ({type(exc).__name__})") from None
-    if len(raw) > MAX_MANIFEST:
-        raise ValueError("its package.json is larger than the guard reads")
+    if problem is None and len(raw) > MAX_MANIFEST:
+        problem = "its package.json is larger than the guard reads"
+    if problem:
+        raise ValueError(problem)
     doc, _issues = lazaret.load_manifest("package.json", raw.decode("utf-8", errors="replace"))
     return read_manifest(doc)
 

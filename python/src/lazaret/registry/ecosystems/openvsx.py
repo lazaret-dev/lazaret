@@ -13,7 +13,8 @@ published for, each checked against the SHA-256 the registry publishes beside it
                  extensions it needs to activate and the members of its pack.
     the files    the API's file URLs answer with a redirect to the content host, `openvsx.eclipsecontent.org`: the
                  `.vsix`, and `<file>.sha256`, the hex SHA-256 of the `.vsix` and nothing else.
-    the archive  a zip; what is under `extension/` is the extension (`repo.canonical_member_path`'s `vsix` rule, and
+    the archive  a zip; every member whose name begins with `extension` is the extension's, those letters taken off,
+                 a `/` after them or not (`base.vsix_member_path`: `repo.canonical_member_path`'s `vsix` rule, and
                  `member_path` here). VS Code writes every entry as a regular file: no link is created.
     what runs    as `lazaret FILE.vsix` reads it (repo.py's `vsix` kind): `main` and `browser` when the editor activates
                  the extension, `vscode:uninstall` only as `node <file>`, npm's scripts never.
@@ -328,11 +329,9 @@ class OpenVSX(base.Ecosystem):
         return "zip" if isinstance(filename, str) and filename.lower().endswith(".vsix") else None
 
     def member_path(self, kind, name, root=None):
-        """VS Code unpacks what is under `extension/` and nothing else."""
-        parts = [x for x in str(name).replace("\\", "/").split("/") if x not in ("", ".")]
-        if len(parts) < 2 or parts[0] != "extension":
-            return None, None
-        return base.finish_member_path("/".join(parts[1:]))
+        """VS Code unpacks every member whose name begins with `extension`, those letters taken off, and nothing else
+        (`base.vsix_member_path`)."""
+        return base.vsix_member_path(name)
 
     def links_extracted(self, kind):
         return False
