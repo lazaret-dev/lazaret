@@ -644,6 +644,11 @@ project is pre-1.0, so the 0.x API may still change.
 
 ### Fixed
 
+- **An sdist's in-tree build backend is found on Python 3.10 too (BR-1).** On Python 3.10, which has no
+  tomllib, `[build-system]` was read with a regex that missed the backend in six of seven forms TOML allows
+  (a comment after the header, dotted keys, an inline table, quoted keys, an escape, a decoy section inside a
+  string), so the backend pip runs got no install-script test there. It is read with the TOML reader Lazaret
+  already has for 3.10, as tomllib reads it on 3.11 and later.
 - **`lazaret guard code` stands in for the editor's gallery only where it reads it (EG-8).** An editor
   whose `product.json` names a gallery the guard doesn't read (a company's own) was looked up in the
   public registry instead, with a note: `--install-extension NAME` and `--update-extensions` sent every

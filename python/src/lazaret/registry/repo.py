@@ -46,7 +46,6 @@ import contextlib
 import datetime
 import functools
 import hashlib
-import importlib
 import io
 import json
 import lzma
@@ -4130,26 +4129,29 @@ _PEP517_SECTION_RE = re.compile(r"^\s*\[build-system\]\s*$(.*?)(?=^\s*\[|\Z)", r
 
 
 def _pep517_backend(pyproject):
-    """(build-backend, backend-path list) from pyproject.toml text; tomllib
-    where available (3.11+), a narrow regex reader on 3.10."""
+    """(build-backend, backend-path list) from pyproject.toml text, as pip
+    reads it: with a TOML reader (sca.load_toml: tomllib from Python 3.11,
+    the subset reader on 3.10), and a narrow regex reader only for a text
+    that one cannot read. On 3.10 the regex alone was the reader, and it
+    missed the backend in six of seven forms TOML allows (a comment after
+    the header, dotted keys, an inline table, quoted keys, an escape, a decoy
+    section inside a string): the backend pip runs got no install-script
+    test there (BR-1)."""
     if not pyproject:
         return None, []
+    from lazaret.scanner import sca as _sca           # (loaded with the scanner already)
     try:
-        # stdlib from Python 3.11; loaded by name so the 3.10 stdlib guard
-        # (tests/architecture) does not see an import it cannot resolve
-        tomllib = importlib.import_module("tomllib")
-    except ImportError:
-        tomllib = None
-    if tomllib is not None:
-        try:
-            section = tomllib.loads(pyproject).get("build-system") or {}
-        except (ValueError, RecursionError):       # TOMLDecodeError is a ValueError
-            section = None
-        if isinstance(section, dict):
-            backend = section.get("build-backend")
-            paths = section.get("backend-path")
-            return (backend if isinstance(backend, str) else None,
-                    [p for p in paths if isinstance(p, str)] if isinstance(paths, list) else [])
+        doc = _sca.load_toml(pyproject)
+    except ValueError:                                # (TOMLDecodeError, and a text the subset reader cannot read)
+        doc = None
+    if isinstance(doc, dict):
+        section = doc.get("build-system")
+        if not isinstance(section, dict):
+            return None, []
+        backend = section.get("build-backend")
+        paths = section.get("backend-path")
+        return (backend if isinstance(backend, str) else None,
+                [p for p in paths if isinstance(p, str)] if isinstance(paths, list) else [])
     m = _PEP517_SECTION_RE.search(pyproject)
     if not m:
         return None, []
