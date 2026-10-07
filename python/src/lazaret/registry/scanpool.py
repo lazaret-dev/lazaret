@@ -43,6 +43,7 @@ import os
 import shutil
 import tempfile
 import threading
+import time
 
 try:
     import resource
@@ -61,6 +62,8 @@ DEFAULT_MEMORY_MB = 6144
 MAX_BREAKS = 20
 #: The engine's own cap on its threads (`scanner.engine.THREADS` is `min(8, cores)`).
 MAX_ENGINE_THREADS = 8
+#: Seconds `close` waits for the workers it ended, and their pools' threads, before it kills what is left (N-22).
+CLOSE_WAIT = 5.0
 
 
 class Unavailable(Exception):
@@ -217,15 +220,17 @@ class WorkerPool:
             return pool
 
     def _retire(self, pool, kill=False):
-        """Forget `pool` (it is broken or done) and, with `kill`, stop its processes."""
+        """Forget `pool` (it is broken or done) and, with `kill`, stop its processes. -> its processes and its
+        manager thread as they were (its shutdown lets go of both), for `close` to wait on."""
         with self._lock:
             if self._pool is pool:
                 self._pool = None
             if pool in self._live:
                 self._live.remove(pool)
+        procs = list((getattr(pool, "_processes", None) or {}).values())
+        thread = getattr(pool, "_executor_manager_thread", None)
         if kill:
-            procs = getattr(pool, "_processes", None) or {}
-            for proc in list(procs.values()):
+            for proc in procs:
                 try:
                     proc.terminate()
                 except (OSError, AttributeError):
@@ -234,6 +239,7 @@ class WorkerPool:
             pool.shutdown(wait=False, cancel_futures=True)
         except (OSError, RuntimeError):
             pass
+        return procs, thread
 
     # ---- files
     def _staging(self):
@@ -340,10 +346,31 @@ class WorkerPool:
             self._closed = True
             pools, self._live, self._pool = self._live, [], None
             folder, self._dir = self._dir, None
-        for pool in pools:
-            self._retire(pool, kill=True)
+        ended = [self._retire(pool, kill=True) for pool in pools]
+        deadline = time.monotonic() + CLOSE_WAIT
+        for procs, thread in ended:
+            _reap(procs, thread, deadline)
         if folder:
             shutil.rmtree(folder, ignore_errors=True)
+
+
+def _reap(procs, thread, deadline):
+    """Wait until `deadline` for ended workers to exit, kill any still there, and give their pool's manager thread
+    the time left: the interpreter waits for both at its exit, and a worker still starting up when it was ended
+    held a test process past its time box under load (N-22)."""
+    for proc in procs:
+        try:
+            proc.join(max(0.0, deadline - time.monotonic()))
+            if proc.is_alive():
+                proc.kill()
+                proc.join(1.0)
+        except (OSError, ValueError, AssertionError, AttributeError):
+            pass
+    if thread is not None:
+        try:
+            thread.join(max(0.0, deadline - time.monotonic()))
+        except RuntimeError:
+            pass
 
 
 def _remove(path):

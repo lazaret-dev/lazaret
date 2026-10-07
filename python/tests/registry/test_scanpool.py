@@ -8,6 +8,7 @@ in the caller's process; a hung scan ends its workers; a pool that cannot start 
 behind."""
 
 import concurrent.futures
+import multiprocessing
 import os
 import pickle
 import shutil
@@ -203,6 +204,18 @@ class HandOffTests(Case):
         for proc in procs:
             proc.join(10)
         self.assertFalse(any(proc.is_alive() for proc in procs))
+
+    def test_close_waits_for_the_workers_and_the_thread_it_ended(self):
+        # N-22: the interpreter waits at its exit for a pool's workers and its manager thread, and under load a test
+        # process outlived its time box waiting for them; close ends them and waits (CLOSE_WAIT at most)
+        p = pool(support.behave, jobs=2)
+        p.run(b"ok", "tgz", "npm", 7)
+        procs = list((getattr(p._pool, "_processes", None) or {}).values())
+        pids, thread = [proc.pid for proc in procs], p._pool._executor_manager_thread
+        self.assertTrue(pids and thread is not None and thread.is_alive())
+        p.close()
+        self.assertFalse(thread.is_alive())
+        self.assertTrue({c.pid for c in multiprocessing.active_children()}.isdisjoint(pids))
 
     def test_a_pool_that_never_ran_closes_without_a_word(self):
         p = pool()

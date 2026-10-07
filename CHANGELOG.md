@@ -602,6 +602,10 @@ project is pre-1.0, so the 0.x API may still change.
   entry with two names, are SC-ARCHIVE-PATH (MAJOR); an archive zipfile from Python 3.12 refuses over a
   bad field is INCOMPLETE; and `lazaret guard code` reads the manifest the editor checks and refuses a
   file with more than one entry written as `package.json`.
+- **The guard's scan workers are gone when it is done (N-22).** Closing the worker pool ended its processes
+  and did not wait for them, so the interpreter waited at its exit for workers still starting up and for
+  their pools' threads: under load a test process outlived its time box that way. `close` now waits for
+  what it ended (5 seconds at most) and kills a worker still there.
 - **Archive paths that differ only by case are one file, as macOS and Windows install them (EG-4; rule set
   2.42.0).** Their file systems ignore case and Unicode normalization, so an npm tarball, a wheel or a
   `.vsix` holding `index.js` and then `INDEX.js` installs the second one's bytes as `index.js` there; Lazaret
