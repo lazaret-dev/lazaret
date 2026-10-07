@@ -602,6 +602,11 @@ project is pre-1.0, so the 0.x API may still change.
   entry with two names, are SC-ARCHIVE-PATH (MAJOR); an archive zipfile from Python 3.12 refuses over a
   bad field is INCOMPLETE; and `lazaret guard code` reads the manifest the editor checks and refuses a
   file with more than one entry written as `package.json`.
+- **An extension whose `main` or `browser` names a file outside its folder is INCOMPLETE (EG-3).** VS
+  Code joins the entry to the extension's folder and runs the file wherever it is, with only a warning,
+  so an extension could start code from another extension's folder (a pack member's,
+  `../publisher.name-1.0.0/…`); Lazaret found no entry, and could call it OK with what it runs unread.
+  Such an entry is now SC-UNREAD-CODE (MAJOR), and the verdict INCOMPLETE.
 - **A file over the per-file download limit that its registry declares no size for is INCOMPLETE, not an
   error (N-21).** A Go module's zip (the proxy declares no size before the download), a crate or an npm
   tarball found over the 200 MiB limit as it came made `lazaret-registry scan` fail; it is now left out

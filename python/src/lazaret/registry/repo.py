@@ -1131,6 +1131,24 @@ def vsix_hook_runs(cmd):
     return len(parts) >= 2 and parts[0] == "node" and bool(parts[1])
 
 
+def _vsix_outside_issue(key, target, text):
+    """SC-UNREAD-CODE for an extension whose `main` or `browser` names a file outside its folder (EG-3): the editor
+    runs that file, and the package does not hold it."""
+    lines = lazaret.normalize_newlines(text).split("\n")
+    line = next((n for n, s in enumerate(lines, 1) if f'"{key}"' in s), 1)
+    shown = target if len(target) <= 120 else target[:120] + "…"
+    return lazaret.mk_issue(
+        {"id": UNREAD_CODE_RULE, "name": "Extension code outside the extension", "type": "HOTSPOT", "sev": "MAJOR",
+         "msg": (f'"{key}" names {shown!r}, outside the extension\'s folder: VS Code runs that file when it activates '
+                 f"the extension, the package does not hold it, and what it runs was not read."),
+         "why": ("VS Code joins an extension's `main` (and `browser`) to the extension's folder and runs the file it "
+                 "names wherever that is, warning only that one outside the folder might not be portable. No "
+                 "extension needs one: the code would come from another extension's folder, or from a file "
+                 "written there later, and no scan of this package reads it."),
+         "fix": "Find out which file the extension runs, and read it before installing.",
+         "ref": "CWE-829 · Supply chain"}, "package.json", line, lines)
+
+
 def _vsix_inert_hook(issue):
     """A vscode:uninstall command VS Code does not run (vsix_hook_runs): inventory, not followed."""
     cmd = issue.pop("cmd", None) or ""
@@ -2811,10 +2829,14 @@ class _ArtifactScan:
         for key in ("main", "browser"):
             target = data.get(key)
             if isinstance(target, str) and target.strip():
-                rel = self._resolve(_rel_join(base, target))
+                path = _rel_join(base, target)
+                rel = self._resolve(path)
                 if rel:
                     self.entries.add(rel)
                     self._text_of(rel, "js", False)
+                elif path == ".." or path.startswith("../"):
+                    # (VS Code joins it to the extension's folder and runs what it names, wherever that is)
+                    self.issues.append(_vsix_outside_issue(key, target, self.manifests.get(manifest_rel, "")))
         events = data.get("activationEvents")
         events = [e for e in events[:1000] if isinstance(e, str)] if isinstance(events, list) else []
         self.vsix_startup = next((e for e in events if e in VSIX_STARTUP_EVENTS), None)

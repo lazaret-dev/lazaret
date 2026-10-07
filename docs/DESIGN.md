@@ -1120,7 +1120,10 @@ editor's rules for what runs and when instead of npm's:
 - `main` and `browser` are the entries (an extension with neither runs no
   code: there is no `index.js` default), and they and what they load get
   the import-time test, whose finding says when the editor starts them at
-  every start; the rest of the code gets the use-time test;
+  every start; the rest of the code gets the use-time test. VS Code runs an
+  entry that leaves the extension's folder too (`../other.ext-1.0.0/x.js`,
+  with only a warning), so such an entry is SC-UNREAD-CODE and the
+  extension INCOMPLETE (EG-3): what it runs is not in the package;
 - `vscode:uninstall` is the one script VS Code runs: `node` and a file,
   split on single spaces (`vsix_hook_runs`, VS Code's `parseScript`), once
   the extension has been uninstalled, at the editor's next start. It gets

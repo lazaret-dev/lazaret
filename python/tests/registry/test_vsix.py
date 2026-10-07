@@ -178,6 +178,24 @@ class WhatRunsTests(unittest.TestCase):
         self.assertIn("extension host", found[0]["why"])
         self.assertEqual(res["verdict"], "SUSPICIOUS")
 
+    def test_an_entry_outside_the_extensions_folder_is_said_and_not_cleared(self):
+        # EG-3: VS Code joins main (and browser) to the extension's folder and runs what it names wherever that is,
+        # with a warning only; a pack member's folder is one such place (`../publisher.name-1.0.0/…`)
+        for key, target in (("main", "../example.helper-1.0.0/dist/x.js"), ("main", "./out/../../x.js"),
+                            ("browser", "../x.js")):
+            with self.subTest(key=key, target=target):
+                res = scan({"package.json": ext_manifest(**{key: target}), "out/x.js": "module.exports = 1;\n"})
+                found = issues(res, "SC-UNREAD-CODE")
+                self.assertEqual([(i["name"], i["file"], i["sev"]) for i in found],
+                                 [("Extension code outside the extension", "package.json", "MAJOR")])
+                self.assertIn(f'"{key}" names {target!r}, outside the extension\'s folder', found[0]["msg"])
+                self.assertEqual(res["verdict"], "INCOMPLETE")
+        # inside the folder (a leading '/' is the folder's own root too), a missing file is no finding: the editor
+        # fails to activate the extension
+        for target in ("./missing.js", "/out/missing.js"):
+            with self.subTest(target=target):
+                self.assertEqual(scan({"package.json": ext_manifest(main=target)})["verdict"], "OK")
+
     def test_at_every_start_for_star_and_on_startup_finished(self):
         for event in ("*", "onStartupFinished"):
             with self.subTest(event=event):
