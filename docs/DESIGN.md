@@ -190,7 +190,8 @@ line yourself.
 ```
 lazaret.scanner    rules, taint, cross-file flow, CLI            (lazaret)
 lazaret.registry   npm / PyPI / Go / crates.io package auditing  (lazaret-registry)
-lazaret.registry.guard  pre-install guard for npm/pnpm/yarn/bun/pip/uv   (lazaret guard, lazaret-guard)
+lazaret.registry.guard  pre-install guard for npm/pnpm/yarn/bun/pip/uv/go/cargo   (lazaret guard, lazaret-guard)
+lazaret.registry.editorguard  the guard for VS Code's and its forks' --install-extension (lazaret guard code …)
 lazaret.registry.pmsettings  the package managers' registries, indexes and credentials (guard)
 lazaret.mcp        MCP server                                    (lazaret-mcp)
 lazaret.scanner.sca_feeds / CVE bundle + SCA                     (lazaret-sca)
@@ -913,6 +914,42 @@ named. Every name and version that reaches a URL or a path is checked first
 (`cargosrc.crate_ok`), so a hostile lockfile can name nothing but a crate to
 fetch. The manifests and lockfiles of both are snapshotted and put back when
 anything is blocked.
+
+**VS Code's extensions (0.1.9, E-1).** An editor has no hook either: its
+gallery is its `product.json`, and nothing on its command line or in its
+environment points it elsewhere. So `editorguard.py` does what the editor's
+`--install-extension` does up to the download, and then has the editor
+install the files it checked (`--install-extension FILE.vsix`): what is
+installed is what was scanned, whatever the registry serves next. Which
+version is VS Code's choice, written again in `editorcompat.py` (its
+extension management and its validator, MIT): an installed extension is
+left alone unless `--force` or a version is given; else the newest release
+(`--pre-release`: the newest version) whose file is for the editor's target
+platform (its build's architecture, from `--version`; Alpine from
+`/etc/os-release`) and whose `engines.vscode` takes the editor's VS Code
+version (`--version`'s, or a fork's `vscodeVersion` from its `product.json`;
+a fork that reports only its own version is not checked against engines,
+and the editor checks each file it installs). The registry modules list what
+the editor chooses among (`candidates`, in rounds: the Marketplace's
+latest-only query and then every version, as VS Code asks; Open VSX's query
+API page by page, or one version's files) and give one candidate's file and
+its manifest (`artifact`, `manifest`). What an extension brings is VS Code's
+walk too (`getAllDepsAndPackExtensions`): its dependencies that are not
+installed, built-in extensions counted as installed (they are not in
+`--list-extensions`, so they are read from the app's `extensions/`), and its
+pack's members that the installed version did not list, each at the version
+the editor would take for it, and what those bring in turn, an installed
+member's newest version read from its manifest alone (the editor reads it
+too, and installs what it brings that is missing). The editor applies a list
+of malicious extensions (`controlUrl`) to what it downloads, not to a file it
+is given, so the guard applies it. From VS Code 1.98 the CLI takes
+`--do-not-include-pack-dependencies`, and the guard installs every file in
+one command with it, so the editor fetches nothing; before 1.98 it installs
+wave by wave, each extension after what it brings, so that the editor finds
+them installed and fetches none, and a cycle stops the run. The editor's
+list of installed extensions afterwards is compared with what was checked.
+An extension installed from a file is pinned by the editor (as one installed
+with `@version` is), which keeps it at the version checked.
 
 **The guard's own folders and programs (0.1.9).** cargo, rustup, yarn, npm
 and go read settings from every folder above where they run (a workspace, a

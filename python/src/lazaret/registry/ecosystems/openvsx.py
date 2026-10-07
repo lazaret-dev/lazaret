@@ -27,6 +27,7 @@ Nothing is run."""
 import hashlib
 import re
 
+from lazaret.registry import editorcompat
 from lazaret.registry.ecosystems import base
 
 __all__ = ["OpenVSX", "ECOSYSTEM", "API_HOST", "CONTENT_HOST", "API", "TARGET_PLATFORMS", "MAX_PART"]
@@ -186,12 +187,14 @@ class OpenVSX(base.Ecosystem):
         return tuple(sorted(set(info.get("dependencies") or ()) | set(info.get("bundledExtensions") or ())))
 
     # ---- the history (SC-NEW-DEPENDENCY, E-1's third part)
-    def _query(self, name, fetch, offset, size):
-        """One page of the query API's answer for every version of `name` (one entry per version and platform):
-        (the entries, how many there are in all). FetchError for an answer of another shape."""
+    def _query(self, name, fetch, offset, size, version=None):
+        """One page of the query API's answer for every version of `name` (one entry per version and platform), or for
+        one `version`'s (its files only, `extensionVersion`): (the entries, how many there are in all). FetchError for
+        an answer of another shape."""
         ns, ext = self.check_name(name).split(".")
-        url = (f"{API}/-/query?extensionId={self.segment(ns)}.{self.segment(ext)}&includeAllVersions=true"
-               f"&size={size}&offset={offset}")
+        url = (f"{API}/-/query?extensionId={self.segment(ns)}.{self.segment(ext)}"
+               + (f"&extensionVersion={self.segment(version)}" if version is not None else "&includeAllVersions=true")
+               + f"&size={size}&offset={offset}")
         doc = fetch.json(url, accept="application/json")
         entries = doc.get("extensions") if isinstance(doc, dict) else None
         total = doc.get("totalSize") if isinstance(doc, dict) else None
@@ -261,6 +264,64 @@ class OpenVSX(base.Ecosystem):
             kept = self.history(name, fetch)
             times = sorted(k[1] for k in kept)
         return (times[0] if times else None), tuple(sorted({k[4] for k in kept if k[4]}))
+
+    # ---- what an editor chooses among (`lazaret guard code --install-extension`, E-1's fifth part)
+    def _candidate(self, e):
+        """A query entry as a file the editor may install (editorcompat.Candidate), with its file's, its digest's and
+        its manifest's URLs; None for an entry without a version, a platform, or those URLs, or one the registry does
+        not serve."""
+        try:
+            version = self.check_version(e.get("version")) if isinstance(e.get("version"), str) else None
+        except base.SpecError:
+            version = None
+        platform = e.get("targetPlatform", "universal")
+        files = e.get("files") if isinstance(e.get("files"), dict) else {}
+        if version is None or not (isinstance(platform, str) and _PLATFORM_RE.fullmatch(platform)) \
+                or e.get("downloadable") is False \
+                or not all(isinstance(files.get(k), str) for k in ("download", "sha256")):
+            return None
+        engines = e.get("engines") if isinstance(e.get("engines"), dict) else {}
+        refs = {"download": files["download"], "sha256": files["sha256"], "manifest": _text(files.get("manifest"), 2048)}
+        return editorcompat.Candidate(version, platform, _text(engines.get("vscode"), 100), e.get("preRelease") is True,
+                                      base.parse_time(e.get("timestamp")), refs)
+
+    def candidates(self, name, fetch, version=None):
+        """The files of `name`'s versions as an editor chooses among them (editorcompat.choose), in rounds: an iterator
+        of lists, each holding every file read so far. With `version`, one round: that version's files. Else page by
+        page, newest first as the registry answers, at most MAX_HISTORY entries; the caller stops at the first round
+        that holds the file it wants. NotFound when the registry lists no file of the extension (or of the version)."""
+        offset, out = 0, []
+        while offset < MAX_HISTORY:
+            entries, total = self._query(name, fetch, offset, HISTORY_PAGE if version is None else MAX_PLATFORMS, version)
+            if total == 0 and offset == 0:
+                raise base.NotFound("openvsx: the registry has no such extension" if version is None
+                                    else "openvsx: the registry has no such version of the extension")
+            out.extend(c for c in (self._candidate(e) for e in entries) if c is not None)
+            yield list(out)
+            if version is not None:
+                return
+            offset += HISTORY_PAGE
+            if offset >= total or not entries:
+                return
+
+    def artifact(self, name, candidate, fetch):
+        """The file of a candidate as `resolve` gives each platform's: its URL checked, its SHA-256 read from the
+        registry (the `.sha256` beside it), for `verify`."""
+        ns, ext = self.check_name(name).split(".")
+        platform = candidate.platform
+        filename = f"{ns}.{ext}-{candidate.version}" + ("" if platform == "universal" else f"@{platform}") + ".vsix"
+        download = fetch.check_url(candidate.entry["download"])
+        entry = {"sha256": self._digest(candidate.entry["sha256"], fetch), "platform": platform}
+        return {"url": download, "container": "zip", "artifact": "vsix", "entry": entry, "filename": filename}
+
+    def manifest(self, name, candidate, fetch):
+        """A candidate's package.json as the registry serves it beside the file (what the editor reads of a version
+        it does not download: the extensions an installed pack member's newest version brings). FetchError when the
+        registry names none."""
+        url = candidate.entry.get("manifest")
+        if not url:
+            raise base.FetchError("openvsx: the registry names no manifest for the version")
+        return fetch.json(url, accept="application/json")
 
     # ---- archives
     def container(self, filename):

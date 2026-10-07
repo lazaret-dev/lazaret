@@ -32,6 +32,7 @@ Nothing is run."""
 
 import re
 
+from lazaret.registry import editorcompat
 from lazaret.registry.ecosystems import base
 from lazaret.registry.ecosystems.openvsx import TARGET_PLATFORMS
 
@@ -48,6 +49,8 @@ VSIX_ASSET = "Microsoft.VisualStudio.Services.VSIXPackage"
 DEPENDENCIES = "Microsoft.VisualStudio.Code.ExtensionDependencies"
 EXTENSION_PACK = "Microsoft.VisualStudio.Code.ExtensionPack"
 PRE_RELEASE = "Microsoft.VisualStudio.Code.PreRelease"
+ENGINE = "Microsoft.VisualStudio.Code.Engine"
+MANIFEST_ASSET = "Microsoft.VisualStudio.Code.Manifest"
 #: IncludeVersions | IncludeFiles | IncludeVersionProperties | ExcludeNonValidated | IncludeAssetUri | IncludeStatistics
 QUERY_FLAGS = 1 | 2 | 16 | 32 | 128 | 256
 #: IncludeLatestPrereleaseAndStableVersionOnly
@@ -130,7 +133,7 @@ class Marketplace(base.Ecosystem):
         if not isinstance(exts, list):
             raise base.FetchError("vscode: the Marketplace's answer is not a list of extensions")
         if not exts:
-            raise base.FetchError("vscode: the Marketplace has no such extension")
+            raise base.NotFound("vscode: the Marketplace has no such extension")
         ext = exts[0]
         publisher = ext.get("publisher") if isinstance(ext, dict) else None
         pub = publisher.get("publisherName") if isinstance(publisher, dict) else None
@@ -273,6 +276,62 @@ class Marketplace(base.Ecosystem):
         ext = self._ask(self.check_name(name), fetch, 0)
         times = sorted(t for t in (base.parse_time(ext.get(k)) for k in ("publishedDate", "releaseDate")) if t)
         return (times[0] if times else None), (ext["publisher"]["publisherName"],)
+
+    # ---- what an editor chooses among (`lazaret guard code --install-extension`, E-1's fifth part)
+    def _candidates(self, ext):
+        """The version entries of a gallery answer as files the editor may install (editorcompat.Candidate, the entry
+        kept): an entry that names no platform is for every one (`undefined`, as VS Code reads it)."""
+        out = []
+        for v in ext["versions"][:MAX_VERSIONS]:
+            if not isinstance(v, dict):
+                continue
+            try:
+                version = self.check_version(v.get("version")) if isinstance(v.get("version"), str) else None
+            except base.SpecError:
+                version = None
+            platform = v.get("targetPlatform") or "undefined"
+            if version is None or not (isinstance(platform, str) and _PLATFORM_RE.fullmatch(platform)):
+                continue
+            props = _properties(v)
+            out.append(editorcompat.Candidate(version, platform, _text(props.get(ENGINE), 100),
+                                              props.get(PRE_RELEASE, "").lower() == "true",
+                                              base.parse_time(v.get("lastUpdated")), v))
+        return out
+
+    def candidates(self, name, fetch, version=None):
+        """The files of `name`'s versions as an editor chooses among them (editorcompat.choose), in rounds, as VS Code
+        asks the gallery: with no version, first the latest release and pre-release, then, when none of those is the
+        file it wants, every version; with a version, every version (the gallery has no query for one). NotFound when
+        the gallery has no such extension."""
+        name = self.check_name(name)
+        if version is None:
+            yield self._candidates(self._query(name, fetch, latest=True))
+        yield self._candidates(self._query(name, fetch, latest=False))
+
+    def artifact(self, name, candidate, fetch):
+        """The file of a candidate, as `resolve` gives each platform's (no digest: the Marketplace publishes none)."""
+        name = self.check_name(name)
+        platform = "universal" if candidate.platform == "undefined" else candidate.platform
+        filename = f"{name}-{candidate.version}" + ("" if platform == "universal" else f"@{platform}") + ".vsix"
+        return {"url": fetch.check_url(self._vsix_url(candidate.entry, platform)), "container": "zip", "artifact": "vsix",
+                "entry": {"platform": platform}, "filename": filename}
+
+    def manifest(self, name, candidate, fetch):
+        """A candidate's package.json as the gallery serves it (its Manifest asset, else the fallback asset URI's): what
+        the editor reads of a version it does not download."""
+        url = None
+        files = candidate.entry.get("files")
+        if isinstance(files, list):
+            for f in files[:100]:
+                if isinstance(f, dict) and f.get("assetType") == MANIFEST_ASSET and isinstance(f.get("source"), str):
+                    url = f["source"]
+                    break
+        if url is None:
+            fallback = candidate.entry.get("fallbackAssetUri")
+            if not isinstance(fallback, str) or not fallback:
+                raise base.FetchError("vscode: the Marketplace's answer names no manifest for the version")
+            url = f"{fallback.rstrip('/')}/{MANIFEST_ASSET}"
+        return fetch.json(url, accept="application/json")
 
     # ---- archives
     def container(self, filename):

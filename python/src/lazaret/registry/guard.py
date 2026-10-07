@@ -9,6 +9,8 @@
     lazaret guard uvx ruff check .        (also: uv tool run, uv tool install)
     lazaret guard go get example.com/m    (also: go install, build, run, test, vet, list, mod download, mod tidy)
     lazaret guard cargo add serde         (also: cargo update, install, fetch, build, check, test, run, ...)
+    lazaret guard code --install-extension ms-python.python
+                                          (also: code-insiders, codium, cursor, windsurf, kiro, positron)
     lazaret-guard …                       (the same command under its own name)
 
 npm, pnpm, yarn, Bun and uv's project commands: the tool resolves first,
@@ -65,6 +67,12 @@ from git, a vendor folder or a local registry, from a registry with a git index,
 INCOMPLETE, not checked. Not wrapped: `cargo install` of a git repository or a folder, --registry, --index, and the
 credentials of registries. What the scan reads in a crate is what it reads in any archive; its Rust rules (build.rs,
 procedural macros) read `.rs` files once the engine routes them (0.1.9, S-4).
+
+VS Code and the editors built on it (`<editor> --install-extension ID[@VERSION] | FILE.vsix`): the version the editor would
+install, and every extension it brings (its extensionDependencies and extensionPack, as the editor walks them), from the
+registry the editor installs from (the Visual Studio Marketplace for VS Code, Open VSX for the others; each Open VSX file
+checked against its published SHA-256), each scanned as `lazaret FILE.vsix` scans it and checked against the editor's
+gallery's list of malicious extensions; then the editor installs those files, and nothing else (registry/editorguard.py).
 
 The resolutions made outside the project (cargo install, yarn 1, npm install -g, go install pkg@version, --plan) are made
 in a folder of the user's own (private_scratch), and the package manager is found in PATH's absolute folders only
@@ -129,7 +137,9 @@ DEFAULT_JOBS = max(1, min(4, os.cpu_count() or 1))
 #: Seconds a tool may wait on the local index while a file is scanned
 TOOL_TIMEOUT = 600
 USER_AGENT = "lazaret-guard/1.0"
-TOOLS = ("npm", "pnpm", "yarn", "bun", "pip", "pip3", "uv", "uvx", "go", "cargo")
+#: The editors whose --install-extension the guard wraps (registry/editorguard.py)
+EDITOR_TOOLS = ("code", "code-insiders", "codium", "cursor", "windsurf", "kiro", "positron")
+TOOLS = ("npm", "pnpm", "yarn", "bun", "pip", "pip3", "uv", "uvx", "go", "cargo") + EDITOR_TOOLS
 
 _DURATION_RE = re.compile(r"^\s*(\d+(?:\.\d+)?)\s*([smhdw]?)\s*$", re.I)
 _UNITS = {"": 86400, "s": 1, "m": 60, "h": 3600, "d": 86400, "w": 7 * 86400}
@@ -4704,12 +4714,13 @@ def finish(ctx, installed, restored=(), code=None, index=None):
 def build_parser():
     ap = argparse.ArgumentParser(
         prog="lazaret guard",
-        description="Check what npm, pnpm, yarn, Bun, pip, uv, go or cargo is about to install — resolve, fetch, scan in "
-                    "memory — and block it before it runs when a package is SUSPICIOUS or too new.",
+        description="Check what npm, pnpm, yarn, Bun, pip, uv, go, cargo or a VS Code editor is about to install — "
+                    "resolve, fetch, scan in memory — and block it before it runs when a package is SUSPICIOUS or too "
+                    "new.",
         epilog="Examples: lazaret guard npm install express · lazaret guard pip install -r requirements.txt · "
                "lazaret guard uv add httpx · lazaret guard yarn add lodash · lazaret guard uvx ruff check . · "
                "lazaret guard go get example.com/m@v1.2.3 · lazaret guard cargo install --locked ripgrep · "
-               "lazaret guard --min-age 7d pnpm add react")
+               "lazaret guard code --install-extension ms-python.python · lazaret guard --min-age 7d pnpm add react")
     ap.add_argument("--version", action="version", version=f"lazaret guard {lazaret.VERSION}")
     ap.add_argument("--min-age", default="2d", metavar="AGE",
                     help="hold back or block releases younger than this (default 2d; s, m, h, d, w; 0 turns it off)")
@@ -4726,6 +4737,9 @@ def build_parser():
     ap.add_argument("--from-plan", action="store_true",
                     help="pip: install the files that were scanned, from a folder, instead of resolving and "
                          "downloading again (needs wheels only; otherwise pip goes through the index as usual)")
+    ap.add_argument("--gallery", choices=("vscode", "openvsx"), default=None,
+                    help="an editor's extensions: the registry to read them from (vscode: the Visual Studio "
+                         "Marketplace; openvsx: Open VSX); by default the one the editor installs from")
     ap.add_argument("--json", metavar="PATH", help="write what was checked, as JSON")
     ap.add_argument("--keepalive", action="store_true",
                     help="reuse connections between the guard's requests (experimental: with --timings, compare "
@@ -4745,7 +4759,7 @@ def build_parser():
                          f"(default {scanpool.DEFAULT_MEMORY_MB}; 0 for none); a scan over it is not cleared")
     ap.add_argument("--scan-timeout", type=float, default=repo.SCAN_TIMEOUT, metavar="SEC",
                     help=f"seconds to scan one artifact (default {repo.SCAN_TIMEOUT:g})")
-    ap.add_argument("tool", choices=TOOLS, help="the package manager")
+    ap.add_argument("tool", choices=TOOLS, help="the package manager, or the editor")
     ap.add_argument("args", nargs=argparse.REMAINDER, help="its command, as you would type it")
     return ap
 
@@ -4786,6 +4800,8 @@ def _run(opts):
         ctx.say(f"lazaret guard: {tool} {' '.join(args)}".rstrip())
         if opts.from_plan and tool != "pip":
             ctx.say(f"lazaret guard: --from-plan is for pip; {tool} goes through the index as usual")
+        if getattr(opts, "gallery", None) and tool not in EDITOR_TOOLS:
+            ctx.say(f"lazaret guard: --gallery is for an editor's extensions; {tool} goes on as usual")
         if tool in ("npm", "pnpm"):
             return guard_npm(ctx, tool, args)
         if tool == "yarn":
@@ -4796,6 +4812,9 @@ def _run(opts):
             return guard_go(ctx, args)
         if tool == "cargo":
             return guard_cargo(ctx, args)
+        if tool in EDITOR_TOOLS:
+            from lazaret.registry import editorguard
+            return editorguard.guard_editor(ctx, tool, args, getattr(opts, "gallery", None))
         if tool == "uv" and args[:1] and args[0] in UV_PROJECT:
             return guard_uv_project(ctx, args)
         if tool == "uvx" or (tool == "uv" and args[:1] == ["tool"] and args[1:2] in (["run"], ["install"])):

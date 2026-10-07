@@ -225,7 +225,10 @@ export function run(argv, io = {}) {
   }
 }
 
-const GUARD_TOOLS = ["npm", "pnpm", "pip", "pip3", "uv"];
+// (the Python package's lazaret._cli.GUARD_TOOLS: the package managers, and the editors whose
+// --install-extension it wraps)
+const GUARD_TOOLS = ["npm", "pnpm", "yarn", "bun", "pip", "pip3", "uv", "uvx", "go", "cargo",
+  "code", "code-insiders", "codium", "cursor", "windsurf", "kiro", "positron"];
 
 /** `lazaret guard <tool> …`, the Python package's install guard: a package
  * manager after `guard`, or only options (or nothing) when no path named

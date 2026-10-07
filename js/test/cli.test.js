@@ -38,7 +38,8 @@ test("a bare non-directory argument is a usage error (exit 2)", () => {
 });
 
 test("lazaret guard points to the Python package (exit 2)", () => {
-  for (const argv of [["guard", "npm", "install", "express"], ["guard", "--plan", "pip", "install", "x"]]) {
+  for (const argv of [["guard", "npm", "install", "express"], ["guard", "--plan", "pip", "install", "x"],
+    ["guard", "cargo", "build"], ["guard", "code", "--install-extension", "ms-python.python"]]) {
     const r = capture(argv);
     assert.equal(r.code, 2);
     assert.match(r.err, /lazaret guard comes with the Python package: pip install lazaret/);

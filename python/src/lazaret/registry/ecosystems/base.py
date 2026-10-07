@@ -26,7 +26,7 @@ import urllib.parse
 
 from lazaret.scanner import core as lazaret
 
-__all__ = ["SpecError", "FetchError", "DigestError", "Resolution", "RunTargets", "Declared", "Ecosystem", "Fetch", "DownloadBudget",
+__all__ = ["SpecError", "FetchError", "NotFound", "DigestError", "Resolution", "RunTargets", "Declared", "Ecosystem", "Fetch", "DownloadBudget",
            "host_allowed",
            "MAX_DOCUMENT_BYTES", "MAX_ARTIFACT_BYTES", "MAX_REDIRECTS", "METADATA_TIMEOUT", "DOWNLOAD_TIMEOUT",
            "VERSION_RE", "show", "ascii_name", "HOSTILE_NAMES", "HOSTILE_VERSIONS", "finish_member_path", "top_directory_stripped",
@@ -52,6 +52,11 @@ class FetchError(ValueError):
     """A fetch was refused (bad scheme or host) or exceeded a size budget. `status` is the HTTP status when the
     server answered with an error."""
     status = None
+
+
+class NotFound(FetchError):
+    """The registry answered that it has no such package (or no such version of it): an answer, not a failure to
+    get one."""
 
 
 class DigestError(ValueError):

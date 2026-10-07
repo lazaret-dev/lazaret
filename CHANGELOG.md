@@ -76,6 +76,25 @@ project is pre-1.0, so the 0.x API may still change.
   terminal shows it. `lazaret-registry` and the MCP tool; not the guard yet.
   `LAZARET_NO_PROVENANCE=1` turns it off; `LAZARET_SIGSTORE_ROOT` and `LAZARET_NPM_KEYS` name
   newer trust.
+- **`lazaret guard code --install-extension` (E-1's fifth part), and `code-insiders`, `codium`, `cursor`,
+  `windsurf`, `kiro` and `positron`.** The guard takes the version the editor would install, as VS Code
+  chooses it (an installed extension left alone unless `--force` or a version is given; else the newest
+  release, or with `--pre-release` or `@prerelease` the newest version, that has a file for the editor's
+  platform and whose `engines.vscode` takes the editor's VS Code version), and every extension it brings,
+  as the editor walks them (its `extensionDependencies` that are not installed, built-in ones counting as
+  installed, and its `extensionPack`'s members, each at the version the editor would take, and what those
+  bring). Each file comes from the registry the editor installs from (the Marketplace for VS Code, Open VSX
+  for the others, each Open VSX file checked against its published SHA-256; `--gallery` chooses), and is
+  scanned as `lazaret FILE.vsix` scans it, with `--min-age`, `--trust`, `--allow-new` and `--block-warn`,
+  and checked against the editor's gallery's list of malicious extensions (Microsoft's for the
+  Marketplace), which the editor does not apply to a file. Nothing is installed when anything is blocked
+  (or under `--plan`); otherwise the editor installs exactly those files (with
+  `--do-not-include-pack-dependencies` from VS Code 1.98 on; before that, each extension after what it
+  brings), and what it then lists as installed is compared with what was checked. A `.vsix` on the
+  command line is scanned and installed from the guard's copy. An extension installed from a file is
+  pinned by the editor, so it stays at the version checked. `--update-extensions` is not wrapped yet. The
+  npm package's `lazaret guard`, which points to the Python package, now knows every tool the guard wraps
+  (it knew npm, pnpm, pip and uv only, and took `lazaret guard cargo build` for a scan of a folder).
 - **VS Code extensions named like a popular one's, and a release that brings a brand-new one (E-1's third
   part).** An extension is named `publisher.name`, and anyone can create a publisher. Its identifier, or
   one it brings (`extensionDependencies`, `extensionPack`), one change from a most-installed extension's of

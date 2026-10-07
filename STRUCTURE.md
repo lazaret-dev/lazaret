@@ -114,6 +114,11 @@ python/
 │   │   ├── guard.py        the install guard (`lazaret guard`, `lazaret-guard`):
 │   │   │                   checks what npm / pnpm / yarn / Bun / pip / uv / go /
 │   │   │                   cargo would install
+│   │   ├── editorguard.py  `lazaret guard code --install-extension` (and the
+│   │   │                   editors built on VS Code): the extensions checked,
+│   │   │                   then the editor installs those files
+│   │   ├── editorcompat.py which version of an extension an editor installs
+│   │   │                   (its platform, `engines.vscode`), as VS Code chooses
 │   │   ├── scanpool.py     the guard's scan workers and their limits
 │   │   ├── keepalive.py    kept-open connections for the guard (`--keepalive`)
 │   │   ├── goproxy.py      GOPROXY lists, module paths and the proxy protocol's
