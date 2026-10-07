@@ -532,6 +532,12 @@ project is pre-1.0, so the 0.x API may still change.
   stays INCOMPLETE and goes through as before. The scan's result says why it is INCOMPLETE (`incomplete`).
   Of the 1,205 popular releases, the one INCOMPLETE (`@img/sharp-libvips-linuxmusl-x64`, for its library)
   still goes through.
+- **A release without the provenance the release before it had is blocked by the guard (decision 13).** It is
+  WARN, as a report says it, and blocked while it is newer than 30 days, as pnpm's `trustPolicy:
+  no-downgrade` fails such an install (ultralytics 8.3.45 and 8.3.46 were uploaded with a stolen token and had
+  none of the attestations the releases before them had); `--trust NAME` lets one through. Measured: one
+  benign drop among the 1,205 popular releases (why-is-node-running 3.2.2), and none within 30 days of
+  publishing across three npm projects and three Python sets (952 releases).
 - **Code received over the network and run out of sight says so too (GR-8's follow-up; rule set 2.44.0).**
   In Go and Rust code, a shell or a program handed what a server sent and started with its window hidden,
   no console or its output sent to null: "runs code it receives over the network, out of sight (no window,

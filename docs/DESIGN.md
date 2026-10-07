@@ -1498,10 +1498,12 @@ provenance and this one has none (a release's, on PyPI: any of its files
 listed with provenance, as for the release before, whichever file is
 scanned: EG-17), SC-PROVENANCE-DROPPED; both verified,
 from repositories with different IDs (or URIs, without IDs) of different
-owners, SC-PROVENANCE-REPO-CHANGED (both MAJOR; decision 13 asks whether
-DROPPED should be CRITICAL). A repository of the same owner is INFO: on the
-popular set's 1,205 releases the two changes of repository were both
-within their owner (scikit-learn 1.9.1 from its release repository,
+owners, SC-PROVENANCE-REPO-CHANGED (both MAJOR; the guard blocks a
+DROPPED release in its window, `Context.provenance_block`, as pnpm's
+`trustPolicy: no-downgrade` fails an install, with `--trust` the way out,
+and the verdict stays WARN: decision 13, John, Oct 7). A repository of
+the same owner is INFO: on the popular set's 1,205 releases the two
+changes of repository were both within their owner (scikit-learn 1.9.1 from its release repository,
 @rolldown/pluginutils 1.0.1 from a new plugins repository), and the one
 drop was why-is-node-running 3.2.2, after two releases with provenance;
 259 npm and 171 PyPI releases verified, none invalid or unchecked. The

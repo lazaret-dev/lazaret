@@ -85,8 +85,9 @@ records them, each to the newest version it would take), checked and installed t
 
 A release from npm's or PyPI's public registry published less than PROVENANCE_DAYS (30) ago also gets the registry's
 provenance check (registry/provenance.py, NET-1): an attestation that does not hold for the file is SUSPICIOUS (it is
-blocked), a release with none of the provenance the release before it had, or with provenance from another owner's
-repository, is WARN (--block-warn blocks it); --json says what was found. LAZARET_NO_PROVENANCE=1 turns it off. A
+blocked); a release with none of the provenance the release before it had is WARN and blocked (decision 13: as pnpm's
+trustPolicy no-downgrade; --trust lets it through), and one with provenance from another owner's repository WARN
+(--block-warn blocks it); --json says what was found. LAZARET_NO_PROVENANCE=1 turns it off. A
 verdict is cached with whether that check ran to the end: one cached while the registry's answers could not be read,
 or with the check off, is scanned and checked again while the release is in that window (EG-10).
 
@@ -704,6 +705,8 @@ def with_provenance(check, hit, eco, report):
     issues, summary = provenance_.release_issues(eco, check.name, check.version, report)
     check.provenance = summary
     hit = {**hit, "provenance": provenance_.complete(report)}
+    if any(i["rule"] == "SC-PROVENANCE-DROPPED" for i in issues):
+        hit["dropped"] = True                       # (the guard blocks it in the window: decision 13)
     found = sorted((i for i in issues if i["sev"] in ("CRITICAL", "MAJOR")), key=lambda i: _SEV_RANK[i["sev"]])
     if not found:
         return hit
@@ -759,6 +762,8 @@ class VerdictCache:
                               "published": iso(published) if published else None}
             if hit.get("provenance") is True:     # (the provenance check ran to the end: EG-10)
                 self.data[key]["provenance"] = True
+            if hit.get("dropped") is True:         # (a release without the provenance before it: decision 13)
+                self.data[key]["dropped"] = True
             kinds = [k for k in hit.get("incomplete") or () if k in repo.INCOMPLETE_KINDS]
             if kinds:                              # (why it is INCOMPLETE: the guard blocks it, T-1)
                 self.data[key]["incomplete"] = kinds
@@ -1434,6 +1439,15 @@ class Context:
         elif check.verdict in ("WARN", "INCOMPLETE") and self.opts.block_warn:
             self.block(check, f"{check.verdict} (--block-warn): {check.reason}")
 
+    def provenance_block(self, check, hit, published):
+        """Decision 13: a release published without the provenance the release before it had (SC-PROVENANCE-DROPPED,
+        which a report gives as WARN) blocks the install while it is in the window the guard checks provenance in
+        (PROVENANCE_DAYS), as pnpm's `trustPolicy: no-downgrade` fails one; --trust lets it through. Its verdict
+        stays WARN: a release pipeline moved is one too."""
+        if hit.get("dropped") and provenance_due(published):
+            self.block(check, f"no provenance, though the release before it had: not published the way that one was "
+                              f"(blocked in its first {PROVENANCE_DAYS} days; --trust {check.name} lets it through)")
+
     def age_check(self, check, published):
         """Block a release younger than --min-age (unless --allow-new names it). One whose publish time is not known (a
         mirror that does not say, an answer that failed) is said at the end of the run, and blocked under --block-warn: it
@@ -1599,6 +1613,7 @@ def check_npm_package(ctx, fetcher, pkg):
         ctx.scanner.remember(key, hit, published)
         ctx.scanner.remember(alt, hit, published)
         ctx.apply(check, hit)
+        ctx.provenance_block(check, hit, published)
         ctx.age_check(check, published)
     except (repo.FetchError, repo.SpecError, ValueError) as exc:
         ctx.not_checked(check, exc)
@@ -1703,6 +1718,7 @@ def check_file(ctx, fetcher, name, version, f):
                                                                              provenance_fetch(fetcher)))
         ctx.scanner.remember(key, hit, published)
         ctx.apply(check, hit)
+        ctx.provenance_block(check, hit, published)
     except (repo.FetchError, ValueError) as exc:
         ctx.not_checked(check, exc)
     ctx.age_check(check, published)
@@ -1947,6 +1963,7 @@ class PypiIndex:
                             info["project"], info["version"], [(info["filename"], sha)], provenance_fetch(self.fetcher)))
                     self.ctx.scanner.remember(key, hit, info["published"])
                     self.ctx.apply(check, hit)
+                    self.ctx.provenance_block(check, hit, info["published"])
                     self.ctx.age_check(check, info["published"])
                     if check.blocked:
                         _remove_quietly(spooled)

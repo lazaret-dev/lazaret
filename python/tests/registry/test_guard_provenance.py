@@ -107,18 +107,35 @@ class NpmTests(unittest.TestCase):
                          [NPM + "-/npm/v1/attestations/sigstore@2.2.0", NPM + "-/npm/v1/attestations/sigstore@4.0.0",
                           NPM + "sigstore"])
 
-    def test_a_release_without_the_provenance_the_one_before_had_is_a_warning(self):
+    def test_a_release_without_the_provenance_the_one_before_had_is_blocked(self):
+        # (decision 13: WARN, as a report says it, and blocked while in the window, as pnpm's trustPolicy no-downgrade
+        # fails an install; --trust lets it through)
         data = b"another tarball"
         later = TP.npm_manifest("4.0.1", attested=False, data=data)
         manifests = [TP.npm_manifest(v) for v in TP.TARBALLS] + [later]
         check, _, ctx = self.check("4.0.1", data, manifests)
-        self.assertEqual((check.verdict, check.blocked), ("WARN", []))
+        self.assertEqual(check.verdict, "WARN")
+        self.assertEqual(check.blocked, ["no provenance, though the release before it had: not published the way that "
+                                         "one was (blocked in its first 30 days; --trust sigstore lets it through)"])
         self.assertIn("4.0.1 has no provenance, though 4.0.0, the release before it, has", check.reason)
         self.assertTrue(check.indicators[0].startswith("SC-PROVENANCE-DROPPED (MAJOR)"), check.indicators)
-        self.assertEqual(ctx.scanner.cache[guard.VerdictCache.key("npm", "sigstore", "4.0.1", f"sha512-{sri(data)[7:]}")]
-                         ["verdict"], "WARN")                                          # (kept with the verdict)
+        kept = ctx.scanner.cache[guard.VerdictCache.key("npm", "sigstore", "4.0.1", f"sha512-{sri(data)[7:]}")]
+        self.assertEqual((kept["verdict"], kept["dropped"]), ("WARN", True))           # (kept with the verdict)
+        check, _, _ = self.check("4.0.1", data, manifests, trust=["sigstore"])
+        self.assertEqual((check.blocked, check.trusted), ([], True))
         check, _, _ = self.check("4.0.1", data, manifests, block_warn=True)
-        self.assertEqual(check.blocked, [f"WARN (--block-warn): {check.reason}"])
+        self.assertEqual(check.blocked[0], f"WARN (--block-warn): {check.reason}")
+        # (from the cache: blocked while the release is in the window, and not after; nor with the check off)
+        cache = {guard.VerdictCache.key("npm", "sigstore", "4.0.1", f"sha512-{sri(data)[7:]}"): dict(
+            kept, published=guard.iso(days_ago(5)))}
+        check, fetcher, ctx = self.check("4.0.1", data, manifests, cache=cache)
+        self.assertEqual((ctx.scanner.scans, len(check.blocked)), (0, 1))
+        old = {k: dict(v, published=guard.iso(days_ago(guard.PROVENANCE_DAYS + 1))) for k, v in cache.items()}
+        check, _, _ = self.check("4.0.1", data, manifests, cache=old, published=days_ago(guard.PROVENANCE_DAYS + 1))
+        self.assertEqual((check.verdict, check.blocked), ("WARN", []))
+        with mock.patch.dict(os.environ, {provenance.OFF_ENV: "1"}):
+            check, _, _ = self.check("4.0.1", data, manifests, cache=cache)
+        self.assertEqual((check.verdict, check.blocked), ("WARN", []))
 
     def test_attestations_that_do_not_hold_for_the_tarball_block_it(self):
         data = b"another tarball"
@@ -233,6 +250,7 @@ class PyPITests(unittest.TestCase):
         check = self.lockfile_check("0.0.31", self.LATER, b"x", days_ago(5))
         self.assertEqual(check.verdict, "WARN")
         self.assertIn("0.0.31 has no provenance, though 0.0.30, the release before it, has", check.reason)
+        self.assertEqual(len(check.blocked), 1)                                        # (decision 13)
         check = self.lockfile_check("0.0.31", self.LATER, b"x", days_ago(guard.PROVENANCE_DAYS + 1))
         self.assertEqual((check.verdict, check.provenance), ("OK", None))
 
@@ -268,13 +286,13 @@ class PyPITests(unittest.TestCase):
         index.page("pypi-attestations")
         numbers = {i["filename"]: n for n, i in index.files.items()}
         check, spooled = index.scan(numbers[self.LATER])
-        self.assertEqual((check.verdict, check.blocked), ("WARN", []))
+        self.assertEqual((check.verdict, len(check.blocked), spooled), ("WARN", 1, None))      # (decision 13)
+        check, spooled = index.scan(numbers[TP.WHEEL_NAME])
         self.assertIsNotNone(spooled)
-        check, _ = index.scan(numbers[TP.WHEEL_NAME])
         self.assertEqual(check.verdict, "OK")
         self.assertEqual(check.provenance["files"], [{"filename": TP.WHEEL_NAME, "status": "verified"}])
         # (checked after the file's bytes leave the scanner's budget; a file it blocks leaves nothing in the spool)
-        ctx = context(tool="pip", min_age=0, block_warn=True)
+        ctx = context(tool="pip", min_age=0)
         ctx.scanner.close()
         ctx.scanner = OkScanner()
         index = guard.PypiIndex(ctx, fetcher, spool, upstream)
@@ -285,6 +303,16 @@ class PyPITests(unittest.TestCase):
         self.assertEqual((check.verdict, spooled), ("WARN", None))
         self.assertTrue(check.blocked)
         self.assertEqual(set(os.listdir(spool)), before)
+        # (with --trust: installed, and spooled)
+        ctx = context(tool="pip", min_age=0, trust=["pypi-attestations"])
+        ctx.scanner.close()
+        ctx.scanner = OkScanner()
+        index = guard.PypiIndex(ctx, fetcher, spool, upstream)
+        index.page("pypi-attestations")
+        numbers = {i["filename"]: n for n, i in index.files.items()}
+        check, spooled = index.scan(numbers[self.LATER])
+        self.assertEqual((check.blocked, check.trusted), ([], True))
+        self.assertIsNotNone(spooled)
 
 
 class MergeTests(unittest.TestCase):
