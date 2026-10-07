@@ -175,10 +175,11 @@ trees). Source files and manifests over 16,000,000 bytes get SC-TRUNCATED instea
 (`--max-source-bytes` or `LAZARET_MAX_SOURCE_BYTES` changes the limit, for the MCP server and the
 registry scanner too; the browser dashboard keeps 2,000,000); other large files are classified from
 a header sample. Bundles in `node_modules` fit: typescript's `lib/typescript.js` is 9.1 MB and scans in
-a few seconds. Each file also has a 30-second time budget, checked inside each rule's match loop (SC-TRUNCATED
-"scan time budget exceeded" if it is ever hit — a backstop; the rules are linear-time), and a file whose
-scan fails with an internal error is SC-TRUNCATED too ("its scan failed"): the rest is still scanned and
-reported, and the gate fails. A `binding.gyp` lists
+a few seconds. A source file's scan is bounded by the engine's work budget, not by a clock, so a file gets
+the same findings on every machine (SC-TRUNCATED "reading it spent the engine's work budget" if it is ever
+hit — a backstop; the rules are linear-time); a config or data file's scan has a 30-second time budget
+(SC-TRUNCATED "scan time budget exceeded"). A file whose scan fails with an internal error is SC-TRUNCATED
+too ("its scan failed"): the rest is still scanned and reported, and the gate fails. A `binding.gyp` lists
 at most 100 install-hook findings (one more sums up the rest, at their highest severity) and is SC-TRUNCATED
 past 100,000 values or 2,000,000 characters of commands.
 
