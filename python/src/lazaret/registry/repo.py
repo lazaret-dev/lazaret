@@ -1279,6 +1279,14 @@ def _tar_codec(data, container, artifact):
                                   f"for this format")
 
 
+def _native_program(raw):
+    """Do a member's first bytes say it is a program the system loads (an ELF, Mach-O or PE file, a WebAssembly or DEX
+    module: core.EXEC_MAGIC), rather than code a runtime reads (a bytenode .jsc, a .pyc) or data? Binary bytes only:
+    a text that starts `MZ=1;` is JavaScript."""
+    return lazaret.looks_binary(raw[:2048]) and (any(raw.startswith(sig) for sig, _what in lazaret.EXEC_MAGIC)
+                                                 or raw.startswith(b"MZ"))
+
+
 def case_fold(rel):
     """A member's path as file systems that ignore case and Unicode normalization compare it (macOS's, Windows'):
     two paths with the same fold are one file there (EG-4)."""
@@ -2019,7 +2027,8 @@ TRUNCATION_RULES = ("SC-TRUNCATED", "SC-MANIFEST-UNPARSEABLE", "SC-UNREAD-CODE")
 # finish a file or a step (its work budget spent on the input, an internal
 # error); "code", code that runs, or a source file, a manifest or a reader's
 # code, not read whole (cut at the size limit, beyond the text budget or a
-# reader's, a hook command longer than is followed, code outside the package);
+# reader's, a hook command longer than is followed, code outside the package,
+# bytecode that runs: a bytenode .jsc);
 # "archive", the archive not read whole (more entries or bytes than are read,
 # a structure that cannot be read on). Each is something a package can be made
 # to do to hide what it holds, unlike a program too large to read, which is
@@ -2428,7 +2437,7 @@ class _ArtifactScan:
         self.shell = {}            # rel -> text of shell scripts
         self.binary = set()        # classified as binary
         self.oversize = set()
-        self.oversize_binary = set()   # oversize members whose first bytes are not text
+        self.native = set()        # members whose first bytes are a program's (ELF, Mach-O, PE, WebAssembly, DEX)
         self.members = set()
         self.manifests = {}        # rel -> text (package.json, binding.gyp, pyproject.toml)
         self.entries = set()       # rels that run when installed / imported
@@ -2625,8 +2634,8 @@ class _ArtifactScan:
                       or (code is not None and ext in code[1] + code[2] and not _never_built(self.artifact, rel)))
         if reason == "member":
             self.oversize.add(rel)
-            if lazaret.looks_binary(raw[:2048]):
-                self.oversize_binary.add(rel)
+            if _native_program(raw):
+                self.native.add(rel)
             if wants_text and not (ext in lazaret.MPEG_TS_EXTS and lazaret._mpeg_ts(raw[:512])):
                 # Verdict integrity (audit C2/G16): a cut-short scan is a
                 # signal, not a clean verdict — whatever the first bytes look like.
@@ -2723,6 +2732,8 @@ class _ArtifactScan:
             return
         if lazaret.looks_binary(raw[:2048]):
             self.binary.add(rel)
+            if _native_program(raw):
+                self.native.add(rel)
             self.classify(rel, raw, size)
             return
         # Text without a source extension: a script by its #! line, or kept
@@ -2867,10 +2878,12 @@ class _ArtifactScan:
             self.truncate(rel, "it runs at install/import time" if rel in self.truncated_at
                           else f"{rel} runs at install/import time but is larger than the "
                                f"{MAX_MEMBER:,}-byte source-scan limit",
-                          None if rel in self.oversize_binary else "code")
+                          None if rel in self.native else "code")
         elif rel in self.binary:
+            # (bytecode or another blob that runs as code, a bytenode .jsc: code no one can read, blocked by the guard;
+            # a program is not, as above)
             self.truncate(rel, f"{rel} runs at install/import time but is not text, so it "
-                               f"could not be scanned")
+                               f"could not be scanned", None if rel in self.native else "code")
         elif rel in self.members:
             # every member lands in one of the sets above; should one ever
             # not, it runs unscanned: never a silent None

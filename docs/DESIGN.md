@@ -841,8 +841,8 @@ blocks (a scan crash is a `ScanError`, never a verdict); only a file over the
 package can be made to hide (T-1, decision 9): the archive's result says why
 it is INCOMPLETE (`incomplete`, of `repo.INCOMPLETE_KINDS`: its deadline
 passed; the engine could not finish a file or a step; code that runs, or a
-source file, a manifest or a reader's code, not read whole; the archive not
-read whole), each something a package controls, as a payload padded past the
+source file, a manifest or a reader's code, not read whole, bytecode that
+runs included; the archive not read whole), each something a package controls, as a payload padded past the
 size limit inside its file does (the Go/Rust review's GO-1). `Context.apply`
 blocks those unless `--allow-incomplete`; a program too large to read (a
 native library a package names) is none of them, and goes through as

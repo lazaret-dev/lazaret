@@ -56,6 +56,15 @@ class WhyTests(unittest.TestCase):
         res = scan(tarball({"package.json": manifest(main="lib/libvips-cpp.so.42"), "lib/libvips-cpp.so.42": ELF}))
         self.assertEqual((res["verdict"], res["incomplete"]), ("INCOMPLETE", []))
 
+    def test_bytecode_that_runs_is_code(self):
+        # (a bytenode .jsc run at install, as the benchmark's @builderius/ai-builder 1.0.3 runs its payload: code no one
+        # can read; a program's bytes are not, above)
+        res = scan(tarball({"package.json": manifest(main="lib/app.jsc"), "lib/app.jsc": b"\xc0\xde\x05\x00" + bytes(range(256)) * 8}))
+        self.assertEqual((res["verdict"], res["incomplete"]), ("INCOMPLETE", ["code"]))
+        # (and a text that starts as a Windows program's would is still a text: `MZ=1;` is JavaScript)
+        res = scan(tarball({"package.json": manifest(main="lib/core.dat"), "lib/core.dat": b"MZ=1;\n" + BIG}))
+        self.assertEqual((res["verdict"], res["incomplete"]), ("INCOMPLETE", ["code"]))
+
     def test_a_scan_that_ran_out_of_time(self):
         files = {"package.json": manifest(main="index.js"), **{f"lib/f{i}.js": f"module.exports = {i};\n"
                                                                  for i in range(60)}}
