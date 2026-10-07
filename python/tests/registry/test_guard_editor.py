@@ -346,6 +346,10 @@ class ManifestTests(unittest.TestCase):
         later = vsix({"package.json": doc}, extra={"extensionpackage.json": ext_manifest(name="c", publisher="a")})
         with self.assertRaisesRegex(ValueError, "more than one of its entries is written as the extension's package"):
             E.vsix_manifest(later)
+        # a twin that differs only by case is the same file on macOS and Windows (EG-4)
+        twin = vsix({"package.json": doc, "Package.JSON": ext_manifest(name="c", publisher="a")})
+        with self.assertRaisesRegex(ValueError, "more than one of its entries is written as the extension's package"):
+            E.vsix_manifest(twin)
 
 
 class ArgsTests(unittest.TestCase):

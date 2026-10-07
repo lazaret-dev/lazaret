@@ -487,7 +487,13 @@ class _Writer:
             while f"{rel}.lazaret-dup{n}" in self.written:
                 n += 1
             out = f"{rel}.lazaret-dup{n}"
-            ck.anomalies.append(("case", rel, f"differs from {self.taken[key]} only in case or form; kept as {out}"))
+            detail = f"differs from {self.taken[key]} only in case or form; kept as {out}"
+            # (the archive's reader names the pair too, as it reads it: one line, with where it was kept, EG-4)
+            same = next((i for i, a in enumerate(ck.anomalies) if a[0] == "case" and a[1] == rel), None)
+            if same is None:
+                ck.anomalies.append(("case", rel, detail))
+            else:
+                ck.anomalies[same] = ("case", rel, detail)
         self.taken.setdefault(key, rel)
         target = os.path.join(self.root, *out.split("/"))
         if os.path.commonpath([self.root, os.path.realpath(os.path.dirname(target))]) != self.root:

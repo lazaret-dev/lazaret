@@ -169,6 +169,26 @@ class PathTests(unittest.TestCase):
                          [("index.js", "MAJOR")])
         self.assertEqual(res["verdict"], "WARN")
 
+    def test_paths_that_differ_only_by_case(self):
+        # EG-4: on macOS and Windows the later entry is written over the earlier, under its name: the main file
+        # runs the twin's bytes there, so the twin gets the import-time test too
+        raw = (tar_member("package/package.json", manifest(main="index.js"))
+               + tar_member("package/index.js", "module.exports = 1;\n")
+               + tar_member("package/INDEX.js", EXFIL_JS) + b"\0" * 1024)
+        res = scan_bytes(gzip.compress(raw))
+        self.assertEqual(res["verdict"], "SUSPICIOUS")
+        self.assertEqual({i["file"] for i in issues(res, "SC-IMPORT-RISK")}, {"INDEX.js"})
+        case = [i for i in issues(res, "SC-ARCHIVE-DUP") if i["name"] == "Archive paths that differ only by case"]
+        self.assertEqual([(i["file"], i["sev"]) for i in case], [("INDEX.js", "MAJOR")])
+        self.assertIn("'index.js'", case[0]["msg"])
+        # Unicode normalization too (macOS's file systems ignore it): é composed, then decomposed
+        raw = (tar_member("package/package.json", manifest()) + tar_member("package/caf\u00e9.js", "1;\n")
+               + tar_member("package/cafe\u0301.js", "2;\n") + b"\0" * 1024)
+        res = scan_bytes(gzip.compress(raw))
+        self.assertEqual(len([i for i in issues(res, "SC-ARCHIVE-DUP")
+                              if i["name"] == "Archive paths that differ only by case"]), 1)
+        self.assertEqual(repo.case_fold("Lib/CAF\u00c9.JS"), repo.case_fold("lib/cafe\u0301.js"))
+
     def test_traversal_entry_is_flagged_not_scanned(self):
         raw = (tar_member("package/index.js", "1;\n") + tar_member("package/../evil.js", PAYLOAD)
                + b"\0" * 1024)

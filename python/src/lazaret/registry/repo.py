@@ -58,6 +58,7 @@ import struct
 import sys
 import tarfile
 import time
+import unicodedata
 import zipfile
 import zlib
 import urllib.error
@@ -266,7 +267,7 @@ SAMPLE = 8192              # header/entropy sample read from oversized files
 #      entry points and hook targets, Python install scripts
 # 2.3: verdict tiers, decoded hex, install-script inspection; 2.2:
 #      verdict-integrity; 2.1: binary-artifact awareness
-ENGINE_VERSION = "2.41.0"
+ENGINE_VERSION = "2.42.0"
 
 # ---------------- The content memo (P-2a, registry/contentcache.py) ----------------
 # One per scan_package run: the engine answers once for content several of a
@@ -1240,6 +1241,12 @@ def _tar_codec(data, container, artifact):
                                   f"for this format")
 
 
+def case_fold(rel):
+    """A member's path as file systems that ignore case and Unicode normalization compare it (macOS's, Windows'):
+    two paths with the same fold are one file there (EG-4)."""
+    return unicodedata.normalize("NFD", rel).casefold()
+
+
 def _note_member(seen, rel, anomalies):
     if rel in seen:
         if seen[rel] == 1:
@@ -1248,6 +1255,11 @@ def _note_member(seen, rel, anomalies):
         seen[rel] += 1
     else:
         seen[rel] = 1
+        first = seen.setdefault(("fold", case_fold(rel)), rel)       # (EG-4; the keys of paths are strings)
+        if first != rel:
+            anomalies.append(("case", rel, f"it differs from {first[:200]!r} only by case or normalization: "
+                                           f"macOS and Windows write the later entry over the earlier, under the "
+                                           f"earlier's name"))
 
 
 def iter_archive(data, container, artifact=None, *, budget=None, anomalies=None):
@@ -2226,6 +2238,11 @@ def _archive_issue(kind, path, detail):
         "noname": ("SC-ARCHIVE-PATH", "Unnamed archive entry",
                    "No extractor can place an entry with no name: installers fail on it or skip it, so "
                    "its bytes are neither installed nor reviewed, and no packaging tool produces one."),
+        "case": ("SC-ARCHIVE-DUP", "Archive paths that differ only by case",
+                 "On macOS and Windows, whose file systems ignore case (and Unicode normalization), two such "
+                 "entries are one file: the later one's bytes under the earlier one's name, so the code that "
+                 "runs there is not the file a listing names. Each was scanned as code that runs when either "
+                 "does; no packaging tool writes such a pair on purpose."),
         "unicode": ("SC-ARCHIVE-PATH", "Archive entry with two names",
                     "A zip entry's Info-ZIP Unicode Path field names it otherwise than its header: VS Code and "
                     "pip from Python 3.12 install it under the field's name, older pips and most listings show "
@@ -2350,6 +2367,7 @@ class _ArtifactScan:
         self.members = set()
         self.manifests = {}        # rel -> text (package.json, binding.gyp, pyproject.toml)
         self.entries = set()       # rels that run when installed / imported
+        self._twins = None         # rel -> the members whose paths differ from it only by case (_case_twins)
         self.install_scripts = set()   # hook targets, setup.py & co (install_script_risk)
         self.startup = set()       # a wheel's sitecustomize / usercustomize
         self.unread = False        # a member the archive's limits left unread
@@ -3797,6 +3815,17 @@ class _ArtifactScan:
             self.unused_dependencies = [_unused.npm_registry_name(dep, spec) for dep, spec in found]
             self.issues.append(_unused_dependency_issue([dep for dep, _spec in found], text))
 
+    def _case_twins(self):
+        """{rel: [the other members whose paths have its case fold]} for the members that have such a twin (EG-4):
+        on macOS and Windows they are one file, whichever entry came last."""
+        if self._twins is None:
+            groups = {}
+            for rel in self.members:
+                groups.setdefault(case_fold(rel), []).append(rel)
+            self._twins = {rel: sorted(t for t in group if t != rel)
+                           for group in groups.values() if len(group) > 1 for rel in group}
+        return self._twins
+
     def _reachable(self):
         """Entry files plus local files they require/import (JS), transitively.
         A file reached this way runs when the package is loaded: one not
@@ -3806,10 +3835,17 @@ class _ArtifactScan:
         # `seen` holds archive members only (at most MAX_FILES) and the deadline
         # is checked per file; the old cap of 10,000 files skipped the walk
         # altogether once exports patterns made that many files entry points
+        twins = self._case_twins()
         seen, queue = set(self.entries), list(self.entries)
         while queue:
             rel = queue.pop()
             self._deadline(rel)
+            for twin in twins.get(rel, ()):
+                # (macOS and Windows write a case twin over the file that runs, under its name: EG-4)
+                if twin not in seen:
+                    seen.add(twin)
+                    self._text_of(twin, self.sources.get(rel, (None, None))[1] or "js", imported=True)
+                    queue.append(twin)
             text, lang = self.sources.get(rel, (None, None))
             if not text or lang != "js":
                 continue

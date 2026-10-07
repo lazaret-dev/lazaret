@@ -602,6 +602,12 @@ project is pre-1.0, so the 0.x API may still change.
   entry with two names, are SC-ARCHIVE-PATH (MAJOR); an archive zipfile from Python 3.12 refuses over a
   bad field is INCOMPLETE; and `lazaret guard code` reads the manifest the editor checks and refuses a
   file with more than one entry written as `package.json`.
+- **Archive paths that differ only by case are one file, as macOS and Windows install them (EG-4; rule set
+  2.42.0).** Their file systems ignore case and Unicode normalization, so an npm tarball, a wheel or a
+  `.vsix` holding `index.js` and then `INDEX.js` installs the second one's bytes as `index.js` there; Lazaret
+  read the main file as the first and the twin as a file nothing loads. Such a pair is now SC-ARCHIVE-DUP
+  (MAJOR), and the twin of a file that runs gets the import-time test too. None of the benchmark's, the
+  popular set's or Part F's releases holds such a pair.
 - **An extension whose `main` or `browser` names a file outside its folder is INCOMPLETE (EG-3).** VS
   Code joins the entry to the extension's folder and runs the file wherever it is, with only a warning,
   so an extension could start code from another extension's folder (a pack member's,

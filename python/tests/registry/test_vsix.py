@@ -178,6 +178,14 @@ class WhatRunsTests(unittest.TestCase):
         self.assertIn("extension host", found[0]["why"])
         self.assertEqual(res["verdict"], "SUSPICIOUS")
 
+    def test_a_case_twin_of_the_main_file_is_read_as_the_main_file(self):
+        # EG-4: on macOS and Windows, out/Extension.js written after out/extension.js is the file main names
+        res = scan({"package.json": ext_manifest(main="./out/extension", activationEvents=["*"]),
+                    "out/extension.js": "module.exports = 1;\n", "out/Extension.js": EXFIL_JS})
+        self.assertEqual(res["verdict"], "SUSPICIOUS")
+        self.assertEqual({i["file"] for i in issues(res, "SC-IMPORT-RISK")}, {"out/Extension.js"})
+        self.assertIn("SC-ARCHIVE-DUP", rules(res))
+
     def test_an_entry_outside_the_extensions_folder_is_said_and_not_cleared(self):
         # EG-3: VS Code joins main (and browser) to the extension's folder and runs what it names wherever that is,
         # with a warning only; a pack member's folder is one such place (`../publisher.name-1.0.0/…`)

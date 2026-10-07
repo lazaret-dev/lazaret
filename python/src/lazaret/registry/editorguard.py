@@ -204,8 +204,8 @@ def vsix_manifest(data):
     """The Manifest of a `.vsix`: its `extension/package.json`, the entry the editor reads by that name when it installs
     the file, by the name yauzl gives an entry (`repo.zip_entry_names`: a Unicode path field's, when one applies).
     ValueError when there is none, when more than one entry is written as the extension's package.json (the editor
-    checks the first and the extension runs with the last: `repo.canonical_member_path`'s `vsix` rule), or when it is
-    not an extension's."""
+    checks the first and the extension runs with the last: `repo.canonical_member_path`'s `vsix` rule, and a twin
+    that differs only by case, one file on macOS and Windows), or when it is not an extension's."""
     reason = repo._zip_preflight(data)
     if reason:
         raise ValueError(reason)
@@ -219,7 +219,9 @@ def vsix_manifest(data):
                     continue
                 if name == "extension/package.json":
                     infos.append(info)
-                written += repo.canonical_member_path(name, "vsix")[0] == "package.json"
+                rel = repo.canonical_member_path(name, "vsix")[0]
+                # (on macOS and Windows a case twin is written over it too: EG-4)
+                written += rel is not None and repo.case_fold(rel) == "package.json"
             if not infos:
                 problem = "it has no extension/package.json"
             elif written > 1:
