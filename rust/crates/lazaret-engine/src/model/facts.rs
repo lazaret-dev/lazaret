@@ -210,6 +210,9 @@ pub fn facts(p: &Pack, text: &[u32], events: &[Ev], anchor: usize) -> FileFacts 
                     out.received = Some((line(*file, *at), "run"));
                     note(*file, *at, &mut first);
                 }
+                if received && *hidden {
+                    out.received_hidden = true;               // (run out of sight: GR-8's words for it)
+                }
                 if cmd.iter().any(|&c| c != UNKNOWN && c != ' ' as u32) {
                     out.commands.push((off(*file, *at), cmd.clone()));
                     let rs = crate::shell::hook_command_risk(p, cmd, true);

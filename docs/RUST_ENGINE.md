@@ -2362,7 +2362,7 @@ TXT records — the Go DNS-backdoor shape). The sources are std's and the usual
 crates' (`env::var`/`vars`, `fs::read`, `dirs`/`home`, `whoami`/`hostname`,
 command output, a response). The events and what every language reads the same way (a command's line as a shell reads it, the download a command writes to a file, an environment variable's kind) are `model/events.rs`, and `model/facts.rs` turns the events into what the tests
 ask (`signs::ModelFacts`): the strongest send and where data goes, code received
-and run, a file written then run (its reason ends ", out of sight (no window, or
+and run, a file written then run (either reason ends ", out of sight (no window, or
 its output thrown away)" when the program is started with its window hidden or
 no console, or with its output sent to null: GR-8), the commands run, and what only the model
 sees (a shell or an interpreter whose stdio is a connection — a reverse shell; a

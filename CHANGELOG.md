@@ -487,6 +487,10 @@ project is pre-1.0, so the 0.x API may still change.
 
 ### Changed
 
+- **Code received over the network and run out of sight says so too (GR-8's follow-up; rule set 2.44.0).**
+  In Go and Rust code, a shell or a program handed what a server sent and started with its window hidden,
+  no console or its output sent to null: "runs code it receives over the network, out of sight (no window,
+  or its output thrown away)". The reason's strength, and so every verdict, is as before.
 - **A program downloaded or decoded, then run out of sight, says so (GR-8; rule set 2.40.0).** The Go and
   Rust readers note a process started with its window hidden or no console (`SysProcAttr.HideWindow`,
   `CreationFlags` or Rust's `creation_flags` with `CREATE_NO_WINDOW` or `DETACHED_PROCESS`) or with its

