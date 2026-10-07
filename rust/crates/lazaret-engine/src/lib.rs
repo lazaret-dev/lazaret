@@ -44,6 +44,7 @@ pub mod shell;
 pub mod signs;
 pub mod strarr;
 pub mod textgate;
+pub mod texts;
 pub mod token;
 pub mod unicode;
 pub mod vendor;

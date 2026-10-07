@@ -56,7 +56,7 @@ def scan(data, memo, container="tgz", kind="npm"):
 class CallSiteTests(unittest.TestCase):
     def counting(self):
         """Patches that count the engine's calls the memo stands in front of -> {name: mock}."""
-        names = ("call_answers", "import_time_risks", "cross_file_answer", "spawned_scripts")
+        names = ("call_answers", "import_time_risks", "cross_file_answer", "spawned_scripts", "spawned_scripts_many")
         mocks = {}
         for name in names:
             patch = mock.patch.object(repo._engine, name, wraps=getattr(repo._engine, name))
@@ -89,9 +89,9 @@ class CallSiteTests(unittest.TestCase):
     def test_an_answer_the_engine_could_not_give_is_not_kept(self):
         real = repo._engine.call_answers
 
-        def exhausted(calls):
+        def exhausted(calls, texts=None):
             return [_native.NativeExhausted("the work budget was spent") if "d.run" in text else answer
-                    for (_n, _a, text), answer in zip(calls, real(calls))]
+                    for (_n, _a, text), answer in zip(calls, real(calls, texts=texts))]
         memo = contentcache.Memo()
         with mock.patch.object(repo._engine, "call_answers", exhausted):
             res = scan(tgz(PACKAGE), memo)

@@ -1659,6 +1659,17 @@ the engine could not finish. So a hit changes the time and nothing else:
 `test_content_memo.py`, and the benchmark scanned with the memo on and off,
 hold that. A store that outlives the run is the next step (P-2b).
 
+Within one scan a file's text crosses into the engine once (0.1.9, FE-1:
+`engine.Texts`, the engine's `texts.rs`): the scan puts each distinct text
+in the engine's store the first time a step asks about it (`texts.put`, the
+raw UTF-8, no JSON), every step after names it by id, and the scan drops its
+texts when it ends, in a `finally`. The memo's keys hash each text once
+(`contentcache.Digests`). The steps that went one file at a time (the agent
+check, the scripts a file starts) go a batch at a time, and Node's names for
+a path are asked once per path. A store that refuses a put (its 1 GiB bound)
+leaves the texts to go with their calls, which gives the same answers:
+`test_engine_texts.py` holds both.
+
 ---
 
 ## 9. Versioning, release and delivery

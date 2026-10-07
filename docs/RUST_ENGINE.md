@@ -293,8 +293,24 @@ does after a call that left the memory above 512 MB). Every call may carry
 `{"calls": [[name, args, text], …], "threads": n}` →
 `[{"ok": v} | {"error": …, "exhausted"?, "panic"?}]` in input order. Threads
 take the next item from an atomic counter; each item has its own budget and
-`catch_unwind`; `batch` and `pack.*` are refused inside a batch; under
-WebAssembly a batch runs on one thread.
+`catch_unwind`; `batch`, `pack.*` and `texts.*` are refused inside a batch on
+threads; under WebAssembly a batch runs on one thread.
+
+The text store (0.1.9, FE-1; `src/texts.rs`): `texts.put` with
+`{"lengths": [code points, …]}` and the texts one after another as the text
+(Python: `"".join(texts).encode("utf-8", "surrogatepass")`) keeps each text as
+the bytes it came as, checked as it is cut, and answers `{"ids": [n, …]}`;
+the library's entry point takes them before reading the text into code points,
+so a text is not held four times its size. Any call then takes `"text_id": n`
+in its arguments in place of a text (alone or in a batch: each call reads the
+text into code points on its own thread), and `cross_file` takes
+`"text_ids"`, one per file, with no text. `texts.drop` `{"ids": […]}` lets them
+go (`{"dropped": n}`), `texts.info` says what the store holds. The store is
+the process's, behind a lock, and bounded (`texts::MAX_BYTES`, 1 GiB): a put
+past it keeps nothing and is refused, and the caller sends those texts with
+its calls as before. A registry scan puts each distinct text once
+(`engine.Texts`), names it in every step, and drops its texts when it ends,
+in a `finally` (`repo.scan_members`).
 
 ## 4. Building, packaging, CI
 

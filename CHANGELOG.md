@@ -522,6 +522,18 @@ project is pre-1.0, so the 0.x API may still change.
 
 ### Changed
 
+- **A registry scan hands each file's text to the engine once (FE-1).** Each step that reads a file (the rules,
+  the import-time test, the scripts it starts, the agent check, the cross-file follower) sent its text again, in
+  a batch escaped into the call's JSON and read back on one thread before the batch's threads started, and the
+  content memo hashed it again for each step. The engine now keeps the texts a scan puts (`texts.put`: the raw
+  UTF-8, no JSON), every step names them by id, and the scan lets them go when it ends, however it ends; each
+  text's digest is worked out once; the agent check and the scripts a file starts are asked a batch at a time
+  (one call per file before), and Node's names for a path once per path. The store is bounded (1 GiB): past it,
+  a scan sends its texts with its calls, as before. On six large releases, each text now crosses once (most
+  crossed three to five times), the calls fall by 74 to 95% (monaco-editor's 11,972 to 1,811), the bytes sent by
+  71 to 80% (356 MB to 96 MB), a scan takes 7 to 17% less time (monaco-editor 19.6 s to 17.4 s, sympy 4.6 s to
+  4.0 s), and its peak memory is lower in five of the six (next 1,025 MB to 776 MB; prettier's rose, 254 MB to
+  278 MB).
 - **tiny_https's drop of Oct 7: the security review's fixes.** Two rounds of outside review of its verification
   path, triaged claim by claim against OpenSSL, Go's `crypto/x509` and Go's `note` package, and every confirmed
   finding fixed with a test (the library's B-93 to B-96): a search for a certificate path that was exponential (now

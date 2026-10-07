@@ -13,7 +13,9 @@
 //! with surrogates passed through (Python: `s.encode("utf-8",
 //! "surrogatepass")`; the npm package writes the same from a JS string, lone
 //! surrogates included). The answer is JSON (ASCII) in a buffer the engine
-//! allocates and the caller hands back to `lazaret_engine_free`.
+//! allocates and the caller hands back to `lazaret_engine_free`. `texts.put`
+//! keeps its texts as these bytes (lazaret_engine::texts), for the calls that
+//! name them by id after.
 //!
 //! Native builds export `lazaret_engine_call`, read by Python's ctypes
 //! (lazaret/scanner/_native.py), and the network layer's calls
@@ -38,41 +40,7 @@ pub const STATUS_PANIC: i32 = 3;
 
 /// UTF-8 with surrogates passed through (CPython's "surrogatepass"): the
 /// code points of a Python str. None for bytes no such encoder writes.
-pub fn decode_wtf8(b: &[u8]) -> Option<Vec<u32>> {
-    let mut out = Vec::with_capacity(b.len());
-    let mut i = 0;
-    while i < b.len() {
-        let c = b[i] as u32;
-        if c < 0x80 {
-            out.push(c);
-            i += 1;
-            continue;
-        }
-        let (n, min, init) = if c & 0xE0 == 0xC0 {
-            (1, 0x80, c & 0x1F)
-        } else if c & 0xF0 == 0xE0 {
-            (2, 0x800, c & 0x0F)
-        } else if c & 0xF8 == 0xF0 {
-            (3, 0x10000, c & 0x07)
-        } else {
-            return None;
-        };
-        let mut v = init;
-        for k in 1..=n {
-            let x = *b.get(i + k)? as u32;
-            if x & 0xC0 != 0x80 {
-                return None;
-            }
-            v = (v << 6) | (x & 0x3F);
-        }
-        if v < min || v > 0x10FFFF {
-            return None;
-        }
-        out.push(v);
-        i += n + 1;
-    }
-    Some(out)
-}
+pub use lazaret_engine::texts::decode_wtf8;
 
 fn read_u32(b: &[u8], at: usize) -> Option<usize> {
     let w = b.get(at..at + 4)?;
@@ -114,6 +82,15 @@ fn handle_inner(req: &[u8]) -> (i32, String) {
             Err(e) => return error(STATUS_ERROR, &format!("bad arguments: {}", e.0)),
         }
     };
+    if name == "texts.put" {
+        // (the texts kept as the bytes they came as, not read into code points first: texts.rs)
+        let answer = api::put_lengths(&args).and_then(|lengths| api::texts_put_answer(lazaret_engine::texts::put(&lengths, text)));
+        return match answer {
+            Ok(v) => (STATUS_OK, json::write(&v)),
+            Err(CallError::BadArgs(m)) => error(STATUS_ERROR, &m),
+            Err(e) => error(STATUS_ERROR, &format!("{e:?}")),
+        };
+    }
     let text = match decode_wtf8(text) {
         Some(t) => t,
         None => return error(STATUS_ERROR, "text is not UTF-8"),
@@ -677,6 +654,38 @@ mod tests {
         assert_eq!(decode_wtf8(&[0xED, 0xA0, 0x80]), Some(vec![0xD800]));
         assert_eq!(decode_wtf8(&[0xC0, 0x80]), None);
         assert_eq!(decode_wtf8(&[0xE2, 0x82]), None);
+    }
+
+    #[test]
+    fn texts_are_kept_and_named_by_id() {
+        let text = "x = 1\n\u{e9}t\u{e9}\n";
+        let mut region = Vec::new();
+        region.extend_from_slice(text.as_bytes());
+        region.extend_from_slice("module.exports = 1;\n".as_bytes());
+        let (s, a) = handle(&request("texts.put", &format!("{{\"lengths\": [{}, 20]}}", text.chars().count()), &region));
+        assert_eq!(s, STATUS_OK, "{a}");
+        let ids: Vec<i64> = json::parse_str(&a).unwrap().get("ids").and_then(Value::as_arr).unwrap()
+            .iter().map(|v| v.as_i64().unwrap()).collect();
+        // the same answer by id as with the text
+        let (s1, by_text) = handle(&request("import_time_risk", "{\"lang\": \"py\"}", text.as_bytes()));
+        let (s2, by_id) = handle(&request("import_time_risk", &format!("{{\"lang\": \"py\", \"text_id\": {}}}", ids[0]), b""));
+        assert_eq!((s1, s2), (STATUS_OK, STATUS_OK));
+        assert_eq!(by_text, by_id);
+        // and in a batch
+        let (s, a) = handle(&request("batch", &format!("{{\"calls\": [[\"logical_text\", {{\"text_id\": {}}}], \
+            [\"logical_text\", {{}}, \"module.exports = 1;\\n\"]], \"threads\": 2}}", ids[1]), b""));
+        assert_eq!(s, STATUS_OK, "{a}");
+        let items = json::parse_str(&a).unwrap();
+        let items = items.as_arr().unwrap();
+        assert_eq!(items[0], items[1]);
+        // a text and a text_id, an id the store does not hold, a put that is not UTF-8: errors
+        assert_eq!(handle(&request("logical_text", &format!("{{\"text_id\": {}}}", ids[1]), b"x")).0, STATUS_ERROR);
+        assert_eq!(handle(&request("texts.put", "{\"lengths\": [2]}", b"a\xff")).0, STATUS_ERROR);
+        let (s, a) = handle(&request("texts.drop", &format!("{{\"ids\": [{}, {}]}}", ids[0], ids[1]), b""));
+        assert_eq!((s, a.as_str()), (STATUS_OK, "{\"dropped\":2}"));
+        let (s, a) = handle(&request("logical_text", &format!("{{\"text_id\": {}}}", ids[1]), b""));
+        assert_eq!(s, STATUS_ERROR);
+        assert!(a.contains("no text"), "{a}");
     }
 
     #[test]

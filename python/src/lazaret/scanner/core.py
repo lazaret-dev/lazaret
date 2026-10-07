@@ -4892,10 +4892,16 @@ def _agent_hijack_issue(path, line_no, lines, agent, flag, col=None, redactor=No
          "ref": "CWE-506 · Supply chain"}, path, line_no, lines, col, redactor)
 
 
-def dependency_agent_issue(path, text):
+_ASK = object()
+
+
+def dependency_agent_issue(path, text, found=_ASK):
     """SC-AGENT-HIJACK (CRITICAL) for a dependency's file that launches an AI
-    agent in an autonomous mode (agent_hijack), else None."""
-    found = agent_hijack(text)
+    agent in an autonomous mode (agent_hijack), else None. `found`: the
+    engine's answer, when the caller asked for it already (a batch:
+    engine.agent_hijacks)."""
+    if found is _ASK:
+        found = agent_hijack(text)
     if found is None:
         return None
     agent, flag, line = found

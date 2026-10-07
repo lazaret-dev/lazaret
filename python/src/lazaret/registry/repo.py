@@ -2423,6 +2423,10 @@ class _ArtifactScan:
         self.artifact, self.full = artifact, full
         self.budget = budget       # the archive's Budget (its deadline names itself)
         self.memo = _cache.NULL if memo is None else memo     # the engine's answers by content (P-2a)
+        self.texts = _engine.Texts()       # the engine's copies of the texts the steps read (FE-1): released at the end
+        self.digests = _cache.Digests()    # each text's SHA-256 for the memo's keys, worked out once (FE-1)
+        self._spawned = {}                 # (text, lang) -> spawned_scripts' answer, asked a batch at a time
+        self._candidates = {}              # path -> node_candidates' answer (Node's names for it), asked once
         self.issues, self.files_scanned, self.binaries = [], 0, 0
         self.truncated, self.truncated_emitted = 0, 0
         self.truncated_at = {}     # rel -> its SC-TRUNCATED issue (None past the cap)
@@ -2571,7 +2575,15 @@ class _ArtifactScan:
 
     # ---- the engine, through the memo (P-2a) ----
     def _key(self, kind, text, lang, flags):
-        return _cache.file_key(kind, None, text, lang, flags, pack=ENGINE_VERSION, engine=_engine.describe())
+        return _cache.file_key(kind, None, text, lang, flags, pack=ENGINE_VERSION, engine=_engine.describe(),
+                               digest=self.digests)
+
+    def release(self):
+        """Let go of what the scan kept for the engine's calls (FE-1): the engine's copies of its texts, and their
+        digests. Called at the end of the scan, and in scan_members' `finally` whatever happened."""
+        self.texts.close()
+        self.digests.clear()
+        self._spawned, self._candidates = {}, {}
 
     def _scan_files(self, items):
         """engine.scan_files, asking the engine once for each distinct call
@@ -2585,7 +2597,7 @@ class _ArtifactScan:
 
         def compute(missing):
             return [_cache.Uncacheable(a) if _engine.unanswered(a) else a
-                    for a in _engine.call_answers([asked[key] for key in missing])]
+                    for a in _engine.call_answers([asked[key] for key in missing], texts=self.texts)]
         answers = self.memo.get_or_compute_many(keys, compute)
         out = [[] for _ in items]
         for k, answer in zip(todo, answers):
@@ -2602,14 +2614,34 @@ class _ArtifactScan:
 
         def compute(missing):
             return [_cache.Uncacheable(a) if _engine.unanswered(a) else a
-                    for a in _engine.import_time_risks([asked[key] for key in missing])]
+                    for a in _engine.import_time_risks([asked[key] for key in missing], texts=self.texts)]
         return self.memo.get_or_compute_many(keys, compute)
 
     def _spawned_scripts(self, text, lang):
         """engine.spawned_scripts, once for each distinct script (a call the
         engine could not answer raises, and is not kept)."""
+        got = self._spawned.get((text, lang))
+        if got is not None:
+            return got
         return self.memo.get_or_compute(self._key("spawned", text, lang, ()),
                                         lambda: _engine.spawned_scripts(text, lang))
+
+    def _prefetch_spawned(self, items):
+        """_spawned_scripts for [(text, lang)], a batch at a time (FE-1: they were asked one file at a time). An
+        answer the engine could not give is not kept: the walk asks for it alone where it needs it, and that call
+        raises as it did."""
+        items = [item for item in dict.fromkeys(items) if item not in self._spawned]
+        if not items:
+            return
+        keys = [self._key("spawned", text, lang, ()) for text, lang in items]
+        asked = dict(zip(keys, items))
+
+        def compute(missing):
+            return [_cache.Uncacheable(a) if _engine.unanswered(a) else a
+                    for a in _engine.spawned_scripts_many([asked[key] for key in missing], texts=self.texts)]
+        for item, answer in zip(items, self.memo.get_or_compute_many(keys, compute)):
+            if not _engine.unanswered(answer):
+                self._spawned[item] = answer
 
     # ---- pass 1: members ----
     def member(self, m):
@@ -2792,7 +2824,7 @@ class _ArtifactScan:
         (LOAD_AS_FILE, then LOAD_AS_DIRECTORY). The "main" step was missing:
         `main: "lib"` with lib/package.json naming core.dat ran core.dat,
         and it was neither scanned nor counted."""
-        candidates = _node_candidates(path)
+        candidates = self._node_candidates(path)
         found = self._find_node(candidates[:6])            # the file, .js, .json, ...
         if found:
             return found
@@ -2802,10 +2834,18 @@ class _ArtifactScan:
             data, _problems = lazaret.load_manifest(manifest_rel, text)
             main = data.get("main") if isinstance(data, dict) else None
             if isinstance(main, str) and main.strip():
-                found = self._find_node(_node_candidates(_rel_join(path.rstrip("/"), main)))
+                found = self._find_node(self._node_candidates(_rel_join(path.rstrip("/"), main)))
                 if found:
                     return found
         return self._find_node(candidates[6:])             # index.js, ...
+
+    def _node_candidates(self, path):
+        """The names Node tries for `path`, in its order (core.node_candidates), asked once per path: a package's
+        modules require the same few paths from many files (monaco-editor asked 8,340 times, FE-1)."""
+        got = self._candidates.get(path)
+        if got is None:
+            got = self._candidates[path] = tuple(_node_candidates(path))
+        return got
 
     def _find_node(self, candidates):
         """The member Node opens for the first of `candidates` that names one, in Node's order: the path itself, else
@@ -3558,12 +3598,14 @@ class _ArtifactScan:
                                               and posixpath.basename(rel) not in _SDIST_NOT_MODULES))
         else:
             files = reachable
-        # and the package scripts that code starts with node or python (0.1.8)
+        # and the package scripts that code starts with node or python (0.1.8); what each file starts is asked
+        # a batch at a time first (FE-1), and the walk reads those answers
         started = set()
-        for rel in sorted(files):
-            text, lang = self.sources.get(rel, (None, None))
-            if text and lang in ("js", "py") and rel not in self.install_scripts:
-                self._started_scripts(rel, text, None, started)
+        starts = [(rel, text) for rel in sorted(files) for text, lang in (self.sources.get(rel, (None, None)),)
+                  if text and lang in ("js", "py") and rel not in self.install_scripts]
+        self._prefetch_spawned([(lazaret.normalize_newlines(text), _engine.script_lang(rel)) for rel, text in starts])
+        for rel, text in starts:
+            self._started_scripts(rel, text, None, started)
         files = set(files) | {rel for rel in started if rel not in self.install_scripts}
         todo = []
         for rel in sorted(files):
@@ -3769,10 +3811,11 @@ class _ArtifactScan:
         todo, args = _engine.cross_file_args(files, who=lambda path: back[path], one_package=True)
         key = _cache.cross_file_key([(f["path"], f["lang"], f["content"]) for f in todo],
                                     {k: v for k, v in args.items() if k not in ("files", "threads")},
-                                    pack=ENGINE_VERSION, engine=_engine.describe())
+                                    pack=ENGINE_VERSION, engine=_engine.describe(), digest=self.digests)
 
         def compute():
-            issues, complete = _engine.cross_file_answer(files, who=lambda path: back[path], one_package=True)
+            issues, complete = _engine.cross_file_answer(files, who=lambda path: back[path], one_package=True,
+                                                         texts=self.texts)
             return issues if complete else _cache.Uncacheable(issues)    # (a package cut short is not clean)
         for issue in self.memo.get_or_compute(key, compute):
             issue["file"] = back[issue["file"]]
@@ -3781,21 +3824,31 @@ class _ArtifactScan:
     def _agent_hijack(self):
         """SC-AGENT-HIJACK (CRITICAL): a package file that launches an AI
         coding agent in an autonomous mode (core.agent_hijack). A package is a
-        dependency, so every source file is dependency code."""
-        for rel in sorted(self.sources):
-            text, lang = self.sources.get(rel, (None, None))
-            if not text or lang not in ("js", "py"):
-                continue
-            self._deadline(rel)
-            issue = lazaret.dependency_agent_issue(rel, lazaret.normalize_newlines(text))
-            if issue is not None:
-                if self.artifact == "action" and issue["sev"] in STRONG_SEVERITIES:
-                    # an action may exist to run an agent in CI (a review bot): MAJOR, worth reading, not proof
-                    issue["sev"] = "MAJOR"
-                    issue["msg"] = issue["msg"].rstrip() + (" An action may exist to run an AI agent in the job; "
-                                                            "the agent then acts with the job's token, on whatever "
-                                                            "reaches its prompt.")
-                self.issues.append(issue)
+        dependency, so every source file is dependency code. The engine is
+        asked a batch at a time (FE-1: one file at a time before), the deadline
+        checked before each; a file it could not answer raises as the call
+        alone did (_phase: the release is INCOMPLETE)."""
+        todo = [(rel, lazaret.normalize_newlines(text)) for rel in sorted(self.sources)
+                for text, lang in (self.sources.get(rel, (None, None)),) if text and lang in ("js", "py")]
+        for start in range(0, len(todo), _engine.BATCH):
+            chunk = todo[start:start + _engine.BATCH]
+            self._deadline(chunk[0][0])
+            for (rel, text), found in zip(chunk, _engine.agent_hijacks([t for _r, t in chunk], texts=self.texts)):
+                if _engine.unanswered(found):
+                    raise found
+                self._agent_issue(rel, text, found)
+
+    def _agent_issue(self, rel, text, found):
+        """The agent check's finding for one file, from the engine's answer."""
+        issue = lazaret.dependency_agent_issue(rel, text, found)
+        if issue is not None:
+            if self.artifact == "action" and issue["sev"] in STRONG_SEVERITIES:
+                # an action may exist to run an agent in CI (a review bot): MAJOR, worth reading, not proof
+                issue["sev"] = "MAJOR"
+                issue["msg"] = issue["msg"].rstrip() + (" An action may exist to run an AI agent in the job; "
+                                                        "the agent then acts with the job's token, on whatever "
+                                                        "reaches its prompt.")
+            self.issues.append(issue)
 
     def _go_mods(self):
         """[(rel, text, gomod.parse's answer)] of the go.mod in a Go module's root
@@ -4130,8 +4183,9 @@ class _ArtifactScan:
         if self.artifact == "vsix":
             self._vsix_hook_words()
         _demote_test_findings(self.issues, reachable if reachable is not None else self.entries)
-        # F9b: the decompressed sources are no longer needed
+        # F9b: the decompressed sources are no longer needed (nor the engine's copies of them: FE-1)
         self.sources, self.deferred, self.shell, self.code_text = {}, {}, {}, {}
+        self.release()
 
 
 _PY_LOCAL_IMPORT_RE = re.compile(r"^\s*(?:from\s+([A-Za-z_][\w.]*)\s+import\b|import\s+([A-Za-z_][\w.]*))", re.M)
@@ -4199,20 +4253,23 @@ def scan_members(members, anomalies, artifact, full, budget, memo=None, action_r
     None when the scan did not get that far)."""
     st = _ArtifactScan(artifact, full, budget, memo, action_root=action_root)
     try:
-        for m in members:
-            st.member(m)
-            if st.out_of_time("(archive)"):          # between members
-                break
-    except _OutOfTime:
-        pass                             # inside a member: recorded where it stopped
-    except ArchiveLimit as lim:          # (defensive: the readers yield their limits)
-        st.truncate("(archive)", lim.detail or st.limit_detail(lim.reason, "(archive)"),
-                    "time" if lim.reason == "time" else "archive")
+        try:
+            for m in members:
+                st.member(m)
+                if st.out_of_time("(archive)"):          # between members
+                    break
+        except _OutOfTime:
+            pass                             # inside a member: recorded where it stopped
+        except ArchiveLimit as lim:          # (defensive: the readers yield their limits)
+            st.truncate("(archive)", lim.detail or st.limit_detail(lim.reason, "(archive)"),
+                        "time" if lim.reason == "time" else "archive")
+        finally:
+            close = getattr(members, "close", None)
+            if close is not None:
+                close()                      # (a reader stopped early lets go of its archive or folder now)
+        st.finish(anomalies)
     finally:
-        close = getattr(members, "close", None)
-        if close is not None:
-            close()                      # (a reader stopped early lets go of its archive or folder now)
-    st.finish(anomalies)
+        st.release()                         # the engine's copies of the texts go whatever happened (FE-1)
     issues = st.issues
     verdict, reason, strong, weak = decide_verdict(issues, st.truncated)
     if any(i["rule"] == UNREAD_CODE_RULE for i in issues):

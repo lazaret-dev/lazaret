@@ -83,6 +83,8 @@ pub const CALLS: &[&str] = &[
     "js_flow",
     // phase 3: project mode's cross-file Python taint (pyflow/)
     "py_flow",
+    // 0.1.9 (FE-1): texts handed over once and named by id after (texts.rs)
+    "texts.put", "texts.drop", "texts.info",
 ];
 
 fn dead_drop(v: Option<(usize, PyStr)>) -> Value {
@@ -148,11 +150,30 @@ const GATED: &[&str] = &[
 ];
 
 /// Run one call. `budget` in the arguments: the steps of the regex matcher
-/// it may take (crate::budget; the default otherwise).
+/// it may take (crate::budget; the default otherwise). `text_id` in the
+/// arguments: the call's text is that one of the store's (texts.rs), read
+/// here, and the call is given no other.
 pub fn call(name: &str, args: &Value, text: &[u32]) -> Result<Value, CallError> {
     if name == "batch" {
         return batch(args);
     }
+    if let Some(id) = args.get("text_id") {
+        let id = text_id(id)?;
+        if !text.is_empty() {
+            return Err(CallError::BadArgs(format!("{name}: a text and a text_id")));
+        }
+        let stored = crate::texts::decoded(id).ok_or_else(|| CallError::BadArgs(format!("{name}: no text {id} in the store")))?;
+        return call_text(name, args, &stored);
+    }
+    call_text(name, args, text)
+}
+
+/// A text_id's value: the id `texts.put` answered.
+fn text_id(v: &Value) -> Result<u64, CallError> {
+    v.as_i64().filter(|&n| n > 0).map(|n| n as u64).ok_or_else(|| CallError::BadArgs("text_id is not an id".into()))
+}
+
+fn call_text(name: &str, args: &Value, text: &[u32]) -> Result<Value, CallError> {
     let steps = match args.get("budget").and_then(|b| b.as_i64()) {
         Some(b) if b > 0 => b as u64,
         _ => crate::budget::DEFAULT_STEPS,
@@ -210,7 +231,7 @@ fn batch(args: &Value) -> Result<Value, CallError> {
         // what changes the engine for every call is not run alongside others
         for item in calls {
             let name = item.as_arr().and_then(|p| p.first()).and_then(|v| v.as_string()).unwrap_or_default();
-            if name == "batch" || name.starts_with("pack.") {
+            if name == "batch" || name.starts_with("pack.") || name.starts_with("texts.") {
                 return Err(CallError::BadArgs(format!("{} in a batch on threads", name)));
             }
         }
@@ -354,6 +375,22 @@ fn batch_item(item: &Value) -> Value {
     }
 }
 
+/// texts.put's lengths (code points, one per text).
+pub fn put_lengths(args: &Value) -> Result<Vec<usize>, CallError> {
+    let bad = || CallError::BadArgs("texts.put: lengths".into());
+    args.get("lengths").and_then(|l| l.as_arr()).ok_or_else(bad)?
+        .iter().map(|n| n.as_i64().filter(|&n| n >= 0).map(|n| n as usize).ok_or_else(bad)).collect()
+}
+
+/// texts.put's answer, {"ids": [id, …]}, or the reason it kept nothing (a store that would pass its bound: the caller
+/// sends those texts with its calls instead).
+pub fn texts_put_answer(r: Result<Vec<u64>, crate::texts::PutError>) -> Result<Value, CallError> {
+    match r {
+        Ok(ids) => Ok(Value::obj(vec![("ids", Value::Arr(ids.into_iter().map(|id| Value::Int(id as i64)).collect()))])),
+        Err(e) => Err(CallError::BadArgs(e.message())),
+    }
+}
+
 fn strs(v: &[PyStr]) -> Value {
     Value::Arr(v.iter().map(|s| Value::Str(s.clone())).collect())
 }
@@ -405,6 +442,23 @@ fn dispatch(name: &str, args: &Value, text: &[u32]) -> Result<Value, CallError> 
             )
         }
         "pyre.escape" => Value::Str(pyre::escape(text)),
+        "texts.put" => {
+            // {"lengths": [code points, …]} and the texts one after another as the text. The library's entry point
+            // keeps the request's bytes as they came (lazaret-ffi); this is the call for a caller that holds code
+            // points (a batch's)
+            let lengths = put_lengths(args)?;
+            texts_put_answer(crate::texts::put(&lengths, &crate::texts::encode_wtf8(text)))?
+        }
+        "texts.drop" => {
+            let ids = args.get("ids").and_then(|l| l.as_arr()).ok_or_else(|| CallError::BadArgs("texts.drop: ids".into()))?;
+            let ids = ids.iter().map(text_id).collect::<Result<Vec<_>, _>>()?;
+            Value::obj(vec![("dropped", Value::Int(crate::texts::release(&ids) as i64))])
+        }
+        "texts.info" => {
+            let (n, bytes) = crate::texts::held();
+            Value::obj(vec![("texts", Value::Int(n as i64)), ("bytes", Value::Int(bytes as i64)),
+                            ("max_bytes", Value::Int(crate::texts::MAX_BYTES as i64))])
+        }
         "cross_file" => cross_file(p, args, text)?,
         "rs_crate" => rs_crate(args, text.to_vec())?,
         "go_package" => go_package(args, text.to_vec())?,
@@ -886,8 +940,9 @@ fn dispatch(name: &str, args: &Value, text: &[u32]) -> Result<Value, CallError> 
 /// cross_file: {"files": [[path, lang, length], …], "skip": […], "who": …,
 /// "whos": [one per file] | null, "one_package", "sep", "redact", "neumaier",
 /// "threads"} and the files' texts one after another (each `length` code
-/// points) -> core._cross_file_received_issues per package
-/// (crossfile::answer). Each package gets the call's budget.
+/// points), or "text_ids": [one per file] (the store's texts, texts.rs: each
+/// `length` code points, and no text) -> core._cross_file_received_issues per
+/// package (crossfile::answer). Each package gets the call's budget.
 fn cross_file(p: &Pack, args: &Value, text: &[u32]) -> Result<Value, CallError> {
     use crate::crossfile::{self, File, Options};
     let bad = |m: &str| CallError::BadArgs(format!("cross_file: {}", m));
@@ -895,6 +950,22 @@ fn cross_file(p: &Pack, args: &Value, text: &[u32]) -> Result<Value, CallError> 
     let who = opt_str(args, "who").unwrap_or_else(|| u("Dependency code"));
     let whos = args.get("whos").and_then(|w| w.as_arr());
     let groups = args.get("groups").and_then(|g| g.as_arr());
+    // the files' texts: the store's, by id, or the text's, one after another
+    let stored: Option<Vec<Vec<u32>>> = match args.get("text_ids") {
+        None | Some(Value::Null) => None,
+        Some(v) => {
+            let ids = v.as_arr().filter(|ids| ids.len() == items.len()).ok_or_else(|| bad("text_ids: one per file"))?;
+            if !text.is_empty() {
+                return Err(bad("a text and text_ids"));
+            }
+            let mut out = Vec::with_capacity(ids.len());
+            for id in ids {
+                let id = text_id(id)?;
+                out.push(crate::texts::decoded(id).ok_or_else(|| bad(&format!("no text {id} in the store")))?);
+            }
+            Some(out)
+        }
+    };
     let mut files = Vec::with_capacity(items.len());
     let mut at = 0usize;
     for (k, item) in items.iter().enumerate() {
@@ -902,13 +973,24 @@ fn cross_file(p: &Pack, args: &Value, text: &[u32]) -> Result<Value, CallError> 
         let path = parts.first().and_then(|v| v.as_str()).ok_or_else(|| bad("a file's path"))?.to_vec();
         let lang = parts.get(1).and_then(|v| v.as_str()).ok_or_else(|| bad("a file's lang"))?.to_vec();
         let len = parts.get(2).and_then(|v| v.as_i64()).filter(|&n| n >= 0).ok_or_else(|| bad("a file's length"))? as usize;
-        if at + len > text.len() {
-            return Err(bad("the files' lengths run past the text"));
-        }
+        let body: &[u32] = match &stored {
+            Some(texts) => {
+                if texts[k].len() != len {
+                    return Err(bad("a stored text's length is not its file's"));
+                }
+                &texts[k]
+            }
+            None => {
+                if at + len > text.len() {
+                    return Err(bad("the files' lengths run past the text"));
+                }
+                at += len;
+                &text[at - len..at]
+            }
+        };
         let who = whos.and_then(|w| w.get(k)).and_then(|v| v.as_str()).map(|s| s.to_vec()).unwrap_or_else(|| who.clone());
         let group = groups.and_then(|g| g.get(k)).and_then(|v| v.as_str()).map(|s| s.to_vec());
-        files.push(File { path, lang, text: &text[at..at + len], who, group });
-        at += len;
+        files.push(File { path, lang, text: body, who, group });
     }
     if at != text.len() {
         return Err(bad("the files' lengths do not add up to the text"));

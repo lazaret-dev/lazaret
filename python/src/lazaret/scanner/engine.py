@@ -24,6 +24,13 @@ Files are sent in batches (BATCH per crossing of the boundary), which the
 engine reads on threads (THREADS, at most the machine's cores); the answers
 come back in the order asked, so reports are the same whatever the thread
 count.
+
+A scan that asks several things of one file hands its text over once (0.1.9,
+FE-1): a Texts puts each distinct text in the engine's store (`texts.put`,
+the texts one after another as raw UTF-8, no JSON) and the calls name it by
+id; the scan lets the store's copies go when it ends (Texts.close). A store
+that refuses (its bound reached) leaves the texts to be sent with the calls,
+as before: the answers are the same either way.
 """
 import os
 
@@ -106,6 +113,60 @@ def _pack_entry(entry):
     return entry.get("value")
 
 
+class Texts:
+    """A scan's texts in the engine's store (FE-1): each distinct text is put
+    once, the first time a call asks for it, and named by its id after, by
+    every step that reads it (the rules, the import-time test, the scripts it
+    starts, the agent check, the cross-file follower). Texts are told apart
+    by their content, so the same text under two paths, or a text and a copy
+    of it, is one. close() lets the store's copies go (a scan calls it in a
+    `finally`); a Texts can be used again after.
+
+    When the store refuses a put (its bound reached: rust/crates/
+    lazaret-engine/src/texts.rs), this scan sends its texts with its calls
+    from then on, as it did before the store."""
+
+    def __init__(self):
+        self._ids = {}          # text -> its id in the store
+        self.off = False        # the store refused: texts go with their calls
+
+    def ids(self, texts):
+        """The ids of `texts`, in order (None for a text that goes with its
+        call): the ones not in the store yet are put, in one call."""
+        if self.off:
+            return [self._ids.get(t) for t in texts]
+        new = [t for t in dict.fromkeys(texts) if t not in self._ids]
+        if new:
+            try:
+                answer = _native.call("texts.put", {"lengths": [len(t) for t in new]}, "".join(new))
+            except _native.NativeError:
+                self.off = True             # (the store's bound, or an engine without one)
+            else:
+                self._ids.update(zip(new, answer["ids"]))
+        return [self._ids.get(t) for t in texts]
+
+    def held(self):
+        """The texts this scan has in the store."""
+        return len(self._ids)
+
+    def close(self):
+        """Let this scan's texts in the store go."""
+        ids, self._ids = list(self._ids.values()), {}
+        if ids:
+            try:
+                _native.call("texts.drop", {"ids": ids})
+            except _native.NativeError:
+                pass                        # (an engine that cannot answer this has no store to free)
+
+
+def _with_texts(calls, texts):
+    """[(name, args, text)] as a batch's items: a text the store holds is named
+    by its id (`text_id`), the others go with their call."""
+    ids = texts.ids([text for _name, _args, text in calls]) if texts is not None else [None] * len(calls)
+    return [[name, args, text] if i is None else [name, dict(args, text_id=i)]
+            for (name, args, text), i in zip(calls, ids)]
+
+
 def _budget(args):
     """`args` with WORK_BUDGET, when one is set."""
     return args if WORK_BUDGET is None else dict(args, budget=int(WORK_BUDGET))
@@ -137,25 +198,20 @@ def error_issue(path, exc):
     return core.scan_error_issue(path, exc)
 
 
-def _batch(call, items):
+def _batch(call, items, texts=None):
     """[(args, text)] -> the engine's answers in order (an item it could not
-    answer: the _native.NativeError it stands for)."""
-    out = []
-    for start in range(0, len(items), BATCH):
-        chunk = items[start:start + BATCH]
-        answers = _native.call("batch", {"calls": [[call, _budget(args), text] for args, text in chunk],
-                                         "threads": THREADS})
-        out.extend(_answer(a) for a in answers)
-    return out
+    answer: the _native.NativeError it stands for). `texts`: the scan's Texts,
+    which names the texts by id."""
+    return _answers([(call, _budget(args), text) for args, text in items], texts)
 
 
-def import_time_risks(items):
+def import_time_risks(items, texts=None):
     """[(text, lang)] -> the import-time test of each, (reasons, line), in
     order; an item the engine could not answer is the _native.NativeError it
-    stands for (see unanswered, error_issue)."""
+    stands for (see unanswered, error_issue). `texts`: the scan's Texts."""
     if not items:
         return []
-    answers = _batch("import_time_risk", [({"lang": lang} if lang else {}, text) for text, lang in items])
+    answers = _batch("import_time_risk", [({"lang": lang} if lang else {}, text) for text, lang in items], texts)
     return [a if unanswered(a) else (a[0], a[1]) for a in answers]
 
 
@@ -248,6 +304,22 @@ def spawned_scripts(text, lang=None):
     return [tuple(x) for x in _native.call("spawned_scripts", {"lang": lang} if lang else {}, text)]
 
 
+def spawned_scripts_many(items, texts=None):
+    """[(text, lang)] -> spawned_scripts of each, in order, a batch at a time
+    (an item the engine could not answer: the _native.NativeError it stands
+    for). `texts`: the scan's Texts."""
+    answers = _answers([("spawned_scripts", {"lang": lang} if lang else {}, text) for text, lang in items], texts)
+    return [a if unanswered(a) else [tuple(x) for x in a] for a in answers]
+
+
+def agent_hijacks(items, texts=None):
+    """[text] -> the agent check of each (core.agent_hijack): (agent, flag,
+    line) or None, in order, a batch at a time (an item the engine could not
+    answer: the _native.NativeError it stands for). `texts`: the scan's Texts."""
+    answers = _answers([("agent_hijack", {}, text) for text in items], texts)
+    return [a if unanswered(a) or a is None else tuple(a) for a in answers]
+
+
 def script_lang(path):
     """The language a script runs in, for the tests that read its strings:
     "py" for a .py file, None for a shell script (.sh), "js" for the rest
@@ -288,14 +360,21 @@ def scan_calls(items):
             for path, content, lang, dep in items]
 
 
-def call_answers(calls):
+def call_answers(calls, texts=None):
     """[(name, args, text)] -> the engine's answers, in order, a batch at a
     time on THREADS threads (an answer it could not give: the NativeError it
-    stands for, unanswered)."""
+    stands for, unanswered). `texts`: the scan's Texts, which hands each text
+    over once and names it by id after (FE-1)."""
+    return _answers(calls, texts)
+
+
+def _answers(calls, texts=None):
+    """call_answers, for every batch of this module (the scans' calls are
+    call_answers itself: the content memo's tests count them apart)."""
     out = []
     for start in range(0, len(calls), BATCH):
         chunk = calls[start:start + BATCH]
-        answers = _native.call("batch", {"calls": [list(c) for c in chunk], "threads": THREADS})
+        answers = _native.call("batch", {"calls": _with_texts(chunk, texts), "threads": THREADS})
         out.extend(_answer(a) for a in answers)
     return out
 
@@ -360,16 +439,21 @@ def cross_file_args(files, skip_paths=(), who="Dependency code", one_package=Fal
     return todo, args
 
 
-def cross_file_answer(files, skip_paths=(), who="Dependency code", one_package=False, site_groups=None):
+def cross_file_answer(files, skip_paths=(), who="Dependency code", one_package=False, site_groups=None, texts=None):
     """(the cross-file follower's findings, whether the engine finished every
     package): a package it could not finish (its work budget spent) is
     skipped, and a call it refuses (an internal error) gives no findings, so
-    an answer that is not complete must not be kept as clean (P-2a)."""
+    an answer that is not complete must not be kept as clean (P-2a).
+    `texts`: the scan's Texts (the files' texts by id)."""
     todo, args = cross_file_args(files, skip_paths, who, one_package, site_groups)
     if len(todo) < 2:
         return [], True
+    ids = texts.ids([f["content"] for f in todo]) if texts is not None else [None]
     try:
-        answer = _native.call("cross_file", args, "".join(f["content"] for f in todo))
+        if None in ids:
+            answer = _native.call("cross_file", args, "".join(f["content"] for f in todo))
+        else:
+            answer = _native.call("cross_file", dict(args, text_ids=ids))
     except _native.NativeError:
         return [], False
     out, complete = [], True

@@ -85,11 +85,11 @@ class StopsAtTheDeadlineTests(unittest.TestCase):
         if name == "scan_file":          # the registry asks the engine about source files through
             real_answers = repo._engine.call_answers      # engine.call_answers (P-2a: what the memo has not)
 
-            def slow_answers(calls):
+            def slow_answers(calls, texts=None):
                 out = []
                 for call in calls:
                     clock.now += 1.0
-                    out += real_answers([call])
+                    out += real_answers([call], texts=texts)
                 return out
             return mock.patch.object(repo._engine, "call_answers", slow_answers)
         real = getattr(repo.lazaret, name)

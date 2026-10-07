@@ -45,7 +45,7 @@ import copy
 import hashlib
 import threading
 
-__all__ = ["KINDS", "file_key", "cross_file_key", "Uncacheable", "Memo", "NULL", "NullMemo"]
+__all__ = ["KINDS", "file_key", "cross_file_key", "Digests", "Uncacheable", "Memo", "NULL", "NullMemo"]
 
 KINDS = ("scan", "import-risk", "spawned", "cross-file")           # the engine calls whose answers are cached
 DEFAULT_MAX_BYTES = 64 << 20                                      # of answers (an estimate of their size)
@@ -60,6 +60,24 @@ def _digest(text):
     return hashlib.sha256(text).hexdigest()
 
 
+class Digests:
+    """The SHA-256 of each distinct text, worked out once (0.1.9, FE-1): a registry scan keys four steps' answers on
+    one file's text (the rules, the import-time test, the scripts it starts, the cross-file follower), and each key
+    used to hash the text again. Pass one as `digest=` to file_key and cross_file_key; clear() it with the scan."""
+
+    def __init__(self):
+        self._of = {}
+
+    def __call__(self, text):
+        d = self._of.get(text)
+        if d is None:
+            d = self._of[text] = _digest(text)
+        return d
+
+    def clear(self):
+        self._of.clear()
+
+
 def _flags(flags):
     """The pass arguments as a tuple that is the same whichever way they were given."""
     if not flags:
@@ -69,30 +87,30 @@ def _flags(flags):
     return tuple(sorted(repr(f) for f in flags))
 
 
-def file_key(kind, rel, text, lang, flags=(), pack="", engine=""):
+def file_key(kind, rel, text, lang, flags=(), pack="", engine="", digest=_digest):
     """`(kind, rel, sha256(text), lang, flags, pack, engine)`. `rel` is the member's path when the pass reads it
     (manifests, the extension's language) and None when it does not (the first pass for a language that reads
     only the text), so that one file under two paths is one question. `pack` is the rule pack's hash and `engine`
-    the engine's version: a new rule never reads an old answer."""
+    the engine's version: a new rule never reads an old answer. `digest`: the scan's Digests (the same hash, kept)."""
     if kind not in KINDS:
         raise ValueError(f"not a kind of answer that is cached: {kind!r}")
-    return (kind, rel, _digest(text), lang, _flags(flags), pack, engine)
+    return (kind, rel, digest(text), lang, _flags(flags), pack, engine)
 
 
-def cross_file_key(files, flags=(), pack="", engine=""):
+def cross_file_key(files, flags=(), pack="", engine="", digest=_digest):
     """The key of a cross-file question. `files` is `[(path, lang, content)]` **in the order the engine is given
     them** (the registry passes `sorted(self.sources)`): the answer is not a function of the set, because where the
     engine has a limit (the symbols kept, the bodies tested for running a parameter, the first import that names a
     seed) the order decides what is read. So the key is of the list: put two files the other way round, change a
     path or a language, or change one byte of one file, and it is another question. `flags` carry the call's other
     arguments (`one_package`, `skip`, `who`, `groups`, `redact`, `neumaier`, `os.sep`, the work budget): anything
-    the answer depends on that is not in `files`."""
+    the answer depends on that is not in `files`. `digest`: the scan's Digests (the same hashes, kept)."""
     parts = []
     for item in files:
         if not isinstance(item, (tuple, list)) or len(item) != 3:
             raise ValueError("a file of a cross-file question is (path, language, content)")
         path, lang, content = item
-        parts.append(repr((path, lang, _digest(content))))
+        parts.append(repr((path, lang, digest(content))))
     return ("cross-file", None, _digest("\n".join(parts)), None, _flags(flags), pack, engine)
 
 
