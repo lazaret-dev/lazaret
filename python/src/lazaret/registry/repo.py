@@ -100,6 +100,22 @@ MAX_MEMBER = _env_number("LAZARET_MAX_SOURCE_BYTES", 16_000_000)
 MAX_FILES = 20_000         # files per package (numpy's sdist alone has >4,000)
 SAMPLE = 8192              # header/entropy sample read from oversized files
 # Stored scans from another engine version are scanned again (has_scan).
+# 2.46: Node's names tried in its order, each under any case before the next
+#      (`node Setup` runs setup.js on macOS and Windows before Setup.json),
+#      and a folder's package.json under another case (EG-9)
+# 2.45: a file an installer opens by name (package.json, binding.gyp,
+#      pyproject.toml, setup.py) read under any case, and a path Node opens
+#      found by its case fold where the exact name is not there (EG-4)
+# 2.44: code received over the network and run out of sight says so (GR-8)
+# 2.43: the code an extension's contributions name (a TypeScript server
+#      plugin, a debug adapter, a renderer, a preview script) is an entry
+#      point with the import-time test (EG-5)
+# 2.42: archive paths that differ only by case or Unicode normalization are
+#      SC-ARCHIVE-DUP, and the twins of a file that runs get its tests (EG-4)
+# 2.41: a .vsix member read where VS Code writes it (`extension…` without a
+#      slash), and such a name is SC-ARCHIVE-PATH (EG-1); a zip's entries by
+#      the names its installer reads, a Unicode path field's included (EG-2)
+# 2.40: a dropped run that is hidden says so (GR-8)
 # 2.39: SC-B64 passes over the base64 of a whole file of a data format, read
 #      by its structure (a WebAssembly module, a PNG, GIF or WebP image, WAV
 #      audio: undici's HTTP parser in every bundled action, N-4); a shell
@@ -267,7 +283,7 @@ SAMPLE = 8192              # header/entropy sample read from oversized files
 #      entry points and hook targets, Python install scripts
 # 2.3: verdict tiers, decoded hex, install-script inspection; 2.2:
 #      verdict-integrity; 2.1: binary-artifact awareness
-ENGINE_VERSION = "2.45.0"
+ENGINE_VERSION = "2.46.0"
 
 # ---------------- The content memo (P-2a, registry/contentcache.py) ----------------
 # One per scan_package run: the engine answers once for content several of a
@@ -2745,24 +2761,35 @@ class _ArtifactScan:
         `main: "lib"` with lib/package.json naming core.dat ran core.dat,
         and it was neither scanned nor counted."""
         candidates = _node_candidates(path)
-        found = self._find(candidates[:6])                 # the file, .js, .json, ...
+        found = self._find_node(candidates[:6])            # the file, .js, .json, ...
         if found:
             return found
         manifest_rel = _rel_join(path.rstrip("/"), "package.json")
-        text = self.manifests.get(manifest_rel)
+        text = self.manifests.get(self._find_node([manifest_rel]) or manifest_rel)
         if text is not None:
             data, _problems = lazaret.load_manifest(manifest_rel, text)
             main = data.get("main") if isinstance(data, dict) else None
             if isinstance(main, str) and main.strip():
-                found = self._find(_node_candidates(_rel_join(path.rstrip("/"), main)))
+                found = self._find_node(_node_candidates(_rel_join(path.rstrip("/"), main)))
                 if found:
                     return found
-        found = self._find(candidates[6:])                 # index.js, ...
-        if found is None:
-            # (macOS and Windows open a path under any case: `node Setup.js` runs setup.js there, EG-4)
-            folds = self._folds()
-            found = next((folds[f] for f in (case_fold(c) for c in candidates) if f in folds), None)
-        return found
+        return self._find_node(candidates[6:])             # index.js, ...
+
+    def _find_node(self, candidates):
+        """The member Node opens for the first of `candidates` that names one, in Node's order: the path itself, else
+        one that differs from it only by case, which macOS and Windows open in its place (`node Setup` runs setup.js
+        there before it tries Setup.json, EG-4, EG-9). Python's imports stay exact (`_find`): its importer compares the
+        case itself (PEP 235)."""
+        folds = None
+        for c in candidates:
+            if c in self.members:
+                return c
+            if folds is None:
+                folds = self._folds()
+            hit = folds.get(case_fold(c))
+            if hit is not None:
+                return hit
+        return None
 
     def _folds(self):
         """{case fold: the first member, by path, with it} (EG-4): what a path names where case is ignored."""

@@ -220,6 +220,22 @@ class PathTests(unittest.TestCase):
         self.assertIn("Install hook runs Setup.js, which", issues(res, "SC-INSTALL-HOOK")[0]["msg"])
         self.assertIn("lib/core.js", {i["file"] for i in issues(res, "SC-IMPORT-RISK")})
 
+    def test_node_tries_each_name_under_any_case_before_the_next(self):
+        # EG-9: `node Setup` tries Setup, then Setup.js, then Setup.json; on macOS and Windows Setup.js opens setup.js,
+        # so that runs, though Setup.json is there under its exact name (on Linux, Setup.json would be read); and a
+        # folder's package.json under another case names its main there too
+        raw = (tar_member("package/package.json", manifest(main="index.js", scripts={"postinstall": "node Setup"}))
+               + tar_member("package/Setup.json", '{"a": 1}\n')
+               + tar_member("package/setup.js", EXFIL_JS)
+               + tar_member("package/index.js", "module.exports = require('./lib');\n")
+               + tar_member("package/lib/Package.json", '{"main": "core.js"}\n')
+               + tar_member("package/lib/core.js", EXFIL_JS) + b"\0" * 1024)
+        res = scan_bytes(gzip.compress(raw))
+        self.assertEqual(res["verdict"], "SUSPICIOUS")
+        self.assertIn("Install hook runs Setup, which", issues(res, "SC-INSTALL-HOOK")[0]["msg"])
+        self.assertEqual([(i["file"], i["sev"]) for i in issues(res, "SC-INSTALL-HOOK")], [("package.json", "CRITICAL")])
+        self.assertIn("lib/core.js", {i["file"] for i in issues(res, "SC-IMPORT-RISK")})
+
     def test_a_case_variant_of_setup_py_or_pyproject_is_run_by_pip(self):
         # EG-4's leftover: pip opens setup.py where case is ignored, and so Setup.py; and a pyproject.toml's backend
         def sdist(*members):

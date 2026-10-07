@@ -641,6 +641,11 @@ project is pre-1.0, so the 0.x API may still change.
   user data and from `VSCODE_GALLERY_SERVICE_URL` (and `VSCODE_GALLERY_CONTROL_URL`), as VSCodium applies
   them; one that can't be read is refused. With no `product.json` found beside the command, the editor's
   own default gallery is taken as its.
+- **Node tries each name under any case before the next, as macOS and Windows resolve it (EG-9; rule set
+  2.46.0).** `node Setup` tries `Setup`, `Setup.js`, then `Setup.json`; where case is ignored, `Setup.js`
+  opens `setup.js`, so that runs though `Setup.json` is there under its exact name. Lazaret tried every exact
+  name first, and read the data file as what runs. Each name is now tried exactly, then under any case,
+  before the next, and a folder's `package.json` under another case names its `main` too.
 - **The extension guard's smaller fixes (EG-11 to EG-16, EG-18).** An extension the gallery's list says
   is malicious is blocked as itself, not replaced: the editor refuses it before it looks for a
   replacement. A `deprecated` entry of the list now cancels a migration to a pre-release for the same
