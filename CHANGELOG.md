@@ -92,9 +92,24 @@ project is pre-1.0, so the 0.x API may still change.
   `--do-not-include-pack-dependencies` from VS Code 1.98 on; before that, each extension after what it
   brings), and what it then lists as installed is compared with what was checked. A `.vsix` on the
   command line is scanned and installed from the guard's copy. An extension installed from a file is
-  pinned by the editor, so it stays at the version checked. `--update-extensions` is not wrapped yet. The
-  npm package's `lazaret guard`, which points to the Python package, now knows every tool the guard wraps
-  (it knew npm, pnpm, pip and uv only, and took `lazaret guard cargo build` for a scan of a folder).
+  pinned by the editor, so it stays at the version checked. The npm package's `lazaret guard`, which points
+  to the Python package, now knows every tool the guard wraps (it knew npm, pnpm, pip and uv only, and
+  took `lazaret guard cargo build` for a scan of a folder).
+- **`lazaret guard code --update-extensions`, and the forks'.** It updates what the editor's own
+  `--update-extensions` would update (VS Code's code read for it, MIT), checked and installed as an
+  install is: each extension the editor lists that came from its gallery, to the newest version the
+  editor would take for it (its newest release, or its newest version when it follows pre-releases),
+  with what that version brings that is missing. Which extensions came from the gallery, and which
+  follow pre-releases, is what the editor recorded when it installed them (the profile's
+  `extensions.json`; with `--profile`, that profile's, found through the editor's `storage.json`, and
+  the default's for extensions installed in every profile). The editor asks its gallery by the
+  identifier it recorded, so an extension whose name the gallery now gives another (another
+  `extensionId`, read from Open VSX's VS Code gallery or the Marketplace) is left alone and said, when
+  the guard reads the gallery the editor's `product.json` names. One installed from a file (as the guard
+  installs) has no identifier until the editor's window matches it to the gallery by name; the guard
+  matches it by name too, so what it installed is updated by it. Under `--min-age` an update younger
+  than that is held back and the newest version old enough is taken when it is newer than the one
+  installed. Nothing is installed when anything is blocked, or when a lookup fails.
 - **VS Code extensions named like a popular one's, and a release that brings a brand-new one (E-1's third
   part).** An extension is named `publisher.name`, and anyone can create a publisher. Its identifier, or
   one it brings (`extensionDependencies`, `extensionPack`), one change from a most-installed extension's of

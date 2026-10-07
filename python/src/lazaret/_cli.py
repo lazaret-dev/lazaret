@@ -1,6 +1,6 @@
 """The `lazaret` command: `lazaret guard <npm|pnpm|yarn|bun|pip|uv|uvx|go|cargo> …` checks what a
-package manager is about to install, and `lazaret guard code --install-extension …` (and the editors
-built on VS Code) what an editor is (lazaret.registry.guard); `lazaret hook [FILE …]` checks what a
+package manager is about to install, and `lazaret guard code --install-extension …` or
+`--update-extensions` (and the editors built on VS Code) what an editor is (lazaret.registry.guard); `lazaret hook [FILE …]` checks what a
 commit holds (lazaret.scanner.hook); `lazaret [scan] FILE.vsix …` and `lazaret [scan] --extensions
 [PATH …]` scan VS Code extensions (lazaret.registry.extensions); `lazaret [scan] github:owner/repo[@ref]`
 (or `gitlab:`) scans a repository at a commit (lazaret.registry.sourcescan); anything else scans a

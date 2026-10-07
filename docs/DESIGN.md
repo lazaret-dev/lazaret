@@ -953,6 +953,32 @@ list of installed extensions afterwards is compared with what was checked.
 An extension installed from a file is pinned by the editor (as one installed
 with `@version` is), which keeps it at the version checked.
 
+`--update-extensions` is VS Code's `updateExtensions`: the user's
+extensions that have a gallery identifier, each asked of the gallery by that
+identifier, to the newest version compatible with the editor (a pre-release
+when the extension follows them), when it is newer. The identifier and the
+pre-release choice are what the editor recorded when it installed the
+extension, in the profile's `extensions.json` (`metadata.id`, else
+`identifier.uuid`; `metadata.preRelease`): the default profile's is in the
+extensions folder, a named profile's in `<user data>/User/profiles/<its
+folder>`, which the editor's `User/globalStorage/storage.json` names
+(`userDataProfiles`), and a named profile also lists the default's
+application-scoped extensions. The registry modules are asked by name, so
+`gallery_id` reads the identifier the gallery gives that name (the
+Marketplace's query; Open VSX's VS Code gallery, `/vscode/gallery`, which
+VSCodium's `product.json` names), and an update goes ahead only when it is
+the one the editor recorded; a fork's own gallery gives identifiers of its
+own, so they are compared only when the guard reads the gallery the
+editor's `product.json` names. An extension installed from a file has no
+identifier as a rule: the editor's command line starts the gallery lookup
+that would add one without waiting for it, and exits, and the window adds
+it when it next opens, matching by name. The guard matches such an
+extension by name, as the window does, so that what it installed is updated
+by it; one installed from a location (`source: resource`) is matched by
+neither. Under `--min-age` the newest version old enough is taken, a younger
+one held back and said: an update is "whatever is newest", as an index
+filtered for pip is, where an install names what it wants and is blocked.
+
 **The guard's own folders and programs (0.1.9).** cargo, rustup, yarn, npm
 and go read settings from every folder above where they run (a workspace, a
 toolchain file, a `.yarnrc`'s `yarn-path`, `go.work`), and `/tmp` is a folder

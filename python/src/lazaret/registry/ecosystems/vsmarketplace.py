@@ -35,7 +35,7 @@ import re
 
 from lazaret.registry import editorcompat
 from lazaret.registry.ecosystems import base
-from lazaret.registry.ecosystems.openvsx import TARGET_PLATFORMS
+from lazaret.registry.ecosystems.openvsx import TARGET_PLATFORMS, gallery_extension, gallery_identifier, gallery_query
 
 __all__ = ["Marketplace", "ECOSYSTEM", "API_HOST", "QUERY_URL", "CDN_SUFFIX", "FALLBACK_SUFFIX", "VSIX_ASSET", "QUERY_FLAGS",
            "LATEST_ONLY_FLAG", "MAX_PART"]
@@ -122,26 +122,8 @@ class Marketplace(base.Ecosystem):
     def _ask(self, name, fetch, flags):
         """The extension's entry from the gallery's answer to a query with `flags`, its shape checked: one extension,
         this one (its publisher's and its own name, without case). FetchError otherwise."""
-        body = {"filters": [{"criteria": [{"filterType": FILTER_TARGET, "value": "Microsoft.VisualStudio.Code"},
-                                          {"filterType": FILTER_NAME, "value": name},
-                                          {"filterType": FILTER_EXCLUDE_FLAGS, "value": "4096"}],
-                             "pageNumber": 1, "pageSize": 1, "sortBy": 0, "sortOrder": 0}],
-                "assetTypes": [], "flags": flags}
-        doc = fetch.post_json(QUERY_URL, body, max_bytes=MAX_QUERY_BYTES, accept=ACCEPT)
-        results = doc.get("results") if isinstance(doc, dict) else None
-        first = results[0] if isinstance(results, list) and results else None
-        exts = first.get("extensions") if isinstance(first, dict) else None
-        if not isinstance(exts, list):
-            raise base.FetchError("vscode: the Marketplace's answer is not a list of extensions")
-        if not exts:
-            raise base.NotFound("vscode: the Marketplace has no such extension")
-        ext = exts[0]
-        publisher = ext.get("publisher") if isinstance(ext, dict) else None
-        pub = publisher.get("publisherName") if isinstance(publisher, dict) else None
-        got = ext.get("extensionName") if isinstance(ext, dict) else None
-        if not (isinstance(pub, str) and isinstance(got, str) and f"{pub}.{got}".lower() == name.lower()):
-            raise base.FetchError("vscode: the Marketplace's answer is about another extension")
-        return ext
+        doc = fetch.post_json(QUERY_URL, gallery_query(name, flags), max_bytes=MAX_QUERY_BYTES, accept=ACCEPT)
+        return gallery_extension(doc, name, "vscode: the Marketplace")
 
     def _query(self, name, fetch, latest):
         """The extension's entry with its versions (their files, properties and asset URIs) and statistics: _ask's,
@@ -277,6 +259,13 @@ class Marketplace(base.Ecosystem):
         ext = self._ask(self.check_name(name), fetch, 0)
         times = sorted(t for t in (base.parse_time(ext.get(k)) for k in ("publishedDate", "releaseDate")) if t)
         return (times[0] if times else None), (ext["publisher"]["publisherName"],)
+
+    def gallery_id(self, name, fetch):
+        """The identifier the gallery gives `name` (its `extensionId`): the one VS Code keeps for an extension it
+        installed from the gallery, and asks the gallery by when it updates it (`lazaret guard code
+        --update-extensions`). One query, without versions (flags 0). NotFound when the gallery has no such extension;
+        FetchError for an answer without one."""
+        return gallery_identifier(self._ask(self.check_name(name), fetch, 0), "vscode: the Marketplace")
 
     # ---- what an editor chooses among (`lazaret guard code --install-extension`, E-1's fifth part)
     def _candidates(self, ext):

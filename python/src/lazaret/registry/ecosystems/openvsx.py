@@ -11,6 +11,9 @@ published for, each checked against the SHA-256 the registry publishes beside it
                  platform's document, and its `files.sha256` names that file's digest. `verified` says the namespace
                  has an owner and the publisher is one of them; `dependencies` and `bundledExtensions` are the
                  extensions it needs to activate and the members of its pack.
+    the gallery  `https://open-vsx.org/vscode/gallery`, the gallery VSCodium's product.json names: VS Code's query
+                 (POST `extensionquery`, the Marketplace's protocol) answered in the Marketplace's shape. Read for one
+                 thing, the `extensionId` the editor keeps for an extension it installed from there (`gallery_id`).
     the files    the API's file URLs answer with a redirect to the content host, `openvsx.eclipsecontent.org`: the
                  `.vsix`, and `<file>.sha256`, the hex SHA-256 of the `.vsix` and nothing else.
     the archive  a zip; every member whose name begins with `extension` is the extension's, those letters taken off,
@@ -31,11 +34,16 @@ import re
 from lazaret.registry import editorcompat
 from lazaret.registry.ecosystems import base
 
-__all__ = ["OpenVSX", "ECOSYSTEM", "API_HOST", "CONTENT_HOST", "API", "TARGET_PLATFORMS", "MAX_PART"]
+__all__ = ["OpenVSX", "ECOSYSTEM", "API_HOST", "CONTENT_HOST", "API", "GALLERY_QUERY_URL", "TARGET_PLATFORMS",
+           "MAX_PART", "gallery_query", "gallery_identifier"]
 
 API_HOST = "open-vsx.org"
 CONTENT_HOST = "openvsx.eclipsecontent.org"
 API = f"https://{API_HOST}/api"
+#: Open VSX's VS Code gallery (VSCodium's `extensionsGallery.serviceUrl` plus `/extensionquery`)
+GALLERY_QUERY_URL = f"https://{API_HOST}/vscode/gallery/extensionquery"
+#: VS Code's own Accept header for a gallery query
+GALLERY_ACCEPT = "application/json;api-version=3.0-preview.1"
 MAX_PART = 128
 #: The target platforms VS Code installs a `.vsix` for (its TargetPlatform values); `universal` runs on all of them.
 TARGET_PLATFORMS = frozenset(("universal", "web", "win32-x64", "win32-arm64", "win32-ia32", "linux-x64", "linux-arm64",
@@ -50,10 +58,49 @@ _PART_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9-]*")
 _NAME_CHAR = re.compile(r"[A-Za-z0-9.-]")
 _SHA256_RE = re.compile(r"[0-9a-fA-F]{64}")
 _PLATFORM_RE = re.compile(r"[a-z0-9]{1,16}(?:-[a-z0-9]{1,16}){0,3}")
+_GALLERY_ID_RE = re.compile(r"[A-Za-z0-9-]{1,100}")
 
 
 def _text(value, limit=200):
     return value if isinstance(value, str) and len(value) <= limit else None
+
+
+def gallery_query(name, flags):
+    """The body of the query VS Code sends a gallery for one extension by its name (filter type 7) among VS Code's
+    (filter type 8), unpublished ones left out (filter type 12, flag 4096), with query `flags`."""
+    return {"filters": [{"criteria": [{"filterType": 8, "value": "Microsoft.VisualStudio.Code"},
+                                      {"filterType": 7, "value": name},
+                                      {"filterType": 12, "value": "4096"}],
+                         "pageNumber": 1, "pageSize": 1, "sortBy": 0, "sortOrder": 0}],
+            "assetTypes": [], "flags": flags}
+
+
+def gallery_extension(doc, name, label):
+    """The extension `name` from a gallery's answer to `gallery_query`, its shape checked: one extension, this one
+    (its publisher's and its own name, without case). NotFound when the answer lists none; FetchError otherwise."""
+    results = doc.get("results") if isinstance(doc, dict) else None
+    first = results[0] if isinstance(results, list) and results else None
+    exts = first.get("extensions") if isinstance(first, dict) else None
+    if not isinstance(exts, list):
+        raise base.FetchError(f"{label}'s answer is not a list of extensions")
+    if not exts:
+        raise base.NotFound(f"{label} has no such extension")
+    ext = exts[0]
+    publisher = ext.get("publisher") if isinstance(ext, dict) else None
+    pub = publisher.get("publisherName") if isinstance(publisher, dict) else None
+    got = ext.get("extensionName") if isinstance(ext, dict) else None
+    if not (isinstance(pub, str) and isinstance(got, str) and f"{pub}.{got}".lower() == name.lower()):
+        raise base.FetchError(f"{label}'s answer is about another extension")
+    return ext
+
+
+def gallery_identifier(ext, label):
+    """The `extensionId` of a gallery's extension entry, as VS Code keeps it (and compares it, as it is); FetchError
+    when there is none, or it is not one."""
+    value = ext.get("extensionId") if isinstance(ext, dict) else None
+    if not (isinstance(value, str) and _GALLERY_ID_RE.fullmatch(value)):
+        raise base.FetchError(f"{label}'s answer gives the extension no identifier")
+    return value
 
 
 class OpenVSX(base.Ecosystem):
@@ -323,6 +370,15 @@ class OpenVSX(base.Ecosystem):
         if not url:
             raise base.FetchError("openvsx: the registry names no manifest for the version")
         return fetch.json(url, accept="application/json")
+
+    def gallery_id(self, name, fetch):
+        """The identifier Open VSX's VS Code gallery gives `name` (its `extensionId`): the one an editor keeps for an
+        extension it installed from that gallery, and asks the gallery by when it updates it (`lazaret guard codium
+        --update-extensions`). VS Code's query, without versions (flags 0). NotFound when the gallery has no such
+        extension; FetchError for an answer without one."""
+        name = self.check_name(name)
+        doc = fetch.post_json(GALLERY_QUERY_URL, gallery_query(name, 0), accept=GALLERY_ACCEPT)
+        return gallery_identifier(gallery_extension(doc, name, "openvsx: the gallery"), "openvsx: the gallery")
 
     # ---- archives
     def container(self, filename):

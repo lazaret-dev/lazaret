@@ -4,6 +4,7 @@ brings, checked before the editor installs it.
     lazaret guard code --install-extension ms-python.python
     lazaret guard code --install-extension redhat.java@1.40.0 --install-extension ./my-extension.vsix
     lazaret guard cursor --install-extension rust-lang.rust-analyzer --pre-release
+    lazaret guard code --update-extensions
     (and code-insiders, codium, windsurf, kiro and positron)
 
 An extension runs in the editor's extension host with all of the user's access and no sandbox, so the guard does what
@@ -37,9 +38,31 @@ the editor's own `--install-extension` does, up to the download, and then has th
                     Then the extensions the editor lists are compared with what was checked: anything else it
                     installed is reported, and the run fails.
 
-An extension installed from a file is pinned by the editor, as one installed with `@version` is: it does not update
-it on its own, so it stays at what was checked. `--update-extensions` is not wrapped yet: an update the editor makes
-itself is outside any guard's reach (`lazaret --extensions` scans what is installed)."""
+`--update-extensions` updates what the editor's own `--update-extensions` updates (VS Code's code read for it, MIT),
+checked and installed the same way:
+
+    which ones      each extension the editor lists that came from its gallery, as the editor recorded it when it
+                    installed it (the profile's extensions.json: the gallery's identifier for it, whether it follows
+                    pre-releases; with --profile, that profile's, and the default's for those installed in every
+                    profile). The editor asks its gallery by that identifier, so one is updated only while the
+                    gallery's extension of its name has the same identifier (when the guard reads the gallery the
+                    editor's product.json names; another's identifiers are not comparable). One installed from a file
+                    has no identifier, as a rule (the editor's command line does not wait for the lookup that adds
+                    one), until the editor's window matches it to its gallery by name when it opens, and the editor's
+                    own --update-extensions passes over it until then; the guard matches it by name, as the window
+                    does, so that what the guard installed is updated by it. One installed from a location
+                    (`source: resource`) the window does not match, nor does the guard.
+    which version   the newest the editor would take for it (its newest release, its newest version when it follows
+                    pre-releases, with a file for the editor's platform and an engine for its version), when that is
+                    newer than the one installed. Under --min-age a version younger than it is held back, and the
+                    newest one old enough is taken if it is newer than the one installed (--allow-new lets it in).
+    what it brings  as for an install: its dependencies that are not installed, and the members of its pack that
+                    the installed version did not list.
+
+Nothing is installed when anything is blocked, or when a lookup fails (the editor's update is one query, and fails
+whole). An extension installed from a file is pinned by the editor, as one installed with `@version` is: the editor
+does not update it on its own, so it stays at what was checked until it is updated again (this command, or the
+editor's own update, which no guard reaches: `lazaret --extensions` scans what is installed)."""
 
 import collections
 import hashlib
@@ -59,7 +82,8 @@ from lazaret.registry.ecosystems import base
 from lazaret.scanner import core as lazaret
 
 __all__ = ["EDITORS", "GALLERIES", "guard_editor", "parse_args", "Request", "Manifest", "vsix_manifest",
-           "read_manifest", "Editor", "read_editor", "installed_extensions", "order_waves"]
+           "read_manifest", "Editor", "read_editor", "installed_extensions", "order_waves", "Origin", "user_data_dir",
+           "profile_files", "installed_origins"]
 
 #: The editors whose `--install-extension` the guard wraps: their name, the registry they install from, and their
 #: data folder (extensions in `~/<it>/extensions`, unless product.json says otherwise).
@@ -73,6 +97,10 @@ EDITORS = {
     "positron": ("Positron", "openvsx", ".positron"),
 }
 GALLERIES = {"vscode": "the Visual Studio Marketplace", "openvsx": "Open VSX"}
+#: The editors' product names (product.json's nameShort), which name their folder of user data, where --profile's
+#: profiles are kept, when the guard does not find product.json
+USER_DATA_NAMES = {"code": "Code", "code-insiders": "Code - Insiders", "codium": "VSCodium", "cursor": "Cursor",
+                   "windsurf": "Windsurf", "kiro": "Kiro", "positron": "Positron"}
 #: The gallery a product.json's extensionsGallery.serviceUrl names, by its host.
 GALLERY_HOSTS = {"marketplace.visualstudio.com": "vscode", "open-vsx.org": "openvsx"}
 #: The list of extensions Microsoft has found malicious, as VS Code reads it (its product.json's controlUrl).
@@ -83,6 +111,7 @@ MAX_MANIFEST = 4 * 1024 * 1024
 MAX_PRODUCT = 2 * 1024 * 1024
 MAX_CONTROL = 16 * 1024 * 1024
 MAX_BUILTINS = 1000
+MAX_PROFILE_FILE = 16 * 1024 * 1024  # a profile's extensions.json, the editor's storage.json
 MAX_LISTED = 500                     # the extensions one manifest lists (as the registry modules read them)
 MAX_PLANNED = 500                    # the extensions one run looks at
 EDITOR_TIMEOUT = 120                 # --version and --list-extensions
@@ -92,8 +121,8 @@ INSTALL_BATCH = 25
 VALUE_OPTIONS = ("--install-extension", "--profile", "--extensions-dir", "--user-data-dir")
 FLAG_OPTIONS = ("--force", "--pre-release", "--do-not-sync", "--do-not-include-pack-dependencies")
 PASSED_VALUES = ("--profile", "--extensions-dir", "--user-data-dir")
-NOT_WRAPPED = ("--update-extensions", "--uninstall-extension", "--install-builtin-extension", "--list-extensions",
-               "--locate-extension")
+UPDATE = "--update-extensions"
+NOT_WRAPPED = ("--uninstall-extension", "--install-builtin-extension", "--list-extensions", "--locate-extension")
 
 _ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9-]*\.[A-Za-z0-9][A-Za-z0-9-]*")
 #: VS Code's `id@version` (extensionManagementUtil's): a version is MAJOR.MINOR.PATCH[-…], or `prerelease`
@@ -101,11 +130,17 @@ _ID_VERSION_RE = re.compile(r"^([^.]+\..+)@((prerelease)|(\d+\.\d+\.\d+(-.*)?))$
 _LISTED_RE = re.compile(r"^([A-Za-z0-9][A-Za-z0-9-]*\.[A-Za-z0-9][A-Za-z0-9-]*)@(\S{1,100})$")
 _VSCODE_VERSION_RE = re.compile(r"^(\d{1,4})\.(\d{1,4})\.(\d{1,9})")
 _PLATFORM_RE = re.compile(r"[a-z0-9]{1,16}(?:-[a-z0-9]{1,16}){0,3}")
+_PRODUCT_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9 ._-]{0,60}")
+_GALLERY_ID_RE = re.compile(r"[A-Za-z0-9-]{1,100}")
 
 
 class Unavailable(Exception):
-    """The editor would not install the extension: no such extension or version, no file for this platform, none
-    for this editor's version, or a file that is not the version the registry named."""
+    """The editor would not install the extension: no such extension or version (`missing`), no file for this
+    platform, none for this editor's version, or a file that is not the version the registry named."""
+
+    def __init__(self, message, missing=False):
+        super().__init__(message)
+        self.missing = missing
 
 
 # ---------------- the command line ----------------
@@ -120,13 +155,14 @@ class Request:
 def parse_args(tool, args, cwd=None):
     """(requests, flags, values) of an editor's command line: the `--install-extension` values (a value ending in
     `.vsix` is a file, relative to the current folder, as the editor reads it; else `id[@version]`), the flags and the
-    options passed on. GuardError for anything else, or for no `--install-extension`."""
+    options passed on; or no request and the flag `--update-extensions`, with the options it passes on. GuardError for
+    anything else, for neither, or for both."""
     requests, flags, values = [], set(), {}
     k = 0
     while k < len(args):
         arg = args[k]
         name, eq, value = arg.partition("=") if arg.startswith("--") else (arg, "", "")
-        if name in FLAG_OPTIONS and not eq:
+        if name in FLAG_OPTIONS + (UPDATE,) and not eq:
             flags.add(name)
         elif name in VALUE_OPTIONS:
             if not eq:
@@ -139,13 +175,25 @@ def parse_args(tool, args, cwd=None):
             else:
                 values[name] = value
         elif name in NOT_WRAPPED:
-            raise G.GuardError(f"lazaret guard wraps {tool} --install-extension; {name} is not wrapped (yet)")
+            raise G.GuardError(f"lazaret guard wraps {tool} --install-extension and {UPDATE}; {name} is not wrapped "
+                               f"(yet)")
         else:
             raise G.GuardError(f"lazaret guard {tool}: {lazaret.sanitize_term_line(arg)!r} is not an option the guard "
                                f"passes on ({', '.join(FLAG_OPTIONS + PASSED_VALUES)})")
         k += 1
+    if UPDATE in flags:
+        if requests:
+            # (the editor would install and not update: it reads --install-extension first)
+            raise G.GuardError(f"{tool} --install-extension and {UPDATE} together: the editor installs and does not "
+                               f"update; run them one at a time")
+        given = [f for f in FLAG_OPTIONS if f in flags]
+        if given:
+            raise G.GuardError(f"{tool} {UPDATE} does not read {', '.join(given)} (it passes on "
+                               f"{', '.join(PASSED_VALUES)})")
+        return requests, flags, values
     if not requests:
-        raise G.GuardError(f"lazaret guard wraps {tool} --install-extension ID[@VERSION] | FILE.vsix")
+        raise G.GuardError(f"lazaret guard wraps {tool} --install-extension ID[@VERSION] | FILE.vsix, and {tool} "
+                           f"{UPDATE}")
     seen = set()
     for r in requests:
         key = r.id or os.path.normcase(r.path)
@@ -256,12 +304,14 @@ def _read_json_file(path, limit):
 
 # ---------------- the editor ----------------
 class Editor:
-    """The editor the command runs: its executable, its name, the registry it installs from, the VS Code version its
+    """The editor the command runs: its executable, its name, the registry it installs from (and the one its
+    product.json names, None when it names none the guard reads or none is found), the VS Code version its
     extensions' engines are checked against (None: not known), its build date, its target platform, its app folder
     (where product.json is; None: not found), its built-in extensions ({id: version}) and its malicious list's URL."""
 
     def __init__(self, tool, exe, label, gallery, data_folder):
         self.tool, self.exe, self.label, self.gallery, self.data_folder = tool, exe, label, gallery, data_folder
+        self.gallery_named = None
         self.reported = None
         self.version = None
         self.date = None
@@ -279,6 +329,12 @@ class Editor:
             return None
         m = _VSCODE_VERSION_RE.match(self.version)
         return (int(m.group(1)), int(m.group(2))) >= PACK_FLAG_SINCE
+
+    def ids_comparable(self):
+        """Are the gallery identifiers the editor keeps the ones the guard's registry gives? Only when the guard reads
+        the gallery the editor's product.json names (a fork's own gallery, or another chosen with --gallery, gives
+        its own)."""
+        return self.gallery_named is not None and self.gallery_named == self.gallery
 
 
 def _vscode_like(text):
@@ -365,6 +421,7 @@ def read_editor(tool, exe, env, gallery=None, system=None):
     gallery_doc = ed.product.get("extensionsGallery") if isinstance(ed.product.get("extensionsGallery"), dict) else {}
     service = gallery_doc.get("serviceUrl") if isinstance(gallery_doc.get("serviceUrl"), str) else None
     named = GALLERY_HOSTS.get((urllib.parse.urlsplit(service).hostname or "").lower()) if service else None
+    ed.gallery_named = named
     if gallery:
         ed.gallery = gallery
     elif named:
@@ -448,6 +505,130 @@ def installed_pack(folder, ext_id, version):
     return None
 
 
+# ---------------- where an installed extension came from (--update-extensions) ----------------
+class Origin:
+    """What the editor recorded of an installed extension (a profile's extensions.json): its version, the identifier
+    its gallery gave it (None: installed from a file and not yet matched to the gallery, or not from one), whether it
+    follows pre-releases, and how it was installed (`gallery`, `vsix`, `resource`; None when not said)."""
+    __slots__ = ("version", "uuid", "pre", "source")
+
+    def __init__(self, version, uuid=None, pre=False, source=None):
+        self.version, self.uuid, self.pre, self.source = version, uuid, pre, source
+
+
+def user_data_dir(editor, env, values, system=None):
+    """The editor's folder of user data (VS Code's rule): VSCODE_PORTABLE's `user-data`, else VSCODE_APPDATA's folder
+    of the editor's product name, else --user-data-dir, else that folder in the system's (APPDATA on Windows,
+    `~/Library/Application Support` on macOS, XDG_CONFIG_HOME or `~/.config` elsewhere)."""
+    if env.get("VSCODE_PORTABLE"):
+        return os.path.abspath(os.path.join(env["VSCODE_PORTABLE"], "user-data"))
+    name = editor.product.get("nameShort")
+    if not (isinstance(name, str) and _PRODUCT_NAME_RE.fullmatch(name)):
+        name = USER_DATA_NAMES[editor.tool]
+    if env.get("VSCODE_APPDATA"):
+        return os.path.abspath(os.path.join(env["VSCODE_APPDATA"], name))
+    if values.get("--user-data-dir"):
+        return os.path.abspath(values["--user-data-dir"])
+    system = sys.platform if system is None else system
+    home = os.path.expanduser("~")
+    if system.startswith("win") or system == "cygwin":
+        appdata = env.get("APPDATA") or os.path.join(env.get("USERPROFILE") or home, "AppData", "Roaming")
+    elif system == "darwin":
+        appdata = os.path.join(home, "Library", "Application Support")
+    else:
+        appdata = env.get("XDG_CONFIG_HOME") or os.path.join(home, ".config")
+    return os.path.abspath(os.path.join(appdata, name))
+
+
+def _profile_folder(location, home):
+    """A stored profile's folder: its location, a folder name under the profiles' folder (`home`), or a file URI as an
+    older editor stored it; None for anything else."""
+    if isinstance(location, str):
+        parts = re.split(r"[\\/]", location)
+        if location and ":" not in location and not os.path.isabs(location) \
+                and not any(p in ("", ".", "..") for p in parts):
+            return os.path.join(home, location)
+        return None
+    if isinstance(location, dict) and location.get("scheme") == "file" and isinstance(location.get("path"), str):
+        path = location["path"]
+        if os.name == "nt" and re.match(r"^/[A-Za-z]:", path):
+            path = path[1:].replace("/", "\\")
+        return path if os.path.isabs(path) else None
+    return None
+
+
+def profile_files(editor, env, values):
+    """[(path, which)] of the files that record the extensions the editor lists: the default profile's
+    `extensions.json`, in its extensions folder (`all`); with --profile NAME, that profile's (`own`, in
+    `<user data>/User/profiles/<its folder>`, as the editor's storage.json names it, unless the profile uses the
+    default's extensions) and the default's for those installed in every profile (`everywhere`). GuardError when the
+    profile is not found."""
+    default = os.path.join(extensions_folder(editor, env, values), "extensions.json")
+    name = values.get("--profile")
+    if not name or name == "Default":                     # (the default profile's name: the editor finds it first)
+        return [(default, "all")]
+    data = user_data_dir(editor, env, values)
+    state = os.path.join(data, "User", "globalStorage", "storage.json")
+    doc = _read_json_file(state, MAX_PROFILE_FILE)
+    stored = doc.get("userDataProfiles") if isinstance(doc, dict) else None
+    for p in stored if isinstance(stored, list) else []:
+        if not (isinstance(p, dict) and p.get("name") == name):
+            continue
+        flags = p.get("useDefaultFlags")
+        if isinstance(flags, dict) and flags.get("extensions") is True:
+            return [(default, "all")]
+        folder = _profile_folder(p.get("location"), os.path.join(data, "User", "profiles"))
+        if folder:
+            return [(os.path.join(folder, "extensions.json"), "own"), (default, "everywhere")]
+        break
+    raise G.GuardError(f"{editor.label}'s profile {lazaret.sanitize_term_line(name)!r} was not found in {state}, where "
+                       f"the guard reads which file records its extensions")
+
+
+def _read_profile_file(path):
+    """The entries of a profile's extensions.json; [] when there is none (the editor reads none as no extension).
+    GuardError when it cannot be read, or is not a JSON list."""
+    try:
+        with open(path, "rb") as f:
+            raw = f.read(MAX_PROFILE_FILE + 1)
+    except FileNotFoundError:
+        return []
+    except OSError as exc:
+        raise G.GuardError(f"could not read {path}: {exc.strerror or exc}") from None
+    if len(raw) > MAX_PROFILE_FILE:
+        raise G.GuardError(f"{path} is larger than the guard reads")
+    try:
+        doc = lazaret.json_loads_bounded(raw.strip() or b"[]")
+    except (lazaret.JsonTooDeep, UnicodeDecodeError, ValueError):
+        doc = None
+    if not isinstance(doc, list):
+        raise G.GuardError(f"{path} is not the list of extensions the editor keeps there")
+    return doc
+
+
+def installed_origins(editor, env, values):
+    """{(id, version): Origin} of the extensions the profile's files record (profile_files): the gallery identifier
+    (`metadata.id`, else `identifier.uuid`, as the editor reads it), `metadata.preRelease` and `metadata.source`. An
+    entry the editor would not read is left out. GuardError when a file cannot be read."""
+    out = {}
+    for path, which in profile_files(editor, env, values):
+        for e in _read_profile_file(path)[:MAX_PLANNED * 4]:
+            ident = e.get("identifier") if isinstance(e, dict) else None
+            ext_id = ident.get("id") if isinstance(ident, dict) else None
+            version = e.get("version") if isinstance(e, dict) else None
+            if not (isinstance(ext_id, str) and _ID_RE.fullmatch(ext_id) and isinstance(version, str) and version):
+                continue
+            meta = e.get("metadata") if isinstance(e.get("metadata"), dict) else {}
+            everywhere = meta.get("isApplicationScoped") is True or meta.get("isBuiltin") is True
+            if (which == "own" and meta.get("isApplicationScoped") is True) or (which == "everywhere" and not everywhere):
+                continue
+            uuid = meta.get("id") if meta.get("id") is not None else ident.get("uuid")
+            uuid = uuid if isinstance(uuid, str) and _GALLERY_ID_RE.fullmatch(uuid) else None
+            source = meta.get("source") if isinstance(meta.get("source"), str) else None
+            out.setdefault((ext_id.lower(), version), Origin(version, uuid, meta.get("preRelease") is True, source))
+    return out
+
+
 # ---------------- one run ----------------
 class Item:
     """One extension the run looks at: why (asked for, or which extension brings it), the file chosen and its
@@ -466,6 +647,7 @@ class Item:
         self.installed = False               # an installed pack member, walked through for what it brings
         self.downgrade = False
         self.pre = False                     # asked for with @prerelease (what it brings is taken as pre-releases too)
+        self.held = None                     # an update's newer version held back by --min-age (said)
 
 
 class Run:
@@ -489,19 +671,21 @@ class Run:
             self.ctx.notes.append(line)
 
     # ---- choosing a file
-    def choose(self, ext_id, version=None, pre=False):
-        """(candidate, artifact) of the file the editor would install. Unavailable when there is none; FetchError when
-        the registry could not be asked."""
+    def choose(self, ext_id, version=None, pre=False, keep=None):
+        """(candidate, artifact) of the file the editor would install (among the candidates `keep` keeps, when it is
+        given: --min-age's held back). Unavailable when there is none; FetchError when the registry could not be
+        asked."""
         ed, chosen, last = self.editor, None, []
         try:
             for cands in self.module.candidates(ext_id, self.fetch, version):
                 last = cands
-                chosen = editorcompat.choose(cands, ed.target, ed.version, ed.date, version, pre)
+                chosen = editorcompat.choose([c for c in cands if keep(c)] if keep else cands, ed.target, ed.version,
+                                             ed.date, version, pre)
                 if chosen is not None:
                     break
         except base.NotFound:
             raise Unavailable(f"not found in {GALLERIES[ed.gallery]}"
-                              + (f" (no version {version})" if version else "")) from None
+                              + (f" (no version {version})" if version else ""), missing=True) from None
         if chosen is None:
             raise Unavailable(self._why_none(last, version, pre))
         return chosen, self.module.artifact(ext_id, chosen, self.fetch)
@@ -721,8 +905,9 @@ def order_waves(items, brings):
 
 # ---------------- the command ----------------
 def guard_editor(ctx, tool, args, gallery=None, fetch=None):
-    """lazaret guard <editor> --install-extension …: -> the exit code (finish's)."""
+    """lazaret guard <editor> --install-extension … | --update-extensions: -> the exit code (finish's)."""
     requests, flags, values = parse_args(tool, args)
+    update = UPDATE in flags
     exe = G.find_tool(tool)
     env = dict(os.environ)
     editor = read_editor(tool, exe, env, gallery)
@@ -736,16 +921,24 @@ def guard_editor(ctx, tool, args, gallery=None, fetch=None):
             + (f" (VS Code {editor.version})" if editor.version and editor.version != editor.reported else "")
             + f" for {editor.target}; extensions from {GALLERIES[editor.gallery]}")
     installed = installed_extensions(editor, env, values)
+    origins = installed_origins(editor, env, values) if update and installed else {}
     ctx.unchecked_hint = ("the editor installed or updated them itself (from its window, or an update of its own); look "
                           "at them, or uninstall them")
     scratch = G.private_scratch("lazaret-guard-ext-")
     try:
         run = Run(ctx, editor, env, flags, values, installed, scratch, fetch)
-        roots, failed = _plan_roots(run, requests)
+        roots, failed = _plan_updates(run, origins) if update else _plan_roots(run, requests)
         if failed:
             for line in failed:
                 ctx.say(f"lazaret guard: {line}")
             return G.finish(ctx, installed=False, code=G.EXIT_RESOLVE)
+        if update and roots:
+            ctx.say(f"lazaret guard: {G.plural(len(roots), 'update')} of the {G.plural(len(installed), 'extension')} "
+                    f"{editor.label} lists")
+            for root in roots:
+                ctx.say(f"  {'update':<10} {root.id} {installed[root.id]} to {root.version}")
+        elif update:
+            ctx.say(f"lazaret guard: no update for the {G.plural(len(installed), 'extension')} {editor.label} lists")
         known = {r.id for r in roots}
         brought = []
         for root in roots:
@@ -756,7 +949,7 @@ def guard_editor(ctx, tool, args, gallery=None, fetch=None):
                 brought += [b for b in run.walk(root, known, pre) if not b.installed and b not in brought]
             except Unavailable as exc:
                 if root.source is None:
-                    ctx.say(f"lazaret guard: {root.id} cannot be installed: {exc}")
+                    ctx.say(f"lazaret guard: {root.id} cannot be {'updated' if update else 'installed'}: {exc}")
                     return G.finish(ctx, installed=False, code=G.EXIT_RESOLVE)
                 run.note(f"what {root.source} brings is left out, as the editor leaves it when one of them cannot be "
                          f"installed: {exc}")
@@ -855,6 +1048,113 @@ def _file_item(run, request, force):
     run.items.append(item)
     run._take(item, data)
     return item
+
+
+def _plan_updates(run, origins):
+    """The Items for what the editor's --update-extensions would update, chosen, fetched and checked (module
+    docstring): of the extensions the editor lists, each from its gallery (`origins`, what the profile recorded), at
+    the newest version it would take when that is newer than the one installed. -> (items, the lookups that failed:
+    the editor's update fails whole when its query does)."""
+    ctx, editor, installed = run.ctx, run.editor, run.installed
+    if len(installed) > MAX_PLANNED:
+        raise G.GuardError(f"{editor.label} lists {len(installed)} extensions; the guard looks at {MAX_PLANNED} at most "
+                           f"(update them by name: --install-extension ID --force)")
+    compare = editor.ids_comparable()
+    choices, jobs, unrecorded = {}, [], []
+
+    def look(ext_id, have, origin):
+        choices[ext_id] = _update_choice(run, ext_id, have, origin, compare)
+
+    for ext_id, have in sorted(installed.items()):
+        origin = origins.get((ext_id, have))
+        if origin is None:
+            unrecorded.append(ext_id)
+            origin = Origin(have)
+        if origin.source == "resource" and origin.uuid is None:
+            continue                         # (installed from a location: the editor matches it to no gallery)
+        jobs.append(lambda i=ext_id, h=have, o=origin: look(i, h, o))
+    if unrecorded:
+        run.note(", ".join(unrecorded[:10]) + (f", … (+{len(unrecorded) - 10})" if len(unrecorded) > 10 else "")
+                 + f": the editor lists {'it' if len(unrecorded) == 1 else 'them'}, and its profile does not record "
+                 f"{'it' if len(unrecorded) == 1 else 'them'} at that version: matched to {GALLERIES[editor.gallery]} "
+                 f"by name, as releases")
+    G.run_all(jobs)
+    items, failed, unmatched = [], [], 0
+    for ext_id in sorted(choices):
+        kind, value = choices[ext_id] or (None, None)
+        if kind == "failed":
+            failed.append(value)
+        elif kind == "note":
+            run.note(value)
+        elif kind in ("update", "unmatched"):
+            unmatched += kind == "unmatched"
+            items.append(value)
+    if unmatched:
+        run.note(f"the gallery identifiers {editor.label} keeps are not compared with {GALLERIES[editor.gallery]}'s "
+                 f"(its product.json names another gallery, or none the guard found): "
+                 f"{G.plural(unmatched, 'extension')} matched by name")
+    if failed:
+        return [], failed
+    fetches = []
+    for item in items:
+        item.check = ctx.add(G.Check(editor.gallery, item.id, item.version, item.why))
+        if item.held:
+            item.check.notes.append(item.held)
+        run.items.append(item)
+        fetches.append(lambda i=item: run.fetch_item(i))
+    G.run_all(fetches)
+    return items, []
+
+
+def _update_choice(run, ext_id, have, origin, compare):
+    """What --update-extensions does with one installed extension: None (nothing newer, or not the gallery's), ("note",
+    why it is left alone), ("failed", the lookup that failed), or ("update" / "unmatched": its gallery identifier not
+    compared, Item)."""
+    ctx, editor = run.ctx, run.editor
+    try:
+        candidate, artifact = run.choose(ext_id, None, origin.pre)
+    except Unavailable as exc:
+        if exc.missing and origin.uuid is None:
+            return None                      # (installed from a file, and no extension of the gallery's)
+        return "note", f"{ext_id} {have} is not updated: {exc}"
+    except (base.FetchError, repo.FetchError, ValueError) as exc:
+        return "failed", f"{ext_id} could not be looked up: {exc}"
+    if editorcompat.version_key(candidate.version) <= editorcompat.version_key(have):
+        return None
+    held = None
+    if ctx.cutoff is not None and candidate.when is not None and candidate.when > ctx.cutoff \
+            and not ctx.matches(ctx.opts.allow_new, editor.gallery, ext_id):
+        young = candidate.version
+        try:
+            candidate, artifact = run.choose(ext_id, None, origin.pre,
+                                             keep=lambda c: c.when is not None and c.when <= ctx.cutoff)
+        except Unavailable:
+            candidate = None
+        except (base.FetchError, repo.FetchError, ValueError) as exc:
+            return "failed", f"{ext_id} could not be looked up: {exc}"
+        if candidate is None or editorcompat.version_key(candidate.version) <= editorcompat.version_key(have):
+            return "note", (f"{ext_id} {have} is not updated: {young} is younger than --min-age "
+                            f"{G.format_age(ctx.min_age)} (--allow-new {ext_id} lets it in)")
+        held = f"{young} held back: younger than --min-age {G.format_age(ctx.min_age)}"
+    kind = "update"
+    if origin.uuid is not None:
+        if compare:
+            try:
+                gid = run.module.gallery_id(ext_id, run.fetch)
+            except base.NotFound:
+                gid = None
+            except (base.FetchError, repo.FetchError, ValueError) as exc:
+                return "failed", f"{ext_id} could not be looked up: {exc}"
+            if gid != origin.uuid:
+                return "note", (f"{ext_id} {have} is not updated: the extension {GALLERIES[editor.gallery]} has by that "
+                                f"name is not the one installed (its gallery identifier is another), and the editor "
+                                f"updates the one it installed")
+        else:
+            kind = "unmatched"
+    item = Item(ext_id, f"update from {have}")
+    item.candidate, item.artifact, item.version, item.pre, item.held = (candidate, artifact, candidate.version,
+                                                                       origin.pre, held)
+    return kind, item
 
 
 def _install(run, items, no_deps):

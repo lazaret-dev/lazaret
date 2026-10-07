@@ -164,11 +164,13 @@ def ovsx_entry(ext_id, version, data, platform="universal", pre=False, when=OLD,
 
 class OpenVSXGallery:
     """`repo.module_transport` for Open VSX: the query API (every version, or one, newest first), each file, its
-    `.sha256`, its package.json; and a list of malicious extensions at CONTROL."""
+    `.sha256`, its package.json; its VS Code gallery's query (an extension's `extensionId`: `ids`, else
+    `ovsx-<id>`); and a list of malicious extensions at CONTROL. `fail` names extensions whose query answers 500."""
 
     def __init__(self):
         self.entries, self.files, self.calls = [], {}, []
         self.control = None
+        self.ids, self.fail = {}, set()
 
     def add(self, ext_id, version, platforms=("universal",), pre=False, when=OLD, engine="^1.90.0", deps=(), pack=(),
             code="exports.activate = () => 1;\n", digest=None):
@@ -187,9 +189,21 @@ class OpenVSXGallery:
         check_redirect(url)
         self.calls.append(url)
         parts = urllib.parse.urlsplit(url)
+        if url == openvsx.GALLERY_QUERY_URL:
+            body = json.loads(data)
+            asked = next(c["value"] for c in body["filters"][0]["criteria"] if c["filterType"] == 7).lower()
+            ns, name = asked.split(".")
+            known = any(f"{e['namespace']}.{e['name']}".lower() == asked for e in self.entries)
+            exts = [{"publisher": {"publisherName": ns}, "extensionName": name,
+                     "extensionId": self.ids.get(asked, f"ovsx-{ns}-{name}")}] if known else []
+            return json.dumps({"results": [{"extensions": exts}]}).encode()
         if parts.path == "/api/-/query":
             q = urllib.parse.parse_qs(parts.query)
             ext_id, version = q["extensionId"][0].lower(), q.get("extensionVersion", [None])[0]
+            if ext_id in self.fail:
+                err = base.FetchError("the registry answered 500")
+                err.status = 500
+                raise err
             size, offset = int(q["size"][0]), int(q["offset"][0])
             mine = [e for e in self.entries if f"{e['namespace']}.{e['name']}".lower() == ext_id
                     and (version is None or e["version"] == version)]
@@ -268,6 +282,37 @@ class OpenVSXCandidatesTests(unittest.TestCase):
         with self.assertRaises(base.FetchError):
             openvsx.ECOSYSTEM.artifact("redhat.java", cand, fetch)
 
+    def test_the_identifier_its_vs_code_gallery_gives(self):
+        sent = []
+
+        def gallery(answer):
+            def transport(url, max_bytes=None, accept=None, timeout=None, check_redirect=None, data=None,
+                          content_type=None):
+                check_redirect(url)
+                sent.append((url, accept, json.loads(data)))
+                return json.dumps(answer).encode()
+            return self.fetch(transport)
+
+        def one(ext):
+            return {"results": [{"extensions": [ext] if ext else []}]}
+        mine = {"publisher": {"publisherName": "RedHat"}, "extensionName": "Java",
+                "extensionId": "0d4e2bb0-3a1b-4c2d-9e8f-123456789abc"}
+        self.assertEqual(openvsx.ECOSYSTEM.gallery_id("redhat.java", gallery(one(mine))),
+                         "0d4e2bb0-3a1b-4c2d-9e8f-123456789abc")
+        url, accept, body = sent[-1]
+        self.assertEqual((url, accept), ("https://open-vsx.org/vscode/gallery/extensionquery",
+                                         "application/json;api-version=3.0-preview.1"))
+        self.assertEqual(body["flags"], 0)          # (VS Code's query: its name among VS Code's, unpublished left out)
+        self.assertEqual({c["filterType"]: c["value"] for c in body["filters"][0]["criteria"]},
+                         {8: "Microsoft.VisualStudio.Code", 7: "redhat.java", 12: "4096"})
+        with self.assertRaises(base.NotFound):
+            openvsx.ECOSYSTEM.gallery_id("redhat.java", gallery(one(None)))
+        for answer in (one({**mine, "extensionName": "other"}), one({**mine, "extensionId": "not an id!"}),
+                       one({k: v for k, v in mine.items() if k != "extensionId"}), {"results": []}, [1]):
+            with self.subTest(answer=answer), self.assertRaises(base.FetchError) as cm:
+                openvsx.ECOSYSTEM.gallery_id("redhat.java", gallery(answer))
+            self.assertNotIsInstance(cm.exception, base.NotFound)
+
 
 class MarketplaceCandidatesTests(unittest.TestCase):
     def fetch(self, gallery):
@@ -309,6 +354,17 @@ class MarketplaceCandidatesTests(unittest.TestCase):
         self.assertEqual(vsm.ECOSYSTEM.manifest("ms-python.python", cands[1], fetch)["publisher"], "ms-python")
         g.files[e["fallbackAssetUri"] + "/" + vsm.MANIFEST_ASSET] = b'{"name": "python"}'
         self.assertEqual(vsm.ECOSYSTEM.manifest("ms-python.python", cands[0], fetch), {"name": "python"})
+
+    def test_the_identifier_the_gallery_gives(self):
+        ext = tvm.extension("ms-python", "python", [tvm.version_entry("ms-python", "python", "2026.1.0")])
+        g = tvm.Gallery(ext)
+        self.assertEqual(vsm.ECOSYSTEM.gallery_id("ms-python.python", self.fetch(g)), "00000000-0000-0000-0000-000000000002")
+        self.assertEqual(g.bodies[-1]["flags"], 0)
+        ext["extensionId"] = None
+        with self.assertRaises(base.FetchError):
+            vsm.ECOSYSTEM.gallery_id("ms-python.python", self.fetch(g))
+        with self.assertRaises(base.NotFound):
+            vsm.ECOSYSTEM.gallery_id("ms-python.python", self.fetch(tvm.Gallery(None)))
 
 
 # ---------------------------------------------------------------- what the guard reads of an extension
@@ -365,12 +421,22 @@ class ArgsTests(unittest.TestCase):
         self.assertEqual(values, {"--profile": "Work", "--user-data-dir": "/u"})
 
     def test_what_is_refused(self):
-        for args in ([], ["--list-extensions"], ["--update-extensions"], ["--uninstall-extension", "a.b"],
+        for args in ([], ["--list-extensions"], ["--uninstall-extension", "a.b"],
                      ["--install-extension"], ["--install-extension", "nope"], ["--install-extension", "a.b", "."],
                      ["--install-extension", "a.b@1.0"], ["--install-extension", "a.b", "--install-extension", "A.B"],
-                     ["--install-extension", "a.b", "--force=yes"], ["--install-extension", "a.b", "--verbose"]):
+                     ["--install-extension", "a.b", "--force=yes"], ["--install-extension", "a.b", "--verbose"],
+                     # (the editor installs and does not update; the flags --update-extensions does not read)
+                     ["--install-extension", "a.b", "--update-extensions"], ["--update-extensions=yes"],
+                     ["--update-extensions", "--force"], ["--update-extensions", "--pre-release"],
+                     ["--update-extensions", "--do-not-include-pack-dependencies"], ["--update-extensions", "x"]):
             with self.subTest(args=args), self.assertRaises(G.GuardError):
                 E.parse_args("code", args, cwd="/w")
+
+    def test_update_extensions(self):
+        reqs, flags, values = E.parse_args("code", ["--update-extensions", "--profile", "Work", "--extensions-dir=/e",
+                                                    "--user-data-dir", "/u"], cwd="/w")
+        self.assertEqual((reqs, flags), ([], {"--update-extensions"}))
+        self.assertEqual(values, {"--profile": "Work", "--extensions-dir": "/e", "--user-data-dir": "/u"})
 
 
 # ---------------------------------------------------------------- the command, against a fake editor
@@ -790,6 +856,323 @@ class BringsTests(EditorCase):
         self.assertEqual(self.gallery.asked("ex.base"), [])
 
 
+def record_profile(path, *entries):
+    """A profile's extensions.json, as the editor writes it: (id, version, its metadata or None) for each."""
+    out = []
+    for ext_id, version, meta in entries:
+        e = {"identifier": {"id": ext_id}, "version": version,
+             "location": {"$mid": 1, "path": f"/home/u/.vscode/extensions/{ext_id}-{version}", "scheme": "file"},
+             "relativeLocation": f"{ext_id}-{version}"}
+        if meta is not None:
+            e["metadata"] = meta
+        out.append(e)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(out, f)
+
+
+def from_gallery(gallery_id, pre=False, **more):
+    """The metadata the editor records for an extension it installed from its gallery."""
+    return {"id": gallery_id, "publisherId": "p-1", "publisherDisplayName": "P", "targetPlatform": "undefined",
+            "isApplicationScoped": False, "isMachineScoped": False, "isBuiltin": False, "updated": False,
+            "isPreReleaseVersion": pre, "hasPreReleaseVersion": pre, "installedTimestamp": 1759737600000,
+            "pinned": False, "preRelease": pre, "source": "gallery", **more}
+
+
+class UpdateTests(EditorCase):
+    """--update-extensions: what the editor's own would update (VS Code's updateExtensions: the extensions from its
+    gallery, each to the newest version it would take), each checked as an install is, and installed from the files
+    checked."""
+
+    def record(self, *entries):
+        record_profile(os.path.join(self.extdir, "extensions.json"), *entries)
+
+    def ovsx(self, ext_id, pre=False, **more):
+        ns, name = ext_id.split(".")
+        return from_gallery(f"ovsx-{ns}-{name}", pre, **more)
+
+    def updated(self, files):
+        return sorted(f.split("-", 1)[1] for f in files)          # (each file's name without the run's counter)
+
+    def test_what_came_from_the_gallery_is_updated_to_the_version_the_editor_would_take(self):
+        self.gallery.add("a.b", "1.0.0")
+        new = self.gallery.add("a.b", "1.1.0")
+        self.gallery.add("a.b", "1.2.0-next.1", pre=True)
+        self.gallery.add("c.d", "2.0.0")
+        self.gallery.add("e.f", "1.0.0")
+        self.gallery.add("e.f", "1.1.0")
+        self.gallery.add("e.f", "1.2.0-next.1", pre=True)
+        self.gallery.add("g.h", "3.0.0", engine="^1.200.0")
+        self.set_state(installed={"a.b": "1.0.0", "c.d": "2.0.0", "e.f": "1.0.0", "g.h": "2.0.0"})
+        # (e.f follows pre-releases: its newest version; the others, their newest release)
+        self.record(("a.b", "1.0.0", self.ovsx("a.b")), ("c.d", "2.0.0", self.ovsx("c.d")),
+                    ("e.f", "1.0.0", self.ovsx("e.f", pre=True)), ("g.h", "2.0.0", self.ovsx("g.h")))
+        self.assertEqual(self.run_guard("--update-extensions"), 0, self.out)
+        st = self.state()
+        self.assertEqual(st["installed"], {"a.b": "1.1.0", "c.d": "2.0.0", "e.f": "1.2.0-next.1", "g.h": "2.0.0"})
+        self.assertEqual(st["files"]["a.b"], hashlib.sha256(new).hexdigest())
+        [(files, rest)] = self.installs()
+        self.assertEqual(self.updated(files), ["a.b-1.1.0.vsix", "e.f-1.2.0-next.1.vsix"])
+        self.assertEqual(rest, ["--do-not-include-pack-dependencies"])
+        self.assertIn("lazaret guard: 2 updates of the 4 extensions VSCodium lists\n"
+                      "  update     a.b 1.0.0 to 1.1.0\n"
+                      "  update     e.f 1.0.0 to 1.2.0-next.1\n", self.out)
+        self.assertIn("checked 2 OK", self.out)
+        self.assertIn("g.h 2.0.0 is not updated: none of its versions is for VSCodium 1.105.1", self.out)
+        # each identifier was compared with the gallery's (only for those with an update)
+        self.assertEqual(len(self.gallery.asked("/vscode/gallery/extensionquery")), 2)
+
+    def test_another_extension_of_that_name_in_the_gallery_is_left_alone(self):
+        self.gallery.add("a.b", "1.0.0")
+        self.gallery.add("a.b", "2.0.0")
+        self.gallery.ids["a.b"] = "ovsx-someone-else"
+        self.set_state(installed={"a.b": "1.0.0"})
+        self.record(("a.b", "1.0.0", self.ovsx("a.b")))
+        self.assertEqual(self.run_guard("--update-extensions"), 0, self.out)
+        self.assertEqual(self.installs(), [])
+        self.assertEqual(self.gallery.asked(".vsix"), [])
+        self.assertIn("lazaret guard: no update for the 1 extension VSCodium lists", self.out)
+        self.assertIn("a.b 1.0.0 is not updated: the extension Open VSX has by that name is not the one installed (its "
+                      "gallery identifier is another)", self.out)
+        # (and one the gallery no longer has is said)
+        self.set_state(installed={"gone.away": "1.0.0"})
+        self.record(("gone.away", "1.0.0", self.ovsx("gone.away")))
+        self.assertEqual(self.run_guard("--update-extensions"), 0, self.out)
+        self.assertIn("gone.away 1.0.0 is not updated: not found in Open VSX", self.out)
+
+    def test_one_installed_from_a_file_is_matched_by_name_as_the_editors_window_matches_it(self):
+        self.gallery.add("a.b", "1.0.0")
+        self.gallery.add("a.b", "1.1.0")
+        self.set_state(installed={"a.b": "1.0.0", "my.own": "0.1.0", "dev.thing": "0.0.1"})
+        self.record(("a.b", "1.0.0", {"source": "vsix", "pinned": True, "installedTimestamp": 1}),   # (as the guard left it)
+                    ("my.own", "0.1.0", {"source": "vsix", "pinned": True}),     # (the gallery has none: nothing said)
+                    ("dev.thing", "0.0.1", {"source": "resource"}))              # (from a location: not looked up)
+        self.assertEqual(self.run_guard("--update-extensions"), 0, self.out)
+        self.assertEqual(self.state()["installed"], {"a.b": "1.1.0", "my.own": "0.1.0", "dev.thing": "0.0.1"})
+        self.assertEqual(self.gallery.asked("/vscode/gallery/"), [])            # (no identifier to compare)
+        self.assertEqual(self.gallery.asked("dev.thing"), [])
+        self.assertNotIn("my.own", self.out)
+        self.assertIn("lazaret guard: 1 update of the 3 extensions VSCodium lists", self.out)
+
+    def test_nothing_to_update(self):
+        self.gallery.add("a.b", "1.0.0")
+        self.set_state(installed={"a.b": "1.0.0"})
+        self.record(("a.b", "1.0.0", self.ovsx("a.b")))
+        self.assertEqual(self.run_guard("--update-extensions"), 0, self.out)
+        self.assertIn("lazaret guard: no update for the 1 extension VSCodium lists", self.out)
+        self.assertEqual(self.installs(), [])
+        # (none installed: the profile is not read)
+        self.set_state(installed={})
+        os.remove(os.path.join(self.extdir, "extensions.json"))
+        os.mkdir(os.path.join(self.extdir, "extensions.json"))
+        self.assertEqual(self.run_guard("--update-extensions"), 0, self.out)
+        self.assertIn("lazaret guard: no update for the 0 extensions VSCodium lists", self.out)
+
+    def test_a_lookup_that_fails_updates_nothing(self):
+        for ext_id in ("a.b", "c.d"):
+            self.gallery.add(ext_id, "1.0.0")
+            self.gallery.add(ext_id, "1.1.0")
+        self.gallery.fail.add("c.d")
+        self.set_state(installed={"a.b": "1.0.0", "c.d": "1.0.0"})
+        self.record(("a.b", "1.0.0", self.ovsx("a.b")), ("c.d", "1.0.0", self.ovsx("c.d")))
+        self.assertEqual(self.run_guard("--update-extensions"), G.EXIT_RESOLVE, self.out)
+        self.assertIn("lazaret guard: c.d could not be looked up", self.out)
+        self.assertEqual(self.installs(), [])
+        self.assertEqual(self.gallery.asked(".vsix"), [])
+
+    def test_a_suspicious_update_blocks_every_update(self):
+        self.gallery.add("a.b", "1.0.0")
+        self.gallery.add("a.b", "1.1.0", code=MARK)
+        self.gallery.add("c.d", "1.0.0")
+        self.gallery.add("c.d", "1.1.0")
+        self.set_state(installed={"a.b": "1.0.0", "c.d": "1.0.0"})
+        self.record(("a.b", "1.0.0", self.ovsx("a.b")), ("c.d", "1.0.0", self.ovsx("c.d")))
+        self.assertEqual(self.run_guard("--update-extensions"), G.EXIT_BLOCKED, self.out)
+        self.assertIn("BLOCKED    a.b@1.1.0: SUSPICIOUS", self.out)
+        self.assertEqual(self.installs(), [])
+        self.assertEqual(self.state()["installed"], {"a.b": "1.0.0", "c.d": "1.0.0"})
+
+    def test_the_galleries_list_of_malicious_extensions_blocks_an_update(self):
+        self.gallery.add("bad.one", "1.0.0")
+        self.gallery.add("bad.one", "1.1.0")
+        self.gallery.control = ["bad.one"]
+        self.set_state(installed={"bad.one": "1.0.0"})
+        self.record(("bad.one", "1.0.0", self.ovsx("bad.one")))
+        self.assertEqual(self.run_guard("--update-extensions"), G.EXIT_BLOCKED, self.out)
+        self.assertIn("the extension is on the list of malicious extensions", self.out)
+        self.assertEqual(self.installs(), [])
+
+    def test_min_age_holds_back_a_release_and_takes_the_newest_one_old_enough(self):
+        self.gallery.add("a.b", "1.0.0")
+        self.gallery.add("a.b", "1.1.0")
+        self.gallery.add("a.b", "1.2.0", when=FRESH)
+        self.gallery.add("c.d", "1.0.0")
+        self.gallery.add("c.d", "1.1.0", when=FRESH)
+        self.set_state(installed={"a.b": "1.0.0", "c.d": "1.0.0"})
+        self.record(("a.b", "1.0.0", self.ovsx("a.b")), ("c.d", "1.0.0", self.ovsx("c.d")))
+        self.assertEqual(self.run_guard("--update-extensions"), 0, self.out)
+        self.assertEqual(self.state()["installed"], {"a.b": "1.1.0", "c.d": "1.0.0"})
+        self.assertIn("a.b@1.1.0: 1.2.0 held back: younger than --min-age 2 days", self.out)
+        self.assertIn("c.d 1.0.0 is not updated: 1.1.0 is younger than --min-age 2 days (--allow-new c.d lets it in)",
+                      self.out)
+        self.assertEqual(self.run_guard("--update-extensions", allow_new=["c.d"]), 0, self.out)
+        self.assertEqual(self.state()["installed"], {"a.b": "1.1.0", "c.d": "1.1.0"})
+        self.assertIn("let through by --allow-new", self.out)
+
+    def test_what_an_update_brings(self):
+        # the installed a.b 1.0.0 packs c.d; its 1.1.0 packs c.d and e.f, and needs g.h
+        self.gallery.add("a.b", "1.0.0", pack=("c.d",))
+        self.gallery.add("a.b", "1.1.0", pack=("c.d", "e.f"), deps=("g.h",))
+        for ext_id in ("c.d", "e.f", "g.h"):
+            self.gallery.add(ext_id, "1.0.0")
+        folder = os.path.join(self.extdir, "a.b-1.0.0")
+        os.makedirs(folder)
+        with open(os.path.join(folder, "package.json"), "w", encoding="utf-8") as f:
+            f.write(ext_manifest(name="b", publisher="a", version="1.0.0", extensionPack=["c.d"]))
+        self.set_state(installed={"a.b": "1.0.0", "c.d": "1.0.0"})
+        self.record(("a.b", "1.0.0", self.ovsx("a.b")), ("c.d", "1.0.0", self.ovsx("c.d")))
+        self.assertEqual(self.run_guard("--update-extensions"), 0, self.out)
+        self.assertEqual(self.state()["installed"], {"a.b": "1.1.0", "c.d": "1.0.0", "e.f": "1.0.0", "g.h": "1.0.0"})
+        [(files, _rest)] = self.installs()
+        self.assertEqual(self.updated(files), ["a.b-1.1.0.vsix", "e.f-1.0.0.vsix", "g.h-1.0.0.vsix"])
+        self.assertIn("lazaret guard: 1 update of the 2 extensions VSCodium lists", self.out)
+        self.assertIn("checked 3 OK", self.out)
+
+    def test_a_profile_of_its_own(self):
+        ud = os.path.join(self.tmp, "user-data")
+        os.makedirs(os.path.join(ud, "User", "globalStorage"))
+        with open(os.path.join(ud, "User", "globalStorage", "storage.json"), "w", encoding="utf-8") as f:
+            json.dump({"userDataProfiles": [{"location": "-6a4c2b4e", "name": "Work", "icon": "briefcase"}],
+                       "theme": "dark"}, f)
+        work = os.path.join(ud, "User", "profiles", "-6a4c2b4e")
+        os.makedirs(work)
+        for ext_id in ("a.b", "c.d"):
+            self.gallery.add(ext_id, "1.0.0")
+            self.gallery.add(ext_id, "1.1.0")
+        # the profile's own a.b; c.d in every profile, recorded in the default profile's (with x.y, the default's only)
+        record_profile(os.path.join(work, "extensions.json"), ("a.b", "1.0.0", self.ovsx("a.b")))
+        self.record(("c.d", "1.0.0", self.ovsx("c.d", isApplicationScoped=True)), ("x.y", "1.0.0", self.ovsx("x.y")))
+        self.set_state(installed={"a.b": "1.0.0", "c.d": "1.0.0"})
+        self.assertEqual(self.run_guard("--update-extensions", "--profile", "Work", "--user-data-dir", ud), 0, self.out)
+        self.assertEqual(self.state()["installed"], {"a.b": "1.1.0", "c.d": "1.1.0"})
+        self.assertNotIn("does not record", self.out)
+        [(files, rest)] = self.installs()
+        self.assertEqual(rest, ["--profile", "Work", "--user-data-dir", ud, "--do-not-include-pack-dependencies"])
+        lists = [c for c in self.state()["calls"] if c[:1] == ["--list-extensions"]]
+        self.assertTrue(lists and all(c[2:] == ["--profile", "Work", "--user-data-dir", ud] for c in lists), lists)
+
+    def test_an_extension_the_profile_does_not_record_is_matched_by_name(self):
+        self.gallery.add("a.b", "1.0.0")
+        self.gallery.add("a.b", "1.1.0")
+        self.set_state(installed={"a.b": "1.0.0"})
+        self.record(("a.b", "0.9.0", self.ovsx("a.b")))                  # (another version than the editor lists)
+        self.assertEqual(self.run_guard("--update-extensions"), 0, self.out)
+        self.assertEqual(self.state()["installed"], {"a.b": "1.1.0"})
+        self.assertIn("a.b: the editor lists it, and its profile does not record it at that version: matched to Open "
+                      "VSX by name, as releases", self.out)
+
+    def test_a_record_the_guard_cannot_read_stops_the_run(self):
+        self.gallery.add("a.b", "1.1.0")
+        self.set_state(installed={"a.b": "1.0.0"})
+        with open(os.path.join(self.extdir, "extensions.json"), "w", encoding="utf-8") as f:
+            f.write('{"not": "a list"}')
+        self.assertEqual(self.run_guard("--update-extensions"), G.EXIT_USAGE)
+        self.assertIn("is not the list of extensions the editor keeps there", self.out)
+        self.assertEqual(self.installs(), [])
+
+    def test_plan_checks_and_installs_nothing(self):
+        self.gallery.add("a.b", "1.0.0")
+        self.gallery.add("a.b", "1.1.0")
+        self.set_state(installed={"a.b": "1.0.0"})
+        self.record(("a.b", "1.0.0", self.ovsx("a.b")))
+        self.assertEqual(self.run_guard("--update-extensions", plan=True), 0, self.out)
+        self.assertIn("checked 1 OK", self.out)
+        self.assertEqual(self.installs(), [])
+
+
+class ProfileTests(unittest.TestCase):
+    """Where the editor keeps its user data and its profiles' records of their extensions (VS Code's rules)."""
+
+    def editor(self, tool="code", product=None):
+        ed = E.Editor(tool, "/x/" + tool, *E.EDITORS[tool])
+        ed.product = product or {}
+        return ed
+
+    def test_the_folder_of_user_data(self):
+        ed, home = self.editor(), os.path.expanduser("~")
+        cases = (({}, {}, "linux", os.path.join(home, ".config", "Code")),
+                 ({"XDG_CONFIG_HOME": "/xdg"}, {}, "linux", os.path.join("/xdg", "Code")),
+                 ({}, {}, "darwin", os.path.join(home, "Library", "Application Support", "Code")),
+                 ({"APPDATA": "/appdata"}, {}, "win32", os.path.join("/appdata", "Code")),
+                 ({"USERPROFILE": "/users/u"}, {}, "win32", os.path.join("/users/u", "AppData", "Roaming", "Code")),
+                 ({}, {"--user-data-dir": "/u"}, "linux", "/u"),
+                 ({"VSCODE_APPDATA": "/a"}, {"--user-data-dir": "/u"}, "linux", os.path.join("/a", "Code")),
+                 ({"VSCODE_PORTABLE": "/p", "VSCODE_APPDATA": "/a"}, {}, "linux", os.path.join("/p", "user-data")))
+        for env, values, system, want in cases:
+            with self.subTest(env=env, values=values, system=system):
+                self.assertEqual(E.user_data_dir(ed, env, values, system=system), os.path.abspath(want))
+        # product.json's name when it is one, else the editor's own
+        self.assertEqual(E.user_data_dir(self.editor("codium", {"nameShort": "VSCodium - Insiders"}), {}, {}, "linux"),
+                         os.path.abspath(os.path.join(home, ".config", "VSCodium - Insiders")))
+        for bad in ("../x", "a/b", "", 3):
+            self.assertEqual(E.user_data_dir(self.editor("cursor", {"nameShort": bad}), {}, {}, "linux"),
+                             os.path.abspath(os.path.join(home, ".config", "Cursor")))
+
+    def test_a_profiles_folder(self):
+        home = os.path.abspath("/ud/User/profiles")
+        self.assertEqual(E._profile_folder("-6a4c2b4e", home), os.path.join(home, "-6a4c2b4e"))
+        for bad in ("", ".", "..", "../x", "a/../b", "a\\..\\b", "/abs", None, 3, {"scheme": "vscode-userdata", "path": "/x"},
+                    {"scheme": "file", "path": "relative/x"}):
+            with self.subTest(bad=bad):
+                self.assertIsNone(E._profile_folder(bad, home))
+        path = os.path.abspath("/elsewhere/profiles/abc")
+        dto = path.replace(os.sep, "/")
+        dto = dto if dto.startswith("/") else "/" + dto                 # (a file URI's path: /c:/… on Windows)
+        got = E._profile_folder({"$mid": 1, "path": dto, "scheme": "file"}, home)
+        self.assertEqual(os.path.normcase(got), os.path.normcase(path))
+
+    def test_the_files_a_profile_is_recorded_in(self):
+        tmp = tempfile.mkdtemp(prefix="lazaret-profile-")
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        ext, ud = os.path.join(tmp, "ext"), os.path.join(tmp, "ud")
+        os.makedirs(os.path.join(ud, "User", "globalStorage"))
+        with open(os.path.join(ud, "User", "globalStorage", "storage.json"), "w", encoding="utf-8") as f:
+            json.dump({"userDataProfiles": [{"location": "w1", "name": "Work"},
+                                            {"location": "s1", "name": "Shared", "useDefaultFlags": {"extensions": True}},
+                                            {"location": "../../etc", "name": "Odd"}]}, f)
+        ed, env = self.editor(), {"VSCODE_EXTENSIONS": ext}
+        default = os.path.join(ext, "extensions.json")
+        self.assertEqual(E.profile_files(ed, env, {}), [(default, "all")])
+        self.assertEqual(E.profile_files(ed, env, {"--profile": "Default"}), [(default, "all")])
+        self.assertEqual(E.profile_files(ed, env, {"--profile": "Shared", "--user-data-dir": ud}), [(default, "all")])
+        self.assertEqual(E.profile_files(ed, env, {"--profile": "Work", "--user-data-dir": ud}),
+                         [(os.path.join(ud, "User", "profiles", "w1", "extensions.json"), "own"), (default, "everywhere")])
+        for name in ("Odd", "Nope", "work"):
+            with self.subTest(name=name), self.assertRaises(G.GuardError):
+                E.profile_files(ed, env, {"--profile": name, "--user-data-dir": ud})
+
+    def test_what_is_read_of_a_record(self):
+        tmp = tempfile.mkdtemp(prefix="lazaret-profile-")
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        record_profile(os.path.join(tmp, "extensions.json"),
+                       ("A.B", "1.0.0", from_gallery("id-ab", pre=True)),                 # (the id is read without case)
+                       ("c.d", "2.0.0", {"source": "vsix"}),
+                       ("e.f", "3.0.0", None),
+                       ("g.h", "1.0.0", {"id": "bad id!", "source": "gallery"}),          # (not an identifier)
+                       ("not an id", "1.0.0", from_gallery("x")))
+        with open(os.path.join(tmp, "extensions.json"), encoding="utf-8") as f:
+            doc = json.load(f)
+        doc[2]["identifier"]["uuid"] = "id-ef"                       # (an older editor's: identifier.uuid)
+        doc[1]["identifier"]["uuid"] = "id-cd-old"
+        doc[1]["metadata"]["id"] = "id-cd"                           # (metadata's first, as the editor reads it)
+        doc.append({"identifier": {"id": "i.j"}})                    # (no version: the editor does not read it)
+        with open(os.path.join(tmp, "extensions.json"), "w", encoding="utf-8") as f:
+            json.dump(doc, f)
+        got = E.installed_origins(self.editor(), {"VSCODE_EXTENSIONS": tmp}, {})
+        self.assertEqual({k: (o.uuid, o.pre, o.source) for k, o in got.items()},
+                         {("a.b", "1.0.0"): ("id-ab", True, "gallery"), ("c.d", "2.0.0"): ("id-cd", False, "vsix"),
+                          ("e.f", "3.0.0"): ("id-ef", False, None), ("g.h", "1.0.0"): (None, False, "gallery")})
+
+
 class OlderEditorTests(EditorCase):
     VERSION = "1.90.2"
 
@@ -894,13 +1277,13 @@ class FileTests(EditorCase):
         self.assertEqual(self.run_guard("--install-extension", os.path.join(self.tmp, "none.vsix")), G.EXIT_USAGE)
 
 
-class MarketplaceTests(EditorCase):
-    """VS Code: the Marketplace's gallery query, files without a digest, Microsoft's list of malicious extensions."""
+class MarketplaceGallery:
+    """The Marketplace's gallery for an EditorCase: `publish` versions, then `serve` them; `ids` gives an extension
+    another gallery identifier than test_vsmarketplace's."""
     TOOL = "code"
-    PRODUCT = None
 
     def make_gallery(self):
-        self.entries = []
+        self.entries, self.ids = [], {}
         g = tvm.Gallery(None)
         g.files[E.MARKETPLACE_CONTROL] = json.dumps({"malicious": ["evilpub"]}).encode()
         return g
@@ -917,7 +1300,7 @@ class MarketplaceTests(EditorCase):
     def serve(self):
         """The gallery answers for each extension asked for (test_vsmarketplace's Gallery answers for one; here each
         query is answered by one of its own, for the extension asked for)."""
-        entries = self.entries
+        entries, ids = self.entries, self.ids
 
         def query(body):
             asked = next(c["value"] for c in body["filters"][0]["criteria"] if c["filterType"] == 7).lower()
@@ -926,8 +1309,17 @@ class MarketplaceTests(EditorCase):
                 return None
             pub, name = asked.split(".")
             ext = tvm.extension(pub, name, sorted(versions, key=lambda e: C.version_key(e["version"]), reverse=True))
+            ext["extensionId"] = ids.get(asked, ext["extensionId"])
             return tvm.Gallery(ext).query(body)
         self.gallery.query = query
+
+
+MARKETPLACE_ID = "00000000-0000-0000-0000-000000000002"           # (test_vsmarketplace's extension's)
+
+
+class MarketplaceTests(MarketplaceGallery, EditorCase):
+    """VS Code: the Marketplace's gallery query, files without a digest, Microsoft's list of malicious extensions."""
+    PRODUCT = None
 
     def test_from_the_marketplace(self):
         data = self.publish("ms-python", "python", "2026.1.0", deps="ms-python.debugpy")
@@ -955,6 +1347,43 @@ class MarketplaceTests(EditorCase):
             self.assertEqual(self.run_guard("--install-extension", "a.b", gallery="openvsx"), 0, self.out)
         self.assertIn("extensions from Open VSX", self.out)
         self.assertEqual(self.state()["installed"], {"a.b": "1.0.0"})
+
+    def test_an_update_where_the_editors_gallery_is_not_known_is_matched_by_name(self):
+        # (no product.json beside the command: the identifiers the editor keeps may be another gallery's)
+        self.publish("ms-python", "python", "2026.1.0")
+        self.publish("ms-python", "python", "2026.2.0")
+        self.serve()
+        self.set_state(installed={"ms-python.python": "2026.1.0"})
+        record_profile(os.path.join(self.extdir, "extensions.json"),
+                       ("ms-python.python", "2026.1.0", from_gallery("another-gallerys-id")))
+        self.assertEqual(self.run_guard("--update-extensions"), 0, self.out)
+        self.assertEqual(self.state()["installed"], {"ms-python.python": "2026.2.0"})
+        self.assertIn("the gallery identifiers VS Code keeps are not compared with the Visual Studio Marketplace's (its "
+                      "product.json names another gallery, or none the guard found): 1 extension matched by name",
+                      self.out)
+
+
+class MarketplaceUpdateTests(MarketplaceGallery, EditorCase):
+    """VS Code's --update-extensions against the Marketplace its product.json names: the identifiers are compared."""
+    PRODUCT = {"nameShort": "Code", "dataFolderName": ".vscode",
+               "extensionsGallery": {"serviceUrl": "https://marketplace.visualstudio.com/_apis/public/gallery",
+                                     "controlUrl": E.MARKETPLACE_CONTROL}}
+
+    def test_the_marketplaces_identifier_is_the_one_the_editor_kept(self):
+        for pub, name in (("ms-python", "python"), ("red", "hat")):
+            self.publish(pub, name, "1.0.0")
+            self.publish(pub, name, "1.1.0")
+        self.ids["red.hat"] = "11111111-1111-1111-1111-111111111111"
+        self.serve()
+        self.set_state(installed={"ms-python.python": "1.0.0", "red.hat": "1.0.0"})
+        record_profile(os.path.join(self.extdir, "extensions.json"),
+                       ("ms-python.python", "1.0.0", from_gallery(MARKETPLACE_ID)),
+                       ("red.hat", "1.0.0", from_gallery(MARKETPLACE_ID)))
+        self.assertEqual(self.run_guard("--update-extensions"), 0, self.out)
+        self.assertEqual(self.state()["installed"], {"ms-python.python": "1.1.0", "red.hat": "1.0.0"})
+        self.assertIn("red.hat 1.0.0 is not updated: the extension the Visual Studio Marketplace has by that name is "
+                      "not the one installed", self.out)
+        self.assertNotIn("not compared", self.out)
 
 
 @unittest.skipUnless(_native.available(), f"native engine not built ({_native.load_error()})")
@@ -999,6 +1428,9 @@ class CommandLineTests(unittest.TestCase):
         self.assertEqual(set(_cli.GUARD_TOOLS), set(G.TOOLS))
         self.assertTrue(_cli.is_guard(["guard", "code", "--install-extension", "ms-python.python"]))
         self.assertTrue(_cli.is_guard(["guard", "--plan", "cursor", "--install-extension", "a.b"]))
+        self.assertTrue(_cli.is_guard(["guard", "codium", "--update-extensions"]))
+        opts = G.build_parser().parse_args(["--min-age", "7d", "code", "--update-extensions", "--profile", "Work"])
+        self.assertEqual((opts.tool, opts.args), ("code", ["--update-extensions", "--profile", "Work"]))
 
     def test_the_npm_packages_pointer_knows_them_too(self):
         import re

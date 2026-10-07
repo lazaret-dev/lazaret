@@ -10,6 +10,7 @@
     lazaret guard go get example.com/m    (also: go install, build, run, test, vet, list, mod download, mod tidy)
     lazaret guard cargo add serde         (also: cargo update, install, fetch, build, check, test, run, ...)
     lazaret guard code --install-extension ms-python.python
+    lazaret guard code --update-extensions
                                           (also: code-insiders, codium, cursor, windsurf, kiro, positron)
     lazaret-guard …                       (the same command under its own name)
 
@@ -73,6 +74,8 @@ install, and every extension it brings (its extensionDependencies and extensionP
 registry the editor installs from (the Visual Studio Marketplace for VS Code, Open VSX for the others; each Open VSX file
 checked against its published SHA-256), each scanned as `lazaret FILE.vsix` scans it and checked against the editor's
 gallery's list of malicious extensions; then the editor installs those files, and nothing else (registry/editorguard.py).
+`<editor> --update-extensions`: what the editor's own would update (its extensions from its gallery, as its profile
+records them, each to the newest version it would take), checked and installed the same way.
 
 The resolutions made outside the project (cargo install, yarn 1, npm install -g, go install pkg@version, --plan) are made
 in a folder of the user's own (private_scratch), and the package manager is found in PATH's absolute folders only
@@ -137,7 +140,7 @@ DEFAULT_JOBS = max(1, min(4, os.cpu_count() or 1))
 #: Seconds a tool may wait on the local index while a file is scanned
 TOOL_TIMEOUT = 600
 USER_AGENT = "lazaret-guard/1.0"
-#: The editors whose --install-extension the guard wraps (registry/editorguard.py)
+#: The editors whose --install-extension and --update-extensions the guard wraps (registry/editorguard.py)
 EDITOR_TOOLS = ("code", "code-insiders", "codium", "cursor", "windsurf", "kiro", "positron")
 TOOLS = ("npm", "pnpm", "yarn", "bun", "pip", "pip3", "uv", "uvx", "go", "cargo") + EDITOR_TOOLS
 
@@ -4793,7 +4796,8 @@ def build_parser():
         epilog="Examples: lazaret guard npm install express · lazaret guard pip install -r requirements.txt · "
                "lazaret guard uv add httpx · lazaret guard yarn add lodash · lazaret guard uvx ruff check . · "
                "lazaret guard go get example.com/m@v1.2.3 · lazaret guard cargo install --locked ripgrep · "
-               "lazaret guard code --install-extension ms-python.python · lazaret guard --min-age 7d pnpm add react")
+               "lazaret guard code --install-extension ms-python.python · lazaret guard code --update-extensions · "
+               "lazaret guard --min-age 7d pnpm add react")
     ap.add_argument("--version", action="version", version=f"lazaret guard {lazaret.VERSION}")
     ap.add_argument("--min-age", default="2d", metavar="AGE",
                     help="hold back or block releases younger than this (default 2d; s, m, h, d, w; 0 turns it off)")
