@@ -36,12 +36,17 @@ OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
 
 class FakeScanner:
-    """Stands in for guard.Scanner: a zip with a JavaScript file in it is SUSPICIOUS, any other is OK."""
+    """Stands in for guard.Scanner: a zip with a JavaScript file in it is SUSPICIOUS, any other is OK. Its byte budget is the
+    real one's (guard.ByteGate), as small as a test wants it."""
 
-    def __init__(self, error=None):
+    def __init__(self, error=None, hold_budget=1 << 30):
         self.error = error
         self.calls = []
         self.remembered = []
+        self.gate = guard.ByteGate(hold_budget)
+
+    def holding(self, nbytes):
+        return self.gate.hold(nbytes)
 
     def cached(self, key):
         return None
@@ -645,6 +650,43 @@ class RelayDetailTests(RelayCase):
         self.assertEqual((status, body), (502, b"lazaret guard could not fetch this from the proxy it relays\n"))
         self.assertEqual(len(lp.relay.errors), 1)
 
+    def test_zips_fetched_at_once_are_read_and_scanned_within_the_byte_budget(self):
+        # (go asks for about GOMAXPROCS zips at once, each held whole to be scanned: GR-4)
+        sizes = {}
+        for i in range(6):
+            name = f"example.test/m{i}"
+            data = self.proxy.add(name, "v1.0.0", files={"a.go": "package a\n" + "".join(f"// {j} {i}\n" for j in range(4000))})
+            sizes[name] = len(data)
+        biggest = max(sizes.values())
+        inside, most = [], [0]
+        lock = threading.Lock()
+
+        class Slow(FakeScanner):
+            def scan(self, data, container, kind):
+                with lock:
+                    inside.append(len(data))
+                    most[0] = max(most[0], sum(inside))
+                threading.Event().wait(0.05)
+                with lock:
+                    inside.remove(len(data))
+                return super().scan(data, container, kind)
+
+        ctx = self.context()
+        ctx.scanner = Slow(hold_budget=int(biggest * 2.5))
+        lp = self.serve(ctx)
+        got = {}
+        threads = [threading.Thread(target=lambda n=n: got.setdefault(n, ask(lp.base, f"/{n}/@v/v1.0.0.zip")[0]))
+                   for n in sizes]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(30)
+        self.assertEqual(got, {n: 200 for n in sizes})
+        self.assertLessEqual(most[0], biggest * 2.5, "more held at once than the budget")
+        self.assertLessEqual(ctx.scanner.gate.peak, biggest * 2.5)
+        self.assertGreater(ctx.scanner.gate.peak, 0)
+        self.assertEqual(ctx.scanner.gate.held, 0)
+
     def test_the_reason_a_zip_is_refused_is_short_and_on_one_line(self):
         class Long(FakeScanner):
             def scan(self, data, container, kind):
@@ -656,6 +698,41 @@ class RelayDetailTests(RelayCase):
         status, body = ask(lp.base, "/example.test/good/@v/v1.0.0.zip")
         self.assertEqual(status, 403)
         self.assertEqual(body, b"blocked by lazaret guard: " + (b"SUSPICIOUS: a " + b"x" * 286) + b"\n")
+
+
+class ByteGateTests(unittest.TestCase):
+    """guard.ByteGate, the scanner's byte budget (GR-4)."""
+
+    def test_what_fits_goes_together_and_what_does_not_waits(self):
+        gate = guard.ByteGate(100)
+        first = gate.hold(60).__enter__()
+        entered = threading.Event()
+
+        def second():
+            with gate.hold(60):
+                entered.set()
+        t = threading.Thread(target=second)
+        t.start()
+        self.assertFalse(entered.wait(0.2), "60 more did not fit beside 60")
+        with gate.hold(40):                                 # (40 fits beside 60)
+            self.assertEqual(gate.held, 100)
+        first.__exit__(None, None, None)
+        self.assertTrue(entered.wait(5))
+        t.join(5)
+        self.assertEqual((gate.held, gate.peak), (0, 100))
+
+    def test_one_larger_than_the_budget_goes_alone(self):
+        gate = guard.ByteGate(10)
+        with gate.hold(500):
+            self.assertEqual(gate.held, 500)
+        self.assertEqual((gate.held, gate.peak), (0, 500))
+
+    def test_the_budget_comes_from_the_environment(self):
+        with mock.patch.dict(os.environ, {"LAZARET_GUARD_HOLD_MB": "64"}):
+            self.assertEqual(guard.Scanner(None).gate.budget, 64 * 1024 * 1024)
+        for bad in ("", "0", "-5", "lots"):
+            with mock.patch.dict(os.environ, {"LAZARET_GUARD_HOLD_MB": bad}):
+                self.assertEqual(guard.Scanner(None).gate.budget, guard.HOLD_MB * 1024 * 1024)
 
 
 class ProxyListTests(RelayCase):

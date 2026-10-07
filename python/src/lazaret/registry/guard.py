@@ -683,15 +683,64 @@ def _scan_one(data, container, kind, timeout, timed=False):
             "timings": here.report()}
 
 
+#: The bytes of archives the guard holds in memory to scan at once (`Scanner.holding`), across the requests a package
+#: manager makes in parallel: go fetches about GOMAXPROCS module zips at a time, each up to 200 MiB (the Go/Rust
+#: review's GO-10, the backlog's GR-4). LAZARET_GUARD_HOLD_MB sets it; an archive larger than it is held alone.
+HOLD_MB = 512
+UNDECLARED_HOLD = 32 * 1024 * 1024           # what a file whose index declares no size counts as
+
+
+def hold_bytes():
+    text = os.environ.get("LAZARET_GUARD_HOLD_MB", "")
+    return (int(text) if text.isdigit() and int(text) > 0 else HOLD_MB) * 1024 * 1024
+
+
+class ByteGate:
+    """At most `budget` bytes held at once by the threads that hold them; one that would go over waits until enough are
+    given back, and one larger than the budget goes through alone. `peak` is the most ever held at once."""
+
+    def __init__(self, budget):
+        self.budget = budget
+        self.held = 0
+        self.peak = 0
+        self._cond = threading.Condition()
+
+    def hold(self, nbytes):
+        return _Held(self, max(0, int(nbytes)))
+
+
+class _Held:
+    def __init__(self, gate, nbytes):
+        self.gate, self.nbytes = gate, nbytes
+
+    def __enter__(self):
+        g = self.gate
+        with g._cond:
+            while g.held and g.held + self.nbytes > g.budget:
+                g._cond.wait()
+            g.held += self.nbytes
+            g.peak = max(g.peak, g.held)
+        return self
+
+    def __exit__(self, *exc):
+        g = self.gate
+        with g._cond:
+            g.held -= self.nbytes
+            g._cond.notify_all()
+        return False
+
+
 class Scanner:
     """Scans artifacts in memory (lazaret.registry.repo._scan_artifact), in worker processes
     (registry/scanpool.py): each with an address-space limit and its share of the cores, given the
     archive as a file, and replaced when it dies. `isolate` None is the old default, workers when
     `jobs` is over 1; True is workers for any `jobs`; False scans in this process, one at a time
-    (`--no-isolate`). When workers cannot be started at all, it scans here too and says why (`note`)."""
+    (`--no-isolate`). When workers cannot be started at all, it scans here too and says why (`note`).
+    `holding(n)` is held around reading an archive into memory and scanning it, so that the requests a
+    package manager makes at once hold at most `hold_bytes()` of archives (GR-4)."""
 
     def __init__(self, cache, timeout=repo.SCAN_TIMEOUT, jobs=1, isolate=None, memory_mb=scanpool.DEFAULT_MEMORY_MB,
-                 note=None):
+                 note=None, hold_budget=None):
         self.cache = cache
         self.timeout = timeout
         self.jobs = jobs
@@ -702,6 +751,11 @@ class Scanner:
         self._no_pool = not self.isolate
         self._lock = threading.Lock()
         self._here = threading.Lock()
+        self.gate = ByteGate(hold_bytes() if hold_budget is None else hold_budget)
+
+    def holding(self, nbytes):
+        """`with scanner.holding(size):` around reading `size` bytes of an archive and scanning them."""
+        return self.gate.hold(nbytes)
 
     def cached(self, key):
         return self.cache.get(key) if self.cache is not None and key else None
@@ -1647,22 +1701,26 @@ class PypiIndex:
                     raise repo.FetchError("not an archive pip or uv installs")
                 if info["size"] is not None and info["size"] > repo.MAX_DOWNLOAD_BYTES:
                     raise TooLarge(f"response over {repo.MAX_DOWNLOAD_BYTES // (1024 * 1024)}MB: {info['filename']}")
-                data = self.fetcher.get(info["url"])
-                sha = hashlib.sha256(data).hexdigest()
-                if info["sha256"] and sha != info["sha256"]:
-                    self.ctx.block(check, "its SHA-256 is not the one the index publishes")
-                else:
-                    check.digest = f"sha256:{sha}"
-                    key = VerdictCache.key("pypi", pep503(info["project"]), info["version"], check.digest)
-                    hit = self.ctx.scanner.cached(key) or self.ctx.scanner.scan(
-                        data, container, "wheel" if info["filename"].lower().endswith(".whl") else "sdist")
-                    self.ctx.scanner.remember(key, hit, info["published"])
-                    self.ctx.apply(check, hit)
-                    self.ctx.age_check(check, info["published"])
-                    if not check.blocked:
-                        fd, spooled = tempfile.mkstemp(dir=self.spool)
-                        with os.fdopen(fd, "wb") as f:
-                            f.write(data)
+                # (uv fetches many files at once, each held whole to be scanned: within the scanner's byte budget, by the
+                # size the index declares (GR-4))
+                with self.ctx.scanner.holding(info["size"] if info["size"] is not None else UNDECLARED_HOLD):
+                    data = self.fetcher.get(info["url"])
+                    sha = hashlib.sha256(data).hexdigest()
+                    if info["sha256"] and sha != info["sha256"]:
+                        self.ctx.block(check, "its SHA-256 is not the one the index publishes")
+                    else:
+                        check.digest = f"sha256:{sha}"
+                        key = VerdictCache.key("pypi", pep503(info["project"]), info["version"], check.digest)
+                        hit = self.ctx.scanner.cached(key) or self.ctx.scanner.scan(
+                            data, container, "wheel" if info["filename"].lower().endswith(".whl") else "sdist")
+                        self.ctx.scanner.remember(key, hit, info["published"])
+                        self.ctx.apply(check, hit)
+                        self.ctx.age_check(check, info["published"])
+                        if not check.blocked:
+                            fd, spooled = tempfile.mkstemp(dir=self.spool)
+                            with os.fdopen(fd, "wb") as f:
+                                f.write(data)
+                    del data
             except (repo.FetchError, ValueError) as exc:
                 self.ctx.not_checked(check, exc)
                 self.ctx.age_check(check, info["published"])
@@ -3486,11 +3544,16 @@ class GoRelay:
                 self.ctx.not_checked(check, TooLarge(f"response over {repo.MAX_DOWNLOAD_BYTES // (1024 * 1024)}MB: "
                                                      f"{module}@{version}"))
             else:
-                with open(spooled, "rb") as f:
-                    data = f.read()
                 key = VerdictCache.key("go", module, version, check.digest)
-                hit = self.ctx.scanner.cached(key) or self.ctx.scanner.scan(data, "zip", "gomod")
-                del data
+                hit = self.ctx.scanner.cached(key)
+                if hit is None:
+                    # (go asks for about GOMAXPROCS zips at once: they are fetched to the spool together, and read and
+                    # scanned within the scanner's byte budget: GR-4)
+                    with self.ctx.scanner.holding(size):
+                        with open(spooled, "rb") as f:
+                            data = f.read()
+                        hit = self.ctx.scanner.scan(data, "zip", "gomod")
+                        del data
                 self.ctx.scanner.remember(key, hit, published)
                 self.ctx.apply(check, hit)
         except (repo.FetchError, ValueError) as exc:
@@ -3855,12 +3918,13 @@ def _check_cached_zip(ctx, check, path, info):
             if os.path.getsize(path) > repo.MAX_DOWNLOAD_BYTES:
                 ctx.not_checked(check, TooLarge(f"response over {repo.MAX_DOWNLOAD_BYTES // (1024 * 1024)}MB: {check.label()}"))
             else:
-                with open(path, "rb") as f:
-                    data = f.read(repo.MAX_DOWNLOAD_BYTES + 1)
-                check.digest = "sha256:" + hashlib.sha256(data).hexdigest()
-                key = VerdictCache.key("go", check.name, check.version, check.digest)
-                hit = ctx.scanner.cached(key) or ctx.scanner.scan(data, "zip", "gomod")
-                del data
+                with ctx.scanner.holding(os.path.getsize(path)):
+                    with open(path, "rb") as f:
+                        data = f.read(repo.MAX_DOWNLOAD_BYTES + 1)
+                    check.digest = "sha256:" + hashlib.sha256(data).hexdigest()
+                    key = VerdictCache.key("go", check.name, check.version, check.digest)
+                    hit = ctx.scanner.cached(key) or ctx.scanner.scan(data, "zip", "gomod")
+                    del data
                 ctx.scanner.remember(key, hit, published)
                 ctx.apply(check, hit)
         except (OSError, ValueError, repo.FetchError) as exc:

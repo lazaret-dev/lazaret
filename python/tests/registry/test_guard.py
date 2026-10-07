@@ -977,6 +977,23 @@ class LocalIndexTests(unittest.TestCase):
         with self.assertRaises(repo.FetchError):
             self.index.scan("999")
 
+    def test_a_file_is_fetched_and_scanned_within_the_byte_budget(self):
+        # (uv fetches many files at once: each is held by the size the index declares, or a fixed amount without one: GR-4)
+        self.index.page("x")
+        numbers = {i["filename"]: n for n, i in self.index.files.items()}
+        held = []
+        real = self.ctx.scanner.holding
+        with mock.patch.object(self.ctx.scanner, "holding", side_effect=lambda n: held.append(n) or real(n)):
+            self.index.scan(numbers["x-1.0-py3-none-any.whl"])
+            self.index.scan(numbers["x-0.7.tar.gz"])
+        self.assertEqual(held, [guard.UNDECLARED_HOLD, guard.UNDECLARED_HOLD])
+        self.assertEqual(self.ctx.scanner.gate.held, 0)
+        self.index.files[numbers["x-0.7.tar.gz"]]["size"] = 123
+        self.index.results.clear()
+        with mock.patch.object(self.ctx.scanner, "holding", side_effect=lambda n: held.append(n) or real(n)):
+            self.index.scan(numbers["x-0.7.tar.gz"])
+        self.assertEqual(held[-1], 123)
+
     def test_the_server(self):
         server = guard.make_index_server(self.index)
         threading.Thread(target=server.serve_forever, daemon=True).start()

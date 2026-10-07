@@ -505,6 +505,14 @@ project is pre-1.0, so the 0.x API may still change.
 
 ### Fixed
 
+- **The Go guard (and the pip and uv relay) holds at most 512 MiB of archives in memory at once (GR-4).** go asks
+  its proxy for about as many zips at once as the machine has cores, each up to 200 MiB, and
+  the guard read each whole to scan it, all at the same time. Zips are still fetched together
+  (to files), and are read and scanned within a budget of bytes held at once
+  (`LAZARET_GUARD_HOLD_MB`, default 512; a zip larger than it goes alone); module zips from
+  go's cache too, and the files the pip and uv relay serves (by the size the index declares).
+  Eight 40 MB zips asked for at once: 320 MB held at the peak before, 80 MB with a budget of
+  100 MB, in 2.2 s instead of 1.3 s.
 - **`lazaret guard --plan cargo …` runs none of the project's programs (GR-1).** When it
   updates a lock, cargo asks the compiler its version, through the wrappers and the
   compiler a project's `.cargo/config.toml` names (`build.rustc-wrapper`,
