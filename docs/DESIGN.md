@@ -996,6 +996,37 @@ repository) is `incomplete`, and an action not checked is not cleared. A
 project scan does not call it: it needs the network, and the offline checks
 (`ghworkflow.hardening`) are the scan's.
 
+Since N-4 it also reads each action's own code at the commit it resolves
+to: the archive the runner fetches (GitHub's archive of the commit, from
+`codeload.github.com`, or through the API with a token; `export-ignore` paths
+are not in it for the runner either), checked against the commit its pax
+header names, and scanned by `repo.scan_action` as an artifact of its own
+kind ("action": the sdist's paths, without the top directory). Its
+`action.yml` (`registry/actionmeta.py`, on the workflow reader's outline)
+says what runs, and the scan reads that as it reads a package's entry points
+and install hooks: a JavaScript action's `pre`, `main` and `post` (each
+`node <the action's directory>/<path>`) are entry points, read with what they
+load by the import-time test; a composite action's `run:` steps are install
+hooks' commands (a PowerShell one as `pwsh -Command`, a Python one by the
+install-script test in Python), and the files of the action they run are
+followed: only a path built from `github.action_path` (GITHUB_ACTION_PATH)
+names one, since a step runs in the job's workspace; a Docker action's
+Dockerfile gives its base images and, through its COPY and ADD lines, the
+file of the build context its entrypoint runs. The rest of the repository
+gets the use-time test. npm's scripts, a `binding.gyp` and the names of
+`package.json` are not the action's: the runner installs and builds
+nothing. What counts is judged for CI code (`actionmeta.judge`): what CI code
+does as its job (a named variable or token sent, a file uploaded, another
+program started, a package published, a loopback address) is not counted; a
+script fetched and run as it arrives is MAJOR, as SC-WORKFLOW-PIPE-SHELL rates
+it in a workflow; the import-time test's strong shapes and the whole
+environment sent are CRITICAL; an AI agent launched in an autonomous mode is
+MAJOR (an action may exist to run one). Each counted issue is a `code`
+finding with the scan's own rule; a Dockerfile's unpinned base image is
+`docker-unpinned`; a scan that did not read the code whole leaves the action
+`incomplete`. One archive per repository and commit is fetched, at most 60
+and 1 GiB in a run; the engine's answers are shared between scans.
+
 ### h. Go and Rust in the engine (0.1.9)
 
 The lexers (`lex/go.rs`, `lex/rs.rs`) are what a project scan reads `.go` and

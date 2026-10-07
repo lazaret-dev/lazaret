@@ -68,6 +68,7 @@ import warnings
 from lazaret.scanner import core as lazaret  # noqa: E402
 
 from lazaret import safexml as _safexml                 # noqa: E402
+from lazaret.registry import actionmeta as _actionmeta  # noqa: E402
 from lazaret.registry import contentcache as _cache     # noqa: E402
 from lazaret.registry import lookalike as _lookalike    # noqa: E402
 from lazaret.registry import provenance as _provenance  # noqa: E402
@@ -1150,8 +1151,10 @@ def canonical_member_path(name, artifact=None):
     `extension/` into the extension's folder, and nothing else (the package's
     `[Content_Types].xml`, `extension.vsixmanifest` and signature stay in
     the archive): those are not extracted.
-    sdist (and the legacy default): '.' / empty segments dropped, then the
-    top directory. Backslashes count as separators (npm on Windows)."""
+    sdist, action (a GitHub Action's repository as GitHub's archive of a
+    commit holds it, under one top directory, 0.1.9, N-4) and the legacy
+    default: '.' / empty segments dropped, then the top directory.
+    Backslashes count as separators (npm on Windows)."""
     p = str(name).replace("\\", "/")
     if artifact == "npm":
         rest = "/".join(p.split("/")[1:])
@@ -1468,9 +1471,9 @@ def _iter_tar(data, container, artifact, budget, anomalies):
             if rel is None:
                 continue                               # the extractor drops it
             if getattr(m, "odd_type", None) is not None:
+                writer = {"crate": "cargo", "action": "the runner's tar"}.get(artifact, "pip")
                 anomalies.append(("type", rel, f"a tar entry of type {m.odd_type.decode('latin-1')!r}, which "
-                                               f"{'cargo' if artifact == 'crate' else 'pip'} writes as a regular file "
-                                               f"and other tar readers skip"))
+                                               f"{writer} writes as a regular file and other tar readers skip"))
             count += 1
             if count > MAX_FILES:
                 yield Member(rel, 0, b"", "files")
@@ -2187,7 +2190,7 @@ class _ArtifactScan:
     resolve what package.json / setup.py say runs (entry points, install
     hooks, build backends) once every member is known."""
 
-    def __init__(self, artifact, full, budget=None, memo=None):
+    def __init__(self, artifact, full, budget=None, memo=None, action_root=None):
         self.artifact, self.full = artifact, full
         self.budget = budget       # the archive's Budget (its deadline names itself)
         self.memo = _cache.NULL if memo is None else memo     # the engine's answers by content (P-2a)
@@ -2219,6 +2222,15 @@ class _ArtifactScan:
         self.code_text = {}        # rel -> raw: what a reader reads besides the scanned sources (a Go
         self.code_bytes = 0        # module's cgo C; an sdist's .rs and Cargo.toml files, N-17), kept
         self.code_dropped = set()  # within PACKAGE_CODE_CHARS bytes (code_dropped: not kept)
+        # action (N-4): the action's directory in the repository ('' for its root), its action.yml's text
+        # (rel -> text), what it runs (_action_entry_points: action_info), and the files it runs as code
+        # (rel -> how: 'runs.main', 'step 2', ...)
+        self.action_root = (action_root or "").strip("/") if artifact == "action" else None
+        self.action_meta_paths = (frozenset(_rel_join(self.action_root, n) for n in _actionmeta.METADATA)
+                                  if artifact == "action" else frozenset())
+        self.action_meta = {}
+        self.action_info = None
+        self.action_entries = {}
 
     # ---- bookkeeping ----
     def truncate(self, rel, detail):
@@ -2375,7 +2387,7 @@ class _ArtifactScan:
         ext = os.path.splitext(base)[1].lower()
         code = PACKAGE_CODE.get(self.artifact)
         wants_text = (base in _MANIFEST_NAMES or lazaret.dep_source_lang(ext) is not None
-                      or ext == ".pth" or (ext in (".gyp", ".gypi") and self.artifact != "vsix")
+                      or ext == ".pth" or (ext in (".gyp", ".gypi") and self.artifact not in ("vsix", "action"))
                       # a file a reader reads: a Go module's .go and cgo C, a crate's .rs (an
                       # sdist's .rs is known to be a crate's only at the end: _sdist_crates)
                       or (code is not None and ext in code[1] + code[2] and not _never_built(self.artifact, rel)))
@@ -2393,13 +2405,23 @@ class _ArtifactScan:
             else:
                 self.classify(rel, raw, size)
             return
+        if rel in self.action_meta_paths:
+            # the action's action.yml (N-4), read in the second pass (_action_entry_points)
+            if len(raw) > _actionmeta.MAX_METADATA_BYTES:
+                self.truncate(rel, f"the action's metadata is larger than {_actionmeta.MAX_METADATA_BYTES:,} bytes, "
+                                   f"so what it runs was not read")
+            else:
+                self.action_meta[rel] = raw.decode("utf-8", "replace").removeprefix("﻿")
+            return
         if base == "package.json":
             text, extra = lazaret.decode_member(rel, raw)
             self.add_decode_issues(extra, keep_encoding=False)
             self.manifests[rel] = text
             self._deadline(rel)
-            # (a VS Code extension: the editor runs no npm script, only the root's vscode:uninstall, E-1)
-            hooks = None if self.artifact != "vsix" else VSIX_HOOKS if rel == "package.json" else ()
+            # (a VS Code extension: the editor runs no npm script, only the root's vscode:uninstall, E-1; an
+            # action's runner installs nothing, N-4)
+            hooks = (None if self.artifact not in ("vsix", "action")
+                     else VSIX_HOOKS if self.artifact == "vsix" and rel == "package.json" else ())
             try:
                 found = lazaret.scan_manifest(rel, text, registry=True, hooks=hooks)
             except _engine.NativeError as exc:
@@ -2413,8 +2435,8 @@ class _ArtifactScan:
                 self._npm_never_installs(i)
                 self.issues.append(i)
             return
-        # (an extension's binding.gyp is data: VS Code builds nothing, E-1)
-        if self.artifact != "vsix" and (base == "binding.gyp" or ext in (".gyp", ".gypi")):
+        # (an extension's binding.gyp is data: VS Code builds nothing, E-1; nor does an action's runner, N-4)
+        if self.artifact not in ("vsix", "action") and (base == "binding.gyp" or ext in (".gyp", ".gypi")):
             text, extra = lazaret.decode_member(rel, raw)
             self.add_decode_issues(extra, keep_encoding=False)
             self.manifests[rel] = text
@@ -2636,7 +2658,11 @@ class _ArtifactScan:
         self.issues.append(issue)
 
     def _entry_point_manifests(self):
-        """The root package.json's entry points and its implicit node-gyp hook."""
+        """The root package.json's entry points and its implicit node-gyp hook; an action's are its
+        action.yml's (_action_entry_points)."""
+        if self.artifact == "action":
+            self._action_entry_points()
+            return
         for rel, text in list(self.manifests.items()):
             if os.path.basename(rel) != "package.json":
                 continue
@@ -2677,6 +2703,241 @@ class _ArtifactScan:
                 found.update(v.lower() for v in listed[:MAX_VSIX_DEPENDENCIES]
                              if isinstance(v, str) and VSCODE_ID_RE.fullmatch(v))
         self.extension_dependencies = sorted(found)
+
+    # ---- an action (N-4) ----
+    def _action_entry_points(self):
+        """What a GitHub Action runs, from its action.yml (actionmeta.read): a JavaScript action's runs.pre,
+        runs.main and runs.post (entry points: the import-time test reads them and the modules they load); a
+        composite action's run steps (_action_steps); a Docker action's Dockerfile (_action_docker).
+        self.action_info says what was found: {metadata, using, runs: {how: file}, missing: [(how, path)],
+        notes, bases: [(dockerfile, line, image, pinned)], image}."""
+        root = self.action_root
+        meta_rel = next((r for r in (_rel_join(root, n) for n in _actionmeta.METADATA) if r in self.action_meta),
+                        None)
+        info = self.action_info = {"metadata": meta_rel, "using": None, "runs": {}, "missing": [], "notes": [],
+                                   "bases": [], "image": None}
+        if meta_rel is None:
+            return
+        text = self.action_meta[meta_rel]
+        meta = _actionmeta.read(text)
+        info["using"] = meta.using
+        if meta.using.startswith("node"):
+            for key in ("pre", "main", "post"):
+                value, _line = meta.runs.get(key, ("", 0))
+                if value:
+                    self._action_code(f"runs.{key}", _rel_join(root, _actionmeta.unquote_json(value)))
+        elif meta.using == "composite":
+            self._action_steps(meta, meta_rel, text)
+        elif meta.using == "docker":
+            self._action_docker(meta, meta_rel, text)
+        elif meta.using:
+            info["notes"].append(f"runs.using is {meta.using!r}, which Lazaret does not read: what it runs was not "
+                                 f"checked")
+            self.truncate(meta_rel, f"the action's runs.using {meta.using[:40]!r} is not one Lazaret reads")
+        else:
+            info["notes"].append("action.yml says nothing under runs.using: the runner refuses it")
+
+    def _action_code(self, how, path):
+        """A JavaScript or Python file the action runs (`how`: 'runs.main', 'step 2'): an entry point, read
+        with the files it loads by the import-time test. -> its member, or None (said in action_info)."""
+        rel = self._resolve(path) if path else None
+        if rel is None:
+            self.action_info["missing"].append((how, path))
+            return None
+        self.action_info["runs"].setdefault(how, rel)
+        self.entries.add(rel)
+        self.action_entries.setdefault(rel, []).append(how)
+        self._text_of(rel, "py" if rel.endswith(".py") else "js")
+        return rel
+
+    def _action_script(self, how, path):
+        """A script an action's step or entrypoint runs that is neither JavaScript nor Python (a shell script, a
+        program): read as an install script is (install_script_risk). -> (member, its text) or (None, None)."""
+        rel = self._find([path])
+        if rel is None:
+            self.action_info["missing"].append((how, path))
+            return None, None
+        self.action_info["runs"].setdefault(how, rel)
+        self.entries.add(rel)
+        self.install_scripts.add(rel)
+        return rel, self._text_of(rel, "sh")
+
+    def _action_follow(self, how, cmd, base):
+        """The files of the action a command runs (lazaret.follow_hook, the action's directory written as
+        actionmeta.ACTION_DIR; `base`: the directory they are relative to, the action's or the Docker build
+        context's): JavaScript and Python files are entry points (_action_code); other scripts are read as
+        install scripts, and the scripts they start with node or python too. -> [(target, reasons)] of the
+        scripts read by the install-script test, each with the reasons it gave."""
+        targets, complete = lazaret.follow_hook(cmd)
+        if not complete:
+            self.truncate(self.action_info["metadata"] or "(action)",
+                          f"a command of the action ({how}) is more than Lazaret follows")
+        out = []
+        for target in targets:
+            inside = _actionmeta.in_action(target)
+            if inside is None:
+                continue                        # the job's workspace, a program of the runner's: not the action's
+            path = _rel_join(base, inside)
+            ext = posixpath.splitext(path)[1].lower()
+            if ext in (".js", ".mjs", ".cjs", ".ts", ".mts", ".cts", ".py"):
+                self._action_code(how, path)
+                continue
+            rel, text = self._action_script(how, path)
+            if rel is None:
+                continue
+            lang = _engine.script_lang(rel)
+            reasons = _engine.install_script_risk(text, lang=lang) if text else []
+            out.append((rel, reasons))
+            # (a step's script runs in the job's workspace: only a path built from its own place is the action's)
+            for started, more in self._started_scripts(rel, text, None, self.install_scripts):
+                self.action_entries.setdefault(started, []).append(how)
+                more = _engine.install_script_risk(more, lang=_engine.script_lang(started)) if more else []
+                out.append((f"{rel}, which starts {started}", more))
+        return out
+
+    def _action_issue(self, where, line, text, what, cmd_reasons, followed, docker=False):
+        """SC-INSTALL-HOOK at `where`:`line` (`text`: that file's) for a command an action runs (a composite
+        step's script, a Docker action's entrypoint), when the command or a script it runs does what
+        actionmeta.judge counts: CRITICAL for a shape no action needs, MAJOR for the rest (a script fetched
+        and run as it arrives, among them). Nothing when nothing counts."""
+        sev, counted = _actionmeta.judge(cmd_reasons)
+        parts, every = ([f"{what} {'; and '.join(counted)}"] if counted else []), list(counted)
+        for target, reasons in followed:
+            s, c = _actionmeta.judge(reasons)
+            if c:
+                parts.append(f"{what} runs {target}, which {'; and '.join(c)}")
+                every.extend(c)
+                sev = "CRITICAL" if "CRITICAL" in (sev, s) else "MAJOR"
+        if not parts:
+            return
+        if sev == "CRITICAL":
+            why = (f"{'A Docker action runs its entrypoint' if docker else 'A composite action runs its steps'} in "
+                   "the job, with its token and every secret the workflow hands the action, and this does what a "
+                   "stealer or a backdoor does: no action needs that.")
+            fix = "Do not run this action; report it to its repository's owner and to GitHub."
+        elif all(r.startswith(_actionmeta.FETCH_AND_RUN) for r in every):
+            why = _actionmeta.PIPE_SHELL_WHY
+            fix = ("Read what it fetches and runs. Prefer an action that installs its tools at a pinned version "
+                   "with a checksum; at least pin this action to a commit you have read.")
+        else:
+            why = ("An action's commands run in the job with its token and the secrets the workflow hands it; "
+                   "this one does something an action rarely needs. Read it before the workflow runs it.")
+            fix = "Read the command and the scripts it runs; pin the action to a commit you have read."
+        self.issues.append(lazaret.mk_issue(
+            {"id": "SC-INSTALL-HOOK", "name": "Action entrypoint" if docker else "Action step", "type": "HOTSPOT",
+             "sev": sev, "msg": "; and ".join(parts) + ".", "why": why, "fix": fix,
+             "ref": "CWE-506 · Supply chain"}, where, line, text.split("\n")))
+
+    def _action_steps(self, meta, meta_rel, text):
+        """A composite action's run steps (N-4): each script read as an install hook's command is
+        (hook_command_risk; a Python, Node or PowerShell one by the install-script test in its language),
+        and the action's own files it runs followed (_action_follow). What a step's `uses:` runs is another
+        action's: registry/actions.py checks it. A step's script in a language Lazaret does not read (a shell
+        of its own, `perl {0}`) makes the scan INCOMPLETE."""
+        root = self.action_root
+        for n, step in enumerate(meta.steps, 1):
+            self._deadline(meta_rel)
+            if step.run is None or not step.run.strip():
+                continue
+            how, what = f"step {n}", f"Step {n} of the action"
+            kind = _actionmeta.step_shell(_actionmeta.unquote_json(step.shell))
+            script = _actionmeta.substitute(step.run)
+            if kind in ("py", "js"):
+                reasons = _engine.install_script_risk(script, shell=False, lang=kind)
+                self._action_issue(meta_rel, step.run_line, text, what, reasons, [])
+                continue
+            if kind == "other":
+                self.action_info["notes"].append(f"{how} runs its script with {step.shell!r}, which Lazaret does "
+                                                 f"not read")
+                self.truncate(meta_rel, f"{how} of the action runs its script with a shell Lazaret does not read "
+                                        f"({step.shell[:40]!r})")
+                continue
+            reasons = lazaret.hook_command_risk(_actionmeta.powershell_command(script) if kind == "ps" else script)
+            followed = []
+            if kind == "sh":
+                cmds, complete = _actionmeta.commands(step.run, step.workdir)
+                if not complete:
+                    self.truncate(meta_rel, f"{how} of the action has more commands than Lazaret follows")
+                for cmd in cmds:
+                    followed.extend(self._action_follow(how, cmd, root))
+            self._action_issue(meta_rel, step.run_line, text, what, reasons, followed)
+
+    def _dockerfile(self, rel):
+        """The text of a Dockerfile of the archive, or None (said: missing, or not kept)."""
+        if rel in self.deferred:
+            raw = self.deferred[rel]
+        elif rel in self.shell:
+            return self.shell[rel]
+        elif rel in self.sources:
+            return self.sources[rel][0]
+        elif rel in self.manifests:
+            return self.manifests[rel]
+        else:
+            if rel in self.dropped or rel in self.oversize or rel in self.binary:
+                self.truncate(rel, f"the action's Dockerfile {rel} could not be read (too large, or not text)")
+            return None
+        if len(raw) > _actionmeta.MAX_DOCKERFILE_BYTES:
+            self.truncate(rel, f"the action's Dockerfile is larger than {_actionmeta.MAX_DOCKERFILE_BYTES:,} bytes")
+            return None
+        return raw.decode("utf-8", "replace")
+
+    def _action_docker(self, meta, meta_rel, text):
+        """A Docker action (N-4): an image pulled (`docker://`, checked by registry/actions.py), or one built
+        from a Dockerfile of the action's directory: its base images (action_info["bases"]: one not pinned
+        to a digest is reported there), and what the image runs, runs.pre-entrypoint, runs.entrypoint (else the
+        Dockerfile's ENTRYPOINT, else its CMD) and runs.post-entrypoint, followed to the files of the build
+        context the COPY and ADD lines put at those paths. What the image's own layers hold is not read."""
+        info = self.action_info
+        image, line = meta.runs.get("image", ("", 0))
+        image = _actionmeta.unquote_json(image.strip())
+        info["image"] = image or None
+        if not image:
+            info["notes"].append("a Docker action with no runs.image: the runner refuses it")
+            return
+        if image.startswith("docker://"):
+            info["notes"].append(f"runs the image {image[:200]}: its code is the image's, not the repository's, "
+                                 f"and was not read")
+            return
+        df = _rel_join(self.action_root, image)
+        body = self._dockerfile(df)
+        if body is None:
+            if df not in self.members:
+                info["missing"].append(("runs.image", image))
+            return
+        d = _actionmeta.dockerfile(body)
+        info["bases"] = [(df, at, base, pinned) for at, base, pinned, _alias in d.bases]
+        context = posixpath.dirname(df)
+        members = sorted(self.members)
+
+        def is_file(rel):
+            return _rel_join(context, rel) in self.members
+
+        def is_dir(rel):
+            head = _rel_join(context, rel) + "/"
+            k = bisect.bisect_left(members, head)
+            return k < len(members) and members[k].startswith(head)
+
+        # (what runs, its command, the file and line that say so, that file's text)
+        runs = [(f"runs.{key}", meta.runs[key][0], meta_rel, meta.runs[key][1], text)
+                for key in ("pre-entrypoint", "entrypoint", "post-entrypoint") if meta.runs.get(key, ("",))[0]]
+        if "entrypoint" not in meta.runs or not meta.runs["entrypoint"][0]:
+            own = d.entrypoint or d.cmd
+            if own is not None:
+                at, words, _exec = own
+                runs.append(("ENTRYPOINT" if own is d.entrypoint else "CMD", " ".join(words), df, at, body))
+        for how, value, where, at, where_text in runs:
+            mapped = []
+            for w in _actionmeta.unquote_json(value).split():
+                path = w if w.startswith("/") else posixpath.join(d.workdir, w) if ("/" in w or "." in w) else None
+                found = _actionmeta.context_file(path, d.copies, is_file, is_dir) if path else None
+                mapped.append(f"{_actionmeta.ACTION_DIR}/{found}" if found else w)
+            cmd = " ".join(mapped)
+            followed = self._action_follow(how, cmd, context)
+            if not any(w.startswith(_actionmeta.ACTION_DIR + "/") for w in mapped):
+                info["notes"].append(f"what the image runs ({how}: {value[:120]}) is not a file the Dockerfile "
+                                     f"copies from the repository, so it was not read")
+            self._action_issue(where, at, where_text, f"The action's {how}", lazaret.hook_command_risk(cmd),
+                               followed, docker=True)
 
     def _follow_hooks(self):
         """Follow each install hook to the scripts it runs; escalate the hook
@@ -2937,7 +3198,17 @@ class _ArtifactScan:
             when, runs = "runs when the package is loaded", (
                 "Code the package's entry points reach (in a wheel or an sdist, its top-level modules and what "
                 "they import) runs whenever the package is imported or its command runs.")
-            if self.artifact == "vsix":
+            sev = lazaret.import_time_severity(reasons)
+            if self.artifact == "action":
+                sev, reasons = _actionmeta.judge(reasons)
+                if sev is None:
+                    continue
+                hows = self.action_entries.get(rel)
+                when = "runs when the action runs" + (f" ({', '.join(hows)})" if hows else "")
+                runs = ("An action's scripts (runs.pre, runs.main and runs.post, or what its steps run) and the "
+                        "modules they load run in the job, with its token, the secrets the workflow hands the action "
+                        "and the runner's own tokens.")
+            elif self.artifact == "vsix":
                 when = ("runs when the editor activates the extension" + (
                     f" (at every start: activation event {self.vsix_startup!r})" if self.vsix_startup else ""))
                 runs = ("An extension's main module (and its browser one) and the modules they load run in the "
@@ -2945,7 +3216,7 @@ class _ArtifactScan:
                         "extension: at every start for the activation events '*' and 'onStartupFinished'.")
             self.issues.append(lazaret.mk_issue(
                 {"id": "SC-IMPORT-RISK", "name": "Risky import-time code", "type": "HOTSPOT",
-                 "sev": lazaret.import_time_severity(reasons),
+                 "sev": sev,
                  "msg": f"{rel} {when}, and it {'; and '.join(reasons)}.",
                  "why": (f"{runs} Collecting credentials or the whole "
                          "environment next to a network call is the shape of an import-time "
@@ -3041,7 +3312,16 @@ class _ArtifactScan:
             strong = [r for r in reasons if r.startswith(lazaret._STRONG_IMPORT_REASONS)]
             if not strong:
                 continue
-            if self.artifact == "vsix":
+            sev = "CRITICAL"
+            if self.artifact == "action":
+                sev, strong = _actionmeta.judge(strong)     # (a script fetched and run is MAJOR in an action)
+                if sev is None:
+                    continue
+                later = ("The action's scripts do not load it as far as Lazaret can tell: it runs if the action's "
+                         "code starts it some other way.")
+                where = "an action's code can load or start any file of its repository"
+                fix = "Do not run the action; report it to its repository's owner and to GitHub."
+            elif self.artifact == "vsix":
                 later = ("The editor does not load it when it activates the extension: it runs when the "
                          "extension's code calls it.")
                 where = ("a command, a debug adapter, a language server or a script the extension starts runs it "
@@ -3054,7 +3334,7 @@ class _ArtifactScan:
                 fix = "Don't use the package; report it to the registry."
             self.issues.append(lazaret.mk_issue(
                 {"id": "SC-USE-RISK", "name": "Hostile code the package runs when used", "type": "HOTSPOT",
-                 "sev": "CRITICAL",
+                 "sev": sev,
                  "msg": f"{rel} {'; and '.join(strong)}. {later}",
                  "why": (f"A payload need not run on install or import to reach you: {where}. These are the "
                          "shapes no library needs: code fetched and run, a reverse shell, "
@@ -3118,6 +3398,12 @@ class _ArtifactScan:
             self._deadline(rel)
             issue = lazaret.dependency_agent_issue(rel, lazaret.normalize_newlines(text))
             if issue is not None:
+                if self.artifact == "action" and issue["sev"] in STRONG_SEVERITIES:
+                    # an action may exist to run an agent in CI (a review bot): MAJOR, worth reading, not proof
+                    issue["sev"] = "MAJOR"
+                    issue["msg"] = issue["msg"].rstrip() + (" An action may exist to run an AI agent in the job; "
+                                                            "the agent then acts with the job's token, on whatever "
+                                                            "reaches its prompt.")
                 self.issues.append(issue)
 
     def _go_mods(self):
@@ -3288,7 +3574,7 @@ class _ArtifactScan:
         one by the name crates.io knows it by). Not a VS Code extension's yet:
         its names are `publisher.name` (E-1's third part), and the npm
         packages it bundles are not installed from npm."""
-        if self.artifact == "vsix":
+        if self.artifact in ("vsix", "action"):
             return
         if self.artifact == "gomod":
             for rel, text, parsed in self._go_mods():
@@ -3475,7 +3761,7 @@ def _scan_artifact(data, container, artifact, full, budget, memo=None):
                         anomalies, artifact, full, budget, memo)
 
 
-def scan_members(members, anomalies, artifact, full, budget, memo=None):
+def scan_members(members, anomalies, artifact, full, budget, memo=None, action_root=None):
     """Scan a package's files -> per-artifact result fields (_scan_artifact):
     `members` yields them as iter_archive does (Member), from an archive or a
     folder (iter_folder: an installed VS Code extension, E-1), and
@@ -3484,8 +3770,11 @@ def scan_members(members, anomalies, artifact, full, budget, memo=None):
     (`extensionDependencies`), the activation event that starts it with the
     editor (`startupEvent`, None when none does) and who it says it is
     (`manifest`: its package.json's publisher, name and version, each None
-    when it is not a string; None when the scan did not get that far)."""
-    st = _ArtifactScan(artifact, full, budget, memo)
+    when it is not a string; None when the scan did not get that far). A
+    GitHub Action's (artifact "action", `action_root` its directory in the
+    repository, N-4) says what it runs (`action`: _ArtifactScan.action_info,
+    None when the scan did not get that far)."""
+    st = _ArtifactScan(artifact, full, budget, memo, action_root=action_root)
     try:
         for m in members:
             st.member(m)
@@ -3510,7 +3799,24 @@ def scan_members(members, anomalies, artifact, full, budget, memo=None):
         out["extensionDependencies"] = st.extension_dependencies
         out["startupEvent"] = st.vsix_startup
         out["manifest"] = st.vsix_identity
+    if artifact == "action":
+        out["action"] = st.action_info
     return out
+
+
+def scan_action(data, root="", budget=None, memo=None):
+    """A GitHub Action at a commit (0.1.9, N-4): `data`, the .tar.gz GitHub
+    serves for the commit of its repository (what the runner fetches), scanned
+    as the action in the directory `root` ('' for the repository's root) runs:
+    its action.yml says what runs, and the scan reads that as an npm package's
+    entry points and install hooks are read (_ArtifactScan, artifact
+    "action"). -> scan_members's fields. `budget`: a Budget (by default the
+    archive budget and the scan timeout)."""
+    if budget is None:
+        budget = Budget(deadline=time.monotonic() + SCAN_TIMEOUT)
+    anomalies = []
+    return scan_members(iter_archive(data, "tgz", "action", budget=budget, anomalies=anomalies), anomalies, "action",
+                        False, budget, memo, action_root=root)
 
 
 def _fmt_bytes(n):

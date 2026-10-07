@@ -233,10 +233,21 @@ another commit than when it was first seen (SC-ACTION-TAG-MOVED, CRITICAL; what 
 `~/.cache/lazaret/actions-pins.json`, `--pins FILE`, until `--accept-moved`); a tag whose commit is on
 none of the branches compared (SC-ACTION-OFF-BRANCH); `@<sha> # v1.2.3` where the tag names another
 commit (SC-ACTION-PIN-MISMATCH); and, in the action's own `action.yml`, a Docker image without a digest
-(SC-ACTION-DOCKER-UNPINNED) or a composite action's steps that are not pinned, followed two levels deep
-(SC-ACTION-NESTED-UNPINNED). It prints JSON and exits 1 for a finding, 3 when something could not be
-checked (GitHub allows 60 requests an hour without `GITHUB_TOKEN`; a private repository; an expression in
-a ref), 2 for a usage error: an action that was not checked is never cleared.
+(SC-ACTION-DOCKER-UNPINNED; MINOR for one of Docker's official images at a version tag) or a composite
+action's steps that are not pinned, followed two levels deep (SC-ACTION-NESTED-UNPINNED). It then reads
+each action's own code at the commit its `uses:` resolves to, the archive the runner fetches, as the
+runner runs it: a JavaScript action's `pre`, `main` and `post` scripts and the modules they load by the
+import-time test (SC-IMPORT-RISK); a composite action's `run:` steps as install hooks are read, with the
+action's own scripts they run (a path built from `github.action_path`; a step's other paths are the
+workspace's) and their shell, Python or PowerShell (SC-INSTALL-HOOK); a Docker action's Dockerfile, its
+base images (SC-ACTION-DOCKER-UNPINNED) and the script its entrypoint runs; and the rest of the
+repository by the use-time test (SC-USE-RISK). In an action, what CI code does as its job (a named
+token sent to its service, a file uploaded, a package published) is not counted, a script fetched and
+run as it arrives (`curl … | sh`) is MAJOR, as it is in a workflow, and a stealer's or a backdoor's shape
+(the whole environment sent, a decoded script written and run, a reverse shell) is CRITICAL. `--no-code`
+skips it. It prints JSON and exits 1 for a finding, 3 when something could not be checked (GitHub allows
+60 requests an hour without `GITHUB_TOKEN`; a private repository; an expression in a ref; an action's
+code not read whole), 2 for a usage error: an action that was not checked is never cleared.
 
 ### Before you commit (`lazaret hook`)
 

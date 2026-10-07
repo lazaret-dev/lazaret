@@ -5,8 +5,10 @@ it, as the `http` seam of `sources.Client` (url, headers, max_bytes, hosts,
 auth_host, **kw) -> bytes. Nothing is fetched."""
 
 import hashlib
+import io
 import json
 import re
+import tarfile
 import urllib.parse
 
 from lazaret.registry.sources import SourceError
@@ -79,9 +81,28 @@ class Repo:
         return "diverged" if a_base & a_head else None
 
 
+def archive(full_name, sha, files):
+    """A commit's archive as GitHub serves it (`git archive`): one top directory, the commit in a pax global
+    header. `files`: {path: bytes or str}."""
+    buf = io.BytesIO()
+    top = f"{full_name.replace('/', '-')}-{sha[:7]}"
+    with tarfile.open(fileobj=buf, mode="w:gz", format=tarfile.PAX_FORMAT, pax_headers={"comment": sha}) as tf:
+        d = tarfile.TarInfo(top)
+        d.type, d.mode = tarfile.DIRTYPE, 0o775
+        tf.addfile(d)
+        for path, data in sorted(files.items()):
+            data = data if isinstance(data, bytes) else data.encode()
+            ti = tarfile.TarInfo(f"{top}/{path}")
+            ti.size, ti.mode, ti.mtime = len(data), 0o664, 0
+            tf.addfile(ti, io.BytesIO(data))
+    return buf.getvalue()
+
+
 class FakeGitHub:
-    """The network seam. `calls` is every URL asked for; `limit` makes call
-    number limit + 1 answer with the rate limit."""
+    """The network seam. `calls` is every URL asked for; `limit` makes API
+    call number limit + 1 answer with the rate limit. A commit's archive is served
+    from codeload.github.com (and through the API, with a token) from the
+    files the commit holds."""
 
     def __init__(self, *repos, limit=None):
         self.repos = {r.full_name.lower(): r for r in repos}
@@ -92,16 +113,22 @@ class FakeGitHub:
         what = kw.get("what", url)
         self.calls.append(url)
         self.headers.append((url, dict(headers)))
-        if self.limit is not None and len(self.calls) > self.limit:
+        if self.limit is not None and url.startswith(API) and sum(c.startswith(API) for c in self.calls) > self.limit:
             exc = SourceError(f"{what}: rate limit reached, wait until 12:00 UTC")
             exc.status = 403
             raise exc
         p = urllib.parse.urlsplit(url)
-        assert p.scheme == "https" and p.netloc == "api.github.com", url
+        assert p.scheme == "https" and p.netloc in ("api.github.com", "codeload.github.com"), url
         path = urllib.parse.unquote(p.path)
         for part, status in self.broken.items():
             if part in path:
                 raise fail(status, what)
+        if p.netloc == "codeload.github.com":
+            m = re.match(r"^/([^/]+)/([^/]+)/tar\.gz/([0-9a-f]{40})$", path)
+            repo = self.repos.get(f"{m.group(1)}/{m.group(2)}".lower()) if m else None
+            if repo is None:
+                raise fail(404, what)
+            return self.archive_of(repo, m.group(3), what)
         m = re.match(r"^/repos/([^/]+)/([^/]+)(/.*)?$", path)
         if not m:
             raise fail(404, what)
@@ -115,7 +142,15 @@ class FakeGitHub:
     def js(doc):
         return json.dumps(doc).encode()
 
+    def archive_of(self, repo, sha, what):
+        if not repo.has(sha):
+            raise fail(404, what)
+        return archive(repo.full_name, sha, {path: data for (s, path), data in repo.files.items() if s == sha})
+
     def answer(self, repo, rest, query, what):
+        m = re.match(r"^/tarball/([0-9a-f]{40})$", rest)
+        if m:
+            return self.archive_of(repo, m.group(1), what)
         if rest == "":
             return self.js({"full_name": repo.full_name, "default_branch": repo.default, "archived": repo.archived})
         if rest == "/tags":

@@ -18,6 +18,16 @@ is not pinned. These ask GitHub what each one points to, each action once:
 - **the action's own `action.yml`**: a Docker image not pinned to a digest; for
   a composite action, the `uses:` of its steps that are not pinned, and each of
   those checked the same way, two levels deep.
+- **the action's own code, at the commit it resolves to** (N-4): the archive
+  the runner fetches (GitHub's archive of the commit, from
+  `codeload.github.com`, or through the API with a token) is scanned as the
+  action runs (`repo.scan_action`): a JavaScript action's `pre`, `main` and
+  `post` scripts and the modules they load by the import-time test; a
+  composite action's steps as install hooks are read, with the action's own
+  scripts they run; a Docker action's Dockerfile, its base images (one not
+  pinned to a digest is `docker-unpinned`) and the script its entrypoint runs.
+  What it finds is a `code` finding with the scan's own rule; an archive not
+  read whole leaves the action `incomplete`. `--no-code` skips it.
 
 What it cannot tell is said, not skipped: a request GitHub refused (the rate
 limit, 60 an hour without `GITHUB_TOKEN`, which is read-only and goes to
@@ -29,7 +39,7 @@ byte-budgeted and read as JSON with limits, nothing run and nothing written but
 the pin book.
 
     python -m lazaret.registry.actions [--no-pins | --pins FILE] [--accept-moved]
-                                       [--max-calls N] WORKFLOW...
+                                       [--max-calls N] [--no-code] WORKFLOW...
 
 prints the report as JSON; exit 1 for a finding, 3 when something could not be
 checked, 2 for a usage error.
@@ -44,6 +54,7 @@ import time
 import urllib.parse
 from collections import namedtuple
 
+from lazaret.registry import repo as _repo
 from lazaret.registry import sources as _sources
 from lazaret.scanner import core as _core
 from lazaret.scanner import ghworkflow
@@ -60,6 +71,12 @@ MAX_USES = 300              # distinct actions looked at in one run
 MAX_ACTION_YML = 256 * 1024
 PIN_ENTRIES = 5000
 MAX_WORKFLOW_BYTES = 2 * 1024 * 1024
+MAX_CODE_SCANS = 60         # actions' archives fetched and scanned in one run (N-4)
+MAX_CODE_BYTES = 1024 ** 3  # bytes of those archives in one run
+MAX_CODE_FINDINGS = 20      # findings reported for one action's code; the rest are counted in a note
+#: Docker's official images (`alpine`, `docker.io/library/python`): at a version tag, a smaller risk than another's
+_OFFICIAL_IMAGE_RE = re.compile(r"^(?:(?:docker\.io|index\.docker\.io|registry-1\.docker\.io)/)?(?:library/)?"
+                                r"[a-z0-9]+(?:[._-][a-z0-9]+)*:v?\d[\w.-]*$")
 
 Finding = namedtuple("Finding", "kind line uses detail")
 Use = namedtuple("Use", "line value kind owner repo path ref pinned comment")
@@ -241,6 +258,10 @@ class _Stop(Exception):
     """GitHub will answer no more (the rate limit, a refused token) or the call budget is spent."""
 
 
+class _CodeLimit(Exception):
+    """The run's budget for actions' archives (MAX_CODE_SCANS, MAX_CODE_BYTES) is spent."""
+
+
 class _Resolution:
     def __init__(self):
         self.sha = None
@@ -259,7 +280,7 @@ class Auditor:
     """Asks GitHub about `uses:` values. `http` is `sources.Client`'s network
     seam (tests give it fixed answers); `pins` a PinBook or None."""
 
-    def __init__(self, env=None, http=None, pins=None, max_calls=None, now=None, accept_moved=False):
+    def __init__(self, env=None, http=None, pins=None, max_calls=None, now=None, accept_moved=False, code=True):
         env = os.environ if env is None else env
         token = _sources._token("github", env)
         self.client = _sources.Client("github", token=token, http=http)
@@ -272,6 +293,18 @@ class Auditor:
         self._memo = {}
         self._done = {}
         self._actions = {}
+        # the actions' own code (N-4): scanned once per action and commit; the last archive is kept for the
+        # next action of the same repository and commit; the engine's answers are shared between scans
+        self.code = code
+        self._code = {}
+        self._archive = None
+        self._archives, self._archive_bytes = 0, 0
+        self._engine_memo = _repo.new_memo() if code else None
+
+    def api_calls(self):
+        """The calls made to the API (the budget counts these; an archive from codeload is not one)."""
+        head = f"https://{_sources.GITHUB_API}/"
+        return sum(1 for c in self.client.calls if c.startswith(head))
 
     # ---- the API
     def _get(self, path, what, accept="application/vnd.github+json", max_bytes=None, missing=False):
@@ -280,12 +313,7 @@ class Auditor:
         url = f"https://{_sources.GITHUB_API}{path}"
         if url in self._memo:
             return self._memo[url]
-        if self.stopped:
-            raise _Stop(self.stopped)
-        if len(self.client.calls) >= self.max_calls:
-            hint = "" if self.token else "; GITHUB_TOKEN (read-only) raises it"
-            self.stopped = f"the budget of {self.max_calls} API calls is spent{hint}"
-            raise _Stop(self.stopped)
+        self._may_call()
         try:
             raw = self.client.get(url, what, accept=accept, max_bytes=max_bytes or _sources.MAX_TREE_BYTES)
         except SourceError as exc:
@@ -299,6 +327,15 @@ class Auditor:
             raise
         self._memo[url] = raw
         return raw
+
+    def _may_call(self):
+        """Raises _Stop when GitHub will answer no more or the budget of API calls is spent."""
+        if self.stopped:
+            raise _Stop(self.stopped)
+        if self.api_calls() >= self.max_calls:
+            hint = "" if self.token else "; GITHUB_TOKEN (read-only) raises it"
+            self.stopped = f"the budget of {self.max_calls} API calls is spent{hint}"
+            raise _Stop(self.stopped)
 
     def _json(self, path, what, missing=False):
         raw = self._get(path, what, missing=missing)
@@ -477,6 +514,94 @@ class Auditor:
         self._actions[key] = text
         return text
 
+    # ---- the action's own code (N-4)
+    @staticmethod
+    def _label(use):
+        return f"{use.owner}/{use.repo}{'/' + use.path if use.path else ''}@{use.ref}"
+
+    def _fetch_archive(self, use, sha):
+        """The archive GitHub serves for the commit (what the runner fetches), checked against it. Raises
+        _CodeLimit past the run's budget, _Stop when GitHub will answer no more, SourceError otherwise."""
+        key = (use.owner.lower(), use.repo.lower(), sha)
+        if self._archive is not None and self._archive[0] == key:
+            return self._archive[1]
+        if self._archives >= MAX_CODE_SCANS:
+            raise _CodeLimit(f"its code was not scanned: more than {MAX_CODE_SCANS} actions' archives in one run")
+        if self._archive_bytes >= MAX_CODE_BYTES:
+            raise _CodeLimit(f"its code was not scanned: the run's {MAX_CODE_BYTES // 1024 ** 2} MB of actions' "
+                             f"archives are spent")
+        if self.token:
+            self._may_call()                    # (with a token, the archive comes through the API)
+        try:
+            data = self.client.archive(_sources.Source("github", f"{use.owner}/{use.repo}", sha), sha)
+        except SourceError as exc:
+            if getattr(exc, "status", None) == 401 or "rate limit" in str(exc):
+                self.stopped = str(exc)
+                raise _Stop(self.stopped) from None
+            raise
+        self._archives += 1
+        self._archive_bytes += len(data)
+        claimed = _sources.archive_commit(data)
+        if claimed is not None and claimed != sha:
+            raise SourceError(f"the archive of {use.owner}/{use.repo}@{sha[:12]} says it is for commit {claimed}")
+        self._archive = (key, data)
+        return data
+
+    def _code_of(self, use, sha):
+        """repo.scan_action's result for the action at `sha`, once per action and commit; ("incomplete", why)
+        when the archive could not be fetched or the run's budget is spent."""
+        key = (use.owner.lower(), use.repo.lower(), sha, use.path)
+        if key not in self._code:
+            try:
+                data = self._fetch_archive(use, sha)
+            except _CodeLimit as exc:
+                self._code[key] = ("incomplete", str(exc))
+            except SourceError as exc:
+                self._code[key] = ("incomplete", f"its code could not be fetched: {exc}")
+            else:
+                self._code[key] = _repo.scan_action(data, use.path, memo=self._engine_memo)
+        return self._code[key]
+
+    def _audit_code(self, use, sha, line, via):
+        """The action's code at `sha` (N-4): each supply-chain finding of the scan a `code` finding (at most
+        MAX_CODE_FINDINGS, the strongest first), a Dockerfile's base image not pinned to a digest a
+        `docker-unpinned` one, what it runs in the action's entry of the report, and a scan that did not
+        read it whole `incomplete`."""
+        rep = self.report
+        got = self._code_of(use, sha)
+        entry = rep.actions.setdefault(self._label(use), {})
+        if isinstance(got, tuple):
+            entry["code"] = {"commit": sha, "verdict": "INCOMPLETE", "reason": got[1]}
+            rep.incomplete.append((use.value, got[1]))
+            return
+        action = got.get("action") or {}
+        entry["code"] = {"commit": sha, "verdict": got["verdict"], "reason": got["verdictReason"],
+                         "files": got["filesScanned"], "runs": dict(action.get("runs") or {})}
+        counted = [i for i in got["issues"] if i["rule"].startswith("SC-") and i["rule"] not in _repo.TRUNCATION_RULES
+                   and i["sev"] != "INFO"]
+        counted.sort(key=lambda i: (i["sev"] not in _repo.STRONG_SEVERITIES, str(i["file"]), i["line"]))
+        for i in counted[:MAX_CODE_FINDINGS]:
+            rep.findings.append(Finding("code", line, use.value, {
+                "owner": use.owner, "repo": use.repo, "path": use.path, "sha": sha, "via": list(via),
+                "rule": i["rule"], "name": i["name"], "sev": i["sev"], "msg": i["msg"], "why": i.get("why") or "",
+                "fix": i.get("fix") or "", "ref": i.get("ref") or "", "file": i["file"], "at": i["line"]}))
+        if len(counted) > MAX_CODE_FINDINGS:
+            rep.notes.append((use.value, f"{len(counted) - MAX_CODE_FINDINGS} more findings in its code are not "
+                                         f"listed"))
+        for how, path in action.get("missing") or ():
+            rep.notes.append((use.value, f"its {how} names {path}, which is not in the commit: the runner fails "
+                                         f"there"))
+        for note in action.get("notes") or ():
+            rep.notes.append((use.value, note))
+        for dockerfile, at, image, pinned in action.get("bases") or ():
+            if not pinned:
+                rep.findings.append(Finding("docker-unpinned", line, use.value, {
+                    "image": image, "dockerfile": f"{dockerfile}:{at}", "owner": use.owner, "repo": use.repo,
+                    "via": list(via)}))
+        if got["verdict"] == "INCOMPLETE":
+            why = [i["msg"] for i in got["issues"] if i["rule"] in _repo.TRUNCATION_RULES][:3]
+            rep.incomplete.append((use.value, f"its code at {sha[:12]} was not read whole: " + " ".join(why)))
+
     def _audit_use(self, use, line, via, depth):
         """Findings for one `uses:`, reported at the workflow's `line`."""
         rep = self.report
@@ -500,8 +625,7 @@ class Auditor:
         records = ghworkflow.outline(text)
         runs = {r["key"]: r["value"] for r in records if r["path"] == ("runs",) and r["key"] is not None}
         using = runs.get("using", "")
-        rep.actions[f"{use.owner}/{use.repo}{'/' + use.path if use.path else ''}@{use.ref}"] = {
-            "using": using, "pre": "pre" in runs, "post": "post" in runs}
+        rep.actions[self._label(use)] = {"using": using, "pre": "pre" in runs, "post": "post" in runs}
         chain = chain + [use.value]
         if using.startswith("docker"):
             image = runs.get("image", "")
@@ -510,9 +634,11 @@ class Auditor:
                 if parsed is not None and not parsed[3]:
                     rep.findings.append(Finding("docker-unpinned", line, use.value, {
                         "image": image, "owner": use.owner, "repo": use.repo, "via": list(via)}))
-            elif image:
-                rep.notes.append((use.value, f"builds its image from {image} in the repository: the Dockerfile's FROM "
-                                             f"lines are not read yet"))
+            elif image and not self.code:
+                rep.notes.append((use.value, f"builds its image from {image} in the repository: its Dockerfile is "
+                                             f"read with the action's code, which was not asked for (--no-code)"))
+        if self.code:
+            self._audit_code(use, res.sha, line, via)
         for nested_line, value in [(r["line"], r["value"]) for r in records
                                    if r["key"] == "uses" and r["path"] == ("runs", "steps", "-")]:
             parsed = ghworkflow.parse_uses(value)
@@ -597,6 +723,11 @@ _MISMATCH_WHY = (
 _DOCKER_WHY = (
     "A Docker action pulls its image when it runs: a tag on an image can be moved, and then the workflow runs "
     "other code than the one reviewed, with the job's token and secrets. An image digest can't be moved.")
+_CODE_WHY = (
+    "An action's code runs in the job with its token, the secrets the workflow hands the action and the runner's "
+    "own tokens. The tj-actions/changed-files and reviewdog/action-setup compromises (March 2025) were in that code: "
+    "a release whose script printed the job's secrets into its log.")
+_CODE_FIX = "Read the code at that commit before the workflow runs it; pin a commit you have read."
 _NESTED_WHY = (
     "A composite action runs the actions its steps name, with the job's token and secrets. Pinning the action to a "
     "commit does not pin what it uses: a tag in its action.yml can still be moved.")
@@ -655,13 +786,26 @@ def rule(kind, d):
                     "the comment, and check that the tag was not moved."),
             "ref": "CWE-1357 · Supply chain"}
     if kind == "docker-unpinned":
+        image = d["image"].removeprefix("docker://")
+        official = bool(_OFFICIAL_IMAGE_RE.match(image))
+        if d.get("dockerfile"):
+            msg = (f"The action {who}{via} builds its image from {image} ({d['dockerfile']}), which is not pinned to "
+                   f"a digest.")
+        else:
+            msg = f"The action {who}{via} runs the image {d['image']}, which is not pinned to a digest."
         return {
             "id": "SC-ACTION-DOCKER-UNPINNED", "name": "Docker action runs an image not pinned to a digest",
-            "type": "HOTSPOT", "sev": "MAJOR",
-            "msg": f"The action {who}{via} runs the image {d['image']}, which is not pinned to a digest.",
+            "type": "HOTSPOT", "sev": "MINOR" if official else "MAJOR",
+            "msg": msg + (" It is one of Docker's official images, at a version tag." if official else ""),
             "why": _DOCKER_WHY,
             "fix": "Use a version of the action that pins the image `@sha256:…`, or a different action.",
             "ref": "CWE-829 · Supply chain"}
+    if kind == "code":
+        path = f"/{d['path']}" if d.get("path") else ""
+        return {
+            "id": d["rule"], "name": d["name"], "type": "HOTSPOT", "sev": d["sev"],
+            "msg": f"In the code of {who}{path} at {d['sha'][:12]}{via}, {d['file']}:{d['at']}: {d['msg']}",
+            "why": d["why"] or _CODE_WHY, "fix": d["fix"] or _CODE_FIX, "ref": d["ref"] or "CWE-506 · Supply chain"}
     small = d.get("kind") == "action" and d.get("first") and d.get("tag")
     return {
         "id": "SC-ACTION-NESTED-UNPINNED", "name": "Action's own steps use something not pinned to a commit",
@@ -674,17 +818,20 @@ def rule(kind, d):
 
 # ------------------------------------------------------------------ the command
 def main(argv=None):
-    """python -m lazaret.registry.actions [--no-pins | --pins FILE] [--accept-moved] [--max-calls N] WORKFLOW..."""
+    """python -m lazaret.registry.actions [--no-pins | --pins FILE] [--accept-moved] [--max-calls N] [--no-code]
+    WORKFLOW..."""
     _core.configure_stdio()
     argv = list(sys.argv[1:] if argv is None else argv)
     usage = ("usage: python -m lazaret.registry.actions [--no-pins | --pins FILE] [--accept-moved] "
-             "[--max-calls N] WORKFLOW...")
-    pins_path, use_pins, accept, max_calls, files = default_pins_path(), True, False, None, []
+             "[--max-calls N] [--no-code] WORKFLOW...")
+    pins_path, use_pins, accept, max_calls, files, scan_code = default_pins_path(), True, False, None, [], True
     i = 0
     while i < len(argv):
         a = argv[i]
         if a == "--no-pins":
             use_pins = False
+        elif a == "--no-code":
+            scan_code = False
         elif a == "--accept-moved":
             accept = True
         elif a in ("--pins", "--max-calls") and i + 1 < len(argv):
@@ -719,7 +866,8 @@ def main(argv=None):
             print(f"error: {path}: larger than {MAX_WORKFLOW_BYTES // 1024} KB", file=sys.stderr)
             return 2
         try:
-            rep = audit_text(text.decode("utf-8", "replace"), pins=pins, max_calls=max_calls, accept_moved=accept)
+            rep = audit_text(text.decode("utf-8", "replace"), pins=pins, max_calls=max_calls, accept_moved=accept,
+                             code=scan_code)
         except SourceError as exc:
             print(f"error: {exc}", file=sys.stderr)
             return 2

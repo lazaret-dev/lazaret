@@ -1257,6 +1257,79 @@ register("ecosystem-member-path", "crates.io and Go: member_path over a member n
          member_path_start, MEMBER_WORDS, max_len=1024)
 
 
+# ---------------------------------------------------------------------------------------------- an action's code (N-4)
+# The input is an action.yml (or, for one input in three, the Dockerfile of a Docker action), in a repository of a few
+# files, as GitHub's archive of a commit holds it; repo.scan_action reads it as the runner runs the action.
+ACTION_SHA = "0123456789abcdef0123456789abcdef01234567"
+ACTION_FILES = {"dist/index.js": b"module.exports = require('./lib');\n", "dist/lib.js": b"module.exports = 1;\n",
+                "dist/post.js": b"require('./index');\n", "install.sh": b"#!/bin/sh\nset -e\nnode \"$(dirname \"$0\")/dist/index.js\"\n",
+                "entrypoint.sh": b"#!/bin/sh\nexec node /app/dist/index.js \"$@\"\n", "main.py": b"import os\nprint(os.getcwd())\n",
+                "package.json": b'{"name": "x", "scripts": {"postinstall": "node install.js"}}\n'}
+ACTION_DOCKER_YML = b"name: x\nruns:\n  using: docker\n  image: Dockerfile\n"
+ACTION_SEEDS = [b"name: x\nruns:\n  using: 'node20'\n  pre: dist/post.js\n  main: dist/index\n  post: \"dist/post.js\"\n",
+                b"runs:\n  using: composite\n  steps:\n    - run: ${{ github.action_path }}/install.sh\n      shell: bash\n"
+                b"    - uses: actions/checkout@v4\n    - shell: python\n      run: |\n        import os\n        print(os.environ)\n"
+                b"    - shell: pwsh\n      working-directory: ${{ github.action_path }}\n      run: ./x.ps1\n"
+                b"    - run: |\n        cd \"$GITHUB_ACTION_PATH\"\n        python3 main.py \\\n          --x\n",
+                b"runs:\n  using: docker\n  image: Dockerfile\n  entrypoint: /app/entrypoint.sh\n  args:\n    - ${{ inputs.x }}\n",
+                b"runs:\n  using: docker\n  image: 'docker://alpine:3.20'\n",
+                b"FROM golang:1.22 AS b\nARG V=1\nWORKDIR /src\nCOPY . .\nFROM alpine:3.${V}\nCOPY --from=b /src/x /x\n"
+                b"COPY [\"entrypoint.sh\", \"dist\", \"/app/\"]\nENTRYPOINT [\"/app/entrypoint.sh\"]\nCMD node /app/dist/index.js\n"]
+ACTION_WORDS = (b"runs:\n", b"  using: ", b"node20", b"composite", b"docker", b"  main: ", b"  pre: ", b"  post: ", b"  steps:\n",
+                b"    - run: ", b"      shell: ", b"bash", b"pwsh", b"python", b"perl {0}", b"cmd", b"${{ github.action_path }}",
+                b"$GITHUB_ACTION_PATH", b"      working-directory: ", b"  image: ", b"Dockerfile", b"  entrypoint: ",
+                b"FROM ", b"COPY ", b"ADD ", b"ENTRYPOINT ", b"CMD ", b"WORKDIR ", b"ARG ", b" AS ", b"--from=", b"@sha256:",
+                b"\\\n", b" |\n", b"cd ", b"../", b"/app/", b"dist/index.js", b"install.sh", b"entrypoint.sh", b"\"", b"'",
+                b"- ", b"\t", b"\r\n", b"#")
+ACTION_SEVERITIES = ("INFO", "MINOR", "MAJOR", "CRITICAL", "BLOCKER")
+
+
+def action_start():
+    from lazaret.registry import repo
+
+    def archive(files):
+        buf = io.BytesIO()
+        with tarfile.open(fileobj=buf, mode="w:gz", format=tarfile.PAX_FORMAT, pax_headers={"comment": ACTION_SHA}) as tf:
+            for name, payload in sorted(files.items()):
+                info = tarfile.TarInfo("o-r-0123456/" + name)
+                info.size = len(payload)
+                tf.addfile(info, io.BytesIO(payload))
+        return buf.getvalue()
+
+    def run(data):
+        files = dict(ACTION_FILES)
+        if pick(data, (False, False, True)):
+            files["action.yml"], files["Dockerfile"] = ACTION_DOCKER_YML, data
+        else:
+            files["action.yml"] = data
+        packed = archive(files)
+        res = repo.scan_action(packed, "", budget=repo.Budget(deadline=None))
+        check(res["verdict"] in ("OK", "WARN", "SUSPICIOUS", "INCOMPLETE"), "action-code-shape", res["verdict"])
+        info = res["action"]
+        check(info is None or isinstance(info, dict), "action-code-shape", type(info).__name__)
+        if info:
+            check(all(isinstance(how, str) and rel in files for how, rel in info["runs"].items()),
+                  "action-code-runs-the-archives-files", repr(info["runs"])[:200])
+            check(all(isinstance(how, str) and isinstance(path, str) for how, path in info["missing"]),
+                  "action-code-shape", repr(info["missing"])[:200])
+            for where, line, image, pinned in info["bases"]:
+                check(where in files and isinstance(line, int) and line >= 1 and isinstance(image, str)
+                      and pinned == bool(re.search(r"@sha256:[0-9a-f]{64}$", image)), "action-code-bases", repr((where, line, image, pinned)))
+        for i in res["issues"]:
+            check(isinstance(i.get("rule"), str) and i.get("sev") in ACTION_SEVERITIES and isinstance(i.get("msg"), str)
+                  and isinstance(i.get("file"), str) and isinstance(i.get("line"), int), "action-code-issues", repr(i)[:200])
+        again = repo.scan_action(packed, "", budget=repo.Budget(deadline=None))
+        check([(i["rule"], i["sev"], i["file"], i["line"], i["msg"]) for i in again["issues"]]
+              == [(i["rule"], i["sev"], i["file"], i["line"], i["msg"]) for i in res["issues"]], "action-code-deterministic",
+              "two scans of one archive differ")
+
+    return run, lambda: None
+
+
+register("action-code", "GitHub Actions: repo.scan_action over an action.yml (or a Docker action's Dockerfile) in an action's repository",
+         lambda: list(ACTION_SEEDS), action_start, ACTION_WORDS, max_len=8192, time_limit=4.0)
+
+
 # ---------------------------------------------------------------------------------------------- live secret verification (V-1)
 # The credentials below are made up, in the shapes the providers use (AWS's is the pair its documentation gives as an example).
 VERIFY_SAMPLES = {

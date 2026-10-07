@@ -11,6 +11,20 @@ project is pre-1.0, so the 0.x API may still change.
 
 ### Added
 
+- **A workflow's actions are read at the commit they run (N-4).** `python -m
+  lazaret.registry.actions` now scans each action's own code, the archive the runner fetches for
+  the commit its `uses:` resolves to, as the runner runs it: a JavaScript action's `pre`, `main`
+  and `post` scripts and the modules they load (the import-time test), a composite action's steps
+  and the action's own scripts they run (a path built from `github.action_path`), a Docker
+  action's Dockerfile (base images not pinned to a digest, and the script its entrypoint runs, by
+  the Dockerfile's COPY lines), and the rest of the repository (the use-time test). Judged as CI
+  code: a named token sent to its service, a file uploaded or a package published is not counted;
+  a script fetched and run as it arrives is MAJOR, as in a workflow; the whole environment sent, a
+  decoded script written and run, a reverse shell are CRITICAL: the tj-actions/changed-files
+  release of March 2025 (a script kept in base64 in its `dist/index.js`, written to a file and run)
+  is CRITICAL at its commit. Each is a `code` finding with the scan's own rule;
+  code not read whole leaves the action incomplete (exit 3). `--no-code` skips it. An official
+  Docker image at a version tag is SC-ACTION-DOCKER-UNPINNED MINOR instead of MAJOR.
 - **Lazaret's own HTTPS client, the registry's default transport (NET-1).** tiny_https, a TLS 1.3
   and HTTP library written on Rust's standard library alone (no dependencies, Apache-2.0), is in the
   repository (`rust/crates/tiny_https`, taken as it was handed over by `scripts/sync_tiny_https.py`,

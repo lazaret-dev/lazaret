@@ -42,7 +42,8 @@ EXPECTED_TARGETS = ["archive-tgz", "archive-tbz2", "archive-txz", "archive-zip",
                     "sca-package-lock-json", "sca-yarn-lock", "sca-pnpm-lock-yaml", "sca-bun-lock", "sca-poetry-lock",
                     "sca-uv-lock", "sca-pylock-toml", "sca-pipfile-lock", "sca-requirements-txt", "sca-pyproject-toml",
                     "sca-setup-py", "sca-go-mod", "sca-go-sum", "sca-vendor-modules-txt", "sca-cargo-lock", "sca-cargo-toml", "sca-bundle-index", "sca-bundle-doc", "crates-index", "crates-manifest", "go-zip", "go-mod", "go-sumdb",
-                    "go-sumdb-check", "provenance-npm", "go-resolve", "ecosystem-names", "ecosystem-member-path", "verify-answers", "verify-credentials"]
+                    "go-sumdb-check", "provenance-npm", "go-resolve", "ecosystem-names", "ecosystem-member-path", "action-code",
+                    "verify-answers", "verify-credentials"]
 
 
 def fake(run, seeds=(b"abc",), name="fake", **options):
@@ -996,6 +997,31 @@ class RegistryModulePromisesAreLive(unittest.TestCase):
             calls.append(1)
             return [] if len(calls) % 2 else [{"outcome": "unchecked", "predicateType": "p", "reason": "r"}]
         self.assertEqual(run(real, V(every_other)), "provenance-deterministic")
+
+    def test_the_action_code_promises(self):
+        from lazaret.registry import repo
+        real = fuzz_targets.ACTION_SEEDS[0]
+        run = lambda data, *patches: self.promise("action-code", data, *patches)            # noqa: E731
+        scan = repo.scan_action
+
+        def changed(**fields):
+            def answer(*args, **kw):
+                res = scan(*args, **kw)
+                for key, value in fields.items():
+                    if key in ("runs", "missing", "bases"):
+                        res["action"] = dict(res["action"] or {"runs": {}, "missing": [], "bases": []}, **{key: value})
+                    else:
+                        res[key] = value
+                return res
+            return (repo, "scan_action", answer)
+        self.assertEqual(run(real, changed(verdict="FINE")), "action-code-shape")
+        self.assertEqual(run(real, changed(runs={"runs.main": "elsewhere.js"})), "action-code-runs-the-archives-files")
+        self.assertEqual(run(real, changed(bases=[("Dockerfile", 1, "alpine:3", True)])), "action-code-bases")
+        self.assertEqual(run(real, changed(issues=[{"rule": "SC-X", "sev": "SEVERE", "msg": "m", "file": "f", "line": 1}])),
+                         "action-code-issues")
+        self.assertEqual(run(real, (repo, "scan_action", self.every_other(scan, lambda *a, **k: dict(
+            scan(*a, **k), issues=[{"rule": "SC-X", "sev": "MAJOR", "msg": "m", "file": "f", "line": 1}])))),
+            "action-code-deterministic")
 
     @mock.patch("lazaret.registry.ecosystems.golang.verify_lookup", new=lambda name, version, lookup, record, fetch: None)
     def test_the_go_resolve_promises(self):
