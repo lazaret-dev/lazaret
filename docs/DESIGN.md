@@ -837,7 +837,21 @@ times can't be held back (the report says so).
 
 Failure is closed: a package that can't be fetched, verified or scanned
 blocks (a scan crash is a `ScanError`, never a verdict); only a file over the
-200 MiB download cap is INCOMPLETE. The cache (`VerdictCache`) keys verdicts by
+200 MiB download cap is INCOMPLETE. So is a scan that could not read what a
+package can be made to hide (T-1, decision 9): the archive's result says why
+it is INCOMPLETE (`incomplete`, of `repo.INCOMPLETE_KINDS`: its deadline
+passed; the engine could not finish a file or a step; code that runs, or a
+source file, a manifest or a reader's code, not read whole; the archive not
+read whole), each something a package controls, as a payload padded past the
+size limit inside its file does (the Go/Rust review's GO-1). `Context.apply`
+blocks those unless `--allow-incomplete`; a program too large to read (a
+native library a package names) is none of them, and goes through as
+before. A time-out is scanned once more (`Scanner.scan`), since a machine
+busy for a moment makes one, and never cached; the others are cached with
+their kind, so a hit blocks too. Measured on 0.1.8's sweep (Oct 3): the
+slowest of 1,206 popular releases took 15 s of the 120 s deadline on the
+2-vCPU sandbox, and one release was INCOMPLETE, for a 16 MB library. The
+cache (`VerdictCache`) keys verdicts by
 ecosystem, name, version and digest and is discarded when `ENGINE_VERSION`
 changes. Scans run in `spawn` worker processes (`--jobs`), downloads in
 threads; a stuck worker is terminated at exit.

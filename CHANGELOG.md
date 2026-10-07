@@ -522,6 +522,16 @@ project is pre-1.0, so the 0.x API may still change.
 
 ### Changed
 
+- **The guard blocks a scan that could not read what a package can be made to hide (T-1, decision 9; rule set
+  2.47.0).** INCOMPLETE used to go through by default, so a package could pass by being slow to scan, or by
+  padding a payload past the size limit inside its file (16 KB of zip did it: the Go/Rust review's GO-1). The
+  guard now blocks an INCOMPLETE package when its scan ran out of time (scanned once more first; a time-out is
+  never cached), the engine could not finish reading it, code that runs or a source file was cut at a limit,
+  or the archive could not be read whole; `--allow-incomplete` lets those through, and `--trust` one package.
+  A download over the 200 MiB limit, or a program too large to read (a 16 MB native library a package names),
+  stays INCOMPLETE and goes through as before. The scan's result says why it is INCOMPLETE (`incomplete`).
+  Of the 1,205 popular releases, the one INCOMPLETE (`@img/sharp-libvips-linuxmusl-x64`, for its library)
+  still goes through.
 - **Code received over the network and run out of sight says so too (GR-8's follow-up; rule set 2.44.0).**
   In Go and Rust code, a shell or a program handed what a server sent and started with its window hidden,
   no console or its output sent to null: "runs code it receives over the network, out of sight (no window,

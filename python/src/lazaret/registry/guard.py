@@ -28,7 +28,13 @@ lockfile (npm's `before`, pnpm's minimum-release-age, yarn's
 npmMinimalAgeGate, bun's --minimum-release-age), and blocked where it can't.
 A SUSPICIOUS package, one that could not be checked, or one younger than
 --min-age blocks the install: the files the resolution changed (package.json,
-the lockfile, pyproject.toml) are put back and nothing is installed.
+the lockfile, pyproject.toml) are put back and nothing is installed. So does
+an INCOMPLETE one whose scan could not read what a package can be made to
+hide (repo.INCOMPLETE_KINDS: the scan's deadline passed, the engine could not
+finish, code that runs or a source file was not read whole, the archive was
+not read whole), unless --allow-incomplete lets them through (T-1, decision
+9): a time-out is scanned once more, and never cached. One too large to
+download, or a program too large to read, stays INCOMPLETE and goes through.
 Otherwise the command runs as given, and what it installed is compared with
 what was checked.
 
@@ -664,6 +670,11 @@ def summarize(result, limit=3):
     return [f"{i['rule']} ({i['sev']}) {i.get('file', '')}: {i.get('msg', '')}"[:400] for i in found[:limit]]
 
 
+#: What the guard says of each reason a scan is INCOMPLETE that blocks it (repo.INCOMPLETE_KINDS)
+INCOMPLETE_SAID = {"time": "the scan ran out of time, twice", "work": "the engine could not finish reading it",
+                   "code": "code was not read whole", "archive": "the archive was not read whole"}
+
+
 # ---------------- Provenance (NET-1) ----------------
 def provenance_due(published):
     """Does the guard check the provenance of a release published at `published` (None: not known)? PROVENANCE_DAYS."""
@@ -748,6 +759,9 @@ class VerdictCache:
                               "published": iso(published) if published else None}
             if hit.get("provenance") is True:     # (the provenance check ran to the end: EG-10)
                 self.data[key]["provenance"] = True
+            kinds = [k for k in hit.get("incomplete") or () if k in repo.INCOMPLETE_KINDS]
+            if kinds:                              # (why it is INCOMPLETE: the guard blocks it, T-1)
+                self.data[key]["incomplete"] = kinds
             self.dirty = True
 
     def save(self):
@@ -832,12 +846,13 @@ def _scan_one(data, container, kind, timeout, timed=False):
     if not timed:
         with timings.span("scan", "artifact"):
             res = repo._scan_artifact(data, container, kind, False, budget)
-        return {"verdict": res["verdict"], "reason": res["verdictReason"], "indicators": summarize(res)}
+        return {"verdict": res["verdict"], "reason": res["verdictReason"], "indicators": summarize(res),
+                "incomplete": list(res.get("incomplete") or ())}
     here = timings.Timings()
     with timings.capture(here), here.run(), timings.span("scan", "artifact"):
         res = repo._scan_artifact(data, container, kind, False, budget)
     return {"verdict": res["verdict"], "reason": res["verdictReason"], "indicators": summarize(res),
-            "timings": here.report()}
+            "incomplete": list(res.get("incomplete") or ()), "timings": here.report()}
 
 
 #: The bytes of archives the guard holds in memory to scan at once (`Scanner.holding`), across the requests a package
@@ -927,7 +942,8 @@ class Scanner:
         return self.cache.get(key) if self.cache is not None and key else None
 
     def remember(self, key, hit, published):
-        if self.cache is not None and key:
+        # (a scan that ran out of time is not kept: a machine busy now, or slow, says nothing of the package, T-1)
+        if self.cache is not None and key and "time" not in (hit.get("incomplete") or ()):
             self.cache.put(key, hit, published)
 
     def _get_pool(self):
@@ -948,8 +964,15 @@ class Scanner:
             self._note("lazaret guard: no scan worker could be started; scanning in this process")
 
     def scan(self, data, container, kind):
-        """-> {verdict, reason, indicators}; ScanError when the scanner can't
-        get through the artifact."""
+        """-> {verdict, reason, indicators, incomplete}; ScanError when the scanner can't get through the artifact. A
+        scan that runs out of time is made once more, as a machine busy for a moment would make it (T-1)."""
+        answer = self._scan(data, container, kind)
+        if "time" in (answer.get("incomplete") or ()):
+            again = self._scan(data, container, kind)
+            answer = again if isinstance(again, dict) else answer
+        return answer
+
+    def _scan(self, data, container, kind):
         pool = self._get_pool()
         if pool is not None:
             kept = timings.current()                 # the run keeps timings: the worker's come back with its answer
@@ -1398,10 +1421,16 @@ class Context:
             check.blocked.append(reason)
 
     def apply(self, check, hit):
-        """A scan verdict, and what it means for the install."""
+        """A scan verdict, and what it means for the install: SUSPICIOUS blocks; INCOMPLETE blocks when the scan could
+        not read what a package can be made to hide (repo.INCOMPLETE_KINDS: T-1, decision 9) unless --allow-incomplete;
+        WARN and the other INCOMPLETE block under --block-warn."""
         check.verdict, check.reason, check.indicators = hit["verdict"], hit["reason"], list(hit["indicators"])
+        cut = [k for k in hit.get("incomplete") or () if k in repo.INCOMPLETE_KINDS]
         if check.verdict == "SUSPICIOUS":
             self.block(check, f"SUSPICIOUS: {check.reason}")
+        elif check.verdict == "INCOMPLETE" and cut and not getattr(self.opts, "allow_incomplete", False):
+            self.block(check, f"INCOMPLETE: {check.reason} ({', '.join(INCOMPLETE_SAID[k] for k in cut)}; "
+                              f"--allow-incomplete lets it through)")
         elif check.verdict in ("WARN", "INCOMPLETE") and self.opts.block_warn:
             self.block(check, f"{check.verdict} (--block-warn): {check.reason}")
 
@@ -4910,6 +4939,10 @@ def build_parser():
     ap.add_argument("--trust", action="append", default=[], metavar="NAME",
                     help="install NAME whatever the guard finds or can't check — a finding you reviewed, a "
                          "package it can't fetch; it is still reported (repeatable; patterns work)")
+    ap.add_argument("--allow-incomplete", action="store_true",
+                    help="let through a package whose scan could not read all of it because it ran out of time, the "
+                         "engine could not finish, code was cut at a limit or the archive was not read whole "
+                         "(INCOMPLETE: blocked by default)")
     ap.add_argument("--block-warn", action="store_true",
                     help="block packages judged WARN or INCOMPLETE too (default: SUSPICIOUS only)")
     ap.add_argument("--plan", action="store_true",

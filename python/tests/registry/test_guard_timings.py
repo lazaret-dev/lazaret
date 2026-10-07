@@ -88,7 +88,7 @@ class ScanTests(unittest.TestCase):
             answer = s.scan(b"d", "tgz", "npm")
         self.assertEqual(s._pool.submitted[-1], (b"d", "tgz", "npm", 10, True))
         self.assertNotIn("timings", answer)                                 # merged and taken out, not passed on
-        self.assertEqual(set(answer), {"verdict", "reason", "indicators"})
+        self.assertEqual(set(answer), {"verdict", "reason", "indicators", "incomplete"})
 
     def test_the_workers_report_is_merged_with_the_wait(self):
         s = guard.Scanner(None, timeout=10, jobs=2)
@@ -102,7 +102,7 @@ class ScanTests(unittest.TestCase):
 
     def test_scan_one_returns_its_report_only_when_asked(self):
         plain = guard._scan_one(b"d", "tgz", "npm", 10)
-        self.assertEqual(set(plain), {"verdict", "reason", "indicators"})
+        self.assertEqual(set(plain), {"verdict", "reason", "indicators", "incomplete"})
         timed = guard._scan_one(b"d", "tgz", "npm", 10, True)
         self.assertEqual(timed["timings"]["phases"]["scan"]["by"]["artifact"]["calls"], 1)
         self.assertGreater(timed["timings"]["wall"], 0)

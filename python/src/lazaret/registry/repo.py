@@ -100,6 +100,8 @@ MAX_MEMBER = _env_number("LAZARET_MAX_SOURCE_BYTES", 16_000_000)
 MAX_FILES = 20_000         # files per package (numpy's sdist alone has >4,000)
 SAMPLE = 8192              # header/entropy sample read from oversized files
 # Stored scans from another engine version are scanned again (has_scan).
+# 2.47: an archive's result says why it is INCOMPLETE (`incomplete`:
+#      INCOMPLETE_KINDS), which the guard blocks on by default (T-1)
 # 2.46: Node's names tried in its order, each under any case before the next
 #      (`node Setup` runs setup.js on macOS and Windows before Setup.json),
 #      and a folder's package.json under another case (EG-9)
@@ -283,7 +285,7 @@ SAMPLE = 8192              # header/entropy sample read from oversized files
 #      entry points and hook targets, Python install scripts
 # 2.3: verdict tiers, decoded hex, install-script inspection; 2.2:
 #      verdict-integrity; 2.1: binary-artifact awareness
-ENGINE_VERSION = "2.46.0"
+ENGINE_VERSION = "2.47.0"
 
 # ---------------- The content memo (P-2a, registry/contentcache.py) ----------------
 # One per scan_package run: the engine answers once for content several of a
@@ -2012,6 +2014,18 @@ VERDICT_RANK = {"OK": 0, "WARN": 1, "INCOMPLETE": 2, "SUSPICIOUS": 3}
 # Rules that mean "not fully scanned": they make a scan INCOMPLETE instead
 # of counting as indicators.
 TRUNCATION_RULES = ("SC-TRUNCATED", "SC-MANIFEST-UNPARSEABLE", "SC-UNREAD-CODE")
+# Why an archive's scan is INCOMPLETE, as its result's `incomplete` says (the
+# guard blocks these by default, T-1 and decision 9; --allow-incomplete lets
+# them through): "time", its deadline passed; "work", the engine could not
+# finish a file or a step (its work budget spent on the input, an internal
+# error); "code", code that runs, or a source file, a manifest or a reader's
+# code, not read whole (cut at the size limit, beyond the text budget or a
+# reader's, a hook command longer than is followed, code outside the package);
+# "archive", the archive not read whole (more entries or bytes than are read,
+# a structure that cannot be read on). Each is something a package can be made
+# to do to hide what it holds, unlike a program too large to read, which is
+# none of them (a 16 MB native library).
+INCOMPLETE_KINDS = ("time", "work", "code", "archive")
 # N-1 (0.1.9): code in a language the engine has no detectors for, by the
 # artifact that ships it: such an artifact is never OK, one SC-UNREAD-CODE
 # finding says what was not read, and the verdict is INCOMPLETE. A Go
@@ -2404,6 +2418,7 @@ class _ArtifactScan:
         self.issues, self.files_scanned, self.binaries = [], 0, 0
         self.truncated, self.truncated_emitted = 0, 0
         self.truncated_at = {}     # rel -> its SC-TRUNCATED issue (None past the cap)
+        self.cut = set()           # why the scan is incomplete, of INCOMPLETE_KINDS (T-1, decision 9)
         self.timed_out = False     # the deadline passed (recorded once)
         self.sources = {}          # rel -> (text, lang) scanned as source
         self.pending = []          # source files queued for scan_pending (a batch)
@@ -2414,6 +2429,7 @@ class _ArtifactScan:
         self.shell = {}            # rel -> text of shell scripts
         self.binary = set()        # classified as binary
         self.oversize = set()
+        self.oversize_binary = set()   # oversize members whose first bytes are not text
         self.members = set()
         self.manifests = {}        # rel -> text (package.json, binding.gyp, pyproject.toml)
         self.entries = set()       # rels that run when installed / imported
@@ -2445,11 +2461,14 @@ class _ArtifactScan:
         self.action_entries = {}
 
     # ---- bookkeeping ----
-    def truncate(self, rel, detail):
+    def truncate(self, rel, detail, kind=None):
         """One SC-TRUNCATED finding, and one "part not fully scanned", per
         file: another reason for the same file (it also runs at install time,
         and package.json can name it as main, bin and exports) is added to
-        that finding's message instead of repeating it."""
+        that finding's message instead of repeating it. `kind`: why, of
+        INCOMPLETE_KINDS (the result's `incomplete`), None for another."""
+        if kind is not None:
+            self.cut.add(kind)
         self.scan_pending()                   # (the files queued before come first)
         if rel in self.truncated_at:
             issue = self.truncated_at[rel]
@@ -2488,7 +2507,7 @@ class _ArtifactScan:
             self.budget.check()
         except ArchiveLimit as lim:
             self.timed_out = True
-            self.truncate("(archive)", lim.detail or self.limit_detail(lim.reason, where))
+            self.truncate("(archive)", lim.detail or self.limit_detail(lim.reason, where), "time")
             return True
         return False
 
@@ -2500,7 +2519,7 @@ class _ArtifactScan:
     def add_decode_issues(self, extra, keep_encoding=True):
         for i in extra:
             if i["rule"] == "SC-TRUNCATED":
-                self.truncate(i["file"], i["msg"].removeprefix("File not fully scanned: ").rstrip("."))
+                self.truncate(i["file"], i["msg"].removeprefix("File not fully scanned: ").rstrip("."), "code")
             elif keep_encoding or i["rule"] != "Q-ENCODING":
                 self.issues.append(i)
 
@@ -2538,7 +2557,7 @@ class _ArtifactScan:
                     # spent, an internal error, the time budget of core's passes),
                     # so the release can't be cleared (it used to be listed while
                     # the verdict stayed OK)
-                    self.truncate(rel, i["msg"].removeprefix("File not fully scanned: ").rstrip("."))
+                    self.truncate(rel, i["msg"].removeprefix("File not fully scanned: ").rstrip("."), "work")
                 else:
                     self.issues.append(i)
 
@@ -2589,7 +2608,8 @@ class _ArtifactScan:
         rel, size, raw, reason = m
         if reason in ("files", "total", "time", "corrupt"):
             self.unread = True
-            self.truncate(rel, getattr(m, "detail", "") or self.limit_detail(reason, rel, size))
+            self.truncate(rel, getattr(m, "detail", "") or self.limit_detail(reason, rel, size),
+                          "time" if reason == "time" else "archive")
             self.timed_out = self.timed_out or reason == "time"
             return
         self.members.add(rel)
@@ -2606,10 +2626,12 @@ class _ArtifactScan:
                       or (code is not None and ext in code[1] + code[2] and not _never_built(self.artifact, rel)))
         if reason == "member":
             self.oversize.add(rel)
+            if lazaret.looks_binary(raw[:2048]):
+                self.oversize_binary.add(rel)
             if wants_text and not (ext in lazaret.MPEG_TS_EXTS and lazaret._mpeg_ts(raw[:512])):
                 # Verdict integrity (audit C2/G16): a cut-short scan is a
                 # signal, not a clean verdict — whatever the first bytes look like.
-                self.truncate(rel, _TRUNC_DETAILS["member"](rel, size))
+                self.truncate(rel, _TRUNC_DETAILS["member"](rel, size), "code")
             # still classifiable by magic/entropy from the decompressed prefix
             disguised = lazaret.disguised_binary(rel, raw) if lazaret.dep_source_lang(ext) else None
             if disguised:
@@ -2839,18 +2861,21 @@ class _ArtifactScan:
             return None          # an image, font or stylesheet a bundler loads
         if rel in self.dropped:
             self.truncate(rel, f"{rel} runs at install/import time but was not kept for "
-                               f"scanning (text budget exhausted)")
+                               f"scanning (text budget exhausted)", "code")
         elif rel in self.oversize:
+            # (code that runs, cut at the limit: blocked by the guard; a program's bytes are not code it reads, as
+            # @img/sharp-libvips' 16 MB library is not)
             self.truncate(rel, "it runs at install/import time" if rel in self.truncated_at
                           else f"{rel} runs at install/import time but is larger than the "
-                               f"{MAX_MEMBER:,}-byte source-scan limit")
+                               f"{MAX_MEMBER:,}-byte source-scan limit",
+                          None if rel in self.oversize_binary else "code")
         elif rel in self.binary:
             self.truncate(rel, f"{rel} runs at install/import time but is not text, so it "
                                f"could not be scanned")
         elif rel in self.members:
             # every member lands in one of the sets above; should one ever
             # not, it runs unscanned: never a silent None
-            self.truncate(rel, f"{rel} runs at install/import time but was not scanned")
+            self.truncate(rel, f"{rel} runs at install/import time but was not scanned", "code")
         return None
 
     def _entry_points(self, manifest_rel, data):
@@ -3307,7 +3332,7 @@ class _ArtifactScan:
                 self.truncate(issue["file"], "its install hook is more than Lazaret follows "
                               f"({lazaret.HOOK_MAX_COMMANDS:,} commands, {lazaret.HOOK_MAX_TARGETS} "
                               f"scripts, {lazaret.HOOK_MAX_CHARS:,} characters, "
-                              f"{lazaret.HOOK_MAX_PATH:,}-character paths)")
+                              f"{lazaret.HOOK_MAX_PATH:,}-character paths)", "code")
             for target in targets:
                 rel = self._resolve(_rel_join(base, target))
                 if rel is None:
@@ -3608,7 +3633,8 @@ class _ArtifactScan:
     def _unanswered(self, rel, exc):
         """A file the engine could not read for a test (engine.unanswered):
         SC-TRUNCATED, once per file (truncate), in engine.error_issue's words."""
-        self.truncate(rel, _engine.error_issue(rel, exc)["msg"].removeprefix("File not fully scanned: ").rstrip("."))
+        self.truncate(rel, _engine.error_issue(rel, exc)["msg"].removeprefix("File not fully scanned: ").rstrip("."),
+                      "work")
 
     def _phase(self, where, step, *args):
         """Run one step of finish() once the deadline check passes. A call the
@@ -3621,7 +3647,7 @@ class _ArtifactScan:
         except _engine.NativeError as exc:
             why = (_engine.EXHAUSTED if isinstance(exc, _engine.NativeExhausted)
                    else f"an internal error of the engine ({type(exc).__name__})")
-            self.truncate("(release)", f"the engine could not finish {where}: {why}")
+            self.truncate("(release)", f"the engine could not finish {where}: {why}", "work")
             return None
 
     def _suspicious(self):
@@ -3808,7 +3834,7 @@ class _ArtifactScan:
         if size > PACKAGE_CODE_CHARS or self.code_dropped:
             amount = f"{size:,} characters" if not self.code_dropped else "its C files not all kept"
             self.truncate(rels[0], f"the {what}'s code ({amount}) is more than the reader takes at once "
-                                   f"({PACKAGE_CODE_CHARS:,}), so it was not read")
+                                   f"({PACKAGE_CODE_CHARS:,}), so it was not read", "code")
             return
         self._deadline(rels[0])
         if self.artifact == "gomod":
@@ -3864,10 +3890,10 @@ class _ArtifactScan:
                 continue                                  # not a file cargo builds
             if rel in self.oversize:
                 self.truncate(rel, f"{rel} is the code of a Rust crate this sdist builds, and it is larger than the "
-                                   f"{MAX_MEMBER:,}-byte source-scan limit")
+                                   f"{MAX_MEMBER:,}-byte source-scan limit", "code")
             elif rel in self.code_dropped or root in unkept:
                 self.truncate(rel, f"{rel} is the code of a Rust crate this sdist builds, and the sdist's Rust is more "
-                                   f"than the {PACKAGE_CODE_CHARS:,} characters a reader takes")
+                                   f"than the {PACKAGE_CODE_CHARS:,} characters a reader takes", "code")
             else:
                 crates.setdefault(root, []).append(rel)
         if not crates:
@@ -4165,7 +4191,8 @@ def scan_members(members, anomalies, artifact, full, budget, memo=None, action_r
     except _OutOfTime:
         pass                             # inside a member: recorded where it stopped
     except ArchiveLimit as lim:          # (defensive: the readers yield their limits)
-        st.truncate("(archive)", lim.detail or st.limit_detail(lim.reason, "(archive)"))
+        st.truncate("(archive)", lim.detail or st.limit_detail(lim.reason, "(archive)"),
+                    "time" if lim.reason == "time" else "archive")
     finally:
         close = getattr(members, "close", None)
         if close is not None:
@@ -4173,10 +4200,13 @@ def scan_members(members, anomalies, artifact, full, budget, memo=None, action_r
     st.finish(anomalies)
     issues = st.issues
     verdict, reason, strong, weak = decide_verdict(issues, st.truncated)
+    if any(i["rule"] == UNREAD_CODE_RULE for i in issues):
+        st.cut.add("code")               # (code that runs and was not read: N-1, EG-3)
     out = {"issues": issues, "filesScanned": st.files_scanned, "binaryArtifacts": st.binaries,
            "truncated": st.truncated, "verdict": verdict, "verdictReason": reason,
            "strongIndicators": strong, "weakIndicators": weak,
-           "unusedDependencies": st.unused_dependencies, "useTime": st.use_time}
+           "unusedDependencies": st.unused_dependencies, "useTime": st.use_time,
+           "incomplete": sorted(st.cut) if verdict == "INCOMPLETE" else []}
     if artifact == "vsix":
         out["extensionDependencies"] = st.extension_dependencies
         out["startupEvent"] = st.vsix_startup
