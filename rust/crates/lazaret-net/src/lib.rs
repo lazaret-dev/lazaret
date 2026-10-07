@@ -15,7 +15,10 @@
 //! * **credentials** (0.1.9, decision 14): a token or a login goes with the hops to its own host only, given by
 //!   tiny_https's hop hook ([`Credential`], [`granted`]), never as a header of the request, which a redirect would
 //!   carry on (tiny_https drops `Authorization`, `Cookie` and `Proxy-Authorization` on a change of origin, and no
-//!   other); a request that sets one of [`CREDENTIAL_HEADERS`] itself is refused.
+//!   other); a request that sets one of [`CREDENTIAL_HEADERS`] itself is refused, and so is one that sets a header
+//!   that is not one of [`PLAIN_HEADERS`]. A hop's path counts as under a credential's when it is so as it is sent,
+//!   with its dot segments resolved and as a server that decodes it reads it, and a redirect from another origin gets
+//!   a credential of the whole host only ([`granted`]).
 //!
 //! **HTTP/2 is the protocol** (John, Oct 6): the handshake offers `h2` and `http/1.1`, a server that picks `h2` gets
 //! one connection per origin that every request to it shares, and any other is spoken to in HTTP/1.1 with
@@ -54,8 +57,10 @@ pub enum Failure {
     Refused(String),
     /// The body was over the caller's budget (declared or read).
     TooLarge,
-    /// The server offered no TLS 1.3.
-    TlsVersion(String),
+    /// The server offered no TLS 1.3: the message, and the host of the hop it was (as a Host header writes it), when it is
+    /// known. The Python side asks that host again with its own transport: on a redirect, that host and not the first
+    /// URL's (the credentials review of decision 14).
+    TlsVersion { message: String, host: Option<String> },
     /// TLS failed otherwise: the certificate, the handshake, an alert.
     Tls(String),
     /// Connecting, or a read or write, took longer than the timeout; or the whole request did.
@@ -74,7 +79,7 @@ impl Failure {
         match self {
             Failure::Refused(_) => "refused",
             Failure::TooLarge => "too-large",
-            Failure::TlsVersion(_) => "tls-version",
+            Failure::TlsVersion { .. } => "tls-version",
             Failure::Tls(_) => "tls",
             Failure::Timeout(_) => "timeout",
             Failure::Network(_) => "network",
@@ -86,8 +91,16 @@ impl Failure {
     pub fn message(&self) -> String {
         match self {
             Failure::TooLarge => "the response is larger than the budget".to_string(),
-            Failure::Refused(m) | Failure::TlsVersion(m) | Failure::Tls(m) | Failure::Timeout(m) | Failure::Network(m)
-            | Failure::Http(m) | Failure::Setup(m) => m.clone(),
+            Failure::Refused(m) | Failure::TlsVersion { message: m, .. } | Failure::Tls(m) | Failure::Timeout(m)
+            | Failure::Network(m) | Failure::Http(m) | Failure::Setup(m) => m.clone(),
+        }
+    }
+
+    /// The host of the hop that offered no TLS 1.3 ([`Failure::TlsVersion`]), when it is known.
+    pub fn host(&self) -> Option<&str> {
+        match self {
+            Failure::TlsVersion { host, .. } => host.as_deref(),
+            _ => None,
         }
     }
 }
@@ -110,9 +123,11 @@ fn classify(e: NetError) -> Failure {
                 Failure::Http(m)
             }
         }
-        NetError::Tls(m) if m.starts_with("protocol_version") => Failure::TlsVersion(m),
+        NetError::Tls(m) if m.starts_with("protocol_version") => Failure::TlsVersion { message: m, host: None },
         // alert 70 is protocol_version: what a server that speaks no TLS 1.3 answers a hello that offers only 1.3
-        NetError::Alert(_, 70) => Failure::TlsVersion("the server answered with a protocol_version alert".to_string()),
+        NetError::Alert(_, 70) => {
+            Failure::TlsVersion { message: "the server answered with a protocol_version alert".to_string(), host: None }
+        }
         NetError::Tls(m) => Failure::Tls(m),
         NetError::Alert(level, desc) => Failure::Tls(format!("TLS alert received (level {level}, description {desc})")),
         NetError::Verify(v) => Failure::Tls(format!("certificate: {v}")),
@@ -147,6 +162,11 @@ pub struct Credential {
 pub const CREDENTIAL_HEADERS: [&str; 6] =
     ["authorization", "proxy-authorization", "cookie", "private-token", "job-token", "deploy-token"];
 
+/// The headers a request may set itself, which go with every hop it takes: those Lazaret's callers send, none of which
+/// carries a credential. Any other is refused, so that a token in a header of another name (`X-API-Key`) cannot
+/// follow a redirect to another host: it goes as a [`Credential`] (the credentials review of decision 14).
+pub const PLAIN_HEADERS: [&str; 4] = ["accept", "content-type", "user-agent", "x-github-api-version"];
+
 impl std::fmt::Debug for Credential {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         // (a credential's value is never printed)
@@ -155,22 +175,115 @@ impl std::fmt::Debug for Credential {
     }
 }
 
+/// A path as npm, uv and browsers read it (the WHATWG URL standard's reading, and pmsettings.normal_path): its "." and
+/// ".." segments resolved, "%2e" spellings included, and a backslash read as a slash; an empty segment stays ("/a//b"
+/// is not "/a/b").
+fn resolved_path(path: &str) -> String {
+    let path = path.replace('\\', "/");
+    let rest = path.strip_prefix('/').unwrap_or(&path);
+    let segments: Vec<&str> = rest.split('/').collect();
+    let last = segments.len() - 1;
+    let mut out: Vec<&str> = Vec::with_capacity(segments.len());
+    for (i, segment) in segments.iter().enumerate() {
+        let lower = segment.to_ascii_lowercase();
+        if matches!(lower.as_str(), ".." | ".%2e" | "%2e." | "%2e%2e") {
+            out.pop();
+            if i == last {
+                out.push("");
+            }
+        } else if matches!(lower.as_str(), "." | "%2e") {
+            if i == last {
+                out.push("");
+            }
+        } else {
+            out.push(segment);
+        }
+    }
+    format!("/{}", out.join("/"))
+}
+
+/// A path as a server that decodes it before it routes it may read it (pmsettings.server_path: nginx's location
+/// matching decodes "%XX", merges slashes and resolves "." and ".."; Tomcat drops a segment's ";parameters"): a
+/// backslash and an encoded "/" or "\" a slash, an encoded "." a dot, ";…" dropped from each segment, a run of "/" one,
+/// and the dot segments resolved.
+fn server_path(path: &str) -> String {
+    let bytes = path.as_bytes();
+    let mut decoded: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        let escape = (bytes[i] == b'%' && i + 2 < bytes.len()).then(|| (bytes[i + 1], bytes[i + 2].to_ascii_lowercase()));
+        match escape {
+            Some((b'2', b'f') | (b'5', b'c')) => {
+                decoded.push(b'/');
+                i += 3;
+            }
+            Some((b'2', b'e')) => {
+                decoded.push(b'.');
+                i += 3;
+            }
+            _ => {
+                decoded.push(if bytes[i] == b'\\' { b'/' } else { bytes[i] });
+                i += 1;
+            }
+        }
+    }
+    // (only ASCII bytes were replaced, by ASCII ones: what was UTF-8 still is)
+    let decoded = String::from_utf8(decoded).unwrap_or_default();
+    let rest = decoded.strip_prefix('/').unwrap_or(&decoded);
+    let segments: Vec<&str> = rest.split('/').collect();
+    let last = segments.len() - 1;
+    let mut out: Vec<&str> = Vec::with_capacity(segments.len());
+    for (i, segment) in segments.iter().enumerate() {
+        let segment = segment.split(';').next().unwrap_or("");
+        if segment == ".." {
+            out.pop();
+            if i == last {
+                out.push("");
+            }
+        } else if segment == "." {
+            if i == last {
+                out.push("");
+            }
+        } else if !segment.is_empty() || i == last {
+            out.push(segment);
+        }
+    }
+    format!("/{}", out.join("/"))
+}
+
+/// The directory of a path: up to its last `/`.
+fn directory(path: &str) -> &str {
+    &path[..path.rfind('/').map_or(0, |k| k + 1)]
+}
+
 /// The headers the credentials give a hop: over https, for each name, the credential of the hop's host whose path is
-/// the longest prefix of the directory of the hop's path (what pmsettings.Credentials.header gives a URL), and on the
-/// request itself a `first_only` one before any other (urllib sends the URL's own user:password with the request and
-/// with no redirect, the settings' credentials of each hop's URL with a redirect).
+/// the longest that covers the hop's path (what pmsettings.Credentials.header gives a URL), and on the request itself a
+/// `first_only` one before any other (urllib sends the URL's own user:password with the request and with no redirect,
+/// the settings' credentials of each hop's URL with a redirect).
+///
+/// A credential's path covers a hop's when the directory of the hop's path is under it read three ways: as it is sent,
+/// as npm and uv resolve it (`resolved_path`), and as a server that decodes it may route it (`server_path`, the
+/// credential's path read so too). tiny_https sends a redirect's path as the `Location` gives it, and "/team/../x" is
+/// under /team/ to a server that reads it as it is, and /x to one that resolves it, as "/team/..%2fx" is to nginx (the
+/// credentials reviews of decision 14). A redirect from another origin gets only a credential of the whole host (`/`):
+/// npm sends none on a redirect to another host, and pip a `.netrc` login for it.
 pub fn granted(credentials: &[Credential], info: &HopInfo<'_>) -> Vec<(String, String)> {
     let url = info.url;
     if url.scheme != "https" {
         return Vec::new();
     }
     let host = url.host_header();
+    let crossed = info.hop > 0 && info.from.map_or(true, |from| from.origin() != url.origin());
     let path = url.path_and_query.split(['?', '#']).next().unwrap_or("/");
-    let dir = &path[..path.rfind('/').map_or(0, |k| k + 1)];
+    let (resolved, server) = (resolved_path(path), server_path(path));
+    let dirs = [directory(path), directory(&resolved), directory(&server)];
+    let covers = |prefix: &str| {
+        dirs[0].starts_with(prefix) && dirs[1].starts_with(prefix) && dirs[2].starts_with(server_path(prefix).as_str())
+    };
     let rank = |c: &Credential| (c.first_only, c.path.len());
     let mut best: Vec<&Credential> = Vec::new();
     for c in credentials {
-        if c.host != host || (c.first_only && info.hop > 0) || !dir.starts_with(c.path.as_str()) {
+        if c.host != host || (c.first_only && info.hop > 0) || (crossed && c.path != "/") || !covers(&c.path) {
             continue;
         }
         match best.iter_mut().find(|b| b.name.eq_ignore_ascii_case(&c.name)) {
@@ -183,7 +296,7 @@ pub fn granted(credentials: &[Credential], info: &HopInfo<'_>) -> Vec<(String, S
 }
 
 /// Which proxy a request goes through.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub enum Proxy {
     /// `HTTPS_PROXY` / `https_proxy`, except for the hosts `NO_PROXY` names: what Python's urllib does with the
     /// environment.
@@ -194,8 +307,31 @@ pub enum Proxy {
     Url(String),
 }
 
+/// A URL as `Debug` shows it: without a `user:password@` (a proxy's setting may have no scheme).
+fn without_userinfo(url: &str) -> String {
+    let (scheme, rest) = match url.split_once("://") {
+        Some((scheme, rest)) => (format!("{scheme}://"), rest),
+        None => (String::new(), url),
+    };
+    let end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    match rest[..end].rfind('@') {
+        Some(at) => format!("{scheme}<redacted>@{}", &rest[at + 1..]),
+        None => url.to_string(),
+    }
+}
+
+impl std::fmt::Debug for Proxy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Proxy::Env => write!(f, "Env"),
+            Proxy::Direct => write!(f, "Direct"),
+            Proxy::Url(u) => write!(f, "Url({:?})", without_userinfo(u)),          // (a proxy's password is never shown)
+        }
+    }
+}
+
 /// One request and its caller's rule.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Request {
     pub method: String,
     pub url: String,
@@ -218,6 +354,27 @@ pub struct Request {
     pub http2: bool,
     /// The credentials the hops may get (see [`Credential`]); none in `headers`.
     pub credentials: Vec<Credential>,
+}
+
+impl std::fmt::Debug for Request {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // (no user:password of a URL, no credential's value, a body's length only)
+        f.debug_struct("Request")
+            .field("method", &self.method)
+            .field("url", &without_userinfo(&self.url))
+            .field("headers", &self.headers)
+            .field("body", &format_args!("{} bytes", self.body.len()))
+            .field("hosts", &self.hosts)
+            .field("any_host", &self.any_host)
+            .field("max_bytes", &self.max_bytes)
+            .field("timeout", &self.timeout)
+            .field("total_timeout", &self.total_timeout)
+            .field("max_redirects", &self.max_redirects)
+            .field("proxy", &self.proxy)
+            .field("http2", &self.http2)
+            .field("credentials", &self.credentials)
+            .finish()
+    }
 }
 
 impl Request {
@@ -313,7 +470,26 @@ fn base() -> Result<Client, Failure> {
     Ok(client)
 }
 
-fn client_for(req: &Request) -> Result<Client, Failure> {
+/// Where the hops of one request went: the host of the last one the client was about to send (as a Host header writes
+/// it), which a TLS failure is of.
+#[derive(Default)]
+struct Hops {
+    last: Mutex<Option<String>>,
+}
+
+impl Hops {
+    /// The failure, with the host of its hop when it is a [`Failure::TlsVersion`].
+    fn of(&self, failure: Failure) -> Failure {
+        match failure {
+            Failure::TlsVersion { message, host: None } => {
+                Failure::TlsVersion { message, host: self.last.lock().unwrap_or_else(|p| p.into_inner()).clone() }
+            }
+            other => other,
+        }
+    }
+}
+
+fn client_for(req: &Request, hops: &Arc<Hops>) -> Result<Client, Failure> {
     if req.hosts.is_empty() && !req.any_host {
         return Err(Failure::Setup("a request needs the hosts its caller may reach".to_string()));
     }
@@ -338,18 +514,19 @@ fn client_for(req: &Request) -> Result<Client, Failure> {
     if !req.http2 {
         client = client.http2(false);         // (this request only: the shared HTTP/2 connections stay)
     }
-    if !req.credentials.is_empty() {
-        for c in &req.credentials {
-            if !valid_credential(c) {
-                // (the host and the header's name, never its value)
-                return Err(Failure::Setup(format!("a credential ({:?} for {:?}) is not one that can be sent", c.name, c.host)));
-            }
+    for c in &req.credentials {
+        if !valid_credential(c) {
+            // (the host and the header's name, never its value)
+            return Err(Failure::Setup(format!("a credential ({:?} for {:?}) is not one that can be sent", c.name, c.host)));
         }
-        let credentials = Arc::new(req.credentials.clone());
-        client = client.hop_headers(move |info| Ok(granted(&credentials, info)));
-    } else {
-        client = client.no_hop_headers();     // (the shared client's clones carry no hook of an earlier request)
     }
+    // (every request has a hook of its own: the shared client's clones carry none of an earlier request's)
+    let credentials = Arc::new(req.credentials.clone());
+    let hops = hops.clone();
+    client = client.hop_headers(move |info| {
+        *hops.last.lock().unwrap_or_else(|p| p.into_inner()) = Some(info.url.host_header());
+        Ok(granted(&credentials, info))
+    });
     client = match &req.proxy {
         Proxy::Env => client.proxy_from_env(),
         Proxy::Direct => client,
@@ -379,6 +556,9 @@ fn prepared<'c>(client: &'c Client, req: &Request, method: &str) -> Result<Reque
             // a header of the request goes with every hop it may take; a credential goes with its own host's alone
             return Err(Failure::Setup(format!("header {name:?} carries a credential: the request gives it as one")));
         }
+        if !PLAIN_HEADERS.iter().any(|h| h.eq_ignore_ascii_case(name)) {
+            return Err(Failure::Setup(format!("header {name:?} is not one a request sets (a credential goes as one)")));
+        }
         builder = builder.header(name, value);
     }
     if method == "POST" {
@@ -389,8 +569,9 @@ fn prepared<'c>(client: &'c Client, req: &Request, method: &str) -> Result<Reque
 
 fn start(req: &Request) -> Result<ResponseStream, Failure> {
     let method = method_of(req)?;
-    let client = client_for(req)?;
-    prepared(&client, req, &method)?.send_stream().map_err(classify)
+    let hops = Arc::new(Hops::default());
+    let client = client_for(req, &hops)?;
+    prepared(&client, req, &method)?.send_stream().map_err(|e| hops.of(classify(e)))
 }
 
 /// A credential that can be sent: a header that can be, and not one the client sets itself; a host as a Host header
@@ -423,8 +604,9 @@ fn reply_head(s: &ResponseStream) -> (u16, String, Vec<(String, String)>, String
 /// with no copy more (tiny_https's `send`).
 pub fn fetch(req: &Request) -> Result<Reply, Failure> {
     let method = method_of(req)?;
-    let client = client_for(req)?;
-    let resp = prepared(&client, req, &method)?.send().map_err(classify)?;
+    let hops = Arc::new(Hops::default());
+    let client = client_for(req, &hops)?;
+    let resp = prepared(&client, req, &method)?.send().map_err(|e| hops.of(classify(e)))?;
     if resp.body.len() as u64 > req.max_bytes {
         return Err(Failure::TooLarge);
     }

@@ -156,8 +156,8 @@ class Hosts(unittest.TestCase):
         self.assertEqual(net.seen[2][1]["PRIVATE-TOKEN"], TOKEN)
         self.assertNotIn(TOKEN, " ".join(c.calls + g.calls))
 
-    def _redirect(self, hosts, auth_host, url, new, token=True):
-        hop = sources._Hop(hosts, auth_host)
+    def _redirect(self, hosts, auth_host, url, new, token=True, auth_path="/"):
+        hop = sources._Hop(hosts, auth_host, auth_path)
         req = urllib.request.Request(url, headers={"Authorization": "Bearer t", "PRIVATE-TOKEN": "t", "Accept": "x"})
         return hop.redirect_request(req, io.BytesIO(), 302, "Found", email.message.Message(), new)
 
@@ -173,6 +173,29 @@ class Hosts(unittest.TestCase):
         self.assertEqual(sorted(k.lower() for k in moved.headers), ["accept"])
         same = self._redirect(hosts, "api.github.com", "https://api.github.com/a", "https://api.github.com/b")
         self.assertIn("authorization", [k.lower() for k in same.headers])
+
+    def test_a_gitlab_tokens_path_is_its_prefix(self):
+        # (the credentials review of decision 14: with LAZARET_GITLAB_URL=https://host/gitlab, a redirect to another
+        # app on that host got the token)
+        net = Net({})
+        g = sources.Client("gitlab", base="https://gl.example.org/gitlab", token=TOKEN, http=net)
+        self.assertEqual((g.auth_host, g.auth_path), ("gl.example.org", "/gitlab/"))
+        with self.assertRaises(SourceError):
+            g.get("https://gl.example.org/gitlab/api/v4/x", "t")
+        self.assertEqual(net.seen[0][1]["PRIVATE-TOKEN"], TOKEN)
+        with self.assertRaises(SourceError):
+            g.get("https://gl.example.org/other/x", "t")
+        self.assertNotIn("PRIVATE-TOKEN", net.seen[1][1])
+        hosts = {"gl.example.org"}
+        for new, kept in [("https://gl.example.org/gitlab/api/v4/y", True), ("https://gl.example.org/other/y", False),
+                          ("https://gl.example.org/gitlab/../other/y", False), ("https://gl.example.org/gitlab2/y", False),
+                          ("https://gl.example.org/gitlab/%2e%2e/other/y", False),
+                          ("https://gl.example.org/x/../gitlab/y", True)]:          # (urllib has joined a Location by now)
+            with self.subTest(new):
+                moved = self._redirect(hosts, "gl.example.org", "https://gl.example.org/gitlab/api/v4/x", new,
+                                       auth_path="/gitlab/")
+                self.assertEqual("private-token" in [k.lower() for k in moved.headers], kept)
+        self.assertEqual(sources.Client("gitlab", base="https://gl.example.org", token=TOKEN, http=net).auth_path, "/")
 
     def test_hops_are_capped(self):
         self.assertEqual(sources._Hop.max_redirections, repo.MAX_REDIRECTS)
@@ -192,6 +215,10 @@ class Hosts(unittest.TestCase):
             sources._http("https://api.github.com/a", {"Authorization": "Bearer t", "Accept": "x"}, 100,
                           {"api.github.com", "codeload.github.com"}, "api.github.com")
             sources._http("https://codeload.github.com/b", {"Accept": "x"}, 100, {"codeload.github.com"}, "api.github.com")
+            sources._http("https://gl.example.org/gitlab/api/v4/x", {"PRIVATE-TOKEN": "glpat-x"}, 100, {"gl.example.org"},
+                          "gl.example.org", kind="gitlab", auth_path="/gitlab/")
+        self.assertEqual(asked[3]["credentials"], [sources._net.Credential("gl.example.org", "/gitlab/", "PRIVATE-TOKEN",
+                                                                           "glpat-x")])
         self.assertEqual(asked[0]["headers"], [("User-Agent", "u")])
         self.assertEqual(asked[0]["credentials"], [sources._net.Credential("gl.example.org:8443", "/", "PRIVATE-TOKEN",
                                                                            "glpat-x")])

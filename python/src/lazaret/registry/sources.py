@@ -55,6 +55,7 @@ import urllib.request
 import zlib
 from collections import namedtuple
 
+from lazaret.registry import pmsettings as _pm
 from lazaret.registry import repo as _repo
 from lazaret.scanner import core as _core
 from lazaret.scanner import nativenet as _net
@@ -146,7 +147,7 @@ def gitlab_base(env=None):
             or parts.query or parts.fragment or not re.fullmatch(r"[A-Za-z0-9.-]+", host)):
         raise SourceError("LAZARET_GITLAB_URL must be https://host[:port][/prefix], nothing more")
     prefix = parts.path.rstrip("/")
-    if "//" in prefix or ".." in prefix.split("/"):
+    if "//" in prefix or (prefix and _pm.normal_path(prefix) != prefix):     # ("..", "%2e%2e", a backslash)
         raise SourceError("LAZARET_GITLAB_URL has an unusable path")
     return f"https://{host}{':%d' % port if port else ''}{prefix}"
 
@@ -165,24 +166,31 @@ def _token(kind, env):
 # ---------------------------------------------------------------- the network
 class _Hop(urllib.request.HTTPRedirectHandler):
     """A redirect stays on https and on the allowed hosts, a token never
-    follows it to another host (urllib would send the header on), and the
-    number of hops is capped."""
+    follows it to another host, or out of the token's path on its own host
+    (urllib would send the header on), and the number of hops is capped."""
 
     max_redirections = _repo.MAX_REDIRECTS
 
-    def __init__(self, hosts, auth_host):
-        self.hosts, self.auth_host = frozenset(hosts), auth_host
+    def __init__(self, hosts, auth_host, auth_path="/"):
+        self.hosts, self.auth_host, self.auth_path = frozenset(hosts), auth_host, auth_path
 
     def redirect_request(self, req, fp, code, msg, headers, newurl):
+        newurl = _pm.normal_url(newurl)
         parts = urllib.parse.urlsplit(newurl)
         if parts.scheme != "https" or parts.netloc.lower() not in self.hosts:
             raise urllib.error.URLError(f"redirect blocked: {parts.scheme}://{parts.netloc}")
         new = super().redirect_request(req, fp, code, msg, headers, newurl)
-        if new is not None and parts.netloc.lower() != self.auth_host:
+        if new is not None and not _covers(parts, self.auth_host, self.auth_path):
             for table in (new.headers, new.unredirected_hdrs):
                 for key in [k for k in table if k.lower() in ("authorization", "private-token")]:
                     del table[key]
         return new
+
+
+def _covers(parts, auth_host, auth_path):
+    """Is the URL of these parts one the token goes with: its host, and a path under the token's however a server
+    reads it (pmsettings.covers, as lazaret-net's `granted` reads a hop)?"""
+    return parts.netloc.lower() == auth_host and _pm.covers(auth_path, parts.path)
 
 
 def _shown(url):
@@ -215,15 +223,17 @@ def _explain(status, headers, url, what, has_token, kind):
 _TOKEN_HEADERS = ("authorization", "private-token")
 
 
-def _http(url, headers, max_bytes, hosts, auth_host, what="fetch", has_token=False, kind="github"):
+def _http(url, headers, max_bytes, hosts, auth_host, what="fetch", has_token=False, kind="github", auth_path="/"):
     """The real fetch: a byte-budgeted read, through the native transport (NET-1, scanner/nativenet.py: `hosts` the
-    rule for the URL and every redirect), with the token as a credential of `auth_host` (decision 14: the native
-    client gives it to the hops to that host and to no other, DESIGN.md §5j); through urllib and `_Hop`, which takes
-    a token off a redirect to another host, where the native transport is not to be used."""
+    rule for the URL and every redirect), with the token as a credential of `auth_host` and the paths under
+    `auth_path` (decision 14: the native client gives it to those hops and to no other, DESIGN.md §5j; a GitLab
+    under a path prefix has the prefix); through urllib and `_Hop`, which takes a token off a redirect anywhere
+    else, where the native transport is not to be used."""
     if _net.chosen(url):
         plain = [(k, v) for k, v in headers.items() if k.lower() not in _TOKEN_HEADERS]
         key = _net.host_key(f"https://{auth_host}/")
-        credentials = [_net.Credential(key, "/", k, v) for k, v in headers.items() if k.lower() in _TOKEN_HEADERS]
+        credentials = [_net.Credential(key, auth_path, k, v) for k, v in headers.items()
+                       if k.lower() in _TOKEN_HEADERS]
         try:
             reply = _net.request(url, hosts=sorted(hosts), headers=plain, credentials=credentials, max_bytes=max_bytes,
                                  timeout=_repo.DOWNLOAD_TIMEOUT, max_redirects=_repo.MAX_REDIRECTS)
@@ -244,7 +254,7 @@ def _http(url, headers, max_bytes, hosts, auth_host, what="fetch", has_token=Fal
                                        kind))
             err.status = reply.status
             raise err
-    opener = urllib.request.build_opener(_Hop(hosts, auth_host))
+    opener = urllib.request.build_opener(_Hop(hosts, auth_host, auth_path))
     req = urllib.request.Request(url, headers=headers)
     try:
         with opener.open(req, timeout=_repo.DOWNLOAD_TIMEOUT) as r:
@@ -285,10 +295,12 @@ class Client:
         if kind == "github":
             self.base = None
             self.hosts = {GITHUB_API, GITHUB_ARCHIVE, GITHUB_RAW}
-            self.auth_host = GITHUB_API
+            self.auth_host, self.auth_path = GITHUB_API, "/"
         else:
             self.base = base or gitlab_base({})
-            self.auth_host = urllib.parse.urlsplit(self.base).netloc.lower()
+            parts = urllib.parse.urlsplit(self.base)
+            self.auth_host = parts.netloc.lower()
+            self.auth_path = parts.path.rstrip("/") + "/"           # (a GitLab under a path prefix: the token's)
             self.hosts = {self.auth_host}
         self.calls = []                          # the URLs asked for, for the report and the tests
 
@@ -301,14 +313,14 @@ class Client:
             headers["Accept"] = accept
         if self.kind == "github":
             headers["X-GitHub-Api-Version"] = "2022-11-28"
-        if self.token and parts.netloc.lower() == self.auth_host:
+        if self.token and _covers(parts, self.auth_host, self.auth_path):
             if self.kind == "github":
                 headers["Authorization"] = f"Bearer {self.token}"
             else:
                 headers["PRIVATE-TOKEN"] = self.token
         self.calls.append(_shown(url))
         return self._http(url, headers, max_bytes or _repo.MAX_FEED_BYTES, self.hosts, self.auth_host,
-                          what=what, has_token=bool(self.token), kind=self.kind)
+                          what=what, has_token=bool(self.token), kind=self.kind, auth_path=self.auth_path)
 
     # -- GitHub
     def _gh(self, src):

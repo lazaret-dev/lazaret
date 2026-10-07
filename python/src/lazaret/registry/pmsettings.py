@@ -70,6 +70,108 @@ def _origin(url):
     return parts.scheme, host, shown, parts.path or "/"
 
 
+#: the spellings of a "." and a ".." segment (WHATWG's URL standard, case aside)
+_DOT_SEGMENTS = frozenset({".", "%2e"})
+_DOTDOT_SEGMENTS = frozenset({"..", ".%2e", "%2e.", "%2e%2e"})
+
+
+def normal_path(path):
+    """A URL's path as npm, uv and browsers send it (the WHATWG URL parser's reading): its "." and ".." segments
+    resolved, "%2e" spellings included, and a backslash read as the slash it is to them; an empty segment stays
+    ("/a//b" is not "/a/b"). The guard sends a URL's path so (Fetcher.request); which credential goes with it is
+    `covers`' question."""
+    path = (path or "/").replace("\\", "/")
+    segments = path.split("/")[1:] if path.startswith("/") else path.split("/")
+    out = []
+    for i, seg in enumerate(segments):
+        last = i == len(segments) - 1
+        kind = seg.lower()
+        if kind in _DOTDOT_SEGMENTS:
+            if out:
+                out.pop()
+            if last:
+                out.append("")
+        elif kind in _DOT_SEGMENTS:
+            if last:
+                out.append("")
+        else:
+            out.append(seg)
+    return "/" + "/".join(out)
+
+
+#: an encoded "/" or "\\" and an encoded "."
+_ENCODED_SLASH_RE = re.compile(r"%2[fF]|%5[cC]")
+_ENCODED_DOT_RE = re.compile(r"%2[eE]")
+
+
+def server_path(path):
+    """A URL's path as a server that decodes it before it routes it may read it (nginx's location matching decodes
+    "%XX", merges slashes and resolves "." and ".."; Tomcat drops a segment's ";parameters"): a backslash and an
+    encoded "/" or "\\" a slash, an encoded "." a dot, ";…" dropped from each segment, a run of "/" one, and the dot
+    segments resolved. A credential's path is read so too, for `covers` to compare them."""
+    path = _ENCODED_DOT_RE.sub(".", _ENCODED_SLASH_RE.sub("/", (path or "/").replace("\\", "/")))
+    segments = path.split("/")[1:] if path.startswith("/") else path.split("/")
+    last = len(segments) - 1
+    out = []
+    for i, seg in enumerate(segments):
+        seg = seg.split(";", 1)[0]
+        if seg == "..":
+            if out:
+                out.pop()
+            if i == last:
+                out.append("")
+        elif seg == ".":
+            if i == last:
+                out.append("")
+        elif seg or i == last:
+            out.append(seg)
+    return "/" + "/".join(out)
+
+
+def _directory(path):
+    return path[:path.rfind("/") + 1]
+
+
+def _readings(path):
+    """The directories of a path as it is sent, as `normal_path` reads it, and as `server_path` does."""
+    raw = path or "/"
+    return _directory(raw), _directory(normal_path(raw)), _directory(server_path(raw))
+
+
+def _covered(prefix, readings):
+    raw, whatwg, server = readings
+    return raw.startswith(prefix) and whatwg.startswith(prefix) and server.startswith(server_path(prefix))
+
+
+def covers(prefix, path):
+    """Does the credential path `prefix` (one that ends in "/") cover a request of this URL path, read as it is
+    sent, as npm and uv resolve it (`normal_path`) and as a server that decodes it may route it (`server_path`)?
+    lazaret-net's `granted` asks the same of every hop: tiny_https sends a redirect's path as its Location gives it,
+    and "/team/../x" is under /team/ to a server that reads it as it is and /x to one that resolves it, as
+    "/team/..%2fx" is to nginx."""
+    return _covered(prefix, _readings(path))
+
+
+def same_origin(a, b):
+    """Are two http(s) URLs of one scheme, host and port?"""
+    oa, ob = _origin(a), _origin(b)
+    return oa is not None and ob is not None and (oa[0], oa[2]) == (ob[0], ob[2])
+
+
+def normal_url(url):
+    """url with its path as `normal_path` reads it (an http(s) URL; anything else as it is)."""
+    if not isinstance(url, str):
+        return url
+    try:
+        parts = urllib.parse.urlsplit(url)
+    except ValueError:
+        return url
+    if parts.scheme not in ("http", "https") or not parts.path:
+        return url
+    path = normal_path(parts.path)
+    return url if path == parts.path else urllib.parse.urlunsplit(parts._replace(path=path))
+
+
 def split_userinfo(url):
     """(the URL without user:password@, (user, password) or None)."""
     try:
@@ -133,25 +235,33 @@ class Credentials:
             for path, header in paths.items():
                 self.hosts.setdefault(host, {}).setdefault(path, header)
 
-    def _lookup(self, url):
+    def _lookup(self, url, crossed=False):
+        """(_origin(url), the header of the longest credential path that `covers` url's path): npm's choice, the
+        longest key its walk up the path finds, made over the host's few keys (a long path costs one reading).
+        `crossed`: the request is a redirect from another origin, which gets a credential of the whole host only."""
         o = _origin(url)
         if o is None:
             return None, None
         prefixes = self.hosts.get(o[2])
         if not prefixes:
             return o, None
-        d = o[3][:o[3].rfind("/") + 1] or "/"
-        while True:
-            if d in prefixes:
-                return o, prefixes[d]
-            if d == "/":
-                return o, None
-            d = d[:d.rstrip("/").rfind("/") + 1]
+        readings = _readings(o[3])
+        best = None
+        for prefix in prefixes:
+            if (not crossed or prefix == "/") and (best is None or len(prefix) > len(best)) \
+                    and _covered(prefix, readings):
+                best = prefix
+        return o, None if best is None else prefixes[best]
 
-    def header(self, url):
+    def header(self, url, from_url=None):
         """The Authorization header for a request of url, or None: none is
-        set for it, or it would go over plain http to another machine."""
-        o, header = self._lookup(url)
+        set for it, or it would go over plain http to another machine.
+        from_url: the URL of the hop before, for a redirect; from another
+        origin, only a credential of the whole host goes (npm sends none on a
+        redirect to another host, and pip a .netrc's login for it), as
+        lazaret-net's `granted` gives."""
+        crossed = from_url is not None and not same_origin(from_url, url)
+        o, header = self._lookup(url, crossed)
         if header is None or (o[0] == "http" and not is_loopback(o[1])):
             return None
         return header

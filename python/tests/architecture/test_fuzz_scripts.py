@@ -43,7 +43,7 @@ EXPECTED_TARGETS = ["archive-tgz", "archive-tbz2", "archive-txz", "archive-zip",
                     "sca-uv-lock", "sca-pylock-toml", "sca-pipfile-lock", "sca-requirements-txt", "sca-pyproject-toml",
                     "sca-setup-py", "sca-go-mod", "sca-go-sum", "sca-vendor-modules-txt", "sca-cargo-lock", "sca-cargo-toml", "sca-bundle-index", "sca-bundle-doc", "crates-index", "crates-manifest", "go-zip", "go-mod", "go-sumdb",
                     "go-sumdb-check", "provenance-npm", "go-resolve", "ecosystem-names", "ecosystem-member-path", "action-code",
-                    "verify-answers", "verify-credentials"]
+                    "verify-answers", "verify-credentials", "credential-path"]
 
 
 def fake(run, seeds=(b"abc",), name="fake", **options):
@@ -1180,6 +1180,44 @@ class VerificationPromisesAreLive(unittest.TestCase):
         self.assertEqual(run(good, built(lambda r, p: r._replace(path=r.path + "?t=" + p["secret"]))), "verify-secret-in-url")
         self.assertEqual(run(good, (sv, "interpret", lambda p, r, s=(): ("bogus", "x", None))), "verify-answer-passed-through")
         self.assertEqual(run(good, (sv, "interpret", lambda p, r, s=(): ("rejected", s[0], None))), "verify-leak")
+
+
+class CredentialPathPromisesAreLive(unittest.TestCase):
+    """The same for the credential of a URL's path (decision 14, the credentials review): each promise is broken by a
+    reader that breaks it."""
+
+    def promise(self, data, *patches):
+        run, close = fuzz_targets.TARGETS["credential-path"].start()
+        self.addCleanup(close)
+        with contextlib.ExitStack() as stack:
+            for owner, attr, value in patches:
+                stack.enter_context(mock.patch.object(owner, attr, value))
+            with self.assertRaises(fuzz_targets.Violation) as raised:
+                run(data)
+        return raised.exception.rule
+
+    def test_the_promises(self):
+        from lazaret.registry import pmsettings as pm
+        real_normal, real_header = pm.normal_path, pm.Credentials.header
+        N = lambda value: (pm, "normal_path", value)                                       # noqa: E731
+        self.assertEqual(self.promise(b"/a/b", N(lambda p: "a\\b")), "normal-path-shape")
+        self.assertEqual(self.promise(b"/a/b", N(lambda p: "/a/../b")), "normal-path-dots")
+        self.assertEqual(self.promise(b"/a/b", N(lambda p: "/x" + real_normal(p))), "normal-path-idempotent")
+        self.assertEqual(self.promise(b"/team/x", (pm.Credentials, "header", lambda self, url: None)), "credential-choice")
+        self.assertEqual(self.promise(b"/team/../x", (pm.Credentials, "header", lambda self, url: "Bearer T/team/")),
+                         "credential-choice")
+        calls = []
+
+        def alternating(self, url):
+            calls.append(1)
+            return real_header(self, url) if len(calls) % 2 else None
+        self.assertEqual(self.promise(b"/team/x", (pm.Credentials, "header", alternating)), "credential-deterministic")
+
+    def test_the_seeds_keep_the_promises(self):
+        run, close = fuzz_targets.TARGETS["credential-path"].start()
+        self.addCleanup(close)
+        for seed in fuzz_targets.CREDENTIAL_PATH_SEEDS:
+            run(seed)
 
 
 class SeedsAndOptions(unittest.TestCase):

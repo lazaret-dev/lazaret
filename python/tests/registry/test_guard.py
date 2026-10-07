@@ -396,6 +396,34 @@ class YarnAndBunLockTests(unittest.TestCase):
                                       "not checked"])])
 
 
+    def test_a_lockfile_url_the_guard_does_not_read_as_npm_does_is_blocked(self):
+        # (the credentials review of decision 14: to npm "https://a\\@b/" is a URL of host a, to the guard of host b)
+        def entry(name, url):
+            return {"name": name, "version": "1.0.0", "resolved": url, "integrity": "sha512-AAA=", "os": [], "cpu": [],
+                    "libc": [], "lock_digest": None}
+
+        ctx = context()
+        seen = []
+        with mock.patch.object(guard, "check_npm_package", side_effect=lambda c, f, p: seen.append(p)), \
+                mock.patch.object(guard, "node_platform", return_value=("linux", "x64", "glibc")):
+            code = guard.check_lock_entries(ctx, [
+                entry("slash", "https://registry.npmjs.org\\@evil.example/x/-/x-1.0.0.tgz"),
+                entry("port", "https://reg.example:+443/p/-/p-1.0.0.tgz"),
+                entry("wild", "https://*.evil.example/w/-/w-1.0.0.tgz"),
+                entry("ok", "https://reg.example/ok/-/ok-1.0.0.tgz"),
+                entry("git", "git+ssh://git@github.com/u/r.git#abc")],
+                guard.Registries({"registry": "https://reg.example/"}), set(), "package-lock.json", rewrite=False)
+        self.assertEqual(code, guard.EXIT_BLOCKED)
+        self.assertEqual([p["name"] for p in seen], ["ok"])
+        got = {c.name: (c.blocked, c.notes) for c in ctx.checks}
+        self.assertEqual(got["slash"][0], ["could not be checked: a backslash in the URL, which URL parsers read "
+                                           "differently"])
+        for name in ("port", "wild"):
+            self.assertEqual(len(got[name][0]), 1)
+            self.assertIn("a host the guard does not read as one", got[name][0][0])
+        self.assertEqual(got["git"], ([], ["not from a registry (git, a local file or a link): not checked"]))
+
+
 class ToolArgumentTests(unittest.TestCase):
     def test_index_options_are_taken_out(self):
         args, default, extras, strategy = guard.take_index_options(
@@ -454,6 +482,14 @@ class CredentialsOnTheWireTests(unittest.TestCase):
                     self.send_header("Content-Length", "0")
                     self.end_headers()
                     return
+                dots = {"/dots-out": base + "/private/%2e%2e/landing", "/dots-in": "/public/../private/landing",
+                        "/to-other-team": other + "/team/x"}
+                if self.path in dots:
+                    self.send_response(302)
+                    self.send_header("Location", dots[self.path])
+                    self.send_header("Content-Length", "0")
+                    self.end_headers()
+                    return
                 self.send_response(200)
                 self.send_header("Content-Length", "2")
                 self.end_headers()
@@ -467,11 +503,12 @@ class CredentialsOnTheWireTests(unittest.TestCase):
             threading.Thread(target=srv.serve_forever, daemon=True).start()
             self.addCleanup(srv.server_close)
             self.addCleanup(srv.shutdown)
-        self.base = f"http://127.0.0.1:{self.servers[0].server_address[1]}"
+        self.base = base = f"http://127.0.0.1:{self.servers[0].server_address[1]}"
         other = f"http://127.0.0.1:{self.servers[1].server_address[1]}"
         self.other = other
         creds = guard.pmsettings.Credentials()
         creds.token(self.base + "/private/", "t0ken")
+        creds.token(other + "/team/", "team-t0ken")
         self.fetcher = guard.Fetcher({self.base[7:], other[7:]}, auth=creds)
 
     def auth_of(self, path):
@@ -492,6 +529,40 @@ class CredentialsOnTheWireTests(unittest.TestCase):
         self.fetcher.get(self.base + "/here")
         self.assertEqual(self.auth_of("/here"), [None])
         self.assertEqual(self.auth_of("/private/landing"), ["Bearer t0ken"])
+
+    def get_soon(self, url):
+        """fetcher.get(url), which must return within 10 s (the review found a lookup that never did)."""
+        out = {}
+        t = threading.Thread(target=lambda: out.setdefault("body", self.fetcher.get(url)), daemon=True)
+        t.start()
+        t.join(10)
+        self.assertFalse(t.is_alive(), f"{url}: no answer")
+        return out.get("body")
+
+    def test_a_path_that_starts_with_two_slashes(self):
+        self.fetcher.auth.token(self.base + "/", "wh0le")
+        self.assertEqual(self.get_soon(self.base + "//private/x"), b"ok")
+        # (http.server reads "//private/x" as "/private/x" since gh-87389; what was sent with it is the whole host's
+        # token, as npm sends: "//private/" is not "/private/")
+        _port, path, auth = self.seen[-1]
+        self.assertEqual(("/" + path.lstrip("/"), auth), ("/private/x", "Bearer wh0le"))
+
+    def test_dots_are_resolved_before_the_credentials_are_chosen(self):
+        # (the credentials review of decision 14: a token for /private/ went with /private/../x, which is /x)
+        for path, sent, auth in [("/private/../public/x", "/public/x", None),
+                                 ("/private/%2e%2e/public/y", "/public/y", None),
+                                 ("/public/../private/z", "/private/z", "Bearer t0ken"),
+                                 ("/dots-out", "/landing", None), ("/dots-in", "/private/landing", "Bearer t0ken")]:
+            with self.subTest(path):
+                self.seen.clear()
+                self.get_soon(self.base + path)
+                self.assertEqual(self.seen[-1][1:], (sent, auth))
+
+    def test_a_redirect_from_another_origin_gets_no_credential_for_a_path(self):
+        self.fetcher.get(self.base + "/to-other-team")
+        self.assertEqual(self.auth_of("/team/x"), [None])
+        self.fetcher.get(self.other + "/team/x")
+        self.assertEqual(self.auth_of("/team/x"), [None, "Bearer team-t0ken"], "asked for itself, it has the path's")
 
     def test_a_urls_own_credentials(self):
         url = self.other.replace("http://", "http://u:" + "s3cret@") + "/y"
@@ -866,6 +937,37 @@ class FetcherTests(unittest.TestCase):
         f.check("http://127.0.0.1:9/x")                             # this machine
         self.assertTrue(guard.fetchable("https://x.example/a") and guard.fetchable("http://localhost:1/a"))
         self.assertFalse(guard.fetchable("http://x.example/a") or guard.fetchable("git+ssh://x/y"))
+
+    def test_a_host_both_transports_read_alike(self):
+        # (the credentials review of decision 14: one entry the native host rule could not read failed every native
+        # request of its fetcher, and a "*." entry is a wildcard to it; a backslash moves the host for npm)
+        good = ["reg.example", "reg.example:8443", "reg.example.", "a_b.example", "127.0.0.1", "[::1]", "[::1]:8443",
+                "xn--bcher-kva.example"]
+        bad = ["", "x.invalid:+1", "x.invalid: 1", "x.invalid:", "x.invalid:0", "x.invalid:65536", "x.invalid:000443",
+               "x.invalid:" + "4" * 5000, "*.evil.example",
+               "a..b", "-a.example", "a-.example", "[fe80::1%25eth0]", "[::1", "[::1]x", "[nope]", "a b", "h\\x",
+               "bücher.example", "a:b:80", "%61.example"]
+        for loc in good:
+            with self.subTest(loc):
+                self.assertTrue(guard.usable_netloc(loc))
+        for loc in bad:
+            with self.subTest(loc):
+                self.assertFalse(guard.usable_netloc(loc))
+        f = guard.Fetcher(good + bad, http_hosts=["npm.internal:+80", "npm.internal:4873"])
+        self.assertEqual((f.hosts, f.http_hosts), ({h.lower() for h in good}, {"npm.internal:4873"}))
+        for url in ("https://x.invalid:+1/a.whl", "https://*.evil.example/a.whl", "https://reg.example\\@evil.example/x"):
+            with self.subTest(url):
+                f.allow(url)
+                self.assertFalse(guard.fetchable(url))
+                with self.assertRaises(repo.FetchError):
+                    f.check(url)
+        self.assertEqual(f.hosts, {h.lower() for h in good})
+        with self.assertRaisesRegex(repo.FetchError, "backslash"):
+            f.check("https://reg.example/a\\..\\b")
+        f.check("https://reg.example/a?b=\\")                  # (a backslash in the query is data, to every parser)
+        with self.assertRaisesRegex(repo.FetchError, "xn--"):
+            f.check("https://bücher.example/x")
+        self.assertIn("xn--", guard.unreadable("https://bücher.example/simple/"))
 
     def test_redirects_are_held_to_the_same_rule_and_bodies_to_a_budget(self):
         server = _Server({"/away": (302, {"Location": "https://evil.example/x"}, b""),

@@ -224,10 +224,11 @@ _is_loopback = pmsettings.is_loopback
 
 
 def fetchable(url):
-    """Can the guard fetch this URL at all: https, or http on this machine?"""
+    """Can the guard fetch this URL at all: https, or http on this machine, and `well_formed`?"""
     try:
         parts = urllib.parse.urlsplit(url)
-        return parts.scheme == "https" or (parts.scheme == "http" and _is_loopback(parts.hostname))
+        return (parts.scheme == "https" or (parts.scheme == "http" and _is_loopback(parts.hostname))) \
+            and well_formed(url)
     except ValueError:
         return False
 
@@ -237,6 +238,58 @@ def netloc(url):
         return urllib.parse.urlsplit(url).netloc.rpartition("@")[2].lower()
     except ValueError:
         return ""
+
+
+_LABEL = frozenset("abcdefghijklmnopqrstuvwxyz0123456789-_")
+
+
+def usable_netloc(loc):
+    """Is loc ('host[:port]', as `netloc` gives it) one host that a fetcher may be let reach: written so that urllib,
+    tiny_https and its host rule all read it as the same host (the credentials review of decision 14 found one
+    unreadable entry failed every native request of its fetcher, and a "*." entry is a wildcard to the host rule).
+    A name of labels of letters, digits, "-" and "_" (no "-" at either end; a final dot is allowed), an IPv4
+    address, or an IPv6 address in brackets; and a port of digits, 1 to 65535."""
+    if not isinstance(loc, str) or not loc or not loc.isascii():
+        return False
+    loc = loc.lower()
+    if loc.startswith("["):
+        host, sep, rest = loc[1:].partition("]")
+        if not sep or "%" in host or (rest and not rest.startswith(":")):
+            return False
+        try:
+            ipaddress.IPv6Address(host)
+        except ValueError:
+            return False
+        port = rest[1:] if rest else None
+    else:
+        host, sep, port = loc.partition(":")
+        port = port if sep else None
+        name = host[:-1] if host.endswith(".") else host
+        if not 0 < len(name) <= 253 or not all(0 < len(label) <= 63 and label[0] != "-" and label[-1] != "-"
+                                               and set(label) <= _LABEL for label in name.split(".")):
+            return False
+    return port is None or (port.isdigit() and len(port) <= 5 and 0 < int(port) < 65536)
+
+
+def unreadable(url):
+    """Why the guard does not fetch url, an http(s) URL it does not read as the package managers do; None when it
+    does. A backslash before the query: to the WHATWG URL parser (npm's, uv's) it is a slash, and "https://a\\@b/" is
+    a URL of host a; to urllib and tiny_https, of host b. A host `usable_netloc` does not take."""
+    if not isinstance(url, str):
+        return "not a URL"
+    if "\\" in url.split("?", 1)[0].split("#", 1)[0]:
+        return "a backslash in the URL, which URL parsers read differently"
+    loc = netloc(url)
+    if not usable_netloc(loc):
+        if not loc.isascii():
+            return "a host that is not ASCII (write it in its xn-- form, as npm and pip send it)"
+        return "a host the guard does not read as one (an unusual character, port or wildcard)"
+    return None
+
+
+def well_formed(url):
+    """Is url one the guard reads as the package managers do (`unreadable`)?"""
+    return unreadable(url) is None
 
 
 class TooLarge(repo.FetchError):
@@ -295,8 +348,8 @@ class Fetcher:
     without it."""
 
     def __init__(self, hosts, http_hosts=(), auth=None, keepalive=False, https_redirects=False):
-        self.hosts = {h.lower() for h in hosts if h}
-        self.http_hosts = {h.lower() for h in http_hosts if h}
+        self.hosts = {h.lower() for h in hosts if usable_netloc(h)}
+        self.http_hosts = {h.lower() for h in http_hosts if usable_netloc(h)}
         self.https_redirects = https_redirects
         self.auth = auth if auth is not None else pmsettings.Credentials()
         self.lock = threading.Lock()
@@ -308,11 +361,11 @@ class Fetcher:
             self.pool.close()
 
     def allow(self, url):
-        """Let the fetcher reach url's host too."""
-        host = netloc(url)
-        if host:
+        """Let the fetcher reach url's host too (when url is `well_formed`; its host is left out otherwise, and a
+        request of it fails `check`)."""
+        if well_formed(url):
             with self.lock:
-                self.hosts.add(host)
+                self.hosts.add(netloc(url))
 
     def check(self, url, redirect=False):
         """The url, or FetchError. redirect: it is where a response sent the fetcher; with `https_redirects` that may be any
@@ -325,6 +378,9 @@ class Fetcher:
         plain_ok = parts.scheme == "http" and (_is_loopback(host) or loc in self.http_hosts or host in self.http_hosts)
         if parts.scheme != "https" and not plain_ok:
             raise repo.FetchError(f"only https is fetched (or http on this machine): {pmsettings.shown(url)}")
+        why = unreadable(url)
+        if why:
+            raise repo.FetchError(f"{why}: {pmsettings.shown(url)[:200]}")
         with self.lock:
             known = loc in self.hosts or host in self.hosts
         if not known and not (redirect and self.https_redirects and parts.scheme == "https"):
@@ -333,8 +389,11 @@ class Fetcher:
 
     def request(self, url, accept=None):
         """-> (a Request for url, url as shown): the guard's User-Agent, the
-        credentials for url (not carried over a redirect)."""
+        credentials for url (not carried over a redirect). Its path is sent as
+        npm and uv send it, its "." and ".." segments resolved
+        (pmsettings.normal_path), and its credentials are chosen by that path."""
         clean, inline = pmsettings.split_userinfo(url)
+        clean = pmsettings.normal_url(clean)
         req = urllib.request.Request(clean, headers={"User-Agent": USER_AGENT, **({"Accept": accept} if accept else {})})
         header = pmsettings.basic(*inline) if inline and (clean.startswith("https:") or _is_loopback(
             urllib.parse.urlsplit(clean).hostname)) else self.auth.header(clean)
@@ -349,12 +408,13 @@ class Fetcher:
             max_redirections = repo.MAX_REDIRECTS
 
             def redirect_request(self, req, fp, code, msg, headers, newurl):
+                newurl = pmsettings.normal_url(newurl)       # (urljoin leaves the dots of an absolute URL)
                 try:
                     fetcher.check(newurl, redirect=True)
                 except repo.FetchError as exc:
                     raise urllib.error.URLError(f"redirect blocked: {exc}")
                 new = super().redirect_request(req, fp, code, msg, headers, newurl)
-                header = fetcher.auth.header(newurl) if new is not None else None
+                header = fetcher.auth.header(newurl, from_url=req.full_url) if new is not None else None
                 if header:                                  # (the request's own was not carried over)
                     new.add_unredirected_header("Authorization", header)
                 return new
@@ -469,6 +529,7 @@ class Fetcher:
             if not target.path and target.netloc:
                 target = target._replace(path="/")
             target = urllib.parse.urldefrag(urllib.parse.urljoin(url, urllib.parse.urlunsplit(target)))[0]
+            target = pmsettings.normal_url(target)          # (urljoin leaves the dots of an absolute URL)
             try:
                 self.check(target, redirect=True)
             except repo.FetchError as exc:
@@ -476,8 +537,8 @@ class Fetcher:
             visited[target] = visited.get(target, 0) + 1
             if visited[target] > 4 or len(visited) > repo.MAX_REDIRECTS:
                 raise self._http_error(code, clean, req)
+            header = self.auth.header(target, from_url=url)
             url, headers = target, dict(req.headers)        # (the first request's own credentials stay behind)
-            header = self.auth.header(target)
             if header:
                 headers["Authorization"] = header
 
@@ -1464,8 +1525,12 @@ def check_lock_entries(ctx, entries, registries, installed, label, env=None, rew
         else:
             url = registries.tarball(e["name"], e["version"]) if e["version"] else ""
         if not url or not (fetchable(url) or (url.startswith("http://") and netloc(url) in http_hosts)):
-            ctx.add(Check("npm", e["name"], e["version"], pmsettings.shown(e["resolved"]) or "unknown source")
-                    ).notes.append("not from a registry (git, a local file or a link): not checked")
+            why = unreadable(url) if url.lower().startswith(("https://", "http://")) else None
+            check = ctx.add(Check("npm", e["name"], e["version"], pmsettings.shown(e["resolved"]) or "unknown source"))
+            if why:                             # (npm fetches it; the guard cannot say from where)
+                ctx.block(check, f"could not be checked: {why}")
+            else:
+                check.notes.append("not from a registry (git, a local file or a link): not checked")
             continue
         if sri_best(e["integrity"]) is None and not e.get("lock_digest") \
                 and (not e["version"] or "/-/" not in urllib.parse.urlsplit(url).path):
@@ -2778,8 +2843,9 @@ def _check_uv(ctx, exe, sub, args, env, root, lock, installed):
             continue
         for f in pick_artifacts(([p["sdist"]] if p["sdist"] else []) + p["wheels"], info):
             if not (fetchable(f["url"]) or netloc(f["url"]) in http_hosts):
+                why = unreadable(f["url"]) or "not fetched over https"
                 ctx.block(ctx.add(Check("pypi", p["name"], p["version"], f["filename"])),
-                          f"could not be checked: not fetched over https ({pmsettings.shown(f['url'])[:80]})")
+                          f"could not be checked: {why} ({pmsettings.shown(f['url'])[:80]})")
                 continue
             fetcher.allow(f["url"])
             jobs.append(lambda p=p, f=f: check_file(ctx, fetcher, p["name"], p["version"], f))
@@ -2897,9 +2963,10 @@ def python_indexes(kind, exe, env, cwd, cli_default=None, cli_extras=(), cli_str
             unique.append(index)
     creds = pmsettings.index_credentials(unique, env)
     for index in unique:
-        if not (fetchable(index.url) or index.url.startswith("http://")):
-            raise GuardError(f"{pmsettings.shown(index.url)}: lazaret guard relays https indexes "
-                             f"(or http ones in the tool's settings)")
+        if not (fetchable(index.url) or index.url.startswith("http://")) or not well_formed(index.url):
+            why = unreadable(index.url) if index.url.startswith(("https://", "http://")) else None
+            raise GuardError(f"{pmsettings.shown(index.url)}: " + (why or "lazaret guard relays https indexes "
+                                                                   "(or http ones in the tool's settings)"))
     return unique, merge, creds
 
 
@@ -4056,10 +4123,11 @@ def guard_go(ctx, args):
     indexes = [pmsettings.Index(p.url) for p in relayed]
     creds = pmsettings.index_credentials(indexes, env)
     relayed = [goproxy.Proxy(i.url, p.fall_back) for i, p in zip(indexes, relayed)]
-    bad = [p.url for p in relayed if not (fetchable(p.url) or p.url.startswith("http://"))]
+    bad = [p.url for p in relayed if not (fetchable(p.url) or p.url.startswith("http://")) or not well_formed(p.url)]
     if bad:
-        raise GuardError(f"GOPROXY lists {', '.join(pmsettings.shown(u) for u in bad)}: the guard relays https and http "
-                         f"proxies, not other kinds (a file:// folder, say)")
+        why = unreadable(bad[0]) if bad[0].startswith(("https://", "http://")) else None
+        raise GuardError(f"GOPROXY lists {', '.join(pmsettings.shown(u) for u in bad)}: " + (why or "the guard relays https and "
+                         "http proxies, not other kinds (a file:// folder, say)"))
     # (go goes to a module's repository when GONOPROXY names it, and `go env` gives GONOPROXY as go takes it: GOPRIVATE when
     # it is not set. GOPRIVATE alone named modules that came through the proxy: the Go/Rust review's GO-7)
     private = settings.get("GONOPROXY", "")

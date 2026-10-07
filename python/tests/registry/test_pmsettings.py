@@ -4,11 +4,15 @@ read the way each tool reads them, and matched to hosts the way npm (a path
 and what is under it) and pip / uv (a whole host) match them. The
 credentials are fake and built here."""
 
+import ast
 import base64
 import os
+import re
 import stat
 import sys
 import tempfile
+import threading
+import time
 import unittest
 
 from lazaret.registry import pmsettings as pm
@@ -63,6 +67,153 @@ class CredentialsTests(unittest.TestCase):
                          ("https://h.example:8443/simple/", ("u", "p@ss")))
         self.assertEqual(pm.split_userinfo("https://h.example/x"), ("https://h.example/x", None))
         self.assertEqual(pm.shown("https://token@h.example/x"), "https://h.example/x")
+
+
+#: one host's npm keys, and the key each request path gets: the same table is in lazaret-net's tests
+#: (`the_choice_of_a_path_is_pmsettings_choice`), which ask `granted` the same questions
+PATH_KEYS = {"/": "W", "/a/": "A", "/a/b/": "AB", "/team/": "T", "/a//": "AE"}
+PATH_CASES = [
+    ("/a/b/x", "AB"), ("/a//b/x", "AE"), ("/a/b//x", "AB"), ("//x", "W"), ("//", "W"), ("///x/y", "W"),
+    ("/team/../x", "W"), ("/team/%2e%2e/x", "W"), ("/team/%2E%2e/x", "W"), ("/team/.%2e/x", "W"),
+    ("/team/%2e./x", "W"), ("/team/..", "W"), ("/x/../team/y", "T"), ("/team/./y", "T"), ("/team/%2e/y", "T"),
+    ("/team/y/..", "T"), ("/a/b/../../team/y", "T"), ("/../team/y", "T"), ("/team/...", "T"),
+    ("/team/%2e%2e%2e/y", "T"), ("/team..%2fx", "W"), ("/a/b/./../c", "A"), ("/a/b", "A"), ("/a", "W"), ("/", "W"),
+    ("/team/../x?q=/team/", "W"), ("/x/y/../../a//z", "AE"),
+    ("/team/..%2fx", "W"), ("/team/%2e%2e%2fx", "W"), ("/team/..;/x", "W"), ("/team/a;b/x", "T"), ("/team/%2fx", "T"),
+    ("/a/%2Fb/x", "A"), ("/a/b//../x", "AB"),
+]
+#: and a path as it is given (a redirect's, which tiny_https sends as its Location says): the key that covers it read
+#: three ways, as it is, as npm resolves it and as a server that decodes it routes it (lazaret-net's
+#: `a_redirects_path_gets_what_covers_it_read_three_ways` has the same table)
+HOP_KEYS = {"/": "W", "/team/": "T", "/x/": "X", "/g%2Fh/": "G"}
+HOP_CASES = [
+    ("/team/../x/y", "W"), ("/team/%2e%2e/y", "W"), ("/x/../team/y", "W"), ("/team/./y", "T"), ("/team/y/../z", "T"),
+    ("/team/sub/%2E%2E/z", "T"), ("/team\\..\\y", "W"), ("/team/y\\..\\..\\z", "W"), ("/team/y", "T"), ("/x//y", "X"),
+    ("/x/y/../../team/z", "W"), ("//team/y", "W"),
+    ("/team//../y", "W"), ("/team/..%2fy", "W"), ("/team/%2E%2E%2Fy", "W"), ("/team/..;/y", "W"), ("/team/a;b/y", "T"),
+    ("/team/%2fy", "T"), ("/g%2Fh/pkg", "G"), ("/g%2Fh/..%2f..%2fx", "W"), ("/g/h/pkg", "W"), ("/g%2fh/pkg", "W"),
+]
+
+
+class RequestPathTests(unittest.TestCase):
+    """The path a credential is chosen by is the one an http client sends (pmsettings.normal_path): the credentials
+    review of decision 14 found a URL path that starts with "//" sent `_lookup` round forever, and a token for
+    /team/ sent with /team/../x."""
+
+    def table(self, whole=True):
+        c = pm.Credentials()
+        for path, token in PATH_KEYS.items():
+            if whole or path != "/":
+                c.token(f"//reg.example{path}", token)
+        return c
+
+    def header(self, c, url):
+        out = {}
+        t = threading.Thread(target=lambda: out.setdefault("h", c.header(url)), daemon=True)
+        t.start()
+        t.join(5)
+        self.assertFalse(t.is_alive(), f"{url}: the lookup did not return")
+        return out["h"]
+
+    def test_a_path_that_starts_with_two_slashes_gets_an_answer(self):
+        c = pm.Credentials()
+        c.token("//registry.npmjs.org/", TOKEN)
+        self.assertEqual(self.header(c, "https://registry.npmjs.org//evil/-/evil-1.0.0.tgz"), "Bearer " + TOKEN)
+        c = pm.Credentials()
+        c.token("//registry.npmjs.org/team/", TOKEN)
+        self.assertIsNone(self.header(c, "https://registry.npmjs.org//team/x.tgz"))
+
+    def test_the_choice_is_made_on_the_path_as_it_is_sent(self):
+        for whole in (True, False):
+            c = self.table(whole)
+            for path, want in PATH_CASES:
+                with self.subTest(path=path, whole=whole):
+                    got = self.header(c, pm.normal_url(f"https://reg.example{path}"))
+                    self.assertEqual(got, None if want == "W" and not whole else "Bearer " + want)
+
+    def test_a_path_as_it_is_given_gets_what_covers_it_read_three_ways(self):
+        c = pm.Credentials()
+        for path, token in HOP_KEYS.items():
+            c.token(f"//reg.example{path}", token)
+        for path, want in HOP_CASES:
+            with self.subTest(path):
+                self.assertEqual(self.header(c, f"https://reg.example{path}"), "Bearer " + want)
+        self.assertTrue(pm.covers("/team/", "/team/./y") and pm.covers("/", "/x/../y")
+                        and pm.covers("/npm/", "/npm/@scope%2fname") and pm.covers("/npm/", "/npm/a;b/c"))
+        self.assertFalse(pm.covers("/team/", "/team/../y") or pm.covers("/team/", "/x/../team/y")
+                         or pm.covers("/npm/", "/npm//../wiki/x") or pm.covers("/npm/", "/npm/..%2fwiki/x")
+                         or pm.covers("/npm/", "/npm/..;/x"))
+        for path, want in [("/npm//../wiki/x", "/wiki/x"), ("/npm/..%2Fwiki/x", "/wiki/x"), ("/npm/%2e%2e%5cx", "/x"),
+                           ("/a;p/b;q/c", "/a/b/c"), ("/a//b///", "/a/b/"), ("", "/"), ("/npm/@s%2fp", "/npm/@s/p")]:
+            with self.subTest(path):
+                self.assertEqual(pm.server_path(path), want)
+
+    def test_a_redirect_from_another_origin_gets_a_credential_of_the_whole_host_only(self):
+        # (npm sends none on a redirect to another host, and pip a .netrc login for the host; lazaret-net's `granted`
+        # gives the same)
+        c = self.table()
+        url = "https://reg.example/team/pkg"
+        for other in ("https://other.example/x", "https://reg.example:8443/team/x", "http://reg.example/team/x"):
+            with self.subTest(other):
+                self.assertEqual(c.header(url, from_url=other), "Bearer W")
+        self.assertEqual(c.header(url, from_url="https://reg.example:443/elsewhere"), "Bearer T")
+        self.assertEqual(c.header(url), "Bearer T")
+        self.assertIsNone(self.table(whole=False).header(url, from_url="https://other.example/x"))
+        self.assertTrue(pm.same_origin("https://REG.example:443/a", "https://reg.example/b"))
+        self.assertFalse(pm.same_origin("https://reg.example/a", "http://reg.example/a")
+                         or pm.same_origin("https://reg.example/a", "https://reg.example:8443/a")
+                         or pm.same_origin("https://reg.example/a", "not a url"))
+
+    def test_a_backslash_is_a_slash_to_a_server_that_resolves_the_path(self):
+        c = self.table(whole=False)
+        # (each is under /team/ as it is sent, and outside it read with its backslashes as slashes)
+        for path in ("/team/y\\..\\..\\x", "/team/a\\..\\..\\x", "/team/a/b\\..\\..\\..\\x", "/team/a\\%2e%2e\\..\\x"):
+            with self.subTest(path):
+                self.assertIsNone(self.header(c, f"https://reg.example{path}"))
+        self.assertEqual(self.header(c, "https://reg.example/team/y\\z"), "Bearer T")
+
+    def test_a_long_path_costs_one_reading(self):
+        # (the review found the walk up a path quadratic: 2 s for a path of 160 KB)
+        c = self.table()
+        url = "https://reg.example/team/" + "a/" * 200_000 + "x.tgz"
+        started = time.monotonic()
+        self.assertEqual(self.header(c, url), "Bearer T")
+        self.assertLess(time.monotonic() - started, 2.0)
+
+    def test_a_key_with_dot_segments_is_never_one_a_path_has(self):
+        c = pm.Credentials()
+        c.token("//reg.example/a/../team/", "dots")      # npm compares keys as written, to a path that has none
+        for path in ("/a/../team/x", "/team/x", "/a/x"):
+            with self.subTest(path):
+                self.assertIsNone(self.header(c, f"https://reg.example{path}"))
+
+    def test_lazaret_net_asks_the_same_questions(self):
+        rust = os.path.join(os.path.dirname(__file__), "..", "..", "..", "rust", "crates", "lazaret-net", "src", "tests.rs")
+        if not os.path.exists(rust):
+            self.skipTest("no rust/ folder here")
+        with open(rust, encoding="utf-8") as f:
+            text = f.read()
+
+        def table(name):
+            body = re.search(r"const %s: \[\(&str, &str\); \d+\] = \[(.*?)\];" % name, text, re.S).group(1)
+            return ast.literal_eval("[" + body + "]")
+
+        self.assertEqual(dict(table("PATH_KEYS")), PATH_KEYS)
+        self.assertEqual(table("PATH_CASES"), PATH_CASES)
+        self.assertEqual(dict(table("HOP_KEYS")), HOP_KEYS)
+        self.assertEqual(table("HOP_CASES"), HOP_CASES)
+
+    def test_normal_path_and_url(self):
+        for path, want in [("", "/"), ("/", "/"), ("/a/./b", "/a/b"), ("/a/b/..", "/a/"), ("/a/.", "/a/"),
+                           ("/..", "/"), ("/a//b/../c", "/a//c"), ("/a/%2E/b/%2e%2E/c", "/a/c"), ("a/b", "/a/b"),
+                           ("/a\\b\\..\\c", "/a/c"), ("//x//", "//x//"), ("/a%2fb/../c", "/c")]:
+            with self.subTest(path):
+                self.assertEqual(pm.normal_path(path), want)
+        self.assertEqual(pm.normal_url("https://h.example/a/../b/c.tgz?x=/../#f"), "https://h.example/b/c.tgz?x=/../#f")
+        for same in ("https://h.example/a/b.tgz", "https://h.example", "https://h.example/a//b", "git+ssh://h/a/../b",
+                     "https://h.example/a/b?x=../y"):
+            with self.subTest(same):
+                self.assertEqual(pm.normal_url(same), same)
 
 
 class NpmrcTests(unittest.TestCase):

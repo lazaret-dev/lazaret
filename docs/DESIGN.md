@@ -1329,6 +1329,50 @@ relay of a file too large to scan now goes through `Fetcher.open` as the
 scan's download does, with the file URL's credentials; it had made a request
 of its own without them.
 
+A review of these credentials by a fresh reader (Oct 7) found no way for one
+to reach another host, and the following, now fixed; a second review of the
+fixes found more, fixed too. A path is read as npm and uv send it
+(`pmsettings.normal_path`, the WHATWG URL standard's reading: "." and ".."
+segments resolved, their "%2e" spellings too, a backslash a slash; an empty
+segment stays). The guard sends a request's URL, and urllib's redirects,
+with the path so read. tiny_https sends a redirect's path as its Location
+gives it, and it is a drop that Lazaret does not edit, so a credential goes
+with a path only when the path's directory is under the credential's path
+read three ways (`pmsettings.covers`, and lazaret-net's `granted`): as it is
+sent, as npm resolves it, and as a server that decodes it before it routes
+it may (`server_path`: nginx decodes "%XX", merges slashes and resolves dot
+segments; Tomcat drops a segment's ";parameters"): "/team/../x" is under
+/team/ to a server that reads it as it is and /x to one that resolves it,
+as "/team/..%2fx" and "/team//../x" are to nginx. A redirect from another
+origin gets a credential of the whole host only: npm sends none on a
+redirect to another host, and pip a `.netrc` login for it; any host the
+guard fetches from can redirect. The choice is the longest key that covers
+the path, as npm's walk up a path finds it, made over the host's few keys:
+the old walk never ended on a path that starts with "//", and was quadratic
+in a long one. A fetcher takes a host only when urllib, tiny_https and its
+host rule read it alike (`guard.usable_netloc`): one entry the host rule
+could not read failed every native request of its fetcher, and a "*." entry
+is a wildcard to it. A lockfile URL with a backslash before its query (a
+slash to npm's parser, so possibly another host) or such a host blocks its
+package; a host that is not ASCII is to be written in its xn-- form. A
+redirect to a server without TLS 1.3 sends that server's host to urllib from
+then on, not the first URL's (lazaret-net's `TlsVersion` names the hop's
+host). lazaret-net refuses a request header outside `PLAIN_HEADERS` (Accept,
+Content-Type, User-Agent, X-GitHub-Api-Version), since a token in a header
+of another name would follow a redirect, and its `Debug` shows no password
+of a URL or a proxy. A GitLab under a path prefix gets its token on that
+prefix alone. A request goes through urllib when urllib and tiny_https would
+read the proxy settings differently: HTTPS_PROXY and https_proxy (or
+NO_PROXY and no_proxy) that differ (urllib reads the lower-case name first,
+tiny_https the upper-case one), a proxy whose port tiny_https would not take
+(it takes 8080 when a path, even "/", follows the port, or none is given),
+or a NO_PROXY that names the request's host to one and not the other ("*"
+in a list, an entry with a port). What tiny_https's next drop is asked for:
+dot segments resolved in a Location's path whatever its form, a backslash
+refused or read as a slash, a port of digits only ("+443" is taken today), a
+proxy's port read wherever the URL has a path, NO_PROXY read as urllib reads
+it, and no password in the `Debug` of a URL, a proxy or a pool's key.
+
 The Go checksum database (NET-1's third part). `golang.verify_lookup`
 checks a `/lookup/<module>@<version>` answer as the go command's client does
 (`golang.org/x/mod/sumdb`), through the native library's `verify.go_sumdb`

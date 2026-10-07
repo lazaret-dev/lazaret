@@ -1460,3 +1460,47 @@ register("verify-answers", "secret verification: interpret and Verifier.verify o
 register("verify-credentials", "secret verification: which credentials Verifier.verify sends, and to where: only one that is the provider's format in "
          "full, to the table's host, with no part in the URL and no line break in a header", lambda: list(VERIFY_CREDENTIAL_SEEDS),
          verify_credentials_start, VERIFY_CREDENTIAL_WORDS, max_len=1024)
+
+
+# ---------------------------------------------------------------------------------------------- a URL path's credential (decision 14)
+# The input is a URL's path (and query), asked of a table of npm keys of one host, as pmsettings keeps one. The answer
+# comes (the credentials review's CR-1 was a walk up the path that never ended on a path that starts with "//"); it is
+# the key of the longest path that covers the path read three ways, as it is sent, with its dot segments resolved and as
+# a server that decodes it may route it (CR-2, CR-9); and normal_path gives a path with no dot segment and no backslash,
+# which it leaves as it is.
+
+CREDENTIAL_PATH_SEEDS = [b"/a/b/x.tgz", b"//evil/-/evil-1.0.0.tgz", b"/team/../x", b"/team/%2e%2E/x?y=/team/", b"/x/../team/y",
+                         b"/a//b/./c/..", b"/team\\..\\x", b"/team/sub/%2e./y", b"///", b"/", b"", b"/a/b/../../../..//team/",
+                         b"/team//../x", b"/team/..%2fx", b"/team/..;/x", b"/team/a;b/%2F../y"]
+CREDENTIAL_PATH_WORDS = (b"/", b"//", b".", b"..", b"%2e", b"%2E", b".%2e", b"%2e.", b"\\", b"?", b"#", b"team/", b"a/", b"sub/",
+                         b"%2f", b"%2F", b"%5c", b";", b";x")
+CREDENTIAL_KEYS = ("/", "/a/", "/a/b/", "/team/", "/a//", "/team/sub/")
+DOT_SEGMENTS = (".", "..", "%2e", ".%2e", "%2e.", "%2e%2e")
+
+
+def credential_path_start():
+    from lazaret.registry import pmsettings
+    table = pmsettings.Credentials()
+    for key in CREDENTIAL_KEYS:
+        table.token("//reg.example" + key, "T" + key)
+
+    def run(data):
+        text = data.decode("utf-8", "surrogateescape")
+        url = "https://reg.example" + ("" if text.startswith("/") else "/") + text
+        path = pmsettings._origin(url)[3]
+        normal = pmsettings.normal_path(path)
+        check(isinstance(normal, str) and normal.startswith("/") and "\\" not in normal, "normal-path-shape", repr(normal)[:120])
+        check(not any(seg.lower() in DOT_SEGMENTS for seg in normal.split("/")), "normal-path-dots", repr(normal)[:120])
+        check(pmsettings.normal_path(normal) == normal, "normal-path-idempotent", repr(normal)[:120])
+        got = table.header(url)
+        covering = [key for key in CREDENTIAL_KEYS if pmsettings.covers(key, path)]
+        want = "Bearer T" + max(covering, key=len) if covering else None
+        check(got == want, "credential-choice", repr((path, got, want))[:200])
+        check(table.header(url) == got, "credential-deterministic", repr(path)[:120])
+
+    return run, lambda: None
+
+
+register("credential-path", "decision 14: pmsettings.Credentials.header over a URL path: an answer, the key of the longest path that covers it "
+         "read three ways, and normal_path a path with no dot segment that it leaves as it is", lambda: list(CREDENTIAL_PATH_SEEDS),
+         credential_path_start, CREDENTIAL_PATH_WORDS, max_len=512)

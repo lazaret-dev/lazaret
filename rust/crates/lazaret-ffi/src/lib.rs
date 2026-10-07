@@ -194,8 +194,9 @@ mod native {
 ///
 /// The answer is JSON too, in a buffer the library allocates: `{"status": 200, "version": "HTTP/2", "headers":
 /// [[name, value], …], "url": "…"}` with the body in a second buffer (status 0), or `{"kind": "refused" |
-/// "too-large" | "tls-version" | "tls" | "timeout" | "network" | "http" | "setup", "error": "…"}` (status 1).
-/// Every buffer goes back to `lazaret_engine_free`. A panic never crosses the boundary (status 3).
+/// "too-large" | "tls-version" | "tls" | "timeout" | "network" | "http" | "setup", "error": "…"}` (status 1), and for
+/// "tls-version" `"host"`, the host of the hop that offered no TLS 1.3 (a redirect's, when it was one). Every buffer
+/// goes back to `lazaret_engine_free`. A panic never crosses the boundary (status 3).
 #[cfg(not(target_arch = "wasm32"))]
 pub mod net {
     use super::*;
@@ -274,7 +275,11 @@ pub mod net {
     }
 
     pub fn failure(f: &Failure) -> String {
-        json::write(&Value::obj(vec![("kind", Value::str(f.kind())), ("error", Value::str(&f.message()))]))
+        let mut fields = vec![("kind", Value::str(f.kind())), ("error", Value::str(&f.message()))];
+        if let Some(host) = f.host() {
+            fields.push(("host", Value::str(host)));       // (the hop that offered no TLS 1.3)
+        }
+        json::write(&Value::obj(fields))
     }
 
     fn head(status: u16, version: &str, headers: &[(String, String)], url: &str) -> String {

@@ -565,23 +565,171 @@ fn a_credential_is_never_a_header_of_the_request() {
     assert!(!debug.contains("s3cr3t"), "{debug}");
 }
 
-/// pmsettings.Credentials.header's choice, written as Python's is (from the directory of the path up to `/`, the
-/// first prefix the host has), for the property below.
+/// pmsettings.normal_path, written as Python's is: the path a request is sent with and its credentials are chosen by
+/// (its "." and ".." segments resolved, "%2e" spellings included; an empty segment stays).
+fn pmsettings_normal_path(path: &str) -> String {
+    let path = if path.is_empty() { "/" } else { path };
+    let segments: Vec<&str> = if let Some(rest) = path.strip_prefix('/') { rest.split('/').collect() } else { path.split('/').collect() };
+    let mut out: Vec<&str> = Vec::new();
+    for (i, seg) in segments.iter().enumerate() {
+        let last = i == segments.len() - 1;
+        let kind = seg.to_ascii_lowercase();
+        if ["..", ".%2e", "%2e.", "%2e%2e"].contains(&kind.as_str()) {
+            out.pop();
+            if last {
+                out.push("");
+            }
+        } else if [".", "%2e"].contains(&kind.as_str()) {
+            if last {
+                out.push("");
+            }
+        } else {
+            out.push(seg);
+        }
+    }
+    format!("/{}", out.join("/"))
+}
+
+/// pmsettings.server_path, written as Python's is (its regular expressions as replacements): a path as a server that
+/// decodes it before it routes it may read it.
+fn pmsettings_server_path(path: &str) -> String {
+    let mut text = (if path.is_empty() { "/" } else { path }).replace('\\', "/");
+    for escape in ["%2f", "%2F", "%5c", "%5C"] {
+        text = text.replace(escape, "/");
+    }
+    for escape in ["%2e", "%2E"] {
+        text = text.replace(escape, ".");
+    }
+    let segments: Vec<&str> = if let Some(rest) = text.strip_prefix('/') { rest.split('/').collect() } else { text.split('/').collect() };
+    let last = segments.len() - 1;
+    let mut out: Vec<&str> = Vec::new();
+    for (i, seg) in segments.iter().enumerate() {
+        let seg = seg.split(';').next().unwrap();
+        if seg == ".." {
+            out.pop();
+            if i == last {
+                out.push("");
+            }
+        } else if seg == "." {
+            if i == last {
+                out.push("");
+            }
+        } else if !seg.is_empty() || i == last {
+            out.push(seg);
+        }
+    }
+    format!("/{}", out.join("/"))
+}
+
+/// pmsettings.covers, written as Python's is: the directory of the path as it is sent, as resolved and as a server
+/// reads it, each under the credential's path (the last as a server reads that too).
+fn pmsettings_covers(prefix: &str, path: &str) -> bool {
+    let dir = |p: &str| p[..p.rfind('/').map_or(0, |k| k + 1)].to_string();
+    let raw = if path.is_empty() { "/" } else { path };
+    dir(raw).starts_with(prefix) && dir(&pmsettings_normal_path(raw)).starts_with(prefix)
+        && dir(&pmsettings_server_path(raw)).starts_with(&pmsettings_server_path(prefix))
+}
+
+/// pmsettings.Credentials.header's choice for a URL whose path is given: the longest key of the host that covers it;
+/// `crossed`, a redirect from another origin: of the keys of the whole host only.
+fn pmsettings_header<'a>(table: &'a [(String, String, String)], host: &str, path: &str, crossed: bool) -> Option<&'a str> {
+    let raw = path.split('?').next().unwrap();
+    table.iter().filter(|(h, p, _)| h == host && (!crossed || p == "/") && pmsettings_covers(p, raw))
+        .max_by_key(|(_, p, _)| p.len()).map(|(_, _, v)| v.as_str())
+}
+
+/// The choice for the request itself, its URL as the Python side sends it (`as_sent`).
 fn pmsettings_choice<'a>(table: &'a [(String, String, String)], host: &str, path: &str) -> Option<&'a str> {
-    let mut d = path[..path.rfind('/').map_or(0, |k| k + 1)].to_string();
-    if d.is_empty() {
-        d = "/".to_string();
+    pmsettings_header(table, host, &as_sent(path), false)
+}
+
+/// The choice for a redirect's hop, whose path tiny_https sends as the Location gives it.
+fn hop_choice<'a>(table: &'a [(String, String, String)], host: &str, path: &str, crossed: bool) -> Option<&'a str> {
+    pmsettings_header(table, host, path, crossed)
+}
+
+/// A path as the Python side sends it (pmsettings.normal_url: the path's dot segments resolved, the query as it is).
+fn as_sent(path: &str) -> String {
+    match path.split_once('?') {
+        Some((p, q)) => format!("{}?{q}", pmsettings_normal_path(p)),
+        None => pmsettings_normal_path(path),
     }
-    loop {
-        if let Some((_, _, v)) = table.iter().find(|(h, p, _)| h == host && *p == d) {
-            return Some(v);
+}
+
+/// One host's npm keys, and the key each request path gets: the same table as tests/registry/test_pmsettings.py's
+/// PATH_KEYS and PATH_CASES, which ask pmsettings the same questions.
+const PATH_KEYS: [(&str, &str); 5] = [("/", "W"), ("/a/", "A"), ("/a/b/", "AB"), ("/team/", "T"), ("/a//", "AE")];
+const PATH_CASES: [(&str, &str); 34] = [
+    ("/a/b/x", "AB"), ("/a//b/x", "AE"), ("/a/b//x", "AB"), ("//x", "W"), ("//", "W"), ("///x/y", "W"),
+    ("/team/../x", "W"), ("/team/%2e%2e/x", "W"), ("/team/%2E%2e/x", "W"), ("/team/.%2e/x", "W"),
+    ("/team/%2e./x", "W"), ("/team/..", "W"), ("/x/../team/y", "T"), ("/team/./y", "T"), ("/team/%2e/y", "T"),
+    ("/team/y/..", "T"), ("/a/b/../../team/y", "T"), ("/../team/y", "T"), ("/team/...", "T"),
+    ("/team/%2e%2e%2e/y", "T"), ("/team..%2fx", "W"), ("/a/b/./../c", "A"), ("/a/b", "A"), ("/a", "W"), ("/", "W"),
+    ("/team/../x?q=/team/", "W"), ("/x/y/../../a//z", "AE"),
+    ("/team/..%2fx", "W"), ("/team/%2e%2e%2fx", "W"), ("/team/..;/x", "W"), ("/team/a;b/x", "T"), ("/team/%2fx", "T"),
+    ("/a/%2Fb/x", "A"), ("/a/b//../x", "AB"),
+];
+
+/// A path as it is given (a redirect's, sent as its Location says) and the key that covers it, read the three ways:
+/// the same table as tests/registry/test_pmsettings.py's HOP_KEYS and HOP_CASES.
+const HOP_KEYS: [(&str, &str); 4] = [("/", "W"), ("/team/", "T"), ("/x/", "X"), ("/g%2Fh/", "G")];
+const HOP_CASES: [(&str, &str); 22] = [
+    ("/team/../x/y", "W"), ("/team/%2e%2e/y", "W"), ("/x/../team/y", "W"), ("/team/./y", "T"), ("/team/y/../z", "T"),
+    ("/team/sub/%2E%2E/z", "T"), ("/team\\..\\y", "W"), ("/team/y\\..\\..\\z", "W"), ("/team/y", "T"), ("/x//y", "X"),
+    ("/x/y/../../team/z", "W"), ("//team/y", "W"),
+    ("/team//../y", "W"), ("/team/..%2fy", "W"), ("/team/%2E%2E%2Fy", "W"), ("/team/..;/y", "W"), ("/team/a;b/y", "T"),
+    ("/team/%2fy", "T"), ("/g%2Fh/pkg", "G"), ("/g%2Fh/..%2f..%2fx", "W"), ("/g/h/pkg", "W"), ("/g%2fh/pkg", "W"),
+];
+
+#[test]
+fn the_choice_of_a_path_is_pmsettings_choice() {
+    use tiny_https::http::Url;
+    for whole in [true, false] {
+        let creds: Vec<Credential> = PATH_KEYS.iter().filter(|(p, _)| whole || *p != "/")
+            .map(|(p, v)| credential("reg.example", p, "Authorization", v)).collect();
+        for (path, want) in PATH_CASES {
+            // the request, as the Python side sends it
+            let url = Url::parse(&format!("https://reg.example{}", as_sent(path))).unwrap();
+            let got = granted(&creds, &hop(&url, 0, None));
+            let want = if want == "W" && !whole { None } else { Some(want) };
+            assert_eq!(got.first().map(|(_, v)| v.as_str()), want, "{path} (whole host: {whole})");
         }
-        if d == "/" {
-            return None;
-        }
-        let trimmed = &d[..d.len() - 1];
-        d = trimmed[..trimmed.rfind('/').map_or(0, |k| k + 1)].to_string();
     }
+}
+
+#[test]
+fn a_redirects_path_gets_what_covers_it_read_three_ways() {
+    // (tiny_https sends a Location's path as it is: "/team/../x" is /x to a server that resolves it, and under /team/ to
+    // one that does not, so a token for /team/ goes with neither; "/team/..%2fx" is /x to nginx)
+    use tiny_https::http::Url;
+    let creds: Vec<Credential> = HOP_KEYS.iter().map(|(p, v)| credential("reg.example", p, "Authorization", v)).collect();
+    let from = Url::parse("https://reg.example/start").unwrap();
+    for (path, want) in HOP_CASES {
+        let url = Url::parse(&format!("https://reg.example{path}")).unwrap();
+        let got = granted(&creds, &hop(&url, 1, Some(&from)));
+        assert_eq!(got.first().map(|(_, v)| v.as_str()), Some(want), "{path}");
+    }
+}
+
+#[test]
+fn a_redirect_from_another_origin_gets_a_credential_of_the_whole_host_only() {
+    // (npm sends none on a redirect to another host, and pip a .netrc login for the host: any host the guard fetches
+    // from can redirect to one that has a token for a path)
+    use tiny_https::http::Url;
+    let creds = vec![credential("reg.example", "/", "Authorization", "Bearer whole"),
+                     credential("reg.example", "/team/", "Authorization", "Bearer team"),
+                     credential("reg.example", "/team/", "PRIVATE-TOKEN", "glpat")];
+    let url = Url::parse("https://reg.example/team/pkg").unwrap();
+    let pair = |n: &str, v: &str| (n.to_string(), v.to_string());
+    for from in ["https://other.example/x", "https://reg.example:8443/team/x", "http://reg.example/team/x"] {
+        let from = Url::parse(from).unwrap();
+        assert_eq!(granted(&creds, &hop(&url, 1, Some(&from))), vec![pair("Authorization", "Bearer whole")], "{from}");
+    }
+    let same = Url::parse("https://reg.example:443/elsewhere").unwrap();
+    assert_eq!(granted(&creds, &hop(&url, 1, Some(&same))),
+               vec![pair("Authorization", "Bearer team"), pair("PRIVATE-TOKEN", "glpat")], "the same origin");
+    assert_eq!(granted(&creds, &hop(&url, 0, None)), vec![pair("Authorization", "Bearer team"), pair("PRIVATE-TOKEN", "glpat")]);
+    assert_eq!(granted(&creds, &hop(&url, 1, None)), vec![pair("Authorization", "Bearer whole")], "a hop that says no origin");
 }
 
 #[test]
@@ -595,8 +743,12 @@ fn the_choice_is_pmsettings_choice() {
         (seed % n as u64) as usize
     };
     let hosts = ["registry.example", "registry.example:8443", "[::1]:8443", "other.example"];
-    let segments = ["a", "b", "team", "npm", "a.b", "-"];
-    for _ in 0..3000 {
+    let segments = ["a", "b", "team", "npm", "a.b", "-", "g%2Fh", "a;b"];
+    // (a request's path also has empty and dot segments, encoded slashes and dots, and ";parameters", which the two sides
+    // read alike: the credentials reviews of decision 14 found they did not)
+    let path_segments = ["a", "b", "team", "npm", "a.b", "-", "", ".", "..", "%2e", "%2E%2e", ".%2e", "%2e.", "...", "%2e%2e%2e",
+                         "..%2f", "%2f", "%2F..", "..%5c", "..;", "a;b", "g%2Fh", "%2e%2e%2f", ";x"];
+    for _ in 0..6000 {
         // a table as pmsettings keeps one: (host, a path prefix ending in '/') -> header, one header per prefix
         let mut table: Vec<(String, String, String)> = Vec::new();
         for i in 0..next(6) {
@@ -613,18 +765,100 @@ fn the_choice_is_pmsettings_choice() {
         let creds: Vec<Credential> = table.iter().map(|(h, p, v)| credential(h, p, "Authorization", v)).collect();
         let host = hosts[next(hosts.len())];
         let mut path = String::new();
-        for _ in 0..next(4) {
+        for _ in 0..next(6) {
             path.push('/');
-            path.push_str(segments[next(segments.len())]);
+            path.push_str(path_segments[next(path_segments.len())]);
         }
         if next(2) == 0 || path.is_empty() {
             path.push('/');
         }
         let query = if next(3) == 0 { "?x=/team/" } else { "" };
-        let url = Url::parse(&format!("https://{host}{path}{query}")).unwrap();
+        // the request, as the Python side sends it: pmsettings' choice
+        let url = Url::parse(&format!("https://{host}{}{query}", as_sent(&path))).unwrap();
         let got = granted(&creds, &hop(&url, 0, None));
         let want = pmsettings_choice(&table, host, &path);
         assert_eq!(got.first().map(|(_, v)| v.as_str()), want, "{host}{path}{query} with {table:?}");
         assert!(got.len() <= 1);
+        // a redirect, its path as the Location gave it: what covers it read three ways; from another origin, of the whole
+        // host only
+        let url = Url::parse(&format!("https://{host}{path}{query}")).unwrap();
+        let same = Url::parse(&format!("https://{host}/start")).unwrap();
+        let got = granted(&creds, &hop(&url, 1, Some(&same)));
+        assert_eq!(got.first().map(|(_, v)| v.as_str()), hop_choice(&table, host, &path, false), "{host}{path}{query} with {table:?}");
+        let other = Url::parse("https://elsewhere.example/start").unwrap();
+        let got = granted(&creds, &hop(&url, 2, Some(&other)));
+        assert_eq!(got.first().map(|(_, v)| v.as_str()), hop_choice(&table, host, &path, true), "{host}{path}{query} with {table:?}");
     }
+}
+
+#[test]
+fn a_header_a_request_does_not_set_is_refused() {
+    let server = serve(|_| Some(response(200, &[], b"ok")));
+    for name in ["X-API-Key", "X-JFrog-Art-Api", "Host", "X-Forwarded-For"] {
+        let mut req = request(&server, "/");
+        req.headers = vec![(name.into(), "s3cret".into())];
+        match fetch(&req) {
+            Err(Failure::Setup(m)) => assert!(!m.contains("s3cret"), "{m}"),
+            other => panic!("{name}: {other:?}"),
+        }
+    }
+    let mut req = request(&server, "/");
+    req.headers = PLAIN_HEADERS.iter().map(|h| (h.to_ascii_uppercase(), "x".to_string())).collect();
+    assert_eq!(fetch(&req).unwrap().body, b"ok", "the plain ones, in any case");
+}
+
+/// A server that answers a TLS hello with a protocol_version alert, as one that speaks no TLS 1.3 does.
+fn serve_no_tls13() -> u16 {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { return };
+            thread::spawn(move || {
+                let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+                let mut hello = [0u8; 4096];
+                let _ = std::io::Read::read(&mut stream, &mut hello);
+                let _ = stream.write_all(&[0x15, 0x03, 0x03, 0x00, 0x02, 0x02, 70]);
+            });
+        }
+    });
+    port
+}
+
+#[test]
+fn a_server_without_tls13_is_named_by_its_hop() {
+    // (the credentials review of decision 14: a redirect to such a server put the first URL's host on Python's
+    // transport, for the rest of the process)
+    let old = serve_no_tls13();
+    let to = format!("https://localhost:{old}/x");
+    let server = serve(move |_| Some(response(302, &[&format!("Location: {to}")], b"")));
+    let mut req = request(&server, "/away");
+    req.hosts.push(format!("localhost:{old}"));
+    match fetch(&req) {
+        Err(f @ Failure::TlsVersion { .. }) => assert_eq!(f.host(), Some(format!("localhost:{old}").as_str())),
+        other => panic!("{other:?}"),
+    }
+    let mut req = request(&server, "/");
+    req.url = format!("https://localhost:{old}/");
+    req.hosts = vec![format!("localhost:{old}")];
+    match open(&req).map(|_| ()) {
+        Err(f @ Failure::TlsVersion { .. }) => assert_eq!(f.host(), Some(format!("localhost:{old}").as_str())),
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn debug_shows_no_password() {
+    let mut req = Request::get("https://user:s3cr3t@registry.example/x", &["registry.example"]);
+    req.proxy = Proxy::Url("http://puser:pr0xy@proxy.example:3128".into());
+    req.credentials = vec![credential("registry.example", "/", "Authorization", "Bearer t0ken")];
+    req.body = b"b0dy".to_vec();
+    let shown = format!("{req:?}");
+    for secret in ["s3cr3t", "pr0xy", "t0ken", "b0dy", "user:", "puser"] {
+        assert!(!shown.contains(secret), "{secret} in {shown}");
+    }
+    assert!(shown.contains("registry.example") && shown.contains("proxy.example:3128"), "{shown}");
+    // (a proxy's setting may have no scheme: tiny_https reads "user:password@host:port" as one)
+    let shown = format!("{:?}", Proxy::Url("puser:pr0xy@proxy.example:3128".into()));
+    assert!(!shown.contains("pr0xy") && !shown.contains("puser") && shown.contains("proxy.example:3128"), "{shown}");
 }

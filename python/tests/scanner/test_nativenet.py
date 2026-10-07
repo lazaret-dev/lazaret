@@ -80,6 +80,16 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self._send(302, headers=[("Location", "/headers")])
         elif self.path == "/out-headers":                  # (another host: 127.0.0.1)
             self._send(302, headers=[("Location", f"https://127.0.0.1:{port}/headers")])
+        elif self.path.startswith("/to-localhost/"):      # (the same server, as another origin when asked as 127.0.0.1)
+            self._send(302, headers=[("Location", f"https://localhost:{port}/{self.path[len('/to-localhost/'):]}")])
+        elif self.path.startswith("/to-port/"):           # (to localhost on another port: a server of the test's)
+            self._send(302, headers=[("Location", f"https://localhost:{self.path[len('/to-port/'):]}/ok")])
+        elif self.path.split("?")[0].endswith("/echo"):    # (the path as the server got it, and the fields)
+            self._send(200, json.dumps({"path": self.path, **{k.lower(): v for k, v in self.headers.items()}}).encode())
+        elif self.path in ("/to-dots", "/to-abs-dots", "/to-into-team"):
+            self._send(302, headers=[("Location", {"/to-dots": "/team/../echo",
+                                                   "/to-abs-dots": f"https://localhost:{port}/team/%2e%2e/echo",
+                                                   "/to-into-team": f"https://localhost:{port}/x/../team/echo"}[self.path])])
         elif self.path == "/drip":                         # (40 chunks of 64 KiB, 0.1 s apart: each read is quick)
             self.send_response(200)
             self.send_header("Content-Length", str(40 * 65536))
@@ -264,6 +274,21 @@ class NativeTransportTests(unittest.TestCase):
         finally:
             server.stop()
 
+    def test_a_redirect_to_a_server_without_tls13_leaves_that_one_to_python(self):
+        # (the credentials review of decision 14: it used to put the first URL's host on Python's transport)
+        server, port = serve(self.cert, self.key, max_version=ssl.TLSVersion.TLSv1_2)
+        old = f"localhost:{port}"
+        try:
+            with self.assertRaises(nativenet.UsePython):
+                nativenet.request(self.url(f"/to-port/{port}"), hosts=[self.host, old], max_bytes=100, timeout=10)
+            self.assertIn(old, nativenet.python_hosts())
+            self.assertNotIn(self.host, nativenet.python_hosts())
+            self.assertTrue(nativenet.chosen(self.url("/ok")), "the first URL's host stays on the native transport")
+        finally:
+            server.stop()
+            with nativenet._lock:
+                nativenet._python_hosts.discard(old)
+
     def seen(self, path, credentials, hosts=None, **kw):
         """The request's fields as the server saw them (on the last hop)."""
         reply = nativenet.request(self.url(path), hosts=hosts or [self.host, f"127.0.0.1:{self.port}"], max_bytes=10_000,
@@ -321,6 +346,14 @@ class NativeTransportTests(unittest.TestCase):
             seen = json.loads(sources._http(self.url("/out-headers"), dict(headers), 10_000, hosts, self.host))
             self.assertEqual((seen.get("authorization"), seen.get("private-token")), (None, None))
             self.assertEqual(seen.get("user-agent"), repo.USER_AGENT)
+            # a GitLab under a path prefix: the token goes with the paths under it alone
+            gitlab = {"User-Agent": repo.USER_AGENT, "PRIVATE-TOKEN": "glpat"}
+            seen = json.loads(sources._http(self.url("/gitlab/echo"), dict(gitlab), 10_000, hosts, self.host,
+                                            auth_path="/gitlab/"))
+            self.assertEqual((seen["path"], seen.get("private-token")), ("/gitlab/echo", "glpat"))
+            seen = json.loads(sources._http(self.url("/gitlab/../echo"), dict(gitlab), 10_000, hosts, self.host,
+                                            auth_path="/gitlab/"))
+            self.assertEqual((seen["path"], seen.get("private-token")), ("/gitlab/../echo", None), "/echo, to a server")
 
     def test_a_root_it_was_not_given_is_refused(self):
         tmp = tempfile.TemporaryDirectory()
@@ -364,6 +397,41 @@ class ChoiceTests(unittest.TestCase):
             self.assertEqual(nativenet._proxy_for("https://pypi.org/x"), "direct")
         with mock.patch.dict(os.environ, env, clear=True), mock.patch.object(urllib.request, "getproxies", lambda: {}):
             self.assertEqual(nativenet._proxy_for("https://registry.npmjs.org/x"), "direct")
+        if os.name != "nt":           # (one variable to Windows, whatever its case)
+            # what urllib and the native client read differently goes to urllib: the lower-case name first to urllib,
+            # and an empty one unsets the setting; the upper-case name first to tiny_https (the credentials review)
+            for differ in ({"HTTPS_PROXY": "http://a.invalid:3128", "https_proxy": "http://b.invalid:3128"},
+                           {"HTTPS_PROXY": "", "https_proxy": "http://b.invalid:3128"},
+                           {"HTTPS_PROXY": "http://a.invalid:3128", "https_proxy": ""},
+                           {"HTTPS_PROXY": "http://a.invalid:3128", "NO_PROXY": "x.example", "no_proxy": "y.example"}):
+                with self.subTest(differ), mock.patch.dict(os.environ, {**env, **differ}, clear=True), \
+                        self.assertRaises(nativenet.UsePython):
+                    nativenet._proxy_for("https://registry.npmjs.org/x")
+            same = {"HTTPS_PROXY": "http://a.invalid:3128", "https_proxy": "http://a.invalid:3128", "no_proxy": "x.example"}
+            with mock.patch.dict(os.environ, {**env, **same}, clear=True):
+                self.assertEqual(nativenet._proxy_for("https://registry.npmjs.org/x"), "env")
+        # one setting that the two read differently: tiny_https takes port 8080 when a path follows the port or none is
+        # given (urllib: the port, or 443), "*" anywhere in NO_PROXY, and no entry with a port (the second review)
+        npm = "https://registry.npmjs.org/x"
+        for differ, url in [({"HTTPS_PROXY": "http://a.invalid:3128/"}, npm), ({"HTTPS_PROXY": "http://a.invalid"}, npm),
+                            ({"HTTPS_PROXY": "http://a.invalid:3128", "NO_PROXY": "localhost,*"}, npm),
+                            ({"HTTPS_PROXY": "http://a.invalid:3128", "NO_PROXY": "registry.npmjs.org:443"},
+                             "https://registry.npmjs.org:443/x"),
+                            ({"HTTPS_PROXY": "http://u%40x:p@a.invalid:3128"}, npm)]:
+            with self.subTest(differ), mock.patch.dict(os.environ, {**env, **differ}, clear=True), \
+                    self.assertRaises(nativenet.UsePython):
+                nativenet._proxy_for(url)
+        for alike, url, want in [({"HTTPS_PROXY": "http://a.invalid:3128", "NO_PROXY": ".npmjs.org,::1"}, "https://registry.npmjs.org/x",
+                                  "env"),
+                                 ({"HTTPS_PROXY": "a.invalid:3128", "NO_PROXY": "*"}, "https://registry.npmjs.org/x", "env"),
+                                 ({"HTTPS_PROXY": "http://u:p@a.invalid:3128"}, "https://pypi.org/simple/", "env")]:
+            with self.subTest(alike), mock.patch.dict(os.environ, {**env, **alike}, clear=True):
+                self.assertEqual(nativenet._proxy_for(url), want)
+        with mock.patch.dict(os.environ, env, clear=True), \
+                mock.patch.object(urllib.request, "getproxies", lambda: {"https": "http://sys.invalid:3128/"}), \
+                mock.patch.object(urllib.request, "proxy_bypass", lambda host: False), \
+                self.assertRaises(nativenet.UsePython):
+            nativenet._proxy_for("https://registry.npmjs.org/x")
 
     def test_the_request_description(self):
         with mock.patch.object(nativenet, "_proxy_for", lambda url: "direct"):

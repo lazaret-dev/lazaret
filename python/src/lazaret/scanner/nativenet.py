@@ -250,24 +250,94 @@ def chosen(url):
         return _netloc(url) not in _python_hosts
 
 
+def _env_proxies():
+    """The environment's https proxy and no-proxy list as urllib reads them (a lower-case name first, and an empty one
+    unsets the setting) and as the native client does (an upper-case name first, set or empty): (urllib's, the
+    native client's), each (proxy, no-proxy list), "" for none."""
+    env = urllib.request.getproxies_environment()
+
+    def native(name):
+        upper = os.environ.get(name.upper())
+        return (upper if upper is not None else os.environ.get(name, "")).strip()
+
+    return ((env.get("https") or "").strip(), (env.get("no") or "").strip()), (native("https_proxy"), native("no_proxy"))
+
+
+def _urllib_proxy(value):
+    """Where urllib's ProxyHandler takes an https request for this proxy setting: (host, port, Basic login or None),
+    the port 443 when it names none (an https request's connection class's); None when it cannot read it."""
+    try:
+        _scheme, user, password, hostport = urllib.request._parse_proxy(value)
+        parts = urllib.parse.urlsplit("//" + urllib.parse.unquote(hostport))
+        login = f"{urllib.parse.unquote(user)}:{urllib.parse.unquote(password)}" if user and password else None
+        return (parts.hostname or "").lower(), parts.port or 443, login
+    except (ValueError, AttributeError, TypeError):
+        return None
+
+
+def _native_proxy(value):
+    """The same as tiny_https's `Proxy::parse` reads it: "http://" before a setting without a scheme; the port only
+    when the setting ends with it (with a path after it, even "/", or none, 8080); the login as written."""
+    text = value.strip()
+    text = text if "://" in text else "http://" + text
+    try:
+        parts = urllib.parse.urlsplit(text)
+        last = text.rsplit("/", 1)[-1]
+        port = parts.port if ":" in last and not last.endswith("]") else 8080
+        login = parts.netloc.rpartition("@")[0] if "@" in parts.netloc else None
+        return (parts.hostname or "").lower(), port, login
+    except ValueError:
+        return None
+
+
+def _native_bypass(host):
+    """tiny_https's `no_proxy_matches` for a host (lower case, an IPv6 address without brackets): NO_PROXY, or
+    no_proxy when NO_PROXY is not set; an entry is a host or a domain, its leading dots aside, or "*"."""
+    value = os.environ.get("NO_PROXY")
+    if value is None:
+        value = os.environ.get("no_proxy", "")
+    for entry in value.split(","):
+        entry = entry.strip().lstrip(".").lower()
+        if entry and (entry == "*" or host == entry or host.endswith("." + entry)):
+            return True
+    return False
+
+
 def _proxy_for(url):
     """What urllib would do for `url`: "env" (HTTPS_PROXY, with NO_PROXY, which the native client reads again on
-    every hop), "direct", or the proxy the system's settings name. UsePython for a proxy reached over TLS."""
-    if os.environ.get("HTTPS_PROXY") or os.environ.get("https_proxy"):
-        proxy = os.environ.get("HTTPS_PROXY") or os.environ.get("https_proxy")
-        if proxy.strip().lower().startswith("https://"):
+    every hop), "direct", or the proxy the system's settings name. UsePython for a proxy reached over TLS, and where
+    urllib and the native client would read the settings differently (the credentials review of decision 14): the
+    environment's variables (HTTPS_PROXY and https_proxy both set, and not to the same), the proxy's address (tiny_https
+    takes port 8080 when a path follows the port, or none is given), and whether the URL's host is one NO_PROXY names
+    (tiny_https takes "*" anywhere in the list, and no entry with a port)."""
+    ours, native = _env_proxies()
+    try:
+        parts = urllib.parse.urlsplit(url)
+    except ValueError:
+        raise UsePython("a URL the native client is not given") from None
+    if ours[0] or native[0]:
+        if ours != native:
+            raise UsePython("HTTPS_PROXY and https_proxy (or NO_PROXY and no_proxy) say different things")
+        if ours[0].lower().startswith("https://"):
             raise UsePython("a proxy reached over TLS")
+        bypass = urllib.request.proxy_bypass_environment(parts.netloc.rpartition("@")[2],
+                                                         urllib.request.getproxies_environment())
+        if bool(bypass) != _native_bypass((parts.hostname or "").lower()):
+            raise UsePython("NO_PROXY reads differently to urllib and the native client for this host")
+        if not bypass and _urllib_proxy(ours[0]) != _native_proxy(ours[0]):
+            raise UsePython("the proxy's address reads differently to urllib and the native client")
         return "env"
     try:
         proxies = urllib.request.getproxies()                # (macOS and Windows: the system's settings)
         proxy = proxies.get("https")
-        host = urllib.parse.urlsplit(url).hostname or ""
-        if not proxy or urllib.request.proxy_bypass(host):
+        if not proxy or urllib.request.proxy_bypass(parts.hostname or ""):
             return "direct"
     except (OSError, ValueError):
         return "direct"
     if proxy.strip().lower().startswith("https://"):
         raise UsePython("a proxy reached over TLS")
+    if _urllib_proxy(proxy) != _native_proxy(proxy):
+        raise UsePython("the proxy's address reads differently to urllib and the native client")
     return proxy
 
 
@@ -309,12 +379,15 @@ def http2(max_bytes=None):
 def _failure(url, answer):
     try:
         doc = json.loads(answer)
-        kind, message = doc.get("kind", "setup"), doc.get("error", "")
+        kind, message, host = doc.get("kind", "setup"), doc.get("error", ""), doc.get("host")
     except ValueError:
-        kind, message = "setup", answer.decode("ascii", "replace")
+        kind, message, host = "setup", answer.decode("ascii", "replace"), None
     if kind == "tls-version":
-        with _lock:
-            _python_hosts.add(_netloc(url))
+        # (the host of the hop that offered no TLS 1.3, a redirect's when it was one: the first URL's host stays on the
+        # native transport; the credentials review of decision 14)
+        if isinstance(host, str) and host:
+            with _lock:
+                _python_hosts.add(_netloc(f"https://{host}/"))
         raise UsePython(f"the server offers no TLS 1.3 ({message})")
     raise NetError(kind, message)
 
