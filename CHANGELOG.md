@@ -148,6 +148,12 @@ project is pre-1.0, so the 0.x API may still change.
   and 2,151, licence-checked) and Go's own `std`, `cmd` and vendored modules, each as its
   registry serves it, for `scripts/bench.py`. None is SUSPICIOUS, and every WARN is read
   (`docs/TESTING.md` §4). The Go and Rust malicious set is run offline.
+- **For contributors: the extensions' benign set (E-1's fourth part).**
+  `scripts/popular/popular.py` pins VS Code extensions from Open VSX too (`pin --top
+  0,0,0,N`): each one's newest release with a file for Linux x86-64, by the SHA-256 Open VSX
+  publishes and only under the licences the crates are taken under. `--top` now pins anew
+  only the ecosystems it is given a count for, and a redirect is followed only to https on
+  a registry's own host (`docs/TESTING.md` §4).
 - **Credentials in Go's and Rust's declarations, crates.io's tokens and a `.netrc`'s
   passwords (G-4, R-4, N-12).** S-SECRET read `name = "…"` and `name: "…"`, so Go's
   `apiKey := "…"` and `var password string = "…"` and Rust's `const API_KEY: &str = "…"`,

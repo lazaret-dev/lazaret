@@ -16,8 +16,9 @@ and "cat", the release's category,
 where "benign" marks a package that should pass and anything else a
 malicious release. (lz_path, lz_container and lz_kind are read too: the
 names the corpus preparation writes.) scripts/popular/ writes the benign
-manifests: popular.py the popular releases (npm, PyPI, crates), packaged.py
-the Go modules and crates Ubuntu packages and Go's own tree.
+manifests: popular.py the popular releases (npm, PyPI, crates, Open VSX's
+extensions), packaged.py the Go modules and crates Ubuntu packages and Go's
+own tree.
 
 `run` scans each release as `lazaret-registry` does (in memory: nothing
 in it is unpacked to disk or run), on the engine the package loads

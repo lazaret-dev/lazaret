@@ -5,34 +5,41 @@ The benchmark's benign set is 429 popular packages, mostly small libraries,
 and it did not hold the nine popular releases 0.1.8 made SUSPICIOUS (vite,
 vitest, monaco-editor, coverage, numba, future, sympy, ipython,
 kubernetes). This set is the latest releases of most-downloaded npm and PyPI
-packages the benchmark does not hold, and of the most-downloaded crates
-(0.1.9, N-2), pinned by version and sha256 in releases.jsonl beside this
-script, each the one file the guard scans: npm's tarball, for PyPI the file
-pip would install on Linux x86-64 (a wheel for any platform, then a
+packages the benchmark does not hold, of the most-downloaded crates (0.1.9,
+N-2) and of the most-installed VS Code extensions Open VSX serves (0.1.9,
+E-1's fourth part), pinned by version and sha256 in releases.jsonl beside
+this script, each the one file the guard scans: npm's tarball, for PyPI the
+file pip would install on Linux x86-64 (a wheel for any platform, then a
 manylinux x86-64 wheel for CPython 3.11 or the stable ABI, then any
-manylinux x86-64 wheel, else the sdist), and a crate's .crate.
+manylinux x86-64 wheel, else the sdist), a crate's .crate, and an
+extension's .vsix for Linux x86-64 (its linux-x64 file, else its universal
+one).
 
     python3 scripts/popular/popular.py fetch --cache DIR --manifest DIR/manifest.jsonl
     python3 scripts/bench.py run DIR/manifest.jsonl RUN.jsonl      (looped, as for the benchmark)
     python3 scripts/bench.py compare BEFORE.jsonl RUN.jsonl
 
-    python3 scripts/popular/popular.py pin --top 800,400,500 --exclude FILE --cache DIR    (refresh, each release)
-    python3 scripts/popular/popular.py pin npm:vite@8.3.2 pypi:sympy crates:syn --cache DIR (add or move some)
+    python3 scripts/popular/popular.py pin --top 800,400,500,400 --exclude FILE --cache DIR    (refresh, each release)
+    python3 scripts/popular/popular.py pin --top 0,0,0,400 --cache DIR                         (one ecosystem's)
+    python3 scripts/popular/popular.py pin npm:vite@8.3.2 pypi:sympy crates:syn --cache DIR    (add or move some)
+    python3 scripts/popular/popular.py fetch --only openvsx --cache DIR --manifest DIR/vsix.jsonl
     python3 scripts/popular/popular.py check
 
 `fetch` downloads each pinned file into DIR, named by its sha256 (a file
 already there is hashed again), refuses bytes that are not the pinned ones,
 and writes a manifest for scripts/bench.py, every release in the category
-"benign". `pin --top N,M,K` takes the first N npm, M PyPI and K crates
-names of python/src/lazaret/registry/popular_names.json (the most
-downloaded), less the names --exclude lists (one per line, "npm:name",
-"pypi:name", "crates:name", or a bare name for all: the benchmark's benign
+"benign". `pin --top N,M,K,L` takes the first N npm, M PyPI, K crates and
+L extension names of python/src/lazaret/registry/popular_names.json (the
+most downloaded; the extensions' list, "vscode", is both registries'
+rankings, so a name Open VSX does not serve is left out), less the names
+--exclude lists (one per line, "npm:name", "pypi:name", "crates:name",
+"openvsx:namespace.name", or a bare name for all: the benchmark's benign
 set), resolves each one's latest release, downloads its file into DIR to
-hash it, and writes releases.jsonl anew; a name whose release can't be
-pinned (no file, a file over the size limit, a registry error) is reported
-and left out. With specs, `pin` pins those releases (the latest one when a
-spec names no version) and keeps the others. `check` validates
-releases.jsonl.
+hash it, and pins those ecosystems' releases anew; an ecosystem given no
+count, or 0, keeps its pins. A name whose release can't be pinned (no file,
+a file over the size limit, a registry error) is reported and left out.
+With specs, `pin` pins those releases (the latest one when a spec names no
+version) and keeps the others. `check` validates releases.jsonl.
 
 A crate's release is crates.io's default version (the highest stable one
 not yanked), read from crates.io's API at one request a second (its crawler
@@ -42,8 +49,17 @@ can take in (LICENCES: MIT, Apache-2.0, the BSD licences, ISC, Zlib, …),
 since the findings on this set are read, and code under other licences is
 not reviewed.
 
-Only https from the registries' own hosts is fetched. Standard library only;
-nothing is unpacked or run here (bench.py scans in memory).
+An extension's release is the newest version Open VSX lists that is not a
+pre-release and has a file for Linux x86-64 (the editor takes a
+platform's own file before a universal one), read from its query API
+(every version, newest first) at two requests a second, with the sha256
+Open VSX publishes beside the file; it is pinned only under LICENCES, as a
+crate is. Its file's URL answers with a redirect to Open VSX's content
+host.
+
+Only https from the registries' own hosts is fetched, a redirect's target
+too. Standard library only; nothing is unpacked or run here (bench.py scans
+in memory).
 """
 import argparse
 import contextlib
@@ -54,6 +70,7 @@ import pathlib
 import re
 import sys
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 
@@ -62,15 +79,30 @@ ROOT = HERE.parent.parent
 RELEASES = HERE / "releases.jsonl"
 NAMES = ROOT / "python" / "src" / "lazaret" / "registry" / "popular_names.json"
 
-ECOSYSTEMS = ("npm", "pypi", "crates")
+ECOSYSTEMS = ("npm", "pypi", "crates", "openvsx")
+#: the section of popular_names.json an ecosystem's names come from, when it is not the ecosystem's own
+NAMES_SECTION = {"openvsx": "vscode"}
 NPM_REGISTRY = "https://registry.npmjs.org/"
 PYPI_JSON = "https://pypi.org/pypi/"
 CRATES_API = "https://crates.io/api/v1/crates/"
 CRATES_FILES = "https://static.crates.io/crates/"
-#: the hosts a pinned file may come from, by ecosystem
-FILE_HOSTS = {"npm": ("registry.npmjs.org",), "pypi": ("files.pythonhosted.org",), "crates": ("static.crates.io",)}
+OPENVSX_HOST = "open-vsx.org"
+OPENVSX_API = f"https://{OPENVSX_HOST}/api/"
+#: the hosts a pinned file may come from, by ecosystem (an Open VSX file's URL redirects to its content host)
+FILE_HOSTS = {"npm": ("registry.npmjs.org",), "pypi": ("files.pythonhosted.org",), "crates": ("static.crates.io",),
+              "openvsx": (OPENVSX_HOST, "openvsx.eclipsecontent.org")}
+#: the hosts any request may go to, a redirect's target too: the registries' APIs and FILE_HOSTS
+HOSTS = frozenset(("registry.npmjs.org", "pypi.org", "crates.io", *(h for hs in FILE_HOSTS.values() for h in hs)))
 #: seconds between two requests to crates.io's API (its crawler policy: one a second)
 API_INTERVAL = 1.0
+#: seconds between two requests to Open VSX (it paces anonymous clients)
+OPENVSX_INTERVAL = 0.5
+#: an extension's files pinned, the first that a version has: a platform's own file before the universal one, as the
+#: editor takes them on Linux x86-64
+OPENVSX_PLATFORMS = ("linux-x64", "universal")
+OPENVSX_PAGE = 1000                # the query API's largest page
+OPENVSX_MAX_ENTRIES = 5000         # the entries (one per version and platform) read for one extension
+MAX_DIGEST_BYTES = 1024            # a .sha256 file is 64 hex digits
 #: the licences a pinned crate may be under (SPDX ids, lower case; "+" or "-or-later" is the same licence): ones
 #: Apache-2.0's terms can take in, since the set's findings are read; LICENCE_EXCEPTIONS may follow WITH
 LICENCES = frozenset(("mit", "mit-0", "apache-2.0", "bsd-2-clause", "bsd-3-clause", "0bsd", "isc", "zlib",
@@ -83,7 +115,9 @@ FETCH_TIMEOUT = 90
 USER_AGENT = "lazaret-popular-set (https://lazaret.dev)"
 FIELDS = ("id", "ecosystem", "name", "version", "filename", "url", "container", "kind", "sha256", "bytes")
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
-SPEC_RE = re.compile(r"^(npm|pypi|crates):((?:@[^/@\s]+/)?[^@\s]+)(?:@([^@\s]+))?$")
+SPEC_RE = re.compile(r"^(" + "|".join(ECOSYSTEMS) + r"):((?:@[^/@\s]+/)?[^@\s]+)(?:@([^@\s]+))?$")
+EXTENSION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9-]*\.[A-Za-z0-9][A-Za-z0-9-]*$")
+SEMVER_RE = re.compile(r"(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?")
 
 EXIT_OK, EXIT_INVALID, EXIT_USAGE, EXIT_FETCH = 0, 1, 2, 3
 
@@ -94,6 +128,21 @@ class PinError(Exception):
 
 class DigestError(PinError):
     """Bytes whose sha256 is not the one they must have."""
+
+
+class _Redirects(urllib.request.HTTPRedirectHandler):
+    """A redirect followed only to https on one of HOSTS (Open VSX's file URLs answer with one to its content host)."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        parts = urllib.parse.urlsplit(newurl)
+        if parts.scheme != "https" or (parts.hostname or "") not in HOSTS:
+            raise urllib.error.HTTPError(req.full_url, code, f"a redirect to {parts.scheme}://{parts.hostname or ''}, "
+                                         f"not https on a registry's host", headers, fp)
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+#: urlopen, with redirects checked (_Redirects)
+urlopen = urllib.request.build_opener(_Redirects).open
 
 
 # ---- the pinned file
@@ -108,6 +157,8 @@ def container_kind(eco, filename):
         return ("tgz", "npm") if low.endswith(".tgz") else None
     if eco == "crates":
         return ("tgz", "crate") if low.endswith(".crate") else None
+    if eco == "openvsx":
+        return ("zip", "vsix") if low.endswith(".vsix") else None
     if low.endswith(".whl"):
         return "zip", "wheel"
     if low.endswith((".tar.gz", ".tgz")):
@@ -230,7 +281,7 @@ def write_releases(rows, path=RELEASES):
 
 
 # ---- the network
-def get(url, limit, opener=urllib.request.urlopen):
+def get(url, limit, opener=urlopen):
     """The body at `url`, at most `limit` bytes (PinError past it, or on a network error)."""
     try:
         req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT, "Accept": "application/json, */*"})
@@ -243,23 +294,34 @@ def get(url, limit, opener=urllib.request.urlopen):
     return data
 
 
-def get_json(url, opener=urllib.request.urlopen):
+def get_json(url, opener=urlopen):
     try:
         return json.loads(get(url, MAX_META_BYTES, opener))
     except ValueError as exc:
         raise PinError(f"{url}: not JSON ({exc})") from exc
 
 
-_api_last = [float("-inf")]
+_last_request = {}
 
 
-def crates_api(path, opener=urllib.request.urlopen):
-    """crates.io's API answer at `path`, at most one request each API_INTERVAL seconds."""
-    wait = _api_last[0] + API_INTERVAL - time.monotonic()
+def _pace(host, interval):
+    """At most one request to `host` each `interval` seconds."""
+    wait = _last_request.get(host, float("-inf")) + interval - time.monotonic()
     if wait > 0:
         time.sleep(wait)
-    _api_last[0] = time.monotonic()
+    _last_request[host] = time.monotonic()
+
+
+def crates_api(path, opener=urlopen):
+    """crates.io's API answer at `path`, at most one request each API_INTERVAL seconds."""
+    _pace("crates.io", API_INTERVAL)
     return get_json(CRATES_API + path, opener)
+
+
+def openvsx_get(url, limit=MAX_META_BYTES, opener=urlopen):
+    """Open VSX's answer at `url`, at most one request each OPENVSX_INTERVAL seconds."""
+    _pace(OPENVSX_HOST, OPENVSX_INTERVAL)
+    return get(url, limit, opener)
 
 
 def sha256_file(path):
@@ -270,11 +332,13 @@ def sha256_file(path):
     return h.hexdigest()
 
 
-def download(url, eco, cache, opener=urllib.request.urlopen, expect=None):
+def download(url, eco, cache, opener=urlopen, expect=None):
     """Download `url` into `cache`, named by its sha256: -> (sha256, size, path). With `expect`, bytes whose
     sha256 is another are refused (PinError) and not kept."""
     if not url_allowed(url, eco):
         raise PinError(f"only https from {' or '.join(FILE_HOSTS[eco])} is fetched: {url}")
+    if urllib.parse.urlsplit(url).hostname == OPENVSX_HOST:
+        _pace(OPENVSX_HOST, OPENVSX_INTERVAL)
     os.makedirs(cache, exist_ok=True)
     part = os.path.join(cache, f".part-{os.getpid()}")
     h, size = hashlib.sha256(), 0
@@ -307,7 +371,7 @@ def download(url, eco, cache, opener=urllib.request.urlopen, expect=None):
             os.remove(part)
 
 
-def fetch_file(row, cache, opener=urllib.request.urlopen):
+def fetch_file(row, cache, opener=urlopen):
     """-> the path of `row`'s file in `cache`, fetched if it is not there. A file already there is hashed
     again, so a damaged or swapped cache is not trusted. PinError for other bytes than the pinned ones."""
     dest = os.path.join(cache, row["sha256"])
@@ -335,7 +399,7 @@ def pypi_pick(files):
     return None
 
 
-def resolve_crate(name, version=None, opener=urllib.request.urlopen):
+def resolve_crate(name, version=None, opener=urlopen):
     """-> (the crate's name as crates.io spells it, version, its .crate's url, the sha256 crates.io lists): the
     default version (the highest stable one not yanked) unless `version` is given. PinError for a release that is
     yanked, over the size limit, or under a licence LICENCES does not take."""
@@ -362,7 +426,90 @@ def resolve_crate(name, version=None, opener=urllib.request.urlopen):
     return canonical, want, url, entry.get("checksum")
 
 
-def resolve(eco, name, version=None, opener=urllib.request.urlopen):
+def version_key(version):
+    """A version's place in SemVer's order (a release after its pre-releases); one that is not SemVer comes first."""
+    m = SEMVER_RE.fullmatch(version)
+    if not m:
+        return 0, (), 0, ()
+    pre = m.group(4)
+    ids = tuple((0, int(p), "") if p.isdigit() else (1, 0, p) for p in pre.split(".")) if pre else ()
+    return 1, tuple(int(m.group(i)) for i in (1, 2, 3)), 0 if pre else 1, ids
+
+
+def _extension_file(entry, name, version):
+    """An entry of Open VSX's query answer as a file to pin: (its place, the entry), or None for one of another
+    extension, of another version than `version`, a pre-release (when no version is named), for another platform
+    than OPENVSX_PLATFORMS', one the registry does not serve, or one naming no file or no digest."""
+    if not (isinstance(entry, dict) and isinstance(entry.get("namespace"), str) and isinstance(entry.get("name"), str)
+            and f"{entry['namespace']}.{entry['name']}".lower() == name.lower()):
+        return None
+    got = entry.get("version")
+    platform = entry.get("targetPlatform") or "universal"
+    files = entry.get("files") if isinstance(entry.get("files"), dict) else {}
+    if not isinstance(got, str) or (version is not None and got != version) \
+            or (version is None and entry.get("preRelease") is True) or platform not in OPENVSX_PLATFORMS \
+            or entry.get("downloadable") is False \
+            or not all(isinstance(files.get(k), str) for k in ("download", "sha256")):
+        return None
+    return (version_key(got), -OPENVSX_PLATFORMS.index(platform)), entry
+
+
+def resolve_extension(name, version=None, opener=urlopen):
+    """-> (the extension's namespace.name as Open VSX spells it, version, its file's url, the sha256 Open VSX publishes
+    for it): the newest version that is not a pre-release with a file for Linux x86-64, unless `version` is given, read
+    from the query API (newest first: the pages are read until one holds such a file). PinError for an extension Open
+    VSX does not serve, a version with no such file, or one under a licence LICENCES does not take."""
+    if not EXTENSION_RE.match(name):
+        raise PinError(f"openvsx:{name}: not namespace.name")
+    query = (f"{OPENVSX_API}-/query?extensionId={urllib.parse.quote(name, safe='.')}"
+             + (f"&extensionVersion={urllib.parse.quote(version, safe='')}" if version else "&includeAllVersions=true"))
+    best, offset = None, 0
+    while offset < OPENVSX_MAX_ENTRIES:
+        url = f"{query}&size={OPENVSX_PAGE}&offset={offset}"
+        try:
+            doc = json.loads(openvsx_get(url, opener=opener))
+        except ValueError as exc:
+            raise PinError(f"{url}: not JSON ({exc})") from exc
+        entries = doc.get("extensions") if isinstance(doc, dict) else None
+        total = doc.get("totalSize") if isinstance(doc, dict) else None
+        if not isinstance(entries, list) or not isinstance(total, int) or isinstance(total, bool):
+            raise PinError(f"openvsx:{name}: the registry's answer is not a list of versions")
+        if total == 0 and offset == 0:
+            raise PinError(f"openvsx:{name}" + (f"@{version}" if version else "") + ": not in Open VSX")
+        for entry in entries[:OPENVSX_PAGE]:
+            found = _extension_file(entry, name, version)
+            if found is not None and (best is None or found[0] > best[0]):
+                best = found
+        offset += OPENVSX_PAGE
+        if best is not None or offset >= total or not entries:
+            break
+    if best is None:
+        raise PinError(f"openvsx:{name}" + (f"@{version}" if version else "") +
+                       (": no file" if version else ": no release with a file") + " for Linux x86-64")
+    entry = best[1]
+    canonical, got = f"{entry['namespace']}.{entry['name']}", entry["version"]
+    licence = entry.get("license")
+    if not isinstance(licence, str):                   # (the version's own document names it)
+        platform = entry.get("targetPlatform") or "universal"
+        path = "/".join(urllib.parse.quote(p, safe="") for p in (
+            entry["namespace"], entry["name"], *(() if platform == "universal" else (platform,)), got))
+        try:
+            doc = json.loads(openvsx_get(OPENVSX_API + path, opener=opener))
+        except ValueError as exc:
+            raise PinError(f"openvsx:{canonical}@{got}: the version's document is not JSON ({exc})") from exc
+        licence = doc.get("license") if isinstance(doc, dict) else None
+    if not licence_ok(licence):
+        raise PinError(f"openvsx:{canonical}@{got}: licence {licence!r} is not one the set takes")
+    digest_url = entry["files"]["sha256"]
+    if not url_allowed(digest_url, "openvsx"):
+        raise PinError(f"openvsx:{canonical}@{got}: its digest is not on {' or '.join(FILE_HOSTS['openvsx'])}")
+    digest = openvsx_get(digest_url, MAX_DIGEST_BYTES, opener).decode("ascii", "replace").strip()
+    if not SHA256_RE.match(digest.lower()):
+        raise PinError(f"openvsx:{canonical}@{got}: the digest Open VSX published is not a sha256")
+    return canonical, got, entry["files"]["download"], digest.lower()
+
+
+def resolve(eco, name, version=None, opener=urlopen):
     """-> the release's row, without sha256 and bytes (and with "expect_sha256" when the registry gives it)."""
     if eco == "npm":
         meta = get_json(NPM_REGISTRY + urllib.parse.quote(name, safe="@") + "/" +
@@ -384,6 +531,8 @@ def resolve(eco, name, version=None, opener=urllib.request.urlopen):
             raise PinError(f"pypi:{name}@{version}: {picked['filename']} is over {MAX_FILE_BYTES >> 20} MiB")
     elif eco == "crates":
         name, version, url, expect = resolve_crate(name, version, opener)
+    elif eco == "openvsx":
+        name, version, url, expect = resolve_extension(name, version, opener)
     else:
         raise PinError(f"unknown ecosystem {eco!r}")
     filename = urllib.parse.urlsplit(url).path.rsplit("/", 1)[-1]
@@ -397,7 +546,7 @@ def resolve(eco, name, version=None, opener=urllib.request.urlopen):
     return row
 
 
-def pin_one(eco, name, version, cache, opener=urllib.request.urlopen):
+def pin_one(eco, name, version, cache, opener=urlopen):
     """Resolve the release and download its file into `cache` to hash it: -> its row."""
     row = resolve(eco, name, version, opener)
     expect = row.pop("expect_sha256", None)
@@ -411,8 +560,8 @@ def pin_one(eco, name, version, cache, opener=urllib.request.urlopen):
 
 # ---- which names
 def read_exclude(path):
-    """-> {(eco, name)}: "npm:name", "pypi:name", "crates:name", or a bare name for every ecosystem; # starts a
-    comment."""
+    """-> {(eco, name)}: "npm:name", "pypi:name", "crates:name", "openvsx:namespace.name", or a bare name for every
+    ecosystem; # starts a comment."""
     out = set()
     with open(path, encoding="utf-8") as fh:
         for line in fh:
@@ -428,7 +577,8 @@ def read_exclude(path):
 
 
 def normal(eco, name):
-    """A name as the registry compares it (PEP 503 for PyPI; npm names are lower case; crates.io takes - for _)."""
+    """A name as the registry compares it (PEP 503 for PyPI; npm names are lower case; crates.io takes - for _; Open
+    VSX compares without case)."""
     name = name.strip().lower()
     if eco == "pypi":
         return re.sub(r"[-_.]+", "-", name)
@@ -436,7 +586,8 @@ def normal(eco, name):
 
 
 def top_names(counts, exclude=frozenset(), names_path=NAMES):
-    """The first counts[eco] names of popular_names.json's targets per ecosystem, less `exclude`."""
+    """The first counts[eco] names of popular_names.json's targets per ecosystem (NAMES_SECTION's section for one
+    that has no section of its own), less `exclude`."""
     with open(names_path, encoding="utf-8") as fh:
         data = json.load(fh)
     out = []
@@ -444,7 +595,7 @@ def top_names(counts, exclude=frozenset(), names_path=NAMES):
         want = counts.get(eco, 0)
         if want <= 0:
             continue
-        for name in data[eco]["targets"]:
+        for name in data[NAMES_SECTION.get(eco, eco)]["targets"]:
             if want <= 0:
                 break
             if (eco, normal(eco, name)) in exclude:
@@ -466,8 +617,8 @@ def parse_top(text):
         counts = [int(x) for x in text.split(",")]
     except ValueError:
         counts = []
-    if len(counts) not in (2, 3):
-        raise argparse.ArgumentTypeError("--top takes N,M[,K] (npm names, PyPI names, crates names)")
+    if len(counts) not in (2, 3, 4):
+        raise argparse.ArgumentTypeError("--top takes N,M[,K[,L]] (npm names, PyPI names, crates names, extensions)")
     if min(counts) < 0:
         raise argparse.ArgumentTypeError("--top takes counts of 0 or more")
     return dict(zip(ECOSYSTEMS, counts))
@@ -495,12 +646,12 @@ def cmd_check(args):
     for p in problems:
         _say(p)
     counts = {eco: sum(1 for r in rows if isinstance(r, dict) and r.get("ecosystem") == eco) for eco in ECOSYSTEMS}
-    print(f"{len(rows)} releases ({counts['npm']} npm, {counts['pypi']} PyPI, {counts['crates']} crates); "
-          f"{len(problems)} problem{'' if len(problems) == 1 else 's'}")
+    print(f"{len(rows)} releases ({counts['npm']} npm, {counts['pypi']} PyPI, {counts['crates']} crates, "
+          f"{counts['openvsx']} Open VSX); {len(problems)} problem{'' if len(problems) == 1 else 's'}")
     return EXIT_INVALID if problems else EXIT_OK
 
 
-def cmd_fetch(args, opener=urllib.request.urlopen):
+def cmd_fetch(args, opener=urlopen):
     rows = read_releases(args.releases)
     problems = validate(rows)
     if problems:
@@ -527,15 +678,16 @@ def cmd_fetch(args, opener=urllib.request.urlopen):
     return EXIT_FETCH if failed else EXIT_OK
 
 
-def cmd_pin(args, opener=urllib.request.urlopen):
+def cmd_pin(args, opener=urlopen):
     if bool(args.specs) == bool(args.top):
-        _say("error: pin takes specs or --top N,M[,K] (not both)")
+        _say("error: pin takes specs or --top N,M[,K[,L]] (not both)")
         return EXIT_USAGE
     try:
         if args.top:
             exclude = read_exclude(args.exclude) if args.exclude else set()
             wanted = [(eco, name, None) for eco, name in top_names(args.top, exclude)]
-            keep = []
+            old = read_releases(args.releases) if os.path.exists(args.releases) else []
+            keep = [r for r in old if args.top.get(r.get("ecosystem"), 0) <= 0]     # the ecosystems not pinned anew
         else:
             wanted = [parse_spec(s) for s in args.specs]
             keep = read_releases(args.releases) if os.path.exists(args.releases) else []
@@ -572,7 +724,8 @@ def build_parser():
     n = sub.add_parser("pin", help="resolve releases, hash their files and write the pinned file")
     n.add_argument("specs", nargs="*", metavar="ecosystem:name[@version]")
     n.add_argument("--top", type=parse_top,
-                   help="N,M[,K]: the first N npm, M PyPI and K crates popular names (replaces the file)")
+                   help="N,M[,K[,L]]: the first N npm, M PyPI, K crates and L extension popular names (pins those "
+                        "ecosystems anew; one given no count, or 0, keeps its pins)")
     n.add_argument("--exclude", help="names to leave out of --top, one per line")
     n.add_argument("--cache", required=True, help="where the downloaded files go, named by sha256")
     n.set_defaults(func=cmd_pin)

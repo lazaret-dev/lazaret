@@ -318,12 +318,29 @@ and SC-NESTED-ARCHIVE). At each release, refresh it:
 `popular.py pin --top 800,400,500 --exclude FILE --cache DIR` takes the
 latest release of the first 800 npm, 400 PyPI and 500 crates names of
 `python/src/lazaret/registry/popular_names.json` (the most downloaded),
-less the benchmark's benign names, which FILE lists, and rewrites the file
-(crates.io's API is asked once a second, so the crates take about ten
-minutes; a crate under a licence Apache-2.0 can't take in is left out,
-since this set's findings are read); a new release of a popular package is
-what this set exists to catch. `popular.py pin npm:vite@8.3.2 crates:syn …`
-adds or moves single releases, and `popular.py check` validates the file.
+less the benchmark's benign names, which FILE lists, and pins those three
+ecosystems anew (crates.io's API is asked once a second, so the crates take
+about ten minutes; a crate under a licence Apache-2.0 can't take in is left
+out, since this set's findings are read); a new release of a popular
+package is what this set exists to catch. A fourth count pins extensions
+from Open VSX, and an ecosystem given no count, or 0, keeps its pins.
+`popular.py pin npm:vite@8.3.2 crates:syn …` adds or moves single
+releases, and `popular.py check` validates the file.
+
+**The extensions (E-1's fourth part).** `popular.py pin --top 0,0,0,400
+--cache DIR` takes the first 400 names of the extensions' list (`vscode`
+in `popular_names.json`: both registries' rankings, in turn) and pins, for
+each one Open VSX serves, its newest release that is not a pre-release and
+has a file for Linux x86-64 (the `linux-x64` file, else the universal one,
+as the editor chooses), checked against the SHA-256 Open VSX publishes
+beside it and only under the licences the crates are taken under; a name
+only the Marketplace serves is left out (its files have no published
+digest to pin by). Open VSX is asked twice a second, and its file URLs
+redirect to its content host (the script follows a redirect only to https
+on a registry's own host). `fetch --only openvsx --manifest DIR/vsix.jsonl`
+and `bench.py run` scan them as `lazaret FILE.vsix` does: no extension may
+be SUSPICIOUS, and every WARN is read. The sandbox the 0.1.9 work ran in
+cannot reach Open VSX, so the set is pinned and run where it can be.
 
 **The Go and Rust sets (N-2).** No Go registry publishes downloads, and Go's
 module proxy can't be reached from everywhere the gate runs, so the Go and

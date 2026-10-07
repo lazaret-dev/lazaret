@@ -14,6 +14,7 @@ import tempfile
 import time
 import unittest
 import urllib.error
+import urllib.request
 
 from tests import _support
 
@@ -24,6 +25,7 @@ NPM_FILES = "https://registry.npmjs.org/"
 PY_FILES = "https://files.pythonhosted.org/packages/ab/cd/"
 CRATE_FILES = "https://static.crates.io/crates/"
 API = "https://crates.io/api/v1/crates/"
+OVSX = "https://open-vsx.org/api/"
 
 
 def sha(data):
@@ -51,6 +53,9 @@ def row(eco="npm", name="left-pad", version="1.3.0", data=b"tarball", **over):
     elif eco == "crates":
         filename = f"{name}-{version}.crate"
         url, ck = f"{CRATE_FILES}{name}/{filename}", ("tgz", "crate")
+    elif eco == "openvsx":
+        filename = f"{name}-{version}.vsix"
+        url, ck = f"{OVSX}{name.replace('.', '/')}/{version}/file/{filename}", ("zip", "vsix")
     else:
         filename = f"{name}-{version}-py3-none-any.whl"
         url, ck = PY_FILES + filename, ("zip", "wheel")
@@ -132,6 +137,18 @@ class ValidateTests(unittest.TestCase):
         self.assertIsNone(pop.container_kind("npm", "a-1.zip"))
         self.assertEqual(pop.container_kind("crates", "serde-1.0.228.crate"), ("tgz", "crate"))
         self.assertIsNone(pop.container_kind("crates", "serde-1.0.228.tgz"))
+        self.assertEqual(pop.container_kind("openvsx", "redhat.java-1.40.0@linux-x64.vsix"), ("zip", "vsix"))
+        self.assertIsNone(pop.container_kind("openvsx", "redhat.java-1.40.0.zip"))
+        self.assertIsNone(pop.container_kind("npm", "redhat.java-1.40.0.vsix"))
+
+    def test_an_extension_only_from_open_vsx_and_its_content_host(self):
+        self.assertEqual(self.problems(row("openvsx", "redhat.java", "1.40.0")), [])
+        content = row("openvsx", "redhat.java", "1.40.0",
+                      url="https://openvsx.eclipsecontent.org/redhat/java/1.40.0/file/redhat.java-1.40.0.vsix")
+        self.assertEqual(self.problems(content), [])
+        self.assertIn("is not https on open-vsx.org or openvsx.eclipsecontent.org",
+                      self.problems(row("openvsx", "redhat.java", "1.40.0",
+                                        url="https://marketplace.invalid/redhat.java-1.40.0.vsix"))[0])
 
     def test_a_crate_only_from_static_crates_io(self):
         good = row("crates", "serde", "1.0.228")
@@ -297,6 +314,148 @@ class CratesTests(unittest.TestCase):
                 self.assertEqual(pop.licence_ok(expr), ok)
 
 
+def extension(version, platform="universal", pre=False, licence="MIT", ns="redhat", name="java", **over):
+    """An entry of Open VSX's query answer: one version's file for one platform."""
+    at = "" if platform == "universal" else f"@{platform}"
+    where = f"{OVSX}{ns}/{name}/" + ("" if platform == "universal" else f"{platform}/") + f"{version}/file/"
+    file = f"{where}{ns}.{name}-{version}{at}"
+    e = {"namespace": ns, "name": name, "version": version, "targetPlatform": platform, "preRelease": pre,
+         "files": {"download": file + ".vsix", "sha256": file + ".sha256"}}
+    if licence is not None:
+        e["license"] = licence
+    e.update(over)
+    return e
+
+
+def query(name="redhat.java", version=None, offset=0, size=1000):
+    which = f"&extensionVersion={version}" if version else "&includeAllVersions=true"
+    return f"{OVSX}-/query?extensionId={name}{which}&size={size}&offset={offset}"
+
+
+class OpenVSXTests(unittest.TestCase):
+    """An extension's release: Open VSX's newest release with a file for Linux x86-64, its licence, its sha256."""
+
+    def setUp(self):
+        old = pop.OPENVSX_INTERVAL
+        pop.OPENVSX_INTERVAL = 0
+        self.addCleanup(setattr, pop, "OPENVSX_INTERVAL", old)
+
+    def registry(self, entries, data=b"PK vsix bytes", digest=None, total=None, extra=None, name="redhat.java",
+                 version=None):
+        pages = {query(name, version): json.dumps({"extensions": entries, "totalSize": len(entries) if total is None
+                                                   else total}).encode()}
+        for e in entries:
+            pages[e["files"]["download"]] = data
+            pages[e["files"]["sha256"]] = (digest or sha(data)).encode() + b"\n"
+        pages.update(extra or {})
+        return Registry(pages)
+
+    def test_the_newest_release_with_a_file_for_linux_x86_64(self):
+        data = b"PK linux-x64 vsix"
+        entries = [extension("1.42.0", pre=True), extension("1.41.0", "darwin-arm64"),
+                   extension("1.40.0", "darwin-arm64"), extension("1.40.0", "linux-x64"), extension("1.39.0"),
+                   extension("1.43.0", downloadable=False)]
+        with tempfile.TemporaryDirectory() as cache:
+            got = pop.pin_one("openvsx", "redhat.java", None, cache, self.registry(entries, data))
+            self.assertEqual(os.listdir(cache), [sha(data)])
+        url = OVSX + "redhat/java/linux-x64/1.40.0/file/redhat.java-1.40.0@linux-x64.vsix"
+        self.assertEqual(got, {"id": "openvsx:redhat.java@1.40.0", "ecosystem": "openvsx", "name": "redhat.java",
+                               "version": "1.40.0", "filename": "redhat.java-1.40.0@linux-x64.vsix", "url": url,
+                               "container": "zip", "kind": "vsix", "sha256": sha(data), "bytes": len(data)})
+        self.assertEqual(pop.validate([got]), [])
+
+    def test_a_named_version_a_universal_file_and_the_registrys_spelling(self):
+        entries = [extension("0.47.1", ns="golang", name="Go"),
+                   extension("0.47.1", "darwin-x64", ns="golang", name="Go")]
+        with tempfile.TemporaryDirectory() as cache:
+            got = pop.pin_one("openvsx", "golang.go", "0.47.1", cache,
+                              self.registry(entries, name="golang.go", version="0.47.1"))
+        self.assertEqual((got["id"], got["filename"]), ("openvsx:golang.Go@0.47.1", "golang.Go-0.47.1.vsix"))
+        pre = [extension("2.0.0", pre=True)]
+        with tempfile.TemporaryDirectory() as cache:                       # a pre-release, when it is named
+            got = pop.pin_one("openvsx", "redhat.java", "2.0.0", cache, self.registry(pre, version="2.0.0"))
+        self.assertEqual(got["version"], "2.0.0")
+
+    def test_the_pages_are_read_until_one_holds_a_release(self):
+        old = pop.OPENVSX_PAGE
+        pop.OPENVSX_PAGE = 2
+        self.addCleanup(setattr, pop, "OPENVSX_PAGE", old)
+        first, second = [extension("1.2.0", pre=True), extension("1.1.0", pre=True)], [extension("1.0.0")]
+        reg = self.registry(first + second, extra={
+            query(size=2): json.dumps({"extensions": first, "totalSize": 3}).encode(),
+            query(offset=2, size=2): json.dumps({"extensions": second, "totalSize": 3}).encode()})
+        with tempfile.TemporaryDirectory() as cache:
+            got = pop.pin_one("openvsx", "redhat.java", None, cache, reg)
+        self.assertEqual(got["version"], "1.0.0")
+        self.assertIn(query(offset=2, size=2), reg.asked)
+
+    def test_a_licence_only_the_versions_document_names(self):
+        entries = [extension("1.40.0", "linux-x64", licence=None)]
+        doc = {OVSX + "redhat/java/linux-x64/1.40.0": json.dumps({"license": "Apache-2.0"}).encode()}
+        with tempfile.TemporaryDirectory() as cache:
+            got = pop.pin_one("openvsx", "redhat.java", None, cache, self.registry(entries, extra=doc))
+        self.assertEqual(got["version"], "1.40.0")
+
+    def test_what_is_not_pinned(self):
+        release = [extension("1.40.0")]
+        no_licence = {OVSX + "redhat/java/1.40.0": json.dumps({"license": "EPL-2.0"}).encode()}
+        with tempfile.TemporaryDirectory() as cache:
+            for reg, name, text in (
+                    (self.registry([], total=0), "redhat.java", "not in Open VSX"),
+                    (self.registry([extension("1.0.0", pre=True), extension("0.9.0", "win32-x64"),
+                                    extension("0.8.0", downloadable=False)]), "redhat.java",
+                     "no release with a file for Linux x86-64"),
+                    (self.registry([extension("1.40.0", licence="GPL-3.0-only")]), "redhat.java",
+                     "licence 'GPL-3.0-only' is not one"),
+                    (self.registry([extension("1.40.0", licence=None)], extra=no_licence), "redhat.java",
+                     "licence 'EPL-2.0' is not one"),
+                    (self.registry(release, digest="4" * 64), "redhat.java", "not the file the registry lists"),
+                    (self.registry(release, digest="not a digest"), "redhat.java", "is not a sha256"),
+                    (Registry({query(): b"<html>"}), "redhat.java", "not JSON"),
+                    (Registry({query(): b'{"extensions": {}}'}), "redhat.java", "not a list of versions"),
+                    (self.registry(release), "java", "not namespace.name")):
+                with self.subTest(text=text), self.assertRaisesRegex(pop.PinError, text):
+                    pop.pin_one("openvsx", name, None, cache, reg)
+            moved = extension("1.40.0")
+            moved["files"]["download"] = "https://cdn.invalid/redhat.java-1.40.0.vsix"
+            with self.assertRaisesRegex(pop.PinError, "only https from open-vsx.org or openvsx.eclipsecontent.org"):
+                pop.pin_one("openvsx", "redhat.java", None, cache, self.registry([moved]))
+            elsewhere = extension("1.40.0")
+            elsewhere["files"]["sha256"] = "https://cdn.invalid/redhat.java-1.40.0.sha256"
+            with self.assertRaisesRegex(pop.PinError, "its digest is not on open-vsx.org"):
+                pop.pin_one("openvsx", "redhat.java", None, cache, self.registry([elsewhere]))
+            self.assertEqual(os.listdir(cache), [])
+
+    def test_open_vsx_is_asked_twice_a_second(self):
+        pop.OPENVSX_INTERVAL = 0.05
+        reg = self.registry([extension("1.40.0")])
+        with tempfile.TemporaryDirectory() as cache:
+            started = time.monotonic()
+            for _ in range(2):                         # the query, the digest and the file, twice
+                pop.pin_one("openvsx", "redhat.java", None, cache, reg)
+        self.assertGreaterEqual(time.monotonic() - started, 0.25)
+
+    def test_the_version_order(self):
+        order = ["1.0", "0.9.0", "1.0.0-alpha", "1.0.0-alpha.1", "1.0.0-alpha.beta", "1.0.0-beta.2", "1.0.0-beta.11",
+                 "1.0.0", "1.0.1", "1.2.0", "1.10.0", "2.0.0+build"]
+        self.assertEqual(sorted(reversed(order), key=pop.version_key), order)
+
+
+class RedirectTests(unittest.TestCase):
+    def test_a_redirect_only_to_https_on_a_registrys_host(self):
+        handler = pop._Redirects()
+        req = urllib.request.Request(OVSX + "redhat/java/1.40.0/file/redhat.java-1.40.0.vsix")
+        to = "https://openvsx.eclipsecontent.org/redhat/java/1.40.0/file/redhat.java-1.40.0.vsix"
+        self.assertEqual(handler.redirect_request(req, io.BytesIO(), 302, "Found", {}, to).full_url, to)
+        for bad in ("http://openvsx.eclipsecontent.org/x.vsix", "https://cdn.invalid/x.vsix", "file:///etc/passwd"):
+            with self.subTest(to=bad), self.assertRaisesRegex(urllib.error.HTTPError, "not https on a registry's host"):
+                handler.redirect_request(req, io.BytesIO(), 302, "Found", {}, bad)
+
+    def test_the_default_opener_checks_them(self):
+        self.assertTrue(any(isinstance(h, pop._Redirects) for h in pop.urlopen.__self__.handlers))
+        self.assertIs(pop.get.__defaults__[-1], pop.urlopen)
+
+
 class FetchTests(unittest.TestCase):
     def test_fetched_once_named_by_sha256_and_hashed_again(self):
         data = b"the pinned bytes"
@@ -373,10 +532,23 @@ class NamesAndSpecsTests(unittest.TestCase):
             got = pop.top_names(pop.parse_top("1,0,2"), pop.read_exclude(exclude), names)
         self.assertEqual(got, [("npm", "semver"), ("crates", "syn"), ("crates", "serde")])
 
+    def test_extensions_from_the_vscode_section(self):
+        with tempfile.TemporaryDirectory() as d:
+            names = os.path.join(d, "names.json")
+            with open(names, "w", encoding="utf-8") as fh:
+                json.dump({"npm": {"targets": ["semver"]}, "pypi": {"targets": []}, "crates": {"targets": []},
+                           "vscode": {"targets": ["ms-python.python", "redhat.java", "golang.go"]}}, fh)
+            exclude = os.path.join(d, "exclude.txt")
+            with open(exclude, "w", encoding="utf-8") as fh:
+                fh.write("openvsx:RedHat.Java\n")
+            got = pop.top_names(pop.parse_top("0,0,0,2"), pop.read_exclude(exclude), names)
+        self.assertEqual(got, [("openvsx", "ms-python.python"), ("openvsx", "golang.go")])
+
     def test_top_counts(self):
         self.assertEqual(pop.parse_top("800,400"), {"npm": 800, "pypi": 400})
         self.assertEqual(pop.parse_top("800,400,500"), {"npm": 800, "pypi": 400, "crates": 500})
-        for bad in ("800", "1,2,3,4", "a,b", "1,-1"):
+        self.assertEqual(pop.parse_top("0,0,0,300"), {"npm": 0, "pypi": 0, "crates": 0, "openvsx": 300})
+        for bad in ("800", "1,2,3,4,5", "a,b", "1,-1"):
             with self.subTest(top=bad), self.assertRaises(argparse.ArgumentTypeError):
                 pop.parse_top(bad)
 
@@ -384,6 +556,7 @@ class NamesAndSpecsTests(unittest.TestCase):
         self.assertEqual(pop.parse_spec("npm:@babel/parser@7.29.9"), ("npm", "@babel/parser", "7.29.9"))
         self.assertEqual(pop.parse_spec("pypi:sympy"), ("pypi", "sympy", None))
         self.assertEqual(pop.parse_spec("crates:rand_core@0.6.4"), ("crates", "rand_core", "0.6.4"))
+        self.assertEqual(pop.parse_spec("openvsx:redhat.java@1.40.0"), ("openvsx", "redhat.java", "1.40.0"))
         for bad in ("gem:rails@7", "npm:", "lodash@4"):
             with self.subTest(spec=bad), self.assertRaises(ValueError):
                 pop.parse_spec(bad)
@@ -402,6 +575,27 @@ class NamesAndSpecsTests(unittest.TestCase):
                 self.assertEqual(pop.cmd_pin(args, reg), pop.EXIT_OK)
             ids = [r["id"] for r in pop.read_releases(releases)]
         self.assertEqual(ids, ["npm:left-pad@1.4.0", "pypi:six@1.17.0"])
+
+    def test_pin_top_keeps_the_ecosystems_it_is_given_no_count_for(self):
+        with open(pop.NAMES, encoding="utf-8") as fh:
+            first = json.load(fh)["vscode"]["targets"][0]
+        ns, name = first.split(".")
+        entry = extension("3.0.0", ns=ns, name=name)
+        data = b"PK newer vsix"
+        reg = Registry({query(first): json.dumps({"extensions": [entry], "totalSize": 1}).encode(),
+                        entry["files"]["download"]: data, entry["files"]["sha256"]: sha(data).encode()})
+        old = pop.OPENVSX_INTERVAL
+        pop.OPENVSX_INTERVAL = 0
+        self.addCleanup(setattr, pop, "OPENVSX_INTERVAL", old)
+        with tempfile.TemporaryDirectory() as d:
+            releases = os.path.join(d, "r.jsonl")
+            pop.write_releases([row(), row("crates", "serde", "1.0.228"), row("openvsx", first, "2.0.0")], releases)
+            args = pop.build_parser().parse_args(["--releases", releases, "pin", "--top", "0,0,0,1",
+                                                  "--cache", os.path.join(d, "cache")])
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(pop.cmd_pin(args, reg), pop.EXIT_OK)
+            ids = [r["id"] for r in pop.read_releases(releases)]
+        self.assertEqual(ids, ["crates:serde@1.0.228", "npm:left-pad@1.3.0", f"openvsx:{first}@3.0.0"])
 
     def test_pin_takes_specs_or_top(self):
         with contextlib.redirect_stderr(io.StringIO()):
