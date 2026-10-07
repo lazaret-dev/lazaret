@@ -168,7 +168,10 @@ class DriverTests(unittest.TestCase):
     def test_the_same_seed_runs_the_same_inputs_and_another_runs_others(self):
         def inputs(seed):
             seen = []
-            driver.fuzz_target(fake(seen.append, dictionary=(b"tok",)), seed=seed, iterations=60)
+            # (an input that runs slowly joins the corpus, which changes what follows it: on a loaded machine a pause
+            # of a few milliseconds did, and the same seed ran other inputs; here no input is slow)
+            with mock.patch.object(driver, "SLOW_FLOOR", 3600.0):
+                driver.fuzz_target(fake(seen.append, dictionary=(b"tok",)), seed=seed, iterations=60)
             return seen
         self.assertEqual(inputs("a"), inputs("a"))
         self.assertNotEqual(inputs("a"), inputs("b"))
