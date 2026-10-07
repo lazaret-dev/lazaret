@@ -1480,7 +1480,9 @@ know among them (SC-PROVENANCE-UNCHECKED, INFO). The release before it
 (npm: the highest lower SemVer version in the abbreviated packument, a
 pre-release only for a pre-release; PyPI: the release uploaded last before
 it, skipping releases whose every file is yanked) is compared: it had
-provenance and this one has none, SC-PROVENANCE-DROPPED; both verified,
+provenance and this one has none (a release's, on PyPI: any of its files
+listed with provenance, as for the release before, whichever file is
+scanned: EG-17), SC-PROVENANCE-DROPPED; both verified,
 from repositories with different IDs (or URIs, without IDs) of different
 owners, SC-PROVENANCE-REPO-CHANGED (both MAJOR; decision 13 asks whether
 DROPPED should be CRITICAL). A repository of the same owner is INFO: on the
@@ -1512,7 +1514,14 @@ older, are outside it. `provenance.guard_npm` reads the abbreviated
 document once for the version's own `dist.attestations` and the release
 before it; `guard.with_provenance` merges the findings into the scan's
 verdict (CRITICAL: SUSPICIOUS; MAJOR: WARN at least) before the verdict is
-cached. A package of a private registry is never named to the public one.
+cached, with whether the check ran to the end (`provenance.complete`: every
+answer it needed read; an attestation read and not checkable here counts as
+read). A cached verdict without it, for a release in the window, is scanned
+and checked again (`guard.provenance_owed`, EG-10): one cached while the
+registry could not be read, or with the check off, would otherwise pass
+unchecked until the rule set changes. The pip and uv index runs the check
+after the file's bytes have left the scanner's byte budget. A package of a
+private registry is never named to the public one.
 
 ## 6. How to add or change a rule — the loop
 

@@ -80,7 +80,9 @@ records them, each to the newest version it would take), checked and installed t
 A release from npm's or PyPI's public registry published less than PROVENANCE_DAYS (30) ago also gets the registry's
 provenance check (registry/provenance.py, NET-1): an attestation that does not hold for the file is SUSPICIOUS (it is
 blocked), a release with none of the provenance the release before it had, or with provenance from another owner's
-repository, is WARN (--block-warn blocks it); --json says what was found. LAZARET_NO_PROVENANCE=1 turns it off.
+repository, is WARN (--block-warn blocks it); --json says what was found. LAZARET_NO_PROVENANCE=1 turns it off. A
+verdict is cached with whether that check ran to the end: one cached while the registry's answers could not be read,
+or with the check off, is scanned and checked again while the release is in that window (EG-10).
 
 The resolutions made outside the project (cargo install, yarn 1, npm install -g, go install pkg@version, --plan) are made
 in a folder of the user's own (private_scratch), and the package manager is found in PATH's absolute folders only
@@ -674,13 +676,23 @@ def provenance_fetch(fetcher):
     return lambda url, max_bytes, accept: fetcher.get(url, max_bytes, accept, repo.METADATA_TIMEOUT)
 
 
+def provenance_owed(hit, published, applies):
+    """Is a cached verdict `hit` to be scanned and checked again, because the provenance check it is due (a release
+    the check `applies` to, published within PROVENANCE_DAYS) did not run to the end when it was cached: the
+    registry's answers could not be read, or the check was off (EG-10)? `published`: the release's publish time, or
+    None."""
+    return hit is not None and applies and not hit.get("provenance") and provenance_due(published)
+
+
 def with_provenance(check, hit, eco, report):
     """The scan's verdict `hit` with the release's provenance (provenance.release_issues over `report`): a CRITICAL
     finding (an attestation that does not hold for the file) makes it SUSPICIOUS, a MAJOR one (provenance dropped, or
     from another owner's repository) WARN at least, and their lines come first among its indicators; what the check
-    said is kept on `check` for --json."""
+    said is kept on `check` for --json. `provenance` in the verdict: the check ran to the end, so the verdict cache
+    keeps it as checked (provenance.complete)."""
     issues, summary = provenance_.release_issues(eco, check.name, check.version, report)
     check.provenance = summary
+    hit = {**hit, "provenance": provenance_.complete(report)}
     found = sorted((i for i in issues if i["sev"] in ("CRITICAL", "MAJOR")), key=lambda i: _SEV_RANK[i["sev"]])
     if not found:
         return hit
@@ -734,6 +746,8 @@ class VerdictCache:
             self.data[key] = {"verdict": hit["verdict"], "reason": hit["reason"],
                               "indicators": [str(i) for i in hit["indicators"]][:3],
                               "published": iso(published) if published else None}
+            if hit.get("provenance") is True:     # (the provenance check ran to the end: EG-10)
+                self.data[key]["provenance"] = True
             self.dirty = True
 
     def save(self):
@@ -1516,9 +1530,13 @@ def check_npm_package(ctx, fetcher, pkg):
     check = ctx.add(Check("npm", name, version, "registry"))
     try:
         repo._check_name("npm", name)
+        # (npm's public registry only: another one's packages are not to be named to it)
+        public = pkg["registry"] == NPM_REGISTRY and netloc(pkg["tarball"]) == netloc(NPM_REGISTRY)
         alt = VerdictCache.key("npm", name, version, "yarn:" + pkg["lock_digest"]) if pkg.get("lock_digest") else None
         hit, key, scanned = ctx.scanner.cached(alt), None, None
         published = parse_time(hit.get("published")) if hit else None
+        if provenance_owed(hit, published, public):
+            hit, published = None, None
         if hit is not None:
             check.digest = "yarn:" + pkg["lock_digest"]
         else:
@@ -1533,6 +1551,8 @@ def check_npm_package(ctx, fetcher, pkg):
             key = VerdictCache.key("npm", name, version, check.digest)
             hit = ctx.scanner.cached(key)
             published = parse_time(hit.get("published")) if hit else None
+            if provenance_owed(hit, published, public):
+                hit, published = None, None
             if hit is None:
                 data, headers = fetcher.fetch(tarball)
                 if not sri_matches(data, want):
@@ -1544,9 +1564,7 @@ def check_npm_package(ctx, fetcher, pkg):
                 scanned = hashlib.sha512(data).hexdigest()
         if ctx.cutoff is not None and (published is None or published > ctx.cutoff):
             published = npm_publish_time(fetcher, pkg["registry"], name, version) or published
-        if scanned and provenance_due(published) and pkg["registry"] == NPM_REGISTRY \
-                and netloc(pkg["tarball"]) == netloc(NPM_REGISTRY):
-            # (npm's public registry only: another one's packages are not to be named to it)
+        if scanned and provenance_due(published) and public:
             hit = with_provenance(check, hit, "npm", provenance_.guard_npm(name, version, scanned,
                                                                           provenance_fetch(fetcher)))
         ctx.scanner.remember(key, hit, published)
@@ -1635,6 +1653,9 @@ def check_file(ctx, fetcher, name, version, f):
         check.digest = f"sha256:{sha}"
         key = VerdictCache.key("pypi", pep503(name), version, check.digest)
         hit, scanned = ctx.scanner.cached(key), False
+        public = netloc(f["url"]) == "files.pythonhosted.org"
+        if provenance_owed(hit, published or (parse_time(hit.get("published")) if hit else None), public):
+            hit = None
         if hit is None:
             container = repo.pypi_container(f["filename"])
             if container is None:
@@ -1646,9 +1667,9 @@ def check_file(ctx, fetcher, name, version, f):
             hit = ctx.scanner.scan(data, container, "wheel" if f["filename"].lower().endswith(".whl") else "sdist")
             scanned = True
         published = published or parse_time(hit.get("published"))
-        if published is None and ctx.cutoff is not None and netloc(f["url"]) == "files.pythonhosted.org":
+        if published is None and ctx.cutoff is not None and public:
             published = pypi_upload_time(fetcher, name, version, f["filename"])
-        if scanned and provenance_due(published) and netloc(f["url"]) == "files.pythonhosted.org":
+        if scanned and provenance_due(published) and public:
             hit = with_provenance(check, hit, "pypi", provenance_.check_pypi(name, version, [(f["filename"], sha)],
                                                                              provenance_fetch(fetcher)))
         ctx.scanner.remember(key, hit, published)
@@ -1867,8 +1888,10 @@ class PypiIndex:
                     raise repo.FetchError("not an archive pip or uv installs")
                 if info["size"] is not None and info["size"] > repo.MAX_DOWNLOAD_BYTES:
                     raise TooLarge(f"response over {repo.MAX_DOWNLOAD_BYTES // (1024 * 1024)}MB: {info['filename']}")
+                public = netloc(info["url"]) == "files.pythonhosted.org"
+                hit = fresh = None
                 # (uv fetches many files at once, each held whole to be scanned: within the scanner's byte budget, by the
-                # size the index declares (GR-4))
+                # size the index declares (GR-4); the provenance check, which reads the index's answers, after it)
                 with self.ctx.scanner.holding(info["size"] if info["size"] is not None else UNDECLARED_HOLD):
                     data = self.fetcher.get(info["url"])
                     sha = hashlib.sha256(data).hexdigest()
@@ -1878,22 +1901,30 @@ class PypiIndex:
                         check.digest = f"sha256:{sha}"
                         key = VerdictCache.key("pypi", pep503(info["project"]), info["version"], check.digest)
                         hit = self.ctx.scanner.cached(key)
-                        if hit is None:
+                        if provenance_owed(hit, (info["published"] or parse_time(hit.get("published"))) if hit else None,
+                                           public):
+                            hit = None
+                        fresh = hit is None
+                        if fresh:
                             hit = self.ctx.scanner.scan(
                                 data, container, "wheel" if info["filename"].lower().endswith(".whl") else "sdist")
-                            if provenance_due(info["published"]) and netloc(info["url"]) == "files.pythonhosted.org":
-                                hit = with_provenance(check, hit, "pypi", provenance_.check_pypi(
-                                    info["project"], info["version"], [(info["filename"], sha)],
-                                    provenance_fetch(self.fetcher)))
-                        self.ctx.scanner.remember(key, hit, info["published"])
-                        self.ctx.apply(check, hit)
-                        self.ctx.age_check(check, info["published"])
-                        if not check.blocked:
-                            fd, spooled = tempfile.mkstemp(dir=self.spool)
-                            with os.fdopen(fd, "wb") as f:
-                                f.write(data)
+                        fd, spooled = tempfile.mkstemp(dir=self.spool)     # (removed below if it is blocked)
+                        with os.fdopen(fd, "wb") as f:
+                            f.write(data)
                     del data
+                if hit is not None:
+                    if fresh and provenance_due(info["published"]) and public:
+                        hit = with_provenance(check, hit, "pypi", provenance_.check_pypi(
+                            info["project"], info["version"], [(info["filename"], sha)], provenance_fetch(self.fetcher)))
+                    self.ctx.scanner.remember(key, hit, info["published"])
+                    self.ctx.apply(check, hit)
+                    self.ctx.age_check(check, info["published"])
+                    if check.blocked:
+                        _remove_quietly(spooled)
+                        spooled = None
             except (repo.FetchError, ValueError) as exc:
+                _remove_quietly(spooled)
+                spooled = None
                 self.ctx.not_checked(check, exc)
                 self.ctx.age_check(check, info["published"])
             with self.lock:
@@ -3838,6 +3869,15 @@ class LocalGoProxy:
         self.server.server_close()
         self.fetcher.close()
         shutil.rmtree(self.spool, ignore_errors=True)
+
+
+def _remove_quietly(path):
+    """Remove a file the guard wrote, if there is one."""
+    if path:
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
 
 
 def remove_tree(path):

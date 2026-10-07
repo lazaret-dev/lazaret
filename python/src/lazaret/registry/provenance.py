@@ -111,6 +111,23 @@ def _printable(text, limit=200):
     return "".join(c if c.isprintable() else "?" for c in str(text))[:limit]
 
 
+def _unread(exc):
+    """The keys a report's entry gets for an answer that could not be had: `retry` when it was the registry's answer
+    that could not be read (a network failure, a garbled answer), which a later check may read; not for an attestation
+    that was read and cannot be checked here (Unchecked), which a later check would not change."""
+    return {"unchecked": _printable(exc), **({} if isinstance(exc, Unchecked) else {"retry": True})}
+
+
+def complete(report):
+    """Did a release's provenance check run to the end: every answer it needed read? What it found then holds for the
+    release, and a verdict cached with it need not be checked again (the guard's cache, EG-10)."""
+    if report.get("unchecked") or report.get("previousUnchecked"):
+        return False
+    if any(f.get("retry") for f in report.get("files", ())):
+        return False
+    return not (report.get("previous") or {}).get("retry")
+
+
 def verify(registry, document, digest_hex):
     """The attestations of one file (`document`: the registry's answer, text; `digest_hex`: the file's SHA-512 for npm,
     SHA-256 for PyPI) checked by the native library -> [{"predicateType", "outcome": "verified" | "invalid" |
@@ -224,7 +241,7 @@ def check_npm(name, version, manifest, sha512_hex, fetch):
             report["files"].append({"filename": None, "attestations": found})
             here = repository(found)
         except (Unchecked, _base.FetchError, UnicodeDecodeError) as exc:
-            report["files"].append({"filename": None, "unchecked": _printable(exc)})
+            report["files"].append({"filename": None, **_unread(exc)})
     else:
         report["files"].append({"filename": None, "attestations": None})
     try:
@@ -247,7 +264,7 @@ def check_npm(name, version, manifest, sha512_hex, fetch):
             text = fetch(_npm_url(name, previous), MAX_ATTESTATION_BYTES, None).decode("utf-8")
             prev["repository"] = repository(verify("npm", text, digest))
         except (Unchecked, _base.FetchError, UnicodeDecodeError) as exc:
-            prev["unchecked"] = _printable(exc)
+            prev.update(_unread(exc))
     return report
 
 
@@ -265,12 +282,14 @@ def guard_npm(name, version, sha512_hex, fetch):
         doc = _core.json_loads_bounded(once(_npm_packument(name), MAX_PACKUMENT_BYTES, NPM_ABBREVIATED))
     except (_base.FetchError, ValueError, _core.JsonTooDeep) as exc:
         return {"files": [{"filename": None, "unchecked": f"the registry's document of the package could not be "
-                                                         f"read ({_printable(exc, 120)})"}], "previous": None}
+                                                         f"read ({_printable(exc, 120)})", "retry": True}],
+                "previous": None}
     versions = doc.get("versions") if isinstance(doc, dict) else None
     manifest = versions.get(version) if isinstance(versions, dict) else None
     if not isinstance(manifest, dict):
+        # (a release a moment old may not be in every copy of the document yet: a later check may find it)
         return {"files": [{"filename": None, "unchecked": "the registry's document of the package does not list the "
-                                                         "version"}], "previous": None}
+                                                         "version", "retry": True}], "previous": None}
     return check_npm(name, version, manifest, sha512_hex, once)
 
 
@@ -362,7 +381,11 @@ def check_pypi(name, version, digests, fetch):
             text = fetch(_pypi_provenance_url(name, version, filename, url), MAX_ATTESTATION_BYTES, None).decode("utf-8")
             report["files"].append({"filename": filename, "attestations": verify("pypi", text, sha256_hex)})
         except (Unchecked, _base.FetchError, UnicodeDecodeError) as exc:
-            report["files"].append({"filename": filename, "unchecked": _printable(exc)})
+            report["files"].append({"filename": filename, **_unread(exc)})
+    # (whether the release has provenance is the release's, as it is for the release before: a file of it without
+    # any, beside one with, is not a release published without it, EG-17)
+    report["releaseProvenance"] = any(isinstance(f.get("provenance"), str) and f["provenance"]
+                                      for f in by_version.get(version, ()))
     previous = pypi_previous(by_version, version)
     if previous is None:
         return report
@@ -380,7 +403,7 @@ def check_pypi(name, version, digests, fetch):
                          None).decode("utf-8")
             prev["repository"] = repository(verify("pypi", text, digest))
         except (Unchecked, _base.FetchError, UnicodeDecodeError) as exc:
-            prev["unchecked"] = _printable(exc)
+            prev.update(_unread(exc))
     return report
 
 
@@ -449,7 +472,7 @@ def release_issues(eco, name, version, report):
                                      "Nothing to do for this release; a newer Lazaret (or LAZARET_SIGSTORE_ROOT) may "
                                      "know the log or authority.", where))
     prev = report.get("previous")
-    if prev and prev.get("provenance") and not has_any:
+    if prev and prev.get("provenance") and not has_any and not report.get("releaseProvenance"):
         issues.append(_issue("SC-PROVENANCE-DROPPED", "MAJOR", "A release without the provenance the one before had",
                              f"{version} has no provenance, though {prev['version']}, the release before it, has: it "
                              f"was not published the way {prev['version']} was.",
@@ -476,7 +499,7 @@ def release_issues(eco, name, version, report):
                                      "verified" if all(a["outcome"] == "verified" for a in f["attestations"]) else
                                      "partly checked")}
                          for f in report.get("files", ())],
-               "previous": dict(prev) if prev else None}
+               "previous": {k: v for k, v in prev.items() if k != "retry"} if prev else None}
     if here is not None:
         summary["repository"] = here["uri"]
     for key in ("unchecked", "previousUnchecked"):

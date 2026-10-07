@@ -646,6 +646,15 @@ project is pre-1.0, so the 0.x API may still change.
   opens `setup.js`, so that runs though `Setup.json` is there under its exact name. Lazaret tried every exact
   name first, and read the data file as what runs. Each name is now tried exactly, then under any case,
   before the next, and a folder's `package.json` under another case names its `main` too.
+- **The guard's provenance check (EG-10, EG-17).** A verdict was cached the same whether the provenance
+  check had run to the end or not, so a release scanned while the registry's answers couldn't be read
+  (or with `LAZARET_NO_PROVENANCE=1`) kept its unchecked verdict from the cache for good. The cache now
+  records whether the check ran to the end, and a verdict without it, for a release published in the
+  last 30 days, is scanned and checked again. A PyPI release whose wheel had no provenance and whose
+  sdist had was a provenance drop for the guard, which checks the one file pip takes; whether a release
+  has provenance is now the release's, as for the release before it and as `lazaret-registry` reads it.
+  And the pip and uv index checks a file's provenance after its bytes have left the scanner's byte
+  budget, so other downloads don't wait on those requests.
 - **The extension guard's smaller fixes (EG-11 to EG-16, EG-18).** An extension the gallery's list says
   is malicious is blocked as itself, not replaced: the editor refuses it before it looks for a
   replacement. A `deprecated` entry of the list now cancels a migration to a pre-release for the same

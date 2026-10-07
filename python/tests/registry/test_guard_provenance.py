@@ -132,11 +132,11 @@ class NpmTests(unittest.TestCase):
         data = b"another tarball"
         later = TP.npm_manifest("4.0.1", attested=False, data=data)
         manifests = [TP.npm_manifest(v) for v in TP.TARBALLS] + [later]
+        key = guard.VerdictCache.key("npm", "sigstore", "4.0.1", f"sha512-{sri(data)[7:]}")
         cases = {"published more than PROVENANCE_DAYS ago": dict(published=days_ago(guard.PROVENANCE_DAYS + 1)),
                  "from another registry (its packages are not named to npm's)": dict(registry="https://npm.example/"),
-                 "a verdict from the cache": dict(cache={guard.VerdictCache.key("npm", "sigstore", "4.0.1",
-                                                                                f"sha512-{sri(data)[7:]}"):
-                                                         {"verdict": "OK", "reason": "", "indicators": []}})}
+                 "a verdict from the cache, its provenance checked": dict(cache={key: {
+                     "verdict": "OK", "reason": "", "indicators": [], "provenance": True}})}
         for why, kw in cases.items():
             with self.subTest(why):
                 check, fetcher, _ = self.check("4.0.1", data, manifests, **kw)
@@ -151,11 +151,51 @@ class NpmTests(unittest.TestCase):
 
     def test_a_document_that_cannot_be_read_flags_nothing(self):
         data = b"another tarball"
-        check, fetcher, _ = self.check("4.0.1", data, [])                 # (the document lists no 4.0.1)
+        check, fetcher, ctx = self.check("4.0.1", data, [])                 # (the document lists no 4.0.1)
         self.assertEqual(check.verdict, "OK")
         self.assertEqual(check.provenance["files"], [{"filename": None, "status": "unchecked"}])
         report = provenance.guard_npm("sigstore", "4.0.1", "00" * 64, TP.Served({}))
         self.assertIn("could not be read", report["files"][0]["unchecked"])
+        self.assertFalse(provenance.complete(report))
+        # (and the verdict is cached as not checked for its provenance: EG-10)
+        self.assertIs(ctx.scanner.cache[guard.VerdictCache.key("npm", "sigstore", "4.0.1", f"sha512-{sri(data)[7:]}")]
+                      ["provenance"], False)
+
+    def test_a_verdict_cached_without_its_provenance_checked_is_checked_again(self):
+        # EG-10: a verdict cached when the registry's answers could not be read, or with the check off, is scanned and
+        # checked again while the release is in the window; once the check has run to the end, the cache is used
+        data = b"another tarball"
+        later = TP.npm_manifest("4.0.1", attested=False, data=data)
+        manifests = [TP.npm_manifest(v) for v in TP.TARBALLS] + [later]
+        key = guard.VerdictCache.key("npm", "sigstore", "4.0.1", f"sha512-{sri(data)[7:]}")
+        unchecked = {key: {"verdict": "OK", "reason": "", "indicators": [], "published": None}}
+        check, fetcher, ctx = self.check("4.0.1", data, manifests, cache=unchecked)
+        self.assertEqual(check.verdict, "WARN")
+        self.assertEqual(ctx.scanner.scans, 1)
+        self.assertIs(ctx.scanner.cache[key]["provenance"], True)
+        check, fetcher, ctx = self.check("4.0.1", data, manifests, cache=ctx.scanner.cache)
+        self.assertEqual((check.verdict, ctx.scanner.scans), ("WARN", 0))
+        self.assertEqual(fetcher.asked, [])
+        # (with the check off, or for a release older than the window: the cache as it is)
+        with mock.patch.dict(os.environ, {provenance.OFF_ENV: "1"}):
+            check, _, ctx = self.check("4.0.1", data, manifests, cache=unchecked)
+        self.assertEqual((check.verdict, ctx.scanner.scans), ("OK", 0))
+        old = {key: dict(unchecked[key], published=guard.iso(days_ago(guard.PROVENANCE_DAYS + 1)))}
+        check, _, ctx = self.check("4.0.1", data, manifests, cache=old, published=days_ago(guard.PROVENANCE_DAYS + 1))
+        self.assertEqual((check.verdict, ctx.scanner.scans), ("OK", 0))
+
+    def test_the_cache_file_keeps_whether_provenance_was_checked(self):
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp)
+        path = os.path.join(tmp, "verdicts.json")
+        cache = guard.VerdictCache(path)
+        ok = {"verdict": "OK", "reason": "", "indicators": []}
+        cache.put("a", {**ok, "provenance": True}, None)
+        cache.put("b", {**ok, "provenance": False}, None)
+        cache.put("c", ok, None)
+        cache.save()
+        again = guard.VerdictCache(path)
+        self.assertEqual([again.get(k).get("provenance") for k in "abc"], [True, None, None])
 
 
 def pypi_answers(*entries):
@@ -196,6 +236,23 @@ class PyPITests(unittest.TestCase):
         check = self.lockfile_check("0.0.31", self.LATER, b"x", days_ago(guard.PROVENANCE_DAYS + 1))
         self.assertEqual((check.verdict, check.provenance), ("OK", None))
 
+    def test_a_file_without_provenance_in_a_release_with_it_is_not_a_drop(self):
+        # EG-17: whether a release has provenance is the release's, as it is for the release before (here its sdist
+        # has, and the wheel pip takes has none); the release-level rule `lazaret-registry` applies
+        published = days_ago(5)
+        sdist = TP.simple_file("0.0.31", "pypi_attestations-0.0.31.tar.gz", b"y",
+                               published.strftime("%Y-%m-%dT%H:%M:%SZ"))
+        entries = self.entries(published) + [sdist]
+        fetcher = _FakeFetcher({}, {**pypi_answers(*entries), entries[1]["url"]: b"x"})
+        ctx = context(tool="uv")
+        ctx.scanner.close()
+        ctx.scanner = OkScanner()
+        f = {"url": entries[1]["url"], "hash": "sha256:" + hashlib.sha256(b"x").hexdigest(), "filename": self.LATER,
+             "upload-time": published.isoformat()}
+        check = guard.check_file(ctx, fetcher, "pypi-attestations", "0.0.31", f)
+        self.assertEqual(check.verdict, "OK")
+        self.assertEqual(check.provenance["files"], [{"filename": self.LATER, "status": "none"}])
+
     def test_a_file_the_local_index_serves(self):
         published = days_ago(5)
         upstream = "https://pypi.org/simple/"
@@ -216,6 +273,18 @@ class PyPITests(unittest.TestCase):
         check, _ = index.scan(numbers[TP.WHEEL_NAME])
         self.assertEqual(check.verdict, "OK")
         self.assertEqual(check.provenance["files"], [{"filename": TP.WHEEL_NAME, "status": "verified"}])
+        # (checked after the file's bytes leave the scanner's budget; a file it blocks leaves nothing in the spool)
+        ctx = context(tool="pip", min_age=0, block_warn=True)
+        ctx.scanner.close()
+        ctx.scanner = OkScanner()
+        index = guard.PypiIndex(ctx, fetcher, spool, upstream)
+        index.page("pypi-attestations")
+        numbers = {i["filename"]: n for n, i in index.files.items()}
+        before = set(os.listdir(spool))
+        check, spooled = index.scan(numbers[self.LATER])
+        self.assertEqual((check.verdict, spooled), ("WARN", None))
+        self.assertTrue(check.blocked)
+        self.assertEqual(set(os.listdir(spool)), before)
 
 
 class MergeTests(unittest.TestCase):
