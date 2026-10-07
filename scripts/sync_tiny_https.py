@@ -222,8 +222,8 @@ Lazaret's is.
   (the workspace's, in `rust/Cargo.toml`, apply) and cargo warns about each one.
 - **Lazaret's crates on it:** `lazaret-verify` (the pure part: `default-features = false`, no I/O, no `unsafe`;
   the engine and the WebAssembly build may use it) and `lazaret-net` (the network: Lazaret's host rule, URL
-  limits, timeouts and byte budgets; linked into the native library only). `scripts/check_rust_deps.py` refuses
-  the engine linking the network part.
+  limits, timeouts and byte budgets, and credentials given to each hop's own host through `Client::hop_headers`;
+  linked into the native library only). `scripts/check_rust_deps.py` refuses the engine linking the network part.
 - **The next drop:** `python3 scripts/sync_tiny_https.py PATH` (the library's folder or a tarball of it), then
   the gates. `python3 scripts/sync_tiny_https.py --verify` checks this folder against `vendored.sha256` (CI does).
 - **Its tests in Lazaret's CI:** `cargo test --release -p tiny_https --lib` and the tests that need nothing

@@ -12,6 +12,10 @@
 //! * **bounds**: a byte budget for the body (a larger body is [`Failure::TooLarge`], whatever the server
 //!   declared), a timeout for connecting and for each read and write, an optional limit on the whole request,
 //!   and a number of redirects.
+//! * **credentials** (0.1.9, decision 14): a token or a login goes with the hops to its own host only, given by
+//!   tiny_https's hop hook ([`Credential`], [`granted`]), never as a header of the request, which a redirect would
+//!   carry on (tiny_https drops `Authorization`, `Cookie` and `Proxy-Authorization` on a change of origin, and no
+//!   other); a request that sets one of [`CREDENTIAL_HEADERS`] itself is refused.
 //!
 //! **HTTP/2 is the protocol** (John, Oct 6): the handshake offers `h2` and `http/1.1`, a server that picks `h2` gets
 //! one connection per origin that every request to it shares, and any other is spoken to in HTTP/1.1 with
@@ -31,7 +35,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use tiny_https::error::Error as NetError;
-use tiny_https::http::{HostRules, RequestBuilder, ResponseStream, UrlLimits};
+use tiny_https::http::{HopInfo, HostRules, RequestBuilder, ResponseStream, UrlLimits};
 use tiny_https::tls::ClientConfig;
 use tiny_https::x509::TrustStore;
 use tiny_https::Client;
@@ -123,6 +127,61 @@ fn classify(e: NetError) -> Failure {
     }
 }
 
+/// A credential (0.1.9, decision 14): the header `name: value` for the hops to `host` whose path is under `path`,
+/// over https. `host` is written as a Host header is (lower case, an IPv6 address in brackets, `:port` when the port
+/// is not 443), which is how pmsettings.Credentials keys a host; `path` is a prefix that ends in `/` (`/` for the
+/// whole host). With `first_only` it is for the request itself and no redirect (the user:password of the URL that
+/// was asked for). tiny_https's hop hook gives them hop by hop ([`granted`]): a redirect to another host gets that
+/// host's or none, and the client never carries one on.
+#[derive(Clone)]
+pub struct Credential {
+    pub host: String,
+    pub path: String,
+    pub name: String,
+    pub value: String,
+    pub first_only: bool,
+}
+
+/// The headers that carry a credential, which a request may not set itself: its credentials go as [`Credential`]s.
+/// (tiny_https drops the first three on a redirect to another origin; a header such as `PRIVATE-TOKEN` it carries on.)
+pub const CREDENTIAL_HEADERS: [&str; 6] =
+    ["authorization", "proxy-authorization", "cookie", "private-token", "job-token", "deploy-token"];
+
+impl std::fmt::Debug for Credential {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // (a credential's value is never printed)
+        write!(f, "Credential {{ host: {:?}, path: {:?}, name: {:?}, first_only: {} }}", self.host, self.path, self.name,
+               self.first_only)
+    }
+}
+
+/// The headers the credentials give a hop: over https, for each name, the credential of the hop's host whose path is
+/// the longest prefix of the directory of the hop's path (what pmsettings.Credentials.header gives a URL), and on the
+/// request itself a `first_only` one before any other (urllib sends the URL's own user:password with the request and
+/// with no redirect, the settings' credentials of each hop's URL with a redirect).
+pub fn granted(credentials: &[Credential], info: &HopInfo<'_>) -> Vec<(String, String)> {
+    let url = info.url;
+    if url.scheme != "https" {
+        return Vec::new();
+    }
+    let host = url.host_header();
+    let path = url.path_and_query.split(['?', '#']).next().unwrap_or("/");
+    let dir = &path[..path.rfind('/').map_or(0, |k| k + 1)];
+    let rank = |c: &Credential| (c.first_only, c.path.len());
+    let mut best: Vec<&Credential> = Vec::new();
+    for c in credentials {
+        if c.host != host || (c.first_only && info.hop > 0) || !dir.starts_with(c.path.as_str()) {
+            continue;
+        }
+        match best.iter_mut().find(|b| b.name.eq_ignore_ascii_case(&c.name)) {
+            Some(b) if rank(b) < rank(c) => *b = c,
+            Some(_) => {}
+            None => best.push(c),
+        }
+    }
+    best.into_iter().map(|c| (c.name.clone(), c.value.clone())).collect()
+}
+
 /// Which proxy a request goes through.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Proxy {
@@ -157,6 +216,8 @@ pub struct Request {
     pub proxy: Proxy,
     /// Offer `h2` (the default); false: HTTP/1.1 only, on the shared HTTP/1.1 connections.
     pub http2: bool,
+    /// The credentials the hops may get (see [`Credential`]); none in `headers`.
+    pub credentials: Vec<Credential>,
 }
 
 impl Request {
@@ -174,6 +235,7 @@ impl Request {
             max_redirects: 3,
             proxy: Proxy::Env,
             http2: true,
+            credentials: Vec::new(),
         }
     }
 }
@@ -276,6 +338,18 @@ fn client_for(req: &Request) -> Result<Client, Failure> {
     if !req.http2 {
         client = client.http2(false);         // (this request only: the shared HTTP/2 connections stay)
     }
+    if !req.credentials.is_empty() {
+        for c in &req.credentials {
+            if !valid_credential(c) {
+                // (the host and the header's name, never its value)
+                return Err(Failure::Setup(format!("a credential ({:?} for {:?}) is not one that can be sent", c.name, c.host)));
+            }
+        }
+        let credentials = Arc::new(req.credentials.clone());
+        client = client.hop_headers(move |info| Ok(granted(&credentials, info)));
+    } else {
+        client = client.no_hop_headers();     // (the shared client's clones carry no hook of an earlier request)
+    }
     client = match &req.proxy {
         Proxy::Env => client.proxy_from_env(),
         Proxy::Direct => client,
@@ -299,6 +373,12 @@ fn prepared<'c>(client: &'c Client, req: &Request, method: &str) -> Result<Reque
         if !valid_header(name, value) {
             return Err(Failure::Setup(format!("header {name:?} is not one that can be sent")));
         }
+        if CREDENTIAL_HEADERS.iter().any(|h| h.eq_ignore_ascii_case(name))
+            || req.credentials.iter().any(|c| c.name.eq_ignore_ascii_case(name))
+        {
+            // a header of the request goes with every hop it may take; a credential goes with its own host's alone
+            return Err(Failure::Setup(format!("header {name:?} carries a credential: the request gives it as one")));
+        }
         builder = builder.header(name, value);
     }
     if method == "POST" {
@@ -311,6 +391,18 @@ fn start(req: &Request) -> Result<ResponseStream, Failure> {
     let method = method_of(req)?;
     let client = client_for(req)?;
     prepared(&client, req, &method)?.send_stream().map_err(classify)
+}
+
+/// A credential that can be sent: a header that can be, and not one the client sets itself; a host as a Host header
+/// writes it (lower case); a path prefix that ends in `/`.
+fn valid_credential(c: &Credential) -> bool {
+    valid_header(&c.name, &c.value)
+        && !["host", "connection", "content-length", "transfer-encoding"].iter().any(|h| h.eq_ignore_ascii_case(&c.name))
+        && !c.host.is_empty()
+        && c.host.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b".-_[]:".contains(&b))
+        && c.path.starts_with('/')
+        && c.path.ends_with('/')
+        && c.path.bytes().all(|b| (0x21..=0x7e).contains(&b) && b != b'?' && b != b'#')
 }
 
 /// A field name of token characters and a value of visible ASCII and spaces: nothing that could end the head.

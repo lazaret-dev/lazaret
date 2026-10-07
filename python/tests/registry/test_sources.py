@@ -177,6 +177,29 @@ class Hosts(unittest.TestCase):
     def test_hops_are_capped(self):
         self.assertEqual(sources._Hop.max_redirections, repo.MAX_REDIRECTS)
 
+    def test_on_the_native_transport_the_token_is_a_credential_of_the_api_host(self):
+        # (decision 14: tiny_https's hop hook gives it to the API host's hops alone; never a header of the request)
+        asked = []
+
+        def request(url, **kw):
+            asked.append(kw)
+            return sources._net.Reply(200, "HTTP/2", [], url, b"{}")
+
+        with mock.patch.object(sources._net, "chosen", lambda url: True), \
+                mock.patch.object(sources._net, "request", request):
+            sources._http("https://gl.example.org:8443/api/v4/x", {"User-Agent": "u", "PRIVATE-TOKEN": "glpat-x"},
+                          100, {"gl.example.org:8443"}, "gl.example.org:8443", kind="gitlab")
+            sources._http("https://api.github.com/a", {"Authorization": "Bearer t", "Accept": "x"}, 100,
+                          {"api.github.com", "codeload.github.com"}, "api.github.com")
+            sources._http("https://codeload.github.com/b", {"Accept": "x"}, 100, {"codeload.github.com"}, "api.github.com")
+        self.assertEqual(asked[0]["headers"], [("User-Agent", "u")])
+        self.assertEqual(asked[0]["credentials"], [sources._net.Credential("gl.example.org:8443", "/", "PRIVATE-TOKEN",
+                                                                           "glpat-x")])
+        self.assertEqual(asked[1]["headers"], [("Accept", "x")])
+        self.assertEqual(asked[1]["credentials"], [sources._net.Credential("api.github.com", "/", "Authorization",
+                                                                           "Bearer t")])
+        self.assertEqual(asked[2]["credentials"], [])
+
 
 class Errors(unittest.TestCase):
     def test_messages_name_the_problem_not_the_token(self):

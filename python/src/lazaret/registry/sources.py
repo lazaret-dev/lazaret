@@ -212,14 +212,20 @@ def _explain(status, headers, url, what, has_token, kind):
     return f"{what}: HTTP {status} from {_shown(url)}"
 
 
+_TOKEN_HEADERS = ("authorization", "private-token")
+
+
 def _http(url, headers, max_bytes, hosts, auth_host, what="fetch", has_token=False, kind="github"):
     """The real fetch: a byte-budgeted read, through the native transport (NET-1, scanner/nativenet.py: `hosts` the
-    rule for the URL and every redirect) when no token goes with it, else through `_Hop`, which takes a token off a
-    redirect to another host. A request with a token stays on urllib: secrets go over OpenSSL (DESIGN.md §5j)."""
-    tokened = any(k.lower() in ("authorization", "private-token") for k in headers)
-    if not tokened and _net.chosen(url):
+    rule for the URL and every redirect), with the token as a credential of `auth_host` (decision 14: the native
+    client gives it to the hops to that host and to no other, DESIGN.md §5j); through urllib and `_Hop`, which takes
+    a token off a redirect to another host, where the native transport is not to be used."""
+    if _net.chosen(url):
+        plain = [(k, v) for k, v in headers.items() if k.lower() not in _TOKEN_HEADERS]
+        key = _net.host_key(f"https://{auth_host}/")
+        credentials = [_net.Credential(key, "/", k, v) for k, v in headers.items() if k.lower() in _TOKEN_HEADERS]
         try:
-            reply = _net.request(url, hosts=sorted(hosts), headers=list(headers.items()), max_bytes=max_bytes,
+            reply = _net.request(url, hosts=sorted(hosts), headers=plain, credentials=credentials, max_bytes=max_bytes,
                                  timeout=_repo.DOWNLOAD_TIMEOUT, max_redirects=_repo.MAX_REDIRECTS)
         except _net.UsePython:
             pass                                 # (urllib below: a server without TLS 1.3, a proxy over TLS)

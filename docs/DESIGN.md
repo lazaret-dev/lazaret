@@ -1191,23 +1191,50 @@ relying on its TLS; decision 12 (John, Oct 6) made it the default anyway,
 with urllib one variable away.
 
 The other callers (NET-1's second part): the guard's `Fetcher.open` (and so
-`fetch`, `fetch_to_file`, the Go relay) and the pip index's relay send an
-https request without credentials through it, with the fetcher's hosts (and
-the URL's own, already checked) as the rule, or no host rule for a redirect
-where `https_redirects` lets one go to any https host; `_NativeResponse`
-reads like urllib's response (`headers.get`, `read`, TooLarge over the
-budget). `sources._http` sends a request without a token, `sca_feeds.fetch`
-a feed's download (no host rule: a feed may move, https only). What stays on
-urllib: plain http (a registry served on this machine), and every request
-that carries credentials: a private registry's token or a URL's own
-`user:password@` in the guard, `GITHUB_TOKEN` and `GITLAB_TOKEN` in sources,
-and secret verification, which sends the secret it checks. Two reasons: a
-redirect hop gets only its own host's credentials through urllib's hook
-(the guard adds the next host's; tiny_https drops a caller's
-`Authorization` on a change of origin and has no hook to add one, its
-backlog's B-75 "left" part), and secrets are what an unreviewed TLS stack
-would cost most. `keepalive.py` (`--keepalive`) pools urllib's connections
-and is moot for the native transport, which pools its own.
+`fetch`, `fetch_to_file`, the Go relay and the pip index's relay) sends an
+https request through it, with the fetcher's hosts (and the URL's own,
+already checked) as the rule, or no host rule for a redirect where
+`https_redirects` lets one go to any https host; `_NativeResponse` reads like
+urllib's response (`headers.get`, `read`, TooLarge over the budget).
+`sources._http` sends the `github:` and `gitlab:` sources' requests,
+`sca_feeds.fetch` a feed's download (no host rule: a feed may move, https
+only). What stays on urllib: plain http (a registry served on this machine),
+and secret verification, which sends the secret it checks (its transport is
+V-1's, which waits on decision 4). `keepalive.py` (`--keepalive`) pools
+urllib's connections and is moot for the native transport, which pools its
+own.
+
+Credentials (decision 14, John, Oct 6: they go over tiny_https in 0.1.9).
+Until this drop they stayed on urllib, for two reasons: a redirect hop must
+get its own host's credentials and no other's, which only urllib's redirect
+hook gave (tiny_https dropped `Authorization`, `Cookie` and
+`Proxy-Authorization` on a change of origin, and nothing more: a
+`PRIVATE-TOKEN` the caller set went on, and nothing could add the next host's),
+and secrets are what an unreviewed TLS stack would cost most. tiny_https's
+drop of Oct 6 (b) added the hook (`Client::hop_headers`: called for the
+request and for every redirect after the host rule and the URL limits allow
+it and before anything is sent there; what it returns goes with that hop
+alone; no response cache, a pool keyed by scheme, host, port and proxy, no
+HTTP/2 coalescing across hosts, and the hook's header names never indexed in
+HPACK or QPACK). `lazaret-net` takes a request's credentials as data
+(`Credential`: a host written as a Host header is, a path prefix, a header,
+and `first_only` for the request itself) and its hook gives each hop, over
+https, the credential of the hop's host with the longest path prefix of the
+hop's directory for each header name, a `first_only` one first on the
+request, as `pmsettings.Credentials.header` chooses for a URL. A request that
+sets `Authorization`, `Cookie`, `PRIVATE-TOKEN`, `JOB-TOKEN`, `Deploy-Token`
+or `Proxy-Authorization` as a header is refused, so none can ride a redirect.
+The guard gives the request's own `Authorization` (its URL's
+`user:password@`, or the settings' for its URL) as `first_only` and the
+settings' for every host and path as the rest, which is what urllib's path
+sends: its own with the request, the settings' of each redirect's URL with
+the redirect. `sources._http` gives the token to the API host (GitHub's API,
+or the GitLab instance's host and port). A credential the native client
+cannot send (a value or path outside printable ASCII, a host it would not
+write that way) sends the request through urllib as before. The pip index's
+relay of a file too large to scan now goes through `Fetcher.open` as the
+scan's download does, with the file URL's credentials; it had made a request
+of its own without them.
 
 The Go checksum database (NET-1's third part). `golang.verify_lookup`
 checks a `/lookup/<module>@<version>` answer as the go command's client does

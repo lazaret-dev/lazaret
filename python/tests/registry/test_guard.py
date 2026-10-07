@@ -958,6 +958,15 @@ class ScannerTests(unittest.TestCase):
 class _FakeFetcher:
     def __init__(self, pages, files):
         self.pages, self.files, self.allowed, self.http_hosts = pages, files, [], set()
+        self.opened = []
+
+    def open(self, url, accept=None, timeout=None, max_bytes=None):
+        # (Fetcher.open: the response of the fetcher's own request, with the credentials of its URL)
+        self.opened.append(url)
+        body = self.get(url)
+        response = io.BytesIO(body)
+        response.headers = {"Content-Length": str(len(body))}
+        return response
 
     def json(self, url, accept=None):
         if url not in self.pages:
@@ -1073,6 +1082,25 @@ class LocalIndexTests(unittest.TestCase):
             with self.subTest(path), self.assertRaises(repo.FetchError) as cm:
                 f.get(base + path)
             self.assertEqual(cm.exception.status, 404)
+
+    def test_a_file_too_large_to_scan_is_relayed_by_the_fetchers_own_request(self):
+        # (0.1.9: Fetcher.open, which sends the credentials of the file's URL as the scan's download does; before, the
+        # relay made a request of its own without them)
+        self.fetcher.files["https://files.example/x-0.6.tar.gz"] = b"too large to scan"
+        server = guard.make_index_server(self.index)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        base = f"http://127.0.0.1:{server.server_address[1]}"
+        f = guard.Fetcher({base[len("http://"):]})
+        self.index.page("x")
+        numbers = {i["filename"]: n for n, i in self.index.files.items()}
+        self.assertEqual(f.get(f"{base}/files/{numbers['x-0.6.tar.gz']}/x-0.6.tar.gz"), b"too large to scan")
+        self.assertEqual(self.fetcher.opened, ["https://files.example/x-0.6.tar.gz"])
+        del self.fetcher.files["https://files.example/x-0.6.tar.gz"]
+        with self.assertRaises(repo.FetchError) as cm:
+            f.get(f"{base}/files/{numbers['x-0.6.tar.gz']}/x-0.6.tar.gz")
+        self.assertEqual(cm.exception.status, 502, "the upstream's failure, in the fixed words for the tool")
 
     def test_file_versions(self):
         self.assertEqual([guard.file_version(n) for n in ("x-1.0-py3-none-any.whl", "x_y-2.0.tar.gz",

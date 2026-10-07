@@ -97,6 +97,14 @@ fn serve(handler: impl Fn(&Seen) -> Option<Vec<u8>> + Send + Sync + 'static) -> 
 /// A server that offers `h2` (and `http/1.1`): what it answers each request with over HTTP/2, the request's path
 /// and body in hand.
 fn serve_h2(handler: impl Fn(&str, &[u8]) -> (u16, Vec<u8>) + Send + Sync + 'static) -> Server {
+    serve_h2_located(move |path, body| {
+        let (status, body) = handler(path, body);
+        (status, None, body)
+    })
+}
+
+/// `serve_h2` whose answer may carry a `location`.
+fn serve_h2_located(handler: impl Fn(&str, &[u8]) -> (u16, Option<String>, Vec<u8>) + Send + Sync + 'static) -> Server {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
     let config = Arc::new(ServerConfig::from_pki(pki()).with_alpn(&["h2", "http/1.1"]));
@@ -116,9 +124,15 @@ fn serve_h2(handler: impl Fn(&str, &[u8]) -> (u16, Vec<u8>) + Send + Sync + 'sta
                     return;
                 }
                 let mut answer = |r: &h2_server::Request| {
-                    s.lock().unwrap().push(Seen { head: format!("{} {} HTTP/2", r.method, r.path), body: r.body.clone() });
-                    let (status, body) = handler(&r.path, &r.body);
-                    h2_server::response(status, &[("content-length", &body.len().to_string())], &body)
+                    let fields: String = r.headers.iter().map(|(n, v)| format!("\r\n{n}: {v}")).collect();
+                    s.lock().unwrap().push(Seen { head: format!("{} {} HTTP/2{fields}", r.method, r.path), body: r.body.clone() });
+                    let (status, location, body) = handler(&r.path, &r.body);
+                    let length = body.len().to_string();
+                    let mut fields = vec![("content-length", length.as_str())];
+                    if let Some(to) = &location {
+                        fields.push(("location", to.as_str()));
+                    }
+                    h2_server::response(status, &fields, &body)
                 };
                 let _ = h2_server::serve(&mut tls, &h2_server::Settings::default(), &mut answer);
             });
@@ -392,4 +406,225 @@ fn over_http2_the_budget_holds_too() {
     assert_eq!(fetch(&req).unwrap_err(), Failure::TooLarge);
     req.max_bytes = 50_000;
     assert_eq!(fetch(&req).unwrap().body.len(), 50_000);
+}
+
+// ---------------------------------------------------------------- credentials (0.1.9, decision 14)
+
+fn credential(host: &str, path: &str, name: &str, value: &str) -> Credential {
+    Credential { host: host.into(), path: path.into(), name: name.into(), value: value.into(), first_only: false }
+}
+
+fn hop<'a>(url: &'a tiny_https::http::Url, hop: usize, from: Option<&'a tiny_https::http::Url>) -> HopInfo<'a> {
+    HopInfo { url, method: "GET", hop, from }
+}
+
+#[test]
+fn a_credential_is_granted_to_its_host_and_path() {
+    use tiny_https::http::Url;
+    let creds = vec![
+        credential("registry.example", "/", "Authorization", "Bearer whole"),
+        credential("registry.example", "/team/", "Authorization", "Bearer team"),
+        credential("registry.example:8443", "/", "Authorization", "Bearer port"),
+        credential("[::1]:8443", "/", "Authorization", "Bearer v6"),
+        credential("registry.example", "/team/", "PRIVATE-TOKEN", "glpat"),
+    ];
+    let at = |u: &str| {
+        let url = Url::parse(u).unwrap();
+        granted(&creds, &hop(&url, 0, None))
+    };
+    let pair = |n: &str, v: &str| (n.to_string(), v.to_string());
+    assert_eq!(at("https://registry.example/pkg"), vec![pair("Authorization", "Bearer whole")]);
+    assert_eq!(at("https://registry.example/team/pkg"),
+               vec![pair("Authorization", "Bearer team"), pair("PRIVATE-TOKEN", "glpat")], "the longest path, each name");
+    assert_eq!(at("https://registry.example/team"), vec![pair("Authorization", "Bearer whole")], "/team is not under /team/");
+    assert_eq!(at("https://registry.example/a?x=/team/b"), vec![pair("Authorization", "Bearer whole")], "the query is not the path");
+    assert_eq!(at("https://registry.example:443/pkg"), vec![pair("Authorization", "Bearer whole")], "443 is the host's own");
+    assert_eq!(at("https://registry.example:8443/pkg"), vec![pair("Authorization", "Bearer port")]);
+    assert_eq!(at("https://[::1]:8443/pkg"), vec![pair("Authorization", "Bearer v6")]);
+    assert_eq!(at("https://REGISTRY.example/pkg"), vec![pair("Authorization", "Bearer whole")], "a host is lower case");
+    assert!(at("https://other.example/pkg").is_empty());
+    assert!(at("https://sub.registry.example/pkg").is_empty(), "a host is the host, not its domain");
+    assert!(at("http://registry.example/pkg").is_empty(), "never over plain http");
+}
+
+#[test]
+fn the_urls_own_login_goes_with_the_request_alone() {
+    use tiny_https::http::Url;
+    let mut first = credential("registry.example", "/", "Authorization", "Basic own");
+    first.first_only = true;
+    let creds = vec![credential("registry.example", "/team/", "Authorization", "Bearer settings"), first];
+    let url = Url::parse("https://registry.example/team/pkg").unwrap();
+    let pair = |v: &str| vec![("Authorization".to_string(), v.to_string())];
+    assert_eq!(granted(&creds, &hop(&url, 0, None)), pair("Basic own"), "the request: the URL's own, before the settings'");
+    let from = Url::parse("https://registry.example/elsewhere").unwrap();
+    assert_eq!(granted(&creds, &hop(&url, 1, Some(&from))), pair("Bearer settings"), "a redirect: the settings' alone");
+    let root = Url::parse("https://registry.example/x").unwrap();
+    assert!(granted(&creds, &hop(&root, 1, Some(&from))).is_empty(), "a redirect: never the URL's own");
+}
+
+#[test]
+fn a_credential_stays_with_its_host_across_redirects() {
+    let target = serve(|_| Some(response(200, &[], b"landed")));
+    let to = format!("https://localhost:{}/x", target.port);
+    let hop_server = serve(move |seen| {
+        if seen.path() == "/again" {
+            return Some(response(302, &[&format!("Location: {to}")], b""));
+        }
+        Some(response(302, &["Location: /again"], b""))
+    });
+    let here = format!("localhost:{}", hop_server.port);
+    let there = format!("localhost:{}", target.port);
+    let mut req = request(&hop_server, "/in");
+    req.hosts.push(there.clone());
+    let mut own = credential(&here, "/", "Authorization", "Basic own");
+    own.first_only = true;
+    req.credentials = vec![own, credential(&here, "/", "PRIVATE-TOKEN", "glpat-here"),
+                           credential(&here, "/again/", "Authorization", "Bearer never")];
+    assert_eq!(fetch(&req).unwrap().body, b"landed");
+    let seen = hop_server.seen.lock().unwrap().clone();
+    assert_eq!(seen.len(), 2);
+    assert_eq!((seen[0].header("authorization"), seen[0].header("private-token")), (Some("Basic own"), Some("glpat-here")));
+    assert_eq!((seen[1].header("authorization"), seen[1].header("private-token")), (None, Some("glpat-here")),
+               "the same host on a redirect: its credentials, not the URL's own (and /again is not under /again/)");
+    let landed = target.seen.lock().unwrap()[0].clone();
+    assert_eq!((landed.header("authorization"), landed.header("private-token")), (None, None),
+               "another origin gets none of them, PRIVATE-TOKEN included");
+
+    // the other host's own credential goes there, and only there
+    let mut req = request(&hop_server, "/in");
+    req.hosts.push(there.clone());
+    req.credentials = vec![credential(&there, "/", "Authorization", "Bearer there")];
+    assert_eq!(fetch(&req).unwrap().body, b"landed");
+    let seen = hop_server.seen.lock().unwrap().clone();
+    assert!(seen[2..].iter().all(|s| s.header("authorization").is_none()));
+    assert_eq!(target.seen.lock().unwrap()[1].header("authorization"), Some("Bearer there"));
+
+    // and a request without credentials on the same kept connections carries none
+    let mut req = request(&hop_server, "/in");
+    req.hosts.push(there);
+    assert_eq!(fetch(&req).unwrap().body, b"landed");
+    assert!(hop_server.seen.lock().unwrap()[4..].iter().all(|s| s.header("authorization").is_none() && s.header("private-token").is_none()));
+    assert!(target.seen.lock().unwrap()[2].header("authorization").is_none());
+}
+
+#[test]
+fn over_http2_a_credential_goes_with_its_own_request_and_host() {
+    let target = serve_h2(|_, _| (200, b"landed".to_vec()));
+    let to = format!("https://localhost:{}/x", target.port);
+    let hop_server = serve_h2_located(move |path, _| match path {
+        "/in" => (302, Some(to.clone()), Vec::new()),
+        _ => (200, None, b"here".to_vec()),
+    });
+    let here = format!("localhost:{}", hop_server.port);
+    let there = format!("localhost:{}", target.port);
+    let mut req = request(&hop_server, "/in");
+    req.hosts.push(there);
+    req.credentials = vec![credential(&here, "/", "Authorization", "Bearer h2"),
+                           credential(&here, "/", "PRIVATE-TOKEN", "glpat-h2")];
+    let reply = fetch(&req).unwrap();
+    assert_eq!((reply.version.as_str(), reply.body.as_slice()), ("HTTP/2", b"landed".as_slice()));
+    assert_eq!(hop_server.seen.lock().unwrap()[0].header("authorization"), Some("Bearer h2"));
+    let landed = target.seen.lock().unwrap()[0].clone();
+    assert_eq!((landed.header("authorization"), landed.header("private-token")), (None, None));
+    // the next request on the origin's one connection, without credentials, carries none
+    assert_eq!(fetch(&request(&hop_server, "/plain")).unwrap().body, b"here");
+    let seen = hop_server.seen.lock().unwrap()[1].clone();
+    assert_eq!((seen.header("authorization"), seen.header("private-token")), (None, None));
+    assert_eq!(hop_server.connections.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn a_credential_is_never_a_header_of_the_request() {
+    let server = serve(|_| Some(response(200, &[], b"ok")));
+    let host = format!("localhost:{}", server.port);
+    for name in ["Authorization", "PRIVATE-TOKEN", "cookie", "Proxy-Authorization", "Job-Token", "Deploy-Token"] {
+        let mut req = request(&server, "/");
+        req.headers = vec![(name.into(), "secret".into())];
+        match fetch(&req) {
+            Err(Failure::Setup(m)) => assert!(m.contains("carries a credential") && !m.contains("secret"), "{m}"),
+            other => panic!("{name} set by the request: {other:?}"),
+        }
+    }
+    let mut req = request(&server, "/");
+    req.headers = vec![("X-Token".into(), "secret".into())];
+    req.credentials = vec![credential(&host, "/", "X-Token", "secret")];
+    assert!(matches!(fetch(&req), Err(Failure::Setup(_))), "a header of a credential's name");
+    for bad in [credential("Localhost", "/", "Authorization", "x"), credential(&host, "/a", "Authorization", "x"),
+                credential(&host, "a/", "Authorization", "x"), credential(&host, "/", "Authorization", "x\r\nInjected: 1"),
+                credential(&host, "/", "Bad Name", "x"), credential(&host, "/", "Host", "x"), credential("", "/", "Authorization", "x"),
+                credential(&host, "/?q/", "Authorization", "x")] {
+        let mut req = request(&server, "/");
+        req.credentials = vec![bad.clone()];
+        match fetch(&req) {
+            Err(Failure::Setup(m)) => assert!(!m.contains("Injected") && !m.contains("\"x\""), "{m}"),
+            other => panic!("{bad:?}: {other:?}"),
+        }
+    }
+    assert_eq!(server.connections.load(Ordering::SeqCst), 0, "nothing was sent");
+    let debug = format!("{:?}", credential(&host, "/", "Authorization", "Bearer s3cr3t"));
+    assert!(!debug.contains("s3cr3t"), "{debug}");
+}
+
+/// pmsettings.Credentials.header's choice, written as Python's is (from the directory of the path up to `/`, the
+/// first prefix the host has), for the property below.
+fn pmsettings_choice<'a>(table: &'a [(String, String, String)], host: &str, path: &str) -> Option<&'a str> {
+    let mut d = path[..path.rfind('/').map_or(0, |k| k + 1)].to_string();
+    if d.is_empty() {
+        d = "/".to_string();
+    }
+    loop {
+        if let Some((_, _, v)) = table.iter().find(|(h, p, _)| h == host && *p == d) {
+            return Some(v);
+        }
+        if d == "/" {
+            return None;
+        }
+        let trimmed = &d[..d.len() - 1];
+        d = trimmed[..trimmed.rfind('/').map_or(0, |k| k + 1)].to_string();
+    }
+}
+
+#[test]
+fn the_choice_is_pmsettings_choice() {
+    use tiny_https::http::Url;
+    let mut seed: u64 = 0x9e37_79b9_7f4a_7c15;
+    let mut next = |n: usize| {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        (seed % n as u64) as usize
+    };
+    let hosts = ["registry.example", "registry.example:8443", "[::1]:8443", "other.example"];
+    let segments = ["a", "b", "team", "npm", "a.b", "-"];
+    for _ in 0..3000 {
+        // a table as pmsettings keeps one: (host, a path prefix ending in '/') -> header, one header per prefix
+        let mut table: Vec<(String, String, String)> = Vec::new();
+        for i in 0..next(6) {
+            let mut path = "/".to_string();
+            for _ in 0..next(3) {
+                path.push_str(segments[next(segments.len())]);
+                path.push('/');
+            }
+            let host = hosts[next(hosts.len())].to_string();
+            if !table.iter().any(|(h, p, _)| *h == host && *p == path) {
+                table.push((host, path, format!("Bearer {i}")));
+            }
+        }
+        let creds: Vec<Credential> = table.iter().map(|(h, p, v)| credential(h, p, "Authorization", v)).collect();
+        let host = hosts[next(hosts.len())];
+        let mut path = String::new();
+        for _ in 0..next(4) {
+            path.push('/');
+            path.push_str(segments[next(segments.len())]);
+        }
+        if next(2) == 0 || path.is_empty() {
+            path.push('/');
+        }
+        let query = if next(3) == 0 { "?x=/team/" } else { "" };
+        let url = Url::parse(&format!("https://{host}{path}{query}")).unwrap();
+        let got = granted(&creds, &hop(&url, 0, None));
+        let want = pmsettings_choice(&table, host, &path);
+        assert_eq!(got.first().map(|(_, v)| v.as_str()), want, "{host}{path}{query} with {table:?}");
+        assert!(got.len() <= 1);
+    }
 }

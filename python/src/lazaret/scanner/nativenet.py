@@ -27,6 +27,13 @@ Windows) when the environment names none.
 `request` reads a body whole, `open_stream` hands it over in pieces. A request that gets no response raises `NetError`
 (`kind`: "refused", "too-large", "tls", "timeout", "network", "http", "setup"); one that should go through Python's
 transport raises `UsePython`. The caller turns either into its own error (repo.py: FetchError).
+
+Credentials (decision 14, John, Oct 6: they go over tiny_https in 0.1.9): a token or a login is a `Credential` of a
+request, never one of its headers. The native client gives each hop the credentials of the host it goes to and no
+other (tiny_https's hop hook, called for the request and for every redirect before anything is sent there; lazaret-net
+refuses a request that sets `Authorization`, `Cookie`, `PRIVATE-TOKEN` and the like as a header, which a redirect to
+another host could carry on). A credential the native client cannot send (a value or path outside printable ASCII, a
+host it would not write that way) makes the request Python's, as before 0.1.9.
 """
 import ctypes
 import json
@@ -71,6 +78,50 @@ class Reply(NamedTuple):
     def header(self, name):
         name = name.lower()
         return next((v for n, v in self.headers if n.lower() == name), None)
+
+
+class Credential(NamedTuple):
+    """The header `name: value` for the hops to `host` whose path is under `path`, over https (decision 14). `host` is
+    written as a Host header is, and as pmsettings.Credentials keys a host: lower case, an IPv6 address in brackets,
+    ":port" when the port is not 443 (`host_key`). `path` is a prefix that ends in "/" ("/": the whole host); where
+    several fit a hop, the longest is given, for each name. `first`: for the request itself and no redirect (the
+    URL's own user:password, which urllib sends with the request alone); on the request it comes before the others."""
+    host: str
+    path: str
+    name: str
+    value: str
+    first: bool = False
+
+    def __repr__(self):                    # (a credential's value is never shown)
+        return f"Credential(host={self.host!r}, path={self.path!r}, name={self.name!r}, first={self.first})"
+
+
+def host_key(url):
+    """The host of an https URL as a `Credential` names it: lower case, an IPv6 address in brackets, ":port" when the
+    port is not 443. "" for a URL without one."""
+    try:
+        parts = urllib.parse.urlsplit(url)
+        host, port = (parts.hostname or "").lower(), parts.port
+    except ValueError:
+        return ""
+    if not host:
+        return ""
+    shown = f"[{host}]" if ":" in host else host
+    return shown if port in (None, 443) else f"{shown}:{port}"
+
+
+_TOKEN = frozenset("!#$%&'*+-.^_`|~0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ")
+_HOST = frozenset("abcdefghijklmnopqrstuvwxyz0123456789.-_[]:")
+
+
+def _sendable(c):
+    """Can the native client send this credential (lazaret-net's rule; it refuses the request otherwise)?"""
+    return (0 < len(c.name) <= 256 and all(ch in _TOKEN for ch in c.name)
+            and c.name.lower() not in ("host", "connection", "content-length", "transfer-encoding")
+            and len(c.value) <= 8192 and all(ch in " \t" or "!" <= ch <= "~" for ch in c.value)
+            and c.host != "" and all(ch in _HOST for ch in c.host)
+            and c.path.startswith("/") and c.path.endswith("/")
+            and all("!" <= ch <= "~" and ch not in "?#" for ch in c.path))
 
 
 _lock = threading.Lock()
@@ -220,17 +271,25 @@ def _proxy_for(url):
     return proxy
 
 
-def _spec(url, hosts, method, headers, max_bytes, timeout, max_redirects, total_timeout, h2=None, proxy=None):
+def _spec(url, hosts, method, headers, max_bytes, timeout, max_redirects, total_timeout, h2=None, proxy=None,
+          credentials=()):
     if hosts is not None and not hosts:
         raise NetError("setup", "a request needs the hosts its caller may reach")
-    return json.dumps({
+    credentials = [Credential(*c) for c in credentials or ()]
+    if not all(_sendable(c) for c in credentials):
+        raise UsePython("a credential the native client cannot send")
+    spec = {
         "method": method, "url": url, "headers": [[str(n), str(v)] for n, v in (headers or ())],
         "hosts": sorted(hosts or ()), "any_host": hosts is None, "max_bytes": int(max_bytes),
         "timeout_ms": max(1, int(timeout * 1000)),
         "total_timeout_ms": None if total_timeout is None else max(1, int(total_timeout * 1000)),
         "max_redirects": int(max_redirects), "proxy": _proxy_for(url) if proxy is None else proxy,
         "http2": http2(max_bytes) if h2 is None else bool(h2),
-    }, ensure_ascii=True, separators=(",", ":")).encode("ascii")
+    }
+    if credentials:
+        spec["credentials"] = [{"host": c.host, "path": c.path, "name": c.name, "value": c.value, "first": bool(c.first)}
+                               for c in credentials]
+    return json.dumps(spec, ensure_ascii=True, separators=(",", ":")).encode("ascii")
 
 
 def http2(max_bytes=None):
@@ -266,16 +325,17 @@ def _head(answer):
 
 
 def request(url, *, hosts, method="GET", headers=(), data=None, max_bytes, timeout, max_redirects=3,
-            total_timeout=None, h2=None, proxy=None):
+            total_timeout=None, h2=None, proxy=None, credentials=()):
     """Send one request and read its body whole (at most `max_bytes`): a `Reply`, whatever its status. NetError when
     no response came; UsePython when Python's transport is to send it. `hosts`: the hosts the URL and every redirect
     may go to, or None for any (https, the URL limits, still hold: a caller that checked the first URL itself). `h2`:
     offer HTTP/2 (True), or not (False); None: as `http2` says for the budget. `proxy`: "direct", "env" or a proxy's
-    URL; None: as urllib would choose."""
+    URL; None: as urllib would choose. `credentials`: `Credential`s, each given to the hops to its own host alone
+    (none of them may be in `headers`)."""
     lib = _setup()
     if lib is None or disabled():
         raise UsePython(why_not() or "the native transport is not available")
-    spec = _spec(url, hosts, method, headers, max_bytes, timeout, max_redirects, total_timeout, h2, proxy)
+    spec = _spec(url, hosts, method, headers, max_bytes, timeout, max_redirects, total_timeout, h2, proxy, credentials)
     meta, meta_len, body, body_len = ctypes.c_void_p(), ctypes.c_size_t(), ctypes.c_void_p(), ctypes.c_size_t()
     status = lib.lazaret_net_request(spec, len(spec), data, len(data or b""), ctypes.byref(meta), ctypes.byref(meta_len),
                                      ctypes.byref(body), ctypes.byref(body_len))
@@ -338,13 +398,13 @@ class Stream:
 
 
 def open_stream(url, *, hosts, method="GET", headers=(), data=None, max_bytes, timeout, max_redirects=3,
-                total_timeout=None, h2=None, proxy=None):
+                total_timeout=None, h2=None, proxy=None, credentials=()):
     """Send one request and return once its head is in: a `Stream` (the body read with `read`), whatever its
-    status. NetError, UsePython, `hosts`, `h2` and `proxy` as `request`."""
+    status. NetError, UsePython, `hosts`, `h2`, `proxy` and `credentials` as `request`."""
     lib = _setup()
     if lib is None or disabled():
         raise UsePython(why_not() or "the native transport is not available")
-    spec = _spec(url, hosts, method, headers, max_bytes, timeout, max_redirects, total_timeout, h2, proxy)
+    spec = _spec(url, hosts, method, headers, max_bytes, timeout, max_redirects, total_timeout, h2, proxy, credentials)
     meta, meta_len, handle = ctypes.c_void_p(), ctypes.c_size_t(), ctypes.c_uint64()
     status = lib.lazaret_net_open(spec, len(spec), data, len(data or b""), ctypes.byref(meta), ctypes.byref(meta_len),
                                   ctypes.byref(handle))

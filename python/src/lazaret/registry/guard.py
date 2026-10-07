@@ -365,24 +365,39 @@ class Fetcher:
         err.status = code
         return err
 
+    def _native_credentials(self, req, clean):
+        """The credentials of a request on the native transport, as urllib's path gives them (decision 14): the
+        request's own Authorization (its URL's user:password, or the settings' for its URL) with the request alone,
+        and the settings' with each redirect, for the redirect's URL (pmsettings.Credentials: a host, the longest
+        path prefix); tiny_https's hop hook gives each hop its own host's and no other's."""
+        out = []
+        own = req.get_header("Authorization")
+        if own:
+            out.append(nativenet.Credential(nativenet.host_key(clean), "/", "Authorization", own, first=True))
+        for host, paths in sorted(self.auth.hosts.items()):
+            for path, header in sorted(paths.items()):
+                out.append(nativenet.Credential(host, path, "Authorization", header))
+        return out
+
     def _open_native(self, req, clean, timeout, max_bytes):
         """The request through the native transport (NET-1): its hosts the rule for the URL and every redirect (any
         https host for a redirect with `https_redirects`, the first URL being checked already), no proxy for this
-        machine. None, for urllib: a plain-http URL, a request with credentials (they stay on OpenSSL, and only
-        urllib's redirect hook gives a hop its own host's credentials), or one the native transport is not to send."""
+        machine, and its credentials given hop by hop (`_native_credentials`). None, for urllib: a plain-http URL, or
+        one the native transport is not to send (or cannot: a credential outside printable ASCII)."""
         parts = urllib.parse.urlsplit(clean)
-        if parts.scheme != "https" or "@" in parts.netloc or req.has_header("Authorization") \
-                or not nativenet.chosen(clean):
+        if parts.scheme != "https" or "@" in parts.netloc or not nativenet.chosen(clean):
             return None
         with self.lock:
             hosts = None if self.https_redirects else sorted(self.hosts | {netloc(clean)})
         budget = min(max_bytes or NATIVE_STREAM_MAX, NATIVE_STREAM_MAX)
+        headers = [(k, v) for k, v in req.header_items() if k.lower() != "authorization"]
         try:
             with timings.span("network", "request"):
-                stream = nativenet.open_stream(clean, hosts=hosts, headers=req.header_items(), max_bytes=budget,
+                stream = nativenet.open_stream(clean, hosts=hosts, headers=headers, max_bytes=budget,
                                                timeout=timeout, max_redirects=repo.MAX_REDIRECTS,
                                                total_timeout=download_deadline(),
-                                               proxy="direct" if _is_loopback(parts.hostname) else None)
+                                               proxy="direct" if _is_loopback(parts.hostname) else None,
+                                               credentials=self._native_credentials(req, clean))
         except nativenet.UsePython:
             return None
         except nativenet.NetError as exc:
@@ -1848,13 +1863,10 @@ def make_index_server(index, gate=None):
                     shutil.copyfileobj(f, self.wfile, 1024 * 1024)
 
         def _relay(self, url):
-            index.fetcher.check(url)
-            req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
-            response = index.fetcher._open_native(req, url, repo.DOWNLOAD_TIMEOUT, None)    # (NET-1; None: urllib)
-            if response is None:
-                with timings.span("network", "request"):
-                    response = index.fetcher._opener(url).open(req, timeout=repo.DOWNLOAD_TIMEOUT)
-            with response as r:
+            # the fetcher's request, as the scan's download is: the credentials of the file's URL (0.1.9: before, a
+            # relayed file went without them on its first hop and a private index's file was refused), an HTTP error
+            # its FetchError
+            with index.fetcher.open(url) as r:
                 self.send_response(200)
                 self.send_header("Content-Type", "application/octet-stream")
                 length = r.headers.get("Content-Length")

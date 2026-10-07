@@ -46,10 +46,14 @@ project is pre-1.0, so the 0.x API may still change.
   and when `LAZARET_NETWORK=python` asks for it. tiny_https has not had an independent review (its
   README says so). The guard's https downloads and relays (any https host on a redirect where the
   guard allows one), the `github:` and `gitlab:` sources and the SCA feeds' downloads go through
-  it too. A request that carries credentials stays on urllib: a private registry's token,
-  `GITHUB_TOKEN` or `GITLAB_TOKEN`, a secret being verified (urllib's redirect hook gives a hop
-  only its own host's credentials, which tiny_https has no hook for yet), as does plain http to a
-  registry on this machine. Building the native library now needs Rust 1.87 or later.
+  it too, credentials included (decision 14): a private registry's token or login, a URL's own
+  `user:password@`, `GITHUB_TOKEN` and `GITLAB_TOKEN` are given hop by hop by tiny_https's hop
+  hook, each to its own host (and path prefix) alone, as urllib's redirect hook gave them; the
+  URL's own login goes with the request and no redirect. A request that sets `Authorization`,
+  `Cookie`, `PRIVATE-TOKEN` or the like as a header is refused by the native layer, so none can
+  follow a redirect to another host. A secret being verified stays on urllib, as does plain http to
+  a registry on this machine and a credential outside printable ASCII. Building the native library
+  now needs Rust 1.87 or later.
 - **The Go checksum database's answers are checked as the go command checks them (NET-1).** A
   `go:` module's `h1:` hash comes from `sum.golang.org`'s lookup, and that answer is now verified
   through tiny_https's pure part in the native library: the signature on the database's tree head
@@ -536,6 +540,10 @@ project is pre-1.0, so the 0.x API may still change.
 
 ### Fixed
 
+- **The pip and uv relay sends a private index's credentials with a file too large to scan.** Such a file
+  is relayed to the tool unscanned (INCOMPLETE), and the relay made a request of its own without the
+  credentials of the file's URL, so a private index that wants them for its files refused it. It now
+  goes through the fetcher's request, as the scan's download does.
 - **The Go guard (and the pip and uv relay) holds at most 512 MiB of archives in memory at once (GR-4).** go asks
   its proxy for about as many zips at once as the machine has cores, each up to 200 MiB, and
   the guard read each whole to scan it, all at the same time. Zips are still fetched together

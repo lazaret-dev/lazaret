@@ -1,6 +1,7 @@
-"""The guard's fetcher on the native transport (0.1.9, NET-1): an https request without credentials goes through
-the native library's client, with the fetcher's hosts as the rule for every redirect; plain http, and a request with
-credentials, stay on urllib. Against a local HTTPS server of Python's ssl, as tests.scanner.test_nativenet's."""
+"""The guard's fetcher on the native transport (0.1.9, NET-1): an https request goes through the native library's
+client, with the fetcher's hosts as the rule for every redirect and its credentials given hop by hop, each to its own
+host (decision 14); plain http, and a credential the native client cannot send, stay on urllib. Against a local HTTPS
+server of Python's ssl, as tests.scanner.test_nativenet's."""
 
 import hashlib
 import os
@@ -94,16 +95,35 @@ class GuardNativeFetchTests(unittest.TestCase):
             f.get(self.url("/missing"), max_bytes=100)
         self.assertEqual(caught.exception.status, 404)
 
-    def test_credentials_stay_on_urllib(self):
+    def test_credentials_go_native_each_to_its_own_host(self):
+        # (decision 14: the settings' credentials of each hop's URL, the URL's own user:password with the request
+        # alone, as urllib's redirect hook gives them; tiny_https's hop hook, never a header a redirect carries on)
         auth = pmsettings.Credentials()
+        auth.token(self.url("/"), "t0ken")
+        auth.token(self.url("/team/"), "team-t0ken")
+        f = self.fetcher(auth=auth, https_redirects=True)
+        with self.no_urllib(f):
+            self.assertEqual(f.json(self.url("/headers")).get("authorization"), "Bearer t0ken")
+            self.assertEqual(f.json(self.url("/to-headers")).get("authorization"), "Bearer t0ken", "the same host")
+            self.assertNotIn("authorization", f.json(self.url("/out-headers")), "another host (127.0.0.1)")
+            own = f.json(f"https://user:pw@{self.host}/headers")
+            self.assertEqual(own.get("authorization"), pmsettings.basic("user", "pw"), "the URL's own, before the settings'")
+            after = f.json(f"https://user:pw@{self.host}/to-headers")
+            self.assertEqual(after.get("authorization"), "Bearer t0ken", "a redirect: the settings', never the URL's own")
+        plain = self.fetcher()
+        with self.no_urllib(plain):
+            self.assertNotIn("authorization", plain.json(self.url("/headers")), "a fetcher without credentials")
+
+    def test_a_credential_the_native_client_cannot_send_goes_through_urllib(self):
+        auth = pmsettings.Credentials()
+        auth.token(self.url("/"), "töken")
         f = self.fetcher(auth=auth)
 
         class Opener:
             def open(self, req, timeout=None):
                 raise urllib.error.URLError("the urllib path")
 
-        with mock.patch.object(auth, "header", lambda url: "Bearer t0ken"), \
-                mock.patch.object(f, "_opener", lambda url: Opener()), self.assertRaises(repo.FetchError) as caught:
+        with mock.patch.object(f, "_opener", lambda url: Opener()), self.assertRaises(repo.FetchError) as caught:
             f.get(self.url("/ok"), max_bytes=100)
         self.assertIn("the urllib path", str(caught.exception))
 

@@ -76,6 +76,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self._send(302, headers=[("Location", "/ok")])
         elif self.path == "/out":
             self._send(302, headers=[("Location", f"https://127.0.0.1:{port}/ok")])
+        elif self.path == "/to-headers":                   # (the same host)
+            self._send(302, headers=[("Location", "/headers")])
+        elif self.path == "/out-headers":                  # (another host: 127.0.0.1)
+            self._send(302, headers=[("Location", f"https://127.0.0.1:{port}/headers")])
         elif self.path == "/drip":                         # (40 chunks of 64 KiB, 0.1 s apart: each read is quick)
             self.send_response(200)
             self.send_header("Content-Length", str(40 * 65536))
@@ -260,6 +264,64 @@ class NativeTransportTests(unittest.TestCase):
         finally:
             server.stop()
 
+    def seen(self, path, credentials, hosts=None, **kw):
+        """The request's fields as the server saw them (on the last hop)."""
+        reply = nativenet.request(self.url(path), hosts=hosts or [self.host, f"127.0.0.1:{self.port}"], max_bytes=10_000,
+                                  timeout=10, credentials=credentials, **kw)
+        self.assertEqual(reply.status, 200)
+        return json.loads(reply.body)
+
+    def test_a_credential_goes_to_its_own_host_alone(self):
+        # (decision 14: credentials over tiny_https, each given by its hop hook to the hops to its own host)
+        token = nativenet.Credential(self.host, "/", "Authorization", "Bearer t0ken")
+        gitlab = nativenet.Credential(self.host, "/", "PRIVATE-TOKEN", "glpat-t0ken")
+        seen = self.seen("/headers", [token, gitlab])
+        self.assertEqual((seen.get("authorization"), seen.get("private-token")), ("Bearer t0ken", "glpat-t0ken"))
+        seen = self.seen("/to-headers", [token, gitlab])
+        self.assertEqual((seen.get("authorization"), seen.get("private-token")), ("Bearer t0ken", "glpat-t0ken"),
+                         "a redirect to the same host")
+        seen = self.seen("/out-headers", [token, gitlab])
+        self.assertEqual((seen.get("authorization"), seen.get("private-token")), (None, None),
+                         "a redirect to another host gets none (PRIVATE-TOKEN included)")
+        there = nativenet.Credential(f"127.0.0.1:{self.port}", "/", "Authorization", "Bearer there")
+        self.assertEqual(self.seen("/out-headers", [token, there]).get("authorization"), "Bearer there")
+        self.assertIsNone(self.seen("/headers", [there]).get("authorization"))
+        self.assertIsNone(self.seen("/headers", [nativenet.Credential(self.host, "/elsewhere/", "Authorization", "x")])
+                          .get("authorization"), "a path the credential is not for")
+        self.assertIsNone(self.seen("/headers", []).get("authorization"), "the next request carries none")
+
+    def test_the_urls_own_login_goes_with_the_request_alone(self):
+        own = nativenet.Credential(self.host, "/", "Authorization", "Basic b3du", first=True)
+        settings = nativenet.Credential(self.host, "/", "Authorization", "Bearer settings")
+        self.assertEqual(self.seen("/headers", [settings, own])["authorization"], "Basic b3du")
+        self.assertEqual(self.seen("/to-headers", [settings, own])["authorization"], "Bearer settings")
+        self.assertIsNone(self.seen("/to-headers", [own]).get("authorization"))
+
+    def test_a_credential_is_never_a_header(self):
+        for name in ("Authorization", "PRIVATE-TOKEN", "Cookie"):
+            with self.subTest(name=name), self.assertRaises(nativenet.NetError) as caught:
+                nativenet.request(self.url("/headers"), hosts=[self.host], max_bytes=10_000, timeout=10,
+                                  headers=[(name, "s3cret")])
+            self.assertEqual(caught.exception.kind, "setup")
+            self.assertNotIn("s3cret", str(caught.exception))
+        for bad in (nativenet.Credential(self.host, "/", "Authorization", "Bearer töken"),
+                    nativenet.Credential(self.host, "/päth/", "Authorization", "x"),
+                    nativenet.Credential(self.host.upper(), "/", "Authorization", "x"),
+                    nativenet.Credential(self.host, "/", "Authorization", "a\r\nInjected: 1")):
+            with self.subTest(bad=bad), self.assertRaises(nativenet.UsePython):
+                nativenet.request(self.url("/headers"), hosts=[self.host], max_bytes=10_000, timeout=10, credentials=[bad])
+
+    def test_a_sources_token_goes_native_to_its_api_host_alone(self):
+        from lazaret.registry import sources
+        headers = {"User-Agent": repo.USER_AGENT, "Authorization": "Bearer t0ken", "PRIVATE-TOKEN": "glpat"}
+        hosts = {self.host, f"127.0.0.1:{self.port}"}
+        with mock.patch.object(sources.urllib.request, "build_opener", side_effect=AssertionError("urllib was used")):
+            seen = json.loads(sources._http(self.url("/headers"), dict(headers), 10_000, hosts, self.host))
+            self.assertEqual((seen.get("authorization"), seen.get("private-token")), ("Bearer t0ken", "glpat"))
+            seen = json.loads(sources._http(self.url("/out-headers"), dict(headers), 10_000, hosts, self.host))
+            self.assertEqual((seen.get("authorization"), seen.get("private-token")), (None, None))
+            self.assertEqual(seen.get("user-agent"), repo.USER_AGENT)
+
     def test_a_root_it_was_not_given_is_refused(self):
         tmp = tempfile.TemporaryDirectory()
         try:
@@ -315,6 +377,26 @@ class ChoiceTests(unittest.TestCase):
         self.assertEqual((spec["hosts"], spec["any_host"], spec["proxy"]), ([], True, "direct"), "no host rule")
         with self.assertRaises(nativenet.NetError):
             nativenet._spec("https://a.example/x", [], "GET", [], 10, 1, 3, None, None, "direct")
+        spec = json.loads(nativenet._spec("https://a.example/x", None, "GET", [], 10, 1, 3, None, None, "direct",
+                                          [nativenet.Credential("a.example", "/x/", "Authorization", "Bearer t", True)]))
+        self.assertEqual(spec["credentials"], [{"host": "a.example", "path": "/x/", "name": "Authorization",
+                                                "value": "Bearer t", "first": True}])
+
+    def test_a_credentials_host_is_written_as_a_host_header_is(self):
+        key = nativenet.host_key
+        self.assertEqual(key("https://API.GitHub.com/repos"), "api.github.com")
+        self.assertEqual(key("https://gl.example.org:443/x"), "gl.example.org")
+        self.assertEqual(key("https://gl.example.org:8443/x"), "gl.example.org:8443")
+        self.assertEqual(key("https://[::1]:8443/x"), "[::1]:8443")
+        self.assertEqual(key("https://user:pw@gl.example.org/x"), "gl.example.org")
+        self.assertEqual((key("https:///x"), key("https://h:99999/")), ("", ""))
+        from lazaret.registry import pmsettings
+        for url in ("https://API.example.org/a/", "https://h.example:8443/b/", "https://[::1]:8443/c/"):
+            with self.subTest(url=url):
+                self.assertEqual(key(url), pmsettings._origin(url)[2], "as pmsettings.Credentials keys a host")
+        shown = repr(nativenet.Credential("a.example", "/", "Authorization", "Bearer s3cret"))
+        self.assertNotIn("s3cret", shown)
+        self.assertNotIn("s3cret", str([nativenet.Credential("a.example", "/", "Authorization", "Bearer s3cret")]))
 
     def test_documents_go_over_http2_and_downloads_over_http11(self):
         def offered(budget, mode=None, h2=None):

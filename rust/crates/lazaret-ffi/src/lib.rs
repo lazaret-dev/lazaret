@@ -185,8 +185,12 @@ mod native {
 /// ```text
 /// {"method": "GET", "url": "https://…", "headers": [["Accept", "…"], …], "hosts": ["registry.npmjs.org", …],
 ///  "max_bytes": 5242880, "timeout_ms": 30000, "total_timeout_ms": null, "max_redirects": 3,
-///  "proxy": "env" | "direct" | "http://host:port", "http2": true, "any_host": false}
+///  "proxy": "env" | "direct" | "http://host:port", "http2": true, "any_host": false,
+///  "credentials": [{"host": "api.github.com", "path": "/", "name": "Authorization", "value": "…", "first": false}, …]}
 /// ```
+///
+/// A credential goes to the hops to its own host only (lazaret_net::Credential: tiny_https's hop hook), never as a
+/// header a redirect could carry on.
 ///
 /// The answer is JSON too, in a buffer the library allocates: `{"status": 200, "version": "HTTP/2", "headers":
 /// [[name, value], …], "url": "…"}` with the body in a second buffer (status 0), or `{"kind": "refused" |
@@ -195,7 +199,7 @@ mod native {
 #[cfg(not(target_arch = "wasm32"))]
 pub mod net {
     use super::*;
-    use lazaret_net::{Failure, Proxy, Request, Stream};
+    use lazaret_net::{Credential, Failure, Proxy, Request, Stream};
     use std::collections::HashMap;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::{Arc, Mutex};
@@ -238,6 +242,20 @@ pub mod net {
         let max_bytes = spec.get("max_bytes").and_then(Value::as_i64).filter(|n| *n >= 0)
             .ok_or("the request has no byte budget")? as u64;
         let max_redirects = spec.get("max_redirects").and_then(Value::as_i64).filter(|n| (0..=10).contains(n)).unwrap_or(3) as usize;
+        let listed = match spec.get("credentials") {
+            None | Some(Value::Null) => &[][..],
+            Some(v) => v.as_arr().ok_or("the request's credentials are not a list")?,
+        };
+        let mut credentials = Vec::new();
+        for item in listed {
+            credentials.push(Credential {
+                host: text(item.get("host"), "credential's host")?,
+                path: text(item.get("path"), "credential's path")?,
+                name: text(item.get("name"), "credential's name")?,
+                value: text(item.get("value"), "credential's value")?,
+                first_only: matches!(item.get("first"), Some(Value::Bool(true))),
+            });
+        }
         Ok(Request {
             method: text(spec.get("method"), "method")?,
             url: text(spec.get("url"), "URL")?,
@@ -251,6 +269,7 @@ pub mod net {
             max_redirects,
             proxy,
             http2: !matches!(spec.get("http2"), Some(Value::Bool(false))),
+            credentials,
         })
     }
 
@@ -738,6 +757,29 @@ mod tests {
             let (s, a) = handle(&request("verify.go_sumdb", "{}", b""));
             assert_eq!(s, STATUS_ERROR);
             assert!(a.contains("needs module"), "{a}");
+        }
+    }
+
+    /// A request's description (native only): its credentials (decision 14).
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_requests_credentials_are_read_from_its_description() {
+        let spec = json::parse_str(r#"{"method": "GET", "url": "https://a.example/x", "hosts": ["a.example"], "max_bytes": 10,
+            "credentials": [{"host": "a.example", "path": "/x/", "name": "Authorization", "value": "Bearer t", "first": true},
+                            {"host": "b.example:8443", "path": "/", "name": "PRIVATE-TOKEN", "value": "glpat"}]}"#).unwrap();
+        let req = net::request_of(&spec, b"").unwrap();
+        let got: Vec<_> = req.credentials.iter().map(|c| (c.host.as_str(), c.path.as_str(), c.name.as_str(), c.value.as_str(),
+                                                          c.first_only)).collect();
+        assert_eq!(got, vec![("a.example", "/x/", "Authorization", "Bearer t", true),
+                             ("b.example:8443", "/", "PRIVATE-TOKEN", "glpat", false)]);
+        assert!(!format!("{req:?}").contains("Bearer t"), "a request's debug form shows no credential's value");
+        let none = json::parse_str(r#"{"method": "GET", "url": "https://a.example/x", "hosts": ["a.example"], "max_bytes": 10}"#).unwrap();
+        assert!(net::request_of(&none, b"").unwrap().credentials.is_empty());
+        for bad in [r#""credentials": {"host": "a.example"}"#, r#""credentials": [{"host": "a.example", "path": "/"}]"#,
+                    r#""credentials": ["Bearer t"]"#] {
+            let spec = json::parse_str(&format!(r#"{{"method": "GET", "url": "https://a.example/x", "max_bytes": 10, {bad}}}"#)).unwrap();
+            let err = net::request_of(&spec, b"").unwrap_err();
+            assert!(!err.contains("Bearer"), "{err}");
         }
     }
 

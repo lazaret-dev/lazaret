@@ -239,7 +239,9 @@ rust/
                              npm's and PyPI's attestations of a file: verified, invalid or
                              unchecked (NET-1)
   crates/lazaret-net/        the network layer on tiny_https: Lazaret's host rule on every hop,
-                             URL limits, budgets; native library only (NET-1, DESIGN.md §5j)
+                             URL limits, budgets, credentials given hop by hop to their own
+                             host (tiny_https's hop hook, decision 14); native library only
+                             (NET-1, DESIGN.md §5j)
   crates/tiny_https/         the HTTPS/TLS library, taken as it was handed over
                              (scripts/sync_tiny_https.py; LAZARET.md, vendored.sha256); not a
                              default member: `cargo test -p tiny_https` runs its own tests
