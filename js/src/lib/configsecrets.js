@@ -130,17 +130,69 @@ const WEBHOOK_RE = pyRe(String.raw`https://hooks\.slack\.com/services/T[A-Z0-9]{
 // A .netrc's names, and its password token and value (configsecrets.NETRC_NAMES, NETRC_PASSWORD_RE).
 export const NETRC_NAMES = new Set([".netrc", "_netrc"]);
 const NETRC_PASSWORD_RE = pyRe(String.raw`(?<![^ \t])password[ \t]+("[^"\n]*"|[^\s"]+)`, "gd");
+// A .netrc's tokens, and the logins of anonymous FTP (configsecrets._NETRC_TOKEN_RE, NETRC_ANONYMOUS: N-25).
+const NETRC_TOKEN_RE = pyRe(String.raw`"[^"\n]*"|[^\s"]+`, "g");
+const NETRC_ANONYMOUS = new Set(["anonymous", "ftp"]);
+
+/**
+ * Map line index -> Set of the columns (UTF-16) of the password values of a .netrc's entries whose login is
+ * anonymous FTP's, which S-SECRET does not report (configsecrets.netrc_anonymous). `codeLines`: the file's lines,
+ * comments removed.
+ */
+export function netrcAnonymous(codeLines) {
+  const skip = new Map();
+  let login = null, passwords = [], pending = null, inMacro = false;
+  const close = () => {
+    if (login !== null && NETRC_ANONYMOUS.has(unquote(login).toLowerCase())) {
+      for (const [i, col] of passwords) {
+        if (!skip.has(i)) skip.set(i, new Set());
+        skip.get(i).add(col);
+      }
+    }
+  };
+  for (let i = 0; i < codeLines.length; i++) {
+    const line = codeLines[i];
+    if (inMacro) {
+      inMacro = pyStrip(line) !== "";
+      continue;
+    }
+    NETRC_TOKEN_RE.lastIndex = 0;
+    let m;
+    while ((m = NETRC_TOKEN_RE.exec(line))) {
+      const token = m[0];
+      if (pending !== null) {
+        if (pending === "login") login = token;
+        else if (pending === "password") passwords.push([i, m.index]);
+        else if (pending === "macdef") inMacro = true;          // (its body is the lines that follow, to an empty one)
+        pending = null;
+        if (inMacro) break;
+        continue;
+      }
+      if (token === "machine" || token === "default") {
+        close();
+        login = null;
+        passwords = [];
+        pending = token === "machine" ? "machine" : null;
+      } else if (token === "login" || token === "password" || token === "account" || token === "macdef") {
+        pending = token;
+      }
+    }
+  }
+  close();
+  return skip;
+}
 
 /**
  * Column (UTF-16) of the first credential S-SECRET reports on a config line (comments removed), else -1.
- * `netrc`: the line is a .netrc's.
+ * `netrc`: the line is a .netrc's; `skip`: the columns of its password values that are not secrets
+ * (netrcAnonymous).
  */
-export function secretCol(code, netrc = false) {
+export function secretCol(code, netrc = false, skip = null) {
   let m;
   if (netrc) {
     NETRC_PASSWORD_RE.lastIndex = 0;
     while ((m = NETRC_PASSWORD_RE.exec(code))) {
-      if (secretValue(m[1])) return m.indices[1][0];
+      if (!(skip && skip.has(m.indices[1][0])) && secretValue(m[1])) return m.indices[1][0];
     }
   }
   KV_RE.lastIndex = 0;

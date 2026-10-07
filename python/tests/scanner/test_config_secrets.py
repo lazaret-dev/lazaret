@@ -231,6 +231,20 @@ class NetrcAndCratesTokens(unittest.TestCase):
         # the snippet never shows the password, on its line or a line around it
         self.assertNotIn(PASS, json.dumps(core.scan_config_file(".netrc", text)))
 
+    def test_an_anonymous_ftp_login_is_no_secret(self):
+        """N-25: the password of an entry whose login is anonymous FTP's (`anonymous`, `ftp`, in any case) is by
+        convention an e-mail address, wherever the login sits in the entry; any other entry's still counts."""
+        text = ("machine ftp.host.invalid login anonymous password jdoe@mailhost.invalid\n"
+                "default\n  password jdoe@mailhost.invalid\n  login FTP\n"
+                f"machine api.host.invalid login alice password {PASS}\n"
+                "macdef init\ncd /pub\n\n"
+                f"machine other.invalid\n login ftpuser\n password {PASS}\n"
+                "machine more.invalid login anonymous\n"
+                f"machine last.invalid password {PASS}\n")
+        self.assertEqual(found(".netrc", text), [("S-SECRET", 5), ("S-SECRET", 11), ("S-SECRET", 13)])
+        # the same lines in another config file are prose, not tokens
+        self.assertEqual(found("ftp.cfg", "login anonymous password jdoe@mailhost.invalid\n"), [])
+
     def test_a_crates_io_token(self):
         tok = "cio" + "Zq8vN3pL0wX7rT2mK9sB4hF6jD1aE5cG"
         self.assertEqual(len(tok), 35)

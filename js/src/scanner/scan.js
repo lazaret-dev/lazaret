@@ -21,7 +21,7 @@ import { cpLen, cpPrefix, pyRepr, pyLstrip, pyStrip, isPySpace } from "../lib/py
 import { findSecretToken, registerScanContext, REDACT } from "../lib/redact.js";
 import { truncatedIssue, normalizeNewlines, treeJoin } from "../lib/fs.js";
 import { assigned13, pinUnicode } from "../lib/unicode13.js";
-import { documentationToken, keyMaterial, secretCol, redactConfigValues, NETRC_NAMES } from "../lib/configsecrets.js";
+import { documentationToken, keyMaterial, secretCol, redactConfigValues, NETRC_NAMES, netrcAnonymous } from "../lib/configsecrets.js";
 import { configKind, ownerDir, entries as autorunEntries, localCommand } from "../lib/autorun.js";
 import { isWorkflow, findings as workflowFindings, hardening as workflowHardening,
   hardeningRule as workflowHardeningRule } from "../lib/ghworkflow.js";
@@ -757,6 +757,7 @@ export function scanConfigFile(path, rawContent, read = null) {
     if (configKind(path) !== null) issues.push(...autorunIssues(path, lines, read));
     if (isWorkflow(path)) issues.push(...workflowIssues(path, lines));
     else if (isGitlabCi(path)) issues.push(...gitlabIssues(path, lines));
+    const anonymous = netrc ? netrcAnonymous(lex.code) : new Map();
     for (let i = 0; i < lines.length; i++) {
       if (Date.now() > deadline) throw new ScanBudgetExceeded();
       const line = lines[i];
@@ -764,7 +765,7 @@ export function scanConfigFile(path, rawContent, read = null) {
       let col = configTokenCol(line, lines, i);
       if (col >= 0) issues.push(mkIssue(TOKEN_RULE(), path, i + 1, lines, col));
       if (!lex.comment[i]) {
-        col = secretCol(lex.code[i], netrc);
+        col = secretCol(lex.code[i], netrc, anonymous.get(i));
         if (col >= 0) issues.push(mkIssue(CONFIG_SECRET_RULE, path, i + 1, lines, col));
       }
     }

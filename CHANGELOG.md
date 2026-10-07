@@ -575,6 +575,10 @@ project is pre-1.0, so the 0.x API may still change.
 
 ### Fixed
 
+- **A `.netrc`'s anonymous-FTP password is not a credential (N-25).** S-SECRET reported the password of an
+  entry whose login is `anonymous` (or `ftp`), which by convention is an e-mail address
+  (`default login anonymous password jdoe@example.org`). It now leaves out every password of such an
+  entry, wherever its login sits in it, in both packages; any other entry's password is reported as before.
 - **The pip and uv relay sends a private index's credentials with a file too large to scan.** Such a file
   is relayed to the tool unscanned (INCOMPLETE), and the relay made a request of its own without the
   credentials of the file's URL, so a private index that wants them for its files refused it. It now

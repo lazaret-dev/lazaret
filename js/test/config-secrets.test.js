@@ -91,6 +91,16 @@ test("a .netrc's password tokens (N-12) and crates.io's API tokens (R-4)", () =>
   assert.ok(!JSON.stringify(scanConfigFile(".netrc", `login app_password password ${PASS}\n`)).includes(PASS));
   assert.deepEqual(found("notes.cfg", `hint = the password ${PASS} is not this\n`), []);
   assert.ok(!JSON.stringify(scanConfigFile(".netrc", netrc)).includes(PASS));
+  // N-25: an entry whose login is anonymous FTP's: its password is an e-mail address by convention
+  const anon = "machine ftp.host.invalid login anonymous password jdoe@mailhost.invalid\n"
+    + "default\n  password jdoe@mailhost.invalid\n  login FTP\n"
+    + `machine api.host.invalid login alice password ${PASS}\n`
+    + "macdef init\ncd /pub\n\n"
+    + `machine other.invalid\n login ftpuser\n password ${PASS}\n`
+    + "machine more.invalid login anonymous\n"
+    + `machine last.invalid password ${PASS}\n`;
+  assert.deepEqual(found(".netrc", anon).map(([, line]) => line).sort((a, b) => a - b), [5, 11, 13]);
+  assert.deepEqual(found("ftp.cfg", "login anonymous password jdoe@mailhost.invalid\n"), []);
   assert.equal(secretCol(`machine h login u password ${PASS}`, true), 27);
   assert.equal(secretCol(`machine h login u password ${PASS}`), -1);
   assert.equal(redactConfigValues(`machine h login u password ${PASS} account x`, true),

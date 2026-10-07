@@ -19,7 +19,8 @@ count in no code metric (core.scan_config_file):
             looks like one (secret_value), outside comments; a password
             in a URL's userinfo (postgres://user:password@db.host/…); and in
             a .netrc (0.1.9, N-12), whose tokens are separated by blanks
-            (`machine HOST login USER password PASS`), a password token's.
+            (`machine HOST login USER password PASS`), a password token's,
+            unless the entry's login is anonymous FTP's (N-25).
 
 This module holds the pure parts (names, matching, comments, redaction); the
 npm engine has a twin (js/src/lib/configsecrets.js). Every pattern here runs
@@ -206,14 +207,61 @@ WEBHOOK_RE = re.compile(
 
 #: A .netrc's password token and its value: a run without blanks, or "…" quoted.
 NETRC_PASSWORD_RE = re.compile(r'(?<![^ \t])password[ \t]+("[^"\n]*"|[^\s"]+)')
+#: A .netrc's tokens: a run without blanks, or "…" quoted.
+_NETRC_TOKEN_RE = re.compile(r'"[^"\n]*"|[^\s"]+')
+#: The logins of anonymous FTP, whose password is by convention an e-mail address, not a secret (N-25).
+NETRC_ANONYMOUS = frozenset(("anonymous", "ftp"))
 
 
-def secret_col(code, netrc=False):
+def netrc_anonymous(code_lines):
+    """{line index: {column}} of the password values of a .netrc's entries
+    whose login is anonymous FTP's (`anonymous`, `ftp`, in any case), which
+    S-SECRET does not report (N-25). An entry runs from `machine NAME` or
+    `default` to the next one, over as many lines as it takes, its login
+    before or after its password; a `macdef`'s lines, up to an empty one, are
+    not tokens. `code_lines`: the file's lines, comments removed."""
+    skip, login, passwords = {}, None, []
+    pending, in_macro = None, False
+
+    def close():
+        if login is not None and unquote(login).lower() in NETRC_ANONYMOUS:
+            for i, col in passwords:
+                skip.setdefault(i, set()).add(col)
+    for i, line in enumerate(code_lines):
+        if in_macro:
+            in_macro = bool(line.strip())
+            continue
+        for m in _NETRC_TOKEN_RE.finditer(line):
+            token = m.group(0)
+            if pending is not None:
+                if pending == "login":
+                    login = token
+                elif pending == "password":
+                    passwords.append((i, m.start()))
+                elif pending == "macdef":
+                    in_macro = True                 # (its body is the lines that follow, to an empty one)
+                pending = None
+                if in_macro:
+                    break
+                continue
+            if token in ("machine", "default"):
+                close()
+                login, passwords = None, []
+                pending = "machine" if token == "machine" else None
+            elif token in ("login", "password", "account", "macdef"):
+                pending = token
+    close()
+    return skip
+
+
+def secret_col(code, netrc=False, skip=()):
     """Column of the first credential S-SECRET reports on a config line (its
-    comment text removed), else None. `netrc`: the line is a .netrc's."""
+    comment text removed), else None. `netrc`: the line is a .netrc's;
+    `skip`: the columns of its password values that are not secrets
+    (netrc_anonymous)."""
     if netrc:
         for m in NETRC_PASSWORD_RE.finditer(code):
-            if secret_value(m.group(1)):
+            if m.start(1) not in skip and secret_value(m.group(1)):
                 return m.start(1)
     for m in KV_RE.finditer(code):
         value = m.group(3)

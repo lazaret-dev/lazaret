@@ -4369,6 +4369,7 @@ def scan_config_file(path, content, read=None):
                 issues.extend(workflow_issues(path, lines))
             elif gitlabci.is_gitlab_ci(path):
                 issues.extend(gitlab_issues(path, lines))
+            anonymous = configsecrets.netrc_anonymous(ctx.code) if ctx.netrc else {}
             for i, line in enumerate(lines):
                 ctx.check_time()
                 if not line or line.isspace():
@@ -4377,7 +4378,7 @@ def scan_config_file(path, content, read=None):
                 if col is not None:
                     issues.append(mk_issue(_TOKEN_RULE, path, i + 1, lines, col))
                 if not ctx.cmask[i]:
-                    col = configsecrets.secret_col(ctx.code[i], ctx.netrc)
+                    col = configsecrets.secret_col(ctx.code[i], ctx.netrc, anonymous.get(i, ()))
                     if col is not None:
                         issues.append(mk_issue(CONFIG_SECRET_RULE, path, i + 1, lines, col))
         except _ScanBudgetExceeded:
