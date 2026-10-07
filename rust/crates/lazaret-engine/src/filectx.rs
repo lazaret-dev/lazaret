@@ -249,6 +249,11 @@ impl<'p> FileCtx<'p> {
         self.content.is_empty()
     }
 
+    /// Every literal's span (absolute, sorted), in JavaScript and Python; None elsewhere.
+    pub fn literals(&self) -> Option<&[(usize, usize)]> {
+        self.literals.as_deref()
+    }
+
     /// Where line i ends in `content`.
     pub fn end_of(&self, i: usize) -> usize {
         self.ends[i]

@@ -1161,6 +1161,20 @@ fn rs_test_only_lines(ctx: &FileCtx) -> Option<Vec<bool>> {
     )
 }
 
+/// core.scan_file in project mode (Q-1): the rules part (`scan_rules`), then the passes that follow it, the
+/// suppression markers and the cap (crate::project), as core's `scan_file(…, dep=False)` makes them. `model`: the
+/// taint configuration's part of the model.
+pub fn scan_project(p: &Pack, text: &[u32], lang_name: Option<&str>, jsx: bool, opts: &Options, model: &crate::taint::Model) -> Vec<Value> {
+    let lang = Lang::from(lang_name);
+    let ctx = FileCtx::new(p, text, lang, jsx);
+    let lines: Vec<&[u32]> = (0..ctx.len()).map(|i| ctx.line(i)).collect();
+    let snippets = Snippets::new(p, lines, opts.redact, opts.neumaier);
+    let mut found = findings_of(&ctx, lang_name, opts, &snippets);
+    crate::project::passes(&ctx, &mut found, model);
+    let found = crate::project::unsuppressed(&ctx, found);
+    findings::cap(p, &snippets, found).iter().map(|f| snippets.issue(f)).collect()
+}
+
 /// core._scan_rules in project mode: the findings of the pattern rules and
 /// the families, in core's order, before the passes that follow them, the
 /// suppression markers and the cap (the caller's: see the module docs).

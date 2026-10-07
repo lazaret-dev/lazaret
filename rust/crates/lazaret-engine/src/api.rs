@@ -85,6 +85,8 @@ pub const CALLS: &[&str] = &[
     "py_flow",
     // 0.1.9 (FE-1): texts handed over once and named by id after (texts.rs)
     "texts.put", "texts.drop", "texts.info",
+    // 0.1.9 (Q-1): project mode's passes one at a time (scan_file with dep false runs them all)
+    "taint_scan", "functions",
 ];
 
 fn dead_drop(v: Option<(usize, PyStr)>) -> Value {
@@ -508,9 +510,33 @@ fn dispatch(name: &str, args: &Value, text: &[u32]) -> Result<Value, CallError> 
             };
             let opts = crate::scanfile::Options { dep: flag("dep", false), redact: flag("redact", true), neumaier: flag("neumaier", false) };
             if !opts.dep {
-                return Err(CallError::BadArgs("project mode is not in the native engine yet".into()));
+                // project mode (Q-1): the rules, the passes after them, the suppression markers and the cap
+                let model = crate::taint::Model::from_args(p, args).map_err(|m| CallError::BadArgs(format!("scan_file: {m}")))?;
+                return Ok(Value::Arr(crate::scanfile::scan_project(p, text, lang, flag("jsx", true), &opts, &model)));
             }
             Value::Arr(crate::scanfile::scan_file(p, text, lang, flag("jsx", true), &opts))
+        }
+        "taint_scan" => {
+            // project mode's intra-file taint alone (core.taint_scan): its T-* findings, before markers and the cap
+            let flag = |k: &str, d: bool| match args.get(k) {
+                Some(Value::Bool(b)) => *b,
+                _ => d,
+            };
+            let model = crate::taint::Model::from_args(p, args).map_err(|m| CallError::BadArgs(format!("taint_scan: {m}")))?;
+            let ctx = crate::filectx::FileCtx::new(p, text, crate::filectx::Lang::from(lang), flag("jsx", true));
+            let lines: Vec<&[u32]> = (0..ctx.len()).map(|i| ctx.line(i)).collect();
+            let snippets = crate::findings::Snippets::new(p, lines, flag("redact", true), flag("neumaier", false));
+            let mut found = Vec::new();
+            crate::taint::scan(&ctx, &model, &mut found);
+            Value::Arr(found.iter().map(|f| snippets.issue(f)).collect())
+        }
+        "functions" => {
+            // core.extract_functions: [[name, line, length, complexity], …] of a Python or JavaScript file
+            let jsx = !matches!(args.get("jsx"), Some(Value::Bool(false)));
+            let ctx = crate::filectx::FileCtx::new(p, text, crate::filectx::Lang::from(lang), jsx);
+            Value::Arr(crate::project::functions(p, &ctx).into_iter().map(|f| Value::Arr(vec![
+                Value::Str(f.name), Value::Int(f.line as i64), Value::Int(f.len as i64), Value::Int(f.cx as i64),
+            ])).collect())
         }
         "scan_rules" => {
             let flag = |k: &str, d: bool| match args.get(k) {

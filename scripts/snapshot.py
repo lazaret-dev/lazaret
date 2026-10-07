@@ -12,9 +12,9 @@ script is how a change in those outputs is reviewed:
 
 SET is a snapshot test's input set (`scripts/snapshot.py sets` lists them),
 or `files:LIST`, a file naming one source file per line: each file's
-dependency-mode scan_file, import-time test, spawned scripts, string-array
-line, data flow and decoded view (by hash); for a Go or Rust file, its
-dependency-mode scan_file and project mode's scan_rules. A parser's answer (js_parse,
+dependency-mode scan_file, project-mode scan_file, import-time test, spawned
+scripts, string-array line, data flow and decoded view (by hash); for a Go or
+Rust file, its dependency-mode scan_file and project mode's scan_rules. A parser's answer (js_parse,
 py_parse) is recorded as its JSON text, and a difference in it is shown
 where the two texts part. The library is the one LAZARET_NATIVE_LIB names,
 else the installed package's. Recordings hold the inputs' first characters,
@@ -39,7 +39,8 @@ MODULES = ("tests.architecture.test_snapshot_hooks", "tests.architecture.test_sn
            "tests.architecture.test_snapshot_scanfile", "tests.architecture.test_snapshot_lexer",
            "tests.architecture.test_snapshot_hook_commands", "tests.architecture.test_snapshot_small",
            "tests.architecture.test_snapshot_crossfile", "tests.architecture.test_snapshot_js_flow",
-           "tests.architecture.test_snapshot_js_parse", "tests.architecture.test_snapshot_py_flow")
+           "tests.architecture.test_snapshot_js_parse", "tests.architecture.test_snapshot_py_flow",
+           "tests.architecture.test_snapshot_project")
 # calls answering a parsed tree, which may be deeper than json.loads reads:
 # recorded as the answer's JSON text ({"ok_text": …})
 RAW_CALLS = ("js_parse", "js_parse_file", "py_parse")
@@ -78,8 +79,10 @@ def file_calls(list_path):
             rules = {"lang": lang, "jsx": False, "redact": True, "neumaier": False}
             calls += [("scan_file", scan, text, path), ("scan_rules", rules, text, path)]
             continue
-        for call, args in (("scan_file", scan), ("import_time_risk", {"lang": lang}), ("spawned_scripts", {}),
-                           ("string_array_line", {}), ("local_data_sent_at", {}), ("decoded_view", {})):
+        project = dict(scan, dep=False, jsx=not path.lower().endswith((".ts", ".mts", ".cts")))
+        for call, args in (("scan_file", scan), ("scan_file", project), ("import_time_risk", {"lang": lang}),
+                           ("spawned_scripts", {}), ("string_array_line", {}), ("local_data_sent_at", {}),
+                           ("decoded_view", {})):
             calls.append((call, args, text, path))
     return calls
 

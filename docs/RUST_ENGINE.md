@@ -198,7 +198,15 @@ rust/
     src/filectx.rs           a file as scan_file reads it (_FileCtx): lines, comment layout,
                              match text (NFKC, JS escapes), names
     src/scanfile.rs          scan_file in dependency mode, scan_rules (project mode's rules
-                             part), family by family; per-line gates
+                             part), family by family; per-line gates; scan_file in project mode
+                             (scan_project: the rules part, then project.rs)
+    src/project.rs           project mode after the rules (core's _project_passes, 0.1.9): SQL
+                             statements without WHERE, the SQL built from strings into execute(),
+                             the function metrics (functions), then the suppression markers and
+                             the cap
+    src/taint.rs             project mode's intra-file taint (core.taint_scan, 0.1.9): sources,
+                             sinks, sanitizers, guards, scopes, Flask views and route parameters;
+                             a taint configuration's sources, sinks and sanitizers for one call
     src/linear.rs            rule patterns sre runs in more than linear time on some lines,
                              matched by hand in linear time (SQL-DYNAMIC)
     src/findings.rs          mk_issue: texts, snippets, redaction (_SecretLiterals); cap_issues
@@ -466,6 +474,7 @@ builds is held to linear time.
 | `test_snapshot_hooks` | the 17 fields of `hooks_view` (shlex, hooks, both supply-chain tests with and without a language, the decoded view with no language and in JavaScript and Python, spawned scripts …) | the hooks corpus (`hooks_corpus.py`, ~44,400 cases) |
 | `test_snapshot_signs` | the detectors one by one (`signs_view`: received code, PowerShell, stagers, reverse shells, self-read, persistence, the exfiltration shapes, services at login, wallet swaps, the string-array technique …), every field reached; the data flow on long texts | the hooks corpus; six long texts |
 | `test_snapshot_scanfile` | `scan_file` in dependency mode and `scan_rules` (project mode's rules part), finding for finding, every family and variant reached; each line's context (`file_context`); the same three for Go and Rust files (`*_go_rs`: the rules that list them and the families) | the scan_file corpus (`scanfile_corpus.py`, and its Go and Rust part, `go_rs_corpus`), this repository's fixtures |
+| `test_snapshot_project` | `scan_file` in project mode (the rules part, the SQL statements without WHERE, the intra-file taint, the SQL sinks, the function metrics, the suppression markers, the cap), finding for finding, every pass's rules reached; with a taint configuration; each file's function list (`functions`) | the project corpus (`project_corpus.py`: every pass's shapes and their combinations, seeded programs in Python, JavaScript and SQL), the scan_file corpus (its Go and Rust part too), this repository's fixtures |
 | `test_snapshot_lexer` | `lex_comment_spans`: comments, strings, every literal (the lexers', §15, for JavaScript and Python) | dense random texts in each language |
 | `test_snapshot_hook_commands` | a hook's command read as a program (`hook_command_risk`, `sh_parse`, the reasons), output thrown away and kept | realistic hook commands and a seeded corpus |
 | `test_snapshot_small` | SC-HEXSTR's hidden names and text, SC-HOMOGLYPH's look-alike names, SC-OFFSCREEN-CODE | curated and seeded lines |

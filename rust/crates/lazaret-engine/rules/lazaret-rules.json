@@ -10107,9 +10107,84 @@
    "flags": "",
    "re": "^\\s*(?:from\\s+(?:flask|quart)\\b|import\\s+(?:flask|quart)\\b)"
   },
+  "_FN_CX_RULE": {
+   "map": {
+    "fix": {
+     "value": "Split branches into smaller functions; use early returns or lookup tables."
+    },
+    "id": {
+     "value": "Q-FN-CX"
+    },
+    "msg": {
+     "value": "Function \"{name}\" has complexity ~{cx} (limit {limit})."
+    },
+    "name": {
+     "value": "High cyclomatic complexity"
+    },
+    "ref": {
+     "value": "Maintainability"
+    },
+    "sev": {
+     "value": "MAJOR"
+    },
+    "type": {
+     "value": "SMELL"
+    },
+    "why": {
+     "value": "Highly branched code is hard to reason about and to cover with tests."
+    }
+   }
+  },
   "_FN_DEF_BEFORE_RE": {
    "flags": "",
    "re": "(?:^|[^\\w$])(?:function\\s*\\*?|def)\\s*$"
+  },
+  "_FN_JS_CX_RE": {
+   "flags": "",
+   "re": "\\b(if|for|while|case|catch)\\b|&&|\\|\\||\\?[^.:]"
+  },
+  "_FN_JS_HEADER_RE": {
+   "flags": "",
+   "re": "(?:function\\s+(\\w+)|(?:const|let|var)\\s+(\\w+)\\s*=\\s*(?:async\\s*)?(?:function|\\([^()]*\\)\\s*=>|\\w+\\s*=>)|(?<!\\w)(\\w+)\\s*\\([^()]*\\)\\s*\\{)"
+  },
+  "_FN_JS_WINDOW_LINES": {
+   "value": 800
+  },
+  "_FN_LONG_RULE": {
+   "map": {
+    "fix": {
+     "value": "Extract cohesive blocks into helper functions."
+    },
+    "id": {
+     "value": "Q-FN-LONG"
+    },
+    "msg": {
+     "value": "Function \"{name}\" is {len} lines long (limit {limit})."
+    },
+    "name": {
+     "value": "Function too long"
+    },
+    "ref": {
+     "value": "Maintainability"
+    },
+    "sev": {
+     "value": "MAJOR"
+    },
+    "type": {
+     "value": "SMELL"
+    },
+    "why": {
+     "value": "Long functions do too much and resist testing and reuse."
+    }
+   }
+  },
+  "_FN_PY_CX_RE": {
+   "flags": "",
+   "re": "\\b(if|elif|for|while|and|or|except|case)\\b"
+  },
+  "_FN_PY_DEF_RE": {
+   "flags": "",
+   "re": "^(\\s*)(?:async\\s+)?def\\s+(\\w+)"
   },
   "_FULL_SAN": {
    "map": {
@@ -12847,6 +12922,45 @@
   "_PY_JOINS": {
    "value": "([{,=+-*/%&|^<>~@\\.\"'"
   },
+  "_PY_KEYWORDS": {
+   "set": [
+    "False",
+    "None",
+    "True",
+    "and",
+    "as",
+    "assert",
+    "async",
+    "await",
+    "break",
+    "class",
+    "continue",
+    "def",
+    "del",
+    "elif",
+    "else",
+    "except",
+    "finally",
+    "for",
+    "from",
+    "global",
+    "if",
+    "import",
+    "in",
+    "is",
+    "lambda",
+    "nonlocal",
+    "not",
+    "or",
+    "pass",
+    "raise",
+    "return",
+    "try",
+    "while",
+    "with",
+    "yield"
+   ]
+  },
   "_PY_LIT_RE": {
    "flags": "",
    "re": "(?:(?<![A-Za-z0-9_])([rRbBuUfF]{1,2}))?(\\\"[^\\\"]*\\\"|'[^']*'|`[^`]*`)"
@@ -12858,6 +12972,13 @@
   "_PY_RUN_RE": {
    "flags": "",
    "re": "\\[\\s*(?:\\w*sys\\.executable|[\"']python[\\d.w]*(?:\\.exe)?[\"'])\\s*,|\\bstart\\s+pythonw?\\b|\\b(?:system|popen|getoutput|run|call|Popen)\\s*\\(\\s*f?[\"']python[\\d.w]*(?:\\.exe)?\\s"
+  },
+  "_PY_SOFT_KEYWORDS": {
+   "set": [
+    "_",
+    "case",
+    "match"
+   ]
   },
   "_QUOTE_CHAR_RE": {
    "flags": "",
@@ -14361,6 +14482,38 @@
   "_SPLIT_LITERAL": {
    "value": "(?:['\\\"`]\\s*\\+\\s*['\\\"`])?"
   },
+  "_SQL_CONCAT_RES": {
+   "list": [
+    {
+     "flags": "",
+     "re": "[\\\"'][^\\\"']*[\\\"']\\s*\\+"
+    },
+    {
+     "flags": "",
+     "re": "\\+\\s*[\\\"']"
+    }
+   ]
+  },
+  "_SQL_FORMAT_RE": {
+   "flags": "",
+   "re": "\\.format\\s*\\("
+  },
+  "_SQL_HOW": {
+   "map": {
+    "concat": {
+     "value": "concatenation"
+    },
+    "format": {
+     "value": ".format()/f-string"
+    },
+    "percent": {
+     "value": "%-interpolation"
+    }
+   }
+  },
+  "_SQL_HOW_OTHER": {
+   "value": "string-building"
+  },
   "_SQL_NOWHERE_RULES": {
    "map": {
     "SQL-DELETE-NOWHERE": {
@@ -14460,6 +14613,38 @@
     "SQL-DELETE-NOWHERE",
     "SQL-UPDATE-NOWHERE"
    ]
+  },
+  "_SQL_PERCENT_RE": {
+   "flags": "",
+   "re": "(?:[\\\"'][^\\\"']*[\\\"']|\\b[A-Za-z_]\\w*)\\s*%\\s*[^=%\\s]"
+  },
+  "_SQL_SINK_RULE": {
+   "map": {
+    "fix": {
+     "value": "Use parameterized queries: cursor.execute(\"SELECT \u2026 WHERE id = %s\", (user_id,))."
+    },
+    "id": {
+     "value": "S-SQL-PY"
+    },
+    "msg": {
+     "value": "SQL query built with {how} into execute()."
+    },
+    "name": {
+     "value": "SQL built from strings"
+    },
+    "ref": {
+     "value": "CWE-89 \u00b7 OWASP A03"
+    },
+    "sev": {
+     "value": "BLOCKER"
+    },
+    "type": {
+     "value": "VULN"
+    },
+    "why": {
+     "value": "Interpolating values into SQL enables SQL injection \u2014 the classic path to full database compromise."
+    }
+   }
   },
   "_SQL_WHERE_RE": {
    "flags": "i",
@@ -14870,6 +15055,34 @@
   },
   "_TAINT_CONFIG_WARNINGS": {
    "list": []
+  },
+  "_TAINT_MAX_MATCH_TEXT": {
+   "value": 2000
+  },
+  "_TAINT_RULE": {
+   "map": {
+    "msg": {
+     "value": "Possible {cat}: {what} reaches this sink."
+    },
+    "name": {
+     "value": "Tainted flow \u2192 {cat}"
+    },
+    "ref": {
+     "value": "{cwe} \u00b7 Taint analysis"
+    },
+    "type": {
+     "value": "VULN"
+    },
+    "why": {
+     "value": "Data from user input or a decode function flows into a dangerous call without visible sanitization (lightweight intra-file taint tracking)."
+    }
+   }
+  },
+  "_TAINT_WHAT": {
+   "value": "untrusted data"
+  },
+  "_TAINT_WHAT_VIA": {
+   "value": "untrusted data via '{carrier}' (tainted at line {line})"
   },
   "_TEMPLATE_IMPORT_RE": {
    "flags": "",
