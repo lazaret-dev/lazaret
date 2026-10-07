@@ -11,6 +11,7 @@
 pub mod api;
 pub mod budget;
 pub mod crossfile;
+pub mod datafmt;
 pub mod filectx;
 pub mod findings;
 pub mod flow;

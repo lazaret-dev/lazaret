@@ -178,7 +178,12 @@ rust/
     src/flow.rs              local data followed to where it is sent (local_data_sent_at), a
                              webhook's secret in the code (secret_endpoint_at)
     src/shell.rs             a shell text read as a program (_sh_parse … _sh_reasons), the command
-                             lines a script hands a shell (exec_command_reasons)
+                             lines a script hands a shell (exec_command_reasons), and what a
+                             pipeline decodes or downloads and hands a shell or an interpreter
+                             on stdin (piped_runs, 0.1.9)
+    src/datafmt.rs           a whole file of a data format, read by its structure (a WebAssembly
+                             module, a PNG, GIF or WebP image, WAV audio): SC-B64 passes over its
+                             base64 (0.1.9)
     src/strarr.rs            javascript-obfuscator's string arrays and proxy objects, for the
                              decoded view
     src/lex/                 the lexers (§15): js.rs (JavaScript, TypeScript, JSX: templates and

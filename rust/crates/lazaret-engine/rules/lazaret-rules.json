@@ -1,6 +1,6 @@
 {
  "format": 1,
- "rule_set": "2.38.0",
+ "rule_set": "2.39.0",
  "source": "lazaret.scanner.core, extracted by scripts/make_rust_tables.py \u2014 do not edit",
  "values": {
   "ALWAYS_PRUNE_DIRS": {
@@ -13850,6 +13850,15 @@
     },
     {
      "value": "ping"
+    },
+    {
+     "value": "base64"
+    },
+    {
+     "value": "xxd"
+    },
+    {
+     "value": "openssl"
     }
    ]
   },
@@ -14634,6 +14643,9 @@
     },
     {
      "value": "runs a program it extracts from inside another file"
+    },
+    {
+     "value": "pipes code it decodes into"
     }
    ]
   },

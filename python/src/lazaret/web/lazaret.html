@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-Xu/c4/pQq0K6ME+FnfWxW32Rchq25pIjVQHT/5snOiE='; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-hxmugJWll3ivBcxkj/jmz1cLJaQaW3yJqCZsJ1vb89k='; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'">
 <title>Lazaret — Security &amp; Quality Review</title>
 <style>
   :root{
@@ -4263,12 +4263,132 @@ function b64Plain(body) {
   }
   return false;
 }
+// A whole file of a format code keeps as data (N-4): twin of the engine's datafmt.rs, read by the format's structure:
+// a WebAssembly module's sections, a PNG's chunks, a GIF's blocks, a WAV's or a WebP's RIFF chunks, each to the end
+// of the file, with what a format carries beside its content (custom sections, text chunks, comments) at most half.
+const B64_DATA_HEADS = ["AGFzbQ", "iVBORw0KGgo", "R0lGOD", "UklGR"];
+const WASM_RANK = { 1: 1, 2: 2, 3: 3, 4: 4, 5: 5, 13: 6, 6: 7, 7: 8, 8: 9, 9: 10, 12: 11, 10: 12, 11: 13 };
+function lebU32(b, i) {
+  let value = 0;
+  for (let k = 0; k < 5; k++) {
+    if (i >= b.length) return null;
+    const x = b[i++];
+    value += (x & 0x7f) * 2 ** (7 * k);
+    if (!(x & 0x80)) return value <= 0xffffffff ? [value, i] : null;
+  }
+  return null;
+}
+function wasmModule(b) {
+  const head = [0, 0x61, 0x73, 0x6d, 1, 0, 0, 0];
+  if (b.length < 8 || head.some((x, k) => b[k] !== x)) return false;
+  let i = 8, last = 0, custom = 0, code = false;
+  while (i < b.length) {
+    const id = b[i], got = lebU32(b, i + 1);
+    if (!got || got[1] + got[0] > b.length) return false;
+    if (id === 0) custom += got[0];
+    else {
+      const rank = WASM_RANK[id];
+      if (!rank || rank <= last) return false;
+      last = rank;
+      code = code || id === 10;
+    }
+    i = got[1] + got[0];
+  }
+  return code && custom * 2 <= b.length;
+}
+const be32 = (b, i) => (i + 4 <= b.length ? ((b[i] << 24) >>> 0) + (b[i + 1] << 16) + (b[i + 2] << 8) + b[i + 3] : null);
+const le32 = (b, i) => (i + 4 <= b.length ? b[i] + (b[i + 1] << 8) + (b[i + 2] << 16) + ((b[i + 3] << 24) >>> 0) : null);
+const isAlpha = (x) => (x >= 0x41 && x <= 0x5a) || (x >= 0x61 && x <= 0x7a);
+const tag = (b, i) => String.fromCharCode(b[i], b[i + 1], b[i + 2], b[i + 3]);
+function pngImage(b) {
+  const head = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
+  if (b.length < 8 || head.some((x, k) => b[k] !== x)) return false;
+  let i = 8, first = true, idat = false, ancillary = 0;
+  for (;;) {
+    const n = be32(b, i);
+    if (n === null || n > 0x7fffffff || i + 8 > b.length || ![4, 5, 6, 7].every((k) => isAlpha(b[i + k]))) return false;
+    const kind = tag(b, i + 4), end = i + 12 + n;
+    if (end > b.length || first !== (kind === "IHDR")) return false;
+    first = false;
+    idat = idat || kind === "IDAT";
+    if (b[i + 4] >= 0x61) ancillary += n;
+    i = end;
+    if (kind === "IEND") return i === b.length && idat && ancillary * 2 <= b.length;
+  }
+}
+function gifImage(b) {
+  const sig = String.fromCharCode(...b.subarray(0, 6));
+  if (b.length < 13 || (sig !== "GIF87a" && sig !== "GIF89a")) return false;
+  const table = (flags) => (flags & 0x80 ? 3 << ((flags & 7) + 1) : 0);
+  const subBlocks = (i) => {
+    let held = 0;
+    for (;;) {
+      if (i >= b.length) return null;
+      const size = b[i++];
+      if (size === 0) return [i, held];
+      i += size;
+      held += size;
+    }
+  };
+  let i = 13 + table(b[10]), side = 0;
+  while (i < b.length) {
+    const block = b[i++];
+    if (block === 0x3b) return b.subarray(i).every((x) => x === 0) && side * 2 <= b.length;
+    if (block === 0x21) {
+      if (i >= b.length) return false;
+      const label = b[i], got = subBlocks(i + 1);
+      if (!got) return false;
+      if (label === 0xfe || label === 0xff || label === 0x01) side += got[1];
+      i = got[0];
+    } else if (block === 0x2c) {
+      if (i + 8 >= b.length) return false;
+      i += 9 + table(b[i + 8]) + 1;
+      const got = subBlocks(i);
+      if (!got) return false;
+      i = got[0];
+    } else return false;
+  }
+  return false;
+}
+function riffMedia(b) {
+  if (b.length < 12 || tag(b, 0) !== "RIFF") return false;
+  const declared = le32(b, 4);
+  if (declared < 4 || declared + 8 < b.length) return false;
+  let i = 12, fmt = false, data = false, image = false;
+  while (i < b.length) {
+    if (i + 4 > b.length || ![0, 1, 2, 3].every((k) => b[i + k] === 0x20 || (b[i + k] > 0x20 && b[i + k] < 0x7f))) return false;
+    const id = tag(b, i), n = le32(b, i + 4);
+    if (n === null) return false;
+    fmt = fmt || id === "fmt ";
+    data = data || id === "data";
+    image = image || id === "VP8 " || id === "VP8L" || id === "VP8X";
+    const end = i + 8 + n + (n & 1);
+    if (end >= b.length) break;
+    i = end;
+  }
+  const form = tag(b, 8);
+  return (form === "WAVE" && fmt && data) || (form === "WEBP" && image);
+}
+/** Is `body` (a run's characters, quotes and `=` off) the base64 of a whole file of a data format? */
+function b64Data(body) {
+  if (body.length % 4 === 1 || !B64_DATA_HEADS.some((h) => body.startsWith(h))) return false;
+  const out = new Uint8Array(Math.floor((body.length * 3) / 4));
+  let bits = 0, nbits = 0, n = 0;
+  for (let k = 0; k < body.length; k++) {
+    bits = ((bits << 6) | B64[body.charCodeAt(k)]) & 0xffffff;
+    nbits += 6;
+    if (nbits >= 8) { nbits -= 8; out[n++] = (bits >> nbits) & 0xff; }
+  }
+  const b = out.subarray(0, n);
+  return wasmModule(b) || pngImage(b) || gifImage(b) || riffMedia(b);
+}
 /** The UTF-16 index of the first B64_BLOB_RE run in `line` that can be base64 data, else null. */
 function b64BlobCol(line) {
   B64_BLOB_ALL.lastIndex = 0;
   let m;
   while ((m = B64_BLOB_ALL.exec(line))) {
-    if (!b64Plain(m[0].slice(1, -1).replace(/=+$/, ""))) return m.index;
+    const body = m[0].slice(1, -1).replace(/=+$/, "");
+    if (!b64Plain(body) && !b64Data(body)) return m.index;
   }
   return null;
 }

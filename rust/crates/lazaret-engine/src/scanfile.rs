@@ -592,11 +592,30 @@ fn b64_blob_col(re: &Regex, line: &[u32], plain_max: usize, period_max: usize) -
         while body.last() == Some(&('=' as u32)) {
             body = &body[..body.len() - 1];
         }
-        if !b64_plain(body, plain_max, period_max) {
+        if !b64_plain(body, plain_max, period_max) && !b64_data(body) {
             return Some(m.start());
         }
     }
     None
+}
+
+/// The base64 that the formats datafmt reads begin with: a WebAssembly module (`\0asm`), a PNG, a GIF, RIFF
+/// (WAV, WebP).
+const B64_DATA_HEADS: [&str; 4] = ["AGFzbQ", "iVBORw0KGgo", "R0lGOD", "UklGR"];
+
+/// Is `body` (the characters of a B64_BLOB_RE run, its quotes and `=` taken off) the base64 of a whole file of a
+/// format code keeps as data, read by its structure (datafmt: a WebAssembly module, a PNG, GIF or WebP image, WAV
+/// audio)? N-4: the WebAssembly HTTP parser every action bundling the Actions toolkit carries (undici's llhttp),
+/// and what made 5 of the popular set's 32 WARNs, were such files.
+fn b64_data(body: &[u32]) -> bool {
+    if body.len() % 4 == 1 || !B64_DATA_HEADS.iter().any(|h| pystr::starts_with(body, h)) {
+        return false;
+    }
+    let mut padded = body.to_vec();
+    while padded.len() % 4 != 0 {
+        padded.push('=' as u32);
+    }
+    crate::signs::b64decode_strict(&padded).is_some_and(|b| crate::datafmt::data_format(&b).is_some())
 }
 
 /// Is `body` (the characters of a B64_BLOB_RE run, its quotes and `=` taken

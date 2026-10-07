@@ -41,7 +41,7 @@ import unittest
 
 from lazaret.scanner import core
 from tests import _support
-from tests.registry._review_support import B64_DATA
+from tests.registry._review_support import B64_DATA, DATA_B64, FAKE_WASM_B64
 from tests.scanner import _dashboard_vm as dash
 
 LANGS = {".py": "py", ".js": "js", ".sql": "sql"}
@@ -114,6 +114,8 @@ ADVERSARIAL = [
      "const t = '" + "SundayMondayTuesdayWednesdayThursdayFridaySaturday" * 5 + "';\nconst d = '" + "1336927655" * 25
      + "';\nconst p = '" + "01234567890ABCDEFGHIJK" * 10 + "';\nconst q = '" + "01234567890ABCDEFGHIJK" * 10 + "Zz';\n"
      "const both = ['" + "ab" * 110 + "', '" + B64_DATA + "'];\n"),
+    # N-4: the base64 of a whole WebAssembly module, PNG, GIF or WAV is data; a payload behind a module's header is not
+    ("b64_data.js", "js", "".join(f"const {k} = '{v}';\n" for k, v in DATA_B64.items()) + f"const fake = '{FAKE_WASM_B64}';\n"),
     # G-5's bound: one class up to 16,384 characters is passed over, one more is reported; a period never is
     ("b64_bound.js", "js", "const h = '" + _one_class(16384) + "';\nconst k = '" + _one_class(16385) + "';\n"
      "const x = '0x" + _one_class(16383) + "';\nconst p = '" + "Zm9v" * 5000 + "';\n"),

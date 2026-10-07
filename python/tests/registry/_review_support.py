@@ -25,6 +25,40 @@ B64_DATA = __import__("base64").b64encode(bytes((i * 7919) % 256 for i in range(
 ELF = b"\x7fELF\x02\x01\x01" + b"\x00" * 200
 
 
+def _leb(n):
+    out = bytearray()
+    while True:
+        b, n = n & 0x7F, n >> 7
+        out.append(b | (0x80 if n else 0))
+        if not n:
+            return bytes(out)
+
+
+def _section(sid, body):
+    return bytes([sid]) + _leb(len(body)) + body
+
+
+def _png_chunk(kind, body):
+    return len(body).to_bytes(4, "big") + kind + body + b"\0\0\0\0"
+
+
+#: small whole files of the data formats SC-B64 passes over (N-4), each more than 150 bytes, so their base64 is a run
+#: of 200 characters or more: a WebAssembly module (a function of 160 nops returning 42), a PNG, a GIF, a WAV
+DATA_FILES = {
+    "wasm": b"\0asm\x01\0\0\0" + _section(1, b"\x01\x60\x00\x01\x7f") + _section(3, b"\x01\x00")
+            + _section(10, b"\x01" + _leb(164) + b"\x00" + b"\x01" * 160 + b"\x41\x2a\x0b"),
+    "png": b"\x89PNG\r\n\x1a\n" + _png_chunk(b"IHDR", bytes(13)) + _png_chunk(b"IDAT", bytes(range(160)))
+           + _png_chunk(b"IEND", b""),
+    "gif": b"GIF89a\x01\x00\x01\x00\x80\x00\x00" + bytes([0, 0, 0, 255, 255, 255])
+           + b"\x2c\x00\x00\x00\x00\x01\x00\x01\x00\x00\x02" + b"\xa0" + bytes(range(160)) + b"\x00\x3b",
+    "wav": b"RIFF" + (4 + 24 + 8 + 160).to_bytes(4, "little") + b"WAVEfmt " + (16).to_bytes(4, "little") + bytes(16)
+           + b"data" + (160).to_bytes(4, "little") + bytes(range(160)),
+}
+#: the same files' base64; and a payload behind a WebAssembly module's header, which is not one
+DATA_B64 = {k: __import__("base64").b64encode(v).decode() for k, v in DATA_FILES.items()}
+FAKE_WASM_B64 = __import__("base64").b64encode(b"\0asm\x01\0\0\0" + bytes((i * 7919) % 256 for i in range(200))).decode()
+
+
 def manifest(**fields):
     """package.json text; scripts=... etc. as keyword arguments."""
     data = {"name": "x", "version": "1.0.0"}

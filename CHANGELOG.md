@@ -440,6 +440,23 @@ project is pre-1.0, so the 0.x API may still change.
 
 ### Changed
 
+- **SC-B64 passes over files kept as data, and a shell reads what it decodes (N-4; rule set 2.39.0).** A
+  quoted base64 run that decodes to a whole WebAssembly module, a PNG, GIF or WebP image or a WAV
+  sound, read by the format's structure to its end (a module's sections in order with a code section,
+  an image's chunks or blocks, RIFF chunks; what a format carries beside its content at most half of
+  it), is data, not a payload: undici's HTTP parser, which every JavaScript action bundling the
+  Actions toolkit carries, es-module-lexer's and vite's WebAssembly, nltk's icons. A payload with a
+  format's header in front of it is still SC-B64. On the popular set, @vitest/mocker, es-module-lexer,
+  loader-utils, tsx and nltk go from WARN to OK. The dashboard's twin reads them the same way. And a
+  shell text, a hook's command or a command line code hands a shell now says what it does when a
+  pipeline decodes code and hands it to a shell or an interpreter (`echo … | base64 -d | bash`,
+  `xxd -r -p | sh`, `bash -c "$(… | base64 -d)"`: "pipes code it decodes into bash", a strong reason,
+  so CRITICAL in an install hook and at import time), and when a download is piped into an
+  interpreter that reads its script on stdin (`curl … | sudo python3`: "downloads a script and runs
+  it with python3"); the shell parser reads both through quotes and filters, where the old pattern
+  stopped at a `;` inside quotes. The reviewdog/action-setup release of March 2025 (its install.sh
+  decoded a script and piped it into bash) is CRITICAL at its commit.
+
 - **The guard scans in worker processes, with limits.** Every scan runs in a worker,
   `--jobs 1` included, never in the process that downloads and talks to the package
   manager. The archive goes to the worker as a file (mode 0600) and is hashed again

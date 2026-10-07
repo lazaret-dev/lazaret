@@ -99,6 +99,12 @@ MAX_MEMBER = _env_number("LAZARET_MAX_SOURCE_BYTES", 16_000_000)
 MAX_FILES = 20_000         # files per package (numpy's sdist alone has >4,000)
 SAMPLE = 8192              # header/entropy sample read from oversized files
 # Stored scans from another engine version are scanned again (has_scan).
+# 2.39: SC-B64 passes over the base64 of a whole file of a data format, read
+#      by its structure (a WebAssembly module, a PNG, GIF or WebP image, WAV
+#      audio: undici's HTTP parser in every bundled action, N-4); a shell
+#      text that pipes what it decodes into a shell or an interpreter
+#      ("pipes code it decodes into …", strong), or a download into an
+#      interpreter reading stdin ("downloads a script and runs it with …")
 # 2.38: the cloud's and the registries' credential files (~/.aws/credentials,
 #      ~/.kube/config, ~/.docker/config.json, gcloud's, Azure's, .npmrc,
 #      .pypirc, .netrc, cargo's, gh's, Vault's, Terraform's) are credential
@@ -260,7 +266,7 @@ SAMPLE = 8192              # header/entropy sample read from oversized files
 #      entry points and hook targets, Python install scripts
 # 2.3: verdict tiers, decoded hex, install-script inspection; 2.2:
 #      verdict-integrity; 2.1: binary-artifact awareness
-ENGINE_VERSION = "2.38.0"
+ENGINE_VERSION = "2.39.0"
 
 # ---------------- The content memo (P-2a, registry/contentcache.py) ----------------
 # One per scan_package run: the engine answers once for content several of a
