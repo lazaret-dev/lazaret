@@ -89,7 +89,9 @@ def tar_member(name, data=b"", typ=tarfile.REGTYPE, linkname=""):
 
 def tarball(files, root="package/", compress=True):
     """{path: str|bytes} -> .tgz bytes (members under `root`). A value that is
-    a (typ, linkname) tuple makes a link member."""
+    a (typ, linkname) tuple makes a link member. The same files give the same
+    bytes, whenever they are made (gzip's header holds no time): a test
+    registry's digests do not change between runs (N-22)."""
     raw = b""
     for path, content in files.items():
         if isinstance(content, tuple):
@@ -97,7 +99,7 @@ def tarball(files, root="package/", compress=True):
         else:
             raw += tar_member(root + path, content)
     raw += b"\0" * 1024
-    return gzip.compress(raw) if compress else raw
+    return gzip.compress(raw, mtime=0) if compress else raw
 
 
 def zipball(files, symlinks=None):
