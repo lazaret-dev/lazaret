@@ -243,6 +243,22 @@ class ScanTests(unittest.TestCase):
         self.assertEqual(res["verdict"], "SUSPICIOUS")
         self.assertIn("SC-IMPORT-RISK", {i["rule"] for i in res["issues"]})
 
+    def test_a_download_over_the_per_file_limit_is_not_scanned(self):
+        # N-21: the Go proxy declares no size before the download, so a zip over the limit is found as it comes; it is
+        # not scanned and the result is INCOMPLETE, as for a file declared over the limit (it was an error)
+        zip_size = len(recorded_go.difflib_responses()[PROXY + GO_MOD + "/@v/v1.0.0.zip"])
+        for eco, name, version, responses in (("go", GO_MOD, "v1.0.0", recorded_go.difflib_responses()),
+                                              ("crates", "fnv", "1.0.7", fnv_responses())):
+            with self.subTest(eco=eco):
+                transport, patch = served(responses)
+                with patch, mock.patch.object(repo, "MAX_DOWNLOAD_BYTES", min(zip_size, len(FNV_CRATE)) - 1), \
+                        mock.patch.object(repo, "_scan_artifact", side_effect=AssertionError("scanned")):
+                    res = repo.scan_package(eco, name, version)
+                self.assertEqual((res["verdict"], res["truncated"]), ("INCOMPLETE", 1))
+                self.assertEqual([s["reason"] for s in res["skippedArtifacts"]], ["filesize"])
+                self.assertTrue(any(i["rule"] == "SC-TRUNCATED" and "per-file download limit" in i["msg"]
+                                    for i in res["issues"]), res["issues"])
+
     def test_a_download_that_does_not_match_its_digest_is_never_scanned(self):
         for eco, name, version, responses, url, swapped in (
                 ("crates", "fnv", "1.0.7", fnv_responses(), STATIC + "fnv/fnv-1.0.7.crate",

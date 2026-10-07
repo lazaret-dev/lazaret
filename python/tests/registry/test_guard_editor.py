@@ -638,6 +638,13 @@ class InstallTests(EditorCase):
         self.assertIn("could not be checked", self.out)
         self.assertEqual(self.installs(), [])
 
+    def test_a_file_too_large_to_scan_is_not_installed(self):
+        self.gallery.add("a.b", "1.0.0")
+        with mock.patch.object(repo, "MAX_DOWNLOAD_BYTES", 100):
+            self.assertEqual(self.run_guard("--install-extension", "a.b"), G.EXIT_BLOCKED)
+        self.assertIn("larger than the 0MB the guard downloads and scans, so it is not installed", self.out)
+        self.assertEqual(self.installs(), [])
+
     def test_too_new_is_held_unless_allowed(self):
         self.gallery.add("a.b", "1.0.0", when=FRESH)
         self.assertEqual(self.run_guard("--install-extension", "a.b"), G.EXIT_BLOCKED)

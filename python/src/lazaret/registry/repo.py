@@ -330,6 +330,7 @@ _PYPI_NAME_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$")   # 
 # scan stops and nothing is persisted for that package.
 SpecError = _base.SpecError
 FetchError = _base.FetchError
+TooLarge = _base.TooLarge
 DigestError = _base.DigestError
 
 
@@ -552,7 +553,7 @@ def _fetch_bytes(url, max_bytes, timeout, accept, data, content_type, opener=Non
                     break
                 buf.extend(chunk)
                 if len(buf) > max_bytes:
-                    raise FetchError(
+                    raise TooLarge(
                         f"response exceeds {max_bytes // (1024 * 1024)}MB budget: {url}")
             return bytes(buf)
     except urllib.error.HTTPError as exc:
@@ -574,7 +575,7 @@ def _native_body(url, hosts, headers, data, max_bytes, timeout):
                              data=data, max_bytes=max_bytes, timeout=timeout, max_redirects=MAX_REDIRECTS)
     except _net.NetError as exc:
         if exc.kind == "too-large":
-            raise FetchError(f"response exceeds {max_bytes // (1024 * 1024)}MB budget: {url}") from None
+            raise TooLarge(f"response exceeds {max_bytes // (1024 * 1024)}MB budget: {url}") from None
         if exc.kind in ("timeout", "network"):
             raise FetchError(f"network error fetching {url}: {exc}") from None
         if exc.kind == "refused":
@@ -3884,7 +3885,7 @@ def _skipped_summary(skipped, byte_budget, limit):
     if "filesize" in groups:
         items = groups["filesize"]
         issues.append(lazaret.truncated_issue(
-            "(release)", f"{len(items)} release file(s) not downloaded: each is larger than "
+            "(release)", f"{len(items)} release file(s) not scanned: each is larger than "
                          f"the {_fmt_bytes(MAX_DOWNLOAD_BYTES)} per-file download limit "
                          f"({names(items)})"))
         labels.append(f"over the {_fmt_bytes(MAX_DOWNLOAD_BYTES)} per-file limit")
@@ -4399,10 +4400,17 @@ def scan_package(eco, name, version=None, full=False, *, resolved=None, deadline
         if downloaded >= byte_budget or (size is not None and downloaded + size > byte_budget):
             skipped.append((ref.get("filename"), "budget", size))
             continue
-        if module is None:
-            data = http_bytes(ref["url"])
-        else:
-            data = module_fetch(module).bytes(ref["url"], MAX_DOWNLOAD_BYTES)
+        try:
+            if module is None:
+                data = http_bytes(ref["url"])
+            else:
+                data = module_fetch(module).bytes(ref["url"], MAX_DOWNLOAD_BYTES)
+        except TooLarge:
+            # (a file whose size the registry does not declare, a Go module's zip among them, found over the
+            # per-file limit as it came: not scanned, as one declared over it is not: N-21)
+            skipped.append((ref.get("filename"), "filesize", size))
+            downloaded += MAX_DOWNLOAD_BYTES
+            continue
         downloaded += max(len(data), size or 0)
         # G15: verify the artifact against the registry-published digest BEFORE
         # scanning anything — a mismatch raises and nothing is persisted under

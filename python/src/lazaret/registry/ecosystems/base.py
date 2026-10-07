@@ -26,7 +26,7 @@ import urllib.parse
 
 from lazaret.scanner import core as lazaret
 
-__all__ = ["SpecError", "FetchError", "NotFound", "DigestError", "Resolution", "RunTargets", "Declared", "Ecosystem", "Fetch", "DownloadBudget",
+__all__ = ["SpecError", "FetchError", "TooLarge", "NotFound", "DigestError", "Resolution", "RunTargets", "Declared", "Ecosystem", "Fetch", "DownloadBudget",
            "host_allowed",
            "MAX_DOCUMENT_BYTES", "MAX_ARTIFACT_BYTES", "MAX_REDIRECTS", "METADATA_TIMEOUT", "DOWNLOAD_TIMEOUT",
            "VERSION_RE", "show", "ascii_name", "HOSTILE_NAMES", "HOSTILE_VERSIONS", "finish_member_path", "top_directory_stripped",
@@ -52,6 +52,11 @@ class FetchError(ValueError):
     """A fetch was refused (bad scheme or host) or exceeded a size budget. `status` is the HTTP status when the
     server answered with an error."""
     status = None
+
+
+class TooLarge(FetchError):
+    """A response over the bytes it was allowed (a typed error, not a message: a message is text a server can choose).
+    A download over the per-file limit is not scanned, which makes the result INCOMPLETE, not an error."""
 
 
 class NotFound(FetchError):
@@ -351,7 +356,7 @@ class Fetch:
                 raise FetchError(f"the transport gave no bytes for {show(url)}")
             used = min(len(body), max_bytes)
             if len(body) > max_bytes:
-                raise FetchError(f"response exceeds {max_bytes // (1024 * 1024) or 1}MB budget: {show(url)}")
+                raise TooLarge(f"response exceeds {max_bytes // (1024 * 1024) or 1}MB budget: {show(url)}")
             return bytes(body)
         finally:
             if budget is not None:

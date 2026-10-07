@@ -576,6 +576,12 @@ project is pre-1.0, so the 0.x API may still change.
 
 ### Fixed
 
+- **A file over the per-file download limit that its registry declares no size for is INCOMPLETE, not an
+  error (N-21).** A Go module's zip (the proxy declares no size before the download), a crate or an npm
+  tarball found over the 200 MiB limit as it came made `lazaret-registry scan` fail; it is now left out
+  as one declared over the limit is (SC-TRUNCATED, the verdict INCOMPLETE). The download's over-budget
+  error is a type of its own (`TooLarge`), not a message. `lazaret guard code` blocks such an extension:
+  it installs the files it scanned, and has none to install.
 - **`lazaret guard cargo` blocks a file in cargo's cache that is not the crate the lockfile names (GR-2).**
   cargo checks a download against the index's checksum, but builds a `.crate` it finds in its cache as it
   is, so a file put there (by anything that can write to `CARGO_HOME`) was built while the guard scanned the

@@ -517,6 +517,12 @@ class Run:
         except base.DigestError as exc:
             ctx.block(check, f"not the file {GALLERIES[self.editor.gallery]} published: {exc}")
             return
+        except base.TooLarge:
+            # (the guard installs the file it scanned, and has none to install: blocked, where the package managers'
+            # guards let the tool fetch a file too large to scan as INCOMPLETE)
+            ctx.block(check, f"larger than the {repo.MAX_DOWNLOAD_BYTES // (1024 * 1024)}MB the guard downloads and "
+                             f"scans, so it is not installed")
+            return
         except (base.FetchError, repo.FetchError, ValueError) as exc:
             ctx.not_checked(check, exc)
             return
