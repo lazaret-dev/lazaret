@@ -31,6 +31,11 @@ the editor's own `--install-extension` does, up to the download, and then has th
                     --allow-new and --block-warn as for the package managers; and the list of extensions the editor's
                     gallery has found malicious (product.json's controlUrl; the Marketplace's own for its extensions),
                     which the editor applies to what it downloads itself, and not to a file it is given.
+    replaced        an extension the gallery's control list says to migrate (`migrateToPreRelease`, a `deprecated`
+                    entry with `autoMigrate`, and the product's `defaultChatAgent`: VS Code's Copilot) is not the one
+                    the editor installs: it installs the replacement, at its newest version (a pre-release when the
+                    list says so), whether the extension was asked for, brought or updated, and so does the guard
+                    (EG-7). A `.vsix` given is installed as itself. The list is read once, when first needed.
     the install     nothing is installed when anything is blocked, or under --plan. Otherwise the editor installs the
                     files the guard checked, written to a folder of the user's own (`<editor> --install-extension
                     FILE.vsix`): from VS Code 1.98 on, with --do-not-include-pack-dependencies, so that it fetches
@@ -72,6 +77,7 @@ import platform
 import re
 import subprocess
 import sys
+import threading
 import types
 import urllib.parse
 import zipfile
@@ -665,6 +671,34 @@ class Run:
         self.resolved = {}                   # (id, pre) -> Item, or Unavailable
         self.items = []                      # every Item downloaded, to install unless blocked
         self.counter = 0
+        self.control = None                  # the gallery's control list, once read (read_control)
+        self.control_lock = threading.Lock()
+        self.key_locks = {}                  # (id, pre) -> the lock its resolution holds
+
+    def _read_control(self):
+        with self.control_lock:              # (read once, when first needed: the editor reads it when it fetches)
+            if self.control is None:
+                self.control = read_control(self)
+            return self.control
+
+    @property
+    def malicious(self):
+        """The ids and publishers the gallery's control list says are malicious; None without a list."""
+        return self._read_control()[0]
+
+    @property
+    def migrate(self):
+        """{id: (the id the editor installs in its place, a pre-release of it?)} from the gallery's control list."""
+        return self._read_control()[1]
+
+    def replaced(self, ext_id, why):
+        """(the id the editor installs for `ext_id`, a pre-release of it?, said) when its gallery's control list says to
+        install another in its place (VS Code's checkAndGetCompatibleVersion, EG-7), else None."""
+        target = self.migrate.get(ext_id)
+        if target is not None:
+            self.note(f"{why}: {self.editor.label}'s gallery says to install {target[0]} in place of {ext_id}, and "
+                      f"the editor does")
+        return target
 
     def note(self, line):
         if line not in self.ctx.notes:
@@ -796,32 +830,40 @@ class Run:
         """The Item for an extension brought by `bringer`, at the version the editor would take (a pre-release when
         `pre`: the extension that brings it was asked for as one); shared by every walk; Unavailable when there is
         none. An installed one is not downloaded: its newest version's manifest is read for what it brings, as the
-        editor reads it."""
+        editor reads it. One the gallery's control list replaces is the replacement (EG-7), kept under both keys."""
+        asked = (ext_id, pre)
+        target = self.replaced(ext_id, f"{ext_id}, which {bringer.id} brings") if asked not in self.resolved else None
+        if target is not None:
+            ext_id, pre = target
         key = (ext_id, pre)
-        if key in self.resolved:
-            return self.resolved[key]
-        item = Item(ext_id, f"brought by {bringer.id}", dependency, bringer)
-        try:
-            if len(self.items) >= MAX_PLANNED:
-                raise Unavailable(f"the run already looks at {MAX_PLANNED} extensions")
-            item.candidate, item.artifact = self.choose(ext_id, None, pre)
-            item.version = item.candidate.version
-            if ext_id in self.present:
-                item.installed = True
-                item.manifest = read_manifest(self.module.manifest(ext_id, item.candidate, self.fetch))
-            else:
-                item.check = self.ctx.add(G.Check(self.editor.gallery, ext_id, item.version, item.why))
-                with self.ctx.lock:
-                    self.items.append(item)
-                self.fetch_item(item)
-        except Unavailable as exc:
-            item = exc
-        except (base.FetchError, repo.FetchError, ValueError) as exc:
-            if item.check is None:
-                item.check = self.ctx.add(G.Check(self.editor.gallery, ext_id, item.version, item.why))
-            self.ctx.not_checked(item.check, exc)
-        self.resolved[key] = item
-        return item
+        with self.ctx.lock:
+            lock = self.key_locks.setdefault(key, threading.Lock())
+        with lock:                           # (one Item for an extension, however many ask for it at once)
+            if key in self.resolved:
+                self.resolved[asked] = self.resolved[key]
+                return self.resolved[key]
+            item = Item(ext_id, f"brought by {bringer.id}", dependency, bringer)
+            try:
+                if len(self.items) >= MAX_PLANNED:
+                    raise Unavailable(f"the run already looks at {MAX_PLANNED} extensions")
+                item.candidate, item.artifact = self.choose(ext_id, None, pre)
+                item.version = item.candidate.version
+                if ext_id in self.present:
+                    item.installed = True
+                    item.manifest = read_manifest(self.module.manifest(ext_id, item.candidate, self.fetch))
+                else:
+                    item.check = self.ctx.add(G.Check(self.editor.gallery, ext_id, item.version, item.why))
+                    with self.ctx.lock:
+                        self.items.append(item)
+                    self.fetch_item(item)
+            except Unavailable as exc:
+                item = exc
+            except (base.FetchError, repo.FetchError, ValueError) as exc:
+                if item.check is None:
+                    item.check = self.ctx.add(G.Check(self.editor.gallery, ext_id, item.version, item.why))
+                self.ctx.not_checked(item.check, exc)
+            self.resolved[key] = self.resolved[asked] = item
+            return item
 
     def walk(self, root, known, pre=False):
         """Every extension `root` brings, as the editor walks (level by level here; the same set): [Item], each at its
@@ -833,8 +875,8 @@ class Run:
             wanted = collections.OrderedDict()
             for item in level:
                 for ext_id, dependency in self.brings(item):
-                    if ext_id in known:
-                        continue
+                    if ext_id in known or self.migrate.get(ext_id, ("",))[0] in known:
+                        continue                 # (or the one the editor installs in its place: EG-7)
                     was = wanted.get(ext_id)
                     wanted[ext_id] = (item if was is None else was[0], dependency or (was is not None and was[1]))
             jobs = [(lambda i=ext_id, b=by, d=dep: self.resolve_brought(i, b, d, pre)) for ext_id, (by, dep) in wanted.items()]
@@ -853,12 +895,16 @@ class Run:
         return found
 
 
-def _malicious(run):
-    """The ids and publishers the editor's gallery lists as malicious (lowercase), from its control URL; None when
-    there is no list or it could not be read (said)."""
+def read_control(run):
+    """What the editor's gallery's control list says (its product.json's controlUrl; Microsoft's for the Marketplace),
+    as VS Code reads it (getExtensionsControlManifest): (the ids and publishers it lists as malicious, lowercase; the
+    extensions the editor installs another in place of: {id: (the other's id, a pre-release of it?)}, from
+    `migrateToPreRelease` (for an engine the editor takes), `deprecated` entries whose extension says `autoMigrate`, and
+    the product's `defaultChatAgent`). (None, {}) when there is no list or it could not be read (said): the editor then
+    applies none of it."""
     url = run.editor.control_url
     if not url:
-        return None
+        return None, {}
     host = (urllib.parse.urlsplit(url).hostname or "").lower()
     eco = types.SimpleNamespace(id="control", hosts=frozenset({host}), rate={})
     try:
@@ -868,12 +914,34 @@ def _malicious(run):
             raise base.FetchError("the answer has no list of malicious extensions")
     except (base.FetchError, repo.FetchError, ValueError) as exc:
         run.note(f"the list of malicious extensions at {host} could not be read ({exc}): not checked against it")
-        return None
-    return {x.lower() for x in listed if isinstance(x, str)}
+        return None, {}
+    malicious = {x.lower() for x in listed if isinstance(x, str)}
+    migrate, ed = {}, run.editor
+    to_pre = doc.get("migrateToPreRelease")
+    for old, info in (to_pre.items() if isinstance(to_pre, dict) else ()):
+        engine = info.get("engine") if isinstance(info, dict) else None
+        if isinstance(old, str) and isinstance(info, dict) and isinstance(info.get("id"), str) \
+                and _ID_RE.fullmatch(info["id"]) and (not engine or not ed.version or (
+                    isinstance(engine, str) and editorcompat.engine_ok(engine, ed.version, ed.date))):
+            migrate[old.lower()] = (info["id"].lower(), True)
+    deprecated = doc.get("deprecated")
+    for old, info in (deprecated.items() if isinstance(deprecated, dict) else ()):
+        ext = info.get("extension") if isinstance(info, dict) else None
+        if isinstance(old, str) and isinstance(ext, dict) and ext.get("autoMigrate") \
+                and isinstance(ext.get("id"), str) and _ID_RE.fullmatch(ext["id"]):
+            migrate[old.lower()] = (ext["id"].lower(), ext.get("preRelease") is True)
+    agent = ed.product.get("defaultChatAgent")
+    if isinstance(agent, dict) and all(isinstance(agent.get(k), str) and _ID_RE.fullmatch(agent[k])
+                                       for k in ("extensionId", "chatExtensionId")):
+        # (VS Code installs its chat extension in place of the agent's own, a pre-release outside its stable builds)
+        migrate[agent["extensionId"].lower()] = (agent["chatExtensionId"].lower(), ed.product.get("quality") != "stable")
+    for old in [k for k, (new, _pre) in migrate.items() if new == k or not _ID_RE.fullmatch(k)]:
+        del migrate[old]
+    return malicious, migrate
 
 
 def _check_malicious(run, items):
-    listed = _malicious(run) if items else None
+    listed = run.malicious if items else None
     if not listed:
         return
     host = (urllib.parse.urlsplit(run.editor.control_url).hostname or "").lower()
@@ -936,7 +1004,8 @@ def guard_editor(ctx, tool, args, gallery=None, fetch=None):
             ctx.say(f"lazaret guard: {G.plural(len(roots), 'update')} of the {G.plural(len(installed), 'extension')} "
                     f"{editor.label} lists")
             for root in roots:
-                ctx.say(f"  {'update':<10} {root.id} {installed[root.id]} to {root.version}")
+                ctx.say(f"  {'update':<10} {root.id} " + (f"{installed[root.id]} to {root.version}" if root.id in installed
+                                                          else f"{root.version}, {root.why}"))
         elif update:
             ctx.say(f"lazaret guard: no update for the {G.plural(len(installed), 'extension')} {editor.label} lists")
         known = {r.id for r in roots}
@@ -993,21 +1062,36 @@ def _plan_roots(run, requests):
         if have is not None and r.version is not None and have == r.version:
             ctx.say(f"lazaret guard: {r.id}@{r.version} is installed already")
             continue
+        target, ext_id, why = run.migrate.get(r.id), r.id, "asked for"
         try:
-            candidate, artifact = run.choose(r.id, r.version, r.pre or pre)
+            try:
+                candidate, artifact = run.choose(r.id, r.version, r.pre or pre)
+            except Unavailable as exc:
+                if exc.missing or target is None:
+                    raise
+            if target is not None:
+                # (the editor finds it in its gallery, then installs the replacement, at its newest version, in its
+                # place: VS Code's checkAndGetCompatibleVersion, EG-7)
+                run.replaced(r.id, r.text)
+                ext_id, why = target[0], f"in place of {r.id}"
+                have = installed.get(ext_id)
+                candidate, artifact = run.choose(ext_id, None, target[1])
         except Unavailable as exc:
-            failed.append(f"{r.text} cannot be installed: {exc}")
+            failed.append(f"{r.text} cannot be installed: " + (f"{ext_id}, which the editor installs in its place: "
+                                                                if ext_id != r.id else "") + str(exc))
             continue
         except (base.FetchError, repo.FetchError, ValueError) as exc:
             failed.append(f"{r.text} could not be looked up: {exc}")
             continue
         if have is not None and have == candidate.version:
-            ctx.say(f"lazaret guard: {r.id}@{have} is installed already")
+            ctx.say(f"lazaret guard: {ext_id}@{have} is installed already")
             continue
-        item = Item(r.id, "asked for")
+        if any(i.id == ext_id for i in roots):
+            continue                             # (the replacement of another asked for, asked for too)
+        item = Item(ext_id, why)
         item.candidate, item.artifact, item.version, item.pre = candidate, artifact, candidate.version, r.pre
         item.downgrade = have is not None and editorcompat.version_key(have) > editorcompat.version_key(item.version)
-        item.check = ctx.add(G.Check(editor.gallery, r.id, item.version, "asked for"))
+        item.check = ctx.add(G.Check(editor.gallery, ext_id, item.version, why))
         run.items.append(item)
         roots.append(item)
         jobs.append(lambda i=item: run.fetch_item(i))
@@ -1095,7 +1179,8 @@ def _plan_updates(run, origins):
                  f"{G.plural(unmatched, 'extension')} matched by name")
     if failed:
         return [], failed
-    fetches = []
+    seen, fetches = set(), []
+    items = [i for i in items if not (i.id in seen or seen.add(i.id))]      # (a replacement asked for twice: EG-7)
     for item in items:
         item.check = ctx.add(G.Check(editor.gallery, item.id, item.version, item.why))
         if item.held:
@@ -1106,11 +1191,31 @@ def _plan_updates(run, origins):
     return items, []
 
 
+def _old_enough(run, ext_id, pre, candidate, artifact, have):
+    """--min-age for an update: (candidate, artifact, None) when `candidate` is old enough (or let in); else the newest
+    version old enough, if it is newer than `have` (None: none installed), with the words for what was held back; else
+    (None, None, why there is none). FetchError passes."""
+    ctx = run.ctx
+    if ctx.cutoff is None or candidate.when is None or candidate.when <= ctx.cutoff \
+            or ctx.matches(ctx.opts.allow_new, run.editor.gallery, ext_id):
+        return candidate, artifact, None
+    young, age = candidate.version, G.format_age(ctx.min_age)
+    try:
+        older, artifact = run.choose(ext_id, None, pre, keep=lambda c: c.when is not None and c.when <= ctx.cutoff)
+    except Unavailable:
+        older = None
+    if older is None or (have is not None
+                         and editorcompat.version_key(older.version) <= editorcompat.version_key(have)):
+        return None, None, f"{young} is younger than --min-age {age} (--allow-new {ext_id} lets it in)"
+    return older, artifact, f"{young} held back: younger than --min-age {age}"
+
+
 def _update_choice(run, ext_id, have, origin, compare):
     """What --update-extensions does with one installed extension: None (nothing newer, or not the gallery's), ("note",
     why it is left alone), ("failed", the lookup that failed), or ("update" / "unmatched": its gallery identifier not
-    compared, Item)."""
-    ctx, editor = run.ctx, run.editor
+    compared, Item). One the gallery's control list replaces is updated as the editor updates it: by installing the
+    replacement (EG-7)."""
+    editor = run.editor
     try:
         candidate, artifact = run.choose(ext_id, None, origin.pre)
     except Unavailable as exc:
@@ -1121,21 +1226,6 @@ def _update_choice(run, ext_id, have, origin, compare):
         return "failed", f"{ext_id} could not be looked up: {exc}"
     if editorcompat.version_key(candidate.version) <= editorcompat.version_key(have):
         return None
-    held = None
-    if ctx.cutoff is not None and candidate.when is not None and candidate.when > ctx.cutoff \
-            and not ctx.matches(ctx.opts.allow_new, editor.gallery, ext_id):
-        young = candidate.version
-        try:
-            candidate, artifact = run.choose(ext_id, None, origin.pre,
-                                             keep=lambda c: c.when is not None and c.when <= ctx.cutoff)
-        except Unavailable:
-            candidate = None
-        except (base.FetchError, repo.FetchError, ValueError) as exc:
-            return "failed", f"{ext_id} could not be looked up: {exc}"
-        if candidate is None or editorcompat.version_key(candidate.version) <= editorcompat.version_key(have):
-            return "note", (f"{ext_id} {have} is not updated: {young} is younger than --min-age "
-                            f"{G.format_age(ctx.min_age)} (--allow-new {ext_id} lets it in)")
-        held = f"{young} held back: younger than --min-age {G.format_age(ctx.min_age)}"
     kind = "update"
     if origin.uuid is not None:
         if compare:
@@ -1151,9 +1241,32 @@ def _update_choice(run, ext_id, have, origin, compare):
                                 f"updates the one it installed")
         else:
             kind = "unmatched"
-    item = Item(ext_id, f"update from {have}")
-    item.candidate, item.artifact, item.version, item.pre, item.held = (candidate, artifact, candidate.version,
-                                                                       origin.pre, held)
+    old_id, old_have, pre = ext_id, have, origin.pre
+    target = run.migrate.get(ext_id)
+    try:
+        if target is not None:
+            # (the editor installs the replacement, at its newest version, in place of the update: EG-7)
+            ext_id, pre = target
+            have = run.installed.get(ext_id)
+            candidate, artifact = run.choose(ext_id, None, pre)
+        candidate, artifact, held = _old_enough(run, ext_id, pre, candidate, artifact, have)
+    except Unavailable as exc:
+        return "note", (f"{old_id} {old_have} is not updated: the editor installs {ext_id} in its place, which it cannot "
+                        f"be: {exc}")
+    except (base.FetchError, repo.FetchError, ValueError) as exc:
+        return "failed", f"{ext_id} could not be looked up: {exc}"
+    if candidate is None:
+        return "note", f"{old_id} {old_have} is not updated: " + (
+            f"the editor installs {ext_id} in its place, and {held}" if target is not None else held)
+    if target is None:
+        why = f"update from {have}"
+    else:
+        if have is not None and editorcompat.version_key(candidate.version) <= editorcompat.version_key(have):
+            return None                      # (the replacement is installed at that version already)
+        run.replaced(old_id, f"the update of {old_id} {old_have}")
+        why = f"in place of {old_id} {old_have}"
+    item = Item(ext_id, why)
+    item.candidate, item.artifact, item.version, item.pre, item.held = candidate, artifact, candidate.version, pre, held
     return kind, item
 
 

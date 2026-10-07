@@ -944,7 +944,13 @@ the editor would take for it, and what those bring in turn, an installed
 member's newest version read from its manifest alone (the editor reads it
 too, and installs what it brings that is missing). The editor applies a list
 of malicious extensions (`controlUrl`) to what it downloads, not to a file it
-is given, so the guard applies it. From VS Code 1.98 the CLI takes
+is given, so the guard applies it. The same list says which extensions the
+editor installs another in place of (`migrateToPreRelease`, a `deprecated`
+entry with `autoMigrate`, and the product's `defaultChatAgent`, VS Code's
+Copilot): an install, a brought extension and an update take the
+replacement, at its newest version, as VS Code's
+`checkAndGetCompatibleVersion` does (EG-7); the list is read once, when
+first needed, as the editor reads it only when it fetches. From VS Code 1.98 the CLI takes
 `--do-not-include-pack-dependencies`, and the guard installs every file in
 one command with it, so the editor fetches nothing; before 1.98 it installs
 wave by wave, each extension after what it brings, so that the editor finds

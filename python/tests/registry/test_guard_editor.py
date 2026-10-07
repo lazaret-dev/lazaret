@@ -169,7 +169,7 @@ class OpenVSXGallery:
 
     def __init__(self):
         self.entries, self.files, self.calls = [], {}, []
-        self.control = None
+        self.control, self.control_extra = None, {}
         self.ids, self.fail = {}, set()
 
     def add(self, ext_id, version, platforms=("universal",), pre=False, when=OLD, engine="^1.90.0", deps=(), pack=(),
@@ -210,7 +210,7 @@ class OpenVSXGallery:
             mine.sort(key=lambda e: C.version_key(e["version"]), reverse=True)
             return json.dumps({"offset": offset, "totalSize": len(mine), "extensions": mine[offset:offset + size]}).encode()
         if url == CONTROL and self.control is not None:
-            return json.dumps({"malicious": self.control, "learnMoreLinks": {}}).encode()
+            return json.dumps({"malicious": self.control, "learnMoreLinks": {}, **self.control_extra}).encode()
         body = self.files.get(url)
         if body is None:
             err = base.FetchError("not found")
@@ -1087,6 +1087,90 @@ class UpdateTests(EditorCase):
         self.assertEqual(self.run_guard("--update-extensions", plan=True), 0, self.out)
         self.assertIn("checked 1 OK", self.out)
         self.assertEqual(self.installs(), [])
+
+
+class ReplacedTests(EditorCase):
+    """EG-7: an extension the gallery's control list says to migrate (`migrateToPreRelease`, a `deprecated` entry with
+    `autoMigrate`, the product's `defaultChatAgent`) is not what the editor installs: it installs the replacement at its
+    newest version (VS Code's checkAndGetCompatibleVersion), when it installs it, an extension brings it, or it updates
+    it; a `.vsix` given is installed as itself."""
+    MOVED = {"deprecated": {"Old.Ext": {"disallowInstall": True, "extension": {"id": "New.Ext", "displayName": "New",
+                                                                                "autoMigrate": {"storage": False}}}}}
+
+    def setUp(self):
+        super().setUp()
+        self.gallery.control = []
+        self.gallery.control_extra = dict(self.MOVED)
+        self.gallery.add("old.ext", "1.0.0")
+        self.gallery.add("old.ext", "1.1.0")
+        self.gallery.add("new.ext", "2.0.0")
+        self.gallery.add("new.ext", "2.1.0-next.1", pre=True)
+
+    def test_what_the_list_says(self):
+        self.gallery.control_extra = {
+            "migrateToPreRelease": {"A.One": {"id": "a.one-next", "displayName": "x"},
+                                    "A.Two": {"id": "a.two-next", "displayName": "x", "engine": "^1.200.0"},
+                                    "a.self": {"id": "A.Self", "displayName": "x"}, "a.bad": {"id": "not an id"}},
+            "deprecated": {"b.one": {"extension": {"id": "b.new", "displayName": "x", "autoMigrate": {"storage": True},
+                                                   "preRelease": True}},
+                           "b.two": {"extension": {"id": "b.other", "displayName": "x"}}, "b.three": True}}
+        self.gallery.control = ["Bad.One"]
+        ed = E.read_editor(self.TOOL, self.exe, dict(os.environ))
+        ctx = G.Context(options(tool=self.TOOL), out=io.StringIO())
+        self.addCleanup(ctx.close)
+        run = E.Run(ctx, ed, dict(os.environ), set(), {}, {}, self.tmp)
+        self.assertEqual(run.malicious, {"bad.one"})
+        self.assertEqual(run.migrate, {"a.one": ("a.one-next", True), "b.one": ("b.new", True)})
+        self.assertEqual(len(self.gallery.asked(CONTROL)), 1)                      # (read once)
+        # the product's chat agent: its chat extension in its place, a release in a stable build
+        ed.product = {"defaultChatAgent": {"extensionId": "GitHub.copilot", "chatExtensionId": "GitHub.copilot-chat"},
+                      "quality": "stable"}
+        run = E.Run(ctx, ed, dict(os.environ), set(), {}, {}, self.tmp)
+        self.assertEqual(run.migrate["github.copilot"], ("github.copilot-chat", False))
+        ed.product["quality"] = "insider"
+        run = E.Run(ctx, ed, dict(os.environ), set(), {}, {}, self.tmp)
+        self.assertEqual(run.migrate["github.copilot"], ("github.copilot-chat", True))
+        # (no list, or one that cannot be read: nothing replaced, as the editor replaces nothing then)
+        self.gallery.control = None
+        run = E.Run(ctx, ed, dict(os.environ), set(), {}, {}, self.tmp)
+        self.assertEqual((run.malicious, run.migrate), (None, {}))
+
+    def test_an_install_takes_the_replacement(self):
+        self.assertEqual(self.run_guard("--install-extension", "old.ext"), 0, self.out)
+        self.assertEqual(self.state()["installed"], {"new.ext": "2.0.0"})
+        self.assertIn("old.ext: VSCodium's gallery says to install new.ext in place of old.ext, and the editor does",
+                      self.out)
+        self.assertIn("new.ext@2.0.0", [c.label() for c in self.ctx.checks])
+        # installed already, at that version: nothing to do
+        self.assertEqual(self.run_guard("--install-extension", "old.ext"), 0, self.out)
+        self.assertIn("new.ext@2.0.0 is installed already", self.out)
+        # (it must be in the gallery, as the editor asks for it first)
+        self.assertEqual(self.run_guard("--install-extension", "old.ext@9.9.9"), G.EXIT_RESOLVE, self.out)
+        self.assertIn("old.ext@9.9.9 cannot be installed: not found in Open VSX (no version 9.9.9)", self.out)
+
+    def test_a_vsix_given_is_installed_as_itself(self):
+        path = os.path.join(self.tmp, "old.ext-1.0.0.vsix")
+        with open(path, "wb") as f:
+            f.write(ext_file("old.ext", "1.0.0"))
+        self.assertEqual(self.run_guard("--install-extension", path), 0, self.out)
+        self.assertEqual(self.state()["installed"], {"old.ext": "1.0.0"})
+
+    def test_what_an_extension_brings_is_replaced_too(self):
+        self.gallery.add("a.b", "1.0.0", pack=("old.ext",), deps=("old.ext",))
+        self.assertEqual(self.run_guard("--install-extension", "a.b"), 0, self.out)
+        self.assertEqual(self.state()["installed"], {"a.b": "1.0.0", "new.ext": "2.0.0"})
+        self.assertIn("old.ext, which a.b brings: VSCodium's gallery says to install new.ext in place of old.ext", self.out)
+        self.assertEqual(sorted(c.label() for c in self.ctx.checks), ["a.b@1.0.0", "new.ext@2.0.0"])
+
+    def test_an_update_installs_the_replacement(self):
+        self.set_state(installed={"old.ext": "1.0.0"})
+        record_profile(os.path.join(self.extdir, "extensions.json"), ("old.ext", "1.0.0", {"source": "vsix"}))
+        self.assertEqual(self.run_guard("--update-extensions"), 0, self.out)
+        self.assertEqual(self.state()["installed"], {"old.ext": "1.0.0", "new.ext": "2.0.0"})
+        self.assertIn("  update     new.ext 2.0.0, in place of old.ext 1.0.0", self.out)
+        # nothing newer of the old one, or the replacement installed already: nothing to do
+        self.assertEqual(self.run_guard("--update-extensions"), 0, self.out)
+        self.assertIn("no update for the 2 extensions VSCodium lists", self.out)
 
 
 class ProfileTests(unittest.TestCase):

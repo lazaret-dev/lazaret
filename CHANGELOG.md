@@ -124,6 +124,12 @@ project is pre-1.0, so the 0.x API may still change.
   matches it by name too, so what it installed is updated by it. Under `--min-age` an update younger
   than that is held back and the newest version old enough is taken when it is newer than the one
   installed. Nothing is installed when anything is blocked, or when a lookup fails.
+- **The extension the editor installs in place of another, under the guard too (EG-7).** The gallery's
+  control list says which extensions the editor replaces (one migrated to its pre-release, a deprecated
+  one whose entry says to migrate, and the product's chat agent: VS Code installs Copilot Chat when
+  asked for Copilot). The guard installed the extension asked for, brought or updated; it now checks and
+  installs the replacement at its newest version, as the editor does, and says so. A `.vsix` given is
+  installed as itself, as the editor installs it.
 - **VS Code extensions named like a popular one's, and a release that brings a brand-new one (E-1's third
   part).** An extension is named `publisher.name`, and anyone can create a publisher. Its identifier, or
   one it brings (`extensionDependencies`, `extensionPack`), one change from a most-installed extension's of
