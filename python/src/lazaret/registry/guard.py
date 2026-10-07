@@ -4286,6 +4286,11 @@ def check_crate(ctx, fetcher, registry, pkg, home, offline, keep=None):
             if digest is None:
                 raise repo.FetchError("neither the lockfile nor the registry's index gives a checksum to check it against")
         check.digest = "sha256:" + digest
+        planted = cargosrc.cache_mismatch(home, registry.base, pkg.name, pkg.version, digest)
+        if planted is not None:
+            ctx.block(check, f"cargo's cache holds another file for it ({planted}), and cargo would build that one: it checks "
+                             f"no file it finds in its cache against the lockfile (delete it and run the command again)")
+            return check
         key = VerdictCache.key("crates", pkg.name, pkg.version, check.digest)
         hit = ctx.scanner.cached(key)
         published = parse_time(hit.get("published")) if hit else None

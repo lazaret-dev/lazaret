@@ -576,6 +576,12 @@ project is pre-1.0, so the 0.x API may still change.
 
 ### Fixed
 
+- **`lazaret guard cargo` blocks a file in cargo's cache that is not the crate the lockfile names (GR-2).**
+  cargo checks a download against the index's checksum, but builds a `.crate` it finds in its cache as it
+  is, so a file put there (by anything that can write to `CARGO_HOME`) was built while the guard scanned the
+  registry's copy. A cached file of the crate in cargo's cache of that registry (`registry/cache/<host>-<hash>/`,
+  every hash cargo's versions have used; crates.io's sparse and git indexes) whose SHA-256 is not the
+  lockfile's now blocks, and the message names it.
 - **A `.netrc`'s anonymous-FTP password is not a credential (N-25).** S-SECRET reported the password of an
   entry whose login is `anonymous` (or `ftp`), which by convention is an e-mail address
   (`default login anonymous password jdoe@example.org`). It now leaves out every password of such an

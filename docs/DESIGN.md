@@ -900,7 +900,9 @@ configuration, and a replaced source is the user's. So the Cargo guard
 resolves first (`cargo update --workspace`, or the lock as it is with
 `--locked`), reads `Cargo.lock`, fetches and checks every crates.io crate
 the lock names against its checksum (one cargo has unpacked already too: a
-verdict cached for its checksum is not scanned again), from where cargo
+verdict cached for its checksum is not scanned again; a file in cargo's
+cache of that registry with other bytes blocks, since cargo builds a cached
+file without checking it: `cargosrc.cache_mismatch`), from where cargo
 would (cargo's configuration as cargo merges it: `[source]` replacement,
 `[registries]`, `include`, `--config`; the registry's `dl`), and only then
 lets cargo run, with `--locked`. `cargo install` resolves in a scratch

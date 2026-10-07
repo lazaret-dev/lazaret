@@ -19,6 +19,7 @@ import sys
 import tarfile
 import tempfile
 import unittest
+import urllib.parse
 from unittest import mock
 
 from lazaret.registry import cargosrc, guard, pmsettings, repo
@@ -220,6 +221,49 @@ class CheckCrateTests(CrateCase):
             f.write(self.reg.versions["leaf"]["1.0.0"]["data"] + b"x")
         check = self.check(self.context(), self.pkg("leaf"))
         self.assertEqual((check.verdict, self.reg.paths("/dl/")), ("OK", ["/dl/leaf/leaf-1.0.0.crate"]))
+
+    def test_a_file_in_cargos_cache_that_is_not_the_crate_blocks(self):
+        # GR-2: cargo builds a file it finds in its cache without checking it, so one with other bytes in the cache of the
+        # registry the crate comes from (named after the index's host and a hash) is what it would build
+        host = urllib.parse.urlsplit(self.reg.url).hostname
+        for folder in (f"{host}-0123456789abcdef", f"{host}-fedcba9876543210-shallow"):
+            with self.subTest(folder):
+                path = os.path.join(self.home, "registry", "cache", folder, "leaf-1.0.0.crate")
+                os.makedirs(os.path.dirname(path))
+                with open(path, "wb") as f:
+                    f.write(self.reg.versions["leaf"]["1.0.0"]["data"] + b"planted")
+                ctx = self.context()
+                check = self.check(ctx, self.pkg("leaf"))
+                self.assertEqual(len(check.blocked), 1)
+                self.assertIn("cargo's cache holds another file for it", check.blocked[0])
+                self.assertIn(path, check.blocked[0])
+                self.assertEqual(ctx.scanner.calls, [])
+                shutil.rmtree(os.path.join(self.home, "registry"))
+        # the right file, an empty one (cargo downloads again), another registry's or a folder not cargo's: not in the way
+        for folder, data in ((f"{host}-0123456789abcdef", self.reg.versions["leaf"]["1.0.0"]["data"]),
+                             (f"{host}-0123456789abcdef", b""), ("other.invalid-0123456789abcdef", b"other"),
+                             ("idx", b"other")):
+            with self.subTest(folder=folder, size=len(data)):
+                path = os.path.join(self.home, "registry", "cache", folder, "leaf-1.0.0.crate")
+                os.makedirs(os.path.dirname(path))
+                with open(path, "wb") as f:
+                    f.write(data)
+                check = self.check(self.context(), self.pkg("leaf"))
+                self.assertEqual((check.verdict, check.blocked), ("OK", []))
+                shutil.rmtree(os.path.join(self.home, "registry"))
+
+    def test_crates_ios_caches_are_its_sparse_and_its_git_indexs(self):
+        data = b"not the crate"
+        for folder in ("index.crates.io-1949cf8c6b5b557f", "github.com-1ecc6299db9ec823", "index.crates.io-6f17d22bba15001f"):
+            with self.subTest(folder):
+                path = os.path.join(self.home, "registry", "cache", folder, "leaf-1.0.0.crate")
+                os.makedirs(os.path.dirname(path))
+                with open(path, "wb") as f:
+                    f.write(data)
+                self.assertEqual(cargosrc.cache_mismatch(self.home, cargosrc.DEFAULT_INDEX, "leaf", "1.0.0", HEX), path)
+                self.assertIsNone(cargosrc.cache_mismatch(self.home, "https://mirror.invalid/", "leaf", "1.0.0", HEX))
+                self.assertIsNone(cargosrc.cache_mismatch(self.home, cargosrc.DEFAULT_INDEX, "leaf", "1.0.1", HEX))
+                shutil.rmtree(os.path.join(self.home, "registry"))
 
     def test_offline_only_cargos_cache_is_read(self):
         ctx = self.context()

@@ -25,6 +25,7 @@ import hashlib
 import json
 import os
 import re
+import urllib.parse
 
 from lazaret.registry.ecosystems import base, crates
 from lazaret.scanner import sca
@@ -469,6 +470,47 @@ def crate_dirs(home):
     except OSError:
         pass
     return found
+
+
+#: The hosts of crates.io's indexes, whose cache folders cargo names after them (`index.crates.io-<hash>`, and
+#: `github.com-<hash>` for the git index it read before the sparse one)
+_CRATES_IO_HOSTS = ("index.crates.io", "github.com")
+_CACHE_FOLDER_RE = re.compile(r"(?P<host>.+)-[0-9a-f]{16}(?:-shallow)?")
+
+
+def cache_mismatch(home, index, name, version, checksum):
+    """The path of a `name-version.crate` in cargo's cache of the registry whose index is at `index` that is not the crate
+    of SHA-256 `checksum` (GR-2), else None. cargo uses a cached file as it is: it checks a download against the index's
+    checksum, and never a file it finds in its cache (nor the folder it unpacked one into), so a file put there is the
+    one it builds. Its cache folders are named after the index's host and a hash of its URL
+    (`registry/cache/<host>-<16 hex>[-shallow]`; the hash changed with cargo's versions, so every one of the host's is
+    read); crates.io's are its sparse index's and its git index's. An empty file is not used by cargo, and is passed
+    over."""
+    host = (urllib.parse.urlsplit(index).hostname or "").lower()
+    hosts = _CRATES_IO_HOSTS if index == DEFAULT_INDEX else (host,)
+    root = os.path.join(home, "registry", "cache")
+    try:
+        folders = sorted(os.listdir(root))
+    except OSError:
+        return None
+    for folder in folders:
+        m = _CACHE_FOLDER_RE.fullmatch(folder)
+        if not m or m.group("host").lower() not in hosts:
+            continue
+        path = os.path.join(root, folder, f"{name}-{version}.crate")
+        try:
+            size = os.path.getsize(path)
+            if size == 0:
+                continue
+            if size > 64 * 1024 * 1024:
+                return path
+            with open(path, "rb") as f:
+                data = f.read()
+        except OSError:
+            continue
+        if hashlib.sha256(data).hexdigest() != checksum:
+            return path
+    return None
 
 
 def cached_crate(home, name, version, checksum):
