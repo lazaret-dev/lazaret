@@ -513,6 +513,15 @@ project is pre-1.0, so the 0.x API may still change.
   go's cache too, and the files the pip and uv relay serves (by the size the index declares).
   Eight 40 MB zips asked for at once: 320 MB held at the peak before, 80 MB with a budget of
   100 MB, in 2.2 s instead of 1.3 s.
+- **The rest of the cargo guard's review (GR-3).** The guard's own runs of cargo now take the
+  command's `-Z` flags, so that they resolve as the command will, and with nightly's
+  `--lockfile-path` the lock that is checked and put back is that one (it was Cargo.lock, and
+  cargo then built from a lock nothing had checked); `cargo install --lockfile-path` is
+  refused. A crate from a plain-http registry on another machine that only the lockfile
+  names, not cargo's settings, is not fetched (INCOMPLETE, not checked): the lockfile is the
+  project's. A download now stops after 15 minutes in all (`LAZARET_GUARD_DOWNLOAD_SECONDS`),
+  where a server sending a byte now and then kept it going for ever. Offline, an entry
+  without a checksum already asked the index nothing; a test now holds it.
 - **`lazaret guard --plan cargo …` runs none of the project's programs (GR-1).** When it
   updates a lock, cargo asks the compiler its version, through the wrappers and the
   compiler a project's `.cargo/config.toml` names (`build.rustc-wrapper`,

@@ -234,6 +234,15 @@ class CheckCrateTests(CrateCase):
         self.assertEqual((check.verdict, check.blocked, check.age), ("OK", [], None))        # (no time asked for either)
         self.assertEqual(self.reg.requests, [])
 
+    def test_offline_an_entry_without_a_checksum_asks_the_index_nothing(self):
+        # (the lockfile's checksum, or nothing: the index is not fetched when offline: the Go/Rust review's CG-9, GR-3)
+        ctx = self.context()
+        registry = guard._offline_registry(self.reg.url)
+        pkg = self.pkg("leaf")._replace(checksum=None)
+        check = guard.check_crate(ctx, self.fetcher(), registry, pkg, self.home, True)
+        self.assertEqual(check.blocked, ["could not be checked: offline, and the lockfile gives no checksum to check it against"])
+        self.assertEqual(self.reg.requests, [])
+
     def test_a_verdict_that_is_known_by_checksum_is_not_fetched_again(self):
         key = guard.VerdictCache.key("crates", "leaf", "1.0.0", "sha256:" + self.sums["leaf"])
         known = {key: {"verdict": "OK", "reason": "no supply-chain indicators", "indicators": [], "published": "2020-01-01T00:00:00Z"}}
@@ -403,11 +412,30 @@ class AuthTests(CrateCase):
 
 
 class PackagesTests(CrateCase):
-    def run_packages(self, packages, registry=None, skip=(), ctx=None, offline=False, **kw):
+    def run_packages(self, packages, registry=None, skip=(), ctx=None, offline=False, known=frozenset(), **kw):
         ctx = ctx or self.context(**kw)
         registry = registry or cargosrc.Registry("sparse", self.reg.url)
-        listed = guard.check_cargo_packages(ctx, packages, registry, self.home, offline, "Cargo.lock", skip=skip)
+        listed = guard.check_cargo_packages(ctx, packages, registry, self.home, offline, "Cargo.lock", skip=skip, known=known)
         return ctx, listed
+
+    def test_a_plain_http_registry_only_the_lockfile_names_is_not_followed(self):
+        # (a lockfile is the project's: the guard takes plain http only to this machine or to a registry cargo's settings name,
+        # as its fetcher does: GR-3)
+        far = "http://192.0.2.1/index/"
+        pkgs = [cargosrc.Package("faraway", "1.0.0", "sparse+" + far, "0" * 64)]
+        asked = []
+        with mock.patch.object(guard.Fetcher, "get", side_effect=lambda *a, **k: asked.append(a) or b""):
+            ctx, listed = self.run_packages(pkgs)
+        (check,) = ctx.checks
+        self.assertEqual((check.name, check.verdict), ("faraway", "INCOMPLETE"))
+        self.assertIn("a plain-http registry (http://192.0.2.1/index/) that the lockfile names and cargo's settings do not",
+                      check.reason)
+        self.assertEqual((asked, listed), ([], {"faraway-1.0.0"}))
+        # one cargo's settings name is read, as cargo reads it (unreachable here: not checked, for that reason)
+        with mock.patch.object(guard.Fetcher, "json", side_effect=repo.FetchError("unreachable")) as read:
+            ctx, _ = self.run_packages(pkgs, known={far})
+        self.assertEqual(read.call_args[0][0], far + "config.json")
+        self.assertEqual(ctx.checks[0].blocked, ["could not be checked: unreachable"])            # (fails closed)
 
     def test_registry_crates_are_checked_and_the_names_cargo_may_unpack_come_back(self):
         pkgs = cargosrc.parse_lock(lock_of(self.reg, ("good", "1.0.0"), ("leaf", "1.0.0")))
@@ -782,6 +810,27 @@ class BuildCommandTests(FlowCase):
         self.assertIn("lazaret guard: checked 2 OK", out)
         self.assertNotIn("installed but not checked", out)
         self.assertIn('name = "good"', self.read(self.lock))                               # (the resolution stays)
+
+    def test_unstable_flags_reach_the_resolution_and_another_lockfile_is_the_one_checked(self):
+        # (nightly's --lockfile-path: cargo reads and writes that lock instead of Cargo.lock; and the guard's own run of cargo
+        # takes the command's -Z flags, so that it resolves as the command will: GR-3)
+        other = os.path.join(self.dir, "other.lock")
+        self.plan = {"update": [["write", other, self.lock_of(("good", "1.0.0"), ("leaf", "1.0.0"))]],
+                     "build": self.unpack("good-1.0.0", "leaf-1.0.0")}
+        code, out = self.run_guard("cargo", "build", "-Z", "unstable-options", "--lockfile-path", "other.lock", "-Zminimal-versions")
+        self.assertEqual(code, 0, out)
+        self.assertEqual(self.commands(), [
+            ["update", "-Z", "unstable-options", "-Z", "minimal-versions", "--workspace", "--lockfile-path", "other.lock"],
+            ["build", "--locked", "-Z", "unstable-options", "--lockfile-path", "other.lock", "-Zminimal-versions"]])
+        self.assertIn("lazaret guard: 2 crates to check (other.lock)\n", out)
+        self.assertFalse(os.path.exists(self.lock))
+        # a hostile crate in it: blocked, and that lock put back (removed: it did not exist)
+        os.remove(other)
+        self.plan = {"update": [["write", other, self.lock_of(("evil", "1.0.0"))]]}
+        code, out = self.run_guard("cargo", "build", "-Z", "unstable-options", "--lockfile-path", "other.lock")
+        self.assertEqual(code, 1, out)
+        self.assertIn("BLOCKED    evil@1.0.0: SUSPICIOUS", out)
+        self.assertFalse(os.path.exists(other))
 
     def test_a_hostile_crate_stops_the_command_and_puts_the_lock_back(self):
         old = self.lock_of(("leaf", "1.0.0"))
@@ -1212,6 +1261,19 @@ class InstallTests(FlowCase):
             self.assertEqual(run["argv"][:2], ["generate-lockfile", "--manifest-path"])
             self.assertNotIn("--offline", run["argv"])                                        # (only a run that is offline resolves so)
             self.assertEqual(os.path.realpath(run["cwd"]), os.path.realpath(self.dir))        # (cargo's settings are the user's folder's)
+
+    def test_unstable_flags_reach_both_resolutions_and_another_lockfile_is_refused(self):
+        # (GR-3: the guard resolves the crate as cargo install will, with its -Z flags; --lockfile-path would make cargo build
+        # from another lock than the one checked, so it is refused)
+        self.plan = {"install": self.unpack("good-1.0.0", "leaf-1.0.0")}
+        code, out = self.run_guard("cargo", "install", "-Zbuild-std", "good")
+        self.assertEqual(code, 0, out)
+        for _kind, run in self.resolutions():
+            self.assertEqual(run["argv"][:3], ["generate-lockfile", "-Z", "build-std"])
+        self.assertEqual(self.commands()[-1], ["install", "-Zbuild-std", "good@=1.0.0"])
+        code, out = self.run_guard("cargo", "install", "--lockfile-path", "x.lock", "good")
+        self.assertNotEqual(code, 0, out)
+        self.assertIn("--lockfile-path is not one the guard reads", out)
 
     def test_what_a_feature_brings_in_is_checked_whatever_features_are_asked(self):
         # (cargo install resolves a crate's lock with every feature of it on; the scratch project asked for its default

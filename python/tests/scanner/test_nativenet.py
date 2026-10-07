@@ -17,6 +17,7 @@ import subprocess
 import tempfile
 import threading
 import types
+import time
 import unittest
 import urllib.request
 from unittest import mock
@@ -75,6 +76,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self._send(302, headers=[("Location", "/ok")])
         elif self.path == "/out":
             self._send(302, headers=[("Location", f"https://127.0.0.1:{port}/ok")])
+        elif self.path == "/drip":                         # (40 chunks of 64 KiB, 0.1 s apart: each read is quick)
+            self.send_response(200)
+            self.send_header("Content-Length", str(40 * 65536))
+            self.end_headers()
+            for _ in range(40):
+                self.wfile.write(b"x" * 65536)
+                self.wfile.flush()
+                time.sleep(0.1)
         else:
             self._send(500)
 

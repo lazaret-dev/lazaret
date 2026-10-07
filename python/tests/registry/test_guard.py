@@ -18,6 +18,7 @@ import shutil
 import socketserver
 import tempfile
 import threading
+import time
 import unittest
 from unittest import mock
 
@@ -881,6 +882,61 @@ class FetcherTests(unittest.TestCase):
         with self.assertRaises(repo.FetchError) as cm:
             f.get(server.url + "/missing")
         self.assertEqual(cm.exception.status, 404)
+
+
+class _DripServer:
+    """A local HTTP server that sends a body of 64 KiB a chunk at a time, `pause` seconds apart: every read is quick, and
+    the download takes as long as the server likes."""
+
+    def __init__(self, chunks=40, pause=0.1):
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *args):
+                pass
+
+            def do_GET(self):
+                self.send_response(200)
+                self.send_header("Content-Length", str(chunks * 65536))
+                self.end_headers()
+                try:
+                    for _ in range(chunks):
+                        self.wfile.write(b"x" * 65536)
+                        self.wfile.flush()
+                        time.sleep(pause)
+                except OSError:
+                    pass
+
+        class Server(socketserver.ThreadingMixIn, http.server.HTTPServer):
+            daemon_threads = True
+
+        self.server = Server(("127.0.0.1", 0), Handler)
+        self.url = f"http://127.0.0.1:{self.server.server_address[1]}/x"
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+
+    def close(self):
+        self.server.shutdown()
+        self.server.server_close()
+
+
+class DownloadDeadlineTests(unittest.TestCase):
+    """A download has a deadline as a whole, not only per read (the Go/Rust review's CG-9, the backlog's GR-3)."""
+
+    def test_a_download_that_drips_past_the_deadline_stops(self):
+        server = _DripServer()
+        self.addCleanup(server.close)
+        f = guard.Fetcher({server.url[len("http://"):].split("/")[0]})
+        with mock.patch.dict(os.environ, {"LAZARET_GUARD_DOWNLOAD_SECONDS": "1"}):
+            started = time.monotonic()
+            with self.assertRaisesRegex(repo.FetchError, "the download took over 1 s"):
+                f.get(server.url, timeout=5)
+            self.assertLess(time.monotonic() - started, 3.5)
+            with tempfile.TemporaryDirectory() as folder, \
+                    self.assertRaisesRegex(repo.FetchError, "the download took over 1 s"):
+                f.fetch_to_file(server.url, os.path.join(folder, "x"), 10 * 1024 * 1024, timeout=5)
+
+    def test_the_deadline_comes_from_the_environment(self):
+        for text, want in (("90", 90), ("", guard.DOWNLOAD_DEADLINE), ("0", guard.DOWNLOAD_DEADLINE), ("x", guard.DOWNLOAD_DEADLINE)):
+            with self.subTest(text=text), mock.patch.dict(os.environ, {"LAZARET_GUARD_DOWNLOAD_SECONDS": text}):
+                self.assertEqual(guard.download_deadline(), want)
 
 
 class ScannerTests(unittest.TestCase):

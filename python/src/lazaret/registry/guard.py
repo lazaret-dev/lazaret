@@ -381,6 +381,7 @@ class Fetcher:
             with timings.span("network", "request"):
                 stream = nativenet.open_stream(clean, hosts=hosts, headers=req.header_items(), max_bytes=budget,
                                                timeout=timeout, max_redirects=repo.MAX_REDIRECTS,
+                                               total_timeout=download_deadline(),
                                                proxy="direct" if _is_loopback(parts.hostname) else None)
         except nativenet.UsePython:
             return None
@@ -465,6 +466,7 @@ class Fetcher:
                 if length and length.isdigit() and int(length) > max_bytes:
                     raise TooLarge(too_big)
                 buf = bytearray()
+                stop = time.monotonic() + download_deadline()
                 with timings.span("network", "read"):
                     while True:
                         chunk = r.read(64 * 1024)
@@ -473,6 +475,8 @@ class Fetcher:
                         buf.extend(chunk)
                         if len(buf) > max_bytes:
                             raise TooLarge(too_big)
+                        if time.monotonic() > stop:
+                            raise repo.FetchError(f"the download took over {download_deadline()} s: {clean}")
                 if length and length.isdigit() and len(buf) != int(length):
                     raise repo.FetchError(f"incomplete response ({len(buf)} of {length} bytes): {clean}")
                 return bytes(buf), r.headers
@@ -493,6 +497,7 @@ class Fetcher:
                 length = r.headers.get("Content-Length")
                 if length and length.isdigit() and int(length) > max_bytes:
                     raise TooLarge(too_big)
+                stop = time.monotonic() + download_deadline()
                 with timings.span("network", "read"):
                     while True:
                         chunk = r.read(1024 * 1024)
@@ -503,6 +508,8 @@ class Fetcher:
                             raise TooLarge(too_big)
                         digest.update(chunk)
                         out.write(chunk)
+                        if time.monotonic() > stop:
+                            raise repo.FetchError(f"the download took over {download_deadline()} s: {clean}")
                 if length and length.isdigit() and size != int(length):
                     raise repo.FetchError(f"incomplete response ({size} of {length} bytes): {clean}")
             except (OSError, http.client.HTTPException) as exc:
@@ -687,6 +694,15 @@ def _scan_one(data, container, kind, timeout, timed=False):
 #: manager makes in parallel: go fetches about GOMAXPROCS module zips at a time, each up to 200 MiB (the Go/Rust
 #: review's GO-10, the backlog's GR-4). LAZARET_GUARD_HOLD_MB sets it; an archive larger than it is held alone.
 HOLD_MB = 512
+#: The longest one download may take, whatever each read's timeout: a server that sends a byte now and then keeps every
+#: read under the timeout and the download going for ever (the Go/Rust review's CG-9, the backlog's GR-3).
+#: LAZARET_GUARD_DOWNLOAD_SECONDS sets it.
+DOWNLOAD_DEADLINE = 15 * 60
+
+
+def download_deadline():
+    text = os.environ.get("LAZARET_GUARD_DOWNLOAD_SECONDS", "")
+    return int(text) if text.isdigit() and int(text) > 0 else DOWNLOAD_DEADLINE
 UNDECLARED_HOLD = 32 * 1024 * 1024           # what a file whose index declares no size counts as
 
 
@@ -4159,6 +4175,11 @@ def cargo_toolchain(args):
     return ([args[0]], list(args[1:])) if args and args[0].startswith("+") else ([], list(args))
 
 
+def cargo_unstable(flags):
+    """The `-Z` flags of the user's command, for the guard's own runs of cargo, so that they resolve as it will (GR-3)."""
+    return [x for flag in flags for x in ("-Z", flag)]
+
+
 def cargo_plan_config(ctx):
     """The `--config` options of the cargo commands the guard runs: CARGO_PLAN_CONFIG under --plan, else none."""
     return list(CARGO_PLAN_CONFIG) if ctx.opts.plan else []
@@ -4280,12 +4301,15 @@ def unchecked(ctx, check, reason):
     ctx.apply(check, {"verdict": "INCOMPLETE", "reason": reason, "indicators": []})
 
 
-def check_cargo_packages(ctx, packages, registry, home, offline, label, skip=(), keep=None):
+def check_cargo_packages(ctx, packages, registry, home, offline, label, skip=(), keep=None, known=frozenset()):
     """Check the registry crates among `packages` (cargosrc.Package), those cargo has unpacked already included: cargo builds
     an unpacked crate without fetching it again, and another tool (an editor, `cargo tree`, `cargo metadata`) may have unpacked
     it (a verdict the cache holds for its checksum is not scanned again). Those in `skip` (name-version) are left out. A crate
-    from git or another source the guard does not read is INCOMPLETE, not checked. -> the names (`name-version`) of every
-    crate the lock lists that cargo may unpack."""
+    from git or another source the guard does not read is INCOMPLETE, not checked, and so is one from a plain-http registry
+    on another machine that the lockfile names and cargo's settings do not (`known`: cargosrc.configured_indexes): a lockfile
+    is the project's, and the guard does not follow one to plain http (GR-3), as its fetcher takes plain http only to this
+    machine or to a registry the settings name. -> the names (`name-version`) of every crate the lock lists that cargo may
+    unpack."""
     listed, todo = set(), {}
     for pkg in packages:
         src = cargosrc.classify(pkg.source)
@@ -4305,6 +4329,12 @@ def check_cargo_packages(ctx, packages, registry, home, offline, label, skip=(),
             listed.add(dirname)
             continue
         listed.add(dirname)
+        if src.kind == "sparse" and src.url.startswith("http://") and src.url not in known \
+                and not _is_loopback(urllib.parse.urlsplit(src.url).hostname):
+            unchecked(ctx, ctx.add(Check("crates", pkg.name, pkg.version, "http")),
+                      f"from a plain-http registry ({pmsettings.shown(src.url)}) that the lockfile names and cargo's "
+                      "settings do not: not checked")
+            continue
         if src.kind == "crates-io" and registry.kind != "sparse":
             unchecked(ctx, ctx.add(Check("crates", pkg.name, pkg.version, registry.kind)),
                       f"cargo reads crates.io from a {registry.kind.replace('-', ' ')} source "
@@ -4369,7 +4399,8 @@ def guard_cargo(ctx, args):
     cwd = os.getcwd()
     project = cargosrc.parse_project(rest[1:])
     root, members = cargo_workspace(exe, tc, env, cwd, project.manifest_path)
-    lock_path = os.path.join(root, "Cargo.lock")
+    # (nightly's --lockfile-path: the lock cargo reads and writes instead of Cargo.lock, so the one checked and put back)
+    lock_path = os.path.join(cwd, project.lockfile_path) if project.lockfile_path else os.path.join(root, "Cargo.lock")
     snap = Snapshot([lock_path, os.path.join(root, "Cargo.toml"), *members])
     home = cargosrc.cargo_home(env)
     conf = cargosrc.config(cwd, env, project.configs)
@@ -4385,8 +4416,9 @@ def guard_cargo(ctx, args):
             if proc.returncode != 0:
                 return finish(ctx, installed=False, restored=snap.restore(), code=proc.returncode)
         elif not project.locked:
-            resolve = [exe, *tc, "update", *cargo_plan_config(ctx), "--workspace"] \
-                + (["--manifest-path", project.manifest_path] if project.manifest_path else []) + (["--offline"] if project.offline else [])
+            resolve = [exe, *tc, "update", *cargo_plan_config(ctx), *cargo_unstable(project.unstable), "--workspace"] \
+                + (["--manifest-path", project.manifest_path] if project.manifest_path else []) + (["--offline"] if project.offline else []) \
+                + (["--lockfile-path", project.lockfile_path] if project.lockfile_path else [])
             proc = run_tool(resolve, env, cwd=cwd, capture=True)
             if proc.returncode != 0:
                 show_failure(ctx, f"resolving (cargo {sub})", proc)
@@ -4397,8 +4429,9 @@ def guard_cargo(ctx, args):
             fetched = [p for p in after if (p.name, p.version, p.source, p.checksum) not in was]
             label = "what the command added to Cargo.lock"
         else:
-            fetched, label = after, "Cargo.lock"
-        listed = check_cargo_packages(ctx, fetched, registry, home, project.offline, label)
+            fetched, label = after, os.path.basename(lock_path)
+        listed = check_cargo_packages(ctx, fetched, registry, home, project.offline, label,
+                                      known=cargosrc.configured_indexes(conf, env))
         if sub not in CARGO_RESOLVES:
             listed |= {f"{p.name}-{p.version}" for p in after if cargosrc.classify(p.source).kind != "path"}
         blocked = bool(ctx.blocked())
@@ -4417,7 +4450,7 @@ def guard_cargo(ctx, args):
         raise
 
 
-def cargo_scratch_lock(ctx, exe, tc, env, scratch, name, req, offline, cwd):
+def cargo_scratch_lock(ctx, exe, tc, env, scratch, name, req, offline, cwd, unstable=()):
     """The lock cargo makes for a project that needs crate `name` at `req` (None: the newest) and nothing else, which is the
     resolution `cargo install` makes for it: -> [cargosrc.Package], or None when cargo could not resolve it. The project is
     its own workspace (`[workspace]`: no Cargo.toml above it joins it), and cargo runs from `cwd`, the user's folder, so its
@@ -4428,8 +4461,8 @@ def cargo_scratch_lock(ctx, exe, tc, env, scratch, name, req, offline, cwd):
                 f'[dependencies]\n{name} = {json.dumps(req or "*")}\n')
     with open(os.path.join(scratch, "src", "lib.rs"), "w", encoding="utf-8") as f:
         f.write("")
-    argv = [exe, *tc, "generate-lockfile", *cargo_plan_config(ctx), "--manifest-path", os.path.join(scratch, "Cargo.toml")] \
-        + (["--offline"] if offline else [])
+    argv = [exe, *tc, "generate-lockfile", *cargo_plan_config(ctx), *cargo_unstable(unstable), "--manifest-path",
+            os.path.join(scratch, "Cargo.toml")] + (["--offline"] if offline else [])
     proc = run_tool(argv, env, cwd=cwd, capture=True)
     if proc.returncode != 0:
         show_failure(ctx, f"resolving (cargo install {name})", proc)
@@ -4469,7 +4502,8 @@ def guard_cargo_install(ctx, tc, rest):
     try:
         for k, (name, req) in enumerate(want.crates):
             here = os.path.join(scratch, str(k))
-            packages = cargo_scratch_lock(ctx, exe, tc, env, os.path.join(here, "dependent"), name, req, want.offline, cwd)
+            packages = cargo_scratch_lock(ctx, exe, tc, env, os.path.join(here, "dependent"), name, req, want.offline, cwd,
+                                          want.unstable)
             if packages is None:
                 return finish(ctx, installed=False, code=EXIT_RESOLVE)
             root = _install_root(packages, name)
@@ -4486,7 +4520,8 @@ def guard_cargo_install(ctx, tc, rest):
             if data is not None and want.locked:
                 built = _published_lock(ctx, data, root)
             if data is not None and built is None and not ctx.blocked():
-                built = cargo_crate_lock(ctx, exe, tc, env, os.path.join(here, "crate"), data, root, want.offline, cwd)
+                built = cargo_crate_lock(ctx, exe, tc, env, os.path.join(here, "crate"), data, root, want.offline, cwd,
+                                         want.unstable)
                 if built is None:
                     return finish(ctx, installed=False, code=EXIT_RESOLVE)
             if built is None:                       # (its bytes are not to be had: the crates a dependent of it resolves)
@@ -4503,7 +4538,7 @@ def guard_cargo_install(ctx, tc, rest):
     return finish(ctx, installed=proc.returncode == 0, code=proc.returncode)
 
 
-def cargo_crate_lock(ctx, exe, tc, env, folder, data, root, offline, cwd):
+def cargo_crate_lock(ctx, exe, tc, env, folder, data, root, offline, cwd, unstable=()):
     """The lock `cargo install` makes for crate `root`: the crate's files (its bytes as the guard checked them) as the root of
     a workspace of its own, resolved with every feature of it on, as cargo resolves an installed crate's lock, the Cargo.lock it
     was published with left out (cargo install reads it only with --locked). cargo runs from `cwd`, the user's folder, and
@@ -4531,7 +4566,8 @@ def cargo_crate_lock(ctx, exe, tc, env, folder, data, root, offline, cwd):
     if not own_workspace:
         with open(manifest, "a", encoding="utf-8") as f:
             f.write("\n[workspace]\n")
-    argv = [exe, *tc, "generate-lockfile", *cargo_plan_config(ctx), "--manifest-path", manifest] + (["--offline"] if offline else [])
+    argv = [exe, *tc, "generate-lockfile", *cargo_plan_config(ctx), *cargo_unstable(unstable), "--manifest-path", manifest] \
+        + (["--offline"] if offline else [])
     proc = run_tool(argv, env, cwd=cwd, capture=True)
     if proc.returncode != 0:
         show_failure(ctx, f"resolving (cargo install {root.name}, the crate's own lock)", proc)

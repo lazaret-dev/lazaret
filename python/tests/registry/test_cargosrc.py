@@ -386,21 +386,45 @@ class InstallArgumentTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             cargosrc.parse_install(["a@^" + "1" * 100])
 
+    def test_unstable_flags_are_kept_and_another_lockfile_is_refused(self):
+        self.assertEqual(cargosrc.parse_install(["-Z", "build-std", "-Zx", "ripgrep"]).unstable, ("build-std", "x"))
+        self.assertEqual(cargosrc.parse_install(["ripgrep"]).unstable, ())
+        with self.assertRaisesRegex(ValueError, "--lockfile-path is not one the guard reads"):
+            cargosrc.parse_install(["--lockfile-path", "x.lock", "ripgrep"])
+
 
 class ProjectArgumentTests(unittest.TestCase):
     def test_the_options_that_matter(self):
-        self.assertEqual(cargosrc.parse_project(["--release"]), (None, False, False, []))
-        self.assertEqual(cargosrc.parse_project(["--manifest-path", "x/Cargo.toml", "--locked"]), ("x/Cargo.toml", True, False, []))
-        self.assertEqual(cargosrc.parse_project(["--manifest-path=y/Cargo.toml", "--offline"]), ("y/Cargo.toml", False, True, []))
-        self.assertEqual(cargosrc.parse_project(["--frozen"]), (None, True, True, []))
-        self.assertEqual(cargosrc.parse_project(["--config", "a=1", "--config=b.toml"]), (None, False, False, ["a=1", "b.toml"]))
+        self.assertEqual(cargosrc.parse_project(["--release"]), (None, False, False, [], (), None))
+        self.assertEqual(cargosrc.parse_project(["--manifest-path", "x/Cargo.toml", "--locked"]), ("x/Cargo.toml", True, False, [], (), None))
+        self.assertEqual(cargosrc.parse_project(["--manifest-path=y/Cargo.toml", "--offline"]), ("y/Cargo.toml", False, True, [], (), None))
+        self.assertEqual(cargosrc.parse_project(["--frozen"]), (None, True, True, [], (), None))
+        self.assertEqual(cargosrc.parse_project(["--config", "a=1", "--config=b.toml"]), (None, False, False, ["a=1", "b.toml"], (), None))
+
+    def test_unstable_flags_and_another_lockfile(self):
+        # (the guard's own runs of cargo take the -Z flags, and the lock it checks is the one --lockfile-path names: GR-3)
+        got = cargosrc.parse_project(["-Z", "unstable-options", "--lockfile-path", "other.lock", "-Zminimal-versions"])
+        self.assertEqual((got.unstable, got.lockfile_path), (("unstable-options", "minimal-versions"), "other.lock"))
+        self.assertEqual(cargosrc.parse_project(["--lockfile-path=x/y.lock"]).lockfile_path, "x/y.lock")
 
     def test_what_comes_after_two_dashes_is_the_programs(self):
-        self.assertEqual(cargosrc.parse_project(["--locked", "--", "--offline", "--manifest-path", "z", "--config", "x"]),
-                         (None, True, False, []))
+        self.assertEqual(cargosrc.parse_project(["--locked", "--", "--offline", "--manifest-path", "z", "--config", "x", "-Zx",
+                                                 "--lockfile-path", "l"]),
+                         (None, True, False, [], (), None))
 
     def test_a_manifest_path_with_no_value_is_none(self):
-        self.assertEqual(cargosrc.parse_project(["--manifest-path"]), (None, False, False, []))
+        self.assertEqual(cargosrc.parse_project(["--manifest-path"]), (None, False, False, [], (), None))
+        self.assertEqual(cargosrc.parse_project(["-Z"]).unstable, ())
+
+
+class ConfiguredIndexTests(unittest.TestCase):
+    def test_the_http_indexes_cargos_settings_name(self):
+        conf = {"registries": {"a": {"index": "sparse+http://192.0.2.1/index"}, "g": {"index": "https://192.0.2.9/git-index"}},
+                "source": {"m": {"registry": "sparse+https://mirror.invalid/"}, "v": {"directory": "vendor"}}}
+        env = {"CARGO_REGISTRIES_X_INDEX": "sparse+http://198.51.100.2/i/", "OTHER": "sparse+http://203.0.113.1/"}
+        self.assertEqual(cargosrc.configured_indexes(conf, env),
+                         {"http://192.0.2.1/index/", "https://mirror.invalid/", "http://198.51.100.2/i/"})
+        self.assertEqual(cargosrc.configured_indexes({}), set())
 
 
 class CargoFolderTests(TmpCase):

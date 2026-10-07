@@ -6,6 +6,7 @@ import hashlib
 import os
 import shutil
 import tempfile
+import time
 import unittest
 import urllib.error
 from unittest import mock
@@ -66,6 +67,15 @@ class GuardNativeFetchTests(unittest.TestCase):
                 f.fetch_to_file(self.url("/size/300001"), path, 300_000)
         with self.assertRaises(guard.TooLarge):
             f.fetch(self.url("/size/5001"), max_bytes=5000)
+
+    def test_a_download_that_drips_past_the_deadline_stops(self):
+        # (the native transport's total timeout is the guard's download deadline: GR-3)
+        f = self.fetcher()
+        with self.no_urllib(f), mock.patch.dict(os.environ, {"LAZARET_GUARD_DOWNLOAD_SECONDS": "1"}):
+            started = time.monotonic()
+            with self.assertRaises(repo.FetchError):
+                f.get(self.url("/drip"), timeout=5)
+            self.assertLess(time.monotonic() - started, 3.5)
 
     def test_the_fetchers_hosts_hold_on_a_redirect(self):
         f = self.fetcher()

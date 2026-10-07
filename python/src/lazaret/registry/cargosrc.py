@@ -5,11 +5,12 @@ one is fetched.
     sources(cwd, env)            the `[source.*]` tables -> {name: {key: value}}
     registry_of(sources, ...)    where crates.io is read from once source replacement is applied -> Registry
     classify(source)             a Cargo.lock `source` -> Source(kind, url): path, git, crates-io, sparse, git-index, other
+    configured_indexes(conf)     the HTTP indexes cargo's settings name
     parse_lock(text)             Cargo.lock -> [Package(name, version, source, checksum)]
     index_url(base, name)        where the sparse index keeps a crate's file
     download_url(dl, ...)        a crate's `.crate` from the registry's config.json `dl`
     index_record(text, version)  one version's line of an index file -> {cksum, yanked, pubtime}
-    parse_install(args)          `cargo install` arguments -> Install(crates, locked, offline, at, versions, configs)
+    parse_install(args)          `cargo install` arguments -> Install(crates, locked, offline, at, versions, configs, unstable)
     pinned_install(args, ...)    those arguments with each crate pinned to the version checked
     parse_project(args)          the options of any other command that matter -> Project
     crate_dirs(home)             the crates cargo has unpacked; cached_crate(...) a `.crate` it holds
@@ -30,6 +31,7 @@ from lazaret.scanner import sca
 
 __all__ = ["Registry", "Source", "Package", "Install", "Project", "config", "sources", "registry_of", "classify", "parse_lock", "crate_ok",
            "index_url", "download_url", "index_record", "parse_install", "pinned_install", "parse_project", "cargo_home", "crate_dirs",
+           "configured_indexes",
            "cached_crate", "MAX_LOCK_BYTES", "MAX_PACKAGES", "MAX_CONFIG_BYTES", "DEFAULT_INDEX"]
 
 DEFAULT_INDEX = "https://index.crates.io/"
@@ -47,8 +49,9 @@ _METADATA_KEY = re.compile(r"checksum (\S+) (\S+) \((.+)\)")
 Registry = collections.namedtuple("Registry", "kind url")
 Source = collections.namedtuple("Source", "kind url")
 Package = collections.namedtuple("Package", "name version source checksum")
-Install = collections.namedtuple("Install", "crates locked offline at versions configs")
-Project = collections.namedtuple("Project", "manifest_path locked offline configs")
+Install = collections.namedtuple("Install", "crates locked offline at versions configs unstable", defaults=((),))
+Project = collections.namedtuple("Project", "manifest_path locked offline configs unstable lockfile_path",
+                                 defaults=((), None))
 
 
 def cargo_home(env):
@@ -186,6 +189,21 @@ def registry_of(table, registries=None, env=None):
     return Registry("unknown", name)
 
 
+def configured_indexes(conf, env=None):
+    """The HTTP indexes cargo's settings name (`[registries.<name>] index`, `[source.<name>] registry`,
+    CARGO_REGISTRIES_<NAME>_INDEX), each as `classify` gives a sparse source's URL: what a plain-http registry in a lockfile
+    must be among for the guard to fetch from it (GR-3)."""
+    found = set()
+    urls = [keys.get("index") for keys in (conf.get("registries") or {}).values() if isinstance(keys, dict)]
+    urls += [keys.get("registry") for keys in (conf.get("source") or {}).values() if isinstance(keys, dict)]
+    urls += [v for k, v in (env or {}).items() if k.startswith("CARGO_REGISTRIES_") and k.endswith("_INDEX")]
+    for url in urls:
+        if isinstance(url, str) and url.startswith("sparse+"):
+            url = url[len("sparse+"):]
+            found.add(url if url.endswith("/") else url + "/")
+    return found
+
+
 def classify(source):
     """A Cargo.lock `source` -> Source(kind, url): "path" (none: the project's own or a workspace member), "git", "crates-io",
     "sparse" (another registry with an HTTP index; url is its index), "git-index" (another registry, a git index), "other"."""
@@ -317,13 +335,14 @@ def _requirement(text):
 
 
 def parse_install(args):
-    """The arguments of `cargo install` (after the word install) -> Install(crates, locked, offline, at, versions, configs).
-    crates: [(name, requirement or None)], each as `name`, `name@version` or with `--version` (`--vers`); at: where each crate
-    is in `args`; versions: where a `--version` option and its value are; configs: the `--config` values. An argument after
+    """The arguments of `cargo install` (after the word install) -> Install(crates, locked, offline, at, versions, configs,
+    unstable). crates: [(name, requirement or None)], each as `name`, `name@version` or with `--version` (`--vers`); at: where
+    each crate is in `args`; versions: where a `--version` option and its value are; configs: the `--config` values; unstable:
+    the `-Z` flags, which the guard's own runs of cargo take too (`--lockfile-path` is refused). An argument after
     `--` is a crate. ValueError, with the reason, for what the guard does not read: a git repository, a folder, another
     registry, an option it does not know (it could not tell what follows it), no crate named, or an argument that cannot be
     read."""
-    found, at, versions, configs, version, locked, offline = [], [], [], [], None, False, False
+    found, at, versions, configs, version, locked, offline, unstable = [], [], [], [], None, False, False, []
     k = 0
     rest_are_crates = False
     while k < len(args):
@@ -355,6 +374,11 @@ def parse_install(args):
                 versions += list(range(start, k))
             elif flag == "--config":
                 configs.append(value)
+            elif flag == "-Z":
+                unstable.append(value)
+            elif flag == "--lockfile-path":
+                raise ValueError("cargo install --lockfile-path is not one the guard reads: it checks the lock the crate was "
+                                 "published with, and cargo would build from another")
             continue
         if arg in _INSTALL_FLAGS or flag == "--timings" or _VERBOSE.fullmatch(arg):
             if arg in ("--locked", "--frozen"):
@@ -378,7 +402,7 @@ def parse_install(args):
         out.append((name, _requirement(req) if req is not None else None))
         if not crate_ok(name, "0.0.0"):
             raise ValueError(f"{spec[:60]!r} is not a crate name")
-    return Install(out, locked, offline, at, versions, configs)
+    return Install(out, locked, offline, at, versions, configs, tuple(unstable))
 
 
 def pinned_install(args, want, versions):
@@ -394,17 +418,24 @@ def pinned_install(args, want, versions):
 
 def parse_project(args):
     """The options of a cargo command that the guard needs (up to `--`, after which come the program's own) ->
-    Project(manifest_path or None, locked, offline, configs); `--frozen` is both; configs: the `--config` values."""
-    manifest, locked, offline, configs = None, False, False, []
+    Project(manifest_path or None, locked, offline, configs, unstable, lockfile_path or None); `--frozen` is both;
+    configs: the `--config` values; unstable: the `-Z` flags (`-Z name` or `-Zname`), which the guard's own runs of cargo
+    take too; lockfile_path: `--lockfile-path` (nightly's `-Z unstable-options`), the lock cargo reads instead of
+    Cargo.lock."""
+    manifest, locked, offline, configs, unstable, lockfile = None, False, False, [], [], None
     k = 0
     while k < len(args):
         arg = args[k]
         k += 1
         if arg == "--":
             break
-        if arg in ("--manifest-path", "--config") and k < len(args):
+        if arg in ("--manifest-path", "--config", "--lockfile-path", "-Z") and k < len(args):
             if arg == "--config":
                 configs.append(args[k])
+            elif arg == "--lockfile-path":
+                lockfile = args[k]
+            elif arg == "-Z":
+                unstable.append(args[k])
             else:
                 manifest = args[k]
             k += 1
@@ -412,13 +443,17 @@ def parse_project(args):
             manifest = arg[len("--manifest-path="):]
         elif arg.startswith("--config="):
             configs.append(arg[len("--config="):])
+        elif arg.startswith("--lockfile-path="):
+            lockfile = arg[len("--lockfile-path="):]
+        elif arg.startswith("-Z") and len(arg) > 2:
+            unstable.append(arg[2:])
         elif arg == "--locked":
             locked = True
         elif arg == "--offline":
             offline = True
         elif arg == "--frozen":
             locked = offline = True
-    return Project(manifest, locked, offline, configs)
+    return Project(manifest, locked, offline, configs, tuple(unstable), lockfile)
 
 
 def crate_dirs(home):
