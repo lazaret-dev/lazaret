@@ -15,6 +15,7 @@ executed; failures are `SpecError`, `FetchError`, `DigestError` or `ValueError`.
 Standard library, and `scanner.core` for the bounded JSON reader. No import of `repo.py`."""
 
 import collections
+import datetime
 import http.client
 import json
 import posixpath
@@ -68,6 +69,28 @@ def show(value, limit=120):
         cut = cut[:len(cut) * (limit + 2) // len(shown)]                  # (always shorter: len(shown) > limit + 2)
         shown = repr(cut)
     return shown + ("…" if len(text) > len(cut) else "")
+
+
+_FRACTION_RE = re.compile(r"^(.*T\d\d:\d\d:\d\d)\.(\d+)(.*)$")
+
+
+def parse_time(text):
+    """An aware datetime (UTC when the text names no zone) from a registry's ISO 8601 time ('2026-06-17T02:06:22.156Z',
+    '2026-03-16T19:14:43.319347Z', Java's 3, 6 or 9 fraction digits), else None. (Python 3.10 reads 3 or 6 digits
+    only: the fraction is cut or padded to 6.)"""
+    if not isinstance(text, str) or not text.strip() or len(text) > 64:
+        return None
+    t = text.strip()
+    if t.endswith(("Z", "z")):
+        t = t[:-1] + "+00:00"
+    m = _FRACTION_RE.match(t)
+    if m:
+        t = f"{m.group(1)}.{(m.group(2) + '000000')[:6]}{m.group(3)}"
+    try:
+        dt = datetime.datetime.fromisoformat(t)
+    except ValueError:
+        return None
+    return dt if dt.tzinfo else dt.replace(tzinfo=datetime.timezone.utc)
 
 
 def ascii_name(value, what, allowed, limit, eco=""):

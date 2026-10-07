@@ -41,6 +41,8 @@ TARGET_PLATFORMS = frozenset(("universal", "web", "win32-x64", "win32-arm64", "w
 MAX_PLATFORMS = 32                       # the files of one version that are scanned or listed
 MAX_LISTED = 500                         # the extensions it needs, the members of its pack
 MAX_DIGEST_BYTES = 1024                  # a `.sha256` file is 64 hex digits
+HISTORY_PAGE = 1000                      # the query API's largest page
+MAX_HISTORY = 5000                       # the versions' entries (each per platform) a history reads
 
 _PART_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9-]*")
 _NAME_CHAR = re.compile(r"[A-Za-z0-9.-]")
@@ -182,6 +184,83 @@ class OpenVSX(base.Ecosystem):
         if not isinstance(info, dict):
             return None
         return tuple(sorted(set(info.get("dependencies") or ()) | set(info.get("bundledExtensions") or ())))
+
+    # ---- the history (SC-NEW-DEPENDENCY, E-1's third part)
+    def _query(self, name, fetch, offset, size):
+        """One page of the query API's answer for every version of `name` (one entry per version and platform):
+        (the entries, how many there are in all). FetchError for an answer of another shape."""
+        ns, ext = self.check_name(name).split(".")
+        url = (f"{API}/-/query?extensionId={self.segment(ns)}.{self.segment(ext)}&includeAllVersions=true"
+               f"&size={size}&offset={offset}")
+        doc = fetch.json(url, accept="application/json")
+        entries = doc.get("extensions") if isinstance(doc, dict) else None
+        total = doc.get("totalSize") if isinstance(doc, dict) else None
+        if not isinstance(entries, list) or not isinstance(total, int) or isinstance(total, bool) or total < 0:
+            raise base.FetchError("openvsx: the registry's answer to a query is not a list of versions")
+        mine = []
+        for e in entries[:size]:
+            if isinstance(e, dict) and isinstance(e.get("namespace"), str) and isinstance(e.get("name"), str) \
+                    and f"{e['namespace']}.{e['name']}".lower() == name.lower():
+                mine.append(e)
+        return mine, total
+
+    def _entry(self, e):
+        """A query entry as the history keeps it: (version, when it was published (an aware datetime), the extensions
+        it brings, a pre-release?, who published it), None for one without a version or a time."""
+        version, when = e.get("version"), base.parse_time(e.get("timestamp"))
+        try:
+            version = self.check_version(version) if isinstance(version, str) else None
+        except base.SpecError:
+            version = None
+        if version is None or when is None:
+            return None
+        brings = set()
+        for key in ("dependencies", "bundledExtensions"):
+            value = e.get(key)
+            brings.update(i for i in ((self._id(v) for v in value[:MAX_LISTED]) if isinstance(value, list) else ()) if i)
+        by = e.get("publishedBy") if isinstance(e.get("publishedBy"), dict) else {}
+        return version, when, brings, e.get("preRelease") is True, _text(by.get("loginName"), 100)
+
+    def history(self, name, fetch):
+        """Every version of `name` the registry lists, newest first as it answers: [(version, when it was published,
+        the extensions it brings, a pre-release?, who published it)], one per version (a version's platforms together: the earliest
+        time, the extensions any of them brings). At most MAX_HISTORY entries are read."""
+        out, seen, offset = [], {}, 0
+        while offset < MAX_HISTORY:
+            entries, total = self._query(name, fetch, offset, HISTORY_PAGE)
+            for e in entries:
+                kept = self._entry(e)
+                if kept is None:
+                    continue
+                version, when, brings, pre, by = kept
+                if version in seen:
+                    old = out[seen[version]]
+                    out[seen[version]] = (version, min(old[1], when), old[2] | brings, old[3] or pre, old[4] or by)
+                else:
+                    seen[version] = len(out)
+                    out.append(kept)
+            offset += HISTORY_PAGE
+            if offset >= total or not entries:
+                break
+        return out
+
+    def first_published(self, name, fetch, old_enough=None):
+        """(when the earliest version the registry lists was published, an aware datetime, who published the versions
+        read) of `name`; (None, ()) when it lists none. The query's last page is read first (the oldest, as the
+        registry answers newest first). Any version is no older than the first, so when `old_enough` (a test of a
+        datetime) says that page's earliest is old enough, that is the answer; else every page is read (at most
+        MAX_HISTORY entries), so that an order of the registry's own cannot hide an older version."""
+        _first, total = self._query(name, fetch, 0, 1)
+        if total == 0:
+            return None, ()
+        start = max(0, total - HISTORY_PAGE)
+        entries, _total = self._query(name, fetch, start, HISTORY_PAGE)
+        kept = [k for k in (self._entry(e) for e in entries) if k is not None]
+        times = sorted(k[1] for k in kept)
+        if start > 0 and not (times and old_enough is not None and old_enough(times[0])):
+            kept = self.history(name, fetch)
+            times = sorted(k[1] for k in kept)
+        return (times[0] if times else None), tuple(sorted({k[4] for k in kept if k[4]}))
 
     # ---- archives
     def container(self, filename):

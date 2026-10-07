@@ -3577,10 +3577,21 @@ class _ArtifactScan:
         (0.1.9, N-3): the module line of the module's go.mod and the paths
         it requires; a crate (N-3's second part): its Cargo.toml's name and
         the crates it depends on to build (not [dev-dependencies]; a renamed
-        one by the name crates.io knows it by). Not a VS Code extension's yet:
-        its names are `publisher.name` (E-1's third part), and the npm
-        packages it bundles are not installed from npm."""
-        if self.artifact in ("vsix", "action"):
+        one by the name crates.io knows it by). A VS Code extension (E-1's
+        third part): its package.json's publisher.name and the extensions it
+        brings (extensionDependencies, extensionPack), against the
+        most-installed extensions (lookalike.vscode_lookalike); the npm
+        packages it bundles are not installed from npm, so not compared."""
+        if self.artifact == "action":
+            return
+        if self.artifact == "vsix":
+            ident = self.vsix_identity or {}
+            publisher, name = ident.get("publisher"), ident.get("name")
+            own = f"{publisher}.{name}" if publisher and name and VSCODE_ID_RE.fullmatch(f"{publisher}.{name}") \
+                else None
+            if own or self.extension_dependencies:
+                self.issues.extend(_lookalike.issues("vscode", own, self.extension_dependencies, "package.json",
+                                                     self.manifests.get("package.json") or ""))
             return
         if self.artifact == "gomod":
             for rel, text, parsed in self._go_mods():
@@ -3930,7 +3941,13 @@ def _always_redacted(fn):
 # its `pubtime`, and a crate's first line is when it was published), its
 # normal and build dependencies only (a dev dependency is never built for a
 # user); a crate an owner of the release's crate also owns (crates.io's API,
-# one request a second) is not counted. Best effort: a document over the
+# one request a second) is not counted. A VS Code extension (E-1's third part,
+# openvsx: and vscode:) is compared with the version its registry published
+# before it, by the registry's history of its versions (Open VSX's query API,
+# the Marketplace's gallery query), on the extensions it brings
+# (extensionDependencies and extensionPack: GlassWorm's way in, 2026); one of
+# its own publisher, or on Open VSX one the account that published the release
+# published, is not counted. Best effort: a document over the
 # metadata budget (an established package's) or a registry that does not
 # answer is not a finding, and a release with no dependencies costs no
 # request. LAZARET_NO_DEPENDENCY_HISTORY=1 turns it off (an offline scan).
@@ -3943,13 +3960,9 @@ _PY_REQ_NAME_RE = re.compile(r"\s*([A-Za-z0-9][A-Za-z0-9._-]*)")
 
 
 def _iso_time(value):
-    """An aware datetime from registry time text ('2026-06-17T02:06:22.156Z'), else None."""
-    if not isinstance(value, str):
-        return None
-    try:
-        return _to_utc(datetime.datetime.fromisoformat(value.strip().replace("Z", "+00:00")))
-    except ValueError:
-        return None
+    """An aware datetime from registry time text ('2026-06-17T02:06:22.156Z'), else None (base.parse_time: any number
+    of fraction digits, on Python 3.10 too)."""
+    return _base.parse_time(value)
 
 
 def _npm_scope(name):
@@ -4216,12 +4229,87 @@ def crates_new_dependencies(name, version, resolved, fetch=None):
     return previous, found
 
 
-def new_dependency_issues(eco, name, version, resolved, unused=()):
+_EXTENSION_WHY = ("GlassWorm's operators (2026) updated benign-looking VS Code extensions to list a malicious one in their "
+                  "extensionPack or extensionDependencies: the editor installs a pack's members and an extension's "
+                  "dependencies with it, so the malicious one came in with them, and runs with the user's full access "
+                  "when it activates. A release rarely brings an extension that did not exist a week earlier, of "
+                  "another publisher.")
+
+
+def _new_extension_issue(dep, age, previous):
+    """SC-NEW-DEPENDENCY for a VS Code extension's release (E-1's third part): CRITICAL under NEW_DEP_CRITICAL, else
+    MAJOR."""
+    return lazaret.mk_issue(
+        {"id": "SC-NEW-DEPENDENCY", "name": "A release adds a brand-new dependency", "type": "HOTSPOT",
+         "sev": "CRITICAL" if age < NEW_DEP_CRITICAL else "MAJOR",
+         "msg": (f'Brings "{dep}" (its extensionDependencies or extensionPack), which {previous} did not: an '
+                 f'extension first published {_age_text(age)} before this release, by another publisher '
+                 f'("{dep.split(".", 1)[0]}").'),
+         "why": _EXTENSION_WHY,
+         "fix": f'Read "{dep}" before installing this release; keep the previous one ({previous}) until you have.',
+         "ref": "CWE-506 · Supply chain"},
+        "(release)", 1, [])
+
+
+def extension_new_dependencies(eco, name, version, resolved, brings, fetch=None):
+    """-> (previous version, [(extension, age)]) for the extensions a VS Code extension's release brings (`brings`:
+    its package.json's extensionDependencies and extensionPack) that the version the registry published before it
+    did not, first published less than NEW_DEP_RECENT before the release (E-1's third part). The previous version is
+    the one published last before this one (a release is compared with releases only, a pre-release with any); an
+    extension of the release's own publisher is not counted, nor, on Open VSX, one the account that published the
+    release published. At most NEW_DEP_LOOKUPS added ones are looked up. `resolved`: the module's Resolution."""
+    module = registry_module(eco)
+    fetch = fetch or module_fetch(module)
+    mine = {b.lower() for b in brings if isinstance(b, str)}
+    if not mine:
+        return None, []
+    info = getattr(resolved, "info", None)
+    info = info if isinstance(info, dict) else {}
+    history = module.history(name, fetch)
+    entry = next((h for h in history if h[0] == version), None)
+    when = entry[1] if entry else _iso_time(info.get("timestamp") or info.get("lastUpdated"))
+    if when is None:
+        return None, []
+    pre = entry[3] if entry else info.get("preRelease") is True
+    before = [h for h in history if h[0] != version and h[1] < when and (pre or not h[3])]
+    if not before:
+        return None, []
+    previous = max(before, key=lambda h: h[1])
+    own, account = name.lower().split(".", 1)[0], (entry[4] if entry else info.get("publishedBy"))
+    found, looked = [], 0
+    for dep in sorted(mine - previous[2]):
+        if dep.split(".", 1)[0] == own:
+            continue                     # (the release's own publisher's)
+        if looked >= NEW_DEP_LOOKUPS:
+            break
+        looked += 1
+        try:
+            first, by = module.first_published(dep, fetch, old_enough=lambda t: when - t >= NEW_DEP_RECENT)
+        except (FetchError, SpecError):
+            continue                     # unreachable, or not an extension the registry names
+        if first is None:
+            continue
+        age = max(when - first, datetime.timedelta(0))
+        if age >= NEW_DEP_RECENT or (account and account in by):
+            continue
+        found.append((dep, age))
+    return previous[0], found
+
+
+def new_dependency_issues(eco, name, version, resolved, unused=(), brings=()):
     """SC-NEW-DEPENDENCY findings for one release (best effort: [] when the
     registry can't say). unused: the registry names of the dependencies no
-    file of the release names (the artifact scan's unusedDependencies)."""
-    if os.environ.get("LAZARET_NO_DEPENDENCY_HISTORY") or eco not in ("npm", "pypi", "crates"):
+    file of the release names (the artifact scan's unusedDependencies).
+    brings: a VS Code extension's (openvsx, vscode) extensionDependencies
+    and extensionPack, as its package.json lists them."""
+    if os.environ.get("LAZARET_NO_DEPENDENCY_HISTORY") or eco not in ("npm", "pypi", "crates", "openvsx", "vscode"):
         return []
+    if eco in ("openvsx", "vscode"):
+        try:
+            previous, found = extension_new_dependencies(eco, name, version, resolved, brings)
+        except (FetchError, SpecError, ValueError):
+            return []
+        return [_new_extension_issue(dep, age, previous) for dep, age in found]
     try:
         if eco == "npm":
             previous, found = npm_new_dependencies(name, version, resolved[4])
@@ -4348,7 +4436,7 @@ def scan_package(eco, name, version=None, full=False, *, resolved=None, deadline
                     **{k: r[k] for k in ("verdict", "verdictReason", "filesScanned",
                                          "binaryArtifacts", "truncated",
                                          "strongIndicators", "weakIndicators", "useTime")}})
-    all_issues.extend(new_dependency_issues(eco, name, version, resolved, unused))
+    all_issues.extend(new_dependency_issues(eco, name, version, resolved, unused, brings))
     provenance_issues, provenance = _provenance.check_release(eco, name, version, resolved, attested, _provenance_fetch)
     all_issues.extend(provenance_issues)
     skip_issues, skip_label = _skipped_summary(skipped, byte_budget, limit)

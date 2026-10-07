@@ -30,6 +30,11 @@ Each list is read from a local copy (nothing is downloaded here):
         Given Ubuntu's source package indices too, the crates Debian
         packages (its rust-* source packages) are known names as well:
         real crates, vetted by Debian, that the check must not flag.
+  vscode  VS Code extensions' identifiers (publisher.name): the Visual
+        Studio Marketplace's gallery query sorted by installs and Open VSX's
+        search sorted by downloads, the pages scripts/fetch-top-extensions.py
+        saves (marketplace-0001.json, …, openvsx-0001.json, …). Identifiers
+        only, lower-cased.
 
 For npm, PyPI and crates the file keeps the TARGETS, the first 5,000 names by
 downloads, and the KNOWN names: those of the whole list (17,000-odd for npm,
@@ -40,10 +45,16 @@ crate names lower-cased with "_" as "-" (one crate to crates.io): the 20,000
 by recent downloads and the 20,000 by all downloads (all the API pages
 through) read, and Debian's.
 For Go every module of the two lists is a target, as lookalike.go_path()
-writes it (lower-cased, without a major version), sorted.
+writes it (lower-cased, without a major version), sorted. For VS Code the
+targets are the first VSCODE_TARGETS of each registry, taken in turn (the
+Marketplace's first, then Open VSX's, then the second of each, …); known
+names are the other identifiers of the pages one change from a target, and
+known publishers the other publishers of the pages that look like a
+target's publisher (lookalike.publisher_lookalike), never flagged.
 
 Usage: python3 scripts/update-popular-names.py [NPM_LIB_DIR TOP_PYPI_JSON]
-           [--crates PAGES_DIR [UBUNTU_SOURCES...]] [--go AWESOME_GO_README UBUNTU_SOURCES...] [--check]
+           [--crates PAGES_DIR [UBUNTU_SOURCES...]] [--vscode PAGES_DIR]
+           [--go AWESOME_GO_README UBUNTU_SOURCES...] [--check]
 A list not given is kept as it is in the file. An Ubuntu index may be
 xz-compressed. --check compares with the file in the tree instead of
 writing it (exit 1 on any difference). Standard library only.
@@ -62,6 +73,8 @@ from lazaret.scanner.core import configure_stdio  # noqa: E402
 
 OUT = ROOT / "python" / "src" / "lazaret" / "registry" / "popular_names.json"
 TARGETS = 5000
+#: the targets of VS Code extensions, from each registry
+VSCODE_TARGETS = 1000
 _JS_STRING_RE = re.compile(r"""^\s*'((?:[^'\\]|\\.)*)',?\s*$""", re.M)
 #: The indices the Go list was made from (the release pocket: they do not change).
 UBUNTU_SOURCES = ("Ubuntu 24.04 LTS (noble), http://archive.ubuntu.com/ubuntu/dists/noble/{main,universe}/source/"
@@ -106,8 +119,9 @@ def section(eco, ranked, everything):
 
 ABOUT = ("Names for the registry's look-alike check (SC-TYPOSQUAT, lazaret/registry/lookalike.py): the "
          f"{TARGETS:,} most-downloaded packages of npm, of PyPI and of crates.io (targets), and the other popular ones "
-         "that are one change from a target (known); the Go modules awesome-go lists and Debian packages (targets). "
-         "Written by scripts/update-popular-names.py.")
+         "that are one change from a target (known); the Go modules awesome-go lists and Debian packages (targets); "
+         "the most-installed VS Code extensions of the Visual Studio Marketplace and Open VSX (targets, known names "
+         "and known publishers). Written by scripts/update-popular-names.py.")
 
 
 def npm_pypi_sections(npm_lib, top_pypi):
@@ -269,7 +283,64 @@ def go_section(readme, sources):
         "targets": targets}}
 
 
-def build(current, npm_lib=None, top_pypi=None, go=None, crates=None):
+def _extension_ids(text, pages, registry, digest):
+    """The identifiers (publisher.name, lower-cased) of one registry's pages, in order."""
+    out = []
+    for page in pages:
+        raw = page.read_bytes()
+        digest.update(raw)
+        doc = json.loads(raw)
+        if registry == "marketplace":
+            results = doc.get("results") if isinstance(doc, dict) else None
+            exts = (results[0].get("extensions") or []) if isinstance(results, list) and results else []
+            pairs = ((e.get("publisher", {}).get("publisherName") if isinstance(e.get("publisher"), dict) else None,
+                      e.get("extensionName")) for e in exts if isinstance(e, dict))
+        else:
+            pairs = ((e.get("namespace"), e.get("name")) for e in (doc.get("extensions") or []) if isinstance(e, dict))
+        for publisher, name in pairs:
+            ident = f"{publisher}.{name}" if isinstance(publisher, str) and isinstance(name, str) else ""
+            if text.fullmatch(ident):
+                out.append(lookalike.normalize("vscode", ident))
+    return out
+
+
+def vscode_section(pages_dir):
+    """The VS Code extensions' list from fetch-top-extensions.py's pages: the first VSCODE_TARGETS of each registry
+    taken in turn (targets), the pages' other identifiers one change from a target (known), and their publishers
+    that look like a target's publisher (known publishers)."""
+    folder = pathlib.Path(pages_dir)
+    market = sorted(folder.glob("marketplace-*.json"), key=lambda p: p.as_posix())
+    openvsx = sorted(folder.glob("openvsx-*.json"), key=lambda p: p.as_posix())
+    if not market and not openvsx:
+        raise SystemExit(f"no marketplace-*.json or openvsx-*.json in {pages_dir}")
+    ident = re.compile(r"[A-Za-z0-9][A-Za-z0-9-]*\.[A-Za-z0-9][A-Za-z0-9-]*")
+    digest = hashlib.sha256()
+    m = unique(_extension_ids(ident, market, "marketplace", digest))
+    o = unique(_extension_ids(ident, openvsx, "openvsx", digest))
+    turns = []
+    for i in range(max(len(m), len(o))):
+        turns += [x[i] for x in (m[:VSCODE_TARGETS], o[:VSCODE_TARGETS]) if i < len(x)]
+    targets = unique(turns)
+    data = lookalike.vscode_tables(targets, ())
+    everything = set(m) | set(o)
+    known = sorted(n for n in everything - set(targets) if lookalike.lookalike("vscode", n, data) is not None)
+    publishers = {n.split(".", 1)[0] for n in everything} - set(data[3])
+    data = lookalike.vscode_tables(targets, known)
+    known_publishers = sorted(p for p in publishers if lookalike.publisher_lookalike(p, data) is not None)
+    return {"vscode": {
+        "source": (f"the Visual Studio Marketplace's gallery query, https://marketplace.visualstudio.com/_apis/public/"
+                   f"gallery/extensionquery (sorted by installs), {len(market)} pages of 100, and Open VSX's API, "
+                   f"https://open-vsx.org/api/-/search?sortBy=downloadCount, {len(openvsx)} pages of 100, saved by "
+                   f"scripts/fetch-top-extensions.py (sha256 {digest.hexdigest()[:16]}…)"),
+        "license": "extension identifiers, which are facts about the extensions; no text of the registries' answers "
+                   "is kept",
+        "changes": (f"identifiers only (publisher.name), lower-cased: the first {VSCODE_TARGETS:,} of each registry, "
+                    f"taken in turn, and those of the {len(everything):,} one change from one of them; the publishers "
+                    "of those that look like a target's publisher"),
+        "targets": targets, "known": known, "known_publishers": known_publishers}}
+
+
+def build(current, npm_lib=None, top_pypi=None, go=None, crates=None, vscode=None):
     """The file: `current` (the file's data) with the lists given rebuilt."""
     out = {"_about": ABOUT}
     if npm_lib is not None:
@@ -278,6 +349,7 @@ def build(current, npm_lib=None, top_pypi=None, go=None, crates=None):
         out.update({eco: current[eco] for eco in ("npm", "pypi")})
     out.update(crates_section(*crates) if crates is not None else {"crates": current["crates"]})
     out.update(go_section(*go) if go is not None else {"go": current["go"]})
+    out.update(vscode_section(vscode) if vscode is not None else {"vscode": current["vscode"]})
     return out
 
 
@@ -292,20 +364,27 @@ def main(argv):
             print(__doc__.split("\n\n")[-1].strip(), file=sys.stderr)
             return 2
         crates, args = (args[at + 1], args[at + 2:end]), args[:at] + args[end:]
+    vscode = None
+    if "--vscode" in args:
+        at = args.index("--vscode")
+        if at + 1 >= len(args) or args[at + 1].startswith("--"):
+            print(__doc__.split("\n\n")[-1].strip(), file=sys.stderr)
+            return 2
+        vscode, args = args[at + 1], args[:at] + args[at + 2:]
     go = None
     if "--go" in args:
         at = args.index("--go")
         args, files = args[:at], args[at + 1:]
         go = (files[0], files[1:]) if len(files) >= 2 else ()          # (the README, then the indices)
-    if len(args) not in ((0, 2) if go is not None or crates is not None else (2,)) or go == ():
+    if len(args) not in ((0, 2) if go is not None or crates is not None or vscode is not None else (2,)) or go == ():
         print(__doc__.split("\n\n")[-1].strip(), file=sys.stderr)
         return 2
     current = json.loads(OUT.read_text(encoding="utf-8")) if OUT.exists() else {}
     if ((not args and ("npm" not in current or "pypi" not in current)) or (go is None and "go" not in current)
-            or (crates is None and "crates" not in current)):
+            or (crates is None and "crates" not in current) or (vscode is None and "vscode" not in current)):
         print(f"{OUT.relative_to(ROOT)} has no list to keep: give every source", file=sys.stderr)
         return 2
-    text = json.dumps(build(current, *args, go=go, crates=crates), indent=1, ensure_ascii=False) + "\n"
+    text = json.dumps(build(current, *args, go=go, crates=crates, vscode=vscode), indent=1, ensure_ascii=False) + "\n"
     if "--check" in argv:
         now = OUT.read_text(encoding="utf-8") if OUT.exists() else ""
         if now != text:
@@ -318,7 +397,8 @@ def main(argv):
     print(f"wrote {OUT.relative_to(ROOT)}: npm {len(data['npm']['targets'])} targets, {len(data['npm']['known'])} "
           f"known; PyPI {len(data['pypi']['targets'])} targets, {len(data['pypi']['known'])} known; crates "
           f"{len(data['crates']['targets'])} targets, {len(data['crates']['known'])} known; Go "
-          f"{len(data['go']['targets'])} modules")
+          f"{len(data['go']['targets'])} modules; VS Code {len(data['vscode']['targets'])} targets, "
+          f"{len(data['vscode']['known'])} known, {len(data['vscode']['known_publishers'])} known publishers")
     return 0
 
 

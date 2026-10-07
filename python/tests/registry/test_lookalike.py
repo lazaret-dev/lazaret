@@ -19,7 +19,17 @@ another owner's module of the same name (a fork).
 depends on to build, one change from one of the 5,000 crates crates.io
 counts the most downloads of in 90 days, compared as crates.io names them
 (lower-cased, "_" as "-"). Not a [dev-dependencies] crate.
+
+0.1.9 (E-1's third part): a VS Code extension's identifier (publisher.name),
+or one it brings (extensionDependencies, extensionPack), one change from a
+most-installed extension's of another publisher (juanbIanco.solidity), or its
+publisher one change from such an extension's publisher, its separators aside
+(juan-bianco.solidity-vlang). Not a popular or known publisher's, not one of
+the bringing extension's own publisher, not a publisher of fewer than six
+letters and digits, not another publisher's extension of the same name (a fork).
 """
+import contextlib
+import io
 import json
 import lzma
 import os
@@ -370,6 +380,88 @@ class CratesLookalikeTests(unittest.TestCase):
         self.assertEqual(typos(scan_crate({"Cargo.toml": toml}, name="reqwest", version="0.12.9")), [])
 
 
+def scan_vsix(files):
+    from tests.registry.test_vsix import scan
+    return scan(files)
+
+
+class VscodeLookalikeTests(unittest.TestCase):
+    def test_identifiers_like_a_popular_extensions(self):
+        for name, want in (("juanbIanco.solidity", ("id", "juanblanco.solidity", "a character changed")),
+                           ("mspython.python", ("id", "ms-python.python", "its separators changed")),
+                           ("ms-pyhton.python", ("id", "ms-python.python", "two characters swapped")),
+                           ("esbenpp.prettier-vscode", ("id", "esbenp.prettier-vscode", "a character added")),
+                           ("DBaeumr.vscode-eslint", ("id", "dbaeumer.vscode-eslint", "a character dropped")),
+                           ("golamg.Go", ("id", "golang.go", "a character changed"))):
+            with self.subTest(name):
+                self.assertEqual(lookalike.vscode_lookalike(name), want)
+
+    def test_publishers_like_a_popular_publishers(self):
+        for name, target, theirs, how in (
+                ("juan-bianco.solidity-vlang", "juanblanco.solidity", "juanblanco",
+                 'is one change from "juanblanco" (a character changed, its separators aside)'),
+                ("eamodi0.git-helper", "eamodio.gitlens", "eamodio", 'is one change from "eamodio" (a character changed)'),
+                ("ms-vscodes.anything", "ms-vscode.js-debug", "ms-vscode", 'is one change from "ms-vscode" (a character added)'),
+                ("ms_python.helper", "ms-python.debugpy", "ms-python", 'differs from "ms-python" only in its separators')):
+            with self.subTest(name):
+                self.assertEqual(lookalike.vscode_lookalike(name), ("publisher", target, theirs, how))
+
+    def test_not_a_lookalike(self):
+        for name in ("ms-python.python", "esbenp.prettier-vscode", "juanblanco.solidity",     # popular themselves
+                     "esbenp.prettier-vscod", "ms-python.pythn", "golang.goo",               # their own publisher's
+                     "solidityai.solidity", "prettier.prettier-vscode", "luma.jupyter",      # another's of that name
+                     "arn.foo", "kad.anything",                                             # a short publisher
+                     "example.other", "a.b", "a.b.c", "nodot", "", "x" * 300, None):
+            with self.subTest(name):
+                self.assertIsNone(lookalike.vscode_lookalike(name))
+        self.assertIsNone(lookalike.vscode_lookalike("juanbianco.other", own="juanbianco"), "the bringer's own")
+        self.assertIsNotNone(lookalike.vscode_lookalike("juanbianco.other", own="someone"))
+
+    def test_the_vscode_list(self):
+        with open(lookalike.__file__.replace("lookalike.py", "popular_names.json"), encoding="utf-8") as f:
+            sec = json.load(f)["vscode"]
+        self.assertEqual(len(sec["targets"]), 1000)
+        self.assertEqual(len(set(sec["targets"])), 1000)
+        self.assertTrue(all(repo.VSCODE_ID_RE.fullmatch(t) and t == t.lower() for t in sec["targets"] + sec["known"]))
+        self.assertEqual(sec["targets"][:3], ["meta.pyrefly", "ms-python.debugpy", "ms-python.python"])
+        self.assertIn("juanblanco.solidity", sec["targets"])
+        self.assertEqual((sec["known"], sec["known_publishers"]), (sorted(sec["known"]), sorted(sec["known_publishers"])))
+        self.assertIn("Open VSX", sec["source"])
+        self.assertTrue(sec["license"])
+        # no target looks like another of another publisher: the list holds no clone it would then wave through
+        data = lookalike.vscode_tables(sec["targets"], ())
+        for t in sec["targets"]:
+            others = lookalike.vscode_tables([x for x in sec["targets"] if x != t], ())
+            self.assertIsNone(lookalike.lookalike("vscode", t, others), t)
+        self.assertEqual(len(data[0]), 1000)
+
+    def test_the_findings(self):
+        text = json.dumps({"name": "solidity", "publisher": "juanbIanco", "version": "0.0.8",
+                           "engines": {"vscode": "^1.90.0"},
+                           "extensionPack": ["esbenp.prettier-vscode", "Esbenpp.prettier-vscode", "juanbIanco.helper",
+                                             "juan-bianco.solidity-vlang"]}, indent=2)
+        res = scan_vsix({"package.json": text})
+        self.assertEqual(typos(res), [
+            ("package.json", 2, "MAJOR", 'The extension is "juanbIanco.solidity", one change from "juanblanco.solidity" '
+                                         '(a character changed), one of the 1,000 most-installed VS Code extensions.'),
+            ("package.json", 10, "MAJOR", 'Brings "esbenpp.prettier-vscode" (its extensionDependencies or extensionPack), '
+                                         'one change from "esbenp.prettier-vscode" (a character added), one of the 1,000 '
+                                         'most-installed VS Code extensions.'),
+            ("package.json", 12, "MAJOR", 'Brings "juan-bianco.solidity-vlang" (its extensionDependencies or '
+                                          'extensionPack): its publisher "juan-bianco" is one change from "juanblanco" '
+                                          '(a character changed, its separators aside), the publisher of '
+                                          '"juanblanco.solidity", one of the 1,000 most-installed VS Code extensions.')])
+        self.assertEqual(res["verdict"], "WARN")
+
+    def test_popular_extensions_stay_quiet(self):
+        text = json.dumps({"name": "vscode-java-pack", "publisher": "vscjava", "version": "0.29.0",
+                           "engines": {"vscode": "^1.90.0"},
+                           "extensionPack": ["redhat.java", "vscjava.vscode-java-debug", "vscjava.vscode-java-test",
+                                             "vscjava.vscode-maven", "vscjava.vscode-gradle",
+                                             "vscjava.vscode-java-dependency", "VisualStudioExptTeam.vscodeintellicode"]})
+        self.assertEqual(typos(scan_vsix({"package.json": text})), [])
+
+
 class PopularNamesScriptTests(unittest.TestCase):
     """scripts/update-popular-names.py's Go list, on small copies of its sources."""
 
@@ -421,6 +513,84 @@ class PopularNamesScriptTests(unittest.TestCase):
         self.assertEqual(without["known"], ["serde-jsom", "tokyo"])
         self.assertIn("2 and 1 pages", sec["source"])
         self.assertIn("rust-*", sec["source"])
+
+    def test_the_vscode_section(self):
+        def market(path, ids):
+            exts = [{"publisher": {"publisherName": i.partition(".")[0]}, "extensionName": i.partition(".")[2]}
+                    for i in ids]
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump({"results": [{"extensions": exts}]}, f)
+
+        def openvsx(path, ids):
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump({"offset": 0, "totalSize": len(ids), "extensions": [
+                    {"namespace": i.partition(".")[0], "name": i.partition(".")[2]} for i in ids]}, f)
+
+        with tempfile.TemporaryDirectory() as d:
+            market(os.path.join(d, "marketplace-0001.json"), ["MS-Python.python", "esbenp.prettier-vscode"])
+            market(os.path.join(d, "marketplace-0002.json"), ["redhat.java", "redhat.javaa", "not an id"])
+            openvsx(os.path.join(d, "openvsx-0001.json"), ["juanblanco.solidity", "ms-python.python", "redhatt.yaml",
+                                                           "juan-bianco.solidity-vlang"])
+            with unittest.mock.patch.object(self.script, "VSCODE_TARGETS", 2):
+                sec = self.script.vscode_section(d)["vscode"]
+            with self.assertRaises(SystemExit):
+                self.script.vscode_section(os.path.join(d, "empty"))
+        # the first two of each registry, taken in turn; known: the pages' others one change from a target; known
+        # publishers: the pages' others that look like a target's publisher
+        self.assertEqual(sec["targets"], ["ms-python.python", "juanblanco.solidity", "esbenp.prettier-vscode"])
+        self.assertEqual(sec["known"], [])
+        self.assertEqual(sec["known_publishers"], ["juan-bianco"])
+        self.assertIn("2 pages of 100", sec["source"])
+        self.assertIn("1 pages of 100", sec["source"])
+
+    def test_fetching_the_extension_rankings(self):
+        fetch = _support.load_script(os.path.join(_support.REPO_ROOT, "scripts", "fetch-top-extensions.py"),
+                                     "fetch_top_extensions_for_tests")
+        asked = []
+
+        class Answer:
+            def __init__(self, body):
+                self.body = body
+
+            def read(self, n=-1):
+                return self.body
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+        def urlopen(req, timeout=None):
+            asked.append(req)
+            if req.full_url == fetch.MARKETPLACE:
+                page = json.loads(req.data)["filters"][0]["pageNumber"]
+                exts = [{"publisher": {"publisherName": "p"}, "extensionName": f"e{page}-{i}"}
+                        for i in range(100 if page == 1 else 3)]
+                return Answer(json.dumps({"results": [{"extensions": exts}]}).encode())
+            offset = int(req.full_url.rsplit("offset=", 1)[1])
+            return Answer(json.dumps({"offset": offset, "totalSize": 100, "extensions": [
+                {"namespace": "n", "name": f"x{i}"} for i in range(100 if offset == 0 else 0)]}).encode())
+
+        with tempfile.TemporaryDirectory() as d, \
+                unittest.mock.patch.object(fetch.urllib.request, "urlopen", urlopen), \
+                unittest.mock.patch.object(fetch.time, "sleep", lambda seconds: None):
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                self.assertEqual(fetch.main([d, "1000"]), 0)
+            self.assertEqual(sorted(os.listdir(d)), ["marketplace-0001.json", "marketplace-0002.json",
+                                                     "openvsx-0001.json", "openvsx-0002.json"])
+        self.assertEqual([line.split(" in ")[0] for line in out.getvalue().splitlines()],
+                         ["marketplace: 2 pages", "openvsx: 2 pages"])
+        market = [r for r in asked if r.full_url == fetch.MARKETPLACE]
+        query = json.loads(market[0].data)
+        self.assertEqual((market[0].get_method(), query["filters"][0]["sortBy"], query["filters"][0]["pageSize"]),
+                         ("POST", 4, 100))
+        self.assertIn({"filterType": 8, "value": "Microsoft.VisualStudio.Code"}, query["filters"][0]["criteria"])
+        openvsx = [r.full_url for r in asked if r.full_url != fetch.MARKETPLACE]
+        self.assertEqual(openvsx[0], "https://open-vsx.org/api/-/search?sortBy=downloadCount&sortOrder=desc&size=100"
+                                     "&offset=0")
+        self.assertTrue(all(r.get_header("User-agent", "").startswith("lazaret-") for r in asked))
 
     def test_the_go_section(self):
         with tempfile.TemporaryDirectory() as d:

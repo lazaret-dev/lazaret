@@ -59,6 +59,27 @@ is the crate's own and each crate its Cargo.toml depends on to build
 renamed one by the name crates.io knows it by); a [dev-dependencies] crate
 is never built for a user of the crate.
 
+VS Code extensions (0.1.9, E-1's third part) are named `publisher.name`
+(compared without case, as the editor and both registries compare them),
+and anyone can create a publisher, so a look-alike is a stranger's: an
+identifier one change from a popular extension's, or differing from it only
+in its separators, in another publisher (juanbIanco.solidity, a capital I
+for the l, cloned juanblanco.solidity on Open VSX in 2025); or a publisher
+one change from a popular extension's publisher, or that publisher with its
+separators changed, whatever the extension's name (juan-bianco.solidity-
+vlang came next). The targets are popular_names.json's "vscode": the most
+installed extensions of the Marketplace and the most downloaded of Open
+VSX. An extension of the target's own publisher is never one (only that
+publisher can publish it), nor a publisher a popular extension has (the
+targets' and the "known_publishers"), nor a publisher of fewer than
+MIN_PUBLISHER letters and digits for the second test (ms, arm and ibm have
+hundreds of neighbours). The names compared are the extension's own (its
+package.json's publisher and name) and those it brings
+(`extensionDependencies` and `extensionPack`), its own publisher's left
+out. An extension of another publisher with the same name is not one:
+Open VSX carries forks and builds of popular extensions under their
+builders' namespaces.
+
 The lists and their licences: scripts/update-popular-names.py, and the
 "source" fields of popular_names.json.
 """
@@ -73,7 +94,9 @@ MAX_NAME = 214                       # npm's longest name; a longer one is not c
 _ALPHABET = "abcdefghijklmnopqrstuvwxyz0123456789-._"
 _SEP_RE = re.compile(r"[-_.]")
 _PEP503_RE = re.compile(r"[-_.]+")
-_ECO_TEXT = {"npm": "npm packages", "pypi": "PyPI projects", "crates": "crates"}
+_ECO_TEXT = {"npm": "npm packages", "pypi": "PyPI projects", "crates": "crates", "vscode": "VS Code extensions"}
+#: the fewest letters and digits a publisher has for the publisher test (VS Code extensions)
+MIN_PUBLISHER = 6
 _DATA = {}
 #: Go module hosts where anyone can create an owner (a user, an organization,
 #: a group), so that a path is host/owner/repository; gopkg.in/NAME.vN is
@@ -120,6 +143,9 @@ def _load():
         for eco in ("npm", "pypi", "crates"):
             _DATA[eco] = tables(raw[eco]["targets"], raw[eco]["known"])
         _DATA["go"] = go_tables(raw["go"]["targets"])
+        vscode = raw.get("vscode") or {}
+        _DATA["vscode"] = vscode_tables(vscode.get("targets") or (), vscode.get("known") or (),
+                                        vscode.get("known_publishers") or ())
     return _DATA
 
 
@@ -134,6 +160,24 @@ def tables(targets, known):
         if len(t) >= MIN_TARGET:
             bare.setdefault(_SEP_RE.sub("", t), t)
     return rank, frozenset(known), bare
+
+
+def _bare(n):
+    """n without its separators."""
+    return _SEP_RE.sub("", n)
+
+
+def vscode_tables(targets, known, known_publishers=()):
+    """tables() for VS Code extensions' identifiers (normalized), and for the publisher test: (each popular
+    publisher's best-ranked target, the popular publishers by their letters without separators, the known ones)."""
+    rank, known_ids, bare = tables(targets, known)
+    best, by_bare = {}, {}
+    for t in targets:
+        publisher = t.split(".", 1)[0]
+        best.setdefault(publisher, t)
+        by_bare.setdefault(_bare(publisher), publisher)
+    known_pubs = frozenset(known_publishers) | frozenset(best) | frozenset(k.split(".", 1)[0] for k in known)
+    return rank, known_ids, bare, best, by_bare, known_pubs
 
 
 def variants(n):
@@ -195,11 +239,16 @@ def lookalike(eco, name, data=None):
     go_lookalike's answer."""
     if eco == "go":
         return go_lookalike(name, data)
-    rank, known, bare = data or _load()[eco]
+    rank, known, bare = (data or _load()[eco])[:3]
     n = normalize(eco, name) if isinstance(name, str) else ""
     if not n or len(n) > MAX_NAME or n in rank or n in known:
         return None
-    scope = n.split("/", 1)[0] + "/" if eco == "npm" and n.startswith("@") and "/" in n else None
+    if eco == "npm" and n.startswith("@") and "/" in n:
+        scope = n.split("/", 1)[0] + "/"
+    elif eco == "vscode" and "." in n:
+        scope = n.split(".", 1)[0] + "."          # (an extension of the target's own publisher is that publisher's)
+    else:
+        scope = None
 
     def fits(t):
         return len(t) >= MIN_TARGET and not (scope and t.startswith(scope))
@@ -212,6 +261,65 @@ def lookalike(eco, name, data=None):
         return None
     t = min(hits, key=rank.__getitem__)
     return t, _how(n, t)
+
+
+# ---- VS Code extensions (0.1.9, E-1's third part)
+def _publisher_change(mine, theirs):
+    """How the publisher `mine` looks like the popular publisher `theirs`: a clause, else None."""
+    if mine == theirs:
+        return None
+    if _bare(mine) == _bare(theirs):
+        return f'differs from "{theirs}" only in its separators'
+    how = _one_change(mine, theirs)
+    if how:
+        return f'is one change from "{theirs}" ({how})'
+    how = _one_change(_bare(mine), _bare(theirs))
+    return f'is one change from "{theirs}" ({how}, its separators aside)' if how else None
+
+
+def publisher_lookalike(publisher, data=None):
+    """(the popular publisher, its best-ranked extension, how) when the publisher `publisher` (normalized) looks
+    like a popular extension's publisher: its separators changed, or one change, its separators aside; else None.
+    Never for a popular or known publisher, nor for one, or against one, of fewer than MIN_PUBLISHER letters and
+    digits."""
+    data = data or _load()["vscode"]
+    rank, _known, _bare_ids, best, by_bare, known_pubs = data
+    mine = _bare(publisher)
+    if not publisher or publisher in known_pubs or len(mine) < MIN_PUBLISHER:
+        return None
+    hits = {by_bare[mine]} if mine in by_bare else set()
+    for v in variants(mine):
+        theirs = by_bare.get(v)
+        if theirs is not None and len(_bare(theirs)) >= MIN_PUBLISHER:
+            hits.add(theirs)
+    for theirs in sorted(hits, key=lambda h: rank[best[h]]):
+        how = _publisher_change(publisher, theirs)
+        if how:
+            return theirs, best[theirs], how
+    return None
+
+
+def vscode_lookalike(name, data=None, own=None):
+    """For a VS Code extension's identifier: ("id", the popular extension, how) when the identifier is one change
+    from a popular one's of another publisher, or differs from it only in its separators (lookalike()); ("publisher",
+    the popular extension, the popular publisher, how) when its publisher looks like the publisher of a popular
+    extension (publisher_lookalike()); else None. `own`: the publisher of the extension that brings `name` (its own
+    are not compared)."""
+    data = data or _load()["vscode"]
+    n = normalize("vscode", name) if isinstance(name, str) else ""
+    if not n or len(n) > MAX_NAME or n.count(".") != 1:
+        return None
+    publisher = n.split(".", 1)[0]
+    if publisher == own:
+        return None
+    found = lookalike("vscode", n, data)
+    if found is not None:
+        return ("id",) + found
+    found = publisher_lookalike(publisher, data)
+    if found is not None:
+        theirs, target, how = found
+        return "publisher", target, theirs, how
+    return None
 
 
 # ---- Go module paths (0.1.9, N-3)
@@ -413,13 +521,66 @@ def _go_issues(name, deps, rel, text, lines):
     return out
 
 
+_VSCODE_WHY = ("A VS Code extension is named by its publisher and its name, and anyone can create a publisher, so a "
+               "clone of a popular extension takes a publisher a character away from the real one's: juanbIanco (a "
+               "capital I for the l) for juanblanco's Solidity extension on Open VSX in 2025, then juan-bianco, both "
+               "aimed at Solidity developers. The editor runs an extension with the user's full access when it "
+               "activates it, and installs the extensions it brings with it. The publishers of the most-installed "
+               "extensions are never flagged; this one is not among them.")
+
+
+def _vscode_issues(name, deps, rel, text, lines):
+    """issues() for a VS Code extension identified as `name` (publisher.name) in its package.json (`rel`, `text`)
+    that brings `deps` (its extensionDependencies and extensionPack)."""
+    out, count = [], f"{len(_load()['vscode'][0]):,}"
+    low = (text or "").lower()
+
+    def whose(ident, found):
+        """The clause that says what `ident` looks like (vscode_lookalike's `found`), after the identifier."""
+        if found[0] == "id":
+            return f', one change from "{found[1]}" ({found[2]}), one of the {count} most-installed VS Code extensions.'
+        _kind, target, _theirs, how = found
+        mine = normalize("vscode", ident).split(".", 1)[0]
+        return (f': its publisher "{mine}" {how}, the publisher of "{target}", one of the {count} most-installed '
+                "VS Code extensions.")
+
+    own = None
+    if isinstance(name, str) and name.count(".") == 1:
+        own = normalize("vscode", name).split(".", 1)[0]
+        found = vscode_lookalike(name)
+        if found is not None:
+            out.append(lazaret.mk_issue(
+                {"id": "SC-TYPOSQUAT", "name": "A name like a popular package's", "type": "HOTSPOT", "sev": "MAJOR",
+                 "msg": f'The extension is "{name}"' + whose(name, found),
+                 "why": _VSCODE_WHY,
+                 "fix": f'Make sure "{name}" is the extension you meant, not "{found[1]}"; read what it runs before '
+                        "installing it.",
+                 "ref": "CWE-506 · Supply chain"}, rel, _line_of(text, ['"name":', '"name" :']), lines))
+    for dep in sorted(deps):
+        found = vscode_lookalike(dep, own=own)
+        if found is None:
+            continue
+        out.append(lazaret.mk_issue(
+            {"id": "SC-TYPOSQUAT", "name": "A name like a popular package's", "type": "HOTSPOT", "sev": "MAJOR",
+             "msg": f'Brings "{dep}" (its extensionDependencies or extensionPack)' + whose(dep, found),
+             "why": _VSCODE_WHY,
+             "fix": f'Check that "{dep}" is the extension meant, not "{found[1]}", and read it before installing this '
+                    "one.",
+             "ref": "CWE-506 · Supply chain"}, rel, _line_of(low, [json.dumps(normalize("vscode", dep))]), lines))
+    return out
+
+
 def issues(eco, name, deps, rel, text=""):
     """SC-TYPOSQUAT findings (MAJOR) for a release named `name` that declares
     `deps` in `rel` (its text, for the lines). For Go, `name` is the module
-    path of a go.mod and `deps` the paths it requires."""
+    path of a go.mod and `deps` the paths it requires; for a VS Code
+    extension, `name` is its publisher.name and `deps` the extensions it
+    brings."""
     out, lines = [], (text or "").split("\n")
     if eco == "go":
         return _go_issues(name, deps, rel, text, lines)
+    if eco == "vscode":
+        return _vscode_issues(name, deps, rel, text, lines)
     count = f"{len(_load()[eco][0]):,}"
     what = _ECO_TEXT[eco]
 

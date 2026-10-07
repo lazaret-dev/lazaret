@@ -291,5 +291,78 @@ class ScanTests(unittest.TestCase):
         self.assertIn("vscode", str(caught.exception))
 
 
+
+class Galleries(Gallery):
+    """A Gallery that answers for several extensions (`exts`: {identifier, lowercase: extension}) by the name the query
+    asks for."""
+
+    def __init__(self, exts, files=None):
+        super().__init__(None, files)
+        self.exts = exts
+
+    def query(self, body):
+        name = next(c["value"] for c in body["filters"][0]["criteria"] if c["filterType"] == vsm.FILTER_NAME)
+        self.ext = self.exts.get(name.lower())
+        return super().query(body)
+
+
+class NewDependencyTests(unittest.TestCase):
+    """SC-NEW-DEPENDENCY for a Marketplace release (E-1's third part): an extension it brings that the version
+    published before it did not, first published days before it (the gallery's publishedDate), of another publisher."""
+
+    def entry(self, version, when, pack="", pre=False):
+        e = version_entry("acme", "tool", version, pack=pack, pre=pre)
+        e["lastUpdated"] = when
+        return e
+
+    def dep(self, ident, published):
+        pub, name = ident.split(".")
+        ext = extension(pub, name, [version_entry(pub, name, "0.0.1")])
+        ext["publishedDate"], ext["releaseDate"] = published, published
+        return ext
+
+    def scan(self, versions, deps, brings):
+        bad = vsix({"package.json": ext_manifest(name="tool", publisher="acme", version="1.1.0", extensionPack=brings)})
+        exts = {"acme.tool": extension("acme", "tool", versions), **{k.lower(): v for k, v in deps.items()}}
+        gallery = Galleries(exts, {vsix_url(versions[0]): bad})
+        with mock.patch.object(repo, "module_transport", gallery), \
+                mock.patch.object(repo._base.Fetch, "_wait_turn", lambda self, url: None):
+            res = repo.scan_package("vscode", "acme.tool", "1.1.0")
+        return [(i["sev"], i["msg"]) for i in res["issues"] if i["rule"] == "SC-NEW-DEPENDENCY"], gallery
+
+    def test_an_extension_published_days_before_the_release(self):
+        versions = [self.entry("1.1.0", "2026-10-06T08:00:00Z", "evil.helper,acme.sibling,old.thing"),
+                    self.entry("1.0.0", "2026-09-01T00:00:00Z")]
+        found, gallery = self.scan(versions, {"evil.helper": self.dep("evil.helper", "2026-10-05T20:00:00Z"),
+                                              "old.thing": self.dep("old.thing", "2024-02-02T00:00:00Z")},
+                                   ["evil.helper", "acme.sibling", "old.thing"])
+        self.assertEqual(found, [("CRITICAL", 'Brings "evil.helper" (its extensionDependencies or extensionPack), '
+                                              "which 1.0.0 did not: an extension first published 12 hours before this "
+                                              'release, by another publisher ("evil").')])
+        names = [next(c["value"] for c in b["filters"][0]["criteria"] if c["filterType"] == vsm.FILTER_NAME)
+                 for b in gallery.bodies]
+        self.assertNotIn("acme.sibling", names, "the release's own publisher's is not looked up")
+        self.assertIn({"filterType": vsm.FILTER_NAME, "value": "evil.helper"},
+                      next(b for b in gallery.bodies if b["flags"] == 0)["filters"][0]["criteria"])
+
+    def test_brought_before_or_weeks_old(self):
+        versions = [self.entry("1.1.0", "2026-10-06T08:00:00Z", "evil.helper,new.one"),
+                    self.entry("1.0.0", "2026-09-01T00:00:00Z", "evil.helper")]
+        found, _g = self.scan(versions, {"evil.helper": self.dep("evil.helper", "2026-10-05T20:00:00Z"),
+                                         "new.one": self.dep("new.one", "2026-09-20T00:00:00Z")},
+                              ["evil.helper", "new.one"])
+        self.assertEqual([sev for sev, _m in found], ["MAJOR"])
+        self.assertIn('"new.one"', found[0][1])
+
+    def test_a_release_is_compared_with_releases_only(self):
+        versions = [self.entry("1.1.0", "2026-10-06T08:00:00Z", "evil.helper"),
+                    self.entry("1.0.5", "2026-10-01T00:00:00Z", "evil.helper", pre=True),
+                    self.entry("1.0.0", "2026-09-01T00:00:00Z")]
+        found, _g = self.scan(versions, {"evil.helper": self.dep("evil.helper", "2026-10-05T20:00:00Z")},
+                              ["evil.helper"])
+        self.assertEqual(len(found), 1)
+        self.assertIn("which 1.0.0 did not", found[0][1])
+
+
 if __name__ == "__main__":
     unittest.main()

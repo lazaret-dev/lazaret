@@ -1080,9 +1080,8 @@ editor's rules for what runs and when instead of npm's:
   command, which VS Code logs and skips, is inventory (INFO). npm's
   lifecycle scripts, a bundled package's and a `binding.gyp` never run;
 - `extensionDependencies` and `extensionPack` are what it brings (lowercase
-  `publisher.name`, the first 500 of each). SC-TYPOSQUAT on those names, and
-  SC-NEW-DEPENDENCY, come with the registry modules (E-1's parts 2 and 3);
-  npm's look-alike test does not apply to an extension's names.
+  `publisher.name`, the first 500 of each). npm's look-alike test does not
+  apply to an extension's names; the extensions' own does (below).
 
 An installed extension is a folder (`<home>/.vscode/extensions/
 publisher.name-version[-platform]`, and the same under each fork's data
@@ -1139,6 +1138,40 @@ version's properties. Its terms of use tie its extensions to Microsoft's
 products; scanning it is the project's decision 11. The sandbox cannot reach
 it, so the tests build the gallery's answers in the shape VS Code's gallery
 service reads.
+
+**Names and new extensions (E-1's third part).** An extension is named
+`publisher.name`, compared without case, and anyone can create a publisher.
+`lookalike.vscode_lookalike` compares an extension's own identifier (its
+`package.json`'s publisher and name) and the ones it brings with the targets
+of `popular_names.json`'s `vscode`, in two tests: the identifier one change
+from a target's, or its separators changed, in another publisher (npm's
+test with the publisher as its scope: only a target's publisher can publish
+in it; `juanbIanco.solidity`); and the publisher one change from a target's
+publisher, its separators aside, whatever the name (`juan-bianco.solidity-vlang`),
+for publishers of six letters and digits or more (`MIN_PUBLISHER`) that
+neither a target nor a known name has and that `known_publishers` does not
+list. Another publisher's extension of the same name is not compared: Open
+VSX carries forks and builds under their builders' namespaces (several of
+its 1,000 most downloaded are). The targets are Open VSX's 1,000 most
+downloaded, read through a fetcher on Oct 6 (the sandbox cannot reach the
+registry; each page was read twice and the readings compared);
+`scripts/fetch-top-extensions.py` saves the Marketplace's ranking by
+installs and Open VSX's by downloads, and `update-popular-names.py
+--vscode` takes the first 1,000 of each in turn, the pages' other
+identifiers one change from a target as known names, and their publishers
+that look like a target's as known publishers. A registry scan also
+compares the release with the version its registry published before it
+(`repo.extension_new_dependencies`): the module's `history` (Open VSX's
+query API, `/api/-/query?extensionId=…&includeAllVersions=true`, a page of
+1,000 entries, at most 5,000; the Marketplace's gallery query with every
+version) gives each version's time, what it brings and whether it is a
+pre-release; the previous version is the one published last before this one
+(a release against releases only). An extension it brings that the previous
+did not, of another publisher, is looked up (`first_published`: Open VSX's
+oldest version, the last page first and every page only when that one is
+recent, since any version is no older than the first; the Marketplace's
+`publishedDate`) and is SC-NEW-DEPENDENCY under 30 days, CRITICAL under 7,
+unless on Open VSX the account that published the release published it.
 
 ### j. The network: Lazaret's own HTTPS client (`nativenet.py`, `lazaret-net`, 0.1.9, NET-1)
 

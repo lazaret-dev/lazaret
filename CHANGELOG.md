@@ -76,6 +76,22 @@ project is pre-1.0, so the 0.x API may still change.
   terminal shows it. `lazaret-registry` and the MCP tool; not the guard yet.
   `LAZARET_NO_PROVENANCE=1` turns it off; `LAZARET_SIGSTORE_ROOT` and `LAZARET_NPM_KEYS` name
   newer trust.
+- **VS Code extensions named like a popular one's, and a release that brings a brand-new one (E-1's third
+  part).** An extension is named `publisher.name`, and anyone can create a publisher. Its identifier, or
+  one it brings (`extensionDependencies`, `extensionPack`), one change from a most-installed extension's of
+  another publisher, or its publisher one change from such an extension's publisher, its separators aside,
+  is SC-TYPOSQUAT (MAJOR), in `lazaret FILE.vsix`, `--extensions` and the registry's scans:
+  `juanbIanco.solidity` (a capital I for the l) cloned `juanblanco.solidity` on Open VSX in 2025, and
+  `juan-bianco.solidity-vlang` came next. Another publisher's extension of the same name (a fork, a build)
+  is not flagged, nor one of the extension's own publisher. The targets are Open VSX's 1,000 most
+  downloaded extensions (`popular_names.json`'s `vscode`); `scripts/fetch-top-extensions.py` saves the
+  Marketplace's and Open VSX's rankings, and `update-popular-names.py --vscode` builds the list from them.
+  On 200 extensions sampled from Open VSX's long tail, none is flagged. And a release on Open VSX or the
+  Marketplace is compared with the version published before it: an extension it brings that the one
+  before did not, first published less than 7 days earlier by another publisher, is SC-NEW-DEPENDENCY
+  (CRITICAL; MAJOR under 30 days), the way GlassWorm brought a malicious extension in through benign
+  ones' `extensionPack` in 2026 (Open VSX's query API and the Marketplace's gallery query give the
+  history; `LAZARET_NO_DEPENDENCY_HISTORY=1` turns it off).
 - **VS Code extensions in `lazaret-registry` (E-1's second part): `openvsx:namespace.name[@version]`
   and `vscode:publisher.name[@version]`.** Every `.vsix` the version is published for, one per
   target platform the editor installs, is downloaded and scanned as `lazaret FILE.vsix` scans

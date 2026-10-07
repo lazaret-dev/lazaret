@@ -115,14 +115,14 @@ class Marketplace(base.Ecosystem):
         return out
 
     # ---- the network
-    def _query(self, name, fetch, latest):
-        """The extension's entry from the gallery's answer, its shape checked: one extension, this one (its publisher's
-        and its own name, without case), and its version entries. FetchError otherwise."""
+    def _ask(self, name, fetch, flags):
+        """The extension's entry from the gallery's answer to a query with `flags`, its shape checked: one extension,
+        this one (its publisher's and its own name, without case). FetchError otherwise."""
         body = {"filters": [{"criteria": [{"filterType": FILTER_TARGET, "value": "Microsoft.VisualStudio.Code"},
                                           {"filterType": FILTER_NAME, "value": name},
                                           {"filterType": FILTER_EXCLUDE_FLAGS, "value": "4096"}],
                              "pageNumber": 1, "pageSize": 1, "sortBy": 0, "sortOrder": 0}],
-                "assetTypes": [], "flags": QUERY_FLAGS | (LATEST_ONLY_FLAG if latest else 0)}
+                "assetTypes": [], "flags": flags}
         doc = fetch.post_json(QUERY_URL, body, max_bytes=MAX_QUERY_BYTES, accept=ACCEPT)
         results = doc.get("results") if isinstance(doc, dict) else None
         first = results[0] if isinstance(results, list) and results else None
@@ -137,6 +137,12 @@ class Marketplace(base.Ecosystem):
         got = ext.get("extensionName") if isinstance(ext, dict) else None
         if not (isinstance(pub, str) and isinstance(got, str) and f"{pub}.{got}".lower() == name.lower()):
             raise base.FetchError("vscode: the Marketplace's answer is about another extension")
+        return ext
+
+    def _query(self, name, fetch, latest):
+        """The extension's entry with its versions (their files, properties and asset URIs) and statistics: _ask's,
+        with version entries. FetchError otherwise."""
+        ext = self._ask(name, fetch, QUERY_FLAGS | (LATEST_ONLY_FLAG if latest else 0))
         versions = ext.get("versions")
         if not isinstance(versions, list) or not versions:
             raise base.FetchError("vscode: the Marketplace's answer lists no version")
@@ -230,6 +236,43 @@ class Marketplace(base.Ecosystem):
         if not isinstance(info, dict):
             return None
         return tuple(sorted(set(info.get("dependencies") or ()) | set(info.get("bundledExtensions") or ())))
+
+    # ---- the history (SC-NEW-DEPENDENCY, E-1's third part)
+    def history(self, name, fetch):
+        """Every version of `name` the gallery lists (newest first, as it answers): [(version, when it was published
+        (an aware datetime: the entry's lastUpdated), the extensions it brings, a pre-release?, None: the gallery does
+        not say who)], one per version (a version's platforms together: the earliest time, the extensions any of
+        them brings)."""
+        ext = self._query(self.check_name(name), fetch, latest=False)
+        out, seen = [], {}
+        for v in ext["versions"][:MAX_VERSIONS]:
+            if not isinstance(v, dict):
+                continue
+            try:
+                version = self.check_version(v.get("version")) if isinstance(v.get("version"), str) else None
+            except base.SpecError:
+                version = None
+            when = base.parse_time(v.get("lastUpdated"))
+            if version is None or when is None:
+                continue
+            props = _properties(v)
+            brings = self._ids(props.get(DEPENDENCIES)) | self._ids(props.get(EXTENSION_PACK))
+            pre = props.get(PRE_RELEASE, "").lower() == "true"
+            if version in seen:
+                old = out[seen[version]]
+                out[seen[version]] = (version, min(old[1], when), old[2] | brings, old[3] or pre, None)
+            else:
+                seen[version] = len(out)
+                out.append((version, when, brings, pre, None))
+        return out
+
+    def first_published(self, name, fetch, old_enough=None):
+        """(when `name` was first published, an aware datetime: the gallery's publishedDate, or its releaseDate when
+        that is earlier, its publisher) of the extension; (None, (its publisher,)) when the gallery gives neither.
+        One query, without versions (flags 0)."""
+        ext = self._ask(self.check_name(name), fetch, 0)
+        times = sorted(t for t in (base.parse_time(ext.get(k)) for k in ("publishedDate", "releaseDate")) if t)
+        return (times[0] if times else None), (ext["publisher"]["publisherName"],)
 
     # ---- archives
     def container(self, filename):

@@ -246,5 +246,115 @@ class ScanTests(unittest.TestCase):
                           "published by someone"])
 
 
+
+def query_url(ident, size, offset=0):
+    return f"{API}-/query?extensionId={ident}&includeAllVersions=true&size={size}&offset={offset}"
+
+
+def query_entry(ident, version, timestamp, brings=(), pre=False, by="example-ci", platform="universal"):
+    ns, name = ident.split(".")
+    return {"namespace": ns, "name": name, "version": version, "timestamp": timestamp, "preRelease": pre,
+            "targetPlatform": platform, "publishedBy": {"loginName": by, "provider": "github"},
+            "dependencies": [], "bundledExtensions": [{"namespace": b.split(".")[0], "extension": b.split(".")[1]}
+                                                      for b in brings]}
+
+
+def history(ident, entries):
+    """The query API's answers for every version of `ident` (`entries`, newest first): the history's page and the
+    first-publication lookup's two."""
+    page = json.dumps({"offset": 0, "totalSize": len(entries), "extensions": entries}).encode()
+    first = json.dumps({"offset": 0, "totalSize": len(entries), "extensions": entries[:1]}).encode()
+    return {query_url(ident, 1000): page, query_url(ident, 1): first}
+
+
+class NewDependencyTests(unittest.TestCase):
+    """SC-NEW-DEPENDENCY for an Open VSX release (E-1's third part): an extension it brings that the version
+    published before it did not, first published days before it, by another publisher (GlassWorm's extensionPack)."""
+
+    RELEASE = "2026-10-06T08:18:12.286437Z"           # (test_openvsx.document's timestamp)
+
+    def served(self, brings, extra=None):
+        bad = vsix({"package.json": ext_manifest(name="tool", publisher="acme", version="1.1.0", extensionPack=brings)})
+        out = responses("acme", "tool", "1.1.0", {"universal": bad})
+        out.update(history("acme.tool", [
+            query_entry("acme.tool", "1.1.0", self.RELEASE, brings),
+            query_entry("acme.tool", "1.0.5", "2026-10-01T00:00:00Z", ["evil.helper"], pre=True),
+            query_entry("acme.tool", "1.0.0", "2026-09-01T00:00:00.5Z", [])]))
+        out.update(history("evil.helper", [query_entry("evil.helper", "0.0.1", "2026-10-04T00:00:00Z", by="mallory")]))
+        out.update(history("old.thing", [query_entry("old.thing", "3.0.0", "2026-10-05T00:00:00Z"),
+                                         query_entry("old.thing", "1.0.0", "2025-01-01T00:00:00.123456789Z")]))
+        out.update(history("same.account", [query_entry("same.account", "0.1.0", "2026-10-05T00:00:00Z")]))
+        out.update(extra or {})
+        return Served(out)
+
+    def scan(self, served):
+        with mock.patch.object(repo, "module_transport", served), \
+                mock.patch.object(repo._base.Fetch, "_wait_turn", lambda self, url: None):
+            return repo.scan_package("openvsx", "acme.tool", "1.1.0")
+
+    def news(self, res):
+        return [(i["sev"], i["file"], i["msg"]) for i in res["issues"] if i["rule"] == "SC-NEW-DEPENDENCY"]
+
+    def test_an_extension_published_days_before_the_release(self):
+        served = self.served(["evil.helper", "acme.sibling", "old.thing", "same.account", "missing.ext"])
+        res = self.scan(served)
+        self.assertEqual(self.news(res), [(
+            "CRITICAL", "(release)",
+            'Brings "evil.helper" (its extensionDependencies or extensionPack), which 1.0.0 did not: an extension first '
+            'published 2 days before this release, by another publisher ("evil").')])
+        self.assertEqual(res["verdict"], "SUSPICIOUS")
+        asked = served.urls()
+        self.assertNotIn(query_url("acme.sibling", 1), asked, "the release's own publisher's is not looked up")
+        self.assertIn(query_url("missing.ext", 1), asked)
+
+    def test_weeks_old_is_major(self):
+        served = self.served(["evil.helper"], history("evil.helper", [
+            query_entry("evil.helper", "0.0.1", "2026-09-20T00:00:00Z", by="mallory")]))
+        self.assertEqual([sev for sev, _f, _m in self.news(self.scan(served))], ["MAJOR"])
+
+    def test_what_the_previous_version_brought_is_not_new(self):
+        served = self.served(["evil.helper"])
+        served.responses.update(history("acme.tool", [
+            query_entry("acme.tool", "1.1.0", self.RELEASE, ["evil.helper"]),
+            query_entry("acme.tool", "1.0.0", "2026-09-01T00:00:00Z", ["evil.helper"])]))
+        self.assertEqual(self.news(self.scan(served)), [])
+
+    def test_a_pre_release_is_compared_with_any_version(self):
+        served = self.served(["evil.helper"])
+        served.responses.update(history("acme.tool", [
+            query_entry("acme.tool", "1.1.0", self.RELEASE, ["evil.helper"], pre=True),
+            query_entry("acme.tool", "1.0.5", "2026-10-01T00:00:00Z", ["evil.helper"], pre=True),
+            query_entry("acme.tool", "1.0.0", "2026-09-01T00:00:00Z", [])]))
+        self.assertEqual(self.news(self.scan(served)), [])
+
+    def test_the_first_publication_is_read_from_every_page_when_the_last_is_recent(self):
+        ext = openvsx.OpenVSX()
+        entries = [query_entry("big.ext", f"1.0.{i}", f"2026-10-0{1 + i % 5}T00:00:00Z") for i in range(3)]
+        older = query_entry("big.ext", "0.9.0", "2024-01-01T00:00:00Z")
+        pages = {query_url("big.ext", 1): json.dumps({"offset": 0, "totalSize": 1001, "extensions": entries[:1]}).encode(),
+                 query_url("big.ext", 1000, 1): json.dumps({"offset": 1, "totalSize": 1001, "extensions": entries}).encode(),
+                 query_url("big.ext", 1000, 0): json.dumps({"offset": 0, "totalSize": 1001,
+                                                            "extensions": [older] + entries}).encode(),
+                 query_url("big.ext", 1000, 1000): json.dumps({"offset": 1000, "totalSize": 1001,
+                                                               "extensions": entries[-1:]}).encode()}
+        served = Served(pages)
+        fetch = base.Fetch(ext, served)
+        recent = lambda t: False                                              # noqa: E731
+        when, _by = ext.first_published("big.ext", fetch, old_enough=recent)
+        self.assertEqual(when.year, 2024, "the older version on another page")
+        served.calls.clear()
+        when, _by = ext.first_published("big.ext", fetch, old_enough=lambda t: True)
+        self.assertEqual(when.isoformat(), "2026-10-01T00:00:00+00:00")
+        self.assertNotIn(query_url("big.ext", 1000, 0), served.urls(), "old enough: the last page is the answer")
+
+    def test_the_check_can_be_turned_off_and_a_silent_registry_is_no_finding(self):
+        served = self.served(["evil.helper"])
+        with mock.patch.dict(os.environ, {"LAZARET_NO_DEPENDENCY_HISTORY": "1"}):
+            self.assertEqual(self.news(self.scan(served)), [])
+        served = self.served(["evil.helper"])
+        del served.responses[query_url("acme.tool", 1000)]
+        self.assertEqual(self.news(self.scan(served)), [])
+
+
 if __name__ == "__main__":
     unittest.main()
