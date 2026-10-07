@@ -267,7 +267,7 @@ SAMPLE = 8192              # header/entropy sample read from oversized files
 #      entry points and hook targets, Python install scripts
 # 2.3: verdict tiers, decoded hex, install-script inspection; 2.2:
 #      verdict-integrity; 2.1: binary-artifact awareness
-ENGINE_VERSION = "2.44.0"
+ENGINE_VERSION = "2.45.0"
 
 # ---------------- The content memo (P-2a, registry/contentcache.py) ----------------
 # One per scan_package run: the engine answers once for content several of a
@@ -1266,6 +1266,19 @@ def case_fold(rel):
     """A member's path as file systems that ignore case and Unicode normalization compare it (macOS's, Windows'):
     two paths with the same fold are one file there (EG-4)."""
     return unicodedata.normalize("NFD", rel).casefold()
+
+
+#: The files an installer opens by their name (EG-4's leftover): npm a package's package.json and binding.gyp, pip an
+#: sdist's pyproject.toml and setup.py, VS Code an extension's package.json
+OPENED_BY_NAME = ("package.json", "binding.gyp", "pyproject.toml", "setup.py")
+
+
+def opened_as(name):
+    """The file of OPENED_BY_NAME a member named `name` is opened as where case and normalization are ignored (macOS,
+    Windows): its fold's, when that is one of them, and None otherwise. `Package.json` there is package.json, written
+    over a package.json before it or opened in its stead (EG-4)."""
+    fold = case_fold(name)
+    return fold if fold in OPENED_BY_NAME else None
 
 
 def _note_member(seen, rel, anomalies):
@@ -2389,6 +2402,7 @@ class _ArtifactScan:
         self.manifests = {}        # rel -> text (package.json, binding.gyp, pyproject.toml)
         self.entries = set()       # rels that run when installed / imported
         self._twins = None         # rel -> the members whose paths differ from it only by case (_case_twins)
+        self._fold_index = None    # (members counted, {case fold: member}) (_folds)
         self.vsix_main = set()     # vsix: the entries of `main` and `browser`
         self.vsix_special = {}     # vsix: rel -> when it runs, for an entry a contribution names (EG-5)
         self._vsix_whens = None    # vsix: rel -> when it runs, for what those reach and `main` does not (_vsix_when)
@@ -2567,8 +2581,9 @@ class _ArtifactScan:
             self.unread_code.append(rel)
         base = os.path.basename(rel)
         ext = os.path.splitext(base)[1].lower()
+        named = opened_as(base)                  # (package.json as `Package.json` too: EG-4's leftover)
         code = PACKAGE_CODE.get(self.artifact)
-        wants_text = (base in _MANIFEST_NAMES or lazaret.dep_source_lang(ext) is not None
+        wants_text = (named in _MANIFEST_NAMES or lazaret.dep_source_lang(ext) is not None
                       or ext == ".pth" or (ext in (".gyp", ".gypi") and self.artifact not in ("vsix", "action"))
                       # a file a reader reads: a Go module's .go and cgo C, a crate's .rs (an
                       # sdist's .rs is known to be a crate's only at the end: _sdist_crates)
@@ -2595,7 +2610,7 @@ class _ArtifactScan:
             else:
                 self.action_meta[rel] = raw.decode("utf-8", "replace").removeprefix("﻿")
             return
-        if base == "package.json":
+        if named == "package.json":
             text, extra = lazaret.decode_member(rel, raw)
             self.add_decode_issues(extra, keep_encoding=False)
             self.manifests[rel] = text
@@ -2603,7 +2618,7 @@ class _ArtifactScan:
             # (a VS Code extension: the editor runs no npm script, only the root's vscode:uninstall, E-1; an
             # action's runner installs nothing, N-4)
             hooks = (None if self.artifact not in ("vsix", "action")
-                     else VSIX_HOOKS if self.artifact == "vsix" and rel == "package.json" else ())
+                     else VSIX_HOOKS if self.artifact == "vsix" and case_fold(rel) == "package.json" else ())
             try:
                 found = lazaret.scan_manifest(rel, text, registry=True, hooks=hooks)
             except _engine.NativeError as exc:
@@ -2618,7 +2633,7 @@ class _ArtifactScan:
                 self.issues.append(i)
             return
         # (an extension's binding.gyp is data: VS Code builds nothing, E-1; nor does an action's runner, N-4)
-        if self.artifact not in ("vsix", "action") and (base == "binding.gyp" or ext in (".gyp", ".gypi")):
+        if self.artifact not in ("vsix", "action") and (named == "binding.gyp" or ext in (".gyp", ".gypi")):
             text, extra = lazaret.decode_member(rel, raw)
             self.add_decode_issues(extra, keep_encoding=False)
             self.manifests[rel] = text
@@ -2634,7 +2649,7 @@ class _ArtifactScan:
                 self._npm_never_installs(i)
                 self.issues.append(i)
             return
-        if base == "pyproject.toml":
+        if named == "pyproject.toml":
             self.manifests[rel] = raw.decode("utf-8", "replace")
             return
         if ((self.artifact == "sdist" and (ext == ".rs" or base == "Cargo.toml"))
@@ -2742,7 +2757,21 @@ class _ArtifactScan:
                 found = self._find(_node_candidates(_rel_join(path.rstrip("/"), main)))
                 if found:
                     return found
-        return self._find(candidates[6:])                  # index.js, ...
+        found = self._find(candidates[6:])                 # index.js, ...
+        if found is None:
+            # (macOS and Windows open a path under any case: `node Setup.js` runs setup.js there, EG-4)
+            folds = self._folds()
+            found = next((folds[f] for f in (case_fold(c) for c in candidates) if f in folds), None)
+        return found
+
+    def _folds(self):
+        """{case fold: the first member, by path, with it} (EG-4): what a path names where case is ignored."""
+        if self._fold_index is None or self._fold_index[0] != len(self.members):
+            index = {}
+            for rel in sorted(self.members):
+                index.setdefault(case_fold(rel), rel)
+            self._fold_index = (len(self.members), index)
+        return self._fold_index[1]
 
     def _text_of(self, rel, as_lang="js", exported=False, imported=False):
         """Text of a member that is run as code, scanning it as `as_lang`
@@ -2831,7 +2860,7 @@ class _ArtifactScan:
         """npm runs `node-gyp rebuild` for a root binding.gyp when the package
         defines no install/preinstall script (and gypfile isn't false)."""
         scripts = data.get("scripts") if isinstance(data.get("scripts"), dict) else {}
-        if "binding.gyp" not in self.members or data.get("gypfile") is False:
+        if not any(case_fold(m) == "binding.gyp" for m in self.members) or data.get("gypfile") is False:
             return
         if any(isinstance(scripts.get(h), str) and scripts[h].strip() for h in ("install", "preinstall")):
             return
@@ -2846,14 +2875,16 @@ class _ArtifactScan:
             self._action_entry_points()
             return
         for rel, text in list(self.manifests.items()):
-            if os.path.basename(rel) != "package.json":
+            if opened_as(os.path.basename(rel)) != "package.json":
                 continue
             data, _problems = lazaret.load_manifest(rel, text)
             if data is None:
                 continue
-            if rel == "package.json" and self.artifact == "vsix":
+            # (a root manifest's case twin is the manifest on macOS and Windows: its entries run too, EG-4)
+            root = case_fold(rel) == "package.json"
+            if root and self.artifact == "vsix":
                 self._vsix_entry_points(rel, data)
-            elif rel == "package.json":
+            elif root:
                 self._entry_points(rel, data)
                 self._implicit_gyp_hook(rel, data)
 
@@ -3275,7 +3306,7 @@ class _ArtifactScan:
         _follow_hooks has read the script (E-1): VS Code runs it when the
         extension has been uninstalled, not npm at install."""
         for issue in self.issues:
-            if issue["rule"] != "SC-INSTALL-HOOK" or issue["file"] != "package.json" or issue["sev"] == "INFO":
+            if issue["rule"] != "SC-INSTALL-HOOK" or case_fold(issue["file"]) != "package.json" or issue["sev"] == "INFO":
                 continue
             msg = issue["msg"]
             for old, new in (("Install hook command ", "The vscode:uninstall command "),
@@ -3323,17 +3354,17 @@ class _ArtifactScan:
     def _python_install_scripts(self):
         """Python code pip runs to build/install an sdist: setup.py and an
         in-tree PEP 517 backend (build-system.backend-path)."""
-        scripts = []
-        if "setup.py" in self.sources:
-            scripts.append("setup.py")
-        backend, paths = _pep517_backend(self.manifests.get("pyproject.toml", ""))
-        if backend and paths:
-            mod = backend.split(":", 1)[0].replace(".", "/")
-            for p in paths:
-                root = _rel_join("", p)
-                rel = self._find([_rel_join(root, mod + ".py"), _rel_join(root, mod + "/__init__.py")])
-                if rel:
-                    scripts.append(rel)
+        # (each file pip opens as setup.py or pyproject.toml where case is ignored: EG-4)
+        scripts = sorted(r for r in self.sources if case_fold(r) == "setup.py")
+        for project in sorted(r for r in self.manifests if case_fold(r) == "pyproject.toml"):
+            backend, paths = _pep517_backend(self.manifests[project])
+            if backend and paths:
+                mod = backend.split(":", 1)[0].replace(".", "/")
+                for p in paths:
+                    root = _rel_join("", p)
+                    rel = self._find([_rel_join(root, mod + ".py"), _rel_join(root, mod + "/__init__.py")])
+                    if rel and rel not in scripts:
+                        scripts.append(rel)
         # modules they import from the sdist itself run at install time too —
         # in the sdist's root or its src/ directory, or relative to the
         # importing module (`from .main import x`)

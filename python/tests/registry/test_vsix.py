@@ -186,6 +186,22 @@ class WhatRunsTests(unittest.TestCase):
         self.assertEqual({i["file"] for i in issues(res, "SC-IMPORT-RISK")}, {"out/Extension.js"})
         self.assertIn("SC-ARCHIVE-DUP", rules(res))
 
+    def test_a_case_twin_of_the_manifest_is_read_as_the_manifest(self):
+        # EG-4's leftover: on macOS and Windows, Package.json written after package.json is the manifest the editor
+        # reads: what its main names runs when the editor activates the extension, and its vscode:uninstall runs
+        res = scan({"package.json": ext_manifest(main="./out/extension"),
+                    "Package.json": ext_manifest(main="./out/real", activationEvents=["*"]),
+                    "out/extension.js": "module.exports = 1;\n", "out/real.js": EXFIL_JS})
+        self.assertEqual(res["verdict"], "SUSPICIOUS")
+        self.assertEqual({i["file"] for i in issues(res, "SC-IMPORT-RISK")}, {"out/real.js"})
+        res = scan({"package.json": ext_manifest(main="./out/extension"),
+                    "Package.json": ext_manifest(main="./out/extension", scripts={"vscode:uninstall": "node ./out/u.js"}),
+                    "out/extension.js": "module.exports = 1;\n", "out/u.js": EXFIL_JS})
+        self.assertEqual(res["verdict"], "SUSPICIOUS")
+        hook = issues(res, "SC-INSTALL-HOOK")
+        self.assertEqual([(i["file"], i["name"]) for i in hook], [("Package.json", "Uninstall hook")])
+        self.assertTrue(hook[0]["msg"].startswith("The vscode:uninstall script runs ./out/u.js"), hook[0]["msg"])
+
     def test_an_entry_outside_the_extensions_folder_is_said_and_not_cleared(self):
         # EG-3: VS Code joins main (and browser) to the extension's folder and runs what it names wherever that is,
         # with a warning only; a pack member's folder is one such place (`../publisher.name-1.0.0/…`)

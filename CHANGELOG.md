@@ -631,6 +631,18 @@ project is pre-1.0, so the 0.x API may still change.
   read the main file as the first and the twin as a file nothing loads. Such a pair is now SC-ARCHIVE-DUP
   (MAJOR), and the twin of a file that runs gets the import-time test too. None of the benchmark's, the
   popular set's or Part F's releases holds such a pair.
+- **A file an installer opens by its name is read under any case, as macOS and Windows open it (EG-4's
+  leftover; rule set 2.45.0).** npm opens a package's `package.json` and `binding.gyp`, pip an sdist's
+  `setup.py` and `pyproject.toml`, VS Code an extension's `package.json`; where case and Unicode
+  normalization are ignored, `Package.json` is that file, whether it was written over a `package.json`
+  before it or is the only one. Lazaret read such a file as an ordinary one, so the install hook a
+  `Package.json` twin named and what its `main` named were not read as what runs. Now a root manifest's
+  case variant is read as the manifest too (its hooks, its entry points, an extension's `vscode:uninstall`),
+  a `Setup.py` is code pip runs, and a `PyProject.toml`'s build backend is too; and a path Node opens (a
+  hook's script, a `main`, a `require`) that names no member exactly is the member with its name under
+  another case, as there (`node Setup.js` runs `setup.js`). Of the benchmark's, the
+  popular set's and Part F's releases, one holds such a name, nested, where nothing opens it
+  (`pyarmor/examples/pybench/Setup.py`).
 - **The code an extension's contributions name is read as code that runs (EG-5; rule set 2.43.0).** VS
   Code and the processes it starts run some of an extension's code without its `main` module: the
   TypeScript server loads a `typescriptServerPlugins` package from every installed extension's

