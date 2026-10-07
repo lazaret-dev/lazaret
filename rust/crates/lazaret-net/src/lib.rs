@@ -36,9 +36,17 @@
 //! Lazaret refuses it: TLS 1.2 is its floor on every transport (John, Oct 7), so the Python side does not ask that
 //! server again with Python's own (`nativenet.TLS_FLOOR`).
 //!
+//! **A document comes compressed** (John, Oct 7: gzip for registry documents, "Add after Q-1"): a request that is a
+//! document ([`Request::decompress`]: metadata, an API's answer; never a download, whose bytes are checked as they
+//! were published) asks for `gzip` and `deflate`, and a body that comes as one of them is decoded on the way by
+//! tiny_https's own inflate (its B-37). The decoded body is held to the request's byte budget as the body on the wire
+//! is (over it: [`Failure::TooLarge`]), and to [`MAX_DECODE_RATIO`] times its compressed size once it is
+//! [`DECODE_RATIO_FLOOR`] bytes long; a compressed body that is cut short, corrupt, past the ratio or followed by
+//! anything is [`Failure::Http`]. Every reply says whether its body was decoded ([`Reply::decoded`]). Any other
+//! request asks for the body as it is (`Accept-Encoding: identity`) and gets it so.
+//!
 //! What it does not do: HTTP/3 is off (tiny_https has it, opt-in), nothing is cached, and tiny_https's other opt-in
-//! extras are never asked for: a body comes as the server sent it (no `Content-Encoding` decoding), no cookie is
-//! kept, and a body goes with its head (no `Expect: 100-continue`).
+//! extras are never asked for: no cookie is kept, and a body goes with its head (no `Expect: 100-continue`).
 
 use std::io::Read;
 use std::sync::{Arc, Mutex};
@@ -56,6 +64,12 @@ pub const MAX_REDIRECTS: usize = 10;
 pub const MAX_BODY: u64 = 2 * 1024 * 1024 * 1024;
 /// The default User-Agent, when the caller gives none.
 pub const USER_AGENT: &str = concat!("lazaret/", env!("CARGO_PKG_VERSION"));
+/// A document's decoded body may come to at most this many times its compressed size, once it is
+/// [`DECODE_RATIO_FLOOR`] bytes long: JSON and text compress 5 to 10 to 1 (npm's packument of react, 7.0 MB, comes as
+/// 1.4), and a bomb is made to come near DEFLATE's most, 1,032 to 1.
+pub const MAX_DECODE_RATIO: u64 = 200;
+/// The decoded size from which [`MAX_DECODE_RATIO`] holds (a small body of one byte repeated compresses further).
+pub const DECODE_RATIO_FLOOR: u64 = 1024 * 1024;
 
 /// Why a request did not give a response.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -146,7 +160,10 @@ fn classify(e: NetError) -> Failure {
         // sent there: "request refused: …", "redirect 2 refused: …" (the reason names the host, never the path,
         // a credential or a header's value)
         NetError::Refused(r) => Failure::Refused(r.to_string()),
-        // (a compressed body this layer never asks to have decoded; and whatever a later tiny_https adds)
+        // a document's body over the caller's budget once decoded; a compressed body cut short, corrupt or past the
+        // ratio is the server's fault, as a broken response is ("response body could not be decoded: …", below)
+        NetError::Decode(tiny_https::inflate::Error::OutputLimit { .. }) => Failure::TooLarge,
+        // (and whatever a later tiny_https adds)
         other => Failure::Http(other.to_string()),
     }
 }
@@ -361,6 +378,9 @@ pub struct Request {
     pub proxy: Proxy,
     /// Offer `h2` (the default); false: HTTP/1.1 only, on the shared HTTP/1.1 connections.
     pub http2: bool,
+    /// A document: ask for `gzip` and `deflate` and decode the body (see the module's documentation). Never for a
+    /// download, whose bytes are checked as they were published.
+    pub decompress: bool,
     /// The credentials the hops may get (see [`Credential`]); none in `headers`.
     pub credentials: Vec<Credential>,
 }
@@ -381,6 +401,7 @@ impl std::fmt::Debug for Request {
             .field("max_redirects", &self.max_redirects)
             .field("proxy", &self.proxy)
             .field("http2", &self.http2)
+            .field("decompress", &self.decompress)
             .field("credentials", &self.credentials)
             .finish()
     }
@@ -401,6 +422,7 @@ impl Request {
             max_redirects: 3,
             proxy: Proxy::Env,
             http2: true,
+            decompress: false,
             credentials: Vec::new(),
         }
     }
@@ -417,6 +439,9 @@ pub struct Reply {
     pub headers: Vec<(String, String)>,
     /// The URL that answered, after redirects.
     pub url: String,
+    /// The body came compressed and was decoded (a document's: [`Request::decompress`]); its `Content-Encoding` and
+    /// `Content-Length` are gone from `headers`, since they described the bytes on the wire.
+    pub decoded: bool,
     pub body: Vec<u8>,
 }
 
@@ -525,6 +550,10 @@ fn client_for(req: &Request, hops: &Arc<Hops>) -> Result<Client, Failure> {
     if !req.http2 {
         client = client.http2(false);         // (this request only: the shared HTTP/2 connections stay)
     }
+    if req.decompress {
+        // a document: asked for compressed, decoded within the caller's budget and the ratio (this request only)
+        client = client.decompress(true).max_decoded_bytes(req.max_bytes).max_decode_ratio(MAX_DECODE_RATIO, DECODE_RATIO_FLOOR);
+    }
     for c in &req.credentials {
         if !valid_credential(c) {
             // (the host and the header's name, never its value)
@@ -606,8 +635,8 @@ fn valid_header(name: &str, value: &str) -> bool {
         && value.bytes().all(|b| b == b' ' || b == b'\t' || (0x21..=0x7e).contains(&b))
 }
 
-fn reply_head(s: &ResponseStream) -> (u16, String, Option<String>, Vec<(String, String)>, String) {
-    (s.status, s.version.to_string(), s.tls_version.map(|v| v.to_string()), s.headers.clone(), s.url.to_string())
+fn reply_head(s: &ResponseStream) -> (u16, String, Option<String>, Vec<(String, String)>, String, bool) {
+    (s.status, s.version.to_string(), s.tls_version.map(|v| v.to_string()), s.headers.clone(), s.url.to_string(), s.uncompressed)
 }
 
 /// Sends `req` and reads the whole body (at most `max_bytes`: the client's limit, which a declared length over it
@@ -622,7 +651,7 @@ pub fn fetch(req: &Request) -> Result<Reply, Failure> {
         return Err(Failure::TooLarge);
     }
     Ok(Reply { status: resp.status, version: resp.version.to_string(), tls: resp.tls_version.map(|v| v.to_string()),
-               headers: resp.headers, url: resp.url.to_string(), body: resp.body })
+               headers: resp.headers, url: resp.url.to_string(), decoded: resp.uncompressed, body: resp.body })
 }
 
 /// A response whose body is read in pieces (a download spooled to a file, a stream handed on).
@@ -633,13 +662,15 @@ pub struct Stream {
     pub tls: Option<String>,
     pub headers: Vec<(String, String)>,
     pub url: String,
+    /// The body is decoded as it is read (as [`Reply::decoded`]).
+    pub decoded: bool,
     inner: ResponseStream,
     read: u64,
     limit: u64,
 }
 
 impl Stream {
-    /// The next bytes of the body into `buf` (0 at its end). Over the budget is [`Failure::TooLarge`].
+    /// The next bytes of the body into `buf` (0 at its end). Over the budget is [`Failure::TooLarge`], decoded or not.
     pub fn read(&mut self, buf: &mut [u8]) -> Result<usize, Failure> {
         let n = self.inner.read(buf).map_err(|e| classify(unwrap_io(e)))?;
         self.read += n as u64;
@@ -666,8 +697,8 @@ fn unwrap_io(e: std::io::Error) -> NetError {
 /// Sends `req` and returns once the head is in.
 pub fn open(req: &Request) -> Result<Stream, Failure> {
     let inner = start(req)?;
-    let (status, version, tls, headers, url) = reply_head(&inner);
-    Ok(Stream { status, version, tls, headers, url, inner, read: 0, limit: req.max_bytes })
+    let (status, version, tls, headers, url, decoded) = reply_head(&inner);
+    Ok(Stream { status, version, tls, headers, url, decoded, inner, read: 0, limit: req.max_bytes })
 }
 
 #[cfg(test)]

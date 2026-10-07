@@ -105,6 +105,14 @@ fn serve_h2(handler: impl Fn(&str, &[u8]) -> (u16, Vec<u8>) + Send + Sync + 'sta
 
 /// `serve_h2` whose answer may carry a `location`.
 fn serve_h2_located(handler: impl Fn(&str, &[u8]) -> (u16, Option<String>, Vec<u8>) + Send + Sync + 'static) -> Server {
+    serve_h2_fields(move |path, body| {
+        let (status, location, body) = handler(path, body);
+        (status, location.map(|to| vec![("location".to_string(), to)]).unwrap_or_default(), body)
+    })
+}
+
+/// `serve_h2` whose answer carries fields of its own (and its content-length).
+fn serve_h2_fields(handler: impl Fn(&str, &[u8]) -> (u16, Vec<(String, String)>, Vec<u8>) + Send + Sync + 'static) -> Server {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
     let config = Arc::new(ServerConfig::from_pki(pki()).with_alpn(&["h2", "http/1.1"]));
@@ -126,12 +134,10 @@ fn serve_h2_located(handler: impl Fn(&str, &[u8]) -> (u16, Option<String>, Vec<u
                 let mut answer = |r: &h2_server::Request| {
                     let fields: String = r.headers.iter().map(|(n, v)| format!("\r\n{n}: {v}")).collect();
                     s.lock().unwrap().push(Seen { head: format!("{} {} HTTP/2{fields}", r.method, r.path), body: r.body.clone() });
-                    let (status, location, body) = handler(&r.path, &r.body);
+                    let (status, extra, body) = handler(&r.path, &r.body);
                     let length = body.len().to_string();
                     let mut fields = vec![("content-length", length.as_str())];
-                    if let Some(to) = &location {
-                        fields.push(("location", to.as_str()));
-                    }
+                    fields.extend(extra.iter().map(|(n, v)| (n.as_str(), v.as_str())));
                     h2_server::response(status, &fields, &body)
                 };
                 let _ = h2_server::serve(&mut tls, &h2_server::Settings::default(), &mut answer);
@@ -866,4 +872,218 @@ fn debug_shows_no_password() {
     // (a proxy's setting may have no scheme: tiny_https reads "user:password@host:port" as one)
     let shown = format!("{:?}", Proxy::Url("puser:pr0xy@proxy.example:3128".into()));
     assert!(!shown.contains("pr0xy") && !shown.contains("puser") && shown.contains("proxy.example:3128"), "{shown}");
+}
+
+// ------------------------------------------------------------------------------------------- compressed documents
+// (gzip for registry documents, John, Oct 7: "Add after Q-1". The compressed bodies are built here as tiny_https's own
+// tests build them: stored blocks for ordinary data, and one dynamic block for the classic bomb.)
+
+fn stored(data: &[u8]) -> Vec<u8> {
+    let mut out = Vec::new();
+    let chunks: Vec<&[u8]> = if data.is_empty() { vec![&[][..]] } else { data.chunks(65_535).collect() };
+    for (i, c) in chunks.iter().enumerate() {
+        out.push(u8::from(i + 1 == chunks.len()));
+        out.extend_from_slice(&(c.len() as u16).to_le_bytes());
+        out.extend_from_slice(&(!(c.len() as u16)).to_le_bytes());
+        out.extend_from_slice(c);
+    }
+    out
+}
+
+fn gzip_of(deflate: &[u8], crc: u32, len: u64) -> Vec<u8> {
+    let mut g = vec![0x1f, 0x8b, 0x08, 0, 0, 0, 0, 0, 0, 3];
+    g.extend_from_slice(deflate);
+    g.extend_from_slice(&crc.to_le_bytes());
+    g.extend_from_slice(&(len as u32).to_le_bytes());
+    g
+}
+
+fn gzip(data: &[u8]) -> Vec<u8> {
+    gzip_of(&stored(data), tiny_https::inflate::crc32(0, data), data.len() as u64)
+}
+
+/// Bits, least significant first, as DEFLATE packs them.
+struct Bits {
+    out: Vec<u8>,
+    acc: u64,
+    n: u32,
+}
+
+impl Bits {
+    fn put(&mut self, value: u64, n: u32) {
+        self.acc |= value << self.n;
+        self.n += n;
+        while self.n >= 8 {
+            self.out.push(self.acc as u8);
+            self.acc >>= 8;
+            self.n -= 8;
+        }
+    }
+
+    /// A Huffman code, which DEFLATE sends most significant bit first.
+    fn code(&mut self, code: u64, len: u32) {
+        let reversed = (0..len).fold(0, |r, i| r | ((code >> i) & 1) << (len - 1 - i));
+        self.put(reversed, len);
+    }
+}
+
+/// A gzip bomb, valid to its trailer: `1 + 258 * matches` zeros in one dynamic block whose code gives the length 258
+/// one bit and the distance 1 one bit, so each match of 258 bytes takes two bits (1,032 to 1, as far as DEFLATE goes).
+fn gzip_bomb(matches: u64) -> Vec<u8> {
+    let mut b = Bits { out: Vec::new(), acc: 0, n: 0 };
+    b.put(1, 1);
+    b.put(2, 2);
+    b.put(29, 5);
+    b.put(0, 5);
+    b.put(14, 4);
+    for len in [0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 0, 2] {
+        b.put(len, 3);
+    }
+    let (c18, c1, c2) = ((0, 1), (0b10, 2), (0b11, 2));
+    b.code(c2.0, c2.1);
+    b.code(c18.0, c18.1);
+    b.put(138 - 11, 7);
+    b.code(c18.0, c18.1);
+    b.put(117 - 11, 7);
+    b.code(c2.0, c2.1);
+    b.code(c18.0, c18.1);
+    b.put(28 - 11, 7);
+    b.code(c1.0, c1.1);
+    b.code(c1.0, c1.1);
+    b.code(0b10, 2);
+    for _ in 0..matches {
+        b.code(0, 1);
+        b.code(0, 1);
+    }
+    b.code(0b11, 2);
+    if b.n > 0 {
+        b.out.push(b.acc as u8);
+    }
+    let n = 1 + 258 * matches;
+    let (zeros, mut crc, mut left) = (vec![0u8; 1 << 16], 0, n);
+    while left > 0 {
+        let k = left.min(zeros.len() as u64) as usize;
+        crc = tiny_https::inflate::crc32(crc, &zeros[..k]);
+        left -= k as u64;
+    }
+    gzip_of(&b.out, crc, n)
+}
+
+fn doc_text(n: usize) -> Vec<u8> {
+    br#"{"name": "left-pad", "versions": {"1.3.0": {"dist": {"tarball": "https://registry.invalid/x.tgz"}}}}"#
+        .iter().copied().cycle().take(n).collect()
+}
+
+fn document(server: &Server, path: &str, budget: u64) -> Request {
+    let mut req = request(server, path);
+    req.decompress = true;
+    req.max_bytes = budget;
+    req
+}
+
+/// Answers by path: the body gzipped (when the request asks for gzip), as it is, a bomb, a stream cut short.
+fn compressing_server() -> Server {
+    serve(|seen| {
+        let asks = seen.header("accept-encoding").map_or(false, |v| v.contains("gzip"));
+        let data = doc_text(50_000);
+        Some(match seen.path() {
+            "/doc" if asks => response(200, &["Content-Encoding: gzip", "Content-Type: application/json"], &gzip(&data)),
+            "/doc" => response(200, &["Content-Type: application/json"], &data),
+            "/tgz" => response(200, &["Content-Encoding: gzip"], &gzip(&data)),     // (a file served as it is stored)
+            "/bomb" => response(200, &["Content-Encoding: gzip"], &gzip_bomb(40_000)),          // 10.3 MB of zeros
+            "/small-bomb" => response(200, &["Content-Encoding: gzip"], &gzip_bomb(1_000)),     // 258,001 zeros
+            "/cut" => {
+                let whole = gzip(&data);
+                response(200, &["Content-Encoding: gzip"], &whole[..whole.len() - 9])
+            }
+            "/trailing" => {
+                let mut extra = gzip(&data);
+                extra.extend_from_slice(b"more");
+                response(200, &["Content-Encoding: gzip"], &extra)
+            }
+            _ => response(404, &[], b""),
+        })
+    })
+}
+
+#[test]
+fn a_document_asks_for_gzip_and_gets_its_body_decoded() {
+    let server = compressing_server();
+    let reply = fetch(&document(&server, "/doc", 1 << 20)).unwrap();
+    assert!(reply.decoded);
+    assert_eq!(reply.body, doc_text(50_000));
+    assert!(reply.headers.iter().all(|(n, _)| !n.eq_ignore_ascii_case("content-encoding") && !n.eq_ignore_ascii_case("content-length")),
+            "the wire's fields are gone: {:?}", reply.headers);
+    assert_eq!(server.seen.lock().unwrap()[0].header("accept-encoding"), Some("gzip, deflate"));
+    // streamed too
+    let mut stream = open(&document(&server, "/doc", 1 << 20)).unwrap();
+    assert!(stream.decoded);
+    let (mut got, mut buf) = (Vec::new(), [0u8; 4096]);
+    loop {
+        let n = stream.read(&mut buf).unwrap();
+        if n == 0 {
+            break;
+        }
+        got.extend_from_slice(&buf[..n]);
+    }
+    assert_eq!(got, doc_text(50_000));
+}
+
+#[test]
+fn any_other_request_gets_the_bytes_as_they_came() {
+    let server = compressing_server();
+    let reply = fetch(&request(&server, "/tgz")).unwrap();
+    assert!(!reply.decoded);
+    assert_eq!(reply.body, gzip(&doc_text(50_000)), "a download's bytes are the ones published");
+    assert_eq!(reply.headers.iter().find(|(n, _)| n.eq_ignore_ascii_case("content-encoding")).map(|(_, v)| v.as_str()), Some("gzip"));
+    assert_eq!(server.seen.lock().unwrap()[0].header("accept-encoding"), Some("identity"));
+    let reply = fetch(&request(&server, "/doc")).unwrap();
+    assert_eq!((reply.decoded, reply.body.len()), (false, 50_000), "not asked for, not sent");
+}
+
+#[test]
+fn a_decoded_body_is_held_to_the_budget_and_the_ratio() {
+    let server = compressing_server();
+    // the bomb is 10 KB on the wire and 10.3 MB decoded: past a budget below the ratio's floor, too large; under a
+    // budget of 64 MB, past the ratio once it is a megabyte long
+    assert_eq!(fetch(&document(&server, "/bomb", 512 << 10)).unwrap_err(), Failure::TooLarge);
+    match fetch(&document(&server, "/bomb", 64 << 20)).unwrap_err() {
+        Failure::Http(m) => assert!(m.contains(&format!("more than {MAX_DECODE_RATIO} times its size")), "{m}"),
+        other => panic!("{other:?}"),
+    }
+    let failed = open(&document(&server, "/bomb", 512 << 10)).and_then(|mut s| {
+        let mut buf = vec![0u8; 1 << 16];
+        loop {
+            if s.read(&mut buf)? == 0 {
+                break Ok(());
+            }
+        }
+    });
+    assert_eq!(failed.unwrap_err(), Failure::TooLarge, "streamed too");
+    // decoded, exactly the budget is fine (under the ratio's floor, a small bomb is a body like any other)
+    assert_eq!(fetch(&document(&server, "/small-bomb", 258_001)).unwrap().body.len(), 258_001);
+    assert_eq!(fetch(&document(&server, "/small-bomb", 258_000)).unwrap_err(), Failure::TooLarge);
+    // and the body on the wire is held to it too
+    assert_eq!(fetch(&document(&server, "/doc", 49_999)).unwrap_err(), Failure::TooLarge);
+}
+
+#[test]
+fn a_compressed_body_that_is_not_whole_is_the_servers_fault() {
+    let server = compressing_server();
+    for path in ["/cut", "/trailing"] {
+        match fetch(&document(&server, path, 1 << 20)).unwrap_err() {
+            Failure::Http(m) => assert!(m.starts_with("response body could not be decoded"), "{path}: {m}"),
+            other => panic!("{path}: {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn over_http2_a_document_is_decoded_too() {
+    let data = doc_text(30_000);
+    let gz = gzip(&data);
+    let server = serve_h2_fields(move |_, _| (200, vec![("content-encoding".to_string(), "gzip".to_string())], gz.clone()));
+    let reply = fetch(&document(&server, "/doc", 1 << 20)).unwrap();
+    assert_eq!((reply.version.as_str(), reply.decoded, reply.body.len()), ("HTTP/2", true, 30_000));
+    assert_eq!(server.seen.lock().unwrap()[0].header("accept-encoding"), Some("gzip, deflate"));
 }

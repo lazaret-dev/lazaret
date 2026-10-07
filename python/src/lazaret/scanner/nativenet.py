@@ -31,6 +31,9 @@ certificates Python's default context loads (on Windows, the system's certificat
 would use, from `HTTPS_PROXY` / `NO_PROXY` (followed on every redirect hop), or from the system's settings (macOS,
 Windows) when the environment names none.
 
+A document comes compressed (`gzip`: a budget of at most GZIP_BUDGET asks for `gzip, deflate`, and the body is decoded
+within its budget); a download comes as published. `LAZARET_GZIP=0` asks for no compressed body.
+
 `request` reads a body whole, `open_stream` hands it over in pieces. A request that gets no response raises `NetError`
 (`kind`: "refused", "too-large", "tls" (a server below the floor too), "timeout", "network", "http", "setup"); one
 that should go through Python's transport raises `UsePython`. The caller turns either into its own error (repo.py: FetchError).
@@ -60,9 +63,14 @@ TLS_FLOOR = ssl.TLSVersion.TLSv1_2
 #: which protocol: "auto" (the default: documents over HTTP/2, downloads over HTTP/1.1), "2" (HTTP/2 for every
 #: request), "1.1" (HTTP/1.1 only). HTTP/2 is offered, never forced: a server that does not pick it gets HTTP/1.1.
 HTTP_ENV = "LAZARET_HTTP"
+#: "0" (or "off"): no request asks for a compressed body; by default a document does (`gzip`)
+GZIP_ENV = "LAZARET_GZIP"
 #: the largest budget of a request that is a document (registry metadata, an API's answer, a query); a request that
 #: may be larger is a download (an artifact, a feed's archive)
 DOCUMENT_BUDGET = 32 * 1024 * 1024
+#: the largest budget of a request that asks for its body compressed: every document's, the guard's too (64 MiB, for
+#: npm's full packuments); a download's budget is 200 MiB and more, and its bytes are taken as published
+GZIP_BUDGET = 64 * 1024 * 1024
 STATUS_OK, STATUS_ERROR = 0, 1
 
 
@@ -112,6 +120,9 @@ class Reply(NamedTuple):
     body: bytes
     #: the TLS version the reply came over: "TLS 1.3" or "TLS 1.2"
     tls: str = None
+    #: the body came compressed and was decoded (a document's: `gzip`); its Content-Encoding and Content-Length,
+    #: which described the bytes on the wire, are gone from `headers`
+    decoded: bool = False
 
     def header(self, name):
         name = name.lower()
@@ -362,7 +373,7 @@ def _proxy_for(url):
 
 
 def _spec(url, hosts, method, headers, max_bytes, timeout, max_redirects, total_timeout, h2=None, proxy=None,
-          credentials=()):
+          credentials=(), compressed=None):
     if hosts is not None and not hosts:
         raise NetError("setup", "a request needs the hosts its caller may reach")
     credentials = [Credential(*c) for c in credentials or ()]
@@ -375,6 +386,7 @@ def _spec(url, hosts, method, headers, max_bytes, timeout, max_redirects, total_
         "total_timeout_ms": None if total_timeout is None else max(1, int(total_timeout * 1000)),
         "max_redirects": int(max_redirects), "proxy": _proxy_for(url) if proxy is None else proxy,
         "http2": http2(max_bytes) if h2 is None else bool(h2),
+        "decompress": gzip(max_bytes) if compressed is None else bool(compressed),
     }
     if credentials:
         spec["credentials"] = [{"host": c.host, "path": c.path, "name": c.name, "value": c.value, "first": bool(c.first)}
@@ -396,6 +408,18 @@ def http2(max_bytes=None):
     return max_bytes is None or max_bytes <= DOCUMENT_BUDGET
 
 
+def gzip(max_bytes=None):
+    """Does a request with this budget ask for its body compressed (gzip or deflate) and have it decoded? A document's
+    does (a budget of at most GZIP_BUDGET: metadata, an API's answer, which come five to thirteen times smaller): the
+    native client decodes it with tiny_https's own inflate, within the request's budget and lazaret-net's
+    MAX_DECODE_RATIO. A download's does not: its bytes are the ones published, which its digest is checked against.
+    `LAZARET_GZIP=0` asks for none: a CDN that compresses a large document as it sends it (npm's full packuments) can
+    be slower than a fast network carrying it whole (measured from a data center, docs/DESIGN.md)."""
+    if os.environ.get(GZIP_ENV, "").strip().lower() in ("0", "off", "no", "false"):
+        return False
+    return max_bytes is None or max_bytes <= GZIP_BUDGET
+
+
 def _failure(url, answer):
     try:
         doc = json.loads(answer)
@@ -410,40 +434,43 @@ def _failure(url, answer):
 
 
 def _head(answer):
-    """(status, version, headers, url, tls) of an answer's head."""
+    """(status, version, headers, url, tls, decoded) of an answer's head."""
     doc = json.loads(answer)
-    return doc["status"], doc["version"], [tuple(h) for h in doc["headers"]], doc["url"], doc.get("tls")
+    return (doc["status"], doc["version"], [tuple(h) for h in doc["headers"]], doc["url"], doc.get("tls"),
+            bool(doc.get("decoded")))
 
 
 def request(url, *, hosts, method="GET", headers=(), data=None, max_bytes, timeout, max_redirects=3,
-            total_timeout=None, h2=None, proxy=None, credentials=()):
-    """Send one request and read its body whole (at most `max_bytes`): a `Reply`, whatever its status. NetError when
-    no response came; UsePython when Python's transport is to send it. `hosts`: the hosts the URL and every redirect
-    may go to, or None for any (https, the URL limits, still hold: a caller that checked the first URL itself). `h2`:
-    offer HTTP/2 (True), or not (False); None: as `http2` says for the budget. `proxy`: "direct", "env" or a proxy's
-    URL; None: as urllib would choose. `credentials`: `Credential`s, each given to the hops to its own host alone
-    (none of them may be in `headers`)."""
+            total_timeout=None, h2=None, proxy=None, credentials=(), compressed=None):
+    """Send one request and read its body whole (at most `max_bytes`, decoded or not): a `Reply`, whatever its status.
+    NetError when no response came; UsePython when Python's transport is to send it. `hosts`: the hosts the URL and
+    every redirect may go to, or None for any (https, the URL limits, still hold: a caller that checked the first URL
+    itself). `h2`: offer HTTP/2 (True), or not (False); None: as `http2` says for the budget. `proxy`: "direct", "env"
+    or a proxy's URL; None: as urllib would choose. `credentials`: `Credential`s, each given to the hops to its own
+    host alone (none of them may be in `headers`). `compressed`: ask for the body compressed and decode it (True), or
+    not (False); None: as `gzip` says for the budget."""
     lib = _setup()
     if lib is None or disabled():
         raise UsePython(why_not() or "the native transport is not available")
-    spec = _spec(url, hosts, method, headers, max_bytes, timeout, max_redirects, total_timeout, h2, proxy, credentials)
+    spec = _spec(url, hosts, method, headers, max_bytes, timeout, max_redirects, total_timeout, h2, proxy, credentials,
+                 compressed)
     meta, meta_len, body, body_len = ctypes.c_void_p(), ctypes.c_size_t(), ctypes.c_void_p(), ctypes.c_size_t()
     status = lib.lazaret_net_request(spec, len(spec), data, len(data or b""), ctypes.byref(meta), ctypes.byref(meta_len),
                                      ctypes.byref(body), ctypes.byref(body_len))
     answer, payload = _take(lib, meta, meta_len), _take(lib, body, body_len)
     if status != STATUS_OK:
         _failure(url, answer)
-    status, version, headers, final, tls = _head(answer)
-    return Reply(status, version, headers, final, payload, tls)
+    status, version, headers, final, tls, decoded = _head(answer)
+    return Reply(status, version, headers, final, payload, tls, decoded)
 
 
 class Stream:
-    """A response whose body is read in pieces: `status`, `version`, `headers`, `url`, `tls` (as a Reply's); `read(n)`
-    (b"" at the end), iteration by chunks, and `close()` (a context manager closes it)."""
+    """A response whose body is read in pieces: `status`, `version`, `headers`, `url`, `tls`, `decoded` (as a Reply's);
+    `read(n)` (b"" at the end), iteration by chunks, and `close()` (a context manager closes it)."""
 
     def __init__(self, lib, handle, head, url):
         self._lib, self._handle, self._url = lib, handle, url
-        self.status, self.version, self.headers, self.url, self.tls = head
+        self.status, self.version, self.headers, self.url, self.tls, self.decoded = head
         self._buf = ctypes.create_string_buffer(64 * 1024)
 
     def header(self, name):
@@ -490,13 +517,14 @@ class Stream:
 
 
 def open_stream(url, *, hosts, method="GET", headers=(), data=None, max_bytes, timeout, max_redirects=3,
-                total_timeout=None, h2=None, proxy=None, credentials=()):
+                total_timeout=None, h2=None, proxy=None, credentials=(), compressed=None):
     """Send one request and return once its head is in: a `Stream` (the body read with `read`), whatever its
-    status. NetError, UsePython, `hosts`, `h2`, `proxy` and `credentials` as `request`."""
+    status. NetError, UsePython, `hosts`, `h2`, `proxy`, `credentials` and `compressed` as `request`."""
     lib = _setup()
     if lib is None or disabled():
         raise UsePython(why_not() or "the native transport is not available")
-    spec = _spec(url, hosts, method, headers, max_bytes, timeout, max_redirects, total_timeout, h2, proxy, credentials)
+    spec = _spec(url, hosts, method, headers, max_bytes, timeout, max_redirects, total_timeout, h2, proxy, credentials,
+                 compressed)
     meta, meta_len, handle = ctypes.c_void_p(), ctypes.c_size_t(), ctypes.c_uint64()
     status = lib.lazaret_net_open(spec, len(spec), data, len(data or b""), ctypes.byref(meta), ctypes.byref(meta_len),
                                   ctypes.byref(handle))

@@ -565,6 +565,14 @@ project is pre-1.0, so the 0.x API may still change.
   that speaks neither version is refused (below). The drop's other additions (decoding compressed
   bodies, a cookie jar, `Expect: 100-continue`) are opt-in and Lazaret asks for none of them; it also brings the
   library's first run against real servers (52 real certificate chains, replayed offline in CI).
+- **Registry documents come compressed (gzip).** Metadata and API answers (a request whose budget is at most
+  64 MiB) ask for `gzip, deflate`, and the native transport decodes them with tiny_https's own inflate, held to the
+  request's byte budget once decoded and to 200 times their compressed size; a download (a tarball, a wheel, a
+  feed's archive) is still taken byte for byte as published. npm's packuments come 5 to 13 times smaller (vite's
+  39 MB as 4.6), PyPI's documents 4.5 to 5.7. Through a link capped at 100 Mbit/s, fourteen large documents took
+  3.6 s instead of 17.4 one at a time. From a data center with a very fast link to npm they took longer (2.9 to
+  4.6 s instead of 1.1 to 1.6), because npm's CDN compresses a full packument as it sends it:
+  `LAZARET_GZIP=0` turns compression off.
 - **Nothing older than TLS 1.2, on either transport.** A server that speaks neither TLS 1.3 nor TLS 1.2 was handed
   from the native client to Python's transport, which refused it too on every Python Lazaret supports, but only
   because Python's own default says so. Now the native client refuses it with an error that names the server

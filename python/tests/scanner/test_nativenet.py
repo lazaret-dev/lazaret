@@ -7,6 +7,9 @@ HTTP/1.1 (the native client offers h2 and takes HTTP/1.1 when the server does no
 lazaret-net's own tests against tiny_https's server). Hosts are `localhost` on the server's port; nothing leaves the
 machine."""
 
+import functools
+import gzip
+import hashlib
 import http.server
 import json
 import os
@@ -23,7 +26,7 @@ import unittest
 import urllib.request
 from unittest import mock
 
-from lazaret.registry import repo
+from lazaret.registry import guard, repo
 from lazaret.registry.ecosystems import base
 from lazaret.scanner import nativenet
 
@@ -50,6 +53,22 @@ def make_pki(folder):
             os.path.join(folder, "leaf.key"))
 
 
+@functools.lru_cache(maxsize=None)
+def compressed(name):
+    """The bodies of the compressed routes: (what the server sends, what it holds)."""
+    if name == "doc":                     # a registry document: JSON that compresses as JSON does, not a hundredfold
+        doc = json.dumps({"name": "left-pad", "versions": {f"1.{i}.0": {"dist": {
+            "shasum": hashlib.sha1(str(i).encode()).hexdigest(), "tarball": f"https://registry.invalid/left-pad-1.{i}.0.tgz"}}
+            for i in range(30_000)}}).encode()
+        return gzip.compress(doc), doc
+    if name == "bomb":                    # 12 MiB of zeros in 12 KB
+        return gzip.compress(bytes(12 << 20)), None
+    if name == "cut":
+        whole = gzip.compress(b"[1, 2, 3]" * 1000)
+        return whole[:-12], None
+    raise KeyError(name)
+
+
 class Handler(http.server.BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
@@ -67,6 +86,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self._send(200, b"hello", [("X-Test", "1")])
         elif self.path == "/json":
             self._send(200, json.dumps({"a": [1, 2]}).encode(), [("Content-Type", "application/json")])
+        elif self.path == "/gz":                           # (compressed when asked: a registry document)
+            sent, doc = compressed("doc")
+            asked = "gzip" in (self.headers.get("Accept-Encoding") or "")
+            self._send(200, sent if asked else doc, [("Content-Encoding", "gzip")] if asked else [])
+        elif self.path == "/gz-file":                      # (a .tgz served with the header, whatever was asked)
+            self._send(200, compressed("doc")[0], [("Content-Encoding", "gzip")])
+        elif self.path in ("/gz-bomb", "/gz-cut"):
+            self._send(200, compressed(self.path[4:])[0], [("Content-Encoding", "gzip")])
         elif self.path == "/headers":
             self._send(200, json.dumps({k.lower(): v for k, v in self.headers.items()}).encode())
         elif self.path.startswith("/size/"):
@@ -335,6 +362,61 @@ class NativeTransportTests(unittest.TestCase):
         finally:
             stop.set()
 
+    def test_a_document_comes_compressed_and_is_decoded(self):
+        # (gzip for registry documents, John, Oct 7: "Add after Q-1")
+        sent, doc = compressed("doc")
+        ask = dict(hosts=[self.host], timeout=10)
+        reply = nativenet.request(self.url("/gz"), max_bytes=repo.MAX_FEED_BYTES, **ask)
+        self.assertEqual((reply.status, reply.decoded, reply.body), (200, True, doc))
+        self.assertEqual((reply.header("content-encoding"), reply.header("content-length")), (None, None),
+                         "the fields that described the wire are gone")
+        seen = json.loads(nativenet.request(self.url("/headers"), max_bytes=repo.MAX_FEED_BYTES, **ask).body)
+        self.assertEqual(seen["accept-encoding"], "gzip, deflate")
+        with nativenet.open_stream(self.url("/gz"), max_bytes=repo.MAX_FEED_BYTES, **ask) as stream:
+            self.assertTrue(stream.decoded)
+            self.assertEqual(b"".join(stream), doc)
+        # the registry's fetch reads it as JSON
+        eco = types.SimpleNamespace(id="local", hosts=frozenset({self.host}), rate={})
+        with mock.patch.object(repo, "_module_opener", side_effect=AssertionError("urllib was used")):
+            self.assertEqual(base.Fetch(eco, repo.module_transport).json(self.url("/gz")), json.loads(doc))
+        # the caller's choice over the budget's
+        reply = nativenet.request(self.url("/gz"), max_bytes=repo.MAX_FEED_BYTES, compressed=False, **ask)
+        self.assertEqual((reply.decoded, reply.body), (False, doc))
+
+    def test_a_downloads_bytes_are_the_ones_published(self):
+        sent, _ = compressed("doc")
+        ask = dict(hosts=[self.host], max_bytes=repo.MAX_DOWNLOAD_BYTES, timeout=10)
+        reply = nativenet.request(self.url("/gz-file"), **ask)
+        self.assertEqual((reply.decoded, reply.body, reply.header("content-encoding")), (False, sent, "gzip"))
+        self.assertEqual(json.loads(nativenet.request(self.url("/headers"), **ask).body)["accept-encoding"], "identity")
+        with nativenet.open_stream(self.url("/gz-file"), **ask) as stream:
+            self.assertEqual((stream.decoded, b"".join(stream)), (False, sent))
+
+    def test_a_decoded_body_is_held_to_the_budget_and_the_ratio(self):
+        def kind_of(path, budget, stream=False):
+            with self.assertRaises(nativenet.NetError) as caught:
+                if stream:
+                    with nativenet.open_stream(self.url(path), hosts=[self.host], max_bytes=budget, timeout=10) as s:
+                        b"".join(s)
+                else:
+                    nativenet.request(self.url(path), hosts=[self.host], max_bytes=budget, timeout=10)
+            return caught.exception.kind, str(caught.exception)
+        # the document is 0.9 MB on the wire and 4.2 MB decoded; the bomb is 12 KB and 12 MiB
+        for stream in (False, True):
+            with self.subTest(stream=stream):
+                self.assertEqual(kind_of("/gz", 2 << 20, stream)[0], "too-large")
+                self.assertEqual(kind_of("/gz-bomb", 512 << 10, stream)[0], "too-large")
+                kind, message = kind_of("/gz-bomb", nativenet.GZIP_BUDGET, stream)
+                self.assertEqual(kind, "http")
+                self.assertIn("decompresses to more than 200 times its size", message)
+                kind, message = kind_of("/gz-cut", repo.MAX_FEED_BYTES, stream)
+                self.assertEqual(kind, "http")
+                self.assertIn("could not be decoded", message)
+        eco = types.SimpleNamespace(id="local", hosts=frozenset({self.host}), rate={})
+        with self.assertRaises(repo.FetchError) as caught:
+            base.Fetch(eco, repo.module_transport).bytes(self.url("/gz-bomb"), max_bytes=512 << 10)
+        self.assertIn("exceeds", str(caught.exception))
+
     def seen(self, path, credentials, hosts=None, **kw):
         """The request's fields as the server saw them (on the last hop)."""
         reply = nativenet.request(self.url(path), hosts=hosts or [self.host, f"127.0.0.1:{self.port}"], max_bytes=10_000,
@@ -486,7 +568,7 @@ class ChoiceTests(unittest.TestCase):
         self.assertEqual(spec, {"method": "GET", "url": "https://a.example/x", "headers": [["Accept", "x"]],
                                 "hosts": ["a.example", "b.example"], "any_host": False, "max_bytes": 10,
                                 "timeout_ms": 2500, "total_timeout_ms": None, "max_redirects": 3, "proxy": "direct",
-                                "http2": True})
+                                "http2": True, "decompress": True})
         spec = json.loads(nativenet._spec("https://a.example/x", None, "GET", [], 10, 1, 3, None, None, "direct"))
         self.assertEqual((spec["hosts"], spec["any_host"], spec["proxy"]), ([], True, "direct"), "no host rule")
         with self.assertRaises(nativenet.NetError):
@@ -527,6 +609,26 @@ class ChoiceTests(unittest.TestCase):
         self.assertTrue(offered(repo.MAX_FEED_BYTES, "auto"))
         self.assertFalse(offered(repo.MAX_FEED_BYTES, h2=False), "the caller's choice")
         self.assertTrue(offered(repo.MAX_DOWNLOAD_BYTES, h2=True))
+
+    def test_documents_ask_for_gzip_and_downloads_for_the_bytes_as_published(self):
+        def asked(budget, compressed=None, mode=None):
+            env = {k: v for k, v in os.environ.items() if k != nativenet.GZIP_ENV}
+            if mode is not None:
+                env[nativenet.GZIP_ENV] = mode
+            with mock.patch.object(nativenet, "_proxy_for", lambda url: "direct"), mock.patch.dict(os.environ, env, clear=True):
+                return json.loads(nativenet._spec("https://a.example/x", {"a.example"}, "GET", [], budget, 1, 3, None,
+                                                  compressed=compressed))["decompress"]
+        self.assertTrue(asked(repo.MAX_FEED_BYTES), "a registry document")
+        self.assertTrue(asked(nativenet.DOCUMENT_BUDGET), "the Marketplace's query, PyPI's XML-RPC")
+        self.assertTrue(asked(guard.MAX_DOCUMENT), "the guard's documents: npm's full packuments")
+        self.assertEqual(guard.MAX_DOCUMENT, nativenet.GZIP_BUDGET)
+        self.assertFalse(asked(repo.MAX_DOWNLOAD_BYTES), "an artifact, which its digest is checked against")
+        self.assertFalse(asked(base.MAX_ARTIFACT_BYTES), "a registry module's artifact")
+        self.assertFalse(asked(repo.MAX_FEED_BYTES, False), "the caller's choice")
+        self.assertTrue(asked(repo.MAX_DOWNLOAD_BYTES, True))
+        for off in ("0", "off", "No"):
+            self.assertFalse(asked(repo.MAX_FEED_BYTES, mode=off), off)
+        self.assertTrue(asked(repo.MAX_FEED_BYTES, mode="1"))
 
 
 if __name__ == "__main__":

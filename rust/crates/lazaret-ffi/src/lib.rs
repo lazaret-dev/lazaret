@@ -162,15 +162,19 @@ mod native {
 /// ```text
 /// {"method": "GET", "url": "https://…", "headers": [["Accept", "…"], …], "hosts": ["registry.npmjs.org", …],
 ///  "max_bytes": 5242880, "timeout_ms": 30000, "total_timeout_ms": null, "max_redirects": 3,
-///  "proxy": "env" | "direct" | "http://host:port", "http2": true, "any_host": false,
+///  "proxy": "env" | "direct" | "http://host:port", "http2": true, "decompress": false, "any_host": false,
 ///  "credentials": [{"host": "api.github.com", "path": "/", "name": "Authorization", "value": "…", "first": false}, …]}
 /// ```
+///
+/// `decompress` makes it a document's request: asked for compressed and decoded, within its budget
+/// (lazaret_net::Request::decompress).
 ///
 /// A credential goes to the hops to its own host only (lazaret_net::Credential: tiny_https's hop hook), never as a
 /// header a redirect could carry on.
 ///
 /// The answer is JSON too, in a buffer the library allocates: `{"status": 200, "version": "HTTP/2", "tls": "TLS 1.3"
-/// | "TLS 1.2" | null, "headers": [[name, value], …], "url": "…"}` with the body in a second buffer (status 0), or
+/// | "TLS 1.2" | null, "headers": [[name, value], …], "url": "…", "decoded": false}` with the body in a second buffer
+/// (status 0; `decoded`: it came compressed and was decoded), or
 /// `{"kind": "refused" | "too-large" | "tls-version" | "tls" | "timeout" | "network" | "http" | "setup", "error": "…"}`
 /// (status 1), and for "tls-version" `"host"`, the host of the hop that offered neither TLS 1.3 nor 1.2 (a
 /// redirect's, when it was one). Every buffer goes back to `lazaret_engine_free`. A panic never crosses the boundary
@@ -248,6 +252,7 @@ pub mod net {
             max_redirects,
             proxy,
             http2: !matches!(spec.get("http2"), Some(Value::Bool(false))),
+            decompress: matches!(spec.get("decompress"), Some(Value::Bool(true))),
             credentials,
         })
     }
@@ -260,11 +265,11 @@ pub mod net {
         json::write(&Value::obj(fields))
     }
 
-    fn head(status: u16, version: &str, tls: Option<&str>, headers: &[(String, String)], url: &str) -> String {
+    fn head(status: u16, version: &str, tls: Option<&str>, headers: &[(String, String)], url: &str, decoded: bool) -> String {
         let headers = headers.iter().map(|(n, v)| Value::Arr(vec![Value::str(n), Value::str(v)])).collect();
         json::write(&Value::obj(vec![("status", Value::Int(status as i64)), ("version", Value::str(version)),
                                      ("tls", tls.map_or(Value::Null, Value::str)), ("headers", Value::Arr(headers)),
-                                     ("url", Value::str(url))]))
+                                     ("url", Value::str(url)), ("decoded", Value::Bool(decoded))]))
     }
 
     /// (status, answer, body) for one request description.
@@ -279,8 +284,8 @@ pub mod net {
                 Err(m) => return (STATUS_ERROR, failure(&Failure::Setup(m)), Vec::new()),
             };
             match lazaret_net::fetch(&req) {
-                Ok(reply) => (STATUS_OK, head(reply.status, &reply.version, reply.tls.as_deref(), &reply.headers, &reply.url),
-                              reply.body),
+                Ok(reply) => (STATUS_OK, head(reply.status, &reply.version, reply.tls.as_deref(), &reply.headers, &reply.url,
+                                              reply.decoded), reply.body),
                 Err(f) => (STATUS_ERROR, failure(&f), Vec::new()),
             }
         }));
@@ -307,7 +312,8 @@ pub mod net {
             };
             match lazaret_net::open(&req) {
                 Ok(stream) => {
-                    let answer = head(stream.status, &stream.version, stream.tls.as_deref(), &stream.headers, &stream.url);
+                    let answer = head(stream.status, &stream.version, stream.tls.as_deref(), &stream.headers, &stream.url,
+                                      stream.decoded);
                     let id = NEXT.fetch_add(1, Ordering::Relaxed);
                     streams().get_or_insert_with(HashMap::new).insert(id, Arc::new(Mutex::new(stream)));
                     (STATUS_OK, answer, id)
@@ -775,6 +781,20 @@ mod tests {
             assert_eq!(s, STATUS_ERROR);
             assert!(a.contains("needs module"), "{a}");
         }
+    }
+
+    /// A request's description (native only): a document's asks for a compressed body (gzip for documents, Oct 7).
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_documents_request_is_read_from_its_description() {
+        let of = |extra: &str| {
+            let text = format!(r#"{{"method": "GET", "url": "https://a.example/x", "hosts": ["a.example"], "max_bytes": 10{extra}}}"#);
+            net::request_of(&json::parse_str(&text).unwrap(), b"").unwrap().decompress
+        };
+        assert!(of(r#", "decompress": true"#));
+        assert!(!of(r#", "decompress": false"#));
+        assert!(!of(""), "not unless the description says so");
+        assert!(!of(r#", "decompress": 1"#), "true, and nothing else");
     }
 
     /// A request's description (native only): its credentials (decision 14).

@@ -1339,6 +1339,34 @@ gain over urllib is reuse whichever protocol is used. So a document (a
 budget of at most 32 MiB) is offered h2 and a download goes over HTTP/1.1
 (`LAZARET_HTTP` overrides); both keep their connections.
 
+A document comes compressed (John, Oct 7: gzip for registry documents, "Add
+after Q-1"). A request with a budget of at most 64 MiB (`GZIP_BUDGET`: every
+document's, the guard's too, whose npm packuments run to 39 MB) asks for
+`gzip, deflate`, and lazaret-net decodes the body with tiny_https's own
+inflate (its B-37), held to the request's budget once decoded as on the wire
+(over it: too large) and to 200 times its compressed size once past 1 MiB
+(`MAX_DECODE_RATIO`: JSON comes 5 to 13 times smaller, a bomb near 1,032
+to 1); a compressed body cut short, corrupt or followed by anything is the
+server's error. A download asks for the bytes as they are (`identity`) and
+gets them so, compressed or not, since its digest is checked against the
+bytes as published. Fourteen large documents (eight npm packuments, four
+PyPI documents, two crates.io index files: 124 MB) come as 15.9 MB (npm 5 to
+13 times smaller, PyPI 4.5 to 5.7, crates.io's index uncompressed either
+way). Fetched from a data center, where npm's edge sent 39 MB in 0.27 s, the
+set took longer compressed (2.9 to 4.6 s one at a time against 1.1 to 1.6 s
+whole; 1.3 to 1.8 against 0.35 to 0.7 s from 8 threads; three rounds, both
+protocols): Cloudflare compresses a full packument as it sends it, about
+35 MB a second (vite's took 1.26 s compressed and 0.27 s whole, both from its
+cache), while PyPI's documents took the same time either way. Through a link
+capped at 100 Mbit/s (a local relay; its pacing makes one stream slower than
+the cap) the set took 3.6 s compressed against 17.4 s whole one at a time,
+and 1.5 against 10.5 s from 8 threads; capped at 300 Mbit/s, 3.2 against
+9.8 s and 1.25 against 4.2 s. Lazaret runs mostly on developers' machines,
+behind links of the second kind, so documents ask for compression;
+`LAZARET_GZIP=0` asks for none (a runner with a fast link to npm). The
+guard's documents (64 MiB) stay on HTTP/1.1: compressed, they came as fast
+or faster over it than over h2 in every round.
+
 What falls back to urllib: no native library, or one without the network
 layer; `LAZARET_NETWORK=python`; a proxy reached over TLS. TLS 1.2 is the
 floor on both transports (John, Oct 7: "Realistically we should avoid any
