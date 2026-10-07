@@ -13,9 +13,10 @@ inside one rule's per-match loop — Python engine and dashboard.
   tests use a fake clock (every clock read is 1 ms later), so they do not
   depend on the machine's speed. Since the Rust-first refactor the native
   engine reads the rules under its work budget (steps of its regex matcher,
-  engine.WORK_BUDGET), not a clock: a file that spends it is SC-TRUNCATED,
-  and the clock still bounds the passes core runs after the engine (taint,
-  SQL, function metrics) in project mode.
+  engine.WORK_BUDGET), not a clock: a file that spends it is SC-TRUNCATED.
+  Since Q-1 (0.1.9) the passes after the rules in project mode (taint, SQL,
+  function metrics) are the engine's too, so a source file's scan reads no
+  clock at all; the clock bounds a config file's scan, which is core's.
 
 Timing bounds are loose (slow CI runners): far above today's cost, far below
 the old one. All content is inert.
@@ -81,15 +82,17 @@ class PythonPackageTests(unittest.TestCase):
         self.assertEqual(len(out), 240)
         self.assertTrue(out.startswith(E) and out.endswith("catch(e){}"))
 
-    def test_backstop_stops_the_passes_after_the_engine(self):
+    def test_a_project_scan_is_bounded_by_the_work_budget_not_the_clock(self):
+        # (Q-1: the same file gets the same findings on every machine, however slow its clock says it is)
         n = 20_000
-        # the engine's rules ran to the end (all n findings); the passes core runs
-        # after them stop at the deadline, 40 clock reads in
         with ticking_clock(40):
             issues = core.scan_file("t.js", "try{}catch(e){}\n" * n, "js")
-        (t,) = [i for i in issues if i["rule"] == "SC-TRUNCATED"]
-        self.assertIn("scan time budget exceeded", t["msg"])
+        self.assertNotIn("SC-TRUNCATED", {i["rule"] for i in issues})
         self.assertEqual(reported(issues, "B-EMPTY-CATCH"), n)
+        with mock.patch.object(engine, "WORK_BUDGET", 10_000):
+            (t,) = core.scan_file("t.js", "try{}catch(e){}\n" * n, "js")
+        self.assertEqual((t["rule"], t["sev"]), ("SC-TRUNCATED", "CRITICAL"))
+        self.assertIn(engine.EXHAUSTED, t["msg"])
 
     def test_the_work_budget_stops_the_dependency_decode_flow_on_one_line(self):
         text = "var d = atob(p); " * 5000 + "\n"

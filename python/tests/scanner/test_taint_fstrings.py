@@ -188,30 +188,17 @@ class CrossFileTests(unittest.TestCase):
         self.assertEqual(found, set())
 
 
-class HelperTests(unittest.TestCase):
-    def test_taint_code_keeps_fields(self):
-        self.assertEqual(core._taint_code('os.system(f"ls {d!r} {{x}}" + rb"q")', "py").split(),
-                         ["os.system(", "d!r", "+", ")"])
-        self.assertEqual(core._taint_code("exec(`ls ${a}`); q = sql`x ${b}`; return `${c}`", "js").split(),
-                         ["exec(", "a", ");", "q", "=", "sql;", "return", "c"])
-
-    def test_arguments(self):
-        self.assertEqual(core._first_arg(" (body, {'h': bar}))"), "body")
-        self.assertEqual(core._first_arg(" sql, (x,))"), " sql")
-        self.assertEqual(core._positional_args(" url, data=d, headers=h)"), " url")
-        self.assertEqual(core._extent("cmd); log(location.href)"), "cmd")
-        self.assertEqual(core._extent(" q; other(req.query)"), " q")
-        self.assertEqual(core._offsite_args(" 301, '/x' + y"), " 301")
-
+class BoundedWorkTests(unittest.TestCase):
+    # (what a line's code is once its literals are read, and a call's arguments: the engine's own tests,
+    # taint_tests.rs)
     def test_linear_time(self):
         import time
         for text in ["(" * 200_000, "'" * 200_000, "a," * 200_000, "f'{" * 100_000, "=>" * 200_000 + " {",
                      "a." * 200_000 + "get(type=int)", " " * 100_000 + "if '..' in x:"]:
-            t0 = time.monotonic()
-            core._first_arg(text), core._positional_args(text), core._extent(text), core._offsite_args(text)
-            core._taint_code(text, "py"), core._taint_code(text, "js")
-            core._scope_opener(text, "js"), core._neutralize(text, "py", "XSS"), core._guarded_names(text, "py")
-            self.assertLess(time.monotonic() - t0, 10, text[:12])
+            for lang in ("py", "js"):
+                t0 = time.monotonic()
+                core.taint_scan(f"x.{lang}", ["q = input()", "os.system(" + text, "x = " + text, text], lang)
+                self.assertLess(time.monotonic() - t0, 10, (text[:12], lang))
 
 
 if __name__ == "__main__":

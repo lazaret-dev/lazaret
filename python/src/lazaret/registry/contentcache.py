@@ -24,11 +24,11 @@ The rules:
   What the caller must return as `Uncacheable`: a call the engine did not answer (`engine.unanswered`: the work
   budget spent, an internal error, a `NativeError`), and a cross-file answer in which any package is marked
   `failed` (it would be cached as clean). Anything asked after the artifact's deadline is not asked at all.
-* **What the key says about the path.** The engine's first pass reads no path: key it with `rel=None` and the
-  flags that matter (`lang`, `jsx`, `dep`, `redact`, `neumaier`), so one `.js` file under two paths is one call. A
-  pass that reads the path (core's passes after the rules, in `--full`) keeps the path in the key or is not cached
-  at all: cache the engine's raw answer and run those passes every time. The cross-file question is keyed on the
-  files in the order given, not as a set (the engine's limits make the order count).
+* **What the key says about the path.** The engine's first pass reads no path, in dependency mode or in `--full`'s
+  project mode: key it with `rel=None` and the flags that matter (`lang`, `jsx`, `dep`, `redact`, `neumaier`, a
+  taint configuration), so one `.js` file under two paths is one call. A pass that reads the path keeps the path in
+  the key or is not cached at all. The cross-file question is keyed on the files in the order given, not as a set
+  (the engine's limits make the order count).
 * **A hit is a copy.** The answer is copied on the way in and on the way out, so a caller that changes what it was
   given changes nothing for the next one (`copy=False` for a caller that promises not to).
 * **Bounded by bytes.** The answers are small; the least recently used go first, and an answer larger than a

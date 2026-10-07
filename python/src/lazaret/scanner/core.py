@@ -51,7 +51,6 @@ import sys
 import threading
 import time
 import types
-import unicodedata
 import warnings
 
 try:
@@ -66,7 +65,6 @@ from lazaret.scanner import configsecrets  # config and data files: credentials 
 from lazaret.scanner import autorun  # editor and AI-agent settings that run commands (SC-AUTORUN)
 from lazaret.scanner import ghworkflow  # GitHub Actions workflows: the worms' shapes, hardening (SC-WORKFLOW-*)
 from lazaret.scanner import gitlabci  # GitLab CI files: hardening (SC-GITLAB-*)
-from lazaret.scanner import frameworks  # web framework models shared by both taint engines
 from lazaret.scanner import _native, engine  # the native engine: every detector below
 
 
@@ -407,16 +405,10 @@ def lookalike_name(code, lang, words):
     return _tuple(_native.call("lookalike_view", args, code))
 
 
-def scan_rules(path, content, lang):
-    """The rules part of project mode's scan of one file (the pattern rules,
-    the families, the whole-text rules), before the passes that follow."""
-    args = {"lang": lang, "jsx": jsx_reading(path), "redact": bool(REDACT_SECRETS), "neumaier": False}
-    return engine._issues(path, _native.call("scan_rules", args, content))
-
-
 def scan_file(path, content, lang, dep=False):
-    """The findings of one file: in dependency mode the engine's, in project
-    mode the engine's rules part and the passes that follow (engine.scan_file)."""
+    """The findings of one file: the engine's, in dependency mode and in
+    project mode (where the passes after the rules read a taint
+    configuration too: engine.scan_file)."""
     return engine.scan_file(path, content, lang, dep)
 
 
@@ -651,8 +643,8 @@ R("S-NEWFUNC", "Function constructor", "VULN", "CRITICAL", ("js",),
   "String-built functions can execute attacker-controlled input.",
   "Define functions statically or use a whitelisted dispatch map.",
   "CWE-95 · OWASP A03"),
-# G12: see scan_file()'s sql_sink_analyzer — the S-SQL-PY regex is only the
-# fast path; the analyzer adds whole-argument analysis (cur.execute(sql % x)
+# G12: the S-SQL-PY regex is only the fast path; project mode's SQL-sink pass
+# (the engine's: project.rs) adds whole-argument analysis (cur.execute(sql % x)
 # with no space, %-interpolation and .format() on template variables assigned
 # earlier in the file, and string concatenation) that a line regex cannot see.
 R("S-SQL-PY", "SQL built from strings", "VULN", "BLOCKER", ("py",),
@@ -1120,8 +1112,9 @@ R("B-EXCEPT-PASS", "except: pass", "BUG", "MAJOR", ("py",),
 # patterns below are deliberately statement-anchored and linear: after the
 # DELETE/UPDATE keyword they match ONE identifier and at most one SET keyword,
 # never scanning to EOF. The "no WHERE before the statement ends" decision is
-# made by the linear per-statement pre-scan in scan_sql_nowhere() — one
-# O(n) pass over the file — not by the regex.
+# made by the linear per-statement pre-scan of project mode's SQL pass (the
+# engine's sql_nowhere: project.rs) — one O(n) pass over the file — not by
+# the regex.
 R("SQL-DELETE-NOWHERE", "DELETE without WHERE", "BUG", "MAJOR", ("sql",),
   r"\bDELETE\s+FROM\s+[\w.\"\[\]`]+",
   "DELETE has no WHERE clause — it removes every row.",
@@ -1138,413 +1131,41 @@ R("SQL-UPDATE-NOWHERE", "UPDATE without WHERE", "BUG", "MAJOR", ("sql",),
 
 
 # ---------------- Taint tracking (lightweight, intra-file) ----------------
-# Sources: user input and decode functions. Sinks: dangerous calls.
-TAINT_SOURCES = {
-    # Flask / Werkzeug request data (query_string, get_data, stream, full_path
-    # too), Django's (GET, POST, COOKIES, META, FILES, body) and Starlette's,
-    # FastAPI's and Django REST framework's (query_params, path_params, a
-    # websocket's messages); the parameters a route handler takes from the
-    # request (_route_params)
-    "py": re.compile(r"request\.(args|form|values|json|data|cookies|headers|files|get_json|get_data"
-                     r"|query_string|stream|full_path|GET|POST|COOKIES|META|FILES|body|query_params|path_params)"
-                     r"|\b(?:websocket|ws)\.receive_(?:text|json|bytes)\s*\("
-                     r"|input\s*\(|sys\.argv|b64decode\s*\(|zlib\.decompress\s*\("),
-    # Express's request (`req`, or `request` as a name of its own): the
-    # parsed parts, the URL and host, and a header read with req.get()
-    "js": re.compile(r"req\.(query|body|params|headers|cookies|signedCookies|files?|originalUrl|url|path|hostname)"
-                     r"|(?<![\w$.])request\.(query|body|params|headers|cookies)|\breq\.(?:get|header|param)\s*\("
-                     r"|process\.argv|location\.(search|hash|href)|document\.URL|new\s+URLSearchParams(?!\s*\(\s*\))"
-                     r"|atob\s*\(|unescape\s*\(|decodeURIComponent\s*\("),
-}
-# (id-suffix, sink regex, category, severity, cwe, fix)
-TAINT_SINKS = {
-    "py": [
-        ("CMD", re.compile(r"os\.(system|popen)\s*\(|subprocess\.(run|call|check_output|check_call|Popen)\s*\("
-                           r"|asyncio\.create_subprocess_shell\s*\("),
-         "command injection", "CRITICAL", "CWE-78",
-         "Validate/allowlist the value; pass args as a list with shell=False."),
-        ("CODE", re.compile(r"(?<![\w.])(eval|exec)\s*\("),
-         "code injection", "CRITICAL", "CWE-95",
-         "Never execute untrusted strings; use safe parsing."),
-        # DB-API cursors, Django's Manager.raw and RawSQL (the query is their
-        # first argument) …
-        ("SQL", re.compile(r"\.(execute|executemany|executescript)\s*\(|\.objects\.raw\s*\(|(?<![\w.])RawSQL\s*\("),
-         "SQL injection", "BLOCKER", "CWE-89",
-         "Use parameterized queries."),
-        # … and Django's QuerySet.extra(), whose SQL is in its keywords
-        ("SQL", re.compile(r"\.extra\s*\(\s*(?:select|where|tables|order_by)\s*="),
-         "SQL injection", "BLOCKER", "CWE-89",
-         "Use parameterized queries."),
-        ("PATH", re.compile(r"(?<![\w.])open\s*\(|(?:codecs|io|os)\.open\s*\(|send_file\s*\("
-                            r"|(?<![\w.])FileResponse\s*\("
-                            r"|shutil\.(?:copy|copy2|copyfile|copytree|move|rmtree)\s*\("
-                            r"|os\.(?:remove|unlink|rmdir|removedirs|rename|replace|listdir|scandir)\s*\("),
-         "path traversal", "MAJOR", "CWE-22",
-         "Resolve the path and verify it stays inside an allowed base directory."),
-        # Flask joins the file name to the directory safely (safe_join): the
-        # directory is the sink
-        ("PATH", re.compile(r"send_from_directory\s*\("),
-         "path traversal", "MAJOR", "CWE-22",
-         "Resolve the path and verify it stays inside an allowed base directory."),
-        ("SSRF", re.compile(r"requests\.(get|post|put|delete|head|request)\s*\(|urlopen\s*\("
-                            r"|httpx\.(?:get|post|put|patch|delete|head|request|stream)\s*\("),
-         "server-side request forgery", "MAJOR", "CWE-918",
-         "Allowlist target hosts and schemes; block internal addresses."),
-        ("REDIR", re.compile(r"(?<![\w.])redirect\s*\(|flask\.redirect\s*\("
-                             r"|HttpResponse(?:Permanent)?Redirect\s*\(|(?<![\w.])RedirectResponse\s*\("),
-         "open redirect", "MAJOR", "CWE-601",
-         "Allowlist redirect targets or use relative paths."),
-        ("SSTI", re.compile(r"render_template_string\s*\(|(?<![\w.])jinja2\.Template\s*\("
-                            r"|(?:\b\w*[eE]nv(?:ironment)?|Environment\s*\([^()]{0,200}\))\s*\.\s*from_string\s*\("),
-         "template injection", "CRITICAL", "CWE-1336",
-         "Pass data as template parameters, never into template source."),
-        # a Template class imported from jinja2, mako or django.template (not
-        # string.Template): only in a file that imports one (_TEMPLATE_IMPORT_RE)
-        ("SSTI", re.compile(r"(?<![\w.])Template\s*\("),
-         "template injection", "CRITICAL", "CWE-1336",
-         "Pass data as template parameters, never into template source."),
-        # a response body built from the value (Flask / Werkzeug, Django,
-        # Starlette / FastAPI), or the value marked as safe HTML; a Flask
-        # view's own `return` is checked too (taint_scan)
-        ("XSS", re.compile(r"make_response\s*\(|(?<![\w.])Response\s*\(|(?<![\w.])HttpResponse\s*\("
-                           r"|(?<![\w.])HTMLResponse\s*\(|(?<![\w.])Markup\s*\(|mark_safe\s*\("
-                           r"|(?<![\w.])SafeString\s*\("),
-         "cross-site scripting", "MAJOR", "CWE-79",
-         "Escape the value (or render it through an autoescaping template) before it is returned."),
-    ],
-    "js": [
-        ("CMD", re.compile(r"\b(exec|execSync|spawn|spawnSync)\s*\("),
-         "command injection", "CRITICAL", "CWE-78",
-         "Use execFile/spawn with an args array; validate the value."),
-        ("CODE", re.compile(r"(?<![\w.])eval\s*\(|new\s+Function\s*\("
-                            r"|\bvm\.(?:runInNewContext|runInThisContext|runInContext|compileFunction)\s*\("
-                            r"|new\s+vm\.Script\s*\("),
-         "code injection", "CRITICAL", "CWE-95",
-         "Never execute untrusted strings; use JSON.parse or a dispatch map."),
-        # driver queries, and the raw SQL of knex and Sequelize
-        ("SQL", re.compile(r"\.(query|execute)\s*\(|\.(?:whereRaw|havingRaw|orderByRaw|joinRaw|groupByRaw|fromRaw)\s*\("
-                           r"|\bknex\.raw\s*\(|\bsequelize\.literal\s*\("),
-         "SQL injection", "BLOCKER", "CWE-89",
-         "Use placeholders with a parameter array."),
-        # (not Express's sendFile / download given a `root`: send refuses a
-        # path that climbs out of it)
-        ("PATH", re.compile(r"\.(sendFile|download)\s*\((?!(?:[^()]|\([^()]*\))*,\s*\{[^{}]*\broot\s*[:,}])"
-                            r"|readFile(Sync)?\s*\(|createReadStream\s*\("),
-         "path traversal", "MAJOR", "CWE-22",
-         "Resolve the path and verify it stays inside an allowed base directory."),
-        # a file written, removed or listed (the path is the first argument)
-        ("PATH", re.compile(r"\bfs(?:\.promises)?\.(?:writeFile|appendFile|unlink|rm|rmdir|mkdir|readdir|rename"
-                            r"|copyFile|createWriteStream)(?:Sync)?\s*\("),
-         "path traversal", "MAJOR", "CWE-22",
-         "Resolve the path and verify it stays inside an allowed base directory."),
-        ("SSRF", re.compile(r"\bfetch\s*\(|axios(\.(get|post|put|delete|request))?\s*\(|https?\.(get|request)\s*\("
-                            r"|\bgot(?:\.(?:get|post|put|patch|delete|head|stream))?\s*\(|\bneedle\s*\("),
-         "server-side request forgery", "MAJOR", "CWE-918",
-         "Allowlist target hosts and schemes; block internal addresses."),
-        ("REDIR", re.compile(r"\.redirect\s*\(|\b(?:res|response)\.location\s*\("),
-         "open redirect", "MAJOR", "CWE-601",
-         "Allowlist redirect targets or use relative paths."),
-        # template source compiled or rendered: EJS, Pug, Handlebars,
-        # Mustache, Nunjucks, doT, lodash
-        ("SSTI", re.compile(r"\b(?:ejs|pug|jade|Handlebars|handlebars|Mustache|mustache|nunjucks|doT|_)"
-                            r"\.(?:render|renderString|compile|template)\s*\("),
-         "template injection", "CRITICAL", "CWE-1336",
-         "Pass data as template parameters, never into template source."),
-        ("XSS", re.compile(r"\.innerHTML\s*=|document\.write\s*\("),
-         "cross-site scripting", "MAJOR", "CWE-79",
-         "Escape/sanitize before rendering; prefer textContent."),
-        # an Express or Node response body (Express sends a string as HTML;
-        # a whole parsed object, `res.send(req.query)`, as JSON)
-        ("XSS", re.compile(r"\b(?:res|response)(?:\.(?:status|type|set|header|append|vary|cookie|clearCookie)"
-                           r"\s*\([^()]{0,200}\))*\.(?:send|write|end)\s*\("
-                           r"(?!\s*(?:req|request)\.(?:query|body|params|headers|cookies|signedCookies)\s*\))"),
-         "cross-site scripting", "MAJOR", "CWE-79",
-         "Escape/sanitize before rendering; prefer textContent."),
-    ],
-}
-# A response whose content type is set to one a browser does not render as
-# HTML (`HttpResponse(body, content_type="text/plain")`, `Response(data,
-# mimetype="application/json")`, `media_type=` in Starlette) is no XSS sink.
-_NON_HTML_TYPE_RE = re.compile(r"""\b(?:content_type|mimetype|media_type)\s*=\s*[rRuU]?["'](?![^"']*(?:html|xml|svg))""")
-# … nor is an Express response whose chain sets one first
-# (`res.type("text/plain").send(q)`, `res.set("Content-Type", "application/json").end(q)`).
-_NON_HTML_CHAIN_RE = re.compile(r"""\.(?:type\s*\(|(?:set|header)\s*\(\s*["'`][Cc][Oo][Nn][Tt][Ee][Nn][Tt]-[Tt][Yy][Pp][Ee]"""
-                                r"""["'`]\s*,)\s*["'`](?![^"'`]*(?:html|xml|svg))""")
-# The Template row of TAINT_SINKS["py"] counts only in a file that imports a
-# Template class from a template engine.
-_TEMPLATE_SINK_RE = next(row[1] for row in TAINT_SINKS["py"] if row[1].pattern == r"(?<![\w.])Template\s*\(")
-_TEMPLATE_IMPORT_RE = re.compile(
-    r"(?<![^\n])[ \t]*from[ \t]+(?:jinja2|mako\.template|django\.template)[ \t]+import\b[^\n]*\bTemplate\b")
-# Review fix (shared semantics 12): a Python annotated assignment
-# `x: T = source` binds x (the optional `: T` part), and a JS destructuring
-# declaration binds every name in its pattern (_JS_DESTRUCT_RE below) —
-# `target: str = request.args.get("next")` and `const { file } = req.query`
-# used to leave their names untainted.
-# An augmented assignment (`html += f"<p>{q}</p>"`) taints its target too.
-ASSIGN_RE = {
-    "py": re.compile(r"^\s*([A-Za-z_]\w*)\s*(?::[^=\n]*|[-+*/%&|^@]|//|\*\*|<<|>>)?=(?![=])\s*(.+)"),
-    "js": re.compile(r"^\s*(?:(?:const|let|var)\s+)?([A-Za-z_$][\w$]*)\s*"
-                     r"(?:[-+*/%&|^]|\*\*|<<|>>>?|&&|\|\||\?\?)?=(?![=>])\s*(.+)"),
-}
-# the augmented forms (`x += y`, `x ||= y`): the target keeps what it held
-_AUG_ASSIGN_RE = {
-    "py": re.compile(r"^\s*[A-Za-z_]\w*\s*(?:[-+*/%&|^@]|//|\*\*|<<|>>)="),
-    "js": re.compile(r"^\s*[A-Za-z_$][\w$]*\s*(?:[-+*/%&|^]|\*\*|<<|>>>?|&&|\|\||\?\?)="),
-}
-# one-level object / array pattern: `{ a, b: c, d = 1, ...e }` / `[a, , b = 2, ...c]`
-_JS_DESTRUCT_RE = re.compile(
-    r"^\s*(?:(?:const|let|var)\s+)?(\{[^{}]*\}|\[[^\[\]]*\])\s*=(?![=>])\s*(.+)")
-_JS_BINDING_RE = re.compile(r"[A-Za-z_$][\w$]*")
+# Project mode's intra-file taint is the engine's (0.1.9, Q-1: taint.rs; its
+# model, the sources, sinks, sanitizers, guards and framework shapes, is the
+# rule pack's). A taint configuration (--taint-config, a trusted
+# .lazaret-taint.json, scan_project's taint_config) adds sources, sinks and
+# sanitizers: validated here (taintspec), kept as the part of the model each
+# call is given (taint_args), and joined to the pack's in the engine as they
+# were joined to core's tables. Applied configurations add up, process-wide,
+# as those tables did.
+_TAINT_CONFIGURED = {lang: {"sources": [], "sinks": [], "full": [], "partial": []} for lang in ("py", "js")}
 
 
-def _destructured_names(pattern):
-    """Names bound by a one-level JS destructuring pattern:
-    `{ a, b: c, d = 1, ...e }` -> [a, c, d, e]; `[a, , b = 2, ...c]` -> [a, b, c]."""
-    names = []
-    for part in pattern[1:-1].split(","):
-        part = part.strip()
-        if part.startswith("..."):
-            part = part[3:].strip()
-        elif pattern[0] == "{" and ":" in part:
-            part = part.split(":", 1)[1].strip()
-        part = part.split("=", 1)[0].strip()
-        if _JS_BINDING_RE.fullmatch(part):
-            names.append(part)
-    return names
+def taint_args(lang):
+    """The configured part of the taint model for a file of `lang` (the
+    engine's `"taint"` argument: {"sources": [pattern], "sinks": [[pattern,
+    category]], "full": [name], "partial": [[name, [category]]]}), or None
+    when nothing is configured for it."""
+    part = _TAINT_CONFIGURED.get(lang)
+    if part is None or not any(part.values()):
+        return None
+    return {key: [list(v) if isinstance(v, list) else v for v in values] for key, values in part.items()}
 
 
-def _assignment(line, lang):
-    """(names bound, right-hand side) of an assignment line, or (None, None).
-    A Python keyword never counts as a name (`else: x = …` is not an
-    annotated assignment to `else`)."""
-    m = ASSIGN_RE[lang].match(line)
-    if m:
-        name = m.group(1)
-        if lang == "py" and (keyword.iskeyword(name) or (
-                keyword.issoftkeyword(name) and line[m.end(1):].lstrip().startswith(":"))):
-            return None, None
-        return [name], m.group(2)
-    if lang == "js":
-        dm = _JS_DESTRUCT_RE.match(line)
-        if dm:
-            names = _destructured_names(dm.group(1))
-            if names:
-                return names, dm.group(2)
-    return None, None
+def taint_scan(path, lines, lang):
+    """The intra-file taint's findings (T-*) in a file's lines, before the
+    suppression markers and the cap, with the configured part of the model:
+    the engine's pass alone (taint_scan), which its scan_file runs in
+    project mode."""
+    if lang not in ("py", "js"):
+        return []
+    args = {"lang": lang, "jsx": jsx_reading(path), "redact": bool(REDACT_SECRETS), "neumaier": False}
+    configured = taint_args(lang)
+    if configured:
+        args["taint"] = configured
+    return engine._issues(path, _native.call("taint_scan", args, "\n".join(lines)))
 
-# A value put into a container — an element assigned (`d["k"] = q`,
-# `arr[i] = q`) or added (`xs.append(q)`, `arr.push(q)`) — taints the
-# container: what is read from it may be the value. A weak update: the
-# container keeps what it held.
-_CONTAINER_WRITE_RE = {
-    "py": re.compile(r"^\s*([A-Za-z_]\w*)\s*(?:\[[^\[\]\n]*\]\s*(?:[-+*/%&|^@]|//|\*\*|<<|>>)?=(?!=)"
-                     r"|\.\s*(?:append|extend|insert|add)\s*\()\s*(.+)"),
-    "js": re.compile(r"^\s*([A-Za-z_$][\w$]*)\s*(?:\[[^\[\]\n]*\]\s*(?:[-+*/%&|^]|\*\*|<<|>>>?|&&|\|\||\?\?)?=(?![=>])"
-                     r"|\.\s*(?:push|unshift)\s*\()\s*(.+)"),
-}
-
-
-# An element assigned under a literal key (`d["k"] = v`) is followed by its
-# key too: reading `d["other"]` after `d["other"] = "fixed"` reads no
-# untrusted data though `d` holds some. Only plain assignments: an
-# augmented one, a computed key or a method keeps the container's taint.
-_KEYED_WRITE_RE = re.compile(r"""^\s*([A-Za-z_$][\w$]*)\s*\[\s*(["'])([^"'\\\n]*)\2\s*\]\s*=(?![=>])""")
-_KEYED_READ_RE = re.compile(r"""(?<![\w$.])([A-Za-z_$][\w$]*)\s*\[\s*(["'])([^"'\\\n]*)\2\s*\]""")
-
-
-def _keyed_reads(text, keyed):
-    """`text` with its reads of container elements known to hold no
-    untrusted data (see above) blanked. `keyed`: {container: {key: clean
-    set, or None for a value with no untrusted data}}."""
-    if not keyed or "[" not in text:
-        return text
-
-    def repl(m):
-        keys = keyed.get(m.group(1))
-        if keys is None or m.group(3) not in keys or keys[m.group(3)] is not None:
-            return m.group()
-        return " " * len(m.group())
-    return _KEYED_READ_RE.sub(repl, text)
-
-
-def _container_write(line, lang):
-    """(container name, the value written) of a line that puts a value into
-    a container (see above), or (None, None)."""
-    m = _CONTAINER_WRITE_RE[lang].match(line)
-    if not m or (lang == "py" and keyword.iskeyword(m.group(1))):
-        return None, None
-    added = line[m.end(1):m.start(2)].rstrip().endswith("(")       # xs.append(…): its arguments
-    return m.group(1), (_extent(m.group(2)) if added else m.group(2))
-
-STRING_LIT_RE = re.compile(r"\"[^\"]*\"|'[^']*'|`[^`]*`")
-
-# What taint reads of a text: its string literals removed, except the fields
-# of a Python f-string (`f"/srv/{name}"`, prefix f / rf / fr in either case)
-# and of a JavaScript template literal no tag reads (`ls ${dir}` — a tagged
-# sql`…${x}` template is parameterized): those are code whose value becomes
-# part of the string. A field is the text between one-level braces;
-# `{{` / `}}` in an f-string are literal braces.
-_FIELD_RE = {"py": re.compile(r"\{([^{}]*)\}"), "js": re.compile(r"\$\{([^{}]*)\}")}
-# A Python literal with its prefix (r, b, u, f or a pair of them), which is
-# part of the literal and not a name: `os.system(f"ls {d}")` reads `d`, not a
-# variable called f.
-_PY_LIT_RE = re.compile(r"(?:(?<![A-Za-z0-9_])([rRbBuUfF]{1,2}))?(\"[^\"]*\"|'[^']*'|`[^`]*`)")
-_ASCII_WORD = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_$")
-_JS_TAG_KEYWORDS = frozenset(("return", "typeof", "case", "in", "of", "yield", "await", "throw",
-                              "delete", "void", "else", "do", "new"))
-
-
-def _js_tagged(text, start):
-    """True when the backtick at `start` opens a tagged template (sql`…`)."""
-    j = start
-    while j > 0 and text[j - 1] in " \t":
-        j -= 1
-    if j == 0 or not (text[j - 1] in _ASCII_WORD or text[j - 1] in ")]"):
-        return False
-    k = j
-    while k > 0 and text[k - 1] in _ASCII_WORD:
-        k -= 1
-    return text[k:j] not in _JS_TAG_KEYWORDS
-
-
-# An element looked up by a key (`users[req.params.id]`, `COMMANDS[q]`) is
-# the container's, not the key's: taint reads a subscript's container and
-# not its index (`request.args["q"]` is still request data), and the same
-# for the index arguments of JavaScript's slice(), substring(), at() …
-# (`names.slice(from, to)`). Innermost subscripts first, at most
-# _SUBSCRIPT_PASSES levels deep; a `[` after a keyword opens a list
-# (`return [q]`, `x in [q]`), not a subscript.
-_SUBSCRIPT_RE = re.compile(r"((?<![\w$])[\w$]+|[)\]])(\s*)\[[^\[\]]*\]")
-_INDEX_ARGS_RE = re.compile(r"(\.\s*(?:slice|substring|substr|at|charAt|charCodeAt|codePointAt)\s*\()([^()]*)\)")
-_SUBSCRIPT_PASSES = 4
-_NOT_SUBSCRIPTED = frozenset((
-    "return", "yield", "in", "await", "else", "and", "or", "not", "is", "if", "lambda", "assert", "del",
-    "typeof", "case", "of", "new", "delete", "void", "throw", "instanceof", "print", "elif", "while", "for",
-    "with", "from", "import", "raise", "except", "do"))
-
-
-def _subscript_repl(m):
-    if m.group(1) in _NOT_SUBSCRIPTED:
-        return m.group()
-    return m.group(1) + m.group(2) + " " * (len(m.group()) - len(m.group(1)) - len(m.group(2)))
-
-
-def _drop_indexes(text):
-    """`text` with its subscripts' indexes blanked (see above)."""
-    if "." in text:
-        text = _INDEX_ARGS_RE.sub(lambda m: m.group(1) + " " * len(m.group(2)) + ")", text)
-    for _ in range(_SUBSCRIPT_PASSES):
-        if "[" not in text:
-            break
-        new = _SUBSCRIPT_RE.sub(_subscript_repl, text)
-        if new == text:
-            break
-        text = new
-    return text
-
-
-def _taint_code(text, lang):
-    """`text` without its string literals and subscripts' indexes, as taint
-    reads it (see above)."""
-    if lang == "py":
-        def py_repl(m):
-            if (m.group(1) or "").lower() not in ("f", "rf", "fr") or m.group(2)[0] == "`":
-                return ""
-            body = m.group(2)[1:-1].replace("{{", "  ").replace("}}", "  ")
-            return " " + " ".join(_FIELD_RE["py"].findall(body)) + " "
-        return _drop_indexes(_PY_LIT_RE.sub(py_repl, text))
-
-    def js_repl(m):
-        lit = m.group()
-        if lit[0] != "`" or _js_tagged(text, m.start()):
-            return ""
-        return " " + " ".join(_FIELD_RE["js"].findall(lit[1:-1])) + " "
-    return _drop_indexes(STRING_LIT_RE.sub(js_repl, text))
-
-
-# ---------------- Sanitizer model (SonarQube / Semgrep style) ----------------
-# Values passed through a sanitizer stop being tainted. "full" sanitizers
-# (numeric coercion) cleanse every sink; "partial" sanitizers (keyed by sink
-# suffix) cleanse one category. Body pattern allows one level of nested parens
-# so int(request.args.get("id")) is recognized.
-_SAN_BODY = r"(?:[^()]|\([^()]*\))*"
-# A record looked up by a value (Django's get_object_or_404(Model, pk=q),
-# Model.objects.filter(name=q); Flask-SQLAlchemy's Model.query.filter_by(…),
-# SQLAlchemy's session.execute(…) / .get / .scalars) is the database's, not
-# the value: the ORM binds the value as a parameter, and what it returns is
-# not request data. Nor is what a file read gives (`open(p).read()`,
-# `fs.readFileSync(p)`): the path is the read's own path-traversal sink.
-_FULL_SAN = {
-    "py": re.compile(r"(?:int|float|bool|complex|uuid\.UUID|ipaddress\.ip_address|get_object_or_404|get_list_or_404"
-                     r"|\.objects\.\w+|\.query\.\w+|\bsession\.(?:query|get|scalars?|execute))\s*\(" + _SAN_BODY + r"\)"
-                     r"|(?<![\w.])open\s*\(" + _SAN_BODY + r"\)\s*\.\s*read(?:lines)?\s*\(\s*\)"),
-    "js": re.compile(r"(?:parseInt|parseFloat|Number|readFileSync)\s*\(" + _SAN_BODY + r"\)"),
-}
-_PARTIAL_SAN = {
-    "py": {
-        "CMD": re.compile(r"(?:shlex|pipes)\.quote\s*\(" + _SAN_BODY + r"\)"),
-        # escape(), escape_html(), …; an autoescaping template and the JSON
-        # and URL builders encode the value too. Not unescape().
-        "XSS": re.compile(r"(?<!\w)(?:html\.escape|markupsafe\.escape|cgi\.escape|escape\w*|bleach\.clean"
-                          r"|conditional_escape|format_html|render_template|render_to_string|TemplateResponse"
-                          r"|jsonify|url_for)\s*\(" + _SAN_BODY + r"\)"),
-        "PATH": re.compile(r"(?:os\.path\.basename|basename|secure_filename|safe_join)\s*\(" + _SAN_BODY + r"\)"),
-        # url_for and Django's reverse() build a URL on this site from a
-        # view's name (Flask's, Starlette's request.url_for); the Referer is
-        # the page the user came from (a redirect "back")
-        "REDIR": re.compile(r"(?<![\w.])(?:[A-Za-z_][\w.]*\.)?(?:url_for|reverse|reverse_lazy)\s*\(" + _SAN_BODY + r"\)"
-                            r"|request\.(?:META\.get|headers\.get)\s*\(\s*[\"'](?:HTTP_REFERER|[Rr]eferr?er)[\"']"
-                            + _SAN_BODY + r"\)|request\.META\s*\[\s*[\"']HTTP_REFERER[\"']\s*\]"),
-    },
-    "js": {
-        "XSS": re.compile(r"(?:DOMPurify\.sanitize|encodeURIComponent|escapeHtml|sanitizeHtml|he\.(?:encode|escape)"
-                          r"|validator\.escape|filterXSS|xssFilters\.\w+|_\.escape|lodash\.escape)\s*\("
-                          + _SAN_BODY + r"\)"),
-        "SQL": re.compile(r"(?:mysql2?|pool|connection|conn|db)\.escape\s*\(" + _SAN_BODY + r"\)"),
-        "PATH": re.compile(r"path\.basename\s*\(" + _SAN_BODY + r"\)"),
-        "CMD": re.compile(r"(?:shellQuote|shell_quote)\s*\(" + _SAN_BODY + r"\)"),
-        # the Referer: the page the user came from (a redirect "back")
-        "REDIR": re.compile(r"\b(?:req|request)\.(?:get|header)\s*\(\s*['\"][Rr]eferr?er['\"]\s*\)"
-                            r"|\b(?:req|request)\.headers\s*(?:\.\s*referr?er\b|\[\s*['\"]referr?er['\"]\s*\])"),
-    },
-}
-
-# Flask's typed lookup, `request.args.get("page", 1, type=int)`, returns a
-# number (or the default): a full sanitizer like int(…).
-_TYPED_GET_RE = re.compile(r"(?<![\w.])[A-Za-z_][\w.]*\.get(?:list)?\s*\(([^()]{0,256})\)")
-_TYPED_ARG_RE = re.compile(r"\btype\s*=\s*(?:int|float|bool)\b")
-
-
-def _typed_get(m):
-    return " " if _TYPED_ARG_RE.search(m.group(1)) else m.group()
-
-
-def _neutralize(text, lang, suffix=None):
-    """Strip sanitizer calls so their sanitized content stops counting as taint."""
-    text = _FULL_SAN[lang].sub(" ", text)
-    if lang == "py" and "type" in text:
-        text = _TYPED_GET_RE.sub(_typed_get, text)
-    if suffix and suffix in _PARTIAL_SAN.get(lang, {}):
-        text = _PARTIAL_SAN[lang][suffix].sub(" ", text)
-    return text
-
-# SQL suffix ↔ flow category, for applying shared config to the intra-file engine
-_SUFFIX_BY_CATEGORY = {
-    "SQL injection": "SQL", "command injection": "CMD", "code injection": "CODE",
-    "template injection": "SSTI", "path traversal": "PATH",
-    "server-side request forgery": "SSRF", "open redirect": "REDIR",
-    "cross-site scripting": "XSS",
-}
-_CAT_META = {  # category -> (severity, cwe, fix) for intra-file sink rows
-    "SQL injection": ("BLOCKER", "CWE-89", "Use parameterized queries with placeholders."),
-    "command injection": ("CRITICAL", "CWE-78", "Pass args as a list with shell=False / use execFile."),
-    "code injection": ("CRITICAL", "CWE-95", "Never execute untrusted strings; use safe parsing."),
-    "template injection": ("CRITICAL", "CWE-1336", "Pass data as template parameters."),
-    "path traversal": ("MAJOR", "CWE-22", "Confine the path to an allowed base directory."),
-    "server-side request forgery": ("MAJOR", "CWE-918", "Allowlist hosts/schemes."),
-    "open redirect": ("MAJOR", "CWE-601", "Allowlist redirect targets."),
-    "cross-site scripting": ("MAJOR", "CWE-79", "Escape/sanitize before rendering."),
-}
 
 #: Exit code for a taint config passed via --taint-config that cannot be
 #: loaded or whose rules failed validation (unknown category, empty pattern,
@@ -1589,9 +1210,10 @@ def apply_taint_config(cfg, allow_sanitizers=True):
     Invalid rules are not silently dropped: each one records a warning (see
     get_taint_config_warnings()) naming the rule and the reason. User regexes
     are guarded (length cap, static backtracking check, and each match sees
-    at most taintspec.MAX_MATCH_TEXT characters of a line).
-    allow_sanitizers=False (a config from the scanned repository): its
-    sanitizers are ignored, never applied.
+    at most taintspec.MAX_MATCH_TEXT characters of a line: the engine holds
+    them to it). allow_sanitizers=False (a config from the scanned
+    repository): its sanitizers are ignored, never applied. What is applied
+    is the part of the model every later call is given (taint_args).
     """
     del _TAINT_CONFIG_WARNINGS[:]
     spec = (cfg if isinstance(cfg, taintspec.TaintSpec)
@@ -1599,24 +1221,12 @@ def apply_taint_config(cfg, allow_sanitizers=True):
     _TAINT_CONFIG_WARNINGS.extend(spec.warnings)
     for lang_key, lang in (("python", "py"), ("javascript", "js")):
         ls = spec.lang(lang_key)
-        if ls.sources:
-            TAINT_SOURCES[lang] = taintspec.extend_pattern(TAINT_SOURCES[lang],
-                                                           ls.sources)
-        for gp, cat in ls.sinks:
-            sev, cwe, fix = _CAT_META[cat]
-            TAINT_SINKS[lang].append((_SUFFIX_BY_CATEGORY[cat], gp, cat, sev, cwe, fix))
-        for name in ls.full:
-            # names are validated call names; re.escape makes them literal
-            _FULL_SAN[lang] = re.compile(
-                _FULL_SAN[lang].pattern + "|" + re.escape(name)
-                + r"\s*\(" + _SAN_BODY + r"\)")
-        for name, cats in ls.partial.items():
-            add = re.escape(name) + r"\s*\(" + _SAN_BODY + r"\)"
-            for cat in sorted(cats):
-                suf = _SUFFIX_BY_CATEGORY[cat]
-                base = _PARTIAL_SAN[lang].get(suf)
-                _PARTIAL_SAN[lang][suf] = re.compile(
-                    (base.pattern + "|" + add) if base else add)
+        part = _TAINT_CONFIGURED[lang]
+        part["sources"].extend(g.pattern for g in ls.sources)
+        part["sinks"].extend([g.pattern, cat] for g, cat in ls.sinks)
+        # names are validated call names; the engine escapes them (literal)
+        part["full"].extend(ls.full)
+        part["partial"].extend([name, sorted(cats)] for name, cats in ls.partial.items())
 
 
 #: The scanned repository's own taint config (never auto-trusted).
@@ -1740,760 +1350,6 @@ def load_taint_config_for_scan(explicit_path, scan_root, trust_repo=False,
          "ref": "Taint configuration provenance"},
         REPO_TAINT_CONFIG, 1, cfg_lines)
     return [note]
-
-
-# Identifier runs for carrier matching. A variable v "appears" in a text iff
-# it equals one of these maximal runs — the old per-variable `\bv\b` regex
-# test, done as one findall + set lookups. (One compiled regex per tainted
-# variable thrashed re's 512-pattern cache: an a1=a0 … a1000=a999 chain took
-# 20 s.) For JS, `$` counts as an identifier character.
-_IDENT_RUN_RE = {"py": re.compile(r"\w+"), "js": re.compile(r"[\w$]+")}
-
-
-# A statement taint reads may run over several lines: a line whose brackets
-# stay open (`RESPONSE += (` / `subprocess.run(` / `const q = \`…`) is read
-# together with the lines that continue it — at most TAINT_JOIN_MAX_LINES of
-# them and TAINT_JOIN_MAX_CHARS of their text, joined with spaces.
-TAINT_JOIN_MAX_LINES = 8
-TAINT_JOIN_MAX_CHARS = 4000
-_BRACKET_DELTA = {"(": 1, "[": 1, "{": 1, ")": -1, "]": -1, "}": -1}
-
-
-def _bracket_depth(code):
-    """Brackets `code` opens and leaves open (string literals not counted)."""
-    return sum(_BRACKET_DELTA.get(ch, 0) for ch in STRING_LIT_RE.sub("", code))
-
-
-def _arg_end(text, start):
-    """Index of the comma or closing bracket that ends the argument starting
-    at `start` in `text` (len(text) when nothing does); brackets and string
-    literals inside the argument are skipped."""
-    depth, i, n = 0, start, len(text)
-    while i < n:
-        ch = text[i]
-        if ch in "\"'`":
-            j = text.find(ch, i + 1)
-            if j < 0:
-                return n
-            i = j + 1
-            continue
-        if ch in "([{":
-            depth += 1
-        elif ch in ")]}":
-            if depth == 0:
-                return i
-            depth -= 1
-        elif ch == "," and depth == 0:
-            return i
-        i += 1
-    return n
-
-
-def _call_close(text, start):
-    """Index of the bracket that closes a call whose arguments start at
-    `start` in `text` (len(text) when nothing does)."""
-    while True:
-        end = _arg_end(text, start)
-        if end >= len(text) or text[end] != ",":
-            return end
-        start = end + 1
-
-
-def _first_arg(text):
-    """The first argument of a call whose text after the opening parenthesis
-    is `text`; a parenthesized tuple is read as its first element
-    (`make_response((body, {"X-H": v}))` → `body`)."""
-    arg = text[:_arg_end(text, 0)]
-    s = arg.lstrip()
-    if s.startswith("("):
-        k = _arg_end(s, 1)
-        if k < len(s) and s[k] == ",":
-            return s[1:k]
-    return arg
-
-
-# a keyword argument that names no target (`data=`, `cwd=`, `timeout=`); the
-# ones that do (`url=`, `file=`, `args=`, …) are read like positional ones
-_KWARG_RE = re.compile(r"\s*(?!(?:url|uri|file|filename|path|path_or_file|args|cmd|command|src|dst|source"
-                       r"|destination)\s*=)[A-Za-z_]\w*\s*=(?!=)")
-
-
-def _positional_args(text):
-    """A call's arguments (`text` follows its opening parenthesis) without its
-    keyword arguments (see above): `requests.post(url, data=d)` → `url`."""
-    out, i, n = [], 0, len(text)
-    while True:
-        end = _arg_end(text, i)
-        arg = text[i:end]
-        if not _KWARG_RE.match(arg):
-            out.append(arg)
-        if end >= n or text[end] != ",":
-            return ",".join(out)
-        i = end + 1
-
-
-# Which arguments of a built-in sink carry the injection. Only the first: a
-# query's bound parameters (`execute(sql, (x,))`), a response's status and
-# headers, a redirect's code, a template's context and eval's namespaces are
-# data — and send_from_directory's directory: it joins the file name safely.
-# In JavaScript the first too for a query, a template's source, a file
-# written or removed (`fs.writeFile(p, data)`) and a response body
-# (`res.send(body)`). Only the positional ones: `requests.post(url, data=d)`,
-# `send_file(f, download_name=n)` and `subprocess.run(cmd, cwd=d)` name no
-# target in their keywords. Other rows (the rest of the JavaScript ones,
-# Django's `.extra(where=[…])`, the rows a taint config adds) read every
-# argument — never the code after the call on the same line
-# (`exec(cmd); log(location.href)`).
-_SINK_ARGS = {row[1]: "first" for row in TAINT_SINKS["py"]
-              if row[0] in ("SQL", "XSS", "REDIR", "SSTI", "CODE") and "extra" not in row[1].pattern}
-_SINK_ARGS.update({row[1]: "positional" for row in TAINT_SINKS["py"]
-                   if row[0] in ("CMD", "PATH", "SSRF") and "send_from_directory" not in row[1].pattern})
-_SINK_ARGS.update({row[1]: "first" for row in TAINT_SINKS["py"] if "send_from_directory" in row[1].pattern})
-_SINK_ARGS.update({row[1]: "first" for row in TAINT_SINKS["js"]
-                   if row[0] in ("SQL", "SSTI") or (row[0] == "PATH" and "writeFile" in row[1].pattern)
-                   or (row[0] == "XSS" and "send" in row[1].pattern)})
-
-
-def _extent(text):
-    """`text` (what follows a sink's match) up to the end of the sink's
-    arguments: the bracket that closes the call, or the end of the statement
-    (a `;` outside brackets) for an assignment sink such as `.innerHTML =`."""
-    depth, i, n = 0, 0, len(text)
-    while i < n:
-        ch = text[i]
-        if ch in "\"'`":
-            j = text.find(ch, i + 1)
-            if j < 0:
-                return text
-            i = j + 1
-            continue
-        if ch in "([{":
-            depth += 1
-        elif ch in ")]}":
-            if depth == 0:
-                return text[:i]
-            depth -= 1
-        elif ch == ";" and depth == 0:
-            return text[:i]
-        i += 1
-    return text
-
-
-# A redirect to a path on this site: an argument that starts with a string
-# literal holding '/' and then neither '/' nor '\\' nor the literal's end
-# nor a field (`redirect("/user/" + id)`, `res.redirect(f"/search?q={q}")`)
-# cannot change the host; neither can one that starts with a scheme, a host
-# (no field in it) and a '/' (`"https://github.com/org/repo/commit/%s" %
-# rev`). A value assigned from such an expression is clean for open redirect
-# (taint_scan).
-_SAME_SITE_RE = re.compile(r"""\s*[rRuUfF]{0,2}["'`](?:/(?![/\\"'`{$])|https?://[^/"'`?#\\\s{}$]+/)""")
-
-
-def _offsite_args(args):
-    """`args` without the arguments that redirect to this site (see above)."""
-    out, i, n = [], 0, len(args)
-    while True:
-        end = _arg_end(args, i)
-        arg = args[i:end]
-        if not _SAME_SITE_RE.match(arg):
-            out.append(arg)
-        if end >= n or args[end] != ",":
-            return ",".join(out)
-        i = end + 1
-
-
-def _sink_args(text, sink_re, lang, suffix):
-    """The part of a sink's arguments (`text` follows the sink's match) that
-    carries the injection (see above)."""
-    mode = _SINK_ARGS.get(sink_re)
-    if mode == "first":
-        args = _first_arg(text)
-    elif mode == "positional":
-        args = _positional_args(text)
-    else:
-        args = _extent(text)
-    return _offsite_args(args) if suffix == "REDIR" else args
-
-
-# Path-traversal guards (barrier guards): a condition that rejects a value
-# holding '..' or checks that it stays under a base directory, on a branch
-# that leaves — `if ".." in name: abort(400)`, `if not path.startswith(BASE):
-# return …`, `if (p.includes("..")) return next(err)`. After one, the value
-# (and what is built from it) no longer carries path traversal. The exit is
-# on the `if` line or starts a line of its block (the lines below it, more
-# indented, at most _GUARD_BLOCK_LINES of them).
-_GUARD_BLOCK_LINES = 12
-_GUARD_IF_RE = {"py": re.compile(r"^\s*(?:el)?if\b"),
-                "js": re.compile(r"^\s*(?:\}\s*)?(?:else\s+)?if\s*\(")}
-_DOTDOT = r"""(?:'\.\.[/\\]{0,2}'|"\.\.[/\\]{0,2}"|`\.\.[/\\]{0,2}`)"""
-_GUARD_VAR_RES = {
-    "py": (re.compile(_DOTDOT + r"\s+(?:not\s+)?in\s+([A-Za-z_]\w*)(?![\w.(\[])"),
-           re.compile(r"(?<![\w.])([A-Za-z_]\w*)\s*\.\s*(?:startswith|is_relative_to)\s*\(\s*(?![\s'\"])"),
-           re.compile(r"(?:realpath|abspath|normpath)\s*\(\s*([A-Za-z_]\w*)\s*\)\s*\.\s*startswith\s*\(\s*(?![\s'\"])")),
-    "js": (re.compile(r"(?<![\w$.])([A-Za-z_$][\w$]*)\s*\.\s*(?:includes|indexOf)\s*\(\s*" + _DOTDOT + r"\s*\)"),
-           re.compile(r"(?<![\w$.])([A-Za-z_$][\w$]*)\s*\.\s*startsWith\s*\(\s*(?![\s'\"`])")),
-}
-# os.path.commonpath([BASE, path]): every name in the list
-_GUARD_COMMONPATH_RE = re.compile(r"commonpath\s*\(\s*[\[(]([^\[\]()]{0,256})[\])]")
-_GUARD_NAME_RE = re.compile(r"^\s*([A-Za-z_]\w*)\s*$")
-_GUARD_EXIT_RE = {
-    "py": re.compile(r"\b(?:return|raise|continue|break)\b|(?<![\w.])(?:abort|flask\.abort|sys\.exit)\s*\("),
-    "js": re.compile(r"\b(?:return|throw|continue|break)\b|(?<![\w$.])process\.exit\s*\("),
-}
-# Allowlist guards: a value found in a collection of the code's own (`if name
-# in ALLOWED:`, `if (allowed.includes(name))`, `.has(name)`) is one of its
-# members inside the block — clean for every category there — and after a
-# branch that leaves when it is not (`if name not in ALLOWED: abort(404)`,
-# `if (!allowed.has(name)) return …`). Not when the collection is request
-# data or holds it (`if key in request.args`).
-_ALLOW_GUARD_RE = {
-    "py": re.compile(r"^\s*(?:el)?if\s+(?:\(\s*)?([A-Za-z_]\w*)\s+(not\s+)?in\s+([^:\n]+?)\s*\)?\s*:"),
-    "js": re.compile(r"^\s*(?:\}\s*)?(?:else\s+)?if\s*\(\s*(!\s*)?([\w$.]+|\[[^\[\]\n]*\])\s*\.\s*(?:includes|has)\s*\("
-                     r"\s*([A-Za-z_$][\w$]*)\s*\)\s*\)"),
-}
-
-
-def _allow_guard(stmt, lang):
-    """(name, collection text, negated) of an allowlist guard in `stmt`
-    (see above), or None."""
-    m = _ALLOW_GUARD_RE[lang].match(stmt)
-    if not m:
-        return None
-    if lang == "py":
-        return m.group(1), m.group(3), bool(m.group(2))
-    return m.group(3), m.group(2), bool(m.group(1))
-
-
-def _guarded_names(stmt, lang):
-    """Names a path-traversal guard condition in `stmt` checks (see above)."""
-    names = [m.group(1) for r in _GUARD_VAR_RES[lang] for m in r.finditer(stmt)]
-    if lang == "py" and "commonpath" in stmt:
-        for m in _GUARD_COMMONPATH_RE.finditer(stmt):
-            names.extend(n.group(1) for n in map(_GUARD_NAME_RE.match, m.group(1).split(",")) if n)
-    return names
-
-
-def _guard_exits(ctx, i, stmt, lang):
-    """True when the `if` on line i (joined statement `stmt`) leaves: an
-    exit on its own line or at the start of a line of its block."""
-    exit_re = _GUARD_EXIT_RE[lang]
-    if exit_re.search(stmt):
-        return True
-    line = ctx.mcode(i)
-    indent = len(line) - len(line.lstrip())
-    seen, j = 0, i + 1
-    while j < len(ctx.lines) and seen < _GUARD_BLOCK_LINES:
-        if not ctx.cmask[j]:
-            code = ctx.mcode(j)
-            body = code.lstrip()
-            if body:
-                if len(code) - len(body) <= indent:
-                    return False
-                if exit_re.match(body):
-                    return True
-                seen += 1
-        j += 1
-    return False
-
-
-# Flask (or Quart) views: what one returns is the response body, HTML by
-# default. A function decorated with @….route(…) — or @….get / post / put /
-# patch / delete(…) in a file that imports flask or quart — is a view; its own
-# `return` lines (not those of a function nested in it) are XSS sinks unless
-# the value (a returned tuple's first item) is a JSON container, a redirect, a
-# template, a file or a response object: those are read as what they are. A
-# FastAPI path operation returns JSON unless its decorator sets
-# `response_class=HTMLResponse`: then it is a view too.
-_FLASK_IMPORT_RE = re.compile(r"^\s*(?:from\s+(?:flask|quart)\b|import\s+(?:flask|quart)\b)")
-_FASTAPI_IMPORT_RE = re.compile(r"^\s*(?:from\s+fastapi\b|import\s+fastapi\b)")
-_DJANGO_IMPORT_RE = re.compile(r"^\s*(?:from\s+django\b|import\s+django\b)")
-_VIEW_DECORATOR_RE = re.compile(r"^\s*@[\w.]+\.(route|get|post|put|patch|delete|api_route)\s*\(")
-_HTML_RESPONSE_CLASS_RE = re.compile(r"\bresponse_class\s*=\s*(?:[\w.]*\.)?HTMLResponse\b")
-_DEF_RE = re.compile(r"^\s*(?:async\s+def|def|class)\b")
-_RETURN_RE = re.compile(r"^\s*return\b")
-_VIEW_RETURN_SKIP_RE = re.compile(
-    r"\s*(?:\{|\[|dict\s*\(|(?:[A-Za-z_][\w.]*\.)?(?:redirect|jsonify|url_for|send_file|send_from_directory"
-    r"|send_static_file|abort|render_template)\s*\()")
-
-
-# A view that returns what a function call gives (`return User.to_dict(q)`,
-# `return request.get_json()`) returns that function's value, most often a
-# dict or a response: only the string builders' results are read as the body
-# (`return str(x)`, `return "…".format(x)`, `return ", ".join(xs)`).
-_VIEW_CALL_RE = re.compile(r"\s*([A-Za-z_][\w.]*)\s*\(")
-_STRING_BUILDERS = frozenset((
-    "str", "format", "join", "replace", "strip", "lstrip", "rstrip", "upper", "lower", "title",
-    "capitalize", "casefold", "swapcase", "decode", "zfill", "ljust", "rjust", "center", "expandtabs",
-    "dumps"))
-
-
-def _view_body(value):
-    """False when a view's return value `value` is a call of a function that
-    is not a string builder (see above)."""
-    m = _VIEW_CALL_RE.match(value)
-    if not m or m.group(1).rsplit(".", 1)[-1] in _STRING_BUILDERS:
-        return True
-    end = _call_close(value, m.end())
-    return end >= len(value) or bool(value[end + 1:].strip())
-
-
-def _view_returns(ctx):
-    """Indices of the `return` lines of the file's Flask views and HTML
-    FastAPI path operations (see above)."""
-    code = [("" if ctx.cmask[i] else ctx.mcode(i)) for i in range(len(ctx.lines))]
-    flask = any(_FLASK_IMPORT_RE.match(c) for c in code)
-    fastapi = not flask and any(_FASTAPI_IMPORT_RE.match(c) for c in code)
-    out = set()
-    stack = []              # [indent, is_view] of the enclosing defs
-    pending = False         # a view decorator seen, its def not yet
-    operation = False       # the decorator being read is a FastAPI path operation's
-    open_brackets = 0       # a decorator's arguments still open …
-    continued = 0           # … over this many lines (at most TAINT_JOIN_MAX_LINES)
-    for i, c in enumerate(code):
-        body = c.lstrip()
-        if not body:
-            continue
-        if open_brackets > 0 and continued < TAINT_JOIN_MAX_LINES:
-            open_brackets += _bracket_depth(c)
-            continued += 1
-            if operation and _HTML_RESPONSE_CLASS_RE.search(c):
-                pending = True
-            continue
-        open_brackets = 0
-        operation = False
-        indent = len(c) - len(body)
-        while stack and indent <= stack[-1][0]:
-            stack.pop()
-        if body.startswith("@"):
-            d = _VIEW_DECORATOR_RE.match(c)
-            if d and (d.group(1) == "route" or flask):
-                pending = True
-            elif d and fastapi:
-                operation = True
-                if _HTML_RESPONSE_CLASS_RE.search(c):
-                    pending = True
-            open_brackets, continued = _bracket_depth(c), 0
-            continue
-        if _DEF_RE.match(c):
-            stack.append([indent, pending and not body.startswith("class")])
-            pending = False
-            continue
-        pending = False
-        if stack and stack[-1][1] and _RETURN_RE.match(c):
-            out.add(i)
-    return out
-
-
-# Route handlers (0.1.7): the parameters a web framework fills from the
-# request are sources in the handler's body. Which ones is decided by
-# lazaret.scanner.frameworks (shared with the interprocedural engine): a
-# Flask view's URL rule variables, a FastAPI path operation's parameters but
-# what it injects or validates to no free text, a Django view's parameters
-# after `request` but the conventional int and slug names. Here they are
-# read from the lines: a function decorated with @….route(RULE) — or
-# @….get / post / put / patch / delete(RULE) in a file that imports flask or
-# quart — is a Flask view; one decorated with @….get / post / put / patch /
-# delete / options / head / api_route / websocket(…) in a file that imports
-# fastapi a FastAPI path operation; in a file that imports django, a
-# function whose first parameter is `request` (a method: `self, request`) a
-# Django view. A decorator or signature is read over the lines that
-# continue its brackets (at most TAINT_JOIN_MAX_LINES of them).
-_ROUTE_DECORATOR_RE = re.compile(
-    r"^\s*@[\w.]+\.(route|get|post|put|patch|delete|options|head|api_route|websocket)\s*\(")
-_ROUTE_RULE_RE = re.compile(r"""\(\s*[rRuU]?(["'])(.*?)\1""")
-_DEF_HEAD_RE = re.compile(r"^\s*(?:async\s+)?def\s+\w+\s*\(")
-_PARAM_RE = re.compile(r"\s*\*{0,2}\s*([A-Za-z_]\w*)\s*")
-_top_split = frameworks.top_split
-
-
-def _signature_params(sig):
-    """[(name, annotation, default)] of the parameters of the def whose text
-    (with the lines that continue it) is `sig`."""
-    m = _DEF_HEAD_RE.match(sig)
-    if not m:
-        return []
-    out = []
-    for part in _top_split(sig[m.end():_call_close(sig, m.end())], ","):
-        pm = _PARAM_RE.match(part)
-        if not pm or pm.end() < len(part) and part[pm.end()] not in ":=":
-            continue
-        ann, default = "", ""
-        rest = part[pm.end():]
-        if rest.startswith(":"):
-            pieces = _top_split(rest[1:], "=")
-            ann, default = pieces[0], "=".join(pieces[1:])
-        elif rest.startswith("="):
-            default = rest[1:]
-        out.append((pm.group(1), ann.strip(), default.strip()))
-    return out
-
-
-def _fastapi_params(params, aliases=frozenset()):
-    """The names of `params` a FastAPI path operation fills from the
-    request; `aliases`: the file's dependency aliases."""
-    return [name for name, ann, default in params if frameworks.fastapi_param(name, ann, default, aliases)]
-
-
-def _flask_params(rule, params):
-    """The names of `params` the Flask URL rule `rule` fills with free text."""
-    free = frameworks.flask_free_vars(rule)
-    return [name for name, _ann, _default in params if name in free]
-
-
-def _django_params(params):
-    """The names of `params` a Django URL pattern fills with free text, when
-    `params` are a view's (see above)."""
-    names = [name for name, _ann, _default in params]
-    first = 2 if names[:2] == ["self", "request"] else 1 if names[:1] == ["request"] else 0
-    if not first:
-        return []
-    return [name for name, ann, _default in params[first:] if frameworks.django_param(name, ann)]
-
-
-def _route_params(ctx):
-    """{index of a route handler's def line: [names of the parameters the
-    framework fills from the request]} (see above)."""
-    code = [("" if ctx.cmask[i] else ctx.mcode(i)) for i in range(len(ctx.lines))]
-    flask = any(_FLASK_IMPORT_RE.match(c) for c in code)
-    fastapi = not flask and any(_FASTAPI_IMPORT_RE.match(c) for c in code)
-    django = any(_DJANGO_IMPORT_RE.match(c) for c in code)
-    aliases = frameworks.dep_aliases("\n".join(code)) if fastapi else frozenset()
-
-    def joined(i):
-        """(line i's code with the lines that continue its brackets, the
-        index of the last of them)."""
-        parts, depth, j = [code[i]], _bracket_depth(code[i]), i
-        while depth > 0 and j + 1 < len(code) and j + 1 <= i + TAINT_JOIN_MAX_LINES:
-            j += 1
-            parts.append(code[j])
-            depth += _bracket_depth(code[j])
-        return " ".join(parts), j
-
-    out = {}
-    routes = []             # (framework, rule) of the route decorators above the next def
-    i = 0
-    while i < len(code):
-        c = code[i]
-        body = c.lstrip()
-        if not body:
-            i += 1
-            continue
-        if body.startswith("@"):
-            text, last = joined(i)
-            d = _ROUTE_DECORATOR_RE.match(text)
-            if d and (d.group(1) == "route" or (flask and d.group(1) in frameworks.FLASK_ROUTE_METHODS)):
-                rule = _ROUTE_RULE_RE.search(text, d.end() - 1)
-                routes.append(("flask", rule.group(2) if rule else ""))
-            elif d and fastapi:
-                routes.append(("fastapi", ""))
-            i = last + 1
-            continue
-        if _DEF_HEAD_RE.match(c):
-            text, last = joined(i)
-            params = _signature_params(text)
-            names = []
-            for framework, rule in routes:
-                names.extend(_fastapi_params(params, aliases) if framework == "fastapi" else _flask_params(rule, params))
-            if not routes and django:
-                names = _django_params(params)
-            if names:
-                out[i] = list(dict.fromkeys(names))
-            routes = []
-            i = last + 1
-            continue
-        routes = []
-        i += 1
-    return out
-
-
-# Where a taint lives, read from the file's indentation: a name tainted in a
-# function's body (a def or class in Python; in JavaScript a function, method
-# or arrow function whose body is a block) is dropped when that body ends, so
-# another function's variable of the same name is not taken for it. A
-# reassignment that runs whenever the tainting one did — later in the same
-# block, or in a block that encloses it — replaces the value (`path =
-# secure_filename(path)` is clean for path traversal; `name = "fixed"` is
-# clean); one in a nested or sibling block (an if, an else, a case) adds to
-# it: the name stays tainted, and clean only for what both values are clean
-# for. The lines of a multi-line string are not part of the structure, nor
-# in Python the lines that continue a statement's brackets (at most
-# TAINT_JOIN_MAX_LINES of them); JavaScript's braces open blocks, and its
-# lines are read by their indentation alone.
-_JS_FUNCTION_WORD_RE = re.compile(r"\bfunction\b")
-_JS_METHOD_HEAD_RE = re.compile(
-    r"^\s*(?:(?:async|static|get|set)\s+){0,3}(?!(?:if|for|while|switch|catch|with|function|return)\b)"
-    r"[A-Za-z_$][\w$]*\s*\([^()]*\)$")
-
-
-def _scope_opener(code, lang):
-    """True when line `code` opens a function body (see above)."""
-    if lang == "py":
-        return bool(_DEF_RE.match(code))
-    t = code.rstrip()
-    if not t.endswith("{"):
-        return False
-    head = t[:-1].rstrip()
-    if head.endswith("=>"):
-        return True
-    if not head.endswith(")"):
-        return False
-    return bool(_JS_FUNCTION_WORD_RE.search(head) or _JS_METHOD_HEAD_RE.match(head))
-
-
-def _literal_continuations(ctx):
-    """Indices of the lines whose first non-blank character lies inside a
-    string literal that began on an earlier line."""
-    lits = ctx._literals
-    out = set()
-    if not lits:
-        return out
-    starts = _line_starts(ctx.content)
-    k, reach = 0, -1
-    for j, line in enumerate(ctx.lines):
-        p = starts[j] + len(line) - len(line.lstrip())
-        while k < len(lits) and lits[k][0] < p:
-            reach = max(reach, lits[k][1])
-            k += 1
-        if p < reach:
-            out.add(j)
-    return out
-
-
-def taint_scan(path, lines, lang, ctx=None):
-    if lang not in TAINT_SOURCES:   # SQL and others: pattern rules only, no taint flow
-        return []
-    if ctx is None or ctx.lines is not lines:
-        ctx = _FileCtx(lines, lang, jsx=jsx_reading(path))
-    # Each line is matched with its comment text removed: `/**/const d =
-    # req.query.x` is an assignment, and `x = 1  // req.query` is not a source.
-    # (Match text: NFKC for Python, decoded identifier escapes for JS.)
-    cmask = ctx.cmask
-    issues = []
-    # var -> [line_no, frozenset(clean sink suffixes), taint order, scope id,
-    #         ((indent, block id), …) of the blocks it was tainted in]
-    tainted = {}
-    src = TAINT_SOURCES[lang]
-    sinks = TAINT_SINKS[lang]
-    partial = _PARTIAL_SAN.get(lang, {})
-    if lang == "py" and not _TEMPLATE_IMPORT_RE.search(ctx.content):
-        sinks = [row for row in sinks if row[1] is not _TEMPLATE_SINK_RE]
-    suffixes = list(dict.fromkeys(row[0] for row in sinks))
-    ident_re = _IDENT_RUN_RE[lang]
-    views = _view_returns(ctx) if lang == "py" and "@" in ctx.content else ()
-    routes = _route_params(ctx) if lang == "py" and "def" in ctx.content else {}
-    pending = None          # (scope id, names, def line) of a route handler whose body is not yet seen
-    xss_sink = next((row for row in sinks if row[0] == "XSS"), None)
-    guard_if = _GUARD_IF_RE[lang]
-    inside = _literal_continuations(ctx)
-    levels = []             # open blocks: [indent, block id, scope id or None]
-    ids = [0, 0, 0]         # next block id, scope id, taint order
-    in_scope = collections.defaultdict(list)    # scope id -> names tainted in it
-    opener = None           # (indent, scope id) of a function whose body is not yet seen
-    open_depth = 0          # brackets a statement leaves open …
-    continued = 0           # … over this many continuation lines
-
-    def carriers_in(text_code, suf):
-        """Tainted vars present in text_code that still pose danger for sink
-        suffix suf (None: any), in the order they were tainted."""
-        if not tainted:
-            return []
-        found = [v for v in set(ident_re.findall(text_code))
-                 if v in tainted and suf not in tainted[v][1]]
-        found.sort(key=lambda v: tainted[v][2])
-        return found
-
-    def statement(i, line):
-        """Line i's code, joined with the lines that continue its open brackets."""
-        depth = _bracket_depth(line)
-        if depth <= 0:
-            return line
-        parts, total, j = [line], 0, i + 1
-        while depth > 0 and j < len(lines) and j <= i + TAINT_JOIN_MAX_LINES \
-                and total < TAINT_JOIN_MAX_CHARS:
-            if not cmask[j]:
-                nxt = ctx.mcode(j)[:TAINT_JOIN_MAX_CHARS - total]
-                parts.append(nxt)
-                total += len(nxt)
-                depth += _bracket_depth(nxt)
-            j += 1
-        return " ".join(parts)
-
-    keyed = {}              # container -> {literal key: clean set, None: no untrusted data}
-    allowed = []            # [indent, name, taint order, clean set before] of the allowlist guards open
-
-    def value_clean(rhs):
-        """None when the value `rhs` carries no untrusted data, else the
-        sink suffixes it is clean for: a sanitizer for the category, or
-        every carrier already clean for it."""
-        rhs = _keyed_reads(rhs, keyed)
-        base = _taint_code(_neutralize(rhs, lang), lang)   # full sanitizers stripped
-        if not (src.search(base) or carriers_in(base, None)):
-            return None
-        clean = set()
-        for suf in suffixes:
-            neut = _taint_code(_neutralize(rhs, lang, suf), lang) if suf in partial else base
-            if not src.search(neut) and not carriers_in(neut, suf):
-                clean.add(suf)
-        # a response object (make_response(…), HttpResponse(…)) or a value
-        # marked safe: the XSS sink reports what it is built from
-        if xss_sink is not None and xss_sink[1].search(rhs):
-            clean.add("XSS")
-        # a path on this site, or a URL on a fixed host
-        if _SAME_SITE_RE.match(rhs):
-            clean.add("REDIR")
-        return frozenset(clean)
-
-    def report(suffix, cat, sev, cwe, fix, text, i, col):
-        """A T-* finding when `text` (a sink's arguments, a view's return
-        value) carries untrusted data for sink category `suffix`."""
-        rest_code = _taint_code(_neutralize(_keyed_reads(text, keyed), lang, suffix), lang)
-        carriers = carriers_in(rest_code, suffix)
-        if not carriers and not src.search(rest_code):
-            return
-        what = (f"untrusted data via '{carriers[0]}' (tainted at line {tainted[carriers[0]][0]})"
-                if carriers else "untrusted data")
-        issues.append(mk_issue(
-            {"id": f"T-{suffix}", "name": f"Tainted flow → {cat}", "type": "VULN", "sev": sev,
-             "msg": f"Possible {cat}: {what} reaches this sink.",
-             "why": "Data from user input or a decode function flows into a dangerous call "
-                    "without visible sanitization (lightweight intra-file taint tracking).",
-             "fix": fix, "ref": f"{cwe} · Taint analysis"}, path, i + 1, lines, col))
-
-    for i in range(len(lines)):
-        if cmask[i]:
-            continue
-        line = ctx.mcode(i)
-        if not line or line.isspace():
-            continue
-        if not i & 63:
-            ctx.check_time()
-        # ---- the structure (see "Where a taint lives") ----
-        structural = False
-        if i not in inside:
-            depth = sum(_BRACKET_DELTA.get(ch, 0) for ch in ctx.names_code(i)) if lang == "py" else 0
-            if open_depth > 0 and continued < TAINT_JOIN_MAX_LINES:
-                open_depth = max(0, open_depth + depth)
-                continued += 1
-            else:
-                structural = True
-                open_depth, continued = max(0, depth), 0
-                raw = lines[i]
-                indent = len(raw) - len(raw.lstrip())
-                while allowed and indent <= allowed[-1][0]:        # an allowlist guard's block ends
-                    _, n, order, before = allowed.pop()
-                    if n in tainted and tainted[n][2] == order:
-                        tainted[n][1] = before
-                while levels and levels[-1][0] > indent:
-                    gone = levels.pop()[2]
-                    if gone is not None:         # a function's body ends
-                        for n in in_scope.pop(gone, ()):
-                            if n in tainted and tainted[n][3] == gone:
-                                del tainted[n]
-                if not levels or levels[-1][0] < indent:
-                    scope = opener[1] if opener is not None and indent > opener[0] else None
-                    levels.append([indent, ids[0], scope])
-                    ids[0] += 1
-                    if pending is not None and scope == pending[0]:
-                        # a route handler's body: the parameters it takes from the request
-                        chain = tuple((lv[0], lv[1]) for lv in levels)
-                        for name in pending[1]:
-                            keyed.pop(name, None)
-                            tainted[name] = [pending[2] + 1, frozenset(), ids[2], scope, chain]
-                            ids[2] += 1
-                            in_scope[scope].append(name)
-                        pending = None
-                opener = None
-                if _scope_opener(line, lang):
-                    opener = (indent, ids[1])
-                    pending = (ids[1], routes[i], i) if i in routes else None
-                    ids[1] += 1
-        stmt = None
-        names, rhs = _assignment(line, lang)
-        container, written = (None, None) if names else _container_write(line, lang)
-        if names:
-            stmt = statement(i, line)
-            joined = _assignment(stmt, lang)
-            if joined[0]:
-                names, rhs = joined
-            clean = value_clean(rhs)
-            chain = tuple((lv[0], lv[1]) for lv in levels)
-            scope = next((lv[2] for lv in reversed(levels) if lv[2] is not None), None)
-            augmented = bool(_AUG_ASSIGN_RE[lang].match(stmt))
-            for name in names:
-                if not augmented:
-                    keyed.pop(name, None)
-                old = tainted.get(name)
-                replaces = (old is not None and structural and not augmented
-                            and (levels[-1][0], levels[-1][1]) in old[4])
-                if old is None or replaces:
-                    if clean is None:
-                        tainted.pop(name, None)
-                    else:
-                        tainted[name] = [i + 1, clean, ids[2], scope, chain]
-                        ids[2] += 1
-                        if scope is not None:
-                            in_scope[scope].append(name)
-                elif clean is not None:
-                    old[1] = old[1] & clean
-        elif container is not None:
-            stmt = statement(i, line)
-            joined = _container_write(stmt, lang)
-            if joined[0] == container:
-                written = joined[1]
-            clean = value_clean(written)
-            km = _KEYED_WRITE_RE.match(stmt)
-            if km and km.group(1) == container:
-                keyed.setdefault(container, {})[km.group(3)] = clean
-            if clean is not None:
-                old = tainted.get(container)
-                if old is not None:
-                    old[1] = old[1] & clean
-                else:
-                    scope = next((lv[2] for lv in reversed(levels) if lv[2] is not None), None)
-                    tainted[container] = [i + 1, clean, ids[2], scope, tuple((lv[0], lv[1]) for lv in levels)]
-                    ids[2] += 1
-                    if scope is not None:
-                        in_scope[scope].append(container)
-        elif tainted and guard_if.match(line):
-            stmt = statement(i, line)
-            guarded = [n for n in _guarded_names(stmt, lang) if n in tainted]
-            if guarded and _guard_exits(ctx, i, stmt, lang):
-                for n in guarded:
-                    tainted[n][1] = tainted[n][1] | {"PATH"}
-            guard = _allow_guard(stmt, lang)
-            if guard is not None and guard[0] in tainted:
-                code = _taint_code(guard[1], lang)
-                if not src.search(code) and not carriers_in(code, None):
-                    entry = tainted[guard[0]]
-                    if guard[2]:                 # leaves when not a member: clean from here on
-                        if _guard_exits(ctx, i, stmt, lang):
-                            entry[1] = frozenset(suffixes)
-                    else:                        # a member inside the block
-                        raw = lines[i]
-                        allowed.append([len(raw) - len(raw.lstrip()), guard[0], entry[2], entry[1]])
-                        entry[1] = frozenset(suffixes)
-        xss_here = False
-        for suffix, sink_re, cat, sev, cwe, fix in sinks:
-            sm = sink_re.search(line)
-            if not sm:
-                continue
-            if stmt is None:
-                stmt = statement(i, line)
-            xss_here = xss_here or suffix == "XSS"
-            if suffix == "XSS" and (_NON_HTML_TYPE_RE.search(_extent(stmt[sm.end():])) if lang == "py"
-                                    else _NON_HTML_CHAIN_RE.search(sm.group(0))):
-                continue                      # a text/plain or JSON response
-            # neutralize full + this-category sanitizers in the sink's arguments
-            args = _sink_args(stmt[sm.end():], sink_re, lang, suffix)
-            report(suffix, cat, sev, cwe, fix, args, i, sm.start())
-        if i in views and not xss_here and xss_sink is not None:
-            if stmt is None:
-                stmt = statement(i, line)
-            rm = _RETURN_RE.match(stmt)
-            value = _first_arg(stmt[rm.end():])
-            if value.strip() and not _VIEW_RETURN_SKIP_RE.match(value) and _view_body(value):
-                report(xss_sink[0], *xss_sink[2:], value, i, rm.end() - 6)
-    return issues
 
 
 # ---------------- Obfuscation / entropy heuristics ----------------
@@ -3068,18 +1924,6 @@ def _comment_spans(content, lang, strings=None, jsx=True, literals=None):
     return _lex_comment_spans(content, lang, strings, jsx, literals)
 
 
-def _cut_spans(line, spans):
-    """`line` without the text of `spans` (sorted, disjoint, relative to it)."""
-    if not spans:
-        return line
-    parts, p = [], 0
-    for a, b in spans:
-        parts.append(line[p:a])
-        p = b
-    parts.append(line[p:])
-    return "".join(parts)
-
-
 def _comment_layout(content, lines, lang, strings=None, jsx=True, literals=None):
     """(mask, spans, code) for the lines of `content`:
     mask[i]  — line i is a comment line (has non-whitespace, all of it in comments);
@@ -3143,54 +1987,21 @@ def source_lines(content, lang):
     return content.split("\n")
 
 
-# ---------------- Match text (review fix: shared semantics 5) ----------------
-# Rules match each line in the form the language runtime reads it, so
-# Unicode spellings of the same code cannot slip past ASCII patterns:
-#   py : a line containing non-ASCII is matched in its NFKC-normalized form —
-#        Python NFKC-normalizes identifiers, so `ｅｘｅｃ(…)` and
-#        `os.ｓｙｓｔｅｍ(…)` run as exec / os.system;
-#   js : identifier escapes \uXXXX and \u{X…} outside '…'/"…" string
-#        literals are decoded when they denote an identifier character
-#        (`\u0065val(` is eval), and U+FEFF — JavaScript whitespace that
-#        Python's \s does not match — becomes a space (`eval\ufeff(`).
-# Line numbers never change; snippets still show the original text.
-_JS_UESC_RE = re.compile(r"\\u\{([0-9A-Fa-f]{1,6})\}|\\u([0-9A-Fa-f]{4})")
-
-
-#: Identifier characters since Unicode 15.1 only (ZWNJ, ZWJ and the two
-#: katakana middle dots): Python 3.13+ and current Node say so, 3.10-3.12 not.
-_LATER_ID_CONTINUE = frozenset("\u200c\u200d\u30fb\uff65")
-
-
-def _js_ident_char(m):
-    """The identifier character a JS \\u escape denotes, else None: the same
-    on every Python and Node (Unicode 13.0's characters, see _unicode13)."""
-    cp = int(m.group(1) or m.group(2), 16)
-    if cp > 0x10FFFF:
-        return None
-    ch = chr(cp)
-    if ch == "$" or ch in _LATER_ID_CONTINUE:
-        return ch
-    return ch if _unicode13.assigned(cp) and ("a" + ch).isidentifier() else None
-
-
-def _py_match_text(text):
-    return text if text.isascii() else unicodedata.normalize("NFKC", text)
-
-
 class _ScanBudgetExceeded(Exception):
-    """Raised inside scan_file when the per-file time budget is spent."""
+    """Raised inside scan_config_file when the per-file time budget is spent."""
 
 
-_TLS = threading.local()      # the scan_file context active on this thread
+_TLS = threading.local()      # the scan_config_file context active on this thread
 
 
 class _Redactor:
     """One file's redaction facts, shared by every snippet built from its
     lines: the lines of its PEM private-key blocks, its entropy literals
-    (_SecretLiterals) and each line as any snippet may show it. scan_file's
-    context is one; encoding_issues and redact_file_issues build their own,
-    so a finding made outside scan_file redacts the file's secrets too."""
+    (_SecretLiterals) and each line as any snippet may show it.
+    scan_config_file's context is one; encoding_issues and redact_file_issues
+    build their own, so a finding made outside a file's scan redacts the
+    file's secrets too (a source file's scan is the engine's, which redacts
+    its own snippets)."""
 
     def __init__(self, lines):
         self.lines = lines
@@ -3223,129 +2034,18 @@ class _Redactor:
 
 
 class _FileCtx(_Redactor):
-    """Per-file facts computed once and shared by every rule, the suppression
-    check and mk_issue: the comment layout, the normalized match text of each
-    line, parsed suppression markers and the redaction caches."""
+    """A config or data file's facts (scan_config_file), computed once and
+    shared by its checks, the suppression check and mk_issue: the comment
+    layout, the parsed suppression markers and the redaction caches. (A
+    source file's are the engine's: filectx.rs.)"""
 
     def __init__(self, lines, lang, content=None, deadline=None, jsx=True):
         super().__init__(lines)
         self.lang = lang
         self.content = "\n".join(lines) if content is None else content
-        self._strings = [] if lang == "js" else None      # '…' "…" spans (absolute)
-        self._literals = [] if lang in ("js", "py") else None   # every literal's span (absolute)
-        self.cmask, self.cspans, self.code = _comment_layout(
-            self.content, lines, lang, self._strings, jsx, self._literals)
+        self.cmask, self.cspans, self.code = _comment_layout(self.content, lines, lang, None, jsx)
         self.deadline = deadline
         self._markers = {}
-        self._mlines = None
-        self._mcode = {}
-        self._starts = None
-        self._str_starts = None
-        self._lit_ends = None
-
-    @property
-    def mlines(self):
-        """The text each line is matched in (see "Match text" above)."""
-        if self._mlines is None:
-            if self.lang == "py":
-                self._mlines = [_py_match_text(l) for l in self.lines]
-            elif self.lang == "js":
-                self._mlines = [self._js_text(i, False) for i in range(len(self.lines))]
-            else:
-                self._mlines = self.lines
-        return self._mlines
-
-    def mcode(self, i):
-        """Match text of line i with its comment text removed."""
-        if self.code is self.lines:
-            return self.mlines[i]
-        v = self._mcode.get(i)
-        if v is None:
-            if self.lang == "py":
-                v = _py_match_text(self.code[i])
-            elif self.lang == "js":
-                v = self._js_text(i, True)
-            else:
-                v = self.code[i]
-            self._mcode[i] = v
-        return v
-
-    def names_code(self, i):
-        """Line i as names are read in it (SC-HOMOGLYPH): its match text
-        with its comments removed and every literal blanked, by the spans
-        both readings of the file agree on: strings of any kind (a template
-        or f-string with its fields), regex literals. So a regex's
-        escapes are not decoded into names (ajv's /http[s\\u017F]?/), a
-        character class like [a-z\\u0430-\\u044f] and a docstring's lines are
-        not names, and a quote escaped in a string ends nothing."""
-        line = self.lines[i]
-        if self._literals is None:
-            return self.mcode(i)
-        if self._starts is None:
-            self._starts = _line_starts(self.content)
-        if self._lit_ends is None:
-            self._lit_ends = [e for _, e in self._literals]
-        base = self._starts[i]
-        end = base + len(line)
-        k = bisect.bisect_right(self._lit_ends, base)       # the first literal ending after base
-        parts, p = [], 0
-        while k < len(self._literals) and self._literals[k][0] < end:
-            a, b = max(self._literals[k][0], base) - base, min(self._literals[k][1], end) - base
-            parts.append(line[p:a])
-            parts.append(" " * (b - a))
-            p = b
-            k += 1
-        if not parts:
-            return self.mcode(i)
-        parts.append(line[p:])
-        blanked = "".join(parts)
-        if self.lang == "js":
-            return self._js_text(i, True, blanked)
-        return _py_match_text(_cut_spans(blanked, self.cspans.get(i, ())))
-
-    def _js_text(self, i, drop_comments, line=None):
-        """Line i's match text; `line`: line i with some of its text blanked
-        (the same length) to read instead."""
-        if line is None:
-            line = self.lines[i]
-            plain = self.code[i] if drop_comments else line
-        else:
-            plain = _cut_spans(line, self.cspans.get(i, ())) if drop_comments else line
-        if "\\u" not in line:
-            return plain.replace("\ufeff", " ") if "\ufeff" in plain else plain
-        if self._starts is None:
-            self._starts = _line_starts(self.content)
-        if self._str_starts is None:
-            self._str_starts = [a for a, _ in self._strings]
-        base = self._starts[i]
-        cuts = list(self.cspans.get(i, ())) if drop_comments else []
-        edits = [(a, b, "") for a, b in cuts]
-        c, ncuts = 0, len(cuts)             # cuts are sorted: one moving index
-        for m in _JS_UESC_RE.finditer(line):
-            while c < ncuts and cuts[c][1] <= m.start():
-                c += 1
-            if c < ncuts and cuts[c][0] <= m.start():
-                continue
-            k = bisect.bisect_right(self._str_starts, base + m.start()) - 1
-            if k >= 0 and self._strings[k][1] > base + m.start():
-                continue                          # inside a '…' or "…" literal
-            ch = _js_ident_char(m)
-            if ch is not None:
-                edits.append((m.start(), m.end(), ch))
-        if not edits:
-            out = plain
-        else:
-            edits.sort()
-            parts, p = [], 0
-            for a, b, rep_ in edits:
-                if a < p:
-                    continue
-                parts.append(line[p:a])
-                parts.append(rep_)
-                p = b
-            parts.append(line[p:])
-            out = "".join(parts)
-        return out.replace("\ufeff", " ") if "\ufeff" in out else out
 
     def marker(self, k):
         """Parsed suppression marker of line k: _NO_MARKER, None (blanket)
@@ -3706,336 +2406,13 @@ def cap_issues(path, issues, lines):
 
 
 def extract_functions(lines, lang):
-    fns = []
+    """[{"name", "line", "len", "cx"}] of a Python or JavaScript file's
+    functions, as the function metrics (Q-FN-LONG, Q-FN-CX) read them: the
+    engine's (functions; project.rs)."""
     if lang not in ("py", "js"):   # function/complexity metrics don't apply to SQL
-        return fns
-    if lang == "py":
-        # A def ends at the first later line that is non-blank, not a
-        # comment, and indented no deeper than the def. Review fix: that was
-        # a forward scan per def — O(defs × lines) (300 nested defs over
-        # 30 000 blank lines: 0.85 s, quadratic). One pass with a stack of
-        # open defs gives the same spans; complexity is summed per line.
-        cx_re = re.compile(r"\b(if|elif|for|while|and|or|except|case)\b")
-        def_re = re.compile(r"^(\s*)(?:async\s+)?def\s+(\w+)")
-        cx_prefix = [0]
-        for line in lines:
-            cx_prefix.append(cx_prefix[-1] + len(cx_re.findall(line)))
-        found = []                        # (line_i, name) in source order
-        spans = {}                        # line_i -> end (exclusive)
-        stack = []                        # (indent, line_i), indents increasing
-        for k, l in enumerate(lines):
-            m = def_re.match(l)
-            t = l.strip()
-            if t and not t.startswith("#"):
-                ind = len(m.group(1)) if m else len(l) - len(l.lstrip())
-                while stack and stack[-1][0] >= ind:
-                    spans[stack.pop()[1]] = k
-            if m:
-                found.append((k, m.group(2)))
-                stack.append((len(m.group(1)), k))
-        for _ind, k in stack:
-            spans[k] = len(lines)
-        for i, name in found:
-            end = spans[i]
-            fns.append({"name": name, "line": i + 1, "len": end - i,
-                        "cx": 1 + cx_prefix[end] - cx_prefix[i]})
-    else:
-        # G4 fix: the old implementation restarted a forward 800-line window
-        # scan for EVERY fn_re match — on minified/adversarial JS that is
-        # O(lines × 800 × line_length) (20 s CPU for a 1.5 MB file, audit G4)
-        # plus a body-string copy per function (memory blowup). This version
-        # walks the brace structure ONCE with a stack. Old semantics are
-        # preserved deliberately: each header's scan started at the first
-        # character of its LINE, so a header claims the first '{' at/after its
-        # line start (including its own, for `name(…){`-style matches), and
-        # two headers on nested lines share a '{' exactly as their independent
-        # scans both counted it. Function span = claimed '{' .. balancing '}'.
-        content = "\n".join(lines)
-        starts = [0]                      # line -> start offset (sorted)
-        find = content.find
-        pos = find("\n")
-        while pos != -1:
-            starts.append(pos + 1)
-            pos = find("\n", pos + 1)
-        starts.append(len(content) + 1)   # sentinel
-        cx_re = re.compile(r"\b(if|for|while|case|catch)\b|&&|\|\||\?[^.:]")
-        # Review fix: `(\w+)\s*\([^)]*\)\s*\{` restarted inside every \w run
-        # and every unclosed '(' scan ran to the end of the line — O(n²): a
-        # benign 32 KB hex literal took 12.7 s. The name must now start a
-        # word run (?<!\w), parameter lists stop at the next '(' ([^()]*), and
-        # only the first FN_HEADER_SCAN_LIMIT characters of a line are
-        # searched for its (first) header.
-        fn_re = re.compile(
-            r"(?:function\s+(\w+)|(?:const|let|var)\s+(\w+)\s*=\s*(?:async\s*)?"
-            r"(?:function|\([^()]*\)\s*=>|\w+\s*=>)|(?<!\w)(\w+)\s*\([^()]*\)\s*\{)")
-        # headers: first match per line (old semantics)
-        headers = []                      # (line_i, name)
-        for i, line in enumerate(lines):
-            m = fn_re.search(line, 0, FN_HEADER_SCAN_LIMIT)
-            if m:
-                name = m.group(1) or m.group(2) or m.group(3) or "(anonymous)"
-                headers.append((i, name))
-        # per-line complexity counts — tokens cannot span '\n' except the
-        # two-char '?x' (which '\n' satisfies); per-line counting is the
-        # linear-time equivalent of the old body-copy findall.
-        cx_prefix = [0]
-        for line in lines:
-            cx_prefix.append(cx_prefix[-1] + len(cx_re.findall(line)))
-        # brace positions (one regex pass, no per-char Python loop)
-        opens = [m.start() for m in re.finditer(r"\{", content)]
-        # one brace walk: stack of (open_pos, owner header indices).
-        from bisect import bisect_left, bisect_right
-        matched = {}                      # header idx -> (open_pos, close_pos)
-        stack, waiting, hi = [], [], 0
-        for bm in re.finditer(r"[{}]", content):
-            bpos = bm.start()
-            while hi < len(headers) and starts[headers[hi][0]] <= bpos:
-                waiting.append(hi)        # header's line has begun: it claims
-                hi += 1                   # the next '{' it sees (old semantics)
-            if bm.group() == "{":
-                stack.append((bpos, waiting))
-                waiting = []
-            elif stack:
-                open_pos, owners = stack.pop()
-                for h in owners:
-                    matched[h] = (open_pos, bpos)
-        for h, (i, name) in enumerate(headers):
-            nlines = len(lines)
-            window_end_off = starts[min(nlines, i + 800)]   # old 800-line cap
-            k = bisect_left(opens, starts[i])
-            if k == len(opens) or opens[k] >= window_end_off:
-                continue          # no '{' in window: old `started` never set
-            if h in matched and matched[h][1] < window_end_off:
-                close_pos = matched[h][1]
-                end = bisect_right(starts, close_pos) - 1  # line of closing '}'
-            else:
-                # opened but never closed within the window: the old scan
-                # ran to the window end and reported that truncated span.
-                end = min(nlines, i + 800) - 1
-            fns.append({"name": name, "line": i + 1, "len": end - i + 1,
-                        "cx": 1 + cx_prefix[end + 1] - cx_prefix[i]})
-    return fns
-
-
-# ---------------- SQL sink analysis (G12) ----------------
-# The line-rule S-SQL-PY only sees formatting applied to a literal *inside*
-# the execute() call. Three common idioms escape a single-line regex, so
-# scan_file() runs this analyzer on every execute()/executemany() line:
-#   1. cur.execute(sql % user_input)  — %-interpolation with no space after %
-#      (the old pattern required one), or "…" + x concatenation, in the call
-#   2. cur.execute(SQL.format(x))     — .format()/f-string on a variable
-#   3. cur.execute(sql)               — where `sql` was assigned a %-or-{}
-#      template or built by interpolation/concatenation earlier in the file
-# Calls with a parameter tuple — execute(q, (x,)) / execute("…%s", (x,)) —
-# are the SAFE idiom and are never flagged here.
-SQL_CALL_RE = re.compile(r"\.(execute|executemany)\s*\(")
-SQL_IDENT_RE = re.compile(r"[A-Za-z_]\w*")
-# `(.+)$` + rstrip() in the caller: the old lazy `(.+?)\s*$` retried `\s*$`
-# at every character of a long whitespace run (quadratic).
-SQL_ASSIGN_RE = re.compile(r"^\s*([A-Za-z_]\w*)\s*(\+=|=)(?!=)\s*(.+)$")
-SQL_LIT_RE = re.compile(r"^(?:[rbu]*)[\"'](.*)[\"']$", re.S)
-
-def _split_top_level(argstr):
-    """Split an argument string on top-level commas (respecting nested
-    brackets and quotes) to isolate the SQL text argument from the parameter
-    tuple that follows it."""
-    parts, depth, cur, quote = [], 0, [], None
-    for ch in argstr:
-        if quote:
-            cur.append(ch)
-            if ch == quote:
-                quote = None
-            continue
-        if ch in "\"'":
-            quote = ch
-            cur.append(ch)
-        elif ch in "([{":
-            depth += 1
-            cur.append(ch)
-        elif ch in ")]}":
-            depth -= 1
-            cur.append(ch)
-        elif ch == "," and depth == 0:
-            parts.append("".join(cur))
-            cur = []
-        else:
-            cur.append(ch)
-    parts.append("".join(cur))
-    return parts
-
-def _sql_build_method(arg):
-    """How an execute() argument (or an assigned expression) builds a string:
-    'format' (.format(…)/f-string), 'percent' (x % y), 'concat' ("…" + x),
-    or None when the argument is a plain literal/identifier."""
-    if re.search(r"\.format\s*\(", arg) or arg.lstrip().startswith(("f\"", "f'")):
-        return "format"
-    # a `%` binary op with a string/identifier left side (not numeric modulo)
-    if re.search(r"(?:[\"'][^\"']*[\"']|\b[A-Za-z_]\w*)\s*%\s*[^=%\s]", arg):
-        return "percent"
-    # concatenation with a literal on one side
-    if re.search(r"[\"'][^\"']*[\"']\s*\+", arg) or re.search(r"\+\s*[\"']", arg):
-        return "concat"
-    return None
-
-def _sql_template_map(lines):
-    """varname → how its value is built, from earlier simple assignments:
-    literal templates ('percent' when they contain %, 'format' when they
-    contain {}), or %-/.format/concat expressions."""
-    tmap = {}
-    for ln in lines:
-        mm = SQL_ASSIGN_RE.match(ln)
-        if not mm:
-            continue
-        var, op, rhs = mm.group(1), mm.group(2), mm.group(3).rstrip()
-        if op == "+=":
-            tmap[var] = tmap.get(var, "concat")
-            continue
-        build = _sql_build_method(rhs)
-        if build:
-            tmap[var] = build
-            continue
-        lit = SQL_LIT_RE.match(rhs.strip())
-        if lit:
-            t = lit.group(1)
-            tmap[var] = "percent" if "%" in t else "format" if "{" in t else "static"
-    return tmap
-
-#: Review fix (quadratic hot spot): per line, at most this many execute()
-#: calls are analyzed and each argument string is cut to SQL_ARG_MAX chars.
-#: '.execute(' * 4000 on one line took 3.3 s — every call re-scanned the rest
-#: of the line for its closing paren and re-split it.
-SQL_CALLS_PER_LINE = 64
-SQL_ARG_MAX = 10000
-_PAREN_TOKEN_RE = re.compile(r"[()\"']")
-
-
-def _paren_close_map(line):
-    """{index of '(' : index of its matching ')'} for one line, in one pass.
-    Quotes are tracked from the start of the line (a '(' inside a string
-    literal has no entry); same pairing as _paren_slice otherwise."""
-    close, stack, quote = {}, [], None
-    for m in _PAREN_TOKEN_RE.finditer(line):
-        ch, j = m.group(), m.start()
-        if quote:
-            if ch == quote:
-                quote = None
-        elif ch in "\"'":
-            quote = ch
-        elif ch == "(":
-            stack.append(j)
-        elif stack:
-            close[stack.pop()] = j
-    return close
-
-
-def sql_sink_analyzer(path, lines, issues, ctx=None):
-    """Whole-argument analysis of execute()/executemany() calls (G12).
-    Appends S-SQL-PY issues to `issues` (deduped against the line-rule pass
-    by line number); safe parameterized calls are skipped. `ctx` (scan_file's
-    per-file context) supplies the normalized match text and the time budget."""
-    match_lines = ctx.mlines if ctx is not None and ctx.lines is lines else lines
-    tmap = _sql_template_map(match_lines)
-    flagged = {i["line"] for i in issues if i.get("rule") == "S-SQL-PY"}
-    for i, line in enumerate(match_lines):
-        if i + 1 in flagged or ".execute" not in line:
-            continue
-        if ctx is not None:
-            ctx.check_time()
-        close = None
-        for n_call, m in enumerate(SQL_CALL_RE.finditer(line)):
-            if n_call >= SQL_CALLS_PER_LINE:
-                break
-            if close is None:
-                close = _paren_close_map(line)
-            j = close.get(m.end() - 1)
-            if j is None:
-                continue
-            arg_str = line[m.end():j][:SQL_ARG_MAX]
-            parts = [p for p in _split_top_level(arg_str)]
-            first = parts[0].strip() if parts else ""
-            second = parts[1].strip() if len(parts) > 1 else ""
-            if not first:
-                continue
-            # SAFE: parameterized call — literal/identifier first argument and
-            # a tuple/list/dict of parameters after the top-level comma
-            if len(parts) >= 2 and second and second[0] in "([{":
-                continue
-            build = _sql_build_method(first)
-            if build is None and SQL_IDENT_RE.fullmatch(first):
-                build = tmap.get(first)
-                if build in (None, "static"):
-                    continue
-            if build:
-                issues.append(_sql_issue(path, i + 1, lines, first, build))
-
-def _sql_issue(path, line_no, lines, arg, build):
-    how = {"percent": "%-interpolation", "format": ".format()/f-string",
-           "concat": "concatenation"}.get(build, "string-building")
-    return mk_issue(
-        {"id": "S-SQL-PY", "name": "SQL built from strings", "type": "VULN", "sev": "BLOCKER",
-         "msg": f"SQL query built with {how} into execute().",
-         "why": "Interpolating values into SQL enables SQL injection — the classic path to full database compromise.",
-         "fix": 'Use parameterized queries: cursor.execute("SELECT … WHERE id = %s", (user_id,)).',
-         "ref": "CWE-89 · OWASP A03"},
-        path, line_no, lines)
-
-
-# ---------------- Linear SQL *-NOWHERE scan (F11) ----------------
-# SQL-DELETE-NOWHERE / SQL-UPDATE-NOWHERE are fired by this linear pass, NOT
-# by the generic TEXT_RULES finditer (their entry regexes match only the
-# statement head and never scan toward EOF). One O(n) pass per file: head
-# matches come from the cheap anchored regexes; statement ends come from the
-# precomputed ';' offsets (a match with no later ';' never fired the old
-# pattern either, so it is skipped — and that is what bounds the work); the
-# WHERE check runs on the bounded statement slice only.
-_SQL_NOWHERE_RULES = {r["id"]: r for r in TEXT_RULES
-                      if r["id"] in ("SQL-DELETE-NOWHERE", "SQL-UPDATE-NOWHERE")}
-_SQL_WHERE_RE = re.compile(r"\bWHERE\b", re.I)
-
-
-def scan_sql_nowhere(path, content, issues, lines):
-    """Emit SQL-DELETE-NOWHERE / SQL-UPDATE-NOWHERE in one linear pass.
-
-    Reproduces the original tempered-dot finditer semantics exactly:
-      * a match starts at a DELETE/UPDATE head, consumes up to the next ';'
-        and is aborted by a WHERE in between (WHERE'd statements do not
-        fire, but heads nested after the WHERE can still match);
-      * finditer is non-overlapping, so every head before a reported match's
-        ';' is consumed by that match (20k unterminated heads before one
-        real statement produce ONE issue, at the first head's line);
-      * heads after a WHERE-aborted statement are still tried (the old
-        engine retried from the next character).
-    Cost is O(n) with bisect lookups over precomputed ';', WHERE and newline
-    offsets (audit finding F11: 51 s CPU on 280 KB of unterminated DELETEs,
-    ~40 min extrapolated to the 2 MB file cap; 735 s reproduced pre-fix).
-    """
-    import bisect
-    semis = None    # lazily: ';' offsets, ascending
-    wheres = None   # lazily: \bWHERE\b offsets, ascending
-    nl = None       # lazily: '\n' offsets, ascending
-    for rid, r in _SQL_NOWHERE_RULES.items():
-        skip_to = -1   # heads starting before this offset are consumed/masked
-        for m in r["re"].finditer(content):
-            if m.start() < skip_to:
-                continue
-            if semis is None:
-                semis = [i for i, ch in enumerate(content) if ch == ";"]
-                wheres = [w.start() for w in _SQL_WHERE_RE.finditer(content)]
-                nl = [i for i, ch in enumerate(content) if ch == "\n"]
-            k = bisect.bisect_left(semis, m.end())
-            if k == len(semis):
-                continue   # no ';' ahead: the old pattern could never match
-            semi = semis[k]
-            w = bisect.bisect_left(wheres, m.end())
-            if w < len(wheres) and wheres[w] < semi:
-                # WHERE before the ';': old match aborted at the WHERE; the
-                # engine retried from the next character, so later heads
-                # (nested after WHERE) still get their own attempts.
-                skip_to = m.end()
-                continue
-            line_no = bisect.bisect_left(nl, m.start()) + 1
-            issues.append(mk_issue(r, path, line_no, lines))
-            skip_to = semi  # non-overlapping: heads before the ';' are spent
+        return []
+    return [{"name": name, "line": line, "len": length, "cx": cx}
+            for name, line, length, cx in _native.call("functions", {"lang": lang}, "\n".join(lines))]
 
 
 def normalize_newlines(text):
@@ -4046,82 +2423,13 @@ def normalize_newlines(text):
     return text.replace("\r\n", "\n").replace("\r", "\n") if "\r" in text else text
 
 
-#: Per-file time backstop (review fix, shared semantics 14): when the pattern
-#: rules on one file have run this many seconds (checked between lines and
-#: between passes), the file's scan stops with an SC-TRUNCATED finding. The
-#: quadratic regexes themselves are fixed; this only bounds what is left.
+#: Per-file time backstop (review fix, shared semantics 14) of a config or
+#: data file's scan (scan_config_file): when it has run this many seconds
+#: (checked between lines), it stops with an SC-TRUNCATED finding. A source
+#: file's scan is the engine's, bounded by its work budget instead (a file
+#: that spends it is SC-TRUNCATED: the same file gets the same findings on
+#: every machine).
 SCAN_TIME_BUDGET = 30.0
-
-
-def scan_file_after_rules(path, content, lang, rules):
-    """scan_file in project mode with its first part already read: `rules`,
-    the findings scan_rules gives for the file (the native engine's,
-    engine.py), then the passes that follow them, the suppression markers
-    and the cap, as scan_file runs them."""
-    def scan(path, content, lines, lang, dep, ctx, issues):
-        issues.extend(rules)
-        _project_passes(path, content, lines, lang, ctx, issues)
-    return _scan_source(path, content, lang, False, scan)
-
-
-def _project_passes(path, content, lines, lang, ctx, issues):
-    """Project mode's passes after the rules part: SQL's *-NOWHERE scan, the
-    intra-file taint, Python's SQL sinks, function length and complexity."""
-    ctx.check_time()
-    if lang == "sql":
-        try:
-            scan_sql_nowhere(path, content, issues, lines)
-        except Exception:
-            pass
-    ctx.check_time()
-    issues.extend(taint_scan(path, lines, lang, ctx))
-    # G12: whole-argument SQL-sink analysis (Python only) — catches
-    # execute(sql % x) with no space after %, .format() on a template variable,
-    # and execute(name) where name was built by interpolation/concatenation.
-    if lang == "py":
-        try:
-            sql_sink_analyzer(path, lines, issues, ctx)
-        except _ScanBudgetExceeded:
-            raise
-        except Exception:
-            pass
-    ctx.check_time()
-    for fn in extract_functions(lines, lang):
-        if fn["len"] > FN_LEN_LIMIT:
-            issues.append(mk_issue(
-                {"id": "Q-FN-LONG", "name": "Function too long", "type": "SMELL", "sev": "MAJOR",
-                 "msg": f"Function \"{fn['name']}\" is {fn['len']} lines long (limit {FN_LEN_LIMIT}).",
-                 "why": "Long functions do too much and resist testing and reuse.",
-                 "fix": "Extract cohesive blocks into helper functions.",
-                 "ref": "Maintainability"}, path, fn["line"], lines))
-        if fn["cx"] > FN_CX_LIMIT:
-            issues.append(mk_issue(
-                {"id": "Q-FN-CX", "name": "High cyclomatic complexity", "type": "SMELL", "sev": "MAJOR",
-                 "msg": f"Function \"{fn['name']}\" has complexity ~{fn['cx']} (limit {FN_CX_LIMIT}).",
-                 "why": "Highly branched code is hard to reason about and to cover with tests.",
-                 "fix": "Split branches into smaller functions; use early returns or lookup tables.",
-                 "ref": "Maintainability"}, path, fn["line"], lines))
-
-
-def _scan_source(path, content, lang, dep, scan, finish=True):
-    """`scan` of one file as scan_file reads it, then, when `finish`,
-    without what a marker suppresses and capped."""
-    lines = source_lines(_unicode13.pin(content), lang)
-    content = "\n".join(lines)
-    ctx = _FileCtx(lines, lang, content, time.monotonic() + SCAN_TIME_BUDGET, jsx_reading(path))
-    outer = getattr(_TLS, "ctx", None)
-    _TLS.ctx = ctx
-    try:
-        issues = []
-        try:
-            scan(path, content, lines, lang, dep, ctx, issues)
-        except _ScanBudgetExceeded:
-            issues.append(truncated_issue(path, "scan time budget exceeded"))
-        if not finish:
-            return issues
-        return cap_issues(path, [i for i in issues if not ctx.suppressed(i, dep=dep)], lines)
-    finally:
-        _TLS.ctx = outer
 
 
 # ---------------- Config and data files (credentials only) ----------------
@@ -7137,9 +5445,8 @@ def scan_project(root, exclude=(), include_deps=False, taint_config=None,
         issues = list(extra_issues) + list(col["issues"])
         numbered = []       # findings numbered by their file's scan lines (redact_file_issues)
         scanned, stopped = [], None
-        # Files a batch at a time (the engine reads a batch on threads:
-        # engine.py; a project file's rules part there, the rest of its scan
-        # in core); should_stop is checked before each batch.
+        # Files a batch at a time (the engine reads a batch on threads, each
+        # file whole: engine.py); should_stop is checked before each batch.
         batch = engine.BATCH
         k = 0
         while k < len(files):
@@ -7152,7 +5459,7 @@ def scan_project(root, exclude=(), include_deps=False, taint_config=None,
                 chunk.append(files[k + len(chunk)])
             try:
                 results = engine.scan_files([(f["path"], f["content"], f["lang"], f.get("dep", False)) for f in chunk])
-            except Exception:                   # a file core could not scan: each again, on its own
+            except Exception:                   # a batch that failed: each file again, on its own
                 results = None
             for n, f in enumerate(chunk):
                 try:

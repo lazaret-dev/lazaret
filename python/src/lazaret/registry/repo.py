@@ -2546,10 +2546,10 @@ class _ArtifactScan:
         self.sources[rel] = (text, lang)
         self.pending.append((rel, text, lang))
         # The engine reads a batch of the first pass's files on threads
-        # (engine.py); a --full scan (project mode: core's passes follow the
-        # engine's rules) and the second pass, whose steps read what they
-        # scan, go one at a time.
-        batch = _engine.BATCH if self.first_pass and not self.full else 1
+        # (engine.py), in dependency mode and in a --full scan's project mode
+        # alike; the second pass, whose steps read what they scan, goes one
+        # at a time.
+        batch = _engine.BATCH if self.first_pass else 1
         if len(self.pending) >= batch:
             self.scan_pending()
 
@@ -2566,9 +2566,8 @@ class _ArtifactScan:
             for i in issues:
                 if i["rule"] in TRUNCATION_RULES:
                     # part of the file was not scanned (the engine's work budget
-                    # spent, an internal error, the time budget of core's passes),
-                    # so the release can't be cleared (it used to be listed while
-                    # the verdict stayed OK)
+                    # spent, an internal error), so the release can't be cleared
+                    # (it used to be listed while the verdict stayed OK)
                     self.truncate(rel, i["msg"].removeprefix("File not fully scanned: ").rstrip("."), "work")
                 else:
                     self.issues.append(i)

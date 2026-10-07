@@ -348,16 +348,27 @@ def _issues(path, answer):
 
 def scan_calls(items):
     """[(path, content, lang, dep)] -> the engine call that scans each, as
-    (name, args), or None for a file it does not read. Its answer is a
-    function of the name, the args and the text: the engine reads no path
-    (the path's part is `jsx`, from its extension), which is what lets the
-    registry ask once for a file that is in several archives (P-2a,
+    (name, args), or None for a file it does not read: scan_file, in
+    dependency mode or in project mode (the rules, then the passes after
+    them: Q-1), a project's Python or JavaScript file with the configured
+    part of the taint model (core.taint_args). Its answer is a function of
+    the name, the args and the text: the engine reads no path (the path's
+    part is `jsx`, from its extension), which is what lets the registry ask
+    once for a file that is in several archives (P-2a,
     registry/contentcache.py)."""
     from lazaret.scanner import core
     base = _budget({"redact": bool(core.REDACT_SECRETS), "neumaier": False})
-    return [("scan_file" if dep else "scan_rules", dict(base, lang=lang, jsx=core.jsx_reading(path), dep=bool(dep)))
-            if lang in ("py", "js", "sql", "go", "rs") and isinstance(content, str) else None
-            for path, content, lang, dep in items]
+    calls = []
+    for path, content, lang, dep in items:
+        if lang not in ("py", "js", "sql", "go", "rs") or not isinstance(content, str):
+            calls.append(None)
+            continue
+        args = dict(base, lang=lang, jsx=core.jsx_reading(path), dep=bool(dep))
+        configured = None if dep else core.taint_args(lang)
+        if configured:
+            args["taint"] = configured
+        calls.append(("scan_file", args))
+    return calls
 
 
 def call_answers(calls, texts=None):
@@ -380,22 +391,19 @@ def _answers(calls, texts=None):
 
 
 def scan_issues(path, content, lang, name, answer):
-    """One file's issues from the engine's answer to its scan_calls call: in
-    dependency mode the engine's (scan_file); in project mode its rules part
-    (scan_rules), after which core runs the passes that follow."""
-    from lazaret.scanner import core
-    rules = [error_issue(path, answer)] if unanswered(answer) else _issues(path, answer)
-    return rules if name == "scan_file" else core.scan_file_after_rules(path, content, lang, rules)
+    """One file's issues from the engine's answer to its scan_calls call (a
+    file it could not answer: SC-TRUNCATED, error_issue)."""
+    return [error_issue(path, answer)] if unanswered(answer) else _issues(path, answer)
 
 
 def scan_files(items):
-    """[(path, content, lang, dep)] -> [issues] for each, in order. In
-    dependency mode the engine reads the whole file; in project mode it reads
-    the rules part (scan_rules: the pattern rules, the families, the
-    whole-text rules), after which core runs the passes that follow (taint,
-    SQL, function length and complexity), the suppression markers and the
-    cap. A file the engine could not answer is SC-TRUNCATED: EXHAUSTED when
-    it spent its work budget, "its scan failed" on an internal error."""
+    """[(path, content, lang, dep)] -> [issues] for each, in order: the
+    engine's scan of each file whole, in dependency mode or in project mode
+    (the pattern rules, the families, the whole-text rules, then the SQL
+    statements without WHERE, the intra-file taint, the SQL sinks, the
+    function length and complexity, the suppression markers and the cap). A
+    file the engine could not answer is SC-TRUNCATED: EXHAUSTED when it
+    spent its work budget, "its scan failed" on an internal error."""
     if not items:
         return []
     calls = scan_calls(items)

@@ -25,7 +25,7 @@ import unittest
 from unittest import mock
 
 from tests import _support
-from lazaret.scanner import core
+from lazaret.scanner import core, engine
 
 PY = sys.executable
 
@@ -173,22 +173,22 @@ class PerFileErrors(unittest.TestCase):
     def test_one_file_exception_becomes_a_finding(self):
         root = make_tree({"a.py": "eval(x)\n", "boom.py": "x = 1\n", "package.json": "{}"})
         self.addCleanup(shutil.rmtree, root, True)
-        real, real_after_rules = core.scan_file, core.scan_file_after_rules
+        real, real_issues = core.scan_file, engine.scan_issues
 
-        # boom.py's scan raises with either engine: in core's scan_file (the
-        # Python engine's, and each file's own retry after a batch fails), or
-        # in the part of it core runs after the native engine's rules
+        # boom.py's scan raises: in the batch (where its answer becomes its
+        # issues), and then in its own scan, which each file of a batch that
+        # failed gets
         def scan_file(path, content, lang, dep=False):
             if path == "boom.py":
                 raise RecursionError("maximum recursion depth exceeded")
             return real(path, content, lang, dep=dep)
 
-        def scan_file_after_rules(path, content, lang, rules):
+        def scan_issues(path, content, lang, name, answer):
             if path == "boom.py":
                 raise RecursionError("maximum recursion depth exceeded")
-            return real_after_rules(path, content, lang, rules)
+            return real_issues(path, content, lang, name, answer)
         with mock.patch.object(core, "scan_file", scan_file), \
-                mock.patch.object(core, "scan_file_after_rules", scan_file_after_rules), \
+                mock.patch.object(engine, "scan_issues", scan_issues), \
                 mock.patch.object(core, "scan_manifest", side_effect=ValueError("bad")):
             res = core.scan_project(root)
         errs = {i["file"]: i for i in res["issues"] if i["rule"] == "SC-TRUNCATED"}

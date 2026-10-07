@@ -89,15 +89,18 @@ Decisions (fixed):
   the next step runs: the release is INCOMPLETE, never cleared.
   `engine.WORK_BUDGET` sets the budget (steps of the regex matcher; by
   default the engine's, about 4e9).
-- `scan_file` in project mode (your own files) goes through it in two
-  parts (`engine.scan_files`): its rules part — every pattern rule and
-  family on every line, the file-level rules and `TEXT_RULES` — is the
-  engine's `scan_rules`, in the same batches on the same threads, and core
-  runs the passes that follow on the engine's findings (the SQL statements
-  without WHERE, taint, the SQL-sink pass, the function metrics), the
-  suppression markers and the cap (`core.scan_file_after_rules`). A file the
-  engine doesn't answer about is SC-TRUNCATED, and core's passes still run
-  on it.
+- `scan_file` in project mode (your own files) is the engine's too, whole
+  (0.1.9, Q-1; `engine.scan_files`, in the same batches on the same
+  threads): the rules part — every pattern rule and family on every line,
+  the file-level rules and `TEXT_RULES` — then the SQL statements without
+  WHERE, the intra-file taint, the SQL-sink pass and the function metrics,
+  then the suppression markers and the cap (`project.rs`, `taint.rs`). A
+  taint configuration (`--taint-config`, a trusted `.lazaret-taint.json`)
+  goes with each Python and JavaScript file's call as its `"taint"`
+  argument (`core.taint_args`: what `core.apply_taint_config` validated and
+  kept). A file the engine doesn't answer about is SC-TRUNCATED, as in
+  dependency mode; no clock bounds the scan, only the work budget, so a
+  file gets the same findings on every machine.
 - The cross-file follower (`engine.cross_file_issues`, for `--deps`,
   registry and guard scans) is one `cross_file` call per scan: the
   dependency files one after another in the text (`[path, lang, length]`
@@ -115,12 +118,9 @@ Decisions (fixed):
   the decoded view, spawned scripts, persistence, the exfiltration shapes, a
   hook command read as a program — is the engine's, and so are the
   cross-file follower (`crossFileIssues`: each file encoded on its own, its
-  length in code points) and `scan_file`: in dependency mode whole
-  (`scan_file`, findings capped as core caps them), in project mode its
-  rules part (`scan_rules`: every pattern rule and family on every line, the
-  file-level rules and `TEXT_RULES`, uncapped and unsuppressed), to which
-  the npm engine adds the SQL, taint and function passes, the suppression
-  markers and the cap. Core's tables the JavaScript side still reads
+  length in code points) and `scan_file`, whole in both modes (project
+  mode's passes since 0.1.9, Q-1: the npm package's `taint.js`, `sql.js`
+  and `functions.js` are retired). Core's tables the JavaScript side still reads
   (limits, `RULES` for S-TOKEN) come from the pack too (`packValues`). There
   is no second engine to fall back on: a call that spends its work budget (a
   hostile input) leaves its file SC-TRUNCATED, CRITICAL and so never cleared
@@ -491,6 +491,7 @@ Twins the engine is still compared with, call for call:
 | `test_wasm_parity`, `test_wasm_parity_signs`, `_crossfile` | the WebAssembly build the npm package ships against the platform library, call for call, byte for byte: `hooks_view`, `signs_view`, `scan_file` (dependency mode), `scan_rules`, and the npm binding's `cross_file` against the Python package's | the hooks corpus, the scan_file corpus, this repository's files, the follower's stream |
 | `test_wasm_parity_jsparse` | the parser in the WebAssembly build against the library, byte for byte | the snippets, this repository's JavaScript, soups, every construct that nests at its deepest |
 | `test_wasm_parity_jsflow` | the JavaScript taint pass in the WebAssembly build against the library, byte for byte | `test_snapshot_js_flow`'s sets; every construct that nests at its deepest, request data followed through it |
+| `test_wasm_parity_project` | project mode in the WebAssembly build against the library, byte for byte (0.1.9, Q-1): `scan_file` with and without a taint configuration, the function lists, the intra-file taint alone | `test_snapshot_project`'s sets; the project corpus |
 | `test_wasm_parity_pyflow` | the Python taint pass in the WebAssembly build against the library, byte for byte | `test_snapshot_py_flow`'s sets; every construct that nests at its deepest, `elif` chains at the frames the pass holds |
 | `test_pyparse_native`, `_b`, `_c` | the Python parser (`py_parse`) against Python 3.13's `ast.parse` (a `python3.13` subprocess; skipped without one), node for node as JSON text, with the errors' lines; spans; its Unicode 15.1 data (§13) | pyparse_cases.py's inputs; every identifier character and character name |
 | `test_wasm_parity_pyparse` | the Python parser in the WebAssembly build against the library, byte for byte | the snippets, this repository's Python, programs, soups, every construct that nests at its deepest |
@@ -664,7 +665,8 @@ modules the import-time test 19.3 s → 8.0 s; `received_code_kind` on a 1 MB
 bundle 125 ms → 85 ms. The cross-file follower is the engine's
 (`cross_file`): the npm tree's 41 packages 1.86 s in core → 0.60 s on one
 thread, 0.38 s on two; litellm's modules read as one package 3.1 s → 1.1 s.
-And the Python package's project mode reads its rules through `scan_rules`.
+And the Python package's project mode read its rules through `scan_rules`
+(core's passes followed until 0.1.9's Q-1 moved them into the engine).
 On two cores, before and after, with the same reports:
 
 | Two cores | Before | After |
@@ -730,7 +732,7 @@ benchmark:
 | 0 | Baseline: the detection round committed (rule set 2.15.0), the engine's outputs recorded on the benchmark's files and on installed packages | Done (tag `rust-first-baseline`) |
 | 1 | The Rust engine is the reference: the Python engine, `--engine` and the pure wheel retired; the recorded outputs (§5); the pack as the source of the rules; every wheel a platform wheel, the sdist compiled by pip where none fits; an unanswered file SC-TRUNCATED in both packages | Done |
 | 2 | Decoding, lexers and bytes in the engine: source decoding (BOMs, UTF-16, coding cookies), one token substrate for the detectors | Done (tag `rust-first-phase2`): the lexers (§15: every caller's comments and literals, both packages), the self-read on them, the decoded view on string values (§15). Moved: the data flow, the dead drop, the secret endpoints and received code to phase 3 (they follow names: scopes); bytes to phase 4 (with linre over bytes); source decoding to after phase 3 (the packages' decoders already agree, held by their parity tests, and owning the CJK codecs would put their tables in the WebAssembly module) |
-| 3 | Parsers, scopes and flow: the detectors on bindings over the JavaScript and Python trees (§12, §13), constant folding of strings, the cross-file follower on them, project mode's passes (taint, SQL, function metrics) in the engine; the npm package's twins of them retired | The parsers done; project mode's JavaScript taint ported onto `js_parse`'s trees (§16: `js_flow`), both packages ask the engine for it, and jsflow.py, jsflow.js and the readers they used are retired (11,357 lines); Python's taint ported onto `py_parse`'s trees (§17: `py_flow`), both packages ask the engine for it (the npm package had no port of it), and flow.py's own pass is retired (1,505 lines); the passes and the parser held to their recorded outputs; the supply-chain data flow and received code on JavaScript's trees (§18: local data sent, reported by the strongest send; received data run, loaded or deserialized, from the script's own address) and on Python's (§19), benchmark-gated; a file written then run, and decoded code run, on both trees (§20). Next: the cross-file follower on bindings and project mode's last passes (SQL, function metrics, intra-file taint). The dead drop, the secret endpoints and the self-read stay on the text detectors for now: on the benchmark's JavaScript they fire in few files, and no examined miss comes from their windows |
+| 3 | Parsers, scopes and flow: the detectors on bindings over the JavaScript and Python trees (§12, §13), constant folding of strings, the cross-file follower on them, project mode's passes (taint, SQL, function metrics) in the engine; the npm package's twins of them retired | The parsers done; project mode's JavaScript taint ported onto `js_parse`'s trees (§16: `js_flow`), both packages ask the engine for it, and jsflow.py, jsflow.js and the readers they used are retired (11,357 lines); Python's taint ported onto `py_parse`'s trees (§17: `py_flow`), both packages ask the engine for it (the npm package had no port of it), and flow.py's own pass is retired (1,505 lines); the passes and the parser held to their recorded outputs; the supply-chain data flow and received code on JavaScript's trees (§18: local data sent, reported by the strongest send; received data run, loaded or deserialized, from the script's own address) and on Python's (§19), benchmark-gated; a file written then run, and decoded code run, on both trees (§20); project mode's last passes (the SQL statements without WHERE, the SQL sinks, the function metrics, the intra-file taint, the markers and the cap: `project.rs`, `taint.rs`) in the engine, both packages ask it for the whole of project mode, and core's passes and the npm package's `taint.js`, `sql.js` and `functions.js` are retired (0.1.9, Q-1). Next: the cross-file follower on bindings. The dead drop, the secret endpoints and the self-read stay on the text detectors for now: on the benchmark's JavaScript they fire in few files, and no examined miss comes from their windows |
 | 4 | Linear-time matching: the pack's patterns on linre (§14), pyre and the shlex port retired, current Unicode | Every pattern runs on linre (P-16, rule set 2.28.0): the pack's 666, its lexers' tables included, and those the engine builds as it scans. Lookaheads of unbounded width run with a memo, and a sweep where the walks would cost more; a quote matched again as branches; a name matched again and counts past what a program holds are checked in code; two patterns read further than before. pyre's port of sre retired (P-16's second part): pyre is re's interface to linre, a pattern linre does not run is an error (a built one fails its call closed), and a taint configuration's patterns are held to what linre runs. The shlex port is written anew from shlex's documentation, and the Final_Sigma rule and the casefix table come from Unicode's definition and data (P-16's third part): the engine holds no CPython code. Next: current Unicode |
 | 5 | One call per file, a content cache (SHA-256), the guard's scan in a child process that fails closed, archive ambiguity checks | Not started |
 
@@ -765,8 +767,9 @@ A parallel track brings Go and Rust up to Python's and JavaScript's level (R-1, 
   the hand matcher can go.
 - The native `scan_file` has no time budget, only its work budget: a file
   it scans is scanned whole, and a file that spends the budget is
-  SC-TRUNCATED. Core's `SCAN_TIME_BUDGET` (30 s per file, ends in
-  SC-TRUNCATED) bounds the passes it runs after the engine in project mode.
+  SC-TRUNCATED, in either mode. Core's `SCAN_TIME_BUDGET` (30 s per file,
+  ends in SC-TRUNCATED) bounds a config or data file's scan, which is
+  still core's (and the npm package's `scanConfigFile`).
 - S-ENTROPY's Shannon entropy is a `sum()` of floats, which Python adds with
   Neumaier's compensation since 3.12: the binding says which way to add
   (`neumaier`), so a value at 4.0's edge is judged as that Python judges it.
@@ -802,8 +805,8 @@ only.
    against the baseline after each phase, nightly too: attribution, and the
    holdout's aggregates.
 2. Phases 2–5 (§8): decoding and the token substrate; the detectors on
-   bindings over the parsers' trees, project mode's passes in the engine
-   and the npm engine's twins of them (`js/src/scanner/`) retired; current
+   bindings over the parsers' trees (project mode's passes are in the engine
+   and the npm engine's twins of them retired since 0.1.9's Q-1); current
    Unicode (the translations of CPython code are retired: every pattern
    runs on linre since P-16, §14, and §11); one call per file, a content
    cache, the guard's scan isolated.

@@ -24,7 +24,7 @@ test("py: eval/exec, command injection, SQL injection", () => {
   assert.ok(scan("t.py", 'cur.execute("SELECT * FROM t WHERE i=" + uid)\n').includes("S-SQL-PY"));
 });
 
-test("py: sqlSinkScan catches template-variable SQL (G12)", () => {
+test("py: the SQL-sink pass catches template-variable SQL (G12)", () => {
   const src = [
     "q = 'SELECT * FROM t WHERE id = %s' % uid",
     "cur.execute(q)",

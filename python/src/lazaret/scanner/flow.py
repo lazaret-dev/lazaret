@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Lazaret interprocedural taint analysis (cross-function, cross-file).
 
-The per-file scanner (lazaret.taint_scan) tracks taint within a single
-function. This module adds *whole-program* analysis: it follows untrusted data
+The per-file scanner (the engine's intra-file taint, core.taint_scan) tracks
+taint within a single function. This module adds *whole-program* analysis: it follows untrusted data
 through function calls and across files, so a source in one module that flows
 into a sink in another is caught.
 

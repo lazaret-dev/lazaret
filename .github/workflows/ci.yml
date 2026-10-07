@@ -196,4 +196,4 @@ jobs:
           python -m unittest tests.architecture.test_wasm_parity tests.architecture.test_wasm_parity_signs \
             tests.architecture.test_wasm_parity_crossfile tests.architecture.test_wasm_parity_jsparse \
             tests.architecture.test_wasm_parity_jsflow tests.architecture.test_wasm_parity_pyparse \
-            tests.architecture.test_wasm_parity_pyflow -v
+            tests.architecture.test_wasm_parity_pyflow tests.architecture.test_wasm_parity_project -v

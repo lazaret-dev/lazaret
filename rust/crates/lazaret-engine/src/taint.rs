@@ -1351,3 +1351,7 @@ fn partial_re<'p>(p: &'p Pack, lang: &str, suffix: &[u32]) -> &'p Regex {
     all.iter().find(|(l, _)| pystr::eq(l, lang)).and_then(|(_, rows)| rows.iter().find(|(s, _)| s.as_slice() == suffix))
         .map(|(_, r)| r).expect("a partial sanitizer the pack has")
 }
+
+#[cfg(test)]
+#[path = "taint_tests.rs"]
+mod tests;

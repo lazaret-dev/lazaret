@@ -33,7 +33,7 @@ All content is inert.
 import unittest
 
 from tests import _support  # noqa: F401
-from lazaret.scanner import core, frameworks
+from lazaret.scanner import core
 
 FLASK = "from flask import Flask, request, send_file, send_from_directory, abort\napp = Flask(__name__)\n"
 FASTAPI = ("from fastapi import FastAPI, Depends, Request, WebSocket, BackgroundTasks\n"
@@ -165,17 +165,13 @@ class FrameworkModelTests(unittest.TestCase):
                 self.assertEqual(t_findings(lang, src), set())
 
     def test_route_parameters(self):
-        ctx = core._FileCtx((FASTAPI + "@app.get('/x/{a}')\nasync def x(a: str, b: int, c = Depends(f), d: Kind = Kind.one,\n"
-                                       "            e: Annotated[str, Query()] = None, f: Response = None):\n    pass\n"
-                             ).split("\n"), "py")
-        self.assertEqual(core._route_params(ctx), {6: ["a", "e"]})
-        self.assertTrue(frameworks.safe_type("Optional[Annotated[list[uuid.UUID], Query()]]"))
-        self.assertTrue(frameworks.safe_type("int | None"))
-        self.assertFalse(frameworks.safe_type("Union[int, str]"))
-        self.assertFalse(frameworks.safe_type("dict[str, int]"))
-        self.assertEqual(core._signature_params("def f(self, a: dict[str, int] = {'x': 1}, *args, b=f(1, 2), **kw):"),
-                         [("self", "", ""), ("a", "dict[str, int]", "{'x': 1}"), ("args", "", ""),
-                          ("b", "", "f(1, 2)"), ("kw", "", "")])
+        # FastAPI fills a and e from the request; b and d it validates, c is injected and f is its own (the reading
+        # of a signature and of an annotation: the engine's own tests, taint_tests.rs and pyflow/frameworks.rs)
+        src = (FASTAPI + "@app.get('/x/{a}')\nasync def x(a: str, b: int, c = Depends(f), d: Kind = Kind.one,\n"
+               "            e: Annotated[str, Query()] = None, f: Response = None):\n"
+               + "".join(f"    os.system({p})\n" for p in "abcdef"))
+        first = src[:src.index("    os.system(a)")].count("\n") + 1
+        self.assertEqual(t_findings("py", src), {("T-CMD", first), ("T-CMD", first + 4)})
 
     def test_bounded_work(self):
         import time

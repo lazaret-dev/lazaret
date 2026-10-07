@@ -58,11 +58,12 @@ test("a file with a huge string or blob line keeps its findings", () => {
 
 test("a file whose scan throws is SC-TRUNCATED, fails the gate, and the report is still written", () => {
   const d = mkdtempSync(join(tmpdir(), "lazaret-b3-"));
-  const exec = RegExp.prototype.exec;
-  RegExp.prototype.exec = function (s) {              // lexing this one file overflows, as in the review
-    if (typeof s === "string" && s.includes("B3-OVERFLOW") && new Error().stack.includes("commentSpans"))
+  const wellFormed = String.prototype.isWellFormed;
+  String.prototype.isWellFormed = function () {       // this one file's scan and lexing overflow, as in the
+    const stack = this.includes("B3-OVERFLOW") ? new Error().stack : "";   // review (its text, sent to the engine)
+    if (stack.includes("scanProjectFile") || stack.includes("commentSpans"))
       throw new RangeError("Maximum call stack size exceeded");
-    return exec.call(this, s);
+    return wellFormed.call(this);
   };
   try {
     mkdirSync(join(d, "src"));
@@ -78,7 +79,7 @@ test("a file whose scan throws is SC-TRUNCATED, fails the gate, and the report i
     assert.equal(code, 1);
     assert.ok(rep.metrics.ncloc >= 4);                 // the metrics counted it as code instead of dying
   } finally {
-    RegExp.prototype.exec = exec;
+    String.prototype.isWellFormed = wellFormed;
     rmSync(d, { recursive: true, force: true });
   }
 });

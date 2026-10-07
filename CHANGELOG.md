@@ -542,6 +542,20 @@ project is pre-1.0, so the 0.x API may still change.
   chain), a BOOLEAN `01` read as "not critical", a checksum-database lookup that answers a different question, and
   a leap second in a certificate's time. No interface Lazaret uses changed. The library's brief for its
   independent review (`SECURITY_REVIEW.md`) is kept with it now.
+- **A project scan is the engine's, whole (Q-1).** In a scan of your own files (`lazaret scan`, the MCP server's
+  scan, `lazaret-registry --full`) the engine read the rules, and then each package ran its own copy of the passes
+  that follow them: the SQL statements without WHERE, the intra-file taint, the SQL built from strings into
+  `execute()`, the function length and complexity, the suppression markers and the cap (1,700 lines of core and
+  1,500 of the npm package's `taint.js`, `sql.js`, `functions.js` and `scan.js`, held together by parity tests). They are
+  the engine's now (`project.rs`, `taint.rs`), one copy for both packages, with the same findings on every file
+  the scanner's tests, the recorded sets, Python's standard library and this repository hold. A taint
+  configuration (`--taint-config`, a trusted `.lazaret-taint.json`) goes with each call. The passes were bounded by
+  30 seconds of wall clock a file, so a slow machine could cut short a file a fast one read whole; they spend the
+  engine's work budget instead, and the same file gets the same findings on every machine (a file that spends it
+  is SC-TRUNCATED, as in dependency mode). `lazaret.scanner.frameworks` is retired (the engine's
+  `pyflow/frameworks.rs` decides for both taint passes). A scan of this repository's Python source (69 files) took
+  2.69 seconds and takes 1.07; twelve packages of Python's standard library (171 files), 2.79 and 1.01; the npm
+  package's source (31 files), 0.53 and 0.32 (best of three, a quiet machine).
 - **The native transport speaks TLS 1.2 to a server that speaks nothing newer (tiny_https's second drop of Oct
   7).** `registry.npmjs.org` answers only TLS 1.2 from some networks, and its requests went through Python's
   transport there. tiny_https now offers TLS 1.2 next to 1.3 under the rules Lazaret asked for: ECDHE with AEAD

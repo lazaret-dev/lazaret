@@ -401,10 +401,16 @@ export function scanDependencyFile(path, content, lang, { jsx = true, redact = t
 }
 
 /**
- * scan_file's first part in project mode (core.scan_rules): every pattern rule of the language,
- * the supply-chain and credential families, the file-level ones and the whole-text rules, in core's
- * order, before the passes that follow them, the suppression markers and the cap.
+ * scan_file in project mode (core.scan_file(dep=False); Q-1, 0.1.9): every pattern rule of the
+ * language, the supply-chain and credential families, the file-level and whole-text rules, then the
+ * SQL statements without WHERE, the intra-file taint, the SQL built from strings into execute(), the
+ * function metrics, the suppression markers and the cap, as core lists them.
  */
-export function scanRules(path, content, lang, { jsx = true, redact = true } = {}) {
-  return issuesOf(path, call("scan_rules", { lang, jsx, redact, neumaier: false }, content));
+export function scanProjectFile(path, content, lang, { jsx = true, redact = true } = {}) {
+  return issuesOf(path, call("scan_file", { lang, dep: false, jsx, redact, neumaier: false }, content));
+}
+
+/** Project mode's intra-file taint alone (core.taint_scan): its T-* findings, before the markers and the cap. */
+export function taintFindings(path, content, lang, { jsx = true, redact = true } = {}) {
+  return issuesOf(path, call("taint_scan", { lang, jsx, redact, neumaier: false }, content));
 }

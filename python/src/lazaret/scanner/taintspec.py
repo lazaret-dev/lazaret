@@ -20,7 +20,8 @@ repository:
   * every match runs against at most MAX_MATCH_TEXT characters of each
     candidate text (GuardedPattern);
   * the engine's linear-time regex engine (linre), which runs the patterns
-    in the cross-file taint passes, must run it: it refuses a backreference
+    in the taint passes (the intra-file one's too since 0.1.9's Q-1), must
+    run it: it refuses a backreference
     (but to a quote), a conditional, a repeat of what can match nothing,
     an atomic group, and a program too large, among others.
 Sanitizer names are exact call names (``module.func`` / ``func``), escaped

@@ -96,8 +96,10 @@ credentials).
   SHA-256).
 - **The native engine** (`rust/crates/lazaret-engine`, 0.1.8) runs core's
   supply-chain tests — the install-script and import-time tests and
-  everything they read — `scan_file` in dependency mode, findings included,
-  its rules part in project mode (`scan_rules`) and the cross-file follower
+  everything they read — `scan_file` in dependency mode and in project mode
+  (the passes after the rules too since 0.1.9's Q-1: the SQL statements
+  without WHERE, the intra-file taint, the SQL sinks, the function metrics,
+  the markers and the cap), findings included, and the cross-file follower
   (`cross_file`), with Python `re` semantics (linre, a linear-time engine
   with `re`'s answers, for every pattern) and its patterns and finding texts
   in a rule pack
@@ -105,9 +107,8 @@ credentials).
   rules). It was ported from core function for function and held to it by
   differential tests on every field (zero differences) until the Rust-first
   refactor retired the Python engine; now it is the only engine. The Python
-  package sends all of them through it (`lazaret.scanner.engine`; in
-  project mode core runs the passes that follow the rules), and the npm
-  package (0.1.8) runs it as WebAssembly (`js/native/lazaret.wasm`,
+  package sends all of them through it (`lazaret.scanner.engine`), and the
+  npm package (0.1.8) runs it as WebAssembly (`js/native/lazaret.wasm`,
   `js/src/lib/native.js`). In both, a file the engine can't finish (a spent
   work budget on hostile input, an error) is SC-TRUNCATED, which fails the
   gate, and a package that spends the follower's budget gives no cross-file
@@ -255,12 +256,11 @@ the parameters a route handler gets from the request are sources — a Flask
 view's URL variables, a FastAPI path operation's parameters (not injected
 dependencies, not types that validate to no free text), a Django view's URL
 parameters. The decisions over a parameter's name, annotation and default
-live in `lazaret.scanner.frameworks`, which the intra-file engine reads (it
-takes a handler's signature from text: `_route_params`, twinned in
-`js/src/scanner/taint.js`), and in the flow engine's port of them
-(`pyflow/frameworks.rs`, which reads a handler's parameters from the tree);
-`test_pyflow_frameworks.py` holds the two to the same answers, so both
-passes agree on what a handler receives. Comments
+live in the engine's `pyflow/frameworks.rs`, which both taint passes read:
+the intra-file pass takes a handler's signature from text (`taint.rs`), the
+cross-file pass from the tree; `test_pyflow_frameworks.py` holds both to the
+decisions recorded from `lazaret.scanner.frameworks` when it was retired
+(0.1.9, Q-1), so both passes agree on what a handler receives. Comments
 are **lexed, not guessed** — block-comment/string/template state is tracked
 across lines, and a line counts as a comment only if all of it is, and only if
 both readings of ambiguous text agree.
@@ -1722,12 +1722,11 @@ leaves the texts to go with their calls, which gives the same answers:
 
 | Path | What |
 |---|---|
-| `python/src/lazaret/scanner/core.py` | The engine: rules, taint, `scan_project`, `--deps`, received-code detector, cross-file follower |
+| `python/src/lazaret/scanner/core.py` | The scanner around the engine: `scan_project`, `--deps`, the taint configuration (`apply_taint_config`, `taint_args`), config files, manifests, the report |
 | `python/src/lazaret/scanner/flow.py` | Interprocedural cross-file taint: hands the engine's passes the files and the configured model, builds their findings (Python's own AST pass until phase 3) |
 | `rust/crates/lazaret-engine/src/jsparse/`, `jsflow/` | The JavaScript / TypeScript reader and the JS cross-file pass (the `js_parse` and `js_flow` calls, both packages'; jsparse.py, jsflow.py and their npm twins until phase 3) |
 | `rust/crates/lazaret-engine/src/pyparse/`, `pyflow/` | The Python reader (Python 3.13's trees) and the Python cross-file pass (the `py_parse` and `py_flow` calls, both packages'; flow.py's own pass until phase 3) |
 | `python/src/lazaret/scanner/autorun.py`, `ghworkflow.py`, `gitlabci.py` | Editor and AI-agent settings that run commands (SC-AUTORUN), the workflows the Shai-Hulud worms planted (SC-WORKFLOW-SECRETS, -BACKDOOR) and the CI files' hardening checks (the other SC-WORKFLOW-* ids, SC-GITLAB-*); twins `js/src/lib/autorun.js`, `ghworkflow.js`, `gitlabci.js` |
-| `python/src/lazaret/scanner/frameworks.py` | Which route handler parameters Flask / FastAPI / Django fill from the request (shared by both taint passes; twinned in `js/src/scanner/taint.js`) |
 | `python/src/lazaret/scanner/sca_feeds.py`, `sca_index.py`, `gomod.py` | CVE bundle build (OSV/KEV/EPSS), the indexed bundle, the `go.mod` reader |
 | `python/src/lazaret/{registry,mcp,pg,safexml}/` | Registry auditor, MCP server, Postgres client, safe XML |
 | `python/src/lazaret/registry/guard.py`, `python/src/lazaret/_cli.py` | The install guard (`lazaret guard`) and the `lazaret` command's dispatch |
