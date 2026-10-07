@@ -11,7 +11,8 @@ replaces it whole and a reader can compare it with its source; nothing in it is 
     python3 scripts/sync_tiny_https.py --verify    check rust/crates/tiny_https against the hashes recorded when it
                                                    was taken (CI): no file changed, none added, none missing
 
-What is taken: Cargo.toml, LICENSE, README.md, BACKLOG.md and the folders src/, tests/ and examples/. What is
+What is taken: Cargo.toml, LICENSE, README.md, BACKLOG.md, SECURITY_REVIEW.md (the brief for its security review,
+when the drop has one) and the folders src/, tests/ and examples/. What is
 left out: the fuzzer and its corpus (fuzz/, 80 MB), the generators and oracles (tools/), the library's own
 Cargo.lock (the workspace's is the one that counts), build output and caches. One change is made, to
 Cargo.toml: its [profile.*] tables are dropped, since a workspace member's profiles are ignored (the
@@ -41,7 +42,7 @@ import tarfile
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 DEST = ROOT / "rust" / "crates" / "tiny_https"
-KEEP_FILES = ("Cargo.toml", "LICENSE", "README.md", "BACKLOG.md")
+KEEP_FILES = ("Cargo.toml", "LICENSE", "README.md", "BACKLOG.md", "SECURITY_REVIEW.md")
 KEEP_DIRS = ("src", "tests", "examples")
 OURS = ("LAZARET.md", "vendored.sha256", ".gitattributes", ".gitignore")   # written here, not taken from the drop
 # Names the repository never commits (.gitignore; scripts/make_bundle.py's CREDENTIAL_NAMES), refused in a drop. A
@@ -213,7 +214,8 @@ over: nothing in it is edited by hand. `scripts/sync_tiny_https.py` took it on {
 (SHA-256 `{source_sha}`): {len(files)} files, {size:,} bytes. Its licence is Apache-2.0 (`LICENSE`), as
 Lazaret's is.
 
-- **What is here:** `Cargo.toml`, `LICENSE`, `README.md`, `BACKLOG.md`, `src/`, `tests/` and `examples/`.
+- **What is here:** `Cargo.toml`, `LICENSE`, `README.md`, `BACKLOG.md`, `src/`, `tests/` and `examples/`, and
+  `SECURITY_REVIEW.md` (the brief for the library's security review) when the drop has one.
 - **What was left out:** the fuzzer and its corpus (`fuzz/`), the generators and oracles (`tools/`), the
   library's own `Cargo.lock`, and build output. Two of the library's interoperability tests use files in
   `tools/` when Go or aioquic is installed (`tests/h2_client_interop.rs`, `tests/h3_client_interop.rs`); they
@@ -227,7 +229,9 @@ Lazaret's is.
 - **The next drop:** `python3 scripts/sync_tiny_https.py PATH` (the library's folder or a tarball of it), then
   the gates. `python3 scripts/sync_tiny_https.py --verify` checks this folder against `vendored.sha256` (CI does).
 - **Its tests in Lazaret's CI:** `cargo test --release -p tiny_https --lib` and the tests that need nothing
-  installed (`go_vectors`, `cms_vectors`, `sigstore_real`, `sigstore_synthetic`, `rekor_real`).
+  installed (`go_vectors`, `cms_vectors`, `sigstore_real`, `sigstore_synthetic`, `rekor_real`, `real_chains`;
+  the last replays chains captured from real servers when `tests/data/real_chains/` is in the drop, and skips
+  without it).
 """
 
 

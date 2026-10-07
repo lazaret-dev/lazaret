@@ -22,7 +22,7 @@ A working HTTPS client: you can `get`/`post` over TLS 1.3 with full certificate 
 | CMS / PKCS#7 signatures (Java `META-INF/*.RSA`, `.p7s`, S/MIME) and RFC 3161 time stamps: BER reader, signer verification (RSA PKCS#1 and PSS, ECDSA P-256/P-384, Ed25519), chain to the caller's roots at the signature's time (pure, no I/O) | 45 messages made by OpenSSL and the JDK's `jarsigner` verify; 1,886 damaged messages judged by `openssl cms -verify` and replayed, each region of a message pinned as exactly OpenSSL's verdict, stricter, or deliberately more lenient; 2 fuzz targets; not Authenticode yet (B-70 phase 2, B-80) |
 
 Not yet verified against real public CA chains from a normal network: see `BACKLOG.md` (B-06, B-08).
-Test run at last check: 1,148 unit (including the mutation fuzzers; 13 more are ignored by default: 9 timing tests, two long random runs, a live QPACK peer and a replay of fuzz inputs; 255 of them also run without the `net` feature), 2 Go-vector, 1 CMS-vector, 13 real Sigstore, 5 synthetic Sigstore, 3 real Rekor, 36 OpenSSL interop, 15 HTTP/2 client against Go's server, 22 HTTP/3 client against aioquic (they skip without `python3` and aioquic), 1 real-root, 11 doc tests, no warnings; `tools/server_interop.sh` (36 checks) and `tools/h2_interop.sh` (21) pass.
+Test run at last check: 1,177 unit (including the mutation fuzzers; 14 more are ignored by default: 10 timing tests, two long random runs, a live QPACK peer and a replay of fuzz inputs; 276 of them also run without the `net` feature), 2 Go-vector, 1 CMS-vector, 13 real Sigstore, 5 synthetic Sigstore, 3 real Rekor, 36 OpenSSL interop, 15 HTTP/2 client against Go's server, 22 HTTP/3 client against aioquic (they skip without `python3` and aioquic), 1 real-root, 11 doc tests, no warnings; `tools/server_interop.sh` (36 checks) and `tools/h2_interop.sh` (21) pass.
 
 ## Security warning
 
@@ -30,6 +30,8 @@ This is hand-written, unaudited cryptography. Nothing has had an independent sid
 it to protect sensitive data until the hardening items in the backlog are done. Revocation is checked only with the
 evidence the server staples and the CRLs you supply or let the library fetch, and by default a missing answer is
 ignored (soft-fail); see Revocation below.
+
+`SECURITY_REVIEW.md` is the brief for an independent reviewer: what the verification code claims, the threat model, the evidence so far, what has not been done, and where to attack first.
 
 ## Async
 
@@ -221,7 +223,8 @@ supply CRLs up front. Details and the list of what is not done: the module docum
 X25519, the P-256/P-384 key exchange (`src/crypto/ecdh.rs`), GHASH, Poly1305, ChaCha20 and AES contain no
 secret-dependent branches or table lookups, and a statistical timing harness (`src/crypto/timing.rs`, dudect style,
 with deliberately leaky positive controls) found no timing dependence on keys or data on x86-64 or on an Apple M5 Max
-(backlog B-24, B-58). The harness earned its keep on the P-256/P-384 code: the first version showed |t| above 100
+(backlog B-24, B-58), with one exception that is not explained: on an Intel Xeon cloud VM the 32-bit-limb Poly1305 (which
+64-bit builds do not use) reads |t| 4 to 12 for an all-zero key against random keys (B-95). The harness earned its keep on the P-256/P-384 code: the first version showed |t| above 100
 because LLVM had turned a mask-based conditional subtraction back into a branch on the data; the masks now go
 through `black_box` and all eight comparisons read below 3. Verification-only ECDSA (`ecdsa.rs`) handles public
 values only and is variable time by design.
@@ -395,7 +398,8 @@ for tile in check.tiles_needed()? {
     // tiles.insert(tile, data)?;
 }
 let outcome = check.finish(&tiles)?;                            // nothing is vouched for before this succeeds
-// outcome.records[0].lines are the go.sum lines; keep outcome.latest_note for next time
+// outcome.records[0].lines are the go.sum lines (never empty: a record with no line for the module and
+// version is an error); keep outcome.latest_note for next time
 ```
 
 `cargo run --release --example sumdb -- golang.org/x/mod v0.17.0` does all of it through `Client` (`--state FILE` keeps the
@@ -540,11 +544,20 @@ looks like from outside, because the self-test then switches it off. Nothing has
 `sh tools/native_check.sh` runs everything below plus the benchmark and the timing tests on the current machine and writes
 a short `native_report.txt` (`--quick` skips the benchmark and timing runs).
 
+`sh tools/mac_field_check.sh` is for a machine on a normal network (not one that re-signs TLS; it stops if it finds that).
+It smoke-tests the library against about fifty real public servers and five that must be refused (backlog B-06), captures
+their certificate chains with OpenSSL and verifies each with the library at the moment it was captured (B-08: the result,
+`field_results/real_chains/`, is what `cargo test --test real_chains` replays once it is copied to `tests/data/real_chains/`),
+downloads their OCSP responses and CRLs for later fixtures (B-65), and with `fuzz HOURS` runs a long fuzz campaign under
+`caffeinate` (B-66). Everything it produces is under `field_results/` and in `field_results.tgz`; it reads no secrets and
+records only the names of proxy variables, never their values. Written and tested against a local test bed only: it has
+not yet been run on a real network.
+
 Run suites one at a time and keep each under 45 seconds:
 
 ```
 cargo test --lib
-cargo test --lib --no-default-features   # the pure part alone (255 tests)
+cargo test --lib --no-default-features   # the pure part alone (276 tests)
 cargo test --test go_vectors             # notes, tree heads, records and Merkle proofs against Go's verdicts (pure)
 cargo test --test cms_vectors            # damaged CMS messages against OpenSSL's verdicts (pure)
 sh tools/check_features.sh               # the line between the pure part and `net`; builds for wasm32 if the target is installed
@@ -554,6 +567,7 @@ AIOQUIC_PATH=/dir cargo test --test h3_client_interop   # the HTTP/3 client agai
 sh tools/server_interop.sh            # the test TLS server against OpenSSL, curl and Go (36 checks)
 sh tools/h2_interop.sh                # its HTTP/2 against curl, Go and python-h2 (PYTHONPATH may point at h2 and hyperframe)
 cargo test --test system_roots        # checks the system CA bundle, if present
+cargo test --test real_chains         # replays real certificate chains captured by tools/mac_field_check.sh; skipped until tests/data/real_chains exists
 cargo test --doc
 ```
 
@@ -573,7 +587,9 @@ runs ten times as many iterations.
 
 The timing tests are `#[ignore]`d because they depend on the machine. Run them one at a time on a quiet machine:
 `cargo test --release --lib crypto::timing::x25519 -- --ignored --nocapture` (also `ecdh`, `ghash`, `poly1305`,
-`aead_and_mac`, `aes`, `harness`).
+`aead_and_mac`, `aes`, `harness`). A comparison that reads |t| above 4.5 is measured again with fresh inputs, and
+fails if the repeat is above 10 or is above 4.5 again at the same statistic with the same sign (the same class slower
+again; B-95); `harness_does_not_fail_comparisons_of_identical_classes` measures how often that happens with nothing to find.
 
 ## Licence
 

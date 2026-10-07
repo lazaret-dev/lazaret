@@ -26,7 +26,8 @@
 //!    has told two stories);
 //! 3. checks that the record's hash is the leaf the log has at that number, using authenticated
 //!    tiles ([`tlog`]);
-//! 4. returns the lines of the record that start with `<module> <version> `.
+//! 4. returns the lines of the record that start with `<module> <version> `, and refuses the record if there
+//!    are none (a genuine record of another module is not an answer about this one).
 //!
 //! Nothing is believed until the signature has been checked and every tile has been authenticated
 //! against the signed root (see [`tlog`]). [`Check`] is sans-IO: you add what the server returned,
@@ -61,7 +62,8 @@
 //! Decisions stricter than Go's, none looser: Base64 must be canonical; a record number or tree size
 //! is plain decimal digits (no sign, no leading zeros; a tree size is at most 2^62); module paths and versions in
 //! [`lookup_path`] are limited to the characters real ones use (the Go functions accept a few more);
-//! lines are taken from the record only, where Go scans the whole response; two signed heads of equal
+//! lines are taken from the record only, where Go scans the whole response; a lookup whose record has no line
+//! for the module and version is an error, where Go returns no lines; two signed heads of equal
 //! size with different roots are a fork on their own (Go reads tiles to find that out); and the
 //! tiles are always fully authenticated (Go before x/mod 0.40.0 was not, CVE-2026-56865).
 
@@ -100,6 +102,9 @@ pub enum Error {
     BadName(&'static str),
     /// The record number is not inside the tree (`id >= size`), so it cannot be checked.
     RecordOutsideTree { id: u64, size: u64 },
+    /// The record holds no line for the module and version asked about. The record may be genuine (a server, or
+    /// someone in between, answered with the record of another module or version), but it says nothing about this one.
+    NoLineForVersion { module: String, version: String },
 }
 
 impl fmt::Display for Error {
@@ -111,6 +116,7 @@ impl fmt::Display for Error {
             Error::MalformedRecord => write!(f, "malformed record data"),
             Error::BadName(m) => write!(f, "cannot look up: {m}"),
             Error::RecordOutsideTree { id, size } => write!(f, "cannot validate record {id} in tree of size {size}"),
+            Error::NoLineForVersion { module, version } => write!(f, "the record has no go.sum line for {module} {version}"),
         }
     }
 }
@@ -227,7 +233,8 @@ pub struct VerifiedRecord {
     /// The whole record text.
     pub text: String,
     /// The lines of the record that start with `<module> <version> ` (for a version without a
-    /// `/go.mod` suffix that is the module's content hash line, with the suffix the go.mod line).
+    /// `/go.mod` suffix that is the module's content hash line, with the suffix the go.mod line). Never empty:
+    /// [`Check::add_lookup`] refuses a record that has none.
     pub lines: Vec<String>,
 }
 
@@ -299,7 +306,10 @@ impl Check {
     }
 
     /// Adds a lookup response for `module@version` (the body of `GET /lookup/<module>@<version>`).
-    /// Returns the index of the record in [`Outcome::records`]. Nothing is changed if it fails.
+    /// Returns the index of the record in [`Outcome::records`]. Nothing is changed if it fails. A record with
+    /// no line for `module` and `version` is an error ([`Error::NoLineForVersion`]); Go's `Lookup` returns no
+    /// lines instead and leaves it to the caller, which is how a genuine record of another module, served in
+    /// answer to this question, would pass for "the database has nothing to say".
     pub fn add_lookup(&mut self, module: &str, version: &str, response: &[u8]) -> Result<usize, Error> {
         let (id, text, note_bytes) = parse_record(response)?;
         let tree = self.open_head(note_bytes)?;
@@ -310,7 +320,10 @@ impl Check {
         }
         obligations.push(Obligation::Record { tree: latest, id, hash: tlog::record_hash(text.as_bytes()) });
         let prefix = format!("{module} {version} ");
-        let lines = text.split('\n').filter(|l| l.starts_with(&prefix)).map(str::to_string).collect();
+        let lines: Vec<String> = text.split('\n').filter(|l| l.starts_with(&prefix)).map(str::to_string).collect();
+        if lines.is_empty() {
+            return Err(Error::NoLineForVersion { module: module.to_string(), version: version.to_string() });
+        }
 
         self.obligations.extend(obligations);
         if let Some((t, n)) = newer {
@@ -438,12 +451,24 @@ mod tests {
         let i = check.add_lookup(MODULE, "v0.17.0/go.mod", LOOKUP).unwrap();
         let outcome = check.finish(&tile_set()).unwrap();
         assert_eq!(outcome.records[i].lines, vec![GOMOD_H1.to_string()]);
-        // a lookup of something else in the same record finds nothing, and vouches for nothing
+    }
+
+    #[test]
+    fn a_record_of_something_else_is_not_an_answer() {
+        // a genuine response for golang.org/x/mod@v0.17.0, served in answer to a question about anything else
         let mut check = Check::new(verifier());
-        check.add_lookup(MODULE, "v0.17.1", LOOKUP).unwrap();
-        check.add_lookup("golang.org/x/net", VERSION, LOOKUP).unwrap();
+        for (module, version) in [(MODULE, "v0.17.1"), ("golang.org/x/net", VERSION), (MODULE, "v0.17"), ("golang.org/x", "v0.17.0")] {
+            let err = check.add_lookup(module, version, LOOKUP).unwrap_err();
+            assert_eq!(err, Error::NoLineForVersion { module: module.to_string(), version: version.to_string() });
+            assert!(err.to_string().contains(module), "{err}");
+        }
+        // nothing was kept: no record, no tile to fetch
+        assert_eq!(check.tiles_needed().unwrap(), Vec::new());
+        // and the right question still works afterwards
+        let i = check.add_lookup(MODULE, VERSION, LOOKUP).unwrap();
         let outcome = check.finish(&tile_set()).unwrap();
-        assert!(outcome.records.iter().all(|r| r.lines.is_empty()));
+        assert_eq!(outcome.records.len(), 1);
+        assert_eq!(outcome.records[i].lines, vec![H1.to_string()]);
     }
 
     #[test]

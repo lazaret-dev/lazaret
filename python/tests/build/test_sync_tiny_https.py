@@ -18,6 +18,7 @@ MANIFEST = ('[package]\nname = "tiny_https"\nversion = "0.2.0"\nedition = "2021"
             '[features]\ndefault = ["net"]\nnet = []\n\n[lints.rust]\n# a comment kept\nunexpected_cfgs = "warn"\n\n'
             '# the release profile\n[profile.release]\nopt-level = 3\n\n[profile.test]\nopt-level = 2\n')
 DROP = {"Cargo.toml": MANIFEST, "LICENSE": "Apache License\n", "README.md": "# tiny_https\n", "BACKLOG.md": "b\n",
+        "SECURITY_REVIEW.md": "# Security review brief\n", "SECURITY.md": "not taken\n",
         "Cargo.lock": "lock\n", "src/lib.rs": "pub fn f() {}\n", "src/quic/vectors.txt": "1 2\n",
         "tests/data/cert.pem": "-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n",
         "tests/data/pkg.tgz": "tgz", "tests/t.rs": "#[test] fn t() {}\n", "examples/e.rs": "fn main() {}\n",
@@ -54,8 +55,9 @@ class SyncTests(unittest.TestCase):
     def test_what_is_taken_and_what_is_left_out(self):
         self.assertEqual(self.main([str(self.drop())]), 0)
         self.assertEqual(self.taken(), [".gitattributes", ".gitignore", "BACKLOG.md", "Cargo.toml", "LAZARET.md",
-                                        "LICENSE", "README.md", "examples/e.rs", "src/lib.rs", "src/quic/vectors.txt",
-                                        "tests/data/cert.pem", "tests/data/pkg.tgz", "tests/t.rs", "vendored.sha256"])
+                                        "LICENSE", "README.md", "SECURITY_REVIEW.md", "examples/e.rs", "src/lib.rs",
+                                        "src/quic/vectors.txt", "tests/data/cert.pem", "tests/data/pkg.tgz", "tests/t.rs",
+                                        "vendored.sha256"])
         manifest = (self.dest / "Cargo.toml").read_text(encoding="utf-8")
         self.assertNotIn("[profile", manifest)
         self.assertNotIn("the release profile", manifest)
@@ -65,7 +67,7 @@ class SyncTests(unittest.TestCase):
         self.assertIn("!*.pem\n!*.tgz\n", (self.dest / ".gitignore").read_text(encoding="utf-8"))
         notes = (self.dest / "LAZARET.md").read_text(encoding="utf-8")
         self.assertIn("tiny_https 0.2.0", notes)
-        self.assertEqual(len((self.dest / "vendored.sha256").read_text(encoding="utf-8").splitlines()), 10)
+        self.assertEqual(len((self.dest / "vendored.sha256").read_text(encoding="utf-8").splitlines()), 11)
 
     def test_a_tarball_with_one_top_folder(self):
         folder = self.drop()

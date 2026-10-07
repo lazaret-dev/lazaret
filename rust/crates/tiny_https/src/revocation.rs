@@ -399,7 +399,7 @@ fn for_each_extension(list: &[u8], mut f: impl FnMut(&[u8], bool, &[u8]) -> Resu
         let mut ext = d.sequence()?;
         let oid = ext.expect(asn1::TAG_OID)?.content;
         let critical = match ext.optional(asn1::TAG_BOOLEAN)? {
-            Some(b) => b.content == [0xff],
+            Some(b) => asn1::boolean(&b)?,
             None => false,
         };
         let value = ext.expect(asn1::TAG_OCTET_STRING)?.content;
@@ -423,16 +423,17 @@ fn parse_scope(value: &[u8]) -> Result<Scope> {
             _ => s.unusable = true,
         }
     }
-    let flag = |t: Option<asn1::Tlv>| t.is_some_and(|b| b.content == [0xff]);
-    s.only_user_certs = flag(seq.optional(0x81)?);
-    s.only_ca_certs = flag(seq.optional(0x82)?);
+    // the flags are IMPLICIT BOOLEANs: a value other than 00 or ff is an error, not "false"
+    let flag = |t: Option<asn1::Tlv>| -> Result<bool> { t.map_or(Ok(false), |b| asn1::boolean_content(b.content)) };
+    s.only_user_certs = flag(seq.optional(0x81)?)?;
+    s.only_ca_certs = flag(seq.optional(0x82)?)?;
     if seq.optional(0x83)?.is_some() {
         s.unusable = true; // onlySomeReasons
     }
-    if flag(seq.optional(0x84)?) {
+    if flag(seq.optional(0x84)?)? {
         s.unusable = true; // indirectCRL
     }
-    if flag(seq.optional(0x85)?) {
+    if flag(seq.optional(0x85)?)? {
         s.unusable = true; // onlyContainsAttributeCerts
     }
     seq.finish()?;

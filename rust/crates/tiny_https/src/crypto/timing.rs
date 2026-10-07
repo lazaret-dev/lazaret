@@ -10,6 +10,15 @@
 //! difference between the classes. dudect's rule of thumb: |t| > 4.5 is suspicious and
 //! |t| > 10 is a leak; a run below those numbers is evidence of absence, not proof of it.
 //!
+//! Which results fail a test: a comparison whose strongest |t| is above 4.5 is measured again with
+//! fresh inputs, and it fails if the repeat is above 10 as well, or if the statistic that was strongest
+//! on the first run (the uncropped one or one crop level) is above 4.5 again *with the same sign*, that is
+//! with the same class slower again. Noise has no direction, so on top of having to reach 4.5 a second time
+//! at one statistic fixed in advance it has to land on the same side, which is a coin toss; a difference
+//! that depends on the input keeps its direction. The first run and the repeat are both printed.
+//! `harness_does_not_fail_comparisons_of_identical_classes` measures the false-alarm rate against the
+//! harness itself, the negative control that goes with the positive ones.
+//!
 //! The harness is validated by *positive controls*: functions that are known to leak (an
 //! early-exit comparison, a ladder that does extra work for set scalar bits) must be flagged, so
 //! that a clean result for the real code means the harness could have seen a leak.
@@ -39,9 +48,10 @@ use crate::util::ct_eq;
 use std::hint::black_box;
 use std::time::{Duration, Instant};
 
-/// |t| above this is reported as a leak.
+/// |t| above this is reported as a leak, and fails the test if the repeat is above it too.
 const LEAK_T: f64 = 10.0;
-/// |t| above this is reported as suspicious.
+/// |t| above this is reported as suspicious, is measured again, and fails the test if the same statistic is
+/// above it again on the repeat with the same sign (see [`judge`]).
 const SUSPICIOUS_T: f64 = 4.5;
 
 pub(crate) struct Report {
@@ -54,7 +64,35 @@ pub(crate) struct Report {
     pub crops: Vec<(f64, f64)>,
 }
 
+/// The fraction of the samples (the fastest) that each cropped view keeps; the slow tail is interrupts and scheduling.
+const CROP_LEVELS: [f64; 6] = [0.999, 0.99, 0.95, 0.9, 0.75, 0.5];
+
 impl Report {
+    /// Every t value of the run with its sign: the uncropped one, then one per crop level of `crops`. The sign
+    /// says which class was slower (positive: class 1), and is the same for a real difference run after run.
+    fn statistics(&self) -> impl Iterator<Item = f64> + '_ {
+        std::iter::once(self.uncropped_t).chain(self.crops.iter().map(|c| c.1))
+    }
+
+    /// The statistic with the largest |t|: its place in [`Report::statistics`] and its signed value.
+    fn peak(&self) -> (usize, f64) {
+        let mut best = (0, self.uncropped_t);
+        for (i, t) in self.statistics().enumerate() {
+            if t.abs() > best.1.abs() {
+                best = (i, t);
+            }
+        }
+        best
+    }
+
+    /// "uncropped", or "p99.9" and so on, for the statistic at `index`.
+    fn label(&self, index: usize) -> String {
+        match index {
+            0 => "uncropped".to_string(),
+            i => self.crops.get(i - 1).map_or("?".to_string(), |(p, _)| format!("p{:.1}", p * 100.0)),
+        }
+    }
+
     fn verdict(&self) -> &'static str {
         if self.max_t > LEAK_T {
             "LEAK"
@@ -110,15 +148,41 @@ fn paired_t(samples: &[(u32, bool)], cutoff: u32) -> f64 {
     let mean = diffs.iter().sum::<f64>() / n;
     let var = diffs.iter().map(|d| (d - mean) * (d - mean)).sum::<f64>() / (n - 1.0);
     if var == 0.0 {
-        0.0
+        // No spread at all. With a mean of zero that is no evidence of a difference; with any other mean it is
+        // the strongest evidence there can be (every block shows the same offset, which a coarse clock makes
+        // the normal case for a cheap operation), and must not be reported as "no leak".
+        if mean == 0.0 {
+            0.0
+        } else {
+            f64::INFINITY.copysign(mean)
+        }
     } else {
         mean / (var / n).sqrt()
     }
 }
 
+const DEFAULT_SECS: f64 = 3.0;
+
+/// The time budget from the text of `TINY_HTTPS_TIMING_SECS` (`None` if it is not set): seconds, 0 or more
+/// (0 is the shortest run, one measured batch). Anything else is an `Err` saying so.
+fn parse_budget(value: Option<&str>) -> Result<Duration, String> {
+    let Some(text) = value else { return Ok(Duration::from_secs_f64(DEFAULT_SECS)) };
+    text.trim()
+        .parse::<f64>()
+        .ok()
+        .filter(|secs| secs.is_finite() && *secs >= 0.0)
+        .and_then(|secs| Duration::try_from_secs_f64(secs).ok())
+        .ok_or_else(|| format!("TINY_HTTPS_TIMING_SECS={text:?} is not a number of seconds (0 or more); using {DEFAULT_SECS}"))
+}
+
 fn budget() -> Duration {
-    let secs: f64 = std::env::var("TINY_HTTPS_TIMING_SECS").ok().and_then(|s| s.parse().ok()).unwrap_or(3.0);
-    Duration::from_secs_f64(secs)
+    match parse_budget(std::env::var("TINY_HTTPS_TIMING_SECS").ok().as_deref()) {
+        Ok(d) => d,
+        Err(why) => {
+            eprintln!("{why}");
+            Duration::from_secs_f64(DEFAULT_SECS)
+        }
+    }
 }
 
 /// Times `op` on inputs from `gen(rng, class)` for `budget` and returns the statistics.
@@ -140,7 +204,8 @@ fn measure_seeded<I, R>(
     let mut samples: Vec<(u32, bool)> = Vec::new();
     let start = Instant::now();
     let mut first = true;
-    while first || start.elapsed() < budget {
+    // the first batch only warms up, so a run is never over before one more has been measured
+    while first || samples.is_empty() || start.elapsed() < budget {
         // balanced blocks: eight of each class per block, shuffled
         let mut classes: Vec<bool> = Vec::with_capacity(BATCH_BLOCKS * BLOCK);
         for _ in 0..BATCH_BLOCKS {
@@ -164,12 +229,12 @@ fn measure_seeded<I, R>(
     }
     let mut sorted: Vec<u32> = samples.iter().map(|s| s.0).collect();
     sorted.sort_unstable();
-    let pct = |p: f64| sorted[(((sorted.len() - 1) as f64) * p) as usize];
+    let pct = |p: f64| if sorted.is_empty() { 0 } else { sorted[(((sorted.len() - 1) as f64) * p) as usize] };
     let uncropped_t = paired_t(&samples, u32::MAX);
     // dudect also crops the slow tail: interrupts and preemption add large, class-independent noise
     let mut max_t = uncropped_t.abs();
     let mut crops = Vec::new();
-    for p in [0.999, 0.99, 0.95, 0.9, 0.75, 0.5] {
+    for p in CROP_LEVELS {
         let t = paired_t(&samples, pct(p));
         crops.push((p, t));
         max_t = max_t.max(t.abs());
@@ -182,23 +247,54 @@ thread_local! {
     static FAILED: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
-/// Reports a comparison and records a failure if it is flagged twice in a row.
+/// Whether a row that was flagged on its first run stays flagged on the repeat with fresh inputs, and
+/// if so, why (the text that [`finish`] reports). There are two ways to stay flagged, and the second
+/// only adds to the first:
+///
+/// * the strongest |t| of both runs is above [`LEAK_T`], whichever statistic and whichever sign;
+/// * the first run's strongest statistic is above [`SUSPICIOUS_T`] and *that same statistic* is above
+///   [`SUSPICIOUS_T`] again on the repeat, with the same sign (the same class slower again).
+///
+/// The second is a replication, not a second look at the maximum. The first run chose the statistic
+/// out of seven, so a t value of 5 there is not much; the repeat then asks one question fixed in
+/// advance (is it there again, in the same direction?), which noise answers yes to only rarely, because
+/// its sign is a coin toss. A real difference in running time keeps its direction and its size.
+fn judge(first: &Report, again: &Report) -> Option<String> {
+    if first.max_t > LEAK_T && again.max_t > LEAK_T {
+        return Some(format!("{}: |t| = {:.1} and {:.1} on two runs", first.name, first.max_t, again.max_t));
+    }
+    let (at, t) = first.peak();
+    if t.abs() <= SUSPICIOUS_T {
+        return None;
+    }
+    let repeat = again.statistics().nth(at)?;
+    (repeat.abs() > SUSPICIOUS_T && repeat.signum() == t.signum()).then(|| {
+        format!("{}: t = {:+.1} at {} and {:+.1} at the same statistic on a repeat with fresh inputs", first.name, t, first.label(at), repeat)
+    })
+}
+
+/// Reports a comparison and records a failure if it is flagged twice in a row (see [`judge`]).
 ///
 /// A real leak depends on the input, so it shows up again on a repeat with fresh data; a burst of
-/// noise (another core waking up, a clock change) almost never does. The first flagged run is
-/// printed too, so nothing is hidden. A failure does not stop the remaining rows from running;
-/// call [`finish`] at the end of the test to fail it.
+/// noise (another core waking up, a clock change) almost never does, and when a stretch of noise
+/// does reach a t value above [`SUSPICIOUS_T`] its sign is as likely to be one as the other. The first
+/// flagged run is printed too, so nothing is hidden. A failure does not stop the remaining rows from
+/// running; call [`finish`] at the end of the test to fail it.
 fn expect_constant_time<I, R>(name: &str, mut gen: impl FnMut(&mut Rng, bool) -> I, op: impl Fn(&I) -> R) {
     let r = measure(name, budget(), &mut gen, &op);
     r.print();
-    if r.max_t <= LEAK_T {
+    if r.max_t <= SUSPICIOUS_T {
         return;
     }
-    println!("    flagged; measuring {:?} again with fresh inputs", name);
+    println!("    above {SUSPICIOUS_T}; measuring {:?} again with fresh inputs", name);
     let again = measure_seeded(name, budget(), 1, &mut gen, &op);
     again.print();
-    if again.max_t > LEAK_T {
-        FAILED.with(|f| f.borrow_mut().push(format!("{}: |t| = {:.1} and {:.1} on two runs", name, r.max_t, again.max_t)));
+    match judge(&r, &again) {
+        Some(why) => {
+            println!("    came back: recorded as a failure");
+            FAILED.with(|f| f.borrow_mut().push(why));
+        }
+        None => println!("    did not come back at the same statistic with the same sign: noise, not recorded"),
     }
 }
 
@@ -457,8 +553,15 @@ fn aead_and_mac_primitives_are_constant_time_in_their_data() {
     // end to end ChaCha20-Poly1305 and AES-GCM over 1 KiB: plaintext zeros / ones vs random
     let nonce = [9u8; 12];
     let cc = ChaCha20Poly1305::new(&[0x42u8; 32]);
+    // Both classes are built the same way, and the zero class is overwritten afterwards. Building it with
+    // `vec![0; 1024]` (a zeroed allocation) and the other with `rng.bytes` puts the buffers in different
+    // places, and on an operation of 550 ns the harness sees that: |t| 5 to 11 on every run, same sign, on
+    // the AES-GCM row below. The same lesson is in `aes_is_constant_time`, where it was learned first.
     let sealed = |c: bool, rng: &mut Rng| {
-        let mut buf = if c { rng.bytes(1024) } else { vec![0u8; 1024] };
+        let mut buf = rng.bytes(1024);
+        if !c {
+            buf.fill(0);
+        }
         buf.extend_from_slice(&[0u8; 16]);
         buf
     };
@@ -567,4 +670,198 @@ fn aes_is_constant_time() {
         }
     }
     finish();
+}
+
+// ------------------------------------------------------------------------ the harness's own arithmetic
+
+/// `blocks` blocks of eight samples of each class, class 0 taking `a` ns and class 1 taking `b(block)` ns.
+fn blocks_of(blocks: usize, a: u32, b: impl Fn(usize) -> u32) -> Vec<(u32, bool)> {
+    let mut v = Vec::new();
+    for k in 0..blocks {
+        for i in 0..BLOCK {
+            let class = i % 2 == 1;
+            v.push((if class { b(k) } else { a }, class));
+        }
+    }
+    v
+}
+
+#[test]
+fn a_difference_with_no_spread_is_the_strongest_evidence_not_none() {
+    // class 1 is exactly 1 ns slower in every block: the old code answered 0 ("no leak detected")
+    let t = paired_t(&blocks_of(200, 100, |_| 101), u32::MAX);
+    assert_eq!(t, f64::INFINITY);
+    assert_eq!(paired_t(&blocks_of(200, 101, |_| 100), u32::MAX), f64::NEG_INFINITY);
+    // no difference and no spread is no evidence
+    assert_eq!(paired_t(&blocks_of(200, 100, |_| 100), u32::MAX), 0.0);
+    // the same offset with some spread was always found
+    let t = paired_t(&blocks_of(200, 100, |k| 101 + (k % 3) as u32), u32::MAX);
+    assert!(t.is_finite() && t > 10.0, "{t}");
+    // and a report built on an infinite t says LEAK, in both signs
+    let r = Report { name: "x".into(), samples: 0, uncropped_t: f64::INFINITY, max_t: f64::INFINITY, median_ns: 0, crops: vec![] };
+    assert_eq!(r.verdict(), "LEAK");
+    r.print();
+}
+
+#[test]
+fn the_time_budget_is_read_with_care() {
+    assert_eq!(parse_budget(None), Ok(Duration::from_secs(3)));
+    assert_eq!(parse_budget(Some("0.5")), Ok(Duration::from_millis(500)));
+    assert_eq!(parse_budget(Some(" 12 ")), Ok(Duration::from_secs(12)));
+    assert_eq!(parse_budget(Some("0")), Ok(Duration::ZERO));
+    // these panicked (a negative or enormous number in `Duration::from_secs_f64`) or were silently the default
+    for bad in ["-1", "-0.001", "abc", "", "NaN", "inf", "1e300"] {
+        let why = parse_budget(Some(bad)).unwrap_err();
+        assert!(why.contains("TINY_HTTPS_TIMING_SECS"), "{bad}: {why}");
+    }
+}
+
+#[test]
+fn a_budget_of_zero_still_measures_something() {
+    // it used to be one batch, the warm-up one, which is thrown away, and then an empty sample set to index into
+    let r = measure("zero budget", Duration::ZERO, |rng, _| rng.next_u64(), |x| x.wrapping_mul(3));
+    assert!(r.samples >= BLOCK, "{}", r.samples);
+    assert!(r.max_t.is_finite() || r.max_t.is_infinite());
+}
+
+/// A report holding the given signed t values (the uncropped one, then one per crop level), as `measure_seeded` builds it.
+fn report(ts: [f64; 7]) -> Report {
+    let crops: Vec<(f64, f64)> = CROP_LEVELS.iter().copied().zip(ts[1..].iter().copied()).collect();
+    let max_t = ts.iter().fold(0f64, |m, t| m.max(t.abs()));
+    Report { name: "row".into(), samples: 1000, uncropped_t: ts[0], max_t, median_ns: 100, crops }
+}
+
+const QUIET: [f64; 7] = [0.5, -1.0, 0.3, 0.8, -0.2, 1.1, 0.4];
+
+/// `QUIET` with `t` at statistic `at` (0 is the uncropped one).
+fn with(at: usize, t: f64) -> [f64; 7] {
+    let mut ts = QUIET;
+    ts[at] = t;
+    ts
+}
+
+#[test]
+fn a_flagged_row_fails_when_its_statistic_comes_back_with_the_same_sign() {
+    // the first run peaks at p95 (index 3) with +6: suspicious, not a leak
+    let first = report(with(3, 6.0));
+    assert_eq!(first.peak(), (3, 6.0));
+    assert_eq!(first.label(3), "p95.0");
+    assert_eq!(first.label(0), "uncropped");
+    assert_eq!(first.label(6), "p50.0");
+    assert_eq!(first.verdict(), "suspicious");
+
+    // the same statistic, the same direction, above 4.5 again: a real difference
+    let why = judge(&first, &report(with(3, 5.0))).expect("a difference that came back");
+    assert!(why.contains("p95.0") && why.contains("+6.0") && why.contains("+5.0"), "{why}");
+    // the other direction (class 1 faster this time) is what noise does half of the time
+    assert_eq!(judge(&first, &report(with(3, -5.5))), None);
+    assert_eq!(judge(&first, &report(with(3, -50.0))), None);
+    // below 4.5 at that statistic, however loud another statistic is
+    assert_eq!(judge(&first, &report(with(3, 4.4))), None);
+    assert_eq!(judge(&first, &report(with(6, 7.0))), None);
+    assert_eq!(judge(&first, &report(QUIET)), None);
+    // a negative first run is judged the same way round
+    let slower_first = report(with(2, -6.0));
+    assert!(judge(&slower_first, &report(with(2, -4.6))).is_some());
+    assert_eq!(judge(&slower_first, &report(with(2, 4.6))), None);
+}
+
+#[test]
+fn the_old_rule_still_holds_and_the_new_one_only_adds_to_it() {
+    // above 10 on both runs fails whichever statistic or sign it is: nothing that failed before passes now
+    let first = report(with(2, 12.0));
+    let why = judge(&first, &report(with(5, -11.0))).expect("two runs above 10");
+    assert!(why.contains("on two runs"), "{why}");
+    assert!(judge(&first, &report(with(2, 11.0))).is_some());
+    // above 10 once and between 4.5 and 10 at the same statistic the second time: this is new, and fails
+    let why = judge(&first, &report(with(2, 7.0))).expect("a replicated leak");
+    assert!(why.contains("p99.0"), "{why}");
+    // above 10 once and quiet the second time is a burst of noise, as before
+    assert_eq!(judge(&first, &report(QUIET)), None);
+    assert_eq!(judge(&first, &report(with(2, 4.0))), None);
+    // a quiet first run is never held against the row
+    assert_eq!(judge(&report(with(4, 4.0)), &report(with(4, 40.0))), None);
+    // the coarse clock: every block offset by the same amount is an infinite t, in either direction
+    let inf = report(with(0, f64::INFINITY));
+    assert!(judge(&inf, &report(with(0, f64::INFINITY))).is_some());
+    assert!(judge(&inf, &report(with(0, f64::NEG_INFINITY))).is_some());
+    assert_eq!(judge(&inf, &report(QUIET)), None);
+}
+
+#[test]
+fn a_report_with_fewer_statistics_than_expected_is_judged_not_crashed_on() {
+    let bare = |t: f64| Report { name: "bare".into(), samples: 0, uncropped_t: t, max_t: t.abs(), median_ns: 0, crops: vec![] };
+    assert_eq!(bare(6.0).peak(), (0, 6.0));
+    assert_eq!(bare(6.0).label(0), "uncropped");
+    assert_eq!(bare(6.0).label(3), "?");
+    assert!(judge(&bare(6.0), &bare(5.0)).is_some());
+    assert_eq!(judge(&bare(6.0), &bare(-5.0)), None);
+    // the first run peaked at a crop level the repeat does not have
+    assert_eq!(judge(&report(with(3, 6.0)), &bare(9.0)), None);
+}
+
+// ------------------------------------------------------------------------ the false-alarm rate
+
+/// The time for each run of the negative control: `TINY_HTTPS_TIMING_SECS` if it is set, else half a second, so
+/// that the default run (ten pairs of three operations) takes about half a minute and not a quarter of an hour.
+fn null_budget() -> Duration {
+    if std::env::var_os("TINY_HTTPS_TIMING_SECS").is_some() {
+        budget()
+    } else {
+        Duration::from_millis(500)
+    }
+}
+
+/// What [`false_alarms`] counted.
+#[derive(Default)]
+struct Tally {
+    /// first runs whose strongest |t| was above [`SUSPICIOUS_T`], and above [`LEAK_T`]
+    above_suspicious: usize,
+    above_leak: usize,
+    /// pairs that the old rule (above [`LEAK_T`] twice) and the new one ([`judge`]) would have failed
+    old_rule: usize,
+    new_rule: usize,
+    /// the strongest |t| of any run
+    largest_t: f64,
+}
+
+/// Measures `pairs` first runs and repeats of a comparison whose two classes are the same kind of input,
+/// so that every difference the harness finds is noise, and counts what each rule would have done.
+fn false_alarms<I, R>(name: &str, pairs: usize, mut gen: impl FnMut(&mut Rng, bool) -> I, op: impl Fn(&I) -> R) -> Tally {
+    let mut tally = Tally::default();
+    for k in 0..pairs {
+        let first = measure_seeded(name, null_budget(), 2 * k as u64, &mut gen, &op);
+        let again = measure_seeded(name, null_budget(), 2 * k as u64 + 1, &mut gen, &op);
+        tally.above_suspicious += (first.max_t > SUSPICIOUS_T) as usize;
+        tally.above_leak += (first.max_t > LEAK_T) as usize;
+        tally.old_rule += (first.max_t > LEAK_T && again.max_t > LEAK_T) as usize;
+        tally.largest_t = tally.largest_t.max(first.max_t).max(again.max_t);
+        if let Some(why) = judge(&first, &again) {
+            tally.new_rule += 1;
+            println!("    new rule failed a pair of identical classes: {why}");
+        }
+    }
+    tally
+}
+
+/// The negative control: the repeat rule must not fail comparisons that have nothing to find. Three operations
+/// of very different length (the short one runs close to the clock's resolution, where noise is worst), each
+/// compared with itself. `TINY_HTTPS_NULL_PAIRS` (default 10) sets the number of first-run and repeat pairs per
+/// operation, `TINY_HTTPS_TIMING_SECS` the time of each run (default here 0.5).
+#[test]
+#[ignore = "statistical timing run; see the module documentation"]
+fn harness_does_not_fail_comparisons_of_identical_classes() {
+    let pairs: usize = std::env::var("TINY_HTTPS_NULL_PAIRS").ok().and_then(|v| v.trim().parse().ok()).unwrap_or(10);
+    let mut new_rule_failures = 0;
+    let mut report_row = |what: &str, c: Tally| {
+        println!(
+            "{what:<46} {pairs} pairs: first run above {SUSPICIOUS_T}: {:>2}, above {LEAK_T}: {:>2}; failed by the old rule: {:>2}, by the new rule: {:>2}; largest |t| of any run {:.1}",
+            c.above_suspicious, c.above_leak, c.old_rule, c.new_rule, c.largest_t
+        );
+        new_rule_failures += c.new_rule;
+    };
+    report_row("x25519, random scalar (about 100 us)", false_alarms("null x25519", pairs, |rng, _| (rand32(rng), x25519::BASE_POINT), |(k, u)| x25519::x25519(k, u)));
+    report_row("sha256, 1 KiB of random bytes (a few us)", false_alarms("null sha256", pairs, |rng, _| rng.bytes(1024), |m| Sha256::digest(m)));
+    report_row("ct_eq, 32 equal random bytes (tens of ns)", false_alarms("null ct_eq", pairs, |rng, _| { let a = rng.bytes(32); (a.clone(), a) }, |(a, b)| ct_eq(a, b)));
+    assert_eq!(new_rule_failures, 0, "the repeat rule failed comparisons of identical classes");
 }

@@ -1,7 +1,10 @@
 //! Variable-length unsigned integers and Montgomery modular arithmetic.
 //!
 //! This is only used on PUBLIC data (signature verification: RSA moduli,
-//! curve points, signatures), so it is not constant time.
+//! curve points, signatures), so it is not constant time: the loops run as long as the exponent, `cmp` and
+//! `is_zero` stop at the first difference, and the reductions branch on magnitudes. That is why the module is
+//! private to the crate; no secret may go through its arithmetic (the constant-time code in `ecdh.rs` and
+//! `x25519.rs` does its own, and uses this module for constants, conversions and public values; see the notes there).
 //!
 //! Numbers are little-endian `u64` limb vectors. Functions that take a modulus
 //! expect operands that are already reduced and exactly as long as the modulus.
@@ -32,6 +35,7 @@ pub fn to_be_bytes(limbs: &[u64], len: usize) -> Vec<u8> {
     out
 }
 
+#[allow(dead_code)] // the constants of ecdh.rs (the `net` part) are written in hex
 pub fn from_hex(s: &str) -> Vec<u64> {
     from_be_bytes(&crate::util::unhex(s))
 }
@@ -44,6 +48,7 @@ pub fn trimmed_len(a: &[u64]) -> usize {
     n
 }
 
+#[allow(dead_code)] // only the tests of the other modules use it
 pub fn is_zero(a: &[u64]) -> bool {
     a.iter().all(|&x| x == 0)
 }
@@ -144,6 +149,7 @@ impl Mont {
         &self.m
     }
 
+    #[allow(dead_code)] // used by ecdh.rs (the `net` part)
     pub fn limbs(&self) -> usize {
         self.n
     }
@@ -161,6 +167,7 @@ impl Mont {
         self.one.clone()
     }
 
+    #[allow(dead_code)] // only the tests use it
     pub fn zero(&self) -> Vec<u64> {
         vec![0; self.n]
     }
@@ -174,6 +181,7 @@ impl Mont {
         r
     }
 
+    #[allow(dead_code)] // only the tests use it
     pub fn sub(&self, a: &[u64], b: &[u64]) -> Vec<u64> {
         let mut r = a.to_vec();
         if sub_in_place(&mut r, b) {
@@ -246,6 +254,7 @@ impl Mont {
 
     /// Modular inverse for a PRIME modulus via Fermat's little theorem.
     /// Input and output are in Montgomery form.
+    #[allow(dead_code)] // only the tests use it
     pub fn inv(&self, a: &[u64]) -> Vec<u64> {
         let mut e = self.m.clone();
         // e = m - 2

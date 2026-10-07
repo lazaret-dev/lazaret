@@ -91,3 +91,80 @@ impl<'a> Reader<'a> {
         s
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A small generator of its own: this file is in the part of the crate that has no dependencies, not even on
+    /// the crate's fuzzing helpers.
+    struct Xorshift(u64);
+    impl Xorshift {
+        fn next(&mut self) -> u64 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            self.0
+        }
+        fn bytes(&mut self, n: usize) -> Vec<u8> {
+            (0..n).map(|_| self.next() as u8).collect()
+        }
+    }
+
+    /// The obvious definition, checked byte by byte with an early exit: right, and not constant time.
+    fn reference(a: &[u8], b: &[u8]) -> bool {
+        a.len() == b.len() && a.iter().zip(b).all(|(x, y)| x == y)
+    }
+
+    #[test]
+    fn ct_eq_agrees_with_a_byte_by_byte_comparison_on_every_single_difference() {
+        assert!(ct_eq(b"", b""));
+        for len in 1..=48usize {
+            let a = Xorshift(0x9e37_79b9_7f4a_7c15 ^ len as u64).bytes(len);
+            assert!(ct_eq(&a, &a.clone()), "equal strings of {len} bytes");
+            // one bit different, in each position and each bit (so the first, the last and every one between)
+            for at in 0..len {
+                for bit in 0..8 {
+                    let mut b = a.clone();
+                    b[at] ^= 1 << bit;
+                    assert!(!ct_eq(&a, &b), "{len} bytes, bit {bit} of byte {at}");
+                    assert!(!ct_eq(&b, &a));
+                }
+            }
+            // a different length is a different string, even when one is the start of the other
+            assert!(!ct_eq(&a, &a[..len - 1]));
+            assert!(!ct_eq(&a[..len - 1], &a));
+            let mut longer = a.clone();
+            longer.push(0);
+            assert!(!ct_eq(&a, &longer));
+        }
+    }
+
+    #[test]
+    fn ct_eq_agrees_with_a_byte_by_byte_comparison_on_random_and_special_strings() {
+        let mut rng = Xorshift(0x2545_f491_4f6c_dd1d);
+        for _ in 0..20_000 {
+            let len = (rng.next() % 40) as usize;
+            let a = rng.bytes(len);
+            // equal, a few bytes changed, wholly random, all zero against all zero, all ones against zeros
+            let b = match rng.next() % 5 {
+                0 => a.clone(),
+                1 => {
+                    let mut b = a.clone();
+                    for _ in 0..1 + rng.next() % 3 {
+                        if !b.is_empty() {
+                            let i = rng.next() as usize % b.len();
+                            b[i] = rng.next() as u8;
+                        }
+                    }
+                    b
+                }
+                2 => rng.bytes(len),
+                3 => vec![0; len],
+                _ => vec![0xff; len],
+            };
+            assert_eq!(ct_eq(&a, &b), reference(&a, &b), "{a:02x?} against {b:02x?}");
+            assert_eq!(ct_eq(&vec![0; len], &b), reference(&vec![0; len], &b));
+        }
+    }
+}

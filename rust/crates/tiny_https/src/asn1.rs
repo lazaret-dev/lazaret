@@ -114,6 +114,26 @@ impl<'a> Der<'a> {
     }
 }
 
+/// The value of a BOOLEAN's content octets. DER writes FALSE as `00` and TRUE as `ff`, and nothing else is a
+/// BOOLEAN here. (BER lets a reader take any non-zero octet for TRUE, and OpenSSL does; Go refuses the
+/// certificate. A reader that took `01` for "not true" would let a critical extension through that both of
+/// them stop at.)
+pub fn boolean_content(content: &[u8]) -> Result<bool> {
+    match content {
+        [0x00] => Ok(false),
+        [0xff] => Ok(true),
+        _ => Err(Error::Asn1("BOOLEAN is not 00 or ff")),
+    }
+}
+
+/// The value of a BOOLEAN element, see [`boolean_content`].
+pub fn boolean(t: &Tlv) -> Result<bool> {
+    if t.tag != TAG_BOOLEAN {
+        return Err(Error::Asn1("expected BOOLEAN"));
+    }
+    boolean_content(t.content)
+}
+
 /// Returns the magnitude bytes of a non-negative INTEGER, with the sign-padding zero removed.
 pub fn unsigned_integer(t: &Tlv) -> Result<Vec<u8>> {
     if t.tag != TAG_INTEGER {
@@ -164,7 +184,8 @@ fn digits(b: &[u8]) -> Result<i64> {
     Ok(b.iter().fold(0i64, |a, c| a * 10 + (c - b'0') as i64))
 }
 
-/// Parses UTCTime (YYMMDDHHMMSSZ) or GeneralizedTime (YYYYMMDDHHMMSSZ) into a Unix timestamp.
+/// Parses UTCTime (YYMMDDHHMMSSZ) or GeneralizedTime (YYYYMMDDHHMMSSZ) into a Unix timestamp. As in RFC 5280, the
+/// zone is Z and the seconds are there; a second 60 (a leap second) is refused, as Go and OpenSSL refuse it.
 pub fn parse_time(t: &Tlv) -> Result<i64> {
     let b = t.content;
     let (year, rest) = match t.tag {
@@ -189,7 +210,7 @@ pub fn parse_time(t: &Tlv) -> Result<i64> {
     }
     let num = |a: usize| digits(&rest[a..a + 2]);
     let (mo, d, h, mi, sec) = (num(0)?, num(2)?, num(4)?, num(6)?, num(8)?);
-    if !(1..=12).contains(&mo) || !(1..=31).contains(&d) || h > 23 || mi > 59 || sec > 60 {
+    if !(1..=12).contains(&mo) || !(1..=31).contains(&d) || h > 23 || mi > 59 || sec > 59 {
         return Err(Error::Asn1("time field out of range"));
     }
     // a real calendar day (found by the fuzzer: 30 February used to parse, as 2 March)
@@ -295,6 +316,20 @@ mod tests {
     }
 
     #[test]
+    fn a_boolean_is_00_or_ff_and_nothing_else() {
+        assert!(!boolean_content(&[0x00]).unwrap());
+        assert!(boolean_content(&[0xff]).unwrap());
+        for bad in [&[][..], &[0x01], &[0x7f], &[0x80], &[0xfe], &[0xff, 0xff], &[0x00, 0x00]] {
+            assert!(boolean_content(bad).is_err(), "{bad:?}");
+        }
+        let data = [0x01, 0x01, 0xff, 0x01, 0x01, 0x01, 0x02, 0x01, 0x00];
+        let mut d = Der::new(&data);
+        assert!(boolean(&d.next().unwrap()).unwrap());
+        assert!(boolean(&d.next().unwrap()).is_err());
+        assert!(boolean(&d.next().unwrap()).is_err()); // an INTEGER is not a BOOLEAN
+    }
+
+    #[test]
     fn parses_nested_sequence() {
         // SEQUENCE { INTEGER 5, OCTET STRING "hi" }
         let data = [0x30, 0x07, 0x02, 0x01, 0x05, 0x04, 0x02, b'h', b'i'];
@@ -345,6 +380,27 @@ mod tests {
             gen(good).unwrap();
         }
         assert_eq!(utc(b"240229000000Z").unwrap() + 86400, utc(b"240301000000Z").unwrap());
+    }
+
+    #[test]
+    fn a_minute_has_no_second_sixty() {
+        // Go (time.Parse) and OpenSSL (ASN1_TIME_check) both refuse :60, and the ASN.1 of RFC 5280 certificates
+        // has no leap seconds; read as the next minute it would move a validity bound by a second
+        let utc = |s: &'static [u8]| parse_time(&Tlv { tag: TAG_UTC_TIME, content: s, raw: &[] });
+        let gen = |s: &'static [u8]| parse_time(&Tlv { tag: TAG_GENERALIZED_TIME, content: s, raw: &[] });
+        for bad in [&b"260101000060Z"[..], b"261231235960Z", b"260101000061Z", b"260101000099Z"] {
+            assert!(utc(bad).is_err(), "{}", String::from_utf8_lossy(bad));
+        }
+        for bad in [&b"20260101000060Z"[..], b"20261231235960Z"] {
+            assert!(gen(bad).is_err(), "{}", String::from_utf8_lossy(bad));
+        }
+        // :59 is the last second, and the one after it is the first of the next minute
+        assert_eq!(utc(b"260101000059Z").unwrap() + 1, utc(b"260101000100Z").unwrap());
+        assert_eq!(gen(b"20261231235959Z").unwrap() + 1, gen(b"20270101000000Z").unwrap());
+        // the year in which UTCTime turns over: 49 is 2049 and 50 is 1950
+        assert_eq!(utc(b"491231235959Z").unwrap(), gen(b"20491231235959Z").unwrap());
+        assert_eq!(utc(b"500101000000Z").unwrap(), gen(b"19500101000000Z").unwrap());
+        assert_eq!(utc(b"500101000000Z").unwrap(), -631_152_000);
     }
 
     #[test]

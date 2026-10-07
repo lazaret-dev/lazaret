@@ -522,6 +522,14 @@ project is pre-1.0, so the 0.x API may still change.
 
 ### Changed
 
+- **tiny_https's drop of Oct 7: the security review's fixes.** Two rounds of outside review of its verification
+  path, triaged claim by claim against OpenSSL, Go's `crypto/x509` and Go's `note` package, and every confirmed
+  finding fixed with a test (the library's B-93 to B-96): a search for a certificate path that was exponential (now
+  at most 256 signature checks), a version 3 trust anchor without `basicConstraints` that could sign for anything,
+  names the reader skipped escaping a CA's name constraints (and directory-name constraints, which now refuse the
+  chain), a BOOLEAN `01` read as "not critical", a checksum-database lookup that answers a different question, and
+  a leap second in a certificate's time. No interface Lazaret uses changed. The library's brief for its
+  independent review (`SECURITY_REVIEW.md`) is kept with it now.
 - **The guard blocks a scan that could not read what a package can be made to hide (T-1, decision 9; rule set
   2.47.0).** INCOMPLETE used to go through by default, so a package could pass by being slow to scan, or by
   padding a payload past the size limit inside its file (16 KB of zip did it: the Go/Rust review's GO-1). The

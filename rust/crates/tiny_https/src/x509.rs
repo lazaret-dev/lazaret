@@ -14,8 +14,11 @@
 //! DNS names, e-mail addresses, URIs and IP addresses; subjectAltName hostname and IP matching (no
 //! CN fallback, like browsers). Revocation is checked by [`crate::revocation`]. Not supported:
 //! policy processing, RSA-PSS certificate signatures, SHA-1 signatures (rejected on
-//! purpose), and name constraints on directory names (ignored) or on other kinds of name (a
-//! certificate that has a name of such a kind under a constraint of that kind is refused).
+//! purpose), and name constraints on other kinds of name: a certificate that has a name of such a kind in its
+//! subjectAltName, or one of any kind that could not be read, under a constraint of that kind is refused, and a
+//! CA with a constraint on directory names is refused whatever the names (this code does not compare names). The
+//! constraints of a CA hold for the subjectAltName of every certificate below it, intermediates included, and the
+//! e-mail addresses in their subject names are held to e-mail constraints.
 
 use crate::asn1::{self, Der, Tlv};
 use crate::crypto::ecdsa::{self, Curve};
@@ -76,6 +79,11 @@ const KU_KEY_CERT_SIGN: u16 = 1 << 5;
 pub(crate) const KU_CRL_SIGN: u16 = 1 << 6;
 
 const MAX_CHAIN_DEPTH: usize = 8;
+
+/// How many candidate issuers (each one a signature check) the search for a path tries before it gives up.
+/// A real chain needs a handful; the limit is what stops a sender who supplies many certificates that all
+/// verify against each other from making the search try every path (8 levels of 20 is 20^8 of them).
+const MAX_PATH_ATTEMPTS: usize = 256;
 
 /// A certificate's public key. New key types may be added, so match with a wildcard arm.
 #[non_exhaustive]
@@ -212,6 +220,19 @@ enum Constraint {
     Unsupported(u8),
 }
 
+impl Constraint {
+    /// The GeneralName tag of the kind of name this constrains.
+    fn kind(&self) -> u8 {
+        match self {
+            Constraint::Dns(_) => 0x82,
+            Constraint::Email(_) => 0x81,
+            Constraint::Uri(_) => 0x86,
+            Constraint::Ip(_) => 0x87,
+            Constraint::Unsupported(tag) => *tag,
+        }
+    }
+}
+
 #[derive(Default)]
 struct NameConstraints {
     permitted: Vec<Constraint>,
@@ -250,6 +271,11 @@ pub struct Certificate {
     /// certificate that has any; chain verification refuses one unless the caller said it
     /// interprets that extension itself (see [`VerifyOptions::with_critical_extension`]).
     unrecognized_critical: Vec<Vec<u8>>,
+    /// The version field: 0 for version 1 (which has no extensions), 1 for version 2, 2 for version 3.
+    version: u8,
+    /// The tags of the subjectAltName entries that were not kept (a kind this code does not read, or an
+    /// entry that is malformed), so that a name constraint of that kind can still refuse the certificate.
+    dropped_san: Vec<u8>,
 }
 
 impl std::fmt::Debug for Certificate {
@@ -353,6 +379,26 @@ fn parse_public_key(spki: &Tlv) -> Result<PublicKey> {
     }
 }
 
+/// A name constraint on a domain (a DNS name, the host of a URI, the domain of a mailbox) is a host name, with
+/// one leading dot to say "its subdomains only"; the empty string is allowed and constrains everything. What
+/// could never match anything is refused: an empty label (`a..b`, a trailing dot, a lone dot) or a byte that is
+/// not a printable ASCII character. Such a constraint would silently do nothing. (Go refuses these as well.)
+fn domain_constraint_is_valid(c: &str) -> bool {
+    if c.is_empty() {
+        return true;
+    }
+    let body = c.strip_prefix('.').unwrap_or(c);
+    !body.is_empty() && body.split('.').all(|label| !label.is_empty() && label.bytes().all(|b| (0x21..=0x7e).contains(&b)))
+}
+
+/// An e-mail constraint is one mailbox (`local@domain`) or a domain as above.
+fn mailbox_constraint_is_valid(c: &str) -> bool {
+    match c.rsplit_once('@') {
+        Some((local, domain)) => !local.is_empty() && !domain.is_empty() && domain_constraint_is_valid(domain),
+        None => domain_constraint_is_valid(c),
+    }
+}
+
 fn parse_name_constraints(value: &[u8]) -> Result<NameConstraints> {
     let mut outer = Der::new(value);
     let mut seq = outer.sequence()?;
@@ -366,9 +412,23 @@ fn parse_name_constraints(value: &[u8]) -> Result<NameConstraints> {
                 let base = subtree.next()?;
                 let text = || core::str::from_utf8(base.content).ok().filter(|s| s.is_ascii());
                 let c = match base.tag {
-                    0x82 => Constraint::Dns(text().ok_or(Error::Asn1("bad dNSName constraint"))?.to_ascii_lowercase()),
-                    0x81 => text().map_or(Constraint::Unsupported(0x81), |s| Constraint::Email(s.to_string())),
-                    0x86 => text().map_or(Constraint::Unsupported(0x86), |s| Constraint::Uri(s.to_ascii_lowercase())),
+                    0x82 => {
+                        let s = text().ok_or(Error::Asn1("bad dNSName constraint"))?.to_ascii_lowercase();
+                        if !domain_constraint_is_valid(&s) {
+                            return Err(Error::Asn1("bad dNSName constraint"));
+                        }
+                        Constraint::Dns(s)
+                    }
+                    0x81 => match text() {
+                        None => Constraint::Unsupported(0x81),
+                        Some(s) if mailbox_constraint_is_valid(s) => Constraint::Email(s.to_string()),
+                        Some(_) => return Err(Error::Asn1("bad rfc822Name constraint")),
+                    },
+                    0x86 => match text() {
+                        None => Constraint::Unsupported(0x86),
+                        Some(s) if domain_constraint_is_valid(&s.to_ascii_lowercase()) => Constraint::Uri(s.to_ascii_lowercase()),
+                        Some(_) => return Err(Error::Asn1("bad URI constraint")),
+                    },
                     0x87 if base.content.len() == 8 || base.content.len() == 32 => Constraint::Ip(base.content.to_vec()),
                     other => Constraint::Unsupported(other),
                 };
@@ -471,12 +531,14 @@ impl Certificate {
         let signature = asn1::bit_string_bytes(&sig_bits)?.to_vec();
 
         let mut tbs = Der::new(tbs_tlv.content);
+        let mut version = 0u8;
         if let Some(v) = tbs.optional(0xa0)? {
             let mut vd = Der::new(v.content);
             let ver = vd.expect(asn1::TAG_INTEGER)?;
             if ver.content.len() != 1 || ver.content[0] > 2 {
                 return Err(Error::Certificate("unsupported certificate version".into()));
             }
+            version = ver.content[0];
         }
         let serial_tlv = tbs.expect(asn1::TAG_INTEGER)?; // serial number
         let inner_alg = tbs.expect(asn1::TAG_SEQUENCE)?;
@@ -531,6 +593,8 @@ impl Certificate {
             san: Vec::new(),
             extensions: Vec::new(),
             unrecognized_critical: Vec::new(),
+            version,
+            dropped_san: Vec::new(),
         };
 
         if let Some(exts) = tbs.optional(0xa3)? {
@@ -540,7 +604,7 @@ impl Certificate {
                 let mut ext = list.sequence()?;
                 let oid = ext.expect(asn1::TAG_OID)?.content;
                 let critical = match ext.optional(asn1::TAG_BOOLEAN)? {
-                    Some(b) => b.content == [0xff],
+                    Some(b) => asn1::boolean(&b)?,
                     None => false,
                 };
                 let value = ext.expect(asn1::TAG_OCTET_STRING)?.content;
@@ -565,44 +629,65 @@ impl Certificate {
                 outer.finish()?;
                 while !names.is_empty() {
                     let n = names.next()?;
-                    match n.tag {
+                    // Every arm says whether it kept the entry. The kinds other than DNS names and IP
+                    // addresses are advisory for TLS and read by callers that care; an entry that is
+                    // malformed, or of a kind this code does not read, is left out rather than failing the
+                    // certificate. What is left out is remembered by its tag, because a name constraint of
+                    // that kind must still refuse the certificate (see `check_name_constraints`).
+                    let kept = match n.tag {
                         0x82 => {
                             let s = std::str::from_utf8(n.content).map_err(|_| Error::Asn1("bad dNSName"))?;
                             if !s.is_ascii() {
                                 return cert("non-ASCII dNSName");
                             }
+                            // a line feed in a host name would end up in a log line
+                            if s.bytes().any(|b| b < 0x20 || b == 0x7f) {
+                                return cert("control character in dNSName");
+                            }
                             self.dns_names.push(s.to_ascii_lowercase());
                             self.san.push(GeneralName::Dns(s.to_ascii_lowercase()));
+                            true
                         }
                         0x87 if n.content.len() == 4 || n.content.len() == 16 => {
                             self.ip_addrs.push(n.content.to_vec());
                             self.san.push(GeneralName::Ip(n.content.to_vec()));
+                            true
                         }
-                        // The kinds below are advisory for TLS and read by callers that care; an
-                        // entry that is malformed is left out rather than failing the certificate.
-                        0x81 | 0x86 => {
-                            if let Some(s) = core::str::from_utf8(n.content).ok().filter(|s| s.is_ascii()) {
+                        0x81 | 0x86 => match core::str::from_utf8(n.content).ok().filter(|s| s.is_ascii()) {
+                            Some(s) => {
                                 self.san.push(if n.tag == 0x81 { GeneralName::Email(s.to_string()) } else { GeneralName::Uri(s.to_string()) });
+                                true
                             }
-                        }
+                            None => false,
+                        },
                         0xa4 => {
                             let mut d = Der::new(n.content);
-                            if let Ok(name) = d.expect(asn1::TAG_SEQUENCE) {
-                                if d.finish().is_ok() {
+                            match d.expect(asn1::TAG_SEQUENCE) {
+                                Ok(name) if d.finish().is_ok() => {
                                     self.san.push(GeneralName::Directory(name.raw.to_vec()));
+                                    true
                                 }
+                                _ => false,
                             }
                         }
                         0xa0 => {
                             let mut d = Der::new(n.content);
-                            if let (Ok(oid), Ok(v)) = (d.expect(asn1::TAG_OID), d.expect(0xa0)) {
-                                if d.finish().is_ok() {
+                            match (d.expect(asn1::TAG_OID), d.expect(0xa0)) {
+                                (Ok(oid), Ok(v)) if d.finish().is_ok() => {
                                     self.san.push(GeneralName::Other { type_id: oid.content.to_vec(), value: v.content.to_vec() });
+                                    true
                                 }
+                                _ => false,
                             }
                         }
-                        0x88 if !n.content.is_empty() => self.san.push(GeneralName::RegisteredId(n.content.to_vec())),
-                        _ => {}
+                        0x88 if !n.content.is_empty() => {
+                            self.san.push(GeneralName::RegisteredId(n.content.to_vec()));
+                            true
+                        }
+                        _ => false,
+                    };
+                    if !kept && !self.dropped_san.contains(&n.tag) {
+                        self.dropped_san.push(n.tag);
                     }
                 }
             }
@@ -612,7 +697,7 @@ impl Certificate {
                 outer.finish()?;
                 self.has_basic_constraints = true;
                 if let Some(b) = seq.optional(asn1::TAG_BOOLEAN)? {
-                    self.is_ca = b.content == [0xff];
+                    self.is_ca = asn1::boolean(&b)?;
                 }
                 if let Some(p) = seq.optional(asn1::TAG_INTEGER)? {
                     let v = asn1::unsigned_integer(&p)?;
@@ -1085,7 +1170,11 @@ impl TrustStore {
     /// host name if one was asked for, and (unless `allow_missing_leaf_eku`) an extendedKeyUsage
     /// naming the purpose; every certificate above the leaf is a CA with keyCertSign, within its
     /// pathLenConstraint and name constraints; and RSA keys other than the anchor's are at least
-    /// [`with_min_rsa_bits`](TrustStore::with_min_rsa_bits) wide.
+    /// [`with_min_rsa_bits`](TrustStore::with_min_rsa_bits) wide. (A trust anchor of version 1, which has no
+    /// extensions and so cannot say it is a CA, is taken to be one; a version 3 anchor must say so.)
+    ///
+    /// The search for a path stops after a fixed number of signature checks (256), however many certificates
+    /// were sent, and refuses the chain with an error that says so.
     ///
     /// Nothing about the leaf's identity is matched except the host name. What it says (e-mail
     /// addresses, URIs, other names, any extension) is for the caller to read and compare; see
@@ -1106,7 +1195,13 @@ impl TrustStore {
         }
         let leaf = Certificate::parse(chain_der[0])?;
         let mut intermediates = Vec::new();
+        // a certificate sent twice (or the leaf sent again) is one candidate, not two
+        let mut seen: std::collections::HashSet<&[u8]> = std::collections::HashSet::new();
+        seen.insert(chain_der[0]);
         for der in &chain_der[1..] {
+            if !seen.insert(*der) {
+                continue;
+            }
             // A malformed extra certificate must not sink an otherwise valid chain.
             if let Ok(c) = Certificate::parse(der) {
                 intermediates.push(c);
@@ -1116,10 +1211,18 @@ impl TrustStore {
         let mut used = vec![false; intermediates.len()];
         let mut last_err: Option<Error> = None;
         let mut dead_end: Option<String> = None;
-        if self.search(&mut path, &intermediates, &mut used, opts, &mut last_err, &mut dead_end) {
+        let mut attempts = 0usize;
+        if self.search(&mut path, &intermediates, &mut used, opts, &mut last_err, &mut dead_end, &mut attempts) {
             let path_der: Vec<Vec<u8>> = path.iter().map(|c| c.der.clone()).collect();
             drop(path);
             return Ok((leaf, path_der));
+        }
+        if attempts > MAX_PATH_ATTEMPTS {
+            return Err(Error::Certificate(format!(
+                "gave up after {} signature checks while building a chain for [{}]: too many certificates that could be each other's issuers",
+                MAX_PATH_ATTEMPTS,
+                leaf.subject_summary()
+            )));
         }
         Err(last_err.unwrap_or_else(|| {
             Error::Certificate(format!(
@@ -1138,10 +1241,15 @@ impl TrustStore {
         opts: &VerifyOptions,
         last_err: &mut Option<Error>,
         dead_end: &mut Option<String>,
+        attempts: &mut usize,
     ) -> bool {
         let Some(&cur) = path.last() else { return false };
         let mut candidates = 0usize;
         for root in self.anchors_for(&cur.issuer_der) {
+            *attempts += 1;
+            if *attempts > MAX_PATH_ATTEMPTS {
+                return false;
+            }
             candidates += 1;
             if let Err(e) = cur.verify_signed_by(root) {
                 last_err.get_or_insert(e);
@@ -1162,6 +1270,10 @@ impl TrustStore {
             if used[i] || ic.subject_der != cur.issuer_der || ic.is_self_issued() {
                 continue;
             }
+            *attempts += 1;
+            if *attempts > MAX_PATH_ATTEMPTS {
+                return false;
+            }
             candidates += 1;
             if let Err(e) = cur.verify_signed_by(ic) {
                 last_err.get_or_insert(e);
@@ -1169,7 +1281,7 @@ impl TrustStore {
             }
             used[i] = true;
             path.push(ic);
-            if self.search(path, inters, used, opts, last_err, dead_end) {
+            if self.search(path, inters, used, opts, last_err, dead_end, attempts) {
                 return true;
             }
             path.pop();
@@ -1194,6 +1306,9 @@ fn path_err(c: &Certificate, what: &str) -> Error {
 /// Does `host` fall under the URI constraint `constraint`? A constraint without a leading dot names
 /// one host; with a dot, any subdomain of it (RFC 5280 section 4.2.1.10).
 fn uri_host_matches(constraint: &str, host: &str) -> bool {
+    if constraint.is_empty() {
+        return true;
+    }
     if constraint.starts_with('.') {
         host.len() > constraint.len() && host[host.len() - constraint.len()..].eq_ignore_ascii_case(constraint)
     } else {
@@ -1218,6 +1333,9 @@ fn uri_host(uri: &str) -> Option<&str> {
 }
 
 fn email_constraint_matches(constraint: &str, mailbox: &str) -> bool {
+    if constraint.is_empty() {
+        return true;
+    }
     let Some((local, domain)) = mailbox.rsplit_once('@') else { return false };
     if let Some((c_local, c_domain)) = constraint.rsplit_once('@') {
         return local == c_local && domain.eq_ignore_ascii_case(c_domain);
@@ -1247,12 +1365,15 @@ fn without_trailing_dot(host: &str) -> &str {
 fn constraint_covers(c: &Constraint, name: &GeneralName) -> Option<bool> {
     match (c, name) {
         (Constraint::Dns(c), GeneralName::Dns(n)) => Some(dns_constraint_matches(c, without_trailing_dot(n))),
-        (Constraint::Email(c), GeneralName::Email(n)) => Some(match n.rsplit_once('@') {
-            Some((local, domain)) => email_constraint_matches(c, &format!("{}@{}", local, without_trailing_dot(domain))),
-            None => false,
-        }),
+        (Constraint::Email(c), GeneralName::Email(n)) => Some(
+            c.is_empty()
+                || match n.rsplit_once('@') {
+                    Some((local, domain)) => email_constraint_matches(c, &format!("{}@{}", local, without_trailing_dot(domain))),
+                    None => false,
+                },
+        ),
         (Constraint::Uri(c), GeneralName::Uri(n)) => {
-            Some(uri_host(n).is_some_and(|h| uri_host_matches(c, without_trailing_dot(h))))
+            Some(c.is_empty() || uri_host(n).is_some_and(|h| uri_host_matches(c, without_trailing_dot(h))))
         }
         (Constraint::Ip(c), GeneralName::Ip(n)) => Some(ip_constraint_matches(c, n)),
         _ => None,
@@ -1273,32 +1394,82 @@ fn name_label(name: &GeneralName) -> String {
     }
 }
 
-/// Applies the name constraints of a CA to the names of the leaf. Only the leaf's subjectAltName is
-/// looked at (as before: names in intermediates, and the subject DN, are not).
-fn check_name_constraints(ca: &Certificate, nc: &NameConstraints, leaf: &Certificate) -> Result<()> {
-    for name in &leaf.san {
-        let kind = name.tag();
-        let unsupported = |c: &Constraint| matches!(c, Constraint::Unsupported(t) if *t == kind);
-        if nc.permitted.iter().chain(nc.excluded.iter()).any(unsupported) {
-            return Err(path_err(
-                ca,
-                &format!("{} is under a name constraint of a kind that is not supported, in", name_label(name)),
-            ));
-        }
-        if nc.excluded.iter().any(|c| constraint_covers(c, name) == Some(true)) {
-            return Err(path_err(ca, &format!("{} is excluded by a name constraint of", name_label(name))));
-        }
-        let mut applies = false;
-        let mut permitted = false;
-        for c in &nc.permitted {
-            if let Some(m) = constraint_covers(c, name) {
-                applies = true;
-                permitted |= m;
+/// The e-mail addresses in a subject name (`emailAddress` attributes, which older S/MIME certificates use
+/// instead of or beside a subjectAltName).
+fn subject_email_addresses(name_der: &[u8]) -> Vec<String> {
+    const OID_EMAIL_ADDRESS: &[u8] = &[0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x09, 0x01];
+    let mut out = Vec::new();
+    let mut outer = Der::new(name_der);
+    let Ok(mut rdns) = outer.sequence() else { return out };
+    while !rdns.is_empty() {
+        let Ok(set) = rdns.expect(asn1::TAG_SET) else { break };
+        let mut atvs = Der::new(set.content);
+        while !atvs.is_empty() {
+            let Ok(mut atv) = atvs.sequence() else { break };
+            let (Ok(oid), Ok(value)) = (atv.expect(asn1::TAG_OID), atv.next()) else { break };
+            if oid.content == OID_EMAIL_ADDRESS {
+                out.push(String::from_utf8_lossy(value.content).into_owned());
             }
         }
-        if applies && !permitted {
-            return Err(path_err(ca, &format!("{} is not permitted by name constraints of", name_label(name))));
+    }
+    out
+}
+
+/// Applies the name constraints of a CA to the names of every certificate below it in the path (`below` is the
+/// leaf first, then the intermediates up to the one the CA issued): the subjectAltName and, for e-mail
+/// constraints, the e-mail addresses in the subject name (RFC 5280 section 4.2.1.10 asks for that when there
+/// is no subjectAltName; OpenSSL does it whether or not there is one, and so does this). A name the
+/// certificate reader left out (a kind it does not read, or a malformed entry) cannot be checked, so a
+/// constraint of its kind refuses the certificate. A constraint on directory names is refused outright: it
+/// applies to the subject name of every certificate below the CA, this code does not compare names, and
+/// ignoring the constraint would let the CA issue outside the subtree it was limited to (OpenSSL enforces such
+/// a constraint and Go refuses the chain as an unhandled critical extension). Self-issued certificates are not
+/// exempt here as RFC 5280 would have it, but none is ever an intermediate of a path (see `search`).
+fn check_name_constraints(ca: &Certificate, nc: &NameConstraints, below: &[&Certificate]) -> Result<()> {
+    let constraints = || nc.permitted.iter().chain(nc.excluded.iter());
+    if constraints().any(|c| c.kind() == 0xa4) {
+        return Err(path_err(ca, "directoryName name constraints are not supported, in"));
+    }
+    for cert in below {
+        for name in &cert.san {
+            check_one_name(ca, nc, name)?;
         }
+        for &kind in &cert.dropped_san {
+            if constraints().any(|c| c.kind() == kind) {
+                return Err(path_err(ca, "a name that cannot be read is under a name constraint of its kind, in"));
+            }
+        }
+        if constraints().any(|c| matches!(c, Constraint::Email(_))) {
+            for mail in subject_email_addresses(&cert.subject_der) {
+                check_one_name(ca, nc, &GeneralName::Email(mail))?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn check_one_name(ca: &Certificate, nc: &NameConstraints, name: &GeneralName) -> Result<()> {
+    let kind = name.tag();
+    let unsupported = |c: &Constraint| matches!(c, Constraint::Unsupported(t) if *t == kind);
+    if nc.permitted.iter().chain(nc.excluded.iter()).any(unsupported) {
+        return Err(path_err(
+            ca,
+            &format!("{} is under a name constraint of a kind that is not supported, in", name_label(name)),
+        ));
+    }
+    if nc.excluded.iter().any(|c| constraint_covers(c, name) == Some(true)) {
+        return Err(path_err(ca, &format!("{} is excluded by a name constraint of", name_label(name))));
+    }
+    let mut applies = false;
+    let mut permitted = false;
+    for c in &nc.permitted {
+        if let Some(m) = constraint_covers(c, name) {
+            applies = true;
+            permitted |= m;
+        }
+    }
+    if applies && !permitted {
+        return Err(path_err(ca, &format!("{} is not permitted by name constraints of", name_label(name))));
     }
     Ok(())
 }
@@ -1363,10 +1534,12 @@ fn check_path(path: &[&Certificate], opts: &VerifyOptions, min_rsa_bits: usize) 
     for i in 1..path.len() {
         let ca = path[i];
         let is_anchor = i == last;
-        if !is_anchor || ca.has_basic_constraints {
-            if !ca.is_ca {
-                return Err(path_err(ca, "issuing certificate is not a CA"));
-            }
+        // Every issuing certificate must say it is a CA. The one exception is a version 1 (or 2) trust anchor,
+        // which has no extensions and so no way to say it: the old roots, and being in the store is what makes
+        // one a CA. (OpenSSL and Go make the same exception.) A version 3 anchor with no basicConstraints is an
+        // ordinary certificate, and so is one whose basicConstraints says it is not a CA.
+        if !ca.is_ca && (!is_anchor || ca.has_basic_constraints || ca.version >= 2) {
+            return Err(path_err(ca, "issuing certificate is not a CA"));
         }
         if let Some(ku) = ca.key_usage {
             if ku & KU_KEY_CERT_SIGN == 0 {
@@ -1384,7 +1557,7 @@ fn check_path(path: &[&Certificate], opts: &VerifyOptions, min_rsa_bits: usize) 
             }
         }
         if let Some(nc) = &ca.name_constraints {
-            check_name_constraints(ca, nc, leaf)?;
+            check_name_constraints(ca, nc, &path[..i])?;
         }
     }
     Ok(())
@@ -2301,5 +2474,168 @@ mod tests {
         }
         assert!(!verify_signature(ec.sig_alg, &leaf.public_key, &ec.tbs, &ec.signature));
         assert!(!verify_signature(None, &leaf.public_key, &leaf.tbs, &leaf.signature));
+    }
+
+    // ---- regression tests for the first review of this file (BACKLOG B-93). The certificates are made by
+    // tools/gen_review_fixtures.py and live in tests/data/rv_fixtures.txt, one `name base64(DER)` per line.
+
+    fn rv(name: &str) -> Vec<u8> {
+        include_str!("../tests/data/rv_fixtures.txt")
+            .lines()
+            .filter(|l| !l.starts_with('#'))
+            .find_map(|l| l.split_once(' ').filter(|(n, _)| *n == name))
+            .map(|(_, b64)| pem::base64_decode(b64).unwrap())
+            .unwrap_or_else(|| panic!("no fixture {name}"))
+    }
+
+    /// Verifies `chain` (leaf first) against the one trust anchor `root`, at `NOW`.
+    fn rv_verify(root: &str, chain: &[&str], purpose: Purpose, host: Option<&str>) -> Result<VerifiedChain> {
+        let ts = store(&[rv(root)]);
+        let chain: Vec<Vec<u8>> = chain.iter().map(|n| rv(n)).collect();
+        let mut options = VerifyOptions::new(purpose, NOW);
+        if let Some(h) = host {
+            options = options.with_hostname(h);
+        }
+        ts.verify_chain(&chain, &options)
+    }
+
+    fn rv_server(root: &str, chain: &[&str]) -> Result<VerifiedChain> {
+        rv_verify(root, chain, Purpose::ServerAuth, Some("host.test"))
+    }
+
+    /// The text of the error, and a failure of the test if there was none.
+    fn refused(r: Result<VerifiedChain>) -> String {
+        match r {
+            Ok(_) => panic!("the chain was accepted"),
+            Err(e) => e.to_string(),
+        }
+    }
+
+    #[test]
+    fn a_ladder_of_lookalike_intermediates_is_given_up_on() {
+        // Eight levels of four different certificates each, every one of which verifies against the one
+        // above it, and no trust anchor at the top. Trying every path is 4^8 = 65,536 signature checks (ten
+        // seconds), and a server that sent 20 per level would hold a client for weeks.
+        let mut chain = vec![rv("ladder_leaf")];
+        for level in 1..=8 {
+            for variant in 0..4 {
+                chain.push(rv(&format!("ladder_L{level}_{variant}")));
+            }
+        }
+        let ts = store(&[rv("ladder_unrelated_root")]);
+        let err = ts.verify_server_chain(&chain, "host.test", NOW).unwrap_err().to_string();
+        assert!(err.contains("gave up after"), "{err}");
+    }
+
+    #[test]
+    fn decoys_and_repeats_do_not_stop_a_good_chain_from_being_found() {
+        // ten certificates with the intermediate's name and the wrong key come first, then the real
+        // intermediate, then the real intermediate again 300 times
+        let mut chain = vec![rv("decoy_leaf")];
+        for i in 0..10 {
+            chain.push(rv(&format!("decoy_x{i}")));
+        }
+        for _ in 0..301 {
+            chain.push(rv("decoy_inter"));
+        }
+        let ts = store(&[rv("decoy_root")]);
+        ts.verify_server_chain(&chain, "host.test", NOW).unwrap();
+    }
+
+    #[test]
+    fn an_anchor_must_be_a_ca_unless_it_is_a_version_1_certificate() {
+        // version 3 with no basicConstraints: an end-entity certificate, with or without keyUsage
+        for (root, leaf) in [("anchor_v3_nobc", "anchor_v3_nobc_leaf"), ("anchor_v3_nobc_ku", "anchor_v3_nobc_ku_leaf")] {
+            let err = refused(rv_server(root, &[leaf]));
+            assert!(err.contains("not a CA"), "{root}: {err}");
+        }
+        // version 1 has no extensions at all, so the old roots of that kind are CAs by being in the store
+        rv_server("anchor_v1", &["anchor_v1_leaf"]).unwrap();
+    }
+
+    #[test]
+    fn a_name_the_reader_leaves_out_does_not_escape_a_constraint_of_its_kind() {
+        for (inter, leaf) in [
+            ("nm_inter_x400", "nm_leaf_x400"),
+            ("nm_inter_dir", "nm_leaf_dir_ok"),
+            ("nm_inter_dir", "nm_leaf_dir_malformed"),
+            ("nm_inter_email", "nm_leaf_email_nonascii"),
+        ] {
+            let err = refused(rv_server("nm_root", &[leaf, inter]));
+            assert!(err.contains("name constraint"), "{leaf}: {err}");
+        }
+        // the same odd name under a CA whose constraints are about DNS names only is no problem
+        rv_server("nm_root", &["nm_leaf_x400_dns_only", "nm_inter_dns_only"]).unwrap();
+    }
+
+    #[test]
+    fn a_boolean_is_00_or_ff_and_nothing_else() {
+        let err = refused(rv_server("bool_root", &["bool_leaf_ff"]));
+        assert!(err.contains("unrecognized critical extension"), "{err}");
+        // True written as 0x01 is not DER. OpenSSL reads it as critical and Go refuses the certificate;
+        // reading it as "not critical" would let an extension this code ignores through.
+        let err = Certificate::from_der(&rv("bool_leaf_01")).unwrap_err().to_string();
+        assert!(err.contains("BOOLEAN"), "{err}");
+        assert!(rv_server("bool_root", &["bool_leaf_01"]).is_err());
+    }
+
+    #[test]
+    fn a_dns_name_with_a_control_character_makes_the_certificate_invalid() {
+        let err = Certificate::from_der(&rv("nm_leaf_ctl_dns")).unwrap_err().to_string();
+        assert!(err.contains("control character"), "{err}");
+    }
+
+    #[test]
+    fn name_constraints_that_cannot_work_are_refused_not_ignored() {
+        for inter in ["nm_inter_trailing_dot", "nm_inter_empty_label"] {
+            assert!(Certificate::from_der(&rv(inter)).is_err(), "{inter} parsed");
+        }
+        for (inter, leaf) in [("nm_inter_trailing_dot", "nm_leaf_bad_host"), ("nm_inter_empty_label", "nm_leaf_bad_host2")] {
+            let err = refused(rv_verify("nm_root", &[leaf, inter], Purpose::ServerAuth, Some("bad.example.com")));
+            assert!(!err.contains("host name"), "{leaf}: the host name was what stopped it: {err}");
+        }
+        // an empty constraint holds for everything, as it already did for DNS names: excluded, it excludes every address
+        let err = refused(rv_verify("nm_root", &["nm_leaf_email", "nm_inter_empty_email"], Purpose::EmailProtection, None));
+        assert!(err.contains("excluded"), "{err}");
+        // and an ordinary exclusion keeps working
+        let err = refused(rv_verify("nm_root", &["nm_leaf_bad_host3", "nm_inter_excl_plain"], Purpose::ServerAuth, Some("bad.example.com")));
+        assert!(err.contains("excluded"), "{err}");
+    }
+
+    #[test]
+    fn the_e_mail_address_in_the_subject_name_is_held_to_e_mail_constraints() {
+        let mail = |leaf: &str| rv_verify("nm_root", &[leaf, "nm_inter_corp_email"], Purpose::EmailProtection, None);
+        assert!(mail("nm_leaf_subject_email_in").is_ok());
+        // outside the constraint, with no SAN at all or next to a SAN that is inside it
+        for leaf in ["nm_leaf_subject_email_out", "nm_leaf_san_in_subject_out"] {
+            let err = refused(mail(leaf));
+            assert!(err.contains("not permitted"), "{leaf}: {err}");
+        }
+    }
+
+    #[test]
+    fn a_directory_name_constraint_is_refused_not_ignored() {
+        // Every certificate has a subject name, so a constraint on directory names applies to all of them. This code
+        // does not compare names, and ignoring the constraint lets a CA issue outside the subtree it was limited to
+        // (OpenSSL enforces it, Go refuses the chain as an unhandled critical extension).
+        for (inter, leaf) in [("nm_inter_dir_perm", "nm_leaf_o_other"), ("nm_inter_dir_excl", "nm_leaf_o_corp")] {
+            let err = refused(rv_server("nm_root", &[leaf, inter]));
+            assert!(err.contains("directoryName"), "{leaf}: {err}");
+        }
+    }
+
+    #[test]
+    fn the_names_of_an_intermediate_are_held_to_the_constraints_above_it() {
+        let under = |sub: &str, leaf: &str, ca: &str| rv_verify("nm_root", &[leaf, sub, ca], Purpose::ServerAuth, Some("www.good.example"));
+        // a CA limited to good.example certifies a CA whose own name is evil.test: OpenSSL and Go refuse the chain
+        let err = refused(under("nm_sub_san_out", "nm_leaf_under_sub_san_out", "nm_inter_good"));
+        assert!(err.contains("not permitted") && err.contains("evil.test"), "{err}");
+        // the same with a name inside the limit
+        under("nm_sub_san_in", "nm_leaf_under_sub_san_in", "nm_inter_good").unwrap();
+        // and the e-mail address in an intermediate's subject name
+        let mail = |sub: &str, leaf: &str| rv_verify("nm_root", &[leaf, sub, "nm_inter_corp_email2"], Purpose::EmailProtection, None);
+        let err = refused(mail("nm_sub_mail_out", "nm_leaf_under_sub_mail_out"));
+        assert!(err.contains("not permitted"), "{err}");
+        mail("nm_sub_mail_in", "nm_leaf_under_sub_mail_in").unwrap();
     }
 }

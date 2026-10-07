@@ -264,14 +264,21 @@ pub struct Tile {
 }
 
 impl Tile {
-    /// Whether the tile has all `2^height` entries.
-    pub fn is_full(&self) -> bool {
-        self.width as u64 == 1u64 << self.height
+    /// `2^height` if it fits a tile's width (a `u32`), else `None`. (A tile that failed
+    /// [`Tile::validate`] can have any height, and a shift by 32 or more must not panic.)
+    fn full_width(&self) -> Option<u32> {
+        1u64.checked_shl(self.height).and_then(|w| u32::try_from(w).ok())
     }
 
-    /// The tile with every entry, same place.
+    /// Whether the tile has all `2^height` entries. (False for a height that no tile can have.)
+    pub fn is_full(&self) -> bool {
+        self.full_width() == Some(self.width)
+    }
+
+    /// The tile with every entry, same place. (A tile whose height is too large for that comes back
+    /// unchanged; [`Tile::validate`] refuses it.)
     pub fn full(&self) -> Tile {
-        Tile { width: 1u32 << self.height, ..*self }
+        Tile { width: self.full_width().unwrap_or(self.width), ..*self }
     }
 
     /// The number of bytes of tile data: `width * 32`.
@@ -615,7 +622,7 @@ pub fn check_record(tree: &Tree, height: u32, index: u64, leaf: &Hash, tiles: &T
         return Err(Error::Invalid("record index is not inside the tree"));
     }
     let got = read_nodes(tree, height, &[Node { level: 0, index }], tiles)?;
-    if got[0] == *leaf {
+    if got.first() == Some(leaf) {
         Ok(())
     } else {
         Err(Error::RecordMismatch)
@@ -625,6 +632,9 @@ pub fn check_record(tree: &Tree, height: u32, index: u64, leaf: &Hash, tiles: &T
 /// The tiles needed by [`check_prefix`] when `older` has the size `older_size`. (None are needed if
 /// the sizes are equal or the older tree is empty.)
 pub fn tiles_for_prefix(newer: &Tree, height: u32, older_size: u64) -> Result<Vec<Tile>> {
+    if newer.size > MAX_TREE_SIZE {
+        return Err(Error::Invalid("tree is larger than 2^62 leaves"));
+    }
     if older_size > newer.size {
         return Err(Error::Invalid("the older tree is larger than the newer one"));
     }
@@ -638,6 +648,9 @@ pub fn tiles_for_prefix(newer: &Tree, height: u32, older_size: u64) -> Result<Ve
 /// root is recomputed from `newer`'s authenticated tiles and compared with `older.root`). A
 /// mismatch is [`Error::Fork`]: the log has signed two histories.
 pub fn check_prefix(older: &Tree, newer: &Tree, height: u32, tiles: &TileSet) -> Result<()> {
+    if newer.size > MAX_TREE_SIZE {
+        return Err(Error::Invalid("tree is larger than 2^62 leaves"));
+    }
     if older.size > newer.size {
         return Err(Error::Invalid("the older tree is larger than the newer one"));
     }
@@ -1370,6 +1383,200 @@ mod tests {
         for h in [1u32, 2, 7, 8, 30] {
             let plan = tiles_for(&huge, h, &[Node { level: 0, index: MAX_TREE_SIZE - 2 }, Node { level: 0, index: 0 }, Node { level: 31, index: 3 }]).unwrap();
             assert!(plan.iter().all(|t| t.validate().is_ok()), "height {h}");
+        }
+    }
+
+    #[test]
+    fn a_tile_of_any_height_can_be_asked_about_without_a_panic() {
+        // Tile fields are public, so a tile can have a height that no tile has; the methods are for
+        // looking at such a tile (and `validate` refuses it), not for stopping the program.
+        for height in [0u32, 1, 8, 30, 31, 32, 33, 63, 64, 65, 1000, u32::MAX] {
+            for width in [0u32, 1, 256, u32::MAX] {
+                let t = Tile { height, level: 0, index: 12345, width };
+                let _ = t.is_full();
+                let _ = t.full();
+                let _ = t.path();
+                let _ = t.data_len();
+                if height > MAX_TILE_HEIGHT {
+                    assert!(t.validate().is_err(), "height {height}");
+                }
+                if height >= 32 {
+                    // 2^height does not fit a width, so there is no full tile of this height
+                    assert!(!t.is_full(), "height {height} width {width}");
+                    assert_eq!(t.full(), t, "an impossible height changes nothing");
+                }
+            }
+        }
+        // for a real height they still mean what they did
+        let t = Tile { height: 8, level: 0, index: 0, width: 256 };
+        assert!(t.is_full() && t.full() == t);
+        let p = Tile { width: 100, ..t };
+        assert!(!p.is_full());
+        assert_eq!(p.full().width, 256);
+        assert_eq!(p.path(), "tile/8/0/000.p/100");
+        assert!(Tile { height: 31, level: 0, index: 0, width: 1 << 31 }.is_full());
+    }
+
+    #[test]
+    fn a_tree_over_the_size_limit_is_refused_by_the_prefix_check_as_well() {
+        let big = Tree { size: u64::MAX, root: [7; 32] };
+        let over = Tree { size: MAX_TREE_SIZE + 1, root: [7; 32] };
+        let ok = Tree { size: MAX_TREE_SIZE, root: [7; 32] };
+        let tiles = TileSet::new();
+        for t in [&big, &over] {
+            // equal sizes used to be answered from the roots alone, with no limit applied
+            assert!(matches!(check_prefix(t, t, 8, &tiles), Err(Error::Invalid(_))), "{}", t.size);
+            assert!(matches!(check_prefix(&Tree { size: 0, root: EMPTY_ROOT }, t, 8, &tiles), Err(Error::Invalid(_))));
+            assert!(matches!(tiles_for_prefix(t, 8, t.size), Err(Error::Invalid(_))));
+            assert!(matches!(tiles_for_prefix(t, 8, 0), Err(Error::Invalid(_))));
+        }
+        // at the limit itself, equal trees are a prefix of each other by their roots, as before
+        assert!(check_prefix(&ok, &ok, 8, &tiles).is_ok());
+        assert_eq!(tiles_for_prefix(&ok, 8, ok.size).unwrap(), Vec::new());
+    }
+
+    // ------------------------------------------------------------------------ the shape of a plan
+
+    /// The width of tile (`level`, `index`) of a tree of `size` leaves with tiles of `height`, written out from the
+    /// definition and not from `tlog.rs`: the tile lists tree level `height * level`, which has `size >> (height *
+    /// level)` nodes, and it starts at node `index << height`. `None` where the tree has no such tile.
+    fn expected_tile_width(size: u64, height: u32, level: u32, index: u64) -> Option<u64> {
+        let shift = level as u64 * height as u64;
+        if shift > 62 {
+            return None;
+        }
+        let nodes = size >> shift;
+        let start = (index as u128) << height;
+        if start >= nodes as u128 {
+            None
+        } else {
+            Some((1u64 << height).min(nodes - start as u64))
+        }
+    }
+
+    /// Plans the tiles for `node` and checks every one of them against `expected_tile_width`.
+    fn assert_plan_has_the_shape_of_the_tree(size: u64, height: u32, node: Node) -> usize {
+        let tree = Tree { size, root: [7; 32] };
+        let tiles = tiles_for(&tree, height, &[node]).unwrap_or_else(|e| panic!("size {size}, height {height}, {node:?}: {e}"));
+        assert!(!tiles.is_empty(), "size {size}, height {height}, {node:?}");
+        for t in &tiles {
+            let want = expected_tile_width(size, height, t.level, t.index);
+            assert_eq!(want, Some(t.width as u64), "size {size}, height {height}, {node:?}: {t:?}");
+            assert_eq!(t.height, height);
+            t.validate().unwrap_or_else(|e| panic!("size {size}, height {height}, {node:?}: {t:?}: {e}"));
+        }
+        tiles.len()
+    }
+
+    #[test]
+    fn a_tile_is_planned_for_every_node_of_every_size_at_every_height() {
+        // every node of every tree up to 130 leaves, with tiles of 2 to 64 entries: the right-hand edge of a tree
+        // is where a partial tile and the parents of a node that has none to its right can go wrong
+        let mut planned = 0;
+        for size in 1..=130u64 {
+            for height in 1..=6u32 {
+                let tree = Tree { size, root: [7; 32] };
+                let mut level = 0;
+                while size >> level >= 1 {
+                    let count = size >> level;
+                    for index in 0..count {
+                        planned += assert_plan_has_the_shape_of_the_tree(size, height, Node { level, index });
+                    }
+                    // the nodes just past the end of the level are not in the tree
+                    for index in [count, count + 1, u64::MAX >> 8] {
+                        assert!(tiles_for(&tree, height, &[Node { level, index }]).is_err(), "size {size}, height {height}, level {level}, index {index}");
+                    }
+                    level += 1;
+                }
+                // and a level above the root
+                assert!(tiles_for(&tree, height, &[Node { level, index: 0 }]).is_err(), "size {size}, height {height}, level {level}");
+            }
+        }
+        assert!(planned > 100_000, "{planned}");
+    }
+
+    #[test]
+    fn the_plan_for_huge_trees_has_the_shape_of_the_tree_at_every_height() {
+        let mut sizes: Vec<u64> = vec![MAX_TREE_SIZE, 1 << 20 | 12345, 1_000_000_007];
+        for k in 0..=62u32 {
+            // 2^k and its neighbours, and 3 * 2^k and its neighbours
+            for base in [Some(1u64 << k), 3u64.checked_mul(1u64 << k)] {
+                for d in [-2i64, -1, 0, 1, 2] {
+                    if let Some(n) = base.and_then(|b| b.checked_add_signed(d)) {
+                        if (1..=MAX_TREE_SIZE).contains(&n) {
+                            sizes.push(n);
+                        }
+                    }
+                }
+            }
+        }
+        sizes.sort_unstable();
+        sizes.dedup();
+        let mut planned = 0;
+        for &size in &sizes {
+            for height in [1u32, 2, 3, 4, 7, 8, 13, 16, 29, MAX_TILE_HEIGHT] {
+                let mut level = 0;
+                while size >> level >= 1 {
+                    let count = size >> level;
+                    // the first node, the last, and the one in the middle of each level
+                    for index in [0, count / 2, count - 1] {
+                        planned += assert_plan_has_the_shape_of_the_tree(size, height, Node { level, index });
+                    }
+                    level += 1;
+                }
+            }
+        }
+        // the widest a tile can be (2^30 entries) is the widest the plan ever asks for, and it fits the u32 of `width`
+        let widest = tiles_for(&Tree { size: MAX_TREE_SIZE, root: [7; 32] }, MAX_TILE_HEIGHT, &[Node { level: 0, index: 0 }]).unwrap();
+        let bottom = widest.iter().find(|t| t.level == 0).expect("the tile of the leaves");
+        assert_eq!(bottom.width, 1 << MAX_TILE_HEIGHT);
+        assert_eq!(bottom.data_len(), 32u64 << MAX_TILE_HEIGHT);
+        assert!(planned > 10_000, "{planned}");
+    }
+
+    #[test]
+    fn the_ancestor_of_a_tile_is_none_where_the_tree_has_nothing() {
+        // 200 leaves, tiles of 4. Tile level 0 lists the 200 leaves: 50 tiles, the last one full. Tile level 1 lists
+        // the 50 nodes of tree level 2: 13 tiles, the last with 2. Tile level 2 lists the 12 nodes of tree level 4
+        // (there is no 13th: it would need leaves 192 to 207): 3 full tiles. Tile level 3 lists the 3 nodes of tree
+        // level 6: one tile with 3.
+        let leaf_tile = |index| Tile { height: 2, level: 0, index, width: 4 };
+        let ancestor = |index, k| tile_ancestor(leaf_tile(index), k, 200).map(|t| (t.level, t.index, t.width));
+        assert_eq!(ancestor(49, 0), Some((0, 49, 4)));
+        assert_eq!(ancestor(49, 1), Some((1, 12, 2)));
+        assert_eq!(ancestor(49, 2), None); // the last leaves have no node of tree level 4 above them
+        assert_eq!(ancestor(49, 3), Some((3, 0, 3)));
+        assert_eq!(ancestor(0, 1), Some((1, 0, 4)));
+        assert_eq!(ancestor(0, 2), Some((2, 0, 4)));
+        // one tile past the last: the tree has nothing there, however it is reached
+        assert_eq!(ancestor(50, 0), None);
+        assert_eq!(ancestor(51, 0), None);
+        assert_eq!(ancestor(52, 1), None);
+        // above the top of the tree, and beyond the 62 levels there can be
+        assert_eq!(tile_ancestor(Tile { height: 2, level: 0, index: 0, width: 4 }, 6, 200), None);
+        assert_eq!(tile_ancestor(Tile { height: 30, level: 0, index: 0, width: 1 }, 3, MAX_TREE_SIZE), None);
+        assert_eq!(tile_ancestor(Tile { height: 8, level: 1, index: 0, width: 1 }, u32::MAX, 200), None);
+    }
+
+    #[test]
+    fn node_tile_never_truncates_the_width_it_computes() {
+        for height in 1..=MAX_TILE_HEIGHT {
+            for level in [0u32, 1, height - 1, height, height + 1, 2 * height, 61, 62] {
+                if level > 62 {
+                    continue;
+                }
+                let last = (MAX_TREE_SIZE >> level) - 1;
+                for index in [0, 1, last / 2, last.saturating_sub(1), last] {
+                    let node = Node { level, index };
+                    let (tile, lo, hi) = node_tile(height, node);
+                    let sub = level % height;
+                    // the node covers 2^sub entries of the tile, ending at `hi`, and the tile is as wide as its last entry
+                    assert_eq!(hi - lo, 1usize << sub, "height {height}, {node:?}");
+                    assert!(hi as u64 <= 1u64 << height, "height {height}, {node:?}");
+                    assert_eq!(tile.width as usize, hi, "height {height}, {node:?}");
+                    assert_eq!(tile.level, level / height);
+                }
+            }
         }
     }
 }

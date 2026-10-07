@@ -8,7 +8,7 @@
 //! hash states) is behind the `net` feature.
 
 // ---- pure (always built)
-pub mod bignum;
+pub(crate) mod bignum;
 pub mod ecdsa;
 pub mod ed25519;
 pub(crate) mod fe25519;
