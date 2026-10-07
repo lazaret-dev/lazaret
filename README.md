@@ -135,8 +135,12 @@ scans the extension folders, extensions folders and `.vsix` files you name. An e
 editor's extension host with all of your access, so it is read as `lazaret-registry` reads an npm package
 (see *Registry scanning*), with the editor's rules for what runs: its `main` and `browser` modules and what
 they load run when the editor activates it (at every start for the activation events `*` and
-`onStartupFinished`, which the result says) and get the import-time test; the rest of its code gets the
-use-time test; and `vscode:uninstall`, the one script VS Code runs (`node` and a file, once the extension
+`onStartupFinished`, which the result says) and get the import-time test; so does the code its contributions
+name, which runs without them, and the finding says when: a TypeScript server plugin
+(`typescriptServerPlugins`, loaded by the TypeScript server whenever a JavaScript or TypeScript file is open,
+the extension activated or not), a debug adapter's program (`debuggers`, started with a debug session), a
+notebook renderer and a Markdown preview script (in a webview); the rest of its code gets the use-time test;
+and `vscode:uninstall`, the one script VS Code runs (`node` and a file, once the extension
 has been uninstalled), gets the install-hook test. npm's scripts, a bundled package's scripts and a
 `binding.gyp` never run, so they are not hooks. The result lists the extensions it brings
 (`extensionDependencies`, `extensionPack`), and an identifier, its own or one it brings, like a most-installed

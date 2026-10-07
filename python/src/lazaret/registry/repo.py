@@ -267,7 +267,7 @@ SAMPLE = 8192              # header/entropy sample read from oversized files
 #      entry points and hook targets, Python install scripts
 # 2.3: verdict tiers, decoded hex, install-script inspection; 2.2:
 #      verdict-integrity; 2.1: binary-artifact awareness
-ENGINE_VERSION = "2.42.0"
+ENGINE_VERSION = "2.43.0"
 
 # ---------------- The content memo (P-2a, registry/contentcache.py) ----------------
 # One per scan_package run: the engine answers once for content several of a
@@ -1121,6 +1121,14 @@ VSIX_STARTUP_EVENTS = frozenset(("*", "onStartupFinished"))
 #: An extension's identifier, `publisher.name` (VS Code's EXTENSION_IDENTIFIER_PATTERN).
 VSCODE_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9-]*\.[A-Za-z0-9][A-Za-z0-9-]*")
 MAX_VSIX_DEPENDENCIES = 500
+#: A package's name, as TypeScript takes a server plugin's: it loads `node_modules/<name>` from each folder it probes,
+#: an extension's among them, and only a package's name (EG-5)
+_PLUGIN_NAME_RE = re.compile(r"(?:@[a-z0-9][a-z0-9._~-]*/)?[a-z0-9][a-z0-9._~-]*", re.I)
+#: A debugger contribution's blocks for one platform, each with its own `program` and `runtime` (VS Code's
+#: `ExecutableDebugAdapter.extract`)
+_DEBUGGER_PLATFORMS = ("win", "winx86", "windows", "osx", "linux")
+#: The entries of one contribution list read (EG-5)
+MAX_VSIX_CONTRIBUTIONS = 100
 
 
 def vsix_hook_runs(cmd):
@@ -1132,22 +1140,35 @@ def vsix_hook_runs(cmd):
     return len(parts) >= 2 and parts[0] == "node" and bool(parts[1])
 
 
-def _vsix_outside_issue(key, target, text):
-    """SC-UNREAD-CODE for an extension whose `main` or `browser` names a file outside its folder (EG-3): the editor
-    runs that file, and the package does not hold it."""
+def _vsix_outside_issue(key, target, text, when="when it activates the extension"):
+    """SC-UNREAD-CODE for an extension whose `main` or `browser` (or a debug adapter's `program` or `runtime`, EG-5)
+    names a file outside its folder (EG-3): the editor runs that file `when`, and the package does not hold it."""
     lines = lazaret.normalize_newlines(text).split("\n")
     line = next((n for n, s in enumerate(lines, 1) if f'"{key}"' in s), 1)
     shown = target if len(target) <= 120 else target[:120] + "…"
     return lazaret.mk_issue(
         {"id": UNREAD_CODE_RULE, "name": "Extension code outside the extension", "type": "HOTSPOT", "sev": "MAJOR",
-         "msg": (f'"{key}" names {shown!r}, outside the extension\'s folder: VS Code runs that file when it activates '
-                 f"the extension, the package does not hold it, and what it runs was not read."),
-         "why": ("VS Code joins an extension's `main` (and `browser`) to the extension's folder and runs the file it "
-                 "names wherever that is, warning only that one outside the folder might not be portable. No "
-                 "extension needs one: the code would come from another extension's folder, or from a file "
-                 "written there later, and no scan of this package reads it."),
+         "msg": (f'"{key}" names {shown!r}, outside the extension\'s folder: VS Code runs that file {when}, the '
+                 f"package does not hold it, and what it runs was not read."),
+         "why": ("VS Code joins an extension's `main` (and `browser`, and a debug adapter's program) to the "
+                 "extension's folder and runs the file it names wherever that is, warning only that one outside the "
+                 "folder might not be portable. No extension needs one: the code would come from another extension's "
+                 "folder, or from a file written there later, and no scan of this package reads it."),
          "fix": "Find out which file the extension runs, and read it before installing.",
          "ref": "CWE-829 · Supply chain"}, "package.json", line, lines)
+
+
+def _debugger_lang(path, runtime):
+    """The language a debug adapter's file is read in (EG-5): JavaScript for a `.js`, `.cjs` or `.mjs` file or one
+    `node` runs (VS Code forks it), Python for a `.py` file or one Python runs; None for anything else (a program
+    of its own, which the scan classifies as any shipped binary)."""
+    ext = posixpath.splitext(path)[1].lower()
+    run = posixpath.basename(runtime.replace("\\", "/")).lower()
+    if ext in (".js", ".cjs", ".mjs") or run in ("node", "node.exe"):
+        return "js"
+    if ext == ".py" or run.startswith("python"):
+        return "py"
+    return None
 
 
 def _vsix_inert_hook(issue):
@@ -2368,6 +2389,9 @@ class _ArtifactScan:
         self.manifests = {}        # rel -> text (package.json, binding.gyp, pyproject.toml)
         self.entries = set()       # rels that run when installed / imported
         self._twins = None         # rel -> the members whose paths differ from it only by case (_case_twins)
+        self.vsix_main = set()     # vsix: the entries of `main` and `browser`
+        self.vsix_special = {}     # vsix: rel -> when it runs, for an entry a contribution names (EG-5)
+        self._vsix_whens = None    # vsix: rel -> when it runs, for what those reach and `main` does not (_vsix_when)
         self.install_scripts = set()   # hook targets, setup.py & co (install_script_risk)
         self.startup = set()       # a wheel's sitecustomize / usercustomize
         self.unread = False        # a member the archive's limits left unread
@@ -2851,10 +2875,14 @@ class _ArtifactScan:
                 rel = self._resolve(path)
                 if rel:
                     self.entries.add(rel)
+                    self.vsix_main.add(rel)
                     self._text_of(rel, "js", False)
                 elif path == ".." or path.startswith("../"):
                     # (VS Code joins it to the extension's folder and runs what it names, wherever that is)
                     self.issues.append(_vsix_outside_issue(key, target, self.manifests.get(manifest_rel, "")))
+        contributes = data.get("contributes")
+        if isinstance(contributes, dict):
+            self._vsix_contributions(base, contributes, self.manifests.get(manifest_rel, ""))
         events = data.get("activationEvents")
         events = [e for e in events[:1000] if isinstance(e, str)] if isinstance(events, list) else []
         self.vsix_startup = next((e for e in events if e in VSIX_STARTUP_EVENTS), None)
@@ -2865,6 +2893,105 @@ class _ArtifactScan:
                 found.update(v.lower() for v in listed[:MAX_VSIX_DEPENDENCIES]
                              if isinstance(v, str) and VSCODE_ID_RE.fullmatch(v))
         self.extension_dependencies = sorted(found)
+
+    def _vsix_contributions(self, base, contributes, text):
+        """Code an extension's `contributes` names, which VS Code (or a process it starts) runs without the
+        extension's `main` (EG-5): each file is an entry point, so it and what it loads get the import-time test,
+        with when it runs (`vsix_special`). VS Code's and TypeScript's code (MIT, Apache-2.0) say where:
+        - `typescriptServerPlugins`: the TypeScript server loads `node_modules/<name>` from every installed
+          extension's folder (`--globalPlugins`, `--pluginProbeLocations`), with all of the user's access, whenever
+          a JavaScript or TypeScript file is open, whether or not the extension is activated;
+        - `debuggers`: a debug adapter's `program` (not absolute), and its `runtime` when it begins `./`, joined to
+          the folder, in each platform's block too, started when a debug session of its type starts (Node forks
+          the program when the runtime is `node`); one that leaves the folder is not read and is said (EG-3's
+          finding);
+        - `notebookRenderer`'s `entrypoint` and `markdown.previewScripts`: scripts a webview runs (a notebook's
+          output, the Markdown preview)."""
+        def listed(key):
+            value = contributes.get(key)
+            return value[:MAX_VSIX_CONTRIBUTIONS] if isinstance(value, list) else []
+
+        for plugin in listed("typescriptServerPlugins"):
+            name = plugin.get("name") if isinstance(plugin, dict) else None
+            if isinstance(name, str) and _PLUGIN_NAME_RE.fullmatch(name):
+                self._vsix_special(_rel_join(base, "node_modules/" + name), "js",
+                                   "runs in the TypeScript server whenever a JavaScript or TypeScript file is open, "
+                                   "whether or not the editor activates the extension (contributes."
+                                   "typescriptServerPlugins)")
+        for dbg in listed("debuggers"):
+            if not isinstance(dbg, dict):
+                continue
+            kind = dbg.get("type") if isinstance(dbg.get("type"), str) else ""
+            when = (f"when a debug session of type {kind[:40]!r} starts" if kind else "when a debug session starts")
+            for block in [dbg] + [dbg.get(p) for p in _DEBUGGER_PLATFORMS]:
+                if not isinstance(block, dict):
+                    continue
+                runtime = block.get("runtime") if isinstance(block.get("runtime"), str) else ""
+                for key, target in (("program", block.get("program")), ("runtime", runtime)):
+                    if not (isinstance(target, str) and target.strip()):
+                        continue
+                    if key == "runtime" and not target.startswith("./"):
+                        continue                    # (a command on the PATH: node, python, mono)
+                    if key == "program" and (target.startswith("/") or re.match(r"[A-Za-z]:[\\/]", target)):
+                        continue                    # (an absolute path: not the extension's)
+                    path = _rel_join(base, target)
+                    if path == ".." or path.startswith("../"):
+                        self.issues.append(_vsix_outside_issue(key, target, text, when))
+                        continue
+                    lang = _debugger_lang(path, runtime if key == "program" else "")
+                    if lang:
+                        self._vsix_special(path, lang, f"runs as the extension's debug adapter {when} "
+                                                       f"(contributes.debuggers)")
+        for renderer in listed("notebookRenderer"):
+            entry = renderer.get("entrypoint") if isinstance(renderer, dict) else None
+            entry = entry.get("path") if isinstance(entry, dict) else entry
+            if isinstance(entry, str) and entry.strip():
+                self._vsix_special(_rel_join(base, entry), "js",
+                                   "runs in a notebook's output webview when an output it renders is shown "
+                                   "(contributes.notebookRenderer)")
+        for script in listed("markdown.previewScripts"):
+            if isinstance(script, str) and script.strip():
+                self._vsix_special(_rel_join(base, script), "js",
+                                   "runs in the Markdown preview's webview while a preview is open "
+                                   "(contributes.markdown.previewScripts)")
+
+    def _vsix_special(self, path, lang, when):
+        """An entry point a contribution names (EG-5), if the package holds it."""
+        rel = self._resolve(path) if lang == "js" else (path if path in self.members else None)
+        if rel and rel not in self.vsix_special:
+            self.entries.add(rel)
+            self.vsix_special[rel] = when
+            self._text_of(rel, lang, False)
+
+    def _reach_of(self, start):
+        """`start` and the local modules it loads, transitively, as `_reachable` walks them (on the texts it read)."""
+        seen, queue = {start}, [start]
+        while queue:
+            rel = queue.pop()
+            text, lang = self.sources.get(rel, (None, None))
+            if not text or lang != "js":
+                continue
+            folder = posixpath.dirname(rel)
+            for _q, target in _JS_LOCAL_DEP_RE.findall(text):
+                dep = self._resolve(_rel_join(folder, target))
+                if dep and dep not in seen:
+                    seen.add(dep)
+                    queue.append(dep)
+        return seen
+
+    def _vsix_when(self, rel):
+        """When a file an extension's contribution names runs (EG-5), or a file it loads that `main` does not; None
+        for the rest (they run when the editor activates the extension)."""
+        if self._vsix_whens is None:
+            by_main = set()
+            for start in self.vsix_main:
+                by_main |= self._reach_of(start)
+            self._vsix_whens = {}
+            for start, when in self.vsix_special.items():
+                for f in self._reach_of(start):
+                    if f not in by_main:
+                        self._vsix_whens.setdefault(f, when)
+        return self._vsix_whens.get(rel)
 
     # ---- an action (N-4) ----
     def _action_entry_points(self):
@@ -3370,6 +3497,12 @@ class _ArtifactScan:
                 runs = ("An action's scripts (runs.pre, runs.main and runs.post, or what its steps run) and the "
                         "modules they load run in the job, with its token, the secrets the workflow hands the action "
                         "and the runner's own tokens.")
+            elif self.artifact == "vsix" and self._vsix_when(rel):
+                when = self._vsix_when(rel)
+                runs = ("Code an extension's contributions name runs without its main module: a TypeScript server "
+                        "plugin in the TypeScript server, with all of the user's access, whenever a JavaScript or "
+                        "TypeScript file is open; a debug adapter as its own process when a debug session starts; a "
+                        "notebook renderer or a Markdown preview script in a webview.")
             elif self.artifact == "vsix":
                 when = ("runs when the editor activates the extension" + (
                     f" (at every start: activation event {self.vsix_startup!r})" if self.vsix_startup else ""))

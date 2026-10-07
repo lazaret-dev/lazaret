@@ -612,6 +612,15 @@ project is pre-1.0, so the 0.x API may still change.
   read the main file as the first and the twin as a file nothing loads. Such a pair is now SC-ARCHIVE-DUP
   (MAJOR), and the twin of a file that runs gets the import-time test too. None of the benchmark's, the
   popular set's or Part F's releases holds such a pair.
+- **The code an extension's contributions name is read as code that runs (EG-5; rule set 2.43.0).** VS
+  Code and the processes it starts run some of an extension's code without its `main` module: the
+  TypeScript server loads a `typescriptServerPlugins` package from every installed extension's
+  `node_modules` whenever a JavaScript or TypeScript file is open, whether or not the extension is
+  activated; a debug adapter's `program` starts with a debug session; a notebook renderer and a Markdown
+  preview script run in webviews. Lazaret gave those files the use-time test alone, which reports only
+  the strongest shapes, so a download-and-run in a TypeScript server plugin was OK. They are entry
+  points now, with the import-time test, and the finding says when each runs; a debug adapter's program
+  outside the extension's folder is SC-UNREAD-CODE, as `main` is.
 - **An extension whose `main` or `browser` names a file outside its folder is INCOMPLETE (EG-3).** VS
   Code joins the entry to the extension's folder and runs the file wherever it is, with only a warning,
   so an extension could start code from another extension's folder (a pack member's,

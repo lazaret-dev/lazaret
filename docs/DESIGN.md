@@ -1124,6 +1124,16 @@ editor's rules for what runs and when instead of npm's:
   entry that leaves the extension's folder too (`../other.ext-1.0.0/x.js`,
   with only a warning), so such an entry is SC-UNREAD-CODE and the
   extension INCOMPLETE (EG-3): what it runs is not in the package;
+- the code an extension's `contributes` names runs without `main`, so it is
+  an entry point too, and its finding says when (EG-5; VS Code's and
+  TypeScript's code read for each): a TypeScript server plugin
+  (`typescriptServerPlugins`: the TypeScript server loads
+  `node_modules/<name>` from every installed extension's folder whenever a
+  JavaScript or TypeScript file is open, the extension activated or not), a
+  debug adapter's `program` and a `./` `runtime` (`debuggers`, each
+  platform's block too, started with a debug session; one outside the
+  folder is EG-3's finding), a notebook renderer's `entrypoint` and a
+  Markdown preview script (run in webviews);
 - `vscode:uninstall` is the one script VS Code runs: `node` and a file,
   split on single spaces (`vsix_hook_runs`, VS Code's `parseScript`), once
   the extension has been uninstalled, at the editor's next start. It gets
