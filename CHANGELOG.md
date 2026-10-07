@@ -486,6 +486,12 @@ project is pre-1.0, so the 0.x API may still change.
 
 ### Changed
 
+- **A program downloaded or decoded, then run out of sight, says so (GR-8; rule set 2.40.0).** The Go and
+  Rust readers note a process started with its window hidden or no console (`SysProcAttr.HideWindow`,
+  `CreationFlags` or Rust's `creation_flags` with `CREATE_NO_WINDOW` or `DETACHED_PROCESS`) or with its
+  output sent to null, and no reason used it. A file written and then run now says it: "downloads a file
+  and then runs it, out of sight (no window, or its output thrown away)", as evm-units' per-OS payload was
+  run in 2025. The reason's strength, and so every verdict, is as before.
 - **SC-B64 passes over files kept as data, and a shell reads what it decodes (N-4; rule set 2.39.0).** A
   quoted base64 run that decodes to a whole WebAssembly module, a PNG, GIF or WebP image or a WAV
   sound, read by the format's structure to its end (a module's sections in order with a code section,

@@ -3702,10 +3702,12 @@ const DROPPED_REASONS: &[(&str, &str)] = &[
 /// the trees' a script run with cmd).
 fn push_dropped(reasons: &mut Vec<PyStr>, r: PyStr) {
     let named = |x: &[u32]| DROPPED_REASONS.iter().position(|(n, _)| pystr::starts_with(x, n));
-    let kind = |x: &[u32]| named(x).or_else(|| DROPPED_REASONS.iter().position(|(_, b)| !b.is_empty() && pystr::eq(x, b)));
+    // (a bare reason, or the same with what the model adds after it: ", out of sight", GR-8)
+    let kind = |x: &[u32]| named(x).or_else(|| DROPPED_REASONS.iter().position(|(_, b)| !b.is_empty() && pystr::starts_with(x, b)));
     if let Some(k) = kind(&r) {
         if let Some(i) = reasons.iter().position(|x| kind(x) == Some(k)) {
-            if named(&r).is_some() && named(&reasons[i]).is_none() {
+            let extends = r.len() > reasons[i].len() && r.starts_with(&reasons[i]);
+            if (named(&r).is_some() && named(&reasons[i]).is_none()) || extends {
                 reasons[i] = r;
             }
             return;

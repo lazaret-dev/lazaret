@@ -105,6 +105,10 @@ fn harvest(p: &Pack, kind: &str, what: &[u32]) -> bool {
     (kind == "environment" && what == p.text("_LD_WHOLE_ENV").as_slice()) || kind == "credentials" || (kind == "file" && cred_store(p, what))
 }
 
+/// What a dropped run's reason says when the program is run out of sight (GR-8): the Go reader's `HideWindow` or
+/// `CREATE_NO_WINDOW`/`DETACHED_PROCESS`, the Rust reader's `creation_flags` of those or its output sent to null.
+pub const HIDDEN_RUN: &str = ", out of sight (no window, or its output thrown away)";
+
 /// The reason a file written and run gets, by what it held (`signs::dropped_reason`'s words).
 fn dropped_reason(kinds: u16, what: &[u32], interp: Option<&PyStr>) -> PyStr {
     let what60: PyStr = what.iter().take(60).copied().collect();
@@ -180,7 +184,7 @@ pub fn facts(p: &Pack, text: &[u32], events: &[Ev], anchor: usize) -> FileFacts 
                     }
                 }
             }
-            Ev::Run { file, at, line: cmd, prog, args, script, conn_io, hidden: _ } => {
+            Ev::Run { file, at, line: cmd, prog, args, script, conn_io, hidden } => {
                 // a file it wrote, run: by itself, or as the script an interpreter is given
                 let base = base_name(prog);
                 let interp = INTERPRETERS.iter().any(|i| pystr::eq(&base, i));
@@ -191,7 +195,11 @@ pub fn facts(p: &Pack, text: &[u32], events: &[Ev], anchor: usize) -> FileFacts 
                 };
                 if out.dropped.is_none() {
                     if let Some((_, kinds, what)) = written.iter().find(|(ks, _, _)| ks.iter().any(|x| run_keys.contains(x))) {
-                        let r = dropped_reason(*kinds, what, if interp { Some(&base) } else { None });
+                        let mut r = dropped_reason(*kinds, what, if interp { Some(&base) } else { None });
+                        if *hidden {
+                            // (its window hidden, no console, its output thrown away: GR-8, evm-units' payload)
+                            r = pystr::concat(&[&r, &u(HIDDEN_RUN)]);
+                        }
                         out.dropped = Some((line(*file, *at), r));
                         note(*file, *at, &mut first);
                     }
