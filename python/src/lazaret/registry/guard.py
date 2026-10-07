@@ -77,6 +77,11 @@ gallery's list of malicious extensions; then the editor installs those files, an
 `<editor> --update-extensions`: what the editor's own would update (its extensions from its gallery, as its profile
 records them, each to the newest version it would take), checked and installed the same way.
 
+A release from npm's or PyPI's public registry published less than PROVENANCE_DAYS (30) ago also gets the registry's
+provenance check (registry/provenance.py, NET-1): an attestation that does not hold for the file is SUSPICIOUS (it is
+blocked), a release with none of the provenance the release before it had, or with provenance from another owner's
+repository, is WARN (--block-warn blocks it); --json says what was found. LAZARET_NO_PROVENANCE=1 turns it off.
+
 The resolutions made outside the project (cargo install, yarn 1, npm install -g, go install pkg@version, --plan) are made
 in a folder of the user's own (private_scratch), and the package manager is found in PATH's absolute folders only
 (scanner/programs.py).
@@ -122,9 +127,18 @@ import urllib.request
 
 from lazaret.scanner import core as lazaret
 from lazaret.scanner import gomod, nativenet, programs, sca, timings
-from lazaret.registry import cargosrc, goproxy, keepalive as keepalive_, pmsettings, repo, scanpool
+from lazaret.registry import cargosrc, goproxy, keepalive as keepalive_, pmsettings, provenance as provenance_, repo, \
+    scanpool
 from lazaret.registry.ecosystems import crates, golang
 
+#: Releases published less than this long ago get npm's and PyPI's provenance check (registry/provenance.py, NET-1): an
+#: attestation that does not hold for the file is SUSPICIOUS; none of the provenance the release before it had, or
+#: provenance from another owner's repository, WARN. A hijacked release is found and taken down within days as a rule,
+#: and the check reads the package's whole history (npm's abbreviated document, PyPI's Simple API), so an older release
+#: is not checked: measured on three npm projects (773 packages) and three Python sets (179), it costs 311 requests and
+#: 67 MB for npm and 122 and 47 MB for PyPI instead of 1,140 and 136 MB and 313 and 80 MB, and leaves out the two benign
+#: releases the whole check flagged (0.1.9 backlog, NET-1). LAZARET_NO_PROVENANCE=1 turns it off.
+PROVENANCE_DAYS = 30
 #: Releases younger than this are held back or blocked (--min-age).
 DEFAULT_MIN_AGE = 2 * 86400
 EXIT_OK, EXIT_BLOCKED, EXIT_USAGE, EXIT_RESOLVE = 0, 1, 2, 3
@@ -625,6 +639,7 @@ class Check:
         self.trusted = False                # --trust let it through
         self.age = None                     # seconds since it was published, when known
         self.digest = None
+        self.provenance = None              # what the provenance check said, when it ran (provenance.release_issues)
 
     def label(self):
         return f"{self.name}@{self.version}" if self.version else self.name
@@ -633,7 +648,8 @@ class Check:
         return {"ecosystem": self.eco, "name": self.name, "version": self.version, "source": self.source,
                 "verdict": self.verdict, "reason": self.reason, "indicators": self.indicators,
                 "blocked": self.blocked, "notes": self.notes, "trusted": self.trusted,
-                "ageSeconds": self.age, "digest": self.digest}
+                "ageSeconds": self.age, "digest": self.digest,
+                **({"provenance": self.provenance} if self.provenance is not None else {})}
 
 
 _SEV_RANK = {"BLOCKER": 0, "CRITICAL": 1, "MAJOR": 2, "MINOR": 3, "INFO": 4}
@@ -644,6 +660,37 @@ def summarize(result, limit=3):
     found = [i for i in result.get("issues", []) if str(i.get("rule", "")).startswith("SC-") and i.get("sev") != "INFO"]
     found.sort(key=lambda i: (_SEV_RANK.get(i.get("sev"), 9), i.get("file", ""), i.get("line", 0)))
     return [f"{i['rule']} ({i['sev']}) {i.get('file', '')}: {i.get('msg', '')}"[:400] for i in found[:limit]]
+
+
+# ---------------- Provenance (NET-1) ----------------
+def provenance_due(published):
+    """Does the guard check the provenance of a release published at `published` (None: not known)? PROVENANCE_DAYS."""
+    return provenance_.enabled() and (published is None
+                                      or (now() - published).total_seconds() < PROVENANCE_DAYS * 86400)
+
+
+def provenance_fetch(fetcher):
+    """The provenance check's fetch (`fetch(url, max_bytes, accept)` -> bytes) over the guard's fetcher."""
+    return lambda url, max_bytes, accept: fetcher.get(url, max_bytes, accept, repo.METADATA_TIMEOUT)
+
+
+def with_provenance(check, hit, eco, report):
+    """The scan's verdict `hit` with the release's provenance (provenance.release_issues over `report`): a CRITICAL
+    finding (an attestation that does not hold for the file) makes it SUSPICIOUS, a MAJOR one (provenance dropped, or
+    from another owner's repository) WARN at least, and their lines come first among its indicators; what the check
+    said is kept on `check` for --json."""
+    issues, summary = provenance_.release_issues(eco, check.name, check.version, report)
+    check.provenance = summary
+    found = sorted((i for i in issues if i["sev"] in ("CRITICAL", "MAJOR")), key=lambda i: _SEV_RANK[i["sev"]])
+    if not found:
+        return hit
+    verdict, reason = hit["verdict"], hit["reason"]
+    if found[0]["sev"] == "CRITICAL" and verdict != "SUSPICIOUS":
+        verdict, reason = "SUSPICIOUS", found[0]["msg"]
+    elif verdict == "OK":
+        verdict, reason = "WARN", found[0]["msg"]
+    return {**hit, "verdict": verdict, "reason": reason[:400],
+            "indicators": summarize({"issues": found}) + list(hit["indicators"])}
 
 
 class VerdictCache:
@@ -1470,7 +1517,7 @@ def check_npm_package(ctx, fetcher, pkg):
     try:
         repo._check_name("npm", name)
         alt = VerdictCache.key("npm", name, version, "yarn:" + pkg["lock_digest"]) if pkg.get("lock_digest") else None
-        hit, key = ctx.scanner.cached(alt), None
+        hit, key, scanned = ctx.scanner.cached(alt), None, None
         published = parse_time(hit.get("published")) if hit else None
         if hit is not None:
             check.digest = "yarn:" + pkg["lock_digest"]
@@ -1494,8 +1541,14 @@ def check_npm_package(ctx, fetcher, pkg):
                     return check
                 published = parse_http_date(headers.get("Last-Modified"))
                 hit = ctx.scanner.scan(data, "tgz", "npm")
+                scanned = hashlib.sha512(data).hexdigest()
         if ctx.cutoff is not None and (published is None or published > ctx.cutoff):
             published = npm_publish_time(fetcher, pkg["registry"], name, version) or published
+        if scanned and provenance_due(published) and pkg["registry"] == NPM_REGISTRY \
+                and netloc(pkg["tarball"]) == netloc(NPM_REGISTRY):
+            # (npm's public registry only: another one's packages are not to be named to it)
+            hit = with_provenance(check, hit, "npm", provenance_.guard_npm(name, version, scanned,
+                                                                          provenance_fetch(fetcher)))
         ctx.scanner.remember(key, hit, published)
         ctx.scanner.remember(alt, hit, published)
         ctx.apply(check, hit)
@@ -1581,7 +1634,7 @@ def check_file(ctx, fetcher, name, version, f):
             raise repo.FetchError("the lockfile gives no SHA-256 to check the file against")
         check.digest = f"sha256:{sha}"
         key = VerdictCache.key("pypi", pep503(name), version, check.digest)
-        hit = ctx.scanner.cached(key)
+        hit, scanned = ctx.scanner.cached(key), False
         if hit is None:
             container = repo.pypi_container(f["filename"])
             if container is None:
@@ -1591,9 +1644,13 @@ def check_file(ctx, fetcher, name, version, f):
                 ctx.block(check, "its SHA-256 is not the lockfile's")
                 return check
             hit = ctx.scanner.scan(data, container, "wheel" if f["filename"].lower().endswith(".whl") else "sdist")
+            scanned = True
         published = published or parse_time(hit.get("published"))
         if published is None and ctx.cutoff is not None and netloc(f["url"]) == "files.pythonhosted.org":
             published = pypi_upload_time(fetcher, name, version, f["filename"])
+        if scanned and provenance_due(published) and netloc(f["url"]) == "files.pythonhosted.org":
+            hit = with_provenance(check, hit, "pypi", provenance_.check_pypi(name, version, [(f["filename"], sha)],
+                                                                             provenance_fetch(fetcher)))
         ctx.scanner.remember(key, hit, published)
         ctx.apply(check, hit)
     except (repo.FetchError, ValueError) as exc:
@@ -1820,8 +1877,14 @@ class PypiIndex:
                     else:
                         check.digest = f"sha256:{sha}"
                         key = VerdictCache.key("pypi", pep503(info["project"]), info["version"], check.digest)
-                        hit = self.ctx.scanner.cached(key) or self.ctx.scanner.scan(
-                            data, container, "wheel" if info["filename"].lower().endswith(".whl") else "sdist")
+                        hit = self.ctx.scanner.cached(key)
+                        if hit is None:
+                            hit = self.ctx.scanner.scan(
+                                data, container, "wheel" if info["filename"].lower().endswith(".whl") else "sdist")
+                            if provenance_due(info["published"]) and netloc(info["url"]) == "files.pythonhosted.org":
+                                hit = with_provenance(check, hit, "pypi", provenance_.check_pypi(
+                                    info["project"], info["version"], [(info["filename"], sha)],
+                                    provenance_fetch(self.fetcher)))
                         self.ctx.scanner.remember(key, hit, info["published"])
                         self.ctx.apply(check, hit)
                         self.ctx.age_check(check, info["published"])

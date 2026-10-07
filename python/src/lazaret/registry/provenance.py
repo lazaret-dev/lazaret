@@ -28,7 +28,11 @@ registry's abbreviated document; PyPI, the release uploaded last before this one
 Simple API. The trust is Sigstore's trusted root and npm's keys, shipped in `sigstore/` (TRUST_FILES; newer copies:
 LAZARET_SIGSTORE_ROOT, LAZARET_NPM_KEYS). Best effort, as SC-NEW-DEPENDENCY's history is: a registry that does not
 answer leaves the release unflagged, and the result's `provenance` says what was not checked. LAZARET_NO_PROVENANCE=1
-turns it off. Standard library, the native library, and the registry's own fetch (`repo` hands it over)."""
+turns it off. Standard library, the native library, and the registry's own fetch (`repo` hands it over).
+
+`lazaret guard` runs the same check (`guard_npm`, `check_pypi`) on a release from npm's or PyPI's public registry it
+scans, when the release was published less than guard.PROVENANCE_DAYS ago, with its own fetcher, and merges the
+findings into the scan's verdict."""
 
 import base64
 import binascii
@@ -170,6 +174,10 @@ def _npm_url(name, version):
             + "@" + urllib.parse.quote(version, safe=""))
 
 
+def _npm_packument(name):
+    return "https://registry.npmjs.org/" + urllib.parse.quote(name, safe="@")
+
+
 def npm_has_attestations(manifest):
     dist = manifest.get("dist") if isinstance(manifest, dict) else None
     att = dist.get("attestations") if isinstance(dist, dict) else None
@@ -220,8 +228,7 @@ def check_npm(name, version, manifest, sha512_hex, fetch):
     else:
         report["files"].append({"filename": None, "attestations": None})
     try:
-        doc = _core.json_loads_bounded(fetch("https://registry.npmjs.org/" + urllib.parse.quote(name, safe="@"),
-                                             MAX_PACKUMENT_BYTES, NPM_ABBREVIATED))
+        doc = _core.json_loads_bounded(fetch(_npm_packument(name), MAX_PACKUMENT_BYTES, NPM_ABBREVIATED))
     except (_base.FetchError, ValueError, _core.JsonTooDeep) as exc:
         report["previousUnchecked"] = _printable(exc)
         return report
@@ -242,6 +249,29 @@ def check_npm(name, version, manifest, sha512_hex, fetch):
         except (Unchecked, _base.FetchError, UnicodeDecodeError) as exc:
             prev["unchecked"] = _printable(exc)
     return report
+
+
+def guard_npm(name, version, sha512_hex, fetch):
+    """check_npm for a caller with a lockfile's entry and not the version's document (`lazaret guard`): npm's
+    abbreviated document of the package, read once, gives the version's and the release's before it. A document that
+    cannot be read, or does not list the version, leaves the release unchecked (said)."""
+    cache = {}
+
+    def once(url, max_bytes, accept):
+        if url not in cache:
+            cache[url] = fetch(url, max_bytes, accept)
+        return cache[url]
+    try:
+        doc = _core.json_loads_bounded(once(_npm_packument(name), MAX_PACKUMENT_BYTES, NPM_ABBREVIATED))
+    except (_base.FetchError, ValueError, _core.JsonTooDeep) as exc:
+        return {"files": [{"filename": None, "unchecked": f"the registry's document of the package could not be "
+                                                         f"read ({_printable(exc, 120)})"}], "previous": None}
+    versions = doc.get("versions") if isinstance(doc, dict) else None
+    manifest = versions.get(version) if isinstance(versions, dict) else None
+    if not isinstance(manifest, dict):
+        return {"files": [{"filename": None, "unchecked": "the registry's document of the package does not list the "
+                                                         "version"}], "previous": None}
+    return check_npm(name, version, manifest, sha512_hex, once)
 
 
 # ---------------------------------------------------------------- PyPI

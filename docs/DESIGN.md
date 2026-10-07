@@ -1471,7 +1471,22 @@ never invalid. Lazaret does no TUF: `LAZARET_SIGSTORE_ROOT` and
 `LAZARET_NPM_KEYS` name copies fetched by something that does. Best effort
 like SC-NEW-DEPENDENCY's history: a registry that does not answer flags
 nothing, and the result's `provenance` says what was not checked. The
-guard does not run it (its installs would wait on the requests).
+guard runs it (0.1.9) on a release from npm's or PyPI's public registry
+that it scans fresh (not from its verdict cache) and that was published
+less than `guard.PROVENANCE_DAYS` (30) ago, or whose publish time is not
+known: its installs wait on the requests, and the release before is read
+from the package's whole history (npm's abbreviated document is megabytes
+for an active package), so the check is kept to where a hijacked release
+is live, as a rule (ultralytics' were found in hours). Measured on three
+npm projects (773 packages) and three Python sets (179 releases) resolved
+on Oct 7, 2026: 127 and 57 releases fall in the window, 311 requests and
+67 MB for npm, 122 and 47 MB for PyPI (instead of 1,140 and 136 MB, 313 and
+80 MB), and the two releases the whole check flagged, both benign and
+older, are outside it. `provenance.guard_npm` reads the abbreviated
+document once for the version's own `dist.attestations` and the release
+before it; `guard.with_provenance` merges the findings into the scan's
+verdict (CRITICAL: SUSPICIOUS; MAJOR: WARN at least) before the verdict is
+cached. A package of a private registry is never named to the public one.
 
 ## 6. How to add or change a rule — the loop
 

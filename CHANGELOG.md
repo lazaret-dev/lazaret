@@ -73,9 +73,23 @@ project is pre-1.0, so the 0.x API may still change.
   repository's and owner's IDs, which a rename keeps; INFO for a repository of the same owner);
   SC-PROVENANCE-UNCHECKED (INFO) for one that could not be checked for a reason that is not the
   file's. On the popular set's 1,205 releases, one is WARN for it (why-is-node-running 3.2.2). The result's `provenance` says who built the release, and the
-  terminal shows it. `lazaret-registry` and the MCP tool; not the guard yet.
+  terminal shows it. `lazaret-registry` and the MCP tool, and the guard (below).
   `LAZARET_NO_PROVENANCE=1` turns it off; `LAZARET_SIGSTORE_ROOT` and `LAZARET_NPM_KEYS` name
   newer trust.
+- **The guard checks the provenance of a release published in the last 30 days (NET-1).** A package
+  from npm's or PyPI's public registry that the guard scans gets the registry's provenance check when
+  it was published less than 30 days ago (or when its publish time is not known), and the findings
+  join the scan's verdict: an attestation that does not hold for the file makes it SUSPICIOUS, so it is
+  blocked; a release with none of the provenance the release before it had, or with provenance from
+  another owner's repository, is WARN (`--block-warn` blocks it); `--json` says what the check found
+  (`provenance`), and the verdict cache keeps it. A hijacked release is found and taken down within
+  days as a rule, and the check reads the package's history (npm's abbreviated document, PyPI's
+  Simple API), so older releases are left out: measured on three npm projects (773 packages) and
+  three Python sets (179 releases), the window brings the check from 1,140 requests and 136 MB to
+  311 and 67 MB for npm, and from 313 and 80 MB to 122 and 47 MB for PyPI, and leaves out the two
+  benign releases the whole check flagged (pino 9.14.0 and annotated-doc 0.0.5, both older). A
+  private registry's packages are never named to the public one. `LAZARET_NO_PROVENANCE=1` turns it
+  off.
 - **`lazaret guard code --install-extension` (E-1's fifth part), and `code-insiders`, `codium`, `cursor`,
   `windsurf`, `kiro` and `positron`.** The guard takes the version the editor would install, as VS Code
   chooses it (an installed extension left alone unless `--force` or a version is given; else the newest
