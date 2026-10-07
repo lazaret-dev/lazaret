@@ -385,6 +385,12 @@ def scan_vsix(files):
     return scan(files)
 
 
+def vscode_section():
+    """popular_names.json's VS Code section, as shipped."""
+    with open(lookalike.__file__.replace("lookalike.py", "popular_names.json"), encoding="utf-8") as f:
+        return json.load(f)["vscode"]
+
+
 class VscodeLookalikeTests(unittest.TestCase):
     def test_identifiers_like_a_popular_extensions(self):
         for name, want in (("juanbIanco.solidity", ("id", "juanblanco.solidity", "a character changed")),
@@ -397,14 +403,18 @@ class VscodeLookalikeTests(unittest.TestCase):
                 self.assertEqual(lookalike.vscode_lookalike(name), want)
 
     def test_publishers_like_a_popular_publishers(self):
-        for name, target, theirs, how in (
-                ("juan-bianco.solidity-vlang", "juanblanco.solidity", "juanblanco",
+        targets = vscode_section()["targets"]
+
+        def first_of(publisher):            # (the finding names the publisher's first extension in the list)
+            return next(t for t in targets if t.split(".", 1)[0] == publisher)
+        for name, theirs, how in (
+                ("juan-bianco.solidity-vlang", "juanblanco",
                  'is one change from "juanblanco" (a character changed, its separators aside)'),
-                ("eamodi0.git-helper", "eamodio.gitlens", "eamodio", 'is one change from "eamodio" (a character changed)'),
-                ("ms-vscodes.anything", "ms-vscode.js-debug", "ms-vscode", 'is one change from "ms-vscode" (a character added)'),
-                ("ms_python.helper", "ms-python.debugpy", "ms-python", 'differs from "ms-python" only in its separators')):
+                ("eamodi0.git-helper", "eamodio", 'is one change from "eamodio" (a character changed)'),
+                ("ms-vscodes.anything", "ms-vscode", 'is one change from "ms-vscode" (a character added)'),
+                ("ms_python.helper", "ms-python", 'differs from "ms-python" only in its separators')):
             with self.subTest(name):
-                self.assertEqual(lookalike.vscode_lookalike(name), ("publisher", target, theirs, how))
+                self.assertEqual(lookalike.vscode_lookalike(name), ("publisher", first_of(theirs), theirs, how))
 
     def test_not_a_lookalike(self):
         for name in ("ms-python.python", "esbenp.prettier-vscode", "juanblanco.solidity",     # popular themselves
@@ -418,22 +428,25 @@ class VscodeLookalikeTests(unittest.TestCase):
         self.assertIsNotNone(lookalike.vscode_lookalike("juanbianco.other", own="someone"))
 
     def test_the_vscode_list(self):
-        with open(lookalike.__file__.replace("lookalike.py", "popular_names.json"), encoding="utf-8") as f:
-            sec = json.load(f)["vscode"]
-        self.assertEqual(len(sec["targets"]), 1000)
-        self.assertEqual(len(set(sec["targets"])), 1000)
+        sec = vscode_section()
+        # the first 1,000 of each registry, taken in turn: the Marketplace's first, then Open VSX's, …
+        self.assertTrue(1000 <= len(sec["targets"]) <= 2000)
+        self.assertEqual(len(set(sec["targets"])), len(sec["targets"]))
         self.assertTrue(all(repo.VSCODE_ID_RE.fullmatch(t) and t == t.lower() for t in sec["targets"] + sec["known"]))
-        self.assertEqual(sec["targets"][:3], ["meta.pyrefly", "ms-python.debugpy", "ms-python.python"])
-        self.assertIn("juanblanco.solidity", sec["targets"])
+        self.assertEqual(sec["targets"][:3], ["ms-python.python", "meta.pyrefly", "ms-python.vscode-pylance"])
+        for popular in ("juanblanco.solidity", "esbenp.prettier-vscode", "dbaeumer.vscode-eslint", "eamodio.gitlens",
+                        "rust-lang.rust-analyzer", "redhat.java"):
+            self.assertIn(popular, sec["targets"])
         self.assertEqual((sec["known"], sec["known_publishers"]), (sorted(sec["known"]), sorted(sec["known_publishers"])))
         self.assertIn("Open VSX", sec["source"])
+        self.assertIn("Visual Studio Marketplace", sec["source"])
         self.assertTrue(sec["license"])
         # no target looks like another of another publisher: the list holds no clone it would then wave through
         data = lookalike.vscode_tables(sec["targets"], ())
         for t in sec["targets"]:
             others = lookalike.vscode_tables([x for x in sec["targets"] if x != t], ())
             self.assertIsNone(lookalike.lookalike("vscode", t, others), t)
-        self.assertEqual(len(data[0]), 1000)
+        self.assertEqual(len(data[0]), len(sec["targets"]))
 
     def test_the_findings(self):
         text = json.dumps({"name": "solidity", "publisher": "juanbIanco", "version": "0.0.8",
@@ -441,16 +454,17 @@ class VscodeLookalikeTests(unittest.TestCase):
                            "extensionPack": ["esbenp.prettier-vscode", "Esbenpp.prettier-vscode", "juanbIanco.helper",
                                              "juan-bianco.solidity-vlang"]}, indent=2)
         res = scan_vsix({"package.json": text})
+        n = f'{len(vscode_section()["targets"]):,}'
         self.assertEqual(typos(res), [
             ("package.json", 2, "MAJOR", 'The extension is "juanbIanco.solidity", one change from "juanblanco.solidity" '
-                                         '(a character changed), one of the 1,000 most-installed VS Code extensions.'),
+                                         f'(a character changed), one of the {n} most-installed VS Code extensions.'),
             ("package.json", 10, "MAJOR", 'Brings "esbenpp.prettier-vscode" (its extensionDependencies or extensionPack), '
-                                         'one change from "esbenp.prettier-vscode" (a character added), one of the 1,000 '
+                                         f'one change from "esbenp.prettier-vscode" (a character added), one of the {n} '
                                          'most-installed VS Code extensions.'),
             ("package.json", 12, "MAJOR", 'Brings "juan-bianco.solidity-vlang" (its extensionDependencies or '
                                           'extensionPack): its publisher "juan-bianco" is one change from "juanblanco" '
                                           '(a character changed, its separators aside), the publisher of '
-                                          '"juanblanco.solidity", one of the 1,000 most-installed VS Code extensions.')])
+                                          f'"juanblanco.solidity", one of the {n} most-installed VS Code extensions.')])
         self.assertEqual(res["verdict"], "WARN")
 
     def test_popular_extensions_stay_quiet(self):

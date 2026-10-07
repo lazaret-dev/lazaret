@@ -102,10 +102,11 @@ project is pre-1.0, so the 0.x API may still change.
   is SC-TYPOSQUAT (MAJOR), in `lazaret FILE.vsix`, `--extensions` and the registry's scans:
   `juanbIanco.solidity` (a capital I for the l) cloned `juanblanco.solidity` on Open VSX in 2025, and
   `juan-bianco.solidity-vlang` came next. Another publisher's extension of the same name (a fork, a build)
-  is not flagged, nor one of the extension's own publisher. The targets are Open VSX's 1,000 most
-  downloaded extensions (`popular_names.json`'s `vscode`); `scripts/fetch-top-extensions.py` saves the
-  Marketplace's and Open VSX's rankings, and `update-popular-names.py --vscode` builds the list from them.
-  On 200 extensions sampled from Open VSX's long tail, none is flagged. And a release on Open VSX or the
+  is not flagged, nor one of the extension's own publisher. The targets are the Visual Studio Marketplace's
+  1,000 most-installed extensions and Open VSX's 1,000 most downloaded, 1,568 in all (`popular_names.json`'s
+  `vscode`, from the registries' rankings of Oct 6); `scripts/fetch-top-extensions.py` saves both rankings,
+  and `update-popular-names.py --vscode` builds the list from them. No target is one change from another's
+  of another publisher, and of 200 extensions sampled from Open VSX's long tail, none is flagged. And a release on Open VSX or the
   Marketplace is compared with the version published before it: an extension it brings that the one
   before did not, first published less than 7 days earlier by another publisher, is SC-NEW-DEPENDENCY
   (CRITICAL; MAJOR under 30 days), the way GlassWorm brought a malicious extension in through benign

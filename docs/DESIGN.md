@@ -1189,12 +1189,11 @@ for publishers of six letters and digits or more (`MIN_PUBLISHER`) that
 neither a target nor a known name has and that `known_publishers` does not
 list. Another publisher's extension of the same name is not compared: Open
 VSX carries forks and builds under their builders' namespaces (several of
-its 1,000 most downloaded are). The targets are Open VSX's 1,000 most
-downloaded, read through a fetcher on Oct 6 (the sandbox cannot reach the
-registry; each page was read twice and the readings compared);
-`scripts/fetch-top-extensions.py` saves the Marketplace's ranking by
-installs and Open VSX's by downloads, and `update-popular-names.py
---vscode` takes the first 1,000 of each in turn, the pages' other
+its 1,000 most downloaded are). The targets are the Marketplace's 1,000
+most installed and Open VSX's 1,000 most downloaded (1,568 extensions, the
+rankings of Oct 6): `scripts/fetch-top-extensions.py` saves the
+Marketplace's ranking by installs and Open VSX's by downloads, and
+`update-popular-names.py --vscode` takes the first 1,000 of each in turn, the pages' other
 identifiers one change from a target as known names, and their publishers
 that look like a target's as known publishers. A registry scan also
 compares the release with the version its registry published before it
