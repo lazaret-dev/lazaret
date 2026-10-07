@@ -22,7 +22,7 @@ A working HTTPS client: you can `get`/`post` over TLS 1.3 with full certificate 
 | CMS / PKCS#7 signatures (Java `META-INF/*.RSA`, `.p7s`, S/MIME) and RFC 3161 time stamps: BER reader, signer verification (RSA PKCS#1 and PSS, ECDSA P-256/P-384, Ed25519), chain to the caller's roots at the signature's time (pure, no I/O) | 45 messages made by OpenSSL and the JDK's `jarsigner` verify; 1,886 damaged messages judged by `openssl cms -verify` and replayed, each region of a message pinned as exactly OpenSSL's verdict, stricter, or deliberately more lenient; 2 fuzz targets; not Authenticode yet (B-70 phase 2, B-80) |
 
 Not yet verified against real public CA chains from a normal network: see `BACKLOG.md` (B-06, B-08).
-Test run at last check: 1,133 unit (including the mutation fuzzers; 13 more are ignored by default: 9 timing tests, two long random runs, a live QPACK peer and a replay of fuzz inputs; 255 of them also run without the `net` feature), 2 Go-vector, 1 CMS-vector, 13 real Sigstore, 5 synthetic Sigstore, 3 real Rekor, 36 OpenSSL interop, 15 HTTP/2 client against Go's server, 22 HTTP/3 client against aioquic (they skip without `python3` and aioquic), 1 real-root, 10 doc tests, no warnings; `tools/server_interop.sh` (36 checks) and `tools/h2_interop.sh` (21) pass.
+Test run at last check: 1,148 unit (including the mutation fuzzers; 13 more are ignored by default: 9 timing tests, two long random runs, a live QPACK peer and a replay of fuzz inputs; 255 of them also run without the `net` feature), 2 Go-vector, 1 CMS-vector, 13 real Sigstore, 5 synthetic Sigstore, 3 real Rekor, 36 OpenSSL interop, 15 HTTP/2 client against Go's server, 22 HTTP/3 client against aioquic (they skip without `python3` and aioquic), 1 real-root, 11 doc tests, no warnings; `tools/server_interop.sh` (36 checks) and `tools/h2_interop.sh` (21) pass.
 
 ## Security warning
 
@@ -141,7 +141,7 @@ link is slower over this than over HTTP/2 until those and CUBIC are in (B-91). `
 
 A client can be limited to the hosts a caller (a module, a plug-in) is allowed to talk to. `Client::allowed_hosts(HostRules::new(["api.example.com", "*.cdn.example.net"])?)`
 is applied to the URL of the request and to **every redirect that is followed**, before anything is sent to that host: a request or a redirect to
-a host the rule does not name is an `Error::Http` whose message begins `host not allowed`, and nothing connects. An entry is a host, a host with a
+a host the rule does not name is an `Error::Refused` (see below) whose reason begins `host not allowed`, and nothing connects. An entry is a host, a host with a
 port (`api.example.com:8443`, `[::1]:8443`), an IPv4 or IPv6 address, or a wildcard `*.example.com`, which allows what is under the domain and **not the
 domain itself** (it needs an entry of its own); a wildcard needs a domain of two labels at least (`*.com` is refused), and an entry that is not
 one of these is an error when the rule is made, not a rule that quietly does something else. The host compared is the one the client will
@@ -154,13 +154,32 @@ The rule is loose unless it is told otherwise, and a caller that wants it tight 
 |---|---|---|
 | `*.example.com` matches | one label or more (`a.example.com`, `a.b.example.com`) | `one_label_wildcards(true)`: exactly one valid label (`[a-z0-9]`, inner `-`, at most 63 bytes), so `a.example.com` and not `a.b.example.com`, `evilexample.com` or an `_` name |
 | a host with no port in its entry matches | any port | `default_port_only(true)`: the scheme's default port only (`:443` counts as the default); a wildcard never matches an explicit port, and a host on another port needs an entry of its own, `host:port` |
-| the URL | anything the parser takes | `Client::url_limits(UrlLimits::strict())`: https only, no `user:password@`, printable ASCII only (no space or control character, nothing over `~`), at most 2,048 bytes; each can be asked for alone (`https_only`, `refuse_credentials`, `printable_ascii_only`, `max_length`) and the message of a refusal begins `URL not allowed` |
+| the URL | anything the parser takes | `Client::url_limits(UrlLimits::strict())`: https only, no `user:password@`, printable ASCII only (no space or control character, nothing over `~`), at most 2,048 bytes; each can be asked for alone (`https_only`, `refuse_credentials`, `printable_ascii_only`, `max_length`) and the reason of a refusal begins `URL not allowed` |
 
 The rule of a module that reaches the Marketplace's hosts (`<publisher>.gallerycdn.vsassets.io`, `<publisher>.gallery.vsassets.io`, and no other
 host) is therefore
 `client.clone().allowed_hosts(HostRules::new(["marketplace.visualstudio.com", "*.gallerycdn.vsassets.io", "*.gallery.vsassets.io"])?.one_label_wildcards(true).default_port_only(true)).url_limits(UrlLimits::strict())`,
 and it holds on the first URL and on every hop. The text of a URL is judged as it came: the caller's string, and for a redirect the `Location` value as
 well as the URL it resolves to.
+
+**A refusal is an error of its own.** A request or a redirect that the client's rules do not allow is `Error::Refused(Refused { hop, by, reason })`, not an
+`Error::Io`, `Tls` or `Http`, so a caller can tell "the module was not allowed to go there" from "the network failed" or "the server was bad": `hop` is 0 for
+the request itself and 1, 2, ... for the redirect it was following (`is_redirect()` says which, so a report can say "redirect blocked"), and `by` is
+`RefusedBy::HostRule`, `UrlLimit`, `Scheme` (plain http without `allow_insecure_http`, or a redirect from https to http) or `Hook` (the enum is `#[non_exhaustive]`).
+Nothing was sent to the host it names. Its `Display` begins `request refused:` or `redirect N refused:`, and the reason names the host and never the path, the
+query, a credential or a header value.
+
+**Credentials for each hop.** A header set on a request travels with its redirects (only `Authorization`, `Cookie` and `Proxy-Authorization` are dropped
+at another origin), so a token should not be set that way. `Client::hop_headers(|hop| ...)` is called for the request itself and for **every redirect that is
+followed**, after the host rule and the limits on a URL have allowed that URL and before anything is sent there, with the URL, the method the hop will have
+(a 303 makes a GET), the hop's number, the URL that redirected to it and whether that crossed an origin; the headers it returns go with that hop and with no
+other, so each host gets its own credentials (`GITHUB_TOKEN` to `api.github.com`, a private registry's token to the registry, nothing to a CDN that a redirect
+names) and a token never follows a redirect to another host. An `Err` from the hook refuses the hop: nothing is sent there, and the request fails with `Error::Refused` (`by: Hook`, with the hop's number and the hook's message as the reason). A header it gives replaces the caller's of the same name, a bad name or value (or `Host`, `Connection`, `Content-Length`) is an error that never says the
+value, and it is called once for a hop though the request is sent again on another connection. The async client and the clones apply their own hook. Its headers are never kept: there is no cache of
+responses, a connection is for one origin only (the pools of HTTP/1.1, HTTP/2 and HTTP/3 are keyed by scheme, host, port and proxy, so HTTP/2 connections are never
+coalesced across hosts), and the names it gives are marked never-indexed in HPACK and QPACK, as `Authorization` and `Cookie` are. A header that the *caller* sets other
+than `Authorization`, `Cookie` and `Proxy-Authorization` (a `PRIVATE-TOKEN`, say) still follows a redirect to another host, so a credential goes through the hook.
+A host whose last label is a number (`1`, `0x7f`) is an address to a resolver, not a name, so a wildcard never matches it.
 
 Clones of a client share their connections, so `client.clone().allowed_hosts(rules)` is a client for one caller, and the limits of `timeout`,
 `total_timeout`, `max_redirects`, `max_body_bytes` and `url_limits` are set on the clone the same way; the async client and the `*_async` methods apply the
@@ -281,7 +300,7 @@ src/zeroize.rs     wiping secrets (the only `unsafe` outside the SIMD kernels an
 examples/       fetch (curl-like; `--http2`, `--http3` (QUIC first, TCP if that fails), `--alt-svc` (QUIC where the origin said it offers it), `--parallel N`, `--max-bytes N`), serve (the test server: HTTP/1.1 and HTTP/2 over TLS 1.3, needs `--features server`), async_get, probe (negotiation report), sumdb (look a module up in the Go checksum database), cms_verify (check a CMS / PKCS#7 signature file), sigstore_verify (check Sigstore attestations of a file) and bench
 tests/          OpenSSL interop tests, the HTTP/2 client against Go's server (h2_client_interop.rs), the HTTP/3 client against aioquic (h3_client_interop.rs), replays of vectors judged by Go (go_vectors.rs) and by OpenSSL (cms_vectors.rs) and fixtures (tests/data)
 tools/          generators for test vectors and fixtures (Python, uses the `cryptography` package; the CMS ones also run the `openssl` command line tool and the JDK's `jarsigner`), check_features.sh, go_oracle.sh (runs Go's sumdb packages as an independent judge), server_interop.sh and h2_interop.sh (the test server against OpenSSL, curl, Go and python-h2), h2_oracle_server.go (Go's HTTP/2 server for `tests/h2_client_interop.rs`), bench_h2.sh with bench_client.go and bench_delay_proxy.go (the benchmark against Go's client above), hpack_oracle.* and h2_frame_oracle.py (HPACK and frames against Go, Python and hyperframe), gen_quic_vectors.py (packets made by aioquic), quicgo_oracle/ (frame payloads read by quic-go's parser), quic_interop_server.py (an aioquic HTTP/3 server, with an HTTPS side on TCP that advertises it, for `examples/quic_probe.rs` and `tests/h3_client_interop.rs`) and qpack_interop.py (QPACK against ls-qpack)
-fuzz/           coverage-guided fuzzer (std-only, stable Rust) and its 40 targets: `sh fuzz/run_all.sh 3600`
+fuzz/           coverage-guided fuzzer (std-only, stable Rust) and its 42 targets: `sh fuzz/run_all.sh 3600`
 ```
 
 ## Usage

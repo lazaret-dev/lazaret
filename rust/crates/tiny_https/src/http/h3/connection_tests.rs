@@ -64,7 +64,7 @@ fn get(c: &mut Connection, f: &mut Fake) -> u64 {
 
 fn request(c: &mut Connection, f: &mut Fake, method: &str, path: &str) -> u64 {
     let headers = vec![("accept".to_string(), "*/*".to_string())];
-    let r = Request { method, scheme: "https", authority: "example.com", path, headers: &headers };
+    let r = Request { method, scheme: "https", authority: "example.com", path, headers: &headers, secret: &[] };
     c.open_stream(f, &r, true).unwrap()
 }
 
@@ -145,7 +145,7 @@ fn the_streams_are_opened_when_the_server_allows_them() {
     // and a request waits for its own limit
     f.max_open[0] = 0;
     let headers = vec![];
-    let r = Request { method: "GET", scheme: "https", authority: "example.com", path: "/", headers: &headers };
+    let r = Request { method: "GET", scheme: "https", authority: "example.com", path: "/", headers: &headers, secret: &[] };
     assert_eq!(c.open_stream(&mut f, &r, true), Err(OpenError::Full));
     assert!(c.usable());
     f.max_open[0] = 1;
@@ -156,7 +156,7 @@ fn the_streams_are_opened_when_the_server_allows_them() {
 fn a_request_is_a_headers_frame_and_the_end_of_the_stream() {
     let (mut c, mut f) = started();
     let headers = vec![("Accept".to_string(), "*/*".to_string()), ("Connection".to_string(), "close".to_string()), ("Host".to_string(), "other".to_string())];
-    let r = Request { method: "GET", scheme: "https", authority: "example.com", path: "/a?b=c", headers: &headers };
+    let r = Request { method: "GET", scheme: "https", authority: "example.com", path: "/a?b=c", headers: &headers, secret: &[] };
     let id = c.open_stream(&mut f, &r, true).unwrap();
     assert_eq!(id, 0);
     let s = &f.sent[&0];
@@ -178,7 +178,7 @@ fn a_request_is_a_headers_frame_and_the_end_of_the_stream() {
 fn a_request_with_a_body_is_headers_then_data_frames() {
     let (mut c, mut f) = started();
     let headers = vec![];
-    let r = Request { method: "POST", scheme: "https", authority: "example.com", path: "/", headers: &headers };
+    let r = Request { method: "POST", scheme: "https", authority: "example.com", path: "/", headers: &headers, secret: &[] };
     let id = c.open_stream(&mut f, &r, false).unwrap();
     assert!(!f.sent[&id].fin);
     assert_eq!(c.send_data(&mut f, id, b"hello ", false), Ok(6));
@@ -209,7 +209,7 @@ fn what_the_transport_does_not_take_is_written_when_it_does() {
     let (mut c, mut f) = started();
     f.room = 10;
     let headers = vec![];
-    let r = Request { method: "POST", scheme: "https", authority: "example.com", path: "/", headers: &headers };
+    let r = Request { method: "POST", scheme: "https", authority: "example.com", path: "/", headers: &headers, secret: &[] };
     let id = c.open_stream(&mut f, &r, false).unwrap();
     let body = vec![7u8; 5000];
     assert_eq!(c.send_data(&mut f, id, &body, true), Ok(5000));
@@ -237,7 +237,7 @@ fn how_much_body_is_taken_is_bounded() {
     let (mut c, mut f) = started_with(cfg, &[]);
     f.room = 0;
     let headers = vec![];
-    let r = Request { method: "POST", scheme: "https", authority: "example.com", path: "/", headers: &headers };
+    let r = Request { method: "POST", scheme: "https", authority: "example.com", path: "/", headers: &headers, secret: &[] };
     let id = c.open_stream(&mut f, &r, false).unwrap();
     let before = c.send_capacity(id);
     assert!(before < 1000 && before > 900, "{before}: what is left of 1000 after the request's head");
@@ -874,12 +874,12 @@ fn the_servers_settings_are_what_the_client_keeps_to() {
     assert_eq!(c.peer_settings().copied(), Some(PeerSettings { qpack_max_table_capacity: 2048, qpack_blocked_streams: 5, max_field_section_size: Some(200) }));
     // a request whose header list is over what the server takes is not sent
     let big = vec![("x-long".to_string(), "v".repeat(300))];
-    let r = Request { method: "GET", scheme: "https", authority: "example.com", path: "/", headers: &big };
+    let r = Request { method: "GET", scheme: "https", authority: "example.com", path: "/", headers: &big, secret: &[] };
     assert!(matches!(c.open_stream(&mut f, &r, true), Err(OpenError::Invalid(_))));
     // (and no stream was opened for it)
     assert_eq!(f.opened[0], 0);
     let small = vec![];
-    let r = Request { method: "GET", scheme: "https", authority: "example.com", path: "/", headers: &small };
+    let r = Request { method: "GET", scheme: "https", authority: "example.com", path: "/", headers: &small, secret: &[] };
     assert!(c.open_stream(&mut f, &r, true).is_ok());
     // the limit is on a size that is the sum of the lengths of names and values and 32 for each field: 177 for this one, which is let
     // through at that and not at one less
@@ -995,7 +995,7 @@ fn goaway_ends_new_requests_and_fails_the_ones_that_were_not_taken() {
         assert_eq!(f.stopped_by_us.get(&id), Some(&code::H3_REQUEST_REJECTED));
     }
     let headers = vec![];
-    let r = Request { method: "GET", scheme: "https", authority: "example.com", path: "/", headers: &headers };
+    let r = Request { method: "GET", scheme: "https", authority: "example.com", path: "/", headers: &headers, secret: &[] };
     assert_eq!(c.open_stream(&mut f, &r, true), Err(OpenError::Unavailable));
 }
 
@@ -1037,7 +1037,7 @@ fn goaway_may_only_go_down_and_must_name_a_request_stream() {
 fn the_server_stopping_our_request_is_not_the_end_of_its_response() {
     let (mut c, mut f) = started();
     let headers = vec![];
-    let r = Request { method: "POST", scheme: "https", authority: "example.com", path: "/", headers: &headers };
+    let r = Request { method: "POST", scheme: "https", authority: "example.com", path: "/", headers: &headers, secret: &[] };
     let id = c.open_stream(&mut f, &r, false).unwrap();
     f.events.push_back(TransportEvent::Stopped(id, code::H3_NO_ERROR));
     f.push(id, &response(413, &[], b"too big"), true);
@@ -1091,7 +1091,7 @@ fn a_released_stream_that_is_done_costs_nothing_more() {
 fn a_released_stream_that_is_not_done_is_cancelled_both_ways() {
     let (mut c, mut f) = started();
     let headers = vec![];
-    let r = Request { method: "POST", scheme: "https", authority: "example.com", path: "/", headers: &headers };
+    let r = Request { method: "POST", scheme: "https", authority: "example.com", path: "/", headers: &headers, secret: &[] };
     let id = c.open_stream(&mut f, &r, false).unwrap();
     f.push(id, &response(200, &[], b"part"), false);
     c.process(&mut f).unwrap();

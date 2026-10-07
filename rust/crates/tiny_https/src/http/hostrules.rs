@@ -53,6 +53,12 @@ fn is_strict_label(s: &str) -> bool {
     !s.is_empty() && s.len() <= 63 && !s.starts_with('-') && !s.ends_with('-') && s.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
 }
 
+/// Whether the last label of a host is a number (`1`, `0x7f`): such a host is an address, whatever its other labels look like.
+fn ends_in_a_number(host: &str) -> bool {
+    let last = host.rsplit('.').next().unwrap_or("");
+    !last.is_empty() && (last.bytes().all(|b| b.is_ascii_digit()) || last.strip_prefix("0x").is_some_and(|h| h.bytes().all(|b| b.is_ascii_hexdigit())))
+}
+
 /// A port as an entry writes it: digits, 1 to 65535.
 fn parse_port(entry: &str, text: &str) -> Result<u16> {
     if text.is_empty() || !text.bytes().all(|b| b.is_ascii_digit()) {
@@ -186,7 +192,11 @@ impl HostRules {
         if default_only && port != default_port {
             return false;
         }
-        // (an address is never under a wildcard: the labels before the suffix are of a name)
+        // (an address is never under a wildcard, however it is written: a host whose last label is a number is one to a URL parser and to the
+        // resolver, `10.1.1` is 10.1.0.1, and `*.0.0.1` would otherwise let 127.0.0.1 through)
+        if ends_in_a_number(host) {
+            return false;
+        }
         self.suffixes.iter().any(|s| match host.strip_suffix(s.as_str()) {
             Some(before) => {
                 if self.one_label {
@@ -304,6 +314,23 @@ mod tests {
         assert!(r.allows("a.example.com", 80, 80) && !r.allows("a.example.com", 443, 80));
         // off again, the ports are not looked at
         assert!(r.default_port_only(false).allows("a.example.com", 8443, 443));
+    }
+
+    #[test]
+    fn an_address_is_never_under_a_wildcard() {
+        // found by the fuzz target `egress`: `*.0.0.1` ends as an address does, and let 127.0.0.1 through
+        for r in [rules(&["*.0.0.1", "*.168.1.1", "*.1.1"]), rules(&["*.0.0.1", "*.168.1.1", "*.1.1"]).one_label_wildcards(true)] {
+            for host in ["127.0.0.1", "192.168.1.1", "10.1.1", "1.1.1.1", "0.0.0.1"] {
+                assert!(!ok(&r, host), "{host}");
+            }
+        }
+        // (a host that ends in a number is an address to a URL parser, so no wildcard has it; one that does not is a name)
+        for host in ["a.0.0.1", "x.0.0x7f", "x.1.0x", "x.1.127", "10.0.0x1"] {
+            assert!(!ok(&rules(&["*.0.0.1", "*.0.0x7f", "*.1.0x", "*.1.127", "*.0.0x1"]), host), "{host}");
+        }
+        assert!(ok(&rules(&["*.0.0.1", "*.example.com"]), "a.1.example.com") && ok(&rules(&["*.example.com"]), "0x7f.example.com"));
+        // (and an entry for the host itself is a host's own)
+        assert!(ok(&rules(&["10.1.1", "a.0.0.1"]), "10.1.1") && ok(&rules(&["a.0.0.1"]), "a.0.0.1"));
     }
 
     #[test]

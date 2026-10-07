@@ -355,6 +355,25 @@ fn compute_tag(otk: &[u8; 32], aad: &[u8], ciphertext: &[u8]) -> [u8; 16] {
     p.finish()
 }
 
+/// The sealed message (ciphertext, then the tag) made with the scalar block function alone, whatever vector code the build has: what
+/// the fuzz target `aead` holds [`ChaCha20Poly1305::seal`] to.
+#[cfg(tiny_https_fuzzing)]
+pub(crate) fn seal_with_scalar_code(key: &[u8], nonce: &[u8; NONCE_LEN], aad: &[u8], plaintext: &[u8]) -> Vec<u8> {
+    let mut k = Zeroizing::new([0u8; 32]);
+    k.copy_from_slice(key);
+    let (kw, nw) = (key_words(&k), nonce_words(nonce));
+    let mut out = plaintext.to_vec();
+    for (i, chunk) in out.chunks_mut(64).enumerate() {
+        let ks = Zeroizing::new(chacha20_block(&kw, 1u32.wrapping_add(i as u32), &nw));
+        for (d, b) in chunk.iter_mut().zip(ks.iter()) {
+            *d ^= b;
+        }
+    }
+    let tag = compute_tag(&one_time_key(&kw, &nw), aad, &out);
+    out.extend_from_slice(&tag);
+    out
+}
+
 /// A ChaCha20 key used for one thing: the mask that QUIC header protection takes from a sample of the packet
 /// (RFC 9001 section 5.4.4). The first four bytes of the 16-byte sample are the block counter and the other twelve the nonce,
 /// both little-endian, and the mask is the first five bytes of that keystream block.

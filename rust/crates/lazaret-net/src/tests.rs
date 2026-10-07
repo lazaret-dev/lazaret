@@ -357,6 +357,11 @@ fn a_failure_says_its_kind() {
     assert_eq!(classify(NetError::Io(std::io::Error::from(std::io::ErrorKind::ConnectionRefused))).kind(), "network");
     let wrapped = std::io::Error::new(std::io::ErrorKind::InvalidData, NetError::Http("response body exceeds the configured size limit".into()));
     assert_eq!(classify(unwrap_io(wrapped)), Failure::TooLarge);
+    let refused = |hop, by| NetError::Refused(tiny_https::error::Refused { hop, by, reason: "host not allowed: x".into() });
+    assert_eq!(classify(refused(0, tiny_https::error::RefusedBy::HostRule)),
+               Failure::Refused("request refused: host not allowed: x".into()));
+    assert_eq!(classify(refused(2, tiny_https::error::RefusedBy::Scheme)),
+               Failure::Refused("redirect 2 refused: host not allowed: x".into()));
 }
 
 #[test]

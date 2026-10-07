@@ -168,6 +168,10 @@ pub(crate) struct Request<'a> {
     /// The header fields other than the pseudo-headers. Names may have capitals (they are lowered); `Host`,
     /// `Connection` and the other connection-specific fields are dropped, as RFC 9113 section 8.2.2 requires.
     pub(crate) headers: &'a [(String, String)],
+    /// Names (lower case) of the fields of `headers` whose values are secrets, besides the ones that always are (`SENSITIVE`): they are
+    /// written so that a compression table does not keep them (HPACK's and QPACK's "never indexed"). A caller that gives each hop its own
+    /// credentials names them here.
+    pub(crate) secret: &'a [String],
 }
 
 /// What happened on a stream, as [`Connection::poll_stream`] gives it, in this order: the head, any number of
@@ -1332,7 +1336,7 @@ pub(crate) fn request_fields<'a>(r: &'a Request<'_>, lowered: &'a [(String, Stri
         if CONNECTION_SPECIFIC.contains(&name.as_str()) || name == "host" || (name == "te" && !value.trim().eq_ignore_ascii_case("trailers")) {
             continue;
         }
-        list.push(FieldRef { name: name.as_bytes(), value: value.as_bytes(), sensitive: SENSITIVE.contains(&name.as_str()) });
+        list.push(FieldRef { name: name.as_bytes(), value: value.as_bytes(), sensitive: SENSITIVE.contains(&name.as_str()) || r.secret.iter().any(|s| s == name) });
     }
     Ok(list)
 }
@@ -1654,7 +1658,7 @@ mod tests {
 
         fn open_with(&mut self, method: &str, path: &str, headers: &[(&str, &str)], end_stream: bool) -> u32 {
             let headers: Vec<(String, String)> = headers.iter().map(|(n, v)| (n.to_string(), v.to_string())).collect();
-            self.c.open_stream(&Request { method, scheme: "https", authority: "example.com", path, headers: &headers }, end_stream).unwrap()
+            self.c.open_stream(&Request { method, scheme: "https", authority: "example.com", path, headers: &headers, secret: &[] }, end_stream).unwrap()
         }
 
         /// The header list a HEADERS frame of the client carried.
@@ -1763,7 +1767,7 @@ mod tests {
     fn nothing_works_before_the_settings_arrive_but_requests_may_be_sent() {
         // a client may send requests at once (RFC 9113 section 3.4): the server's SETTINGS can only widen what they may do
         let mut h = Harness::unsettled(Config::default());
-        let id = h.c.open_stream(&Request { method: "GET", scheme: "https", authority: "example.com", path: "/", headers: &[] }, true).unwrap();
+        let id = h.c.open_stream(&Request { method: "GET", scheme: "https", authority: "example.com", path: "/", headers: &[], secret: &[] }, true).unwrap();
         assert_eq!(id, 1);
         let out = h.take();
         assert_eq!(out.last().map(|f| (f.kind, f.stream)), Some((kind::HEADERS, 1)));
@@ -1812,7 +1816,7 @@ mod tests {
     #[test]
     fn secrets_are_never_indexed() {
         let headers = vec![("authorization".to_string(), "Bearer x".to_string()), ("cookie".to_string(), "a=b".to_string()), ("accept".to_string(), "*/*".to_string())];
-        let r = Request { method: "GET", scheme: "https", authority: "example.com", path: "/", headers: &headers };
+        let r = Request { method: "GET", scheme: "https", authority: "example.com", path: "/", headers: &headers, secret: &[] };
         let lowered = lower_names(r.headers);
         let list = request_fields(&r, &lowered).unwrap();
         let sensitive: Vec<(&[u8], bool)> = list.iter().map(|f| (f.name, f.sensitive)).collect();
@@ -1823,11 +1827,33 @@ mod tests {
     }
 
     #[test]
+    fn the_names_a_caller_says_are_secret_are_never_indexed_either() {
+        // (a hop's own credentials: any name, in any case, given as the lower case name; the others stay as they were)
+        let headers = vec![("Private-Token".to_string(), "t0k3n".to_string()), ("X-Api-Key".to_string(), "k".to_string()), ("accept".to_string(), "*/*".to_string())];
+        let secret = vec!["private-token".to_string(), "x-api-key".to_string()];
+        let r = Request { method: "GET", scheme: "https", authority: "example.com", path: "/", headers: &headers, secret: &secret };
+        let lowered = lower_names(r.headers);
+        let list = request_fields(&r, &lowered).unwrap();
+        let sensitive: Vec<(&[u8], bool)> = list.iter().skip(4).map(|f| (f.name, f.sensitive)).collect();
+        assert_eq!(sensitive, vec![(b"private-token".as_slice(), true), (b"x-api-key".as_slice(), true), (b"accept".as_slice(), false)]);
+        // and what is written does not let a table keep them: the second of two identical requests on one connection is a few bytes when a table
+        // holds the credentials, and carries them in full when it does not
+        let second_block = |secret: &[String]| {
+            let mut h = Harness::new();
+            let r = Request { method: "GET", scheme: "https", authority: "example.com", path: "/", headers: &headers, secret };
+            h.c.open_stream(&r, true).unwrap();
+            h.c.open_stream(&r, true).unwrap();
+            h.take().into_iter().filter(|f| f.kind == kind::HEADERS).map(|f| f.payload.len()).last().unwrap()
+        };
+        assert!(second_block(&secret) > second_block(&[]) + 10, "{} against {}", second_block(&secret), second_block(&[]));
+    }
+
+    #[test]
     fn requests_that_cannot_be_sent_are_refused_before_anything_is_written() {
         let mut h = Harness::new();
         let try_open = |h: &mut Harness, method: &str, path: &str, authority: &str, headers: &[(&str, &str)]| {
             let headers: Vec<(String, String)> = headers.iter().map(|(n, v)| (n.to_string(), v.to_string())).collect();
-            h.c.open_stream(&Request { method, scheme: "https", authority, path, headers: &headers }, true)
+            h.c.open_stream(&Request { method, scheme: "https", authority, path, headers: &headers, secret: &[] }, true)
         };
         for (method, path, authority, headers) in [
             ("", "/", "example.com", vec![]),
@@ -1852,7 +1878,7 @@ mod tests {
     fn a_header_list_over_what_the_server_takes_is_refused() {
         let mut h = Harness::with_settings(Config::default(), &[(setting::MAX_HEADER_LIST_SIZE, 200)]);
         let headers = vec![("x-big".to_string(), "v".repeat(300))];
-        let big = h.c.open_stream(&Request { method: "GET", scheme: "https", authority: "example.com", path: "/", headers: &headers }, true);
+        let big = h.c.open_stream(&Request { method: "GET", scheme: "https", authority: "example.com", path: "/", headers: &headers, secret: &[] }, true);
         assert!(matches!(big, Err(OpenError::Invalid(_))), "{big:?}");
         assert_eq!(h.open("GET", "/"), 1);
     }
@@ -1863,7 +1889,7 @@ mod tests {
         // values that do not repeat, so that Huffman and the table cannot make them small
         let value: String = (0..60_000u32).map(|i| char::from(b'a' + ((i * 7 + i / 13) % 26) as u8)).collect();
         let headers = vec![("x-big".to_string(), value.clone())];
-        h.c.open_stream(&Request { method: "GET", scheme: "https", authority: "example.com", path: "/", headers: &headers }, true).unwrap();
+        h.c.open_stream(&Request { method: "GET", scheme: "https", authority: "example.com", path: "/", headers: &headers, secret: &[] }, true).unwrap();
         let out = h.take();
         assert!(out.len() >= 3, "{} frames", out.len());
         assert_eq!((out[0].kind, out[0].flags & flag::END_HEADERS), (kind::HEADERS, 0));
@@ -2821,7 +2847,7 @@ mod tests {
         h.feed(&goaway).unwrap();
         assert!(!h.c.usable());
         assert!(!h.c.can_open_stream());
-        assert_eq!(h.c.open_stream(&Request { method: "GET", scheme: "https", authority: "a", path: "/", headers: &[] }, true), Err(OpenError::Unavailable));
+        assert_eq!(h.c.open_stream(&Request { method: "GET", scheme: "https", authority: "a", path: "/", headers: &[], secret: &[] }, true), Err(OpenError::Unavailable));
         let failed = h.got(s5).failed.unwrap();
         assert!(failed.retry_safe, "the server did not get to it");
         assert_eq!(h.got(s1).failed, None);
@@ -2899,7 +2925,7 @@ mod tests {
         assert!(h.c.error().is_some());
         // asking again changes nothing
         h.c.peer_closed();
-        assert_eq!(h.c.open_stream(&Request { method: "GET", scheme: "https", authority: "a", path: "/", headers: &[] }, true), Err(OpenError::Unavailable));
+        assert_eq!(h.c.open_stream(&Request { method: "GET", scheme: "https", authority: "a", path: "/", headers: &[], secret: &[] }, true), Err(OpenError::Unavailable));
     }
 
     #[test]
@@ -3084,7 +3110,7 @@ mod tests {
         let a = h.open("GET", "/");
         let b = h.open("GET", "/");
         assert!(!h.c.can_open_stream());
-        assert_eq!(h.c.open_stream(&Request { method: "GET", scheme: "https", authority: "a", path: "/", headers: &[] }, true), Err(OpenError::Full));
+        assert_eq!(h.c.open_stream(&Request { method: "GET", scheme: "https", authority: "a", path: "/", headers: &[], secret: &[] }, true), Err(OpenError::Full));
         // a stream whose exchange is over makes room, read or not, let go of or not
         h.respond(a, "200", &[], true).unwrap();
         assert!(h.c.can_open_stream());
@@ -3108,7 +3134,7 @@ mod tests {
         assert!(h.c.usable());
         assert_eq!(h.open("GET", "/"), MAX_STREAM_ID);
         assert!(!h.c.usable());
-        assert_eq!(h.c.open_stream(&Request { method: "GET", scheme: "https", authority: "a", path: "/", headers: &[] }, true), Err(OpenError::Unavailable));
+        assert_eq!(h.c.open_stream(&Request { method: "GET", scheme: "https", authority: "a", path: "/", headers: &[], secret: &[] }, true), Err(OpenError::Unavailable));
     }
 
     #[test]
@@ -4019,7 +4045,7 @@ mod tests {
                     let method = rng.pick(&["GET", "POST", "HEAD"]);
                     let end = method != "POST" || rng.below(3) == 0;
                     let headers = vec![("x-n".to_string(), step.to_string())];
-                    if let Ok(id) = h.c.open_stream(&Request { method, scheme: "https", authority: "example.com", path: "/", headers: &headers }, end) {
+                    if let Ok(id) = h.c.open_stream(&Request { method, scheme: "https", authority: "example.com", path: "/", headers: &headers, secret: &[] }, end) {
                         ids.push(id);
                         known.push(id);
                     }

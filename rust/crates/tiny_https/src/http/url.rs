@@ -203,12 +203,12 @@ impl UrlLimits {
         self
     }
 
-    fn refuse<T>(why: String) -> Result<T> {
-        Err(Error::Http(format!("URL not allowed: {why}")))
+    fn refuse<T>(why: String) -> std::result::Result<T, String> {
+        Err(format!("URL not allowed: {why}"))
     }
 
-    /// Checks the text of a URL (before it is parsed).
-    pub(crate) fn check_text(&self, text: &str) -> Result<()> {
+    /// Checks the text of a URL (before it is parsed); the reason, if it is refused.
+    pub(crate) fn check_text(&self, text: &str) -> std::result::Result<(), String> {
         if let Some(max) = self.max_length {
             if text.len() > max {
                 return Self::refuse(format!("{} bytes is longer than {max}", text.len()));
@@ -220,8 +220,8 @@ impl UrlLimits {
         Ok(())
     }
 
-    /// Checks a parsed URL.
-    pub(crate) fn check(&self, url: &Url) -> Result<()> {
+    /// Checks a parsed URL; the reason, if it is refused.
+    pub(crate) fn check(&self, url: &Url) -> std::result::Result<(), String> {
         if self.https_only && !url.is_https() {
             return Self::refuse(format!("{} is not https", url.scheme));
         }
@@ -318,8 +318,8 @@ mod tests {
         assert_eq!(base.join("../../../../x").unwrap().to_string(), "https://a.example/x");
     }
 
-    fn refused<T: std::fmt::Debug>(r: Result<T>) -> bool {
-        matches!(&r, Err(Error::Http(m)) if m.starts_with("URL not allowed"))
+    fn refused<T: std::fmt::Debug>(r: std::result::Result<T, String>) -> bool {
+        matches!(&r, Err(m) if m.starts_with("URL not allowed"))
     }
 
     #[test]

@@ -42,6 +42,44 @@ fn wait_until(what: &str, mut condition: impl FnMut() -> bool) {
     }
 }
 
+// ------------------------------------------------------------------------------------------------ headers for each hop
+
+#[test]
+fn what_the_hook_gives_goes_over_http2_to_the_host_it_was_given_for_and_a_connection_is_never_shared_between_hosts() {
+    // one server with two names (the same address, the same certificate): a client that put both on one connection, as RFC 9113 section 9.1.1
+    // lets it, would be able to send one host's credentials to the other; this one has a connection for each origin
+    let server = H2Server::start(hello);
+    let port = server.port;
+    let client = server.client().hop_headers(|info| {
+        Ok(vec![("Authorization".to_string(), format!("Bearer for-{}", info.url.host)), ("Private-Token".to_string(), format!("p-{}", info.url.host))])
+    });
+    for (host, path) in [("127.0.0.1", "/one"), ("localhost", "/two"), ("127.0.0.1", "/three"), ("localhost", "/four")] {
+        assert_eq!(client.get(&format!("https://{host}:{port}{path}")).unwrap().text(), format!("hello {path}"));
+    }
+    assert_eq!(server.connections(), 2, "a connection for each host, and each is used again");
+    let seen = server.requests();
+    for (path, host) in [("/one", "127.0.0.1"), ("/two", "localhost"), ("/three", "127.0.0.1"), ("/four", "localhost")] {
+        let q = seen.iter().find(|s| s.path() == path).unwrap();
+        assert_eq!(q.header("authorization"), Some(format!("Bearer for-{host}").as_str()), "{path}");
+        assert_eq!(q.header("private-token"), Some(format!("p-{host}").as_str()), "{path}");
+    }
+    // a redirect from one to the other: the credentials of the host it lands on, and not those of the host it left
+    let redirecting = H2Server::start(move |seen: &Seen| {
+        if seen.path() == "/start" {
+            let to = format!("https://{}/landed", seen.request.authority.replace("127.0.0.1", "localhost"));
+            response(302, &[("location", to.as_str())], b"")
+        } else {
+            response(200, &[], b"landed")
+        }
+    });
+    let port = redirecting.port;
+    let client = redirecting.client().hop_headers(|info| Ok(vec![("Private-Token".to_string(), format!("p-{}", info.url.host))]));
+    assert_eq!(client.get(&format!("https://127.0.0.1:{port}/start")).unwrap().text(), "landed");
+    let seen = redirecting.requests();
+    assert_eq!(seen.iter().find(|s| s.path() == "/start").unwrap().header("private-token"), Some("p-127.0.0.1"));
+    assert_eq!(seen.iter().find(|s| s.path() == "/landed").unwrap().header("private-token"), Some("p-localhost"));
+}
+
 // ------------------------------------------------------------------------------------------------ a request
 
 #[test]
@@ -1130,7 +1168,7 @@ fn the_right_to_read_goes_back_when_the_stream_that_took_it_is_answered_or_dropp
     let conn = client.h2.as_ref().unwrap().registry.any_connection().unwrap();
     assert_eq!(conn.reading_caller(), None, "a caller kept the right after its request was answered");
     let authority = format!("127.0.0.1:{}", server.port);
-    let request = Request { method: "GET", scheme: "https", authority: &authority, path: "/x", headers: &[] };
+    let request = Request { method: "GET", scheme: "https", authority: &authority, path: "/x", headers: &[], secret: &[] };
     let waits = Waits { timeout: Duration::from_secs(5), deadline: None };
 
     // a request takes the right when it starts, if nobody has it
@@ -1187,7 +1225,7 @@ fn a_caller_who_has_stopped_reading_loses_the_right_to_a_new_request() {
     client.get(&server.url("/warm")).unwrap();
     let conn = client.h2.as_ref().unwrap().registry.any_connection().unwrap();
     let authority = format!("127.0.0.1:{}", server.port);
-    let request = Request { method: "GET", scheme: "https", authority: &authority, path: "/y", headers: &[] };
+    let request = Request { method: "GET", scheme: "https", authority: &authority, path: "/y", headers: &[], secret: &[] };
     let waits = Waits { timeout: Duration::from_secs(5), deadline: None };
 
     let mut first = start_with_the_right_to_read(&conn, &request, waits);
@@ -1251,7 +1289,7 @@ fn a_download_whose_caller_stops_reading_is_read_for_by_the_reader_thread_after_
     client.get(&server.url("/warm")).unwrap();
     let conn = client.h2.as_ref().unwrap().registry.any_connection().unwrap();
     let authority = format!("127.0.0.1:{}", server.port);
-    let request = Request { method: "GET", scheme: "https", authority: &authority, path: "/trickle/100", headers: &[] };
+    let request = Request { method: "GET", scheme: "https", authority: &authority, path: "/trickle/100", headers: &[], secret: &[] };
     let waits = Waits { timeout: Duration::from_secs(5), deadline: None };
 
     let mut s = start_with_the_right_to_read(&conn, &request, waits);
@@ -1283,8 +1321,8 @@ fn a_request_that_waits_for_window_credit_takes_the_right_to_read_from_a_caller_
     client.get(&server.url("/warm")).unwrap();
     let conn = client.h2.as_ref().unwrap().registry.any_connection().unwrap();
     let authority = format!("127.0.0.1:{}", server.port);
-    let get = Request { method: "GET", scheme: "https", authority: &authority, path: "/trickle/250", headers: &[] };
-    let post = Request { method: "POST", scheme: "https", authority: &authority, path: "/up", headers: &[] };
+    let get = Request { method: "GET", scheme: "https", authority: &authority, path: "/trickle/250", headers: &[], secret: &[] };
+    let post = Request { method: "POST", scheme: "https", authority: &authority, path: "/up", headers: &[], secret: &[] };
     let waits = Waits { timeout: Duration::from_secs(5), deadline: None };
 
     // a download whose caller is not reading for the moment
@@ -1359,8 +1397,8 @@ fn a_download_that_pauses_does_not_hold_up_a_request_that_waits_for_the_reader_t
     client.get(&server.url("/warm")).unwrap();
     let conn = client.h2.as_ref().unwrap().registry.any_connection().unwrap();
     let authority = format!("127.0.0.1:{}", server.port);
-    let download = Request { method: "GET", scheme: "https", authority: &authority, path: "/trickle/150", headers: &[] };
-    let slow = Request { method: "GET", scheme: "https", authority: &authority, path: "/slow/100", headers: &[] };
+    let download = Request { method: "GET", scheme: "https", authority: &authority, path: "/trickle/150", headers: &[], secret: &[] };
+    let slow = Request { method: "GET", scheme: "https", authority: &authority, path: "/slow/100", headers: &[], secret: &[] };
     let waits = Waits { timeout: Duration::from_secs(5), deadline: None };
 
     let mut a = start_with_the_right_to_read(&conn, &download, waits);
@@ -1505,8 +1543,8 @@ fn a_stream_that_is_dropped_does_not_take_the_right_to_read_from_another() {
     client.get(&server.url("/warm")).unwrap();
     let conn = client.h2.as_ref().unwrap().registry.any_connection().unwrap();
     let authority = format!("127.0.0.1:{}", server.port);
-    let slow = Request { method: "GET", scheme: "https", authority: &authority, path: "/slow/200", headers: &[] };
-    let other = Request { method: "GET", scheme: "https", authority: &authority, path: "/x", headers: &[] };
+    let slow = Request { method: "GET", scheme: "https", authority: &authority, path: "/slow/200", headers: &[], secret: &[] };
+    let other = Request { method: "GET", scheme: "https", authority: &authority, path: "/x", headers: &[], secret: &[] };
     let waits = Waits { timeout: Duration::from_secs(5), deadline: None };
 
     let a = start_with_the_right_to_read(&conn, &slow, waits);

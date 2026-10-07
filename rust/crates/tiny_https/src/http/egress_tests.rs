@@ -6,10 +6,12 @@
 //! too, for the rule of a module that reaches the Marketplace's hosts: on the first URL and on every hop.
 
 use super::testserver::*;
-use super::{Hop, HostRules};
+use super::{Hop, HopInfo, HostRules};
+use crate::error::{Refused, RefusedBy};
 use crate::asyncio::block_on;
 use crate::error::Error;
 use crate::http::{Url, UrlLimits};
+use std::sync::{Arc, Mutex};
 
 fn rules(entries: &[&str]) -> HostRules {
     HostRules::new(entries.iter().copied()).unwrap()
@@ -21,12 +23,12 @@ fn as_host(server: &TestServer, host: &str, path: &str) -> String {
 }
 
 fn refused(e: &Error) -> bool {
-    matches!(e, Error::Http(m) if m.starts_with("host not allowed"))
+    matches!(e, Error::Refused(r) if r.by == RefusedBy::HostRule && r.reason.starts_with("host not allowed"))
 }
 
 /// Refused by a limit of the URL (not by the rule about hosts).
 fn limited(e: &Error) -> bool {
-    matches!(e, Error::Http(m) if m.starts_with("URL not allowed"))
+    matches!(e, Error::Refused(r) if r.by == RefusedBy::UrlLimit && r.reason.starts_with("URL not allowed"))
 }
 
 fn port_of(server: &TestServer) -> u16 {
@@ -48,7 +50,7 @@ fn first(client: &crate::Client, url: &str) -> Result<String, Error> {
 
 /// What `client` decides about a redirect from `from` to `location`: the host it goes to, or why not.
 fn hop_to(client: &crate::Client, from: &str, location: &str) -> Result<String, Error> {
-    let mut hop = Hop { method: "GET".into(), url: Url::parse(from).unwrap(), headers: vec![], body: vec![] };
+    let mut hop = Hop { method: "GET".into(), url: Url::parse(from).unwrap(), headers: vec![], body: vec![], granted: vec![], index: 0 };
     client.follow(&mut hop, 302, &[("Location".to_string(), location.to_string())], &mut 0)?;
     Ok(hop.url.host)
 }
@@ -70,7 +72,7 @@ fn check(what: &str, got: Result<String, Error>, want: &Verdict) {
         (Ok(h), Verdict::Goes(w)) => h == w,
         (Err(e), Verdict::Host) => refused(e),
         (Err(e), Verdict::Url) => limited(e),
-        (Err(Error::Http(m)), Verdict::Plain) => m.contains("plain http"),
+        (Err(Error::Refused(r)), Verdict::Plain) => r.by == RefusedBy::Scheme && r.reason.contains("plain http"),
         _ => false,
     };
     assert!(ok, "{what}: wanted {want:?}, got {got:?}");
@@ -174,7 +176,7 @@ fn a_clone_has_the_rule_that_was_set_on_it() {
 fn the_wildcard_is_applied_to_the_hop_that_a_redirect_makes() {
     // (no network: the decision of `follow` for the redirect's `Location`)
     let client = crate::Client::with_tls_config(crate::tls::ClientConfig::new(crate::x509::TrustStore::empty())).allowed_hosts(rules(&["api.example.com", "*.cdn.example.net"]));
-    let hop = |url: &str| Hop { method: "GET".into(), url: Url::parse(url).unwrap(), headers: vec![], body: vec![] };
+    let hop = |url: &str| Hop { method: "GET".into(), url: Url::parse(url).unwrap(), headers: vec![], body: vec![], granted: vec![], index: 0 };
     let location = |value: &str| vec![("Location".to_string(), value.to_string())];
     // (where the redirect goes, the host it ends up at if it is followed)
     for (to, goes_to) in [
@@ -389,7 +391,7 @@ fn the_rule_of_a_module_that_reaches_the_marketplace_holds_on_every_redirect() {
     assert!(hop_to(&client, &base, "?q=1").is_ok());
     assert!(limited(&hop_to(&client, &base, &format!("?q={}", "a".repeat(100))).unwrap_err()));
     // (a hop that follows a hop: it is the one the redirect has made that the next is judged from, and every one is judged)
-    let mut hop = Hop { method: "GET".into(), url: Url::parse(from).unwrap(), headers: vec![], body: vec![] };
+    let mut hop = Hop { method: "GET".into(), url: Url::parse(from).unwrap(), headers: vec![], body: vec![], granted: vec![], index: 0 };
     let at = |v: &str| vec![("Location".to_string(), v.to_string())];
     let mut hops = 0;
     assert!(client.follow(&mut hop, 302, &at("https://x.gallerycdn.vsassets.io/one"), &mut hops).unwrap());
@@ -500,4 +502,309 @@ fn a_clone_has_the_limits_that_were_set_on_it() {
     assert!(limited(&strict.get(&server.url("/")).unwrap_err()));
     assert_eq!(shared.get(&server.url("/")).unwrap().text(), "hello");
     assert_eq!(strict.clone().url_limits(UrlLimits::new()).get(&server.url("/")).unwrap().text(), "hello");
+}
+
+// ------------------------------------------------------------------------------------------------ headers for each hop
+
+type Log = Arc<Mutex<Vec<String>>>;
+
+/// A hook that notes what it is asked (`hop method port from-port`) and gives what `give` says for the port the hop goes to.
+fn noting(log: &Log, give: impl Fn(&HopInfo<'_>) -> Result<Vec<(String, String)>, Error> + Send + Sync + 'static) -> impl Fn(&HopInfo<'_>) -> Result<Vec<(String, String)>, Error> + Send + Sync + 'static {
+    let log = log.clone();
+    move |info| {
+        let from = info.from.map_or("-".to_string(), |u| u.port.to_string());
+        log.lock().unwrap().push(format!("{} {} {} {} {}", info.hop, info.method, info.url.port, from, info.crosses_origin()));
+        give(info)
+    }
+}
+
+fn h(name: &str, value: &str) -> (String, String) {
+    (name.to_string(), value.to_string())
+}
+
+#[test]
+fn each_hop_gets_the_headers_the_hook_gives_for_it_and_no_other_hop_does() {
+    // a (127.0.0.1) -> b (localhost) -> c (127.0.0.1): three hosts, three tokens, and a header the hook gives is not one that a redirect carries on
+    let c = TestServer::start(|_| ok("end"));
+    let c_url = c.url("/c");
+    let b = TestServer::start(move |_| Reply::Send(response(302, &[&format!("Location: {c_url}")], b"")));
+    let b_url = as_host(&b, "localhost", "/b");
+    let a = TestServer::start(move |_| Reply::Send(response(302, &[&format!("Location: {b_url}")], b"")));
+    let (pa, pb, pc) = (port_of(&a), port_of(&b), port_of(&c));
+    let log: Log = Default::default();
+    let client = a.client().hop_headers(noting(&log, move |info| {
+        Ok(match info.url.port {
+            p if p == pa => vec![h("Authorization", "Bearer token-a"), h("PRIVATE-TOKEN", "private-a")],
+            p if p == pb => vec![h("Authorization", "Bearer token-b")],
+            _ => vec![],
+        })
+    }));
+    assert_eq!(client.get(&a.url("/a")).unwrap().text(), "end");
+    let seen = |s: &TestServer| s.requests().remove(0);
+    assert_eq!((seen(&a).header("authorization"), seen(&a).header("private-token")), (Some("Bearer token-a"), Some("private-a")));
+    assert_eq!((seen(&b).header("authorization"), seen(&b).header("private-token")), (Some("Bearer token-b"), None), "b gets its own, and not what a was given");
+    assert_eq!((seen(&c).header("authorization"), seen(&c).header("private-token")), (None, None), "c is given nothing, and not what a or b was given");
+    // asked once for each hop, in order, with what each hop is
+    assert_eq!(*log.lock().unwrap(), vec![format!("0 GET {pa} - false"), format!("1 GET {pb} {pa} true"), format!("2 GET {pc} {pb} true")]);
+}
+
+#[test]
+fn a_redirect_to_the_same_origin_is_not_a_crossing_and_is_asked_about_all_the_same() {
+    let server = TestServer::start(|s| if s.path() == "/start" { Reply::Send(response(302, &["Location: /next"], b"")) } else { ok("there") });
+    let log: Log = Default::default();
+    let client = server.client().hop_headers(noting(&log, |info| Ok(vec![h("X-Hop", &info.hop.to_string())])));
+    assert_eq!(client.get(&server.url("/start")).unwrap().text(), "there");
+    let port = port_of(&server);
+    assert_eq!(*log.lock().unwrap(), vec![format!("0 GET {port} - false"), format!("1 GET {port} {port} false")]);
+    let reqs = server.requests();
+    assert_eq!((reqs[0].header("x-hop"), reqs[1].header("x-hop")), (Some("0"), Some("1")), "each request has the header of its own hop, not of the one before");
+}
+
+#[test]
+fn what_the_hook_gives_replaces_what_the_caller_set_and_what_a_url_says() {
+    let server = TestServer::start(|_| ok("hello"));
+    let client = server.client().hop_headers(|_| Ok(vec![h("authorization", "Bearer from-hook")]));
+    // (the caller's own Authorization, a user name in the URL: the hook's is the one that is sent, and there is one)
+    let r = client.request("GET", &server.url("/")).header("Authorization", "Bearer from-caller").header("X-Other", "kept").send().unwrap();
+    assert_eq!(r.text(), "hello");
+    let url = server.url("/").replace("://", "://user:pw@");
+    client.get(&url).unwrap();
+    for seen in server.requests() {
+        assert_eq!(seen.header("authorization"), Some("Bearer from-hook"));
+        assert_eq!(seen.head.to_ascii_lowercase().matches("\nauthorization:").count(), 1, "{}", seen.head);
+    }
+    assert_eq!(server.requests()[0].header("x-other"), Some("kept"));
+    // without a hook, they are what they were
+    let plain = server.client();
+    plain.request("GET", &server.url("/")).header("Authorization", "Bearer from-caller").send().unwrap();
+    assert_eq!(server.requests().last().unwrap().header("authorization"), Some("Bearer from-caller"));
+}
+
+#[test]
+fn a_caller_header_is_carried_by_a_redirect_as_before_and_the_credential_ones_are_dropped_at_another_origin() {
+    // what the hook gives is for the hop it is given for; what the caller set is what it was (Authorization, Cookie and Proxy-Authorization
+    // are dropped at another origin, and the others stay), and the hook's answer for the new hop is added to that
+    let target = TestServer::start(|_| ok("target"));
+    let landed = as_host(&target, "localhost", "/landed");
+    let origin = TestServer::start(move |_| Reply::Send(response(302, &[&format!("Location: {landed}")], b"")));
+    let pt = port_of(&target);
+    let client = origin.client().hop_headers(move |info| Ok(if info.url.port == pt { vec![h("Authorization", "Bearer for-target")] } else { vec![] }));
+    client
+        .request("GET", &origin.url("/"))
+        .header("Authorization", "Bearer from-caller")
+        .header("Cookie", "k=v")
+        .header("X-Kept", "yes")
+        .send()
+        .unwrap();
+    let seen = target.requests().remove(0);
+    assert_eq!(seen.header("authorization"), Some("Bearer for-target"));
+    assert_eq!((seen.header("cookie"), seen.header("x-kept")), (None, Some("yes")));
+}
+
+#[test]
+fn a_hop_the_hook_refuses_is_not_connected_to_and_the_request_fails_with_what_it_said() {
+    let target = TestServer::start(|_| ok("target"));
+    let landed = as_host(&target, "localhost", "/landed");
+    let origin = TestServer::start(move |_| Reply::Send(response(302, &[&format!("Location: {landed}")], b"moved")));
+    let refuse_localhost = |info: &HopInfo<'_>| {
+        if info.url.host == "localhost" {
+            Err(Error::Http(format!("no credentials for {}", info.url.host)))
+        } else {
+            Ok(vec![h("Authorization", "Bearer secret-value")])
+        }
+    };
+    let client = origin.client().hop_headers(refuse_localhost);
+    let e = client.get(&origin.url("/")).unwrap_err();
+    assert!(e.to_string().contains("no credentials for localhost"), "{e}");
+    assert!(!e.to_string().contains("secret-value"));
+    assert_eq!((origin.connections(), target.connections()), (1, 0));
+    assert!(client.get_stream(&origin.url("/")).is_err());
+    assert_eq!(target.connections(), 0);
+    // the first URL too: nothing is connected to
+    let none = origin.client().hop_headers(|_| Err(Error::Http("no".into())));
+    let before = origin.connections();
+    assert!(none.get(&origin.url("/")).unwrap_err().to_string().contains("no"));
+    assert_eq!(origin.connections(), before);
+    // and a refused hop leaves the request as it was: the URL, the method, the headers that were given for it
+    let mut hop = client.start("POST".into(), &origin.url("/"), vec![], b"x".to_vec()).unwrap();
+    let granted = hop.granted.clone();
+    assert!(client.follow(&mut hop, 302, &[("Location".to_string(), as_host(&target, "localhost", "/"))], &mut 0).is_err());
+    assert_eq!((hop.method.as_str(), hop.url.host.as_str(), hop.body.len(), hop.granted), ("POST", "127.0.0.1", 1, granted));
+}
+
+#[test]
+fn the_hook_is_not_asked_about_a_url_that_the_rule_or_a_limit_refuses() {
+    let target = TestServer::start(|_| ok("target"));
+    let landed = as_host(&target, "localhost", "/landed");
+    let origin = TestServer::start(move |_| Reply::Send(response(302, &[&format!("Location: {landed}")], b"")));
+    let log: Log = Default::default();
+    let client = origin.client().allowed_hosts(rules(&["127.0.0.1"])).hop_headers(noting(&log, |_| Ok(vec![h("Authorization", "Bearer t")])));
+    assert!(refused(&client.get(&origin.url("/")).unwrap_err()));
+    // asked for the first URL, which the rule allows, and not for the redirect that it does not
+    assert_eq!(log.lock().unwrap().len(), 1);
+    assert_eq!(target.connections(), 0);
+    log.lock().unwrap().clear();
+    let limited_client = origin.client().url_limits(UrlLimits::new().max_length(10)).hop_headers(noting(&log, |_| Ok(vec![])));
+    assert!(limited(&limited_client.get(&origin.url("/")).unwrap_err()));
+    assert!(log.lock().unwrap().is_empty());
+}
+
+#[test]
+fn a_header_from_the_hook_that_is_not_one_is_an_error_and_never_says_its_value() {
+    let server = TestServer::start(|_| ok("hello"));
+    for (name, value) in [
+        ("Bad Name", "ok"),
+        ("", "ok"),
+        ("X-Ok", "secret\r\nX-Injected: yes"),
+        ("X-Ok", "secret\nX-Injected: yes"),
+        ("X-Ok", "se\0cret"),
+        ("Host", "evil.example"),
+        ("host", "evil.example"),
+        ("Connection", "upgrade"),
+        ("Content-Length", "0"),
+    ] {
+        let (n, v) = (name.to_string(), value.to_string());
+        let client = server.client().hop_headers(move |_| Ok(vec![(n.clone(), v.clone())]));
+        let e = client.get(&server.url("/")).unwrap_err();
+        assert!(matches!(&e, Error::Http(m) if m.contains("hop hook")), "{name:?}: {e}");
+        assert!(!e.to_string().contains("secret") && !e.to_string().contains("evil.example"), "{name:?}: {e}");
+    }
+    assert_eq!(server.connections(), 0, "nothing was sent");
+}
+
+#[test]
+fn the_hook_is_asked_once_for_a_hop_that_is_sent_again() {
+    // the pooled connection has been closed by the server: the request goes again on a new one, with the same headers and without asking again
+    let server = TestServer::start(|_| ok("hello"));
+    let log: Log = Default::default();
+    let client = server.client().hop_headers(noting(&log, |_| Ok(vec![h("X-Token", "t")])));
+    assert_eq!(client.get(&server.url("/")).unwrap().text(), "hello");
+    server.close_all();
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    assert_eq!(client.get(&server.url("/")).unwrap().text(), "hello");
+    assert_eq!(log.lock().unwrap().len(), 2, "one for each request: {:?}", log.lock().unwrap());
+    assert!(server.requests().iter().all(|s| s.header("x-token") == Some("t")));
+}
+
+#[test]
+fn the_method_the_hook_is_told_is_the_one_the_hop_is_sent_with() {
+    let client = crate::Client::with_tls_config(crate::tls::ClientConfig::new(crate::x509::TrustStore::empty()));
+    let log: Log = Default::default();
+    let client = client.hop_headers(noting(&log, |_| Ok(vec![])));
+    for (status, method, sent_as) in [(303, "POST", "GET"), (302, "POST", "GET"), (301, "POST", "GET"), (307, "POST", "POST"), (308, "POST", "POST"), (302, "GET", "GET"), (303, "HEAD", "HEAD")] {
+        log.lock().unwrap().clear();
+        let mut hop = client.start(method.into(), "https://a.example/start", vec![], b"{}".to_vec()).unwrap();
+        assert!(client.follow(&mut hop, status, &[("Location".to_string(), "https://b.example/x".to_string())], &mut 0).unwrap());
+        assert_eq!(hop.method, sent_as, "{status} {method}");
+        let told = log.lock().unwrap().clone();
+        assert_eq!(told[1], format!("1 {sent_as} 443 443 true"), "{status} {method}: {told:?}");
+    }
+}
+
+#[test]
+fn the_async_client_and_the_clones_have_their_hooks_too() {
+    let target = TestServer::start(|_| ok("target"));
+    let landed = target.url("/landed");
+    let origin = TestServer::start(move |_| Reply::Send(response(302, &[&format!("Location: {landed}")], b"")));
+    let shared = origin.client();
+    let a = shared.clone().hop_headers(|_| Ok(vec![h("X-Who", "a")]));
+    let b = shared.clone().hop_headers(|_| Ok(vec![h("X-Who", "b")]));
+    assert_eq!(block_on(a.clone().into_async().get(&origin.url("/"))).unwrap().text(), "target");
+    assert_eq!(target.requests().last().unwrap().header("x-who"), Some("a"));
+    assert_eq!(block_on(b.get_async(&origin.url("/"))).unwrap().text(), "target");
+    assert_eq!(target.requests().last().unwrap().header("x-who"), Some("b"));
+    // the client they came from has none, and a hook can be taken away
+    shared.get(&origin.url("/")).unwrap();
+    assert_eq!(target.requests().last().unwrap().header("x-who"), None);
+    a.no_hop_headers().get(&origin.url("/")).unwrap();
+    assert_eq!(target.requests().last().unwrap().header("x-who"), None);
+    // (an error of the hook in the async client's first hop, too)
+    let refusing = shared.clone().hop_headers(|_| Err(Error::Http("no".into()))).into_async();
+    assert!(block_on(refusing.get(&origin.url("/"))).is_err());
+}
+
+// ------------------------------------------------------------------------------------------------ a refusal is its own kind of error
+
+fn refusal(e: Error) -> Refused {
+    match e {
+        Error::Refused(r) => r,
+        other => panic!("not a refusal: {other:?}"),
+    }
+}
+
+#[test]
+fn a_refusal_is_not_a_network_error_and_says_which_hop_and_which_rule_refused() {
+    let c = TestServer::start(|_| ok("end"));
+    let c_url = as_host(&c, "localhost", "/c");
+    let b = TestServer::start(move |_| Reply::Send(response(302, &[&format!("Location: {c_url}")], b"")));
+    let b_url = b.url("/b");
+    let a = TestServer::start(move |_| Reply::Send(response(302, &[&format!("Location: {b_url}")], b"")));
+    // the host rule, at the third hop of a chain of redirects (the request itself is hop 0)
+    let client = a.client().allowed_hosts(rules(&["127.0.0.1"]));
+    let r = refusal(client.get(&a.url("/a")).unwrap_err());
+    assert_eq!((r.hop, r.by, r.is_redirect()), (2, RefusedBy::HostRule, true));
+    assert!(r.reason.starts_with("host not allowed: localhost"), "{}", r.reason);
+    assert_eq!(Error::Refused(r).to_string(), format!("redirect 2 refused: host not allowed: localhost:{} is not in the allowed hosts", port_of(&c)));
+    // the request itself
+    let r = refusal(a.client().allowed_hosts(rules(&["api.example.com"])).get(&a.url("/a")).unwrap_err());
+    assert_eq!((r.hop, r.by, r.is_redirect()), (0, RefusedBy::HostRule, false));
+    assert!(Error::Refused(r).to_string().starts_with("request refused: host not allowed"));
+    // a limit on the URL: of the request itself, and (below) of a redirect
+    let r = refusal(a.client().url_limits(UrlLimits::new().max_length(a.url("/a").len() - 1)).get(&a.url("/a")).unwrap_err());
+    assert_eq!((r.hop, r.by), (0, RefusedBy::UrlLimit), "{r:?}");
+    let creds = TestServer::start(|_| ok("x"));
+    let to_creds = creds.url("/").replace("://", "://user:pw@");
+    let origin = TestServer::start(move |_| Reply::Send(response(302, &[&format!("Location: {to_creds}")], b"")));
+    let r = refusal(origin.client().url_limits(UrlLimits::new().refuse_credentials(true)).get(&origin.url("/")).unwrap_err());
+    assert_eq!((r.hop, r.by), (1, RefusedBy::UrlLimit));
+    assert_eq!(creds.connections(), 0);
+    // the scheme: plain http where it is not allowed (the request itself), and a redirect from https to plain http
+    let plain = crate::Client::with_tls_config(crate::tls::ClientConfig::new(crate::x509::TrustStore::empty()));
+    let before = a.connections();
+    let r = refusal(plain.get(&a.url("/a")).unwrap_err());
+    assert_eq!((r.hop, r.by), (0, RefusedBy::Scheme));
+    assert_eq!(a.connections(), before, "nothing was connected to");
+    let mut hop = plain.start("GET".into(), "https://a.example/", vec![], vec![]).unwrap();
+    let r = refusal(plain.follow(&mut hop, 302, &[("Location".to_string(), "http://a.example/".to_string())], &mut 0).unwrap_err());
+    assert_eq!((r.hop, r.by), (1, RefusedBy::Scheme));
+    // a hook that says no, whatever kind of error it says it with
+    for (given, reason) in [(Error::Http("no token for this host".into()), "no token for this host"), (Error::Io(std::io::Error::other("broken")), "broken"), (Error::Tls("t".into()), "t")] {
+        let given = std::sync::Mutex::new(Some(given));
+        let client = a.client().hop_headers(move |_| Err(given.lock().unwrap().take().unwrap_or_else(|| Error::Http("again".into()))));
+        let r = refusal(client.get(&a.url("/a")).unwrap_err());
+        assert_eq!((r.hop, r.by), (0, RefusedBy::Hook));
+        assert!(r.reason.contains(reason), "{r:?}");
+    }
+    // (one the hook made itself, with a hop of its own choosing, is the hop it is: the client knows which it was)
+    let client = a.client().hop_headers(|info| Err(Error::Refused(Refused { hop: 99, by: RefusedBy::Hook, reason: format!("not {}", info.url.host) })));
+    let r = refusal(client.get(&a.url("/a")).unwrap_err());
+    assert_eq!((r.hop, r.reason.as_str()), (0, "not 127.0.0.1"));
+    // and a network failure is not a refusal
+    let closed = TestServer::start(|_| ok("x"));
+    let url = closed.url("/");
+    drop(closed);
+    let e = a.client().get(&url).unwrap_err();
+    assert!(!matches!(e, Error::Refused(_)), "{e}");
+}
+
+#[test]
+fn what_a_refusal_says_names_the_host_and_never_the_path_a_credential_or_a_value() {
+    let client = marketplace().hop_headers(|_| Err(Error::Http("no token for this host".into())));
+    // (the hook is asked last: these are refused by the rule or a limit before it is)
+    for url in [
+        "https://evil.example.org/private-path?token=abc123",
+        "https://user:hunter2@x.gallerycdn.vsassets.io/private-path?token=abc123",
+        "http://x.gallerycdn.vsassets.io/private-path?token=abc123",
+        "https://x.gallerycdn.vsassets.io:8443/private-path?token=abc123",
+    ] {
+        let e = first(&client, url).unwrap_err();
+        let said = format!("{e} {e:?}");
+        for secret in ["private-path", "token=abc123", "hunter2", "abc123"] {
+            assert!(!said.contains(secret), "{url}: {said}");
+        }
+    }
+    // a long URL is refused with its length and not its text
+    let long = format!("https://x.gallerycdn.vsassets.io/{}", "k".repeat(3000));
+    let said = format!("{:?}", first(&client, &long).unwrap_err());
+    assert!(said.contains("3033") && !said.contains("kkkk"), "{said}");
 }

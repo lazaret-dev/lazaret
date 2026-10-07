@@ -1,7 +1,7 @@
 //! AES-GCM authenticated encryption (NIST SP 800-38D), 96-bit nonces only (as in TLS 1.3).
 
 use super::aes::Aes;
-#[cfg(test)]
+#[cfg(any(test, tiny_https_fuzzing))]
 use super::aes::Backend;
 use super::ghash::GhashKey;
 use crate::util::ct_eq;
@@ -30,7 +30,7 @@ impl AesGcm {
     }
 
     /// Like [`AesGcm::new`] with an explicit implementation, for the tests that compare them.
-    #[cfg(test)]
+    #[cfg(any(test, tiny_https_fuzzing))]
     pub(crate) fn with_backend(key: &[u8], backend: Backend) -> Self {
         AesGcm::from_aes(Aes::with_backend(key, backend))
     }
@@ -42,7 +42,7 @@ impl AesGcm {
         AesGcm { aes, ghash }
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, tiny_https_fuzzing))]
     pub(crate) fn backend(&self) -> Backend {
         self.aes.backend()
     }

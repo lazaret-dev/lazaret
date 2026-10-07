@@ -1560,7 +1560,7 @@ mod tests {
     }
 
     fn open(s: &mut State) -> u32 {
-        let request = Request { method: "GET", scheme: "https", authority: "x", path: "/", headers: &[] };
+        let request = Request { method: "GET", scheme: "https", authority: "x", path: "/", headers: &[], secret: &[] };
         s.h2.open_stream(&request, true).ok().expect("a stream is opened")
     }
 

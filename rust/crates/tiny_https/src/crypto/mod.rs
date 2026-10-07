@@ -52,3 +52,12 @@ mod sha2_wipe;
 pub mod x25519;
 #[cfg(all(test, feature = "net"))]
 mod timing;
+
+/// Entry points for the coverage-guided fuzzer in `fuzz/`; compiled only with `--cfg tiny_https_fuzzing`. Not part of the API.
+#[cfg(all(tiny_https_fuzzing, feature = "net"))]
+#[doc(hidden)]
+pub mod fuzz_hooks {
+    pub use super::fuzz_aead::{aead, example_inputs as aead_example_inputs};
+}
+#[cfg(all(tiny_https_fuzzing, feature = "net"))]
+mod fuzz_aead;

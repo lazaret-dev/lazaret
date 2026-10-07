@@ -134,7 +134,7 @@ impl Link {
 
     fn open(&mut self, method: &str, path: &str, headers: &[(&str, &str)], end_stream: bool) -> u32 {
         let headers = pairs(headers);
-        self.client.open_stream(&ClientRequest { method, scheme: "https", authority: "example.com", path, headers: &headers }, end_stream).unwrap()
+        self.client.open_stream(&ClientRequest { method, scheme: "https", authority: "example.com", path, headers: &headers, secret: &[] }, end_stream).unwrap()
     }
 
     fn reply(&mut self, stream: u32, steps: Vec<Step>) {
@@ -314,7 +314,7 @@ fn streams_past_the_servers_limit_are_refused_and_may_be_tried_again() {
     }
     // now the client knows
     assert!(!link.client.can_open_stream());
-    assert_eq!(link.client.open_stream(&ClientRequest { method: "GET", scheme: "https", authority: "a", path: "/", headers: &[] }, true), Err(OpenError::Full));
+    assert_eq!(link.client.open_stream(&ClientRequest { method: "GET", scheme: "https", authority: "a", path: "/", headers: &[], secret: &[] }, true), Err(OpenError::Full));
     link.reply(ids[0], response(200, &[], b""));
     link.run();
     assert!(link.client.can_open_stream());
@@ -795,7 +795,7 @@ impl Wire {
     }
 
     fn fetch(&mut self, method: &str, path: &str) -> (u32, Got) {
-        let id = self.conn.open_stream(&ClientRequest { method, scheme: "https", authority: "example.com", path, headers: &[] }, true).unwrap();
+        let id = self.conn.open_stream(&ClientRequest { method, scheme: "https", authority: "example.com", path, headers: &[], secret: &[] }, true).unwrap();
         let got = self.collect(id);
         (id, got)
     }
@@ -859,7 +859,7 @@ fn over_tcp_steps_happen_when_they_are_due_and_streams_do_not_wait_for_each_othe
     });
     let mut wire = Wire::connect(addr);
     let started = Instant::now();
-    let slow = wire.conn.open_stream(&ClientRequest { method: "GET", scheme: "https", authority: "example.com", path: "/slow", headers: &[] }, true).unwrap();
+    let slow = wire.conn.open_stream(&ClientRequest { method: "GET", scheme: "https", authority: "example.com", path: "/slow", headers: &[], secret: &[] }, true).unwrap();
     let (_, quick) = wire.fetch("GET", "/quick");
     assert_eq!(quick.body, b"quick");
     assert!(started.elapsed() < Duration::from_millis(250), "the quick one did not wait for the slow one");
@@ -890,7 +890,7 @@ fn over_tcp_a_request_body_is_uploaded_and_echoed() {
     let (addr, server) = spawn_server(Settings::default(), |r| response(200, &[], &r.body));
     let mut wire = Wire::connect(addr);
     let body: Vec<u8> = (0..3_000_000u32).map(|i| (i % 249) as u8).collect();
-    let id = wire.conn.open_stream(&ClientRequest { method: "POST", scheme: "https", authority: "example.com", path: "/echo", headers: &[] }, false).unwrap();
+    let id = wire.conn.open_stream(&ClientRequest { method: "POST", scheme: "https", authority: "example.com", path: "/echo", headers: &[], secret: &[] }, false).unwrap();
     let mut sent = 0;
     let mut got = Got::default();
     wire.drive(|c| {
@@ -923,7 +923,7 @@ fn over_tcp_a_client_goaway_lets_the_open_streams_finish() {
         vec![Step::now(Action::Head { status: 200, headers: vec![], end: false }), Step::later(Duration::from_millis(100), Action::Data(b"done".to_vec())), Step::now(Action::End)]
     });
     let mut wire = Wire::connect(addr);
-    let id = wire.conn.open_stream(&ClientRequest { method: "GET", scheme: "https", authority: "example.com", path: "/", headers: &[] }, true).unwrap();
+    let id = wire.conn.open_stream(&ClientRequest { method: "GET", scheme: "https", authority: "example.com", path: "/", headers: &[], secret: &[] }, true).unwrap();
     let mut got = Got::default();
     // until the head is in
     wire.drive(|c| {

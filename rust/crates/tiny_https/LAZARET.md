@@ -1,8 +1,8 @@
 # tiny_https in Lazaret
 
 This folder is tiny_https 0.1.0, the HTTPS/TLS library Lazaret's network layer is built on, as it was handed
-over: nothing in it is edited by hand. `scripts/sync_tiny_https.py` took it on 2026-10-06 from `tiny_https-2026-10-06.tgz`
-(SHA-256 `b229f1b851b786f1e659a00a0b5b47e0ba7fa71b8d3bfe899c382efa91f97641`): 305 files, 7,453,904 bytes. Its licence is Apache-2.0 (`LICENSE`), as
+over: nothing in it is edited by hand. `scripts/sync_tiny_https.py` took it on 2026-10-06 from `tiny_https-2026-10-06b.tgz`
+(SHA-256 `3f12f0d386048b15134ac769020f3f4a27279ace4a8ef769508bc1b2433febe2`): 307 files, 7,515,951 bytes. Its licence is Apache-2.0 (`LICENSE`), as
 Lazaret's is.
 
 - **What is here:** `Cargo.toml`, `LICENSE`, `README.md`, `BACKLOG.md`, `src/`, `tests/` and `examples/`.

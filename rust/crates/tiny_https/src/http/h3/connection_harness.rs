@@ -313,7 +313,7 @@ pub(crate) fn exchange<C: Choose>(c: &mut C, max_steps: usize, garbage: bool) ->
                 let extra: Vec<(String, String)> = (0..c.below(3)).map(|_| (["accept", "user-agent", "x-a", "Accept-Encoding"][c.below(4)].to_string(), value(c))).collect();
                 let method = ["GET", "GET", "POST", "HEAD"][c.below(4)];
                 let end = c.below(3) != 0;
-                let req = Request { method, scheme: "https", authority: "example.com", path: &path, headers: &extra };
+                let req = Request { method, scheme: "https", authority: "example.com", path: &path, headers: &extra, secret: &[] };
                 if let Ok(id) = conn.open_stream(&mut t, &req, end) {
                     let mut fields = vec![(":method".to_string(), method.to_string()), (":scheme".to_string(), "https".to_string()), (":authority".to_string(), "example.com".to_string()), (":path".to_string(), path.clone())];
                     fields.extend(extra.iter().map(|(n, v)| (n.to_ascii_lowercase(), v.clone())));

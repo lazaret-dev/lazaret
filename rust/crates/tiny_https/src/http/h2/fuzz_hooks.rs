@@ -110,7 +110,7 @@ pub fn client(data: &[u8]) {
         for i in 0..requests {
             let method = ["GET", "POST", "HEAD"][i % 3];
             let headers = vec![("accept".to_string(), "*/*".to_string()), ("x-n".to_string(), i.to_string())];
-            let request = Request { method, scheme: "https", authority: "example.com", path: "/a?b=c", headers: &headers };
+            let request = Request { method, scheme: "https", authority: "example.com", path: "/a?b=c", headers: &headers, secret: &[] };
             if let Ok(id) = c.open_stream(&request, method != "POST") {
                 ids.push(id);
                 if method == "POST" {
@@ -414,7 +414,7 @@ pub fn example_client_flights() -> Vec<Vec<u8>> {
         if long {
             headers.push(("x-long".to_string(), "v".repeat(40_000)));
         }
-        let request = Request { method, scheme: "https", authority: "example.com", path: "/a?b=c", headers: &headers };
+        let request = Request { method, scheme: "https", authority: "example.com", path: "/a?b=c", headers: &headers, secret: &[] };
         let _ = c.feed(&{
             let mut s = Vec::new();
             frame::write_settings(&mut s, &[]);

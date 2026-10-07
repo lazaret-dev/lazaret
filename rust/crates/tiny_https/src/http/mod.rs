@@ -101,7 +101,8 @@
 //! rule is loose unless it is told otherwise: [`one_label_wildcards`](HostRules::one_label_wildcards) makes `*.example.com` match exactly one
 //! label, [`default_port_only`](HostRules::default_port_only) makes an entry match the default port only, and
 //! [`Client::url_limits`] with [`UrlLimits::strict`] refuses a URL that is not https, has credentials, is not printable ASCII or is longer
-//! than 2,048 bytes.
+//! than 2,048 bytes. [`Client::hop_headers`] gives each hop (the request and every redirect) the headers the hook says for the host it goes
+//! to, which is where credentials belong: a token is sent to that host and does not follow a redirect to another.
 //!
 //! ```no_run
 //! use tiny_https::http::{HostRules, UrlLimits};
@@ -133,6 +134,8 @@ pub(crate) mod parser;
 mod stream;
 #[cfg(test)]
 mod egress_tests;
+#[cfg(tiny_https_fuzzing)]
+mod egress_fuzz;
 #[cfg(test)]
 mod h2_client_tests;
 #[cfg(test)]
@@ -162,6 +165,8 @@ pub mod fuzz_hooks {
 
     // the HTTP/2 layers: header blocks, frames, the client's connection and the server's
     pub use super::h3::fuzz_hooks::{qpack_decoder as h3_qpack_decoder, qpack_encoder as h3_qpack_encoder, qpack_example_decoder_scripts as h3_qpack_example_decoder_scripts, qpack_example_encoder_scripts as h3_qpack_example_encoder_scripts, qpack_example_exchange_scripts as h3_qpack_example_exchange_scripts, qpack_exchange as h3_qpack_exchange, frames as h3_frames, frame_example_streams as h3_frame_example_streams, connection_exchange as h3_connection_exchange, connection_example_scripts as h3_connection_example_scripts};
+    // what a client with a rule about hosts, limits on a URL and a hook for each hop decides about a request and its redirects
+    pub use super::egress_fuzz::{egress, example_inputs as egress_example_inputs};
     pub use super::h2::fuzz_hooks::{client as h2_client, example_client_flights as h2_example_client_flights, example_header_blocks as h2_example_header_blocks, example_server_flights as h2_example_server_flights, frames as h2_frames, hpack as h2_hpack};
 
     /// The value of an `Alt-Svc` field (`data` read as text): see `altsvc.rs`.
@@ -233,7 +238,7 @@ pub mod fuzz_hooks_server {
 
 use crate::asyncio::net::{deadline_error, Io};
 use crate::asyncio::{BlockingTask, Pool};
-use crate::error::{Error, Result};
+use crate::error::{Error, Refused, RefusedBy, Result};
 use crate::pem::base64_encode;
 use crate::tls::{ClientConfig, TlsStream};
 use h2_transport::{Acquired, Registry, StartError, Waits};
@@ -377,7 +382,36 @@ pub struct Client {
     hosts: Option<Arc<HostRules>>,
     /// What the URL of a request, and of every redirect, may not be: see [`Client::url_limits`].
     url_limits: UrlLimits,
+    /// What gives each hop its own headers (its host's credentials): see [`Client::hop_headers`].
+    hop_hook: Option<Arc<HopHook>>,
 }
+
+/// What a hop hook is told about the request that is about to be sent: see [`Client::hop_headers`].
+#[derive(Clone, Copy, Debug)]
+pub struct HopInfo<'a> {
+    /// Where it goes: the URL of the request itself or of the redirect, after the client's host rule and the limits on a URL have allowed it
+    /// (the hook never sees a URL that they refuse).
+    pub url: &'a Url,
+    /// The method it is sent with (a 303 makes a GET of a POST, and the hook is told so).
+    pub method: &'a str,
+    /// 0 for the request itself, 1 for the first redirect it is sent on, and so on.
+    pub hop: usize,
+    /// The URL whose redirect this is; `None` for the request itself.
+    pub from: Option<&'a Url>,
+}
+
+impl HopInfo<'_> {
+    /// Whether this hop goes to another origin (scheme, host or port) than the one that redirected to it. False for the request itself.
+    pub fn crosses_origin(&self) -> bool {
+        self.from.is_some_and(|from| from.origin() != self.url.origin())
+    }
+}
+
+/// The headers the client sets itself, and that a caller's (or a hook's) of the same name does not replace.
+const OWN_HEADERS: [&str; 3] = ["host", "connection", "content-length"];
+
+/// What a hop hook is: see [`Client::hop_headers`].
+type HopHook = dyn Fn(&HopInfo<'_>) -> Result<Vec<(String, String)>> + Send + Sync;
 
 /// What a client that speaks HTTP/3 has besides the TCP machinery.
 #[derive(Clone)]
@@ -421,6 +455,7 @@ impl Client {
             h3: None,
             hosts: None,
             url_limits: UrlLimits::new(),
+            hop_hook: None,
         }
     }
 
@@ -644,18 +679,80 @@ impl Client {
         self
     }
 
+    /// Gives each hop of a request its own headers, which is where a caller puts the credentials of the host a hop goes to: `f` is called
+    /// for the request itself (hop 0) and for **every redirect that is followed**, after the host rule and the limits on a URL have allowed
+    /// that URL and before anything is sent there, and the headers it returns are sent with that hop and with no other (a redirect to another
+    /// host gets what `f` says for that host, not what the host before it was given). An `Err` from `f` refuses the hop: nothing is sent
+    /// there and the request fails with that error.
+    ///
+    /// A header that `f` gives replaces a header of the same name that the caller set on the request (so `Authorization` from `f` is the
+    /// one sent), and is checked as the caller's are (a bad name or value is an error, and so is `Host`, `Connection` or `Content-Length`,
+    /// which the client owns); the error names the header and never says its value. `f` is called once for each hop, also when the request
+    /// is sent again on another connection (a pooled one that had closed, HTTP/3 falling back to TCP). It runs on the thread that makes the
+    /// request, in the async client too, so it should not wait for anything.
+    ///
+    /// Send credentials this way and not as headers of the request: a header the caller sets stays with a redirect to another origin (only
+    /// `Authorization`, `Cookie` and `Proxy-Authorization` are dropped there), where one that `f` gives does not.
+    ///
+    /// ```no_run
+    /// use tiny_https::{Client, error::Error};
+    /// let token = std::env::var("GITHUB_TOKEN").unwrap_or_default();
+    /// let client = Client::new()?.max_redirects(5).hop_headers(move |hop| match hop.url.host.as_str() {
+    ///     // the token goes to GitHub's API and to nobody else, whatever the redirect chain does
+    ///     "api.github.com" if !token.is_empty() => Ok(vec![("Authorization".into(), format!("Bearer {token}"))]),
+    ///     "api.github.com" | "objects.githubusercontent.com" => Ok(vec![]),
+    ///     other => Err(Error::Http(format!("{other} is not a host this client talks to"))),
+    /// });
+    /// # let _ = client; Ok::<(), Error>(())
+    /// ```
+    pub fn hop_headers<F>(mut self, f: F) -> Client
+    where
+        F: Fn(&HopInfo<'_>) -> Result<Vec<(String, String)>> + Send + Sync + 'static,
+    {
+        self.hop_hook = Some(Arc::new(f));
+        self
+    }
+
+    /// Takes the hook of [`hop_headers`](Client::hop_headers) away.
+    pub fn no_hop_headers(mut self) -> Client {
+        self.hop_hook = None;
+        self
+    }
+
+    /// What the hook gives for a hop that is about to be sent, checked: nothing if there is no hook.
+    fn granted_for(&self, info: &HopInfo<'_>) -> Result<Vec<(String, String)>> {
+        let Some(hook) = &self.hop_hook else { return Ok(Vec::new()) };
+        let granted = hook(info).map_err(|e| match e {
+            // (a hook that says no, as an error of its own or as one of ours, has refused the hop)
+            Error::Refused(r) => Error::Refused(Refused { hop: info.hop, ..r }),
+            Error::Http(reason) => Error::Refused(Refused { hop: info.hop, by: RefusedBy::Hook, reason }),
+            other => Error::Refused(Refused { hop: info.hop, by: RefusedBy::Hook, reason: other.to_string() }),
+        })?;
+        for (name, value) in &granted {
+            if !wire::is_valid_header_name(name) || !wire::is_valid_header_value(value) {
+                return Err(Error::Http(format!("invalid header {name:?} from the hop hook")));
+            }
+            if OWN_HEADERS.iter().any(|own| name.eq_ignore_ascii_case(own)) {
+                return Err(Error::Http(format!("the hop hook may not give {name:?}: the client sets it")));
+            }
+        }
+        Ok(granted)
+    }
+
     /// Refuses a URL (as the text it came in) that a limit refuses; the cheap check, made before the text is parsed.
-    pub(crate) fn check_text(&self, text: &str) -> Result<()> {
-        self.url_limits.check_text(text)
+    pub(crate) fn check_text(&self, text: &str, hop: usize) -> Result<()> {
+        self.url_limits.check_text(text).map_err(|reason| Error::Refused(Refused { hop, by: RefusedBy::UrlLimit, reason }))
     }
 
     /// Refuses a URL that a limit or the host rule does not allow. Called for the first URL and for every redirect, before a connection.
-    pub(crate) fn check_target(&self, url: &Url) -> Result<()> {
-        self.url_limits.check(url)?;
+    pub(crate) fn check_target(&self, url: &Url, hop: usize) -> Result<()> {
+        self.url_limits.check(url).map_err(|reason| Error::Refused(Refused { hop, by: RefusedBy::UrlLimit, reason }))?;
         match &self.hosts {
-            Some(rules) if !rules.allows_url(url) => {
-                Err(Error::Http(format!("host not allowed: {} is not in the allowed hosts", url.host_header())))
-            }
+            Some(rules) if !rules.allows_url(url) => Err(Error::Refused(Refused {
+                hop,
+                by: RefusedBy::HostRule,
+                reason: format!("host not allowed: {} is not in the allowed hosts", url.host_header()),
+            })),
             _ => Ok(()),
         }
     }
@@ -834,6 +931,18 @@ pub(crate) struct Hop {
     pub(crate) url: Url,
     pub(crate) headers: Vec<(String, String)>,
     pub(crate) body: Vec<u8>,
+    /// What the client's hop hook gave for this hop (see [`Client::hop_headers`]): sent with this hop and no other, and not part of
+    /// `headers`, which a redirect carries on to the next hop.
+    pub(crate) granted: Vec<(String, String)>,
+    /// 0 for the request itself, 1 for the first redirect it was sent on, and so on.
+    pub(crate) index: usize,
+}
+
+impl Hop {
+    /// The names (lower case) of the headers that the hook gave for this hop: credentials, which a compression table must not keep.
+    pub(crate) fn secret_names(&self) -> Vec<String> {
+        self.granted.iter().map(|(n, _)| n.to_ascii_lowercase()).collect()
+    }
 }
 
 /// What a dial made.
@@ -935,10 +1044,12 @@ impl Client {
         if !wire::is_valid_header_name(&method) {
             return Err(Error::Http("invalid request method".into()));
         }
-        self.check_text(url)?;
+        self.check_text(url, 0)?;
         let url = Url::parse(url)?;
-        self.check_target(&url)?;
-        Ok(Hop { method: method.to_ascii_uppercase(), url, headers, body })
+        self.check_target(&url, 0)?;
+        let method = method.to_ascii_uppercase();
+        let granted = self.granted_for(&HopInfo { url: &url, method: &method, hop: 0, from: None })?;
+        Ok(Hop { method, url, headers, body, granted, index: 0 })
     }
 
     /// Decides what a response means for the request: `Ok(true)` if `hop` now describes the
@@ -951,14 +1062,17 @@ impl Client {
         }
         *hops += 1;
         // (what the server said, and what it comes to: both before anything is sent there)
-        self.check_text(&location)?;
+        self.check_text(&location, *hops)?;
         let next = hop.url.join(&location)?;
-        self.check_text(&next.to_string())?;
+        self.check_text(&next.to_string(), *hops)?;
         if hop.url.is_https() && !next.is_https() {
-            return Err(Error::Http("refusing redirect from https to plain http".into()));
+            return Err(Error::Refused(Refused { hop: *hops, by: RefusedBy::Scheme, reason: "refusing redirect from https to plain http".into() }));
         }
-        self.check_target(&next)?;
+        self.check_target(&next, *hops)?;
         let drop_body = status == 303 && hop.method != "HEAD" || (status == 301 || status == 302) && hop.method == "POST";
+        // (the hook is asked last, with the method the request will have; a hop that it refuses leaves the request as it was)
+        let method = if drop_body { "GET" } else { hop.method.as_str() };
+        let granted = self.granted_for(&HopInfo { url: &next, method, hop: *hops, from: Some(&hop.url) })?;
         if drop_body {
             hop.method = "GET".to_string();
             hop.body.clear();
@@ -968,15 +1082,29 @@ impl Client {
             hop.headers.retain(|(n, _)| !["authorization", "cookie", "proxy-authorization"].iter().any(|s| n.eq_ignore_ascii_case(s)));
         }
         hop.url = next;
+        hop.granted = granted;
+        hop.index = *hops;
         Ok(true)
     }
 
     /// The header list sent with `hop`: ours first, then the caller's (minus those we own).
     pub(crate) fn request_headers(&self, hop: &Hop) -> Result<Vec<(String, String)>> {
-        let (method, url, extra, body) = (hop.method.as_str(), &hop.url, &hop.headers, &hop.body);
+        let (method, url, body) = (hop.method.as_str(), &hop.url, &hop.body);
         if !url.is_https() && !self.allow_insecure_http {
-            return Err(Error::Http("plain http:// URLs are disabled; call allow_insecure_http(true) to permit them".into()));
+            return Err(Error::Refused(Refused {
+                hop: hop.index,
+                by: RefusedBy::Scheme,
+                reason: "plain http:// URLs are disabled; call allow_insecure_http(true) to permit them".into(),
+            }));
         }
+        // the caller's headers, except those of a name that the hook gave for this hop, and then what the hook gave
+        let extra: Vec<(String, String)> = hop
+            .headers
+            .iter()
+            .filter(|(n, _)| !hop.granted.iter().any(|(g, _)| g.eq_ignore_ascii_case(n)))
+            .chain(hop.granted.iter())
+            .cloned()
+            .collect();
         let has = |name: &str| extra.iter().any(|(n, _)| n.eq_ignore_ascii_case(name));
         let mut headers: Vec<(String, String)> = Vec::new();
         headers.push(("Host".into(), url.host_header()));
@@ -998,7 +1126,7 @@ impl Client {
         if !body.is_empty() || matches!(method, "POST" | "PUT" | "PATCH") {
             headers.push(("Content-Length".into(), body.len().to_string()));
         }
-        headers.extend(extra.iter().filter(|(n, _)| !["host", "connection", "content-length"].iter().any(|s| n.eq_ignore_ascii_case(s))).cloned());
+        headers.extend(extra.into_iter().filter(|(n, _)| !OWN_HEADERS.iter().any(|s| n.eq_ignore_ascii_case(s))));
         Ok(headers)
     }
 
@@ -1082,7 +1210,8 @@ impl Client {
             },
         };
         let authority = hop.url.host_header();
-        let request = h2::connection::Request { method: &hop.method, scheme: "https", authority: &authority, path: &hop.url.path_and_query, headers };
+        let secret = hop.secret_names();
+        let request = h2::connection::Request { method: &hop.method, scheme: "https", authority: &authority, path: &hop.url.path_and_query, headers, secret: &secret };
         let failure = match conn.start(&request, &hop.body, waits) {
             Ok(mut stream) if whole => match stream.response(limits.max_body_bytes, waits) {
                 // the caller wants it all: head and body were waited for together, and the body is here
@@ -1149,7 +1278,8 @@ impl Client {
             }
         };
         let authority = hop.url.host_header();
-        let request = h2::connection::Request { method: &hop.method, scheme: "https", authority: &authority, path: &hop.url.path_and_query, headers };
+        let secret = hop.secret_names();
+        let request = h2::connection::Request { method: &hop.method, scheme: "https", authority: &authority, path: &hop.url.path_and_query, headers, secret: &secret };
         let failure = match conn.start(&request, &hop.body, waits) {
             Ok(mut stream) => match stream.head(waits) {
                 Ok(head) => {

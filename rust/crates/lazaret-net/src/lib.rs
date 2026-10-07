@@ -116,6 +116,10 @@ fn classify(e: NetError) -> Failure {
             std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock => Failure::Timeout(io.to_string()),
             _ => Failure::Network(io.to_string()),
         },
+        // the client's rules (the host rule, the URL limits, the scheme) or the hop hook said no, before anything was
+        // sent there: "request refused: …", "redirect 2 refused: …" (the reason names the host, never the path,
+        // a credential or a header's value)
+        NetError::Refused(r) => Failure::Refused(r.to_string()),
     }
 }
 

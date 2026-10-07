@@ -16,6 +16,51 @@ pub enum Error {
     Http(String),
     /// Certificate, ASN.1 or revocation checking failed (the verification part of the crate).
     Verify(verify_error::Error),
+    /// The client refused to send a request, or a redirect it was following, to where it was going, by its own rules and before it connected
+    /// to anything: not a network failure, and not a bad server. See [`Refused`].
+    Refused(Refused),
+}
+
+/// A request or a redirect that the client's rules did not allow: nothing was sent to the host it named.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Refused {
+    /// 0 if the request itself was refused, 1 for the first redirect it was sent on, and so on.
+    pub hop: usize,
+    /// Which rule said no.
+    pub by: RefusedBy,
+    /// Why, in words (it names the host, never a credential, a header value or the path of the URL).
+    pub reason: String,
+}
+
+/// The rule that refused a request or a redirect.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum RefusedBy {
+    /// The rule about hosts of [`Client::allowed_hosts`](crate::http::Client::allowed_hosts).
+    HostRule,
+    /// A limit on the URL of [`Client::url_limits`](crate::http::Client::url_limits) (its length, its characters, credentials in it, a scheme).
+    UrlLimit,
+    /// The scheme: plain http without `allow_insecure_http`, or a redirect from https to plain http.
+    Scheme,
+    /// The hook of [`Client::hop_headers`](crate::http::Client::hop_headers) said no.
+    Hook,
+}
+
+impl Refused {
+    /// Whether this is a redirect that was refused (not the request the caller made).
+    pub fn is_redirect(&self) -> bool {
+        self.hop > 0
+    }
+}
+
+impl fmt::Display for Refused {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.hop == 0 {
+            write!(f, "request refused: {}", self.reason)
+        } else {
+            write!(f, "redirect {} refused: {}", self.hop, self.reason)
+        }
+    }
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -28,6 +73,7 @@ impl fmt::Display for Error {
             Error::Alert(level, desc) => write!(f, "TLS alert received (level {}, description {})", level, desc),
             Error::Http(m) => write!(f, "HTTP error: {}", m),
             Error::Verify(e) => e.fmt(f),
+            Error::Refused(r) => r.fmt(f),
         }
     }
 }
