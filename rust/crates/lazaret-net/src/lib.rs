@@ -32,8 +32,9 @@
 //! **TLS 1.3, or TLS 1.2 with a server that speaks nothing newer** (tiny_https's B-36, its default minimum since the
 //! drop of Oct 7: ECDHE with AEAD suites only, the extended master secret required, the downgrade check of RFC 8446
 //! that catches a TLS 1.3 server pushed down to 1.2, no renegotiation or resumption, and the same certificate checks
-//! as 1.3); every reply says which ([`Reply::tls`]). A server that speaks neither is [`Failure::TlsVersion`], which
-//! the Python side answers by asking that server again with Python's own transport.
+//! as 1.3); every reply says which ([`Reply::tls`]). A server that speaks neither is [`Failure::TlsVersion`], and
+//! Lazaret refuses it: TLS 1.2 is its floor on every transport (John, Oct 7), so the Python side does not ask that
+//! server again with Python's own (`nativenet.TLS_FLOOR`).
 //!
 //! What it does not do: HTTP/3 is off (tiny_https has it, opt-in), nothing is cached, and tiny_https's other opt-in
 //! extras are never asked for: a body comes as the server sent it (no `Content-Encoding` decoding), no cookie is
@@ -64,8 +65,8 @@ pub enum Failure {
     /// The body was over the caller's budget (declared or read).
     TooLarge,
     /// The server offered neither TLS 1.3 nor TLS 1.2: the message, and the host of the hop it was (as a Host header
-    /// writes it), when it is known. The Python side asks that host again with its own transport: on a redirect, that
-    /// host and not the first URL's (the credentials review of decision 14).
+    /// writes it), when it is known: on a redirect, that host and not the first URL's, which the error names (it
+    /// is refused, not asked again with another transport).
     TlsVersion { message: String, host: Option<String> },
     /// TLS failed otherwise: the certificate, the handshake, an alert.
     Tls(String),

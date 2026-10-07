@@ -23,8 +23,8 @@ no header of its own beyond `http.client`'s (`Host`, `Accept-Encoding: identity`
   it for an https URL: one CONNECT through an `http://` proxy, with `Proxy-Authorization` from the
   proxy URL's user and password. A proxy of another kind (an `https://` proxy, or any proxy for a
   plain-http URL) raises `Unsupported`, and the caller takes the `urllib` path as before.
-- **TLS** is `ssl.create_default_context()`: the same verification `urllib` does, with the same
-  certificate store and environment (`SSL_CERT_FILE`).
+- **TLS** is `nativenet.tls_context()`: the same verification `urllib` does, with the same
+  certificate store and environment (`SSL_CERT_FILE`), and nothing older than TLS 1.2.
 - Connecting (TCP, the tunnel, TLS) is a `network`/`connect` span; each answer is counted under
   `connections` as `new` or `reused`, so a timed run shows what reuse did."""
 
@@ -36,7 +36,7 @@ import time
 import urllib.parse
 import urllib.request
 
-from lazaret.scanner import timings
+from lazaret.scanner import nativenet, timings
 
 __all__ = ["Pool", "Response", "Unsupported", "proxy_for", "STALE", "MAX_IDLE", "IDLE_SECONDS"]
 
@@ -145,7 +145,7 @@ class Pool:
 
     def _tls(self):
         if self._context is None:
-            self._context = ssl.create_default_context()
+            self._context = nativenet.tls_context()
         return self._context
 
     # ---- the idle list

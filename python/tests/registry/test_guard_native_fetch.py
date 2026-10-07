@@ -50,6 +50,11 @@ class GuardNativeFetchTests(unittest.TestCase):
         self.addCleanup(f.close)
         return f
 
+    def trusting_the_root(self):
+        """urllib's default context trusting the test's root: PEP 476's hook, which Python's transport builds its
+        context on (nativenet.tls_context), with the floor of TLS 1.2."""
+        return mock.patch.object(ssl, "_create_default_https_context", lambda: ssl.create_default_context(cadata=self.root))
+
     def no_urllib(self, fetcher):
         return mock.patch.object(fetcher, "_opener", side_effect=AssertionError("urllib was used"))
 
@@ -136,13 +141,9 @@ class GuardNativeFetchTests(unittest.TestCase):
             ("/team/..%2fx/echo", ("/team/..%2fx/echo", None), ("/team/..%2fx/echo", None)),   # (/x/echo to nginx)
             ("/team/..;/echo", ("/team/..;/echo", None), ("/team/..;/echo", None)),       # (/echo to Tomcat)
         ]
-        context = ssl.create_default_context(cadata=self.root)
-        build = urllib.request.build_opener
         for python in (False, True):
             f = self.fetcher(auth=auth)
-            with mock.patch.dict(os.environ, {nativenet.ENV: "python"} if python else {}), \
-                    mock.patch.object(urllib.request, "build_opener",
-                                      lambda *h: build(*h, urllib.request.HTTPSHandler(context=context))):
+            with mock.patch.dict(os.environ, {nativenet.ENV: "python"} if python else {}), self.trusting_the_root():
                 for path, native, by_urllib in cases:
                     with self.subTest(path=path, python=python):
                         if python:
@@ -157,8 +158,6 @@ class GuardNativeFetchTests(unittest.TestCase):
     def test_a_redirect_from_another_origin_gets_a_credential_of_the_whole_host_only(self):
         # (the second review of decision 14's credentials: any host the guard fetches from can redirect to one that has
         # a token for a path; npm sends none on a redirect to another host, and pip a .netrc login for it)
-        context = ssl.create_default_context(cadata=self.root)
-        build = urllib.request.build_opener
         start = f"https://127.0.0.1:{self.port}/to-localhost/team/echo"
         for whole, want in ((False, None), (True, "Bearer wh0le")):
             auth = pmsettings.Credentials()
@@ -170,8 +169,7 @@ class GuardNativeFetchTests(unittest.TestCase):
                 self.addCleanup(f.close)
                 with self.subTest(whole=whole, python=python), \
                         mock.patch.dict(os.environ, {nativenet.ENV: "python"} if python else {}), \
-                        mock.patch.object(urllib.request, "build_opener",
-                                          lambda *h: build(*h, urllib.request.HTTPSHandler(context=context))):
+                        self.trusting_the_root():
                     if python:
                         seen = f.json(start)
                     else:

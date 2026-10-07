@@ -238,7 +238,7 @@ def _http(url, headers, max_bytes, hosts, auth_host, what="fetch", has_token=Fal
             reply = _net.request(url, hosts=sorted(hosts), headers=plain, credentials=credentials, max_bytes=max_bytes,
                                  timeout=_repo.DOWNLOAD_TIMEOUT, max_redirects=_repo.MAX_REDIRECTS)
         except _net.UsePython:
-            pass                                 # (urllib below: a server without TLS 1.3, a proxy over TLS)
+            pass                                 # (urllib below: a proxy it does not take, a credential it cannot send)
         except _net.NetError as exc:
             if exc.kind == "too-large":
                 raise SourceError(f"{what}: response exceeds the {max_bytes // (1024 * 1024)}MB budget") from None
@@ -254,7 +254,7 @@ def _http(url, headers, max_bytes, hosts, auth_host, what="fetch", has_token=Fal
                                        kind))
             err.status = reply.status
             raise err
-    opener = urllib.request.build_opener(_Hop(hosts, auth_host, auth_path))
+    opener = urllib.request.build_opener(_Hop(hosts, auth_host, auth_path), _net.HTTPSHandler())
     req = urllib.request.Request(url, headers=headers)
     try:
         with opener.open(req, timeout=_repo.DOWNLOAD_TIMEOUT) as r:

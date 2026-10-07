@@ -294,60 +294,46 @@ class NativeTransportTests(unittest.TestCase):
             self.assertEqual((reply.status, reply.body, reply.tls), (200, b"hello", "TLS 1.2"))
             with nativenet.open_stream(f"https://{host}/size/70000", hosts=[host], max_bytes=100_000, timeout=10) as s:
                 self.assertEqual((s.status, s.tls, len(b"".join(s))), (200, "TLS 1.2", 70_000))
-            self.assertNotIn(host, nativenet.python_hosts())
             self.assertTrue(nativenet.chosen(f"https://{host}/x"))
         finally:
             server.stop()
 
-    def test_a_server_that_speaks_neither_version_is_left_to_python(self):
+    def test_a_server_that_speaks_neither_version_is_refused(self):
+        # (John, Oct 7: "Realistically we should avoid any tls < 1.2 as that would be horrible security stance by a
+        # provider". Such a server used to be handed to Python's transport, which refuses it too (test_tls_floor.py))
         stop, port = serve_old_tls()
         host = f"localhost:{port}"
         try:
-            with self.assertRaises(nativenet.UsePython):
-                nativenet.request(f"https://{host}/ok", hosts=[host], max_bytes=100, timeout=10)
-            self.assertIn(host, nativenet.python_hosts())
-            self.assertFalse(nativenet.chosen(f"https://{host}/x"), "that host goes to Python's transport from then on")
-        finally:
-            stop.set()
-            with nativenet._lock:
-                nativenet._python_hosts.discard(host)
-
-    def test_a_host_left_to_python_is_fetched_by_urllib(self):
-        # (what the registry's fetch does for a host the native transport left to Python: urllib, trusting the test's
-        # root, gets the answer)
-        server, port = serve(self.cert, self.key)
-        host = f"localhost:{port}"
-        with nativenet._lock:
-            nativenet._python_hosts.add(host)
-        try:
-            self.assertFalse(nativenet.chosen(f"https://{host}/ok"))
-            context = ssl.create_default_context(cadata=self.root)
+            for _ in range(2):                                         # (the second time the same: nothing is kept)
+                with self.assertRaises(nativenet.NetError) as caught:
+                    nativenet.request(f"https://{host}/ok", hosts=[host], max_bytes=100, timeout=10)
+                self.assertEqual(caught.exception.kind, "tls")
+                self.assertIn(f"{host} speaks neither TLS 1.3 nor TLS 1.2, and Lazaret uses nothing older",
+                              str(caught.exception))
+                self.assertTrue(nativenet.chosen(f"https://{host}/x"))
+            # the registry's fetch says so, and does not try urllib
             eco = types.SimpleNamespace(id="local", hosts=frozenset({host}), rate={})
             fetch = base.Fetch(eco, repo.module_transport)
-
-            def opener(check):
-                return urllib.request.build_opener(repo._ModuleRedirects(check), urllib.request.HTTPSHandler(context=context))
-            with mock.patch.object(repo, "_module_opener", opener):
-                self.assertEqual(fetch.text(f"https://{host}/ok"), "hello")
+            with mock.patch.object(repo, "_module_opener", side_effect=AssertionError("urllib was used")), \
+                    self.assertRaises(repo.FetchError) as caught:
+                fetch.text(f"https://{host}/ok")
+            self.assertIn("Lazaret uses nothing older", str(caught.exception))
         finally:
-            server.stop()
-            with nativenet._lock:
-                nativenet._python_hosts.discard(host)
+            stop.set()
 
-    def test_a_redirect_to_a_server_that_speaks_neither_version_leaves_that_one_to_python(self):
-        # (the credentials review of decision 14: it used to put the first URL's host on Python's transport)
+    def test_a_redirect_to_a_server_that_speaks_neither_version_is_refused_by_its_name(self):
+        # (the error names the hop refused, a redirect's, not the first URL's: lazaret-net's TlsVersion carries it)
         stop, port = serve_old_tls()
         old = f"localhost:{port}"
         try:
-            with self.assertRaises(nativenet.UsePython):
+            with self.assertRaises(nativenet.NetError) as caught:
                 nativenet.request(self.url(f"/to-port/{port}"), hosts=[self.host, old], max_bytes=100, timeout=10)
-            self.assertIn(old, nativenet.python_hosts())
-            self.assertNotIn(self.host, nativenet.python_hosts())
-            self.assertTrue(nativenet.chosen(self.url("/ok")), "the first URL's host stays on the native transport")
+            self.assertEqual(caught.exception.kind, "tls")
+            self.assertIn(f"{old} speaks neither", str(caught.exception))
+            reply = nativenet.request(self.url("/ok"), hosts=[self.host], max_bytes=100, timeout=10)
+            self.assertEqual(reply.status, 200, "the first URL's host is answered as before")
         finally:
             stop.set()
-            with nativenet._lock:
-                nativenet._python_hosts.discard(old)
 
     def seen(self, path, credentials, hosts=None, **kw):
         """The request's fields as the server saw them (on the last hop)."""

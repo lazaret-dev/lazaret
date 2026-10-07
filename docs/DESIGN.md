@@ -1340,9 +1340,14 @@ budget of at most 32 MiB) is offered h2 and a download goes over HTTP/1.1
 (`LAZARET_HTTP` overrides); both keep their connections.
 
 What falls back to urllib: no native library, or one without the network
-layer; `LAZARET_NETWORK=python`; a server that speaks neither TLS 1.3 nor
-TLS 1.2 (the host goes to urllib for the rest of the process); a proxy
-reached over TLS. tiny_https speaks TLS 1.2 only to a server that speaks
+layer; `LAZARET_NETWORK=python`; a proxy reached over TLS. TLS 1.2 is the
+floor on both transports (John, Oct 7: "Realistically we should avoid any
+tls < 1.2 as that would be horrible security stance by a provider"): a
+server that speaks neither TLS 1.3 nor TLS 1.2 is refused, not handed to
+urllib, and urllib's connections take `nativenet.tls_context()`, urllib's
+default context with the floor stated, so a process that lowered Python's
+default does not lower Lazaret's (`test_tls_floor.py` holds every opener,
+connection and context under `python/src` to it). tiny_https speaks TLS 1.2 only to a server that speaks
 nothing newer (its drop of the evening of Oct 7, B-36, because npm's edge
 answered only 1.2 to John's network): ECDHE with AEAD suites only, the
 extended master secret required, RFC 8446's downgrade check, no
@@ -1425,9 +1430,8 @@ could not read failed every native request of its fetcher, and a "*." entry
 is a wildcard to it. A lockfile URL with a backslash before its query (a
 slash to npm's parser, so possibly another host) or such a host blocks its
 package; a host that is not ASCII is to be written in its xn-- form. A
-redirect to a server without TLS 1.3 sends that server's host to urllib from
-then on, not the first URL's (lazaret-net's `TlsVersion` names the hop's
-host). lazaret-net refuses a request header outside `PLAIN_HEADERS` (Accept,
+redirect to a server below TLS 1.2 is refused by that server's name, not the
+first URL's (lazaret-net's `TlsVersion` names the hop's host). lazaret-net refuses a request header outside `PLAIN_HEADERS` (Accept,
 Content-Type, User-Agent, X-GitHub-Api-Version), since a token in a header
 of another name would follow a redirect, and its `Debug` shows no password
 of a URL or a proxy. A GitLab under a path prefix gets its token on that

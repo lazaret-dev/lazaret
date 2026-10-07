@@ -445,7 +445,7 @@ class Fetcher:
                     new.add_unredirected_header("Authorization", header)
                 return new
 
-        handlers = [Redirects]
+        handlers = [Redirects, nativenet.HTTPSHandler()]                # (TLS 1.2 at least: nativenet.TLS_FLOOR)
         if _is_loopback(urllib.parse.urlsplit(url).hostname):
             handlers.append(urllib.request.ProxyHandler({}))      # never through a proxy
         return urllib.request.build_opener(*handlers)

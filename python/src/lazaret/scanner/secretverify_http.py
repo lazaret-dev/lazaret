@@ -6,6 +6,8 @@ do as little as it can:
 - **https, port 443, one host.** The host and the path are checked before anything is opened: a lower-case DNS name with a dot
   in it (no address, no port, no credentials), a path that is printable ASCII. The caller (`secretverify`) takes the host from
   its provider table, never from scanned text.
+- **TLS 1.2 at least** (`TLS_FLOOR`, the floor of every transport Lazaret has), stated in the context rather than left to
+  Python's defaults; the system's trust anchors, the hostname checked (`default_context`).
 - **No redirect is followed.** A 3xx answer is returned as it is; the secret is not sent anywhere the table does not name.
 - **The answer is bounded**: `max_bytes` of body (the rest is not read), and one deadline for the whole call, kept by a
   watchdog that closes the socket, so a server that answers a byte at a time cannot hold the run.
@@ -31,8 +33,8 @@ import time
 import urllib.parse
 import urllib.request
 
-__all__ = ["Request", "Response", "TransportError", "https_transport", "check_request", "MAX_ANSWER_BYTES", "DEFAULT_TIMEOUT",
-           "HOST_RE"]
+__all__ = ["Request", "Response", "TransportError", "https_transport", "check_request", "default_context", "MAX_ANSWER_BYTES",
+           "DEFAULT_TIMEOUT", "HOST_RE", "TLS_FLOOR"]
 
 MAX_ANSWER_BYTES = 64 * 1024
 DEFAULT_TIMEOUT = 10.0
@@ -40,6 +42,8 @@ MAX_HEADERS = 64
 MAX_HEADER_VALUE = 512
 MAX_PATH = 2000
 USER_AGENT = "lazaret-secret-verify"
+#: the oldest TLS version a secret is sent over (nativenet.TLS_FLOOR: Lazaret's floor on every transport)
+TLS_FLOOR = ssl.TLSVersion.TLSv1_2
 
 HOST_RE = re.compile(r"(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z][a-z0-9-]{0,61}[a-z0-9]")
 _PATH_RE = re.compile(r"/[\x21-\x7e]{0,%d}" % (MAX_PATH - 1))
@@ -121,6 +125,15 @@ class _Connection(http.client.HTTPSConnection):
         return None
 
 
+def default_context():
+    """Python's default context (the system's trust anchors, the hostname checked) with `TLS_FLOOR` as its floor."""
+    context = ssl.create_default_context()
+    low = context.minimum_version
+    if low == ssl.TLSVersion.MINIMUM_SUPPORTED or 0 <= low < TLS_FLOOR:
+        context.minimum_version = TLS_FLOOR
+    return context
+
+
 def https_transport(ssl_context=None, connect_to=None, environ=None, clock=time.monotonic):
     """A `send(request, timeout, max_bytes) -> Response` for `secretverify`. `ssl_context` and `connect_to` (an address to connect
     to in place of the host's own) are for tests; `environ` is the mapping the proxy settings are read from (the process's by
@@ -132,7 +145,7 @@ def https_transport(ssl_context=None, connect_to=None, environ=None, clock=time.
         check_request(request)
         if not isinstance(max_bytes, int) or max_bytes < 1:
             raise TransportError("refused", "no room for an answer")
-        context = ssl_context if ssl_context is not None else ssl.create_default_context()
+        context = ssl_context if ssl_context is not None else default_context()
         proxy = None if connect_to is not None else _proxy(request.host, environ)
         if proxy is not None:
             conn = http.client.HTTPSConnection(proxy[0], proxy[1], timeout=timeout, context=context)

@@ -13,12 +13,17 @@ Python's transport is used instead:
 
 * where the native library is missing or older than the network layer (no `lazaret_net_request`);
 * when `LAZARET_NETWORK=python` asks for it;
-* for a server that speaks neither TLS 1.3 nor TLS 1.2, from then on for that host, in this process
-  (`python_hosts`). tiny_https speaks 1.2 only to a server that speaks nothing newer, as its drop of Oct 7 does
-  (B-36): ECDHE with AEAD suites only, the extended master secret required, RFC 8446's downgrade check, no
-  renegotiation or resumption, the certificate checks of 1.3. Every reply says which version it came over (`tls`);
 * for a proxy reached over TLS (`https://` in the proxy's URL), which tiny_https does not speak;
 * where no trust anchors can be found for it (below).
+
+TLS 1.2 is the floor, on both transports (`TLS_FLOOR`; John, Oct 7: "Realistically we should avoid any tls < 1.2 as
+that would be horrible security stance by a provider"). tiny_https speaks TLS 1.3, and 1.2 only to a server that
+speaks nothing newer, as its drop of Oct 7 does (B-36): ECDHE with AEAD suites only, the extended master secret
+required, RFC 8446's downgrade check, no renegotiation or resumption, the certificate checks of 1.3. Every reply says
+which version it came over (`tls`). A server that speaks neither is refused (`NetError`, kind "tls"), not handed to
+Python's transport. Python's transport makes its connections with `tls_context()`, which states the same floor (every
+Python Lazaret runs on starts there; a process that lowered urllib's default does not lower Lazaret's); its urllib
+openers take `HTTPSHandler`, which uses it.
 
 Trust anchors: `SSL_CERT_FILE` when it is set (as OpenSSL reads it); else the system's CA bundle (the files
 tiny_https knows: Debian's, Red Hat's, SUSE's, macOS's /etc/ssl/cert.pem, Homebrew's, FreeBSD's); else the
@@ -27,8 +32,8 @@ would use, from `HTTPS_PROXY` / `NO_PROXY` (followed on every redirect hop), or 
 Windows) when the environment names none.
 
 `request` reads a body whole, `open_stream` hands it over in pieces. A request that gets no response raises `NetError`
-(`kind`: "refused", "too-large", "tls", "timeout", "network", "http", "setup"); one that should go through Python's
-transport raises `UsePython`. The caller turns either into its own error (repo.py: FetchError).
+(`kind`: "refused", "too-large", "tls" (a server below the floor too), "timeout", "network", "http", "setup"); one
+that should go through Python's transport raises `UsePython`. The caller turns either into its own error (repo.py: FetchError).
 
 Credentials (decision 14, John, Oct 6: they go over tiny_https in 0.1.9): a token or a login is a `Credential` of a
 request, never one of its headers. The native client gives each hop the credentials of the host it goes to and no
@@ -38,6 +43,7 @@ another host could carry on). A credential the native client cannot send (a valu
 host it would not write that way) makes the request Python's, as before 0.1.9.
 """
 import ctypes
+import http.client
 import json
 import os
 import ssl
@@ -49,6 +55,8 @@ from typing import NamedTuple
 from lazaret.scanner import _native
 
 ENV = "LAZARET_NETWORK"
+#: the oldest TLS version Lazaret speaks, on either transport
+TLS_FLOOR = ssl.TLSVersion.TLSv1_2
 #: which protocol: "auto" (the default: documents over HTTP/2, downloads over HTTP/1.1), "2" (HTTP/2 for every
 #: request), "1.1" (HTTP/1.1 only). HTTP/2 is offered, never forced: a server that does not pick it gets HTTP/1.1.
 HTTP_ENV = "LAZARET_HTTP"
@@ -68,6 +76,32 @@ class NetError(Exception):
 
 class UsePython(Exception):
     """Send this request with Python's transport (the reason is the message)."""
+
+
+def tls_context():
+    """The context Python's transport makes Lazaret's connections with: urllib's own default (PEP 476's: the system's
+    trust anchors and `SSL_CERT_FILE`, the hostname checked; or what the process put in its place), offering
+    HTTP/1.1 as urllib does, with `TLS_FLOOR` as its floor."""
+    context = getattr(ssl, "_create_default_https_context", ssl.create_default_context)()
+    context.set_alpn_protocols(["http/1.1"])
+    low = context.minimum_version
+    if low == ssl.TLSVersion.MINIMUM_SUPPORTED or 0 <= low < TLS_FLOOR:
+        context.minimum_version = TLS_FLOOR
+    return context
+
+
+class HTTPSHandler(urllib.request.HTTPSHandler):
+    """urllib's HTTPS handler on `tls_context()`, made when the first request goes rather than when the opener is
+    built. An opener given one uses it in place of urllib's own."""
+
+    def __init__(self):
+        urllib.request.AbstractHTTPHandler.__init__(self)            # (not HTTPSHandler's: it makes a context now)
+        self._context = None
+
+    def https_open(self, req):
+        if self._context is None:
+            self._context = tls_context()
+        return self.do_open(http.client.HTTPSConnection, req, context=self._context)
 
 
 class Reply(NamedTuple):
@@ -131,7 +165,6 @@ def _sendable(c):
 _lock = threading.Lock()
 _ready = None                    # None: not tried; True: the native transport works here; False: it does not
 _why_not = None                  # why it does not
-_python_hosts = set()            # hosts that offered no TLS version the client speaks (lower-case host[:port])
 
 
 def _bind(lib):
@@ -231,28 +264,10 @@ def why_not():
     return _why_not
 
 
-def python_hosts():
-    """The hosts this process sends through Python's transport because they offered no TLS version the native client
-    speaks (neither 1.3 nor 1.2)."""
-    with _lock:
-        return frozenset(_python_hosts)
-
-
-def _netloc(url):
-    try:
-        parts = urllib.parse.urlsplit(url)
-        host, port = (parts.hostname or "").lower(), parts.port
-    except ValueError:
-        return ""
-    return host if port in (None, 443) else f"{host}:{port}"
-
-
 def chosen(url):
-    """Does a request to `url` go through the native transport?"""
-    if not available():
-        return False
-    with _lock:
-        return _netloc(url) not in _python_hosts
+    """Does a request to `url` go through the native transport? (Where it is available, every https URL does: a server
+    it cannot speak to is refused, not handed to Python's transport.)"""
+    return available()
 
 
 def _env_proxies():
@@ -388,12 +403,9 @@ def _failure(url, answer):
     except ValueError:
         kind, message, host = "setup", answer.decode("ascii", "replace"), None
     if kind == "tls-version":
-        # (the host of the hop that offered no version the client speaks, a redirect's when it was one: the first URL's
-        # host stays on the native transport; the credentials review of decision 14)
-        if isinstance(host, str) and host:
-            with _lock:
-                _python_hosts.add(_netloc(f"https://{host}/"))
-        raise UsePython(f"the server speaks neither TLS 1.3 nor TLS 1.2 ({message})")
+        # (below TLS_FLOOR: refused, not handed to Python's transport; the host is the hop's, a redirect's when it was one)
+        where = f"{host} " if isinstance(host, str) and host else "the server "
+        raise NetError("tls", f"{where}speaks neither TLS 1.3 nor TLS 1.2, and Lazaret uses nothing older ({message})")
     raise NetError(kind, message)
 
 

@@ -523,7 +523,7 @@ class _RegistryOpener(urllib.request.HTTPRedirectHandler):
         return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
-_OPENER = urllib.request.build_opener(_RegistryOpener)
+_OPENER = urllib.request.build_opener(_RegistryOpener, _net.HTTPSHandler())   # (TLS 1.2 at least: nativenet.TLS_FLOOR)
 
 
 def _fetch(url, max_bytes=MAX_DOWNLOAD_BYTES, timeout=DOWNLOAD_TIMEOUT, accept=None,
@@ -544,8 +544,9 @@ def _fetch_bytes(url, max_bytes, timeout, accept, data, content_type, opener=Non
     default since 0.1.9) with `hosts` as the rule for the URL and every
     redirect (REGISTRY_HOSTS when the rule is this file's), and through
     urllib when the native transport is not here or is not to be used: no
-    library, LAZARET_NETWORK=python, a server without TLS 1.3, a rule given
-    only as a function, or an opener given by the caller."""
+    library, LAZARET_NETWORK=python, a proxy it does not take (a proxy
+    reached over TLS), a rule given only as a function, or an opener given
+    by the caller. Both stop at TLS 1.2 (nativenet.TLS_FLOOR)."""
     (validate or _validated_url)(url)
     headers = {"User-Agent": USER_AGENT}
     if accept:
@@ -558,7 +559,7 @@ def _fetch_bytes(url, max_bytes, timeout, accept, data, content_type, opener=Non
         try:
             return _native_body(url, hosts, headers, data, max_bytes, timeout)
         except _net.UsePython:
-            pass                               # (urllib below: a server without TLS 1.3, a proxy reached over TLS)
+            pass                               # (urllib below: a proxy it does not take, nativenet._proxy_for)
     if opener is None:
         opener = _OPENER if validate is None else _module_opener(validate)
     req = urllib.request.Request(url, data=data, headers=headers)
@@ -626,7 +627,7 @@ class _ModuleRedirects(urllib.request.HTTPRedirectHandler):
 
 
 def _module_opener(check):
-    return urllib.request.build_opener(_ModuleRedirects(check))
+    return urllib.request.build_opener(_ModuleRedirects(check), _net.HTTPSHandler())
 
 
 def module_transport(url, max_bytes=MAX_DOWNLOAD_BYTES, accept=None, timeout=DOWNLOAD_TIMEOUT,

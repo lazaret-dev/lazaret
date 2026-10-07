@@ -152,7 +152,7 @@ class _HttpsRedirects(urllib.request.HTTPRedirectHandler):
         return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
-_OPENER = urllib.request.build_opener(_HttpsRedirects)
+_OPENER = urllib.request.build_opener(_HttpsRedirects, nativenet.HTTPSHandler())   # (TLS 1.2 at least)
 
 
 def local_path(location):
@@ -215,7 +215,7 @@ def fetch(location, dst, max_bytes):
             try:
                 return _fetch_native(location, dst, max_bytes)
             except nativenet.UsePython:
-                pass                    # (urllib below: a server without TLS 1.3, a proxy reached over TLS)
+                pass                    # (urllib below: a proxy it does not take, nativenet._proxy_for)
         req = urllib.request.Request(location, headers={"User-Agent": USER_AGENT})
         with _OPENER.open(req, timeout=READ_TIMEOUT) as resp:
             return _copy(resp, dst, max_bytes, location)

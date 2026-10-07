@@ -42,8 +42,8 @@ project is pre-1.0, so the 0.x API may still change.
   tarballs by 8 threads 0.4 s instead of 2.9 s. Trust anchors come from `SSL_CERT_FILE`, then the
   system's CA bundle, then what Python's `ssl` loads (the system store on Windows); the proxy is
   the one urllib would use. Python's urllib takes the request where the native library is missing,
-  for a server that speaks neither TLS 1.3 nor TLS 1.2 (from then on for that host), for a proxy reached over TLS,
-  and when `LAZARET_NETWORK=python` asks for it. tiny_https has not had an independent review (its
+  for a proxy reached over TLS, and when `LAZARET_NETWORK=python` asks for it. Neither speaks anything older than
+  TLS 1.2: a server that speaks neither TLS 1.3 nor TLS 1.2 is refused. tiny_https has not had an independent review (its
   README says so). The guard's https downloads and relays (any https host on a redirect where the
   guard allows one), the `github:` and `gitlab:` sources and the SCA feeds' downloads go through
   it too, credentials included (decision 14): a private registry's token or login, a URL's own
@@ -562,9 +562,16 @@ project is pre-1.0, so the 0.x API may still change.
   suites only (no RSA key exchange, no CBC), the extended master secret required, the downgrade check of RFC
   8446 that catches a TLS 1.3 server pushed down to 1.2, no renegotiation, compression or resumption, no SHA-1 in
   signatures, and the certificate checks of 1.3. Every reply says which version it came over (`tls`). A server
-  that speaks neither version still goes to Python's transport. The drop's other additions (decoding compressed
+  that speaks neither version is refused (below). The drop's other additions (decoding compressed
   bodies, a cookie jar, `Expect: 100-continue`) are opt-in and Lazaret asks for none of them; it also brings the
   library's first run against real servers (52 real certificate chains, replayed offline in CI).
+- **Nothing older than TLS 1.2, on either transport.** A server that speaks neither TLS 1.3 nor TLS 1.2 was handed
+  from the native client to Python's transport, which refused it too on every Python Lazaret supports, but only
+  because Python's own default says so. Now the native client refuses it with an error that names the server
+  ("… speaks neither TLS 1.3 nor TLS 1.2, and Lazaret uses nothing older"), and every connection Python's transport
+  makes (the urllib openers, the kept-alive connections, secret verification) states TLS 1.2 as its minimum, so a
+  process that lowered Python's default does not lower Lazaret's. `SSL_CERT_FILE` and the rest of urllib's default
+  context are as before.
 - **The guard blocks a scan that could not read what a package can be made to hide (T-1, decision 9; rule set
   2.47.0).** INCOMPLETE used to go through by default, so a package could pass by being slow to scan, or by
   padding a payload past the size limit inside its file (16 KB of zip did it: the Go/Rust review's GO-1). The
