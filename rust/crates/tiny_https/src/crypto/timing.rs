@@ -28,6 +28,17 @@
 //! `cargo test --release --lib crypto::timing::x25519 -- --ignored --nocapture` (and `ecdh`, `ghash`,
 //! `poly1305`, `aead_and_mac`, `aes`, `harness`). Each takes 10 to 25 seconds;
 //! `TINY_HTTPS_TIMING_SECS` (default 3) sets the time spent per comparison.
+//! Coarse clocks: Apple Silicon's clock ticks every 41.67 ns (a 24 MHz counter, which is all that `Instant` can read there), so
+//! an operation of 40 to 300 ns reads as one to seven ticks, and a difference of a percent is far below the tick. The first
+//! run on an Apple M5 Max showed what that does: a control with a known 1.3% leak was not flagged, and two cheap operations
+//! (a 42 ns GHASH, a 2.3 us SHA-256) were flagged at |t| of 12 to 35 on cropped views only, where the few distinct values
+//! left make the variance collapse. The harness now detects a coarse clock (a good part of back-to-back readings equal) and
+//! times a *batch* of calls of one class per sample, enough for the sample to span about twenty ticks; the report says how
+//! many (`x3`), and its medians are per call (`TINY_HTTPS_TIMING_TICKS` sets the ticks per sample for a run). A fine clock (Linux, x86-64 and aarch64 alike) is not affected: one call per
+//! sample, as before. `TINY_HTTPS_TIMING_TICK_NS=42` makes any machine read its clock as coarsely as that, which is how the
+//! batching is tested here without an Apple machine, and `TINY_HTTPS_TIMING_REPS=1` forces one call per sample (to see
+//! what the old harness would have said).
+//!
 //! What this cannot see: cache-timing differences too small to move the clock on a quiet machine,
 //! differences that only exist on other CPUs, and leaks smaller than the noise floor of the machine
 //! it runs on. (The table-based AES this library used to have, backlog B-20, was such a case on
@@ -57,6 +68,8 @@ const SUSPICIOUS_T: f64 = 4.5;
 pub(crate) struct Report {
     pub name: String,
     pub samples: usize,
+    /// Calls timed together in each sample (1 on a fine clock; see the module documentation).
+    pub reps: usize,
     pub uncropped_t: f64,
     pub max_t: f64,
     pub median_ns: u32,
@@ -103,10 +116,12 @@ impl Report {
         }
     }
     fn print(&self) {
+        let batch = if self.reps > 1 { format!(" x{}", self.reps) } else { String::new() };
         println!(
-            "{:<58} n={:>7}  median {:>7} ns  |t| uncropped {:>6.1}  max {:>6.1}  {}",
+            "{:<58} n={:>7}{:<5} median {:>7} ns  |t| uncropped {:>6.1}  max {:>6.1}  {}",
             self.name,
             self.samples,
+            batch,
             self.median_ns,
             self.uncropped_t.abs(),
             self.max_t,
@@ -163,6 +178,86 @@ fn paired_t(samples: &[(u32, bool)], cutoff: u32) -> f64 {
 
 const DEFAULT_SECS: f64 = 3.0;
 
+// ------------------------------------------------------------------------------------------------ the clock
+
+thread_local! {
+    /// A tick to pretend the clock has, for the tests of the batching (see [`with_tick`]); the environment variable
+    /// `TINY_HTTPS_TIMING_TICK_NS` does the same for a whole run.
+    static TICK_OVERRIDE: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
+}
+
+/// The clock the harness reads: nanoseconds since its creation, rounded down to a multiple of `tick` if that is more than one
+/// (which is how a counter that ticks every `tick` ns reads, whatever the true time).
+struct Clock {
+    epoch: Instant,
+    tick: u64,
+}
+
+impl Clock {
+    fn new() -> Clock {
+        let tick = TICK_OVERRIDE
+            .with(|t| t.get())
+            .or_else(|| std::env::var("TINY_HTTPS_TIMING_TICK_NS").ok().and_then(|v| v.trim().parse::<u64>().ok()))
+            .unwrap_or(0);
+        Clock { epoch: Instant::now(), tick }
+    }
+
+    #[inline]
+    fn now(&self) -> u64 {
+        let ns = self.epoch.elapsed().as_nanos().min(u64::MAX as u128) as u64;
+        if self.tick > 1 {
+            ns / self.tick * self.tick
+        } else {
+            ns
+        }
+    }
+
+    /// The tick of the clock if it is coarse: readings taken back to back are equal for a good part of the pairs (a fine
+    /// clock hardly ever repeats, because the call to read it takes longer than its resolution), and the smallest step seen
+    /// between two different readings is the tick. `None` for a fine clock.
+    fn coarse_tick(&self) -> Option<u64> {
+        let (mut equal, mut smallest) = (0u32, u64::MAX);
+        const PAIRS: u32 = 20_000;
+        for _ in 0..PAIRS {
+            let a = self.now();
+            let b = self.now();
+            if a == b {
+                equal += 1;
+            } else {
+                smallest = smallest.min(b - a);
+            }
+        }
+        (equal > PAIRS / 10 && smallest != u64::MAX).then_some(smallest)
+    }
+}
+
+/// Runs `f` with the harness reading its clock as if it ticked every `tick_ns`.
+#[cfg(test)]
+fn with_tick<T>(tick_ns: u64, f: impl FnOnce() -> T) -> T {
+    let before = TICK_OVERRIDE.with(|t| t.replace(Some(tick_ns)));
+    let r = f();
+    TICK_OVERRIDE.with(|t| t.set(before));
+    r
+}
+
+/// How many ticks of a coarse clock a sample spans (see [`reps_for`]); `TINY_HTTPS_TIMING_TICKS` sets another number for a run.
+///
+/// Twenty: enough for a sample's time to take many values (one call of one to seven ticks takes so few that the cropped views
+/// collapse), and short enough that a sample seldom has an interrupt in it. On a virtual machine with a pretended tick, a hundred
+/// ticks lost the 1.3% control (|t| 3.5) where twenty found it (|t| 27), and neither raised a false alarm on identical classes.
+const TICKS_PER_SAMPLE: f64 = 20.0;
+
+/// How many calls to time together so that a sample spans about [`TICKS_PER_SAMPLE`] ticks of a clock that ticks every `tick_ns`, for a
+/// call that takes `cost_ns`. One call for a fine clock (`tick_ns` of 0), and never more than 4096.
+fn reps_for(cost_ns: f64, tick_ns: u64) -> usize {
+    if tick_ns <= 1 {
+        return 1;
+    }
+    let ticks: f64 = std::env::var("TINY_HTTPS_TIMING_TICKS").ok().and_then(|v| v.trim().parse().ok()).filter(|&t: &f64| t >= 1.0).unwrap_or(TICKS_PER_SAMPLE);
+    let want = ticks * tick_ns as f64 / cost_ns.max(1.0);
+    (want.ceil() as usize).clamp(1, 4096)
+}
+
 /// The time budget from the text of `TINY_HTTPS_TIMING_SECS` (`None` if it is not set): seconds, 0 or more
 /// (0 is the shortest run, one measured batch). Anything else is an `Err` saying so.
 fn parse_budget(value: Option<&str>) -> Result<Duration, String> {
@@ -201,6 +296,32 @@ fn measure_seeded<I, R>(
 ) -> Report {
     const BATCH_BLOCKS: usize = 64;
     let mut rng = Rng::new(0xd0de_c7 ^ name.len() as u64 ^ seed.wrapping_mul(0x9e37_79b9_7f4a_7c15));
+    let clock = Clock::new();
+    let forced: Option<usize> = std::env::var("TINY_HTTPS_TIMING_REPS").ok().and_then(|v| v.trim().parse().ok()).filter(|&n| n >= 1);
+    // on a coarse clock, several calls of one class make a sample; how many is found by timing a few calls together
+    let reps = match if forced.is_some() { None } else { clock.coarse_tick() } {
+        None => forced.unwrap_or(1),
+        Some(tick) => {
+            let probe: Vec<I> = (0..64).map(|i| gen(&mut rng, i % 2 == 0)).collect();
+            // the cost of a call: the median of nine rounds of at least twenty ticks each, so that an interrupt in one round (or
+            // a cold start in the first) does not make the calls look dearer than they are
+            let mut costs: Vec<f64> = (0..9)
+                .map(|_| {
+                    let mut calls = 0usize;
+                    let t0 = clock.now();
+                    while clock.now() - t0 < 20 * tick && calls < 1 << 22 {
+                        for input in &probe {
+                            black_box(op(black_box(input)));
+                        }
+                        calls += probe.len();
+                    }
+                    (clock.now() - t0) as f64 / calls as f64
+                })
+                .collect();
+            costs.sort_by(|a, b| a.total_cmp(b));
+            reps_for(costs[4], tick)
+        }
+    };
     let mut samples: Vec<(u32, bool)> = Vec::new();
     let start = Instant::now();
     let mut first = true;
@@ -215,11 +336,14 @@ fn measure_seeded<I, R>(
             }
             classes.extend(block);
         }
-        let inputs: Vec<I> = classes.iter().map(|&c| gen(&mut rng, c)).collect();
-        for (&class, input) in classes.iter().zip(&inputs) {
-            let t0 = Instant::now();
-            black_box(op(black_box(input)));
-            let dt = t0.elapsed().as_nanos().min(u32::MAX as u128) as u32;
+        // `reps` inputs of the class of each sample
+        let inputs: Vec<Vec<I>> = classes.iter().map(|&c| (0..reps).map(|_| gen(&mut rng, c)).collect()).collect();
+        for (&class, group) in classes.iter().zip(&inputs) {
+            let t0 = clock.now();
+            for input in group {
+                black_box(op(black_box(input)));
+            }
+            let dt = (clock.now() - t0).min(u32::MAX as u64) as u32;
             // the first batch only warms caches, branch predictors and clocks up
             if !first {
                 samples.push((dt, class));
@@ -239,7 +363,7 @@ fn measure_seeded<I, R>(
         crops.push((p, t));
         max_t = max_t.max(t.abs());
     }
-    Report { name: name.to_string(), samples: samples.len(), uncropped_t, max_t, median_ns: pct(0.5), crops }
+    Report { name: name.to_string(), samples: samples.len(), reps, uncropped_t, max_t, median_ns: pct(0.5) / reps as u32, crops }
 }
 
 thread_local! {
@@ -595,6 +719,18 @@ fn aead_and_mac_primitives_are_constant_time_in_their_data() {
 #[test]
 #[ignore = "statistical timing run; see the module documentation"]
 fn harness_detects_a_difference_of_about_one_percent() {
+    one_percent_control();
+}
+
+/// The same control with a clock that ticks every 41.67 ns, as Apple Silicon's does: without batching the calls it was not
+/// flagged on an Apple M5 Max (|t| 8.1 at best), because a tick is more than ten times the difference.
+#[test]
+#[ignore = "statistical timing run; see the module documentation"]
+fn harness_detects_a_difference_of_about_one_percent_on_a_coarse_clock() {
+    with_tick(test_tick(), one_percent_control);
+}
+
+fn one_percent_control() {
     // sensitivity: class 1 does ten extra dependent multiplications (about 9 ns) on an operation
     // that takes about 680 ns. A harness that cannot see that would give clean results for
     // leaks of that size too.
@@ -698,7 +834,7 @@ fn a_difference_with_no_spread_is_the_strongest_evidence_not_none() {
     let t = paired_t(&blocks_of(200, 100, |k| 101 + (k % 3) as u32), u32::MAX);
     assert!(t.is_finite() && t > 10.0, "{t}");
     // and a report built on an infinite t says LEAK, in both signs
-    let r = Report { name: "x".into(), samples: 0, uncropped_t: f64::INFINITY, max_t: f64::INFINITY, median_ns: 0, crops: vec![] };
+    let r = Report { name: "x".into(), samples: 0, reps: 1, uncropped_t: f64::INFINITY, max_t: f64::INFINITY, median_ns: 0, crops: vec![] };
     assert_eq!(r.verdict(), "LEAK");
     r.print();
 }
@@ -728,7 +864,7 @@ fn a_budget_of_zero_still_measures_something() {
 fn report(ts: [f64; 7]) -> Report {
     let crops: Vec<(f64, f64)> = CROP_LEVELS.iter().copied().zip(ts[1..].iter().copied()).collect();
     let max_t = ts.iter().fold(0f64, |m, t| m.max(t.abs()));
-    Report { name: "row".into(), samples: 1000, uncropped_t: ts[0], max_t, median_ns: 100, crops }
+    Report { name: "row".into(), samples: 1000, reps: 1, uncropped_t: ts[0], max_t, median_ns: 100, crops }
 }
 
 const QUIET: [f64; 7] = [0.5, -1.0, 0.3, 0.8, -0.2, 1.1, 0.4];
@@ -790,7 +926,7 @@ fn the_old_rule_still_holds_and_the_new_one_only_adds_to_it() {
 
 #[test]
 fn a_report_with_fewer_statistics_than_expected_is_judged_not_crashed_on() {
-    let bare = |t: f64| Report { name: "bare".into(), samples: 0, uncropped_t: t, max_t: t.abs(), median_ns: 0, crops: vec![] };
+    let bare = |t: f64| Report { name: "bare".into(), samples: 0, reps: 1, uncropped_t: t, max_t: t.abs(), median_ns: 0, crops: vec![] };
     assert_eq!(bare(6.0).peak(), (0, 6.0));
     assert_eq!(bare(6.0).label(0), "uncropped");
     assert_eq!(bare(6.0).label(3), "?");
@@ -864,4 +1000,171 @@ fn harness_does_not_fail_comparisons_of_identical_classes() {
     report_row("sha256, 1 KiB of random bytes (a few us)", false_alarms("null sha256", pairs, |rng, _| rng.bytes(1024), |m| Sha256::digest(m)));
     report_row("ct_eq, 32 equal random bytes (tens of ns)", false_alarms("null ct_eq", pairs, |rng, _| { let a = rng.bytes(32); (a.clone(), a) }, |(a, b)| ct_eq(a, b)));
     assert_eq!(new_rule_failures, 0, "the repeat rule failed comparisons of identical classes");
+}
+
+// ---------------------------------------------------------------------------------------------- coarse clocks
+
+#[test]
+fn the_number_of_calls_per_sample_follows_the_cost_and_the_tick() {
+    // a fine clock (or none): one call
+    assert_eq!(reps_for(500.0, 0), 1);
+    assert_eq!(reps_for(500.0, 1), 1);
+    // twenty ticks of 41 ns are 820 ns
+    assert_eq!(reps_for(42.0, 41), 20);
+    assert_eq!(reps_for(292.0, 41), 3);
+    assert_eq!(reps_for(819.0, 41), 2);
+    assert_eq!(reps_for(820.0, 41), 1);
+    assert_eq!(reps_for(150_000.0, 41), 1);
+    // never zero, never more than 4096, whatever the cost
+    assert_eq!(reps_for(0.0, 41), 820);
+    assert_eq!(reps_for(0.0, 1000), 4096);
+    assert_eq!(reps_for(f64::NAN, 41), 820);
+    assert_eq!(reps_for(f64::INFINITY, 41), 1);
+}
+
+/// A tick for the tests of the batching that is coarse next to the cost of reading the clock: Apple Silicon's is 41.67 ns and a
+/// reading takes it 10 to 20 ns, so back-to-back readings repeat; on a machine where reading the clock takes longer than a tick (a
+/// virtual machine's can take a few hundred ns) a pretended tick of 42 ns would not repeat anything and nothing would look coarse.
+#[cfg(test)]
+fn test_tick() -> u64 {
+    let c = Clock::new();
+    let t0 = Instant::now();
+    for _ in 0..20_000 {
+        black_box(c.now());
+    }
+    (t0.elapsed().as_nanos() as u64 / 20_000 * 4).max(42)
+}
+
+/// An operation of `n` dependent multiplications: a cost that is set by choosing `n`.
+#[cfg(test)]
+fn chain(n: u32) -> impl Fn(&u64) -> u64 {
+    move |x: &u64| {
+        let mut a = *x;
+        for _ in 0..n {
+            a = black_box(a.wrapping_mul(3).wrapping_add(1));
+        }
+        a
+    }
+}
+
+/// What one step of [`chain`] costs here, in ns.
+#[cfg(test)]
+fn ns_per_step() -> f64 {
+    let (op, x) = (chain(200_000), 7u64);
+    let t0 = Instant::now();
+    for _ in 0..5 {
+        black_box(op(black_box(&x)));
+    }
+    t0.elapsed().as_nanos() as f64 / (5.0 * 200_000.0)
+}
+
+#[test]
+fn a_clock_that_ticks_coarsely_is_recognised_and_its_tick_measured() {
+    let t = test_tick();
+    for tick in [t, 4 * t, 1000 * t] {
+        let found = with_tick(tick, || Clock::new().coarse_tick());
+        assert_eq!(found, Some(tick), "a clock of {tick} ns");
+    }
+    // readings of the pretended clock are multiples of its tick
+    with_tick(t, || {
+        let c = Clock::new();
+        for _ in 0..1000 {
+            assert_eq!(c.now() % t, 0);
+        }
+    });
+}
+
+#[test]
+fn a_coarse_clock_makes_the_harness_time_several_calls_together() {
+    let tick = test_tick();
+    let r = with_tick(tick, || measure("batching", Duration::from_millis(100), |rng, _| rng.next_u64(), |x| x.wrapping_mul(0x9e37_79b9)));
+    // a multiplication is far below the tick: many calls to a sample, and a median per call that is far below it too
+    assert!(r.reps > 100, "calls per sample: {} (tick {tick} ns)", r.reps);
+    assert!((r.median_ns as u64) < tick, "median per call: {} ns (tick {tick} ns)", r.median_ns);
+    // a call that takes about a tick gets just enough company to make a sample span about twenty ticks (not one call per sample,
+    // which a sample of a tick would be, nor thousands)
+    let per_step = ns_per_step();
+    let few = (tick as f64 / per_step) as u32;
+    let r = with_tick(tick, || measure("a tick", Duration::from_millis(100), |rng, _| rng.next_u64(), chain(few)));
+    let span = r.reps as u64 * r.median_ns as u64;
+    assert!((5..=80).contains(&r.reps), "reps {} median {} ns (tick {tick} ns, {per_step:.2} ns a step)", r.reps, r.median_ns);
+    assert!((10 * tick..=45 * tick).contains(&span), "a sample spans {span} ns ({} calls of {} ns; tick {tick} ns)", r.reps, r.median_ns);
+    // a call that takes many more than twenty ticks is timed on its own
+    let long = (300.0 * tick as f64 / per_step).min(5_000_000.0) as u32;
+    let r = with_tick(tick, || measure("long", Duration::from_millis(100), |rng, _| rng.next_u64(), chain(long)));
+    assert_eq!(r.reps, 1, "median {} ns (tick {tick} ns, {per_step:.2} ns a step, {long} steps)", r.median_ns);
+}
+
+/// The negative control on a coarse clock, where the cheap operations are most exposed: the repeat rule must not fail
+/// comparisons of a thing with itself (nor, as it did on the M5, call a 42 ns operation a leak).
+#[test]
+#[ignore = "statistical timing run; see the module documentation"]
+fn harness_does_not_fail_identical_classes_on_a_coarse_clock() {
+    let pairs: usize = std::env::var("TINY_HTTPS_NULL_PAIRS").ok().and_then(|v| v.trim().parse().ok()).unwrap_or(10);
+    let mut failures = 0;
+    with_tick(test_tick(), || {
+        for (what, tally) in [
+            ("ct_eq, 32 equal random bytes", false_alarms("null ct_eq", pairs, |rng, _| { let a = rng.bytes(32); (a.clone(), a) }, |(a, b)| ct_eq(a, b))),
+            ("sha256, 1 KiB of random bytes", false_alarms("null sha256", pairs, |rng, _| rng.bytes(1024), |m| Sha256::digest(m))),
+            ("a 64-bit multiply", false_alarms("null mul", pairs, |rng, _| rng.next_u64(), |x| x.wrapping_mul(0x9e37_79b9_7f4a_7c15))),
+        ] {
+            println!(
+                "{what:<34} {pairs} pairs: first run above {SUSPICIOUS_T}: {:>2}, above {LEAK_T}: {:>2}; failed by the new rule: {:>2}; largest |t| {:.1}",
+                tally.above_suspicious, tally.above_leak, tally.new_rule, tally.largest_t
+            );
+            failures += tally.new_rule;
+        }
+    });
+    assert_eq!(failures, 0, "the repeat rule failed comparisons of identical classes on a coarse clock");
+}
+
+// -------------------------------------------------------------------------------------------------- operand probe
+
+/// Not a pass or fail test: whether this CPU itself takes longer for some operand values than for others, which no source code
+/// can fix and which would explain a timing difference in code with no branch or table index on a secret. (The first run on an
+/// Apple M5 Max flagged the ECDH scalar multiplication for a scalar of 3 against random scalars, |t| 40 to 110 on both curves and
+/// every run, with the fixed-window, masked-select, complete-formula code that is constant time as written.) Each row is a
+/// simple loop over 2048 words, run on words of one kind and on random words; a row far from "no leak detected" says the hardware
+/// (a multiplier that is faster for zeros, a prefetcher that follows values that look like addresses, a clock that follows the
+/// power the data draws) is the cause and not the library. Run it with
+/// `cargo test --release --lib crypto::timing::operand_probe -- --ignored --nocapture`.
+#[test]
+#[ignore = "statistical timing run; see the module documentation"]
+fn operand_probe() {
+    const N: usize = 2048;
+    type Kind = (&'static str, fn(&mut Rng, usize, *const u64) -> u64);
+    let kinds: [Kind; 5] = [
+        ("zeros", |_, _, _| 0),
+        ("small (below 2^16)", |r, _, _| r.next_u64() & 0xffff),
+        ("all ones", |_, _, _| u64::MAX),
+        ("below 2^47 (could be addresses)", |r, _, _| (r.next_u64() & ((1 << 47) - 1)) | (1 << 32)),
+        ("addresses of its own words", |r, _, base| base as u64 + 8 * (r.below(N) as u64)),
+    ];
+    type Op = (&'static str, fn(&[u64]) -> u64);
+    let ops: [Op; 4] = [
+        ("64-bit multiply, summed", |d| d.chunks_exact(2).fold(0u64, |a, c| a.wrapping_add(c[0].wrapping_mul(c[1])))),
+        ("128-bit multiply (high half), summed", |d| d.chunks_exact(2).fold(0u64, |a, c| a.wrapping_add(((c[0] as u128 * c[1] as u128) >> 64) as u64))),
+        ("add, rotate, xor (no multiply)", |d| d.iter().fold(0u64, |a, &x| (a.rotate_left(5) ^ x).wrapping_add(0x9e37_79b9_7f4a_7c15))),
+        ("loads, the index taken from the data", |d| (0..d.len()).fold(0u64, |a, i| a.wrapping_add(d[((a as usize) ^ i) & (d.len() - 1)]))),
+    ];
+    println!("\noperand probe: each row compares words of one kind with random words (class 1 is random)");
+    for (op_name, op) in ops {
+        for (kind_name, kind) in kinds {
+            let name = format!("{op_name} on {kind_name}");
+            let r = measure(
+                &name,
+                Duration::from_millis(1500),
+                move |rng, random| {
+                    let mut v = vec![0u64; N];
+                    let base = v.as_ptr();
+                    for w in v.iter_mut() {
+                        *w = if random { rng.next_u64() } else { kind(rng, N, base) };
+                    }
+                    v
+                },
+                |v: &Vec<u64>| op(v),
+            );
+            r.print();
+        }
+    }
 }

@@ -175,10 +175,15 @@ fn a_real_chain_is_refused_under_the_anchors_of_the_others() {
     for f in fixtures.iter().filter(|f| f.expect == "ok") {
         let own = f.anchor.as_ref().expect("an anchor");
         let own_subject = Certificate::from_der(own).unwrap().subject_der;
+        // The root a server's last certificate points at is not "somebody else's" even when it is not the one the capture ended at:
+        // servers send cross-signed roots (the real chains of Google's hosts send GTS Root R1 as signed by GlobalSign Root CA, so
+        // GlobalSign's root alone is a second, legitimate way to the same host). Roots that any certificate of the chain names as
+        // its issuer are left out; what is left has nothing to do with the chain.
+        let issuers: Vec<Vec<u8>> = f.chain.iter().map(|c| Certificate::from_der(c).unwrap().issuer_der).collect();
         let others: Vec<&[u8]> = fixtures
             .iter()
             .filter_map(|g| g.anchor.as_deref())
-            .filter(|a| Certificate::from_der(a).map(|c| c.subject_der != own_subject).unwrap_or(false))
+            .filter(|a| Certificate::from_der(a).map(|c| c.subject_der != own_subject && !issuers.contains(&c.subject_der)).unwrap_or(false))
             .collect();
         if others.is_empty() {
             continue;

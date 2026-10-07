@@ -31,7 +31,25 @@
 //! from it as a [`Read`] as it arrives, with no memory proportional to its size and
 //! no copy beyond the one out of the TLS layer, so a download can be hashed, unpacked and scanned
 //! on the way. The size limit and the timeouts apply to a stream as they do to a buffered body.
-//! Compressed content encodings are not supported; requests send `Accept-Encoding: identity`.
+//! Requests send `Accept-Encoding: identity`, unless the client was asked to decode compressed bodies (below).
+//!
+//! # Compressed bodies
+//!
+//! [`Client::decompress`] makes the client ask for `gzip` and `deflate` and undo them, with the bomb in mind: the
+//! decoder is this crate's own ([`inflate`](crate::inflate)), written to produce no more than it is allowed, and the limits are the caller's.
+//! The size of what comes out is limited by [`max_decoded_bytes`](Client::max_decoded_bytes) (by default the same number as
+//! [`max_body_bytes`](Client::max_body_bytes), which limits the compressed bytes on the wire), a ratio can be limited too
+//! ([`max_decode_ratio`](Client::max_decode_ratio)), and a body over a limit is an error ([`Error::Decode`]), never a cut one. Only a
+//! single `gzip`, `x-gzip` or `deflate` is decoded; a response with another coding, or a list of them, comes as it is, with its
+//! `Content-Encoding`, and so does one to `HEAD` or a 206 (a range of the encoded body). A decoded response has no `Content-Encoding`
+//! and no `Content-Length` and says [`Response::uncompressed`]. The same options exist per request, on the [`RequestBuilder`].
+//!
+//! ```no_run
+//! let client = tiny_https::Client::new()?.decompress(true).max_decoded_bytes(256 << 20);
+//! let resp = client.get("https://example.com/data.json")?;
+//! assert!(resp.uncompressed || resp.header("content-encoding").is_none());
+//! # Ok::<(), tiny_https::error::Error>(())
+//! ```
 //!
 //! # HTTP/2
 //!
@@ -117,7 +135,15 @@
 
 mod altsvc;
 mod async_client;
+mod cookie;
 mod crl_source;
+mod decode;
+#[cfg(test)]
+mod decode_tests;
+#[cfg(test)]
+mod expect_tests;
+#[cfg(test)]
+mod cookie_tests;
 mod hostrules;
 // the HTTP/2 protocol layers (sans-IO) and the blocking client's transport on top of them
 mod h2;
@@ -150,6 +176,7 @@ pub mod url;
 pub(crate) mod wire;
 
 pub use async_client::{AsyncClient, AsyncRequestBuilder, AsyncResponseStream, Connect, ThreadConnector};
+pub use cookie::CookieJar;
 pub use crl_source::HttpCrlSource;
 pub use hostrules::HostRules;
 pub use stream::ResponseStream;
@@ -240,7 +267,7 @@ use crate::asyncio::net::{deadline_error, Io};
 use crate::asyncio::{BlockingTask, Pool};
 use crate::error::{Error, Refused, RefusedBy, Result};
 use crate::pem::base64_encode;
-use crate::tls::{ClientConfig, TlsStream};
+use crate::tls::{ClientConfig, TlsStream, TlsVersion};
 use h2_transport::{Acquired, Registry, StartError, Waits};
 use h3_transport::{DialOptions, Registry as H3Registry};
 use idle::{IdlePool, Key, Policy};
@@ -251,6 +278,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
+use decode::{DecodeLimits, RequestOpts};
 use stream::{BodyReader, Conn, Failure, Home, MuxBody};
 use wire::Limits;
 
@@ -258,8 +286,14 @@ use wire::Limits;
 const SMALL_BODY: usize = 16 * 1024;
 
 /// What a request must share with another to use the same connection.
-pub(crate) fn pool_key(url: &Url, proxy: Option<&Proxy>) -> Key {
-    Key { tls: url.is_https(), host: url.host.to_ascii_lowercase(), port: url.port, proxy: proxy.map(|p| (p.host.to_ascii_lowercase(), p.port, p.auth.clone())) }
+pub(crate) fn pool_key(url: &Url, proxy: Option<&Proxy>, min_tls: TlsVersion) -> Key {
+    Key {
+        tls: url.is_https(),
+        host: url.host.to_ascii_lowercase(),
+        port: url.port,
+        proxy: proxy.map(|p| (p.host.to_ascii_lowercase(), p.port, p.auth.clone())),
+        min_tls,
+    }
 }
 
 /// A redirect's body is read and dropped, so that its connection can be used again, when it is
@@ -303,6 +337,11 @@ pub struct Response {
     pub body: Vec<u8>,
     /// The URL that produced this response (after redirects).
     pub url: Url,
+    /// The version of TLS the response came over (`None` over plain http). HTTP/3 is always TLS 1.3.
+    pub tls_version: Option<TlsVersion>,
+    /// True if the body came compressed (`gzip` or `deflate`) and this client undid that, because it was asked to (see
+    /// [`Client::decompress`]): `headers` then has no `Content-Encoding` and no `Content-Length`, which described the bytes on the wire.
+    pub uncompressed: bool,
 }
 
 impl Response {
@@ -384,6 +423,14 @@ pub struct Client {
     url_limits: UrlLimits,
     /// What gives each hop its own headers (its host's credentials): see [`Client::hop_headers`].
     hop_hook: Option<Arc<HopHook>>,
+    /// Whether compressed bodies are decoded: see [`Client::decompress`].
+    decompress: bool,
+    /// How much a decoded body may come to: see [`Client::max_decoded_bytes`].
+    decode: DecodeLimits,
+    /// How long a request that says `Expect: 100-continue` waits for the go-ahead: see [`Client::expect_continue_timeout`].
+    expect_timeout: Duration,
+    /// Where cookies are kept, if anywhere: see [`Client::cookie_jar`].
+    cookies: Option<CookieJar>,
 }
 
 /// What a hop hook is told about the request that is about to be sent: see [`Client::hop_headers`].
@@ -456,6 +503,10 @@ impl Client {
             hosts: None,
             url_limits: UrlLimits::new(),
             hop_hook: None,
+            decompress: false,
+            decode: DecodeLimits::default(),
+            expect_timeout: Duration::from_secs(1),
+            cookies: None,
         }
     }
 
@@ -506,6 +557,77 @@ impl Client {
     /// [`RequestBuilder::max_body_bytes`] sets it for one request.
     pub fn max_body_bytes(mut self, n: u64) -> Client {
         self.limits.max_body_bytes = n;
+        self
+    }
+
+    /// Decodes compressed response bodies (off by default): requests ask for `gzip, deflate` and a body that comes as a single `gzip`,
+    /// `x-gzip` or `deflate` is decoded on the way, whether it is read whole, streamed or read by the async client. The caller gets
+    /// the decoded bytes, no `Content-Encoding` and no `Content-Length` (they described the wire), and [`Response::uncompressed`]
+    /// true. What is not decoded comes as it is: another coding, a list of codings, a response to `HEAD`, a 204, a 304, a 206 (part
+    /// of the encoded body) and every response when the option is off; a request that sets its own `Accept-Encoding` keeps it,
+    /// and a body it gets back in a coding that is known is decoded all the same. A request with a `Range` header does not ask.
+    ///
+    /// Compressed data from a stranger can be a bomb (about 1,000 times its size, and more with a stack of codings, which this client
+    /// does not undo), so the decoder is held to [`max_decoded_bytes`](Client::max_decoded_bytes) (by default the same as
+    /// [`max_body_bytes`](Client::max_body_bytes)) and, if set, [`max_decode_ratio`](Client::max_decode_ratio); a stream that would
+    /// pass a limit fails with [`Error::Decode`] and is not delivered in part. The compressed stream
+    /// must end where the body does (bytes after it are an error), an empty body is an empty body, and after a failure nothing more
+    /// of the body is read (so its connection is closed, unless all of it had arrived). The decoder is the crate's own,
+    /// [`inflate`](crate::inflate).
+    pub fn decompress(mut self, on: bool) -> Client {
+        self.decompress = on;
+        self
+    }
+
+    /// The most bytes a decoded body may have (see [`decompress`](Client::decompress)); by default the same number as
+    /// [`max_body_bytes`](Client::max_body_bytes), which limits the compressed body as it is on the wire. Set it higher to take large
+    /// bodies that compress well, and keep it as low as the application can live with: it is the bound on what a hostile
+    /// server can make this process write to memory (or to the sink of a stream).
+    pub fn max_decoded_bytes(mut self, n: u64) -> Client {
+        self.decode.max_output = Some(n);
+        self
+    }
+
+    /// Refuses a decoded body that comes to more than `ratio` times its compressed size, once it is `floor` bytes long (0 for
+    /// no ratio limit, the default). DEFLATE cannot exceed 1,032 to 1, and honest data that is nothing but one byte repeated gets
+    /// near that, so a ratio below about 1,100 refuses such data; ordinary files stay under 20 to 1 and text under 10 to 1.
+    pub fn max_decode_ratio(mut self, ratio: u64, floor: u64) -> Client {
+        self.decode.max_ratio = ratio;
+        self.decode.ratio_floor = floor;
+        self
+    }
+
+    /// How long a request that says `Expect: 100-continue` (see [`RequestBuilder::expect_continue`]) waits for the server's go-ahead
+    /// before it sends its body anyway (default one second, as curl does). Over HTTP/1.1 only: HTTP/2 and HTTP/3 send the body
+    /// with the head, and so does the async client, which has no timer to wait with.
+    pub fn expect_continue_timeout(mut self, wait: Duration) -> Client {
+        self.expect_timeout = wait;
+        self
+    }
+
+    /// Keeps the cookies that responses set in `jar` and sends them back (off by default: without a jar, `Set-Cookie` is ignored and
+    /// no `Cookie` is sent but the caller's own). Each cookie goes back to the host that set it and to no other, whatever its `Domain`
+    /// says, for the reasons [`CookieJar`] gives; the cookies of every response are kept, redirects included, and each hop of a
+    /// request gets the cookies of its own host. A request that has its own `Cookie` header sends that one and none from the jar.
+    /// The jar can be shared: give clones of one jar to several clients, and look into it or fill it with its own methods.
+    pub fn cookie_jar(mut self, jar: CookieJar) -> Client {
+        self.cookies = Some(jar);
+        self
+    }
+
+    /// The cookie jar of this client, if it has one.
+    pub fn cookies(&self) -> Option<&CookieJar> {
+        self.cookies.as_ref()
+    }
+
+    /// The oldest TLS version spoken (TLS 1.2 by default; see [`ClientConfig::min_version`] for what TLS 1.2 here is and is not).
+    /// `TlsVersion::Tls13` makes every request TLS 1.3 only, and no request can then loosen it; [`RequestBuilder::min_tls_version`]
+    /// makes one request TLS 1.3 only. Each response says which version it came over ([`Response::tls_version`]).
+    pub fn min_tls_version(mut self, version: TlsVersion) -> Client {
+        self.tls.min_version = version;
+        if let Some(h2) = &mut self.h2 {
+            h2.tls.min_version = version;
+        }
         self
     }
 
@@ -788,7 +910,7 @@ impl Client {
     }
 
     pub fn request(&self, method: &str, url: &str) -> RequestBuilder<'_> {
-        RequestBuilder { client: self, method: method.to_string(), url: url.to_string(), headers: Vec::new(), body: Vec::new(), max_body: None }
+        RequestBuilder { client: self, method: method.to_string(), url: url.to_string(), headers: Vec::new(), body: Vec::new(), opts: RequestOpts::default() }
     }
 
     /// [`get`](Client::get) as a future. The request runs on a worker thread (see [`Pool`]), so
@@ -833,7 +955,7 @@ pub struct RequestBuilder<'a> {
     url: String,
     headers: Vec<(String, String)>,
     body: Vec<u8>,
-    max_body: Option<u64>,
+    opts: RequestOpts,
 }
 
 impl<'a> RequestBuilder<'a> {
@@ -849,19 +971,52 @@ impl<'a> RequestBuilder<'a> {
 
     /// Largest response body accepted for this request, in bytes; see [`Client::max_body_bytes`].
     pub fn max_body_bytes(mut self, n: u64) -> Self {
-        self.max_body = Some(n);
+        self.opts.max_body = Some(n);
         self
     }
 
+    /// Decodes (or does not decode) a compressed response to this request, whatever the client's setting; see [`Client::decompress`].
+    pub fn decompress(mut self, on: bool) -> Self {
+        self.opts.decompress = Some(on);
+        self
+    }
+
+    /// The most bytes the decoded body of this response may have; see [`Client::max_decoded_bytes`].
+    pub fn max_decoded_bytes(mut self, n: u64) -> Self {
+        self.opts.max_decoded = Some(n);
+        self
+    }
+
+    /// The oldest TLS version this request accepts: `TlsVersion::Tls13` keeps it TLS 1.3 only, and a server that cannot do 1.3
+    /// is then refused. It can only make the client's minimum ([`Client::min_tls_version`]) stricter: `TlsVersion::Tls12` on a
+    /// client that requires TLS 1.3 changes nothing. It holds for every redirect the request follows, and connections are not
+    /// shared between requests that accept TLS 1.2 and ones that do not.
+    pub fn min_tls_version(mut self, version: TlsVersion) -> Self {
+        self.opts.min_tls = Some(version);
+        self
+    }
+
+    /// Says `Expect: 100-continue` (the same as adding that header): over HTTP/1.1 the head goes first and the body only when the
+    /// server says to go on, or after [`Client::expect_continue_timeout`] if it says nothing. A server that answers at once (a 401, a
+    /// redirect, a 413 for a body too large) is answered without the body having been sent, which is what this is for: a large upload
+    /// that is refused costs its head and nothing more. The body is then sent again, whole, if a redirect is followed (307 and 308
+    /// keep it) or if the server does not do expectations (417, after which the request goes once more without one).
+    pub fn expect_continue(self) -> Self {
+        if self.headers.iter().any(|(n, v)| n.eq_ignore_ascii_case("expect") && v.trim().eq_ignore_ascii_case("100-continue")) {
+            return self;
+        }
+        self.header("Expect", "100-continue")
+    }
+
     pub fn send(self) -> Result<Response> {
-        self.client.execute(self.method, &self.url, self.headers, self.body, self.max_body)
+        self.client.execute(self.method, &self.url, self.headers, self.body, self.opts)
     }
 
     /// Sends the request and returns as soon as the response headers are in; the body is read from
     /// the [`ResponseStream`] as it arrives. Redirects are followed first, as for
     /// [`send`](RequestBuilder::send); the stream is the final response.
     pub fn send_stream(self) -> Result<ResponseStream> {
-        self.client.execute_stream(self.method, &self.url, self.headers, self.body, self.max_body, false)
+        self.client.execute_stream(self.method, &self.url, self.headers, self.body, self.opts, false)
     }
 
     /// Sends the request without blocking the caller: it runs on a worker thread and the
@@ -869,8 +1024,8 @@ impl<'a> RequestBuilder<'a> {
     pub fn send_async(self) -> ResponseFuture {
         let client = self.client.clone();
         let pool = client.pool.clone().unwrap_or_else(Pool::global);
-        let (method, url, headers, body, max_body) = (self.method, self.url, self.headers, self.body, self.max_body);
-        ResponseFuture { task: pool.spawn_blocking(move || client.execute(method, &url, headers, body, max_body)) }
+        let (method, url, headers, body, opts) = (self.method, self.url, self.headers, self.body, self.opts);
+        ResponseFuture { task: pool.spawn_blocking(move || client.execute(method, &url, headers, body, opts)) }
     }
 }
 
@@ -913,6 +1068,11 @@ pub(crate) fn tcp_connect(host: &str, port: u16, opts: ConnectOptions) -> Result
     }
 }
 
+/// Whether a request's headers say `Expect: 100-continue`.
+pub(crate) fn expects_continue(headers: &[(String, String)]) -> bool {
+    headers.iter().any(|(n, v)| n.eq_ignore_ascii_case("expect") && v.trim().eq_ignore_ascii_case("100-continue"))
+}
+
 fn is_redirect(status: u16) -> bool {
     matches!(status, 301 | 302 | 303 | 307 | 308)
 }
@@ -936,6 +1096,10 @@ pub(crate) struct Hop {
     pub(crate) granted: Vec<(String, String)>,
     /// 0 for the request itself, 1 for the first redirect it was sent on, and so on.
     pub(crate) index: usize,
+    /// If compressed bodies are to be asked for and decoded: the limits of the decoding. Decided once for the request and kept by its redirects.
+    pub(crate) decode: Option<DecodeLimits>,
+    /// The oldest TLS version the request accepts, if it says (else the client's): see [`RequestBuilder::min_tls_version`].
+    pub(crate) min_tls: Option<TlsVersion>,
 }
 
 impl Hop {
@@ -991,22 +1155,46 @@ struct H3Tries {
 const H3_ATTEMPTS: usize = 4;
 
 impl Client {
-    fn execute(&self, method: String, url: &str, headers: Vec<(String, String)>, body: Vec<u8>, max_body: Option<u64>) -> Result<Response> {
-        self.execute_stream(method, url, headers, body, max_body, true)?.into_response()
+    fn execute(&self, method: String, url: &str, headers: Vec<(String, String)>, body: Vec<u8>, opts: RequestOpts) -> Result<Response> {
+        self.execute_stream(method, url, headers, body, opts, true)?.into_response()
+    }
+
+    /// The oldest TLS version a request accepts: its own, else the client's.
+    /// The oldest TLS version a hop accepts: the client's, or the request's when that is stricter. A request can keep itself to
+    /// TLS 1.3 on a client that allows 1.2, and cannot allow 1.2 on a client that requires 1.3.
+    pub(crate) fn min_tls_for(&self, hop: &Hop) -> TlsVersion {
+        hop.min_tls.map_or(self.tls.min_version, |v| v.max(self.tls.min_version))
+    }
+
+    /// The limits of the decoding for a request with `opts`, or `None` if its response is not to be decoded.
+    pub(crate) fn decode_for(&self, opts: RequestOpts) -> Option<DecodeLimits> {
+        opts.decompress.unwrap_or(self.decompress).then(|| DecodeLimits { max_output: opts.max_decoded.or(self.decode.max_output), ..self.decode })
     }
 
     /// Sends the request, follows redirects, and returns the final response as soon as its headers
     /// have arrived.
-    fn execute_stream(&self, method: String, url: &str, headers: Vec<(String, String)>, body: Vec<u8>, max_body: Option<u64>, whole: bool) -> Result<ResponseStream> {
+    fn execute_stream(&self, method: String, url: &str, headers: Vec<(String, String)>, body: Vec<u8>, opts: RequestOpts, whole: bool) -> Result<ResponseStream> {
         let mut hop = self.start(method, url, headers, body)?;
+        hop.decode = self.decode_for(opts);
+        hop.min_tls = opts.min_tls;
         let deadline = self.deadline();
-        let limits = Limits { max_body_bytes: max_body.unwrap_or(self.limits.max_body_bytes), ..self.limits };
+        let limits = Limits { max_body_bytes: opts.max_body.unwrap_or(self.limits.max_body_bytes), ..self.limits };
         let mut hops = 0;
         loop {
             let mut resp = self.once(&hop, deadline, limits, whole)?;
             self.learn_alternatives(&hop, &resp);
+            if let Some(jar) = &self.cookies {
+                jar.store_from(&hop.url, resp.headers_named("set-cookie"));
+            }
             if !self.follow(&mut hop, resp.status, &resp.headers, &mut hops)? {
-                return Ok(resp);
+                // (the final response, and the only one whose body the caller gets)
+                return Ok(match &hop.decode {
+                    Some(d) => match decode::coding_of(&hop.method, resp.status, &resp.headers) {
+                        Some(format) => resp.with_decoder(format, d.for_body(limits.max_body_bytes)),
+                        None => resp,
+                    },
+                    None => resp,
+                });
             }
             // what is left of the redirect's body, if it is small, so that its connection can be used again
             if resp.content_length.map_or(true, |n| n <= REDIRECT_BODY_LIMIT) {
@@ -1023,7 +1211,7 @@ impl Client {
             return;
         }
         let key = match self.proxy_for(&hop.url) {
-            Ok(None) => pool_key(&hop.url, None),
+            Ok(None) => pool_key(&hop.url, None, self.min_tls_for(hop)),
             _ => return,
         };
         let hosts = self.hosts.as_deref();
@@ -1049,7 +1237,7 @@ impl Client {
         self.check_target(&url, 0)?;
         let method = method.to_ascii_uppercase();
         let granted = self.granted_for(&HopInfo { url: &url, method: &method, hop: 0, from: None })?;
-        Ok(Hop { method, url, headers, body, granted, index: 0 })
+        Ok(Hop { method, url, headers, body, granted, index: 0, decode: None, min_tls: None })
     }
 
     /// Decides what a response means for the request: `Ok(true)` if `hop` now describes the
@@ -1115,10 +1303,17 @@ impl Client {
             headers.push(("Accept".into(), "*/*".into()));
         }
         if !has("accept-encoding") {
-            headers.push(("Accept-Encoding".into(), "identity".into()));
+            // (not for a range of a body: it is a range of the encoded one, which nothing can decode in part)
+            let encodings = if hop.decode.is_some() && !has("range") { "gzip, deflate" } else { "identity" };
+            headers.push(("Accept-Encoding".into(), encodings.into()));
         }
         if !self.policy.keep_alive {
             headers.push(("Connection".into(), "close".into()));
+        }
+        if let (Some(jar), false) = (&self.cookies, has("cookie")) {
+            if let Some(cookies) = jar.header_for(url) {
+                headers.push(("Cookie".into(), cookies));
+            }
         }
         if let (Some(ui), false) = (&url.userinfo, has("authorization")) {
             headers.push(("Authorization".into(), format!("Basic {}", base64_encode(ui.as_bytes()))));
@@ -1133,11 +1328,13 @@ impl Client {
     /// One request on one connection (a shared HTTP/2 one, a pooled HTTP/1.1 one if there is a good one, else a
     /// new one), up to the arrival of the response headers.
     fn once(&self, hop: &Hop, deadline: Option<Instant>, limits: Limits, whole: bool) -> Result<ResponseStream> {
-        let headers = self.request_headers(hop)?;
+        let mut headers = self.request_headers(hop)?;
         let (method, url, body) = (hop.method.as_str(), &hop.url, hop.body.as_slice());
         let proxy = self.proxy_for(url)?;
-        let key = pool_key(url, proxy.as_ref());
-        let head = wire::write_request_head(method, &url.path_and_query, &headers);
+        let key = pool_key(url, proxy.as_ref(), self.min_tls_for(hop));
+        let mut head = wire::write_request_head(method, &url.path_and_query, &headers);
+        // a body that waits for the server's go-ahead (over HTTP/1.1)
+        let mut expect = (!body.is_empty() && expects_continue(&headers)).then_some(self.expect_timeout);
         let mut retry_allowed = self.policy.parks() && is_replayable(method, &hop.headers);
         let mut pooled_allowed = true;
         let h2_on = self.h2.is_some() && url.is_https() && self.policy.parks();
@@ -1167,10 +1364,18 @@ impl Client {
             let was_reused = reused.is_some();
             let conn = match (fresh, reused) {
                 (Some(c), _) | (None, Some(c)) => c,
-                (None, None) => self.connect(url, proxy.as_ref(), deadline)?,
+                (None, None) => self.connect(url, proxy.as_ref(), deadline, key.min_tls)?,
             };
             let home = self.policy.parks().then(|| Home { pool: self.idle.clone(), key: key.clone(), policy: self.policy });
-            match self.exchange(conn, method, url, &head, body, limits, home) {
+            match self.exchange(conn, method, url, &head, body, limits, home, expect) {
+                // a server that does not do expectations says so (RFC 9110, 15.5.18): the request, which it has not acted on, goes
+                // once more without one, and with its body
+                Ok(stream) if stream.status == 417 && expect.is_some() => {
+                    drop(stream);
+                    headers.retain(|(n, _)| !n.eq_ignore_ascii_case("expect"));
+                    head = wire::write_request_head(method, &url.path_and_query, &headers);
+                    expect = None;
+                }
                 Ok(stream) => return Ok(stream),
                 // the server closed a connection that had been waiting: the request never reached
                 // anything that could have acted on it, so it is sent once more on a new connection
@@ -1198,7 +1403,7 @@ impl Client {
         let (conn, reused) = match support.registry.acquire(key, waits, opts.connect_timeout + opts.timeout)? {
             Acquired::Http1 => return Ok(H2Step::Http1(None)),
             Acquired::Conn(conn) => (conn, true),
-            Acquired::Dial(ticket) => match self.dial(&hop.url, proxy, deadline, true)? {
+            Acquired::Dial(ticket) => match self.dial(&hop.url, proxy, deadline, true, key.min_tls)? {
                 Dialed::H2(conn) => {
                     ticket.h2(conn.clone());
                     (conn, false)
@@ -1218,7 +1423,7 @@ impl Client {
                 Ok((head, bytes)) => {
                     let bodiless = hop.method == "HEAD" || matches!(head.status, 204 | 304);
                     let body = MuxBody::complete(bytes, waits, limits);
-                    return Ok(H2Step::Response(ResponseStream::from_h2(head.status, head.headers, hop.url.clone(), body, bodiless)?));
+                    return Ok(H2Step::Response(ResponseStream::from_h2(head.status, head.headers, hop.url.clone(), body, bodiless, conn.tls_version())?));
                 }
                 Err(f) => f,
             },
@@ -1226,7 +1431,7 @@ impl Client {
                 Ok(head) => {
                     let bodiless = hop.method == "HEAD" || matches!(head.status, 204 | 304);
                     let body = MuxBody::new(stream, waits, limits);
-                    return Ok(H2Step::Response(ResponseStream::from_h2(head.status, head.headers, hop.url.clone(), body, bodiless)?));
+                    return Ok(H2Step::Response(ResponseStream::from_h2(head.status, head.headers, hop.url.clone(), body, bodiless, conn.tls_version())?));
                 }
                 Err(f) => f,
             },
@@ -1321,13 +1526,18 @@ impl Client {
         Err(failure.error)
     }
 
-    /// Sends the request on `conn` and reads the response headers.
+    /// Sends the request on `conn` (the body after a go-ahead, if it waits for one: see [`RequestBuilder::expect_continue`]) and reads the
+    /// response headers.
     #[allow(clippy::too_many_arguments)]
-    fn exchange(&self, conn: Conn, method: &str, url: &Url, head: &[u8], body: &[u8], limits: Limits, home: Option<Home>) -> std::result::Result<ResponseStream, Failure> {
+    fn exchange(&self, conn: Conn, method: &str, url: &Url, head: &[u8], body: &[u8], limits: Limits, home: Option<Home>, expect: Option<Duration>) -> std::result::Result<ResponseStream, Failure> {
+        let tls_version = conn.tls_version();
         let mut reader = BodyReader::new(conn, method, limits, home);
-        reader.send_request(head, body, body.len() <= SMALL_BODY)?;
+        match expect {
+            Some(wait) => reader.send_request_expecting_continue(head, body, wait)?,
+            None => reader.send_request(head, body, body.len() <= SMALL_BODY)?,
+        }
         let response_head = reader.receive_head()?;
-        Ok(ResponseStream::new(response_head, url.clone(), reader))
+        Ok(ResponseStream::new(response_head, url.clone(), reader, tls_version))
     }
 
     /// An idle connection to `key` that the peer has not closed in the meantime, with the limits of
@@ -1372,11 +1582,11 @@ impl Client {
     }
 
     /// A new connection for an HTTP/1.1 request.
-    fn connect(&self, url: &Url, proxy: Option<&Proxy>, deadline: Option<Instant>) -> Result<Conn> {
+    fn connect(&self, url: &Url, proxy: Option<&Proxy>, deadline: Option<Instant>, min_tls: TlsVersion) -> Result<Conn> {
         if !url.is_https() {
             return Ok(Conn::Plain(self.tcp_connect(&url.host, url.port, deadline)?));
         }
-        match self.dial(url, proxy, deadline, false)? {
+        match self.dial(url, proxy, deadline, false, min_tls)? {
             Dialed::Http1(conn) => Ok(conn),
             Dialed::H2(_) => Err(Error::Http("internal: an HTTP/2 connection where HTTP/1.1 was asked for".into())),
         }
@@ -1384,7 +1594,7 @@ impl Client {
 
     /// A new TLS connection to an https origin (through the proxy, if there is one). With `offer_h2` the client
     /// offers `h2` in ALPN, and a server that picks it gets an HTTP/2 connection.
-    fn dial(&self, url: &Url, proxy: Option<&Proxy>, deadline: Option<Instant>, offer_h2: bool) -> Result<Dialed> {
+    fn dial(&self, url: &Url, proxy: Option<&Proxy>, deadline: Option<Instant>, offer_h2: bool, min_tls: TlsVersion) -> Result<Dialed> {
         let mut io = match proxy {
             Some(p) => self.proxy_tunnel(p, &url.host, url.port, deadline)?,
             None => self.tcp_connect(&url.host, url.port, deadline)?,
@@ -1392,6 +1602,14 @@ impl Client {
         let config = match (&self.h2, offer_h2) {
             (Some(h2), true) => &h2.tls,
             _ => &self.tls,
+        };
+        // (a request may ask for a newer version than the client's oldest)
+        let narrowed;
+        let config = if config.min_version == min_tls {
+            config
+        } else {
+            narrowed = config.clone().with_min_version(min_tls);
+            &narrowed
         };
         let tls = crate::tls::handshake(&mut io, &url.host, config)?;
         match tls.alpn_protocol() {

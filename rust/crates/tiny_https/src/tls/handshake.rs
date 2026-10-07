@@ -12,7 +12,8 @@
 
 use super::messages::*;
 use super::suite::*;
-use super::ClientConfig;
+use super::tls12::{Handshake12, Start12, Step12, VERSION_TLS12};
+use super::{ClientConfig, TlsVersion};
 use crate::crypto::ecdsa::Curve;
 use crate::crypto::{ecdh, rand, x25519};
 use crate::error::{Error, Result};
@@ -88,6 +89,9 @@ pub(crate) enum Event {
     /// The server's Finished is verified and ours is in the events before this: the handshake is over, and these are the traffic
     /// secrets of the application epoch.
     ApplicationSecrets { suite: Suite, client: Zeroizing<Vec<u8>>, server: Zeroizing<Vec<u8>> },
+    /// The server speaks TLS 1.2: the handshake goes on in this one (see [`super::tls12`]), which asks for these steps first.
+    /// Never over QUIC, which offers TLS 1.3 only.
+    Tls12(Box<Handshake12>, Vec<Step12>),
 }
 
 /// Where the server's flight stands.
@@ -142,6 +146,10 @@ pub(crate) struct Handshake {
     secret: KeyShareSecret,
     /// The group of the key share in the ClientHello sent last.
     sent_group: u16,
+    /// The random of the ClientHello (the same in a second one).
+    client_random: [u8; 32],
+    /// The ClientHello offers TLS 1.2 too (see [`ClientConfig::min_version`]): never over QUIC.
+    offers_tls12: bool,
     /// The ClientHello's random and legacy session id, kept to build the second ClientHello after a
     /// HelloRetryRequest (it must repeat them). `None` for a recorded hello (tests), which cannot retry.
     hello_inputs: Option<([u8; 32], Vec<u8>)>,
@@ -182,6 +190,7 @@ impl Handshake {
         let public = x25519::public_key(&private);
         let sni = if server_name.parse::<IpAddr>().is_ok() { None } else { Some(server_name) };
         let status_requested = config.verify_server_certificate && config.revocation.mode != RevocationMode::Off;
+        let offers_tls12 = quic.is_none() && config.min_version <= TlsVersion::Tls12;
         let client_hello = build_client_hello(&ClientHello {
             random,
             session_id,
@@ -192,11 +201,14 @@ impl Handshake {
             status_request: status_requested,
             cookie: None,
             quic_transport_parameters: quic,
+            tls12: offers_tls12,
         });
         let hs = Handshake {
             stage: Stage::ServerHello,
             secret: KeyShareSecret::X25519(private),
             sent_group: GROUP_X25519,
+            client_random: *random,
+            offers_tls12,
             hello_inputs: Some((*random, session_id.to_vec())),
             retry_suite: None,
             session_id: session_id.to_vec(),
@@ -228,10 +240,16 @@ impl Handshake {
         client_hello: &[u8],
         ignored_ee_extensions: &[u16],
     ) -> Handshake {
+        let mut client_random = [0u8; 32];
+        if client_hello.len() >= 38 {
+            client_random.copy_from_slice(&client_hello[6..38]);
+        }
         Handshake {
             stage: Stage::ServerHello,
             secret: KeyShareSecret::X25519(Zeroizing::new(private)),
             sent_group: GROUP_X25519,
+            client_random,
+            offers_tls12: false,
             hello_inputs: None,
             retry_suite: None,
             session_id: session_id.to_vec(),
@@ -269,13 +287,28 @@ impl Handshake {
                     self.on_hello_retry_request(msg, sh, trailing, &mut events)?;
                     return Ok(events);
                 }
+                // RFC 8446 section 4.1.3: a server that can do TLS 1.3 and speaks an older version marks its random so; a client
+                // that offered 1.3 and sees the mark knows that 1.3 was taken out of its ClientHello on the way
                 if has_downgrade_sentinel(&sh.random) {
                     return Err(Error::Tls(
                         "illegal_parameter: ServerHello.random carries the TLS downgrade sentinel (possible downgrade attack)".into(),
                     ));
                 }
-                if sh.selected_version != Some(VERSION_TLS13) {
-                    return Err(Error::Tls("protocol_version: server did not negotiate TLS 1.3 (this library supports TLS 1.3 only)".into()));
+                match sh.selected_version {
+                    Some(VERSION_TLS13) => {}
+                    // a version in supported_versions that is not 1.3 is one we did not offer there (section 4.2.1)
+                    Some(_) => return Err(Error::Tls("illegal_parameter: the server selected a version in supported_versions that was not offered".into())),
+                    None if sh.legacy_version == VERSION_TLS12 && self.offers_tls12 && self.retry_suite.is_none() => {
+                        // (in TLS 1.2 the messages after ServerHello are in the clear too, so they may come with it)
+                        return self.switch_to_tls12(msg, &sh);
+                    }
+                    None if sh.legacy_version == VERSION_TLS12 && !self.offers_tls12 => {
+                        return Err(Error::Tls("protocol_version: the server speaks TLS 1.2, and this connection requires TLS 1.3".into()));
+                    }
+                    None => return Err(Error::Tls("protocol_version: server did not negotiate TLS 1.3 or 1.2".into())),
+                }
+                if let Some((t, _)) = sh.other_extensions.first() {
+                    return Err(Error::Tls(format!("unsupported_extension: unexpected extension {} in ServerHello", t)));
                 }
                 if sh.legacy_version != 0x0303 || sh.compression != 0 {
                     return Err(Error::Tls("illegal_parameter: bad legacy fields in ServerHello".into()));
@@ -389,6 +422,26 @@ impl Handshake {
         Ok(events)
     }
 
+    /// The server chose TLS 1.2: the handshake goes on as one of those, with what it needs from this one.
+    fn switch_to_tls12(&mut self, msg: &[u8], sh: &ServerHello) -> Result<Vec<Event>> {
+        let x25519_private = match &self.secret {
+            KeyShareSecret::X25519(p) => Some(p.clone()),
+            KeyShareSecret::Ec(..) => None,
+        };
+        let start = Start12 {
+            client_random: self.client_random,
+            session_id: self.session_id.clone(),
+            server_name: self.server_name.clone(),
+            sent_sni: self.sent_sni,
+            status_requested: self.status_requested,
+            config: self.config.clone(),
+            transcript: std::mem::take(&mut self.transcript),
+            x25519_private,
+        };
+        let (hs12, steps) = Handshake12::start(start, msg, sh)?;
+        Ok(vec![Event::Tls12(Box::new(hs12), steps)])
+    }
+
     /// A HelloRetryRequest (RFC 8446 section 4.1.4): the server wants a key share for another
     /// group and/or a cookie echoed. Answers with a second ClientHello; anything else about the
     /// request that is not allowed ends the handshake.
@@ -455,6 +508,7 @@ impl Handshake {
             status_request: self.status_requested,
             cookie: hrr.cookie.as_deref(),
             quic_transport_parameters: self.quic.as_deref(),
+            tls12: self.offers_tls12,
         });
         self.transcript.extend_from_slice(&client_hello);
         // The compatibility change_cipher_spec went out after the first ClientHello; one is enough.

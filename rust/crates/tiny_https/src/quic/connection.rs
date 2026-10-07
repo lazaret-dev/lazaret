@@ -5,7 +5,7 @@
 //! to be woken ([`Connection::timeout`]) and is woken with [`Connection::on_timeout`]. What happens to the connection that the owner
 //! should know of comes out of [`Connection::poll_event`].
 //!
-//! What is here: the handshake (the TLS client of [`tls`](super::tls) in CRYPTO frames, the packet protection of every level, Retry
+//! What is here: the handshake (the TLS client of [`tls`] in CRYPTO frames, the packet protection of every level, Retry
 //! and Version Negotiation, the transport parameters and the connection ids that authenticate them), acknowledgments (what to
 //! acknowledge and when, and what the peer's acknowledgments say, with [`recovery`](super::recovery)), the probe timeout, the idle
 //! timeout, key updates, closing and draining, stateless resets. Streams are in [`streams`](super::streams).

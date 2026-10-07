@@ -1,4 +1,4 @@
-//! A TLS 1.3 client (RFC 8446).
+//! A TLS 1.3 client (RFC 8446), which speaks TLS 1.2 (RFC 5246) to a server that cannot do 1.3, unless told not to.
 //!
 //! [`TlsStream`] runs it over any blocking `Read + Write` transport. [`ClientConnection`] is the
 //! same protocol as a state machine that does no I/O, for callers that bring their own event
@@ -8,7 +8,10 @@
 //! wants another group answers with a HelloRetryRequest and the client retries once),
 //! TLS_AES_128_GCM_SHA256, TLS_AES_256_GCM_SHA384, TLS_CHACHA20_POLY1305_SHA256, certificate chain
 //! + hostname validation, ALPN, KeyUpdate.
-//! Not supported: TLS 1.2 and earlier, session resumption / 0-RTT, client certificates (an empty
+//! TLS 1.2, for servers that cannot do 1.3 (the npm registry was one, in 2026), with only what has no known weakness of its own:
+//! ECDHE, AEAD suites, the extended master secret required, the downgrade protection of TLS 1.3, no renegotiation, no
+//! resumption, and the same certificate checks (see [`tls12`]). [`ClientConfig::min_version`] turns it off.
+//! Not supported: TLS 1.1 and earlier, session resumption / 0-RTT, client certificates (an empty
 //! Certificate is sent if the server asks), post-quantum or finite-field key exchange groups.
 //! Revocation: a stapled OCSP response is requested and checked by default, CRLs can be supplied or
 //! fetched, and the policy is in [`ClientConfig::revocation`] (see [`crate::revocation`]).
@@ -18,6 +21,7 @@ pub(crate) mod handshake;
 pub(crate) mod messages;
 mod signature;
 pub(crate) mod suite;
+pub mod tls12;
 #[cfg(any(test, feature = "server"))]
 pub mod pki;
 #[cfg(any(test, feature = "server"))]
@@ -46,6 +50,22 @@ use crate::x509::TrustStore;
 use std::io::{self, Read, Write};
 use std::sync::Arc;
 
+/// A version of TLS.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum TlsVersion {
+    Tls12,
+    Tls13,
+}
+
+impl std::fmt::Display for TlsVersion {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            TlsVersion::Tls12 => "TLS 1.2",
+            TlsVersion::Tls13 => "TLS 1.3",
+        })
+    }
+}
+
 /// Client-side TLS settings.
 #[derive(Clone)]
 pub struct ClientConfig {
@@ -63,6 +83,11 @@ pub struct ClientConfig {
     /// (counting the KeyUpdate itself; at least 2). `None` uses the cipher suite's own limit: 2^24
     /// records for AES-GCM (RFC 8446 section 5.5), far more for ChaCha20-Poly1305.
     pub rekey_after_records: Option<u64>,
+    /// The oldest version spoken: TLS 1.2 by default, so that a server that cannot do 1.3 can still be reached (with what
+    /// [`tls12`] allows of it); `TlsVersion::Tls13` offers TLS 1.3 alone, as this library did before. Either way a server that
+    /// can do 1.3 does 1.3, and one that is made to look as if it cannot (by someone in the middle) is caught by the downgrade
+    /// check of RFC 8446.
+    pub min_version: TlsVersion,
 }
 
 impl ClientConfig {
@@ -74,7 +99,14 @@ impl ClientConfig {
             time_override: None,
             revocation: Revocation::default(),
             rekey_after_records: None,
+            min_version: TlsVersion::Tls12,
         }
+    }
+
+    /// Sets the oldest TLS version spoken; see [`min_version`](ClientConfig::min_version).
+    pub fn with_min_version(mut self, version: TlsVersion) -> ClientConfig {
+        self.min_version = version;
+        self
     }
 
     /// Rotates the sending keys after `records` records instead of at the suite's own limit; see
@@ -173,7 +205,7 @@ pub(crate) fn handshake<S: Read + Write>(io: &mut S, server_name: &str, config: 
     }
 }
 
-/// An established TLS 1.3 connection. Implements [`Read`] and [`Write`].
+/// An established TLS connection (1.3, or 1.2 with a server that cannot do 1.3). Implements [`Read`] and [`Write`].
 ///
 /// A blocking driver around [`ClientConnection`].
 pub struct TlsStream<S: Read + Write> {
@@ -234,9 +266,24 @@ impl<S: Read + Write> TlsStream<S> {
         to_io(e)
     }
 
-    /// The cipher suite negotiated with the server.
+    /// The TLS 1.3 cipher suite negotiated with the server; `None` for a TLS 1.2 connection.
     pub fn cipher_suite(&self) -> Option<Suite> {
         self.conn.cipher_suite()
+    }
+
+    /// The TLS 1.2 cipher suite negotiated with the server, if it is a TLS 1.2 connection.
+    pub fn cipher_suite12(&self) -> Option<tls12::Suite12> {
+        self.conn.cipher_suite12()
+    }
+
+    /// The name of the negotiated cipher suite, in either version.
+    pub fn cipher_suite_name(&self) -> Option<&'static str> {
+        self.conn.cipher_suite_name()
+    }
+
+    /// The version of TLS spoken.
+    pub fn protocol_version(&self) -> Option<TlsVersion> {
+        self.conn.protocol_version()
     }
 
     /// The ALPN protocol the server selected, if any.

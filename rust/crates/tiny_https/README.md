@@ -4,14 +4,16 @@ An HTTPS client for Rust built from scratch with **zero dependencies** (only `st
 
 ## Status
 
-A working HTTPS client: you can `get`/`post` over TLS 1.3 with full certificate validation, over HTTP/1.1 (with a keep-alive pool and streaming bodies) or, when you ask for it, HTTP/2 or HTTP/3.
+A working HTTPS client: you can `get`/`post` over TLS 1.3 (or TLS 1.2, with a server that speaks nothing newer) with full certificate validation, over HTTP/1.1 (with a keep-alive pool and streaming bodies) or, when you ask for it, HTTP/2 or HTTP/3.
 
 | Layer | State |
 |-------|-------|
 | Crypto: SHA-256/384/512, HMAC, HKDF, AES-128/256-GCM, ChaCha20-Poly1305, X25519, ECDH on P-256/P-384 (constant time), RSA (PKCS#1 v1.5 and PSS verify), ECDSA P-256/P-384 verify, Ed25519 verify (rules of Go's `crypto/ed25519`), bignum | Tested against RFC/NIST vectors and OpenSSL-generated signatures; all 122 supported self-signatures among the 128 real roots in a system CA bundle verify |
 | ASN.1/DER, PEM, X.509 chain validation for TLS servers and for other purposes (code signing, time stamping, e-mail, any), hostname matching | Fixture tests (expiry, wrong host, non-CA issuer, pathLen, name constraints on DNS, e-mail, URI and IP names, wrong purpose, validation at a past time, tampering); a real Sigstore Fulcio chain (root, intermediate and a leaf from a real npm provenance attestation, validated at its logged time) and a real Apple Mac App Store code-signing chain; 127 of 128 real roots parse |
 | TLS 1.3 client (handshake, HelloRetryRequest, record layer, KeyUpdate in both directions, ALPN) | Interoperates with `openssl s_server` (RSA/P-256/P-384 keys x 3 cipher suites, and servers that accept only P-256 or P-384 key exchange, which force a HelloRetryRequest) and with a third-party TLS gateway; reproduces the RFC 8448 handshake trace byte for byte |
+| TLS 1.2 client for servers that speak nothing newer (B-36): ECDHE (X25519, P-256, P-384) with AES-GCM or ChaCha20-Poly1305 only, the extended master secret required, the downgrade check of RFC 8446, no renegotiation, no resumption; a minimum version per client and per request; the version in every response | `openssl s_server -tls1_2`: every suite with RSA, P-256 and P-384 keys, every group, 3 MiB down and up on every suite, ALPN, revocation by staple; a man in the middle that takes TLS 1.3 out of the ClientHello is caught by the downgrade check, and one that takes the extended master secret out of the ServerHello is refused; what is not offered (CBC, static RSA, no EMS) is refused; HTTP/1.1 and HTTP/2 over TLS 1.2 against Go's server, with the pool keeping TLS 1.2 connections from requests that require 1.3; the PRF and the records against published vectors and Python's `cryptography`; fuzz targets `tls12_flight` and `tls_post` |
 | HTTP/1.1 client, keep-alive pool, streaming bodies, redirects, CONNECT proxy | Unit tests, HTTPS tests against OpenSSL, and tests against the in-crate TLS server (tickets, rekeys, stale connections) |
+| DEFLATE, zlib and gzip decompression (`inflate`, pure, written from scratch, with limits on the size and the ratio) and, opt-in, `Content-Encoding` in the clients; `Expect: 100-continue`; an opt-in cookie jar | 256 streams made by zlib, gzip(1), zlib-flate, Go's `compress/*` and by hand decode at every cutting of input and output, and 1,039 damaged copies get exactly zlib's verdict (Go agrees on all but the gzip headers with a reserved flag bit, which it ignores and zlib and RFC 1952 refuse: `tests/inflate_vectors.rs`, `tools/gen_inflate_vectors.py`); a fuzz target (`inflate`: the answer does not depend on how the stream is cut, nothing past the limit); bombs of 1,032 to 1 stopped at the limit over HTTP/1.1, HTTP/2 and the async client; the 100-continue wait over TCP and TLS against scripted servers; the cookie rules of RFC 6265 and 6265bis, host-only |
 | HTTP/2 client (opt-in, blocking `Client`): HPACK, framing, flow control, one shared connection per origin | HPACK checked against Go's and Python's implementations in both directions; 15 tests against Go's own HTTP/2 server; the in-crate server (below) against curl, Go and python-h2; 4 fuzz targets; real servers (pypi.org, npm) answer it over h2 |
 | TLS 1.3 / HTTP/2 server (`server` feature, **for tests and tools only**) | Against `openssl s_client`, curl and Go's `crypto/tls`: 36 checks; its HTTP/2 against curl, Go and python-h2: 21 checks |
 | QUIC client transport for HTTP/3 (`net` feature, work in progress: B-91): packet and header protection (all three TLS 1.3 suites, key update, AEAD limits), the frame codec, transport parameters, the TLS 1.3 handshake in CRYPTO frames, Retry and Version Negotiation, loss recovery (RFC 9002) with NewReno and pacing, streams with flow control, closing and draining, the idle timeout; sans-IO, one `Connection` per path | The RFC 9001 appendix vectors; 72 packets made by aioquic 1.3.0 (each also under the next key generation) open, and what is sealed here is read by it; 1,745 frame payloads read by quic-go's own parser and by this one with the same result; a live handshake, requests (`GET`, bulk, `POST` echo) and the close against an aioquic server, with Retry, and through a relay that drops and delays datagrams (`examples/quic_probe.rs`, `tools/quic_interop_server.py`); 7 fuzz targets, three of which run models (a set of numbers, a map of bytes, a list of outstanding packets) beside the code, and one a whole connection against the test server over a network that loses, duplicates, corrupts and reorders; 32 deliberate bugs in the packet protection, each caught by a test, and 21 in the buffers, flow control, transport parameters, loss recovery and connection, each caught by a fuzz target (`fuzz/mutate.py`; two more change nothing that anyone could see) |
@@ -21,8 +23,8 @@ A working HTTPS client: you can `get`/`post` over TLS 1.3 with full certificate 
 | Sigstore attestations: npm provenance and publish attestations, PyPI PEP 740 provenance, bundles v0.1 to v0.3 (strict JSON, DSSE, Fulcio identity, Rekor signed entry timestamps and inclusion proofs, RFC 3161 time stamps; pure, no I/O, no clock) | The six real npm attestations of three `sigstore` releases (one per bundle format, two with a Rekor shard that has since closed) and PyPI's real provenance verify against Sigstore's production trusted root and npm's keys, and every member and string of every one, removed or changed in turn (about 1,700 changes), makes it fail unless nothing authenticates it; 86 bundles from a Sigstore of our own cover time stamps, an Ed25519 log, every key type and 62 refusals, each for the reason it was made for (and 600 more changes on four of them); 3 fuzz targets (`json`, `sigstore`, `trust_root`) |
 | CMS / PKCS#7 signatures (Java `META-INF/*.RSA`, `.p7s`, S/MIME) and RFC 3161 time stamps: BER reader, signer verification (RSA PKCS#1 and PSS, ECDSA P-256/P-384, Ed25519), chain to the caller's roots at the signature's time (pure, no I/O) | 45 messages made by OpenSSL and the JDK's `jarsigner` verify; 1,886 damaged messages judged by `openssl cms -verify` and replayed, each region of a message pinned as exactly OpenSSL's verdict, stricter, or deliberately more lenient; 2 fuzz targets; not Authenticode yet (B-70 phase 2, B-80) |
 
-Not yet verified against real public CA chains from a normal network: see `BACKLOG.md` (B-06, B-08).
-Test run at last check: 1,177 unit (including the mutation fuzzers; 14 more are ignored by default: 10 timing tests, two long random runs, a live QPACK peer and a replay of fuzz inputs; 276 of them also run without the `net` feature), 2 Go-vector, 1 CMS-vector, 13 real Sigstore, 5 synthetic Sigstore, 3 real Rekor, 36 OpenSSL interop, 15 HTTP/2 client against Go's server, 22 HTTP/3 client against aioquic (they skip without `python3` and aioquic), 1 real-root, 11 doc tests, no warnings; `tools/server_interop.sh` (36 checks) and `tools/h2_interop.sh` (21) pass.
+Checked against real public servers from a normal network (B-97 in `BACKLOG.md`): 43 of 49 live hosts, and 52 real certificate chains replayed offline. The six that failed were servers that spoke only TLS 1.2 to the client of then, `registry.npmjs.org` among them; TLS 1.2 is done now (B-36, see "TLS versions" below), and the field run that confirms npm on that network is still to be repeated.
+Test run at last check: 1,260 unit (including the mutation fuzzers; 17 more are ignored by default: 13 timing tests, two long random runs, a live QPACK peer and a replay of fuzz inputs; 297 of them also run without the `net` feature), 2 Go-vector, 1 CMS-vector, 2 inflate-vector (1,295 cases), 6 real-chain, 13 real Sigstore, 5 synthetic Sigstore, 3 real Rekor, 47 OpenSSL interop (12 of them TLS 1.2), 17 HTTP/2 client against Go's server, 22 HTTP/3 client against aioquic (they skip without `python3` and aioquic), 1 real-root, 14 doc tests, no warnings; `tools/server_interop.sh` (36 checks) and `tools/h2_interop.sh` (21) pass.
 
 ## Security warning
 
@@ -104,6 +106,77 @@ Where HTTP/2 helps most is many requests to an origin that has no connection yet
 For one big stream or a run of small requests on a fast local path HTTP/1.1 is as fast or faster, on this server. A run of small requests costs HTTP/2 about a sixth more CPU than HTTP/1.1 here, and a download read in pieces about half as much again (80 ms against 50 for 100 MB): the two HTTP/2 servers tried (Go's and Node's) send the head and the body of a response in two TCP segments, so whoever reads has one wake-up more per response, and a piece is copied once more on its way to the caller (B-86, B-87). Eight threads on one connection cost more than eight connections do (B-89).
 `cargo run --release --example fetch -- --http2 --parallel 8 URL` shows the sharing and the time.
 
+
+## TLS versions
+
+TLS 1.3 is spoken whenever the server can. The ClientHello offers TLS 1.2 too, and a server that speaks nothing newer gets
+TLS 1.2, under rules that leave nothing to that version's known weaknesses (`registry.npmjs.org` answered only TLS 1.2 from a home network
+on 2026-10-07; it is what B-36 was for):
+
+* **Downgrade check** (RFC 8446 section 4.1.3). A TLS 1.3 server that answers with 1.2 ends its random with `DOWNGRD` and 1 or 0,
+  which it does only when something on the way took 1.3 out of the ClientHello: the handshake ends with `illegal_parameter`.
+* **ECDHE with AEAD suites only**: `TLS_ECDHE_{ECDSA,RSA}_WITH_AES_128_GCM_SHA256`, `..._AES_256_GCM_SHA384` and
+  `..._CHACHA20_POLY1305_SHA256`, over X25519, P-256 or P-384. No RSA key exchange, no CBC, no static DH, no RC4, 3DES, NULL or export suite.
+* **The extended master secret is required** (RFC 7627): a server that does not agree to it is refused.
+* **Off**: renegotiation (`renegotiation_info` is sent empty and must come back empty; a HelloRequest is answered with a
+  `no_renegotiation` warning and nothing more), compression, session resumption and tickets, and SHA-1 or MD5 in the
+  ServerKeyExchange signature (the schemes offered are the TLS 1.3 ones and RSA PKCS#1 v1.5 with SHA-256, -384 or -512) and in
+  certificates.
+* **The same certificate checks as TLS 1.3**: chain, host name, purpose, validity and revocation through the same code (the OCSP
+  staple comes in 1.2's CertificateStatus message), and the certificate's key must be the kind the suite says signs.
+* A TLS 1.2 connection cannot change its keys: one that has sent as many records as a key may protect (2^24 with AES-GCM, about
+  270 GB) fails rather than going on, and the next request opens another. HTTP/3 and QUIC are TLS 1.3 by definition.
+
+The oldest version is set per client and per request, and every response says which one it came over:
+
+```rust
+use tiny_https::tls::TlsVersion;
+let client = tiny_https::Client::new()?;                       // TLS 1.3, or 1.2 with a server that speaks nothing newer
+let r = client.get("https://registry.npmjs.org/left-pad")?;
+println!("{:?}", r.tls_version);                               // Some(Tls12) or Some(Tls13); None over plain http
+let r = client.request("GET", "https://sum.golang.org/latest").min_tls_version(TlsVersion::Tls13).send()?;  // 1.3 or nothing
+let strict = tiny_https::Client::new()?.min_tls_version(TlsVersion::Tls13);   // every request 1.3 or nothing
+```
+
+A request can only make the client's minimum stricter, never looser: `min_tls_version(TlsVersion::Tls12)` on a request of a
+client that requires 1.3 changes nothing. The minimum holds for every redirect a request follows, and the pools (HTTP/1.1
+and HTTP/2) are keyed by it, so a request that requires 1.3 never gets a connection that was opened for one that allows 1.2,
+even one that turned out to be 1.3. `ResponseStream` and the async client's responses carry `tls_version` too, and a
+`TlsStream` says `protocol_version()` and `cipher_suite_name()` (`cipher_suite()` is the TLS 1.3 suite, `cipher_suite12()` the
+TLS 1.2 one). `ClientConfig::with_min_version` sets the same thing for a bare `TlsStream`. The default is TLS 1.2, so that a
+supply-chain tool reaches every registry; a caller that would rather fail than speak 1.2 sets `TlsVersion::Tls13` once.
+
+## Compressed bodies, cookies and `Expect: 100-continue`
+
+All three are opt-in, so a client that asks for none of them sends and receives exactly what it did before.
+
+**Decompression.** `Client::decompress(true)` (or `RequestBuilder::decompress`) makes requests ask for `gzip, deflate` and decodes a body
+that comes as a single `gzip`, `x-gzip` or `deflate`, whether it is read whole, streamed (`send_stream`) or read by the async client.
+The decoded response has no `Content-Encoding` and no `Content-Length` (they described the wire) and `uncompressed` is true. Compressed
+data from a stranger can be a bomb (DEFLATE reaches 1,032 to 1), so the decoder, the crate's own `inflate`, is held to
+`max_decoded_bytes` (by default the same number as `max_body_bytes`, which limits the compressed bytes) and, if you set one,
+`max_decode_ratio`; a body that would pass a limit is an error, `Error::Decode`, never a body cut short. What is not decoded comes
+as it came: another coding (`br`, `zstd`), a list of codings (each layer would be a bomb of its own), a response to `HEAD`, a 206 (a
+range of the *encoded* body). The compressed stream must end where the body does, and an empty body is an empty body.
+
+```rust
+let client = tiny_https::Client::new()?.decompress(true).max_decoded_bytes(256 << 20);
+let resp = client.get("https://registry.example/index.json")?;   // decoded, if it came compressed
+```
+
+`tiny_https::inflate` is usable on its own, with no HTTP, for a `.tgz` or anything else: a push-style streaming decoder over slices
+(`Inflater::inflate(input, output)`) or `decode_all` for a buffer, with `Limits` on the output and the ratio. It is in the pure part.
+
+**Cookies.** `Client::cookie_jar(CookieJar::new())` keeps the cookies that responses set (redirects included) and sends them back.
+Every cookie goes back to the host that set it and to no other: a `Domain` attribute is honoured only as far as it names that host
+or a domain the host is in, and the cookie stays the host's. There is no public-suffix list in this crate to tell `example.com` from
+`co.uk`, and a cookie set for a whole domain is how one host plants a session on another. `Secure`, `Path`, `Expires`, `Max-Age` and the
+`__Secure-` and `__Host-` prefixes work as RFC 6265bis says; a request with its own `Cookie` header sends that and nothing from the jar.
+
+**`Expect: 100-continue`.** `RequestBuilder::expect_continue()` sends the head first and the body only when the server says to go on
+(or after `expect_continue_timeout`, one second by default, if it says nothing). A server that answers at once (a 401, a redirect, a 413)
+never gets the body, which is the point for a large upload; after a 417 the request goes again without the expectation. HTTP/1.1 only:
+HTTP/2, HTTP/3 and the async client (which has no timer to wait with) send the body with the head.
 
 ## HTTP/3 (opt-in)
 
@@ -243,7 +316,7 @@ RSA, ECDSA and Ed25519 are verification only and handle public data (the Ed25519
 `net` (on by default) is TLS, the HTTP client, sockets, OS randomness, the SIMD kernels and the wiping of secrets: everything
 that does I/O or needs `unsafe`. With `default-features = false` you get only the pure part: ASN.1, PEM, X.509 path
 validation (the caller passes the trust anchors and the time), OCSP and CRL checking, SHA-1/SHA-2, big numbers, RSA,
-ECDSA and Ed25519 verification, signed notes, Merkle proofs, the Go checksum database check, and CMS / PKCS#7 signatures with RFC 3161 time stamps. That build has `#![forbid(unsafe_code)]`, does no I/O, starts no threads, reads no clock or
+ECDSA and Ed25519 verification, signed notes, Merkle proofs, the Go checksum database check, CMS / PKCS#7 signatures with RFC 3161 time stamps, and DEFLATE, zlib and gzip decompression. That build has `#![forbid(unsafe_code)]`, does no I/O, starts no threads, reads no clock or
 environment variable, has no dependencies, and compiles for `wasm32-unknown-unknown`.
 
 ```toml
@@ -279,12 +352,13 @@ src/sumdb.rs       the Go checksum database check (`Check`, sans-IO), lookup pat
 src/json.rs        strict I-JSON reader (duplicate names, bad UTF-8, lone surrogates and non-RFC 8259 numbers are errors; 64-bit integers from decimal strings) and canonical writer
 src/trust_root.rs  Sigstore's `trusted_root.json` and npm's key list: logs, Fulcio and time-stamp authorities, keys, validity periods
 src/sigstore.rs    Sigstore bundle verification (v0.1 to v0.3, npm attestations, PyPI's PEP 740): DSSE, Fulcio identity, Rekor entries, time stamps, in-toto subject
+src/inflate.rs     DEFLATE, zlib and gzip decompression: a streaming decoder over slices with limits on the size and the ratio
 src/verify_error.rs  the error type of the pure part
 src/util.rs        hex, constant-time compare, byte reader
 src/crypto/        SHA-1 (OCSP certificate IDs, and reporting weak CMS signatures), SHA-2, big numbers, RSA, ECDSA and Ed25519 verification, the 2^255-19 field (also used by X25519)
 
 Behind the `net` feature (default):
-src/tls/           TLS 1.3 client: messages, cipher suites and record cipher, `ClientConnection` (sans-IO state machine), `TlsStream` (blocking driver)
+src/tls/           TLS 1.3 client: messages, cipher suites and record cipher, `ClientConnection` (sans-IO state machine), `TlsStream` (blocking driver); TLS 1.2 (`tls12.rs`: suites, PRF, records, handshake)
 src/http/          URL parsing, sans-IO response parser, HTTP/1.1 framing, Client and AsyncClient (redirects, CONNECT proxy, keep-alive pool, streaming bodies), HttpCrlSource
 src/http/h2/       HTTP/2 client layers that do no I/O: Huffman, HPACK, frames, the connection state machine (flow control, streams, GOAWAY)
 src/http/h2_transport.rs  the blocking client's HTTP/2 transport: one shared connection per origin, a reader and a writer thread
@@ -294,6 +368,8 @@ src/http/h3/       HTTP/3 pieces that do no I/O (B-91): QPACK (static table, enc
 src/http/h3_transport.rs  the blocking client's HTTP/3 transport: a UDP socket, a reader and a timer thread per connection, the registry of connections and Alt-Svc alternatives with its backoff
 src/http/altsvc.rs  the `Alt-Svc` field (RFC 7838)
 src/http/hostrules.rs  `HostRules`: the hosts a client may reach (one-label wildcards, default port only), applied to the request and every redirect
+src/http/decode.rs  `Content-Encoding`: what to ask for and decode, and the sans-IO body decoder both clients drive
+src/http/cookie.rs  `CookieJar` (RFC 6265 and 6265bis, host-only)
 src/tls/server.rs, pki.rs, src/crypto/ed25519_sign.rs, src/http/h2_server.rs   the `server` feature: a TLS 1.3 and HTTP/2 server for tests and tools (not for production)
 src/crypto/        HMAC/HKDF, AEAD ciphers (ChaCha20-Poly1305, AES-GCM, with the SIMD kernels), X25519, ECDH on P-256/P-384, OS randomness (the files `crypto/mod.rs` lists under "behind net")
 src/error.rs       the error type of the net side (wraps the pure one)
@@ -303,7 +379,7 @@ src/zeroize.rs     wiping secrets (the only `unsafe` outside the SIMD kernels an
 examples/       fetch (curl-like; `--http2`, `--http3` (QUIC first, TCP if that fails), `--alt-svc` (QUIC where the origin said it offers it), `--parallel N`, `--max-bytes N`), serve (the test server: HTTP/1.1 and HTTP/2 over TLS 1.3, needs `--features server`), async_get, probe (negotiation report), sumdb (look a module up in the Go checksum database), cms_verify (check a CMS / PKCS#7 signature file), sigstore_verify (check Sigstore attestations of a file) and bench
 tests/          OpenSSL interop tests, the HTTP/2 client against Go's server (h2_client_interop.rs), the HTTP/3 client against aioquic (h3_client_interop.rs), replays of vectors judged by Go (go_vectors.rs) and by OpenSSL (cms_vectors.rs) and fixtures (tests/data)
 tools/          generators for test vectors and fixtures (Python, uses the `cryptography` package; the CMS ones also run the `openssl` command line tool and the JDK's `jarsigner`), check_features.sh, go_oracle.sh (runs Go's sumdb packages as an independent judge), server_interop.sh and h2_interop.sh (the test server against OpenSSL, curl, Go and python-h2), h2_oracle_server.go (Go's HTTP/2 server for `tests/h2_client_interop.rs`), bench_h2.sh with bench_client.go and bench_delay_proxy.go (the benchmark against Go's client above), hpack_oracle.* and h2_frame_oracle.py (HPACK and frames against Go, Python and hyperframe), gen_quic_vectors.py (packets made by aioquic), quicgo_oracle/ (frame payloads read by quic-go's parser), quic_interop_server.py (an aioquic HTTP/3 server, with an HTTPS side on TCP that advertises it, for `examples/quic_probe.rs` and `tests/h3_client_interop.rs`) and qpack_interop.py (QPACK against ls-qpack)
-fuzz/           coverage-guided fuzzer (std-only, stable Rust) and its 42 targets: `sh fuzz/run_all.sh 3600`
+fuzz/           coverage-guided fuzzer (std-only, stable Rust) and its 43 targets: `sh fuzz/run_all.sh 3600`
 ```
 
 ## Usage
@@ -550,24 +626,25 @@ their certificate chains with OpenSSL and verifies each with the library at the 
 `field_results/real_chains/`, is what `cargo test --test real_chains` replays once it is copied to `tests/data/real_chains/`),
 downloads their OCSP responses and CRLs for later fixtures (B-65), and with `fuzz HOURS` runs a long fuzz campaign under
 `caffeinate` (B-66). Everything it produces is under `field_results/` and in `field_results.tgz`; it reads no secrets and
-records only the names of proxy variables, never their values. Written and tested against a local test bed only: it has
-not yet been run on a real network.
+records only the names of proxy variables, never their values. First run on a real network on 2026-10-07 (an Apple M5 Max,
+B-97 in `BACKLOG.md`): its chains are in `tests/data/real_chains/`.
 
 Run suites one at a time and keep each under 45 seconds:
 
 ```
 cargo test --lib
-cargo test --lib --no-default-features   # the pure part alone (276 tests)
+cargo test --lib --no-default-features   # the pure part alone (297 tests)
 cargo test --test go_vectors             # notes, tree heads, records and Merkle proofs against Go's verdicts (pure)
 cargo test --test cms_vectors            # damaged CMS messages against OpenSSL's verdicts (pure)
 sh tools/check_features.sh               # the line between the pure part and `net`; builds for wasm32 if the target is installed
-cargo test --test interop_openssl     # needs the `openssl` command line tool; skipped otherwise
+cargo test --test interop_openssl     # needs the `openssl` command line tool; skipped otherwise (TLS 1.3 and 1.2)
 cargo test --test h2_client_interop   # the HTTP/2 client against Go's server; builds it with `go`, skipped if there is none
 AIOQUIC_PATH=/dir cargo test --test h3_client_interop   # the HTTP/3 client against aioquic (pip install --target /dir aioquic==1.3.0); skipped if python3 or openssl is missing
 sh tools/server_interop.sh            # the test TLS server against OpenSSL, curl and Go (36 checks)
 sh tools/h2_interop.sh                # its HTTP/2 against curl, Go and python-h2 (PYTHONPATH may point at h2 and hyperframe)
 cargo test --test system_roots        # checks the system CA bundle, if present
-cargo test --test real_chains         # replays real certificate chains captured by tools/mac_field_check.sh; skipped until tests/data/real_chains exists
+cargo test --test real_chains         # replays the 52 real certificate chains captured by tools/mac_field_check.sh
+cargo test --test inflate_vectors     # streams from zlib, gzip(1), zlib-flate and Go, and damaged ones with zlib's verdicts (pure)
 cargo test --doc
 ```
 
@@ -590,6 +667,8 @@ The timing tests are `#[ignore]`d because they depend on the machine. Run them o
 `aead_and_mac`, `aes`, `harness`). A comparison that reads |t| above 4.5 is measured again with fresh inputs, and
 fails if the repeat is above 10 or is above 4.5 again at the same statistic with the same sign (the same class slower
 again; B-95); `harness_does_not_fail_comparisons_of_identical_classes` measures how often that happens with nothing to find.
+A clock that ticks coarsely (Apple Silicon's, 41.67 ns) is found and handled by timing several calls together (B-98);
+`operand_probe` asks whether the CPU itself takes longer for some operand values than for others (B-99).
 
 ## Licence
 

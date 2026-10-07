@@ -174,6 +174,7 @@ fn a_request_to_an_allowed_host_is_answered() {
     let reply = fetch(&request(&server, "/a")).unwrap();
     assert_eq!((reply.status, reply.body.as_slice()), (200, b"hello /a".as_slice()));
     assert_eq!(reply.version, "HTTP/1.1");
+    assert_eq!(reply.tls.as_deref(), Some("TLS 1.3"));
     assert!(reply.headers.iter().any(|(n, v)| n.eq_ignore_ascii_case("x-test") && v == "1"));
     assert_eq!(reply.url, format!("https://localhost:{}/a", server.port));
     let seen = server.seen.lock().unwrap()[0].clone();
@@ -266,7 +267,7 @@ fn a_body_over_the_budget_is_too_large() {
 fn a_stream_reads_in_pieces_within_the_budget() {
     let server = serve(|_| Some(response(200, &[], &[b'z'; 10_000])));
     let mut stream = open(&request(&server, "/")).unwrap();
-    assert_eq!(stream.status, 200);
+    assert_eq!((stream.status, stream.tls.as_deref()), (200, Some("TLS 1.3")));
     let mut got = 0;
     let mut buf = [0u8; 999];
     loop {
@@ -367,6 +368,9 @@ fn a_failure_says_its_kind() {
     assert_eq!(classify(NetError::Tls("protocol_version: server did not negotiate TLS 1.3".into())).kind(), "tls-version");
     assert_eq!(classify(NetError::Alert(2, 70)).kind(), "tls-version");
     assert_eq!(classify(NetError::Alert(2, 40)).kind(), "tls");
+    // (a compressed body this layer never asks to have decoded)
+    let decode = classify(NetError::Decode(tiny_https::inflate::Error::Truncated));
+    assert_eq!(decode.kind(), "http", "{decode:?}");
     assert_eq!(classify(NetError::Io(std::io::Error::from(std::io::ErrorKind::TimedOut))).kind(), "timeout");
     assert_eq!(classify(NetError::Io(std::io::Error::from(std::io::ErrorKind::ConnectionRefused))).kind(), "network");
     let wrapped = std::io::Error::new(std::io::ErrorKind::InvalidData, NetError::Http("response body exceeds the configured size limit".into()));
@@ -807,8 +811,9 @@ fn a_header_a_request_does_not_set_is_refused() {
     assert_eq!(fetch(&req).unwrap().body, b"ok", "the plain ones, in any case");
 }
 
-/// A server that answers a TLS hello with a protocol_version alert, as one that speaks no TLS 1.3 does.
-fn serve_no_tls13() -> u16 {
+/// A server that answers a TLS hello with a protocol_version alert, as one that speaks neither TLS 1.3 nor TLS 1.2
+/// does.
+fn serve_old_tls() -> u16 {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
     thread::spawn(move || {
@@ -826,10 +831,10 @@ fn serve_no_tls13() -> u16 {
 }
 
 #[test]
-fn a_server_without_tls13_is_named_by_its_hop() {
+fn a_server_that_speaks_neither_version_is_named_by_its_hop() {
     // (the credentials review of decision 14: a redirect to such a server put the first URL's host on Python's
     // transport, for the rest of the process)
-    let old = serve_no_tls13();
+    let old = serve_old_tls();
     let to = format!("https://localhost:{old}/x");
     let server = serve(move |_| Some(response(302, &[&format!("Location: {to}")], b"")));
     let mut req = request(&server, "/away");

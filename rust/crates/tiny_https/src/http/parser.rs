@@ -82,6 +82,8 @@ pub(crate) struct ResponseParser {
     persistent: bool,
     /// Bytes arrived after the end of the message.
     extra: bool,
+    /// A `100 Continue` interim response has been read (see [`continued`](ResponseParser::continued)).
+    continued: bool,
 }
 
 impl ResponseParser {
@@ -104,6 +106,7 @@ impl ResponseParser {
             body_bytes: 0,
             persistent: false,
             extra: false,
+            continued: false,
         }
     }
 
@@ -119,6 +122,12 @@ impl ResponseParser {
     /// True once the status line and headers of the final response have been read.
     pub(crate) fn head_complete(&self) -> bool {
         self.head_complete
+    }
+
+    /// True once a `100 Continue` has been read: the go-ahead that a request with `Expect: 100-continue` waits for before it sends
+    /// its body. (The interim response is otherwise skipped, like every 1xx.)
+    pub(crate) fn continued(&self) -> bool {
+        self.continued
     }
 
     /// The final response's head, once, after [`head_complete`](ResponseParser::head_complete).
@@ -364,6 +373,7 @@ impl ResponseParser {
                                 return http_err("unexpected protocol switch (101)");
                             }
                             // an interim response: the real one follows
+                            self.continued |= self.status == 100;
                             self.blank_lines = 0;
                             self.state = State::StatusLine;
                             continue;

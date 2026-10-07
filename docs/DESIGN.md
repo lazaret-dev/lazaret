@@ -1340,10 +1340,14 @@ budget of at most 32 MiB) is offered h2 and a download goes over HTTP/1.1
 (`LAZARET_HTTP` overrides); both keep their connections.
 
 What falls back to urllib: no native library, or one without the network
-layer; `LAZARET_NETWORK=python`; a server that offers no TLS 1.3 (tiny_https
-speaks 1.3 only; OpenSSL then negotiates with its downgrade protection, and
-the host goes to urllib for the rest of the process); a proxy reached over
-TLS. Trust anchors: `SSL_CERT_FILE`, the system bundle, or what Python's
+layer; `LAZARET_NETWORK=python`; a server that speaks neither TLS 1.3 nor
+TLS 1.2 (the host goes to urllib for the rest of the process); a proxy
+reached over TLS. tiny_https speaks TLS 1.2 only to a server that speaks
+nothing newer (its drop of the evening of Oct 7, B-36, because npm's edge
+answered only 1.2 to John's network): ECDHE with AEAD suites only, the
+extended master secret required, RFC 8446's downgrade check, no
+renegotiation or resumption, the certificate checks of 1.3; every reply
+says which version it came over. Trust anchors: `SSL_CERT_FILE`, the system bundle, or what Python's
 `ssl` loads (Windows' store); `SSL_CERT_DIR` alone is not read. The library
 has not had an independent review, which Lazaret had asked for before
 relying on its TLS; decision 12 (John, Oct 6) made it the default anyway,

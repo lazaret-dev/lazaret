@@ -12,6 +12,7 @@ import json
 import os
 import pathlib
 import shutil
+import socket
 import ssl
 import subprocess
 import tempfile
@@ -135,6 +136,35 @@ def serve(cert, key, max_version=None):
     return server, server.server_address[1]
 
 
+def serve_old_tls():
+    """A server that answers a TLS hello with a protocol_version alert, as one that speaks neither TLS 1.3 nor TLS 1.2
+    does: (stop, port); `stop.set()` ends it."""
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(8)
+    listener.settimeout(0.2)
+    stop = threading.Event()
+
+    def run():
+        while not stop.is_set():
+            try:
+                conn, _ = listener.accept()
+            except socket.timeout:
+                continue
+            except OSError:
+                break
+            with conn:
+                try:
+                    conn.settimeout(5)
+                    conn.recv(4096)
+                    conn.sendall(b"\x15\x03\x03\x00\x02\x02\x46")        # alert, fatal, protocol_version (70)
+                except OSError:
+                    pass
+        listener.close()
+    threading.Thread(target=run, daemon=True).start()
+    return stop, listener.getsockname()[1]
+
+
 NO_PROXY_ENV = {k: v for k, v in os.environ.items() if k.lower() not in ("https_proxy", "http_proxy", "all_proxy")}
 
 
@@ -167,7 +197,7 @@ class NativeTransportTests(unittest.TestCase):
     def test_a_request_is_answered(self):
         reply = nativenet.request(self.url("/ok"), hosts=[self.host], max_bytes=100, timeout=10)
         self.assertEqual((reply.status, reply.body, reply.header("x-test")), (200, b"hello", "1"))
-        self.assertEqual((reply.version, reply.url), ("HTTP/1.1", self.url("/ok")))
+        self.assertEqual((reply.version, reply.url, reply.tls), ("HTTP/1.1", self.url("/ok"), "TLS 1.3"))
 
     def test_its_fields_are_sent(self):
         reply = nativenet.request(self.url("/headers"), hosts=[self.host], max_bytes=10_000, timeout=10,
@@ -254,15 +284,43 @@ class NativeTransportTests(unittest.TestCase):
         self.assertIn("the urllib path", str(caught.exception))
         self.assertFalse(nativenet.chosen(self.url("/ok")) and os.environ.get(nativenet.ENV) == "python")
 
-    def test_a_server_without_tls13_is_left_to_python(self):
+    def test_a_tls12_server_is_answered_natively_over_tls12(self):
+        # (tiny_https's drop of Oct 7, B-36: it speaks TLS 1.2 to a server that speaks nothing newer, as
+        # registry.npmjs.org did to a home network that day; before, such a server went to Python's transport)
         server, port = serve(self.cert, self.key, max_version=ssl.TLSVersion.TLSv1_2)
+        host = f"localhost:{port}"
+        try:
+            reply = nativenet.request(f"https://{host}/ok", hosts=[host], max_bytes=100, timeout=10)
+            self.assertEqual((reply.status, reply.body, reply.tls), (200, b"hello", "TLS 1.2"))
+            with nativenet.open_stream(f"https://{host}/size/70000", hosts=[host], max_bytes=100_000, timeout=10) as s:
+                self.assertEqual((s.status, s.tls, len(b"".join(s))), (200, "TLS 1.2", 70_000))
+            self.assertNotIn(host, nativenet.python_hosts())
+            self.assertTrue(nativenet.chosen(f"https://{host}/x"))
+        finally:
+            server.stop()
+
+    def test_a_server_that_speaks_neither_version_is_left_to_python(self):
+        stop, port = serve_old_tls()
         host = f"localhost:{port}"
         try:
             with self.assertRaises(nativenet.UsePython):
                 nativenet.request(f"https://{host}/ok", hosts=[host], max_bytes=100, timeout=10)
             self.assertIn(host, nativenet.python_hosts())
             self.assertFalse(nativenet.chosen(f"https://{host}/x"), "that host goes to Python's transport from then on")
-            # and the registry's fetch does so: urllib, trusting the test's root, gets the answer
+        finally:
+            stop.set()
+            with nativenet._lock:
+                nativenet._python_hosts.discard(host)
+
+    def test_a_host_left_to_python_is_fetched_by_urllib(self):
+        # (what the registry's fetch does for a host the native transport left to Python: urllib, trusting the test's
+        # root, gets the answer)
+        server, port = serve(self.cert, self.key)
+        host = f"localhost:{port}"
+        with nativenet._lock:
+            nativenet._python_hosts.add(host)
+        try:
+            self.assertFalse(nativenet.chosen(f"https://{host}/ok"))
             context = ssl.create_default_context(cadata=self.root)
             eco = types.SimpleNamespace(id="local", hosts=frozenset({host}), rate={})
             fetch = base.Fetch(eco, repo.module_transport)
@@ -273,10 +331,12 @@ class NativeTransportTests(unittest.TestCase):
                 self.assertEqual(fetch.text(f"https://{host}/ok"), "hello")
         finally:
             server.stop()
+            with nativenet._lock:
+                nativenet._python_hosts.discard(host)
 
-    def test_a_redirect_to_a_server_without_tls13_leaves_that_one_to_python(self):
+    def test_a_redirect_to_a_server_that_speaks_neither_version_leaves_that_one_to_python(self):
         # (the credentials review of decision 14: it used to put the first URL's host on Python's transport)
-        server, port = serve(self.cert, self.key, max_version=ssl.TLSVersion.TLSv1_2)
+        stop, port = serve_old_tls()
         old = f"localhost:{port}"
         try:
             with self.assertRaises(nativenet.UsePython):
@@ -285,7 +345,7 @@ class NativeTransportTests(unittest.TestCase):
             self.assertNotIn(self.host, nativenet.python_hosts())
             self.assertTrue(nativenet.chosen(self.url("/ok")), "the first URL's host stays on the native transport")
         finally:
-            server.stop()
+            stop.set()
             with nativenet._lock:
                 nativenet._python_hosts.discard(old)
 

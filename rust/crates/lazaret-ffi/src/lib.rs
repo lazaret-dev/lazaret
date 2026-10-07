@@ -169,11 +169,12 @@ mod native {
 /// A credential goes to the hops to its own host only (lazaret_net::Credential: tiny_https's hop hook), never as a
 /// header a redirect could carry on.
 ///
-/// The answer is JSON too, in a buffer the library allocates: `{"status": 200, "version": "HTTP/2", "headers":
-/// [[name, value], …], "url": "…"}` with the body in a second buffer (status 0), or `{"kind": "refused" |
-/// "too-large" | "tls-version" | "tls" | "timeout" | "network" | "http" | "setup", "error": "…"}` (status 1), and for
-/// "tls-version" `"host"`, the host of the hop that offered no TLS 1.3 (a redirect's, when it was one). Every buffer
-/// goes back to `lazaret_engine_free`. A panic never crosses the boundary (status 3).
+/// The answer is JSON too, in a buffer the library allocates: `{"status": 200, "version": "HTTP/2", "tls": "TLS 1.3"
+/// | "TLS 1.2" | null, "headers": [[name, value], …], "url": "…"}` with the body in a second buffer (status 0), or
+/// `{"kind": "refused" | "too-large" | "tls-version" | "tls" | "timeout" | "network" | "http" | "setup", "error": "…"}`
+/// (status 1), and for "tls-version" `"host"`, the host of the hop that offered neither TLS 1.3 nor 1.2 (a
+/// redirect's, when it was one). Every buffer goes back to `lazaret_engine_free`. A panic never crosses the boundary
+/// (status 3).
 #[cfg(not(target_arch = "wasm32"))]
 pub mod net {
     use super::*;
@@ -254,15 +255,16 @@ pub mod net {
     pub fn failure(f: &Failure) -> String {
         let mut fields = vec![("kind", Value::str(f.kind())), ("error", Value::str(&f.message()))];
         if let Some(host) = f.host() {
-            fields.push(("host", Value::str(host)));       // (the hop that offered no TLS 1.3)
+            fields.push(("host", Value::str(host)));       // (the hop that offered no version the client speaks)
         }
         json::write(&Value::obj(fields))
     }
 
-    fn head(status: u16, version: &str, headers: &[(String, String)], url: &str) -> String {
+    fn head(status: u16, version: &str, tls: Option<&str>, headers: &[(String, String)], url: &str) -> String {
         let headers = headers.iter().map(|(n, v)| Value::Arr(vec![Value::str(n), Value::str(v)])).collect();
         json::write(&Value::obj(vec![("status", Value::Int(status as i64)), ("version", Value::str(version)),
-                                     ("headers", Value::Arr(headers)), ("url", Value::str(url))]))
+                                     ("tls", tls.map_or(Value::Null, Value::str)), ("headers", Value::Arr(headers)),
+                                     ("url", Value::str(url))]))
     }
 
     /// (status, answer, body) for one request description.
@@ -277,7 +279,8 @@ pub mod net {
                 Err(m) => return (STATUS_ERROR, failure(&Failure::Setup(m)), Vec::new()),
             };
             match lazaret_net::fetch(&req) {
-                Ok(reply) => (STATUS_OK, head(reply.status, &reply.version, &reply.headers, &reply.url), reply.body),
+                Ok(reply) => (STATUS_OK, head(reply.status, &reply.version, reply.tls.as_deref(), &reply.headers, &reply.url),
+                              reply.body),
                 Err(f) => (STATUS_ERROR, failure(&f), Vec::new()),
             }
         }));
@@ -304,7 +307,7 @@ pub mod net {
             };
             match lazaret_net::open(&req) {
                 Ok(stream) => {
-                    let answer = head(stream.status, &stream.version, &stream.headers, &stream.url);
+                    let answer = head(stream.status, &stream.version, stream.tls.as_deref(), &stream.headers, &stream.url);
                     let id = NEXT.fetch_add(1, Ordering::Relaxed);
                     streams().get_or_insert_with(HashMap::new).insert(id, Arc::new(Mutex::new(stream)));
                     (STATUS_OK, answer, id)

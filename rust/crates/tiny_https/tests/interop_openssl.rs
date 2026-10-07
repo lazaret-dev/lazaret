@@ -13,7 +13,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tiny_https::http::HttpCrlSource;
 use tiny_https::revocation::{Crl, Revocation, RevocationMode};
-use tiny_https::tls::{ClientConfig, Suite, TlsStream};
+use tiny_https::tls::tls12::Suite12;
+use tiny_https::tls::{ClientConfig, Suite, TlsStream, TlsVersion};
 use tiny_https::x509::TrustStore;
 
 fn have_openssl() -> bool {
@@ -310,16 +311,241 @@ fn expired_time_is_rejected_via_clock_override() {
 }
 
 #[test]
-fn tls12_only_server_gives_clear_error() {
+fn a_tls12_only_server_is_refused_by_a_client_that_requires_tls13() {
     if !have_openssl() {
         return;
     }
     let fx = Fixture::new("tls12", "p256");
     let server = start_server(&fx, &["-www", "-tls1_2"]);
-    let config = ClientConfig::new(fx.trust());
+    let config = ClientConfig::new(fx.trust()).with_min_version(TlsVersion::Tls13);
     let err = connect(&server, "localhost", &config).err().expect("must fail");
+    // the ClientHello offers TLS 1.3 alone, which the server refuses with protocol_version
     let msg = err.to_string();
-    assert!(msg.contains("TLS 1.3") || msg.contains("alert"), "{}", msg);
+    assert!(msg.contains("protocol_version") && msg.contains("TLS 1.2"), "{}", msg);
+}
+
+// ------------------------------------------------------------------------------------------------ TLS 1.2
+
+fn openssl_name12(s: Suite12) -> &'static str {
+    match s {
+        Suite12::EcdheEcdsaAes128Gcm => "ECDHE-ECDSA-AES128-GCM-SHA256",
+        Suite12::EcdheRsaAes128Gcm => "ECDHE-RSA-AES128-GCM-SHA256",
+        Suite12::EcdheEcdsaAes256Gcm => "ECDHE-ECDSA-AES256-GCM-SHA384",
+        Suite12::EcdheRsaAes256Gcm => "ECDHE-RSA-AES256-GCM-SHA384",
+        Suite12::EcdheEcdsaChacha20Poly1305 => "ECDHE-ECDSA-CHACHA20-POLY1305",
+        Suite12::EcdheRsaChacha20Poly1305 => "ECDHE-RSA-CHACHA20-POLY1305",
+    }
+}
+
+#[test]
+fn tls12_every_suite_with_every_key_type() {
+    if !have_openssl() {
+        return;
+    }
+    for kind in ["rsa", "p256", "p384", "ed25519"] {
+        let fx = Fixture::new(&format!("t12_{kind}"), kind);
+        for suite in Suite12::ALL.into_iter().filter(|s| s.signs_with_rsa() == (kind == "rsa")) {
+            let server = start_server(&fx, &["-www", "-tls1_2", "-cipher", openssl_name12(suite)]);
+            let config = ClientConfig::new(fx.trust());
+            let mut tls = connect(&server, "localhost", &config).unwrap_or_else(|e| panic!("{kind} / {}: {e}", suite.name()));
+            assert_eq!(tls.protocol_version(), Some(TlsVersion::Tls12));
+            assert_eq!(tls.cipher_suite12(), Some(suite), "{kind}");
+            assert_eq!(tls.cipher_suite(), None);
+            assert_eq!(tls.cipher_suite_name(), Some(suite.name()));
+            let page = get_root(&mut tls);
+            assert!(page.starts_with("HTTP/1.0 200 ok"), "{kind} / {}: {:?}", suite.name(), &page[..page.len().min(80)]);
+            assert!(page.contains(openssl_name12(suite)) && page.contains("TLSv1.2"), "{kind} / {}: {page}", suite.name());
+        }
+    }
+}
+
+#[test]
+fn tls12_every_group() {
+    if !have_openssl() {
+        return;
+    }
+    let fx = Fixture::new("t12_groups", "p256");
+    for group in ["X25519", "P-256", "P-384"] {
+        let server = start_server(&fx, &["-www", "-tls1_2", "-groups", group]);
+        let mut tls = connect(&server, "localhost", &ClientConfig::new(fx.trust())).unwrap_or_else(|e| panic!("{group}: {e}"));
+        assert!(get_root(&mut tls).starts_with("HTTP/1.0 200 ok"), "{group}");
+    }
+}
+
+#[test]
+fn a_server_that_can_do_tls13_does_tls13() {
+    if !have_openssl() {
+        return;
+    }
+    let fx = Fixture::new("t13_preferred", "rsa");
+    let server = start_server(&fx, &["-www"]);
+    let tls = connect(&server, "localhost", &ClientConfig::new(fx.trust())).unwrap();
+    assert_eq!(tls.protocol_version(), Some(TlsVersion::Tls13));
+}
+
+#[test]
+fn tls12_refuses_what_is_not_offered() {
+    if !have_openssl() {
+        return;
+    }
+    let fx = Fixture::new("t12_refuse", "rsa");
+    // CBC, static RSA key exchange, SHA-1 MACs: none is offered, so a server that has nothing else has nothing in common
+    for cipher in ["ECDHE-RSA-AES128-SHA", "AES128-GCM-SHA256", "AES256-SHA256", "ECDHE-RSA-AES256-SHA384"] {
+        let server = start_server(&fx, &["-www", "-tls1_2", "-cipher", cipher]);
+        let err = connect(&server, "localhost", &ClientConfig::new(fx.trust())).err().unwrap_or_else(|| panic!("{cipher} was accepted"));
+        assert!(err.to_string().contains("alert"), "{cipher}: {err}");
+    }
+    // and a server that will only sign with SHA-1 has nothing to sign with
+    let server = start_server(&fx, &["-www", "-tls1_2", "-sigalgs", "RSA+SHA1"]);
+    assert!(connect(&server, "localhost", &ClientConfig::new(fx.trust())).is_err(), "SHA-1 signature accepted");
+}
+
+#[test]
+fn tls12_checks_the_certificate_as_tls13_does() {
+    if !have_openssl() {
+        return;
+    }
+    let fx = Fixture::new("t12_cert", "p256");
+    let other = Fixture::new("t12_cert_other", "p256");
+    let server = start_server(&fx, &["-www", "-tls1_2"]);
+    let err = connect(&server, "not-localhost.example", &ClientConfig::new(fx.trust())).err().unwrap();
+    assert!(err.to_string().contains("not valid for host name"), "{err}");
+    let server = start_server(&fx, &["-www", "-tls1_2"]);
+    let err = connect(&server, "localhost", &ClientConfig::new(other.trust())).err().unwrap();
+    assert!(err.to_string().contains("[CN="), "{err}");
+    let server = start_server(&fx, &["-www", "-tls1_2"]);
+    let mut config = ClientConfig::new(fx.trust());
+    config.time_override = Some(7_300_000_000);
+    let err = connect(&server, "localhost", &config).err().unwrap();
+    assert!(err.to_string().contains("expired"), "{err}");
+}
+
+#[test]
+fn tls12_large_download_on_every_suite() {
+    if !have_openssl() {
+        return;
+    }
+    for (kind, suites) in [("rsa", [Suite12::EcdheRsaAes128Gcm, Suite12::EcdheRsaAes256Gcm, Suite12::EcdheRsaChacha20Poly1305]), ("p256", [Suite12::EcdheEcdsaAes128Gcm, Suite12::EcdheEcdsaAes256Gcm, Suite12::EcdheEcdsaChacha20Poly1305])] {
+        let fx = Fixture::new(&format!("t12_bulk_{kind}"), kind);
+        let blob = pseudo_random(3 * 1024 * 1024 + 17, 12);
+        fs::write(fx.dir.join("blob.bin"), &blob).unwrap();
+        for suite in suites {
+            let server = start_server(&fx, &["-WWW", "-tls1_2", "-cipher", openssl_name12(suite)]);
+            let mut tls = connect(&server, "localhost", &ClientConfig::new(fx.trust())).unwrap();
+            assert_eq!(tls.cipher_suite12(), Some(suite));
+            let got = download_blob(&mut tls);
+            assert!(got.ends_with(&blob), "{}: {} bytes", suite.name(), got.len());
+        }
+    }
+}
+
+#[test]
+fn tls12_large_upload_on_every_suite() {
+    if !have_openssl() {
+        return;
+    }
+    let fx = Fixture::new("t12_upload", "rsa");
+    let mut parts: Vec<Vec<u8>> = vec![pseudo_random(1_234_567, 9)];
+    for (i, n) in [16_384usize, 16_385, 16_383, 65_536, 65_537, 1, 0, 2].into_iter().enumerate() {
+        parts.push(pseudo_random(n, 2000 + i as u32));
+    }
+    let expected: Vec<u8> = parts.concat();
+    for suite in [Suite12::EcdheRsaAes128Gcm, Suite12::EcdheRsaAes256Gcm, Suite12::EcdheRsaChacha20Poly1305] {
+        let out_path = fx.dir.join(format!("received-{:x}.bin", suite.id()));
+        let server = start_server_with_stdout(&fx, &["-quiet", "-tls1_2", "-cipher", openssl_name12(suite)], Stdio::from(fs::File::create(&out_path).unwrap()));
+        let mut tls = connect(&server, "localhost", &ClientConfig::new(fx.trust())).unwrap();
+        for p in &parts {
+            tls.write_all(p).unwrap();
+        }
+        tls.flush().unwrap();
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while (fs::metadata(&out_path).unwrap().len() as usize) < expected.len() {
+            assert!(Instant::now() < deadline, "{}: the server did not get it all", suite.name());
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        std::thread::sleep(Duration::from_millis(100));
+        assert!(fs::read(&out_path).unwrap() == expected, "{}: uploaded bytes differ", suite.name());
+    }
+}
+
+/// A man in the middle: forwards the client's first flight after `rewrite` has changed it (keeping its length), and everything
+/// else as it is.
+fn mitm(upstream: u16, rewrite: fn(&mut Vec<u8>)) -> u16 {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        let Ok((mut client, _)) = listener.accept() else { return };
+        let Ok(mut server) = TcpStream::connect(("127.0.0.1", upstream)) else { return };
+        let mut buf = vec![0u8; 16384];
+        // the ClientHello record (one record, as this client sends it)
+        let mut first = Vec::new();
+        while first.len() < 5 || first.len() < 5 + u16::from_be_bytes([first[3], first[4]]) as usize {
+            match client.read(&mut buf) {
+                Ok(0) | Err(_) => return,
+                Ok(n) => first.extend_from_slice(&buf[..n]),
+            }
+        }
+        rewrite(&mut first);
+        if server.write_all(&first).is_err() {
+            return;
+        }
+        let (mut c2, mut s2) = (client.try_clone().unwrap(), server.try_clone().unwrap());
+        std::thread::spawn(move || {
+            let _ = std::io::copy(&mut s2, &mut c2);
+        });
+        let _ = std::io::copy(&mut client, &mut server);
+    });
+    port
+}
+
+/// Replaces `from` with `to` (of the same length) where it first occurs in `data`.
+fn replace_once(data: &mut [u8], from: &[u8], to: &[u8]) {
+    let at = data.windows(from.len()).position(|w| w == from).unwrap_or_else(|| panic!("{from:02x?} is not in the ClientHello"));
+    data[at..at + to.len()].copy_from_slice(to);
+}
+
+#[test]
+fn a_downgrade_to_tls12_by_a_man_in_the_middle_is_caught() {
+    if !have_openssl() {
+        return;
+    }
+    // the attacker takes TLS 1.3 out of supported_versions (1.3, 1.2 becomes 1.1, 1.2); the server, which can do 1.3, then speaks
+    // 1.2 and says so in its random (RFC 8446 section 4.1.3), and the client stops at the ServerHello
+    let fx = Fixture::new("t12_downgrade", "p256");
+    let server = start_server(&fx, &["-www"]);
+    let port = mitm(server.port, |hello| replace_once(hello, &[0x00, 0x2b, 0x00, 0x05, 0x04, 0x03, 0x04, 0x03, 0x03], &[0x00, 0x2b, 0x00, 0x05, 0x04, 0x03, 0x02, 0x03, 0x03]));
+    let tcp = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    tcp.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+    let err = TlsStream::connect(tcp, "localhost", &ClientConfig::new(fx.trust())).err().expect("a downgraded handshake was completed");
+    assert!(err.to_string().contains("downgrade"), "{err}");
+}
+
+#[test]
+fn a_tls12_server_without_the_extended_master_secret_is_refused() {
+    if !have_openssl() {
+        return;
+    }
+    // the server only does the extended master secret if the ClientHello asks: an attacker who hides the request (here by
+    // renaming the extension, which keeps the length) gets a ServerHello without it, which the client refuses
+    let fx = Fixture::new("t12_ems", "p256");
+    let server = start_server(&fx, &["-www", "-tls1_2"]);
+    let port = mitm(server.port, |hello| replace_once(hello, &[0x00, 0x17, 0x00, 0x00], &[0xfa, 0xfa, 0x00, 0x00]));
+    let tcp = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    tcp.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+    let err = TlsStream::connect(tcp, "localhost", &ClientConfig::new(fx.trust())).err().expect("a handshake without the extended master secret was completed");
+    assert!(err.to_string().contains("extended master secret"), "{err}");
+}
+
+#[test]
+fn tls12_alpn_and_the_http_client() {
+    if !have_openssl() {
+        return;
+    }
+    let fx = Fixture::new("t12_alpn", "rsa");
+    let server = start_server(&fx, &["-www", "-tls1_2", "-alpn", "http/1.1"]);
+    let tls = connect(&server, "localhost", &ClientConfig::new(fx.trust())).unwrap();
+    assert_eq!(tls.alpn_protocol(), Some(&b"http/1.1"[..]));
+    drop(tls);
 }
 
 fn pseudo_random(len: usize, seed: u32) -> Vec<u8> {
@@ -929,9 +1155,14 @@ fn async_handshake_failures_are_errors() {
     let err = async_connect(&server, "localhost", &ClientConfig::new(TrustStore::empty())).err().expect("untrusted issuer");
     assert!(err.to_string().contains("trusted root"), "{}", err);
 
+    // a TLS 1.2 server: refused by a client that requires 1.3, spoken to in 1.2 by default
     let tls12 = start_server(&fx, &["-www", "-tls1_2"]);
-    let err = async_connect(&tls12, "localhost", &config).err().expect("must fail");
-    assert!(err.to_string().contains("TLS 1.3") || err.to_string().contains("alert"), "{}", err);
+    let err = async_connect(&tls12, "localhost", &config.clone().with_min_version(TlsVersion::Tls13)).err().expect("must fail");
+    assert!(err.to_string().contains("protocol_version"), "{}", err);
+    let tls12 = start_server(&fx, &["-www", "-tls1_2"]);
+    let stream = async_connect(&tls12, "localhost", &config).unwrap();
+    assert_eq!(stream.protocol_version(), Some(TlsVersion::Tls12));
+    assert!(stream.cipher_suite_name().is_some_and(|n| n.starts_with("TLS_ECDHE_ECDSA")));
 }
 
 #[test]
@@ -1245,4 +1476,31 @@ fn hard_fail_fetches_the_crl_named_in_the_certificate_and_caches_it() {
     let err = connect(&server, "localhost", &cfg).err().expect("a listed certificate must be refused");
     assert!(err.to_string().contains("certificate_revoked") && err.to_string().contains("a fetched CRL"), "{}", err);
     assert_eq!(requests.load(Ordering::SeqCst), 2);
+}
+
+#[test]
+fn tls12_revocation_works_as_for_tls13() {
+    if !have_openssl() {
+        return;
+    }
+    // a good staple satisfies hard-fail, a revoked one is refused, no staple is hard-fail's refusal, and must-staple is honoured,
+    // with the staple in TLS 1.2's CertificateStatus message
+    let fx = Fixture::new("t12_ocsp", "p256");
+    let good = fx.ocsp_response("good12.der", false, false);
+    let server = start_server(&fx, &["-www", "-tls1_2", "-status_file", &good.ocsp]);
+    let mut tls = connect(&server, "localhost", &revocation_config(&fx, RevocationMode::HardFail)).unwrap();
+    assert_eq!(tls.protocol_version(), Some(TlsVersion::Tls12));
+    assert!(get_root(&mut tls).contains("HTTP/1.0 200"));
+    drop(tls);
+    let revoked = fx.ocsp_response("revoked12.der", true, false);
+    let server = start_server(&fx, &["-www", "-tls1_2", "-status_file", &revoked.ocsp]);
+    let err = connect(&server, "localhost", &revocation_config(&fx, RevocationMode::SoftFail)).err().expect("a revoked certificate must be refused");
+    assert!(err.to_string().contains("certificate_revoked"), "{err}");
+    let server = start_server(&fx, &["-www", "-tls1_2"]);
+    let err = connect(&server, "localhost", &revocation_config(&fx, RevocationMode::HardFail)).err().expect("hard-fail needs evidence");
+    assert!(err.to_string().contains("bad_certificate_status_response"), "{err}");
+    let must = Fixture::with_extensions("t12_must_staple", "p256", "tlsfeature=status_request\n");
+    let server = start_server(&must, &["-www", "-tls1_2"]);
+    let err = connect(&server, "localhost", &revocation_config(&must, RevocationMode::SoftFail)).err().expect("a missing staple must be refused");
+    assert!(err.to_string().contains("requires a stapled OCSP response"), "{err}");
 }

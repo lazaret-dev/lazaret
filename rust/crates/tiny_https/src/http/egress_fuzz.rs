@@ -133,7 +133,7 @@ fn same(a: &Hop, b: &Hop) -> bool {
 }
 
 fn copy(h: &Hop) -> Hop {
-    Hop { method: h.method.clone(), url: h.url.clone(), headers: h.headers.clone(), body: h.body.clone(), granted: h.granted.clone(), index: h.index }
+    Hop { method: h.method.clone(), url: h.url.clone(), headers: h.headers.clone(), body: h.body.clone(), granted: h.granted.clone(), index: h.index, decode: h.decode, min_tls: h.min_tls }
 }
 
 /// The header list that goes with `hop` is well made, and is what the caller, the hook and the client each give.

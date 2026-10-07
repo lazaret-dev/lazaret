@@ -413,6 +413,8 @@ enum Round {
 /// reader holds `tls` while it decrypts and takes `state` only to hand each record's bytes to HTTP/2, so callers who take
 /// what has arrived (a swap of buffers) are not kept waiting for decryption.
 pub(super) struct Shared {
+    /// The version of TLS the connection speaks.
+    tls_version: Option<crate::tls::TlsVersion>,
     state: Mutex<State>,
     tls: Mutex<ClientConnection>,
     /// TLS has bytes for the peer that the writer has not taken. Written with `tls` held; the writer reads it holding
@@ -469,6 +471,7 @@ pub(super) fn spawn(tcp: TcpStream, mut tls: ClientConnection, idle_timeout: Dur
     let _ = tcp.set_nodelay(true);
     let reader_tcp = tcp.try_clone()?;
     let shared = Arc::new(Shared {
+        tls_version: tls.protocol_version(),
         state: Mutex::new(State::new(Connection::new(Config::default()))),
         tls_pending: AtomicBool::new(tls.wants_write()),
         tls: Mutex::new(tls),
@@ -515,6 +518,13 @@ impl Drop for Leaving<'_> {
 
 fn tls_lost(e: &Error) -> Lost {
     Lost { peer_closed: false, kind: io::ErrorKind::InvalidData, message: e.to_string() }
+}
+
+impl Shared {
+    /// The version of TLS the connection speaks.
+    pub(super) fn tls_version(&self) -> Option<crate::tls::TlsVersion> {
+        self.tls_version
+    }
 }
 
 impl Shared {

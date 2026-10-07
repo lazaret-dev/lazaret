@@ -41,7 +41,8 @@ pub const SUPPORTED_GROUPS: [u16; 3] = [GROUP_X25519, GROUP_SECP256R1, GROUP_SEC
 pub const VERSION_TLS13: u16 = 0x0304;
 
 /// Signature schemes we advertise. Only the first six may sign a TLS 1.3 handshake; the PKCS#1
-/// entries exist so that servers will present RSA-signed certificate chains.
+/// entries exist so that servers will present RSA-signed certificate chains, and may sign a TLS 1.2
+/// ServerKeyExchange. None uses SHA-1, so a server that signs with SHA-1 signs with what was not offered.
 pub const SIGNATURE_SCHEMES: [u16; 9] = [
     0x0403, // ecdsa_secp256r1_sha256
     0x0503, // ecdsa_secp384r1_sha384
@@ -49,9 +50,9 @@ pub const SIGNATURE_SCHEMES: [u16; 9] = [
     0x0804, // rsa_pss_rsae_sha256
     0x0805, // rsa_pss_rsae_sha384
     0x0806, // rsa_pss_rsae_sha512
-    0x0401, // rsa_pkcs1_sha256 (certificates only)
-    0x0501, // rsa_pkcs1_sha384 (certificates only)
-    0x0601, // rsa_pkcs1_sha512 (certificates only)
+    0x0401, // rsa_pkcs1_sha256 (certificates, and a TLS 1.2 ServerKeyExchange)
+    0x0501, // rsa_pkcs1_sha384 (certificates, and a TLS 1.2 ServerKeyExchange)
+    0x0601, // rsa_pkcs1_sha512 (certificates, and a TLS 1.2 ServerKeyExchange)
 ];
 
 /// RFC 8446 section 4.1.3: a TLS 1.3 server that negotiates TLS 1.2 or 1.1 ends its random with
@@ -106,6 +107,9 @@ pub struct ClientHello<'a> {
     pub cookie: Option<&'a [u8]>,
     /// QUIC's transport parameters (RFC 9001 section 8.2), already encoded.
     pub quic_transport_parameters: Option<&'a [u8]>,
+    /// Offer TLS 1.2 as well (after 1.3): its version, its cipher suites (ECDHE with an AEAD only) and the extensions it needs
+    /// (the extended master secret, `renegotiation_info`, uncompressed points). Without it the ClientHello is TLS 1.3 only.
+    pub tls12: bool,
 }
 
 pub fn build_client_hello(ch: &ClientHello) -> Vec<u8> {
@@ -115,10 +119,13 @@ pub fn build_client_hello(ch: &ClientHello) -> Vec<u8> {
     body.push(ch.session_id.len() as u8);
     body.extend_from_slice(ch.session_id);
 
-    let suites = Suite::preference_order();
+    let mut suites: Vec<u16> = Suite::preference_order().iter().map(|s| s.id()).collect();
+    if ch.tls12 {
+        suites.extend(super::tls12::Suite12::preference_order().iter().map(|s| s.id()));
+    }
     put_u16(&mut body, (suites.len() * 2) as u16);
     for s in suites {
-        put_u16(&mut body, s.id());
+        put_u16(&mut body, s);
     }
     body.extend_from_slice(&[1, 0]); // compression methods: null only
 
@@ -143,7 +150,11 @@ pub fn build_client_hello(ch: &ClientHello) -> Vec<u8> {
     put_vec16(&mut sigs, &list);
     extension(&mut exts, EXT_SIGNATURE_ALGORITHMS, &sigs);
 
-    extension(&mut exts, EXT_SUPPORTED_VERSIONS, &[2, 0x03, 0x04]);
+    if ch.tls12 {
+        extension(&mut exts, EXT_SUPPORTED_VERSIONS, &[4, 0x03, 0x04, 0x03, 0x03]);
+    } else {
+        extension(&mut exts, EXT_SUPPORTED_VERSIONS, &[2, 0x03, 0x04]);
+    }
 
     let mut share = Vec::new();
     put_u16(&mut share, ch.key_share_group);
@@ -179,6 +190,14 @@ pub fn build_client_hello(ch: &ClientHello) -> Vec<u8> {
         extension(&mut exts, EXT_QUIC_TRANSPORT_PARAMETERS, params);
     }
 
+    if ch.tls12 {
+        use super::tls12::{EXT_EC_POINT_FORMATS, EXT_EXTENDED_MASTER_SECRET, EXT_RENEGOTIATION_INFO};
+        extension(&mut exts, EXT_EXTENDED_MASTER_SECRET, &[]);
+        // an empty renegotiated_connection: this is a first handshake (RFC 5746), and none will follow
+        extension(&mut exts, EXT_RENEGOTIATION_INFO, &[0]);
+        extension(&mut exts, EXT_EC_POINT_FORMATS, &[1, 0]);
+    }
+
     put_vec16(&mut body, &exts);
     handshake_message(HS_CLIENT_HELLO, &body)
 }
@@ -198,6 +217,8 @@ pub struct ServerHello {
     pub key_share: Option<(u16, Vec<u8>)>,
     /// The cookie of a HelloRetryRequest, to be echoed.
     pub cookie: Option<Vec<u8>>,
+    /// Extensions of a ServerHello that are not TLS 1.3's, in order: the TLS 1.3 handshake refuses any, the TLS 1.2 one reads them.
+    pub other_extensions: Vec<(u16, Vec<u8>)>,
 }
 
 /// Iterates over an extensions block, calling `f(type, data)`. Rejects duplicate types.
@@ -231,7 +252,17 @@ pub fn parse_server_hello(body: &[u8]) -> Result<ServerHello> {
         return Err(bad("trailing data in ServerHello"));
     }
     let is_retry = random == HELLO_RETRY_REQUEST_RANDOM;
-    let mut sh = ServerHello { random, session_id, cipher_suite, compression, legacy_version, selected_version: None, key_share: None, cookie: None };
+    let mut sh = ServerHello {
+        random,
+        session_id,
+        cipher_suite,
+        compression,
+        legacy_version,
+        selected_version: None,
+        key_share: None,
+        cookie: None,
+        other_extensions: Vec::new(),
+    };
     for_each_extension(exts, |t, d| {
         match t {
             EXT_SUPPORTED_VERSIONS => {
@@ -251,7 +282,8 @@ pub fn parse_server_hello(body: &[u8]) -> Result<ServerHello> {
                 }
                 sh.key_share = Some((group, key));
             }
-            EXT_COOKIE if is_retry => {
+            EXT_COOKIE if !is_retry => return Err(Error::Tls("unsupported_extension: a cookie in a ServerHello".into())),
+            EXT_COOKIE => {
                 let mut cr = Reader::new(d);
                 let cookie = cr.vec16().ok_or_else(|| bad("cookie"))?;
                 if cookie.is_empty() || !cr.is_empty() {
@@ -259,7 +291,8 @@ pub fn parse_server_hello(body: &[u8]) -> Result<ServerHello> {
                 }
                 sh.cookie = Some(cookie.to_vec());
             }
-            _ => return Err(Error::Tls(format!("unsupported_extension: unexpected extension {} in ServerHello", t))),
+            _ if is_retry => return Err(Error::Tls(format!("unsupported_extension: unexpected extension {} in ServerHello", t))),
+            _ => sh.other_extensions.push((t, d.to_vec())),
         }
         Ok(())
     })?;
@@ -457,6 +490,7 @@ mod tests {
             status_request: false,
             cookie: None,
             quic_transport_parameters: None,
+            tls12: false,
         });
         assert_eq!(ch[0], HS_CLIENT_HELLO);
         let len = ((ch[1] as usize) << 16) | ((ch[2] as usize) << 8) | ch[3] as usize;
@@ -492,6 +526,7 @@ mod tests {
                 status_request,
                 cookie: None,
                 quic_transport_parameters: None,
+                tls12: false,
             })
         };
         let extensions = |ch: &[u8]| {
@@ -610,6 +645,7 @@ mod tests {
                 status_request: false,
                 cookie,
                 quic_transport_parameters: None,
+                tls12: false,
             })
         };
         let exts = |ch: &[u8]| {

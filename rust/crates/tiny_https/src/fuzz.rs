@@ -538,3 +538,63 @@ fn url_parsing_never_panics() {
         let _ = Url::parse(&String::from_utf8_lossy(&random_up_to(rng, 60)));
     });
 }
+
+/// The decompressor on damaged copies of the streams of tests/data/inflate_vectors.txt: no panic, nothing past the limit, and the
+/// same answer however the input and the output are cut (the coverage-guided target `inflate` in `fuzz/` checks more).
+#[test]
+fn inflate_never_panics_and_how_the_stream_is_cut_changes_nothing() {
+    use crate::inflate::{decode_all, Error, Format, Inflater, Limits, Status};
+    const VECTORS: &str = include_str!("../tests/data/inflate_vectors.txt");
+    fn format_of(name: &str) -> Format {
+        match name {
+            "deflate" => Format::Deflate,
+            "zlib" => Format::Zlib,
+            _ => Format::Gzip,
+        }
+    }
+    fn chunked(format: Format, data: &[u8], limits: Limits, inp: usize, out: usize) -> Result<Vec<u8>, Error> {
+        let mut inf = Inflater::new(format, limits);
+        let (mut result, mut buf, mut pos) = (Vec::new(), vec![0u8; out], 0usize);
+        loop {
+            let end = pos.saturating_add(inp).min(data.len());
+            let p = inf.inflate(&data[pos..end], &mut buf)?;
+            pos += p.consumed;
+            result.extend_from_slice(&buf[..p.produced]);
+            assert!(result.len() as u64 <= limits.max_output);
+            match p.status {
+                Status::Done => return if pos == data.len() && inf.take_unused().is_empty() { Ok(result) } else { Err(Error::Corrupt("trailing")) },
+                Status::NeedOutput => {}
+                Status::NeedInput if pos == data.len() => return inf.finish().map(|_| result),
+                Status::NeedInput => {}
+            }
+        }
+    }
+    let seeds: Vec<(Format, Vec<u8>)> = VECTORS
+        .lines()
+        .filter_map(|l| {
+            let f: Vec<&str> = l.split(' ').collect();
+            (f[0] == "base").then(|| (format_of(f[2]), unhex(f[3])))
+        })
+        .collect();
+    assert!(seeds.len() > 20);
+    let formats = [Format::Deflate, Format::Zlib, Format::ZlibOrDeflate, Format::Gzip, Format::GzipMember];
+    run("inflate", 3000, |rng| {
+        let (format, seed) = &seeds[rng.below(seeds.len())];
+        let data = mutate(rng, seed);
+        let format = if rng.chance(15) { *rng.pick(&formats) } else { *format };
+        let limits = match rng.below(4) {
+            0 => Limits::new(1 << 20),
+            1 => Limits::new(rng.below(2000) as u64),
+            2 => Limits::new(1 << 20).with_ratio(1 + rng.below(20) as u64, rng.below(500) as u64),
+            _ => Limits::new(0),
+        };
+        let whole = decode_all(format, &data, limits);
+        let (inp, out) = *rng.pick(&[(1, 1), (3, 5), (7, 4096), (usize::MAX, 1), (1, 1 << 16)]);
+        let cut = chunked(format, &data, limits, inp, out);
+        let same = match (&whole, &cut) {
+            (Err(Error::Corrupt(_)), Err(Error::Corrupt(_))) => true,
+            (a, b) => a == b,
+        };
+        assert!(same, "{format:?}, input in {inp}s and output in {out}s: {:?} against {:?}", cut.as_ref().map(Vec::len), whole.as_ref().map(Vec::len));
+    });
+}

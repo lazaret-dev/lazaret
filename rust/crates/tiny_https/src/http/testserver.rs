@@ -1,6 +1,7 @@
 //! A scripted HTTP/1.1 server for the tests of connection reuse and streaming, over plain TCP or over TLS (the
 //! crate's own TLS server, `tls::server`, with a throwaway certificate). It keeps connections open and answers
-//! each request as the test's handler says, and it counts connections and requests.
+//! each request as the test's handler says, and it counts connections and requests. A request that says
+//! `Expect: 100-continue` gets a `100 Continue` before its body is read, unless its path starts with `/silent`.
 
 use crate::tls::pki::TestPki;
 use crate::tls::server::{ServerConfig, ServerStream};
@@ -254,6 +255,14 @@ fn serve(conn: usize, mut stream: Box<dyn Wire>, raw: &TcpStream, handler: &(dyn
         buf.drain(..end);
         let length: usize =
             head.lines().find_map(|l| l.to_ascii_lowercase().strip_prefix("content-length:").map(|v| v.trim().parse().unwrap_or(0))).unwrap_or(0);
+        // a request that waits for the go-ahead gets it before its body is read, unless its path starts with /silent (a server
+        // that does not do expectations, and waits for the body)
+        let path = head.split(' ').nth(1).unwrap_or("");
+        if length > 0 && buf.len() < length && !path.starts_with("/silent") && head.lines().any(|l| l.eq_ignore_ascii_case("expect: 100-continue")) {
+            if stream.write_all(b"HTTP/1.1 100 Continue\r\n\r\n").and_then(|_| stream.flush()).is_err() {
+                return;
+            }
+        }
         while buf.len() < length {
             let mut chunk = [0u8; 4096];
             match stream.read(&mut chunk) {

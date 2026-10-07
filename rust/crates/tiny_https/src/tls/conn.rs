@@ -37,7 +37,8 @@
 use super::handshake::{alert_description, take_message, Epoch, Event, Handshake};
 use super::messages::*;
 use super::suite::*;
-use super::ClientConfig;
+use super::tls12::{Handshake12, RecordCipher12, Step12, Suite12, HS_HELLO_REQUEST};
+use super::{ClientConfig, TlsVersion};
 use crate::crypto::rand;
 use crate::error::{Error, Result};
 use crate::zeroize::{Zeroize, Zeroizing};
@@ -82,10 +83,46 @@ impl Drop for RecvBuf {
     }
 }
 
-/// A TLS 1.3 client connection without any I/O. See the module documentation.
+/// The record protection of one direction, in either version.
+pub(crate) enum Cipher {
+    V13(RecordCipher),
+    V12(RecordCipher12),
+}
+
+impl Cipher {
+    fn encrypt_into(&mut self, record_type: u8, content: &[u8], out: &mut Vec<u8>) {
+        match self {
+            Cipher::V13(c) => c.encrypt_into(record_type, content, out),
+            Cipher::V12(c) => c.encrypt_into(record_type, content, out),
+        }
+    }
+
+    /// Opens a record in place: (content type, where the content starts in `payload`, its length).
+    fn decrypt_in_place(&mut self, header: &[u8; 5], payload: &mut [u8]) -> Result<(u8, usize, usize)> {
+        match self {
+            Cipher::V13(c) => c.decrypt_in_place(header, payload).map(|(t, n)| (t, 0, n)),
+            Cipher::V12(c) => c.decrypt_in_place(header, payload),
+        }
+    }
+
+    fn records(&self) -> u64 {
+        match self {
+            Cipher::V13(c) => c.records(),
+            Cipher::V12(c) => c.records(),
+        }
+    }
+}
+
+/// The handshake in progress, in either version: it starts as TLS 1.3 and becomes TLS 1.2 if the server answers so.
+enum Hs {
+    V13(Box<Handshake>),
+    V12(Box<Handshake12>),
+}
+
+/// A TLS client connection (TLS 1.3, or 1.2 with a server that cannot do 1.3) without any I/O. See the module documentation.
 pub struct ClientConnection {
-    read_cipher: Option<RecordCipher>,
-    write_cipher: Option<RecordCipher>,
+    read_cipher: Option<Cipher>,
+    write_cipher: Option<Cipher>,
     hs_buf: Vec<u8>,
     /// Receive buffer. `rbuf[rpos..rend]` holds bytes received but not yet parsed.
     rbuf: Vec<u8>,
@@ -101,8 +138,16 @@ pub struct ClientConnection {
     /// Bytes for the peer: `out[out_pos..]` has not been taken yet.
     out: Vec<u8>,
     out_pos: usize,
-    hs: Option<Box<Handshake>>,
+    hs: Option<Hs>,
     handshake_done: bool,
+    /// The version the server chose, once it has (at its ServerHello).
+    version: Option<TlsVersion>,
+    /// The TLS 1.2 cipher suite, if the connection is a TLS 1.2 one.
+    suite12: Option<Suite12>,
+    /// The middlebox-compatibility change_cipher_spec of TLS 1.3 has still to go out, before our next flight (RFC 8446 appendix D.4).
+    /// A ClientHello that offers TLS 1.2 cannot be followed by it at once, as a TLS 1.3-only one is, because a TLS 1.2 server
+    /// takes a change_cipher_spec before its ServerHello for the error it would be in TLS 1.2.
+    compat_ccs_pending: bool,
     got_close_notify: bool,
     sent_close_notify: bool,
     failed: bool,
@@ -129,11 +174,16 @@ impl ClientConnection {
     pub(super) fn start(server_name: &str, config: &ClientConfig, private: Zeroizing<[u8; 32]>, random: &[u8; 32], session_id: &[u8; 32]) -> ClientConnection {
         let (hs, client_hello) = Handshake::start(server_name, config, None, private, random, session_id);
         let mut conn = ClientConnection::blank();
-        // ClientHello plus the middlebox-compatibility change_cipher_spec (RFC 8446 appendix D.4,
-        // which the server ignores) go out together.
         conn.queue_plain(RT_HANDSHAKE, &client_hello);
-        conn.queue_plain(RT_CHANGE_CIPHER_SPEC, &[1]);
-        conn.hs = Some(Box::new(hs));
+        if config.min_version >= TlsVersion::Tls13 {
+            // ClientHello plus the middlebox-compatibility change_cipher_spec (RFC 8446 appendix D.4,
+            // which the server ignores) go out together.
+            conn.queue_plain(RT_CHANGE_CIPHER_SPEC, &[1]);
+        } else {
+            // (it goes before our second flight instead, if the server speaks TLS 1.3)
+            conn.compat_ccs_pending = true;
+        }
+        conn.hs = Some(Hs::V13(Box::new(hs)));
         conn
     }
 
@@ -153,7 +203,7 @@ impl ClientConnection {
     ) -> ClientConnection {
         let mut conn = ClientConnection::blank();
         conn.queue_plain(RT_HANDSHAKE, client_hello);
-        conn.hs = Some(Box::new(Handshake::recorded(server_name, config, private, session_id, client_hello, ignored_ee_extensions)));
+        conn.hs = Some(Hs::V13(Box::new(Handshake::recorded(server_name, config, private, session_id, client_hello, ignored_ee_extensions))));
         conn
     }
 
@@ -172,6 +222,9 @@ impl ClientConnection {
             out_pos: 0,
             hs: None,
             handshake_done: false,
+            version: None,
+            suite12: None,
+            compat_ccs_pending: false,
             got_close_notify: false,
             sent_close_notify: false,
             failed: false,
@@ -187,9 +240,10 @@ impl ClientConnection {
     #[cfg(any(test, tiny_https_fuzzing))]
     pub(super) fn established(suite: Suite, read_secret: &[u8], write_secret: &[u8]) -> ClientConnection {
         let mut c = ClientConnection::blank();
-        c.read_cipher = Some(RecordCipher::new(suite, read_secret));
-        c.write_cipher = Some(RecordCipher::new(suite, write_secret));
+        c.read_cipher = Some(Cipher::V13(RecordCipher::new(suite, read_secret)));
+        c.write_cipher = Some(Cipher::V13(RecordCipher::new(suite, write_secret)));
         c.handshake_done = true;
+        c.version = Some(TlsVersion::Tls13);
         c.suite = Some(suite);
         c.rekey_after = suite.records_per_key();
         c
@@ -224,9 +278,39 @@ impl ClientConnection {
         self.failed
     }
 
-    /// The cipher suite negotiated with the server.
+    /// A TLS 1.2 connection that is established with fixed keys (for tests and the fuzzer).
+    #[cfg(any(test, tiny_https_fuzzing))]
+    pub(super) fn established12(read: RecordCipher12, write: RecordCipher12) -> ClientConnection {
+        let mut c = ClientConnection::blank();
+        c.suite12 = Some(read.suite());
+        c.rekey_after = read.suite().records_per_key();
+        c.read_cipher = Some(Cipher::V12(read));
+        c.write_cipher = Some(Cipher::V12(write));
+        c.handshake_done = true;
+        c.version = Some(TlsVersion::Tls12);
+        c
+    }
+
+    /// The TLS 1.3 cipher suite negotiated with the server; `None` for a TLS 1.2 connection (see
+    /// [`cipher_suite_name`](ClientConnection::cipher_suite_name)).
     pub fn cipher_suite(&self) -> Option<Suite> {
         self.suite
+    }
+
+    /// The TLS 1.2 cipher suite negotiated with the server, if the connection is a TLS 1.2 one.
+    pub fn cipher_suite12(&self) -> Option<Suite12> {
+        self.suite12
+    }
+
+    /// The name of the negotiated cipher suite, in either version (`TLS_AES_128_GCM_SHA256`,
+    /// `TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256`, ...).
+    pub fn cipher_suite_name(&self) -> Option<&'static str> {
+        self.suite12.map(Suite12::name).or(self.suite.map(Suite::name))
+    }
+
+    /// The version of TLS the server chose; `None` before its ServerHello.
+    pub fn protocol_version(&self) -> Option<TlsVersion> {
+        self.version
     }
 
     /// The ALPN protocol the server selected, if any.
@@ -307,13 +391,19 @@ impl ClientConnection {
     /// ones are about to have protected as many records as they may (RFC 8446 section 5.5 and
     /// 4.6.3). The KeyUpdate is the last record under the old key; the peer is not asked to rotate
     /// its own sending keys, which it does on its own schedule.
+    ///
+    /// TLS 1.2 has no KeyUpdate: a connection whose key is used up cannot go on, and says so (the HTTP client then opens
+    /// another; at 2^24 records of up to 16 KiB that is 256 GiB in one direction).
     fn rekey_if_due(&mut self) -> Result<()> {
         let due = self.write_cipher.as_ref().is_some_and(|c| c.records().saturating_add(1) >= self.rekey_after);
         if due {
+            let next = match self.write_cipher.as_ref() {
+                Some(Cipher::V13(c)) => c.next_generation(),
+                _ => return Err(Error::Tls("internal: this TLS 1.2 connection has sent as much as one key may protect; open another".into())),
+            };
             let update = handshake_message(HS_KEY_UPDATE, &[0]);
             self.queue_protected(RT_HANDSHAKE, &update)?;
-            let next = self.write_cipher.as_ref().map(|c| c.next_generation());
-            self.write_cipher = next;
+            self.write_cipher = Some(Cipher::V13(next));
         }
         Ok(())
     }
@@ -501,6 +591,17 @@ impl ClientConnection {
                             self.handshake_step(&msg)?;
                         }
                     }
+                    // (only TLS 1.2 passes a change_cipher_spec up: TLS 1.3's are skipped below)
+                    RT_CHANGE_CIPHER_SPEC => {
+                        if !self.hs_buf.is_empty() {
+                            return Err(Error::Tls("unexpected_message: a handshake message is cut by change_cipher_spec".into()));
+                        }
+                        let Some(Hs::V12(hs)) = self.hs.as_mut() else {
+                            return Err(Error::Tls("unexpected_message: change_cipher_spec".into()));
+                        };
+                        let cipher = hs.on_change_cipher_spec()?;
+                        self.read_cipher = Some(Cipher::V12(cipher));
+                    }
                     RT_ALERT => return Err(alert_error(&self.rbuf[start..start + n])),
                     _ => return Err(Error::Tls("unexpected_message: non-handshake record during handshake".into())),
                 }
@@ -523,7 +624,11 @@ impl ClientConnection {
                             return Err(Error::Tls("unexpected_message: empty handshake record".into()));
                         }
                         self.hs_buf.extend_from_slice(&self.rbuf[start..start + n]);
-                        self.process_post_handshake()?;
+                        if self.version == Some(TlsVersion::Tls12) {
+                            self.process_post_handshake12()?;
+                        } else {
+                            self.process_post_handshake()?;
+                        }
                     }
                     _ => return Err(Error::Tls("unexpected_message: unexpected record type".into())),
                 }
@@ -558,7 +663,18 @@ impl ClientConnection {
             let start = self.rpos + 5;
             self.rpos = start + length;
             let payload = &mut self.rbuf[start..start + length];
+            let tls12 = self.version == Some(TlsVersion::Tls12);
             match (self.read_cipher.as_mut(), record_type) {
+                // TLS 1.2's is the real thing: the server's keys start after it (only during the handshake, and before any keys)
+                (None, RT_CHANGE_CIPHER_SPEC) if tls12 => {
+                    if payload != [1] || self.handshake_done {
+                        return Err(Error::Tls("unexpected_message: bad change_cipher_spec".into()));
+                    }
+                    return Ok(Some((RT_CHANGE_CIPHER_SPEC, start, length)));
+                }
+                (Some(_), RT_CHANGE_CIPHER_SPEC) if tls12 => {
+                    return Err(Error::Tls("unexpected_message: change_cipher_spec after the keys changed".into()));
+                }
                 (_, RT_CHANGE_CIPHER_SPEC) => {
                     // RFC 8446 appendix D.4: a single 0x01 byte, only during the handshake. A
                     // conforming server sends at most one; a flood is treated as an attack.
@@ -568,12 +684,17 @@ impl ClientConnection {
                     self.ccs_skipped += 1;
                     continue;
                 }
-                (Some(c), RT_APPLICATION_DATA) => {
-                    let (t, n) = c.decrypt_in_place(&header, payload)?;
+                (Some(c @ Cipher::V13(_)), RT_APPLICATION_DATA) => {
+                    let (t, _, n) = c.decrypt_in_place(&header, payload)?;
                     if t == RT_CHANGE_CIPHER_SPEC {
                         return Err(Error::Tls("unexpected_message: protected change_cipher_spec".into()));
                     }
                     return Ok(Some((t, start, n)));
+                }
+                // TLS 1.2 protects records of every type and does not hide which
+                (Some(c @ Cipher::V12(_)), RT_APPLICATION_DATA | RT_HANDSHAKE | RT_ALERT) => {
+                    let (t, offset, n) = c.decrypt_in_place(&header, payload)?;
+                    return Ok(Some((t, start + offset, n)));
                 }
                 (Some(_), _) => {
                     return Err(Error::Tls("unexpected_message: unprotected record after keys were established".into()));
@@ -591,28 +712,76 @@ impl ClientConnection {
     // ------------------------------------------------------------------ handshake
 
     fn handshake_step(&mut self, msg: &[u8]) -> Result<()> {
-        let mut hs = self.hs.take().ok_or_else(|| Error::Tls("internal: no handshake in progress".into()))?;
-        let events = hs.on_message(msg, !self.hs_buf.is_empty())?;
-        let rekey_after = hs.config().rekey_after_records;
-        self.apply(events, rekey_after)?;
-        if !self.handshake_done {
-            self.hs = Some(hs);
+        let trailing = !self.hs_buf.is_empty();
+        match self.hs.take().ok_or_else(|| Error::Tls("internal: no handshake in progress".into()))? {
+            Hs::V13(mut hs) => {
+                let events = hs.on_message(msg, trailing)?;
+                let rekey_after = hs.config().rekey_after_records;
+                // the server may turn out to speak TLS 1.2: the handshake goes on as one of those
+                match self.apply(events, rekey_after)? {
+                    Some(hs12) => self.hs = Some(Hs::V12(hs12)),
+                    None if !self.handshake_done => self.hs = Some(Hs::V13(hs)),
+                    None => {}
+                }
+            }
+            Hs::V12(mut hs) => {
+                let steps = hs.on_message(msg, trailing)?;
+                self.apply12(steps)?;
+                if !self.handshake_done {
+                    self.hs = Some(Hs::V12(hs));
+                }
+            }
         }
         Ok(())
     }
 
-    /// Does what a step of the handshake asks for, in the order it asks.
-    fn apply(&mut self, events: Vec<Event>, rekey_after: Option<u64>) -> Result<()> {
+    /// Does what a step of the TLS 1.2 handshake asks for, in the order it asks.
+    fn apply12(&mut self, steps: Vec<Step12>) -> Result<()> {
+        for step in steps {
+            match step {
+                Step12::SendPlain(m) => self.queue_plain(RT_HANDSHAKE, &m),
+                Step12::ChangeCipherSpec(cipher) => {
+                    self.queue_plain(RT_CHANGE_CIPHER_SPEC, &[1]);
+                    self.rekey_after = cipher.suite().records_per_key();
+                    self.write_cipher = Some(Cipher::V12(cipher));
+                }
+                Step12::SendProtected(m) => self.queue_protected(RT_HANDSHAKE, &m)?,
+                Step12::Alpn(protocol) => self.alpn = protocol,
+                Step12::PeerCertificates(chain) => self.peer_chain = chain,
+                Step12::Established => self.handshake_done = true,
+            }
+        }
+        Ok(())
+    }
+
+    /// Queues the middlebox-compatibility change_cipher_spec, if it has not gone out yet.
+    fn compat_ccs(&mut self) {
+        if std::mem::take(&mut self.compat_ccs_pending) {
+            self.queue_plain(RT_CHANGE_CIPHER_SPEC, &[1]);
+        }
+    }
+
+    /// Does what a step of the handshake asks for, in the order it asks. Returns the TLS 1.2 handshake to go on with if the
+    /// server turned out to speak TLS 1.2.
+    fn apply(&mut self, events: Vec<Event>, rekey_after: Option<u64>) -> Result<Option<Box<Handshake12>>> {
         for event in events {
             match event {
-                Event::Send(Epoch::Initial, message) => self.queue_plain(RT_HANDSHAKE, &message),
+                Event::Send(Epoch::Initial, message) => {
+                    // (a second ClientHello, after a HelloRetryRequest: our second flight)
+                    self.compat_ccs();
+                    self.queue_plain(RT_HANDSHAKE, &message)
+                }
                 // protected with the client handshake keys, which are installed by now
-                Event::Send(Epoch::Handshake, message) => self.queue_protected(RT_HANDSHAKE, &message)?,
+                Event::Send(Epoch::Handshake, message) => {
+                    self.compat_ccs();
+                    self.queue_protected(RT_HANDSHAKE, &message)?
+                }
                 Event::HandshakeSecrets { suite, client, server } => {
                     self.suite = Some(suite);
-                    self.read_cipher = Some(RecordCipher::new(suite, &server));
+                    self.version = Some(TlsVersion::Tls13);
+                    self.read_cipher = Some(Cipher::V13(RecordCipher::new(suite, &server)));
                     // from here on anything we send, a fatal alert included, is under the handshake keys
-                    self.write_cipher = Some(RecordCipher::new(suite, &client));
+                    self.write_cipher = Some(Cipher::V13(RecordCipher::new(suite, &client)));
                 }
                 Event::Alpn(protocol) => self.alpn = protocol,
                 Event::PeerCertificates(chain) => self.peer_chain = chain,
@@ -620,14 +789,22 @@ impl ClientConnection {
                 Event::ApplicationSecrets { suite, client, server } => {
                     // The Finished record stays in the output until the driver chooses to send it; see the
                     // module documentation.
-                    self.write_cipher = Some(RecordCipher::new(suite, &client));
-                    self.read_cipher = Some(RecordCipher::new(suite, &server));
+                    self.write_cipher = Some(Cipher::V13(RecordCipher::new(suite, &client)));
+                    self.read_cipher = Some(Cipher::V13(RecordCipher::new(suite, &server)));
                     self.rekey_after = rekey_after.unwrap_or(suite.records_per_key()).max(2);
                     self.handshake_done = true;
                 }
+                Event::Tls12(hs12, steps) => {
+                    // no compatibility change_cipher_spec in TLS 1.2: the real one comes with our flight
+                    self.compat_ccs_pending = false;
+                    self.version = Some(TlsVersion::Tls12);
+                    self.suite12 = Some(hs12.suite());
+                    self.apply12(steps)?;
+                    return Ok(Some(hs12));
+                }
             }
         }
-        Ok(())
+        Ok(None)
     }
 
     fn process_post_handshake(&mut self) -> Result<()> {
@@ -642,20 +819,32 @@ impl ClientConnection {
                         // RFC 8446 section 5.1: messages must not span a key change
                         return Err(Error::Tls("unexpected_message: handshake data follows a KeyUpdate in the same record".into()));
                     }
-                    let (Some(rc), Some(wc)) = (self.read_cipher.as_ref(), self.write_cipher.as_ref()) else {
+                    let (Some(Cipher::V13(rc)), Some(Cipher::V13(wc))) = (self.read_cipher.as_ref(), self.write_cipher.as_ref()) else {
                         return Err(Error::Tls("internal: KeyUpdate without traffic keys".into()));
                     };
                     let next = rc.next_generation();
                     let next_write = wc.next_generation();
-                    self.read_cipher = Some(next);
+                    self.read_cipher = Some(Cipher::V13(next));
                     if msg[4] == 1 {
                         // peer asked us to update too: answer under the old keys, then rotate
                         let reply = handshake_message(HS_KEY_UPDATE, &[0]);
                         self.queue_protected(RT_HANDSHAKE, &reply)?;
-                        self.write_cipher = Some(next_write);
+                        self.write_cipher = Some(Cipher::V13(next_write));
                     }
                 }
                 _ => return Err(Error::Tls("unexpected_message: unexpected post-handshake message".into())),
+            }
+        }
+        Ok(())
+    }
+
+    /// What a TLS 1.2 server may send after the handshake: a HelloRequest, which asks for a renegotiation and is answered with a
+    /// `no_renegotiation` warning (RFC 5246 section 7.4.1.1; this client never renegotiates). Nothing else.
+    fn process_post_handshake12(&mut self) -> Result<()> {
+        while let Some(msg) = self.take_buffered_handshake_message()? {
+            match msg[0] {
+                HS_HELLO_REQUEST if msg.len() == 4 => self.queue_protected(RT_ALERT, &[1, 100])?,
+                _ => return Err(Error::Tls("unexpected_message: unexpected handshake message after a TLS 1.2 handshake".into())),
             }
         }
         Ok(())
@@ -1024,5 +1213,102 @@ mod tests {
         assert_eq!(cfg.clone().with_rekey_after_records(1000).rekey_after_records, Some(1000));
         assert_eq!(cfg.clone().with_rekey_after_records(0).rekey_after_records, Some(2));
         assert_eq!(cfg.with_rekey_after_records(1).rekey_after_records, Some(2));
+    }
+
+    // ------------------------------------------------------------------ TLS 1.2 after the handshake
+
+    /// A TLS 1.2 connection and the server's two ciphers: (client, server's sealer, server's opener).
+    fn tls12_pair(suite: Suite12) -> (ClientConnection, RecordCipher12, RecordCipher12) {
+        let key = vec![3u8; suite.aead_suite().key_len()];
+        let other = vec![4u8; suite.aead_suite().key_len()];
+        let iv = [5u8; 12];
+        let client = ClientConnection::established12(RecordCipher12::new(suite, &key, &iv[..4]), RecordCipher12::new(suite, &other, &iv[..4]));
+        (client, RecordCipher12::new(suite, &key, &iv[..4]), RecordCipher12::new(suite, &other, &iv[..4]))
+    }
+
+    fn open12(opener: &mut RecordCipher12, mut bytes: &[u8]) -> Vec<(u8, Vec<u8>)> {
+        let mut out = Vec::new();
+        while !bytes.is_empty() {
+            let len = u16::from_be_bytes([bytes[3], bytes[4]]) as usize;
+            let header: [u8; 5] = bytes[..5].try_into().unwrap();
+            let mut p = bytes[5..5 + len].to_vec();
+            let (t, off, n) = opener.decrypt_in_place(&header, &mut p).unwrap();
+            out.push((t, p[off..off + n].to_vec()));
+            bytes = &bytes[5 + len..];
+        }
+        out
+    }
+
+    #[test]
+    fn tls12_data_flows_both_ways_and_close_notify_ends_it() {
+        for suite in Suite12::ALL {
+            let (mut c, mut seal, mut open) = tls12_pair(suite);
+            assert_eq!(c.protocol_version(), Some(TlsVersion::Tls12));
+            let mut wire = Vec::new();
+            seal.encrypt_into(RT_APPLICATION_DATA, b"from the server", &mut wire);
+            seal.encrypt_into(RT_APPLICATION_DATA, &[7u8; MAX_PLAINTEXT], &mut wire);
+            let got = feed(&mut c, &wire).unwrap();
+            assert_eq!(got.len(), 15 + MAX_PLAINTEXT);
+            assert_eq!(&got[..15], b"from the server");
+            write_all(&mut c, b"from the client");
+            c.send_close_notify();
+            let sent = open12(&mut open, &take_output(&mut c));
+            assert_eq!(sent, vec![(RT_APPLICATION_DATA, b"from the client".to_vec()), (RT_ALERT, vec![1, 0])], "{}", suite.name());
+            let mut wire = Vec::new();
+            seal.encrypt_into(RT_ALERT, &[1, 0], &mut wire);
+            feed(&mut c, &wire).unwrap();
+            assert!(c.peer_closed());
+        }
+    }
+
+    #[test]
+    fn tls12_a_hello_request_is_answered_with_no_renegotiation_and_nothing_else_is_taken() {
+        let (mut c, mut seal, mut open) = tls12_pair(Suite12::EcdheRsaAes128Gcm);
+        let mut wire = Vec::new();
+        seal.encrypt_into(RT_HANDSHAKE, &[HS_HELLO_REQUEST, 0, 0, 0], &mut wire);
+        seal.encrypt_into(RT_APPLICATION_DATA, b"still here", &mut wire);
+        assert_eq!(feed(&mut c, &wire).unwrap(), b"still here");
+        // a warning, not a handshake: the connection goes on as it was
+        assert_eq!(open12(&mut open, &take_output(&mut c)), vec![(RT_ALERT, vec![1, 100])]);
+        assert!(c.is_quiet());
+        // a KeyUpdate, a session ticket, a ClientHello-shaped thing or a HelloRequest with a body: not in TLS 1.2 after the handshake
+        for msg in [vec![HS_KEY_UPDATE, 0, 0, 1, 0], vec![HS_NEW_SESSION_TICKET, 0, 0, 0], vec![HS_HELLO_REQUEST, 0, 0, 1, 0], vec![1, 0, 0, 0]] {
+            let (mut c, mut seal, _) = tls12_pair(Suite12::EcdheRsaAes128Gcm);
+            let mut wire = Vec::new();
+            seal.encrypt_into(RT_HANDSHAKE, &msg, &mut wire);
+            assert!(feed(&mut c, &wire).is_err(), "{msg:02x?}");
+        }
+        // nor a change_cipher_spec, protected or not, nor a record in the clear
+        let (mut c, mut seal, _) = tls12_pair(Suite12::EcdheRsaAes128Gcm);
+        let mut wire = Vec::new();
+        seal.encrypt_into(RT_CHANGE_CIPHER_SPEC, &[1], &mut wire);
+        assert!(feed(&mut c, &wire).is_err());
+        let (mut c, _, _) = tls12_pair(Suite12::EcdheRsaAes128Gcm);
+        assert!(feed(&mut c, &[RT_CHANGE_CIPHER_SPEC, 3, 3, 0, 1, 1]).is_err());
+        let (mut c, _, _) = tls12_pair(Suite12::EcdheRsaAes128Gcm);
+        assert!(feed(&mut c, &[RT_APPLICATION_DATA, 3, 3, 0, 2, 0, 0]).is_err());
+    }
+
+    #[test]
+    fn tls12_a_used_up_key_stops_the_connection_rather_than_wrap() {
+        let (mut c, _, _) = tls12_pair(Suite12::EcdheEcdsaAes128Gcm);
+        c.set_rekey_after(3);
+        assert!(c.write_plaintext(b"one").is_ok());
+        assert!(c.write_plaintext(b"two").is_ok());
+        let e = c.write_plaintext(b"three").unwrap_err();
+        assert!(e.to_string().contains("open another"), "{e}");
+    }
+
+    #[test]
+    fn the_compatibility_change_cipher_spec_waits_when_tls12_is_offered() {
+        let tls13 = ClientConfig::new(crate::x509::TrustStore::empty()).with_min_version(TlsVersion::Tls13);
+        let c = ClientConnection::start("example.com", &tls13, Zeroizing::new([7; 32]), &[1; 32], &[2; 32]);
+        assert!(c.output().ends_with(&[RT_CHANGE_CIPHER_SPEC, 3, 3, 0, 1, 1]), "after a TLS 1.3-only ClientHello at once");
+        let both = ClientConfig::new(crate::x509::TrustStore::empty());
+        let c = ClientConnection::start("example.com", &both, Zeroizing::new([7; 32]), &[1; 32], &[2; 32]);
+        assert_eq!(c.output()[0], RT_HANDSHAKE);
+        let len = u16::from_be_bytes([c.output()[3], c.output()[4]]) as usize;
+        assert_eq!(c.output().len(), 5 + len, "nothing after a ClientHello that offers TLS 1.2 too");
+        assert!(c.compat_ccs_pending);
     }
 }

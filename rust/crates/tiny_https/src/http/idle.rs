@@ -22,6 +22,9 @@ pub(crate) struct Key {
     pub(crate) port: u16,
     /// The proxy a TLS tunnel goes through: host, port and credentials.
     pub(crate) proxy: Option<(String, u16, Option<String>)>,
+    /// The oldest TLS version the requests that may use the connection accept: a connection made for a request that allows
+    /// TLS 1.2 is never given to one that requires 1.3 (it may have become a TLS 1.2 one).
+    pub(crate) min_tls: crate::tls::TlsVersion,
 }
 
 /// How much is kept and for how long.
@@ -171,7 +174,7 @@ mod tests {
     }
 
     fn key(host: &str) -> Key {
-        Key { tls: true, host: host.to_string(), port: 443, proxy: None }
+        Key { tls: true, host: host.to_string(), port: 443, proxy: None, min_tls: crate::tls::TlsVersion::Tls12 }
     }
 
     fn policy() -> Policy {

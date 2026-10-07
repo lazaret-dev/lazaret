@@ -1,9 +1,9 @@
 """Lazaret's network transport (0.1.9, NET-1): the native library's HTTPS client, the default for the registry's
 requests since John's decision 12 (Oct 6), with Python's urllib (OpenSSL) behind it.
 
-The client is rust/crates/lazaret-net, on tiny_https (rust/crates/tiny_https: TLS 1.3, HTTP/2 with one shared
-connection per origin, and HTTP/1.1 with kept-alive connections; documents go over HTTP/2 and downloads over
-HTTP/1.1, see `http2`), reached through the native library's C ABI
+The client is rust/crates/lazaret-net, on tiny_https (rust/crates/tiny_https: TLS 1.3, and TLS 1.2 with a server
+that speaks nothing newer; HTTP/2 with one shared connection per origin, and HTTP/1.1 with kept-alive connections;
+documents go over HTTP/2 and downloads over HTTP/1.1, see `http2`), reached through the native library's C ABI
 (`lazaret_net_*`, rust/crates/lazaret-ffi). Every request carries its caller's host rule, which the client applies
 to the first URL and to every redirect before it connects (a `*.` entry is one DNS label; an entry without a port is
 the default port only), with https only, no credentials in a URL, a byte budget for the body, a timeout for
@@ -13,8 +13,10 @@ Python's transport is used instead:
 
 * where the native library is missing or older than the network layer (no `lazaret_net_request`);
 * when `LAZARET_NETWORK=python` asks for it;
-* for a server that offers no TLS 1.3 (tiny_https speaks 1.3 only; OpenSSL then picks the best version both have,
-  with its downgrade protection), from then on for that host, in this process (`python_hosts`);
+* for a server that speaks neither TLS 1.3 nor TLS 1.2, from then on for that host, in this process
+  (`python_hosts`). tiny_https speaks 1.2 only to a server that speaks nothing newer, as its drop of Oct 7 does
+  (B-36): ECDHE with AEAD suites only, the extended master secret required, RFC 8446's downgrade check, no
+  renegotiation or resumption, the certificate checks of 1.3. Every reply says which version it came over (`tls`);
 * for a proxy reached over TLS (`https://` in the proxy's URL), which tiny_https does not speak;
 * where no trust anchors can be found for it (below).
 
@@ -74,6 +76,8 @@ class Reply(NamedTuple):
     headers: list
     url: str
     body: bytes
+    #: the TLS version the reply came over: "TLS 1.3" or "TLS 1.2"
+    tls: str = None
 
     def header(self, name):
         name = name.lower()
@@ -127,7 +131,7 @@ def _sendable(c):
 _lock = threading.Lock()
 _ready = None                    # None: not tried; True: the native transport works here; False: it does not
 _why_not = None                  # why it does not
-_python_hosts = set()            # hosts that offered no TLS 1.3 (lower-case host[:port])
+_python_hosts = set()            # hosts that offered no TLS version the client speaks (lower-case host[:port])
 
 
 def _bind(lib):
@@ -228,7 +232,8 @@ def why_not():
 
 
 def python_hosts():
-    """The hosts this process sends through Python's transport because they offered no TLS 1.3."""
+    """The hosts this process sends through Python's transport because they offered no TLS version the native client
+    speaks (neither 1.3 nor 1.2)."""
     with _lock:
         return frozenset(_python_hosts)
 
@@ -383,18 +388,19 @@ def _failure(url, answer):
     except ValueError:
         kind, message, host = "setup", answer.decode("ascii", "replace"), None
     if kind == "tls-version":
-        # (the host of the hop that offered no TLS 1.3, a redirect's when it was one: the first URL's host stays on the
-        # native transport; the credentials review of decision 14)
+        # (the host of the hop that offered no version the client speaks, a redirect's when it was one: the first URL's
+        # host stays on the native transport; the credentials review of decision 14)
         if isinstance(host, str) and host:
             with _lock:
                 _python_hosts.add(_netloc(f"https://{host}/"))
-        raise UsePython(f"the server offers no TLS 1.3 ({message})")
+        raise UsePython(f"the server speaks neither TLS 1.3 nor TLS 1.2 ({message})")
     raise NetError(kind, message)
 
 
 def _head(answer):
+    """(status, version, headers, url, tls) of an answer's head."""
     doc = json.loads(answer)
-    return doc["status"], doc["version"], [tuple(h) for h in doc["headers"]], doc["url"]
+    return doc["status"], doc["version"], [tuple(h) for h in doc["headers"]], doc["url"], doc.get("tls")
 
 
 def request(url, *, hosts, method="GET", headers=(), data=None, max_bytes, timeout, max_redirects=3,
@@ -415,16 +421,17 @@ def request(url, *, hosts, method="GET", headers=(), data=None, max_bytes, timeo
     answer, payload = _take(lib, meta, meta_len), _take(lib, body, body_len)
     if status != STATUS_OK:
         _failure(url, answer)
-    return Reply(*_head(answer), payload)
+    status, version, headers, final, tls = _head(answer)
+    return Reply(status, version, headers, final, payload, tls)
 
 
 class Stream:
-    """A response whose body is read in pieces: `status`, `version`, `headers`, `url`; `read(n)` (b"" at the end),
-    iteration by chunks, and `close()` (a context manager closes it)."""
+    """A response whose body is read in pieces: `status`, `version`, `headers`, `url`, `tls` (as a Reply's); `read(n)`
+    (b"" at the end), iteration by chunks, and `close()` (a context manager closes it)."""
 
     def __init__(self, lib, handle, head, url):
         self._lib, self._handle, self._url = lib, handle, url
-        self.status, self.version, self.headers, self.url = head
+        self.status, self.version, self.headers, self.url, self.tls = head
         self._buf = ctypes.create_string_buffer(64 * 1024)
 
     def header(self, name):

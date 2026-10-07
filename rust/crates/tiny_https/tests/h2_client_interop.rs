@@ -13,7 +13,7 @@ use std::process::{Child, Command, Stdio};
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 use tiny_https::http::HttpVersion;
-use tiny_https::tls::ClientConfig;
+use tiny_https::tls::{ClientConfig, TlsVersion};
 use tiny_https::Client;
 
 /// The oracle server's executable, built on first use; `None` if there is no Go toolchain.
@@ -386,3 +386,43 @@ fn a_server_without_h2_is_spoken_to_in_http_1_1() {
     let conns = oracle.stats(&client);
     assert!(conns.iter().all(|c| c.0 == "HTTP/1.1"), "{conns:?}");
 }
+
+// ------------------------------------------------------------------------------------------------ TLS 1.2
+
+#[test]
+fn http2_and_http1_over_tls12_with_a_go_server_and_tls13_where_it_is_asked_for() {
+    for (args, proto) in [(&["-tls12"][..], tiny_https::http::HttpVersion::Http2), (&["-tls12", "-h1"][..], tiny_https::http::HttpVersion::Http11)] {
+        let Some(oracle) = start(&format!("tls12_{}", args.len()), args) else { return };
+        let client = oracle.client();
+        for _ in 0..3 {
+            let r = client.get(&oracle.url("/size/10000")).unwrap();
+            assert!(pattern_ok(&r.body) && r.body.len() == 10_000);
+            assert_eq!((r.version, r.tls_version), (proto, Some(TlsVersion::Tls12)), "{args:?}");
+        }
+        // the requests shared one connection (the stats request asks on it too)
+        let stats = oracle.stats(&client);
+        assert_eq!(stats.len(), 1, "{args:?}: {stats:?}");
+        // a request that requires TLS 1.3 does not take the TLS 1.2 connection, and the server cannot give it what it wants
+        let e = client.request("GET", &oracle.url("/size/10")).min_tls_version(TlsVersion::Tls13).send().unwrap_err();
+        assert!(e.to_string().contains("alert"), "{args:?}: {e}");
+        // nor does a client that requires it
+        let strict = oracle.client().min_tls_version(TlsVersion::Tls13);
+        assert!(strict.get(&oracle.url("/size/10")).is_err());
+        // and a request on that client cannot loosen it
+        assert!(strict.request("GET", &oracle.url("/size/10")).min_tls_version(TlsVersion::Tls12).send().is_err());
+        // and the client's own requests go on on the connection they had
+        assert_eq!(client.get(&oracle.url("/size/10")).unwrap().tls_version, Some(TlsVersion::Tls12));
+        // (the refused handshakes were connections too, with no request on them)
+        let stats = oracle.stats(&client);
+        assert_eq!(stats.len(), 4, "{args:?}: {stats:?}");
+        assert_eq!(stats.iter().filter(|(_, requests)| *requests > 0).count(), 1, "{args:?}: {stats:?}");
+    }
+}
+
+#[test]
+fn a_go_server_that_can_do_tls13_does() {
+    let Some(oracle) = start("tls13_default", &[]) else { return };
+    let r = oracle.client().get(&oracle.url("/size/10")).unwrap();
+    assert_eq!(r.tls_version, Some(TlsVersion::Tls13));
+}
+

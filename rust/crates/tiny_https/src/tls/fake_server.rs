@@ -93,11 +93,11 @@ fn downgrade_sentinel_aborts_with_illegal_parameter() {
         assert!(err.contains("downgrade sentinel"), "{}", err);
         assert_eq!(plaintext_alert(&sent), Some(47), "client must send illegal_parameter");
     }
-    // a plain TLS 1.2 server (no sentinel) is a protocol_version failure, not a downgrade attack
+    // supported_versions naming TLS 1.2 is no way to choose it (RFC 8446 section 4.2.1): illegal_parameter, not a downgrade
     let o = ShOpts { supported_version: Some(0x0303), ..ShOpts::default() };
     let (err, sent) = handshake_error("example.test", &config_for_tests(), move |h| Session::new(h, SUITE).hello_records(&o).0);
-    assert!(err.contains("did not negotiate TLS 1.3"), "{}", err);
-    assert_eq!(plaintext_alert(&sent), Some(70));
+    assert!(err.contains("not offered"), "{}", err);
+    assert_eq!(plaintext_alert(&sent), Some(47));
 }
 
 #[test]
@@ -113,10 +113,16 @@ fn server_hello_legacy_fields_are_validated() {
         let (err, _) = handshake_error("example.test", &config_for_tests(), move |h| Session::new(h, SUITE).hello_records(&o).0);
         assert!(err.contains(expect), "wanted {:?}, got {}", expect, err);
     }
-    // no supported_versions extension at all
+    // no supported_versions extension at all: TLS 1.2, which a TLS 1.3-only client refuses, and which this ServerHello (with its
+    // TLS 1.3 key share) is not a well-made one of
+    let o = ShOpts { supported_version: None, ..ShOpts::default() };
+    let tls13 = config_for_tests().with_min_version(crate::tls::TlsVersion::Tls13);
+    let (err, sent) = handshake_error("example.test", &tls13, move |h| Session::new(h, SUITE).hello_records(&o).0);
+    assert!(err.contains("requires TLS 1.3"), "{}", err);
+    assert_eq!(plaintext_alert(&sent), Some(70));
     let o = ShOpts { supported_version: None, ..ShOpts::default() };
     let (err, _) = handshake_error("example.test", &config_for_tests(), move |h| Session::new(h, SUITE).hello_records(&o).0);
-    assert!(err.contains("did not negotiate TLS 1.3"), "{}", err);
+    assert!(err.contains("TLS 1.3 extensions in a TLS 1.2 ServerHello"), "{}", err);
 }
 
 #[test]

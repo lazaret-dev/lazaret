@@ -42,7 +42,7 @@ project is pre-1.0, so the 0.x API may still change.
   tarballs by 8 threads 0.4 s instead of 2.9 s. Trust anchors come from `SSL_CERT_FILE`, then the
   system's CA bundle, then what Python's `ssl` loads (the system store on Windows); the proxy is
   the one urllib would use. Python's urllib takes the request where the native library is missing,
-  for a server that offers no TLS 1.3 (from then on for that host), for a proxy reached over TLS,
+  for a server that speaks neither TLS 1.3 nor TLS 1.2 (from then on for that host), for a proxy reached over TLS,
   and when `LAZARET_NETWORK=python` asks for it. tiny_https has not had an independent review (its
   README says so). The guard's https downloads and relays (any https host on a redirect where the
   guard allows one), the `github:` and `gitlab:` sources and the SCA feeds' downloads go through
@@ -542,6 +542,15 @@ project is pre-1.0, so the 0.x API may still change.
   chain), a BOOLEAN `01` read as "not critical", a checksum-database lookup that answers a different question, and
   a leap second in a certificate's time. No interface Lazaret uses changed. The library's brief for its
   independent review (`SECURITY_REVIEW.md`) is kept with it now.
+- **The native transport speaks TLS 1.2 to a server that speaks nothing newer (tiny_https's second drop of Oct
+  7).** `registry.npmjs.org` answers only TLS 1.2 from some networks, and its requests went through Python's
+  transport there. tiny_https now offers TLS 1.2 next to 1.3 under the rules Lazaret asked for: ECDHE with AEAD
+  suites only (no RSA key exchange, no CBC), the extended master secret required, the downgrade check of RFC
+  8446 that catches a TLS 1.3 server pushed down to 1.2, no renegotiation, compression or resumption, no SHA-1 in
+  signatures, and the certificate checks of 1.3. Every reply says which version it came over (`tls`). A server
+  that speaks neither version still goes to Python's transport. The drop's other additions (decoding compressed
+  bodies, a cookie jar, `Expect: 100-continue`) are opt-in and Lazaret asks for none of them; it also brings the
+  library's first run against real servers (52 real certificate chains, replayed offline in CI).
 - **The guard blocks a scan that could not read what a package can be made to hide (T-1, decision 9; rule set
   2.47.0).** INCOMPLETE used to go through by default, so a package could pass by being slow to scan, or by
   padding a payload past the size limit inside its file (16 KB of zip did it: the Go/Rust review's GO-1). The

@@ -177,7 +177,7 @@ jobs:
       - working-directory: rust
         run: >-
           cargo test --release --offline --locked -p tiny_https --lib --test go_vectors --test cms_vectors
-          --test sigstore_real --test sigstore_synthetic --test rekor_real --test real_chains
+          --test sigstore_real --test sigstore_synthetic --test rekor_real --test real_chains --test inflate_vectors
       - working-directory: rust
         run: cargo build --release --offline --locked
       # The WebAssembly build (the npm package's engine) against this library:

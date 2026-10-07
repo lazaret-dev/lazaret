@@ -30,8 +30,9 @@ fn main() {
                 _ => "unsupported".to_string(),
             };
             Ok(format!(
-                "{} | leaf key {} | {} SANs | alpn {:?}",
-                tls.cipher_suite().unwrap().name(),
+                "{} {} | leaf key {} | {} SANs | alpn {:?}",
+                tls.protocol_version().map_or("?".to_string(), |v| v.to_string()),
+                tls.cipher_suite_name().unwrap_or("?"),
                 key,
                 leaf.dns_names.len(),
                 tls.alpn_protocol().map(|p| String::from_utf8_lossy(p).into_owned()),

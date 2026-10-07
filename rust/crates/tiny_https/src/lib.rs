@@ -1,10 +1,13 @@
 //! `tiny_https`: an HTTPS client built from scratch with only the Rust standard library.
 //!
 //! * TLS 1.3 client (X25519, P-256 and P-384 key exchange with HelloRetryRequest, AES-128/256-GCM,
-//!   ChaCha20-Poly1305)
+//!   ChaCha20-Poly1305), and TLS 1.2 for servers that speak nothing newer (ECDHE and AEAD suites only, the extended
+//!   master secret required, the downgrade check of RFC 8446; see [`tls::tls12`]), with a minimum version per client
+//!   and per request and the version spoken in every response
 //! * X.509 chain validation (RSA and ECDSA P-256/P-384 signatures) and hostname checks
 //! * revocation: OCSP stapling and CRLs, with soft-fail and hard-fail policies (see [`revocation`])
-//! * HTTP/1.1 (content-length, chunked, redirects)
+//! * HTTP/1.1 (content-length, chunked, redirects); opt-in: `gzip`/`deflate` bodies decoded with limits, a cookie jar,
+//!   `Expect: 100-continue`
 //! * async use: thread-backed futures, a sans-IO TLS core and an async client (see the `asyncio` module)
 //! * Ed25519 verification (the rules of Go's `crypto/ed25519`), and transparency-log verification: signed
 //!   notes ([`note`]), Merkle proofs and tiles ([`tlog`]) and the Go checksum database check ([`sumdb`]),
@@ -17,10 +20,12 @@
 //!   inclusion proofs to signed checkpoints) and RFC 3161 time stamps, all checked at times the logs and
 //!   time-stamp authorities vouch for and never the clock, against a trusted root the caller supplies
 //!   ([`sigstore`], [`trust_root`], and a strict I-JSON reader [`json`]), also pure
+//! * DEFLATE, zlib and gzip decompression with limits on the size and the ratio, as a streaming decoder over slices
+//!   ([`inflate`]), also pure; the HTTP client uses it to decode `Content-Encoding` when asked to
 //! * features: `net` (default) is everything above except the verification primitives. Without it
 //!   (`default-features = false`) the crate is only the pure part (ASN.1 and BER, PEM, X.509 path validation,
 //!   revocation checking, SHA-1/2, RSA, ECDSA and Ed25519 verification, CMS signatures, signed notes, Merkle
-//!   proofs, the checksum database check and Sigstore bundles), with `#![forbid(unsafe_code)]`, no I/O and no threads, and it
+//!   proofs, the checksum database check, Sigstore bundles and decompression), with `#![forbid(unsafe_code)]`, no I/O and no threads, and it
 //!   builds for `wasm32-unknown-unknown`.
 //!
 //! This crate has zero dependencies. It has not been audited; see README.
@@ -36,6 +41,7 @@ pub mod asn1;
 pub mod ber;
 pub mod cms;
 pub mod crypto;
+pub mod inflate;
 pub mod json;
 #[cfg(test)]
 mod fuzz;

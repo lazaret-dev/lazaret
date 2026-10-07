@@ -946,7 +946,7 @@ mod tests {
     use super::*;
 
     fn key() -> Key {
-        Key { tls: true, host: "example.com".into(), port: 443, proxy: None }
+        Key { tls: true, host: "example.com".into(), port: 443, proxy: None, min_tls: crate::tls::TlsVersion::Tls12 }
     }
 
     fn waits() -> Waits {
@@ -1141,7 +1141,7 @@ mod tests {
     fn only_so_many_origins_are_remembered() {
         let r = Arc::new(Registry::new());
         for i in 0..MAX_ORIGINS + 50 {
-            let k = Key { tls: true, host: format!("h{i}.example"), port: 443, proxy: None };
+            let k = Key { tls: true, host: format!("h{i}.example"), port: 443, proxy: None, min_tls: crate::tls::TlsVersion::Tls12 };
             r.learn(&k, [r#"h3=":443""#].into_iter(), &|_, _| true);
         }
         assert!(r.lock().len() <= MAX_ORIGINS);

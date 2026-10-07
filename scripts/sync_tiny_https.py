@@ -228,10 +228,14 @@ Lazaret's is.
   linked into the native library only). `scripts/check_rust_deps.py` refuses the engine linking the network part.
 - **The next drop:** `python3 scripts/sync_tiny_https.py PATH` (the library's folder or a tarball of it), then
   the gates. `python3 scripts/sync_tiny_https.py --verify` checks this folder against `vendored.sha256` (CI does).
+- **What Lazaret asks of it:** TLS 1.3, and TLS 1.2 with a server that speaks nothing newer (the library's
+  default minimum: ECDHE with AEAD suites only, the extended master secret required, the downgrade check);
+  HTTP/2 or HTTP/1.1; never the opt-in extras (`Content-Encoding` decoding, cookies, `Expect: 100-continue`) and
+  never HTTP/3 (`rust/crates/lazaret-net`).
 - **Its tests in Lazaret's CI:** `cargo test --release -p tiny_https --lib` and the tests that need nothing
-  installed (`go_vectors`, `cms_vectors`, `sigstore_real`, `sigstore_synthetic`, `rekor_real`, `real_chains`;
-  the last replays chains captured from real servers when `tests/data/real_chains/` is in the drop, and skips
-  without it).
+  installed (`go_vectors`, `cms_vectors`, `sigstore_real`, `sigstore_synthetic`, `rekor_real`, `real_chains`,
+  `inflate_vectors`; `real_chains` replays chains captured from real servers when `tests/data/real_chains/` is
+  in the drop, and skips without it).
 """
 
 

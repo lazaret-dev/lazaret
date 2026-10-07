@@ -19,6 +19,7 @@
 //! sockets (they are blocking calls on worker threads); for another connector, the
 //! [`ConnectOptions`] are handed to it and a timeout around the whole future is the executor's job.
 
+use super::decode::{self, BodyDecoder, Next, RequestOpts};
 use super::idle::{IdlePool, Key, Policy};
 use super::parser::{keep_alive_timeout, Head, ResponseParser};
 use super::stream::{is_peer_close, Failure};
@@ -29,6 +30,7 @@ use super::{
 };
 use crate::asyncio::{AsyncRead, AsyncReadExt, AsyncTlsStream, AsyncWrite, AsyncWriteExt, Pool, ThreadedStream};
 use crate::error::{Error, Result};
+use crate::inflate::{Format, Limits as InflateLimits};
 use std::future::{poll_fn, Future};
 use std::io;
 use std::pin::Pin;
@@ -156,7 +158,7 @@ impl<C: Connect> AsyncClient<C> {
     }
 
     pub fn request(&self, method: &str, url: &str) -> AsyncRequestBuilder<'_, C> {
-        AsyncRequestBuilder { client: self, method: method.to_string(), url: url.to_string(), headers: Vec::new(), body: Vec::new(), max_body: None }
+        AsyncRequestBuilder { client: self, method: method.to_string(), url: url.to_string(), headers: Vec::new(), body: Vec::new(), opts: RequestOpts::default() }
     }
 
     /// Closes every idle connection this client (and its clones) is holding.
@@ -169,8 +171,8 @@ impl<C: Connect> AsyncClient<C> {
         self.idle.len()
     }
 
-    async fn execute(&self, method: String, url: &str, headers: Vec<(String, String)>, body: Vec<u8>, max_body: Option<u64>) -> Result<Response> {
-        self.execute_stream(method, url, headers, body, max_body).await?.into_response().await
+    async fn execute(&self, method: String, url: &str, headers: Vec<(String, String)>, body: Vec<u8>, opts: RequestOpts) -> Result<Response> {
+        self.execute_stream(method, url, headers, body, opts).await?.into_response().await
     }
 
     async fn execute_stream(
@@ -179,16 +181,28 @@ impl<C: Connect> AsyncClient<C> {
         url: &str,
         headers: Vec<(String, String)>,
         body: Vec<u8>,
-        max_body: Option<u64>,
+        opts: RequestOpts,
     ) -> Result<AsyncResponseStream<C::Stream>> {
         let mut hop = self.client.start(method, url, headers, body)?;
+        hop.decode = self.client.decode_for(opts);
+        hop.min_tls = opts.min_tls;
         let deadline = self.client.deadline();
-        let limits = Limits { max_body_bytes: max_body.unwrap_or(self.client.limits.max_body_bytes), ..self.client.limits };
+        let limits = Limits { max_body_bytes: opts.max_body.unwrap_or(self.client.limits.max_body_bytes), ..self.client.limits };
         let mut hops = 0;
         loop {
             let mut resp = self.once(&hop, deadline, limits).await?;
+            if let Some(jar) = &self.client.cookies {
+                jar.store_from(&hop.url, resp.headers_named("set-cookie"));
+            }
             if !self.client.follow(&mut hop, resp.status, &resp.headers, &mut hops)? {
-                return Ok(resp);
+                // (the final response, and the only one whose body the caller gets)
+                return Ok(match &hop.decode {
+                    Some(d) => match decode::coding_of(&hop.method, resp.status, &resp.headers) {
+                        Some(format) => resp.with_decoder(format, d.for_body(limits.max_body_bytes)),
+                        None => resp,
+                    },
+                    None => resp,
+                });
             }
             // what is left of the redirect's body, if it is small, so that its connection can be used again
             if resp.content_length.map_or(true, |n| n <= REDIRECT_BODY_LIMIT) {
@@ -203,7 +217,7 @@ impl<C: Connect> AsyncClient<C> {
         let headers = self.client.request_headers(hop)?;
         let (method, url, body) = (hop.method.as_str(), &hop.url, hop.body.as_slice());
         let proxy = self.client.proxy_for(url)?;
-        let key = pool_key(url, proxy.as_ref());
+        let key = pool_key(url, proxy.as_ref(), self.client.min_tls_for(hop));
         let head = wire::write_request_head(method, &url.path_and_query, &headers);
         let policy = self.client.policy;
         let mut retry_allowed = policy.parks() && is_replayable(method, &hop.headers);
@@ -213,7 +227,7 @@ impl<C: Connect> AsyncClient<C> {
             let was_reused = reused.is_some();
             let conn = match reused {
                 Some(c) => c,
-                None => self.connect(url, proxy.as_ref(), deadline).await?,
+                None => self.connect(url, proxy.as_ref(), deadline, key.min_tls).await?,
             };
             let home = policy.parks().then(|| AsyncHome { pool: self.idle.clone(), key: key.clone(), policy });
             match exchange(conn, method, url, &head, body, limits, home).await {
@@ -244,7 +258,7 @@ impl<C: Connect> AsyncClient<C> {
         None
     }
 
-    async fn connect(&self, url: &Url, proxy: Option<&Proxy>, deadline: Option<Instant>) -> Result<AsyncConn<C::Stream>> {
+    async fn connect(&self, url: &Url, proxy: Option<&Proxy>, deadline: Option<Instant>, min_tls: crate::tls::TlsVersion) -> Result<AsyncConn<C::Stream>> {
         let opts = self.client.connect_options(deadline);
         if !url.is_https() {
             return Ok(AsyncConn::Plain(self.connector.connect(&url.host, url.port, opts).await?));
@@ -271,7 +285,14 @@ impl<C: Connect> AsyncClient<C> {
             }
             None => self.connector.connect(&url.host, url.port, opts).await?,
         };
-        Ok(AsyncConn::Tls(Box::new(AsyncTlsStream::connect(stream, &url.host, &self.client.tls).await?)))
+        let narrowed;
+        let config = if self.client.tls.min_version == min_tls {
+            &self.client.tls
+        } else {
+            narrowed = self.client.tls.clone().with_min_version(min_tls);
+            &narrowed
+        };
+        Ok(AsyncConn::Tls(Box::new(AsyncTlsStream::connect(stream, &url.host, config).await?)))
     }
 }
 
@@ -285,10 +306,14 @@ async fn exchange<S: AsyncRead + AsyncWrite + Unpin + Send + 'static>(
     limits: Limits,
     home: Option<AsyncHome<S>>,
 ) -> std::result::Result<AsyncResponseStream<S>, Failure> {
+    let tls_version = match &conn {
+        AsyncConn::Plain(_) => None,
+        AsyncConn::Tls(s) => s.protocol_version(),
+    };
     let mut reader = AsyncBody::new(conn, method, limits, home);
     reader.send_request(head, body).await?;
     let response_head = reader.receive_head().await?;
-    Ok(AsyncResponseStream::new(response_head, url.clone(), reader))
+    Ok(AsyncResponseStream::new(response_head, url.clone(), reader, tls_version))
 }
 
 /// A request being built; see [`AsyncClient::request`].
@@ -298,7 +323,7 @@ pub struct AsyncRequestBuilder<'a, C: Connect> {
     url: String,
     headers: Vec<(String, String)>,
     body: Vec<u8>,
-    max_body: Option<u64>,
+    opts: RequestOpts,
 }
 
 impl<'a, C: Connect> AsyncRequestBuilder<'a, C> {
@@ -314,19 +339,46 @@ impl<'a, C: Connect> AsyncRequestBuilder<'a, C> {
 
     /// Largest response body accepted for this request, in bytes; see [`Client::max_body_bytes`].
     pub fn max_body_bytes(mut self, n: u64) -> Self {
-        self.max_body = Some(n);
+        self.opts.max_body = Some(n);
         self
     }
 
+    /// Decodes (or does not decode) a compressed response to this request, whatever the client's setting; see [`Client::decompress`].
+    pub fn decompress(mut self, on: bool) -> Self {
+        self.opts.decompress = Some(on);
+        self
+    }
+
+    /// The most bytes the decoded body of this response may have; see [`Client::max_decoded_bytes`].
+    pub fn max_decoded_bytes(mut self, n: u64) -> Self {
+        self.opts.max_decoded = Some(n);
+        self
+    }
+
+    /// The oldest TLS version this request accepts; see [`RequestBuilder::min_tls_version`](super::RequestBuilder::min_tls_version).
+    pub fn min_tls_version(mut self, version: crate::tls::TlsVersion) -> Self {
+        self.opts.min_tls = Some(version);
+        self
+    }
+
+    /// Says `Expect: 100-continue`. The async client has no timer to wait with, so it sends the body with the head all the same
+    /// (which RFC 9110 allows); the blocking client waits for the go-ahead (see [`RequestBuilder::expect_continue`](super::RequestBuilder::expect_continue)).
+    pub fn expect_continue(self) -> Self {
+        if super::expects_continue(&self.headers) {
+            return self;
+        }
+        self.header("Expect", "100-continue")
+    }
+
     pub async fn send(self) -> Result<Response> {
-        self.client.execute(self.method, &self.url, self.headers, self.body, self.max_body).await
+        self.client.execute(self.method, &self.url, self.headers, self.body, self.opts).await
     }
 
     /// Sends the request and returns as soon as the response headers are in; the body is read from
     /// the [`AsyncResponseStream`] as it arrives. Redirects are followed first; the stream is the
     /// final response.
     pub async fn send_stream(self) -> Result<AsyncResponseStream<C::Stream>> {
-        self.client.execute_stream(self.method, &self.url, self.headers, self.body, self.max_body).await
+        self.client.execute_stream(self.method, &self.url, self.headers, self.body, self.opts).await
     }
 }
 
@@ -631,12 +683,56 @@ pub struct AsyncResponseStream<S = ThreadedStream> {
     /// The Content-Length the server declared, if it declared one and the body is not chunked.
     /// Known before the body is read. For a response to HEAD, the length a GET would have.
     pub content_length: Option<u64>,
+    /// The version of TLS the response came over (`None` over plain http).
+    pub tls_version: Option<crate::tls::TlsVersion>,
+    /// True if the body came compressed and the client is decoding it as it is read (see [`Client::decompress`]).
+    pub uncompressed: bool,
     body: AsyncBody<S>,
+    decoder: Option<Box<BodyDecoder>>,
 }
 
 impl<S: AsyncRead + AsyncWrite + Unpin + Send + 'static> AsyncResponseStream<S> {
-    fn new(head: Head, url: Url, body: AsyncBody<S>) -> AsyncResponseStream<S> {
-        AsyncResponseStream { status: head.status, reason: head.reason, version: super::HttpVersion::Http11, headers: head.headers, url, content_length: head.content_length, body }
+    fn new(head: Head, url: Url, body: AsyncBody<S>, tls_version: Option<crate::tls::TlsVersion>) -> AsyncResponseStream<S> {
+        AsyncResponseStream {
+            status: head.status,
+            reason: head.reason,
+            version: super::HttpVersion::Http11,
+            headers: head.headers,
+            url,
+            content_length: head.content_length,
+            tls_version,
+            uncompressed: false,
+            body,
+            decoder: None,
+        }
+    }
+
+    /// The same response with its body decoded as it is read: the headers that describe the encoded body are gone and so is the length.
+    fn with_decoder(mut self, format: Format, limits: InflateLimits) -> AsyncResponseStream<S> {
+        decode::strip_encoding_headers(&mut self.headers);
+        self.content_length = None;
+        self.uncompressed = true;
+        self.decoder = Some(Box::new(BodyDecoder::new(format, limits)));
+        self
+    }
+
+    /// Reads up to `out.len()` bytes of the body as the caller gets it (decoded, if it is): 0 is the end.
+    fn poll_read_some(&mut self, cx: &mut Context<'_>, out: &mut [u8]) -> Poll<Result<usize>> {
+        let Some(decoder) = self.decoder.as_mut() else { return self.body.poll_read_body(cx, out) };
+        loop {
+            match decoder.next(out).map_err(Error::Decode)? {
+                Next::Data(n) => return Poll::Ready(Ok(n)),
+                Next::End => return Poll::Ready(Ok(0)),
+                Next::Wire => {
+                    let n = ready!(self.body.poll_read_body(cx, decoder.wire_buf()))?;
+                    decoder.wire(n).map_err(Error::Decode)?;
+                }
+            }
+        }
+    }
+
+    async fn read_some(&mut self, out: &mut [u8]) -> Result<usize> {
+        poll_fn(|cx| self.poll_read_some(cx, out)).await
     }
 
     /// First header with this (case-insensitive) name.
@@ -667,7 +763,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send + 'static> AsyncResponseStream<S> 
             let len = body.len();
             let room = (body.capacity() - len).min(1 << 20);
             body.resize(len + room, 0);
-            match self.body.read_body(&mut body[len..]).await {
+            match self.read_some(&mut body[len..]).await {
                 Ok(0) => {
                     body.truncate(len);
                     break;
@@ -676,7 +772,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send + 'static> AsyncResponseStream<S> 
                 Err(e) => return Err(e),
             }
         }
-        Ok(Response { status: self.status, reason: self.reason, version: self.version, headers: self.headers, body, url: self.url })
+        Ok(Response { status: self.status, reason: self.reason, version: self.version, headers: self.headers, body, url: self.url, tls_version: self.tls_version, uncompressed: self.uncompressed })
     }
 
     /// Reads the rest of the body into `sink`; returns how many bytes it was.
@@ -684,7 +780,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send + 'static> AsyncResponseStream<S> 
         let mut buf = vec![0u8; 64 * 1024];
         let mut total = 0u64;
         loop {
-            match self.body.read_body(&mut buf).await? {
+            match self.read_some(&mut buf).await? {
                 0 => return Ok(total),
                 n => {
                     sink.write_all(&buf[..n]).await?;
@@ -701,7 +797,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send + 'static> AsyncResponseStream<S> 
 
 impl<S: AsyncRead + AsyncWrite + Unpin + Send + 'static> AsyncRead for AsyncResponseStream<S> {
     fn poll_read(mut self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &mut [u8]) -> Poll<io::Result<usize>> {
-        self.body.poll_read_body(cx, buf).map_err(to_io)
+        self.poll_read_some(cx, buf).map_err(to_io)
     }
 }
 

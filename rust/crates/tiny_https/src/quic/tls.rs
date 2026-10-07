@@ -1,6 +1,6 @@
 //! TLS 1.3 as QUIC uses it (RFC 9001 section 4 to 8): the client's handshake carried in CRYPTO frames instead of TLS records.
 //!
-//! [`TlsClient`] sits between the connection and [`Handshake`](crate::tls::handshake), the message-level handshake that the TLS
+//! [`TlsClient`] sits between the connection and `Handshake` (`tls::handshake`), the message-level handshake that the TLS
 //! client over TCP is also built on. The connection gives it the handshake bytes that CRYPTO frames brought, in order, at the
 //! encryption level of the packets they came in ([`TlsClient::read_crypto`]); it says what the connection is to do about them:
 //! send handshake bytes at a level, install the keys of a level, learn the server's transport parameters
@@ -179,6 +179,8 @@ impl TlsClient {
                     events.push(Event::Keys { level: Level::Application, suite, write: client, read: server });
                     events.push(Event::Complete);
                 }
+                // (never: over QUIC the ClientHello offers TLS 1.3 alone, and a TLS 1.2 ServerHello is refused before this)
+                CoreEvent::Tls12(..) => debug_assert!(false, "TLS 1.2 over QUIC"),
             }
         }
     }

@@ -29,9 +29,15 @@
 //! HTTP/2 connection's reader and writer threads are not in the child). Proxies are the caller's to choose: from
 //! the environment (`HTTPS_PROXY`, `NO_PROXY`), one given, or none.
 //!
-//! What it does not do: HTTP/3 is off (tiny_https has it, opt-in), and nothing is cached. TLS is 1.3 only: a
-//! server that offers nothing newer than TLS 1.2 is [`Failure::TlsVersion`], which the Python side answers by
-//! asking that server again with Python's own transport.
+//! **TLS 1.3, or TLS 1.2 with a server that speaks nothing newer** (tiny_https's B-36, its default minimum since the
+//! drop of Oct 7: ECDHE with AEAD suites only, the extended master secret required, the downgrade check of RFC 8446
+//! that catches a TLS 1.3 server pushed down to 1.2, no renegotiation or resumption, and the same certificate checks
+//! as 1.3); every reply says which ([`Reply::tls`]). A server that speaks neither is [`Failure::TlsVersion`], which
+//! the Python side answers by asking that server again with Python's own transport.
+//!
+//! What it does not do: HTTP/3 is off (tiny_https has it, opt-in), nothing is cached, and tiny_https's other opt-in
+//! extras are never asked for: a body comes as the server sent it (no `Content-Encoding` decoding), no cookie is
+//! kept, and a body goes with its head (no `Expect: 100-continue`).
 
 use std::io::Read;
 use std::sync::{Arc, Mutex};
@@ -57,9 +63,9 @@ pub enum Failure {
     Refused(String),
     /// The body was over the caller's budget (declared or read).
     TooLarge,
-    /// The server offered no TLS 1.3: the message, and the host of the hop it was (as a Host header writes it), when it is
-    /// known. The Python side asks that host again with its own transport: on a redirect, that host and not the first
-    /// URL's (the credentials review of decision 14).
+    /// The server offered neither TLS 1.3 nor TLS 1.2: the message, and the host of the hop it was (as a Host header
+    /// writes it), when it is known. The Python side asks that host again with its own transport: on a redirect, that
+    /// host and not the first URL's (the credentials review of decision 14).
     TlsVersion { message: String, host: Option<String> },
     /// TLS failed otherwise: the certificate, the handshake, an alert.
     Tls(String),
@@ -96,7 +102,7 @@ impl Failure {
         }
     }
 
-    /// The host of the hop that offered no TLS 1.3 ([`Failure::TlsVersion`]), when it is known.
+    /// The host of the hop that offered no version the client speaks ([`Failure::TlsVersion`]), when it is known.
     pub fn host(&self) -> Option<&str> {
         match self {
             Failure::TlsVersion { host, .. } => host.as_deref(),
@@ -124,7 +130,7 @@ fn classify(e: NetError) -> Failure {
             }
         }
         NetError::Tls(m) if m.starts_with("protocol_version") => Failure::TlsVersion { message: m, host: None },
-        // alert 70 is protocol_version: what a server that speaks no TLS 1.3 answers a hello that offers only 1.3
+        // alert 70 is protocol_version: what a server that speaks neither version the hello offers answers
         NetError::Alert(_, 70) => {
             Failure::TlsVersion { message: "the server answered with a protocol_version alert".to_string(), host: None }
         }
@@ -139,6 +145,8 @@ fn classify(e: NetError) -> Failure {
         // sent there: "request refused: …", "redirect 2 refused: …" (the reason names the host, never the path,
         // a credential or a header's value)
         NetError::Refused(r) => Failure::Refused(r.to_string()),
+        // (a compressed body this layer never asks to have decoded; and whatever a later tiny_https adds)
+        other => Failure::Http(other.to_string()),
     }
 }
 
@@ -403,6 +411,8 @@ pub struct Reply {
     pub status: u16,
     /// "HTTP/2" or "HTTP/1.1".
     pub version: String,
+    /// The TLS version the response came over: "TLS 1.3" or "TLS 1.2" (None: not over TLS).
+    pub tls: Option<String>,
     pub headers: Vec<(String, String)>,
     /// The URL that answered, after redirects.
     pub url: String,
@@ -595,8 +605,8 @@ fn valid_header(name: &str, value: &str) -> bool {
         && value.bytes().all(|b| b == b' ' || b == b'\t' || (0x21..=0x7e).contains(&b))
 }
 
-fn reply_head(s: &ResponseStream) -> (u16, String, Vec<(String, String)>, String) {
-    (s.status, s.version.to_string(), s.headers.clone(), s.url.to_string())
+fn reply_head(s: &ResponseStream) -> (u16, String, Option<String>, Vec<(String, String)>, String) {
+    (s.status, s.version.to_string(), s.tls_version.map(|v| v.to_string()), s.headers.clone(), s.url.to_string())
 }
 
 /// Sends `req` and reads the whole body (at most `max_bytes`: the client's limit, which a declared length over it
@@ -610,14 +620,16 @@ pub fn fetch(req: &Request) -> Result<Reply, Failure> {
     if resp.body.len() as u64 > req.max_bytes {
         return Err(Failure::TooLarge);
     }
-    Ok(Reply { status: resp.status, version: resp.version.to_string(), headers: resp.headers, url: resp.url.to_string(),
-               body: resp.body })
+    Ok(Reply { status: resp.status, version: resp.version.to_string(), tls: resp.tls_version.map(|v| v.to_string()),
+               headers: resp.headers, url: resp.url.to_string(), body: resp.body })
 }
 
 /// A response whose body is read in pieces (a download spooled to a file, a stream handed on).
 pub struct Stream {
     pub status: u16,
     pub version: String,
+    /// The TLS version the response comes over (as [`Reply::tls`]).
+    pub tls: Option<String>,
     pub headers: Vec<(String, String)>,
     pub url: String,
     inner: ResponseStream,
@@ -653,8 +665,8 @@ fn unwrap_io(e: std::io::Error) -> NetError {
 /// Sends `req` and returns once the head is in.
 pub fn open(req: &Request) -> Result<Stream, Failure> {
     let inner = start(req)?;
-    let (status, version, headers, url) = reply_head(&inner);
-    Ok(Stream { status, version, headers, url, inner, read: 0, limit: req.max_bytes })
+    let (status, version, tls, headers, url) = reply_head(&inner);
+    Ok(Stream { status, version, tls, headers, url, inner, read: 0, limit: req.max_bytes })
 }
 
 #[cfg(test)]

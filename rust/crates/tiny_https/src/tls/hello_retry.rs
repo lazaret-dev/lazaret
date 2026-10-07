@@ -24,8 +24,10 @@ const RANDOM: [u8; 32] = [1; 32];
 const SESSION: [u8; 32] = [2; 32];
 const X25519_SERVER_PRIVATE: [u8; 32] = [0x55; 32];
 
+/// TLS 1.3 only: these tests look at the flights byte by byte, and a ClientHello that offers TLS 1.2 too sends its
+/// compatibility change_cipher_spec later (see `the_compatibility_change_cipher_spec_goes_before_the_second_hello`).
 fn config() -> ClientConfig {
-    ClientConfig::new(crate::x509::TrustStore::empty()).danger_disable_verification()
+    ClientConfig::new(crate::x509::TrustStore::empty()).danger_disable_verification().with_min_version(crate::tls::TlsVersion::Tls13)
 }
 
 /// A client that has sent its ClientHello (taken from its output, which is returned).
@@ -515,3 +517,18 @@ fn the_scripted_retry_server_gets_the_client_to_read_its_flight() {
         }
     }
 }
+
+#[test]
+fn the_compatibility_change_cipher_spec_goes_before_the_second_hello() {
+    // a ClientHello that offers TLS 1.2 as well is sent alone (a TLS 1.2 server would take a change_cipher_spec before its
+    // ServerHello for an error); after a HelloRetryRequest, which only a TLS 1.3 server sends, it goes before the second hello
+    let config = ClientConfig::new(crate::x509::TrustStore::empty()).danger_disable_verification();
+    let mut c = ClientConnection::start("example.com", &config, Zeroizing::new([7u8; 32]), &RANDOM, &SESSION);
+    let r1 = records(&take_output(&mut c));
+    assert_eq!(r1.iter().map(|r| r.0).collect::<Vec<_>>(), vec![RT_HANDSHAKE]);
+    let retry = Retry::to(GROUP_SECP256R1);
+    feed(&mut c, &retry.record()).expect("the retry is accepted");
+    let r2 = records(&take_output(&mut c));
+    assert_eq!(r2.iter().map(|r| r.0).collect::<Vec<_>>(), vec![RT_CHANGE_CIPHER_SPEC, RT_HANDSHAKE]);
+}
+

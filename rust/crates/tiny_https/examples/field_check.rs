@@ -6,7 +6,8 @@
 //! cargo run --release --example field_check -- verify field_results [--cacert FILE]
 //! ```
 //!
-//! `smoke` connects to every host of the list with the library's own TLS 1.3 client and the system CA bundle, directly (the
+//! `smoke` connects to every host of the list with the library's own TLS client (1.3, or 1.2 with a server that speaks only
+//! that) and the system CA bundle, directly (the
 //! environment's proxy variables are not read unless `--proxy` is given), and says for each whether it did what the list
 //! expects of that host:
 //!
@@ -15,7 +16,10 @@
 //! * `refuse`: the certificate is expired, self-signed, for another host or from a root nobody trusts, and must be refused
 //!   as a certificate error;
 //! * `info`: whatever happens is written down and is not a pass or a fail (a revoked certificate, a chain with the
-//!   intermediate left out, a 100 KB certificate, a server that speaks only TLS 1.2).
+//!   intermediate left out, a 100 KB certificate).
+//!
+//! `ok-tls12` and `refuse-tls12` are `ok` and `refuse` for servers that speak only TLS 1.2: they are judged the same way, and
+//! the TLS version that was spoken is written down for every host.
 //!
 //! A host that cannot be reached at all (no address, no route, a connect timeout) is `SKIP`, never a failure. Only a
 //! `FAIL` makes the exit status 1.
@@ -125,11 +129,13 @@ fn parse_hosts(text: &str) -> Vec<Site> {
         let mut words = line.split_whitespace();
         let (Some(group), Some(target)) = (words.next(), words.next()) else { continue };
         let group = match group {
-            "ok" => Group::Ok,
-            "refuse" => Group::Refuse,
+            // the -tls12 names mark servers that speak only TLS 1.2 (BACKLOG B-36): judged as the others since the library
+            // speaks 1.2 too, and `mac_field_check.sh capture` takes their chains like the others
+            "ok" | "ok-tls12" => Group::Ok,
+            "refuse" | "refuse-tls12" => Group::Refuse,
             "info" => Group::Info,
             other => {
-                eprintln!("hosts file: unknown group {other:?} (ok, refuse or info) in: {line}");
+                eprintln!("hosts file: unknown group {other:?} (ok, refuse, info, ok-tls12 or refuse-tls12) in: {line}");
                 continue;
             }
         };
@@ -165,6 +171,9 @@ fn class_of(e: &Error) -> &'static str {
         Error::Io(_) => "io",
         Error::Http(_) => "http",
         Error::Refused(_) => "refused",
+        Error::Decode(_) => "http",
+        // (the enum may grow)
+        _ => "other",
     }
 }
 
@@ -201,8 +210,9 @@ fn attempt_direct(site: &Site, config: &ClientConfig, timeout: Duration) -> Atte
     };
     let anchor = Certificate::from_der(verified.anchor()).map(|c| c.subject_summary()).unwrap_or_else(|_| "?".to_string());
     Attempt::Accepted(format!(
-        "{} alpn={} sent={} path={} leaf={} issuer=[{}] anchor=[{}] expires_in={}d",
-        tls.cipher_suite().map_or("?", |s| s.name()),
+        "{} {} alpn={} sent={} path={} leaf={} issuer=[{}] anchor=[{}] expires_in={}d",
+        tls.protocol_version().map_or("?".to_string(), |v| v.to_string()),
+        tls.cipher_suite_name().unwrap_or("?"),
         tls.alpn_protocol().map_or("-".to_string(), |p| String::from_utf8_lossy(p).into_owned()),
         chain.len(),
         verified.path.len(),
@@ -240,7 +250,8 @@ fn attempt_http(site: &Site, config: &ClientConfig, via_proxy: bool, timeout: Du
             Err(e) => return Attempt::Rejected("io", format!("reading the body of {} after {} bytes: {e}", stream.status, total)),
         }
     }
-    Attempt::Accepted(format!("{} {} {} bytes read, {} ms", stream.version, stream.status, total, started.elapsed().as_millis()))
+    let tls = stream.tls_version.map_or("no TLS".to_string(), |v| v.to_string());
+    Attempt::Accepted(format!("{} {} over {tls}, {} bytes read, {} ms", stream.version, stream.status, total, started.elapsed().as_millis()))
 }
 
 /// (verdict, class, detail) for one site.

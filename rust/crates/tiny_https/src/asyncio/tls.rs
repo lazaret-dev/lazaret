@@ -100,9 +100,19 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AsyncTlsStream<S> {
         }
     }
 
-    /// The cipher suite negotiated with the server.
+    /// The TLS 1.3 cipher suite negotiated with the server; `None` for a TLS 1.2 connection.
     pub fn cipher_suite(&self) -> Option<Suite> {
         self.conn.cipher_suite()
+    }
+
+    /// The name of the negotiated cipher suite, in either version.
+    pub fn cipher_suite_name(&self) -> Option<&'static str> {
+        self.conn.cipher_suite_name()
+    }
+
+    /// The version of TLS spoken.
+    pub fn protocol_version(&self) -> Option<crate::tls::TlsVersion> {
+        self.conn.protocol_version()
     }
 
     /// The ALPN protocol the server selected, if any.
