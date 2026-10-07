@@ -628,6 +628,29 @@ project is pre-1.0, so the 0.x API may still change.
 
 ### Fixed
 
+- **`lazaret guard code` stands in for the editor's gallery only where it reads it (EG-8).** An editor
+  whose `product.json` names a gallery the guard doesn't read (a company's own) was looked up in the
+  public registry instead, with a note: `--install-extension NAME` and `--update-extensions` sent every
+  name asked for to that registry, private ones included, and `--update-extensions` installed a public
+  extension of the same name over an extension the private gallery had served (where the identifiers
+  could not be compared, it matched by name). Such an editor, or one whose `product.json` names no
+  gallery, is now refused unless `--gallery vscode|openvsx` says which registry to read for the
+  extensions you name, before any name is sent; `--update-extensions`, which asks for every extension
+  installed, runs only when the guard reads the editor's own gallery, and then always compares the
+  identifiers the editor recorded. VSCodium's gallery is also read from a `product.json` in its folder of
+  user data and from `VSCODE_GALLERY_SERVICE_URL` (and `VSCODE_GALLERY_CONTROL_URL`), as VSCodium applies
+  them; one that can't be read is refused. With no `product.json` found beside the command, the editor's
+  own default gallery is taken as its.
+- **The extension guard's smaller fixes (EG-11 to EG-16, EG-18).** An extension the gallery's list says
+  is malicious is blocked as itself, not replaced: the editor refuses it before it looks for a
+  replacement. A `deprecated` entry of the list now cancels a migration to a pre-release for the same
+  id, as VS Code builds the list (any value JavaScript takes as true, `{}` too). An extension brought
+  twice, once in place of another, is checked and installed once. `ID@VERSION` with a version the
+  Marketplace doesn't have fails, as in the editor, where it installed the replacement. An update of an
+  extension that follows pre-releases is installed with `--pre-release`, and one of an extension
+  installed in every profile without `--profile`, in the default profile where the editor keeps it
+  (with `--profile`, such an update did not take). A profile folder or `--user-data-dir` with a NUL in
+  it is an error, not a traceback.
 - **A `.vsix` is read by the names VS Code extracts, and a zip by the names its installer reads (the
   review of Oct 7; rule set 2.41.0).** VS Code writes every entry of a `.vsix` whose name begins with
   `extension` into the extension's folder, a `/` after it or not, so `extensionout/extension.js` is

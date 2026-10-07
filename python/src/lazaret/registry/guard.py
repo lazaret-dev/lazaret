@@ -4879,7 +4879,9 @@ def build_parser():
                          "downloading again (needs wheels only; otherwise pip goes through the index as usual)")
     ap.add_argument("--gallery", choices=("vscode", "openvsx"), default=None,
                     help="an editor's extensions: the registry to read them from (vscode: the Visual Studio "
-                         "Marketplace; openvsx: Open VSX); by default the one the editor installs from")
+                         "Marketplace; openvsx: Open VSX); by default the one the editor installs from. Needed "
+                         "for an editor whose gallery is another (a company's own) or none; --update-extensions "
+                         "takes only the editor's own")
     ap.add_argument("--json", metavar="PATH", help="write what was checked, as JSON")
     ap.add_argument("--keepalive", action="store_true",
                     help="reuse connections between the guard's requests (experimental: with --timings, compare "

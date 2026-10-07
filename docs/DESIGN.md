@@ -918,8 +918,10 @@ fetch. The manifests and lockfiles of both are snapshotted and put back when
 anything is blocked.
 
 **VS Code's extensions (0.1.9, E-1).** An editor has no hook either: its
-gallery is its `product.json`, and nothing on its command line or in its
-environment points it elsewhere. So `editorguard.py` does what the editor's
+gallery is its `product.json` (VSCodium's also a `product.json` in its folder
+of user data and `VSCODE_GALLERY_SERVICE_URL`, field by field over it, as
+VSCodium's patches read them), and nothing on its command line points it
+elsewhere. So `editorguard.py` does what the editor's
 `--install-extension` does up to the download, and then has the editor
 install the files it checked (`--install-extension FILE.vsix`): what is
 installed is what was scanned, whatever the registry serves next. Which
@@ -949,8 +951,20 @@ editor installs another in place of (`migrateToPreRelease`, a `deprecated`
 entry with `autoMigrate`, and the product's `defaultChatAgent`, VS Code's
 Copilot): an install, a brought extension and an update take the
 replacement, at its newest version, as VS Code's
-`checkAndGetCompatibleVersion` does (EG-7); the list is read once, when
-first needed, as the editor reads it only when it fetches. From VS Code 1.98 the CLI takes
+`checkAndGetCompatibleVersion` does (EG-7), except one the list says is
+malicious, which that function refuses first (EG-11); a `deprecated` entry
+is written over `migrateToPreRelease`'s for its id, as
+`getExtensionsControlManifest` builds the map, and one with no replacement
+leaves none (EG-12); one Item for an id, however many bring it or are
+replaced by it (EG-13); the list is read once, when first needed, as the
+editor reads it only when it fetches. The guard stands in for the editor's
+gallery only where it reads it (EG-8): an editor whose gallery is another
+(a company's, which serves its own extensions under names a public registry
+may give to others) or none is refused unless `--gallery` says which
+registry to read for the extensions the command names, so no private name
+is sent to a public registry and no public extension of the same name is
+installed in its place unasked; with no `product.json` found beside the
+command, the editor's own default gallery is taken as its. From VS Code 1.98 the CLI takes
 `--do-not-include-pack-dependencies`, and the guard installs every file in
 one command with it, so the editor fetches nothing; before 1.98 it installs
 wave by wave, each extension after what it brings, so that the editor finds
@@ -973,9 +987,15 @@ application-scoped extensions. The registry modules are asked by name, so
 `gallery_id` reads the identifier the gallery gives that name (the
 Marketplace's query; Open VSX's VS Code gallery, `/vscode/gallery`, which
 VSCodium's `product.json` names), and an update goes ahead only when it is
-the one the editor recorded; a fork's own gallery gives identifiers of its
-own, so they are compared only when the guard reads the gallery the
-editor's `product.json` names. An extension installed from a file has no
+the one the editor recorded. The guard updates only when it reads the
+editor's own gallery (EG-8: every extension installed is asked for by name,
+private ones too), so the identifiers are always the same gallery's. An
+extension the editor keeps in every profile (`isApplicationScoped`, or
+`isBuiltin`) is installed without `--profile`, in the default profile, as
+VS Code's own update installs it there (EG-16), and one that follows
+pre-releases with `--pre-release` (EG-15: the editor records the flag only
+if its command line waits for the lookup it starts after installing a file,
+which as a rule it does not). An extension installed from a file has no
 identifier as a rule: the editor's command line starts the gallery lookup
 that would add one without waiting for it, and exits, and the window adds
 it when it next opens, matching by name. The guard matches such an
