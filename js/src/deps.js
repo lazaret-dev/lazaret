@@ -166,7 +166,6 @@ export function webAssets(tree, files) {
 
 /** The paths an npm package.json's main, module, bin and exports name. core._deps_npm_entries */
 export function npmEntries(data) {
-  const [max] = packValues("_DEPS_REACH_MAX");
   const isObject = (v) => v !== null && typeof v === "object" && !Array.isArray(v);
   const out = [];
   for (const key of ["main", "module"]) {
@@ -176,7 +175,7 @@ export function npmEntries(data) {
   if (typeof b === "string") out.push(b);
   else if (isObject(b)) for (const [, v] of pyEntries(b)) if (typeof v === "string") out.push(v);
   const stack = [own(data, "exports")];
-  while (stack.length && out.length < max) {
+  while (stack.length) {
     const e = stack.pop();
     if (typeof e === "string") {
       if (!e.includes("*")) out.push(e);
@@ -192,17 +191,18 @@ export function npmEntries(data) {
 /**
  * The files of the npm package at `root` its entry points reach: what Node runs for the package
  * itself and for each entry point, then the local files they require or import and the scripts
- * they start with node (spawnedScripts), transitively. core._deps_npm_reach
+ * they start with node (spawnedScripts), transitively, each file once (no cap: BR-5).
+ * core._deps_npm_reach
  */
 function npmReach(tree, root) {
-  const [max, localDep] = packValues("_DEPS_REACH_MAX", "_DEPS_LOCAL_DEP_RE");
+  const [localDep] = packValues("_DEPS_LOCAL_DEP_RE");
   const rx = pyRe(localDep.re, "gm");
   const manifest = tree.manifests.get(`${root}/package.json`);
   const data = manifest !== undefined ? loadManifest(manifest.path, manifest.content)[0] : null;
   const entries = data !== null && typeof data === "object" && !Array.isArray(data) ? npmEntries(data) : [];
   const queue = [tree.resolve(root), ...entries.map((e) => treeJoin(root, e)).filter((t) => t !== null).map((t) => tree.resolve(t))];
   const seen = new Set();
-  while (queue.length && seen.size < max) {
+  while (queue.length) {
     const rel = queue.pop();
     if (rel === null || rel === undefined || seen.has(rel) || !rel.startsWith(root + "/")) continue;
     seen.add(rel);

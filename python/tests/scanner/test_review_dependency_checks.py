@@ -256,6 +256,22 @@ class WebAssetTests(unittest.TestCase):
                           "node_modules/w/public/widget.js", "node_modules/x/static/cli.js",
                           "node_modules/x/static/index.js", "node_modules/x/static/y.js"])
 
+    def test_padding_hides_no_file(self):
+        # BR-5: the walk from a package's entry points stopped at 5,000 files, and its exports were read to 5,000 entry
+        # points, so a file in static/ reached past them was left out as a web asset (the npm twin's test: the same)
+        files = [{"path": f"node_modules/w/lib/f{i}.js", "content": f"require('./f{i + 1}.js');\n", "lang": "js",
+                  "dep": True} for i in range(5_100)]
+        files += [{"path": "node_modules/w/lib/f5100.js", "content": "require('../static/run.js');\n", "lang": "js",
+                   "dep": True},
+                  {"path": "node_modules/w/static/run.js", "content": WEB, "lang": "js", "dep": True}]
+        manifest = {"path": "node_modules/w/package.json",
+                    "content": json.dumps({"name": "w", "version": "1.0.0", "main": "lib/f0.js"})}
+        root = tempfile.mkdtemp(prefix="lz-deps-pad-")
+        self.addCleanup(shutil.rmtree, root, True)
+        self.assertEqual(core._deps_web_assets(core._DependencyTree(root, files, [manifest], ()), files), set())
+        exports = {f"./p{i}": f"./p{i}.js" for i in range(6_000)}
+        self.assertEqual(len(core._deps_npm_entries({"exports": exports})), 6_000)
+
     def test_entries(self):
         self.assertEqual(core._deps_npm_entries({"main": "a.js", "module": "b.mjs", "bin": {"c": "c.js", "d": 1},
                                                  "exports": {".": {"import": "./e.mjs", "require": ["./f.js", "./g.js"]},

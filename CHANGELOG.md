@@ -755,6 +755,25 @@ project is pre-1.0, so the 0.x API may still change.
 
 ### Fixed
 
+- **What a package's Python code imports is followed to the end (BR-5; rule set 2.49.0).** Which modules of a wheel
+  or an sdist get the import-time test (SC-IMPORT-RISK) is decided by following the imports of its top-level modules,
+  and which modules pip runs to install an sdist get the install-script test (SC-INSTALL-HOOK) by following
+  setup.py's. The walks stopped at 300 modules seen and at 200, so padding hid a module: a wheel whose
+  `x/__init__.py` imports 299 modules, one of which imports `x/evil.py` (the whole environment sent away), lost
+  evil.py's CRITICAL finding. Both walks now go to the end (what they hold is the archive's own files, and the scan's
+  deadline is checked as each module is read: past it the release is INCOMPLETE, as for every other step), and read
+  what they missed: each module of `import a, b` (the first alone was read), a statement after a `;` or a compound
+  statement's `:` (`try: import x`), a line a backslash continues, a parenthesized name list past 50 names or 2,000
+  characters or with a `)` in a comment, `from .import x` and `from x import(y)`; in setup.py's walk also the
+  packages above a module, the submodules a `from` names and, for an in-tree build backend, the `backend-path`
+  directories pip puts on `sys.path`; and in both a module named by a literal to `importlib.import_module()` (a
+  relative name against its package argument), `__import__()` or `runpy.run_module()`. A `--deps` project scan's
+  walk from an npm package's entry points, which decides which files in `static/`, `public/` or `_next/` are web
+  assets left out of the import-time test, stopped at 5,000 files (and read `exports` to 5,000 entry points); it goes
+  to the end too, in both packages. Measured on the benchmark's and the popular set's 830 PyPI releases, each scanned
+  as the guard scans it before and after: no verdict, finding or INCOMPLETE changes; 58 walks reach more modules
+  (20,244 modules in all to 40,953; 22 releases past 300, auth0-python 4,300); the scans take 7% longer in all (192.5
+  to 205.9 s), the most 3.6 s longer (google-cloud-aiplatform, 92 MB of Python: 6.3 to 9.9 s), the median not at all.
 - **An sdist's in-tree build backend is found on Python 3.10 too (BR-1).** On Python 3.10, which has no
   tomllib, `[build-system]` was read with a regex that missed the backend in six of seven forms TOML allows
   (a comment after the header, dotted keys, an inline table, quoted keys, an escape, a decoy section inside a

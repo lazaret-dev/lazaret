@@ -1,6 +1,6 @@
 {
  "format": 1,
- "rule_set": "2.48.0",
+ "rule_set": "2.49.0",
  "source": "lazaret.scanner.core, extracted by scripts/make_rust_tables.py \u2014 do not edit",
  "values": {
   "ALWAYS_PRUNE_DIRS": {
@@ -4965,9 +4965,6 @@
   "_DEPS_LOCAL_DEP_RE": {
    "flags": "m",
    "re": "(?:\\brequire\\s*\\(\\s*|\\bimport\\s*\\(\\s*|\\bfrom\\s+|^\\s*import\\s+|\\bexport\\s+[^'\"\\n;]*?\\bfrom\\s+)(['\"])(\\.{1,2}/[^'\"\\n]+)\\1"
-  },
-  "_DEPS_REACH_MAX": {
-   "value": 5000
   },
   "_DEPS_WEB_DIRS": {
    "set": [

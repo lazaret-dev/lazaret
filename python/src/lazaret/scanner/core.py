@@ -4551,7 +4551,6 @@ def _scan_manifest_entry(mf):
 #     package whose main points into static/ is still read.
 # Twin of the npm engine's js/src/deps.js.
 _DEPS_WEB_DIRS = frozenset({"_next", "static", "public"})
-_DEPS_REACH_MAX = 5000          # files an npm package's entry points are followed to, at most
 _DEPS_LOCAL_DEP_RE = re.compile(
     r"""(?:\brequire\s*\(\s*|\bimport\s*\(\s*|\bfrom\s+|^\s*import\s+|\bexport\s+[^'"\n;]*?\bfrom\s+)"""
     r"""(['"])(\.{1,2}/[^'"\n]+)\1""", re.M)
@@ -5156,7 +5155,7 @@ def _deps_npm_entries(data):
     b = data.get("bin")
     out.extend([b] if isinstance(b, str) else [v for v in b.values() if isinstance(v, str)] if isinstance(b, dict) else [])
     stack = [data.get("exports")]
-    while stack and len(out) < _DEPS_REACH_MAX:
+    while stack:
         e = stack.pop()
         if isinstance(e, str):
             if "*" not in e:
@@ -5172,7 +5171,10 @@ def _deps_npm_reach(tree, root):
     """The files of the npm package at `root` its entry points reach: what
     Node runs for the package itself and for each entry point, then the
     local files they require or import and the scripts they start with
-    node (spawned_scripts), transitively (at most _DEPS_REACH_MAX)."""
+    node (spawned_scripts), transitively. No cap: each file of the package
+    is read once (BR-5: the walk stopped at 5,000 files, and the exports
+    read at 5,000 entry points, so a file reached past them by padding
+    was left out as a web asset)."""
     manifest = tree.manifests.get(root + "/package.json")
     data = None
     if manifest is not None:
@@ -5180,7 +5182,7 @@ def _deps_npm_reach(tree, root):
     entries = _deps_npm_entries(data) if isinstance(data, dict) else []
     queue = [tree.resolve(root)] + [tree.resolve(t) for t in (_tree_join(root, e) for e in entries) if t is not None]
     seen = set()
-    while queue and len(seen) < _DEPS_REACH_MAX:
+    while queue:
         rel = queue.pop()
         if rel is None or rel in seen or not rel.startswith(root + "/"):
             continue
