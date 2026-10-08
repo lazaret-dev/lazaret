@@ -1165,6 +1165,20 @@ fn rs_test_only_lines(ctx: &FileCtx) -> Option<Vec<bool>> {
 /// suppression markers and the cap (crate::project), as core's `scan_file(…, dep=False)` makes them. `model`: the
 /// taint configuration's part of the model.
 pub fn scan_project(p: &Pack, text: &[u32], lang_name: Option<&str>, jsx: bool, opts: &Options, model: &crate::taint::Model) -> Vec<Value> {
+    scan_project_metrics(p, text, lang_name, jsx, opts, model, false).0
+}
+
+/// scan_project, and with `metrics` the file's line metrics too (Q-1 step 4: metrics.rs, from the scan's own
+/// reading of the file, so a project scan reads each file once).
+pub fn scan_project_metrics(
+    p: &Pack,
+    text: &[u32],
+    lang_name: Option<&str>,
+    jsx: bool,
+    opts: &Options,
+    model: &crate::taint::Model,
+    metrics: bool,
+) -> (Vec<Value>, Option<crate::metrics::FileMetrics>) {
     let lang = Lang::from(lang_name);
     let ctx = FileCtx::new(p, text, lang, jsx);
     let lines: Vec<&[u32]> = (0..ctx.len()).map(|i| ctx.line(i)).collect();
@@ -1172,7 +1186,8 @@ pub fn scan_project(p: &Pack, text: &[u32], lang_name: Option<&str>, jsx: bool, 
     let mut found = findings_of(&ctx, lang_name, opts, &snippets);
     crate::project::passes(&ctx, &mut found, model);
     let found = crate::project::unsuppressed(&ctx, found);
-    findings::cap(p, &snippets, found).iter().map(|f| snippets.issue(f)).collect()
+    let issues = findings::cap(p, &snippets, found).iter().map(|f| snippets.issue(f)).collect();
+    (issues, if metrics { Some(crate::metrics::of_ctx(&ctx, text)) } else { None })
 }
 
 /// core._scan_rules in project mode: the findings of the pattern rules and

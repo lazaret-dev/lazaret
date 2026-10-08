@@ -5471,10 +5471,14 @@ def scan_project(root, exclude=(), include_deps=False, taint_config=None,
                    and files[k + len(chunk)].get("dep", False) == chunk[0].get("dep", False)):
                 chunk.append(files[k + len(chunk)])
             try:
-                results = engine.scan_files([(f["path"], f["content"], f["lang"], f.get("dep", False)) for f in chunk])
+                # (each project file's line metrics from the same reading: compute_metrics, Q-1 step 4)
+                results, line_metrics = engine.scan_files_metrics(
+                    [(f["path"], f["content"], f["lang"], f.get("dep", False)) for f in chunk])
             except Exception:                   # a batch that failed: each file again, on its own
-                results = None
+                results = line_metrics = None
             for n, f in enumerate(chunk):
+                if line_metrics is not None and line_metrics[n] is not None:
+                    f["lineMetrics"] = line_metrics[n]
                 try:
                     found = (results[n] if results is not None
                              else scan_file(f["path"], f["content"], f["lang"], dep=f.get("dep", False)))
@@ -5564,37 +5568,38 @@ DUP_LANGS = frozenset({"py", "js", "sql"})
 
 
 def compute_metrics(all_files):
+    """files, lines of code, comment lines and duplication (the share of measured lines of code in a window of six
+    consecutive ones that occurs twice or more: DUP_LANGS) of a project's own files, its dependencies' left out.
+    Each file's part is the engine's (Q-1 step 4, metrics.rs: its lines as this module splits them, at "\n" alone,
+    each window keyed by its six stripped lines joined): a project scan's, from its reading of the file (a file's
+    `lineMetrics`), or engine.file_metrics'; the windows are compared here, across the files. A file the engine could not answer counts its non-blank lines as code (review B3), and its windows
+    are not compared."""
     files = [f for f in all_files if not f.get("dep")]  # deps excluded from quality metrics
+    answers = [f.get("lineMetrics") for f in files]     # (a project scan's, from its reading of each file)
+    todo = [k for k, got in enumerate(answers) if got is None]
+    for k, got in zip(todo, engine.file_metrics([(files[k].get("path"), files[k].get("content"), files[k].get("lang"))
+                                                  for k in todo])):
+        answers[k] = got
     ncloc = comments = measured = 0
-    win_map = {}
-    for f in files:
-        code = []
-        dup_lang = f.get("lang") is None or f["lang"] in DUP_LANGS
-        flines = _unicode13.pin(f["content"]).split("\n")
-        try:
-            cmask = comment_mask(flines, f["lang"], jsx_reading(f["path"]))
-        except Exception:       # its scan failed the same way (SC-TRUNCATED): count its lines
-            cmask = None        # as code rather than lose the whole report (review B3)
-        for i, l in enumerate(flines):
-            t = l.strip()
-            if not t:
-                continue
-            if cmask is not None and cmask[i]:
-                comments += 1
-                continue
-            ncloc += 1
-            if dup_lang:
-                measured += 1
-                code.append((t, i, f["path"]))
-        for i in range(len(code) - 5):
-            key = "".join(c[0] for c in code[i:i + 6])
-            win_map.setdefault(key, []).append(code[i:i + 6])
+    starts = {}                                         # a window's key -> where each occurrence starts
+    for f, got in zip(files, answers):
+        if got is None:                                 # every non-blank line is code
+            lines = [l for l in _unicode13.pin(str(f.get("content") or "")).split("\n") if l.strip()]
+            ncloc += len(lines)
+            if f.get("lang") is None or f["lang"] in DUP_LANGS:
+                measured += len(lines)
+            continue
+        f_ncloc, f_comments, f_measured, windows = got
+        ncloc += f_ncloc
+        comments += f_comments
+        for k in range(0, len(windows), 16):
+            starts.setdefault(windows[k:k + 16], []).append(measured + k // 16)
+        measured += f_measured
     dup = set()
-    for occ in win_map.values():
-        if len(occ) > 1:
-            for win in occ:
-                for _, i, p in win:
-                    dup.add((p, i))
+    for at in starts.values():
+        if len(at) > 1:
+            for a in at:
+                dup.update(range(a, a + 6))
     dup_pct = round(100 * len(dup) / measured, 1) if measured else 0.0
     return {"files": len(files), "depFiles": len(all_files) - len(files),
             "ncloc": ncloc, "comments": comments, "dupPct": dup_pct}

@@ -81,8 +81,9 @@ python/
 │   │   ├── flow.py         interprocedural / cross-file taint (the engine's
 │   │   │                   passes for Python and JavaScript: their findings)
 │   │   ├── engine.py       the native engine's calls: the supply-chain tests,
-│   │   │                   the scan of a file and the cross-file follower, in
-│   │   │                   batches on threads; an unanswered file SC-TRUNCATED
+│   │   │                   the scan of a file (and a project file's line
+│   │   │                   metrics) and the cross-file follower, in batches on
+│   │   │                   threads; an unanswered file SC-TRUNCATED
 │   │   ├── _native.py      the native engine's ctypes loader
 │   │   ├── nativenet.py    the network layer in the native library (lazaret-net):
 │   │   │                   the default transport, urllib behind it (NET-1)

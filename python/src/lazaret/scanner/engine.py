@@ -404,21 +404,64 @@ def scan_files(items):
     function length and complexity, the suppression markers and the cap). A
     file the engine could not answer is SC-TRUNCATED: EXHAUSTED when it
     spent its work budget, "its scan failed" on an internal error."""
+    return _scan(items, False)[0]
+
+
+def scan_files_metrics(items):
+    """scan_files, and each project file's line metrics from the same reading of it (Q-1 step 4): ([issues],
+    [metrics]), the metrics as file_metrics gives them, None for a dependency's file or one the engine could not
+    answer."""
+    return _scan(items, True)
+
+
+def _scan(items, metrics):
     if not items:
-        return []
+        return [], []
     calls = scan_calls(items)
+    if metrics:
+        calls = [None if call is None else (call[0], dict(call[1], metrics=True)) if not item[3] else call
+                 for call, item in zip(calls, items)]
     todo = [k for k, call in enumerate(calls) if call is not None]
     answers = call_answers([(calls[k][0], calls[k][1], items[k][1]) for k in todo])
-    out = [[] for _ in items]
+    out, line_metrics = [[] for _ in items], [None] * len(items)
     for k, answer in zip(todo, answers):
         path, content, lang, _dep = items[k]
+        if isinstance(answer, dict):                    # {"issues", "metrics"}: a project file's, asked for both
+            m = answer["metrics"]
+            line_metrics[k] = (m["ncloc"], m["comments"], m["measured"], m["windows"])
+            answer = answer["issues"]
         out[k] = scan_issues(path, content, lang, calls[k][0], answer)
-    return out
+    return out, line_metrics
 
 
 def scan_file(path, content, lang, dep=False):
     """The scan of one file (see scan_files)."""
     return scan_files([(path, content, lang, dep)])[0]
+
+
+#: the languages the engine's lexer reads (core._lex_comment_spans gives it no other)
+_LEXED = ("py", "js", "sql", "go", "rs")
+
+
+def file_metrics(items):
+    """[(path, content, lang)] -> each project file's line metrics, from the engine (Q-1 step 4, metrics.rs): (lines
+    of code, comment lines, lines whose duplication is measured, the duplication windows' keys as one string of 16
+    hexadecimal digits each), or None for a file the engine could not answer (core.compute_metrics then counts its
+    lines as code). A batch at a time on THREADS threads."""
+    from lazaret.scanner import core
+    calls, todo = [], []
+    for k, (path, content, lang) in enumerate(items):
+        if isinstance(content, str):
+            args = {"jsx": core.jsx_reading(path)}
+            if lang in _LEXED:
+                args["lang"] = lang
+            calls.append(("file_metrics", args, content))
+            todo.append(k)
+    out = [None] * len(items)
+    for k, answer in zip(todo, call_answers(calls)):
+        if not unanswered(answer):
+            out[k] = (answer["ncloc"], answer["comments"], answer["measured"], answer["windows"])
+    return out
 
 
 def cross_file_issues(files, skip_paths=(), who="Dependency code", one_package=False, site_groups=None):

@@ -1,50 +1,54 @@
 // Metrics & ratings — twin of lazaret.scanner.core compute_metrics /
 // worst_sev_rating / maintainability_rating.
 
-import { lexLines, jsxReading } from "../lib/lexer.js";
+import { jsxReading } from "../lib/lexer.js";
 import { pyStrip, pyRound1 } from "../lib/pycompat.js";
 import { normalizeNewlines } from "../lib/fs.js";
 import { pinUnicode } from "../lib/unicode13.js";
+import { fileMetrics } from "../lib/native.js";
 
 // The languages whose duplication is measured (twin of core.DUP_LANGS): a
 // project's Go and Rust files count in the files, lines of code and
 // comments, not yet in the duplication.
 export const DUP_LANGS = new Set(["py", "js", "sql"]);
 
+/**
+ * Files, lines of code, comment lines and duplication of a project's own files (its dependencies' left out), as
+ * core.compute_metrics: each file's part is the engine's (Q-1 step 4, metrics.rs), and the windows of six lines of
+ * code that occur twice or more are found here, across the files. A file the engine could not answer counts its
+ * non-blank lines as code (review B3), and its windows are not compared.
+ */
 export function computeMetrics(files) {
   let ncloc = 0, comments = 0, measured = 0;
   const nonDep = files.filter((f) => !f.dep);   // deps excluded from quality metrics
   const depFiles = files.length - nonDep.length;
-  const winMap = new Map();
+  const starts = new Map();                      // a window's key -> where each occurrence starts
   for (const f of nonDep) {
     const key = f.path ?? f.name;                // CLI files carry `path`, library callers `name`
-    const lines = pinUnicode(normalizeNewlines(String(f.content ?? ""))).split("\n");   // (no U+2028 split: core.compute_metrics)
-    let lex = null;
-    try { lex = lexLines(lines, f.lang, null, { jsx: jsxReading(key) }); }
-    catch { /* its scan failed the same way (SC-TRUNCATED): count its lines as code rather than lose the report (review B3) */ }
-    const code = [];
-    const dupLang = f.lang == null || DUP_LANGS.has(f.lang);
-    for (let i = 0; i < lines.length; i++) {
-      const t = pyStrip(lines[i]);
-      if (!t) continue;
-      if (lex && lex.comment[i]) { comments++; continue; }
-      ncloc++;
-      if (dupLang) { measured++; code.push([t, i]); }
+    const text = normalizeNewlines(String(f.content ?? ""));   // (no U+2028 split: core.compute_metrics)
+    let got = null;
+    try { got = fileMetrics(text, f.lang, { jsx: jsxReading(key) }); } catch { /* every non-blank line is code */ }
+    if (!got) {
+      const lines = pinUnicode(text).split("\n").filter((l) => pyStrip(l));
+      ncloc += lines.length;
+      if (f.lang == null || DUP_LANGS.has(f.lang)) measured += lines.length;
+      continue;
     }
-    for (let i = 0; i + 6 <= code.length; i++) {
-      let k = code[i][0];
-      for (let j = i + 1; j < i + 6; j++) k += code[j][0];
-      let occ = winMap.get(k);
-      if (!occ) { occ = []; winMap.set(k, occ); }
-      occ.push([key, i, code]);
+    ncloc += got.ncloc;
+    comments += got.comments;
+    for (let k = 0; k < got.windows.length; k += 16) {
+      const w = got.windows.slice(k, k + 16);
+      const at = starts.get(w);
+      if (at) at.push(measured + k / 16); else starts.set(w, [measured + k / 16]);
     }
+    measured += got.measured;
   }
-  const dupSet = new Set();
-  for (const occ of winMap.values()) {
-    if (occ.length < 2) continue;
-    for (const [key, i, code] of occ) for (let j = i; j < i + 6; j++) dupSet.add(`${key}\u0000${code[j][1]}`);
+  const dup = new Set();
+  for (const at of starts.values()) {
+    if (at.length < 2) continue;
+    for (const a of at) for (let j = a; j < a + 6; j++) dup.add(j);
   }
-  const dupPct = measured ? pyRound1(100 * dupSet.size / measured) : 0;
+  const dupPct = measured ? pyRound1(100 * dup.size / measured) : 0;
   return { files: nonDep.length, depFiles, ncloc, comments, dupPct };
 }
 

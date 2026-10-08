@@ -587,6 +587,16 @@ project is pre-1.0, so the 0.x API may still change.
   `pyflow/frameworks.rs` decides for both taint passes). A scan of this repository's Python source (69 files) took
   2.69 seconds and takes 1.07; twelve packages of Python's standard library (171 files), 2.79 and 1.01; the npm
   package's source (31 files), 0.53 and 0.32 (best of three, a quiet machine).
+- **A project's metrics are the engine's (Q-1, step 4).** The lines of code, comment lines and duplication of a
+  project scan were worked out after it, each file lexed again in a second engine call and its lines walked in Python
+  (13 to 18% of a scan); the npm package lexed them with its own lexer. The engine gives each file's part
+  (`metrics.rs`: its comment and code lines, and each window of six lines of code keyed as before): to the Python
+  package from the scan's own reading of the file, so a project scan reads each file once, and to the npm package on
+  its own, in place of its lexer. Only the windows are compared across the files outside it. The metrics are the same,
+  held to the code this replaces on files built from every kind of comment, string, line ending and repeat, on this
+  repository and through project scans, in both packages. A scan of this repository's Python source takes 12% less
+  time (0.77 to 0.67 seconds), of Python's asyncio and email packages 15% less, of urllib3 23% less (best of three, in
+  one process).
 - **The native transport speaks TLS 1.2 to a server that speaks nothing newer (tiny_https's second drop of Oct
   7).** `registry.npmjs.org` answers only TLS 1.2 from some networks, and its requests went through Python's
   transport there. tiny_https now offers TLS 1.2 next to 1.3 under the rules Lazaret asked for: ECDHE with AEAD

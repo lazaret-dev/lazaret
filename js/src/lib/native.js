@@ -410,6 +410,19 @@ export function scanProjectFile(path, content, lang, { jsx = true, redact = true
   return issuesOf(path, call("scan_file", { lang, dep: false, jsx, redact, neumaier: false }, content));
 }
 
+const LEXED = new Set(["py", "js", "sql", "go", "rs"]);
+
+/**
+ * A project file's line metrics (core.compute_metrics' part for one file; Q-1 step 4, the engine's metrics.rs):
+ * {ncloc, comments, measured, windows}, `windows` the duplication windows' keys as one string of 16 hexadecimal
+ * digits each. `lang` as the scan read it; `jsx` false for a TypeScript file.
+ */
+export function fileMetrics(content, lang, { jsx = true } = {}) {
+  const args = { jsx };
+  if (LEXED.has(lang)) args.lang = lang;
+  return call("file_metrics", args, content);
+}
+
 /** Project mode's intra-file taint alone (core.taint_scan): its T-* findings, before the markers and the cap. */
 export function taintFindings(path, content, lang, { jsx = true, redact = true } = {}) {
   return issuesOf(path, call("taint_scan", { lang, jsx, redact, neumaier: false }, content));

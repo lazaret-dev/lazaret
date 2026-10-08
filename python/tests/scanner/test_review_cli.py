@@ -25,7 +25,7 @@ import unittest
 from unittest import mock
 
 from tests import _support
-from lazaret.scanner import core, engine
+from lazaret.scanner import _native, core, engine
 
 PY = sys.executable
 
@@ -199,14 +199,14 @@ class PerFileErrors(unittest.TestCase):
         self.assertIn("S-EVAL-PY", {i["rule"] for i in res["issues"] if i["file"] == "a.py"})
         self.assertFalse(res["pass"])                   # a file not scanned can't pass
 
-    def test_metrics_survive_a_file_the_lexer_cannot_read(self):
-        real = core.comment_mask
+    def test_metrics_survive_a_file_the_engine_cannot_read(self):
+        # (each file's metrics are the engine's since Q-1 step 4: a file it gives no answer for counts as code)
+        real = engine.call_answers
 
-        def comment_mask(lines, lang, jsx=True):
-            if any("z = 3" in l for l in lines):
-                raise RecursionError("maximum recursion depth exceeded")
-            return real(lines, lang, jsx)
-        with mock.patch.object(core, "comment_mask", comment_mask):
+        def call_answers(calls, texts=None):
+            return [_native.NativeError("boom") if "z = 3" in text else answer
+                    for (_name, _args, text), answer in zip(calls, real(calls, texts))]
+        with mock.patch.object(engine, "call_answers", call_answers):
             metrics = core.compute_metrics([{"path": "a.py", "content": "# note\nx = 1\n", "lang": "py"},
                                             {"path": "boom.py", "content": "# note\ny = 2\nz = 3\n", "lang": "py"}])
         self.assertEqual((metrics["ncloc"], metrics["comments"]), (4, 1))     # boom.py: every line is code

@@ -204,6 +204,10 @@ rust/
                              statements without WHERE, the SQL built from strings into execute(),
                              the function metrics (functions), then the suppression markers and
                              the cap
+    src/metrics.rs           a project file's line metrics (core.compute_metrics' part for one
+                             file, 0.1.9, Q-1 step 4): comment lines, lines of code, the windows
+                             of six lines of code keyed for the duplication; from the scan's own
+                             reading (scan_file with "metrics") or on their own (file_metrics)
     src/taint.rs             project mode's intra-file taint (core.taint_scan, 0.1.9): sources,
                              sinks, sanitizers, guards, scopes, Flask views and route parameters;
                              a taint configuration's sources, sinks and sanitizers for one call

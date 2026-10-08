@@ -87,6 +87,8 @@ pub const CALLS: &[&str] = &[
     "texts.put", "texts.drop", "texts.info",
     // 0.1.9 (Q-1): project mode's passes one at a time (scan_file with dep false runs them all)
     "taint_scan", "functions",
+    // 0.1.9 (Q-1 step 4): a project file's line metrics: comment lines, lines of code, the duplication windows
+    "file_metrics",
     // 0.1.9 (V-1 stage 2): live secret verification's table and logic (secrets.rs); each package makes the call
     "secrets.providers", "secrets.identify", "secrets.request", "secrets.judge", "secrets.find",
 ];
@@ -407,6 +409,22 @@ fn arg_strs(args: &Value, name: &str) -> Vec<PyStr> {
     args.get(name).and_then(|v| v.as_arr()).unwrap_or(&[]).iter().filter_map(|v| v.as_str().map(|s| s.to_vec())).collect()
 }
 
+/// A file's line metrics as the packages read them: {"ncloc", "comments", "measured", "windows"}, the windows'
+/// keys as one string of 16 hexadecimal digits each.
+fn metrics_value(m: &crate::metrics::FileMetrics) -> Value {
+    use std::fmt::Write;
+    let mut windows = String::with_capacity(16 * m.windows.len());
+    for h in &m.windows {
+        let _ = write!(windows, "{h:016x}");
+    }
+    Value::obj(vec![
+        ("ncloc", Value::Int(m.ncloc as i64)),
+        ("comments", Value::Int(m.comments as i64)),
+        ("measured", Value::Int(m.measured as i64)),
+        ("windows", Value::str(&windows)),
+    ])
+}
+
 fn spans_value(sp: &[(usize, usize)]) -> Value {
     Value::Arr(sp.iter().map(|&(a, b)| Value::Arr(vec![Value::Int(a as i64), Value::Int(b as i64)])).collect())
 }
@@ -514,6 +532,11 @@ fn dispatch(name: &str, args: &Value, text: &[u32]) -> Result<Value, CallError> 
             if !opts.dep {
                 // project mode (Q-1): the rules, the passes after them, the suppression markers and the cap
                 let model = crate::taint::Model::from_args(p, args).map_err(|m| CallError::BadArgs(format!("scan_file: {m}")))?;
+                if flag("metrics", false) {
+                    // and the file's line metrics (Q-1 step 4): {"issues": […], "metrics": file_metrics' answer}
+                    let (issues, m) = crate::scanfile::scan_project_metrics(p, text, lang, flag("jsx", true), &opts, &model, true);
+                    return Ok(Value::obj(vec![("issues", Value::Arr(issues)), ("metrics", metrics_value(&m.expect("asked for")))]));
+                }
                 return Ok(Value::Arr(crate::scanfile::scan_project(p, text, lang, flag("jsx", true), &opts, &model)));
             }
             Value::Arr(crate::scanfile::scan_file(p, text, lang, flag("jsx", true), &opts))
@@ -617,6 +640,11 @@ fn dispatch(name: &str, args: &Value, text: &[u32]) -> Result<Value, CallError> 
             let body: Vec<u8> = text.iter().map(|&c| c as u8).collect();
             let (outcome, why, who) = crate::secrets::judge(rules, status, &body, truncated, &secrets);
             Value::Arr(vec![Value::str(outcome.as_str()), Value::Str(why), who.map_or(Value::Null, Value::Str)])
+        }
+        "file_metrics" => {
+            // core.compute_metrics' part for one file (metrics.rs)
+            let jsx = !matches!(args.get("jsx"), Some(Value::Bool(false)));
+            metrics_value(&crate::metrics::file_metrics(p, text, lang, jsx))
         }
         "functions" => {
             // core.extract_functions: [[name, line, length, complexity], …] of a Python or JavaScript file

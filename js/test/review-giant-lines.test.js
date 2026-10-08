@@ -61,7 +61,7 @@ test("a file whose scan throws is SC-TRUNCATED, fails the gate, and the report i
   const wellFormed = String.prototype.isWellFormed;
   String.prototype.isWellFormed = function () {       // this one file's scan and lexing overflow, as in the
     const stack = this.includes("B3-OVERFLOW") ? new Error().stack : "";   // review (its text, sent to the engine)
-    if (stack.includes("scanProjectFile") || stack.includes("commentSpans"))
+    if (stack.includes("scanProjectFile") || stack.includes("commentSpans") || stack.includes("fileMetrics"))
       throw new RangeError("Maximum call stack size exceeded");
     return wellFormed.call(this);
   };

@@ -26,6 +26,7 @@ pub mod lex;
 pub mod lexer;
 pub mod linear;
 pub mod linre;
+pub mod metrics;
 pub mod model;
 pub mod normalize;
 pub mod pack;

@@ -2,8 +2,9 @@
 project mode too (Q-1, 0.1.9: both packages ask the engine for the whole of
 a project file's scan): the WebAssembly build against the native library on
 test_snapshot_project's sets (scan_file in project mode, with and without a
-taint configuration, and the function lists) and on the intra-file taint
-alone (taint_scan, the npm package's taintScan). Skipped where node, the
+taint configuration, and the function lists), on the intra-file taint
+alone (taint_scan, the npm package's taintScan) and on the line metrics
+(file_metrics, and scan_file's with "metrics": Q-1 step 4). Skipped where node, the
 WebAssembly build or the native library is missing.
 """
 import unittest
@@ -36,6 +37,16 @@ class WasmProjectParityTests(unittest.TestCase):
     def test_with_a_taint_configuration_and_the_function_lists(self):
         sets = snapshot_sets()
         check(self, sets["scan_project_configured"]() + sets["functions"]())
+
+    def test_the_line_metrics(self):
+        # (Q-1 step 4: a file's metrics alone, and with its project scan; texts with CRs and line separators, which
+        # the metrics read where the rules do not)
+        cases = [(p, t) for p, t in project_corpus.corpus()][:800]
+        cases += [("x.js", "a();\u2028b();\r\n// c\n" * 8), ("x.py", "x = 1\r# c\n" * 8)]
+        calls = [("file_metrics", {"lang": lang_of(p), "jsx": not p.endswith(".ts")}, t) for p, t in cases]
+        calls += [("scan_file", {"lang": lang_of(p), "jsx": True, "dep": False, "redact": True, "metrics": True}, t)
+                  for p, t in cases[::4]]
+        check(self, calls)
 
     def test_the_taint_pass_alone(self):
         calls = [("taint_scan", {"lang": lang_of(p), "jsx": True, "redact": True}, t)
