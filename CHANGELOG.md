@@ -812,6 +812,18 @@ project is pre-1.0, so the 0.x API may still change.
 
 ### Fixed
 
+- **What a JavaScript script puts into a member's container, the member holds (D-3b; rule set 2.59.0).** D-3 left
+  `o.list.push(x)`, `o.m.set(k, x)`, `this.items.push(x)` and `Object.assign(this.opts, …)` out: put into the object
+  that holds the member, as an assignment to a name's member is, what they were given reached every member read of
+  that object, and joined unrelated flows in vite's bundle. A member is now a container of its own: `this.items` (a
+  member of `this` is a binding already) and `o.list`, a binding beside `o`'s that `o.list` reads and the object's
+  other members do not. Into a member of `this`, what a method holds of its own parameters is not put: a recorder's
+  `this._events.push(new LoaderEvent(type, detail))` then held everything every caller recorded, and in
+  monaco-editor's loader that reached its check that eval runs (SC-USE-RISK CRITICAL). Not followed: the object sent
+  whole after a member's container is filled (`JSON.stringify(o)`), as before. Measured: the benchmark (945 releases),
+  the popular set (1,205, vite 8.3.2 and monaco-editor 0.57.0 among them), Part F's sets and the 43 packages that
+  generate, patch or install code are unchanged, and so are the tree's answers on the 20,422 JavaScript files of the
+  installed npm packages.
 - **A program named in another file, given the data as its arguments, runs none of it (D-17; rule set 2.58.0).** lerna
   10.0.1 was SUSPICIOUS: `gitCheckout(dirtyManifests, …)` calls a function of another file of the package that runs
   `exec("git", ["checkout", "--"].concat(files), execOpts)` (its wrapper of execa), and the cross-file follower, which
@@ -872,9 +884,8 @@ project is pre-1.0, so the 0.x API may still change.
   A container's `set`, `add`, `append`, `splice` (its items) and `fill` now put what they are given into it, and
   `Object.assign`, `Object.defineProperty(ies)`, `Reflect.set` and `Reflect.defineProperty` into their first
   argument, when it is a name, for what is sent, what is received and run and what is decoded and run alike;
-  Python's model had them. A member's container (`o.list.push(x)`, `this.items.push(x)`) is not followed yet: tried,
-  it joined unrelated flows in vite's bundle and monaco-editor's loader, two of the popular set's releases
-  SUSPICIOUS. Measured on the benchmark (945 releases) and the popular set (1,205): no verdict moved; one malicious
+  Python's model had them. A member's container (`o.list.push(x)`, `this.items.push(x)`) came with D-3b (above).
+  Measured on the benchmark (945 releases) and the popular set (1,205): no verdict moved; one malicious
   release's finding now names the upload its code builds (react-milton 19.1.1: the host name and files appended to a
   `FormData`, CRITICAL as before).
 - **What a package's Python code imports is followed to the end (BR-5; rule set 2.49.0).** Which modules of a wheel

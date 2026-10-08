@@ -1090,6 +1090,9 @@ pub struct Program {
     pub sc_wide: Option<HashSet<ClassId>>,
     /// (the supply-chain model) a class's `this.x` binding -> the class
     pub sc_this_class: HashMap<BindId, ClassId>,
+    /// (the supply-chain model) a module -> the names of the members of a name it puts anything into
+    /// (`o.list.push(…)`, `Object.assign(o.opts, …)`): made when first asked (supply::collected_members, D-3b)
+    pub sc_collected: HashMap<ModId, HashSet<PyStr>>,
 }
 
 impl Program {
@@ -1115,6 +1118,7 @@ impl Program {
             sc_props: HashMap::new(),
             sc_wide: None,
             sc_this_class: HashMap::new(),
+            sc_collected: HashMap::new(),
         }
     }
 

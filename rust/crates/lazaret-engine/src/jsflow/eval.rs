@@ -1063,13 +1063,20 @@ impl<'p> Eval<'p> {
             key = self.expr(Some(prop), scope)?;
         }
         if self.p.cfg.supply.is_some() {
-            if let Some(v) = self.sc_member(node, obj, &key, scope) {
-                return Ok(v);
-            }
-            if self.a().prop_name(node).as_deref().is_some_and(|n| eq(n, "length")) {
-                return Ok(V::empty());
-            }
-            return Ok(if obj.kind != 0 { obj.plain() } else { obj.clone() });
+            let v = if let Some(v) = self.sc_member(node, obj, &key, scope) {
+                v
+            } else if self.a().prop_name(node).as_deref().is_some_and(|n| eq(n, "length")) {
+                V::empty()
+            } else if obj.kind != 0 {
+                obj.plain()
+            } else {
+                obj.clone()
+            };
+            // (and what was put into the member as a container of its own: `o.list` after `o.list.push(x)`, D-3b)
+            return Ok(match self.sc_member_held(node, scope) {
+                Some(held) => v.union(&held),
+                None => v,
+            });
         }
         let name = self.a().prop_name(node);
         let line = if self.a().computed(node) { self.a().line(node) } else { self.a().line(self.a().at(node, B)) };

