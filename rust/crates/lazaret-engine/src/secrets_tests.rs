@@ -29,9 +29,12 @@ fn pairs(h: &[(&str, &str)]) -> Vec<(String, String)> {
     h.iter().map(|(n, v)| (n.to_string(), v.to_string())).collect()
 }
 
-const GITHUB: &str = "gh\x70_a1B2a1B2a1B2a1B2a1B2a1B2a1B2a1B2a1B2";
-const AWS_ID: &str = "AKI\x41ABCDEFGHIJKLMNOP";
+// made-up credentials, each written in pieces so that no line of the source is one (GitHub's push protection reads
+// the formats; the Python and npm tests build theirs the same way)
+const GITHUB: &str = concat!("ghp_", "a1B2a1B2a1B2a1B2a1B2", "a1B2a1B2a1B2a1B2");
+const AWS_ID: &str = concat!("AKIA", "ABCDEFGHIJKLMNOP");
 const AWS_SECRET: &str = "wJalrXUtnFEMI/K7MDEN\x47+bPxRfiCYEXAMPLEKEY";
+const ANTHROPIC: &str = concat!("sk-ant-", "api03-", "Ab1_Ab1_Ab1_Ab1_Ab1_", "Ab1_Ab1_Ab1_Ab1_Ab1_");
 
 // ------------------------------------------------------------------------------------------------ the table
 
@@ -110,9 +113,9 @@ fn ids(text: &str) -> Vec<String> {
 
 #[test]
 fn each_sample_names_its_provider_alone() {
-    for (id, sample) in [("github", GITHUB), ("slack", "xox\x62-1234567890-abcdefghij"), ("stripe", "sk_liv\x65_a1a1a1a1a1a1a1a1a1a1a1a1"),
-                         ("npm", "np\x6d_A1b2A1b2A1b2A1b2A1b2A1b2A1b2A1b2A1b2"), ("openai", "sk-proj-a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"),
-                         ("anthropic", "sk-an\x74-api03-Ab1_Ab1_Ab1_Ab1_Ab1_Ab1_Ab1_Ab1_Ab1_Ab1_")] {
+    for (id, sample) in [("github", GITHUB), ("slack", "xox\x62-1234567890-abcdefghij"), ("stripe", concat!("sk_live_", "a1a1a1a1a1a1", "a1a1a1a1a1a1")),
+                         ("npm", concat!("npm_", "A1b2A1b2A1b2A1b2A1b2", "A1b2A1b2A1b2A1b2")), ("openai", concat!("sk-proj-", "a1a1a1a1a1a1a1a1a1a1", "a1a1a1a1a1a1a1a1a1a1")),
+                         ("anthropic", ANTHROPIC)] {
         assert_eq!(ids(sample), [id], "{sample}");
     }
     assert!(ids(AWS_ID).is_empty() && ids(AWS_SECRET).is_empty(), "a pair is not named by a part");
@@ -163,7 +166,7 @@ fn each_request_is_stage_ones() {
     assert_eq!(headers, pairs(&[("Accept", "application/vnd.github+json"), ("Authorization", &format!("Bearer {GITHUB}")),
                                 ("User-Agent", "lazaret-secret-verify"), ("X-GitHub-Api-Version", "2022-11-28")]));
     assert_eq!(r.secret_headers, ["Authorization"]);
-    let r = ask("anthropic", &[("secret", "sk-an\x74-api03-Ab1_Ab1_Ab1_Ab1_Ab1_Ab1_Ab1_Ab1_Ab1_Ab1_")]).unwrap();
+    let r = ask("anthropic", &[("secret", ANTHROPIC)]).unwrap();
     assert_eq!(r.secret_headers, ["x-api-key"]);
     let r = ask("aws", &[("id", AWS_ID), ("secret", AWS_SECRET)]).unwrap();
     assert_eq!((r.method.as_str(), r.host.as_str(), r.path.as_str()), ("POST", "sts.amazonaws.com", "/"));
