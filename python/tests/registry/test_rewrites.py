@@ -69,6 +69,22 @@ class RewriteTests(unittest.TestCase):
                 self.assertEqual((file, sev), (main, "CRITICAL"))
                 self.assertIn(REASON, msg)
 
+    def test_a_climb_to_a_scoped_package_beside_its_own(self):
+        # D-9b: out of the script's own folder to a scoped sibling package's; an unscoped name after the climb is as
+        # likely one of the package's own folders, so it is not one
+        head = "const fs = require('fs');\nconst path = require('path');\n"
+        write = "fs.writeFileSync(path.join(%s, 'Socket', 'newsletter.js'), 'exports.x = 1;');\n"
+        for where in ("__dirname, '..', '..', '@whiskeysockets', 'baileys', 'lib'",
+                      "path.dirname(__filename), '../../@whiskeysockets/baileys/lib'"):
+            with self.subTest(where):
+                res = scan_npm({"package.json": manifest(main="index.js"), "index.js": head + write % where})
+                ((file, sev, msg),) = found(res, "SC-IMPORT-RISK")
+                self.assertEqual((file, sev), ("index.js", "CRITICAL"))
+                self.assertIn(REASON, msg)
+        res = scan_npm({"package.json": manifest(main="index.js"),
+                        "index.js": head + write % "__dirname, '..', 'baileys', 'lib'"})
+        self.assertFalse(any("rewrites another package" in m for _f, _s, m in found(res, "SC-IMPORT-RISK")))
+
     def test_its_own_package_or_scope(self):
         # a release that writes into its own folder, or a sibling of its scope, through node_modules: its own code
         for name in ("@whiskeysockets/baileys", "@whiskeysockets/helper"):

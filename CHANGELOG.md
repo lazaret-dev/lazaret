@@ -812,6 +812,12 @@ project is pre-1.0, so the 0.x API may still change.
 
 ### Fixed
 
+- **A climb out of the script's own folder to a scoped package beside its own is that package's folder (D-9b; rule
+  set 2.61.0).** D-9 read another package's folder from `require.resolve` and from `node_modules` and a package's
+  name in a joined path; `path.join(__dirname, '..', '..', '@scope', 'name', …)` (from `__dirname`,
+  `path.dirname(__filename)` or `import.meta.dirname`) is now one too, so a code file written there is "rewrites
+  another package's code". An unscoped name after the climb is as likely one of the package's own folders (`lib`,
+  `src`), and is not read as another package's.
 - **A method reads `this` as the instance it is called on, in a class made in several places (B-3; rule set
   2.60.0).** B-1 keeps the instances of a class made in several places apart (vite's MagicString), so what a call
   on one instance gives a method is not put into the class's `this.x`, and what one method of an instance was given

@@ -2297,6 +2297,19 @@ impl<'p> Eval<'p> {
                     }
                 }
             }
+            // (D-9b) a climb out of the script's own folder to a scoped package beside its own:
+            // `path.join(__dirname, '..', '..', '@scope', 'name', …)`. An unscoped name after the climb is as likely
+            // one of the package's own folders (`lib`, `src`), so only a scope says it is another package
+            if pkg.is_none() && self.sc_script_dir(args.first().copied(), scope) {
+                let climbed = parts.iter().skip(1).take_while(|p| p.as_deref().is_some_and(|p| eq(p, ".."))).count();
+                if climbed > 0 {
+                    if let (Some(Some(sc)), Some(Some(name))) = (parts.get(1 + climbed), parts.get(2 + climbed)) {
+                        if sc.first() == Some(&0x40) {
+                            pkg = crate::jsloads::npm_package(&pystr::join(&u("/"), &[sc.as_slice(), name.as_slice()]));
+                        }
+                    }
+                }
+            }
         }
         match pkg {
             Some(p) => {
@@ -2304,6 +2317,29 @@ impl<'p> Eval<'p> {
                 self.sc_source(K_PKG, p, at, line, 0)
             }
             None => V::empty(),
+        }
+    }
+
+    /// Is `node` the script's own folder: Node's `__dirname` (no name of the script's), `import.meta.dirname`, or
+    /// `path.dirname(__filename)` (D-9b)?
+    fn sc_script_dir(&self, node: Option<NodeId>, scope: ScopeId) -> bool {
+        let Some(node) = node else { return false };
+        let a = self.a();
+        let node = a.unwrap(node);
+        let platform = |n: NodeId, name: &str| a.is_ident_named(n, name) && self.bind(n, scope).is_none();
+        match a.kind(node) {
+            Kind::Identifier => platform(node, "__dirname"),
+            Kind::MemberExpression => {
+                a.kind(a.at(node, jt::A)) == Kind::MetaProperty && a.prop_name(node).is_some_and(|p| eq(&p, "dirname"))
+            }
+            Kind::CallExpression => {
+                let callee = a.unwrap(a.at(node, jt::A));
+                let dirname = a.kind(callee) == Kind::MemberExpression
+                    && a.prop_name(callee).is_some_and(|p| eq(&p, "dirname"))
+                    && a.is_ident_named(a.at(callee, jt::A), "path");
+                dirname && a.list(node, jt::B).first().is_some_and(|&f| platform(a.unwrap(f), "__filename"))
+            }
+            _ => false,
         }
     }
 
@@ -4233,6 +4269,36 @@ mod tests {
         // a text read sliced is not a binary's
         let src = "const fs = require('fs');\nconst { spawn } = require('child_process');\nconst s = fs.readFileSync('a.txt', 'utf8').slice(10);\nfs.writeFileSync('/tmp/a', s);\nspawn('/tmp/a');\n";
         assert_eq!(dropped(src), None);
+    }
+
+    #[test]
+    fn a_climb_to_a_scoped_package_beside_its_own() {
+        // D-9b: out of the script's own folder to a scoped package's
+        let rewrote = |src: &str| -> Vec<(usize, String)> {
+            let text: Vec<u32> = src.chars().map(|c| c as u32).collect();
+            facts_here(&text).expect("read").rewrote.iter().map(|(l, p)| (*l, pystr::to_string(p))).collect()
+        };
+        for dir in ["__dirname", "path.dirname(__filename)"] {
+            let src = format!(
+                "const fs = require('fs'), path = require('path');\n\
+                 fs.writeFileSync(path.join({}, '..', '..', '@whiskeysockets', 'baileys', 'lib', 'index.js'), 'x');\n",
+                dir
+            );
+            assert_eq!(rewrote(&src), vec![(2, "@whiskeysockets/baileys".to_string())], "{}", dir);
+        }
+        let src = "import fs from 'fs';\nimport path from 'path';\n\
+                   fs.writeFileSync(path.join(import.meta.dirname, '../../@a/b/x.mjs'), 'x');\n";
+        assert_eq!(rewrote(src), vec![(3, "@a/b".to_string())]);
+        // not: an unscoped name after the climb (as likely one of the package's own folders), no climb, a name of the
+        // script's own
+        for src in [
+            "const fs = require('fs'), path = require('path');\nfs.writeFileSync(path.join(__dirname, '..', 'lib', 'x.js'), 'x');\n",
+            "const fs = require('fs'), path = require('path');\nfs.writeFileSync(path.join(__dirname, '@a', 'b', 'x.js'), 'x');\n",
+            "const fs = require('fs'), path = require('path');\n\
+             function f(__dirname) { fs.writeFileSync(path.join(__dirname, '..', '@a', 'b', 'x.js'), 'x'); }\nf('/tmp');\n",
+        ] {
+            assert_eq!(rewrote(src), Vec::<(usize, String)>::new(), "{}", src);
+        }
     }
 
     #[test]
