@@ -41,7 +41,7 @@ const SCRIPT = {
   "api.github.com": { status: 200, body: '{"login": "octocat"}' },
   "slack.com": { status: 200, body: '{"ok": false, "error": "invalid_auth"}' },
   "sts.amazonaws.com": { status: 200, body: AWS_LIVE },
-  "api.anthropic.com": { status: 401, body: "{}" },
+  "api.anthropic.com": { status: 401, body: '{"type": "error", "error": {"type": "authentication_error", "message": "invalid x-api-key"}}' },
 };
 
 let dir, keys, stub, tunnel;

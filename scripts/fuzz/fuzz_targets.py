@@ -1405,7 +1405,8 @@ VERIFY_CREDENTIAL_SEEDS = [
     b"github\n", b"\n", b"", b"nonesuch\nx",
 ]
 VERIFY_CREDENTIAL_WORDS = (b"github\n", b"slack\n", b"stripe\n", b"npm\n", b"openai\n", b"anthropic\n", b"aws\n", b"ghp_", b"github_pat_", b"xoxb-", b"xoxp-",
-                           b"sk_live_", b"rk_live_", b"npm_", b"sk-", b"sk-ant-", b"sk-proj-", b"AKIA", b"\r\n", b"\n", b"\r", b" ", b"\t", b"\x00",
+                           b"sk_live_", b"rk_live_", b"npm_", b"sk-", b"sk-ant-", b"sk-ant-api03-", b"sk-ant-oat01-", b"sk-admin-",
+                           b"sk-proj-", b"AKIA", b"\r\n", b"\n", b"\r", b" ", b"\t", b"\x00",
                            b"\xc3\xa9", b"\xd9\xa1", b"\xe2\x80\xae", b"Bearer ", b"/", b"+", b"=", b"%0d%0a", b"a" * 36, b"A" * 40)
 
 

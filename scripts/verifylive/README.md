@@ -22,10 +22,16 @@ is printed.
 | slack | `GET slack.com/api/auth.test` | 200 `invalid_auth` | 200 `ok` and the user |
 | stripe | `GET api.stripe.com/v1/balance` | 401 | 200 (or 403 `permission_error` for a restricted key) |
 | npm | `GET registry.npmjs.org/-/whoami` | 401 | 200 and the username |
-| openai | `GET api.openai.com/v1/models` | 401 | 200 |
-| anthropic | `GET api.anthropic.com/v1/models` | 401 | 200 |
+| openai | `GET api.openai.com/v1/models` | 401 `invalid_api_key` | 200 |
+| anthropic | `GET api.anthropic.com/v1/models` | 401 `authentication_error` | 200 (or 403 `permission_error`) |
 | aws | `POST sts.amazonaws.com` `GetCallerIdentity`, signed | 403 `InvalidClientTokenId` | 200 and the ARN |
 
 The table's answers are from each provider's documentation; the first run of this script is what confirms them. A line marked
 `<-- not what was expected` means the table is wrong for that provider (or the provider changed): read its documentation, change
 the table and its tests, and run this again.
+
+OpenAI's key is a user, project or service account key (`sk-`, `sk-proj-`, `sk-svcacct-`), Anthropic's an API key
+(`sk-ant-api03-`). Admin keys (OpenAI's `sk-admin-`, Anthropic's `sk-ant-admin01-` and Claude Enterprise's `sk-ant-api01-`,
+which are its Compliance Access Keys too) and Anthropic's OAuth tokens (`sk-ant-oat01-`) are not asked about: `/v1/models` is
+not documented for them, and a 401 there could read as "rejected" for a key that is live. A 401 without the provider's own
+error (`invalid_api_key`, `authentication_error`) is `unknown`, never `rejected`.

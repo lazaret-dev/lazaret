@@ -116,14 +116,20 @@ fn each_sample_names_its_provider_alone() {
         assert_eq!(ids(sample), [id], "{sample}");
     }
     assert!(ids(AWS_ID).is_empty() && ids(AWS_SECRET).is_empty(), "a pair is not named by a part");
-    assert_eq!(ids(&format!("sk-ant-{}", "a".repeat(30))), ["anthropic"]);
     assert_eq!(ids(&format!("sk-ant{}", "a".repeat(30))), ["openai"]);
+    // what a provider issues but the table does not ask about is no one's (each is detected still; it is not verified):
+    // Anthropic's OAuth tokens, its admin keys (the Console's sk-ant-admin01-, Claude Enterprise's sk-ant-api01-, which are
+    // its Compliance Access Keys too: Anthropic's API keys are sk-ant-api03-), a key of Anthropic's in no format it
+    // documents, OpenAI's admin keys
+    for prefix in ["sk-ant-oat01-", "sk-ant-admin01-", "sk-ant-api01-", "sk-ant-api02-", "sk-ant-", "sk-ant-api-", "sk-admin-"] {
+        assert!(ids(&format!("{prefix}{}", "a".repeat(30))).is_empty(), "{prefix}");
+    }
 }
 
 #[test]
 fn the_lengths_are_the_formats_and_a_credential_is_looked_at_to_512_characters() {
     for (prefix, low, high) in [("ghp_", 36, 251), ("github_pat_", 22, 255), ("xoxb-", 10, 250), ("sk_live_", 16, 247), ("npm_", 36, 36),
-                                ("sk-", 20, 200), ("sk-ant-", 20, 200)] {
+                                ("sk-", 20, 200), ("sk-ant-api03-", 20, 200)] {
         assert!(!ids(&format!("{prefix}{}", "a".repeat(low))).is_empty(), "{prefix}");
         assert!(!ids(&format!("{prefix}{}", "a".repeat(high))).is_empty(), "{prefix}");
         assert!(ids(&format!("{prefix}{}", "a".repeat(low - 1))).is_empty(), "{prefix}");
@@ -349,6 +355,30 @@ fn an_answer_is_read_by_the_first_rule_that_holds() {
     assert_eq!(judged("aws", 403, &error("InvalidClientTokenId"), false).0, "rejected");
     assert_eq!(judged("aws", 400, &error("Throttling"), false).0, "unknown");
     assert_eq!(judged("aws", 403, &error("Other"), false).1, "the answer was not one this module knows (HTTP 403)");
+}
+
+#[test]
+fn a_key_is_rejected_only_on_its_providers_own_word() {
+    // OpenAI's invalid_api_key code, Anthropic's authentication_error: a 401 without it (a gateway's, a proxy's, another
+    // reason's, a body cut short) is unknown; Anthropic's permission_error is a key it knows, live as Stripe's is
+    let openai = r#"{"error": {"message": "Incorrect API key provided", "type": "invalid_request_error", "code": "invalid_api_key"}}"#;
+    assert_eq!(judged("openai", 401, openai, false), ("rejected", "OpenAI says the key is not valid".into(), None));
+    assert_eq!(judged("openai", 401, openai, true).0, "unknown");
+    for body in ["", "{}", r#"{"error": {"code": "invalid_issuer"}}"#, r#"{"code": "invalid_api_key"}"#] {
+        assert_eq!(judged("openai", 401, body, false), ("unknown", "OpenAI refused or rate limited the call".into(), None), "{body}");
+    }
+    assert_eq!(judged("openai", 200, r#"{"data": []}"#, false).0, "live");
+    let anthropic = |kind: &str| format!(r#"{{"type": "error", "error": {{"type": "{kind}", "message": "x"}}}}"#);
+    assert_eq!(judged("anthropic", 401, &anthropic("authentication_error"), false),
+               ("rejected", "Anthropic says the key is not valid".into(), None));
+    assert_eq!(judged("anthropic", 403, &anthropic("permission_error"), false),
+               ("live", "Anthropic knows the key but it may not list the models".into(), None));
+    for (status, body) in [(401, "".to_string()), (401, r#"{"type": "error"}"#.to_string()), (401, anthropic("permission_error")),
+                           (403, anthropic("authentication_error")), (403, "".to_string()), (429, anthropic("rate_limit_error"))] {
+        assert_eq!(judged("anthropic", status, &body, false), ("unknown", "Anthropic refused or rate limited the call".into(), None),
+                   "{status} {body}");
+    }
+    assert_eq!(judged("anthropic", 200, r#"{"data": []}"#, false).0, "live");
 }
 
 #[test]

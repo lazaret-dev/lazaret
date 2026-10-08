@@ -12,22 +12,23 @@ project is pre-1.0, so the 0.x API may still change.
 ### Added
 
 - **Live secrets: `lazaret scan --verify-secrets` and `npx lazaret --verify-secrets` (V-1; John's decisions 4 and 7).** After the scan, each secret
-  finding is asked about where a provider can say whether it is live: a GitHub, Slack, Stripe, npm, OpenAI or
-  Anthropic token, or an AWS key pair (a key id and a secret key in the same file). Each credential goes to its own
-  provider alone, over HTTPS, in a call that only authenticates (GitHub's `GET /user`, Slack's `auth.test`, AWS
-  STS's `GetCallerIdentity`, signed with Signature Version 4), with no redirect followed; before the first call a
-  note on stderr says which providers will be asked and where each credential goes. A finding says what its provider
-  said: live (a BLOCKER vulnerability, with the account the provider names), rejected (kept as it was: revoke it
-  anyway, the history keeps it) or unknown (kept, with the reason). The JSON report gains `verification` and each
-  such finding `verified`; SARIF carries `verified` in a result's properties. Off by default; any target can be
-  verified (`github:` and `gitlab:` repositories too); the guard, the registry auditor, the MCP server and the
-  pre-commit hook never verify. A Google API key, a JWT, a private key or a database's password has no provider to
-  ask, and the report counts those. The value is never written anywhere: it is read again from the file, in
-  memory, for the call; the run's cache is keyed by its SHA-256. The provider table and the logic (which words of
-  a line are a credential and which provider's, each request, AWS's signature, reading an answer) are the
-  engine's (`secrets.rs`, the pack's `_VERIFY_PROVIDERS`), one copy for both packages; the Python package's call
-  goes over lazaret-net, the npm package's over Node's `https` (TLS 1.2 at least, `HTTPS_PROXY` through an http://
-  proxy's CONNECT tunnel), and the two report alike (`test_js_parity_verify`).
+  finding is asked about where a provider can say whether it is live: a GitHub, Slack, Stripe or npm token, an OpenAI
+  or Anthropic API key, or an AWS key pair (a key id and a secret key in the same file). Each credential goes to its
+  own provider alone, over HTTPS, in a call that only authenticates (GitHub's `GET /user`, Slack's `auth.test`, AWS
+  STS's `GetCallerIdentity`, signed with Signature Version 4), with no redirect followed; before the first call a note
+  on stderr says which providers will be asked and where each credential goes. A finding says what its provider said:
+  live (a BLOCKER vulnerability, with the account the provider names), rejected (kept as it was: revoke it anyway, the
+  history keeps it; only on the provider's own word, such as OpenAI's `invalid_api_key`, never a bare 401) or unknown
+  (kept, with the reason). Admin keys and OAuth tokens are detected, not asked about. The JSON report gains
+  `verification` and each such finding `verified`; SARIF carries `verified` in a result's properties. Off by default;
+  any target can be verified (`github:` and `gitlab:` repositories too); the guard, the registry auditor, the MCP
+  server and the pre-commit hook never verify. A Google API key, a JWT, a private key or a database's password has no
+  provider to ask, and the report counts those. The value is never written anywhere: it is read again from the file,
+  in memory, for the call; the run's cache is keyed by its SHA-256. The provider table and the logic (which words of a
+  line are a credential and which provider's, each request, AWS's signature, reading an answer) are the engine's
+  (`secrets.rs`, the pack's `_VERIFY_PROVIDERS`), one copy for both packages; the Python package's call goes over
+  lazaret-net, the npm package's over Node's `https` (TLS 1.2 at least, `HTTPS_PROXY` through an http:// proxy's
+  CONNECT tunnel), and the two report alike (`test_js_parity_verify`).
 - **A workflow's actions are read at the commit they run (N-4).** `python -m
   lazaret.registry.actions` now scans each action's own code, the archive the runner fetches for
   the commit its `uses:` resolves to, as the runner runs it: a JavaScript action's `pre`, `main`

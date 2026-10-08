@@ -39,7 +39,7 @@ MADE_UP = {
     "stripe": "sk_live_" + "0" * 24,
     "npm": "npm_" + "0" * 36,
     "openai": "sk-" + "0" * 48,
-    "anthropic": "sk-ant-" + "0" * 40,
+    "anthropic": "sk-ant-api03-" + "0" * 40,
     "aws": {"id": "AKIA" + "0" * 16, "secret": "0" * 40},
 }
 

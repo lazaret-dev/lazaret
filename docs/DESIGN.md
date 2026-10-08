@@ -1589,21 +1589,34 @@ target when asked (`github:` and `gitlab:` repositories too), never in the
 guard, the registry auditor, the MCP server or the pre-commit hook.
 
 One copy of the logic, in the engine (decision 7): the provider table is
-the pack's `_VERIFY_PROVIDERS` (seven providers: GitHub, Slack, Stripe,
-npm, OpenAI and Anthropic tokens, AWS key pairs), checked when it is read
-and by `make_rust_tables.py --check` (a host is a lower-case DNS name; a
-credential goes in a header, never in the path or the query; a signed
-request sends no secret). `secrets.rs` answers three questions, with no
-clock and no network: which credentials a file's flagged lines hold
-(`secrets.find`: a word that is all of a provider's format; an AWS key id
-and a secret key of the same file, paired nearest first, eight pairs at
-most), the request that asks about one (`secrets.request`: a call that only
-authenticates; AWS's signed with Signature Version 4 over lazaret-verify's
-SHA-256, the time given by the caller; the fields that carry the credential
-named), and what an answer says (`secrets.judge`: the first of the
-provider's rules that holds, live, rejected or unknown; a body cut at 64
-KiB read by its status alone; the account's name printable, 80 characters
-at most, any part of the credential in it `[redacted]`).
+the pack's `_VERIFY_PROVIDERS` (seven providers: GitHub, Slack, Stripe and
+npm tokens, OpenAI and Anthropic API keys, AWS key pairs), checked when it
+is read and by `make_rust_tables.py --check` (a host is a lower-case DNS
+name; a credential goes in a header, never in the path or the query; a
+signed request sends no secret). `secrets.rs` answers three questions,
+with no clock and no network: which credentials a file's flagged lines
+hold (`secrets.find`: a word that is all of a provider's format; an AWS
+key id and a secret key of the same file, paired nearest first, eight
+pairs at most), the request that asks about one (`secrets.request`: a call
+that only authenticates; AWS's signed with Signature Version 4 over
+lazaret-verify's SHA-256, the time given by the caller; the fields that
+carry the credential named), and what an answer says (`secrets.judge`: the
+first of the provider's rules that holds, live, rejected or unknown; a
+body cut at 64 KiB read by its status alone; the account's name printable,
+80 characters at most, any part of the credential in it `[redacted]`).
+
+A key is asked about only where the call is documented for it, and is
+rejected only on its provider's own word. OpenAI's pattern takes user,
+project and service account keys (`sk-`, `sk-proj-`, `sk-svcacct-`), not its
+admin keys (`sk-admin-`); Anthropic's takes its API keys (`sk-ant-api03-`),
+not its OAuth tokens (`sk-ant-oat01-`) or admin keys (`sk-ant-admin01-`,
+and Claude Enterprise's `sk-ant-api01-`, its Compliance Access Keys), which
+`/v1/models` is not documented for: a live admin key turned away there must
+not read as rejected. A 401 is rejected only with OpenAI's `error.code`
+`invalid_api_key` or Anthropic's `error.type` `authentication_error`; any
+other 401 (a gateway's, a proxy's, another reason) is unknown, and
+Anthropic's 403 `permission_error` is a key it knows, live, as Stripe's is.
+What the table does not ask about is detected as before.
 
 Each package keeps what is about a run and makes the call. Python
 (`verifyscan.py`, `secretverify.py`, `secretverify_http.py`): the secret

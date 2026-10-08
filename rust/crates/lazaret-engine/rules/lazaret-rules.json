@@ -15517,6 +15517,9 @@
        ]
       },
       {
+       "json": {
+        "error.code": "invalid_api_key"
+       },
        "outcome": "rejected",
        "status": [
         401
@@ -15526,6 +15529,7 @@
       {
        "outcome": "unknown",
        "status": [
+        401,
         403,
         429
        ],
@@ -15536,7 +15540,7 @@
      "id": "openai",
      "label": "OpenAI API key",
      "parts": {
-      "secret": "sk-(?!ant-)(?:proj-|svcacct-|admin-)?[A-Za-z0-9_-]{20,200}"
+      "secret": "sk-(?!ant-|admin-)(?:proj-|svcacct-)?[A-Za-z0-9_-]{20,200}"
      },
      "request": {
       "headers": {
@@ -15557,6 +15561,9 @@
        ]
       },
       {
+       "json": {
+        "error.type": "authentication_error"
+       },
        "outcome": "rejected",
        "status": [
         401
@@ -15564,8 +15571,19 @@
        "why": "Anthropic says the key is not valid"
       },
       {
+       "json": {
+        "error.type": "permission_error"
+       },
+       "outcome": "live",
+       "status": [
+        403
+       ],
+       "why": "Anthropic knows the key but it may not list the models"
+      },
+      {
        "outcome": "unknown",
        "status": [
+        401,
         403,
         429
        ],
@@ -15576,7 +15594,7 @@
      "id": "anthropic",
      "label": "Anthropic API key",
      "parts": {
-      "secret": "sk-ant-[A-Za-z0-9_-]{20,200}"
+      "secret": "sk-ant-api03-[A-Za-z0-9_-]{20,200}"
      },
      "request": {
       "headers": {

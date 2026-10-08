@@ -37,6 +37,7 @@ APP = (f'import os\nGITHUB_TOKEN = "{GITHUB}"\nslack = "{SLACK}"\nheaders = {{"A
 ENV = f"ANTHROPIC_API_KEY={ANTHROPIC}\n"
 AWS_LIVE = b"<GetCallerIdentityResult><Arn>arn:aws:iam::123456789012:user/alice</Arn></GetCallerIdentityResult>"
 AWS_REJECTED = b"<ErrorResponse><Error><Code>InvalidClientTokenId</Code></Error></ErrorResponse>"
+ANTHROPIC_REJECTED = b'{"type": "error", "error": {"type": "authentication_error", "message": "invalid x-api-key"}}'
 
 
 def write_project(folder, app=APP, env=ENV):
@@ -67,7 +68,7 @@ class Answers:
 
 
 SCRIPT = {"api.github.com": (200, b'{"login": "octocat"}'), "slack.com": (200, b'{"ok": false, "error": "invalid_auth"}'),
-          "sts.amazonaws.com": (200, AWS_LIVE), "api.anthropic.com": (401, b"{}")}
+          "sts.amazonaws.com": (200, AWS_LIVE), "api.anthropic.com": (401, ANTHROPIC_REJECTED)}
 
 
 class Case(unittest.TestCase):

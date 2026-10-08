@@ -76,24 +76,25 @@ always redacted, because they are stored (see *Registry scanning*).
 
 **Live secrets (`--verify-secrets`, off by default):** after the scan, each
 secret finding is asked about where a provider can say whether it is live: a
-GitHub, Slack, Stripe, npm, OpenAI or Anthropic token, or an AWS key pair (a
-key id and a secret key in the same file). Each credential goes to its own
-provider alone, over HTTPS, in a call that only authenticates (GitHub's
-`GET /user`, Slack's `auth.test`, AWS STS's `GetCallerIdentity`…), never
-following a redirect; before the first call a note on stderr says which
+GitHub, Slack, Stripe or npm token, an OpenAI or Anthropic API key (not an
+admin key or an OAuth token: those are detected, not asked about), or an AWS
+key pair (a key id and a secret key in the same file). Each credential goes to
+its own provider alone, over HTTPS, in a call that only authenticates
+(GitHub's `GET /user`, Slack's `auth.test`, AWS STS's `GetCallerIdentity`…),
+never following a redirect; before the first call a note on stderr says which
 providers will be asked and where each credential goes. A finding then says
 what its provider said: **live** (a BLOCKER, with the account the provider
 names: revoke it now), **rejected** (kept: revoke it anyway, the history keeps
 it) or **unknown** (kept, and why: no answer in time, a rate limit…); the JSON
 report's `verification` and each finding's `verified` say the same, and SARIF
-carries `verified` in a result's properties. A Google API key, a JWT, a private
-key or a database's password has no provider to ask; the report counts those.
-The value itself is never written anywhere: it is read again from the file, in
-memory, for the call. The flag works for any target, a `github:` or `gitlab:`
-repository too; the guard, the registry auditor, the MCP server and the
-pre-commit hook never verify. The npm package's `--verify-secrets` asks the
-same way (Node's `https`, TLS 1.2 at least, `HTTPS_PROXY` through an http://
-proxy's tunnel) and reports the same.
+carries `verified` in a result's properties. A Google API key, a JWT, a
+private key or a database's password has no provider to ask; the report counts
+those. The value itself is never written anywhere: it is read again from the
+file, in memory, for the call. The flag works for any target, a `github:` or
+`gitlab:` repository too; the guard, the registry auditor, the MCP server and
+the pre-commit hook never verify. The npm package's `--verify-secrets` asks
+the same way (Node's `https`, TLS 1.2 at least, `HTTPS_PROXY` through an
+http:// proxy's tunnel) and reports the same.
 
 **Baselines:** a baseline must be a report this engine wrote, and a hostile
 repo must not be able to supply one (audit G17), because a hand-crafted

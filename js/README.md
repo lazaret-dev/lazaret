@@ -242,18 +242,18 @@ lazaret <directory> [options]          # the same, like the Python CLI
 ```
 
 `--verify-secrets` (off by default) asks, after the scan, each secret
-finding's provider whether the credential is live: a GitHub, Slack, Stripe,
-npm, OpenAI or Anthropic token, or an AWS key pair (a key id and a secret key
-in the same file), each sent to its own provider alone in a call that only
-authenticates, over HTTPS with TLS 1.2 at least and no redirect followed
-(`HTTPS_PROXY` through an `http://` proxy's tunnel, `NO_PROXY` honoured).
-A note on stderr says which providers will be asked, and where each credential
-goes, before the first call. A live credential is a BLOCKER; a rejected or
-unknown one is kept as it was, and says why. The JSON report gains
+finding's provider whether the credential is live: a GitHub, Slack, Stripe or
+npm token, an OpenAI or Anthropic API key, or an AWS key pair (a key id and a
+secret key in the same file), each sent to its own provider alone in a call
+that only authenticates, over HTTPS with TLS 1.2 at least and no redirect
+followed (`HTTPS_PROXY` through an `http://` proxy's tunnel, `NO_PROXY`
+honoured). A note on stderr says which providers will be asked, and where each
+credential goes, before the first call. A live credential is a BLOCKER; a
+rejected or unknown one is kept as it was, and says why. The JSON report gains
 `verification` and each such finding `verified` (in SARIF, a result's
 properties), as the Python package's do: the provider table and the logic are
-the engine's, the same for both packages. `run()` returns a promise of the exit
-code when the flag is given.
+the engine's, the same for both packages. `run()` returns a promise of the
+exit code when the flag is given.
 
 A scan with much to read (a megabyte of source or more besides its largest
 file) spreads the files over worker threads, one per core up to 8, each with

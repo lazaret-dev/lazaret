@@ -130,16 +130,24 @@ class IdentifyTests(unittest.TestCase):
         self.assertEqual(sv.identify(SECRETS["aws"]["secret"]), [])
 
     def test_the_two_sk_families_do_not_overlap(self):
-        self.assertEqual(sv.identify("sk-ant-" + "a" * 30), ["anthropic"])
+        self.assertEqual(sv.identify("sk-ant-api03-" + "a" * 30), ["anthropic"])
         self.assertEqual(sv.identify("sk-" + "a" * 30), ["openai"])
         self.assertEqual(sv.identify("sk-proj-" + "a" * 30), ["openai"])
         self.assertEqual(sv.identify("sk-svcacct-" + "a" * 30), ["openai"])
         self.assertEqual(sv.identify("sk-ant" + "a" * 30), ["openai"])            # (no dash after ant: not Anthropic's)
 
+    def test_what_the_table_does_not_ask_about_is_no_ones(self):
+        # each is detected still (S-TOKEN, S-ENTROPY), but it is not verified: Anthropic's OAuth tokens, its admin keys (the
+        # Console's sk-ant-admin01-, Claude Enterprise's sk-ant-api01-, which are its Compliance Access Keys too: Anthropic's
+        # API keys are sk-ant-api03-), a key of Anthropic's in no format it documents, OpenAI's admin keys
+        for prefix in ("sk-ant-oat01-", "sk-ant-admin01-", "sk-ant-api01-", "sk-ant-api02-", "sk-ant-", "sk-ant-api-", "sk-admin-"):
+            with self.subTest(prefix):
+                self.assertEqual(sv.identify(prefix + "a" * 30), [])
+
     def test_the_lengths_are_the_formats(self):
         edge = [("ghp_", "a", 36, 251), ("gho_", "a", 36, 251), ("ghs_", "a", 36, 251), ("github_pat_", "a", 22, 255), ("xoxb-", "a", 10, 250),
                 ("xoxp-", "1", 10, 250), ("sk_live_", "a", 16, 247), ("rk_live_", "a", 16, 247), ("npm_", "a", 36, 36),
-                ("sk-", "a", 20, 200), ("sk-ant-", "a", 20, 200)]
+                ("sk-", "a", 20, 200), ("sk-ant-api03-", "a", 20, 200)]
         for prefix, ch, low, high in edge:
             with self.subTest(prefix):
                 self.assertNotEqual(sv.identify(prefix + ch * low), [])
@@ -301,12 +309,20 @@ CASES = {
         (200, {"username": "alice"}, "live", "alice"), (200, b"", "live", None), (401, {"error": "x"}, "rejected", None),
         (403, b"", "unknown", None), (429, b"", "unknown", None), (404, b"", "unknown", None),
     ],
+    # (a key is rejected only on the provider's own word: OpenAI's invalid_api_key, Anthropic's authentication_error)
     "openai": [
-        (200, {"data": []}, "live", None), (401, {"error": {"code": "invalid_api_key"}}, "rejected", None), (403, b"", "unknown", None),
-        (429, b"", "unknown", None), (503, b"", "unknown", None),
+        (200, {"data": []}, "live", None), (401, {"error": {"code": "invalid_api_key"}}, "rejected", None),
+        (401, b"", "unknown", None), (401, {}, "unknown", None), (401, {"error": {"code": "invalid_issuer"}}, "unknown", None),
+        (401, {"code": "invalid_api_key"}, "unknown", None), (403, b"", "unknown", None), (429, b"", "unknown", None),
+        (503, b"", "unknown", None),
     ],
     "anthropic": [
-        (200, {"data": []}, "live", None), (401, {"type": "error"}, "rejected", None), (403, b"", "unknown", None),
+        (200, {"data": []}, "live", None),
+        (401, {"type": "error", "error": {"type": "authentication_error", "message": "invalid x-api-key"}}, "rejected", None),
+        (403, {"type": "error", "error": {"type": "permission_error", "message": "x"}}, "live", None),
+        (401, {"type": "error"}, "unknown", None), (401, b"", "unknown", None),
+        (401, {"type": "error", "error": {"type": "permission_error"}}, "unknown", None),
+        (403, {"type": "error", "error": {"type": "authentication_error"}}, "unknown", None), (403, b"", "unknown", None),
         (429, b"", "unknown", None), (529, b"", "unknown", None),
     ],
     "aws": [
@@ -918,8 +934,9 @@ class StubTests(StubCase):
             "slack": ("slack.com", "/api/auth.test", (200, {"ok": True, "user": "bot"}), (200, {"ok": False, "error": "invalid_auth"})),
             "stripe": ("api.stripe.com", "/v1/balance", (200, {"object": "balance"}), (401, {"error": {"type": "invalid_request_error"}})),
             "npm": ("registry.npmjs.org", "/-/whoami", (200, {"username": "alice"}), (401, {})),
-            "openai": ("api.openai.com", "/v1/models", (200, {"data": []}), (401, {})),
-            "anthropic": ("api.anthropic.com", "/v1/models", (200, {"data": []}), (401, {})),
+            "openai": ("api.openai.com", "/v1/models", (200, {"data": []}), (401, {"error": {"code": "invalid_api_key"}})),
+            "anthropic": ("api.anthropic.com", "/v1/models", (200, {"data": []}),
+                          (401, {"type": "error", "error": {"type": "authentication_error", "message": "invalid x-api-key"}})),
             "aws": ("sts.amazonaws.com", "/", (200, AWS_LIVE), (403, aws_error("InvalidClientTokenId"))),
         }
         for pid, (host, path, live, rejected) in plan.items():
