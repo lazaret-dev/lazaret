@@ -110,6 +110,11 @@ pub struct Config {
     /// application writes the rest when it is told that there is room. At least the bandwidth-delay product of the path, to
     /// keep it full.
     pub stream_send_buffer: usize,
+    /// How many packets the 1-RTT keys seal before the connection updates them (RFC 9001 section 6): at most three quarters of
+    /// what the AEAD allows (2^23 packets under AES-GCM), whatever this says. A key update needs the handshake confirmed and a
+    /// packet of the keys in use acknowledged; a connection that cannot update its keys before they are near their limit
+    /// closes with AEAD_LIMIT_REACHED.
+    pub key_update_after: u64,
 }
 
 impl Default for Config {
@@ -129,6 +134,7 @@ impl Default for Config {
             ack_delay_exponent: 3,
             max_ack_delay: Duration::from_millis(25),
             stream_send_buffer: 1 << 20,
+            key_update_after: 1 << 22,
         }
     }
 }
@@ -306,6 +312,8 @@ struct KeyPhases {
     rx_first_pn: u64,
     /// The first packet number that we sent in the phase now.
     tx_first_pn: u64,
+    /// A packet that we sent in the phase now has been acknowledged: the keys may be updated (RFC 9001 section 6.5).
+    tx_acked: bool,
 }
 
 /// Connection ids that the peer gave us.
@@ -386,6 +394,9 @@ pub struct Connection {
     last_activity: Instant,
     eliciting_sent_since_rx: bool,
     ping_pending: bool,
+    /// The application waits for the peer (see [`Connection::set_keep_alive`]), and when the last PING to keep it so was asked for.
+    keep_alive: bool,
+    last_keep_alive: Option<Instant>,
     max_datagram_size: usize,
     closing: Option<Closing>,
     events: VecDeque<Event>,
@@ -405,6 +416,35 @@ pub struct Stats {
     pub packets_dropped: u64,
     pub packets_lost: u64,
     pub probes: u64,
+    /// Key updates this end started (not those it followed).
+    pub key_updates: u64,
+    /// PINGs sent to keep the connection alive (see [`Connection::set_keep_alive`]).
+    pub keep_alives: u64,
+}
+
+/// What the 1-RTT keys that send need before the next packet (see [`Connection::keys_due`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum KeyAction {
+    Keep,
+    Updated,
+    /// They are near their limit and could not be updated: the connection is to close.
+    Close,
+}
+
+/// Keys that have sealed `sealed` packets of the `limit` they may are updated past `update_after` (or three quarters of the limit),
+/// by `update`, which says whether it could; ones that are within a sixteenth of the limit and could not be are done with.
+fn key_action(sealed: u64, update_after: u64, limit: u64, update: impl FnOnce() -> bool) -> KeyAction {
+    if sealed < update_after.min(limit / 4 * 3) {
+        return KeyAction::Keep;
+    }
+    if update() {
+        return KeyAction::Updated;
+    }
+    if sealed >= limit - limit / 16 {
+        KeyAction::Close
+    } else {
+        KeyAction::Keep
+    }
 }
 
 fn level_of(space: Space) -> Level {
@@ -484,6 +524,8 @@ impl Connection {
             last_activity: now,
             eliciting_sent_since_rx: false,
             ping_pending: false,
+            keep_alive: false,
+            last_keep_alive: None,
             max_datagram_size: mds,
             closing: None,
             events: VecDeque::new(),
@@ -568,6 +610,64 @@ impl Connection {
     /// Asks for a PING to be sent (to keep the connection from going idle).
     pub fn ping(&mut self) {
         self.ping_pending = true;
+    }
+
+    /// Whether the application is waiting for the peer (a request in flight): while it is, the connection sends a PING when it
+    /// has heard nothing for a third of the idle timeout, so that a server that takes long to answer (longer than the idle
+    /// timeout) does not see the connection go idle, and nor does this end. Off, a connection with nothing to do is let go idle,
+    /// as RFC 9000 section 10.1 has it.
+    pub fn set_keep_alive(&mut self, on: bool) {
+        if on && !self.keep_alive {
+            self.last_keep_alive = None;
+        }
+        self.keep_alive = on;
+    }
+
+    /// When the next PING to keep the connection alive is due, if one is.
+    fn keep_alive_at(&self) -> Option<Instant> {
+        if !self.keep_alive || !self.handshake_complete || self.state != State::Established {
+            return None;
+        }
+        let every = self.idle_timeout()? / 3;
+        let since = self.last_keep_alive.map_or(self.last_activity, |t| t.max(self.last_activity));
+        Some(since + every)
+    }
+
+    /// Updates the 1-RTT keys that this end sends with (RFC 9001 section 6), if it may: the handshake is confirmed, and a packet
+    /// sent with the keys in use has been acknowledged (which also means that the peer followed the last update). Whether it
+    /// did. The connection does this by itself before the keys reach their limit (see [`Config::key_update_after`]).
+    pub fn update_keys(&mut self) -> bool {
+        if !self.handshake_confirmed || self.is_closing() || self.is_closed() {
+            return false;
+        }
+        let si = Space::Application.index();
+        let (Some(p), Some(tx)) = (self.phases.as_mut(), self.spaces[si].tx.as_mut()) else { return false };
+        if !p.tx_acked || p.rx_phase != p.tx_phase {
+            return false;
+        }
+        *tx = tx.next();
+        p.tx_phase = !p.tx_phase;
+        p.tx_first_pn = self.spaces[si].next_pn;
+        p.tx_acked = false;
+        self.stats.key_updates += 1;
+        true
+    }
+
+    /// Before a packet is sealed: the keys are updated once they have sealed `key_update_after` packets (or three quarters of their
+    /// limit), and a connection whose keys are near their limit and cannot be updated is closed while it can still say so.
+    fn keys_due(&mut self, now: Instant) {
+        let si = Space::Application.index();
+        let Some(tx) = self.spaces[si].tx.as_ref() else { return };
+        if self.phases.is_none() {
+            return;
+        }
+        let (sealed, limit) = (tx.packet.sealed(), tx.packet.confidentiality_limit());
+        match key_action(sealed, self.config.key_update_after, limit, || self.update_keys()) {
+            KeyAction::Keep | KeyAction::Updated => {}
+            KeyAction::Close => {
+                self.close_with_error(now, TransportError::new(code::AEAD_LIMIT_REACHED, "the packet keys are near their limit and could not be updated"));
+            }
+        }
     }
 
     // -----------------------------------------------------------------------------------------------------------------------
@@ -736,6 +836,7 @@ impl Connection {
             add(s.ack.deadline.filter(|_| s.ack.pending()));
         }
         add(self.idle_timeout().map(|d| self.last_activity + d));
+        add(self.keep_alive_at());
         add(self.pacing_wake);
         if let Some(p) = &self.phases {
             add(p.rx_prev_until);
@@ -770,6 +871,11 @@ impl Connection {
         }
         if self.pacing_wake.is_some_and(|t| now >= t) {
             self.pacing_wake = None;
+        }
+        if self.keep_alive_at().is_some_and(|t| now >= t) {
+            self.ping_pending = true;
+            self.last_keep_alive = Some(now);
+            self.stats.keep_alives += 1;
         }
         if self.recovery.timer().is_some_and(|t| now >= t) {
             let out = self.recovery.on_timeout(now);
@@ -878,11 +984,27 @@ impl Connection {
             }
         };
         if ty == PacketType::Initial && !token_empty {
-            self.close_with_error(now, TransportError::new(code::PROTOCOL_VIOLATION, "a server's Initial packet has a token"));
+            // RFC 9000 section 17.2.2: discard the packet or close the connection. The token is read from a header that has not
+            // been authenticated yet, and a packet damaged on the way (a bit of its token length) must not end a connection
+            // that did nothing wrong (found by the fuzz target `quic_connection`, whose network flips bits); so the connection is
+            // closed for a packet that is genuine (its header is authenticated with its payload), and one that is not is dropped.
+            if self.initial_is_genuine(&data[..len], pn_offset) {
+                self.close_with_error(now, TransportError::new(code::PROTOCOL_VIOLATION, "a server's Initial packet has a token"));
+            } else {
+                self.stats.packets_dropped += 1;
+            }
             return None;
         }
         self.process_packet(now, &mut data[..len], ty, pn_offset, &scid);
         Some(len)
+    }
+
+    /// Whether an Initial packet opens with the Initial keys (on a copy: nothing in it is acted on).
+    fn initial_is_genuine(&mut self, packet: &[u8], pn_offset: usize) -> bool {
+        let largest = self.spaces[0].ack.largest;
+        let Some(rx) = self.spaces[0].rx.as_mut() else { return false };
+        let mut copy = packet.to_vec();
+        matches!(rx.open(&mut copy, pn_offset, largest), Ok(_) | Err(OpenError::ReservedBits))
     }
 
     fn on_version_negotiation(&mut self, now: Instant, scid: &[u8], versions: Vec<u32>) {
@@ -1053,6 +1175,7 @@ impl Connection {
             *tx = next_tx;
             phases.tx_phase = phase;
             phases.tx_first_pn = self.spaces[si].next_pn;
+            phases.tx_acked = false;
         }
         Ok((pn, range))
     }
@@ -1157,6 +1280,11 @@ impl Connection {
         let exponent = if space == Space::Application || self.handshake_complete { self.peer_ack_delay_exponent } else { 3 };
         let delay = Duration::from_micros(a.delay_micros(exponent as u32));
         let out = self.recovery.on_ack_received(now, space, a.largest, delay, a.ranges());
+        if space == Space::Application {
+            if let Some(p) = self.phases.as_mut().filter(|p| a.largest >= p.tx_first_pn) {
+                p.tx_acked = true;
+            }
+        }
         for p in &out.acked {
             for f in &p.payload {
                 match f {
@@ -1217,7 +1345,7 @@ impl Connection {
         match level {
             Level::Handshake => self.recovery.set_handshake_keys(true),
             Level::Application => {
-                self.phases = Some(KeyPhases { tx_phase: false, rx_phase: false, rx_prev: None, rx_prev_until: None, rx_first_pn: 0, tx_first_pn: 0 });
+                self.phases = Some(KeyPhases { tx_phase: false, rx_phase: false, rx_prev: None, rx_prev_until: None, rx_first_pn: 0, tx_first_pn: 0, tx_acked: false });
             }
             Level::Initial => {}
         }
@@ -1331,6 +1459,10 @@ impl Connection {
             State::Closed | State::Draining => return false,
             State::Closing => return self.transmit_close(now, out),
             _ => {}
+        }
+        self.keys_due(now);
+        if self.state == State::Closing {
+            return self.transmit_close(now, out);
         }
         self.pacing_wake = None;
         let max = self.max_datagram_size;
@@ -1722,6 +1854,41 @@ mod tests {
     }
 
     #[test]
+    fn a_server_initial_with_a_token_closes_the_connection_only_if_it_is_genuine() {
+        let ids = ([0xa0u8; 8], [0xd0u8; 8], [0xe0u8; 8]);
+        let start = |now| {
+            let server = TestQuicServer::new("example.test", ServerOptions::default());
+            Connection::connect_with_ids(&Config::default(), &server.client_config(), "example.test", now, ids.0.to_vec(), ids.1.to_vec()).unwrap()
+        };
+        // a server's Initial: a PING and some padding, sealed with the server's Initial keys
+        let initial = |token: &[u8]| {
+            let (_, mut server_keys) = keys::initial_keys(&ids.1);
+            let mut p = Vec::new();
+            let h = packet::write_long_header(&mut p, PacketType::Initial, &ids.0, &ids.2, token, 0, 2);
+            p.push(0x01);
+            p.extend([0u8; 30]);
+            packet::finish_long(&mut p, h, TAG_LEN);
+            server_keys.seal(&mut p, h.pn_offset, 2, 0).unwrap();
+            p
+        };
+        let now = Instant::now();
+        let mut c = start(now);
+        c.recv(now, &mut initial(b"t"));
+        assert!(c.is_closing(), "a genuine Initial with a token");
+        assert!(matches!(c.poll_event(), Some(Event::Closed(CloseReason::Local(e))) if e.code == code::PROTOCOL_VIOLATION));
+        // one without, whose token length was damaged on the way (1 + 4 + 1 + 8 + 1 + 8 bytes in): dropped
+        for bit in 0..8 {
+            let mut c = start(now);
+            let mut damaged = initial(b"");
+            damaged[23] ^= 1 << bit;
+            let dropped = c.stats().packets_dropped;
+            c.recv(now, &mut damaged);
+            assert!(!c.is_closing(), "bit {bit}: a damaged Initial closed the connection");
+            assert!(c.stats().packets_dropped > dropped, "bit {bit}");
+        }
+    }
+
+    #[test]
     fn a_retry_that_the_server_does_not_repeat_in_its_parameters_fails() {
         let mut l = link(ServerOptions { retry: true, params: Box::new(|p| p.retry_source_connection_id = None), ..ServerOptions::default() });
         l.run_until(Duration::from_secs(5), |l| l.client.is_closing());
@@ -2022,6 +2189,137 @@ mod tests {
         l.advance(ms(200));
         assert_eq!(l.server.rx_updates, 1);
         assert!(l.server.log.iter().filter(|s| s.starts_with("OneRtt") && s.contains("Ping")).count() >= 2, "{:?}", l.server.log);
+    }
+
+    #[test]
+    fn the_client_updates_its_keys_before_they_wear_out_and_the_server_follows() {
+        let config = Config { key_update_after: 40, ..Config::default() };
+        let mut l = Link::new(TestQuicServer::new("example.test", ServerOptions::default()), &config);
+        confirmed(&mut l);
+        transfer(&mut l, &pattern(300_000, 2), &pattern(100_000, 3));
+        l.advance(ms(300));
+        let stats = l.client.stats();
+        assert!(stats.key_updates >= 3, "{stats:?}");
+        // the server saw each, and followed (its packets are in the client's phase, and open)
+        assert_eq!(l.server.rx_updates, stats.key_updates);
+        // (the server's keys followed the client's last update; the client hears them when the server next has something to say)
+        assert_eq!(l.client.phases.as_ref().unwrap().tx_phase, l.server.tx_phase);
+        assert_eq!(stats.packets_dropped, 0, "{stats:?}");
+        // no key sealed many more than it was to: an update waits only for an acknowledgment
+        assert!(l.client.spaces[2].tx.as_ref().unwrap().packet.sealed() < 40 + 40, "{}", l.client.spaces[2].tx.as_ref().unwrap().packet.sealed());
+        assert!(!l.client.is_closing());
+    }
+
+    #[test]
+    fn keys_are_not_updated_again_before_a_packet_sent_with_them_is_acknowledged() {
+        let config = Config { key_update_after: 10, ..Config::default() };
+        let mut l = Link::new(TestQuicServer::new("example.test", ServerOptions::default()), &config);
+        assert!(!l.client.update_keys(), "an update before the handshake is confirmed");
+        confirmed(&mut l);
+        l.client.ping();
+        l.advance(ms(200));
+        // from now on the server's datagrams are lost: nothing more is acknowledged
+        let from = l.sent_by_server;
+        l.drop_rule = Box::new(move |from_client, n, _| !from_client && n >= from);
+        let id = l.client.open_stream(true).unwrap();
+        for _ in 0..30 {
+            let _ = l.client.stream_write(id, &[7u8; 1000], false);
+            l.advance(ms(20));
+        }
+        assert_eq!(l.client.stats().key_updates, 1, "{:?}", l.client.stats());
+        assert!(!l.client.update_keys());
+        // the server is heard again: its acknowledgments let the next update happen
+        l.drop_rule = Box::new(|_, _, _| false);
+        assert!(l.run_until(Duration::from_secs(5), |l| l.client.stats().key_updates >= 2), "{:?}", l.client.stats());
+        assert!(!l.client.is_closing());
+    }
+
+    #[test]
+    fn after_following_the_servers_update_the_client_waits_for_an_acknowledgment_of_its_own_new_keys() {
+        let config = Config { key_update_after: u64::MAX, ..Config::default() };
+        let mut l = Link::new(TestQuicServer::new("example.test", ServerOptions::default()), &config);
+        confirmed(&mut l);
+        l.client.ping();
+        l.advance(ms(200));
+        // the server updates its keys, and the client follows when it opens a packet of the new ones
+        let mut ping = Vec::new();
+        Frame::Ping.write(&mut ping);
+        l.server.key_update();
+        l.server.queued = ping;
+        l.flush();
+        assert!(l.run_until(ms(500), |l| l.client.phases.as_ref().is_some_and(|p| p.rx_phase)));
+        l.advance(ms(100));
+        let first = l.client.phases.as_ref().map(|p| p.tx_first_pn).unwrap();
+        assert!(l.client.phases.as_ref().is_some_and(|p| p.tx_phase && !p.tx_acked));
+        assert!(l.client.spaces[2].next_pn > first, "nothing was sent with the new keys");
+        let ack = |l: &mut Link, largest: u64| {
+            let mut b = vec![0x02];
+            crate::quic::wire::put_varint(&mut b, largest);
+            b.extend([0, 0, 0]);
+            let f = frame::frames(&b, PacketType::OneRtt).next().unwrap().unwrap();
+            let Frame::Ack(a) = f else { panic!("{f:?}") };
+            let now = l.now;
+            l.client.on_ack_frame(now, Space::Application, &a).unwrap();
+        };
+        // an acknowledgment of a packet sent with the keys before does not let the client update again
+        ack(&mut l, first - 1);
+        assert!(!l.client.update_keys());
+        // one of a packet sent with the keys now does
+        ack(&mut l, first);
+        assert!(l.client.update_keys());
+    }
+
+    #[test]
+    fn keys_near_their_limit_that_cannot_be_updated_close_the_connection() {
+        let limit = 1u64 << 23;
+        let never = || -> bool { panic!("not asked to update") };
+        assert_eq!(key_action(1000, 1 << 22, limit, never), KeyAction::Keep);
+        // past what was asked for, or three quarters of the limit, whichever is first
+        assert_eq!(key_action(1 << 22, 1 << 22, limit, || true), KeyAction::Updated);
+        assert_eq!(key_action(limit / 4 * 3, u64::MAX, limit, || true), KeyAction::Updated);
+        assert_eq!(key_action(limit / 4 * 3 - 1, u64::MAX, limit, never), KeyAction::Keep);
+        // one that cannot be updated goes on until it is a sixteenth from its limit, and then the connection closes
+        assert_eq!(key_action(limit / 4 * 3, 0, limit, || false), KeyAction::Keep);
+        assert_eq!(key_action(limit - limit / 16 - 1, 0, limit, || false), KeyAction::Keep);
+        assert_eq!(key_action(limit - limit / 16, 0, limit, || false), KeyAction::Close);
+    }
+
+    // ------------------------------------------------------------------------------------------------------------------------
+    // keeping alive
+
+    #[test]
+    fn a_connection_that_waits_for_its_peer_is_kept_alive_and_one_that_does_not_goes_idle() {
+        let config = Config { max_idle_timeout: Duration::from_secs(3), ..Config::default() };
+        let mut l = Link::new(TestQuicServer::new("example.test", ServerOptions::default()), &config);
+        confirmed(&mut l);
+        l.client.set_keep_alive(true);
+        // a minute in which neither side has anything to say: the client pings every second (a third of the idle timeout)
+        assert!(!l.run_until(Duration::from_secs(60), |l| l.client.is_closing() || l.client.is_closed()), "{:?}", l.client_events);
+        let pings = l.client.stats().keep_alives;
+        assert!((55..=62).contains(&pings), "{pings} keep-alive PINGs in a minute");
+        // the server hears them (all but the last, which may be on its way): it does not go idle either, as they ask for an answer
+        let heard = l.server.log.iter().filter(|s| s.starts_with("OneRtt") && s.contains("Ping")).count() as u64;
+        assert!(heard + 1 >= pings, "the server heard {heard} of {pings}");
+        // nothing waits any more: the connection goes idle as it should
+        l.client.set_keep_alive(false);
+        assert!(l.run_until(Duration::from_secs(10), |l| l.client.is_closed()));
+        assert!(l.client_events.iter().any(|e| matches!(e, Event::Closed(CloseReason::IdleTimeout))), "{:?}", l.client_events);
+        assert_eq!(l.client.stats().keep_alives, pings);
+    }
+
+    #[test]
+    fn a_peer_that_does_not_answer_keep_alives_still_times_out() {
+        let config = Config { max_idle_timeout: Duration::from_secs(3), ..Config::default() };
+        let mut l = Link::new(TestQuicServer::new("example.test", ServerOptions::default()), &config);
+        confirmed(&mut l);
+        l.client.set_keep_alive(true);
+        let from = l.sent_by_server;
+        l.drop_rule = Box::new(move |from_client, n, _| !from_client && n >= from);
+        let started = l.now;
+        assert!(l.run_until(Duration::from_secs(20), |l| l.client.is_closed()));
+        // (the idle timer starts again with the first ack-eliciting packet sent after the last one received, not with each)
+        assert!(l.now - started <= Duration::from_secs(5), "{:?}", l.now - started);
+        assert!(l.client_events.iter().any(|e| matches!(e, Event::Closed(CloseReason::IdleTimeout))), "{:?}", l.client_events);
     }
 
     // ------------------------------------------------------------------------------------------------------------------------

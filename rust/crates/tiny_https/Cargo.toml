@@ -22,6 +22,10 @@ net = []
 # for production: the signing is not constant-time and none of it has been reviewed. Off by default, so the
 # default build contains no server and no signing code. See src/tls/server.rs.
 server = ["net"]
+# Mozilla's root store for TLS servers, built in (`mozilla_roots::trust_store()`; roots/mozilla.pem, about 190 KB, made by
+# tools/gen_mozilla_roots.py from NSS's certdata.txt): for machines whose own CA bundle is missing or old. Pure: it
+# adds no I/O and works with or without `net`. Off by default; see src/mozilla_roots.rs.
+mozilla-roots = []
 
 [[example]]
 name = "async_get"
@@ -32,11 +36,27 @@ name = "bench"
 required-features = ["net"]
 
 [[example]]
+name = "bench_net"
+required-features = ["server"]
+
+[[example]]
 name = "cms_verify"
 required-features = ["net"]
 
 [[example]]
 name = "fetch"
+required-features = ["net"]
+
+[[example]]
+name = "field_check"
+required-features = ["net"]
+
+[[example]]
+name = "quic_probe"
+required-features = ["net"]
+
+[[example]]
+name = "native_roots"
 required-features = ["net"]
 
 [[example]]
@@ -51,6 +71,10 @@ required-features = ["server"]
 name = "sumdb"
 required-features = ["net"]
 
+[[example]]
+name = "tuf_refresh"
+required-features = ["net"]
+
 [[test]]
 name = "interop_openssl"
 required-features = ["net"]
@@ -58,6 +82,14 @@ required-features = ["net"]
 [[test]]
 name = "system_roots"
 required-features = ["net"]
+
+[[test]]
+name = "native_roots"
+required-features = ["net"]
+
+[[test]]
+name = "mozilla_roots"
+required-features = ["mozilla-roots"]
 
 [[test]]
 name = "h2_client_interop"

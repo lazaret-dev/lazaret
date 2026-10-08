@@ -1,4 +1,4 @@
-//! ECDSA signature verification over NIST P-256 and P-384.
+//! ECDSA signature verification over NIST P-256, P-384 and P-521.
 //!
 //! Verification only, so every value is public and nothing here is constant time (signing and the key
 //! exchange, which do handle secrets, are in `ecdh.rs` and elsewhere and are written differently). What this
@@ -6,8 +6,10 @@
 //! server's `CertificateVerify`) and for a client that opens many connections that is most of what a handshake
 //! costs:
 //!
-//! * field elements are fixed-size limb arrays (`[u64; N]`, N = 4 or 6, a const generic, so the loops of the
-//!   Montgomery multiplication are unrolled and nothing is allocated);
+//! * field elements are fixed-size limb arrays (`[u64; N]`, N = 4, 6 or 9, a const generic, so the loops of the
+//!   Montgomery multiplication are unrolled and nothing is allocated; the arithmetic is in `bignum::fixed`, which RSA
+//!   uses too), and P-256's prime has a reduction of its own, one product a step where the general one makes five
+//!   (B-49);
 //! * `u1*G + u2*Q` is computed by one interleaved pass over the width-w non-adjacent forms of the two scalars
 //!   (Straus-Shamir): one doubling per bit, and an addition only at the nonzero digits (about one in w + 1);
 //! * the multiples of the generator come from a table of 32 odd multiples in affine form (built once, on first
@@ -20,7 +22,7 @@
 //! the reference the new one is compared with, on random keys and signatures and on the special cases of the
 //! group law (adding a point to itself, to its negative).
 
-use super::bignum::Mont;
+use super::bignum::fixed::{add_carry, compare, is_zero, limbs_from_be, limbs_from_hex, sub_borrow, Fe, Field};
 use super::sha2::HashAlg;
 use crate::asn1::{self, Der};
 use std::cmp::Ordering;
@@ -30,213 +32,18 @@ use std::sync::OnceLock;
 pub enum Curve {
     P256,
     P384,
+    /// For verification only (certificates, a TLS signature): the key exchange offers P-256 and P-384.
+    P521,
 }
 
 impl Curve {
+    /// Bytes of a coordinate (and of a scalar) in an encoding.
     pub fn coord_len(self) -> usize {
         match self {
             Curve::P256 => 32,
             Curve::P384 => 48,
+            Curve::P521 => 66,
         }
-    }
-}
-
-/// A number below a modulus of N limbs, least significant limb first.
-type Fe<const N: usize> = [u64; N];
-
-fn is_zero<const N: usize>(a: &Fe<N>) -> bool {
-    a.iter().all(|&x| x == 0)
-}
-
-fn compare<const N: usize>(a: &Fe<N>, b: &Fe<N>) -> Ordering {
-    for i in (0..N).rev() {
-        if a[i] != b[i] {
-            return a[i].cmp(&b[i]);
-        }
-    }
-    Ordering::Equal
-}
-
-/// a + b, and whether it carried out of the top limb.
-#[inline(always)]
-fn add_carry<const N: usize>(a: &Fe<N>, b: &Fe<N>) -> (Fe<N>, bool) {
-    let mut r = [0u64; N];
-    let mut carry = 0u64;
-    for i in 0..N {
-        let s = a[i] as u128 + b[i] as u128 + carry as u128;
-        r[i] = s as u64;
-        carry = (s >> 64) as u64;
-    }
-    (r, carry != 0)
-}
-
-/// a - b, and whether it borrowed from beyond the top limb.
-#[inline(always)]
-fn sub_borrow<const N: usize>(a: &Fe<N>, b: &Fe<N>) -> (Fe<N>, bool) {
-    let mut r = [0u64; N];
-    let mut borrow = 0u64;
-    for i in 0..N {
-        let (d1, b1) = a[i].overflowing_sub(b[i]);
-        let (d2, b2) = d1.overflowing_sub(borrow);
-        r[i] = d2;
-        borrow = (b1 | b2) as u64;
-    }
-    (r, borrow != 0)
-}
-
-/// Big-endian bytes (at most 8 * N of them) as limbs.
-fn limbs_from_be<const N: usize>(bytes: &[u8]) -> Option<Fe<N>> {
-    if bytes.len() > 8 * N {
-        return None;
-    }
-    let mut r = [0u64; N];
-    for (i, b) in bytes.iter().rev().enumerate() {
-        r[i / 8] |= (*b as u64) << (8 * (i % 8));
-    }
-    Some(r)
-}
-
-fn limbs_from_hex<const N: usize>(hex: &str) -> Fe<N> {
-    limbs_from_be(&crate::util::unhex(hex)).expect("constant fits")
-}
-
-/// Arithmetic modulo an odd prime of N limbs, in Montgomery form (R = 2^(64 N)).
-struct Field<const N: usize> {
-    m: Fe<N>,
-    /// -m^-1 mod 2^64
-    m0inv: u64,
-    /// R mod m: the Montgomery form of 1
-    one: Fe<N>,
-    /// R^2 mod m
-    r2: Fe<N>,
-}
-
-impl<const N: usize> Field<N> {
-    fn new(modulus_hex: &str) -> Field<N> {
-        let m: Fe<N> = limbs_from_hex(modulus_hex);
-        let mut inv = 1u64;
-        for _ in 0..6 {
-            inv = inv.wrapping_mul(2u64.wrapping_sub(m[0].wrapping_mul(inv)));
-        }
-        // R mod m and R^2 mod m by the generic code, which has no assumption about the form of the modulus
-        let mont = Mont::new(&m);
-        let one_v = mont.one();
-        let r2_v = mont.to_mont(&one_v);
-        let mut one = [0u64; N];
-        let mut r2 = [0u64; N];
-        one.copy_from_slice(&one_v);
-        r2.copy_from_slice(&r2_v);
-        Field { m, m0inv: inv.wrapping_neg(), one, r2 }
-    }
-
-    /// `t` (with the carry out of its top limb) reduced once: minus m if it is at least m.
-    #[inline(always)]
-    fn reduce_once(&self, t: Fe<N>, carry: bool) -> Fe<N> {
-        let (d, borrow) = sub_borrow(&t, &self.m);
-        if carry || !borrow {
-            d
-        } else {
-            t
-        }
-    }
-
-    #[inline(always)]
-    fn add(&self, a: &Fe<N>, b: &Fe<N>) -> Fe<N> {
-        let (s, carry) = add_carry(a, b);
-        self.reduce_once(s, carry)
-    }
-
-    #[inline(always)]
-    fn sub(&self, a: &Fe<N>, b: &Fe<N>) -> Fe<N> {
-        let (d, borrow) = sub_borrow(a, b);
-        if borrow {
-            add_carry(&d, &self.m).0
-        } else {
-            d
-        }
-    }
-
-    /// m - a (0 for 0).
-    #[inline(always)]
-    fn neg(&self, a: &Fe<N>) -> Fe<N> {
-        if is_zero(a) {
-            *a
-        } else {
-            sub_borrow(&self.m, a).0
-        }
-    }
-
-    /// The Montgomery product a * b / R mod m (CIOS), for a and b below m.
-    #[inline(always)]
-    fn mul(&self, a: &Fe<N>, b: &Fe<N>) -> Fe<N> {
-        let mut t = [0u64; N];
-        let mut tn = 0u64; // the limb above t
-        for i in 0..N {
-            let bi = b[i] as u128;
-            let mut c = 0u128;
-            for j in 0..N {
-                let s = t[j] as u128 + a[j] as u128 * bi + c;
-                t[j] = s as u64;
-                c = s >> 64;
-            }
-            let s = tn as u128 + c;
-            tn = s as u64;
-            let tn1 = (s >> 64) as u64; // the limb above that
-
-            let q = t[0].wrapping_mul(self.m0inv) as u128;
-            let s = t[0] as u128 + q * self.m[0] as u128;
-            let mut c = s >> 64;
-            for j in 1..N {
-                let s = t[j] as u128 + q * self.m[j] as u128 + c;
-                t[j - 1] = s as u64;
-                c = s >> 64;
-            }
-            let s = tn as u128 + c;
-            t[N - 1] = s as u64;
-            tn = tn1 + (s >> 64) as u64;
-        }
-        self.reduce_once(t, tn != 0)
-    }
-
-    #[inline(always)]
-    fn sqr(&self, a: &Fe<N>) -> Fe<N> {
-        self.mul(a, a)
-    }
-
-    fn to_mont(&self, a: &Fe<N>) -> Fe<N> {
-        self.mul(a, &self.r2)
-    }
-
-    #[cfg(test)]
-    fn from_mont(&self, a: &Fe<N>) -> Fe<N> {
-        let mut one = [0u64; N];
-        one[0] = 1;
-        self.mul(a, &one)
-    }
-
-    /// The inverse of a nonzero value (Montgomery form in, Montgomery form out) by Fermat's little theorem:
-    /// a^(m-2), in windows of four bits.
-    fn inv(&self, a: &Fe<N>) -> Fe<N> {
-        let mut e = self.m;
-        e[0] -= 2; // the low limb of every modulus used here is far above 2
-        let mut table = [self.one; 16];
-        table[1] = *a;
-        for i in 2..16 {
-            table[i] = self.mul(&table[i - 1], a);
-        }
-        let mut r = self.one;
-        for limb in (0..N).rev() {
-            for nibble in (0..16).rev() {
-                for _ in 0..4 {
-                    r = self.sqr(&r);
-                }
-                let d = ((e[limb] >> (4 * nibble)) & 15) as usize;
-                if d != 0 {
-                    r = self.mul(&r, &table[d]);
-                }
-            }
-        }
-        r
     }
 }
 
@@ -263,8 +70,10 @@ const G_TABLE: usize = 1 << (W_G - 2);
 /// The same for the public key's scalar, whose table is made for each signature.
 const W_Q: u32 = 5;
 const Q_TABLE: usize = 1 << (W_Q - 2);
-/// Digits of a width-w NAF of a number of up to 384 bits: one more than its bits, and a spare.
-const MAX_DIGITS: usize = 64 * 6 + 2;
+/// The most limbs a number has here (P-521: 9).
+const MAX_LIMBS: usize = 9;
+/// Digits of a width-w NAF of a number of up to 64 * MAX_LIMBS bits: one more than its bits, and a spare.
+const MAX_DIGITS: usize = 64 * MAX_LIMBS + 2;
 
 /// A curve y^2 = x^3 - 3x + b over GF(p) with a prime group order n (and cofactor 1).
 struct Group<const N: usize> {
@@ -272,17 +81,22 @@ struct Group<const N: usize> {
     n: Field<N>,
     b: Fe<N>,
     g: Aff<N>,
+    /// Bytes of a coordinate in an encoded point (the field's size in bytes: 66 for P-521, less than 8 N).
+    coord_len: usize,
+    /// Bits of the group order (521 for P-521): how many of a digest's leftmost bits make the number signed.
+    n_bits: usize,
     /// 1G, 3G, 5G, ..., built on first use.
     g_table: OnceLock<Vec<Aff<N>>>,
 }
 
 impl<const N: usize> Group<N> {
-    fn new(p: &str, b: &str, gx: &str, gy: &str, n: &str) -> Group<N> {
+    fn new(p: &str, b: &str, gx: &str, gy: &str, n: &str, coord_len: usize) -> Group<N> {
         let f = Field::<N>::new(p);
         let order = Field::<N>::new(n);
         let to_m = |h: &str| f.to_mont(&limbs_from_hex(h));
         let (b, gx, gy) = (to_m(b), to_m(gx), to_m(gy));
-        Group { f, n: order, b, g: Aff { x: gx, y: gy }, g_table: OnceLock::new() }
+        let n_bits = order.m.iter().rposition(|&l| l != 0).map_or(0, |i| 64 * i + 64 - order.m[i].leading_zeros() as usize);
+        Group { f, n: order, b, g: Aff { x: gx, y: gy }, coord_len, n_bits, g_table: OnceLock::new() }
     }
 
     fn infinity(&self) -> Jac<N> {
@@ -470,7 +284,7 @@ impl<const N: usize> Group<N> {
     /// The point of an uncompressed SEC1 public key (0x04 || X || Y), if it is one: right length, coordinates
     /// below the field prime, and on the curve.
     fn public_point(&self, public_key: &[u8]) -> Option<Aff<N>> {
-        let cl = 8 * N;
+        let cl = self.coord_len;
         if public_key.len() != 1 + 2 * cl || public_key[0] != 0x04 {
             return None;
         }
@@ -484,7 +298,6 @@ impl<const N: usize> Group<N> {
     }
 
     fn verify(&self, public_key: &[u8], digest: &[u8], sig_der: &[u8]) -> bool {
-        let cl = 8 * N;
         let Some(q) = self.public_point(public_key) else { return false };
 
         // the signature: SEQUENCE { INTEGER r, INTEGER s }, both in 1..n
@@ -504,8 +317,17 @@ impl<const N: usize> Group<N> {
             }
         }
 
-        // e: the leftmost bits of the digest as a number, below 2^(8 cl), so below 2 n
-        let Some(mut e) = limbs_from_be::<N>(&digest[..digest.len().min(cl)]) else { return false };
+        // e: as many of the digest's leftmost bits as the order has (SEC 1 section 4.1.3, step 5), as a number, so below
+        // 2^n_bits and so below 2 n. (For P-256 and P-384 that is whole bytes; the order of P-521 has 521 bits, more than
+        // any SHA-2 digest, which is then taken whole: the shift is for a longer one.)
+        let take = digest.len().min(self.n_bits.div_ceil(8));
+        let Some(mut e) = limbs_from_be::<N>(&digest[..take]) else { return false };
+        let extra = (8 * take).saturating_sub(self.n_bits);
+        if extra > 0 {
+            for i in 0..N {
+                e[i] = (e[i] >> extra) | if i + 1 < N { e[i + 1] << (64 - extra) } else { 0 };
+            }
+        }
         if compare(&e, &self.n.m) != Ordering::Less {
             e = sub_borrow(&e, &self.n.m).0;
         }
@@ -538,9 +360,10 @@ impl<const N: usize> Group<N> {
 /// Every digit is zero or odd with absolute value below 2^(w-1), and no two nonzero digits are less than w apart,
 /// so a nonzero one comes about every w + 1 bits. (w is at most 7 so that a digit fits in an `i8`.)
 fn wnaf(k: &[u64], w: u32, out: &mut [i8; MAX_DIGITS]) -> usize {
-    debug_assert!((2..=7).contains(&w) && k.len() <= 6);
+    debug_assert!((2..=7).contains(&w) && k.len() <= MAX_LIMBS);
     // one limb more than k has: adding the correction for a negative digit can carry out of the top
-    let mut v = [0u64; 7];
+    const V: usize = MAX_LIMBS + 1;
+    let mut v = [0u64; V];
     v[..k.len()].copy_from_slice(k);
     let mask = (1u64 << w) - 1;
     let half = 1u64 << (w - 1);
@@ -566,7 +389,7 @@ fn wnaf(k: &[u64], w: u32, out: &mut [i8; MAX_DIGITS]) -> usize {
                     }
                 }
                 digit = -(add as i8);
-                if top < 7 && v[top] != 0 {
+                if top < V && v[top] != 0 {
                     top += 1;
                 }
             } else {
@@ -587,7 +410,7 @@ fn wnaf(k: &[u64], w: u32, out: &mut [i8; MAX_DIGITS]) -> usize {
         len += 1;
         // shift right by one
         for i in 0..top {
-            v[i] = (v[i] >> 1) | if i + 1 < 7 { v[i + 1] << 63 } else { 0 };
+            v[i] = (v[i] >> 1) | if i + 1 < V { v[i + 1] << 63 } else { 0 };
         }
         while top > 0 && v[top - 1] == 0 {
             top -= 1;
@@ -605,6 +428,7 @@ fn p256() -> &'static Group<4> {
             "6b17d1f2e12c4247f8bce6e563a440f277037d812deb33a0f4a13945d898c296",
             "4fe342e2fe1a7f9b8ee7eb4a7c0f9e162bce33576b315ececbb6406837bf51f5",
             "ffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc632551",
+            32,
         )
     })
 }
@@ -618,6 +442,23 @@ fn p384() -> &'static Group<6> {
             "aa87ca22be8b05378eb1c71ef320ad746e1d3b628ba79b9859f741e082542a385502f25dbf55296c3a545e3872760ab7",
             "3617de4a96262c6f5d9e98bf9292dc29f8f41dbd289a147ce9da3113b5f0b8c00a60b1ce1d7e819d7a431d7c90ea0e5f",
             "ffffffffffffffffffffffffffffffffffffffffffffffffc7634d81f4372ddf581a0db248b0a77aecec196accc52973",
+            48,
+        )
+    })
+}
+
+/// The constants are SEC 2 section 2.6.1's (read back from `openssl ecparam -name secp521r1 -param_enc explicit`):
+/// p = 2^521 - 1, a = -3.
+fn p521() -> &'static Group<9> {
+    static G: OnceLock<Group<9>> = OnceLock::new();
+    G.get_or_init(|| {
+        Group::new(
+            "01ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+            "0051953eb9618e1c9a1f929a21a0b68540eea2da725b99b315f3b8b489918ef109e156193951ec7e937b1652c0bd3bb1bf073573df883d2c34f1ef451fd46b503f00",
+            "00c6858e06b70404e9cd9e3ecb662395b4429c648139053fb521f828af606b4d3dbaa14b5e77efe75928fe1dc127a2ffa8de3348b3c1856a429bf97e7e31c2e5bd66",
+            "011839296a789a3bc0045c8a5fb42c7d1bd998f54449579b446817afbd17273e662c97ee72995ef42640c550b9013fad0761353c7086a272c24088be94769fd16650",
+            "01fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffa51868783bf2f966b7fcc0148f709a5d03bb5c9b8899c47aebb6fb71e91386409",
+            66,
         )
     })
 }
@@ -628,6 +469,7 @@ pub fn is_valid_public_key(curve: Curve, public_key: &[u8]) -> bool {
     match curve {
         Curve::P256 => p256().public_point(public_key).is_some(),
         Curve::P384 => p384().public_point(public_key).is_some(),
+        Curve::P521 => p521().public_point(public_key).is_some(),
     }
 }
 
@@ -638,6 +480,7 @@ pub fn verify_prehashed(curve: Curve, public_key: &[u8], digest: &[u8], sig_der:
     match curve {
         Curve::P256 => p256().verify(public_key, digest, sig_der),
         Curve::P384 => p384().verify(public_key, digest, sig_der),
+        Curve::P521 => p521().verify(public_key, digest, sig_der),
     }
 }
 
@@ -686,6 +529,7 @@ mod tests {
         pub(super) fn params(curve: Curve) -> &'static Params {
             static P256: OnceLock<Params> = OnceLock::new();
             static P384: OnceLock<Params> = OnceLock::new();
+            static P521: OnceLock<Params> = OnceLock::new();
             match curve {
                 Curve::P256 => P256.get_or_init(|| {
                     build(
@@ -703,6 +547,15 @@ mod tests {
                         "aa87ca22be8b05378eb1c71ef320ad746e1d3b628ba79b9859f741e082542a385502f25dbf55296c3a545e3872760ab7",
                         "3617de4a96262c6f5d9e98bf9292dc29f8f41dbd289a147ce9da3113b5f0b8c00a60b1ce1d7e819d7a431d7c90ea0e5f",
                         "ffffffffffffffffffffffffffffffffffffffffffffffffc7634d81f4372ddf581a0db248b0a77aecec196accc52973",
+                        )
+                }),
+                Curve::P521 => P521.get_or_init(|| {
+                    build(
+                        "01ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+                        "0051953eb9618e1c9a1f929a21a0b68540eea2da725b99b315f3b8b489918ef109e156193951ec7e937b1652c0bd3bb1bf073573df883d2c34f1ef451fd46b503f00",
+                        "00c6858e06b70404e9cd9e3ecb662395b4429c648139053fb521f828af606b4d3dbaa14b5e77efe75928fe1dc127a2ffa8de3348b3c1856a429bf97e7e31c2e5bd66",
+                        "011839296a789a3bc0045c8a5fb42c7d1bd998f54449579b446817afbd17273e662c97ee72995ef42640c550b9013fad0761353c7086a272c24088be94769fd16650",
+                        "01fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffa51868783bf2f966b7fcc0148f709a5d03bb5c9b8899c47aebb6fb71e91386409",
                         )
                 }),
             }
@@ -857,10 +710,29 @@ mod tests {
 
     fn der_sig(r: &[u8], s: &[u8]) -> Vec<u8> {
         let (r, s) = (der_int(r), der_int(s));
-        let mut out = vec![0x30, (r.len() + s.len()) as u8];
+        let len = r.len() + s.len();
+        // (P-521's r and s take more than 127 bytes together: the long form of the length)
+        let mut out = if len < 0x80 { vec![0x30, len as u8] } else { vec![0x30, 0x81, len as u8] };
         out.extend(r);
         out.extend(s);
         out
+    }
+
+    /// The leftmost bits of `digest`, as many as the order `n` has (SEC 1 section 4.1.3, step 5), as a number.
+    fn digest_number(n: &[u64], digest: &[u8]) -> Vec<u64> {
+        let bits = bignum::bit_len(n);
+        let take = digest.len().min(bits.div_ceil(8));
+        let mut e = bignum::from_be_bytes(&digest[..take]);
+        let extra = (8 * take).saturating_sub(bits);
+        for _ in 0..extra {
+            let mut carry = 0;
+            for l in e.iter_mut().rev() {
+                let next = *l & 1;
+                *l = (*l >> 1) | (carry << 63);
+                carry = next;
+            }
+        }
+        e
     }
 
     /// Signs `digest` with private key `d` and nonce `k` using the reference arithmetic: (public key, DER signature).
@@ -878,7 +750,7 @@ mod tests {
         if bignum::cmp(&r, nm.modulus()) != Ordering::Less {
             r = nm.sub(&r, &nm.fit(nm.modulus()));
         }
-        let mut e = nm.fit(&bignum::from_be_bytes(&digest[..digest.len().min(cl)]));
+        let mut e = nm.fit(&digest_number(nm.modulus(), digest));
         if bignum::cmp(&e, nm.modulus()) != Ordering::Less {
             e = nm.sub(&e, &nm.fit(nm.modulus()));
         }
@@ -891,7 +763,7 @@ mod tests {
 
     #[test]
     fn generators_are_on_curve_and_order_is_correct() {
-        for c in [Curve::P256, Curve::P384] {
+        for c in [Curve::P256, Curve::P384, Curve::P521] {
             let pr = reference::params(c);
             assert!(pr.on_curve(&pr.gx, &pr.gy), "G not on curve");
             // n * G must be the point at infinity
@@ -908,6 +780,7 @@ mod tests {
         }
         assert!(p256().on_curve(&p256().g));
         assert!(p384().on_curve(&p384().g));
+        assert!(p521().on_curve(&p521().g));
         // (n - 1) G + G is infinity with the new code too
         fn group_order_check<const N: usize>(g: &Group<N>) {
             let (nm1, _) = sub_borrow(&g.n.m, &{
@@ -922,6 +795,7 @@ mod tests {
         }
         group_order_check(p256());
         group_order_check(p384());
+        group_order_check(p521());
     }
 
     #[test]
@@ -929,7 +803,7 @@ mod tests {
         let mut state = 7u64;
         for w in 2..=7u32 {
             for round in 0..400 {
-                let limbs = 1 + round % 6;
+                let limbs = 1 + round % MAX_LIMBS;
                 let k: Vec<u64> = (0..limbs).map(|_| match splitmix(&mut state) % 5 {
                     0 => 0,
                     1 => u64::MAX,
@@ -954,8 +828,8 @@ mod tests {
                 }
                 assert!(digits[len..].iter().all(|&d| d == 0));
                 // sum of d_i 2^i == k, in a number twice as wide as needed: positives minus negatives
-                let mut pos = vec![0u64; 8];
-                let mut neg = vec![0u64; 8];
+                let mut pos = vec![0u64; MAX_LIMBS + 2];
+                let mut neg = vec![0u64; MAX_LIMBS + 2];
                 for (i, &d) in digits[..len].iter().enumerate() {
                     if d == 0 {
                         continue;
@@ -972,8 +846,8 @@ mod tests {
                 }
                 // pos - neg == k (all limbs of k, then zeros)
                 let mut borrow = 0u64;
-                let mut diff = vec![0u64; 8];
-                for i in 0..8 {
+                let mut diff = vec![0u64; MAX_LIMBS + 2];
+                for i in 0..MAX_LIMBS + 2 {
                     let (a, b1) = pos[i].overflowing_sub(neg[i]);
                     let (c, b2) = a.overflowing_sub(borrow);
                     diff[i] = c;
@@ -981,7 +855,7 @@ mod tests {
                 }
                 assert_eq!(borrow, 0);
                 let mut want = k.clone();
-                want.resize(8, 0);
+                want.resize(MAX_LIMBS + 2, 0);
                 assert_eq!(diff, want, "w {w} k {k:x?}");
             }
         }
@@ -1028,6 +902,11 @@ mod tests {
         check_mul_add(p384(), Curve::P384, 30);
     }
 
+    #[test]
+    fn the_new_scalar_multiplication_matches_the_reference_p521() {
+        check_mul_add(p521(), Curve::P521, 12);
+    }
+
     /// The special cases of the group law, which a random input never reaches: Q = G with equal scalars (the sum
     /// meets the same point, so an addition is a doubling), Q = -G (it meets the negative: infinity), zero
     /// scalars, and the largest ones.
@@ -1062,7 +941,7 @@ mod tests {
             for l in k.iter_mut() {
                 *l = splitmix(&mut state);
             }
-            k[N - 1] &= 0x7fff_ffff; // below n
+            k[N - 1] &= g.n.m[N - 1] >> 1; // below n
             assert!(affine(&g.mul_add(&k, &k, &minus_g)).is_none(), "kG - kG");
             // and u1 G + u2 G = (u1 + u2) G, whatever the digits do when they meet
             let mut k2 = k;
@@ -1084,11 +963,12 @@ mod tests {
     fn special_cases_of_the_group_law_are_right() {
         check_special_cases(p256());
         check_special_cases(p384());
+        check_special_cases(p521());
     }
 
     #[test]
     fn signatures_made_with_the_reference_arithmetic_verify_and_tampered_ones_do_not() {
-        for (curve, rounds) in [(Curve::P256, 40), (Curve::P384, 20)] {
+        for (curve, rounds) in [(Curve::P256, 40), (Curve::P384, 20), (Curve::P521, 12)] {
             let pr = reference::params(curve);
             let mut state = 42u64 + rounds as u64;
             for round in 0..rounds {
@@ -1105,7 +985,7 @@ mod tests {
                     let mut bad = digest.clone();
                     bad[round % digest.len()] ^= 1 << (round % 8);
                     // (a bit beyond the order's width, in a long digest, is not part of the number)
-                    if len <= curve.coord_len() {
+                    if 8 * len <= bignum::bit_len(pr.n.modulus()) {
                         assert!(!verify_prehashed(curve, &public, &bad, &sig), "{curve:?} round {round}: bad digest");
                     }
                 }
@@ -1172,7 +1052,8 @@ mod tests {
         let big_r = pr.affine_point(&x_m, &y_m);
         let mut state = 0xabcdef ^ cl as u64;
         for round in 0..3 {
-            let digest: Vec<u8> = (0..cl).map(|_| splitmix(&mut state) as u8).collect();
+            // (64 bytes at most: the order of P-521 has 521 bits, and a longer digest would be cut)
+            let digest: Vec<u8> = (0..cl.min(64)).map(|_| splitmix(&mut state) as u8).collect();
             let e = nm.fit(&bignum::from_be_bytes(&digest));
             assert_eq!(bignum::cmp(&e, &n), Ordering::Less, "(the chance that a random digest is not below n is 2^-32)");
             let s = random_scalar(pr, &mut state);
@@ -1207,6 +1088,7 @@ mod tests {
     fn an_x_coordinate_between_n_and_p_is_matched_by_r_equal_to_x_minus_n() {
         check_x_between_n_and_p(Curve::P256);
         check_x_between_n_and_p(Curve::P384);
+        check_x_between_n_and_p(Curve::P521);
     }
 
     #[test]

@@ -122,12 +122,16 @@ SDIST_TOP_FILES = ["pyproject.toml", "README.md", "LICENSE", "LICENSE-UNICODE"]
 RUST_TOP_FILES = ["Cargo.toml", "Cargo.lock", "LICENSE-UNICODE", "NOTICE"]
 RUST_CRATE_DIRS = {"src": (".rs",), "rules": (".json",)}
 # tiny_https (taken into rust/crates as it was handed over: NET-1) also
-# carries its LICENSE and the test and example sources its manifest declares
-# (cargo reads every target of a manifest before it builds any), but not its
-# test data, its test vectors in src/ or its documents: the library is built
-# from the sdist, its tests are not.
-RUST_VENDORED = {"tiny_https": {"files": ("LICENSE",), "dirs": {"tests": (".rs",), "examples": (".rs",)},
-                                "skip_suffixes": {"src": (".txt",)}, "skip_top": {"tests": {"data"}}}}
+# carries its LICENSE, the test and example sources its manifest declares
+# (cargo reads every target of a manifest before it builds any) and the
+# Sigstore TUF root its tuf module builds in (roots/*.json), but not its test
+# data, its test vectors in src/, Mozilla's root store (roots/mozilla.pem, for
+# a feature Lazaret does not use) or its documents: the library is built from
+# the sdist, its tests are not.
+RUST_VENDORED = {"tiny_https": {"files": ("LICENSE",), "dirs": {"tests": (".rs",), "examples": (".rs",),
+                                                                "roots": (".json",)},
+                                "skip_suffixes": {"src": (".txt",), "roots": (".pem",)},
+                                "skip_top": {"tests": {"data"}}}}
 # The oldest macOS a library built here supports (the release wheels' tags):
 # cargo is given it as MACOSX_DEPLOYMENT_TARGET.
 MACOS_MINIMUM = {"arm64": (11, 0), "x86_64": (10, 12)}

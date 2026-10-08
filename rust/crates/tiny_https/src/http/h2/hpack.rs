@@ -529,10 +529,15 @@ mod tests {
     #[test]
     fn integers_that_are_too_large_or_cut_short_are_errors() {
         let mut pos = 0;
-        // 2^32 in a 7-bit prefix
-        let mut big = Vec::new();
-        encode_int(&mut big, 7, 0, u32::MAX as usize + 1);
+        // 2^32 in a 7-bit prefix (written out: `encode_int` takes a usize, which on a 32-bit target cannot hold it)
+        let big = [0x7f, 0x81, 0xff, 0xff, 0xff, 0x0f];
         assert_eq!(decode_int(&big, &mut pos, 7), Err(Error::Integer));
+        #[cfg(target_pointer_width = "64")]
+        {
+            let mut encoded = Vec::new();
+            encode_int(&mut encoded, 7, 0, 1 << 32);
+            assert_eq!(encoded, big);
+        }
         // written with six continuation bytes, though it is small
         pos = 0;
         assert_eq!(decode_int(&[0x7f, 0x80, 0x80, 0x80, 0x80, 0x80, 0x00], &mut pos, 7), Err(Error::Integer));

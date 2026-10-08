@@ -7,6 +7,7 @@ use super::pool::{BlockingTask, Pool};
 use std::io::{self, Read, Write};
 use std::net::{Shutdown, TcpStream};
 use std::pin::Pin;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
@@ -27,6 +28,46 @@ pub(crate) struct Io {
     /// socket's own timeouts, set when it was connected, are in force).
     pub(crate) timeout: Duration,
     pub(crate) deadline: Option<Instant>,
+    /// The slot this connection holds under a per-host connection limit (`Client::max_connections_per_host`), given back
+    /// when it closes.
+    pub(crate) permit: Option<super::slots::Permit>,
+    /// The read and write timeouts that are set on the socket (see [`Armed`]), so that a connection that is used again with
+    /// the same limits is not set again (two system calls a request: BACKLOG B-90).
+    pub(crate) armed: Armed,
+}
+
+/// The timeouts set on a socket: read and write, in nanoseconds plus one; 0 is not known (set it).
+#[derive(Debug, Default)]
+pub(crate) struct Armed([AtomicU64; 2]);
+
+impl Armed {
+    /// The socket was given these timeouts.
+    pub(crate) fn both(t: Duration) -> Armed {
+        let v = Armed::code(t);
+        Armed([AtomicU64::new(v), AtomicU64::new(v)])
+    }
+
+    fn code(t: Duration) -> u64 {
+        u64::try_from(t.as_nanos()).unwrap_or(u64::MAX - 1).saturating_add(1)
+    }
+
+    /// Sets the read (or write) timeout of `tcp` to `t`, unless it is set to that already.
+    fn set(&self, tcp: &TcpStream, read: bool, t: Duration) -> io::Result<()> {
+        let slot = &self.0[usize::from(!read)];
+        let v = Armed::code(t);
+        if slot.load(Ordering::Relaxed) == v {
+            return Ok(());
+        }
+        // (unknown while it is being set: a failure leaves it so)
+        slot.store(0, Ordering::Relaxed);
+        if read {
+            tcp.set_read_timeout(Some(t))?;
+        } else {
+            tcp.set_write_timeout(Some(t))?;
+        }
+        slot.store(v, Ordering::Relaxed);
+        Ok(())
+    }
 }
 
 impl Io {
@@ -38,12 +79,7 @@ impl Io {
         if left.is_zero() {
             return Err(deadline_error());
         }
-        let t = Some(left.min(self.timeout));
-        if read {
-            self.tcp.set_read_timeout(t)
-        } else {
-            self.tcp.set_write_timeout(t)
-        }
+        self.armed.set(&self.tcp, read, left.min(self.timeout))
     }
 
     /// A timeout that happened because the deadline passed is reported as such.
@@ -60,8 +96,8 @@ impl Io {
     pub(crate) fn rearm(&mut self, timeout: Duration, deadline: Option<Instant>) -> io::Result<()> {
         self.timeout = timeout;
         self.deadline = deadline;
-        self.tcp.set_read_timeout(Some(timeout))?;
-        self.tcp.set_write_timeout(Some(timeout))
+        self.armed.set(&self.tcp, true, timeout)?;
+        self.armed.set(&self.tcp, false, timeout)
     }
 
     /// True if the peer has neither hung up nor sent anything: what a connection that is waiting
@@ -69,6 +105,10 @@ impl Io {
     /// that is waiting, such as a TLS alert, means the connection is not to be trusted with a
     /// request.) The socket is polled without blocking and put back as it was.
     pub(crate) fn peer_quiet(&self) -> bool {
+        // one system call where the system has a flag for a read that does not wait (BACKLOG B-90)
+        if let Some(quiet) = sys::peek_quiet(&self.tcp) {
+            return quiet;
+        }
         if self.tcp.set_nonblocking(true).is_err() {
             return false;
         }
@@ -103,6 +143,50 @@ impl Write for Io {
     }
 }
 
+/// A look at a socket that does not wait, without making the socket non-blocking and back (which is two more system calls).
+mod sys {
+    use std::net::TcpStream;
+
+    /// `MSG_PEEK | MSG_DONTWAIT` where the values are known.
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    const FLAGS: i32 = 0x02 | 0x40;
+    #[cfg(any(target_os = "macos", target_os = "ios", target_os = "freebsd", target_os = "netbsd", target_os = "openbsd", target_os = "dragonfly"))]
+    const FLAGS: i32 = 0x02 | 0x80;
+
+    #[cfg(any(target_os = "linux", target_os = "android", target_os = "macos", target_os = "ios", target_os = "freebsd", target_os = "netbsd", target_os = "openbsd", target_os = "dragonfly"))]
+    extern "C" {
+        fn recv(socket: i32, buf: *mut core::ffi::c_void, len: usize, flags: i32) -> isize;
+    }
+
+    /// Whether nothing is waiting on the socket and the peer has not hung up (`None`: this system has no such call here,
+    /// and the caller looks the long way).
+    #[cfg(any(target_os = "linux", target_os = "android", target_os = "macos", target_os = "ios", target_os = "freebsd", target_os = "netbsd", target_os = "openbsd", target_os = "dragonfly"))]
+    pub(super) fn peek_quiet(tcp: &TcpStream) -> Option<bool> {
+        use std::os::fd::AsRawFd;
+        let mut byte = 0u8;
+        loop {
+            // SAFETY: `recv` writes at most one byte into `byte`, which lives for the call; the descriptor is the socket's,
+            // open for as long as `tcp` is borrowed.
+            let n = unsafe { recv(tcp.as_raw_fd(), (&mut byte as *mut u8).cast(), 1, FLAGS) };
+            if n >= 0 {
+                // a byte (something is waiting) or end of file (the peer hung up)
+                return Some(false);
+            }
+            let e = std::io::Error::last_os_error();
+            match e.kind() {
+                std::io::ErrorKind::WouldBlock => return Some(true),
+                std::io::ErrorKind::Interrupted => continue,
+                _ => return Some(false),
+            }
+        }
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "android", target_os = "macos", target_os = "ios", target_os = "freebsd", target_os = "netbsd", target_os = "openbsd", target_os = "dragonfly")))]
+    pub(super) fn peek_quiet(_: &TcpStream) -> Option<bool> {
+        None
+    }
+}
+
 fn task_error(e: super::pool::TaskError) -> io::Error {
     io::Error::new(io::ErrorKind::Other, e)
 }
@@ -127,7 +211,7 @@ pub struct ThreadedStream {
 
 impl ThreadedStream {
     pub fn new(tcp: TcpStream, pool: Pool) -> ThreadedStream {
-        ThreadedStream::from_io(Io { tcp, timeout: Duration::from_secs(u64::MAX / 4), deadline: None }, pool)
+        ThreadedStream::from_io(Io { tcp, timeout: Duration::from_secs(u64::MAX / 4), deadline: None, permit: None, armed: Armed::default() }, pool)
     }
 
     pub(crate) fn from_io(io: Io, pool: Pool) -> ThreadedStream {
@@ -277,6 +361,65 @@ mod tests {
         let a = TcpStream::connect(l.local_addr().unwrap()).unwrap();
         let (b, _) = l.accept().unwrap();
         (a, b)
+    }
+
+    fn wrap(tcp: TcpStream, armed: Armed) -> Io {
+        Io { tcp, timeout: Duration::from_secs(5), deadline: None, permit: None, armed }
+    }
+
+    #[test]
+    fn a_quiet_peer_is_told_from_one_that_sent_something_or_hung_up_and_the_socket_stays_blocking() {
+        let (client, mut server) = pair();
+        let io = wrap(client, Armed::default());
+        assert!(io.peer_quiet());
+        server.write_all(b"x").unwrap();
+        let since = Instant::now();
+        while io.peer_quiet() {
+            assert!(since.elapsed() < Duration::from_secs(5), "the byte never showed");
+            thread::sleep(Duration::from_millis(1));
+        }
+        // the look took nothing: the byte is there to be read, by a read that blocks (and so waits for the next one)
+        let mut b = [0u8; 1];
+        assert_eq!((&io.tcp).read(&mut b).unwrap(), 1);
+        assert_eq!(&b, b"x");
+        assert!(io.peer_quiet());
+        io.tcp.set_read_timeout(Some(Duration::from_millis(50))).unwrap();
+        let e = (&io.tcp).read(&mut b).unwrap_err();
+        assert!(matches!(e.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut), "{e:?}");
+        assert!(since.elapsed() >= Duration::from_millis(50), "the socket was left non-blocking");
+        drop(server);
+        let since = Instant::now();
+        while io.peer_quiet() {
+            assert!(since.elapsed() < Duration::from_secs(5), "the hang-up never showed");
+            thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    #[test]
+    fn timeouts_are_set_on_the_socket_only_when_they_change() {
+        let (client, _server) = pair();
+        let mut io = wrap(client, Armed::default());
+        io.rearm(Duration::from_secs(1), None).unwrap();
+        assert_eq!((io.tcp.read_timeout().unwrap(), io.tcp.write_timeout().unwrap()), (Some(Duration::from_secs(1)), Some(Duration::from_secs(1))));
+        // (set behind its back: a rearm with the same limits does not touch the socket, which is the point)
+        io.tcp.set_read_timeout(Some(Duration::from_secs(7))).unwrap();
+        io.rearm(Duration::from_secs(1), None).unwrap();
+        assert_eq!(io.tcp.read_timeout().unwrap(), Some(Duration::from_secs(7)));
+        // other limits are set
+        io.rearm(Duration::from_secs(2), None).unwrap();
+        assert_eq!((io.tcp.read_timeout().unwrap(), io.tcp.write_timeout().unwrap()), (Some(Duration::from_secs(2)), Some(Duration::from_secs(2))));
+        // and a deadline closer than the timeout shortens what is set for the next read
+        io.rearm(Duration::from_secs(2), Some(Instant::now() + Duration::from_millis(300))).unwrap();
+        io.arm(true).unwrap();
+        assert!(io.tcp.read_timeout().unwrap().is_some_and(|t| t <= Duration::from_millis(300)));
+        // a connection made with its timeouts set knows them
+        let (client, _server) = pair();
+        client.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+        client.set_write_timeout(Some(Duration::from_secs(3))).unwrap();
+        let mut io = wrap(client, Armed::both(Duration::from_secs(3)));
+        io.tcp.set_write_timeout(Some(Duration::from_secs(9))).unwrap();
+        io.rearm(Duration::from_secs(3), None).unwrap();
+        assert_eq!(io.tcp.write_timeout().unwrap(), Some(Duration::from_secs(9)));
     }
 
     #[test]

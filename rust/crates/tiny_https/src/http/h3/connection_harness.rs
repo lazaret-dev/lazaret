@@ -650,7 +650,10 @@ pub(crate) fn exchange<C: Choose>(c: &mut C, max_steps: usize, garbage: bool) ->
         // is refused for its size): the end of a stream that waited for the table, or came with the last of the table's entries, is not lost
         if s.pristine && s.response.is_some() && !s.cut && !table_corrupt && !gone && !transport_gone && !s.seen.ended {
             let too_large = s.seen.failed.as_ref().is_some_and(|f| f.code == code::H3_EXCESSIVE_LOAD);
-            assert!(too_large, "a well-made response to stream {id} was not read to its end: {:?}", s.seen);
+            // (bytes that mean nothing, put on the control stream, can make a GOAWAY that is well made: the requests it names are
+            // rejected, as they must be, though the script never cut them. Found by the field run's fuzzing: 07 01 00 is GOAWAY(0))
+            let rejected = tainted && conn.goaway.is_some_and(|g| *id >= g) && s.seen.failed.as_ref().is_some_and(|f| f.code == code::H3_REQUEST_REJECTED);
+            assert!(too_large || rejected, "a well-made response to stream {id} was not read to its end: {:?}", s.seen);
         }
         if !tainted && !s.cut && !gone {
             if let Some(f) = &s.seen.failed {

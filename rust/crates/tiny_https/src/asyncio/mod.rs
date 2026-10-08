@@ -12,6 +12,8 @@
 //! * [`AsyncRead`] and [`AsyncWrite`] (poll-based, shaped like the `futures-io` traits) and
 //!   [`AsyncTlsStream`], TLS 1.3 over any such transport, built on the sans-IO
 //!   [`ClientConnection`](crate::tls::ClientConnection).
+//! * [`sleep`], [`timeout`] and [`Timed`] (read and write timeouts and a deadline on any stream): timers on one thread of
+//!   their own, for any executor.
 //! * [`block_on`]: a tiny executor for tests, examples and simple programs.
 //!
 //! ```no_run
@@ -26,12 +28,17 @@ mod exec;
 mod io;
 pub(crate) mod net;
 mod pool;
+pub(crate) mod slots;
+mod timer;
+#[cfg(test)]
+mod timer_tests;
 mod tls;
 
 pub use exec::block_on;
 pub use io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 pub use net::ThreadedStream;
 pub use pool::{BlockingTask, Pool, TaskError};
+pub use timer::{sleep, sleep_until, timeout, timeout_at, Elapsed, Sleep, Timed, Timeout};
 pub use tls::AsyncTlsStream;
 
 /// Minimal join of several futures, for the tests: polls every pending one on each wake-up.

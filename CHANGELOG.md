@@ -611,6 +611,17 @@ project is pre-1.0, so the 0.x API may still change.
   71 to 80% (356 MB to 96 MB), a scan takes 7 to 17% less time (monaco-editor 19.6 s to 17.4 s, sympy 4.6 s to
   4.0 s), and its peak memory is lower in five of the six (next 1,025 MB to 776 MB; prettier's rose, 254 MB to
   278 MB).
+- **tiny_https's drop of Oct 8: connection set-up, timers, a scheduler, revocation and trust roots.** A new connection
+  now looks its host name up on a thread of its own, so the connect timeout bounds a slow resolver too, keeps the
+  answer 30 seconds, and races the addresses as RFC 8305's "Happy Eyeballs" says: an address family routed nowhere
+  costs a quarter of a second, not the connect timeout per address. Lazaret's requests get this as they are. The
+  drop's other additions are not used by Lazaret yet: a request scheduler (places in flight per host, a byte budget,
+  batches under one deadline, cancelled together), timers for asynchronous code, TLS 1.3 session resumption, OCSP
+  responders asked and the whole chain's revocation, certificate transparency for Fulcio's certificates, Sigstore's
+  trusted root through TUF, ECDSA P-521 and RSA-PSS, internationalized host names, Mozilla's root store (a feature)
+  and the operating systems' own stores, and faster encryption and public-key arithmetic. No interface Lazaret uses
+  changed. The library builds in Sigstore's TUF root (`roots/sigstore_tuf_root.json`), which the sync script now takes
+  and the sdist ships.
 - **tiny_https's drop of Oct 7: the security review's fixes.** Two rounds of outside review of its verification
   path, triaged claim by claim against OpenSSL, Go's `crypto/x509` and Go's `note` package, and every confirmed
   finding fixed with a test (the library's B-93 to B-96): a search for a certificate path that was exponential (now

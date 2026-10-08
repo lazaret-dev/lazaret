@@ -154,16 +154,34 @@ pub struct ClientConnection {
     suite: Option<Suite>,
     alpn: Option<Vec<u8>>,
     peer_chain: Vec<Vec<u8>>,
+    /// A verified chain whose revocation sources are still to be asked (the configuration deferred them).
+    unchecked: Option<Box<crate::revocation::Unchecked>>,
     /// Number of compatibility change_cipher_spec records skipped so far.
     ccs_skipped: u8,
     /// Records one sending key may protect before we send a KeyUpdate (including the KeyUpdate).
     rekey_after: u64,
+    /// The server took the session the ClientHello offered.
+    resumed: bool,
+    /// Where the server's tickets go, as soon as the handshake gives the secret to make their PSKs with (TLS 1.3 with
+    /// resumption on); `None` otherwise.
+    tickets: Option<TicketSink>,
+}
+
+/// What turns a NewSessionTicket into a session kept for the next connection.
+struct TicketSink {
+    resumption: super::Resumption,
+    server: String,
+    scope: super::session::Scope,
+    time_override: Option<i64>,
+    /// Set at the end of the handshake: the suite, the resumption master secret and when the chain was checked.
+    secret: Option<(Suite, Zeroizing<Vec<u8>>, i64)>,
 }
 
 impl ClientConnection {
     /// Starts a connection to `server_name` (a DNS name or IP literal): builds the ClientHello
     /// and leaves it in [`output`](ClientConnection::output).
     pub fn new(server_name: &str, config: &ClientConfig) -> Result<ClientConnection> {
+        super::handshake::check_server_name(server_name)?;
         let private: Zeroizing<[u8; 32]> = Zeroizing::new(rand::bytes()?);
         let random: [u8; 32] = rand::bytes()?;
         let session_id: [u8; 32] = rand::bytes()?;
@@ -174,6 +192,15 @@ impl ClientConnection {
     pub(super) fn start(server_name: &str, config: &ClientConfig, private: Zeroizing<[u8; 32]>, random: &[u8; 32], session_id: &[u8; 32]) -> ClientConnection {
         let (hs, client_hello) = Handshake::start(server_name, config, None, private, random, session_id);
         let mut conn = ClientConnection::blank();
+        if config.resumption.is_enabled() {
+            conn.tickets = Some(TicketSink {
+                resumption: config.resumption.clone(),
+                server: super::handshake::session_key(server_name),
+                scope: super::handshake::scope_of(config),
+                time_override: config.time_override,
+                secret: None,
+            });
+        }
         conn.queue_plain(RT_HANDSHAKE, &client_hello);
         if config.min_version >= TlsVersion::Tls13 {
             // ClientHello plus the middlebox-compatibility change_cipher_spec (RFC 8446 appendix D.4,
@@ -231,9 +258,36 @@ impl ClientConnection {
             suite: None,
             alpn: None,
             peer_chain: Vec::new(),
+            unchecked: None,
             ccs_skipped: 0,
             rekey_after: u64::MAX,
+            resumed: false,
+            tickets: None,
         }
+    }
+
+    /// Whether this connection resumed a session (TLS 1.3 with a ticket from an earlier connection to the server): the
+    /// server's chain was then checked by that connection, and [`peer_certificates`](Self::peer_certificates) is the chain
+    /// it checked.
+    pub fn is_resumed(&self) -> bool {
+        self.resumed
+    }
+
+    /// The verified chain whose revocation sources the configuration left for later ([`Revocation::deferred`](
+    /// crate::revocation::Revocation::deferred)), taken out (once): finish it with [`Unchecked::check`](
+    /// crate::revocation::Unchecked::check) before trusting the connection.
+    pub fn take_unchecked(&mut self) -> Option<Box<crate::revocation::Unchecked>> {
+        self.unchecked.take()
+    }
+
+    /// What is left in a `TlsStream` whose connection has moved elsewhere (`TlsStream::split`): it has no keys and nothing to
+    /// send, and counts as closed, so that dropping the stream sends nothing.
+    pub(super) fn spent() -> ClientConnection {
+        let mut c = ClientConnection::blank();
+        c.rbuf = Vec::new();
+        c.sent_close_notify = true;
+        c.failed = true;
+        c
     }
 
     /// A connection that is already established with fixed traffic keys (for tests and the fuzzer).
@@ -348,6 +402,19 @@ impl ClientConnection {
             self.out.clear();
             self.out_pos = 0;
         }
+    }
+
+    /// Moves everything waiting to be sent into `into` (cleared first), by swapping buffers when it can, so that it can be
+    /// sent with the connection no longer borrowed or locked (`TlsStream::split`).
+    pub(crate) fn take_output(&mut self, into: &mut Vec<u8>) {
+        into.clear();
+        if self.out_pos == 0 {
+            std::mem::swap(&mut self.out, into);
+        } else {
+            into.extend_from_slice(&self.out[self.out_pos..]);
+            self.out.clear();
+        }
+        self.out_pos = 0;
     }
 
     /// Appends an unprotected record to the output.
@@ -748,6 +815,7 @@ impl ClientConnection {
                 Step12::SendProtected(m) => self.queue_protected(RT_HANDSHAKE, &m)?,
                 Step12::Alpn(protocol) => self.alpn = protocol,
                 Step12::PeerCertificates(chain) => self.peer_chain = chain,
+                Step12::Unchecked(u) => self.unchecked = Some(u),
                 Step12::Established => self.handshake_done = true,
             }
         }
@@ -785,6 +853,7 @@ impl ClientConnection {
                 }
                 Event::Alpn(protocol) => self.alpn = protocol,
                 Event::PeerCertificates(chain) => self.peer_chain = chain,
+                Event::Unchecked(u) => self.unchecked = Some(u),
                 Event::PeerTransportParameters(_) => {} // only a QUIC handshake has them
                 Event::ApplicationSecrets { suite, client, server } => {
                     // The Finished record stays in the output until the driver chooses to send it; see the
@@ -794,9 +863,22 @@ impl ClientConnection {
                     self.rekey_after = rekey_after.unwrap_or(suite.records_per_key()).max(2);
                     self.handshake_done = true;
                 }
+                Event::Resumed => self.resumed = true,
+                Event::ResumptionSecret { suite, secret, verified_at } => {
+                    // a chain whose revocation is still to be checked (deferred) gives no sessions: a resumption would skip
+                    // that check
+                    if self.unchecked.is_some() {
+                        self.tickets = None;
+                    }
+                    if let Some(sink) = self.tickets.as_mut() {
+                        sink.secret = Some((suite, secret, verified_at));
+                    }
+                }
                 Event::Tls12(hs12, steps) => {
                     // no compatibility change_cipher_spec in TLS 1.2: the real one comes with our flight
                     self.compat_ccs_pending = false;
+                    // (and no sessions: resumption here is TLS 1.3's)
+                    self.tickets = None;
                     self.version = Some(TlsVersion::Tls12);
                     self.suite12 = Some(hs12.suite());
                     self.apply12(steps)?;
@@ -810,7 +892,10 @@ impl ClientConnection {
     fn process_post_handshake(&mut self) -> Result<()> {
         while let Some(msg) = self.take_buffered_handshake_message()? {
             match msg[0] {
-                HS_NEW_SESSION_TICKET => {} // resumption is not implemented; ignore tickets
+                HS_NEW_SESSION_TICKET => {
+                    let ticket = parse_new_session_ticket(&msg[4..])?;
+                    self.keep_ticket(ticket);
+                }
                 HS_KEY_UPDATE => {
                     if msg.len() != 5 || msg[4] > 1 {
                         return Err(Error::Tls("decode_error: malformed KeyUpdate".into()));
@@ -825,8 +910,9 @@ impl ClientConnection {
                     let next = rc.next_generation();
                     let next_write = wc.next_generation();
                     self.read_cipher = Some(Cipher::V13(next));
-                    if msg[4] == 1 {
-                        // peer asked us to update too: answer under the old keys, then rotate
+                    // peer asked us to update too: answer under the old keys, then rotate (unless we have sent close_notify:
+                    // nothing is sent after that, and our keys are not used again)
+                    if msg[4] == 1 && !self.sent_close_notify {
                         let reply = handshake_message(HS_KEY_UPDATE, &[0]);
                         self.queue_protected(RT_HANDSHAKE, &reply)?;
                         self.write_cipher = Some(Cipher::V13(next_write));
@@ -838,11 +924,40 @@ impl ClientConnection {
         Ok(())
     }
 
+    /// Keeps a ticket for the next connection to this server (RFC 8446 section 4.6.1): its PSK is HKDF-Expand-Label of the
+    /// resumption master secret with the ticket's nonce. A ticket of lifetime 0 is not kept.
+    fn keep_ticket(&mut self, t: NewSessionTicket) {
+        let Some(TicketSink { resumption, server, scope, time_override, secret: Some((suite, secret, verified_at)) }) = &self.tickets else { return };
+        if t.lifetime == 0 {
+            return;
+        }
+        let alg = suite.hash();
+        let now = time_override.unwrap_or_else(crate::sys::now_unix);
+        let expires = resumption.expiry(now, t.lifetime, *verified_at);
+        if expires <= now {
+            return;
+        }
+        let session = super::session::Session {
+            ticket: t.ticket,
+            psk: Zeroizing::new(expand_label(alg, secret, "resumption", &t.nonce, alg.output_len())),
+            suite: *suite,
+            age_add: t.age_add,
+            received: std::time::Instant::now(),
+            expires,
+            verified_at: *verified_at,
+            peer_chain: self.peer_chain.clone(),
+            scope: scope.clone(),
+        };
+        resumption.insert(server, session);
+    }
+
     /// What a TLS 1.2 server may send after the handshake: a HelloRequest, which asks for a renegotiation and is answered with a
     /// `no_renegotiation` warning (RFC 5246 section 7.4.1.1; this client never renegotiates). Nothing else.
     fn process_post_handshake12(&mut self) -> Result<()> {
         while let Some(msg) = self.take_buffered_handshake_message()? {
             match msg[0] {
+                // (nothing is sent after our close_notify, an answer included)
+                HS_HELLO_REQUEST if msg.len() == 4 && self.sent_close_notify => {}
                 HS_HELLO_REQUEST if msg.len() == 4 => self.queue_protected(RT_ALERT, &[1, 100])?,
                 _ => return Err(Error::Tls("unexpected_message: unexpected handshake message after a TLS 1.2 handshake".into())),
             }
@@ -873,6 +988,28 @@ impl Drop for ClientConnection {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// B-34: what a server name may be, and the server_name extension without a trailing dot (RFC 6066 section 3).
+    #[test]
+    fn server_names_are_checked_and_sent_without_a_trailing_dot() {
+        let config = ClientConfig::new(crate::x509::TrustStore::empty());
+        for good in ["example.com", "example.com.", "EXAMPLE.com", "localhost", "_srv.example", "xn--bcher-kva.example", "127.0.0.1", "::1", "a-b.c-d"] {
+            ClientConnection::new(good, &config).unwrap_or_else(|e| panic!("{good:?}: {e}"));
+        }
+        let long_label = format!("{}.example", "a".repeat(64));
+        let long_name = vec!["abcdefghi"; 26].join(".");
+        for bad in ["", ".", "a..b", "example.com..", "[::1]", "exa mple.com", "*.example.com", "a/b", "bücher.example", long_label.as_str(), long_name.as_str()] {
+            let e = ClientConnection::new(bad, &config).err().unwrap_or_else(|| panic!("{bad:?} accepted")).to_string();
+            assert!(e.contains("is not a host name or IP address"), "{bad:?}: {e}");
+            assert_eq!(e.contains("idna::to_ascii"), !bad.is_ascii(), "{bad:?}: {e}");
+        }
+        // the extension carries the name without its trailing dot, and an IP literal is not sent at all
+        let hello = |name: &str| ClientConnection::new(name, &config).unwrap().output().to_vec();
+        let with_dot = hello("example.com.");
+        assert!(with_dot.windows(11).any(|w| w == b"example.com") && !with_dot.windows(12).any(|w| w == b"example.com."));
+        assert_eq!(with_dot.len(), hello("example.com").len());
+        assert!(!hello("127.0.0.1").windows(9).any(|w| w == b"127.0.0.1"));
+    }
 
     #[test]
     fn buffers_holding_plaintext_are_wiped() {
@@ -1031,6 +1168,20 @@ mod tests {
                 suite
             );
             assert_eq!(peer.recv.records(), 1, "the record after the answer is the first under the new keys");
+        }
+    }
+
+    #[test]
+    fn after_our_close_notify_a_key_update_request_is_not_answered() {
+        // (a split stream's reading half goes on after the writing half has closed; nothing may follow our close_notify)
+        for suite in Suite::ALL {
+            let (mut c, mut peer) = Peer::connect(suite);
+            c.send_close_notify();
+            assert_eq!(peer.open_all(&take_output(&mut c)), vec![(RT_ALERT, vec![1, 0])]);
+            assert_eq!(feed(&mut c, &peer.key_update(1)).unwrap(), b"");
+            assert!(!c.wants_write(), "{suite:?}: an answer after close_notify");
+            // and what the peer sends under its next keys is still read
+            assert_eq!(feed(&mut c, &peer.record(RT_APPLICATION_DATA, b"still read")).unwrap(), b"still read");
         }
     }
 
@@ -1271,6 +1422,14 @@ mod tests {
         // a warning, not a handshake: the connection goes on as it was
         assert_eq!(open12(&mut open, &take_output(&mut c)), vec![(RT_ALERT, vec![1, 100])]);
         assert!(c.is_quiet());
+        // after our close_notify, a HelloRequest gets no answer (nothing follows close_notify) and is otherwise ignored
+        c.send_close_notify();
+        assert_eq!(open12(&mut open, &take_output(&mut c)), vec![(RT_ALERT, vec![1, 0])]);
+        let mut wire = Vec::new();
+        seal.encrypt_into(RT_HANDSHAKE, &[HS_HELLO_REQUEST, 0, 0, 0], &mut wire);
+        seal.encrypt_into(RT_APPLICATION_DATA, b"read on", &mut wire);
+        assert_eq!(feed(&mut c, &wire).unwrap(), b"read on");
+        assert!(!c.wants_write());
         // a KeyUpdate, a session ticket, a ClientHello-shaped thing or a HelloRequest with a body: not in TLS 1.2 after the handshake
         for msg in [vec![HS_KEY_UPDATE, 0, 0, 1, 0], vec![HS_NEW_SESSION_TICKET, 0, 0, 0], vec![HS_HELLO_REQUEST, 0, 0, 1, 0], vec![1, 0, 0, 0]] {
             let (mut c, mut seal, _) = tls12_pair(Suite12::EcdheRsaAes128Gcm);

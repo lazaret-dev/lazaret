@@ -56,7 +56,11 @@ impl Fixtures {
     fn run(&self, case: &Value) -> Result<Verified, Error> {
         let root = self.root(case.get("root").and_then(Value::as_str).unwrap());
         let bundle = Bundle::parse(&json::canonical(case.get("bundle").unwrap()).unwrap())?;
-        bundle.verify(&Trust::new(&root), &self.digest(case))
+        let mut trust = Trust::new(&root);
+        if let Some(n) = case.get("sct_threshold").and_then(Value::as_int64) {
+            trust = trust.with_sct_threshold(n as usize);
+        }
+        bundle.verify(&trust, &self.digest(case))
     }
 }
 
@@ -135,6 +139,14 @@ fn check_facts(case: &Value, v: &Verified) -> Result<(), String> {
             let it = want_e.get("integrated_time").and_then(Value::as_int64);
             want("integrated time", got.integrated_time == it, format!("{:?} is not {it:?}", got.integrated_time));
         }
+    }
+    if let Some(list) = f.get("scts").and_then(Value::as_array) {
+        let wanted: Vec<(String, u64)> = list.iter().map(|p| {
+            let p = p.as_array().unwrap();
+            (p[0].as_str().unwrap().to_string(), p[1].as_int64().unwrap() as u64)
+        }).collect();
+        let got: Vec<(String, u64)> = v.scts.iter().map(|s| (s.log_url.clone(), s.timestamp_ms)).collect();
+        want("signed certificate timestamps", got == wanted, format!("{got:?} is not {wanted:?}"));
     }
     if let Some(m) = int("matched_subject") {
         want("matched subject", v.matched_subject as i64 == m, format!("{}", v.matched_subject));

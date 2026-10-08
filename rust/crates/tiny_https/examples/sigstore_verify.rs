@@ -91,6 +91,10 @@ fn show(v: &Verified) {
         let proof = e.inclusion.as_ref().map_or("no inclusion proof".to_string(), |i| format!("leaf {} of {} in {}", i.leaf_index, i.tree_size, i.origin));
         println!("  log entry {} ({} {}) of {}: {}{}", e.log_index, e.kind, e.version, e.log_url, if e.signed_entry_timestamp { "signed entry timestamp, " } else { "" }, proof);
     }
+    for s in &v.scts {
+        let at = when((s.timestamp_ms / 1000) as i64).replace(" UTC", &format!(".{:03} UTC", s.timestamp_ms % 1000));
+        println!("  certificate logged by the CT log {} at {at} (signed certificate timestamp)", s.log_url);
+    }
 }
 
 fn run() -> Result<bool, Box<dyn Error>> {

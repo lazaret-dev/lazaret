@@ -1,10 +1,14 @@
 //! ChaCha20-Poly1305 AEAD (RFC 8439).
 //!
-//! Performance notes: on x86_64 the keystream is produced four blocks at a time with SSE2
-//! (baseline for the architecture, so no runtime detection); other targets use a portable
-//! one-block loop. Poly1305 uses three 44-bit limbs with 128-bit products. Everything here is
-//! constant-time with respect to the key and data (no secret-dependent branches or table lookups).
+//! Performance notes: the keystream is made four blocks at a time with SSE2 on x86_64 and NEON on aarch64 (baseline
+//! features of those architectures, so no detection at run time); on x86_64, eight at a time with AVX2 and sixteen with
+//! AVX-512 where the CPU has them (asked at run time; see the `avx2` and `avx512` modules for which CPUs); other targets
+//! use a portable one-block loop. Poly1305 is in `poly1305.rs` (radix 2^64 on 64-bit targets). Encrypting and
+//! authenticating in one pass, a chunk at a time, was tried (B-57) and gained nothing measurable on records of 1 to 16 KiB,
+//! which stay in the L1 cache between the two passes; it would also have meant decrypting before the tag is checked.
+//! Everything here is constant-time with respect to the key and data (no secret-dependent branches or table lookups).
 
+use super::dit::Dit;
 use super::poly1305::Poly1305;
 use crate::util::ct_eq;
 use crate::zeroize::{Zeroize, Zeroizing};
@@ -305,10 +309,267 @@ mod simd {
     }
 }
 
+// ---------------------------------------------------------------- ChaCha20, eight blocks at once (AVX2)
+// x86-64 CPUs since 2013 (Haswell) and 2017 (Zen) have AVX2, which is not a baseline feature of the architecture: it is
+// asked of the CPU at run time (`is_x86_feature_detected!`, which the standard library caches). Eight blocks are made in
+// the eight 32-bit lanes of sixteen 256-bit registers; the rotations by 16 and 8 bits are byte shuffles. Constant time like
+// the rest: the same instructions whatever the key and the data.
+
+#[cfg(all(target_arch = "x86_64", not(tiny_https_portable)))]
+mod avx2 {
+    use super::SIGMA;
+    use core::arch::x86_64::*;
+
+    /// Whether the CPU this runs on has AVX2.
+    #[inline]
+    pub fn available() -> bool {
+        std::is_x86_feature_detected!("avx2")
+    }
+
+    #[inline]
+    #[target_feature(enable = "avx2")]
+    fn rol<const L: i32, const R: i32>(x: __m256i) -> __m256i {
+        _mm256_or_si256(_mm256_slli_epi32::<L>(x), _mm256_srli_epi32::<R>(x))
+    }
+
+    #[inline]
+    #[target_feature(enable = "avx2")]
+    fn quarter_round(x: &mut [__m256i; 16], a: usize, b: usize, c: usize, d: usize, rot16: __m256i, rot8: __m256i) {
+        x[a] = _mm256_add_epi32(x[a], x[b]);
+        x[d] = _mm256_shuffle_epi8(_mm256_xor_si256(x[d], x[a]), rot16);
+        x[c] = _mm256_add_epi32(x[c], x[d]);
+        x[b] = rol::<12, 20>(_mm256_xor_si256(x[b], x[c]));
+        x[a] = _mm256_add_epi32(x[a], x[b]);
+        x[d] = _mm256_shuffle_epi8(_mm256_xor_si256(x[d], x[a]), rot8);
+        x[c] = _mm256_add_epi32(x[c], x[d]);
+        x[b] = rol::<7, 25>(_mm256_xor_si256(x[b], x[c]));
+    }
+
+    /// dst ^= v, as 32 bytes at an arbitrary alignment.
+    #[inline]
+    #[target_feature(enable = "avx2")]
+    fn xor_into(dst: &mut [u8], v: __m256i) {
+        let dst: &mut [u8; 32] = dst.try_into().unwrap();
+        let p = dst.as_mut_ptr() as *mut __m256i;
+        // SAFETY: `p` points to 32 valid bytes that we hold a unique reference to, and `loadu`/`storeu` have no alignment
+        // requirement.
+        unsafe { _mm256_storeu_si256(p, _mm256_xor_si256(_mm256_loadu_si256(p), v)) }
+    }
+
+    #[target_feature(enable = "avx2")]
+    fn xor8_avx2(key: &[u32; 8], counter: u32, nonce: &[u32; 3], data: &mut [u8; 512]) {
+        let set = |w: u32| _mm256_set1_epi32(w as i32);
+        // (byte shuffles that rotate each 32-bit word left by 16 and by 8 bits; the same in both 128-bit halves)
+        let rot16 = _mm256_set_epi8(13, 12, 15, 14, 9, 8, 11, 10, 5, 4, 7, 6, 1, 0, 3, 2, 13, 12, 15, 14, 9, 8, 11, 10, 5, 4, 7, 6, 1, 0, 3, 2);
+        let rot8 = _mm256_set_epi8(14, 13, 12, 15, 10, 9, 8, 11, 6, 5, 4, 7, 2, 1, 0, 3, 14, 13, 12, 15, 10, 9, 8, 11, 6, 5, 4, 7, 2, 1, 0, 3);
+        let init: [__m256i; 16] = [
+            set(SIGMA[0]),
+            set(SIGMA[1]),
+            set(SIGMA[2]),
+            set(SIGMA[3]),
+            set(key[0]),
+            set(key[1]),
+            set(key[2]),
+            set(key[3]),
+            set(key[4]),
+            set(key[5]),
+            set(key[6]),
+            set(key[7]),
+            // block j has the counter + j (wrapping, as the scalar code's)
+            _mm256_add_epi32(set(counter), _mm256_set_epi32(7, 6, 5, 4, 3, 2, 1, 0)),
+            set(nonce[0]),
+            set(nonce[1]),
+            set(nonce[2]),
+        ];
+        let mut x = init;
+        for _ in 0..10 {
+            quarter_round(&mut x, 0, 4, 8, 12, rot16, rot8);
+            quarter_round(&mut x, 1, 5, 9, 13, rot16, rot8);
+            quarter_round(&mut x, 2, 6, 10, 14, rot16, rot8);
+            quarter_round(&mut x, 3, 7, 11, 15, rot16, rot8);
+            quarter_round(&mut x, 0, 5, 10, 15, rot16, rot8);
+            quarter_round(&mut x, 1, 6, 11, 12, rot16, rot8);
+            quarter_round(&mut x, 2, 7, 8, 13, rot16, rot8);
+            quarter_round(&mut x, 3, 4, 9, 14, rot16, rot8);
+        }
+        // Word i of block j is lane j of x[i]. A 4x4 transpose in each 128-bit half of a group of four words gives, for
+        // each j < 4, a register with those words of block j in its low half and of block j + 4 in its high half; two
+        // groups' halves put together make 32 consecutive bytes of one block.
+        let mut rows = [[_mm256_setzero_si256(); 4]; 4];
+        for (g, row) in rows.iter_mut().enumerate() {
+            let a = _mm256_add_epi32(x[4 * g], init[4 * g]);
+            let b = _mm256_add_epi32(x[4 * g + 1], init[4 * g + 1]);
+            let c = _mm256_add_epi32(x[4 * g + 2], init[4 * g + 2]);
+            let d = _mm256_add_epi32(x[4 * g + 3], init[4 * g + 3]);
+            let t0 = _mm256_unpacklo_epi32(a, b);
+            let t1 = _mm256_unpacklo_epi32(c, d);
+            let t2 = _mm256_unpackhi_epi32(a, b);
+            let t3 = _mm256_unpackhi_epi32(c, d);
+            *row = [_mm256_unpacklo_epi64(t0, t1), _mm256_unpackhi_epi64(t0, t1), _mm256_unpacklo_epi64(t2, t3), _mm256_unpackhi_epi64(t2, t3)];
+        }
+        #[allow(clippy::needless_range_loop)] // (j picks the same register of each of the four groups)
+        for j in 0..4 {
+            let (lo, hi) = (64 * j, 64 * (j + 4));
+            xor_into(&mut data[lo..lo + 32], _mm256_permute2x128_si256::<0x20>(rows[0][j], rows[1][j]));
+            xor_into(&mut data[lo + 32..lo + 64], _mm256_permute2x128_si256::<0x20>(rows[2][j], rows[3][j]));
+            xor_into(&mut data[hi..hi + 32], _mm256_permute2x128_si256::<0x31>(rows[0][j], rows[1][j]));
+            xor_into(&mut data[hi + 32..hi + 64], _mm256_permute2x128_si256::<0x31>(rows[2][j], rows[3][j]));
+        }
+    }
+
+    /// XORs the keystream of blocks `counter .. counter + 8` into 512 bytes. Only to be called when [`available`] said yes.
+    #[inline]
+    pub fn xor8(key: &[u32; 8], counter: u32, nonce: &[u32; 3], data: &mut [u8; 512]) {
+        assert!(available());
+        // SAFETY: the CPU has AVX2 (asserted just above; the standard library caches the answer)
+        unsafe { xor8_avx2(key, counter, nonce, data) }
+    }
+}
+
+// ---------------------------------------------------------------- ChaCha20, sixteen blocks at once (AVX-512)
+// Sixteen blocks in the sixteen lanes of 512-bit registers, with the rotations done by the rotate instruction AVX-512 has.
+// Only on CPUs that also have VBMI2, which is to say Intel since Ice Lake (2019) and AMD since Zen 4 (2022): the Skylake
+// and Cascade Lake server CPUs before them lower the clock of a core that runs 512-bit instructions, for milliseconds and
+// for whatever else it runs, which is why Linux keeps its ChaCha20 off them too; they take the AVX2 path. (On a Cascade
+// Lake VM, where it was measured anyway, the keystream was 4.6 GB/s against 2.3 with AVX2, and the AEAD 1.15 to 1.3 times.)
+
+#[cfg(all(target_arch = "x86_64", not(tiny_https_portable)))]
+mod avx512 {
+    use super::SIGMA;
+    use core::arch::x86_64::*;
+
+    /// Whether the CPU has AVX-512 and is of a generation that does not slow down for it (see above).
+    #[inline]
+    pub fn available() -> bool {
+        std::is_x86_feature_detected!("avx512f") && std::is_x86_feature_detected!("avx512vbmi2")
+    }
+
+    /// Whether the CPU can run the code at all (the tests run it wherever it can).
+    #[cfg(test)]
+    pub fn runs() -> bool {
+        std::is_x86_feature_detected!("avx512f")
+    }
+
+    #[inline]
+    #[target_feature(enable = "avx512f")]
+    fn quarter_round(x: &mut [__m512i; 16], a: usize, b: usize, c: usize, d: usize) {
+        x[a] = _mm512_add_epi32(x[a], x[b]);
+        x[d] = _mm512_rol_epi32::<16>(_mm512_xor_si512(x[d], x[a]));
+        x[c] = _mm512_add_epi32(x[c], x[d]);
+        x[b] = _mm512_rol_epi32::<12>(_mm512_xor_si512(x[b], x[c]));
+        x[a] = _mm512_add_epi32(x[a], x[b]);
+        x[d] = _mm512_rol_epi32::<8>(_mm512_xor_si512(x[d], x[a]));
+        x[c] = _mm512_add_epi32(x[c], x[d]);
+        x[b] = _mm512_rol_epi32::<7>(_mm512_xor_si512(x[b], x[c]));
+    }
+
+    #[inline]
+    #[target_feature(enable = "avx512f")]
+    fn xor_into(dst: &mut [u8], v: __m512i) {
+        let dst: &mut [u8; 64] = dst.try_into().unwrap();
+        let p = dst.as_mut_ptr() as *mut __m512i;
+        // SAFETY: `p` points to 64 valid bytes that we hold a unique reference to, and `loadu`/`storeu` have no alignment
+        // requirement.
+        unsafe { _mm512_storeu_si512(p, _mm512_xor_si512(_mm512_loadu_si512(p), v)) }
+    }
+
+    #[target_feature(enable = "avx512f")]
+    fn xor16_avx512(key: &[u32; 8], counter: u32, nonce: &[u32; 3], data: &mut [u8; 1024]) {
+        let set = |w: u32| _mm512_set1_epi32(w as i32);
+        let init: [__m512i; 16] = [
+            set(SIGMA[0]),
+            set(SIGMA[1]),
+            set(SIGMA[2]),
+            set(SIGMA[3]),
+            set(key[0]),
+            set(key[1]),
+            set(key[2]),
+            set(key[3]),
+            set(key[4]),
+            set(key[5]),
+            set(key[6]),
+            set(key[7]),
+            // block j has the counter + j (wrapping, as the scalar code's)
+            _mm512_add_epi32(set(counter), _mm512_set_epi32(15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0)),
+            set(nonce[0]),
+            set(nonce[1]),
+            set(nonce[2]),
+        ];
+        let mut x = init;
+        for _ in 0..10 {
+            quarter_round(&mut x, 0, 4, 8, 12);
+            quarter_round(&mut x, 1, 5, 9, 13);
+            quarter_round(&mut x, 2, 6, 10, 14);
+            quarter_round(&mut x, 3, 7, 11, 15);
+            quarter_round(&mut x, 0, 5, 10, 15);
+            quarter_round(&mut x, 1, 6, 11, 12);
+            quarter_round(&mut x, 2, 7, 8, 13);
+            quarter_round(&mut x, 3, 4, 9, 14);
+        }
+        // As with AVX2, a 4x4 transpose in each 128-bit quarter of a group of four words; then, for each j < 4, the four
+        // groups' registers hold block j + 4k's words in their quarter k, and a 4x4 transpose of quarters (`shuffle_i32x4`,
+        // twice) makes one register of each block's 64 bytes.
+        let mut rows = [[_mm512_setzero_si512(); 4]; 4];
+        for (g, row) in rows.iter_mut().enumerate() {
+            let a = _mm512_add_epi32(x[4 * g], init[4 * g]);
+            let b = _mm512_add_epi32(x[4 * g + 1], init[4 * g + 1]);
+            let c = _mm512_add_epi32(x[4 * g + 2], init[4 * g + 2]);
+            let d = _mm512_add_epi32(x[4 * g + 3], init[4 * g + 3]);
+            let t0 = _mm512_unpacklo_epi32(a, b);
+            let t1 = _mm512_unpacklo_epi32(c, d);
+            let t2 = _mm512_unpackhi_epi32(a, b);
+            let t3 = _mm512_unpackhi_epi32(c, d);
+            *row = [_mm512_unpacklo_epi64(t0, t1), _mm512_unpackhi_epi64(t0, t1), _mm512_unpacklo_epi64(t2, t3), _mm512_unpackhi_epi64(t2, t3)];
+        }
+        #[allow(clippy::needless_range_loop)] // (j picks the same register of each of the four groups)
+        for j in 0..4 {
+            let (a, b, c, d) = (rows[0][j], rows[1][j], rows[2][j], rows[3][j]);
+            let t0 = _mm512_shuffle_i32x4::<0x44>(a, b);
+            let t1 = _mm512_shuffle_i32x4::<0x44>(c, d);
+            let t2 = _mm512_shuffle_i32x4::<0xee>(a, b);
+            let t3 = _mm512_shuffle_i32x4::<0xee>(c, d);
+            let out = [_mm512_shuffle_i32x4::<0x88>(t0, t1), _mm512_shuffle_i32x4::<0xdd>(t0, t1), _mm512_shuffle_i32x4::<0x88>(t2, t3), _mm512_shuffle_i32x4::<0xdd>(t2, t3)];
+            for (k, v) in out.into_iter().enumerate() {
+                let at = 64 * (j + 4 * k);
+                xor_into(&mut data[at..at + 64], v);
+            }
+        }
+    }
+
+    /// XORs the keystream of blocks `counter .. counter + 16` into 1024 bytes. Only to be called when the CPU has AVX-512F
+    /// ([`available`], or in tests [`runs`]).
+    #[inline]
+    pub fn xor16(key: &[u32; 8], counter: u32, nonce: &[u32; 3], data: &mut [u8; 1024]) {
+        assert!(std::is_x86_feature_detected!("avx512f"));
+        // SAFETY: the CPU has AVX-512F (asserted just above; the standard library caches the answer)
+        unsafe { xor16_avx512(key, counter, nonce, data) }
+    }
+}
+
 /// XORs the ChaCha20 keystream starting at block `start_counter` into `data`.
 fn chacha20_xor(key: &[u32; 8], nonce: &[u32; 3], start_counter: u32, data: &mut [u8]) {
     let mut counter = start_counter;
     let mut rest = data;
+    // the widest vectors the CPU has first (each leaves less than its own width), then the baseline ones
+    #[cfg(all(target_arch = "x86_64", not(tiny_https_portable)))]
+    if rest.len() >= 512 {
+        if rest.len() >= 1024 && avx512::available() {
+            let mut chunks = rest.chunks_exact_mut(1024);
+            for chunk in &mut chunks {
+                avx512::xor16(key, counter, nonce, <&mut [u8; 1024]>::try_from(chunk).unwrap());
+                counter = counter.wrapping_add(16);
+            }
+            rest = chunks.into_remainder();
+        }
+        if rest.len() >= 512 && avx2::available() {
+            let mut chunks = rest.chunks_exact_mut(512);
+            for chunk in &mut chunks {
+                avx2::xor8(key, counter, nonce, <&mut [u8; 512]>::try_from(chunk).unwrap());
+                counter = counter.wrapping_add(8);
+            }
+            rest = chunks.into_remainder();
+        }
+    }
     if simd::AVAILABLE {
         let mut chunks = rest.chunks_exact_mut(256);
         for chunk in &mut chunks {
@@ -390,6 +651,7 @@ impl Drop for ChaCha20Mask {
 
 impl ChaCha20Mask {
     pub fn new(key: &[u8]) -> Self {
+        let _dit = Dit::on(); // data-independent timing while the key and the data are in use (crypto::dit)
         assert_eq!(key.len(), KEY_LEN);
         let mut k = Zeroizing::new([0u8; 32]);
         k.copy_from_slice(key);
@@ -397,6 +659,7 @@ impl ChaCha20Mask {
     }
 
     pub fn mask(&self, sample: &[u8; 16]) -> [u8; 5] {
+        let _dit = Dit::on(); // data-independent timing while the key and the data are in use (crypto::dit)
         let counter = le32(&sample[..4]);
         let mut n = [0u8; 12];
         n.copy_from_slice(&sample[4..]);
@@ -422,6 +685,7 @@ impl ChaCha20Poly1305 {
     }
 
     pub fn new(key: &[u8]) -> Self {
+        let _dit = Dit::on(); // data-independent timing while the key and the data are in use (crypto::dit)
         assert_eq!(key.len(), KEY_LEN);
         let mut k = Zeroizing::new([0u8; 32]);
         k.copy_from_slice(key);
@@ -431,6 +695,7 @@ impl ChaCha20Poly1305 {
     /// Encrypts in place. `buf` holds the plaintext followed by `TAG_LEN` bytes of room; on return
     /// it holds ciphertext || tag.
     pub fn seal_in_place(&self, nonce: &[u8; NONCE_LEN], aad: &[u8], buf: &mut [u8]) {
+        let _dit = Dit::on(); // data-independent timing while the key and the data are in use (crypto::dit)
         assert!(buf.len() >= TAG_LEN, "buffer must have room for the tag");
         let n = buf.len() - TAG_LEN;
         let nw = nonce_words(nonce);
@@ -444,6 +709,7 @@ impl ChaCha20Poly1305 {
     /// and `buf[..len]` holds the plaintext; on failure returns `None` and `buf` is untouched
     /// (the tag is verified before anything is decrypted).
     pub fn open_in_place(&self, nonce: &[u8; NONCE_LEN], aad: &[u8], buf: &mut [u8]) -> Option<usize> {
+        let _dit = Dit::on(); // data-independent timing while the key and the data are in use (crypto::dit)
         if buf.len() < TAG_LEN {
             return None;
         }
@@ -549,13 +815,46 @@ mod tests {
         }
     }
 
+    /// The wide kernels themselves, called directly wherever the CPU can run them (the dispatcher takes AVX-512 only on
+    /// some of the CPUs that have it): every counter of a block that wraps around u32 in the middle, and data that is not
+    /// all the same.
+    #[cfg(all(target_arch = "x86_64", not(tiny_https_portable)))]
+    #[test]
+    fn the_wide_kernels_match_the_one_block_function() {
+        let key = key_words(&det_key(9, 32).try_into().unwrap());
+        let nonce = nonce_words(&det_nonce(9));
+        let counters = [0u32, 1, 0x7fff_ffff, 0xffff_ffef, 0xffff_fff0, 0xffff_fff8, 0xffff_fffb, 0xffff_ffff];
+        let mut ran = Vec::new();
+        if avx2::available() {
+            for &ctr in &counters {
+                let src: [u8; 512] = det_pt(ctr as usize % 997, 512).try_into().unwrap();
+                let (mut a, mut b) = (src, src);
+                avx2::xor8(&key, ctr, &nonce, &mut a);
+                xor_reference(&key, &nonce, ctr, &mut b);
+                assert_eq!(a, b, "AVX2 from counter {ctr}");
+            }
+            ran.push("AVX2");
+        }
+        if avx512::runs() {
+            for &ctr in &counters {
+                let src: [u8; 1024] = det_pt(ctr as usize % 997, 1024).try_into().unwrap();
+                let (mut a, mut b) = (src, src);
+                avx512::xor16(&key, ctr, &nonce, &mut a);
+                xor_reference(&key, &nonce, ctr, &mut b);
+                assert_eq!(a, b, "AVX-512 from counter {ctr}");
+            }
+            ran.push(if avx512::available() { "AVX-512 (in use)" } else { "AVX-512 (not in use on this CPU)" });
+        }
+        eprintln!("kernels checked: {ran:?}");
+    }
+
     #[test]
     fn bulk_keystream_matches_single_block_reference() {
         let key = key_words(&det_key(5, 32).try_into().unwrap());
         let nonce = nonce_words(&det_nonce(5));
         // Every length around the 64/256 boundaries, and counters that wrap around u32.
-        for &ctr in &[0u32, 1, 7, 0xffff_fffe, 0xffff_ffff] {
-            for len in (0..700usize).chain([1023, 1024, 1025, 4096, 16384]) {
+        for &ctr in &[0u32, 1, 7, 0xffff_fff9, 0xffff_fffe, 0xffff_ffff] {
+            for len in (0..700usize).chain([767, 768, 1023, 1024, 1025, 1536, 1600, 2047, 2048, 2049, 4096, 16384]) {
                 let src = det_pt(len, len);
                 let mut a = src.clone();
                 let mut b = src.clone();

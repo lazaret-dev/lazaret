@@ -2,8 +2,10 @@
 //!
 //! Two implementations with the same interface; the one matching the pointer width is used:
 //!
-//! * `limbs64`: three 44-bit limbs with 128-bit products (after poly1305-donna-64). Fast on 64-bit
-//!   CPUs, where a 64x64 -> 128 multiply is a single instruction (or two).
+//! * `radix64`: two 64-bit limbs and a third of a few bits (after OpenSSL's `crypto/poly1305/poly1305.c`): four
+//!   64 x 64 -> 128-bit products and two small ones per block, where three 44-bit limbs (poly1305-donna-64, used here
+//!   before B-57) take nine. Fast on 64-bit CPUs, where such a product is one instruction or two: about 1.65 times the
+//!   44-bit limbs on an x86-64 VM, and faster for short messages too.
 //! * `limbs32`: five 26-bit limbs with 64-bit products (after poly1305-donna-32). Used on 32-bit
 //!   targets, where 128-bit multiplies would be library calls.
 //!
@@ -11,7 +13,7 @@
 //! constant-time: no secret-dependent branches, indices or variable-time instructions.
 
 #[cfg(target_pointer_width = "64")]
-pub(crate) use limbs64::Poly1305;
+pub(crate) use radix64::Poly1305;
 #[cfg(not(target_pointer_width = "64"))]
 pub(crate) use limbs32::Poly1305;
 
@@ -28,19 +30,15 @@ fn le64(b: &[u8]) -> u64 {
 }
 
 #[cfg(any(test, target_pointer_width = "64"))]
-pub(crate) mod limbs64 {
+pub(crate) mod radix64 {
     use super::le64;
     use crate::zeroize::Zeroize;
 
-    const MASK44: u64 = 0xfff_ffff_ffff;
-    const MASK42: u64 = 0x3ff_ffff_ffff;
-    /// Bit 128 of a block, as it appears in the top limb (bit 40 of the limb at 2^88).
-    const HIBIT: u64 = 1 << 40;
-
     pub(crate) struct Poly1305 {
-        r: [u64; 3],
-        /// r1 * 20 and r2 * 20 (2^132 = 4 * 2^130 = 20 mod p).
-        s: [u64; 2],
+        /// r, clamped: the top four bits of each 32-bit word and the low two bits of the last three are clear, so r1 is a
+        /// multiple of 4.
+        r: [u64; 2],
+        /// h, partly reduced: h = h0 + h1 2^64 + h2 2^128, h2 at most 4 between blocks.
         h: [u64; 3],
         pad: [u64; 2],
     }
@@ -51,116 +49,66 @@ pub(crate) mod limbs64 {
         }
     }
 
+    /// a + b + carry, and the carry out (0 or 1), with no branch.
+    #[inline(always)]
+    fn adc(a: u64, b: u64, carry: u64) -> (u64, u64) {
+        let t = a as u128 + b as u128 + carry as u128;
+        (t as u64, (t >> 64) as u64)
+    }
+
     impl Poly1305 {
         fn wipe(&mut self) {
             self.r.zeroize();
-            self.s.zeroize();
             self.h.zeroize();
             self.pad.zeroize();
         }
 
         pub(crate) fn new(key: &[u8; 32]) -> Self {
-            let t0 = le64(&key[0..8]);
-            let t1 = le64(&key[8..16]);
-            let r0 = t0 & 0xffc_0fff_ffff;
-            let r1 = ((t0 >> 44) | (t1 << 20)) & 0xfff_ffc0_ffff;
-            let r2 = (t1 >> 24) & 0x00f_ffff_fc0f;
-            Poly1305 { r: [r0, r1, r2], s: [r1 * 20, r2 * 20], h: [0; 3], pad: [le64(&key[16..24]), le64(&key[24..32])] }
+            let r0 = le64(&key[0..8]) & 0x0fff_fffc_0fff_ffff;
+            let r1 = le64(&key[8..16]) & 0x0fff_fffc_0fff_fffc;
+            Poly1305 { r: [r0, r1], h: [0; 3], pad: [le64(&key[16..24]), le64(&key[24..32])] }
         }
 
         /// Absorbs one 16-byte block. `hibit` is the 2^128 padding bit that every full block of the
         /// AEAD construction carries (it is clear only for a short final block of a plain message).
         #[inline(always)]
         pub(crate) fn block(&mut self, m: &[u8; 16], hibit: bool) {
-            let [r0, r1, r2] = self.r;
-            let [s1, s2] = self.s;
-            let t0 = le64(&m[0..8]);
-            let t1 = le64(&m[8..16]);
-            let hb = if hibit { HIBIT } else { 0 };
-            let h0 = self.h[0] + (t0 & MASK44);
-            let h1 = self.h[1] + (((t0 >> 44) | (t1 << 20)) & MASK44);
-            let h2 = self.h[2] + (((t1 >> 24) & MASK42) | hb);
-
+            let [r0, r1] = self.r;
+            // 2^130 = 5 mod p and r1 is a multiple of 4, so h1 r1 2^128 = h1 (r1 / 4) 2^130 = h1 (5 r1 / 4) = h1 s1 mod p
+            let s1 = r1 + (r1 >> 2);
+            let [h0, h1, h2] = self.h;
+            // h += m: h2 at most 4 + 1 + 1
+            let (h0, c) = adc(h0, le64(&m[0..8]), 0);
+            let (h1, c) = adc(h1, le64(&m[8..16]), c);
+            let h2 = h2 + c + u64::from(hibit);
+            // h *= r, partly reduced. r0 < 2^60 and s1 < 2^61, so the sums of products are under 2^126, and h2 s1 and
+            // h2 r0 (h2 at most 6) fit in 64 bits
             let mul = |a: u64, b: u64| a as u128 * b as u128;
-            let d0 = mul(h0, r0) + mul(h1, s2) + mul(h2, s1);
-            let mut d1 = mul(h0, r1) + mul(h1, r0) + mul(h2, s2);
-            let mut d2 = mul(h0, r2) + mul(h1, r1) + mul(h2, r0);
-
-            let mut c = (d0 >> 44) as u64;
-            let mut h0 = d0 as u64 & MASK44;
-            d1 += c as u128;
-            c = (d1 >> 44) as u64;
-            let mut h1 = d1 as u64 & MASK44;
-            d2 += c as u128;
-            c = (d2 >> 42) as u64;
-            let h2 = d2 as u64 & MASK42;
-            h0 += c * 5;
-            c = h0 >> 44;
-            h0 &= MASK44;
-            h1 += c;
-            self.h = [h0, h1, h2];
+            let d0 = mul(h0, r0) + mul(h1, s1);
+            let d1 = mul(h0, r1) + mul(h1, r0) + (h2 * s1) as u128 + (d0 >> 64);
+            let h2 = h2 * r0 + (d1 >> 64) as u64;
+            // what is at 2^130 and above comes back times 5: (h2 >> 2) 5 = (h2 & !3) + (h2 >> 2)
+            let c = (h2 & !3) + (h2 >> 2);
+            let (h0, c) = adc(d0 as u64, c, 0);
+            let (h1, c) = adc(d1 as u64, 0, c);
+            self.h = [h0, h1, (h2 & 3) + c];
         }
 
         pub(crate) fn finish(self) -> [u8; 16] {
             // (the key material is wiped when `self` drops at the end of this function)
-            let [mut h0, mut h1, mut h2] = self.h;
-
-            // fully carry h
-            let mut c = h1 >> 44;
-            h1 &= MASK44;
-            h2 += c;
-            c = h2 >> 42;
-            h2 &= MASK42;
-            h0 += c * 5;
-            c = h0 >> 44;
-            h0 &= MASK44;
-            h1 += c;
-            c = h1 >> 44;
-            h1 &= MASK44;
-            h2 += c;
-            c = h2 >> 42;
-            h2 &= MASK42;
-            h0 += c * 5;
-            c = h0 >> 44;
-            h0 &= MASK44;
-            h1 += c;
-
-            // compute h + -p
-            let mut g0 = h0 + 5;
-            c = g0 >> 44;
-            g0 &= MASK44;
-            let mut g1 = h1 + c;
-            c = g1 >> 44;
-            g1 &= MASK44;
-            let g2 = (h2 + c).wrapping_sub(1 << 42);
-
-            // select h if h < p, else h + -p (constant time)
-            let sel = (g2 >> 63).wrapping_sub(1); // all ones when h >= p
-            g0 &= sel;
-            g1 &= sel;
-            let g2 = g2 & sel;
-            let nsel = !sel;
-            h0 = (h0 & nsel) | g0;
-            h1 = (h1 & nsel) | g1;
-            h2 = (h2 & nsel) | g2;
-
-            // h = (h + pad) mod 2^128
-            let t0 = self.pad[0];
-            let t1 = self.pad[1];
-            h0 += t0 & MASK44;
-            c = h0 >> 44;
-            h0 &= MASK44;
-            h1 += (((t0 >> 44) | (t1 << 20)) & MASK44) + c;
-            c = h1 >> 44;
-            h1 &= MASK44;
-            h2 += ((t1 >> 24) & MASK42) + c;
-            h2 &= MASK42;
-
-            let lo = h0 | (h1 << 44);
-            let hi = (h1 >> 20) | (h2 << 24);
+            let [h0, h1, h2] = self.h;
+            // h < 5 2^128 < 2p, so h mod p is h - p if that is not below zero, which is when bit 130 of h + 5 is set
+            let (g0, c) = adc(h0, 5, 0);
+            let (g1, c) = adc(h1, 0, c);
+            let take = 0u64.wrapping_sub((h2 + c) >> 2); // all ones when h >= p
+            let h0 = (h0 & !take) | (g0 & take);
+            let h1 = (h1 & !take) | (g1 & take);
+            // (h + pad) mod 2^128
+            let (h0, c) = adc(h0, self.pad[0], 0);
+            let (h1, _) = adc(h1, self.pad[1], c);
             let mut tag = [0u8; 16];
-            tag[..8].copy_from_slice(&lo.to_le_bytes());
-            tag[8..].copy_from_slice(&hi.to_le_bytes());
+            tag[..8].copy_from_slice(&h0.to_le_bytes());
+            tag[8..].copy_from_slice(&h1.to_le_bytes());
             tag
         }
     }
@@ -174,9 +122,9 @@ pub(crate) mod limbs64 {
             assert!(std::mem::needs_drop::<Poly1305>());
             let mut p = Poly1305::new(&[0xa5u8; 32]);
             p.block(&[0x77; 16], true);
-            assert!(p.r != [0; 3] && p.h != [0; 3]);
+            assert!(p.r != [0; 2] && p.h != [0; 3]);
             p.wipe();
-            assert!(p.r == [0; 3] && p.s == [0; 2] && p.h == [0; 3] && p.pad == [0; 2]);
+            assert!(p.r == [0; 2] && p.h == [0; 3] && p.pad == [0; 2]);
         }
     }
 }
@@ -396,8 +344,64 @@ mod tests {
     fn rfc8439_2_5_2_both_implementations() {
         let key: [u8; 32] = unhex("85d6be7857556d337f4452fe42d506a80103808afb0db2fd4abff6af4149f51b").try_into().unwrap();
         let msg = b"Cryptographic Forum Research Group";
-        assert_eq!(hex(&mac!(limbs64, &key, msg)), "a8061dc1305136c6c22b8baf0c0127a9");
+        assert_eq!(hex(&mac!(radix64, &key, msg)), "a8061dc1305136c6c22b8baf0c0127a9");
         assert_eq!(hex(&mac!(limbs32, &key, msg)), "a8061dc1305136c6c22b8baf0c0127a9");
+    }
+
+    /// The two implementations agree where the arithmetic is at its limits: r with every bit the clamp allows, blocks of
+    /// all ones (with and without the 2^128 bit, and short final blocks), h that ends at p, just over and just under, and
+    /// long runs of each, and random keys and messages.
+    #[test]
+    fn both_implementations_agree_at_the_limits() {
+        let mut keys: Vec<[u8; 32]> = vec![[0xff; 32], [0; 32], [0x0f; 32], [0xf0; 32]];
+        let mut x = 0x9e37_79b9_7f4a_7c15u64;
+        let mut next = move || {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x
+        };
+        for _ in 0..40 {
+            keys.push(core::array::from_fn(|_| next() as u8));
+        }
+        let mut messages: Vec<Vec<u8>> = Vec::new();
+        for len in [0usize, 1, 15, 16, 17, 31, 32, 33, 63, 64, 65, 255, 256, 1000, 4096] {
+            messages.push(vec![0xff; len]);
+            messages.push(vec![0; len]);
+            messages.push((0..len).map(|_| next() as u8).collect());
+        }
+        for key in &keys {
+            for msg in &messages {
+                assert_eq!(mac!(radix64, key, msg), mac!(limbs32, key, msg), "key {} length {}", hex(key), msg.len());
+                // and every block with the high bit, as the AEAD feeds them
+                let mut a = super::radix64::Poly1305::new(key);
+                let mut b = super::limbs32::Poly1305::new(key);
+                for c in msg.chunks(16) {
+                    let mut block = [0u8; 16];
+                    block[..c.len()].copy_from_slice(c);
+                    a.block(&block, true);
+                    b.block(&block, true);
+                }
+                assert_eq!(a.finish(), b.finish());
+            }
+        }
+        // the last step of `finish` at its edge: with r = 1 (and s = 0) h is the sum of the blocks, and three blocks of
+        // 2^128 and one of 2^128 - 5 - k make h = p - k, whose tag is h mod p
+        let mut key = [0u8; 32];
+        key[0] = 1;
+        for (k, tag) in [(1i64, "faffffffffffffffffffffffffffffff"), (0, "00000000000000000000000000000000"), (-1, "01000000000000000000000000000000"), (-4, "04000000000000000000000000000000")] {
+            let v = (u128::MAX - 4).wrapping_sub(k as u128); // 2^128 - 5 - k
+            let last = v.to_le_bytes();
+            let mut a = super::radix64::Poly1305::new(&key);
+            let mut b = super::limbs32::Poly1305::new(&key);
+            for _ in 0..3 {
+                a.block(&[0; 16], true);
+                b.block(&[0; 16], true);
+            }
+            a.block(&last, false);
+            b.block(&last, false);
+            assert_eq!((hex(&a.finish()), hex(&b.finish())), (tag.to_string(), tag.to_string()), "h = p - ({k})");
+        }
     }
 
     #[test]
@@ -406,7 +410,7 @@ mod tests {
         for (i, &(key, msg, tag)) in POLY1305_VECTORS.iter().enumerate() {
             let key: [u8; 32] = unhex(key).try_into().unwrap();
             let msg = unhex(msg);
-            assert_eq!(hex(&mac!(limbs64, &key, msg)), tag, "limbs64 vector {i}");
+            assert_eq!(hex(&mac!(radix64, &key, msg)), tag, "radix64 vector {i}");
             assert_eq!(hex(&mac!(limbs32, &key, msg)), tag, "limbs32 vector {i}");
         }
     }

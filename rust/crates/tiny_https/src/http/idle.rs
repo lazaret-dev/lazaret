@@ -139,6 +139,26 @@ impl<T> IdlePool<T> {
         drop(dropped);
     }
 
+    /// The connection to `host:port` (of any key) that has been parked the longest: the one to close when a per-host
+    /// connection limit needs room.
+    pub(crate) fn take_oldest_to(&self, host: &str, port: u16) -> Option<T> {
+        let mut inner = self.lock();
+        let key = inner
+            .hosts
+            .iter()
+            .filter(|(k, _)| k.host == host && k.port == port)
+            .filter_map(|(k, l)| l.front().map(|e| (e.parked, k.clone())))
+            .min_by_key(|(p, _)| *p)
+            .map(|(_, k)| k)?;
+        let list = inner.hosts.get_mut(&key)?;
+        let found = list.pop_front().map(|e| e.conn);
+        if list.is_empty() {
+            inner.hosts.remove(&key);
+        }
+        inner.total -= usize::from(found.is_some());
+        found
+    }
+
     /// Drops every idle connection.
     pub(crate) fn clear(&self) {
         let all: Vec<VecDeque<Idle<T>>> = {
@@ -218,6 +238,19 @@ mod tests {
         assert!(pool.take(&Key { proxy: Some(("p".into(), 3128, Some("u:2".into()))), ..key("a") }, t0).is_none());
         assert_eq!(pool.take(&key("a"), t0).map(|c| c.id), Some(1));
         assert_eq!(dropped.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn the_oldest_connection_to_a_host_of_any_key_can_be_taken_to_make_room() {
+        let (pool, dropped, t0) = fixture();
+        pool.put(key("a"), conn(1, &dropped), 60 * SECOND, &policy(), t0 + SECOND);
+        pool.put(Key { min_tls: crate::tls::TlsVersion::Tls13, ..key("a") }, conn(2, &dropped), 60 * SECOND, &policy(), t0);
+        pool.put(key("b"), conn(3, &dropped), 60 * SECOND, &policy(), t0);
+        pool.put(Key { port: 8443, ..key("a") }, conn(4, &dropped), 60 * SECOND, &policy(), t0);
+        assert_eq!(pool.take_oldest_to("a", 443).map(|c| c.id), Some(2));
+        assert_eq!(pool.take_oldest_to("a", 443).map(|c| c.id), Some(1));
+        assert!(pool.take_oldest_to("a", 443).is_none());
+        assert_eq!(pool.len(), 2);
     }
 
     #[test]

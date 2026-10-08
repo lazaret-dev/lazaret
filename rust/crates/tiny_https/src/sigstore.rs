@@ -30,12 +30,15 @@
 //!    checks out, a time stamp's time), are the only notion of time here: at least one is needed. The
 //!    signer must have been valid at one: the certificate chain verifies to a Fulcio authority that counts
 //!    at that time, for code signing, at that time; or the key's validity includes it.
-//! 6. One of the statement's subjects has the digest the caller gave.
+//! 6. For a certificate, the signed certificate timestamps embedded in it (RFC 6962, see [`crate::ct`]) are checked
+//!    against the trusted root's CT logs with the issuer of the verified chain: an SCT from a listed log must verify
+//!    under a key of that log valid at the SCT's time, and SCTs from [`Trust::sct_threshold`] different logs (one by
+//!    default) must have verified. SCTs from logs the root does not list are not checked and do not count.
+//! 7. One of the statement's subjects has the digest the caller gave.
 //!
 //! # What is not verified
 //!
-//! Signed certificate timestamps in the certificate (the Certificate Transparency side of Fulcio); bundles
-//! that sign an artifact's digest directly (`messageSignature`) rather than a statement; Rekor v2 entries
+//! Bundles that sign an artifact's digest directly (`messageSignature`) rather than a statement; Rekor v2 entries
 //! (`kindVersion` other than `intoto` 0.0.2 and `dsse` 0.0.1); the envelope hash that Rekor records. The
 //! `integratedTime` of an entry that has no valid signed entry timestamp is not used for anything. Consistency
 //! between checkpoints is not looked at (an inclusion proof is to one signed checkpoint).
@@ -49,6 +52,7 @@ use std::fmt;
 
 use crate::asn1::{self, Der};
 use crate::cms;
+use crate::ct;
 use crate::crypto::sha2::{Hash as _, HashAlg, Sha256};
 use crate::json::{self, Value};
 use crate::note::{self, Verifier};
@@ -94,6 +98,9 @@ pub enum Error {
     /// The signer's certificate is unacceptable: the string says why (the chain, the purpose, a
     /// Fulcio extension that is not text).
     Certificate(String),
+    /// The signer's certificate does not have enough signed certificate timestamps from the trusted root's CT logs,
+    /// or has one from such a log that does not verify: the string says which.
+    CertificateTransparency(String),
     /// The signer's key was not valid at any time the bundle established.
     KeyNotValid(String),
     /// The statement is malformed or of a kind not handled.
@@ -115,6 +122,7 @@ impl fmt::Display for Error {
             Error::Timestamp(m) => write!(f, "time stamp: {m}"),
             Error::NoVerifiedTime => write!(f, "nothing in the bundle establishes when it was signed"),
             Error::Certificate(m) => write!(f, "signing certificate: {m}"),
+            Error::CertificateTransparency(m) => write!(f, "certificate transparency: {m}"),
             Error::KeyNotValid(k) => write!(f, "key {k:?} was not valid when the bundle was signed"),
             Error::Statement(m) => write!(f, "statement: {m}"),
             Error::SubjectMismatch => write!(f, "no subject of the statement has the artifact's digest"),
@@ -139,16 +147,27 @@ fn malformed<T>(path: &str, what: &str) -> Result<T, Error> {
 /// The trust a bundle is checked against.
 #[derive(Clone, Copy, Debug)]
 pub struct Trust<'a> {
-    /// Sigstore's trusted root: logs, Fulcio and time-stamp authorities.
+    /// Sigstore's trusted root: logs, Fulcio and time-stamp authorities, CT logs.
     pub root: &'a TrustedRoot,
     /// Keys for bundles that carry a key hint instead of a certificate (npm's publish attestations).
     pub keys: Option<&'a KeyRing>,
+    /// How many of the trusted root's CT logs must have signed a timestamp embedded in a signing certificate
+    /// (counted once per log). 1 by default, as in sigstore-go, cosign and sigstore-python; 0 accepts a certificate
+    /// without one (for a Sigstore that runs no CT log), but an SCT from a listed log is still checked.
+    pub sct_threshold: usize,
 }
 
 impl<'a> Trust<'a> {
-    /// Trust in a trusted root only: bundles signed by a Fulcio certificate.
+    /// Trust in a trusted root only: bundles signed by a Fulcio certificate that carries a signed certificate
+    /// timestamp from one of the root's CT logs.
     pub fn new(root: &'a TrustedRoot) -> Trust<'a> {
-        Trust { root, keys: None }
+        Trust { root, keys: None, sct_threshold: 1 }
+    }
+
+    /// Requires signed certificate timestamps from `logs` different CT logs of the root (0: none required).
+    pub fn with_sct_threshold(mut self, logs: usize) -> Trust<'a> {
+        self.sct_threshold = logs;
+        self
     }
 
     /// Also trust the keys of `keys` for key-signed bundles.
@@ -237,6 +256,9 @@ pub struct Verified {
     pub times: Vec<VerifiedTime>,
     /// The transparency log entries, all authenticated.
     pub entries: Vec<VerifiedEntry>,
+    /// The signed certificate timestamps of the signing certificate that verified against the root's CT logs (none
+    /// for a key).
+    pub scts: Vec<ct::VerifiedSct>,
 }
 
 /// Who signed.
@@ -1131,6 +1153,12 @@ impl Bundle {
             }
         };
 
+        // 5c. the certificate's signed certificate timestamps, with the issuer the chain was built through
+        let scts = match &signer {
+            Signer::Certificate(id) => check_scts(&id.certificate, &id.chain, trust)?,
+            Signer::Key { .. } => Vec::new(),
+        };
+
         // 6. the subject
         let matched_subject = statement
             .subjects
@@ -1138,8 +1166,28 @@ impl Bundle {
             .position(|s| s.digests.iter().any(|(alg, value)| alg == artifact.algorithm.name() && hex_matches(value, &artifact.digest)))
             .ok_or(Error::SubjectMismatch)?;
 
-        Ok(Verified { format: self.format, signer, statement, matched_subject, verified_time, times, entries })
+        Ok(Verified { format: self.format, signer, statement, matched_subject, verified_time, times, entries, scts })
     }
+}
+
+/// Checks the SCTs embedded in a signing certificate (`chain` is the verified path from it, the issuer second) against
+/// the root's CT logs and requires them from `trust.sct_threshold` logs.
+fn check_scts(leaf: &[u8], chain: &[Vec<u8>], trust: &Trust) -> Result<Vec<ct::VerifiedSct>, Error> {
+    let fail = |m: String| Error::CertificateTransparency(m);
+    let leaf = Certificate::parse(leaf).map_err(|e| fail(e.to_string()))?;
+    let Some(issuer) = chain.get(1) else { return Err(fail("the certificate is itself a trust anchor: it has no issuer to check SCTs with".into())) };
+    let issuer = Certificate::parse(issuer).map_err(|e| fail(e.to_string()))?;
+    let report = ct::verify_embedded(&leaf, &issuer, &trust.root.ctlogs).map_err(|e| fail(e.to_string()))?;
+    let logs = report.distinct_logs();
+    if logs < trust.sct_threshold {
+        let seen = ct::embedded(&leaf).map(|l| l.scts.len() + l.other_versions).unwrap_or(0);
+        return Err(fail(format!(
+            "signed certificate timestamps from {logs} of the trusted root's CT logs verified and {} are required (the certificate has {seen}, {} from logs the root does not list)",
+            trust.sct_threshold,
+            report.unknown_logs.len()
+        )));
+    }
+    Ok(report.verified)
 }
 
 /// Finds the earliest of `times` at which the certificate verifies under some Fulcio authority that counts

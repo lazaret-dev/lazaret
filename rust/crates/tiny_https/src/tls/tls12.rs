@@ -287,6 +287,8 @@ pub(crate) enum Step12 {
     SendProtected(Vec<u8>),
     Alpn(Option<Vec<u8>>),
     PeerCertificates(Vec<Vec<u8>>),
+    /// The chain is verified, and the sources of revocation evidence are left for later (see the TLS 1.3 `Event`).
+    Unchecked(Box<revocation::Unchecked>),
     /// The server's Finished is verified: the handshake is over.
     Established,
 }
@@ -504,6 +506,9 @@ impl Handshake12 {
             staples[0] = self.staple.clone();
             let evidence = revocation::ChainEvidence { sent: &self.chain, staples: &staples };
             revocation::check_path(&config.revocation, &path, &evidence, now)?;
+            if config.revocation.is_deferred() {
+                steps.push(Step12::Unchecked(Box::new(revocation::Unchecked { path, sent: self.chain.clone(), staples })));
+            }
             leaf
         } else {
             Certificate::from_der(&self.chain[0])?
@@ -657,6 +662,7 @@ pub fn verify_tls12_signature(cert: &Certificate, suite: Suite12, scheme: u16, s
     let ok = match (scheme, &cert.public_key, suite.signs_with_rsa()) {
         (0x0403, PublicKey::Ec { curve, point }, false) => ecdsa::verify(*curve, point, HashAlg::Sha256, signed, signature),
         (0x0503, PublicKey::Ec { curve, point }, false) => ecdsa::verify(*curve, point, HashAlg::Sha384, signed, signature),
+        (0x0603, PublicKey::Ec { curve, point }, false) => ecdsa::verify(*curve, point, HashAlg::Sha512, signed, signature),
         (0x0807, PublicKey::Ed25519(k), false) => ed25519::verify(k, signed, signature),
         (0x0401, PublicKey::Rsa(k), true) => k.verify_pkcs1(HashAlg::Sha256, signed, signature),
         (0x0501, PublicKey::Rsa(k), true) => k.verify_pkcs1(HashAlg::Sha384, signed, signature),

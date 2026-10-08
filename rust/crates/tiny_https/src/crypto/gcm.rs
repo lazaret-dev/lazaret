@@ -1,5 +1,6 @@
 //! AES-GCM authenticated encryption (NIST SP 800-38D), 96-bit nonces only (as in TLS 1.3).
 
+use super::dit::Dit;
 use super::aes::Aes;
 #[cfg(any(test, tiny_https_fuzzing))]
 use super::aes::Backend;
@@ -26,12 +27,14 @@ impl AesGcm {
     /// `key` must be 16 or 32 bytes. Uses the hardware AES and GHASH where the CPU has them (see
     /// [`super::aes`]), the constant-time portable code otherwise.
     pub fn new(key: &[u8]) -> Self {
+        let _dit = Dit::on(); // data-independent timing while the key and the data are in use (crypto::dit)
         AesGcm::from_aes(Aes::new(key))
     }
 
     /// Like [`AesGcm::new`] with an explicit implementation, for the tests that compare them.
     #[cfg(any(test, tiny_https_fuzzing))]
     pub(crate) fn with_backend(key: &[u8], backend: Backend) -> Self {
+        let _dit = Dit::on(); // data-independent timing while the key and the data are in use (crypto::dit)
         AesGcm::from_aes(Aes::with_backend(key, backend))
     }
 
@@ -77,16 +80,32 @@ impl AesGcm {
     /// Encrypts in place. `buf` holds the plaintext followed by `TAG_LEN` bytes of room; on return
     /// it holds ciphertext || tag.
     pub fn seal_in_place(&self, nonce: &[u8; NONCE_LEN], aad: &[u8], buf: &mut [u8]) {
+        let _dit = Dit::on(); // data-independent timing while the key and the data are in use (crypto::dit)
         assert!(buf.len() >= TAG_LEN, "buffer must have room for the tag");
         let n = buf.len() - TAG_LEN;
         let (data, tag_out) = buf.split_at_mut(n);
         // one pass over the data where the CPU has the code for it, else CTR and then GHASH
         let tag = match self.aes.gcm_seal(nonce, aad, data, self.ghash.powers()) {
             Some(s) => self.mask_tag(nonce, s),
-            None => {
-                self.ctr_xor(nonce, data);
-                self.tag(nonce, aad, data)
-            }
+            None => match self.short(nonce, data.len()) {
+                // a short message and J0 from one pass of the portable cipher
+                Some((mut j0, mut ks)) => {
+                    for (d, k) in data.iter_mut().zip(ks.iter()) {
+                        *d ^= k;
+                    }
+                    let mut tag = self.ghash.hash(aad, data);
+                    for (t, k) in tag.iter_mut().zip(j0.iter()) {
+                        *t ^= k;
+                    }
+                    j0.zeroize();
+                    ks.zeroize();
+                    tag
+                }
+                None => {
+                    self.ctr_xor(nonce, data);
+                    self.tag(nonce, aad, data)
+                }
+            },
         };
         tag_out.copy_from_slice(&tag);
     }
@@ -95,6 +114,7 @@ impl AesGcm {
     /// and `buf[..len]` holds the plaintext; on failure returns `None` and `buf` is untouched
     /// (the tag is verified before anything is decrypted).
     pub fn open_in_place(&self, nonce: &[u8; NONCE_LEN], aad: &[u8], buf: &mut [u8]) -> Option<usize> {
+        let _dit = Dit::on(); // data-independent timing while the key and the data are in use (crypto::dit)
         if buf.len() < TAG_LEN {
             return None;
         }
@@ -109,12 +129,59 @@ impl AesGcm {
             }
             return Some(n);
         }
+        if let Some((mut j0, mut ks)) = self.short(nonce, n) {
+            let mut expected = self.ghash.hash(aad, data);
+            for (t, k) in expected.iter_mut().zip(j0.iter()) {
+                *t ^= k;
+            }
+            let good = ct_eq(&expected, tag);
+            if good {
+                for (d, k) in data.iter_mut().zip(ks.iter()) {
+                    *d ^= k;
+                }
+            }
+            j0.zeroize();
+            ks.zeroize();
+            return good.then_some(n);
+        }
         let expected = self.tag(nonce, aad, data);
         if !ct_eq(&expected, tag) {
             return None;
         }
         self.ctr_xor(nonce, data);
         Some(n)
+    }
+
+    /// J0's encryption and the keystream of a message of at most 48 bytes, from one pass of the portable cipher (`None`
+    /// for a longer message, or on the hardware path).
+    fn short(&self, nonce: &[u8; NONCE_LEN], len: usize) -> Option<([u8; 16], [u8; 48])> {
+        if len > 48 {
+            return None;
+        }
+        self.aes.j0_and_short_keystream(nonce)
+    }
+
+    /// [`AesGcm::seal_in_place`] by the two steps, CTR and then GHASH, whatever the CPU has: what the hardware path did
+    /// before B-85 gave it one pass. Test builds only, for the timing tests that compare the two
+    /// (`crypto::timing::aes_gcm_seal_parts`).
+    #[cfg(test)]
+    pub(crate) fn seal_in_place_two_passes(&self, nonce: &[u8; NONCE_LEN], aad: &[u8], buf: &mut [u8]) {
+        let _dit = Dit::on();
+        let n = buf.len() - TAG_LEN;
+        let (data, tag_out) = buf.split_at_mut(n);
+        self.ctr_xor(nonce, data);
+        let tag = self.tag(nonce, aad, data);
+        tag_out.copy_from_slice(&tag);
+    }
+
+    /// [`AesGcm::seal_in_place`] with the aarch64 one-pass kernel as it was from B-85 until the timing tests (it read each
+    /// group of ciphertext back from memory to hash it; `aes_hw::SEAL_BY_RELOAD`). The same as `seal_in_place` elsewhere.
+    /// Test builds only.
+    #[cfg(test)]
+    pub(crate) fn seal_in_place_by_reload(&self, nonce: &[u8; NONCE_LEN], aad: &[u8], buf: &mut [u8]) {
+        super::aes_hw::SEAL_BY_RELOAD.with(|c| c.set(true));
+        self.seal_in_place(nonce, aad, buf);
+        super::aes_hw::SEAL_BY_RELOAD.with(|c| c.set(false));
     }
 
     /// Returns ciphertext || tag.
@@ -148,6 +215,34 @@ mod tests {
             v.push(AesGcm::with_backend(key, Backend::Hardware));
         }
         v
+    }
+
+    /// The two-step seal and the one-pass seal as it was until the timing tests (which read its ciphertext back), which those
+    /// tests compare with the one-pass seal, give the same bytes as it (every length around the groups of eight blocks,
+    /// both key sizes, every implementation).
+    #[test]
+    fn the_two_step_seal_is_the_same_as_the_one_pass_seal() {
+        let nonce = [7u8; 12];
+        for key_len in [16usize, 32] {
+            let key: Vec<u8> = (0..key_len as u8).collect();
+            for g in gcms(&key) {
+                for len in (0..300).chain([1024, 1040, 4096 + 5]) {
+                    let plain: Vec<u8> = (0..len).map(|i| (i * 31 + 7) as u8).collect();
+                    let mut one = plain.clone();
+                    one.extend_from_slice(&[0u8; TAG_LEN]);
+                    let mut two = one.clone();
+                    let mut reload = one.clone();
+                    g.seal_in_place(&nonce, b"aad", &mut one);
+                    g.seal_in_place_two_passes(&nonce, b"aad", &mut two);
+                    g.seal_in_place_by_reload(&nonce, b"aad", &mut reload);
+                    assert_eq!(one, two, "{:?}, {key_len}-byte key, {len} bytes", g.backend());
+                    assert_eq!(one, reload, "{:?}, {key_len}-byte key, {len} bytes (by reload)", g.backend());
+                    // and it opens
+                    assert_eq!(g.open_in_place(&nonce, b"aad", &mut one), Some(len));
+                    assert_eq!(one[..len], plain[..]);
+                }
+            }
+        }
     }
 
     #[test]

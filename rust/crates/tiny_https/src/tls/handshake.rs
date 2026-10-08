@@ -11,6 +11,7 @@
 //! secrets that replace them), so a step returns a list of [`Event`]s to be applied in order.
 
 use super::messages::*;
+use super::session::{Scope, Session};
 use super::suite::*;
 use super::tls12::{Handshake12, Start12, Step12, VERSION_TLS12};
 use super::{ClientConfig, TlsVersion};
@@ -84,6 +85,8 @@ pub(crate) enum Event {
     Alpn(Option<Vec<u8>>),
     /// The certificate chain the server sent and that was accepted (the leaf first).
     PeerCertificates(Vec<Vec<u8>>),
+    /// The chain is verified but the sources of revocation evidence are still to be asked (the configuration deferred them).
+    Unchecked(Box<revocation::Unchecked>),
     /// The server's `quic_transport_parameters`, as sent (QUIC only).
     PeerTransportParameters(Vec<u8>),
     /// The server's Finished is verified and ours is in the events before this: the handshake is over, and these are the traffic
@@ -92,6 +95,12 @@ pub(crate) enum Event {
     /// The server speaks TLS 1.2: the handshake goes on in this one (see [`super::tls12`]), which asks for these steps first.
     /// Never over QUIC, which offers TLS 1.3 only.
     Tls12(Box<Handshake12>, Vec<Step12>),
+    /// The server took the session the ClientHello offered: no certificate comes, and these are the ones of the full handshake
+    /// the session descends from (before [`Event::PeerCertificates`] with them).
+    Resumed,
+    /// The handshake is over (after [`Event::ApplicationSecrets`]): the resumption master secret, from which the PSKs of the
+    /// server's tickets are made, and when the chain these tickets rest on was checked (Unix seconds).
+    ResumptionSecret { suite: Suite, secret: Zeroizing<Vec<u8>>, verified_at: i64 },
 }
 
 /// Where the server's flight stands.
@@ -109,6 +118,8 @@ enum Stage {
 struct HandshakeKeys {
     suite: Suite,
     alg: crate::crypto::sha2::HashAlg,
+    /// The server took the offered session.
+    resumed: bool,
     handshake_secret: Zeroizing<Vec<u8>>,
     c_hs: Zeroizing<Vec<u8>>,
     s_hs: Zeroizing<Vec<u8>>,
@@ -168,6 +179,10 @@ pub(crate) struct Handshake {
     keys: Option<HandshakeKeys>,
     request_context: Option<Vec<u8>>,
     leaf: Option<Certificate>,
+    /// The session the ClientHello offers, if it offers one (TLS 1.3 over TCP, with resumption on and a session kept).
+    psk: Option<Session>,
+    /// When the server's chain was checked (Unix seconds): now, in a full handshake; the session's, in a resumed one.
+    verified_at: i64,
     /// Extension types removed from EncryptedExtensions before they are checked (tests only).
     #[cfg(test)]
     ignored_ee_extensions: Vec<u16>,
@@ -188,10 +203,15 @@ impl Handshake {
         session_id: &[u8],
     ) -> (Handshake, Vec<u8>) {
         let public = x25519::public_key(&private);
-        let sni = if server_name.parse::<IpAddr>().is_ok() { None } else { Some(server_name) };
+        // RFC 6066 section 3: no IP literal, and no trailing dot ("example.com." is sent as "example.com")
+        let sni = if server_name.parse::<IpAddr>().is_ok() { None } else { Some(server_name.strip_suffix('.').unwrap_or(server_name)) };
         let status_requested = config.verify_server_certificate && config.revocation.mode != RevocationMode::Off;
         let offers_tls12 = quic.is_none() && config.min_version <= TlsVersion::Tls12;
-        let client_hello = build_client_hello(&ClientHello {
+        // a session to resume: over TCP only (a QUIC client neither keeps nor offers any)
+        let now = config.time_override.unwrap_or_else(sys::now_unix);
+        let psk = if quic.is_none() { config.resumption.take(&session_key(server_name), &scope_of(config), now) } else { None };
+        let offer = psk.as_ref().map(|s| PskOffer { identity: &s.ticket, obfuscated_age: s.obfuscated_age(), binder_len: s.suite.hash().output_len() });
+        let mut client_hello = build_client_hello(&ClientHello {
             random,
             session_id,
             server_name: sni,
@@ -202,7 +222,12 @@ impl Handshake {
             cookie: None,
             quic_transport_parameters: quic,
             tls12: offers_tls12,
+            psk: offer,
         });
+        if let Some(session) = &psk {
+            let binder = psk_binder(session, &[], &client_hello);
+            set_psk_binder(&mut client_hello, &binder);
+        }
         let hs = Handshake {
             stage: Stage::ServerHello,
             secret: KeyShareSecret::X25519(private),
@@ -221,6 +246,8 @@ impl Handshake {
             keys: None,
             request_context: None,
             leaf: None,
+            psk,
+            verified_at: now,
             #[cfg(test)]
             ignored_ee_extensions: Vec::new(),
         };
@@ -262,6 +289,8 @@ impl Handshake {
             keys: None,
             request_context: None,
             leaf: None,
+            psk: None,
+            verified_at: 0,
             ignored_ee_extensions: ignored_ee_extensions.to_vec(),
         }
     }
@@ -321,6 +350,16 @@ impl Handshake {
                 if self.retry_suite.is_some_and(|retry| retry != suite) {
                     return Err(Error::Tls("illegal_parameter: ServerHello changed the cipher suite chosen in the HelloRetryRequest".into()));
                 }
+                // RFC 8446 section 4.2.11: the identity must be one that was offered (there is one), and the suite's hash the
+                // PSK's
+                let resumed = match (sh.selected_identity, &self.psk) {
+                    (None, _) => false,
+                    (Some(_), None) => return Err(Error::Tls("illegal_parameter: the server took a PSK that was not offered".into())),
+                    (Some(0), Some(session)) if session.suite.hash() == suite.hash() => true,
+                    (Some(0), Some(_)) => return Err(Error::Tls("illegal_parameter: the server resumed with a cipher suite of another hash than the session's".into())),
+                    (Some(i), Some(_)) => return Err(Error::Tls(format!("illegal_parameter: the server took PSK identity {i}, and one was offered"))),
+                };
+                // (only psk_dhe_ke was offered, so the server must send a key share whether it resumes or not)
                 let (group, server_share) = sh.key_share.ok_or_else(|| Error::Tls("missing_extension: no key_share in ServerHello".into()))?;
                 if group != self.sent_group {
                     return Err(Error::Tls("illegal_parameter: ServerHello selected a key share group we did not send".into()));
@@ -349,14 +388,18 @@ impl Handshake {
                 let hash_len = alg.output_len();
                 let zeros = vec![0u8; hash_len];
                 let empty_hash = alg.digest(&[]);
-                let early_secret = Zeroizing::new(hkdf_extract(alg, &[], &zeros));
+                let psk: &[u8] = match (&self.psk, resumed) {
+                    (Some(session), true) => &session.psk,
+                    _ => &zeros,
+                };
+                let early_secret = Zeroizing::new(hkdf_extract(alg, &[], psk));
                 let derived = Zeroizing::new(derive_secret(alg, &early_secret, "derived", &empty_hash));
                 let handshake_secret = Zeroizing::new(hkdf_extract(alg, &derived, &shared));
                 let hello_hash = alg.digest(&self.transcript);
                 let c_hs = Zeroizing::new(derive_secret(alg, &handshake_secret, "c hs traffic", &hello_hash));
                 let s_hs = Zeroizing::new(derive_secret(alg, &handshake_secret, "s hs traffic", &hello_hash));
                 events.push(Event::HandshakeSecrets { suite, client: c_hs.clone(), server: s_hs.clone() });
-                self.keys = Some(HandshakeKeys { suite, alg, handshake_secret, c_hs, s_hs });
+                self.keys = Some(HandshakeKeys { suite, alg, resumed, handshake_secret, c_hs, s_hs });
                 self.stage = Stage::EncryptedExtensions;
             }
             (Stage::EncryptedExtensions, HS_ENCRYPTED_EXTENSIONS) => {
@@ -383,7 +426,17 @@ impl Handshake {
                 }
                 events.push(Event::Alpn(ee.alpn));
                 self.transcript.extend_from_slice(msg);
-                self.stage = Stage::CertificateOrRequest;
+                let resumed = self.keys.as_ref().is_some_and(|k| k.resumed);
+                if let (true, Some(session)) = (resumed, &self.psk) {
+                    // a resumed handshake has no Certificate, CertificateVerify or CertificateRequest (RFC 8446 section 2.2,
+                    // 4.3.2): the server's Finished is next, and the chain is the one the session was made on
+                    self.verified_at = session.verified_at;
+                    events.push(Event::Resumed);
+                    events.push(Event::PeerCertificates(session.peer_chain.clone()));
+                    self.stage = Stage::Finished;
+                } else {
+                    self.stage = Stage::CertificateOrRequest;
+                }
             }
             (Stage::CertificateOrRequest, HS_CERTIFICATE_REQUEST) => {
                 self.request_context = Some(parse_certificate_request(body)?);
@@ -394,9 +447,13 @@ impl Handshake {
                 let ServerCertificates { chain, staples } = parse_certificate(body, self.status_requested)?;
                 self.leaf = Some(if self.config.verify_server_certificate {
                     let now = self.config.time_override.unwrap_or_else(sys::now_unix);
+                    self.verified_at = now;
                     let (leaf, path) = self.config.trust_store.verify_server_path(&chain, &self.server_name, now)?;
                     let evidence = revocation::ChainEvidence { sent: &chain, staples: &staples };
                     revocation::check_path(&self.config.revocation, &path, &evidence, now)?;
+                    if self.config.revocation.is_deferred() {
+                        events.push(Event::Unchecked(Box::new(revocation::Unchecked { path, sent: chain.clone(), staples })));
+                    }
                     leaf
                 } else {
                     Certificate::from_der(&chain[0])?
@@ -498,7 +555,13 @@ impl Handshake {
                 (self.sent_group, public)
             }
         };
-        let client_hello = build_client_hello(&ClientHello {
+        // the session goes into the second ClientHello too, with its binder over the new transcript, unless the suite the
+        // server chose has another hash than the session's (RFC 8446 section 4.1.4): then it is not offered again
+        if self.psk.as_ref().is_some_and(|s| s.suite.hash() != suite.hash()) {
+            self.psk = None;
+        }
+        let offer = self.psk.as_ref().map(|s| PskOffer { identity: &s.ticket, obfuscated_age: s.obfuscated_age(), binder_len: s.suite.hash().output_len() });
+        let mut client_hello = build_client_hello(&ClientHello {
             random: &random,
             session_id: &session_id,
             server_name: if self.sent_sni { Some(self.server_name.as_str()) } else { None },
@@ -509,7 +572,12 @@ impl Handshake {
             cookie: hrr.cookie.as_deref(),
             quic_transport_parameters: self.quic.as_deref(),
             tls12: self.offers_tls12,
+            psk: offer,
         });
+        if let Some(session) = &self.psk {
+            let binder = psk_binder(session, &self.transcript, &client_hello);
+            set_psk_binder(&mut client_hello, &binder);
+        }
         self.transcript.extend_from_slice(&client_hello);
         // The compatibility change_cipher_spec went out after the first ClientHello; one is enough.
         events.push(Event::Send(Epoch::Initial, client_hello));
@@ -558,8 +626,13 @@ impl Handshake {
         }
         let client_finished_key = Zeroizing::new(expand_label(alg, &keys.c_hs, "finished", &[], hash_len));
         let verify_data = hmac(alg, &client_finished_key, &alg.digest(&self.transcript));
-        events.push(Event::Send(Epoch::Handshake, handshake_message(HS_FINISHED, &verify_data)));
+        let client_finished = handshake_message(HS_FINISHED, &verify_data);
+        // the resumption master secret covers the transcript through our Finished (RFC 8446 section 7.1)
+        self.transcript.extend_from_slice(&client_finished);
+        let res_master = Zeroizing::new(derive_secret(alg, &master_secret, "res master", &alg.digest(&self.transcript)));
+        events.push(Event::Send(Epoch::Handshake, client_finished));
         events.push(Event::ApplicationSecrets { suite, client: c_ap, server: s_ap });
+        events.push(Event::ResumptionSecret { suite, secret: res_master, verified_at: self.verified_at });
         Ok(())
     }
 }
@@ -584,3 +657,47 @@ fn without_extensions(body: &[u8], types: &[u16]) -> Vec<u8> {
     out.extend(kept);
     out
 }
+
+/// The name sessions are kept under: the server name in lower case, without a trailing dot.
+pub(crate) fn session_key(server_name: &str) -> String {
+    server_name.strip_suffix('.').unwrap_or(server_name).to_ascii_lowercase()
+}
+
+/// The trust a session made under `config` rests on.
+pub(crate) fn scope_of(config: &ClientConfig) -> Scope {
+    Scope { trust: config.trust_store.clone(), verify: config.verify_server_certificate, revocation: config.revocation.mode }
+}
+
+/// The binder of `session` in `client_hello` (built with a binder of zeros), after the messages of `transcript` (empty for
+/// a first ClientHello; the message_hash and HelloRetryRequest for a second): the HMAC, under the binder key's finished key,
+/// of the transcript hash through the ClientHello without its binders (RFC 8446 section 4.2.11.2).
+fn psk_binder(session: &Session, transcript: &[u8], client_hello: &[u8]) -> Vec<u8> {
+    let alg = session.suite.hash();
+    let hash_len = alg.output_len();
+    let early_secret = Zeroizing::new(hkdf_extract(alg, &[], &session.psk));
+    let binder_key = Zeroizing::new(derive_secret(alg, &early_secret, "res binder", &alg.digest(&[])));
+    let finished_key = Zeroizing::new(expand_label(alg, &binder_key, "finished", &[], hash_len));
+    let mut t = transcript.to_vec();
+    t.extend_from_slice(truncated_client_hello(client_hello, hash_len));
+    hmac(alg, &finished_key, &alg.digest(&t))
+}
+
+/// Refuses a server name that a TLS connection cannot be made to as it is: one that is neither an IP address literal (without
+/// brackets) nor an ASCII host name of labels of letters, digits, hyphens and underscores, at most 63 bytes each and 253 in
+/// all, with one trailing dot allowed. A name in Unicode is the common case of a name refused here: certificates and the
+/// server name extension hold A-labels, which [`crate::idna::to_ascii`] makes.
+pub(crate) fn check_server_name(name: &str) -> Result<()> {
+    if name.parse::<IpAddr>().is_ok() {
+        return Ok(());
+    }
+    let body = name.strip_suffix('.').unwrap_or(name);
+    let fits = !body.is_empty()
+        && body.len() <= 253
+        && body.split('.').all(|l| !l.is_empty() && l.len() <= 63 && l.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_'));
+    if fits {
+        return Ok(());
+    }
+    let hint = if name.is_ascii() { "" } else { "; an internationalized name must be given as A-labels, which tiny_https::idna::to_ascii makes" };
+    Err(Error::Tls(format!("{name:?} is not a host name or IP address a TLS connection can be made to{hint}")))
+}
+

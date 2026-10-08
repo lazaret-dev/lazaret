@@ -34,8 +34,8 @@ impl DecodeLimits {
     }
 }
 
-/// What a request can ask of the decoding: per request, over the client's setting.
-#[derive(Clone, Copy, Debug, Default)]
+/// What a request asks for itself, over the client's settings: the decoding, its limits, and its place in a batch.
+#[derive(Clone, Debug, Default)]
 pub(crate) struct RequestOpts {
     /// The limit on the size of the response body (the one on the wire, and the default for the decoded one).
     pub(crate) max_body: Option<u64>,
@@ -45,6 +45,10 @@ pub(crate) struct RequestOpts {
     pub(crate) max_decoded: Option<u64>,
     /// The oldest TLS version this request accepts, over the client's.
     pub(crate) min_tls: Option<crate::tls::TlsVersion>,
+    /// The batch it belongs to, over the client's (see `http::schedule`).
+    pub(crate) batch: Option<super::schedule::Batch>,
+    /// How many bytes it expects to bring, for a scheduler's byte budget.
+    pub(crate) expected: Option<u64>,
 }
 
 /// The coding of the body of a response that this client undoes, if it is one: a single `gzip`, `x-gzip` or `deflate`, on a response

@@ -36,7 +36,7 @@ use crate::quic::connection::{CloseReason, Config as QuicConfig, Connection as Q
 use crate::tls::ClientConfig;
 use std::collections::HashMap;
 use std::io;
-use std::net::{SocketAddr, ToSocketAddrs, UdpSocket};
+use std::net::{SocketAddr, UdpSocket};
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::thread;
@@ -133,19 +133,23 @@ pub(super) struct DialOptions {
     pub(super) idle_timeout: Duration,
     /// When the whole request must be finished.
     pub(super) deadline: Option<Instant>,
+    /// The client's resolver (see `http::connect`).
+    pub(super) resolver: Arc<super::connect::Resolver>,
 }
 
 /// Makes a QUIC connection to `host:port` that is authenticated as `server_name` (the origin: an alternative service has to be
 /// authoritative for it), and starts its threads.
 pub(super) fn dial(host: &str, port: u16, server_name: &str, tls: &ClientConfig, opts: DialOptions) -> Result<Arc<Shared>, Error> {
-    let addrs: Vec<SocketAddr> = (host, port).to_socket_addrs()?.collect();
-    if addrs.is_empty() {
-        return Err(Error::Http(format!("no address for {host}")));
-    }
     let now = Instant::now();
     let mut limit = now.checked_add(opts.handshake_timeout).unwrap_or(now + Duration::from_secs(3600));
     if let Some(d) = opts.deadline {
         limit = limit.min(d);
+    }
+    // the client's resolver (its cache, and its order: the address that last connected over TCP first, the families
+    // interleaved), within the time of the handshake
+    let addrs: Vec<SocketAddr> = opts.resolver.resolve(host, limit)?.into_iter().map(|ip| SocketAddr::new(ip, port)).collect();
+    if addrs.is_empty() {
+        return Err(Error::Http(format!("no address for {host}")));
     }
     let mut last: Option<Error> = None;
     for (i, addr) in addrs.iter().enumerate() {
@@ -503,6 +507,8 @@ impl Shared {
             let slot = Arc::new(Slot { cv: Condvar::new(), want: AtomicU8::new(WANT_NOTHING) });
             g.slots.insert(id, slot.clone());
             g.open += 1;
+            // (while a request is in flight the connection does not go idle, however long the server takes: B-91)
+            g.quic.set_keep_alive(true);
             self.pump(&mut g);
             (id, slot)
         };
@@ -670,6 +676,9 @@ impl Drop for H3Stream {
         }
         g.slots.remove(&self.id);
         g.open = g.open.saturating_sub(1);
+        if g.open == 0 {
+            g.quic.set_keep_alive(false);
+        }
         g.last_used = now;
         self.shared.pump(&mut g);
         if g.open == 0 {

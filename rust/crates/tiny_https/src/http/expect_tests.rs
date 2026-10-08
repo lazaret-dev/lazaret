@@ -1,9 +1,9 @@
 //! Tests of `Expect: 100-continue` in the blocking client ([`RequestBuilder::expect_continue`]): the body waits for the go-ahead,
 //! is never sent when the server answers first, goes after the wait when the server says nothing (over TCP and over TLS), and
-//! goes again without the expectation after a 417, and after a redirect that keeps it.
+//! goes again without the expectation after a 417, and after a redirect that keeps it. (The async client's are in
+//! `async_timeout_tests`, which uses the servers here.)
 
 use super::testserver::{response, Reply, Seen, TestServer};
-use crate::asyncio::block_on;
 use crate::tls::ClientConfig;
 use crate::x509::TrustStore;
 use crate::Client;
@@ -15,7 +15,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 /// A server on plain TCP that runs `script` on each connection (with its number, from 0) on a thread of its own.
-fn raw_server(script: impl Fn(usize, TcpStream) + Send + Sync + 'static) -> (u16, Arc<AtomicUsize>) {
+pub(super) fn raw_server(script: impl Fn(usize, TcpStream) + Send + Sync + 'static) -> (u16, Arc<AtomicUsize>) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
     let count = Arc::new(AtomicUsize::new(0));
@@ -32,12 +32,12 @@ fn raw_server(script: impl Fn(usize, TcpStream) + Send + Sync + 'static) -> (u16
     (port, count)
 }
 
-fn client() -> Client {
+pub(super) fn client() -> Client {
     Client::with_tls_config(ClientConfig::new(TrustStore::empty())).allow_insecure_http(true).timeout(Duration::from_secs(5))
 }
 
 /// Reads up to the end of a request head.
-fn read_head(s: &mut TcpStream) -> String {
+pub(super) fn read_head(s: &mut TcpStream) -> String {
     let mut head = Vec::new();
     let mut byte = [0u8; 1];
     while !head.ends_with(b"\r\n\r\n") {
@@ -49,23 +49,23 @@ fn read_head(s: &mut TcpStream) -> String {
     String::from_utf8_lossy(&head).into_owned()
 }
 
-fn header<'a>(head: &'a str, name: &str) -> Option<&'a str> {
+pub(super) fn header<'a>(head: &'a str, name: &str) -> Option<&'a str> {
     head.lines().skip(1).find_map(|l| l.split_once(':').filter(|(k, _)| k.eq_ignore_ascii_case(name)).map(|(_, v)| v.trim()))
 }
 
-fn length(head: &str) -> usize {
+pub(super) fn length(head: &str) -> usize {
     header(head, "content-length").map_or(0, |v| v.parse().unwrap())
 }
 
 /// Reads exactly `n` bytes.
-fn read_body(s: &mut TcpStream, n: usize) -> Vec<u8> {
+pub(super) fn read_body(s: &mut TcpStream, n: usize) -> Vec<u8> {
     let mut body = vec![0u8; n];
     s.read_exact(&mut body).unwrap();
     body
 }
 
 /// What arrives within `wait` (the bytes that came, until the client closed or the time ran out).
-fn arrives_within(s: &mut TcpStream, wait: Duration) -> usize {
+pub(super) fn arrives_within(s: &mut TcpStream, wait: Duration) -> usize {
     s.set_read_timeout(Some(wait)).unwrap();
     let mut buf = [0u8; 4096];
     let mut total = 0;
@@ -82,9 +82,9 @@ fn arrives_within(s: &mut TcpStream, wait: Duration) -> usize {
     total
 }
 
-const UPLOAD: usize = 300_000;
+pub(super) const UPLOAD: usize = 300_000;
 
-fn upload() -> Vec<u8> {
+pub(super) fn upload() -> Vec<u8> {
     (0..UPLOAD).map(|i| (i % 251) as u8).collect()
 }
 
@@ -261,15 +261,4 @@ fn a_request_without_a_body_or_without_the_header_does_not_wait() {
     // and the builder does not say it twice
     let _ = client.request("POST", &server.url("/twice")).header("expect", "100-continue").body("x").expect_continue().send().unwrap();
     assert_eq!(server.requests()[2].head.to_ascii_lowercase().matches("expect:").count(), 1);
-}
-
-#[test]
-fn the_async_client_sends_the_body_with_the_head() {
-    let server = TestServer::start(|seen: &Seen| Reply::Send(response(200, &[], format!("got {}", seen.body.len()).as_bytes())));
-    let client = server.client().expect_continue_timeout(Duration::from_secs(10)).into_async();
-    let t0 = Instant::now();
-    let r = block_on(client.request("POST", &server.url("/silent")).body(upload()).expect_continue().send()).unwrap();
-    assert_eq!(r.text(), format!("got {UPLOAD}"));
-    assert!(t0.elapsed() < Duration::from_secs(5));
-    assert!(server.requests()[0].has_header("Expect: 100-continue"));
 }

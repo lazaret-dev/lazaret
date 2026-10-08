@@ -110,9 +110,20 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AsyncTlsStream<S> {
         self.conn.cipher_suite_name()
     }
 
+    /// The verified chain whose revocation sources were left for later, taken out (once); see
+    /// [`ClientConnection::take_unchecked`](crate::tls::ClientConnection::take_unchecked).
+    pub fn take_unchecked(&mut self) -> Option<Box<crate::revocation::Unchecked>> {
+        self.conn.take_unchecked()
+    }
+
     /// The version of TLS spoken.
     pub fn protocol_version(&self) -> Option<crate::tls::TlsVersion> {
         self.conn.protocol_version()
+    }
+
+    /// Whether the handshake resumed a session.
+    pub fn is_resumed(&self) -> bool {
+        self.conn.is_resumed()
     }
 
     /// The ALPN protocol the server selected, if any.

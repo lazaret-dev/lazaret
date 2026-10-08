@@ -135,16 +135,25 @@
 
 mod altsvc;
 mod async_client;
+pub mod connect;
 mod cookie;
 mod crl_source;
+mod ocsp_source;
+// TUF over HTTPS, and Sigstore's trusted root and npm's keys through it (BACKLOG B-82)
+pub mod tuf_source;
 mod decode;
 #[cfg(test)]
 mod decode_tests;
 #[cfg(test)]
 mod expect_tests;
 #[cfg(test)]
+mod async_timeout_tests;
+#[cfg(test)]
+mod revocation_fetch_tests;
+#[cfg(test)]
 mod cookie_tests;
 mod hostrules;
+pub mod schedule;
 // the HTTP/2 protocol layers (sans-IO) and the blocking client's transport on top of them
 mod h2;
 // HTTP/3: QPACK now, then the frames and the connection over `quic`
@@ -171,6 +180,10 @@ mod h2_testserver;
 #[cfg(test)]
 mod pool_tests;
 #[cfg(test)]
+mod establish_tests;
+#[cfg(test)]
+mod schedule_tests;
+#[cfg(test)]
 mod testserver;
 pub mod url;
 pub(crate) mod wire;
@@ -178,7 +191,10 @@ pub(crate) mod wire;
 pub use async_client::{AsyncClient, AsyncRequestBuilder, AsyncResponseStream, Connect, ThreadConnector};
 pub use cookie::CookieJar;
 pub use crl_source::HttpCrlSource;
+pub use ocsp_source::HttpOcspSource;
+pub use tuf_source::TufSource;
 pub use hostrules::HostRules;
+pub use schedule::{Batch, Scheduler};
 pub use stream::ResponseStream;
 pub use url::{Url, UrlLimits};
 
@@ -264,6 +280,8 @@ pub mod fuzz_hooks_server {
 }
 
 use crate::asyncio::net::{deadline_error, Io};
+use crate::asyncio::slots::{Permit, Slots};
+use schedule::{Interrupt, Membership, Running, Ticket};
 use crate::asyncio::{BlockingTask, Pool};
 use crate::error::{Error, Refused, RefusedBy, Result};
 use crate::pem::base64_encode;
@@ -273,7 +291,7 @@ use h3_transport::{DialOptions, Registry as H3Registry};
 use idle::{IdlePool, Key, Policy};
 use std::future::Future;
 use std::io::{self, Read, Write};
-use std::net::{TcpStream, ToSocketAddrs};
+use connect::Establish;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
@@ -431,6 +449,15 @@ pub struct Client {
     expect_timeout: Duration,
     /// Where cookies are kept, if anywhere: see [`Client::cookie_jar`].
     cookies: Option<CookieJar>,
+    /// How connections are made: the resolver and its cache, and the delay between attempts (see [`Client::dns_cache`] and
+    /// [`Client::connection_attempt_delay`]).
+    establish: Establish,
+    /// The per-host limit on connections, if there is one: see [`Client::max_connections_per_host`].
+    conn_limit: Option<Arc<Slots>>,
+    /// What lets requests go, if anything: see [`Client::scheduler`].
+    scheduler: Option<Scheduler>,
+    /// The batch every request of this client belongs to, if any: see [`Client::in_batch`].
+    batch: Option<Batch>,
 }
 
 /// What a hop hook is told about the request that is about to be sent: see [`Client::hop_headers`].
@@ -507,6 +534,10 @@ impl Client {
             decode: DecodeLimits::default(),
             expect_timeout: Duration::from_secs(1),
             cookies: None,
+            establish: Establish::default(),
+            conn_limit: None,
+            scheduler: None,
+            batch: None,
         }
     }
 
@@ -516,16 +547,58 @@ impl Client {
         self
     }
 
+    /// Limit for making a connection (default 10 s): resolving the host name and connecting, over all its addresses
+    /// (see [`connect`](crate::http::connect)).
     pub fn connect_timeout(mut self, t: Duration) -> Client {
         self.connect_timeout = t;
         self
     }
 
+    /// How long a host name's addresses are kept after a lookup (default [`connect::DEFAULT_DNS_TTL`], 30 s; zero keeps
+    /// none). The system's resolver does not say how long a record may be kept, so this one time is used for all. The
+    /// cache is new, for this client and the clones made from it from now on (see [`connect`](crate::http::connect)).
+    pub fn dns_cache(mut self, ttl: Duration) -> Client {
+        self.establish.resolver = Arc::new(connect::Resolver::new(ttl));
+        self
+    }
+
+    /// How long an attempt to connect to one of a host's addresses has before the next address is tried as well (RFC
+    /// 8305, "Happy Eyeballs"; default [`connect::DEFAULT_ATTEMPT_DELAY`], 250 ms, kept between 10 ms and 2 s): what an
+    /// address that does not answer costs (see [`connect`](crate::http::connect)).
+    pub fn connection_attempt_delay(mut self, delay: Duration) -> Client {
+        self.establish.attempt_delay = delay.clamp(connect::MIN_ATTEMPT_DELAY, connect::MAX_ATTEMPT_DELAY);
+        self
+    }
+
+    /// At most `n` TCP connections to one host and port at a time, idle ones included (0, the default: no limit). A
+    /// request that needs a new connection when there are `n` closes an idle one to that host that it cannot use (one
+    /// made for another proxy or another TLS minimum), or else waits for one to close or to come back to the pool, which
+    /// it then uses; it waits up to its deadline ([`total_timeout`](Client::total_timeout)) or, without one, the
+    /// client's [`timeout`](Client::timeout). An HTTP/2 connection counts once however many requests it carries; HTTP/3
+    /// connections are not counted. The count is shared by the clones made from this client from now on; an
+    /// [`AsyncClient`] made from it keeps a count of its own.
+    pub fn max_connections_per_host(mut self, n: usize) -> Client {
+        self.conn_limit = (n > 0).then(|| Slots::new(n));
+        self
+    }
+
+    /// Lets this client's requests go through `scheduler` (and its limits on requests in flight, in all and per host, and
+    /// on bytes), which other clients, blocking or async, may share; see [`schedule`](crate::http::schedule).
+    pub fn scheduler(mut self, scheduler: &Scheduler) -> Client {
+        self.scheduler = Some(scheduler.clone());
+        self
+    }
+
+    /// A client whose every request belongs to `batch` (unless the request names another): they share its deadline and
+    /// are cancelled with it. See [`Batch`].
+    pub fn in_batch(&self, batch: &Batch) -> Client {
+        Client { batch: Some(batch.clone()), ..self.clone() }
+    }
+
     /// Limit on the whole request, redirects included (default: none). The per-operation
     /// [`timeout`](Client::timeout) restarts on every read and write, so a server that sends one
-    /// byte at a time can hold a request open indefinitely; this cannot be outlasted.
-    /// Resolving the host name is not interruptible (the standard library has no timeout for
-    /// it), so a slow resolver can still delay the error past the limit.
+    /// byte at a time can hold a request open indefinitely; this cannot be outlasted. Resolving a
+    /// host name counts too (the lookup runs on a thread of its own, see [`connect`](crate::http::connect)).
     pub fn total_timeout(mut self, t: Duration) -> Client {
         self.total_timeout = Some(t);
         self
@@ -598,8 +671,8 @@ impl Client {
     }
 
     /// How long a request that says `Expect: 100-continue` (see [`RequestBuilder::expect_continue`]) waits for the server's go-ahead
-    /// before it sends its body anyway (default one second, as curl does). Over HTTP/1.1 only: HTTP/2 and HTTP/3 send the body
-    /// with the head, and so does the async client, which has no timer to wait with.
+    /// before it sends its body anyway (default one second, as curl does). Over HTTP/1.1, in the blocking client and the async
+    /// one alike: HTTP/2 and HTTP/3 send the body with the head.
     pub fn expect_continue_timeout(mut self, wait: Duration) -> Client {
         self.expect_timeout = wait;
         self
@@ -676,6 +749,13 @@ impl Client {
     #[cfg(test)]
     pub(crate) fn h2_reads(&self) -> (usize, usize) {
         self.h2.as_ref().map_or((0, 0), |h2| h2.registry.reads())
+    }
+
+    /// How many bytes of HTTP/2 bodies read in pieces went straight into the callers' buffers, and how many through the
+    /// streams' buffers (tests of the transport).
+    #[cfg(test)]
+    pub(crate) fn h2_body_bytes(&self) -> (usize, usize) {
+        self.h2.as_ref().map_or((0, 0), |h2| h2.registry.body_bytes())
     }
 
     /// Speaks HTTP/2 to servers that choose it (off by default). The client then offers `h2` and `http/1.1` in
@@ -975,6 +1055,19 @@ impl<'a> RequestBuilder<'a> {
         self
     }
 
+    /// Makes this request part of `batch` (in place of the client's, if it has one): see [`Batch`].
+    pub fn batch(mut self, batch: &Batch) -> Self {
+        self.opts.batch = Some(batch.clone());
+        self
+    }
+
+    /// How many bytes this request expects to bring, for the byte budget of the client's [`Scheduler`]: it waits until
+    /// that much fits, and holds it until the head of the response says how much it is.
+    pub fn expected_bytes(mut self, n: u64) -> Self {
+        self.opts.expected = Some(n);
+        self
+    }
+
     /// Decodes (or does not decode) a compressed response to this request, whatever the client's setting; see [`Client::decompress`].
     pub fn decompress(mut self, on: bool) -> Self {
         self.opts.decompress = Some(on);
@@ -1040,32 +1133,92 @@ pub struct ConnectOptions {
     pub deadline: Option<Instant>,
 }
 
-/// Resolves `host` and connects, trying each address in turn; the socket honours `opts`.
-pub(crate) fn tcp_connect(host: &str, port: u16, opts: ConnectOptions) -> Result<Io> {
-    let mut last_err: Option<io::Error> = None;
-    for addr in (host, port).to_socket_addrs()? {
-        let mut connect_timeout = opts.connect_timeout;
-        if let Some(d) = opts.deadline {
-            let left = d.saturating_duration_since(Instant::now());
-            if left.is_zero() {
-                return Err(Error::Io(deadline_error()));
-            }
-            connect_timeout = connect_timeout.min(left);
+/// Resolves `host` and connects, racing its addresses (see [`connect`](crate::http::connect)); the socket honours `opts`, and holds `permit`
+/// (the connection's slot under a per-host limit) for as long as it is open.
+pub(crate) fn tcp_connect(host: &str, port: u16, opts: ConnectOptions, est: &Establish, permit: Option<Permit>) -> Result<Io> {
+    let now = Instant::now();
+    let by_timeout = now.checked_add(opts.connect_timeout).unwrap_or(now + Duration::from_secs(365 * 86_400));
+    let until = match opts.deadline {
+        Some(d) if d <= now => return Err(Error::Io(deadline_error())),
+        Some(d) => d.min(by_timeout),
+        None => by_timeout,
+    };
+    let tcp = match connect::connect(est, host, port, until) {
+        Ok(tcp) => tcp,
+        // (the time ran out because the whole request's did)
+        Err(e) if e.kind() == io::ErrorKind::TimedOut && opts.deadline.is_some_and(|d| d < by_timeout && Instant::now() >= d) => {
+            return Err(Error::Io(deadline_error()))
         }
-        match TcpStream::connect_timeout(&addr, connect_timeout) {
-            Ok(tcp) => {
-                tcp.set_read_timeout(Some(opts.timeout))?;
-                tcp.set_write_timeout(Some(opts.timeout))?;
-                let _ = tcp.set_nodelay(true);
-                return Ok(Io { tcp, timeout: opts.timeout, deadline: opts.deadline });
-            }
-            Err(e) => last_err = Some(e),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Err(Error::Http(e.to_string())),
+        Err(e) => return Err(Error::Io(e)),
+    };
+    tcp.set_read_timeout(Some(opts.timeout))?;
+    tcp.set_write_timeout(Some(opts.timeout))?;
+    let _ = tcp.set_nodelay(true);
+    Ok(Io { tcp, timeout: opts.timeout, deadline: opts.deadline, permit, armed: crate::asyncio::net::Armed::both(opts.timeout) })
+}
+
+/// The key of a per-host connection limit: the host and port connected to (through a proxy, the origin's).
+pub(crate) fn slot_key(url: &Url) -> String {
+    format!("{}:{}", url.host, url.port)
+}
+
+/// No slot came free in time under a per-host connection limit.
+pub(crate) fn no_slot(key: &str, max: usize, deadline: Option<Instant>, waited: Duration) -> Error {
+    if deadline.is_some_and(|d| Instant::now() >= d) {
+        return Error::Io(deadline_error());
+    }
+    Error::Io(io::Error::new(
+        io::ErrorKind::TimedOut,
+        format!("no connection to {key} came free within {waited:?} (at most {max} at a time: Client::max_connections_per_host)"),
+    ))
+}
+
+/// What a request holds while it is in flight, from its scheduler and its batch, given back when its response is over.
+pub(crate) struct InFlight {
+    ticket: Option<Ticket>,
+    membership: Option<Membership>,
+    /// Bytes of the body handed out so far.
+    received: u64,
+}
+
+impl InFlight {
+    pub(crate) fn new(ticket: Option<Ticket>, membership: Option<Membership>) -> Option<InFlight> {
+        (ticket.is_some() || membership.is_some()).then_some(InFlight { ticket, membership, received: 0 })
+    }
+
+    /// The length the response says its body has.
+    pub(crate) fn length(&mut self, length: Option<u64>) {
+        if let (Some(t), Some(n)) = (self.ticket.as_mut(), length) {
+            t.length_known(n);
         }
     }
-    match last_err {
-        Some(e) => Err(Error::Io(e)),
-        None => Err(Error::Http(format!("{} did not resolve to any address", host))),
+
+    /// `n` more bytes of the body were handed out (counted against the budget when the body has no length).
+    pub(crate) fn received(&mut self, n: usize, length: Option<u64>) {
+        self.received += n as u64;
+        if let (Some(t), None) = (self.ticket.as_mut(), length) {
+            t.received(self.received);
+        }
     }
+
+    /// Whether the request's batch was cancelled.
+    pub(crate) fn cancelled(&self) -> bool {
+        self.membership.as_ref().is_some_and(|m| m.running.is_cancelled())
+    }
+
+    /// The request's control, if it belongs to a batch.
+    pub(crate) fn running(&self) -> Option<&Running> {
+        self.membership.as_ref().map(|m| &m.running)
+    }
+}
+
+/// What a request that needs a new connection gets under a per-host connection limit.
+enum Room {
+    /// A slot to open one with (none when there is no limit).
+    Slot(Option<Permit>),
+    /// A connection for the request's key that came back to the pool while it waited.
+    Parked(Conn),
 }
 
 /// Whether a request's headers say `Expect: 100-continue`.
@@ -1100,6 +1253,8 @@ pub(crate) struct Hop {
     pub(crate) decode: Option<DecodeLimits>,
     /// The oldest TLS version the request accepts, if it says (else the client's): see [`RequestBuilder::min_tls_version`].
     pub(crate) min_tls: Option<TlsVersion>,
+    /// The control of the request when it belongs to a batch: cancelled or not, and what stops it.
+    pub(crate) running: Option<Running>,
 }
 
 impl Hop {
@@ -1167,39 +1322,68 @@ impl Client {
     }
 
     /// The limits of the decoding for a request with `opts`, or `None` if its response is not to be decoded.
-    pub(crate) fn decode_for(&self, opts: RequestOpts) -> Option<DecodeLimits> {
+    pub(crate) fn decode_for(&self, opts: &RequestOpts) -> Option<DecodeLimits> {
         opts.decompress.unwrap_or(self.decompress).then(|| DecodeLimits { max_output: opts.max_decoded.or(self.decode.max_output), ..self.decode })
     }
 
     /// Sends the request, follows redirects, and returns the final response as soon as its headers
     /// have arrived.
     fn execute_stream(&self, method: String, url: &str, headers: Vec<(String, String)>, body: Vec<u8>, opts: RequestOpts, whole: bool) -> Result<ResponseStream> {
+        let membership = self.membership(&opts)?;
+        let running = membership.as_ref().map(|m| m.running.clone());
         let mut hop = self.start(method, url, headers, body)?;
-        hop.decode = self.decode_for(opts);
+        hop.decode = self.decode_for(&opts);
         hop.min_tls = opts.min_tls;
-        let deadline = self.deadline();
+        hop.running = running.clone();
+        let deadline = self.request_deadline(membership.as_ref());
         let limits = Limits { max_body_bytes: opts.max_body.unwrap_or(self.limits.max_body_bytes), ..self.limits };
+        let cancelled = |e: Error| if running.as_ref().is_some_and(Running::is_cancelled) { Error::Cancelled } else { e };
+        let mut ticket = match &self.scheduler {
+            Some(s) => Some(s.admit(&slot_key(&hop.url), opts.expected.unwrap_or(0), deadline, running.as_ref())?),
+            None => None,
+        };
         let mut hops = 0;
         loop {
-            let mut resp = self.once(&hop, deadline, limits, whole)?;
+            if let Some(t) = ticket.as_mut() {
+                t.move_to(&slot_key(&hop.url), deadline, running.as_ref())?;
+            }
+            let mut resp = self.once(&hop, deadline, limits, whole).map_err(cancelled)?;
             self.learn_alternatives(&hop, &resp);
             if let Some(jar) = &self.cookies {
                 jar.store_from(&hop.url, resp.headers_named("set-cookie"));
             }
             if !self.follow(&mut hop, resp.status, &resp.headers, &mut hops)? {
                 // (the final response, and the only one whose body the caller gets)
-                return Ok(match &hop.decode {
+                let resp = match &hop.decode {
                     Some(d) => match decode::coding_of(&hop.method, resp.status, &resp.headers) {
                         Some(format) => resp.with_decoder(format, d.for_body(limits.max_body_bytes)),
                         None => resp,
                     },
                     None => resp,
-                });
+                };
+                // the request is in flight until its response is over
+                return Ok(resp.in_flight(InFlight::new(ticket, membership)));
             }
             // what is left of the redirect's body, if it is small, so that its connection can be used again
             if resp.content_length.map_or(true, |n| n <= REDIRECT_BODY_LIMIT) {
                 resp.discard(REDIRECT_BODY_LIMIT);
             }
+        }
+    }
+
+    /// The request's place in its batch (its own, else the client's), if it has one; an error if the batch is cancelled.
+    pub(crate) fn membership(&self, opts: &RequestOpts) -> Result<Option<Membership>> {
+        let Some(batch) = opts.batch.as_ref().or(self.batch.as_ref()) else { return Ok(None) };
+        let m = batch.join();
+        m.running.check()?;
+        Ok(Some(m))
+    }
+
+    /// When a request must be over: the client's total timeout from now, or its batch's deadline, whichever comes first.
+    pub(crate) fn request_deadline(&self, membership: Option<&Membership>) -> Option<Instant> {
+        match (self.deadline(), membership.and_then(|m| m.batch().deadline())) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
         }
     }
 
@@ -1237,7 +1421,7 @@ impl Client {
         self.check_target(&url, 0)?;
         let method = method.to_ascii_uppercase();
         let granted = self.granted_for(&HopInfo { url: &url, method: &method, hop: 0, from: None })?;
-        Ok(Hop { method, url, headers, body, granted, index: 0, decode: None, min_tls: None })
+        Ok(Hop { method, url, headers, body, granted, index: 0, decode: None, min_tls: None, running: None })
     }
 
     /// Decides what a response means for the request: `Ok(true)` if `hop` now describes the
@@ -1343,6 +1527,9 @@ impl Client {
         let h3_on = self.h3.is_some() && url.is_https() && proxy.is_none() && self.policy.parks();
         let mut h3_tries = H3Tries { attempts: 0, repeat_allowed: retry_allowed };
         loop {
+            if let Some(r) = &hop.running {
+                r.check()?;
+            }
             // HTTP/3 if the caller asked for it and the origin offers it; anything else goes the TCP way, below
             if h3_on {
                 match self.h3_step(hop, &headers, &key, deadline, limits, whole, &mut h3_tries)? {
@@ -1361,12 +1548,25 @@ impl Client {
                 }
             }
             let reused = if fresh.is_none() && pooled_allowed { self.checkout(&key, deadline) } else { None };
-            let was_reused = reused.is_some();
+            let mut was_reused = reused.is_some();
             let conn = match (fresh, reused) {
                 (Some(c), _) | (None, Some(c)) => c,
-                (None, None) => self.connect(url, proxy.as_ref(), deadline, key.min_tls)?,
+                (None, None) => match self.room(url, pooled_allowed.then_some(&key), deadline)? {
+                    Room::Parked(c) => {
+                        was_reused = true;
+                        c
+                    }
+                    Room::Slot(permit) => self.connect(url, proxy.as_ref(), deadline, key.min_tls, permit)?,
+                },
             };
-            let home = self.policy.parks().then(|| Home { pool: self.idle.clone(), key: key.clone(), policy: self.policy });
+            let mut conn = conn;
+            if let Some(r) = &hop.running {
+                // a cancel shuts the connection down, which stops a read or a write that waits on it
+                if let Ok(socket) = conn.io_mut().tcp.try_clone() {
+                    r.set(Interrupt::Socket(socket));
+                }
+            }
+            let home = self.policy.parks().then(|| Home { pool: self.idle.clone(), key: key.clone(), policy: self.policy, slots: self.conn_limit.clone() });
             match self.exchange(conn, method, url, &head, body, limits, home, expect) {
                 // a server that does not do expectations says so (RFC 9110, 15.5.18): the request, which it has not acted on, goes
                 // once more without one, and with its body
@@ -1403,7 +1603,7 @@ impl Client {
         let (conn, reused) = match support.registry.acquire(key, waits, opts.connect_timeout + opts.timeout)? {
             Acquired::Http1 => return Ok(H2Step::Http1(None)),
             Acquired::Conn(conn) => (conn, true),
-            Acquired::Dial(ticket) => match self.dial(&hop.url, proxy, deadline, true, key.min_tls)? {
+            Acquired::Dial(ticket) => match self.dial(&hop.url, proxy, deadline, true, key.min_tls, self.slot(&hop.url, deadline)?)? {
                 Dialed::H2(conn) => {
                     ticket.h2(conn.clone());
                     (conn, false)
@@ -1417,7 +1617,11 @@ impl Client {
         let authority = hop.url.host_header();
         let secret = hop.secret_names();
         let request = h2::connection::Request { method: &hop.method, scheme: "https", authority: &authority, path: &hop.url.path_and_query, headers, secret: &secret };
-        let failure = match conn.start(&request, &hop.body, waits) {
+        let started = conn.start(&request, &hop.body, waits);
+        if let (Ok(stream), Some(r)) = (&started, &hop.running) {
+            r.set(Interrupt::Call(Box::new(stream.canceller())));
+        }
+        let failure = match started {
             Ok(mut stream) if whole => match stream.response(limits.max_body_bytes, waits) {
                 // the caller wants it all: head and body were waited for together, and the body is here
                 Ok((head, bytes)) => {
@@ -1467,7 +1671,7 @@ impl Client {
             h3_transport::Acquired::Dial(ticket, host, port) => {
                 // an origin that merely said it offers QUIC is not waited for long; one that the caller said speaks it is
                 let handshake_timeout = if support.eager { self.connect_timeout } else { self.connect_timeout.min(h3_transport::ALT_HANDSHAKE_TIMEOUT) };
-                let dial = DialOptions { handshake_timeout, idle_timeout: self.policy.idle_timeout, deadline };
+                let dial = DialOptions { handshake_timeout, idle_timeout: self.policy.idle_timeout, deadline, resolver: self.establish.resolver.clone() };
                 match h3_transport::dial(&host, port, &hop.url.host, &self.tls, dial) {
                     Ok(conn) => {
                         ticket.connected(conn.clone());
@@ -1556,8 +1760,36 @@ impl Client {
         None
     }
 
-    fn tcp_connect(&self, host: &str, port: u16, deadline: Option<Instant>) -> Result<Io> {
-        tcp_connect(host, port, self.connect_options(deadline))
+    fn tcp_connect(&self, host: &str, port: u16, deadline: Option<Instant>, permit: Option<Permit>) -> Result<Io> {
+        tcp_connect(host, port, self.connect_options(deadline), &self.establish, permit)
+    }
+
+    /// A slot for a new connection to `url`'s host under [`max_connections_per_host`](Client::max_connections_per_host)
+    /// (none without a limit), or, if `reuse` names the request's key, a connection for it that came back to the pool
+    /// while this waited.
+    fn room(&self, url: &Url, reuse: Option<&Key>, deadline: Option<Instant>) -> Result<Room> {
+        let Some(slots) = &self.conn_limit else { return Ok(Room::Slot(None)) };
+        let key = slot_key(url);
+        let started = Instant::now();
+        let until = deadline.unwrap_or_else(|| started + self.timeout);
+        loop {
+            let seen = match slots.try_take(&key) {
+                Ok(permit) => return Ok(Room::Slot(Some(permit))),
+                Err(seen) => seen,
+            };
+            if let Some(conn) = reuse.and_then(|k| self.checkout(k, deadline)) {
+                return Ok(Room::Parked(conn));
+            }
+            // an idle connection to the host that this request cannot use (made for another proxy or TLS minimum, or one
+            // that went stale) is closed to make room
+            if let Some(idle) = self.idle.take_oldest_to(&url.host, url.port) {
+                drop(idle);
+                continue;
+            }
+            if !slots.wait(seen, Some(until)) {
+                return Err(no_slot(&key, slots.max(), deadline, started.elapsed()));
+            }
+        }
     }
 
     pub(crate) fn connect_options(&self, deadline: Option<Instant>) -> ConnectOptions {
@@ -1581,12 +1813,21 @@ impl Client {
         }
     }
 
-    /// A new connection for an HTTP/1.1 request.
-    fn connect(&self, url: &Url, proxy: Option<&Proxy>, deadline: Option<Instant>, min_tls: TlsVersion) -> Result<Conn> {
-        if !url.is_https() {
-            return Ok(Conn::Plain(self.tcp_connect(&url.host, url.port, deadline)?));
+    /// A slot for a new connection to `url`'s host (waiting for one if the per-host limit is reached), with nothing to
+    /// reuse instead: for a dial that may become an HTTP/2 connection.
+    fn slot(&self, url: &Url, deadline: Option<Instant>) -> Result<Option<Permit>> {
+        match self.room(url, None, deadline)? {
+            Room::Slot(permit) => Ok(permit),
+            Room::Parked(_) => Err(Error::Http("internal: a parked connection where none was asked for".into())),
         }
-        match self.dial(url, proxy, deadline, false, min_tls)? {
+    }
+
+    /// A new connection for an HTTP/1.1 request, holding `permit`.
+    fn connect(&self, url: &Url, proxy: Option<&Proxy>, deadline: Option<Instant>, min_tls: TlsVersion, permit: Option<Permit>) -> Result<Conn> {
+        if !url.is_https() {
+            return Ok(Conn::Plain(self.tcp_connect(&url.host, url.port, deadline, permit)?));
+        }
+        match self.dial(url, proxy, deadline, false, min_tls, permit)? {
             Dialed::Http1(conn) => Ok(conn),
             Dialed::H2(_) => Err(Error::Http("internal: an HTTP/2 connection where HTTP/1.1 was asked for".into())),
         }
@@ -1594,10 +1835,10 @@ impl Client {
 
     /// A new TLS connection to an https origin (through the proxy, if there is one). With `offer_h2` the client
     /// offers `h2` in ALPN, and a server that picks it gets an HTTP/2 connection.
-    fn dial(&self, url: &Url, proxy: Option<&Proxy>, deadline: Option<Instant>, offer_h2: bool, min_tls: TlsVersion) -> Result<Dialed> {
+    fn dial(&self, url: &Url, proxy: Option<&Proxy>, deadline: Option<Instant>, offer_h2: bool, min_tls: TlsVersion, permit: Option<Permit>) -> Result<Dialed> {
         let mut io = match proxy {
-            Some(p) => self.proxy_tunnel(p, &url.host, url.port, deadline)?,
-            None => self.tcp_connect(&url.host, url.port, deadline)?,
+            Some(p) => self.proxy_tunnel(p, &url.host, url.port, deadline, permit)?,
+            None => self.tcp_connect(&url.host, url.port, deadline, permit)?,
         };
         let config = match (&self.h2, offer_h2) {
             (Some(h2), true) => &h2.tls,
@@ -1614,7 +1855,7 @@ impl Client {
         let tls = crate::tls::handshake(&mut io, &url.host, config)?;
         match tls.alpn_protocol() {
             Some(b"h2") if offer_h2 => {
-                let shared = h2_transport::spawn(io.tcp, tls, self.policy.idle_timeout, self.timeout)?;
+                let shared = h2_transport::spawn(io.tcp, io.permit, tls, self.policy.idle_timeout, self.timeout)?;
                 Ok(Dialed::H2(shared))
             }
             Some(b"h2") => Err(Error::Http("the server chose HTTP/2, which this request was not set up to speak (see Client::http2)".into())),
@@ -1634,8 +1875,8 @@ impl Client {
     }
 
     /// Opens a CONNECT tunnel through `proxy` to host:port.
-    fn proxy_tunnel(&self, proxy: &Proxy, host: &str, port: u16, deadline: Option<Instant>) -> Result<Io> {
-        let mut s = self.tcp_connect(&proxy.host, proxy.port, deadline)?;
+    fn proxy_tunnel(&self, proxy: &Proxy, host: &str, port: u16, deadline: Option<Instant>, permit: Option<Permit>) -> Result<Io> {
+        let mut s = self.tcp_connect(&proxy.host, proxy.port, deadline, permit)?;
         s.write_all(self.connect_request(proxy, host, port).as_bytes())?;
         // Read the response head one byte at a time so no tunnel data is consumed.
         let mut head = Vec::new();
@@ -2244,11 +2485,11 @@ mod tests {
         });
         let c = plain_client();
         let p = Proxy { host: "127.0.0.1".into(), port, auth: Some("u:p".into()) };
-        assert!(c.proxy_tunnel(&p, "example.com", 443, None).is_ok());
+        assert!(c.proxy_tunnel(&p, "example.com", 443, None, None).is_ok());
         let head = seen.lock().unwrap().clone();
         assert!(head.starts_with("CONNECT example.com:443 HTTP/1.1\r\n"), "{}", head);
         assert!(head.contains("Proxy-Authorization: Basic dTpw\r\n"), "{}", head);
-        let err = c.proxy_tunnel(&p, "example.com", 443, None).unwrap_err();
+        let err = c.proxy_tunnel(&p, "example.com", 443, None, None).unwrap_err();
         assert!(err.to_string().contains("403"), "{}", err);
     }
 }

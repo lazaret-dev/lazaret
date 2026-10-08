@@ -28,6 +28,11 @@ pub const EXT_SIGNATURE_ALGORITHMS_CERT: u16 = 50;
 pub const EXT_SUPPORTED_VERSIONS: u16 = 43;
 pub const EXT_KEY_SHARE: u16 = 51;
 pub const EXT_COOKIE: u16 = 44;
+/// RFC 8446 section 4.2.11: the PSK identities (session tickets) a ClientHello offers, and the one a ServerHello takes.
+pub const EXT_PRE_SHARED_KEY: u16 = 41;
+/// RFC 8446 section 4.2.9: how a PSK may be used; this client offers `psk_dhe_ke` (1) only, a fresh key exchange with it.
+pub const EXT_PSK_KEY_EXCHANGE_MODES: u16 = 45;
+pub const PSK_DHE_KE: u8 = 1;
 /// RFC 9001 section 8.2.
 pub const EXT_QUIC_TRANSPORT_PARAMETERS: u16 = 0x39;
 
@@ -40,12 +45,13 @@ pub const GROUP_X25519: u16 = 0x001d;
 pub const SUPPORTED_GROUPS: [u16; 3] = [GROUP_X25519, GROUP_SECP256R1, GROUP_SECP384R1];
 pub const VERSION_TLS13: u16 = 0x0304;
 
-/// Signature schemes we advertise. Only the first six may sign a TLS 1.3 handshake; the PKCS#1
+/// Signature schemes we advertise. Only the first seven may sign a TLS 1.3 handshake; the PKCS#1
 /// entries exist so that servers will present RSA-signed certificate chains, and may sign a TLS 1.2
 /// ServerKeyExchange. None uses SHA-1, so a server that signs with SHA-1 signs with what was not offered.
-pub const SIGNATURE_SCHEMES: [u16; 9] = [
+pub const SIGNATURE_SCHEMES: [u16; 10] = [
     0x0403, // ecdsa_secp256r1_sha256
     0x0503, // ecdsa_secp384r1_sha384
+    0x0603, // ecdsa_secp521r1_sha512
     0x0807, // ed25519
     0x0804, // rsa_pss_rsae_sha256
     0x0805, // rsa_pss_rsae_sha384
@@ -110,6 +116,31 @@ pub struct ClientHello<'a> {
     /// Offer TLS 1.2 as well (after 1.3): its version, its cipher suites (ECDHE with an AEAD only) and the extensions it needs
     /// (the extended master secret, `renegotiation_info`, uncompressed points). Without it the ClientHello is TLS 1.3 only.
     pub tls12: bool,
+    /// A session to resume: `psk_key_exchange_modes` (`psk_dhe_ke`) and, last of all, `pre_shared_key` with this one
+    /// identity and a binder of zeros that [`set_psk_binder`] fills in.
+    pub psk: Option<PskOffer<'a>>,
+}
+
+/// The one PSK a ClientHello offers.
+pub struct PskOffer<'a> {
+    /// The ticket.
+    pub identity: &'a [u8],
+    /// The ticket's age in milliseconds plus the server's `ticket_age_add`, modulo 2^32.
+    pub obfuscated_age: u32,
+    /// The length of the binder: the PSK's hash length.
+    pub binder_len: usize,
+}
+
+/// The part of a ClientHello (with its handshake header) that a PSK binder is computed over: all of it but the binders
+/// list at its end (RFC 8446 section 4.2.11.2), for a ClientHello built with one binder of `binder_len` bytes.
+pub fn truncated_client_hello(client_hello: &[u8], binder_len: usize) -> &[u8] {
+    &client_hello[..client_hello.len() - (2 + 1 + binder_len)]
+}
+
+/// Writes `binder` over the zeros [`build_client_hello`] left at the end of a ClientHello offering a PSK.
+pub fn set_psk_binder(client_hello: &mut [u8], binder: &[u8]) {
+    let n = client_hello.len();
+    client_hello[n - binder.len()..].copy_from_slice(binder);
 }
 
 pub fn build_client_hello(ch: &ClientHello) -> Vec<u8> {
@@ -198,6 +229,21 @@ pub fn build_client_hello(ch: &ClientHello) -> Vec<u8> {
         extension(&mut exts, EXT_EC_POINT_FORMATS, &[1, 0]);
     }
 
+    if let Some(psk) = &ch.psk {
+        extension(&mut exts, EXT_PSK_KEY_EXCHANGE_MODES, &[1, PSK_DHE_KE]);
+        // OfferedPsks: identities<7..2^16-1> (identity<1..2^16-1>, obfuscated_ticket_age u32), binders<33..2^16-1>
+        // (binder<32..255>); it must be the last extension (RFC 8446 section 4.2.11)
+        let mut identity = Vec::new();
+        put_vec16(&mut identity, psk.identity);
+        identity.extend_from_slice(&psk.obfuscated_age.to_be_bytes());
+        let mut e = Vec::new();
+        put_vec16(&mut e, &identity);
+        let mut binder = vec![psk.binder_len as u8];
+        binder.resize(1 + psk.binder_len, 0);
+        put_vec16(&mut e, &binder);
+        extension(&mut exts, EXT_PRE_SHARED_KEY, &e);
+    }
+
     put_vec16(&mut body, &exts);
     handshake_message(HS_CLIENT_HELLO, &body)
 }
@@ -217,6 +263,8 @@ pub struct ServerHello {
     pub key_share: Option<(u16, Vec<u8>)>,
     /// The cookie of a HelloRetryRequest, to be echoed.
     pub cookie: Option<Vec<u8>>,
+    /// The PSK identity the server took (`pre_shared_key`), if it took one.
+    pub selected_identity: Option<u16>,
     /// Extensions of a ServerHello that are not TLS 1.3's, in order: the TLS 1.3 handshake refuses any, the TLS 1.2 one reads them.
     pub other_extensions: Vec<(u16, Vec<u8>)>,
 }
@@ -261,6 +309,7 @@ pub fn parse_server_hello(body: &[u8]) -> Result<ServerHello> {
         selected_version: None,
         key_share: None,
         cookie: None,
+        selected_identity: None,
         other_extensions: Vec::new(),
     };
     for_each_extension(exts, |t, d| {
@@ -290,6 +339,12 @@ pub fn parse_server_hello(body: &[u8]) -> Result<ServerHello> {
                     return Err(bad("cookie"));
                 }
                 sh.cookie = Some(cookie.to_vec());
+            }
+            EXT_PRE_SHARED_KEY if !is_retry => {
+                if d.len() != 2 {
+                    return Err(bad("pre_shared_key"));
+                }
+                sh.selected_identity = Some(u16::from_be_bytes([d[0], d[1]]));
             }
             _ if is_retry => return Err(Error::Tls(format!("unsupported_extension: unexpected extension {} in ServerHello", t))),
             _ => sh.other_extensions.push((t, d.to_vec())),
@@ -465,6 +520,38 @@ pub fn parse_certificate_verify(body: &[u8]) -> Result<(u16, Vec<u8>)> {
     Ok((scheme, sig))
 }
 
+/// A NewSessionTicket (RFC 8446 section 4.6.1).
+pub struct NewSessionTicket {
+    /// Seconds the ticket may be used for (at most 604800, seven days).
+    pub lifetime: u32,
+    /// Added to the ticket's age, in milliseconds, when it is offered.
+    pub age_add: u32,
+    pub nonce: Vec<u8>,
+    pub ticket: Vec<u8>,
+}
+
+/// Parses a NewSessionTicket. Its extensions are skipped (the only one defined, `early_data`, is for 0-RTT, which this
+/// client does not do), as the RFC asks of a client that does not know them; a duplicate one is still an error.
+pub fn parse_new_session_ticket(body: &[u8]) -> Result<NewSessionTicket> {
+    let mut r = Reader::new(body);
+    let lifetime = r.u32().ok_or_else(|| bad("NewSessionTicket lifetime"))?;
+    let age_add = r.u32().ok_or_else(|| bad("NewSessionTicket age_add"))?;
+    let nonce = r.vec8().ok_or_else(|| bad("NewSessionTicket nonce"))?.to_vec();
+    let ticket = r.vec16().ok_or_else(|| bad("NewSessionTicket ticket"))?.to_vec();
+    let exts = r.vec16().ok_or_else(|| bad("NewSessionTicket extensions"))?;
+    if !r.is_empty() {
+        return Err(bad("trailing data in NewSessionTicket"));
+    }
+    if ticket.is_empty() {
+        return Err(bad("empty ticket in NewSessionTicket"));
+    }
+    if lifetime > 604_800 {
+        return Err(Error::Tls("illegal_parameter: a ticket lifetime over seven days".into()));
+    }
+    for_each_extension(exts, |_, _| Ok(()))?;
+    Ok(NewSessionTicket { lifetime, age_add, nonce, ticket })
+}
+
 /// The data a server signs in CertificateVerify (RFC 8446 section 4.4.3).
 pub fn server_certificate_verify_content(transcript_hash: &[u8]) -> Vec<u8> {
     let mut c = vec![0x20u8; 64];
@@ -490,6 +577,7 @@ mod tests {
             status_request: false,
             cookie: None,
             quic_transport_parameters: None,
+            psk: None,
             tls12: false,
         });
         assert_eq!(ch[0], HS_CLIENT_HELLO);
@@ -526,7 +614,8 @@ mod tests {
                 status_request,
                 cookie: None,
                 quic_transport_parameters: None,
-                tls12: false,
+                psk: None,
+            tls12: false,
             })
         };
         let extensions = |ch: &[u8]| {
@@ -645,7 +734,8 @@ mod tests {
                 status_request: false,
                 cookie,
                 quic_transport_parameters: None,
-                tls12: false,
+                psk: None,
+            tls12: false,
             })
         };
         let exts = |ch: &[u8]| {

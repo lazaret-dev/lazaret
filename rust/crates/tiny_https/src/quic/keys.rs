@@ -221,6 +221,11 @@ impl PacketKey {
         self.failed
     }
 
+    /// How many packets this key may seal (see [`confidentiality_limit`]).
+    pub fn confidentiality_limit(&self) -> u64 {
+        confidentiality_limit(self.suite)
+    }
+
     /// Whether this key has sealed as many packets as it may: it must not seal another, and a connection has to have started a
     /// key update well before (or be closed).
     pub fn confidentiality_limit_reached(&self) -> bool {

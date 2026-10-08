@@ -91,6 +91,10 @@ pub struct TestQuicServer {
     outbox: Vec<Vec<u8>>,
     pub tx_phase: bool,
     rx_phase: bool,
+    /// The first 1-RTT packet number the server sent in its key phase now, and whether the client has acknowledged one sent
+    /// in it (only then may the server update its keys again: RFC 9001 section 6.5).
+    tx_phase_first_pn: u64,
+    tx_phase_acked: bool,
     /// How many times the client's keys changed under us.
     pub rx_updates: u64,
     pub datagrams_received: u64,
@@ -146,6 +150,8 @@ impl TestQuicServer {
             outbox: Vec::new(),
             tx_phase: false,
             rx_phase: false,
+            tx_phase_first_pn: 0,
+            tx_phase_acked: false,
             rx_updates: 0,
             datagrams_received: 0,
             packets_received: 0,
@@ -235,7 +241,7 @@ impl TestQuicServer {
                 self.keys[0] = Some((client, server));
             }
         }
-        let Some((rx, _)) = self.keys[level].as_mut() else { return };
+        let Some((rx, tx)) = self.keys[level].as_mut() else { return };
         let opened = if level == 2 {
             // 1-RTT: the key phase says which keys
             let Some(hdr) = rx.header.unprotect(buf, pn_offset) else { return };
@@ -250,6 +256,13 @@ impl TestQuicServer {
                     *rx = next;
                     self.rx_phase = phase;
                     self.rx_updates += 1;
+                    // the client updated its keys: the server's follow, before it acknowledges anything (RFC 9001 section 6.2)
+                    if self.tx_phase != phase {
+                        *tx = tx.next();
+                        self.tx_phase = phase;
+                        self.tx_phase_first_pn = self.next_pn[2];
+                        self.tx_phase_acked = false;
+                    }
                 }
                 r
             };
@@ -278,6 +291,9 @@ impl TestQuicServer {
                     self.on_crypto(now, level, &bytes);
                 }
                 Frame::Ack(a) => {
+                    if level == 2 && a.largest >= self.tx_phase_first_pn {
+                        self.tx_phase_acked = true;
+                    }
                     let mut acked = Vec::new();
                     let mut done_acked = false;
                     let mut stream_frames = Vec::new();
@@ -418,7 +434,11 @@ impl TestQuicServer {
             let room = 1200 - used - 50;
             let mut payload = Vec::new();
             let mut crypto = Vec::new();
-            if self.ack_due[level] && !self.received[level].is_empty() {
+            // (an acknowledgment goes when one is due, and also with every 1-RTT packet that is sent anyway, as most servers do: one
+            // that went once and was lost leaves a client that hears the server but not of its own packets, backing its probes
+            // off until the idle timeout ends a connection on which nothing was wrong; found by the field run's fuzzing)
+            let piggyback = level == 2 && (!self.queued.is_empty() || self.streams.has_pending() || (self.handshake_done && !self.handshake_done_sent));
+            if (self.ack_due[level] || piggyback) && !self.received[level].is_empty() {
                 let ranges: Vec<_> = self.received[level].iter().rev().take(10).map(|r| r.start..=r.end - 1).collect();
                 frame::write_ack(&mut payload, 0, &ranges, None);
                 self.ack_due[level] = false;
@@ -507,8 +527,16 @@ impl TestQuicServer {
         true
     }
 
+    /// Whether the server may start a key update: the client has acknowledged a packet that the server sent with the keys it
+    /// has now (RFC 9001 section 6.5), so it has those keys.
+    pub fn keys_agreed(&self) -> bool {
+        self.tx_phase_acked && self.rx_phase == self.tx_phase
+    }
+
     /// Updates the keys the server sends with (and expects): a key update that the server starts.
     pub fn key_update(&mut self) {
+        self.tx_phase_first_pn = self.next_pn[2];
+        self.tx_phase_acked = false;
         if let Some((rx, tx)) = self.keys[2].as_mut() {
             *tx = tx.next();
             let _ = rx;

@@ -2,12 +2,13 @@
 //! lookups and no secret-dependent branches or addresses, on any CPU.
 //!
 //! Four blocks are processed at once. The 64 bytes of the four blocks are spread over eight
-//! `u64` "planes": plane `i` holds bit `i` of every byte, and lane `j` of a plane (bit `j` of the
-//! `u64`) belongs to byte `j` of the 64-byte input. Within a block, byte `j = 4 * column + row`,
-//! the order FIPS 197 uses for the state. In this form
+//! `u64` "planes": plane `i` holds bit `i` of every byte. The state byte of block `b` at row `r` and
+//! column `c` (byte `16 b + 4 c + r` of the input, the order FIPS 197 uses) is lane
+//! `16 r + 4 b + c` of a plane (bit of the `u64`): a row of all four blocks is one 16-bit field, so
+//! that turning the rows of every column (in `MixColumns`) is a rotation of the whole word. In this form
 //!
-//! * `SubBytes` is the GF(2^8) inversion `x^254` followed by the affine map, written with `AND`
-//!   and `XOR` on whole planes, so all 64 bytes are substituted by the same fixed circuit;
+//! * `SubBytes` is the 113-gate circuit of Boyar and Peralta (the GF(2^8) inversion and the affine map, as `AND`, `XOR`
+//!   and `NOT` on whole planes), so all 64 bytes are substituted by the same fixed circuit;
 //! * `ShiftRows` and `MixColumns` are lane permutations (masks and shifts);
 //! * `AddRoundKey` is an `XOR` with the round key spread over the planes the same way.
 //!
@@ -36,11 +37,27 @@ fn transpose8(mut x: u64) -> u64 {
     x ^ t ^ (t << 28)
 }
 
-/// Spreads 64 bytes over eight planes: bit `i` of byte `j` becomes bit `j` of `planes[i]`.
+/// The input byte that goes to each lane: lane `16 r + 4 b + c` holds byte `16 b + 4 c + r`.
+const LANE_BYTE: [u8; 64] = {
+    let mut t = [0u8; 64];
+    let mut lane = 0;
+    while lane < 64 {
+        let (r, b, c) = (lane / 16, (lane / 4) % 4, lane % 4);
+        t[lane] = (16 * b + 4 * c + r) as u8;
+        lane += 1;
+    }
+    t
+};
+
+/// Spreads 64 bytes over eight planes: bit `i` of byte `LANE_BYTE[j]` becomes bit `j` of `planes[i]`.
 ///
-/// Each group of eight bytes is an 8x8 bit matrix (row = byte, column = bit); its transpose has
-/// one byte per plane, which goes to the group's eight lanes of that plane.
-fn pack(bytes: &[u8; 64]) -> Planes {
+/// The bytes are put in lane order first; then each group of eight is an 8x8 bit matrix (row = byte,
+/// column = bit), whose transpose has one byte per plane, which goes to the group's eight lanes of that plane.
+fn pack(input: &[u8; 64]) -> Planes {
+    let mut bytes = [0u8; 64];
+    for (lane, b) in bytes.iter_mut().enumerate() {
+        *b = input[LANE_BYTE[lane] as usize];
+    }
     let mut p = [0u64; 8];
     for g in 0..8 {
         let w = transpose8(u64::from_le_bytes(bytes[8 * g..8 * g + 8].try_into().unwrap()));
@@ -53,21 +70,26 @@ fn pack(bytes: &[u8; 64]) -> Planes {
 
 /// The inverse of [`pack`].
 fn unpack(p: &Planes) -> [u8; 64] {
-    let mut out = [0u8; 64];
+    let mut lanes = [0u8; 64];
     for g in 0..8 {
         let mut w = 0u64;
         for (i, plane) in p.iter().enumerate() {
             w |= ((plane >> (8 * g)) & 0xff) << (8 * i);
         }
-        out[8 * g..8 * g + 8].copy_from_slice(&transpose8(w).to_le_bytes());
+        lanes[8 * g..8 * g + 8].copy_from_slice(&transpose8(w).to_le_bytes());
     }
+    let mut out = [0u8; 64];
+    for (lane, b) in lanes.iter().enumerate() {
+        out[LANE_BYTE[lane] as usize] = *b;
+    }
+    lanes.zeroize();
     out
 }
 
-// ---- GF(2^8) on planes ---------------------------------------------------------------------
+// ---- GF(2^8) on planes (the tests check the products against the textbook ones) -------------
 
 /// Reduces a 15-term polynomial product modulo x^8 + x^4 + x^3 + x + 1.
-#[inline(always)]
+#[cfg(test)]
 fn reduce(mut t: [u64; 15]) -> Planes {
     // x^k = x^(k-4) + x^(k-5) + x^(k-7) + x^(k-8) for k >= 8; going down means a term that a
     // higher one folded into is itself folded later.
@@ -82,7 +104,7 @@ fn reduce(mut t: [u64; 15]) -> Planes {
 }
 
 /// Lane-wise product in GF(2^8).
-#[inline(always)]
+#[cfg(test)]
 fn gf_mul(a: &Planes, b: &Planes) -> Planes {
     let mut t = [0u64; 15];
     for i in 0..8 {
@@ -94,7 +116,7 @@ fn gf_mul(a: &Planes, b: &Planes) -> Planes {
 }
 
 /// Lane-wise square in GF(2^8); linear, so it costs no `AND`s.
-#[inline(always)]
+#[cfg(test)]
 fn gf_sq(a: &Planes) -> Planes {
     let mut t = [0u64; 15];
     for i in 0..8 {
@@ -103,70 +125,187 @@ fn gf_sq(a: &Planes) -> Planes {
     reduce(t)
 }
 
-/// The AES S-box on every lane: inversion (`x^254`, so 0 maps to 0) and the affine transform.
-fn sbox(x: &Planes) -> Planes {
-    let x2 = gf_sq(x);
-    let x3 = gf_mul(&x2, x);
-    let x12 = gf_sq(&gf_sq(&x3));
-    let x15 = gf_mul(&x12, &x3);
-    let x240 = gf_sq(&gf_sq(&gf_sq(&gf_sq(&x15))));
-    let x252 = gf_mul(&x240, &x12);
-    let b = gf_mul(&x252, &x2); // x^254
-    let mut y = [0u64; 8];
-    for i in 0..8 {
-        y[i] = b[i] ^ b[(i + 4) % 8] ^ b[(i + 5) % 8] ^ b[(i + 6) % 8] ^ b[(i + 7) % 8];
-    }
-    // the constant 0x63: complement the planes of bits 0, 1, 5 and 6
-    for i in [0usize, 1, 5, 6] {
-        y[i] = !y[i];
-    }
-    y
+/// The AES S-box on every lane, as the circuit of Boyar and Peralta ("A new combinational logic minimization technique
+/// with applications to cryptology", 2010; "A depth-16 circuit for the AES S-box", 2011): a linear layer, a non-linear middle
+/// of 32 ANDs and a linear layer, 113 gates in all, against some 800 for the inversion by multiplications that it replaced.
+/// The gates are in the order of the paper as BearSSL's `aes_ct` writes them; `x0` is the high bit, so `x0` is plane 7. The
+/// test below checks it against the table on all 256 inputs.
+#[inline(always)]
+fn sbox(q: &Planes) -> Planes {
+    let (x0, x1, x2, x3, x4, x5, x6, x7) = (q[7], q[6], q[5], q[4], q[3], q[2], q[1], q[0]);
+
+    // top linear transformation
+    let y14 = x3 ^ x5;
+    let y13 = x0 ^ x6;
+    let y9 = x0 ^ x3;
+    let y8 = x0 ^ x5;
+    let t0 = x1 ^ x2;
+    let y1 = t0 ^ x7;
+    let y4 = y1 ^ x3;
+    let y12 = y13 ^ y14;
+    let y2 = y1 ^ x0;
+    let y5 = y1 ^ x6;
+    let y3 = y5 ^ y8;
+    let t1 = x4 ^ y12;
+    let y15 = t1 ^ x5;
+    let y20 = t1 ^ x1;
+    let y6 = y15 ^ x7;
+    let y10 = y15 ^ t0;
+    let y11 = y20 ^ y9;
+    let y7 = x7 ^ y11;
+    let y17 = y10 ^ y11;
+    let y19 = y10 ^ y8;
+    let y16 = t0 ^ y11;
+    let y21 = y13 ^ y16;
+    let y18 = x0 ^ y16;
+
+    // non-linear section
+    let t2 = y12 & y15;
+    let t3 = y3 & y6;
+    let t4 = t3 ^ t2;
+    let t5 = y4 & x7;
+    let t6 = t5 ^ t2;
+    let t7 = y13 & y16;
+    let t8 = y5 & y1;
+    let t9 = t8 ^ t7;
+    let t10 = y2 & y7;
+    let t11 = t10 ^ t7;
+    let t12 = y9 & y11;
+    let t13 = y14 & y17;
+    let t14 = t13 ^ t12;
+    let t15 = y8 & y10;
+    let t16 = t15 ^ t12;
+    let t17 = t4 ^ t14;
+    let t18 = t6 ^ t16;
+    let t19 = t9 ^ t14;
+    let t20 = t11 ^ t16;
+    let t21 = t17 ^ y20;
+    let t22 = t18 ^ y19;
+    let t23 = t19 ^ y21;
+    let t24 = t20 ^ y18;
+
+    let t25 = t21 ^ t22;
+    let t26 = t21 & t23;
+    let t27 = t24 ^ t26;
+    let t28 = t25 & t27;
+    let t29 = t28 ^ t22;
+    let t30 = t23 ^ t24;
+    let t31 = t22 ^ t26;
+    let t32 = t31 & t30;
+    let t33 = t32 ^ t24;
+    let t34 = t23 ^ t33;
+    let t35 = t27 ^ t33;
+    let t36 = t24 & t35;
+    let t37 = t36 ^ t34;
+    let t38 = t27 ^ t36;
+    let t39 = t29 & t38;
+    let t40 = t25 ^ t39;
+
+    let t41 = t40 ^ t37;
+    let t42 = t29 ^ t33;
+    let t43 = t29 ^ t40;
+    let t44 = t33 ^ t37;
+    let t45 = t42 ^ t41;
+    let z0 = t44 & y15;
+    let z1 = t37 & y6;
+    let z2 = t33 & x7;
+    let z3 = t43 & y16;
+    let z4 = t40 & y1;
+    let z5 = t29 & y7;
+    let z6 = t42 & y11;
+    let z7 = t45 & y17;
+    let z8 = t41 & y10;
+    let z9 = t44 & y12;
+    let z10 = t37 & y3;
+    let z11 = t33 & y4;
+    let z12 = t43 & y13;
+    let z13 = t40 & y5;
+    let z14 = t29 & y2;
+    let z15 = t42 & y9;
+    let z16 = t45 & y14;
+    let z17 = t41 & y8;
+
+    // bottom linear transformation
+    let t46 = z15 ^ z16;
+    let t47 = z10 ^ z11;
+    let t48 = z5 ^ z13;
+    let t49 = z9 ^ z10;
+    let t50 = z2 ^ z12;
+    let t51 = z2 ^ z5;
+    let t52 = z7 ^ z8;
+    let t53 = z0 ^ z3;
+    let t54 = z6 ^ z7;
+    let t55 = z16 ^ z17;
+    let t56 = z12 ^ t48;
+    let t57 = t50 ^ t53;
+    let t58 = z4 ^ t46;
+    let t59 = z3 ^ t54;
+    let t60 = t46 ^ t57;
+    let t61 = z14 ^ t57;
+    let t62 = t52 ^ t58;
+    let t63 = t49 ^ t58;
+    let t64 = z4 ^ t59;
+    let t65 = t61 ^ t62;
+    let t66 = z1 ^ t63;
+    let s0 = t59 ^ t63;
+    let s6 = t56 ^ !t62;
+    let s7 = t48 ^ !t60;
+    let t67 = t64 ^ t65;
+    let s3 = t53 ^ t66;
+    let s4 = t51 ^ t66;
+    let s5 = t47 ^ t65;
+    let s1 = t64 ^ !s3;
+    let s2 = t55 ^ !t67;
+
+    [s7, s6, s5, s4, s3, s2, s1, s0]
 }
 
 // ---- ShiftRows and MixColumns as lane permutations -----------------------------------------
 
-/// Lanes (bit positions) of one 16-lane block group that are in row `r`, and whose column `c`
-/// has `c + r >= 4` (`wrap`) or not.
-const fn shift_mask(r: usize, wrap: bool) -> u64 {
+/// The lanes of row `r` whose column `c` has `c + r < 4` (`low`), or `c + r >= 4`.
+const fn row_mask(r: usize, low: bool) -> u64 {
     let mut m = 0u64;
-    let mut g = 0;
-    while g < 4 {
+    let mut b = 0;
+    while b < 4 {
         let mut c = 0;
         while c < 4 {
-            if (c + r >= 4) == wrap {
-                m |= 1u64 << (16 * g + 4 * c + r);
+            if (c + r < 4) == low {
+                m |= 1u64 << (16 * r + 4 * b + c);
             }
             c += 1;
         }
-        g += 1;
+        b += 1;
     }
     m
 }
 
-const SHIFT_NO_WRAP: [u64; 4] = [shift_mask(0, false), shift_mask(1, false), shift_mask(2, false), shift_mask(3, false)];
-const SHIFT_WRAP: [u64; 4] = [shift_mask(0, true), shift_mask(1, true), shift_mask(2, true), shift_mask(3, true)];
+const ROW0: u64 = 0xffff;
+const LOW: [u64; 4] = [row_mask(0, true), row_mask(1, true), row_mask(2, true), row_mask(3, true)];
+const HIGH: [u64; 4] = [row_mask(0, false), row_mask(1, false), row_mask(2, false), row_mask(3, false)];
 
-/// New state byte (column c, row r) is old byte (column (c + r) % 4, row r): a rotation of the
-/// four columns of row r by r places, i.e. a move by 4r lanes within the block's 16 lanes.
+/// New state byte (column c, row r) is old byte (column (c + r) % 4, row r): in row r's field, each
+/// block's four lanes (one per column) turn by r places.
 #[inline(always)]
 fn shift_rows_plane(x: u64) -> u64 {
-    let mut out = 0u64;
-    for r in 0..4 {
-        out |= ((x >> (4 * r)) & SHIFT_NO_WRAP[r]) | ((x << (16 - 4 * r)) & SHIFT_WRAP[r]);
-    }
-    out
+    (x & ROW0)
+        | ((x >> 1) & LOW[1])
+        | ((x << 3) & HIGH[1])
+        | ((x >> 2) & LOW[2])
+        | ((x << 2) & HIGH[2])
+        | ((x >> 3) & LOW[3])
+        | ((x << 1) & HIGH[3])
 }
 
-/// Rotates the four rows of every column: new row r is old row (r + 1) % 4.
+/// Rotates the four rows of every column: new row r is old row (r + 1) % 4 (a row is a 16-bit field).
 #[inline(always)]
 fn rot_rows_1(x: u64) -> u64 {
-    ((x >> 1) & 0x7777_7777_7777_7777) | ((x << 3) & 0x8888_8888_8888_8888)
+    x.rotate_right(16)
 }
 
 /// New row r is old row (r + 2) % 4.
 #[inline(always)]
 fn rot_rows_2(x: u64) -> u64 {
-    ((x >> 2) & 0x3333_3333_3333_3333) | ((x << 2) & 0xcccc_cccc_cccc_cccc)
+    x.rotate_right(32)
 }
 
 #[inline(always)]
@@ -330,17 +469,22 @@ mod tests {
     }
 
     #[test]
-    fn pack_and_unpack_are_inverse_and_lane_order_is_byte_order() {
+    fn pack_and_unpack_are_inverse_and_a_row_of_all_blocks_is_one_field() {
         let mut rng = Lcg(1);
         for _ in 0..50 {
             let mut b = [0u8; 64];
             rng.fill(&mut b);
             let p = pack(&b);
             assert_eq!(unpack(&p), b);
-            // bit i of byte j is bit j of plane i
-            for j in 0..64 {
-                for i in 0..8 {
-                    assert_eq!((p[i] >> j) & 1, ((b[j] >> i) & 1) as u64);
+            // bit i of the byte of block b, row r, column c (input byte 16 b + 4 c + r) is bit 16 r + 4 b + c of plane i
+            for blk in 0..4 {
+                for r in 0..4 {
+                    for c in 0..4 {
+                        let (byte, lane) = (16 * blk + 4 * c + r, 16 * r + 4 * blk + c);
+                        for i in 0..8 {
+                            assert_eq!((p[i] >> lane) & 1, ((b[byte] >> i) & 1) as u64);
+                        }
+                    }
                 }
             }
         }

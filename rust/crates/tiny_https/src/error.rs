@@ -24,6 +24,9 @@ pub enum Error {
     /// compressed data, it is cut short, it fails its checksum, or it would come to more than the limits on the decoded size allow.
     /// What had been read of such a body is not to be trusted.
     Decode(crate::inflate::Error),
+    /// The request's batch was cancelled ([`Batch::cancel`](crate::http::Batch::cancel)): it was stopped while it waited
+    /// to start or while it was under way, or it was made after the cancel.
+    Cancelled,
 }
 
 /// A request or a redirect that the client's rules did not allow: nothing was sent to the host it named.
@@ -125,6 +128,7 @@ impl fmt::Display for Error {
             Error::Verify(e) => e.fmt(f),
             Error::Refused(r) => r.fmt(f),
             Error::Decode(e) => write!(f, "response body could not be decoded: {}", e),
+            Error::Cancelled => f.write_str("cancelled: the request's batch was cancelled"),
         }
     }
 }

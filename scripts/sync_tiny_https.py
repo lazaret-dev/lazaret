@@ -12,7 +12,8 @@ replaces it whole and a reader can compare it with its source; nothing in it is 
                                                    was taken (CI): no file changed, none added, none missing
 
 What is taken: Cargo.toml, LICENSE, README.md, BACKLOG.md, SECURITY_REVIEW.md (the brief for its security review,
-when the drop has one) and the folders src/, tests/ and examples/. What is
+when the drop has one) and the folders src/, tests/, examples/ and roots/ (the trust roots the library builds in:
+Sigstore's TUF root, which src/tuf.rs includes, and Mozilla's root store for its `mozilla-roots` feature). What is
 left out: the fuzzer and its corpus (fuzz/, 80 MB), the generators and oracles (tools/), the library's own
 Cargo.lock (the workspace's is the one that counts), build output and caches. One change is made, to
 Cargo.toml: its [profile.*] tables are dropped, since a workspace member's profiles are ignored (the
@@ -43,7 +44,7 @@ import tarfile
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 DEST = ROOT / "rust" / "crates" / "tiny_https"
 KEEP_FILES = ("Cargo.toml", "LICENSE", "README.md", "BACKLOG.md", "SECURITY_REVIEW.md")
-KEEP_DIRS = ("src", "tests", "examples")
+KEEP_DIRS = ("src", "tests", "examples", "roots")
 OURS = ("LAZARET.md", "vendored.sha256", ".gitattributes", ".gitignore")   # written here, not taken from the drop
 # Names the repository never commits (.gitignore; scripts/make_bundle.py's CREDENTIAL_NAMES), refused in a drop. A
 # .pem is let through when it holds no private key (the library's tests read public certificates), as is a .tgz (real
@@ -214,8 +215,10 @@ over: nothing in it is edited by hand. `scripts/sync_tiny_https.py` took it on {
 (SHA-256 `{source_sha}`): {len(files)} files, {size:,} bytes. Its licence is Apache-2.0 (`LICENSE`), as
 Lazaret's is.
 
-- **What is here:** `Cargo.toml`, `LICENSE`, `README.md`, `BACKLOG.md`, `src/`, `tests/` and `examples/`, and
-  `SECURITY_REVIEW.md` (the brief for the library's security review) when the drop has one.
+- **What is here:** `Cargo.toml`, `LICENSE`, `README.md`, `BACKLOG.md`, `src/`, `tests/`, `examples/` and `roots/`
+  (the trust roots it builds in: Sigstore's TUF root, always, and Mozilla's root store for the `mozilla-roots`
+  feature, which Lazaret does not use), and `SECURITY_REVIEW.md` (the brief for the library's security review) when
+  the drop has one.
 - **What was left out:** the fuzzer and its corpus (`fuzz/`), the generators and oracles (`tools/`), the
   library's own `Cargo.lock`, and build output. Two of the library's interoperability tests use files in
   `tools/` when Go or aioquic is installed (`tests/h2_client_interop.rs`, `tests/h3_client_interop.rs`); they

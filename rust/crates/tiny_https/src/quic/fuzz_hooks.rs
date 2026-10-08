@@ -99,6 +99,12 @@ struct Sim {
     corrupt: u64,
     /// How many datagrams were lost in a row, toward the server and toward the client.
     dropped_in_a_row: [u32; 2],
+    /// When a datagram last got through, toward the server and toward the client.
+    last_through: [Instant; 2],
+    /// In an honest run, a direction that has had nothing through for this long lets the next datagram through.
+    starved: Duration,
+    /// Nothing the server sends reaches the client (the end of a hostile run: the server goes quiet).
+    server_muted: bool,
     honest: bool,
     max_datagram: usize,
     first_datagram: bool,
@@ -146,6 +152,9 @@ impl Sim {
 
     /// What the network does to a datagram.
     fn route(&mut self, to_server: bool, mut bytes: Vec<u8>) {
+        if !to_server && self.server_muted {
+            return;
+        }
         let dir = usize::from(to_server);
         let protected = !to_server && self.retry && self.server_datagrams == 0;
         if !to_server {
@@ -157,7 +166,14 @@ impl Sim {
         // server before the handshake is done, for the test server takes the connection ids and keys of the first Initial it sees.)
         let mut corrupted = bytes.len() > 6 && !protected && self.rng.chance(self.corrupt) && (!to_server || self.server.handshake_done || !self.honest);
         if (lose || corrupted) && self.honest {
-            if self.dropped_in_a_row[dir] >= 3 {
+            // (three in a row is not enough on its own: the probes of a client that has heard nothing back off, one round trip
+            // after another can fail with a loss in either direction, and an honest network that lost every round trip for
+            // the idle timeout ended a connection that did nothing wrong (found by the field run's fuzzing, at 25% loss). So
+            // a direction that has had nothing through for a quarter of the idle timeout lets the next datagram through: of the
+            // idle timeout that applies, the smaller of the two sides'. A quarter of the client's alone, 30 s of a 120 s setting,
+            // was all of the server's 30 s, and the network could be silent until the client gave up: found by fuzzing after the
+            // field run.)
+            if self.dropped_in_a_row[dir] >= 3 || self.now.saturating_duration_since(self.last_through[dir]) >= self.starved {
                 lose = false;
                 corrupted = false;
             }
@@ -166,6 +182,7 @@ impl Sim {
             self.dropped_in_a_row[dir] += 1;
         } else {
             self.dropped_in_a_row[dir] = 0;
+            self.last_through[dir] = self.now;
         }
         if self.trace {
             eprintln!("{:>8.1} ms  {}  {:>5} bytes  {}", (self.now - self.start).as_secs_f64() * 1000.0, if to_server { "client->server" } else { "server->client" }, bytes.len(), if lose { "lost" } else if corrupted { "corrupted" } else { "" });
@@ -264,6 +281,9 @@ impl Sim {
     fn service(&mut self) {
         while let Some(e) = self.client.poll_event() {
             if let Event::Closed(reason) = e {
+                if self.trace {
+                    eprintln!("{:>8.1} ms  the client's connection is closed: {reason:?}", (self.now - self.start).as_secs_f64() * 1000.0);
+                }
                 self.closed.get_or_insert(reason);
             }
         }
@@ -373,7 +393,7 @@ impl Sim {
             for id in self.known_client.iter().chain(self.own_client.iter()) {
                 eprintln!("client stream {id}: {}", self.client.describe_stream(*id));
             }
-            eprintln!("client: window {} in flight {} ssthresh {} srtt {:?} streams pending {}", self.client.congestion().window(), self.client.bytes_in_flight(), self.client.congestion().ssthresh(), self.client.smoothed_rtt(), self.client.streams_have_pending());
+            eprintln!("client: window {} in flight {} ssthresh {} srtt {:?} streams pending {} confirmed {}", self.client.congestion().window(), self.client.bytes_in_flight(), self.client.congestion().ssthresh(), self.client.smoothed_rtt(), self.client.streams_have_pending(), self.client.is_confirmed());
             eprintln!("server timer {:?}", self.server.timeout().map(|t| t.saturating_duration_since(self.now)));
             eprintln!("what the server was told:");
             for line in self.server.log.iter().rev().take(80).rev() {
@@ -404,6 +424,10 @@ fn pick(ids: &[u64], by: u8) -> Option<u64> {
     }
 }
 
+/// The idle timeout the test server asks for (its transport parameter, in milliseconds); the connection's is the smaller of
+/// this and the client's.
+const SERVER_IDLE_MS: u64 = 30_000;
+
 /// See the top of this file.
 pub fn connection(data: &[u8]) {
     let mut c = Cursor(data);
@@ -431,6 +455,8 @@ pub fn connection(data: &[u8]) {
     config.initial_max_streams_uni = [0, 4, 16][((b2 >> 2) % 3) as usize];
     config.stream_send_buffer = [3000, 20_000, 1 << 20][((b2 >> 4) % 3) as usize];
     config.max_datagram_size = [1200, 1350, 1472][(b3 % 3) as usize];
+    // (keys updated every 64 packets, so that a run goes through updates the client starts, under loss and reordering: B-91)
+    config.key_update_after = 64;
     config.cid_len = [4, 8, 20][((b3 >> 2) % 3) as usize];
 
     let server_data = [3000u64, 12_000, 1 << 20][(b3 >> 4) as usize % 3];
@@ -440,6 +466,7 @@ pub fn connection(data: &[u8]) {
     opts.retry = retry;
     opts.crypto_chunk = crypto_chunk;
     opts.params = Box::new(move |p| {
+        p.max_idle_timeout = SERVER_IDLE_MS;
         p.initial_max_data = server_data;
         p.initial_max_stream_data_bidi_local = server_stream;
         p.initial_max_stream_data_bidi_remote = server_stream;
@@ -466,6 +493,9 @@ pub fn connection(data: &[u8]) {
         reorder: if honest { 10 } else { 20 },
         corrupt: if honest { 3 } else { 10 },
         dropped_in_a_row: [0; 2],
+        last_through: [now; 2],
+        starved: config.max_idle_timeout.min(Duration::from_millis(SERVER_IDLE_MS)) / 4,
+        server_muted: false,
         honest,
         max_datagram: config.max_datagram_size,
         first_datagram: true,
@@ -596,8 +626,10 @@ pub fn connection(data: &[u8]) {
             }
             13 => sim.client.ping(),
             14 => {
-                // (one update at a time: a second before the client has answered the first is not what a server does)
-                if sim.server.rx_updates >= sim.updates_begun {
+                // (one update at a time: a second before the client has answered the first is not what a server does; nor is one
+                // before the server has seen packets of the client's own last update, which `rx_updates` counted too: found when the
+                // client began to update its keys itself, B-91)
+                if sim.server.keys_agreed() {
                     sim.server.key_update();
                     sim.updates_begun += 1;
                 }
@@ -606,6 +638,9 @@ pub fn connection(data: &[u8]) {
                 if a % 16 == 0 {
                     sim.client.close(sim.now, u64::from(a), b"fuzz");
                     closed_by_us = true;
+                } else if a % 16 == 1 {
+                    // (refused unless the last update was answered and acknowledged)
+                    sim.client.update_keys();
                 } else {
                     sim.client.ping();
                 }
@@ -662,7 +697,11 @@ pub fn connection(data: &[u8]) {
         }
     }
 
-    // and a connection with nothing to do ends: by the idle timeout (or at once if it was closed) and then it is quiet
+    // and a connection with nothing to do ends: by the idle timeout (or at once if it was closed) and then it is quiet. (A hostile
+    // server may have left itself unable to hear the client, with frames that move the client to connection ids it does not
+    // know, and retransmit to it for ever, which keeps a connection alive as the RFC says it should: so it goes quiet here. Found
+    // by the field run's fuzzing.)
+    sim.server_muted = !honest;
     let mut ended = false;
     for _ in 0..2000 {
         if sim.client.is_closed() {

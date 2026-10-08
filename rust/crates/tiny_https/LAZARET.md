@@ -1,12 +1,14 @@
 # tiny_https in Lazaret
 
 This folder is tiny_https 0.1.0, the HTTPS/TLS library Lazaret's network layer is built on, as it was handed
-over: nothing in it is edited by hand. `scripts/sync_tiny_https.py` took it on 2026-10-07 from `tiny_https-2026-10-07b.tgz`
-(SHA-256 `1dd602de6d153fc9c91efeab2aa32a96a13fa78bea982634516b31918df8e3ab`): 423 files, 9,126,812 bytes. Its licence is Apache-2.0 (`LICENSE`), as
+over: nothing in it is edited by hand. `scripts/sync_tiny_https.py` took it on 2026-10-08 from `tiny_https-2026-10-08l.tgz`
+(SHA-256 `d94f7c43411b4ee7bedc84cf569fb4487c7d770a3a9684bae624cd38b5498c0d`): 579 files, 11,828,074 bytes. Its licence is Apache-2.0 (`LICENSE`), as
 Lazaret's is.
 
-- **What is here:** `Cargo.toml`, `LICENSE`, `README.md`, `BACKLOG.md`, `src/`, `tests/` and `examples/`, and
-  `SECURITY_REVIEW.md` (the brief for the library's security review) when the drop has one.
+- **What is here:** `Cargo.toml`, `LICENSE`, `README.md`, `BACKLOG.md`, `src/`, `tests/`, `examples/` and `roots/`
+  (the trust roots it builds in: Sigstore's TUF root, always, and Mozilla's root store for the `mozilla-roots`
+  feature, which Lazaret does not use), and `SECURITY_REVIEW.md` (the brief for the library's security review) when
+  the drop has one.
 - **What was left out:** the fuzzer and its corpus (`fuzz/`), the generators and oracles (`tools/`), the
   library's own `Cargo.lock`, and build output. Two of the library's interoperability tests use files in
   `tools/` when Go or aioquic is installed (`tests/h2_client_interop.rs`, `tests/h3_client_interop.rs`); they

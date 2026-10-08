@@ -13,6 +13,7 @@
 //! Neither indexes memory with a key or data byte, so there is no cache-timing channel; the
 //! table-based AES this replaces had one (backlog B-20).
 
+use super::dit::Dit;
 use super::{aes_ct, aes_hw};
 
 /// Which implementation an [`Aes`] uses.
@@ -60,6 +61,7 @@ impl Aes {
     // in builds without the hardware path `aes_hw::Keys` is uninhabited and `new` panics
     #[allow(unreachable_code)]
     pub(crate) fn with_backend(key: &[u8], backend: Backend) -> Aes {
+        let _dit = Dit::on(); // data-independent timing while the key and the data are in use (crypto::dit)
         let imp = match backend {
             Backend::Portable => Imp::Portable(aes_ct::Keys::new(key)),
             Backend::Hardware => Imp::Hardware(aes_hw::Keys::new(key)),
@@ -75,6 +77,7 @@ impl Aes {
     }
 
     pub fn encrypt_block(&self, block: &[u8; 16]) -> [u8; 16] {
+        let _dit = Dit::on(); // data-independent timing while the key and the data are in use (crypto::dit)
         match &self.imp {
             Imp::Hardware(k) => k.encrypt_block(block),
             Imp::Portable(k) => {
@@ -93,6 +96,7 @@ impl Aes {
     /// ... (a 32-bit big-endian counter that wraps, as in GCM). A last partial block uses the
     /// front of its keystream block.
     pub fn ctr_xor(&self, nonce: &[u8; 12], counter: u32, data: &mut [u8]) {
+        let _dit = Dit::on(); // data-independent timing while the key and the data are in use (crypto::dit)
         match &self.imp {
             Imp::Hardware(k) => k.ctr_xor(nonce, counter, data),
             Imp::Portable(k) => {
@@ -111,6 +115,28 @@ impl Aes {
                     crate::zeroize::Zeroize::zeroize(&mut blocks);
                     counter = counter.wrapping_add(chunk.len().div_ceil(16) as u32);
                 }
+            }
+        }
+    }
+
+    /// For GCM on the portable path, where a call costs a pass over four blocks: the encryption of J0 (`nonce || 1`, which
+    /// masks the tag) and the keystream of the three blocks after it, from one pass, for a message of at most 48 bytes
+    /// (which would otherwise take two). `None` on the hardware path, where a block costs no more alone.
+    pub(crate) fn j0_and_short_keystream(&self, nonce: &[u8; 12]) -> Option<([u8; 16], [u8; 48])> {
+        match &self.imp {
+            Imp::Hardware(_) => None,
+            Imp::Portable(k) => {
+                let mut blocks = [0u8; 64];
+                for b in 0..4u32 {
+                    let at = 16 * b as usize;
+                    blocks[at..at + 12].copy_from_slice(nonce);
+                    blocks[at + 12..at + 16].copy_from_slice(&(1 + b).to_be_bytes());
+                }
+                k.encrypt4(&mut blocks);
+                let j0: [u8; 16] = blocks[..16].try_into().unwrap();
+                let ks: [u8; 48] = blocks[16..].try_into().unwrap();
+                crate::zeroize::Zeroize::zeroize(&mut blocks);
+                Some((j0, ks))
             }
         }
     }

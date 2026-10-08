@@ -16,15 +16,40 @@ use super::parser::{keep_alive_timeout, Head, ResponseParser};
 use super::wire::Limits;
 use super::{HttpVersion, Response, Url};
 use crate::asyncio::net::Io;
+use crate::asyncio::slots::Slots;
 use crate::error::{Error, Result};
 use crate::inflate::{Format, Limits as InflateLimits};
 use crate::tls::{TlsStream, TlsVersion};
+use std::cell::Cell;
 use std::io::{self, Read, Write};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 /// Size of the buffer that chunk framing and the headers pass through.
 const SCRATCH: usize = 32 * 1024;
+
+thread_local! {
+    /// The buffer of a response that was finished on this thread, for the next one: a new buffer is zeroed (32 KiB), which
+    /// for a small response on a connection that is used again was a good part of the work (BACKLOG B-90). What it holds
+    /// from before is never looked at: only what a read writes into it is.
+    static SPARE_SCRATCH: Cell<Option<Vec<u8>>> = const { Cell::new(None) };
+}
+
+/// A buffer of `SCRATCH` bytes: the spare one, if this thread has it.
+fn scratch_buffer() -> Vec<u8> {
+    SPARE_SCRATCH.with(Cell::take).filter(|b| b.len() == SCRATCH).unwrap_or_else(|| vec![0u8; SCRATCH])
+}
+
+/// Where this thread's spare buffer is, if it has one (tests).
+#[cfg(test)]
+pub(super) fn spare_scratch() -> Option<usize> {
+    SPARE_SCRATCH.with(|s| {
+        let b = s.take();
+        let at = b.as_ref().map(|b| b.as_ptr() as usize);
+        s.set(b);
+        at
+    })
+}
 
 /// Plain or TLS, so the request code does not care which.
 pub(super) enum Conn {
@@ -87,6 +112,8 @@ pub(super) struct Home {
     pub(super) pool: Arc<IdlePool<Conn>>,
     pub(super) key: Key,
     pub(super) policy: Policy,
+    /// The client's per-host connection limit, whose waiters are told when a connection is parked.
+    pub(super) slots: Option<std::sync::Arc<Slots>>,
 }
 
 /// Why a request got no response, and whether trying again on a new connection is sound.
@@ -122,6 +149,15 @@ pub(super) struct BodyReader {
     failed: bool,
 }
 
+impl Drop for BodyReader {
+    fn drop(&mut self) {
+        if self.scratch.len() == SCRATCH {
+            let spare = std::mem::take(&mut self.scratch);
+            SPARE_SCRATCH.with(|s| s.set(Some(spare)));
+        }
+    }
+}
+
 impl BodyReader {
     pub(super) fn new(conn: Conn, method: &str, limits: Limits, home: Option<Home>) -> BodyReader {
         BodyReader { conn: Some(conn), parser: ResponseParser::new(method, limits), home, pending: Vec::new(), pos: 0, scratch: Vec::new(), failed: false }
@@ -155,7 +191,7 @@ impl BodyReader {
             Failure { peer_closed: is_peer_close(&error), error }
         }
         if self.scratch.is_empty() {
-            self.scratch = vec![0u8; SCRATCH];
+            self.scratch = scratch_buffer();
         }
         let conn = self.conn.as_mut().expect("a connection");
         conn.write_all(head).and_then(|_| conn.flush()).map_err(failure)?;
@@ -202,7 +238,7 @@ impl BodyReader {
     /// takes the connection back at once if the response has no body to read.
     pub(super) fn receive_head(&mut self) -> std::result::Result<Head, Failure> {
         if self.scratch.is_empty() {
-            self.scratch = vec![0u8; SCRATCH];
+            self.scratch = scratch_buffer();
         }
         while !self.parser.head_complete() {
             let want = self.parser.max_read().min(self.scratch.len());
@@ -242,6 +278,9 @@ impl BodyReader {
         let (Some(mut conn), Some(home)) = (self.conn.take(), self.home.take()) else { return };
         if self.parser.reusable() && home.policy.parks() && conn.settle() {
             home.pool.put(home.key, conn, home.policy.idle_timeout, &home.policy, Instant::now());
+            if let Some(slots) = &home.slots {
+                slots.poke();
+            }
         }
     }
 
@@ -299,7 +338,7 @@ impl BodyReader {
                 }
             } else {
                 if self.scratch.is_empty() {
-                    self.scratch = vec![0u8; SCRATCH];
+                    self.scratch = scratch_buffer();
                 }
                 let want = self.parser.max_read().min(self.scratch.len());
                 match conn.read(&mut self.scratch[..want]) {
@@ -547,6 +586,8 @@ pub struct ResponseStream {
     pub uncompressed: bool,
     body: Body,
     decoder: Option<Box<BodyDecoder>>,
+    /// What the request holds while it is in flight (its scheduler's place, its batch's), given back when the body is over.
+    in_flight: Option<super::InFlight>,
 }
 
 impl ResponseStream {
@@ -562,6 +603,40 @@ impl ResponseStream {
             uncompressed: false,
             body: Body::H1(body),
             decoder: None,
+            in_flight: None,
+        }
+    }
+
+    /// The same response, holding what its request holds in flight until its body is over (or it is dropped).
+    pub(super) fn in_flight(mut self, in_flight: Option<super::InFlight>) -> ResponseStream {
+        let Some(mut f) = in_flight else { return self };
+        if self.body.is_done() {
+            // nothing more to come: over now
+            return self;
+        }
+        f.length(self.content_length);
+        self.in_flight = Some(f);
+        self
+    }
+
+    /// What became of a read, for what the request holds in flight: given back at the end of the body or on an error
+    /// (which is a cancel if its batch was cancelled).
+    fn account(&mut self, r: Result<usize>) -> Result<usize> {
+        let Some(f) = self.in_flight.as_mut() else { return r };
+        match r {
+            Ok(0) => {
+                self.in_flight = None;
+                Ok(0)
+            }
+            Ok(n) => {
+                f.received(n, self.content_length);
+                Ok(n)
+            }
+            Err(e) => {
+                let cancelled = f.cancelled();
+                self.in_flight = None;
+                Err(if cancelled { Error::Cancelled } else { e })
+            }
         }
     }
 
@@ -576,6 +651,17 @@ impl ResponseStream {
 
     /// Reads up to `out.len()` bytes of the body as the caller gets it (decoded, if it is): 0 is the end.
     fn read_some(&mut self, out: &mut [u8]) -> Result<usize> {
+        if self.in_flight.is_none() {
+            return self.read_plain(out);
+        }
+        if self.in_flight.as_ref().is_some_and(|f| f.cancelled()) {
+            return self.account(Err(Error::Cancelled));
+        }
+        let r = self.read_plain(out);
+        self.account(r)
+    }
+
+    fn read_plain(&mut self, out: &mut [u8]) -> Result<usize> {
         let Some(decoder) = self.decoder.as_mut() else { return self.body.read_body(out) };
         loop {
             match decoder.next(out).map_err(Error::Decode)? {
@@ -606,7 +692,7 @@ impl ResponseStream {
         if !bodiless && content_length.is_some_and(|n| n > body.limit()) {
             return Err(Error::Http("response body exceeds the configured size limit".into()));
         }
-        Ok(ResponseStream { status, reason: String::new(), version, headers, url, content_length, tls_version, uncompressed: false, body: Body::Mux(body), decoder: None })
+        Ok(ResponseStream { status, reason: String::new(), version, headers, url, content_length, tls_version, uncompressed: false, body: Body::Mux(body), decoder: None, in_flight: None })
     }
 
     /// First header with this (case-insensitive) name.
@@ -627,7 +713,11 @@ impl ResponseStream {
     pub fn into_response(mut self) -> Result<Response> {
         // over HTTP/2 the connection keeps the body in one buffer as it comes, and gives that buffer over
         if let (Body::Mux(b), None) = (&mut self.body, &self.decoder) {
-            let body = b.collect()?;
+            let collected = b.collect();
+            let body = match self.in_flight.take() {
+                Some(f) if collected.is_err() && f.cancelled() => return Err(Error::Cancelled),
+                _ => collected?,
+            };
             return Ok(Response { status: self.status, reason: self.reason, version: self.version, headers: self.headers, body, url: self.url, tls_version: self.tls_version, uncompressed: false });
         }
         // `body[..filled]` is what has been read; the rest of `body` is zeros waiting to be read into (the safe way to
@@ -645,6 +735,11 @@ impl ResponseStream {
             if hint >= 1 << 20 {
                 // (and the room for one more read, which is how the end of the body is found out)
                 body = vec![0u8; hint.min(PRESIZE_MAX) as usize + 4096];
+                presized = true;
+            } else if self.content_length.is_some() && !self.uncompressed {
+                // a small body of a known length: room for it and that one more read, and no more zeroed than that (where
+                // 32 KiB were, for a body of 1 KB: BACKLOG B-90); one that is longer than it said grows as below
+                body = vec![0u8; hint as usize + 4096];
                 presized = true;
             } else {
                 body.reserve(hint as usize);

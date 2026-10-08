@@ -20,6 +20,15 @@ pub const GRANULARITY: Duration = Duration::from_millis(1);
 pub const INITIAL_RTT: Duration = Duration::from_millis(333);
 /// How many PTO periods of loss make persistent congestion (RFC 9002 section 7.6).
 pub const PERSISTENT_CONGESTION_THRESHOLD: u32 = 3;
+/// The longest round trip a sample counts for: a longer one is taken as this. A peer that takes longer to acknowledge is as good
+/// as gone (idle timeouts are shorter), and the bound keeps what is made of the estimate (the probe timeout, times a backoff of
+/// up to 2^20) finite. (A sample of a thousand years made the multiplication overflow; found by the field run's fuzzing.)
+pub const MAX_RTT: Duration = Duration::from_secs(60);
+
+/// `t + d`, or the furthest `t` can go if that is past what an `Instant` holds (a timer that far away never fires).
+fn later(t: Instant, d: Duration) -> Instant {
+    t.checked_add(d).or_else(|| t.checked_add(Duration::from_secs(1 << 32))).unwrap_or(t)
+}
 
 /// The three packet number spaces.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -284,7 +293,7 @@ impl<T> Recovery<T> {
         // an acknowledgment
         let newest = acked.last().expect("some acknowledged");
         if newest.pn == largest && acked.iter().any(|p| p.ack_eliciting) {
-            self.latest_rtt = now.saturating_duration_since(newest.time);
+            self.latest_rtt = now.saturating_duration_since(newest.time).min(MAX_RTT);
             let delay = if space == Space::Initial { Duration::ZERO } else { ack_delay };
             self.update_rtt(now, delay);
         }
@@ -347,7 +356,7 @@ impl<T> Recovery<T> {
             if now.saturating_duration_since(p.time) >= loss_delay || largest >= pn + PACKET_THRESHOLD {
                 lost_pns.push(pn);
             } else {
-                let t = p.time + loss_delay;
+                let t = later(p.time, loss_delay);
                 loss_time = Some(loss_time.map_or(t, |l| l.min(t)));
             }
         }
@@ -422,11 +431,11 @@ impl<T> Recovery<T> {
     /// When the probe timeout is, and for which space (RFC 9002 section 6.2.1, with `now` where the algorithm says "now").
     fn pto_time_and_space(&self, now: Instant) -> Option<(Instant, Space)> {
         let backoff = 1u32 << self.pto_count.min(20);
-        let base = self.smoothed_rtt + (4 * self.rttvar).max(GRANULARITY);
+        let base = self.smoothed_rtt.saturating_add(self.rttvar.saturating_mul(4).max(GRANULARITY));
         if !self.any_ack_eliciting_in_flight() {
             // the anti-deadlock probe: from now
             let space = if self.handshake_keys { Space::Handshake } else { Space::Initial };
-            return Some((now + base * backoff, space));
+            return Some((later(now, base.saturating_mul(backoff)), space));
         }
         let mut best: Option<(Instant, Space)> = None;
         for space in Space::ALL {
@@ -434,16 +443,16 @@ impl<T> Recovery<T> {
             if s.ack_eliciting_in_flight == 0 {
                 continue;
             }
-            let mut duration = base * backoff;
+            let mut duration = base.saturating_mul(backoff);
             if space == Space::Application {
                 // not until the handshake is confirmed
                 if !self.handshake_confirmed {
                     return best;
                 }
-                duration += self.max_ack_delay * backoff;
+                duration = duration.saturating_add(self.max_ack_delay.saturating_mul(backoff));
             }
             let Some(last) = s.last_ack_eliciting else { continue };
-            let t = last + duration;
+            let t = later(last, duration);
             if best.map_or(true, |(b, _)| t < b) {
                 best = Some((t, space));
             }
@@ -515,6 +524,7 @@ impl<T> Recovery<T> {
         self.pto_count = 0;
         self.timer = None;
         if let Some(rtt) = rtt {
+            let rtt = rtt.min(MAX_RTT);
             self.smoothed_rtt = rtt;
             self.rttvar = rtt / 2;
         }
@@ -553,6 +563,29 @@ mod tests {
 
     // ------------------------------------------------------------------------------------------------------------------------
     // the estimate
+
+    #[test]
+    fn a_sample_of_ages_counts_as_a_minute_and_the_backed_off_timer_stays_finite() {
+        // (the field run's fuzzer found a sample long enough to overflow the probe timeout times its backoff)
+        let t0 = Instant::now();
+        let mut r = Recovery::new(MDS);
+        r.on_packet_sent(t0, Space::Initial, sent(0, t0, true));
+        let far = t0 + Duration::from_secs(1 << 40);
+        r.on_ack_received(far, Space::Initial, 0, ms(0), std::iter::once(0..=0));
+        assert_eq!((r.latest_rtt(), r.smoothed_rtt()), (MAX_RTT, MAX_RTT));
+        // probe after probe, up to the most backoff there is: the timer is always somewhere
+        r.on_packet_sent(far, Space::Initial, sent(1, far, true));
+        let mut now = far;
+        for _ in 0..30 {
+            let Some(t) = r.timer() else { panic!("no timer with a packet out") };
+            assert!(t > now);
+            now = t;
+            r.on_timeout(now);
+            r.on_packet_sent(now, Space::Initial, sent(100 + r.pto_count() as u64, now, true));
+        }
+        assert_eq!(r.reset(Some(Duration::MAX)).len() > 0, true);
+        assert_eq!(r.smoothed_rtt(), MAX_RTT);
+    }
 
     #[test]
     fn the_first_sample_is_the_estimate() {

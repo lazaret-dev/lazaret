@@ -68,6 +68,31 @@ enum Sink<'a> {
     Take(&'a mut Vec<u8>),
 }
 
+/// The buffer of the application that reads one stream, when the application is also the one feeding the connection the
+/// server's bytes (see [`Connection::feed_direct`]): the body of that stream is written straight into it as it is taken
+/// in, instead of being kept in the stream's own buffer to be copied out by a poll (BACKLOG B-87).
+pub(crate) struct Direct<'a> {
+    stream: u32,
+    out: &'a mut [u8],
+    written: usize,
+}
+
+impl<'a> Direct<'a> {
+    pub(crate) fn new(stream: u32, out: &'a mut [u8]) -> Direct<'a> {
+        Direct { stream, out, written: 0 }
+    }
+
+    /// How many bytes of the body were written into the buffer (from its start), all of which count as read.
+    pub(crate) fn written(&self) -> usize {
+        self.written
+    }
+
+    /// The buffer has no room left.
+    pub(crate) fn full(&self) -> bool {
+        self.written == self.out.len()
+    }
+}
+
 /// The credit at which a window of this size is refreshed.
 pub(crate) fn refresh_threshold(window: u32) -> i64 {
     (window as i64 / 2).min(REFRESH_CAP)
@@ -456,7 +481,7 @@ impl Connection {
             return Err(e.clone());
         }
         let buf = std::mem::take(&mut self.inbound);
-        let (used, result) = self.run(&buf);
+        let (used, result) = self.run(&buf, None);
         self.inbound = buf;
         self.inbound.drain(..used); // what is left is a part of a frame; the allocation stays
         self.finish(result)
@@ -466,8 +491,21 @@ impl Connection {
     /// copied that need not be: frames in `data` are handled where they are; the start of a frame that was left
     /// from before is completed with just the bytes it needs; the payload of a DATA frame that is cut off is passed
     /// on as it comes, and only a part of any other frame at the end is kept for the next call. Same errors as
-    /// [`process`](Connection::process).
-    pub(crate) fn feed(&mut self, mut data: &[u8]) -> Result<(), ConnectionError> {
+    /// [`process`](Connection::process). (The transport feeds with [`feed_direct`](Connection::feed_direct), this with no
+    /// reader's buffer.)
+    #[cfg(any(test, tiny_https_fuzzing))]
+    pub(crate) fn feed(&mut self, data: &[u8]) -> Result<(), ConnectionError> {
+        self.feed_direct(data, None)
+    }
+
+    /// [`feed`](Connection::feed), by the application that reads `direct`'s stream: the body of that stream is written
+    /// into `direct`'s buffer as it is taken in, as far as the buffer has room, and those bytes are read (the peer gets
+    /// credit for them as for bytes a poll returns, and they are not news for the stream). Only bytes that a poll would
+    /// return next go there: none while the stream holds bytes that were not read, or a head that was not taken, or is
+    /// collecting; what does not fit is kept for a poll as usual, and so is everything after it. So a reader that feeds
+    /// with an empty buffer, or whose stream has something waiting, sees exactly what [`feed`](Connection::feed) would
+    /// have done.
+    pub(crate) fn feed_direct(&mut self, mut data: &[u8], mut direct: Option<&mut Direct<'_>>) -> Result<(), ConnectionError> {
         if let Some(e) = &self.error {
             return Err(e.clone());
         }
@@ -483,7 +521,7 @@ impl Connection {
             self.inbound.extend_from_slice(&data[..take]);
             data = &data[take..];
             let buf = std::mem::take(&mut self.inbound);
-            let (used, result) = self.run(&buf);
+            let (used, result) = self.run(&buf, direct.as_deref_mut());
             self.inbound = buf;
             self.inbound.drain(..used);
             if result.is_err() {
@@ -493,7 +531,7 @@ impl Connection {
                 return Ok(()); // all of `data` is in `inbound`, and it is still not a whole frame
             }
         }
-        let (used, result) = self.run(data);
+        let (used, result) = self.run(data, direct);
         if result.is_ok() {
             self.inbound.extend_from_slice(&data[used..]);
         }
@@ -513,11 +551,11 @@ impl Connection {
     /// at its end (when it can be told what to do with the bytes from the header alone: the frame is not padded,
     /// and nothing else is in the way): how many bytes of `buf` that was, and how it went. A frame that is not
     /// complete and is not one of those is left, and not counted.
-    fn run(&mut self, buf: &[u8]) -> (usize, Result<(), ConnectionError>) {
+    fn run(&mut self, buf: &[u8], mut direct: Option<&mut Direct<'_>>) -> (usize, Result<(), ConnectionError>) {
         let mut pos = 0;
         let result = loop {
             if self.incoming.is_some() {
-                pos += self.pass_on(&buf[pos..]);
+                pos += self.pass_on(&buf[pos..], direct.as_deref_mut());
                 if self.incoming.is_some() {
                     break Ok(()); // all of `buf` went to it
                 }
@@ -546,7 +584,7 @@ impl Connection {
                 break Err(connection_error(ErrorCode::PROTOCOL_ERROR, "the server's first frame is not SETTINGS"));
             }
             let step = match frame::parse(&header, &buf[pos + HEADER_LEN..end]) {
-                Ok(f) => self.handle(f),
+                Ok(f) => self.handle(f, direct.as_deref_mut()),
                 Err(FrameError { code, stream: None, reason }) => Err(connection_error(code, reason)),
                 Err(FrameError { code, stream: Some(id), reason }) => {
                     self.stream_error(id, code, reason);
@@ -633,6 +671,14 @@ impl Connection {
 
     /// Asks the peer to stop opening streams and finish up: a GOAWAY with no error. (The connection has no streams
     /// of the peer's, so the last stream id in it is 0.)
+    /// Queues a PING (its answer is taken and dropped): something for the server to answer at once, which wakes whoever
+    /// is waiting for the socket to be readable.
+    pub(crate) fn ping(&mut self, data: [u8; 8]) {
+        if self.error.is_none() {
+            frame::write_ping(&mut self.out, false, data);
+        }
+    }
+
     pub(crate) fn close(&mut self) {
         if self.error.is_none() {
             frame::write_goaway(&mut self.out, 0, ErrorCode::NO_ERROR, b"");
@@ -777,6 +823,10 @@ impl Connection {
     /// hands the buffer over once the response is complete; nothing is copied on the way. What is kept is bounded by
     /// `limit` (the body, all told, from its first byte): a response that goes past it loses its stream.
     pub(crate) fn collect_stream(&mut self, id: u32, limit: u64) {
+        // the rest of a DATA frame that is arriving for the stream counts as received: it was let in as it began, when there
+        // was no limit to check it against (found by fuzzing on the Mac: collecting begun in the middle of a frame took
+        // the rest of it past the limit)
+        let arriving = self.incoming.as_ref().filter(|i| i.stream == id && i.keep).map_or(0, |i| i.remaining as u64);
         let Some(s) = self.streams.get_mut(&id) else { return };
         if s.collecting || s.failure.is_some() {
             return;
@@ -789,7 +839,7 @@ impl Connection {
         let held = s.body.len();
         s.collecting = true;
         s.collect_limit = limit;
-        let too_big = s.received > limit || !s.make_room();
+        let too_big = s.received + arriving > limit || !s.make_room();
         s.unannounced += held as u32;
         self.announce_stream(id);
         self.credit_connection(held as u32);
@@ -919,7 +969,7 @@ impl Connection {
 
     // -------------------------------------------------------------------------------------------- frames
 
-    fn handle(&mut self, f: Frame<'_>) -> Result<(), ConnectionError> {
+    fn handle(&mut self, f: Frame<'_>, direct: Option<&mut Direct<'_>>) -> Result<(), ConnectionError> {
         // a header block in progress is followed by its CONTINUATION frames and nothing else (RFC 9113 section 4.3)
         if let Some(block) = &self.block {
             match &f {
@@ -940,7 +990,7 @@ impl Connection {
             Frame::Data { .. } | Frame::Headers { .. } | Frame::Continuation { .. } | Frame::Ping { .. } | Frame::Priority { .. } | Frame::Unknown { .. } => {}
         }
         match f {
-            Frame::Data { stream, end_stream, data, flow_len } => self.on_data(stream, end_stream, data, flow_len),
+            Frame::Data { stream, end_stream, data, flow_len } => self.on_data(stream, end_stream, data, flow_len, direct),
             Frame::Headers { stream, end_stream, end_headers, fragment } => {
                 self.require_server_stream_known(stream)?;
                 self.block = Some(Block { stream, end_stream, bytes: Vec::new(), frames: 0 });
@@ -989,9 +1039,9 @@ impl Connection {
     }
 
     /// A DATA frame that is all here.
-    fn on_data(&mut self, id: u32, end_stream: bool, data: &[u8], flow_len: u32) -> Result<(), ConnectionError> {
+    fn on_data(&mut self, id: u32, end_stream: bool, data: &[u8], flow_len: u32, direct: Option<&mut Direct<'_>>) -> Result<(), ConnectionError> {
         let keep = self.check_data(id, end_stream, data.len(), flow_len)?;
-        self.data_bytes(id, keep, data);
+        self.data_bytes(id, keep, data, direct);
         self.data_end(id, keep, end_stream, flow_len - data.len() as u32);
         Ok(())
     }
@@ -1008,7 +1058,7 @@ impl Connection {
 
     /// Passes on the payload of the DATA frame that is arriving: what of `bytes` it needs, which is how many bytes
     /// that is.
-    fn pass_on(&mut self, bytes: &[u8]) -> usize {
+    fn pass_on(&mut self, bytes: &[u8], direct: Option<&mut Direct<'_>>) -> usize {
         let Some(incoming) = self.incoming.as_mut() else { return 0 };
         let n = bytes.len().min(incoming.remaining);
         incoming.remaining -= n;
@@ -1016,7 +1066,7 @@ impl Connection {
         if done {
             self.incoming = None;
         }
-        self.data_bytes(id, keep, &bytes[..n]);
+        self.data_bytes(id, keep, &bytes[..n], direct);
         if done {
             self.data_end(id, keep, end_stream, 0);
         }
@@ -1072,8 +1122,9 @@ impl Connection {
 
     /// Some of the payload of a DATA frame: it counts against the windows as it comes, so that the books balance at
     /// every point, and it is the stream's body or thrown away (and credited at once). A stream that is collecting
-    /// has the credit for it at once too, and its reader is not woken for it.
-    fn data_bytes(&mut self, id: u32, keep: bool, bytes: &[u8]) {
+    /// has the credit for it at once too, and its reader is not woken for it. Bytes that go straight to the reader (see
+    /// [`Connection::feed_direct`]) are read as they come, with the credit a poll would give.
+    fn data_bytes(&mut self, id: u32, keep: bool, bytes: &[u8], direct: Option<&mut Direct<'_>>) {
         let n = bytes.len();
         self.recv_window -= n as i64;
         if keep {
@@ -1082,21 +1133,40 @@ impl Connection {
                 Some(s) => {
                     s.recv_window -= n as i64;
                     s.received += n as u64;
-                    s.compact();
-                    s.body.extend_from_slice(bytes);
+                    // the reader of the stream is the one feeding, and these are the bytes it would read next: they go to it
+                    let mut read = 0;
+                    if let Some(d) = direct.filter(|d| d.stream == id) {
+                        if !s.collecting && s.head.is_none() && s.unread() == 0 {
+                            read = n.min(d.out.len() - d.written);
+                            d.out[d.written..d.written + read].copy_from_slice(&bytes[..read]);
+                            d.written += read;
+                        }
+                    }
+                    if read < n {
+                        s.compact();
+                        s.body.extend_from_slice(&bytes[read..]);
+                    }
                     if s.collecting {
                         s.unannounced += n as u32;
+                    } else {
+                        s.unannounced += read as u32;
                     }
-                    Some(s.collecting)
+                    Some((s.collecting, read))
                 }
                 None => None,
             };
             match kept {
-                Some(false) => {
-                    self.news.touch(id);
+                Some((false, read)) => {
+                    if read < n {
+                        self.news.touch(id);
+                    }
+                    if read > 0 {
+                        self.announce_stream(id);
+                        self.credit_connection(read as u32);
+                    }
                     return;
                 }
-                Some(true) => {
+                Some((true, _)) => {
                     self.credit_connection(n as u32);
                     return;
                 }
@@ -3492,6 +3562,249 @@ mod tests {
         assert_eq!(h.got(id).body, pattern(3000));
     }
 
+    // ---------------------------------------------------------------------------------------- straight into the reader's buffer
+
+    /// DATA frames of at most 16384 bytes with `body`, the last one ending the stream if `end`.
+    fn data_frames(id: u32, body: &[u8], end: bool) -> Vec<u8> {
+        let mut out = Vec::new();
+        let mut chunks = body.chunks(16384).peekable();
+        while let Some(chunk) = chunks.next() {
+            frame::write_data(&mut out, id, end && chunks.peek().is_none(), chunk);
+        }
+        out
+    }
+
+    /// A stream with its head taken, as a reader has it when it asks for body.
+    fn reading(h: &mut Harness, extra: &[(&str, &str)]) -> u32 {
+        let id = h.open("GET", "/");
+        h.respond(id, "200", extra, false).unwrap();
+        assert!(h.got(id).head.is_some());
+        h.take();
+        id
+    }
+
+    /// Feeds `bytes` in pieces of `n` as the reader of `id` does when it reads the socket itself, with a buffer of `size`
+    /// bytes (B-87), and after each piece polls with a buffer as big; the books must balance after every step. The body in
+    /// the order the reader got it, how much of it went straight into the buffer, and the last event of the polls.
+    fn read_straight(h: &mut Harness, id: u32, bytes: &[u8], n: usize, size: usize) -> (Vec<u8>, usize, StreamEvent) {
+        let mut body = Vec::new();
+        let mut straight = 0;
+        let mut buf = vec![0u8; size];
+        let mut last = StreamEvent::Pending;
+        for piece in bytes.chunks(n) {
+            let mut direct = Direct::new(id, &mut buf);
+            let fed = h.c.feed_direct(piece, Some(&mut direct));
+            let w = direct.written();
+            body.extend_from_slice(&buf[..w]);
+            straight += w;
+            h.c.assert_books();
+            loop {
+                match h.c.poll_stream(id, &mut buf) {
+                    StreamEvent::Data(k) => body.extend_from_slice(&buf[..k]),
+                    StreamEvent::Head(_) | StreamEvent::Trailers(_) => {}
+                    other => {
+                        last = other;
+                        break;
+                    }
+                }
+            }
+            h.c.assert_books();
+            if fed.is_err() {
+                break;
+            }
+        }
+        (body, straight, last)
+    }
+
+    #[test]
+    fn a_reader_that_feeds_gets_the_body_straight_into_its_buffer() {
+        let body = pattern(100_000);
+        let wire = data_frames(1, &body, true);
+        // (pieces that cut frames anywhere, buffers smaller and larger than a frame and than a piece)
+        for (n, size) in [(1, 7), (100, 1000), (777, 300), (16_393, 16_384), (5000, 65_536), (wire.len(), 1 << 20)] {
+            let mut h = Harness::new();
+            let id = reading(&mut h, &[("content-length", "100000")]);
+            let (got, straight, last) = read_straight(&mut h, id, &wire, n, size);
+            assert!(got == body, "pieces of {n}, a buffer of {size}");
+            assert_eq!(last, StreamEvent::End);
+            assert!(straight > 0);
+            if n <= size {
+                assert_eq!(straight, body.len(), "pieces of {n} fit a buffer of {size}");
+                assert_eq!(h.c.streams[&id].body.capacity(), 0, "the stream's own buffer was used");
+            }
+        }
+    }
+
+    #[test]
+    fn bytes_read_straight_are_not_news_and_what_is_kept_is() {
+        let mut h = Harness::new();
+        let id = reading(&mut h, &[]);
+        news_of(&mut h);
+        let mut buf = [0u8; 4000];
+        let mut direct = Direct::new(id, &mut buf);
+        h.c.feed_direct(&raw(kind::DATA, 0, id, &pattern(3000)), Some(&mut direct)).unwrap();
+        assert_eq!(direct.written(), 3000);
+        assert_eq!(news_of(&mut h), (vec![], false), "the reader has what came: nobody is to be woken for it");
+        let mut direct = Direct::new(id, &mut buf[..1000]);
+        h.c.feed_direct(&raw(kind::DATA, 0, id, &pattern(3000)), Some(&mut direct)).unwrap();
+        assert_eq!(direct.written(), 1000);
+        assert_eq!(news_of(&mut h), (vec![id], false), "what did not fit is waiting for a read");
+    }
+
+    #[test]
+    fn what_does_not_fit_is_kept_and_read_next_and_nothing_goes_past_it() {
+        let mut h = Harness::new();
+        let id = reading(&mut h, &[]);
+        let body = pattern(6000);
+        let mut buf = [0u8; 1000];
+        let mut direct = Direct::new(id, &mut buf);
+        h.c.feed_direct(&raw(kind::DATA, 0, id, &body[..3000]), Some(&mut direct)).unwrap();
+        assert_eq!(direct.written(), 1000);
+        assert_eq!(buf[..], body[..1000]);
+        assert_eq!(h.c.streams[&id].unread(), 2000);
+        h.c.assert_books();
+        // the stream holds bytes that were not read: the next ones go behind them, not to the reader
+        let mut buf = [0u8; 1000];
+        let mut direct = Direct::new(id, &mut buf);
+        h.c.feed_direct(&raw(kind::DATA, 0, id, &body[3000..]), Some(&mut direct)).unwrap();
+        assert_eq!(direct.written(), 0);
+        h.c.assert_books();
+        assert!(h.got(id).body == body[1000..]);
+        // and once they are read, the reader gets the next straight again
+        let mut direct = Direct::new(id, &mut buf);
+        h.c.feed_direct(&raw(kind::DATA, 0, id, b"more"), Some(&mut direct)).unwrap();
+        assert_eq!(direct.written(), 4);
+        h.c.assert_books();
+    }
+
+    #[test]
+    fn only_the_readers_stream_goes_to_its_buffer() {
+        let mut h = Harness::new();
+        let a = reading(&mut h, &[]);
+        let b = reading(&mut h, &[]);
+        news_of(&mut h);
+        let mut wire = raw(kind::DATA, 0, b, &pattern(500));
+        wire.extend(raw(kind::DATA, 0, a, b"for a"));
+        wire.extend(raw(kind::DATA, 0, b, &pattern(700)[500..]));
+        let mut buf = [0u8; 4000];
+        let mut direct = Direct::new(a, &mut buf);
+        h.c.feed_direct(&wire, Some(&mut direct)).unwrap();
+        let w = direct.written();
+        assert_eq!(&buf[..w], b"for a");
+        assert_eq!(news_of(&mut h), (vec![b], false));
+        assert_eq!(h.got(b).body, pattern(700));
+        assert!(h.got(a).body.is_empty());
+        h.c.assert_books();
+    }
+
+    #[test]
+    fn nothing_goes_straight_before_the_head_is_taken_or_to_a_stream_that_collects() {
+        let mut h = Harness::new();
+        let id = h.open("GET", "/");
+        h.take();
+        let mut wire = Vec::new();
+        let block = h.block(&[(":status", "200")]);
+        frame::write_header_block(&mut wire, id, false, &block, 16384);
+        wire.extend(raw(kind::DATA, 0, id, b"body"));
+        let mut buf = [0u8; 100];
+        let mut direct = Direct::new(id, &mut buf);
+        h.c.feed_direct(&wire, Some(&mut direct)).unwrap();
+        assert_eq!(direct.written(), 0, "the head comes first");
+        let got = h.got(id);
+        assert!(got.head.is_some());
+        assert_eq!(got.body, b"body");
+
+        let mut h = Harness::new();
+        let id = reading(&mut h, &[]);
+        h.c.collect_stream(id, 1 << 20);
+        let mut wire = raw(kind::DATA, 0, id, b"all ");
+        wire.extend(raw(kind::DATA, flag::END_STREAM, id, b"of it"));
+        let mut direct = Direct::new(id, &mut buf);
+        h.c.feed_direct(&wire, Some(&mut direct)).unwrap();
+        assert_eq!(direct.written(), 0);
+        h.c.assert_books();
+        let mut body = Vec::new();
+        assert_eq!(h.c.collected(id, &mut body), Collected::Done(None));
+        assert_eq!(body, b"all of it");
+    }
+
+    #[test]
+    fn credit_for_bytes_read_straight_is_what_a_poll_would_give() {
+        // as in `credit_goes_back_as_the_application_reads`, with the reads made as the bytes come
+        let mut h = Harness::with(small_windows());
+        let id = reading(&mut h, &[]);
+        let mut buf = [0u8; 300];
+        let mut feed = |h: &mut Harness| {
+            let mut direct = Direct::new(id, &mut buf);
+            h.c.feed_direct(&raw(kind::DATA, 0, id, &[7u8; 300]), Some(&mut direct)).unwrap();
+            assert_eq!(direct.written(), 300);
+            h.c.assert_books();
+        };
+        feed(&mut h);
+        assert!(h.take().is_empty(), "300 is less than half");
+        feed(&mut h);
+        let out = h.take();
+        assert_eq!(out.iter().map(|f| (f.kind, f.stream, f.number())).collect::<Vec<_>>(), vec![(kind::WINDOW_UPDATE, 1, 600)]);
+        feed(&mut h);
+        assert!(h.take().is_empty());
+        assert_eq!(h.c.unannounced, 900);
+        // the window is as the reads left it: 1000 - 900 + 600 is room for 700 more, and no more (fed with no room to read)
+        let mut direct = Direct::new(id, &mut []);
+        h.c.feed_direct(&raw(kind::DATA, 0, id, &[7u8; 700]), Some(&mut direct)).unwrap();
+        assert_eq!(direct.written(), 0);
+        h.c.assert_books();
+        assert_eq!(h.c.streams[&id].recv_window, 0);
+        h.c.feed(&raw(kind::DATA, 0, id, &[7u8; 1])).unwrap();
+        assert_eq!(h.got(id).failed.map(|e| e.code), Some(ErrorCode::FLOW_CONTROL_ERROR));
+    }
+
+    #[test]
+    fn bytes_read_straight_come_before_the_end_the_trailers_or_the_failure() {
+        let mut buf = [0u8; 1000];
+        // the end
+        let mut h = Harness::new();
+        let id = reading(&mut h, &[]);
+        news_of(&mut h);
+        let mut direct = Direct::new(id, &mut buf);
+        h.c.feed_direct(&raw(kind::DATA, flag::END_STREAM, id, &pattern(500)), Some(&mut direct)).unwrap();
+        assert_eq!(direct.written(), 500);
+        assert_eq!(news_of(&mut h), (vec![id], false), "the end is news");
+        assert_eq!(h.got(id), Got { ended: true, ..Got::default() });
+        // trailers
+        let mut h = Harness::new();
+        let id = reading(&mut h, &[]);
+        let mut wire = raw(kind::DATA, 0, id, &pattern(500));
+        let block = h.block(&[("x-check", "1")]);
+        wire.extend(raw(kind::HEADERS, flag::END_HEADERS | flag::END_STREAM, id, &block));
+        let mut direct = Direct::new(id, &mut buf);
+        h.c.feed_direct(&wire, Some(&mut direct)).unwrap();
+        assert_eq!(direct.written(), 500);
+        assert_eq!(h.got(id), Got { trailers: Some(header_pairs(&[("x-check", "1")])), ended: true, ..Got::default() });
+        // a reset
+        let mut h = Harness::new();
+        let id = reading(&mut h, &[]);
+        let mut wire = raw(kind::DATA, 0, id, &pattern(500));
+        wire.extend(raw(kind::RST_STREAM, 0, id, &ErrorCode::INTERNAL_ERROR.0.to_be_bytes()));
+        let mut direct = Direct::new(id, &mut buf);
+        h.c.feed_direct(&wire, Some(&mut direct)).unwrap();
+        assert_eq!(direct.written(), 500);
+        let got = h.got(id);
+        assert!(got.body.is_empty() && got.failed.is_some());
+        h.c.assert_books();
+        // a padded frame: the data is read, the padding given back
+        let mut h = Harness::new();
+        let id = reading(&mut h, &[]);
+        let mut payload = vec![200u8];
+        payload.extend(pattern(500));
+        payload.extend([0u8; 200]);
+        let mut direct = Direct::new(id, &mut buf);
+        h.c.feed_direct(&raw(kind::DATA, flag::PADDED, id, &payload), Some(&mut direct)).unwrap();
+        let w = direct.written();
+        assert_eq!(&buf[..w], &pattern(500)[..]);
+        h.c.assert_books();
+        assert_eq!(h.c.unannounced, 701);
+    }
+
     // ---------------------------------------------------------------------------------------- collecting a body
 
     #[test]
@@ -3636,6 +3949,34 @@ mod tests {
         h.data(c, &pattern(300), false).unwrap();
         h.c.collect_stream(c, 200);
         assert!(matches!(h.c.collected(c, &mut body), Collected::Failed { .. }));
+        h.c.assert_books();
+    }
+
+    #[test]
+    fn collecting_begun_in_the_middle_of_a_data_frame_counts_the_rest_of_it() {
+        let mut h = Harness::new();
+        let (a, b) = (h.open("GET", "/a"), h.open("GET", "/b"));
+        h.take();
+        h.respond(a, "200", &[], false).unwrap();
+        h.respond(b, "200", &[], false).unwrap();
+        // a frame of 600 bytes, of which 100 have come when collecting begins with a limit of 400: the stream is lost at once,
+        // and the rest of the frame is thrown away
+        let wire = raw(kind::DATA, 0, a, &pattern(600));
+        feed_in_pieces(&mut h, &wire[..HEADER_LEN + 100], 50).unwrap();
+        h.c.collect_stream(a, 400);
+        assert_eq!(h.take().iter().map(|f| (f.kind, f.stream, f.number())).collect::<Vec<_>>(), vec![(kind::RST_STREAM, a, ErrorCode::CANCEL.0)]);
+        feed_in_pieces(&mut h, &wire[HEADER_LEN + 100..], 100).unwrap();
+        let mut body = Vec::new();
+        assert!(matches!(h.c.collected(a, &mut body), Collected::Failed { error, .. } if error.reason == BODY_TOO_BIG));
+        h.c.assert_books();
+        // with a limit the whole frame fits in, it is collected whole
+        let wire = raw(kind::DATA, flag::END_STREAM, b, &pattern(600));
+        feed_in_pieces(&mut h, &wire[..HEADER_LEN + 100], 50).unwrap();
+        h.c.collect_stream(b, 600);
+        feed_in_pieces(&mut h, &wire[HEADER_LEN + 100..], 100).unwrap();
+        assert!(matches!(h.c.collected(b, &mut body), Collected::Done(_)));
+        assert_eq!(body, pattern(600));
+        assert!(h.c.error().is_none());
         h.c.assert_books();
     }
 

@@ -93,6 +93,7 @@ impl TlsClient {
         if config.alpn_protocols.is_empty() {
             return Err(Error::Tls("QUIC needs an ALPN protocol: the configuration has none".into()));
         }
+        crate::tls::handshake::check_server_name(server_name)?;
         // no compatibility mode: an empty legacy session id (RFC 9001 section 8.4)
         let (hs, client_hello) = Handshake::start(server_name, config, Some(transport_params), private, random, &[]);
         let client = TlsClient {
@@ -181,6 +182,10 @@ impl TlsClient {
                 }
                 // (never: over QUIC the ClientHello offers TLS 1.3 alone, and a TLS 1.2 ServerHello is refused before this)
                 CoreEvent::Tls12(..) => debug_assert!(false, "TLS 1.2 over QUIC"),
+                // (the QUIC client's configuration never defers the revocation sources)
+                CoreEvent::Unchecked(_) => {}
+                // a QUIC handshake offers no session, and keeps none (see `tls::session`)
+                CoreEvent::Resumed | CoreEvent::ResumptionSecret { .. } => {}
             }
         }
     }

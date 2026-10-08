@@ -59,6 +59,10 @@ pub struct CertSpec {
     pub serial: u64,
     /// An extended key usage of serverAuth. Without it the certificate has no extended key usage at all.
     pub server_auth: bool,
+    /// OCSP responders to name in an Authority Information Access extension (none: no extension).
+    pub ocsp_uris: Vec<String>,
+    /// CRL distribution points (none: no extension).
+    pub crl_uris: Vec<String>,
 }
 
 impl Default for CertSpec {
@@ -74,6 +78,8 @@ impl Default for CertSpec {
             not_after: now + 30 * 86_400,
             serial: 1,
             server_auth: true,
+            ocsp_uris: Vec::new(),
+            crl_uris: Vec::new(),
         }
     }
 }
@@ -156,6 +162,21 @@ fn extensions(spec: &CertSpec, subject_key: &KeyPair, issuer_key: &KeyPair) -> V
         }
         out.extend(extension(&[0x55, 0x1D, 0x11], false, &tlv(0x30, &names)));
     }
+    if !spec.ocsp_uris.is_empty() {
+        let mut list = Vec::new();
+        for u in &spec.ocsp_uris {
+            list.extend(tlv(0x30, &[oid(&[0x2B, 0x06, 0x01, 0x05, 0x05, 0x07, 0x30, 0x01]), tlv(0x86, u.as_bytes())].concat()));
+        }
+        out.extend(extension(&[0x2B, 0x06, 0x01, 0x05, 0x05, 0x07, 0x01, 0x01], false, &tlv(0x30, &list)));
+    }
+    if !spec.crl_uris.is_empty() {
+        let mut points = Vec::new();
+        for u in &spec.crl_uris {
+            // DistributionPoint { distributionPoint [0] { fullName [0] GeneralNames } }
+            points.extend(tlv(0x30, &tlv(0xA0, &tlv(0xA0, &tlv(0x86, u.as_bytes())))));
+        }
+        out.extend(extension(&[0x55, 0x1D, 0x1F], false, &tlv(0x30, &points)));
+    }
     // subjectKeyIdentifier and authorityKeyIdentifier: the keys' own hashes (RFC 5280's method 1)
     let key_id = |key: &KeyPair| <crate::crypto::sha2::Sha256 as crate::crypto::sha2::Hash>::digest(key.public())[..20].to_vec();
     out.extend(extension(&[0x55, 0x1D, 0x0E], false, &tlv(0x04, &key_id(subject_key))));
@@ -176,6 +197,82 @@ fn extension(extn_id: &[u8], critical: bool, value: &[u8]) -> Vec<u8> {
 fn name(common_name: &str) -> Vec<u8> {
     let attribute = tlv(0x30, &[oid(&[0x55, 0x04, 0x03]), tlv(0x0C, common_name.as_bytes())].concat());
     tlv(0x30, &tlv(0x31, &attribute))
+}
+
+// ------------------------------------------------------------------------------------------------ revocation evidence
+
+/// A CRL from the CA named `issuer_name` with key `issuer_key`, valid from `this_update` to `next_update`, listing the
+/// certificates with these serial numbers (big-endian magnitudes) as revoked at the times given.
+pub fn crl(issuer_name: &str, issuer_key: &KeyPair, this_update: i64, next_update: i64, revoked: &[(&[u8], i64)]) -> Vec<u8> {
+    let algorithm = tlv(0x30, &oid(&[0x2B, 0x65, 0x70]));
+    let mut tbs = Vec::new();
+    tbs.extend(integer(&[1])); // v2
+    tbs.extend(&algorithm);
+    tbs.extend(name(issuer_name));
+    tbs.extend(time(this_update));
+    tbs.extend(time(next_update));
+    if !revoked.is_empty() {
+        let mut list = Vec::new();
+        for (serial, when) in revoked {
+            list.extend(tlv(0x30, &[integer(serial), time(*when)].concat()));
+        }
+        tbs.extend(tlv(0x30, &list));
+    }
+    let tbs = tlv(0x30, &tbs);
+    let signature = issuer_key.sign(&tbs);
+    tlv(0x30, &[tbs, algorithm, bit_string(0, &signature)].concat())
+}
+
+/// What an OCSP response says about a certificate.
+#[derive(Clone, Copy, Debug)]
+pub enum OcspStatus {
+    Good,
+    /// Revoked at this time.
+    Revoked(i64),
+    Unknown,
+}
+
+/// A successful basic OCSP response about `cert` (DER), signed by its issuer (`issuer`, DER, with key `issuer_key`) and
+/// naming it as the responder, valid from `this_update` (to `next_update`, if there is one). The `CertID` hashes are
+/// SHA-1, as responders use.
+pub fn ocsp_response(issuer: &[u8], issuer_key: &KeyPair, cert: &[u8], status: OcspStatus, this_update: i64, next_update: Option<i64>) -> Vec<u8> {
+    let issuer_cert = crate::x509::Certificate::from_der(issuer).expect("the issuer parses");
+    let leaf = crate::x509::Certificate::from_der(cert).expect("the certificate parses");
+    let gen_time = |t: i64| {
+        let days = t.div_euclid(86_400);
+        let secs = t.rem_euclid(86_400);
+        let (y, m, d) = civil_from_days(days);
+        tlv(0x18, format!("{y:04}{m:02}{d:02}{:02}{:02}{:02}Z", secs / 3600, secs % 3600 / 60, secs % 60).as_bytes())
+    };
+    let sha1 = |data: &[u8]| crate::crypto::sha1::digest(data).to_vec();
+    let cert_id = tlv(
+        0x30,
+        &[
+            tlv(0x30, &[oid(&[0x2B, 0x0E, 0x03, 0x02, 0x1A]), vec![0x05, 0x00]].concat()),
+            tlv(0x04, &sha1(&leaf.issuer_der)),
+            tlv(0x04, &sha1(&issuer_cert.spki_key)),
+            tlv(0x02, &leaf.serial_content),
+        ]
+        .concat(),
+    );
+    let cert_status = match status {
+        OcspStatus::Good => vec![0x80, 0x00],
+        OcspStatus::Revoked(when) => tlv(0xA1, &[gen_time(when), tlv(0xA0, &tlv(0x0A, &[1]))].concat()), // keyCompromise
+        OcspStatus::Unknown => vec![0x82, 0x00],
+    };
+    let mut single = [cert_id, cert_status, gen_time(this_update)].concat();
+    if let Some(n) = next_update {
+        single.extend(tlv(0xA0, &gen_time(n)));
+    }
+    let data = tlv(
+        0x30,
+        &[tlv(0xA1, &issuer_cert.subject_der), gen_time(this_update), tlv(0x30, &tlv(0x30, &single))].concat(),
+    );
+    let algorithm = tlv(0x30, &oid(&[0x2B, 0x65, 0x70]));
+    let signature = issuer_key.sign(&data);
+    let basic = tlv(0x30, &[data, algorithm, bit_string(0, &signature)].concat());
+    let response_bytes = tlv(0x30, &[oid(&[0x2B, 0x06, 0x01, 0x05, 0x05, 0x07, 0x30, 0x01, 0x01]), tlv(0x04, &basic)].concat());
+    tlv(0x30, &[tlv(0x0A, &[0]), tlv(0xA0, &response_bytes)].concat())
 }
 
 // ------------------------------------------------------------------------------------------------ DER

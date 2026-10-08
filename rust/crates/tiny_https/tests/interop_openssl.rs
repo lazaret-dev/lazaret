@@ -11,7 +11,7 @@ use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use tiny_https::http::HttpCrlSource;
+use tiny_https::http::{HttpCrlSource, HttpOcspSource};
 use tiny_https::revocation::{Crl, Revocation, RevocationMode};
 use tiny_https::tls::tls12::Suite12;
 use tiny_https::tls::{ClientConfig, Suite, TlsStream, TlsVersion};
@@ -41,22 +41,29 @@ impl Fixture {
         Fixture::with_ca(name, "rsa", key_kind, extra_extensions)
     }
 
-    /// `ca_kind` and `key_kind` are each one of "rsa", "p256", "p384", "ed25519".
+    /// `ca_kind` and `key_kind` are each one of "rsa", "p256", "p384", "p521", "ed25519"; `ca_kind` may also be "rsa-pss", an
+    /// RSA CA that signs with RSASSA-PSS (SHA-256, MGF1-SHA-256, a 32-byte salt). A P-521 CA signs with SHA-512.
     fn with_ca(name: &str, ca_kind: &str, key_kind: &str, extra_extensions: &str) -> Fixture {
         let dir = std::env::temp_dir().join(format!("tiny_https_interop_{}_{}", std::process::id(), name));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         let key_args = |kind: &str| -> Vec<&'static str> {
             match kind {
-                "rsa" => vec!["-newkey", "rsa:2048"],
+                "rsa" | "rsa-pss" => vec!["-newkey", "rsa:2048"],
                 "p256" => vec!["-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:prime256v1"],
                 "p384" => vec!["-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:secp384r1"],
+                "p521" => vec!["-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:secp521r1"],
                 "ed25519" => vec!["-newkey", "ed25519"],
                 _ => unreachable!(),
             }
         };
         // Ed25519 takes no digest argument
-        let digest: Vec<&str> = if ca_kind == "ed25519" { vec![] } else { vec!["-sha256"] };
+        let digest: Vec<&str> = match ca_kind {
+            "ed25519" => vec![],
+            "p521" => vec!["-sha512"],
+            "rsa-pss" => vec!["-sha256", "-sigopt", "rsa_padding_mode:pss", "-sigopt", "rsa_pss_saltlen:digest"],
+            _ => vec!["-sha256"],
+        };
         let mut args = vec!["req", "-x509"];
         args.extend(key_args(ca_kind));
         args.extend([
@@ -119,9 +126,18 @@ fn start_server(fx: &Fixture, extra: &[&str]) -> Server {
 /// Like `start_server`, with the server's stdout redirected (`s_server -quiet` writes the
 /// application data it receives to stdout).
 fn start_server_with_stdout(fx: &Fixture, extra: &[&str], stdout: Stdio) -> Server {
+    spawn_server(fx, &[&["-no_ticket"], extra].concat(), stdout)
+}
+
+/// `openssl s_server` as it is by default, which sends two session tickets after each handshake and resumes with them.
+fn start_server_with_tickets(fx: &Fixture, extra: &[&str]) -> Server {
+    spawn_server(fx, extra, Stdio::null())
+}
+
+fn spawn_server(fx: &Fixture, extra: &[&str], stdout: Stdio) -> Server {
     let port = free_port();
     let mut cmd = Command::new("openssl");
-    cmd.args(["s_server", "-accept", &format!("127.0.0.1:{}", port), "-cert", "srv.pem", "-key", "srv.key", "-no_ticket"])
+    cmd.args(["s_server", "-accept", &format!("127.0.0.1:{}", port), "-cert", "srv.pem", "-key", "srv.key"])
         .args(extra)
         .current_dir(&fx.dir)
         .stdin(Stdio::piped())
@@ -194,6 +210,68 @@ fn ed25519_chains_in_every_pairing() {
         let mut tls = connect(&server, "localhost", &config).unwrap_or_else(|e| panic!("CA {ca}, server key {key}: {e}"));
         assert!(get_root(&mut tls).starts_with("HTTP/1.0 200 ok"), "CA {ca}, server key {key}");
     }
+}
+
+/// B-33: a P-521 CA (signing with SHA-512) issuing a P-521 server certificate, whose CertificateVerify is
+/// ecdsa_secp521r1_sha512; a P-521 CA issuing a P-256 one; and an RSA CA that signs with RSASSA-PSS. Over TLS 1.3 and
+/// TLS 1.2, except that a P-521 *server key* is TLS 1.3 only: in TLS 1.2 the client's supported groups also limit the
+/// curve of an ECDSA certificate (RFC 8422 section 5.1), and offering P-521 there would offer it for the key exchange,
+/// which the library does not do, so OpenSSL has no certificate it may use and says handshake_failure.
+#[test]
+fn p521_keys_and_rsa_pss_certificate_signatures() {
+    if !have_openssl() {
+        return;
+    }
+    for (ca, key) in [("p521", "p521"), ("p521", "p256"), ("rsa-pss", "rsa"), ("rsa-pss", "p384"), ("rsa", "p521")] {
+        let fx = Fixture::with_ca(&format!("b33_{ca}_{key}"), ca, key, "");
+        for version in ["-tls1_3", "-tls1_2"] {
+            let server = start_server(&fx, &["-www", version]);
+            let config = ClientConfig::new(fx.trust());
+            if key == "p521" && version == "-tls1_2" {
+                let e = connect(&server, "localhost", &config).err().expect("a P-521 server key over TLS 1.2").to_string();
+                assert!(e.contains("handshake_failure"), "CA {ca}: {e}");
+                continue;
+            }
+            let mut tls = connect(&server, "localhost", &config).unwrap_or_else(|e| panic!("CA {ca}, key {key}, {version}: {e}"));
+            let want = if version == "-tls1_3" { TlsVersion::Tls13 } else { TlsVersion::Tls12 };
+            assert_eq!(tls.protocol_version(), Some(want), "CA {ca}, key {key}");
+            assert!(get_root(&mut tls).starts_with("HTTP/1.0 200 ok"), "CA {ca}, key {key}, {version}");
+        }
+    }
+    // and the server's P-521 certificate is refused by a client that trusts another CA
+    let fx = Fixture::with_ca("b33_untrusted", "p521", "p521", "");
+    let other = Fixture::with_ca("b33_other", "p521", "p256", "");
+    let server = start_server(&fx, &["-www", "-tls1_3"]);
+    assert!(connect(&server, "localhost", &ClientConfig::new(other.trust())).is_err());
+}
+
+/// B-34: chain building matches an issuer name to a subject name as OpenSSL does (RFC 5280 section 7.1: string types,
+/// ASCII case and white space do not matter; other characters do), so that the two agree on chains whose names are
+/// written differently (tools/gen_name_fixtures.py).
+#[test]
+fn names_written_differently_are_matched_as_openssl_matches_them() {
+    if !have_openssl() {
+        return;
+    }
+    let data = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data");
+    let ts = tiny_https::sys::trust_store_from_pem_file(data.join("nm_root.pem")).unwrap();
+    let der = |name: &str| tiny_https::pem::parse(&fs::read_to_string(data.join(format!("{name}.pem"))).unwrap()).remove(0).data;
+    let mut agreed = 0;
+    for (leaf, inter, want) in [("nm_leaf", "nm_inter", true), ("nm_leaf_u_ascii", "nm_inter_u", true), ("nm_leaf_u_lower", "nm_inter_u", false)] {
+        let out = Command::new("openssl")
+            .args(["verify", "-CAfile"])
+            .arg(data.join("nm_root.pem"))
+            .arg("-untrusted")
+            .arg(data.join(format!("{inter}.pem")))
+            .arg(data.join(format!("{leaf}.pem")))
+            .output()
+            .unwrap();
+        let ours = ts.verify_server_chain(&[der(leaf), der(inter)], "name.example.test", tiny_https::sys::now_unix());
+        assert_eq!(out.status.success(), want, "OpenSSL on {leaf}: {}", String::from_utf8_lossy(&out.stdout));
+        assert_eq!(ours.is_ok(), want, "the library on {leaf}: {:?}", ours.err());
+        agreed += 1;
+    }
+    assert_eq!(agreed, 3);
 }
 
 /// Starts `openssl s_server` with its standard output in the file `log`.
@@ -1503,4 +1581,127 @@ fn tls12_revocation_works_as_for_tls13() {
     let server = start_server(&must, &["-www", "-tls1_2"]);
     let err = connect(&server, "localhost", &revocation_config(&must, RevocationMode::SoftFail)).err().expect("a missing staple must be refused");
     assert!(err.to_string().contains("requires a stapled OCSP response"), "{err}");
+}
+
+// ------------------------------------------------------------------------------ OCSP responders (B-63)
+
+/// `openssl ocsp` as a live responder on `port`, answering from the fixture's index (the server certificate good or
+/// revoked), signed by the CA.
+fn start_responder(fx: &Fixture, port: u16, revoked: bool) -> Server {
+    use std::io::BufRead;
+    fx.write_index(revoked);
+    let mut child = Command::new("openssl")
+        .args(["ocsp", "-index", "index.txt", "-port", &port.to_string(), "-CA", "ca.pem", "-rsigner", "ca.pem", "-rkey", "ca.key", "-ndays", "7"])
+        .current_dir(&fx.dir)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("failed to start openssl ocsp");
+    // it says ACCEPT when it listens. (Not a test connection: OpenSSL 3.0's responder stops answering after a connection
+    // that sends nothing.)
+    let mut out = std::io::BufReader::new(child.stdout.take().unwrap());
+    let mut line = String::new();
+    out.read_line(&mut line).unwrap();
+    assert!(line.starts_with("ACCEPT"), "openssl ocsp said {line:?}");
+    std::thread::spawn(move || std::io::copy(&mut out, &mut std::io::sink()));
+    Server { child, port }
+}
+
+fn der_of(fx: &Fixture, file: &str) -> Vec<u8> {
+    tiny_https::pem::parse(&fs::read_to_string(fx.dir.join(file)).unwrap()).remove(0).data
+}
+
+#[test]
+fn our_ocsp_request_is_openssls_byte_for_byte() {
+    if !have_openssl() {
+        return;
+    }
+    for (name, kind) in [("ocsp_req_rsa", "rsa"), ("ocsp_req_p256", "p256"), ("ocsp_req_ed", "ed25519")] {
+        let fx = Fixture::new(name, kind);
+        run(&["ocsp", "-issuer", "ca.pem", "-cert", "srv.pem", "-no_nonce", "-reqout", "plain.der"], &fx.dir);
+        let theirs = fs::read(fx.dir.join("plain.der")).unwrap();
+        let cert = tiny_https::x509::Certificate::from_der(&der_of(&fx, "srv.pem")).unwrap();
+        let issuer = tiny_https::x509::Certificate::from_der(&der_of(&fx, "ca.pem")).unwrap();
+        assert_eq!(tiny_https::revocation::ocsp_request(&cert, &issuer), theirs, "{kind}");
+    }
+}
+
+#[test]
+fn a_live_openssl_responder_settles_revocation_for_both_clients() {
+    if !have_openssl() {
+        return;
+    }
+    let port = free_port();
+    let fx = Fixture::with_extensions("ocsp_live", "p256", &format!("authorityInfoAccess=OCSP;URI:http://127.0.0.1:{port}/\n"));
+    let config = |mode: RevocationMode| ClientConfig::new(fx.trust()).with_revocation(Revocation::new(mode).with_ocsp_source(Arc::new(HttpOcspSource::new())));
+    // no staple: the responder is what satisfies hard-fail, for the bare TLS stream, the blocking client and the async one
+    let responder = start_responder(&fx, port, false);
+    let server = start_server(&fx, &["-www", "-tls1_3"]);
+    let mut tls = connect(&server, "localhost", &config(RevocationMode::HardFail)).unwrap();
+    assert!(get_root(&mut tls).contains("HTTP/1.0 200"));
+    drop(tls);
+    let url = format!("https://localhost:{}/", server.port);
+    let blocking = tiny_https::Client::with_tls_config(config(RevocationMode::HardFail)).timeout(Duration::from_secs(10));
+    assert_eq!(blocking.get(&url).unwrap().status, 200);
+    let server = start_server(&fx, &["-www", "-tls1_3"]);
+    let url = format!("https://localhost:{}/", server.port);
+    let asynchronous = tiny_https::Client::with_tls_config(config(RevocationMode::HardFail)).timeout(Duration::from_secs(10)).into_async();
+    assert_eq!(tiny_https::asyncio::block_on(asynchronous.get(&url)).unwrap().status, 200);
+    drop(responder);
+    // the responder says revoked: refused, even in soft-fail
+    let responder = start_responder(&fx, port, true);
+    let server = start_server(&fx, &["-www", "-tls1_2"]);
+    let err = connect(&server, "localhost", &config(RevocationMode::SoftFail)).err().expect("a revoked certificate must be refused");
+    assert!(err.to_string().contains("certificate_revoked") && err.to_string().contains("OCSP responder"), "{err}");
+    let server = start_server(&fx, &["-www", "-tls1_3"]);
+    let url = format!("https://localhost:{}/", server.port);
+    let asynchronous = tiny_https::Client::with_tls_config(config(RevocationMode::SoftFail)).timeout(Duration::from_secs(10)).into_async();
+    let err = tiny_https::asyncio::block_on(asynchronous.get(&url)).unwrap_err();
+    assert!(err.to_string().contains("certificate_revoked"), "{err}");
+    drop(responder);
+    // no responder at all: soft-fail goes on, hard-fail refuses
+    let server = start_server(&fx, &["-www", "-tls1_3"]);
+    assert!(connect(&server, "localhost", &config(RevocationMode::SoftFail)).is_ok());
+    let server = start_server(&fx, &["-www", "-tls1_3"]);
+    let err = connect(&server, "localhost", &config(RevocationMode::HardFail)).err().expect("hard-fail needs evidence");
+    assert!(err.to_string().contains("no valid evidence") && err.to_string().contains("OCSP responder"), "{err}");
+}
+
+/// TLS 1.3 session resumption (B-35) with OpenSSL's server, which checks the binder and makes the resumed key schedule on
+/// its own: the second connection resumes (the server's page says "Reused"), on every suite and after a HelloRetryRequest;
+/// a server that resumes nothing gets a full handshake.
+#[test]
+fn sessions_are_resumed_with_openssl() {
+    if !have_openssl() {
+        eprintln!("skipping: openssl not installed");
+        return;
+    }
+    let fx = Fixture::new("resume", "p256");
+    for (suite, groups) in Suite::ALL.iter().flat_map(|s| [(*s, "X25519"), (*s, "P-256")]) {
+        let server = start_server_with_tickets(&fx, &["-www", "-tls1_3", "-ciphersuites", suite_arg(suite), "-groups", groups]);
+        let config = ClientConfig::new(fx.trust());
+        let mut tls = connect(&server, "localhost", &config).unwrap();
+        let page = get_root(&mut tls);
+        assert!(page.contains("New, TLSv1.3") && !tls.is_resumed(), "{}: {page}", suite.name());
+        // (s_server serves one connection at a time, and waits for this one to be closed)
+        drop(tls);
+        assert_eq!(config.resumption.sessions(), 2, "OpenSSL sends two tickets");
+        for round in 0..2 {
+            let mut tls = connect(&server, "localhost", &config).unwrap_or_else(|e| panic!("{} / {groups}: {e}", suite.name()));
+            let page = get_root(&mut tls);
+            assert!(tls.is_resumed(), "{} / {groups}, round {round}", suite.name());
+            assert!(page.contains("Reused, TLSv1.3"), "{} / {groups}: {page}", suite.name());
+            assert_eq!(tls.peer_certificates().len(), 1, "the chain of the full handshake is reported");
+        }
+    }
+    // a server that does not know the tickets (restarted, with new ticket keys): a full handshake
+    let server = start_server_with_tickets(&fx, &["-www", "-tls1_3"]);
+    let config = ClientConfig::new(fx.trust());
+    get_root(&mut connect(&server, "localhost", &config).unwrap());
+    drop(server);
+    let server = start_server_with_tickets(&fx, &["-www", "-tls1_3"]);
+    let mut tls = connect(&server, "localhost", &config).unwrap();
+    let page = get_root(&mut tls);
+    assert!(!tls.is_resumed() && page.contains("New, TLSv1.3"), "{page}");
 }

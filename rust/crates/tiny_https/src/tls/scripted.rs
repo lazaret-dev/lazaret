@@ -88,6 +88,8 @@ pub(super) struct ShOpts {
     pub compression: u8,
     pub supported_version: Option<u16>,
     pub echo_session_id: bool,
+    /// Extensions added at the end of the ServerHello's.
+    pub extra_extensions: Vec<(u16, Vec<u8>)>,
 }
 
 impl Default for ShOpts {
@@ -99,6 +101,7 @@ impl Default for ShOpts {
             compression: 0,
             supported_version: Some(0x0304),
             echo_session_id: true,
+            extra_extensions: Vec::new(),
         }
     }
 }
@@ -110,12 +113,14 @@ pub(super) struct Session {
     pub suite: Suite,
     server_public: [u8; 32],
     shared: [u8; 32],
+    /// The PSK the handshake's key schedule starts from (a resumption), instead of zeros.
+    pub psk: Option<Vec<u8>>,
 }
 
 impl Session {
     pub fn new(hello: Hello, suite: Suite) -> Session {
         let shared = x25519::x25519(&SERVER_PRIVATE, &hello.x25519);
-        Session { server_public: x25519::public_key(&SERVER_PRIVATE), shared, hello, suite }
+        Session { server_public: x25519::public_key(&SERVER_PRIVATE), shared, hello, suite, psk: None }
     }
 
     /// The ServerHello handshake message (header included).
@@ -137,6 +142,9 @@ impl Session {
         let mut share = GROUP_X25519.to_be_bytes().to_vec();
         share.extend(block16(&self.server_public));
         exts.extend(ext(EXT_KEY_SHARE, &share));
+        for (t, d) in &o.extra_extensions {
+            exts.extend(ext(*t, d));
+        }
         body.extend(block16(&exts));
         handshake_message(HS_SERVER_HELLO, &body)
     }
@@ -146,7 +154,7 @@ impl Session {
         let alg = self.suite.hash();
         let zeros = vec![0u8; alg.output_len()];
         let empty = alg.digest(&[]);
-        let early = hkdf_extract(alg, &[], &zeros);
+        let early = hkdf_extract(alg, &[], self.psk.as_deref().unwrap_or(&zeros));
         let derived = derive_secret(alg, &early, "derived", &empty);
         let hs = hkdf_extract(alg, &derived, &self.shared);
         let mut transcript = self.hello.msg.clone();
@@ -160,7 +168,7 @@ impl Session {
         let alg = self.suite.hash();
         let zeros = vec![0u8; alg.output_len()];
         let empty = alg.digest(&[]);
-        let early = hkdf_extract(alg, &[], &zeros);
+        let early = hkdf_extract(alg, &[], self.psk.as_deref().unwrap_or(&zeros));
         let derived = derive_secret(alg, &early, "derived", &empty);
         let hs = hkdf_extract(alg, &derived, &self.shared);
         let mut transcript = self.hello.msg.clone();

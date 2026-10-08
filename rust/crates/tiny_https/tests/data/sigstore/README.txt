@@ -52,7 +52,8 @@ MADE UP:
                  repository root; the keys are new on every run, so rerunning changes the file): a Sigstore of
                  our own with a Fulcio-like CA, a Rekor-like log that signs with ECDSA, a second log that signs
                  with Ed25519 and gives inclusion proofs only (Rekor v2's way), and an RFC 3161 time-stamp
-                 authority whose tokens carry the time the generator chooses. 86 bundles, each with the
+                 authority whose tokens carry the time the generator chooses, and two CT logs (P-256 and RSA) whose SCTs are
+                 embedded in every leaf it issues. 108 bundles, each with the
                  trusted root to check it against and the verdict to expect (`ok` and the facts, or the kind of
                  error and a part of its message); they cover what the real data does not reach: time stamps
                  and what a time is, proof-only entries, certificates of every key type, e-mail and username

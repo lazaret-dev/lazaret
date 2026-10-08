@@ -3,7 +3,7 @@
 //! must hold for any input does not: what the layer writes can be read back, the flow-control books balance, nothing
 //! is left waiting after the connection is lost.
 
-use super::connection::{Collected, Config, Connection, Request, StreamEvent};
+use super::connection::{Collected, Config, Connection, Direct, Request, StreamEvent};
 use super::frame::{self, ErrorCode, Frame, Header, DEFAULT_MAX_FRAME_SIZE, HEADER_LEN, PREFACE};
 use super::hpack::{Decoder, Encoder, FieldRef};
 
@@ -69,25 +69,35 @@ pub fn frames(data: &[u8]) -> usize {
     count
 }
 
-/// The client's connection against a server that sends `data[4..]`: `data[0]` chooses the windows the client
-/// announces, whether the server's SETTINGS come first and the limit on a header list; `data[1]` how many requests
+/// The client's connection against a server that sends `data[4..]`, twice: once with the bytes fed as they come, and once
+/// fed by the reader of the first stream, whose body then goes straight into its buffer (as the transport does, B-87).
+/// `data[0]` chooses the windows the client announces, whether the server's SETTINGS come first, the limit on a header
+/// list and whether the first stream's reader takes one piece a step or all there is; `data[1]` how many requests
 /// are made (one to three, a GET, a POST and a HEAD), whether the application reads the responses in pieces, has
 /// every stream collect its whole body (with a limit that may be small), or switches the first stream to collecting
 /// half way through the server's bytes, and that limit; `data[2]` how many bytes the server's bytes come in at a
 /// time; `data[3]` the size of the application's reads. After every step the books must balance, what the client
 /// writes must be frames that parse and header blocks that decode, a collected body is never longer than its
 /// limit, and when the transport is lost every stream must end or fail, with nothing left in the connection once
-/// they are released.
+/// they are released. And what each stream gave the application (read in pieces, straight into the reader's buffer, or
+/// collected) is the start of what the server's DATA frames for it carry, in order; all of it, if the stream ended.
 pub fn client(data: &[u8]) {
     if data.len() < 4 {
         return;
     }
+    client_run(data, false);
+    client_run(data, true);
+}
+
+fn client_run(data: &[u8], direct: bool) {
     let config = Config {
         stream_window: [1000u32, 65_535, 1 << 20, 8 << 20][(data[0] & 3) as usize],
         connection_window: [65_535u32, 100_000, 1 << 20, 32 << 20][((data[0] >> 2) & 3) as usize],
         max_header_list: [300u32, 64 << 10][((data[0] >> 4) & 1) as usize],
     };
     let settled = (data[0] >> 5) & 1 == 0;
+    // the first stream's reader takes one piece a step instead of all there is (so that bytes are held unread when more come)
+    let lazy = (data[0] >> 6) & 1 == 1;
     let requests = 1 + (data[1] % 3) as usize;
     // how bodies are taken: 0 in pieces, 1 and 2 collected from the start, 3 collected from half way (by the first stream)
     let collect_mode = (data[1] >> 2) & 3;
@@ -129,6 +139,10 @@ pub fn client(data: &[u8]) {
         offset = first;
     }
     open(&mut c, &mut ids, &mut posts);
+    // what each stream has given the application so far, and whether a collected body was taken (it is given once)
+    let mut delivered: Vec<Vec<u8>> = vec![Vec::new(); ids.len()];
+    let mut taken = vec![false; ids.len()];
+    let mut scratch = vec![0u8; buf.len()];
     let mut collecting: Vec<u32> = Vec::new();
     if collect_mode == 1 || collect_mode == 2 {
         for &id in &ids {
@@ -140,22 +154,36 @@ pub fn client(data: &[u8]) {
     let switch_at = input.len() / 2;
     while !lost && offset < input.len() {
         let end = (offset + piece).min(input.len());
-        lost = c.feed(&input[offset..end]).is_err();
+        match ids.first() {
+            Some(&first) if direct => {
+                let mut d = Direct::new(first, &mut scratch);
+                lost = c.feed_direct(&input[offset..end], Some(&mut d)).is_err();
+                let w = d.written();
+                assert!(w == 0 || !collecting.contains(&first), "a stream that collects had its body written to a reader's buffer");
+                delivered[0].extend_from_slice(&scratch[..w]);
+            }
+            _ => lost = c.feed(&input[offset..end]).is_err(),
+        }
         offset = end;
         c.assert_books();
         if collect_mode == 3 && offset >= switch_at && collecting.is_empty() {
             if let Some(&first) = ids.first() {
                 // what was read so far was read; the rest is collected
-                read_all(&mut c, first, &mut buf);
+                read_all(&mut c, first, &mut buf, &mut delivered[0]);
                 c.collect_stream(first, limit);
                 collecting.push(first);
             }
         }
-        for &id in &ids {
+        for (i, &id) in ids.iter().enumerate() {
             if collecting.contains(&id) {
-                poll_collected(&mut c, id, limit, false);
+                poll_collected(&mut c, id, limit, false, &mut delivered[i], &mut taken[i]);
+            } else if lazy && i == 0 {
+                if let StreamEvent::Data(n) = c.poll_stream(id, &mut buf) {
+                    assert!(n > 0 && n <= buf.len());
+                    delivered[0].extend_from_slice(&buf[..n]);
+                }
             } else {
-                read_all(&mut c, id, &mut buf);
+                read_all(&mut c, id, &mut buf, &mut delivered[i]);
             }
         }
         for &id in &posts {
@@ -168,14 +196,22 @@ pub fn client(data: &[u8]) {
         wire.take(&mut c);
     }
     c.peer_closed();
-    for &id in &ids {
-        if collecting.contains(&id) {
-            poll_collected(&mut c, id, limit, true);
+    for (i, &id) in ids.iter().enumerate() {
+        let (sent, end) = sent_body(&input, id);
+        let ended = if collecting.contains(&id) {
+            poll_collected(&mut c, id, limit, true, &mut delivered[i], &mut taken[i]);
+            taken[i]
         } else {
-            match read_all(&mut c, id, &mut buf) {
-                StreamEvent::End | StreamEvent::Failed(_) => {}
+            match read_all(&mut c, id, &mut buf, &mut delivered[i]) {
+                StreamEvent::End => true,
+                StreamEvent::Failed(_) => false,
                 other => panic!("stream {id} is {other:?} after the connection was lost"),
             }
+        };
+        let got = &delivered[i];
+        assert!(sent.starts_with(got), "stream {id} gave {} bytes that are not the start of the {} its DATA frames carry", got.len(), sent.len());
+        if ended {
+            assert_eq!(Some(got.len()), end, "stream {id} ended with {} bytes of body, where its DATA frames carry {end:?} to the end", got.len());
         }
         c.release_stream(id);
     }
@@ -185,26 +221,74 @@ pub fn client(data: &[u8]) {
     wire.check();
 }
 
-/// Asks a collecting stream for its body: if it is done, the body is within the limit; if the transport is lost
-/// (`over`), it must be done or failed, and not still waiting.
-fn poll_collected(c: &mut Connection, id: u32, limit: u64, over: bool) {
+/// Asks a collecting stream for its body: if it is done, the body is within the limit, and the first time it is added to
+/// what the stream gave (`taken` says it was); if the transport is lost (`over`), it must be done or failed, and not still
+/// waiting.
+fn poll_collected(c: &mut Connection, id: u32, limit: u64, over: bool, delivered: &mut Vec<u8>, taken: &mut bool) {
     let mut body = Vec::new();
     match c.collected(id, &mut body) {
-        Collected::Done(_) => assert!(body.len() as u64 <= limit, "a collected body of {} bytes is over the limit {limit}", body.len()),
+        Collected::Done(_) => {
+            assert!(body.len() as u64 <= limit, "a collected body of {} bytes is over the limit {limit}", body.len());
+            if !*taken {
+                delivered.extend_from_slice(&body);
+                *taken = true;
+            }
+        }
         Collected::Failed { .. } => {}
         Collected::Pending(_) => assert!(!over, "stream {id} is still pending after the connection was lost"),
     }
 }
 
-/// Reads what a stream has until it has nothing new; returns the last event.
-fn read_all(c: &mut Connection, id: u32, buf: &mut [u8]) -> StreamEvent {
+/// Reads what a stream has until it has nothing new, adding the body to `delivered`; returns the last event.
+fn read_all(c: &mut Connection, id: u32, buf: &mut [u8], delivered: &mut Vec<u8>) -> StreamEvent {
     loop {
         match c.poll_stream(id, buf) {
-            StreamEvent::Data(n) => assert!(n > 0 && n <= buf.len()),
+            StreamEvent::Data(n) => {
+                assert!(n > 0 && n <= buf.len());
+                delivered.extend_from_slice(&buf[..n]);
+            }
             StreamEvent::Head(_) | StreamEvent::Trailers(_) => {}
             other => return other,
         }
     }
+}
+
+/// What the server's bytes carry as the body of stream `id`, read as a frame splitter that knows nothing else: the payloads
+/// of its DATA frames in order (with the part of one that is cut off at the end, unless it is padded, since the client
+/// passes on such a payload as it comes), and how long that is at the first frame on the stream with END_STREAM, if
+/// there is one (a DATA frame, or HEADERS: the head of a response with no body, or trailers). Whatever the client made of
+/// the bytes, what it gave the application for the stream can only be the start of this, and all of it if it ended.
+fn sent_body(input: &[u8], id: u32) -> (Vec<u8>, Option<usize>) {
+    let mut body = Vec::new();
+    let mut pos = 0;
+    while input.len() - pos >= HEADER_LEN {
+        let header = Header::parse(input[pos..pos + HEADER_LEN].try_into().unwrap());
+        if header.length > DEFAULT_MAX_FRAME_SIZE {
+            break;
+        }
+        let end = pos + HEADER_LEN + header.length as usize;
+        let ends_stream = header.flags & frame::flag::END_STREAM != 0;
+        if header.stream == id && header.kind == frame::kind::DATA {
+            if end > input.len() {
+                if header.flags & frame::flag::PADDED == 0 {
+                    body.extend_from_slice(&input[pos + HEADER_LEN..]);
+                }
+                break;
+            }
+            if let Ok(Frame::Data { data, .. }) = frame::parse(&header, &input[pos + HEADER_LEN..end]) {
+                body.extend_from_slice(data);
+            }
+        }
+        if end > input.len() {
+            break;
+        }
+        if header.stream == id && ends_stream && (header.kind == frame::kind::DATA || header.kind == frame::kind::HEADERS) {
+            let len = body.len();
+            return (body, Some(len));
+        }
+        pos = end;
+    }
+    (body, None)
 }
 
 /// What a client connection has written, kept to be checked at the end.

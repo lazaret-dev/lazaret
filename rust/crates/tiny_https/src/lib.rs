@@ -1,7 +1,8 @@
 //! `tiny_https`: an HTTPS client built from scratch with only the Rust standard library.
 //!
 //! * TLS 1.3 client (X25519, P-256 and P-384 key exchange with HelloRetryRequest, AES-128/256-GCM,
-//!   ChaCha20-Poly1305), and TLS 1.2 for servers that speak nothing newer (ECDHE and AEAD suites only, the extended
+//!   ChaCha20-Poly1305; sessions resumed from the server's tickets with a fresh key exchange, see
+//!   [`tls::Resumption`]), and TLS 1.2 for servers that speak nothing newer (ECDHE and AEAD suites only, the extended
 //!   master secret required, the downgrade check of RFC 8446; see [`tls::tls12`]), with a minimum version per client
 //!   and per request and the version spoken in every response
 //! * X.509 chain validation (RSA and ECDSA P-256/P-384 signatures) and hostname checks
@@ -16,10 +17,11 @@
 //!   against roots the caller supplies at the time the signature was made ([`cms`], with the BER reader
 //!   [`ber`]), also pure
 //! * Sigstore attestations (npm provenance, PyPI's PEP 740, any bundle of version 0.1 to 0.3): the DSSE
-//!   signature, the signer's Fulcio certificate or registry key, Rekor entries (signed entry timestamps and
+//!   signature, the signer's Fulcio certificate (with its signed certificate timestamps, [`ct`]) or registry key, Rekor entries (signed entry timestamps and
 //!   inclusion proofs to signed checkpoints) and RFC 3161 time stamps, all checked at times the logs and
 //!   time-stamp authorities vouch for and never the clock, against a trusted root the caller supplies
-//!   ([`sigstore`], [`trust_root`], and a strict I-JSON reader [`json`]), also pure
+//!   ([`sigstore`], [`trust_root`], and a strict I-JSON reader [`json`]), also pure; and a TUF client ([`tuf`], pure, with
+//!   a fetcher behind `net`) that brings Sigstore's trusted root and npm's keys from Sigstore's TUF repository
 //! * DEFLATE, zlib and gzip decompression with limits on the size and the ratio, as a streaming decoder over slices
 //!   ([`inflate`]), also pure; the HTTP client uses it to decode `Content-Encoding` when asked to
 //! * features: `net` (default) is everything above except the verification primitives. Without it
@@ -41,8 +43,12 @@ pub mod asn1;
 pub mod ber;
 pub mod cms;
 pub mod crypto;
+pub mod ct;
+pub mod idna;
 pub mod inflate;
 pub mod json;
+#[cfg(feature = "mozilla-roots")]
+pub mod mozilla_roots;
 #[cfg(test)]
 mod fuzz;
 pub mod note;
@@ -52,6 +58,7 @@ pub mod sigstore;
 pub mod sumdb;
 pub mod tlog;
 pub mod trust_root;
+pub mod tuf;
 pub mod util;
 pub mod verify_error;
 pub mod x509;
@@ -64,6 +71,8 @@ pub mod asyncio;
 pub mod error;
 #[cfg(feature = "net")]
 pub mod http;
+#[cfg(feature = "net")]
+pub mod native_roots;
 #[cfg(feature = "net")]
 pub mod quic;
 #[cfg(feature = "net")]

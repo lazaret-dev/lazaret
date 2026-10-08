@@ -2,6 +2,7 @@
 //! The Montgomery ladder uses constant-time conditional swaps and no
 //! secret-dependent branches or table lookups.
 
+use super::dit::Dit;
 use super::fe25519::{Fe, MASK51};
 use crate::zeroize::Zeroize;
 
@@ -35,6 +36,7 @@ fn cswap(swap: u64, a: &mut Fe, b: &mut Fe) {
 
 /// The X25519 function: scalar multiplication of the u-coordinate `u` by `scalar`.
 pub fn x25519(scalar: &[u8; 32], u: &[u8; 32]) -> [u8; 32] {
+    let _dit = Dit::on(); // data-independent timing while the secret is in use (crypto::dit)
     let mut k = *scalar;
     k[0] &= 248;
     k[31] &= 127;

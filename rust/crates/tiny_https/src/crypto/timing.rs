@@ -39,19 +39,28 @@
 //! batching is tested here without an Apple machine, and `TINY_HTTPS_TIMING_REPS=1` forces one call per sample (to see
 //! what the old harness would have said).
 //!
+//! Data-independent timing (BACKLOG B-99): on an Apple M5 the CPU itself made ECDH, SHA-256, AES key setup and GCM sealing
+//! faster on zero-heavy inputs unless ARM's `DIT` bit was set, and the library now sets it around its secret work
+//! (`crypto::dit`). The rows that call a public entry point (ECDH, X25519, the AEADs, HMAC) measure it as it is, with the
+//! library's own guard; the rows that call a building block directly (GHASH, the Poly1305 backends) run it inside a guard
+//! as the library does, since it only ever reaches them through those entry points. Plain SHA-256 is measured inside HMAC,
+//! the only way the library hashes a secret; `dit_on_and_off` measures it bare, and everything with the library's guard
+//! held off and on, which is the comparison to read on a CPU that has the mode.
+//!
 //! What this cannot see: cache-timing differences too small to move the clock on a quiet machine,
 //! differences that only exist on other CPUs, and leaks smaller than the noise floor of the machine
 //! it runs on. (The table-based AES this library used to have, backlog B-20, was such a case on
 //! some machines and flagged reproducibly on others; its replacement has no tables at all.)
 
 use super::chacha20poly1305::ChaCha20Poly1305;
+use super::dit::{held_off, Dit};
 use super::ecdh;
 use super::ecdsa::Curve;
 use super::aes::Backend;
 use super::gcm::AesGcm;
 use super::ghash::GhashKey;
 use super::hmac::Hmac;
-use super::poly1305::{limbs32, limbs64};
+use super::poly1305::{limbs32, radix64};
 use super::sha2::{Hash, Sha256};
 use super::x25519;
 use crate::fuzz::Rng;
@@ -75,6 +84,10 @@ pub(crate) struct Report {
     pub median_ns: u32,
     /// (percentile kept, t) for each crop level.
     pub crops: Vec<(f64, f64)>,
+    /// (percentile kept, 1.0 for none; mean of class 1 minus class 0 per call in ns; its standard error), uncropped and at
+    /// each crop level: the size of a difference, which t does not give (t also grows with the number of samples and
+    /// shrinks with the noise of a slower operation).
+    pub per_call: Vec<(f64, f64, f64)>,
 }
 
 /// The fraction of the samples (the fastest) that each cropped view keeps; the slow tail is interrupts and scheduling.
@@ -104,6 +117,11 @@ impl Report {
             0 => "uncropped".to_string(),
             i => self.crops.get(i - 1).map_or("?".to_string(), |(p, _)| format!("p{:.1}", p * 100.0)),
         }
+    }
+
+    /// The difference per call and its standard error at the crop level that keeps `p` of the samples (1.0: uncropped).
+    fn per_call_at(&self, p: f64) -> (f64, f64) {
+        self.per_call.iter().find(|c| (c.0 - p).abs() < 1e-9).map_or((f64::NAN, f64::NAN), |c| (c.1, c.2))
     }
 
     fn verdict(&self) -> &'static str {
@@ -136,6 +154,31 @@ impl Report {
 
 /// Samples per block: eight of each class, in random order.
 const BLOCK: usize = 16;
+
+/// The mean of the per-block differences (class 1 minus class 0, in ns per sample) and its standard error, over the
+/// same blocks as [`paired_t`], with samples slower than `cutoff` ignored.
+fn paired_mean_se(samples: &[(u32, bool)], cutoff: u32) -> (f64, f64) {
+    let mut diffs: Vec<f64> = Vec::with_capacity(samples.len() / BLOCK);
+    for block in samples.chunks(BLOCK) {
+        let (mut sum, mut n) = ([0f64; 2], [0f64; 2]);
+        for &(d, class) in block {
+            if d <= cutoff {
+                sum[class as usize] += d as f64;
+                n[class as usize] += 1.0;
+            }
+        }
+        if n[0] > 0.0 && n[1] > 0.0 {
+            diffs.push(sum[1] / n[1] - sum[0] / n[0]);
+        }
+    }
+    let n = diffs.len() as f64;
+    if n < 2.0 {
+        return (f64::NAN, f64::NAN);
+    }
+    let mean = diffs.iter().sum::<f64>() / n;
+    let var = diffs.iter().map(|d| (d - mean) * (d - mean)).sum::<f64>() / (n - 1.0);
+    (mean, (var / n).sqrt())
+}
 
 /// Paired t statistic over blocks. Each block holds the same number of samples of both classes, so
 /// slow drift in the machine's speed (frequency changes, a noisy neighbour) hits both classes
@@ -363,7 +406,14 @@ fn measure_seeded<I, R>(
         crops.push((p, t));
         max_t = max_t.max(t.abs());
     }
-    Report { name: name.to_string(), samples: samples.len(), reps, uncropped_t, max_t, median_ns: pct(0.5) / reps as u32, crops }
+    let per_call = std::iter::once((1.0, u32::MAX))
+        .chain(CROP_LEVELS.iter().map(|&p| (p, pct(p))))
+        .map(|(p, cutoff)| {
+            let (m, se) = paired_mean_se(&samples, cutoff);
+            (p, m / reps as f64, se / reps as f64)
+        })
+        .collect();
+    Report { name: name.to_string(), samples: samples.len(), reps, uncropped_t, max_t, median_ns: pct(0.5) / reps as u32, crops, per_call }
 }
 
 thread_local! {
@@ -442,6 +492,18 @@ fn expect_leak<I, R>(name: &str, budget: Duration, gen: impl FnMut(&mut Rng, boo
 
 fn rand32(rng: &mut Rng) -> [u8; 32] {
     rng.bytes(32).try_into().unwrap()
+}
+
+/// `n` random bytes for class 1, `n` bytes of `fill` for class 0, both made the same way (random bytes, then overwritten for
+/// class 0). A class made with `vec![0; n]` is a calloc, which an allocator can hand over without writing it, while the other
+/// was just written: the two then differ in where they are and in what the caches hold, and on an Apple M5 that alone was
+/// flagged (SHA-256, GHASH and Poly1305 on zeros, the rows built that way, while the rows built like this were clean).
+fn fixed_or_random(rng: &mut Rng, random: bool, n: usize, fill: u8) -> Vec<u8> {
+    let mut v = rng.bytes(n);
+    if !random {
+        v.fill(fill);
+    }
+    v
 }
 
 // ------------------------------------------------------------------------ positive controls
@@ -610,11 +672,13 @@ fn backends() -> Vec<Backend> {
 #[test]
 #[ignore = "statistical timing run; see the module documentation"]
 fn ghash_multiplication_is_constant_time() {
+    // as the library runs it: only inside AES-GCM's entry points, which set data-independent timing
+    let _dit = Dit::on();
     // eight blocks per call, so one call is well above the timer's resolution
     let rand128 = |rng: &mut Rng| rng.bytes(16);
     for backend in backends() {
         let fixed_h = 0x0123_4567_89ab_cdef_fedc_ba98_7654_3210_u128.to_be_bytes();
-        let blocks = |rng: &mut Rng, c: bool, fill: u8| -> Vec<u8> { if c { (0..8).flat_map(|_| rand128(rng)).collect() } else { vec![fill; 128] } };
+        let blocks = |rng: &mut Rng, c: bool, fill: u8| -> Vec<u8> { fixed_or_random(rng, c, 128, fill) };
         let by_data = |(h, data): &([u8; 16], Vec<u8>)| GhashKey::new(h, backend).hash(b"aad", data);
         expect_constant_time(&format!("ghash [{backend:?}] data blocks: 0 vs random (fixed H)"), |rng, c| (fixed_h, blocks(rng, c, 0)), by_data);
         expect_constant_time(&format!("ghash [{backend:?}] data blocks: all ones vs random (fixed H)"), |rng, c| (fixed_h, blocks(rng, c, 0xff)), by_data);
@@ -631,7 +695,7 @@ fn ghash_multiplication_is_constant_time() {
 fn poly1305_is_constant_time() {
     // 1 KiB messages; the key is the secret in the AEAD, the message is public but should not matter
     fn run64(k: &[u8; 32], m: &[u8]) -> [u8; 16] {
-        let mut p = limbs64::Poly1305::new(k);
+        let mut p = radix64::Poly1305::new(k);
         for c in m.chunks_exact(16) {
             p.block(c.try_into().unwrap(), true);
         }
@@ -646,7 +710,9 @@ fn poly1305_is_constant_time() {
     }
     let fixed_key = [0x33u8; 32];
     let fixed_msg = vec![0xa7u8; 1024];
-    for (label, run) in [("limbs64 (3 x 44-bit)", run64 as fn(&[u8; 32], &[u8]) -> [u8; 16]), ("limbs32 (5 x 26-bit)", run32)] {
+    // as the library runs it: only inside ChaCha20-Poly1305's entry points, which set data-independent timing
+    let _dit = Dit::on();
+    for (label, run) in [("radix64 (2 x 64-bit)", run64 as fn(&[u8; 32], &[u8]) -> [u8; 16]), ("limbs32 (5 x 26-bit)", run32)] {
         expect_constant_time(
             &format!("poly1305 {} key: zero vs random", label),
             |rng, c| (if c { rand32(rng) } else { [0u8; 32] }, fixed_msg.clone()),
@@ -659,12 +725,12 @@ fn poly1305_is_constant_time() {
         );
         expect_constant_time(
             &format!("poly1305 {} message: zeros vs random", label),
-            |rng, c| (fixed_key, if c { rng.bytes(1024) } else { vec![0u8; 1024] }),
+            |rng, c| (fixed_key, fixed_or_random(rng, c, 1024, 0)),
             |(k, m)| run(k, m),
         );
         expect_constant_time(
             &format!("poly1305 {} message: all ones vs random", label),
-            |rng, c| (fixed_key, if c { rng.bytes(1024) } else { vec![0xffu8; 1024] }),
+            |rng, c| (fixed_key, fixed_or_random(rng, c, 1024, 0xff)),
             |(k, m)| run(k, m),
         );
     }
@@ -681,39 +747,278 @@ fn aead_and_mac_primitives_are_constant_time_in_their_data() {
     // `vec![0; 1024]` (a zeroed allocation) and the other with `rng.bytes` puts the buffers in different
     // places, and on an operation of 550 ns the harness sees that: |t| 5 to 11 on every run, same sign, on
     // the AES-GCM row below. The same lesson is in `aes_is_constant_time`, where it was learned first.
+    // Each input is sealed in the buffer it was made in, before the clock started, and nothing else is timed. These rows
+    // used to time a copy of the input as well: under macOS on an Apple M5 copying 1 KiB of random bytes is slower than
+    // copying 1 KiB of zeros (|t| 15 to 35), which flagged the AES-GCM row there (`aes_gcm_seal_parts`, B-24).
+    // Under macOS on the M5 the AES-GCM row may still be flagged: the one-pass seal itself takes about 0.1 ns longer per KiB
+    // for random plaintext there (`aes_gcm_one_pass_against_two_passes`), a known residual (B-24).
     let sealed = |c: bool, rng: &mut Rng| {
         let mut buf = rng.bytes(1024);
         if !c {
             buf.fill(0);
         }
         buf.extend_from_slice(&[0u8; 16]);
-        buf
+        std::cell::RefCell::new(buf)
     };
-    expect_constant_time("chacha20-poly1305 seal 1 KiB: zeros vs random", |rng, c| sealed(c, rng), |buf| {
-        let mut b = buf.clone();
+    expect_constant_time("chacha20-poly1305 seal 1 KiB: zeros vs random", |rng, c| sealed(c, rng), |cell| {
+        let mut b = cell.borrow_mut();
         cc.seal_in_place(&nonce, b"aad", &mut b);
-        b
+        b[b.len() - 1]
     });
-    expect_constant_time("chacha20-poly1305 key setup + seal 64 B: zero key vs random", |rng, c| if c { rng.bytes(32) } else { vec![0u8; 32] }, |key| {
+    expect_constant_time("chacha20-poly1305 key setup + seal 64 B: zero key vs random", |rng, c| fixed_or_random(rng, c, 32, 0), |key| {
         let c = ChaCha20Poly1305::new(key);
         let mut b = vec![0u8; 64 + 16];
         c.seal_in_place(&nonce, b"", &mut b);
         b
     });
     let gcm = AesGcm::new(&[0x42u8; 16]);
-    expect_constant_time("aes-128-gcm seal 1 KiB: zeros vs random", |rng, c| sealed(c, rng), |buf| {
-        let mut b = buf.clone();
+    expect_constant_time("aes-128-gcm seal 1 KiB: zeros vs random", |rng, c| sealed(c, rng), |cell| {
+        let mut b = cell.borrow_mut();
         gcm.seal_in_place(&nonce, b"aad", &mut b);
-        b
+        b[b.len() - 1]
     });
     // HMAC-SHA-256 and SHA-256: key / message bytes
-    expect_constant_time("hmac-sha256 key: zero vs random (1 KiB message)", |rng, c| if c { rng.bytes(32) } else { vec![0u8; 32] }, |key| {
+    expect_constant_time("hmac-sha256 key: zero vs random (1 KiB message)", |rng, c| fixed_or_random(rng, c, 32, 0), |key| {
         let mut h = Hmac::<Sha256>::new(key);
         h.update(&[0x5au8; 1024]);
         h.finalize()
     });
-    expect_constant_time("sha256 message: zeros vs random (1 KiB)", |rng, c| if c { rng.bytes(1024) } else { vec![0u8; 1024] }, |m| Sha256::digest(m));
+    // SHA-256 over secret bytes, as the library does it: as HMAC's message (HKDF-Extract's input keying material is one).
+    // Bare SHA-256, which the library uses on public data only, is in `dit_on_and_off`.
+    expect_constant_time("hmac-sha256 message: zeros vs random (1 KiB)", |rng, c| fixed_or_random(rng, c, 1024, 0), |m| Hmac::<Sha256>::mac(&[0x5au8; 32], m));
     finish();
+}
+
+/// Where the time of `aead_and_mac`'s AES-GCM row goes (report only). That row used to time a new buffer, the copy of the input
+/// into it, the seal and the buffer's release together; on an Apple M5 Max under macOS it read random plaintext as slower than
+/// zeros in most runs (|t| 5 to 11), and not once in five runs in a Linux VM on the same CPU. The first run of this test there
+/// put it in the copy: copying 1 KiB of random bytes was slower than copying 1 KiB of zeros (|t| 20 to 33 at every crop level,
+/// with or without a new buffer), and the seal rows showed it only as far as they contained the copy. Each piece is timed here
+/// on its own, twice with fresh inputs; "seal only" seals each input in the buffer it was made in, so nothing but the seal is
+/// timed. The second run there: the 1 KiB seal alone reads random as slower too, if much less than the copy (|t| 5.6 and 9.2,
+/// at every crop level), while reading 1 KiB is clean, copying a fixed pattern is as fast as copying zeros, and the copy and
+/// the seal of 16 KiB are clean. The last rows ask whether that is the cipher or the writes it makes over its input: the
+/// same writes with no cipher (fixed bytes written over the input, and an XOR in place with a fixed key stream), and the
+/// opposite direction (opening in place, which writes zeros or random bytes over random ones). The third run: those are all
+/// clean, and the 1 KiB seal alone flags again (5.7 and 7.0). Plaintext only goes through loads, an XOR and stores in the
+/// one-pass kernel, so the rows after it ask whether this is B-85's code at all: the same seal by the two steps that came
+/// before it, and ChaCha20-Poly1305's.
+#[test]
+#[ignore = "statistical timing run; see the module documentation"]
+fn aes_gcm_seal_parts() {
+    use std::cell::RefCell;
+    let nonce = [9u8; 12];
+    let gcm = AesGcm::new(&[0x42u8; 16]);
+    println!("\nAES-GCM backend: {:?}; each row twice, t > 0 means the random class is slower (report only)", gcm.backend());
+    // n bytes of `fill` (or random ones), and 16 bytes of room for the tag
+    let made = |n: usize, fill: u8| move |rng: &mut Rng, c: bool| -> Vec<u8> {
+        let mut buf = rng.bytes(n);
+        if !c {
+            buf.fill(fill);
+        }
+        buf.extend_from_slice(&[0u8; 16]);
+        buf
+    };
+    let in_cell = |n: usize| move |rng: &mut Rng, c: bool| RefCell::new(made(n, 0)(rng, c));
+    let reused = RefCell::new(vec![0u8; 16 * 1024 + 16]);
+    let copy_into_reused = |buf: &Vec<u8>| {
+        let mut r = reused.borrow_mut();
+        let b = &mut r[..buf.len()];
+        b.copy_from_slice(buf);
+        b[b.len() - 1]
+    };
+    let mut table: Vec<(&str, Vec<Report>)> = Vec::new();
+    let mut row = |name: &'static str, run: &mut dyn FnMut(&str, u64) -> Report| {
+        let runs: Vec<Report> = (0..2u64)
+            .map(|seed| {
+                let r = run(name, seed);
+                r.print();
+                r
+            })
+            .collect();
+        table.push((name, runs));
+    };
+    row("1 KiB: new buffer, copy, seal, free (the old aead row)", &mut |name, seed| {
+        measure_seeded(name, budget(), seed, made(1024, 0), |buf: &Vec<u8>| {
+            let mut b = buf.clone();
+            gcm.seal_in_place(&nonce, b"aad", &mut b);
+            b
+        })
+    });
+    row("1 KiB: new buffer, copy, free (no seal)", &mut |name, seed| measure_seeded(name, budget(), seed, made(1024, 0), |buf: &Vec<u8>| buf.clone()));
+    row("1 KiB: copy into a reused buffer (no seal)", &mut |name, seed| measure_seeded(name, budget(), seed, made(1024, 0), copy_into_reused));
+    // the seal and nothing else: each input is sealed where it was made, once (the inputs are made before the clock starts)
+    row("1 KiB: seal only", &mut |name, seed| {
+        measure_seeded(name, budget(), seed, in_cell(1024), |cell: &RefCell<Vec<u8>>| {
+            let mut b = cell.borrow_mut();
+            gcm.seal_in_place(&nonce, b"aad", &mut b);
+            b[b.len() - 1]
+        })
+    });
+    // the same seal by other code: the two steps the hardware path took before B-85 (CTR, then GHASH), and another AEAD
+    row("1 KiB: seal only, two passes (the code before B-85)", &mut |name, seed| {
+        measure_seeded(name, budget(), seed, in_cell(1024), |cell: &RefCell<Vec<u8>>| {
+            let mut b = cell.borrow_mut();
+            gcm.seal_in_place_two_passes(&nonce, b"aad", &mut b);
+            b[b.len() - 1]
+        })
+    });
+    let chacha = ChaCha20Poly1305::new(&[0x42u8; 32]);
+    row("1 KiB: ChaCha20-Poly1305 seal only", &mut |name, seed| {
+        measure_seeded(name, budget(), seed, in_cell(1024), |cell: &RefCell<Vec<u8>>| {
+            let mut b = cell.borrow_mut();
+            chacha.seal_in_place(&nonce, b"aad", &mut b);
+            b[b.len() - 1]
+        })
+    });
+    row("16 KiB: seal only", &mut |name, seed| {
+        measure_seeded(name, budget(), seed, in_cell(16 * 1024), |cell: &RefCell<Vec<u8>>| {
+            let mut b = cell.borrow_mut();
+            gcm.seal_in_place(&nonce, b"aad", &mut b);
+            b[b.len() - 1]
+        })
+    });
+    // what kind of effect the copy's is
+    row("16 KiB: copy into a reused buffer (no seal)", &mut |name, seed| measure_seeded(name, budget(), seed, made(16 * 1024, 0), copy_into_reused));
+    row("1 KiB: read only (XOR of its words)", &mut |name, seed| {
+        measure_seeded(name, budget(), seed, made(1024, 0), |buf: &Vec<u8>| {
+            buf.chunks_exact(8).fold(0u64, |a, w| a ^ u64::from_le_bytes(w.try_into().unwrap()))
+        })
+    });
+    row("1 KiB: copy, a fixed pattern (0x5a) vs random", &mut |name, seed| measure_seeded(name, budget(), seed, made(1024, 0x5a), copy_into_reused));
+    // the writes the seal makes over its input, with no cipher: fixed bytes written over it, and an XOR in place with a fixed
+    // key stream (read it, change it, write it back, as CTR does)
+    let stream: Vec<u8> = Rng::new(0x5eed).bytes(1024);
+    row("1 KiB: fixed bytes written over it (no cipher)", &mut |name, seed| {
+        measure_seeded(name, budget(), seed, in_cell(1024), |cell: &RefCell<Vec<u8>>| {
+            let mut b = cell.borrow_mut();
+            b[..1024].copy_from_slice(&stream);
+            b[0]
+        })
+    });
+    row("1 KiB: XOR in place with a fixed stream (no cipher)", &mut |name, seed| {
+        measure_seeded(name, budget(), seed, in_cell(1024), |cell: &RefCell<Vec<u8>>| {
+            let mut b = cell.borrow_mut();
+            for (d, k) in b[..1024].iter_mut().zip(&stream) {
+                *d ^= k;
+            }
+            b[0]
+        })
+    });
+    // the other direction: each input is sealed before the clock starts and opened in place, which writes zeros or random
+    // plaintext over random ciphertext
+    row("1 KiB: open only (zeros or random come out)", &mut |name, seed| {
+        measure_seeded(
+            name,
+            budget(),
+            seed,
+            |rng: &mut Rng, c: bool| {
+                let mut b = made(1024, 0)(rng, c);
+                gcm.seal_in_place(&nonce, b"aad", &mut b);
+                RefCell::new(b)
+            },
+            |cell: &RefCell<Vec<u8>>| {
+                let mut b = cell.borrow_mut();
+                gcm.open_in_place(&nonce, b"aad", &mut b)
+            },
+        )
+    });
+    println!("\nt at p50 / p90 / p99 and the largest |t|, two runs each (|t| above {SUSPICIOUS_T} is suspicious, above {LEAK_T} reads as a leak):");
+    for (name, runs) in &table {
+        let cells: Vec<String> = runs
+            .iter()
+            .map(|r| {
+                let at = |p: f64| r.crops.iter().find(|(q, _)| (q - p).abs() < 1e-9).map_or(f64::NAN, |c| c.1);
+                format!("{:+5.1} {:+5.1} {:+5.1} |{:4.1}|", at(0.5), at(0.9), at(0.99), r.max_t)
+            })
+            .collect();
+        println!("  {name:<54} {}", cells.join("   "));
+    }
+}
+
+/// The 1 KiB seal by the one-pass kernel as it is now (hashing each group's ciphertext from registers), by the one-pass
+/// kernel as it was from B-85 until this test (reading each group back from memory to hash it), and by the two steps that
+/// came before B-85 (CTR, then GHASH), alternated over several rounds, as a difference per call in nanoseconds (random
+/// minus zeros) with two standard errors, pooled over the rounds (report only). A t value alone cannot compare them: the
+/// two-pass seal takes about 3.5 times as long, so the same difference gives it a smaller t. Under macOS on an Apple M5 the
+/// read-back kernel measured +0.077 ns +/- 0.010 at p99 (six rounds, all positive) and the two-pass code +0.015 +/- 0.012.
+/// The next run, with the kernel that hashes from registers: +0.113 +/- 0.011, against +0.206 +/- 0.012 for the read-back
+/// kernel and -0.001 +/- 0.014 for the two-pass code. Half, not none: the rest is kept as a known macOS residual (B-24).
+#[test]
+#[ignore = "statistical timing run; see the module documentation"]
+fn aes_gcm_one_pass_against_two_passes() {
+    use std::cell::RefCell;
+    const ROUNDS: u64 = 6;
+    let nonce = [9u8; 12];
+    let gcm = AesGcm::new(&[0x42u8; 16]);
+    let long = budget() * 3;
+    println!(
+        "\nAES-GCM backend: {:?}; {ROUNDS} rounds of {:.0} s for each; per call, random minus zeros (report only)",
+        gcm.backend(),
+        long.as_secs_f64()
+    );
+    let made = |rng: &mut Rng, c: bool| {
+        let mut buf = rng.bytes(1024);
+        if !c {
+            buf.fill(0);
+        }
+        buf.extend_from_slice(&[0u8; 16]);
+        RefCell::new(buf)
+    };
+    const NAMES: [&str; 3] = ["1 KiB seal, one pass, registers (now)", "1 KiB seal, one pass, read back (B-85)", "1 KiB seal, two passes (before B-85)"];
+    let mut runs: [Vec<Report>; 3] = [Vec::new(), Vec::new(), Vec::new()];
+    for round in 0..ROUNDS {
+        for (i, name) in NAMES.iter().enumerate() {
+            let r = match i {
+                0 => measure_seeded(name, long, round, made, |cell: &RefCell<Vec<u8>>| {
+                    let mut b = cell.borrow_mut();
+                    gcm.seal_in_place(&nonce, b"aad", &mut b);
+                    b[b.len() - 1]
+                }),
+                1 => measure_seeded(name, long, round, made, |cell: &RefCell<Vec<u8>>| {
+                    let mut b = cell.borrow_mut();
+                    gcm.seal_in_place_by_reload(&nonce, b"aad", &mut b);
+                    b[b.len() - 1]
+                }),
+                _ => measure_seeded(name, long, round, made, |cell: &RefCell<Vec<u8>>| {
+                    let mut b = cell.borrow_mut();
+                    gcm.seal_in_place_two_passes(&nonce, b"aad", &mut b);
+                    b[b.len() - 1]
+                }),
+            };
+            r.print();
+            let (m, se) = r.per_call_at(0.99);
+            println!("    per call at p99: {m:+.3} ns +/- {:.3} (two standard errors)", 2.0 * se);
+            runs[i].push(r);
+        }
+    }
+    // each round weighted by its precision (1 / se^2)
+    let pooled = |rs: &[Report], p: f64| -> (f64, f64) {
+        let (mut w, mut wm) = (0.0, 0.0);
+        for r in rs {
+            let (m, se) = r.per_call_at(p);
+            if m.is_finite() && se.is_finite() && se > 0.0 {
+                w += 1.0 / (se * se);
+                wm += m / (se * se);
+            }
+        }
+        if w == 0.0 {
+            (f64::NAN, f64::NAN)
+        } else {
+            (wm / w, (1.0 / w).sqrt())
+        }
+    };
+    println!("\npooled over {ROUNDS} rounds, per call in ns, random minus zeros, +/- two standard errors (and the median time of a call):");
+    println!("  {:<40} {:>27} {:>27} {:>27} {:>8}", "", "uncropped", "p99", "p90", "median");
+    for (i, name) in NAMES.iter().enumerate() {
+        let cell = |p: f64| {
+            let (m, se) = pooled(&runs[i], p);
+            format!("{m:+8.3} +/- {:.3} ({:+5.1}se)", 2.0 * se, m / se)
+        };
+        let mut medians: Vec<u32> = runs[i].iter().map(|r| r.median_ns).collect();
+        medians.sort_unstable();
+        println!("  {name:<40} {:>27} {:>27} {:>27} {:>5} ns", cell(1.0), cell(0.99), cell(0.9), medians[medians.len() / 2]);
+    }
 }
 
 #[test]
@@ -743,7 +1048,7 @@ fn one_percent_control() {
     }
     let key = [0x33u8; 32];
     expect_leak("control: poly1305 1 KiB, one class ~1.3% slower", Duration::from_secs(3), |rng, c| (c, rng.bytes(1024)), |(c, m)| {
-        let mut p = limbs64::Poly1305::new(&key);
+        let mut p = radix64::Poly1305::new(&key);
         for ch in m.chunks_exact(16) {
             p.block(ch.try_into().unwrap(), true);
         }
@@ -775,7 +1080,7 @@ fn aes_is_constant_time() {
             for (what, fill) in [("zero", 0u8), ("all-ones", 0xff)] {
                 expect_constant_time(
                     &format!("aes-{}-gcm [{backend:?}] key setup + seal 64 B: {what} key vs random", key_len * 8),
-                    |rng, c| if c { rng.bytes(key_len) } else { vec![fill; key_len] },
+                    |rng, c| fixed_or_random(rng, c, key_len, fill),
                     |key| {
                         let g = AesGcm::with_backend(key, backend);
                         let mut b = vec![0u8; 64 + 16];
@@ -785,6 +1090,19 @@ fn aes_is_constant_time() {
                 );
             }
         }
+        // a message of at most 48 bytes, which the portable cipher encrypts with J0 in one pass: the key, and the plaintext
+        let short_key = AesGcm::with_backend(&[0x6bu8; 16], backend);
+        expect_constant_time(&format!("aes-128-gcm [{backend:?}] key setup + seal 32 B: zero key vs random"), |rng, c| fixed_or_random(rng, c, 16, 0), |key| {
+            let g = AesGcm::with_backend(key, backend);
+            let mut b = vec![0u8; 32 + 16];
+            g.seal_in_place(&nonce, b"", &mut b);
+            b
+        });
+        expect_constant_time(&format!("aes-128-gcm [{backend:?}] seal 32 B: zeros vs random"), |rng, c| fixed_or_random(rng, c, 48, 0), |buf| {
+            let mut b = buf.clone();
+            short_key.seal_in_place(&nonce, b"", &mut b);
+            b
+        });
         // a fixed key, secret plaintext of 1 KiB (CTR keystream and GHASH over the ciphertext).
         // Both classes are built the same way and only then overwritten: filling one class with
         // `vec![0; n]` (a calloc) and the other by pushing bytes puts the buffers at different
@@ -834,7 +1152,7 @@ fn a_difference_with_no_spread_is_the_strongest_evidence_not_none() {
     let t = paired_t(&blocks_of(200, 100, |k| 101 + (k % 3) as u32), u32::MAX);
     assert!(t.is_finite() && t > 10.0, "{t}");
     // and a report built on an infinite t says LEAK, in both signs
-    let r = Report { name: "x".into(), samples: 0, reps: 1, uncropped_t: f64::INFINITY, max_t: f64::INFINITY, median_ns: 0, crops: vec![] };
+    let r = Report { name: "x".into(), samples: 0, reps: 1, uncropped_t: f64::INFINITY, max_t: f64::INFINITY, median_ns: 0, crops: vec![], per_call: vec![] };
     assert_eq!(r.verdict(), "LEAK");
     r.print();
 }
@@ -864,7 +1182,7 @@ fn a_budget_of_zero_still_measures_something() {
 fn report(ts: [f64; 7]) -> Report {
     let crops: Vec<(f64, f64)> = CROP_LEVELS.iter().copied().zip(ts[1..].iter().copied()).collect();
     let max_t = ts.iter().fold(0f64, |m, t| m.max(t.abs()));
-    Report { name: "row".into(), samples: 1000, reps: 1, uncropped_t: ts[0], max_t, median_ns: 100, crops }
+    Report { name: "row".into(), samples: 1000, reps: 1, uncropped_t: ts[0], max_t, median_ns: 100, crops, per_call: vec![] }
 }
 
 const QUIET: [f64; 7] = [0.5, -1.0, 0.3, 0.8, -0.2, 1.1, 0.4];
@@ -926,7 +1244,7 @@ fn the_old_rule_still_holds_and_the_new_one_only_adds_to_it() {
 
 #[test]
 fn a_report_with_fewer_statistics_than_expected_is_judged_not_crashed_on() {
-    let bare = |t: f64| Report { name: "bare".into(), samples: 0, reps: 1, uncropped_t: t, max_t: t.abs(), median_ns: 0, crops: vec![] };
+    let bare = |t: f64| Report { name: "bare".into(), samples: 0, reps: 1, uncropped_t: t, max_t: t.abs(), median_ns: 0, crops: vec![], per_call: vec![] };
     assert_eq!(bare(6.0).peak(), (0, 6.0));
     assert_eq!(bare(6.0).label(0), "uncropped");
     assert_eq!(bare(6.0).label(3), "?");
@@ -1147,24 +1465,131 @@ fn operand_probe() {
         ("add, rotate, xor (no multiply)", |d| d.iter().fold(0u64, |a, &x| (a.rotate_left(5) ^ x).wrapping_add(0x9e37_79b9_7f4a_7c15))),
         ("loads, the index taken from the data", |d| (0..d.len()).fold(0u64, |a, i| a.wrapping_add(d[((a as usize) ^ i) & (d.len() - 1)]))),
     ];
-    println!("\noperand probe: each row compares words of one kind with random words (class 1 is random)");
-    for (op_name, op) in ops {
-        for (kind_name, kind) in kinds {
-            let name = format!("{op_name} on {kind_name}");
-            let r = measure(
-                &name,
-                Duration::from_millis(1500),
-                move |rng, random| {
-                    let mut v = vec![0u64; N];
-                    let base = v.as_ptr();
-                    for w in v.iter_mut() {
-                        *w = if random { rng.next_u64() } else { kind(rng, N, base) };
-                    }
-                    v
-                },
-                |v: &Vec<u64>| op(v),
-            );
-            r.print();
+    let all_rows = |suffix: &str| {
+        for (op_name, op) in ops {
+            for (kind_name, kind) in kinds {
+                let name = format!("{op_name} on {kind_name}{suffix}");
+                let r = measure(
+                    &name,
+                    Duration::from_millis(1500),
+                    move |rng, random| {
+                        let mut v = vec![0u64; N];
+                        let base = v.as_ptr();
+                        for w in v.iter_mut() {
+                            *w = if random { rng.next_u64() } else { kind(rng, N, base) };
+                        }
+                        v
+                    },
+                    |v: &Vec<u64>| op(v),
+                );
+                r.print();
+            }
         }
+    };
+    println!("\noperand probe: each row compares words of one kind with random words (class 1 is random)");
+    all_rows("");
+    // the same with ARM's data-independent timing mode set on this thread, where the CPU has it (BACKLOG B-99)
+    if super::dit::Dit::available() {
+        println!("\nand again with DIT set:");
+        let _dit = super::dit::Dit::on();
+        all_rows(" [DIT]");
+    } else {
+        println!("\n(this CPU has no data-independent timing mode, FEAT_DIT: no rows with it)");
+    }
+}
+
+// ---------------------------------------------------------------------------------------- DIT on and off
+
+/// Not a pass or fail test (BACKLOG B-99): the comparisons that an Apple M5 Max flagged, each measured with ARM's
+/// data-independent timing mode (`crypto::dit`) off (the library's own guards held off) and then on, back to back on this
+/// thread, and a table of the two. The M5's second run (2026-10-08) answered the question it was written for: every row
+/// flagged with the mode off was clean with it on, and so the library sets it now. It stays as the check that the mode still
+/// does that on the next CPU. On a CPU without the mode it says so and stops. Run it with
+/// `cargo test --release --lib crypto::timing::dit -- --ignored --nocapture`.
+#[test]
+#[ignore = "statistical timing run; see the module documentation"]
+fn dit_on_and_off() {
+    use super::dit::Dit;
+    if !Dit::available() {
+        println!("\nthis CPU has no data-independent timing mode (FEAT_DIT): nothing to compare");
+        return;
+    }
+    println!("\nthe same comparisons with DIT off and then on (report only; |t| above {LEAK_T} reads as a leak)");
+    let mut table: Vec<(String, f64, f64)> = Vec::new();
+    let mut both = |name: String, run: &mut dyn FnMut(&str) -> Report| {
+        assert!(!Dit::is_set());
+        let off = held_off(|| run(&name));
+        off.print();
+        let on = {
+            let _dit = Dit::on();
+            assert!(Dit::is_set());
+            run(&format!("{name} [DIT]"))
+        };
+        on.print();
+        table.push((name, off.max_t, on.max_t));
+    };
+    for (curve, size, label) in [(Curve::P256, 32usize, "p256"), (Curve::P384, 48, "p384")] {
+        let pool: Vec<Vec<u8>> = (0..32).map(|_| ecdh::generate(curve).unwrap().1).collect();
+        let random_scalar = move |rng: &mut Rng| -> Vec<u8> {
+            loop {
+                let k = rng.bytes(size);
+                if ecdh::public_key(curve, &k).is_some() {
+                    return k;
+                }
+            }
+        };
+        let mut small = vec![0u8; size];
+        small[size - 1] = 3;
+        let (p, k3) = (pool.clone(), small.clone());
+        both(format!("ecdh {label} scalar: 3 vs random"), &mut |name| {
+            measure(name, budget(), |rng, c| (if c { random_scalar(rng) } else { k3.clone() }, p[rng.below(32)].clone()), |(k, pt): &(Vec<u8>, Vec<u8>)| {
+                ecdh::shared_secret(curve, k, pt)
+            })
+        });
+        let k3 = small.clone();
+        both(format!("ecdh {label} public key: scalar 3 vs random"), &mut |name| {
+            measure(name, budget(), |rng, c| if c { random_scalar(rng) } else { k3.clone() }, |k: &Vec<u8>| ecdh::public_key(curve, k))
+        });
+    }
+    both("sha256 message: zeros vs random (1 KiB)".into(), &mut |name| measure(name, budget(), |rng, c| fixed_or_random(rng, c, 1024, 0), |m| Sha256::digest(m)));
+    both("poly1305 limbs32 (5 x 26-bit) message: zeros vs random".into(), &mut |name| {
+        measure(name, budget(), |rng, c| fixed_or_random(rng, c, 1024, 0), |m: &Vec<u8>| {
+            let mut p = limbs32::Poly1305::new(&[0x33u8; 32]);
+            for c in m.chunks_exact(16) {
+                p.block(c.try_into().unwrap(), true);
+            }
+            p.finish()
+        })
+    });
+    let h = 0x0123_4567_89ab_cdef_fedc_ba98_7654_3210_u128.to_be_bytes();
+    both("ghash [Portable] data blocks: 0 vs random (fixed H)".into(), &mut |name| {
+        measure(name, budget(), |rng, c| fixed_or_random(rng, c, 128, 0), |d: &Vec<u8>| GhashKey::new(&h, Backend::Portable).hash(b"aad", d))
+    });
+    // the AES rows the M5's second run flagged: key setup with a zero key, and the hardware path sealing 32 zero bytes
+    let nonce = [9u8; 12];
+    for backend in backends() {
+        for key_len in [16usize, 32] {
+            both(format!("aes-{}-gcm [{backend:?}] key setup + seal 64 B: zero key vs random", key_len * 8), &mut |name| {
+                measure(name, budget(), |rng, c| fixed_or_random(rng, c, key_len, 0), |key: &Vec<u8>| {
+                    let g = AesGcm::with_backend(key, backend);
+                    let mut b = vec![0u8; 64 + 16];
+                    g.seal_in_place(&nonce, b"", &mut b);
+                    b
+                })
+            });
+        }
+        let short_key = AesGcm::with_backend(&[0x6bu8; 16], backend);
+        both(format!("aes-128-gcm [{backend:?}] seal 32 B: zeros vs random"), &mut |name| {
+            measure(name, budget(), |rng, c| fixed_or_random(rng, c, 48, 0), |buf: &Vec<u8>| {
+                let mut b = buf.clone();
+                short_key.seal_in_place(&nonce, b"", &mut b);
+                b
+            })
+        });
+    }
+    println!("\nlargest |t| of each comparison, DIT off and on:");
+    for (name, off, on) in &table {
+        let mark = |t: f64| if t > LEAK_T { "LEAK" } else if t > SUSPICIOUS_T { "suspicious" } else { "ok" };
+        println!("  {name:<56} DIT off {off:>6.1} {:<10}  DIT on {on:>6.1} {}", mark(*off), mark(*on));
     }
 }

@@ -26,7 +26,7 @@ impl Url {
             return err("contains whitespace or control characters");
         }
         if !input.is_ascii() {
-            return err("contains non-ASCII characters (use punycode for hosts and percent-encoding elsewhere)");
+            return err("contains non-ASCII characters (use punycode for hosts, which tiny_https::idna::to_ascii makes, and percent-encoding elsewhere)");
         }
         let Some((scheme, rest)) = input.split_once("://") else {
             return err("missing scheme (expected http:// or https://)");

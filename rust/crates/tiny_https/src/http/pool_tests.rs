@@ -55,6 +55,23 @@ fn requests_one_after_another_share_a_connection() {
 }
 
 #[test]
+fn the_read_buffer_of_a_finished_response_is_used_for_the_next_one() {
+    // (a new one is 32 KiB zeroed, a good part of the work of a small request on a connection that is used again: B-90)
+    each_transport(hello, |server, tls| {
+        let client = server.client();
+        client.get(&server.url("/first")).unwrap();
+        let kept = super::stream::spare_scratch();
+        assert!(kept.is_some(), "tls {tls}: the buffer was not kept");
+        for i in 0..3 {
+            let mut s = client.get_stream(&server.url(&format!("/{i}"))).unwrap();
+            assert_eq!(read_all(&mut s).unwrap(), format!("hello /{i}").as_bytes());
+            drop(s);
+            assert_eq!(super::stream::spare_scratch(), kept, "tls {tls}: a new buffer was made");
+        }
+    });
+}
+
+#[test]
 fn without_keep_alive_each_request_has_its_own_connection() {
     each_transport(hello, |server, tls| {
         let client = server.client().keep_alive(false);
@@ -977,4 +994,27 @@ mod asynchronous {
         }
         assert_eq!(server.connections(), 1, "12 requests, keys rotated both ways, one connection");
     }
+}
+
+/// TLS 1.3 session resumption (B-35) through the client: a request that needs a new connection to a server it has spoken to
+/// resumes the session of the connection before, with the client's own store (shared by its clones), and a separate
+/// client does not.
+#[test]
+fn a_new_connection_to_the_same_server_resumes_the_tls_session() {
+    let sessions = Arc::new(Mutex::new(crate::tls::server::ServerSessions::default()));
+    let s = sessions.clone();
+    // the server closes every connection after its response, so each request makes a new one
+    let server = TestServer::start_tls_with(|_| Reply::SendAndClose(response(200, &[], b"ok")), move |c| crate::tls::server::ServerConfig { sessions: Some(s), ..c });
+    let client = server.client();
+    for i in 0..3 {
+        let resp = client.get(&server.url("/")).unwrap();
+        assert_eq!(resp.body, b"ok", "request {i}");
+    }
+    assert_eq!(server.connections(), 3);
+    assert_eq!(sessions.lock().unwrap().resumed, 2, "the second and third connections resumed");
+    let clone = client.clone();
+    clone.get(&server.url("/")).unwrap();
+    assert_eq!(sessions.lock().unwrap().resumed, 3, "a clone shares the sessions");
+    server.client().get(&server.url("/")).unwrap();
+    assert_eq!(sessions.lock().unwrap().resumed, 3, "another client has none");
 }

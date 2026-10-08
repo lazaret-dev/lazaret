@@ -4,8 +4,10 @@
 //!
 //! **Experimental, and not for production.** Behind the `server` feature (always built for this crate's own
 //! tests). The signing is Ed25519 and is not constant-time (see [`crate::crypto::ed25519_sign`]), the code
-//! has had no review, and it takes whatever shortcut keeps a test simple: no resumption, no client
-//! certificates, no early data, one certificate. The independent review of BACKLOG B-23 does not cover it.
+//! has had no review, and it takes whatever shortcut keeps a test simple: no client certificates, no early data, one
+//! certificate, and sessions resumed from tickets that are kept in memory per configuration (used once, never expiring),
+//! so that the client's resumption (B-35) has a peer in the tests; OpenSSL's server checks that too. The independent
+//! review of BACKLOG B-23 does not cover it.
 //!
 //! It is the same shape as the client: [`ServerConnection`] is the protocol as a state machine that does no
 //! I/O (bytes in with [`receive`](ServerConnection::receive), bytes out of [`output`](ServerConnection::output)),
@@ -14,7 +16,7 @@
 //! What it does: ClientHello parsing with the checks that matter to a server (versions, duplicate
 //! extensions, the legacy fields), X25519, P-256 and P-384 key exchange with a HelloRetryRequest when the
 //! client's share is not for a group it takes, the three TLS 1.3 cipher suites, ALPN, an optional stapled
-//! OCSP response, NewSessionTicket messages (which nothing can resume, but which a client has to read past),
+//! OCSP response, NewSessionTicket messages (resumable with PSK and a fresh key exchange, `psk_dhe_ke`),
 //! KeyUpdate in both directions, and close_notify. What it shares with the client: the key schedule and the
 //! record cipher (`suite.rs`), the message constants and the CertificateVerify content (`messages.rs`); the
 //! record layer around them (framing, fragmentation, buffering) is its own, so that a mistake there is not
@@ -29,8 +31,9 @@ use crate::crypto::{ecdh, rand, x25519};
 use crate::error::{Error, Result};
 use crate::util::{ct_eq, Reader};
 use crate::zeroize::{Zeroize, Zeroizing};
+use std::collections::HashMap;
 use std::io::{self, Read, Write};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 /// Ed25519 (the only key this server has), as a SignatureScheme.
 const ED25519: u16 = 0x0807;
@@ -70,6 +73,17 @@ pub struct ServerConfig {
     pub rekey_after_records: Option<u64>,
     /// An OCSP response to staple to the leaf certificate for a client that asks for one.
     pub ocsp_staple: Option<Vec<u8>>,
+    /// The tickets issued and not used yet (shared by clones of this configuration), or `None` to resume nothing (the
+    /// tickets sent are then random bytes).
+    pub sessions: Option<Arc<Mutex<ServerSessions>>>,
+}
+
+/// A server's resumable sessions: ticket, the PSK it stands for, and the suite it came from.
+#[derive(Default)]
+pub struct ServerSessions {
+    tickets: HashMap<Vec<u8>, (Zeroizing<Vec<u8>>, Suite)>,
+    /// How many handshakes resumed a session.
+    pub resumed: usize,
 }
 
 impl ServerConfig {
@@ -86,7 +100,19 @@ impl ServerConfig {
             max_fragment: MAX_PLAINTEXT,
             rekey_after_records: None,
             ocsp_staple: None,
+            sessions: Some(Arc::new(Mutex::new(ServerSessions::default()))),
         }
+    }
+
+    /// Resumes nothing: every handshake is a full one.
+    pub fn without_resumption(mut self) -> ServerConfig {
+        self.sessions = None;
+        self
+    }
+
+    /// How many handshakes resumed a session so far.
+    pub fn resumed_count(&self) -> usize {
+        self.sessions.as_ref().map_or(0, |s| s.lock().unwrap().resumed)
     }
 
     /// The server certificate of `pki`.
@@ -187,6 +213,10 @@ struct Hello {
     signature_algorithms: Option<Vec<u16>>,
     alpn: Option<Vec<Vec<u8>>>,
     status_request: bool,
+    psk_dhe_ke: bool,
+    /// `pre_shared_key`: the first identity and its binder, and the length of the binders list (with its own length),
+    /// which the end of the ClientHello is.
+    psk: Option<(Vec<u8>, Vec<u8>, usize)>,
 }
 
 fn u16_list(data: &[u8], what: &str) -> Result<Vec<u16>> {
@@ -231,6 +261,8 @@ fn parse_hello(body: &[u8]) -> Result<Hello> {
         signature_algorithms: None,
         alpn: None,
         status_request: false,
+        psk_dhe_ke: false,
+        psk: None,
     };
     let mut seen: Vec<u16> = Vec::new();
     let mut er = Reader::new(extensions);
@@ -304,6 +336,37 @@ fn parse_hello(body: &[u8]) -> Result<Hello> {
                 hello.alpn = Some(names);
             }
             EXT_STATUS_REQUEST => hello.status_request = true,
+            EXT_PSK_KEY_EXCHANGE_MODES => {
+                let mut mr = Reader::new(d);
+                let modes = mr.vec8().ok_or_else(|| bad("psk_key_exchange_modes"))?;
+                hello.psk_dhe_ke = modes.contains(&PSK_DHE_KE);
+            }
+            EXT_PRE_SHARED_KEY => {
+                // RFC 8446 section 4.2.11: the last extension, identities and then binders, as many of one as of the other
+                if !er.is_empty() {
+                    return Err(Error::Tls("illegal_parameter: pre_shared_key is not the last extension".into()));
+                }
+                let mut pr = Reader::new(d);
+                let ids = pr.vec16().ok_or_else(|| bad("pre_shared_key identities"))?;
+                let binders_at = d.len() - pr.remaining();
+                let binders = pr.vec16().ok_or_else(|| bad("pre_shared_key binders"))?;
+                if !pr.is_empty() {
+                    return Err(bad("pre_shared_key"));
+                }
+                let (mut ir, mut br) = (Reader::new(ids), Reader::new(binders));
+                let mut first = None;
+                while !ir.is_empty() {
+                    let id = ir.vec16().ok_or_else(|| bad("PSK identity"))?;
+                    ir.u32().ok_or_else(|| bad("PSK age"))?;
+                    let binder = br.vec8().ok_or_else(|| Error::Tls("illegal_parameter: fewer binders than identities".into()))?;
+                    first.get_or_insert((id.to_vec(), binder.to_vec()));
+                }
+                if !br.is_empty() {
+                    return Err(Error::Tls("illegal_parameter: more binders than identities".into()));
+                }
+                let (id, binder) = first.ok_or_else(|| bad("pre_shared_key without identities"))?;
+                hello.psk = Some((id, binder, d.len() - binders_at));
+            }
             _ => {} // a server ignores extensions it does not know
         }
     }
@@ -340,6 +403,8 @@ struct Handshake {
     expected_finished: Vec<u8>,
     client_application_secret: Zeroizing<Vec<u8>>,
     suite: Suite,
+    /// The master secret, for the resumption master secret once the client's Finished is in.
+    master_secret: Zeroizing<Vec<u8>>,
 }
 
 /// The private half of our key share.
@@ -432,6 +497,10 @@ pub struct ServerConnection {
     rekey_after: u64,
     /// Tickets still to be sent (when they wait for the first write).
     late_tickets: usize,
+    /// The handshake resumed a session.
+    resumed: bool,
+    /// The suite and resumption master secret, which the PSKs of our tickets are made from.
+    resumption_secret: Option<(Suite, Zeroizing<Vec<u8>>)>,
 }
 
 impl ServerConnection {
@@ -455,6 +524,7 @@ impl ServerConnection {
                 expected_finished: Vec::new(),
                 client_application_secret: Zeroizing::new(Vec::new()),
                 suite: Suite::Aes128GcmSha256,
+                master_secret: Zeroizing::new(Vec::new()),
             })),
             established: false,
             got_close_notify: false,
@@ -467,7 +537,14 @@ impl ServerConnection {
             group: None,
             rekey_after: u64::MAX,
             late_tickets: 0,
+            resumed: false,
+            resumption_secret: None,
         }
+    }
+
+    /// Whether the handshake resumed a session.
+    pub fn is_resumed(&self) -> bool {
+        self.resumed
     }
 
     // ------------------------------------------------------------------ state
@@ -585,14 +662,22 @@ impl ServerConnection {
         Ok(())
     }
 
-    /// Queues `count` NewSessionTicket messages. Nothing can resume with them; they are for a client to read past.
+    /// Queues `count` NewSessionTicket messages: resumable ones if the configuration keeps sessions, else random bytes for a
+    /// client to read past.
     pub fn send_session_tickets(&mut self, count: usize) -> Result<()> {
         for i in 0..count {
+            let ticket = rand::bytes::<32>()?.to_vec();
+            let nonce = [i as u8];
+            if let (Some(sessions), Some((suite, secret))) = (&self.config.sessions, &self.resumption_secret) {
+                let alg = suite.hash();
+                let psk = Zeroizing::new(expand_label(alg, secret, "resumption", &nonce, alg.output_len()));
+                sessions.lock().unwrap().tickets.insert(ticket.clone(), (psk, *suite));
+            }
             let mut body = Vec::new();
             body.extend_from_slice(&7200u32.to_be_bytes()); // ticket_lifetime
             body.extend_from_slice(&rand::bytes::<4>()?); // ticket_age_add
-            put_vec8(&mut body, &[i as u8]); // ticket_nonce
-            put_vec16(&mut body, &rand::bytes::<32>()?); // ticket
+            put_vec8(&mut body, &nonce); // ticket_nonce
+            put_vec16(&mut body, &ticket); // ticket
             put_vec16(&mut body, &[]); // extensions
             self.queue_protected(RT_HANDSHAKE, &handshake_message(HS_NEW_SESSION_TICKET, &body))?;
         }
@@ -865,8 +950,28 @@ impl ServerConnection {
             _ => None,
         };
 
+        // a session to resume: the first identity, if it is a ticket of ours (used once) of a suite with this one's hash, with
+        // a fresh key exchange; its binder must be right (RFC 8446 section 4.2.11.2: a wrong one ends the handshake)
+        let mut psk = None;
+        if let (Some((id, binder, binders_len)), true, Some(sessions)) = (&hello.psk, hello.psk_dhe_ke, &config.sessions) {
+            let found = sessions.lock().unwrap().tickets.remove(id);
+            if let Some((key, _)) = found.filter(|(_, s)| s.hash() == suite.hash()) {
+                let alg = suite.hash();
+                let early = Zeroizing::new(hkdf_extract(alg, &[], &key));
+                let binder_key = Zeroizing::new(derive_secret(alg, &early, "res binder", &alg.digest(&[])));
+                let finished_key = Zeroizing::new(expand_label(alg, &binder_key, "finished", &[], alg.output_len()));
+                let mut t = hs.transcript.clone();
+                t.extend_from_slice(&msg[..msg.len() - binders_len]);
+                if !ct_eq(&hmac(alg, &finished_key, &alg.digest(&t)), binder) {
+                    return Err(Error::Tls("decrypt_error: the PSK binder is wrong".into()));
+                }
+                sessions.lock().unwrap().resumed += 1;
+                psk = Some(key);
+            }
+        }
+
         hs.transcript.extend_from_slice(msg);
-        self.send_flight(hs, &hello, suite, *group, client_public, alpn)
+        self.send_flight(hs, &hello, suite, *group, client_public, alpn, psk)
     }
 
     /// Asks for a key share for `group` (RFC 8446 section 4.1.4).
@@ -903,9 +1008,18 @@ impl ServerConnection {
     }
 
     /// ServerHello and everything up to our Finished; the keys for the rest.
-    fn send_flight(&mut self, hs: &mut Handshake, hello: &Hello, suite: Suite, group: u16, client_public: &[u8], alpn: Option<Vec<u8>>) -> Result<()> {
+    #[allow(clippy::too_many_arguments)]
+    fn send_flight(
+        &mut self,
+        hs: &mut Handshake,
+        hello: &Hello,
+        suite: Suite,
+        group: u16,
+        client_public: &[u8],
+        alpn: Option<Vec<u8>>,
+        psk: Option<Zeroizing<Vec<u8>>>,
+    ) -> Result<()> {
         let (server_public, shared) = key_exchange(group, client_public)?;
-        let config = self.config.clone();
 
         // ServerHello
         let mut body = Vec::new();
@@ -919,6 +1033,9 @@ impl ServerConnection {
         let mut share = group.to_be_bytes().to_vec();
         put_vec16(&mut share, &server_public);
         put_extension(&mut exts, EXT_KEY_SHARE, &share);
+        if psk.is_some() {
+            put_extension(&mut exts, EXT_PRE_SHARED_KEY, &0u16.to_be_bytes());
+        }
         put_vec16(&mut body, &exts);
         let server_hello = handshake_message(HS_SERVER_HELLO, &body);
         hs.transcript.extend_from_slice(&server_hello);
@@ -933,10 +1050,11 @@ impl ServerConnection {
         let hash_len = alg.output_len();
         let zeros = vec![0u8; hash_len];
         let empty_hash = alg.digest(&[]);
-        let early_secret = Zeroizing::new(hkdf_extract(alg, &[], &zeros));
+        let early_secret = Zeroizing::new(hkdf_extract(alg, &[], psk.as_deref().map_or(&zeros[..], |p| &p[..])));
         let derived = Zeroizing::new(derive_secret(alg, &early_secret, "derived", &empty_hash));
         let handshake_secret = Zeroizing::new(hkdf_extract(alg, &derived, &shared));
         let hello_hash = alg.digest(&hs.transcript);
+        self.resumed = psk.is_some();
         let c_hs = Zeroizing::new(derive_secret(alg, &handshake_secret, "c hs traffic", &hello_hash));
         let s_hs = Zeroizing::new(derive_secret(alg, &handshake_secret, "s hs traffic", &hello_hash));
         self.write_cipher = Some(RecordCipher::new(suite, &s_hs));
@@ -962,6 +1080,35 @@ impl ServerConnection {
         put_vec16(&mut ee, &exts);
         self.queue_handshake(hs, &handshake_message(HS_ENCRYPTED_EXTENSIONS, &ee))?;
 
+        if psk.is_none() {
+            self.queue_certificate(hs, hello, alg)?;
+        }
+
+        // Finished
+        let finished_key = Zeroizing::new(expand_label(alg, &s_hs, "finished", &[], hash_len));
+        let verify_data = hmac(alg, &finished_key, &alg.digest(&hs.transcript));
+        self.queue_handshake(hs, &handshake_message(HS_FINISHED, &verify_data))?;
+
+        // application keys (transcript through our Finished) and what the client's Finished must be
+        let app_hash = alg.digest(&hs.transcript);
+        let derived2 = Zeroizing::new(derive_secret(alg, &handshake_secret, "derived", &empty_hash));
+        let master_secret = Zeroizing::new(hkdf_extract(alg, &derived2, &zeros));
+        let c_ap = Zeroizing::new(derive_secret(alg, &master_secret, "c ap traffic", &app_hash));
+        let s_ap = Zeroizing::new(derive_secret(alg, &master_secret, "s ap traffic", &app_hash));
+        let client_finished_key = Zeroizing::new(expand_label(alg, &c_hs, "finished", &[], hash_len));
+        hs.expected_finished = hmac(alg, &client_finished_key, &app_hash);
+        hs.client_application_secret = c_ap;
+        hs.suite = suite;
+        hs.master_secret = master_secret;
+        // we may send application data as soon as our Finished is out; we read the client's Finished first
+        self.write_cipher = Some(RecordCipher::new(suite, &s_ap));
+        hs.stage = Stage::ClientFinished;
+        Ok(())
+    }
+
+    /// Certificate and CertificateVerify (a full handshake's).
+    fn queue_certificate(&mut self, hs: &mut Handshake, hello: &Hello, alg: HashAlg) -> Result<()> {
+        let config = self.config.clone();
         // Certificate
         let mut list = Vec::new();
         for (i, der) in config.chain.iter().enumerate() {
@@ -986,27 +1133,7 @@ impl ServerConnection {
         let mut verify = Vec::new();
         put_u16(&mut verify, ED25519);
         put_vec16(&mut verify, &signature);
-        self.queue_handshake(hs, &handshake_message(HS_CERTIFICATE_VERIFY, &verify))?;
-
-        // Finished
-        let finished_key = Zeroizing::new(expand_label(alg, &s_hs, "finished", &[], hash_len));
-        let verify_data = hmac(alg, &finished_key, &alg.digest(&hs.transcript));
-        self.queue_handshake(hs, &handshake_message(HS_FINISHED, &verify_data))?;
-
-        // application keys (transcript through our Finished) and what the client's Finished must be
-        let app_hash = alg.digest(&hs.transcript);
-        let derived2 = Zeroizing::new(derive_secret(alg, &handshake_secret, "derived", &empty_hash));
-        let master_secret = Zeroizing::new(hkdf_extract(alg, &derived2, &zeros));
-        let c_ap = Zeroizing::new(derive_secret(alg, &master_secret, "c ap traffic", &app_hash));
-        let s_ap = Zeroizing::new(derive_secret(alg, &master_secret, "s ap traffic", &app_hash));
-        let client_finished_key = Zeroizing::new(expand_label(alg, &c_hs, "finished", &[], hash_len));
-        hs.expected_finished = hmac(alg, &client_finished_key, &app_hash);
-        hs.client_application_secret = c_ap;
-        hs.suite = suite;
-        // we may send application data as soon as our Finished is out; we read the client's Finished first
-        self.write_cipher = Some(RecordCipher::new(suite, &s_ap));
-        hs.stage = Stage::ClientFinished;
-        Ok(())
+        self.queue_handshake(hs, &handshake_message(HS_CERTIFICATE_VERIFY, &verify))
     }
 
     /// Queues a handshake message under the handshake keys and adds it to the transcript.
@@ -1025,6 +1152,11 @@ impl ServerConnection {
         self.read_cipher = Some(RecordCipher::new(hs.suite, &hs.client_application_secret));
         self.rekey_after = self.config.rekey_after_records.unwrap_or(hs.suite.records_per_key()).max(2);
         self.established = true;
+        // the resumption master secret: the transcript through the client's Finished
+        let alg = hs.suite.hash();
+        hs.transcript.extend_from_slice(msg);
+        let res_master = Zeroizing::new(derive_secret(alg, &hs.master_secret, "res master", &alg.digest(&hs.transcript)));
+        self.resumption_secret = Some((hs.suite, res_master));
         if self.config.tickets_after_first_write {
             self.late_tickets = self.config.tickets;
         } else {
@@ -1136,6 +1268,11 @@ impl<S: Read + Write> ServerStream<S> {
 
     pub fn group(&self) -> Option<u16> {
         self.conn.group()
+    }
+
+    /// Whether the handshake resumed a session.
+    pub fn is_resumed(&self) -> bool {
+        self.conn.is_resumed()
     }
 
     pub fn get_ref(&self) -> &S {

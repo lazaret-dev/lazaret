@@ -1,5 +1,6 @@
 //! HMAC (RFC 2104) and HKDF (RFC 5869), generic over the hash function.
 
+use super::dit::Dit;
 use super::sha2::Hash;
 use crate::zeroize::{Zeroize, Zeroizing};
 
@@ -20,6 +21,7 @@ impl<H: Hash + Zeroize> Drop for Hmac<H> {
 
 impl<H: Hash + Zeroize> Hmac<H> {
     pub fn new(key: &[u8]) -> Self {
+        let _dit = Dit::on(); // data-independent timing while the key and the data are in use (crypto::dit)
         let mut k = Zeroizing::new(if key.len() > H::BLOCK_LEN { H::digest(key) } else { key.to_vec() });
         k.resize(H::BLOCK_LEN, 0);
         let ipad = Zeroizing::new(k.iter().map(|b| b ^ 0x36).collect::<Vec<u8>>());
@@ -30,10 +32,12 @@ impl<H: Hash + Zeroize> Hmac<H> {
     }
 
     pub fn update(&mut self, data: &[u8]) {
+        let _dit = Dit::on(); // data-independent timing while the key and the data are in use (crypto::dit)
         self.inner.update(data);
     }
 
     pub fn finalize(self) -> Vec<u8> {
+        let _dit = Dit::on(); // data-independent timing while the key and the data are in use (crypto::dit)
         let ih = self.inner.clone().finalize();
         let mut outer = H::new();
         outer.update(&self.outer_key);

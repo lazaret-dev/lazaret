@@ -440,6 +440,139 @@ fn a_certificate_must_chain_to_an_authority_that_counts_at_the_time() {
     }
 }
 
+/// Every Fulcio certificate here carries one signed certificate timestamp (RFC 6962), from Sigstore's 2022 CT log,
+/// signed within a second of the certificate's notBefore; npm's key-signed publish attestations have none. The SCT is
+/// checked against the root's `ctlogs` (B-81).
+#[test]
+fn the_certificate_carries_a_timestamp_from_a_ct_log_of_the_root() {
+    let (root, ring) = trust_material();
+    let trust = Trust::new(&root).with_keys(&ring);
+    let pypi = || Bundle::parse_pep740(PROVENANCE).unwrap().remove(0);
+    let wheel = ArtifactDigest::of(DigestAlgorithm::Sha256, WHEEL);
+    let mut provenance: Vec<Verified> = (0..3).map(|i| verify_release(i, &trust).remove(1).unwrap()).collect();
+    provenance.push(pypi().verify(&trust, &wheel).unwrap());
+    let want = [1_670_516_319_542u64, 1_705_092_993_994, 1_753_831_006_550, 1_785_247_711_104];
+    for (v, ms) in provenance.iter().zip(want) {
+        assert_eq!(v.scts.len(), 1, "{:?}", v.scts);
+        assert_eq!(v.scts[0].log_url, "https://ctfe.sigstore.dev/2022");
+        assert_eq!(v.scts[0].log_id, root.ctlogs[1].log_id);
+        assert_eq!(v.scts[0].timestamp_ms, ms);
+        let nb = identity(v).not_before;
+        assert!((ms / 1000) as i64 - nb <= 1 && (ms / 1000) as i64 >= nb, "{ms} {nb}");
+    }
+    for i in 0..3 {
+        assert!(verify_release(i, &trust).remove(0).unwrap().scts.is_empty(), "a key has no SCTs");
+    }
+
+    let ct_error = |r: Result<Verified, Error>| match r {
+        Err(Error::CertificateTransparency(m)) => m,
+        other => panic!("{}", brief(&other)),
+    };
+    let check = |r: &TrustedRoot, threshold: usize| -> Vec<Result<Verified, Error>> {
+        let t = Trust::new(r).with_keys(&ring).with_sct_threshold(threshold);
+        let mut out: Vec<_> = (0..3).map(|i| verify_release(i, &t).remove(1)).collect();
+        out.push(pypi().verify(&t, &wheel));
+        out
+    };
+    // a root without the CT logs: the SCT is from a log it does not list, so nothing counts; unless none is required
+    let mut no_ct = root.clone();
+    no_ct.ctlogs.clear();
+    for r in check(&no_ct, 1) {
+        let m = ct_error(r);
+        assert!(m.contains("from 0 of the trusted root's CT logs verified and 1 are required") && m.contains("has 1, 1 from logs the root does not list"), "{m}");
+    }
+    assert!(check(&no_ct, 0).into_iter().all(|r| r.unwrap().scts.is_empty()));
+    // two logs required: there is one
+    for r in check(&root, 2) {
+        assert!(ct_error(r).contains("from 1 of the trusted root's CT logs verified and 2 are required"));
+    }
+    // the log's key was not valid at the SCT's time: before 2022-12-08 16:18:39 / from after it
+    for (valid_for, ok_from) in [(Validity { start: None, end: Some(1_670_516_318) }, 0), (Validity { start: Some(1_670_516_320), end: None }, 1)] {
+        let mut r = root.clone();
+        r.ctlogs[1].valid_for = valid_for;
+        for (i, res) in check(&r, 0).into_iter().enumerate() {
+            if i < ok_from || valid_for.end.is_some() {
+                let m = ct_error(res);
+                assert!(m.contains("does not verify: no key of the log was valid at"), "{m}");
+            } else {
+                res.unwrap();
+            }
+        }
+    }
+    // the last second of the key's validity is inside it
+    let mut r = root.clone();
+    r.ctlogs[1].valid_for = Validity { start: Some(1_670_516_319), end: Some(1_670_516_319) };
+    assert!(check(&r, 1)[0].is_ok());
+    // the log's id with another key (Rekor's, also P-256): the signature is not by it; even with the threshold at 0
+    let mut r = root.clone();
+    r.ctlogs[1].key = r.tlogs[0].key.clone();
+    for res in check(&r, 0) {
+        assert!(ct_error(res).contains("the signature is not the log's"));
+    }
+    // ... and a P-384 key: the SCT's algorithms are not the key's
+    let mut r = root.clone();
+    let p384 = root.certificate_authorities.iter().flat_map(|a| &a.chain).find_map(|der| {
+        let c = tiny_https::x509::Certificate::from_der(der).unwrap();
+        tiny_https::trust_root::VerificationKey::from_spki(c.spki_der()).ok().filter(|k| k.kind() == tiny_https::trust_root::KeyKind::EcdsaP384)
+    });
+    r.ctlogs[1].key = p384.expect("Fulcio's CA keys are P-384");
+    for res in check(&r, 0) {
+        assert!(ct_error(res).contains("signed with algorithms (4, 3), and the log's key goes with (5, 3)"));
+    }
+    // the same log listed twice, once with a wrong key: the right one is found
+    let mut r = root.clone();
+    let mut wrong = r.ctlogs[1].clone();
+    wrong.key = r.tlogs[0].key.clone();
+    r.ctlogs.insert(1, wrong);
+    assert!(check(&r, 1).into_iter().all(|x| x.unwrap().scts.len() == 1));
+}
+
+/// The SCT reader on its own, on the real certificates: every byte of the SCT list changed in turn makes it either
+/// unreadable or not verify (or, for the log id, from a log that is not listed); the precertificate is the certificate
+/// without the extension.
+#[test]
+fn every_byte_of_a_real_sct_counts() {
+    use tiny_https::ct;
+    use tiny_https::x509::Certificate;
+    let (root, ring) = trust_material();
+    let v = verify_release(2, &Trust::new(&root).with_keys(&ring)).remove(1).unwrap();
+    let id = identity(&v);
+    let (leaf, issuer) = (Certificate::from_der(&id.certificate).unwrap(), Certificate::from_der(&id.chain[1]).unwrap());
+    let report = ct::verify_embedded(&leaf, &issuer, &root.ctlogs).unwrap();
+    assert_eq!((report.verified.len(), report.unknown_logs.len(), report.other_versions, report.distinct_logs()), (1, 0, 0, 1));
+    // the issuer is part of what was signed: the root above it is not the issuer
+    let anchor = Certificate::from_der(id.chain.last().unwrap()).unwrap();
+    assert!(ct::verify_embedded(&leaf, &anchor, &root.ctlogs).unwrap_err().to_string().contains("the signature is not the log's"));
+    // the precertificate: one extension fewer, otherwise the same bytes (the lengths are what Python's `cryptography`
+    // gives for `tbs_certificate_bytes` and `tbs_precertificate_bytes` of this certificate)
+    let pre = ct::precertificate_tbs(leaf.tbs_der()).unwrap();
+    assert_eq!((leaf.tbs_der().len(), pre.len()), (1599, 1459));
+    let ext = leaf.extension(ct::OID_SCT_LIST).unwrap();
+    let list = ct::parse_list(&ext.value).unwrap();
+    assert_eq!(list.scts.len(), 1);
+    assert_eq!((list.scts[0].hash_algorithm, list.scts[0].signature_algorithm), (4, 3));
+    // change each byte of the extension's value inside the certificate (the certificate's own signature is not what
+    // is checked here)
+    let at = id.certificate.windows(ext.value.len()).position(|w| w == ext.value.as_slice()).unwrap();
+    let (mut unreadable, mut refused, mut unknown) = (0, 0, 0);
+    for i in 0..ext.value.len() {
+        let mut der = id.certificate.clone();
+        der[at + i] ^= 0x01;
+        let Ok(c) = Certificate::from_der(&der) else {
+            unreadable += 1;
+            continue;
+        };
+        match ct::verify_embedded(&c, &issuer, &root.ctlogs) {
+            Err(_) => refused += 1,
+            Ok(r) if r.verified.is_empty() && (r.unknown_logs.len() == 1 || r.other_versions == 1) => unknown += 1,
+            Ok(r) => panic!("byte {i} of the SCT extension changed and it still verified: {r:?}"),
+        }
+    }
+    assert_eq!(unreadable + refused + unknown, ext.value.len());
+    // 32 log id bytes and the version byte make an SCT that is not checked; the rest is refused
+    assert_eq!(unknown, 33, "{unreadable} {refused} {unknown}");
+}
+
 // the JSON editing helpers are in tests/common/json_edit.rs
 
 // ------------------------------------------------------------------------------------ damage

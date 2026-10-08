@@ -30,6 +30,9 @@ mod aes_ct;
 mod aes_hw;
 #[cfg(feature = "net")]
 pub mod chacha20poly1305;
+// ARM's data-independent timing mode around the secret arithmetic (BACKLOG B-99)
+#[cfg(feature = "net")]
+pub(crate) mod dit;
 #[cfg(feature = "net")]
 pub mod ecdh;
 #[cfg(any(test, feature = "server"))]

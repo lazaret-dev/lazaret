@@ -18,9 +18,14 @@
 //!   not list it. Without that the handshake fails. Use it where connections to hosts that staple
 //!   nothing and publish no CRL may be refused.
 //!
-//! The leaf is the only certificate that hard-fail requires evidence for, and the only one a
-//! [`CrlSource`] is asked about. Evidence for intermediates (a per-certificate staple, or a CRL
-//! the caller supplied) is used when it exists: a revoked intermediate always fails.
+//! Where the evidence comes from: what the server staples, the CRLs the caller supplies, and two kinds of source that are
+//! asked when those do not settle a certificate: an [`OcspSource`] (asked first, at the responders the certificate's
+//! Authority Information Access names, with a request from [`ocsp_request`]) and a [`CrlSource`] (at its CRL distribution
+//! points). Plain `http://` URLs only, and whatever a source returns is verified like the rest.
+//!
+//! By default the sources are asked about the leaf only, and hard-fail requires evidence for the leaf only;
+//! [`Revocation::whole_chain`] extends both to every certificate below the trust anchor. Evidence for an intermediate that
+//! is there anyway (a per-certificate staple, a CRL the caller supplied) is always used: a revoked intermediate always fails.
 //!
 //! What is verified: an OCSP response must be signed by the certificate's issuer, or by a
 //! responder certificate the issuer signed that carries the OCSP-signing extended key usage;
@@ -31,9 +36,10 @@
 //! used. SHA-1 signatures are rejected; SHA-1 is used only to compare the hashes OCSP uses to name
 //! a certificate.
 //!
-//! What is not done: this library never contacts an OCSP responder itself (so a server that does
-//! not staple and a certificate with no CRL leave soft-fail with no evidence), and it keeps no
-//! state between connections other than the cache of `http::HttpCrlSource` (with the `net` feature).
+//! This module does no I/O: the sources are the caller's (with the `net` feature, `http::HttpOcspSource` and
+//! `http::HttpCrlSource`, which keep what they fetched until it goes out of date). Delta CRLs, indirect CRLs and CRLs
+//! partitioned by reason are not interpreted and never used (public CAs do not issue them; one that a source returns counts
+//! as no evidence).
 
 use crate::asn1::{self, Der};
 use crate::crypto::sha1;
@@ -81,13 +87,21 @@ pub enum RevocationMode {
 /// A source of CRLs for certificates the caller did not supply one for: given the URL from a
 /// certificate's CRL distribution points, returns the list.
 ///
-/// `fetch` is called synchronously during the TLS handshake, on the thread that drives it, for the
-/// leaf certificate only and only if no valid evidence for it has been found yet. In async code
-/// that thread is the executor's: supply CRLs up front (or fetch them on a worker) instead of
-/// using a source that blocks. Whatever `fetch` returns is verified (signature, window, scope)
-/// like any other CRL, so it does not have to come over a trusted channel.
+/// `fetch` is called synchronously during the TLS handshake of the blocking client, on the thread that drives it, for the
+/// leaf certificate (and the intermediates, with [`Revocation::whole_chain`]) and only if no valid evidence for it has been
+/// found yet; the async client asks its sources on its worker pool after the handshake instead, so that the executor's
+/// thread never waits for them. Whatever `fetch` returns is verified (signature, window, scope) like any other CRL, so it
+/// does not have to come over a trusted channel.
 pub trait CrlSource: Send + Sync {
     fn fetch(&self, url: &str) -> Result<Arc<Crl>>;
+}
+
+/// A way to ask an OCSP responder (RFC 6960): given the responder's URL (from the certificate's Authority Information Access)
+/// and a DER `OCSPRequest` (see [`ocsp_request`]), returns the DER `OCSPResponse`. Asked when and where a [`CrlSource`] is,
+/// and before it. The response is verified like a staple (signed by the issuer or by a responder it authorized, about this
+/// certificate, in its window), so the channel does not have to be a trusted one.
+pub trait OcspSource: Send + Sync {
+    fn fetch(&self, url: &str, request: &[u8]) -> Result<Vec<u8>>;
 }
 
 /// Revocation settings for a connection.
@@ -96,6 +110,12 @@ pub struct Revocation {
     pub mode: RevocationMode,
     crls: Vec<Arc<Crl>>,
     source: Option<Arc<dyn CrlSource>>,
+    ocsp: Option<Arc<dyn OcspSource>>,
+    /// The sources are asked about every certificate below the anchor, and hard-fail requires evidence for each.
+    chain: bool,
+    /// The sources are not asked now and missing evidence is not held against the chain: a later [`check_path`] with the
+    /// sources will do both (the async client, which asks them on a worker after the handshake).
+    deferred: bool,
 }
 
 impl Default for Revocation {
@@ -110,13 +130,15 @@ impl std::fmt::Debug for Revocation {
             .field("mode", &self.mode)
             .field("crls", &self.crls.len())
             .field("source", &self.source.is_some())
+            .field("ocsp", &self.ocsp.is_some())
+            .field("whole_chain", &self.chain)
             .finish()
     }
 }
 
 impl Revocation {
     pub fn new(mode: RevocationMode) -> Revocation {
-        Revocation { mode, crls: Vec::new(), source: None }
+        Revocation { mode, crls: Vec::new(), source: None, ocsp: None, chain: false, deferred: false }
     }
 
     pub fn off() -> Revocation {
@@ -141,6 +163,37 @@ impl Revocation {
     pub fn with_crl_source(mut self, source: Arc<dyn CrlSource>) -> Revocation {
         self.source = Some(source);
         self
+    }
+
+    /// Uses `source` to ask the leaf's OCSP responder when nothing else has settled it (before any [`CrlSource`]).
+    pub fn with_ocsp_source(mut self, source: Arc<dyn OcspSource>) -> Revocation {
+        self.ocsp = Some(source);
+        self
+    }
+
+    /// Asks the sources about every certificate below the trust anchor, not the leaf alone, and in hard-fail mode requires
+    /// valid evidence for each of them.
+    pub fn whole_chain(mut self) -> Revocation {
+        self.chain = true;
+        self
+    }
+
+    /// Whether a check would ask a source (and so may wait for the network).
+    pub fn fetches(&self) -> bool {
+        self.mode != RevocationMode::Off && (self.source.is_some() || self.ocsp.is_some())
+    }
+
+    /// The same settings with the sources left for later: a check with them asks no source and holds no missing evidence
+    /// against the chain (revocation that the staples or the supplied CRLs show still fails it), and the TLS handshake hands
+    /// out an [`Unchecked`] to be finished with the original settings where waiting is not a problem (the async client does
+    /// this on its worker pool, so that the executor's thread never waits for a responder).
+    pub fn deferred(&self) -> Revocation {
+        Revocation { deferred: true, ..self.clone() }
+    }
+
+    /// Whether the sources are left for later (see [`deferred`](Revocation::deferred)).
+    pub fn is_deferred(&self) -> bool {
+        self.deferred && self.fetches()
     }
 }
 
@@ -343,6 +396,11 @@ impl Crl {
         self.revoked.is_empty()
     }
 
+    /// The end of the list's window: `nextUpdate`, or a week after `thisUpdate` if it has none.
+    pub fn valid_until(&self) -> i64 {
+        self.next_update.unwrap_or(self.this_update + MAX_AGE_WITHOUT_NEXT_UPDATE)
+    }
+
     /// True if the list's window has ended at `now` (or, with no `nextUpdate`, is older than a week).
     pub fn is_stale(&self, now: i64) -> bool {
         match self.next_update {
@@ -442,6 +500,39 @@ fn parse_scope(value: &[u8]) -> Result<Scope> {
 
 // ------------------------------------------------------------------------------ OCSP
 
+/// A DER TLV.
+fn der(tag: u8, content: &[u8]) -> Vec<u8> {
+    let mut out = vec![tag];
+    let n = content.len();
+    if n < 0x80 {
+        out.push(n as u8);
+    } else {
+        let bytes = (n as u64).to_be_bytes();
+        let skip = bytes.iter().take_while(|&&b| b == 0).count();
+        out.push(0x80 | (8 - skip) as u8);
+        out.extend_from_slice(&bytes[skip..]);
+    }
+    out.extend_from_slice(content);
+    out
+}
+
+/// A DER `OCSPRequest` (RFC 6960 section 4.1.1) about `cert`, whose issuer is `issuer`: one request whose `CertID` uses
+/// SHA-1 (the hash of the issuer's name and of its key, which every responder takes and some take alone: RFC 5019), the
+/// certificate's serial number as it is written in it, no signature and no extensions. The same bytes as
+/// `openssl ocsp -no_nonce -reqout`.
+pub fn ocsp_request(cert: &Certificate, issuer: &Certificate) -> Vec<u8> {
+    let alg = der(asn1::TAG_SEQUENCE, &[der(asn1::TAG_OID, OID_HASH_SHA1), vec![0x05, 0x00]].concat());
+    let cert_id = der(
+        asn1::TAG_SEQUENCE,
+        &[alg, der(asn1::TAG_OCTET_STRING, &sha1::digest(&cert.issuer_der)), der(asn1::TAG_OCTET_STRING, &sha1::digest(&issuer.spki_key)), der(asn1::TAG_INTEGER, &cert.serial_content)]
+            .concat(),
+    );
+    let request = der(asn1::TAG_SEQUENCE, &cert_id);
+    let request_list = der(asn1::TAG_SEQUENCE, &request);
+    let tbs_request = der(asn1::TAG_SEQUENCE, &request_list);
+    der(asn1::TAG_SEQUENCE, &tbs_request)
+}
+
 fn ocsp_hash(oid: &[u8], data: &[u8]) -> Option<Vec<u8>> {
     Some(match oid {
         OID_HASH_SHA1 => sha1::digest(data).to_vec(),
@@ -464,6 +555,37 @@ impl ResponderId<'_> {
             ResponderId::Name(n) => *n == cert.subject_der.as_slice(),
             ResponderId::KeyHash(h) => *h == sha1::digest(&cert.spki_key).as_slice(),
         }
+    }
+}
+
+/// The end of the window of the first single response in an OCSP response (its `nextUpdate`, or a week after its
+/// `thisUpdate`), read without verifying anything: for a cache that keeps a response until then (it is verified again,
+/// window included, every time it is used). `None` if it does not parse or is not a successful basic response.
+pub fn ocsp_response_valid_until(response: &[u8]) -> Option<i64> {
+    let mut top = Der::new(response);
+    let mut resp = top.sequence().ok()?;
+    if resp.expect(0x0a).ok()?.content != [0] {
+        return None;
+    }
+    let response_bytes = resp.expect(0xa0).ok()?;
+    let mut rb = Der::new(response_bytes.content).sequence().ok()?;
+    if rb.expect(asn1::TAG_OID).ok()?.content != OID_OCSP_BASIC {
+        return None;
+    }
+    let basic = rb.expect(asn1::TAG_OCTET_STRING).ok()?.content;
+    let tbs = Der::new(basic).sequence().ok()?.expect(asn1::TAG_SEQUENCE).ok()?;
+    let mut data = Der::new(tbs.content);
+    data.optional(0xa0).ok()?;
+    data.next().ok()?; // responderID
+    data.next().ok()?; // producedAt
+    let mut singles = data.sequence().ok()?;
+    let mut sr = singles.sequence().ok()?;
+    sr.expect(asn1::TAG_SEQUENCE).ok()?; // certID
+    sr.next().ok()?; // certStatus
+    let this_update = asn1::parse_time(&sr.next().ok()?).ok()?;
+    match sr.optional(0xa0).ok()? {
+        Some(t) => asn1::parse_time(&Der::new(t.content).next().ok()?).ok(),
+        None => Some(this_update + MAX_AGE_WITHOUT_NEXT_UPDATE),
     }
 }
 
@@ -630,6 +752,23 @@ fn revoked_error(cert: &Certificate, via: &str, when: i64, reason: Option<u8>) -
     ))
 }
 
+/// A verified chain whose check was deferred ([`Revocation::deferred`]), with what it needs to be finished later: the
+/// path (leaf to anchor), the certificates as sent, and the staples that came with them. A TLS connection hands it out
+/// after its handshake (`ClientConnection::take_unchecked`, with the `net` feature).
+#[derive(Clone, Debug, Default)]
+pub struct Unchecked {
+    pub(crate) path: Vec<Vec<u8>>,
+    pub(crate) sent: Vec<Vec<u8>>,
+    pub(crate) staples: Vec<Option<Vec<u8>>>,
+}
+
+impl Unchecked {
+    /// Finishes the check with `cfg` (its sources asked now, so this may wait for the network) at `now` (Unix seconds).
+    pub fn check(&self, cfg: &Revocation, now: i64) -> Result<()> {
+        check_path(cfg, &self.path, &ChainEvidence { sent: &self.sent, staples: &self.staples }, now)
+    }
+}
+
 /// What the caller has about revocation of a certificate chain it has just verified (a TLS
 /// handshake, a code-signing chain): the certificates as they were sent, and the OCSP responses that
 /// came with them.
@@ -652,6 +791,8 @@ pub fn check_path(cfg: &Revocation, path: &[Vec<u8>], evidence: &ChainEvidence, 
     for k in 0..certs.len() - 1 {
         let (cert, issuer) = (&certs[k], &certs[k + 1]);
         let is_leaf = k == 0;
+        // the certificates the sources are asked about, and that hard-fail wants evidence for
+        let asked = is_leaf || cfg.chain;
         let mut good_by: Option<&'static str> = None;
         let mut staple_good = false;
         let mut problems: Vec<String> = Vec::new();
@@ -684,44 +825,64 @@ pub fn check_path(cfg: &Revocation, path: &[Vec<u8>], evidence: &ChainEvidence, 
             }
         }
 
-        if is_leaf && good_by.is_none() {
-            if let Some(source) = &cfg.source {
-                for url in cert.crl_uris.iter().filter(|u| u.starts_with("http://")) {
-                    match source.fetch(url) {
-                        Ok(crl) => match crl.check(cert, issuer, now) {
-                            Verdict::Good => {
-                                good_by = Some("a fetched CRL");
-                                break;
-                            }
-                            Verdict::Revoked { when, reason } => return Err(revoked_error(cert, "a fetched CRL", when, reason)),
-                            Verdict::Invalid(why) => problems.push(format!("CRL from {} rejected: {}", url, why)),
-                            Verdict::Unknown | Verdict::NotApplicable => problems.push(format!("CRL from {} does not cover the certificate", url)),
-                        },
-                        Err(e) => problems.push(format!("could not get the CRL at {}: {}", url, e)),
-                    }
-                }
-            }
+        if asked && good_by.is_none() && !cfg.deferred {
+            good_by = ask_sources(cfg, cert, issuer, now, &mut problems)?;
         }
 
-        if is_leaf {
-            let detail = if problems.is_empty() { String::new() } else { format!(" ({})", problems.join("; ")) };
-            if cert.must_staple && !staple_good {
-                return Err(Error::Certificate(format!(
-                    "bad_certificate_status_response: certificate [{}] requires a stapled OCSP response (TLS Feature: status_request) but the server did not send a valid one{}",
-                    cert.subject_summary(),
-                    detail
-                )));
-            }
-            if cfg.mode == RevocationMode::HardFail && good_by.is_none() {
-                return Err(Error::Certificate(format!(
-                    "bad_certificate_status_response: no valid evidence that certificate [{}] has not been revoked (no good OCSP staple, no covering CRL){}",
-                    cert.subject_summary(),
-                    detail
-                )));
-            }
+        let detail = if problems.is_empty() { String::new() } else { format!(" ({})", problems.join("; ")) };
+        if is_leaf && cert.must_staple && !staple_good {
+            return Err(Error::Certificate(format!(
+                "bad_certificate_status_response: certificate [{}] requires a stapled OCSP response (TLS Feature: status_request) but the server did not send a valid one{}",
+                cert.subject_summary(),
+                detail
+            )));
+        }
+        if asked && cfg.mode == RevocationMode::HardFail && good_by.is_none() && !cfg.deferred {
+            return Err(Error::Certificate(format!(
+                "bad_certificate_status_response: no valid evidence that certificate [{}] has not been revoked (no good OCSP response, no covering CRL){}",
+                cert.subject_summary(),
+                detail
+            )));
         }
     }
     Ok(())
+}
+
+/// Asks the configured sources about `cert`: its OCSP responders first, then its CRL distribution points (plain `http://`
+/// only, two of each at most). What settled it, if anything; an error if the evidence says it is revoked.
+fn ask_sources(cfg: &Revocation, cert: &Certificate, issuer: &Certificate, now: i64, problems: &mut Vec<String>) -> Result<Option<&'static str>> {
+    if let Some(source) = &cfg.ocsp {
+        let urls: Vec<&String> = cert.ocsp_uris.iter().filter(|u| u.starts_with("http://")).take(2).collect();
+        if !urls.is_empty() {
+            let request = ocsp_request(cert, issuer);
+            for url in urls {
+                match source.fetch(url, &request) {
+                    Ok(response) => match check_ocsp(&response, cert, issuer, now) {
+                        Verdict::Good => return Ok(Some("the certificate's OCSP responder")),
+                        Verdict::Revoked { when, reason } => return Err(revoked_error(cert, "the certificate's OCSP responder", when, reason)),
+                        Verdict::Unknown => problems.push(format!("the OCSP responder at {} does not know the certificate", url)),
+                        Verdict::NotApplicable => {}
+                        Verdict::Invalid(why) => problems.push(format!("OCSP response from {} rejected: {}", url, why)),
+                    },
+                    Err(e) => problems.push(format!("could not ask the OCSP responder at {}: {}", url, e)),
+                }
+            }
+        }
+    }
+    if let Some(source) = &cfg.source {
+        for url in cert.crl_uris.iter().filter(|u| u.starts_with("http://")).take(2) {
+            match source.fetch(url) {
+                Ok(crl) => match crl.check(cert, issuer, now) {
+                    Verdict::Good => return Ok(Some("a fetched CRL")),
+                    Verdict::Revoked { when, reason } => return Err(revoked_error(cert, "a fetched CRL", when, reason)),
+                    Verdict::Invalid(why) => problems.push(format!("CRL from {} rejected: {}", url, why)),
+                    Verdict::Unknown | Verdict::NotApplicable => problems.push(format!("CRL from {} does not cover the certificate", url)),
+                },
+                Err(e) => problems.push(format!("could not get the CRL at {}: {}", url, e)),
+            }
+        }
+    }
+    Ok(None)
 }
 
 // ------------------------------------------------------------------------------ fetching CRLs

@@ -15,8 +15,8 @@
 //! * `tlogs`, the transparency logs (Rekor) with the keys they sign checkpoints and entry timestamps with;
 //! * `certificateAuthorities`, Fulcio's certificate chains;
 //! * `timestampAuthorities`, the RFC 3161 time-stamp authorities' chains;
-//! * `ctlogs`, the Certificate Transparency logs (read, but nothing here uses them: signed certificate
-//!   timestamps are not checked).
+//! * `ctlogs`, the Certificate Transparency logs, whose signed certificate timestamps in Fulcio's certificates
+//!   [`crate::sigstore`] checks (with [`crate::ct`]).
 //!
 //! Every key and every authority has a validity period, [`Validity`]: from `start`, to `end` if there is
 //! one, both in whole seconds. An end of `2022-12-31T23:59:59.999Z` is read as 23:59:59 (the last whole
@@ -588,6 +588,43 @@ impl KeyRing {
         }
         Ok(ring)
     }
+
+    /// Reads npm's keys in the form Sigstore's TUF repository distributes them (the target `registry.npmjs.org/keys.json`,
+    /// see [`crate::tuf::NPM_KEYS_TARGET`]): `{"keys": [{"keyId", "keyUsage", "publicKey": {"rawBytes", "keyDetails",
+    /// "validFor"}}]}`, keeping the keys whose `keyUsage` is `usage` (`npm:attestations` for publish attestations,
+    /// `npm:signatures` for the registry's package signatures). Each key keeps the period that comes with it; the key id
+    /// must be the fingerprint of the key (as in [`KeyRing::from_npm_keys`]). A key of a type not verified here is counted
+    /// in [`skipped_keys`](KeyRing::skipped_keys).
+    pub fn from_tuf_npm_keys(json_bytes: &[u8], usage: &str) -> Result<KeyRing, Error> {
+        let root = json::parse(json_bytes)?;
+        if root.as_object().is_none() {
+            return malformed("$", "not an object");
+        }
+        let mut ring = KeyRing::new();
+        for (i, k) in array(&root, "keys", "$")?.iter().enumerate() {
+            let path = format!("$.keys[{i}]");
+            if text(k, "keyUsage", &path)? != usage {
+                continue;
+            }
+            let id = text(k, "keyId", &path)?;
+            let Some(public) = k.get("publicKey").filter(|p| p.as_object().is_some()) else { return malformed(&format!("{path}.publicKey"), "missing") };
+            let ppath = format!("{path}.publicKey");
+            let Some(want) = details_kind(text(public, "keyDetails", &ppath)?) else {
+                ring.skipped_keys += 1;
+                continue;
+            };
+            let spki = bytes(public, "rawBytes", &ppath)?;
+            let key = VerificationKey::from_spki(&spki).map_err(|e| Error::Malformed(format!("{ppath}.rawBytes: {e}")))?;
+            if key.kind() != want {
+                return malformed(&ppath, "keyDetails does not match the key");
+            }
+            if Some(id) != ssh_fingerprint(key.spki()).as_deref() {
+                return malformed(&format!("{path}.keyId"), "is not the fingerprint of the key");
+            }
+            ring.keys.push(RingKey { id: id.to_string(), key, valid_for: validity(public, &ppath)? });
+        }
+        Ok(ring)
+    }
 }
 
 #[cfg(test)]
@@ -732,6 +769,56 @@ mod tests {
         assert_eq!(new.valid_for, Validity::ALWAYS);
         assert_eq!(ring.with_id(&new.id).count(), 1);
         assert_eq!(ring.with_id("SHA256:nope").count(), 0);
+    }
+
+    /// npm's two keys in the form of Sigstore's TUF target `registry.npmjs.org/keys.json` (made here from the registry's
+    /// list, with the usages and periods that target gives them: the old key for package signatures from 1999 and for
+    /// attestations from December 2022, both to 29 January 2025; the new one for both from 13 January 2025).
+    fn tuf_npm_keys() -> String {
+        let doc = json::parse(NPM_KEYS).unwrap();
+        let keys = doc.get("keys").and_then(Value::as_array).unwrap();
+        let raw = |i: usize| keys[i].get("key").and_then(Value::as_str).unwrap().to_string();
+        let id = |i: usize| keys[i].get("keyid").and_then(Value::as_str).unwrap().to_string();
+        let entry = |i: usize, usage: &str, start: &str, end: Option<&str>| {
+            let end = end.map(|e| format!(", \"end\": \"{e}\"")).unwrap_or_default();
+            format!(
+                "{{\"keyId\": \"{}\", \"keyUsage\": \"{usage}\", \"publicKey\": {{\"rawBytes\": \"{}\", \"keyDetails\": \"PKIX_ECDSA_P256_SHA_256\", \"validFor\": {{\"start\": \"{start}\"{end}}}}}}}",
+                id(i),
+                raw(i)
+            )
+        };
+        let list = [
+            entry(0, "npm:signatures", "1999-01-01T00:00:00.000Z", Some("2025-01-29T00:00:00.000Z")),
+            entry(0, "npm:attestations", "2022-12-01T00:00:00.000Z", Some("2025-01-29T00:00:00.000Z")),
+            entry(1, "npm:signatures", "2025-01-13T00:00:00.000Z", None),
+            entry(1, "npm:attestations", "2025-01-13T00:00:00.000Z", None),
+        ];
+        format!("{{\"keys\": [{}]}}", list.join(", "))
+    }
+
+    #[test]
+    fn npm_keys_in_the_tuf_form_are_read_by_usage() {
+        let text = tuf_npm_keys();
+        let ring = KeyRing::from_tuf_npm_keys(text.as_bytes(), "npm:attestations").unwrap();
+        assert_eq!(ring.keys().len(), 2);
+        assert_eq!(ring.keys()[0].id, "SHA256:jl3bwswu80PjjokCgh0o2w5c2U4LhQAE57gj9cz1kzA");
+        assert_eq!(ring.keys()[0].valid_for, Validity { start: Some(1_669_852_800), end: Some(1_738_108_800) });
+        assert_eq!(ring.keys()[1].valid_for, Validity { start: Some(1_736_726_400), end: None });
+        // the same keys as the registry's own list
+        let registry = KeyRing::from_npm_keys(NPM_KEYS).unwrap();
+        for (a, b) in ring.keys().iter().zip(registry.keys()) {
+            assert_eq!((&a.id, a.key.spki()), (&b.id, b.key.spki()));
+        }
+        let signatures = KeyRing::from_tuf_npm_keys(text.as_bytes(), "npm:signatures").unwrap();
+        assert_eq!(signatures.keys()[0].valid_for.start, Some(915_148_800));
+        assert!(KeyRing::from_tuf_npm_keys(text.as_bytes(), "npm:other").unwrap().keys().is_empty());
+        // a key id that is not the key's fingerprint, details that are not the key's, a type not verified here
+        let wrong_id = text.replacen("SHA256:jl3bwswu", "SHA256:Jl3bwswu", 2);
+        assert!(KeyRing::from_tuf_npm_keys(wrong_id.as_bytes(), "npm:attestations").unwrap_err().to_string().contains("fingerprint"));
+        let wrong_details = text.replace("PKIX_ECDSA_P256_SHA_256", "PKIX_ECDSA_P384_SHA_384");
+        assert!(KeyRing::from_tuf_npm_keys(wrong_details.as_bytes(), "npm:attestations").unwrap_err().to_string().contains("does not match"));
+        let unknown = text.replace("PKIX_ECDSA_P256_SHA_256", "PKIX_SOMETHING_ELSE");
+        assert_eq!(KeyRing::from_tuf_npm_keys(unknown.as_bytes(), "npm:attestations").unwrap().skipped_keys, 2);
     }
 
     fn mutate(from: &[u8], old: &str, new: &str) -> Vec<u8> {

@@ -7,16 +7,21 @@
 //! Supported: key exchange with X25519, P-256 and P-384 (X25519 is offered first; a server that
 //! wants another group answers with a HelloRetryRequest and the client retries once),
 //! TLS_AES_128_GCM_SHA256, TLS_AES_256_GCM_SHA384, TLS_CHACHA20_POLY1305_SHA256, certificate chain
-//! + hostname validation, ALPN, KeyUpdate.
+//! + hostname validation, ALPN, KeyUpdate, and session resumption with the server's tickets and a fresh key exchange
+//! (`psk_dhe_ke`; on by default, see [`Resumption`] for what is kept, for how long and for whom).
 //! TLS 1.2, for servers that cannot do 1.3 (the npm registry was one, in 2026), with only what has no known weakness of its own:
 //! ECDHE, AEAD suites, the extended master secret required, the downgrade protection of TLS 1.3, no renegotiation, no
 //! resumption, and the same certificate checks (see [`tls12`]). [`ClientConfig::min_version`] turns it off.
-//! Not supported: TLS 1.1 and earlier, session resumption / 0-RTT, client certificates (an empty
-//! Certificate is sent if the server asks), post-quantum or finite-field key exchange groups.
+//! Not supported: TLS 1.1 and earlier, 0-RTT (early data, which can be replayed), resumption in TLS 1.2 and over QUIC,
+//! client certificates (an empty Certificate is sent if the server asks), post-quantum or finite-field key exchange groups.
 //! Revocation: a stapled OCSP response is requested and checked by default, CRLs can be supplied or
 //! fetched, and the policy is in [`ClientConfig::revocation`] (see [`crate::revocation`]).
 
 mod conn;
+pub(crate) mod session;
+mod split;
+#[cfg(test)]
+mod split_tests;
 pub(crate) mod handshake;
 pub(crate) mod messages;
 mod signature;
@@ -33,6 +38,8 @@ mod scripted;
 #[cfg(test)]
 mod fake_server;
 #[cfg(test)]
+mod resumption_tests;
+#[cfg(test)]
 mod hello_retry;
 #[cfg(tiny_https_fuzzing)]
 #[doc(hidden)]
@@ -41,6 +48,8 @@ pub mod fuzz_hooks;
 mod rfc8448;
 
 pub use conn::ClientConnection;
+pub use session::Resumption;
+pub use split::{Duplex, TlsReadHalf, TlsWriteHalf};
 pub(crate) use conn::RecvBuf;
 pub use suite::Suite;
 
@@ -88,6 +97,9 @@ pub struct ClientConfig {
     /// can do 1.3 does 1.3, and one that is made to look as if it cannot (by someone in the middle) is caught by the downgrade
     /// check of RFC 8446.
     pub min_version: TlsVersion,
+    /// TLS 1.3 session resumption: on by default, sessions shared by the clones of this configuration and used for at most an
+    /// hour after the certificate check they rest on; see [`Resumption`].
+    pub resumption: Resumption,
 }
 
 impl ClientConfig {
@@ -100,7 +112,14 @@ impl ClientConfig {
             revocation: Revocation::default(),
             rekey_after_records: None,
             min_version: TlsVersion::Tls12,
+            resumption: Resumption::new(),
         }
+    }
+
+    /// Sets how sessions are resumed (or [`Resumption::off`]); see [`resumption`](ClientConfig::resumption).
+    pub fn with_resumption(mut self, resumption: Resumption) -> ClientConfig {
+        self.resumption = resumption;
+        self
     }
 
     /// Sets the oldest TLS version spoken; see [`min_version`](ClientConfig::min_version).
@@ -131,6 +150,12 @@ impl ClientConfig {
     /// Uses the operating system's CA bundle (see [`sys::system_trust_store`](crate::sys::system_trust_store)).
     pub fn with_system_roots() -> Result<ClientConfig> {
         Ok(ClientConfig::new(crate::sys::system_trust_store()?))
+    }
+
+    /// A configuration that trusts the roots of the operating system's own store (the macOS Keychain's trust settings, the
+    /// Windows certificate store): see [`sys::native_trust_store`](crate::sys::native_trust_store).
+    pub fn with_native_roots() -> Result<ClientConfig> {
+        Ok(ClientConfig::new(crate::sys::native_trust_store()?))
     }
 
     /// Disables certificate validation. Anyone on the network path can then impersonate the server.
@@ -286,6 +311,11 @@ impl<S: Read + Write> TlsStream<S> {
         self.conn.protocol_version()
     }
 
+    /// Whether the handshake resumed a session (see [`Resumption`]).
+    pub fn is_resumed(&self) -> bool {
+        self.conn.is_resumed()
+    }
+
     /// The ALPN protocol the server selected, if any.
     pub fn alpn_protocol(&self) -> Option<&[u8]> {
         self.conn.alpn_protocol()
@@ -332,6 +362,24 @@ impl<S: Read + Write> TlsStream<S> {
         self.send_output()?;
         self.io.flush()?;
         Ok(())
+    }
+}
+
+impl<S: Duplex> TlsStream<S> {
+    /// Splits the stream into a reading half and a writing half, which two threads can use at once (one waits for what the
+    /// server sends while the other sends). They share the TLS state; reading never waits for a write that is blocked, and
+    /// records go out in the order they are made, with the answers to the server's KeyUpdates among them. Our Finished, if
+    /// it has not gone yet, is sent first. Dropping the writing half (or [`TlsWriteHalf::close`]) sends close_notify.
+    ///
+    /// The transport is split with [`Duplex::duplicate`] (for a socket, a second handle to it), so its options, such as
+    /// timeouts, are shared by both halves.
+    pub fn split(mut self) -> io::Result<(TlsReadHalf<S>, TlsWriteHalf<S>)> {
+        self.flush()?;
+        let reader = self.io.duplicate()?;
+        let writer = self.io.duplicate()?;
+        // what is left is spent, so dropping it (and the original handle) sends nothing
+        let conn = std::mem::replace(&mut self.conn, ClientConnection::spent());
+        Ok(split::halves(conn, reader, writer))
     }
 }
 

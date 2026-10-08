@@ -1,6 +1,7 @@
 //! RSA signature verification: PKCS#1 v1.5 (certificates) and PSS (TLS 1.3 CertificateVerify).
 //! Public-key operations only, so no constant-time requirements apply.
 
+use super::bignum::fixed::Field;
 use super::bignum::{self, Mont};
 use super::sha2::HashAlg;
 use crate::asn1::{self, Der};
@@ -8,11 +9,66 @@ use crate::verify_error::{Error, Result};
 use crate::util::ct_eq;
 
 pub struct RsaPublicKey {
-    mont: Mont,
-    e: Vec<u64>,
+    modulus: Modulus,
+    e: u64,
     /// Modulus length in bytes.
     k: usize,
     mod_bits: usize,
+}
+
+/// The modulus and its Montgomery constants: of a common size, in fixed-size arithmetic (no allocation, loops unrolled:
+/// about twice as fast, and so is making the constants); otherwise the general code.
+enum Modulus {
+    L16(Box<Field<16>>),
+    L24(Box<Field<24>>),
+    L32(Box<Field<32>>),
+    L48(Box<Field<48>>),
+    L64(Box<Field<64>>),
+    Other(Mont),
+}
+
+impl Modulus {
+    fn new(n: &[u64]) -> Modulus {
+        fn fixed<const N: usize>(n: &[u64]) -> Box<Field<N>> {
+            Box::new(Field::from_modulus(n.try_into().expect("N limbs")))
+        }
+        match n.len() {
+            16 => Modulus::L16(fixed(n)),
+            24 => Modulus::L24(fixed(n)),
+            32 => Modulus::L32(fixed(n)),
+            48 => Modulus::L48(fixed(n)),
+            64 => Modulus::L64(fixed(n)),
+            _ => Modulus::Other(Mont::new(n)),
+        }
+    }
+
+    /// s^e mod n, for s below n (as many limbs as n or fewer, the top ones not zero) and an odd e of at least 3.
+    fn pow(&self, s: &[u64], e: u64) -> Vec<u64> {
+        fn fixed<const N: usize>(f: &Field<N>, s: &[u64], e: u64) -> Vec<u64> {
+            let mut b = [0u64; N];
+            b[..s.len()].copy_from_slice(s);
+            f.pow_odd(&b, e).to_vec()
+        }
+        match self {
+            Modulus::L16(f) => fixed(f, s, e),
+            Modulus::L24(f) => fixed(f, s, e),
+            Modulus::L32(f) => fixed(f, s, e),
+            Modulus::L48(f) => fixed(f, s, e),
+            Modulus::L64(f) => fixed(f, s, e),
+            Modulus::Other(m) => m.from_mont(&m.pow(&m.to_mont(&m.fit(s)), &[e])),
+        }
+    }
+
+    fn limbs(&self) -> &[u64] {
+        match self {
+            Modulus::L16(f) => &f.m,
+            Modulus::L24(f) => &f.m,
+            Modulus::L32(f) => &f.m,
+            Modulus::L48(f) => &f.m,
+            Modulus::L64(f) => &f.m,
+            Modulus::Other(m) => m.modulus(),
+        }
+    }
 }
 
 impl RsaPublicKey {
@@ -44,7 +100,8 @@ impl RsaPublicKey {
         if e_bits < 2 || e_bits > 64 || e_limbs[0] & 1 == 0 {
             return Err(Error::Certificate("unsupported RSA public exponent".into()));
         }
-        Ok(RsaPublicKey { mont: Mont::new(&n_limbs), e: e_limbs, k: (mod_bits + 7) / 8, mod_bits })
+        let n_limbs = &n_limbs[..bignum::trimmed_len(&n_limbs)];
+        Ok(RsaPublicKey { modulus: Modulus::new(n_limbs), e: e_limbs[0], k: (mod_bits + 7) / 8, mod_bits })
     }
 
     /// Size of the modulus in bits.
@@ -58,11 +115,11 @@ impl RsaPublicKey {
             return None;
         }
         let s = bignum::from_be_bytes(sig);
-        if bignum::cmp(&s, self.mont.modulus()) != std::cmp::Ordering::Less {
+        if bignum::cmp(&s, self.modulus.limbs()) != std::cmp::Ordering::Less {
             return None;
         }
-        let sm = self.mont.to_mont(&self.mont.fit(&s));
-        let r = self.mont.from_mont(&self.mont.pow(&sm, &self.e));
+        let s = &s[..bignum::trimmed_len(&s)];
+        let r = self.modulus.pow(s, self.e);
         Some(bignum::to_be_bytes(&r, self.k))
     }
 
@@ -111,6 +168,17 @@ impl RsaPublicKey {
     /// structure in a CMS signature algorithm carries them: the message hash, the MGF1 hash and the
     /// salt length. The trailer field is always 0xbc.
     pub fn verify_pss_with(&self, alg: HashAlg, mgf_alg: HashAlg, salt_len: usize, msg: &[u8], sig: &[u8]) -> bool {
+        self.pss(alg, mgf_alg, Some(salt_len), msg, sig)
+    }
+
+    /// RSASSA-PSS with MGF1 of the same hash and whatever salt length the signature has (read from the encoded message, as
+    /// OpenSSL's `RSA_PSS_SALTLEN_AUTO` and Python `cryptography`'s `PSS.AUTO` do): what TUF's `rsassa-pss-sha256` scheme
+    /// is verified with, since signers have used both the hash length and the largest salt.
+    pub fn verify_pss_any_salt(&self, alg: HashAlg, msg: &[u8], sig: &[u8]) -> bool {
+        self.pss(alg, alg, None, msg, sig)
+    }
+
+    fn pss(&self, alg: HashAlg, mgf_alg: HashAlg, salt_len: Option<usize>, msg: &[u8], sig: &[u8]) -> bool {
         let Some(raw) = self.raw(sig) else { return false };
         let em_bits = self.mod_bits - 1;
         let em_len = (em_bits + 7) / 8;
@@ -119,8 +187,7 @@ impl RsaPublicKey {
             return false;
         }
         let h_len = alg.output_len();
-        let s_len = salt_len;
-        if em_len < h_len + s_len + 2 || em[em_len - 1] != 0xbc {
+        if em_len < h_len + salt_len.unwrap_or(0) + 2 || em[em_len - 1] != 0xbc {
             return false;
         }
         let db_len = em_len - h_len - 1;
@@ -133,6 +200,14 @@ impl RsaPublicKey {
         let mask = mgf1(mgf_alg, h, db_len);
         let mut db: Vec<u8> = masked_db.iter().zip(mask.iter()).map(|(a, b)| a ^ b).collect();
         db[0] &= top_mask;
+        // the salt is what follows the zeros and the 0x01; its length is fixed by the caller, or read here
+        let s_len = match salt_len {
+            Some(n) => n,
+            None => match db.iter().position(|&b| b != 0) {
+                Some(i) => db_len - i - 1,
+                None => return false,
+            },
+        };
         let ps_len = db_len - s_len - 1;
         if db[..ps_len].iter().any(|&b| b != 0) || db[ps_len] != 0x01 {
             return false;
@@ -197,6 +272,36 @@ mod tests {
         assert!(!k.verify_pss(HashAlg::Sha256, tv::RSA_MSG, &unhex(tv::RSA_PKCS1_SHA256_SIG)));
     }
 
+    /// Moduli of the common sizes take the fixed-size code and the others the general code, and both give the same
+    /// s^e mod n, for signatures with fewer limbs than n, zero and n - 1 among them.
+    #[test]
+    fn every_size_of_modulus_gives_the_same_powers() {
+        let mut seed = 0x9e37_79b9_7f4a_7c15u64;
+        let mut next = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        for limbs in [16usize, 17, 24, 31, 32, 33, 48, 64, 65] {
+            let mut n: Vec<u64> = (0..limbs).map(|_| next()).collect();
+            n[0] |= 1;
+            n[limbs - 1] |= 1 << 63;
+            let m = Modulus::new(&n);
+            assert_eq!(matches!(m, Modulus::Other(_)), ![16, 24, 32, 48, 64].contains(&limbs), "{limbs} limbs");
+            let general = Mont::new(&n);
+            let mut n_minus_1 = n.clone();
+            n_minus_1[0] -= 1;
+            for s in [vec![0u64], vec![1], vec![next(), next()], n_minus_1, (0..limbs).map(|i| if i + 1 == limbs { next() >> 1 } else { next() }).collect()] {
+                let s = &s[..bignum::trimmed_len(&s)];
+                for e in [3u64, 65537] {
+                    let want = general.from_mont(&general.pow(&general.to_mont(&general.fit(s)), &[e]));
+                    assert_eq!(m.pow(s, e), want, "{limbs} limbs, e = {e}");
+                }
+            }
+        }
+    }
+
     fn alg(name: &str) -> HashAlg {
         match name {
             "sha256" => HashAlg::Sha256,
@@ -243,6 +348,10 @@ mod tests {
                     let (hash, mgf, salt) = (alg(f[1]), alg(f[2]), f[3].parse::<usize>().unwrap());
                     let (msg, sig) = (unhex(f[4]), unhex(f[5]));
                     assert!(k.verify_pss_with(hash, mgf, salt, &msg, &sig), "{line:.60}");
+                    if hash == mgf {
+                        assert!(k.verify_pss_any_salt(hash, &msg, &sig), "{line:.60}");
+                        assert!(!k.verify_pss_any_salt(hash, b"another message", &sig));
+                    }
                     assert!(!k.verify_pss_with(hash, mgf, salt + 1, &msg, &sig));
                     assert!(salt == 0 || !k.verify_pss_with(hash, mgf, salt - 1, &msg, &sig));
                     for other in [HashAlg::Sha256, HashAlg::Sha384, HashAlg::Sha512] {

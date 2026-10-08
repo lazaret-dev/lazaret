@@ -42,6 +42,12 @@ const OID_RSA_ENCRYPTION: &[u8] = &[0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x
 const OID_EC_PUBLIC_KEY: &[u8] = &[0x2a, 0x86, 0x48, 0xce, 0x3d, 0x02, 0x01];
 const OID_CURVE_P256: &[u8] = &[0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07];
 const OID_CURVE_P384: &[u8] = &[0x2b, 0x81, 0x04, 0x00, 0x22];
+const OID_CURVE_P521: &[u8] = &[0x2b, 0x81, 0x04, 0x00, 0x23];
+const OID_RSASSA_PSS: &[u8] = &[0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x0a];
+const OID_MGF1: &[u8] = &[0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x08];
+const OID_SHA256: &[u8] = &[0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x01];
+const OID_SHA384: &[u8] = &[0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x02];
+const OID_SHA512: &[u8] = &[0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x03];
 /// id-Ed25519 (RFC 8410): both the signature algorithm and the public key algorithm.
 const OID_ED25519: &[u8] = &[0x2b, 0x65, 0x70];
 
@@ -101,6 +107,9 @@ pub enum PublicKey {
 #[non_exhaustive]
 pub enum SigAlg {
     RsaPkcs1(HashAlg),
+    /// RSASSA-PSS (RFC 4055) with this hash, MGF1 with the same hash and a salt as long as the hash: the only parameters
+    /// the Web PKI allows (Mozilla Root Store Policy section 5.1.1), and the only ones read.
+    RsaPss(HashAlg),
     Ecdsa(HashAlg),
     /// Ed25519 (RFC 8032, RFC 8410), which has no separate hash: the parameters of its
     /// AlgorithmIdentifier must be absent, not NULL.
@@ -115,6 +124,9 @@ impl SigAlg {
     /// rather than a detail that is quietly ignored.
     pub(crate) fn from_algorithm_identifier(content: &[u8]) -> Result<Option<SigAlg>> {
         let (oid, params) = parse_algorithm_identifier(content)?;
+        if oid == OID_RSASSA_PSS {
+            return Ok(pss_params(params).map(SigAlg::RsaPss));
+        }
         let Some(alg) = SigAlg::from_oid(oid) else { return Ok(None) };
         Ok(match params {
             None => Some(alg),
@@ -135,6 +147,54 @@ impl SigAlg {
             _ => return None,
         })
     }
+}
+
+/// The hash of RSASSA-PSS-params (RFC 4055 section 3.1) in the one shape the Web PKI uses (Mozilla Root Store Policy section
+/// 5.1.1, which gives the three encodings byte for byte): hashAlgorithm SHA-256, SHA-384 or SHA-512 (with NULL or absent
+/// parameters, RFC 4055 section 2.1), maskGenAlgorithm MGF1 with the same hash, saltLength the length of the hash, and
+/// trailerField left at its default (and so absent, in DER). Anything else is `None`: the SHA-1 defaults that an absent
+/// field means, a mask hash unlike the message hash, another salt length.
+fn pss_params(params: Option<Tlv>) -> Option<HashAlg> {
+    let p = params.filter(|p| p.tag == asn1::TAG_SEQUENCE)?;
+    let mut d = Der::new(p.content);
+    // [0] EXPLICIT hashAlgorithm
+    let hash = hash_of(explicit_sequence(d.optional(0xa0).ok()??.content)?)?;
+    // [1] EXPLICIT maskGenAlgorithm: MGF1 with an AlgorithmIdentifier of the same hash as its parameter
+    let (mgf, mgf_params) = parse_algorithm_identifier(explicit_sequence(d.optional(0xa1).ok()??.content)?).ok()?;
+    let mgf_hash = mgf_params.filter(|p| p.tag == asn1::TAG_SEQUENCE).and_then(|p| hash_of(p.content))?;
+    if mgf != OID_MGF1 || mgf_hash != hash {
+        return None;
+    }
+    // [2] EXPLICIT saltLength: the hash's length (32, 48 or 64, one content byte)
+    let mut salt = Der::new(d.optional(0xa2).ok()??.content);
+    if salt.expect(asn1::TAG_INTEGER).ok()?.content != [hash.output_len() as u8] || salt.finish().is_err() {
+        return None;
+    }
+    // [3] trailerField is DEFAULT 1, so in DER it is absent
+    d.finish().ok()?;
+    Some(hash)
+}
+
+/// The content of the one SEQUENCE that an EXPLICIT tag holds.
+fn explicit_sequence(content: &[u8]) -> Option<&[u8]> {
+    let mut d = Der::new(content);
+    let seq = d.expect(asn1::TAG_SEQUENCE).ok()?;
+    d.finish().ok()?;
+    Some(seq.content)
+}
+
+/// A SHA-2 hash named by an AlgorithmIdentifier's content, with NULL or absent parameters.
+fn hash_of(algorithm_identifier: &[u8]) -> Option<HashAlg> {
+    let (oid, params) = parse_algorithm_identifier(algorithm_identifier).ok()?;
+    if params.is_some_and(|p| p.tag != asn1::TAG_NULL || !p.content.is_empty()) {
+        return None;
+    }
+    Some(match oid {
+        OID_SHA256 => HashAlg::Sha256,
+        OID_SHA384 => HashAlg::Sha384,
+        OID_SHA512 => HashAlg::Sha512,
+        _ => return None,
+    })
 }
 
 /// One entry of a subjectAltName extension (RFC 5280 section 4.2.1.6). Entries of the kinds not
@@ -246,12 +306,21 @@ pub struct Certificate {
     signature: Vec<u8>,
     pub issuer_der: Vec<u8>,
     pub subject_der: Vec<u8>,
+    /// The issuer and subject names in the form [`name_key`] gives, which chain building compares.
+    issuer_key: Vec<u8>,
+    subject_key: Vec<u8>,
     /// Serial number without leading zero bytes (revocation lists and OCSP name certificates by it).
     pub(crate) serial: Vec<u8>,
+    /// The serial number's INTEGER content as it is in the certificate (an OCSP request repeats it as it is).
+    pub(crate) serial_content: Vec<u8>,
     /// The subjectPublicKey bits, which OCSP hashes to identify an issuer.
     pub(crate) spki_key: Vec<u8>,
+    /// The whole `SubjectPublicKeyInfo` (DER), which Certificate Transparency hashes to identify an issuer.
+    spki: Vec<u8>,
     /// `http(s)` and other URIs from the CRL distribution points extension.
     pub(crate) crl_uris: Vec<String>,
+    /// The OCSP responders the Authority Information Access extension names (`id-ad-ocsp` URIs).
+    pub(crate) ocsp_uris: Vec<String>,
     /// The certificate carries the TLS Feature extension asking for a stapled OCSP response.
     pub(crate) must_staple: bool,
     pub not_before: i64,
@@ -287,6 +356,106 @@ impl std::fmt::Debug for Certificate {
             .field("is_ca", &self.is_ca)
             .finish()
     }
+}
+
+/// A DER TLV.
+pub(crate) fn tlv(tag: u8, content: &[u8]) -> Vec<u8> {
+    let mut out = vec![tag];
+    let n = content.len();
+    if n < 0x80 {
+        out.push(n as u8);
+    } else {
+        let bytes = (n as u64).to_be_bytes();
+        let skip = bytes.iter().take_while(|&&b| b == 0).count();
+        out.push(0x80 | (8 - skip) as u8);
+        out.extend_from_slice(&bytes[skip..]);
+    }
+    out.extend_from_slice(content);
+    out
+}
+
+/// The text of a directory string of one of the types RFC 5280 section 7.1 compares as text, as UTF-8: UTF8String
+/// (which must be valid), PrintableString, IA5String and VisibleString (ASCII, read a byte per character), TeletexString
+/// (read as Latin-1, as OpenSSL does), BMPString (UTF-16 without surrogates) and UniversalString (UTF-32). `None` for
+/// another type, which is compared as it is, and for one that does not decode.
+fn directory_string(tag: u8, content: &[u8]) -> Option<Result<String>> {
+    let bad = || Err(Error::Asn1("a directory string that does not decode"));
+    Some(match tag {
+        0x0c => std::str::from_utf8(content).map(str::to_string).or_else(|_| bad()),
+        0x13 | 0x16 | 0x1a | 0x14 => Ok(content.iter().map(|&b| b as char).collect()),
+        0x1e if content.len() % 2 == 0 => content
+            .chunks(2)
+            .map(|c| char::from_u32(u16::from_be_bytes([c[0], c[1]]) as u32).ok_or(()))
+            .collect::<std::result::Result<String, ()>>()
+            .or_else(|_| bad()),
+        0x1c if content.len() % 4 == 0 => content
+            .chunks(4)
+            .map(|c| char::from_u32(u32::from_be_bytes([c[0], c[1], c[2], c[3]])).ok_or(()))
+            .collect::<std::result::Result<String, ()>>()
+            .or_else(|_| bad()),
+        0x1e | 0x1c => bad(),
+        _ => return None,
+    })
+}
+
+/// The canonical form of a Name (RFC 5280 section 7.1), as OpenSSL makes it to compare names (`x509_name_canon`): every
+/// attribute value of a text type becomes a UTF8String with leading and trailing white space removed, inner runs of
+/// white space made one space, and ASCII letters lower-cased (other characters are left as they are: no Unicode case
+/// folding or normalization); a value of another type is kept as it is; the attributes of a multi-valued RDN are put
+/// in DER order. The RDNs keep their order. An error for a name that does not parse or a string that does not decode.
+pub(crate) fn canonical_name(der: &[u8]) -> Result<Vec<u8>> {
+    let mut outer = Der::new(der);
+    let mut rdns = outer.sequence()?;
+    outer.finish()?;
+    let mut out = Vec::new();
+    while !rdns.is_empty() {
+        let set = rdns.expect(asn1::TAG_SET)?;
+        let mut atvs = Der::new(set.content);
+        let mut entries = Vec::new();
+        while !atvs.is_empty() {
+            let mut atv = atvs.sequence()?;
+            let oid = atv.expect(asn1::TAG_OID)?;
+            let value = atv.next()?;
+            atv.finish()?;
+            let value = match directory_string(value.tag, value.content) {
+                None => value.raw.to_vec(),
+                Some(text) => {
+                    let text = text?;
+                    let bytes = text.as_bytes();
+                    let space = |b: &u8| matches!(b, b' ' | b'\t' | b'\n' | 0x0b | 0x0c | b'\r');
+                    let start = bytes.iter().position(|b| !space(b)).unwrap_or(bytes.len());
+                    let end = bytes.iter().rposition(|b| !space(b)).map_or(start, |i| i + 1);
+                    let mut canon = Vec::with_capacity(end - start);
+                    let mut i = start;
+                    while i < end {
+                        if space(&bytes[i]) {
+                            canon.push(b' ');
+                            while i < end && space(&bytes[i]) {
+                                i += 1;
+                            }
+                        } else {
+                            canon.push(bytes[i].to_ascii_lowercase());
+                            i += 1;
+                        }
+                    }
+                    tlv(asn1::TAG_UTF8_STRING, &canon)
+                }
+            };
+            entries.push(tlv(asn1::TAG_SEQUENCE, &[oid.raw, &value].concat()));
+        }
+        if entries.is_empty() {
+            return Err(Error::Asn1("an empty RDN"));
+        }
+        entries.sort();
+        out.extend(tlv(asn1::TAG_SET, &entries.concat()));
+    }
+    Ok(out)
+}
+
+/// What chain building compares a name by: its canonical form, or (for a name that has none) its bytes, marked so that
+/// they cannot equal a canonical form (which is empty or starts with a SET tag).
+fn name_key(der: &[u8]) -> Vec<u8> {
+    canonical_name(der).unwrap_or_else(|_| [&[0xff][..], der].concat())
 }
 
 /// A short, log-safe rendering of a Name (`CN=example.com, O=Example Inc`) for error messages.
@@ -365,6 +534,7 @@ fn parse_public_key(spki: &Tlv) -> Result<PublicKey> {
         let curve = match params {
             Some(p) if p.tag == asn1::TAG_OID && p.content == OID_CURVE_P256 => Curve::P256,
             Some(p) if p.tag == asn1::TAG_OID && p.content == OID_CURVE_P384 => Curve::P384,
+            Some(p) if p.tag == asn1::TAG_OID && p.content == OID_CURVE_P521 => Curve::P521,
             _ => return Ok(PublicKey::Unsupported),
         };
         Ok(PublicKey::Ec { curve, point: key_bytes.to_vec() })
@@ -463,6 +633,30 @@ pub(crate) fn parse_crl_uris(value: &[u8]) -> Result<Vec<String>> {
     Ok(uris)
 }
 
+/// The OCSP responder URIs of an Authority Information Access extension: the `uniformResourceIdentifier` locations of the
+/// `id-ad-ocsp` access descriptions (RFC 5280 section 4.2.2.1).
+pub(crate) fn parse_ocsp_uris(value: &[u8]) -> Result<Vec<String>> {
+    const OID_AD_OCSP: &[u8] = &[0x2b, 0x06, 0x01, 0x05, 0x05, 0x07, 0x30, 0x01];
+    let mut outer = Der::new(value);
+    let mut list = outer.sequence()?;
+    outer.finish()?;
+    let mut uris = Vec::new();
+    while !list.is_empty() {
+        let mut ad = list.sequence()?;
+        let method = ad.expect(asn1::TAG_OID)?;
+        let location = ad.next()?;
+        ad.finish()?;
+        if method.content == OID_AD_OCSP && location.tag == 0x86 {
+            if let Ok(s) = std::str::from_utf8(location.content) {
+                if s.is_ascii() {
+                    uris.push(s.to_string());
+                }
+            }
+        }
+    }
+    Ok(uris)
+}
+
 /// The uniformResourceIdentifier entries (tag [6]) of a GeneralNames sequence body.
 pub(crate) fn general_name_uris(names: &[u8]) -> Result<Vec<String>> {
     let mut d = Der::new(names);
@@ -501,6 +695,7 @@ fn tls_feature_requires_status_request(value: &[u8]) -> Result<bool> {
 pub(crate) fn verify_signature(alg: Option<SigAlg>, key: &PublicKey, msg: &[u8], signature: &[u8]) -> bool {
     match (alg, key) {
         (Some(SigAlg::RsaPkcs1(h)), PublicKey::Rsa(k)) => k.verify_pkcs1(h, msg, signature),
+        (Some(SigAlg::RsaPss(h)), PublicKey::Rsa(k)) => k.verify_pss(h, msg, signature),
         (Some(SigAlg::Ecdsa(h)), PublicKey::Ec { curve, point }) => ecdsa::verify(*curve, point, h, msg, signature),
         (Some(SigAlg::Ed25519), PublicKey::Ed25519(k)) => ed25519::verify(k, msg, signature),
         _ => false,
@@ -575,9 +770,14 @@ impl Certificate {
             signature,
             issuer_der: issuer.raw.to_vec(),
             subject_der: subject.raw.to_vec(),
+            issuer_key: name_key(issuer.raw),
+            subject_key: name_key(subject.raw),
             serial,
+            serial_content: serial_tlv.content.to_vec(),
             spki_key,
+            spki: spki.raw.to_vec(),
             crl_uris: Vec::new(),
+            ocsp_uris: Vec::new(),
             must_staple: false,
             not_before,
             not_after,
@@ -743,7 +943,11 @@ impl Certificate {
             OID_TLS_FEATURE => {
                 self.must_staple = tls_feature_requires_status_request(value).unwrap_or(false);
             }
-            OID_SKI | OID_AKI | OID_AIA | OID_SCT_LIST | OID_CERT_POLICIES | OID_POLICY_MAPPINGS
+            OID_AIA => {
+                // advisory, like the CRL distribution points: where to ask about revocation
+                self.ocsp_uris = parse_ocsp_uris(value).unwrap_or_default();
+            }
+            OID_SKI | OID_AKI | OID_SCT_LIST | OID_CERT_POLICIES | OID_POLICY_MAPPINGS
             | OID_POLICY_CONSTRAINTS | OID_INHIBIT_ANY_POLICY => {}
             _ => {
                 if critical {
@@ -752,6 +956,16 @@ impl Certificate {
             }
         }
         Ok(())
+    }
+
+    /// The OCSP responders this certificate names (Authority Information Access), in the order it gives them.
+    pub fn ocsp_uris(&self) -> &[String] {
+        &self.ocsp_uris
+    }
+
+    /// The URIs of the CRL distribution points this certificate names.
+    pub fn crl_uris(&self) -> &[String] {
+        &self.crl_uris
     }
 
     /// Subject name in a short readable form, for diagnostics.
@@ -817,6 +1031,16 @@ impl Certificate {
     /// signing workflow or person this way.
     pub fn uris(&self) -> impl Iterator<Item = &str> {
         self.san.iter().filter_map(|n| if let GeneralName::Uri(s) = n { Some(s.as_str()) } else { None })
+    }
+
+    /// The DER of the certificate's `SubjectPublicKeyInfo`, as written.
+    pub fn spki_der(&self) -> &[u8] {
+        &self.spki
+    }
+
+    /// The DER of the `TBSCertificate`, the part the issuer signed.
+    pub fn tbs_der(&self) -> &[u8] {
+        &self.tbs
     }
 
     /// Every extension, in the order the certificate lists them, each with its critical flag.
@@ -985,10 +1209,12 @@ fn normalize_host(host: &str) -> String {
     h.to_ascii_lowercase()
 }
 
-/// RFC 6125-style matching of a DNS name against one SAN pattern.
+/// RFC 6125-style matching of a DNS name against one SAN pattern (RFC 9525 section 6.3): ASCII only on both sides (an
+/// internationalized name is compared as its A-labels, which [`crate::idna::to_ascii`] makes), case-insensitive, and a
+/// wildcard only as the whole left-most label of a pattern with at least two labels after it.
 pub fn dns_pattern_matches(pattern: &str, host: &str) -> bool {
     let pattern = pattern.strip_suffix('.').unwrap_or(pattern);
-    if pattern.is_empty() || host.is_empty() {
+    if pattern.is_empty() || host.is_empty() || !pattern.is_ascii() || !host.is_ascii() {
         return false;
     }
     if !pattern.contains('*') {
@@ -1040,12 +1266,26 @@ struct Root {
     /// Filled on first use; `None` inside means the certificate could not be parsed, in which case
     /// the anchor is simply never used.
     parsed: OnceLock<Option<Certificate>>,
+    /// Leaves issued (by their notBefore) after this time are not trusted under the anchor: how a root program winds a
+    /// CA down (Mozilla's CKA_NSS_SERVER_DISTRUST_AFTER). See [`TrustStore::add_der_distrusted_after`].
+    distrust_after: Option<i64>,
 }
 
 impl Root {
     fn certificate(&self) -> Option<&Certificate> {
         self.parsed.get_or_init(|| Certificate::from_der(&self.der).ok()).as_ref()
     }
+}
+
+/// What a root program says about a trust anchor beyond what its certificate says (see
+/// [`TrustStore::add_der_with_limits`] and the `mozilla-roots` feature).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct AnchorLimits {
+    /// Leaves issued (by their notBefore) after this time (Unix seconds) are not trusted under the anchor.
+    pub distrust_after: Option<i64>,
+    /// A NameConstraints extension value (DER) applied as if the anchor carried it, when it carries none of its own (as
+    /// NSS does for the few roots it limits in code).
+    pub name_constraints: Option<Vec<u8>>,
 }
 
 /// The set of trust anchors server certificates are validated against. Safe to share between
@@ -1103,10 +1343,10 @@ impl TrustStore {
         self.roots.is_empty()
     }
 
-    fn push_root(&mut self, der: &[u8], subject: Vec<u8>, parsed: OnceLock<Option<Certificate>>) {
+    fn push_root(&mut self, der: &[u8], subject: &[u8], parsed: OnceLock<Option<Certificate>>) {
         let idx = self.roots.len();
-        self.roots.push(Root { der: der.to_vec(), parsed });
-        self.by_subject.entry(subject).or_default().push(idx);
+        self.roots.push(Root { der: der.to_vec(), parsed, distrust_after: None });
+        self.by_subject.entry(name_key(subject)).or_default().push(idx);
     }
 
     /// Adds one certificate, parsing it completely now so that problems are reported to the caller.
@@ -1115,7 +1355,35 @@ impl TrustStore {
         let subject = cert.subject_der.clone();
         let parsed = OnceLock::new();
         let _ = parsed.set(Some(cert));
-        self.push_root(der, subject, parsed);
+        self.push_root(der, &subject, parsed);
+        Ok(())
+    }
+
+    /// Adds one certificate as [`add_der`](TrustStore::add_der) does, as an anchor only for leaves issued (by their
+    /// notBefore) at or before `time` (Unix seconds): a chain whose leaf is newer is refused under this anchor. This is
+    /// how a root program stops trusting a CA without breaking what it issued before (Mozilla's "distrust after" date,
+    /// which the `mozilla-roots` feature carries over).
+    pub fn add_der_distrusted_after(&mut self, der: &[u8], time: i64) -> Result<()> {
+        self.add_der_with_limits(der, &AnchorLimits { distrust_after: Some(time), name_constraints: None })
+    }
+
+    /// Adds one certificate as [`add_der`](TrustStore::add_der) does, with the limits a root program puts on it beyond
+    /// what the certificate itself says. An error if the certificate, or the name constraints, do not parse.
+    pub fn add_der_with_limits(&mut self, der: &[u8], limits: &AnchorLimits) -> Result<()> {
+        let mut cert = Certificate::from_der(der)?;
+        if let Some(nc) = &limits.name_constraints {
+            let imposed = parse_name_constraints(nc)?;
+            if cert.name_constraints.is_none() {
+                cert.name_constraints = Some(imposed);
+            }
+        }
+        let subject = cert.subject_der.clone();
+        let parsed = OnceLock::new();
+        let _ = parsed.set(Some(cert));
+        self.push_root(der, &subject, parsed);
+        if let Some(root) = self.roots.last_mut() {
+            root.distrust_after = limits.distrust_after;
+        }
         Ok(())
     }
 
@@ -1129,7 +1397,7 @@ impl TrustStore {
             if block.label == "CERTIFICATE" || block.label == "TRUSTED CERTIFICATE" {
                 if let Ok(subject) = peek_subject(&block.data) {
                     let subject = subject.to_vec();
-                    self.push_root(&block.data, subject, OnceLock::new());
+                    self.push_root(&block.data, &subject, OnceLock::new());
                     added += 1;
                 }
             }
@@ -1137,9 +1405,9 @@ impl TrustStore {
         added
     }
 
-    /// The parsed anchors whose subject name equals `name`.
-    fn anchors_for<'a>(&'a self, name: &[u8]) -> impl Iterator<Item = &'a Certificate> + 'a {
-        self.by_subject.get(name).into_iter().flatten().filter_map(move |&i| self.roots[i].certificate())
+    /// The parsed anchors whose subject name matches the name whose [`name_key`] is `key`, with their distrust dates.
+    fn anchors_for<'a>(&'a self, key: &[u8]) -> impl Iterator<Item = (&'a Certificate, Option<i64>)> + 'a {
+        self.by_subject.get(key).into_iter().flatten().filter_map(move |&i| self.roots[i].certificate().map(|c| (c, self.roots[i].distrust_after)))
     }
 
     /// Validates a server-presented chain (leaf first, DER encoded) for `hostname` at time `now`
@@ -1245,7 +1513,7 @@ impl TrustStore {
     ) -> bool {
         let Some(&cur) = path.last() else { return false };
         let mut candidates = 0usize;
-        for root in self.anchors_for(&cur.issuer_der) {
+        for (root, distrust_after) in self.anchors_for(&cur.issuer_key) {
             *attempts += 1;
             if *attempts > MAX_PATH_ATTEMPTS {
                 return false;
@@ -1256,7 +1524,10 @@ impl TrustStore {
                 continue;
             }
             path.push(root);
-            match check_path(path, opts, self.min_rsa_bits) {
+            let distrusted = distrust_after.filter(|&t| path[0].not_before > t).map(|t| {
+                path_err(root, &format!("the leaf was issued ({}) after the date ({}) from which certificates are not trusted under the root", utc_date(path[0].not_before), utc_date(t)))
+            });
+            match distrusted.map_or_else(|| check_path(path, opts, self.min_rsa_bits), Err) {
                 Ok(()) => return true,
                 Err(e) => *last_err = Some(e),
             }
@@ -1267,7 +1538,7 @@ impl TrustStore {
             return false;
         }
         for (i, ic) in inters.iter().enumerate() {
-            if used[i] || ic.subject_der != cur.issuer_der || ic.is_self_issued() {
+            if used[i] || ic.subject_key != cur.issuer_key || ic.is_self_issued() {
                 continue;
             }
             *attempts += 1;
@@ -1294,6 +1565,22 @@ impl TrustStore {
         }
         false
     }
+}
+
+/// A Unix time as a UTC date and time (`2026-04-15T23:59:59Z`), for messages.
+fn utc_date(t: i64) -> String {
+    let (days, secs) = (t.div_euclid(86_400), t.rem_euclid(86_400));
+    // civil_from_days (Howard Hinnant's algorithm)
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = yoe + era * 400 + i64::from(m <= 2);
+    format!("{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}Z", secs / 3600, secs / 60 % 60, secs % 60)
 }
 
 /// A certificate error that names the certificate it is about.
@@ -2426,6 +2713,291 @@ mod tests {
         ed_inter.verify_signed_by(&ed_root).unwrap();
         assert!(ed_leaf.verify_signed_by(&ed_root).is_err(), "the root did not sign the leaf");
         assert!(ed_root.verify_signed_by(&ed_inter).is_err());
+    }
+
+    // ---- B-34: names (tools/gen_name_fixtures.py) and host names
+
+    /// A Name of RDNs, each a list of (attribute type's last OID byte under 2.5.4, string tag, value).
+    fn name_der(rdns: &[&[(u8, u8, &[u8])]]) -> Vec<u8> {
+        let sets: Vec<u8> = rdns
+            .iter()
+            .flat_map(|atvs| {
+                let inner: Vec<u8> = atvs.iter().flat_map(|&(t, tag, v)| tlv(0x30, &[tlv(0x06, &[0x55, 0x04, t]), tlv(tag, v)].concat())).collect();
+                tlv(0x31, &inner)
+            })
+            .collect();
+        tlv(0x30, &sets)
+    }
+
+    #[test]
+    fn names_compare_as_rfc_5280_and_openssl_compare_them() {
+        const CN: u8 = 3;
+        const O: u8 = 10;
+        const OU: u8 = 11;
+        let same = |a: &[u8], b: &[u8]| canonical_name(a).unwrap() == canonical_name(b).unwrap();
+        let base = name_der(&[&[(O, 0x13, b"Example Org")], &[(CN, 0x13, b"Test CA")]]);
+        // other string types, case, white space at the ends and inside
+        let bmp: Vec<u8> = "test ca".encode_utf16().flat_map(|u| u.to_be_bytes()).collect();
+        let universal: Vec<u8> = "TEST CA".chars().flat_map(|c| (c as u32).to_be_bytes()).collect();
+        for other in [
+            name_der(&[&[(O, 0x0c, b"example org")], &[(CN, 0x0c, b"TEST CA")]]),
+            name_der(&[&[(O, 0x0c, b"  Example \t\n Org ")], &[(CN, 0x16, b"Test  CA")]]),
+            name_der(&[&[(O, 0x14, b"EXAMPLE ORG")], &[(CN, 0x1e, &bmp)]]),
+            name_der(&[&[(O, 0x1a, b"Example Org")], &[(CN, 0x1c, &universal)]]),
+        ] {
+            assert!(same(&base, &other), "{}", describe_name(&other));
+        }
+        // the order of RDNs matters; the order inside a multi-valued RDN does not
+        assert!(!same(&base, &name_der(&[&[(CN, 0x13, b"Test CA")], &[(O, 0x13, b"Example Org")]])));
+        assert!(same(&name_der(&[&[(O, 0x0c, b"A"), (OU, 0x0c, b"B")]]), &name_der(&[&[(OU, 0x0c, b"b"), (O, 0x0c, b"a")]])));
+        // different text, a missing RDN, an attribute of another type
+        for other in [
+            name_der(&[&[(O, 0x13, b"Example Org")], &[(CN, 0x13, b"Test CA 2")]]),
+            name_der(&[&[(CN, 0x13, b"Test CA")]]),
+            name_der(&[&[(OU, 0x13, b"Example Org")], &[(CN, 0x13, b"Test CA")]]),
+            name_der(&[&[(O, 0x13, b"ExampleOrg")], &[(CN, 0x13, b"Test CA")]]),
+        ] {
+            assert!(!same(&base, &other), "{}", describe_name(&other));
+        }
+        // only ASCII letters are folded (as OpenSSL does): no Unicode case folding, no normalization
+        let upper = name_der(&[&[(CN, 0x0c, "Über".as_bytes())]]);
+        assert!(same(&upper, &name_der(&[&[(CN, 0x0c, "ÜBER".as_bytes())]])));
+        assert!(!same(&upper, &name_der(&[&[(CN, 0x0c, "über".as_bytes())]])));
+        assert!(!same(&upper, &name_der(&[&[(CN, 0x0c, "U\u{308}ber".as_bytes())]])));
+        // a type that is not text (NumericString) is compared as it is, its tag included
+        assert!(!same(&name_der(&[&[(5, 0x12, b"123")]]), &name_der(&[&[(5, 0x13, b"123")]])));
+        // what does not decode has no canonical form, and is then compared by its bytes alone
+        assert!(canonical_name(&name_der(&[&[(CN, 0x0c, b"\xff\xfe")]])).is_err());
+        assert!(canonical_name(&name_der(&[&[(CN, 0x1e, b"\xd8\x00")]])).is_err(), "a lone surrogate in a BMPString");
+        assert!(canonical_name(&name_der(&[&[]])).is_err(), "an empty RDN");
+        let broken = name_der(&[&[(CN, 0x0c, b"\xff")]]);
+        assert_eq!(name_key(&broken), [&[0xff][..], &broken].concat());
+        assert_ne!(name_key(&broken), name_key(&name_der(&[&[(CN, 0x0c, b"\xff\xfe")]])));
+        // the empty name is a name
+        assert_eq!(canonical_name(&[0x30, 0x00]).unwrap(), Vec::<u8>::new());
+    }
+
+    #[test]
+    fn a_chain_whose_names_are_written_differently_is_built_like_openssl_builds_it() {
+        let ts = store(&[fixture!("nm_root")]);
+        // issuer names that differ from their issuer's subject in string type, case and white space
+        let leaf = ts.verify_server_chain(&[fixture!("nm_leaf"), fixture!("nm_inter")], "name.example.test", NOW).unwrap();
+        assert_ne!(leaf.issuer_der, Certificate::from_der(&fixture!("nm_inter")).unwrap().subject_der);
+        ts.verify_server_chain(&[fixture!("nm_leaf_u_ascii"), fixture!("nm_inter_u")], "name.example.test", NOW).unwrap();
+        // Ü is not ü: refused, as OpenSSL refuses it
+        let msg = err_text(ts.verify_server_chain(&[fixture!("nm_leaf_u_lower"), fixture!("nm_inter_u")], "name.example.test", NOW));
+        assert!(msg.contains("is neither a trusted root nor sent by the server"), "{msg}");
+        // a name that matches does not make a signature: a root with the same name and another key is tried and refused,
+        // and with both in the store the right one is found
+        let twin = store(&[fixture!("nm_root_twin")]);
+        let msg = err_text(twin.verify_server_chain(&[fixture!("nm_leaf"), fixture!("nm_inter")], "name.example.test", NOW));
+        assert!(msg.contains("signature"), "{msg}");
+        let both = store(&[fixture!("nm_root_twin"), fixture!("nm_root")]);
+        both.verify_server_chain(&[fixture!("nm_leaf"), fixture!("nm_inter")], "name.example.test", NOW).unwrap();
+        // and the bulk loader, which reads only the subject, finds the anchor the same way
+        let mut bulk = TrustStore::empty();
+        assert_eq!(bulk.add_pem(include_str!("../tests/data/nm_root.pem")), 1);
+        bulk.verify_server_chain(&[fixture!("nm_leaf"), fixture!("nm_inter")], "name.example.test", NOW).unwrap();
+    }
+
+    #[test]
+    fn a_root_programs_limits_on_an_anchor_apply() {
+        let chain = [fixture!("nm_leaf"), fixture!("nm_inter")];
+        let root = fixture!("nm_root");
+        // name constraints imposed on an anchor that has none of its own (NSS does this for a few roots)
+        let nc = |dns: &str| tlv(0x30, &tlv(0xa0, &tlv(0x30, &tlv(0x82, dns.as_bytes()))));
+        let with = |limits: AnchorLimits| {
+            let mut ts = TrustStore::empty();
+            ts.add_der_with_limits(&root, &limits).unwrap();
+            ts.verify_server_chain(&chain, "name.example.test", NOW)
+        };
+        with(AnchorLimits { name_constraints: Some(nc(".example.test")), ..Default::default() }).unwrap();
+        let msg = err_text(with(AnchorLimits { name_constraints: Some(nc(".tr")), ..Default::default() }));
+        assert!(msg.contains("is not permitted by name constraints of") && msg.contains("Name Test Root"), "{msg}");
+        // a distrust date: leaves issued after it are refused, at it or before accepted
+        let issued = Certificate::from_der(&chain[0]).unwrap().not_before;
+        with(AnchorLimits { distrust_after: Some(issued), ..Default::default() }).unwrap();
+        let msg = err_text(with(AnchorLimits { distrust_after: Some(issued - 1), ..Default::default() }));
+        assert!(msg.contains("after the date") && msg.contains("2020-01-01T00:00:00Z"), "{msg}");
+        // both, and nothing
+        assert!(with(AnchorLimits { distrust_after: Some(issued), name_constraints: Some(nc(".tr")) }).is_err());
+        with(AnchorLimits::default()).unwrap();
+        // constraints that do not parse are an error when the anchor is added
+        let mut ts = TrustStore::empty();
+        assert!(ts.add_der_with_limits(&root, &AnchorLimits { name_constraints: Some(vec![0x30, 0x03, 0x01]), ..Default::default() }).is_err());
+        assert!(ts.is_empty());
+        // an anchor with name constraints of its own keeps them, and the imposed ones are not added (as in NSS)
+        let mut ts = TrustStore::empty();
+        ts.add_der_with_limits(&fixture!("cs_inter_nc"), &AnchorLimits { name_constraints: Some(nc(".tr")), ..Default::default() }).unwrap();
+        ts.verify_chain(&[fixture!("cs_nc_ok")], &code_signing(NOW)).unwrap();
+        assert!(err_text(ts.verify_chain(&[fixture!("cs_nc_bad_ip")], &code_signing(NOW))).contains("not permitted by name constraints"));
+        assert_eq!(utc_date(0), "1970-01-01T00:00:00Z");
+        assert_eq!(utc_date(1_776_297_599), "2026-04-15T23:59:59Z");
+        assert_eq!(utc_date(951_782_400), "2000-02-29T00:00:00Z");
+    }
+
+    #[test]
+    fn host_name_matching_edge_cases() {
+        // (SAN pattern, host, matches): RFC 6125 section 6.4 and RFC 9525 section 6.3, and what this library adds
+        for (pattern, host, want) in [
+            ("example.com", "example.com", true),
+            ("example.com", "EXAMPLE.COM", true),
+            ("example.com.", "example.com", true),
+            ("*.example.com", "a.example.com", true),
+            ("*.example.com", "A.Example.Com", true),
+            ("*.example.com", "xn--bcher-kva.example.com", true),
+            ("*.example.com", "example.com", false),
+            ("*.example.com", ".example.com", false),
+            ("*.example.com", "a.b.example.com", false),
+            ("*.example.com", "aexample.com", false),
+            ("*.example.com", "a.example.com.evil", false),
+            ("*.com", "example.com", false),
+            ("*", "example", false),
+            ("*.*.example.com", "a.b.example.com", false),
+            ("a*.example.com", "ab.example.com", false),
+            ("*a.example.com", "ba.example.com", false),
+            ("xn--*.example.com", "xn--bcher-kva.example.com", false),
+            ("a.*.example.com", "a.b.example.com", false),
+            ("example.com", "example.com.evil", false),
+            ("example.com", "www.example.com", false),
+            ("www.example.com", "example.com", false),
+            ("", "example.com", false),
+            ("example.com", "", false),
+            ("bücher.example", "bücher.example", false),
+        ] {
+            assert_eq!(dns_pattern_matches(pattern, &normalize_host(host)), want, "{pattern:?} for {host:?}");
+        }
+        // an IP address is matched against iPAddress names only, and only in the same family
+        let mut ip_leaf = Certificate::from_der(&fixture!("leaf_p384")).unwrap();
+        ip_leaf.dns_names = vec!["127.0.0.1".into(), "*.example.test".into()];
+        ip_leaf.ip_addrs = vec![vec![192, 0, 2, 1], [0u8; 15].iter().copied().chain([1]).collect()];
+        assert!(!ip_leaf.matches_hostname("127.0.0.1"), "a dNSName that looks like an address is not an address");
+        assert!(ip_leaf.matches_hostname("192.0.2.1"));
+        assert!(ip_leaf.matches_hostname("::1"));
+        assert!(!ip_leaf.matches_hostname("::ffff:192.0.2.1"), "no mapping between the families");
+        assert!(ip_leaf.matches_hostname("x.example.test") && !ip_leaf.matches_hostname("192.0.2.1.example"));
+        assert!(!ip_leaf.matches_hostname("[::1]"));
+        assert!(!ip_leaf.matches_hostname("192.0.2.1."), "an address with a dot after it is not an address, and no name");
+    }
+
+    // ---- B-33: ECDSA P-521 and RSASSA-PSS certificate signatures (tools/gen_algorithm_fixtures.py)
+
+    #[test]
+    fn a_p521_chain_verifies_and_a_changed_signature_does_not() {
+        let ts = store(&[fixture!("alg_p521_root")]);
+        let (leaf, inter) = (fixture!("alg_p521_leaf"), fixture!("alg_p521_inter"));
+        let got = ts.verify_server_chain(&[leaf.clone(), inter.clone()], "p521.example.test", NOW).unwrap();
+        assert!(matches!(got.public_key, PublicKey::Ec { curve: Curve::P521, .. }));
+        assert_eq!(got.sig_alg, Some(SigAlg::Ecdsa(HashAlg::Sha384)));
+        let root = Certificate::from_der(&fixture!("alg_p521_root")).unwrap();
+        let inter_c = Certificate::from_der(&inter).unwrap();
+        assert!(matches!(root.public_key, PublicKey::Ec { curve: Curve::P521, .. }));
+        assert_eq!(inter_c.sig_alg, Some(SigAlg::Ecdsa(HashAlg::Sha512)));
+        inter_c.verify_signed_by(&root).unwrap();
+        root.verify_signed_by(&root).unwrap();
+        // the P-521 root's signature on the intermediate, damaged in its last byte and in s's first
+        for at in [inter.len() - 1, inter.len() - 60] {
+            let mut bad = inter.clone();
+            bad[at] ^= 1;
+            let msg = err_text(ts.verify_server_chain(&[leaf.clone(), bad], "p521.example.test", NOW));
+            assert!(msg.contains("signature"), "{at}: {msg}");
+        }
+        // and the root does not verify what the intermediate signed
+        assert!(Certificate::from_der(&leaf).unwrap().verify_signed_by(&root).is_err());
+    }
+
+    #[test]
+    fn rsa_pss_chains_with_the_web_pki_parameters_verify() {
+        let ts = store(&[fixture!("alg_pss_root")]);
+        let inter = fixture!("alg_pss_inter");
+        assert_eq!(Certificate::from_der(&inter).unwrap().sig_alg, Some(SigAlg::RsaPss(HashAlg::Sha256)));
+        for (leaf, hash) in [(fixture!("alg_pss_leaf"), HashAlg::Sha512), (fixture!("alg_pss_leaf_sha384"), HashAlg::Sha384)] {
+            let got = ts.verify_server_chain(&[leaf.clone(), inter.clone()], "pss.example.test", NOW).unwrap();
+            assert_eq!(got.sig_alg, Some(SigAlg::RsaPss(hash)));
+            let mut bad = leaf.clone();
+            *bad.last_mut().unwrap() ^= 1;
+            assert!(err_text(ts.verify_server_chain(&[bad, inter.clone()], "pss.example.test", NOW)).contains("signature"));
+        }
+        // a PKCS#1 v1.5 verification of a PSS signature, and the reverse, fail: the algorithm is the certificate's
+        let leaf = Certificate::from_der(&fixture!("alg_pss_leaf")).unwrap();
+        let inter_c = Certificate::from_der(&inter).unwrap();
+        assert!(verify_signature(Some(SigAlg::RsaPss(HashAlg::Sha512)), &inter_c.public_key, &leaf.tbs, &leaf.signature));
+        assert!(!verify_signature(Some(SigAlg::RsaPkcs1(HashAlg::Sha512)), &inter_c.public_key, &leaf.tbs, &leaf.signature));
+        assert!(!verify_signature(Some(SigAlg::RsaPss(HashAlg::Sha384)), &inter_c.public_key, &leaf.tbs, &leaf.signature));
+        let root = Certificate::from_der(&fixture!("alg_pss_root")).unwrap();
+        assert!(!verify_signature(Some(SigAlg::RsaPss(HashAlg::Sha256)), &root.public_key, &root.tbs, &root.signature));
+    }
+
+    #[test]
+    fn rsa_pss_with_other_parameters_is_not_read() {
+        // real signatures (OpenSSL verifies both) with parameters the Web PKI does not allow: no algorithm, so refused
+        let ts = store(&[fixture!("alg_pss_root")]);
+        for name in ["alg_pss_leaf_salt20", "alg_pss_leaf_mgf_sha512"] {
+            let der = match name {
+                "alg_pss_leaf_salt20" => fixture!("alg_pss_leaf_salt20"),
+                _ => fixture!("alg_pss_leaf_mgf_sha512"),
+            };
+            assert_eq!(Certificate::from_der(&der).unwrap().sig_alg, None, "{name}");
+            let msg = err_text(ts.verify_server_chain(&[der, fixture!("alg_pss_inter")], "pss.example.test", NOW));
+            assert!(msg.contains("unsupported certificate signature algorithm"), "{name}: {msg}");
+        }
+    }
+
+    #[test]
+    fn the_rsa_pss_parameters_are_read_only_in_the_web_pki_shapes() {
+        let unhex = crate::util::unhex;
+        // Mozilla Root Store Policy 5.1.1, byte for byte (the whole AlgorithmIdentifier; its content is from byte 2)
+        let mozilla = [
+            ("304106092a864886f70d01010a3034a00f300d06096086480165030402010500a11c301a06092a864886f70d010108300d06096086480165030402010500a203020120", HashAlg::Sha256),
+            ("304106092a864886f70d01010a3034a00f300d06096086480165030402020500a11c301a06092a864886f70d010108300d06096086480165030402020500a203020130", HashAlg::Sha384),
+            ("304106092a864886f70d01010a3034a00f300d06096086480165030402030500a11c301a06092a864886f70d010108300d06096086480165030402030500a203020140", HashAlg::Sha512),
+        ];
+        for (hex, hash) in mozilla {
+            let der = unhex(hex);
+            assert_eq!(SigAlg::from_algorithm_identifier(&der[2..]).unwrap(), Some(SigAlg::RsaPss(hash)), "{hex}");
+        }
+        // the hash AlgorithmIdentifiers without their NULL (RFC 4055 section 2.1 allows both)
+        let bare = "06092a864886f70d01010a3030a00d300b0609608648016503040201a11a301806092a864886f70d010108300b0609608648016503040201a203020120";
+        assert_eq!(SigAlg::from_algorithm_identifier(&unhex(bare)).unwrap(), Some(SigAlg::RsaPss(HashAlg::Sha256)));
+        let content = |hex: &str| unhex(hex)[2..].to_vec();
+        let sha256 = content(mozilla[0].0);
+        let edits: [(&str, Vec<u8>); 8] = [
+            // no parameters, NULL parameters, empty parameters (all the SHA-1 defaults)
+            ("absent", unhex("06092a864886f70d01010a")),
+            ("NULL", unhex("06092a864886f70d01010a0500")),
+            ("the SHA-1 defaults", unhex("06092a864886f70d01010a3000")),
+            // salt 20 (the default) and 0
+            ("salt 33", { let mut d = sha256.clone(); let n = d.len(); d[n - 1] = 0x21; d }),
+            ("salt 0", { let mut d = sha256.clone(); let n = d.len(); d[n - 1] = 0x00; d }),
+            // a mask hash of SHA-384 under a message hash of SHA-256
+            ("mask hash differs", { let mut d = sha256.clone(); let at = d.windows(9).rposition(|w| w == [0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x01]).unwrap(); d[at + 8] = 0x02; d }),
+            // trailerField 1 written out (DER leaves a default out)
+            ("trailer field written", unhex("06092a864886f70d01010a3039a00f300d06096086480165030402010500a11c301a06092a864886f70d010108300d06096086480165030402010500a203020120a303020101")),
+            // a mask generation function other than MGF1 (1.2.840.113549.1.1.9)
+            ("not MGF1", { let mut d = sha256.clone(); let at = d.windows(9).position(|w| w == [0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x08]).unwrap(); d[at + 8] = 0x09; d }),
+        ];
+        for (what, der) in edits {
+            assert_eq!(SigAlg::from_algorithm_identifier(&der).unwrap(), None, "{what}");
+        }
+        // a SHA-1 hash: no
+        let sha1 = "06092a864886f70d01010a302ca00b300906052b0e03021a0500a118301606092a864886f70d010108300906052b0e03021a0500a203020114";
+        assert_eq!(SigAlg::from_algorithm_identifier(&unhex(sha1)).unwrap(), None);
+    }
+
+    #[test]
+    fn a_crl_signed_with_rsa_pss_is_checked() {
+        let crl = crate::revocation::Crl::from_der(include_bytes!("../tests/data/alg_pss_crl.der")).unwrap();
+        assert_eq!(crl.len(), 1);
+        let inter = fixture!("alg_pss_inter");
+        let path = vec![fixture!("alg_pss_leaf_sha384"), inter.clone(), fixture!("alg_pss_root")];
+        let evidence = crate::revocation::ChainEvidence { sent: &path[..2], staples: &[] };
+        let cfg = crate::revocation::Revocation::hard_fail().with_crl(crl);
+        let msg = err_text(crate::revocation::check_path(&cfg, &path, &evidence, NOW));
+        assert!(msg.contains("certificate_revoked") && msg.contains("a CRL"), "{msg}");
+        // the other leaf of the same intermediate is on no list: the PSS-signed list settles it
+        let path = vec![fixture!("alg_pss_leaf"), inter, fixture!("alg_pss_root")];
+        let cfg = crate::revocation::Revocation::hard_fail().with_crl(crate::revocation::Crl::from_der(include_bytes!("../tests/data/alg_pss_crl.der")).unwrap());
+        crate::revocation::check_path(&cfg, &path, &crate::revocation::ChainEvidence { sent: &path[..2], staples: &[] }, NOW).unwrap();
     }
 
     #[test]

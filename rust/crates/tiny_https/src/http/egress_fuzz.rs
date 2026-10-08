@@ -133,7 +133,7 @@ fn same(a: &Hop, b: &Hop) -> bool {
 }
 
 fn copy(h: &Hop) -> Hop {
-    Hop { method: h.method.clone(), url: h.url.clone(), headers: h.headers.clone(), body: h.body.clone(), granted: h.granted.clone(), index: h.index, decode: h.decode, min_tls: h.min_tls }
+    Hop { method: h.method.clone(), url: h.url.clone(), headers: h.headers.clone(), body: h.body.clone(), granted: h.granted.clone(), index: h.index, decode: h.decode, min_tls: h.min_tls, running: None }
 }
 
 /// The header list that goes with `hop` is well made, and is what the caller, the hook and the client each give.
@@ -179,6 +179,9 @@ pub fn egress(data: &[u8]) {
         .split(';')
         .filter_map(|p| p.split_once(':'))
         .map(|(n, v)| (n.trim().to_string(), v.trim().to_string()))
+        // (the harness's own marker, which the hook adds for each hop: an input that gave one too would make the check below
+        // see two, one of them not the hop's, without the client having done anything wrong; found by the field run's fuzzing)
+        .filter(|(n, _)| !n.eq_ignore_ascii_case("x-hop-host"))
         .collect();
     let locations: Vec<&str> = lines.collect();
     let spec_is_ok = spec_ok(&spec);

@@ -6,7 +6,7 @@
 
 use super::h2::connection::Request;
 use super::h2_server::{response, Action, Settings, Step};
-use super::h2_transport::{H2Stream, Shared, Waits};
+use super::h2_transport::{H2Stream, Pause, Shared, Waits};
 use super::h2_testserver::*;
 use super::testserver::{ok, TestServer};
 use crate::asyncio::block_on;
@@ -606,6 +606,115 @@ fn giving_up_on_a_response_early_cancels_the_stream_and_the_connection_goes_on()
     drop(stream);
     assert_eq!(client.get(&server.url("/after")).unwrap().text(), "hello /after");
     assert_eq!(server.connections(), 1);
+    drop(client);
+    assert!(server.end_and_complaints().is_empty());
+}
+
+#[test]
+fn threads_that_share_a_connection_read_and_send_for_each_other() {
+    // eight threads making small requests on one connection (B-89): a caller who has its response gives the right to read to
+    // one who waits for its own, so the callers read and the reader thread is seldom needed; and a caller who finds another
+    // writing leaves its request to it, so the writer thread is seldom woken
+    let server = H2Server::start(hello);
+    let client = Arc::new(server.client());
+    client.get(&server.url("/warm")).unwrap();
+    let conn = client.h2.as_ref().unwrap().registry.any_connection().unwrap();
+    let (callers_before, reader_before) = client.h2_reads();
+    let wakes_before = conn.writer_wakes();
+    let workers: Vec<_> = (0..8)
+        .map(|t| {
+            let (client, url) = (client.clone(), server.url(&format!("/t{t}")));
+            thread::spawn(move || {
+                for _ in 0..50 {
+                    assert_eq!(client.get(&url).unwrap().text(), format!("hello /t{t}"));
+                }
+            })
+        })
+        .collect();
+    for w in workers {
+        w.join().unwrap();
+    }
+    let (callers, reader) = client.h2_reads();
+    let (callers, reader) = (callers - callers_before, reader - reader_before);
+    let wakes = conn.writer_wakes() - wakes_before;
+    eprintln!("400 requests on 8 threads: the callers read {callers} times, the reader thread {reader}; the writer thread was woken {wakes} times");
+    assert!(callers > 2 * reader, "the callers read {callers} times, the reader thread {reader}");
+    assert!(wakes < 40, "the writer thread was woken {wakes} times for 400 requests");
+    assert_eq!(server.connections(), 1);
+}
+
+#[test]
+fn a_request_queued_while_another_thread_sends_is_sent_by_that_thread() {
+    // A's thread sends its request itself and, having found nothing more to send, is about to let go of the outbox; B's request
+    // is queued then, and B's thread finds the outbox taken: A's thread sends it before it goes, and nobody else has to (B-89).
+    // (A's response is a second late, so that A's thread, which reads the socket for it, has nothing to read that would make it
+    // send B's request on the way)
+    let server = H2Server::start(sizes_and_delays);
+    let client = server.client();
+    client.get(&server.url("/warm")).unwrap();
+    let conn = client.h2.as_ref().unwrap().registry.any_connection().unwrap();
+    let authority = format!("127.0.0.1:{}", server.port);
+    let waits = Waits { timeout: Duration::from_secs(5), deadline: None };
+    conn.set_pause(Pause::Armed);
+    let a = {
+        let conn = conn.clone();
+        let authority = authority.clone();
+        thread::spawn(move || {
+            let request = Request { method: "GET", scheme: "https", authority: &authority, path: "/slow/1000", headers: &[], secret: &[] };
+            let mut a = conn.start(&request, &[], waits).unwrap();
+            a.response(1000, waits).unwrap()
+        })
+    };
+    conn.wait_for_pause(Pause::Held);
+    let request = Request { method: "GET", scheme: "https", authority: &authority, path: "/b", headers: &[], secret: &[] };
+    let mut b = conn.start(&request, &[], waits).unwrap();
+    assert!(conn.output_queued(), "B's request went out while A's thread held the outbox");
+    let wakes = conn.writer_wakes();
+    conn.set_pause(Pause::Off);
+    let since = Instant::now();
+    while conn.output_queued() {
+        assert!(since.elapsed() < Duration::from_millis(100), "B's request waits to be sent");
+        thread::sleep(Duration::from_millis(1));
+    }
+    assert_eq!(conn.writer_wakes(), wakes, "the writer thread was woken for it");
+    let (head, body) = b.response(1000, waits).unwrap();
+    assert_eq!((head.status, body.as_slice()), (200, &b"hello /b"[..]));
+    let (head, body) = a.join().unwrap();
+    assert_eq!((head.status, body.as_slice()), (200, &b"late"[..]));
+}
+
+#[test]
+fn a_stream_that_is_given_up_tells_the_server_at_once() {
+    // the server is held back by the stream's window (nothing was read), so nothing comes that would make somebody write: the
+    // reset (and the credit for what was received and is dropped) goes from the thread that gives the stream up (B-89)
+    let big = pattern(20_000_000);
+    let b = big.clone();
+    let server = H2Server::start(move |s| if s.path() == "/big" { response(200, &[], &b) } else { hello(s) });
+    let client = server.client();
+    let mut stream = client.get_stream(&server.url("/big")).unwrap();
+    let mut buf = [0u8; 1000];
+    stream.read_exact(&mut buf).unwrap();
+    let conn = client.h2.as_ref().unwrap().registry.any_connection().unwrap();
+    // (the reader thread takes over from the caller, who has stopped reading, and reads what the window let the server send,
+    // until nothing more comes)
+    wait_until("the reader thread to take over", || conn.reading_caller().is_none());
+    let mut reads = client.h2_reads();
+    loop {
+        thread::sleep(Duration::from_millis(200));
+        let now = client.h2_reads();
+        if now == reads {
+            break;
+        }
+        reads = now;
+    }
+    assert!(!conn.output_queued());
+    drop(stream);
+    let since = Instant::now();
+    while conn.output_queued() {
+        assert!(since.elapsed() < Duration::from_millis(100), "the reset waits to be sent");
+        thread::sleep(Duration::from_millis(1));
+    }
+    assert_eq!(client.get(&server.url("/after")).unwrap().text(), "hello /after");
     drop(client);
     assert!(server.end_and_complaints().is_empty());
 }
@@ -1282,6 +1391,128 @@ fn a_download_read_in_pieces_is_read_by_its_caller() {
     assert_eq!(server.connections(), 1);
 }
 
+/// Reads a download of `size` bytes in pieces of `piece`, checks it, and says how many of its bytes went straight into
+/// the caller's buffer and how many through the stream's (B-87).
+fn read_in_pieces(client: &crate::Client, server: &H2Server, size: usize, piece: usize) -> (usize, usize) {
+    let (before_straight, before_kept) = client.h2_body_bytes();
+    let mut s = client.get_stream(&server.url(&format!("/n/{size}"))).unwrap();
+    let mut body = Vec::with_capacity(size);
+    let mut buf = vec![0u8; piece];
+    loop {
+        let n = s.read(&mut buf).unwrap();
+        if n == 0 {
+            break;
+        }
+        body.extend_from_slice(&buf[..n]);
+    }
+    assert!(body == pattern(size), "the body read in pieces of {piece}");
+    drop(s);
+    let (straight, kept) = client.h2_body_bytes();
+    (straight - before_straight, kept - before_kept)
+}
+
+#[test]
+fn a_download_read_in_pieces_goes_straight_into_the_callers_buffer() {
+    let server = H2Server::start(sizes_and_delays);
+    let client = server.client();
+    for _ in 0..5 {
+        client.get(&server.url("/warm")).unwrap();
+    }
+    for piece in [1 << 20, 64 << 10, 4096, 100] {
+        let (straight, kept) = read_in_pieces(&client, &server, 4_000_000, piece);
+        assert_eq!(straight + kept, 4_000_000, "every byte is handed out once, one way or the other");
+        assert!(straight > 0, "pieces of {piece}: nothing went straight to the caller");
+        if piece >= 64 << 10 {
+            // (the reader thread may have read the first piece)
+            assert!(straight > kept, "pieces of {piece}: {straight} bytes went straight to the caller, {kept} through the stream");
+        }
+        eprintln!("pieces of {piece}: {straight} bytes straight, {kept} through the stream");
+    }
+    assert_eq!(server.connections(), 1);
+}
+
+#[test]
+fn what_a_full_buffer_leaves_undecrypted_is_taken_in_by_whoever_reads_next() {
+    let server = H2Server::start(sizes_and_delays);
+    let client = server.client();
+    client.get(&server.url("/warm")).unwrap();
+    let conn = client.h2.as_ref().unwrap().registry.any_connection().unwrap();
+    let authority = format!("127.0.0.1:{}", server.port);
+    let big = Request { method: "GET", scheme: "https", authority: &authority, path: "/n/4000000", headers: &[], secret: &[] };
+    let small = Request { method: "GET", scheme: "https", authority: &authority, path: "/n/1000", headers: &[], secret: &[] };
+    let waits = Waits { timeout: Duration::from_secs(5), deadline: None };
+
+    // a download read in pieces smaller than a record, until a read leaves records it did not need in the receive buffer
+    let mut download = start_with_the_right_to_read(&conn, &big, waits);
+    download.head(waits).unwrap();
+    let mut got = Vec::new();
+    let mut out = [0u8; 1000];
+    while conn.undigested() != Some(true) {
+        let n = download.read(&mut out, waits).unwrap();
+        assert!(n > 0 && got.len() < 4_000_000, "no read left anything in the receive buffer");
+        got.extend_from_slice(&out[..n]);
+    }
+    // its caller stops for a while: another request on the connection takes the right to read, takes in what was left first,
+    // and is answered as soon as its response comes after it (not when the reader thread takes over from the caller)
+    let started = Instant::now();
+    let before = conn.leftovers();
+    let mut second = conn.start(&small, &[], waits).unwrap();
+    let (head, body) = second.response(1 << 20, waits).unwrap();
+    assert!(head.status == 200 && body == pattern(1000));
+    assert!(started.elapsed() < Duration::from_millis(150), "the second request took {:?}", started.elapsed());
+    assert!(conn.leftovers().0 > before.0, "the second request did not take in what was left");
+    // and the download goes on where it was, whole and in order
+    got.extend(read_all(&mut download, waits));
+    assert!(got == pattern(4_000_000));
+    // the same, with nobody else on the connection: the reader thread takes the right after a while, and in what was left
+    let mut download = start_with_the_right_to_read(&conn, &big, waits);
+    download.head(waits).unwrap();
+    let mut got = Vec::new();
+    while conn.undigested() != Some(true) {
+        let n = download.read(&mut out, waits).unwrap();
+        assert!(n > 0 && got.len() < 4_000_000, "no read left anything in the receive buffer");
+        got.extend_from_slice(&out[..n]);
+    }
+    let before = conn.leftovers().1;
+    wait_until("the reader thread to take in what was left", || conn.leftovers().1 > before);
+    got.extend(read_all(&mut download, waits));
+    assert!(got == pattern(4_000_000));
+    assert_eq!(server.connections(), 1);
+}
+
+#[test]
+fn the_credit_for_bytes_read_straight_is_sent_at_once() {
+    let server = H2Server::start(sizes_and_delays);
+    let client = server.client();
+    client.get(&server.url("/warm")).unwrap();
+    let conn = client.h2.as_ref().unwrap().registry.any_connection().unwrap();
+    let authority = format!("127.0.0.1:{}", server.port);
+    let big = Request { method: "GET", scheme: "https", authority: &authority, path: "/n/4000000", headers: &[], secret: &[] };
+    let waits = Waits { timeout: Duration::from_secs(5), deadline: None };
+    let mut download = start_with_the_right_to_read(&conn, &big, waits);
+    download.head(waits).unwrap();
+    let (straight, _) = client.h2_body_bytes();
+    let mut got = 0;
+    let mut out = vec![0u8; 64 << 10];
+    loop {
+        let n = download.read(&mut out, waits).unwrap();
+        if n == 0 {
+            break;
+        }
+        got += n;
+        // the caller who read them sends what the read queued (the credit, every megabyte) before it returns, or has it sent:
+        // nothing waits for something else to send it (the reader thread would, after a caller who stopped reading for
+        // STALL, 200 ms)
+        let since = Instant::now();
+        while conn.output_queued() {
+            assert!(since.elapsed() < Duration::from_millis(100), "the credit was not sent");
+            thread::sleep(Duration::from_millis(1));
+        }
+    }
+    assert_eq!(got, 4_000_000);
+    assert!(client.h2_body_bytes().0 - straight > 2_000_000, "the download did not go straight to the caller");
+}
+
 #[test]
 fn a_download_whose_caller_stops_reading_is_read_for_by_the_reader_thread_after_a_while() {
     let server = H2Server::start(sizes_and_delays);
@@ -1405,6 +1636,7 @@ fn a_download_that_pauses_does_not_hold_up_a_request_that_waits_for_the_reader_t
     // a request that comes when a caller is reading does not take the right from it; it waits for whoever reads
     let mut b = conn.start(&slow, &[], waits).unwrap();
     assert_eq!(conn.reading_caller(), Some((a.id(), false)));
+    let b_id = b.id();
     let started = Instant::now();
     let b = thread::spawn(move || {
         let (head, body) = b.response(1000, waits).unwrap();
@@ -1413,14 +1645,14 @@ fn a_download_that_pauses_does_not_hold_up_a_request_that_waits_for_the_reader_t
     });
     thread::sleep(Duration::from_millis(20));
     // the download has its head and a first piece, and its caller stops reading: with another request in flight, which
-    // somebody has to read for, it does not keep the right
+    // somebody has to read for, it does not keep the right, but gives it to the caller who waits for that one (B-89)
     a.head(waits).unwrap();
     let mut first = [0u8; 5];
     let mut have = 0;
     while have < 5 {
         have += a.read(&mut first[have..], waits).unwrap();
     }
-    assert_eq!(conn.reading_caller(), None, "a caller kept the right to read with another request waiting for the socket to be read");
+    assert_eq!(conn.reading_caller(), Some((b_id, false)), "a caller kept the right to read with another request waiting for the socket to be read");
     let took = b.join().unwrap();
     assert!(took < Duration::from_millis(600), "the other request took {took:?}");
     assert_eq!(read_all(&mut a, waits), b"second");

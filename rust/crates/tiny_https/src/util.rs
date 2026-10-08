@@ -67,6 +67,10 @@ impl<'a> Reader<'a> {
     pub fn u16(&mut self) -> Option<u16> {
         self.take(2).map(|s| u16::from_be_bytes([s[0], s[1]]))
     }
+    pub fn u32(&mut self) -> Option<u32> {
+        self.take(4).map(|b| u32::from_be_bytes([b[0], b[1], b[2], b[3]]))
+    }
+
     pub fn u24(&mut self) -> Option<usize> {
         self.take(3).map(|s| ((s[0] as usize) << 16) | ((s[1] as usize) << 8) | s[2] as usize)
     }

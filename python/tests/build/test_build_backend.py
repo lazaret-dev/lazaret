@@ -297,7 +297,9 @@ class BuildTests(unittest.TestCase):
                          "rust/crates/lazaret-net/Cargo.toml", "rust/crates/lazaret-net/src/lib.rs",
                          "rust/crates/lazaret-verify/Cargo.toml", "rust/crates/lazaret-verify/src/lib.rs",
                          "rust/crates/tiny_https/Cargo.toml", "rust/crates/tiny_https/LICENSE",
-                         "rust/crates/tiny_https/src/lib.rs", "rust/crates/tiny_https/src/http/hostrules.rs"):
+                         "rust/crates/tiny_https/src/lib.rs", "rust/crates/tiny_https/src/http/hostrules.rs",
+                         # the Sigstore TUF root tiny_https builds in (src/tuf.rs)
+                         "rust/crates/tiny_https/roots/sigstore_tuf_root.json"):
                 self.assertIn(base + must, names)
             # tiny_https's test and example sources ship (cargo reads every target its manifest declares before it
             # builds any), and nothing else of its tests: no data, no vectors, no documents
@@ -305,7 +307,8 @@ class BuildTests(unittest.TestCase):
             self.assertFalse([n for n in names if ("/tests/" in n or "/examples/" in n)
                               and not (n.startswith(vendored) and n.endswith(".rs") and "/tests/data/" not in n)])
             self.assertFalse([n for n in names if n.startswith(vendored) and n.endswith((".md", ".txt", ".json", ".der",
-                                                                                          ".pem", ".sha256"))])
+                                                                                          ".pem", ".sha256"))
+                              and n != vendored + "roots/sigstore_tuf_root.json"])
             self.assertFalse([n for n in names if "__pycache__" in n or "/target/" in n
                               or "/." in n or n.endswith((".so", ".dll", ".dylib"))])
             with tempfile.TemporaryDirectory() as d:

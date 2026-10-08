@@ -22,6 +22,7 @@ DROP = {"Cargo.toml": MANIFEST, "LICENSE": "Apache License\n", "README.md": "# t
         "Cargo.lock": "lock\n", "src/lib.rs": "pub fn f() {}\n", "src/quic/vectors.txt": "1 2\n",
         "tests/data/cert.pem": "-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n",
         "tests/data/pkg.tgz": "tgz", "tests/t.rs": "#[test] fn t() {}\n", "examples/e.rs": "fn main() {}\n",
+        "roots/tuf_root.json": "{}\n",
         "fuzz/corpus/x": "fuzz input\n", "tools/gen.py": "print(1)\n", "target/debug/x": "built\n",
         "src/__pycache__/x.pyc": "x"}
 
@@ -55,9 +56,9 @@ class SyncTests(unittest.TestCase):
     def test_what_is_taken_and_what_is_left_out(self):
         self.assertEqual(self.main([str(self.drop())]), 0)
         self.assertEqual(self.taken(), [".gitattributes", ".gitignore", "BACKLOG.md", "Cargo.toml", "LAZARET.md",
-                                        "LICENSE", "README.md", "SECURITY_REVIEW.md", "examples/e.rs", "src/lib.rs",
-                                        "src/quic/vectors.txt", "tests/data/cert.pem", "tests/data/pkg.tgz", "tests/t.rs",
-                                        "vendored.sha256"])
+                                        "LICENSE", "README.md", "SECURITY_REVIEW.md", "examples/e.rs",
+                                        "roots/tuf_root.json", "src/lib.rs", "src/quic/vectors.txt", "tests/data/cert.pem",
+                                        "tests/data/pkg.tgz", "tests/t.rs", "vendored.sha256"])
         manifest = (self.dest / "Cargo.toml").read_text(encoding="utf-8")
         self.assertNotIn("[profile", manifest)
         self.assertNotIn("the release profile", manifest)
@@ -67,7 +68,7 @@ class SyncTests(unittest.TestCase):
         self.assertIn("!*.pem\n!*.tgz\n", (self.dest / ".gitignore").read_text(encoding="utf-8"))
         notes = (self.dest / "LAZARET.md").read_text(encoding="utf-8")
         self.assertIn("tiny_https 0.2.0", notes)
-        self.assertEqual(len((self.dest / "vendored.sha256").read_text(encoding="utf-8").splitlines()), 11)
+        self.assertEqual(len((self.dest / "vendored.sha256").read_text(encoding="utf-8").splitlines()), 12)
 
     def test_a_tarball_with_one_top_folder(self):
         folder = self.drop()

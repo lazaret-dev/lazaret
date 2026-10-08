@@ -26,6 +26,7 @@
 //! The values are checked against the Python `cryptography` package (OpenSSL), against the
 //! variable-time big-number code, and with a statistical timing test (`timing.rs`).
 
+use super::dit::Dit;
 use super::bignum::{self, Mont};
 use super::ecdsa::Curve;
 use super::rand;
@@ -96,10 +97,11 @@ fn build(p: &str, b: &str, gx: &str, gy: &str, order: &str, len: usize) -> Field
     }
 }
 
-fn field(curve: Curve) -> &'static Field {
+/// The curve's arithmetic; `None` for P-521, which the ECDSA code verifies with but the key exchange does not offer.
+fn try_field(curve: Curve) -> Option<&'static Field> {
     static P256: OnceLock<Field> = OnceLock::new();
     static P384: OnceLock<Field> = OnceLock::new();
-    match curve {
+    Some(match curve {
         Curve::P256 => P256.get_or_init(|| {
             build(
                 "ffffffff00000001000000000000000000000000ffffffffffffffffffffffff",
@@ -120,7 +122,13 @@ fn field(curve: Curve) -> &'static Field {
                 48,
             )
         }),
-    }
+        Curve::P521 => return None,
+    })
+}
+
+#[cfg(test)]
+fn field(curve: Curve) -> &'static Field {
+    try_field(curve).expect("a curve of the key exchange")
 }
 
 /// All ones if the low bit of `bit` is set, else zero.
@@ -396,7 +404,8 @@ fn scalar_in_range(f: &Field, k: &[u8]) -> bool {
 /// The uncompressed SEC1 encoding (0x04 || x || y) of the generator times `scalar`, or `None` if
 /// `scalar` is not in 1..n or has the wrong length.
 pub fn public_key(curve: Curve, scalar: &[u8]) -> Option<Vec<u8>> {
-    let f = field(curve);
+    let _dit = Dit::on(); // data-independent timing while the secret is in use (crypto::dit)
+    let f = try_field(curve)?;
     if !scalar_in_range(f, scalar) {
         return None;
     }
@@ -412,7 +421,9 @@ pub fn public_key(curve: Curve, scalar: &[u8]) -> Option<Vec<u8>> {
 
 /// A fresh private scalar (uniform in 1..n, by rejection sampling) and its public key.
 pub fn generate(curve: Curve) -> Result<(Zeroizing<Vec<u8>>, Vec<u8>)> {
-    let f = field(curve);
+    let Some(f) = try_field(curve) else {
+        return Err(crate::error::Error::Tls(format!("{curve:?} is not a curve of the key exchange")));
+    };
     loop {
         let mut k = Zeroizing::new(vec![0u8; f.len]);
         rand::fill(&mut k)?;
@@ -427,7 +438,8 @@ pub fn generate(curve: Curve) -> Result<(Zeroizing<Vec<u8>>, Vec<u8>)> {
 /// `None` if the scalar is out of range or the peer's point is not a valid uncompressed point of
 /// the curve (wrong length or prefix, a coordinate not below p, or not on the curve).
 pub fn shared_secret(curve: Curve, scalar: &[u8], peer_public: &[u8]) -> Option<Zeroizing<Vec<u8>>> {
-    let f = field(curve);
+    let _dit = Dit::on(); // data-independent timing while the secret is in use (crypto::dit)
+    let f = try_field(curve)?;
     if !scalar_in_range(f, scalar) {
         return None;
     }

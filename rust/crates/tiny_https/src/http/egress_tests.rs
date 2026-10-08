@@ -50,7 +50,7 @@ fn first(client: &crate::Client, url: &str) -> Result<String, Error> {
 
 /// What `client` decides about a redirect from `from` to `location`: the host it goes to, or why not.
 fn hop_to(client: &crate::Client, from: &str, location: &str) -> Result<String, Error> {
-    let mut hop = Hop { method: "GET".into(), url: Url::parse(from).unwrap(), headers: vec![], body: vec![], granted: vec![], index: 0, decode: None, min_tls: None };
+    let mut hop = Hop { method: "GET".into(), url: Url::parse(from).unwrap(), headers: vec![], body: vec![], granted: vec![], index: 0, decode: None, min_tls: None, running: None };
     client.follow(&mut hop, 302, &[("Location".to_string(), location.to_string())], &mut 0)?;
     Ok(hop.url.host)
 }
@@ -176,7 +176,7 @@ fn a_clone_has_the_rule_that_was_set_on_it() {
 fn the_wildcard_is_applied_to_the_hop_that_a_redirect_makes() {
     // (no network: the decision of `follow` for the redirect's `Location`)
     let client = crate::Client::with_tls_config(crate::tls::ClientConfig::new(crate::x509::TrustStore::empty())).allowed_hosts(rules(&["api.example.com", "*.cdn.example.net"]));
-    let hop = |url: &str| Hop { method: "GET".into(), url: Url::parse(url).unwrap(), headers: vec![], body: vec![], granted: vec![], index: 0, decode: None, min_tls: None };
+    let hop = |url: &str| Hop { method: "GET".into(), url: Url::parse(url).unwrap(), headers: vec![], body: vec![], granted: vec![], index: 0, decode: None, min_tls: None, running: None };
     let location = |value: &str| vec![("Location".to_string(), value.to_string())];
     // (where the redirect goes, the host it ends up at if it is followed)
     for (to, goes_to) in [
@@ -391,7 +391,7 @@ fn the_rule_of_a_module_that_reaches_the_marketplace_holds_on_every_redirect() {
     assert!(hop_to(&client, &base, "?q=1").is_ok());
     assert!(limited(&hop_to(&client, &base, &format!("?q={}", "a".repeat(100))).unwrap_err()));
     // (a hop that follows a hop: it is the one the redirect has made that the next is judged from, and every one is judged)
-    let mut hop = Hop { method: "GET".into(), url: Url::parse(from).unwrap(), headers: vec![], body: vec![], granted: vec![], index: 0, decode: None, min_tls: None };
+    let mut hop = Hop { method: "GET".into(), url: Url::parse(from).unwrap(), headers: vec![], body: vec![], granted: vec![], index: 0, decode: None, min_tls: None, running: None };
     let at = |v: &str| vec![("Location".to_string(), v.to_string())];
     let mut hops = 0;
     assert!(client.follow(&mut hop, 302, &at("https://x.gallerycdn.vsassets.io/one"), &mut hops).unwrap());
@@ -813,7 +813,7 @@ fn what_a_refusal_says_names_the_host_and_never_the_path_a_credential_or_a_value
 fn a_request_can_require_tls13_and_cannot_allow_tls12_on_a_client_that_requires_tls13() {
     use crate::tls::TlsVersion::{Tls12, Tls13};
     let config = crate::tls::ClientConfig::new(crate::x509::TrustStore::empty());
-    let hop = |min_tls| Hop { method: "GET".into(), url: Url::parse("https://example.com/").unwrap(), headers: vec![], body: vec![], granted: vec![], index: 0, decode: None, min_tls };
+    let hop = |min_tls| Hop { method: "GET".into(), url: Url::parse("https://example.com/").unwrap(), headers: vec![], body: vec![], granted: vec![], index: 0, decode: None, min_tls, running: None };
     let lenient = crate::Client::with_tls_config(config.clone());
     let strict = crate::Client::with_tls_config(config).min_tls_version(Tls13);
     let cases = [(&lenient, None, Tls12), (&lenient, Some(Tls12), Tls12), (&lenient, Some(Tls13), Tls13), (&strict, None, Tls13), (&strict, Some(Tls12), Tls13), (&strict, Some(Tls13), Tls13)];
