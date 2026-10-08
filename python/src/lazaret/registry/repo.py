@@ -99,6 +99,9 @@ MAX_MEMBER = _env_number("LAZARET_MAX_SOURCE_BYTES", 16_000_000)
 MAX_FILES = 20_000         # files per package (numpy's sdist alone has >4,000)
 SAMPLE = 8192              # header/entropy sample read from oversized files
 # Stored scans from another engine version are scanned again (has_scan).
+# 2.54: a download a JavaScript callback is given, written to a file and
+#      run, is a dropper's (D-2: the request client's body, https.get's
+#      chunks, a pipe into a file stream)
 # 2.53: a package an npm release loads when it is loaded that its
 #      package.json names only in devDependencies is SC-DEV-DEPENDENCY,
 #      MAJOR (D-13: dotenv-express's `require('environment-gate')`)
@@ -308,7 +311,7 @@ SAMPLE = 8192              # header/entropy sample read from oversized files
 #      entry points and hook targets, Python install scripts
 # 2.3: verdict tiers, decoded hex, install-script inspection; 2.2:
 #      verdict-integrity; 2.1: binary-artifact awareness
-ENGINE_VERSION = "2.53.0"
+ENGINE_VERSION = "2.54.0"
 
 # ---------------- The content memo (P-2a, registry/contentcache.py) ----------------
 # One per scan_package run: the engine answers once for content several of a

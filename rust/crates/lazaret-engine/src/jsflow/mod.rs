@@ -536,6 +536,9 @@ pub struct Func {
     /// param index -> the closure variables it is written to (the
     /// supply-chain model's: `res.on('data', d => body += d)`)
     pub param_writes: BTreeMap<usize, BTreeSet<BindId>>,
+    /// param index -> the files it is written to: (the keys of the path, where), the supply-chain model's (D-2:
+    /// `request.get(u, (e, r, body) => fs.writeFileSync(p, body))`, a callback given a download)
+    pub param_files: BTreeMap<usize, BTreeSet<(Vec<PyStr>, u32)>>,
     /// fid -> the parameters it passed tainted values in its last reading
     pub callers: BTreeMap<FnId, BTreeSet<usize>>,
     pub runs: u32,
@@ -1167,6 +1170,7 @@ impl Program {
             ret_src: None,
             ret_outer: BTreeMap::new(),
             param_writes: BTreeMap::new(),
+            param_files: BTreeMap::new(),
             callers: BTreeMap::new(),
             runs: 0,
             calls: Vec::new(),
@@ -1645,6 +1649,7 @@ impl Program {
             ret_src: None,
             ret_outer: BTreeMap::new(),
             param_writes: BTreeMap::new(),
+            param_files: BTreeMap::new(),
             callers: BTreeMap::new(),
             runs: 0,
             calls: Vec::new(),

@@ -788,6 +788,16 @@ project is pre-1.0, so the 0.x API may still change.
 
 ### Fixed
 
+- **A download a JavaScript callback is given, written to a file and run, is a dropper's (D-2; rule set 2.54.0).**
+  `request.get(u, (e, r, body) => { fs.writeFileSync(p, body); exec('python3 ' + p); })` had no finding: neither had
+  https.get's response gathered in its `data` callback and written in its `end` one, nor one piped into
+  `fs.createWriteStream(p)` and run when the stream finishes, nor a helper that writes what it is given; only a
+  download awaited in the same function (`await fetch()`) was found. A function's summary now keeps the files a
+  parameter is written to, so the file is written when the client gives the callback the download (or code the script
+  decodes), and a helper's carries to the callback that calls it; a run of a file read before its write was known is
+  matched at the end. Each is now "downloads a script and runs it with Python" (CRITICAL), in install scripts and at
+  import time. A program downloaded and run stays an installer's, and a download kept but not run is nothing. The
+  benchmark, the popular set and the 20,422 JavaScript files of the npm packages installed here are unchanged.
 - **Code received in a callback and run from a variable outside it is followed (D-15; rule set 2.51.0).**
   `let p; https.get(u, (res) => { let d = ''; res.on('data', (c) => { d += c; }); res.on('end', () => { p = d;
   eval(p); }); })` had no finding on the JavaScript tree, which answers for a `.js` file (the text detector found

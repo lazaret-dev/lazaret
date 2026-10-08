@@ -40,6 +40,8 @@ pub struct Eval<'p> {
     /// (the supply-chain model) (key of this function's parameter, the
     /// closure variable it was written to)
     pub pw_adds: Vec<(u64, BindId)>,
+    /// (the supply-chain model) (key of a parameter, the keys of the path of a file it is written to, where)
+    pub pf_adds: Vec<(u64, Vec<PyStr>, u32)>,
 }
 
 /// The changes a reading made to summaries: fid -> (returned request data
@@ -74,6 +76,7 @@ impl<'p> Eval<'p> {
             limit,
             ancestors,
             pw_adds: Vec::new(),
+            pf_adds: Vec::new(),
         }
     }
 
@@ -1652,6 +1655,19 @@ impl<'p> Eval<'p> {
                     }
                 }
             }
+            // (the supply-chain model) the files a parameter is written to: what it is given here (D-2)
+            if self.p.cfg.supply.is_some() {
+                let files: Vec<(usize, Vec<(Vec<PyStr>, u32)>)> =
+                    self.p.fns[fid as usize].param_files.iter().map(|(&i, fs)| (i, fs.iter().cloned().collect())).collect();
+                for (i, fs) in files {
+                    let t = bound(args, spread, rest, i);
+                    if t.tainted() {
+                        for (keys, at) in fs {
+                            self.sc_param_file(&t, keys, at);
+                        }
+                    }
+                }
+            }
             if ctor {
                 continue;
             }
@@ -1793,12 +1809,19 @@ impl<'p> Eval<'p> {
     /// (monotone). Returns the functions whose summaries changed, each with
     /// what changed, and the bindings whose value grew.
     pub fn commit(self) -> (Changes, Vec<BindId>) {
-        let Eval { p, fid, emit, reach_adds, ret_val, shared_writes, reads, uses, pw_adds, .. } = self;
+        let Eval { p, fid, emit, reach_adds, ret_val, shared_writes, reads, uses, pw_adds, pf_adds, .. } = self;
         let mut changes: Changes = BTreeMap::new();
         for (key, b) in pw_adds {
             let owner = (key / PARAM_BASE) as FnId;
             let i = (key % PARAM_BASE) as usize;
             if p.fns[owner as usize].param_writes.entry(i).or_default().insert(b) {
+                changes.entry(owner).or_default().1.insert(i);
+            }
+        }
+        for (key, keys, at) in pf_adds {
+            let owner = (key / PARAM_BASE) as FnId;
+            let i = (key % PARAM_BASE) as usize;
+            if p.fns[owner as usize].param_files.entry(i).or_default().insert((keys, at)) {
                 changes.entry(owner).or_default().1.insert(i);
             }
         }

