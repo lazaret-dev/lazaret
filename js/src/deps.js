@@ -267,6 +267,113 @@ export function siteGroups(root, files) {
   return out;
 }
 
+const METADATA_HEAD_BYTES = 1 << 20;
+
+/** A package.json's (`data`, as read) own name and the packages it names, dependencies of every kind, bundled
+ * ones too: what a package manager may install for it (D-12). core.npm_declared_names */
+export function npmDeclaredNames(data) {
+  const out = new Set();
+  if (typeof own(data, "name") === "string") out.add(own(data, "name"));
+  for (const key of ["dependencies", "devDependencies", "optionalDependencies", "peerDependencies"]) {
+    const deps = own(data, key);
+    if (deps && typeof deps === "object" && !Array.isArray(deps)) for (const k of Object.keys(deps)) out.add(k);
+  }
+  for (const key of ["bundleDependencies", "bundledDependencies"]) {
+    const list = own(data, key);
+    if (Array.isArray(list)) for (const k of list) if (typeof k === "string") out.add(k);
+  }
+  return out;
+}
+
+/** A distribution's METADATA headers: [its Name and each Requires-Dist's name, an extra's too; how many
+ * Requires-Dist it has] (D-12). core.metadata_declared_names */
+export function metadataDeclaredNames(text) {
+  const names = new Set();
+  let requires = 0;
+  for (const line of text.split("\n")) {
+    if (!pyStrip(line)) break;                 // (the headers end at the first empty line)
+    const req = line.startsWith("Requires-Dist:");
+    if (!req && !line.startsWith("Name:")) continue;
+    requires += req ? 1 : 0;
+    const value = pyStrip(line.slice(line.indexOf(":") + 1));
+    let end = 0;
+    for (const ch of value) {
+      if (isPySpace(ch) || ";[(<>=!~@".includes(ch)) break;
+      end += ch.length;
+    }
+    if (end) names.add(value.slice(0, end));
+  }
+  return [names, requires];
+}
+
+/**
+ * The names of the installed package a dependency file belongs to, for the tests a --deps scan runs on it:
+ * [declared, own], or null where they are not known. An npm package's: its package.json's (node_modules/<name>
+ * or node_modules/@scope/<name>, the nearest), its name and the packages it names, and its name as its own
+ * (D-12b, D-9c); a Python distribution's: the *.dist-info whose RECORD lists the file's top-level module or
+ * package, its METADATA's Name and Requires-Dist (D-12b; several that list one, all of theirs). Twin of
+ * core._InstalledNames.
+ */
+class InstalledNames {
+  constructor(tree) {
+    this.tree = tree;
+    this.npm = new Map();                     // package directory -> [declared, own] or null
+    this.sites = new Map();                   // site-packages directory -> Map(top-level name -> [declared, null])
+  }
+
+  of(path) {
+    const parts = posix(path).split("/");
+    const k = parts.length > 1 ? parts.lastIndexOf("node_modules", parts.length - 2) : -1;
+    if (k >= 0) {
+      const end = parts[k + 1].startsWith("@") ? k + 3 : k + 2;
+      const directory = parts.slice(0, end).join("/");
+      if (end >= parts.length || !isPackageRoot(directory)) return null;
+      if (!this.npm.has(directory)) this.npm.set(directory, this.npmNames(directory));
+      return this.npm.get(directory);
+    }
+    const [siteMarkers] = packValues("_XF_SITE_MARKERS");
+    let idx = -1;
+    for (let i = 0; i < parts.length - 1; i++) if (siteMarkers.includes(parts[i])) idx = i;
+    if (idx < 0) return null;
+    const site = parts.slice(0, idx + 1).join("/");
+    if (!this.sites.has(site)) this.sites.set(site, this.siteNames(site));
+    return this.sites.get(site).get(parts[idx + 1]) || null;
+  }
+
+  npmNames(directory) {
+    const m = this.tree.manifests.get(`${directory}/package.json`);
+    if (!m) return null;
+    const [data] = loadManifest(m.path, m.content);
+    if (!data || typeof data !== "object" || Array.isArray(data)) return null;
+    const name = own(data, "name");
+    return [[...npmDeclaredNames(data)].sort(cmpCodePoints), typeof name === "string" && name ? name : null];
+  }
+
+  siteNames(site) {
+    const where = join(this.tree.root, ...site.split("/"));
+    let infos;
+    try {
+      infos = readdirSync(where).filter((n) => n.endsWith(".dist-info")).sort(cmpCodePoints);
+    } catch { return new Map(); }
+    const names = new Map();                  // top-level name -> the names of the distributions that list it
+    for (const info of infos) {
+      const directory = join(where, info);
+      try {                                    // (a real directory: no link is followed)
+        const st = lstatSync(directory);
+        if (!st.isDirectory() || st.isSymbolicLink()) continue;
+      } catch { continue; }
+      let data;
+      try { data = readBounded(join(directory, "METADATA"), METADATA_HEAD_BYTES); } catch { continue; }
+      const [declared] = metadataDeclaredNames(data.toString("utf8"));
+      for (const top of recordTops(join(directory, "RECORD"))) {
+        if (!names.has(top)) names.set(top, new Set());
+        for (const n of declared) names.get(top).add(n);
+      }
+    }
+    return new Map([...names].map(([top, d]) => [top, [[...d].sort(cmpCodePoints), null]]));
+  }
+}
+
 /** The top-level names a RECORD lists (its rows' first path parts); none when it cannot be read. core._xf_record_tops */
 function recordTops(path) {
   const [limit] = packValues("_XF_RECORD_BYTES");
@@ -290,23 +397,24 @@ function recordTops(path) {
  */
 export function dependencyChecks(root, files, manifests, issues, { exclude = [], maxFileBytes = MAX_FILE_BYTES, pool = null } = {}) {
   const tree = new DependencyTree(root, files, manifests, exclude, maxFileBytes);
+  const names = new InstalledNames(tree);
   const depManifests = new Set(manifests.filter((m) => m.dep).map((m) => m.path));
   const out = [], extra = [], run = new Set(), truncated = new Set();
   for (const i of implicitGypHooks(tree, manifests)) out.push(i);
   for (const issue of issues) {
     const cmd = HOOK_COMMANDS.get(issue);
     if (issue.rule !== "SC-INSTALL-HOOK" || !cmd || !depManifests.has(issue.file)) continue;
-    try { followDependencyHook(tree, issue, cmd, out, extra, run, truncated); }
+    try { followDependencyHook(tree, issue, cmd, out, extra, run, truncated, names); }
     catch (e) { out.push(scanErrorIssue(issue.file, e)); }       // one manifest must never kill the run
   }
-  // The import-time and agent checks of each dependency file no hook runs; with a worker pool
-  // (pool.js) on its workers, and with them the cross-file follower (below), the answers taken
-  // in order.
+  // The import-time and agent checks of each dependency file no hook runs, the import-time test given the names
+  // of the package it is in (D-12b, D-9c: InstalledNames); with a worker pool (pool.js) on its workers, and with
+  // them the cross-file follower (below), the answers taken in order.
   // (the detection round) a web app's static assets no entry point reaches are left out (webAssets)
   const assets = webAssets(tree, files);
   const checks = files.filter((f) => f.dep && (f.lang === "js" || f.lang === "py") && !run.has(posix(f.path))
     && !assets.has(posix(f.path)))
-    .map((f) => ["dep", [f.path, f.content, f.lang]]);
+    .map((f) => ["dep", [f.path, f.content, f.lang, names.of(f.path)]]);
   const code = assets.size ? files.filter((f) => !assets.has(posix(f.path))) : files;
   const groups = siteGroups(tree.root, code);
   const follow = ["xf", {
@@ -560,8 +668,8 @@ export function vendoredCode(tree, files) {
 /** A task of dependencyChecks, as a worker of pool.js runs it (pool-worker.js), run here. */
 function dependencyTask([kind, args]) {
   if (kind === "dep") {
-    const [path, content, lang] = args;
-    return [dependencyImportIssue(path, content, lang), dependencyAgentIssue(path, content)];
+    const [path, content, lang, named] = args;
+    return [dependencyImportIssue(path, content, lang, named), dependencyAgentIssue(path, content)];
   }
   return crossFileIssues(args.files, new Set(), { redact: args.redact, siteGroups: args.siteGroups });
 }
@@ -604,8 +712,10 @@ function implicitGypHooks(tree, manifests) {
   return out;
 }
 
-function followDependencyHook(tree, issue, cmd, out, extra, run, truncated) {
+function followDependencyHook(tree, issue, cmd, out, extra, run, truncated, names = null) {
   const manifest = issue.file;
+  const named = names ? names.of(manifest) : null;
+  const ownName = named ? named[1] : null;          // (D-9c: the package's own name, for its install scripts)
   const base = dirname(posix(manifest));
   const direct = agentHijackInCommand(cmd);              // the hook runs the agent itself
   if (direct) {
@@ -631,7 +741,7 @@ function followDependencyHook(tree, issue, cmd, out, extra, run, truncated) {
     const rel = path === null ? null : tree.resolve(path);
     if (rel === null) continue;
     const text = scriptText(tree, rel, rel.endsWith(".sh") ? "sh" : "js", out, extra, run);
-    const reasons = text ? installScriptRisk(text, true, false, scriptLang(rel)) : [];
+    const reasons = text ? installScriptRisk(text, true, false, scriptLang(rel), ownName) : [];
     if (reasons.length && issue.sev !== "BLOCKER" && issue.sev !== "CRITICAL") {
       const msg = `Install hook runs ${target}, which ${reasons.join("; and ")}.`;
       issue.sev = "CRITICAL";
@@ -641,7 +751,7 @@ function followDependencyHook(tree, issue, cmd, out, extra, run, truncated) {
     if (agent) out.push(agent);
     // the scripts it starts with node or python (0.1.8, spawnedScripts)
     for (const [started, stext] of startedScripts(tree, rel, text, base, out, extra, run)) {
-      const more = stext ? installScriptRisk(stext, true, false, scriptLang(started)) : [];
+      const more = stext ? installScriptRisk(stext, true, false, scriptLang(started), ownName) : [];
       if (more.length && issue.sev !== "BLOCKER" && issue.sev !== "CRITICAL") {
         const shown = base && started.startsWith(base + "/") ? started.slice(base.length + 1) : started;
         const msg = `Install hook runs ${target}, which starts ${shown}, which ${more.join("; and ")}.`;
@@ -712,9 +822,10 @@ function readScript(tree, rel, asLang, out, extra) {
 }
 
 /** SC-IMPORT-RISK (MAJOR, or CRITICAL: importTimeSeverity) for a dependency's file (`lang` "js" or "py") that fails
- * the import-time test, else null. Twin of core.dependency_import_issue. */
-export function dependencyImportIssue(path, text, lang = null) {
-  const [reasons, line] = importTimeRisk(text, lang);
+ * the import-time test (`names`: its package's [declared, own], when known), else null. Twin of
+ * core.dependency_import_issue. */
+export function dependencyImportIssue(path, text, lang = null, names = null) {
+  const [reasons, line] = importTimeRisk(text, lang, names);
   if (!reasons.length) return null;
   const lines = text.split("\n");
   registerScanContext(lines, SECRET_SKIP_RE);     // the file's own entropy literals (core: _Redactor(lines))

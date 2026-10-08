@@ -2861,13 +2861,7 @@ class _ArtifactScan:
             text = self.manifests.get("package.json")
             data, _problems = lazaret.load_manifest("package.json", text) if text else (None, None)
             if isinstance(data, dict):
-                out = {data["name"]} if isinstance(data.get("name"), str) else set()
-                for key in ("dependencies", "devDependencies", "optionalDependencies", "peerDependencies"):
-                    if isinstance(data.get(key), dict):
-                        out.update(k for k in data[key] if isinstance(k, str))
-                for key in ("bundleDependencies", "bundledDependencies"):
-                    if isinstance(data.get(key), list):
-                        out.update(k for k in data[key] if isinstance(k, str))
+                out = lazaret.npm_declared_names(data)
         elif self.artifact in ("wheel", "sdist"):
             if self.artifact == "wheel":
                 rel = next((r for r in sorted(self.deferred) if r.count("/") == 1
@@ -2875,15 +2869,7 @@ class _ArtifactScan:
             else:
                 rel = "PKG-INFO" if "PKG-INFO" in self.deferred else None
             if rel is not None:
-                names, requires = set(), 0
-                for line in self.deferred[rel].decode("utf-8", "replace").split("\n"):
-                    if not line.strip():
-                        break                       # (the headers end at the first empty line)
-                    if line.startswith(("Name:", "Requires-Dist:")):
-                        requires += line.startswith("Requires-Dist:")
-                        name = re.split(r"[\s;\[(<>=!~@]", line.split(":", 1)[1].strip(), maxsplit=1)[0]
-                        if name:
-                            names.add(name)
+                names, requires = lazaret.metadata_declared_names(self.deferred[rel].decode("utf-8", "replace"))
                 if requires or self.artifact == "wheel":
                     out = names
         self._declared = sorted(out) if out is not None else None

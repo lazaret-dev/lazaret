@@ -93,9 +93,10 @@ def install_script_risk(text, shell=True, command=False, lang=None):
     return engine.install_script_risk(text, shell, command, lang)
 
 
-def import_time_risk(text, lang=None):
-    """(reasons, line): the import-time test of a dependency's file."""
-    return engine.import_time_risk(text, lang)
+def import_time_risk(text, lang=None, declared=None, own=None):
+    """(reasons, line): the import-time test of a dependency's file; `declared` and `own`, its package's names when
+    known (engine.import_time_risks)."""
+    return engine.import_time_risk(text, lang, declared, own)
 
 
 def import_time_severity(reasons):
@@ -5055,6 +5056,105 @@ def _xf_record_tops(path):
     return out
 
 
+def npm_declared_names(data):
+    """A package.json's (`data`, as read) own name and the packages it names, dependencies of every kind, bundled
+    ones too: what a package manager may install for it (D-12)."""
+    out = {data["name"]} if isinstance(data.get("name"), str) else set()
+    for key in ("dependencies", "devDependencies", "optionalDependencies", "peerDependencies"):
+        if isinstance(data.get(key), dict):
+            out.update(k for k in data[key] if isinstance(k, str))
+    for key in ("bundleDependencies", "bundledDependencies"):
+        if isinstance(data.get(key), list):
+            out.update(k for k in data[key] if isinstance(k, str))
+    return out
+
+
+def metadata_declared_names(text):
+    """A distribution's METADATA or PKG-INFO headers: (its Name and each Requires-Dist's name, an extra's too; how
+    many Requires-Dist it has), D-12."""
+    names, requires = set(), 0
+    for line in text.split("\n"):
+        if not line.strip():
+            break                                   # (the headers end at the first empty line)
+        if line.startswith(("Name:", "Requires-Dist:")):
+            requires += line.startswith("Requires-Dist:")
+            name = re.split(r"[\s;\[(<>=!~@]", line.split(":", 1)[1].strip(), maxsplit=1)[0]
+            if name:
+                names.add(name)
+    return names, requires
+
+
+_METADATA_HEAD_BYTES = 1 << 20
+
+
+class _InstalledNames:
+    """The names of the installed package a dependency file belongs to, for the tests a --deps scan runs on it,
+    as the registry gives a release's (repo's _declared_names and _own_name): (declared, own), or None where they
+    are not known. An npm package's: its package.json's (node_modules/<name> or node_modules/@scope/<name>, the
+    nearest), its name and the packages it names, and its name as its own (D-12b, D-9c: an install at import of
+    any other is a reason, and a rewrite of its own folder is its own code); a Python distribution's: the
+    *.dist-info whose RECORD lists the file's top-level module or package, its METADATA's Name and Requires-Dist
+    (D-12b; several that list one, all of theirs)."""
+
+    def __init__(self, tree):
+        self.tree = tree
+        self.npm = {}                       # package directory -> (declared, own) or None
+        self.sites = {}                     # site-packages directory -> {top-level name: (declared, None)}
+
+    def of(self, path):
+        parts = path.replace(os.sep, "/").split("/")
+        k = max((i for i, part in enumerate(parts[:-1]) if part == "node_modules"), default=-1)
+        if k >= 0:
+            end = k + 3 if parts[k + 1].startswith("@") else k + 2
+            if end >= len(parts) or not _is_package_root("/".join(parts[:end])):
+                return None
+            directory = "/".join(parts[:end])
+            if directory not in self.npm:
+                self.npm[directory] = self._npm_names(directory)
+            return self.npm[directory]
+        idx = max((i for i, part in enumerate(parts[:-1]) if part in _XF_SITE_MARKERS), default=-1)
+        if idx < 0:
+            return None
+        site = "/".join(parts[:idx + 1])
+        if site not in self.sites:
+            self.sites[site] = self._site_names(site)
+        return self.sites[site].get(parts[idx + 1])
+
+    def _npm_names(self, directory):
+        manifest = self.tree.manifests.get(directory + "/package.json")
+        if manifest is None:
+            return None
+        data, _problems = load_manifest(manifest["path"], manifest["content"])
+        if not isinstance(data, dict):
+            return None
+        name = data.get("name") if isinstance(data.get("name"), str) and data.get("name") else None
+        return sorted(npm_declared_names(data)), name
+
+    def _site_names(self, site):
+        where = os.path.join(self.tree.root, *site.split("/"))
+        try:
+            infos = sorted(n for n in os.listdir(where) if n.endswith(".dist-info"))
+        except OSError:
+            return {}
+        names = {}                          # top-level name -> the names of the distributions that list it
+        for info in infos:
+            directory = os.path.join(where, info)
+            try:                            # (a real directory: no link is followed)
+                st = os.lstat(directory)
+            except OSError:
+                continue
+            if not _stat.S_ISDIR(st.st_mode) or _is_reparse_point(st):
+                continue
+            try:                            # (its headers: they come first)
+                data = _read_prefix(os.path.join(directory, "METADATA"), _METADATA_HEAD_BYTES)
+            except (OSError, ValueError):
+                continue
+            declared, _requires = metadata_declared_names(data.decode("utf-8", "replace"))
+            for top in _xf_record_tops(os.path.join(directory, "RECORD")):
+                names.setdefault(top, set()).update(declared)
+        return {top: (sorted(declared), None) for top, declared in names.items()}
+
+
 def dependency_checks(root, files, manifests, issues, excludes=(), should_stop=None):
     """The --deps checks of what dependencies run (see the section comment),
     after the files and manifests were scanned: escalates the SC-INSTALL-HOOK
@@ -5063,6 +5163,7 @@ def dependency_checks(root, files, manifests, issues, excludes=(), should_stop=N
     and scanned here (to add to the scanned files), and should_stop's reason
     when it stopped the checks (None otherwise)."""
     tree = _DependencyTree(root, files, manifests, excludes)
+    names = _InstalledNames(tree)
     dep_manifests = {m["path"] for m in manifests if m.get("dep")}
     out, extra, run = [], [], set()
     followed_to_end = {}                    # manifest -> SC-TRUNCATED issue added for it
@@ -5075,11 +5176,12 @@ def dependency_checks(root, files, manifests, issues, excludes=(), should_stop=N
             if stopped:
                 return out, extra, stopped
         try:
-            _follow_dependency_hook(tree, issue, out, extra, run, followed_to_end)
+            _follow_dependency_hook(tree, issue, out, extra, run, followed_to_end, names)
         except Exception as exc:            # one manifest must never kill the run
             out.append(engine.error_issue(issue["file"], exc))
     # the import-time test for each dependency file, a batch at a time (the
-    # engine reads a batch on threads); a file it could not answer about is
+    # engine reads a batch on threads), given the names of the package it is
+    # in (D-12b, D-9c: _InstalledNames); a file it could not answer about is
     # SC-TRUNCATED (engine.error_issue)
     assets = _deps_web_assets(tree, files)
     todo = [f for f in files
@@ -5091,15 +5193,16 @@ def dependency_checks(root, files, manifests, issues, excludes=(), should_stop=N
             if stopped:
                 return out, extra, stopped
         chunk = todo[start:start + engine.BATCH]
+        named = [names.of(f["path"]) for f in chunk]
         try:
-            risks = engine.import_time_risks([(f["content"], f["lang"]) for f in chunk])
+            risks = engine.import_time_risks([(f["content"], f["lang"]) for f in chunk], names=named)
         except Exception:                   # each file is then read on its own below
             risks = [None] * len(chunk)
-        for f, risk in zip(chunk, risks):
+        for f, risk, name in zip(chunk, risks, named):
             try:
                 if engine.unanswered(risk):
                     raise risk
-                found = dependency_import_issue(f["path"], f["content"], f["lang"], risk=risk)
+                found = dependency_import_issue(f["path"], f["content"], f["lang"], risk=risk, names=name)
                 agent = dependency_agent_issue(f["path"], f["content"])
             except Exception as exc:
                 found, agent = engine.error_issue(f["path"], exc), None
@@ -5237,8 +5340,10 @@ def _implicit_gyp_hooks(tree, manifests):
     return out
 
 
-def _follow_dependency_hook(tree, issue, out, extra, run, followed_to_end):
+def _follow_dependency_hook(tree, issue, out, extra, run, followed_to_end, names=None):
     manifest = issue["file"]
+    named = names.of(manifest) if names is not None else None
+    own = named[1] if named else None               # (D-9c: the package's own name, for its install scripts)
     base = posixpath.dirname(manifest.replace(os.sep, "/"))
     direct = agent_hijack_in_command(issue["cmd"])         # the hook runs the agent itself
     if direct is not None:
@@ -5265,7 +5370,7 @@ def _follow_dependency_hook(tree, issue, out, extra, run, followed_to_end):
         if rel is None:
             continue
         text = _dependency_script_text(tree, rel, "sh" if rel.endswith(".sh") else "js", out, extra, run)
-        reasons = engine.install_script_risk(text, lang=engine.script_lang(rel)) if text else []
+        reasons = engine.install_script_risk(text, lang=engine.script_lang(rel), own=own) if text else []
         if reasons and issue["sev"] not in ("BLOCKER", "CRITICAL"):
             msg = f"Install hook runs {target}, which {'; and '.join(reasons)}."
             issue["sev"] = "CRITICAL"
@@ -5275,7 +5380,7 @@ def _follow_dependency_hook(tree, issue, out, extra, run, followed_to_end):
             out.append(agent)
         # the scripts it starts with node or python (0.1.8, spawned_scripts)
         for started, stext in _started_dependency_scripts(tree, rel, text, base, out, extra, run):
-            more = engine.install_script_risk(stext, lang=engine.script_lang(started)) if stext else []
+            more = engine.install_script_risk(stext, lang=engine.script_lang(started), own=own) if stext else []
             if more and issue["sev"] not in ("BLOCKER", "CRITICAL"):
                 shown = started[len(base) + 1:] if base and started.startswith(base + "/") else started
                 msg = f"Install hook runs {target}, which starts {shown}, which {'; and '.join(more)}."
@@ -5346,12 +5451,13 @@ def _read_dependency_script(tree, rel, as_lang, out, extra):
     return text
 
 
-def dependency_import_issue(path, text, lang=None, risk=None):
+def dependency_import_issue(path, text, lang=None, risk=None, names=None):
     """SC-IMPORT-RISK (MAJOR, or CRITICAL: import_time_severity) for a
     dependency's JavaScript or Python file (`lang` 'js' or 'py') that fails
     the import-time test (import_time_risk; `risk`: its answer, when the
-    caller has it already), else None."""
-    reasons, line = risk if risk is not None else import_time_risk(text, lang)
+    caller has it already; `names`: its package's (declared, own), when
+    known), else None."""
+    reasons, line = risk if risk is not None else import_time_risk(text, lang, *(names or (None, None)))
     if not reasons:
         return None
     lines = text.split("\n")

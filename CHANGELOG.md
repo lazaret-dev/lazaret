@@ -86,7 +86,7 @@ project is pre-1.0, so the 0.x API may still change.
   `@atexit.register`), and not under `if __name__ == "__main__":`: litellm 1.103.0 installs supabase, sentry_sdk or
   slack_bolt when one of its integrations is set up and the package is missing, and stays OK. With every install
   counted, as if no manifest named a package, none of the 30,241 Python and JavaScript files of the packages installed
-  here has one. Registry and guard scans; a `--deps` scan, which reads installed packages, does not have it yet.
+  here has one. Registry and guard scans, and `--deps` scans since D-12b (below).
 - **A workflow's actions are read at the commit they run (N-4).** `python -m
   lazaret.registry.actions` now scans each action's own code, the archive the runner fetches for
   the commit its `uses:` resolves to, as the runner runs it: a JavaScript action's `pre`, `main`
@@ -812,6 +812,17 @@ project is pre-1.0, so the 0.x API may still change.
 
 ### Fixed
 
+- **A `--deps` scan gives the tests each installed package's names (D-12b, D-9c).** D-12's install at import of a
+  package the release does not depend on was judged in registry and guard scans, which know the release's manifest,
+  and not in a `--deps` scan, which gave the import-time test no names; and D-9's test, given no name, would read a
+  package's code written into its own folder (`require.resolve('<its name>/…')`) as another package's. Both
+  packages' `--deps` now give each installed package's names, as the registry gives a release's: an npm package's
+  package.json (the nearest `node_modules/<name>` or `node_modules/@scope/<name>`: its own name and the packages it
+  names, of every kind) to the import-time test, and its name as its own to that test and to its install scripts';
+  a Python distribution's, the Name and Requires-Dist of the `*.dist-info` whose RECORD lists the file's top-level
+  module or package. Where neither is known (no package.json, no RECORD), the tests read as before. Measured: both
+  CLIs' `--deps` over the npm trees installed here (29,400 dependency files) and the import-time test on the 535
+  files of 137 pip-installed distributions that name an install: no finding changed.
 - **What a JavaScript script puts into a member's container, the member holds (D-3b; rule set 2.59.0).** D-3 left
   `o.list.push(x)`, `o.m.set(k, x)`, `this.items.push(x)` and `Object.assign(this.opts, …)` out: put into the object
   that holds the member, as an assignment to a name's member is, what they were given reached every member read of

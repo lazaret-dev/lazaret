@@ -205,28 +205,43 @@ def _batch(call, items, texts=None):
     return _answers([(call, _budget(args), text) for args, text in items], texts)
 
 
-def import_time_risks(items, texts=None, declared=None, own=None):
+def _names_args(declared, own):
+    """The import-time test's arguments for a package's names: `declared` (D-12) and `own` (D-9), when known."""
+    args = {} if declared is None else {"declared": list(declared)}
+    if own:
+        args["own"] = own
+    return args
+
+
+def import_time_risks(items, texts=None, declared=None, own=None, names=None):
     """[(text, lang)] -> the import-time test of each, (reasons, line), in
     order; an item the engine could not answer is the _native.NativeError it
     stands for (see unanswered, error_issue). `texts`: the scan's Texts.
     `declared`: the release's own name and the packages its manifest names,
     when known: a package manager's install of any other is a reason (D-12).
     `own`: the release's name, when known (D-9: its own code is not
-    another package's)."""
+    another package's). `names`: for each item, the (declared, own) of the
+    package it belongs to, or None, in place of `declared` and `own` (a
+    --deps scan's installed packages: D-12b, D-9c)."""
     if not items:
         return []
-    extra = {} if declared is None else {"declared": list(declared)}
-    if own:
-        extra["own"] = own
-    answers = _batch("import_time_risk", [({"lang": lang, **extra} if lang else dict(extra), text)
-                                          for text, lang in items], texts)
+    shared = _names_args(declared, own)
+    calls = []
+    for k, (text, lang) in enumerate(items):
+        extra = shared if names is None or names[k] is None else _names_args(*names[k])
+        calls.append(({"lang": lang, **extra} if lang else dict(extra), text))
+    answers = _batch("import_time_risk", calls, texts)
     return [a if unanswered(a) else (a[0], a[1]) for a in answers]
 
 
-def import_time_risk(text, lang=None):
+def import_time_risk(text, lang=None, declared=None, own=None):
     """(reasons, line) of the import-time test (raises _native.NativeError
-    when the engine could not answer)."""
-    answer = _native.call("import_time_risk", {"lang": lang} if lang else {}, text)
+    when the engine could not answer); `declared` and `own` as for
+    import_time_risks."""
+    args = _names_args(declared, own)
+    if lang:
+        args["lang"] = lang
+    answer = _native.call("import_time_risk", args, text)
     return answer[0], answer[1]
 
 

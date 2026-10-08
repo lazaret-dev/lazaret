@@ -204,14 +204,25 @@ export function packValues(...names) {
 
 /** Reasons an install-time script looks hostile ([] if none). `shell`: read a shell script as a program
  * too; `command`: the text is a hook's command; `lang`: the script's language when known ("js", "py": its
- * strings are read as its runtime reads them). core.install_script_risk */
-export const installScriptRisk = (text, shell = true, command = false, lang = null) =>
-  call("install_script_risk", lang ? { shell, command, lang } : { shell, command }, text);
+ * strings are read as its runtime reads them); `own`: the package's name, when known (D-9: a rewrite of its
+ * own code is its own). core.install_script_risk */
+export const installScriptRisk = (text, shell = true, command = false, lang = null, own = null) => {
+  const args = lang ? { shell, command, lang } : { shell, command };
+  if (own) args.own = own;
+  return call("install_script_risk", args, text);
+};
 /** The language a script runs in, for the tests that read its strings: "py" for a .py file, null for a
  * shell script (.sh), "js" for the rest (what node runs). core's engine.script_lang */
 export const scriptLang = (path) => (path.endsWith(".py") ? "py" : path.endsWith(".sh") ? null : "js");
-/** [reasons, line] of the weaker import-time test ([] and null if none); `lang` "py", "js" or null. */
-export const importTimeRisk = (text, lang = null) => call("import_time_risk", lang ? { lang } : {}, text);
+/** [reasons, line] of the weaker import-time test ([] and null if none); `lang` "py", "js" or null; `names`: the
+ * package's [declared, own], when known (D-12: an install of a package it does not name is a reason; D-9: a
+ * rewrite of its own code is its own). core.import_time_risk */
+export const importTimeRisk = (text, lang = null, names = null) => {
+  const args = lang ? { lang } : {};
+  if (names && names[0] != null) args.declared = names[0];
+  if (names && names[1]) args.own = names[1];
+  return call("import_time_risk", args, text);
+};
 /** "CRITICAL" when one of importTimeRisk's reasons is a strong one, else "MAJOR". */
 export const importTimeSeverity = (reasons) => call("import_time_severity", { reasons });
 /** [targets, complete]: the files an install hook's command runs, and whether it was read to the end
