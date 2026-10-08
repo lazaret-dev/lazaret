@@ -29,9 +29,10 @@ one of three outcomes:
 the rule pack's `_VERIFY_PROVIDERS` (rust/crates/lazaret-engine/rules/lazaret-rules.json), and which provider a credential is, the
 request that asks it (AWS's signed with Signature Version 4) and what its answer says are the engine's `secrets.identify`,
 `secrets.request` and `secrets.judge` (rust/crates/lazaret-engine/src/secrets.rs). This module keeps what is about a run (the
-cache, the budgets, the calls in flight) and makes the call (`secretverify_http`); `validate` is the table's rules, which
-`scripts/make_rust_tables.py --check` holds the pack to. Nothing calls it yet: `lazaret scan --verify-secrets` is stage 2's
-third step. Never in `guard`, the registry auditor or the MCP server.
+cache, the budgets, the calls in flight) and makes the call (`secretverify_http`: over lazaret-net, the native library's client,
+or urllib where the native client is not used); `validate` is the table's rules, which `scripts/make_rust_tables.py --check`
+holds the pack to. Nothing calls it yet: `lazaret scan --verify-secrets` is stage 2's third step. Never in `guard`, the registry
+auditor or the MCP server.
 
 Imports the engine's calls (`_native`, `engine`) and `secretverify_http` of this package."""
 
@@ -256,19 +257,20 @@ def build_request(provider, parts, now):
         raise ValueError(answer["refused"])
     body = answer["body"]
     return http.Request(answer["method"], answer["host"], answer["path"], dict(answer["headers"]),
-                        None if body is None else body.encode("utf-8"))
+                        None if body is None else body.encode("utf-8"), tuple(answer["secret_headers"]))
 
 
 class Verifier:
     """Asks providers whether credentials are live, for one run.
 
-    `transport(request, timeout, max_bytes) -> Response` is `secretverify_http.https_transport()` by default; a test gives its own.
+    `transport(request, timeout, max_bytes) -> Response` is `secretverify_http.default_transport()` by default (lazaret-net's, or
+    urllib's); a test gives its own.
     `timeout` bounds one call; `budget` (seconds) and `max_calls` bound the run; `per_provider` is how many calls may be in flight
     to one provider and `interval` the least time between the starts of two calls to it. `clock` and `sleep` are for tests."""
 
     def __init__(self, transport=None, *, timeout=http.DEFAULT_TIMEOUT, budget=120.0, max_calls=500, per_provider=2, interval=0.0,
                  clock=time.monotonic, sleep=time.sleep, now=None):
-        self._transport = transport if transport is not None else http.https_transport()
+        self._transport = transport if transport is not None else http.default_transport()
         self.timeout = timeout
         self.budget = budget
         self.max_calls = max_calls
@@ -392,4 +394,5 @@ _TRANSPORT_WORDS = {
     "tls": "the provider's certificate could not be checked",
     "proxy": "the proxy could not be used",
     "refused": "the request was not allowed",
+    "redirect": "the provider answered with a redirect, which is not followed",
 }

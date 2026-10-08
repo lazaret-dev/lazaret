@@ -1,16 +1,19 @@
-"""A stub provider for the secret-verification tests (0.1.9, V-1 stage 1): one TLS server on 127.0.0.1 that answers as scripted
-for any of the providers' hosts, and a CONNECT proxy in front of it.
+"""A stub provider for the secret-verification tests (0.1.9, V-1): one TLS server on 127.0.0.1 that answers as scripted for
+any of the providers' hosts, and a CONNECT proxy in front of it.
 
 The tests make no call to a real service. The server's certificate is made when a test class starts, with the `openssl`
-command (a throw-away key, valid two days, in a temporary folder, for the providers' hosts); where there is no `openssl` the
-tests that need the server are skipped. The client trusts that certificate and connects to the stub's port in place of 443, the
-host's name still being what the certificate is checked for, so what is tested is the code a real call runs: https, the host
-checked, the headers, no redirect, the size and time limits.
+command (a throw-away root and a certificate for the providers' hosts under it, valid two days, in a temporary folder); where
+there is no `openssl` the tests that need the server are skipped. urllib's transport trusts the root and connects to the stub's
+port in place of 443; lazaret-net's, which connects to a host by its name, reaches it through the stub's CONNECT proxy, with
+the root as its trust anchor (`nativenet.configure_roots(stub.root)`, which the test class sets and puts back). Either way the
+host's name is what the certificate is checked for, so what is tested is the code a real call runs: https, the host checked,
+the headers, no redirect, the size and time limits.
 
     stub = ProviderStub()           # (in setUpClass)
     stub.script["api.github.com", "/user"] = Answer(200, b'{"login": "octocat"}')
-    send = stub.transport()         # a `secretverify_http` transport that reaches the stub
-    stub.requests                   # what it was asked: [Seen(method, host, path, headers, body)]
+    send = stub.transport()         # urllib's transport (`secretverify_http.https_transport`), reaching the stub
+    send = stub.native()            # lazaret-net's (`secretverify_http.native_transport`)
+    stub.requests                   # what it was asked: [Seen(method, host, path, headers, body, raw)]
 """
 
 import collections
@@ -24,11 +27,13 @@ import subprocess
 import tempfile
 import threading
 import time
+import unittest
 
 from lazaret.scanner import secretverify as verify
 from lazaret.scanner import secretverify_http as http_mod
 
-Seen = collections.namedtuple("Seen", "method host path headers body")
+#: `headers`: lower-case names, the last of a name; `raw`: every field as it came, in order
+Seen = collections.namedtuple("Seen", "method host path headers body raw")
 
 
 class Answer:
@@ -62,7 +67,7 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         body = self.rfile.read(length) if length else b""
         host = (self.headers.get("Host") or "").lower()
         stub = self.server.stub
-        seen = Seen(self.command, host, self.path, {k.lower(): v for k, v in self.headers.items()}, body)
+        seen = Seen(self.command, host, self.path, {k.lower(): v for k, v in self.headers.items()}, body, tuple(self.headers.items()))
         with stub.lock:
             stub.requests.append(seen)
         answer = stub.script.get((host, self.path.split("?")[0])) or stub.script.get(host) or Answer(404, b"not found")
@@ -186,12 +191,24 @@ class StubProxy:
 class ProviderStub:
     def __init__(self):
         self.dir = tempfile.mkdtemp(prefix="lazaret-stub-")
+        self.cafile, root_key = os.path.join(self.dir, "root.pem"), os.path.join(self.dir, "root.key")
         self.cert, key = os.path.join(self.dir, "cert.pem"), os.path.join(self.dir, "key.pem")
-        san = ",".join(f"DNS:{h}" for h in hosts())
-        subprocess.run(["openssl", "req", "-x509", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:prime256v1", "-nodes", "-keyout", key,
-                        "-out", self.cert, "-days", "2", "-subj", "/CN=lazaret-stub", "-addext", f"subjectAltName={san}",
-                        "-addext", "basicConstraints=critical,CA:TRUE", "-addext", "keyUsage=critical,digitalSignature,keyCertSign"],
-                       check=True, capture_output=True, timeout=30)
+        with open(os.path.join(self.dir, "leaf.ext"), "w", encoding="ascii") as ext:
+            ext.write("subjectAltName=" + ",".join(f"DNS:{h}" for h in hosts()) + "\nbasicConstraints=critical,CA:FALSE\n"
+                      "keyUsage=critical,digitalSignature\nextendedKeyUsage=serverAuth\n")
+
+        def openssl(*args):
+            subprocess.run(["openssl", *args], check=True, capture_output=True, timeout=30, cwd=self.dir)
+
+        openssl("req", "-x509", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:prime256v1", "-nodes", "-keyout", root_key, "-out",
+                self.cafile, "-days", "2", "-subj", "/CN=lazaret-stub root", "-addext", "basicConstraints=critical,CA:TRUE",
+                "-addext", "keyUsage=critical,keyCertSign,cRLSign")
+        openssl("req", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:prime256v1", "-nodes", "-keyout", key, "-out", "leaf.csr",
+                "-subj", "/CN=lazaret-stub")
+        openssl("x509", "-req", "-in", "leaf.csr", "-CA", self.cafile, "-CAkey", root_key, "-CAcreateserial", "-out", self.cert,
+                "-days", "2", "-extfile", "leaf.ext")
+        with open(self.cafile, encoding="ascii") as f:
+            self.root = f.read()                          # (lazaret-net's trust anchor, for `native`)
         server_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         server_ctx.load_cert_chain(self.cert, key)
         self.script, self.requests, self.lock = {}, [], threading.Lock()
@@ -201,13 +218,24 @@ class ProviderStub:
         self.address = self._server.server_address
         threading.Thread(target=self._server.serve_forever, daemon=True).start()
         self._proxies = []
+        self._tunnel = None
 
     def client_context(self):
-        return ssl.create_default_context(cafile=self.cert)
+        return ssl.create_default_context(cafile=self.cafile)
 
     def transport(self, environ=None, direct=True):
         """A transport that reaches this stub: straight to its port (`direct`), or, with `environ` holding proxy settings, through them."""
         return http_mod.https_transport(self.client_context(), self.address if direct else None, environ if environ is not None else {})
+
+    def native(self, proxy=None, auth=None):
+        """lazaret-net's transport, reaching this stub through `proxy` (a `StubProxy`; by default one of the stub's own), with
+        `auth` ("user:password") for the proxy. The caller has made `root` lazaret-net's trust anchor."""
+        if proxy is None:
+            if self._tunnel is None:
+                self._tunnel = self.proxy()
+            proxy = self._tunnel
+        at = f"{auth}@" if auth else ""
+        return http_mod.native_transport(proxy=f"http://{at}127.0.0.1:{proxy.address[1]}")
 
     def proxy(self, require=None):
         proxy = StubProxy(self.address[1], require)
@@ -225,3 +253,18 @@ class ProviderStub:
         self._server.shutdown()
         self._server.server_close()
         shutil.rmtree(self.dir, ignore_errors=True)
+
+
+class OverLazaretNet:
+    """A mixin for a test class whose stub (`cls.stub`, made by the class it is mixed into) is reached over lazaret-net: the
+    class is skipped where the native transport is not available, and the stub's root is lazaret-net's trust anchor while it
+    runs (the default ones again after)."""
+
+    @classmethod
+    def setUpClass(cls):
+        from lazaret.scanner import nativenet
+        if nativenet.disabled() or not nativenet.available():
+            raise unittest.SkipTest(f"no native transport here ({nativenet.why_not()})")
+        super().setUpClass()
+        nativenet.configure_roots(cls.stub.root)
+        cls.addClassCleanup(nativenet.configure_roots, None)

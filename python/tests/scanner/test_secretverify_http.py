@@ -1,7 +1,12 @@
-"""The HTTPS transport of live secret verification (scanner/secretverify_http.py), against a stub provider on 127.0.0.1 (no real
-service is called; the stub's certificate is made with `openssl`, and the tests that need the stub are skipped without it)."""
+"""The HTTPS transports of live secret verification (scanner/secretverify_http.py): lazaret-net's and urllib's, against a stub
+provider on 127.0.0.1 (no real service is called; the stub's certificates are made with `openssl`, and the tests that need the stub
+are skipped without it; lazaret-net's are skipped where the native transport is not available)."""
 
+import datetime
+import hashlib
+import hmac
 import os
+import re
 import socket
 import ssl
 import threading
@@ -10,14 +15,50 @@ import unittest
 from http.client import HTTPSConnection
 from unittest import mock
 
+from lazaret.scanner import _native, nativenet
 from lazaret.scanner import secretverify_http as http
 from tests.scanner import _verify_stub as vs
 
-GOOD = http.Request("GET", "api.github.com", "/user", {"Authorization": "Bearer abc"}, None)
+GOOD = http.Request("GET", "api.github.com", "/user", {"Authorization": "Bearer abc"}, None, ("Authorization",))
+
+
+#: a credential of each provider's format (made up)
+SAMPLES = {
+    "github": "ghp_" + "a1B2" * 9, "slack": "xoxb-1234567890-abcdefghij", "stripe": "sk_live_" + "a1" * 12,
+    "npm": "npm_" + "A1b2" * 9, "openai": "sk-proj-" + "a1" * 20, "anthropic": "sk-ant-api03-" + "Ab1_" * 10,
+    "aws": {"id": "AKIAABCDEFGHIJKLMNOP", "secret": "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY"},
+}
+NO_PROXY_ENV = {k: v for k, v in os.environ.items() if k.lower() not in ("https_proxy", "http_proxy", "all_proxy", "no_proxy")}
 
 
 def request(**changes):
-    return GOOD._replace(**changes)
+    """GOOD with `changes`; new headers keep the credential's field if they still have it."""
+    req = GOOD._replace(**changes)
+    if "headers" in changes and "secret_headers" not in changes and isinstance(req.headers, dict):
+        req = req._replace(secret_headers=tuple(n for n in GOOD.secret_headers if n in req.headers))
+    return req
+
+
+def sigv4_holds(seen, secret_key):
+    """Does the signature in what the stub received (`seen`) hold over it? AWS's Signature Version 4 worked out here, with
+    hashlib and hmac, over the fields it names as they came (each must have come once)."""
+    m = re.fullmatch(r"AWS4-HMAC-SHA256 Credential=[^/]+/(\d{8})/([^/]+)/([^/]+)/aws4_request, SignedHeaders=([a-z0-9;-]+), "
+                     r"Signature=([0-9a-f]{64})", seen.headers["authorization"])
+    date, region, service, signed, signature = m.groups()
+    fields = ""
+    for name in signed.split(";"):
+        values = [v for n, v in seen.raw if n.lower() == name]
+        if len(values) != 1:
+            return False
+        fields += f"{name}:{' '.join(values[0].split())}\n"
+    path, _, query = seen.path.partition("?")
+    canonical = "\n".join([seen.method, path, query, fields, signed, hashlib.sha256(seen.body).hexdigest()])
+    scope = f"{date}/{region}/{service}/aws4_request"
+    to_sign = "\n".join(["AWS4-HMAC-SHA256", seen.headers["x-amz-date"], scope, hashlib.sha256(canonical.encode()).hexdigest()])
+    key = ("AWS4" + secret_key).encode()
+    for part in (date, region, service, "aws4_request"):
+        key = hmac.new(key, part.encode(), hashlib.sha256).digest()
+    return hmac.compare_digest(hmac.new(key, to_sign.encode(), hashlib.sha256).hexdigest(), signature)
 
 
 class CheckRequestTests(unittest.TestCase):
@@ -109,6 +150,15 @@ class CheckRequestTests(unittest.TestCase):
                 self.refused(request(method="POST", body=body))
         self.assertIsNotNone(http.check_request(request(method="POST", body=b"")))
 
+    def test_the_fields_that_carry_the_credential_are_the_request_s_own(self):
+        for names in (None, "Authorization", ("X-Other",), (5,), ("Authorization", None)):
+            with self.subTest(names):
+                self.refused(request(secret_headers=names))
+        for names in ((), ["Authorization"], ("authorization",), ("AUTHORIZATION", "Authorization")):
+            with self.subTest(names):
+                self.assertIsNotNone(http.check_request(request(secret_headers=names)))
+        self.assertEqual(http.Request("GET", "a.example", "/", {}, None).secret_headers, ())
+
     def test_what_is_refused_says_nothing_of_the_request(self):
         secret = "ghp_" + "s" * 36
         with self.assertRaises(http.TransportError) as caught:
@@ -189,6 +239,38 @@ class RequestTests(StubCase):
         (seen,) = self.seen()
         self.assertEqual((seen.method, seen.body, seen.headers["content-length"]), ("POST", b"Action=X", "8"))
 
+    @unittest.skipUnless(_native.available(), "the requests are the engine's")
+    def test_each_provider_s_request_arrives_as_it_was_made(self):
+        from lazaret.scanner import secretverify as sv
+        now = datetime.datetime(2026, 10, 3, 12, 0)
+        for pid, credential in SAMPLES.items():
+            with self.subTest(pid):
+                self.stub.reset()
+                req = sv.build_request(sv._by_id()[pid], credential if isinstance(credential, dict) else {"secret": credential}, now)
+                self.stub.script[req.host] = vs.Answer(200, b"{}")
+                self.assertEqual(self.send(req, 5, 1000).status, 200)
+                (seen,) = self.seen()
+                self.assertEqual((seen.method, seen.host, seen.path, seen.body), (req.method, req.host, req.path, req.body or b""))
+                for name, value in req.headers.items():                     # (each field once, as it was made)
+                    self.assertEqual([v for n, v in seen.raw if n.lower() == name.lower()], [value], name)
+                self.assertTrue(req.secret_headers)
+                parts = list(credential.values()) if isinstance(credential, dict) else [credential]
+                for name, value in seen.raw:                                # (the credential in its own fields alone)
+                    if name.lower() not in {n.lower() for n in req.secret_headers}:
+                        self.assertFalse(any(part in value for part in parts), name)
+
+    @unittest.skipUnless(_native.available(), "the request is the engine's")
+    def test_aws_s_signature_holds_over_the_request_the_provider_receives(self):
+        from lazaret.scanner import secretverify as sv
+        pair = SAMPLES["aws"]
+        req = sv.build_request(sv._by_id()["aws"], pair, datetime.datetime(2026, 10, 3, 12, 0))
+        self.stub.script["sts.amazonaws.com"] = vs.Answer(200, b"<ok/>")
+        self.assertEqual(self.send(req, 5, 1000).status, 200)
+        (seen,) = self.seen()
+        self.assertTrue(sigv4_holds(seen, pair["secret"]))
+        self.assertFalse(sigv4_holds(seen._replace(body=seen.body + b"&x=1"), pair["secret"]))     # (the check can fail)
+        self.assertNotIn(pair["secret"], repr(seen))                                              # (the key itself never goes)
+
     def test_a_request_s_own_user_agent_replaces_the_default(self):
         self.stub.script["slack.com"] = vs.Answer(200, b"{}")
         self.send(request(host="slack.com", path="/api/auth.test", headers={"User-Agent": "mine"}), 5, 1000)
@@ -222,6 +304,9 @@ class RequestTests(StubCase):
         self.stub.script["api.github.com"] = vs.Answer(200, b"yz")
         got = self.send(GOOD, 5, 1)
         self.assertEqual((got.body, got.truncated), (b"y", True))
+
+class UrllibTests(StubCase):
+    """What only urllib's transport has: its connection, its watchdog."""
 
     def test_a_request_the_connection_cannot_form_is_refused(self):
         with mock.patch.object(HTTPSConnection, "request", side_effect=ValueError("bad")):
@@ -258,19 +343,29 @@ class RequestTests(StubCase):
 
 
 class RedirectTests(StubCase):
-    def test_a_redirect_is_returned_and_never_followed(self):
+    def test_a_redirect_is_an_error_and_never_followed(self):
         self.stub.script["api.github.com", "/user"] = vs.Answer(302, b"", {"Location": "https://slack.com/steal"})
         self.stub.script["slack.com"] = vs.Answer(200, b"stolen")
-        got = self.send(GOOD, 5, 1000)
-        self.assertEqual(got.status, 302)
-        self.assertEqual(got.headers["location"], "https://slack.com/steal")
+        with self.assertRaises(http.TransportError) as caught:
+            self.send(GOOD, 5, 1000)
+        self.assertEqual(caught.exception.kind, "redirect")
         self.assertEqual([(s.host, s.path) for s in self.seen()], [("api.github.com", "/user")])
 
     def test_every_redirect_status_is_the_same(self):
-        for status in (301, 302, 303, 307, 308):
+        for status in http.REDIRECTS:
             with self.subTest(status):
                 self.stub.reset()
                 self.stub.script["api.github.com"] = vs.Answer(status, b"", {"Location": "/elsewhere"})
+                with self.assertRaises(http.TransportError) as caught:
+                    self.send(GOOD, 5, 1000)
+                self.assertEqual(caught.exception.kind, "redirect")
+                self.assertEqual(len(self.seen()), 1)
+
+    def test_a_status_that_does_not_redirect_is_an_answer_whatever_it_names(self):
+        for status, headers in ((302, {}), (300, {"Location": "/elsewhere"}), (304, {"Location": "/elsewhere"})):
+            with self.subTest(status):
+                self.stub.reset()
+                self.stub.script["api.github.com"] = vs.Answer(status, b"", headers)
                 self.assertEqual(self.send(GOOD, 5, 1000).status, status)
                 self.assertEqual(len(self.seen()), 1)
 
@@ -458,6 +553,144 @@ class ProxyTests(StubCase):
             self.stub.transport({"https_proxy": "https://proxy.example:3128"}, direct=False)(GOOD, 2, 1000)
         self.assertEqual(caught.exception.kind, "proxy")
         self.assertEqual(self.seen(), [])
+
+
+class Native(vs.OverLazaretNet):
+    """The same tests on lazaret-net's transport, which reaches the stub through its CONNECT proxy, with the stub's root as its
+    trust anchor (put back when the class ends)."""
+
+    def setUp(self):
+        super().setUp()
+        self.send = self.stub.native()
+
+
+class NativeRequestTests(Native, RequestTests):
+    def test_the_credential_goes_as_a_credential_and_nothing_else_does(self):
+        self.stub.script["api.anthropic.com"] = vs.Answer(200, b"{}")
+        req = http.Request("GET", "api.anthropic.com", "/v1/models", {"x-api-key": "sk-ant-x", "anthropic-version": "2023-06-01"},
+                           None, ("x-api-key",))
+        self.assertEqual(self.send(req, 5, 1000).status, 200)
+        self.assertEqual(self.seen()[0].headers["x-api-key"], "sk-ant-x")
+        # (a field lazaret-net would carry on to any hop, and that is not said to carry the credential, is refused)
+        for headers, secret in (({"x-api-key": "sk-ant-x"}, ()), ({"Authorization": "Bearer abc"}, ())):
+            with self.subTest(headers), self.assertRaises(http.TransportError) as caught:
+                self.send(http.Request("GET", "api.anthropic.com", "/v1/models", headers, None, secret), 5, 1000)
+            self.assertEqual(caught.exception.kind, "refused")
+            self.assertNotIn("sk-ant-x", str(caught.exception))
+        self.assertEqual(len(self.seen()), 1)
+
+
+class NativeRedirectTests(Native, RedirectTests):
+    pass
+
+
+class NativeSizeTests(Native, SizeTests):
+    def test_an_answer_that_declares_more_than_it_may_be_read_is_cut_not_refused(self):
+        # (lazaret-net fails a request whose answer declares more than its budget before its status is known)
+        self.stub.script["api.github.com"] = vs.Answer(401, huge=3 * 1024 * 1024)
+        got = self.send(GOOD, 5, 1000)
+        self.assertEqual((got.status, len(got.body), got.truncated), (401, 1000, True))
+
+
+class NativeTimeTests(Native, TimeTests):
+    pass
+
+
+class NativeConnectionTests(Native, StubCase):
+    def test_a_certificate_that_is_not_trusted_is_a_tls_error(self):
+        nativenet.configure_roots(None)                                 # (the system's anchors: the stub's root is not one)
+        try:
+            with self.assertRaises(http.TransportError) as caught:
+                self.send(request(headers={"Authorization": "Bearer ghp_sekrit"}), 5, 1000)
+        finally:
+            nativenet.configure_roots(self.stub.root)
+        self.assertEqual(caught.exception.kind, "tls")
+        self.assertNotIn("ghp_sekrit", str(caught.exception))
+        self.assertEqual(self.seen(), [])
+
+    def test_a_certificate_for_another_host_is_a_tls_error(self):
+        with self.assertRaises(http.TransportError) as caught:
+            self.send(request(host="not-in-the-certificate.example"), 5, 1000)
+        self.assertEqual(caught.exception.kind, "tls")
+        self.assertEqual(self.seen(), [])
+
+
+class NativeProxyTests(Native, StubCase):
+    def test_a_request_goes_through_a_connect_tunnel_and_the_proxy_sees_only_the_host(self):
+        proxy = self.stub.proxy()
+        self.stub.script["api.github.com", "/user"] = vs.Answer(200, b'{"login": "x"}')
+        got = self.stub.native(proxy)(request(headers={"Authorization": "Bearer sekrit-token-value"}), 5, 1000)
+        self.assertEqual(got.status, 200)
+        (line, headers) = proxy.requests[0]
+        self.assertEqual(line, "CONNECT api.github.com:443 HTTP/1.1")
+        self.assertNotIn("authorization", headers)
+        self.assertNotIn("sekrit-token-value", repr(proxy.requests))
+        self.assertEqual(self.seen()[0].headers["authorization"], "Bearer sekrit-token-value")
+
+    def test_the_proxy_s_credentials_go_to_the_proxy(self):
+        proxy = self.stub.proxy(require="Basic dXNlcjpwYXNz")
+        self.stub.script["api.github.com"] = vs.Answer(200, b"{}")
+        self.assertEqual(self.stub.native(proxy, "user:pass")(GOOD, 5, 1000).status, 200)
+        self.assertEqual(proxy.requests[0][1]["proxy-authorization"], "Basic dXNlcjpwYXNz")
+        self.assertNotIn("proxy-authorization", self.seen()[0].headers)
+
+    def test_a_proxy_that_refuses_or_wants_credentials_the_request_has_not_is_a_proxy_error(self):
+        refusing = self.stub.proxy()
+        refusing.refuse = True
+        for proxy in (self.stub.proxy(require="Basic dXNlcjpwYXNz"), refusing):
+            with self.subTest(proxy.require), self.assertRaises(http.TransportError) as caught:
+                self.stub.native(proxy)(GOOD, 5, 1000)
+            self.assertEqual(caught.exception.kind, "proxy")
+        self.assertEqual(self.seen(), [])
+
+
+class DefaultTransportTests(unittest.TestCase):
+    def test_lazaret_net_s_transport_sends_and_urllib_s_takes_what_it_will_not(self):
+        calls = []
+
+        def native(req, timeout, max_bytes):
+            calls.append("native")
+            if req.host == "slack.com":
+                raise nativenet.UsePython("a proxy reached over TLS")
+            return http.Response(200, {}, b"", False)
+
+        def python(req, timeout, max_bytes):
+            calls.append("python")
+            return http.Response(201, {}, b"", False)
+
+        with mock.patch.object(http, "native_transport", return_value=native), mock.patch.object(http, "https_transport", return_value=python):
+            send = http.default_transport()
+        self.assertEqual(send(GOOD, 5, 100).status, 200)
+        self.assertEqual(send(request(host="slack.com"), 5, 100).status, 201)
+        self.assertEqual(calls, ["native", "native", "python"])
+
+    def test_LAZARET_NETWORK_python_asks_for_urllib_s(self):
+        python = mock.Mock(return_value=http.Response(204, {}, b"", False))
+        with mock.patch.dict(os.environ, {nativenet.ENV: "python"}), mock.patch.object(http, "https_transport", return_value=python):
+            self.assertEqual(http.default_transport()(GOOD, 2, 1000).status, 204)
+        python.assert_called_once()
+
+    def test_an_https_proxy_is_refused_and_the_request_is_not_sent_without_it(self):
+        env = dict(NO_PROXY_ENV, https_proxy="https://proxy.example:3128", HTTPS_PROXY="https://proxy.example:3128")
+        env.pop(nativenet.ENV, None)
+        with mock.patch.dict(os.environ, env, clear=True), self.assertRaises(http.TransportError) as caught:
+            http.default_transport()(GOOD, 2, 1000)
+        self.assertEqual(caught.exception.kind, "proxy")
+
+    def test_what_lazaret_net_says_is_one_of_the_transport_s_kinds_and_holds_none_of_its_message(self):
+        for kind, message, expected in (("timeout", "read timed out at api.github.com", "timeout"),
+                                        ("tls", "certificate: unknown issuer for api.github.com", "tls"),
+                                        ("http", "too many redirects (limit 0)", "redirect"),
+                                        ("http", "proxy refused CONNECT: HTTP/1.1 407", "proxy"),
+                                        ("http", "connection closed before the body ended", "connection"),
+                                        ("network", "Connection refused (os error 111)", "connection"),
+                                        ("too-large", "the response is larger than the budget", "connection"),
+                                        ("refused", "request refused: host not allowed", "refused"),
+                                        ("setup", "header \"X\" is not one a request sets", "refused")):
+            with self.subTest(kind, message=message):
+                error = http._native_error(nativenet.NetError(kind, message))
+                self.assertEqual(error.kind, expected)
+                self.assertNotIn(message, str(error))
 
 
 if __name__ == "__main__":

@@ -107,8 +107,8 @@ python/
 │   │   ├── sca_index.py    the indexed CVE bundle (`--bundle-format index`)
 │   │   └── secretverify*.py  live secret verification: the verifier (a run's
 │   │                       cache and limits, on the engine's table and logic:
-│   │                       secrets.rs) and the one HTTPS transport; not called
-│   │                       by a scan yet
+│   │                       secrets.rs) and its HTTPS call (lazaret-net's, or
+│   │                       urllib's); not called by a scan yet
 │   ├── registry/
 │   │   ├── repo.py         npm / PyPI / Go / crates.io package auditing
 │   │   │                   (`lazaret-registry`)

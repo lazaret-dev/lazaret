@@ -2,15 +2,18 @@
 `_VERIFY_PROVIDERS` and rust/crates/lazaret-engine/src/secrets.rs): what is asked of whom, how an answer is read, and what is
 promised about the credential. Stage 1's tests, kept: the engine is held to what its Python was held to (the engine's own tests,
 secrets_tests.rs, hold AWS's signature vectors, the 512-character limit with a pattern of their own, and the JSON read once). No
-call reaches a real service: a stand-in transport answers, and the last class asks a stub provider over TLS on 127.0.0.1 (skipped
-without `openssl`)."""
+call reaches a real service: a stand-in transport answers, and the last classes ask a stub provider over TLS on 127.0.0.1, over
+urllib and over lazaret-net (skipped without `openssl`, and lazaret-net's where the native transport is not available)."""
 
 import copy
 import datetime
 import json
+import os
+import pathlib
 import re
 import threading
 import unittest
+from unittest import mock
 
 from lazaret.scanner import _native
 from lazaret.scanner import secretverify as sv
@@ -22,6 +25,7 @@ def setUpModule():
     if not _native.available():
         raise unittest.SkipTest(f"the table and the logic are the native engine's ({_native.load_error()})")
 
+REPO = pathlib.Path(__file__).resolve().parents[3]
 NOW = datetime.datetime(2026, 10, 3, 12, 0, 0, tzinfo=datetime.timezone.utc)
 SECRETS = {
     "github": "ghp_" + "a1B2" * 9,
@@ -465,6 +469,20 @@ class RequestTests(unittest.TestCase):
         self.assertEqual(r.headers["Content-Type"], "application/x-www-form-urlencoded; charset=utf-8")
         self.assertIsNotNone(http.check_request(r))
 
+    def test_the_credential_s_fields_are_named_and_the_others_are_ones_lazaret_net_sends(self):
+        source = REPO / "rust" / "crates" / "lazaret-net" / "src" / "lib.rs"
+        if not source.exists():
+            self.skipTest("lazaret-net's source is not here")
+        listed = re.search(r"pub const PLAIN_HEADERS: \[&str; \d+\] =\s*\[([^\]]*)\]", source.read_text(encoding="utf-8"))
+        plain = set(re.findall(r'"([^"]+)"', listed.group(1)))
+        self.assertIn("anthropic-version", plain)
+        named = {"anthropic": ("x-api-key",), "aws": ("authorization",)}
+        for pid in SECRETS:
+            with self.subTest(pid):
+                r = self.build(pid)
+                self.assertEqual(r.secret_headers, named.get(pid, ("Authorization",)))
+                self.assertLessEqual({n.lower() for n in r.headers} - {n.lower() for n in r.secret_headers}, plain)
+
     def test_every_request_is_one_the_transport_will_send(self):
         for pid in SECRETS:
             with self.subTest(pid):
@@ -842,7 +860,7 @@ class PromiseTests(unittest.TestCase):
 
     def test_no_result_holds_any_part_of_a_credential(self):
         answers = [resp(s, b) for s in (200, 401, 403, 429, 500) for b in (b"", b"{}", b"x" * 100)]
-        answers += [http.TransportError(k, "x") for k in ("timeout", "connection", "tls", "proxy", "refused")]
+        answers += [http.TransportError(k, "x") for k in ("timeout", "connection", "tls", "proxy", "refused", "redirect")]
         for pid, secret in SECRETS.items():
             parts = [secret] if isinstance(secret, str) else list(secret.values())
             for answer in answers:
@@ -876,7 +894,14 @@ class StubCase(unittest.TestCase):
 
     def setUp(self):
         self.stub.reset()
-        self.v = sv.Verifier(self.stub.transport(), timeout=5)
+        self.v = sv.Verifier(self.make(), timeout=5)
+
+    def make(self):
+        """The transport these tests verify over (urllib's here; lazaret-net's in NativeStubTests)."""
+        return self.stub.transport()
+
+    def through(self, proxy):
+        return self.stub.transport({"https_proxy": f"http://127.0.0.1:{proxy.address[1]}"}, direct=False)
 
     def seen(self):
         with self.stub.lock:
@@ -900,7 +925,7 @@ class StubTests(StubCase):
         for pid, (host, path, live, rejected) in plan.items():
             for (status, body), outcome in ((live, "live"), (rejected, "rejected")):
                 with self.subTest(pid=pid, outcome=outcome):
-                    self.v = sv.Verifier(self.stub.transport(), timeout=5)
+                    self.v = sv.Verifier(self.make(), timeout=5)
                     self.answer(host, path, status, body)
                     got = self.v.verify(pid, SECRETS[pid])
                     self.assertEqual((got.outcome, got.status), (outcome, status))
@@ -922,12 +947,12 @@ class StubTests(StubCase):
         self.stub.script["api.github.com", "/user"] = vs.Answer(302, b"", {"Location": "https://slack.com/steal"})
         self.answer("slack.com", "/steal", 200, {"ok": True})
         got = self.v.verify("github", SECRETS["github"])
-        self.assertEqual((got.outcome, got.status), ("unknown", 302))
+        self.assertEqual((got.outcome, got.detail, got.status), ("unknown", "the provider answered with a redirect, which is not followed", None))
         self.assertEqual([s.host for s in self.seen()], ["api.github.com"])
 
     def test_an_answer_that_is_too_slow_or_too_big_or_cut_short_is_unknown(self):
         self.stub.script["api.github.com", "/user"] = vs.Answer(200, b"{}", delay=3)
-        v = sv.Verifier(self.stub.transport(), timeout=0.5)
+        v = sv.Verifier(self.make(), timeout=0.5)
         got = v.verify("github", SECRETS["github"])
         self.assertEqual((got.outcome, got.detail), ("unknown", "the provider did not answer in time"))
         self.stub.script["api.github.com", "/user"] = vs.Answer(200, huge=500_000)
@@ -950,7 +975,7 @@ class StubTests(StubCase):
     def test_through_a_proxy(self):
         proxy = self.stub.proxy()
         self.answer("api.github.com", "/user", 200, {"login": "octocat"})
-        v = sv.Verifier(self.stub.transport({"https_proxy": f"http://127.0.0.1:{proxy.address[1]}"}, direct=False), timeout=5)
+        v = sv.Verifier(self.through(proxy), timeout=5)
         self.assertEqual(v.verify("github", SECRETS["github"]).outcome, "live")
         self.assertEqual([line.rsplit(" HTTP/", 1)[0] for line, _ in proxy.requests], ["CONNECT api.github.com:443"])
         self.assertNotIn(SECRETS["github"], repr(proxy.requests))
@@ -964,6 +989,38 @@ class StubTests(StubCase):
         got = self.v.verify_all(list(SECRETS.items()), workers=7)
         self.assertEqual([r.outcome for r in got], ["live"] * 7)
         self.assertEqual({s.host for s in self.seen()}, {p["host"] for p in sv.PROVIDERS})
+
+
+
+class NativeStubTests(vs.OverLazaretNet, StubTests):
+    """The same over lazaret-net (the transport a run uses where the native library is), through the stub's CONNECT proxy."""
+
+    def make(self):
+        return self.stub.native()
+
+    def through(self, proxy):
+        return self.stub.native(proxy)
+
+    def test_a_certificate_that_is_not_trusted_is_unknown_and_nothing_is_sent(self):
+        from lazaret.scanner import nativenet
+        nativenet.configure_roots(None)                             # (the system's anchors: the stub's root is not one)
+        try:
+            got = sv.Verifier(self.make(), timeout=5).verify("github", SECRETS["github"])
+        finally:
+            nativenet.configure_roots(self.stub.root)
+        self.assertEqual((got.outcome, got.detail), ("unknown", "the provider's certificate could not be checked"))
+        self.assertEqual(self.seen(), [])
+
+    def test_the_default_transport_is_lazaret_net_s(self):
+        self.answer("api.github.com", "/user", 200, {"login": "octocat"})
+        proxy = self.stub.proxy()
+        url = f"http://127.0.0.1:{proxy.address[1]}"
+        env = {k: v for k, v in os.environ.items() if k.lower() not in ("https_proxy", "http_proxy", "all_proxy", "no_proxy", "lazaret_network")}
+        env.update(HTTPS_PROXY=url, https_proxy=url)
+        with mock.patch.dict(os.environ, env, clear=True):
+            got = sv.Verifier(timeout=5).verify("github", SECRETS["github"])        # (urllib's would not trust the stub's root)
+        self.assertEqual((got.outcome, got.who), ("live", "octocat"))
+        self.assertEqual([line for line, _ in proxy.requests], ["CONNECT api.github.com:443 HTTP/1.1"])
 
 
 if __name__ == "__main__":

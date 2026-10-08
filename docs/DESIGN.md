@@ -1460,7 +1460,8 @@ slash to npm's parser, so possibly another host) or such a host blocks its
 package; a host that is not ASCII is to be written in its xn-- form. A
 redirect to a server below TLS 1.2 is refused by that server's name, not the
 first URL's (lazaret-net's `TlsVersion` names the hop's host). lazaret-net refuses a request header outside `PLAIN_HEADERS` (Accept,
-Content-Type, User-Agent, X-GitHub-Api-Version), since a token in a header
+Content-Type, User-Agent, X-GitHub-Api-Version, and live secret verification's
+anthropic-version and x-amz-date), since a token in a header
 of another name would follow a redirect, and its `Debug` shows no password
 of a URL or a proxy. A GitLab under a path prefix gets its token on that
 prefix alone. A request goes through urllib when urllib and tiny_https would

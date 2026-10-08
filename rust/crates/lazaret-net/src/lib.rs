@@ -190,8 +190,11 @@ pub const CREDENTIAL_HEADERS: [&str; 6] =
 
 /// The headers a request may set itself, which go with every hop it takes: those Lazaret's callers send, none of which
 /// carries a credential. Any other is refused, so that a token in a header of another name (`X-API-Key`) cannot
-/// follow a redirect to another host: it goes as a [`Credential`] (the credentials review of decision 14).
-pub const PLAIN_HEADERS: [&str; 4] = ["accept", "content-type", "user-agent", "x-github-api-version"];
+/// follow a redirect to another host: it goes as a [`Credential`] (the credentials review of decision 14). Live secret
+/// verification's requests (0.1.9, V-1) send two more beside their credential: Anthropic's API version and the time
+/// AWS's signature holds (`x-amz-date`, which says nothing without the signature, a credential).
+pub const PLAIN_HEADERS: [&str; 6] =
+    ["accept", "content-type", "user-agent", "x-github-api-version", "anthropic-version", "x-amz-date"];
 
 impl std::fmt::Debug for Credential {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

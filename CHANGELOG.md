@@ -51,9 +51,10 @@ project is pre-1.0, so the 0.x API may still change.
   hook, each to its own host (and path prefix) alone, as urllib's redirect hook gave them; the
   URL's own login goes with the request and no redirect. A request that sets `Authorization`,
   `Cookie`, `PRIVATE-TOKEN` or the like as a header is refused by the native layer, so none can
-  follow a redirect to another host. A secret being verified stays on urllib, as does plain http to
-  a registry on this machine and a credential outside printable ASCII. Building the native library
-  now needs Rust 1.87 or later.
+  follow a redirect to another host. A secret being verified (V-1) goes over it too, given to its
+  provider's host alone and never on a redirect; plain http to a registry on this machine and a
+  credential outside printable ASCII stay on urllib. Building the native library now needs Rust
+  1.87 or later.
 - **The Go checksum database's answers are checked as the go command checks them (NET-1).** A
   `go:` module's `h1:` hash comes from `sum.golang.org`'s lookup, and that answer is now verified
   through tiny_https's pure part in the native library: the signature on the database's tree head
