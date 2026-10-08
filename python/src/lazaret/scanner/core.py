@@ -5347,7 +5347,9 @@ def dependency_import_issue(path, text, lang=None, risk=None):
 
 def redact_file_issues(issues, files):
     """Apply each scanned file's redaction to the findings numbered by its
-    scan lines (source_lines: scan_file's and the flow engine's), in place.
+    scan lines (source_lines) that were built outside the engine's scan of
+    it: the flow engine's and the dependency checks' (scan_project passes
+    those; the engine redacts its own as mk_issue does), in place.
 
     redact_result sweeps snippets with the secret patterns only, and a PEM
     block only when its BEGIN line is in the same snippet: a finding built
@@ -5456,7 +5458,9 @@ def scan_project(root, exclude=(), include_deps=False, taint_config=None,
                 f"nothing to scan under {_fs_display(root)}: no Python, JavaScript or "
                 f"SQL sources, package manifests or other files to check")
         issues = list(extra_issues) + list(col["issues"])
-        numbered = []       # findings numbered by their file's scan lines (redact_file_issues)
+        # findings numbered by their file's scan lines and built outside the engine's scan of it, which redacted
+        # its own with the file's redaction (mk_issue's): the flows' and the dependency checks' (redact_file_issues)
+        numbered = []
         scanned, stopped = [], None
         # Files a batch at a time (the engine reads a batch on threads, each
         # file whole: engine.py); should_stop is checked before each batch.
@@ -5483,7 +5487,6 @@ def scan_project(root, exclude=(), include_deps=False, taint_config=None,
                     found = (results[n] if results is not None
                              else scan_file(f["path"], f["content"], f["lang"], dep=f.get("dep", False)))
                     issues.extend(found)
-                    numbered.extend(found)
                 except Exception as exc:        # one file must never kill the run
                     issues.append(engine.error_issue(f["path"], exc))
                 scanned.append(f)

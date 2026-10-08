@@ -597,6 +597,11 @@ project is pre-1.0, so the 0.x API may still change.
   repository and through project scans, in both packages. A scan of this repository's Python source takes 12% less
   time (0.77 to 0.67 seconds), of Python's asyncio and email packages 15% less, of urllib3 23% less (best of three, in
   one process).
+- **A project scan redacts the engine's findings once.** The sweep that gives findings built from a file's raw lines
+  the file's own redaction (the flows') took every finding of the engine's scans too, reading each file with a finding
+  again to redact what the engine had redacted when it built them. It takes the findings built outside the engine
+  alone now, as the npm package always has; the results are the same, every field of every finding, and a scan of this
+  repository's Python source takes 15% less time again.
 - **The native transport speaks TLS 1.2 to a server that speaks nothing newer (tiny_https's second drop of Oct
   7).** `registry.npmjs.org` answers only TLS 1.2 from some networks, and its requests went through Python's
   transport there. tiny_https now offers TLS 1.2 next to 1.3 under the rules Lazaret asked for: ECDHE with AEAD
