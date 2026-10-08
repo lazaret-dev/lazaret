@@ -91,6 +91,8 @@ pub const CALLS: &[&str] = &[
     "file_metrics",
     // 0.1.9 (V-1 stage 2): live secret verification's table and logic (secrets.rs); each package makes the call
     "secrets.providers", "secrets.identify", "secrets.request", "secrets.judge", "secrets.find",
+    // 0.1.9 (D-13): what a JavaScript module loads when it runs (jsloads.rs)
+    "js_loads",
 ];
 
 fn dead_drop(v: Option<(usize, PyStr)>) -> Value {
@@ -514,6 +516,27 @@ fn dispatch(name: &str, args: &Value, text: &[u32]) -> Result<Value, CallError> 
             };
             let (spans, text) = (flag("spans", false), text.to_vec());
             Value::Raw(on_own_stack(move || crate::jsparse::to_json(&text, ts, jsx, spans)))
+        }
+        "js_loads" => {
+            // [[specifier, line, how, package]] of what a JavaScript module loads when it runs (D-13; the npm package
+            // the specifier names, or null), or null when it does not parse; "path": its file name, for the dialect
+            let path = match args.get("path") {
+                Some(_) => arg_str(args, "path")?,
+                None => u("module.js"),
+            };
+            let text = text.to_vec();
+            match on_own_stack(move || crate::jsloads::js_loads(&text, &path)) {
+                Some(found) => Value::Arr(
+                    found
+                        .into_iter()
+                        .map(|(spec, line, how)| {
+                            let package = crate::jsloads::npm_package(&spec).map(Value::Str).unwrap_or(Value::Null);
+                            Value::Arr(vec![Value::Str(spec), Value::Int(line as i64), Value::str(how), package])
+                        })
+                        .collect(),
+                ),
+                None => Value::Null,
+            }
         }
         "py_parse" => {
             // ast.parse(text) as Python 3.13 builds it, as JSON (pyparse/out.rs),

@@ -41,6 +41,21 @@ project is pre-1.0, so the 0.x API may still change.
   Part F's 4,620 or the installed Python and npm packages. The whole-run alternatives now start with their literal
   (crates.io's too), so Python's `re` has a first character to look for: its token pattern takes about half the time
   it took, with the three formats added. Rule set 2.48.0.
+- **A package the code loads when the package is loaded, that package.json names only in devDependencies, is a weaker
+  indicator (D-13; rule set 2.53.0).** dotenv-express 17.4.3, a copy of dotenv, requires `environment-gate` at the top
+  of `lib/main.js` and calls it first in `config()`; its package.json lists `environment-gate` only in
+  devDependencies, which npm does not install for the package's users, and it was OK. Such a load is now
+  SC-DEV-DEPENDENCY (MAJOR, so WARN): a `require()` given a literal outside any function, class body and `try`
+  statement, an import or export-from declaration, or an `import()` outside any function, in what the package's main
+  entry and its commands reach, read on the engine's JavaScript tree (`js_loads`, new), of a package package.json
+  names only in devDependencies. Not in a subpath export, which runs when a user imports it by name
+  (@dev-blinq/cucumber-js 1.0.131, a fork of @cucumber/cucumber, exports `./lib/*`, its test helpers among them, which
+  load its test tools), nor in a type declaration. Not one of npm's 5,000 most-downloaded packages (es-abstract 1.24.2
+  loads `for-each`, which it lists only in devDependencies), one of the release's own scope, or Ember's own modules
+  (`@ember/*`, `@glimmer/*`, which the Ember app provides); nor a package no field of package.json names (a
+  framework's adapter loads the framework its user brings: `cypress/svelte` loads svelte). Measured first, on the
+  engine's tree: none of the popular set's 801 npm releases, the benchmark's 219 popular ones or the 1,623 npm
+  packages installed here has one. Registry and guard scans.
 - **A package manager's install at import time, of a package the release does not depend on, is a strong reason (D-12;
   rule set 2.52.0).** crypto-hash-sdk 1.0.1 ran `npm uninstall prettier-sdk && npm install prettier-sdk` when it was
   imported, hidden (no output, no window, any error swallowed), to fetch its payload past every check of the release

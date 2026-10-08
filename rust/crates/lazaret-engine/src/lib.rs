@@ -21,6 +21,7 @@ pub mod goread;
 pub mod hooks;
 pub mod json;
 pub mod jsflow;
+pub mod jsloads;
 pub mod jsparse;
 pub mod lex;
 pub mod lexer;

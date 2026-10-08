@@ -235,6 +235,11 @@ rust/
                              supply.rs (its supply-chain model: local data followed to a
                              network send, and received data to code run, in an install
                              script or a dependency's code, §18)
+    src/jsloads.rs           what a JavaScript module loads when it runs (js_loads, 0.1.9, D-13): the
+                             specifiers of its require() calls given a literal outside any function,
+                             class body and try statement, of its import and export-from
+                             declarations and of its import() calls, on js_parse's tree, with the
+                             npm package each names; the registry compares them with package.json
     src/pyflow/              project mode's cross-file Python taint (a port of flow.py's Python
                              pass, §17): mod.rs (the model: modules, functions, classes, names,
                              imports, resolution, the frames), eval.rs (one reading of a
@@ -1880,14 +1885,14 @@ statements as jsflow.py's did; the parser's nesting bound keeps the
 deepest input of each construct under 512 KiB of stack natively (release;
 `jsflow/tests.rs` reads each on a 2 MiB thread). A host's thread may have
 less — a worker thread's default is 512 KiB on macOS and 128 KiB on musl —
-so natively `js_flow`, `js_parse` and `py_parse` run on a thread of the
-engine's own with an 8 MiB stack (`api::OWN_STACK`; 64 MiB in a debug
-build), one per calling thread, made at its first such call and kept for
-the next (the engine's caches, compiled patterns among them, are per
-thread), ending with the calling thread; a call from a thread of 128 KiB
-reads the deepest input of every construct (`jsflow/tests.rs`). It costs
-about 50 µs a call and 7% of the pass over the 1,490 packages below. In
-WebAssembly a call's frames are on Node's own stack (about 1 MB on its
+so natively `js_flow`, `js_parse`, `js_loads` and `py_parse` run on a
+thread of the engine's own with an 8 MiB stack (`api::OWN_STACK`; 64 MiB
+in a debug build), one per calling thread, made at its first such call and
+kept for the next (the engine's caches, compiled patterns among them, are
+per thread), ending with the calling thread; a call from a thread of 128
+KiB reads the deepest input of every construct (`jsflow/tests.rs`). It
+costs about 50 µs a call and 7% of the pass over the 1,490 packages below.
+In WebAssembly a call's frames are on Node's own stack (about 1 MB on its
 main thread), its larger locals on the module's 8 MiB stack;
 `test_wasm_parity_jsflow` reads the deepest input of every construct
 there.

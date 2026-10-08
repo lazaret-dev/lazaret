@@ -99,6 +99,9 @@ MAX_MEMBER = _env_number("LAZARET_MAX_SOURCE_BYTES", 16_000_000)
 MAX_FILES = 20_000         # files per package (numpy's sdist alone has >4,000)
 SAMPLE = 8192              # header/entropy sample read from oversized files
 # Stored scans from another engine version are scanned again (has_scan).
+# 2.53: a package an npm release loads when it is loaded that its
+#      package.json names only in devDependencies is SC-DEV-DEPENDENCY,
+#      MAJOR (D-13: dotenv-express's `require('environment-gate')`)
 # 2.52: a package manager's install, run by code that runs when the
 #      package is loaded, of a package the release does not depend on is a
 #      strong import-time reason (D-12: crypto-hash-sdk's `npm install
@@ -305,7 +308,7 @@ SAMPLE = 8192              # header/entropy sample read from oversized files
 #      entry points and hook targets, Python install scripts
 # 2.3: verdict tiers, decoded hex, install-script inspection; 2.2:
 #      verdict-integrity; 2.1: binary-artifact awareness
-ENGINE_VERSION = "2.52.0"
+ENGINE_VERSION = "2.53.0"
 
 # ---------------- The content memo (P-2a, registry/contentcache.py) ----------------
 # One per scan_package run: the engine answers once for content several of a
@@ -2229,6 +2232,38 @@ def _package_entry_targets(data):
         elif isinstance(node, list):
             stack.extend((v, pattern) for v in node)
     return targets
+
+
+def _npm_main_targets(data):
+    """The files an npm package's main entry and its commands start from (D-13): main (index.js without one), the
+    "." entry of exports under every condition but types, and bin. Not a subpath export: it runs when a user
+    imports it by name."""
+    main = data.get("main")
+    targets = [main if isinstance(main, str) and main.strip() else "index.js"]
+    bins = data.get("bin")
+    if isinstance(bins, str):
+        targets.append(bins)
+    elif isinstance(bins, dict):
+        targets += [v for v in bins.values() if isinstance(v, str)]
+    exports = data.get("exports")
+    if isinstance(exports, dict) and any(isinstance(k, str) and k.startswith(".") for k in exports):
+        exports = exports.get(".")
+    stack, nodes = [exports], 0
+    while stack and nodes < 10_000:
+        node = stack.pop()
+        nodes += 1
+        if isinstance(node, str):
+            if node.startswith("./") and "*" not in node:
+                targets.append(node)
+        elif isinstance(node, dict):
+            stack.extend(v for k, v in node.items() if k != "types")
+        elif isinstance(node, list):
+            stack.extend(node)
+    return targets
+
+
+#: TypeScript's declaration files: types alone, which nothing runs
+_TS_DECLARATIONS = (".d.ts", ".d.cts", ".d.mts")
 
 
 def _pattern_regex(pattern):
@@ -4300,6 +4335,70 @@ class _ArtifactScan:
             self.unused_dependencies = [_unused.npm_registry_name(dep, spec) for dep, spec in found]
             self.issues.append(_unused_dependency_issue([dep for dep, _spec in found], text))
 
+    def _dev_only_loads(self, reachable):
+        """SC-DEV-DEPENDENCY (MAJOR, D-13): a package an npm release's code loads when the package is loaded (or its
+        command runs) that its package.json names only in devDependencies, which npm does not install for the
+        package's users. The code is what the package's main entry and its commands reach (_npm_main_targets; not a
+        subpath export, which runs when a user imports it by name: @cucumber/cucumber's `./lib/*` exports its test
+        helpers, which load its test tools; not a type declaration), the loads the engine's reading of each module
+        (js_loads: a require() given a literal outside any function, class body and try statement, an import or
+        export-from declaration); a module is read only when it quotes such a name (unused_deps.quoted_in). Not one of npm's most-downloaded packages, which is no
+        payload's carrier (es-abstract 1.24.2 loads for-each, which it lists only in devDependencies), one of the
+        release's own scope, or Ember's own modules (@ember/*, @glimmer/*: the Ember app provides them). A package no field names
+        is not one either: a framework's adapter loads the framework its user brings (cypress/svelte)."""
+        if self.artifact != "npm" or not reachable:
+            return
+        text = self.manifests.get("package.json")
+        data, _problems = lazaret.load_manifest("package.json", text) if text else (None, None)
+        if not isinstance(data, dict) or not isinstance(data.get("devDependencies"), dict):
+            return
+        runtime = set()
+        for key in ("dependencies", "optionalDependencies", "peerDependencies"):
+            if isinstance(data.get(key), dict):
+                runtime.update(data[key])
+        for key in ("bundleDependencies", "bundledDependencies"):
+            if isinstance(data.get(key), list):
+                runtime.update(k for k in data[key] if isinstance(k, str))
+        own = data.get("name") if isinstance(data.get("name"), str) else ""
+        scope = own.split("/", 1)[0] + "/" if own.startswith("@") and "/" in own else None
+        wanted = {dep for dep, spec in data["devDependencies"].items()
+                  if isinstance(dep, str) and dep and dep not in runtime and dep != own
+                  and not (scope and dep.startswith(scope)) and not dep.startswith(_HOST_PROVIDED_SCOPES)
+                  and not _lookalike.popular("npm", _unused.npm_registry_name(dep, spec))}
+        if not wanted:
+            return
+        reach = set()
+        for target in _npm_main_targets(data):
+            start = self._resolve(_rel_join("", target))
+            if start and start not in reach:
+                reach |= self._reach_of(start)
+        files = [(rel, t) for rel in sorted(reach & set(reachable)) for t, lang in (self.sources.get(rel, (None, None)),)
+                 if t and lang == "js" and not rel.lower().endswith(_TS_DECLARATIONS)
+                 and any(_unused.quoted_in(dep, [t]) for dep in wanted)]
+        found = {}
+        for (rel, _t), loads in zip(files, self._js_loads(files)):
+            if _engine.unanswered(loads) or not isinstance(loads, list):
+                continue                        # (a module the engine could not read: Node could not either)
+            for _spec, line, _how, package in loads:
+                if package in wanted and package not in found:
+                    found[package] = (rel, line)
+        if found:
+            first = self.sources[next(iter(found.values()))[0]][0]
+            self.issues.append(_dev_only_load_issue(found, first.split("\n")))
+
+    def _js_loads(self, files):
+        """engine js_loads for [(rel, text)] (the dialect by the extension), once for each distinct file:
+        [[specifier, line, how, package]] each, None where the module does not parse, or the error the engine
+        gave."""
+        exts = [posixpath.splitext(rel)[1].lower() or ".js" for rel, _t in files]
+        keys = [self._key("scan", text, "js", {"call": "js_loads", "ext": ext}) for (_r, text), ext in zip(files, exts)]
+        asked = dict(zip(keys, [("js_loads", {"path": "module" + ext}, text) for (_r, text), ext in zip(files, exts)]))
+
+        def compute(missing):
+            return [_cache.Uncacheable(a) if _engine.unanswered(a) else a
+                    for a in _engine.call_answers([asked[key] for key in missing], texts=self.texts)]
+        return self.memo.get_or_compute_many(keys, compute)
+
     def _case_twins(self):
         """{rel: [the other members whose paths have its case fold]} for the members that have such a twin (EG-4):
         on macOS and Windows they are one file, whichever entry came last."""
@@ -4369,6 +4468,8 @@ class _ArtifactScan:
             self._phase("the agent-hijack check", self._agent_hijack)
             self._phase("the package's names", self._lookalike_names)
             self._phase("the dependencies nothing uses", self._unused_dependencies)
+            self._phase("the devDependencies the code loads", self._dev_only_loads,
+                        reachable if reachable is not None else set(self.entries))
             # interprocedural / cross-file taint (full profile only — needs whole source)
             if self.full and getattr(lazaret, "lazaret_flow", None) is not None:
                 self._deadline("the cross-file analysis")
@@ -4720,6 +4821,40 @@ def _unused_dependency_issue(names, text):
          "msg": msg, "why": _UNUSED_WHY,
          "fix": "Find out why the package declares it, and read it before installing the package.",
          "ref": "CWE-506 · Supply chain"}, "package.json", line, lines)
+
+
+#: (D-13) scopes whose modules the app provides: Ember's (ember-source resolves @ember/* and @glimmer/* for an
+#: addon), so an addon lists them in devDependencies for its own tests
+_HOST_PROVIDED_SCOPES = ("@ember/", "@glimmer/")
+_DEV_ONLY_WHY = ("npm installs a package's dependencies, optionalDependencies and peerDependencies for the people "
+                 "who install it, not its devDependencies. Code that runs when the package is loaded and loads a "
+                 "package named only there fails for them, unless that package arrives another way, which is where "
+                 "a payload can wait: dotenv-express 17.4.3, a copy of dotenv, requires environment-gate, which its "
+                 "package.json lists only in devDependencies, and calls it first in config(). One of npm's "
+                 "most-downloaded packages, one of the release's own scope and Ember's own modules (@ember/*, "
+                 "@glimmer/*, which the Ember app provides) are not flagged.")
+
+
+def _dev_only_load_issue(found, lines):
+    """SC-DEV-DEPENDENCY (MAJOR, D-13) for {package: (file, line)}: the packages an npm release loads when it is
+    loaded that its package.json names only in devDependencies, at the first one's load (`lines`: its file's)."""
+    (first, (rel, line)), rest = next(iter(found.items())), len(found) - 1
+    if not rest:
+        msg = (f'{rel}, which runs when the package is loaded or its command runs, loads "{first}", and '
+               "package.json names it only in devDependencies: npm does not install it with the package, so it is "
+               "missing where the package runs or brought there another way.")
+    else:
+        names = list(found)
+        shown = ", ".join(f'"{n}"' for n in names[:5]) + (f" and {len(names) - 5} more" if len(names) > 5 else "")
+        msg = (f"The package's code that runs when it is loaded or its command runs loads {len(names)} packages that "
+               f"package.json names only in devDependencies ({shown}; {rel} the first): npm does not install them "
+               "with the package, so they are missing where the package runs or brought there another way.")
+    return lazaret.mk_issue(
+        {"id": "SC-DEV-DEPENDENCY", "name": "A devDependency the package loads", "type": "HOTSPOT", "sev": "MAJOR",
+         "msg": msg, "why": _DEV_ONLY_WHY,
+         "fix": "Find out what the package it loads is and why only devDependencies name it; read it before "
+                "installing the package.",
+         "ref": "CWE-829 · Supply chain"}, rel, line or 1, lines)
 
 
 def _new_dependency_issue(eco, dep, age, previous, owners, unused=False):
