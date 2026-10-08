@@ -3193,7 +3193,8 @@ _STRONG_IMPORT_REASONS = (
     "sends the machine's user or host name to an address it fetches",
     "runs a cryptocurrency miner", "swaps the cryptocurrency wallet addresses",
     "hides its code in a string array", "runs a program it extracts from inside another file",
-    "pipes code it decodes into", "installs packages the release does not depend on")
+    "pipes code it decodes into", "installs packages the release does not depend on",
+    "rewrites another package's code")
 
 
 # ---------------- Download to a file, then run the file ----------------

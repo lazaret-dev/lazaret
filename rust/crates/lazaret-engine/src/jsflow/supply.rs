@@ -74,15 +74,19 @@ pub const K_WFILE: u16 = 1 << 13;
 /// and the paths of those files (Python's model, 0.1.9: N-19); run as code,
 /// it is code the script reads back from its own file
 pub const K_OWN: u16 = 1 << 14;
+/// not local data: a path in another package's folder (what: the package):
+/// `require.resolve('<pkg>/…')`, a path joined from `node_modules` and a
+/// package's name (D-9); code written there rewrites that package
+pub const K_PKG: u16 = 1 << 15;
 
 /// The kinds' names (the text follower's strings), by bit index.
-pub const KIND_NAMES: [&str; 15] = [
+pub const KIND_NAMES: [&str; 16] = [
     "identity", "environment", "environment", "file", "report", "credentials", "address", "path", "file", "received",
-    "decoded", "bytes", "carved", "written", "own",
+    "decoded", "bytes", "carved", "written", "own", "package",
 ];
 
 /// The kinds a send of local data never reports.
-pub(crate) const NOT_LOCAL: u16 = K_PATH | K_RECEIVED | K_DECODED | K_BYTES | K_CARVED | K_WFILE | K_OWN;
+pub(crate) const NOT_LOCAL: u16 = K_PATH | K_RECEIVED | K_DECODED | K_BYTES | K_CARVED | K_WFILE | K_OWN | K_PKG;
 
 /// What a file written then run held: code or a program the script decodes,
 /// one it carves out of another file, one it downloads.
@@ -2122,6 +2126,23 @@ impl<'p> Eval<'p> {
         let name = name?;
         let at = self.a().0.nodes[node as usize].start;
         let arg_nodes = self.a().list(node, jt::B).to_vec();
+        // a code file in another package's folder written, copied or moved to (D-9)
+        let target = if is_one(name, WRITE_FILES) || eq(name, "createWriteStream") {
+            Some(0)
+        } else if is_one(name, &["copyFileSync", "copyFile", "renameSync", "rename", "cpSync", "cp"]) {
+            Some(1)
+        } else {
+            None
+        };
+        if let (Some(i), true) = (target, self.emit) {
+            if let (Some(v), Some(&n)) = (args.get(i), arg_nodes.get(i)) {
+                if let Some(pkg) = v.sc.as_ref().and_then(|sc| sc.firsts.iter().find(|(k, _, _)| (1u16 << k) == K_PKG)).map(|(_, w, _)| (**w).clone()) {
+                    if self.sc_code_path(n, scope) {
+                        self.findings.push(Out::Rewrote { at, pkg });
+                    }
+                }
+            }
+        }
         if eq(name, "createWriteStream") {
             let keys = self.sc_path_keys(*arg_nodes.first()?, scope);
             let what = pystr::join(&u("\n"), &keys.iter().map(|k| k.as_slice()).collect::<Vec<_>>());
@@ -2160,6 +2181,115 @@ impl<'p> Eval<'p> {
             }
         }
         None
+    }
+
+    /// supply mode: a path in another package's folder a call makes (D-9): `require.resolve('<pkg>/…')`, or one
+    /// joined from `node_modules` and a package's name (`path.join(…, 'node_modules', '@scope', 'name', …)`,
+    /// `'node_modules/<pkg>/…'` as one of its parts). Its value: that package's path, else nothing.
+    pub(super) fn sc_pkg_path(&self, node: NodeId, names: &[PyStr], scope: ScopeId) -> V {
+        let resolve = self.sc_require_resolve(node, scope);
+        let join = names.iter().any(|n| {
+            is_one(n, &["path.join", "path.resolve", "path.posix.join", "path.posix.resolve", "path.win32.join", "path.win32.resolve"])
+        });
+        if !resolve && !join {
+            return V::empty();
+        }
+        let args = self.a().list(node, jt::B).to_vec();
+        let mut pkg: Option<PyStr> = None;
+        if resolve {
+            pkg = args.first().and_then(|&f| self.sc_const_str(f)).and_then(|s| crate::jsloads::npm_package(&s));
+        } else {
+            // the literal parts, each split at its separators; an expression is a part of its own
+            let mut parts: Vec<Option<PyStr>> = Vec::new();
+            for &x in args.iter().take(16) {
+                match self.sc_const_str(x) {
+                    Some(s) => parts.extend(s.split(|&c| c == 0x2F || c == 0x5C).filter(|p| !p.is_empty()).map(|p| Some(p.to_vec()))),
+                    None => parts.push(None),
+                }
+            }
+            for k in 0..parts.len() {
+                if parts[k].as_deref().is_some_and(|p| eq(p, "node_modules")) {
+                    let spec = match (parts.get(k + 1).cloned().flatten(), parts.get(k + 2).cloned().flatten()) {
+                        (Some(scope), Some(name)) if scope.first() == Some(&0x40) => {
+                            Some(pystr::join(&u("/"), &[scope.as_slice(), name.as_slice()]))
+                        }
+                        (Some(name), _) if name.first() != Some(&0x40) => Some(name),
+                        _ => None,
+                    };
+                    if let Some(found) = spec.and_then(|sp| crate::jsloads::npm_package(&sp)) {
+                        pkg = Some(found);
+                    }
+                }
+            }
+        }
+        match pkg {
+            Some(p) => {
+                let (at, line) = (self.a().0.nodes[node as usize].start, self.call_line(node));
+                self.sc_source(K_PKG, p, at, line, 0)
+            }
+            None => V::empty(),
+        }
+    }
+
+    /// Is a call's callee a resolver of the platform's: `require.resolve` (of Node's `require`, not a name of the
+    /// script's, or of one `createRequire()` made, as ES modules do), `import.meta.resolve`? The model's
+    /// descriptions name no member of either.
+    fn sc_require_resolve(&self, node: NodeId, scope: ScopeId) -> bool {
+        let a = self.a();
+        let callee = a.unwrap(a.at(node, jt::A));
+        if a.kind(callee) != Kind::MemberExpression || !a.prop_name(callee).is_some_and(|p| eq(&p, "resolve")) {
+            return false;
+        }
+        let obj = a.unwrap(a.at(callee, jt::A));
+        if a.kind(obj) == Kind::MetaProperty {
+            return a.is_ident_named(a.at(obj, jt::A), "import") && a.is_ident_named(a.at(obj, jt::B), "meta");
+        }
+        if !a.is_ident_named(obj, "require") {
+            return false;
+        }
+        let made = |n: NodeId| {
+            let n = a.unwrap(n);
+            if a.kind(n) != Kind::CallExpression {
+                return false;
+            }
+            let f = a.unwrap(a.at(n, jt::A));
+            a.is_ident_named(f, "createRequire")
+                || (a.kind(f) == Kind::MemberExpression && a.prop_name(f).is_some_and(|p| eq(&p, "createRequire")))
+        };
+        match self.bind(obj, scope) {
+            None => true,
+            Some(b) => self.p.binds[b as usize].writes.iter().any(|w| matches!(w, Write::Init { node, .. } if made(*node))),
+        }
+    }
+
+    /// supply mode: does a path a write is given name a code file (its text, or what the name it is given holds
+    /// in this module, has a literal ending in `.js`, `.cjs` or `.mjs`)?
+    fn sc_code_path(&self, n: NodeId, scope: ScopeId) -> bool {
+        let sup = self.sup();
+        let a = self.a();
+        let code = |text: &[u32]| {
+            let lower = pystr::lower(text);
+            [".js'", ".js\"", ".js`", ".cjs'", ".cjs\"", ".cjs`", ".mjs'", ".mjs\"", ".mjs`"].iter().any(|e| pystr::contains(&lower, e))
+        };
+        let n = a.unwrap(n);
+        let (lo, hi) = (a.0.nodes[n as usize].start, a.0.nodes[n as usize].end);
+        if code(sup.span(lo, hi)) {
+            return true;
+        }
+        if a.kind(n) != Kind::Identifier {
+            return false;
+        }
+        let b = match self.bind(n, scope) {
+            Some(b) => b,
+            None => return false,
+        };
+        self.p.binds[b as usize].writes.iter().take(8).any(|w| match w {
+            Write::Init { node, .. } | Write::Assign { node, .. } => {
+                let nd = &a.0.nodes[*node as usize];
+                code(sup.span(nd.start, nd.end.min(nd.start + 4000)))
+            }
+            _ => false,
+        })
     }
 
     /// supply mode: a parameter a function writes to the file of `keys` at `at` is given `t` at a call (eval's
@@ -2858,6 +2988,8 @@ impl<'p> Eval<'p> {
             } else if named("join") || named("concat") {
                 v = v.with_built();
             }
+            // (a path in another package's folder, D-9)
+            v = v.union(&self.sc_pkg_path(node, &names, scope));
         }
         // (a server holds nothing it is sent, nor what its handler returns: OBJ_SERVER, below)
         let server = receiving && makes_server(&names);
@@ -3125,6 +3257,9 @@ pub struct Facts {
     /// the first file the script writes, then runs, holding code or a
     /// program it decodes, carves out of another file or downloads
     pub dropped: Option<DropRun>,
+    /// the code files it writes in other packages' folders: (the write's
+    /// line, the package), in the text's order (D-9)
+    pub rewrote: Vec<(usize, PyStr)>,
 }
 
 thread_local! {
@@ -3176,6 +3311,13 @@ pub fn dropped_run(text: &[u32]) -> Option<Option<DropRun>> {
     facts(text).map(|f| f.dropped.clone())
 }
 
+/// The code files a JavaScript text writes in other packages' folders (D-9),
+/// read on its tree: Some((line, package) in the text's order), or None when
+/// the tree could not say.
+pub fn rewrote(text: &[u32]) -> Option<Vec<(usize, PyStr)>> {
+    facts(text).map(|f| f.rewrote.clone())
+}
+
 fn facts_here(text: &[u32]) -> Option<Facts> {
     let pack = crate::pack::current();
     let path = u("script.js");
@@ -3207,6 +3349,7 @@ fn facts_here(text: &[u32]) -> Option<Facts> {
     let mut best: Option<((bool, bool, u32), &'static str, PyStr)> = None;
     let mut first: Option<(u32, &'static str)> = None;
     let mut decoded: Vec<(usize, usize)> = Vec::new();
+    let mut rewrote: Vec<(u32, PyStr)> = Vec::new();
     let dropped = first_drop(text, &findings);
     for f in findings {
         match f {
@@ -3222,11 +3365,18 @@ fn facts_here(text: &[u32]) -> Option<Facts> {
                 }
             }
             Out::Decoded { at, from } => decoded.push((at as usize, from as usize)),
+            Out::Rewrote { at, pkg } => rewrote.push((at, pkg)),
             _ => {}
         }
     }
     decoded.sort_unstable();
     decoded.dedup_by_key(|d| d.0);
+    rewrote.sort();
+    rewrote.dedup();
+    let rewrote: Vec<(usize, PyStr)> = rewrote
+        .into_iter()
+        .map(|(at, pkg)| (text[..(at as usize).min(text.len())].iter().filter(|&&c| c == 0x0A).count() + 1, pkg))
+        .collect();
     let sent = match best {
         Some(((weak, _, at), kind, what)) => Answer::Found(at as usize, kind, what, weak),
         None => Answer::Nothing,
@@ -3235,7 +3385,7 @@ fn facts_here(text: &[u32]) -> Option<Facts> {
         let at = (at as usize).min(text.len());
         (text[..at].iter().filter(|&&c| c == 0x0A).count() + 1, cat)
     });
-    Some(Facts { sent, received, decoded, dropped })
+    Some(Facts { sent, received, decoded, dropped, rewrote })
 }
 
 #[cfg(test)]
@@ -3704,6 +3854,53 @@ mod tests {
         // a text read sliced is not a binary's
         let src = "const fs = require('fs');\nconst { spawn } = require('child_process');\nconst s = fs.readFileSync('a.txt', 'utf8').slice(10);\nfs.writeFileSync('/tmp/a', s);\nspawn('/tmp/a');\n";
         assert_eq!(dropped(src), None);
+    }
+
+    #[test]
+    fn code_written_in_another_packages_folder() {
+        // D-9: @dinzid04/libsignal-node 2.2.5's shape, its payload inert: the target found by require.resolve or a
+        // path joined from node_modules, its code file written with the script's own text
+        let rewrote = |src: &str| -> Vec<(usize, String)> {
+            let text: Vec<u32> = src.chars().map(|c| c as u32).collect();
+            facts_here(&text).expect("read").rewrote.iter().map(|(l, p)| (*l, pystr::to_string(p))).collect()
+        };
+        let src = "const fs = require('fs');\nconst path = require('path');\nfunction findTarget() {\n  \
+                   const possible = [path.join(process.cwd(), 'node_modules', '@whiskeysockets', 'baileys')];\n  \
+                   try { possible.unshift(require.resolve('@whiskeysockets/baileys/package.json').replace('/package.json', '')); } catch (e) {}\n  \
+                   for (const p of possible) { if (fs.existsSync(path.join(p, 'lib', 'Socket', 'newsletter.js'))) return p; }\n  \
+                   return null;\n}\nconst MODIFIED = `'use strict';\\nexports.x = 1;\\n`;\nfunction install() {\n  \
+                   const base = findTarget();\n  if (!base) return;\n  const file = path.join(base, 'lib', 'Socket', 'newsletter.js');\n  \
+                   fs.writeFileSync(file, MODIFIED);\n}\ninstall();\n";
+        assert_eq!(rewrote(src), vec![(14, "@whiskeysockets/baileys".to_string())]);
+        // require.resolve alone, at the module's top: the file it names, or the folder of what it names
+        let src = "const fs = require('fs'), path = require('path');\n\
+                   const base = require.resolve('@whiskeysockets/baileys/package.json').replace('/package.json', '');\n\
+                   fs.writeFileSync(path.join(base, 'lib', 'Socket', 'newsletter.js'), 'exports.x = 1;');\n\
+                   fs.writeFileSync(path.join(path.dirname(require.resolve('left-pad')), 'index.js'), 'x');\n";
+        assert_eq!(rewrote(src), vec![(3, "@whiskeysockets/baileys".to_string()), (4, "left-pad".to_string())]);
+        // an ES module's: createRequire's require, import.meta.resolve
+        let src = "import fs from 'fs';\nimport path from 'path';\nimport { createRequire } from 'module';\n\
+                   import { fileURLToPath } from 'url';\nconst require = createRequire(import.meta.url);\n\
+                   fs.writeFileSync(path.join(path.dirname(require.resolve('left-pad')), 'index.js'), 'x');\n\
+                   fs.writeFileSync(path.join(path.dirname(fileURLToPath(import.meta.resolve('@a/b'))), 'c.mjs'), 'x');\n";
+        assert_eq!(rewrote(src), vec![(6, "left-pad".to_string()), (7, "@a/b".to_string())]);
+        // (a `require` of the script's own resolves nothing of the platform's)
+        let src = "const fs = require('fs');\nfunction f(require) {\n  \
+                   fs.writeFileSync(require.resolve('left-pad/index.js'), 'x');\n}\nf({ resolve: (s) => s });\n";
+        assert_eq!(rewrote(src), Vec::<(usize, String)>::new());
+        // a file copied over one, a path of node_modules in one part
+        let src = "const fs = require('fs'), path = require('path');\n\
+                   fs.copyFileSync(path.join(__dirname, 'patch.js'), path.join(process.cwd(), 'node_modules/left-pad', 'index.js'));\n";
+        assert_eq!(rewrote(src), vec![(2, "left-pad".to_string())]);
+        // a data file, a dot folder (a cache), a read, the script's own folder: none
+        for src in [
+            "const fs = require('fs'), path = require('path');\nfs.writeFileSync(path.join('node_modules', 'x', 'data.json'), '{}');\n",
+            "const fs = require('fs'), path = require('path');\nfs.writeFileSync(path.join('node_modules', '.cache', 'x', 'a.js'), s);\n",
+            "const fs = require('fs');\nconst s = fs.readFileSync(require.resolve('x/index.js'), 'utf8');\n",
+            "const fs = require('fs'), path = require('path');\nfs.writeFileSync(path.join(__dirname, 'out.js'), s);\n",
+        ] {
+            assert_eq!(rewrote(src), Vec::<(usize, String)>::new(), "{}", src);
+        }
     }
 
     #[test]

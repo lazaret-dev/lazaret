@@ -123,9 +123,9 @@ class UseRiskBoundTests(unittest.TestCase):
         clock = types.SimpleNamespace(monotonic=lambda: now[0])
         real = repo._engine.import_time_risks
 
-        def slow(items, texts=None, declared=None):
+        def slow(items, **kw):
             now[0] += 100.0
-            return real(items, texts=texts, declared=declared)
+            return real(items, **kw)
 
         fast = scan_npm(self.PACKAGE)
         with mock.patch.object(repo, "time", clock), mock.patch.object(repo, "SCAN_TIMEOUT", 1e9), \

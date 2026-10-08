@@ -3401,6 +3401,9 @@ pub fn install_script_risk(p: &Pack, text: &[u32], lang: Option<&str>) -> Vec<Py
 /// strings are read as its runtime reads them).
 pub fn install_script_risk_with(p: &Pack, text: &[u32], shell: bool, command: bool, lang: Option<&str>) -> Vec<PyStr> {
     let mut reasons = install_script_risk_of(p, text, shell, command, lang, None);
+    for (_, r) in rewrite_reasons(p, text, lang) {
+        push_new(&mut reasons, r);
+    }
     let view = decoded_view(p, text, lang);
     if view != text {
         let _gate = crate::textgate::open(&view);
@@ -3728,6 +3731,61 @@ fn push_dropped(reasons: &mut Vec<PyStr>, r: PyStr) {
     push_new(reasons, r);
 }
 
+/// The code files in other packages' folders a JavaScript text writes (D-9: @dinzid04/libsignal-node 2.2.5 replaced
+/// @whiskeysockets/baileys's `lib/Socket/newsletter.js` when it was loaded), read on its tree: (the first write's
+/// line, "rewrites another package's code (<package>)"), one per package, at most three; not the release's own
+/// package nor one of its scope (`own_release`), which are its own code.
+fn rewrite_reasons(p: &Pack, text: &[u32], lang: Option<&str>) -> Vec<(usize, PyStr)> {
+    if lang != Some("js") {
+        return Vec::new();
+    }
+    let mut out: Vec<(usize, PyStr)> = Vec::new();
+    for (line, pkg) in crate::jsflow::supply::rewrote(text).unwrap_or_default() {
+        if own_package(&pkg) {
+            continue;
+        }
+        let r = cat(&[&p.text("_REWRITE_REASON"), &u(" ("), head(&pkg, 80), &u(")")]);
+        if out.len() < 3 && !out.iter().any(|(_, x)| *x == r) {
+            out.push((line, r));
+        }
+    }
+    out
+}
+
+thread_local! {
+    // the release's name while a call given it runs (the API's `own`, D-9)
+    static OWN: std::cell::RefCell<Option<PyStr>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Names the release (`own`: its name) for what runs on this thread until the guard is dropped (D-9: the API's
+/// `install_script_risk` and `import_time_risk` are given it): a rewrite of its own package's code, or of one of its
+/// scope's, is its own, wherever the test reads it (a script's text, code a command hands an interpreter).
+pub fn own_release(own: &[u32]) -> OwnRelease {
+    OwnRelease(OWN.with(|o| o.replace(Some(own.to_vec()))))
+}
+
+/// own_release's guard: the name before it, put back when it is dropped.
+pub struct OwnRelease(Option<PyStr>);
+
+impl Drop for OwnRelease {
+    fn drop(&mut self) {
+        let before = self.0.take();
+        OWN.with(|o| *o.borrow_mut() = before);
+    }
+}
+
+/// Is `pkg` the release's own package, or one of its scope (own_release)?
+fn own_package(pkg: &[u32]) -> bool {
+    OWN.with(|o| match o.borrow().as_deref() {
+        Some(own) => {
+            pkg == own
+                || (own.first() == Some(&c('@'))
+                    && own.iter().position(|&x| x == c('/')).is_some_and(|k| pkg.starts_with(&own[..=k])))
+        }
+        None => false,
+    })
+}
+
 /// A file the text writes, then runs, holding code or a program it decodes,
 /// carves out of another file or downloads (a script an interpreter runs),
 /// read on its tree (JavaScript, Python): the run's line and the reason.
@@ -3774,6 +3832,10 @@ pub fn import_time_risk(p: &Pack, text: &[u32], lang: Option<&str>) -> (Vec<PySt
 /// installs plugins when it is used.
 pub fn import_time_risk_with(p: &Pack, text: &[u32], lang: Option<&str>, declared: Option<&[PyStr]>) -> (Vec<PyStr>, Option<usize>) {
     let (mut reasons, mut line) = import_time_reading(p, text, lang);
+    for (at, r) in rewrite_reasons(p, text, lang) {
+        line = line.or(Some(at));
+        push_new(&mut reasons, r);
+    }
     if let Some(declared) = declared {
         let mut found = undeclared_installs(p, text, declared, lang);
         let mut note: PyStr = Vec::new();
@@ -4671,5 +4733,45 @@ mod package_install_tests {
         // what the tokenizer refuses is read by indentation (a signature's `):` closes no block there either)
         let refused = format!("{}\nx = '\u{0}'\n", signature);
         assert_eq!(undeclared(&refused, &["x"]), None);
+    }
+}
+
+#[cfg(test)]
+mod rewrite_tests {
+    use super::*;
+    use crate::pack;
+
+    fn cps(s: &str) -> Vec<u32> {
+        s.chars().map(|c| c as u32).collect()
+    }
+
+    fn strs(r: &[PyStr]) -> Vec<String> {
+        r.iter().map(|x| pystr::to_string(x)).collect()
+    }
+
+    #[test]
+    fn another_packages_code_and_the_releases_own() {
+        // D-9: a code file written into another package's folder, in the import-time and the install-script tests;
+        // the release's own package and its scope's are its own code (the API's `own`, own_release)
+        let p = pack::current();
+        let text = cps("const fs = require('fs'), path = require('path');\nconst MOD = 'x';\n\
+                        fs.writeFileSync(path.join(process.cwd(), 'node_modules', '@acme', 'core', 'index.js'), MOD);\n");
+        let reason = "rewrites another package's code (@acme/core)".to_string();
+        let (reasons, line) = import_time_risk_with(&p, &text, Some("js"), None);
+        assert_eq!((strs(&reasons), line), (vec![reason.clone()], Some(3)));
+        assert!(strs(&install_script_risk_with(&p, &text, true, false, Some("js"))).contains(&reason));
+        // (read in JavaScript alone)
+        assert!(!strs(&import_time_risk_with(&p, &text, Some("py"), None).0).contains(&reason));
+        for own in ["@acme/core", "@acme/cli"] {
+            let _own = own_release(&cps(own));
+            assert_eq!(import_time_risk_with(&p, &text, Some("js"), None), (Vec::new(), None), "{}", own);
+            assert!(!strs(&install_script_risk_with(&p, &text, true, false, Some("js"))).contains(&reason), "{}", own);
+        }
+        // another release's name, and none once its guard is dropped: the rewrite is reported
+        {
+            let _own = own_release(&cps("acme"));
+            assert_eq!(strs(&import_time_risk_with(&p, &text, Some("js"), None).0), vec![reason.clone()]);
+        }
+        assert_eq!(strs(&import_time_risk_with(&p, &text, Some("js"), None).0), vec![reason]);
     }
 }

@@ -1,6 +1,6 @@
 {
  "format": 1,
- "rule_set": "2.55.0",
+ "rule_set": "2.56.0",
  "source": "lazaret.scanner.core, extracted by scripts/make_rust_tables.py \u2014 do not edit",
  "values": {
   "ALWAYS_PRUNE_DIRS": {
@@ -13212,6 +13212,9 @@
    "flags": "",
    "re": "[\"'](?:/bin/(?:ba|z|da|k)?sh|cmd(?:\\.exe)?|powershell(?:\\.exe)?)[\"']|\\bpty\\.spawn\\s*\\("
   },
+  "_REWRITE_REASON": {
+   "value": "rewrites another package's code"
+  },
   "_ROUTE_DECORATOR_RE": {
    "flags": "",
    "re": "^\\s*@[\\w.]+\\.(route|get|post|put|patch|delete|options|head|api_route|websocket)\\s*\\("
@@ -14969,6 +14972,9 @@
     },
     {
      "value": "installs packages the release does not depend on"
+    },
+    {
+     "value": "rewrites another package's code"
     }
    ]
   },

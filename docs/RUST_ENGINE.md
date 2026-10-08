@@ -2381,6 +2381,30 @@ against what is written at the end (`late_drops`). A program downloaded
 and run stays an installer's; a download written and not run, and what a
 callback is given by a read of the package's own file, are not reported.
 
+**Code written into another package's folder** (0.1.9, D-9). The
+JavaScript model's values have one more kind, a path in another package's
+folder (`K_PKG`, what: the package): `require.resolve('<pkg>…')` (Node's
+`require`, or one `createRequire()` made, as ES modules do; the model's
+descriptions name no member of `require`, so `sc_require_resolve` reads
+the call), `import.meta.resolve('<pkg>…')`, and a path joined
+(`path.join`, `path.resolve`) from `node_modules` and a package's name
+among its literal parts (`'node_modules', '@scope', 'name'`, or
+`'node_modules/name'` in one part; a dot folder such as `.cache` is no
+package), carried as every value is, through variables, a function's
+return and a list's items. A code file (a literal ending in `.js`, `.cjs`
+or `.mjs` in the path's text, or in what the name it is given holds)
+written there (`writeFileSync`, `writeFile`, `appendFile*`,
+`createWriteStream`) or copied or moved there (`copyFile*`, `rename*`,
+`cp*`, their second argument) is `Out::Rewrote` (the write's offset, the
+package), and the install-script and import-time tests give each package
+"rewrites another package's code (the package)", a strong reason
+(`signs::rewrite_reasons`). The API's `install_script_risk` and
+`import_time_risk` take the release's name as `own` (`signs::own_release`,
+for what the call reads, a command's inline code too): its own package's
+code, or one of its scope's, is its own. @dinzid04/libsignal-node 2.2.5
+writes over @whiskeysockets/baileys's `lib/Socket/newsletter.js` a second
+after it is loaded.
+
 **Held to** `jsflow::supply::tests` and `pyflow::supply::tests` (each
 shape above, and its negatives: a binary installer, a whole file copied, text
 written, `tarfile.open` and a browser's `open`, another function's local

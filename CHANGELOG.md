@@ -41,6 +41,19 @@ project is pre-1.0, so the 0.x API may still change.
   Part F's 4,620 or the installed Python and npm packages. The whole-run alternatives now start with their literal
   (crates.io's too), so Python's `re` has a first character to look for: its token pattern takes about half the time
   it took, with the three formats added. Rule set 2.48.0.
+- **Code written into another package's folder is a strong reason (D-9; rule set 2.56.0).** @dinzid04/libsignal-node
+  2.2.5 finds @whiskeysockets/baileys (`require.resolve('@whiskeysockets/baileys/package.json')`, or a path joined
+  from `node_modules`) and, a second after it is loaded, writes its own text over baileys's
+  `lib/Socket/newsletter.js`; it was OK. A code file (`.js`, `.cjs`, `.mjs`) written, copied or moved into another
+  package's folder, as the engine's JavaScript tree reads the path (`require.resolve('<pkg>…')`, an ES module's
+  `createRequire()` and `import.meta.resolve` too, or `node_modules` and the package's name among a joined path's
+  parts, through variables, a function's return and a list's items), is now "rewrites another package's code (the
+  package)": SC-IMPORT-RISK CRITICAL when the package is loaded, SC-INSTALL-HOOK CRITICAL in an install script. The
+  release's own package and its scope are its own code; a data file, a dot folder (`node_modules/.cache`) and a read
+  are not rewrites. Measured: on the benchmark only libsignal-node moves; the popular set is unchanged, and neither
+  the 20,422 JavaScript files of the npm packages installed here nor 43 packages that generate, patch or install code
+  (prisma, patch-package, husky, electron, next, nx, npm, pnpm, yarn, corepack, …) has one. Registry and guard scans,
+  and `--deps`.
 - **A package the code loads when the package is loaded, that package.json names only in devDependencies, is a weaker
   indicator (D-13; rule set 2.53.0).** dotenv-express 17.4.3, a copy of dotenv, requires `environment-gate` at the top
   of `lib/main.js` and calls it first in `config()`; its package.json lists `environment-gate` only in

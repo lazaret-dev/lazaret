@@ -99,6 +99,9 @@ MAX_MEMBER = _env_number("LAZARET_MAX_SOURCE_BYTES", 16_000_000)
 MAX_FILES = 20_000         # files per package (numpy's sdist alone has >4,000)
 SAMPLE = 8192              # header/entropy sample read from oversized files
 # Stored scans from another engine version are scanned again (has_scan).
+# 2.56: a JavaScript code file written into another package's folder is
+#      "rewrites another package's code", a strong reason (D-9:
+#      @dinzid04/libsignal-node's rewrite of @whiskeysockets/baileys)
 # 2.55: a Python comprehension over the environment reads the lists its
 #      test names (B-6: `any(p in k for p in PATTERNS)` with secret words
 #      in PATTERNS is the whole environment, not a selection)
@@ -314,7 +317,7 @@ SAMPLE = 8192              # header/entropy sample read from oversized files
 #      entry points and hook targets, Python install scripts
 # 2.3: verdict tiers, decoded hex, install-script inspection; 2.2:
 #      verdict-integrity; 2.1: binary-artifact awareness
-ENGINE_VERSION = "2.55.0"
+ENGINE_VERSION = "2.56.0"
 
 # ---------------- The content memo (P-2a, registry/contentcache.py) ----------------
 # One per scan_package run: the engine answers once for content several of a
@@ -2656,6 +2659,7 @@ class _ArtifactScan:
         self.entries = set()       # rels that run when installed / imported
         self._twins = None         # rel -> the members whose paths differ from it only by case (_case_twins)
         self._declared = False     # the release's declared names (_declared_names; None: not known)
+        self._own = False          # its own name (_own_name; None: not known)
         self._fold_index = None    # (members counted, {case fold: member}) (_folds)
         self.vsix_main = set()     # vsix: the entries of `main` and `browser`
         self.vsix_special = {}     # vsix: rel -> when it runs, for an entry a contribution names (EG-5)
@@ -2817,17 +2821,21 @@ class _ArtifactScan:
     def _import_risks(self, items, declared=None):
         """engine.import_time_risks for [(text, lang)], once for each distinct
         file (an answer the engine could not give is not kept); `declared`,
-        the release's declared names, for its D-12 test (_declared_names)."""
+        the release's declared names, for its D-12 test (_declared_names);
+        the release's own name (D-9, _own_name)."""
         flags = {"budget": _engine.WORK_BUDGET}
         if declared is not None:
             flags["declared"] = hashlib.sha256("\n".join(declared).encode("utf-8", "surrogatepass")).hexdigest()
+        own = self._own_name()
+        if own:
+            flags["own"] = own
         keys = [self._key("import-risk", text, lang, flags) for text, lang in items]
         asked = dict(zip(keys, items))
 
         def compute(missing):
             return [_cache.Uncacheable(a) if _engine.unanswered(a) else a
                     for a in _engine.import_time_risks([asked[key] for key in missing], texts=self.texts,
-                                                       declared=declared)]
+                                                       declared=declared, own=own)]
         return self.memo.get_or_compute_many(keys, compute)
 
     def _declared_names(self):
@@ -2870,6 +2878,18 @@ class _ArtifactScan:
                     out = names
         self._declared = sorted(out) if out is not None else None
         return self._declared
+
+    def _own_name(self):
+        """An npm release's own name (package.json's), or None (D-9: a rewrite of its own package's code, or of one
+        of its scope, is its own)."""
+        if self._own is False:
+            self._own = None
+            if self.artifact == "npm":
+                text = self.manifests.get("package.json")
+                data, _problems = lazaret.load_manifest("package.json", text) if text else (None, None)
+                name = data.get("name") if isinstance(data, dict) else None
+                self._own = name if isinstance(name, str) and name else None
+        return self._own
 
     def _spawned_scripts(self, text, lang):
         """engine.spawned_scripts, once for each distinct script (a call the
@@ -3464,12 +3484,13 @@ class _ArtifactScan:
             if rel is None:
                 continue
             lang = _engine.script_lang(rel)
-            reasons = _engine.install_script_risk(text, lang=lang) if text else []
+            reasons = _engine.install_script_risk(text, lang=lang, own=self._own_name()) if text else []
             out.append((rel, reasons))
             # (a step's script runs in the job's workspace: only a path built from its own place is the action's)
             for started, more in self._started_scripts(rel, text, None, self.install_scripts):
                 self.action_entries.setdefault(started, []).append(how)
-                more = _engine.install_script_risk(more, lang=_engine.script_lang(started)) if more else []
+                more = (_engine.install_script_risk(more, lang=_engine.script_lang(started), own=self._own_name())
+                        if more else [])
                 out.append((f"{rel}, which starts {started}", more))
         return out
 
@@ -3521,7 +3542,7 @@ class _ArtifactScan:
             kind = _actionmeta.step_shell(_actionmeta.unquote_json(step.shell))
             script = _actionmeta.substitute(step.run)
             if kind in ("py", "js"):
-                reasons = _engine.install_script_risk(script, shell=False, lang=kind)
+                reasons = _engine.install_script_risk(script, shell=False, lang=kind, own=self._own_name())
                 self._action_issue(meta_rel, step.run_line, text, what, reasons, [])
                 continue
             if kind == "other":
@@ -3647,13 +3668,15 @@ class _ArtifactScan:
                 self.install_scripts.add(rel)
                 lang = "sh" if rel.endswith(".sh") else "js"
                 text = self._text_of(rel, lang)
-                reasons = _engine.install_script_risk(text, lang=_engine.script_lang(rel)) if text else []
+                reasons = (_engine.install_script_risk(text, lang=_engine.script_lang(rel), own=self._own_name())
+                           if text else [])
                 if reasons and issue["sev"] not in STRONG_SEVERITIES:
                     issue["sev"] = "CRITICAL"
                     issue["msg"] = f"Install hook runs {target}, which {'; and '.join(reasons)}."
                 # the scripts it starts with node or python (0.1.8, core.spawned_scripts)
                 for started, more in self._started_scripts(rel, text, base, self.install_scripts):
-                    more = _engine.install_script_risk(more, lang=_engine.script_lang(started)) if more else []
+                    more = (_engine.install_script_risk(more, lang=_engine.script_lang(started), own=self._own_name())
+                            if more else [])
                     if more and issue["sev"] not in STRONG_SEVERITIES:
                         issue["sev"] = "CRITICAL"
                         issue["msg"] = (f"Install hook runs {target}, which starts {started}, which "
@@ -3747,7 +3770,7 @@ class _ArtifactScan:
             self.entries.add(rel)
             self.install_scripts.add(rel)
             text = self.sources.get(rel, ("", "py"))[0]
-            reasons = _engine.install_script_risk(text, lang=_engine.script_lang(rel))
+            reasons = _engine.install_script_risk(text, lang=_engine.script_lang(rel), own=self._own_name())
             # a download written to a file and run: CRITICAL in the code pip
             # runs to install an sdist (a prebuilt-binary installer's shape
             # keeps it MAJOR-only in npm hooks and import-time code)

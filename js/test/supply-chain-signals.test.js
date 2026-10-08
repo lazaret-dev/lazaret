@@ -214,6 +214,17 @@ test("a download a callback is given, written to a file and run (D-2)", () => {
   assert.ok(!kept.some((r) => r.includes("runs it with")), kept.join("; "));
 });
 
+test("code written into another package's folder (D-9)", () => {
+  // @dinzid04/libsignal-node 2.2.5's shape (python: test_rewrites.py)
+  const text = "const fs = require('fs');\nconst path = require('path');\n" +
+    "const base = require.resolve('@whiskeysockets/baileys/package.json').replace('/package.json', '');\n" +
+    "fs.writeFileSync(path.join(base, 'lib', 'Socket', 'newsletter.js'), 'exports.x = 1;');\n";
+  assert.deepEqual(importTimeRisk(text, "js")[0], ["rewrites another package's code (@whiskeysockets/baileys)"]);
+  assert.deepEqual(installScriptRisk(text, true, false, "js"), ["rewrites another package's code (@whiskeysockets/baileys)"]);
+  // a data file there is not code
+  assert.deepEqual(importTimeRisk(text.replace("newsletter.js", "data.json"), "js")[0], []);
+});
+
 test("linear time on hostile texts", () => {
   for (const text of ["powershell ".repeat(50_000), "powershell -e " + "A".repeat(400_000), "'".repeat(200_000) + "exec http",
     "dup2(".repeat(100_000), "$(whoami)".repeat(50_000), "iwr ".repeat(100_000) + "| iex"]) {

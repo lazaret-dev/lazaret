@@ -786,11 +786,15 @@ fn dispatch(name: &str, args: &Value, text: &[u32]) -> Result<Value, CallError> 
         "install_script_risk" => {
             let shell = !matches!(args.get("shell"), Some(Value::Bool(false)));
             let command = matches!(args.get("command"), Some(Value::Bool(true)));
+            // `own`: the release's name, when the caller knows it (its own package's code is not another's, D-9)
+            let _own = if args.get("own").is_some() { Some(signs::own_release(&arg_str(args, "own")?)) } else { None };
             strs(&signs::install_script_risk_with(p, text, shell, command, lang))
         }
         "import_time_risk" => {
             // `declared`: the release's own name and the packages its manifest names (D-12), when the caller knows them
             let declared = args.get("declared").map(|_| arg_strs(args, "declared"));
+            // `own`: the release's name (D-9), as for install_script_risk
+            let _own = if args.get("own").is_some() { Some(signs::own_release(&arg_str(args, "own")?)) } else { None };
             let (reasons, line) = signs::import_time_risk_with(p, text, lang, declared.as_deref());
             Value::Arr(vec![strs(&reasons), line.map(|l| Value::Int(l as i64)).unwrap_or(Value::Null)])
         }
@@ -1409,7 +1413,7 @@ fn js_flow(args: &Value, text: &[u32]) -> Result<Value, CallError> {
                     Value::str(fix),
                 ]),
                 // (the supply-chain model's; project mode never gives one)
-                Out::Send { .. } | Out::Received { .. } | Out::Decoded { .. } | Out::Dropped { .. } | Out::Own { .. } => Value::Null,
+                Out::Send { .. } | Out::Received { .. } | Out::Decoded { .. } | Out::Dropped { .. } | Out::Own { .. } | Out::Rewrote { .. } => Value::Null,
             })
             .collect(),
     ))
@@ -1508,7 +1512,7 @@ fn flow_out(out: Vec<crate::jsflow::Out>, max_file: usize) -> Value {
                     Value::str(fix),
                 ]),
                 // (the supply-chain model's; project mode never gives one)
-                Out::Send { .. } | Out::Received { .. } | Out::Decoded { .. } | Out::Dropped { .. } | Out::Own { .. } => Value::Null,
+                Out::Send { .. } | Out::Received { .. } | Out::Decoded { .. } | Out::Dropped { .. } | Out::Own { .. } | Out::Rewrote { .. } => Value::Null,
             })
             .collect(),
     )
