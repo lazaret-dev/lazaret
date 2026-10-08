@@ -35,7 +35,7 @@ if not _native.available():
 def REFERENCE(all_files):
     """core.compute_metrics before Q-1 step 4."""
     files = [f for f in all_files if not f.get("dep")]
-    ncloc = comments = measured = 0
+    ncloc = comments = measured = left_out = 0
     win_map = {}
     for f in files:
         code = []
@@ -53,6 +53,8 @@ def REFERENCE(all_files):
             if dup_lang:
                 measured += 1
                 code.append((t, i, f["path"]))
+            else:
+                left_out += 1
         for i in range(len(code) - 5):
             key = "".join(c[0] for c in code[i:i + 6])
             win_map.setdefault(key, []).append(code[i:i + 6])
@@ -64,7 +66,7 @@ def REFERENCE(all_files):
                     dup.add((p, i))
     dup_pct = round(100 * len(dup) / measured, 1) if measured else 0.0
     return {"files": len(files), "depFiles": len(all_files) - len(files),
-            "ncloc": ncloc, "comments": comments, "dupPct": dup_pct}
+            "ncloc": ncloc, "comments": comments, "dupPct": dup_pct, "dupLeftOut": left_out}
 
 
 PIECES = {

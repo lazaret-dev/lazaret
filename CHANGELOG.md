@@ -812,6 +812,11 @@ project is pre-1.0, so the 0.x API may still change.
 
 ### Fixed
 
+- **The report says which lines the duplication measure leaves out (N-13).** A project's Go and Rust files count in
+  its files and lines of code, and not in its duplication (six-line windows rate idiomatic Go and Rust as duplicated:
+  Go's standard library 2 to 13%, popular crates 4 to 54%), and the report did not say so. Its metrics now carry
+  `dupLeftOut`, the lines of code the measure leaves out, and both CLIs' summaries and the HTML report add "(N lines
+  of Go and Rust not measured)" to the duplication when there are any.
 - **A climb out of the script's own folder to a scoped package beside its own is that package's folder (D-9b; rule
   set 2.61.0).** D-9 read another package's folder from `require.resolve` and from `node_modules` and a package's
   name in a joined path; `path.join(__dirname, '..', '..', '@scope', 'name', …)` (from `__dirname`,

@@ -257,7 +257,8 @@ export function printReport(res, { out = console.log, quiet = false } = {}) {
   out("");
   out(`Lazaret scan — ${sanitizeTermLine(res.project)}`);
   const configs = m.configFiles ? ` · ${m.configFiles} config files` : "";
-  out(`  ${m.files} files · ${m.ncloc} lines of code · ${typeof m.dupPct === "number" ? pyFloatRepr(m.dupPct) : m.dupPct}% duplication${configs}`);
+  const left = m.dupLeftOut ? ` (${m.dupLeftOut} lines of Go and Rust not measured)` : "";
+  out(`  ${m.files} files · ${m.ncloc} lines of code · ${typeof m.dupPct === "number" ? pyFloatRepr(m.dupPct) : m.dupPct}% duplication${left}${configs}`);
   out("");
   out(`  Quality gate: ${res.pass ? "PASSED" : "FAILED"}`);
   for (const cond of res.conditions) out(`  ${cond.ok ? "✓" : "✗"} ${sanitizeTermLine(cond.label)}`);

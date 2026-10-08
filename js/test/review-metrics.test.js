@@ -18,7 +18,7 @@ test("computeMetrics keys duplicate lines per file (path or name)", () => {
   // CLI-shaped entries (path only) and library-shaped entries (name only)
   for (const key of ["path", "name"]) {
     const m = computeMetrics([{ ...a, [key]: "a.py" }, { ...b, [key]: "b.py" }]);
-    assert.deepEqual(m, { files: 2, depFiles: 0, ncloc: 17, comments: 1, dupPct: 94.1 }, key);
+    assert.deepEqual(m, { files: 2, depFiles: 0, ncloc: 17, comments: 1, dupPct: 94.1, dupLeftOut: 0 }, key);
   }
 });
 
@@ -30,6 +30,7 @@ test("CLI dupPct matches the Python engine", () => {
     writeFileSync(join(d, "c.js"), "/* x */\nconst a = 1;\n");
     assert.equal(run(["check", d, "--no-html", "-q"], { out: () => {}, err: () => {}, env: {} }), 0);
     const rep = JSON.parse(readFileSync(join(d, "lazaret-report.json"), "utf8"));
-    assert.deepEqual(rep.metrics, { files: 3, depFiles: 0, ncloc: 18, comments: 2, dupPct: 88.9, configFiles: 0 });
+    assert.deepEqual(rep.metrics, { files: 3, depFiles: 0, ncloc: 18, comments: 2, dupPct: 88.9, dupLeftOut: 0,
+      configFiles: 0 });
   } finally { rmSync(d, { recursive: true, force: true }); }
 });

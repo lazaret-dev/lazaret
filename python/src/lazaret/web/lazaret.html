@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-r6VsGhsljmiY4EyE/c0DekRfAkHfHUD91+C9D5Gzbfo='; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-P69gkwcijYNXaCEvwfxVIzJba7AqttHVz5Tvj6K3WyU='; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'">
 <title>Lazaret — Security &amp; Quality Review</title>
 <style>
   :root{
@@ -5287,7 +5287,8 @@ function computeMetrics(files) {
     for (const [key, i, code] of occ) for (let j = i; j < i + 6; j++) dupSet.add(`${key}\u0000${code[j][1]}`);
   }
   const dupPct = ncloc ? pyRound1(100 * dupSet.size / ncloc) : 0;
-  return { files: measured.length, depFiles: 0, ncloc, comments, dupPct };
+  // (dupLeftOut: the lines of Go and Rust the measure leaves out, core.compute_metrics; the page reads neither, N-14)
+  return { files: measured.length, depFiles: 0, ncloc, comments, dupPct, dupLeftOut: 0 };
 }
 
 function worstSevRating(issues, types) {

@@ -154,6 +154,6 @@ test("perFile holds every file in Python's order; dupPct is written as a float",
   for (const [dup, written] of [[100, "100.0"], [12.5, "12.5"], [33.3, "33.3"], [0, "0.0"]]) {
     res.metrics.dupPct = dup;
     assert.equal(JSON.parse(jsonRenderer(res)).metrics.dupPct, dup);
-    assert.match(jsonRenderer(res), new RegExp(`\n {4}"dupPct": ${written.replace(".", "\\.")}\n`));
+    assert.match(jsonRenderer(res), new RegExp(`\n {4}"dupPct": ${written.replace(".", "\\.")},?\n`));
   }
 });

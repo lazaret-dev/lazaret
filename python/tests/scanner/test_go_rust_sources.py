@@ -17,6 +17,7 @@ another dependency tree's are not. The duplication measure counts Python,
 JavaScript and SQL lines (core.DUP_LANGS). Credentials are fakes built by
 concatenation; nothing is executed.
 """
+import contextlib
 import io
 import json
 import os
@@ -171,10 +172,20 @@ class ProjectScanTests(unittest.TestCase):
         block = "".join(f"    let v{k} = compute({k}, \"step {k}\");\n" for k in range(8))
         go_rs = {"a.rs": "fn a() {\n" + block + "}\n", "b.rs": "fn b() {\n" + block + "}\n"}
         res = self.scan(go_rs)
-        self.assertEqual((res["metrics"]["ncloc"], res["metrics"]["dupPct"]), (20, 0.0))
+        self.assertEqual((res["metrics"]["ncloc"], res["metrics"]["dupPct"], res["metrics"]["dupLeftOut"]), (20, 0.0, 20))
         py = "".join(f"v{k} = compute({k}, 'step {k}')\n" for k in range(8))
         res = self.scan(dict(go_rs, **{"a.py": py, "b.py": py}))
-        self.assertEqual((res["metrics"]["ncloc"], res["metrics"]["dupPct"]), (36, 100.0))
+        self.assertEqual((res["metrics"]["ncloc"], res["metrics"]["dupPct"], res["metrics"]["dupLeftOut"]), (36, 100.0, 20))
+        # (N-13) the report says which lines the measure left out
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            core.print_report(res, True)
+        self.assertIn("100.0% duplication (20 lines of Go and Rust not measured)", out.getvalue())
+        self.assertIn("Duplication (20 lines of Go and Rust not measured)", core.html_report(res))
+        res = self.scan({"a.py": py})
+        self.assertEqual(res["metrics"]["dupLeftOut"], 0)
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            core.print_report(res, True)
+        self.assertNotIn("not measured", out.getvalue())
 
     def test_suppression_markers_in_go_and_rust_comments(self):
         res = self.scan({"m.go": f"package m\n// nosec\nvar a = \"{AWS}\"\nvar b = \"{AWS}\" // NOSONAR\n",

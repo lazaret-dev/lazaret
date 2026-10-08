@@ -101,11 +101,11 @@ test("duplication is measured on Python, JavaScript and SQL lines", () => {
   const rs = [{ path: "a.rs", lang: "rs", content: "fn a() {\n" + block + "}\n" },
     { path: "b.rs", lang: "rs", content: "fn b() {\n" + block + "}\n" }];
   let m = computeMetrics(rs);
-  assert.deepEqual([m.ncloc, m.dupPct], [20, 0]);
+  assert.deepEqual([m.ncloc, m.dupPct, m.dupLeftOut], [20, 0, 20]);
   let py = "";
   for (let k = 0; k < 8; k++) py += `v${k} = compute(${k}, 'step ${k}')\n`;
   m = computeMetrics([...rs, { path: "a.py", lang: "py", content: py }, { path: "b.py", lang: "py", content: py }]);
-  assert.deepEqual([m.ncloc, m.dupPct], [36, 100]);
+  assert.deepEqual([m.ncloc, m.dupPct, m.dupLeftOut], [36, 100, 20]);
   // (a file given without its language is measured, as before)
   m = computeMetrics([{ path: "a", content: py }, { path: "b", content: py }]);
   assert.equal(m.dupPct, 100);

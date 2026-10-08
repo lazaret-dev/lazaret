@@ -9,7 +9,8 @@ import { fileMetrics } from "../lib/native.js";
 
 // The languages whose duplication is measured (twin of core.DUP_LANGS): a
 // project's Go and Rust files count in the files, lines of code and
-// comments, not yet in the duplication.
+// comments, not yet in the duplication; the report says how many of its
+// lines of code the measure left out (dupLeftOut, N-13).
 export const DUP_LANGS = new Set(["py", "js", "sql"]);
 
 /**
@@ -19,7 +20,7 @@ export const DUP_LANGS = new Set(["py", "js", "sql"]);
  * non-blank lines as code (review B3), and its windows are not compared.
  */
 export function computeMetrics(files) {
-  let ncloc = 0, comments = 0, measured = 0;
+  let ncloc = 0, comments = 0, measured = 0, leftOut = 0;
   const nonDep = files.filter((f) => !f.dep);   // deps excluded from quality metrics
   const depFiles = files.length - nonDep.length;
   const starts = new Map();                      // a window's key -> where each occurrence starts
@@ -28,13 +29,15 @@ export function computeMetrics(files) {
     const text = normalizeNewlines(String(f.content ?? ""));   // (no U+2028 split: core.compute_metrics)
     let got = null;
     try { got = fileMetrics(text, f.lang, { jsx: jsxReading(key) }); } catch { /* every non-blank line is code */ }
+    const dupLang = f.lang == null || DUP_LANGS.has(f.lang);
     if (!got) {
       const lines = pinUnicode(text).split("\n").filter((l) => pyStrip(l));
       ncloc += lines.length;
-      if (f.lang == null || DUP_LANGS.has(f.lang)) measured += lines.length;
+      if (dupLang) measured += lines.length; else leftOut += lines.length;
       continue;
     }
     ncloc += got.ncloc;
+    if (!dupLang) leftOut += got.ncloc;
     comments += got.comments;
     for (let k = 0; k < got.windows.length; k += 16) {
       const w = got.windows.slice(k, k + 16);
@@ -49,7 +52,7 @@ export function computeMetrics(files) {
     for (const a of at) for (let j = a; j < a + 6; j++) dup.add(j);
   }
   const dupPct = measured ? pyRound1(100 * dup.size / measured) : 0;
-  return { files: nonDep.length, depFiles, ncloc, comments, dupPct };
+  return { files: nonDep.length, depFiles, ncloc, comments, dupPct, dupLeftOut: leftOut };
 }
 
 export function worstSevRating(issues, types) {

@@ -5690,7 +5690,9 @@ def scan_project(root, exclude=(), include_deps=False, taint_config=None,
 #: on Python and JavaScript, and with these windows Go's standard library
 #: measures 2 to 13% and popular crates 4 to 54% (repetitive tests, an API
 #: written for each type, a file per platform), and this repository's Python
-#: and JavaScript under 1%. Go and Rust need a measure of their own.
+#: and JavaScript under 1%. Go and Rust need a measure of their own; until
+#: then the report says how many of its lines of code the measure left out
+#: (`dupLeftOut`, N-13).
 DUP_LANGS = frozenset({"py", "js", "sql"})
 
 
@@ -5700,24 +5702,30 @@ def compute_metrics(all_files):
     Each file's part is the engine's (Q-1 step 4, metrics.rs: its lines as this module splits them, at "\n" alone,
     each window keyed by its six stripped lines joined): a project scan's, from its reading of the file (a file's
     `lineMetrics`), or engine.file_metrics'; the windows are compared here, across the files. A file the engine could not answer counts its non-blank lines as code (review B3), and its windows
-    are not compared."""
+    are not compared. `dupLeftOut`: the lines of code of the languages the duplication does not measure (Go and
+    Rust, N-13)."""
     files = [f for f in all_files if not f.get("dep")]  # deps excluded from quality metrics
     answers = [f.get("lineMetrics") for f in files]     # (a project scan's, from its reading of each file)
     todo = [k for k, got in enumerate(answers) if got is None]
     for k, got in zip(todo, engine.file_metrics([(files[k].get("path"), files[k].get("content"), files[k].get("lang"))
                                                   for k in todo])):
         answers[k] = got
-    ncloc = comments = measured = 0
+    ncloc = comments = measured = left_out = 0
     starts = {}                                         # a window's key -> where each occurrence starts
     for f, got in zip(files, answers):
+        dup_lang = f.get("lang") is None or f["lang"] in DUP_LANGS
         if got is None:                                 # every non-blank line is code
             lines = [l for l in _unicode13.pin(str(f.get("content") or "")).split("\n") if l.strip()]
             ncloc += len(lines)
-            if f.get("lang") is None or f["lang"] in DUP_LANGS:
+            if dup_lang:
                 measured += len(lines)
+            else:
+                left_out += len(lines)
             continue
         f_ncloc, f_comments, f_measured, windows = got
         ncloc += f_ncloc
+        if not dup_lang:
+            left_out += f_ncloc
         comments += f_comments
         for k in range(0, len(windows), 16):
             starts.setdefault(windows[k:k + 16], []).append(measured + k // 16)
@@ -5729,7 +5737,7 @@ def compute_metrics(all_files):
                 dup.update(range(a, a + 6))
     dup_pct = round(100 * len(dup) / measured, 1) if measured else 0.0
     return {"files": len(files), "depFiles": len(all_files) - len(files),
-            "ncloc": ncloc, "comments": comments, "dupPct": dup_pct}
+            "ncloc": ncloc, "comments": comments, "dupPct": dup_pct, "dupLeftOut": left_out}
 
 def worst_sev_rating(issues, types):
     sevs = {i["sev"] for i in issues if i["type"] in types}
@@ -6055,7 +6063,8 @@ def print_report(res, quiet):
     print()
     print(c("1", f"Lazaret scan — {sanitize_term_line(res['project'])}"))
     configs = f" · {m['configFiles']} config files" if m.get("configFiles") else ""
-    print(f"  {m['files']} files · {m['ncloc']} lines of code · {m['dupPct']}% duplication{configs}")
+    left = f" ({m['dupLeftOut']} lines of Go and Rust not measured)" if m.get("dupLeftOut") else ""
+    print(f"  {m['files']} files · {m['ncloc']} lines of code · {m['dupPct']}% duplication{left}{configs}")
     print()
     gate = c("42;30", " PASSED ") if res["pass"] else c("41;97", " FAILED ")
     print(f"  Quality gate: {gate}")
@@ -6166,12 +6175,13 @@ def html_report(res):
     conds = "".join(
         f'<span class="cond {"ok" if c["ok"] else "ko"}">{"✓" if c["ok"] else "✗"} {esc(c["label"])}</span>'
         for c in res["conditions"])
+    dup_left = f" ({m['dupLeftOut']} lines of Go and Rust not measured)" if m.get("dupLeftOut") else ""
     cards = f"""
 <div class="card"><div class="num">{ct['VULN']}{rating_badge(rt['security'])}</div><div class="lbl">Vulnerabilities · Security</div></div>
 <div class="card"><div class="num">{ct['HOTSPOT']}</div><div class="lbl">Security Hotspots</div></div>
 <div class="card"><div class="num">{ct['BUG']}{rating_badge(rt['reliability'])}</div><div class="lbl">Bugs · Reliability</div></div>
 <div class="card"><div class="num">{ct['SMELL']}{rating_badge(rt['maintainability'])}</div><div class="lbl">Code Smells · Maintainability</div></div>
-<div class="card"><div class="num">{m['dupPct']}%</div><div class="lbl">Duplication</div></div>
+<div class="card"><div class="num">{m['dupPct']}%</div><div class="lbl">Duplication{dup_left}</div></div>
 <div class="card"><div class="num">{m['ncloc']}</div><div class="lbl">Lines of Code</div></div>
 <div class="card"><div class="num">{m['files']}</div><div class="lbl">Files Scanned</div></div>"""
     file_rows = "".join(
