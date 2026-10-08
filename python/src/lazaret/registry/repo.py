@@ -99,6 +99,8 @@ MAX_MEMBER = _env_number("LAZARET_MAX_SOURCE_BYTES", 16_000_000)
 MAX_FILES = 20_000         # files per package (numpy's sdist alone has >4,000)
 SAMPLE = 8192              # header/entropy sample read from oversized files
 # Stored scans from another engine version are scanned again (has_scan).
+# 2.60: a method of a class made in several places reads `this` as the
+#      instance it is called on (B-3)
 # 2.59: a member's container is its own (D-3b): what `o.list.push(x)` or
 #      `Object.assign(this.opts, …)` is given, `o.list` and `this.opts`
 #      hold, not the object
@@ -327,7 +329,7 @@ SAMPLE = 8192              # header/entropy sample read from oversized files
 #      entry points and hook targets, Python install scripts
 # 2.3: verdict tiers, decoded hex, install-script inspection; 2.2:
 #      verdict-integrity; 2.1: binary-artifact awareness
-ENGINE_VERSION = "2.59.0"
+ENGINE_VERSION = "2.60.0"
 
 # ---------------- The content memo (P-2a, registry/contentcache.py) ----------------
 # One per scan_package run: the engine answers once for content several of a

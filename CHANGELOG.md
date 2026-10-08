@@ -812,6 +812,14 @@ project is pre-1.0, so the 0.x API may still change.
 
 ### Fixed
 
+- **A method reads `this` as the instance it is called on, in a class made in several places (B-3; rule set
+  2.60.0).** B-1 keeps the instances of a class made in several places apart (vite's MagicString), so what a call
+  on one instance gives a method is not put into the class's `this.x`, and what one method of an instance was given
+  reached nothing another method of that instance did with it: `r.setCode(t); r.run()`, where `run` evals
+  `this.c`, ran nothing received. A method of such a class now reads `this` as a parameter, the value it is called
+  on, which holds what the instance's methods were given, for what the method sends or runs through it: the code is
+  followed for `r`, through another method of its own too (`this.run()`), and not for another instance. What a
+  method returns or keeps of `this` stays with the instance, as before. A class made once is followed as before.
 - **A `--deps` scan gives the tests each installed package's names (D-12b, D-9c).** D-12's install at import of a
   package the release does not depend on was judged in registry and guard scans, which know the release's manifest,
   and not in a `--deps` scan, which gave the import-time test no names; and D-9's test, given no name, would read a

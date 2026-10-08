@@ -2084,10 +2084,17 @@ binding already, and `o.list`, a binding of its own beside `o`'s, which
 that holds it, what `o.list.push(x)` was given joined unrelated flows in
 vite's bundle), and what a function holds of its own parameters is not
 put into a member of `this` (a recorder's `this._events.push(…)` held what
-every caller recorded: monaco-editor's loader); the script's own wrappers of
-exec, of a read and of `process.env[name]` are summaries too
-(`run('whoami')`, `getEnv('AWS_SECRET_ACCESS_KEY')`). A child process
-doesn't hold what it was given, nor a length the data it measures.
+every caller recorded: monaco-editor's loader); in a method of a class made
+in several places, `this` is the method's receiver, a parameter
+(`RECV_INDEX`) that a call on an instance gives the instance's value for
+the sinks the method reaches through it (B-3, 0.1.9: B-1 keeps such a
+class's instances apart, so what one method of an instance was given
+reached nothing another method of it did; what a method returns or keeps
+of `this` stays with B-1's instance); the
+script's own wrappers of exec, of a read and of `process.env[name]` are
+summaries too (`run('whoami')`, `getEnv('AWS_SECRET_ACCESS_KEY')`). A
+child process doesn't hold what it was given, nor a length the data it
+measures.
 
 **Copies and holders of the environment** (0.1.9, D-16). process.env's
 mark is kept by a name it is given, not by a parameter whose default it

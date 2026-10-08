@@ -45,6 +45,10 @@ pub const PARAM_BASE: u64 = 1 << 20;
 /// (the supply-chain model, D-16: `env.platform`, `env.readConfig()`): what a call gives such a parameter is,
 /// there, its value without the whole environment.
 pub const MEMBER_KEY: u64 = 1 << 63;
+/// A method's receiver, `this`, as a parameter's index (the supply-chain model, B-3): a method of a class made in
+/// several places reads `this` as the value it is called on, so what one method of an instance was given reaches
+/// what another method of that instance does with it (`r.setCode(t); r.run()`), and no other instance's.
+pub const RECV_INDEX: usize = (PARAM_BASE - 1) as usize;
 
 /// The function a parameter's key is of.
 pub fn key_owner(key: u64) -> FnId {

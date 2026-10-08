@@ -420,7 +420,7 @@ impl Program {
     }
 
     /// The method a scope's code belongs to, through arrow functions.
-    fn method_fn(&self, scope: ScopeId) -> FnId {
+    pub(super) fn method_fn(&self, scope: ScopeId) -> FnId {
         let mut f = self.scopes[scope as usize].fid;
         let mut seen = 0;
         loop {

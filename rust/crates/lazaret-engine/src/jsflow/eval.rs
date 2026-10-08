@@ -42,6 +42,8 @@ pub struct Eval<'p> {
     pub pw_adds: Vec<(u64, BindId)>,
     /// (the supply-chain model) (key of a parameter, the keys of the path of a file it is written to, where)
     pub pf_adds: Vec<(u64, Vec<PyStr>, u32)>,
+    /// (the supply-chain model) the value a method call is made on, for the next apply: its receiver (B-3)
+    pub recv_val: Option<V>,
 }
 
 /// The changes a reading made to summaries: fid -> (returned request data
@@ -77,6 +79,7 @@ impl<'p> Eval<'p> {
             ancestors,
             pw_adds: Vec::new(),
             pf_adds: Vec::new(),
+            recv_val: None,
         }
     }
 
@@ -762,6 +765,8 @@ impl<'p> Eval<'p> {
                 Some(b) => Ok(self.read(b)),
             },
             Kind::Literal if self.p.cfg.supply.is_some() => Ok(self.sc_literal(e)),
+            // (`this` in a method of a class made in several places: its receiver, B-3)
+            Kind::ThisExpression if self.p.cfg.supply.is_some() => Ok(self.sc_this_value(scope)),
             Kind::Literal | Kind::ThisExpression | Kind::Super | Kind::MetaProperty => Ok(V::empty()),
             Kind::TemplateLiteral => {
                 let exprs = self.a().list(e, B).to_vec();
@@ -1516,6 +1521,9 @@ impl<'p> Eval<'p> {
     /// when request data arrives; the reach of the caller's parameters when
     /// they do) and what they return.
     pub(super) fn apply(&mut self, node: NodeId, fids: &[FnId], args: &[V], spread: isize, line: u32, ctor: bool) -> V {
+        // (the value a method is called on: the sinks it reaches through its receiver, `this`, are given it; what
+        // it returns or keeps of `this` stays with B-1's instance (sc_call), B-3)
+        let recv = self.recv_val.take().unwrap_or_else(V::empty);
         let mut out = V::empty();
         // (the supply-chain model: what the script's wrappers of exec print)
         let mut wrapped = V::empty();
@@ -1544,7 +1552,7 @@ impl<'p> Eval<'p> {
             let reach: Vec<(usize, BTreeMap<u8, Entry>)> =
                 self.p.fns[fid as usize].reach.iter().map(|(&i, t)| (i, t.clone())).collect();
             for (i, table) in reach {
-                let t = bound(args, spread, rest, i);
+                let t = bound_or_recv(args, spread, rest, i, &recv);
                 if !t.tainted() {
                     // (the supply-chain model: a constant command line given the script's
                     // wrapper of exec, a constant name its getEnv())
@@ -1655,6 +1663,9 @@ impl<'p> Eval<'p> {
                 self.p.fns[fid as usize].param_writes.iter().map(|(&i, bs)| (i, bs.iter().copied().collect())).collect();
             let outside = !writes.is_empty() && self.sc_on_instance(node);
             for (i, binds) in writes {
+                if i == RECV_INDEX {
+                    continue; // (what a method keeps of its receiver stays with B-1's instance, B-3)
+                }
                 let t = bound(args, spread, rest, i);
                 if t.tainted() {
                     for b in binds {
@@ -1670,6 +1681,9 @@ impl<'p> Eval<'p> {
                 let files: Vec<(usize, Vec<(Vec<PyStr>, u32)>)> =
                     self.p.fns[fid as usize].param_files.iter().map(|(&i, fs)| (i, fs.iter().cloned().collect())).collect();
                 for (i, fs) in files {
+                    if i == RECV_INDEX {
+                        continue;
+                    }
                     let t = bound(args, spread, rest, i);
                     if t.tainted() {
                         for (keys, at) in fs {
@@ -1697,6 +1711,9 @@ impl<'p> Eval<'p> {
             let ret_params: Vec<(usize, (u8, bool, bool))> = f.ret_params.iter().map(|(&i, &x)| (i, x)).collect();
             let ret_outer: Vec<(u64, (u8, bool))> = f.ret_outer.iter().map(|(&k, &x)| (k, x)).collect();
             for (i, (clean, built, member)) in ret_params {
+                if i == RECV_INDEX {
+                    continue; // (what a method returns of its receiver: B-1's instance gives it, sc_call)
+                }
                 let mut b = bound(args, spread, rest, i);
                 if b.tainted() {
                     b = b.plain();
@@ -1949,6 +1966,15 @@ impl<'p> Eval<'p> {
         }
         (changes, grown)
     }
+}
+
+/// The value parameter i of a function receives, or the receiver a method is called on (RECV_INDEX, B-3), for the
+/// sinks the parameter reaches.
+fn bound_or_recv(args: &[V], spread: isize, rest: isize, i: usize, recv: &V) -> V {
+    if i == RECV_INDEX {
+        return recv.clone();
+    }
+    bound(args, spread, rest, i)
 }
 
 /// The value parameter i of a function receives.

