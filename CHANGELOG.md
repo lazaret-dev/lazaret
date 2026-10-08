@@ -755,6 +755,13 @@ project is pre-1.0, so the 0.x API may still change.
 
 ### Fixed
 
+- **Code received in a callback and run from a variable outside it is followed (D-15; rule set 2.51.0).**
+  `let p; https.get(u, (res) => { let d = ''; res.on('data', (c) => { d += c; }); res.on('end', () => { p = d;
+  eval(p); }); })` had no finding on the JavaScript tree, which answers for a `.js` file (the text detector found
+  it): what `https.get`'s callback was given reached the variable of the `'end'` callback around it, and was lost
+  when put into one declared outside the callback, where the value cannot carry the callback's parameter. Such a
+  write is now in the callback's summary, as one of its own parameter is: when the callback is given the response,
+  the variable holds it. The send direction was followed already.
 - **What a JavaScript script puts into a container, the container holds (D-3; rule set 2.50.0).** The data flow on
   the JavaScript tree followed a value into an array's `push` and `unshift` alone, so an install script or code run
   at import that put the whole environment (or the host name, or a file's bytes) into a `FormData`, a `Map`, a `Set`

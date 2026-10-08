@@ -151,9 +151,18 @@ impl<'p> Eval<'p> {
         if shared {
             if self.p.cfg.supply.is_some() {
                 // (the supply-chain model: a parameter written to a closure's
-                // variable is in the function's summary, for its callers)
+                // variable is in the function's summary, for its callers; so is
+                // a parameter of a function around this one written to a
+                // variable declared outside that function, which the value
+                // written cannot carry there (D-15: `p = body` in the 'end'
+                // callback, `body` the response https.get's callback was given
+                // and `p` the module's))
+                let fid = self.fid;
+                let mine = self.p.scope_fns(fid);
+                let outer = self.p.scope_fns(bfid);
                 for &key in v.params.iter() {
-                    if (key / PARAM_BASE) as FnId == self.fid && bfid != self.fid {
+                    let owner = (key / PARAM_BASE) as FnId;
+                    if mine.contains(&owner) && !outer.contains(&owner) {
                         self.pw_adds.push((key, b));
                     }
                 }

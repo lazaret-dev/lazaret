@@ -2053,7 +2053,10 @@ declaration binds), and a URL literal whose host the data continues
 to follow them: a callback of anything but the script's own functions gets
 what the call holds (a read's callback what was read: `exec(c, (e, out) =>
 …)`); a parameter written to a closure's variable is in the function's
-summary (`res.on('data', d => body += d)`); `this.x` and a name no
+summary (`res.on('data', d => body += d)`), and so is a parameter of a
+function around it written to a variable declared outside that function
+(D-15, 0.1.9: `p = body` in the `'end'` callback, `p` the module's: the
+value written cannot carry the parameter there); `this.x` and a name no
 declaration binds are bindings of their own; what a container's `push`,
 `unshift`, `splice` (its items), `set`, `add`, `append` or `fill` is given
 the container holds, and so does the target of `Object.assign`,
