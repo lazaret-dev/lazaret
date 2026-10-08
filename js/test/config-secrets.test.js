@@ -112,6 +112,26 @@ test("a .netrc's password tokens (N-12) and crates.io's API tokens (R-4)", () =>
   }
 });
 
+test("npm's access tokens, Anthropic's and OpenAI's keys (V-2)", () => {
+  const found = (path, text) => scanConfigFile(path, text).map((i) => [i.rule, i.line]).sort();
+  // made up and built in pieces, so the source holds no token-shaped literal (GitHub's push protection knows these)
+  const keys = ["npm" + "_" + "a1B2".repeat(9), "sk-ant-" + "api03-" + "Ab1_-".repeat(18) + "Ab1" + "AA",
+    "sk-ant-" + "oat01-" + "Q7r_p".repeat(12), "sk-" + "a1B2C".repeat(4) + "T3Blbk" + "FJ" + "d3E4f".repeat(4),
+    "sk-" + "proj-" + "Ab1_-".repeat(14) + "Ab1_" + "T3Blbk" + "FJ" + "Cd2-_".repeat(14) + "Cd2-"];
+  for (const key of keys) {
+    for (const [path, text] of [[".env", `KEY=${key}\n`], ["ci.yml", `env:\n  K: ${key}\n`]]) {
+      const issues = scanConfigFile(path, text);
+      assert.ok(issues.some((i) => i.rule === "S-TOKEN"), `${path} ${key.slice(0, 12)}`);
+      assert.ok(!JSON.stringify(issues).includes(key), key.slice(0, 12));
+    }
+    assert.ok(!found(".env", `K=x${key}\n`).some(([r]) => r === "S-TOKEN"), key.slice(0, 12));
+  }
+  for (const text of ["npm" + "_" + "a".repeat(35), "sk-ant-" + "api03-" + "a".repeat(39), "sk-ant-" + "api03-...",
+    "sk-" + "a".repeat(48), "sk-" + "a".repeat(19) + "T3Blbk" + "FJ" + "a".repeat(20)]) {
+    assert.ok(!found(".env", `K=${text}\n`).some(([r]) => r === "S-TOKEN"), text);
+  }
+});
+
 test("linear time on hostile lines", () => {
   for (const line of ["a".repeat(2_000_000), "a=".repeat(1_000_000), 'k="'.repeat(700_000),
     "x://".repeat(500_000), "a:b@".repeat(500_000), ("-".repeat(127) + "=").repeat(15_000)]) {

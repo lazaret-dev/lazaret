@@ -468,19 +468,32 @@ TYPE_LABEL = {"VULN": "Vulnerability", "HOTSPOT": "Security Hotspot",
 # search, finditer, sub with a literal replacement).
 _JWT_ALT = r"eyJ[A-Za-z0-9_\-]{10,}\.eyJ[A-Za-z0-9_\-]{10,}"
 # crates.io's API tokens (0.1.9, R-4): "cio" and 32 letters and digits, a whole run of them (in a run of base64 or
-# a longer name, a "cio" is chance)
-_CRATES_TOKEN_ALT = r"(?<![A-Za-z0-9])cio[A-Za-z0-9]{32}(?![A-Za-z0-9])"
+# a longer name, a "cio" is chance). The whole-run alternatives start with their literal and look behind it: the same
+# language as a leading (?<!…), but Python's re then has a first character to look for (V-2: with one alternative led
+# by a look-behind, which re tries at every position, the alternatives' regex ran about five times slower).
+_CRATES_TOKEN_ALT = r"cio(?<![A-Za-z0-9]cio)[A-Za-z0-9]{32}(?![A-Za-z0-9])"
+# npm's access tokens (V-2): "npm_" and 36 letters and digits, a whole run of them, as crates.io's
+_NPM_TOKEN_ALT = r"npm_(?<![A-Za-z0-9]npm_)[A-Za-z0-9]{36}(?![A-Za-z0-9])"
+# Anthropic's keys and tokens (V-2): "sk-ant-", a kind of three to five letters and two digits (an API key's api03, an
+# admin key's admin01, an OAuth token's oat01…), "-" and 40 to 200 of [A-Za-z0-9_-], a whole run of them
+_ANTHROPIC_TOKEN_ALT = r"sk-ant-(?<![A-Za-z0-9_\-]sk-ant-)[a-z]{3,5}[0-9]{2}-[A-Za-z0-9_\-]{40,200}(?![A-Za-z0-9_\-])"
+# OpenAI's keys (V-2): "sk-", 20 to 90 of [A-Za-z0-9_-] (a project's, a service account's or an admin's key names its
+# kind first: "proj-", "svcacct-", "admin-"), "T3BlbkFJ" (the base64 of "OpenAI", which OpenAI's keys carry) and 20 to
+# 74 more, a whole run of them
+_OPENAI_TOKEN_ALT = r"sk-(?<![A-Za-z0-9_\-]sk-)[A-Za-z0-9_\-]{20,90}T3BlbkFJ[A-Za-z0-9_\-]{20,74}(?![A-Za-z0-9_\-])"
 _JWT_CHARS = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-")
 _JWT_RUN_RE = re.compile(r"[A-Za-z0-9_\-]*")
 _JWT_CANDIDATE_RE = re.compile(r"(?<![A-Za-z0-9_\-])(?=[A-Za-z0-9_\-]{13,}\.eyJ[A-Za-z0-9_\-]{10})")
 _TOKEN_ALTS = (       # S-TOKEN, in pattern order
     r"AKIA[0-9A-Z]{16}", r"gh[pousr]_[A-Za-z0-9]{36}", r"github_pat_[A-Za-z0-9]{22}_[A-Za-z0-9]{59}",
     r"xox[baprs]-[A-Za-z0-9-]{10,}", r"sk_live_[A-Za-z0-9]{16,}", r"AIza[0-9A-Za-z_\-]{35}",
-    r"-----BEGIN [A-Z ]*PRIVATE KEY-----", _CRATES_TOKEN_ALT, _JWT_ALT)
+    r"-----BEGIN [A-Z ]*PRIVATE KEY-----", _CRATES_TOKEN_ALT, _NPM_TOKEN_ALT, _ANTHROPIC_TOKEN_ALT, _OPENAI_TOKEN_ALT,
+    _JWT_ALT)
 _TOKEN_REDACT_ALTS = (    # the redaction list's first pattern (_SECRET_LINE_PATTERNS[0])
     r"AKIA[0-9A-Z]{16}", r"gh[pousr]_[A-Za-z0-9]{36,}", r"github_pat_[A-Za-z0-9_]{22,}",
     r"xox[baprs]-[A-Za-z0-9-]{10,}", r"sk_live_[A-Za-z0-9]{16,}", r"AIza[0-9A-Za-z_\-]{35}",
-    r"-----BEGIN [A-Z ]*PRIVATE KEY-----(?:.*?-----END [A-Z ]*PRIVATE KEY-----|.*)", _CRATES_TOKEN_ALT, _JWT_ALT)
+    r"-----BEGIN [A-Z ]*PRIVATE KEY-----(?:.*?-----END [A-Z ]*PRIVATE KEY-----|.*)", _CRATES_TOKEN_ALT, _NPM_TOKEN_ALT,
+    _ANTHROPIC_TOKEN_ALT, _OPENAI_TOKEN_ALT, _JWT_ALT)
 
 
 def _jwt_in_run(s, start, run_end):

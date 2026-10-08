@@ -142,11 +142,12 @@ class VerifyFindingsTests(Case):
         self.assertIn("Verified live: the provider accepts this GitHub token (the account: octocat). Revoke it now.", lines[2]["msg"])
         self.assertIn("Verified rejected: Slack says the token is not valid. Revoke it anyway: the history keeps it.", lines[3]["msg"])
         self.assertIn("Not verified: the provider failed (HTTP 503).", lines[4]["msg"])
-        (env,) = [i for i in res["issues"] if i["file"] == ".env"]
-        self.assertEqual((env["verified"]["outcome"], env["verified"]["provider"]), ("rejected", "anthropic"))
+        # the .env line's two findings (S-SECRET by the name, S-TOKEN by the format: V-2) are its one credential's
+        env = sorted((i["rule"], i["verified"]["outcome"], i["verified"]["provider"]) for i in res["issues"] if i["file"] == ".env")
+        self.assertEqual(env, [("S-SECRET", "rejected", "anthropic"), ("S-TOKEN", "rejected", "anthropic")])
         self.assertEqual(answers.hosts(), ["api.anthropic.com", "api.github.com", "api.stripe.com", "slack.com", "sts.amazonaws.com"])
         self.assertEqual(res["verification"]["credentials"], {"live": 2, "rejected": 2, "unknown": 1})
-        self.assertEqual(res["verification"]["findings"], {"live": 3, "rejected": 2, "unknown": 1, "notVerified": 1})
+        self.assertEqual(res["verification"]["findings"], {"live": 3, "rejected": 3, "unknown": 1, "notVerified": 1})
         self.assertEqual([(p["provider"], p["host"], p["credentials"]) for p in res["verification"]["providers"]],
                          [("anthropic", "api.anthropic.com", 1), ("github", "api.github.com", 1), ("slack", "slack.com", 1),
                           ("stripe", "api.stripe.com", 1), ("aws", "sts.amazonaws.com", 1)])
@@ -281,7 +282,7 @@ class CliTests(CliCase):
         self.assertEqual(verified, {2: "live", 3: "rejected", 4: "unknown", 5: "live", 6: "live"})
         results = json.loads(written["r.sarif"])["runs"][0]["results"]
         self.assertEqual(sorted(r["properties"]["verified"]["outcome"] for r in results if "properties" in r),
-                         ["live", "live", "live", "rejected", "rejected", "unknown"])
+                         ["live", "live", "live", "rejected", "rejected", "rejected", "unknown"])
         self.assertIn("Verified live", written["r.html"])
         self.assertIn('<p class="verified">Secrets verified  2 live, 2 rejected, 1 unknown (of 5 asked about)', written["r.html"])
         self.assertFalse(report["pass"])

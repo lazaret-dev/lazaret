@@ -99,6 +99,8 @@ MAX_MEMBER = _env_number("LAZARET_MAX_SOURCE_BYTES", 16_000_000)
 MAX_FILES = 20_000         # files per package (numpy's sdist alone has >4,000)
 SAMPLE = 8192              # header/entropy sample read from oversized files
 # Stored scans from another engine version are scanned again (has_scan).
+# 2.48: S-TOKEN reads npm's access tokens and OpenAI's and Anthropic's keys,
+#      which got only S-ENTROPY or S-SECRET (V-2)
 # 2.47: an archive's result says why it is INCOMPLETE (`incomplete`:
 #      INCOMPLETE_KINDS), which the guard blocks on by default (T-1)
 # 2.46: Node's names tried in its order, each under any case before the next
@@ -284,7 +286,7 @@ SAMPLE = 8192              # header/entropy sample read from oversized files
 #      entry points and hook targets, Python install scripts
 # 2.3: verdict tiers, decoded hex, install-script inspection; 2.2:
 #      verdict-integrity; 2.1: binary-artifact awareness
-ENGINE_VERSION = "2.47.0"
+ENGINE_VERSION = "2.48.0"
 
 # ---------------- The content memo (P-2a, registry/contentcache.py) ----------------
 # One per scan_package run: the engine answers once for content several of a

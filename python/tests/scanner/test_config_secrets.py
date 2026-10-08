@@ -266,6 +266,73 @@ class NetrcAndCratesTokens(unittest.TestCase):
                 self.assertNotIn("S-TOKEN", [r for r, _ in found("a.toml", text)])
 
 
+# V-2: npm's access tokens, Anthropic's keys and tokens and OpenAI's keys, made up and built in pieces so the source
+# holds no token-shaped literal (GitHub's push protection knows these formats)
+NPM = "npm" + "_" + "a1B2" * 9
+ANTHROPIC = "sk-ant-" + "api03-" + "Ab1_-" * 18 + "Ab1" + "AA"
+ANTHROPIC_ADMIN = "sk-ant-" + "admin01-" + "x1Y2z" * 18 + "x1Y" + "AA"
+ANTHROPIC_OAUTH = "sk-ant-" + "oat01-" + "Q7r_p" * 12
+OPENAI = "sk-" + "a1B2C" * 4 + "T3Blbk" + "FJ" + "d3E4f" * 4
+OPENAI_PROJECT = "sk-" + "proj-" + "Ab1_-" * 14 + "Ab1_" + "T3Blbk" + "FJ" + "Cd2-_" * 14 + "Cd2-"
+OPENAI_ADMIN = "sk-" + "admin-" + "Zz9y8" * 11 + "Zz9" + "T3Blbk" + "FJ" + "Yy8x7" * 11 + "Yy8"
+PROVIDER_KEYS = (NPM, ANTHROPIC, ANTHROPIC_ADMIN, ANTHROPIC_OAUTH, OPENAI, OPENAI_PROJECT, OPENAI_ADMIN)
+
+
+class ProviderKeyFormats(unittest.TestCase):
+    """V-2: S-TOKEN reads npm's access tokens ("npm_" and 36 letters and digits), Anthropic's keys and tokens
+    ("sk-ant-", a kind such as api03, admin01 or oat01, and 40 to 200 more) and OpenAI's keys ("sk-", the kind's name
+    if any, "T3BlbkFJ" in the middle), each a whole run of its characters. They got only S-ENTROPY, or S-SECRET by
+    a variable's name, before."""
+
+    def test_in_code_of_each_language(self):
+        for tok in PROVIDER_KEYS:
+            for path, text, lang in (("app.py", f'KEY = "{tok}"\n', "py"), ("app.js", f"const key = '{tok}';\n", "js"),
+                                     ("main.go", f'var k = "{tok}"\n', "go"),
+                                     ("src/lib.rs", f'const K: &str = "{tok}";\n', "rs")):
+                with self.subTest(tok=tok[:12], lang=lang):
+                    got = core.scan_file(path, text, lang)
+                    self.assertIn("S-TOKEN", [i["rule"] for i in got])
+                    self.assertNotIn(tok, json.dumps(got))
+
+    def test_in_config_files(self):
+        for tok in PROVIDER_KEYS:
+            for path, text in ((".env", f"KEY={tok}\n"), ("ci.yml", f"env:\n  K: {tok}\n"),
+                               (".npmrc", f"//registry.npmjs.org/:_authToken={tok}\n")):
+                with self.subTest(tok=tok[:12], path=path):
+                    self.assertIn("S-TOKEN", [r for r, _ in found(path, text)])
+                    self.assertNotIn(tok, json.dumps(core.scan_config_file(path, text)))
+
+    def test_each_is_the_whole_run(self):
+        p = core._TOKEN_PATTERN
+        for tok in PROVIDER_KEYS:
+            for text in (tok, f'"{tok}"', f"Bearer {tok};", f"KEY={tok}\n"):
+                with self.subTest(text=text[:20]):
+                    self.assertEqual(p.search(text).group(0), tok)
+
+    def test_what_is_not_one(self):
+        not_ones = [
+            "x" + NPM, NPM + "9", NPM[:-1], "npm" + "_" + "config_" + "a" * 36,   # a longer run, too short, a name
+            "_" + ANTHROPIC, "sk-ant-" + "api03-" + "a" * 39,                       # glued, too short
+            "sk-ant-" + "api03-" + "a" * 201, "sk-ant-" + "ap03-" + "a" * 50,     # too long, a kind too short
+            "sk-ant-" + "abcdef03-" + "a" * 50, "sk-ant-" + "api003-" + "a" * 50,  # a kind too long, three digits
+            "sk-ant-" + "api03-...", "sk-ant-" + "api03-xxxx",                      # documentation's samples
+            "x" + OPENAI, "sk-" + "a" * 19 + "T3Blbk" + "FJ" + "a" * 20,           # glued, the first part short
+            "sk-" + "a" * 20 + "T3Blbk" + "FJ" + "a" * 19, "sk-" + "a" * 91 + "T3Blbk" + "FJ" + "a" * 20,
+            "sk-" + "a" * 20 + "T3Blbk" + "FJ" + "a" * 75, "sk-" + "a" * 48,       # the last part long; no marker
+        ]
+        for text in not_ones:
+            with self.subTest(text=text[:24]):
+                self.assertIsNone(core._TOKEN_PATTERN.search(text))
+                self.assertNotIn("S-TOKEN", [r for r, _ in found(".env", f"K={text}\n")])
+
+    def test_redacted_on_another_findings_line(self):
+        for tok in PROVIDER_KEYS:
+            with self.subTest(tok=tok[:12]):
+                self.assertEqual(core._redact_context_line(f"x = '{tok}' # a"), "x = '[redacted]' # a")
+                got = core.scan_file("app.py", f'password = "hunter22hunter"\nk = ["{tok}"]\n', "py")
+                self.assertNotIn(tok, json.dumps(got))
+
+
 class ProjectScan(unittest.TestCase):
     def setUp(self):
         self.root = tree({

@@ -29,6 +29,18 @@ project is pre-1.0, so the 0.x API may still change.
   (`secrets.rs`, the pack's `_VERIFY_PROVIDERS`), one copy for both packages; the Python package's call goes over
   lazaret-net, the npm package's over Node's `https` (TLS 1.2 at least, `HTTPS_PROXY` through an http:// proxy's
   CONNECT tunnel), and the two report alike (`test_js_parity_verify`).
+- **S-TOKEN knows npm's access tokens and OpenAI's and Anthropic's keys (V-2).** `npm_` and 36 letters and digits;
+  Anthropic's `sk-ant-` keys and tokens (an API key's `api03`, an admin key's `admin01`, an OAuth token's `oat01`…,
+  then 40 to 200 characters); OpenAI's `sk-` keys (a project's `sk-proj-`, a service account's, an admin's or a
+  user's), which carry `T3BlbkFJ` in the middle; each a whole run of its characters. Such a key got only S-ENTROPY
+  (MAJOR), or S-SECRET by its variable's name, or nothing when neither applied; it is S-TOKEN (BLOCKER) now, in code
+  and in config files, and is redacted from every snippet line. With `--verify-secrets`, an npm token, an OpenAI key
+  and an Anthropic API key are then asked about (the admin keys and OAuth tokens are not: V-3). The npm package and
+  the dashboard read them the same way (`test_js_parity_tokens`, and the dashboard's twin, held to core's pattern
+  match by match). Measured first: none of the formats is in the benchmark's 945 releases, the popular set's 1,205,
+  Part F's 4,620 or the installed Python and npm packages. The whole-run alternatives now start with their literal
+  (crates.io's too), so Python's `re` has a first character to look for: its token pattern takes about half the time
+  it took, with the three formats added. Rule set 2.48.0.
 - **A workflow's actions are read at the commit they run (N-4).** `python -m
   lazaret.registry.actions` now scans each action's own code, the archive the runner fetches for
   the commit its `uses:` resolves to, as the runner runs it: a JavaScript action's `pre`, `main`

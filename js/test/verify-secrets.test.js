@@ -433,14 +433,15 @@ test("without the flag nothing is asked; with it, the note, the outcomes, and no
   assert.match(r.out, /Secrets verified {2}2 live, 2 rejected, 1 unknown \(of 5 asked about\); 1 secret finding no provider can be asked about/);
   const report = JSON.parse(r.written["r.json"]);
   assert.deepEqual(report.verification.credentials, { live: 2, rejected: 2, unknown: 1 });
-  assert.deepEqual(report.verification.findings, { live: 3, rejected: 2, unknown: 1, notVerified: 1 });
+  // (the .env line's two findings, S-SECRET by the name and S-TOKEN by the format, are its one credential's)
+  assert.deepEqual(report.verification.findings, { live: 3, rejected: 3, unknown: 1, notVerified: 1 });
   const verified = Object.fromEntries(report.issues.filter((i) => i.file === "app.py" && i.verified).map((i) => [i.line, i.verified.outcome]));
   assert.deepEqual(verified, { 2: LIVE, 3: REJECTED, 4: UNKNOWN, 5: LIVE, 6: LIVE });
   const github = report.issues.find((i) => i.file === "app.py" && i.line === 2);
   assert.ok(github.msg.endsWith("Verified live: the provider accepts this GitHub token (the account: octocat). Revoke it now."));
   const sarif = JSON.parse(r.written["r.sarif"]).runs[0].results;
   assert.deepEqual(sarif.filter((x) => x.properties).map((x) => x.properties.verified.outcome).sort(),
-    [LIVE, LIVE, LIVE, REJECTED, REJECTED, UNKNOWN]);
+    [LIVE, LIVE, LIVE, REJECTED, REJECTED, REJECTED, UNKNOWN]);
   assert.equal(report.pass, false);
   for (const text of [r.out, r.err, ...Object.values(r.written)]) {
     for (const value of VALUES) assert.ok(!text.includes(value), value);
