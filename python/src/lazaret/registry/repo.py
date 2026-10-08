@@ -99,6 +99,10 @@ MAX_MEMBER = _env_number("LAZARET_MAX_SOURCE_BYTES", 16_000_000)
 MAX_FILES = 20_000         # files per package (numpy's sdist alone has >4,000)
 SAMPLE = 8192              # header/entropy sample read from oversized files
 # Stored scans from another engine version are scanned again (has_scan).
+# 2.52: a package manager's install, run by code that runs when the
+#      package is loaded, of a package the release does not depend on is a
+#      strong import-time reason (D-12: crypto-hash-sdk's `npm install
+#      prettier-sdk` at import)
 # 2.51: what a JavaScript callback was given, put into a variable declared
 #      outside it from a callback within it, holds what it was given (D-15:
 #      a response body kept by https.get's callback, put into the module's
@@ -301,7 +305,7 @@ SAMPLE = 8192              # header/entropy sample read from oversized files
 #      entry points and hook targets, Python install scripts
 # 2.3: verdict tiers, decoded hex, install-script inspection; 2.2:
 #      verdict-integrity; 2.1: binary-artifact awareness
-ENGINE_VERSION = "2.51.0"
+ENGINE_VERSION = "2.52.0"
 
 # ---------------- The content memo (P-2a, registry/contentcache.py) ----------------
 # One per scan_package run: the engine answers once for content several of a
@@ -2610,6 +2614,7 @@ class _ArtifactScan:
         self.manifests = {}        # rel -> text (package.json, binding.gyp, pyproject.toml)
         self.entries = set()       # rels that run when installed / imported
         self._twins = None         # rel -> the members whose paths differ from it only by case (_case_twins)
+        self._declared = False     # the release's declared names (_declared_names; None: not known)
         self._fold_index = None    # (members counted, {case fold: member}) (_folds)
         self.vsix_main = set()     # vsix: the entries of `main` and `browser`
         self.vsix_special = {}     # vsix: rel -> when it runs, for an entry a contribution names (EG-5)
@@ -2768,17 +2773,62 @@ class _ArtifactScan:
             out[k] = _engine.scan_issues(rel, text, lang, calls[k][0], answer)
         return out
 
-    def _import_risks(self, items):
+    def _import_risks(self, items, declared=None):
         """engine.import_time_risks for [(text, lang)], once for each distinct
-        file (an answer the engine could not give is not kept)."""
+        file (an answer the engine could not give is not kept); `declared`,
+        the release's declared names, for its D-12 test (_declared_names)."""
         flags = {"budget": _engine.WORK_BUDGET}
+        if declared is not None:
+            flags["declared"] = hashlib.sha256("\n".join(declared).encode("utf-8", "surrogatepass")).hexdigest()
         keys = [self._key("import-risk", text, lang, flags) for text, lang in items]
         asked = dict(zip(keys, items))
 
         def compute(missing):
             return [_cache.Uncacheable(a) if _engine.unanswered(a) else a
-                    for a in _engine.import_time_risks([asked[key] for key in missing], texts=self.texts)]
+                    for a in _engine.import_time_risks([asked[key] for key in missing], texts=self.texts,
+                                                       declared=declared)]
         return self.memo.get_or_compute_many(keys, compute)
+
+    def _declared_names(self):
+        """The release's own name and the packages its manifest names, or None where they are not known (D-12: a
+        package manager's install of any other, in code that runs when the package is loaded, is a strong reason).
+        npm: package.json's name and its dependencies of every kind, bundled ones too; a wheel's METADATA and an
+        sdist's PKG-INFO: the Name and each Requires-Dist, an extra's too. An sdist whose PKG-INFO names no
+        dependency is not known (its setup.py may), nor is any other artifact's."""
+        if self._declared is not False:
+            return self._declared
+        out = None
+        if self.artifact == "npm":
+            text = self.manifests.get("package.json")
+            data, _problems = lazaret.load_manifest("package.json", text) if text else (None, None)
+            if isinstance(data, dict):
+                out = {data["name"]} if isinstance(data.get("name"), str) else set()
+                for key in ("dependencies", "devDependencies", "optionalDependencies", "peerDependencies"):
+                    if isinstance(data.get(key), dict):
+                        out.update(k for k in data[key] if isinstance(k, str))
+                for key in ("bundleDependencies", "bundledDependencies"):
+                    if isinstance(data.get(key), list):
+                        out.update(k for k in data[key] if isinstance(k, str))
+        elif self.artifact in ("wheel", "sdist"):
+            if self.artifact == "wheel":
+                rel = next((r for r in sorted(self.deferred) if r.count("/") == 1
+                            and r.endswith(".dist-info/METADATA")), None)
+            else:
+                rel = "PKG-INFO" if "PKG-INFO" in self.deferred else None
+            if rel is not None:
+                names, requires = set(), 0
+                for line in self.deferred[rel].decode("utf-8", "replace").split("\n"):
+                    if not line.strip():
+                        break                       # (the headers end at the first empty line)
+                    if line.startswith(("Name:", "Requires-Dist:")):
+                        requires += line.startswith("Requires-Dist:")
+                        name = re.split(r"[\s;\[(<>=!~@]", line.split(":", 1)[1].strip(), maxsplit=1)[0]
+                        if name:
+                            names.add(name)
+                if requires or self.artifact == "wheel":
+                    out = names
+        self._declared = sorted(out) if out is not None else None
+        return self._declared
 
     def _spawned_scripts(self, text, lang):
         """engine.spawned_scripts, once for each distinct script (a call the
@@ -3767,7 +3817,7 @@ class _ArtifactScan:
             text, lang = self.sources.get(rel, (None, None))
             if text and lang in ("js", "py"):
                 todo.append((rel, text, lang))
-        for rel, text, lang, risk in self._import_time_risks(todo):
+        for rel, text, lang, risk in self._import_time_risks(todo, declared=self._declared_names()):
             if _engine.unanswered(risk):
                 self._unanswered(rel, risk)
                 continue
@@ -3814,7 +3864,7 @@ class _ArtifactScan:
         self._use_time_code(set(files))
         self._cross_file_code()
 
-    def _import_time_risks(self, todo, short_batches=False):
+    def _import_time_risks(self, todo, short_batches=False, declared=None):
         """(rel, text, lang, import_time_risk's answer) for [(rel, text, lang)]
         (the text with its newlines normalized), in order, a batch at a time
         (engine.py: the engine reads a batch on threads; an answer it could
@@ -3834,7 +3884,7 @@ class _ArtifactScan:
             chunk = [(rel, lazaret.normalize_newlines(text), lang) for rel, text, lang in todo[start:end]]
             start = end
             self._deadline(chunk[0][0])
-            for (rel, text, lang), risk in zip(chunk, self._import_risks([(t, lg) for _r, t, lg in chunk])):
+            for (rel, text, lang), risk in zip(chunk, self._import_risks([(t, lg) for _r, t, lg in chunk], declared)):
                 yield rel, text, lang, risk
 
     def _unanswered(self, rel, exc):

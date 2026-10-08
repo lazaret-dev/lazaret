@@ -2047,10 +2047,12 @@ comprehensive, so weigh marginal value against FP risk):
   a second file whose function a computed destructuring key imports
   (main-util-validation, at use time), JS-Confuser's string concealing
   (panel-keylogger-sim), a package manager install run at import time
-  (crypto-hash-sdk), a `require()` of a package the manifest doesn't
-  declare (dotenv-express), and a file written from a request callback's
-  data, then run. The rest put their payload outside the release, are
-  proofs of concept, CTFs or empty samples, or ship a compiled binary.
+  (crypto-hash-sdk: SUSPICIOUS since D-12, an install at import time of a
+  package the manifest doesn't name), a `require()` of a package the
+  manifest doesn't declare (dotenv-express), and a file written from a
+  request callback's data, then run. The rest put their payload outside
+  the release, are proofs of concept, CTFs or empty samples, or ship a
+  compiled binary.
   - **Padding past the window**: in a text over `_LD_LONG` the flow
     follows a name only `_LD_NEAR` characters from where it was given data,
     and reads only `_DD_MAX_ASSIGNS` assignments, so a script padded past

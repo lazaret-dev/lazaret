@@ -205,13 +205,17 @@ def _batch(call, items, texts=None):
     return _answers([(call, _budget(args), text) for args, text in items], texts)
 
 
-def import_time_risks(items, texts=None):
+def import_time_risks(items, texts=None, declared=None):
     """[(text, lang)] -> the import-time test of each, (reasons, line), in
     order; an item the engine could not answer is the _native.NativeError it
-    stands for (see unanswered, error_issue). `texts`: the scan's Texts."""
+    stands for (see unanswered, error_issue). `texts`: the scan's Texts.
+    `declared`: the release's own name and the packages its manifest names,
+    when known: a package manager's install of any other is a reason (D-12)."""
     if not items:
         return []
-    answers = _batch("import_time_risk", [({"lang": lang} if lang else {}, text) for text, lang in items], texts)
+    extra = {} if declared is None else {"declared": list(declared)}
+    answers = _batch("import_time_risk", [({"lang": lang, **extra} if lang else dict(extra), text)
+                                          for text, lang in items], texts)
     return [a if unanswered(a) else (a[0], a[1]) for a in answers]
 
 

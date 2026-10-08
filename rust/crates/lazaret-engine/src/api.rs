@@ -766,7 +766,9 @@ fn dispatch(name: &str, args: &Value, text: &[u32]) -> Result<Value, CallError> 
             strs(&signs::install_script_risk_with(p, text, shell, command, lang))
         }
         "import_time_risk" => {
-            let (reasons, line) = signs::import_time_risk(p, text, lang);
+            // `declared`: the release's own name and the packages its manifest names (D-12), when the caller knows them
+            let declared = args.get("declared").map(|_| arg_strs(args, "declared"));
+            let (reasons, line) = signs::import_time_risk_with(p, text, lang, declared.as_deref());
             Value::Arr(vec![strs(&reasons), line.map(|l| Value::Int(l as i64)).unwrap_or(Value::Null)])
         }
         "import_time_severity" => Value::str(signs::import_time_severity(p, &arg_strs(args, "reasons"))),

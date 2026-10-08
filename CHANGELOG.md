@@ -41,6 +41,24 @@ project is pre-1.0, so the 0.x API may still change.
   Part F's 4,620 or the installed Python and npm packages. The whole-run alternatives now start with their literal
   (crates.io's too), so Python's `re` has a first character to look for: its token pattern takes about half the time
   it took, with the three formats added. Rule set 2.48.0.
+- **A package manager's install at import time, of a package the release does not depend on, is a strong reason (D-12;
+  rule set 2.52.0).** crypto-hash-sdk 1.0.1 ran `npm uninstall prettier-sdk && npm install prettier-sdk` when it was
+  imported, hidden (no output, no window, any error swallowed), to fetch its payload past every check of the release
+  itself; it was WARN. Code that runs when a package is loaded and has npm, pnpm, yarn, bun or pip (or
+  `python -m pip`, `uv pip`) install a package the release's manifest does not name is now SC-IMPORT-RISK CRITICAL ("…
+  runs when the package is loaded, and it installs packages the release does not depend on", with the packages),
+  whether the command line is a string or a program and its arguments as a list (`spawn('npm', ['i', 'x'])`,
+  `[sys.executable, '-m', 'pip', 'install', 'x']`). The manifest is npm's package.json (the release's own name and its
+  dependencies of every kind), a wheel's METADATA or an sdist's PKG-INFO (Name and Requires-Dist, an extra's too,
+  names compared as pip compares them); an sdist whose PKG-INFO names no dependency is not judged (its setup.py may).
+  Not at install time (@swc/core's postinstall installs @swc/wasm when its native binding fails) nor when the
+  package's code is called (a command line tool installs plugins on demand), and not a package manager installing
+  itself. In Python, read from its tokens, an install in a function's body counts only where the module runs the
+  function when it is loaded (calls it, hands it on as `atexit.register(f)` does, or decorates it with
+  `@atexit.register`), and not under `if __name__ == "__main__":`: litellm 1.103.0 installs supabase, sentry_sdk or
+  slack_bolt when one of its integrations is set up and the package is missing, and stays OK. With every install
+  counted, as if no manifest named a package, none of the 30,241 Python and JavaScript files of the packages installed
+  here has one. Registry and guard scans; a `--deps` scan, which reads installed packages, does not have it yet.
 - **A workflow's actions are read at the commit they run (N-4).** `python -m
   lazaret.registry.actions` now scans each action's own code, the archive the runner fetches for
   the commit its `uses:` resolves to, as the runner runs it: a JavaScript action's `pre`, `main`

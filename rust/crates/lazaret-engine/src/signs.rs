@@ -3764,7 +3764,33 @@ pub fn import_time_severity(p: &Pack, reasons: &[PyStr]) -> &'static str {
 
 /// core.import_time_risk: (reasons, 1-based line of the first sign).
 pub fn import_time_risk(p: &Pack, text: &[u32], lang: Option<&str>) -> (Vec<PyStr>, Option<usize>) {
+    import_time_risk_with(p, text, lang, None)
+}
+
+/// [`import_time_risk`], and with `declared` (the release's own name and the packages its manifest names, when the
+/// caller knows them) a package manager's install of a package that is none of them (D-12: crypto-hash-sdk 1.0.1
+/// ran `npm install prettier-sdk` when it was loaded). Only at import time: an installer's script fetches what the
+/// package declares as optional pieces (@swc/core's postinstall installs @swc/wasm), and a command line tool
+/// installs plugins when it is used.
+pub fn import_time_risk_with(p: &Pack, text: &[u32], lang: Option<&str>, declared: Option<&[PyStr]>) -> (Vec<PyStr>, Option<usize>) {
     let (mut reasons, mut line) = import_time_reading(p, text, lang);
+    if let Some(declared) = declared {
+        let mut found = undeclared_installs(p, text, declared, lang);
+        let mut note: PyStr = Vec::new();
+        if found.is_none() {
+            let view = decoded_view(p, text, lang);
+            if view != text {
+                let _gate = crate::textgate::open(&view);
+                found = undeclared_installs(p, &view, declared, lang);
+                note = p.text("_DV_NOTE");
+            }
+        }
+        if let Some((at, names)) = found {
+            let listed = pystr::join(&u(", "), &names.iter().map(|n| n.as_slice()).collect::<Vec<_>>());
+            reasons.push(cat(&[&p.text("_PM_REASON"), &u(" ("), head(&listed, 80), &u(")"), &note]));
+            line = line.or(Some(at));
+        }
+    }
     let view = decoded_view(p, text, lang);
     if view != text {
         let _gate = crate::textgate::open(&view);
@@ -3782,6 +3808,392 @@ pub fn import_time_risk(p: &Pack, text: &[u32], lang: Option<&str>) -> (Vec<PySt
         line = line.or(Some(sa));
     }
     (reasons, line)
+}
+
+/// The packages a package manager is asked to install in the command lines a text hands an exec call (a command
+/// line, or a program and its arguments as a list: `spawn('npm', ['i', 'x'])`, `[sys.executable, '-m', 'pip',
+/// 'install', 'x']`) that are none of `declared` nor a package manager itself: (the 1-based line of the first, the
+/// packages as written, without versions). A name the text builds is not one. In Python, an install in a function's
+/// body is not run when the module is loaded, unless the module runs that function when it is loaded ([`PyLoad`]):
+/// litellm installs an integration's package when the integration is set up, onnxruntime's whisper helper
+/// `datasets` when a method needs it (the benchmark's benign litellm was SUSPICIOUS when they counted).
+fn undeclared_installs(p: &Pack, text: &[u32], declared: &[PyStr], lang: Option<&str>) -> Option<(usize, Vec<PyStr>)> {
+    if !p.needles("_PM_NEEDLES").any_in(text) {
+        return None;
+    }
+    let mut lines = crate::shell::exec_command_lines(p, text);
+    for m in p.re("_PM_ARGV_RE").finditer(text) {
+        let mut words: Vec<PyStr> = Vec::new();
+        if let Some(prog) = m.name("prog") {
+            words.push(argv_word(prog));
+        }
+        for item in pystr::split_char(m.name("items").unwrap_or(&[]), c(',')) {
+            words.push(argv_word(pystr::strip(item)));
+        }
+        lines.push((m.start(), pystr::join(&u(" "), &words.iter().map(|w| w.as_slice()).collect::<Vec<_>>())));
+    }
+    let npm_declared: HashSet<PyStr> = declared.iter().map(|d| pystr::lower(d)).collect();
+    let pip_declared: HashSet<PyStr> = declared.iter().map(|d| pip_canonical(d)).collect();
+    let own = p.strs("_PM_SELF");
+    let mut first: Option<usize> = None;
+    let mut out: Vec<PyStr> = Vec::new();
+    let load = if lang == Some("py") && !lines.is_empty() { Some(PyLoad::read(text)) } else { None };
+    for (at, cmd) in lines {
+        let runs = match &load {
+            None => true,
+            Some(Some(load)) => load.runs(at),
+            Some(None) => py_runs_at_load(text, at),
+        };
+        if !runs {
+            continue;
+        }
+        for (spec, pip) in installed_packages(p, &cmd) {
+            let known = if pip { pip_declared.contains(&pip_canonical(&spec)) } else { npm_declared.contains(&pystr::lower(&spec)) };
+            if known || own.iter().any(|o| *o == pystr::lower(&spec)) || out.contains(&spec) {
+                continue;
+            }
+            first = first.or(Some(line_of(text, at)));
+            out.push(spec);
+        }
+    }
+    first.map(|l| (l, out))
+}
+
+/// Python: what of a module does not run when the module is loaded, read from its tokens (so a string's lines, a
+/// comment and the lines inside brackets are not lines of the module's): the body of a function, and the module's
+/// `if __name__ == '__main__':` block (its `else:` runs). A function of the module's own (not a method nor a function
+/// within a function) runs when the module refers to it where the module runs when loaded: calls it (`_setup()`),
+/// hands it on (`atexit.register(_setup)`, `Thread(target=_setup).start()`), or decorates it with
+/// `@atexit.register`.
+struct PyLoad {
+    /// each span [start, end) that does not run when loaded, with the name of the module's own function whose body
+    /// it is (None: a method's, a function's within a function, the `__main__` block)
+    lazy: Vec<(usize, usize, Option<PyStr>)>,
+    /// the names the module refers to where it runs when loaded, and the functions `@atexit.register` decorates
+    loaded: HashSet<PyStr>,
+}
+
+impl PyLoad {
+    /// None when the tokenizer refuses the text (Python does not load it either; [`py_runs_at_load`] decides).
+    fn read(text: &[u32]) -> Option<PyLoad> {
+        use crate::pyparse::lexer::{self as pl, T};
+        let lexed = pl::tokenize_with(text, true).ok()?;
+        if lexed.fail.is_some() {
+            return None;
+        }
+        let toks = &lexed.toks;
+        fn tok_word<'a>(text: &'a [u32], toks: &[pl::Tok], k: usize) -> &'a [u32] {
+            toks.get(k).map_or(&[][..], |t| &text[(t.s as usize).min(text.len())..(t.e as usize).min(text.len())])
+        }
+        let word = |k: usize| tok_word(text, toks, k);
+        let op = |k: usize, o: u8| toks.get(k).is_some_and(|t| t.t == T::Op && t.k == o);
+        let kw = |k: usize, w: u8| toks.get(k).is_some_and(|t| t.t == T::Kw && t.k == w);
+        let name = |k: usize, n: &str| toks.get(k).is_some_and(|t| t.t == T::Name) && pystr::eq(word(k), n);
+        let main = |k: usize| toks.get(k).is_some_and(|t| t.t == T::Str) && (pystr::eq(word(k), "'__main__'") || pystr::eq(word(k), "\"__main__\""));
+        // the blocks open: what opened each (0 another statement, 1 a class, 2 a function of the module's own,
+        // 3 another function, 4 the `__main__` block), the function's name, where its body starts
+        let mut open: Vec<(u8, Option<PyStr>, usize)> = Vec::new();
+        let mut lazy: Vec<(usize, usize, Option<PyStr>)> = Vec::new();
+        let mut refs: Vec<(PyStr, usize)> = Vec::new();
+        let mut loaded: HashSet<PyStr> = HashSet::new();
+        let mut head: (u8, Option<PyStr>) = (0, None); // the logical line's, when it opens a block
+        let mut pending: (u8, Option<PyStr>) = (0, None); // the header whose block the next INDENT opens
+        let mut colon: Option<usize> = None; // the header's colon
+        let mut starts = true; // the next token starts a logical line
+        let mut atexit = false; // `@atexit.register` decorates the next `def`
+        let mut depth = 0usize;
+        for k in 0..toks.len() {
+            let t = toks[k];
+            match t.t {
+                T::Newline => {
+                    if let Some(at) = colon {
+                        if at + 1 == k {
+                            pending = head.clone();
+                        } else if head.0 >= 2 {
+                            // (a body on the header's line: `def f(): os.system(…)`)
+                            lazy.push((toks[at].e as usize, t.s as usize, if head.0 == 2 { head.1.clone() } else { None }));
+                        }
+                    }
+                    head = (0, None);
+                    colon = None;
+                    depth = 0;
+                    starts = true;
+                }
+                T::Indent => {
+                    let (kind, name) = std::mem::take(&mut pending);
+                    open.push((kind, name, t.s as usize));
+                }
+                T::Dedent => {
+                    if let Some((kind, name, start)) = open.pop() {
+                        if kind >= 2 {
+                            lazy.push((start, t.s as usize, if kind == 2 { name } else { None }));
+                        }
+                    }
+                }
+                T::End | T::Error => {}
+                _ => {
+                    if starts {
+                        starts = false;
+                        pending = (0, None);
+                        let within = open.iter().any(|o| (1..=3).contains(&o.0));
+                        let def = if kw(k, pl::KW_DEF) {
+                            Some(k)
+                        } else if kw(k, pl::KW_ASYNC) && kw(k + 1, pl::KW_DEF) {
+                            Some(k + 1)
+                        } else {
+                            None
+                        };
+                        head = if let Some(d) = def {
+                            let fname = toks.get(d + 1).filter(|n| n.t == T::Name).map(|_| word(d + 1).to_vec());
+                            if within {
+                                (3, None)
+                            } else {
+                                if atexit {
+                                    loaded.extend(fname.clone());
+                                }
+                                (2, fname)
+                            }
+                        } else if kw(k, pl::KW_CLASS) {
+                            (1, None)
+                        } else if kw(k, pl::KW_IF)
+                            && !within
+                            && ((name(k + 1, "__name__") && op(k + 2, pl::EQEQUAL) && main(k + 3))
+                                || (main(k + 1) && op(k + 2, pl::EQEQUAL) && name(k + 3, "__name__")))
+                            && op(k + 4, pl::COLON)
+                        {
+                            (4, None)
+                        } else {
+                            (0, None)
+                        };
+                        if op(k, pl::AT) {
+                            atexit |= name(k + 1, "atexit") && op(k + 2, pl::DOT) && name(k + 3, "register");
+                        } else {
+                            atexit = false;
+                        }
+                    }
+                    if t.t == T::Op {
+                        if matches!(t.k, pl::LPAR | pl::LSQB | pl::LBRACE) {
+                            depth += 1;
+                        } else if matches!(t.k, pl::RPAR | pl::RSQB | pl::RBRACE) {
+                            depth = depth.saturating_sub(1);
+                        } else if t.k == pl::COLON && depth == 0 && head.0 != 0 && colon.is_none() {
+                            colon = Some(k);
+                        }
+                    }
+                    if t.t == T::Name && !(k > 0 && (op(k - 1, pl::DOT) || kw(k - 1, pl::KW_DEF) || kw(k - 1, pl::KW_CLASS))) {
+                        refs.push((word(k).to_vec(), t.s as usize));
+                    }
+                }
+            }
+        }
+        for (n, at) in refs {
+            if !lazy.iter().any(|&(s, e, _)| s <= at && at < e) {
+                loaded.insert(n);
+            }
+        }
+        Some(PyLoad { lazy, loaded })
+    }
+
+    /// Does the statement at `at` run when the module is loaded?
+    fn runs(&self, at: usize) -> bool {
+        let mut own: Option<&PyStr> = None;
+        for (s, e, name) in &self.lazy {
+            if *s <= at && at < *e {
+                match name {
+                    None => return false,
+                    Some(n) => own = Some(n),
+                }
+            }
+        }
+        own.map_or(true, |n| self.loaded.contains(n))
+    }
+}
+
+/// [`PyLoad`] read by indentation, for a text the tokenizer refuses: each line above that is less indented than
+/// the one below it opens the block around it (a line a closing bracket starts closes a statement's brackets: a
+/// signature's `):`); a module's own function runs where the module calls it at its top level.
+fn py_runs_at_load(text: &[u32], at: usize) -> bool {
+    let indent = |line: &[u32]| line.iter().take_while(|&&ch| ch == c(' ') || ch == c('\t')).count();
+    let start = pystr::rfind_char(text, c('\n'), 0, at).map_or(0, |k| k + 1);
+    let mut want = indent(pystr::sub(text, start, at));
+    let mut end = start;
+    while want > 0 && end > 0 {
+        let from = pystr::rfind_char(text, c('\n'), 0, end - 1).map_or(0, |k| k + 1);
+        let line = pystr::sub(text, from, end - 1);
+        end = from;
+        let ind = indent(line);
+        let code = &line[ind..];
+        if code.is_empty() || code[0] == c('#') || code[0] == c(')') || code[0] == c(']') || code[0] == c('}') || ind >= want {
+            continue;
+        }
+        want = ind;
+        let def = if pystr::starts_with(code, "def ") {
+            Some(&code[4..])
+        } else if pystr::starts_with(code, "async def ") {
+            Some(&code[10..])
+        } else {
+            None
+        };
+        if let Some(rest) = def {
+            let name: PyStr = pystr::lstrip(rest).iter().take_while(|&&ch| ch == c('_') || pystr::is_alnum(ch)).copied().collect();
+            return ind == 0 && !name.is_empty() && py_module_calls(text, &name);
+        }
+        // (a script's own block runs when it is run, not when it is imported)
+        if ind == 0 && pystr::starts_with(code, "if __name__") {
+            return false;
+        }
+    }
+    true
+}
+
+/// Does a line of the module's own (not indented, not a definition) call `name`?
+fn py_module_calls(text: &[u32], name: &[u32]) -> bool {
+    let mut call = name.to_vec();
+    call.push(c('('));
+    pystr::split_char(text, c('\n')).iter().any(|line| {
+        line.first().is_some_and(|&ch| ch != c(' ') && ch != c('\t') && ch != c('#'))
+            && !pystr::starts_with(line, "def ")
+            && !pystr::starts_with(line, "async def ")
+            && !pystr::starts_with(line, "class ")
+            && pystr::find(line, &call, 0).is_some_and(|k| k == 0 || !(line[k - 1] == c('_') || line[k - 1] == c('.') || pystr::is_alnum(line[k - 1])))
+    })
+}
+
+/// An item of a list of a program's arguments, as the command line holds it: a literal's text; the interpreter's
+/// own name for `sys.executable` and `process.execPath`; `?` for anything else (a name the text builds).
+fn argv_word(item: &[u32]) -> PyStr {
+    let item = pystr::strip(item);
+    if item.len() >= 2 {
+        let (a, b) = (item[0], item[item.len() - 1]);
+        if a == b && (a == c('\'') || a == c('"') || a == c('`')) && !item[1..item.len() - 1].contains(&a) {
+            return item[1..item.len() - 1].to_vec();
+        }
+    }
+    if pystr::eq(item, "sys.executable") {
+        return u("python");
+    }
+    if pystr::eq(item, "process.execPath") {
+        return u("node");
+    }
+    u("?")
+}
+
+/// PEP 503's normalized name: lower case, each run of `-`, `_` and `.` one `-`.
+fn pip_canonical(name: &[u32]) -> PyStr {
+    let mut out: PyStr = Vec::new();
+    for &ch in pystr::lower(name).iter() {
+        if ch == c('-') || ch == c('_') || ch == c('.') {
+            if out.last() != Some(&c('-')) {
+                out.push(c('-'));
+            }
+        } else {
+            out.push(ch);
+        }
+    }
+    out
+}
+
+/// The packages a command line asks a package manager to install, each (as written without its version or
+/// extras, read as pip's): npm's, pnpm's, yarn's, bun's `install`, `i` and `add` (and npm's other spellings of
+/// install); pip's `install`, run as pip or as `python -m pip`, and uv's `pip install`. A local path is not one;
+/// a URL or a git source is, as written.
+fn installed_packages(p: &Pack, cmd: &[u32]) -> Vec<(PyStr, bool)> {
+    let managers = p.strs("_PM_JS_MANAGERS");
+    let installs = p.strs("_PM_INSTALL_WORDS");
+    let npm_values = p.strs("_PM_NPM_VALUE_OPTIONS");
+    let pip_values = p.strs("_PM_PIP_VALUE_OPTIONS");
+    let mut out: Vec<(PyStr, bool)> = Vec::new();
+    for command in crate::shell::sh_parse(p, cmd) {
+        let (pi, name, _) = crate::shell::sh_program(p, &command);
+        let Some(pi) = pi else { continue };
+        let name = if pystr::ends_with(&name, ".cmd") { name[..name.len() - 4].to_vec() } else { name };
+        let mut args: &[PyStr] = &command.words[pi + 1..];
+        let pip = if managers.iter().any(|m| *m == name) {
+            false
+        } else if p.re("_PM_PIP_RE").fullmatch(&name).is_some() {
+            true
+        } else if p.re("_PYTHON_NAME_RE").match_(&name).is_some() && args.len() >= 2 && pystr::eq(&args[0], "-m") && p.re("_PM_PIP_RE").fullmatch(&args[1]).is_some() {
+            args = &args[2..];
+            true
+        } else if pystr::eq(&name, "uv") && args.first().is_some_and(|a| pystr::eq(a, "pip")) {
+            args = &args[1..];
+            true
+        } else {
+            continue;
+        };
+        let values = if pip { pip_values } else { npm_values };
+        let mut sub: Option<PyStr> = None;
+        let mut k = 0;
+        while k < args.len() {
+            let a = &args[k];
+            k += 1;
+            if pystr::starts_with(a, "-") {
+                if values.iter().any(|v| *v == *a) {
+                    k += 1; // (its value)
+                }
+                continue;
+            }
+            match &sub {
+                None => {
+                    // (`yarn global add x`)
+                    if !pip && pystr::eq(a, "global") {
+                        continue;
+                    }
+                    sub = Some(a.clone());
+                    let wanted = if pip { pystr::eq(a, "install") } else { installs.iter().any(|w| *w == *a) };
+                    if !wanted {
+                        break;
+                    }
+                }
+                Some(_) => {
+                    if let Some(spec) = if pip { pip_spec(a) } else { npm_spec(a) } {
+                        out.push((spec, pip));
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
+/// The package an npm spec names: `@scope/name@1.2` the scoped name, `name@^1` the name; a local path is none.
+fn npm_spec(spec: &[u32]) -> Option<PyStr> {
+    if spec.is_empty() || pystr::eq(spec, "?") || spec.contains(&2) || [".", "/", "~"].iter().any(|s| pystr::starts_with(spec, s)) || pystr::starts_with(spec, "file:") {
+        return None;
+    }
+    if pystr::contains(spec, "://") || pystr::contains(spec, ":") {
+        return Some(spec.to_vec()); // a URL, a git source, an alias (`npm:x`): as written
+    }
+    let from = if spec[0] == c('@') { 1 } else { 0 };
+    let end = spec[from..].iter().position(|&x| x == c('@')).map(|i| i + from).unwrap_or(spec.len());
+    let name = &spec[..end];
+    if name.is_empty() || name == [c('@')] {
+        None
+    } else {
+        Some(name.to_vec())
+    }
+}
+
+/// The package a pip requirement names, without its extras, version or marker; a local path or an archive file is
+/// none; a URL is, as written.
+fn pip_spec(spec: &[u32]) -> Option<PyStr> {
+    if spec.is_empty() || pystr::eq(spec, "?") || spec.contains(&2) || [".", "/", "~"].iter().any(|s| pystr::starts_with(spec, s)) {
+        return None;
+    }
+    if pystr::contains(spec, "://") {
+        return Some(spec.to_vec());
+    }
+    let lowered = pystr::lower(spec);
+    if [".whl", ".tar.gz", ".zip", ".tgz", ".tar.bz2"].iter().any(|e| pystr::ends_with(&lowered, e)) || pystr::contains(spec, "/") {
+        return None;
+    }
+    let end = spec.iter().position(|&x| "[=<>!~;@ ".chars().any(|ch| x == ch as u32)).unwrap_or(spec.len());
+    let name = &spec[..end];
+    if name.is_empty() {
+        None
+    } else {
+        Some(name.to_vec())
+    }
 }
 
 fn import_time_reading(p: &Pack, text: &[u32], lang: Option<&str>) -> (Vec<PyStr>, Option<usize>) {
@@ -4163,4 +4575,101 @@ fn import_time_risk_of(p: &Pack, text: &[u32], lang: Option<&str>, model: Option
         line = line.or(Some(line_of(text, at)));
     }
     (reasons, line)
+}
+
+#[cfg(test)]
+mod package_install_tests {
+    use super::*;
+    use crate::pack;
+
+    fn cps(s: &str) -> Vec<u32> {
+        s.chars().map(|c| c as u32).collect()
+    }
+
+    fn installs(cmd: &str) -> Vec<(String, bool)> {
+        installed_packages(&pack::current(), &cps(cmd)).into_iter().map(|(n, pip)| (pystr::to_string(&n), pip)).collect()
+    }
+
+    fn undeclared(text: &str, declared: &[&str]) -> Option<(usize, Vec<String>)> {
+        let declared: Vec<PyStr> = declared.iter().map(|d| cps(d)).collect();
+        let lang = if text.contains("require(") || text.contains("import {") { "js" } else { "py" };
+        undeclared_installs(&pack::current(), &cps(text), &declared, Some(lang))
+            .map(|(line, names)| (line, names.iter().map(|n| pystr::to_string(n)).collect()))
+    }
+
+    #[test]
+    fn the_packages_a_command_line_installs() {
+        let npm = |names: &[&str]| names.iter().map(|n| (n.to_string(), false)).collect::<Vec<_>>();
+        let pip = |names: &[&str]| names.iter().map(|n| (n.to_string(), true)).collect::<Vec<_>>();
+        assert_eq!(installs("npm uninstall prettier-sdk && npm install prettier-sdk"), npm(&["prettier-sdk"]));
+        assert_eq!(installs("npm i -g --registry https://r.invalid x@1.2.3 @s/y@^2 z"), npm(&["x", "@s/y", "z"]));
+        assert_eq!(installs("yarn global add x; pnpm add -D y; bun i z; cnpm install w"), npm(&["x", "y", "z", "w"]));
+        assert_eq!(installs("npm install ./local ../up /abs file:x"), npm(&[]));
+        assert_eq!(installs("npm install github:u/r https://h.invalid/x.tgz"), npm(&["github:u/r", "https://h.invalid/x.tgz"]));
+        assert_eq!(installs("npm install"), npm(&[]));
+        assert_eq!(installs("npm run build && npm test"), npm(&[]));
+        assert_eq!(installs("pip install requests==2.0 'x[extra]>=1' -r req.txt -e . --index-url https://i.invalid y"),
+                   pip(&["requests", "x", "y"]));
+        assert_eq!(installs("python3 -m pip install --upgrade z"), pip(&["z"]));
+        assert_eq!(installs("uv pip install w; pip3.11 install v"), pip(&["w", "v"]));
+        assert_eq!(installs("pip install ./dist/x-1.0.whl x.tar.gz"), pip(&[]));
+        assert_eq!(installs("pip download x; pip show y"), pip(&[]));
+    }
+
+    #[test]
+    fn an_install_of_what_the_release_does_not_declare() {
+        // crypto-hash-sdk 1.0.1's shape: at import, hidden, a package it does not depend on
+        let chs = "import { execSync } from 'child_process';\n(function () {\n  try {\n    \
+                   execSync('npm uninstall prettier-sdk && npm install prettier-sdk', { stdio: 'ignore', windowsHide: true });\n  \
+                   } catch (e) {}\n})();\n";
+        assert_eq!(undeclared(chs, &["crypto-hash-sdk", "child-process"]), Some((4, vec!["prettier-sdk".to_string()])));
+        assert_eq!(undeclared(chs, &["crypto-hash-sdk", "prettier-sdk"]), None);
+        // a program and its arguments as a list (Python's and Node's), a declared name by PEP 503's normalizing
+        let py = "import subprocess, sys\nsubprocess.check_call([sys.executable, '-m', 'pip', 'install', 'Evil_Pkg'])\n";
+        assert_eq!(undeclared(py, &["x"]), Some((2, vec!["Evil_Pkg".to_string()])));
+        assert_eq!(undeclared(py, &["x", "evil-pkg"]), None);
+        let js = "const { spawn } = require('child_process');\nspawn('npm', ['install', '--no-save', 'evil'], { stdio: 'ignore' });\n";
+        assert_eq!(undeclared(js, &["x"]), Some((2, vec!["evil".to_string()])));
+        // a package manager itself, a name the code builds, a command line that is only text: none
+        assert_eq!(undeclared("execSync('npm install -g npm@latest')\n", &["x"]), None);
+        assert_eq!(undeclared("spawn('npm', ['install', name])\n", &["x"]), None);
+        assert_eq!(undeclared("console.log('run npm install foo first')\n", &["x"]), None);
+        // a value the code builds (an f-string's hole)
+        assert_eq!(undeclared("import subprocess\nsubprocess.check_output(f'pip install {pkgs}', shell=True)\n", &["x"]), None);
+        // Python: in a function's body, not at load; unless the module calls it
+        let lazy = "import subprocess, sys\n\ndef _install():\n    subprocess.check_call([sys.executable, '-m', 'pip', 'install', 'supabase'])\n";
+        assert_eq!(undeclared(lazy, &["x"]), None);
+        assert_eq!(undeclared(&format!("{}\n_install()\n", lazy), &["x"]), Some((4, vec!["supabase".to_string()])));
+        let block = "import os, sys\ntry:\n    import y\nexcept ImportError:\n    os.system('pip install y-evil')\n";
+        assert_eq!(undeclared(block, &["x"]), Some((5, vec!["y-evil".to_string()])));
+        let method = "import os\nclass C:\n    def go(self):\n        os.system('pip install z')\n";
+        assert_eq!(undeclared(method, &["x"]), None);
+        let main = "import os\nif __name__ == '__main__':\n    os.system('pip install z')\n";
+        assert_eq!(undeclared(main, &["x"]), None);
+        // read from the tokens: a signature's lines and a docstring's are not the module's (onnxruntime's whisper
+        // helper installs `datasets` in a static method whose signature closes with `):`)
+        let signature = "import os\n\nclass H:\n    @staticmethod\n    def verify(\n        a,\n        b=1,\n    ):\n        \
+                         try:\n            import datasets\n        except Exception:\n            \
+                         cmd = 'pip install datasets'\n            os.system(cmd)\n";
+        assert_eq!(undeclared(signature, &["x"]), None);
+        let doc = "import os\n\ndef f():\n    \"\"\"Installs.\nAt the left edge.\n\"\"\"\n    os.system('pip install z')\n";
+        assert_eq!(undeclared(doc, &["x"]), None);
+        // nor do a string's lines hide a statement of the module's
+        let hidden = "import os\ntry:\n    s = '''\ndef fake():\n    '''\n    os.system('pip install z')\nexcept Exception:\n    pass\n";
+        assert_eq!(undeclared(hidden, &["x"]), Some((6, vec!["z".to_string()])));
+        // a function the module hands on, or that `@atexit.register` decorates, runs when it is loaded
+        for tail in ["atexit.register(_install)\n", "threading.Thread(target=_install).start()\n"] {
+            assert_eq!(undeclared(&format!("{}\n{}", lazy, tail), &["x"]), Some((4, vec!["supabase".to_string()])));
+        }
+        let decorated = lazy.replace("def _install", "@atexit.register\ndef _install");
+        assert_eq!(undeclared(&decorated, &["x"]), Some((5, vec!["supabase".to_string()])));
+        // a body on its header's line; the `__main__` block's `else:`
+        assert_eq!(undeclared("import os\ndef f(): os.system('pip install z')\n", &["x"]), None);
+        assert_eq!(undeclared("import os\ndef f(): os.system('pip install z')\nf()\n", &["x"]), Some((2, vec!["z".to_string()])));
+        let other = "import os\nif __name__ == '__main__':\n    pass\nelse:\n    os.system('pip install z')\n";
+        assert_eq!(undeclared(other, &["x"]), Some((5, vec!["z".to_string()])));
+        // what the tokenizer refuses is read by indentation (a signature's `):` closes no block there either)
+        let refused = format!("{}\nx = '\u{0}'\n", signature);
+        assert_eq!(undeclared(&refused, &["x"]), None);
+    }
 }

@@ -1,6 +1,6 @@
 {
  "format": 1,
- "rule_set": "2.51.0",
+ "rule_set": "2.52.0",
  "source": "lazaret.scanner.core, extracted by scripts/make_rust_tables.py \u2014 do not edit",
  "values": {
   "ALWAYS_PRUNE_DIRS": {
@@ -12759,6 +12759,138 @@
    "flags": "",
    "re": "^[A-Za-z_][A-Za-z0-9_]*$"
   },
+  "_PM_ARGV_RE": {
+   "flags": "",
+   "re": "\\b(?:spawn|spawnSync|execFile|execFileSync|execa|execaSync|run|call|check_call|check_output|Popen)\\s*\\(\\s*(?:(?P<prog>['\"`][^'\"`\\n]{1,100}['\"`]|sys\\.executable|process\\.execPath)\\s*,\\s*)?[\\[(](?P<items>[^\\[\\]()\\n]{0,2000})[\\])]"
+  },
+  "_PM_INSTALL_WORDS": {
+   "set": [
+    "add",
+    "i",
+    "in",
+    "ins",
+    "inst",
+    "insta",
+    "instal",
+    "install",
+    "isnt",
+    "isnta",
+    "isntal",
+    "isntall"
+   ]
+  },
+  "_PM_JS_MANAGERS": {
+   "set": [
+    "bun",
+    "cnpm",
+    "npm",
+    "pnpm",
+    "yarn"
+   ]
+  },
+  "_PM_NEEDLES": {
+   "list": [
+    {
+     "value": "bun"
+    },
+    {
+     "value": "npm"
+    },
+    {
+     "value": "pip"
+    },
+    {
+     "value": "pnpm"
+    },
+    {
+     "value": "yarn"
+    }
+   ]
+  },
+  "_PM_NPM_VALUE_OPTIONS": {
+   "set": [
+    "--before",
+    "--cache",
+    "--cwd",
+    "--dir",
+    "--filter",
+    "--globalconfig",
+    "--include",
+    "--install-strategy",
+    "--loglevel",
+    "--omit",
+    "--prefix",
+    "--registry",
+    "--save-prefix",
+    "--tag",
+    "--userconfig",
+    "--workspace",
+    "-C",
+    "-F",
+    "-w"
+   ]
+  },
+  "_PM_PIP_RE": {
+   "flags": "",
+   "re": "pip(?:3(?:\\.\\d+)?)?"
+  },
+  "_PM_PIP_VALUE_OPTIONS": {
+   "set": [
+    "--abi",
+    "--cache-dir",
+    "--cert",
+    "--client-cert",
+    "--config-settings",
+    "--constraint",
+    "--editable",
+    "--exists-action",
+    "--extra-index-url",
+    "--find-links",
+    "--global-option",
+    "--implementation",
+    "--index-url",
+    "--log",
+    "--platform",
+    "--prefix",
+    "--progress-bar",
+    "--proxy",
+    "--python",
+    "--python-version",
+    "--report",
+    "--requirement",
+    "--retries",
+    "--root",
+    "--src",
+    "--target",
+    "--timeout",
+    "--trusted-host",
+    "--upgrade-strategy",
+    "-C",
+    "-c",
+    "-e",
+    "-f",
+    "-i",
+    "-r",
+    "-t"
+   ]
+  },
+  "_PM_REASON": {
+   "value": "installs packages the release does not depend on"
+  },
+  "_PM_SELF": {
+   "set": [
+    "bun",
+    "cnpm",
+    "corepack",
+    "npm",
+    "pip",
+    "pnpm",
+    "setuptools",
+    "uv",
+    "wheel",
+    "yarn"
+   ]
+  },
   "_PRESENTATION_REPEAT_MAX": {
    "value": 4
   },
@@ -14834,6 +14966,9 @@
     },
     {
      "value": "pipes code it decodes into"
+    },
+    {
+     "value": "installs packages the release does not depend on"
     }
    ]
   },
