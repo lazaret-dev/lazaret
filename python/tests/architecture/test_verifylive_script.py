@@ -4,6 +4,7 @@ The tests never call a service. They check what the script does around the calls
 credentials it asks about (a made-up one for each provider, and the ones in the environment), what it says about each, that no
 credential is printed, and the exit status when an expectation does not hold."""
 
+import datetime
 import io
 import os
 import unittest
@@ -42,10 +43,12 @@ def run(argv, environ=None, verifier=None):
 class MadeUpTests(unittest.TestCase):
     def test_a_made_up_credential_is_in_the_format_of_every_provider_and_is_not_a_real_pattern_of_any_account(self):
         self.assertEqual(set(verifylive.MADE_UP), set(sv.provider_ids()))
-        v = sv.Verifier(lambda *a: None)
+        now = datetime.datetime(2026, 10, 3, 12, 0, tzinfo=datetime.timezone.utc)
         for pid, credential in verifylive.MADE_UP.items():
             with self.subTest(pid):
-                self.assertIsNotNone(v._parts(next(p for p in sv.PROVIDERS if p["id"] == pid), credential))
+                parts = sv.Verifier._parts(credential)
+                self.assertIsNotNone(parts)
+                sv.build_request(next(p for p in sv.PROVIDERS if p["id"] == pid), parts, now)    # (ValueError: not the format)
                 text = credential if isinstance(credential, str) else "".join(credential.values())
                 self.assertRegex(text.split("-")[-1].split("_")[-1].replace("AKIA", ""), r"^0+$")
 

@@ -148,7 +148,7 @@ rust/
   NOTICE                     the engine's notices, and what was CPython's (§11)
   LICENSE-UNICODE            the Unicode License v3, for generated/unicode13.rs and
                              pyparse/unidata.rs (§11)
-  crates/lazaret-engine/     #![forbid(unsafe_code)], no dependencies, no I/O
+  crates/lazaret-engine/     #![forbid(unsafe_code)], no I/O; one dependency, lazaret-verify (its SHA-256)
     rules/lazaret-rules.json the rule pack: the source of the rules (embedded; `pack.install` can
                              replace it)
     src/api.rs               the calls by name (JSON args + text -> JSON; `budget`); `batch` on
@@ -207,6 +207,12 @@ rust/
     src/taint.rs             project mode's intra-file taint (core.taint_scan, 0.1.9): sources,
                              sinks, sanitizers, guards, scopes, Flask views and route parameters;
                              a taint configuration's sources, sinks and sanitizers for one call
+    src/secrets.rs           live secret verification's table and logic (0.1.9, V-1 stage 2):
+                             the pack's _VERIFY_PROVIDERS read and checked; `secrets.identify`,
+                             `secrets.request` (a call that only authenticates; AWS's signed with
+                             Signature Version 4: HMAC over lazaret-verify's SHA-256),
+                             `secrets.judge` (live, rejected or unknown, why, whose); each package
+                             makes the call
     src/linear.rs            rule patterns sre runs in more than linear time on some lines,
                              matched by hand in linear time (SQL-DYNAMIC)
     src/findings.rs          mk_issue: texts, snippets, redaction (_SecretLiterals); cap_issues
@@ -303,6 +309,24 @@ does after a call that left the memory above 512 MB). Every call may carry
 take the next item from an atomic counter; each item has its own budget and
 `catch_unwind`; `batch`, `pack.*` and `texts.*` are refused inside a batch on
 threads; under WebAssembly a batch runs on one thread.
+
+Live secret verification (0.1.9, V-1 stage 2, John's decision 7; `src/secrets.rs`): the provider table is
+the pack's `_VERIFY_PROVIDERS` (checked when first read, by the rules `scripts/make_rust_tables.py --check`
+holds the pack to: `lazaret.scanner.secretverify.validate`). `secrets.providers` → `[{"id", "label", "host",
+"path", "parts"}]`; `secrets.identify` (the text) → the ids whose one-part pattern matches all of it;
+`secrets.request` `{"provider": id | "entry": {…}, "parts": {name: text}, "time": "YYYYMMDDTHHMMSSZ"}` →
+`{"method", "host", "path", "headers": [[name, value]], "secret_headers": [names], "body"}` or
+`{"refused": why}`; `secrets.judge` `{"provider": id | "answers": [rules], "status", "truncated", "secrets"}`
+with the body as the text, one code point a byte (at most 64 KiB) → `[outcome, why, who]`. The engine has
+no clock and no network: each package gives the time and makes the call. JSON in an answer is read as RFC
+8259 has it (a key's last value counts, as Python's json keeps it; NaN and Infinity are not numbers, which
+Python's json takes, so an answer holding one is unknown where stage 1's Python could read it live). The
+engine's JSON reader now refuses a number RFC 8259 does not allow (`01`, `1.`, `.5`), which nothing Lazaret
+writes holds. Held to stage 1's Python on 53,760 answers, 2,800 requests (AWS's signatures at random
+times among them) and 5,500 texts with no difference. One change from stage 1, on purpose: a part of the
+credential is looked for in all of the owner's name an answer gives before it is cut to 80 characters, and
+parts that overlap are one `[redacted]` (stage 1 looked in the first 320 characters, so a part over 240
+characters long that began in the first 80 kept its start).
 
 The text store (0.1.9, FE-1; `src/texts.rs`): `texts.put` with
 `{"lengths": [code points, …]}` and the texts one after another as the text

@@ -41,6 +41,7 @@ pub mod rsread;
 pub mod rxutil;
 pub mod scan;
 pub mod scanfile;
+pub mod secrets;
 pub mod shell;
 pub mod signs;
 pub mod strarr;

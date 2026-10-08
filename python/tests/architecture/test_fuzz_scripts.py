@@ -1157,11 +1157,17 @@ class VerificationPromisesAreLive(unittest.TestCase):
         short = b"github\nghp_short"
         aws = fuzz_targets.VERIFY_CREDENTIAL_SEEDS[10]
         run = lambda seed, *patches: self.promise("verify-credentials", seed, *patches)                       # noqa: E731
-        original_parts, original_verify, original_build = sv.Verifier._parts, sv.Verifier.verify, sv.build_request
-        accept_all = staticmethod(lambda provider, credential: {"secret": credential} if isinstance(credential, str) else dict(credential))
-        self.assertEqual(run(short, (sv.Verifier, "_parts", accept_all)), "verify-sent-a-credential-that-is-not-the-providers")
-        self.assertEqual(run(good, (sv.Verifier, "_parts", staticmethod(lambda provider, credential: None))), "verify-wrongly-refused")
-        self.assertEqual(run(aws, (sv.Verifier, "_parts", staticmethod(lambda provider, credential: None))), "verify-wrongly-refused")
+        original_verify, original_build = sv.Verifier.verify, sv.build_request
+
+        def lax(provider, parts, now):                    # (the format not held: the engine asked with patterns that take any text)
+            return original_build(dict(provider, parts={name: "[\\s\\S]+" for name in provider["parts"]}), parts, now)
+
+        def refusing(provider, parts, now):
+            raise ValueError(sv.NOT_THIS_FORMAT)
+        self.assertEqual(run(short, (sv, "build_request", lax)), "verify-sent-a-credential-that-is-not-the-providers")
+        for seed in (good, aws):
+            self.assertEqual(run(seed, (sv.Verifier, "_parts", staticmethod(lambda credential: None))), "verify-wrongly-refused")
+            self.assertEqual(run(seed, (sv, "build_request", refusing)), "verify-wrongly-refused")
         invented = lambda self, pid, credential: sv.Result(pid, "live", "x", None, 200)                       # noqa: E731
         self.assertEqual(run(short, (sv.Verifier, "verify", invented)), "verify-refused-is-unknown")
 

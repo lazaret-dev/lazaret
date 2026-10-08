@@ -1337,7 +1337,7 @@ VERIFY_SAMPLES = {
     "openai": "sk-proj-" + "a1" * 20, "anthropic": "sk-ant-api03-" + "Ab1_" * 10,
     "aws": {"id": "AKIAABCDEFGHIJKLMNOP", "secret": "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY"},
 }
-VERIFY_FIELDS = ("github", "slack", "stripe", "npm", "openai", "anthropic", "aws")        # (the order of secretverify_providers)
+VERIFY_FIELDS = ("github", "slack", "stripe", "npm", "openai", "anthropic", "aws")        # (the order of the pack's _VERIFY_PROVIDERS)
 
 
 def verify_answer(index, status, body, truncated=False):

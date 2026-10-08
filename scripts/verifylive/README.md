@@ -1,6 +1,6 @@
 # The manual live check of secret verification
 
-`verifylive.py` holds the provider table (`python/src/lazaret/scanner/secretverify_providers.py`) to the real services. It is the
+`verifylive.py` holds the provider table (the rule pack's `_VERIFY_PROVIDERS`, `rust/crates/lazaret-engine/rules/lazaret-rules.json`, which the engine reads) to the real services. It is the
 check to run before a release that ships `--verify-secrets`, and again when a provider changes its API. CI never runs it: the
 tests (`tests/scanner/test_secretverify*.py`) answer from a stub.
 

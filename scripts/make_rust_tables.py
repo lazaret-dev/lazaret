@@ -12,9 +12,11 @@
   them. Edit it by hand; this script writes it back in its canonical form
   (sorted keys, one space of indent, ASCII), and --check fails when it is
   not in that form, when its rule set is not the registry's ENGINE_VERSION,
-  when a pattern does not compile with Python's re, or when a value core
+  when a pattern does not compile with Python's re, when a value core
   still holds differs from the pack's (core keeps the few the Python side
-  reads itself: reasons the registry ranks, limits the walk applies).
+  reads itself: reasons the registry ranks, limits the walk applies), or
+  when live secret verification's provider table (_VERIFY_PROVIDERS) breaks
+  the rules of lazaret.scanner.secretverify.validate.
 
 * rust/crates/lazaret-engine/src/generated/unicode13.rs: the character data
   the engine reads source text with, from Unicode 13.0 (Python 3.10's
@@ -492,6 +494,13 @@ def check_pack(text):
                 problems.append(f"core.{name} differs from the pack's {name}: change both")
     if not shared:
         problems.append("no value of core was compared with the pack (the check is broken)")
+    # live secret verification's provider table (V-1): the rules of secretverify.validate, which the engine applies too
+    from lazaret.scanner import secretverify
+    table = data.get("values", {}).get(secretverify.TABLE)
+    try:
+        secretverify.validate(table.get("value") if isinstance(table, dict) else None)
+    except (ValueError, TypeError, AttributeError) as e:
+        problems.append(f"the pack's {secretverify.TABLE}: {e}")
     return problems
 
 

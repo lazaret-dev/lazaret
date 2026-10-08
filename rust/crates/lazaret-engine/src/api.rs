@@ -87,6 +87,8 @@ pub const CALLS: &[&str] = &[
     "texts.put", "texts.drop", "texts.info",
     // 0.1.9 (Q-1): project mode's passes one at a time (scan_file with dep false runs them all)
     "taint_scan", "functions",
+    // 0.1.9 (V-1 stage 2): live secret verification's table and logic (secrets.rs); each package makes the call
+    "secrets.providers", "secrets.identify", "secrets.request", "secrets.judge",
 ];
 
 fn dead_drop(v: Option<(usize, PyStr)>) -> Value {
@@ -529,6 +531,72 @@ fn dispatch(name: &str, args: &Value, text: &[u32]) -> Result<Value, CallError> 
             let mut found = Vec::new();
             crate::taint::scan(&ctx, &model, &mut found);
             Value::Arr(found.iter().map(|f| snippets.issue(f)).collect())
+        }
+        "secrets.providers" => {
+            // the table's providers: where each credential would go, for a report's notice before any call
+            let t = crate::secrets::table(p).as_ref().map_err(|m| CallError::BadArgs(format!("secrets.providers: {m}")))?;
+            Value::Arr(t.iter().map(|q| Value::obj(vec![
+                ("id", Value::str(&q.id)), ("label", Value::str(&q.label)), ("host", Value::str(&q.host)),
+                ("path", Value::str(&q.path)), ("parts", Value::Arr(q.part_names().into_iter().map(Value::str).collect())),
+            ])).collect())
+        }
+        "secrets.identify" => {
+            // the providers whose one-part pattern matches all of the text
+            let t = crate::secrets::table(p).as_ref().map_err(|m| CallError::BadArgs(format!("secrets.identify: {m}")))?;
+            Value::Arr(crate::secrets::identify(t, text).iter().map(|id| Value::str(id)).collect())
+        }
+        "secrets.request" => {
+            // {"provider": id (the pack's) | "entry": {…} (one of the caller's), "parts": {name: text}, "time":
+            // "YYYYMMDDTHHMMSSZ"} -> the request, or {"refused": why} when the parts are not the provider's format
+            let bad = |m: String| CallError::BadArgs(format!("secrets.request: {m}"));
+            let owned;
+            let q = match (args.get("entry"), args.get("provider")) {
+                (Some(entry), _) => {
+                    owned = crate::secrets::provider_of(entry).map_err(bad)?;
+                    &owned
+                }
+                (None, Some(Value::Str(id))) => crate::secrets::by_id(p, &crate::pystr::to_string(id)).map_err(bad)?,
+                _ => return Err(bad("no provider".into())),
+            };
+            let time = args.get("time").and_then(|t| t.as_string()).filter(|t| crate::secrets::is_amz_date(t))
+                .ok_or_else(|| bad("time is not YYYYMMDDTHHMMSSZ".into()))?;
+            let given = args.get("parts").and_then(|v| v.as_obj()).ok_or_else(|| bad("parts is not a mapping".into()))?;
+            // (a part that is not text is not this provider's format: nothing is sent)
+            let parts: Option<Vec<(String, Vec<u32>)>> =
+                given.iter().map(|(k, v)| v.as_str().map(|s| (crate::pystr::to_string(k), s.to_vec()))).collect();
+            match parts.ok_or(crate::secrets::NOT_THIS_FORMAT).and_then(|parts| crate::secrets::request(q, &parts, &time)) {
+                Ok(r) => Value::obj(vec![
+                    ("method", Value::str(&r.method)), ("host", Value::str(&r.host)), ("path", Value::str(&r.path)),
+                    ("headers", Value::Arr(r.headers.iter().map(|(n, v)| Value::Arr(vec![Value::str(n), Value::str(v)])).collect())),
+                    ("secret_headers", Value::Arr(r.secret_headers.iter().map(|n| Value::str(n)).collect())),
+                    ("body", r.body.as_deref().map_or(Value::Null, Value::str)),
+                ]),
+                Err(why) => Value::obj(vec![("refused", Value::str(why))]),
+            }
+        }
+        "secrets.judge" => {
+            // {"provider": id | "answers": [rules], "status": n, "truncated": bool, "secrets": [the credential's parts]}
+            // and the answer's body as the text, one code point a byte -> [outcome, why, who]
+            let bad = |m: String| CallError::BadArgs(format!("secrets.judge: {m}"));
+            let owned;
+            let rules: &[crate::secrets::Rule] = match (args.get("answers"), args.get("provider")) {
+                (Some(Value::Arr(answers)), _) => {
+                    owned = crate::secrets::rules_of(answers).map_err(bad)?;
+                    &owned
+                }
+                (None, Some(Value::Str(id))) => crate::secrets::by_id(p, &crate::pystr::to_string(id)).map_err(bad)?.rules(),
+                _ => return Err(bad("no provider".into())),
+            };
+            let status = args.get("status").and_then(|s| s.as_i64()).ok_or_else(|| bad("status is not a number".into()))?;
+            let truncated = matches!(args.get("truncated"), Some(Value::Bool(true)));
+            let secrets: Vec<Vec<u32>> = args.get("secrets").and_then(|s| s.as_arr()).unwrap_or(&[])
+                .iter().filter_map(|s| s.as_str().map(|s| s.to_vec())).collect();
+            if text.len() > crate::secrets::MAX_ANSWER_BYTES || text.iter().any(|&c| c > 0xFF) {
+                return Err(bad(format!("the body is at most {} bytes, one code point each", crate::secrets::MAX_ANSWER_BYTES)));
+            }
+            let body: Vec<u8> = text.iter().map(|&c| c as u8).collect();
+            let (outcome, why, who) = crate::secrets::judge(rules, status, &body, truncated, &secrets);
+            Value::Arr(vec![Value::str(outcome.as_str()), Value::Str(why), who.map_or(Value::Null, Value::Str)])
         }
         "functions" => {
             // core.extract_functions: [[name, line, length, complexity], …] of a Python or JavaScript file

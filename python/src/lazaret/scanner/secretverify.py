@@ -1,9 +1,9 @@
-"""Is this credential live? (0.1.9, V-1 stage 1)
+"""Is this credential live? (0.1.9, V-1)
 
 A secret found in a file is a finding of one severity. A secret the provider still accepts is the finding someone acts on first,
-and one it has revoked is the finding someone can close. This module asks the provider, with a call that only authenticates
-(`secretverify_providers`: GitHub's `GET /user`, Slack's `auth.test`, AWS STS's `GetCallerIdentity`, ...), and answers with one of
-three outcomes:
+and one it has revoked is the finding someone can close. This module asks the provider, with a call that only authenticates (the
+rule pack's `_VERIFY_PROVIDERS`: GitHub's `GET /user`, Slack's `auth.test`, AWS STS's `GetCallerIdentity`, ...), and answers with
+one of three outcomes:
 
 - `live`: the provider says the credential works.
 - `rejected`: the provider says it does not (revoked, expired, never valid). It is still a leak: the history keeps it.
@@ -25,33 +25,37 @@ three outcomes:
 - Hostile answers (huge, not UTF-8, not JSON, JSON nested to the stack's limit, a `who` of control characters) are `unknown` or
   read as text that is safe to print; nothing raises.
 
-This module is a mechanism: it is not called by a scan yet. Stage 2 (after 0.1.8 ships, with S-4) wires it to `lazaret scan
---verify-secrets`, off by default, never in `guard`, the registry auditor or the MCP server, and refused for `github:` and
-`gitlab:` targets unless the user says the repository is theirs.
+**The table and the logic are the engine's** (stage 2; John's decision 7, Oct 7: one copy for both packages): the providers are
+the rule pack's `_VERIFY_PROVIDERS` (rust/crates/lazaret-engine/rules/lazaret-rules.json), and which provider a credential is, the
+request that asks it (AWS's signed with Signature Version 4) and what its answer says are the engine's `secrets.identify`,
+`secrets.request` and `secrets.judge` (rust/crates/lazaret-engine/src/secrets.rs). This module keeps what is about a run (the
+cache, the budgets, the calls in flight) and makes the call (`secretverify_http`); `validate` is the table's rules, which
+`scripts/make_rust_tables.py --check` holds the pack to. Nothing calls it yet: `lazaret scan --verify-secrets` is stage 2's
+third step. Never in `guard`, the registry auditor or the MCP server.
 
-Standard library only; imports `sigv4` and `secretverify_http` of this package."""
+Imports the engine's calls (`_native`, `engine`) and `secretverify_http` of this package."""
 
 import collections
 import concurrent.futures
 import datetime
 import hashlib
-import json
 import re
 import threading
 import time
-import urllib.parse
 
+from . import _native, engine
 from . import secretverify_http as http
-from . import secretverify_providers as providers_data
-from . import sigv4
 
 __all__ = ["LIVE", "REJECTED", "UNKNOWN", "OUTCOMES", "Result", "Verifier", "identify", "provider_ids", "provider_info", "validate",
-           "PROVIDERS", "interpret"]
+           "interpret", "build_request", "TABLE"]                # (and PROVIDERS, the pack's table: read when first asked for)
 
 LIVE, REJECTED, UNKNOWN = "live", "rejected", "unknown"
 OUTCOMES = (LIVE, REJECTED, UNKNOWN)
-MAX_WHO = 80
+MAX_WHO = 80                                    # (the engine's: secrets.rs)
 MAX_CREDENTIAL = 512
+#: the table's name in the engine's rule pack
+TABLE = "_VERIFY_PROVIDERS"
+NOT_THIS_FORMAT = "not this provider's format, so nothing was sent"
 
 Result = collections.namedtuple("Result", "provider outcome detail who status")
 
@@ -59,7 +63,6 @@ _ID_RE = re.compile(r"[a-z][a-z0-9-]{0,31}")
 _PART_RE = re.compile(r"[a-z][a-z0-9_]{0,15}")
 _PLACEHOLDER = re.compile(r"\{([a-z][a-z0-9_]*)\}")
 _PRINTABLE = re.compile(r"[\x21-\x7e]+")
-_XML_CODE = re.compile(r"<Code>\s*([A-Za-z0-9_.:-]{1,80})\s*</Code>")
 _STATUS = range(100, 600)
 _RULE_KEYS = {"status", "json", "code", "outcome", "why", "who"}
 
@@ -67,8 +70,11 @@ _RULE_KEYS = {"status", "json", "code", "outcome", "why", "who"}
 # ------------------------------------------------------------------------------------------------ the table
 
 def validate(providers):
-    """`providers` as a tuple of checked entries; ValueError that says where, for an entry that breaks the rules of
-    `secretverify_providers`. The table is checked when this module is loaded."""
+    """`providers` as a tuple of checked entries; ValueError that says where, for an entry that breaks the table's rules (the
+    module documentation of the engine's secrets.rs, which checks them too when it reads the table). The pack's table is checked
+    when it is first read, and by `scripts/make_rust_tables.py --check`."""
+    if not isinstance(providers, (list, tuple)):
+        raise ValueError("the table is not a list")
     seen = set()
     for entry in providers:
         pid = entry.get("id") if isinstance(entry, dict) else None
@@ -108,8 +114,11 @@ def _validate_one(pid, entry):
     if not isinstance(query, dict) or any(not isinstance(k, str) or not isinstance(v, str) or "{" in k or "{" in v
                                           for k, v in query.items()):
         bad("request.query is a mapping of text that holds no part")
+    headers = request.get("headers")
+    if headers is not None and not isinstance(headers, dict):
+        bad("request.headers holds something that is not text")
     used = set()
-    for where, templates in (("headers", list((request.get("headers") or {}).items())),
+    for where, templates in (("headers", list((headers or {}).items())),
                              ("body", [("body", request["body"])] if request.get("body") is not None else [])):
         for name, text in templates:
             if not isinstance(name, str) or not isinstance(text, str):
@@ -162,147 +171,92 @@ def _scalar_or_list(value):
     return isinstance(value, (str, bool))
 
 
-PROVIDERS = validate(providers_data.PROVIDERS)
-_BY_ID = {p["id"]: p for p in PROVIDERS}
-_SHAPES = {p["id"]: {name: re.compile(pattern) for name, pattern in p["parts"].items()} for p in PROVIDERS}
+_table = None
+_table_lock = threading.Lock()
+
+
+def _providers():
+    """The pack's table, read from the engine and checked the first time it is asked for."""
+    global _table
+    if _table is None:
+        with _table_lock:
+            if _table is None:
+                _table = validate(engine.pack_value(TABLE))
+    return _table
+
+
+def __getattr__(name):
+    if name == "PROVIDERS":                         # (the pack's table, read when it is first asked for)
+        return _providers()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+def _by_id():
+    return {p["id"]: p for p in _providers()}
 
 
 def provider_ids():
     """The providers a credential can be verified with, in the table's order."""
-    return [p["id"] for p in PROVIDERS]
+    return [p["id"] for p in _providers()]
 
 
 def provider_info():
     """[(id, label, host)] for a report that says what is verified and where a credential would go."""
-    return [(p["id"], p["label"], p["host"]) for p in PROVIDERS]
+    return [(p["id"], p["label"], p["host"]) for p in _providers()]
 
 
 def identify(text):
     """The providers whose one-part pattern matches all of `text` (a credential found in a file): a list, empty when none does.
     The patterns do not overlap (OpenAI's leaves out Anthropic's `sk-ant-`), so a credential names one provider. A provider whose
-    credential is a pair (AWS) is not named by one part."""
+    credential is a pair (AWS) is not named by one part. (The engine's `secrets.identify`.)"""
     if not isinstance(text, str) or not 0 < len(text) <= MAX_CREDENTIAL:
         return []
-    return [pid for pid, shapes in _SHAPES.items() if set(shapes) == {"secret"} and shapes["secret"].fullmatch(text)]
+    return list(_native.call("secrets.identify", {}, text))
+
+
+def _own(provider):
+    """The id of a table entry that is the pack's own, or None for one of the caller's."""
+    pid = provider.get("id") if isinstance(provider, dict) else None
+    return pid if isinstance(pid, str) and _by_id().get(pid) == provider else None
 
 
 # ------------------------------------------------------------------------------------------------ reading an answer
 
-def _equal(actual, want):
-    if isinstance(want, list):
-        return any(_equal(actual, w) for w in want)
-    if isinstance(want, bool):
-        return actual is want
-    return isinstance(actual, str) and actual == want
-
-
-def _dig(doc, path):
-    for key in path.split("."):
-        if not isinstance(doc, dict) or key not in doc:
-            return None
-        doc = doc[key]
-    return doc
-
-
-def _json(body):
-    try:
-        return json.loads(body.decode("utf-8"))
-    except (ValueError, RecursionError):                      # (not UTF-8, not JSON, or nested past the stack: no document)
-        return None
-
-
-def _text(value, secrets):
-    """`value` as text that is safe to print, or None: printable characters only, cut short, with a credential's part (which should
-    not be in an answer at all) replaced."""
-    if not isinstance(value, str) or not value:
-        return None
-    out = "".join(c if c.isprintable() and c not in "  " else "?" for c in value[:MAX_WHO * 4])
-    for secret in secrets:
-        if secret:
-            out = out.replace(secret, "[redacted]")
-    return out[:MAX_WHO]
-
-
-class _Answer:
-    """The body of an answer, read as JSON or as text only when a rule asks."""
-
-    def __init__(self, response):
-        self.truncated = response.truncated
-        self._body = response.body
-        self._json = self._text = None
-        self._parsed = False
-
-    @property
-    def json(self):
-        if not self._parsed:
-            self._json = None if self.truncated else _json(self._body)
-            self._parsed = True
-        return self._json
-
-    @property
-    def text(self):
-        if self._text is None:
-            self._text = self._body.decode("utf-8", "replace")
-        return self._text
-
-
 def interpret(provider, response, secrets=()):
-    """What a provider's answer says -> (outcome, detail, who). `provider` is a table entry, `response` a `Response`, `secrets` the
+    """What a provider's answer says -> (outcome, detail, who): the engine's `secrets.judge`. `provider` is a table entry (the
+    pack's, named by its id; or one of the caller's, whose answer rules are given), `response` a `Response`, `secrets` the
     credential's parts (so that none is echoed). The first rule whose conditions hold decides; no rule is unknown. An answer cut
     short by the size limit is read by its status alone: a condition on its body does not hold."""
-    status = response.status
-    answer = _Answer(response)
-    for rule in provider["answers"]:
-        if status not in rule["status"]:
-            continue
-        cond = rule.get("json")
-        if cond is not None:
-            doc = answer.json
-            if not isinstance(doc, dict) or not all(_equal(_dig(doc, k), want) for k, want in cond.items()):
-                continue
-        codes = rule.get("code")
-        if codes is not None:
-            found = None if answer.truncated else _XML_CODE.search(answer.text)
-            if found is None or found.group(1) not in codes:
-                continue
-        who = None
-        where = rule.get("who")
-        if where:
-            if "json" in where:
-                doc = answer.json
-                who = _text(_dig(doc, where["json"]), secrets) if isinstance(doc, dict) else None
-            elif not answer.truncated:
-                tag = re.escape(where["xml"])
-                found = re.search(rf"<{tag}>([^<]{{1,300}})</{tag}>", answer.text)
-                who = _text(found.group(1), secrets) if found else None
-        return rule["outcome"], _text(rule.get("why"), secrets) or f"HTTP {status}", who
-    if answer.truncated:
-        return UNKNOWN, f"the answer was larger than {http.MAX_ANSWER_BYTES} bytes (HTTP {status})", None
-    if 500 <= status <= 599:
-        return UNKNOWN, f"the provider failed (HTTP {status})", None
-    return UNKNOWN, f"the answer was not one this module knows (HTTP {status})", None
+    pid = _own(provider)
+    body = response.body if isinstance(response.body, (bytes, bytearray)) else b""
+    args = {"provider": pid} if pid is not None else {"answers": provider.get("answers")}
+    args.update(status=int(response.status), truncated=bool(response.truncated) or len(body) > http.MAX_ANSWER_BYTES,
+                secrets=[part for part in secrets if isinstance(part, str)])
+    outcome, detail, who = _native.call("secrets.judge", args, bytes(body[:http.MAX_ANSWER_BYTES]).decode("latin-1"))
+    return outcome, detail, who
 
 
 # ------------------------------------------------------------------------------------------------ the request
 
+def _amz_date(now):
+    if now.tzinfo is not None:
+        now = now.astimezone(datetime.timezone.utc)
+    return now.strftime("%Y%m%dT%H%M%SZ")
+
+
 def build_request(provider, parts, now):
-    """The `Request` for this provider and credential parts. `parts` has been checked against the shapes."""
-    spec = provider["request"]
-
-    def fill(text):
-        return _PLACEHOLDER.sub(lambda m: parts[m.group(1)], text)
-
-    headers = {name: fill(text) for name, text in (spec.get("headers") or {}).items()}
-    body = fill(spec["body"]).encode("utf-8") if spec.get("body") is not None else None
-    path = spec["path"]
-    query = spec.get("query") or {}
-    if query:
-        path += "?" + urllib.parse.urlencode(sorted(query.items()), quote_via=urllib.parse.quote)
-    sig = spec.get("sigv4")
-    if sig:
-        headers = sigv4.sign(spec["method"], provider["host"], spec["path"], query, body, headers, parts["id"], parts["secret"],
-                             sig["region"], sig["service"], now)
-    return http.Request(spec["method"], provider["host"], path, headers, body)
+    """The `Request` that asks this provider whether the credential (`parts`, {part: text}) is live, at `now` (a `datetime`, UTC if
+    it has no zone: AWS's signature holds the time): the engine's `secrets.request`. ValueError when the parts are not the
+    provider's format (nothing is to be sent)."""
+    pid = _own(provider)
+    args = {"provider": pid} if pid is not None else {"entry": provider}
+    args.update(parts=dict(parts), time=_amz_date(now))
+    answer = _native.call("secrets.request", args)
+    if "refused" in answer:
+        raise ValueError(answer["refused"])
+    body = answer["body"]
+    return http.Request(answer["method"], answer["host"], answer["path"], dict(answer["headers"]),
+                        None if body is None else body.encode("utf-8"))
 
 
 class Verifier:
@@ -325,24 +279,20 @@ class Verifier:
         self._started = None
         self._calls = 0
         self._cache = {}
-        self._slots = {pid: threading.BoundedSemaphore(per_provider) for pid in _BY_ID}
+        self._by_id = _by_id()
+        self._slots = {pid: threading.BoundedSemaphore(per_provider) for pid in self._by_id}
         self._next = {}
         self.requests = []                                      # (provider, host, path) of each call made, for a report and tests
 
     # ---- the credential
     @staticmethod
-    def _parts(provider, credential):
-        """The credential as {part: text} if it is this provider's, else None."""
-        shapes = _SHAPES[provider["id"]]
+    def _parts(credential):
+        """The credential as {part: text}, or None for what cannot be one (the engine checks the rest: the provider's parts, each
+        printable, at most MAX_CREDENTIAL characters, all of it the part's format)."""
         if isinstance(credential, str):
             credential = {"secret": credential}
-        if not isinstance(credential, dict) or set(credential) != set(shapes):
+        if not isinstance(credential, dict) or not all(isinstance(k, str) and isinstance(v, str) for k, v in credential.items()):
             return None
-        for name, shape in shapes.items():
-            value = credential[name]
-            if (not isinstance(value, str) or not 0 < len(value) <= MAX_CREDENTIAL or not _PRINTABLE.fullmatch(value)
-                    or not shape.fullmatch(value)):
-                return None
         return dict(credential)
 
     @staticmethod
@@ -377,10 +327,16 @@ class Verifier:
     def verify(self, provider_id, credential):
         """One credential, as one secret (text) or, for a pair, a mapping of its parts -> a Result. An unknown provider is a
         KeyError; nothing else raises."""
-        provider = _BY_ID[provider_id]
-        parts = self._parts(provider, credential)
+        provider = self._by_id[provider_id]
+        parts = self._parts(credential)
         if parts is None:
-            return Result(provider_id, UNKNOWN, "not this provider's format, so nothing was sent", None, None)
+            return Result(provider_id, UNKNOWN, NOT_THIS_FORMAT, None, None)
+        try:
+            request = build_request(provider, parts, self._now())
+        except ValueError:
+            return Result(provider_id, UNKNOWN, NOT_THIS_FORMAT, None, None)
+        except Exception as exc:                                # (the engine could not answer: nothing was sent)
+            return Result(provider_id, UNKNOWN, f"the request could not be made ({type(exc).__name__})", None, None)
         key = self._key(provider, parts)
         with self._lock:
             hit = self._cache.get(key)
@@ -391,7 +347,6 @@ class Verifier:
             return Result(provider_id, UNKNOWN, refused, None, None)
         secrets = sorted(parts.values(), key=len, reverse=True)
         try:
-            request = build_request(provider, parts, self._now())
             with self._slots[provider_id]:
                 self._wait_turn(provider_id)
                 with self._lock:
@@ -401,7 +356,10 @@ class Verifier:
             return Result(provider_id, UNKNOWN, _TRANSPORT_WORDS.get(exc.kind, "the call failed"), None, None)
         except Exception as exc:                                # (a transport that is not this module's: what it says may hold anything)
             return Result(provider_id, UNKNOWN, f"the call failed unexpectedly ({type(exc).__name__})", None, None)
-        outcome, detail, who = interpret(provider, response, secrets)
+        try:
+            outcome, detail, who = interpret(provider, response, secrets)
+        except Exception as exc:                                # (the engine could not read it: the call settled nothing)
+            return Result(provider_id, UNKNOWN, f"the answer could not be read ({type(exc).__name__})", None, None)
         result = Result(provider_id, outcome, detail, who, response.status)
         if outcome != UNKNOWN:
             with self._lock:

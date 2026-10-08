@@ -25,8 +25,8 @@ import tempfile
 import threading
 import time
 
+from lazaret.scanner import secretverify as verify
 from lazaret.scanner import secretverify_http as http_mod
-from lazaret.scanner import secretverify_providers as providers
 
 Seen = collections.namedtuple("Seen", "method host path headers body")
 
@@ -43,7 +43,8 @@ class Answer:
 
 
 def hosts():
-    return sorted({p["host"] for p in providers.PROVIDERS})
+    """The providers' hosts (the engine's table: secretverify.PROVIDERS)."""
+    return sorted({p["host"] for p in verify.PROVIDERS})
 
 
 def have_openssl():

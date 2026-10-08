@@ -20,8 +20,9 @@ It sends the credentials it is given, and made-up ones, to the providers' hosts 
 and the reason the table gives, and for a live key the account name the provider reports; never a credential. `HTTPS_PROXY`
 is honoured. Exit status: 0 every expectation held, 1 one did not, 2 usage (including no `--yes`).
 
-An answer that does not match is a reason to read the provider's documentation again and change the table
-(`scanner/secretverify_providers.py`), not the check."""
+An answer that does not match is a reason to read the provider's documentation again and change the table (the rule pack's
+`_VERIFY_PROVIDERS`, rust/crates/lazaret-engine/rules/lazaret-rules.json, which the engine reads: V-1's stage 2), not the
+check."""
 
 import argparse
 import os

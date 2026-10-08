@@ -1,6 +1,9 @@
-"""Live secret verification (scanner/secretverify.py and its provider table): what is asked of whom, how an answer is read, and what
-is promised about the credential. No call reaches a real service: a stand-in transport answers, and the last class asks a stub
-provider over TLS on 127.0.0.1 (skipped without `openssl`)."""
+"""Live secret verification (scanner/secretverify.py, on the engine's table and logic since V-1's stage 2: the pack's
+`_VERIFY_PROVIDERS` and rust/crates/lazaret-engine/src/secrets.rs): what is asked of whom, how an answer is read, and what is
+promised about the credential. Stage 1's tests, kept: the engine is held to what its Python was held to (the engine's own tests,
+secrets_tests.rs, hold AWS's signature vectors, the 512-character limit with a pattern of their own, and the JSON read once). No
+call reaches a real service: a stand-in transport answers, and the last class asks a stub provider over TLS on 127.0.0.1 (skipped
+without `openssl`)."""
 
 import copy
 import datetime
@@ -8,12 +11,16 @@ import json
 import re
 import threading
 import unittest
-from unittest import mock
 
+from lazaret.scanner import _native
 from lazaret.scanner import secretverify as sv
 from lazaret.scanner import secretverify_http as http
-from lazaret.scanner import secretverify_providers as data
 from tests.scanner import _verify_stub as vs
+
+
+def setUpModule():
+    if not _native.available():
+        raise unittest.SkipTest(f"the table and the logic are the native engine's ({_native.load_error()})")
 
 NOW = datetime.datetime(2026, 10, 3, 12, 0, 0, tzinfo=datetime.timezone.utc)
 SECRETS = {
@@ -73,7 +80,7 @@ def verifier(fake=None, **kw):
 
 class TableTests(unittest.TestCase):
     def test_the_shipped_table_is_valid_and_every_provider_has_a_sample(self):
-        self.assertEqual(sv.validate(data.PROVIDERS), tuple(data.PROVIDERS))
+        self.assertEqual(sv.validate(list(sv.PROVIDERS)), tuple(sv.PROVIDERS))
         self.assertEqual(sv.provider_ids(), ["github", "slack", "stripe", "npm", "openai", "anthropic", "aws"])
         self.assertEqual(set(SECRETS), set(sv.provider_ids()))
 
@@ -137,13 +144,12 @@ class IdentifyTests(unittest.TestCase):
                 self.assertEqual(sv.identify(prefix + ch * (high + 1)), [])
 
     def test_a_credential_is_looked_at_up_to_512_characters_and_no_further(self):
-        wide = {"github": {"secret": re.compile(r"[a-z]+")}}                       # (the shipped patterns stop well short of 512)
-        with mock.patch.dict(sv._SHAPES, wide):
-            self.assertEqual(sv.identify("a" * 512), ["github"])
-            self.assertEqual(sv.identify("a" * 513), [])
-            v = verifier(Fake(default=resp(401)))
-            self.assertEqual(v.verify("github", "a" * 512).outcome, "rejected")
-            self.assertEqual(v.verify("github", "a" * 513).detail, "not this provider's format, so nothing was sent")
+        # (with a pattern of its own that takes 512 characters: the engine's tests, secrets_tests.rs; the shipped patterns stop
+        # well short of it)
+        self.assertEqual(sv.MAX_CREDENTIAL, 512)
+        self.assertEqual(sv.identify("a" * 513), [])
+        self.assertEqual(verifier(Fake(default=resp(401))).verify("github", "ghp_" + "a" * 509).detail,
+                         "not this provider's format, so nothing was sent")
 
     def test_what_is_not_a_credential_is_none(self):
         good = SECRETS["github"]
@@ -219,6 +225,8 @@ class ValidateTests(unittest.TestCase):
         self.refused("github", lambda e: e["request"].update(body="x={secret}"), "POST")
         self.refused("github", lambda e: e["request"].update(headers={"User-Agent": "x"}), "sent nowhere")
         self.refused("github", lambda e: e["request"]["headers"].update(X=5), "not text")
+        self.refused("github", lambda e: e["request"].update(headers=["Authorization"]), "not text")
+        self.refused("github", lambda e: e["request"].update(headers="Authorization: {secret}"), "not text")
         self.refused("github", lambda e: e["request"].update(body=5, method="POST"), "not text")
         sv.validate(self.table("github", lambda e: e["request"].update(method="POST", body="token={secret}")))
 
@@ -367,23 +375,25 @@ class InterpretTests(unittest.TestCase):
 
     def test_the_limits_on_what_is_printed_and_what_is_sent_are_these(self):
         self.assertEqual((sv.MAX_WHO, sv.MAX_CREDENTIAL), (80, 512))
-        self.assertEqual(len(sv._text("a" * 81, ())), 80)
-        self.assertEqual(len(sv._text("a" * 80, ())), 80)
-        self.assertEqual(sv._text("a" * 79, ()), "a" * 79)
+        github = entry("github")
+        self.assertEqual(len(sv.interpret(github, resp(200, {"login": "a" * 81}))[2]), 80)
+        self.assertEqual(len(sv.interpret(github, resp(200, {"login": "a" * 80}))[2]), 80)
+        self.assertEqual(sv.interpret(github, resp(200, {"login": "a" * 79}))[2], "a" * 79)
 
     def test_an_empty_part_redacts_nothing(self):
-        self.assertEqual(sv._text("abc", [""]), "abc")
-        self.assertEqual(sv._text("abc", ["", "b"]), "a[redacted]c")
+        github = entry("github")
+        self.assertEqual(sv.interpret(github, resp(200, {"login": "abc"}), [""])[2], "abc")
+        self.assertEqual(sv.interpret(github, resp(200, {"login": "abc"}), ["", "b"])[2], "a[redacted]c")
 
-    def test_an_answer_is_read_as_json_once_however_many_rules_ask(self):
-        with mock.patch.object(sv, "_json", wraps=sv._json) as parse:
-            self.assertEqual(sv.interpret(entry("slack"), resp(200, {"ok": True, "user": "bot"})), ("live", "HTTP 200", "bot"))
-        self.assertEqual(parse.call_count, 1)
-        with mock.patch.object(sv, "_json", wraps=sv._json) as parse:
-            provider = {"answers": [{"status": [200], "json": {"a": "x"}, "outcome": "rejected"},
-                                    {"status": [200], "json": {"b": "y"}, "outcome": "rejected"}, {"status": [200], "outcome": "live"}]}
-            self.assertEqual(sv.interpret(provider, resp(200, b"null"))[0], "live")        # (a document that is no mapping is read once too)
-        self.assertEqual(parse.call_count, 1)
+    def test_a_document_that_is_no_mapping_holds_no_condition(self):
+        provider = {"answers": [{"status": [200], "json": {"a": "x"}, "outcome": "rejected"},
+                                {"status": [200], "json": {"b": "y"}, "outcome": "rejected"}, {"status": [200], "outcome": "live"}]}
+        self.assertEqual(sv.interpret(provider, resp(200, b"null"))[0], "live")
+        self.assertEqual(sv.interpret(entry("slack"), resp(200, {"ok": True, "user": "bot"})), ("live", "HTTP 200", "bot"))
+
+    def test_a_key_given_twice_counts_by_its_last_value_as_pythons_json_reads_it(self):
+        self.assertEqual(sv.interpret(entry("slack"), resp(200, b'{"ok": false, "ok": true, "user": "a", "user": "b"}')),
+                         ("live", "HTTP 200", "b"))
 
     def test_a_credential_in_an_answer_is_not_echoed(self):
         secret = SECRETS["github"]
@@ -419,8 +429,7 @@ class InterpretTests(unittest.TestCase):
 class RequestTests(unittest.TestCase):
     def build(self, pid, credential=None):
         credential = SECRETS[pid] if credential is None else credential
-        v = verifier()
-        parts = v._parts(entry(pid), credential)
+        parts = sv.Verifier._parts(credential)
         self.assertIsNotNone(parts)
         return sv.build_request(entry(pid), parts, NOW)
 

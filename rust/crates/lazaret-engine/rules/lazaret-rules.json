@@ -15313,6 +15313,347 @@
   "_VENDOR_TEXT_CAP": {
    "value": 4194304
   },
+  "_VERIFY_PROVIDERS": {
+   "value": [
+    {
+     "answers": [
+      {
+       "outcome": "live",
+       "status": [
+        200
+       ],
+       "who": {
+        "json": "login"
+       }
+      },
+      {
+       "outcome": "rejected",
+       "status": [
+        401
+       ],
+       "why": "GitHub says the token is not valid"
+      },
+      {
+       "outcome": "unknown",
+       "status": [
+        403,
+        429
+       ],
+       "why": "GitHub refused or rate limited the call"
+      }
+     ],
+     "host": "api.github.com",
+     "id": "github",
+     "label": "GitHub token",
+     "parts": {
+      "secret": "(?:gh[pousr]_[A-Za-z0-9]{36,251}|github_pat_[A-Za-z0-9_]{22,255})"
+     },
+     "request": {
+      "headers": {
+       "Accept": "application/vnd.github+json",
+       "Authorization": "Bearer {secret}",
+       "User-Agent": "lazaret-secret-verify",
+       "X-GitHub-Api-Version": "2022-11-28"
+      },
+      "method": "GET",
+      "path": "/user",
+      "query": {}
+     }
+    },
+    {
+     "answers": [
+      {
+       "json": {
+        "ok": true
+       },
+       "outcome": "live",
+       "status": [
+        200
+       ],
+       "who": {
+        "json": "user"
+       }
+      },
+      {
+       "json": {
+        "error": [
+         "invalid_auth",
+         "not_authed",
+         "token_revoked",
+         "token_expired",
+         "account_inactive"
+        ],
+        "ok": false
+       },
+       "outcome": "rejected",
+       "status": [
+        200
+       ],
+       "why": "Slack says the token is not valid"
+      },
+      {
+       "outcome": "unknown",
+       "status": [
+        429
+       ],
+       "why": "Slack rate limited the call"
+      }
+     ],
+     "host": "slack.com",
+     "id": "slack",
+     "label": "Slack token",
+     "parts": {
+      "secret": "xox[baprs]-[A-Za-z0-9-]{10,250}"
+     },
+     "request": {
+      "headers": {
+       "Authorization": "Bearer {secret}",
+       "User-Agent": "lazaret-secret-verify"
+      },
+      "method": "GET",
+      "path": "/api/auth.test",
+      "query": {}
+     }
+    },
+    {
+     "answers": [
+      {
+       "outcome": "live",
+       "status": [
+        200
+       ]
+      },
+      {
+       "json": {
+        "error.type": "permission_error"
+       },
+       "outcome": "live",
+       "status": [
+        403
+       ],
+       "why": "Stripe knows the key but it may not read the balance"
+      },
+      {
+       "outcome": "rejected",
+       "status": [
+        401
+       ],
+       "why": "Stripe says the key is not valid"
+      },
+      {
+       "outcome": "unknown",
+       "status": [
+        429
+       ],
+       "why": "Stripe rate limited the call"
+      }
+     ],
+     "host": "api.stripe.com",
+     "id": "stripe",
+     "label": "Stripe live key",
+     "parts": {
+      "secret": "(?:sk|rk)_live_[A-Za-z0-9]{16,247}"
+     },
+     "request": {
+      "headers": {
+       "Authorization": "Bearer {secret}",
+       "User-Agent": "lazaret-secret-verify"
+      },
+      "method": "GET",
+      "path": "/v1/balance",
+      "query": {}
+     }
+    },
+    {
+     "answers": [
+      {
+       "outcome": "live",
+       "status": [
+        200
+       ],
+       "who": {
+        "json": "username"
+       }
+      },
+      {
+       "outcome": "rejected",
+       "status": [
+        401
+       ],
+       "why": "npm says the token is not valid"
+      },
+      {
+       "outcome": "unknown",
+       "status": [
+        403,
+        429
+       ],
+       "why": "npm refused or rate limited the call"
+      }
+     ],
+     "host": "registry.npmjs.org",
+     "id": "npm",
+     "label": "npm token",
+     "parts": {
+      "secret": "npm_[A-Za-z0-9]{36}"
+     },
+     "request": {
+      "headers": {
+       "Accept": "application/json",
+       "Authorization": "Bearer {secret}",
+       "User-Agent": "lazaret-secret-verify"
+      },
+      "method": "GET",
+      "path": "/-/whoami",
+      "query": {}
+     }
+    },
+    {
+     "answers": [
+      {
+       "outcome": "live",
+       "status": [
+        200
+       ]
+      },
+      {
+       "outcome": "rejected",
+       "status": [
+        401
+       ],
+       "why": "OpenAI says the key is not valid"
+      },
+      {
+       "outcome": "unknown",
+       "status": [
+        403,
+        429
+       ],
+       "why": "OpenAI refused or rate limited the call"
+      }
+     ],
+     "host": "api.openai.com",
+     "id": "openai",
+     "label": "OpenAI API key",
+     "parts": {
+      "secret": "sk-(?!ant-)(?:proj-|svcacct-|admin-)?[A-Za-z0-9_-]{20,200}"
+     },
+     "request": {
+      "headers": {
+       "Authorization": "Bearer {secret}",
+       "User-Agent": "lazaret-secret-verify"
+      },
+      "method": "GET",
+      "path": "/v1/models",
+      "query": {}
+     }
+    },
+    {
+     "answers": [
+      {
+       "outcome": "live",
+       "status": [
+        200
+       ]
+      },
+      {
+       "outcome": "rejected",
+       "status": [
+        401
+       ],
+       "why": "Anthropic says the key is not valid"
+      },
+      {
+       "outcome": "unknown",
+       "status": [
+        403,
+        429
+       ],
+       "why": "Anthropic refused or rate limited the call"
+      }
+     ],
+     "host": "api.anthropic.com",
+     "id": "anthropic",
+     "label": "Anthropic API key",
+     "parts": {
+      "secret": "sk-ant-[A-Za-z0-9_-]{20,200}"
+     },
+     "request": {
+      "headers": {
+       "User-Agent": "lazaret-secret-verify",
+       "anthropic-version": "2023-06-01",
+       "x-api-key": "{secret}"
+      },
+      "method": "GET",
+      "path": "/v1/models",
+      "query": {}
+     }
+    },
+    {
+     "answers": [
+      {
+       "outcome": "live",
+       "status": [
+        200
+       ],
+       "who": {
+        "xml": "Arn"
+       }
+      },
+      {
+       "code": [
+        "InvalidClientTokenId",
+        "SignatureDoesNotMatch",
+        "ExpiredToken"
+       ],
+       "outcome": "rejected",
+       "status": [
+        403
+       ],
+       "why": "AWS says the key pair is not valid"
+      },
+      {
+       "code": [
+        "Throttling",
+        "ThrottlingException",
+        "RequestLimitExceeded",
+        "ServiceUnavailable"
+       ],
+       "outcome": "unknown",
+       "status": [
+        400,
+        403,
+        429,
+        503
+       ],
+       "why": "AWS throttled the call"
+      }
+     ],
+     "host": "sts.amazonaws.com",
+     "id": "aws",
+     "label": "AWS access key",
+     "parts": {
+      "id": "AKIA[0-9A-Z]{16}",
+      "secret": "[A-Za-z0-9/+=]{40}"
+     },
+     "request": {
+      "body": "Action=GetCallerIdentity&Version=2011-06-15",
+      "headers": {
+       "Accept": "application/xml",
+       "Content-Type": "application/x-www-form-urlencoded; charset=utf-8",
+       "User-Agent": "lazaret-secret-verify"
+      },
+      "method": "POST",
+      "path": "/",
+      "query": {},
+      "sigv4": {
+       "region": "us-east-1",
+       "service": "sts"
+      }
+     }
+    }
+   ]
+  },
   "_VIEW_CALL_RE": {
    "flags": "",
    "re": "\\s*([A-Za-z_][\\w.]*)\\s*\\("

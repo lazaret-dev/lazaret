@@ -1,6 +1,6 @@
 [package]
 name = "lazaret-engine"
-description = "Lazaret's scanning engine: bytes in, findings out (no I/O, no unsafe, no dependencies)"
+description = "Lazaret's scanning engine: bytes in, findings out (no I/O, no unsafe; one dependency, lazaret-verify, tiny_https's pure part)"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -16,3 +16,6 @@ path = "src/lib.rs"
 stats = []
 
 [dependencies]
+# tiny_https's pure part (no I/O, no unsafe; scripts/check_rust_deps.py holds the line): SHA-256, for the signed
+# requests of live secret verification (secrets.rs)
+lazaret-verify = { path = "../lazaret-verify" }
