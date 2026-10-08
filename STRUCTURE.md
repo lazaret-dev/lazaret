@@ -301,6 +301,8 @@ js/
 │   ├── cli.js            `lazaret check <dir>`; returns an exit code (testable)
 │   ├── index.js          public exports
 │   ├── report.js         report format (JSON + HTML), terminal output
+│   ├── verify.js         --verify-secrets: the scan's secrets asked about, over
+│   │                     node:https (the engine's table and logic)
 │   ├── deps.js           --deps: a dependency's install hooks followed to the
 │   │                     files they run; the import-time test on its code
 │   ├── pool.js           worker threads for the per-file work (pool-worker.js:

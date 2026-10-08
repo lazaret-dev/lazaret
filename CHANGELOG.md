@@ -11,7 +11,7 @@ project is pre-1.0, so the 0.x API may still change.
 
 ### Added
 
-- **Live secrets: `lazaret scan --verify-secrets` (V-1; John's decisions 4 and 7).** After the scan, each secret
+- **Live secrets: `lazaret scan --verify-secrets` and `npx lazaret --verify-secrets` (V-1; John's decisions 4 and 7).** After the scan, each secret
   finding is asked about where a provider can say whether it is live: a GitHub, Slack, Stripe, npm, OpenAI or
   Anthropic token, or an AWS key pair (a key id and a secret key in the same file). Each credential goes to its own
   provider alone, over HTTPS, in a call that only authenticates (GitHub's `GET /user`, Slack's `auth.test`, AWS
@@ -25,8 +25,9 @@ project is pre-1.0, so the 0.x API may still change.
   ask, and the report counts those. The value is never written anywhere: it is read again from the file, in
   memory, for the call; the run's cache is keyed by its SHA-256. The provider table and the logic (which words of
   a line are a credential and which provider's, each request, AWS's signature, reading an answer) are the
-  engine's (`secrets.rs`, the pack's `_VERIFY_PROVIDERS`), one copy for both packages; the call goes over
-  lazaret-net.
+  engine's (`secrets.rs`, the pack's `_VERIFY_PROVIDERS`), one copy for both packages; the Python package's call
+  goes over lazaret-net, the npm package's over Node's `https` (TLS 1.2 at least, `HTTPS_PROXY` through an http://
+  proxy's CONNECT tunnel), and the two report alike (`test_js_parity_verify`).
 - **A workflow's actions are read at the commit they run (N-4).** `python -m
   lazaret.registry.actions` now scans each action's own code, the archive the runner fetches for
   the commit its `uses:` resolves to, as the runner runs it: a JavaScript action's `pre`, `main`

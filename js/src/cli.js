@@ -26,6 +26,8 @@ import { dependencyChecks } from "./deps.js";
 import { loadError } from "./lib/native.js";
 import { Pool, threadsFor, mapTasks } from "./pool.js";
 import { analyzeFlows, redactFlowIssues } from "./scanner/flow.js";
+import { splitLines } from "./scanner/lines.js";
+import { verifyFindings } from "./verify.js";
 
 // Local copies (NOT imported from index.js — that would be a cycle).
 const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
@@ -61,6 +63,11 @@ Options:
                         A baseline inside the scanned tree is trusted only when
                         ${BASELINE_KEY_ENV} is set and its signature verifies.
   --no-redact-secrets   Keep credential lines in reports (default: redacted).
+  --verify-secrets      After the scan, ask each secret's provider whether it is
+                        live (GitHub, Slack, Stripe, npm, OpenAI and Anthropic
+                        tokens, AWS key pairs): each credential goes to its own
+                        provider alone, over HTTPS. A live one is a BLOCKER.
+                        Off by default.
   --excerpt-width N     Characters of the flagged line shown per finding (100).
   --max-source-bytes N  Largest source file or manifest read (16,000,000, env
                         LAZARET_MAX_SOURCE_BYTES); a larger one is not scanned
@@ -92,6 +99,7 @@ const OPTIONS = [
   { flag: "--deps", dest: "deps" },
   { flag: "--include-deps", dest: "deps" },
   { flag: "--no-redact-secrets", dest: "noRedact" },
+  { flag: "--verify-secrets", dest: "verifySecrets" },
   { flag: "--quiet", short: "-q", dest: "quiet" },
   { flag: "--ci", dest: "ci" },
   { flag: "--version", dest: "version" },
@@ -199,18 +207,17 @@ export function parseArgs(argv) {
 }
 
 /**
- * Run the CLI. Returns an exit code.
+ * Run the CLI. Returns an exit code; with --verify-secrets, a promise of one (the providers are asked over the network
+ * after the scan).
  * @param {string[]} argv arguments after the program name
- * @param {{ out?: (s: string)=>void, err?: (s: string)=>void, env?: object }} io injectable
+ * @param {{ out?: (s: string)=>void, err?: (s: string)=>void, env?: object, verifier?: object }} io injectable
  */
 export function run(argv, io = {}) {
   const err = io.err ?? ((s) => console.error(s));
   const env = io.env ?? process.env;
-  try {
-    return runChecked(argv ?? [], io);
-  } catch (e) {
-    // Any internal error is `error: internal: …` with exit 5 — never a raw
-    // stack trace, never confusable with a failed gate (exit 1).
+  // Any internal error is `error: internal: …` with exit 5 — never a raw
+  // stack trace, never confusable with a failed gate (exit 1).
+  const internal = (e) => {
     const debug = env.LAZARET_DEBUG === "1";
     try {
       if (debug && e && e.stack) err(sanitizeTerm(e.stack));
@@ -220,8 +227,19 @@ export function run(argv, io = {}) {
       if (!debug) err("  (this is a Lazaret bug, not a scan result; set LAZARET_DEBUG=1 for a traceback)");
     } catch { /* never throw from the error path */ }
     return EXIT_INTERNAL;
+  };
+  let pending = false;
+  try {
+    const code = runChecked(argv ?? [], io);
+    if (code && typeof code.then === "function") {
+      pending = true;
+      return code.catch(internal).finally(() => setRedactSecrets(true));
+    }
+    return code;
+  } catch (e) {
+    return internal(e);
   } finally {
-    setRedactSecrets(true);
+    if (!pending) setRedactSecrets(true);
   }
 }
 
@@ -394,6 +412,20 @@ function runChecked(argv, io) {
     add(redactFlowIssues(analyzeFlows(files), files));
     const res = redactResult(buildResult(root, files, issues), clipLine);
     res.metrics.configFiles = configs.length;
+    if (opts.verifySecrets) {
+      // V-1 (John's decision 4): only when asked; each credential to its own provider, after a note that says where.
+      // A finding's line is read from the text the scan read (verifyscan.lines_of reads it again from the file).
+      const read = new Map();
+      for (const f of files) if (!read.has(f.path)) read.set(f.path, [f.content, f.lang]);
+      for (const c of configs) if (!read.has(c.path)) read.set(c.path, [c.content, "cfg"]);
+      const linesOf = (file) => (read.has(file) ? splitLines(...read.get(file)) : null);
+      return verifyFindings(res, linesOf, { verifier: io.verifier ?? null, err: (s) => err(sanitizeTermLine(s)) })
+        .then(() => report(res));
+    }
+    return report(res);
+  }
+
+  function report(res) {
     if (opts.baseline) {
       applyBaseline(res, opts.baseline, { root, env, warn: (m) => err(sanitizeTermLine(m)) });
     }

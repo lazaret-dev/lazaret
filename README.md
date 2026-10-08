@@ -18,7 +18,7 @@ On a machine with Node but no Python, the project scanner is also on npm, with t
 npx lazaret check .          # or: npx lazaret .   (or: npm install -g lazaret)
 ```
 
-The npm package is the project scanner only; registry auditing, the install guard, custom taint specs, SCA and the MCP server come with the Python package. Its cross-file taint passes (`X-*` findings) are the native engine's, for JavaScript and for Python, as in the Python package. The npm CLI takes the same flags as the Python one (`--deps`, `--exclude`, `--out-dir`, `--html`/`--json`, `--sarif`, `--baseline`, `--ci`, `--force-overwrite`, `--no-redact-secrets`, `--max-source-bytes`, `-q`) and rejects unknown ones. The two packages are tested to agree exactly — every finding including its severity and message, the metrics, ratings, quality gate and exit code (`tests/architecture/test_js_parity.py`, which also runs an adversarial fixture set). Since 0.1.8 the npm package's rules, supply-chain tests and cross-file received-code follower (a `--deps` value received in one file of a package and run in another) are the native engine's, the one the Python package's wheels carry (`docs/RUST_ENGINE.md`), and the npm CLI spreads a large scan over worker threads (`LAZARET_THREADS`) with the same report. The browser dashboard carries a port of the same engine and is held to the same findings (`tests/scanner/test_review_dashboard_parity.py`).
+The npm package is the project scanner only; registry auditing, the install guard, custom taint specs, SCA and the MCP server come with the Python package. Its cross-file taint passes (`X-*` findings) are the native engine's, for JavaScript and for Python, as in the Python package. The npm CLI takes the same flags as the Python one (`--deps`, `--exclude`, `--out-dir`, `--html`/`--json`, `--sarif`, `--baseline`, `--ci`, `--force-overwrite`, `--no-redact-secrets`, `--verify-secrets`, `--max-source-bytes`, `-q`) and rejects unknown ones. The two packages are tested to agree exactly — every finding including its severity and message, the metrics, ratings, quality gate and exit code (`tests/architecture/test_js_parity.py`, which also runs an adversarial fixture set). Since 0.1.8 the npm package's rules, supply-chain tests and cross-file received-code follower (a `--deps` value received in one file of a package and run in another) are the native engine's, the one the Python package's wheels carry (`docs/RUST_ENGINE.md`), and the npm CLI spreads a large scan over worker threads (`LAZARET_THREADS`) with the same report. The browser dashboard carries a port of the same engine and is held to the same findings (`tests/scanner/test_review_dashboard_parity.py`).
 
 From a checkout, `pip install ./python` (or `pip install -e ./python` for development) works with no network access: Lazaret builds with its own standard-library build backend, which compiles the engine with your Rust toolchain (the workspace has no external crates, so cargo fetches nothing).
 
@@ -91,7 +91,9 @@ key or a database's password has no provider to ask; the report counts those.
 The value itself is never written anywhere: it is read again from the file, in
 memory, for the call. The flag works for any target, a `github:` or `gitlab:`
 repository too; the guard, the registry auditor, the MCP server and the
-pre-commit hook never verify.
+pre-commit hook never verify. The npm package's `--verify-secrets` asks the
+same way (Node's `https`, TLS 1.2 at least, `HTTPS_PROXY` through an http://
+proxy's tunnel) and reports the same.
 
 **Baselines:** a baseline must be a report this engine wrote, and a hostile
 repo must not be able to supply one (audit G17), because a hand-crafted

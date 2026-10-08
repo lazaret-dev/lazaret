@@ -44,7 +44,9 @@ untrusted dependencies past it before letting them in.
    noise (see §7, the 0-FP discipline).
 2. **Deterministic and self-contained.** No network at scan time, no third-party
    libraries, identical results on Linux/macOS/Windows and across Python/Node
-   versions. A scan of the same bytes gives the same answer everywhere.
+   versions. A scan of the same bytes gives the same answer everywhere. The one
+   exception is asked for by name: `--verify-secrets` (§5k) asks providers
+   about the secrets a scan found, after the scan, and says so before it does.
 3. **Bounded.** No input — a 50 MB minified bundle, a pathological nest of
    brackets, a file written to defeat the follower — may make the scanner slow.
    Every pass is linear-ish and every search is bounded.
@@ -1617,11 +1619,23 @@ rejected. A finding gets the result of the credentials on its line that
 says most (live, then unknown, then rejected): live makes it a BLOCKER
 vulnerability, and the result is graded again (`core.regrade`).
 
+The npm package's runner (`js/src/verify.js`) is the twin of the three
+Python modules, on the same engine calls: a finding's line read from the text
+the scan read; the same cache, budgets and two calls at once to a provider;
+the call over `node:https`, the provider's host alone on port 443, TLS 1.2 at
+least (`minVersion`), no redirect followed, the body read to 64 KiB, one
+deadline, `HTTPS_PROXY` through an http:// proxy's CONNECT tunnel (an
+https:// proxy is refused) and `NO_PROXY` read as urllib reads it. Its
+`run()` returns a promise of the exit code when the flag is given.
+
 Tested against a stub provider over TLS on 127.0.0.1, on both transports:
 each credential reaches its own provider's host and no other, AWS's
 signature holds over the request as the stub received it, and a verifying
 scan's every output (the terminal, stderr, the JSON, SARIF and HTML
-reports) holds none of the values. `scripts/verifylive` is the manual check
+reports) holds none of the values; the npm runner against its own stub
+(`js/test/verify-secrets.test.js`: a server that speaks only TLS 1.1 refused,
+as a client without the floor would reach it), and both CLIs against the same
+stub with the same results (`test_js_parity_verify`). `scripts/verifylive` is the manual check
 against the real services, run before a release.
 
 ## 6. How to add or change a rule — the loop
