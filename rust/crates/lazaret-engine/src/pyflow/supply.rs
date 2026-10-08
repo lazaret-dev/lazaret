@@ -972,18 +972,66 @@ impl<'p> Analyzer<'p> {
     /// supply mode: does a comprehension over the environment's variables
     /// select some of them (`{k: v for k, v in os.environ.items() if
     /// k.startswith('X_')}`): not the whole of it, unless the test excludes
-    /// some or names secrets (the text follower's _LD_ENV_SELECT_RE)?
-    pub(super) fn sc_selects_env(&self, it: &Taint, ifs: &[NodeId]) -> bool {
+    /// some or names secrets (the text follower's _LD_ENV_SELECT_RE)? What
+    /// the names a test reads are given in the function or around it counts
+    /// as its text, as the JavaScript model reads it (B-6: `PATTERNS =
+    /// ['TOKEN', 'SECRET']` then `if any(p in k for p in PATTERNS)`).
+    pub(super) fn sc_selects_env(&mut self, it: &Taint, ifs: &[NodeId]) -> bool {
         if ifs.is_empty() || !it.sc.as_ref().is_some_and(|s| s.kinds & K_WHOLE_ENV != 0) {
             return false;
         }
         let sup = self.sup();
         let p = sup.p();
-        ifs.iter().all(|&c| {
+        let names_secrets = |text: &[u32]| p.re("_SH_SECRET_VAR_RE").search(text).is_some();
+        let mut names: Vec<PyStr> = Vec::new();
+        for &c in ifs {
             let n = self.t().node(c);
             let cond = sup.span(n.start, n.end);
-            p.re("_LD_EXCLUDES_RE").search(cond).is_none() && p.re("_SH_SECRET_VAR_RE").search(cond).is_none()
-        })
+            if p.re("_LD_EXCLUDES_RE").search(cond).is_some() || names_secrets(cond) {
+                return false;
+            }
+            for k in own_nodes(self.t(), &[c]) {
+                if self.t().kind(k) == Kind::Name && names.len() < 8 {
+                    let name = self.t().str(a_(self.t(), k)).to_vec();
+                    if !names.contains(&name) {
+                        names.push(name);
+                    }
+                }
+            }
+        }
+        // (the values the names are given: in the function, or the nearest function or module around it that gives them)
+        let saved = self.f;
+        let mut scopes: Vec<FnId> = vec![saved];
+        let mut at = self.p.fns[saved as usize].parent;
+        while let Some(f) = at {
+            if scopes.len() > 8 {
+                break;
+            }
+            scopes.push(f);
+            at = self.p.fns[f as usize].parent;
+        }
+        let body = self.p.mods[self.p.fns[saved as usize].module as usize].body_fn;
+        if !scopes.contains(&body) {
+            scopes.push(body);
+        }
+        let mut secret = false;
+        'names: for name in &names {
+            for &f in &scopes {
+                let ix = self.sc_index(f);
+                if let Some(values) = ix.assigns.get(name) {
+                    for &v in values.iter().take(8) {
+                        let n = self.t().node(v);
+                        if names_secrets(sup.span(n.start, n.end.min(n.start + 4000))) {
+                            secret = true;
+                            break 'names;
+                        }
+                    }
+                    break;
+                }
+            }
+        }
+        self.f = saved;
+        !secret
     }
 
     /// supply mode: a lambda: what its body sends or runs (its parameters
@@ -3455,6 +3503,26 @@ mod tests {
         assert_eq!(sent(&selected), None);
         let by_name = format!("{}opts = {{k: v for k, v in os.environ.items() if 'TOKEN' in k}}\n{}", head, post("opts"));
         assert_eq!(sent(&by_name), found("environment", "the whole environment"));
+        // B-6: the secret words in a list the test names, the module's or the function's (as JavaScript's model reads them)
+        let named = format!(
+            "{}PATTERNS = ['TOKEN', 'SECRET']\nopts = {{k: v for k, v in os.environ.items() if any(p in k for p in PATTERNS)}}\n{}",
+            head,
+            post("opts")
+        );
+        assert_eq!(sent(&named), found("environment", "the whole environment"));
+        let local = format!(
+            "{}def go():\n    words = ('KEY', 'PASSWORD')\n    opts = [v for k, v in os.environ.items() if any(w in k for w in words)]\n    {}go()\n",
+            head,
+            post("opts")
+        );
+        assert_eq!(sent(&local), found("environment", "the whole environment"));
+        // a named list of prefixes selects (vite's `VITE_`)
+        let prefixes = format!(
+            "{}PREFIXES = ('VITE_', 'APP_')\nopts = {{k: v for k, v in os.environ.items() if k.startswith(PREFIXES)}}\n{}",
+            head,
+            post("opts")
+        );
+        assert_eq!(sent(&prefixes), None);
         assert_eq!(sent("import os, subprocess\nsubprocess.run(['curl', 'https://x.invalid'], env=dict(os.environ))\n"), None);
         // a local name environ is not the environment
         assert_eq!(sent(&format!("import requests\nenviron = {{}}\n{}", post("str(environ)"))), None);

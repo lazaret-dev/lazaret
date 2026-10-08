@@ -788,6 +788,13 @@ project is pre-1.0, so the 0.x API may still change.
 
 ### Fixed
 
+- **A Python comprehension over the environment reads the lists its test names (B-6; rule set 2.55.0).**
+  `{k: v for k, v in os.environ.items() if any(p in k for p in PATTERNS)}` with `PATTERNS = ['TOKEN', 'SECRET']` read
+  as a selection of variables, so sending it had no finding; with the words written in the test it was the whole
+  environment, and the JavaScript model already read a named list (`patterns.some((p) => p.test(k))`). What the names
+  a test reads are given in its function or around it now counts as its text, so secret words there make the
+  comprehension the whole environment; a test of named prefixes (`PREFIXES = ('VITE_', 'APP_')`,
+  `k.startswith(PREFIXES)`) still selects.
 - **A download a JavaScript callback is given, written to a file and run, is a dropper's (D-2; rule set 2.54.0).**
   `request.get(u, (e, r, body) => { fs.writeFileSync(p, body); exec('python3 ' + p); })` had no finding: neither had
   https.get's response gathered in its `data` callback and written in its `end` one, nor one piped into
