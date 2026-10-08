@@ -510,6 +510,8 @@ def _jwt_in_run(s, start, run_end):
 
 def _jwt_search(s, pos):
     """(start, end) of the leftmost JWT-alternative match at or after pos."""
+    if s.find(".eyJ", pos) < 0:                    # (every match holds one, after pos)
+        return None
     if 0 < pos < len(s) and s[pos - 1] in _JWT_CHARS and s[pos] in _JWT_CHARS:
         run_end = _JWT_RUN_RE.match(s, pos).end()  # pos is inside a run: its rest counts
         hit = _jwt_in_run(s, pos, run_end)
@@ -2668,6 +2670,12 @@ def tree_reader(files, configs):
     return read
 
 
+def _match_lines(rx, text):
+    """The indices of the lines of `text` (split at "\n") on which `rx` matches, by one finditer over it."""
+    starts = _line_starts(text)
+    return {bisect.bisect_right(starts, m.start()) - 1 for m in rx.finditer(text)}
+
+
 def scan_config_file(path, content, read=None):
     """Credentials in a config or data file (see configsecrets): S-TOKEN on
     every line, S-SECRET outside comments. Nothing else runs — it is not
@@ -2691,14 +2699,21 @@ def scan_config_file(path, content, read=None):
             elif gitlabci.is_gitlab_ci(path):
                 issues.extend(gitlab_issues(path, lines))
             anonymous = configsecrets.netrc_anonymous(ctx.code) if ctx.netrc else {}
+            # the lines either test can report on, each found by one pass over the whole text (no pattern here
+            # matches across a newline, nor looks at one but as it looks at a line's end): a line with no token
+            # match, no credential-named key before a separator (SECRET_KV_HINT_RE) and no URL is reported on by
+            # neither, and most lines of a large data file are such lines
+            token_lines = _match_lines(_TOKEN_RULE["re"], content)
+            kv_lines = _match_lines(configsecrets.SECRET_KV_HINT_RE, "\n".join(ctx.code).lower())
             for i, line in enumerate(lines):
                 ctx.check_time()
                 if not line or line.isspace():
                     continue
-                col = _config_token_col(line, lines, i)
-                if col is not None:
-                    issues.append(mk_issue(_TOKEN_RULE, path, i + 1, lines, col))
-                if not ctx.cmask[i]:
+                if i in token_lines:
+                    col = _config_token_col(line, lines, i)
+                    if col is not None:
+                        issues.append(mk_issue(_TOKEN_RULE, path, i + 1, lines, col))
+                if not ctx.cmask[i] and (ctx.netrc or i in kv_lines or "://" in ctx.code[i]):
                     col = configsecrets.secret_col(ctx.code[i], ctx.netrc, anonymous.get(i, ()))
                     if col is not None:
                         issues.append(mk_issue(CONFIG_SECRET_RULE, path, i + 1, lines, col))

@@ -602,6 +602,11 @@ project is pre-1.0, so the 0.x API may still change.
   again to redact what the engine had redacted when it built them. It takes the findings built outside the engine
   alone now, as the npm package always has; the results are the same, every field of every finding, and a scan of this
   repository's Python source takes 15% less time again.
+- **A config or data file's lines are read where a test can report.** S-TOKEN and S-SECRET's key-value test ran on
+  every line of a config or data file, in Python; one pass over the whole text now finds the lines either can report
+  on (a token's, or a credential-named key's before a separator, or a URL's), and the other lines of a large data file
+  are passed over. The same findings, on 4,726 files; the config files of this repository's Python source are scanned
+  in a third of the time.
 - **The native transport speaks TLS 1.2 to a server that speaks nothing newer (tiny_https's second drop of Oct
   7).** `registry.npmjs.org` answers only TLS 1.2 from some networks, and its requests went through Python's
   transport there. tiny_https now offers TLS 1.2 next to 1.3 under the rules Lazaret asked for: ECDHE with AEAD

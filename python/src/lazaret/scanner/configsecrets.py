@@ -127,6 +127,10 @@ def comment_spans(content):
 KV_RE = re.compile(
     r"(?<![A-Za-z0-9_.\-])[\"']?([A-Za-z0-9_.\-]{1,128})[\"']?[ \t]*([:=])[ \t]*"
     r"(\"[^\"\n]*\"|'[^'\n]*'|[^\s\"',;#{}\[\]]+)")
+#: Where a key-value pair S-SECRET can report on may be, in the text lowered (a key is ASCII): a name ending as
+#: SECRET_KEY_RE's names end, then the separator. A line without it has no such pair (scan_config_file reads only
+#: the lines that have it, or a URL). (Lowered, not re.I: an alternation re.I searches is six times slower.)
+SECRET_KV_HINT_RE = re.compile(r"(?:password|passwd|passphrase|secret|token|key|pass|pwd|pat|auth)[\"']?[ \t]*[:=]")
 #: A key named like a credential: by its last word, or its last segment.
 SECRET_KEY_RE = re.compile(
     r"(?:password|passwd|passphrase|secret|token|(?:api|access|account|app|client|encryption|"
