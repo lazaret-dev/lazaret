@@ -109,8 +109,18 @@ Decisions (fixed):
   `core._xf_site_groups`), each package on its own work budget, on up to 8
   threads, the findings in the follower's order. A package the engine
   reports as failed (its budget spent, an internal error) gives no
-  cross-file finding, and neither does a call the engine refuses, as in the
-  npm package.
+  cross-file finding, and neither does a call the engine refuses, as in
+  the npm package. A function's body is read twice: with its strings
+  blanked, to find what the module defines, imports and exports, and as
+  written, for the received-code test, which reads strings itself
+  (`Module::code_of`; D-17, 0.1.9: lerna 10.0.1's `exec("git",
+  ["checkout", "--"].concat(files), execOpts)` read as `exec("   ", …)`, a
+  call that runs what it is given). A call of exec's whose first argument
+  is a literal, plain command line none of whose words is a program that
+  runs what it is given (`received::fixed_command`: an interpreter or a
+  shell, `_DL_RUNNERS`; a wrapper, `_HOOK_WRAPPERS`; a program that runs
+  the command its arguments name, `_CMD_RUNNERS`) runs none of the data
+  after it.
 - **The npm package** (0.1.8) loads `native/lazaret.wasm` with
   `js/src/lib/native.js` (`npm run build` makes it from `rust/`; the
   published package carries it). Everything the supply-chain tests answer —

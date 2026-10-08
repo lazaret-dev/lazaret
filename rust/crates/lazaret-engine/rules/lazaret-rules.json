@@ -1,6 +1,6 @@
 {
  "format": 1,
- "rule_set": "2.57.0",
+ "rule_set": "2.58.0",
  "source": "lazaret.scanner.core, extracted by scripts/make_rust_tables.py \u2014 do not edit",
  "values": {
   "ALWAYS_PRUNE_DIRS": {
@@ -4732,6 +4732,44 @@
   "_CHILD_PROCESS_RE": {
    "flags": "",
    "re": "['\\\"`](?:node:)?child_process['\\\"`]"
+  },
+  "_CMD_RUNNERS": {
+   "set": [
+    "arch",
+    "bunx",
+    "caffeinate",
+    "chroot",
+    "chrt",
+    "doas",
+    "firejail",
+    "flock",
+    "ionice",
+    "ltrace",
+    "mshta",
+    "npx",
+    "nsenter",
+    "parallel",
+    "pkexec",
+    "pnpx",
+    "prlimit",
+    "regsvr32",
+    "runas",
+    "rundll32",
+    "runuser",
+    "sandbox-exec",
+    "setsid",
+    "stdbuf",
+    "strace",
+    "su",
+    "systemd-run",
+    "taskset",
+    "timeout",
+    "unbuffer",
+    "unshare",
+    "watch",
+    "wsl",
+    "xargs"
+   ]
   },
   "_COMMENT_LINE_RULES": {
    "set": [

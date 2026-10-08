@@ -812,6 +812,16 @@ project is pre-1.0, so the 0.x API may still change.
 
 ### Fixed
 
+- **A program named in another file, given the data as its arguments, runs none of it (D-17; rule set 2.58.0).** lerna
+  10.0.1 was SUSPICIOUS: `gitCheckout(dirtyManifests, …)` calls a function of another file of the package that runs
+  `exec("git", ["checkout", "--"].concat(files), execOpts)` (its wrapper of execa), and the cross-file follower, which
+  read each function's body with its strings blanked, took it for one that runs what it is given. Its received-code
+  test now reads the body's code, and an exec whose first argument is a literal, plain command line none of whose
+  words is a program that runs what it is given (an interpreter or a shell, a wrapper such as `env` or `sudo`, or one
+  that runs the command its arguments name, such as `xargs`, `timeout` or `npx`) runs none of the data after it. The
+  data as the program, or handed to an interpreter or such a program, is still found. Measured: lerna is OK, and the
+  benchmark and the popular set are unchanged; of the 43 packages that generate, patch or install code D-9 was measured
+  on, now a set of the gates, none is SUSPICIOUS (30 OK, 13 WARN).
 - **The environment held or copied, read by a member's name, is that member (D-16; rule set 2.57.0).** prisma
   8.0.0-rc.21 was SUSPICIOUS: its `getApiBaseUrl(env = process.env)` reads `env.PRISMA_MANAGEMENT_API_URL`, and a
   parameter's default, an object's member and a copy (`{ ...process.env }`, `Object.assign({}, process.env)`) kept no
