@@ -2075,6 +2075,44 @@ exec, of a read and of `process.env[name]` are summaries too
 (`run('whoami')`, `getEnv('AWS_SECRET_ACCESS_KEY')`). A child process
 doesn't hold what it was given, nor a length the data it measures.
 
+**Copies and holders of the environment** (0.1.9, D-16). process.env's
+mark is kept by a name it is given, not by a parameter whose default it
+is, an object's member, a copy (`{ ...process.env }`, `Object.assign({},
+process.env)`) or what a call returns, and an object's members are read as
+the whole object, so a member of such a value read the whole environment:
+prisma 8.0.0-rc.21's `getApiBaseUrl(env = process.env)` reads
+`env.PRISMA_MANAGEMENT_API_URL`, and the Management API's answers that
+address reached were sent in an address of their own (SUSPICIOUS). Now a
+member of a value holding the whole environment and no mark is read by its
+name (`sc_member`): a variable's (capitals, digits and underscores;
+`npm_*`; the proxies', `env_var_name`) is that variable, as process.env's
+own member is; one with `env` in it (`env`, `environment`) is all of it;
+any other is not the environment (corepack 0.36.0's env file gives `{ env:
+<a copy>, path }`, and its caller's `localEnv?.path` is a path). A
+parameter is read so too: a value read through a member of it of such a
+name, or a method of its own called on it (not one of the built-in ones
+that give back what the object holds, `PASS_THROUGH`: `join`, `map`,
+`then`, `toString` …), holds the parameter's key with `MEMBER_KEY` set
+(`V::through_member`; `key_owner` and `key_index` read the key without
+it), and the function's summary keeps, for what it returns (`ret_params`)
+and for each sink a parameter reaches (`reach_member`), whether it holds
+the parameter only so; a call gives such a parameter its argument without
+the whole environment (`sc_through_member`). prisma's telemetry sender
+builds its event in `buildTelemetryEvent(payload, config, env)` from
+`env.platform`, `env.env.npm_config_user_agent` and
+`env.readProjectPackageJson()`, given `{ env: process.env, … }`. The copy
+or the holder sent whole, the holder's `env`, and a parameter returned or
+sent whole (or beside a member of it) are still the whole environment. A
+holder of the environment under another name, read by that name and sent
+(`{ data: process.env }`, then `payload.data`, here or in a function given
+it), is no longer it.
+
+**A JSON file given require** (0.1.9, D-18) is parsed and runs nothing:
+the module-name sink leaves out a `require` whose argument ends in a
+literal ending in `.json` (`sc_json_module`; corepack 0.36.0 requires the
+package.json of the package manager it downloaded,
+`require(path.join(tmpFolder, 'package.json'))`).
+
 **The strongest send.** A value keeps the first read of each kind, and a
 credential store (`_CRED_STORE_RE`, not a public key) apart from other
 files. A send is reported by the strongest data it carries — the

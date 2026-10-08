@@ -801,6 +801,24 @@ project is pre-1.0, so the 0.x API may still change.
 
 ### Fixed
 
+- **The environment held or copied, read by a member's name, is that member (D-16; rule set 2.57.0).** prisma
+  8.0.0-rc.21 was SUSPICIOUS: its `getApiBaseUrl(env = process.env)` reads `env.PRISMA_MANAGEMENT_API_URL`, and a
+  parameter's default, an object's member and a copy (`{ ...process.env }`, `Object.assign({}, process.env)`) kept no
+  mark of being process.env, so the member read as the whole environment, and the Management API's answers it reached
+  were sent in an address; its telemetry sender, which builds its event from a parameter given `{ env: process.env, …
+  }` (`env.platform`, `env.env.npm_config_user_agent`, `env.readProjectPackageJson()`), was next. A member of such a
+  value read by a variable's name (capitals, digits and underscores; `npm_*`; the proxies') is now that variable, as
+  `process.env.X` is; one with `env` in its name is still all of it; any other member is not the environment; and a
+  function that reads a parameter so, or calls a method of its own on it, gives its return and its sends none of the
+  environment a call hands it. The copy or the holder sent whole, and a parameter returned or sent whole, are still
+  the whole environment; a holder under another name, read by that name and sent (`{ data: process.env }`, then
+  `payload.data`), is no longer found. Measured: prisma and corepack are OK, the benchmark and the popular set
+  unchanged; of the 20,422 JavaScript files of the npm packages installed here, only Node's own corepack changes.
+- **A JSON file given require is parsed, not a module load (D-18; rule set 2.57.0).** corepack 0.36.0 was SUSPICIOUS:
+  it requires the package.json of the package manager it downloaded (`require(path.join(tmpFolder, 'package.json'))`),
+  which read as loading a module named by data it receives; and its env file's `{ env: <a copy of the environment>,
+  path }` made the caller's `localEnv?.path` the whole environment (D-16). A `require` whose argument ends in a
+  literal ending in `.json` is now no module load.
 - **A Python comprehension over the environment reads the lists its test names (B-6; rule set 2.55.0).**
   `{k: v for k, v in os.environ.items() if any(p in k for p in PATTERNS)}` with `PATTERNS = ['TOKEN', 'SECRET']` read
   as a selection of variables, so sending it had no finding; with the words written in the test it was the whole

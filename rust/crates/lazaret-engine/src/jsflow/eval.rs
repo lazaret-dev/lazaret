@@ -164,7 +164,7 @@ impl<'p> Eval<'p> {
                 let mine = self.p.scope_fns(fid);
                 let outer = self.p.scope_fns(bfid);
                 for &key in v.params.iter() {
-                    let owner = (key / PARAM_BASE) as FnId;
+                    let owner = key_owner(key);
                     if mine.contains(&owner) && !outer.contains(&owner) {
                         self.pw_adds.push((key, b));
                     }
@@ -887,7 +887,7 @@ impl<'p> Eval<'p> {
             out = out.union(rs);
         }
         for (&key, &(clean, built)) in &f.ret_outer {
-            if self.ancestors.contains(&((key / PARAM_BASE) as FnId)) {
+            if self.ancestors.contains(&key_owner(key)) {
                 out = out.union(&V::param(key, clean, built, 0));
             }
         }
@@ -1568,6 +1568,9 @@ impl<'p> Eval<'p> {
                     };
                     let needs = entry.3 && !t.built;
                     if self.p.cfg.supply.is_some() {
+                        // (a sink the parameter reaches through a member alone: not the whole environment, D-16)
+                        let member = self.p.fns[fid as usize].reach_member.get(&(i, cat)).copied().unwrap_or(false);
+                        let t = if member { super::supply::sc_through_member(&t) } else { t.clone() };
                         if cat == super::supply::EXEC_CMD || cat == super::supply::READ_PATH || cat == super::supply::ENV_NAME {
                             // (the script's wrappers: of exec given a command line, of a
                             // read given a path outside the package, of getEnv given a name)
@@ -1684,12 +1687,19 @@ impl<'p> Eval<'p> {
                         .with_sc(rs.sc.clone()),
                 );
             }
-            let ret_params: Vec<(usize, (u8, bool))> = f.ret_params.iter().map(|(&i, &x)| (i, x)).collect();
+            let ret_params: Vec<(usize, (u8, bool, bool))> = f.ret_params.iter().map(|(&i, &x)| (i, x)).collect();
             let ret_outer: Vec<(u64, (u8, bool))> = f.ret_outer.iter().map(|(&k, &x)| (k, x)).collect();
-            for (i, (clean, built)) in ret_params {
+            for (i, (clean, built, member)) in ret_params {
                 let mut b = bound(args, spread, rest, i);
                 if b.tainted() {
                     b = b.plain();
+                    // (returned through a member of a name that is not the environment's: not the whole of it, D-16)
+                    if member && self.p.cfg.supply.is_some() {
+                        b = super::supply::sc_through_member(&b);
+                        if !b.tainted() {
+                            continue;
+                        }
+                    }
                     if clean != 0 {
                         b = b.sanitize(clean);
                     }
@@ -1697,7 +1707,7 @@ impl<'p> Eval<'p> {
                 }
             }
             for (key, (clean, built)) in ret_outer {
-                if self.ancestors.contains(&((key / PARAM_BASE) as FnId)) {
+                if self.ancestors.contains(&key_owner(key)) {
                     out = out.union(&V::param(key, clean, built, 0));
                 }
             }
@@ -1812,22 +1822,29 @@ impl<'p> Eval<'p> {
         let Eval { p, fid, emit, reach_adds, ret_val, shared_writes, reads, uses, pw_adds, pf_adds, .. } = self;
         let mut changes: Changes = BTreeMap::new();
         for (key, b) in pw_adds {
-            let owner = (key / PARAM_BASE) as FnId;
-            let i = (key % PARAM_BASE) as usize;
+            let owner = key_owner(key);
+            let i = key_index(key);
             if p.fns[owner as usize].param_writes.entry(i).or_default().insert(b) {
                 changes.entry(owner).or_default().1.insert(i);
             }
         }
         for (key, keys, at) in pf_adds {
-            let owner = (key / PARAM_BASE) as FnId;
-            let i = (key % PARAM_BASE) as usize;
+            let owner = key_owner(key);
+            let i = key_index(key);
             if p.fns[owner as usize].param_files.entry(i).or_default().insert((keys, at)) {
                 changes.entry(owner).or_default().1.insert(i);
             }
         }
         for (key, cat, entry) in reach_adds {
-            let owner = (key / PARAM_BASE) as FnId;
-            let i = (key % PARAM_BASE) as usize;
+            let owner = key_owner(key);
+            let i = key_index(key);
+            // (reached through a member alone, D-16; once whole, whole)
+            let member = key & MEMBER_KEY != 0;
+            let rm = p.fns[owner as usize].reach_member.entry((i, cat)).or_insert(member);
+            if *rm && !member {
+                *rm = false;
+                changes.entry(owner).or_default().1.insert(i);
+            }
             let d = p.fns[owner as usize].reach.entry(i).or_default();
             let replace = match d.get(&cat) {
                 None => true,
@@ -1865,16 +1882,20 @@ impl<'p> Eval<'p> {
                         }
                     }
                 }
+                // (a parameter returned through a member alone, and whole: whole; MEMBER_KEY, D-16)
+                let whole: BTreeSet<u64> = rv.params.iter().filter(|&&k| k & MEMBER_KEY == 0).copied().collect();
                 for &key in rv.params.iter() {
                     let f = &mut p.fns[fid as usize];
                     let merged = |old: Option<(u8, bool)>| match old {
                         None => (rv.clean, rv.built),
                         Some(o) => (o.0 & rv.clean, o.1 || rv.built),
                     };
-                    if (key / PARAM_BASE) as FnId == fid {
-                        let k = (key % PARAM_BASE) as usize;
+                    if key_owner(key) == fid {
+                        let k = key_index(key);
+                        let member = key & MEMBER_KEY != 0 && !whole.contains(&(key & !MEMBER_KEY));
                         let old = f.ret_params.get(&k).copied();
-                        let new = merged(old);
+                        let (clean, built) = merged(old.map(|o| (o.0, o.1)));
+                        let new = (clean, built, old.map_or(member, |o| o.2 && member));
                         if old != Some(new) {
                             f.ret_params.insert(k, new);
                             changes.entry(fid).or_default().1.insert(k);

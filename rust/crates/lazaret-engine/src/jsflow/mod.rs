@@ -41,6 +41,20 @@ pub const MAX_OPEN: usize = 4;
 pub const MAX_ITERS: u32 = 50;
 pub const MAX_PARAMS: usize = 64;
 pub const PARAM_BASE: u64 = 1 << 20;
+/// A parameter's key, set on a value read through a member of the parameter whose name is not the environment's
+/// (the supply-chain model, D-16: `env.platform`, `env.readConfig()`): what a call gives such a parameter is,
+/// there, its value without the whole environment.
+pub const MEMBER_KEY: u64 = 1 << 63;
+
+/// The function a parameter's key is of.
+pub fn key_owner(key: u64) -> FnId {
+    ((key & !MEMBER_KEY) / PARAM_BASE) as FnId
+}
+
+/// A parameter's key's index among its function's parameters.
+pub fn key_index(key: u64) -> usize {
+    ((key & !MEMBER_KEY) % PARAM_BASE) as usize
+}
 pub const EXPORT_HOPS: u32 = 8;
 pub const ALIAS_DEPTH: u32 = 16;
 pub const WORK_BASE: u64 = 200_000;
@@ -386,7 +400,7 @@ impl V {
         if self.params.is_empty() {
             return self.clone();
         }
-        let params: Vec<u64> = self.params.iter().copied().filter(|&k| fids.contains(&((k / PARAM_BASE) as u32))).collect();
+        let params: Vec<u64> = self.params.iter().copied().filter(|&k| fids.contains(&key_owner(k))).collect();
         if params.len() == self.params.len() {
             return self.clone();
         }
@@ -394,6 +408,19 @@ impl V {
             return V::empty();
         }
         V::new(self.src, self.origin, self.fname.clone(), self.via.clone(), Rc::from(params), self.clean, self.built, self.kind)
+            .with_sc(self.sc.clone())
+    }
+
+    /// The value read through a member of a name that is not the environment's: its parameters' keys with
+    /// MEMBER_KEY set (D-16).
+    pub fn through_member(&self) -> V {
+        if self.params.iter().all(|&k| k & MEMBER_KEY != 0) {
+            return self.clone();
+        }
+        let mut keys: Vec<u64> = self.params.iter().map(|&k| k | MEMBER_KEY).collect();
+        keys.sort_unstable();
+        keys.dedup();
+        V::new(self.src, self.origin, self.fname.clone(), self.via.clone(), Rc::from(keys), self.clean, self.built, self.kind)
             .with_sc(self.sc.clone())
     }
 
@@ -527,8 +554,10 @@ pub struct Func {
     pub route: u8,
     /// param index -> category -> the sink it reaches
     pub reach: BTreeMap<usize, BTreeMap<u8, Entry>>,
-    /// param index -> (clean, built) of the value it returns
-    pub ret_params: BTreeMap<usize, (u8, bool)>,
+    /// (param index, category) -> whether it reaches the sink through a member alone (MEMBER_KEY, D-16)
+    pub reach_member: BTreeMap<(usize, u8), bool>,
+    /// param index -> (clean, built, through a member alone: MEMBER_KEY) of the value it returns
+    pub ret_params: BTreeMap<usize, (u8, bool, bool)>,
     /// request data it returns
     pub ret_src: Option<V>,
     /// key of an enclosing function's parameter it returns -> (clean, built)
@@ -1166,6 +1195,7 @@ impl Program {
             is_module: true,
             route: 0,
             reach: BTreeMap::new(),
+            reach_member: BTreeMap::new(),
             ret_params: BTreeMap::new(),
             ret_src: None,
             ret_outer: BTreeMap::new(),
@@ -1645,6 +1675,7 @@ impl Program {
             is_module: false,
             route: 0,
             reach: BTreeMap::new(),
+            reach_member: BTreeMap::new(),
             ret_params: BTreeMap::new(),
             ret_src: None,
             ret_outer: BTreeMap::new(),

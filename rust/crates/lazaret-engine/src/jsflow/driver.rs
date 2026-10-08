@@ -447,7 +447,7 @@ pub(super) fn fixpoint(prog: &mut Program, findings: &mut Vec<Out>) -> Vec<Out> 
                 // parameter of a function around it returned
                 let hit = *src
                     || !params.is_disjoint(&used)
-                    || outer.iter().any(|&k| prog.scope_fns(c).contains(&((k / PARAM_BASE) as FnId)));
+                    || outer.iter().any(|&k| prog.scope_fns(c).contains(&super::key_owner(k)));
                 if hit {
                     deps.push(c);
                 }
