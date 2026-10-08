@@ -99,6 +99,11 @@ MAX_MEMBER = _env_number("LAZARET_MAX_SOURCE_BYTES", 16_000_000)
 MAX_FILES = 20_000         # files per package (numpy's sdist alone has >4,000)
 SAMPLE = 8192              # header/entropy sample read from oversized files
 # Stored scans from another engine version are scanned again (has_scan).
+# 2.50: what a JavaScript script puts into a container, the container holds
+#      on the tree (D-3): a Map's, a Headers' or a URLSearchParams' set, a
+#      Set's add, a FormData's append, a splice's items, a fill, a member's
+#      container (`this.items.push(x)`), Object.assign's and Reflect.set's
+#      target; only an array's push and unshift on a name were followed
 # 2.49: the modules a package's Python code imports followed to the end (BR-5):
 #      the import-time walk stopped at 300 modules seen and setup.py's at 200,
 #      so padding hid a module from its test; each module of an import list,
@@ -292,7 +297,7 @@ SAMPLE = 8192              # header/entropy sample read from oversized files
 #      entry points and hook targets, Python install scripts
 # 2.3: verdict tiers, decoded hex, install-script inspection; 2.2:
 #      verdict-integrity; 2.1: binary-artifact awareness
-ENGINE_VERSION = "2.49.0"
+ENGINE_VERSION = "2.50.0"
 
 # ---------------- The content memo (P-2a, registry/contentcache.py) ----------------
 # One per scan_package run: the engine answers once for content several of a

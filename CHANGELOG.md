@@ -755,6 +755,19 @@ project is pre-1.0, so the 0.x API may still change.
 
 ### Fixed
 
+- **What a JavaScript script puts into a container, the container holds (D-3; rule set 2.50.0).** The data flow on
+  the JavaScript tree followed a value into an array's `push` and `unshift` alone, so an install script or code run
+  at import that put the whole environment (or the host name, or a file's bytes) into a `FormData`, a `Map`, a `Set`
+  or a `URLSearchParams`, or `Object.assign`ed it into an object, and sent that, had no finding at all: the tree
+  answered, and the text follower, which reads `x.append(…)` and `x.add(…)`, answers only what the tree cannot read.
+  A container's `set`, `add`, `append`, `splice` (its items) and `fill` now put what they are given into it, and
+  `Object.assign`, `Object.defineProperty(ies)`, `Reflect.set` and `Reflect.defineProperty` into their first
+  argument, when it is a name, for what is sent, what is received and run and what is decoded and run alike;
+  Python's model had them. A member's container (`o.list.push(x)`, `this.items.push(x)`) is not followed yet: tried,
+  it joined unrelated flows in vite's bundle and monaco-editor's loader, two of the popular set's releases
+  SUSPICIOUS. Measured on the benchmark (945 releases) and the popular set (1,205): no verdict moved; one malicious
+  release's finding now names the upload its code builds (react-milton 19.1.1: the host name and files appended to a
+  `FormData`, CRITICAL as before).
 - **What a package's Python code imports is followed to the end (BR-5; rule set 2.49.0).** Which modules of a wheel
   or an sdist get the import-time test (SC-IMPORT-RISK) is decided by following the imports of its top-level modules,
   and which modules pip runs to install an sdist get the install-script test (SC-INSTALL-HOOK) by following

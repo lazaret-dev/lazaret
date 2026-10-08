@@ -2054,7 +2054,15 @@ to follow them: a callback of anything but the script's own functions gets
 what the call holds (a read's callback what was read: `exec(c, (e, out) =>
 …)`); a parameter written to a closure's variable is in the function's
 summary (`res.on('data', d => body += d)`); `this.x` and a name no
-declaration binds are bindings of their own; the script's own wrappers of
+declaration binds are bindings of their own; what a container's `push`,
+`unshift`, `splice` (its items), `set`, `add`, `append` or `fill` is given
+the container holds, and so does the target of `Object.assign`,
+`Object.defineProperty(ies)`, `Reflect.set` and `Reflect.defineProperty`,
+when it is a name (D-3, 0.1.9: only an array's `push` and `unshift` were
+followed, so the environment put into a `FormData`, a `Map` or a `Set`
+and sent was not seen; a member's container, `o.list.push(x)`, is not
+followed: put into the object that holds it, it joined unrelated flows in
+vite's bundle and monaco-editor's loader); the script's own wrappers of
 exec, of a read and of `process.env[name]` are summaries too
 (`run('whoami')`, `getEnv('AWS_SECRET_ACCESS_KEY')`). A child process
 doesn't hold what it was given, nor a length the data it measures.
