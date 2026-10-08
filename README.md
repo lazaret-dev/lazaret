@@ -52,6 +52,7 @@ lazaret . --max-source-bytes 32000000  # read larger source files (default 16,00
 lazaret . --sarif out.sarif         # SARIF 2.1.0 for GitHub code scanning
 lazaret . --baseline prev.json      # mark issues not in a previous report as new
 lazaret . --no-redact-secrets       # keep credential lines in reports (default: redacted)
+lazaret . --verify-secrets          # ask each secret's provider whether it is live (off by default)
 lazaret . --taint-config taint.json # extend the taint model (see "Custom taint config")
 lazaret scan github:owner/repo@v1.2.3  # a repository at a commit (also gitlab:group/project@ref)
 lazaret extension.vsix                # a VS Code extension's package
@@ -72,6 +73,25 @@ matching because the placeholder is deterministic for a given rule + secret.
 Pass `--no-redact-secrets` when you are auditing a leak and need the exact
 bytes in the report. It applies to project scans only: registry results are
 always redacted, because they are stored (see *Registry scanning*).
+
+**Live secrets (`--verify-secrets`, off by default):** after the scan, each
+secret finding is asked about where a provider can say whether it is live: a
+GitHub, Slack, Stripe, npm, OpenAI or Anthropic token, or an AWS key pair (a
+key id and a secret key in the same file). Each credential goes to its own
+provider alone, over HTTPS, in a call that only authenticates (GitHub's
+`GET /user`, Slack's `auth.test`, AWS STS's `GetCallerIdentity`…), never
+following a redirect; before the first call a note on stderr says which
+providers will be asked and where each credential goes. A finding then says
+what its provider said: **live** (a BLOCKER, with the account the provider
+names: revoke it now), **rejected** (kept: revoke it anyway, the history keeps
+it) or **unknown** (kept, and why: no answer in time, a rate limit…); the JSON
+report's `verification` and each finding's `verified` say the same, and SARIF
+carries `verified` in a result's properties. A Google API key, a JWT, a private
+key or a database's password has no provider to ask; the report counts those.
+The value itself is never written anywhere: it is read again from the file, in
+memory, for the call. The flag works for any target, a `github:` or `gitlab:`
+repository too; the guard, the registry auditor, the MCP server and the
+pre-commit hook never verify.
 
 **Baselines:** a baseline must be a report this engine wrote, and a hostile
 repo must not be able to supply one (audit G17), because a hand-crafted

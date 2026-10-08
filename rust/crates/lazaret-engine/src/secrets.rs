@@ -464,6 +464,134 @@ pub fn identify(providers: &[Provider], text: &[u32]) -> Vec<String> {
         .collect()
 }
 
+// ------------------------------------------------------------------------------------------------ in a file's lines
+
+/// The most pairs of a credential of two parts (AWS's key id and secret key) asked about for one file.
+pub const MAX_PAIRS: usize = 8;
+/// The most ids, and the most secrets, of a credential of two parts that one file's lines are read for.
+pub const MAX_HALVES: usize = 64;
+
+/// A credential a provider names in a file's lines: its parts (in the table's order) and the lines it is on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Found {
+    pub provider: String,
+    pub parts: Vec<(String, Vec<u32>)>,
+    pub lines: Vec<i64>,
+}
+
+fn word_char(c: u32) -> bool {
+    matches!(c, 0x30..=0x39 | 0x41..=0x5A | 0x61..=0x7A) || [b'_', b'-', b'+', b'/'].iter().any(|&b| c == b as u32)
+}
+
+/// The words of a line a credential may be: its longest runs of letters, digits and `_-+/` (a credential holds no other
+/// character the table's patterns take: no quote, space, `=`, `:`, `@` or `.`), and, of a run with a slash in it, the
+/// pieces between its slashes too (a token at the end of a URL's path); none longer than [`MAX_CREDENTIAL`].
+fn words(line: &[u32]) -> Vec<&[u32]> {
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < line.len() {
+        if !word_char(line[i]) {
+            i += 1;
+            continue;
+        }
+        let start = i;
+        while i < line.len() && word_char(line[i]) {
+            i += 1;
+        }
+        let run = &line[start..i];
+        if run.len() <= MAX_CREDENTIAL {
+            out.push(run);
+        }
+        if run.contains(&('/' as u32)) {
+            out.extend(run.split(|&c| c == '/' as u32).filter(|w| !w.is_empty() && w.len() <= MAX_CREDENTIAL));
+        }
+    }
+    out
+}
+
+fn found(out: &mut Vec<Found>, provider: &str, parts: Vec<(String, Vec<u32>)>, lines: &[i64]) {
+    match out.iter_mut().find(|f| f.provider == provider && f.parts == parts) {
+        Some(f) => {
+            for n in lines {
+                if !f.lines.contains(n) {
+                    f.lines.push(*n);
+                }
+            }
+            f.lines.sort_unstable();
+        }
+        None => {
+            let mut lines = lines.to_vec();
+            lines.sort_unstable();
+            lines.dedup();
+            out.push(Found { provider: provider.to_string(), parts, lines })
+        }
+    }
+}
+
+/// The values of `lines`' words that `rx` matches all of, each with the lines it is on (at most [`MAX_HALVES`]).
+fn halves(lines: &[(i64, Vec<u32>)], rx: &Regex) -> Vec<(Vec<u32>, Vec<i64>)> {
+    let mut out: Vec<(Vec<u32>, Vec<i64>)> = Vec::new();
+    for (n, text) in lines {
+        for w in words(text) {
+            if rx.fullmatch(w).is_none() {
+                continue;
+            }
+            let room = out.len() < MAX_HALVES;
+            match out.iter_mut().find(|(v, _)| v.as_slice() == w) {
+                Some((_, at)) if !at.contains(n) => at.push(*n),
+                Some(_) => {}
+                None if room => out.push((w.to_vec(), vec![*n])),
+                None => {}
+            }
+        }
+    }
+    out
+}
+
+/// The credentials the providers name in `lines` (a file's lines that hold a secret finding: (number, text)), each once,
+/// with the lines it is on: a one-part provider's where a word is all of one ([`identify`]); a provider's of an id and a
+/// secret (AWS's key pair) an id and a secret among the words, paired nearest lines first, at most [`MAX_PAIRS`] pairs.
+/// Only what is on the lines given is read: a pair is of one file, never of two.
+pub fn find(providers: &[Provider], lines: &[(i64, Vec<u32>)]) -> Vec<Found> {
+    let mut out: Vec<Found> = Vec::new();
+    for (n, text) in lines {
+        for w in words(text) {
+            for pid in identify(providers, w) {
+                found(&mut out, &pid, vec![("secret".to_string(), w.to_vec())], &[*n]);
+            }
+        }
+    }
+    for q in providers {
+        let mut names = q.part_names();
+        names.sort_unstable();
+        if names != ["id", "secret"] {
+            continue;
+        }
+        let rx = |name: &str| &q.parts.iter().find(|(n, _)| n == name).expect("the part is there").1;
+        let (ids, secrets) = (halves(lines, rx("id")), halves(lines, rx("secret")));
+        let mut pairs: Vec<(i64, usize, usize)> = Vec::new();
+        for (a, (id, id_lines)) in ids.iter().enumerate() {
+            for (b, (secret, secret_lines)) in secrets.iter().enumerate() {
+                if id == secret {
+                    continue;
+                }
+                let near = id_lines.iter().flat_map(|x| secret_lines.iter().map(move |y| (x - y).abs())).min().unwrap_or(i64::MAX);
+                pairs.push((near, a, b));
+            }
+        }
+        pairs.sort_unstable();
+        for (_, a, b) in pairs.into_iter().take(MAX_PAIRS) {
+            let parts = q.parts.iter().map(|(name, _)| {
+                let value = if name == "id" { &ids[a].0 } else { &secrets[b].0 };
+                (name.clone(), value.clone())
+            }).collect();
+            let at: Vec<i64> = ids[a].1.iter().chain(&secrets[b].1).copied().collect();
+            found(&mut out, &q.id, parts, &at);
+        }
+    }
+    out
+}
+
 // ------------------------------------------------------------------------------------------------ the request
 
 /// Percent-encoding of everything but letters, digits and `-_.~` (Python's `urllib.parse.quote(t, safe="")`).

@@ -241,6 +241,87 @@ fn hmac_is_rfc_4231s() {
                "60e431591ee0b67f0d8a26aacbf5b77f8e0bc6213728c5140546040f0ee37f54");
 }
 
+// ------------------------------------------------------------------------------------------------ in a file's lines
+
+type Seen = Vec<(String, Vec<(String, String)>, Vec<i64>)>;
+
+fn found_in(lines: &[(i64, &str)]) -> Seen {
+    let p = pack::current();
+    let t = table(&p).as_ref().unwrap();
+    let lines: Vec<(i64, Vec<u32>)> = lines.iter().map(|(n, t)| (*n, cps(t))).collect();
+    find(t, &lines)
+        .into_iter()
+        .map(|f| (f.provider, f.parts.into_iter().map(|(n, v)| (n, pystr::to_string(&v))).collect(), f.lines))
+        .collect()
+}
+
+fn one(pid: &str, secret: &str, lines: &[i64]) -> (String, Vec<(String, String)>, Vec<i64>) {
+    (pid.to_string(), vec![("secret".to_string(), secret.to_string())], lines.to_vec())
+}
+
+fn pair(id: &str, secret: &str, lines: &[i64]) -> (String, Vec<(String, String)>, Vec<i64>) {
+    ("aws".to_string(), vec![("id".to_string(), id.to_string()), ("secret".to_string(), secret.to_string())], lines.to_vec())
+}
+
+#[test]
+fn a_credential_is_a_word_of_its_line() {
+    // in quotes, after `=` or `:`, in a header, in a URL's userinfo or at the end of its path, beside another
+    for line in [format!(r#"token = "{GITHUB}";"#), format!("GITHUB_TOKEN={GITHUB}"), format!("Authorization: Bearer {GITHUB}"),
+                 format!("https://x:{GITHUB}@github.com/a"), format!("https://example.invalid/hook/{GITHUB}"),
+                 format!("{GITHUB},{GITHUB}"), format!("'{GITHUB}'.strip()")] {
+        assert_eq!(found_in(&[(3, &line)]), vec![one("github", GITHUB, &[3])], "{line}");
+    }
+    // a word that runs on past the format, or starts before it, is not one; nor is a word too short
+    for line in [format!("x{GITHUB}"), format!("{GITHUB}_a"), format!("{GITHUB}-a"), "ghp_short".to_string(), String::new()] {
+        assert!(found_in(&[(1, &line)]).is_empty(), "{line}");
+    }
+    // every provider of one part, each once, with every line it is on
+    let slack = "xox\x62-1234567890-abcdefghij";
+    let lines = [(1, format!("a = '{GITHUB}' # {slack}")), (7, format!("b = '{GITHUB}'")), (9, "c = 'sk-ant-api03-Ab1_Ab1_Ab1_Ab1_Ab1_Ab1_'".into())];
+    let lines: Vec<(i64, &str)> = lines.iter().map(|(n, t)| (*n, t.as_str())).collect();
+    assert_eq!(found_in(&lines), vec![one("github", GITHUB, &[1, 7]), one("slack", slack, &[1]),
+                                      one("anthropic", "sk-ant-api03-Ab1_Ab1_Ab1_Ab1_Ab1_Ab1_", &[9])]);
+}
+
+#[test]
+fn an_aws_key_is_paired_with_the_nearest_secret_of_its_file() {
+    let id = format!(r#"AWS_ACCESS_KEY_ID = "{AWS_ID}""#);
+    let secret = format!(r#"AWS_SECRET_ACCESS_KEY = "{AWS_SECRET}""#);
+    assert_eq!(found_in(&[(5, &id), (6, &secret)]), vec![pair(AWS_ID, AWS_SECRET, &[5, 6])]);
+    assert_eq!(found_in(&[(2, &format!("{AWS_ID}:{AWS_SECRET}"))]), vec![pair(AWS_ID, AWS_SECRET, &[2])]);
+    // an id alone, or a secret alone, is not asked about: a pair is of one file's lines
+    assert!(found_in(&[(5, &id)]).is_empty());
+    assert!(found_in(&[(6, &secret)]).is_empty());
+    // two secrets: the nearer first; two ids and two secrets: four pairs, nearest first
+    let far = "abcdefghijABCDEFGHIJ\x30123456789/+abcdefgh";
+    assert_eq!(found_in(&[(1, &format!("s = '{far}'")), (10, &id), (11, &secret)]),
+               vec![pair(AWS_ID, AWS_SECRET, &[10, 11]), pair(AWS_ID, far, &[1, 10])]);
+    let id2 = "AKI\x41ZZZZZZZZZZZZZZZZ";
+    let got = found_in(&[(1, &id), (2, &secret), (40, &format!("k = '{id2}'")), (41, &format!("v = '{far}'"))]);
+    assert_eq!(got, vec![pair(AWS_ID, AWS_SECRET, &[1, 2]), pair(id2, far, &[40, 41]), pair(id2, AWS_SECRET, &[2, 40]),
+                         pair(AWS_ID, far, &[1, 41])]);
+}
+
+#[test]
+fn the_pairs_of_a_file_are_bounded() {
+    // many ids and many secrets: MAX_PAIRS pairs at most, of MAX_HALVES of each read
+    let lines: Vec<(i64, String)> = (0..200)
+        .map(|k| (k, format!("AKIA{:016} {:040}", k, k)))
+        .collect();
+    let lines: Vec<(i64, &str)> = lines.iter().map(|(n, t)| (*n, t.as_str())).collect();
+    let got = found_in(&lines);
+    assert_eq!(got.len(), MAX_PAIRS);
+    assert!(got.iter().all(|(pid, parts, at)| pid == "aws" && parts.len() == 2 && at.len() == 1));
+}
+
+#[test]
+fn a_long_line_is_read_in_linear_time_and_its_long_runs_are_not_words() {
+    let long = format!("{} {GITHUB} {}", "a".repeat(600), "b/".repeat(100_000));
+    let started = std::time::Instant::now();
+    assert_eq!(found_in(&[(1, &long)]), vec![one("github", GITHUB, &[1])]);
+    assert!(started.elapsed().as_secs() < 5);
+}
+
 // ------------------------------------------------------------------------------------------------ the answers
 
 fn judged(id: &str, status: i64, body: &str, truncated: bool) -> (&'static str, String, Option<String>) {

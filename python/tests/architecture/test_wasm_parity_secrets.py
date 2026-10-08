@@ -1,8 +1,9 @@
 """The npm package's engine is the native engine (see test_wasm_parity), for live secret verification's calls too (V-1 stage 2:
 the table and the logic in the engine, one copy for both packages): the WebAssembly build against the native library on
 `secrets.providers`, `secrets.identify`, `secrets.request` (every provider, AWS's signature at several times, credentials not in
-the format) and `secrets.judge` (every provider's answers, cut and whole, and hostile bodies). Skipped where node, the
-WebAssembly build or the native library is missing.
+the format), `secrets.judge` (every provider's answers, cut and whole, and hostile bodies) and `secrets.find` (the credentials
+of a file's lines: words, AWS's pairs, long and odd lines). Skipped where node, the WebAssembly build or the native library is
+missing.
 """
 import json
 import unittest
@@ -22,6 +23,20 @@ BODIES = [b"", b"not json", b'{"login": "octocat"}', b'{"ok": true, "user": "bot
           b"<Error><Code>Throttling</Code></Error>", b"<Arn>arn:aws:iam::1:user/a</Arn>", b"<Arn>caf\xc3\xa9\xff</Arn>",
           b'{"login": "' + b"x" * 70 + b"octocat" * 60 + b'", "user": "octobotocat-bot"}', b"<Arn>bot" + b"octocat" * 40 + b"</Arn>"]
 
+#: a file's flagged lines, as `lazaret scan --verify-secrets` hands them to `secrets.find`: (line number, text)
+GITHUB = SAMPLES["github"]
+FIND = [
+    [(2, f'GITHUB_TOKEN = "{GITHUB}"'), (3, f'slack = "{SAMPLES["slack"]}"'), (4, f'h = {{"Authorization": "Bearer {SAMPLES["stripe"]}"}}'),
+     (5, f'AWS_ACCESS_KEY_ID = "{AWS["id"]}"'), (6, f'AWS_SECRET_ACCESS_KEY = "{AWS["secret"]}"')],
+    [(1, f"https://x:{GITHUB}@github.com/a https://example.invalid/hook/{GITHUB} {SAMPLES['openai']},{SAMPLES['anthropic']}")],
+    [(1, f"{AWS['id']} {AWS['secret']}"), (40, "AKI\x41ZZZZZZZZZZZZZZZZ"), (41, "abcdefghijABCDEFGHIJ\x30123456789/+abcdefgh")],
+    [(k, f"AKIA{k:016} {k:040}") for k in range(100)],
+    [(7, "a" * 600 + f" {GITHUB} " + "b/" * 5000)],
+    [(9, f"caf\u00e9 \u2028 {GITHUB}\u00a0{SAMPLES['npm']} \U0001f600")],
+    [(1, f"x{GITHUB}"), (2, f"{GITHUB}_a"), (3, "ghp_short"), (4, "")],
+    [(1, "")],
+]
+
 
 def calls():
     out = [("secrets.providers", {}, "")]
@@ -32,6 +47,8 @@ def calls():
             out.append(("secrets.request", {"provider": pid, "parts": parts, "time": "20261003T120000Z"}, ""))
     for time in ("20261003T120000Z", "20150830T123600Z", "20991231T235959Z"):
         out.append(("secrets.request", {"provider": "aws", "parts": AWS, "time": time}, ""))
+    for lines in FIND:
+        out.append(("secrets.find", {"lines": [n for n, _ in lines]}, "\n".join(t for _, t in lines)))
     for pid in list(SAMPLES) + ["aws"]:
         for status in (200, 400, 401, 403, 429, 500, 0):
             for body in BODIES:
@@ -56,6 +73,7 @@ class WasmSecretsParityTests(unittest.TestCase):
         answers = [_native.call(*c) for c in cs[:40]]
         self.assertTrue(any(isinstance(a, dict) and "authorization" in json.dumps(a) for a in answers))
         self.assertTrue(any(isinstance(a, dict) and "refused" in a for a in answers))
+        self.assertTrue(any(c[0] == "secrets.find" and _native.call(*c) for c in cs))
 
 
 if __name__ == "__main__":

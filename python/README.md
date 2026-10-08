@@ -7,6 +7,7 @@ pip install lazaret
 lazaret path/to/project                 # scan; writes lazaret-report.{html,json}
 lazaret . --ci --sarif out.sarif        # quality gate for CI, SARIF for code scanning
 lazaret . --deps                        # also audit node_modules and site-packages
+lazaret . --verify-secrets              # ask each secret's provider whether it is live
 lazaret scan github:owner/repo@v1.2.3   # a GitHub or GitLab repository at a commit
 lazaret --extensions                    # the VS Code (Cursor, VSCodium, …) extensions installed here
 lazaret-registry scan npm:left-pad      # audit a published npm / PyPI package

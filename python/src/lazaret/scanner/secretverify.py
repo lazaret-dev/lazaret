@@ -31,7 +31,7 @@ request that asks it (AWS's signed with Signature Version 4) and what its answer
 `secrets.request` and `secrets.judge` (rust/crates/lazaret-engine/src/secrets.rs). This module keeps what is about a run (the
 cache, the budgets, the calls in flight) and makes the call (`secretverify_http`: over lazaret-net, the native library's client,
 or urllib where the native client is not used); `validate` is the table's rules, which `scripts/make_rust_tables.py --check`
-holds the pack to. Nothing calls it yet: `lazaret scan --verify-secrets` is stage 2's third step. Never in `guard`, the registry
+holds the pack to. `lazaret scan --verify-secrets` calls it (`verifyscan`), and nothing else does: never `guard`, the registry
 auditor or the MCP server.
 
 Imports the engine's calls (`_native`, `engine`) and `secretverify_http` of this package."""

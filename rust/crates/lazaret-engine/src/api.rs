@@ -88,7 +88,7 @@ pub const CALLS: &[&str] = &[
     // 0.1.9 (Q-1): project mode's passes one at a time (scan_file with dep false runs them all)
     "taint_scan", "functions",
     // 0.1.9 (V-1 stage 2): live secret verification's table and logic (secrets.rs); each package makes the call
-    "secrets.providers", "secrets.identify", "secrets.request", "secrets.judge",
+    "secrets.providers", "secrets.identify", "secrets.request", "secrets.judge", "secrets.find",
 ];
 
 fn dead_drop(v: Option<(usize, PyStr)>) -> Value {
@@ -544,6 +544,26 @@ fn dispatch(name: &str, args: &Value, text: &[u32]) -> Result<Value, CallError> 
             // the providers whose one-part pattern matches all of the text
             let t = crate::secrets::table(p).as_ref().map_err(|m| CallError::BadArgs(format!("secrets.identify: {m}")))?;
             Value::Arr(crate::secrets::identify(t, text).iter().map(|id| Value::str(id)).collect())
+        }
+        "secrets.find" => {
+            // {"lines": [n, …]} and those lines of one file, joined by "\n", as the text -> the credentials the providers
+            // name in them: [{"provider", "parts": {name: text}, "lines": [n, …]}] (`lazaret scan --verify-secrets`)
+            let bad = |m: &str| CallError::BadArgs(format!("secrets.find: {m}"));
+            let t = crate::secrets::table(p).as_ref().map_err(|m| bad(m))?;
+            let numbers: Vec<i64> = match args.get("lines").and_then(|l| l.as_arr()) {
+                Some(list) => list.iter().map(|n| n.as_i64()).collect::<Option<_>>().ok_or_else(|| bad("a line is not a number"))?,
+                None => return Err(bad("no lines")),
+            };
+            let texts: Vec<&[u32]> = text.split(|&c| c == '\n' as u32).collect();
+            if texts.len() != numbers.len() {
+                return Err(bad("the text is not one line for each number"));
+            }
+            let lines: Vec<(i64, Vec<u32>)> = numbers.into_iter().zip(texts).map(|(n, t)| (n, t.to_vec())).collect();
+            Value::Arr(crate::secrets::find(t, &lines).into_iter().map(|f| Value::obj(vec![
+                ("provider", Value::str(&f.provider)),
+                ("parts", Value::Obj(f.parts.into_iter().map(|(name, v)| (u(&name), Value::Str(v))).collect())),
+                ("lines", Value::Arr(f.lines.into_iter().map(Value::Int).collect())),
+            ])).collect())
         }
         "secrets.request" => {
             // {"provider": id (the pack's) | "entry": {…} (one of the caller's), "parts": {name: text}, "time":

@@ -202,6 +202,15 @@ class Arguments(Dir):
         self.assertFalse(os.path.exists(root))                          # and gone
         self.assertFalse(os.path.exists(os.path.dirname(root)))
 
+    def test_verify_secrets_goes_to_the_scan_of_the_checkout(self):
+        # (decision 4: any target is verified when asked, a repository that is not the user's too)
+        self.assertEqual(sourcescan.find([SPEC, "--verify-secrets"]).opts, {"--verify-secrets": True})
+        rec = Recorder()
+        code, out, err, net = run([SPEC, "--verify-secrets"], core_main=rec)
+        self.assertEqual(code, 0)
+        argv, root, listing = rec.calls[0]
+        self.assertEqual(argv[6:], [root, "--verify-secrets"])
+
     def test_the_commit_that_was_read_is_named(self):
         code, out, err, net = run([SPEC], core_main=Recorder())
         self.assertIn(f"Source: github:o/r@{SHA} (the ref v1)", out)

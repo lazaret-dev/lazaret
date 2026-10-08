@@ -208,7 +208,8 @@ rust/
                              sinks, sanitizers, guards, scopes, Flask views and route parameters;
                              a taint configuration's sources, sinks and sanitizers for one call
     src/secrets.rs           live secret verification's table and logic (0.1.9, V-1 stage 2):
-                             the pack's _VERIFY_PROVIDERS read and checked; `secrets.identify`,
+                             the pack's _VERIFY_PROVIDERS read and checked; `secrets.find` (the
+                             credentials of a file's flagged lines; AWS's pairs), `secrets.identify`,
                              `secrets.request` (a call that only authenticates; AWS's signed with
                              Signature Version 4: HMAC over lazaret-verify's SHA-256),
                              `secrets.judge` (live, rejected or unknown, why, whose); each package
@@ -317,8 +318,13 @@ holds the pack to: `lazaret.scanner.secretverify.validate`). `secrets.providers`
 `secrets.request` `{"provider": id | "entry": {…}, "parts": {name: text}, "time": "YYYYMMDDTHHMMSSZ"}` →
 `{"method", "host", "path", "headers": [[name, value]], "secret_headers": [names], "body"}` or
 `{"refused": why}`; `secrets.judge` `{"provider": id | "answers": [rules], "status", "truncated", "secrets"}`
-with the body as the text, one code point a byte (at most 64 KiB) → `[outcome, why, who]`. The engine has
-no clock and no network: each package gives the time and makes the call. JSON in an answer is read as RFC
+with the body as the text, one code point a byte (at most 64 KiB) → `[outcome, why, who]`; `secrets.find`
+`{"lines": [n, …]}` with those lines of one file joined by "\n" as the text → `[{"provider", "parts":
+{name: text}, "lines": [n, …]}]`, the credentials the providers name in them (a word, a run of letters,
+digits and `_-+/` or a piece of one between slashes, that is all of a one-part provider's format; an id and
+a secret of a provider of two parts, AWS's, paired nearest lines first: 8 pairs at most, of 64 ids and 64
+secrets), for `lazaret scan --verify-secrets`. The engine has no clock and no network: each package gives
+the time and makes the call. JSON in an answer is read as RFC
 8259 has it (a key's last value counts, as Python's json keeps it; NaN and Infinity are not numbers, which
 Python's json takes, so an answer holding one is unknown where stage 1's Python could read it live). The
 engine's JSON reader now refuses a number RFC 8259 does not allow (`01`, `1.`, `.5`), which nothing Lazaret

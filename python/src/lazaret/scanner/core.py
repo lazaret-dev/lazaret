@@ -5624,18 +5624,43 @@ def maintainability_rating(issues, ncloc):
             return rating
     return "E"
 
-def build_result(root, files, issues):
-    issues.sort(key=lambda i: (SEV_ORDER[i["sev"]], i["file"], i["line"]))
-    metrics = compute_metrics(files)
+def _severity_grades(issues):
+    """(counts by type, the security and reliability ratings, the gate's two conditions on severities) of `issues`."""
     counts = {t: sum(1 for i in issues if i["type"] == t) for t in TYPE_LABEL}
     ratings = {"security": worst_sev_rating(issues, ("VULN",)),
-               "reliability": worst_sev_rating(issues, ("BUG",)),
-               "maintainability": maintainability_rating(issues, metrics["ncloc"])}
+               "reliability": worst_sev_rating(issues, ("BUG",))}
     conds = [
         {"label": "No blocker issues",
          "ok": not any(i["sev"] == "BLOCKER" for i in issues)},
         {"label": "No critical vulnerabilities",
          "ok": not any(i["type"] == "VULN" and i["sev"] in ("CRITICAL", "BLOCKER") for i in issues)},
+    ]
+    return counts, ratings, conds
+
+
+def regrade(res):
+    """`res` graded again from its issues, after something changed their severities or types (`--verify-secrets`: a live
+    credential is a BLOCKER vulnerability, verifyscan): the order of its issues, the counts, the security and reliability
+    ratings, the gate's two conditions on severities and the gate. The other conditions are left as they are."""
+    issues = res["issues"]
+    issues.sort(key=lambda i: (SEV_ORDER[i["sev"]], i["file"], i["line"]))
+    counts, ratings, conds = _severity_grades(issues)
+    res["counts"] = counts
+    res["ratings"].update(ratings)
+    now = {c["label"]: c["ok"] for c in conds}
+    for cond in res["conditions"]:
+        if cond["label"] in now:
+            cond["ok"] = now[cond["label"]]
+    res["pass"] = all(c["ok"] for c in res["conditions"])
+    return res
+
+
+def build_result(root, files, issues):
+    issues.sort(key=lambda i: (SEV_ORDER[i["sev"]], i["file"], i["line"]))
+    metrics = compute_metrics(files)
+    counts, ratings, conds = _severity_grades(issues)
+    ratings["maintainability"] = maintainability_rating(issues, metrics["ncloc"])
+    conds += [
         {"label": "Duplication < 10%", "ok": metrics["dupPct"] < 10},
         {"label": "Maintainability ≥ C", "ok": ratings["maintainability"] in "ABC"},
     ]
@@ -5867,6 +5892,19 @@ def redact_result(res):
             i["snippet"] = cleaned
     return res
 
+def verification_line(v):
+    """The report's line on `--verify-secrets` (verifyscan): what the providers said of the credentials asked about, and the
+    secret findings no provider could be asked about."""
+    cred, found = v.get("credentials", {}), v.get("findings", {})
+    asked = sum(cred.get(k, 0) for k in ("live", "rejected", "unknown"))
+    text = (f"Secrets verified  {cred.get('live', 0)} live, {cred.get('rejected', 0)} rejected, {cred.get('unknown', 0)} unknown "
+            f"(of {asked} asked about)")
+    if found.get("notVerified"):
+        n = found["notVerified"]
+        text += f"; {n} secret finding{'s' if n != 1 else ''} no provider can be asked about"
+    return text
+
+
 def print_report(res, quiet):
     m, ct, rt = res["metrics"], res["counts"], res["ratings"]
     print()
@@ -5895,6 +5933,8 @@ def print_report(res, quiet):
         print(f"  Dependency files scanned: {m['depFiles']}")
     if "newIssues" in res:
         print(f"  New issues vs baseline: {c('1', res['newIssues'])}")
+    if isinstance(res.get("verification"), dict):
+        print(f"  {verification_line(res['verification'])}")
     print()
     if not quiet and res["issues"]:
         print(c("1", "  Issues"))
@@ -6010,6 +6050,8 @@ def html_report(res):
 <div class="why"><b>How to fix</b><div>{esc(i['fix'])}</div></div>
 <div class="refs">Rule {i['rule']} · {esc(i['ref'])}</div></div></details>""")
     issues_html = "\n".join(items) if items else "<p>No issues found. 🎉</p>"
+    verified = (f'<p class="verified">{esc(verification_line(res["verification"]))}</p>'
+                if isinstance(res.get("verification"), dict) else "")
     return f"""<!DOCTYPE html>
 <html lang="en"><head><meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -6019,7 +6061,7 @@ def html_report(res):
 <div class="meta">{esc(res['project'])} · scanned {esc(res['scannedAt'])}</div></header>
 <div class="wrap">
 <div class="panel"><div class="gate"><div class="gate-badge {gate_cls}">{gate_txt}</div>{conds}</div>
-<div class="cards">{cards}</div></div>
+<div class="cards">{cards}</div>{verified}</div>
 <div class="panel"><h2>Issues by file</h2>{file_table}</div>
 <div class="panel"><h2>All issues ({len(res['issues'])})</h2>{issues_html}</div>
 </div>
@@ -6092,14 +6134,17 @@ def sarif_report(res, root=None):
             line = max(1, int(i.get("line") or 1))
         except (TypeError, ValueError):
             line = 1
-        results.append({
+        result = {
             "ruleId": i["rule"],
             "ruleIndex": rule_index[i["rule"]],
             "level": SARIF_LEVEL[i["sev"]],
             "message": {"text": i["msg"]},
             "locations": [{"physicalLocation": {
                 "artifactLocation": loc,
-                "region": {"startLine": line}}}]})
+                "region": {"startLine": line}}}]}
+        if isinstance(i.get("verified"), dict):
+            result["properties"] = {"verified": dict(i["verified"])}       # (--verify-secrets: no part of the credential)
+        results.append(result)
     run = {"tool": {"driver": {"name": "Lazaret",
                                "version": _lazaret_pkg.__version__,
                                "informationUri": LAZARET_INFORMATION_URI,
@@ -6429,6 +6474,10 @@ def _main(argv=None, source=None):
                          "By default the flagged line is replaced with a placeholder in "
                          "every artifact — terminal, JSON/HTML/SARIF reports — so scans of "
                          "your own code do not persist credentials into CI artifacts.")
+    ap.add_argument("--verify-secrets", action="store_true",
+                    help="After the scan, ask each secret's provider whether it is live (GitHub, Slack, Stripe, npm, "
+                         "OpenAI and Anthropic tokens, AWS key pairs): each credential goes to its own provider "
+                         "alone, over HTTPS. A live one is a BLOCKER. Off by default.")
     ap.add_argument("--excerpt-width", type=int, default=EXCERPT_WIDTH, metavar="N",
                     help=f"Chars of the matched line to show under each finding (default {EXCERPT_WIDTH})")
     ap.add_argument("--max-source-bytes", type=_positive_int, metavar="BYTES",
@@ -6508,6 +6557,10 @@ def _main(argv=None, source=None):
         print(f"warning: {sanitize_term_line(warning)}", file=sys.stderr)
     if source is not None:
         set_source(res, source)
+    if args.verify_secrets:
+        # V-1 (John's decision 4): only when asked; each credential to its own provider, after a note that says where
+        from lazaret.scanner import verifyscan
+        verifyscan.verify_findings(args.directory, res)
 
     # ---- SEAM (flow-sca): baseline block ---------------------------------
     if args.baseline:

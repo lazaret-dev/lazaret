@@ -49,7 +49,7 @@ __all__ = ["main", "find", "UsageError", "Plan", "VALUE_OPTIONS", "FLAG_OPTIONS"
 VALUE_OPTIONS = ("--out-dir", "--html", "--json", "--exclude", "--sarif", "--baseline", "--taint-config",
                  "--excerpt-width", "--max-source-bytes")
 FLAG_OPTIONS = ("--ci", "--deps", "--no-html", "--no-json", "--force-overwrite", "--trust-repo-config",
-                "--strict-taint-config", "--no-redact-secrets", "--quiet", "--help", "--version")
+                "--strict-taint-config", "--no-redact-secrets", "--verify-secrets", "--quiet", "--help", "--version")
 SHORT_OPTIONS = {"-q": "--quiet", "-h": "--help"}
 ACCEPT = "--accept-incomplete"
 PREFIXES = ("github:", "gitlab:")

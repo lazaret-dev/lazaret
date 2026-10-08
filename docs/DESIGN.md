@@ -1394,9 +1394,10 @@ already checked) as the rule, or no host rule for a redirect where
 urllib's response (`headers.get`, `read`, TooLarge over the budget).
 `sources._http` sends the `github:` and `gitlab:` sources' requests,
 `sca_feeds.fetch` a feed's download (no host rule: a feed may move, https
-only). What stays on urllib: plain http (a registry served on this machine),
-and secret verification, which sends the secret it checks (its transport is
-V-1's, which waits on decision 4). `keepalive.py` (`--keepalive`) pools
+only). What stays on urllib: plain http (a registry served on this machine).
+Secret verification's call goes over it too since V-1's stage 2 (§5k), its
+credential given to the provider's host and the request alone; urllib's
+transport makes it where the native client does not. `keepalive.py` (`--keepalive`) pools
 urllib's connections and is moot for the native transport, which pools its
 own.
 
@@ -1575,6 +1576,53 @@ registry could not be read, or with the check off, would otherwise pass
 unchecked until the rule set changes. The pip and uv index runs the check
 after the file's bytes have left the scanner's byte budget. A package of a
 private registry is never named to the public one.
+
+### k. Live secret verification (`--verify-secrets`, 0.1.9, V-1)
+
+A secret the provider still accepts is the finding someone acts on first.
+`lazaret scan --verify-secrets` asks (John's decision 4, Oct 7: "Let's
+follow trufflehog behavior. Verify is an explicit flag -- detection of
+secret is default without verification it is live"): off by default, any
+target when asked (`github:` and `gitlab:` repositories too), never in the
+guard, the registry auditor, the MCP server or the pre-commit hook.
+
+One copy of the logic, in the engine (decision 7): the provider table is
+the pack's `_VERIFY_PROVIDERS` (seven providers: GitHub, Slack, Stripe,
+npm, OpenAI and Anthropic tokens, AWS key pairs), checked when it is read
+and by `make_rust_tables.py --check` (a host is a lower-case DNS name; a
+credential goes in a header, never in the path or the query; a signed
+request sends no secret). `secrets.rs` answers three questions, with no
+clock and no network: which credentials a file's flagged lines hold
+(`secrets.find`: a word that is all of a provider's format; an AWS key id
+and a secret key of the same file, paired nearest first, eight pairs at
+most), the request that asks about one (`secrets.request`: a call that only
+authenticates; AWS's signed with Signature Version 4 over lazaret-verify's
+SHA-256, the time given by the caller; the fields that carry the credential
+named), and what an answer says (`secrets.judge`: the first of the
+provider's rules that holds, live, rejected or unknown; a body cut at 64
+KiB read by its status alone; the account's name printable, 80 characters
+at most, any part of the credential in it `[redacted]`).
+
+Each package keeps what is about a run and makes the call. Python
+(`verifyscan.py`, `secretverify.py`, `secretverify_http.py`): the secret
+findings' lines read again from their files, as the scan numbered them, in
+memory only; one call per credential (a cache for the run, keyed by
+provider, endpoint and the credential's SHA-256; 120 seconds and 500 calls
+at most; two calls at once to one provider); the call over lazaret-net, the
+provider's host the only host, no redirect (a 3xx with a Location is
+`redirect`, unknown), nothing compressed, one deadline, the credential as a
+`Credential` for that host and the request alone, and urllib's transport
+where the native client does not send it. A failed call is unknown, never
+rejected. A finding gets the result of the credentials on its line that
+says most (live, then unknown, then rejected): live makes it a BLOCKER
+vulnerability, and the result is graded again (`core.regrade`).
+
+Tested against a stub provider over TLS on 127.0.0.1, on both transports:
+each credential reaches its own provider's host and no other, AWS's
+signature holds over the request as the stub received it, and a verifying
+scan's every output (the terminal, stderr, the JSON, SARIF and HTML
+reports) holds none of the values. `scripts/verifylive` is the manual check
+against the real services, run before a release.
 
 ## 6. How to add or change a rule — the loop
 
