@@ -812,6 +812,18 @@ project is pre-1.0, so the 0.x API may still change.
 
 ### Fixed
 
+- **Security: an npm tarball that npm's tar reader reads differently from the registry's is INCOMPLETE (BR-4, F-10;
+  rule set 2.63.0).** npm unpacks a package with node-tar; the registry read the tarball with Python's tarfile alone,
+  and the two parse headers differently: a differential fuzzer that runs npm's own node-tar found tarballs from which npm
+  writes a file the scan never read (a ustar prefix field whose first byte is NUL and whose 131st is not: `/index.js` to
+  node-tar, so npm writes the package's main file, and a top-level `index.js`, which the registry dropped, to tarfile)
+  or read under another name (a pax global header's `path`, a regular file named as a directory, a file's header with a
+  link name, a pax value with a newline, `N` and `X` headers, a name that is not UTF-8, a NUL before a newline, a UNC
+  root written with backslashes). `registry/npmtar.py` models node-tar's reading and the registry feeds it the stream
+  tarfile reads: an entry npm writes that tarfile read at another place, under another name or not at all, or a header
+  node-tar finds invalid, makes the archive corrupt, which the guard refuses; a drive-relative root (`C:index.js`) is
+  taken off as node-tar does. Tarballs npm, yarn, pnpm, bun and git write read the same in both. The fuzz target is
+  `archive-npm-diff`.
 - **An archive member's name is case-folded on the engine's Unicode, the same on every Python (BR-2; rule set
   2.62.0).** EG-4 compares members' names as macOS's and Windows' file systems do (NFD, then case-folded), and did it
   with the host Python's `unicodedata`: Unicode 13.0 on Python 3.10, 14.0 or later on 3.11 and after, so the same

@@ -70,6 +70,7 @@ from lazaret import safexml as _safexml                 # noqa: E402
 from lazaret.registry import actionmeta as _actionmeta  # noqa: E402
 from lazaret.registry import contentcache as _cache     # noqa: E402
 from lazaret.registry import lookalike as _lookalike    # noqa: E402
+from lazaret.registry import npmtar as _npmtar          # noqa: E402
 from lazaret.registry import provenance as _provenance  # noqa: E402
 from lazaret.registry import unused_deps as _unused     # noqa: E402
 from lazaret.registry.ecosystems import base as _base   # noqa: E402
@@ -98,6 +99,8 @@ MAX_MEMBER = _env_number("LAZARET_MAX_SOURCE_BYTES", 16_000_000)
 MAX_FILES = 20_000         # files per package (numpy's sdist alone has >4,000)
 SAMPLE = 8192              # header/entropy sample read from oversized files
 # Stored scans from another engine version are scanned again (has_scan).
+# 2.63: an npm tarball that npm's tar reader (node-tar) reads differently from
+#      tarfile is corrupt (BR-4, F-10)
 # 2.62: an archive member's name is case-folded on the engine's Unicode
 #      13.0, the same on every Python (BR-2)
 # 2.61: a climb from the script's folder to a scoped package beside its own
@@ -332,7 +335,7 @@ SAMPLE = 8192              # header/entropy sample read from oversized files
 #      entry points and hook targets, Python install scripts
 # 2.3: verdict tiers, decoded hex, install-script inspection; 2.2:
 #      verdict-integrity; 2.1: binary-artifact awareness
-ENGINE_VERSION = "2.62.0"
+ENGINE_VERSION = "2.63.0"
 
 # ---------------- The content memo (P-2a, registry/contentcache.py) ----------------
 # One per scan_package run: the engine answers once for content several of a
@@ -1111,6 +1114,26 @@ class _Inflater:
                 raise ArchiveLimit("corrupt", "data after the end of the compressed stream")
 
 
+class _Tee:
+    """The tar stream tarfile reads, fed as it is read to npm's reader too (npmtar.NodeTar, BR-4), which an
+    error of its own stops (and the archive is then one the two readers disagree about)."""
+
+    def __init__(self, inner, node):
+        self.inner, self.node, self.failed = inner, node, None
+
+    def readable(self):
+        return True
+
+    def read(self, n=-1):
+        data = self.inner.read(n)
+        if self.failed is None:
+            try:
+                self.node.feed(data)
+            except Exception as exc:                   # a fault of this reader: the archive is not vouched for
+                self.failed = f"{type(exc).__name__}"
+        return data
+
+
 class _TarReader(tarfile.TarFile):
     """Records the blocks tarfile skips with ignore_zeros=True: zero blocks
     (end-of-archive markers) and invalid headers (a bad checksum). Python's
@@ -1283,6 +1306,8 @@ def canonical_member_path(name, artifact=None):
     else:
         parts = [x for x in p.split("/") if x not in ("", ".")]
         rest = "/".join(parts[1:]) if len(parts) > 1 else (parts[0] if parts else "")
+    if artifact == "npm":
+        _roots, rest = _npmtar.strip_absolute(rest)          # node-tar's stripAbsolutePath (`C:x` is `x`, BR-4)
     while True:
         stripped = _DRIVE_ROOT_RE.sub("", rest)
         if stripped == rest:
@@ -1592,7 +1617,9 @@ def _iter_tar(data, container, artifact, budget, anomalies):
         reader = _Inflater(data, codec, budget)
         # (npm's node-tar writes regular files only, and skips the rest)
         kinds = {"crate": {"tarinfo": _CargoTarInfo}, "npm": {}}.get(artifact, {"tarinfo": _PipTarInfo})
-        tf = _TarReader.open(fileobj=reader, mode="r|", ignore_zeros=True, **kinds)
+        # (npm's own reading beside tarfile's, to compare: BR-4)
+        tee = _Tee(reader, _npmtar.NodeTar()) if artifact == "npm" else None
+        tf = _TarReader.open(fileobj=tee or reader, mode="r|", ignore_zeros=True, **kinds)
     except ArchiveLimit as lim:
         yield Member(last, 0, b"", lim.reason, lim.detail)
         return
@@ -1600,6 +1627,7 @@ def _iter_tar(data, container, artifact, budget, anomalies):
         yield Member(last, 0, b"", "corrupt", f"not a readable tar archive ({type(exc).__name__})")
         return
     seen, links, offsets, count = {}, [], [], 0
+    read = {}                                          # the regular files tarfile read, by where their data is
     try:
         for m in tf:
             budget.check()
@@ -1607,6 +1635,8 @@ def _iter_tar(data, container, artifact, budget, anomalies):
             if m.isdir():
                 continue
             rel, problem = canonical_member_path(m.name, artifact)
+            if tee is not None and m.isfile():
+                read[m.offset_data] = (None if problem else rel, m.size)
             if m.issym() or m.islnk():
                 if artifact != "npm":                  # pacote drops links
                     links.append((m.name, m.linkname, m.issym(), rel, problem))
@@ -1654,6 +1684,25 @@ def _iter_tar(data, container, artifact, budget, anomalies):
     leftover = reader.produced - tf.offset
     if 0 < leftover <= len(reader.tail) and reader.tail[-leftover:].strip(b"\x00"):
         yield Member("(archive)", 0, b"", "corrupt", "data after the last tar entry")
+    if tee is not None:
+        # what npm writes from this archive (node-tar's reading) against what tarfile read (BR-4): an entry npm
+        # writes that tarfile read at another place, under another name or not at all, a header node-tar finds
+        # invalid: the scan cannot vouch for what npm installs
+        try:
+            while tee.read(_OUTPUT_CHUNK):             # (what tarfile left unread, to its end)
+                pass
+        except ArchiveLimit as lim:
+            yield Member(last, 0, b"", lim.reason, lim.detail)
+            return
+        except (zlib.error, lzma.LZMAError, OSError, ValueError, EOFError) as exc:
+            yield Member("(archive)", 0, b"", "corrupt", f"archive could not be read to its end ({type(exc).__name__})")
+            return
+        if tee.failed is not None:
+            yield Member("(archive)", 0, b"", "corrupt", f"npm's reading of the archive could not be followed "
+                                                         f"({tee.failed})")
+        else:
+            for _where, detail in _npmtar.disagreements(tee.node.finish(), read):
+                yield Member("(archive)", 0, b"", "corrupt", detail)
     if links:
         yield from _resolve_tar_links(data, codec, artifact, links, seen, budget, anomalies, count)
 

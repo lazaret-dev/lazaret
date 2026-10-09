@@ -38,7 +38,7 @@ fuzz_mutate = importlib.import_module("fuzz_mutate")
 fuzz_targets = importlib.import_module("fuzz_targets")
 driver = _support.load_script(os.path.join(FUZZ, "fuzz.py"), "fuzz_driver")
 
-EXPECTED_TARGETS = ["archive-tgz", "archive-tbz2", "archive-txz", "archive-zip", "xml", "xml-minidom",
+EXPECTED_TARGETS = ["archive-tgz", "archive-tbz2", "archive-txz", "archive-zip", "archive-npm-diff", "xml", "xml-minidom",
                     "sca-package-lock-json", "sca-yarn-lock", "sca-pnpm-lock-yaml", "sca-bun-lock", "sca-poetry-lock",
                     "sca-uv-lock", "sca-pylock-toml", "sca-pipfile-lock", "sca-requirements-txt", "sca-pyproject-toml",
                     "sca-setup-py", "sca-go-mod", "sca-go-sum", "sca-vendor-modules-txt", "sca-cargo-lock", "sca-cargo-toml", "sca-bundle-index", "sca-bundle-doc", "crates-index", "crates-manifest", "go-zip", "go-mod", "go-sumdb",
@@ -540,6 +540,28 @@ class PromisesAreLive(unittest.TestCase):
     def member(self, *a, **k):
         from lazaret.registry import repo
         return repo.Member(*a, **k)
+
+    def test_the_npm_diff_promises(self):
+        # BR-4: with the reader's check against npm's reading taken out, the archive whose prefix field starts
+        # with NUL is npm's index.js and nothing the reader read; with the model of npm's reading wrong, the model
+        # and npm disagree. (npm's own node-tar decides: without node and it, nothing is compared.)
+        from lazaret.registry import npmtar
+        run, close = fuzz_targets.TARGETS["archive-npm-diff"].start()
+        self.addCleanup(close)
+        prefix_case = fuzz_targets.npm_diff_seeds()[0]
+        run(prefix_case)                                   # the reader calls it corrupt: no finding
+        if not fuzz_targets.shutil.which("node"):
+            self.skipTest("no node here")
+        with mock.patch.object(npmtar, "disagreements", lambda node, read: []):
+            with self.assertRaises(fuzz_targets.Violation) as raised:
+                run(prefix_case)
+        if raised.exception.rule != "npm-unread":
+            self.fail(raised.exception)
+        plain = fuzz_targets.tar_entry(b"package/a.js", b"1;\n") + b"\0" * 1024
+        with mock.patch.object(npmtar, "written_path", lambda path: "elsewhere.js"):
+            with self.assertRaises(fuzz_targets.Violation) as raised:
+                run(plain)
+        self.assertEqual(raised.exception.rule, "npm-model")
 
     def test_the_archive_promises(self):
         M = self.member
@@ -1259,7 +1281,8 @@ class SeedsAndOptions(unittest.TestCase):
 class ScriptRules(unittest.TestCase):
     def test_every_script_is_standard_library_only(self):
         allowed = {"argparse", "bz2", "contextlib", "faulthandler", "gzip", "hashlib", "io", "json", "lzma", "os",
-                   "platform", "random", "re", "shutil", "sys", "tarfile", "tempfile", "time", "traceback", "warnings",
+                   "platform", "random", "re", "shutil", "subprocess", "sys", "tarfile", "tempfile", "time",
+                   "traceback", "warnings",
                    "zipfile", "zlib", "xml", "fuzz_common", "fuzz_mutate", "fuzz_targets", "lazaret"}
         for name in sorted(os.listdir(FUZZ)):
             if not name.endswith(".py"):

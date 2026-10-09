@@ -847,7 +847,10 @@ it is INCOMPLETE (`incomplete`, of `repo.INCOMPLETE_KINDS`: its deadline
 passed; the engine could not finish a file or a step; code that runs, or a
 source file, a manifest or a reader's code, not read whole, bytecode that
 runs included; the archive not read whole), each something a package controls, as a payload padded past the
-size limit inside its file does (the Go/Rust review's GO-1). `Context.apply`
+size limit inside its file does (the Go/Rust review's GO-1), and an npm tarball that npm's tar reader and the
+registry's read differently (BR-4: `registry/npmtar.py` follows node-tar's reading beside tarfile's; an entry npm writes
+that tarfile read at another place, under another name or not at all, or a header node-tar finds invalid, makes the
+archive corrupt). `Context.apply`
 blocks those unless `--allow-incomplete`; a program too large to read (a
 native library a package names) is none of them, and goes through as
 before. A time-out is scanned once more (`Scanner.scan`), since a machine

