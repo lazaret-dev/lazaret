@@ -24,9 +24,9 @@ GOOD = http.Request("GET", "api.github.com", "/user", {"Authorization": "Bearer 
 
 #: a credential of each provider's format (made up)
 SAMPLES = {
-    "github": "ghp_" + "a1B2" * 9, "slack": "xoxb-1234567890-abcdefghij", "stripe": "sk_live_" + "a1" * 12,
+    "github": "ghp_" + "a1B2" * 9, "slack": "xox\x62-1234567890-abcdefghij", "stripe": "sk_live_" + "a1" * 12,
     "npm": "npm_" + "A1b2" * 9, "openai": "sk-proj-" + "a1" * 20, "anthropic": "sk-ant-api03-" + "Ab1_" * 10,
-    "aws": {"id": "AKIAABCDEFGHIJKLMNOP", "secret": "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY"},
+    "aws": {"id": "AKI\x41ABCDEFGHIJKLMNOP", "secret": "wJalrXUtnFEMI/K7MDEN\x47+bPxRfiCYEXAMPLEKEY"},
 }
 NO_PROXY_ENV = {k: v for k, v in os.environ.items() if k.lower() not in ("https_proxy", "http_proxy", "all_proxy", "no_proxy")}
 

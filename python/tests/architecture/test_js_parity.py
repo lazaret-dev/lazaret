@@ -175,7 +175,7 @@ ADVERSARIAL = {
     "sec/creds.sql": "create user bob identified by 'hunter2hunter2';\nGRANT ALL ON t TO PUBLIC;\n",
     "sec/markup.jsx": '<Input password="hunter2hunter2" />\n',
     # config and data files: credentials only (configsecrets), never read as code
-    "cfg/.env": ("# service\nDB_PASSWORD=Zq8!vN3pL0wX7r\nAPI_KEY=${API_KEY}\nAWS_KEY=AKIAIOSFODNN7EXAMPLE\n"
+    "cfg/.env": ("# service\nDB_PASSWORD=Zq8!vN3pL0wX7r\nAPI_KEY=${API_KEY}\nAWS_KEY=AKI\x41IOSFODNN7EXAMPLE\n"
                  "GITHUB_TOKEN=ghp_" + "a1B2" * 9 + "  # nosec\n"
                  "SAMPLE_JWT=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6Ikpv"
                  "aG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c\n"
@@ -189,7 +189,7 @@ ADVERSARIAL = {
     "cfg/settings.json": ('{\n  "api_key": "d41d8cd98f00b204e9800998ecf8427e",\n  "password": "changeme",\n'
                           '  "nextPageToken": "Zq8vN3pL0wX7rT2m",\n  "accessKey": "ACCESS_KEY",\n'
                           '  "private_key": "-----BEGIN PRIVATE KEY-----\\nMIIEvQIBADANBgkqhkiG9w0BAQEFAASC\\n"\n}\n'),
-    "cfg/deploy.sh": ('#!/bin/sh\nexport SLACK_BOT_TOKEN="xoxb-1234567890-abcdefghijkl"\n'
+    "cfg/deploy.sh": ('#!/bin/sh\nexport SLACK_BOT_TOKEN="xox\x62-1234567890-abcdefghijkl"\n'
                       'mysql --password="$DB_PASSWORD" -e "select 1"\n'),
     "cfg/key.pem": ("-----BEGIN RSA PRIVATE KEY-----\nMIIEpAIBAAKCAQEA3Bq7" + "Zq8vN3pL0wX7rT2mK9sB" * 2
                     + "\n-----END RSA PRIVATE KEY-----\n"),

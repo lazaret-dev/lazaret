@@ -181,7 +181,7 @@ ADVERSARIAL = [
     ("pem.js", "js", 'k = "-----BEGIN EC PRIVATE KEY-----' + PEM_LINE.strip() + '-----END EC PRIVATE KEY-----"; eval(k)\n'),
     ("tokens.js", "js", 'const t = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.abc";\neval(t)\n'
      'const g = "github_pat_' + "A1b2" * 7 + '";\neval(g)\nconst s = "' + "eyJ" * 50 + '";\n'),
-    ("tokens.py", "py", 'a = "AKIAIOSFODNN7ABCDEFG"\nb = "xoxb-1234567890-abcdef"\nc = "sk_live_' + "a1" * 10 + '"\n'
+    ("tokens.py", "py", 'a = "AKI\x41IOSFODNN7ABCDEFG"\nb = "xox\x62-1234567890-abcdef"\nc = "sk_live_' + "a1" * 10 + '"\n'
      'd = "AIza' + "B" * 35 + '"\ne = "ghp_' + "x" * 36 + '"\nlit = "Aq3vN5mR1tY7wK2pL9xB4cJ6hF0dS"\n'
      'print("Aq3vN5mR1tY7wK2pL9xB4cJ6hF0dS")\n'),
     ("entropy.js", "js", 'const k = "q8Z3vN5mR1tY7wK2pL9xB4cJ6hF0dS"; // test\nconst path = "/usr/local/lib/node_modules/x";\n'

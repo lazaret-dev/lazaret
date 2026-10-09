@@ -132,7 +132,7 @@ class TokenPatternTests(unittest.TestCase):
         rnd = random.Random(7)
         samples = [JWT, "x" + JWT, "AKIA" + "Q" * 16 + JWT, "eyJ" * 40, "eyJ" * 5 + ".eyJ" + "a" * 10,
                    "eyJaaaaaaaaaaeyJbbbbbbbbbbb.eyJcccccccccc", "-----BEGIN RSA PRIVATE KEY-----x-----END RSA "
-                   "PRIVATE KEY----- tail", "t = 'AKIAIOSFODNN7ABCDEFG' + 'ghp_" + "a1B2" * 9 + "'"]
+                   "PRIVATE KEY----- tail", "t = 'AKI\x41IOSFODNN7ABCDEFG' + 'ghp_" + "a1B2" * 9 + "'"]
         samples += ["".join(rnd.choice(TOKEN_FRAGMENTS) for _ in range(rnd.randint(1, 25))) for _ in range(20000)]
         for pat in (core._TOKEN_PATTERN, core._TOKEN_REDACT_PATTERN):
             ref = re.compile(pat.pattern)

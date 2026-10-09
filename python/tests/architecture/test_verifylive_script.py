@@ -16,7 +16,7 @@ SCRIPT = os.path.join(_support.REPO_ROOT, "scripts", "verifylive")
 verifylive = _support.load_script(os.path.join(SCRIPT, "verifylive.py"), "verifylive_script")
 
 GITHUB = "ghp_" + "a1B2" * 9
-AWS = {"id": "AKIAABCDEFGHIJKLMNOP", "secret": "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY"}
+AWS = {"id": "AKI\x41ABCDEFGHIJKLMNOP", "secret": "wJalrXUtnFEMI/K7MDEN\x47+bPxRfiCYEXAMPLEKEY"}
 
 
 class Verifier:

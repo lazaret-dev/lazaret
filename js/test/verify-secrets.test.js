@@ -28,10 +28,10 @@ const HOSTS = ["api.github.com", "slack.com", "api.stripe.com", "registry.npmjs.
   "sts.amazonaws.com"];
 
 const GITHUB = "ghp_" + "a1B2".repeat(9);
-const SLACK = "xoxb-1234567890-abcdefghij";
+const SLACK = "xox\x62-1234567890-abcdefghij";
 const STRIPE = "sk_live_" + "a1".repeat(12);
 const ANTHROPIC = "sk-ant-api03-" + "Ab1_".repeat(10);
-const AWS = { id: "AKIAABCDEFGHIJKLMNOP", secret: "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY" };
+const AWS = { id: "AKI\x41ABCDEFGHIJKLMNOP", secret: "wJalrXUtnFEMI/K7MDEN\x47+bPxRfiCYEXAMPLEKEY" };
 const VALUES = [GITHUB, SLACK, STRIPE, ANTHROPIC, AWS.id, AWS.secret];
 const APP = `import os\nGITHUB_TOKEN = "${GITHUB}"\nslack = "${SLACK}"\nheaders = {"Authorization": "Bearer ${STRIPE}"}\n`
   + `AWS_ACCESS_KEY_ID = "${AWS.id}"\nAWS_SECRET_ACCESS_KEY = "${AWS.secret}"\npassword = "hunter2hunter2"\n`;

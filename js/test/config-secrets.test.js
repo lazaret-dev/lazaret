@@ -63,8 +63,8 @@ test("context lines lose credential-named values, not references", () => {
 });
 
 test("documentation samples and key material", () => {
-  assert.ok(documentationToken("AKIAIOSFODNN7EXAMPLE"));
-  assert.ok(!documentationToken("AKIA2345ABCD6789WXYZ"));
+  assert.ok(documentationToken("AKI\x41IOSFODNN7EXAMPLE"));
+  assert.ok(!documentationToken("AKI\x412345ABCD6789WXYZ"));
   assert.ok(documentationToken("eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9." + JWT_IO_PAYLOAD));
   assert.ok(keyMaterial("MIIEpAIBAAKCAQEA3Bq7Zq8vN3pL0wX7rT2mK9sBZq8vN3pL0wX7rT2mK9sB"));
   assert.ok(!keyMaterial("privatekey".repeat(6)));

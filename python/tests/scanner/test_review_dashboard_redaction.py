@@ -14,7 +14,7 @@ import unittest
 from lazaret.scanner import reports
 from tests.scanner import _dashboard_vm as dash
 
-AWS = "AKIAIOSFODNN7ABCDEFG"
+AWS = "AKI\x41IOSFODNN7ABCDEFG"
 PASSWORD = "Xk9#mQ2vLp8zR4tW"
 LITERAL = "q8Z3vN5mR1tY7wK2pL9xB4cJ6hF0dS"          # flagged by the entropy rule
 GH_TOKEN = "gho_" + "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8"

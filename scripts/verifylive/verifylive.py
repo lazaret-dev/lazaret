@@ -35,7 +35,7 @@ EXIT_OK, EXIT_MISMATCH, EXIT_USAGE = 0, 1, 2
 #: Made-up credentials in each provider's format: they belong to no account.
 MADE_UP = {
     "github": "ghp_" + "0" * 36,
-    "slack": "xoxb-0000000000-0000000000",
+    "slack": "xox\x62-0000000000-0000000000",
     "stripe": "sk_live_" + "0" * 24,
     "npm": "npm_" + "0" * 36,
     "openai": "sk-" + "0" * 48,

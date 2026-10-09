@@ -98,22 +98,22 @@ test("redaction: SECRET-rule flagged line replaced by deterministic placeholder"
 });
 
 test("redaction: context lines swept for OTHER credentials (audit L1)", () => {
-  const lines = ["aws_key", "AKIAIOSFODNN7EXAMPLE", "x=1"];
+  const lines = ["aws_key", "AKI\x41IOSFODNN7EXAMPLE", "x=1"];
   const out = redactSecretSnippet("S-SECRET", lines, 0, lines[0]);
   assert.ok(out[1].includes("[redacted]"));
-  assert.ok(!out[1].includes("AKIAIOSFODNN7EXAMPLE"));
+  assert.ok(!out[1].includes("AKI\x41IOSFODNN7EXAMPLE"));
 });
 
 test("redaction: redactResult sweeps a full result, secrets never leak", () => {
   const res = { issues: [{
     rule: "S-ENTROPY", line: 2, snipStart: 1, name: "e", type: "HOTSPOT", sev: "MAJOR",
     msg: "", why: "", fix: "", ref: "", file: "a.py",
-    snippet: ["x=0", 'token = "Zk9mS3B4NjdxTW5xU2Y4QWJ"', "AKIAIOSFODNN7EXAMPLE"],
+    snippet: ["x=0", 'token = "Zk9mS3B4NjdxTW5xU2Y4QWJ"', "AKI\x41IOSFODNN7EXAMPLE"],
   }] };
   redactResult(res);
   const blob = JSON.stringify(res);
   assert.ok(!blob.includes("Zk9mS3B4NjdxTW5xU2Y4"));
-  assert.ok(!blob.includes("AKIAIOSFODNN7EXAMPLE"));
+  assert.ok(!blob.includes("AKI\x41IOSFODNN7EXAMPLE"));
   assert.ok(blob.includes("[redacted: secret rule S-ENTROPY]"));
 });
 

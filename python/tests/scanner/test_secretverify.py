@@ -29,12 +29,12 @@ REPO = pathlib.Path(__file__).resolve().parents[3]
 NOW = datetime.datetime(2026, 10, 3, 12, 0, 0, tzinfo=datetime.timezone.utc)
 SECRETS = {
     "github": "ghp_" + "a1B2" * 9,
-    "slack": "xoxb-1234567890-abcdefghij",
+    "slack": "xox\x62-1234567890-abcdefghij",
     "stripe": "sk_live_" + "a1" * 12,
     "npm": "npm_" + "A1b2" * 9,
     "openai": "sk-proj-" + "a1" * 20,
     "anthropic": "sk-ant-api03-" + "Ab1_" * 10,
-    "aws": {"id": "AKIAABCDEFGHIJKLMNOP", "secret": "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY"},
+    "aws": {"id": "AKI\x41ABCDEFGHIJKLMNOP", "secret": "wJalrXUtnFEMI/K7MDEN\x47+bPxRfiCYEXAMPLEKEY"},
 }
 AWS_LIVE = (b'<GetCallerIdentityResponse xmlns="https://sts.amazonaws.com/doc/2011-06-15/"><GetCallerIdentityResult>'
             b"<Arn>arn:aws:iam::123456789012:user/alice</Arn><UserId>AIDAEXAMPLE</UserId><Account>123456789012</Account>"
@@ -479,7 +479,7 @@ class RequestTests(unittest.TestCase):
         self.assertEqual((r.method, r.host, r.path), ("POST", "sts.amazonaws.com", "/"))
         self.assertEqual(r.body, b"Action=GetCallerIdentity&Version=2011-06-15")
         self.assertEqual(r.headers["x-amz-date"], "20261003T120000Z")
-        self.assertRegex(r.headers["authorization"], r"^AWS4-HMAC-SHA256 Credential=AKIAABCDEFGHIJKLMNOP/20261003/us-east-1/sts/aws4_request, "
+        self.assertRegex(r.headers["authorization"], r"^AWS4-HMAC-SHA256 Credential=AKI\x41ABCDEFGHIJKLMNOP/20261003/us-east-1/sts/aws4_request, "
                                                      r"SignedHeaders=accept;content-type;host;user-agent;x-amz-date, Signature=[0-9a-f]{64}$")
         self.assertNotIn(SECRETS["aws"]["secret"], repr(r))
         self.assertEqual(r.headers["Content-Type"], "application/x-www-form-urlencoded; charset=utf-8")
@@ -522,7 +522,7 @@ class VerifyTests(unittest.TestCase):
         self.assertEqual((call[0].host, call[1], call[2]), ("api.github.com", http.DEFAULT_TIMEOUT, http.MAX_ANSWER_BYTES))
 
     def test_a_part_that_holds_another_is_redacted_whole(self):
-        pair = {"id": "AKIAABCDEFGHIJKLMNOP", "secret": "xyzAKIAABCDEFGHIJKLMNOPxyz0123456789abcd"}
+        pair = {"id": "AKI\x41ABCDEFGHIJKLMNOP", "secret": "xyzAKI\x41ABCDEFGHIJKLMNOPxyz0123456789abcd"}
         self.assertEqual(len(pair["secret"]), 40)
         arn = b"<Arn>arn:aws:iam::1:user/" + pair["secret"].encode() + b"</Arn>"
         got = verifier(Fake(default=resp(200, arn))).verify("aws", pair)
@@ -956,7 +956,7 @@ class StubTests(StubCase):
         self.assertEqual((github.method, github.host, github.path), ("GET", "api.github.com", "/user"))
         self.assertEqual(github.headers["authorization"], "Bearer " + SECRETS["github"])
         self.assertEqual((aws.method, aws.host, aws.path, aws.body), ("POST", "sts.amazonaws.com", "/", b"Action=GetCallerIdentity&Version=2011-06-15"))
-        self.assertRegex(aws.headers["authorization"], r"^AWS4-HMAC-SHA256 Credential=AKIAABCDEFGHIJKLMNOP/\d{8}/us-east-1/sts/aws4_request, ")
+        self.assertRegex(aws.headers["authorization"], r"^AWS4-HMAC-SHA256 Credential=AKI\x41ABCDEFGHIJKLMNOP/\d{8}/us-east-1/sts/aws4_request, ")
         self.assertNotIn(SECRETS["aws"]["secret"], repr(aws))
         self.assertTrue(re.fullmatch(r"\d{8}T\d{6}Z", aws.headers["x-amz-date"]))
 

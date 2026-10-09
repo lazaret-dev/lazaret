@@ -1747,9 +1747,9 @@ register("action-code", "GitHub Actions: repo.scan_action over an action.yml (or
 # ---------------------------------------------------------------------------------------------- live secret verification (V-1)
 # The credentials below are made up, in the shapes the providers use (AWS's is the pair its documentation gives as an example).
 VERIFY_SAMPLES = {
-    "github": "ghp_" + "a1B2" * 9, "slack": "xoxb-1234567890-abcdefghij", "stripe": "sk_live_" + "a1" * 12, "npm": "npm_" + "A1b2" * 9,
+    "github": "ghp_" + "a1B2" * 9, "slack": "xox\x62-1234567890-abcdefghij", "stripe": "sk_live_" + "a1" * 12, "npm": "npm_" + "A1b2" * 9,
     "openai": "sk-proj-" + "a1" * 20, "anthropic": "sk-ant-api03-" + "Ab1_" * 10,
-    "aws": {"id": "AKIAABCDEFGHIJKLMNOP", "secret": "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY"},
+    "aws": {"id": "AKI\x41ABCDEFGHIJKLMNOP", "secret": "wJalrXUtnFEMI/K7MDEN\x47+bPxRfiCYEXAMPLEKEY"},
 }
 VERIFY_FIELDS = ("github", "slack", "stripe", "npm", "openai", "anthropic", "aws")        # (the order of the pack's _VERIFY_PROVIDERS)
 

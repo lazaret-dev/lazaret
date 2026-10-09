@@ -56,7 +56,7 @@ QUIET = (
     "API_KEY=$API_KEY", "password: {{ .Values.password }}", "token: <your-token>",
     "password: '%(db_password)s'", "GITHUB_TOKEN=your-github-token-here",
     "API_KEY=xxxxxxxxxxxxxxxxxxxx", "password: ********", "secret_key = ...",
-    "AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+    "AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDEN\x47/bPxRfiCYEXAMPLEKEY",
     "password: postgres", "password: supersecret1", "PASSWORD: P@ssw0rd!",
     "PASSWORD_MIN_LENGTH=12", "PASSWORD_FIELD=password", "PASSWORD_RESET_URL=/account/reset",
     "TOKEN_EXPIRY=3600", "max_tokens: 4096", "token_type: bearer", "tokenizer: gpt2-large",
@@ -162,7 +162,7 @@ class SecretValues(unittest.TestCase):
 class ScanConfigFile(unittest.TestCase):
     def test_tokens_on_every_line_secrets_outside_comments(self):
         text = (f"# GITHUB_TOKEN={TOKEN}\n# DB_PASSWORD={PASS}\n"
-                f"DB_PASSWORD={PASS}\nAWS_KEY=AKIAIOSFODNN7EXAMPLE\nKEY=AKIA2345ABCD6789WXYZ\n")
+                f"DB_PASSWORD={PASS}\nAWS_KEY=AKI\x41IOSFODNN7EXAMPLE\nKEY=AKI\x412345ABCD6789WXYZ\n")
         self.assertEqual(found(".env", text), [("S-SECRET", 3), ("S-TOKEN", 1), ("S-TOKEN", 5)])
 
     def test_fine_grained_github_tokens(self):
@@ -179,9 +179,9 @@ class ScanConfigFile(unittest.TestCase):
     def test_documentation_tokens_are_not_reported(self):
         jwt_io = ("eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9." + C.JWT_IO_PAYLOAD
                   + ".SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c")
-        self.assertEqual(found("a.yaml", f"k: {jwt_io}\nid: AKIAIOSFODNN7EXAMPLE\n"), [])
+        self.assertEqual(found("a.yaml", f"k: {jwt_io}\nid: AKI\x41IOSFODNN7EXAMPLE\n"), [])
         # a documentation sample first, a real-looking token after it: the second counts
-        self.assertEqual(found("b.yaml", f"k: AKIAIOSFODNN7EXAMPLE {TOKEN}\n"), [("S-TOKEN", 1)])
+        self.assertEqual(found("b.yaml", f"k: AKI\x41IOSFODNN7EXAMPLE {TOKEN}\n"), [("S-TOKEN", 1)])
 
     def test_private_keys_need_material(self):
         body = "MIIEpAIBAAKCAQEA3Bq7Zq8vN3pL0wX7rT2mK9sBZq8vN3pL0wX7rT2mK9sB"

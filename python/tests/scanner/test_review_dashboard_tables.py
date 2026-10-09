@@ -130,9 +130,9 @@ class DashboardTableTests(unittest.TestCase):
         """The page's linear token matcher redacts exactly what core's pattern does."""
         a36 = "a1B2" * 9
         lines = [
-            "AKIAIOSFODNN7ABCDEFG", "AKIAIOSFODNN7ABCDEF", "xAKIAIOSFODNN7ABCDEFGH", "akiaIOSFODNN7ABCDEFG",
+            "AKI\x41IOSFODNN7ABCDEFG", "AKIAIOSFODNN7ABCDEF", "xAKIAIOSFODNN7ABCDEFGH", "akiaIOSFODNN7ABCDEFG",
             "ghp_" + a36, "ghp_" + a36[:-1], "gho_" + a36 + "XYZ", "ghq_" + a36, "gh_" + a36,
-            "github_pat_" + "A_b1" * 6, "github_pat_" + "A" * 21, "xoxb-1234567890", "xoxb-123456789", "xoxz-1234567890",
+            "github_pat_" + "A_b1" * 6, "github_pat_" + "A" * 21, "xox\x62-1234567890", "xoxb-123456789", "xoxz-1234567890",
             "sk_live_" + "a1" * 8, "sk_live_" + "a" * 15, "AIza" + "B" * 35, "AIza" + "B" * 34, "AIza" + "B-_" * 13,
             "-----BEGIN RSA PRIVATE KEY-----", "x = '-----BEGIN PRIVATE KEY-----MIIE'  # tail",
             "-----BEGIN EC PRIVATE KEY-----abc-----END EC PRIVATE KEY----- after",
@@ -140,11 +140,11 @@ class DashboardTableTests(unittest.TestCase):
             "-----BEGIN rsa PRIVATE KEY-----", "-----BEGIN  PRIVATE KEY----", "-----BEGIN PRIVATE KEY-----",
             "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.sig", "eyJshort.eyJhbGciOiJIUzI1NiJ9",
             "eyJ" + "eyJ" * 40, "eyJ" * 5 + ".eyJ" + "a" * 10, "eyJaaaaaaaaaaeyJbbbbbbbbbbb.eyJcccccccccc",
-            "t = 'AKIAIOSFODNN7ABCDEFG' + 'ghp_" + a36 + "' + 'xoxp-abcdefghijk'",
+            "t = 'AKI\x41IOSFODNN7ABCDEFG' + 'ghp_" + a36 + "' + 'xox\x70-abcdefghijk'",
             "url = 'https://user:pa55w0rd@192.0.2.1/x'; password = 'hunter22'; IDENTIFIED BY 'x'",
             "api-key: \"abcd1234\" and secret='zz'", "PASSWORD='p' identified by password",
             "https://tok@host.invalid and ftp://a:b@c", "", "plain text, nothing secret",
-            "éAKIAIOSFODNN7ABCDEFGé \U0001F600ghp_" + a36,
+            "éAKI\x41IOSFODNN7ABCDEFGé \U0001F600ghp_" + a36,
         ]
         (page,) = dash.run([{"op": "eval", "expr": f"{json.dumps(lines)}.map(redactContextLine)"}])
         for line, got in zip(lines, page):

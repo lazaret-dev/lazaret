@@ -14,7 +14,9 @@ know:
   between the packages, the engine's recorded outputs, the 0-false-positive
   discipline, bounded work).
 
-Everything below is inert by policy: fixtures use `.invalid` / TEST-NET hosts and
+Everything below is inert by policy: fixtures use `.invalid` / TEST-NET hosts,
+made-up credentials are written in pieces or with one character escaped so that
+no line holds a provider's format whole (`test_fixture_credentials.py`), and
 nothing is executed (`STRUCTURE.md` §6).
 
 ---

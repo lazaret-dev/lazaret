@@ -190,8 +190,9 @@ tests/
 │                          plus registry_bootstrap.py (the registry with a faked network)
 ├── fixtures/              inert fixture trees and demo scan inputs (section 6)
 ├── architecture/          rules about the code: stdlib-only imports, layering,
-│                          the engine's recorded outputs (snapshots/), and the
-│                          npm package's parity with the Python package
+│                          the engine's recorded outputs (snapshots/), the
+│                          npm package's parity with the Python package, and no
+│                          credential format written whole (fixture credentials)
 ├── build/                 the build backend and the typosquat stubs
 ├── scanner/               the engine, taint, reports, SCA, dashboard, bundle hygiene,
 │                          and the samples-corpus test
@@ -358,7 +359,7 @@ Two tiers, in two places.
 
 ### Inert fixtures: `python/tests/fixtures/`
 
-Files that *look* malicious or vulnerable so the scanner has something to detect, but do nothing harmful: network references point at reserved addresses (`192.0.2.0/24`, `.invalid` hosts), credentials are dummies, and nothing is ever installed or executed. `tests/fixtures/README.md` states the policy. Because they're inert, they can live in the public repository, but they never ship in any package (section 8).
+Files that *look* malicious or vulnerable so the scanner has something to detect, but do nothing harmful: network references point at reserved addresses (`192.0.2.0/24`, `.invalid` hosts), credentials are dummies, written in pieces or with one character escaped so that no line holds a provider's format whole (`tests/architecture/test_fixture_credentials.py` checks the whole repository), and nothing is ever installed or executed. `tests/fixtures/README.md` states the policy. Because they're inert, they can live in the public repository, but they never ship in any package (section 8).
 
 ### Offensive samples: private `lazaret-samples` repository
 
