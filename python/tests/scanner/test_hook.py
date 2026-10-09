@@ -15,6 +15,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 from tests import _support
 from lazaret import _cli
@@ -50,7 +51,7 @@ class HookTests(unittest.TestCase):
         self.git("config", "core.autocrlf", "false")
 
     def git(self, *args):
-        subprocess.run(["git", "-C", self.dir, *args], check=True, capture_output=True)
+        return subprocess.run(["git", "-C", self.dir, *args], check=True, capture_output=True).stdout
 
     def write(self, rel, text):
         path = os.path.join(self.dir, *rel.split("/"))
@@ -60,7 +61,7 @@ class HookTests(unittest.TestCase):
 
     def stage(self, rel, text):
         self.write(rel, text)
-        self.git("add", "--", rel)
+        self.git("--literal-pathspecs", "add", "-f", "--", rel)
 
     def check(self, *files, cwd=None):
         out = io.StringIO()
@@ -149,6 +150,82 @@ class HookTests(unittest.TestCase):
         self.assertEqual(code, 1, out)
         self.assertIn("[SC-TRUNCATED]", out)
         self.assertIn("it is not a regular file", out)
+
+    def test_files_in_a_dependency_folder_are_read(self):
+        # (the project scan leaves node_modules, a virtualenv and a vendor folder out unless --deps, so a key
+        # committed in one went unchecked: H-2's review). They are read as a dependency's files are.
+        self.stage("node_modules/x/settings.py", f"KEY = '{AWS_KEY}'\n")
+        self.stage("vendor/package.json", '{"name": "y"}\n')
+        self.stage("vendor/y/settings.py", f"KEY = '{AWS_KEY}'\n")
+        code, out = self.check()
+        self.assertEqual(code, 1, out)
+        self.assertIn("lazaret hook: 3 files checked", out)
+        for rel in ("node_modules/x/settings.py", "vendor/y/settings.py"):
+            self.assertIn(f"  {rel}\n    L1     BLOCKER  [S-TOKEN]", out)
+        self.assertEqual(self.check("vendor/y/settings.py")[0], 1)        # (named, as pre-commit names them)
+
+    @unittest.skipIf(sys.platform == "win32", "a file name can't hold a backslash here")
+    def test_two_names_one_file_in_the_check(self):
+        # A backslash ends a folder's name in the temporary tree, as on Windows: `a\b.py` was written over `a/b.py`,
+        # whose key then went unread (H-2's review). The second is SC-TRUNCATED now, and the first is read.
+        self.stage("a/b.py", f"KEY = '{AWS_KEY}'\n")
+        self.stage("a\\b.py", "KEY = None\n")
+        code, out = self.check()
+        self.assertEqual(code, 1, out)
+        self.assertIn("  a/b.py\n    L1     BLOCKER  [S-TOKEN]", out)
+        self.assertIn("  a\\b.py\n    L1     CRITICAL [SC-TRUNCATED] File not fully scanned: " + hook.COLLISION_WHY, out)
+
+    def test_names_that_differ_only_in_case(self):
+        # On macOS and Windows `A.py` and `a.py` are one file: the second was written over the first. Put in the
+        # index as git would hold them from another system (the work tree can't hold both here either).
+        self.git("config", "core.ignorecase", "false")       # (git takes both names into the index then)
+        blob = lambda text: self.git_in(text, "hash-object", "-w", "--stdin").decode("ascii").strip()
+        for rel, text in (("A.py", f"KEY = '{AWS_KEY}'\n"), ("a.py", "KEY = None\n")):
+            self.git("update-index", "--add", "--cacheinfo", f"100644,{blob(text)},{rel}")
+        code, out = self.check()
+        self.assertEqual(code, 1, out)
+        self.assertIn("  A.py\n    L1     BLOCKER  [S-TOKEN]", out)
+        probe = tempfile.mkdtemp(prefix="lz-hook-case-")
+        self.addCleanup(shutil.rmtree, probe)
+        open(os.path.join(probe, "X"), "wb").close()
+        if os.path.exists(os.path.join(probe, "x")):        # (a system whose names ignore case)
+            self.assertIn(hook.COLLISION_WHY, out)
+
+    def git_in(self, data, *args):
+        return subprocess.run(["git", "-C", self.dir, *args], input=data.encode("utf-8"), check=True,
+                              capture_output=True).stdout
+
+    def test_an_index_entry_that_is_not_a_blob(self):
+        # git prints a tree's bytes after its line: they are skipped, not read as the next file's line.
+        self.stage("d/a.py", "x = 1\n")
+        tree = self.git("write-tree").decode("ascii").strip()
+        sub = self.git("rev-parse", f"{tree}:d").decode("ascii").strip()
+        self.git("update-index", "--add", "--cacheinfo", f"100644,{sub},x.py")
+        self.stage("y.py", f"KEY = '{AWS_KEY}'\n")
+        code, out = self.check()
+        self.assertEqual(code, 1, out)
+        self.assertIn("  x.py\n    L1     CRITICAL [SC-TRUNCATED] File not fully scanned: " + hook.UNPRINTED_WHY, out)
+        self.assertIn("  y.py\n    L1     BLOCKER  [S-TOKEN]", out)
+
+    @unittest.skipIf(sys.platform == "win32", "the stand-in git is a shell script")
+    def test_git_stopping_early_leaves_no_file_unchecked(self):
+        # A git that prints the first blob and stops: each file after it is SC-TRUNCATED. The ones after the first
+        # it failed on were neither written nor reported (H-2's review).
+        for name in ("a.py", "b.py", "c.py"):
+            self.stage(name, "x = 1\n")
+        bindir = tempfile.mkdtemp(prefix="lz-hook-bin-")
+        self.addCleanup(shutil.rmtree, bindir)
+        fake = os.path.join(bindir, "git")
+        with open(fake, "w", encoding="utf-8") as f:
+            f.write(f'#!/bin/sh\ncase " $* " in\n  *" cat-file "*) head -n 1 | "{GIT}" "$@"; exit 0 ;;\nesac\n'
+                    f'exec "{GIT}" "$@"\n')
+        os.chmod(fake, 0o755)
+        with mock.patch.object(hook.programs, "find", lambda name, path=None: fake if name == "git" else None):
+            code, out = self.check()
+        self.assertEqual(code, 1, out)
+        self.assertNotIn("  a.py", out)
+        for name in ("b.py", "c.py"):
+            self.assertIn(f"  {name}\n    L1     CRITICAL [SC-TRUNCATED] File not fully scanned: {hook.UNPRINTED_WHY}", out)
 
     def test_usage_errors(self):
         os.mkdir(os.path.join(self.dir, "folder"))

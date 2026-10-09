@@ -449,8 +449,13 @@ project is pre-1.0, so the 0.x API may still change.
   download into a shell, or a workflow that sends out every repository secret stops
   the commit. pre-commit runs it from a mirror repository,
   github.com/lazaret-dev/lazaret-pre-commit, whose package pins the release, written
-  by `scripts/make_pre_commit_mirror.py` (`docs/RELEASING.md`). The npm package
-  points to the Python package for it.
+  by `scripts/make_pre_commit_mirror.py` (`docs/RELEASING.md`). The npm package has the
+  same command (H-2): `npx lazaret hook` checks the same files and prints the same lines
+  (`js/src/hook.js`, held to the Python package's by `test_js_parity_hook.py`), runs
+  only git (`diff --cached`, `ls-files`, `cat-file`), the git `PATH` names by an absolute
+  path (`js/src/lib/programs.js`, the twin of `lazaret.scanner.programs`), and streams
+  the blobs to disk; the project scan both CLIs run is one function in the npm package
+  now (`js/src/project.js`).
 - **Commands written to a shell's startup file.** An install hook's command, or a script
   it runs or starts, that writes a command that downloads or runs code (`curl … | sh`,
   `nohup node …/agent.js &`) to `~/.bashrc`, `~/.zshrc`, `~/.profile`, fish's
@@ -833,6 +838,16 @@ project is pre-1.0, so the 0.x API may still change.
 
 ### Fixed
 
+- **Security: `lazaret hook` reads every file being committed (H-2's review of H-1).** A file committed in a
+  dependency's folder (`node_modules`, a virtualenv, a `vendor` folder with its marker) went unchecked: the hook
+  scanned the commit as `lazaret <dir>` does, which leaves those folders out without `--deps`. It scans as `--deps`
+  does now, so such a file is read as a dependency's (its supply-chain and secret rules): a GitHub Action's committed
+  `node_modules`, for one. And two names a commit holds could be one file in the hook's temporary tree, the
+  second written over the first, which then went unread: `a\b.py` over `a/b.py` anywhere (a backslash ends a
+  folder's name there, as on Windows), `a.py` over `A.py` on macOS and Windows; a file whose name is taken is
+  SC-TRUNCATED now, which fails the gate. When git stops before printing every blob, each one it did not print is
+  reported (those after the first went unmentioned, though the gate failed), an index entry that is not a blob no
+  longer puts the next file's reading out of step, and paths print as git writes them on every system.
 - **Security: a wheel's or an sdist's file that pip installs through `..` is read where pip writes it, and an sdist pip
   unpacks otherwise than the registry is INCOMPLETE (BR-4, F-11; rule set 2.64.0).** pip resolves a member's `..`:
   tarfile writes an sdist's `pkg-1.0/x/../setup.py` through the path, as setup.py, over the setup.py before it, and

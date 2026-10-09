@@ -218,6 +218,7 @@ resolving to one file. Writes are atomic
 ```
 lazaret check <directory> [options]
 lazaret <directory> [options]          # the same, like the Python CLI
+lazaret hook [FILE …] [--staged] [-q]  # the commit-time gate (below)
 
   --out-dir DIR         directory for the default reports (default: the scan
                         root); must already exist and be writable
@@ -264,6 +265,26 @@ Options are parsed like the Python CLI's: `--opt=value` and unique prefixes
 work, `--` ends the options, and an unknown option is a usage error. The
 Python-only options (`--taint-config`, `--strict-taint-config`,
 `--trust-repo-config`) are refused with a pointer to `pip install lazaret`.
+
+**The commit-time gate: `lazaret hook [FILE …] [--staged] [-q]`.** It checks
+the files being committed, as they are staged (read from git's index, so a
+partly staged file is checked as it will be committed), with the project
+scan's rules and `--deps`' (a file committed in `node_modules`, a virtualenv
+or a vendor folder is read as a dependency's), and fails (exit 1) on `--ci`'s
+security and supply-chain conditions: no BLOCKER finding, no CRITICAL
+vulnerability, no supply-chain indicator, no cross-file taint flow;
+duplication and maintainability are not a commit's business. With no file
+named it checks the files staged for commit; pre-commit passes the files
+being committed. It prints what fails the gate, and the vulnerabilities of
+MAJOR and above, the same lines as the Python package's `lazaret hook`
+(`python/tests/architecture/test_js_parity_hook.py`). The only program it
+runs is git, to list the index and print its blobs (`cat-file`, so no filter
+runs), and only the git `PATH` names by an absolute path, never one in the
+repository's folder. A file that can't be read, or whose name is another's
+on this system (names that differ only in case on macOS and Windows), is
+SC-TRUNCATED, which fails the gate. In a git hook or husky's
+`.husky/pre-commit`: `npx lazaret hook`. `run()` returns a promise of its
+exit code: the blobs are streamed to disk.
 
 Exit codes: `0` ok (also a failed gate without `--ci`) · `1` gate failed
 with `--ci`, or a hostile-depth manifest (`SC-MANIFEST-DEPTH`: `package.json`

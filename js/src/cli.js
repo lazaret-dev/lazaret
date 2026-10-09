@@ -8,24 +8,19 @@
 import { resolve } from "node:path";
 import { statSync, readFileSync } from "node:fs";
 import {
-  collectFiles, reportPaths, writeReport, validateReportPaths, validateOutDir,
-  ReportPathError, EXIT_OUTPUT, ScanTargetError, scanErrorIssue, MAX_FILE_BYTES,
+  reportPaths, writeReport, validateReportPaths, validateOutDir,
+  ReportPathError, EXIT_OUTPUT, ScanTargetError, MAX_FILE_BYTES,
 } from "./lib/fs.js";
-import { fsNameToString } from "./lib/encoding.js";
 import { pyRepr } from "./lib/pycompat.js";
-import { scanFile, scanConfigFile, treeReader } from "./scanner/scan.js";
-import { scanManifest, scanGyp } from "./lib/supplychain.js";
-import { redactResult, setRedactSecrets } from "./lib/redact.js";
+import { setRedactSecrets } from "./lib/redact.js";
 import {
-  buildResult, jsonReportChunks, htmlReportChunks, printReport, sarifReport, sarifChunks,
+  jsonReportChunks, htmlReportChunks, printReport, sarifReport, sarifChunks,
   sanitizeTerm, sanitizeTermLine, setExcerptWidth,
 } from "./report.js";
-import { clipLine } from "./lib/issue.js";
 import { applyBaseline, BASELINE_KEY_ENV } from "./baseline.js";
-import { dependencyChecks } from "./deps.js";
 import { loadError } from "./lib/native.js";
-import { Pool, threadsFor, mapTasks } from "./pool.js";
-import { analyzeFlows, redactFlowIssues } from "./scanner/flow.js";
+import { collectProject, scanCollected } from "./project.js";
+import { runHook } from "./hook.js";
 import { splitLines } from "./scanner/lines.js";
 import { verifyFindings } from "./verify.js";
 
@@ -42,6 +37,7 @@ const USAGE = `lazaret v${version} — ${TAGLINE}
 Usage:
   lazaret check <directory> [options]
   lazaret <directory> [options]
+  lazaret hook [FILE …]   the commit-time gate (lazaret hook --help)
 
 Options:
   --out-dir DIR         Directory for the default reports (default: the scan
@@ -208,9 +204,10 @@ export function parseArgs(argv) {
 
 /**
  * Run the CLI. Returns an exit code; with --verify-secrets, a promise of one (the providers are asked over the network
- * after the scan).
+ * after the scan), and for `lazaret hook` (hook.js: git's blobs are streamed to disk).
  * @param {string[]} argv arguments after the program name
- * @param {{ out?: (s: string)=>void, err?: (s: string)=>void, env?: object, verifier?: object }} io injectable
+ * @param {{ out?: (s: string)=>void, err?: (s: string)=>void, env?: object, verifier?: object, cwd?: string }} io
+ *   injectable (`cwd`: where `lazaret hook` runs, the process's by default)
  */
 export function run(argv, io = {}) {
   const err = io.err ?? ((s) => console.error(s));
@@ -259,7 +256,7 @@ function isGuardCommand(argv) {
   try { statSync("guard"); return false; } catch { return true; }
 }
 
-/** `lazaret hook [FILE …]`, the Python package's commit-time gate: `hook` first,
+/** `lazaret hook [FILE …]`, the commit-time gate (hook.js): `hook` first,
  * when no path named hook is here to scan, or when what follows is files or
  * --staged (lazaret._cli.is_hook). */
 function isHookCommand(argv) {
@@ -287,10 +284,8 @@ function runChecked(argv, io) {
       + "then run: lazaret guard npm install …");
     return EXIT_USAGE;
   }
-  if (isHookCommand(argv)) {
-    err("error: lazaret hook comes with the Python package: pip install lazaret (or pipx install lazaret), "
-      + "or pre-commit's hook (github.com/lazaret-dev/lazaret-pre-commit)");
-    return EXIT_USAGE;
+  if (isHookCommand(argv)) {                                    // (a promise of the exit code: hook.js)
+    return runHook(argv.slice(1), io, { maxFileBytes: envPositiveInt(env.LAZARET_MAX_SOURCE_BYTES) ?? MAX_FILE_BYTES });
   }
   let parsed;
   try {
@@ -352,66 +347,19 @@ function runChecked(argv, io) {
     throw e;
   }
 
-  // ---- scan -------------------------------------------------------------
+  // ---- scan (project.js) ---------------------------------------------------
   let col;
   try {
-    col = collectFiles(root, { includeDeps: !!opts.deps, exclude: opts.exclude,
+    col = collectProject(root, { deps: !!opts.deps, exclude: opts.exclude,
       maxFileBytes: opts.maxSourceBytes ?? envPositiveInt(env.LAZARET_MAX_SOURCE_BYTES) ?? MAX_FILE_BYTES });
   } catch (e) {
     if (e instanceof ScanTargetError) { err(`error: ${sanitizeTermLine(e.message)}`); return EXIT_USAGE; }
     throw e;
   }
-  const { files, manifests, configs, binaryIssues, skippedIssues } = col;
-  if (!files.length && !manifests.length && !configs.length && !col.pth.length && !binaryIssues.length) {
-    err(`error: ${sanitizeTermLine(`nothing to scan under ${fsNameToString(Buffer.from(root))}: no Python, JavaScript or SQL sources, package manifests or other files to check`)}`);
-    return EXIT_USAGE;
-  }
-  const issues = [];
-  const add = (list) => { for (const i of list) issues.push(i); };   // never push(...big)
-  add(binaryIssues);
-  // Each file's scan, and --deps' checks of each dependency file: on worker threads for a scan
-  // with enough to read (pool.js; LAZARET_THREADS), the findings in the same order.
-  const threads = threadsFor(env, files.reduce((n, f) => n + f.content.length, 0),
-    files.reduce((n, f) => Math.max(n, f.content.length), 0));
-  let pool = null;
-  if (threads > 1) {
-    try { pool = new Pool(threads); } catch { pool = null; }        // (no workers here: one thread does it all)
-  }
-  try {
-    return scanAndReport(pool);
-  } finally {
-    if (pool) pool.close();
-  }
+  return scanAndReport();
 
-  function scanAndReport(pool) {
-    const scans = mapTasks(pool,
-      files.map((f) => ["scan", { name: f.path, path: f.path, content: f.content, lang: f.lang, dep: f.dep }]),
-      ([, file]) => scanFile(file),
-      ([, file], e) => [scanErrorIssue(file.path, e)]);                  // one file must never kill the run
-    for (const found of scans) add(found);
-    const read = treeReader(files, configs);                            // what an editor's or agent's settings run
-    for (const cf of configs) {                                         // config and data files: credentials only
-      try { add(scanConfigFile(cf.path, cf.content, read)); } catch (e) { issues.push(scanErrorIssue(cf.path, e)); }
-    }
-    for (const mf of manifests) {
-      // binding.gyp and every other .gyp / .gypi → scanGyp (G11); package.json
-      // → scanManifest, with the registry hook set inside a dependency tree.
-      try {
-        add(mf.kind !== "package.json" ? scanGyp(mf.path, mf.content)
-          : scanManifest(mf.path, mf.content, { registry: !!mf.dep }));
-      } catch (e) { issues.push(scanErrorIssue(mf.path, e)); }
-    }
-    // --deps: what the dependencies run (install hooks, import-time code)
-    const deps = dependencyChecks(root, files, manifests, issues, { exclude: opts.exclude, maxFileBytes: col.maxFileBytes, pool });
-    add(deps.issues);
-    for (const f of deps.files) files.push(f);
-    add(skippedIssues);
-    // Cross-file taint flows in the project's Python and JavaScript (the
-    // Python engine's flow.analyze; dependency files are not analyzed). The
-    // findings copy raw source lines: they get their file's redaction here.
-    add(redactFlowIssues(analyzeFlows(files), files));
-    const res = redactResult(buildResult(root, files, issues), clipLine);
-    res.metrics.configFiles = configs.length;
+  function scanAndReport() {
+    const { res, files, configs } = scanCollected(root, col, { exclude: opts.exclude, env });
     if (opts.verifySecrets) {
       // V-1 (John's decision 4): only when asked; each credential to its own provider, after a note that says where.
       // A finding's line is read from the text the scan read (verifyscan.lines_of reads it again from the file).

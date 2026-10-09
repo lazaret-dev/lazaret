@@ -2114,7 +2114,7 @@ comprehensive, so weigh marginal value against FP risk):
   coverage gate and parser fuzzing in CI, optional live secret verification,
   splitting `core.py`, generating the dashboard's script from `js/src` (the
   GitHub Action was built in 0.1.8, and the pre-commit hook, `lazaret hook`,
-  in 0.1.9; the npm package has no `hook` command yet).
+  in 0.1.9, in both packages).
 
 Prefer doing detection extensions **reactively** — when a real-world dropper
 uses the pattern — over speculatively. The bar that made this tool good is the

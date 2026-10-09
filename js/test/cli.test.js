@@ -46,11 +46,17 @@ test("lazaret guard points to the Python package (exit 2)", () => {
   }
 });
 
-test("lazaret hook points to the Python package (exit 2)", () => {
-  for (const argv of [["hook"], ["hook", "--staged"]]) {
-    const r = capture(argv);
-    assert.equal(r.code, 2);
-    assert.match(r.err, /lazaret hook comes with the Python package: pip install lazaret/);
+test("lazaret hook is the commit-time gate (hook.test.js): outside a repository it asks for files (exit 2)", async () => {
+  const d = mkdtempSync(join(tmpdir(), "lazaret-nohook-"));
+  try {
+    for (const argv of [["hook"], ["hook", "--staged"]]) {
+      const err = [];
+      const code = await run(argv, { cwd: d, out: () => {}, err: (s) => err.push(s), env: { ...process.env, PATH: "" } });
+      assert.equal(code, 2);
+      assert.deepEqual(err, ["error: not in a git repository: name the files to check"]);
+    }
+  } finally {
+    rmSync(d, { recursive: true, force: true });
   }
 });
 

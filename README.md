@@ -287,9 +287,11 @@ supply-chain conditions: no BLOCKER finding (a credential, SQL built from string
 vulnerability, no supply-chain indicator (an install hook that downloads and runs code, a workflow that
 sends out the repository's secrets, code that decodes and runs a payload) and no cross-file taint flow.
 Duplication and maintainability, which `--ci` also gates, are not checked. Each file is scanned as a project
-scan scans it, from git's index, so a partly staged file is checked as it will be committed. With no file
+scan with `--deps` scans it (a file committed in `node_modules`, a virtualenv or a vendor folder is read as a
+dependency's), from git's index, so a partly staged file is checked as it will be committed. With no file
 named it checks the files staged for commit; it prints what fails the gate, and the vulnerabilities of
-MAJOR and above. Since 0.1.9.
+MAJOR and above, with each path as git writes it. Since 0.1.9, in both packages: `npx lazaret hook` checks
+the same files and prints the same lines.
 
 With [pre-commit](https://pre-commit.com), the mirror repository installs Lazaret's wheel for your platform
 by version:
@@ -302,10 +304,10 @@ repos:
       - id: lazaret
 ```
 
-Without it, the git hook is an executable `.git/hooks/pre-commit` holding `#!/bin/sh` and `lazaret hook`. To accept a
-finding, mark its line (Inline suppression, below); to leave files out with pre-commit, use its `exclude`.
-Exit codes: 0 passed or nothing to check, 1 the gate failed, 2 usage error. The npm package has no `hook`
-command yet.
+Without it, the git hook is an executable `.git/hooks/pre-commit` holding `#!/bin/sh` and `lazaret hook` (with
+the npm package as a dev dependency, `npx lazaret hook`, which husky's `.husky/pre-commit` can hold too). To
+accept a finding, mark its line (Inline suppression, below); to leave files out with pre-commit, use its
+`exclude`. Exit codes: 0 passed or nothing to check, 1 the gate failed, 2 usage error.
 
 ## Detection capabilities
 

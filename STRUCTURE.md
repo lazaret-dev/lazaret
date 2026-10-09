@@ -88,8 +88,9 @@ python/
 │   │   ├── nativenet.py    the network layer in the native library (lazaret-net):
 │   │   │                   the default transport, urllib behind it (NET-1)
 │   │   ├── hook.py         the commit-time gate (`lazaret hook`): the files being
-│   │   │                   committed, from git's index, through scan_project();
-│   │   │                   fails on --ci's security and supply-chain conditions
+│   │   │                   committed, from git's index, through scan_project()
+│   │   │                   with --deps; fails on --ci's security and supply-chain
+│   │   │                   conditions (js/src/hook.js is its twin)
 │   │   ├── taintspec.py    taint-config validation (shared by both taint engines)
 │   │   ├── reports.py      safe report paths, report provenance, baseline signing
 │   │   ├── ghworkflow.py   GitHub Actions workflows: the worms' shapes and the
@@ -300,6 +301,10 @@ js/
 ├── scripts/build-wasm.js `npm run build`: native/ from ../rust
 ├── src/
 │   ├── cli.js            `lazaret check <dir>`; returns an exit code (testable)
+│   ├── project.js        the project scan (core.scan_project's twin), for the
+│   │                     CLI and the hook
+│   ├── hook.js           `lazaret hook`: the files being committed, from git's
+│   │                     index (hook.py's twin)
 │   ├── index.js          public exports
 │   ├── report.js         report format (JSON + HTML), terminal output
 │   ├── verify.js         --verify-secrets: the scan's secrets asked about, over
@@ -318,7 +323,8 @@ js/
 │                         (BOM/UTF-16/PEP 263), binary (magic bytes), lexer
 │                         (the comment layout, the engine's lexers'), redact,
 │                         issue, supplychain
-│                         (install hooks), autorun and ghworkflow (editor and
+│                         (install hooks), programs (the git PATH names by an
+│                         absolute path), autorun and ghworkflow (editor and
 │                         agent settings that run commands; the workflows
 │                         the worms planted), pyjson/pycompat/pynames
 │                         (Python-compatible JSON, literals and text); never

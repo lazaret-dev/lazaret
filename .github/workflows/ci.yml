@@ -136,7 +136,7 @@ jobs:
           PYTHONPATH=src python -c "from lazaret.scanner import _native; assert _native.available(), _native.load_error(); print('native engine', _native.version())"
           node -e 'import("../js/src/lib/native.js").then((n) => { if (!n.available()) process.exit(1); console.log("npm engine", n.call("version").version); })'
           python -m unittest tests.architecture.test_js_parity tests.architecture.test_js_parity_config \
-            tests.architecture.test_js_parity_core \
+            tests.architecture.test_js_parity_core tests.architecture.test_js_parity_hook \
             tests.architecture.test_js_parity_eval tests.architecture.test_js_parity_flow \
             tests.architecture.test_js_parity_ci_hardening tests.architecture.test_js_parity_go_rust \
             tests.architecture.test_js_parity_gyp tests.architecture.test_js_parity_lexing \
