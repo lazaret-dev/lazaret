@@ -1,4 +1,4 @@
-//! The rules against a real TLS 1.3 peer on 127.0.0.1: tiny_https's test server (its `server` feature, for tests
+//! The rules against a real TLS 1.3 peer on 127.0.0.1: pratique's test server (its `server` feature, for tests
 //! only), with a throwaway root that the shared client is configured to trust.
 
 use super::*;
@@ -7,9 +7,9 @@ use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::OnceLock;
 use std::thread;
-use tiny_https::tls::pki::TestPki;
-use tiny_https::http::h2_server;
-use tiny_https::tls::server::{ServerConfig, ServerStream};
+use pratique::tls::pki::TestPki;
+use pratique::http::h2_server;
+use pratique::tls::server::{ServerConfig, ServerStream};
 
 /// One root for every test (the trust anchors are the process's), configured once.
 fn pki() -> &'static TestPki {
@@ -375,16 +375,16 @@ fn a_failure_says_its_kind() {
     assert_eq!(classify(NetError::Alert(2, 70)).kind(), "tls-version");
     assert_eq!(classify(NetError::Alert(2, 40)).kind(), "tls");
     // (a compressed body this layer never asks to have decoded)
-    let decode = classify(NetError::Decode(tiny_https::inflate::Error::Truncated));
+    let decode = classify(NetError::Decode(pratique::inflate::Error::Truncated));
     assert_eq!(decode.kind(), "http", "{decode:?}");
     assert_eq!(classify(NetError::Io(std::io::Error::from(std::io::ErrorKind::TimedOut))).kind(), "timeout");
     assert_eq!(classify(NetError::Io(std::io::Error::from(std::io::ErrorKind::ConnectionRefused))).kind(), "network");
     let wrapped = std::io::Error::new(std::io::ErrorKind::InvalidData, NetError::Http("response body exceeds the configured size limit".into()));
     assert_eq!(classify(unwrap_io(wrapped)), Failure::TooLarge);
-    let refused = |hop, by| NetError::Refused(tiny_https::error::Refused { hop, by, reason: "host not allowed: x".into() });
-    assert_eq!(classify(refused(0, tiny_https::error::RefusedBy::HostRule)),
+    let refused = |hop, by| NetError::Refused(pratique::error::Refused { hop, by, reason: "host not allowed: x".into() });
+    assert_eq!(classify(refused(0, pratique::error::RefusedBy::HostRule)),
                Failure::Refused("request refused: host not allowed: x".into()));
-    assert_eq!(classify(refused(2, tiny_https::error::RefusedBy::Scheme)),
+    assert_eq!(classify(refused(2, pratique::error::RefusedBy::Scheme)),
                Failure::Refused("redirect 2 refused: host not allowed: x".into()));
 }
 
@@ -424,13 +424,13 @@ fn credential(host: &str, path: &str, name: &str, value: &str) -> Credential {
     Credential { host: host.into(), path: path.into(), name: name.into(), value: value.into(), first_only: false }
 }
 
-fn hop<'a>(url: &'a tiny_https::http::Url, hop: usize, from: Option<&'a tiny_https::http::Url>) -> HopInfo<'a> {
+fn hop<'a>(url: &'a pratique::http::Url, hop: usize, from: Option<&'a pratique::http::Url>) -> HopInfo<'a> {
     HopInfo { url, method: "GET", hop, from }
 }
 
 #[test]
 fn a_credential_is_granted_to_its_host_and_path() {
-    use tiny_https::http::Url;
+    use pratique::http::Url;
     let creds = vec![
         credential("registry.example", "/", "Authorization", "Bearer whole"),
         credential("registry.example", "/team/", "Authorization", "Bearer team"),
@@ -459,7 +459,7 @@ fn a_credential_is_granted_to_its_host_and_path() {
 
 #[test]
 fn the_urls_own_login_goes_with_the_request_alone() {
-    use tiny_https::http::Url;
+    use pratique::http::Url;
     let mut first = credential("registry.example", "/", "Authorization", "Basic own");
     first.first_only = true;
     let creds = vec![credential("registry.example", "/team/", "Authorization", "Bearer settings"), first];
@@ -653,7 +653,7 @@ fn pmsettings_choice<'a>(table: &'a [(String, String, String)], host: &str, path
     pmsettings_header(table, host, &as_sent(path), false)
 }
 
-/// The choice for a redirect's hop, whose path tiny_https sends as the Location gives it.
+/// The choice for a redirect's hop, whose path pratique sends as the Location gives it.
 fn hop_choice<'a>(table: &'a [(String, String, String)], host: &str, path: &str, crossed: bool) -> Option<&'a str> {
     pmsettings_header(table, host, path, crossed)
 }
@@ -693,7 +693,7 @@ const HOP_CASES: [(&str, &str); 22] = [
 
 #[test]
 fn the_choice_of_a_path_is_pmsettings_choice() {
-    use tiny_https::http::Url;
+    use pratique::http::Url;
     for whole in [true, false] {
         let creds: Vec<Credential> = PATH_KEYS.iter().filter(|(p, _)| whole || *p != "/")
             .map(|(p, v)| credential("reg.example", p, "Authorization", v)).collect();
@@ -709,9 +709,9 @@ fn the_choice_of_a_path_is_pmsettings_choice() {
 
 #[test]
 fn a_redirects_path_gets_what_covers_it_read_three_ways() {
-    // (tiny_https sends a Location's path as it is: "/team/../x" is /x to a server that resolves it, and under /team/ to
+    // (pratique sends a Location's path as it is: "/team/../x" is /x to a server that resolves it, and under /team/ to
     // one that does not, so a token for /team/ goes with neither; "/team/..%2fx" is /x to nginx)
-    use tiny_https::http::Url;
+    use pratique::http::Url;
     let creds: Vec<Credential> = HOP_KEYS.iter().map(|(p, v)| credential("reg.example", p, "Authorization", v)).collect();
     let from = Url::parse("https://reg.example/start").unwrap();
     for (path, want) in HOP_CASES {
@@ -725,7 +725,7 @@ fn a_redirects_path_gets_what_covers_it_read_three_ways() {
 fn a_redirect_from_another_origin_gets_a_credential_of_the_whole_host_only() {
     // (npm sends none on a redirect to another host, and pip a .netrc login for the host: any host the guard fetches
     // from can redirect to one that has a token for a path)
-    use tiny_https::http::Url;
+    use pratique::http::Url;
     let creds = vec![credential("reg.example", "/", "Authorization", "Bearer whole"),
                      credential("reg.example", "/team/", "Authorization", "Bearer team"),
                      credential("reg.example", "/team/", "PRIVATE-TOKEN", "glpat")];
@@ -744,7 +744,7 @@ fn a_redirect_from_another_origin_gets_a_credential_of_the_whole_host_only() {
 
 #[test]
 fn the_choice_is_pmsettings_choice() {
-    use tiny_https::http::Url;
+    use pratique::http::Url;
     let mut seed: u64 = 0x9e37_79b9_7f4a_7c15;
     let mut next = |n: usize| {
         seed ^= seed << 13;
@@ -869,13 +869,13 @@ fn debug_shows_no_password() {
         assert!(!shown.contains(secret), "{secret} in {shown}");
     }
     assert!(shown.contains("registry.example") && shown.contains("proxy.example:3128"), "{shown}");
-    // (a proxy's setting may have no scheme: tiny_https reads "user:password@host:port" as one)
+    // (a proxy's setting may have no scheme: pratique reads "user:password@host:port" as one)
     let shown = format!("{:?}", Proxy::Url("puser:pr0xy@proxy.example:3128".into()));
     assert!(!shown.contains("pr0xy") && !shown.contains("puser") && shown.contains("proxy.example:3128"), "{shown}");
 }
 
 // ------------------------------------------------------------------------------------------- compressed documents
-// (gzip for registry documents, John, Oct 7: "Add after Q-1". The compressed bodies are built here as tiny_https's own
+// (gzip for registry documents, John, Oct 7: "Add after Q-1". The compressed bodies are built here as pratique's own
 // tests build them: stored blocks for ordinary data, and one dynamic block for the classic bomb.)
 
 fn stored(data: &[u8]) -> Vec<u8> {
@@ -899,7 +899,7 @@ fn gzip_of(deflate: &[u8], crc: u32, len: u64) -> Vec<u8> {
 }
 
 fn gzip(data: &[u8]) -> Vec<u8> {
-    gzip_of(&stored(data), tiny_https::inflate::crc32(0, data), data.len() as u64)
+    gzip_of(&stored(data), pratique::inflate::crc32(0, data), data.len() as u64)
 }
 
 /// Bits, least significant first, as DEFLATE packs them.
@@ -963,7 +963,7 @@ fn gzip_bomb(matches: u64) -> Vec<u8> {
     let (zeros, mut crc, mut left) = (vec![0u8; 1 << 16], 0, n);
     while left > 0 {
         let k = left.min(zeros.len() as u64) as usize;
-        crc = tiny_https::inflate::crc32(crc, &zeros[..k]);
+        crc = pratique::inflate::crc32(crc, &zeros[..k]);
         left -= k as u64;
     }
     gzip_of(&b.out, crc, n)

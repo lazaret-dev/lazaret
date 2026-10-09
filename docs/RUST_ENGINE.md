@@ -268,18 +268,19 @@ rust/
   crates/lazaret-ffi/        cdylib liblazaret_native: Lazaret's only `unsafe` (the C ABI; the
                              WebAssembly exports; natively, the network layer's `lazaret_net_*`
                              and the `verify.*` calls: `verify.go_sumdb`, `verify.sigstore`)
-  crates/lazaret-verify/     tiny_https's pure part (no I/O, no `unsafe`, wasm32): signatures,
+  crates/lazaret-verify/     pratique's pure part (no I/O, no `unsafe`, wasm32): signatures,
                              certificate chains, transparency logs, attestations; `gosum`, the
                              Go checksum database's lookup checked in two steps; `provenance`,
                              npm's and PyPI's attestations of a file: verified, invalid or
                              unchecked (NET-1)
-  crates/lazaret-net/        the network layer on tiny_https: Lazaret's host rule on every hop,
+  crates/lazaret-net/        the network layer on pratique: Lazaret's host rule on every hop,
                              URL limits, budgets, credentials given hop by hop to their own
-                             host (tiny_https's hop hook, decision 14); native library only
+                             host (pratique's hop hook, decision 14); native library only
                              (NET-1, DESIGN.md §5j)
-  crates/tiny_https/         the HTTPS/TLS library, taken as it was handed over
-                             (scripts/sync_tiny_https.py; LAZARET.md, vendored.sha256); not a
-                             default member: `cargo test -p tiny_https` runs its own tests
+  crates/pratique/           the HTTPS/TLS library (github.com/lazaret-dev/pratique; tiny_https
+                             until October 2026), taken from a commit of its repository as it is
+                             (scripts/sync_pratique.py; LAZARET.md, vendored.sha256); not a
+                             default member: `cargo test -p pratique` runs its own tests
   .cargo/config.toml         the WebAssembly build's stack (8 MiB, placed first)
 python/src/lazaret/scanner/_native.py   ctypes loader and one call (NativeError, NativeExhausted)
 python/src/lazaret/scanner/nativenet.py the network layer from Python: the default transport, urllib
@@ -407,9 +408,9 @@ without `--platform`, compiles the engine: `cargo build --release --offline
 --locked -p lazaret-ffi` in the sdist's (or the checkout's) `rust/`, with
 `MACOSX_DEPLOYMENT_TARGET` set to the release wheels' minimum on macOS and
 the C runtime linked statically on Windows. Since NET-1 the library holds the
-network layer too (`lazaret-net` on tiny_https, whose sources the sdist
+network layer too (`lazaret-net` on pratique, whose sources the sdist
 carries: its manifest, licence and the test and example sources cargo reads,
-not its test data), and building it needs Rust 1.87 or later (tiny_https's
+not its test data), and building it needs Rust 1.87 or later (pratique's
 SIMD kernels call the architecture intrinsics as safe functions). The backend then loads the
 library to check that it is this release's and loads in this Python, and
 tags the wheel for this machine (`linux_x86_64`, `win_amd64`,

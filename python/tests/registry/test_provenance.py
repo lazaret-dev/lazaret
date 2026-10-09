@@ -1,6 +1,6 @@
 """`registry/provenance.py` (0.1.9, NET-1's fifth item): npm's and PyPI's provenance as findings, on real attestations.
 
-The data is tiny_https's capture of the real registries (rust/crates/tiny_https/tests/data/sigstore/README.txt, fetched
+The data is pratique's capture of the real registries (rust/crates/pratique/tests/data/sigstore/README.txt, fetched
 Oct 5, 2026; the artifacts are Apache-2.0): the npm package sigstore 0.2.0, 2.2.0 and 4.0.0 with their attestations
 (npm's publish attestation and SLSA provenance from sigstore/sigstore-js's workflow), and PyPI's PEP 740 provenance of
 the wheel pypi-attestations 0.0.30 with the wheel. The registries' other documents (npm's abbreviated packument, PyPI's
@@ -21,7 +21,7 @@ from lazaret.scanner import _native
 from tests import _support
 from tests.registry._review_support import tarball
 
-DATA = os.path.join(_support.REPO_ROOT, "rust", "crates", "tiny_https", "tests", "data", "sigstore")
+DATA = os.path.join(_support.REPO_ROOT, "rust", "crates", "pratique", "tests", "data", "sigstore")
 NPM = "https://registry.npmjs.org/"
 ATTESTATIONS = NPM + "-/npm/v1/attestations/"
 SIGSTORE_JS = "https://github.com/sigstore/sigstore-js"

@@ -16,6 +16,6 @@ database's answers were not reachable when this was made. The tests build the pr
 describes, and the `lookups` bodies are what the checksum database's server code of `golang.org/x/mod/sumdb` writes for
 the real hashes, signed with a key made from a fixed seed (`vkey` in the file), not the key of `sum.golang.org`. So the
 tests that use them leave out the check of a lookup's signature and proof (`golang.verify_lookup` is patched, and
-`info["sumdb"]` is "tls"); `tests/registry/test_golang_sumdb.py` checks real answers, tiny_https's capture of
-`sum.golang.org` (`rust/crates/tiny_https/tests/data/sumdb`). To record the real ones: `curl https://sum.golang.org/lookup/github.com/pmezard/go-difflib@v1.0.0` and
+`info["sumdb"]` is "tls"); `tests/registry/test_golang_sumdb.py` checks real answers, pratique's capture of
+`sum.golang.org` (`rust/crates/pratique/tests/data/sumdb`). To record the real ones: `curl https://sum.golang.org/lookup/github.com/pmezard/go-difflib@v1.0.0` and
 `curl https://proxy.golang.org/github.com/pmezard/go-difflib/@v/v1.0.0.info`.

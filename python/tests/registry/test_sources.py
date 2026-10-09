@@ -201,7 +201,7 @@ class Hosts(unittest.TestCase):
         self.assertEqual(sources._Hop.max_redirections, repo.MAX_REDIRECTS)
 
     def test_on_the_native_transport_the_token_is_a_credential_of_the_api_host(self):
-        # (decision 14: tiny_https's hop hook gives it to the API host's hops alone; never a header of the request)
+        # (decision 14: pratique's hop hook gives it to the API host's hops alone; never a header of the request)
         asked = []
 
         def request(url, **kw):

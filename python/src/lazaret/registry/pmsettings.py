@@ -146,7 +146,7 @@ def _covered(prefix, readings):
 def covers(prefix, path):
     """Does the credential path `prefix` (one that ends in "/") cover a request of this URL path, read as it is
     sent, as npm and uv resolve it (`normal_path`) and as a server that decodes it may route it (`server_path`)?
-    lazaret-net's `granted` asks the same of every hop: tiny_https sends a redirect's path as its Location gives it,
+    lazaret-net's `granted` asks the same of every hop: pratique sends a redirect's path as its Location gives it,
     and "/team/../x" is under /team/ to a server that reads it as it is and /x to one that resolves it, as
     "/team/..%2fx" is to nginx."""
     return _covered(prefix, _readings(path))

@@ -1,10 +1,10 @@
-"""The native transport (0.1.9, NET-1): the native library's HTTPS client (rust/crates/lazaret-net, on tiny_https)
+"""The native transport (0.1.9, NET-1): the native library's HTTPS client (rust/crates/lazaret-net, on pratique)
 from Python, against a local HTTPS server that Python's ssl serves with a root made for the test.
 
 The root and the server's certificate are made with the `openssl` command when the tests start (none is kept in the
 repository); without it, or without the native library's network layer, the tests skip. Python's server speaks
 HTTP/1.1 (the native client offers h2 and takes HTTP/1.1 when the server does not pick it; the HTTP/2 path is held by
-lazaret-net's own tests against tiny_https's server). Hosts are `localhost` on the server's port; nothing leaves the
+lazaret-net's own tests against pratique's server). Hosts are `localhost` on the server's port; nothing leaves the
 machine."""
 
 import functools
@@ -312,7 +312,7 @@ class NativeTransportTests(unittest.TestCase):
         self.assertFalse(nativenet.chosen(self.url("/ok")) and os.environ.get(nativenet.ENV) == "python")
 
     def test_a_tls12_server_is_answered_natively_over_tls12(self):
-        # (tiny_https's drop of Oct 7, B-36: it speaks TLS 1.2 to a server that speaks nothing newer, as
+        # (pratique's drop of Oct 7, B-36: it speaks TLS 1.2 to a server that speaks nothing newer, as
         # registry.npmjs.org did to a home network that day; before, such a server went to Python's transport)
         server, port = serve(self.cert, self.key, max_version=ssl.TLSVersion.TLSv1_2)
         host = f"localhost:{port}"
@@ -425,7 +425,7 @@ class NativeTransportTests(unittest.TestCase):
         return json.loads(reply.body)
 
     def test_a_credential_goes_to_its_own_host_alone(self):
-        # (decision 14: credentials over tiny_https, each given by its hop hook to the hops to its own host)
+        # (decision 14: credentials over pratique, each given by its hop hook to the hops to its own host)
         token = nativenet.Credential(self.host, "/", "Authorization", "Bearer t0ken")
         gitlab = nativenet.Credential(self.host, "/", "PRIVATE-TOKEN", "glpat-t0ken")
         seen = self.seen("/headers", [token, gitlab])
@@ -527,7 +527,7 @@ class ChoiceTests(unittest.TestCase):
             self.assertEqual(nativenet._proxy_for("https://registry.npmjs.org/x"), "direct")
         if os.name != "nt":           # (one variable to Windows, whatever its case)
             # what urllib and the native client read differently goes to urllib: the lower-case name first to urllib,
-            # and an empty one unsets the setting; the upper-case name first to tiny_https (the credentials review)
+            # and an empty one unsets the setting; the upper-case name first to pratique (the credentials review)
             for differ in ({"HTTPS_PROXY": "http://a.invalid:3128", "https_proxy": "http://b.invalid:3128"},
                            {"HTTPS_PROXY": "", "https_proxy": "http://b.invalid:3128"},
                            {"HTTPS_PROXY": "http://a.invalid:3128", "https_proxy": ""},
@@ -538,7 +538,7 @@ class ChoiceTests(unittest.TestCase):
             same = {"HTTPS_PROXY": "http://a.invalid:3128", "https_proxy": "http://a.invalid:3128", "no_proxy": "x.example"}
             with mock.patch.dict(os.environ, {**env, **same}, clear=True):
                 self.assertEqual(nativenet._proxy_for("https://registry.npmjs.org/x"), "env")
-        # one setting that the two read differently: tiny_https takes port 8080 when a path follows the port or none is
+        # one setting that the two read differently: pratique takes port 8080 when a path follows the port or none is
         # given (urllib: the port, or 443), "*" anywhere in NO_PROXY, and no entry with a port (the second review)
         npm = "https://registry.npmjs.org/x"
         for differ, url in [({"HTTPS_PROXY": "http://a.invalid:3128/"}, npm), ({"HTTPS_PROXY": "http://a.invalid"}, npm),

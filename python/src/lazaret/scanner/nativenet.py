@@ -1,7 +1,7 @@
 """Lazaret's network transport (0.1.9, NET-1): the native library's HTTPS client, the default for the registry's
 requests since John's decision 12 (Oct 6), with Python's urllib (OpenSSL) behind it.
 
-The client is rust/crates/lazaret-net, on tiny_https (rust/crates/tiny_https: TLS 1.3, and TLS 1.2 with a server
+The client is rust/crates/lazaret-net, on pratique (rust/crates/pratique: TLS 1.3, and TLS 1.2 with a server
 that speaks nothing newer; HTTP/2 with one shared connection per origin, and HTTP/1.1 with kept-alive connections;
 documents go over HTTP/2 and downloads over HTTP/1.1, see `http2`), reached through the native library's C ABI
 (`lazaret_net_*`, rust/crates/lazaret-ffi). Every request carries its caller's host rule, which the client applies
@@ -13,11 +13,11 @@ Python's transport is used instead:
 
 * where the native library is missing or older than the network layer (no `lazaret_net_request`);
 * when `LAZARET_NETWORK=python` asks for it;
-* for a proxy reached over TLS (`https://` in the proxy's URL), which tiny_https does not speak;
+* for a proxy reached over TLS (`https://` in the proxy's URL), which pratique does not speak;
 * where no trust anchors can be found for it (below).
 
 TLS 1.2 is the floor, on both transports (`TLS_FLOOR`; John, Oct 7: "Realistically we should avoid any tls < 1.2 as
-that would be horrible security stance by a provider"). tiny_https speaks TLS 1.3, and 1.2 only to a server that
+that would be horrible security stance by a provider"). pratique speaks TLS 1.3, and 1.2 only to a server that
 speaks nothing newer, as its drop of Oct 7 does (B-36): ECDHE with AEAD suites only, the extended master secret
 required, RFC 8446's downgrade check, no renegotiation or resumption, the certificate checks of 1.3. Every reply says
 which version it came over (`tls`). A server that speaks neither is refused (`NetError`, kind "tls"), not handed to
@@ -26,7 +26,7 @@ Python Lazaret runs on starts there; a process that lowered urllib's default doe
 openers take `HTTPSHandler`, which uses it.
 
 Trust anchors: `SSL_CERT_FILE` when it is set (as OpenSSL reads it); else the system's CA bundle (the files
-tiny_https knows: Debian's, Red Hat's, SUSE's, macOS's /etc/ssl/cert.pem, Homebrew's, FreeBSD's); else the
+pratique knows: Debian's, Red Hat's, SUSE's, macOS's /etc/ssl/cert.pem, Homebrew's, FreeBSD's); else the
 certificates Python's default context loads (on Windows, the system's certificate store). A proxy: the one urllib
 would use, from `HTTPS_PROXY` / `NO_PROXY` (followed on every redirect hop), or from the system's settings (macOS,
 Windows) when the environment names none.
@@ -38,9 +38,9 @@ within its budget); a download comes as published. `LAZARET_GZIP=0` asks for no 
 (`kind`: "refused", "too-large", "tls" (a server below the floor too), "timeout", "network", "http", "setup"); one
 that should go through Python's transport raises `UsePython`. The caller turns either into its own error (repo.py: FetchError).
 
-Credentials (decision 14, John, Oct 6: they go over tiny_https in 0.1.9): a token or a login is a `Credential` of a
+Credentials (decision 14, John, Oct 6: they go over pratique in 0.1.9): a token or a login is a `Credential` of a
 request, never one of its headers. The native client gives each hop the credentials of the host it goes to and no
-other (tiny_https's hop hook, called for the request and for every redirect before anything is sent there; lazaret-net
+other (pratique's hop hook, called for the request and for every redirect before anything is sent there; lazaret-net
 refuses a request that sets `Authorization`, `Cookie`, `PRIVATE-TOKEN` and the like as a header, which a redirect to
 another host could carry on). A credential the native client cannot send (a value or path outside printable ASCII, a
 host it would not write that way) makes the request Python's, as before 0.1.9.
@@ -307,7 +307,7 @@ def _urllib_proxy(value):
 
 
 def _native_proxy(value):
-    """The same as tiny_https's `Proxy::parse` reads it: "http://" before a setting without a scheme; the port only
+    """The same as pratique's `Proxy::parse` reads it: "http://" before a setting without a scheme; the port only
     when the setting ends with it (with a path after it, even "/", or none, 8080); the login as written."""
     text = value.strip()
     text = text if "://" in text else "http://" + text
@@ -322,7 +322,7 @@ def _native_proxy(value):
 
 
 def _native_bypass(host):
-    """tiny_https's `no_proxy_matches` for a host (lower case, an IPv6 address without brackets): NO_PROXY, or
+    """pratique's `no_proxy_matches` for a host (lower case, an IPv6 address without brackets): NO_PROXY, or
     no_proxy when NO_PROXY is not set; an entry is a host or a domain, its leading dots aside, or "*"."""
     value = os.environ.get("NO_PROXY")
     if value is None:
@@ -338,9 +338,9 @@ def _proxy_for(url):
     """What urllib would do for `url`: "env" (HTTPS_PROXY, with NO_PROXY, which the native client reads again on
     every hop), "direct", or the proxy the system's settings name. UsePython for a proxy reached over TLS, and where
     urllib and the native client would read the settings differently (the credentials review of decision 14): the
-    environment's variables (HTTPS_PROXY and https_proxy both set, and not to the same), the proxy's address (tiny_https
+    environment's variables (HTTPS_PROXY and https_proxy both set, and not to the same), the proxy's address (pratique
     takes port 8080 when a path follows the port, or none is given), and whether the URL's host is one NO_PROXY names
-    (tiny_https takes "*" anywhere in the list, and no entry with a port)."""
+    (pratique takes "*" anywhere in the list, and no entry with a port)."""
     ours, native = _env_proxies()
     try:
         parts = urllib.parse.urlsplit(url)
@@ -411,7 +411,7 @@ def http2(max_bytes=None):
 def gzip(max_bytes=None):
     """Does a request with this budget ask for its body compressed (gzip or deflate) and have it decoded? A document's
     does (a budget of at most GZIP_BUDGET: metadata, an API's answer, which come five to thirteen times smaller): the
-    native client decodes it with tiny_https's own inflate, within the request's budget and lazaret-net's
+    native client decodes it with pratique's own inflate, within the request's budget and lazaret-net's
     MAX_DECODE_RATIO. A download's does not: its bytes are the ones published, which its digest is checked against.
     `LAZARET_GZIP=0` asks for none: a CDN that compresses a large document as it sends it (npm's full packuments) can
     be slower than a fast network carrying it whole (measured from a data center, docs/DESIGN.md)."""

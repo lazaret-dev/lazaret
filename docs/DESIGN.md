@@ -1308,12 +1308,13 @@ unless on Open VSX the account that published the release published it.
 
 ### j. The network: Lazaret's own HTTPS client (`nativenet.py`, `lazaret-net`, 0.1.9, NET-1)
 
-tiny_https, an HTTPS client written on Rust's standard library alone (TLS
-1.3, X.509, HTTP/1.1 with a keep-alive pool, HTTP/2 and HTTP/3; and pure
-verifiers: the Go checksum database, Sigstore bundles, CMS), is in the
-repository as it was handed over (`rust/crates/tiny_https`;
-`scripts/sync_tiny_https.py` takes a drop and `--verify` checks the copy
-against `vendored.sha256`, so a local edit cannot slip in). Lazaret takes it
+pratique (github.com/lazaret-dev/pratique; tiny_https until October 2026),
+an HTTPS client written on Rust's standard library alone (TLS 1.3, X.509,
+HTTP/1.1 with a keep-alive pool, HTTP/2 and HTTP/3; and pure verifiers:
+the Go checksum database, Sigstore bundles, CMS), is in the repository as
+it is upstream (`rust/crates/pratique`: `scripts/sync_pratique.py` takes
+a commit of its repository and records which, and `--verify` checks the
+copy against `vendored.sha256`, so a local edit cannot slip in). Lazaret takes it
 in as two crates, the split its consumer asked of it: `lazaret-verify`, its
 pure part (`default-features = false`: no I/O, no `unsafe`, WebAssembly),
 which the engine may use, and `lazaret-net`, which only the native library
@@ -1349,7 +1350,7 @@ budget of at most 32 MiB) is offered h2 and a download goes over HTTP/1.1
 A document comes compressed (John, Oct 7: gzip for registry documents, "Add
 after Q-1"). A request with a budget of at most 64 MiB (`GZIP_BUDGET`: every
 document's, the guard's too, whose npm packuments run to 39 MB) asks for
-`gzip, deflate`, and lazaret-net decodes the body with tiny_https's own
+`gzip, deflate`, and lazaret-net decodes the body with pratique's own
 inflate (its B-37), held to the request's budget once decoded as on the wire
 (over it: too large) and to 200 times its compressed size once past 1 MiB
 (`MAX_DECODE_RATIO`: JSON comes 5 to 13 times smaller, a bomb near 1,032
@@ -1382,7 +1383,7 @@ server that speaks neither TLS 1.3 nor TLS 1.2 is refused, not handed to
 urllib, and urllib's connections take `nativenet.tls_context()`, urllib's
 default context with the floor stated, so a process that lowered Python's
 default does not lower Lazaret's (`test_tls_floor.py` holds every opener,
-connection and context under `python/src` to it). tiny_https speaks TLS 1.2 only to a server that speaks
+connection and context under `python/src` to it). pratique speaks TLS 1.2 only to a server that speaks
 nothing newer (its drop of the evening of Oct 7, B-36, because npm's edge
 answered only 1.2 to John's network): ECDHE with AEAD suites only, the
 extended master secret required, RFC 8446's downgrade check, no
@@ -1408,13 +1409,13 @@ transport makes it where the native client does not. `keepalive.py` (`--keepaliv
 urllib's connections and is moot for the native transport, which pools its
 own.
 
-Credentials (decision 14, John, Oct 6: they go over tiny_https in 0.1.9).
+Credentials (decision 14, John, Oct 6: they go over pratique in 0.1.9).
 Until this drop they stayed on urllib, for two reasons: a redirect hop must
 get its own host's credentials and no other's, which only urllib's redirect
-hook gave (tiny_https dropped `Authorization`, `Cookie` and
+hook gave (pratique dropped `Authorization`, `Cookie` and
 `Proxy-Authorization` on a change of origin, and nothing more: a
 `PRIVATE-TOKEN` the caller set went on, and nothing could add the next host's),
-and secrets are what an unreviewed TLS stack would cost most. tiny_https's
+and secrets are what an unreviewed TLS stack would cost most. pratique's
 drop of Oct 6 (b) added the hook (`Client::hop_headers`: called for the
 request and for every redirect after the host rule and the URL limits allow
 it and before anything is sent there; what it returns goes with that hop
@@ -1446,7 +1447,7 @@ fixes found more, fixed too. A path is read as npm and uv send it
 (`pmsettings.normal_path`, the WHATWG URL standard's reading: "." and ".."
 segments resolved, their "%2e" spellings too, a backslash a slash; an empty
 segment stays). The guard sends a request's URL, and urllib's redirects,
-with the path so read. tiny_https sends a redirect's path as its Location
+with the path so read. pratique sends a redirect's path as its Location
 gives it, and it is a drop that Lazaret does not edit, so a credential goes
 with a path only when the path's directory is under the credential's path
 read three ways (`pmsettings.covers`, and lazaret-net's `granted`): as it is
@@ -1460,7 +1461,7 @@ redirect to another host, and pip a `.netrc` login for it; any host the
 guard fetches from can redirect. The choice is the longest key that covers
 the path, as npm's walk up a path finds it, made over the host's few keys:
 the old walk never ended on a path that starts with "//", and was quadratic
-in a long one. A fetcher takes a host only when urllib, tiny_https and its
+in a long one. A fetcher takes a host only when urllib, pratique and its
 host rule read it alike (`guard.usable_netloc`): one entry the host rule
 could not read failed every native request of its fetcher, and a "*." entry
 is a wildcard to it. A lockfile URL with a backslash before its query (a
@@ -1472,13 +1473,13 @@ Content-Type, User-Agent, X-GitHub-Api-Version, and live secret verification's
 anthropic-version and x-amz-date), since a token in a header
 of another name would follow a redirect, and its `Debug` shows no password
 of a URL or a proxy. A GitLab under a path prefix gets its token on that
-prefix alone. A request goes through urllib when urllib and tiny_https would
+prefix alone. A request goes through urllib when urllib and pratique would
 read the proxy settings differently: HTTPS_PROXY and https_proxy (or
 NO_PROXY and no_proxy) that differ (urllib reads the lower-case name first,
-tiny_https the upper-case one), a proxy whose port tiny_https would not take
+pratique the upper-case one), a proxy whose port pratique would not take
 (it takes 8080 when a path, even "/", follows the port, or none is given),
 or a NO_PROXY that names the request's host to one and not the other ("*"
-in a list, an entry with a port). What tiny_https's next drop is asked for:
+in a list, an entry with a port). What pratique's next drop is asked for:
 dot segments resolved in a Location's path whatever its form, a backslash
 refused or read as a slash, a port of digits only ("+443" is taken today), a
 proxy's port read wherever the URL has a path, NO_PROXY read as urllib reads
@@ -1487,7 +1488,7 @@ it, and no password in the `Debug` of a URL, a proxy or a pool's key.
 The Go checksum database (NET-1's third part). `golang.verify_lookup`
 checks a `/lookup/<module>@<version>` answer as the go command's client does
 (`golang.org/x/mod/sumdb`), through the native library's `verify.go_sumdb`
-(lazaret-ffi's `verify` module, over `lazaret-verify`'s `gosum`: tiny_https's
+(lazaret-ffi's `verify` module, over `lazaret-verify`'s `gosum`: pratique's
 `sumdb::Check` and `tlog`). The tree head the lookup carries must have the
 signature of the key Go pins (`SUMDB_KEY`, `cmd/go/internal/modfetch`'s
 `knownGOSUMDB`); it is checked against the newest head this process has
@@ -1510,7 +1511,7 @@ command does and this does not: keep the newest head between runs (its
 honour `GOSUMDB`, `GONOSUMDB` and `GOPRIVATE` (the registry resolves public
 modules through `proxy.golang.org` and checks them against `sum.golang.org`
 only). The guard's Go relay is not affected: there the go command checks
-the database itself. Tested on tiny_https's capture of the real database
+the database itself. Tested on pratique's capture of the real database
 (`golang.org/x/mod` v0.17.0's lookup, a head served a little before it and
 the seven tiles Go's client reads): `tests/registry/test_golang_sumdb.py`,
 lazaret-ffi's and lazaret-verify's own tests, and the `go-sumdb-check` fuzz
@@ -1525,7 +1526,7 @@ names each file's PEP 740 provenance. After a file's digest check,
 `scan_package` hands its digest (npm: the tarball's SHA-512; PyPI: the
 file's SHA-256) to `provenance.check_release`, which fetches the
 attestations and has the native library check them (`verify.sigstore`,
-lazaret-verify's `provenance` over tiny_https's `sigstore`): the signature
+lazaret-verify's `provenance` over pratique's `sigstore`): the signature
 by the certificate or key, the chain to Sigstore's CA at a time a
 transparency log or time-stamp authority vouches for, the log entries, and
 a subject with the file's digest. The outcome is one of three, and the line

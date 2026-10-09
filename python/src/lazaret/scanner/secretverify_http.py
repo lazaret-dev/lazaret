@@ -2,7 +2,7 @@
 
 A credential is sent to its provider in a header, so this is the one place a secret leaves the machine, and it is written to
 do as little as it can. Two transports make the call, held to the same rules: lazaret-net's (`native_transport`: the native
-library's client on tiny_https, as every other request Lazaret makes; John's decision 7, Oct 7, V-1 stage 2), and urllib's
+library's client on pratique, as every other request Lazaret makes; John's decision 7, Oct 7, V-1 stage 2), and urllib's
 (`https_transport`, stage 1's) for a request the native client is not to send: no native library, `LAZARET_NETWORK=python`, a
 proxy reached over TLS, proxy settings the two would read differently (`nativenet.UsePython`). `default_transport` chooses for
 each request.
@@ -11,7 +11,7 @@ each request.
   in it (no address, no port, no credentials), a path that is printable ASCII. The caller (`secretverify`) takes the host from
   its provider table, never from scanned text. lazaret-net holds the request to that host alone, and gives the fields that
   carry the credential (`Request.secret_headers`) as `Credential`s for that host and the request alone.
-- **TLS 1.2 at least** (`TLS_FLOOR`, the floor of every transport Lazaret has): tiny_https speaks TLS 1.3, and 1.2 only to a
+- **TLS 1.2 at least** (`TLS_FLOOR`, the floor of every transport Lazaret has): pratique speaks TLS 1.3, and 1.2 only to a
   server that speaks nothing newer; urllib's context states the floor rather than leaving it to Python's defaults
   (`default_context`). The system's trust anchors, the hostname checked.
 - **No redirect is followed.** A 301, 302, 303, 307 or 308 that names a Location is TransportError "redirect"; the secret is
@@ -53,7 +53,7 @@ MAX_PATH = 2000
 USER_AGENT = "lazaret-secret-verify"
 #: the oldest TLS version a secret is sent over (nativenet.TLS_FLOOR: Lazaret's floor on every transport)
 TLS_FLOOR = ssl.TLSVersion.TLSv1_2
-#: the statuses that redirect (tiny_https's `is_redirect`): with a Location, one is TransportError "redirect"
+#: the statuses that redirect (pratique's `is_redirect`): with a Location, one is TransportError "redirect"
 REDIRECTS = (301, 302, 303, 307, 308)
 #: the budget lazaret-net's request is opened with: an answer that declares a length up to it is read to `max_bytes` and cut,
 #: as urllib's transport cuts it (a declared length over a request's budget fails it before its status is read)

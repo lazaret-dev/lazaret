@@ -611,7 +611,7 @@ fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-/// HMAC-SHA-256 (RFC 2104) over tiny_https's SHA-256 (its pure part keeps HMAC behind the network feature).
+/// HMAC-SHA-256 (RFC 2104) over pratique's SHA-256 (its pure part keeps HMAC behind the network feature).
 pub fn hmac_sha256(key: &[u8], data: &[u8]) -> Vec<u8> {
     let mut k = if key.len() > 64 { Sha256::digest(key) } else { key.to_vec() };
     k.resize(64, 0);

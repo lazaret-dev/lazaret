@@ -9,12 +9,12 @@ with no `source`: nothing from crates.io, git or another registry) and each
 member's Cargo.toml (every dependency, dev- and build-dependency is a
 `path` to another member). CI runs it; exit 1 names what is wrong.
 
-It also holds the line between the engine and the network (NET-1): tiny_https
-(rust/crates/tiny_https, taken as it was handed over) is depended on only by
+It also holds the line between the engine and the network (NET-1): pratique
+(rust/crates/pratique, taken as it is upstream) is depended on only by
 lazaret-verify, without its `net` feature (`default-features = false`: no
 I/O, no `unsafe`), and by lazaret-net; lazaret-net only by lazaret-ffi, and
 only for targets other than WebAssembly; and the engine (lazaret-engine)
-depends on neither tiny_https nor lazaret-net, so the engine may use the pure
+depends on neither pratique nor lazaret-net, so the engine may use the pure
 verification part (through lazaret-verify) and never the sockets.
 
 Usage: python3 scripts/check_rust_deps.py. Standard library only.
@@ -111,13 +111,13 @@ def purity_problems(names):
     problems = []
     for name, directory in names.items():
         for header, section, dep, value in manifest_dependencies(directory):
-            if dep == "tiny_https":
+            if dep == "pratique":
                 if name == "lazaret-verify" and section == "dependencies":
                     if not re.search(r"\bdefault-features\s*=\s*false\b", value):
-                        problems.append("lazaret-verify: tiny_https without default-features = false (its pure part "
+                        problems.append("lazaret-verify: pratique without default-features = false (its pure part "
                                         "only: no I/O, no unsafe)")
                 elif name != "lazaret-net":
-                    problems.append(f"{name}: {header} tiny_https (only lazaret-verify, the pure part, and "
+                    problems.append(f"{name}: {header} pratique (only lazaret-verify, the pure part, and "
                                     "lazaret-net depend on the library)")
             elif dep == "lazaret-net":
                 if name != "lazaret-ffi" or header != _NATIVE_ONLY:

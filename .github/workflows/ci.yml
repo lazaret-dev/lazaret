@@ -150,7 +150,7 @@ jobs:
   # rule pack in its canonical form and consistent with the values core still
   # keeps, its own tests, and its WebAssembly build against the library (the
   # Python suite runs on the library in python-unit). The network layer
-  # (lazaret-net) and tiny_https, the library it is built on, are tested here
+  # (lazaret-net) and pratique, the library it is built on, are tested here
   # too. Rust is on the runners already (1.87 or later); the build needs no
   # registry (Cargo.lock lists only the workspace). Python 3.10 because
   # make_rust_tables.py --check compares the generated Unicode 13.0 tables
@@ -169,22 +169,28 @@ jobs:
         with:
           python-version: "3.10"
       - run: python scripts/check_rust_deps.py
-      # tiny_https (NET-1) is in rust/crates as it was handed over: no file changed since it was taken
-      - run: python scripts/sync_tiny_https.py --verify
+      # pratique (NET-1) is in rust/crates as it is upstream, at the commit its LAZARET.md names: no file
+      # changed since it was taken
+      - run: python scripts/sync_pratique.py --verify
       - run: python scripts/make_rust_tables.py --check
       - working-directory: rust
         run: cargo test --release --offline --locked
-      # tiny_https's own tests, those that need nothing installed (its interop tests want OpenSSL, Go or
+      # pratique's own tests, those that need nothing installed (its interop tests want OpenSSL, Go or
       # aioquic servers and are the library's to run; its trust-store tests read this machine's stores). One
-      # unit test is left out until the library's next drop: a_cancel_stops_waiting_and_running_requests_and_
+      # unit test is left out until a later commit of the library: a_cancel_stops_waiting_and_running_requests_and_
       # fails_new_ones starts two requests on two threads and expects them to take the scheduler's two places
-      # in the order they were started, which a busy machine does not always keep.
+      # in the order they were started, which a busy machine does not always keep. The tests that count a host's
+      # connections (http::establish_tests) run on their own after the others, one at a time: their counts depend
+      # on how their threads are scheduled, and the tests running beside them can make one connection more (the
+      # library's B-105; the_async_client_keeps_the_limit_too did once, in a gate, and passes alone).
       - working-directory: rust
         run: >-
-          cargo test --release --offline --locked -p tiny_https --lib --test go_vectors --test cms_vectors
+          cargo test --release --offline --locked -p pratique --lib --test go_vectors --test cms_vectors
           --test sigstore_real --test sigstore_synthetic --test rekor_real --test real_chains --test inflate_vectors
           --test tuf_sigstore --test tuf_synthetic --test wycheproof --test real_revocation
-          -- --skip a_cancel_stops_waiting_and_running_requests_and_fails_new_ones
+          -- --skip a_cancel_stops_waiting_and_running_requests_and_fails_new_ones --skip http::establish_tests
+      - working-directory: rust
+        run: cargo test --release --offline --locked -p pratique --lib http::establish_tests -- --test-threads=1
       - working-directory: rust
         run: cargo build --release --offline --locked
       # The WebAssembly build (the npm package's engine) against this library:

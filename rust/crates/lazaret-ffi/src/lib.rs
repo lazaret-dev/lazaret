@@ -1,6 +1,6 @@
 //! The C ABI of Lazaret's native engine and of its network layer: the only
-//! `unsafe` code of Lazaret's own, and all of it in this file (tiny_https,
-//! taken into rust/crates as it was handed over, has its own: its SIMD
+//! `unsafe` code of Lazaret's own, and all of it in this file (pratique,
+//! taken into rust/crates as it is upstream, has its own: its SIMD
 //! kernels, randomness and the wiping of secrets).
 //!
 //! One call carries everything: a request buffer
@@ -22,7 +22,7 @@
 //! (`lazaret_net_request`, `_open`, `_read`, `_close`, `_configure`: see
 //! [`net`]), which only the native library has; its `lazaret_engine_call`
 //! also answers the `verify.*` calls ([`verify`]: the Go checksum database's
-//! check and npm's and PyPI's attestations, on tiny_https's pure part).
+//! check and npm's and PyPI's attestations, on pratique's pure part).
 //! WebAssembly builds (wasm32-unknown-unknown,
 //! loaded by Node's built-in WebAssembly: js/src/lib/native.js) export
 //! `lazaret_alloc`, `lazaret_call` and `lazaret_free` instead, the same
@@ -155,7 +155,7 @@ mod native {
 }
 
 /// The network layer's C ABI (NET-1), native builds only: Lazaret's requests to registries, feeds and APIs over
-/// tiny_https (`lazaret-net`), read by the Python package (lazaret/registry/nativenet.py).
+/// pratique (`lazaret-net`), read by the Python package (lazaret/registry/nativenet.py).
 ///
 /// A request is JSON, with its body (a POST's) apart:
 ///
@@ -169,7 +169,7 @@ mod native {
 /// `decompress` makes it a document's request: asked for compressed and decoded, within its budget
 /// (lazaret_net::Request::decompress).
 ///
-/// A credential goes to the hops to its own host only (lazaret_net::Credential: tiny_https's hop hook), never as a
+/// A credential goes to the hops to its own host only (lazaret_net::Credential: pratique's hop hook), never as a
 /// header a redirect could carry on.
 ///
 /// The answer is JSON too, in a buffer the library allocates: `{"status": 200, "version": "HTTP/2", "tls": "TLS 1.3"
@@ -456,7 +456,7 @@ pub mod net {
     }
 }
 
-/// The calls the native library answers itself, over tiny_https's pure part (`lazaret-verify`), before the engine's:
+/// The calls the native library answers itself, over pratique's pure part (`lazaret-verify`), before the engine's:
 /// `verify.go_sumdb` checks the Go checksum database's answer for a module (NET-1; lazaret/registry/ecosystems/golang.py),
 /// and `verify.sigstore` npm's or PyPI's attestations of a file (NET-1's provenance; lazaret/registry/provenance.py).
 ///
@@ -708,22 +708,22 @@ mod tests {
         assert_eq!(s, STATUS_ERROR);
     }
 
-    /// `verify.go_sumdb` (native only), on tiny_https's capture of the real sum.golang.org (its
+    /// `verify.go_sumdb` (native only), on pratique's capture of the real sum.golang.org (its
     /// tests/data/sumdb/README.txt): the lookup of golang.org/x/mod@v0.17.0, an older head and the seven tiles.
     #[cfg(not(target_arch = "wasm32"))]
     mod go_sumdb {
         use super::*;
 
-        const LOOKUP: &str = include_str!("../../tiny_https/tests/data/sumdb/lookup.txt");
-        const LATEST: &str = include_str!("../../tiny_https/tests/data/sumdb/latest.txt");
+        const LOOKUP: &str = include_str!("../../pratique/tests/data/sumdb/lookup.txt");
+        const LATEST: &str = include_str!("../../pratique/tests/data/sumdb/latest.txt");
         const TILES: [(&str, &[u8]); 7] = [
-            ("tile/8/0/x097/482", include_bytes!("../../tiny_https/tests/data/sumdb/tile/8/0/x097/482")),
-            ("tile/8/0/x260/730.p/101", include_bytes!("../../tiny_https/tests/data/sumdb/tile/8/0/x260/730.p/101")),
-            ("tile/8/1/380", include_bytes!("../../tiny_https/tests/data/sumdb/tile/8/1/380")),
-            ("tile/8/1/x001/018.p/122", include_bytes!("../../tiny_https/tests/data/sumdb/tile/8/1/x001/018.p/122")),
-            ("tile/8/2/001", include_bytes!("../../tiny_https/tests/data/sumdb/tile/8/2/001")),
-            ("tile/8/2/003.p/250", include_bytes!("../../tiny_https/tests/data/sumdb/tile/8/2/003.p/250")),
-            ("tile/8/3/000.p/3", include_bytes!("../../tiny_https/tests/data/sumdb/tile/8/3/000.p/3")),
+            ("tile/8/0/x097/482", include_bytes!("../../pratique/tests/data/sumdb/tile/8/0/x097/482")),
+            ("tile/8/0/x260/730.p/101", include_bytes!("../../pratique/tests/data/sumdb/tile/8/0/x260/730.p/101")),
+            ("tile/8/1/380", include_bytes!("../../pratique/tests/data/sumdb/tile/8/1/380")),
+            ("tile/8/1/x001/018.p/122", include_bytes!("../../pratique/tests/data/sumdb/tile/8/1/x001/018.p/122")),
+            ("tile/8/2/001", include_bytes!("../../pratique/tests/data/sumdb/tile/8/2/001")),
+            ("tile/8/2/003.p/250", include_bytes!("../../pratique/tests/data/sumdb/tile/8/2/003.p/250")),
+            ("tile/8/3/000.p/3", include_bytes!("../../pratique/tests/data/sumdb/tile/8/3/000.p/3")),
         ];
         const KEY: &str = "sum.golang.org+033de0ae+Ac4zctda0e5eza+HJyk9SxEdh+s3Ux18htTTAD8OuAn8";
 
@@ -820,15 +820,15 @@ mod tests {
         }
     }
 
-    /// `verify.sigstore` (native only), on tiny_https's real Sigstore data (its tests/data/sigstore/README.txt).
+    /// `verify.sigstore` (native only), on pratique's real Sigstore data (its tests/data/sigstore/README.txt).
     #[cfg(not(target_arch = "wasm32"))]
     mod sigstore_call {
         use super::*;
 
-        const ROOT: &str = include_str!("../../tiny_https/tests/data/sigstore/trusted_root.json");
-        const NPM_KEYS: &str = include_str!("../../tiny_https/tests/data/sigstore/npm-registry-keys.json");
-        const ATTESTATIONS: &str = include_str!("../../tiny_https/tests/data/sigstore/sigstore-4.0.0.attestations.json");
-        const TARBALL: &[u8] = include_bytes!("../../tiny_https/tests/data/sigstore/sigstore-4.0.0.tgz");
+        const ROOT: &str = include_str!("../../pratique/tests/data/sigstore/trusted_root.json");
+        const NPM_KEYS: &str = include_str!("../../pratique/tests/data/sigstore/npm-registry-keys.json");
+        const ATTESTATIONS: &str = include_str!("../../pratique/tests/data/sigstore/sigstore-4.0.0.attestations.json");
+        const TARBALL: &[u8] = include_bytes!("../../pratique/tests/data/sigstore/sigstore-4.0.0.tgz");
 
         fn call(registry: &str, digest: &str, keys: Option<&str>) -> (i32, Value) {
             let args = Value::obj(vec![("registry", Value::str(registry)), ("document", Value::str(ATTESTATIONS)),

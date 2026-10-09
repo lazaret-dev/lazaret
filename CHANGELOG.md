@@ -101,10 +101,10 @@ project is pre-1.0, so the 0.x API may still change.
   is CRITICAL at its commit. Each is a `code` finding with the scan's own rule;
   code not read whole leaves the action incomplete (exit 3). `--no-code` skips it. An official
   Docker image at a version tag is SC-ACTION-DOCKER-UNPINNED MINOR instead of MAJOR.
-- **Lazaret's own HTTPS client, the registry's default transport (NET-1).** tiny_https, a TLS 1.3
+- **Lazaret's own HTTPS client, the registry's default transport (NET-1).** pratique (called tiny_https until October 2026), a TLS 1.3
   and HTTP library written on Rust's standard library alone (no dependencies, Apache-2.0), is in the
-  repository (`rust/crates/tiny_https`, taken as it was handed over by `scripts/sync_tiny_https.py`,
-  which also takes the next drop and checks the copy against its recorded hashes). Two crates sit on
+  repository (`rust/crates/pratique`, taken from a commit of https://github.com/lazaret-dev/pratique by
+  `scripts/sync_pratique.py`, which records the commit and checks the copy against its recorded hashes). Two crates sit on
   it: `lazaret-verify`, its pure part (signatures, certificate chains, transparency logs and
   attestations: no I/O, no `unsafe`, usable by the engine and in WebAssembly), and `lazaret-net`,
   the network layer the native library exports to Python (`lazaret_net_*`). `lazaret-registry`'s
@@ -119,11 +119,11 @@ project is pre-1.0, so the 0.x API may still change.
   system's CA bundle, then what Python's `ssl` loads (the system store on Windows); the proxy is
   the one urllib would use. Python's urllib takes the request where the native library is missing,
   for a proxy reached over TLS, and when `LAZARET_NETWORK=python` asks for it. Neither speaks anything older than
-  TLS 1.2: a server that speaks neither TLS 1.3 nor TLS 1.2 is refused. tiny_https has not had an independent review (its
+  TLS 1.2: a server that speaks neither TLS 1.3 nor TLS 1.2 is refused. pratique has not had an independent review (its
   README says so). The guard's https downloads and relays (any https host on a redirect where the
   guard allows one), the `github:` and `gitlab:` sources and the SCA feeds' downloads go through
   it too, credentials included (decision 14): a private registry's token or login, a URL's own
-  `user:password@`, `GITHUB_TOKEN` and `GITLAB_TOKEN` are given hop by hop by tiny_https's hop
+  `user:password@`, `GITHUB_TOKEN` and `GITLAB_TOKEN` are given hop by hop by pratique's hop
   hook, each to its own host (and path prefix) alone, as urllib's redirect hook gave them; the
   URL's own login goes with the request and no redirect. A request that sets `Authorization`,
   `Cookie`, `PRIVATE-TOKEN` or the like as a header is refused by the native layer, so none can
@@ -133,7 +133,7 @@ project is pre-1.0, so the 0.x API may still change.
   1.87 or later.
 - **The Go checksum database's answers are checked as the go command checks them (NET-1).** A
   `go:` module's `h1:` hash comes from `sum.golang.org`'s lookup, and that answer is now verified
-  through tiny_https's pure part in the native library: the signature on the database's tree head
+  through pratique's pure part in the native library: the signature on the database's tree head
   (the key Go pins), the head's agreement with the newest one the run has accepted, and the
   record's place in the tree, proved from the database's tiles (a partial tile the database no
   longer serves is read from the full one, as Go does). An answer that does not check out stops
@@ -599,6 +599,18 @@ project is pre-1.0, so the 0.x API may still change.
 
 ### Changed
 
+- **The HTTPS/TLS library is pratique, taken from its repository (NET-1).** tiny_https is now pratique
+  (https://github.com/lazaret-dev/pratique, Apache-2.0). `rust/crates/pratique` is a commit of that repository:
+  `scripts/sync_pratique.py CHECKOUT [--rev REV]` takes the commit's files as git holds them and records the commit,
+  and `--verify` checks the copy as before. The library's NOTICE comes with it and ships in the sdist: two of its
+  crypto files follow BearSSL, whose MIT notice `rust/NOTICE` now carries for the native library, and its Mozilla
+  root store is under the Mozilla Public License 2.0 (a feature Lazaret does not use; no package carries it). The
+  commit also brings the library's B-103 and B-104, faster public-key and hash code with no interface Lazaret uses
+  changed: SHA-256 and SHA-512 on the CPU's SHA instructions where it has them (checked against the portable code
+  first), X25519's field and ladder and its key generation from a table of base-point multiples read whole at each
+  lookup, Ed25519 verification by signed windows, RSA's products a column at a time, ECDSA P-256's inverse and
+  point operations, X25519 and P-256 compiled a second time for BMI2 on x86-64 (chosen at run time), AES-GCM on
+  short messages and a cheaper GHASH reduction, and Poly1305 four blocks at a time with AVX2.
 - **A registry scan hands each file's text to the engine once (FE-1).** Each step that reads a file (the rules,
   the import-time test, the scripts it starts, the agent check, the cross-file follower) sent its text again, in
   a batch escaped into the call's JSON and read back on one thread before the batch's threads started, and the
@@ -611,7 +623,7 @@ project is pre-1.0, so the 0.x API may still change.
   71 to 80% (356 MB to 96 MB), a scan takes 7 to 17% less time (monaco-editor 19.6 s to 17.4 s, sympy 4.6 s to
   4.0 s), and its peak memory is lower in five of the six (next 1,025 MB to 776 MB; prettier's rose, 254 MB to
   278 MB).
-- **tiny_https's drop of Oct 8: connection set-up, timers, a scheduler, revocation and trust roots.** A new connection
+- **pratique's drop of Oct 8: connection set-up, timers, a scheduler, revocation and trust roots.** A new connection
   now looks its host name up on a thread of its own, so the connect timeout bounds a slow resolver too, keeps the
   answer 30 seconds, and races the addresses as RFC 8305's "Happy Eyeballs" says: an address family routed nowhere
   costs a quarter of a second, not the connect timeout per address. Lazaret's requests get this as they are. The
@@ -622,7 +634,7 @@ project is pre-1.0, so the 0.x API may still change.
   and the operating systems' own stores, and faster encryption and public-key arithmetic. No interface Lazaret uses
   changed. The library builds in Sigstore's TUF root (`roots/sigstore_tuf_root.json`), which the sync script now takes
   and the sdist ships.
-- **tiny_https's drop of Oct 7: the security review's fixes.** Two rounds of outside review of its verification
+- **pratique's drop of Oct 7: the security review's fixes.** Two rounds of outside review of its verification
   path, triaged claim by claim against OpenSSL, Go's `crypto/x509` and Go's `note` package, and every confirmed
   finding fixed with a test (the library's B-93 to B-96): a search for a certificate path that was exponential (now
   at most 256 signature checks), a version 3 trust anchor without `basicConstraints` that could sign for anything,
@@ -664,9 +676,9 @@ project is pre-1.0, so the 0.x API may still change.
   on (a token's, or a credential-named key's before a separator, or a URL's), and the other lines of a large data file
   are passed over. The same findings, on 4,726 files; the config files of this repository's Python source are scanned
   in a third of the time.
-- **The native transport speaks TLS 1.2 to a server that speaks nothing newer (tiny_https's second drop of Oct
+- **The native transport speaks TLS 1.2 to a server that speaks nothing newer (pratique's second drop of Oct
   7).** `registry.npmjs.org` answers only TLS 1.2 from some networks, and its requests went through Python's
-  transport there. tiny_https now offers TLS 1.2 next to 1.3 under the rules Lazaret asked for: ECDHE with AEAD
+  transport there. pratique now offers TLS 1.2 next to 1.3 under the rules Lazaret asked for: ECDHE with AEAD
   suites only (no RSA key exchange, no CBC), the extended master secret required, the downgrade check of RFC
   8446 that catches a TLS 1.3 server pushed down to 1.2, no renegotiation, compression or resumption, no SHA-1 in
   signatures, and the certificate checks of 1.3. Every reply says which version it came over (`tls`). A server
@@ -674,7 +686,7 @@ project is pre-1.0, so the 0.x API may still change.
   bodies, a cookie jar, `Expect: 100-continue`) are opt-in and Lazaret asks for none of them; it also brings the
   library's first run against real servers (52 real certificate chains, replayed offline in CI).
 - **Registry documents come compressed (gzip).** Metadata and API answers (a request whose budget is at most
-  64 MiB) ask for `gzip, deflate`, and the native transport decodes them with tiny_https's own inflate, held to the
+  64 MiB) ask for `gzip, deflate`, and the native transport decodes them with pratique's own inflate, held to the
   request's byte budget once decoded and to 200 times their compressed size; a download (a tarball, a wheel, a
   feed's archive) is still taken byte for byte as published. npm's packuments come 5 to 13 times smaller (vite's
   39 MB as 4.6), PyPI's documents 4.5 to 5.7. Through a link capped at 100 Mbit/s, fourteen large documents took

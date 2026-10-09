@@ -135,13 +135,16 @@ Notes:
   on the class. `tests.scanner.test_nativenet` runs the native client against
   an HTTPS server Python's `ssl` serves on 127.0.0.1, with a root the `openssl`
   command makes when the module starts (it skips without `openssl`), and
-  `cargo test -p lazaret-net` against tiny_https's own TLS 1.3 and HTTP/2
-  test server. tiny_https's tests are its own (`cargo test --release -p
-  tiny_https --lib` takes about 25 s after a 3-minute build, and its
+  `cargo test -p lazaret-net` against pratique's own TLS 1.3 and HTTP/2
+  test server. pratique's tests are its own (`cargo test --release -p
+  pratique --lib` takes about 25 s after a 3-minute build, and its
   `go_vectors`, `cms_vectors`, `sigstore_real`, `sigstore_synthetic` and
-  `rekor_real` tests a second each); after taking a new drop
-  (`scripts/sync_tiny_https.py`), run them and the gates. The Go checksum
-  database's check (`golang.verify_lookup`) is tested on tiny_https's capture
+  `rekor_real` tests a second each); after taking a new commit of it
+  (`scripts/sync_pratique.py`), run them and the gates. CI runs the tests
+  that count a host's connections (`http::establish_tests`) apart, one at a
+  time: their counts depend on how their threads are scheduled (the
+  library's B-105). The Go checksum
+  database's check (`golang.verify_lookup`) is tested on pratique's capture
   of the real `sum.golang.org` (`tests.registry.test_golang_sumdb`); the Go
   tests whose lookups are signed with a test key or not at all
   (`test_golang`, `test_registry_go_crates`, the `go-resolve` fuzz target)
@@ -150,7 +153,7 @@ Notes:
   (`LAZARET_NO_PROVENANCE=1`, unless the environment sets it): a scan asks
   the registry for a release's attestations and for the release before it,
   and the tests scan made-up releases that must not reach the network.
-  `tests.registry.test_provenance` turns it on over tiny_https's real npm
+  `tests.registry.test_provenance` turns it on over pratique's real npm
   and PyPI attestations (sigstore 0.2.0, 2.2.0 and 4.0.0; pypi-attestations
   0.0.30), with the registries' other documents built in their shapes.
 

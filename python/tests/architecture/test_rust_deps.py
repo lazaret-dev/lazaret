@@ -2,7 +2,7 @@
 (scripts/check_rust_deps.py): its Cargo.lock lists only the workspace's
 crates, from no registry, and each crate's dependencies are paths to other
 members. Synthetic manifests show what the check refuses. It also holds the
-line between the engine and the network (NET-1): tiny_https's pure part
+line between the engine and the network (NET-1): pratique's pure part
 through lazaret-verify, its sockets through lazaret-net, which only the
 native library links."""
 import os
@@ -22,7 +22,7 @@ class RustDepsTests(unittest.TestCase):
 
     def test_the_workspace_has_no_external_crates(self):
         names = self.s.members()
-        self.assertEqual(sorted(names), ["lazaret-engine", "lazaret-ffi", "lazaret-net", "lazaret-verify", "tiny_https"])
+        self.assertEqual(sorted(names), ["lazaret-engine", "lazaret-ffi", "lazaret-net", "lazaret-verify", "pratique"])
         self.assertEqual(self.s.lock_problems(names), [])
         for name, directory in names.items():
             self.assertEqual(self.s.manifest_problems(name, directory, names), [], name)
@@ -61,21 +61,21 @@ class RustDepsTests(unittest.TestCase):
             return out
 
         native = "[target.'cfg(not(target_arch = \"wasm32\"))'.dependencies]"
-        good = crates(**{"lazaret-verify": '[dependencies]\ntiny_https = { path = "../tiny_https", default-features = false }\n',
-                         "lazaret-net": '[dependencies]\ntiny_https = { path = "../tiny_https" }\n',
+        good = crates(**{"lazaret-verify": '[dependencies]\npratique = { path = "../pratique", default-features = false }\n',
+                         "lazaret-net": '[dependencies]\npratique = { path = "../pratique" }\n',
                          "lazaret-ffi": f'[dependencies]\nlazaret-engine = {{ path = "../lazaret-engine" }}\n\n'
                                         f'{native}\nlazaret-net = {{ path = "../lazaret-net" }}\n',
                          "lazaret-engine": '[dependencies]\nlazaret-verify = { path = "../lazaret-verify" }\n'})
         self.assertEqual(self.s.purity_problems(good), [])
-        bad = crates(**{"lazaret-verify": '[dependencies]\ntiny_https = { path = "../tiny_https" }\n',
+        bad = crates(**{"lazaret-verify": '[dependencies]\npratique = { path = "../pratique" }\n',
                         "lazaret-engine": '[dependencies]\nlazaret-net = { path = "../lazaret-net" }\n'
-                                          'tiny_https = { path = "../tiny_https", default-features = false }\n',
+                                          'pratique = { path = "../pratique", default-features = false }\n',
                         "lazaret-ffi": '[dependencies]\nlazaret-net = { path = "../lazaret-net" }\n'})
         problems = self.s.purity_problems(bad)
         self.assertEqual(len(problems), 4, problems)
-        self.assertTrue(any(p.startswith("lazaret-verify: tiny_https without default-features") for p in problems))
+        self.assertTrue(any(p.startswith("lazaret-verify: pratique without default-features") for p in problems))
         self.assertTrue(any(p.startswith("lazaret-engine: [dependencies] lazaret-net") for p in problems))
-        self.assertTrue(any(p.startswith("lazaret-engine: [dependencies] tiny_https") for p in problems))
+        self.assertTrue(any(p.startswith("lazaret-engine: [dependencies] pratique") for p in problems))
         self.assertTrue(any(p.startswith("lazaret-ffi: [dependencies] lazaret-net") for p in problems),
                         "the network for every target, WebAssembly included")
 

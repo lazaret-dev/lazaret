@@ -22,16 +22,16 @@ dependencies = [
 name = "lazaret-net"
 version = "0.1.8"
 dependencies = [
- "tiny_https",
+ "pratique",
 ]
 
 [[package]]
 name = "lazaret-verify"
 version = "0.1.8"
 dependencies = [
- "tiny_https",
+ "pratique",
 ]
 
 [[package]]
-name = "tiny_https"
+name = "pratique"
 version = "0.1.0"

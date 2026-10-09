@@ -1,4 +1,4 @@
-//! Lazaret's network layer (NET-1): tiny_https's HTTPS client with Lazaret's rules, for the requests the Python
+//! Lazaret's network layer (NET-1): pratique's HTTPS client with Lazaret's rules, for the requests the Python
 //! package makes to registries, feeds and APIs (through the native library's C ABI, `lazaret-ffi`).
 //!
 //! Every request carries its caller's rule and is held to it by the client on the first URL and on every redirect
@@ -6,15 +6,15 @@
 //!
 //! * **hosts**: the hosts the caller may reach, as Lazaret writes them (`registry.npmjs.org`,
 //!   `*.gallerycdn.vsassets.io`): a `*.` entry stands for exactly one DNS label, and an entry without a port is
-//!   the default port only (tiny_https's `HostRules` with `one_label_wildcards` and `default_port_only`). A
+//!   the default port only (pratique's `HostRules` with `one_label_wildcards` and `default_port_only`). A
 //!   request without a rule is refused here: there is no "any host".
 //! * **the URL**: https only, no credentials, printable ASCII, at most 2,048 bytes (`UrlLimits::strict`).
 //! * **bounds**: a byte budget for the body (a larger body is [`Failure::TooLarge`], whatever the server
 //!   declared), a timeout for connecting and for each read and write, an optional limit on the whole request,
 //!   and a number of redirects.
 //! * **credentials** (0.1.9, decision 14): a token or a login goes with the hops to its own host only, given by
-//!   tiny_https's hop hook ([`Credential`], [`granted`]), never as a header of the request, which a redirect would
-//!   carry on (tiny_https drops `Authorization`, `Cookie` and `Proxy-Authorization` on a change of origin, and no
+//!   pratique's hop hook ([`Credential`], [`granted`]), never as a header of the request, which a redirect would
+//!   carry on (pratique drops `Authorization`, `Cookie` and `Proxy-Authorization` on a change of origin, and no
 //!   other); a request that sets one of [`CREDENTIAL_HEADERS`] itself is refused, and so is one that sets a header
 //!   that is not one of [`PLAIN_HEADERS`]. A hop's path counts as under a credential's when it is so as it is sent,
 //!   with its dot segments resolved and as a server that decodes it reads it, and a redirect from another origin gets
@@ -22,14 +22,14 @@
 //!
 //! **HTTP/2 is the protocol** (John, Oct 6): the handshake offers `h2` and `http/1.1`, a server that picks `h2` gets
 //! one connection per origin that every request to it shares, and any other is spoken to in HTTP/1.1 with
-//! keep-alive. The clients share their connections (tiny_https's clones share the pool and the HTTP/2 registry),
+//! keep-alive. The clients share their connections (pratique's clones share the pool and the HTTP/2 registry),
 //! made on first use with the trust anchors [`configure`] was given or else the system's CA bundle
 //! (`SSL_CERT_FILE` first). A process that forks gets new connections in the child: the parent's are left alone,
 //! neither used nor closed from the child (a TLS close from the child would end the parent's session, and an
 //! HTTP/2 connection's reader and writer threads are not in the child). Proxies are the caller's to choose: from
 //! the environment (`HTTPS_PROXY`, `NO_PROXY`), one given, or none.
 //!
-//! **TLS 1.3, or TLS 1.2 with a server that speaks nothing newer** (tiny_https's B-36, its default minimum since the
+//! **TLS 1.3, or TLS 1.2 with a server that speaks nothing newer** (pratique's B-36, its default minimum since the
 //! drop of Oct 7: ECDHE with AEAD suites only, the extended master secret required, the downgrade check of RFC 8446
 //! that catches a TLS 1.3 server pushed down to 1.2, no renegotiation or resumption, and the same certificate checks
 //! as 1.3); every reply says which ([`Reply::tls`]). A server that speaks neither is [`Failure::TlsVersion`], and
@@ -39,24 +39,24 @@
 //! **A document comes compressed** (John, Oct 7: gzip for registry documents, "Add after Q-1"): a request that is a
 //! document ([`Request::decompress`]: metadata, an API's answer; never a download, whose bytes are checked as they
 //! were published) asks for `gzip` and `deflate`, and a body that comes as one of them is decoded on the way by
-//! tiny_https's own inflate (its B-37). The decoded body is held to the request's byte budget as the body on the wire
+//! pratique's own inflate (its B-37). The decoded body is held to the request's byte budget as the body on the wire
 //! is (over it: [`Failure::TooLarge`]), and to [`MAX_DECODE_RATIO`] times its compressed size once it is
 //! [`DECODE_RATIO_FLOOR`] bytes long; a compressed body that is cut short, corrupt, past the ratio or followed by
 //! anything is [`Failure::Http`]. Every reply says whether its body was decoded ([`Reply::decoded`]). Any other
 //! request asks for the body as it is (`Accept-Encoding: identity`) and gets it so.
 //!
-//! What it does not do: HTTP/3 is off (tiny_https has it, opt-in), nothing is cached, and tiny_https's other opt-in
+//! What it does not do: HTTP/3 is off (pratique has it, opt-in), nothing is cached, and pratique's other opt-in
 //! extras are never asked for: no cookie is kept, and a body goes with its head (no `Expect: 100-continue`).
 
 use std::io::Read;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use tiny_https::error::Error as NetError;
-use tiny_https::http::{HopInfo, HostRules, RequestBuilder, ResponseStream, UrlLimits};
-use tiny_https::tls::ClientConfig;
-use tiny_https::x509::TrustStore;
-use tiny_https::Client;
+use pratique::error::Error as NetError;
+use pratique::http::{HopInfo, HostRules, RequestBuilder, ResponseStream, UrlLimits};
+use pratique::tls::ClientConfig;
+use pratique::x509::TrustStore;
+use pratique::Client;
 
 /// The redirects a request follows at most (a caller asks for fewer).
 pub const MAX_REDIRECTS: usize = 10;
@@ -132,7 +132,7 @@ impl std::fmt::Display for Failure {
     }
 }
 
-/// What tiny_https said, as one of ours.
+/// What pratique said, as one of ours.
 fn classify(e: NetError) -> Failure {
     match e {
         NetError::Http(m) => {
@@ -162,8 +162,8 @@ fn classify(e: NetError) -> Failure {
         NetError::Refused(r) => Failure::Refused(r.to_string()),
         // a document's body over the caller's budget once decoded; a compressed body cut short, corrupt or past the
         // ratio is the server's fault, as a broken response is ("response body could not be decoded: …", below)
-        NetError::Decode(tiny_https::inflate::Error::OutputLimit { .. }) => Failure::TooLarge,
-        // (and whatever a later tiny_https adds)
+        NetError::Decode(pratique::inflate::Error::OutputLimit { .. }) => Failure::TooLarge,
+        // (and whatever a later pratique adds)
         other => Failure::Http(other.to_string()),
     }
 }
@@ -172,7 +172,7 @@ fn classify(e: NetError) -> Failure {
 /// over https. `host` is written as a Host header is (lower case, an IPv6 address in brackets, `:port` when the port
 /// is not 443), which is how pmsettings.Credentials keys a host; `path` is a prefix that ends in `/` (`/` for the
 /// whole host). With `first_only` it is for the request itself and no redirect (the user:password of the URL that
-/// was asked for). tiny_https's hop hook gives them hop by hop ([`granted`]): a redirect to another host gets that
+/// was asked for). pratique's hop hook gives them hop by hop ([`granted`]): a redirect to another host gets that
 /// host's or none, and the client never carries one on.
 #[derive(Clone)]
 pub struct Credential {
@@ -184,7 +184,7 @@ pub struct Credential {
 }
 
 /// The headers that carry a credential, which a request may not set itself: its credentials go as [`Credential`]s.
-/// (tiny_https drops the first three on a redirect to another origin; a header such as `PRIVATE-TOKEN` it carries on.)
+/// (pratique drops the first three on a redirect to another origin; a header such as `PRIVATE-TOKEN` it carries on.)
 pub const CREDENTIAL_HEADERS: [&str; 6] =
     ["authorization", "proxy-authorization", "cookie", "private-token", "job-token", "deploy-token"];
 
@@ -292,7 +292,7 @@ fn directory(path: &str) -> &str {
 ///
 /// A credential's path covers a hop's when the directory of the hop's path is under it read three ways: as it is sent,
 /// as npm and uv resolve it (`resolved_path`), and as a server that decodes it may route it (`server_path`, the
-/// credential's path read so too). tiny_https sends a redirect's path as the `Location` gives it, and "/team/../x" is
+/// credential's path read so too). pratique sends a redirect's path as the `Location` gives it, and "/team/../x" is
 /// under /team/ to a server that reads it as it is, and /x to one that resolves it, as "/team/..%2fx" is to nginx (the
 /// credentials reviews of decision 14). A redirect from another origin gets only a credential of the whole host (`/`):
 /// npm sends none on a redirect to another host, and pip a `.netrc` login for it.
@@ -467,7 +467,7 @@ fn new_base(roots: Option<&str>) -> Result<Client, Failure> {
             }
             store
         }
-        None => tiny_https::sys::system_trust_store()
+        None => pratique::sys::system_trust_store()
             .map_err(|e| Failure::Setup(format!("no trust anchors: {e} (set SSL_CERT_FILE, or give them to configure)")))?,
     };
     Ok(Client::with_tls_config(ClientConfig::new(store)).user_agent(USER_AGENT).http2(true))
@@ -644,7 +644,7 @@ fn reply_head(s: &ResponseStream) -> (u16, String, Option<String>, Vec<(String, 
 
 /// Sends `req` and reads the whole body (at most `max_bytes`: the client's limit, which a declared length over it
 /// fails at once). Read whole, an HTTP/2 body is kept as it comes and its flow-control credit goes back as it arrives,
-/// with no copy more (tiny_https's `send`).
+/// with no copy more (pratique's `send`).
 pub fn fetch(req: &Request) -> Result<Reply, Failure> {
     let method = method_of(req)?;
     let hops = Arc::new(Hops::default());
@@ -684,7 +684,7 @@ impl Stream {
     }
 }
 
-/// tiny_https's body reader reports its own errors through `std::io::Error` (an `Other` that wraps one of its
+/// pratique's body reader reports its own errors through `std::io::Error` (an `Other` that wraps one of its
 /// errors); take that one out again when it is there.
 fn unwrap_io(e: std::io::Error) -> NetError {
     if e.get_ref().map_or(false, |inner| inner.is::<NetError>()) {

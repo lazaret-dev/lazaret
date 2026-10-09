@@ -104,7 +104,7 @@ class GuardNativeFetchTests(unittest.TestCase):
 
     def test_credentials_go_native_each_to_its_own_host(self):
         # (decision 14: the settings' credentials of each hop's URL, the URL's own user:password with the request
-        # alone, as urllib's redirect hook gives them; tiny_https's hop hook, never a header a redirect carries on)
+        # alone, as urllib's redirect hook gives them; pratique's hop hook, never a header a redirect carries on)
         auth = pmsettings.Credentials()
         auth.token(self.url("/"), "t0ken")
         auth.token(self.url("/team/"), "team-t0ken")
@@ -125,7 +125,7 @@ class GuardNativeFetchTests(unittest.TestCase):
         # (the credentials review of decision 14: a token for /team/ went with /team/../x, which a server reads as /x,
         # and a path that starts with "//" sent the choice round forever.) The request's own URL is sent with its dot
         # segments resolved, on both transports, and its credentials are chosen by it; a redirect's path urllib
-        # resolves too, and tiny_https sends as the Location gives it, so a credential goes with it when both of its
+        # resolves too, and pratique sends as the Location gives it, so a credential goes with it when both of its
         # readings are under the credential's path (lazaret-net's `granted`)
         auth = pmsettings.Credentials()
         auth.token(self.url("/team/"), "team-t0ken")

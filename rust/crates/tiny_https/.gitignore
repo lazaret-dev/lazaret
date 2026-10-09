@@ -1,5 +1,0 @@
-# The library's test fixtures as they were handed over: public certificates (*.pem) and real npm tarballs
-# (*.tgz), which its tests read. The repository's rule against committing those names does not apply in this
-# folder: scripts/sync_tiny_https.py refuses a drop with a private key or a credential file.
-!*.pem
-!*.tgz

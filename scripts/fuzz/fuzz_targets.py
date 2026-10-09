@@ -1202,7 +1202,7 @@ def go_sumdb_start():
 
 # ---- Go: the checksum database's answer checked (NET-1): the real database's answer, changed
 SUMDB_CAPTURE = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "rust", "crates",
-                             "tiny_https", "tests", "data", "sumdb")
+                             "pratique", "tests", "data", "sumdb")
 CHECK_NAME, CHECK_VERSION = "golang.org/x/mod", "v0.17.0"
 CHECK_TILES = ("tile/8/0/x097/482", "tile/8/0/x260/730.p/101", "tile/8/1/380", "tile/8/1/x001/018.p/122", "tile/8/2/001",
                "tile/8/2/003.p/250", "tile/8/3/000.p/3")
@@ -1211,7 +1211,7 @@ CHECK_WORDS = (b"\n", b"\n\n", b"\xe2\x80\x94 ", b"sum.golang.org", b"go.sum dat
 
 
 def sumdb_capture(rel):
-    """A file of tiny_https's capture of the real sum.golang.org (its tests/data/sumdb/README.txt)."""
+    """A file of pratique's capture of the real sum.golang.org (its tests/data/sumdb/README.txt)."""
     with open(os.path.join(SUMDB_CAPTURE, *rel.split("/")), "rb") as fh:
         return fh.read()
 

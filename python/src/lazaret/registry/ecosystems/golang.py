@@ -15,7 +15,7 @@ checksum database's `h1:` hash, and saying which of its files are built into a p
                  hex SHA-256 of the member, two spaces and the name (`golang.org/x/mod/sumdb/dirhash`). `zip_h1` computes
                  it from the zip, and `verify` compares it with the line `sum.golang.org/lookup/<module>@<version>`
                  returns: a host other than the one that served the zip. The lookup is checked as the go command checks
-                 it (`verify_lookup`, since 0.1.9: NET-1, the native library over tiny_https): the signed tree head it
+                 it (`verify_lookup`, since 0.1.9: NET-1, the native library over pratique): the signed tree head it
                  carries has the signature of the key Go pins (`SUMDB_KEY`), it agrees with the newest head this process
                  accepted before, and the record is in that tree, proved by the database's tiles. So an answer the
                  database did not sign (forged or altered, whoever served it) is caught, not only a swapped download;
@@ -36,7 +36,7 @@ version, a member path, a zip and a go.mod what Go answers, and `tests/registry/
 long list, real module zips built by Go from their git tags with the `h1:` that the published go.sum files carry, and a
 lookup response made by Go's own checksum database server. The module proxy itself was not reachable from where this
 was written: its response formats are the documented protocol (`go help goproxy`), not recordings. The lookup's check
-is tested on a capture of the real `sum.golang.org` (tiny_https's tests/data/sumdb: a lookup, a tree head kept from
+is tested on a capture of the real `sum.golang.org` (pratique's tests/data/sumdb: a lookup, a tree head kept from
 before and the seven tiles Go's own client reads for them; `tests/registry/test_golang_sumdb.py`).
 
 Standard library, `base`, and the native library for the lookup's check. No Go is run and nothing is built."""
@@ -411,7 +411,7 @@ def _not_checked(name, version, exc):
 
 def verify_lookup(name, version, lookup, record, fetch):
     """The checksum database's answer for `name@version` (`lookup`, the response; `record`, what `parse_lookup` read of
-    it) checked as the go command checks it, by the native library's `verify.go_sumdb` (tiny_https's sumdb and tlog):
+    it) checked as the go command checks it, by the native library's `verify.go_sumdb` (pratique's sumdb and tlog):
     the signed tree head the lookup carries has the signature of the database's key (`SUMDB_KEY`), it is consistent
     with the newest head this process accepted before, and the record is in that tree, proved by the tiles the check
     names, which come from the database through `fetch` and are each checked against the signed root. The hashes

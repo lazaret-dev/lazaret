@@ -4,7 +4,7 @@ A release's files may carry attestations. npm's: the version's document has `dis
 `/-/npm/v1/attestations/<name>@<version>` holds npm's own publish attestation (signed with the registry's key) and
 SLSA provenance (signed through Sigstore by the CI that built the tarball). PyPI's (PEP 740): the Simple API's JSON
 names a `provenance` URL for each file that has one. The native library checks each attestation (`verify.sigstore`,
-over tiny_https's `sigstore`): its signature by its certificate or key, the certificate's chain to Sigstore's CA at a
+over pratique's `sigstore`): its signature by its certificate or key, the certificate's chain to Sigstore's CA at a
 time a transparency log vouches for, the log entries, and a subject with the file's digest (npm: the tarball's
 SHA-512; PyPI: the file's SHA-256). What it proves is who built the file: the CI's source repository (its URI, and
 the numeric IDs GitHub puts in the certificate, which a rename keeps), the workflow and the ref.

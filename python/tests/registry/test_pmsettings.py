@@ -82,7 +82,7 @@ PATH_CASES = [
     ("/team/..%2fx", "W"), ("/team/%2e%2e%2fx", "W"), ("/team/..;/x", "W"), ("/team/a;b/x", "T"), ("/team/%2fx", "T"),
     ("/a/%2Fb/x", "A"), ("/a/b//../x", "AB"),
 ]
-#: and a path as it is given (a redirect's, which tiny_https sends as its Location says): the key that covers it read
+#: and a path as it is given (a redirect's, which pratique sends as its Location says): the key that covers it read
 #: three ways, as it is, as npm resolves it and as a server that decodes it routes it (lazaret-net's
 #: `a_redirects_path_gets_what_covers_it_read_three_ways` has the same table)
 HOP_KEYS = {"/": "W", "/team/": "T", "/x/": "X", "/g%2Fh/": "G"}

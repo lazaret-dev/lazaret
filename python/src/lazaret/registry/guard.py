@@ -271,7 +271,7 @@ _LABEL = frozenset("abcdefghijklmnopqrstuvwxyz0123456789-_")
 
 def usable_netloc(loc):
     """Is loc ('host[:port]', as `netloc` gives it) one host that a fetcher may be let reach: written so that urllib,
-    tiny_https and its host rule all read it as the same host (the credentials review of decision 14 found one
+    pratique and its host rule all read it as the same host (the credentials review of decision 14 found one
     unreadable entry failed every native request of its fetcher, and a "*." entry is a wildcard to the host rule).
     A name of labels of letters, digits, "-" and "_" (no "-" at either end; a final dot is allowed), an IPv4
     address, or an IPv6 address in brackets; and a port of digits, 1 to 65535."""
@@ -300,7 +300,7 @@ def usable_netloc(loc):
 def unreadable(url):
     """Why the guard does not fetch url, an http(s) URL it does not read as the package managers do; None when it
     does. A backslash before the query: to the WHATWG URL parser (npm's, uv's) it is a slash, and "https://a\\@b/" is
-    a URL of host a; to urllib and tiny_https, of host b. A host `usable_netloc` does not take."""
+    a URL of host a; to urllib and pratique, of host b. A host `usable_netloc` does not take."""
     if not isinstance(url, str):
         return "not a URL"
     if "\\" in url.split("?", 1)[0].split("#", 1)[0]:
@@ -465,7 +465,7 @@ class Fetcher:
         """The credentials of a request on the native transport, as urllib's path gives them (decision 14): the
         request's own Authorization (its URL's user:password, or the settings' for its URL) with the request alone,
         and the settings' with each redirect, for the redirect's URL (pmsettings.Credentials: a host, the longest
-        path prefix); tiny_https's hop hook gives each hop its own host's and no other's."""
+        path prefix); pratique's hop hook gives each hop its own host's and no other's."""
         out = []
         own = req.get_header("Authorization")
         if own:

@@ -1,8 +1,8 @@
 """The Go checksum database's answer checked as the go command checks it (`golang.verify_lookup`, 0.1.9, NET-1 part 3),
-on a capture of the real `sum.golang.org`: tiny_https's tests/data/sumdb (its README.txt says how it was made), the
+on a capture of the real `sum.golang.org`: pratique's tests/data/sumdb (its README.txt says how it was made), the
 lookup of golang.org/x/mod v0.17.0, a tree head the database served a little before it (`latest.txt`, kept here as if
 from an earlier check) and the seven tiles Go's own client reads for the two. The check is the native library's
-(`verify.go_sumdb`, over tiny_https's sumdb and tlog). The module proxy's `.info` is the documented shape, not a recording.
+(`verify.go_sumdb`, over pratique's sumdb and tlog). The module proxy's `.info` is the documented shape, not a recording.
 Nothing here opens a socket."""
 
 import json
@@ -14,7 +14,7 @@ from lazaret.registry.ecosystems import base, golang
 from lazaret.scanner import _native
 from tests import _support
 
-DATA = os.path.join(_support.REPO_ROOT, "rust", "crates", "tiny_https", "tests", "data", "sumdb")
+DATA = os.path.join(_support.REPO_ROOT, "rust", "crates", "pratique", "tests", "data", "sumdb")
 MODULE, VERSION = "golang.org/x/mod", "v0.17.0"
 ZIP_H1 = "h1:zY54UmvipHiNd+pm+m0x9KhZ9hl1/7QNMyxXbc6ICqA="
 MOD_H1 = "h1:hTbmBsO62+eylJbnUtE2MGJUyE7QWk4xUqPFrRgJ+7c="

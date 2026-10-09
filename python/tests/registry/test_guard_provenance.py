@@ -1,7 +1,7 @@
 """lazaret guard's provenance check (0.1.9, NET-1): npm's and PyPI's, for a release published less than
 guard.PROVENANCE_DAYS ago, as `lazaret-registry` checks it (registry/provenance.py), merged into the scan's verdict.
 
-On the real attestations test_provenance reads (tiny_https's capture of the registries: the npm package sigstore 2.2.0
+On the real attestations test_provenance reads (pratique's capture of the registries: the npm package sigstore 2.2.0
 and 4.0.0, the wheel pypi-attestations 0.0.30), with the registries' other documents built in their shapes. The scan
 is a stand-in (every archive OK), so what moves a verdict here is the provenance alone. Nothing here opens a socket."""
 

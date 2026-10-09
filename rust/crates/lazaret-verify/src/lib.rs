@@ -1,15 +1,15 @@
-//! What Lazaret takes from tiny_https's pure part (NET-1): verification over bytes, with the time and the trust
+//! What Lazaret takes from pratique's pure part (NET-1): verification over bytes, with the time and the trust
 //! anchors given by the caller. No I/O, no threads, no clock, no `unsafe`, and it builds for WebAssembly, so the
 //! engine may use it where it reads a release (the Go checksum database's records, npm's and PyPI's
 //! attestations, signed archives).
 //!
-//! The modules are tiny_https's own (`rust/crates/tiny_https`, taken as it was handed over by
-//! `scripts/sync_tiny_https.py`); this crate names the ones Lazaret uses, so that the engine depends on this
+//! The modules are pratique's own (`rust/crates/pratique`, taken as it is upstream by
+//! `scripts/sync_pratique.py`); this crate names the ones Lazaret uses, so that the engine depends on this
 //! crate and never on the network part (`scripts/check_rust_deps.py` checks both).
 #![forbid(unsafe_code)]
 
-pub use tiny_https::{asn1, ber, cms, crypto, json, note, pem, revocation, sigstore, sumdb, tlog, trust_root, util,
-                     verify_error, x509};
+pub use pratique::{asn1, ber, cms, crypto, json, note, pem, revocation, sigstore, sumdb, tlog, trust_root, util,
+                   verify_error, x509};
 
 /// The Go checksum database's answer for one `module@version`, checked as the go command checks it (NET-1): the tree
 /// head's signature by the database's key, the head against one saved from before (if given), and the record's place
@@ -94,7 +94,7 @@ pub mod gosum {
 }
 
 /// npm's and PyPI's attestations of one file, checked (NET-1's provenance findings): each is verified by
-/// tiny_https's `sigstore` against Sigstore's trusted root (and npm's key ring, for npm's own publish attestation),
+/// pratique's `sigstore` against Sigstore's trusted root (and npm's key ring, for npm's own publish attestation),
 /// with the file's digest (npm: the tarball's SHA-512; PyPI: the file's SHA-256), and comes back as what it
 /// proves or as one of two kinds of failure: **invalid**, when the attestation is not about this file (no subject
 /// has its digest) or its signature is not by its signer's key, which no age of the trust explains; and
@@ -241,18 +241,18 @@ mod tests {
     use super::sumdb::{self, Check};
     use super::tlog::{Tile, TileSet};
 
-    // tiny_https's capture of the real `sum.golang.org` (its tests/data/sumdb/README.txt): the lookup of
+    // pratique's capture of the real `sum.golang.org` (its tests/data/sumdb/README.txt): the lookup of
     // golang.org/x/mod@v0.17.0 and the tiles a Go client reads for it.
-    const LATEST: &[u8] = include_bytes!("../../tiny_https/tests/data/sumdb/latest.txt");
-    const LOOKUP: &[u8] = include_bytes!("../../tiny_https/tests/data/sumdb/lookup.txt");
+    const LATEST: &[u8] = include_bytes!("../../pratique/tests/data/sumdb/latest.txt");
+    const LOOKUP: &[u8] = include_bytes!("../../pratique/tests/data/sumdb/lookup.txt");
     const TILES: [(&str, &[u8]); 7] = [
-        ("tile/8/0/x097/482", include_bytes!("../../tiny_https/tests/data/sumdb/tile/8/0/x097/482")),
-        ("tile/8/0/x260/730.p/101", include_bytes!("../../tiny_https/tests/data/sumdb/tile/8/0/x260/730.p/101")),
-        ("tile/8/1/380", include_bytes!("../../tiny_https/tests/data/sumdb/tile/8/1/380")),
-        ("tile/8/1/x001/018.p/122", include_bytes!("../../tiny_https/tests/data/sumdb/tile/8/1/x001/018.p/122")),
-        ("tile/8/2/001", include_bytes!("../../tiny_https/tests/data/sumdb/tile/8/2/001")),
-        ("tile/8/2/003.p/250", include_bytes!("../../tiny_https/tests/data/sumdb/tile/8/2/003.p/250")),
-        ("tile/8/3/000.p/3", include_bytes!("../../tiny_https/tests/data/sumdb/tile/8/3/000.p/3")),
+        ("tile/8/0/x097/482", include_bytes!("../../pratique/tests/data/sumdb/tile/8/0/x097/482")),
+        ("tile/8/0/x260/730.p/101", include_bytes!("../../pratique/tests/data/sumdb/tile/8/0/x260/730.p/101")),
+        ("tile/8/1/380", include_bytes!("../../pratique/tests/data/sumdb/tile/8/1/380")),
+        ("tile/8/1/x001/018.p/122", include_bytes!("../../pratique/tests/data/sumdb/tile/8/1/x001/018.p/122")),
+        ("tile/8/2/001", include_bytes!("../../pratique/tests/data/sumdb/tile/8/2/001")),
+        ("tile/8/2/003.p/250", include_bytes!("../../pratique/tests/data/sumdb/tile/8/2/003.p/250")),
+        ("tile/8/3/000.p/3", include_bytes!("../../pratique/tests/data/sumdb/tile/8/3/000.p/3")),
     ];
 
     fn tiles() -> TileSet {
@@ -307,15 +307,15 @@ mod tests {
         assert!(gosum::verify(sumdb::KEY, Some(LATEST), "golang.org/x/mod", "v0.17.0", LOOKUP, &cut).is_err(), "a short tile");
     }
 
-    // tiny_https's real Sigstore data (its tests/data/sigstore/README.txt): Sigstore's trusted root, npm's keys, the
+    // pratique's real Sigstore data (its tests/data/sigstore/README.txt): Sigstore's trusted root, npm's keys, the
     // attestations of the npm package sigstore 4.0.0 with its tarball, and PyPI's provenance of a wheel with the wheel
-    const ROOT: &[u8] = include_bytes!("../../tiny_https/tests/data/sigstore/trusted_root.json");
-    const NPM_KEYS: &[u8] = include_bytes!("../../tiny_https/tests/data/sigstore/npm-registry-keys.json");
-    const NPM_ATTESTATIONS: &[u8] = include_bytes!("../../tiny_https/tests/data/sigstore/sigstore-4.0.0.attestations.json");
-    const NPM_TARBALL: &[u8] = include_bytes!("../../tiny_https/tests/data/sigstore/sigstore-4.0.0.tgz");
+    const ROOT: &[u8] = include_bytes!("../../pratique/tests/data/sigstore/trusted_root.json");
+    const NPM_KEYS: &[u8] = include_bytes!("../../pratique/tests/data/sigstore/npm-registry-keys.json");
+    const NPM_ATTESTATIONS: &[u8] = include_bytes!("../../pratique/tests/data/sigstore/sigstore-4.0.0.attestations.json");
+    const NPM_TARBALL: &[u8] = include_bytes!("../../pratique/tests/data/sigstore/sigstore-4.0.0.tgz");
     const PYPI_PROVENANCE: &[u8] =
-        include_bytes!("../../tiny_https/tests/data/sigstore/pypi_attestations-0.0.30-py3-none-any.whl.provenance.json");
-    const WHEEL: &[u8] = include_bytes!("../../tiny_https/tests/data/sigstore/pypi_attestations-0.0.30-py3-none-any.whl");
+        include_bytes!("../../pratique/tests/data/sigstore/pypi_attestations-0.0.30-py3-none-any.whl.provenance.json");
+    const WHEEL: &[u8] = include_bytes!("../../pratique/tests/data/sigstore/pypi_attestations-0.0.30-py3-none-any.whl");
 
     fn digest(algorithm: super::sigstore::DigestAlgorithm, data: &[u8]) -> Vec<u8> {
         super::sigstore::ArtifactDigest::of(algorithm, data).bytes().to_vec()

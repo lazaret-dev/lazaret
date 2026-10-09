@@ -40,15 +40,51 @@ extra case equivalences are derived from Unicode's case mappings
 (scripts/make_rust_tables.py). Tests hold each to Python's own answers.
 
 
-tiny_https
-----------
+pratique
+--------
 
-The native library (the platform wheels' library, not the WebAssembly
-build) also holds tiny_https, the HTTPS/TLS library Lazaret's network layer
-is built on (crates/lazaret-net, crates/lazaret-verify). It is in
-crates/tiny_https as it was handed over to the project, under the Apache
-License 2.0 (crates/tiny_https/LICENSE), Lazaret's own licence; where it
-came from and how a new drop is taken is in crates/tiny_https/LAZARET.md.
+Lazaret's network layer is built on pratique
+(https://github.com/lazaret-dev/pratique; called tiny_https until October
+2026), an HTTPS/TLS library under the Apache License 2.0
+(crates/pratique/LICENSE), Lazaret's own licence. It is in crates/pratique
+as it is upstream, at the commit crates/pratique/LAZARET.md names, with the
+notices of what it holds from elsewhere in crates/pratique/NOTICE. The
+native library holds its network part (crates/lazaret-net) and its pure
+verification code (crates/lazaret-verify: the Go checksum database's check,
+npm's and PyPI's attestations); the WebAssembly build holds what the engine
+takes of the pure part (SHA-256, for the signed requests of live secret
+verification).
+
+Of crates/pratique/NOTICE, this is what the native library holds: the
+bitsliced AES S-box and the constant-time carry-less multiplication of its
+TLS code follow BearSSL (src/crypto/aes_ct.rs and src/crypto/ghash.rs in
+crates/pratique), which is under the MIT licence:
+
+    Copyright (c) 2016 Thomas Pornin <pornin@bolet.org>
+
+    Permission is hereby granted, free of charge, to any person obtaining
+    a copy of this software and associated documentation files (the
+    "Software"), to deal in the Software without restriction, including
+    without limitation the rights to use, copy, modify, merge, publish,
+    distribute, sublicense, and/or sell copies of the Software, and to
+    permit persons to whom the Software is furnished to do so, subject to
+    the following conditions:
+
+    The above copyright notice and this permission notice shall be
+    included in all copies or substantial portions of the Software.
+
+    THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+    EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+    MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+    NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS
+    BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN
+    ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
+    CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+    SOFTWARE.
+
+pratique's Mozilla root store (crates/pratique/roots/mozilla.pem, under the
+Mozilla Public License 2.0, as NSS is) is for a feature Lazaret does not
+use; no package of Lazaret's carries it.
 
 
 Unicode data

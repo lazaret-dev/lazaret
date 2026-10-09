@@ -20,6 +20,6 @@ lazaret-engine = { path = "../lazaret-engine" }
 # itself never links it (scripts/check_rust_deps.py).
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 lazaret-net = { path = "../lazaret-net" }
-# tiny_https's pure verification part, for the calls the native library answers itself (`verify.*`: the Go checksum
+# pratique's pure verification part, for the calls the native library answers itself (`verify.*`: the Go checksum
 # database's records); the WebAssembly build has no use for it yet
 lazaret-verify = { path = "../lazaret-verify" }

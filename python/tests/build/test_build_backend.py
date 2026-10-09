@@ -294,16 +294,17 @@ class BuildTests(unittest.TestCase):
                          "rust/crates/lazaret-engine/rules/lazaret-rules.json",
                          "rust/crates/lazaret-ffi/Cargo.toml", "rust/crates/lazaret-ffi/src/lib.rs",
                          # the network layer (NET-1), and the library it is built on, which ships with its licence
+                         # and its notices
                          "rust/crates/lazaret-net/Cargo.toml", "rust/crates/lazaret-net/src/lib.rs",
                          "rust/crates/lazaret-verify/Cargo.toml", "rust/crates/lazaret-verify/src/lib.rs",
-                         "rust/crates/tiny_https/Cargo.toml", "rust/crates/tiny_https/LICENSE",
-                         "rust/crates/tiny_https/src/lib.rs", "rust/crates/tiny_https/src/http/hostrules.rs",
-                         # the Sigstore TUF root tiny_https builds in (src/tuf.rs)
-                         "rust/crates/tiny_https/roots/sigstore_tuf_root.json"):
+                         "rust/crates/pratique/Cargo.toml", "rust/crates/pratique/LICENSE", "rust/crates/pratique/NOTICE",
+                         "rust/crates/pratique/src/lib.rs", "rust/crates/pratique/src/http/hostrules.rs",
+                         # the Sigstore TUF root pratique builds in (src/tuf.rs)
+                         "rust/crates/pratique/roots/sigstore_tuf_root.json"):
                 self.assertIn(base + must, names)
-            # tiny_https's test and example sources ship (cargo reads every target its manifest declares before it
+            # pratique's test and example sources ship (cargo reads every target its manifest declares before it
             # builds any), and nothing else of its tests: no data, no vectors, no documents
-            vendored = base + "rust/crates/tiny_https/"
+            vendored = base + "rust/crates/pratique/"
             self.assertFalse([n for n in names if ("/tests/" in n or "/examples/" in n)
                               and not (n.startswith(vendored) and n.endswith(".rs") and "/tests/data/" not in n)])
             self.assertFalse([n for n in names if n.startswith(vendored) and n.endswith((".md", ".txt", ".json", ".der",

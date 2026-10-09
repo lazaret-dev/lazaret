@@ -1,18 +1,18 @@
 # Lazaret's native scanning engine (docs/RUST_ENGINE.md) and its network layer
-# (lazaret-net, on tiny_https: NET-1).
+# (lazaret-net, on pratique: NET-1).
 #
 # No external crates: every member depends only on the standard library and
 # on the other members, so Cargo.lock lists nothing but this workspace and a
 # build needs no registry (scripts/check_rust_deps.py fails CI otherwise).
-# tiny_https is a member, taken into rust/crates/tiny_https as it was handed
-# over (scripts/sync_tiny_https.py), not a crate from a registry.
+# pratique is a member, taken into rust/crates/pratique from a commit of its
+# repository (scripts/sync_pratique.py), not a crate from a registry.
 [workspace]
 resolver = "2"
 members = ["crates/lazaret-engine", "crates/lazaret-ffi", "crates/lazaret-verify", "crates/lazaret-net",
-           "crates/tiny_https"]
-# What `cargo build` and `cargo test` take with no -p: Lazaret's crates. tiny_https (taken as it was handed over,
-# scripts/sync_tiny_https.py) is built as their dependency, and its own tests run on their own in CI
-# (`cargo test -p tiny_https --lib` and its tests that need nothing installed).
+           "crates/pratique"]
+# What `cargo build` and `cargo test` take with no -p: Lazaret's crates. pratique (taken as it is upstream,
+# scripts/sync_pratique.py) is built as their dependency, and its own tests run on their own in CI
+# (`cargo test -p pratique --lib` and its tests that need nothing installed).
 default-members = ["crates/lazaret-engine", "crates/lazaret-ffi", "crates/lazaret-verify", "crates/lazaret-net"]
 
 [workspace.package]
