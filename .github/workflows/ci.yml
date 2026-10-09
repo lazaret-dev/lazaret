@@ -179,18 +179,13 @@ jobs:
       # aioquic servers and are the library's to run; its trust-store tests read this machine's stores). One
       # unit test is left out until a later commit of the library: a_cancel_stops_waiting_and_running_requests_and_
       # fails_new_ones starts two requests on two threads and expects them to take the scheduler's two places
-      # in the order they were started, which a busy machine does not always keep. The tests that count a host's
-      # connections (http::establish_tests) run on their own after the others, one at a time: their counts depend
-      # on how their threads are scheduled, and the tests running beside them can make one connection more (the
-      # library's B-105; the_async_client_keeps_the_limit_too did once, in a gate, and passes alone).
+      # in the order they were started, which a busy machine does not always keep.
       - working-directory: rust
         run: >-
           cargo test --release --offline --locked -p pratique --lib --test go_vectors --test cms_vectors
           --test sigstore_real --test sigstore_synthetic --test rekor_real --test real_chains --test inflate_vectors
           --test tuf_sigstore --test tuf_synthetic --test wycheproof --test real_revocation
-          -- --skip a_cancel_stops_waiting_and_running_requests_and_fails_new_ones --skip http::establish_tests
-      - working-directory: rust
-        run: cargo test --release --offline --locked -p pratique --lib http::establish_tests -- --test-threads=1
+          -- --skip a_cancel_stops_waiting_and_running_requests_and_fails_new_ones
       - working-directory: rust
         run: cargo build --release --offline --locked
       # The WebAssembly build (the npm package's engine) against this library:

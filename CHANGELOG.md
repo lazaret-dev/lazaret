@@ -599,6 +599,15 @@ project is pre-1.0, so the 0.x API may still change.
 
 ### Changed
 
+- **pratique's commit of Oct 9: a connection the per-host limit closed under load (NET-1).** `rust/crates/pratique` is
+  pratique's `b2097695`. Its B-105: when a request waited for room under a host's connection limit, the client could
+  close an idle connection of the request's own kind, parked a moment before, to make room for a new one, so a busy
+  host got one connection more than the limit; such a connection is now the request's to use. The commit also brings
+  the library's server work (B-109 and B-110: constant-time signing keys, real certificates, stateless tickets, client
+  certificates), which Lazaret's network layer does not use: its client's only change is that it can answer a
+  server's request for a certificate with one it is given, which Lazaret never gives (it answers with none, as before).
+  The signing code is now part of the library's network build, unused by Lazaret. CI runs the library's connection
+  tests with the others again.
 - **The HTTPS/TLS library is pratique, taken from its repository (NET-1).** tiny_https is now pratique
   (https://github.com/lazaret-dev/pratique, Apache-2.0). `rust/crates/pratique` is a commit of that repository:
   `scripts/sync_pratique.py CHECKOUT [--rev REV]` takes the commit's files as git holds them and records the commit,

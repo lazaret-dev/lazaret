@@ -140,10 +140,7 @@ Notes:
   pratique --lib` takes about 25 s after a 3-minute build, and its
   `go_vectors`, `cms_vectors`, `sigstore_real`, `sigstore_synthetic` and
   `rekor_real` tests a second each); after taking a new commit of it
-  (`scripts/sync_pratique.py`), run them and the gates. CI runs the tests
-  that count a host's connections (`http::establish_tests`) apart, one at a
-  time: their counts depend on how their threads are scheduled (the
-  library's B-105). The Go checksum
+  (`scripts/sync_pratique.py`), run them and the gates. The Go checksum
   database's check (`golang.verify_lookup`) is tested on pratique's capture
   of the real `sum.golang.org` (`tests.registry.test_golang_sumdb`); the Go
   tests whose lookups are signed with a test key or not at all

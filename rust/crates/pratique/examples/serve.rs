@@ -1,13 +1,21 @@
 //! A small HTTPS test server on pratique's TLS 1.3 server, for pointing other programs at: `openssl s_client`,
 //! `curl`, a Go client, a browser that has been told to trust the root.
 //!
-//! EXPERIMENTAL, FOR TESTS: the signing is not constant-time and nothing here has been reviewed. The certificate
-//! and its key are made fresh at each start and mean nothing. Do not expose this to a network.
+//! FOR TESTS: the server is not ready for production yet (BACKLOG B-109 to B-114: no limits or timeouts against abusive
+//! clients, no review). The throwaway certificate and its key are made fresh at each start and mean nothing. Do not
+//! expose this to a network.
 //!
 //!     cargo run --release --features server --example serve -- [options]
 //!
 //!   port=N            listen on 127.0.0.1:N (default 0: a free port, printed)
 //!   names=a,b         DNS names or IP addresses of the certificate (default localhost,127.0.0.1,::1)
+//!   keytype=NAME      the throwaway certificate's key: ed25519 (default), p256 or p384
+//!   rootkey=NAME      the throwaway root's key, the same choices (browsers take no Ed25519 in a chain: use p256)
+//!   certfile=FILE     serve this certificate chain (PEM, leaf first) instead of a throwaway one, with
+//!   keyfile=FILE      its private key (PEM: PKCS#8, SEC 1 or PKCS#1; ECDSA P-256/P-384, Ed25519 or RSA)
+//!   names2=a,b        a second throwaway certificate under the same root, for these names (the client's SNI picks)
+//!   clientca=FILE     ask for client certificates that lead to the CA certificates in FILE (PEM), and with
+//!   clientauth=MODE   require them (`required`, the default) or take them if offered (`optional`)
 //!   ca=FILE           write the root certificate (PEM) there (default: serve-root.pem)
 //!   alpn=h2,http/1.1  ALPN protocols, in the server's order (default: none)
 //!   suite=NAME        only this cipher suite: aes128, aes256 or chacha
@@ -38,8 +46,11 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 use pratique::http::h2_server::{self, Action, Step};
-use pratique::tls::pki::{CertSpec, TestPki};
-use pratique::tls::server::{ServerConfig, ServerStream};
+use pratique::crypto::ecdsa::Curve;
+use pratique::tls::certs::{CertStore, CertifiedKey};
+use pratique::tls::pki::{issue, CertSpec, KeyPair, TestPki};
+use pratique::x509::TrustStore;
+use pratique::tls::server::{ClientAuth, ServerConfig, ServerStream};
 use pratique::tls::Suite;
 
 fn main() {
@@ -59,13 +70,52 @@ fn main() {
 
     let names = get("names", "localhost,127.0.0.1,::1");
     let names: Vec<&str> = names.split(',').collect();
-    let pki = TestPki::with_spec(CertSpec::server(&names)).expect("random numbers");
     let ca_path = get("ca", "serve-root.pem");
-    std::fs::write(&ca_path, pki.root_pem()).expect("write the root certificate");
-
-    let mut config = ServerConfig::from_pki(&pki);
+    let mut config = match (opts.get("certfile"), opts.get("keyfile")) {
+        (Some(c), Some(k)) => {
+            let chain = std::fs::read_to_string(c).expect("read certfile");
+            let key = std::fs::read_to_string(k).expect("read keyfile");
+            ServerConfig::from_pem(&chain, &key).unwrap_or_else(|e| panic!("{e}"))
+        }
+        (None, None) => {
+            let key_of = |option: &str| {
+                match get(option, "ed25519").as_str() {
+                    "ed25519" => KeyPair::generate(),
+                    "p256" => KeyPair::generate_ecdsa(Curve::P256),
+                    "p384" => KeyPair::generate_ecdsa(Curve::P384),
+                    other => panic!("unknown {option} {other}"),
+                }
+                .expect("random numbers")
+            };
+            let server_key = key_of("keytype");
+            let root_key = key_of("rootkey");
+            let pki = TestPki::with_keys(CertSpec::server(&names), &root_key, server_key);
+            std::fs::write(&ca_path, pki.root_pem()).expect("write the root certificate");
+            let store = CertStore::single(CertifiedKey::new(pki.chain.clone(), pki.server_key.signing_key().clone()).expect("the test certificate"));
+            if let Some(n2) = opts.get("names2") {
+                // a second certificate under the same root ("pratique test root", as TestPki names it)
+                let names2: Vec<&str> = n2.split(',').collect();
+                let key2 = KeyPair::generate_ecdsa(Curve::P256).expect("random numbers");
+                let der = issue(&CertSpec::server(&names2), &key2, Some(("pratique test root", &root_key)));
+                store.add(CertifiedKey::new(vec![der], key2.signing_key().clone()).expect("the second certificate"));
+            }
+            ServerConfig::with_certificates(store)
+        }
+        _ => panic!("certfile= and keyfile= go together"),
+    };
     if let Some(a) = opts.get("alpn") {
         config = config.with_alpn(&a.split(',').collect::<Vec<_>>());
+    }
+    if let Some(path) = opts.get("clientca") {
+        let mut roots = TrustStore::empty();
+        let n = roots.add_pem(&std::fs::read_to_string(path).expect("read clientca"));
+        assert!(n > 0, "no certificate in {path}");
+        let roots = Arc::new(roots);
+        config = config.with_client_auth(match get("clientauth", "required").as_str() {
+            "required" => ClientAuth::Required(roots),
+            "optional" => ClientAuth::Optional(roots),
+            other => panic!("unknown clientauth {other}"),
+        });
     }
     if let Some(s) = opts.get("suite") {
         let suite = match s.as_str() {
@@ -105,11 +155,13 @@ fn main() {
             match ServerStream::accept(socket, &config) {
                 Ok(stream) => {
                     println!(
-                        "connection {n}: {:?} group {:#06x} alpn {:?} sni {:?}",
+                        "connection {n}: {:?} group {:#06x} alpn {:?} sni {:?} resumed {} client certificates {}",
                         stream.cipher_suite().map(|s| s.name()),
                         stream.group().unwrap_or(0),
                         stream.alpn_protocol().map(|p| String::from_utf8_lossy(p).into_owned()),
-                        stream.server_name()
+                        stream.server_name(),
+                        stream.is_resumed(),
+                        stream.peer_certificates().len()
                     );
                     if stream.alpn_protocol() == Some(b"h2".as_slice()) {
                         serve_h2(n, stream);
