@@ -2000,3 +2000,127 @@ def js_parse_start():
 
 register("js-parse", "jsparse.parse (js_parse): a tree or a well-formed error on any bytes, deterministic, linear (X-1)",
          js_parse_seeds, js_parse_start, JS_WORDS, max_len=16384)
+
+
+# ---------------- the Python parser's robustness (X-1) ----------------
+# A fuzzer for py_parse (pyparse/), as js-parse is for the JavaScript parser: whatever the bytes, it answers a tree
+# (`{"_type": "Module", …}`) or a `{"error": {"line", "reason"}}`, the same twice, within the time limit — totality,
+# determinism, linear time. It is held to CPython node by node by test_pyparse_native.py; this target is robustness on
+# bytes those curated inputs do not reach.
+PY_SNIPPETS = [
+    b"def f(x):\n    return x + 1\n",
+    b"async def g():\n    async with a() as b:\n        await b\n    async for x in y:\n        yield x\n",
+    b"match p:\n    case [1, *rest]:\n        pass\n    case {'k': v, **r}:\n        pass\n    case A(x=1) | B():\n        pass\n",
+    b"x: int = 1; y = [i for i in range(10) if i % 2]; z = {k: v for k, v in items}\n",
+    b"from . import a, b as c\nfrom ..pkg import (d, e)\nimport x.y.z as w\n",
+    b"f'{x!r:>{width}}' f'{y:{spec}}' rb'\\x00' r'''raw''' b'\\101'\n",
+    b"@decorator(arg)\nclass C(Base, metaclass=M):\n    __slots__ = ()\n    def m(self, /, a, *args, k=1, **kw): ...\n",
+    b"lambda a, b=1, *c, d, **e: (a, b, c, d, e)\n",
+    b"try:\n    pass\nexcept* TypeError as e:\n    pass\nexcept* (A, B):\n    pass\n",
+    b"with (open('a') as f, open('b') as g):\n    pass\n",
+    b"print >> sys.stderr, x\n",            # Python 2's print statement: on 3 a tuple, `(print >> sys.stderr), x`
+    b"x = 0o17 + 0b1010 + 0x_ff + 1_000.5j + .5e-3\n",
+    b"def f() -> 'T': yield from g(); return (yield)\n",
+    b"type Alias[T] = list[T]\ndef f[T](x: T) -> T: return x\n",   # 3.12 type params
+]
+PY_WORDS = (b"\n", b"    ", b"def ", b"class ", b"async ", b"await ", b"yield", b"lambda", b"match ", b"case ",
+            b"import ", b"from ", b"return", b"with ", b"try:", b"except", b"f'", b'"""', b"rb'", b":=", b"->",
+            b"**", b"*", b"(", b")", b"[", b"]", b"{", b"}", b":", b",", b"@", b"\\\n", b"# c", b"\t", b"0x", b"1j")
+
+
+def py_sources():
+    """The repository's own small Python (python/src), as seeds beside the snippets."""
+    out = []
+    for base in (os.path.join(REPO_ROOT, "python", "src"),):
+        for dirpath, _dirs, files in os.walk(base):
+            for name in sorted(files):
+                if name.endswith(".py"):
+                    try:
+                        with open(os.path.join(dirpath, name), "rb") as fh:
+                            data = fh.read()
+                    except OSError:
+                        continue
+                    if 0 < len(data) <= 16384:
+                        out.append(data)
+    return out
+
+
+def py_parse_seeds():
+    return PY_SNIPPETS + py_sources()[:40]
+
+
+def py_parse_start():
+    from lazaret.scanner import _native
+
+    def one(src):
+        status, answer = _native.call_raw("py_parse", {}, src)
+        check(status == 0, "py-parse-status", f"status {status}")
+        check(answer.startswith('{"_type":"Module"') or answer.startswith('{"error"'), "py-parse-shape", answer[:80])
+        if answer.startswith('{"error"'):
+            err = json.loads(answer)["error"]
+            check(isinstance(err.get("line"), int) and err["line"] >= 0 and isinstance(err.get("reason"), str),
+                  "py-parse-error-shape", answer[:80])
+        return answer
+
+    def run(data):
+        src = data.decode("utf-8", "replace")
+        answer = one(src)
+        check(answer == one(src), "py-parse-deterministic", src[:40])
+
+    return run, lambda: None
+
+
+register("py-parse", "pyparse.to_json (py_parse): a tree or a well-formed error on any bytes, deterministic, linear (X-1)",
+         py_parse_seeds, py_parse_start, PY_WORDS, max_len=16384)
+
+
+# ---------------- the intra-file taint pass's robustness (X-1) ----------------
+# A fuzzer for taint_scan (taint.rs), the intra-file taint pass of project mode (the T-* findings): whatever the
+# bytes, in Python or in JavaScript, a well-formed list of issues, the same twice, within the time limit. The pass is
+# held to core's answers by the snapshot and parity tests; this is robustness on bytes.
+TAINT_SNIPPETS = [
+    (b"import os\ncmd = input()\nos.system(cmd)\n", "py"),
+    (b"from flask import request\nq = request.args['q']\ncur.execute('SELECT ' + q)\n", "py"),
+    (b"const cp = require('child_process');\ncp.execSync(process.argv[2]);\n", "js"),
+    (b"app.get('/x', (req, res) => { res.send('<b>' + req.query.n + '</b>'); });\n", "js"),
+    (b"x = request.args.get('a')\ny = x\nif c:\n    y = sanitize(y)\nos.system(y)\n", "py"),
+    (b"const { a, b: c } = req.query; db.query(`SELECT ${a}`);\n", "js"),
+]
+TAINT_WORDS = (b"\n", b"request", b"input(", b"os.system(", b"execSync(", b"query", b"req.", b"res.send(",
+               b".args", b".query", b"cur.execute(", b"sanitize(", b"=", b"(", b")", b"${", b"`", b"'", b"import ",
+               b"require(", b"app.get(")
+
+
+def taint_seeds():
+    both = [s for s, _ in TAINT_SNIPPETS]
+    return both + py_sources()[:16] + js_sources()[:16]
+
+
+def taint_start():
+    from lazaret.scanner import _native
+
+    def scan(src, args):
+        status, answer = _native.call_raw("taint_scan", args, src)
+        check(status == 0, "taint-status", f"status {status} ({args})")
+        issues = json.loads(answer)
+        check(isinstance(issues, list), "taint-shape", answer[:80])
+        # an issue is a positional row (engine._ISSUE_KEYS + line/snippet/snipStart): [rule, name, type, sev, msg,
+        # why, fix, ref, line, snippet, snipStart, (omitted, omittedType)]
+        for i in issues:
+            check(isinstance(i, list) and len(i) in (11, 13), "taint-issue-shape", str(i)[:80])
+            check(isinstance(i[0], str) and i[0].startswith("T-"), "taint-issue-rule", str(i[:1]))
+            check(isinstance(i[3], str) and isinstance(i[8], int) and i[8] >= 1, "taint-issue-fields", str(i[:9]))
+        return answer
+
+    def run(data):
+        src = data.decode("utf-8", "replace")
+        # (Python; JavaScript as a .ts file is read, without JSX, and as every other, with it)
+        for args in ({"lang": "py"}, {"lang": "js", "jsx": False}, {"lang": "js", "jsx": True}):
+            answer = scan(src, args)
+            check(answer == scan(src, args), "taint-deterministic", f"{args}: {src[:40]}")
+
+    return run, lambda: None
+
+
+register("taint", "taint.scan (taint_scan): a well-formed issue list on any Python or JavaScript bytes, deterministic (X-1)",
+         taint_seeds, taint_start, TAINT_WORDS, max_len=16384)
