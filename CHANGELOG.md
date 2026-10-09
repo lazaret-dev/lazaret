@@ -604,6 +604,20 @@ project is pre-1.0, so the 0.x API may still change.
 
 ### Changed
 
+- **pratique's production server commit, f28b6d39: a stricter TLS client, and a proxy's login decoded (NET-1).**
+  `rust/crates/pratique` is pratique's `f28b6d39`. Most of the commit is the library's server, behind its `server`
+  feature, which no package of Lazaret's builds (only `lazaret-net`'s tests use it): the HTTP/1.1 and HTTP/2 server,
+  its runtime and ACME, a scanning proxy for package registries, and conformance testing (tlsfuzzer, testssl.sh). What
+  tlsfuzzer found holds for the client too. It now refuses two things RFC 8446 forbids that it took: a record whose
+  plaintext, padding included, is over the limit, and a record of another type inside a handshake message. Four that
+  it refused already now get the alert the RFC names: an empty alert, a KeyUpdate whose request is neither 0 nor 1, a
+  server Finished not the length of the hash, and a CertificateVerify in a scheme that does not go with the
+  certificate's key. Its HTTP/2 header decoder measures a reference to a large table entry before it copies it, so a
+  header block of such references (an "HPACK bomb") no longer costs memory past the list's limit. And it decodes a
+  proxy's login (`HTTPS_PROXY=http://u%40x:pw@proxy:3128` logs in as `u@x`), as urllib does. `nativenet`, which sends
+  a request to urllib when the two transports would read the proxy setting differently, decodes it too: requests
+  through such a proxy now go over the native transport, while a login the two decode differently (`%+1`, which
+  pratique reads as an escape) still sends them to urllib. The pure part gains two functions Lazaret does not call.
 - **pratique's commit of Oct 9: a connection the per-host limit closed under load (NET-1).** `rust/crates/pratique` is
   pratique's `b2097695`. Its B-105: when a request waited for room under a host's connection limit, the client could
   close an idle connection of the request's own kind, parked a moment before, to make room for a new one, so a busy

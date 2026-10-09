@@ -539,20 +539,23 @@ class ChoiceTests(unittest.TestCase):
             with mock.patch.dict(os.environ, {**env, **same}, clear=True):
                 self.assertEqual(nativenet._proxy_for("https://registry.npmjs.org/x"), "env")
         # one setting that the two read differently: pratique takes port 8080 when a path follows the port or none is
-        # given (urllib: the port, or 443), "*" anywhere in NO_PROXY, and no entry with a port (the second review)
+        # given (urllib: the port, or 443), "*" anywhere in NO_PROXY, and no entry with a port (the second review);
+        # and an escape in the login that only pratique decodes (`%+1`: its from_str_radix takes a sign)
         npm = "https://registry.npmjs.org/x"
         for differ, url in [({"HTTPS_PROXY": "http://a.invalid:3128/"}, npm), ({"HTTPS_PROXY": "http://a.invalid"}, npm),
                             ({"HTTPS_PROXY": "http://a.invalid:3128", "NO_PROXY": "localhost,*"}, npm),
                             ({"HTTPS_PROXY": "http://a.invalid:3128", "NO_PROXY": "registry.npmjs.org:443"},
                              "https://registry.npmjs.org:443/x"),
-                            ({"HTTPS_PROXY": "http://u%40x:p@a.invalid:3128"}, npm)]:
+                            ({"HTTPS_PROXY": "http://u%+1x:p@a.invalid:3128"}, npm)]:
             with self.subTest(differ), mock.patch.dict(os.environ, {**env, **differ}, clear=True), \
                     self.assertRaises(nativenet.UsePython):
                 nativenet._proxy_for(url)
+        # (an escaped login: both decode it, since pratique's f28b6d39)
         for alike, url, want in [({"HTTPS_PROXY": "http://a.invalid:3128", "NO_PROXY": ".npmjs.org,::1"}, "https://registry.npmjs.org/x",
                                   "env"),
                                  ({"HTTPS_PROXY": "a.invalid:3128", "NO_PROXY": "*"}, "https://registry.npmjs.org/x", "env"),
-                                 ({"HTTPS_PROXY": "http://u:p@a.invalid:3128"}, "https://pypi.org/simple/", "env")]:
+                                 ({"HTTPS_PROXY": "http://u:p@a.invalid:3128"}, "https://pypi.org/simple/", "env"),
+                                 ({"HTTPS_PROXY": "http://u%40x:p%3Aw%C3%A9@a.invalid:3128"}, npm, "env")]:
             with self.subTest(alike), mock.patch.dict(os.environ, {**env, **alike}, clear=True):
                 self.assertEqual(nativenet._proxy_for(url), want)
         with mock.patch.dict(os.environ, env, clear=True), \

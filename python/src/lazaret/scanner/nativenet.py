@@ -308,17 +308,42 @@ def _urllib_proxy(value):
 
 def _native_proxy(value):
     """The same as pratique's `Proxy::parse` reads it: "http://" before a setting without a scheme; the port only
-    when the setting ends with it (with a path after it, even "/", or none, 8080); the login as written."""
+    when the setting ends with it (with a path after it, even "/", or none, 8080); the login with its escapes
+    decoded as pratique decodes them (since its f28b6d39; before, as written)."""
     text = value.strip()
     text = text if "://" in text else "http://" + text
     try:
         parts = urllib.parse.urlsplit(text)
         last = text.rsplit("/", 1)[-1]
         port = parts.port if ":" in last and not last.endswith("]") else 8080
-        login = parts.netloc.rpartition("@")[0] if "@" in parts.netloc else None
+        login = _pratique_decoded(parts.netloc.rpartition("@")[0]) if "@" in parts.netloc else None
         return (parts.hostname or "").lower(), port, login
     except ValueError:
         return None
+
+
+def _pratique_decoded(text):
+    """pratique's `percent_decoded` (`http::Proxy::parse`, for a proxy's login): each `%` and the two characters after
+    it that `u8::from_str_radix` reads in base 16 becomes that byte, and the bytes are read as UTF-8, U+FFFD where
+    they are not. from_str_radix takes a sign, so `%+1` is the byte 1 there, where urllib leaves `%+1` as it is: such
+    a login reads differently to the two, and goes to urllib."""
+    data = text.encode("utf-8", "surrogateescape")
+    out = bytearray()
+    i = 0
+    while i < len(data):
+        pair = data[i + 1:i + 3]
+        value = None
+        if data[i] == 0x25 and len(pair) == 2:
+            digits = pair[1:] if pair[:1] == b"+" else pair
+            if digits and all(c in b"0123456789abcdefABCDEF" for c in digits):
+                value = int(digits, 16)
+        if value is None:
+            out.append(data[i])
+            i += 1
+        else:
+            out.append(value)
+            i += 3
+    return bytes(out).decode("utf-8", "replace")
 
 
 def _native_bypass(host):
