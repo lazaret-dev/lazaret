@@ -95,6 +95,80 @@ fn a_small_program() {
 }
 
 #[test]
+fn annex_b_html_comments_are_comments_in_javascript() {
+    // (F-12) `<!--` opens a line comment anywhere a token may begin; `-->` opens one at a line's start (the input's,
+    // or after only blanks and comments since a line terminator), as V8 reads a script (Node's CommonJS). Before
+    // F-12 the parser read `<!--` as `<` `!` `--`, and a file that opened with one did not parse.
+    let ok = |src: &str| {
+        for jsx in [false, true] {
+            assert!(parse(&cp(src), false, jsx).is_ok(), "{src:?} (jsx={jsx})");
+        }
+    };
+    let err = |src: &str| {
+        assert!(parse(&cp(src), false, false).is_err(), "{src:?} parsed");
+    };
+    ok("<!-- banner\nmodule.exports = 1;\n");           // a leading open comment
+    ok("x = 1;\n--> banner\ny = 2;\n");                 // `-->` after a line terminator
+    ok("--> banner\nx = 1;\n");                          // `-->` at the input's start
+    ok("   --> banner\nx = 1;\n");                       // blanks before it, still the input's first line
+    ok("/* a\nb */ --> banner\nx = 1;\n");              // a block comment with a line terminator opens the line
+    ok("#!/usr/bin/env node\n<!-- banner\nx = 1;\n");   // after a hashbang (its line ends first)
+    ok("x = a <!-- b;\n");                               // `<!--` mid-line: a comment to the line's end
+    ok("x<!--y\nz = 1;\n");                              // `<!--` with no space: still a comment
+    ok("i-->0;\n");                                      // `i-- > 0`: a postfix `--`, not a close comment
+    ok("<!-- only a comment\n");                         // nothing but the comment
+    // `-->` that does not begin a line stays `--` `>` (V8 refuses `x = 1; --> y`)
+    err("x = 1; --> y\n");
+    // the exact bytes only: a real less-than is untouched
+    assert!(json("a < !b;", false, false).contains("BinaryExpression"));
+    assert!(json("a-->b;", false, false).contains("UpdateExpression"));
+    // what the comment hides is no part of the tree
+    assert!(!json("z = 5 <!--y, f()\n", false, false).contains("CallExpression"));
+}
+
+#[test]
+fn typescript_reads_html_like_open_comments_as_tsc_does() {
+    // tsc (6.0.3) has no HTML-like comments: `<!--` is `<` `!` `--`, so `z = 5 <!--y, f()` compiles to
+    // `z = 5 < !--y, f();`, which calls f, and a file that opens with `<!--` is a syntax error to it (tsx and Node's
+    // type stripping read a comment; the supply-chain facts read a TypeScript file's text as JavaScript first,
+    // jsflow::supply::facts). `-->` where a line begins is never code, and is a comment in either dialect.
+    for jsx in [false, true] {
+        let tree = json("z = 5 <!--y, f()\n", true, jsx);
+        assert!(tree.contains("CallExpression") && tree.contains("UpdateExpression"), "{tree}");
+        assert!(json("z = 5\n<!--y, f()\n", true, jsx).contains("CallExpression"));
+        assert!(parse(&cp("<!-- banner\nx = 1;\n"), true, jsx).is_err());
+        assert!(!parse(&cp("x = a <!-- b;\n"), true, jsx).unwrap().html_after_code);
+        assert!(!json("x = y\n--> 0, f()\n", true, jsx).contains("CallExpression"));
+        assert!(parse(&cp("--> banner\nx = 1;\n"), true, jsx).is_ok());
+    }
+    // JavaScript read as tsc reads `<!--` (parse_with, html_open false): the supply-chain facts' second reading
+    let tree = parse_with(&cp("z = 5 <!--y, f()\n--> c\n"), false, true, false).unwrap();
+    assert!(!tree.html_after_code);
+    assert!(parse_with(&cp("<!-- banner\nx = 1;\n"), false, true, false).is_err());
+}
+
+#[test]
+fn an_html_like_open_comment_after_code_is_marked() {
+    // Tree::html_after_code: the JavaScript reading took a `<!--` after the first token for a comment, where tsc
+    // (and a module, by the standard) reads code. Before the first token it is a comment in every reading that runs
+    // the file, and `-->` hides nothing that runs.
+    let marked = |src: &str| parse(&cp(src), false, true).unwrap().html_after_code;
+    assert!(marked("z = 5 <!--y, f()\n"));
+    assert!(marked("z = 5\n<!--y, f()\n"));
+    assert!(marked("x = 1;\n<!-- a note\n"));
+    assert!(marked("x = 1 <!-- at the end"));                 // (the comment before the end of the input)
+    assert!(marked("f(<a\n<!-- c\nb='1'/>);\n"));          // (in a JSX tag)
+    assert!(!marked("<!-- banner\nmodule.exports = 1;\n"));
+    assert!(!marked("#!/usr/bin/env node\n<!-- banner\nx = 1;\n"));
+    assert!(!marked("/* a */ <!-- banner\nx = 1;\n"));
+    assert!(!marked("x = 1;\n--> banner\ny = 2;\n"));
+    assert!(!marked("s = '<!--'; t = `<!-- ${u} -->`; r = /<!--/; // <!--\n"));   // in a string, a template, a regex
+    assert!(!marked("a = b < !--c;\n"));
+    // (a read ahead, an arrow's parameters here, leaves no mark of its own: the mark is state save() keeps)
+    assert!(!marked("x = (a = /<!--/, b = '<!--') => a;\n"));
+}
+
+#[test]
 fn every_nesting_ends_where_jsparse_ends_it() {
     for n in NESTINGS {
         let deepest = nested(n, n.8);

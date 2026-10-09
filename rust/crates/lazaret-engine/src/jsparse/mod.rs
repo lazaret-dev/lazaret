@@ -86,7 +86,13 @@ pub struct SyntaxError {
 
 /// The Program of `src` (its nodes in document order), or the error.
 pub fn parse(src: &[u32], ts: bool, jsx: bool) -> Result<Tree, SyntaxError> {
-    match parser::parse(src, ts, jsx) {
+    parse_with(src, ts, jsx, !ts)
+}
+
+/// parse(), `<!--` opening a line comment (JavaScript's reading) or read as
+/// `<` `!` `--` (tsc's, and a module's by the standard): parser.rs, skip().
+pub fn parse_with(src: &[u32], ts: bool, jsx: bool, html_open: bool) -> Result<Tree, SyntaxError> {
+    match parser::parse_with(src, ts, jsx, html_open) {
         parser::Outcome::Tree(t) => Ok(t.compact()),
         parser::Outcome::Error(line, reason) => Err(SyntaxError { line, reason }),
     }

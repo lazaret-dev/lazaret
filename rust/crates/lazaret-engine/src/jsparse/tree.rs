@@ -411,11 +411,15 @@ pub struct Tree {
     pub lists: Vec<u32>,
     pub strings: Strings,
     pub root: NodeId,
+    /// The JavaScript reading took an HTML-like `<!--` for a comment after
+    /// the program's first token (F-12): V8 reads a script so, but tsc reads
+    /// `<` `!` `--` there, which may be code it runs (parser.rs, skip()).
+    pub html_after_code: bool,
 }
 
 impl Tree {
     pub fn new() -> Tree {
-        Tree { nodes: Vec::new(), lists: vec![0], strings: Strings::with_literals(), root: NONE }
+        Tree { nodes: Vec::new(), lists: vec![0], strings: Strings::with_literals(), root: NONE, html_after_code: false }
     }
 
     /// The node `id`.
@@ -526,10 +530,12 @@ impl Tree {
     pub fn compact(mut self) -> Tree {
         let root = self.root;
         let strings = std::mem::take(&mut self.strings);
+        let html_after_code = self.html_after_code;
         if root == NONE {
-            return Tree { nodes: Vec::new(), lists: vec![0], strings, root: NONE };
+            return Tree { nodes: Vec::new(), lists: vec![0], strings, root: NONE, html_after_code };
         }
-        let mut out = Tree { nodes: Vec::with_capacity(self.nodes.len()), lists: vec![0], strings, root: NONE };
+        let mut out =
+            Tree { nodes: Vec::with_capacity(self.nodes.len()), lists: vec![0], strings, root: NONE, html_after_code };
         // pass 1: pre-order ids, with an explicit stack (trees may be deep)
         let mut stack: Vec<NodeId> = vec![root];
         let mut order: Vec<NodeId> = Vec::with_capacity(self.nodes.len());
@@ -594,7 +600,7 @@ impl Tree {
 
     /// compact() for a tree that holds a node twice: each place gets a copy.
     fn compact_by_copy(&self, root: NodeId, strings: Strings) -> Tree {
-        let mut out = Tree { nodes: Vec::new(), lists: vec![0], strings, root: NONE };
+        let mut out = Tree { nodes: Vec::new(), lists: vec![0], strings, root: NONE, html_after_code: self.html_after_code };
         // (old id, the slot in `out` to point at it: (node index, slot) or a list position)
         enum At {
             Root,

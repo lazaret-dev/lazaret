@@ -479,6 +479,8 @@ register("archive-npm-diff", "registry.repo.iter_archive on npm tarballs against
          npm_diff_seeds, npm_diff_start, TAR_WORDS + (b"././@LongLink", b"\x00" * 130), max_len=32768)
 
 
+
+
 # ---------------- an sdist against pip's own unpacking (BR-4, F-11) ----------------
 # pip unpacks an sdist with its own code (pip/_internal/utils/unpacking.py) before it builds it: the top folder taken
 # off only when every member has the same one, a `..` resolved through the path. `fuzz_pip_extract.py` runs that code
@@ -1917,3 +1919,84 @@ def credential_path_start():
 register("credential-path", "decision 14: pmsettings.Credentials.header over a URL path: an answer, the key of the longest path that covers it "
          "read three ways, and normal_path a path with no dot segment that it leaves as it is", lambda: list(CREDENTIAL_PATH_SEEDS),
          credential_path_start, CREDENTIAL_PATH_WORDS, max_len=512)
+
+
+# ---------------- the JavaScript parser's robustness (X-1) ----------------
+# A fuzzer for js_parse (jsparse/parser.rs), as the lexer has one: whatever the bytes, the parser answers — a tree or
+# a `{"error": …}` with a line and a reason — never panics, is the same twice, and stays within the time limit (the
+# driver's; a parser that read ahead from every `<` or `/` would not). It is not held to V8 here (that is a curated
+# test, test_jsparse_v8.py, which the Annex B HTML-comment fix of F-12 added); this target is totality, determinism
+# and linear time on generated programs and mutants of real files.
+JS_SNIPPETS = [
+    b"<!-- an HTML open comment, a script runs it\nmodule.exports = 1;\n",
+    b"0;\n--> an HTML close comment at a line's start\nmodule.exports = 1;\n",
+    b"/* a block\ncomment */ --> close after it\ny = 2;\n",
+    b"#!/usr/bin/env node\n<!-- after a hashbang\nz = 3;\n",
+    b"i-->0;\nj = i-- > 0;\n",
+    b"a ??= b; c ||= d; e &&= f; g = h?.i?.[j]?.(k);\n",
+    b"x = 1_000n + 0xffn + 0o7n + 0b1n;\n",
+    b"async function* f() { for await (const x of y) yield* z; }\n",
+    b"class C { #p = 1; static { this.q = 2; } m() { return #p in this; } get #g() { return 1; } }\n",
+    b"const { [a]: b, ...c } = d; [e, , ...f] = g;\n",
+    b"x = a => b => ({ c: d }); async (e, f) => e;\n",
+    b"export { a as 'a b' }; export * as ns from 'm'; import x, * as y from 'z';\n",
+    b"import.meta.url; await import(x); export default function () {}\n",
+    b"tag`a${b}c`; s = `x${`y${z}`}`;\n",
+    b"r = /[a-z]/gimsuy; t = a / b / c; u = /=/;\n",
+    b"for (a in b); for (const c of d); for (let e = (f in g);;) break;\n",
+    b"<a b={c}><d/>{e}text</a>; x = <>{y}</>;\n",
+    b"let x: T<U> = y as Z; enum E { A, B } interface I { m(): void; }\n",
+]
+JS_WORDS = (b"<!--", b"-->", b"\n", b"function", b"=>", b"async", b"await", b"yield", b"class", b"const", b"let",
+            b"import", b"export", b"return", b"`", b"${", b"}", b"/*", b"*/", b"//", b"#!", b"?.", b"??", b"...",
+            b"of", b"in", b"with", b"static", b"{", b"(", b")", b";", b"'", b'"', b"0x", b"1n", b"<", b">")
+# the repository's root (this file is scripts/fuzz/fuzz_targets.py)
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+
+def js_sources():
+    """The repository's own small JavaScript (js/src and js/test), as seeds beside the snippets."""
+    out = []
+    for sub in (os.path.join("js", "src"), os.path.join("js", "test")):
+        for root, _dirs, files in os.walk(os.path.join(REPO_ROOT, sub)):
+            for name in sorted(files):
+                if name.endswith((".js", ".cjs", ".mjs")):
+                    try:
+                        with open(os.path.join(root, name), "rb") as fh:
+                            data = fh.read()
+                    except OSError:
+                        continue
+                    if 0 < len(data) <= 16384:
+                        out.append(data)
+    return out
+
+
+def js_parse_seeds():
+    return JS_SNIPPETS + js_sources()[:40]
+
+
+def js_parse_start():
+    from lazaret.scanner import _native
+
+    def one(src, mode):
+        status, answer = _native.call_raw("js_parse", mode, src)
+        check(status == 0, "js-parse-status", f"status {status}")
+        check(answer.startswith('{"type":"Program"') or answer.startswith('{"error"'),
+              "js-parse-shape", answer[:80])
+        if answer.startswith('{"error"'):
+            err = json.loads(answer)["error"]
+            check(isinstance(err.get("line"), int) and err["line"] >= 0 and isinstance(err.get("reason"), str),
+                  "js-parse-error-shape", answer[:80])
+        return answer
+
+    def run(data):
+        src = data.decode("utf-8", "replace")
+        for mode in ({"ts": False, "jsx": True}, {"ts": True, "jsx": False}):
+            answer = one(src, mode)
+            check(answer == one(src, mode), "js-parse-deterministic", str(mode))
+
+    return run, lambda: None
+
+
+register("js-parse", "jsparse.parse (js_parse): a tree or a well-formed error on any bytes, deterministic, linear (X-1)",
+         js_parse_seeds, js_parse_start, JS_WORDS, max_len=16384)

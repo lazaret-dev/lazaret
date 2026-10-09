@@ -44,7 +44,7 @@ EXPECTED_TARGETS = ["archive-tgz", "archive-tbz2", "archive-txz", "archive-zip",
                     "sca-uv-lock", "sca-pylock-toml", "sca-pipfile-lock", "sca-requirements-txt", "sca-pyproject-toml",
                     "sca-setup-py", "sca-go-mod", "sca-go-sum", "sca-vendor-modules-txt", "sca-cargo-lock", "sca-cargo-toml", "sca-bundle-index", "sca-bundle-doc", "crates-index", "crates-manifest", "go-zip", "go-mod", "go-sumdb",
                     "go-sumdb-check", "provenance-npm", "go-resolve", "ecosystem-names", "ecosystem-member-path", "action-code",
-                    "verify-answers", "verify-credentials", "credential-path"]
+                    "verify-answers", "verify-credentials", "credential-path", "js-parse"]
 
 
 def fake(run, seeds=(b"abc",), name="fake", **options):
@@ -467,6 +467,15 @@ class TargetTests(unittest.TestCase):
                 self.assertLessEqual(max(len(s) for s in seeds), target.max_len)
                 self.assertGreater(target.time_limit, 0)
                 self.assertTrue(target.summary and target.dictionary)
+
+    def test_the_parser_targets_are_seeded_with_the_repositorys_own_sources(self):
+        # (a root one folder short once left them the snippets alone, with no word of it)
+        self.assertEqual(os.path.realpath(fuzz_targets.REPO_ROOT), os.path.realpath(_support.REPO_ROOT))
+        for name, own in (("js-parse", fuzz_targets.js_sources),):
+            with self.subTest(name):
+                sources = own()
+                self.assertGreater(len(sources), 10)
+                self.assertLessEqual(set(sources[:40]), set(fuzz_targets.TARGETS[name].seeds()))
 
     def test_every_seed_runs_clean(self):
         for name, target in fuzz_targets.TARGETS.items():

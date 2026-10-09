@@ -838,6 +838,19 @@ project is pre-1.0, so the 0.x API may still change.
 
 ### Fixed
 
+- **Security: the JavaScript parser reads Annex B's HTML-like comments as V8 does, and TypeScript's `<!--` as tsc does
+  (F-12, X-1).** The supply-chain tests read a package's JavaScript on the engine's tree where the parser reads it, and
+  on its text where it does not. `<!--` (a line comment anywhere a token may begin) and `-->` (one where a line begins),
+  which V8 reads in a script (Node's CommonJS: a `.cjs`, and a `.js` whose package.json does not say
+  `"type": "module"`), were syntax errors, so a file that opened with `<!-- a banner` lost what only the tree answers:
+  another package's code rewritten (D-9), a program a dropper carves out of another file, the loads D-13 compares with
+  package.json, and in project mode the cross-file pass. JavaScript now reads both as V8 does (V8 refuses a module that
+  holds either, and Bun refuses `<!--`, so nothing a runtime runs is taken for a comment). TypeScript keeps `<!--` as
+  `<` `!` `--`, as tsc compiles it (`z = 5 <!--y, f()` calls `f`), and the supply-chain facts, which read a TypeScript
+  file's text as JavaScript first, read it as tsc does wherever the JavaScript reading took a `<!--` after code for a
+  comment. `-->` where a line begins is never code, and is a comment in either. Found by a hand-written probe checked
+  against V8 while X-1's `js-parse` fuzz target (the parser's robustness on any bytes) was written; V8 holds the parser
+  to a curated list in `test_jsparse_v8.py`. A parser fix, no rule change.
 - **Security: `lazaret hook` reads every file being committed (H-2's review of H-1).** A file committed in a
   dependency's folder (`node_modules`, a virtualenv, a `vendor` folder with its marker) went unchecked: the hook
   scanned the commit as `lazaret <dir>` does, which leaves those folders out without `--deps`. It scans as `--deps`
