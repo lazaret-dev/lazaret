@@ -14,6 +14,8 @@ Python's transport is used instead:
 * where the native library is missing or older than the network layer (no `lazaret_net_request`);
 * when `LAZARET_NETWORK=python` asks for it;
 * for a proxy reached over TLS (`https://` in the proxy's URL), which pratique does not speak;
+* for a byte budget past what the native transport carries (`MAX_BODY`, 2 GiB), which only a setting asks for now
+  (`LAZARET_MAX_DOWNLOAD_BYTES`, `--max-download-bytes`);
 * where no trust anchors can be found for it (below).
 
 TLS 1.2 is the floor, on both transports (`TLS_FLOOR`; John, Oct 7: "Realistically we should avoid any tls < 1.2 as
@@ -71,6 +73,9 @@ DOCUMENT_BUDGET = 32 * 1024 * 1024
 #: the largest budget of a request that asks for its body compressed: every document's, the guard's too (64 MiB, for
 #: npm's full packuments); a download's budget is 200 MiB and more, and its bytes are taken as published
 GZIP_BUDGET = 64 * 1024 * 1024
+#: the largest byte budget the native transport carries (lazaret-net's MAX_BODY, which refuses a request asking for
+#: more before it connects); a request with a larger one goes to urllib (`_spec`)
+MAX_BODY = 2 * 1024 * 1024 * 1024
 STATUS_OK, STATUS_ERROR = 0, 1
 
 
@@ -401,6 +406,8 @@ def _spec(url, hosts, method, headers, max_bytes, timeout, max_redirects, total_
           credentials=(), compressed=None):
     if hosts is not None and not hosts:
         raise NetError("setup", "a request needs the hosts its caller may reach")
+    if max_bytes > MAX_BODY:
+        raise UsePython("a budget past what the native transport carries")
     credentials = [Credential(*c) for c in credentials or ()]
     if not all(_sendable(c) for c in credentials):
         raise UsePython("a credential the native client cannot send")

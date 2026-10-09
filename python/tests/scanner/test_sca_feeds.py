@@ -22,9 +22,10 @@ import urllib.error
 import urllib.request
 import zipfile
 from contextlib import redirect_stderr, redirect_stdout
+from unittest import mock
 
 from tests import _support
-from lazaret.scanner import sca, sca_feeds
+from lazaret.scanner import nativenet, sca, sca_feeds
 
 # ---------------------------------------------------------------------------
 # Fixture feeds
@@ -933,6 +934,11 @@ class FetchTests(Feeds):
                 with self.assertRaises(sca_feeds.FeedError):
                     sca_feeds.fetch(location, io.BytesIO(), 1 << 20)
 
+    def test_every_feeds_budget_is_one_the_native_transport_carries(self):
+        # (F-13: an OSV export's was 4 GiB, which the native transport refused for every export)
+        for budget in (sca_feeds.MAX_OSV_ZIP_BYTES, sca_feeds.MAX_KEV_BYTES, sca_feeds.MAX_EPSS_BYTES):
+            self.assertLessEqual(budget, nativenet.MAX_BODY)
+
     def test_budget(self):
         with self.assertRaises(sca_feeds.FeedError) as cm:
             sca_feeds.fetch(self.path("kev.json"), io.BytesIO(), 16)
@@ -1170,6 +1176,48 @@ class CliTests(Feeds):
         rc, _, err = self.main(self.project(), "--bundle", empty, "--no-json")
         self.assertEqual(rc, 4)
         self.assertIn("--update-bundle", err)
+
+
+@unittest.skipUnless(shutil.which("openssl"), "no openssl command to make the test's certificates with")
+class NativeFetchTests(unittest.TestCase):
+    """fetch over the native transport, with each feed's own budget, against a local HTTPS server (as
+    tests.scanner.test_nativenet's): F-13, an OSV export's budget past what the native transport carries, failed
+    every update where it is used, and the tests above read local files only."""
+
+    @classmethod
+    def setUpClass(cls):
+        from tests.scanner.test_nativenet import NO_PROXY_ENV, make_pki, serve
+        if os.environ.get(nativenet.ENV, "").strip().lower() == "python":
+            raise unittest.SkipTest("LAZARET_NETWORK=python")
+        if not nativenet.available():
+            raise unittest.SkipTest(f"no native transport here ({nativenet.why_not()})")
+        cls.tmp = tempfile.TemporaryDirectory()
+        root, cert, key = make_pki(cls.tmp.name)
+        nativenet.configure_roots(root)
+        cls.server, port = serve(cert, key)
+        cls.base = f"https://localhost:{port}"
+        cls.env = mock.patch.dict(os.environ, NO_PROXY_ENV, clear=True)
+        cls.env.start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.env.stop()
+        cls.server.stop()
+        nativenet.configure_roots(None)
+        cls.tmp.cleanup()
+
+    def test_each_feed_comes_over_the_native_transport_within_its_own_budget(self):
+        with mock.patch.object(sca_feeds._OPENER, "open", side_effect=AssertionError("urllib was used")):
+            for budget in (sca_feeds.MAX_OSV_ZIP_BYTES, sca_feeds.MAX_KEV_BYTES, sca_feeds.MAX_EPSS_BYTES):
+                with self.subTest(budget=budget):
+                    buf = io.BytesIO()
+                    self.assertEqual(sca_feeds.fetch(self.base + "/size/5000", buf, budget), 5000)
+                    self.assertEqual(buf.getvalue(), b"x" * 5000)
+
+    def test_a_feed_over_its_budget_is_refused(self):
+        with self.assertRaises(sca_feeds.FeedError) as cm:
+            sca_feeds.fetch(self.base + "/size/5000", io.BytesIO(), 4000)
+        self.assertIn("budget", str(cm.exception))
 
 
 @_support.requires_env("LAZARET_TEST_FEEDS")

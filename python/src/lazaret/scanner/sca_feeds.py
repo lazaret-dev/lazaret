@@ -110,7 +110,10 @@ USER_AGENT = "lazaret-sca/%s" % _lazaret_pkg.__version__
 # a small gzip can expand a thousandfold, so the EPSS reader charges every
 # decompressed byte and caps the length of a line, and an OSV export's zip
 # central directory is checked before zipfile parses it.
-MAX_OSV_ZIP_BYTES = 4 << 30
+# An OSV export's budget is the most the native transport carries (nativenet.MAX_BODY, 2 GiB). It was 4 GiB, which
+# the native transport refused for every export, so --update-bundle failed wherever it is used (F-13). On Oct 9 the
+# largest, npm's, was 208 MiB.
+MAX_OSV_ZIP_BYTES = nativenet.MAX_BODY
 MAX_OSV_RECORDS = 5_000_000
 MAX_OSV_RECORD_BYTES = 8 << 20
 MAX_OSV_CENTRAL_DIR = 1 << 30       # declared bytes of an export's zip central directory

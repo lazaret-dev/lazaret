@@ -60,7 +60,8 @@ use pratique::Client;
 
 /// The redirects a request follows at most (a caller asks for fewer).
 pub const MAX_REDIRECTS: usize = 10;
-/// The most a caller may ask for in one body (the Python side's largest budget is 500 MB).
+/// The most a caller may ask for in one body. The Python side knows it as `nativenet.MAX_BODY` (a test holds the two
+/// together), and sends a request with a larger budget through urllib.
 pub const MAX_BODY: u64 = 2 * 1024 * 1024 * 1024;
 /// The default User-Agent, when the caller gives none.
 pub const USER_AGENT: &str = concat!("lazaret/", env!("CARGO_PKG_VERSION"));

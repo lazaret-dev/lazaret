@@ -226,6 +226,16 @@ class NativeTransportTests(unittest.TestCase):
         self.assertEqual((reply.status, reply.body, reply.header("x-test")), (200, b"hello", "1"))
         self.assertEqual((reply.version, reply.url, reply.tls), ("HTTP/1.1", self.url("/ok"), "TLS 1.3"))
 
+    def test_a_budget_past_what_the_native_transport_carries_goes_to_urllib(self):
+        # (lazaret-net refuses a budget past its MAX_BODY before it connects: F-13, an OSV export's 4 GiB)
+        reply = nativenet.request(self.url("/ok"), hosts=[self.host], max_bytes=nativenet.MAX_BODY, timeout=10)
+        self.assertEqual((reply.status, reply.body), (200, b"hello"))
+        with nativenet.open_stream(self.url("/ok"), hosts=[self.host], max_bytes=nativenet.MAX_BODY, timeout=10) as s:
+            self.assertEqual(s.read(), b"hello")
+        for call in (nativenet.request, nativenet.open_stream):
+            with self.subTest(call.__name__), self.assertRaises(nativenet.UsePython):
+                call(self.url("/ok"), hosts=[self.host], max_bytes=nativenet.MAX_BODY + 1, timeout=10)
+
     def test_its_fields_are_sent(self):
         reply = nativenet.request(self.url("/headers"), hosts=[self.host], max_bytes=10_000, timeout=10,
                                   headers=[("User-Agent", repo.USER_AGENT), ("Accept", "application/json")])
@@ -499,6 +509,18 @@ class NativeTransportTests(unittest.TestCase):
 
 class ChoiceTests(unittest.TestCase):
     """What decides the transport, without a network."""
+
+    def test_the_most_the_native_transport_carries_is_lazaret_nets(self):
+        """nativenet.MAX_BODY is lazaret-net's MAX_BODY, which refuses a request that asks for more (F-13)."""
+        source = pathlib.Path(__file__).resolve().parents[3] / "rust" / "crates" / "lazaret-net" / "src" / "lib.rs"
+        if not source.exists():
+            self.skipTest("rust/ is not in this tree")
+        line = next(t for t in source.read_text(encoding="utf-8").splitlines()
+                    if t.startswith("pub const MAX_BODY: u64 = "))
+        product = 1
+        for factor in line.split("=", 1)[1].strip().rstrip(";").split("*"):
+            product *= int(factor)
+        self.assertEqual(product, nativenet.MAX_BODY)
 
     def test_the_environment_asks_for_python(self):
         with mock.patch.dict(os.environ, {nativenet.ENV: "python"}):

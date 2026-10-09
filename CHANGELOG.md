@@ -852,6 +852,12 @@ project is pre-1.0, so the 0.x API may still change.
 
 ### Fixed
 
+- **`lazaret-sca --update-bundle` failed wherever the native transport is used (F-13, NET-1).** The SCA's feeds go
+  over the native transport, each with its own byte budget, and an OSV export's was 4 GiB, past the 2 GiB the native
+  transport carries, which refused every export before it connected (`a budget of more than 2147483648 bytes`), so no
+  bundle could be made unless `LAZARET_NETWORK=python`. Found by the live checks. An OSV export's budget is now the
+  most the native transport carries (2 GiB, `nativenet.MAX_BODY`), and a request whose budget is past it goes to
+  urllib instead of failing (only `LAZARET_MAX_DOWNLOAD_BYTES` or `--max-download-bytes` past 2 GiB asks for one).
 - **Security: the JavaScript parser reads Annex B's HTML-like comments as V8 does, and TypeScript's `<!--` as tsc does
   (F-12, X-1).** The supply-chain tests read a package's JavaScript on the engine's tree where the parser reads it, and
   on its text where it does not. `<!--` (a line comment anywhere a token may begin) and `-->` (one where a line begins),

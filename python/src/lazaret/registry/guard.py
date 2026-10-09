@@ -323,8 +323,8 @@ class TooLarge(repo.FetchError):
     a message: a message is text a server can choose)."""
 
 
-#: the most a stream of the native transport carries when its reader gives no budget of its own (lazaret-net's MAX_BODY)
-NATIVE_STREAM_MAX = 2 * 1024 * 1024 * 1024
+#: the most a stream of the native transport carries when its reader gives no budget of its own
+NATIVE_STREAM_MAX = nativenet.MAX_BODY
 
 
 class _NativeResponse:
