@@ -850,7 +850,10 @@ runs included; the archive not read whole), each something a package controls, a
 size limit inside its file does (the Go/Rust review's GO-1), and an npm tarball that npm's tar reader and the
 registry's read differently (BR-4: `registry/npmtar.py` follows node-tar's reading beside tarfile's; an entry npm writes
 that tarfile read at another place, under another name or not at all, or a header node-tar finds invalid, makes the
-archive corrupt). `Context.apply`
+archive corrupt), and an sdist whose members pip places otherwise than the registry reads them (BR-4, F-11: pip takes
+the top folder off only when every member has the same one, `repo._pip_sdist_disagreement`). A wheel's or an sdist's
+member whose path goes through `..` and stays in the folder is read where pip writes it (`x/../setup.py` is setup.py),
+with an SC-ARCHIVE-PATH of its own; node-tar, cargo, Go and VS Code refuse one. `Context.apply`
 blocks those unless `--allow-incomplete`; a program too large to read (a
 native library a package names) is none of them, and goes through as
 before. A time-out is scanned once more (`Scanner.scan`), since a machine

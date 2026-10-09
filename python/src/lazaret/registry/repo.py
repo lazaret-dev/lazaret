@@ -99,6 +99,10 @@ MAX_MEMBER = _env_number("LAZARET_MAX_SOURCE_BYTES", 16_000_000)
 MAX_FILES = 20_000         # files per package (numpy's sdist alone has >4,000)
 SAMPLE = 8192              # header/entropy sample read from oversized files
 # Stored scans from another engine version are scanned again (has_scan).
+# 2.64: an sdist's or a wheel's member whose path goes through `..` is read
+#      where pip writes it (`x/../setup.py` is setup.py), and an sdist whose
+#      members pip places otherwise than the scan reads them (no one top
+#      folder, or `.` as the top folder) is corrupt (BR-4, F-11)
 # 2.63: an npm tarball that npm's tar reader (node-tar) reads differently from
 #      tarfile is corrupt (BR-4, F-10)
 # 2.62: an archive member's name is case-folded on the engine's Unicode
@@ -335,7 +339,7 @@ SAMPLE = 8192              # header/entropy sample read from oversized files
 #      entry points and hook targets, Python install scripts
 # 2.3: verdict tiers, decoded hex, install-script inspection; 2.2:
 #      verdict-integrity; 2.1: binary-artifact awareness
-ENGINE_VERSION = "2.63.0"
+ENGINE_VERSION = "2.64.0"
 
 # ---------------- The content memo (P-2a, registry/contentcache.py) ----------------
 # One per scan_package run: the engine answers once for content several of a
@@ -1295,7 +1299,12 @@ def canonical_member_path(name, artifact=None):
     sdist, action (a GitHub Action's repository as GitHub's archive of a
     commit holds it, under one top directory, 0.1.9, N-4) and the legacy
     default: '.' / empty segments dropped, then the top directory.
-    Backslashes count as separators (npm on Windows)."""
+    Backslashes count as separators (npm on Windows). A `..` in a wheel's or
+    an sdist's member is resolved, as pip resolves it (`x/../setup.py` is
+    setup.py; one that leaves the folder is a problem: pip refuses the
+    archive); anywhere else it is a problem (node-tar, yauzl, cargo and tar
+    refuse the member). Whether pip drops an sdist's top directory at all is
+    `_pip_sdist_disagreement`'s question."""
     p = str(name).replace("\\", "/")
     if artifact == "npm":
         rest = "/".join(p.split("/")[1:])
@@ -1314,7 +1323,13 @@ def canonical_member_path(name, artifact=None):
             break
         rest = stripped
     if ".." in rest.split("/"):
-        return None, "path contains '..'"
+        if artifact not in _PIP_ZIPS:
+            return None, "path contains '..'"
+        # pip resolves it (BR-4, F-11): an sdist's member is written through the path (`x/../setup.py` is
+        # setup.py), a wheel's at the path's normpath; one that leaves the folder makes pip refuse the archive
+        norm = posixpath.normpath(rest)
+        if norm == ".." or norm.startswith("../"):
+            return None, "path contains '..'"
     norm = posixpath.normpath(rest) if rest else ""
     if norm in ("", "."):
         return None, None
@@ -1325,6 +1340,72 @@ def strip_root(path):
     """Legacy helper: canonical_member_path() without artifact semantics."""
     rel, _problem = canonical_member_path(path)
     return rel if rel is not None else str(path).replace("\\", "/")
+
+
+# ---------------- Where pip writes an sdist's members (BR-4, F-11) ----------------
+# pip unpacks an sdist with tarfile (zipfile for a .zip) and takes the archive's top folder off only when every
+# member, folders too, has the same one (pip/_internal/utils/unpacking.py's has_leading_dir and split_leading_dir,
+# written out here as pip reads them); otherwise it writes each member under its whole name. The scan takes the first
+# folder off every name. Where the two place a member differently, the scan's reading of what runs when pip builds
+# (setup.py, what it imports) is not pip's.
+
+def _pip_split_leading_dir(path):
+    """pip's split_leading_dir: (the first folder, the rest), at the first `/` or `\\`, after leading slashes."""
+    path = path.lstrip("/").lstrip("\\")
+    if "/" in path and (("\\" in path and path.find("/") < path.find("\\")) or "\\" not in path):
+        return path.split("/", 1)
+    if "\\" in path:
+        return path.split("\\", 1)
+    return [path, ""]
+
+
+def _pip_has_leading_dir(paths):
+    """pip's has_leading_dir: does every name have the same first folder?"""
+    common = None
+    for path in paths:
+        prefix = _pip_split_leading_dir(path)[0]
+        if not prefix or (common is not None and prefix != common):
+            return False
+        common = prefix
+    return True
+
+
+def _pip_sdist_path(name, leading):
+    """Where pip writes an sdist's member, relative to the folder it builds in, as the scan writes paths (`/`, no `.`,
+    `..` resolved): "" for that folder itself, None for a member that leaves it (pip refuses the archive)."""
+    p = _pip_split_leading_dir(name)[1] if leading else name
+    p = p.replace("\\", "/").lstrip("/")       # (pip from 24.1 takes a leading slash off; pip 24.0 refuses the archive)
+    norm = posixpath.normpath(p) if p else "."
+    if norm == ".":
+        return ""
+    if norm == ".." or norm.startswith("../"):
+        return None
+    return norm
+
+
+def _pip_sdist_disagreement(names, placed):
+    """The first member pip writes elsewhere than the scan reads it -> what to say, or None. `names`: every member's
+    name as tarfile (or zipfile) reads it, folders too; `placed`: (name, the scan's path, None when it reads none) for
+    every member that is not a folder."""
+    if not names:
+        return None
+    leading = _pip_has_leading_dir(names)
+    for name, rel in placed:
+        pip = _pip_sdist_path(name, leading)
+        if not pip or pip == rel:
+            # (where pip refuses the archive nothing is built, and a member that is the top folder itself pip writes
+            # nowhere: what the scan read of it is more than pip writes, never less)
+            continue
+        why = ("its members do not all sit in one top folder, so pip writes every member under its whole name"
+               if not leading else
+               f"pip takes only {_pip_split_leading_dir(name)[0][:100]!r} off the front of each name")
+        return (f"pip writes {name[:200]!r} as {pip[:200]!r}, where this scan read it as {(rel or 'nothing')[:200]!r} "
+                f"({why}): the scan cannot vouch for what pip builds")
+    return None
+
+
+def _through_dotdot(name):
+    return ".." in str(name).replace("\\", "/").split("/")
 
 
 def _tar_codec(data, container, artifact):
@@ -1628,13 +1709,20 @@ def _iter_tar(data, container, artifact, budget, anomalies):
         return
     seen, links, offsets, count = {}, [], [], 0
     read = {}                                          # the regular files tarfile read, by where their data is
+    pip_names, placed = [], []                         # (an sdist: where pip writes each member, BR-4)
     try:
         for m in tf:
             budget.check()
             offsets.append(m.offset)
+            if artifact == "sdist":
+                pip_names.append(m.name)
             if m.isdir():
                 continue
             rel, problem = canonical_member_path(m.name, artifact)
+            if artifact == "sdist":
+                placed.append((m.name, None if problem else rel))
+            if rel is not None and not problem and artifact in _PIP_ZIPS and _through_dotdot(m.name):
+                anomalies.append(("dotdot", m.name, f"pip installs it as {rel[:200]!r}"))
             if tee is not None and m.isfile():
                 read[m.offset_data] = (None if problem else rel, m.size)
             if m.issym() or m.islnk():
@@ -1684,6 +1772,10 @@ def _iter_tar(data, container, artifact, budget, anomalies):
     leftover = reader.produced - tf.offset
     if 0 < leftover <= len(reader.tail) and reader.tail[-leftover:].strip(b"\x00"):
         yield Member("(archive)", 0, b"", "corrupt", "data after the last tar entry")
+    if artifact == "sdist":
+        disagreement = _pip_sdist_disagreement(pip_names, placed)
+        if disagreement:
+            yield Member("(archive)", 0, b"", "corrupt", disagreement)
     if tee is not None:
         # what npm writes from this archive (node-tar's reading) against what tarfile read (BR-4): an entry npm
         # writes that tarfile read at another place, under another name or not at all, a header node-tar finds
@@ -2027,10 +2119,20 @@ def _iter_zip(data, artifact, budget, anomalies):
 
     for name in _zip_overlaps(data, infos):
         anomalies.append(("overlap", name, "its bytes overlap another entry's"))
+    # (a zip sdist: where pip writes each member, by the names pip before Python 3.12 reads, the header's, and by
+    # those pip from 3.12 reads: BR-4)
+    pip_views = (([], []), ([], [])) if artifact == "sdist" else ()
     with zf:
         try:
             for info in infos:
                 budget.check()
+                if pip_views:
+                    header, _vscode, _from_field, pip312, _refused = zip_entry_names(info)
+                    for (view_names, view_placed), name in zip(pip_views, (header, pip312)):
+                        view_names.append(name)
+                        if not name.endswith("/"):
+                            rel, problem = canonical_member_path(name, artifact)
+                            view_placed.append((name, None if problem else rel))
                 names, refused = _zip_member_names(info, artifact, anomalies)
                 if refused:
                     # (pip on Python 3.12 and later installs nothing of it, and Lazaret there reads none of it)
@@ -2049,6 +2151,8 @@ def _iter_zip(data, artifact, budget, anomalies):
                         anomalies.append(("path", name, problem))
                     elif rel is not None and rel not in rels:
                         rels.append(rel)
+                        if artifact in _PIP_ZIPS and _through_dotdot(name):
+                            anomalies.append(("dotdot", name, f"pip installs it as {rel[:200]!r}"))
                 if not rels:
                     continue
                 for rel in rels:
@@ -2079,6 +2183,11 @@ def _iter_zip(data, artifact, budget, anomalies):
                         yield Member(rel, SAMPLE, raw[:SAMPLE], "member")
                     else:
                         yield Member(rel, len(raw), raw, None)
+            for view_names, view_placed in pip_views:
+                disagreement = _pip_sdist_disagreement(view_names, view_placed)
+                if disagreement:
+                    yield Member("(archive)", 0, b"", "corrupt", disagreement)
+                    break
         except ArchiveLimit as lim:
             yield Member(last, 0, b"", lim.reason, lim.detail)
 
@@ -2584,6 +2693,11 @@ def _archive_issue(kind, path, detail):
         "path": ("SC-ARCHIVE-PATH", "Unsafe archive path",
                  "An entry with '..' in its path tries to escape the extraction directory; "
                  "installers refuse it, and no legitimate package tool produces one."),
+        "dotdot": ("SC-ARCHIVE-PATH", "Archive path through '..'",
+                   "pip resolves the '..' of an sdist's or a wheel's entry and installs it under the path it comes "
+                   "to ('x/../setup.py' is setup.py), where a listing of the archive shows another name, so what a "
+                   "reviewer sees is not what gets built or installed, and no packaging tool writes one. The entry "
+                   "was scanned where pip writes it."),
         "noname": ("SC-ARCHIVE-PATH", "Unnamed archive entry",
                    "No extractor can place an entry with no name: installers fail on it or skip it, so "
                    "its bytes are neither installed nor reviewed, and no packaging tool produces one."),

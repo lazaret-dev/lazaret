@@ -442,10 +442,13 @@ class SameAsRepoTests(unittest.TestCase):
                 self.assertEqual(base.top_directory_stripped(name), repo.canonical_member_path(name))
 
     def test_the_tail_of_the_npm_and_wheel_rules_is_repos(self):
-        names = ["a", "/a", "C:/a", "//a", "a/../b", "..", ".", "", "a/./b", "a/b/", "///C:/a", "C:/C:/a"]
+        names = ["a", "/a", "C:/a", "//a", "..", ".", "", "a/./b", "a/b/", "///C:/a", "C:/C:/a", "a/../../b"]
         for name in names:
             with self.subTest(name=name):
                 self.assertEqual(base.finish_member_path(name), repo.canonical_member_path(name, "wheel"))
+        # (but pip resolves a `..` that stays in the folder, where cargo, go and yauzl refuse it: BR-4, F-11)
+        self.assertEqual(base.finish_member_path("a/../b"), (None, "path contains '..'"))
+        self.assertEqual(repo.canonical_member_path("a/../b", "wheel"), ("b", None))
 
 
 class RootStrippedTests(unittest.TestCase):

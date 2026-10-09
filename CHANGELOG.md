@@ -824,6 +824,17 @@ project is pre-1.0, so the 0.x API may still change.
 
 ### Fixed
 
+- **Security: a wheel's or an sdist's file that pip installs through `..` is read where pip writes it, and an sdist pip
+  unpacks otherwise than the registry is INCOMPLETE (BR-4, F-11; rule set 2.64.0).** pip resolves a member's `..`:
+  tarfile writes an sdist's `pkg-1.0/x/../setup.py` through the path, as setup.py, over the setup.py before it, and
+  pip's wheel installer writes `x/../evil.pth` as a .pth file at the top of site-packages. The registry refused such
+  a member as an unsafe path (MAJOR) and never read it, so a release whose setup.py or .pth file came in that way was
+  WARN, which the guard installs. Now the file is read where pip writes it and gets its own tests (that setup.py and
+  that .pth file are SUSPICIOUS), with an SC-ARCHIVE-PATH of its own; a `..` that leaves the folder is refused as
+  before (so does pip). pip also takes an sdist's top folder off only when every member has the same one, and
+  otherwise writes each member under its whole name, where the registry took the first folder off every name: such
+  an sdist, and one whose top folder is `.`, is corrupt, which the guard refuses. The archives build tools write
+  read the same both ways. The fuzz target is `archive-pip-diff`, against pip's own unpacking on each Python here.
 - **Security: an npm tarball that npm's tar reader reads differently from the registry's is INCOMPLETE (BR-4, F-10;
   rule set 2.63.0).** npm unpacks a package with node-tar; the registry read the tarball with Python's tarfile alone,
   and the two parse headers differently: a differential fuzzer that runs npm's own node-tar found tarballs from which npm
