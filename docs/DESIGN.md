@@ -160,7 +160,9 @@ line yourself.
   and Node version (`_unicode13.pin`; a later code point is scanned and shown as
   U+FFFD). Results must not depend on the host's Unicode tables. Regenerate
   tables with `scripts/make_unicode_tables.py`; never call `unicodedata`
-  directly in scan logic.
+  directly in scan logic. An archive member's name is compared as file systems
+  that ignore case compare it by the engine's fold (`engine.case_fold`: NFD or
+  NFC, then `str.casefold()`, on the same 13.0 data; BR-2), not the host's.
 - **Bounded, linear work.** No catastrophic backtracking, ever. Every pattern
   of the engine runs on linre, in time linear in the text whatever it holds,
   and one linre would not run fails the tests (`docs/RUST_ENGINE.md` §14);

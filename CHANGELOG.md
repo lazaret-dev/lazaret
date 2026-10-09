@@ -812,6 +812,13 @@ project is pre-1.0, so the 0.x API may still change.
 
 ### Fixed
 
+- **An archive member's name is case-folded on the engine's Unicode, the same on every Python (BR-2; rule set
+  2.62.0).** EG-4 compares members' names as macOS's and Windows' file systems do (NFD, then case-folded), and did it
+  with the host Python's `unicodedata`: Unicode 13.0 on Python 3.10, 14.0 or later on 3.11 and after, so the same
+  release could have a pair of names that differ only by case on one and none on the other (`xⰯ.js` and `xⱟ.js`,
+  Glagolitic's caudate chri, a pair from Unicode 14.0). The fold is the engine's now, on the Unicode 13.0 data its
+  NFKC reads (`str.casefold()` as 3.10 gives it): the registry's case pairs, the files an installer opens by name, and
+  the checkout writer's pairs.
 - **The report says which lines the duplication measure leaves out (N-13).** A project's Go and Rust files count in
   its files and lines of code, and not in its duplication (six-line windows rate idiomatic Go and Rust as duplicated:
   Go's standard library 2 to 13%, popular crates 4 to 54%), and the report did not say so. Its metrics now carry

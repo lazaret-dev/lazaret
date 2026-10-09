@@ -726,13 +726,17 @@ fn dispatch(name: &str, args: &Value, text: &[u32]) -> Result<Value, CallError> 
         }
         "normalize" => {
             let form = opt_str(args, "form").map(|f| crate::pystr::to_string(&f)).unwrap_or_default();
-            Value::Str(match form.as_str() {
+            let out = match form.as_str() {
                 "NFC" => crate::normalize::nfc(text),
                 "NFD" => crate::normalize::nfd(text),
                 "NFKC" => crate::normalize::nfkc(text),
                 "NFKD" => crate::normalize::nfkd(text),
                 _ => return Err(CallError::BadArgs(format!("unknown normalization form {:?}", form))),
-            })
+            };
+            // "fold": true, then case-folded (str.casefold): a name as file systems that ignore case and
+            // normalization compare it, on this engine's Unicode 13.0 whatever the caller's (BR-2)
+            let fold = matches!(args.get("fold"), Some(Value::Bool(true)));
+            Value::Str(if fold { crate::unicode::casefold(&out) } else { out })
         }
         "lex.tokens" => {
             // the tokens of one reading (lex/): [kind, start, end] each, in

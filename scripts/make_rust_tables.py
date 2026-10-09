@@ -168,6 +168,8 @@ def unicode_data():
         up = chr(c).upper()
         if len(up) != 1 or ord(up) != upper.get(c, c):
             full_upper[c] = [ord(x) for x in up]
+    # str.casefold() where it is not str.lower() of the character alone (Σ's alone is σ, its fold too)
+    full_fold = {c: [ord(x) for x in chr(c).casefold()] for c in range(MAX_CP) if chr(c).casefold() != chr(c).lower()}
     import unicodedata
     decimal_runs = []                              # (first, last, value of first): int() of a digit
     for ch in range(MAX_CP):
@@ -179,7 +181,7 @@ def unicode_data():
             else:
                 decimal_runs.append([ch, ch, v])
     return {"flags": flags, "lower": lower, "upper": upper, "full_lower": full_lower,
-            "full_upper": full_upper, "fixes": case_fixes(), "decimal_runs": decimal_runs,
+            "full_upper": full_upper, "full_fold": full_fold, "fixes": case_fixes(), "decimal_runs": decimal_runs,
             **normalization_data()}
 
 
@@ -257,6 +259,8 @@ def render_unicode(data):
     lists("FULL_LOWER", "str.lower() where it is not LOWER's one character (Σ excepted: its context decides).",
           data["full_lower"])
     lists("FULL_UPPER", "str.upper() where it is not UPPER's one character.", data["full_upper"])
+    lists("FULL_FOLD", "str.casefold() where it is not the character's str.lower() (FULL_LOWER's, or LOWER's one "
+          "character).", data["full_fold"])
     lists("CASE_FIXES", "re's extra case equivalences: lowercase letters that share an uppercase -> the others.",
           data["fixes"])
     out.append("/// (first, last, value of first) of each run of decimal digits: int() reads them.\n")
@@ -344,11 +348,23 @@ def check_unicode_here(path):
             bad.append(f"U+{c:04X} uppercase differs")
         if len(bad) > 20:
             break
-    body = text.split("pub const CASE_FIXES:")[1].split("];\n")[0]
-    table = {int(a, 16): tuple(int(x, 16) for x in re.findall(r"0x([0-9A-F]+)", b))
-             for a, b in re.findall(r"\(0x([0-9A-F]+), &\[([^\]]*)\]\)", body)}
-    if table != want["fixes"]:
+    def table_lists(name):
+        body = text.split(f"pub const {name}:")[1].split("];\n")[0]
+        return {int(a, 16): tuple(int(x, 16) for x in re.findall(r"0x([0-9A-F]+)", b))
+                for a, b in re.findall(r"\(0x([0-9A-F]+), &\[([^\]]*)\]\)", body)}
+
+    if table_lists("CASE_FIXES") != want["fixes"]:
         bad.append("re's extra case equivalences differ")
+    # str.casefold() (BR-2): Unicode's case folding stability policy, checked
+    fold, full_lower = table_lists("FULL_FOLD"), table_lists("FULL_LOWER")
+    for c in range(MAX_CP):
+        if not _unicode13.assigned(c):
+            if c in fold:
+                bad.append(f"U+{c:04X} is unassigned in Unicode 13.0 but has a case fold in the table")
+        elif tuple(map(ord, chr(c).casefold())) != fold.get(c, full_lower.get(c, (lower.get(c, c),))):
+            bad.append(f"U+{c:04X} case fold differs")
+        if len(bad) > 20:
+            break
     return bad + check_normalization_here(text, want)
 
 

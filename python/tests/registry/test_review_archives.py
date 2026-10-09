@@ -189,6 +189,20 @@ class PathTests(unittest.TestCase):
                               if i["name"] == "Archive paths that differ only by case"]), 1)
         self.assertEqual(repo.case_fold("Lib/CAF\u00c9.JS"), repo.case_fold("lib/cafe\u0301.js"))
 
+    def test_the_fold_is_the_same_on_every_python(self):
+        # BR-2: the fold is the engine's, on its Unicode 13.0 (Python 3.10's), not the host Python's: Glagolitic's
+        # caudate chri (U+2C2F and U+2C5F, from Unicode 14.0) folded together on 3.11 and later and not on 3.10, so
+        # the same release had a case pair on one and none on the other. Neither has one now; the full folds are
+        # the same as before (ß and ẞ to ss, ς and Σ to σ, ﬃ to ffi)
+        raw = (tar_member("package/package.json", manifest()) + tar_member("package/x\u2c2f.js", "1;\n")
+               + tar_member("package/x\u2c5f.js", "2;\n") + b"\0" * 1024)
+        res = scan_bytes(gzip.compress(raw))
+        self.assertEqual([i["file"] for i in issues(res, "SC-ARCHIVE-DUP")], [])
+        self.assertNotEqual(repo.case_fold("x\u2c2f.js"), repo.case_fold("x\u2c5f.js"))
+        self.assertEqual(repo.case_fold("Stra\u00dfe.JS"), "strasse.js")
+        self.assertEqual(repo.case_fold("\u1e9e/\u03c2/\ufb03"), repo.case_fold("SS/\u03a3/FFI"))
+        self.assertEqual(repo.case_fold("\udc80A.js"), "\udc80a.js")         # (a name read with surrogateescape)
+
     def test_a_case_twin_of_the_manifest_is_read_as_the_manifest(self):
         # EG-4's leftover: on macOS and Windows, Package.json written after package.json is the package.json npm
         # reads there: its install hook runs, and what its main names is an entry

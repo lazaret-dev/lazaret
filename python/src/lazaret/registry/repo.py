@@ -57,7 +57,6 @@ import struct
 import sys
 import tarfile
 import time
-import unicodedata
 import zipfile
 import zlib
 import urllib.error
@@ -99,6 +98,8 @@ MAX_MEMBER = _env_number("LAZARET_MAX_SOURCE_BYTES", 16_000_000)
 MAX_FILES = 20_000         # files per package (numpy's sdist alone has >4,000)
 SAMPLE = 8192              # header/entropy sample read from oversized files
 # Stored scans from another engine version are scanned again (has_scan).
+# 2.62: an archive member's name is case-folded on the engine's Unicode
+#      13.0, the same on every Python (BR-2)
 # 2.61: a climb from the script's folder to a scoped package beside its own
 #      is that package's folder (D-9b)
 # 2.60: a method of a class made in several places reads `this` as the
@@ -331,7 +332,7 @@ SAMPLE = 8192              # header/entropy sample read from oversized files
 #      entry points and hook targets, Python install scripts
 # 2.3: verdict tiers, decoded hex, install-script inspection; 2.2:
 #      verdict-integrity; 2.1: binary-artifact awareness
-ENGINE_VERSION = "2.61.0"
+ENGINE_VERSION = "2.62.0"
 
 # ---------------- The content memo (P-2a, registry/contentcache.py) ----------------
 # One per scan_package run: the engine answers once for content several of a
@@ -1337,8 +1338,9 @@ def _native_program(raw):
 
 def case_fold(rel):
     """A member's path as file systems that ignore case and Unicode normalization compare it (macOS's, Windows'):
-    two paths with the same fold are one file there (EG-4)."""
-    return unicodedata.normalize("NFD", rel).casefold()
+    two paths with the same fold are one file there (EG-4). NFD, then str.casefold(), on the engine's Unicode 13.0
+    whatever the host Python's (BR-2)."""
+    return _engine.case_fold(rel, "NFD")
 
 
 #: The files an installer opens by their name (EG-4's leftover): npm a package's package.json and binding.gyp, pip an

@@ -166,7 +166,8 @@ rust/
     src/budget.rs            per-call work budget -> Exhausted (both packages: SC-TRUNCATED)
     src/pack.rs              the pack: values by core's names, patterns compiled on first use
     src/json.rs, pystr.rs    JSON; Python str semantics on code points ([u32])
-    src/unicode.rs           Python 3.10 / Unicode 13.0 predicates (generated/unicode13.rs)
+    src/unicode.rs           Python 3.10 / Unicode 13.0 predicates, case mappings and casefold
+                             (generated/unicode13.rs)
     src/pyre.rs              re's calls as the engine's code makes them, on linre (§6)
     src/linre/               a linear-time regex engine with re's answers, which every pattern
                              runs on (§14): parser, sets, programs, lazy DFAs, memoized and

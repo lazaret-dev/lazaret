@@ -76,6 +76,19 @@ def describe():
     return f"rust {_native.version()}" if _native.available() else "rust (not installed)"
 
 
+def case_fold(text, form="NFD"):
+    """`text` in Unicode normalization form `form` ("NFD" or "NFC"), then
+    case-folded as str.casefold() does: a name as file systems that ignore
+    case and normalization compare it (macOS's, Windows'). On the engine's
+    Unicode 13.0 (Python 3.10's), the same on every Python: the host's
+    unicodedata is 14.0 on 3.11 and later, where `xⰯ.js` and `xⱟ.js` (a pair
+    from 14.0) folded together and on 3.10 not (BR-2). An ASCII text is its
+    lower(), without a call."""
+    if text.isascii():
+        return text.lower()
+    return _native.call("normalize", {"form": form, "fold": True}, text)
+
+
 def pack_value(name):
     """A value of the engine's rule pack (rust/crates/lazaret-engine/rules/
     lazaret-rules.json): a text, a number, a list for a set or a list, a

@@ -48,7 +48,6 @@ import shutil
 import sys
 import tempfile
 import time
-import unicodedata
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -58,6 +57,7 @@ from collections import namedtuple
 from lazaret.registry import pmsettings as _pm
 from lazaret.registry import repo as _repo
 from lazaret.scanner import core as _core
+from lazaret.scanner import engine as _engine
 from lazaret.scanner import nativenet as _net
 
 __all__ = ["SourceError", "Source", "Checkout", "parse_source", "checkout", "scanned_checkout",
@@ -492,7 +492,7 @@ class _Writer:
 
     def write(self, rel, raw):
         ck = self.ck
-        key = unicodedata.normalize("NFC", rel).casefold()
+        key = _engine.case_fold(rel, "NFC")                    # (on the engine's Unicode, BR-2)
         out = rel
         if key in self.taken and self.taken[key] != rel:
             n = 1
