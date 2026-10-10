@@ -55,7 +55,7 @@ Decisions (fixed):
 ## 2. Using it
 
 - `lazaret …` and `lazaret-registry …` run the native engine; `--version`
-  names it: `lazaret 0.1.8 (engine: rust 0.1.8)`. Without the library the
+  names it: `lazaret 0.1.9 (engine: rust 0.1.9)`. Without the library the
   scanning commands stop with exit code 2 and say what is missing
   (`engine.require`): there is no engine to fall back on. The workspace
   version (`rust/Cargo.toml`) is the release the engine ships in.

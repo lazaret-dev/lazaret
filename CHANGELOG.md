@@ -7,7 +7,7 @@ This log starts at 0.1.6; for earlier releases see the git history and tags.
 The format is based on [Keep a Changelog](https://keepachangelog.com); the
 project is pre-1.0, so the 0.x API may still change.
 
-## [Unreleased]
+## [0.1.9] — 2026-10-10
 
 Where the numbers stand (rerun October 10 on this engine: the benchmark's 516 malicious releases and 429
 popular packages are in-sample; the holdout is 745 other malicious releases of the same dataset, read only in
