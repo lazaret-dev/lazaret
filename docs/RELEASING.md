@@ -96,7 +96,7 @@ Anything merged through the GitHub web UI reaches GitLab the next time you pull 
 
 ## Cutting a release
 
-1. Bump the version in one commit, and get it onto `main` (merge the PR, or push to `main`): `__version__` in `python/src/lazaret/__init__.py`, `"version"` in `js/package.json`, and `version` under `[workspace.package]` in `rust/Cargo.toml`, the native engine's, which ships in the platform wheels; then run `cargo update --workspace --offline` in `rust/`, which rewrites the two workspace entries in `rust/Cargo.lock`, and commit that too. `sh scripts/check-versions.sh HEAD` checks all of them.
+1. Bump the version in one commit, and get it onto `main` (merge the PR, or push to `main`): `__version__` in `python/src/lazaret/__init__.py`, `"version"` in `js/package.json`, and `version` under `[workspace.package]` in `rust/Cargo.toml`, the native engine's, which ships in the platform wheels; then run `cargo update --workspace --offline` in `rust/`, which rewrites the workspace's entries in `rust/Cargo.lock` (`lazaret-engine`, `lazaret-ffi`, `lazaret-net` and `lazaret-verify`; pratique keeps its own version), and commit that too. `sh scripts/check-versions.sh HEAD` checks all of them.
 2. Tag the commit on `main`, from a clean checkout of it:
    ```sh
    git switch main && git pull
