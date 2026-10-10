@@ -873,6 +873,11 @@ aggregate):
 
 ### Fixed
 
+- **`git status` no longer lists `python/src/lazaret/_native/` after `pip install -e ./python`.** An editable install
+  compiles the engine and puts it there, where `lazaret.scanner._native` loads it, but `.gitignore` did not list the
+  directory, so the library showed as untracked, one `git add .` away from a commit. `.gitignore` lists it now, and the
+  source bundle (`scripts/make_bundle.py`) skips it as build output when it walks a tree without git; the wheel and the
+  sdist never packed it.
 - **Security: the JavaScript parser reads an assignment or an update to a call, and `let` as a name, as V8 does; a
   registry scan lists the package files it could not read (JS-PARSE-STRICT; rule set 2.66.0).** The supply-chain
   tests read a package's JavaScript on the engine's tree where the parser reads it, and on its text where it does not.

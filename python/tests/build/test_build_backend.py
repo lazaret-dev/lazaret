@@ -392,6 +392,11 @@ class BuildTests(unittest.TestCase):
             with unittest.mock.patch.object(self.b, "PKG", pkg):
                 self.assertEqual([p.name for p in self.b._package_files()], ["__init__.py"])
 
+    def test_git_ignores_an_editable_installs_library(self):
+        """`git status` after `pip install -e python` lists no src/lazaret/_native/."""
+        with open(os.path.join(_support.REPO_ROOT, ".gitignore"), encoding="utf-8") as f:
+            self.assertIn("python/src/lazaret/_native/", {line.strip() for line in f})
+
     def test_command_line_build(self):
         env = dict(os.environ, **self.env)
         with tempfile.TemporaryDirectory() as d:

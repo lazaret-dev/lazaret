@@ -312,8 +312,10 @@ class TestBundleHygiene(unittest.TestCase):
         self.assertFalse(make_bundle.is_junk("python/tests/fixtures/detection_gaps/dist/bundle.py"))
         self.assertTrue(make_bundle.is_junk("build/typosquats/lazarat/js/index.js"))
         for rel in (".env", "python/.env.local", "python/dist/lazaret-0.0.1.tar.gz",
-                    "python/src/lazaret.egg-info/PKG-INFO", "python/.venv/bin/python"):
+                    "python/src/lazaret.egg-info/PKG-INFO", "python/.venv/bin/python",
+                    "python/src/lazaret/_native/liblazaret_native.dylib"):
             self.assertTrue(make_bundle.is_junk(rel), rel)
+        self.assertFalse(make_bundle.is_junk("python/src/lazaret/scanner/_native.py"))
 
     def test_bundle_has_no_junk_and_carries_engine(self):
         out, p = self.build()

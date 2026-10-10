@@ -418,9 +418,9 @@ tags the wheel for this machine (`linux_x86_64`, `win_amd64`,
 `macosx_11_0_arm64` …). Without cargo it stops and says to install Rust
 (`rust-version` in `rust/Cargo.toml` or later) or a platform wheel; a build
 takes about a minute. `pip install -e .` compiles it the same way and puts
-it in `src/lazaret/_native/`, which is never packed from there: after a
-change to the engine, install again or point `LAZARET_NATIVE_LIB` at a
-fresh build.
+it in `src/lazaret/_native/`, which git ignores and nothing packs (not the
+wheel, the sdist or the source bundle): after a change to the engine,
+install again or point `LAZARET_NATIVE_LIB` at a fresh build.
 
 **Release builds** (`.github/workflows/wheels.yml`, called by `release.yml`
 as `build-python`, and run on pull requests and pushes to main that change

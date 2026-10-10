@@ -27,6 +27,8 @@ __pycache__/
 venv/
 python/dist/
 python/build/
+# the native engine an editable install builds (pip install -e python)
+python/src/lazaret/_native/
 *.egg-info/
 .pytest_cache/
 
