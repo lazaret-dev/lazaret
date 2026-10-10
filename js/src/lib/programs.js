@@ -34,6 +34,15 @@ function envValue(env, name, windows) {
   return key === undefined ? undefined : env[key];
 }
 
+/** `s` without the double quotes at either end, Python's s.strip('"') (a loop: /^"+|"+$/ takes quadratic time on
+ * a long run of them). */
+function stripQuotes(s) {
+  let a = 0, b = s.length;
+  while (a < b && s[a] === '"') a++;
+  while (b > a && s[b - 1] === '"') b--;
+  return a === 0 && b === s.length ? s : s.slice(a, b);
+}
+
 /**
  * PATH's folders a program is looked up in, in order and once each: those named by an absolute path (on Windows, one
  * with a drive and a root, or a share). `path` is a PATH value (programs.folders).
@@ -43,7 +52,7 @@ export function folders(path, { windows = isWindows() } = {}) {
   for (let d of String(path ?? "").split(windows ? ";" : ":")) {
     let key;
     if (windows) {
-      d = d.trim().replace(/^"+|"+$/g, "");
+      d = stripQuotes(d.trim());
       // a drive and a root (`C:x` is relative to C:'s current folder), or a share
       if (!/^[A-Za-z]:[\\/]/.test(d) && !/^[\\/]{2}[^\\/]/.test(d)) continue;
       key = normpath(win32, d).toLowerCase();

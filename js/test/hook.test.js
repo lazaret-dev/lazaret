@@ -4,17 +4,17 @@
 // test makes a git repository in a temporary folder; the credentials are built from parts, so this file holds none,
 // and nothing is run but git (and, in two tests, a stand-in for it that runs git).
 
-import { test } from "node:test";
+import { after, test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import {
   chmodSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync, existsSync,
 } from "node:fs";
-import { devNull, tmpdir } from "node:os";
+import { tmpdir } from "node:os";
 import { delimiter, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { run } from "../src/index.js";
-import { check, parseHookArgs, repoRoot, shown } from "../src/hook.js";
+import { check, parseHookArgs, repoRoot, shown, trimSeparators } from "../src/hook.js";
 import { fileNames, findProgram, folders } from "../src/lib/programs.js";
 
 const BIN = fileURLToPath(new URL("../bin/lazaret.js", import.meta.url));
@@ -28,8 +28,13 @@ const WORKFLOW = "on: push\njobs:\n  a:\n    runs-on: ubuntu-latest\n    steps:\
 const COLLISION = "its name is another file's on this system (they differ only in case, in their Unicode form or by a "
   + "backslash), so it could not be copied for the scan";
 const UNPRINTED = "git could not print it from the index";
-// git without the machine's or the user's settings (a global commit.gpgsign would stop a test's commit)
-const ENV = { ...process.env, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: devNull };
+// git without the machine's or the user's settings (a global commit.gpgsign would stop a test's commit). The
+// user's settings are an empty file, not os.devNull: Git for Windows cannot read \\.\nul ("unable to access").
+const GIT_HOME = mkdtempSync(join(tmpdir(), "lz-hook-git-"));
+const NO_SETTINGS = join(GIT_HOME, "gitconfig");
+writeFileSync(NO_SETTINGS, "");
+after(() => rmSync(GIT_HOME, { recursive: true, force: true, maxRetries: 3 }));
+const ENV = { ...process.env, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: NO_SETTINGS };
 
 function repo() {
   const dir = realpathSync(mkdtempSync(join(tmpdir(), "lz-hook-")));
@@ -360,4 +365,17 @@ test("programs: PATH's absolute folders, once each, never the current folder", (
   if (GIT && !WINDOWS) {
     assert.equal(findProgram("git", { env: { PATH: `.:${dirname(GIT)}` } }), join(dirname(GIT), "git"));
   }
+});
+
+test("a long run of separators or quotes is read in linear time (CodeQL: polynomial regular expressions)", () => {
+  // /[\\/]+$/ on the folder and /^"+|"+$/ on a PATH entry took quadratic time: 12 s for a run of 100,000
+  const many = (c) => c.repeat(100_000);
+  const t = performance.now();
+  assert.equal(trimSeparators("a" + many("/") + "b"), "a" + many("/") + "b");
+  assert.deepEqual(folders(many('"') + "x" + many('"') + "y", { windows: true }), []);
+  assert.ok(performance.now() - t < 1000, `${Math.round(performance.now() - t)} ms`);
+  assert.equal(trimSeparators("C:\\x\\//\\"), "C:\\x");
+  assert.equal(trimSeparators("/"), "");
+  assert.equal(trimSeparators("/srv/x"), "/srv/x");
+  assert.deepEqual(folders(' ""C:\\Tools"" ;"""', { windows: true }), ["C:\\Tools"]);
 });

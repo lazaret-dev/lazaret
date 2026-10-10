@@ -336,7 +336,7 @@ async function gather(files, cwd, dest, env) {
   if (files.length) {
     paths = [];
     for (const f of files) {
-      const given = isAbsolute(f) ? f : cwd.replace(/[\\/]+$/, "") + sep + f;   // (its folder resolved, not a link it is)
+      const given = isAbsolute(f) ? f : trimSeparators(cwd) + sep + f;   // (its folder resolved, not a link it is)
       let folder = dirname(given);
       try { folder = realpathSync.native(folder); } catch { /* (missing: said below) */ }
       const full = join(folder, basename(given));
@@ -372,6 +372,13 @@ async function gather(files, cwd, dest, env) {
   }
   if (root !== null) for (const f of await writeBlobs(root, blobs, dest, env)) failed.push(f);
   return { checked, failed };
+}
+
+/** `path` without the separators at its end (a loop: /[\\/]+$/ takes quadratic time on a long run of them). */
+export function trimSeparators(path) {
+  let end = path.length;
+  while (end > 0 && (path[end - 1] === "/" || path[end - 1] === "\\")) end--;
+  return end === path.length ? path : path.slice(0, end);
 }
 
 /** What the gate's conditions read: vulnerabilities of MAJOR and above, supply-chain indicators, cross-file flows. */
