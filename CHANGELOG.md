@@ -9,6 +9,21 @@ project is pre-1.0, so the 0.x API may still change.
 
 ## [Unreleased]
 
+Where the numbers stand (rerun October 10 on this engine: the benchmark's 516 malicious releases and 429
+popular packages are in-sample; the holdout is 745 other malicious releases of the same dataset, read only in
+aggregate):
+
+| | 0.1.9 | 0.1.8 |
+| --- | --- | --- |
+| Malicious releases SUSPICIOUS (in-sample) | 88.0% (454 of 516) | 87.0% (449) |
+| ... with the registry's dependency history (live registry data) | 91.3% (471) | 90.3% (466) |
+| ... SUSPICIOUS or WARN | 91.7% (473) | 91.1% (470) |
+| Holdout, SUSPICIOUS | 85.8% (639 of 745) | 85.4% (636) |
+| Holdout releases that share no code with the benchmark, SUSPICIOUS | 80.3% (399 of 497) | 79.5% (395) |
+| Popular packages SUSPICIOUS · SUSPICIOUS or WARN | none · 6.1% (26 of 429) | none · 7.2% (31) |
+| `lazaret guard`, end to end: malicious npm releases blocked (of 300) · popular (of 219) | 247 · none | 241 · none |
+| Fake credentials found · decoys flagged; BenchmarkPython; SCA advisories matched | 95% · 6; +0.22; 1,278 of 1,278 | the same |
+
 ### Added
 
 - **Platform wheels for musl Linux and Windows ARM64 (W-1).** `musllinux_1_2_x86_64` and `musllinux_1_2_aarch64`
