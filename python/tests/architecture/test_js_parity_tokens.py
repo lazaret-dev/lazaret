@@ -45,12 +45,13 @@ def texts(n=6000, seed=11):
     rnd = random.Random(seed)
     out = ["".join(rnd.choice(TOKEN_FRAGMENTS) for _ in range(rnd.randint(1, 25))) for _ in range(n)]
     pieces = {"npm": "npm" + "_" + "a1B2" * 9, "anthropic": "sk-ant-" + "api03-" + "Ab1_-" * 18 + "Ab1" + "AA",
+              "anthropic usr": "sk-ant-" + "usr-" + "1a2B3c4D5e6F" + "-" + "Gh7Ij8Kl9Mn0" * 6 + "Op1Q" + "-" + "Rs2Tu",
               "openai": "sk-" + "proj-" + "Ab1_-" * 14 + "Ab1_" + "T3Blbk" + "FJ" + "Cd2-_" * 14 + "Cd2-"}
     # each length at and around each format's limits, after and before each kind of neighbour
     run = "aB3_-"
     edges = ["npm" + "_" + "a1B2c3"[:1] * n for n in (35, 36, 37)]
-    edges += ["sk-ant-" + kind + "-" + (run * 41)[:n] for kind in ("ab01", "abc01", "abcde01", "abcdef01", "abc1", "abc012")
-              for n in (39, 40, 41, 199, 200, 201)]
+    kinds = ("ab01", "abc01", "abcde01", "abcdef01", "abc1", "abc012", "usr", "usra", "ust", "usr01")  # S-TOKEN-USR
+    edges += ["sk-ant-" + kind + "-" + (run * 41)[:n] for kind in kinds for n in (39, 40, 41, 199, 200, 201)]
     edges += ["sk-" + (run * 19)[:a] + "T3Blbk" + "FJ" + (run * 15)[:b] for a in (19, 20, 21, 89, 90, 91)
               for b in (19, 20, 21, 73, 74, 75)]
     edges += ["sk-" + "x" * 20 + ("T3Blbk" + "FJ") * 3 + "y" * n for n in (4, 12, 20, 66, 74, 82)]

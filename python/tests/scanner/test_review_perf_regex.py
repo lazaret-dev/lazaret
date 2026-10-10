@@ -122,7 +122,8 @@ TOKEN_FRAGMENTS = ["AKIA", "AIza", "gh", "ghp_", "gho_", "github_pat_", "xox", "
                    "-----BEGIN ", "-----END ", "PRIVATE KEY-----", "RSA ", "eyJ", ".", ".eyJ", "a", "B",
                    "0123456789", "ABCDEFGHIJKLMNOP", "_", "-", " ", "\n", "\u00e9", "Q" * 20, "a1B2" * 9,
                    # V-2's formats: npm's, Anthropic's (a kind, 40 more), OpenAI's (20, the marker, 20)
-                   "cio", "npm_", "sk-", "sk-ant-", "api03-", "oat01-", "proj-", "T3Blbk" + "FJ", "Ab1_-" * 8, "x" * 20]
+                   "cio", "npm_", "sk-", "sk-ant-", "api03-", "oat01-", "usr-", "proj-", "T3Blbk" + "FJ", "Ab1_-" * 8,
+                   "x" * 20]
 
 
 class TokenPatternTests(unittest.TestCase):

@@ -20,7 +20,7 @@ FORMATS = (
     ("a GitHub token", r"gh[pousr]_[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9_]{50,}"),
     ("a Stripe key", r"[sr]k_live_[0-9A-Za-z]{10,}"),
     ("an npm token", r"(?<![A-Za-z0-9])npm_[A-Za-z0-9]{36}(?![A-Za-z0-9])"),
-    ("an Anthropic key", r"sk-ant-[a-z]{3,5}[0-9]{2}-[A-Za-z0-9_\-]{40,}"),
+    ("an Anthropic key", r"sk-ant-(?:[a-z]{3,5}[0-9]{2}|usr)-[A-Za-z0-9_\-]{40,}"),
     ("an OpenAI key", r"sk-[A-Za-z0-9_\-]{20,90}T3BlbkFJ[A-Za-z0-9_\-]{20,74}"),
     ("a Google API key", r"AIza[0-9A-Za-z_\-]{35}"),
     ("AWS's example secret key", r"wJalrXUtnFEMI[A-Za-z0-9/+]{27}"),

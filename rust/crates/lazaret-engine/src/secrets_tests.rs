@@ -120,10 +120,11 @@ fn each_sample_names_its_provider_alone() {
     }
     assert!(ids(AWS_ID).is_empty() && ids(AWS_SECRET).is_empty(), "a pair is not named by a part");
     assert_eq!(ids(&format!("sk-ant{}", "a".repeat(30))), ["openai"]);
+    assert_eq!(ids(concat!("sk-ant-", "usr-", "Ab1_Ab1_Ab1_Ab1_Ab1_", "Ab1_Ab1_Ab1_Ab1_Ab1_")), ["anthropic"]); // the Console's personal keys
     // what a provider issues but the table does not ask about is no one's (each is detected still; it is not verified):
     // Anthropic's OAuth tokens, its admin keys (the Console's sk-ant-admin01-, Claude Enterprise's sk-ant-api01-, which are
-    // its Compliance Access Keys too: Anthropic's API keys are sk-ant-api03-), a key of Anthropic's in no format it
-    // documents, OpenAI's admin keys
+    // its Compliance Access Keys too: Anthropic's API keys are sk-ant-api03- and the Console's personal sk-ant-usr-), a key
+    // of Anthropic's in no format it documents, OpenAI's admin keys
     for prefix in ["sk-ant-oat01-", "sk-ant-admin01-", "sk-ant-api01-", "sk-ant-api02-", "sk-ant-", "sk-ant-api-", "sk-admin-"] {
         assert!(ids(&format!("{prefix}{}", "a".repeat(30))).is_empty(), "{prefix}");
     }
@@ -132,7 +133,7 @@ fn each_sample_names_its_provider_alone() {
 #[test]
 fn the_lengths_are_the_formats_and_a_credential_is_looked_at_to_512_characters() {
     for (prefix, low, high) in [("ghp_", 36, 251), ("github_pat_", 22, 255), ("xoxb-", 10, 250), ("sk_live_", 16, 247), ("npm_", 36, 36),
-                                ("sk-", 20, 200), ("sk-ant-api03-", 20, 200)] {
+                                ("sk-", 20, 200), ("sk-ant-api03-", 20, 200), ("sk-ant-usr-", 20, 200)] {
         assert!(!ids(&format!("{prefix}{}", "a".repeat(low))).is_empty(), "{prefix}");
         assert!(!ids(&format!("{prefix}{}", "a".repeat(high))).is_empty(), "{prefix}");
         assert!(ids(&format!("{prefix}{}", "a".repeat(low - 1))).is_empty(), "{prefix}");

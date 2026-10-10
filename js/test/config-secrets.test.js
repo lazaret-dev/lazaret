@@ -155,6 +155,7 @@ test("npm's access tokens, Anthropic's and OpenAI's keys (V-2)", () => {
   // made up and built in pieces, so the source holds no token-shaped literal (GitHub's push protection knows these)
   const keys = ["npm" + "_" + "a1B2".repeat(9), "sk-ant-" + "api03-" + "Ab1_-".repeat(18) + "Ab1" + "AA",
     "sk-ant-" + "oat01-" + "Q7r_p".repeat(12), "sk-" + "a1B2C".repeat(4) + "T3Blbk" + "FJ" + "d3E4f".repeat(4),
+    "sk-ant-" + "usr-" + "1a2B3c4D5e6F" + "-" + "Gh7Ij8Kl9Mn0".repeat(6) + "Op1Q" + "-" + "Rs2Tu",
     "sk-" + "proj-" + "Ab1_-".repeat(14) + "Ab1_" + "T3Blbk" + "FJ" + "Cd2-_".repeat(14) + "Cd2-"];
   for (const key of keys) {
     for (const [path, text] of [[".env", `KEY=${key}\n`], ["ci.yml", `env:\n  K: ${key}\n`]]) {
@@ -165,6 +166,7 @@ test("npm's access tokens, Anthropic's and OpenAI's keys (V-2)", () => {
     assert.ok(!found(".env", `K=x${key}\n`).some(([r]) => r === "S-TOKEN"), key.slice(0, 12));
   }
   for (const text of ["npm" + "_" + "a".repeat(35), "sk-ant-" + "api03-" + "a".repeat(39), "sk-ant-" + "api03-...",
+    "sk-ant-" + "usr-" + "a".repeat(39), "sk-ant-" + "usra-" + "a".repeat(50),
     "sk-" + "a".repeat(48), "sk-" + "a".repeat(19) + "T3Blbk" + "FJ" + "a".repeat(20)]) {
     assert.ok(!found(".env", `K=${text}\n`).some(([r]) => r === "S-TOKEN"), text);
   }

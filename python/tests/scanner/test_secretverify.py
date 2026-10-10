@@ -131,6 +131,7 @@ class IdentifyTests(unittest.TestCase):
 
     def test_the_two_sk_families_do_not_overlap(self):
         self.assertEqual(sv.identify("sk-ant-api03-" + "a" * 30), ["anthropic"])
+        self.assertEqual(sv.identify("sk-ant-usr-" + "a" * 30), ["anthropic"])     # the Console's personal keys
         self.assertEqual(sv.identify("sk-" + "a" * 30), ["openai"])
         self.assertEqual(sv.identify("sk-proj-" + "a" * 30), ["openai"])
         self.assertEqual(sv.identify("sk-svcacct-" + "a" * 30), ["openai"])
@@ -139,7 +140,8 @@ class IdentifyTests(unittest.TestCase):
     def test_what_the_table_does_not_ask_about_is_no_ones(self):
         # each is detected still (S-TOKEN, S-ENTROPY), but it is not verified: Anthropic's OAuth tokens, its admin keys (the
         # Console's sk-ant-admin01-, Claude Enterprise's sk-ant-api01-, which are its Compliance Access Keys too: Anthropic's
-        # API keys are sk-ant-api03-), a key of Anthropic's in no format it documents, OpenAI's admin keys
+        # API keys are sk-ant-api03- and the Console's personal sk-ant-usr-), a key of Anthropic's in no format it
+        # documents, OpenAI's admin keys
         for prefix in ("sk-ant-oat01-", "sk-ant-admin01-", "sk-ant-api01-", "sk-ant-api02-", "sk-ant-", "sk-ant-api-", "sk-admin-"):
             with self.subTest(prefix):
                 self.assertEqual(sv.identify(prefix + "a" * 30), [])
@@ -147,7 +149,7 @@ class IdentifyTests(unittest.TestCase):
     def test_the_lengths_are_the_formats(self):
         edge = [("ghp_", "a", 36, 251), ("gho_", "a", 36, 251), ("ghs_", "a", 36, 251), ("github_pat_", "a", 22, 255), ("xoxb-", "a", 10, 250),
                 ("xoxp-", "1", 10, 250), ("sk_live_", "a", 16, 247), ("rk_live_", "a", 16, 247), ("npm_", "a", 36, 36),
-                ("sk-", "a", 20, 200), ("sk-ant-api03-", "a", 20, 200)]
+                ("sk-", "a", 20, 200), ("sk-ant-api03-", "a", 20, 200), ("sk-ant-usr-", "a", 20, 200)]
         for prefix, ch, low, high in edge:
             with self.subTest(prefix):
                 self.assertNotEqual(sv.identify(prefix + ch * low), [])

@@ -31,7 +31,7 @@ The table's answers are from each provider's documentation; the first run of thi
 the table and its tests, and run this again.
 
 OpenAI's key is a user, project or service account key (`sk-`, `sk-proj-`, `sk-svcacct-`), Anthropic's an API key
-(`sk-ant-api03-`). Admin keys (OpenAI's `sk-admin-`, Anthropic's `sk-ant-admin01-` and Claude Enterprise's `sk-ant-api01-`,
-which are its Compliance Access Keys too) and Anthropic's OAuth tokens (`sk-ant-oat01-`) are not asked about: `/v1/models` is
-not documented for them, and a 401 there could read as "rejected" for a key that is live. A 401 without the provider's own
-error (`invalid_api_key`, `authentication_error`) is `unknown`, never `rejected`.
+(`sk-ant-api03-`, or the Console's personal `sk-ant-usr-`). Admin keys (OpenAI's `sk-admin-`, Anthropic's `sk-ant-admin01-` and
+Claude Enterprise's `sk-ant-api01-`, which are its Compliance Access Keys too) and Anthropic's OAuth tokens (`sk-ant-oat01-`)
+are not asked about: `/v1/models` is not documented for them, and a 401 there could read as "rejected" for a key that is live. A
+401 without the provider's own error (`invalid_api_key`, `authentication_error`) is `unknown`, never `rejected`.

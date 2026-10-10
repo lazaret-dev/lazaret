@@ -40,7 +40,9 @@ FIND = [
 
 def calls():
     out = [("secrets.providers", {}, "")]
-    for text in list(SAMPLES.values()) + [AWS["id"], AWS["secret"], "ghp_short", "sk-ant" + "a" * 30, "", "x" * 600]:
+    usr = "sk-ant-" + "usr-" + "Ab1_" * 10                                 # the Console's personal keys (S-TOKEN-USR)
+    others = [AWS["id"], AWS["secret"], "ghp_short", "sk-ant" + "a" * 30, usr, "", "x" * 600]
+    for text in list(SAMPLES.values()) + others:
         out.append(("secrets.identify", {}, text))
     for pid, secret in SAMPLES.items():
         for parts in ({"secret": secret}, {"secret": secret[:-3]}, {"secret": secret + "\n"}, {"token": secret}):

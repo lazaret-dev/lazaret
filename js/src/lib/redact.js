@@ -56,7 +56,7 @@ export function entropySecretish(v) {
 //   |sk_live_[A-Za-z0-9]{16,}|AIza[0-9A-Za-z_\-]{35}
 //   |-----BEGIN [A-Z ]*PRIVATE KEY-----|cio(?<![A-Za-z0-9]cio)[A-Za-z0-9]{32}(?![A-Za-z0-9])
 //   |npm_(?<![A-Za-z0-9]npm_)[A-Za-z0-9]{36}(?![A-Za-z0-9])
-//   |sk-ant-(?<![A-Za-z0-9_\-]sk-ant-)[a-z]{3,5}[0-9]{2}-[A-Za-z0-9_\-]{40,200}(?![A-Za-z0-9_\-])
+//   |sk-ant-(?<![A-Za-z0-9_\-]sk-ant-)(?:[a-z]{3,5}[0-9]{2}|usr)-[A-Za-z0-9_\-]{40,200}(?![A-Za-z0-9_\-])
 //   |sk-(?<![A-Za-z0-9_\-]sk-)[A-Za-z0-9_\-]{20,90}T3BlbkFJ[A-Za-z0-9_\-]{20,74}(?![A-Za-z0-9_\-])
 //   |eyJ[A-Za-z0-9_\-]{10,}\.eyJ[A-Za-z0-9_\-]{10,}
 // but without the backtracking blow-up of the JWT alternative on a run of
@@ -81,17 +81,19 @@ function fixedRun(s, i, n, pred) {
 
 /**
  * End of an Anthropic or an OpenAI key at `p` (its "sk-"), a whole [A-Za-z0-9_-]
- * run, or -1: Anthropic's "sk-ant-", a kind (three to five letters, two digits)
- * and "-", then 40 to 200 more to the run's end; else OpenAI's 20 to 90, "T3BlbkFJ"
+ * run, or -1: Anthropic's "sk-ant-", a kind (three to five letters and two digits,
+ * or usr) and "-", then 40 to 200 more to the run's end; else OpenAI's 20 to 90, "T3BlbkFJ"
  * and 20 to 74 more to the run's end. Either way the match is the run.
  */
 function skKeyEnd(s, p) {
   if (p > 0 && isJwt(s.charCodeAt(p - 1))) return -1;
   const e = runEnd(s, p + 3, isJwt);
   if (s.startsWith("ant-", p + 3)) {
-    const kind = runEnd(s, p + 7, isLower);
-    if (kind - (p + 7) >= 3 && kind - (p + 7) <= 5 && fixedRun(s, kind, 2, isDigit) && s.charCodeAt(kind + 2) === 45
-        && e - (kind + 3) >= 40 && e - (kind + 3) <= 200) return e;
+    const kind = runEnd(s, p + 7, isLower), n = kind - (p + 7);
+    let body = -1;                                             // where the 40 to 200 begin
+    if (n >= 3 && n <= 5 && fixedRun(s, kind, 2, isDigit) && s.charCodeAt(kind + 2) === 45) body = kind + 3;
+    else if (n === 3 && s.startsWith("usr-", p + 7)) body = kind + 1;
+    if (body >= 0 && e - body >= 40 && e - body <= 200) return e;
   }
   for (let t = p + 23; t <= p + 93 && t + 8 <= e; t++) {
     if (s.startsWith("T3BlbkFJ", t) && e - (t + 8) >= 20 && e - (t + 8) <= 74) return e;

@@ -476,8 +476,10 @@ _CRATES_TOKEN_ALT = r"cio(?<![A-Za-z0-9]cio)[A-Za-z0-9]{32}(?![A-Za-z0-9])"
 # npm's access tokens (V-2): "npm_" and 36 letters and digits, a whole run of them, as crates.io's
 _NPM_TOKEN_ALT = r"npm_(?<![A-Za-z0-9]npm_)[A-Za-z0-9]{36}(?![A-Za-z0-9])"
 # Anthropic's keys and tokens (V-2): "sk-ant-", a kind of three to five letters and two digits (an API key's api03, an
-# admin key's admin01, an OAuth token's oat01…), "-" and 40 to 200 of [A-Za-z0-9_-], a whole run of them
-_ANTHROPIC_TOKEN_ALT = r"sk-ant-(?<![A-Za-z0-9_\-]sk-ant-)[a-z]{3,5}[0-9]{2}-[A-Za-z0-9_\-]{40,200}(?![A-Za-z0-9_\-])"
+# admin key's admin01, an OAuth token's oat01…) or usr (the Console's personal API keys, sk-ant-usr-: S-TOKEN-USR),
+# "-" and 40 to 200 of [A-Za-z0-9_-], a whole run of them
+_ANTHROPIC_TOKEN_ALT = (r"sk-ant-(?<![A-Za-z0-9_\-]sk-ant-)(?:[a-z]{3,5}[0-9]{2}|usr)-"
+                        r"[A-Za-z0-9_\-]{40,200}(?![A-Za-z0-9_\-])")
 # OpenAI's keys (V-2): "sk-", 20 to 90 of [A-Za-z0-9_-] (a project's, a service account's or an admin's key names its
 # kind first: "proj-", "svcacct-", "admin-"), "T3BlbkFJ" (the base64 of "OpenAI", which OpenAI's keys carry) and 20 to
 # 74 more, a whole run of them

@@ -1642,7 +1642,8 @@ body cut at 64 KiB read by its status alone; the account's name printable,
 A key is asked about only where the call is documented for it, and is
 rejected only on its provider's own word. OpenAI's pattern takes user,
 project and service account keys (`sk-`, `sk-proj-`, `sk-svcacct-`), not its
-admin keys (`sk-admin-`); Anthropic's takes its API keys (`sk-ant-api03-`),
+admin keys (`sk-admin-`); Anthropic's takes its API keys (`sk-ant-api03-`,
+and the Console's personal ones, `sk-ant-usr-`),
 not its OAuth tokens (`sk-ant-oat01-`) or admin keys (`sk-ant-admin01-`,
 and Claude Enterprise's `sk-ant-api01-`, its Compliance Access Keys), which
 `/v1/models` is not documented for: a live admin key turned away there must

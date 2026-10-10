@@ -272,16 +272,18 @@ NPM = "npm" + "_" + "a1B2" * 9
 ANTHROPIC = "sk-ant-" + "api03-" + "Ab1_-" * 18 + "Ab1" + "AA"
 ANTHROPIC_ADMIN = "sk-ant-" + "admin01-" + "x1Y2z" * 18 + "x1Y" + "AA"
 ANTHROPIC_OAUTH = "sk-ant-" + "oat01-" + "Q7r_p" * 12
+# the Console's personal keys (S-TOKEN-USR): 106 long, 12, 76 and 5 characters between their dashes
+ANTHROPIC_USR = "sk-ant-" + "usr-" + "1a2B3c4D5e6F" + "-" + "Gh7Ij8Kl9Mn0" * 6 + "Op1Q" + "-" + "Rs2Tu"
 OPENAI = "sk-" + "a1B2C" * 4 + "T3Blbk" + "FJ" + "d3E4f" * 4
 OPENAI_PROJECT = "sk-" + "proj-" + "Ab1_-" * 14 + "Ab1_" + "T3Blbk" + "FJ" + "Cd2-_" * 14 + "Cd2-"
 OPENAI_ADMIN = "sk-" + "admin-" + "Zz9y8" * 11 + "Zz9" + "T3Blbk" + "FJ" + "Yy8x7" * 11 + "Yy8"
-PROVIDER_KEYS = (NPM, ANTHROPIC, ANTHROPIC_ADMIN, ANTHROPIC_OAUTH, OPENAI, OPENAI_PROJECT, OPENAI_ADMIN)
+PROVIDER_KEYS = (NPM, ANTHROPIC, ANTHROPIC_ADMIN, ANTHROPIC_OAUTH, ANTHROPIC_USR, OPENAI, OPENAI_PROJECT, OPENAI_ADMIN)
 
 
 class ProviderKeyFormats(unittest.TestCase):
     """V-2: S-TOKEN reads npm's access tokens ("npm_" and 36 letters and digits), Anthropic's keys and tokens
-    ("sk-ant-", a kind such as api03, admin01 or oat01, and 40 to 200 more) and OpenAI's keys ("sk-", the kind's name
-    if any, "T3BlbkFJ" in the middle), each a whole run of its characters. They got only S-ENTROPY, or S-SECRET by
+    ("sk-ant-", a kind such as api03, admin01 or oat01, or usr, and 40 to 200 more) and OpenAI's keys ("sk-", the kind's
+    name if any, "T3BlbkFJ" in the middle), each a whole run of its characters. They got only S-ENTROPY, or S-SECRET by
     a variable's name, before."""
 
     def test_in_code_of_each_language(self):
@@ -316,6 +318,8 @@ class ProviderKeyFormats(unittest.TestCase):
             "sk-ant-" + "api03-" + "a" * 201, "sk-ant-" + "ap03-" + "a" * 50,     # too long, a kind too short
             "sk-ant-" + "abcdef03-" + "a" * 50, "sk-ant-" + "api003-" + "a" * 50,  # a kind too long, three digits
             "sk-ant-" + "api03-...", "sk-ant-" + "api03-xxxx",                      # documentation's samples
+            "sk-ant-" + "usr-" + "a" * 39, "sk-ant-" + "usra-" + "a" * 50,         # usr: too short; four letters
+            "sk-ant-" + "ust-" + "a" * 50, "sk-ant-" + "usr-...",                   # another kind; a sample
             "x" + OPENAI, "sk-" + "a" * 19 + "T3Blbk" + "FJ" + "a" * 20,           # glued, the first part short
             "sk-" + "a" * 20 + "T3Blbk" + "FJ" + "a" * 19, "sk-" + "a" * 91 + "T3Blbk" + "FJ" + "a" * 20,
             "sk-" + "a" * 20 + "T3Blbk" + "FJ" + "a" * 75, "sk-" + "a" * 48,       # the last part long; no marker
