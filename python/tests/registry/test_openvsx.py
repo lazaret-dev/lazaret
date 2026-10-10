@@ -195,6 +195,87 @@ class ResolveTests(unittest.TestCase):
         self.assertEqual(openvsx.ECOSYSTEM.rate, {"open-vsx.org": 0.5})
 
 
+class LatestReleaseTests(unittest.TestCase):
+    """OVSX-LATEST: with no version asked for, Open VSX's newest release, as the editors install it, not its `latest`,
+    which is a pre-release when that is the newest (redhat.vscode-yaml's 1.25.2026100908 on Oct 9, where the
+    Marketplace's module took the release); the pre-release when there is no release, and the result says why."""
+
+    IDENT = "redhat.vscode-yaml"
+    PRE = "1.25.2026100908"
+
+    def fetch(self, served):
+        return base.Fetch(openvsx.ECOSYSTEM, served, clock=lambda: 0.0, sleep=lambda s: None)
+
+    def page(self, entries, total=None, offset=0):
+        """The query API's page of RELEASE_PAGE files at `offset`, newest first."""
+        doc = {"offset": offset, "totalSize": len(entries) if total is None else total, "extensions": entries}
+        return {query_url(self.IDENT, openvsx.RELEASE_PAGE, offset): json.dumps(doc).encode()}
+
+    def latest_pre_release(self):
+        """The registry's answers for the pre-release that is its `latest` (with its file and digest)."""
+        return responses("redhat", "vscode-yaml", self.PRE, {"universal": PLAIN}, preRelease=True,
+                         versionAlias=["latest", "pre-release"])
+
+    def entry(self, version, pre=False, **extra):
+        return {**query_entry(self.IDENT, version, "2026-10-01T00:00:00Z", pre=pre), **extra}
+
+    def test_the_newest_release_not_a_newer_pre_release(self):
+        served = Served({**self.latest_pre_release(),
+                         **responses("redhat", "vscode-yaml", "1.24.0", {"universal": PLAIN}, latest=False),
+                         **self.page([self.entry(self.PRE, pre=True), self.entry("1.25.2026100808", pre=True),
+                                      self.entry("1.24.1", downloadable=False),        # (not served: not one)
+                                      self.entry("1.23.0"), self.entry("1.24.0"), self.entry("1.24.0-beta.1")])})
+        res = openvsx.ECOSYSTEM.resolve(self.IDENT, None, self.fetch(served))
+        self.assertEqual((res[0], res.info["preRelease"]), ("1.24.0", False))
+        self.assertNotIn("preReleaseReason", res.info)
+        self.assertEqual([a["filename"] for a in res.artifacts], ["redhat.vscode-yaml-1.24.0.vsix"])
+        self.assertEqual(res.artifacts[0]["entry"]["sha256"], hashlib.sha256(PLAIN).hexdigest())
+        self.assertEqual(served.urls()[:3], [API + "redhat/vscode-yaml", query_url(self.IDENT, openvsx.RELEASE_PAGE),
+                                             API + "redhat/vscode-yaml/1.24.0"])
+
+    def test_the_search_reads_on_to_the_first_page_that_holds_a_release_and_stops_there(self):
+        size = openvsx.RELEASE_PAGE
+        pre = [self.entry(f"1.25.{2026100900 - i}", pre=True) for i in range(size)]
+        served = Served({**self.latest_pre_release(),
+                         **responses("redhat", "vscode-yaml", "1.24.0", {"universal": PLAIN}, latest=False),
+                         **self.page(pre, total=3 * size),
+                         **self.page(pre[:3] + [self.entry("1.24.0")], total=3 * size, offset=size),
+                         **self.page([self.entry("1.99.0")], total=3 * size, offset=2 * size)})
+        self.assertEqual(openvsx.ECOSYSTEM.resolve(self.IDENT, None, self.fetch(served))[0], "1.24.0")
+        self.assertNotIn(query_url(self.IDENT, size, 2 * size), served.urls())
+
+    def test_a_pre_release_when_there_is_no_release_and_the_result_says_why(self):
+        size = openvsx.RELEASE_PAGE
+        cases = {
+            "the extension has no release": [self.page([self.entry(self.PRE, pre=True)])],
+            f"no release among the newest {openvsx.MAX_RELEASE_SEARCH} files Open VSX lists": [
+                self.page([self.entry(f"1.25.{offset + i}", pre=True) for i in range(size)],
+                          total=10 * openvsx.MAX_RELEASE_SEARCH, offset=offset)
+                for offset in range(0, openvsx.MAX_RELEASE_SEARCH, size)],
+        }
+        for why, pages in cases.items():
+            with self.subTest(why):
+                answers = self.latest_pre_release()
+                for p in pages:
+                    answers.update(p)
+                served = Served(answers)
+                res = openvsx.ECOSYSTEM.resolve(self.IDENT, None, self.fetch(served))
+                self.assertEqual((res[0], res.info["preRelease"], res.info["preReleaseReason"]), (self.PRE, True, why))
+                self.assertEqual(sum(1 for u in served.urls() if "/-/query?" in u), len(pages))
+                self.assertEqual(repo.registry_lines({"ecosystem": "openvsx", "registryInfo": {
+                    k: res.info[k] for k in ("verified", "preRelease", "preReleaseReason")}})[1],
+                    f"Open VSX: a pre-release version, taken with no version asked for: {why}")
+
+    def test_a_release_that_is_the_latest_and_a_version_asked_for_are_taken_as_they_are(self):
+        served = Served(responses("redhat", "vscode-yaml", "1.25.0", {"universal": PLAIN}))
+        self.assertEqual(openvsx.ECOSYSTEM.resolve(self.IDENT, None, self.fetch(served))[0], "1.25.0")
+        served = Served(self.latest_pre_release())
+        res = openvsx.ECOSYSTEM.resolve(self.IDENT, self.PRE, self.fetch(served))
+        self.assertEqual((res[0], res.info["preRelease"]), (self.PRE, True))
+        self.assertNotIn("preReleaseReason", res.info)
+        self.assertFalse([u for u in served.urls() if "/-/query?" in u], "no query when no release is looked for")
+
+
 @unittest.skipUnless(_native.available(), f"native engine not built ({_native.load_error()})")
 class ScanTests(unittest.TestCase):
     def scan(self, served, spec="openvsx:redhat.vscode-yaml@1.25.0"):

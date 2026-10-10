@@ -5515,19 +5515,22 @@ def _extension_fields(eco, resolved, brings, startup, kinds):
 #: what a VS Code extension's registry says of its publisher, kept in the
 #: result (`registryInfo`): Open VSX's namespace and publisher, the
 #: Marketplace's publisher, its verified domain, the install count, and that
-#: it publishes no digest (`digest`: None)
+#: it publishes no digest (`digest`: None); a pre-release, and why one was
+#: taken with no version asked for (`preReleaseReason`, OVSX-LATEST)
 REGISTRY_INFO_KEYS = {
-    "openvsx": ("verified", "unrelatedPublisher", "publishedBy", "provider", "preRelease", "deprecated", "timestamp"),
-    "vscode": ("publisher", "publisherDisplayName", "verified", "domain", "installs", "preRelease", "lastUpdated",
-               "digest"),
+    "openvsx": ("verified", "unrelatedPublisher", "publishedBy", "provider", "preRelease", "preReleaseReason",
+                "deprecated", "timestamp"),
+    "vscode": ("publisher", "publisherDisplayName", "verified", "domain", "installs", "preRelease", "preReleaseReason",
+               "lastUpdated", "digest"),
 }
 
 
 def registry_lines(res):
     """What print_scan says of an extension's publisher, from `registryInfo`:
     Open VSX's namespace verified or not, who published the version, a
-    pre-release, deprecated; the Marketplace's publisher's domain verified or
-    not, the install count, a pre-release, and that it publishes no digest."""
+    pre-release (and why one was taken with no version asked for),
+    deprecated; the Marketplace's publisher's domain verified or not, the
+    install count, a pre-release, and that it publishes no digest."""
     info = res.get("registryInfo") or {}
     if not info:
         return []
@@ -5541,7 +5544,8 @@ def registry_lines(res):
             line += f"; {info['installs']:,} installs"
         lines = [line]
         if info.get("preRelease"):
-            lines.append(f"{name}: a pre-release version")
+            why = info.get("preReleaseReason")
+            lines.append(f"{name}: a pre-release version" + (f", taken with no version asked for: {why}" if why else ""))
         lines.append(f"{name}: no digest is published, so the files were scanned unverified")
         return lines
     who = info.get("publishedBy")
@@ -5553,7 +5557,8 @@ def registry_lines(res):
     if info.get("unrelatedPublisher"):
         lines.append("Open VSX: the publisher is not a member of the namespace")
     if info.get("preRelease"):
-        lines.append("Open VSX: a pre-release version")
+        why = info.get("preReleaseReason")
+        lines.append("Open VSX: a pre-release version" + (f", taken with no version asked for: {why}" if why else ""))
     if info.get("deprecated"):
         lines.append("Open VSX: the extension is deprecated")
     return lines

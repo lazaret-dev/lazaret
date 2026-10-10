@@ -858,6 +858,13 @@ project is pre-1.0, so the 0.x API may still change.
 
 ### Fixed
 
+- **`lazaret-registry scan openvsx:namespace.name` with no version scans the newest release, as the editors install it
+  (OVSX-LATEST).** It scanned what Open VSX's API calls latest, the newest version of either kind: redhat.vscode-yaml
+  was scanned as 1.25.2026100908, a nightly pre-release, where the Marketplace's module took the release (found by the
+  live checks). When the latest is a pre-release, the query API is read, newest first, for the newest release (at most
+  500 files, in pages of 50: each file of its answer carries up to a hundred of the versions' URLs); the pre-release
+  is taken only when there is none, and `registryInfo` says why (`preReleaseReason`, which the Marketplace's module
+  now gives too, and the text output prints). The guard, which chooses as the editor does, is unchanged.
 - **S-TOKEN took a private-key header with no key after it for a key (S-TOKEN-PEM; rule set 2.65.0).** The token
   rule's private-key alternative is the header alone, and a header counted as a key when key material (40 or more of
   base64's characters) was anywhere on its line or the next two. On a minified line, which runs on for megabytes, any

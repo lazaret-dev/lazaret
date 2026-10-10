@@ -148,6 +148,7 @@ class Marketplace(base.Ecosystem):
                 got = None
             if got is not None:
                 entries.append(v)
+        why = None                       # (why a pre-release is taken with no version asked for)
         if want is not None:
             chosen = [v for v in entries if v["version"] == want]
             if not chosen:
@@ -156,6 +157,7 @@ class Marketplace(base.Ecosystem):
             # (newest first, as the gallery answers; the release VS Code installs, else a pre-release)
             releases = [v for v in entries if _properties(v).get(PRE_RELEASE, "").lower() != "true"]
             pool = releases or entries
+            why = None if releases else "the extension has no release"
             if not pool:
                 raise base.FetchError("vscode: the Marketplace's answer has no version that is one")
             chosen = [v for v in pool if v["version"] == pool[0]["version"]]
@@ -195,6 +197,8 @@ class Marketplace(base.Ecosystem):
                 "verified": publisher.get("isDomainVerified") is True, "domain": _text(publisher.get("domain"), 200),
                 "installs": installs, "preRelease": props.get(PRE_RELEASE, "").lower() == "true",
                 "lastUpdated": _text(chosen[0].get("lastUpdated"), 40), "digest": None, **brings}
+        if why and info["preRelease"]:
+            info["preReleaseReason"] = why
         return base.Resolution(version, artifacts, skipped, info)
 
     @staticmethod

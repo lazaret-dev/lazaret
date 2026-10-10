@@ -184,7 +184,14 @@ class ResolveTests(unittest.TestCase):
         self.assertEqual((res[0], res.info["preRelease"]), ("2.1.0", True))
         self.assertEqual(vsm.ECOSYSTEM.resolve("p.x", "1.0.0", self.fetch(served(ext)))[0], "1.0.0")
         only_pre = extension("p", "x", [version_entry("p", "x", "0.1.0", pre=True)])
-        self.assertEqual(vsm.ECOSYSTEM.resolve("p.x", None, self.fetch(served(only_pre)))[0], "0.1.0")
+        res = vsm.ECOSYSTEM.resolve("p.x", None, self.fetch(served(only_pre)))
+        self.assertEqual((res[0], res.info["preReleaseReason"]), ("0.1.0", "the extension has no release"))
+        self.assertEqual(repo.registry_lines({"ecosystem": "vscode", "registryInfo": {"preRelease": True, **{
+            k: res.info[k] for k in ("verified", "installs", "preReleaseReason")}}})[1],
+            "Visual Studio Marketplace: a pre-release version, taken with no version asked for: the extension has no "
+            "release")
+        # (a release, or a version asked for, has no reason)
+        self.assertNotIn("preReleaseReason", vsm.ECOSYSTEM.resolve("p.x", "2.1.0", self.fetch(served(ext))).info)
 
     def test_what_the_marketplace_says_of_the_publisher_and_what_the_extension_brings(self):
         entries = [version_entry("example", "pack", "2.0.0", deps="Example.Base, bad name,a.b.c", pack="example.other")]

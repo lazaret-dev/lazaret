@@ -5,8 +5,12 @@ published for, each checked against the SHA-256 the registry publishes beside it
                  pattern: an extension the editor would not install is not one to scan), at most 128 characters each.
                  Open VSX and the editor compare them without case; `identity` lowercases.
     versions     the base rule (`[A-Za-z0-9._-]`, at most 100 characters); the editor's are SemVer.
-    the API      `https://open-vsx.org/api/<namespace>/<name>`: the latest version as Open VSX names it (a pre-release
-                 can be the latest: `versionAlias`), `/<version>` for another. `downloads` maps each target platform
+    the API      `https://open-vsx.org/api/<namespace>/<name>`: the latest version as Open VSX names it, a pre-release
+                 when that is the newest (`versionAlias`), `/<version>` for another. With no version asked for, the
+                 newest release is scanned, as the editors install it (OVSX-LATEST): when the latest is a pre-release,
+                 the query API (`/api/-/query`, newest first) is read for the newest release, at most
+                 MAX_RELEASE_SEARCH files in pages of RELEASE_PAGE; the pre-release when there is none, and the
+                 result says why (`preReleaseReason`). `downloads` maps each target platform
                  the version is published for to its `.vsix`; `/api/<namespace>/<name>/<platform>/<version>` is one
                  platform's document, and its `files.sha256` names that file's digest. `verified` says the namespace
                  has an owner and the publisher is one of them; `dependencies` and `bundledExtensions` are the
@@ -53,6 +57,10 @@ MAX_LISTED = 500                         # the extensions it needs, the members 
 MAX_DIGEST_BYTES = 1024                  # a `.sha256` file is 64 hex digits
 HISTORY_PAGE = 1000                      # the query API's largest page
 MAX_HISTORY = 5000                       # the versions' entries (each per platform) a history reads
+#: A page of the query API read for a release: each entry holds up to a hundred of the extension's versions' URLs
+#: (`allVersions`), about 9 KB (rust-lang.rust-analyzer's, Oct 9), so a page is under half a megabyte.
+RELEASE_PAGE = 50
+MAX_RELEASE_SEARCH = 500                 # the newest files read for a release when the latest is a pre-release
 
 _PART_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9-]*")
 _NAME_CHAR = re.compile(r"[A-Za-z0-9.-]")
@@ -174,11 +182,43 @@ class OpenVSX(base.Ecosystem):
             raise base.FetchError("openvsx: the digest the registry published is not a SHA-256")
         return text.lower()
 
+    def _newest_release(self, name, fetch):
+        """(the newest release of `name`, None) from the query API's answer, newest first as it answers, at most
+        MAX_RELEASE_SEARCH files read and none after the first page that holds a release (the newest by SemVer among
+        that page's: `editorcompat.version_key`, as the editors order versions); (None, why) when there is none: the
+        extension has no release, or none among the files read. An entry the registry does not serve is not one."""
+        offset = 0
+        while offset < MAX_RELEASE_SEARCH:
+            entries, total = self._query(name, fetch, offset, RELEASE_PAGE)
+            releases = []
+            for e in entries:
+                if e.get("preRelease") is True or e.get("downloadable") is False:
+                    continue
+                try:
+                    got = self.check_version(e.get("version")) if isinstance(e.get("version"), str) else None
+                except base.SpecError:
+                    got = None
+                if got is not None:
+                    releases.append(got)
+            if releases:
+                return max(releases, key=editorcompat.version_key), None
+            offset += RELEASE_PAGE
+            if offset >= total or not entries:
+                return None, "the extension has no release"
+        return None, f"no release among the newest {MAX_RELEASE_SEARCH} files Open VSX lists"
+
     def resolve(self, name, version, fetch):
         ns, ext = self.check_name(name).split(".")
         want = self.check_version(version)
         root = f"{API}/{self.segment(ns)}/{self.segment(ext)}"
         doc = self._document(root + (f"/{self.segment(want)}" if want else ""), fetch, ns, ext, want)
+        why = None
+        if want is None and doc.get("preRelease") is True:
+            # (the latest is a pre-release: the editors install the newest release, and the pre-release only when there
+            # is none; Open VSX's `latest` is the newest version of either kind)
+            release, why = self._newest_release(name, fetch)
+            if release is not None:
+                doc = self._document(f"{root}/{self.segment(release)}", fetch, ns, ext, release)
         version = doc["version"]
         downloads = doc.get("downloads")
         if not isinstance(downloads, dict) or not downloads:
@@ -214,6 +254,8 @@ class OpenVSX(base.Ecosystem):
                 "publishedBy": _text(publisher.get("loginName"), 100), "provider": _text(publisher.get("provider"), 40),
                 "preRelease": doc.get("preRelease") is True, "deprecated": doc.get("deprecated") is True,
                 "timestamp": _text(doc.get("timestamp"), 40), **listed}
+        if why and info["preRelease"]:
+            info["preReleaseReason"] = why
         return base.Resolution(version, artifacts, skipped, info)
 
     def verify(self, data, entry, name, version):

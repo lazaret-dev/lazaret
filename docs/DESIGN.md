@@ -1249,7 +1249,20 @@ host `openvsx.eclipsecontent.org` its file URLs redirect to). The result's
 `registryInfo` says whether the namespace is verified, who published the
 version, a pre-release, deprecated; `extensionDependencies` and
 `startupEvent` come from the files' `package.json`. Requests to the API are
-paced (0.5 s), as Open VSX asks of anonymous clients.
+paced (0.5 s), as Open VSX asks of anonymous clients. With no version asked
+for, the newest release is scanned, as the editors install it
+(OVSX-LATEST): what the API calls latest is the newest version of either
+kind (redhat.vscode-yaml's nightly pre-release, on Oct 9), so when it is a
+pre-release the query API is read, newest first, in pages of 50 files, for
+the first page that holds a release, and the newest release there by SemVer
+is taken. At most 500 files are read: rust-lang.rust-analyzer's newest
+release, 0.3.2053, comes after some 1,500 pre-release versions, each
+published for several platforms (13,140 files in all on Oct 9), and each
+file of the query's answer carries up to a hundred of the versions' URLs
+(about 9 KB). With no
+release found, the pre-release is scanned and `registryInfo.preReleaseReason`
+says why (no release at all, or none among the files read); the
+Marketplace's module says the first the same way.
 
 **The Visual Studio Marketplace (`ecosystems/vsmarketplace.py`, E-1's second
 part, decision 11).** `lazaret-registry scan vscode:publisher.name[@version]`
