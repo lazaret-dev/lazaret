@@ -195,6 +195,11 @@ ADVERSARIAL = {
                     + "\n-----END RSA PRIVATE KEY-----\n"),
     "cfg/template.pem": ("-----BEGIN RSA PRIVATE KEY-----\n" + "privatekey" * 6
                          + "\n-----END RSA PRIVATE KEY-----\n"),
+    # S-TOKEN-PEM: a header counts only with its key right after it (an encrypted key's Proc-Type: too)
+    "cfg/pem-note.yaml": ('header: "-----BEGIN PRIVATE KEY-----"  # see MIIEpAIBAAKCAQEA3Bq7' + "Zq8vN3pL0wX7rT2mK9sB\n"
+                          'pk: "-----BEGIN PRIVATE KEY-----\\n...\\n-----END PRIVATE KEY-----"\n'),
+    "cfg/enc.pem": ("-----BEGIN RSA " "PRIVATE KEY-----\nProc-Type: 4,ENCRYPTED\nDEK-Info: AES-128-CBC,0123456789ABCDEF\n\n"
+                    "MIIEpAIBAAKCAQEA3Bq7" + "Zq8vN3pL0wX7rT2mK9sB" * 2 + "\n-----END RSA PRIVATE KEY-----\n"),
     "cfg/Dockerfile": "FROM scratch\nENV API_TOKEN=Zq8vN3pL0wX7rT2m\nARG NPM_TOKEN\n",
     "cfg/.npmrc": "//registry.invalid/:_authToken=Zq8vN3pL0wX7rT2mK9sB4hF6jD1\n",
     "cfg/package-lock.json": '{"packages": {"": {"token": "ghp_' + "e5F6" * 9 + '"}}}\n',   # a lockfile: not read

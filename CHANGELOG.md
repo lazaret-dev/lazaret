@@ -858,6 +858,21 @@ project is pre-1.0, so the 0.x API may still change.
 
 ### Fixed
 
+- **S-TOKEN took a private-key header with no key after it for a key (S-TOKEN-PEM; rule set 2.65.0).** The token
+  rule's private-key alternative is the header alone, and a header counted as a key when key material (40 or more of
+  base64's characters) was anywhere on its line or the next two. On a minified line, which runs on for megabytes, any
+  long run did: jose's `importPKCS8`, which checks a string by its header
+  (`pkcs8.indexOf('-----BEGIN PRIVATE KEY-----') !== 0`), made two BLOCKERs in the bundles of redhat.vscode-yaml
+  1.25.0 (found by the live checks), as it would in a project or a `--deps` scan of any bundle that holds it. Now the
+  key must begin right after its header: past what a string or a concatenation puts there (blanks, the escapes `\n`
+  `\r` `\t`, a backslash that ends the line, quotes and a string's prefix such as `b"` or `r#"`, `#`, `+`, `,` and
+  `.`) on the header's line, or at the start of the first of the next two lines that holds anything (a comment's marks
+  aside). An encrypted key's `Proc-Type:` counts as its key (on lines of its own, such a key was not reported: its key
+  lines come after the `DEK-Info` line and a blank one). And past a header without its key, the line's other tokens
+  are read, where the header hid them (an AWS key after one on a minified line was not reported). In the engine, the
+  dashboard, and the reading of config files on both sides (`configsecrets.key_follows`, `keyFollows`). A line that
+  holds many headers is read in one walk, each header's key looked for in place: the config files' reading searched
+  the rest of the line for each (over 45 seconds for a line of 60,000, a fifth of a second now).
 - **`lazaret-sca --update-bundle` failed wherever the native transport is used (F-13, NET-1).** The SCA's feeds go
   over the native transport, each with its own byte budget, and an OSV export's was 4 GiB, past the 2 GiB the native
   transport carries, which refused every export before it connected (`a budget of more than 2147483648 bytes`), so no

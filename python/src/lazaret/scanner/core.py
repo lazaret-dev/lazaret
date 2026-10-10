@@ -2464,14 +2464,13 @@ CONFIG_SECRET_RULE = {
 
 def _config_token_col(line, lines, i):
     """Column of the first S-TOKEN match on a config line that is reported: not
-    a documentation sample, and a private-key header only with key material
-    after it, on the line or the next two (configsecrets.key_material)."""
+    a documentation sample, and a private-key header only with its key right
+    after it, on the line or at the start of the next (configsecrets.key_follows)."""
     for m in _TOKEN_RULE["re"].finditer(line):
         text = m.group(0)
         if configsecrets.documentation_token(text):
             continue
-        if text.startswith("-----BEGIN") and not any(
-                configsecrets.key_material(t) for t in [line[m.end():]] + lines[i + 1:i + 3]):
+        if text.startswith("-----BEGIN") and not configsecrets.key_follows(line, m.end(), lines[i + 1:i + 3]):
             continue
         return m.start()
     return None

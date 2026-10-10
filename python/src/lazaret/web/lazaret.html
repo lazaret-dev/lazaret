@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-P69gkwcijYNXaCEvwfxVIzJba7AqttHVz5Tvj6K3WyU='; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-a31GW+rJrAfq2w8jdhSdZBI4X9/umRmU5L7nqIgbplU='; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'">
 <title>Lazaret — Security &amp; Quality Review</title>
 <style>
   :root{
@@ -4481,14 +4481,54 @@ function hiddenUnicodeIssue(path, lineNo, lines, col, run, runsCode) {
 }
 
 
-// A "-----BEGIN ... PRIVATE KEY-----" header alone is not a key: libraries keep the
-// header as a constant to recognize key files. Require base64 key material after it,
-// on the same line or the next two. Twin of core._token_has_material.
-const PEM_BODY_RE = /[A-Za-z0-9+/]{40}[A-Za-z0-9+/]*={0,2}/;   // {40}…*, not {40,}: see pycompat AT_LEAST_RE
-function tokenHasMaterial(line, lines, i) {
-  const t = findSecretToken(line);
-  if (!t || !t.text.startsWith("-----BEGIN")) return true;
-  return [line.slice(t.end), ...lines.slice(i + 1, i + 3)].some((x) => PEM_BODY_RE.test(x));
+// S-TOKEN-PEM: a "-----BEGIN ... PRIVATE KEY-----" header counts only with its key right after
+// it: key material, or an encrypted key's "Proc-Type:", past the separators a string or a
+// concatenation puts there (blanks, the escapes \n \r \t, a backslash that ends the line,
+// quotes and a string's prefix before one (b" rb' u8" r#"), #, +, ",", and .), on its line; or,
+// where the line ends with them, at the start of the first of the next two lines that holds
+// anything (a comment's # * / aside). Key material further on is not the header's: a minified
+// line runs on for megabytes, and libraries keep the header alone to recognize a key file.
+// Twin of scanfile.rs's pem_has_material and token_col.
+const PEM_BODY_AT = /[A-Za-z0-9+/]{40}[A-Za-z0-9+/]*={0,2}/y;   // {40}…*, not {40,}: see pycompat AT_LEAST_RE
+const STRING_PREFIX_AT = /[A-Za-z][A-Za-z0-9]{0,2}#*["']/y;
+function pastPemSeparators(s, k, lineStart) {
+  while (k < s.length) {
+    const c = s[k];
+    if (PY_SPACE_SET.has(c) || c === '"' || c === "'" || c === "`" || c === "+" || c === "," || c === "." || c === "#") k++;
+    else if (lineStart && (c === "*" || c === "/")) k++;
+    else if (c === "\\") {
+      let j = k + 1;
+      while (s[j] === "\\") j++;
+      if (s[j] === "n" || s[j] === "r" || s[j] === "t") { k = j + 1; continue; }
+      while (j < s.length && PY_SPACE_SET.has(s[j])) j++;   // a line continued
+      if (j < s.length) break;
+      k = j;
+    } else {
+      STRING_PREFIX_AT.lastIndex = k;                        // a string's prefix and its quote
+      if (!STRING_PREFIX_AT.test(s)) break;
+      k = STRING_PREFIX_AT.lastIndex;
+    }
+  }
+  return k;
+}
+function pemKeyAt(s, k) { PEM_BODY_AT.lastIndex = k; return PEM_BODY_AT.test(s) || s.startsWith("Proc-Type:", k); }
+function pemHasMaterial(line, end, lines, i) {
+  const k = pastPemSeparators(line, end, false);
+  if (k < line.length) return pemKeyAt(line, k);
+  for (const next of lines.slice(i + 1, i + 3)) {
+    const j = pastPemSeparators(next, 0, true);
+    if (j < next.length) return pemKeyAt(next, j);
+  }
+  return false;
+}
+/** Column of the first token on a line that is reported (a header only with its key), else -1. */
+function tokenCol(line, lines, i) {
+  let t, from = 0;
+  while ((t = findSecretToken(line, from))) {
+    if (!t.text.startsWith("-----BEGIN") || pemHasMaterial(line, t.end, lines, i)) return t.index;
+    from = Math.max(t.end, t.index + 1);
+  }
+  return -1;
 }
 
 // ---- intra-file taint ------------------------------------------------------
@@ -5006,7 +5046,7 @@ function scanLines(path, content, lines, lang, ctx, issues) {
       if (col < 0) continue;
       if (r.need && !r.need.test(mline)) continue;
       if (r.skip && r.skip.test(mline)) continue;
-      if (r.id === "S-TOKEN" && !tokenHasMaterial(mline, mlines, i)) continue;
+      if (r.id === "S-TOKEN" && (col = tokenCol(mline, mlines, i)) < 0) continue;
       if (r.id === "S-TOKEN" || r.id === "S-SECRET") secretLines.add(i);
       issues.push(mkIssue(r, path, i + 1, lines, col));
     }

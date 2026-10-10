@@ -10,11 +10,15 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { run, scanConfigFile, isConfigFile } from "../src/index.js";
 import {
-  configCommentSpans, secretCol, redactConfigValues, documentationToken, keyMaterial, JWT_IO_PAYLOAD,
+  configCommentSpans, secretCol, redactConfigValues, documentationToken, keyFollows as keyFollowsAt, JWT_IO_PAYLOAD,
 } from "../src/lib/configsecrets.js";
 
 const PASS = "Zq8!vN3pL0wX7r";
 const TOKEN = "ghp_" + "a1B2".repeat(9);
+// a made-up private key, in pieces (tests/fixtures/README.md); BODY is 64 of base64's characters, mixed
+const HEADER = "-----BEGIN " + "PRIVATE KEY-----", FOOTER = "-----END " + "PRIVATE KEY-----";
+const RSA_HEADER = "-----BEGIN RSA " + "PRIVATE KEY-----", RSA_FOOTER = "-----END RSA " + "PRIVATE KEY-----";
+const BODY = "MIIEvQIB" + "ADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQC7Zq8vN3pL0wX7rT2mK9sB";
 
 test("config file names", () => {
   for (const n of [".env", ".env.local", "prod.env", "config.json", "app.yaml", "ci.yml", "setup.cfg",
@@ -62,12 +66,46 @@ test("context lines lose credential-named values, not references", () => {
   assert.equal(redactConfigValues('"token": "x", "api_key": "${KEY}"'), '"token": [redacted], "api_key": "${KEY}"');
 });
 
-test("documentation samples and key material", () => {
+test("documentation samples", () => {
   assert.ok(documentationToken("AKI\x41IOSFODNN7EXAMPLE"));
   assert.ok(!documentationToken("AKI\x412345ABCD6789WXYZ"));
   assert.ok(documentationToken("eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9." + JWT_IO_PAYLOAD));
-  assert.ok(keyMaterial("MIIEpAIBAAKCAQEA3Bq7Zq8vN3pL0wX7rT2mK9sBZq8vN3pL0wX7rT2mK9sB"));
-  assert.ok(!keyMaterial("privatekey".repeat(6)));
+});
+
+test("a private-key header's key comes right after it (S-TOKEN-PEM; test_private_key_material's twin)", () => {
+  const keyFollows = (after, following) => keyFollowsAt(HEADER + after, HEADER.length, following);
+  assert.ok(keyFollows("\\n" + BODY, []));
+  assert.ok(keyFollows('\\\\n" + "' + BODY, []));                 // a string inside a string, then joined
+  assert.ok(keyFollows('",', ['    "' + BODY + '",']));
+  assert.ok(keyFollows("", ["", "  # " + BODY]));                  // a blank line, then a comment's mark
+  assert.ok(keyFollows("", ["Proc-Type: 4,ENCRYPTED"]));
+  assert.ok(keyFollows("\\nProc-Type: 4,ENCRYPTED\\n", []));
+  assert.ok(keyFollows('\\n" \\', ['      "' + BODY + '\\n"']));        // a line continued
+  assert.ok(keyFollows('\\n" .', ['      "' + BODY + '";']));             // PHP's and Perl's concatenation
+  assert.ok(!keyFollows("\\ x", [BODY]));                               // a backslash, and then not an escape
+  assert.ok(keyFollows('\\n"', ['    b"' + BODY + '\\n"']));                // a string's prefix
+  assert.ok(keyFollows('"#,', ['    r#"' + BODY + '"#,']));                 // Rust's raw strings
+  assert.ok(!keyFollows('"', ['    bytes("' + BODY + '")']));               // not a prefix: a call
+  assert.ok(!keyFollows('"))throw new TypeError("x");var t="' + BODY + '"', []));
+  assert.ok(!keyFollows('"', ["const x = 1; // " + BODY]));
+  assert.ok(!keyFollows("\\n" + "privatekey".repeat(6), []));     // not mixed: a template's text
+  assert.ok(!keyFollows("", ["", "  ", "x"]));                     // the first line that holds anything decides
+  assert.ok(!keyFollows("", []));
+  const found = (name, text) => scanConfigFile(name, text).filter((i) => i.rule === "S-TOKEN").map((i) => i.line);
+  const sa = `{\n  "type": "service_account",\n  "private_key": "${HEADER}\\n${BODY}\\n${FOOTER}\\n",\n`
+    + '  "client_email": "svc@example.invalid"\n}\n';
+  assert.deepEqual(found("sa.json", sa), [3]);
+  assert.deepEqual(found(".env", `PRIVATE_KEY="${HEADER}\\n...\\n${FOOTER}"\n`), []);
+  assert.deepEqual(found("c.yaml", `header: "${HEADER}"  # see ${BODY}\n`), []);
+  assert.deepEqual(found("k.pem", `${RSA_HEADER}\n${BODY}\n${RSA_FOOTER}\n`), [1]);
+  assert.deepEqual(found("e.pem", `${RSA_HEADER}\nProc-Type: 4,ENCRYPTED\nDEK-Info: AES-128-CBC,0123456789ABCDEF\n\n`
+    + `${BODY}\n${RSA_FOOTER}\n`), [1]);
+  assert.deepEqual(found("f.pem", `${RSA_HEADER}\n\n\n${BODY}\n${RSA_FOOTER}\n`), []);
+  // 60,000 headers without their keys on one line, then an AWS key: one walk, each header's key looked for in place
+  const many = `x="${HEADER}")x(`.repeat(60_000) + '"AKI' + 'AQWERTYUIOPASDFGH"';
+  const t0 = Date.now();
+  assert.deepEqual(found("x.env", `a = 1\n${many}\n`), [2]);
+  assert.ok(Date.now() - t0 < 10_000);
 });
 
 test("scanConfigFile: tokens everywhere, secrets outside comments, markers in comments only", () => {

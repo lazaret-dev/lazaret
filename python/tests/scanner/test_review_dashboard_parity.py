@@ -179,6 +179,20 @@ ADVERSARIAL = [
     ("pem.py", "py", 'K = """-----BEGIN RSA PRIVATE KEY-----\n' + PEM_LINE * 3 + '-----END RSA PRIVATE KEY-----"""\n'
      'eval(x)\nH = "-----BEGIN OPENSSH PRIVATE KEY-----"\neval(y)\n'),
     ("pem.js", "js", 'k = "-----BEGIN EC PRIVATE KEY-----' + PEM_LINE.strip() + '-----END EC PRIVATE KEY-----"; eval(k)\n'),
+    # S-TOKEN-PEM: a header counts only with its key right after it (on its line past a string's separators, or at
+    # the start of the next line that holds anything), and past one without, the line's other tokens are read
+    ("pem_jose.js", "js", 'async function E(e){if(0!==e.indexOf("-----BEGIN PRIVATE KEY-----"))throw new TypeError("x")}'
+     'var t="' + PEM_LINE.strip() + '",k="AKI' + 'AQWERTYUIOPASDFGH";\nconst H = "-----BEGIN PRIVATE KEY-----"\n'
+     'const p = "src/runtime/node/key/import/pkcs8/whatever/aaaaaaaa"\n'),
+    ("pem_strings.js", "js", "const j = '-----BEGIN PRIVATE KEY-----\\\\n' +\n  '" + PEM_LINE.strip() + "';\n"
+     "const k = `-----BEGIN RSA PRIVATE KEY-----\\n" + PEM_LINE.strip() + "`;\n"),
+    ("pem_lines.py", "py", 'K = [\n    "-----BEGIN RSA PRIVATE KEY-----",\n    "' + PEM_LINE.strip() + '",\n]\n'
+     "# -----BEGIN PRIVATE KEY-----\n# " + PEM_LINE + 'E = """-----BEGIN RSA ' 'PRIVATE KEY-----\n' 'Proc-Type: 4,ENCRYPTED\n'
+     'DEK-Info: AES-128-CBC,0123456789ABCDEF\n\n' + PEM_LINE + '"""\nF = """-----BEGIN RSA PRIVATE KEY-----\n\n\n'
+     + PEM_LINE + '"""\nG = "-----BEGIN RSA ' 'PRIVATE KEY-----\\nProc-Type: 4,ENCRYPTED\\nDEK-Info: AES-128-CBC,0123\\n"\n'
+     'H = "-----BEGIN RSA PRIVATE KEY-----\\n" \\\n    "' + PEM_LINE.strip() + '\\n"\n'
+     '$k = "-----BEGIN PRIVATE KEY-----\\n" .\n    "' + PEM_LINE.strip() + '";\n'
+     'B = (\n    b"-----BEGIN PRIVATE KEY-----\\n"\n    b"' + PEM_LINE.strip() + '\\n"\n)\n'),
     ("tokens.js", "js", 'const t = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.abc";\neval(t)\n'
      'const g = "github_pat_' + "A1b2" * 7 + '";\neval(g)\nconst s = "' + "eyJ" * 50 + '";\n'),
     ("tokens.py", "py", 'a = "AKI\x41IOSFODNN7ABCDEFG"\nb = "xox\x62-1234567890-abcdef"\nc = "sk_live_' + "a1" * 10 + '"\n'

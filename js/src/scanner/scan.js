@@ -12,7 +12,7 @@ import { cpLen, cpPrefix, pyRepr, isPySpace } from "../lib/pycompat.js";
 import { findSecretToken, registerScanContext, REDACT } from "../lib/redact.js";
 import { truncatedIssue, normalizeNewlines, treeJoin } from "../lib/fs.js";
 import { pinUnicode } from "../lib/unicode13.js";
-import { documentationToken, keyMaterial, secretCol, redactConfigValues, NETRC_NAMES, netrcAnonymous } from "../lib/configsecrets.js";
+import { documentationToken, keyFollows, secretCol, redactConfigValues, NETRC_NAMES, netrcAnonymous } from "../lib/configsecrets.js";
 import { configKind, ownerDir, entries as autorunEntries, localCommand } from "../lib/autorun.js";
 import { isWorkflow, findings as workflowFindings, hardening as workflowHardening,
   hardeningRule as workflowHardeningRule } from "../lib/ghworkflow.js";
@@ -159,16 +159,15 @@ export const CONFIG_SECRET_RULE = {
 
 /**
  * Column of the first S-TOKEN match on a config line that is reported: not a
- * documentation sample, and a private-key header only with key material after
- * it, on the line or the next two (core._config_token_col). -1 if none.
+ * documentation sample, and a private-key header only with its key right after
+ * it, on the line or at the start of the next (core._config_token_col). -1 if none.
  */
 function configTokenCol(line, lines, i) {
   let t, from = 0;
   while ((t = findSecretToken(line, from))) {
     from = t.end;
     if (documentationToken(t.text)) continue;
-    if (t.text.startsWith("-----BEGIN")
-        && ![line.slice(t.end), ...lines.slice(i + 1, i + 3)].some((x) => keyMaterial(x))) continue;
+    if (t.text.startsWith("-----BEGIN") && !keyFollows(line, t.end, lines.slice(i + 1, i + 3))) continue;
     return t.index;
   }
   return -1;

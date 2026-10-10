@@ -356,21 +356,95 @@ fn joined_eval_decode(ctx: &FileCtx, j: &Join, i: usize, rule: &Matcher) -> Opti
     }
 }
 
-/// core._token_has_material: a private-key header needs key material after
-/// it, on its line or the next two (match text).
-fn token_has_material(ctx: &FileCtx, rule: &Matcher, line: &[u32], i: usize) -> bool {
-    let (a, b) = match rule.search(line) {
-        None => return true,
-        Some(s) => s,
-    };
-    if !pystr::starts_with(&line[a..], "-----BEGIN") {
-        return true;
+/// What a string or a concatenation puts between a private-key header and its key: blanks, the escapes \n \r \t
+/// (with any number of backslashes, as a string inside a string writes them), backslashes that end the line (a line
+/// continued), quotes and a string's prefix before one (`b"`, `rb'`, `u8"`, Rust's `r#"`: string_prefix_end), `#`
+/// (a raw string's closing marks, a comment's), `+`, `,` and `.` (PHP's and Perl's concatenation); at the start of a
+/// line after the header's, a comment's `*` and `/` too. The index past them.
+fn past_pem_separators(line: &[u32], mut k: usize, line_start: bool) -> usize {
+    while k < line.len() {
+        let c = line[k];
+        if pystr::is_space(c) {
+            k += 1;
+            continue;
+        }
+        match char::from_u32(c) {
+            Some('"' | '\'' | '`' | '+' | ',' | '.' | '#') => k += 1,
+            Some('*' | '/') if line_start => k += 1,
+            Some('\\') => {
+                let mut j = k + 1;
+                while line.get(j) == Some(&('\\' as u32)) {
+                    j += 1;
+                }
+                match line.get(j).and_then(|&d| char::from_u32(d)) {
+                    Some('n' | 'r' | 't') => k = j + 1,
+                    _ if line[j..].iter().all(|&d| pystr::is_space(d)) => k = line.len(),
+                    _ => break,
+                }
+            }
+            Some(c) if c.is_ascii_alphabetic() => match string_prefix_end(line, k) {
+                Some(e) => k = e,
+                None => break,
+            },
+            _ => break,
+        }
     }
+    k
+}
+
+/// Past a string's prefix and its opening quote at `k` (Python's `b"` `rb'` `f"`, C's `L"` `u8"`, Rust's `b"` `r#"`:
+/// a letter, at most two more letters or digits, any `#`, then a quote); None where that is not there (key material
+/// runs on past three characters).
+fn string_prefix_end(line: &[u32], k: usize) -> Option<usize> {
+    let mut j = k + 1;
+    while j < line.len() && j < k + 3 && char::from_u32(line[j]).is_some_and(|c| c.is_ascii_alphanumeric()) {
+        j += 1;
+    }
+    while line.get(j) == Some(&('#' as u32)) {
+        j += 1;
+    }
+    match line.get(j).and_then(|&d| char::from_u32(d)) {
+        Some('"' | '\'') => Some(j + 1),
+        _ => None,
+    }
+}
+
+/// S-TOKEN-PEM: a private-key header counts only with its key right after it: key material (`_PEM_BODY_RE`), or an
+/// encrypted key's `Proc-Type:`, past the separators a string or a concatenation puts there, on the header's line;
+/// or, where the line ends with them, at the start of the first of the next two lines that holds anything. Key
+/// material further on is not the header's: a minified file's line runs on for megabytes, and a library that
+/// recognizes a key file by its header keeps the header alone (jose's importPKCS8,
+/// `pkcs8.indexOf('-----BEGIN PRIVATE KEY-----') !== 0`, made two BLOCKERs in a bundle of redhat.vscode-yaml).
+fn pem_has_material(ctx: &FileCtx, line: &[u32], end: usize, i: usize) -> bool {
     let body = ctx.p.re("_PEM_BODY_RE");
-    if body.search(&line[b..]).is_some() {
-        return true;
+    let key_at = |s: &[u32], k: usize| {
+        body.match_at(s, k as isize, s.len() as isize).is_some() || pystr::starts_with(&s[k..], "Proc-Type:")
+    };
+    let k = past_pem_separators(line, end, false);
+    if k < line.len() {
+        return key_at(line, k);
     }
-    (i + 1..ctx.len().min(i + 3)).any(|k| body.search(ctx.mline(k)).is_some())
+    for n in i + 1..ctx.len().min(i + 3) {
+        let next = ctx.mline(n);
+        let k = past_pem_separators(next, 0, true);
+        if k < next.len() {
+            return key_at(next, k);
+        }
+    }
+    false
+}
+
+/// The column of the first token on a line that is reported: a private-key header only with its key
+/// (pem_has_material); past a header without one, the search goes on.
+fn token_col(ctx: &FileCtx, rule: &Matcher, line: &[u32], i: usize) -> Option<usize> {
+    let t = match rule {
+        Matcher::Token(t) => t,
+        other => return other.search(line).map(|s| s.0),
+    };
+    // (one walk over the line's tokens: searching again from each header would read the rest of the line each time)
+    t.iter(line, 0)
+        .find(|&(a, b)| !pystr::starts_with(&line[a..], "-----BEGIN") || pem_has_material(ctx, line, b, i))
+        .map(|(a, _)| a)
 }
 
 /// core.hex_hidden_text: the readable text hidden in a line's \xNN escapes.
@@ -1370,9 +1444,14 @@ pub fn findings_of(ctx: &FileCtx, lang_name: Option<&str>, opts: &Options, snipp
                     continue;
                 }
             }
-            if a.kind == Kind::Token && !token_has_material(ctx, &r.re, mline, i) {
-                continue;
-            }
+            let col = if a.kind == Kind::Token {
+                match token_col(ctx, &r.re, mline, i) {
+                    None => continue,
+                    Some(c) => c,
+                }
+            } else {
+                col
+            };
             if a.kind == Kind::Token || a.kind == Kind::Secret {
                 secret_lines.insert(i);
             }

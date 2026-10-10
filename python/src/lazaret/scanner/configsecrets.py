@@ -319,12 +319,62 @@ _PEM_BODY_RE = re.compile(r"[A-Za-z0-9+/]{40,}={0,2}")
 _MIXED_RE = (re.compile(r"[A-Z]"), re.compile(r"[a-z]"), re.compile(r"[0-9]"))
 
 
-def key_material(text):
-    """True when `text` holds a line of private-key material: a base64 run of
-    40 or more characters that mixes upper case, lower case and digits (a
-    template's "privatekeyprivatekey…" does not)."""
-    m = _PEM_BODY_RE.search(text)
-    return bool(m and all(r.search(m.group()) for r in _MIXED_RE))
+_STRING_PREFIX_RE = re.compile(r"[A-Za-z][A-Za-z0-9]{0,2}#*[\"']")
+
+
+def _past_pem_separators(text, k, line_start):
+    """The index past what a string or a concatenation puts between a private-key header and its key: blanks, the
+    escapes \\n \\r \\t (with any number of backslashes), backslashes that end the line (a line continued),
+    quotes and a string's prefix before one (`b"`, `rb'`, `u8"`, Rust's `r#"`), `#` (a raw string's closing marks, a
+    comment's), `+`, `,` and `.` (PHP's and Perl's concatenation); at the start of a line after the header's, a
+    comment's `*` and `/` too."""
+    while k < len(text):
+        c = text[k]
+        if c.isspace() or c in "\"'`+,.#" or (line_start and c in "*/"):
+            k += 1
+        elif c == "\\":
+            j = k + 1
+            while j < len(text) and text[j] == "\\":
+                j += 1
+            if j < len(text) and text[j] in "nrt":
+                k = j + 1
+                continue
+            while j < len(text) and text[j].isspace():
+                j += 1
+            if j < len(text):
+                break
+            k = j
+        else:
+            m = _STRING_PREFIX_RE.match(text, k)       # a string's prefix and its quote
+            if not m:
+                break
+            k = m.end()
+    return k
+
+
+def _key_at(text, k):
+    """True when a private key begins at `text[k]`: key material, a base64 run of 40 or more characters that mixes
+    upper case, lower case and digits (a template's "privatekeyprivatekey…" does not), or an encrypted key's
+    "Proc-Type:"."""
+    m = _PEM_BODY_RE.match(text, k)
+    return bool(m and all(r.search(m.group()) for r in _MIXED_RE)) or text.startswith("Proc-Type:", k)
+
+
+def key_follows(line, end, following):
+    """True when a private-key header's key comes right after it (S-TOKEN-PEM): key material, or an encrypted key's
+    "Proc-Type:" (_key_at), past the separators a string or a concatenation puts there, on the header's line (`line`,
+    the header ending at `end`: read in place, as a line can hold many headers); or, where that line ends with them,
+    at the start of the first of the `following` lines (the caller's window: the next two) that holds anything. Key
+    material further on is not the header's: a minified line runs on for megabytes, and a library keeps a header
+    alone to recognize a key."""
+    k = _past_pem_separators(line, end, False)
+    if k < len(line):
+        return _key_at(line, k)
+    for line in following:
+        k = _past_pem_separators(line, 0, True)
+        if k < len(line):
+            return _key_at(line, k)
+    return False
 
 
 def documentation_token(text):

@@ -7,7 +7,7 @@
 // (pyRe), and run in linear time.
 // Never import from ../scanner/ (RESTRUCTURE.md §5).
 
-import { pyRe, cpLen, pyStrip } from "./pycompat.js";
+import { pyRe, cpLen, pyStrip, isPySpace } from "./pycompat.js";
 import { pyExt } from "./binary.js";
 
 export const CONFIG_EXTS = new Set([
@@ -237,11 +237,47 @@ export function redactConfigValues(line, netrc = false) {
 }
 
 // ---- S-TOKEN in config files -----------------------------------------------------
-const PEM_BODY_RE = /[A-Za-z0-9+/]{40}[A-Za-z0-9+/]*={0,2}/;   // {40}…*, not {40,}: see pycompat AT_LEAST_RE
-/** True when `text` holds a line of private-key material that mixes cases and digits (configsecrets.key_material). */
-export function keyMaterial(text) {
-  const m = PEM_BODY_RE.exec(text);
-  return !!m && /[A-Z]/.test(m[0]) && /[a-z]/.test(m[0]) && /[0-9]/.test(m[0]);
+const PEM_BODY_AT = /[A-Za-z0-9+/]{40}[A-Za-z0-9+/]*={0,2}/y;   // {40}…*, not {40,}: see pycompat AT_LEAST_RE
+const STRING_PREFIX_AT = /[A-Za-z][A-Za-z0-9]{0,2}#*["']/y;
+/** The index past a private-key header's separators (configsecrets._past_pem_separators). */
+function pastPemSeparators(s, k, lineStart) {
+  while (k < s.length) {
+    const c = s[k];
+    if (isPySpace(c) || '"\'`+,.#'.includes(c) || (lineStart && "*/".includes(c))) k++;
+    else if (c === "\\") {
+      let j = k + 1;
+      while (s[j] === "\\") j++;
+      if (s[j] === "n" || s[j] === "r" || s[j] === "t") { k = j + 1; continue; }
+      while (j < s.length && isPySpace(s[j])) j++;   // a line continued
+      if (j < s.length) break;
+      k = j;
+    } else {
+      STRING_PREFIX_AT.lastIndex = k;                // a string's prefix and its quote (b" rb' u8" r#")
+      if (!STRING_PREFIX_AT.test(s)) break;
+      k = STRING_PREFIX_AT.lastIndex;
+    }
+  }
+  return k;
+}
+/** True when a private key begins at s[k]: mixed key material, or "Proc-Type:" (configsecrets._key_at). */
+function keyAt(s, k) {
+  PEM_BODY_AT.lastIndex = k;
+  const m = PEM_BODY_AT.exec(s);
+  return (!!m && /[A-Z]/.test(m[0]) && /[a-z]/.test(m[0]) && /[0-9]/.test(m[0])) || s.startsWith("Proc-Type:", k);
+}
+/**
+ * True when a private-key header's key comes right after it (configsecrets.key_follows): keyAt past the separators
+ * on the header's line (`line`, the header ending at `end`, read in place), or, where that line ends with them, at
+ * the start of the first of the `following` lines that holds anything.
+ */
+export function keyFollows(line, end, following) {
+  const k = pastPemSeparators(line, end, false);
+  if (k < line.length) return keyAt(line, k);
+  for (const line of following) {
+    const j = pastPemSeparators(line, 0, true);
+    if (j < line.length) return keyAt(line, j);
+  }
+  return false;
 }
 
 export const JWT_IO_PAYLOAD = "eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ";
