@@ -3,33 +3,31 @@
 Quarantine for your dependencies: security & quality scanner for Python and
 JavaScript projects.
 
-Its rules run in Lazaret's native engine, written in Rust and compiled to
-WebAssembly (`native/lazaret.wasm`, in the package: nothing to compile at
-install, no native addon, no dependency): every pattern rule, the
-obfuscation, entropy and secret detection, the supply-chain tests and the
-cross-file received-code follower — the same engine the Python package's
-platform wheels carry, held to the Python package's `lazaret.scanner` case by
-case. The intra-file taint and SQL-sink analyzers, the cross-file taint pass
-and the reports are JavaScript, ported from the Python package. For a project
-scan, `npx lazaret` and `python -m lazaret` are tested
+Its scanning runs in Lazaret's native engine, written in Rust and compiled
+to WebAssembly (`native/lazaret.wasm`, in the package: nothing to compile at
+install, no native addon, no dependency), the same engine the Python
+package's platform wheels carry: every pattern rule, the obfuscation, entropy
+and secret detection, the supply-chain tests, the intra-file taint, SQL-sink
+and function passes (since 0.1.9), and the cross-file taint passes, for
+JavaScript and for Python files alike (`X-*` findings: a request value passed
+into a function, in the same or another file, whose parameter reaches a sink
+— directly or through the local variables that hold it — or a helper's
+returned request value reaching one; a proven RegExp's `exec()` is not a
+command sink; calls bind through `require()`/`import` to the function the
+file names, and a call it can't resolve reaches every project function of
+that name). The checks of config and data files (credentials, auto-run
+settings, CI workflows) and the reports are the package's own JavaScript.
+For a project scan, `npx lazaret` and `python -m lazaret` are tested
 (`python/tests/architecture/test_js_parity.py`) to report the same issues
 (rule, file, line, severity, message), metrics, ratings, gate result and exit
-code. Both run the JavaScript half of the cross-file flow engine (`X-*`
-findings: a request value passed into a function, in the same or another
-file, whose parameter reaches a sink — directly or through the local
-variables that hold it — or a helper's returned request value reaching one; a
-proven RegExp's `exec()` is not a command sink; calls bind through
-`require()`/`import` to the function the file names, and a call it can't
-resolve reaches every project function of that name). The Python engine
-additionally follows flows through Python files and accepts taint configs;
-registry auditing (`lazaret-registry`) is Python-only. When the project has
-Python files, the gate's cross-file condition says so: `No cross-file taint
-flows (JavaScript only: 3 Python files not analyzed)`. Through 0.1.7 this
-package ran JavaScript ports of those rules and tests; the findings are the
-same.
+code. Custom taint configs, registry auditing (`lazaret-registry`), the
+install guard, SCA and the MCP server come with the Python package (`pip
+install lazaret`). Through 0.1.7 this package ran JavaScript ports of the
+rules and tests; the findings are the same.
 
 ```
 npx lazaret check ./my-project
+npx lazaret hook                 # the files staged for commit (below)
 ```
 
 ## What it does

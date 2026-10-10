@@ -16,16 +16,19 @@ and the tests are the source of truth — fix the doc.
 ## 1. What Lazaret is
 
 Lazaret is a static security, supply-chain and quality scanner for Python,
-JavaScript and SQL projects, plus a registry auditor for npm/PyPI packages. It
+JavaScript and SQL projects, plus a registry auditor for npm and PyPI packages,
+Go modules, crates and VS Code extensions, and an install guard. It
 ships as **two independently-installable packages that must behave identically**:
 
 - **PyPI `lazaret`** — the Python package. Standard library only (its
   scanning engine is the native library every wheel carries). Console
-  scripts: `lazaret` (project scan), `lazaret-registry` (package audit),
-  `lazaret-mcp` (MCP server), `lazaret-sca` (CVE bundle + SCA).
+  scripts: `lazaret` (project scan; `lazaret guard`, `lazaret hook`),
+  `lazaret-registry` (package audit), `lazaret-mcp` (MCP server),
+  `lazaret-sca` (CVE bundle + SCA), `lazaret-guard` (the install guard).
 - **npm `lazaret`** — the Node engine. Zero runtime dependencies, ES modules.
-  It is the **project scanner only** (`lazaret <dir>`); registry auditing,
-  custom taint specs, SCA and the MCP server are Python-only.
+  It is the **project scanner** (`lazaret <dir>`) and the commit-time gate
+  (`lazaret hook`); registry auditing, the install guard, custom taint specs,
+  SCA and the MCP server are Python-only.
 
 Both packages run one **native engine** written in Rust (`rust/`, no
 crates): every wheel of the PyPI package carries it as a library, and the
