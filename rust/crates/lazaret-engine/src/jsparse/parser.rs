@@ -1163,7 +1163,7 @@ impl<'a> Parser<'a> {
                 self.semicolon()?;
                 return Ok(Some(self.extend_to_pe(node)));
             }
-            if v == W_LET && (pk == T::Name || (pk == T::P && (pv == P_LBRACK || pv == P_LBRACE))) {
+            if v == W_LET && let_declares(pk, pv) {
                 let node = self.parse_var(LET, false)?;
                 self.semicolon()?;
                 return Ok(Some(self.extend_to_pe(node)));
@@ -1422,7 +1422,7 @@ impl<'a> Parser<'a> {
                 let v = self.tok.v;
                 if v == W_VAR || v == W_CONST {
                     kind = Some(if v == W_VAR { VAR } else { CONST });
-                } else if v == W_LET && (pk == T::Name || (pk == T::P && (pv == P_LBRACK || pv == P_LBRACE))) {
+                } else if v == W_LET && let_declares(pk, pv) {
                     kind = Some(LET);
                 } else if v == W_USING && pk == T::Name && pv != W_OF && pv != W_IN && !pnl {
                     kind = Some(USING);
@@ -1439,7 +1439,7 @@ impl<'a> Parser<'a> {
                 let of = self.tok.v == W_OF;
                 self.next()?;
                 if self.node(init).kind != Kind::VariableDeclaration {
-                    init = self.to_pattern(init, false)?;
+                    init = self.assign_target(init)?;     // (a call too: `for (f() in x)`, as V8 reads it)
                 }
                 let right = if of { self.parse_maybe_assign(false, true)? } else { self.parse_expression(false)? };
                 self.expect_p(P_RPAREN)?;
@@ -2448,6 +2448,12 @@ impl<'a> Parser<'a> {
         let members = self.commit(mark);
         Ok(self.fin(Kind::TSEnumDeclaration, at, [eid, members, NONE, NONE]))
     }
+}
+
+/// `let` followed by this token starts a declaration: a name, `[` or `{`; not `in` or `instanceof`, which make `let` a
+/// name in sloppy code (`for (let in x)`, `let in x`, which V8 compiles in a script: JS-PARSE-STRICT).
+fn let_declares(pk: T, pv: u32) -> bool {
+    (pk == T::Name && pv != W_IN && pv != W_INSTANCEOF) || (pk == T::P && (pv == P_LBRACK || pv == P_LBRACE))
 }
 
 /// _PARAM_MODIFIERS

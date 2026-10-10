@@ -93,6 +93,8 @@ pub const CALLS: &[&str] = &[
     "secrets.providers", "secrets.identify", "secrets.request", "secrets.judge", "secrets.find",
     // 0.1.9 (D-13): what a JavaScript module loads when it runs (jsloads.rs)
     "js_loads",
+    // 0.1.9 (JS-PARSE-STRICT): the parser's refusal of a text the supply-chain model reads on its tree
+    "js_refusal",
 ];
 
 fn dead_drop(v: Option<(usize, PyStr)>) -> Value {
@@ -538,6 +540,15 @@ fn dispatch(name: &str, args: &Value, text: &[u32]) -> Result<Value, CallError> 
                 None => Value::Null,
             }
         }
+        "js_refusal" => {
+            // [line, reason] of the parser's refusal of a JavaScript text the supply-chain model would read on its tree
+            // (TypeScript's reading refusing it too), or null: the parse alone (JS-PARSE-STRICT, the registry's
+            // report of an install script whose tree its test could not read)
+            match crate::jsflow::supply::parse_refusal(text) {
+                Some((line, reason)) => Value::Arr(vec![Value::Int(line as i64), Value::Str(reason)]),
+                None => Value::Null,
+            }
+        }
         "py_parse" => {
             // ast.parse(text) as Python 3.13 builds it, as JSON (pyparse/out.rs),
             // or {"error": {"line": n, "reason": …}}; "spans": each node's start
@@ -799,8 +810,17 @@ fn dispatch(name: &str, args: &Value, text: &[u32]) -> Result<Value, CallError> 
             let declared = args.get("declared").map(|_| arg_strs(args, "declared"));
             // `own`: the release's name (D-9), as for install_script_risk
             let _own = if args.get("own").is_some() { Some(signs::own_release(&arg_str(args, "own")?)) } else { None };
+            // `refused`: a third element, the parser's refusal of a JavaScript text whose tree the test then could
+            // not read ([line, reason], or null: JS-PARSE-STRICT, said in a registry scan's report); asked first, it
+            // reads the text once for the test (facts' cache)
+            let refused = matches!(args.get("refused"), Some(Value::Bool(true)));
+            let why = if refused && lang == Some("js") { crate::jsflow::supply::refusal(text) } else { None };
             let (reasons, line) = signs::import_time_risk_with(p, text, lang, declared.as_deref());
-            Value::Arr(vec![strs(&reasons), line.map(|l| Value::Int(l as i64)).unwrap_or(Value::Null)])
+            let mut out = vec![strs(&reasons), line.map(|l| Value::Int(l as i64)).unwrap_or(Value::Null)];
+            if refused {
+                out.push(why.map(|(l, r)| Value::Arr(vec![Value::Int(l as i64), Value::Str(r)])).unwrap_or(Value::Null));
+            }
+            Value::Arr(out)
         }
         "import_time_severity" => Value::str(signs::import_time_severity(p, &arg_strs(args, "reasons"))),
         "decoded_view" => Value::Str(signs::decoded_view(p, text, lang)),

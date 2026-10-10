@@ -8,14 +8,17 @@ loads, the cross-file pass) are lost. The oracle is
 `scripts/fuzz/js_v8_compile.cjs` (a node subprocess; V8 compiles only,
 nothing is run).
 
-A fixed list, not a fuzzer: the parser is stricter than V8 in places (it
-bounds nesting; it refuses an assignment to a call, which V8 leaves to a
-runtime error), the backlog's JS-PARSE-STRICT, so "parse everything V8
-compiles" is not yet the contract; `js-parse` in `scripts/fuzz` fuzzes the
-parser for robustness. The list is constructs a package's script uses,
-Annex B's HTML-like comments among them (F-12: `<!--` and `-->` were syntax
-errors, so a file that opened with `<!-- a banner` did not parse). Skipped
-where node is missing.
+A fixed list, not a fuzzer: `js-parse` in `scripts/fuzz` fuzzes the parser
+for robustness. The list is constructs a package's script uses, Annex B's
+HTML-like comments among them (F-12: `<!--` and `-->` were syntax errors, so
+a file that opened with `<!-- a banner` did not parse), and what the parser
+refused before JS-PARSE-STRICT (Oct 9): an assignment or an update to a call,
+which V8 compiles and leaves to a ReferenceError when the line runs, and
+`let` as a name in sloppy code. What V8 refuses, the parser refuses too (the
+forms next to those). The one place left where the parser is stricter is
+nesting: it stops past MAX_DEPTH (jsparse), well short of V8, and a
+registry scan says which of a package's files it could not read
+(SC-UNPARSED-CODE). Skipped where node is missing.
 """
 import json
 import os
@@ -57,7 +60,19 @@ VALID = [
     "function f(a = 1, { b } = {}, ...rest) { return new.target; }\n",
     "label: for (;;) { break label; } do x(); while (0);\n",
     "with (o) { x = 1; } var yield = 2, await = 3; async = 4;\n",       # script-only forms
+    # JS-PARSE-STRICT: an assignment or an update to a call (a ReferenceError when it runs; in modules too), `let`
+    # as a name before `in` and `instanceof` (scripts)
+    "function f() {}\nif (0) { f() = 1; f() += 1; f() **= 2; f()++; --f(); (f()) = 1; f() = g() = 1; }\n",
+    "if (0) { for (f() in x); for (f() of x); for ((f()) in x); }\n",
+    "var let = 1; for (let in {}); if (0) { let in x; let instanceof X; for (let.x in y); }\n",
 ]
+
+# What V8 refuses, as scripts and as modules, next to what JS-PARSE-STRICT made the parser read: a call as the target
+# of a logical assignment or inside a pattern, `new`, an optional chain, a tagged template, `import()`, a sequence,
+# `for (let of x)`
+REFUSED = ["f() &&= 1;", "f() ||= 1;", "f() ??= 1;", "[f()] = [];", "({a: f()} = {});", "[a, f()] = [1, 2];",
+           "new f() = 1;", "a?.b = 1;", "a?.b() = 1;", "f()?.x = 1;", "f`x` = 1;", "import(x) = 1;", "(a, f()) = 1;",
+           "for (let of x);"]
 
 
 @unittest.skipUnless(NODE, "node is not installed")
@@ -105,6 +120,20 @@ class JsParseVsV8Tests(unittest.TestCase):
         for src in VALID:
             with self.subTest(src=src[:50]):
                 self.assertTrue(self.parses(src), f"V8 runs it, js_parse does not: {src!r}")
+
+    def test_what_v8_refuses_the_parser_refuses(self):
+        for src in REFUSED:
+            with self.subTest(src=src):
+                self.assertEqual(self.v8(src), {"script": False, "module": False})
+                self.assertFalse(self.parses(src))
+
+    def test_nesting_past_the_bound_is_the_one_place_left(self):
+        # V8 compiles 1,000 nested arrays; the parser reads 127 (MAX_DEPTH, 256, counts two for each): such a file
+        # keeps only the text followers, and a registry scan says so (SC-UNPARSED-CODE)
+        deep = "x = " + "[" * 200 + "]" * 200 + ";\n"
+        self.assertTrue(self.v8(deep)["script"])
+        self.assertFalse(self.parses(deep))
+        self.assertTrue(self.parses("x = " + "[" * 120 + "]" * 120 + ";\n"))
 
     def test_an_html_comment_hides_nothing_a_module_runs(self):
         # V8 refuses a module that holds an HTML-like comment (Node: "HTML comments are not allowed in modules"),

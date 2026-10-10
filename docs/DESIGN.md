@@ -719,6 +719,15 @@ their registry names (`unusedDependencies`), and `scan_package` makes a new
 one among them CRITICAL. The comparison itself, `registry/unused_deps.py`,
 takes declared names, used names and an ecosystem's normalizer, so a crate's
 or a Go module's dependencies go through the same function.
+SC-UNPARSED-CODE (0.1.9, JS-PARSE-STRICT; INFO) lists the JavaScript members
+the parser refused where a test that reads the syntax tree read them (the
+import-time test, SC-USE-RISK's, the install-script test's, D-13's loads),
+with each one's line and reason: there the text followers answered alone.
+The import-time test gives the refusal when it is asked for
+(`import_time_risk`'s `refused`, which `_import_risks` asks for), from the
+supply model's cache, so the file is parsed once; an install script is
+parsed once more (`js_refusal`, the parse alone:
+`_unparsed_install_scripts`); a TypeScript declaration is left out.
 
 SCA for Go and Rust (0.1.9): the inventory reads `go.mod` (its `replace`
 lines applied), `go.sum` only for a module whose `go` directive is before

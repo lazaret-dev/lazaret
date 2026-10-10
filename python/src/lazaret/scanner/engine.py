@@ -226,7 +226,7 @@ def _names_args(declared, own):
     return args
 
 
-def import_time_risks(items, texts=None, declared=None, own=None, names=None):
+def import_time_risks(items, texts=None, declared=None, own=None, names=None, refused=False):
     """[(text, lang)] -> the import-time test of each, (reasons, line), in
     order; an item the engine could not answer is the _native.NativeError it
     stands for (see unanswered, error_issue). `texts`: the scan's Texts.
@@ -235,15 +235,22 @@ def import_time_risks(items, texts=None, declared=None, own=None, names=None):
     `own`: the release's name, when known (D-9: its own code is not
     another package's). `names`: for each item, the (declared, own) of the
     package it belongs to, or None, in place of `declared` and `own` (a
-    --deps scan's installed packages: D-12b, D-9c)."""
+    --deps scan's installed packages: D-12b, D-9c). `refused`: each answer
+    is (reasons, line, refused), `refused` the parser's refusal of a
+    JavaScript text whose tree the test could not read, (line, reason), or
+    None (JS-PARSE-STRICT: the text followers answered there)."""
     if not items:
         return []
     shared = _names_args(declared, own)
     calls = []
     for k, (text, lang) in enumerate(items):
-        extra = shared if names is None or names[k] is None else _names_args(*names[k])
-        calls.append(({"lang": lang, **extra} if lang else dict(extra), text))
+        extra = dict(shared if names is None or names[k] is None else _names_args(*names[k]))
+        if refused:
+            extra["refused"] = True
+        calls.append(({"lang": lang, **extra} if lang else extra, text))
     answers = _batch("import_time_risk", calls, texts)
+    if refused:
+        return [a if unanswered(a) else (a[0], a[1], tuple(a[2]) if len(a) > 2 and a[2] else None) for a in answers]
     return [a if unanswered(a) else (a[0], a[1]) for a in answers]
 
 

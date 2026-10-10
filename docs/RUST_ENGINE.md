@@ -1014,6 +1014,26 @@ its deepest on a 1 MiB thread) and between 64 and 128 KiB in WebAssembly,
 whose stack is 8 MiB (§3). Every input gives a tree or an error, never a
 panic.
 
+The bound was measured against the stacks the engine parses on (Oct 9,
+JS-PARSE-STRICT; a build with the bound at 4,096, each construct of
+`NESTINGS` given to every call that reads the tree: `js_parse`, `js_loads`,
+`import_time_risk`, `scan_file`, `install_script_risk`, `js_flow`).
+Natively, on the engine's own 8 MiB thread (§16), every construct reads to
+that bound. In WebAssembly on Node's main thread, whose frames go on V8's
+own stack (about 984 KB), a call stops with "Maximum call stack size
+exceeded" (the npm package says the engine stopped) from 992 nested tagged
+templates, the costliest construct; every construct reads to a depth of
+976 (in the bound's units: a level of parentheses or arrays counts two, of
+objects three), 3.8 times 256. So the bound stays: a deeper one wants the
+npm package's engine on a thread with a larger stack (a Worker's
+`resourceLimits.stackSizeMb`). V8 compiles deeper nesting (1,000 nested
+arrays, objects or blocks, 2,000 parentheses), so a file nested past the
+bound is the one kind of source V8 compiles that the parser refuses since
+JS-PARSE-STRICT (an assignment or an update to a call, `f() = 1`,
+`f()++`, `for (f() in x)`, and `let` as a name before `in` and
+`instanceof` were the others); a registry scan lists the package files
+the parser refuses (SC-UNPARSED-CODE).
+
 **jsparse.py's bugs, reproduced:**
 
 - `(...a, b)` that is not an arrow function's parameter list raises

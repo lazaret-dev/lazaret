@@ -858,6 +858,22 @@ project is pre-1.0, so the 0.x API may still change.
 
 ### Fixed
 
+- **Security: the JavaScript parser reads an assignment or an update to a call, and `let` as a name, as V8 does; a
+  registry scan lists the package files it could not read (JS-PARSE-STRICT; rule set 2.66.0).** The supply-chain
+  tests read a package's JavaScript on the engine's tree where the parser reads it, and on its text where it does not.
+  The parser refused some sources V8 compiles: an assignment or an update to a call (`f() = 1`, `f() += 1`, `f()++`,
+  `for (f() in x)`), which V8 compiles in scripts and modules and leaves to a ReferenceError when the line runs, and
+  `let` as a name before `in` or `instanceof` in a script (`for (let in x)`). One such line, even one that never runs
+  (`if (0) { f() = 1; }`), left the whole file to the text followers, and with it what only the tree answers: another
+  package's code rewritten (D-9), a program a dropper carves out of another file, the loads D-13 compares with
+  package.json, and in project mode the cross-file pass. The parser reads them now, and still refuses what V8 refuses
+  (`f() &&= 1`, `[f()] = []`, `new f() = 1`, `a?.b = 1`). Nesting stays bounded (127 nested arrays, 126 parentheses,
+  84 objects, 256 blocks), where V8 compiles 1,000 and more (the bound keeps the WebAssembly build within the stack
+  of Node's main thread, with room to spare). So a registry or guard scan now lists the package's JavaScript files that one
+  of its tests read and the parser refused, with each one's line and the parser's reason, in one SC-UNPARSED-CODE
+  finding (INFO: the verdict does not move); a TypeScript declaration, which nothing runs, is not listed. On the
+  popular set's and the benchmark's npm releases the parser refuses 11 of their 37,490 JavaScript files, and V8
+  refuses each of them too. Found reviewing F-12 (R48-6).
 - **`lazaret-registry scan openvsx:namespace.name` with no version scans the newest release, as the editors install it
   (OVSX-LATEST).** It scanned what Open VSX's API calls latest, the newest version of either kind: redhat.vscode-yaml
   was scanned as 1.25.2026100908, a nightly pre-release, where the Marketplace's module took the release (found by the

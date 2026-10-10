@@ -63,7 +63,9 @@
 //! ahead that crosses it again costs nothing more. Nesting deeper than
 //! [`MAX_DEPTH`] (statements, expressions, types, JSX) is an error,
 //! "nesting too deep": the recursion is bounded by it, and fits a 1 MiB
-//! stack. No input panics: every input gives a tree or an error.
+//! stack (in WebAssembly on Node's main thread every construct reads to 3.8
+//! times the bound: docs/RUST_ENGINE.md §12). No input panics: every input
+//! gives a tree or an error.
 
 pub mod expr;
 pub mod out;

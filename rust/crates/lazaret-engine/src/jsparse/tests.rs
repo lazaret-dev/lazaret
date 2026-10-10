@@ -169,6 +169,30 @@ fn an_html_like_open_comment_after_code_is_marked() {
 }
 
 #[test]
+fn a_call_as_a_target_and_let_as_a_name_as_v8_reads_them() {
+    // (JS-PARSE-STRICT) V8 compiles these, in scripts (and the calls in modules), and leaves an assignment or an update
+    // to a call to a ReferenceError when it runs: the parser reads them, the call as the target
+    for src in ["f() = 1;", "f() += 1;", "f() **= 2;", "f()++;", "--f();", "(f()) = 1;", "f() = g() = 1;",
+                "for (f() in x);", "for (f() of x);", "for ((f()) in x);", "for (let in x);", "let in x;",
+                "let instanceof X;", "for (let instanceof X;;);", "for (let.x in y);", "let = 1;"] {
+        assert!(parse(&cp(src), false, true).is_ok(), "{}", src);
+    }
+    assert!(json("f() = 1;", false, true).contains(
+        r#""type":"AssignmentExpression","line":1,"operator":"=","left":{"type":"CallExpression""#));
+    assert!(json("f()++;", false, true).contains(r#""type":"UpdateExpression","line":1,"operator":"++","prefix":false,"argument":{"type":"CallExpression""#));
+    assert!(json("for (let in x);", false, true).contains(r#""left":{"type":"Identifier","line":1,"name":"let"}"#));
+    // and V8 refuses these: a call in a logical assignment or in a pattern, `new`, an optional chain, a tagged
+    // template, `import()`, `for (let of x)`
+    for (src, why) in [("f() &&= 1;", "invalid assignment target"), ("f() ??= 1;", "invalid assignment target"),
+                       ("[f()] = [];", "invalid destructuring target"), ("({a: f()} = {});", "invalid destructuring target"),
+                       ("new f() = 1;", "invalid destructuring target"), ("a?.b = 1;", "invalid destructuring target"),
+                       ("f`x` = 1;", "invalid destructuring target"), ("import(x) = 1;", "invalid destructuring target"),
+                       ("[a, f()] = [1, 2];", "invalid destructuring target"), ("for (let of x);", "unexpected token 'x'")] {
+        assert_eq!(error(src, false, true), (1, why.to_string()), "{}", src);
+    }
+}
+
+#[test]
 fn every_nesting_ends_where_jsparse_ends_it() {
     for n in NESTINGS {
         let deepest = nested(n, n.8);

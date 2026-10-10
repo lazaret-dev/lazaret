@@ -659,6 +659,11 @@ impl<'p> Eval<'p> {
     fn assign_pattern(&mut self, pat: NodeId, v: V, scope: ScopeId) -> R<()> {
         use jt::{A, B};
         let t = self.a().kind(pat);
+        if t == Kind::CallExpression {
+            // (a call as a for-in or for-of loop's target: made, then a ReferenceError: JS-PARSE-STRICT)
+            self.expr(Some(pat), scope)?;
+            return Ok(());
+        }
         if t == Kind::Identifier {
             if let Some(b) = self.bind(pat, scope) {
                 self.write(b, v, true);
@@ -953,6 +958,12 @@ impl<'p> Eval<'p> {
         let (left, right) = (self.a().at(e, A), self.a().at(e, B));
         let op = self.a().operator(e);
         let lk = self.a().kind(left);
+        if lk == Kind::CallExpression {
+            // (JS-PARSE-STRICT: a call as the target, `f() = v`, `f() += v`: V8 makes the call, then throws a
+            // ReferenceError, before the value on the right is worked out)
+            self.expr(Some(left), scope)?;
+            return Ok(V::empty());
+        }
         if op == "=" {
             let v = self.expr(Some(right), scope)?;
             if lk == Kind::Identifier {

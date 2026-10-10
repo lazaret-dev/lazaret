@@ -82,9 +82,9 @@ class CallSiteTests(unittest.TestCase):
     def test_one_file_under_two_paths_is_asked_once(self):
         calls = self.counting()
         scan(tgz(PACKAGE), contentcache.Memo())
-        asked = [text for (batch,), _kw in calls["call_answers"].call_args_list for _name, _args, text in batch]
-        self.assertEqual(asked.count(PACKAGE["lib/a.js"]), 1)
-        self.assertEqual(len(asked), len(set(asked)))
+        asked = [(name, text) for (batch,), _kw in calls["call_answers"].call_args_list for name, _args, text in batch]
+        self.assertEqual([text for _name, text in asked].count(PACKAGE["lib/a.js"]), 1)
+        self.assertEqual(len(asked), len(set(asked)))           # each question once for one content
 
     def test_an_answer_the_engine_could_not_give_is_not_kept(self):
         real = repo._engine.call_answers

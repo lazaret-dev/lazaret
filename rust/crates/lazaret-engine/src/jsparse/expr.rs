@@ -100,7 +100,11 @@ impl<'a> Parser<'a> {
                 }
             }
             if assign_op(op) {
-                let target = if op == P_ASSIGN { self.to_pattern(left, false)? } else { self.simple_target(left)? };
+                let target = match op {
+                    P_ASSIGN => self.assign_target(left)?,
+                    P_AND_ASSIGN | P_OR_ASSIGN | P_NULLISH_ASSIGN => self.simple_target(left)?,
+                    _ => self.update_target(left)?,
+                };
                 self.next()?;
                 let right = self.parse_maybe_assign(no_in, true)?;
                 return Ok(self.fin_x(Kind::AssignmentExpression, at, op as u8, 0, [target, right, NONE, NONE]));
@@ -115,6 +119,26 @@ impl<'a> Parser<'a> {
             return Ok(node);
         }
         self.fail_at("invalid assignment target", n.line)
+    }
+
+    /// The target of `=` (JS-PARSE-STRICT): a pattern, or a call, which V8 compiles in scripts and modules alike and
+    /// leaves to a ReferenceError when it runs (`f() = 1`, `(f()) = 1`), the call made first; not inside a pattern
+    /// (`[f()] = []`), which V8 refuses.
+    pub(super) fn assign_target(&mut self, node: NodeId) -> R<NodeId> {
+        if self.node(node).kind == Kind::CallExpression {
+            return Ok(node);
+        }
+        self.to_pattern(node, false)
+    }
+
+    /// The target of an update (`++`, `--`) or of a compound assignment (`+=` …): simple_target's, or a call, as V8
+    /// reads them (a ReferenceError when it runs); a logical assignment's (`&&=` `||=` `??=`) stays simple_target's,
+    /// as V8 refuses a call there.
+    pub(super) fn update_target(&mut self, node: NodeId) -> R<NodeId> {
+        if self.node(node).kind == Kind::CallExpression {
+            return Ok(node);
+        }
+        self.simple_target(node)
     }
 
     pub(super) fn starts_expression(&self) -> bool {
@@ -319,7 +343,7 @@ impl<'a> Parser<'a> {
         let mut expr = self.parse_expr_subscripts()?;
         if self.tok.t == T::P && (self.tok.v == P_INC || self.tok.v == P_DEC) && !self.tok.nl {
             let (op, e) = (self.tok.v, self.tok.e);
-            let arg = self.simple_target(expr)?;
+            let arg = self.update_target(expr)?;
             expr = self.mk(Kind::UpdateExpression, oat, e, op as u8, 0, [arg, NONE, NONE, NONE]);
             self.next()?;
         }
@@ -329,7 +353,7 @@ impl<'a> Parser<'a> {
             expr = match kind {
                 Kind::AwaitExpression => self.fin(Kind::AwaitExpression, pat, [expr, NONE, NONE, NONE]),
                 Kind::UpdateExpression => {
-                    let arg = self.simple_target(expr)?;
+                    let arg = self.update_target(expr)?;
                     self.fin_x(Kind::UpdateExpression, pat, op as u8, PREFIX, [arg, NONE, NONE, NONE])
                 }
                 _ => self.fin_x(Kind::UnaryExpression, pat, op as u8, PREFIX, [expr, NONE, NONE, NONE]),
