@@ -381,6 +381,33 @@ class BuildTests(unittest.TestCase):
             placed = src / "lazaret" / "_native" / self.b.native_library_name(self.platform)
             self.assertEqual(placed.read_bytes(), pathlib.Path(the_library()).read_bytes())
 
+    def test_a_second_editable_install_replaces_the_library_with_a_new_file(self):
+        """The library is never rewritten in place: macOS keeps the code signature it read for a
+        file, and on Apple silicon kills a process that loads a library whose bytes changed under
+        it ("zsh: killed" after a second `pip install -e`). It is written beside it, renamed over it."""
+        with tempfile.TemporaryDirectory() as d:
+            src = pathlib.Path(d, "src")
+            native = src / "lazaret" / "_native"
+            native.mkdir(parents=True)
+            placed = native / self.b.native_library_name(self.platform)
+            placed.write_bytes(b"the library an earlier install built")
+            before = os.stat(placed).st_ino
+            with unittest.mock.patch.object(self.b, "SRC", src), unittest.mock.patch.dict(os.environ, self.env):
+                self.b.build_editable(d)
+            self.assertEqual(placed.read_bytes(), pathlib.Path(the_library()).read_bytes())
+            self.assertNotEqual(os.stat(placed).st_ino, before)            # a new file, not the old one rewritten
+            self.assertEqual([p.name for p in native.iterdir()], [placed.name])   # and no temporary file left
+
+    def test_a_failed_replacement_keeps_the_old_library(self):
+        with tempfile.TemporaryDirectory() as d:
+            target = pathlib.Path(d, "liblazaret_native.so")
+            target.write_bytes(b"old")
+            with unittest.mock.patch.object(self.b.os, "replace", side_effect=PermissionError("in use")):
+                with self.assertRaises(PermissionError):
+                    self.b._replace_file(target, b"new")
+            self.assertEqual(target.read_bytes(), b"old")
+            self.assertEqual(os.listdir(d), ["liblazaret_native.so"])
+
     def test_an_editable_installs_library_never_ships(self):
         """src/lazaret/_native/ (where build_editable puts the library) is not
         packed from the tree: the wheel's library is the one it is built with."""

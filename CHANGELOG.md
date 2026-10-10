@@ -873,6 +873,12 @@ aggregate):
 
 ### Fixed
 
+- **A second `pip install -e ./python` could leave Python killed on a Mac with Apple silicon.** An editable install
+  wrote the new engine over the old library in place. macOS keeps the code signature it read for a file and kills a
+  process that loads a library whose bytes changed under it (`zsh: killed`, "Python quit unexpectedly"), so after an
+  engine change, the reinstall the docs ask for could break every command that loads the engine. The library is now
+  written beside the old one and renamed over it, a new file each time, and a failure leaves the old one as it was;
+  installing again mends an install the old way left killing Python.
 - **`git status` no longer lists `python/src/lazaret/_native/` after `pip install -e ./python`.** An editable install
   compiles the engine and puts it there, where `lazaret.scanner._native` loads it, but `.gitignore` did not list the
   directory, so the library showed as untracked, one `git add .` away from a commit. `.gitignore` lists it now, and the

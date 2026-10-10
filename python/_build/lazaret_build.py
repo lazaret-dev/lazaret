@@ -512,14 +512,37 @@ def build_editable(wheel_directory, config_settings=None, metadata_directory=Non
     """PEP 660: a wheel whose only payload is a .pth file pointing at src/.
     The native library (_native_payload) is written to src/lazaret/_native/,
     where lazaret.scanner._native finds it; after a change to the engine,
-    install again (or set LAZARET_NATIVE_LIB to a fresh build)."""
+    install again (or set LAZARET_NATIVE_LIB to a fresh build). The new
+    library replaces the old one as a new file (_replace_file)."""
     _platform, native = _native_payload()
     for arcname, data in native.items():
         target = SRC / arcname
         target.parent.mkdir(exist_ok=True)
-        target.write_bytes(data)
+        _replace_file(target, data)
     pth = f"__editable__.{NAME}-{version()}.pth"
     return _write_wheel(wheel_directory, {pth: (str(SRC) + "\n").encode("utf-8")}, "any")
+
+
+def _replace_file(target, data):
+    """Put `data` at `target` as a new file: written beside it under a
+    temporary name, then renamed over it. Never rewritten in place: macOS
+    keeps the code signature it read for a file, and on Apple silicon it
+    kills a process that loads a library whose bytes changed under that
+    file (a second `pip install -e` after the first one's library had been
+    loaded: "zsh: killed", "Python quit unexpectedly"). A failure leaves the
+    old library as it was, and no temporary file."""
+    tmp = target.with_name(f".{target.name}.{os.getpid()}.tmp")
+    try:
+        with open(tmp, "wb") as f:
+            f.write(data)
+        os.chmod(tmp, 0o644)
+        os.replace(tmp, target)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
 
 
 def build_sdist(sdist_directory, config_settings=None):
