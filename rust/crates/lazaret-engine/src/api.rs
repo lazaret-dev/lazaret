@@ -44,6 +44,8 @@ pub const CALLS: &[&str] = &[
     "self_publish_at", "runs_dll", "join_string_pieces", "received_code_kind", "runs_received_code",
     "downloads_and_runs", "decodes_and_runs", "powershell_risk", "stager_at", "reverse_shell_at",
     "local_data_sent_at", "runs_own_source_at", "reads_own_source", "persistence_reasons",
+    // a .pth file's import lines (SC-PTH-EXEC)
+    "pth_line_risk",
     // phase 3 step 3: the data flow and received code on the JavaScript and Python trees (the
     // supply-chain models; {"lang": "py"} asks Python's)
     "local_data_sent_tree", "received_code_tree", "decoded_runs_tree", "dropped_run_tree",
@@ -63,18 +65,36 @@ pub const CALLS: &[&str] = &[
     "import_code", "scan_rules", "hook_command_view", "hex_view", "lookalike_view",
     // 0.1.8: the cross-file follower, each package on its own budget
     "cross_file",
+    // 0.1.9 (R-1): a crate's code read for what it does when it is built, starts or is used
+    "rs_crate",
+    // 0.1.9 (G-1): a Go module's code read for what its init code and the rest do
+    "go_package",
+    // 0.1.9 (Part C): what a vendored crate's Cargo.toml and a vendor/modules.txt say (vendor.rs), for --deps
+    "cargo_layout", "go_vendored_modules",
     // the JavaScript parser (jsparse.py's trees)
     "js_parse", "js_parse_file",
     // the Python parser (Python 3.13's ast trees)
     "py_parse",
     // linre, the linear-time regex engine the patterns run on
-    "linre.probe", "linre.check",
+    "linre.probe", "linre.check", "linre.refused",
     // the lexers (lex/): a text read once into its language's tokens
     "lex.tokens", "lex.structure",
     // phase 3: project mode's cross-file JavaScript taint (jsflow/)
     "js_flow",
     // phase 3: project mode's cross-file Python taint (pyflow/)
     "py_flow",
+    // 0.1.9 (FE-1): texts handed over once and named by id after (texts.rs)
+    "texts.put", "texts.drop", "texts.info",
+    // 0.1.9 (Q-1): project mode's passes one at a time (scan_file with dep false runs them all)
+    "taint_scan", "functions",
+    // 0.1.9 (Q-1 step 4): a project file's line metrics: comment lines, lines of code, the duplication windows
+    "file_metrics",
+    // 0.1.9 (V-1 stage 2): live secret verification's table and logic (secrets.rs); each package makes the call
+    "secrets.providers", "secrets.identify", "secrets.request", "secrets.judge", "secrets.find",
+    // 0.1.9 (D-13): what a JavaScript module loads when it runs (jsloads.rs)
+    "js_loads",
+    // 0.1.9 (JS-PARSE-STRICT): the parser's refusal of a text the supply-chain model reads on its tree
+    "js_refusal",
 ];
 
 fn dead_drop(v: Option<(usize, PyStr)>) -> Value {
@@ -140,11 +160,30 @@ const GATED: &[&str] = &[
 ];
 
 /// Run one call. `budget` in the arguments: the steps of the regex matcher
-/// it may take (crate::budget; the default otherwise).
+/// it may take (crate::budget; the default otherwise). `text_id` in the
+/// arguments: the call's text is that one of the store's (texts.rs), read
+/// here, and the call is given no other.
 pub fn call(name: &str, args: &Value, text: &[u32]) -> Result<Value, CallError> {
     if name == "batch" {
         return batch(args);
     }
+    if let Some(id) = args.get("text_id") {
+        let id = text_id(id)?;
+        if !text.is_empty() {
+            return Err(CallError::BadArgs(format!("{name}: a text and a text_id")));
+        }
+        let stored = crate::texts::decoded(id).ok_or_else(|| CallError::BadArgs(format!("{name}: no text {id} in the store")))?;
+        return call_text(name, args, &stored);
+    }
+    call_text(name, args, text)
+}
+
+/// A text_id's value: the id `texts.put` answered.
+fn text_id(v: &Value) -> Result<u64, CallError> {
+    v.as_i64().filter(|&n| n > 0).map(|n| n as u64).ok_or_else(|| CallError::BadArgs("text_id is not an id".into()))
+}
+
+fn call_text(name: &str, args: &Value, text: &[u32]) -> Result<Value, CallError> {
     let steps = match args.get("budget").and_then(|b| b.as_i64()) {
         Some(b) if b > 0 => b as u64,
         _ => crate::budget::DEFAULT_STEPS,
@@ -154,6 +193,33 @@ pub fn call(name: &str, args: &Value, text: &[u32]) -> Result<Value, CallError> 
     // pairs costs a pass over it)
     let _gate = if GATED.contains(&name) { crate::textgate::open(text) } else { None };
     let out = crate::budget::call_with(steps, || dispatch(name, args, text));
+    match out {
+        Ok(r) => r,
+        Err(_) => Err(CallError::Exhausted),
+    }
+}
+
+/// `call`, given the text to keep: a module's or a crate's reading (go_package, rs_crate) holds every file of it
+/// at once, so it takes the text as it is rather than a copy of each file (a copy doubled what 200 MB of Go held:
+/// aws-sdk-go's 207 million characters were 1.7 GB of text in the engine before a tree was built). The other
+/// calls borrow it.
+pub fn call_owned(name: &str, args: &Value, text: Vec<u32>) -> Result<Value, CallError> {
+    if name != "go_package" && name != "rs_crate" {
+        return call(name, args, &text);
+    }
+    let steps = match args.get("budget").and_then(|b| b.as_i64()) {
+        Some(b) if b > 0 => b as u64,
+        _ => crate::budget::DEFAULT_STEPS,
+    };
+    let mut text = Some(text);
+    let out = crate::budget::call_with(steps, || {
+        let text = text.take().unwrap_or_default();
+        if name == "go_package" {
+            go_package(args, text)
+        } else {
+            rs_crate(args, text)
+        }
+    });
     match out {
         Ok(r) => r,
         Err(_) => Err(CallError::Exhausted),
@@ -175,7 +241,7 @@ fn batch(args: &Value) -> Result<Value, CallError> {
         // what changes the engine for every call is not run alongside others
         for item in calls {
             let name = item.as_arr().and_then(|p| p.first()).and_then(|v| v.as_string()).unwrap_or_default();
-            if name == "batch" || name.starts_with("pack.") {
+            if name == "batch" || name.starts_with("pack.") || name.starts_with("texts.") {
                 return Err(CallError::BadArgs(format!("{} in a batch on threads", name)));
             }
         }
@@ -319,6 +385,22 @@ fn batch_item(item: &Value) -> Value {
     }
 }
 
+/// texts.put's lengths (code points, one per text).
+pub fn put_lengths(args: &Value) -> Result<Vec<usize>, CallError> {
+    let bad = || CallError::BadArgs("texts.put: lengths".into());
+    args.get("lengths").and_then(|l| l.as_arr()).ok_or_else(bad)?
+        .iter().map(|n| n.as_i64().filter(|&n| n >= 0).map(|n| n as usize).ok_or_else(bad)).collect()
+}
+
+/// texts.put's answer, {"ids": [id, …]}, or the reason it kept nothing (a store that would pass its bound: the caller
+/// sends those texts with its calls instead).
+pub fn texts_put_answer(r: Result<Vec<u64>, crate::texts::PutError>) -> Result<Value, CallError> {
+    match r {
+        Ok(ids) => Ok(Value::obj(vec![("ids", Value::Arr(ids.into_iter().map(|id| Value::Int(id as i64)).collect()))])),
+        Err(e) => Err(CallError::BadArgs(e.message())),
+    }
+}
+
 fn strs(v: &[PyStr]) -> Value {
     Value::Arr(v.iter().map(|s| Value::Str(s.clone())).collect())
 }
@@ -329,6 +411,22 @@ fn opt_s(v: Option<PyStr>) -> Value {
 
 fn arg_strs(args: &Value, name: &str) -> Vec<PyStr> {
     args.get(name).and_then(|v| v.as_arr()).unwrap_or(&[]).iter().filter_map(|v| v.as_str().map(|s| s.to_vec())).collect()
+}
+
+/// A file's line metrics as the packages read them: {"ncloc", "comments", "measured", "windows"}, the windows'
+/// keys as one string of 16 hexadecimal digits each.
+fn metrics_value(m: &crate::metrics::FileMetrics) -> Value {
+    use std::fmt::Write;
+    let mut windows = String::with_capacity(16 * m.windows.len());
+    for h in &m.windows {
+        let _ = write!(windows, "{h:016x}");
+    }
+    Value::obj(vec![
+        ("ncloc", Value::Int(m.ncloc as i64)),
+        ("comments", Value::Int(m.comments as i64)),
+        ("measured", Value::Int(m.measured as i64)),
+        ("windows", Value::str(&windows)),
+    ])
 }
 
 fn spans_value(sp: &[(usize, usize)]) -> Value {
@@ -370,7 +468,39 @@ fn dispatch(name: &str, args: &Value, text: &[u32]) -> Result<Value, CallError> 
             )
         }
         "pyre.escape" => Value::Str(pyre::escape(text)),
+        "texts.put" => {
+            // {"lengths": [code points, …]} and the texts one after another as the text. The library's entry point
+            // keeps the request's bytes as they came (lazaret-ffi); this is the call for a caller that holds code
+            // points (a batch's)
+            let lengths = put_lengths(args)?;
+            texts_put_answer(crate::texts::put(&lengths, &crate::texts::encode_wtf8(text)))?
+        }
+        "texts.drop" => {
+            let ids = args.get("ids").and_then(|l| l.as_arr()).ok_or_else(|| CallError::BadArgs("texts.drop: ids".into()))?;
+            let ids = ids.iter().map(text_id).collect::<Result<Vec<_>, _>>()?;
+            Value::obj(vec![("dropped", Value::Int(crate::texts::release(&ids) as i64))])
+        }
+        "texts.info" => {
+            let (n, bytes) = crate::texts::held();
+            Value::obj(vec![("texts", Value::Int(n as i64)), ("bytes", Value::Int(bytes as i64)),
+                            ("max_bytes", Value::Int(crate::texts::MAX_BYTES as i64))])
+        }
         "cross_file" => cross_file(p, args, text)?,
+        "rs_crate" => rs_crate(args, text.to_vec())?,
+        "go_package" => go_package(args, text.to_vec())?,
+        "cargo_layout" => {
+            let l = crate::vendor::cargo_layout(text);
+            Value::obj(vec![
+                ("build", match l.build {
+                    Some(crate::vendor::Build::Path(p)) => Value::Str(p),
+                    Some(crate::vendor::Build::Off) => Value::Bool(false),
+                    None => Value::Null,
+                }),
+                ("lib", l.lib_path.map(Value::Str).unwrap_or(Value::Null)),
+                ("proc_macro", l.proc_macro.map(Value::Bool).unwrap_or(Value::Null)),
+            ])
+        }
+        "go_vendored_modules" => strs(&crate::vendor::vendored_modules(text)),
         "js_flow" => js_flow(args, text)?,
         "py_flow" => py_flow(args, text)?,
         "js_parse" | "js_parse_file" => {
@@ -389,6 +519,36 @@ fn dispatch(name: &str, args: &Value, text: &[u32]) -> Result<Value, CallError> 
             let (spans, text) = (flag("spans", false), text.to_vec());
             Value::Raw(on_own_stack(move || crate::jsparse::to_json(&text, ts, jsx, spans)))
         }
+        "js_loads" => {
+            // [[specifier, line, how, package]] of what a JavaScript module loads when it runs (D-13; the npm package
+            // the specifier names, or null), or null when it does not parse; "path": its file name, for the dialect
+            let path = match args.get("path") {
+                Some(_) => arg_str(args, "path")?,
+                None => u("module.js"),
+            };
+            let text = text.to_vec();
+            match on_own_stack(move || crate::jsloads::js_loads(&text, &path)) {
+                Some(found) => Value::Arr(
+                    found
+                        .into_iter()
+                        .map(|(spec, line, how)| {
+                            let package = crate::jsloads::npm_package(&spec).map(Value::Str).unwrap_or(Value::Null);
+                            Value::Arr(vec![Value::Str(spec), Value::Int(line as i64), Value::str(how), package])
+                        })
+                        .collect(),
+                ),
+                None => Value::Null,
+            }
+        }
+        "js_refusal" => {
+            // [line, reason] of the parser's refusal of a JavaScript text the supply-chain model would read on its tree
+            // (TypeScript's reading refusing it too), or null: the parse alone (JS-PARSE-STRICT, the registry's
+            // report of an install script whose tree its test could not read)
+            match crate::jsflow::supply::parse_refusal(text) {
+                Some((line, reason)) => Value::Arr(vec![Value::Int(line as i64), Value::Str(reason)]),
+                None => Value::Null,
+            }
+        }
         "py_parse" => {
             // ast.parse(text) as Python 3.13 builds it, as JSON (pyparse/out.rs),
             // or {"error": {"line": n, "reason": …}}; "spans": each node's start
@@ -404,9 +564,129 @@ fn dispatch(name: &str, args: &Value, text: &[u32]) -> Result<Value, CallError> 
             };
             let opts = crate::scanfile::Options { dep: flag("dep", false), redact: flag("redact", true), neumaier: flag("neumaier", false) };
             if !opts.dep {
-                return Err(CallError::BadArgs("project mode is not in the native engine yet".into()));
+                // project mode (Q-1): the rules, the passes after them, the suppression markers and the cap
+                let model = crate::taint::Model::from_args(p, args).map_err(|m| CallError::BadArgs(format!("scan_file: {m}")))?;
+                if flag("metrics", false) {
+                    // and the file's line metrics (Q-1 step 4): {"issues": […], "metrics": file_metrics' answer}
+                    let (issues, m) = crate::scanfile::scan_project_metrics(p, text, lang, flag("jsx", true), &opts, &model, true);
+                    return Ok(Value::obj(vec![("issues", Value::Arr(issues)), ("metrics", metrics_value(&m.expect("asked for")))]));
+                }
+                return Ok(Value::Arr(crate::scanfile::scan_project(p, text, lang, flag("jsx", true), &opts, &model)));
             }
             Value::Arr(crate::scanfile::scan_file(p, text, lang, flag("jsx", true), &opts))
+        }
+        "taint_scan" => {
+            // project mode's intra-file taint alone (core.taint_scan): its T-* findings, before markers and the cap
+            let flag = |k: &str, d: bool| match args.get(k) {
+                Some(Value::Bool(b)) => *b,
+                _ => d,
+            };
+            let model = crate::taint::Model::from_args(p, args).map_err(|m| CallError::BadArgs(format!("taint_scan: {m}")))?;
+            let ctx = crate::filectx::FileCtx::new(p, text, crate::filectx::Lang::from(lang), flag("jsx", true));
+            let lines: Vec<&[u32]> = (0..ctx.len()).map(|i| ctx.line(i)).collect();
+            let snippets = crate::findings::Snippets::new(p, lines, flag("redact", true), flag("neumaier", false));
+            let mut found = Vec::new();
+            crate::taint::scan(&ctx, &model, &mut found);
+            Value::Arr(found.iter().map(|f| snippets.issue(f)).collect())
+        }
+        "secrets.providers" => {
+            // the table's providers: where each credential would go, for a report's notice before any call
+            let t = crate::secrets::table(p).as_ref().map_err(|m| CallError::BadArgs(format!("secrets.providers: {m}")))?;
+            Value::Arr(t.iter().map(|q| Value::obj(vec![
+                ("id", Value::str(&q.id)), ("label", Value::str(&q.label)), ("host", Value::str(&q.host)),
+                ("path", Value::str(&q.path)), ("parts", Value::Arr(q.part_names().into_iter().map(Value::str).collect())),
+            ])).collect())
+        }
+        "secrets.identify" => {
+            // the providers whose one-part pattern matches all of the text
+            let t = crate::secrets::table(p).as_ref().map_err(|m| CallError::BadArgs(format!("secrets.identify: {m}")))?;
+            Value::Arr(crate::secrets::identify(t, text).iter().map(|id| Value::str(id)).collect())
+        }
+        "secrets.find" => {
+            // {"lines": [n, …]} and those lines of one file, joined by "\n", as the text -> the credentials the providers
+            // name in them: [{"provider", "parts": {name: text}, "lines": [n, …]}] (`lazaret scan --verify-secrets`)
+            let bad = |m: &str| CallError::BadArgs(format!("secrets.find: {m}"));
+            let t = crate::secrets::table(p).as_ref().map_err(|m| bad(m))?;
+            let numbers: Vec<i64> = match args.get("lines").and_then(|l| l.as_arr()) {
+                Some(list) => list.iter().map(|n| n.as_i64()).collect::<Option<_>>().ok_or_else(|| bad("a line is not a number"))?,
+                None => return Err(bad("no lines")),
+            };
+            let texts: Vec<&[u32]> = text.split(|&c| c == '\n' as u32).collect();
+            if texts.len() != numbers.len() {
+                return Err(bad("the text is not one line for each number"));
+            }
+            let lines: Vec<(i64, Vec<u32>)> = numbers.into_iter().zip(texts).map(|(n, t)| (n, t.to_vec())).collect();
+            Value::Arr(crate::secrets::find(t, &lines).into_iter().map(|f| Value::obj(vec![
+                ("provider", Value::str(&f.provider)),
+                ("parts", Value::Obj(f.parts.into_iter().map(|(name, v)| (u(&name), Value::Str(v))).collect())),
+                ("lines", Value::Arr(f.lines.into_iter().map(Value::Int).collect())),
+            ])).collect())
+        }
+        "secrets.request" => {
+            // {"provider": id (the pack's) | "entry": {…} (one of the caller's), "parts": {name: text}, "time":
+            // "YYYYMMDDTHHMMSSZ"} -> the request, or {"refused": why} when the parts are not the provider's format
+            let bad = |m: String| CallError::BadArgs(format!("secrets.request: {m}"));
+            let owned;
+            let q = match (args.get("entry"), args.get("provider")) {
+                (Some(entry), _) => {
+                    owned = crate::secrets::provider_of(entry).map_err(bad)?;
+                    &owned
+                }
+                (None, Some(Value::Str(id))) => crate::secrets::by_id(p, &crate::pystr::to_string(id)).map_err(bad)?,
+                _ => return Err(bad("no provider".into())),
+            };
+            let time = args.get("time").and_then(|t| t.as_string()).filter(|t| crate::secrets::is_amz_date(t))
+                .ok_or_else(|| bad("time is not YYYYMMDDTHHMMSSZ".into()))?;
+            let given = args.get("parts").and_then(|v| v.as_obj()).ok_or_else(|| bad("parts is not a mapping".into()))?;
+            // (a part that is not text is not this provider's format: nothing is sent)
+            let parts: Option<Vec<(String, Vec<u32>)>> =
+                given.iter().map(|(k, v)| v.as_str().map(|s| (crate::pystr::to_string(k), s.to_vec()))).collect();
+            match parts.ok_or(crate::secrets::NOT_THIS_FORMAT).and_then(|parts| crate::secrets::request(q, &parts, &time)) {
+                Ok(r) => Value::obj(vec![
+                    ("method", Value::str(&r.method)), ("host", Value::str(&r.host)), ("path", Value::str(&r.path)),
+                    ("headers", Value::Arr(r.headers.iter().map(|(n, v)| Value::Arr(vec![Value::str(n), Value::str(v)])).collect())),
+                    ("secret_headers", Value::Arr(r.secret_headers.iter().map(|n| Value::str(n)).collect())),
+                    ("body", r.body.as_deref().map_or(Value::Null, Value::str)),
+                ]),
+                Err(why) => Value::obj(vec![("refused", Value::str(why))]),
+            }
+        }
+        "secrets.judge" => {
+            // {"provider": id | "answers": [rules], "status": n, "truncated": bool, "secrets": [the credential's parts]}
+            // and the answer's body as the text, one code point a byte -> [outcome, why, who]
+            let bad = |m: String| CallError::BadArgs(format!("secrets.judge: {m}"));
+            let owned;
+            let rules: &[crate::secrets::Rule] = match (args.get("answers"), args.get("provider")) {
+                (Some(Value::Arr(answers)), _) => {
+                    owned = crate::secrets::rules_of(answers).map_err(bad)?;
+                    &owned
+                }
+                (None, Some(Value::Str(id))) => crate::secrets::by_id(p, &crate::pystr::to_string(id)).map_err(bad)?.rules(),
+                _ => return Err(bad("no provider".into())),
+            };
+            let status = args.get("status").and_then(|s| s.as_i64()).ok_or_else(|| bad("status is not a number".into()))?;
+            let truncated = matches!(args.get("truncated"), Some(Value::Bool(true)));
+            let secrets: Vec<Vec<u32>> = args.get("secrets").and_then(|s| s.as_arr()).unwrap_or(&[])
+                .iter().filter_map(|s| s.as_str().map(|s| s.to_vec())).collect();
+            if text.len() > crate::secrets::MAX_ANSWER_BYTES || text.iter().any(|&c| c > 0xFF) {
+                return Err(bad(format!("the body is at most {} bytes, one code point each", crate::secrets::MAX_ANSWER_BYTES)));
+            }
+            let body: Vec<u8> = text.iter().map(|&c| c as u8).collect();
+            let (outcome, why, who) = crate::secrets::judge(rules, status, &body, truncated, &secrets);
+            Value::Arr(vec![Value::str(outcome.as_str()), Value::Str(why), who.map_or(Value::Null, Value::Str)])
+        }
+        "file_metrics" => {
+            // core.compute_metrics' part for one file (metrics.rs)
+            let jsx = !matches!(args.get("jsx"), Some(Value::Bool(false)));
+            metrics_value(&crate::metrics::file_metrics(p, text, lang, jsx))
+        }
+        "functions" => {
+            // core.extract_functions: [[name, line, length, complexity], …] of a Python or JavaScript file
+            let jsx = !matches!(args.get("jsx"), Some(Value::Bool(false)));
+            let ctx = crate::filectx::FileCtx::new(p, text, crate::filectx::Lang::from(lang), jsx);
+            Value::Arr(crate::project::functions(p, &ctx).into_iter().map(|f| Value::Arr(vec![
+                Value::Str(f.name), Value::Int(f.line as i64), Value::Int(f.len as i64), Value::Int(f.cx as i64),
+            ])).collect())
         }
         "scan_rules" => {
             let flag = |k: &str, d: bool| match args.get(k) {
@@ -457,22 +737,29 @@ fn dispatch(name: &str, args: &Value, text: &[u32]) -> Result<Value, CallError> 
         }
         "normalize" => {
             let form = opt_str(args, "form").map(|f| crate::pystr::to_string(&f)).unwrap_or_default();
-            Value::Str(match form.as_str() {
+            let out = match form.as_str() {
                 "NFC" => crate::normalize::nfc(text),
                 "NFD" => crate::normalize::nfd(text),
                 "NFKC" => crate::normalize::nfkc(text),
                 "NFKD" => crate::normalize::nfkd(text),
                 _ => return Err(CallError::BadArgs(format!("unknown normalization form {:?}", form))),
-            })
+            };
+            // "fold": true, then case-folded (str.casefold): a name as file systems that ignore case and
+            // normalization compare it, on this engine's Unicode 13.0 whatever the caller's (BR-2)
+            let fold = matches!(args.get("fold"), Some(Value::Bool(true)));
+            Value::Str(if fold { crate::unicode::casefold(&out) } else { out })
         }
         "lex.tokens" => {
             // the tokens of one reading (lex/): [kind, start, end] each, in
-            // code points; lang "js" (with JSX unless "jsx": false) or "py"
+            // code points; lang "js" (with JSX unless "jsx": false), "py",
+            // "go" or "rs"
             let jsx = !matches!(args.get("jsx"), Some(Value::Bool(false)));
             let toks = match lang {
                 Some("js") => crate::lex::js::tokens(text, jsx),
                 Some("py") => crate::lex::py::tokens(text),
-                _ => return Err(CallError::BadArgs("lex.tokens needs lang 'js' or 'py'".into())),
+                Some("go") => crate::lex::go::tokens(text),
+                Some("rs") => crate::lex::rs::tokens(text),
+                _ => return Err(CallError::BadArgs("lex.tokens needs lang 'js', 'py', 'go' or 'rs'".into())),
             };
             Value::Arr(
                 toks.iter()
@@ -490,12 +777,15 @@ fn dispatch(name: &str, args: &Value, text: &[u32]) -> Result<Value, CallError> 
                     ("strings", spans_value(&st.strings)),
                     ("literals", spans_value(&st.literals)),
                 ]),
-                None => return Err(CallError::BadArgs("lex.structure needs lang 'js' or 'py'".into())),
+                None => return Err(CallError::BadArgs("lex.structure needs lang 'js', 'py', 'go' or 'rs'".into())),
             }
         }
         "pyre.probe" => probe(args, text)?,
         "linre.probe" => linre_probe(args, text)?,
         "linre.check" => linre_check(p, args),
+        // the patterns the engine built that linre refused (each failed its
+        // call closed), since the last call: none, the tests hold
+        "linre.refused" => Value::Arr(crate::rxutil::take_refused().iter().map(|s| Value::str(s)).collect()),
         "shlex_split" => match hooks::shlex_split(text) {
             Some(t) => strs(&t),
             None => Value::Null,
@@ -511,11 +801,26 @@ fn dispatch(name: &str, args: &Value, text: &[u32]) -> Result<Value, CallError> 
         "install_script_risk" => {
             let shell = !matches!(args.get("shell"), Some(Value::Bool(false)));
             let command = matches!(args.get("command"), Some(Value::Bool(true)));
+            // `own`: the release's name, when the caller knows it (its own package's code is not another's, D-9)
+            let _own = if args.get("own").is_some() { Some(signs::own_release(&arg_str(args, "own")?)) } else { None };
             strs(&signs::install_script_risk_with(p, text, shell, command, lang))
         }
         "import_time_risk" => {
-            let (reasons, line) = signs::import_time_risk(p, text, lang);
-            Value::Arr(vec![strs(&reasons), line.map(|l| Value::Int(l as i64)).unwrap_or(Value::Null)])
+            // `declared`: the release's own name and the packages its manifest names (D-12), when the caller knows them
+            let declared = args.get("declared").map(|_| arg_strs(args, "declared"));
+            // `own`: the release's name (D-9), as for install_script_risk
+            let _own = if args.get("own").is_some() { Some(signs::own_release(&arg_str(args, "own")?)) } else { None };
+            // `refused`: a third element, the parser's refusal of a JavaScript text whose tree the test then could
+            // not read ([line, reason], or null: JS-PARSE-STRICT, said in a registry scan's report); asked first, it
+            // reads the text once for the test (facts' cache)
+            let refused = matches!(args.get("refused"), Some(Value::Bool(true)));
+            let why = if refused && lang == Some("js") { crate::jsflow::supply::refusal(text) } else { None };
+            let (reasons, line) = signs::import_time_risk_with(p, text, lang, declared.as_deref());
+            let mut out = vec![strs(&reasons), line.map(|l| Value::Int(l as i64)).unwrap_or(Value::Null)];
+            if refused {
+                out.push(why.map(|(l, r)| Value::Arr(vec![Value::Int(l as i64), Value::Str(r)])).unwrap_or(Value::Null));
+            }
+            Value::Arr(out)
         }
         "import_time_severity" => Value::str(signs::import_time_severity(p, &arg_strs(args, "reasons"))),
         "decoded_view" => Value::Str(signs::decoded_view(p, text, lang)),
@@ -609,6 +914,7 @@ fn dispatch(name: &str, args: &Value, text: &[u32]) -> Result<Value, CallError> 
         "runs_own_source_at" => Value::Int(signs::runs_own_source_at(p, text, lang) as i64),
         "reads_own_source" => Value::Bool(signs::reads_own_source(p, text)),
         "persistence_reasons" => strs(&signs::persistence_reasons(p, text)),
+        "pth_line_risk" => strs(&signs::pth_line_risk(p, text)),
         "secret_endpoint_at" => at_reason(crate::flow::secret_endpoint_at(p, text)),
         "credential_sweep_at" => sweep(signs::credential_sweep_at(p, text)),
         "exec_command_reasons" => strs(&crate::shell::exec_command_reasons(p, text)),
@@ -829,8 +1135,9 @@ fn dispatch(name: &str, args: &Value, text: &[u32]) -> Result<Value, CallError> 
 /// cross_file: {"files": [[path, lang, length], …], "skip": […], "who": …,
 /// "whos": [one per file] | null, "one_package", "sep", "redact", "neumaier",
 /// "threads"} and the files' texts one after another (each `length` code
-/// points) -> core._cross_file_received_issues per package
-/// (crossfile::answer). Each package gets the call's budget.
+/// points), or "text_ids": [one per file] (the store's texts, texts.rs: each
+/// `length` code points, and no text) -> core._cross_file_received_issues per
+/// package (crossfile::answer). Each package gets the call's budget.
 fn cross_file(p: &Pack, args: &Value, text: &[u32]) -> Result<Value, CallError> {
     use crate::crossfile::{self, File, Options};
     let bad = |m: &str| CallError::BadArgs(format!("cross_file: {}", m));
@@ -838,6 +1145,22 @@ fn cross_file(p: &Pack, args: &Value, text: &[u32]) -> Result<Value, CallError> 
     let who = opt_str(args, "who").unwrap_or_else(|| u("Dependency code"));
     let whos = args.get("whos").and_then(|w| w.as_arr());
     let groups = args.get("groups").and_then(|g| g.as_arr());
+    // the files' texts: the store's, by id, or the text's, one after another
+    let stored: Option<Vec<Vec<u32>>> = match args.get("text_ids") {
+        None | Some(Value::Null) => None,
+        Some(v) => {
+            let ids = v.as_arr().filter(|ids| ids.len() == items.len()).ok_or_else(|| bad("text_ids: one per file"))?;
+            if !text.is_empty() {
+                return Err(bad("a text and text_ids"));
+            }
+            let mut out = Vec::with_capacity(ids.len());
+            for id in ids {
+                let id = text_id(id)?;
+                out.push(crate::texts::decoded(id).ok_or_else(|| bad(&format!("no text {id} in the store")))?);
+            }
+            Some(out)
+        }
+    };
     let mut files = Vec::with_capacity(items.len());
     let mut at = 0usize;
     for (k, item) in items.iter().enumerate() {
@@ -845,13 +1168,24 @@ fn cross_file(p: &Pack, args: &Value, text: &[u32]) -> Result<Value, CallError> 
         let path = parts.first().and_then(|v| v.as_str()).ok_or_else(|| bad("a file's path"))?.to_vec();
         let lang = parts.get(1).and_then(|v| v.as_str()).ok_or_else(|| bad("a file's lang"))?.to_vec();
         let len = parts.get(2).and_then(|v| v.as_i64()).filter(|&n| n >= 0).ok_or_else(|| bad("a file's length"))? as usize;
-        if at + len > text.len() {
-            return Err(bad("the files' lengths run past the text"));
-        }
+        let body: &[u32] = match &stored {
+            Some(texts) => {
+                if texts[k].len() != len {
+                    return Err(bad("a stored text's length is not its file's"));
+                }
+                &texts[k]
+            }
+            None => {
+                if at + len > text.len() {
+                    return Err(bad("the files' lengths run past the text"));
+                }
+                at += len;
+                &text[at - len..at]
+            }
+        };
         let who = whos.and_then(|w| w.get(k)).and_then(|v| v.as_str()).map(|s| s.to_vec()).unwrap_or_else(|| who.clone());
         let group = groups.and_then(|g| g.get(k)).and_then(|v| v.as_str()).map(|s| s.to_vec());
-        files.push(File { path, lang, text: &text[at..at + len], who, group });
-        at += len;
+        files.push(File { path, lang, text: body, who, group });
     }
     if at != text.len() {
         return Err(bad("the files' lengths do not add up to the text"));
@@ -873,6 +1207,139 @@ fn cross_file(p: &Pack, args: &Value, text: &[u32]) -> Result<Value, CallError> 
     };
     let skip: std::collections::HashSet<PyStr> = arg_strs(args, "skip").into_iter().collect();
     Ok(crossfile::answer(crossfile::cross_file(p, &files, &skip, &opts)))
+}
+
+/// rs_crate: {"files": [[path, length], …] (their contents, concatenated, are
+/// the text; the .rs files of one crate), "build" (the build script's path, or
+/// null), "proc_macro" (bool), "lib" (the library root's path, or null),
+/// "use_file_chars", "use_chars" (SC-USE-RISK's bounds, optional)} ->
+/// {"build": finding|null, "macros": finding|null, "start": [finding, …],
+/// "uses": [finding, …], "read": [file index, …], "useRead": {files, chars,
+/// ofFiles, ofChars}}. A finding is {"file": index, "reasons": [str, …],
+/// "line": n}. Each crate gets the call's budget (crate::rsread::read_crate).
+/// The files of a package's call: [[path, length], …], their contents the text, concatenated -> (path, where its
+/// contents start, where they end), or the reason the arguments are refused.
+fn package_files(args: &Value, text_len: usize) -> Result<Vec<(PyStr, usize, usize)>, &'static str> {
+    let items = args.get("files").and_then(|f| f.as_arr()).ok_or("files")?;
+    let mut files = Vec::with_capacity(items.len());
+    let mut at = 0usize;
+    for item in items {
+        let parts = item.as_arr().ok_or("a file is not [path, length]")?;
+        let path = parts.first().and_then(|v| v.as_str()).ok_or("a file's path")?.to_vec();
+        let len = parts.get(1).and_then(|v| v.as_i64()).filter(|&n| n >= 0).ok_or("a file's length")? as usize;
+        if at + len > text_len {
+            return Err("the files' lengths run past the text");
+        }
+        files.push((path, at, at + len));
+        at += len;
+    }
+    if at != text_len {
+        return Err("the files' lengths do not add up to the text");
+    }
+    Ok(files)
+}
+
+fn rs_crate(args: &Value, text: Vec<u32>) -> Result<Value, CallError> {
+    use crate::rsread::{read_crate, Found, Options};
+    let bad = |m: &str| CallError::BadArgs(format!("rs_crate: {}", m));
+    let files = package_files(args, text.len()).map_err(bad)?;
+    let flag = |k: &str, d: bool| match args.get(k) {
+        Some(Value::Bool(b)) => *b,
+        _ => d,
+    };
+    let mut opts = Options { build: opt_str(args, "build"), proc_macro: flag("proc_macro", false), lib: opt_str(args, "lib"), ..Options::default() };
+    if let Some(n) = opt_int(args, "use_file_chars").filter(|&n| n >= 0) {
+        opts.use_file_chars = n as usize;
+    }
+    if let Some(n) = opt_int(args, "use_chars").filter(|&n| n >= 0) {
+        opts.use_chars = n as usize;
+    }
+    let answer = on_own_stack(move || {
+        let pack = crate::pack::current();
+        let refs: Vec<(PyStr, &[u32])> = files.iter().map(|(p, a, b)| (p.clone(), &text[*a..*b])).collect();
+        read_crate(&pack, &refs, &opts)
+    });
+    let finding = |f: &Found| {
+        Value::obj(vec![
+            ("file", Value::Int(f.file as i64)),
+            ("reasons", strs(&f.reasons)),
+            ("line", Value::Int(f.line as i64)),
+        ])
+    };
+    let findings = |fs: &[Found]| Value::Arr(fs.iter().map(finding).collect());
+    Ok(Value::obj(vec![
+        ("build", answer.build.as_ref().map(finding).unwrap_or(Value::Null)),
+        ("macros", answer.macros.as_ref().map(finding).unwrap_or(Value::Null)),
+        ("start", findings(&answer.start)),
+        ("uses", findings(&answer.uses)),
+        ("read", Value::Arr(answer.read.iter().map(|&k| Value::Int(k as i64)).collect())),
+        (
+            "useRead",
+            Value::obj(vec![
+                ("files", Value::Int(answer.use_read.files as i64)),
+                ("chars", Value::Int(answer.use_read.chars as i64)),
+                ("ofFiles", Value::Int(answer.use_read.of_files as i64)),
+                ("ofChars", Value::Int(answer.use_read.of_chars as i64)),
+            ]),
+        ),
+    ]))
+}
+
+/// go_package: {"files": [[path, length], …] (their contents, concatenated, are
+/// the text; a module's .go files, and its cgo packages' .c and .h files),
+/// "module" (go.mod's module path, optional), "use_file_chars", "use_chars"
+/// (SC-USE-RISK's bounds, optional)} -> {"start": [finding, …] (the
+/// import-time test of what init code reaches), "uses": [finding, …],
+/// "read": [file index, …], "unparsed": [file index, …] (.go files the
+/// parser refuses), "generate": [[file, line, text], …], "linkname": [[file,
+/// line, text], …], "useRead": {files, chars, ofFiles, ofChars}}. A finding
+/// is {"file": index, "reasons": [str, …], "line": n}. Each module gets the
+/// call's budget (crate::goread::read_module).
+fn go_package(args: &Value, text: Vec<u32>) -> Result<Value, CallError> {
+    use crate::goread::{read_module, Found, Options};
+    let bad = |m: &str| CallError::BadArgs(format!("go_package: {}", m));
+    let files = package_files(args, text.len()).map_err(bad)?;
+    let mut opts = Options { module: opt_str(args, "module"), ..Options::default() };
+    if let Some(n) = opt_int(args, "use_file_chars").filter(|&n| n >= 0) {
+        opts.use_file_chars = n as usize;
+    }
+    if let Some(n) = opt_int(args, "use_chars").filter(|&n| n >= 0) {
+        opts.use_chars = n as usize;
+    }
+    let answer = on_own_stack(move || {
+        let pack = crate::pack::current();
+        let refs: Vec<(PyStr, &[u32])> = files.iter().map(|(p, a, b)| (p.clone(), &text[*a..*b])).collect();
+        read_module(&pack, &refs, &opts)
+    });
+    let finding = |f: &Found| {
+        Value::obj(vec![
+            ("file", Value::Int(f.file as i64)),
+            ("reasons", strs(&f.reasons)),
+            ("line", Value::Int(f.line as i64)),
+        ])
+    };
+    let findings = |fs: &[Found]| Value::Arr(fs.iter().map(finding).collect());
+    let directives = |ds: &[(usize, usize, PyStr)]| {
+        Value::Arr(ds.iter().map(|(f, l, t)| Value::Arr(vec![Value::Int(*f as i64), Value::Int(*l as i64), Value::Str(t.clone())])).collect())
+    };
+    let ints = |v: &[usize]| Value::Arr(v.iter().map(|&k| Value::Int(k as i64)).collect());
+    Ok(Value::obj(vec![
+        ("start", findings(&answer.start)),
+        ("uses", findings(&answer.uses)),
+        ("read", ints(&answer.read)),
+        ("unparsed", ints(&answer.unparsed)),
+        ("generate", directives(&answer.generate)),
+        ("linkname", directives(&answer.linkname)),
+        (
+            "useRead",
+            Value::obj(vec![
+                ("files", Value::Int(answer.use_read.files as i64)),
+                ("chars", Value::Int(answer.use_read.chars as i64)),
+                ("ofFiles", Value::Int(answer.use_read.of_files as i64)),
+                ("ofChars", Value::Int(answer.use_read.of_chars as i64)),
+            ]),
+        ),
+    ]))
 }
 
 /// js_flow: {"files": [[path, length], …] (their contents, concatenated,
@@ -970,7 +1437,7 @@ fn js_flow(args: &Value, text: &[u32]) -> Result<Value, CallError> {
                     Value::str(fix),
                 ]),
                 // (the supply-chain model's; project mode never gives one)
-                Out::Send { .. } | Out::Received { .. } | Out::Decoded { .. } | Out::Dropped { .. } => Value::Null,
+                Out::Send { .. } | Out::Received { .. } | Out::Decoded { .. } | Out::Dropped { .. } | Out::Own { .. } | Out::Rewrote { .. } => Value::Null,
             })
             .collect(),
     ))
@@ -1069,7 +1536,7 @@ fn flow_out(out: Vec<crate::jsflow::Out>, max_file: usize) -> Value {
                     Value::str(fix),
                 ]),
                 // (the supply-chain model's; project mode never gives one)
-                Out::Send { .. } | Out::Received { .. } | Out::Decoded { .. } | Out::Dropped { .. } => Value::Null,
+                Out::Send { .. } | Out::Received { .. } | Out::Decoded { .. } | Out::Dropped { .. } | Out::Own { .. } | Out::Rewrote { .. } => Value::Null,
             })
             .collect(),
     )
@@ -1137,17 +1604,22 @@ fn opt_match(m: Option<pyre::Match>) -> Value {
 /// pyre.probe: every entry point of a pattern on each text of `texts` (or
 /// on the text), for the differential tests against Python's `re`:
 /// search / match / fullmatch at pos..endpos, finditer, findall, sub with a
-/// function and with a template, split. The pattern runs as the engine runs
-/// it (on linre where linre accepts it); `"backtracking": true`, on sre's
-/// backtracking matcher alone.
+/// function and with a template, split, as the engine's code calls them
+/// (pyre, on linre). A pattern Python rejects is `{"error"}`; one linre does
+/// not run, `{"error", "refused": true}`. (`"backtracking": true` asked for
+/// sre's matcher alone until P-16 retired it: an error now.)
 fn probe(args: &Value, text: &[u32]) -> Result<Value, CallError> {
     let pattern = arg_str(args, "pattern")?;
     let flags = opt_str(args, "flags").map(|f| pyre::flags_from_letters(&crate::pystr::to_string(&f))).unwrap_or(0);
-    let backtracking = matches!(args.get("backtracking"), Some(Value::Bool(true)));
-    let compiled = if backtracking { Regex::new_backtracking(&pattern, flags) } else { Regex::new(&pattern, flags) };
-    let rx = match compiled {
+    if matches!(args.get("backtracking"), Some(Value::Bool(true))) {
+        return Err(CallError::BadArgs("pyre.probe: there is no backtracking matcher (P-16: every pattern runs on linre)".into()));
+    }
+    let rx = match Regex::new(&pattern, flags) {
         Ok(rx) => rx,
-        Err(e) => return Ok(Value::obj(vec![("error", Value::str(&e.0))])),
+        Err(e) => {
+            let refused = e.0.starts_with("linre does not run it");
+            return Ok(Value::obj(vec![("error", Value::str(&e.0)), ("refused", Value::Bool(refused))]));
+        }
     };
     let texts: Vec<Vec<u32>> = match args.get("texts").and_then(|t| t.as_arr()) {
         Some(items) => items.iter().filter_map(|v| v.as_str().map(|s| s.to_vec())).collect(),
@@ -1261,10 +1733,18 @@ fn linre_probe(args: &Value, text: &[u32]) -> Result<Value, CallError> {
 /// name, then `[i]` into a list and `['key']` into a map
 /// (`TAINT_SINKS['js'][3][1]`). Answers its {"re", "flags"} value.
 fn pack_pattern<'v>(p: &'v Pack, name: &str) -> Option<&'v Value> {
-    let base_end = name.find('[').unwrap_or(name.len());
+    let base_end = [name.find('['), name.find(".items[")].into_iter().flatten().min().unwrap_or(name.len());
     let mut v = p.raw(&name[..base_end])?;
     let mut rest = &name[base_end..];
     while !rest.is_empty() {
+        if let Some(r) = rest.strip_prefix(".items[") {
+            // a table of (key, pattern) items, by index
+            let end = r.find(']')?;
+            let i: usize = r.get(..end)?.parse().ok()?;
+            v = v.get("items")?.as_arr()?.get(i)?.as_arr()?.get(1)?;
+            rest = &r[end + 1..];
+            continue;
+        }
         let close = if rest.starts_with("['") || rest.starts_with("[\"") {
             let q = &rest[1..2];
             let inner_end = rest[2..].find(q)? + 2;
@@ -1300,6 +1780,12 @@ pub fn pack_pattern_names(p: &Pack) -> Vec<String> {
                 let key = crate::pystr::to_string(k);
                 let q = if key.contains('\'') && !key.contains('"') { '"' } else { '\'' };
                 walk(format!("{}[{}{}{}]", name, q, key, q), x, out);
+            }
+        } else if let Some(items) = v.get("items").and_then(|l| l.as_arr()) {
+            for (i, kv) in items.iter().enumerate() {
+                if let Some(x) = kv.as_arr().and_then(|kv| kv.get(1)) {
+                    walk(format!("{}.items[{}]", name, i), x, out);
+                }
             }
         }
     }

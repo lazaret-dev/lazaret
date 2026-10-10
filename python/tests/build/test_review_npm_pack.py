@@ -62,7 +62,7 @@ class NpmPackTests(unittest.TestCase):
     def test_the_engine_and_its_notices_are_packed_and_nothing_else_of_native(self):
         # 0.1.8: the native engine as WebAssembly (npm run build) and its
         # notices; a stray build product or secret in native/ stays out
-        for name in ("NOTICE", "LICENSE-PYTHON", "LICENSE-UNICODE"):
+        for name in ("NOTICE", "LICENSE-UNICODE"):
             shutil.copy2(os.path.join(JS, name), self.root)
         native = os.path.join(self.root, "native")
         os.makedirs(native)
@@ -71,7 +71,7 @@ class NpmPackTests(unittest.TestCase):
                 f.write("TOKEN=dummy-not-a-secret\n")
         files = packed(self.root)
         self.assertEqual([f for f in files if f.startswith("native/")], ["native/NOTICE", "native/lazaret.wasm"])
-        for name in ("package.json", "README.md", "LICENSE", "LICENSE-PYTHON", "LICENSE-UNICODE", "NOTICE"):
+        for name in ("package.json", "README.md", "LICENSE", "LICENSE-UNICODE", "NOTICE"):
             self.assertIn(name, files)
 
 

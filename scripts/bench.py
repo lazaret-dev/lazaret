@@ -8,10 +8,17 @@ releases, and the comparison of two runs.
 
 MANIFEST is JSON lines, one release each: "id"; "artifact_path", the
 release file as the registry serves it; "container" (tgz, zip) and "kind"
-(npm, sdist, wheel); and "cat", the release's category, where "benign"
-marks a package that should pass and anything else a malicious release.
-(lz_path, lz_container and lz_kind are read too: the names the corpus
-preparation writes.)
+(npm, sdist, wheel; gomod, a module zip as Go's proxy serves it, path@version/
+inside, container zip; crate, a .crate as crates.io serves it,
+name-version/ inside, container tgz; vsix, a VS Code extension's .vsix as
+the Marketplace and Open VSX serve it, extension/ inside, container zip);
+and "cat", the release's category,
+where "benign" marks a package that should pass and anything else a
+malicious release. (lz_path, lz_container and lz_kind are read too: the
+names the corpus preparation writes.) scripts/popular/ writes the benign
+manifests: popular.py the popular releases (npm, PyPI, crates, Open VSX's
+extensions), packaged.py the Go modules and crates Ubuntu packages and Go's
+own tree.
 
 `run` scans each release as `lazaret-registry` does (in memory: nothing
 in it is unpacked to disk or run), on the engine the package loads
@@ -75,6 +82,7 @@ def scan_one(rec, deadline_s):
     row["strong"] = [[i["rule"], i["sev"], i["msg"][:700]] for i in res["issues"]
                      if i["rule"].startswith("SC-") and i["sev"] in STRONG]
     row["weak"] = sorted({i["rule"] for i in res["issues"] if i["rule"].startswith("SC-") and i["sev"] == "MAJOR"})
+    row["useTime"] = res.get("useTime")                # how much SC-USE-RISK read (None: not run)
     return row
 
 

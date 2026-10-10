@@ -1,17 +1,25 @@
-# Lazaret's native scanning engine (docs/RUST_ENGINE.md).
+# Lazaret's native scanning engine (docs/RUST_ENGINE.md) and its network layer
+# (lazaret-net, on pratique: NET-1).
 #
 # No external crates: every member depends only on the standard library and
 # on the other members, so Cargo.lock lists nothing but this workspace and a
 # build needs no registry (scripts/check_rust_deps.py fails CI otherwise).
+# pratique is a member, taken into rust/crates/pratique from a commit of its
+# repository (scripts/sync_pratique.py), not a crate from a registry.
 [workspace]
 resolver = "2"
-members = ["crates/lazaret-engine", "crates/lazaret-ffi"]
+members = ["crates/lazaret-engine", "crates/lazaret-ffi", "crates/lazaret-verify", "crates/lazaret-net",
+           "crates/pratique"]
+# What `cargo build` and `cargo test` take with no -p: Lazaret's crates. pratique (taken as it is upstream,
+# scripts/sync_pratique.py) is built as their dependency, and its own tests run on their own in CI
+# (`cargo test -p pratique --lib` and its tests that need nothing installed).
+default-members = ["crates/lazaret-engine", "crates/lazaret-ffi", "crates/lazaret-verify", "crates/lazaret-net"]
 
 [workspace.package]
-version = "0.1.8"
+version = "0.1.9"
 edition = "2021"
-license = "Apache-2.0 AND Python-2.0.1 AND Unicode-3.0"
-rust-version = "1.75"
+license = "Apache-2.0 AND Unicode-3.0"
+rust-version = "1.87"
 repository = "https://github.com/lazaret-dev/lazaret"
 
 [profile.release]

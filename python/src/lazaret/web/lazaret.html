@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-9hYCWFj25eXUbqQ2Fb9zUNdXM+CJjyxGpJoPhbheVmw='; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-eDtskOYXyc7FlPguS0NAex7TuhWVyZTMTwCUsay4g6g='; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'">
 <title>Lazaret — Security &amp; Quality Review</title>
 <style>
   :root{
@@ -1002,11 +1002,15 @@ function entropySecretish(v) {
 //   AKIA[0-9A-Z]{16}|gh[pousr]_[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9]{22}_[A-Za-z0-9]{59}
 //   |xox[baprs]-[A-Za-z0-9-]{10,}
 //   |sk_live_[A-Za-z0-9]{16,}|AIza[0-9A-Za-z_\-]{35}
-//   |-----BEGIN [A-Z ]*PRIVATE KEY-----|eyJ[A-Za-z0-9_\-]{10,}\.eyJ[A-Za-z0-9_\-]{10,}
+//   |-----BEGIN [A-Z ]*PRIVATE KEY-----|cio(?<![A-Za-z0-9]cio)[A-Za-z0-9]{32}(?![A-Za-z0-9])
+//   |npm_(?<![A-Za-z0-9]npm_)[A-Za-z0-9]{36}(?![A-Za-z0-9])
+//   |sk-ant-(?<![A-Za-z0-9_\-]sk-ant-)(?:[a-z]{3,5}[0-9]{2}|usr)-[A-Za-z0-9_\-]{40,200}(?![A-Za-z0-9_\-])
+//   |sk-(?<![A-Za-z0-9_\-]sk-)[A-Za-z0-9_\-]{20,90}T3BlbkFJ[A-Za-z0-9_\-]{20,74}(?![A-Za-z0-9_\-])
+//   |eyJ[A-Za-z0-9_\-]{10,}\.eyJ[A-Za-z0-9_\-]{10,}
 // but without the backtracking blow-up of the JWT alternative on a run of
 // "eyJeyJeyJ…" (every head rescanned the whole run: quadratic).
-const HEAD_RE = /AKIA|gh[pousr]_|github_pat_|xox[baprs]-|sk_live_|AIza|-----BEGIN |eyJ/g;
-const HEAD_RE_REDACT = /AKIA|gh[pousr]_|github_pat_|xox[baprs]-|sk_live_|AIza|-----BEGIN |eyJ/g;
+const HEAD_RE = /AKIA|gh[pousr]_|github_pat_|xox[baprs]-|sk_live_|sk-|AIza|-----BEGIN |cio|npm_|eyJ/g;
+const HEAD_RE_REDACT = /AKIA|gh[pousr]_|github_pat_|xox[baprs]-|sk_live_|sk-|AIza|-----BEGIN |cio|npm_|eyJ/g;
 const PEM_END_G = /-----END [A-Z ]*PRIVATE KEY-----/g;
 const isPat = (c) => isAlnum(c) || c === 95;                     // [A-Za-z0-9_]
 const isUpperDigit = (c) => (c >= 48 && c <= 57) || (c >= 65 && c <= 90);
@@ -1014,11 +1018,35 @@ const isAlnum = (c) => isUpperDigit(c) || (c >= 97 && c <= 122);
 const isJwt = (c) => isAlnum(c) || c === 95 || c === 45;          // [A-Za-z0-9_-]
 const isXox = (c) => isAlnum(c) || c === 45;                      // [A-Za-z0-9-]
 const isPemName = (c) => (c >= 65 && c <= 90) || c === 32;        // [A-Z ]
+const isLower = (c) => c >= 97 && c <= 122;                       // [a-z]
+const isDigit = (c) => c >= 48 && c <= 57;                        // [0-9]
 function runEnd(s, i, pred) { while (i < s.length && pred(s.charCodeAt(i))) i++; return i; }
 function fixedRun(s, i, n, pred) {
   if (i + n > s.length) return false;
   for (let k = i; k < i + n; k++) if (!pred(s.charCodeAt(k))) return false;
   return true;
+}
+
+/**
+ * End of an Anthropic or an OpenAI key at `p` (its "sk-"), a whole [A-Za-z0-9_-]
+ * run, or -1: Anthropic's "sk-ant-", a kind (three to five letters and two digits,
+ * or usr) and "-", then 40 to 200 more to the run's end; else OpenAI's 20 to 90, "T3BlbkFJ"
+ * and 20 to 74 more to the run's end. Either way the match is the run.
+ */
+function skKeyEnd(s, p) {
+  if (p > 0 && isJwt(s.charCodeAt(p - 1))) return -1;
+  const e = runEnd(s, p + 3, isJwt);
+  if (s.startsWith("ant-", p + 3)) {
+    const kind = runEnd(s, p + 7, isLower), n = kind - (p + 7);
+    let body = -1;                                             // where the 40 to 200 begin
+    if (n >= 3 && n <= 5 && fixedRun(s, kind, 2, isDigit) && s.charCodeAt(kind + 2) === 45) body = kind + 3;
+    else if (n === 3 && s.startsWith("usr-", p + 7)) body = kind + 1;
+    if (body >= 0 && e - body >= 40 && e - body <= 200) return e;
+  }
+  for (let t = p + 23; t <= p + 93 && t + 8 <= e; t++) {
+    if (s.startsWith("T3BlbkFJ", t) && e - (t + 8) >= 20 && e - (t + 8) <= 74) return e;
+  }
+  return -1;
 }
 
 /**
@@ -1051,7 +1079,20 @@ function findSecretToken(s, from = 0, { redact = false } = {}) {
         else if (fixedRun(s, p + 4, 36, isAlnum)) end = p + 40;
         break;
       case "x": { const e = runEnd(s, p + 5, isXox); if (e - (p + 5) >= 10) end = e; break; }
-      case "s": { const e = runEnd(s, p + 8, isAlnum); if (e - (p + 8) >= 16) end = e; break; }
+      case "c":                                                    // crates.io's API token: a whole run
+        if ((p === 0 || !isAlnum(s.charCodeAt(p - 1))) && fixedRun(s, p + 3, 32, isAlnum) && !isAlnum(s.charCodeAt(p + 35))) {
+          end = p + 35;
+        }
+        break;
+      case "n":                                                    // npm's access token: a whole run
+        if ((p === 0 || !isAlnum(s.charCodeAt(p - 1))) && fixedRun(s, p + 4, 36, isAlnum) && !isAlnum(s.charCodeAt(p + 40))) {
+          end = p + 40;
+        }
+        break;
+      case "s":
+        if (m[0] === "sk_live_") { const e = runEnd(s, p + 8, isAlnum); if (e - (p + 8) >= 16) end = e; }
+        else end = skKeyEnd(s, p);                                 // Anthropic's and OpenAI's keys
+        break;
       case "-": {
         const r = runEnd(s, p + 11, isPemName);
         if (r - 11 >= p + 11 && s.startsWith("PRIVATE KEY", r - 11) && s.startsWith("-----", r)) {
@@ -1102,12 +1143,17 @@ const SECRET_LINE_PATTERNS = [
   [String.raw`AKIA[0-9A-Z]{16}|gh[pousr]_[A-Za-z0-9]{36,}|github_pat_[A-Za-z0-9_]{22,}`
     + String.raw`|xox[baprs]-[A-Za-z0-9-]{10,}|sk_live_[A-Za-z0-9]{16,}|AIza[0-9A-Za-z_\-]{35}`
     + String.raw`|-----BEGIN [A-Z ]*PRIVATE KEY-----(?:.*?-----END [A-Z ]*PRIVATE KEY-----|.*)`
+    + String.raw`|cio(?<![A-Za-z0-9]cio)[A-Za-z0-9]{32}(?![A-Za-z0-9])`
+    + String.raw`|npm_(?<![A-Za-z0-9]npm_)[A-Za-z0-9]{36}(?![A-Za-z0-9])`
+    + String.raw`|sk-ant-(?<![A-Za-z0-9_\-]sk-ant-)(?:[a-z]{3,5}[0-9]{2}|usr)-[A-Za-z0-9_\-]{40,200}(?![A-Za-z0-9_\-])`
+    + String.raw`|sk-(?<![A-Za-z0-9_\-]sk-)[A-Za-z0-9_\-]{20,90}T3BlbkFJ[A-Za-z0-9_\-]{20,74}(?![A-Za-z0-9_\-])`
     + String.raw`|eyJ[A-Za-z0-9_\-]{10,}\.eyJ[A-Za-z0-9_\-]{10,}`, ""],
   // SQL credentials, case-insensitive like the SQL-CRED rule
   [String.raw`(?:IDENTIFIED\s+BY\s+['\"][^'\"]+['\"]|PASSWORD\s*=?\s*['\"][^'\"]+['\"]`
     + String.raw`|IDENTIFIED\s+BY\s+PASSWORD)`, "i"],
   [String.raw`(?:password|passwd|pwd|secret|api[_-]?key|access[_-]?key|auth[_-]?token|`
-    + String.raw`private[_-]?key)\s*[:=]\s*[\"'][^\"']{4,}[\"']`, "i"],
+    + String.raw`private[_-]?key)\s*(?::=|[:=]|:\s*&(?:'static\s+)?(?:str|\[u8\])\s*=|[ \t]+string\s*=)\s*`
+    + String.raw`(?:b|rb|r#*|br#*)?[\"'][^\"']{4,}[\"']`, "i"],
   // credentials in a URL's userinfo: scheme://user:password@host, scheme://token@host
   [String.raw`(?<=://)[^/\s@'\"]+(?=@)`, ""],
 ];
@@ -1683,8 +1729,8 @@ id:"S-YAML", name:"Unsafe yaml.load", type:"VULN", sev:"CRITICAL", langs:["py"],
  ref:"CWE-502",
 },
 {
-id:"S-SECRET", name:"Hardcoded credential", type:"VULN", sev:"BLOCKER", langs:["py", "js"],
- re:pyRe("(password|passwd|pwd|secret|api[_-]?key|access[_-]?key|auth[_-]?token|private[_-]?key)\\s*[:=]\\s*[\\\"'][^\\\"']{4,}[\\\"']", "i"),
+id:"S-SECRET", name:"Hardcoded credential", type:"VULN", sev:"BLOCKER", langs:["py", "js", "go", "rs"],
+ re:pyRe("(password|passwd|pwd|secret|api[_-]?key|access[_-]?key|auth[_-]?token|private[_-]?key)\\s*(?::=|[:=]|:\\s*&(?:'static\\s+)?(?:str|\\[u8\\])\\s*=|[ \\t]+string\\s*=)\\s*(?:b|rb|r#*|br#*)?[\\\"'][^\\\"']{4,}[\\\"']", "i"),
  skip:pyRe("(environ|process\\.env|getenv|config\\[|\\bimport\\b|\\bplaceholder\\b|\\bexample\\b|\\bdummy\\b|\\bsample\\b|\\bmock\\b|\\bmocked\\b|\\bxxxx+\\b|\\{\\{)", "i"),
  msg:"Credential appears to be hardcoded in source.",
  why:"Secrets in code leak through version control, logs, and builds; rotation requires a deploy.",
@@ -1822,7 +1868,7 @@ id:"B-EQEQ", name:"Loose equality", type:"BUG", sev:"MINOR", langs:["js"],
  ref:"Reliability",
 },
 {
-id:"Q-TODO", name:"TODO/FIXME marker", type:"SMELL", sev:"INFO", langs:["py", "js", "sql"],
+id:"Q-TODO", name:"TODO/FIXME marker", type:"SMELL", sev:"INFO", langs:["py", "js", "sql", "go", "rs"],
  re:pyRe("\\b(TODO|FIXME|XXX|HACK)\\b", ""),
  msg:"Unresolved TODO/FIXME comment.",
  why:"Tracked work living only in comments tends to be forgotten.",
@@ -1846,8 +1892,8 @@ id:"Q-VAR", name:"var declaration", type:"SMELL", sev:"MINOR", langs:["js"],
  ref:"Maintainability",
 },
 {
-id:"S-TOKEN", name:"Known secret token format", type:"VULN", sev:"BLOCKER", langs:["py", "js"],
- re:pyRe("AKIA[0-9A-Z]{16}|gh[pousr]_[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9]{22}_[A-Za-z0-9]{59}|xox[baprs]-[A-Za-z0-9-]{10,}|sk_live_[A-Za-z0-9]{16,}|AIza[0-9A-Za-z_\\-]{35}|-----BEGIN [A-Z ]*PRIVATE KEY-----|eyJ[A-Za-z0-9_\\-]{10,}\\.eyJ[A-Za-z0-9_\\-]{10,}", ""),
+id:"S-TOKEN", name:"Known secret token format", type:"VULN", sev:"BLOCKER", langs:["py", "js", "go", "rs"],
+ re:pyRe("AKIA[0-9A-Z]{16}|gh[pousr]_[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9]{22}_[A-Za-z0-9]{59}|xox[baprs]-[A-Za-z0-9-]{10,}|sk_live_[A-Za-z0-9]{16,}|AIza[0-9A-Za-z_\\-]{35}|-----BEGIN [A-Z ]*PRIVATE KEY-----|cio(?<![A-Za-z0-9]cio)[A-Za-z0-9]{32}(?![A-Za-z0-9])|npm_(?<![A-Za-z0-9]npm_)[A-Za-z0-9]{36}(?![A-Za-z0-9])|sk-ant-(?<![A-Za-z0-9_\\-]sk-ant-)(?:[a-z]{3,5}[0-9]{2}|usr)-[A-Za-z0-9_\\-]{40,200}(?![A-Za-z0-9_\\-])|sk-(?<![A-Za-z0-9_\\-]sk-)[A-Za-z0-9_\\-]{20,90}T3BlbkFJ[A-Za-z0-9_\\-]{20,74}(?![A-Za-z0-9_\\-])|eyJ[A-Za-z0-9_\\-]{10,}\\.eyJ[A-Za-z0-9_\\-]{10,}", ""),
  find:(line) => { const t = findSecretToken(line); return t ? t.index : -1; },
  msg:"String matches a known secret format (AWS/GitHub/Slack/Stripe/Google key, private key, or JWT).",
  why:"Provider-format tokens in source are live credentials until proven otherwise.",
@@ -1855,7 +1901,7 @@ id:"S-TOKEN", name:"Known secret token format", type:"VULN", sev:"BLOCKER", lang
  ref:"CWE-798 · OWASP A07",
 },
 {
-id:"S-BIDI", name:"Trojan Source bidi control", type:"VULN", sev:"CRITICAL", langs:["py", "js", "sql"],
+id:"S-BIDI", name:"Trojan Source bidi control", type:"VULN", sev:"CRITICAL", langs:["py", "js", "sql", "go", "rs"],
  re:pyRe("[\\u202a-\\u202e\\u2066-\\u2069]", ""),
  msg:"Bidirectional control character in source (Trojan Source)",
  why:"Bidi override and isolate characters make code display in a different order than the compiler reads it, so reviewers approve logic that is not what runs (CVE-2021-42574).",
@@ -1985,7 +2031,7 @@ id:"SC-PACKER", name:"Packed JavaScript (p,a,c,k,e,d)", type:"VULN", sev:"MAJOR"
 },
 {
 id:"SC-EVAL-DECODER", name:"Code decoded by its own function and run", type:"VULN", sev:"CRITICAL", langs:["js"],
- re:pyRe("\\b(?:eval|(?:new\\s+)?Function|runIn(?:This|New)?Context)\\s*\\(\\s*(?:\\(?\\s*function\\s*\\([^()]{0,80}\\)\\s*\\{(?:[^{}]|\\{[^{}]{0,2000}\\}){0,2000}\\}\\s*\\)?|[A-Za-z_$][\\w$]*)\\s*\\(\\s*(?:\\[\\s*\\d+(?:\\s*,\\s*\\d+){199}|'[^'\\n]{1000}|\\\"[^\\\"\\n]{1000}|`[^`]{1000})", ""),
+ re:pyRe("\\b(?:eval|(?:new\\s+)?Function|runIn(?:This|New)?Context)\\s*\\(\\s*(?:\\(?\\s*function\\s*\\([^()]{0,80}\\)\\s*\\{(?:[^{}]|\\{[^{}]*\\})*\\}\\s*\\)?|[A-Za-z_$][\\w$]*)\\s*\\(\\s*(?:\\[\\s*\\d+(?:\\s*,\\s*\\d+){199}|'[^'\\n]{1000}|\\\"[^\\\"\\n]{1000}|`[^`]{1000})", ""),
  msg:"Code a function computes from a long literal is run (eval, Function or vm).",
  why:"A decoder over a blob of character codes or text keeps a payload out of sight: the file shows the decoder, never the code it runs.",
  fix:"Decode the blob and read what it runs; treat the package as hostile until then.",
@@ -3858,7 +3904,7 @@ function extractFunctions(lines, lang) {
 
 
 // `curl … | sh` / `wget … | bash`, read in one left-to-right pass (core's comment)
-const PIPE_SCAN_SRC = String.raw`\|\s*(?:sudo\s+)?(?:ba|z|da|k)?sh\b|[\n|;&]|\b(?:curl|wget)\b`;
+const PIPE_SCAN_SRC = String.raw`\|\s*(?:sudo\s+)?(?:[\w.~-]*\/)*(?:env\s+)?(?:ba|z|da|k)?sh\b|[\n|;&]|\b(?:curl|wget)\b`;
 const PIPE_SCAN_RE = pyRe(PIPE_SCAN_SRC, "g");
 
 /** twin of core._pipes_download_to_shell: a pipe into a shell after curl or wget in the same command */
@@ -4238,6 +4284,153 @@ function lookalikeIssue(found, path, lineNo, lines) {
     ref: "CWE-1007 · CVE-2021-42694" }, path, lineNo, lines, col);
 }
 
+// ---- Base64 blobs (SC-B64): the runs that can be base64 data (G-5); twin of the engine's b64_blob_col ----
+const B64_BLOB_ALL = new RegExp(B64_BLOB_RE.source, B64_BLOB_RE.flags + "g"), B64_PLAIN_MAX = 16384, B64_PERIOD_MAX = 64;
+/** Is `body` (a run's characters, quotes and `=` off) digits alone, hex alone (after `0x` or not) or letters alone, up
+ * to B64_PLAIN_MAX characters, or a period of at most B64_PERIOD_MAX characters repeated? Base64 of 150 bytes or more
+ * is none of these; a longer run of one class is what a payload written in hex is. */
+function b64Plain(body) {
+  const hexBody = /^0[xX]./.test(body) ? body.slice(2) : body;
+  if (body.length <= B64_PLAIN_MAX && (/^[0-9]+$/.test(body) || /^[0-9A-Fa-f]+$/.test(hexBody) || /^[A-Za-z]+$/.test(body))) {
+    return true;
+  }
+  for (let k = 1; k <= Math.min(B64_PERIOD_MAX, Math.floor(body.length / 2)); k++) {
+    let i = k;
+    while (i < body.length && body[i] === body[i - k]) i++;
+    if (i === body.length) return true;
+  }
+  return false;
+}
+// A whole file of a format code keeps as data (N-4): twin of the engine's datafmt.rs, read by the format's structure:
+// a WebAssembly module's sections, a PNG's chunks, a GIF's blocks, a WAV's or a WebP's RIFF chunks, each to the end
+// of the file, with what a format carries beside its content (custom sections, text chunks, comments) at most half.
+const B64_DATA_HEADS = ["AGFzbQ", "iVBORw0KGgo", "R0lGOD", "UklGR"];
+const WASM_RANK = { 1: 1, 2: 2, 3: 3, 4: 4, 5: 5, 13: 6, 6: 7, 7: 8, 8: 9, 9: 10, 12: 11, 10: 12, 11: 13 };
+function lebU32(b, i) {
+  let value = 0;
+  for (let k = 0; k < 5; k++) {
+    if (i >= b.length) return null;
+    const x = b[i++];
+    value += (x & 0x7f) * 2 ** (7 * k);
+    if (!(x & 0x80)) return value <= 0xffffffff ? [value, i] : null;
+  }
+  return null;
+}
+function wasmModule(b) {
+  const head = [0, 0x61, 0x73, 0x6d, 1, 0, 0, 0];
+  if (b.length < 8 || head.some((x, k) => b[k] !== x)) return false;
+  let i = 8, last = 0, custom = 0, code = false;
+  while (i < b.length) {
+    const id = b[i], got = lebU32(b, i + 1);
+    if (!got || got[1] + got[0] > b.length) return false;
+    if (id === 0) custom += got[0];
+    else {
+      const rank = WASM_RANK[id];
+      if (!rank || rank <= last) return false;
+      last = rank;
+      code = code || id === 10;
+    }
+    i = got[1] + got[0];
+  }
+  return code && custom * 2 <= b.length;
+}
+const be32 = (b, i) => (i + 4 <= b.length ? ((b[i] << 24) >>> 0) + (b[i + 1] << 16) + (b[i + 2] << 8) + b[i + 3] : null);
+const le32 = (b, i) => (i + 4 <= b.length ? b[i] + (b[i + 1] << 8) + (b[i + 2] << 16) + ((b[i + 3] << 24) >>> 0) : null);
+const isAlpha = (x) => (x >= 0x41 && x <= 0x5a) || (x >= 0x61 && x <= 0x7a);
+const tag = (b, i) => String.fromCharCode(b[i], b[i + 1], b[i + 2], b[i + 3]);
+function pngImage(b) {
+  const head = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
+  if (b.length < 8 || head.some((x, k) => b[k] !== x)) return false;
+  let i = 8, first = true, idat = false, ancillary = 0;
+  for (;;) {
+    const n = be32(b, i);
+    if (n === null || n > 0x7fffffff || i + 8 > b.length || ![4, 5, 6, 7].every((k) => isAlpha(b[i + k]))) return false;
+    const kind = tag(b, i + 4), end = i + 12 + n;
+    if (end > b.length || first !== (kind === "IHDR")) return false;
+    first = false;
+    idat = idat || kind === "IDAT";
+    if (b[i + 4] >= 0x61) ancillary += n;
+    i = end;
+    if (kind === "IEND") return i === b.length && idat && ancillary * 2 <= b.length;
+  }
+}
+function gifImage(b) {
+  const sig = String.fromCharCode(...b.subarray(0, 6));
+  if (b.length < 13 || (sig !== "GIF87a" && sig !== "GIF89a")) return false;
+  const table = (flags) => (flags & 0x80 ? 3 << ((flags & 7) + 1) : 0);
+  const subBlocks = (i) => {
+    let held = 0;
+    for (;;) {
+      if (i >= b.length) return null;
+      const size = b[i++];
+      if (size === 0) return [i, held];
+      i += size;
+      held += size;
+    }
+  };
+  let i = 13 + table(b[10]), side = 0;
+  while (i < b.length) {
+    const block = b[i++];
+    if (block === 0x3b) return b.subarray(i).every((x) => x === 0) && side * 2 <= b.length;
+    if (block === 0x21) {
+      if (i >= b.length) return false;
+      const label = b[i], got = subBlocks(i + 1);
+      if (!got) return false;
+      if (label === 0xfe || label === 0xff || label === 0x01) side += got[1];
+      i = got[0];
+    } else if (block === 0x2c) {
+      if (i + 8 >= b.length) return false;
+      i += 9 + table(b[i + 8]) + 1;
+      const got = subBlocks(i);
+      if (!got) return false;
+      i = got[0];
+    } else return false;
+  }
+  return false;
+}
+function riffMedia(b) {
+  if (b.length < 12 || tag(b, 0) !== "RIFF") return false;
+  const declared = le32(b, 4);
+  if (declared < 4 || declared + 8 < b.length) return false;
+  let i = 12, fmt = false, data = false, image = false;
+  while (i < b.length) {
+    if (i + 4 > b.length || ![0, 1, 2, 3].every((k) => b[i + k] === 0x20 || (b[i + k] > 0x20 && b[i + k] < 0x7f))) return false;
+    const id = tag(b, i), n = le32(b, i + 4);
+    if (n === null) return false;
+    fmt = fmt || id === "fmt ";
+    data = data || id === "data";
+    image = image || id === "VP8 " || id === "VP8L" || id === "VP8X";
+    const end = i + 8 + n + (n & 1);
+    if (end >= b.length) break;
+    i = end;
+  }
+  const form = tag(b, 8);
+  return (form === "WAVE" && fmt && data) || (form === "WEBP" && image);
+}
+/** Is `body` (a run's characters, quotes and `=` off) the base64 of a whole file of a data format? */
+function b64Data(body) {
+  if (body.length % 4 === 1 || !B64_DATA_HEADS.some((h) => body.startsWith(h))) return false;
+  const out = new Uint8Array(Math.floor((body.length * 3) / 4));
+  let bits = 0, nbits = 0, n = 0;
+  for (let k = 0; k < body.length; k++) {
+    bits = ((bits << 6) | B64[body.charCodeAt(k)]) & 0xffffff;
+    nbits += 6;
+    if (nbits >= 8) { nbits -= 8; out[n++] = (bits >> nbits) & 0xff; }
+  }
+  const b = out.subarray(0, n);
+  return wasmModule(b) || pngImage(b) || gifImage(b) || riffMedia(b);
+}
+/** The UTF-16 index of the first B64_BLOB_RE run in `line` that can be base64 data, else null. */
+function b64BlobCol(line) {
+  B64_BLOB_ALL.lastIndex = 0;
+  let m;
+  while ((m = B64_BLOB_ALL.exec(line))) {
+    const body = m[0].slice(1, -1).replace(/=+$/, "");
+    if (!b64Plain(body) && !b64Data(body)) return m.index;
+  }
+  return null;
+}
+
 // ---- Invisible-character payload (SC-HIDDEN-UNICODE); twins of core ----
 // Carrier chars in UTF-16: VS1 (BMP U+FE00-FE0F), or an astral char in
 // U+E0000-E01EF, which all share the high surrogate 0xDB40 with a low
@@ -4256,12 +4449,21 @@ function hiddenFlagEmoji(line, index, run) {
   return last === HIDDEN_TAG_END && cps.every((c) => { const o = c.codePointAt(0); return o >= HIDDEN_TAG_START && o <= HIDDEN_TAG_END; });
 }
 
-/** [col, run] (col a UTF-16 index) for the first non-flag-emoji carrier run in `line`, else null. Twin of core.hidden_unicode_run. */
+/** Is the run an emoji's presentation selector (U+FE0E, U+FE0F) repeated, at most 4 times? One character repeated
+ * carries no data (N-23). Twin of the engine's hidden_unicode_run. */
+const PRESENTATION_SELECTORS = "\uFE0E\uFE0F", PRESENTATION_REPEAT_MAX = 4;
+function hiddenPresentationRepeat(run) {
+  const cps = [...run];
+  return cps.length <= PRESENTATION_REPEAT_MAX && PRESENTATION_SELECTORS.includes(cps[0]) && cps.every((c) => c === cps[0]);
+}
+
+/** [col, run] (col a UTF-16 index) for the first carrier run in `line` that is neither a flag emoji nor a presentation
+ * selector repeated, else null. Twin of core.hidden_unicode_run. */
 function hiddenUnicodeRun(line) {
   HIDDEN_RUN_RE.lastIndex = 0;
   let m;
   while ((m = HIDDEN_RUN_RE.exec(line))) {
-    if (!hiddenFlagEmoji(line, m.index, m[0])) return [m.index, m[0]];
+    if (!hiddenFlagEmoji(line, m.index, m[0]) && !hiddenPresentationRepeat(m[0])) return [m.index, m[0]];
   }
   return null;
 }
@@ -4281,14 +4483,54 @@ function hiddenUnicodeIssue(path, lineNo, lines, col, run, runsCode) {
 }
 
 
-// A "-----BEGIN ... PRIVATE KEY-----" header alone is not a key: libraries keep the
-// header as a constant to recognize key files. Require base64 key material after it,
-// on the same line or the next two. Twin of core._token_has_material.
-const PEM_BODY_RE = /[A-Za-z0-9+/]{40}[A-Za-z0-9+/]*={0,2}/;   // {40}…*, not {40,}: see pycompat AT_LEAST_RE
-function tokenHasMaterial(line, lines, i) {
-  const t = findSecretToken(line);
-  if (!t || !t.text.startsWith("-----BEGIN")) return true;
-  return [line.slice(t.end), ...lines.slice(i + 1, i + 3)].some((x) => PEM_BODY_RE.test(x));
+// S-TOKEN-PEM: a "-----BEGIN ... PRIVATE KEY-----" header counts only with its key right after
+// it: key material, or an encrypted key's "Proc-Type:", past the separators a string or a
+// concatenation puts there (blanks, the escapes \n \r \t, a backslash that ends the line,
+// quotes and a string's prefix before one (b" rb' u8" r#"), #, +, ",", and .), on its line; or,
+// where the line ends with them, at the start of the first of the next two lines that holds
+// anything (a comment's # * / aside). Key material further on is not the header's: a minified
+// line runs on for megabytes, and libraries keep the header alone to recognize a key file.
+// Twin of scanfile.rs's pem_has_material and token_col.
+const PEM_BODY_AT = /[A-Za-z0-9+/]{40}[A-Za-z0-9+/]*={0,2}/y;   // {40}…*, not {40,}: see pycompat AT_LEAST_RE
+const STRING_PREFIX_AT = /[A-Za-z][A-Za-z0-9]{0,2}#*["']/y;
+function pastPemSeparators(s, k, lineStart) {
+  while (k < s.length) {
+    const c = s[k];
+    if (PY_SPACE_SET.has(c) || c === '"' || c === "'" || c === "`" || c === "+" || c === "," || c === "." || c === "#") k++;
+    else if (lineStart && (c === "*" || c === "/")) k++;
+    else if (c === "\\") {
+      let j = k + 1;
+      while (s[j] === "\\") j++;
+      if (s[j] === "n" || s[j] === "r" || s[j] === "t") { k = j + 1; continue; }
+      while (j < s.length && PY_SPACE_SET.has(s[j])) j++;   // a line continued
+      if (j < s.length) break;
+      k = j;
+    } else {
+      STRING_PREFIX_AT.lastIndex = k;                        // a string's prefix and its quote
+      if (!STRING_PREFIX_AT.test(s)) break;
+      k = STRING_PREFIX_AT.lastIndex;
+    }
+  }
+  return k;
+}
+function pemKeyAt(s, k) { PEM_BODY_AT.lastIndex = k; return PEM_BODY_AT.test(s) || s.startsWith("Proc-Type:", k); }
+function pemHasMaterial(line, end, lines, i) {
+  const k = pastPemSeparators(line, end, false);
+  if (k < line.length) return pemKeyAt(line, k);
+  for (const next of lines.slice(i + 1, i + 3)) {
+    const j = pastPemSeparators(next, 0, true);
+    if (j < next.length) return pemKeyAt(next, j);
+  }
+  return false;
+}
+/** Column of the first token on a line that is reported (a header only with its key), else -1. */
+function tokenCol(line, lines, i) {
+  let t, from = 0;
+  while ((t = findSecretToken(line, from))) {
+    if (!t.text.startsWith("-----BEGIN") || pemHasMaterial(line, t.end, lines, i)) return t.index;
+    from = Math.max(t.end, t.index + 1);
+  }
+  return -1;
 }
 
 // ---- intra-file taint ------------------------------------------------------
@@ -4806,7 +5048,7 @@ function scanLines(path, content, lines, lang, ctx, issues) {
       if (col < 0) continue;
       if (r.need && !r.need.test(mline)) continue;
       if (r.skip && r.skip.test(mline)) continue;
-      if (r.id === "S-TOKEN" && !tokenHasMaterial(mline, mlines, i)) continue;
+      if (r.id === "S-TOKEN" && (col = tokenCol(mline, mlines, i)) < 0) continue;
       if (r.id === "S-TOKEN" || r.id === "S-SECRET") secretLines.add(i);
       issues.push(mkIssue(r, path, i + 1, lines, col));
     }
@@ -4851,13 +5093,13 @@ function scanLines(path, content, lines, lang, ctx, issues) {
         why: "fromCharCode chains hide payloads from static review.",
         fix: "Decode and review what string is being built.",
         ref: "CWE-506 · Supply chain" }, path, i + 1, lines, cmCol));
-    const bm = B64_BLOB_RE.exec(line);
-    if (bm && !line.includes("sourceMappingURL"))
+    const b64Col = b64BlobCol(line);
+    if (b64Col !== null && !line.includes("sourceMappingURL"))
       issues.push(mkIssue({ id: "SC-B64", name: "Large base64 blob", type: "HOTSPOT", sev: "MAJOR",
         msg: "Base64 blob (200+ chars) embedded in code.",
         why: "Embedded encoded blobs can carry second-stage payloads.",
         fix: "Decode and verify the content; move legitimate assets to data files.",
-        ref: "CWE-506 · Supply chain" }, path, i + 1, lines, bm.index));
+        ref: "CWE-506 · Supply chain" }, path, i + 1, lines, b64Col));
     if (lang === "js" || lang === "py") {
       const off = offscreenCode(line, lang);
       if (off !== null && pyStrip(ctx.namesCode(i)) !== "") issues.push(offscreenIssue(path, i + 1, lines, off));
@@ -5087,7 +5329,8 @@ function computeMetrics(files) {
     for (const [key, i, code] of occ) for (let j = i; j < i + 6; j++) dupSet.add(`${key}\u0000${code[j][1]}`);
   }
   const dupPct = ncloc ? pyRound1(100 * dupSet.size / ncloc) : 0;
-  return { files: measured.length, depFiles: 0, ncloc, comments, dupPct };
+  // (dupLeftOut: the lines of Go and Rust the measure leaves out, core.compute_metrics; the page reads neither, N-14)
+  return { files: measured.length, depFiles: 0, ncloc, comments, dupPct, dupLeftOut: 0 };
 }
 
 function worstSevRating(issues, types) {
@@ -5184,7 +5427,11 @@ function shebangLang(text) {
    site.py executes every line of a .pth file in site-packages that starts
    with 'import' at every interpreter start. An uploaded .pth file gets only
    this check (as in the CLI's project and --deps scans): no other rule runs
-   on it, and it is not counted in the metrics. */
+   on it, and it is not counted in the metrics. The page has no engine: a
+   line is CRITICAL by PTH_EXEC_RE alone, where the CLI and the registry ask
+   the engine (pth_line_risk), which also reads what the line's code does
+   and judges `exec('…')` of a plain literal by the literal's code (an exec
+   here is CRITICAL whatever it runs). */
 const PTH_EXEC_RE = pyRe("\\b(?:exec|eval|compile)\\s*\\(|\\b(?:b64decode|b32decode|b85decode|a85decode|fromhex|unhexlify)\\b|\\.decode\\s*\\(|\\bmarshal\\.loads\\b|\\bzlib\\.decompress\\b|\\bcodecs\\.decode\\b|\\\\x[0-9a-fA-F]{2}");
 function isPth(name) {                         // os.path.splitext(name)[1].lower() == ".pth"
   const base = String(name).split(/[\\/]/).pop();

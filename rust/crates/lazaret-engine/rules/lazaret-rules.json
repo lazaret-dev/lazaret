@@ -1,6 +1,6 @@
 {
  "format": 1,
- "rule_set": "2.24.0",
+ "rule_set": "2.67.0",
  "source": "lazaret.scanner.core, extracted by scripts/make_rust_tables.py \u2014 do not edit",
  "values": {
   "ALWAYS_PRUNE_DIRS": {
@@ -327,6 +327,9 @@
     ".cts": {
      "value": "js"
     },
+    ".go": {
+     "value": "go"
+    },
     ".js": {
      "value": "js"
     },
@@ -344,6 +347,9 @@
     },
     ".pyw": {
      "value": "py"
+    },
+    ".rs": {
+     "value": "rs"
     },
     ".sql": {
      "value": "sql"
@@ -589,6 +595,9 @@
      "value": "migrations"
     }
    ]
+  },
+  "PACKAGE_CODE_CHARS": {
+   "value": 300000000
   },
   "PREVIEW_MAX": {
    "value": 60
@@ -1113,6 +1122,12 @@
         },
         {
          "value": "js"
+        },
+        {
+         "value": "go"
+        },
+        {
+         "value": "rs"
         }
        ]
       },
@@ -1127,7 +1142,7 @@
       },
       "re": {
        "flags": "i",
-       "re": "(password|passwd|pwd|secret|api[_-]?key|access[_-]?key|auth[_-]?token|private[_-]?key)\\s*[:=]\\s*[\\\"'][^\\\"']{4,}[\\\"']"
+       "re": "(password|passwd|pwd|secret|api[_-]?key|access[_-]?key|auth[_-]?token|private[_-]?key)\\s*(?::=|[:=]|:\\s*&(?:'static\\s+)?(?:str|\\[u8\\])\\s*=|[ \\t]+string\\s*=)\\s*(?:b|rb|r#*|br#*)?[\\\"'][^\\\"']{4,}[\\\"']"
       },
       "ref": {
        "value": "CWE-798 \u00b7 OWASP A07"
@@ -1902,6 +1917,12 @@
         },
         {
          "value": "sql"
+        },
+        {
+         "value": "go"
+        },
+        {
+         "value": "rs"
         }
        ]
       },
@@ -2040,6 +2061,12 @@
         },
         {
          "value": "js"
+        },
+        {
+         "value": "go"
+        },
+        {
+         "value": "rs"
         }
        ]
       },
@@ -2054,7 +2081,7 @@
       },
       "re": {
        "flags": "",
-       "re": "AKIA[0-9A-Z]{16}|gh[pousr]_[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9]{22}_[A-Za-z0-9]{59}|xox[baprs]-[A-Za-z0-9-]{10,}|sk_live_[A-Za-z0-9]{16,}|AIza[0-9A-Za-z_\\-]{35}|-----BEGIN [A-Z ]*PRIVATE KEY-----|eyJ[A-Za-z0-9_\\-]{10,}\\.eyJ[A-Za-z0-9_\\-]{10,}",
+       "re": "AKIA[0-9A-Z]{16}|gh[pousr]_[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9]{22}_[A-Za-z0-9]{59}|xox[baprs]-[A-Za-z0-9-]{10,}|sk_live_[A-Za-z0-9]{16,}|AIza[0-9A-Za-z_\\-]{35}|-----BEGIN [A-Z ]*PRIVATE KEY-----|cio(?<![A-Za-z0-9]cio)[A-Za-z0-9]{32}(?![A-Za-z0-9])|npm_(?<![A-Za-z0-9]npm_)[A-Za-z0-9]{36}(?![A-Za-z0-9])|sk-ant-(?<![A-Za-z0-9_\\-]sk-ant-)(?:[a-z]{3,5}[0-9]{2}|usr)-[A-Za-z0-9_\\-]{40,200}(?![A-Za-z0-9_\\-])|sk-(?<![A-Za-z0-9_\\-]sk-)[A-Za-z0-9_\\-]{20,90}T3BlbkFJ[A-Za-z0-9_\\-]{20,74}(?![A-Za-z0-9_\\-])|eyJ[A-Za-z0-9_\\-]{10,}\\.eyJ[A-Za-z0-9_\\-]{10,}",
        "token": [
         "AKIA[0-9A-Z]{16}",
         "gh[pousr]_[A-Za-z0-9]{36}",
@@ -2063,6 +2090,10 @@
         "sk_live_[A-Za-z0-9]{16,}",
         "AIza[0-9A-Za-z_\\-]{35}",
         "-----BEGIN [A-Z ]*PRIVATE KEY-----",
+        "cio(?<![A-Za-z0-9]cio)[A-Za-z0-9]{32}(?![A-Za-z0-9])",
+        "npm_(?<![A-Za-z0-9]npm_)[A-Za-z0-9]{36}(?![A-Za-z0-9])",
+        "sk-ant-(?<![A-Za-z0-9_\\-]sk-ant-)(?:[a-z]{3,5}[0-9]{2}|usr)-[A-Za-z0-9_\\-]{40,200}(?![A-Za-z0-9_\\-])",
+        "sk-(?<![A-Za-z0-9_\\-]sk-)[A-Za-z0-9_\\-]{20,90}T3BlbkFJ[A-Za-z0-9_\\-]{20,74}(?![A-Za-z0-9_\\-])",
         "eyJ[A-Za-z0-9_\\-]{10,}\\.eyJ[A-Za-z0-9_\\-]{10,}"
        ]
       },
@@ -2101,6 +2132,12 @@
         },
         {
          "value": "sql"
+        },
+        {
+         "value": "go"
+        },
+        {
+         "value": "rs"
         }
        ]
       },
@@ -2838,7 +2875,7 @@
       },
       "re": {
        "flags": "",
-       "re": "\\b(?:eval|(?:new\\s+)?Function|runIn(?:This|New)?Context)\\s*\\(\\s*(?:\\(?\\s*function\\s*\\([^()]{0,80}\\)\\s*\\{(?:[^{}]|\\{[^{}]{0,2000}\\}){0,2000}\\}\\s*\\)?|[A-Za-z_$][\\w$]*)\\s*\\(\\s*(?:\\[\\s*\\d+(?:\\s*,\\s*\\d+){199}|'[^'\\n]{1000}|\\\"[^\\\"\\n]{1000}|`[^`]{1000})"
+       "re": "\\b(?:eval|(?:new\\s+)?Function|runIn(?:This|New)?Context)\\s*\\(\\s*(?:\\(?\\s*function\\s*\\([^()]{0,80}\\)\\s*\\{(?:[^{}]|\\{[^{}]*\\})*\\}\\s*\\)?|[A-Za-z_$][\\w$]*)\\s*\\(\\s*(?:\\[\\s*\\d+(?:\\s*,\\s*\\d+){199}|'[^'\\n]{1000}|\\\"[^\\\"\\n]{1000}|`[^`]{1000})"
       },
       "ref": {
        "value": "CWE-506 \u00b7 Supply chain"
@@ -4255,6 +4292,12 @@
     }
    ]
   },
+  "USE_RISK_CHARS": {
+   "value": 24000000
+  },
+  "USE_RISK_MAX_CHARS": {
+   "value": 8000000
+  },
   "VALID_CATEGORIES": {
    "list": [
     {
@@ -4282,6 +4325,16 @@
      "value": "template injection"
     }
    ]
+  },
+  "VENDOR_CODE": {
+   "map": {
+    "cargo": {
+     "value": ".rs"
+    },
+    "go": {
+     "value": ".go"
+    }
+   }
   },
   "_AGENT_BIN_CMD_RE": {
    "flags": "",
@@ -4416,6 +4469,12 @@
   "_AUTORUN_WHY": {
    "value": "Editors and AI coding agents run these commands on their own \u2014 when the folder is opened, a session starts or the agent uses a tool \u2014 with your privileges, without asking each time. The 2026 Shai-Hulud worms (Mini Shai-Hulud, the keyv wave) committed a Claude Code SessionStart hook and a VS Code folder-open task to every repository they reached, so opening a checkout ran the worm."
   },
+  "_B64_PERIOD_MAX": {
+   "value": 64
+  },
+  "_B64_PLAIN_MAX": {
+   "value": 16384
+  },
   "_B64_RULE": {
    "map": {
     "fix": {
@@ -4476,6 +4535,9 @@
   "_BRACKET_RE": {
    "flags": "",
    "re": "[()\\[\\]{}]"
+  },
+  "_BUILD_SCRIPT_WHY": {
+   "value": "cargo compiles and runs a dependency's build script with the user's privileges, before anything is reviewed, whenever a crate that depends on it is built: the Rust twin of an npm install hook and an sdist's setup.py, where proc-macro1 and rustdecimal ran their payloads."
   },
   "_CAPPED_RULE": {
    "map": {
@@ -4617,6 +4679,16 @@
     }
    }
   },
+  "_CGO_EXTS": {
+   "list": [
+    {
+     "value": ".c"
+    },
+    {
+     "value": ".h"
+    }
+   ]
+  },
   "_CHARCODE_CALL_TAIL_RE": {
    "flags": "",
    "re": "\\s*(?:\\.\\s*(?:apply|call)\\s*)?\\("
@@ -4661,6 +4733,44 @@
    "flags": "",
    "re": "['\\\"`](?:node:)?child_process['\\\"`]"
   },
+  "_CMD_RUNNERS": {
+   "set": [
+    "arch",
+    "bunx",
+    "caffeinate",
+    "chroot",
+    "chrt",
+    "doas",
+    "firejail",
+    "flock",
+    "ionice",
+    "ltrace",
+    "mshta",
+    "npx",
+    "nsenter",
+    "parallel",
+    "pkexec",
+    "pnpx",
+    "prlimit",
+    "regsvr32",
+    "runas",
+    "rundll32",
+    "runuser",
+    "sandbox-exec",
+    "setsid",
+    "stdbuf",
+    "strace",
+    "su",
+    "systemd-run",
+    "taskset",
+    "timeout",
+    "unbuffer",
+    "unshare",
+    "watch",
+    "wsl",
+    "xargs"
+   ]
+  },
   "_COMMENT_LINE_RULES": {
    "set": [
     "Q-TODO",
@@ -4690,7 +4800,7 @@
   },
   "_CRED_STORE_RE": {
    "flags": "i",
-   "re": "\\.ssh\\b|\\bid_(?:rsa|ed25519|ecdsa|dsa)\\b(?!\\.pub)|\\.git-credentials|Local Storage"
+   "re": "\\.ssh\\b|\\bid_(?:rsa|ed25519|ecdsa|dsa)\\b(?!\\.pub)|\\.git-credentials|Local Storage|\\.aws(?:[/\\\\]|[\"'`]\\s*[,/+]\\s*[\"'`][/\\\\]?)(?:credentials|config)\\b|\\.aws(?:[/\\\\]|[\"'`]\\s*[,/+]\\s*[\"'`][/\\\\]?)sso(?:[/\\\\]|[\"'`]\\s*[,/+]\\s*[\"'`][/\\\\]?)cache\\b|\\.kube(?:[/\\\\]|[\"'`]\\s*[,/+]\\s*[\"'`][/\\\\]?)config\\b|\\.docker(?:[/\\\\]|[\"'`]\\s*[,/+]\\s*[\"'`][/\\\\]?)config\\.json\\b|\\bgcloud(?:[/\\\\]|[\"'`]\\s*[,/+]\\s*[\"'`][/\\\\]?)(?:credentials\\.db|access_tokens\\.db|legacy_credentials)\\b|\\bapplication_default_credentials\\.json\\b|\\.azure(?:[/\\\\]|[\"'`]\\s*[,/+]\\s*[\"'`][/\\\\]?)(?:accessTokens\\.json|msal_token_cache)|\\.npmrc\\b|\\.pypirc\\b|[._]netrc\\b|\\.cargo(?:[/\\\\]|[\"'`]\\s*[,/+]\\s*[\"'`][/\\\\]?)credentials\\b|\\bgh(?:[/\\\\]|[\"'`]\\s*[,/+]\\s*[\"'`][/\\\\]?)hosts\\.yml\\b|\\.vault-token\\b|\\.terraform\\.d(?:[/\\\\]|[\"'`]\\s*[,/+]\\s*[\"'`][/\\\\]?)credentials\\b"
   },
   "_CRED_SWEEP_MAX": {
    "value": 200
@@ -4893,9 +5003,6 @@
   "_DEPS_LOCAL_DEP_RE": {
    "flags": "m",
    "re": "(?:\\brequire\\s*\\(\\s*|\\bimport\\s*\\(\\s*|\\bfrom\\s+|^\\s*import\\s+|\\bexport\\s+[^'\"\\n;]*?\\bfrom\\s+)(['\"])(\\.{1,2}/[^'\"\\n]+)\\1"
-  },
-  "_DEPS_REACH_MAX": {
-   "value": 5000
   },
   "_DEPS_WEB_DIRS": {
    "set": [
@@ -9612,9 +9719,15 @@
    "flags": "",
    "re": "&\\d$"
   },
+  "_DV_ARRAY_MAX_CHARS": {
+   "value": 400
+  },
+  "_DV_ARRAY_MAX_ITEMS": {
+   "value": 64
+  },
   "_DV_ARRAY_RE": {
    "flags": "",
-   "re": "(?<![\\w$.])(?P<name>[A-Za-z_$][\\w$]*)[ \\t]*=[ \\t]*\\[(?P<items>(?:\\s*(?:'[^'\\\\\\n]{0,400}'|\"[^\"\\\\\\n]{0,400}\")\\s*,){0,63}\\s*(?:'[^'\\\\\\n]{0,400}'|\"[^\"\\\\\\n]{0,400}\")\\s*,?\\s*)\\]"
+   "re": "(?<![\\w$.])(?P<name>[A-Za-z_$][\\w$]*)[ \\t]*=[ \\t]*\\[(?P<items>(?:\\s*(?:'[^'\\\\\\n]*'|\"[^\"\\\\\\n]*\")\\s*,)*\\s*(?:'[^'\\\\\\n]*'|\"[^\"\\\\\\n]*\")\\s*,?\\s*)\\]"
   },
   "_DV_ARRAY_SRC": {
    "value": "(?<![\\w$.])(?P<name>[A-Za-z_$][\\w$]*)[ \\t]*=[ \\t]*\\[(?P<items>(?:\\s*(?:'[^'\\\\\\n]{0,400}'|\"[^\"\\\\\\n]{0,400}\")\\s*,){0,63}\\s*(?:'[^'\\\\\\n]{0,400}'|\"[^\"\\\\\\n]{0,400}\")\\s*,?\\s*)\\]"
@@ -9664,8 +9777,11 @@
   "_DV_CC_ARG_STR_SRC": {
    "value": "'(?P<a>[ -&(-\\[\\]-~]{0,400})'|\"(?P<b>[ !#-\\[\\]-~]{0,400})\\\""
   },
+  "_DV_CC_ARRAY_MAX_INTS": {
+   "value": 4096
+  },
   "_DV_CC_ARRAY_TAIL": {
-   "value": "[ \\t]*=[ \\t]*[\\[(]\\s*(?P<items>(?:0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10})(?:\\s*,\\s*(?:0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10})){0,4095}\\s*,?)\\s*[\\])]"
+   "value": "[ \\t]*=[ \\t]*[\\[(]\\s*(?P<items>(?:0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10})(?:\\s*,\\s*(?:0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10}))*\\s*,?)\\s*[\\])]"
   },
   "_DV_CC_BINARY": {
    "map": {
@@ -9704,12 +9820,18 @@
   "_DV_CC_BODY": {
    "value": 600
   },
+  "_DV_CC_CALL_MAX_CHARS": {
+   "value": 400
+  },
+  "_DV_CC_CALL_MAX_ITEMS": {
+   "value": 20000
+  },
   "_DV_CC_CALL_TAIL": {
-   "value": "[ \\t]*\\((?P<args>(?:[^()'\"\\n]|'[^'\\\\\\n]{0,400}'|\"[^\"\\\\\\n]{0,400}\"){0,20000})\\)"
+   "value": "[ \\t]*\\((?P<args>(?:[^()'\"\\n]|'[^'\\\\\\n]*'|\"[^\"\\\\\\n]*\")*)\\)"
   },
   "_DV_CC_FOR_RE": {
    "flags": "",
-   "re": "\\bfor[ \\t]*\\([ \\t]*(?:var|let)[ \\t]+(?P<i>[A-Za-z_$][\\w$]*)[ \\t]*=[ \\t]*0[ \\t]*;[ \\t]*\\1[ \\t]*<[ \\t]*(?P<d>[A-Za-z_$][\\w$]*)[ \\t]*\\.[ \\t]*length[ \\t]*;"
+   "re": "\\bfor[ \\t]*\\([ \\t]*(?:var|let)[ \\t]+(?P<i>[A-Za-z_$][\\w$]*)[ \\t]*=[ \\t]*0[ \\t]*;[ \\t]*(?P<i_again>[A-Za-z_$][\\w$]*)[ \\t]*<[ \\t]*(?P<d>[A-Za-z_$][\\w$]*)[ \\t]*\\.[ \\t]*length[ \\t]*;"
   },
   "_DV_CC_FOR_SRC": {
    "value": "\\bfor[ \\t]*\\([ \\t]*(?:var|let)[ \\t]+(?P<i>[A-Za-z_$][\\w$]*)[ \\t]*=[ \\t]*0[ \\t]*;[ \\t]*\\1[ \\t]*<[ \\t]*(?P<d>[A-Za-z_$][\\w$]*)[ \\t]*\\.[ \\t]*length[ \\t]*;"
@@ -9734,9 +9856,12 @@
    "flags": "",
    "re": "(?:0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10})"
   },
+  "_DV_CC_LITERAL_MAX_INTS": {
+   "value": 400
+  },
   "_DV_CC_LITERAL_RE": {
    "flags": "",
-   "re": "\\bString[ \\t]*\\.[ \\t]*fromCharCode[ \\t]*(?:\\([ \\t]*(?:\\.\\.\\.[ \\t]*\\[[ \\t]*(?P<a>(?:0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10})(?:[ \\t]*,[ \\t]*(?:0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10})){0,399}[ \\t]*,?)[ \\t]*\\]|(?P<b>(?:0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10})(?:[ \\t]*,[ \\t]*(?:0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10})){0,399}[ \\t]*,?))[ \\t]*\\)|\\.[ \\t]*apply[ \\t]*\\([ \\t]*(?:null|undefined|this|String)[ \\t]*,[ \\t]*\\[[ \\t]*(?P<c>(?:0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10})(?:[ \\t]*,[ \\t]*(?:0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10})){0,399}[ \\t]*,?)[ \\t]*\\][ \\t]*\\))|(?:''|\"\")[ \\t]*\\.[ \\t]*join[ \\t]*\\([ \\t]*(?:map[ \\t]*\\([ \\t]*chr[ \\t]*,[ \\t]*[\\[(][ \\t]*(?P<d>(?:0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10})(?:[ \\t]*,[ \\t]*(?:0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10})){0,399}[ \\t]*,?)[ \\t]*[\\])][ \\t]*\\)|\\[?[ \\t]*chr[ \\t]*\\([ \\t]*(?P<v>[A-Za-z_]\\w*)[ \\t]*\\)[ \\t]+for[ \\t]+\\5[ \\t]+in[ \\t]+[\\[(][ \\t]*(?P<e>(?:0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10})(?:[ \\t]*,[ \\t]*(?:0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10})){0,399}[ \\t]*,?)[ \\t]*[\\])][ \\t]*\\]?)[ \\t]*\\)|\\bbyte(?:s|array)[ \\t]*\\([ \\t]*[\\[(][ \\t]*(?P<f>(?:0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10})(?:[ \\t]*,[ \\t]*(?:0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10})){0,399}[ \\t]*,?)[ \\t]*[\\])][ \\t]*\\)[ \\t]*\\.[ \\t]*decode[ \\t]*\\([^()\\n]{0,20}\\)"
+   "re": "\\bString[ \\t]*\\.[ \\t]*fromCharCode[ \\t]*(?:\\([ \\t]*(?:\\.\\.\\.[ \\t]*\\[[ \\t]*(?P<a>(?:0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10})(?:[ \\t]*,[ \\t]*(?:0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10}))*[ \\t]*,?)[ \\t]*\\]|(?P<b>(?:0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10})(?:[ \\t]*,[ \\t]*(?:0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10}))*[ \\t]*,?))[ \\t]*\\)|\\.[ \\t]*apply[ \\t]*\\([ \\t]*(?:null|undefined|this|String)[ \\t]*,[ \\t]*\\[[ \\t]*(?P<c>(?:0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10})(?:[ \\t]*,[ \\t]*(?:0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10}))*[ \\t]*,?)[ \\t]*\\][ \\t]*\\))|(?:''|\"\")[ \\t]*\\.[ \\t]*join[ \\t]*\\([ \\t]*(?:map[ \\t]*\\([ \\t]*chr[ \\t]*,[ \\t]*[\\[(][ \\t]*(?P<d>(?:0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10})(?:[ \\t]*,[ \\t]*(?:0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10}))*[ \\t]*,?)[ \\t]*[\\])][ \\t]*\\)|\\[?[ \\t]*chr[ \\t]*\\([ \\t]*(?P<v>[A-Za-z_]\\w*)[ \\t]*\\)[ \\t]+for[ \\t]+(?P<v_again>[A-Za-z_]\\w*)[ \\t]+in[ \\t]+[\\[(][ \\t]*(?P<e>(?:0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10})(?:[ \\t]*,[ \\t]*(?:0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10}))*[ \\t]*,?)[ \\t]*[\\])][ \\t]*\\]?)[ \\t]*\\)|\\bbyte(?:s|array)[ \\t]*\\([ \\t]*[\\[(][ \\t]*(?P<f>(?:0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10})(?:[ \\t]*,[ \\t]*(?:0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10}))*[ \\t]*,?)[ \\t]*[\\])][ \\t]*\\)[ \\t]*\\.[ \\t]*decode[ \\t]*\\([^()\\n]{0,20}\\)"
   },
   "_DV_CC_LITERAL_SRC": {
    "value": "\\bString[ \\t]*\\.[ \\t]*fromCharCode[ \\t]*(?:\\([ \\t]*(?:\\.\\.\\.[ \\t]*\\[[ \\t]*(?P<a>(?:0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10})(?:[ \\t]*,[ \\t]*(?:0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10})){0,399}[ \\t]*,?)[ \\t]*\\]|(?P<b>(?:0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10})(?:[ \\t]*,[ \\t]*(?:0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10})){0,399}[ \\t]*,?))[ \\t]*\\)|\\.[ \\t]*apply[ \\t]*\\([ \\t]*(?:null|undefined|this|String)[ \\t]*,[ \\t]*\\[[ \\t]*(?P<c>(?:0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10})(?:[ \\t]*,[ \\t]*(?:0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10})){0,399}[ \\t]*,?)[ \\t]*\\][ \\t]*\\))|(?:''|\"\")[ \\t]*\\.[ \\t]*join[ \\t]*\\([ \\t]*(?:map[ \\t]*\\([ \\t]*chr[ \\t]*,[ \\t]*[\\[(][ \\t]*(?P<d>(?:0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10})(?:[ \\t]*,[ \\t]*(?:0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10})){0,399}[ \\t]*,?)[ \\t]*[\\])][ \\t]*\\)|\\[?[ \\t]*chr[ \\t]*\\([ \\t]*(?P<v>[A-Za-z_]\\w*)[ \\t]*\\)[ \\t]+for[ \\t]+\\5[ \\t]+in[ \\t]+[\\[(][ \\t]*(?P<e>(?:0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10})(?:[ \\t]*,[ \\t]*(?:0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10})){0,399}[ \\t]*,?)[ \\t]*[\\])][ \\t]*\\]?)[ \\t]*\\)|\\bbyte(?:s|array)[ \\t]*\\([ \\t]*[\\[(][ \\t]*(?P<f>(?:0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10})(?:[ \\t]*,[ \\t]*(?:0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10})){0,399}[ \\t]*,?)[ \\t]*[\\])][ \\t]*\\)[ \\t]*\\.[ \\t]*decode[ \\t]*\\([^()\\n]{0,20}\\)"
@@ -10020,9 +10145,84 @@
    "flags": "",
    "re": "^\\s*(?:from\\s+(?:flask|quart)\\b|import\\s+(?:flask|quart)\\b)"
   },
+  "_FN_CX_RULE": {
+   "map": {
+    "fix": {
+     "value": "Split branches into smaller functions; use early returns or lookup tables."
+    },
+    "id": {
+     "value": "Q-FN-CX"
+    },
+    "msg": {
+     "value": "Function \"{name}\" has complexity ~{cx} (limit {limit})."
+    },
+    "name": {
+     "value": "High cyclomatic complexity"
+    },
+    "ref": {
+     "value": "Maintainability"
+    },
+    "sev": {
+     "value": "MAJOR"
+    },
+    "type": {
+     "value": "SMELL"
+    },
+    "why": {
+     "value": "Highly branched code is hard to reason about and to cover with tests."
+    }
+   }
+  },
   "_FN_DEF_BEFORE_RE": {
    "flags": "",
    "re": "(?:^|[^\\w$])(?:function\\s*\\*?|def)\\s*$"
+  },
+  "_FN_JS_CX_RE": {
+   "flags": "",
+   "re": "\\b(if|for|while|case|catch)\\b|&&|\\|\\||\\?[^.:]"
+  },
+  "_FN_JS_HEADER_RE": {
+   "flags": "",
+   "re": "(?:function\\s+(\\w+)|(?:const|let|var)\\s+(\\w+)\\s*=\\s*(?:async\\s*)?(?:function|\\([^()]*\\)\\s*=>|\\w+\\s*=>)|(?<!\\w)(\\w+)\\s*\\([^()]*\\)\\s*\\{)"
+  },
+  "_FN_JS_WINDOW_LINES": {
+   "value": 800
+  },
+  "_FN_LONG_RULE": {
+   "map": {
+    "fix": {
+     "value": "Extract cohesive blocks into helper functions."
+    },
+    "id": {
+     "value": "Q-FN-LONG"
+    },
+    "msg": {
+     "value": "Function \"{name}\" is {len} lines long (limit {limit})."
+    },
+    "name": {
+     "value": "Function too long"
+    },
+    "ref": {
+     "value": "Maintainability"
+    },
+    "sev": {
+     "value": "MAJOR"
+    },
+    "type": {
+     "value": "SMELL"
+    },
+    "why": {
+     "value": "Long functions do too much and resist testing and reuse."
+    }
+   }
+  },
+  "_FN_PY_CX_RE": {
+   "flags": "",
+   "re": "\\b(if|elif|for|while|and|or|except|case)\\b"
+  },
+  "_FN_PY_DEF_RE": {
+   "flags": "",
+   "re": "^(\\s*)(?:async\\s+)?def\\s+(\\w+)"
   },
   "_FULL_SAN": {
    "map": {
@@ -10051,6 +10251,12 @@
   },
   "_GLOBAL_OBJECT": {
    "value": "(?:(?:window|globalThis|self|global|top|parent|frames)\\s*\\.\\s*)?"
+  },
+  "_GO_GENERATE_WHY": {
+   "value": "A //go:generate line names a command for go generate to run. Nothing runs it when the module is built or imported; it runs when someone runs go generate in the module's folders, which is a developer's step, so it is listed rather than judged."
+  },
+  "_GO_START_WHY": {
+   "value": "Go runs nothing when a module is downloaded, but a package's init functions and the initializers of its package-level variables run when any program that imports the package starts, and so does a cgo constructor: where Go malware puts its payload (the 2025 typosquats ran `wget -O - \u2026 | /bin/bash` from init). Collecting credentials or the whole environment next to a network call is the shape of a stealer; MAJOR where the code may have a reason, CRITICAL for code no library needs: code fetched and run, a reverse shell, a beacon to a data-capture service."
   },
   "_GUARD_BLOCK_LINES": {
    "value": 12
@@ -12339,6 +12545,25 @@
   "_OFFSCREEN_WHY": {
    "value": "A long run of blanks pushes code past the right edge of editors, diffs and code review, while the interpreter runs it all the same: @react-native-aria/radio 0.2.14 hid its loader 731 columns right. No formatter puts code there."
   },
+  "_PACKAGE_RULE_NAMES": {
+   "map": {
+    "SC-GO-GENERATE": {
+     "value": "A go:generate command"
+    },
+    "SC-IMPORT-RISK": {
+     "value": "Risky import-time code"
+    },
+    "SC-INSTALL-HOOK": {
+     "value": "Install hook"
+    },
+    "SC-USE-RISK": {
+     "value": "Hostile code the package runs when used"
+    }
+   }
+  },
+  "_PACKAGE_USE_RISK_WHY": {
+   "value": "A payload need not run on install or import to reach you: a logger's constructor, a middleware or a script the package spawns runs it the first time your code uses the package. These are the shapes no library needs: code fetched and run, a reverse shell, hidden PowerShell, credentials sent to an exfiltration service, a beacon to a data-capture service."
+  },
   "_PARAM_RE": {
    "flags": "",
    "re": "\\s*\\*{0,2}\\s*([A-Za-z_]\\w*)\\s*"
@@ -12531,14 +12756,14 @@
   },
   "_PERSIST_WRITE_RE": {
    "flags": "",
-   "re": "\\b(?:writeFileSync|writeFile|appendFileSync|appendFile|createWriteStream|outputFileSync|outputFile|outputJsonSync|outputJson|writeJsonSync|writeJson|copyFileSync|copyFile|cpSync|renameSync|symlinkSync|write_text|write_bytes|createOrUpdateFileContents)\\s*\\(|\\bjson\\.dump\\s*\\(|\\bshutil\\.(?:copy\\w*|move)\\s*\\(|\\bopen\\s*\\([^()\\n]{0,300}?[\"'][wax]b?\\+?[\"']"
+   "re": "\\b(?:writeFileSync|writeFile|appendFileSync|appendFile|createWriteStream|outputFileSync|outputFile|outputJsonSync|outputJson|writeJsonSync|writeJson|copyFileSync|copyFile|cpSync|renameSync|symlinkSync|write_text|write_bytes|createOrUpdateFileContents)\\s*\\(|\\bjson\\.dump\\s*\\(|\\bshutil\\.(?:copy\\w*|move)\\s*\\(|\\bopen\\s*\\((?:[^()\\n]|\\([^()\\n]*\\))*?[\"'][wax]b?\\+?[\"']"
   },
   "_PERSIST_WRITE_SRC": {
    "value": "\\b(?:writeFileSync|writeFile|appendFileSync|appendFile|createWriteStream|outputFileSync|outputFile|outputJsonSync|outputJson|writeJsonSync|writeJson|copyFileSync|copyFile|cpSync|renameSync|symlinkSync|write_text|write_bytes|createOrUpdateFileContents)\\s*\\(|\\bjson\\.dump\\s*\\(|\\bshutil\\.(?:copy\\w*|move)\\s*\\(|\\bopen\\s*\\([^()\\n]{0,300}?[\"'][wax]b?\\+?[\"']"
   },
   "_PIPE_SCAN_RE": {
    "flags": "",
-   "re": "\\|\\s*(?:sudo\\s+)?(?:ba|z|da|k)?sh\\b|[\\n|;&]|\\b(?:curl|wget)\\b"
+   "re": "\\|\\s*(?:sudo\\s+)?(?:[\\w.~-]*/)*(?:env\\s+)?(?:ba|z|da|k)?sh\\b|[\\n|;&]|\\b(?:curl|wget)\\b"
   },
   "_PIPE_SHELL_RULE": {
    "map": {
@@ -12571,6 +12796,147 @@
   "_PLAIN_NAME_RE": {
    "flags": "",
    "re": "^[A-Za-z_][A-Za-z0-9_]*$"
+  },
+  "_PM_ARGV_RE": {
+   "flags": "",
+   "re": "\\b(?:spawn|spawnSync|execFile|execFileSync|execa|execaSync|run|call|check_call|check_output|Popen)\\s*\\(\\s*(?:(?P<prog>['\"`][^'\"`\\n]{1,100}['\"`]|sys\\.executable|process\\.execPath)\\s*,\\s*)?[\\[(](?P<items>[^\\[\\]()\\n]{0,2000})[\\])]"
+  },
+  "_PM_INSTALL_WORDS": {
+   "set": [
+    "add",
+    "i",
+    "in",
+    "ins",
+    "inst",
+    "insta",
+    "instal",
+    "install",
+    "isnt",
+    "isnta",
+    "isntal",
+    "isntall"
+   ]
+  },
+  "_PM_JS_MANAGERS": {
+   "set": [
+    "bun",
+    "cnpm",
+    "npm",
+    "pnpm",
+    "yarn"
+   ]
+  },
+  "_PM_NEEDLES": {
+   "list": [
+    {
+     "value": "bun"
+    },
+    {
+     "value": "npm"
+    },
+    {
+     "value": "pip"
+    },
+    {
+     "value": "pnpm"
+    },
+    {
+     "value": "yarn"
+    }
+   ]
+  },
+  "_PM_NPM_VALUE_OPTIONS": {
+   "set": [
+    "--before",
+    "--cache",
+    "--cwd",
+    "--dir",
+    "--filter",
+    "--globalconfig",
+    "--include",
+    "--install-strategy",
+    "--loglevel",
+    "--omit",
+    "--prefix",
+    "--registry",
+    "--save-prefix",
+    "--tag",
+    "--userconfig",
+    "--workspace",
+    "-C",
+    "-F",
+    "-w"
+   ]
+  },
+  "_PM_PIP_RE": {
+   "flags": "",
+   "re": "pip(?:3(?:\\.\\d+)?)?"
+  },
+  "_PM_PIP_VALUE_OPTIONS": {
+   "set": [
+    "--abi",
+    "--cache-dir",
+    "--cert",
+    "--client-cert",
+    "--config-settings",
+    "--constraint",
+    "--editable",
+    "--exists-action",
+    "--extra-index-url",
+    "--find-links",
+    "--global-option",
+    "--implementation",
+    "--index-url",
+    "--log",
+    "--platform",
+    "--prefix",
+    "--progress-bar",
+    "--proxy",
+    "--python",
+    "--python-version",
+    "--report",
+    "--requirement",
+    "--retries",
+    "--root",
+    "--src",
+    "--target",
+    "--timeout",
+    "--trusted-host",
+    "--upgrade-strategy",
+    "-C",
+    "-c",
+    "-e",
+    "-f",
+    "-i",
+    "-r",
+    "-t"
+   ]
+  },
+  "_PM_REASON": {
+   "value": "installs packages the release does not depend on"
+  },
+  "_PM_SELF": {
+   "set": [
+    "bun",
+    "cnpm",
+    "corepack",
+    "npm",
+    "pip",
+    "pnpm",
+    "setuptools",
+    "uv",
+    "wheel",
+    "yarn"
+   ]
+  },
+  "_PRESENTATION_REPEAT_MAX": {
+   "value": 4
+  },
+  "_PRESENTATION_SELECTORS": {
+   "value": "\ufe0e\ufe0f"
+  },
+  "_PROC_MACRO_WHY": {
+   "value": "A procedural macro is a program the compiler loads and runs, with the user's privileges, while it builds every crate that uses the macro: the moment of a build script, an install hook's twin."
   },
   "_PS_CRADLE_RE": {
    "flags": "i",
@@ -12614,6 +12980,23 @@
      "value": "import\t"
     }
    ]
+  },
+  "_PTH_REASONS": {
+   "list": [
+    {
+     "value": "executes or decodes a payload"
+    },
+    {
+     "value": "reaches the network"
+    },
+    {
+     "value": "starts another program"
+    }
+   ]
+  },
+  "_PTH_RUN_RE": {
+   "flags": "",
+   "re": "\\bsubprocess\\b|\\bos\\s*\\.\\s*(?:system|popen|startfile|exec[lv]p?e?|spawn[lv]p?e?|posix_spawnp?)\\s*\\(|\\bpty\\s*\\.\\s*spawn\\s*\\(|\\bmultiprocessing\\b"
   },
   "_PUBLIC_IP_URL_RE": {
    "flags": "",
@@ -12709,6 +13092,45 @@
   "_PY_JOINS": {
    "value": "([{,=+-*/%&|^<>~@\\.\"'"
   },
+  "_PY_KEYWORDS": {
+   "set": [
+    "False",
+    "None",
+    "True",
+    "and",
+    "as",
+    "assert",
+    "async",
+    "await",
+    "break",
+    "class",
+    "continue",
+    "def",
+    "del",
+    "elif",
+    "else",
+    "except",
+    "finally",
+    "for",
+    "from",
+    "global",
+    "if",
+    "import",
+    "in",
+    "is",
+    "lambda",
+    "nonlocal",
+    "not",
+    "or",
+    "pass",
+    "raise",
+    "return",
+    "try",
+    "while",
+    "with",
+    "yield"
+   ]
+  },
   "_PY_LIT_RE": {
    "flags": "",
    "re": "(?:(?<![A-Za-z0-9_])([rRbBuUfF]{1,2}))?(\\\"[^\\\"]*\\\"|'[^']*'|`[^`]*`)"
@@ -12720,6 +13142,13 @@
   "_PY_RUN_RE": {
    "flags": "",
    "re": "\\[\\s*(?:\\w*sys\\.executable|[\"']python[\\d.w]*(?:\\.exe)?[\"'])\\s*,|\\bstart\\s+pythonw?\\b|\\b(?:system|popen|getoutput|run|call|Popen)\\s*\\(\\s*f?[\"']python[\\d.w]*(?:\\.exe)?\\s"
+  },
+  "_PY_SOFT_KEYWORDS": {
+   "set": [
+    "_",
+    "case",
+    "match"
+   ]
   },
   "_QUOTE_CHAR_RE": {
    "flags": "",
@@ -12821,6 +13250,9 @@
    "flags": "",
    "re": "[\"'](?:/bin/(?:ba|z|da|k)?sh|cmd(?:\\.exe)?|powershell(?:\\.exe)?)[\"']|\\bpty\\.spawn\\s*\\("
   },
+  "_REWRITE_REASON": {
+   "value": "rewrites another package's code"
+  },
   "_ROUTE_DECORATOR_RE": {
    "flags": "",
    "re": "^\\s*@[\\w.]+\\.(route|get|post|put|patch|delete|options|head|api_route|websocket)\\s*\\("
@@ -12836,6 +13268,9 @@
    "flags": "i",
    "re": "\\.(?:[cm]?[jt]s|[jt]sx)$"
   },
+  "_RUST_START_WHY": {
+   "value": "A function marked #[ctor], placed in a load section (.init_array) or exported as C's main runs before Rust's own main in every program the crate is linked into: an import-time payload's place. MAJOR where the code may have a reason; CRITICAL for code no library needs."
+  },
   "_SAME_SITE_RE": {
    "flags": "",
    "re": "\\s*[rRuUfF]{0,2}[\"'`](?:/(?![/\\\\\"'`{$])|https?://[^/\"'`?#\\\\\\s{}$]+/)"
@@ -12847,13 +13282,13 @@
    "value": "(?:[^()]|\\([^()]*\\))*"
   },
   "_SA_ACC_A_HEAD": {
-   "value": "function\\s+(?P<g>[A-Za-z_$][\\w$]*)\\s*\\(\\s*(?P<p>[A-Za-z_$][\\w$]*)\\s*,\\s*[A-Za-z_$][\\w$]*\\s*\\)\\s*\\{\\s*(?P=p)\\s*=\\s*(?P=p)\\s*-\\s*(?P<off>[^;{}]{1,300});\\s*(?:var|const|let)\\s+[A-Za-z_$][\\w$]*\\s*=\\s*"
+   "value": "function\\s+(?P<g>[A-Za-z_$][\\w$]*)\\s*\\(\\s*(?P<p>[A-Za-z_$][\\w$]*)\\s*,\\s*[A-Za-z_$][\\w$]*\\s*\\)\\s*\\{\\s*(?P<p2>[A-Za-z_$][\\w$]*)\\s*=\\s*(?P<p3>[A-Za-z_$][\\w$]*)\\s*-\\s*(?P<off>[^;{}]{1,300});\\s*(?:var|const|let)\\s+[A-Za-z_$][\\w$]*\\s*=\\s*"
   },
   "_SA_ACC_B_HEAD": {
    "value": "function\\s+(?P<g>[A-Za-z_$][\\w$]*)\\s*\\(\\s*[A-Za-z_$][\\w$]*\\s*,\\s*[A-Za-z_$][\\w$]*\\s*\\)\\s*\\{\\s*(?:var|const|let)\\s+[A-Za-z_$][\\w$]*\\s*=\\s*"
   },
   "_SA_ACC_B_TAIL": {
-   "value": "\\s*\\(\\s*\\)\\s*;\\s*return\\s+(?P=g)\\s*=\\s*function\\s*\\(\\s*(?P<p>[A-Za-z_$][\\w$]*)\\s*,\\s*[A-Za-z_$][\\w$]*\\s*\\)\\s*\\{\\s*(?P=p)\\s*=\\s*(?P=p)\\s*-\\s*(?P<off>[^;{}]{1,300});"
+   "value": "\\s*\\(\\s*\\)\\s*;\\s*return\\s+(?P<g2>[A-Za-z_$][\\w$]*)\\s*=\\s*function\\s*\\(\\s*(?P<p>[A-Za-z_$][\\w$]*)\\s*,\\s*[A-Za-z_$][\\w$]*\\s*\\)\\s*\\{\\s*(?P<p2>[A-Za-z_$][\\w$]*)\\s*=\\s*(?P<p3>[A-Za-z_$][\\w$]*)\\s*-\\s*(?P<off>[^;{}]{1,300});"
   },
   "_SA_ALIAS_RE": {
    "flags": "",
@@ -12882,7 +13317,7 @@
   },
   "_SA_CHECKSUM_RE": {
    "flags": "",
-   "re": "try\\s*\\{\\s*(?:var|const|let)\\s+(?P<v>[A-Za-z_$][\\w$]*)\\s*=\\s*(?P<e>[^;]{1,6000});\\s*if\\s*\\(\\s*(?P=v)\\s*===\\s*[A-Za-z_$][\\w$]*\\s*\\)\\s*break"
+   "re": "try\\s*\\{\\s*(?:var|const|let)\\s+(?P<v>[A-Za-z_$][\\w$]*)\\s*=\\s*(?P<e>[^;]{1,6000});\\s*if\\s*\\(\\s*(?P<v_again>[A-Za-z_$][\\w$]*)\\s*===\\s*[A-Za-z_$][\\w$]*\\s*\\)\\s*break"
   },
   "_SA_DECIMAL_RE": {
    "flags": "",
@@ -13099,6 +13534,15 @@
    "flags": "",
    "re": "\\b(?:eval|exec|execSync|Function|runIn(?:This|New)?Context)\\b|\\[\\s*['\\\"`](?:e(?:['\\\"`]\\s*\\+\\s*['\\\"`])?v(?:['\\\"`]\\s*\\+\\s*['\\\"`])?a(?:['\\\"`]\\s*\\+\\s*['\\\"`])?l|F(?:['\\\"`]\\s*\\+\\s*['\\\"`])?u(?:['\\\"`]\\s*\\+\\s*['\\\"`])?n(?:['\\\"`]\\s*\\+\\s*['\\\"`])?c(?:['\\\"`]\\s*\\+\\s*['\\\"`])?t(?:['\\\"`]\\s*\\+\\s*['\\\"`])?i(?:['\\\"`]\\s*\\+\\s*['\\\"`])?o(?:['\\\"`]\\s*\\+\\s*['\\\"`])?n)['\\\"`]\\s*\\]"
   },
+  "_SDIST_BUILD_WHY": {
+   "value": "pip builds an sdist's Rust extension with cargo when it installs the sdist (maturin, setuptools-rust), and cargo compiles and runs the crate's build script with the user's privileges before anything is reviewed: the moment of setup.py, and where proc-macro1 and rustdecimal ran their payloads on crates.io."
+  },
+  "_SDIST_PROC_MACRO_WHY": {
+   "value": "A procedural macro is a program the compiler loads and runs, with the user's privileges, while pip builds the sdist's Rust extension: the moment of setup.py."
+  },
+  "_SDIST_START_WHY": {
+   "value": "A function marked #[ctor] or placed in a load section (.init_array) runs when the package's Rust extension module is loaded, at import, before any of its code is called: an import-time payload's place. MAJOR where the code may have a reason; CRITICAL for code no library needs."
+  },
   "_SECRETS_DUMP_RE": {
    "flags": "i",
    "re": "\\btoJSON\\s*\\(\\s*secrets\\s*\\)"
@@ -13110,7 +13554,7 @@
    "list": [
     {
      "flags": "",
-     "re": "AKIA[0-9A-Z]{16}|gh[pousr]_[A-Za-z0-9]{36,}|github_pat_[A-Za-z0-9_]{22,}|xox[baprs]-[A-Za-z0-9-]{10,}|sk_live_[A-Za-z0-9]{16,}|AIza[0-9A-Za-z_\\-]{35}|-----BEGIN [A-Z ]*PRIVATE KEY-----(?:.*?-----END [A-Z ]*PRIVATE KEY-----|.*)|eyJ[A-Za-z0-9_\\-]{10,}\\.eyJ[A-Za-z0-9_\\-]{10,}",
+     "re": "AKIA[0-9A-Z]{16}|gh[pousr]_[A-Za-z0-9]{36,}|github_pat_[A-Za-z0-9_]{22,}|xox[baprs]-[A-Za-z0-9-]{10,}|sk_live_[A-Za-z0-9]{16,}|AIza[0-9A-Za-z_\\-]{35}|-----BEGIN [A-Z ]*PRIVATE KEY-----(?:.*?-----END [A-Z ]*PRIVATE KEY-----|.*)|cio(?<![A-Za-z0-9]cio)[A-Za-z0-9]{32}(?![A-Za-z0-9])|npm_(?<![A-Za-z0-9]npm_)[A-Za-z0-9]{36}(?![A-Za-z0-9])|sk-ant-(?<![A-Za-z0-9_\\-]sk-ant-)(?:[a-z]{3,5}[0-9]{2}|usr)-[A-Za-z0-9_\\-]{40,200}(?![A-Za-z0-9_\\-])|sk-(?<![A-Za-z0-9_\\-]sk-)[A-Za-z0-9_\\-]{20,90}T3BlbkFJ[A-Za-z0-9_\\-]{20,74}(?![A-Za-z0-9_\\-])|eyJ[A-Za-z0-9_\\-]{10,}\\.eyJ[A-Za-z0-9_\\-]{10,}",
      "token": [
       "AKIA[0-9A-Z]{16}",
       "gh[pousr]_[A-Za-z0-9]{36,}",
@@ -13119,6 +13563,10 @@
       "sk_live_[A-Za-z0-9]{16,}",
       "AIza[0-9A-Za-z_\\-]{35}",
       "-----BEGIN [A-Z ]*PRIVATE KEY-----(?:.*?-----END [A-Z ]*PRIVATE KEY-----|.*)",
+      "cio(?<![A-Za-z0-9]cio)[A-Za-z0-9]{32}(?![A-Za-z0-9])",
+      "npm_(?<![A-Za-z0-9]npm_)[A-Za-z0-9]{36}(?![A-Za-z0-9])",
+      "sk-ant-(?<![A-Za-z0-9_\\-]sk-ant-)(?:[a-z]{3,5}[0-9]{2}|usr)-[A-Za-z0-9_\\-]{40,200}(?![A-Za-z0-9_\\-])",
+      "sk-(?<![A-Za-z0-9_\\-]sk-)[A-Za-z0-9_\\-]{20,90}T3BlbkFJ[A-Za-z0-9_\\-]{20,74}(?![A-Za-z0-9_\\-])",
       "eyJ[A-Za-z0-9_\\-]{10,}\\.eyJ[A-Za-z0-9_\\-]{10,}"
      ]
     },
@@ -13128,7 +13576,7 @@
     },
     {
      "flags": "i",
-     "re": "(?:password|passwd|pwd|secret|api[_-]?key|access[_-]?key|auth[_-]?token|private[_-]?key)\\s*[:=]\\s*[\\\"'][^\\\"']{4,}[\\\"']"
+     "re": "(?:password|passwd|pwd|secret|api[_-]?key|access[_-]?key|auth[_-]?token|private[_-]?key)\\s*(?::=|[:=]|:\\s*&(?:'static\\s+)?(?:str|\\[u8\\])\\s*=|[ \\t]+string\\s*=)\\s*(?:b|rb|r#*|br#*)?[\\\"'][^\\\"']{4,}[\\\"']"
     },
     {
      "flags": "",
@@ -13192,7 +13640,7 @@
   },
   "_SELF_READ_RE": {
    "flags": "",
-   "re": "\\bopen\\s*\\(\\s*(?:os\\.path\\.(?:abspath|realpath)\\s*\\(\\s*)?__file__\\b|\\bPath\\s*\\(\\s*__file__\\s*\\)\\s*\\.\\s*(?:read_text|read_bytes|open)\\s*\\(|\\blinecache\\.getlines?\\s*\\(\\s*__file__\\b|(?<![\\w.])__loader__\\s*\\.\\s*get_source\\s*\\(|(?<![\\w.])__doc__\\b|\\breadFile(?:Sync)?\\s*\\(\\s*(?:__filename\\b|(?:new\\s+URL\\s*\\(\\s*)?import\\.meta\\.url|fileURLToPath\\s*\\(\\s*import\\.meta\\.url)|\\barguments\\s*\\.\\s*callee\\b|\\}\\s*\\)?\\s*\\.\\s*toString\\s*\\(\\s*\\)"
+   "re": "\\bopen\\s*\\(\\s*(?:os\\.path\\.(?:abspath|realpath)\\s*\\(\\s*)?__file__\\b|\\bPath\\s*\\(\\s*__file__\\s*\\)\\s*\\.\\s*(?:read_text|read_bytes|open)\\s*\\(|\\blinecache\\.getlines?\\s*\\(\\s*__file__\\b|(?<![\\w.])__loader__\\s*\\.\\s*get_source\\s*\\(|(?<![\\w.])__doc__\\b(?![ \\t]*=[^=])|\\breadFile(?:Sync)?\\s*\\(\\s*(?:__filename\\b|(?:new\\s+URL\\s*\\(\\s*)?import\\.meta\\.url|fileURLToPath\\s*\\(\\s*import\\.meta\\.url)|\\barguments\\s*\\.\\s*callee\\b|\\}\\s*\\)?\\s*\\.\\s*toString\\s*\\(\\s*\\)"
   },
   "_SELF_READ_THEN_SPAN": {
    "value": 200
@@ -13699,6 +14147,15 @@
     },
     {
      "value": "ping"
+    },
+    {
+     "value": "base64"
+    },
+    {
+     "value": "xxd"
+    },
+    {
+     "value": "openssl"
     }
    ]
   },
@@ -14201,6 +14658,38 @@
   "_SPLIT_LITERAL": {
    "value": "(?:['\\\"`]\\s*\\+\\s*['\\\"`])?"
   },
+  "_SQL_CONCAT_RES": {
+   "list": [
+    {
+     "flags": "",
+     "re": "[\\\"'][^\\\"']*[\\\"']\\s*\\+"
+    },
+    {
+     "flags": "",
+     "re": "\\+\\s*[\\\"']"
+    }
+   ]
+  },
+  "_SQL_FORMAT_RE": {
+   "flags": "",
+   "re": "\\.format\\s*\\("
+  },
+  "_SQL_HOW": {
+   "map": {
+    "concat": {
+     "value": "concatenation"
+    },
+    "format": {
+     "value": ".format()/f-string"
+    },
+    "percent": {
+     "value": "%-interpolation"
+    }
+   }
+  },
+  "_SQL_HOW_OTHER": {
+   "value": "string-building"
+  },
   "_SQL_NOWHERE_RULES": {
    "map": {
     "SQL-DELETE-NOWHERE": {
@@ -14300,6 +14789,38 @@
     "SQL-DELETE-NOWHERE",
     "SQL-UPDATE-NOWHERE"
    ]
+  },
+  "_SQL_PERCENT_RE": {
+   "flags": "",
+   "re": "(?:[\\\"'][^\\\"']*[\\\"']|\\b[A-Za-z_]\\w*)\\s*%\\s*[^=%\\s]"
+  },
+  "_SQL_SINK_RULE": {
+   "map": {
+    "fix": {
+     "value": "Use parameterized queries: cursor.execute(\"SELECT \u2026 WHERE id = %s\", (user_id,))."
+    },
+    "id": {
+     "value": "S-SQL-PY"
+    },
+    "msg": {
+     "value": "SQL query built with {how} into execute()."
+    },
+    "name": {
+     "value": "SQL built from strings"
+    },
+    "ref": {
+     "value": "CWE-89 \u00b7 OWASP A03"
+    },
+    "sev": {
+     "value": "BLOCKER"
+    },
+    "type": {
+     "value": "VULN"
+    },
+    "why": {
+     "value": "Interpolating values into SQL enables SQL injection \u2014 the classic path to full database compromise."
+    }
+   }
   },
   "_SQL_WHERE_RE": {
    "flags": "i",
@@ -14483,6 +15004,15 @@
     },
     {
      "value": "runs a program it extracts from inside another file"
+    },
+    {
+     "value": "pipes code it decodes into"
+    },
+    {
+     "value": "installs packages the release does not depend on"
+    },
+    {
+     "value": "rewrites another package's code"
     }
    ]
   },
@@ -14591,6 +15121,13 @@
   "_SVC_PYCRON_WRITE_SRC": {
    "value": "\\.write\\s{0,20}\\("
   },
+  "_SVC_RC_ARGS_MAX": {
+   "value": 400
+  },
+  "_SVC_RC_CONTENT_CALL_RE": {
+   "flags": "",
+   "re": "\\b(?:writeFileSync|writeFile|appendFileSync|appendFile|outputFileSync|outputFile|write_text|write|writelines)\\s*\\("
+  },
   "_SVC_REG_WRITE_RE": {
    "flags": "i",
    "re": "\\breg(?:\\.exe)?[\"'`]?(?:[ \\t]+|\\s{0,20},\\s{0,20}\\[?\\s{0,20}[\"'`])add\\b|\\b(?:New|Set)-ItemProperty\\b|\\bSetValueEx\\b|\\bSetValue\\s{0,20}\\(|\\bputValue\\b|\\bRegSetValue|\\bREG_(?:EXPAND_)?SZ\\b|\\bKEY_(?:SET_VALUE|WRITE|ALL_ACCESS)\\b"
@@ -14614,6 +15151,18 @@
   },
   "_SVC_SCHTASKS_SRC": {
    "value": "\\bschtasks(?:\\.exe)?[\"'`]?(?:[ \\t]+|\\s{0,20},\\s{0,20}\\[?\\s{0,20}[\"'`])[/-]create\\b"
+  },
+  "_SVC_SHELL_RC_RE": {
+   "flags": "",
+   "re": "[\"'`][^\\s\"'`]{0,120}?(?<![\\w.-])\\.(?:bashrc|bash_profile|bash_login|zshrc|zshenv|zprofile|zlogin|kshrc|mkshrc|cshrc|tcshrc)[\"'`]|[\"'`][^\\s\"'`]{0,120}?[/\\\\~]\\.profile[\"'`]|[\"'`][^\\s\"'`]{0,120}?(?<![\\w.-])fish[/\\\\]config\\.fish[\"'`]"
+  },
+  "_SVC_SHELL_RC_RUN_RE": {
+   "flags": "",
+   "re": "\\b(?:curl|wget|Invoke-WebRequest|Invoke-RestMethod|iwr|irm|certutil|bitsadmin)\\b|https?://|\\|\\s*(?:ba|z|k|da)?sh\\b|\\b(?:ba|z|k|da)?sh\\s+-c\\b|\\b(?:node|nodejs|python[23]?|perl|ruby|php|bun|deno|osascript|powershell|pwsh)(?:\\.exe)?[ \\t]+(?:-[A-Za-z]|[\\w./~$\\\\{\\\"'])|\\bnohup\\b|\\bsetsid\\b|\\bbase64\\s+(?:-d|-D|--decode)\\b|[^&\\s]\\s*&\\s*(?:disown\\s*)?(?:\\\\[nr]|[\\\"'`])"
+  },
+  "_SVC_SHELL_RC_SH_RE": {
+   "flags": "",
+   "re": "(?:~|\\$\\{?HOME\\}?)[/\\\\]\\.(?:bashrc|bash_profile|bash_login|zshrc|zshenv|zprofile|zlogin|kshrc|mkshrc|cshrc|tcshrc|profile)(?![\\w.-])|(?:~|\\$\\{?HOME\\}?)[/\\\\]\\.config[/\\\\]fish[/\\\\]config\\.fish(?![\\w.-])"
   },
   "_SVC_STARTUP_RE": {
    "flags": "i",
@@ -14689,6 +15238,34 @@
   "_TAINT_CONFIG_WARNINGS": {
    "list": []
   },
+  "_TAINT_MAX_MATCH_TEXT": {
+   "value": 2000
+  },
+  "_TAINT_RULE": {
+   "map": {
+    "msg": {
+     "value": "Possible {cat}: {what} reaches this sink."
+    },
+    "name": {
+     "value": "Tainted flow \u2192 {cat}"
+    },
+    "ref": {
+     "value": "{cwe} \u00b7 Taint analysis"
+    },
+    "type": {
+     "value": "VULN"
+    },
+    "why": {
+     "value": "Data from user input or a decode function flows into a dangerous call without visible sanitization (lightweight intra-file taint tracking)."
+    }
+   }
+  },
+  "_TAINT_WHAT": {
+   "value": "untrusted data"
+  },
+  "_TAINT_WHAT_VIA": {
+   "value": "untrusted data via '{carrier}' (tainted at line {line})"
+  },
   "_TEMPLATE_IMPORT_RE": {
    "flags": "",
    "re": "(?<![^\\n])[ \\t]*from[ \\t]+(?:jinja2|mako\\.template|django\\.template)[ \\t]+import\\b[^\\n]*\\bTemplate\\b"
@@ -14740,13 +15317,25 @@
      "value": "-----BEGIN [A-Z ]*PRIVATE KEY-----"
     },
     {
+     "value": "cio(?<![A-Za-z0-9]cio)[A-Za-z0-9]{32}(?![A-Za-z0-9])"
+    },
+    {
+     "value": "npm_(?<![A-Za-z0-9]npm_)[A-Za-z0-9]{36}(?![A-Za-z0-9])"
+    },
+    {
+     "value": "sk-ant-(?<![A-Za-z0-9_\\-]sk-ant-)(?:[a-z]{3,5}[0-9]{2}|usr)-[A-Za-z0-9_\\-]{40,200}(?![A-Za-z0-9_\\-])"
+    },
+    {
+     "value": "sk-(?<![A-Za-z0-9_\\-]sk-)[A-Za-z0-9_\\-]{20,90}T3BlbkFJ[A-Za-z0-9_\\-]{20,74}(?![A-Za-z0-9_\\-])"
+    },
+    {
      "value": "eyJ[A-Za-z0-9_\\-]{10,}\\.eyJ[A-Za-z0-9_\\-]{10,}"
     }
    ]
   },
   "_TOKEN_PATTERN": {
    "flags": "",
-   "re": "AKIA[0-9A-Z]{16}|gh[pousr]_[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9]{22}_[A-Za-z0-9]{59}|xox[baprs]-[A-Za-z0-9-]{10,}|sk_live_[A-Za-z0-9]{16,}|AIza[0-9A-Za-z_\\-]{35}|-----BEGIN [A-Z ]*PRIVATE KEY-----|eyJ[A-Za-z0-9_\\-]{10,}\\.eyJ[A-Za-z0-9_\\-]{10,}",
+   "re": "AKIA[0-9A-Z]{16}|gh[pousr]_[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9]{22}_[A-Za-z0-9]{59}|xox[baprs]-[A-Za-z0-9-]{10,}|sk_live_[A-Za-z0-9]{16,}|AIza[0-9A-Za-z_\\-]{35}|-----BEGIN [A-Z ]*PRIVATE KEY-----|cio(?<![A-Za-z0-9]cio)[A-Za-z0-9]{32}(?![A-Za-z0-9])|npm_(?<![A-Za-z0-9]npm_)[A-Za-z0-9]{36}(?![A-Za-z0-9])|sk-ant-(?<![A-Za-z0-9_\\-]sk-ant-)(?:[a-z]{3,5}[0-9]{2}|usr)-[A-Za-z0-9_\\-]{40,200}(?![A-Za-z0-9_\\-])|sk-(?<![A-Za-z0-9_\\-]sk-)[A-Za-z0-9_\\-]{20,90}T3BlbkFJ[A-Za-z0-9_\\-]{20,74}(?![A-Za-z0-9_\\-])|eyJ[A-Za-z0-9_\\-]{10,}\\.eyJ[A-Za-z0-9_\\-]{10,}",
    "token": [
     "AKIA[0-9A-Z]{16}",
     "gh[pousr]_[A-Za-z0-9]{36}",
@@ -14755,6 +15344,10 @@
     "sk_live_[A-Za-z0-9]{16,}",
     "AIza[0-9A-Za-z_\\-]{35}",
     "-----BEGIN [A-Z ]*PRIVATE KEY-----",
+    "cio(?<![A-Za-z0-9]cio)[A-Za-z0-9]{32}(?![A-Za-z0-9])",
+    "npm_(?<![A-Za-z0-9]npm_)[A-Za-z0-9]{36}(?![A-Za-z0-9])",
+    "sk-ant-(?<![A-Za-z0-9_\\-]sk-ant-)(?:[a-z]{3,5}[0-9]{2}|usr)-[A-Za-z0-9_\\-]{40,200}(?![A-Za-z0-9_\\-])",
+    "sk-(?<![A-Za-z0-9_\\-]sk-)[A-Za-z0-9_\\-]{20,90}T3BlbkFJ[A-Za-z0-9_\\-]{20,74}(?![A-Za-z0-9_\\-])",
     "eyJ[A-Za-z0-9_\\-]{10,}\\.eyJ[A-Za-z0-9_\\-]{10,}"
    ]
   },
@@ -14782,13 +15375,25 @@
      "value": "-----BEGIN [A-Z ]*PRIVATE KEY-----(?:.*?-----END [A-Z ]*PRIVATE KEY-----|.*)"
     },
     {
+     "value": "cio(?<![A-Za-z0-9]cio)[A-Za-z0-9]{32}(?![A-Za-z0-9])"
+    },
+    {
+     "value": "npm_(?<![A-Za-z0-9]npm_)[A-Za-z0-9]{36}(?![A-Za-z0-9])"
+    },
+    {
+     "value": "sk-ant-(?<![A-Za-z0-9_\\-]sk-ant-)(?:[a-z]{3,5}[0-9]{2}|usr)-[A-Za-z0-9_\\-]{40,200}(?![A-Za-z0-9_\\-])"
+    },
+    {
+     "value": "sk-(?<![A-Za-z0-9_\\-]sk-)[A-Za-z0-9_\\-]{20,90}T3BlbkFJ[A-Za-z0-9_\\-]{20,74}(?![A-Za-z0-9_\\-])"
+    },
+    {
      "value": "eyJ[A-Za-z0-9_\\-]{10,}\\.eyJ[A-Za-z0-9_\\-]{10,}"
     }
    ]
   },
   "_TOKEN_REDACT_PATTERN": {
    "flags": "",
-   "re": "AKIA[0-9A-Z]{16}|gh[pousr]_[A-Za-z0-9]{36,}|github_pat_[A-Za-z0-9_]{22,}|xox[baprs]-[A-Za-z0-9-]{10,}|sk_live_[A-Za-z0-9]{16,}|AIza[0-9A-Za-z_\\-]{35}|-----BEGIN [A-Z ]*PRIVATE KEY-----(?:.*?-----END [A-Z ]*PRIVATE KEY-----|.*)|eyJ[A-Za-z0-9_\\-]{10,}\\.eyJ[A-Za-z0-9_\\-]{10,}",
+   "re": "AKIA[0-9A-Z]{16}|gh[pousr]_[A-Za-z0-9]{36,}|github_pat_[A-Za-z0-9_]{22,}|xox[baprs]-[A-Za-z0-9-]{10,}|sk_live_[A-Za-z0-9]{16,}|AIza[0-9A-Za-z_\\-]{35}|-----BEGIN [A-Z ]*PRIVATE KEY-----(?:.*?-----END [A-Z ]*PRIVATE KEY-----|.*)|cio(?<![A-Za-z0-9]cio)[A-Za-z0-9]{32}(?![A-Za-z0-9])|npm_(?<![A-Za-z0-9]npm_)[A-Za-z0-9]{36}(?![A-Za-z0-9])|sk-ant-(?<![A-Za-z0-9_\\-]sk-ant-)(?:[a-z]{3,5}[0-9]{2}|usr)-[A-Za-z0-9_\\-]{40,200}(?![A-Za-z0-9_\\-])|sk-(?<![A-Za-z0-9_\\-]sk-)[A-Za-z0-9_\\-]{20,90}T3BlbkFJ[A-Za-z0-9_\\-]{20,74}(?![A-Za-z0-9_\\-])|eyJ[A-Za-z0-9_\\-]{10,}\\.eyJ[A-Za-z0-9_\\-]{10,}",
    "token": [
     "AKIA[0-9A-Z]{16}",
     "gh[pousr]_[A-Za-z0-9]{36,}",
@@ -14797,6 +15402,10 @@
     "sk_live_[A-Za-z0-9]{16,}",
     "AIza[0-9A-Za-z_\\-]{35}",
     "-----BEGIN [A-Z ]*PRIVATE KEY-----(?:.*?-----END [A-Z ]*PRIVATE KEY-----|.*)",
+    "cio(?<![A-Za-z0-9]cio)[A-Za-z0-9]{32}(?![A-Za-z0-9])",
+    "npm_(?<![A-Za-z0-9]npm_)[A-Za-z0-9]{36}(?![A-Za-z0-9])",
+    "sk-ant-(?<![A-Za-z0-9_\\-]sk-ant-)(?:[a-z]{3,5}[0-9]{2}|usr)-[A-Za-z0-9_\\-]{40,200}(?![A-Za-z0-9_\\-])",
+    "sk-(?<![A-Za-z0-9_\\-]sk-)[A-Za-z0-9_\\-]{20,90}T3BlbkFJ[A-Za-z0-9_\\-]{20,74}(?![A-Za-z0-9_\\-])",
     "eyJ[A-Za-z0-9_\\-]{10,}\\.eyJ[A-Za-z0-9_\\-]{10,}"
    ]
   },
@@ -14829,7 +15438,7 @@
     },
     "re": {
      "flags": "",
-     "re": "AKIA[0-9A-Z]{16}|gh[pousr]_[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9]{22}_[A-Za-z0-9]{59}|xox[baprs]-[A-Za-z0-9-]{10,}|sk_live_[A-Za-z0-9]{16,}|AIza[0-9A-Za-z_\\-]{35}|-----BEGIN [A-Z ]*PRIVATE KEY-----|eyJ[A-Za-z0-9_\\-]{10,}\\.eyJ[A-Za-z0-9_\\-]{10,}",
+     "re": "AKIA[0-9A-Z]{16}|gh[pousr]_[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9]{22}_[A-Za-z0-9]{59}|xox[baprs]-[A-Za-z0-9-]{10,}|sk_live_[A-Za-z0-9]{16,}|AIza[0-9A-Za-z_\\-]{35}|-----BEGIN [A-Z ]*PRIVATE KEY-----|cio(?<![A-Za-z0-9]cio)[A-Za-z0-9]{32}(?![A-Za-z0-9])|npm_(?<![A-Za-z0-9]npm_)[A-Za-z0-9]{36}(?![A-Za-z0-9])|sk-ant-(?<![A-Za-z0-9_\\-]sk-ant-)(?:[a-z]{3,5}[0-9]{2}|usr)-[A-Za-z0-9_\\-]{40,200}(?![A-Za-z0-9_\\-])|sk-(?<![A-Za-z0-9_\\-]sk-)[A-Za-z0-9_\\-]{20,90}T3BlbkFJ[A-Za-z0-9_\\-]{20,74}(?![A-Za-z0-9_\\-])|eyJ[A-Za-z0-9_\\-]{10,}\\.eyJ[A-Za-z0-9_\\-]{10,}",
      "token": [
       "AKIA[0-9A-Z]{16}",
       "gh[pousr]_[A-Za-z0-9]{36}",
@@ -14838,6 +15447,10 @@
       "sk_live_[A-Za-z0-9]{16,}",
       "AIza[0-9A-Za-z_\\-]{35}",
       "-----BEGIN [A-Z ]*PRIVATE KEY-----",
+      "cio(?<![A-Za-z0-9]cio)[A-Za-z0-9]{32}(?![A-Za-z0-9])",
+      "npm_(?<![A-Za-z0-9]npm_)[A-Za-z0-9]{36}(?![A-Za-z0-9])",
+      "sk-ant-(?<![A-Za-z0-9_\\-]sk-ant-)(?:[a-z]{3,5}[0-9]{2}|usr)-[A-Za-z0-9_\\-]{40,200}(?![A-Za-z0-9_\\-])",
+      "sk-(?<![A-Za-z0-9_\\-]sk-)[A-Za-z0-9_\\-]{20,90}T3BlbkFJ[A-Za-z0-9_\\-]{20,74}(?![A-Za-z0-9_\\-])",
       "eyJ[A-Za-z0-9_\\-]{10,}\\.eyJ[A-Za-z0-9_\\-]{10,}"
      ]
     },
@@ -14904,6 +15517,371 @@
     "unicode-1-1-utf-7",
     "utf-7",
     "utf7"
+   ]
+  },
+  "_VENDOR_PROBE": {
+   "value": 256
+  },
+  "_VENDOR_TEXT_CAP": {
+   "value": 4194304
+  },
+  "_VERIFY_PROVIDERS": {
+   "value": [
+    {
+     "answers": [
+      {
+       "outcome": "live",
+       "status": [
+        200
+       ],
+       "who": {
+        "json": "login"
+       }
+      },
+      {
+       "outcome": "rejected",
+       "status": [
+        401
+       ],
+       "why": "GitHub says the token is not valid"
+      },
+      {
+       "outcome": "unknown",
+       "status": [
+        403,
+        429
+       ],
+       "why": "GitHub refused or rate limited the call"
+      }
+     ],
+     "host": "api.github.com",
+     "id": "github",
+     "label": "GitHub token",
+     "parts": {
+      "secret": "(?:gh[pousr]_[A-Za-z0-9]{36,251}|github_pat_[A-Za-z0-9_]{22,255})"
+     },
+     "request": {
+      "headers": {
+       "Accept": "application/vnd.github+json",
+       "Authorization": "Bearer {secret}",
+       "User-Agent": "lazaret-secret-verify",
+       "X-GitHub-Api-Version": "2022-11-28"
+      },
+      "method": "GET",
+      "path": "/user",
+      "query": {}
+     }
+    },
+    {
+     "answers": [
+      {
+       "json": {
+        "ok": true
+       },
+       "outcome": "live",
+       "status": [
+        200
+       ],
+       "who": {
+        "json": "user"
+       }
+      },
+      {
+       "json": {
+        "error": [
+         "invalid_auth",
+         "not_authed",
+         "token_revoked",
+         "token_expired",
+         "account_inactive"
+        ],
+        "ok": false
+       },
+       "outcome": "rejected",
+       "status": [
+        200
+       ],
+       "why": "Slack says the token is not valid"
+      },
+      {
+       "outcome": "unknown",
+       "status": [
+        429
+       ],
+       "why": "Slack rate limited the call"
+      }
+     ],
+     "host": "slack.com",
+     "id": "slack",
+     "label": "Slack token",
+     "parts": {
+      "secret": "xox[baprs]-[A-Za-z0-9-]{10,250}"
+     },
+     "request": {
+      "headers": {
+       "Authorization": "Bearer {secret}",
+       "User-Agent": "lazaret-secret-verify"
+      },
+      "method": "GET",
+      "path": "/api/auth.test",
+      "query": {}
+     }
+    },
+    {
+     "answers": [
+      {
+       "outcome": "live",
+       "status": [
+        200
+       ]
+      },
+      {
+       "json": {
+        "error.type": "permission_error"
+       },
+       "outcome": "live",
+       "status": [
+        403
+       ],
+       "why": "Stripe knows the key but it may not read the balance"
+      },
+      {
+       "outcome": "rejected",
+       "status": [
+        401
+       ],
+       "why": "Stripe says the key is not valid"
+      },
+      {
+       "outcome": "unknown",
+       "status": [
+        429
+       ],
+       "why": "Stripe rate limited the call"
+      }
+     ],
+     "host": "api.stripe.com",
+     "id": "stripe",
+     "label": "Stripe live key",
+     "parts": {
+      "secret": "(?:sk|rk)_live_[A-Za-z0-9]{16,247}"
+     },
+     "request": {
+      "headers": {
+       "Authorization": "Bearer {secret}",
+       "User-Agent": "lazaret-secret-verify"
+      },
+      "method": "GET",
+      "path": "/v1/balance",
+      "query": {}
+     }
+    },
+    {
+     "answers": [
+      {
+       "outcome": "live",
+       "status": [
+        200
+       ],
+       "who": {
+        "json": "username"
+       }
+      },
+      {
+       "outcome": "rejected",
+       "status": [
+        401
+       ],
+       "why": "npm says the token is not valid"
+      },
+      {
+       "outcome": "unknown",
+       "status": [
+        403,
+        429
+       ],
+       "why": "npm refused or rate limited the call"
+      }
+     ],
+     "host": "registry.npmjs.org",
+     "id": "npm",
+     "label": "npm token",
+     "parts": {
+      "secret": "npm_[A-Za-z0-9]{36}"
+     },
+     "request": {
+      "headers": {
+       "Accept": "application/json",
+       "Authorization": "Bearer {secret}",
+       "User-Agent": "lazaret-secret-verify"
+      },
+      "method": "GET",
+      "path": "/-/whoami",
+      "query": {}
+     }
+    },
+    {
+     "answers": [
+      {
+       "outcome": "live",
+       "status": [
+        200
+       ]
+      },
+      {
+       "json": {
+        "error.code": "invalid_api_key"
+       },
+       "outcome": "rejected",
+       "status": [
+        401
+       ],
+       "why": "OpenAI says the key is not valid"
+      },
+      {
+       "outcome": "unknown",
+       "status": [
+        401,
+        403,
+        429
+       ],
+       "why": "OpenAI refused or rate limited the call"
+      }
+     ],
+     "host": "api.openai.com",
+     "id": "openai",
+     "label": "OpenAI API key",
+     "parts": {
+      "secret": "sk-(?!ant-|admin-)(?:proj-|svcacct-)?[A-Za-z0-9_-]{20,200}"
+     },
+     "request": {
+      "headers": {
+       "Authorization": "Bearer {secret}",
+       "User-Agent": "lazaret-secret-verify"
+      },
+      "method": "GET",
+      "path": "/v1/models",
+      "query": {}
+     }
+    },
+    {
+     "answers": [
+      {
+       "outcome": "live",
+       "status": [
+        200
+       ]
+      },
+      {
+       "json": {
+        "error.type": "authentication_error"
+       },
+       "outcome": "rejected",
+       "status": [
+        401
+       ],
+       "why": "Anthropic says the key is not valid"
+      },
+      {
+       "json": {
+        "error.type": "permission_error"
+       },
+       "outcome": "live",
+       "status": [
+        403
+       ],
+       "why": "Anthropic knows the key but it may not list the models"
+      },
+      {
+       "outcome": "unknown",
+       "status": [
+        401,
+        403,
+        429
+       ],
+       "why": "Anthropic refused or rate limited the call"
+      }
+     ],
+     "host": "api.anthropic.com",
+     "id": "anthropic",
+     "label": "Anthropic API key",
+     "parts": {
+      "secret": "sk-ant-(?:api03|usr)-[A-Za-z0-9_-]{20,200}"
+     },
+     "request": {
+      "headers": {
+       "User-Agent": "lazaret-secret-verify",
+       "anthropic-version": "2023-06-01",
+       "x-api-key": "{secret}"
+      },
+      "method": "GET",
+      "path": "/v1/models",
+      "query": {}
+     }
+    },
+    {
+     "answers": [
+      {
+       "outcome": "live",
+       "status": [
+        200
+       ],
+       "who": {
+        "xml": "Arn"
+       }
+      },
+      {
+       "code": [
+        "InvalidClientTokenId",
+        "SignatureDoesNotMatch",
+        "ExpiredToken"
+       ],
+       "outcome": "rejected",
+       "status": [
+        403
+       ],
+       "why": "AWS says the key pair is not valid"
+      },
+      {
+       "code": [
+        "Throttling",
+        "ThrottlingException",
+        "RequestLimitExceeded",
+        "ServiceUnavailable"
+       ],
+       "outcome": "unknown",
+       "status": [
+        400,
+        403,
+        429,
+        503
+       ],
+       "why": "AWS throttled the call"
+      }
+     ],
+     "host": "sts.amazonaws.com",
+     "id": "aws",
+     "label": "AWS access key",
+     "parts": {
+      "id": "AKIA[0-9A-Z]{16}",
+      "secret": "[A-Za-z0-9/+=]{40}"
+     },
+     "request": {
+      "body": "Action=GetCallerIdentity&Version=2011-06-15",
+      "headers": {
+       "Accept": "application/xml",
+       "Content-Type": "application/x-www-form-urlencoded; charset=utf-8",
+       "User-Agent": "lazaret-secret-verify"
+      },
+      "method": "POST",
+      "path": "/",
+      "query": {},
+      "sigv4": {
+       "region": "us-east-1",
+       "service": "sts"
+      }
+     }
+    }
    ]
   },
   "_VIEW_CALL_RE": {

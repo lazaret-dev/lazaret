@@ -54,11 +54,15 @@ export function entropySecretish(v) {
 //   AKIA[0-9A-Z]{16}|gh[pousr]_[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9]{22}_[A-Za-z0-9]{59}
 //   |xox[baprs]-[A-Za-z0-9-]{10,}
 //   |sk_live_[A-Za-z0-9]{16,}|AIza[0-9A-Za-z_\-]{35}
-//   |-----BEGIN [A-Z ]*PRIVATE KEY-----|eyJ[A-Za-z0-9_\-]{10,}\.eyJ[A-Za-z0-9_\-]{10,}
+//   |-----BEGIN [A-Z ]*PRIVATE KEY-----|cio(?<![A-Za-z0-9]cio)[A-Za-z0-9]{32}(?![A-Za-z0-9])
+//   |npm_(?<![A-Za-z0-9]npm_)[A-Za-z0-9]{36}(?![A-Za-z0-9])
+//   |sk-ant-(?<![A-Za-z0-9_\-]sk-ant-)(?:[a-z]{3,5}[0-9]{2}|usr)-[A-Za-z0-9_\-]{40,200}(?![A-Za-z0-9_\-])
+//   |sk-(?<![A-Za-z0-9_\-]sk-)[A-Za-z0-9_\-]{20,90}T3BlbkFJ[A-Za-z0-9_\-]{20,74}(?![A-Za-z0-9_\-])
+//   |eyJ[A-Za-z0-9_\-]{10,}\.eyJ[A-Za-z0-9_\-]{10,}
 // but without the backtracking blow-up of the JWT alternative on a run of
 // "eyJeyJeyJ…" (every head rescanned the whole run: quadratic).
-const HEAD_RE = /AKIA|gh[pousr]_|github_pat_|xox[baprs]-|sk_live_|AIza|-----BEGIN |eyJ/g;
-const HEAD_RE_REDACT = /AKIA|gh[pousr]_|github_pat_|xox[baprs]-|sk_live_|AIza|-----BEGIN |eyJ/g;
+const HEAD_RE = /AKIA|gh[pousr]_|github_pat_|xox[baprs]-|sk_live_|sk-|AIza|-----BEGIN |cio|npm_|eyJ/g;
+const HEAD_RE_REDACT = /AKIA|gh[pousr]_|github_pat_|xox[baprs]-|sk_live_|sk-|AIza|-----BEGIN |cio|npm_|eyJ/g;
 const PEM_END_G = /-----END [A-Z ]*PRIVATE KEY-----/g;
 const isPat = (c) => isAlnum(c) || c === 95;                     // [A-Za-z0-9_]
 const isUpperDigit = (c) => (c >= 48 && c <= 57) || (c >= 65 && c <= 90);
@@ -66,11 +70,35 @@ const isAlnum = (c) => isUpperDigit(c) || (c >= 97 && c <= 122);
 const isJwt = (c) => isAlnum(c) || c === 95 || c === 45;          // [A-Za-z0-9_-]
 const isXox = (c) => isAlnum(c) || c === 45;                      // [A-Za-z0-9-]
 const isPemName = (c) => (c >= 65 && c <= 90) || c === 32;        // [A-Z ]
+const isLower = (c) => c >= 97 && c <= 122;                       // [a-z]
+const isDigit = (c) => c >= 48 && c <= 57;                        // [0-9]
 function runEnd(s, i, pred) { while (i < s.length && pred(s.charCodeAt(i))) i++; return i; }
 function fixedRun(s, i, n, pred) {
   if (i + n > s.length) return false;
   for (let k = i; k < i + n; k++) if (!pred(s.charCodeAt(k))) return false;
   return true;
+}
+
+/**
+ * End of an Anthropic or an OpenAI key at `p` (its "sk-"), a whole [A-Za-z0-9_-]
+ * run, or -1: Anthropic's "sk-ant-", a kind (three to five letters and two digits,
+ * or usr) and "-", then 40 to 200 more to the run's end; else OpenAI's 20 to 90, "T3BlbkFJ"
+ * and 20 to 74 more to the run's end. Either way the match is the run.
+ */
+function skKeyEnd(s, p) {
+  if (p > 0 && isJwt(s.charCodeAt(p - 1))) return -1;
+  const e = runEnd(s, p + 3, isJwt);
+  if (s.startsWith("ant-", p + 3)) {
+    const kind = runEnd(s, p + 7, isLower), n = kind - (p + 7);
+    let body = -1;                                             // where the 40 to 200 begin
+    if (n >= 3 && n <= 5 && fixedRun(s, kind, 2, isDigit) && s.charCodeAt(kind + 2) === 45) body = kind + 3;
+    else if (n === 3 && s.startsWith("usr-", p + 7)) body = kind + 1;
+    if (body >= 0 && e - body >= 40 && e - body <= 200) return e;
+  }
+  for (let t = p + 23; t <= p + 93 && t + 8 <= e; t++) {
+    if (s.startsWith("T3BlbkFJ", t) && e - (t + 8) >= 20 && e - (t + 8) <= 74) return e;
+  }
+  return -1;
 }
 
 /**
@@ -103,7 +131,20 @@ export function findSecretToken(s, from = 0, { redact = false } = {}) {
         else if (fixedRun(s, p + 4, 36, isAlnum)) end = p + 40;
         break;
       case "x": { const e = runEnd(s, p + 5, isXox); if (e - (p + 5) >= 10) end = e; break; }
-      case "s": { const e = runEnd(s, p + 8, isAlnum); if (e - (p + 8) >= 16) end = e; break; }
+      case "c":                                                    // crates.io's API token: a whole run
+        if ((p === 0 || !isAlnum(s.charCodeAt(p - 1))) && fixedRun(s, p + 3, 32, isAlnum) && !isAlnum(s.charCodeAt(p + 35))) {
+          end = p + 35;
+        }
+        break;
+      case "n":                                                    // npm's access token: a whole run
+        if ((p === 0 || !isAlnum(s.charCodeAt(p - 1))) && fixedRun(s, p + 4, 36, isAlnum) && !isAlnum(s.charCodeAt(p + 40))) {
+          end = p + 40;
+        }
+        break;
+      case "s":
+        if (m[0] === "sk_live_") { const e = runEnd(s, p + 8, isAlnum); if (e - (p + 8) >= 16) end = e; }
+        else end = skKeyEnd(s, p);                                 // Anthropic's and OpenAI's keys
+        break;
       case "-": {
         const r = runEnd(s, p + 11, isPemName);
         if (r - 11 >= p + 11 && s.startsWith("PRIVATE KEY", r - 11) && s.startsWith("-----", r)) {
@@ -147,7 +188,7 @@ function redactTokens(s) {
 
 // _SECRET_LINE_PATTERNS[1:] (the token pattern is findSecretToken above).
 const SQL_CRED_LINE_RE = pyRe(String.raw`(?:IDENTIFIED\s+BY\s+['\"][^'\"]+['\"]|PASSWORD\s*=?\s*['\"][^'\"]+['\"]|IDENTIFIED\s+BY\s+PASSWORD)`, "gi");
-const ASSIGN_LINE_RE = pyRe(String.raw`(?:password|passwd|pwd|secret|api[_-]?key|access[_-]?key|auth[_-]?token|private[_-]?key)\s*[:=]\s*[\"'][^\"']{4,}[\"']`, "gi");
+const ASSIGN_LINE_RE = pyRe(String.raw`(?:password|passwd|pwd|secret|api[_-]?key|access[_-]?key|auth[_-]?token|private[_-]?key)\s*(?::=|[:=]|:\s*&(?:'static\s+)?(?:str|\[u8\])\s*=|[ \t]+string\s*=)\s*(?:b|rb|r#*|br#*)?[\"'][^\"']{4,}[\"']`, "gi");
 // credentials in a URL's userinfo: scheme://user:password@host, scheme://token@host
 const URL_USERINFO_RE = pyRe(String.raw`(?<=://)[^/\s@'\"]+(?=@)`, "g");
 export const REDACTED = "[redacted]";

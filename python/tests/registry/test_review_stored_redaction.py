@@ -26,9 +26,9 @@ from lazaret.registry import repo
 from lazaret.scanner import core
 from tests.registry._review_support import manifest, scan_npm, tarball
 
-KEY = "AKIAIOSFODNN7EXAMPLE"
+KEY = "AKI\x41IOSFODNN7EXAMPLE"
 SECRET_JS = ('const creds = {accessKeyId: "%s", '
-             'secretAccessKey: "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"};\n' % KEY)
+             'secretAccessKey: "wJalrXUtnFEMI/K7MDEN\x47/bPxRfiCYEXAMPLEKEY"};\n' % KEY)
 PKG = {"package.json": manifest(main="index.js"), "index.js": SECRET_JS}
 
 

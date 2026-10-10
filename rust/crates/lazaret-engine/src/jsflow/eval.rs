@@ -40,6 +40,10 @@ pub struct Eval<'p> {
     /// (the supply-chain model) (key of this function's parameter, the
     /// closure variable it was written to)
     pub pw_adds: Vec<(u64, BindId)>,
+    /// (the supply-chain model) (key of a parameter, the keys of the path of a file it is written to, where)
+    pub pf_adds: Vec<(u64, Vec<PyStr>, u32)>,
+    /// (the supply-chain model) the value a method call is made on, for the next apply: its receiver (B-3)
+    pub recv_val: Option<V>,
 }
 
 /// The changes a reading made to summaries: fid -> (returned request data
@@ -74,6 +78,8 @@ impl<'p> Eval<'p> {
             limit,
             ancestors,
             pw_adds: Vec::new(),
+            pf_adds: Vec::new(),
+            recv_val: None,
         }
     }
 
@@ -151,9 +157,18 @@ impl<'p> Eval<'p> {
         if shared {
             if self.p.cfg.supply.is_some() {
                 // (the supply-chain model: a parameter written to a closure's
-                // variable is in the function's summary, for its callers)
+                // variable is in the function's summary, for its callers; so is
+                // a parameter of a function around this one written to a
+                // variable declared outside that function, which the value
+                // written cannot carry there (D-15: `p = body` in the 'end'
+                // callback, `body` the response https.get's callback was given
+                // and `p` the module's))
+                let fid = self.fid;
+                let mine = self.p.scope_fns(fid);
+                let outer = self.p.scope_fns(bfid);
                 for &key in v.params.iter() {
-                    if (key / PARAM_BASE) as FnId == self.fid && bfid != self.fid {
+                    let owner = key_owner(key);
+                    if mine.contains(&owner) && !outer.contains(&owner) {
                         self.pw_adds.push((key, b));
                     }
                 }
@@ -438,7 +453,13 @@ impl<'p> Eval<'p> {
         if t == Kind::ForInStatement || t == Kind::ForOfStatement {
             let right = self.a().at(st, B);
             let c = self.cur;
-            it = Some(self.expr(Some(right), c)?.plain());
+            let mut v = self.expr(Some(right), c)?.plain();
+            // (the supply-chain model: a loop that selects some of the
+            // environment's variables does not read the whole of it)
+            if self.p.cfg.supply.is_some() && self.sc_loop_selects_env(st, &v) {
+                v = super::supply::sc_without(&v, super::supply::K_WHOLE_ENV);
+            }
+            it = Some(v);
         }
         let before = self.copy_env()?;
         for _k in 0..2 {
@@ -638,6 +659,11 @@ impl<'p> Eval<'p> {
     fn assign_pattern(&mut self, pat: NodeId, v: V, scope: ScopeId) -> R<()> {
         use jt::{A, B};
         let t = self.a().kind(pat);
+        if t == Kind::CallExpression {
+            // (a call as a for-in or for-of loop's target: made, then a ReferenceError: JS-PARSE-STRICT)
+            self.expr(Some(pat), scope)?;
+            return Ok(());
+        }
         if t == Kind::Identifier {
             if let Some(b) = self.bind(pat, scope) {
                 self.write(b, v, true);
@@ -671,7 +697,7 @@ impl<'p> Eval<'p> {
     }
 
     /// `o.x = v`: the container o holds v too (a weak update).
-    fn member_write(&mut self, target: NodeId, v: &V, scope: ScopeId) {
+    pub(super) fn member_write(&mut self, target: NodeId, v: &V, scope: ScopeId) {
         if self.p.cfg.supply.is_some() {
             // (the supply-chain model: `this.x = v`, `this.x.y = v` hold v in this.x;
             // a connection or a client too)
@@ -744,6 +770,8 @@ impl<'p> Eval<'p> {
                 Some(b) => Ok(self.read(b)),
             },
             Kind::Literal if self.p.cfg.supply.is_some() => Ok(self.sc_literal(e)),
+            // (`this` in a method of a class made in several places: its receiver, B-3)
+            Kind::ThisExpression if self.p.cfg.supply.is_some() => Ok(self.sc_this_value(scope)),
             Kind::Literal | Kind::ThisExpression | Kind::Super | Kind::MetaProperty => Ok(V::empty()),
             Kind::TemplateLiteral => {
                 let exprs = self.a().list(e, B).to_vec();
@@ -869,7 +897,7 @@ impl<'p> Eval<'p> {
             out = out.union(rs);
         }
         for (&key, &(clean, built)) in &f.ret_outer {
-            if self.ancestors.contains(&((key / PARAM_BASE) as FnId)) {
+            if self.ancestors.contains(&key_owner(key)) {
                 out = out.union(&V::param(key, clean, built, 0));
             }
         }
@@ -930,6 +958,12 @@ impl<'p> Eval<'p> {
         let (left, right) = (self.a().at(e, A), self.a().at(e, B));
         let op = self.a().operator(e);
         let lk = self.a().kind(left);
+        if lk == Kind::CallExpression {
+            // (JS-PARSE-STRICT: a call as the target, `f() = v`, `f() += v`: V8 makes the call, then throws a
+            // ReferenceError, before the value on the right is worked out)
+            self.expr(Some(left), scope)?;
+            return Ok(V::empty());
+        }
         if op == "=" {
             let v = self.expr(Some(right), scope)?;
             if lk == Kind::Identifier {
@@ -1045,13 +1079,20 @@ impl<'p> Eval<'p> {
             key = self.expr(Some(prop), scope)?;
         }
         if self.p.cfg.supply.is_some() {
-            if let Some(v) = self.sc_member(node, obj, &key, scope) {
-                return Ok(v);
-            }
-            if self.a().prop_name(node).as_deref().is_some_and(|n| eq(n, "length")) {
-                return Ok(V::empty());
-            }
-            return Ok(if obj.kind != 0 { obj.plain() } else { obj.clone() });
+            let v = if let Some(v) = self.sc_member(node, obj, &key, scope) {
+                v
+            } else if self.a().prop_name(node).as_deref().is_some_and(|n| eq(n, "length")) {
+                V::empty()
+            } else if obj.kind != 0 {
+                obj.plain()
+            } else {
+                obj.clone()
+            };
+            // (and what was put into the member as a container of its own: `o.list` after `o.list.push(x)`, D-3b)
+            return Ok(match self.sc_member_held(node, scope) {
+                Some(held) => v.union(&held),
+                None => v,
+            });
         }
         let name = self.a().prop_name(node);
         let line = if self.a().computed(node) { self.a().line(node) } else { self.a().line(self.a().at(node, B)) };
@@ -1167,7 +1208,11 @@ impl<'p> Eval<'p> {
         let mut text = (*ctext).clone();
         text.push(0x28);
         let name: Option<PyStr> = if member {
-            self.a().prop_name(callee)
+            if self.p.cfg.supply.is_some() {
+                self.p.member_name(self.m, callee, scope)
+            } else {
+                self.a().prop_name(callee)
+            }
         } else if self.a().is_ident(callee) {
             Some(self.a().name(callee).to_vec())
         } else {
@@ -1487,6 +1532,9 @@ impl<'p> Eval<'p> {
     /// when request data arrives; the reach of the caller's parameters when
     /// they do) and what they return.
     pub(super) fn apply(&mut self, node: NodeId, fids: &[FnId], args: &[V], spread: isize, line: u32, ctor: bool) -> V {
+        // (the value a method is called on: the sinks it reaches through its receiver, `this`, are given it; what
+        // it returns or keeps of `this` stays with B-1's instance (sc_call), B-3)
+        let recv = self.recv_val.take().unwrap_or_else(V::empty);
         let mut out = V::empty();
         // (the supply-chain model: what the script's wrappers of exec print)
         let mut wrapped = V::empty();
@@ -1515,7 +1563,7 @@ impl<'p> Eval<'p> {
             let reach: Vec<(usize, BTreeMap<u8, Entry>)> =
                 self.p.fns[fid as usize].reach.iter().map(|(&i, t)| (i, t.clone())).collect();
             for (i, table) in reach {
-                let t = bound(args, spread, rest, i);
+                let t = bound_or_recv(args, spread, rest, i, &recv);
                 if !t.tainted() {
                     // (the supply-chain model: a constant command line given the script's
                     // wrapper of exec, a constant name its getEnv())
@@ -1546,6 +1594,9 @@ impl<'p> Eval<'p> {
                     };
                     let needs = entry.3 && !t.built;
                     if self.p.cfg.supply.is_some() {
+                        // (a sink the parameter reaches through a member alone: not the whole environment, D-16)
+                        let member = self.p.fns[fid as usize].reach_member.get(&(i, cat)).copied().unwrap_or(false);
+                        let t = if member { super::supply::sc_through_member(&t) } else { t.clone() };
                         if cat == super::supply::EXEC_CMD || cat == super::supply::READ_PATH || cat == super::supply::ENV_NAME {
                             // (the script's wrappers: of exec given a command line, of a
                             // read given a path outside the package, of getEnv given a name)
@@ -1617,13 +1668,38 @@ impl<'p> Eval<'p> {
                 }
             }
             // (the supply-chain model) the closure variables a parameter is written to
+            // (not the `this.x` of a class made in several places, from a call
+            // on an instance: the instance holds it, sc_instance_call)
             let writes: Vec<(usize, Vec<BindId>)> =
                 self.p.fns[fid as usize].param_writes.iter().map(|(&i, bs)| (i, bs.iter().copied().collect())).collect();
+            let outside = !writes.is_empty() && self.sc_on_instance(node);
             for (i, binds) in writes {
+                if i == RECV_INDEX {
+                    continue; // (what a method keeps of its receiver stays with B-1's instance, B-3)
+                }
                 let t = bound(args, spread, rest, i);
                 if t.tainted() {
                     for b in binds {
+                        if outside && self.p.sc_this_class.get(&b).copied().is_some_and(|c| self.p.sc_made_widely(c)) {
+                            continue;
+                        }
                         self.write(b, t.plain(), false);
+                    }
+                }
+            }
+            // (the supply-chain model) the files a parameter is written to: what it is given here (D-2)
+            if self.p.cfg.supply.is_some() {
+                let files: Vec<(usize, Vec<(Vec<PyStr>, u32)>)> =
+                    self.p.fns[fid as usize].param_files.iter().map(|(&i, fs)| (i, fs.iter().cloned().collect())).collect();
+                for (i, fs) in files {
+                    if i == RECV_INDEX {
+                        continue;
+                    }
+                    let t = bound(args, spread, rest, i);
+                    if t.tainted() {
+                        for (keys, at) in fs {
+                            self.sc_param_file(&t, keys, at);
+                        }
                     }
                 }
             }
@@ -1643,12 +1719,22 @@ impl<'p> Eval<'p> {
                         .with_sc(rs.sc.clone()),
                 );
             }
-            let ret_params: Vec<(usize, (u8, bool))> = f.ret_params.iter().map(|(&i, &x)| (i, x)).collect();
+            let ret_params: Vec<(usize, (u8, bool, bool))> = f.ret_params.iter().map(|(&i, &x)| (i, x)).collect();
             let ret_outer: Vec<(u64, (u8, bool))> = f.ret_outer.iter().map(|(&k, &x)| (k, x)).collect();
-            for (i, (clean, built)) in ret_params {
+            for (i, (clean, built, member)) in ret_params {
+                if i == RECV_INDEX {
+                    continue; // (what a method returns of its receiver: B-1's instance gives it, sc_call)
+                }
                 let mut b = bound(args, spread, rest, i);
                 if b.tainted() {
                     b = b.plain();
+                    // (returned through a member of a name that is not the environment's: not the whole of it, D-16)
+                    if member && self.p.cfg.supply.is_some() {
+                        b = super::supply::sc_through_member(&b);
+                        if !b.tainted() {
+                            continue;
+                        }
+                    }
                     if clean != 0 {
                         b = b.sanitize(clean);
                     }
@@ -1656,7 +1742,7 @@ impl<'p> Eval<'p> {
                 }
             }
             for (key, (clean, built)) in ret_outer {
-                if self.ancestors.contains(&((key / PARAM_BASE) as FnId)) {
+                if self.ancestors.contains(&key_owner(key)) {
                     out = out.union(&V::param(key, clean, built, 0));
                 }
             }
@@ -1768,18 +1854,32 @@ impl<'p> Eval<'p> {
     /// (monotone). Returns the functions whose summaries changed, each with
     /// what changed, and the bindings whose value grew.
     pub fn commit(self) -> (Changes, Vec<BindId>) {
-        let Eval { p, fid, emit, reach_adds, ret_val, shared_writes, reads, uses, pw_adds, .. } = self;
+        let Eval { p, fid, emit, reach_adds, ret_val, shared_writes, reads, uses, pw_adds, pf_adds, .. } = self;
         let mut changes: Changes = BTreeMap::new();
         for (key, b) in pw_adds {
-            let owner = (key / PARAM_BASE) as FnId;
-            let i = (key % PARAM_BASE) as usize;
+            let owner = key_owner(key);
+            let i = key_index(key);
             if p.fns[owner as usize].param_writes.entry(i).or_default().insert(b) {
                 changes.entry(owner).or_default().1.insert(i);
             }
         }
+        for (key, keys, at) in pf_adds {
+            let owner = key_owner(key);
+            let i = key_index(key);
+            if p.fns[owner as usize].param_files.entry(i).or_default().insert((keys, at)) {
+                changes.entry(owner).or_default().1.insert(i);
+            }
+        }
         for (key, cat, entry) in reach_adds {
-            let owner = (key / PARAM_BASE) as FnId;
-            let i = (key % PARAM_BASE) as usize;
+            let owner = key_owner(key);
+            let i = key_index(key);
+            // (reached through a member alone, D-16; once whole, whole)
+            let member = key & MEMBER_KEY != 0;
+            let rm = p.fns[owner as usize].reach_member.entry((i, cat)).or_insert(member);
+            if *rm && !member {
+                *rm = false;
+                changes.entry(owner).or_default().1.insert(i);
+            }
             let d = p.fns[owner as usize].reach.entry(i).or_default();
             let replace = match d.get(&cat) {
                 None => true,
@@ -1817,16 +1917,20 @@ impl<'p> Eval<'p> {
                         }
                     }
                 }
+                // (a parameter returned through a member alone, and whole: whole; MEMBER_KEY, D-16)
+                let whole: BTreeSet<u64> = rv.params.iter().filter(|&&k| k & MEMBER_KEY == 0).copied().collect();
                 for &key in rv.params.iter() {
                     let f = &mut p.fns[fid as usize];
                     let merged = |old: Option<(u8, bool)>| match old {
                         None => (rv.clean, rv.built),
                         Some(o) => (o.0 & rv.clean, o.1 || rv.built),
                     };
-                    if (key / PARAM_BASE) as FnId == fid {
-                        let k = (key % PARAM_BASE) as usize;
+                    if key_owner(key) == fid {
+                        let k = key_index(key);
+                        let member = key & MEMBER_KEY != 0 && !whole.contains(&(key & !MEMBER_KEY));
                         let old = f.ret_params.get(&k).copied();
-                        let new = merged(old);
+                        let (clean, built) = merged(old.map(|o| (o.0, o.1)));
+                        let new = (clean, built, old.map_or(member, |o| o.2 && member));
                         if old != Some(new) {
                             f.ret_params.insert(k, new);
                             changes.entry(fid).or_default().1.insert(k);
@@ -1873,6 +1977,15 @@ impl<'p> Eval<'p> {
         }
         (changes, grown)
     }
+}
+
+/// The value parameter i of a function receives, or the receiver a method is called on (RECV_INDEX, B-3), for the
+/// sinks the parameter reaches.
+fn bound_or_recv(args: &[V], spread: isize, rest: isize, i: usize, recv: &V) -> V {
+    if i == RECV_INDEX {
+        return recv.clone();
+    }
+    bound(args, spread, rest, i)
 }
 
 /// The value parameter i of a function receives.

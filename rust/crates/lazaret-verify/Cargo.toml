@@ -1,0 +1,18 @@
+[package]
+name = "lazaret-verify"
+description = "The pure part of pratique for Lazaret: signatures, certificate chains, transparency logs and attestations (no I/O, no unsafe)"
+version.workspace = true
+edition.workspace = true
+license = "Apache-2.0"
+rust-version = "1.82"
+repository.workspace = true
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+# The library without its `net` feature: no sockets, no threads, no clock, no `unsafe`; it builds for
+# wasm32-unknown-unknown. (In a build that also has lazaret-net, cargo unifies the features and the one copy
+# of pratique has `net`; this crate's code is the same either way.)
+pratique = { path = "../pratique", default-features = false }

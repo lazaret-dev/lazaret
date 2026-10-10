@@ -231,8 +231,14 @@ struct Module<'t> {
     default: Option<PyStr>,
     default_module: Option<PyStr>,
     env: OMap<Ret>,
-    bodies: OMap<(Vec<PyStr>, Vec<PyStr>)>,
-    relays: OMap<(Vec<PyStr>, Vec<PyStr>)>,
+    /// sym -> (parameters, body rows as the follower reads them (strings blanked), the body's code (D-17: its
+    /// strings, which the received-code test reads))
+    bodies: OMap<(Vec<PyStr>, Vec<PyStr>, Vec<PyStr>)>,
+    relays: OMap<(Vec<PyStr>, Vec<PyStr>, Vec<PyStr>)>,
+    /// while a JavaScript module is parsed: its code rows, and where each row with its strings blanked is (its
+    /// address, length, row), to read a body's code (code_of)
+    code_rows: Vec<Cow<'t, [u32]>>,
+    code_index: Vec<(usize, usize, usize)>,
 }
 
 impl<'t> Module<'t> {
@@ -253,7 +259,28 @@ impl<'t> Module<'t> {
             env: OMap::default(),
             bodies: OMap::default(),
             relays: OMap::default(),
+            code_rows: Vec::new(),
+            code_index: Vec::new(),
         }
+    }
+
+    /// The code of a body's row, which `masked` is a part of (a row of the parse's masked rows, or a part of one):
+    /// the same span of the row with its strings (D-17); the row itself where nothing was blanked.
+    fn code_of(&self, masked: &[u32]) -> PyStr {
+        let at = masked.as_ptr() as usize;
+        let k = self.code_index.partition_point(|&(start, _, _)| start <= at);
+        if k > 0 {
+            let (start, len, row) = self.code_index[k - 1];
+            let offset = (at - start) / std::mem::size_of::<u32>();
+            if offset + masked.len() <= len {
+                if let Some(code) = self.code_rows.get(row) {
+                    if offset + masked.len() <= code.len() {
+                        return code[offset..offset + masked.len()].to_vec();
+                    }
+                }
+            }
+        }
+        masked.to_vec()
     }
 }
 
@@ -460,7 +487,7 @@ impl<'p> Xf<'p> {
                 .all(|n| p.strs(n).iter().all(|x| !x.is_empty() && !x.contains(&c('\n')))),
             py_body_plain: ["'", "\""].iter().all(|q| {
                 let rx = p.map_re("_XF_PY_BODY_RE", q);
-                rx.pattern == u(&format!(r"(?:[^\\{}]|\\.)*", q)) && rx.flags & !crate::pyre::constants::FLAG_UNICODE == 0
+                rx.pattern == u(&format!(r"(?:[^\\{}]|\\.)*", q)) && rx.flags & !crate::pyre::UNICODE == 0
             }),
             redact,
             neumaier,
@@ -608,10 +635,11 @@ impl<'p> Xf<'p> {
         if params.is_empty() || module.bodies.contains(&sym) {
             return;
         }
+        let code: Vec<PyStr> = body.iter().map(|r| module.code_of(r)).collect();
         if self.in_rows(self.run_needles, body) {
-            module.bodies.insert(sym, (params.to_vec(), body.iter().map(|r| r.to_vec()).collect()));
+            module.bodies.insert(sym, (params.to_vec(), body.iter().map(|r| r.to_vec()).collect(), code));
         } else if !module.relays.contains(&sym) {
-            module.relays.insert(sym, (params.to_vec(), body.iter().map(|r| r.to_vec()).collect()));
+            module.relays.insert(sym, (params.to_vec(), body.iter().map(|r| r.to_vec()).collect(), code));
         }
     }
 
@@ -1290,6 +1318,16 @@ impl<'p> Xf<'p> {
             return;
         }
         let (rows, masked, changed) = self.js_views(module.text);
+        // (where each row with its strings blanked is, to read a body's code: D-17)
+        let mut index: Vec<(usize, usize, usize)> = masked
+            .iter()
+            .enumerate()
+            .filter(|(_, m)| matches!(m, Cow::Owned(_)) && !m.is_empty())
+            .map(|(j, m)| (m.as_ptr() as usize, m.len(), j))
+            .collect();
+        index.sort_unstable();
+        module.code_index = index;
+        module.code_rows = rows.clone();
         let mut code: Cow<[u32]> = if changed {
             let row_refs: Vec<&[u32]> = rows.iter().map(|r| r.as_ref()).collect();
             Cow::Owned(join_rows(&row_refs))
@@ -1605,6 +1643,8 @@ impl<'p> Xf<'p> {
             }
         }
         self.writes(module, &masked, &row_class, &class_names, Lang::Js);
+        module.code_index = Vec::new();
+        module.code_rows = Vec::new();
     }
 }
 
@@ -1648,7 +1688,7 @@ fn line_matches<'s>(rx: &'s Regex, text: &'s [u32], word: &str) -> Vec<crate::py
     let mut head = u(r"^[ \t]*");
     head.extend(u(word));
     head.extend(u(r"[ \t]+"));
-    if rx.flags & crate::pyre::constants::FLAG_MULTILINE == 0 || !rx.pattern.starts_with(&head) {
+    if rx.flags & crate::pyre::MULTILINE == 0 || !rx.pattern.starts_with(&head) {
         return rx.finditer(text).collect();
     }
     let w = u(word);
@@ -1668,7 +1708,7 @@ fn line_matches<'s>(rx: &'s Regex, text: &'s [u32], word: &str) -> Vec<crate::py
                 }
             }
         }
-        match crate::pyre::scan::find1(text, line, text.len(), c('\n')) {
+        match crate::scan::find1(text, line, text.len(), c('\n')) {
             Some(nl) => line = nl + 1,
             None => break,
         }
@@ -2012,7 +2052,7 @@ impl<'t> Package<'t> {
         // (a body that names a runner may still only hand it on)
         let mut relays: Vec<(&Module, &PyStr, Vec<PyStr>, PyStr)> = Vec::new();
         for m in self.mods.values() {
-            for (sym, (params, body)) in m.bodies.iter().chain(m.relays.iter()) {
+            for (sym, (params, _masked, body)) in m.bodies.iter().chain(m.relays.iter()) {
                 let mut names: Vec<PyStr> = params.iter().filter(|p| !Xf::in_set(xf.not_params, p)).cloned().collect();
                 names.sort();
                 names.dedup();
@@ -2075,7 +2115,7 @@ impl<'t> Package<'t> {
         let mut out = HashSet::new();
         let mut count = 0usize;
         for m in self.mods.values() {
-            for (sym, (params, body)) in m.bodies.iter() {
+            for (sym, (params, _masked, body)) in m.bodies.iter() {
                 let mut names: Vec<PyStr> = params.iter().filter(|p| !Xf::in_set(xf.not_params, p)).cloned().collect();
                 names.sort();
                 names.dedup();
@@ -2233,7 +2273,7 @@ impl<'p> Xf<'p> {
         pkg: &Package,
         m: &Module,
         marked: &HashSet<Sym>,
-        envs: &[(PyStr, PyStr)],
+        envs: &[(PyStr, Vec<PyStr>)],
         members: &HashMap<Sym, Vec<(PyStr, bool)>>,
     ) -> Seeds {
         let mut out = Seeds::default();
@@ -2256,7 +2296,13 @@ impl<'p> Xf<'p> {
             }
             self.add(pkg, m, marked, members, &mut out, local, got, label, 0);
         }
-        for (var, label) in envs {
+        // (a variable another file writes: one this file writes itself is the
+        // single-file test's, which read the file already)
+        for (var, keys) in envs {
+            let label = match keys.iter().find(|k| **k != m.key) {
+                Some(k) => k,
+                None => continue,
+            };
             if pystr::find(m.text, var, 0).is_some() {
                 let prefix = if m.lang == Lang::Py { u("environ.") } else { u("process.env.") };
                 out.seeds.insert(concat(&[&prefix, var]), label.clone());
@@ -2347,7 +2393,7 @@ impl<'p> Xf<'p> {
         &self,
         pkg: &Package,
         tainted: &HashSet<Sym>,
-        envs: &[(PyStr, PyStr)],
+        envs: &[(PyStr, Vec<PyStr>)],
         held: &HashMap<Sym, Vec<(PyStr, bool)>>,
     ) -> HashMap<PyStr, (BTreeMap<PyStr, PyStr>, Vec<PyStr>, usize)> {
         struct Hit {
@@ -2505,12 +2551,14 @@ impl<'p> Xf<'p> {
         let runners = pkg.runners(self);
         let mut sorted_tainted: Vec<&Sym> = tainted.iter().collect();
         sorted_tainted.sort();
-        let mut envs: Vec<(PyStr, PyStr)> = Vec::new();
+        // the environment variables written with a received value: (name, the files that do)
+        let mut envs: Vec<(PyStr, Vec<PyStr>)> = Vec::new();
         for (key, name) in sorted_tainted {
             if pystr::starts_with(name, "<env>.") {
                 let var = name[6..].to_vec();
-                if !envs.iter().any(|(v, _)| *v == var) {
-                    envs.push((var, key.clone()));
+                match envs.iter_mut().find(|(v, _)| *v == var) {
+                    Some((_, keys)) => keys.push(key.clone()),
+                    None => envs.push((var, vec![key.clone()])),
                 }
             }
         }

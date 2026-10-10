@@ -2,226 +2,89 @@ Lazaret's native engine: notices
 ================================
 
 The native engine (this directory) is Lazaret's own work, licensed under the
-Apache License 2.0 (../LICENSE), except for the parts listed below, which are
-translations into Rust of code from CPython (https://github.com/python/cpython),
-the reference implementation of Python. Those parts are distributed under
-CPython's license: the Python Software Foundation License Version 2 and the
-older licenses of CPython's license stack, among them the CNRI license the
-SRE notices below refer to, in LICENSE-PYTHON (CPython 3.14.0's LICENSE file,
-unchanged; SPDX: Python-2.0.1).
-
-    Copyright (c) 2001 Python Software Foundation; All Rights Reserved
-
-The engine also holds Unicode data (below), distributed under the Unicode
-License v3 in LICENSE-UNICODE (SPDX: Unicode-3.0).
+Apache License 2.0 (../LICENSE). It holds Unicode data (below), distributed
+under the Unicode License v3 in LICENSE-UNICODE (SPDX: Unicode-3.0), so the
+crates' license is Apache-2.0 AND Unicode-3.0.
 
 The compiled engine ships in Lazaret's platform wheels and, compiled to
 WebAssembly, in the npm package (as native/lazaret.wasm, this file as
-native/NOTICE), each with LICENSE-PYTHON and LICENSE-UNICODE; the crates',
-the platform wheels' and the npm package's license is
-Apache-2.0 AND Python-2.0.1 AND Unicode-3.0.
+native/NOTICE), each with LICENSE-UNICODE. Those packages are
+Apache-2.0 AND Unicode-3.0 too.
 
 
-What is translated from CPython
--------------------------------
+What was CPython's
+------------------
 
-As of CPython 3.11 to 3.14, the behavior the translation keeps:
+Until P-16 (0.1.9), parts of the engine were translations into Rust of
+CPython code (https://github.com/python/cpython), distributed under
+CPython's license as well as Lazaret's:
 
-    crates/lazaret-engine/src/pyre/parser.rs     Lib/re/_parser.py
-    crates/lazaret-engine/src/pyre/compiler.rs   Lib/re/_compiler.py
-    crates/lazaret-engine/src/pyre/constants.rs  Lib/re/_constants.py
-    crates/lazaret-engine/src/pyre/matcher.rs    Modules/_sre/sre_lib.h
-    crates/lazaret-engine/src/pyre/mod.rs        in part: Lib/re/_parser.py
-                                                 (parse_template) and the
-                                                 Pattern methods of
-                                                 Modules/_sre/sre.c
-    crates/lazaret-engine/src/hooks.rs           in part: Lib/shlex.py
-                                                 (shlex_split)
-    crates/lazaret-engine/src/unicode.rs         in part: Objects/unicodeobject.c
-                                                 (handle_capital_sigma)
-    crates/lazaret-engine/src/generated/unicode13.rs
-                                                 in part: the table of
-                                                 Lib/re/_casefix.py
+    src/pyre/                    Lib/re/_parser.py, _compiler.py and
+                                 _constants.py, and Modules/_sre (the SRE
+                                 library, whose notices allowed its
+                                 redistribution under CNRI's Python 1.6
+                                 license and asked any other use to contact
+                                 Secret Labs AB)
+    src/hooks.rs, in part        Lib/shlex.py (shlex_split)
+    src/unicode.rs, in part      Objects/unicodeobject.c
+                                 (handle_capital_sigma)
+    src/generated/unicode13.rs,  the table of Lib/re/_casefix.py
+    in part
 
-The rest of pyre/ (first.rs, literal.rs, prog.rs) is Lazaret's own.
-
-
-Summary of the changes (section 3 of the PSF License)
------------------------------------------------------
-
-- Translated from Python and C into Rust, for str patterns only: bytes
-  patterns, the LOCALE flag and \N{name} escapes are refused.
-- Text is a slice of code points and every position a code-point index;
-  \B at an empty string behaves as in CPython 3.10 to 3.13.
-- SRE(match)'s recursion is an explicit stack of contexts on the heap, so no
-  pattern or input can overflow the call stack.
-- Each dispatched operation spends one step of a per-call work budget; a call
-  that runs out says so instead of answering.
-- A BIGCHARSET keeps its 256 block numbers one per word (CPython packs four).
-- Added without changing any answer: a first-character filter, per-operation
-  tables (ASCII bitsets, first-sets for repeats and for the alternatives of a
-  branch), a required-literal prefilter, and pooled matcher buffers
-  (docs/RUST_ENGINE.md, section 6).
-- The shell tokenizer implements one configuration of shlex (posix=True,
-  punctuation_chars=True, whitespace_split=True, no commenters) as one loop.
-- The Final_Sigma rule of str.lower() reads Unicode 13.0 tables of the
-  engine's own, whatever the Python version.
+They are retired, and with them their notices. The engine's regular
+expressions are linre (src/linre/), written from re's documented and
+observed behaviour, with src/pyre.rs as re's interface to it; a command's
+words are read by rules written from shlex's documentation; the Final_Sigma
+rule of str.lower() follows the Unicode Standard's definition; and re's
+extra case equivalences are derived from Unicode's case mappings
+(scripts/make_rust_tables.py). Tests hold each to Python's own answers.
 
 
-The originals' notices
-----------------------
+pratique
+--------
 
-Lib/re/__init__.py, to which Lib/re/_parser.py, _compiler.py and
-_constants.py refer for usage and redistribution:
+Lazaret's network layer is built on pratique
+(https://github.com/lazaret-dev/pratique; called tiny_https until October
+2026), an HTTPS/TLS library under the Apache License 2.0
+(crates/pratique/LICENSE), Lazaret's own licence. It is in crates/pratique
+as it is upstream, at the commit crates/pratique/LAZARET.md names, with the
+notices of what it holds from elsewhere in crates/pratique/NOTICE. The
+native library holds its network part (crates/lazaret-net) and its pure
+verification code (crates/lazaret-verify: the Go checksum database's check,
+npm's and PyPI's attestations); the WebAssembly build holds what the engine
+takes of the pure part (SHA-256, for the signed requests of live secret
+verification).
 
-    #
-    # Secret Labs' Regular Expression Engine
-    #
-    # re-compatible interface for the sre matching engine
-    #
-    # Copyright (c) 1998-2001 by Secret Labs AB.  All rights reserved.
-    #
-    # This version of the SRE library can be redistributed under CNRI's
-    # Python 1.6 license.  For any other use, please contact Secret Labs
-    # AB (info@pythonware.com).
-    #
-    # Portions of this engine have been developed in cooperation with
-    # CNRI.  Hewlett-Packard provided funding for 1.6 integration and
-    # other compatibility work.
-    #
+Of crates/pratique/NOTICE, this is what the native library holds: the
+bitsliced AES S-box and the constant-time carry-less multiplication of its
+TLS code follow BearSSL (src/crypto/aes_ct.rs and src/crypto/ghash.rs in
+crates/pratique), which is under the MIT licence:
 
-Lib/re/_parser.py:
+    Copyright (c) 2016 Thomas Pornin <pornin@bolet.org>
 
-    #
-    # Secret Labs' Regular Expression Engine
-    #
-    # convert re-style regular expression to sre pattern
-    #
-    # Copyright (c) 1998-2001 by Secret Labs AB.  All rights reserved.
-    #
-    # See the __init__.py file for information on usage and redistribution.
-    #
+    Permission is hereby granted, free of charge, to any person obtaining
+    a copy of this software and associated documentation files (the
+    "Software"), to deal in the Software without restriction, including
+    without limitation the rights to use, copy, modify, merge, publish,
+    distribute, sublicense, and/or sell copies of the Software, and to
+    permit persons to whom the Software is furnished to do so, subject to
+    the following conditions:
 
-Lib/re/_compiler.py:
+    The above copyright notice and this permission notice shall be
+    included in all copies or substantial portions of the Software.
 
-    #
-    # Secret Labs' Regular Expression Engine
-    #
-    # convert template to internal format
-    #
-    # Copyright (c) 1997-2001 by Secret Labs AB.  All rights reserved.
-    #
-    # See the __init__.py file for information on usage and redistribution.
-    #
+    THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+    EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+    MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+    NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS
+    BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN
+    ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
+    CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+    SOFTWARE.
 
-Lib/re/_constants.py:
-
-    #
-    # Secret Labs' Regular Expression Engine
-    #
-    # various symbols used by the regular expression engine.
-    # run this script to update the _sre include files!
-    #
-    # Copyright (c) 1998-2001 by Secret Labs AB.  All rights reserved.
-    #
-    # See the __init__.py file for information on usage and redistribution.
-    #
-
-Modules/_sre/sre_lib.h:
-
-    /*
-     * Secret Labs' Regular Expression Engine
-     *
-     * regular expression matching engine
-     *
-     * Copyright (c) 1997-2001 by Secret Labs AB.  All rights reserved.
-     *
-     * See the sre.c file for information on usage and redistribution.
-     */
-
-Modules/_sre/sre.c:
-
-    /*
-     * Secret Labs' Regular Expression Engine
-     *
-     * regular expression matching engine
-     *
-     * partial history:
-     * 1999-10-24 fl   created (based on existing template matcher code)
-     * 2000-03-06 fl   first alpha, sort of
-     * 2000-08-01 fl   fixes for 1.6b1
-     * 2000-08-07 fl   use PyOS_CheckStack() if available
-     * 2000-09-20 fl   added expand method
-     * 2001-03-20 fl   lots of fixes for 2.1b2
-     * 2001-04-15 fl   export copyright as Python attribute, not global
-     * 2001-04-28 fl   added __copy__ methods (work in progress)
-     * 2001-05-14 fl   fixes for 1.5.2 compatibility
-     * 2001-07-01 fl   added BIGCHARSET support (from Martin von Loewis)
-     * 2001-10-18 fl   fixed group reset issue (from Matthew Mueller)
-     * 2001-10-20 fl   added split primitive; re-enable unicode for 1.6/2.0/2.1
-     * 2001-10-21 fl   added sub/subn primitive
-     * 2001-10-24 fl   added finditer primitive (for 2.2 only)
-     * 2001-12-07 fl   fixed memory leak in sub/subn (Guido van Rossum)
-     * 2002-11-09 fl   fixed empty sub/subn return type
-     * 2003-04-18 mvl  fully support 4-byte codes
-     * 2003-10-17 gn   implemented non recursive scheme
-     * 2013-02-04 mrab added fullmatch primitive
-     *
-     * Copyright (c) 1997-2001 by Secret Labs AB.  All rights reserved.
-     *
-     * This version of the SRE library can be redistributed under CNRI's
-     * Python 1.6 license.  For any other use, please contact Secret Labs
-     * AB (info@pythonware.com).
-     *
-     * Portions of this engine have been developed in cooperation with
-     * CNRI.  Hewlett-Packard provided funding for 1.6 integration and
-     * other compatibility work.
-     */
-
-Objects/unicodeobject.c:
-
-    /*
-
-    Unicode implementation based on original code by Fredrik Lundh,
-    modified by Marc-Andre Lemburg <mal@lemburg.com>.
-
-    Major speed upgrades to the method implementations at the Reykjavik
-    NeedForSpeed sprint, by Fredrik Lundh and Andrew Dalke.
-
-    Copyright (c) Corporation for National Research Initiatives.
-
-    --------------------------------------------------------------------
-    The original string type implementation is:
-
-      Copyright (c) 1999 by Secret Labs AB
-      Copyright (c) 1999 by Fredrik Lundh
-
-    By obtaining, using, and/or copying this software and/or its
-    associated documentation, you agree that you have read, understood,
-    and will comply with the following terms and conditions:
-
-    Permission to use, copy, modify, and distribute this software and its
-    associated documentation for any purpose and without fee is hereby
-    granted, provided that the above copyright notice appears in all
-    copies, and that both that copyright notice and this permission notice
-    appear in supporting documentation, and that the name of Secret Labs
-    AB or the author not be used in advertising or publicity pertaining to
-    distribution of the software without specific, written prior
-    permission.
-
-    SECRET LABS AB AND THE AUTHOR DISCLAIMS ALL WARRANTIES WITH REGARD TO
-    THIS SOFTWARE, INCLUDING ALL IMPLIED WARRANTIES OF MERCHANTABILITY AND
-    FITNESS.  IN NO EVENT SHALL SECRET LABS AB OR THE AUTHOR BE LIABLE FOR
-    ANY SPECIAL, INDIRECT OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
-    WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
-    ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT
-    OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
-    --------------------------------------------------------------------
-
-    */
-
-Lib/shlex.py and Lib/re/_casefix.py carry no notice of their own; CPython's
-license covers them.
+pratique's Mozilla root store (crates/pratique/roots/mozilla.pem, under the
+Mozilla Public License 2.0, as NSS is) is for a feature Lazaret does not
+use; no package of Lazaret's carries it.
 
 
 Unicode data

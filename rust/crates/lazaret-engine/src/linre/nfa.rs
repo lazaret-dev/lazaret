@@ -76,8 +76,10 @@ pub enum LookDef {
     Ahead1 { set: u32, negate: bool },
     /// a sub-pattern (program `prog`) tried at the position (a lookahead) or
     /// `width` characters before it (a lookbehind, of fixed width); `flat`:
-    /// the same as a few fixed sequences, when it is that simple
-    Around { behind: bool, negate: bool, prog: u32, width: u32, max: u32, flat: Option<Box<[Box<[Flat]>]>>, first: Option<FirstTest> },
+    /// the same as a few fixed sequences, when it is that simple; `memo`: a
+    /// lookahead that may read further than hir::MAX_LOOK, whose walks are
+    /// memoized (looks.rs)
+    Around { behind: bool, negate: bool, prog: u32, width: u32, max: u32, memo: bool, flat: Option<Box<[Box<[Flat]>]>>, first: Option<FirstTest> },
 }
 
 /// The characters the flat sequences of a lookaround can begin with (every
@@ -479,7 +481,8 @@ pub fn compile(hir: &Hir, sets: Vec<CharSet>, looks: &[Look], groups: usize) -> 
                 // (a single-character repeat's guard matters only past the
                 // window's end, where a flat sequence fails at its first
                 // character anyway)
-                let seqs = flatten(body, looks);
+                let memo = !*behind && u64::from(*hi) > super::hir::MAX_LOOK;
+                let seqs = if memo { None } else { flatten(body, looks) };
                 let first = seqs.as_ref().and_then(|v| FirstTest::of(v, &sets));
                 let flat = seqs.map(|v| v.into_iter().map(|s| s.into_boxed_slice()).collect());
                 LookDef::Around {
@@ -488,6 +491,7 @@ pub fn compile(hir: &Hir, sets: Vec<CharSet>, looks: &[Look], groups: usize) -> 
                     prog: (subs.len() - 1) as u32,
                     width: *lo,
                     max: *hi,
+                    memo,
                     flat,
                     first,
                 }

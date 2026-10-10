@@ -1,7 +1,7 @@
 # Lazaret as a GitHub Action: scan the checked-out project and write a
 # SARIF 2.1.0 report for GitHub code scanning (README.md, "In CI").
 #
-#   - uses: lazaret-dev/lazaret@<full commit SHA> # v0.1.8
+#   - uses: lazaret-dev/lazaret@<full commit SHA> # v0.1.9
 #     id: lazaret
 #   - uses: github/codeql-action/upload-sarif@<full commit SHA> # v…
 #     if: ${{ !cancelled() }}

@@ -201,3 +201,28 @@ pub fn flask_free_vars(rule: &[u32]) -> Vec<PyStr> {
 pub fn django_param(name: &[u32], ann: &[u32]) -> bool {
     rx(DJANGO_ID_RE, 0).match_(name).is_none() && !(!ann.is_empty() && safe_type(ann, 0))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn u(s: &str) -> PyStr {
+        pystr::u(s)
+    }
+
+    #[test]
+    fn annotations_fastapi_validates_to_no_free_text() {
+        // (the cases lazaret.scanner.frameworks was held to until it was retired: Q-1, 0.1.9)
+        assert!(safe_type(&u("Optional[Annotated[list[uuid.UUID], Query()]]"), 0));
+        assert!(safe_type(&u("int | None"), 0));
+        assert!(safe_type(&u("Literal['a', 'b']"), 0));
+        assert!(safe_type(&u("conint(gt=1)"), 0));
+        assert!(!safe_type(&u("Union[int, str]"), 0));
+        assert!(!safe_type(&u("dict[str, int]"), 0));
+        assert!(!safe_type(&u("str"), 0));
+        let deep = format!("{}int{}", "Optional[".repeat(20), "]".repeat(20));
+        assert!(!safe_type(&u(&deep), 0), "wrappers past ROUTE_TYPE_DEPTH are not read");
+        assert_eq!(flask_free_vars(&u("/x/<cmd>/<int:n>/<path:p>/<any(a, b):k>")), vec![u("cmd"), u("p")]);
+        assert!(django_param(&u("q"), &u("")) && !django_param(&u("user_id"), &u("")) && !django_param(&u("q"), &u("int")));
+    }
+}

@@ -18,7 +18,7 @@ import tempfile
 import unittest
 from unittest import mock
 
-from lazaret.scanner import core
+from lazaret.scanner import core, engine
 from tests import _support
 from tests.scanner import _dashboard_vm as dash
 
@@ -32,6 +32,17 @@ def scan(tree):
             with open(os.path.join(root, rel), "w", encoding="utf-8") as f:
                 f.write(text)
         return core.scan_project(root)
+
+
+def uncapped_calls(items):
+    """engine.scan_calls asking for the rules part alone (scan_rules: no markers, no cap): these trees' findings are
+    all the rules', so it is their scan uncapped (the cap is the engine's since Q-1, 0.1.9, as the passes are)."""
+    calls = REAL_SCAN_CALLS(items)
+    return [None if c is None else ("scan_rules", {k: v for k, v in c[1].items() if k not in ("dep", "taint")})
+            for c in calls]
+
+
+REAL_SCAN_CALLS = engine.scan_calls
 
 
 class RatingTests(unittest.TestCase):
@@ -52,7 +63,7 @@ class RatingTests(unittest.TestCase):
         for tree in trees:
             with self.subTest(files=sorted(tree)):
                 capped = scan(tree)
-                with mock.patch.object(core, "CAP_PER_RULE", 10 ** 9):
+                with mock.patch.object(engine, "scan_calls", uncapped_calls):
                     uncapped = scan(tree)
                 self.assertIn("Q-CAPPED", {i["rule"] for i in capped["issues"]})
                 self.assertNotIn("Q-CAPPED", {i["rule"] for i in uncapped["issues"]})

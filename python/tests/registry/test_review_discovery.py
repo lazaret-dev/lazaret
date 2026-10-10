@@ -24,6 +24,7 @@ from unittest import mock
 from lazaret.mcp import server as mcp_server
 from lazaret.registry import repo
 from tests.registry._review_support import tarball
+from tests import _support
 
 NOW = datetime.datetime.now(datetime.timezone.utc)
 GOOD_TGZ = tarball({"package.json": json.dumps({"name": "g"}), "index.js": "module.exports = 1;\n"})
@@ -102,6 +103,7 @@ def doc(modified, latest="1.0.0"):
             "modified": modified.isoformat().replace("+00:00", "Z")}
 
 
+@mock.patch.dict(os.environ, _support.PYTHON_TRANSPORT)
 class NpmFeedTests(unittest.TestCase):
     CUTOFF = NOW - datetime.timedelta(days=1)
 

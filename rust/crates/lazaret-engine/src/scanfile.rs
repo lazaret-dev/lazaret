@@ -21,7 +21,7 @@ use crate::filectx::{FileCtx, Lang};
 use crate::findings::{self, Arg, Finding, RuleText, Snippets};
 use crate::json::Value;
 use crate::pack::Pack;
-use crate::pyre::literal::Need;
+use crate::linre::literal::LitSet as Need;
 use crate::pyre::{self, Regex};
 use crate::pystr::{self, PyStr};
 use crate::rxutil;
@@ -356,21 +356,95 @@ fn joined_eval_decode(ctx: &FileCtx, j: &Join, i: usize, rule: &Matcher) -> Opti
     }
 }
 
-/// core._token_has_material: a private-key header needs key material after
-/// it, on its line or the next two (match text).
-fn token_has_material(ctx: &FileCtx, rule: &Matcher, line: &[u32], i: usize) -> bool {
-    let (a, b) = match rule.search(line) {
-        None => return true,
-        Some(s) => s,
-    };
-    if !pystr::starts_with(&line[a..], "-----BEGIN") {
-        return true;
+/// What a string or a concatenation puts between a private-key header and its key: blanks, the escapes \n \r \t
+/// (with any number of backslashes, as a string inside a string writes them), backslashes that end the line (a line
+/// continued), quotes and a string's prefix before one (`b"`, `rb'`, `u8"`, Rust's `r#"`: string_prefix_end), `#`
+/// (a raw string's closing marks, a comment's), `+`, `,` and `.` (PHP's and Perl's concatenation); at the start of a
+/// line after the header's, a comment's `*` and `/` too. The index past them.
+fn past_pem_separators(line: &[u32], mut k: usize, line_start: bool) -> usize {
+    while k < line.len() {
+        let c = line[k];
+        if pystr::is_space(c) {
+            k += 1;
+            continue;
+        }
+        match char::from_u32(c) {
+            Some('"' | '\'' | '`' | '+' | ',' | '.' | '#') => k += 1,
+            Some('*' | '/') if line_start => k += 1,
+            Some('\\') => {
+                let mut j = k + 1;
+                while line.get(j) == Some(&('\\' as u32)) {
+                    j += 1;
+                }
+                match line.get(j).and_then(|&d| char::from_u32(d)) {
+                    Some('n' | 'r' | 't') => k = j + 1,
+                    _ if line[j..].iter().all(|&d| pystr::is_space(d)) => k = line.len(),
+                    _ => break,
+                }
+            }
+            Some(c) if c.is_ascii_alphabetic() => match string_prefix_end(line, k) {
+                Some(e) => k = e,
+                None => break,
+            },
+            _ => break,
+        }
     }
+    k
+}
+
+/// Past a string's prefix and its opening quote at `k` (Python's `b"` `rb'` `f"`, C's `L"` `u8"`, Rust's `b"` `r#"`:
+/// a letter, at most two more letters or digits, any `#`, then a quote); None where that is not there (key material
+/// runs on past three characters).
+fn string_prefix_end(line: &[u32], k: usize) -> Option<usize> {
+    let mut j = k + 1;
+    while j < line.len() && j < k + 3 && char::from_u32(line[j]).is_some_and(|c| c.is_ascii_alphanumeric()) {
+        j += 1;
+    }
+    while line.get(j) == Some(&('#' as u32)) {
+        j += 1;
+    }
+    match line.get(j).and_then(|&d| char::from_u32(d)) {
+        Some('"' | '\'') => Some(j + 1),
+        _ => None,
+    }
+}
+
+/// S-TOKEN-PEM: a private-key header counts only with its key right after it: key material (`_PEM_BODY_RE`), or an
+/// encrypted key's `Proc-Type:`, past the separators a string or a concatenation puts there, on the header's line;
+/// or, where the line ends with them, at the start of the first of the next two lines that holds anything. Key
+/// material further on is not the header's: a minified file's line runs on for megabytes, and a library that
+/// recognizes a key file by its header keeps the header alone (jose's importPKCS8,
+/// `pkcs8.indexOf('-----BEGIN PRIVATE KEY-----') !== 0`, made two BLOCKERs in a bundle of redhat.vscode-yaml).
+fn pem_has_material(ctx: &FileCtx, line: &[u32], end: usize, i: usize) -> bool {
     let body = ctx.p.re("_PEM_BODY_RE");
-    if body.search(&line[b..]).is_some() {
-        return true;
+    let key_at = |s: &[u32], k: usize| {
+        body.match_at(s, k as isize, s.len() as isize).is_some() || pystr::starts_with(&s[k..], "Proc-Type:")
+    };
+    let k = past_pem_separators(line, end, false);
+    if k < line.len() {
+        return key_at(line, k);
     }
-    (i + 1..ctx.len().min(i + 3)).any(|k| body.search(ctx.mline(k)).is_some())
+    for n in i + 1..ctx.len().min(i + 3) {
+        let next = ctx.mline(n);
+        let k = past_pem_separators(next, 0, true);
+        if k < next.len() {
+            return key_at(next, k);
+        }
+    }
+    false
+}
+
+/// The column of the first token on a line that is reported: a private-key header only with its key
+/// (pem_has_material); past a header without one, the search goes on.
+fn token_col(ctx: &FileCtx, rule: &Matcher, line: &[u32], i: usize) -> Option<usize> {
+    let t = match rule {
+        Matcher::Token(t) => t,
+        other => return other.search(line).map(|s| s.0),
+    };
+    // (one walk over the line's tokens: searching again from each header would read the rest of the line each time)
+    t.iter(line, 0)
+        .find(|&(a, b)| !pystr::starts_with(&line[a..], "-----BEGIN") || pem_has_material(ctx, line, b, i))
+        .map(|(a, _)| a)
 }
 
 /// core.hex_hidden_text: the readable text hidden in a line's \xNN escapes.
@@ -575,12 +649,81 @@ fn lookalike_name(p: &Pack, code: &[u32], lang: Lang, word_in: &dyn Fn(&[u32]) -
     None
 }
 
+/// The column of the first quoted run B64_BLOB_RE finds in `line` that can be
+/// base64 data (G-5): not digits alone, hex digits alone (after a `0x` or
+/// not) or letters alone (a table of names: Go's stringer writes them) up to
+/// `plain_max` characters, nor a period of at most `period_max` characters
+/// repeated (a test string). Base64 of 150 bytes or more mixes letters and
+/// digits and does not repeat itself; those are what Go's own tree, Ubuntu's
+/// Go modules and the popular crates hold under the rule (Part F: 24 of 39 Go
+/// WARNs, 11 of 30 crates'), the longest 9,327 digits. A longer run of one
+/// class is reported: it is what a payload written in hex is (three of the
+/// benchmark's malicious PyPI releases hold one of 270,000 hex digits or more).
+fn b64_blob_col(re: &Regex, line: &[u32], plain_max: usize, period_max: usize) -> Option<usize> {
+    for m in re.finditer(line) {
+        let run = m.group0();
+        let mut body = &run[1..run.len() - 1];
+        while body.last() == Some(&('=' as u32)) {
+            body = &body[..body.len() - 1];
+        }
+        if !b64_plain(body, plain_max, period_max) && !b64_data(body) {
+            return Some(m.start());
+        }
+    }
+    None
+}
+
+/// The base64 that the formats datafmt reads begin with: a WebAssembly module (`\0asm`), a PNG, a GIF, RIFF
+/// (WAV, WebP).
+const B64_DATA_HEADS: [&str; 4] = ["AGFzbQ", "iVBORw0KGgo", "R0lGOD", "UklGR"];
+
+/// Is `body` (the characters of a B64_BLOB_RE run, its quotes and `=` taken off) the base64 of a whole file of a
+/// format code keeps as data, read by its structure (datafmt: a WebAssembly module, a PNG, GIF or WebP image, WAV
+/// audio)? N-4: the WebAssembly HTTP parser every action bundling the Actions toolkit carries (undici's llhttp),
+/// and what made 5 of the popular set's 32 WARNs, were such files.
+fn b64_data(body: &[u32]) -> bool {
+    if body.len() % 4 == 1 || !B64_DATA_HEADS.iter().any(|h| pystr::starts_with(body, h)) {
+        return false;
+    }
+    let mut padded = body.to_vec();
+    while padded.len() % 4 != 0 {
+        padded.push('=' as u32);
+    }
+    crate::signs::b64decode_strict(&padded).is_some_and(|b| crate::datafmt::data_format(&b).is_some())
+}
+
+/// Is `body` (the characters of a B64_BLOB_RE run, its quotes and `=` taken
+/// off) one of the runs b64_blob_col passes over? A period is checked from
+/// the shortest, each stopping at its first mismatch; a period carries no
+/// more than one period's characters, however long the run.
+fn b64_plain(body: &[u32], plain_max: usize, period_max: usize) -> bool {
+    let digit = |c: u32| (0x30..=0x39).contains(&c);
+    let hex = |c: u32| digit(c) || (0x41..=0x46).contains(&c) || (0x61..=0x66).contains(&c);
+    let letter = |c: u32| (0x41..=0x5a).contains(&c) || (0x61..=0x7a).contains(&c);
+    let hex_body = if body.len() > 2 && body[0] == '0' as u32 && (body[1] == 'x' as u32 || body[1] == 'X' as u32) {
+        &body[2..]
+    } else {
+        body
+    };
+    if body.len() <= plain_max
+        && (body.iter().all(|&c| digit(c)) || hex_body.iter().all(|&c| hex(c)) || body.iter().all(|&c| letter(c)))
+    {
+        return true;
+    }
+    (1..=period_max.min(body.len() / 2)).any(|k| (k..body.len()).all(|i| body[i] == body[i - k]))
+}
+
 /// core.hidden_unicode_run: (column, run) of the first run of invisible
-/// carrier characters that is not a flag emoji.
+/// carrier characters that is not a flag emoji, nor an emoji's presentation
+/// selector repeated (N-23: U+2622 and U+FE0F twice, in a top-100 crate; one
+/// character repeated a few times carries no data, and GlassWorm's encoding
+/// is a run of many different selectors).
 fn hidden_unicode_run(p: &Pack, line: &[u32]) -> Option<(usize, PyStr)> {
     let base = p.text("_FLAG_EMOJI_BASE");
     let tag_start = p.text("_TAG_START")[0];
     let tag_end = p.text("_TAG_END")[0];
+    let presentation = p.text("_PRESENTATION_SELECTORS");
+    let repeat_max = p.usize("_PRESENTATION_REPEAT_MAX");
     for m in p.re("_HIDDEN_RUN_RE").finditer(line) {
         let run = m.group0();
         let flag = m.start() > 0
@@ -588,7 +731,8 @@ fn hidden_unicode_run(p: &Pack, line: &[u32]) -> Option<(usize, PyStr)> {
             && line[m.start() - 1] == base[0]
             && run.last() == Some(&tag_end)
             && run.iter().all(|&c| (tag_start..=tag_end).contains(&c));
-        if !flag {
+        let repeated = run.len() <= repeat_max && presentation.contains(&run[0]) && run.iter().all(|&c| c == run[0]);
+        if !flag && !repeated {
             return Some((m.start(), run.to_vec()));
         }
     }
@@ -1038,8 +1182,86 @@ pub fn scan_file(p: &Pack, text: &[u32], lang_name: Option<&str>, jsx: bool, opt
     let ctx = FileCtx::new(p, text, lang, jsx);
     let lines: Vec<&[u32]> = (0..ctx.len()).map(|i| ctx.line(i)).collect();
     let snippets = Snippets::new(p, lines, opts.redact, opts.neumaier);
-    let found = findings_of(&ctx, lang_name, opts, &snippets);
+    let mut found = findings_of(&ctx, lang_name, opts, &snippets);
+    if lang == Lang::Rs && opts.dep && !found.is_empty() {
+        if let Some(test_only) = rs_test_only_lines(&ctx) {
+            found.retain(|f| !test_only.get(f.line.wrapping_sub(1)).copied().unwrap_or(false));
+        }
+    }
     findings::cap(p, &snippets, found).iter().map(|f| snippets.issue(f)).collect()
+}
+
+/// N-20: the lines of a dependency's Rust file that hold only code no dependent builds, as `*_test.go` is a Go
+/// file none builds: the items under `#[cfg(test)]` (or `cfg(all(…, test))`), `#[test]`, `#[bench]` and the like,
+/// with their attributes (the Rust reader's test items, `rsread::test_items`), an item whose own inner attributes
+/// are such a `cfg`, or the whole file under its `#![cfg(test)]`. A line is left out only when all of its text,
+/// blanks aside, is in such an item; a file the parser could not read whole leaves none out (None).
+fn rs_test_only_lines(ctx: &FileCtx) -> Option<Vec<bool>> {
+    let src = &ctx.content;
+    let tree = crate::rsparse::parse(src);
+    if tree.problems != 0 {
+        return None;
+    }
+    let only_in_tests = |attrs: &[crate::rsparse::Attr]| attrs.iter().any(|a| crate::rsread::cfg_only_in_tests(&tree, src, a));
+    let (first, count) = tree.crate_attrs;
+    if only_in_tests(&tree.attrs[first as usize..(first + count) as usize]) {
+        return Some(vec![true; ctx.len()]);
+    }
+    let mut tests = crate::rsread::test_items(&tree, src);
+    for k in 0..tree.items.len() {
+        let parent = tree.items[k].parent;
+        if only_in_tests(tree.inner_attrs_of(k)) || (parent != crate::rsparse::NONE && tests.contains(&parent)) {
+            tests.insert(k as u32);
+        }
+    }
+    if tests.is_empty() {
+        return None;
+    }
+    let mut covered = vec![false; src.len()];
+    for &k in &tests {
+        let it = &tree.items[k as usize];
+        let start = tree.attrs_of(k as usize).iter().map(|a| tree.toks[a.tok_start as usize].start).fold(it.start, u32::min);
+        let (start, end) = ((start as usize).min(src.len()), (it.end as usize).min(src.len()));
+        covered[start..end.max(start)].iter_mut().for_each(|c| *c = true);
+    }
+    let blank = |c: u32| c == ' ' as u32 || c == '\t' as u32 || c == 0x0B || c == 0x0C;
+    Some(
+        (0..ctx.len())
+            .map(|i| {
+                let (s, e) = (ctx.starts[i], ctx.end_of(i));
+                (s..e).any(|j| covered[j]) && (s..e).all(|j| covered[j] || blank(src[j]))
+            })
+            .collect(),
+    )
+}
+
+/// core.scan_file in project mode (Q-1): the rules part (`scan_rules`), then the passes that follow it, the
+/// suppression markers and the cap (crate::project), as core's `scan_file(…, dep=False)` makes them. `model`: the
+/// taint configuration's part of the model.
+pub fn scan_project(p: &Pack, text: &[u32], lang_name: Option<&str>, jsx: bool, opts: &Options, model: &crate::taint::Model) -> Vec<Value> {
+    scan_project_metrics(p, text, lang_name, jsx, opts, model, false).0
+}
+
+/// scan_project, and with `metrics` the file's line metrics too (Q-1 step 4: metrics.rs, from the scan's own
+/// reading of the file, so a project scan reads each file once).
+pub fn scan_project_metrics(
+    p: &Pack,
+    text: &[u32],
+    lang_name: Option<&str>,
+    jsx: bool,
+    opts: &Options,
+    model: &crate::taint::Model,
+    metrics: bool,
+) -> (Vec<Value>, Option<crate::metrics::FileMetrics>) {
+    let lang = Lang::from(lang_name);
+    let ctx = FileCtx::new(p, text, lang, jsx);
+    let lines: Vec<&[u32]> = (0..ctx.len()).map(|i| ctx.line(i)).collect();
+    let snippets = Snippets::new(p, lines, opts.redact, opts.neumaier);
+    let mut found = findings_of(&ctx, lang_name, opts, &snippets);
+    crate::project::passes(&ctx, &mut found, model);
+    let found = crate::project::unsuppressed(&ctx, found);
+    let issues = findings::cap(p, &snippets, found).iter().map(|f| snippets.issue(f)).collect();
+    (issues, if metrics { Some(crate::metrics::of_ctx(&ctx, text)) } else { None })
 }
 
 /// core._scan_rules in project mode: the findings of the pattern rules and
@@ -1160,6 +1382,8 @@ pub fn findings_of(ctx: &FileCtx, lang_name: Option<&str>, opts: &Options, snipp
     needs.push(need_of(&decode));
     let gates = Gates::new(ctx, &needs);
     let b64_filter = written_for(p, "B64_BLOB_RE", B64_BLOB_TEXT);
+    let b64_plain_max = p.usize("_B64_PLAIN_MAX");
+    let b64_period_max = p.usize("_B64_PERIOD_MAX");
     let entropy_filter = written_for(p, "ENTROPY_VALUE_RE", ENTROPY_VALUE_TEXT);
     let js_name = if lang == Lang::Js { "js" } else { "py" };
     let join = Join::new(p);
@@ -1220,9 +1444,14 @@ pub fn findings_of(ctx: &FileCtx, lang_name: Option<&str>, opts: &Options, snipp
                     continue;
                 }
             }
-            if a.kind == Kind::Token && !token_has_material(ctx, &r.re, mline, i) {
-                continue;
-            }
+            let col = if a.kind == Kind::Token {
+                match token_col(ctx, &r.re, mline, i) {
+                    None => continue,
+                    Some(c) => c,
+                }
+            } else {
+                col
+            };
             if a.kind == Kind::Token || a.kind == Kind::Secret {
                 secret_lines.insert(i);
             }
@@ -1296,9 +1525,9 @@ pub fn findings_of(ctx: &FileCtx, lang_name: Option<&str>, opts: &Options, snipp
             }
         }
         if !b64_filter || line.len() >= 202 {
-            if let Some(bm) = b64_re.search(line) {
+            if let Some(col) = b64_blob_col(b64_re, line, b64_plain_max, b64_period_max) {
                 if !pystr::contains(line, "sourceMappingURL") {
-                    out.push(Finding::new(b64.clone(), i + 1, Some(bm.start())));
+                    out.push(Finding::new(b64.clone(), i + 1, Some(col)));
                 }
             }
         }

@@ -7,9 +7,11 @@ patterns) and nothing compared them. The page now compiles every pattern
 from its Python text with Python `re` semantics (pyRe, which keeps the text
 on the RegExp as .pySource); this test compares that text and every other
 field with core: RULES / TEXT_RULES (id, name, type, sev, langs, pattern,
-flags, skip, need, msg, why, fix, ref), the taint tables, the suppression
-grammar, the entropy / secret-skip / obfuscation patterns, the redaction
-pattern list (_SECRET_LINE_PATTERNS, FIX-SPEC 6) and the limits. The
+flags, skip, need, msg, why, fix, ref), the suppression grammar, the
+entropy / secret-skip / obfuscation patterns, the redaction pattern list
+(_SECRET_LINE_PATTERNS, FIX-SPEC 6) and the limits; and with the engine's
+rule pack where core keeps a table no longer (the taint model and the
+project passes' limits since they moved into the engine: Q-1). The
 redaction list's first entry runs through a linear-time matcher in the page;
 test_token_redaction_matches checks it redacts exactly what core does."""
 
@@ -17,7 +19,7 @@ import json
 import re
 import unittest
 
-from lazaret.scanner import core
+from lazaret.scanner import _native, core
 from tests import _support
 from tests.scanner import _dashboard_vm as dash
 
@@ -51,6 +53,22 @@ def pat(rx):
     return {"src": rx.pattern, "i": bool(rx.flags & re.I), "s": bool(rx.flags & re.S), "m": bool(rx.flags & re.M)}
 
 
+def pack_entry(name):
+    """A value of the engine's rule pack as the page's tables hold it: a pattern as pat() describes one, a map as
+    a dict, a list as a list."""
+    def plain(e):
+        if "map" in e:
+            return {k: plain(v) for k, v in e["map"].items()}
+        for kind in ("list", "set", "items"):
+            if kind in e:
+                return [plain(v) for v in e[kind]]
+        if "re" in e:
+            flags = e.get("flags", "")
+            return {"src": e["re"], "i": "i" in flags, "s": "s" in flags, "m": "m" in flags}
+        return e.get("value")
+    return plain(_native.call("pack.values", {"names": [name]})[name])
+
+
 def rule(r):
     return {"id": r["id"], "name": r["name"], "type": r["type"], "sev": r["sev"], "langs": list(r["langs"]),
             "re": pat(r["re"]), "skip": pat(r["skip"]), "need": pat(r["need"]), "msg": r["msg"],
@@ -73,14 +91,10 @@ class DashboardTableTests(unittest.TestCase):
                     self.assertEqual(page[rid], cli[rid])
 
     def test_taint_tables(self):
-        self.assertEqual(self.page["sources"], {k: pat(v) for k, v in core.TAINT_SOURCES.items()})
-        self.assertEqual(self.page["sinks"], {k: [[suf, pat(rx), cat, sev, cwe, fix] for suf, rx, cat, sev, cwe, fix in rows]
-                                              for k, rows in core.TAINT_SINKS.items()})
-        self.assertEqual(self.page["assign"], {k: pat(v) for k, v in core.ASSIGN_RE.items()})
-        self.assertEqual(self.page["fullSan"], {k: pat(v) for k, v in core._FULL_SAN.items()})
-        self.assertEqual(self.page["partialSan"],
-                         {k: {s: pat(v) for s, v in d.items()} for k, d in core._PARTIAL_SAN.items()})
-        self.assertEqual(self.page["stringLit"], pat(core.STRING_LIT_RE))
+        for key, name in (("sources", "TAINT_SOURCES"), ("sinks", "TAINT_SINKS"), ("assign", "ASSIGN_RE"),
+                          ("fullSan", "_FULL_SAN"), ("partialSan", "_PARTIAL_SAN"), ("stringLit", "STRING_LIT_RE")):
+            with self.subTest(table=name):
+                self.assertEqual(self.page[key], pack_entry(name))
 
     def test_heuristic_and_suppression_patterns(self):
         for key, rx in (("suppress", core.SUPPRESS_RE), ("secretSkip", core.SECRET_SKIP_RE),
@@ -100,10 +114,10 @@ class DashboardTableTests(unittest.TestCase):
     def test_limits_and_labels(self):
         self.assertEqual(self.page["limits"], {
             "CAP_PER_RULE": core.CAP_PER_RULE, "SNIPPET_MAX": core.SNIPPET_MAX, "SNIPPET_LEAD": core.SNIPPET_LEAD,
-            "LONG_LINE": _support.pack("LONG_LINE"), "FN_LEN_LIMIT": core.FN_LEN_LIMIT, "FN_CX_LIMIT": core.FN_CX_LIMIT,
-            "FN_HEADER_SCAN_LIMIT": core.FN_HEADER_SCAN_LIMIT, "SC_JOIN_MAX_LINES": _support.pack("SC_JOIN_MAX_LINES"),
-            "SC_JOIN_MAX_CHARS": _support.pack("SC_JOIN_MAX_CHARS"), "SQL_CALLS_PER_LINE": core.SQL_CALLS_PER_LINE,
-            "SQL_ARG_MAX": core.SQL_ARG_MAX,
+            "LONG_LINE": _support.pack("LONG_LINE"), "FN_LEN_LIMIT": _support.pack("FN_LEN_LIMIT"),
+            "FN_CX_LIMIT": _support.pack("FN_CX_LIMIT"), "FN_HEADER_SCAN_LIMIT": _support.pack("FN_HEADER_SCAN_LIMIT"),
+            "SC_JOIN_MAX_LINES": _support.pack("SC_JOIN_MAX_LINES"), "SC_JOIN_MAX_CHARS": _support.pack("SC_JOIN_MAX_CHARS"),
+            "SQL_CALLS_PER_LINE": _support.pack("SQL_CALLS_PER_LINE"), "SQL_ARG_MAX": _support.pack("SQL_ARG_MAX"),
             # the page keeps 2,000,000 (it scans on the tab's main thread); the
             # CLIs default to 16,000,000 (core.SOURCE_SIZE_CAP)
             "MAX_FILE_BYTES": 2_000_000,
@@ -116,9 +130,9 @@ class DashboardTableTests(unittest.TestCase):
         """The page's linear token matcher redacts exactly what core's pattern does."""
         a36 = "a1B2" * 9
         lines = [
-            "AKIAIOSFODNN7ABCDEFG", "AKIAIOSFODNN7ABCDEF", "xAKIAIOSFODNN7ABCDEFGH", "akiaIOSFODNN7ABCDEFG",
+            "AKI\x41IOSFODNN7ABCDEFG", "AKIAIOSFODNN7ABCDEF", "xAKIAIOSFODNN7ABCDEFGH", "akiaIOSFODNN7ABCDEFG",
             "ghp_" + a36, "ghp_" + a36[:-1], "gho_" + a36 + "XYZ", "ghq_" + a36, "gh_" + a36,
-            "github_pat_" + "A_b1" * 6, "github_pat_" + "A" * 21, "xoxb-1234567890", "xoxb-123456789", "xoxz-1234567890",
+            "github_pat_" + "A_b1" * 6, "github_pat_" + "A" * 21, "xox\x62-1234567890", "xoxb-123456789", "xoxz-1234567890",
             "sk_live_" + "a1" * 8, "sk_live_" + "a" * 15, "AIza" + "B" * 35, "AIza" + "B" * 34, "AIza" + "B-_" * 13,
             "-----BEGIN RSA PRIVATE KEY-----", "x = '-----BEGIN PRIVATE KEY-----MIIE'  # tail",
             "-----BEGIN EC PRIVATE KEY-----abc-----END EC PRIVATE KEY----- after",
@@ -126,11 +140,11 @@ class DashboardTableTests(unittest.TestCase):
             "-----BEGIN rsa PRIVATE KEY-----", "-----BEGIN  PRIVATE KEY----", "-----BEGIN PRIVATE KEY-----",
             "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.sig", "eyJshort.eyJhbGciOiJIUzI1NiJ9",
             "eyJ" + "eyJ" * 40, "eyJ" * 5 + ".eyJ" + "a" * 10, "eyJaaaaaaaaaaeyJbbbbbbbbbbb.eyJcccccccccc",
-            "t = 'AKIAIOSFODNN7ABCDEFG' + 'ghp_" + a36 + "' + 'xoxp-abcdefghijk'",
+            "t = 'AKI\x41IOSFODNN7ABCDEFG' + 'ghp_" + a36 + "' + 'xox\x70-abcdefghijk'",
             "url = 'https://user:pa55w0rd@192.0.2.1/x'; password = 'hunter22'; IDENTIFIED BY 'x'",
             "api-key: \"abcd1234\" and secret='zz'", "PASSWORD='p' identified by password",
             "https://tok@host.invalid and ftp://a:b@c", "", "plain text, nothing secret",
-            "éAKIAIOSFODNN7ABCDEFGé \U0001F600ghp_" + a36,
+            "éAKI\x41IOSFODNN7ABCDEFGé \U0001F600ghp_" + a36,
         ]
         (page,) = dash.run([{"op": "eval", "expr": f"{json.dumps(lines)}.map(redactContextLine)"}])
         for line, got in zip(lines, page):

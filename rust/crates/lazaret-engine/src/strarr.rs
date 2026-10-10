@@ -836,12 +836,15 @@ pub fn sa_read(p: &Pack, text: &[u32]) -> Option<(PyStr, usize)> {
     let mut by_name: HashMap<PyStr, usize> = HashMap::new();
     for (fn_name, items) in &arrays {
         let esc = crate::pyre::escape(fn_name);
-        let forms = [
-            rxutil::dynamic(cat(&[&p.text("_SA_ACC_A_HEAD"), &esc, &p.text("_SA_CALL_TAIL")]), 0),
-            rxutil::dynamic(cat(&[&p.text("_SA_ACC_B_HEAD"), &esc, &p.text("_SA_ACC_B_TAIL")]), 0),
+        // (the parameter, and form B's function, named again: second groups
+        // held to the first, see rxutil::finditer_same)
+        let forms: [(_, &[(&str, &str)]); 2] = [
+            (rxutil::dynamic(cat(&[&p.text("_SA_ACC_A_HEAD"), &esc, &p.text("_SA_CALL_TAIL")]), 0), &[("p", "p2"), ("p", "p3")]),
+            (rxutil::dynamic(cat(&[&p.text("_SA_ACC_B_HEAD"), &esc, &p.text("_SA_ACC_B_TAIL")]), 0),
+             &[("g", "g2"), ("p", "p2"), ("p", "p3")]),
         ];
-        for rx in forms.iter() {
-            for m in rx.finditer(text) {
+        for (rx, same) in forms.iter() {
+            for m in rxutil::finditer_same(rx, text, 0, text.len(), same) {
                 let off = match value_of(p, m.name("off").unwrap_or(&[]), &consts) {
                     Ok(v) => sa_to_number(p, &v),
                     Err(_) => continue,
@@ -920,7 +923,7 @@ pub fn sa_read(p: &Pack, text: &[u32]) -> Option<(PyStr, usize)> {
             }
         };
         let lo = inv.start().saturating_sub(loop_back);
-        let loop_m = p.re("_SA_CHECKSUM_RE").finditer_at(text, lo as isize, inv.start() as isize).last();
+        let loop_m = rxutil::finditer_same(p.re("_SA_CHECKSUM_RE"), text, lo, inv.start(), &[("v", "v_again")]).pop();
         let target_src = inv.name("t").unwrap_or(&[]).to_vec();
         let prepared: R<(f64, Tree)> = (|| {
             let lm = loop_m.as_ref().ok_or(Stop)?;

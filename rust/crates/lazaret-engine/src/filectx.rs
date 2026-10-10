@@ -19,6 +19,11 @@ pub enum Lang {
     Py,
     Js,
     Sql,
+    /// Go and Rust: their comments and literals as their lexers read them
+    /// (lex/go.rs, lex/rs.rs); the rules that list the language, and the
+    /// families every text gets
+    Go,
+    Rs,
     Other,
 }
 
@@ -28,6 +33,8 @@ impl Lang {
             Some("py") => Lang::Py,
             Some("js") => Lang::Js,
             Some("sql") => Lang::Sql,
+            Some("go") => Lang::Go,
+            Some("rs") => Lang::Rs,
             _ => Lang::Other,
         }
     }
@@ -37,6 +44,8 @@ impl Lang {
             Lang::Py => Some("py"),
             Lang::Js => Some("js"),
             Lang::Sql => Some("sql"),
+            Lang::Go => Some("go"),
+            Lang::Rs => Some("rs"),
             Lang::Other => None,
         }
     }
@@ -238,6 +247,11 @@ impl<'p> FileCtx<'p> {
 
     pub fn is_empty(&self) -> bool {
         self.content.is_empty()
+    }
+
+    /// Every literal's span (absolute, sorted), in JavaScript and Python; None elsewhere.
+    pub fn literals(&self) -> Option<&[(usize, usize)]> {
+        self.literals.as_deref()
     }
 
     /// Where line i ends in `content`.
@@ -497,5 +511,27 @@ mod tests {
         assert!(!ctx.in_code(at(js, "e^f")), "a template's text");
         assert!(!ctx.in_code(at(js, "g ^")), "a block comment");
         assert!(ctx.in_code(at(js, "i ^")));
+    }
+
+    #[test]
+    fn go_and_rust_comments_are_their_lexers() {
+        for (name, lang) in [("go", Lang::Go), ("rs", Lang::Rs)] {
+            assert_eq!((Lang::from(Some(name)), lang.name()), (lang, Some(name)));
+        }
+        let p = crate::pack::current();
+        let rs = "let a = 1;\n/* x /* y */\n still */\nlet b = '\"'; // c\nfn f<'a>() {} // d\n";
+        let ctx = ctx_of(&p, rs, Lang::Rs);
+        assert_eq!(ctx.cmask, vec![false, true, true, false, false, false], "a nested block comment");
+        assert!(!ctx.in_code(at(rs, "still")));
+        assert!(ctx.in_code(at(rs, "let b")));
+        assert!(!ctx.in_code(at(rs, "// c")), "after a character holding a quote");
+        assert!(!ctx.in_code(at(rs, "// d")), "after a lifetime");
+        let go = "s := `/* x */`\n/* y */ t := \"// z\"\nr := '`' // w\n";
+        let ctx = ctx_of(&p, go, Lang::Go);
+        assert_eq!(ctx.cmask, vec![false, false, false, false]);
+        assert!(ctx.in_code(at(go, "/* x")), "a raw string's text is no comment");
+        assert!(!ctx.in_code(at(go, "/* y")));
+        assert!(ctx.in_code(at(go, "// z")), "nor a string's");
+        assert!(!ctx.in_code(at(go, "// w")), "after a rune holding a backtick");
     }
 }

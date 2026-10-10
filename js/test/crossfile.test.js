@@ -63,6 +63,21 @@ test("crafted false positives stay quiet", () => {
   assert.deepEqual(found(py({ "pkg/_net.py": PY_NET, "pkg/run.py": "from ._net import pull\n# exec(pull()) would be unsafe\ndata = pull()\n" })), []);
 });
 
+test("a program a literal names, given the data as its arguments, in another file (D-17, 0.1.9)", () => {
+  // lerna 10.0.1's gitCheckout: its wrapper of execa runs git, given the files as its arguments
+  const util = (run) => "const { execa } = require('execa');\n"
+    + "function exec(command, args, opts) { return execa(command, args, opts); }\n"
+    + "function gitCheckout(stagedFiles, gitOpts, execOpts) {\n"
+    + "  const files = gitOpts.granularPathspec ? stagedFiles : '.';\n  " + run + "\n}\nmodule.exports = { gitCheckout };\n";
+  const index = "const { gitCheckout } = require('./util');\n"
+    + "fetch(" + U + ").then((r) => r.json()).then((files) => gitCheckout(files, {}, {}));\n";
+  assert.deepEqual(found(js({ "util.js": util('return exec("git", ["checkout", "--"].concat(files), execOpts);'), "index.js": index })), []);
+  // the data as the program, or given to a program that runs the command its arguments name
+  for (const run of ["return exec(stagedFiles, [], execOpts);", 'return exec("timeout", ["5"].concat(files), execOpts);']) {
+    assert.deepEqual(found(js({ "util.js": util(run), "index.js": index })), [["node_modules/pkg/index.js", "CRITICAL", RUN_THERE]], run);
+  }
+});
+
 test("an event emitter: a value emitted in one file, run by a listener in another (0.1.8)", () => {
   const net = "const EventEmitter = require('events');\nconst bus = new EventEmitter();\n"
     + "fetch(" + U + ").then((r) => r.text()).then((c) => bus.emit('code', c));\nmodule.exports = { bus };\n";

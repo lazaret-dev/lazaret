@@ -718,8 +718,8 @@ impl<'p> Analyzer<'p> {
                     if let Some(x) = self.sc_subscript(e, &v, &k) {
                         return Ok(x);
                     }
-                    // (a reversal decodes: `s[::-1]`)
-                    if self.sc_reversal(b) {
+                    // (a reversal decodes: `s[::-1]`; a list's reorders its items)
+                    if self.sc_reversal(b) && !self.sc_items_not_text(a, 0) {
                         let at = self.start(e);
                         return Ok(self.sc_decoded(&v, "a reversal", at));
                     }
@@ -970,7 +970,8 @@ impl<'p> Analyzer<'p> {
         };
         let line = self.line(e);
         if self.supply {
-            return self.sc_call(e, &res, &recv, &pos, starred.as_ref(), &kws, dstar.as_ref());
+            let v = self.sc_call(e, &res, &recv, &pos, starred.as_ref(), &kws, dstar.as_ref())?;
+            return Ok(self.sc_own_call(e, v));
         }
 
         let class = res.class;
@@ -1095,7 +1096,7 @@ pub fn classify(cfg: &Config, raw: &[u32], canon: &[u32], precise: bool, attr: b
         builtin_san: cfg.builtin_sanitizer(&[canon, raw]),
         full_result: is_in(canon, FULL_RESULT) || is_in(raw, FULL_RESULT) || cfg.orm.search(&dot_raw).is_some(),
         sql_builder: is_in(canon, SQL_BUILDER_FUNCS) || is_in(raw, SQL_BUILDER_FUNCS) || attr_is_builder,
-        clean_result: in_words(last_part(raw), CLEAN_RESULT),
+        clean_result: clean_result(last_part(raw)),
     }
 }
 

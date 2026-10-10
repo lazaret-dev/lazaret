@@ -38,10 +38,25 @@ test("a bare non-directory argument is a usage error (exit 2)", () => {
 });
 
 test("lazaret guard points to the Python package (exit 2)", () => {
-  for (const argv of [["guard", "npm", "install", "express"], ["guard", "--plan", "pip", "install", "x"]]) {
+  for (const argv of [["guard", "npm", "install", "express"], ["guard", "--plan", "pip", "install", "x"],
+    ["guard", "cargo", "build"], ["guard", "code", "--install-extension", "ms-python.python"]]) {
     const r = capture(argv);
     assert.equal(r.code, 2);
     assert.match(r.err, /lazaret guard comes with the Python package: pip install lazaret/);
+  }
+});
+
+test("lazaret hook is the commit-time gate (hook.test.js): outside a repository it asks for files (exit 2)", async () => {
+  const d = mkdtempSync(join(tmpdir(), "lazaret-nohook-"));
+  try {
+    for (const argv of [["hook"], ["hook", "--staged"]]) {
+      const err = [];
+      const code = await run(argv, { cwd: d, out: () => {}, err: (s) => err.push(s), env: { ...process.env, PATH: "" } });
+      assert.equal(code, 2);
+      assert.deepEqual(err, ["error: not in a git repository: name the files to check"]);
+    }
+  } finally {
+    rmSync(d, { recursive: true, force: true });
   }
 });
 
@@ -169,10 +184,11 @@ test("--include-deps scans node_modules content (dep rules only)", () => {
   try {
     mkdirSync(join(d, "node_modules"), { recursive: true });
     writeFileSync(join(d, "app.py"), "x = 1\n");
-    // SC-B64: a supply-chain indicator (dep-rule) hidden in a dependency.
-    // eval() is NOT a dep rule, so it stays unreported in dep mode.
+    // SC-B64: a supply-chain indicator (dep-rule) hidden in a dependency (base64 of 240 bytes: a run of
+    // one letter is not data, G-5). eval() is NOT a dep rule, so it stays unreported in dep mode.
+    const blob = Buffer.from(Array.from({ length: 240 }, (_, i) => (i * 7919) % 256)).toString("base64");
     writeFileSync(join(d, "node_modules", "evil-pkg.js"),
-      'x = "' + "A".repeat(250) + '";\neval(userInput);\n');
+      'x = "' + blob + '";\neval(userInput);\n');
     const without = capture(["check", d, "--no-html", "--no-json", "--quiet"]);
     assert.equal(without.code, 0);
     const withDeps = capture(["check", d, "--no-html", "--quiet", "--include-deps", "--ci"]);

@@ -37,7 +37,7 @@ from lazaret.registry import repo as lazaret_repo  # noqa: E402
 SECRET_SRC = ("import os\n"
               "os.system(cmd)\n"
               "password = \"hunter2secr3t\"\n"
-              "aws_key = \"AKIAIOSFODNN7EXAMPLE\"\n")
+              "aws_key = \"AKI\x41IOSFODNN7EXAMPLE\"\n")
 
 
 def _read(path):
@@ -97,7 +97,7 @@ class TestSecretRedaction(unittest.TestCase):
         for i in issues:
             for line in i["snippet"]:
                 self.assertNotIn("hunter2secr3t", line, i["rule"])
-                self.assertNotIn("AKIAIOSFODNN7EXAMPLE", line, i["rule"])
+                self.assertNotIn("AKI\x41IOSFODNN7EXAMPLE", line, i["rule"])
         self.assertTrue(any(i["rule"] == "S-SECRET" for i in issues))
         self.assertTrue(any(i["rule"] == "S-TOKEN" for i in issues))
 
@@ -105,11 +105,11 @@ class TestSecretRedaction(unittest.TestCase):
         # an issue that BYPASSED mk_issue (e.g. hand-built) still gets swept
         res = {"issues": [{"rule": "S-OSCMD-PY", "line": 3, "snipStart": 1,
                            "snippet": ["x = 1", "password = \"hunter2secr3t\"",
-                                       "aws_key = \"AKIAIOSFODNN7EXAMPLE\""]}]}
+                                       "aws_key = \"AKI\x41IOSFODNN7EXAMPLE\""]}]}
         lazaret.redact_result(res)
         joined = "\n".join(res["issues"][0]["snippet"])
         self.assertNotIn("hunter2secr3t", joined)
-        self.assertNotIn("AKIAIOSFODNN7EXAMPLE", joined)
+        self.assertNotIn("AKI\x41IOSFODNN7EXAMPLE", joined)
 
     def test_cli_json_html_sarif_clean_by_default(self):
         out = os.path.join(self.tmp, "out")
@@ -123,13 +123,13 @@ class TestSecretRedaction(unittest.TestCase):
         self.assertEqual(p.returncode, 1, p.stderr[:400])  # gate fails: secrets
         jtxt = _read(os.path.join(out, "r.json"))
         self.assertNotIn("hunter2secr3t", jtxt)
-        self.assertNotIn("AKIAIOSFODNN7EXAMPLE", jtxt)
+        self.assertNotIn("AKI\x41IOSFODNN7EXAMPLE", jtxt)
         self.assertIn("[redacted: secret rule", jtxt)
         p2 = run_cli([self.root, "--no-json", "--html",
                       os.path.join(out, "r.html")])
         html = _read(os.path.join(out, "r.html"))
         self.assertNotIn("hunter2secr3t", html)
-        self.assertNotIn("AKIAIOSFODNN7EXAMPLE", html)
+        self.assertNotIn("AKI\x41IOSFODNN7EXAMPLE", html)
 
     def test_cli_opt_out_flag(self):
         out = os.path.join(self.tmp, "out2")
@@ -312,8 +312,10 @@ class TestBundleHygiene(unittest.TestCase):
         self.assertFalse(make_bundle.is_junk("python/tests/fixtures/detection_gaps/dist/bundle.py"))
         self.assertTrue(make_bundle.is_junk("build/typosquats/lazarat/js/index.js"))
         for rel in (".env", "python/.env.local", "python/dist/lazaret-0.0.1.tar.gz",
-                    "python/src/lazaret.egg-info/PKG-INFO", "python/.venv/bin/python"):
+                    "python/src/lazaret.egg-info/PKG-INFO", "python/.venv/bin/python",
+                    "python/src/lazaret/_native/liblazaret_native.dylib"):
             self.assertTrue(make_bundle.is_junk(rel), rel)
+        self.assertFalse(make_bundle.is_junk("python/src/lazaret/scanner/_native.py"))
 
     def test_bundle_has_no_junk_and_carries_engine(self):
         out, p = self.build()

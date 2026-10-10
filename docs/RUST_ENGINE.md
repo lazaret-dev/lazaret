@@ -18,7 +18,7 @@ package runs the same engine compiled to WebAssembly
 of jsparse.py, held to its trees node for node until phase 3 retired it),
 the Python parser (`py_parse`, §13: Python 3.13's `ast` trees, node for
 node) and a linear-time regex engine (linre, §14) are in place for the
-phases that follow; every pattern linre accepts runs on it, and the
+phases that follow; every pattern of the engine runs on linre (P-16), and the
 engine's lexers (§15) read JavaScript and Python for every caller that asks
 where a text's comments and literals are.
 
@@ -45,26 +45,27 @@ Decisions (fixed):
 
 | Topic | Decision |
 |---|---|
-| Dependencies | **No external crates.** Own regex engines (a port of CPython's sre; linre, §14), JSON, Unicode tables, parsers. `Cargo.lock` lists only the workspace; `scripts/check_rust_deps.py` fails CI otherwise. |
+| Dependencies | **No external crates.** Own regex engine (linre, §14; until P-16 also a port of CPython's sre), JSON, Unicode tables, parsers. `Cargo.lock` lists only the workspace; `scripts/check_rust_deps.py` fails CI otherwise. |
 | Bindings | **C ABI + ctypes** for Python (no compiled extension, one library per platform serves every Python version); **WebAssembly** for Node (Node's own `WebAssembly`, no imports, no npm dependency). |
 | Rule source | **The pack is the source.** `rust/crates/lazaret-engine/rules/lazaret-rules.json` holds the engine's patterns, sets, limits and finding texts and is edited by hand (it was extracted from `core.py`, which no longer holds them). `scripts/make_rust_tables.py` keeps it in its canonical form, and `--check` holds it there: every pattern compiles with Python's `re` (the syntax the engine reads), its `rule_set` is the registry's `ENGINE_VERSION`, and the values core still keeps for the Python side (the reasons the registry ranks, the walk's limits) are the pack's. Python reads the pack through the engine (`engine.pack_value`, `engine.pack_pattern`). |
 | Engine shape | Generic engine plus data: declarative rules come from the pack, the algorithms are Rust functions (ported from core's, function for function, until the refactor; rebuilt on the parsers in the phases that follow, §8). |
 | Calls | Whole files, batched: one crossing of the boundary per batch of files, read on threads (`std::thread`), answers in input order. |
-| License | Lazaret's code is Apache-2.0; the translations of CPython code (the regex engine, shlex, the Final_Sigma rule) are also under CPython's license, and the Unicode 13.0 tables are Unicode data, under the Unicode License v3, so the crates, the platform wheels and the npm package are `Apache-2.0 AND Python-2.0.1 AND Unicode-3.0` (§11). |
+| License | The engine is Lazaret's own work, Apache-2.0, with Unicode data under the Unicode License v3: the crates are `Apache-2.0 AND Unicode-3.0`. Its translations of CPython code are retired (P-16). The platform wheels, the sdist and the npm package are `Apache-2.0 AND Unicode-3.0` too (§11). |
 
 ## 2. Using it
 
 - `lazaret …` and `lazaret-registry …` run the native engine; `--version`
-  names it: `lazaret 0.1.8 (engine: rust 0.1.8)`. Without the library the
+  names it: `lazaret 0.1.9 (engine: rust 0.1.9)`. Without the library the
   scanning commands stop with exit code 2 and say what is missing
   (`engine.require`): there is no engine to fall back on. The workspace
   version (`rust/Cargo.toml`) is the release the engine ships in.
 - The library is `lazaret/_native/<library>` in a wheel: a platform wheel
-  for Linux x86-64 and ARM64 (manylinux_2_28), macOS arm64 from 11.0 and
-  x86-64 from 10.12, and Windows x64; anywhere else pip builds a wheel from
-  the sdist, compiling the engine with cargo (Rust is needed there: §4).
-  An editable install puts it in `src/lazaret/_native/`, and
-  `LAZARET_NATIVE_LIB` names another copy (a development build).
+  for Linux x86-64 and ARM64 (manylinux_2_28 and musllinux_1_2), macOS arm64
+  from 11.0 and x86-64 from 10.12, and Windows x64 and ARM64; anywhere else
+  pip builds a wheel from the sdist, compiling the engine with cargo (Rust
+  is needed there: §4). An editable install puts it in
+  `src/lazaret/_native/`, and `LAZARET_NATIVE_LIB` names another copy (a
+  development build).
 - `python/src/lazaret/scanner/engine.py` sends the supply-chain tests
   through it: the import-time test of every dependency file (`--deps`), of
   every file a registry scan reaches at import time and of the files it runs
@@ -89,15 +90,18 @@ Decisions (fixed):
   the next step runs: the release is INCOMPLETE, never cleared.
   `engine.WORK_BUDGET` sets the budget (steps of the regex matcher; by
   default the engine's, about 4e9).
-- `scan_file` in project mode (your own files) goes through it in two
-  parts (`engine.scan_files`): its rules part — every pattern rule and
-  family on every line, the file-level rules and `TEXT_RULES` — is the
-  engine's `scan_rules`, in the same batches on the same threads, and core
-  runs the passes that follow on the engine's findings (the SQL statements
-  without WHERE, taint, the SQL-sink pass, the function metrics), the
-  suppression markers and the cap (`core.scan_file_after_rules`). A file the
-  engine doesn't answer about is SC-TRUNCATED, and core's passes still run
-  on it.
+- `scan_file` in project mode (your own files) is the engine's too, whole
+  (0.1.9, Q-1; `engine.scan_files`, in the same batches on the same
+  threads): the rules part — every pattern rule and family on every line,
+  the file-level rules and `TEXT_RULES` — then the SQL statements without
+  WHERE, the intra-file taint, the SQL-sink pass and the function metrics,
+  then the suppression markers and the cap (`project.rs`, `taint.rs`). A
+  taint configuration (`--taint-config`, a trusted `.lazaret-taint.json`)
+  goes with each Python and JavaScript file's call as its `"taint"`
+  argument (`core.taint_args`: what `core.apply_taint_config` validated and
+  kept). A file the engine doesn't answer about is SC-TRUNCATED, as in
+  dependency mode; no clock bounds the scan, only the work budget, so a
+  file gets the same findings on every machine.
 - The cross-file follower (`engine.cross_file_issues`, for `--deps`,
   registry and guard scans) is one `cross_file` call per scan: the
   dependency files one after another in the text (`[path, lang, length]`
@@ -106,8 +110,18 @@ Decisions (fixed):
   `core._xf_site_groups`), each package on its own work budget, on up to 8
   threads, the findings in the follower's order. A package the engine
   reports as failed (its budget spent, an internal error) gives no
-  cross-file finding, and neither does a call the engine refuses, as in the
-  npm package.
+  cross-file finding, and neither does a call the engine refuses, as in
+  the npm package. A function's body is read twice: with its strings
+  blanked, to find what the module defines, imports and exports, and as
+  written, for the received-code test, which reads strings itself
+  (`Module::code_of`; D-17, 0.1.9: lerna 10.0.1's `exec("git",
+  ["checkout", "--"].concat(files), execOpts)` read as `exec("   ", …)`, a
+  call that runs what it is given). A call of exec's whose first argument
+  is a literal, plain command line none of whose words is a program that
+  runs what it is given (`received::fixed_command`: an interpreter or a
+  shell, `_DL_RUNNERS`; a wrapper, `_HOOK_WRAPPERS`; a program that runs
+  the command its arguments name, `_CMD_RUNNERS`) runs none of the data
+  after it.
 - **The npm package** (0.1.8) loads `native/lazaret.wasm` with
   `js/src/lib/native.js` (`npm run build` makes it from `rust/`; the
   published package carries it). Everything the supply-chain tests answer —
@@ -115,12 +129,9 @@ Decisions (fixed):
   the decoded view, spawned scripts, persistence, the exfiltration shapes, a
   hook command read as a program — is the engine's, and so are the
   cross-file follower (`crossFileIssues`: each file encoded on its own, its
-  length in code points) and `scan_file`: in dependency mode whole
-  (`scan_file`, findings capped as core caps them), in project mode its
-  rules part (`scan_rules`: every pattern rule and family on every line, the
-  file-level rules and `TEXT_RULES`, uncapped and unsuppressed), to which
-  the npm engine adds the SQL, taint and function passes, the suppression
-  markers and the cap. Core's tables the JavaScript side still reads
+  length in code points) and `scan_file`, whole in both modes (project
+  mode's passes since 0.1.9, Q-1: the npm package's `taint.js`, `sql.js`
+  and `functions.js` are retired). Core's tables the JavaScript side still reads
   (limits, `RULES` for S-TOKEN) come from the pack too (`packValues`). There
   is no second engine to fall back on: a call that spends its work budget (a
   hostile input) leaves its file SC-TRUNCATED, CRITICAL and so never cleared
@@ -145,10 +156,10 @@ Decisions (fixed):
 rust/
   Cargo.toml                 workspace; release: lto, codegen-units=1, panic=unwind, strip;
                              wasm: release with panic=abort (the WebAssembly build)
-  NOTICE, LICENSE-PYTHON     what is translated from CPython, its notices, CPython's license (§11)
+  NOTICE                     the engine's notices, and what was CPython's (§11)
   LICENSE-UNICODE            the Unicode License v3, for generated/unicode13.rs and
                              pyparse/unidata.rs (§11)
-  crates/lazaret-engine/     #![forbid(unsafe_code)], no dependencies, no I/O
+  crates/lazaret-engine/     #![forbid(unsafe_code)], no I/O; one dependency, lazaret-verify (its SHA-256)
     rules/lazaret-rules.json the rule pack: the source of the rules (embedded; `pack.install` can
                              replace it)
     src/api.rs               the calls by name (JSON args + text -> JSON; `budget`); `batch` on
@@ -156,11 +167,13 @@ rust/
     src/budget.rs            per-call work budget -> Exhausted (both packages: SC-TRUNCATED)
     src/pack.rs              the pack: values by core's names, patterns compiled on first use
     src/json.rs, pystr.rs    JSON; Python str semantics on code points ([u32])
-    src/unicode.rs           Python 3.10 / Unicode 13.0 predicates (generated/unicode13.rs)
-    src/pyre/                CPython's sre: parser, compiler, matcher (see §6)
-    src/linre/               a linear-time regex engine with re's answers, which every pattern it
-                             accepts runs on (§14): parser, sets, programs, lazy DFAs,
-                             backtracker, Pike VM, prefilters
+    src/unicode.rs           Python 3.10 / Unicode 13.0 predicates, case mappings and casefold
+                             (generated/unicode13.rs)
+    src/pyre.rs              re's calls as the engine's code makes them, on linre (§6)
+    src/linre/               a linear-time regex engine with re's answers, which every pattern
+                             runs on (§14): parser, sets, programs, lazy DFAs, memoized and
+                             swept lookaheads, backtracker, Pike VM, prefilters
+    src/scan.rs              pystr's find: a string by its rarest character
     src/hooks.rs             shlex, _hook_tokens, follow_hook, node_candidates, node -e, #!
     src/signs.rs             install_script_risk, import_time_risk(+severity), decoded_view
                              (and string_array_line), spawned_scripts, and the detectors they
@@ -171,24 +184,52 @@ rust/
                              module defines, imports, exports, sets in the environment, emits
                              and listens for; one call per scan, a budget per package, threads
     src/textgate.rs          a text's character pairs and triples, read once per call: a search
-                             whose strings need one the text lacks answers at once
+                             whose strings need one the text lacks answers at once; for a long
+                             text, where each pair stands, and what the call's tests read of it
+                             more than once (its tokens)
     src/flow.rs              local data followed to where it is sent (local_data_sent_at), a
                              webhook's secret in the code (secret_endpoint_at)
     src/shell.rs             a shell text read as a program (_sh_parse … _sh_reasons), the command
-                             lines a script hands a shell (exec_command_reasons)
+                             lines a script hands a shell (exec_command_reasons), and what a
+                             pipeline decodes or downloads and hands a shell or an interpreter
+                             on stdin (piped_runs, 0.1.9)
+    src/datafmt.rs           a whole file of a data format, read by its structure (a WebAssembly
+                             module, a PNG, GIF or WebP image, WAV audio): SC-B64 passes over its
+                             base64 (0.1.9)
     src/strarr.rs            javascript-obfuscator's string arrays and proxy objects, for the
                              decoded view
     src/lex/                 the lexers (§15): js.rs (JavaScript, TypeScript, JSX: templates and
                              their holes, regular expressions), py.rs (Python, with pyparse's
-                             tokenizer), mod.rs (what the detectors ask: comments, strings,
-                             literals, two readings intersected), value.rs (literals' values,
-                             the runs a runtime joins)
-    src/lexer.rs             lex_comment_spans, every caller's: JavaScript and Python from lex/,
-                             SQL (two readings) and any other text by the pack's patterns (§6)
+                             tokenizer), go.rs and rs.rs (Go and Rust: raw strings, runes and
+                             characters, Rust's nested comments and lifetimes), mod.rs (what the
+                             detectors ask: comments, strings, literals, two readings
+                             intersected), value.rs (literals' values, the runs a runtime joins)
+    src/lexer.rs             lex_comment_spans, every caller's: JavaScript, Python, Go and Rust
+                             from lex/, SQL (two readings) and any other text by the pack's
+                             patterns (§6)
     src/filectx.rs           a file as scan_file reads it (_FileCtx): lines, comment layout,
                              match text (NFKC, JS escapes), names
     src/scanfile.rs          scan_file in dependency mode, scan_rules (project mode's rules
-                             part), family by family; per-line gates
+                             part), family by family; per-line gates; scan_file in project mode
+                             (scan_project: the rules part, then project.rs)
+    src/project.rs           project mode after the rules (core's _project_passes, 0.1.9): SQL
+                             statements without WHERE, the SQL built from strings into execute(),
+                             the function metrics (functions), then the suppression markers and
+                             the cap
+    src/metrics.rs           a project file's line metrics (core.compute_metrics' part for one
+                             file, 0.1.9, Q-1 step 4): comment lines, lines of code, the windows
+                             of six lines of code keyed for the duplication; from the scan's own
+                             reading (scan_file with "metrics") or on their own (file_metrics)
+    src/taint.rs             project mode's intra-file taint (core.taint_scan, 0.1.9): sources,
+                             sinks, sanitizers, guards, scopes, Flask views and route parameters;
+                             a taint configuration's sources, sinks and sanitizers for one call
+    src/secrets.rs           live secret verification's table and logic (0.1.9, V-1 stage 2):
+                             the pack's _VERIFY_PROVIDERS read and checked; `secrets.find` (the
+                             credentials of a file's flagged lines; AWS's pairs), `secrets.identify`,
+                             `secrets.request` (a call that only authenticates; AWS's signed with
+                             Signature Version 4: HMAC over lazaret-verify's SHA-256),
+                             `secrets.judge` (live, rejected or unknown, why, whose); each package
+                             makes the call
     src/linear.rs            rule patterns sre runs in more than linear time on some lines,
                              matched by hand in linear time (SQL-DYNAMIC)
     src/findings.rs          mk_issue: texts, snippets, redaction (_SecretLiterals); cap_issues
@@ -206,6 +247,11 @@ rust/
                              supply.rs (its supply-chain model: local data followed to a
                              network send, and received data to code run, in an install
                              script or a dependency's code, §18)
+    src/jsloads.rs           what a JavaScript module loads when it runs (js_loads, 0.1.9, D-13): the
+                             specifiers of its require() calls given a literal outside any function,
+                             class body and try statement, of its import and export-from
+                             declarations and of its import() calls, on js_parse's tree, with the
+                             npm package each names; the registry compares them with package.json
     src/pyflow/              project mode's cross-file Python taint (a port of flow.py's Python
                              pass, §17): mod.rs (the model: modules, functions, classes, names,
                              imports, resolution, the frames), eval.rs (one reading of a
@@ -220,10 +266,26 @@ rust/
                              (Python's nesting limits), tree.rs (the arena), out.rs (JSON)
     examples/                profiling tools (profile_calls, profile_scanfile, pattern_times,
                              pattern_stats, show_need, jsparse_bench, pyparse_bench, pyflow_bench)
-  crates/lazaret-ffi/        cdylib liblazaret_native: the only `unsafe` (the C ABI; the
-                             WebAssembly exports)
+  crates/lazaret-ffi/        cdylib liblazaret_native: Lazaret's only `unsafe` (the C ABI; the
+                             WebAssembly exports; natively, the network layer's `lazaret_net_*`
+                             and the `verify.*` calls: `verify.go_sumdb`, `verify.sigstore`)
+  crates/lazaret-verify/     pratique's pure part (no I/O, no `unsafe`, wasm32): signatures,
+                             certificate chains, transparency logs, attestations; `gosum`, the
+                             Go checksum database's lookup checked in two steps; `provenance`,
+                             npm's and PyPI's attestations of a file: verified, invalid or
+                             unchecked (NET-1)
+  crates/lazaret-net/        the network layer on pratique: Lazaret's host rule on every hop,
+                             URL limits, budgets, credentials given hop by hop to their own
+                             host (pratique's hop hook, decision 14); native library only
+                             (NET-1, DESIGN.md §5j)
+  crates/pratique/           the HTTPS/TLS library (github.com/lazaret-dev/pratique; tiny_https
+                             until October 2026), taken from a commit of its repository as it is
+                             (scripts/sync_pratique.py; LAZARET.md, vendored.sha256); not a
+                             default member: `cargo test -p pratique` runs its own tests
   .cargo/config.toml         the WebAssembly build's stack (8 MiB, placed first)
 python/src/lazaret/scanner/_native.py   ctypes loader and one call (NativeError, NativeExhausted)
+python/src/lazaret/scanner/nativenet.py the network layer from Python: the default transport, urllib
+                                        behind it (NET-1)
 js/src/lib/native.js                    the npm package's loader: WebAssembly, one call, the pack's
                                         values, a wrapper per call the npm engine makes
 js/scripts/build-wasm.js                `npm run build`: native/lazaret.wasm and native/NOTICE
@@ -268,8 +330,47 @@ does after a call that left the memory above 512 MB). Every call may carry
 `{"calls": [[name, args, text], …], "threads": n}` →
 `[{"ok": v} | {"error": …, "exhausted"?, "panic"?}]` in input order. Threads
 take the next item from an atomic counter; each item has its own budget and
-`catch_unwind`; `batch` and `pack.*` are refused inside a batch; under
-WebAssembly a batch runs on one thread.
+`catch_unwind`; `batch`, `pack.*` and `texts.*` are refused inside a batch on
+threads; under WebAssembly a batch runs on one thread.
+
+Live secret verification (0.1.9, V-1 stage 2, John's decision 7; `src/secrets.rs`): the provider table is
+the pack's `_VERIFY_PROVIDERS` (checked when first read, by the rules `scripts/make_rust_tables.py --check`
+holds the pack to: `lazaret.scanner.secretverify.validate`). `secrets.providers` → `[{"id", "label", "host",
+"path", "parts"}]`; `secrets.identify` (the text) → the ids whose one-part pattern matches all of it;
+`secrets.request` `{"provider": id | "entry": {…}, "parts": {name: text}, "time": "YYYYMMDDTHHMMSSZ"}` →
+`{"method", "host", "path", "headers": [[name, value]], "secret_headers": [names], "body"}` or
+`{"refused": why}`; `secrets.judge` `{"provider": id | "answers": [rules], "status", "truncated", "secrets"}`
+with the body as the text, one code point a byte (at most 64 KiB) → `[outcome, why, who]`; `secrets.find`
+`{"lines": [n, …]}` with those lines of one file joined by "\n" as the text → `[{"provider", "parts":
+{name: text}, "lines": [n, …]}]`, the credentials the providers name in them (a word, a run of letters,
+digits and `_-+/` or a piece of one between slashes, that is all of a one-part provider's format; an id and
+a secret of a provider of two parts, AWS's, paired nearest lines first: 8 pairs at most, of 64 ids and 64
+secrets), for `lazaret scan --verify-secrets`. The engine has no clock and no network: each package gives
+the time and makes the call. JSON in an answer is read as RFC
+8259 has it (a key's last value counts, as Python's json keeps it; NaN and Infinity are not numbers, which
+Python's json takes, so an answer holding one is unknown where stage 1's Python could read it live). The
+engine's JSON reader now refuses a number RFC 8259 does not allow (`01`, `1.`, `.5`), which nothing Lazaret
+writes holds. Held to stage 1's Python on 53,760 answers, 2,800 requests (AWS's signatures at random
+times among them) and 5,500 texts with no difference. One change from stage 1, on purpose: a part of the
+credential is looked for in all of the owner's name an answer gives before it is cut to 80 characters, and
+parts that overlap are one `[redacted]` (stage 1 looked in the first 320 characters, so a part over 240
+characters long that began in the first 80 kept its start).
+
+The text store (0.1.9, FE-1; `src/texts.rs`): `texts.put` with
+`{"lengths": [code points, …]}` and the texts one after another as the text
+(Python: `"".join(texts).encode("utf-8", "surrogatepass")`) keeps each text as
+the bytes it came as, checked as it is cut, and answers `{"ids": [n, …]}`;
+the library's entry point takes them before reading the text into code points,
+so a text is not held four times its size. Any call then takes `"text_id": n`
+in its arguments in place of a text (alone or in a batch: each call reads the
+text into code points on its own thread), and `cross_file` takes
+`"text_ids"`, one per file, with no text. `texts.drop` `{"ids": […]}` lets them
+go (`{"dropped": n}`), `texts.info` says what the store holds. The store is
+the process's, behind a lock, and bounded (`texts::MAX_BYTES`, 1 GiB): a put
+past it keeps nothing and is refused, and the caller sends those texts with
+its calls as before. A registry scan puts each distinct text once
+(`engine.Texts`), names it in every step, and drops its texts when it ends,
+in a `finally` (`repo.scan_members`).
 
 ## 4. Building, packaging, CI
 
@@ -293,9 +394,9 @@ python/_build/lazaret_build.py dist/ --platform <tag>=<built library>`
 (repeatable; it also writes the sdist), or `LAZARET_NATIVE_LIBRARY` and
 `LAZARET_WHEEL_PLATFORM` for the PEP 517 hook, gives
 `lazaret-<v>-py3-none-<tag>.whl`: the package's files,
-`lazaret/_native/<library>`, and `rust/LICENSE-PYTHON` and `rust/NOTICE` as
-license files beside `LICENSE` and `LICENSE-UNICODE`, with
-`License-Expression: Apache-2.0 AND Python-2.0.1 AND Unicode-3.0` and
+`lazaret/_native/<library>`, and `rust/NOTICE` as a license file beside
+`LICENSE` and `LICENSE-UNICODE`, with
+`License-Expression: Apache-2.0 AND Unicode-3.0` and
 `Root-Is-Purelib: false`. The sdist carries the engine's sources under
 `rust/` (the workspace's `Cargo.toml` and `Cargo.lock`, each crate's
 `Cargo.toml`, `src/**/*.rs` and `rules/*.json`, and the notices; not the
@@ -307,15 +408,19 @@ platform wheel fits), `pip install .` in `python/`, or the backend run
 without `--platform`, compiles the engine: `cargo build --release --offline
 --locked -p lazaret-ffi` in the sdist's (or the checkout's) `rust/`, with
 `MACOSX_DEPLOYMENT_TARGET` set to the release wheels' minimum on macOS and
-the C runtime linked statically on Windows. The backend then loads the
+the C runtime linked statically on Windows. Since NET-1 the library holds the
+network layer too (`lazaret-net` on pratique, whose sources the sdist
+carries: its manifest, licence and the test and example sources cargo reads,
+not its test data), and building it needs Rust 1.87 or later (pratique's
+SIMD kernels call the architecture intrinsics as safe functions). The backend then loads the
 library to check that it is this release's and loads in this Python, and
 tags the wheel for this machine (`linux_x86_64`, `win_amd64`,
 `macosx_11_0_arm64` …). Without cargo it stops and says to install Rust
 (`rust-version` in `rust/Cargo.toml` or later) or a platform wheel; a build
 takes about a minute. `pip install -e .` compiles it the same way and puts
-it in `src/lazaret/_native/`, which is never packed from there: after a
-change to the engine, install again or point `LAZARET_NATIVE_LIB` at a
-fresh build.
+it in `src/lazaret/_native/`, which git ignores and nothing packs (not the
+wheel, the sdist or the source bundle): after a change to the engine,
+install again or point `LAZARET_NATIVE_LIB` at a fresh build.
 
 **Release builds** (`.github/workflows/wheels.yml`, called by `release.yml`
 as `build-python`, and run on pull requests and pushes to main that change
@@ -326,36 +431,53 @@ as `build-python`, and run on pull requests and pushes to main that change
 |---|---|---|
 | `manylinux_2_28_x86_64` | ubuntu-24.04 | in `quay.io/pypa/manylinux_2_28_x86_64`, pinned by digest |
 | `manylinux_2_28_aarch64` | ubuntu-24.04-arm | in `quay.io/pypa/manylinux_2_28_aarch64`, pinned by digest |
+| `musllinux_1_2_x86_64` | ubuntu-24.04 | in `quay.io/pypa/musllinux_1_2_x86_64`, pinned by digest; musl's libc dynamic, the unwinder linked in (below) |
+| `musllinux_1_2_aarch64` | ubuntu-24.04-arm | in `quay.io/pypa/musllinux_1_2_aarch64`, the same way |
 | `macosx_11_0_arm64` | macos-15 | `MACOSX_DEPLOYMENT_TARGET=11.0` |
 | `macosx_10_12_x86_64` | macos-15-intel | `MACOSX_DEPLOYMENT_TARGET=10.12` |
 | `win_amd64` | windows-2025 | `-C target-feature=+crt-static` (no Visual C++ runtime needed) |
+| `win_arm64` | windows-11-arm | the same |
 
 Every library is built with Rust `RUST_VERSION` (1.95.0, the compiler of
 §5's and §7's measurements; the runner's rustup installs it and checks each
 component's published SHA-256), `--release --offline --locked`. The Linux
 jobs mount that toolchain read-only into the image, so the library links
-against the image's glibc 2.28; building on the runner itself would need
-its glibc (2.39). Each library is then checked against its tag
-(`scripts/check_native_library.py LIB TAG --load`: machine, the glibc and
-libgcc_s symbol versions and libraries manylinux allows, no RPATH or
-executable stack; the Mach-O minimum macOS and system-only dylibs; a PE DLL
-with ASLR and DEP and no Visual C++ or MinGW runtime; the three exports;
+against the image's glibc 2.28; building on the runner itself would need its
+glibc (2.39). The musl jobs mount the musl-hosted toolchain of the same
+version (rustup installs it on the runner with `--force-non-host`; it runs
+only in the image) and build with two flags. `-C target-feature=-crt-static`
+links musl's libc dynamically: a static libc in a library Python loads would
+be a second libc in the process. And `-L native=` a directory whose
+`libgcc_s.a` is the toolchain's own `libunwind.a` (the unwinder a static
+musl build links): with a dynamic libc, Rust's standard library asks the
+linker for libgcc_s, which a minimal Alpine doesn't have, and this links the
+unwinder in instead. Checked before the jobs first ran, against Ubuntu
+24.04's musl 1.2.4: the library built that way needs `libc.so` alone, loads
+in a musl CPython (python-build-standalone's 3.12.11, which links musl
+dynamically) and passes the whole Python suite there, and a library linked
+the same way catches a panic, as the FFI boundary does. Each library is then
+checked against its tag (`scripts/check_native_library.py LIB TAG --load`:
+machine, the glibc and libgcc_s symbol versions and libraries manylinux
+allows, or musl's libc alone and no symbol versions for musllinux, no RPATH
+or executable stack; the Mach-O minimum macOS and system-only dylibs; a PE
+DLL with ASLR and DEP and no Visual C++ or MinGW runtime; the three exports;
 then loaded as `_native.py` loads it, reporting the package's version and
 giving one call its known answer), and the whole Python suite runs on it on
 its platform (the Linux ones inside the image), the recorded outputs (§5)
-among it. The `dist` job builds the sdist and the five platform wheels from
+among it. The `dist` job builds the sdist and the eight platform wheels from
 one checkout (Python 3.12.14, `SOURCE_DATE_EPOCH`), and
-`check_native_library.py --dist` holds the sdist to the engine's sources
-and no library, each platform wheel to the sdist's package files plus its
+`check_native_library.py --dist` holds the sdist to the engine's sources and
+no library, each platform wheel to the sdist's package files plus its
 library and license files, and its METADATA to the sdist's PKG-INFO; a pure
 wheel is an error. The `install` job then installs each platform wheel with
-pip, from those files only, on its platform, and runs `python -m lazaret
---version` (`lazaret X (engine: rust X)`); on Linux x86-64 pip also builds
-the sdist, compiling the engine with the pinned toolchain, and that install
-runs too. On Linux a build is reproducible: the same commit, toolchain and
-image give the same library bytes wherever the checkout is (cargo passes
-workspace paths relative). Given the same five libraries, the six files are
-too; the Windows linker, though, stamps a time into the DLL.
+pip, from those files only, on its platform (a musl one in its image, with
+the image's Python), and runs `python -m lazaret --version` (`lazaret X
+(engine: rust X)`); on Linux x86-64 pip also builds the sdist, compiling the
+engine with the pinned toolchain, and that install runs too. On Linux a
+build is reproducible: the same commit, toolchain and image give the same
+library bytes wherever the checkout is (cargo passes workspace paths
+relative). Given the same eight libraries, the nine files are too; the
+Windows linker, though, stamps a time into the DLL.
 
 The npm package's module is built the same way in `release.yml`'s
 `build-npm` job: Rust `RUST_VERSION` with its `wasm32-unknown-unknown`
@@ -412,12 +534,16 @@ the change, whose diff then names the chunks it moved. `scripts/snapshot.py
 sets` lists the sets; `files:LIST` records real files the way
 `test_snapshot_scanfile` reads them. The registry's `ENGINE_VERSION` (the
 pack's `rule_set`) is bumped with any change to what a verdict records.
+A run of a set also fails when the engine built, on the way, a pattern
+linre does not run (`linre.refused`, §14), so every pattern the engine
+builds is held to linear time.
 
 | Module | Records | On |
 |---|---|---|
 | `test_snapshot_hooks` | the 17 fields of `hooks_view` (shlex, hooks, both supply-chain tests with and without a language, the decoded view with no language and in JavaScript and Python, spawned scripts …) | the hooks corpus (`hooks_corpus.py`, ~44,400 cases) |
 | `test_snapshot_signs` | the detectors one by one (`signs_view`: received code, PowerShell, stagers, reverse shells, self-read, persistence, the exfiltration shapes, services at login, wallet swaps, the string-array technique …), every field reached; the data flow on long texts | the hooks corpus; six long texts |
-| `test_snapshot_scanfile` | `scan_file` in dependency mode and `scan_rules` (project mode's rules part), finding for finding, every family and variant reached; each line's context (`file_context`) | the scan_file corpus (`scanfile_corpus.py`), this repository's fixtures |
+| `test_snapshot_scanfile` | `scan_file` in dependency mode and `scan_rules` (project mode's rules part), finding for finding, every family and variant reached; each line's context (`file_context`); the same three for Go and Rust files (`*_go_rs`: the rules that list them and the families) | the scan_file corpus (`scanfile_corpus.py`, and its Go and Rust part, `go_rs_corpus`), this repository's fixtures |
+| `test_snapshot_project` | `scan_file` in project mode (the rules part, the SQL statements without WHERE, the intra-file taint, the SQL sinks, the function metrics, the suppression markers, the cap), finding for finding, every pass's rules reached; with a taint configuration; each file's function list (`functions`) | the project corpus (`project_corpus.py`: every pass's shapes and their combinations, seeded programs in Python, JavaScript and SQL), the scan_file corpus (its Go and Rust part too), this repository's fixtures |
 | `test_snapshot_lexer` | `lex_comment_spans`: comments, strings, every literal (the lexers', §15, for JavaScript and Python) | dense random texts in each language |
 | `test_snapshot_hook_commands` | a hook's command read as a program (`hook_command_risk`, `sh_parse`, the reasons), output thrown away and kept | realistic hook commands and a seeded corpus |
 | `test_snapshot_small` | SC-HEXSTR's hidden names and text, SC-HOMOGLYPH's look-alike names, SC-OFFSCREEN-CODE | curated and seeded lines |
@@ -430,10 +556,11 @@ Twins the engine is still compared with, call for call:
 
 | Module | Compares | On |
 |---|---|---|
-| `test_rust_parity_regex` | pyre against Python's `re`: every pack pattern and 126 hand-written probes, search/match/fullmatch/finditer/sub/split with pos/endpos | Python 3.10–3.14 |
+| `test_rust_parity_regex` | pyre (on linre) against Python's `re`: every pack pattern and the hand-written probes (those linre refuses, refused for a known reason), search/match/fullmatch/finditer/sub/split with pos/endpos, `sub`'s templates, `re.escape` | Python 3.10–3.14 |
 | `test_wasm_parity`, `test_wasm_parity_signs`, `_crossfile` | the WebAssembly build the npm package ships against the platform library, call for call, byte for byte: `hooks_view`, `signs_view`, `scan_file` (dependency mode), `scan_rules`, and the npm binding's `cross_file` against the Python package's | the hooks corpus, the scan_file corpus, this repository's files, the follower's stream |
 | `test_wasm_parity_jsparse` | the parser in the WebAssembly build against the library, byte for byte | the snippets, this repository's JavaScript, soups, every construct that nests at its deepest |
 | `test_wasm_parity_jsflow` | the JavaScript taint pass in the WebAssembly build against the library, byte for byte | `test_snapshot_js_flow`'s sets; every construct that nests at its deepest, request data followed through it |
+| `test_wasm_parity_project` | project mode in the WebAssembly build against the library, byte for byte (0.1.9, Q-1): `scan_file` with and without a taint configuration, the function lists, the intra-file taint alone | `test_snapshot_project`'s sets; the project corpus |
 | `test_wasm_parity_pyflow` | the Python taint pass in the WebAssembly build against the library, byte for byte | `test_snapshot_py_flow`'s sets; every construct that nests at its deepest, `elif` chains at the frames the pass holds |
 | `test_pyparse_native`, `_b`, `_c` | the Python parser (`py_parse`) against Python 3.13's `ast.parse` (a `python3.13` subprocess; skipped without one), node for node as JSON text, with the errors' lines; spans; its Unicode 15.1 data (§13) | pyparse_cases.py's inputs; every identifier character and character name |
 | `test_wasm_parity_pyparse` | the Python parser in the WebAssembly build against the library, byte for byte | the snippets, this repository's Python, programs, soups, every construct that nests at its deepest |
@@ -488,68 +615,45 @@ PYTHONPATH=src:. python3 -m unittest tests.architecture.test_wasm_parity_pyflow 
 python3 ../scripts/make_rust_tables.py --check && python3 ../scripts/check_rust_deps.py
 ```
 
-## 6. The regex engine (`pyre/`)
+## 6. The regex interface (`pyre.rs`)
 
-A port of CPython's `re/_parser.py`, `re/_compiler.py` and `_sre/sre_lib.h`
-(3.11–3.14 semantics; 3.10-only differences are version-gated in the tests):
-the same code words as `re._compiler`, SRE(match) as an explicit context
-stack (no recursion), MARK and REPEAT handling, sre's literal-prefix and
-charset scans, one budget tick per op. `\B` on an empty string follows
-3.10–3.13 (no pack pattern uses `\B`; a test keeps it so).
+`pyre` is Python's `re` as the engine's code calls it — compile, search,
+match, fullmatch, finditer, findall, sub with a function or a template,
+split, `re.escape` — over linre (§14), which runs every pattern in time
+linear in the text with `re`'s answers. A pattern linre does not run is an
+error, as one Python rejects is. Until P-16 pyre was a port of CPython's
+sre (`re/_parser.py`, `re/_compiler.py`, `_sre/sre_lib.h`: its parse, its
+program and its backtracking order, with speedups sre lacks — a
+first-character filter, per-operation tables, a required-literal
+prefilter, leads, anchored scans, set patterns answered without the
+matcher), which ran every pattern until phase 2 and those linre refused
+until P-16; linre has its own of each. The templates of `sub` follow `re`'s
+documented rules (`\1`, `\g<name>`, `\0` and octal escapes, the
+character escapes, a bad escape an error), held to Python's by
+`test_rust_parity_regex`.
 
-Answer-preserving speedups sre lacks, each a skip of work that cannot lead to
-a match (the soundness argument is in each module's doc, and hand-written
-probes in `test_rust_parity_regex` hold it):
-
-- a **first-character filter** (`first.rs`): start positions no possible
-  first consuming op accepts are skipped (JUMPs followed out of
-  alternatives; a leading lookahead's first op counts; a path that can end
-  without consuming gives no filter);
-- per-op tables (`prog.rs`): ASCII bitsets for the IN ops and sre's INFO
-  charset, tail first-sets for REPEAT_ONE/MIN_REPEAT_ONE and first-sets per
-  BRANCH alternative (sre does both only for a literal lead);
-- a **required-literal prefilter** (`literal.rs`): strings one of which must
-  lie inside every match, from runs of literals and small literal-only sets
-  (`(?i)s` is `[s ſ]`), joined across a BRANCH's alternatives and never
-  taken from a lookaround (which may look outside `[pos, endpos)`); a text
-  holding none of them has no match. Unused under 2 characters or over 64
-  strings; about 170 pack patterns get one
-  (`cargo run --release --example show_need -- NAME` prints them);
-- **leads** (`literal.rs`): the strings every match starts with; a search
-  tries only where one starts, found with a two-character filter, and a
-  need that is the lead's own strings is not scanned for twice;
-- a search's start set (`first.rs`) keeps the zero-width tests a match
-  makes before its first character — a one-character lookbehind
-  (`(?<![\w$.])` before a name, `(?<![^\n])` at a line's start) and the
-  position tests (`\b`, `^`, `$`) — so the matcher is entered at the first
-  letter of a name, not at every letter;
-- **anchored scans** (`scan.rs`): a literal string — a need, a lead, sre's
-  literal prefix (each place it occurs, overlapping ones too: the places
-  sre's own scan tries) — is looked for by its character that is rarest in
-  source text (a static guess: it changes only how fast, never what is
-  found), sixteen characters at a time, and checked only where that
-  character is; `pystr`'s find (core's `in` and `find`) the same way, a
-  short text character by character;
-- a pattern that starts with `^` under MULTILINE is tried only where a
-  line starts (every other start fails at its first operation), jumping
-  from line to line;
-- a **set pattern** — one character of a set of literals and ranges
-  (`[/'"`]`, a lexer's next interesting character) or the longest run of
-  them (`[ \t\n]*`), with no groups and no IGNORECASE — is answered without
-  the matcher (`Simple` in `mod.rs`: search and match only);
-- mechanics: the dispatch phase is an inner loop, and matcher buffers are
-  pooled per thread.
-
-`Regex::need()` exposes the prefilter's strings: `scan_file` reads them
-for all of a file's per-line patterns in one pass (`Gates`, a bit per
-pattern and line), and a line holding none of a pattern's strings is not
-searched for it (a line whose match text differs from the file's text — NFKC,
-decoded escapes, comments cut out — always is). The calls that run many
-searches over one whole text (the import-time and install-script tests, the
-decoded view, the import-time code) read a **text gate** first
-(`textgate.rs`): the text's pairs of characters, and its triples hashed
-into a table sized to it, so a need, a needle or a find whose string has a
-pair or triple the text lacks answers at once.
+`Regex::need()` gives linre's strings one of which every match holds (or
+those every match starts with): `scan_file` reads them for all of a file's
+per-line patterns in one pass (`Gates`, a bit per pattern and line), and a
+line holding none of a pattern's strings is not searched for it (a line
+whose match text differs from the file's text — NFKC, decoded escapes,
+comments cut out — always is). The calls that run many searches over one
+whole text (the import-time and install-script tests, the decoded view,
+the import-time code) read a **text gate** first (`textgate.rs`): the
+text's pairs of characters, and its triples hashed into a table sized to
+it, so a need, a needle or a find whose string has a pair or triple the
+text lacks answers at once. For a text of 64 K to 8 M characters, the gate
+also lists where each pair of ASCII characters stands, the first time a
+search over the whole text asks for it. A search for a set of strings over
+4,096 characters or more of such a text (a lead, a need, a literal prefix)
+then visits the places of the pairs its strings have at their rarest
+column, in order. It tries each place as a scan tries the places it stops
+at, so its answer is the scan's: on a bundle the scans had read the text
+some 40 to 60 times. The gate also keeps, until it closes, what a call's
+tests make of the whole text more than once (`memo`: the lexers' tokens,
+the download tests' lines that hold a write, the assignments three tests
+read). `pystr`'s `find` and `in` scan for a string by its rarest character
+(`scan.rs`).
 
 Beyond the regex engine, a few patterns core runs on every line or every
 token are matched or prefiltered by hand, each written for one pattern text
@@ -562,13 +666,11 @@ match, as each loop's comment argues), and three necessary conditions
 `scan_file` tests before a search —
 `ENTROPY_VALUE_RE` (a quote, then 20 characters of the literal's class),
 `B64_BLOB_RE` (202 characters) and `_SC_SINK_WORD_RE` (a sink's name, or `[`,
-blanks, a quote and an `e` or `F`). `test_snapshot_lexer`'s recorded outputs
+blanks, a quote and an `e` or `F`). The text follower reads
+`_LD_NAME_TOKEN_RE`'s names by hand too (`flow.rs` `NameTokens`, compared at
+each use). `test_snapshot_lexer`'s recorded outputs
 hold what the loops answer (`test_rust_parity_lexer`, which compared them
 with `re` and failed when one was mutated, retired with the Python engine).
-
-It still loses to sre on patterns that could start almost anywhere
-(`_XF_JS_MEMBER_RE`, `_PY_DOC_HEAD_RE`); core only calls those with
-`.match(text, pos)`, so their whole-text search time doesn't matter.
 
 ## 7. Performance
 
@@ -632,7 +734,8 @@ modules the import-time test 19.3 s → 8.0 s; `received_code_kind` on a 1 MB
 bundle 125 ms → 85 ms. The cross-file follower is the engine's
 (`cross_file`): the npm tree's 41 packages 1.86 s in core → 0.60 s on one
 thread, 0.38 s on two; litellm's modules read as one package 3.1 s → 1.1 s.
-And the Python package's project mode reads its rules through `scan_rules`.
+And the Python package's project mode read its rules through `scan_rules`
+(core's passes followed until 0.1.9's Q-1 moved them into the engine).
 On two cores, before and after, with the same reports:
 
 | Two cores | Before | After |
@@ -666,7 +769,7 @@ the worker threads gain least on a project scan: one thread already keeps
 1.4 cores busy (V8's compiler and garbage collector run beside it), and the
 cross-file flow analysis (about 1 s of the 616-file project, against 3.8 s
 for its per-file scans) runs on the main thread after the per-file scans.
-SQL-DYNAMIC, which `re` and pyre run in quadratic time on a line of many
+SQL-DYNAMIC, which `re` runs (and pyre's sre port ran) in quadratic time on a line of many
 `EXEC("` (13.9 s for one such file), is matched by hand in linear time
 (`linear.rs`), as the twin did (`linear.js`).
 
@@ -698,9 +801,11 @@ benchmark:
 | 0 | Baseline: the detection round committed (rule set 2.15.0), the engine's outputs recorded on the benchmark's files and on installed packages | Done (tag `rust-first-baseline`) |
 | 1 | The Rust engine is the reference: the Python engine, `--engine` and the pure wheel retired; the recorded outputs (§5); the pack as the source of the rules; every wheel a platform wheel, the sdist compiled by pip where none fits; an unanswered file SC-TRUNCATED in both packages | Done |
 | 2 | Decoding, lexers and bytes in the engine: source decoding (BOMs, UTF-16, coding cookies), one token substrate for the detectors | Done (tag `rust-first-phase2`): the lexers (§15: every caller's comments and literals, both packages), the self-read on them, the decoded view on string values (§15). Moved: the data flow, the dead drop, the secret endpoints and received code to phase 3 (they follow names: scopes); bytes to phase 4 (with linre over bytes); source decoding to after phase 3 (the packages' decoders already agree, held by their parity tests, and owning the CJK codecs would put their tables in the WebAssembly module) |
-| 3 | Parsers, scopes and flow: the detectors on bindings over the JavaScript and Python trees (§12, §13), constant folding of strings, the cross-file follower on them, project mode's passes (taint, SQL, function metrics) in the engine; the npm package's twins of them retired | The parsers done; project mode's JavaScript taint ported onto `js_parse`'s trees (§16: `js_flow`), both packages ask the engine for it, and jsflow.py, jsflow.js and the readers they used are retired (11,357 lines); Python's taint ported onto `py_parse`'s trees (§17: `py_flow`), both packages ask the engine for it (the npm package had no port of it), and flow.py's own pass is retired (1,505 lines); the passes and the parser held to their recorded outputs; the supply-chain data flow and received code on JavaScript's trees (§18: local data sent, reported by the strongest send; received data run, loaded or deserialized, from the script's own address) and on Python's (§19), benchmark-gated; a file written then run, and decoded code run, on both trees (§20). Next: the cross-file follower on bindings and project mode's last passes (SQL, function metrics, intra-file taint). The dead drop, the secret endpoints and the self-read stay on the text detectors for now: on the benchmark's JavaScript they fire in few files, and no examined miss comes from their windows |
-| 4 | Linear-time matching: the pack's patterns on linre (§14), pyre and the shlex port retired, current Unicode | Every pattern linre accepts runs on it (616 of the pack's 657; done first, as no answer changes); the 41 others, pyre and the shlex port not started |
+| 3 | Parsers, scopes and flow: the detectors on bindings over the JavaScript and Python trees (§12, §13), constant folding of strings, the cross-file follower on them, project mode's passes (taint, SQL, function metrics) in the engine; the npm package's twins of them retired | The parsers done; project mode's JavaScript taint ported onto `js_parse`'s trees (§16: `js_flow`), both packages ask the engine for it, and jsflow.py, jsflow.js and the readers they used are retired (11,357 lines); Python's taint ported onto `py_parse`'s trees (§17: `py_flow`), both packages ask the engine for it (the npm package had no port of it), and flow.py's own pass is retired (1,505 lines); the passes and the parser held to their recorded outputs; the supply-chain data flow and received code on JavaScript's trees (§18: local data sent, reported by the strongest send; received data run, loaded or deserialized, from the script's own address) and on Python's (§19), benchmark-gated; a file written then run, and decoded code run, on both trees (§20); project mode's last passes (the SQL statements without WHERE, the SQL sinks, the function metrics, the intra-file taint, the markers and the cap: `project.rs`, `taint.rs`) in the engine, both packages ask it for the whole of project mode, and core's passes and the npm package's `taint.js`, `sql.js` and `functions.js` are retired (0.1.9, Q-1). Next: the cross-file follower on bindings. The dead drop, the secret endpoints and the self-read stay on the text detectors for now: on the benchmark's JavaScript they fire in few files, and no examined miss comes from their windows |
+| 4 | Linear-time matching: the pack's patterns on linre (§14), pyre and the shlex port retired, current Unicode | Every pattern runs on linre (P-16, rule set 2.28.0): the pack's 666, its lexers' tables included, and those the engine builds as it scans. Lookaheads of unbounded width run with a memo, and a sweep where the walks would cost more; a quote matched again as branches; a name matched again and counts past what a program holds are checked in code; two patterns read further than before. pyre's port of sre retired (P-16's second part): pyre is re's interface to linre, a pattern linre does not run is an error (a built one fails its call closed), and a taint configuration's patterns are held to what linre runs. The shlex port is written anew from shlex's documentation, and the Final_Sigma rule and the casefix table come from Unicode's definition and data (P-16's third part): the engine holds no CPython code. Next: current Unicode |
 | 5 | One call per file, a content cache (SHA-256), the guard's scan in a child process that fails closed, archive ambiguity checks | Not started |
+
+A parallel track brings Go and Rust up to Python's and JavaScript's level (R-1, G-1, §21, §22): the Rust reader (`rs_crate`) and the Go reader (`go_package`) are built, and the registry, the guard and `--deps` call them (Part C; §23 for what `--deps` reads of a vendored manifest).
 
 ## 9. Known issues
 
@@ -711,9 +816,8 @@ benchmark:
   bound it in the pack (a reviewed difference of the recorded outputs).
 - The budget (4e9 steps per call) discards an exhausted answer: in both
   packages the call's file is SC-TRUNCATED (CRITICAL), on hostile input only
-  (no file of the corpora or the benchmark comes near the budget). pyre
-  charges its steps in batches of 4,096 per search, so short searches cost
-  nothing against it, and linre what its automata read (§14); a call's
+  (no file of the corpora or the benchmark comes near the budget). linre
+  charges a sixteenth of what its automata read (§14); a call's
   `budget` argument sets another (`engine.WORK_BUDGET`
   in Python, `setWorkBudget` in npm; the tests use a small one).
   `cross_file` gives each package its own budget: a package that spends it
@@ -728,12 +832,13 @@ benchmark:
   time budget is checked between lines, so one search is not cut short).
   It is a project-mode rule of `.sql` files. The native engine matches the
   pattern by hand in linear time (`linear.rs`) while the pack holds its
-  exact text and flags; bound the pattern in the pack (or run it on linre,
-  phase 4) and the hand matcher can go.
+  exact text and flags; linre runs it in linear time too since P-16, so
+  the hand matcher can go.
 - The native `scan_file` has no time budget, only its work budget: a file
   it scans is scanned whole, and a file that spends the budget is
-  SC-TRUNCATED. Core's `SCAN_TIME_BUDGET` (30 s per file, ends in
-  SC-TRUNCATED) bounds the passes it runs after the engine in project mode.
+  SC-TRUNCATED, in either mode. Core's `SCAN_TIME_BUDGET` (30 s per file,
+  ends in SC-TRUNCATED) bounds a config or data file's scan, which is
+  still core's (and the npm package's `scanConfigFile`).
 - S-ENTROPY's Shannon entropy is a `sum()` of floats, which Python adds with
   Neumaier's compensation since 3.12: the binding says which way to add
   (`neumaier`), so a value at 4.0's edge is judged as that Python judges it.
@@ -744,8 +849,6 @@ benchmark:
   normalize both sides through JSON first.
 - Python 3.10 has no atomic groups or possessive repeats: those regex probes
   are version-gated. The pack holds no integer beyond i64.
-- The matcher's macros are defined inside its `'main: loop` so that
-  `continue 'main` resolves; keep them there.
 - Patterns built at run time are compiled into a per-thread cache cleared at
   512 entries, like `re`'s; each thread compiles its own.
 - Measuring: single runs vary ±15% on shared machines; compare best of 3, or
@@ -771,11 +874,11 @@ only.
    against the baseline after each phase, nightly too: attribution, and the
    holdout's aggregates.
 2. Phases 2–5 (§8): decoding and the token substrate; the detectors on
-   bindings over the parsers' trees, project mode's passes in the engine
-   and the npm engine's twins of them (`js/src/scanner/`) retired; the
-   pack's 41 patterns linre refuses rewritten (§14) so that pyre and the
-   shlex port retire; one call per file, a content cache, the guard's scan
-   isolated.
+   bindings over the parsers' trees (project mode's passes are in the engine
+   and the npm engine's twins of them retired since 0.1.9's Q-1); current
+   Unicode (the translations of CPython code are retired: every pattern
+   runs on linre since P-16, §14, and §11); one call per file, a content
+   cache, the guard's scan isolated.
 3. The rest of the npm engine's twins: the manifest, workflow and settings
    checks (`supplychain.js`, `ghworkflow.js`, `autorun.js`), the
    config-file credentials; the dashboard keeps its own script until it can
@@ -783,62 +886,65 @@ only.
 4. Archive reading for registry scans in the engine, where it reads as the
    registries' own tools do.
 5. Record the engine in reports (JSON and SARIF), next to the version.
-6. Platform wheels for musllinux and Windows ARM64 (pip compiles the sdist
-   there today).
+6. ~~Platform wheels for musllinux and Windows ARM64~~ (0.1.9: §4).
 
 ## 11. Licensing
 
-The engine is Lazaret's own work under Apache-2.0, except for its
-translations of CPython code: pyre's parser, compiler, constants and
-matcher (`Lib/re/_parser.py`, `_compiler.py`, `_constants.py`,
-`Modules/_sre/sre_lib.h`), parts of `pyre/mod.rs` (`parse_template` and the
-Pattern methods of `sre.c`), `shlex_split` in `hooks.rs` (`Lib/shlex.py`),
-`capital_sigma` in `unicode.rs` (`handle_capital_sigma` in
-`Objects/unicodeobject.c`), and the `_casefix` table in `unicode13.rs`.
-Those are derivative works of CPython and are distributed under CPython's
-license as well: the PSF License Version 2 and the older licenses of its
-stack, among them CNRI's Python 1.6 license, which the SRE files' Secret
-Labs notices name.
+The engine is Lazaret's own work under Apache-2.0, with Unicode data under
+the Unicode License v3. Until P-16 (0.1.9) parts of it were translations of
+CPython code, distributed under CPython's license as well: pyre, a
+translation of sre (`Lib/re/_parser.py`, `_compiler.py`, `_constants.py`,
+`Modules/_sre`), whose files carried the SRE library's notices (they
+allowed its redistribution under CNRI's Python 1.6 license and asked any
+other use to contact Secret Labs AB); `shlex_split` in `hooks.rs`
+(`Lib/shlex.py`); `capital_sigma` in `unicode.rs` (`handle_capital_sigma`
+in `Objects/unicodeobject.c`); and the `_casefix` table in `unicode13.rs`.
+They are retired:
 
-- `rust/NOTICE` lists them, repeats the originals' notices (Secret Labs AB
-  1997-2001 and 1998-2001, the PSF's) and summarizes the changes (section 3
-  of the PSF License asks for that when the work is distributed).
-- `rust/LICENSE-PYTHON` is CPython 3.14.0's LICENSE, unchanged (a test pins
-  its SHA-256; take a newer one whole, never edited).
-- Each translated file starts with `// SPDX-License-Identifier: Apache-2.0
-  AND Python-2.0.1` and its original's notices.
-- `generated/unicode13.rs` is Unicode Character Database 13.0 data, under
-  the Unicode License v3 (`rust/LICENSE-UNICODE`, the same text as the
-  Python and npm packages' `LICENSE-UNICODE`); its header carries the
-  notice, and `rust/NOTICE` says so (0.1.8). So is `pyparse/unidata.rs`,
-  the Python parser's Unicode 15.1 data (§13), written from Python 3.13's
-  unicodedata: its header carries the notice and `rust/NOTICE` names it.
+- every pattern runs on linre (§14), written from `re`'s documented and
+  observed behaviour, and `pyre.rs` is `re`'s interface to it (P-16's
+  first two parts);
+- `shlex_split` is written from shlex's documentation (its parsing rules in
+  POSIX mode, and `punctuation_chars`), and `test_shell_words.py` holds it
+  to Python's shlex on the hooks corpus and on random commands;
+- the Final_Sigma rule follows the Unicode Standard's definition (section
+  3.13), as `str.lower()` reads it: a character both cased and
+  case-ignorable is passed over (a Rust test holds it to Python's answers);
+- `re`'s extra case equivalences are derived from Unicode's case mappings,
+  the lowercase letters that share an uppercase, by
+  `scripts/make_rust_tables.py`, whose `--check` holds them to `re`'s own
+  table.
+
+So:
+
+- `rust/NOTICE` says the engine is Lazaret's own and what was CPython's,
+  and carries the Unicode notice: `generated/unicode13.rs` is Unicode
+  Character Database 13.0 data, and `pyparse/unidata.rs` the Python
+  parser's Unicode 15.1 data (§13), each with the notice in its header.
   The Python parser is written from Python's grammar and `ast`'s answers,
-  not translated from CPython's parser: it is Lazaret's own work.
-- `rust/Cargo.toml` declares `Apache-2.0 AND Python-2.0.1 AND Unicode-3.0`.
-  Every wheel carries the compiled engine and the sdist its source, so each
-  carries `LICENSE-PYTHON` and `NOTICE` as license files (the wheels'
+  not translated from CPython's parser. `rust/LICENSE-UNICODE` is the same
+  text as the Python and npm packages' `LICENSE-UNICODE`.
+- `rust/Cargo.toml` declares `Apache-2.0 AND Unicode-3.0`.
+- The packages that carry the engine are `Apache-2.0 AND Unicode-3.0`
+  too: every wheel carries the compiled engine and the sdist its source,
+  each with `NOTICE` as a license file (the wheels'
   `.dist-info/licenses/`, the sdist's root) beside `LICENSE` and
-  `LICENSE-UNICODE`, and declares the same expression.
+  `LICENSE-UNICODE`; the npm package carries `native/lazaret.wasm` with
+  `rust/NOTICE` as `native/NOTICE` (both written by `npm run build`),
+  `LICENSE-UNICODE` and its own `NOTICE` (the Unicode tables of its
+  JavaScript). The codec names the npm package and the dashboard list to
+  read a coding cookie as Python does are what Python's codecs answer to:
+  facts about Python, not CPython's code, so no package carries CPython's
+  license (until 0.1.9 they carried it, with `Python-2.0.1`).
   `check_native_library.py --dist` checks the sdist and the wheels before a
-  release.
-- The npm package (0.1.8) carries the compiled engine as
-  `native/lazaret.wasm`, with `rust/NOTICE` as `native/NOTICE` (both written
-  by `npm run build`), `LICENSE-PYTHON` and `LICENSE-UNICODE`; its own
-  `NOTICE` points to them (and names the CPython codec names and Unicode
-  tables of its JavaScript), and it declares `Apache-2.0 AND Python-2.0.1 AND
-  Unicode-3.0`. Its shlex is the engine's since the JavaScript translation
-  (`hooks.js`) was retired. `release.yml` fails a tarball without
-  `native/lazaret.wasm` or `native/NOTICE`.
+  release, and `release.yml` fails a tarball without `native/lazaret.wasm`
+  or `native/NOTICE`.
 
-`tests/architecture/test_rust_notices.py` keeps all of this in place, and
-fails on a Rust file that says it is ported or translated from CPython
-without a notice: a new translation gets a header and a line in
-`rust/NOTICE`. The Secret Labs notices say the SRE library "can be
-redistributed under CNRI's Python 1.6 license. For any other use, please
-contact Secret Labs AB"; Lazaret distributes the translation under
-CPython's own terms with every notice kept, the usual reading, and a
-commercial use may want a lawyer's view of that sentence.
+`tests/architecture/test_rust_notices.py` keeps this in place: it fails on
+an engine file that carries CPython's license or says it is ported or
+translated from CPython. A part of CPython that the engine needs is written
+from the documentation and held to Python's answers by a test, never
+translated.
 
 ## 12. The JavaScript parser
 
@@ -907,6 +1013,26 @@ takes 231 KiB natively (release; the crate's test reads every construct at
 its deepest on a 1 MiB thread) and between 64 and 128 KiB in WebAssembly,
 whose stack is 8 MiB (§3). Every input gives a tree or an error, never a
 panic.
+
+The bound was measured against the stacks the engine parses on (Oct 9,
+JS-PARSE-STRICT; a build with the bound at 4,096, each construct of
+`NESTINGS` given to every call that reads the tree: `js_parse`, `js_loads`,
+`import_time_risk`, `scan_file`, `install_script_risk`, `js_flow`).
+Natively, on the engine's own 8 MiB thread (§16), every construct reads to
+that bound. In WebAssembly on Node's main thread, whose frames go on V8's
+own stack (about 984 KB), a call stops with "Maximum call stack size
+exceeded" (the npm package says the engine stopped) from 992 nested tagged
+templates, the costliest construct; every construct reads to a depth of
+976 (in the bound's units: a level of parentheses or arrays counts two, of
+objects three), 3.8 times 256. So the bound stays: a deeper one wants the
+npm package's engine on a thread with a larger stack (a Worker's
+`resourceLimits.stackSizeMb`). V8 compiles deeper nesting (1,000 nested
+arrays, objects or blocks, 2,000 parentheses), so a file nested past the
+bound is the one kind of source V8 compiles that the parser refuses since
+JS-PARSE-STRICT (an assignment or an update to a call, `f() = 1`,
+`f()++`, `for (f() in x)`, and `let` as a name before `in` and
+`instanceof` were the others); a registry scan lists the package files
+the parser refuses (SC-UNPARSED-CODE).
 
 **jsparse.py's bugs, reproduced:**
 
@@ -1221,30 +1347,39 @@ its Unicode data add 0.58 MB to the WebAssembly module (2.45 MB → 3.03 MB).
 whatever the text holds. It is written from `re`'s documented and observed
 behaviour, not translated from CPython (whose sources were read for the
 rules, as for any reimplementation), so it needs no line in `rust/NOTICE`.
-**The engine runs every pattern linre accepts on it** (since the Rust-first
-refactor's phase 2): a `pyre::Regex` compiles its pattern with linre too,
-and when linre accepts it, search, match, fullmatch, finditer, sub and
-split run there and come back as pyre's matches; the 41 pack patterns it
-refuses (below), and patterns pyre answers without a matcher (one
-character of a set, or a run of them), stay on pyre. A linre search
-charges the call's work budget a sixteenth of the characters its automata
-read (the DFAs, the Pike VM, the backtracker for groups), as pyre charges a
-scan: a search the text gate answers, or a scan for the strings the
-pattern needs, costs nothing (pyre's cost nothing either), a match that
+**The engine runs every one of its patterns on it** (P-16; patterns linre
+accepted ran there since the Rust-first refactor's phase 2): pyre (§6) is
+`re`'s interface to it, and a pattern linre does not run is an error there,
+as one Python rejects is. None of the pack's is (`test_linre`). One the
+engine builds as it scans (`rxutil::dynamic`: names escaped into a
+template) fails its call closed: the call's budget is spent, so both
+packages make the file SC-TRUNCATED, and it is noted (`linre.refused`; a
+run of the recorded outputs, §5, fails on one, and none is; it would take
+names of tens of thousands of characters). A taint configuration's own
+patterns (`rxutil::dynamic_user`) are held to what linre runs when the
+configuration is read (`taintspec`: a pattern linre refuses is a rejected
+rule, with the reason), and one that is not never matches. Before P-16 the
+patterns linre refused ran on pyre's port of sre's backtracking matcher.
+A linre search charges the call's work budget a sixteenth of the
+characters its automata read (the DFAs, the Pike VM, the backtracker for
+groups), as pyre's port charged its scans: a search the text gate answers,
+or a scan for the strings the pattern needs, costs nothing, a match that
 fails what the DFA read before it died. So the budget still bounds a call,
-and no file needs more of it on linre than on pyre (a 9 MB `typescript.js`
-needs less than 1e8 of the 4e9 steps on both; charging every search the
-whole span it covered, as the first wiring did, spent the budget on the
-largest files — `typescript.js`, `pnpm.cjs`, the benchmark's 11 MB
-obfuscated bundles — in seconds of work). `pyre.probe` runs a pattern as
-the engine runs it (`"backtracking": true`: on sre's matcher alone). Two
-calls expose linre itself: `linre.probe` (pyre.probe's arguments and
-answer — search, match,
-fullmatch, finditer with every group, sub with `<…>` and split, at `pos`
-and `endpos`, with `gate` — or `{"error", "refused"}`) and `linre.check`
-(`{"names": […]}`, or nothing for the whole pack: each pattern accepted, with
-its program's size, its lookarounds and the strings it scans for, or
-refused and why).
+and no file needs more of it on linre than it did on sre's port (a 9 MB
+`typescript.js` needs less than 1e8 of the 4e9 steps on both; charging
+every search the whole span it covered, as the first wiring did, spent the
+budget on the largest files — `typescript.js`, `pnpm.cjs`, the benchmark's
+11 MB obfuscated bundles — in seconds of work). A memoized lookahead's walks
+(below) are charged the same way, a step a character. `pyre.probe` runs a
+pattern through pyre, as the engine's code does (`sub` with a template
+too). Three calls expose linre itself: `linre.probe` (pyre.probe's
+arguments and answer — search, match, fullmatch, finditer with every
+group, sub with `<…>` and split, at `pos` and `endpos`, with `gate` — or
+`{"error", "refused"}`), `linre.check` (`{"names": […]}`, or nothing for
+the whole pack: each pattern accepted, with its program's size, its
+lookarounds and the strings it scans for, or refused and why) and
+`linre.refused` (the patterns the engine built since the last call that
+linre refused, at most 64).
 
 **What it runs.** Literals and every escape of str patterns; classes with
 ranges, negation and `\w \d \s \W \D \S`; `.` with and without DOTALL;
@@ -1252,18 +1387,19 @@ alternation; greedy and lazy `* + ? {m} {m,} {,n} {m,n}`; capturing, named
 and non-capturing groups; `^ $ \A \Z \b \B`, with MULTILINE; the flags
 `i m s x a u` as arguments, inline at the start and scoped (`(?i:…)`,
 `(?-i:…)`); comments; lookbehinds (fixed width, as Python requires) and
-lookaheads of bounded width, positive and negative, nested. 616 of the
-pack's 657 patterns.
+lookaheads of any width, positive and negative, nested; and a
+backreference to a group that is one character of a few, none of them
+cased (`(["'])…\1`: a quote matched again). All of the pack's 666 patterns,
+its lexers' tables included.
 
 **What it refuses**, when the pattern is compiled, saying why (`Error {
 refused: true }`; a pattern Python rejects is an error, with Python's
-message): backreferences and conditionals (they need what a group matched);
-a lookahead of unbounded width (`(?!\s*\()`: trying it may read the rest of
-the text from every position); a repeat other than `?` whose body can match
-the empty string (`(a*)*`: sre ends such loops by rules of its own); a
-capturing group inside a positive lookaround; atomic groups and possessive
-repeats; `\N{…}`; the TEMPLATE flag; a lookaround wider than 1,000
-characters or nested more than 8 deep; and a program of more than 30,000
+message): other backreferences, and conditionals (they need what a group
+matched); a repeat other than `?` whose body can match the empty string
+(`(a*)*`: sre ends such loops by rules of its own); a capturing group
+inside a positive lookaround; atomic groups and possessive repeats;
+`\N{…}`; the TEMPLATE flag; a lookbehind wider than 1,000 characters;
+lookarounds nested more than 8 deep; and a program of more than 30,000
 instructions once counted repeats are expanded.
 
 **Answers.** `re`'s: leftmost-first, with greedy and lazy priorities; the
@@ -1273,21 +1409,29 @@ through, lastindex the last group closed); finditer's rule after an empty
 match; a lookbehind reads before `pos`, nothing reads past `endpos`, and a
 match that starts past `endpos` (`match(s, 5, 2)`) answers as sre's does
 (an empty pattern and MULTILINE's `$` match there, a one-character repeat
-fails); `\b` and `\B` hold nowhere in an empty window at 0 (3.10–3.13, as
-pyre); IGNORECASE and ASCII as sre compiles them, with unicode.rs's Unicode
+fails); `\b` and `\B` hold nowhere in an empty window at 0 (as 3.10–3.13
+do); IGNORECASE and ASCII as sre compiles them, with unicode.rs's Unicode
 13.0 tables (sre's lower and upper and its case fixes; a class is tested on
 the lowercased character, or as written when it holds no cased character;
 a range past the Basic Multilingual Plane on the lowercase and on its
 uppercase). Where Python versions differ — an astral letter written in a
 class under IGNORECASE, which 3.10–3.12 match in neither case, and an
-astral range under ASCII and IGNORECASE — linre answers as 3.13 and later,
-and pyre, do. A text is code points: a lone surrogate is a character like
-any other.
+astral range under ASCII and IGNORECASE — linre answers as 3.13 and later
+do (as pyre's sre port did). A text is code points: a lone surrogate is a
+character like any other.
 
 **How it runs.** The parser keeps what `re`'s parser keeps where it changes
 an answer (a one-character class is a literal, the item alternatives begin
 with is taken out in front, alternatives of single characters become one
-class); lowering resolves the flags item by item into character sets
+class). A backreference linre runs is rewritten next (`hir.rs`,
+`expand_backrefs`): the group heads an item of a sequence, through groups
+only, so it matches whenever that item does, and every backreference comes
+in a later item; the items from the group's to the last backreference's
+become one alternative per character (at most 8), the group's body and
+each backreference that character, the group's capture kept. At a given
+position the alternatives begin with different characters, so at most one
+goes on: sre's path, with its spans and groups. Lowering resolves the
+flags item by item into character sets
 (sorted ranges over all u32 values: the matchers test membership, they
 never fold) and zero-width tests. From that, Thompson programs ordered by
 priority: forward (with capture slots), fullmatch, reverse, one per
@@ -1297,9 +1441,13 @@ which a counted repeat of one set is a single `Run`. A search, in order:
 1. Prefilters, each skipping only work that cannot match: strings one of
    which every match holds (a text gate answers at once for a text that
    lacks one of each string's character pairs), strings every match starts
-   with (found by their rarest character, sixteen at a time), a set of first
-   characters, and patterns that are one set or a greedy repeat of one,
-   answered by scans alone.
+   with (found by their rarest character, sixteen at a time, and kept even
+   where those characters are common: each place is checked for a whole
+   string before a try, and over a long text the places are the pairs'), a
+   set of first characters when they are rare (at most one character in
+   twenty-five of source text: past that, a try at each place costs more
+   than the DFA's own pass), and patterns that are one set or a greedy
+   repeat of one, answered by scans alone.
 2. Where a lead string or first character is found, an anchored try: the
    backtracker's for the first tries and, while most tries match, for a
    pattern with groups or large counted repeats; the anchored DFA's
@@ -1312,8 +1460,25 @@ which a counted repeat of one set is a single `Run`. A search, in order:
    lookarounds and anchors are decided inside transitions; a longer
    lookaround is tried on the text — a set of states stepped over at most
    its width, nested ones one level deeper — and a state that has one keys
-   its transitions by the outcomes. Each DFA keeps at most 2 MB of states;
-   a search that would empty them too often gives up to the Pike VM.
+   its transitions by the outcomes. A lookahead that may read more than
+   1,000 characters (`(?!\s*\()`, `` (?![^"'`]*(?:html|xml|svg)) ``) would
+   read up to the rest of the text wherever it is tried, so its walks are
+   memoized (`looks.rs`, `run_memo`): a walk's outcome depends only on the
+   set of threads it holds and its position, so after its first 8 steps a
+   walk notes each set it holds (named by its character instructions) with
+   the runs of positions it held it at, and stops where an earlier walk's
+   outcome is known. From inside a run of blanks a walk meets the first
+   walk's set after a step or two. A lookahead whose walks meet many sets
+   (`(?![ab]*a[ab]{12}c)` on a text of a's and b's: what the last dozen
+   characters were) would still walk far from every position, so once its
+   walks have taken 4 steps per character of the stretch it is tried on
+   (and 4,096 more), it is decided at every position of that stretch at
+   once (`sweep`: from the window's end back, the instructions from which a
+   path reaches Match at each position) and answered from that. The memos
+   last one search, or one finditer (one text, one window end); the DFAs,
+   the backtracker and the Pike VM share them. Each DFA keeps at most 2 MB
+   of states; a search that would empty them too often gives up to the
+   Pike VM.
 4. The groups: the backtracker, in sre's order, on the match's span only,
    visiting each (instruction, position) once; a span too long for its
    visited bits (2 MB) goes to the Pike VM.
@@ -1323,13 +1488,17 @@ which a counted repeat of one set is a single `Run`. A search, in order:
 **Complexity.** For a text of n characters and a program of m instructions
 (counted repeats expanded): the DFAs read each character a bounded number
 of times, one table entry each once the transition is known (a new one
-costs O(m)); a lookaround of width w costs O(w·m) where it is tried; the
-anchored tries cost at most 8n + 4m + 256 steps in all; the backtracker
+costs O(m)); a lookaround of width w ≤ 1,000 costs O(w·m) where it is
+tried; a memoized lookahead's walks take some 5n + 4,096 steps at most
+(at O(m) each) before it is swept, at O(n·m), and each test after that
+reads a bit (a test before the swept stretch walks again, and sweeps
+again only after as many steps more); the anchored tries cost at most
+8n + 4m + 256 steps in all; the backtracker
 visits each (instruction, position) once; the Pike VM is O(n·m). So
 O(n·m) at worst: linear in the text for every accepted pattern, whatever
 the text. No recursion on the text, and no panic on any text of any u32
-values. Compiling costs more than pyre's: the 300 patterns of a scan take
-113 ms against pyre's 35 ms.
+values. Compiling: the 300 patterns of a scan take 113 ms (pyre's sre port
+took 35 ms; until P-16 each pattern was compiled by both).
 
 **Tests.** `cargo test --release` (`linre/tests.rs`, `linre/charset.rs`):
 the syntax the pack uses compiles, Python's errors are errors, each refusal
@@ -1340,7 +1509,23 @@ the backtracker alone (sre's search: a try from each start in turn) — on
 which compile), on random texts of letters, the edge characters and lone
 surrogates, in windows too; 20,000 seeded garbage patterns and texts of
 arbitrary u32 values without a panic; and adversarial texts of 20,000
-repetitions read at once. Against Python's `re`, from `python/` (each
+repetitions read at once. Since P-16, against the answers recorded from
+sre's matcher (pyre's port, before P-16's second part retired it) on the
+same seeded inputs, a digest per test, and the matchers against each other:
+lookaheads of unbounded width — 25 of the pack's shapes and others
+on 400 texts each, in windows too, and 3,000 seeded random patterns with
+one (over 1,500 of which compile) — each walked and swept; three that meet
+thousands of sets, on texts of 3,000 characters; and one-character
+backreferences (15 patterns on 500 texts each; 6 others still refused).
+The memoized lookaheads in linear time, four times the text in less than
+eight times the time: six that would read the rest of the text from every
+position (that test takes 0.2 s; 16.7 s walked without a memo) and the
+three of many sets (1.1 s with the agreement part; past 100 s without the
+sweep). And the patterns rewritten for P-16
+(`rxutil_tests.rs`) against the pack's originals (rule set 2.27.0) on
+sre's matcher: the same matches, spans and groups, on texts made to sit
+on each side of every limit; the two that read further answer as before
+within their old limits. Against Python's `re`, from `python/` (each
 module in under 10 s; skipped without the library):
 
 ```bash
@@ -1356,9 +1541,9 @@ PYTHONPATH=src:. python3 -m unittest tests.architecture.test_linre_linear  # ~3 
   (`_rust_regex_corpus`), the hand-written texts and the edge characters one
   by one (ſ, K, İ, ı, U+0085, U+00A0, U+001C–U+001F, U+2028, astral letters
   and symbols, lone surrogates), at 0, in windows (inside the text, and past
-  each other) and with a text gate: 140,000 texts. And `linre.check`: what
-  is refused is refused for a known reason, and at least 90% of the pack is
-  accepted.
+  each other) and with a text gate: 140,000 texts. And `linre.check`: every
+  pattern of the pack is accepted (the recorded-output modules, §5, fail a
+  run that built a pattern linre does not run: `linre.refused`).
 - `test_linre_b` and `_c` (half of the patterns each): texts sampled from
   each pattern's parse tree (`_linre_inputs.sample`: a branch, a repeat's
   count at or next to its bounds, a class's member — a range's ends, a
@@ -1366,14 +1551,19 @@ PYTHONPATH=src:. python3 -m unittest tests.architecture.test_linre_linear  # ~3 
   IGNORECASE, what a lookbehind wants before and a lookahead after), some
   of them mutated: about two thirds of them match, and many others nearly
   do. 80,000 texts.
-- `test_linre_d`: pyre's hand-written patterns (each construct `re`
-  supports for str patterns: linre runs 120 of the 141 and refuses the rest
-  for a known reason), about 100 of linre's own (lookarounds of several
-  characters, nested and at a window's ends; anchors; flags; IGNORECASE
-  past ASCII; astral characters; counted and lazy repeats at their bounds;
-  empty matches; lastindex; the literal scans' corners), and linre against
-  pyre on 300 random classes of astral and other letters under IGNORECASE
-  and ASCII: 110,000 texts.
+- `test_linre_d`: the parity test's hand-written patterns (each construct
+  `re` supports for str patterns: linre runs 124 of the 141 and refuses the
+  rest for a known reason), about 100 of linre's own (lookarounds of
+  several characters, nested and at a window's ends; anchors; flags;
+  IGNORECASE past ASCII; astral characters; counted and lazy repeats at
+  their bounds; empty matches; lastindex; the literal scans' corners), and,
+  on Python 3.13 and later, 300 random classes of astral and other letters
+  under IGNORECASE and ASCII: 110,000 texts.
+- `test_linre_e`: what P-16 added, on the shapes `linre/tests.rs` holds to
+  sre's recorded answers: the 25 lookaheads of unbounded width and 600
+  random patterns with one, the three of many sets on texts of 1,500
+  characters, the 14 one-character backreferences, and the backreferences
+  still refused.
 - `test_linre_linear`: linear time, below.
 
 Every text goes through search, match, fullmatch, finditer, sub and split
@@ -1382,22 +1572,24 @@ in both, at 0 and in windows: no difference, on Python 3.10, 3.11, 3.12 and
 short: `re` itself takes exponential time on a near miss of some of them.)
 
 **Linear time.** Pack patterns on texts that make a backtracking matcher
-backtrack, through `pyre.probe` and `linre.probe` (all six operations), best
-of three:
+backtrack, through a backtracking matcher (pyre's port of sre when this was
+measured, in phase 2; Python's `re` in the test since P-16) and
+`linre.probe` (all six operations), best of three:
 
-| Pattern, text | pyre | linre |
+| Pattern, text | sre (pyre's port) | linre |
 |---|---|---|
 | `_SVC_LAUNCHCTL_RE`, "launchctl" + " --a" × k + " x" (`-{1,2}[\w-]+` reads "--a" two ways: 2^k paths) | k = 10: 2.1 ms; 12: 7.7 ms; 14: 30 ms; 16: 120 ms | k = 1,000: 0.5 ms; 100,000: 12 ms |
 | `_DD_PARAM_RE`, n blanks (two `\s*` in a row, from every start: n³) | n = 100: 5.9 ms; 200: 35 ms; 400: 226 ms | n = 100,000: 2.5 ms; 200,000: 4.9 ms |
 | `_JSON_COLON_RE` (`[ \t\n\r]*:`), n blanks (n²) | n = 1,000: 8.3 ms; 2,000: 33 ms; 4,000: 135 ms | n = 100,000: 2.5 ms; 200,000: 4.9 ms |
 
 `_LD_CALLED_RE` (`\s*\(`) and `_DL_JOIN_CHAIN_RE` grow as `_JSON_COLON_RE`
-does. The test asserts the growth (pyre: more than eightfold for two more
+does. The test asserts the growth (`re`: more than eightfold for two more
 pieces, more than tenfold for four times the text; linre: less than
 eightfold for four times the text) and that linre reads a million
 characters of each in under 2 s.
 
-**Measurements.** Every regex call of a scan of the 1,500-file sample (22
+**Measurements** (phase 2, pyre's sre port against linre). Every regex
+call of a scan of the 1,500-file sample (22
 MB): the scanner's calls recorded with their texts, `pos`, `endpos` and
 text gate, then replayed through both engines in one process, one thread,
 release build, three runs. 300 patterns, 1,465,383 calls, the same answers
@@ -1427,50 +1619,63 @@ three times — forward, reverse, groups — where sre reads it once
 (`_DEP_ASSIGN_RE`'s `([^;]*)`). The module adds 178 KB to the WebAssembly
 build (2.45 MB → 2.63 MB).
 
-**The pack's 41 refusals, with a rewrite** (`linre.check` lists them):
+Since P-16 the 17 run on linre too. The five main per-file calls on the
+same sample (§7) take 8.11 s against 8.17 s before it (best of three, one
+thread, both measured on the same machine on the same day: no difference
+past the noise). In instructions on a warm engine,
+P-1's way: litellm's `proxy_server.py` 1,134 → 1,123 M (-1%),
+playwright-core's `coreBundle.js` 5,140 → 4,852 M (-6%) and
+`utilsBundle.js` 7,182 → 6,881 M (-4%).
 
+**The 43 patterns linre refused before P-16**, and four pieces of
+patterns the engine builds as it scans, which the strict compile found
+(`linre.check` lists no refusal now):
+
+- *A lookahead of unbounded width* (27): `RULES[7]`, `RULES[9]`,
+  `RULES[50]` (SQL-DYNAMIC), `TAINT_SINKS['js'][3][1]` and `[9][1]`,
+  `TAINT_SOURCES['js']`, `_DL_CALLBACK_RE`, `_DL_COMMA_CALL_RE`,
+  `_DL_DESERIAL[0]` and `[1]`, `_DL_DESERIAL_CANDIDATE_RE`,
+  `_DL_DESERIAL_RE`, `_INDIRECT_SINK_RE`, `_JWT_CANDIDATE_RE`, `_KWARG_RE`,
+  `_LD_ALIAS_JS_RE`, `_LD_CLIENT_RE`, `_LD_ENV_ALL_RE`, `_LD_ENV_QUIET_RE`,
+  `_LD_FIRST_MEMBER_RE`, `_LD_MEMBER_READ_RE`, `_NON_HTML_CHAIN_RE`,
+  `_NON_HTML_TYPE_RE`, `_SELF_READ_RE`, `_XF_JS_EXPORT_LIST_RE`,
+  `_XF_JS_MODEXP_FN_RE`, `_XF_JS_REQ_NS_RE` (blanks before a test,
+  `(?!\s*\()`; the rest of an argument list or a string,
+  `(?![^()]*\)\s*\{)`, `` (?![^"'`]*(?:html|xml|svg)) ``): run as written,
+  their walks memoized.
 - *A quote matched again* (10): `_DEPS_LOCAL_DEP_RE`, `_DNS_CMD_SUM_RE`,
   `_DV_ESCAPED_LITERAL_RE`, `_KEYED_READ_RE`, `_KEYED_WRITE_RE`,
   `_LD_HOST_BUILT_RE`, `_LD_PLAIN_LITERAL_RE`, `_ROUTE_RULE_RE`,
-  `_XF_EMIT_RE`, `_XF_LISTEN_RE`. The text between the quotes cannot hold
-  a quote (or stops at the first one), so one branch per quote character
-  gives the same spans and the same text in the groups (the quote's own
-  group goes, the others are numbered anew): `(["'])([^"'\\\n]*)\2` is
-  `'([^"'\\\n]*)'|"([^"'\\\n]*)"`, `\(\s*[rRuU]?(["'])(.*?)\1` is
-  `\(\s*[rRuU]?(?:"([^"\n]*)"|'([^'\n]*)')` (checked with `re` on random
-  texts).
-- *The same name twice* (3): `_DV_CC_FOR_RE` (`\1`, the loop's variable),
+  `_XF_EMIT_RE`, `_XF_LISTEN_RE` (`(["'])([^"'\\\n]*)\2`): run as written,
+  the backreference as one branch per quote.
+- *The same name matched again* (3), and two pieces of the string arrays'
+  accessors: `_DV_CC_FOR_RE` (`\1`, the loop's variable),
   `_DV_CC_LITERAL_RE` (`\5`, the comprehension's), `_SA_CHECKSUM_RE`
-  (`(?P=v)`). Not a regular language: capture the second name too, compare
-  the two in code, and on a difference search again from the next start.
-- *Blanks before a lookahead's test* (13): `TAINT_SINKS['js'][9][1]`,
-  `TAINT_SOURCES['js']`, `_DL_CALLBACK_RE`, `_DL_COMMA_CALL_RE`,
-  `_INDIRECT_SINK_RE`, `_KWARG_RE`, `_LD_ALIAS_JS_RE`, `_LD_CLIENT_RE`,
-  `_LD_ENV_ALL_RE`, `_LD_FIRST_MEMBER_RE`, `_LD_MEMBER_READ_RE`,
-  `_XF_JS_EXPORT_LIST_RE`, `_XF_JS_REQ_NS_RE` (`(?!\s*\()`, `(?![ \t]*\.)`,
-  `(?=\s*\()` …): bound the blanks, `(?!\s{0,64}\()`, which answers
-  differently only after 64 of them.
-- *A lookahead over the rest of an argument list or a string* (10):
-  `RULES[7]` (`(?![^()]*\)\s*\{)`), `RULES[9]` and
-  `TAINT_SINKS['js'][3][1]` (an argument list), `_DL_DESERIAL[0]`, `[1]`,
-  `_DL_DESERIAL_CANDIDATE_RE` and `_DL_DESERIAL_RE` (whose `{0,400}?` is
-  bounded but whose `\([^()]*\)` is not), `_NON_HTML_CHAIN_RE` and
-  `_NON_HTML_TYPE_RE` (`(?![^"'`]*(?:html|xml|svg))`),
-  `_XF_JS_MODEXP_FN_RE` (`\([^()]*\)`): bound them (`[^()]{0,400}`, as
-  `_DL_DESERIAL_RE` already bounds its outer loop).
-- `RULES[50]` (1) is SQL-DYNAMIC, which the engine already matches by hand
-  in linear time (`linear.rs`).
-- *An exact rewrite* (2): `_LD_ENV_QUIET_RE`'s
-  `npm_(?:package|lifecycle|config)_(?![\w]*(?:auth|token|passw|secret))\w*`
-  is `npm_(?:package|lifecycle|config)_(?:(?!auth|token|passw|secret)\w)*`
-  (the test at each character of the name, of bounded width; checked with
-  `re` on random texts); `_JWT_CANDIDATE_RE`'s empty match before a token
-  can take the token in, where only its start is used
-  (`(?<![A-Za-z0-9_\-])[A-Za-z0-9_\-]{13,}\.eyJ[A-Za-z0-9_\-]{10}`).
-- *Too large* (2): `RULES[47]` (`(?:[^{}]|\{[^{}]{0,2000}\}){0,2000}`:
-  millions of instructions expanded) and `_DV_ARRAY_RE` (up to 64 strings
-  of up to 400 characters): unbounded repeats in place of the large counts
-  (`(?:[^{}]|\{[^{}]*\})*`) answer differently only past those counts.
+  (`(?P=v)`), `_SA_ACC_A_HEAD` and `_SA_ACC_B_TAIL` (`(?P=p)`, `(?P=g)`:
+  the accessor's parameter, form B's function). Not a regular language:
+  each name again is a group of its own (`i_again`, `v_again`, `p2`, `p3`,
+  `g2`) that the code compares with the first (`rxutil::finditer_same`,
+  `same_groups`). A match whose names differ is no match, and the search
+  goes on from the next start, as sre's does where its pattern fails; the
+  names are whole identifiers, which the rest of the pattern fixes at a
+  start, so the answers are the originals'.
+- *Counts larger than a program holds* (3), and two pieces of the decoded
+  view's: `RULES[47]` (SC-EVAL-DECODER's decoder body,
+  `(?:[^{}]|\{[^{}]{0,2000}\}){0,2000}`: millions of instructions
+  expanded), `_DV_ARRAY_RE` (up to 64 strings of up to 400 characters),
+  `_PERSIST_WRITE_RE` (`open(`'s arguments before the mode: up to 300
+  items, one in brackets up to 200 characters), `_DV_CC_LITERAL_RE`'s lists
+  of up to 400 numbers, `_DV_CC_ARRAY_TAIL` (4,096 numbers) and
+  `_DV_CC_CALL_TAIL` (20,000 arguments, strings of up to 400 characters):
+  unbounded repeats in place of the counts. Where the count is a limit the
+  detector keeps, the code checks the match against it
+  (`rxutil::finditer_checked`, `search_checked`, `sub_checked`, with the
+  pack's `_DV_ARRAY_MAX_ITEMS`, `_DV_ARRAY_MAX_CHARS`,
+  `_DV_CC_LITERAL_MAX_INTS`, `_DV_CC_ARRAY_MAX_INTS`, `_DV_CC_CALL_MAX_ITEMS`
+  and `_DV_CC_CALL_MAX_CHARS`), and a match past it is no match, the
+  search going on from the next start. SC-EVAL-DECODER's body and the
+  shell-profile write's arguments keep no limit: they read further than
+  before (rule set 2.28.0), and within the old limits answer as before.
 
 ## 15. The lexers
 
@@ -1526,6 +1731,23 @@ a call there was not a call.
   `.mts`, `.cts`) is read with JSX and without; Python as 3.12 and later
   read it and as 3.11 did (an f-string a string to its first closing
   quote, and a `t` before a quote a name, as 3.13 reads it).
+- **Go** (`go.rs`) and **Rust** (`rs.rs`), since 0.1.9 (S-4: a project's
+  `.go` and `.rs` files): Go's `//` and `/* */` comments (no nesting),
+  interpreted strings and runes, raw strings in backticks, numbers (hex
+  floats, `_`, imaginary) and Unicode names; Rust's nested block comments
+  and doc comments, strings over several lines, raw strings (`r#"…"#`),
+  byte and C strings, characters told apart from lifetimes and loop labels
+  (`'a` is a name, `'x'` a character), raw identifiers, numbers (`1..2`,
+  `1.max(2)`, `1.5e-3f64`) and a first-line shebang (`#![…]` is code). An
+  interpreted string or a rune not closed on its line ends there; an
+  unclosed comment or raw string runs to the end of the text. One reading
+  each (`Structure::of`): neither language has a second one that could
+  run what the first calls prose. `scan_file` gives them their own `Lang`
+  (`filectx.rs`): the rules that list `go` or `rs` (S-SECRET, S-TOKEN,
+  S-BIDI, Q-TODO) and the families every text gets. The lexers' fuzzer
+  (`examples/fuzz_lex/`, its short gate `lex/tests_fuzz.rs`) builds
+  programs from known tokens and mutates them; its first run found a
+  quadratic read of `'\'` repeated, fixed.
 - **SQL and other text** keep the pack's lexer (`lexer.rs`, §6): SQL read
   as standard SQL and as MySQL reads it, any other text with `#` and `//`
   line comments, `/* … */` and quoted strings.
@@ -1712,14 +1934,14 @@ statements as jsflow.py's did; the parser's nesting bound keeps the
 deepest input of each construct under 512 KiB of stack natively (release;
 `jsflow/tests.rs` reads each on a 2 MiB thread). A host's thread may have
 less — a worker thread's default is 512 KiB on macOS and 128 KiB on musl —
-so natively `js_flow`, `js_parse` and `py_parse` run on a thread of the
-engine's own with an 8 MiB stack (`api::OWN_STACK`; 64 MiB in a debug
-build), one per calling thread, made at its first such call and kept for
-the next (the engine's caches, compiled patterns among them, are per
-thread), ending with the calling thread; a call from a thread of 128 KiB
-reads the deepest input of every construct (`jsflow/tests.rs`). It costs
-about 50 µs a call and 7% of the pass over the 1,490 packages below. In
-WebAssembly a call's frames are on Node's own stack (about 1 MB on its
+so natively `js_flow`, `js_parse`, `js_loads` and `py_parse` run on a
+thread of the engine's own with an 8 MiB stack (`api::OWN_STACK`; 64 MiB
+in a debug build), one per calling thread, made at its first such call and
+kept for the next (the engine's caches, compiled patterns among them, are
+per thread), ending with the calling thread; a call from a thread of 128
+KiB reads the deepest input of every construct (`jsflow/tests.rs`). It
+costs about 50 µs a call and 7% of the pass over the 1,490 packages below.
+In WebAssembly a call's frames are on Node's own stack (about 1 MB on its
 main thread), its larger locals on the module's 8 MiB stack;
 `test_wasm_parity_jsflow` reads the deepest input of every construct
 there.
@@ -1885,11 +2107,71 @@ declaration binds), and a URL literal whose host the data continues
 to follow them: a callback of anything but the script's own functions gets
 what the call holds (a read's callback what was read: `exec(c, (e, out) =>
 …)`); a parameter written to a closure's variable is in the function's
-summary (`res.on('data', d => body += d)`); `this.x` and a name no
-declaration binds are bindings of their own; the script's own wrappers of
-exec, of a read and of `process.env[name]` are summaries too
-(`run('whoami')`, `getEnv('AWS_SECRET_ACCESS_KEY')`). A child process
-doesn't hold what it was given, nor a length the data it measures.
+summary (`res.on('data', d => body += d)`), and so is a parameter of a
+function around it written to a variable declared outside that function
+(D-15, 0.1.9: `p = body` in the `'end'` callback, `p` the module's: the
+value written cannot carry the parameter there); `this.x` and a name no
+declaration binds are bindings of their own; what a container's `push`,
+`unshift`, `splice` (its items), `set`, `add`, `append` or `fill` is given
+the container holds, and so does the target of `Object.assign`,
+`Object.defineProperty(ies)`, `Reflect.set` and `Reflect.defineProperty`
+(D-3, 0.1.9: only an array's `push` and `unshift` were followed, so the
+environment put into a `FormData`, a `Map` or a `Set` and sent was not
+seen); a member as a container is its own (D-3b, 0.1.9): `this.items`, a
+binding already, and `o.list`, a binding of its own beside `o`'s, which
+`o.list` reads and the object's other members do not (put into the object
+that holds it, what `o.list.push(x)` was given joined unrelated flows in
+vite's bundle), and what a function holds of its own parameters is not
+put into a member of `this` (a recorder's `this._events.push(…)` held what
+every caller recorded: monaco-editor's loader); in a method of a class made
+in several places, `this` is the method's receiver, a parameter
+(`RECV_INDEX`) that a call on an instance gives the instance's value for
+the sinks the method reaches through it (B-3, 0.1.9: B-1 keeps such a
+class's instances apart, so what one method of an instance was given
+reached nothing another method of it did; what a method returns or keeps
+of `this` stays with B-1's instance); the
+script's own wrappers of exec, of a read and of `process.env[name]` are
+summaries too (`run('whoami')`, `getEnv('AWS_SECRET_ACCESS_KEY')`). A
+child process doesn't hold what it was given, nor a length the data it
+measures.
+
+**Copies and holders of the environment** (0.1.9, D-16). process.env's
+mark is kept by a name it is given, not by a parameter whose default it
+is, an object's member, a copy (`{ ...process.env }`, `Object.assign({},
+process.env)`) or what a call returns, and an object's members are read as
+the whole object, so a member of such a value read the whole environment:
+prisma 8.0.0-rc.21's `getApiBaseUrl(env = process.env)` reads
+`env.PRISMA_MANAGEMENT_API_URL`, and the Management API's answers that
+address reached were sent in an address of their own (SUSPICIOUS). Now a
+member of a value holding the whole environment and no mark is read by its
+name (`sc_member`): a variable's (capitals, digits and underscores;
+`npm_*`; the proxies', `env_var_name`) is that variable, as process.env's
+own member is; one with `env` in it (`env`, `environment`) is all of it;
+any other is not the environment (corepack 0.36.0's env file gives `{ env:
+<a copy>, path }`, and its caller's `localEnv?.path` is a path). A
+parameter is read so too: a value read through a member of it of such a
+name, or a method of its own called on it (not one of the built-in ones
+that give back what the object holds, `PASS_THROUGH`: `join`, `map`,
+`then`, `toString` …), holds the parameter's key with `MEMBER_KEY` set
+(`V::through_member`; `key_owner` and `key_index` read the key without
+it), and the function's summary keeps, for what it returns (`ret_params`)
+and for each sink a parameter reaches (`reach_member`), whether it holds
+the parameter only so; a call gives such a parameter its argument without
+the whole environment (`sc_through_member`). prisma's telemetry sender
+builds its event in `buildTelemetryEvent(payload, config, env)` from
+`env.platform`, `env.env.npm_config_user_agent` and
+`env.readProjectPackageJson()`, given `{ env: process.env, … }`. The copy
+or the holder sent whole, the holder's `env`, and a parameter returned or
+sent whole (or beside a member of it) are still the whole environment. A
+holder of the environment under another name, read by that name and sent
+(`{ data: process.env }`, then `payload.data`, here or in a function given
+it), is no longer it.
+
+**A JSON file given require** (0.1.9, D-18) is parsed and runs nothing:
+the module-name sink leaves out a `require` whose argument ends in a
+literal ending in `.json` (`sc_json_module`; corepack 0.36.0 requires the
+package.json of the package manager it downloaded,
+`require(path.join(tmpFolder, 'package.json'))`).
 
 **The strongest send.** A value keeps the first read of each kind, and a
 credential store (`_CRED_STORE_RE`, not a public key) apart from other
@@ -2179,10 +2461,47 @@ kind: one reason per kind, and one that names the interpreter takes the
 place of one that names none (the text's "downloads a file and then runs
 it" for `cmd /c x.bat`).
 
-Known gaps: a file written through a parameter (a callback given a
-response, a helper given the data: a function's summary keeps no file), and
-JavaScript's summaries keep eight categories in an 8-bit mask, which is
-full.
+**A file written through a parameter** (0.1.9, D-2). In JavaScript a
+download most often comes in as a callback's parameter: the request
+client's body (`request.get(u, (e, r, body) => …)`), https.get's response,
+its chunks gathered in `data` and written in `end`, or piped into
+`fs.createWriteStream(p)`; or a helper writes what it is given. A
+function's summary keeps the files a parameter is written to
+(`Fn::param_files`: the path's keys, where), apart from its eight
+categories' 8-bit mask, which is full: when a call gives the parameter a
+download, or code the script decodes or carves out, the file is written
+(`sc_param_file`), and a parameter of the caller's given to it is written
+there through the caller (a helper's summary carries to the callback that
+calls it). The write is then known only when the client gives the callback
+the download, after the callback that runs the file was read, so a run of
+a file no write is known for yet is kept (`Supply::runs`) and matched
+against what is written at the end (`late_drops`). A program downloaded
+and run stays an installer's; a download written and not run, and what a
+callback is given by a read of the package's own file, are not reported.
+
+**Code written into another package's folder** (0.1.9, D-9). The
+JavaScript model's values have one more kind, a path in another package's
+folder (`K_PKG`, what: the package): `require.resolve('<pkg>…')` (Node's
+`require`, or one `createRequire()` made, as ES modules do; the model's
+descriptions name no member of `require`, so `sc_require_resolve` reads
+the call), `import.meta.resolve('<pkg>…')`, and a path joined
+(`path.join`, `path.resolve`) from `node_modules` and a package's name
+among its literal parts (`'node_modules', '@scope', 'name'`, or
+`'node_modules/name'` in one part; a dot folder such as `.cache` is no
+package), carried as every value is, through variables, a function's
+return and a list's items. A code file (a literal ending in `.js`, `.cjs`
+or `.mjs` in the path's text, or in what the name it is given holds)
+written there (`writeFileSync`, `writeFile`, `appendFile*`,
+`createWriteStream`) or copied or moved there (`copyFile*`, `rename*`,
+`cp*`, their second argument) is `Out::Rewrote` (the write's offset, the
+package), and the install-script and import-time tests give each package
+"rewrites another package's code (the package)", a strong reason
+(`signs::rewrite_reasons`). The API's `install_script_risk` and
+`import_time_risk` take the release's name as `own` (`signs::own_release`,
+for what the call reads, a command's inline code too): its own package's
+code, or one of its scope's, is its own. @dinzid04/libsignal-node 2.2.5
+writes over @whiskeysockets/baileys's `lib/Socket/newsletter.js` a second
+after it is loaded.
 
 **Held to** `jsflow::supply::tests` and `pyflow::supply::tests` (each
 shape above, and its negatives: a binary installer, a whole file copied, text
@@ -2210,3 +2529,195 @@ SUSPICIOUS (448 of 516): pywhool (an XOR decoder in setup.py, its result
 run by `eval(compile(…))`), requests-darwin-lite and quasarlib; five more
 gain a reason. The holdout gains two PyPI releases
 (631 of 745), both sharing no code with the benchmark.
+
+## 21. The Rust reader (R-1)
+
+`rs_crate` reads a crate's `.rs` files for what their code does when the crate
+is built, when it starts and when it is used, so that `lazaret guard cargo` and
+the registry can judge a crate instead of marking it INCOMPLETE (the engine had
+no Rust detectors). The reader is `crates/lazaret-engine/src/rsread/` and uses
+`rsparse` (the items and the token bodies, §3) and `rsparse::hooks` (the build
+script's `main`, `#[proc_macro…]`, `#[ctor]`, load sections, `#![no_main]`).
+
+The code of each moment is read with the test that Python's and JavaScript's
+code of the same moment gets (§18–§20), with the same reasons and severities:
+
+- the **build script** and a **procedural-macro crate** run on the machine that
+  builds a dependent, the analog of an npm install hook and an sdist's
+  `setup.py`: the install-script test, every reason CRITICAL (SC-INSTALL-HOOK);
+- the **start-up functions** (`#[ctor]`/`#[dtor]`, `#[no_mangle] extern fn main`,
+  a `.init_array`-like section, `#![no_main]` with `#[start]`) run before a
+  binary's `main`, the analog of import-time code: the import-time test
+  (SC-IMPORT-RISK; the strong reasons CRITICAL, the rest MAJOR);
+- **everything else** runs when the crate's code is called: the import-time test
+  of which only the strong reasons count (SC-USE-RISK).
+
+The reading evaluates the code the way the trees' data flow does, not with
+patterns over text. `ast.rs` reads a function body's statements and expressions
+from `rsparse`'s tokens (it is not Rust's parser: what it cannot read is one
+`Unknown` leaf and the rest is read; nesting is bounded, so no input recurses
+past it). A value (`model/val.rs`, shared with Go's reader) is the text the code builds where it builds one
+(`format!`, `concat!`, a `+`, a constant, base64 or hex decoded, a byte slice
+read as UTF-8; Rust's literals and `format!` are `rsread/lit.rs`), the items of a list, the data it carries (the supply-chain
+kinds of §18) and the handle it is (a `Command`, an HTTP request, a `TcpStream`,
+a file open for writing). `eval.rs` walks the entry points of each moment,
+following the crate's own functions (a few calls deep, within a step budget),
+its closures and its methods; then it reads on their own, their parameters not
+known, the functions of the moment that reading did not reach: every function
+of a build script and of a procedural-macro crate (all of that code runs at
+build), and every function a start-up function calls by name, however deep. It
+records what the code does: a process started
+(`std::process::Command`, read as a shell reads its line, with `sh -c`/`cmd /c`/
+`powershell -Command` scripts pulled out), data sent (`std::net`, reqwest, ureq,
+minreq, attohttpc, curl, raw sockets), a file written and then run or loaded
+(`libloading`), a name looked up (`ToSocketAddrs`, hickory/trust-dns, including
+TXT records — the Go DNS-backdoor shape). The sources are std's and the usual
+crates' (`env::var`/`vars`, `fs::read`, `dirs`/`home`, `whoami`/`hostname`,
+command output, a response). The events and what every language reads the same way (a command's line as a shell reads it, the download a command writes to a file, an environment variable's kind) are `model/events.rs`, and `model/facts.rs` turns the events into what the tests
+ask (`signs::ModelFacts`): the strongest send and where data goes, code received
+and run, a file written then run (either reason ends ", out of sight (no window, or
+its output thrown away)" when the program is started with its window hidden or
+no console, or with its output sent to null: GR-8), the commands run, and what only the model
+sees (a shell or an interpreter whose stdio is a connection — a reverse shell; a
+DNS lookup of a name built from the host name and a public domain, as the text
+detector reads a lookup). The tests still read each file's text too, for
+the signs a literal shows (a stager, a reverse-shell command, a raw IP), with
+comments, tests (`#[cfg(test)]`, `#[test]`) and the code of another moment
+blanked.
+
+A crate is read as its compilation units: the build script's files, the
+library's (`src/lib.rs` and the modules it declares, `#[path]` included) and the
+binaries' (`src/main.rs`, `src/bin/`). `tests/`, `benches/` and `examples/` are
+never built into a dependent and are not read. `SC-USE-RISK`'s reading is
+bounded as the registry bounds Python and JavaScript (smallest files first,
+within a character budget, so every machine reads the same files); `useRead`
+says how much it read.
+
+The reading has bounds, and a reading that reaches one says so. `ast.rs` counts
+every form it reads within itself against its depth (`MAX_DEPTH`), reads the
+operators of one level as a flat chain and a chain of postfix operations up to
+`MAX_LINKS`, so no tree is deeper than its bounds; the evaluator's own nesting
+stops at `MAX_NEST`, a reading records at most `MAX_EVENTS` events and makes at
+most `MAX_CLOSURES` closures, and the text a step copies is charged to its
+steps. A reading that runs out of steps, nesting or events is cut short, and the
+moment's text is then read by the text test as well, as a Python or JavaScript
+file the models cannot read is: code that pads or spends the reading's steps
+before its payload hides nothing the text shows. (The bounds, the readings of
+every function of a moment and the fallback are the review of Oct 4, RR-1 to
+RR-11 in `audits/lazaret-go-rust-code-review-2026-10-04.md`.)
+
+Nothing changes for Python or JavaScript: the install-script and import-time
+tests take a model's facts only when one is given (the text path is untouched,
+held identical on the benchmark and the recorded snapshots). The registry and
+the guard call `rs_crate` on every crate they scan (Part C, `repo.py`'s
+`_package_code`); the call takes the request's text as it is, without a copy
+of each file (`api::call_owned`). On Ubuntu 24.04's 2,122 packaged crates
+whose licences allow it, it reads 34,000 files in 26 s and finds nothing.
+
+## 22. The Go reader (G-1)
+
+`go_package` reads a Go module's files for what their code does when a program
+that imports the module's packages starts, and when it is used, so that `lazaret
+guard go` and the registry can judge a module instead of marking it INCOMPLETE.
+The reader is `crates/lazaret-engine/src/goread/`, on `goparse`'s trees (the
+tree `go/parser` builds, §15) and `goparse::hooks`, and on the values, events and
+facts it shares with the Rust reader (`model/`).
+
+Go runs nothing at install, but a package's code still runs at moments its user
+did not choose. Each is read with the test Python's and JavaScript's code of the
+same moment gets:
+
+- **at start**: every `init` function and the initializer of every package-level
+  variable that calls something run when any program that imports the package
+  starts, the analog of import-time code: the import-time test (SC-IMPORT-RISK;
+  the strong reasons CRITICAL, the rest MAJOR). So does a cgo preamble's C with
+  a constructor (`__attribute__((constructor))`, `.init_array`), or C that init
+  code calls;
+- **when used**: everything else, a command's `main` included: the import-time
+  test of which only the strong reasons count (SC-USE-RISK);
+- `//go:generate` runs only when someone runs `go generate`, and
+  `//go:linkname` runs nothing: both are listed in the answer (`generate`,
+  `linkname`), never judged.
+
+A module is its packages, one per folder, each read as one unit, as Go compiles
+it: a package's functions, methods, types and package-level names are found
+across its files, and a call of another of the module's packages (an import of
+the module's path, `module` in the call; or, with none given, an import that
+ends in one of the module's folders) is followed there. What no build of a
+dependent reads is left out: `_test.go` files, files whose names start with `_`
+or `.`, `testdata/`, `vendor/` (other modules, read on their own) and files
+constrained to `ignore`. A folder whose name starts with `_` or `.` is read: an
+import can name it. A `.go` file the parser refuses could not be built, so
+nothing in it runs; the answer lists it (`unparsed`) for the text rules.
+
+`eval.rs` evaluates the code as the Rust reader does (§21), on the tree: a value
+is the text the code builds (`+`, `fmt.Sprintf` with `fmt`'s verbs,
+`strings.Join`, `Replace`, `Repeat`, a string array read by index — the 2025
+typosquats' shape —, a byte slice read as a string, `[]byte` and `[]rune`,
+base64 with a standard or a custom alphabet, hex, `url.QueryUnescape`,
+`strings.Map`), the data it carries and the handle it is. Both branches of an
+`if` and every case of a `switch` are read; a loop is read once, or for each
+item of a list it knows (a few, or all of them up to 4,096 when its body only
+computes: a decoder's loop, `data[i] ^= key[i]`, is run index by index); a
+goroutine and a deferred call are read where they are written; a closure sees
+and changes its function's names. Package-level variables are read when first
+used, constants with their `iota`, and `//go:embed`'s variables hold the bytes a
+build puts in them. The APIs it knows are the standard library's (`os/exec`,
+`os`, `os/user`, `io`, `bufio`, `net`, `net/http`, `crypto/tls`, `syscall`,
+`plugin`, `path/filepath`, `strings`, `bytes`, `strconv`, `fmt`,
+`encoding/base64`, `encoding/hex`, `compress/*`, `net/url`) and
+`golang.org/x/sys/windows`'s: processes started (with a shell's input set to a
+script, and `SysProcAttr`), requests and their bodies, connections, DNS lookups
+(TXT records among them: the `shopsprint/decimal` shape), files written, made
+executable, renamed and run, plugins and DLLs loaded. The init code's reading
+starts from the initializers and the `init` functions in Go's order, then reads
+on its own every function they reach by name, however deep.
+
+`cread.rs` reads the C a cgo package compiles in: the preamble (the comment
+before `import "C"`, its contents read as C where they are) and the package's
+`.c` and `.h` files. It is not a C parser: it reads the calls that run a
+program or load a library (`system`, `popen`, the `exec` family,
+`posix_spawn`, `WinExec`, `ShellExecute`, `CreateProcess`, `dlopen`,
+`LoadLibrary`) with the strings they are given (adjacent literals joined, C's
+escapes, a `#define`d string), and whether the C has a constructor.
+
+What every reader shares changed with it (`model/events.rs`): a shell's or
+cmd's script is read command by command, so a file one command writes and the
+next runs (`wget -O /tmp/x … && bash /tmp/x`, `certutil … %TEMP%\u.exe &&
+%TEMP%\u.exe`) is a file written then run, in Rust's reading too; certutil,
+bitsadmin and PowerShell's `Invoke-WebRequest -OutFile` downloads are read
+wherever they are; and `wget -O -` (standard output) writes no file.
+
+The bounds are the Rust reader's (§21), built in from the start: `goparse`'s
+trees are an arena (dropping one recurses into nothing), chains (`a + b + …`,
+`if … else if …`) are walked rather than recursed through, the evaluator's
+nesting stops at `MAX_NEST`, a reading records at most `MAX_EVENTS` events and
+makes at most `MAX_CLOSURES` closures, the text a step copies is charged to its
+steps, and a reading cut short has its text read by the text test as well.
+
+Go's standard library and the modules it vendors (`golang.org/x/…`), each
+package folder read as a module, give no finding at either moment (717 folders,
+6,121 files, 7 s), and neither do Ubuntu 24.04's 1,953 packaged Go modules whose licences allow
+it (114,000 files, 49 s). The registry and the guard call `go_package` on every module zip they scan
+(Part C), with the text as it came (`api::call_owned`: the copy of each file it made doubled what a
+module held; aws-sdk-go v1, 207 million characters, now peaks at 2.4 GB, from 3.0 GB).
+
+## 23. A vendored dependency's manifest (Part C)
+
+`vendor.rs` reads what a `--deps` scan needs of a vendored dependency's manifest, once for both packages (core.py's
+`_vendored_code`, the npm package's `deps.js` `vendoredCode`), so that the two CLIs read a Go `vendor/` and a
+`cargo vendor` tree alike:
+
+- `cargo_layout` (text: a crate's `Cargo.toml`) -> `{"build": a path, false or null, "lib": a path or null,
+  "proc_macro": a boolean or null}`: `package.build` (or `project.build`), `lib.path` and `lib.proc-macro`, read as TOML
+  writes them: tables and arrays of tables (whose keys are not these), dotted and quoted keys, inline tables, basic and
+  literal strings on one line or several, arrays over several lines and comments. What a string or an array holds is
+  never read as a line of its own (a description holding `[lib]` and `proc-macro = true` is a description), a line it
+  cannot read is left and the next one read, the first value given wins, and values nested more than 32 deep end the
+  reading (cargo refuses a manifest that deep). On the 2,122 crates of Ubuntu 24.04's licence-checked `librust-*-dev`
+  packages it says what the registry's reading says (Python's TOML, `crates.Crates.layout`) for every one.
+- `go_vendored_modules` (text: a `vendor/modules.txt`) -> the module paths it says are vendored (a `# path version`
+  line followed by its annotations or packages; a `# ` line with nothing after it is a replacement `go mod vendor`
+  records but does not use), longest first: a file belongs to the module whose path is the longest prefix of its own.
+
+Both are linear in the text, and nothing in them panics on any input (`vendor::tests`).

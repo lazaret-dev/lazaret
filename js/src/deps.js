@@ -25,15 +25,16 @@ import { join, resolve, sep } from "node:path";
 import { scanFile } from "./scanner/scan.js";
 import { followHook, persistenceReasons, installScriptRisk, importTimeRisk, importTimeSeverity, agentHijack,
   agentHijackInCommand, nodeCandidates, shebangLang, spawnedScripts, scriptLang, packValues, crossFileIssues,
-  NativeError } from "./lib/native.js";
+  NativeError, NativeExhausted, goPackage, rsCrate, cargoLayout, goVendoredModules, codePoints } from "./lib/native.js";
 import { HOOK_COMMANDS, loadManifest, scInstallHookIssue } from "./lib/supplychain.js";
 import { readBounded, truncatedIssue, scanErrorIssue, strerror, normalizeNewlines, decodeMember, treeJoin,
-  MAX_FILE_BYTES } from "./lib/fs.js";
-import { looksBinary, HEADER_SAMPLE } from "./lib/binary.js";
+  MAX_FILE_BYTES, normpathRel } from "./lib/fs.js";
+import { looksBinary, HEADER_SAMPLE, pyExt } from "./lib/binary.js";
 import { mkIssue } from "./lib/issue.js";
 import { REDACT, redactText, registerScanContext, SECRET_SKIP_RE } from "./lib/redact.js";
 import { mapTasks } from "./pool.js";
-import { pyStrip, pyStripChars, pyRepr, cmpCodePoints, pyEntries, pyRe } from "./lib/pycompat.js";
+import { pyStrip, pyStripChars, pyRepr, cmpCodePoints, pyEntries, pyRe, cpLen, cpPrefix, isPySpace } from "./lib/pycompat.js";
+import { EXHAUSTED } from "./scanner/scan.js";
 
 const DEP_IMPORT_RISK_WHY = "An installed package's code runs with the application's privileges when it is loaded " +
   "or its command runs. Collecting credentials or the whole environment next to a network call is the shape of an " +
@@ -165,7 +166,6 @@ export function webAssets(tree, files) {
 
 /** The paths an npm package.json's main, module, bin and exports name. core._deps_npm_entries */
 export function npmEntries(data) {
-  const [max] = packValues("_DEPS_REACH_MAX");
   const isObject = (v) => v !== null && typeof v === "object" && !Array.isArray(v);
   const out = [];
   for (const key of ["main", "module"]) {
@@ -175,7 +175,7 @@ export function npmEntries(data) {
   if (typeof b === "string") out.push(b);
   else if (isObject(b)) for (const [, v] of pyEntries(b)) if (typeof v === "string") out.push(v);
   const stack = [own(data, "exports")];
-  while (stack.length && out.length < max) {
+  while (stack.length) {
     const e = stack.pop();
     if (typeof e === "string") {
       if (!e.includes("*")) out.push(e);
@@ -191,17 +191,18 @@ export function npmEntries(data) {
 /**
  * The files of the npm package at `root` its entry points reach: what Node runs for the package
  * itself and for each entry point, then the local files they require or import and the scripts
- * they start with node (spawnedScripts), transitively. core._deps_npm_reach
+ * they start with node (spawnedScripts), transitively, each file once (no cap: BR-5).
+ * core._deps_npm_reach
  */
 function npmReach(tree, root) {
-  const [max, localDep] = packValues("_DEPS_REACH_MAX", "_DEPS_LOCAL_DEP_RE");
+  const [localDep] = packValues("_DEPS_LOCAL_DEP_RE");
   const rx = pyRe(localDep.re, "gm");
   const manifest = tree.manifests.get(`${root}/package.json`);
   const data = manifest !== undefined ? loadManifest(manifest.path, manifest.content)[0] : null;
   const entries = data !== null && typeof data === "object" && !Array.isArray(data) ? npmEntries(data) : [];
   const queue = [tree.resolve(root), ...entries.map((e) => treeJoin(root, e)).filter((t) => t !== null).map((t) => tree.resolve(t))];
   const seen = new Set();
-  while (queue.length && seen.size < max) {
+  while (queue.length) {
     const rel = queue.pop();
     if (rel === null || rel === undefined || seen.has(rel) || !rel.startsWith(root + "/")) continue;
     seen.add(rel);
@@ -266,6 +267,113 @@ export function siteGroups(root, files) {
   return out;
 }
 
+const METADATA_HEAD_BYTES = 1 << 20;
+
+/** A package.json's (`data`, as read) own name and the packages it names, dependencies of every kind, bundled
+ * ones too: what a package manager may install for it (D-12). core.npm_declared_names */
+export function npmDeclaredNames(data) {
+  const out = new Set();
+  if (typeof own(data, "name") === "string") out.add(own(data, "name"));
+  for (const key of ["dependencies", "devDependencies", "optionalDependencies", "peerDependencies"]) {
+    const deps = own(data, key);
+    if (deps && typeof deps === "object" && !Array.isArray(deps)) for (const k of Object.keys(deps)) out.add(k);
+  }
+  for (const key of ["bundleDependencies", "bundledDependencies"]) {
+    const list = own(data, key);
+    if (Array.isArray(list)) for (const k of list) if (typeof k === "string") out.add(k);
+  }
+  return out;
+}
+
+/** A distribution's METADATA headers: [its Name and each Requires-Dist's name, an extra's too; how many
+ * Requires-Dist it has] (D-12). core.metadata_declared_names */
+export function metadataDeclaredNames(text) {
+  const names = new Set();
+  let requires = 0;
+  for (const line of text.split("\n")) {
+    if (!pyStrip(line)) break;                 // (the headers end at the first empty line)
+    const req = line.startsWith("Requires-Dist:");
+    if (!req && !line.startsWith("Name:")) continue;
+    requires += req ? 1 : 0;
+    const value = pyStrip(line.slice(line.indexOf(":") + 1));
+    let end = 0;
+    for (const ch of value) {
+      if (isPySpace(ch) || ";[(<>=!~@".includes(ch)) break;
+      end += ch.length;
+    }
+    if (end) names.add(value.slice(0, end));
+  }
+  return [names, requires];
+}
+
+/**
+ * The names of the installed package a dependency file belongs to, for the tests a --deps scan runs on it:
+ * [declared, own], or null where they are not known. An npm package's: its package.json's (node_modules/<name>
+ * or node_modules/@scope/<name>, the nearest), its name and the packages it names, and its name as its own
+ * (D-12b, D-9c); a Python distribution's: the *.dist-info whose RECORD lists the file's top-level module or
+ * package, its METADATA's Name and Requires-Dist (D-12b; several that list one, all of theirs). Twin of
+ * core._InstalledNames.
+ */
+class InstalledNames {
+  constructor(tree) {
+    this.tree = tree;
+    this.npm = new Map();                     // package directory -> [declared, own] or null
+    this.sites = new Map();                   // site-packages directory -> Map(top-level name -> [declared, null])
+  }
+
+  of(path) {
+    const parts = posix(path).split("/");
+    const k = parts.length > 1 ? parts.lastIndexOf("node_modules", parts.length - 2) : -1;
+    if (k >= 0) {
+      const end = parts[k + 1].startsWith("@") ? k + 3 : k + 2;
+      const directory = parts.slice(0, end).join("/");
+      if (end >= parts.length || !isPackageRoot(directory)) return null;
+      if (!this.npm.has(directory)) this.npm.set(directory, this.npmNames(directory));
+      return this.npm.get(directory);
+    }
+    const [siteMarkers] = packValues("_XF_SITE_MARKERS");
+    let idx = -1;
+    for (let i = 0; i < parts.length - 1; i++) if (siteMarkers.includes(parts[i])) idx = i;
+    if (idx < 0) return null;
+    const site = parts.slice(0, idx + 1).join("/");
+    if (!this.sites.has(site)) this.sites.set(site, this.siteNames(site));
+    return this.sites.get(site).get(parts[idx + 1]) || null;
+  }
+
+  npmNames(directory) {
+    const m = this.tree.manifests.get(`${directory}/package.json`);
+    if (!m) return null;
+    const [data] = loadManifest(m.path, m.content);
+    if (!data || typeof data !== "object" || Array.isArray(data)) return null;
+    const name = own(data, "name");
+    return [[...npmDeclaredNames(data)].sort(cmpCodePoints), typeof name === "string" && name ? name : null];
+  }
+
+  siteNames(site) {
+    const where = join(this.tree.root, ...site.split("/"));
+    let infos;
+    try {
+      infos = readdirSync(where).filter((n) => n.endsWith(".dist-info")).sort(cmpCodePoints);
+    } catch { return new Map(); }
+    const names = new Map();                  // top-level name -> the names of the distributions that list it
+    for (const info of infos) {
+      const directory = join(where, info);
+      try {                                    // (a real directory: no link is followed)
+        const st = lstatSync(directory);
+        if (!st.isDirectory() || st.isSymbolicLink()) continue;
+      } catch { continue; }
+      let data;
+      try { data = readBounded(join(directory, "METADATA"), METADATA_HEAD_BYTES); } catch { continue; }
+      const [declared] = metadataDeclaredNames(data.toString("utf8"));
+      for (const top of recordTops(join(directory, "RECORD"))) {
+        if (!names.has(top)) names.set(top, new Set());
+        for (const n of declared) names.get(top).add(n);
+      }
+    }
+    return new Map([...names].map(([top, d]) => [top, [[...d].sort(cmpCodePoints), null]]));
+  }
+}
+
 /** The top-level names a RECORD lists (its rows' first path parts); none when it cannot be read. core._xf_record_tops */
 function recordTops(path) {
   const [limit] = packValues("_XF_RECORD_BYTES");
@@ -289,23 +397,24 @@ function recordTops(path) {
  */
 export function dependencyChecks(root, files, manifests, issues, { exclude = [], maxFileBytes = MAX_FILE_BYTES, pool = null } = {}) {
   const tree = new DependencyTree(root, files, manifests, exclude, maxFileBytes);
+  const names = new InstalledNames(tree);
   const depManifests = new Set(manifests.filter((m) => m.dep).map((m) => m.path));
   const out = [], extra = [], run = new Set(), truncated = new Set();
   for (const i of implicitGypHooks(tree, manifests)) out.push(i);
   for (const issue of issues) {
     const cmd = HOOK_COMMANDS.get(issue);
     if (issue.rule !== "SC-INSTALL-HOOK" || !cmd || !depManifests.has(issue.file)) continue;
-    try { followDependencyHook(tree, issue, cmd, out, extra, run, truncated); }
+    try { followDependencyHook(tree, issue, cmd, out, extra, run, truncated, names); }
     catch (e) { out.push(scanErrorIssue(issue.file, e)); }       // one manifest must never kill the run
   }
-  // The import-time and agent checks of each dependency file no hook runs; with a worker pool
-  // (pool.js) on its workers, and with them the cross-file follower (below), the answers taken
-  // in order.
+  // The import-time and agent checks of each dependency file no hook runs, the import-time test given the names
+  // of the package it is in (D-12b, D-9c: InstalledNames); with a worker pool (pool.js) on its workers, and with
+  // them the cross-file follower (below), the answers taken in order.
   // (the detection round) a web app's static assets no entry point reaches are left out (webAssets)
   const assets = webAssets(tree, files);
   const checks = files.filter((f) => f.dep && (f.lang === "js" || f.lang === "py") && !run.has(posix(f.path))
     && !assets.has(posix(f.path)))
-    .map((f) => ["dep", [f.path, f.content, f.lang]]);
+    .map((f) => ["dep", [f.path, f.content, f.lang, names.of(f.path)]]);
   const code = assets.size ? files.filter((f) => !assets.has(posix(f.path))) : files;
   const groups = siteGroups(tree.root, code);
   const follow = ["xf", {
@@ -318,6 +427,8 @@ export function dependencyChecks(root, files, manifests, issues, { exclude = [],
     if (found) out.push(found);
     if (agent) out.push(agent);
   }
+  // (0.1.9, Part C) the vendored Go modules' and crates' code, by the engine's readers (vendoredCode)
+  for (const i of vendoredCode(tree, files)) out.push(i);
   // Cross-file received code (both engines since 0.1.8; the native engine's follower, crossfile.rs):
   // a value received in one file of a package and run in another. Skips the files already flagged
   // CRITICAL single-file (on a worker the follower skipped none: a skipped file's findings are
@@ -335,11 +446,230 @@ export function dependencyChecks(root, files, manifests, issues, { exclude = [],
   return { issues: out, files: extra };
 }
 
+// ---- Go modules and crates: the readers' findings, and --deps's vendor trees (0.1.9, Part C) ----
+// Twin of core's section of the same name: a Go project's vendor/ (vendor/modules.txt) and a Rust project's (cargo
+// vendor: a .cargo-checksum.json in each crate's directory) are read as the registry reads a module zip and a .crate,
+// the file rules on each .go and .rs file a build compiles (lib/fs.js collectFiles) and the engine's Go and Rust readers
+// here, on each vendored module (the paths vendor/modules.txt lists) or crate.
+
+const LAYOUT_ROOT_RE = /^(?:[A-Za-z]:)?\/+/;
+
+/** A path a Cargo.toml names, relative to the crate's root (core._layout_path): drive roots and leading slashes off,
+ * normalized; null for one with a `..` or none at all. */
+function layoutPath(value) {
+  if (typeof value !== "string" || cpLen(value) > 512) return null;
+  let rest = value.split("\\").join("/");
+  for (;;) {
+    const stripped = rest.replace(LAYOUT_ROOT_RE, "");
+    if (stripped === rest) break;
+    rest = stripped;
+  }
+  if (rest.split("/").includes("..")) return null;
+  const norm = rest ? normpathRel(rest) : "";
+  return norm === "" || norm === "." ? null : norm;
+}
+
+/** [the build script, the library's root, whether it is a procedural macro] of a vendored crate whose Cargo.toml text
+ * is `manifest` and whose .rs files are `members` (paths below its root): the engine's reading of the manifest
+ * (cargoLayout), resolved as the registry resolves its own. Twin of core.cargo_layout. */
+export function crateLayout(manifest, members) {
+  const said = cargoLayout(manifest || "");
+  const present = new Set(members || []);
+  const build = said.build, lib = said.lib;
+  const script = build === false ? null : typeof build === "string" ? layoutPath(build) : "build.rs";
+  let root = typeof lib === "string" ? layoutPath(lib) : "src/lib.rs";
+  root = root !== null && present.has(root) ? root : null;
+  return [script !== null && present.has(script) ? script : null, root, root !== null && said.proc_macro === true];
+}
+
+/** `text` on one line, at most `limit` characters (core._one_line). */
+function oneLine(text, limit) {
+  const words = [];
+  let word = "";
+  for (const ch of String(text)) {
+    if (isPySpace(ch)) {
+      if (word) words.push(word);
+      word = "";
+    } else word += ch;
+  }
+  if (word) words.push(word);
+  const joined = words.join(" ");
+  return cpLen(joined) <= limit ? joined : cpPrefix(joined, limit - 1) + "…";
+}
+
+/** [issues, what its use-time step read] of a reader's answer (goPackage, rsCrate) for the files `order` (their paths,
+ * in the order the reader was given them; `texts`: path -> text). `what`: "module", "crate" or "sdist". Twin of
+ * core.package_reader_issues. */
+export function packageReaderIssues(answer, order, texts, what) {
+  const [names, buildWhy, macroWhy, sdistBuildWhy, sdistMacroWhy, goStartWhy, rustStartWhy, sdistStartWhy, useWhy,
+    generateWhy, strongReasons] = packValues("_PACKAGE_RULE_NAMES", "_BUILD_SCRIPT_WHY", "_PROC_MACRO_WHY",
+    "_SDIST_BUILD_WHY", "_SDIST_PROC_MACRO_WHY", "_GO_START_WHY", "_RUST_START_WHY", "_SDIST_START_WHY",
+    "_PACKAGE_USE_RISK_WHY", "_GO_GENERATE_WHY", "_STRONG_IMPORT_REASONS");
+  const issues = [];
+  const at = (found) => {
+    const k = typeof found.file === "number" ? found.file : -1;
+    return k >= 0 && k < order.length ? order[k] : order[0];
+  };
+  const issue = (rule, sev, path, line, msg, why, fix) => {
+    const lines = (texts.get(path) ?? "").split("\n");
+    registerScanContext(lines, SECRET_SKIP_RE);       // (the file's own literals too: core's _Redactor(lines))
+    issues.push(mkIssue({ id: rule, name: names[rule], type: "HOTSPOT", sev, msg, why, fix,
+      ref: "CWE-506 · Supply chain" }, path, line, lines));
+  };
+  const sdist = what === "sdist";
+  const hooks = [
+    [answer.build, sdist ? "is the build script of a Rust crate in this sdist: pip has cargo build the crate when it " +
+      "installs the sdist, and cargo runs the script on that machine"
+      : "is the crate's build script: cargo runs it on the machine that builds any crate that depends on it",
+    sdist ? sdistBuildWhy : buildWhy],
+    [answer.macros, sdist ? "is a procedural macro of a Rust crate in this sdist: it runs inside the compiler when pip " +
+      "builds the sdist" : "is a procedural macro: it runs inside the compiler of every crate that uses it",
+    sdist ? sdistMacroWhy : macroWhy],
+  ];
+  for (const [found, how, why] of hooks) {
+    if (found && found.reasons && found.reasons.length) {
+      const path = at(found);
+      issue("SC-INSTALL-HOOK", "CRITICAL", path, found.line || 1, `${path} ${how}, and it ${found.reasons.join("; and ")}.`,
+        why, sdist ? "Do not install this sdist; report it to PyPI." : "Do not build with this crate; report it to crates.io.");
+    }
+  }
+  const [startHow, startWhy] = {
+    module: ["runs when any program that imports its package starts (init functions, package-level variables' " +
+      "initializers, cgo constructors)", goStartWhy],
+    crate: ["runs before a program's main (#[ctor], a load section, an exported main)", rustStartWhy],
+    sdist: ["runs when the package's Rust extension is loaded, before any of its code is called (#[ctor], a load " +
+      "section)", sdistStartWhy],
+  }[what];
+  for (const found of answer.start || []) {
+    const reasons = found.reasons || [];
+    if (reasons.length) {
+      const path = at(found);
+      issue("SC-IMPORT-RISK", importTimeSeverity(reasons), path, found.line || 1,
+        `${path} ${startHow}, and it ${reasons.join("; and ")}.`, startWhy,
+        "Read that code: what does it run, and where does it send what it collects?");
+    }
+  }
+  const whose = { module: "the module's code", crate: "the crate's code", sdist: "the package's Rust code" }[what];
+  for (const found of answer.uses || []) {
+    const strong = (found.reasons || []).filter((r) => strongReasons.some((p) => r.startsWith(p)));
+    if (strong.length) {
+      const path = at(found);
+      issue("SC-USE-RISK", "CRITICAL", path, found.line || 1,
+        `${path} ${strong.join("; and ")}. Nothing runs it at ${sdist ? "build or load" : "build or start"}: it runs ` +
+        `when ${whose} is called.`, useWhy,
+        sdist ? "Don't use the package; report it to PyPI." : `Don't use the ${what}; report it to its registry.`);
+    }
+  }
+  const generate = answer.generate || [];
+  if (generate.length) {
+    const [k, line, cmd] = generate[0];
+    const path = k >= 0 && k < order.length ? order[k] : order[0];
+    const more = generate.length > 1 ? ` (and ${withCommas(generate.length - 1)} more)` : "";
+    issue("SC-GO-GENERATE", "INFO", path, line,
+      `${path} has \`${oneLine(cmd, 200)}\`${more}: go generate runs such commands when someone runs it in the ` +
+      "module's folders; a build never does.", generateWhy, "Read the commands before running go generate in this module.");
+  }
+  const read = answer.useRead || {};
+  return [issues, Object.fromEntries(["files", "ofFiles", "chars", "ofChars"].map((key) => [key, Number(read[key] || 0)]))];
+}
+
+/** The text of a regular file of the tree ("/"-separated rel), read through no link, at most `cap` bytes; null
+ * otherwise (core._vendor_text). */
+function vendorText(tree, rel, cap) {
+  if (!tree.isFile(rel)) return null;
+  let data;
+  try { data = readBounded(join(tree.root, ...rel.split("/")), cap + 1); } catch { return null; }
+  return data.length > cap ? null : new TextDecoder("utf-8", { ignoreBOM: true }).decode(data);
+}
+
+/** The module paths vendor/modules.txt says are vendored, longest first (core._vendored_modules). */
+const vendoredModules = (text) => (text ? goVendoredModules(text) : []);
+
+/** [[rel, text]] of the .c and .h files directly in `folder` (a vendored Go package's directory, "/"-separated):
+ * what the Go reader reads with its cgo preambles. Regular files only, through no link (core._cgo_texts). */
+function cgoTexts(tree, folder, exts) {
+  const where = folder ? join(tree.root, ...folder.split("/")) : tree.root;
+  let names;
+  try { names = readdirSync(where); } catch { return []; }
+  const out = [];
+  for (const name of names.filter((n) => exts.includes(pyExt(n).toLowerCase())).sort(cmpCodePoints)) {
+    const rel = folder ? `${folder}/${name}` : name;
+    if (!tree.isFile(rel)) continue;
+    let data;
+    try { data = readBounded(join(where, name), tree.maxFileBytes + 1); } catch { continue; }
+    if (data.length <= tree.maxFileBytes && !looksBinary(data.subarray(0, HEADER_SAMPLE))) {
+      out.push([rel, new TextDecoder("utf-8", { ignoreBOM: true }).decode(data)]);
+    }
+  }
+  return out;
+}
+
+/** The readers on a --deps scan's vendored Go modules and crates (see the section comment): each module
+ * vendor/modules.txt lists (a file of none is read with its package's directory), each crate of a cargo vendor tree.
+ * A module or a crate over PACKAGE_CODE_CHARS is SC-TRUNCATED, and so is one the engine could not answer about.
+ * Twin of core._vendored_code. */
+export function vendoredCode(tree, files) {
+  const [codeChars, useFileChars, useChars, textCap, cgoExts] = packValues("PACKAGE_CODE_CHARS", "USE_RISK_MAX_CHARS",
+    "USE_RISK_CHARS", "_VENDOR_TEXT_CAP", "_CGO_EXTS");
+  const units = new Map();                  // key -> {lang, top, unit, module, members}
+  const listed = new Map();
+  for (const f of files) {
+    if (!f.vendor || (f.lang !== "go" && f.lang !== "rs")) continue;
+    const path = posix(f.path), top = posix(f.vendor);
+    const below = path.slice(top.length + 1);
+    let unit, module = null;
+    if (f.lang === "go") {
+      if (!listed.has(top)) listed.set(top, vendoredModules(vendorText(tree, `${top}/modules.txt`, textCap)));
+      module = listed.get(top).find((m) => below === m || below.startsWith(m + "/")) ?? null;
+      unit = module !== null ? module : dirname(below);
+    } else unit = below.split("/")[0];
+    const key = JSON.stringify([f.lang, top, unit, module]);
+    if (!units.has(key)) units.set(key, { lang: f.lang, top, unit, module, members: [] });
+    units.get(key).members.push(f);
+  }
+  const cmpUnits = (a, b) => cmpCodePoints(a.lang, b.lang) || cmpCodePoints(a.top, b.top) || cmpCodePoints(a.unit, b.unit);
+  const out = [];
+  for (const { lang, top, unit, module, members } of [...units.values()].sort(cmpUnits)) {
+    const base = unit ? `${top}/${unit}` : top;
+    const sorted = [...members].sort((a, b) => cmpCodePoints(posix(a.path), posix(b.path)));
+    const named = sorted.map((f) => [f.path, posix(f.path).slice(base.length + 1), f.content]);
+    if (lang === "go") {
+      const folders = [...new Set(sorted.map((f) => dirname(posix(f.path))))].sort(cmpCodePoints);
+      for (const folder of folders) {
+        for (const [rel, text] of cgoTexts(tree, folder, cgoExts)) named.push([native(rel), rel.slice(base.length + 1), text]);
+      }
+    }
+    const order = named.map(([p]) => p);
+    const texts = new Map(named.map(([p, , t]) => [p, t]));
+    const size = named.reduce((n, [, , t]) => n + codePoints(t), 0);
+    const what = lang === "go" ? "module" : "crate";
+    if (size > codeChars) {
+      out.push(truncatedIssue(order[0], `the vendored ${what}'s code (${withCommas(size)} characters) is more than the ` +
+        `reader takes at once (${withCommas(codeChars)}), so it was not read`));
+      continue;
+    }
+    let answer;
+    try {
+      const pairs = named.map(([, r, t]) => [r, t]);
+      if (lang === "go") answer = goPackage(pairs, { module, useFileChars, useChars });
+      else {
+        const [script, lib, procMacro] = crateLayout(vendorText(tree, `${base}/Cargo.toml`, textCap), pairs.map(([r]) => r));
+        answer = rsCrate(pairs, { build: script, procMacro, lib, useFileChars, useChars });
+      }
+    } catch (e) {                               // one module must never kill the run
+      out.push(e instanceof NativeExhausted ? truncatedIssue(order[0], EXHAUSTED) : scanErrorIssue(order[0], e));
+      continue;
+    }
+    for (const i of packageReaderIssues(answer, order, texts, what)[0]) out.push(i);
+  }
+  return out;
+}
+
 /** A task of dependencyChecks, as a worker of pool.js runs it (pool-worker.js), run here. */
 function dependencyTask([kind, args]) {
   if (kind === "dep") {
-    const [path, content, lang] = args;
-    return [dependencyImportIssue(path, content, lang), dependencyAgentIssue(path, content)];
+    const [path, content, lang, named] = args;
+    return [dependencyImportIssue(path, content, lang, named), dependencyAgentIssue(path, content)];
   }
   return crossFileIssues(args.files, new Set(), { redact: args.redact, siteGroups: args.siteGroups });
 }
@@ -382,8 +712,10 @@ function implicitGypHooks(tree, manifests) {
   return out;
 }
 
-function followDependencyHook(tree, issue, cmd, out, extra, run, truncated) {
+function followDependencyHook(tree, issue, cmd, out, extra, run, truncated, names = null) {
   const manifest = issue.file;
+  const named = names ? names.of(manifest) : null;
+  const ownName = named ? named[1] : null;          // (D-9c: the package's own name, for its install scripts)
   const base = dirname(posix(manifest));
   const direct = agentHijackInCommand(cmd);              // the hook runs the agent itself
   if (direct) {
@@ -409,7 +741,7 @@ function followDependencyHook(tree, issue, cmd, out, extra, run, truncated) {
     const rel = path === null ? null : tree.resolve(path);
     if (rel === null) continue;
     const text = scriptText(tree, rel, rel.endsWith(".sh") ? "sh" : "js", out, extra, run);
-    const reasons = text ? installScriptRisk(text, true, false, scriptLang(rel)) : [];
+    const reasons = text ? installScriptRisk(text, true, false, scriptLang(rel), ownName) : [];
     if (reasons.length && issue.sev !== "BLOCKER" && issue.sev !== "CRITICAL") {
       const msg = `Install hook runs ${target}, which ${reasons.join("; and ")}.`;
       issue.sev = "CRITICAL";
@@ -419,7 +751,7 @@ function followDependencyHook(tree, issue, cmd, out, extra, run, truncated) {
     if (agent) out.push(agent);
     // the scripts it starts with node or python (0.1.8, spawnedScripts)
     for (const [started, stext] of startedScripts(tree, rel, text, base, out, extra, run)) {
-      const more = stext ? installScriptRisk(stext, true, false, scriptLang(started)) : [];
+      const more = stext ? installScriptRisk(stext, true, false, scriptLang(started), ownName) : [];
       if (more.length && issue.sev !== "BLOCKER" && issue.sev !== "CRITICAL") {
         const shown = base && started.startsWith(base + "/") ? started.slice(base.length + 1) : started;
         const msg = `Install hook runs ${target}, which starts ${shown}, which ${more.join("; and ")}.`;
@@ -490,9 +822,10 @@ function readScript(tree, rel, asLang, out, extra) {
 }
 
 /** SC-IMPORT-RISK (MAJOR, or CRITICAL: importTimeSeverity) for a dependency's file (`lang` "js" or "py") that fails
- * the import-time test, else null. Twin of core.dependency_import_issue. */
-export function dependencyImportIssue(path, text, lang = null) {
-  const [reasons, line] = importTimeRisk(text, lang);
+ * the import-time test (`names`: its package's [declared, own], when known), else null. Twin of
+ * core.dependency_import_issue. */
+export function dependencyImportIssue(path, text, lang = null, names = null) {
+  const [reasons, line] = importTimeRisk(text, lang, names);
   if (!reasons.length) return null;
   const lines = text.split("\n");
   registerScanContext(lines, SECRET_SKIP_RE);     // the file's own entropy literals (core: _Redactor(lines))

@@ -120,7 +120,10 @@ class SameMatchesTests(unittest.TestCase):
 JWT = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0"        # {"alg":"HS256"}.{"sub":"1234567890"}
 TOKEN_FRAGMENTS = ["AKIA", "AIza", "gh", "ghp_", "gho_", "github_pat_", "xox", "xoxb-", "sk_live_",
                    "-----BEGIN ", "-----END ", "PRIVATE KEY-----", "RSA ", "eyJ", ".", ".eyJ", "a", "B",
-                   "0123456789", "ABCDEFGHIJKLMNOP", "_", "-", " ", "\n", "\u00e9", "Q" * 20, "a1B2" * 9]
+                   "0123456789", "ABCDEFGHIJKLMNOP", "_", "-", " ", "\n", "\u00e9", "Q" * 20, "a1B2" * 9,
+                   # V-2's formats: npm's, Anthropic's (a kind, 40 more), OpenAI's (20, the marker, 20)
+                   "cio", "npm_", "sk-", "sk-ant-", "api03-", "oat01-", "usr-", "proj-", "T3Blbk" + "FJ", "Ab1_-" * 8,
+                   "x" * 20]
 
 
 class TokenPatternTests(unittest.TestCase):
@@ -130,7 +133,7 @@ class TokenPatternTests(unittest.TestCase):
         rnd = random.Random(7)
         samples = [JWT, "x" + JWT, "AKIA" + "Q" * 16 + JWT, "eyJ" * 40, "eyJ" * 5 + ".eyJ" + "a" * 10,
                    "eyJaaaaaaaaaaeyJbbbbbbbbbbb.eyJcccccccccc", "-----BEGIN RSA PRIVATE KEY-----x-----END RSA "
-                   "PRIVATE KEY----- tail", "t = 'AKIAIOSFODNN7ABCDEFG' + 'ghp_" + "a1B2" * 9 + "'"]
+                   "PRIVATE KEY----- tail", "t = 'AKI\x41IOSFODNN7ABCDEFG' + 'ghp_" + "a1B2" * 9 + "'"]
         samples += ["".join(rnd.choice(TOKEN_FRAGMENTS) for _ in range(rnd.randint(1, 25))) for _ in range(20000)]
         for pat in (core._TOKEN_PATTERN, core._TOKEN_REDACT_PATTERN):
             ref = re.compile(pat.pattern)

@@ -18,13 +18,19 @@ repository:
     two unbounded repeats, or two unbounded repeats over overlapping
     characters (``.*.*x``, ``\\w+\\w+x``);
   * every match runs against at most MAX_MATCH_TEXT characters of each
-    candidate text (GuardedPattern).
+    candidate text (GuardedPattern);
+  * the engine's linear-time regex engine (linre), which runs the patterns
+    in the taint passes (the intra-file one's too since 0.1.9's Q-1), must
+    run it: it refuses a backreference
+    (but to a quote), a conditional, a repeat of what can match nothing,
+    an atomic group, and a program too large, among others.
 Sanitizer names are exact call names (``module.func`` / ``func``), escaped
 before they are compiled, so they carry no regex risk; but a config loaded
 from the scanned repository may not declare sanitizers at all (allow_sanitizers
 =False): a repository must not be able to declare its own code safe.
 
-Standard library only; imports nothing else from Lazaret.
+Standard library only; imports nothing else from Lazaret but the engine's
+binding (for linre's verdict on a pattern), when it is loaded.
 """
 from __future__ import annotations
 
@@ -280,6 +286,20 @@ def _walk(items, in_repeat, unbounded):
             _walk(sub, in_repeat, unbounded)
 
 
+def _linre_refuses(pattern):
+    """Why linre (the engine's regex engine, which runs a config's patterns
+    in the cross-file taint passes) would not run `pattern`; None when it
+    runs it, or when the engine is not loaded (no pass runs then)."""
+    try:
+        from lazaret.scanner import _native
+    except ImportError:                   # (not inside the Lazaret package)
+        return None
+    if not _native.available():
+        return None
+    got = _native.call("linre.probe", {"pattern": pattern, "texts": []})
+    return got.get("error") if got.get("refused") else None
+
+
 def check_pattern(pattern):
     """(GuardedPattern, None) for an acceptable user regex, else
     (None, reason). reason starting with 'invalid:' means it did not
@@ -303,6 +323,9 @@ def check_pattern(pattern):
         return None, str(exc)
     except Exception:                     # parser internals changed: refuse
         return None, "could not be analyzed for backtracking safety"
+    why = _linre_refuses(pattern)
+    if why:
+        return None, f"the engine's linear-time regex engine does not run it: {why}"
     return GuardedPattern(pattern, compiled), None
 
 

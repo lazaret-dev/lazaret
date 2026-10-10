@@ -20,6 +20,11 @@ SCA = os.path.join(_BIN, "sca_main.py")
 BOOTSTRAP = os.path.join(_BIN, "registry_bootstrap.py")   # registry with a faked network
 
 MAKE_BUNDLE = os.path.join(REPO_ROOT, "scripts", "make_bundle.py")
+
+# The environment of a test that fakes urllib's opener (repo._OPENER, repo._module_opener): Python's transport,
+# which the native one (NET-1, lazaret/scanner/nativenet.py) would otherwise take the request from. A test class
+# takes it with `@mock.patch.dict(os.environ, _support.PYTHON_TRANSPORT)`.
+PYTHON_TRANSPORT = {"LAZARET_NETWORK": "python"}
 FLOW_SRC = os.path.join(PKG, "scanner", "flow.py")
 
 

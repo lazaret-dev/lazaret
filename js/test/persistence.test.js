@@ -18,6 +18,7 @@ import { spawnSync } from "node:child_process";
 import { persistenceReasons, installScriptRisk, importTimeRisk, importTimeSeverity } from "../src/lib/native.js";
 import { parseJsonc, JsoncError, configKind, ownerDir, entries, localCommand } from "../src/lib/autorun.js";
 import { isWorkflow, findings, outline } from "../src/lib/ghworkflow.js";
+import { HARDENING_RULES } from "../src/scanner/rules.js";
 import { scanConfigFile } from "../src/scanner/scan.js";
 
 const CLI = join(dirname(fileURLToPath(import.meta.url)), "..", "bin", "lazaret.js");
@@ -153,9 +154,14 @@ test("workflows the worms planted", () => {
     [1, [], "seq", "", []], [2, ["seq", "-"], null, "a", []], [3, ["seq", "-"], "b", "1", []],
     [4, ["seq", "-"], "c", "", [[5, "x: y"], [7, "z"]]]]);
   const rep = scanTree({ ".github/workflows/discussion.yaml": backdoor, ".github/workflows/formatter_1.yml": artifact, "docs/f.yml": artifact });
-  assert.deepEqual(rep.issues.filter((i) => i.rule.startsWith("SC-")).map((i) => [i.rule, i.sev, i.file.replaceAll("\\", "/"), i.line]), [
+  const sc = rep.issues.filter((i) => i.rule.startsWith("SC-"));
+  assert.deepEqual(sc.filter((i) => !HARDENING_RULES.has(i.rule)).map((i) => [i.rule, i.sev, i.file.replaceAll("\\", "/"), i.line]), [
     ["SC-WORKFLOW-BACKDOOR", "CRITICAL", ".github/workflows/discussion.yaml", 12],
     ["SC-WORKFLOW-SECRETS", "CRITICAL", ".github/workflows/formatter_1.yml", 8]]);
+  // (and since 0.1.9 the workflows' hardening checks: no permissions set, actions at a tag)
+  assert.deepEqual([...new Set(sc.filter((i) => HARDENING_RULES.has(i.rule)).map((i) => i.rule))].sort(),
+    ["SC-WORKFLOW-PERMISSIONS", "SC-WORKFLOW-UNPINNED"]);
+  assert.equal(sc.filter((i) => i.file.replaceAll("\\", "/") === "docs/f.yml").length, 0);
 });
 
 test("an install hook's own command", () => {

@@ -16,8 +16,11 @@ count in no code metric (core.scan_config_file):
             passwd, passphrase, secret, token, api_key, access_key,
             private_key or secret_key, or it ends in a pass / pwd / auth
             segment (DB_PASS, .npmrc's _auth) — whose value is a literal that
-            looks like one (secret_value), outside comments; and a password
-            in a URL's userinfo (postgres://user:password@db.host/…).
+            looks like one (secret_value), outside comments; a password
+            in a URL's userinfo (postgres://user:password@db.host/…); and in
+            a .netrc (0.1.9, N-12), whose tokens are separated by blanks
+            (`machine HOST login USER password PASS`), a password token's,
+            unless the entry's login is anonymous FTP's (N-25).
 
 This module holds the pure parts (names, matching, comments, redaction); the
 npm engine has a twin (js/src/lib/configsecrets.js). Every pattern here runs
@@ -38,6 +41,8 @@ CONFIG_NAMES = frozenset((
     ".env", ".envrc", ".npmrc", ".pypirc", ".netrc", "_netrc", ".git-credentials", ".dockercfg",
     "dockerfile", "containerfile", "id_rsa", "id_dsa", "id_ecdsa", "id_ed25519",
 ))
+#: A .netrc's names (curl's, git's, pip's and ftp's credentials; _netrc on Windows).
+NETRC_NAMES = frozenset((".netrc", "_netrc"))
 #: Lockfiles: generated, full of integrity hashes, never where a credential is kept.
 CONFIG_SKIP_NAMES = frozenset((
     "package-lock.json", "npm-shrinkwrap.json", "pnpm-lock.yaml", "packages.lock.json",
@@ -122,6 +127,10 @@ def comment_spans(content):
 KV_RE = re.compile(
     r"(?<![A-Za-z0-9_.\-])[\"']?([A-Za-z0-9_.\-]{1,128})[\"']?[ \t]*([:=])[ \t]*"
     r"(\"[^\"\n]*\"|'[^'\n]*'|[^\s\"',;#{}\[\]]+)")
+#: Where a key-value pair S-SECRET can report on may be, in the text lowered (a key is ASCII): a name ending as
+#: SECRET_KEY_RE's names end, then the separator. A line without it has no such pair (scan_config_file reads only
+#: the lines that have it, or a URL). (Lowered, not re.I: an alternation re.I searches is six times slower.)
+SECRET_KV_HINT_RE = re.compile(r"(?:password|passwd|passphrase|secret|token|key|pass|pwd|pat|auth)[\"']?[ \t]*[:=]")
 #: A key named like a credential: by its last word, or its last segment.
 SECRET_KEY_RE = re.compile(
     r"(?:password|passwd|passphrase|secret|token|(?:api|access|account|app|client|encryption|"
@@ -200,9 +209,64 @@ WEBHOOK_RE = re.compile(
     r"|https://(?:ptb\.|canary\.)?discord(?:app)?\.com/api/webhooks/[0-9]{5,20}/[A-Za-z0-9_\-]{20,100}")
 
 
-def secret_col(code):
+#: A .netrc's password token and its value: a run without blanks, or "…" quoted.
+NETRC_PASSWORD_RE = re.compile(r'(?<![^ \t])password[ \t]+("[^"\n]*"|[^\s"]+)')
+#: A .netrc's tokens: a run without blanks, or "…" quoted.
+_NETRC_TOKEN_RE = re.compile(r'"[^"\n]*"|[^\s"]+')
+#: The logins of anonymous FTP, whose password is by convention an e-mail address, not a secret (N-25).
+NETRC_ANONYMOUS = frozenset(("anonymous", "ftp"))
+
+
+def netrc_anonymous(code_lines):
+    """{line index: {column}} of the password values of a .netrc's entries
+    whose login is anonymous FTP's (`anonymous`, `ftp`, in any case), which
+    S-SECRET does not report (N-25). An entry runs from `machine NAME` or
+    `default` to the next one, over as many lines as it takes, its login
+    before or after its password; a `macdef`'s lines, up to an empty one, are
+    not tokens. `code_lines`: the file's lines, comments removed."""
+    skip, login, passwords = {}, None, []
+    pending, in_macro = None, False
+
+    def close():
+        if login is not None and unquote(login).lower() in NETRC_ANONYMOUS:
+            for i, col in passwords:
+                skip.setdefault(i, set()).add(col)
+    for i, line in enumerate(code_lines):
+        if in_macro:
+            in_macro = bool(line.strip())
+            continue
+        for m in _NETRC_TOKEN_RE.finditer(line):
+            token = m.group(0)
+            if pending is not None:
+                if pending == "login":
+                    login = token
+                elif pending == "password":
+                    passwords.append((i, m.start()))
+                elif pending == "macdef":
+                    in_macro = True                 # (its body is the lines that follow, to an empty one)
+                pending = None
+                if in_macro:
+                    break
+                continue
+            if token in ("machine", "default"):
+                close()
+                login, passwords = None, []
+                pending = "machine" if token == "machine" else None
+            elif token in ("login", "password", "account", "macdef"):
+                pending = token
+    close()
+    return skip
+
+
+def secret_col(code, netrc=False, skip=()):
     """Column of the first credential S-SECRET reports on a config line (its
-    comment text removed), else None."""
+    comment text removed), else None. `netrc`: the line is a .netrc's;
+    `skip`: the columns of its password values that are not secrets
+    (netrc_anonymous)."""
+    if netrc:
+        for m in NETRC_PASSWORD_RE.finditer(code):
+            if m.start(1) not in skip and secret_value(m.group(1)):
+                return m.start(1)
     for m in KV_RE.finditer(code):
         value = m.group(3)
         if value[0] not in "\"'":
@@ -224,11 +288,14 @@ def secret_col(code):
     return None
 
 
-def redact_values(line):
+def redact_values(line, netrc=False):
     """`line` with the value of every credential-named key replaced by
     [redacted] — whatever the value looks like, unless it is a reference or
     a template ($VAR, {{…}}, <…>, %…): a snippet's context lines are shown
-    only as far as they cannot carry a credential."""
+    only as far as they cannot carry a credential. `netrc`: a .netrc's line,
+    whose password tokens' values are redacted too."""
+    if netrc:
+        line = NETRC_PASSWORD_RE.sub(lambda m: m.group(0)[:m.start(1) - m.start(0)] + "[redacted]", line)
     out, pos = [], 0
     for m in KV_RE.finditer(line):
         value = unquote(m.group(3))
@@ -252,12 +319,62 @@ _PEM_BODY_RE = re.compile(r"[A-Za-z0-9+/]{40,}={0,2}")
 _MIXED_RE = (re.compile(r"[A-Z]"), re.compile(r"[a-z]"), re.compile(r"[0-9]"))
 
 
-def key_material(text):
-    """True when `text` holds a line of private-key material: a base64 run of
-    40 or more characters that mixes upper case, lower case and digits (a
-    template's "privatekeyprivatekey…" does not)."""
-    m = _PEM_BODY_RE.search(text)
-    return bool(m and all(r.search(m.group()) for r in _MIXED_RE))
+_STRING_PREFIX_RE = re.compile(r"[A-Za-z][A-Za-z0-9]{0,2}#*[\"']")
+
+
+def _past_pem_separators(text, k, line_start):
+    """The index past what a string or a concatenation puts between a private-key header and its key: blanks, the
+    escapes \\n \\r \\t (with any number of backslashes), backslashes that end the line (a line continued),
+    quotes and a string's prefix before one (`b"`, `rb'`, `u8"`, Rust's `r#"`), `#` (a raw string's closing marks, a
+    comment's), `+`, `,` and `.` (PHP's and Perl's concatenation); at the start of a line after the header's, a
+    comment's `*` and `/` too."""
+    while k < len(text):
+        c = text[k]
+        if c.isspace() or c in "\"'`+,.#" or (line_start and c in "*/"):
+            k += 1
+        elif c == "\\":
+            j = k + 1
+            while j < len(text) and text[j] == "\\":
+                j += 1
+            if j < len(text) and text[j] in "nrt":
+                k = j + 1
+                continue
+            while j < len(text) and text[j].isspace():
+                j += 1
+            if j < len(text):
+                break
+            k = j
+        else:
+            m = _STRING_PREFIX_RE.match(text, k)       # a string's prefix and its quote
+            if not m:
+                break
+            k = m.end()
+    return k
+
+
+def _key_at(text, k):
+    """True when a private key begins at `text[k]`: key material, a base64 run of 40 or more characters that mixes
+    upper case, lower case and digits (a template's "privatekeyprivatekey…" does not), or an encrypted key's
+    "Proc-Type:"."""
+    m = _PEM_BODY_RE.match(text, k)
+    return bool(m and all(r.search(m.group()) for r in _MIXED_RE)) or text.startswith("Proc-Type:", k)
+
+
+def key_follows(line, end, following):
+    """True when a private-key header's key comes right after it (S-TOKEN-PEM): key material, or an encrypted key's
+    "Proc-Type:" (_key_at), past the separators a string or a concatenation puts there, on the header's line (`line`,
+    the header ending at `end`: read in place, as a line can hold many headers); or, where that line ends with them,
+    at the start of the first of the `following` lines (the caller's window: the next two) that holds anything. Key
+    material further on is not the header's: a minified line runs on for megabytes, and a library keeps a header
+    alone to recognize a key."""
+    k = _past_pem_separators(line, end, False)
+    if k < len(line):
+        return _key_at(line, k)
+    for line in following:
+        k = _past_pem_separators(line, 0, True)
+        if k < len(line):
+            return _key_at(line, k)
+    return False
 
 
 def documentation_token(text):

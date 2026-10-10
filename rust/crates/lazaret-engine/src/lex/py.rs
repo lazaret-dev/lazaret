@@ -15,6 +15,11 @@ const fn c(ch: char) -> u32 {
 
 /// The tokens of `s`.
 pub fn tokens(s: &[u32]) -> Vec<Token> {
+    // (a call's tests lex its text more than once: the open gate keeps them)
+    crate::textgate::memo(s, "py-tokens", || lex(s))
+}
+
+fn lex(s: &[u32]) -> Vec<Token> {
     let lexed = match tokenize_with(s, true) {
         Ok(l) => l,
         Err(_) => {

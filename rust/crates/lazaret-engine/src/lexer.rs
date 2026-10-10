@@ -44,7 +44,7 @@ enum StrScan {
 
 fn str_scan_of(rx: &Regex) -> Option<StrScan> {
     let text = pystr::to_string(&rx.pattern);
-    let flags = rx.flags & !crate::pyre::constants::FLAG_UNICODE;
+    let flags = rx.flags & !crate::pyre::UNICODE;
     let dotall = flags == crate::pyre::DOTALL;
     for q in ['\'', '"', '`'] {
         let found = if text == format!(r"{q}(?:[^{q}\\\n]|\\.)*{q}?") && dotall {
@@ -205,7 +205,7 @@ pub fn lex_comment_spans(
     if lang == Some("cfg") {
         panic!("config comment spans are not in the Rust engine yet");
     }
-    if let Some(l @ ("js" | "py")) = lang {
+    if let Some(l @ ("js" | "py" | "go" | "rs")) = lang {
         let st = crate::lex::structure(content, l, jsx).unwrap_or_default();
         if let Some(s) = strings {
             s.extend(st.strings);

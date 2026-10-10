@@ -213,6 +213,13 @@ pub fn in_words(s: &[u32], words: &str) -> bool {
     words.split_whitespace().any(|w| pystr::eq(s, w))
 }
 
+/// [`in_words`] of [`CLEAN_RESULT`], its words split once (it is asked of
+/// every call the model resolves).
+pub fn clean_result(s: &[u32]) -> bool {
+    static WORDS: std::sync::OnceLock<Vec<&'static str>> = std::sync::OnceLock::new();
+    WORDS.get_or_init(|| CLEAN_RESULT.split_whitespace().collect()).iter().any(|w| pystr::eq(s, w))
+}
+
 fn cp(s: &str) -> PyStr {
     s.chars().map(|c| c as u32).collect()
 }
@@ -699,7 +706,7 @@ pub fn dotted(t: &Tree, node: NodeId) -> PyStr {
 
 /// `dotted`, and the links of the chain it followed.
 pub fn dotted_links(t: &Tree, node: NodeId) -> (PyStr, u64) {
-    let mut parts: Vec<&[u32]> = Vec::new();
+    let mut parts: Vec<&[u32]> = Vec::with_capacity(4);
     let mut n = node;
     let mut links = 0u64;
     loop {
@@ -737,7 +744,7 @@ pub fn dotted_links(t: &Tree, node: NodeId) -> (PyStr, u64) {
             }
         }
     }
-    let mut out = Vec::new();
+    let mut out = Vec::with_capacity(parts.iter().map(|p| p.len() + 1).sum());
     for (k, p) in parts.iter().rev().enumerate() {
         if k > 0 {
             out.push(0x2E);

@@ -10,11 +10,15 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { run, scanConfigFile, isConfigFile } from "../src/index.js";
 import {
-  configCommentSpans, secretCol, redactConfigValues, documentationToken, keyMaterial, JWT_IO_PAYLOAD,
+  configCommentSpans, secretCol, redactConfigValues, documentationToken, keyFollows as keyFollowsAt, JWT_IO_PAYLOAD,
 } from "../src/lib/configsecrets.js";
 
 const PASS = "Zq8!vN3pL0wX7r";
 const TOKEN = "ghp_" + "a1B2".repeat(9);
+// a made-up private key, in pieces (tests/fixtures/README.md); BODY is 64 of base64's characters, mixed
+const HEADER = "-----BEGIN " + "PRIVATE KEY-----", FOOTER = "-----END " + "PRIVATE KEY-----";
+const RSA_HEADER = "-----BEGIN RSA " + "PRIVATE KEY-----", RSA_FOOTER = "-----END RSA " + "PRIVATE KEY-----";
+const BODY = "MIIEvQIB" + "ADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQC7Zq8vN3pL0wX7rT2mK9sB";
 
 test("config file names", () => {
   for (const n of [".env", ".env.local", "prod.env", "config.json", "app.yaml", "ci.yml", "setup.cfg",
@@ -62,12 +66,46 @@ test("context lines lose credential-named values, not references", () => {
   assert.equal(redactConfigValues('"token": "x", "api_key": "${KEY}"'), '"token": [redacted], "api_key": "${KEY}"');
 });
 
-test("documentation samples and key material", () => {
-  assert.ok(documentationToken("AKIAIOSFODNN7EXAMPLE"));
-  assert.ok(!documentationToken("AKIA2345ABCD6789WXYZ"));
+test("documentation samples", () => {
+  assert.ok(documentationToken("AKI\x41IOSFODNN7EXAMPLE"));
+  assert.ok(!documentationToken("AKI\x412345ABCD6789WXYZ"));
   assert.ok(documentationToken("eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9." + JWT_IO_PAYLOAD));
-  assert.ok(keyMaterial("MIIEpAIBAAKCAQEA3Bq7Zq8vN3pL0wX7rT2mK9sBZq8vN3pL0wX7rT2mK9sB"));
-  assert.ok(!keyMaterial("privatekey".repeat(6)));
+});
+
+test("a private-key header's key comes right after it (S-TOKEN-PEM; test_private_key_material's twin)", () => {
+  const keyFollows = (after, following) => keyFollowsAt(HEADER + after, HEADER.length, following);
+  assert.ok(keyFollows("\\n" + BODY, []));
+  assert.ok(keyFollows('\\\\n" + "' + BODY, []));                 // a string inside a string, then joined
+  assert.ok(keyFollows('",', ['    "' + BODY + '",']));
+  assert.ok(keyFollows("", ["", "  # " + BODY]));                  // a blank line, then a comment's mark
+  assert.ok(keyFollows("", ["Proc-Type: 4,ENCRYPTED"]));
+  assert.ok(keyFollows("\\nProc-Type: 4,ENCRYPTED\\n", []));
+  assert.ok(keyFollows('\\n" \\', ['      "' + BODY + '\\n"']));        // a line continued
+  assert.ok(keyFollows('\\n" .', ['      "' + BODY + '";']));             // PHP's and Perl's concatenation
+  assert.ok(!keyFollows("\\ x", [BODY]));                               // a backslash, and then not an escape
+  assert.ok(keyFollows('\\n"', ['    b"' + BODY + '\\n"']));                // a string's prefix
+  assert.ok(keyFollows('"#,', ['    r#"' + BODY + '"#,']));                 // Rust's raw strings
+  assert.ok(!keyFollows('"', ['    bytes("' + BODY + '")']));               // not a prefix: a call
+  assert.ok(!keyFollows('"))throw new TypeError("x");var t="' + BODY + '"', []));
+  assert.ok(!keyFollows('"', ["const x = 1; // " + BODY]));
+  assert.ok(!keyFollows("\\n" + "privatekey".repeat(6), []));     // not mixed: a template's text
+  assert.ok(!keyFollows("", ["", "  ", "x"]));                     // the first line that holds anything decides
+  assert.ok(!keyFollows("", []));
+  const found = (name, text) => scanConfigFile(name, text).filter((i) => i.rule === "S-TOKEN").map((i) => i.line);
+  const sa = `{\n  "type": "service_account",\n  "private_key": "${HEADER}\\n${BODY}\\n${FOOTER}\\n",\n`
+    + '  "client_email": "svc@example.invalid"\n}\n';
+  assert.deepEqual(found("sa.json", sa), [3]);
+  assert.deepEqual(found(".env", `PRIVATE_KEY="${HEADER}\\n...\\n${FOOTER}"\n`), []);
+  assert.deepEqual(found("c.yaml", `header: "${HEADER}"  # see ${BODY}\n`), []);
+  assert.deepEqual(found("k.pem", `${RSA_HEADER}\n${BODY}\n${RSA_FOOTER}\n`), [1]);
+  assert.deepEqual(found("e.pem", `${RSA_HEADER}\nProc-Type: 4,ENCRYPTED\nDEK-Info: AES-128-CBC,0123456789ABCDEF\n\n`
+    + `${BODY}\n${RSA_FOOTER}\n`), [1]);
+  assert.deepEqual(found("f.pem", `${RSA_HEADER}\n\n\n${BODY}\n${RSA_FOOTER}\n`), []);
+  // 60,000 headers without their keys on one line, then an AWS key: one walk, each header's key looked for in place
+  const many = `x="${HEADER}")x(`.repeat(60_000) + '"AKI' + 'AQWERTYUIOPASDFGH"';
+  const t0 = Date.now();
+  assert.deepEqual(found("x.env", `a = 1\n${many}\n`), [2]);
+  assert.ok(Date.now() - t0 < 10_000);
 });
 
 test("scanConfigFile: tokens everywhere, secrets outside comments, markers in comments only", () => {
@@ -78,6 +116,60 @@ test("scanConfigFile: tokens everywhere, secrets outside comments, markers in co
     + `D_PASSWORD=${PASS} LABEL="# nosec"\n`), [["S-SECRET", 3], ["S-TOKEN", 2]]);
   const issues = scanConfigFile("c.json", `{\n  "password": "${PASS}",\n  "pw": "hunter2"\n}\n`);
   assert.ok(!JSON.stringify(issues).includes(PASS));
+});
+
+test("a .netrc's password tokens (N-12) and crates.io's API tokens (R-4)", () => {
+  const found = (path, text) => scanConfigFile(path, text).map((i) => [i.rule, i.line]).sort();
+  const netrc = `machine api.example.invalid login alice password ${PASS}\nmachine ftp.example.invalid\n  login bob\n`
+    + `  password changeme\ndefault login anon password "${PASS}"\n# password ${PASS}\n`;
+  for (const name of [".netrc", "_netrc", "home/.NETRC"]) {
+    assert.deepEqual(found(name, netrc), [["S-SECRET", 1], ["S-SECRET", 5]], name);
+  }
+  assert.deepEqual(found(".netrc", `machine h.invalid login app_password password ${PASS}\n`), [["S-SECRET", 1]]);
+  assert.ok(!JSON.stringify(scanConfigFile(".netrc", `login app_password password ${PASS}\n`)).includes(PASS));
+  assert.deepEqual(found("notes.cfg", `hint = the password ${PASS} is not this\n`), []);
+  assert.ok(!JSON.stringify(scanConfigFile(".netrc", netrc)).includes(PASS));
+  // N-25: an entry whose login is anonymous FTP's: its password is an e-mail address by convention
+  const anon = "machine ftp.host.invalid login anonymous password jdoe@mailhost.invalid\n"
+    + "default\n  password jdoe@mailhost.invalid\n  login FTP\n"
+    + `machine api.host.invalid login alice password ${PASS}\n`
+    + "macdef init\ncd /pub\n\n"
+    + `machine other.invalid\n login ftpuser\n password ${PASS}\n`
+    + "machine more.invalid login anonymous\n"
+    + `machine last.invalid password ${PASS}\n`;
+  assert.deepEqual(found(".netrc", anon).map(([, line]) => line).sort((a, b) => a - b), [5, 11, 13]);
+  assert.deepEqual(found("ftp.cfg", "login anonymous password jdoe@mailhost.invalid\n"), []);
+  assert.equal(secretCol(`machine h login u password ${PASS}`, true), 27);
+  assert.equal(secretCol(`machine h login u password ${PASS}`), -1);
+  assert.equal(redactConfigValues(`machine h login u password ${PASS} account x`, true),
+    "machine h login u password [redacted] account x");
+  const tok = "cio" + "Zq8vN3pL0wX7rT2mK9sB4hF6jD1aE5cG";
+  assert.deepEqual(found("credentials.toml", `[registry]\ntoken = "${tok}"\n`), [["S-SECRET", 2], ["S-TOKEN", 2]]);
+  for (const text of [`x = "A${tok}"\n`, `x = "${tok}9"\n`, `x = "${tok.slice(0, -1)}"\n`]) {
+    assert.ok(!found("a.toml", text).some(([r]) => r === "S-TOKEN"), text);
+  }
+});
+
+test("npm's access tokens, Anthropic's and OpenAI's keys (V-2)", () => {
+  const found = (path, text) => scanConfigFile(path, text).map((i) => [i.rule, i.line]).sort();
+  // made up and built in pieces, so the source holds no token-shaped literal (GitHub's push protection knows these)
+  const keys = ["npm" + "_" + "a1B2".repeat(9), "sk-ant-" + "api03-" + "Ab1_-".repeat(18) + "Ab1" + "AA",
+    "sk-ant-" + "oat01-" + "Q7r_p".repeat(12), "sk-" + "a1B2C".repeat(4) + "T3Blbk" + "FJ" + "d3E4f".repeat(4),
+    "sk-ant-" + "usr-" + "1a2B3c4D5e6F" + "-" + "Gh7Ij8Kl9Mn0".repeat(6) + "Op1Q" + "-" + "Rs2Tu",
+    "sk-" + "proj-" + "Ab1_-".repeat(14) + "Ab1_" + "T3Blbk" + "FJ" + "Cd2-_".repeat(14) + "Cd2-"];
+  for (const key of keys) {
+    for (const [path, text] of [[".env", `KEY=${key}\n`], ["ci.yml", `env:\n  K: ${key}\n`]]) {
+      const issues = scanConfigFile(path, text);
+      assert.ok(issues.some((i) => i.rule === "S-TOKEN"), `${path} ${key.slice(0, 12)}`);
+      assert.ok(!JSON.stringify(issues).includes(key), key.slice(0, 12));
+    }
+    assert.ok(!found(".env", `K=x${key}\n`).some(([r]) => r === "S-TOKEN"), key.slice(0, 12));
+  }
+  for (const text of ["npm" + "_" + "a".repeat(35), "sk-ant-" + "api03-" + "a".repeat(39), "sk-ant-" + "api03-...",
+    "sk-ant-" + "usr-" + "a".repeat(39), "sk-ant-" + "usra-" + "a".repeat(50),
+    "sk-" + "a".repeat(48), "sk-" + "a".repeat(19) + "T3Blbk" + "FJ" + "a".repeat(20)]) {
+    assert.ok(!found(".env", `K=${text}\n`).some(([r]) => r === "S-TOKEN"), text);
+  }
 });
 
 test("linear time on hostile lines", () => {

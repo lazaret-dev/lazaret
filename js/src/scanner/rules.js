@@ -9,6 +9,13 @@
 import { pyRe } from "../lib/pycompat.js";
 
 export const SEV_ORDER = {BLOCKER:0, CRITICAL:1, MAJOR:2, MINOR:3, INFO:4};
+
+// The CI files' hardening checks (twin of core.HARDENING_RULES): reported,
+// and only a CRITICAL one counts against the gate's supply-chain condition.
+export const HARDENING_RULES = new Set([
+  "SC-WORKFLOW-UNPINNED", "SC-WORKFLOW-PR-CHECKOUT", "SC-WORKFLOW-CACHE", "SC-WORKFLOW-PERMISSIONS",
+  "SC-WORKFLOW-OIDC-INSTALL", "SC-WORKFLOW-PIPE-SHELL",
+  "SC-GITLAB-INCLUDE", "SC-GITLAB-IMAGE", "SC-GITLAB-PIPE-SHELL", "SC-GITLAB-MR-TEXT", "SC-GITLAB-TOKEN-INSTALL"]);
 export const TYPES = {VULN:"Vulnerability", HOTSPOT:"Security Hotspot", BUG:"Bug", SMELL:"Code Smell"};
 
 // DELETE and UPDATE without WHERE: the statement heads, found in one linear pass (sql.js)

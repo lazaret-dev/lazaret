@@ -1,15 +1,18 @@
-"""The native engine's notices: part of it is a Rust translation of CPython
-code, distributed under CPython's license.
+"""The native engine's notices: since P-16 the engine is Lazaret's own work,
+with Unicode data.
 
-rust/NOTICE lists what was translated from where, summarizes the changes
-(section 3 of the PSF License asks for that) and repeats the originals'
-notices; rust/LICENSE-PYTHON is CPython 3.14.0's LICENSE, unchanged. Each
-translated file names its source and carries its notices, and the crates and
-the platform wheels (python/_build) declare both licenses. A file that comes
-to say it is ported from CPython without them fails here.
+Until then parts of it were Rust translations of CPython code, distributed
+under CPython's license: the port of sre (pyre/), the shell tokenizer
+(hooks.rs), the Final_Sigma rule (unicode.rs) and re's case-fix table
+(generated/unicode13.rs). They are retired. rust/NOTICE says so and lists
+no translated file; no engine file carries CPython's license header or says
+it is ported from CPython; the crates declare Apache-2.0 AND Unicode-3.0.
+So do the packages that carry the engine (the wheels, the sdist, the npm
+package): the codec names they hold outside the engine are what Python's
+codecs answer to, facts about Python, not CPython's code, so none carries
+CPython's license (they did in 0.1.8; js/NOTICE, test_notices.py).
 """
 
-import hashlib
 import os
 import re
 import unittest
@@ -18,27 +21,13 @@ from tests import _support
 
 RUST = os.path.join(_support.REPO_ROOT, "rust")
 SRC = os.path.join(RUST, "crates", "lazaret-engine", "src")
-# the crates' and the platform wheels' license (with generated/unicode13.rs's Unicode data, 0.1.8) …
-EXPRESSION = "Apache-2.0 AND Python-2.0.1 AND Unicode-3.0"
-# … and a translated file's
-FILE_EXPRESSION = "Apache-2.0 AND Python-2.0.1"
+# the crates' license: Lazaret's, and the Unicode data of generated/unicode13.rs and pyparse/unidata.rs
+CRATES = "Apache-2.0 AND Unicode-3.0"
+# the packages' (python/_build, scripts/check_native_library.py): the same
+PACKAGES = CRATES
 PSF = "Copyright (c) 2001 Python Software Foundation; All Rights Reserved"
-# CPython v3.14.0's LICENSE: replace it only with another release's LICENSE, whole.
-LICENSE_PYTHON_SHA256 = "b0e25a78cffb43f4d92de8b61ccfa1f1f98ecbc22330b54b5251e7b6ba010231"
-# file -> the Secret Labs line of what it translates (None: CPython's notice only)
-TRANSLATED = {
-    "pyre/parser.rs": ["Copyright (c) 1998-2001 by Secret Labs AB.  All rights reserved."],
-    "pyre/compiler.rs": ["Copyright (c) 1997-2001 by Secret Labs AB.  All rights reserved."],
-    "pyre/constants.rs": ["Copyright (c) 1998-2001 by Secret Labs AB.  All rights reserved."],
-    "pyre/matcher.rs": ["Copyright (c) 1997-2001 by Secret Labs AB.  All rights reserved."],
-    "pyre/mod.rs": ["Copyright (c) 1998-2001 by Secret Labs AB.  All rights reserved.",
-                    "Copyright (c) 1997-2001 by Secret Labs AB.  All rights reserved."],
-    "hooks.rs": [],
-    "unicode.rs": [],
-}
-CNRI = ("This version of the SRE library can be redistributed under CNRI's\n"
-        "Python 1.6 license.  For any other use, please contact Secret Labs\n"
-        "AB (info@pythonware.com).")
+# the terms of the SRE library's notices, which went with pyre/
+CNRI = "For any other use, please contact Secret Labs"
 
 
 def read(*parts):
@@ -46,82 +35,70 @@ def read(*parts):
         return f.read()
 
 
-def header(text):
-    """The leading // comment block, without the comment marks."""
-    lines = []
-    for line in text.splitlines():
-        if not line.startswith("//") or line.startswith("//!"):
-            break
-        lines.append(line[2:].strip())
-    return "\n".join(lines)
+def engine_files():
+    for crate in ("lazaret-engine", "lazaret-ffi"):
+        base = os.path.join(RUST, "crates", crate)
+        for root, _dirs, files in os.walk(base):
+            for fn in files:
+                if fn.endswith(".rs"):
+                    yield os.path.relpath(os.path.join(root, fn), RUST), read(root, fn)
 
 
 class NoticeTests(unittest.TestCase):
-    def test_license_python_is_cpythons_unchanged(self):
-        with open(os.path.join(RUST, "LICENSE-PYTHON"), "rb") as f:
-            data = f.read()
-        self.assertEqual(hashlib.sha256(data).hexdigest(), LICENSE_PYTHON_SHA256,
-                         "rust/LICENSE-PYTHON is CPython 3.14.0's LICENSE file, unchanged")
-        text = data.decode("ascii")
-        for part in (PSF, "PYTHON SOFTWARE FOUNDATION LICENSE VERSION 2", "CNRI LICENSE AGREEMENT FOR PYTHON 1.6.1"):
-            self.assertIn(part, text)
-
-    def test_the_notice_lists_every_translated_file(self):
+    def test_no_package_carries_cpythons_license(self):
+        for rel in ("rust/LICENSE-PYTHON", "js/LICENSE-PYTHON", "python/LICENSE-PYTHON"):
+            with self.subTest(rel):
+                self.assertFalse(os.path.exists(os.path.join(_support.REPO_ROOT, *rel.split("/"))))
         notice = read(RUST, "NOTICE")
-        self.assertIn(PSF, notice)
-        self.assertIn(EXPRESSION, notice)
-        listed = set(re.findall(r"crates/lazaret-engine/src/(\S+\.rs)", notice))
-        self.assertEqual(listed, set(TRANSLATED) | {"generated/unicode13.rs"})
-        for source in ("Lib/re/__init__.py", "Lib/re/_parser.py", "Lib/re/_compiler.py", "Lib/re/_constants.py",
-                       "Modules/_sre/sre_lib.h", "Modules/_sre/sre.c", "Objects/unicodeobject.c"):
-            with self.subTest(source=source):
-                self.assertIn(f"\n{source}", notice)                  # its notices are repeated
-        self.assertIn("Summary of the changes", notice)
+        self.assertNotIn("LICENSE-PYTHON", notice)
+        self.assertNotIn("Python-2.0.1", notice)
+        self.assertIn(f"Those packages are {PACKAGES} too.", " ".join(notice.split()))
 
-    def test_each_translated_file_carries_its_notices(self):
-        for name, lines in TRANSLATED.items():
-            with self.subTest(file=name):
-                text = read(SRC, *name.split("/"))
-                self.assertTrue(text.startswith(f"// SPDX-License-Identifier: {FILE_EXPRESSION}\n"))
-                head = header(text)
-                self.assertIn("rust/NOTICE", head)
-                self.assertIn("rust/LICENSE-PYTHON", head)
-                self.assertIn(PSF, head)
-                for line in lines:
-                    self.assertIn(line, head)
-                if lines:
-                    self.assertIn(CNRI, head)
+    def test_the_notice_says_the_engine_is_lazarets_own(self):
+        notice = read(RUST, "NOTICE")
+        self.assertIn("is Lazaret's own work", notice)
+        self.assertIn(f"the crates' license is {CRATES}.", " ".join(notice.split()))
+        # the retired translations are named as history, not as parts of the engine
+        history = notice.split("What was CPython's")[1].split("Unicode data")[0]
+        self.assertIn("They are retired", history)
+        for name in ("Lib/shlex.py", "Objects/unicodeobject.c", "Lib/re/_casefix.py", "Modules/_sre"):
+            with self.subTest(name=name):
+                self.assertEqual(notice.count(name), history.count(name))
+        # no original's notice, no summary of changes, no SRE terms are left
+        self.assertNotIn(PSF, notice)
+        self.assertNotIn("Summary of the changes", notice)
+        self.assertNotIn("Fredrik Lundh", notice)
+        self.assertNotIn(CNRI, notice)
+        self.assertIn("generated/unicode13.rs", notice.split("Unicode data")[1])
 
-    def test_no_other_file_says_it_is_ported_from_cpython(self):
-        """A new translation gets a notice (and a line in rust/NOTICE)."""
+    def test_no_engine_file_carries_cpythons_license(self):
+        for rel, text in engine_files():
+            with self.subTest(file=rel):
+                self.assertNotIn("Python-2.0.1", text)
+                self.assertNotIn(PSF, text)
+                self.assertNotIn("LICENSE-PYTHON", text)
+
+    def test_no_engine_file_says_it_is_ported_from_cpython(self):
+        """A translation of CPython code would need its notices and its
+        license again: write from the documentation and Python's answers."""
         said = re.compile(r"(?i)(?:port(?:ed)?|translat\w*)\b[^.]{0,80}\b(?:CPython|_sre|sre_lib|"
                           r"_parser\.py|_compiler\.py|shlex\.py|unicodeobject)|CPython's \w+\.")
-        for crate in ("lazaret-engine", "lazaret-ffi"):
-            base = os.path.join(RUST, "crates", crate)
-            for root, _dirs, files in os.walk(base):
-                for fn in files:
-                    if not fn.endswith(".rs"):
-                        continue
-                    rel = os.path.relpath(os.path.join(root, fn), SRC).replace(os.sep, "/")
-                    text = read(root, fn)
-                    if rel in TRANSLATED or rel == "generated/unicode13.rs":
-                        continue
-                    with self.subTest(file=os.path.relpath(os.path.join(root, fn), RUST)):
-                        self.assertIsNone(said.search(text), "says it is translated from CPython: give it a "
-                                                             "notice header and a line in rust/NOTICE")
+        for rel, text in engine_files():
+            with self.subTest(file=rel):
+                self.assertIsNone(said.search(text), "says it is translated from CPython")
 
-    def test_the_crates_and_the_platform_wheels_declare_both_licenses(self):
+    def test_the_crates_and_the_packages_declare_their_licenses(self):
         cargo = read(RUST, "Cargo.toml")
-        self.assertRegex(cargo, rf'(?m)^license = "{re.escape(EXPRESSION)}"$')
+        self.assertRegex(cargo, rf'(?m)^license = "{re.escape(CRATES)}"$')
         backend = _support.load_script(os.path.join(_support.PY_ROOT, "_build", "lazaret_build.py"),
                                        "lazaret_build_for_notices")
-        self.assertEqual(backend.NATIVE_LICENSE_EXPRESSION, EXPRESSION)
+        self.assertEqual(backend.NATIVE_LICENSE_EXPRESSION, PACKAGES)
         self.assertEqual({k: os.path.realpath(v) for k, v in backend.NATIVE_LICENSE_FILES.items()},
-                         {"LICENSE-PYTHON": os.path.realpath(os.path.join(RUST, "LICENSE-PYTHON")),
-                          "NOTICE": os.path.realpath(os.path.join(RUST, "NOTICE"))})
+                         {"NOTICE": os.path.realpath(os.path.join(RUST, "NOTICE"))})
+        self.assertNotIn("LICENSE-PYTHON", backend.RUST_TOP_FILES)
         check = _support.load_script(os.path.join(_support.REPO_ROOT, "scripts", "check_native_library.py"),
                                      "check_native_library_for_notices")
-        self.assertEqual(check.NATIVE_LICENSE_EXPRESSION, EXPRESSION)
+        self.assertEqual(check.NATIVE_LICENSE_EXPRESSION, PACKAGES)
         self.assertEqual(check.NATIVE_LICENSE_FILES, tuple(backend.NATIVE_LICENSE_FILES))
 
 

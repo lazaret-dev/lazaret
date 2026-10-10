@@ -51,7 +51,7 @@ impl Config {
     /// Patterns that fail to compile match nothing (taintspec refused them
     /// before they got here).
     pub fn new(extra_sources: &[PyStr], extra_sinks: &[(PyStr, u8)], full: &[PyStr], partial: &[(PyStr, u8)]) -> Config {
-        let compile = |p: &PyStr| crate::rxutil::dynamic(p.clone(), 0);
+        let compile = |p: &PyStr| crate::rxutil::dynamic_user(p.clone(), 0);
         let mut part: Vec<(PyStr, u8)> = Vec::new();
         for (name, bits) in partial {
             match part.iter_mut().find(|(k, _)| k == name) {
@@ -226,6 +226,13 @@ const FIX_SIZE: &str = "Split or deminify very large or deeply nested files, or 
 /// The cross-file Python pass over `files` (path, content: the project's
 /// own Python, no dependencies; None: a file whose content is not text).
 pub fn analyze(files: &[(PyStr, Option<PyStr>)], cfg: Config) -> Vec<Out> {
+    analyze_with(files, Vec::new(), cfg)
+}
+
+/// [`analyze`], with trees already parsed: `trees[k]`, when there is one,
+/// is file k's (the supply-chain model reads a text's tree before it asks
+/// for the flow, facts_here: one parse, not two).
+pub fn analyze_with(files: &[(PyStr, Option<PyStr>)], mut trees: Vec<Option<crate::pyparse::Tree>>, cfg: Config) -> Vec<Out> {
     let cfg = Rc::new(cfg);
     let mut p = Project::new(cfg.clone());
     let mut findings: Vec<Out> = Vec::new();
@@ -247,7 +254,11 @@ pub fn analyze(files: &[(PyStr, Option<PyStr>)], cfg: Config) -> Vec<Out> {
             }
             Some(c) => c,
         };
-        match crate::pyparse::parse(content) {
+        let parsed = match trees.get_mut(k).and_then(|t| t.take()) {
+            Some(tree) => Ok(tree),
+            None => crate::pyparse::parse(content),
+        };
+        match parsed {
             Ok(tree) => {
                 total += size;
                 if !p.add_module(k as u32, path, content, tree) {

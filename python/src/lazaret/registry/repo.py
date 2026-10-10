@@ -1,15 +1,18 @@
 #!/usr/bin/env python3
-"""Lazaret registry scanner — audit npm / PyPI packages for supply-chain compromise.
+"""Lazaret registry scanner — audit npm / PyPI packages, Go modules and crates for supply-chain compromise.
 
-Fetches package archives from registry.npmjs.org / pypi.org, scans them
-in memory (never extracted to disk — immune to tar-slip), and tracks scan
-state in a database so you can do full or incremental sweeps.
+Fetches package archives from registry.npmjs.org / pypi.org (and Go modules
+from proxy.golang.org, crates from static.crates.io), scans them in memory
+(never extracted to disk — immune to tar-slip), and tracks scan state in a
+database so you can do full or incremental sweeps.
 
 Usage:
     lazaret-registry add npm:express pypi:requests      # track packages
     lazaret-registry scan npm:left-pad                  # scan latest version
     lazaret-registry scan npm:left-pad@1.3.0            # scan specific version
     lazaret-registry scan pypi:six --full               # full ruleset, not just supply-chain
+    lazaret-registry scan go:github.com/pkg/errors@v0.9.1   # a Go module version
+    lazaret-registry scan crates:serde                  # the latest crate release
     lazaret-registry scan-all                           # scan latest of every tracked package
     lazaret-registry list                               # tracked packages + last verdicts
     lazaret-registry report npm:left-pad@1.3.0          # stored findings for a scan
@@ -26,7 +29,11 @@ State backends (--db or LAZARET_DB env):
                        for one-time setup. Don't reuse an existing application DB.
 
 Package specs: npm:<name>[@version]  |  pypi:<name>[@version or ==version]
+               go:<module path>[@version]  |  crates:<name>[@version]
 Scoped npm packages work: npm:@scope/pkg@1.0.0
+A Go module is the zip the module proxy serves, checked against the h1: hash
+the Go checksum database publishes; a crate is the .crate crates.io serves,
+checked against its index's SHA-256. Neither has `discover` yet.
 PyPI releases are judged on every file pip may install: the sdist and each
 distinct wheel (up to --max-artifacts files and --max-download-bytes in
 total); the verdict is the worst of them.
@@ -35,16 +42,17 @@ import argparse
 import base64
 import bisect
 import bz2
+import contextlib
 import datetime
 import functools
 import hashlib
-import importlib
 import io
 import json
 import lzma
 import os
 import posixpath
 import re
+import stat
 import struct
 import sys
 import tarfile
@@ -59,9 +67,17 @@ import warnings
 from lazaret.scanner import core as lazaret  # noqa: E402
 
 from lazaret import safexml as _safexml                 # noqa: E402
+from lazaret.registry import actionmeta as _actionmeta  # noqa: E402
+from lazaret.registry import contentcache as _cache     # noqa: E402
 from lazaret.registry import lookalike as _lookalike    # noqa: E402
+from lazaret.registry import npmtar as _npmtar          # noqa: E402
+from lazaret.registry import provenance as _provenance  # noqa: E402
 from lazaret.registry import unused_deps as _unused     # noqa: E402
+from lazaret.registry.ecosystems import base as _base   # noqa: E402
 from lazaret.scanner import engine as _engine           # noqa: E402
+from lazaret.scanner import gomod as _gomod             # noqa: E402
+from lazaret.scanner import nativenet as _net           # noqa: E402
+from lazaret.scanner import timings                     # noqa: E402
 from lazaret.safexml import ElementTree as _safe_ET     # noqa: E402
 
 
@@ -83,6 +99,155 @@ MAX_MEMBER = _env_number("LAZARET_MAX_SOURCE_BYTES", 16_000_000)
 MAX_FILES = 20_000         # files per package (numpy's sdist alone has >4,000)
 SAMPLE = 8192              # header/entropy sample read from oversized files
 # Stored scans from another engine version are scanned again (has_scan).
+# 2.66: the JavaScript parser reads an assignment or an update to a call
+#      (`f() = 1`, `f()++`, `for (f() in x)`) and `let` as a name before
+#      `in` and `instanceof`, as V8 compiles them, and a package's
+#      JavaScript it refuses is SC-UNPARSED-CODE, INFO (JS-PARSE-STRICT)
+# 2.65: S-TOKEN reads a private-key header as a key only with its key right
+#      after it (S-TOKEN-PEM: jose's `indexOf('-----BEGIN PRIVATE KEY-----')`
+#      in a bundle was two BLOCKERs)
+# 2.64: an sdist's or a wheel's member whose path goes through `..` is read
+#      where pip writes it (`x/../setup.py` is setup.py), and an sdist whose
+#      members pip places otherwise than the scan reads them (no one top
+#      folder, or `.` as the top folder) is corrupt (BR-4, F-11)
+# 2.63: an npm tarball that npm's tar reader (node-tar) reads differently from
+#      tarfile is corrupt (BR-4, F-10)
+# 2.62: an archive member's name is case-folded on the engine's Unicode
+#      13.0, the same on every Python (BR-2)
+# 2.61: a climb from the script's folder to a scoped package beside its own
+#      is that package's folder (D-9b)
+# 2.60: a method of a class made in several places reads `this` as the
+#      instance it is called on (B-3)
+# 2.59: a member's container is its own (D-3b): what `o.list.push(x)` or
+#      `Object.assign(this.opts, …)` is given, `o.list` and `this.opts`
+#      hold, not the object
+# 2.58: the cross-file follower's received-code test reads a function's
+#      code, strings and all, and an exec of a literal command naming a
+#      program that runs nothing it is given runs no data (D-17: lerna)
+# 2.57: the environment held or copied (a parameter's default, an
+#      object's member, `{ ...process.env }`), read by a member's name, is
+#      that member (D-16: prisma); a JSON file given require is parsed, not
+#      a module load (D-18: corepack)
+# 2.56: a JavaScript code file written into another package's folder is
+#      "rewrites another package's code", a strong reason (D-9:
+#      @dinzid04/libsignal-node's rewrite of @whiskeysockets/baileys)
+# 2.55: a Python comprehension over the environment reads the lists its
+#      test names (B-6: `any(p in k for p in PATTERNS)` with secret words
+#      in PATTERNS is the whole environment, not a selection)
+# 2.54: a download a JavaScript callback is given, written to a file and
+#      run, is a dropper's (D-2: the request client's body, https.get's
+#      chunks, a pipe into a file stream)
+# 2.53: a package an npm release loads when it is loaded that its
+#      package.json names only in devDependencies is SC-DEV-DEPENDENCY,
+#      MAJOR (D-13: dotenv-express's `require('environment-gate')`)
+# 2.52: a package manager's install, run by code that runs when the
+#      package is loaded, of a package the release does not depend on is a
+#      strong import-time reason (D-12: crypto-hash-sdk's `npm install
+#      prettier-sdk` at import)
+# 2.51: what a JavaScript callback was given, put into a variable declared
+#      outside it from a callback within it, holds what it was given (D-15:
+#      a response body kept by https.get's callback, put into the module's
+#      variable and run)
+# 2.50: what a JavaScript script puts into a container, the container holds
+#      on the tree (D-3): a Map's, a Headers' or a URLSearchParams' set, a
+#      Set's add, a FormData's append, a splice's items, a fill, a member's
+#      container (`this.items.push(x)`), Object.assign's and Reflect.set's
+#      target; only an array's push and unshift on a name were followed
+# 2.49: the modules a package's Python code imports followed to the end (BR-5):
+#      the import-time walk stopped at 300 modules seen and setup.py's at 200,
+#      so padding hid a module from its test; each module of an import list,
+#      a statement after a `;` or a `:`, continued lines, a name list's
+#      comments, and a module named by a literal to import_module(),
+#      __import__() or run_module() are followed
+# 2.48: S-TOKEN reads npm's access tokens and OpenAI's and Anthropic's keys,
+#      which got only S-ENTROPY or S-SECRET (V-2)
+# 2.47: an archive's result says why it is INCOMPLETE (`incomplete`:
+#      INCOMPLETE_KINDS), which the guard blocks on by default (T-1)
+# 2.46: Node's names tried in its order, each under any case before the next
+#      (`node Setup` runs setup.js on macOS and Windows before Setup.json),
+#      and a folder's package.json under another case (EG-9)
+# 2.45: a file an installer opens by name (package.json, binding.gyp,
+#      pyproject.toml, setup.py) read under any case, and a path Node opens
+#      found by its case fold where the exact name is not there (EG-4)
+# 2.44: code received over the network and run out of sight says so (GR-8)
+# 2.43: the code an extension's contributions name (a TypeScript server
+#      plugin, a debug adapter, a renderer, a preview script) is an entry
+#      point with the import-time test (EG-5)
+# 2.42: archive paths that differ only by case or Unicode normalization are
+#      SC-ARCHIVE-DUP, and the twins of a file that runs get its tests (EG-4)
+# 2.41: a .vsix member read where VS Code writes it (`extension…` without a
+#      slash), and such a name is SC-ARCHIVE-PATH (EG-1); a zip's entries by
+#      the names its installer reads, a Unicode path field's included (EG-2)
+# 2.40: a dropped run that is hidden says so (GR-8)
+# 2.39: SC-B64 passes over the base64 of a whole file of a data format, read
+#      by its structure (a WebAssembly module, a PNG, GIF or WebP image, WAV
+#      audio: undici's HTTP parser in every bundled action, N-4); a shell
+#      text that pipes what it decodes into a shell or an interpreter
+#      ("pipes code it decodes into …", strong), or a download into an
+#      interpreter reading stdin ("downloads a script and runs it with …")
+# 2.38: the cloud's and the registries' credential files (~/.aws/credentials,
+#      ~/.kube/config, ~/.docker/config.json, gcloud's, Azure's, .npmrc,
+#      .pypirc, .netrc, cargo's, gh's, Vault's, Terraform's) are credential
+#      stores, read however the code writes the path, and a long path keeps
+#      the end that names one (GR-7)
+# 2.37: a dependency's Rust test items (what #[cfg(test)], #[test] or
+#      #[bench] marks in src/, or a file's #![cfg(test)]) are left out of the
+#      file rules, as tests/ is (N-20)
+# 2.36: an npm manifest or a binding.gyp inside a Go module or a crate: its
+#      hooks are inventory (INFO), as npm never installs from there (N-18)
+# 2.35: two false positives of the file rules in Go and Rust code: SC-B64
+#      passes over a run of digits, hex digits or letters alone (up to 16,384
+#      characters) and a short period repeated (name tables, test vectors:
+#      G-5), and an emoji's presentation selector repeated (U+FE0F twice after
+#      U+2622 in a popular crate) is not SC-HIDDEN-UNICODE (N-23)
+# 2.34: a library whose `crate-type` holds "proc-macro" is a procedural macro
+#      (cargo builds it as one, `proc-macro = false` or not), so its code is
+#      read as code that runs at build; it was read as code run when called
+# 2.33: S-SECRET reads Go's `:=` and `var … string =`, Rust's typed constants
+#      and byte and raw literals; S-TOKEN reads crates.io's `cio` tokens; a
+#      .netrc's passwords are S-SECRET (Part E: G-4, R-4, N-12)
+# 2.32: Python's "runs code it reads back from its own file" is read on the
+#      tree (N-19): a parameter is not the module's variable of its name
+# 2.31: a Go module's and a crate's code is read (Part C: the Go and Rust
+#      readers, G-1 and R-1, in registry and guard scans), so a module or a
+#      crate is OK, WARN or SUSPICIOUS for what its code does; it was
+#      INCOMPLETE whatever it held (SC-UNREAD-CODE, N-1)
+# 2.30: a download piped into a shell named by its path (`| /bin/bash`,
+#      `| /usr/bin/env sh`) is one: the pipe test read only a bare shell's name,
+#      so the 2025 Go typosquats' `wget -O - … | /bin/bash &` was not one
+# 2.29: the Go/Rust review's archive fix (RM-1): a tar member of a type that
+#      cargo or pip unpacks as a file (a device, a FIFO, a type tar does not
+#      know) is read as one, and is SC-ARCHIVE-TYPE; it was left out unread,
+#      so a crate's build.rs could hide in one and the crate scan OK
+# 2.28: every pattern runs on linre, the linear-time engine (P-16): the
+#      decoder body SC-EVAL-DECODER reads and the arguments of open() a
+#      shell-profile write reads are no longer cut at 2,000 and 300 items;
+#      the other rewritten patterns answer as before
+# 2.27: Go and Rust source files read by project scans (S-4): their
+#      comments and literals as their lexers read them, and S-SECRET,
+#      S-TOKEN, S-BIDI and Q-TODO on them (a package's are not read yet); a
+#      Go module or a crate whose code is not read is INCOMPLETE, never OK
+#      (SC-UNREAD-CODE, N-1)
+# 2.26: the in-sample misses examined (D-1, B-4): a command that downloads
+#      or runs code written to a shell's startup file is persistence (any
+#      command, to one named only in strings the script decodes: alinet),
+#      the request client's calls requests (and what they are given
+#      received), a parameter whose default is the script's own address
+#      that address when the caller gives none, a member or require() named
+#      by a constant read by that name
+# 2.25: popular packages' false positives (B-1): a library's request for an
+#      address it is given or works out is not the script's own download, a
+#      server's address and options not data it receives, a selection of
+#      the environment's variables (a loop's test, read with what the names
+#      it reads are given) not the whole environment, os.environ by a
+#      constant key one variable, a list's reversal no decoder, a Node
+#      module's objects not the script's classes (createHash(…).update),
+#      createRequire's require a require, one instance of a class made in
+#      several places not every other's members, a .pth line judged by what
+#      its code does (the network or another program CRITICAL; an exec of a
+#      plain literal by the literal's code), a __doc__= keyword no read of
+#      the file's own docstring, and the cross-file follower's environment
+#      variables from another file only
 # 2.24: Python's decoded value run by a shell (os.system, os.popen,
 #      subprocess with shell=True) is SC-EVAL-DECODE, as JavaScript's was
 # 2.23: the zip reader on the fuzzers' findings: entries that overlap are
@@ -181,7 +346,20 @@ SAMPLE = 8192              # header/entropy sample read from oversized files
 #      entry points and hook targets, Python install scripts
 # 2.3: verdict tiers, decoded hex, install-script inspection; 2.2:
 #      verdict-integrity; 2.1: binary-artifact awareness
-ENGINE_VERSION = "2.24.0"
+ENGINE_VERSION = "2.67.0"
+
+# ---------------- The content memo (P-2a, registry/contentcache.py) ----------------
+# One per scan_package run: the engine answers once for content several of a
+# release's files hold (a wheel per platform, an sdist with the same modules),
+# and a hit gives exactly what the engine would (its raw answer, rebuilt for
+# the member's own path). LAZARET_NO_CACHE=1 turns it off. The guard and a
+# single archive's scan (_scan_artifact) use none unless given one.
+MEMO_DISABLED_ENV = "LAZARET_NO_CACHE"
+
+
+def new_memo():
+    """A memo for one run: contentcache.Memo, or NULL with LAZARET_NO_CACHE=1."""
+    return _cache.NULL if os.environ.get(MEMO_DISABLED_ENV) == "1" else _cache.Memo()
 
 # ---------------- Trust-chain limits (F9/G14/F10) ----------------
 # Only these hosts may ever be fetched, over https only, and redirects to any
@@ -223,21 +401,17 @@ _NPM_NAME_PART_RE = re.compile(r"^[a-zA-Z0-9~-][a-zA-Z0-9._~-]*$")
 _PYPI_NAME_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$")   # PEP 508
 
 
-class SpecError(ValueError):
-    """Invalid ecosystem / package name / version."""
-
-
-class FetchError(ValueError):
-    """A fetch was refused (bad scheme/host) or exceeded a size budget.
-    `status` is the HTTP status when the server answered with an error."""
-    status = None
-
-
-class DigestError(ValueError):
-    """A downloaded artifact failed its registry-published integrity check.
-
-    Fail-closed: the scan stops and nothing is persisted for that package.
-    """
+# The errors are the registry modules' (registry/ecosystems/base.py; X-2's
+# first step): one class each, so what a Go or crates.io module raises is what
+# this file and its callers catch. SpecError: invalid ecosystem / package name
+# / version. FetchError: a fetch refused (scheme, host) or over its budget, with
+# `status` the HTTP status when the server answered with an error. DigestError:
+# a download failed its registry-published integrity check; fail closed, the
+# scan stops and nothing is persisted for that package.
+SpecError = _base.SpecError
+FetchError = _base.FetchError
+TooLarge = _base.TooLarge
+DigestError = _base.DigestError
 
 
 class FeedError(ValueError):
@@ -253,6 +427,37 @@ class ScanCancelled(Exception):
 
 
 # ---------------- Package spec parsing ----------------
+#: The ecosystems whose names, versions, resolving and digest live in a
+#: registry module (registry/ecosystems; Part C wires them in, X-2's part):
+#: `go:<module path>[@version]`, `crates:<name>[@version]` and, since E-1's
+#: second part, `openvsx:<namespace>.<name>[@version]` and
+#: `vscode:<publisher>.<name>[@version]` (a VS Code extension from Open VSX or
+#: the Visual Studio Marketplace). npm and PyPI keep their code in this file
+#: until X-2 moves it.
+MODULE_ECOSYSTEMS = ("go", "crates", "openvsx", "vscode")
+ECOSYSTEMS = ("npm", "pypi") + MODULE_ECOSYSTEMS
+
+
+def registry_module(eco):
+    """The registry module of `eco` (golang.ECOSYSTEM, crates.ECOSYSTEM,
+    openvsx.ECOSYSTEM, vsmarketplace.ECOSYSTEM), or None for npm, PyPI and
+    anything else. Imported when
+    first asked for: a sweep of npm and PyPI packages never loads them."""
+    if eco == "go":
+        from lazaret.registry.ecosystems import golang
+        return golang.ECOSYSTEM
+    if eco == "crates":
+        from lazaret.registry.ecosystems import crates
+        return crates.ECOSYSTEM
+    if eco == "openvsx":
+        from lazaret.registry.ecosystems import openvsx
+        return openvsx.ECOSYSTEM
+    if eco == "vscode":
+        from lazaret.registry.ecosystems import vsmarketplace
+        return vsmarketplace.ECOSYSTEM
+    return None
+
+
 def _check_npm_name(name):
     """npm's naming rules (validate-npm-package-name), restricted to URL-safe
     ASCII: an optional @scope/, at most 214 characters, no leading '.' or
@@ -281,6 +486,9 @@ def _check_name(eco, name):
     end up interpolated into URLs and persisted — so traversal segments, path
     separators and control characters must never be accepted.
     """
+    module = registry_module(eco)
+    if module is not None:
+        return module.check_name(name)
     if not isinstance(name, str) or not name:
         raise SpecError(f"{eco}: empty package name")
     if eco == "npm":
@@ -300,6 +508,9 @@ def valid_name(eco, name):
 
 def _check_version(eco, version):
     """Same guarantee for pinned versions; None (== latest) passes through."""
+    module = registry_module(eco)
+    if module is not None:
+        return module.check_version(version)
     if version is None:
         return None
     if not isinstance(version, str) or not version.strip():
@@ -311,13 +522,22 @@ def _check_version(eco, version):
 
 
 def parse_spec(spec):
-    """'npm:@scope/pkg@1.2.3' -> ('npm', '@scope/pkg', '1.2.3'); version may be None."""
+    """'npm:@scope/pkg@1.2.3' -> ('npm', '@scope/pkg', '1.2.3'); version may be None.
+    'go:github.com/pkg/errors@v0.9.1', 'crates:serde@1.0.0' and
+    'openvsx:redhat.vscode-yaml@1.0.0' and 'vscode:redhat.vscode-yaml@1.0.0' are
+    read by their registry module (a Go
+    version is v1.2.3; a crate's has no v)."""
     if not isinstance(spec, str) or ":" not in spec:
-        raise SpecError(f"Spec must be npm:<name> or pypi:<name> — got {spec!r}")
+        raise SpecError(f"Spec must be npm:<name>, pypi:<name>, go:<module>, crates:<name>, "
+                        f"openvsx:<namespace>.<name> or vscode:<publisher>.<name> — got {spec!r}")
     eco, rest = spec.split(":", 1)
     eco = eco.strip().lower()
-    if eco not in ("npm", "pypi"):
-        raise SpecError(f"Unknown ecosystem {eco!r} (use npm or pypi)")
+    if eco not in ECOSYSTEMS:
+        raise SpecError(f"Unknown ecosystem {eco!r} (use npm, pypi, go, crates, openvsx or vscode)")
+    module = registry_module(eco)
+    if module is not None:
+        name, ver = module.parse_spec(rest)
+        return eco, name, ver
     rest = rest.strip().replace("==", "@")
     if rest.startswith("@"):                      # scoped npm package
         if eco != "npm":
@@ -365,7 +585,7 @@ class _RegistryOpener(urllib.request.HTTPRedirectHandler):
         return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
-_OPENER = urllib.request.build_opener(_RegistryOpener)
+_OPENER = urllib.request.build_opener(_RegistryOpener, _net.HTTPSHandler())   # (TLS 1.2 at least: nativenet.TLS_FLOOR)
 
 
 def _fetch(url, max_bytes=MAX_DOWNLOAD_BYTES, timeout=DOWNLOAD_TIMEOUT, accept=None,
@@ -373,16 +593,40 @@ def _fetch(url, max_bytes=MAX_DOWNLOAD_BYTES, timeout=DOWNLOAD_TIMEOUT, accept=N
     """Validated, byte-budgeted fetch (F10 + F9a). Reads in bounded chunks so
     a hostile server cannot OOM the scanner with an unbounded stream (a 300MB
     response previously pinned ~714MB RSS via bare r.read()). With `data`
-    (bytes) the request is a POST of that body (PyPI's XML-RPC API)."""
-    _validated_url(url)
+    (bytes) the request is a POST of that body (PyPI's XML-RPC API). Its
+    seconds are the network's in `--timings`."""
+    with timings.span("network", "fetch"):
+        return _fetch_bytes(url, max_bytes, timeout, accept, data, content_type)
+
+
+def _fetch_bytes(url, max_bytes, timeout, accept, data, content_type, opener=None, validate=None, hosts=None):
+    """`opener` and `validate` default to this file's (_OPENER, _validated_url);
+    a registry module's fetch passes its own (module_transport). The request
+    goes through the native transport (NET-1, scanner/nativenet.py: the
+    default since 0.1.9) with `hosts` as the rule for the URL and every
+    redirect (REGISTRY_HOSTS when the rule is this file's), and through
+    urllib when the native transport is not here or is not to be used: no
+    library, LAZARET_NETWORK=python, a proxy it does not take (a proxy
+    reached over TLS), a rule given only as a function, or an opener given
+    by the caller. Both stop at TLS 1.2 (nativenet.TLS_FLOOR)."""
+    (validate or _validated_url)(url)
     headers = {"User-Agent": USER_AGENT}
     if accept:
         headers["Accept"] = accept
     if content_type:
         headers["Content-Type"] = content_type
+    if hosts is None and opener is None and validate is None:
+        hosts = REGISTRY_HOSTS
+    if hosts is not None and opener is None and _net.chosen(url):
+        try:
+            return _native_body(url, hosts, headers, data, max_bytes, timeout)
+        except _net.UsePython:
+            pass                               # (urllib below: a proxy it does not take, nativenet._proxy_for)
+    if opener is None:
+        opener = _OPENER if validate is None else _module_opener(validate)
     req = urllib.request.Request(url, data=data, headers=headers)
     try:
-        with _OPENER.open(req, timeout=timeout) as r:
+        with opener.open(req, timeout=timeout) as r:
             buf = bytearray()
             while True:
                 chunk = r.read(64 * 1024)
@@ -390,7 +634,7 @@ def _fetch(url, max_bytes=MAX_DOWNLOAD_BYTES, timeout=DOWNLOAD_TIMEOUT, accept=N
                     break
                 buf.extend(chunk)
                 if len(buf) > max_bytes:
-                    raise FetchError(
+                    raise TooLarge(
                         f"response exceeds {max_bytes // (1024 * 1024)}MB budget: {url}")
             return bytes(buf)
     except urllib.error.HTTPError as exc:
@@ -401,6 +645,85 @@ def _fetch(url, max_bytes=MAX_DOWNLOAD_BYTES, timeout=DOWNLOAD_TIMEOUT, accept=N
         raise FetchError(f"URL error fetching {url}: {exc.reason}") from exc
     except OSError as exc:                     # includes socket timeouts
         raise FetchError(f"network error fetching {url}: {exc}") from exc
+
+
+def _native_body(url, hosts, headers, data, max_bytes, timeout):
+    """The body of one request through the native transport, in _fetch_bytes'
+    words: FetchError (with `.status` for an HTTP error) as urllib's path
+    raises it; nativenet.UsePython when urllib is to send it."""
+    try:
+        reply = _net.request(url, hosts=hosts, method="GET" if data is None else "POST", headers=list(headers.items()),
+                             data=data, max_bytes=max_bytes, timeout=timeout, max_redirects=MAX_REDIRECTS)
+    except _net.NetError as exc:
+        if exc.kind == "too-large":
+            raise TooLarge(f"response exceeds {max_bytes // (1024 * 1024)}MB budget: {url}") from None
+        if exc.kind in ("timeout", "network"):
+            raise FetchError(f"network error fetching {url}: {exc}") from None
+        if exc.kind == "refused":
+            raise FetchError(f"URL error fetching {url}: redirect blocked: {exc}") from None
+        raise FetchError(f"URL error fetching {url}: {exc}") from None
+    if not 200 <= reply.status < 300:
+        err = FetchError(f"HTTP {reply.status} fetching {url}")
+        err.status = reply.status
+        raise err
+    return reply.body
+
+
+class _ModuleRedirects(urllib.request.HTTPRedirectHandler):
+    """_RegistryOpener for a registry module's fetches: every redirect is
+    checked by the module's own rule (`base.Fetch.check_url`: https, one of
+    the module's hosts, no credentials), at most MAX_REDIRECTS hops."""
+
+    max_redirections = MAX_REDIRECTS
+
+    def __init__(self, check):
+        super().__init__()
+        self._check = check
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        try:
+            self._check(newurl)
+        except FetchError as exc:
+            raise urllib.error.URLError(f"redirect blocked: {exc}")
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+def _module_opener(check):
+    return urllib.request.build_opener(_ModuleRedirects(check), _net.HTTPSHandler())
+
+
+def module_transport(url, max_bytes=MAX_DOWNLOAD_BYTES, accept=None, timeout=DOWNLOAD_TIMEOUT,
+                     check_redirect=None, data=None, content_type=None):
+    """The transport a registry module's `base.Fetch` is given (X-2): _fetch's
+    bounded, timed read, with the module's URL rule (`check_redirect`, which
+    `Fetch` passes) for the URL and for every redirect; `data` and
+    `content_type` make it a POST (the Marketplace's gallery query). The
+    native transport sends it with the module's hosts as its rule (NET-1),
+    urllib where that is not to be used (_fetch_bytes). The network seam for
+    go:, crates:, openvsx: and vscode: (tests patch it with recorded
+    responses)."""
+    if check_redirect is None:
+        raise FetchError("a registry module's fetch needs the module's URL rule")
+    with timings.span("network", "fetch"):
+        hosts = _module_hosts(check_redirect)
+        if hosts is not None and _net.chosen(url):
+            return _fetch_bytes(url, max_bytes, timeout, accept, data, content_type, validate=check_redirect,
+                                hosts=hosts)
+        return _fetch_bytes(url, max_bytes, timeout, accept, data, content_type,
+                            opener=_module_opener(check_redirect), validate=check_redirect)
+
+
+def _module_hosts(check):
+    """The hosts of a module's URL rule when it is `base.Fetch.check_url` (the
+    rule the native transport applies to every hop as data); None for a rule
+    given only as a function, which urllib applies hop by hop."""
+    owner = getattr(check, "__self__", None)
+    return owner.hosts if isinstance(owner, _base.Fetch) and check == owner.check_url else None
+
+
+def module_fetch(module):
+    """A `base.Fetch` for a registry module, over module_transport."""
+    return _base.Fetch(module, module_transport)
 
 
 def http_json(url, accept=None):
@@ -438,22 +761,15 @@ def http_bytes(url):
 
 
 # ---------------- Registry metadata ----------------
-class Resolution(tuple):
-    """(version, url, container_format, artifact_kind, meta_entry) — the
-    primary artifact, unpackable as before — plus .artifacts: every artifact
-    to scan, as dicts {url, container, artifact, entry, filename}, and
-    .skipped: files of the release that are not scanned, as dicts {filename,
-    packagetype, installable, size, reason}; `installable` means pip may
-    install the file anyway (scan_package counts it as not scanned)."""
-
-    def __new__(cls, version, artifacts, skipped=(), info=None):
-        first = artifacts[0]
-        self = super().__new__(cls, (version, first["url"], first["container"],
-                                     first["artifact"], first["entry"]))
-        self.artifacts = list(artifacts)
-        self.skipped = list(skipped)
-        self.info = info if isinstance(info, dict) else {}      # PyPI: the release's metadata
-        return self
+# (version, url, container_format, artifact_kind, meta_entry) — the primary
+# artifact, unpackable as before — plus .artifacts: every artifact to scan, as
+# dicts {url, container, artifact, entry, filename}, and .skipped: files of
+# the release that are not scanned, as dicts {filename, packagetype,
+# installable, size, reason}; `installable` means pip may install the file
+# anyway (scan_package counts it as not scanned). .info: PyPI's release
+# metadata; a Go module's path and root, a crate's spelling and yanked flag.
+# The registry modules' class (base.py), as the errors are.
+Resolution = _base.Resolution
 
 
 def resolve_npm(name, version):
@@ -596,7 +912,10 @@ def pypi_latest_from_feed(name):
 
 def resolve(eco, name, version):
     """Registry metadata for one package version (network seam: tests patch
-    resolve_npm / resolve_pypi)."""
+    resolve_npm / resolve_pypi, and module_transport for go and crates)."""
+    module = registry_module(eco)
+    if module is not None:
+        return module.resolve(name, version, module_fetch(module))
     return (resolve_npm if eco == "npm" else resolve_pypi)(name, version)
 
 
@@ -653,6 +972,20 @@ def verify_digest(data, meta_entry, eco, name, version):
             f"refusing to scan an unverified artifact (possible CDN/mirror "
             f"compromise or man-in-the-middle)")
     return alg, want
+
+
+def _module_digest(module, data, meta_entry, eco, name, version):
+    """verify_digest for a registry module's download: the module's check (a Go
+    module's h1: from the checksum database, a crate's SHA-256 from the index),
+    which fails closed in verify_digest's words. A module that resolves always
+    has a digest to check (resolve fails without one); None only when the
+    release names none, as verify_digest's."""
+    try:
+        return module.verify(data, meta_entry, name, version)
+    except DigestError as exc:
+        raise DigestError(
+            f"{eco}:{name}@{version} SC-DIGEST-MISMATCH: {exc} — refusing to scan an "
+            f"unverified artifact (possible CDN/mirror compromise or man-in-the-middle)") from None
 
 
 # ---------------- In-memory archive reading ----------------
@@ -792,6 +1125,26 @@ class _Inflater:
                 raise ArchiveLimit("corrupt", "data after the end of the compressed stream")
 
 
+class _Tee:
+    """The tar stream tarfile reads, fed as it is read to npm's reader too (npmtar.NodeTar, BR-4), which an
+    error of its own stops (and the archive is then one the two readers disagree about)."""
+
+    def __init__(self, inner, node):
+        self.inner, self.node, self.failed = inner, node, None
+
+    def readable(self):
+        return True
+
+    def read(self, n=-1):
+        data = self.inner.read(n)
+        if self.failed is None:
+            try:
+                self.node.feed(data)
+            except Exception as exc:                   # a fault of this reader: the archive is not vouched for
+                self.failed = f"{type(exc).__name__}"
+        return data
+
+
 class _TarReader(tarfile.TarFile):
     """Records the blocks tarfile skips with ignore_zeros=True: zero blocks
     (end-of-archive markers) and invalid headers (a bad checksum). Python's
@@ -810,6 +1163,37 @@ class _TarReader(tarfile.TarFile):
         super()._dbg(level, msg)
 
 
+class _PipTarInfo(tarfile.TarInfo):
+    """An sdist's member as pip reads it. pip unpacks with Python's tarfile,
+    which extracts a member of a type no tool writes (`9`, `A`…) as a regular
+    file, while the scan's loop took only regular files: a setup.py of such a
+    type was run by pip and never read. Here it is a regular file, and the
+    type the archive gave is kept in `odd_type` (None for a regular file). A
+    device or a FIFO is not one pip extracts (it fails on it)."""
+
+    odd_type = None
+
+    def _odd(self):
+        return self.type not in tarfile.SUPPORTED_TYPES
+
+    def _proc_builtin(self, tarfile_):
+        if self._odd():
+            self.odd_type = self.type
+            self.type = tarfile.REGTYPE
+        return super()._proc_builtin(tarfile_)
+
+
+class _CargoTarInfo(_PipTarInfo):
+    """A .crate's member as cargo reads it. Cargo unpacks with Rust's `tar`
+    crate, which reads every entry's data by its size and writes any entry
+    that is not a directory, a link or one of the format's own headers as a
+    regular file: a character or block device and a FIFO too (Python's
+    tarfile reads the data of those as the next headers)."""
+
+    def _odd(self):
+        return self.type in (tarfile.CHRTYPE, tarfile.BLKTYPE, tarfile.FIFOTYPE) or super()._odd()
+
+
 class Member(tuple):
     """(relative_path, real_size, raw_bytes, reason) with a .detail text for
     reasons that need one ('corrupt')."""
@@ -823,6 +1207,87 @@ class Member(tuple):
 _DRIVE_ROOT_RE = re.compile(r"^(?:[A-Za-z]:)?/+")
 
 
+#: What begins the name of every .vsix member VS Code unpacks into the extension's folder (E-1; a `/` after it or
+#: not: `_base.vsix_member_path`).
+VSIX_ROOT = _base.VSIX_PREFIX
+#: The package's manifest, which every .vsix holds and VS Code writes into the extension's folder as `.vsixmanifest`
+VSIX_MANIFEST = "extension.vsixmanifest"
+#: The one script of an extension's package.json VS Code runs (`node` and a file, once the extension has been
+#: uninstalled, at the editor's next start: vsix_hook_runs). npm's lifecycle scripts never run: the editor runs no
+#: npm install.
+VSIX_HOOKS = ("vscode:uninstall",)
+#: Activation events that start an extension with the editor, every time.
+VSIX_STARTUP_EVENTS = frozenset(("*", "onStartupFinished"))
+#: An extension's identifier, `publisher.name` (VS Code's EXTENSION_IDENTIFIER_PATTERN).
+VSCODE_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9-]*\.[A-Za-z0-9][A-Za-z0-9-]*")
+MAX_VSIX_DEPENDENCIES = 500
+#: A package's name, as TypeScript takes a server plugin's: it loads `node_modules/<name>` from each folder it probes,
+#: an extension's among them, and only a package's name (EG-5)
+_PLUGIN_NAME_RE = re.compile(r"(?:@[a-z0-9][a-z0-9._~-]*/)?[a-z0-9][a-z0-9._~-]*", re.I)
+#: A debugger contribution's blocks for one platform, each with its own `program` and `runtime` (VS Code's
+#: `ExecutableDebugAdapter.extract`)
+_DEBUGGER_PLATFORMS = ("win", "winx86", "windows", "osx", "linux")
+#: The entries of one contribution list read (EG-5)
+MAX_VSIX_CONTRIBUTIONS = 100
+
+
+def vsix_hook_runs(cmd):
+    """Does VS Code run this vscode:uninstall command? Only `node <file> [arguments]`: it splits the
+    command on single spaces and forks the file (the extension's folder joined with the second word)
+    with the rest as arguments, and logs and skips any other command (extensionLifecycle.ts,
+    parseScript)."""
+    parts = cmd.split(" ")
+    return len(parts) >= 2 and parts[0] == "node" and bool(parts[1])
+
+
+def _vsix_outside_issue(key, target, text, when="when it activates the extension"):
+    """SC-UNREAD-CODE for an extension whose `main` or `browser` (or a debug adapter's `program` or `runtime`, EG-5)
+    names a file outside its folder (EG-3): the editor runs that file `when`, and the package does not hold it."""
+    lines = lazaret.normalize_newlines(text).split("\n")
+    line = next((n for n, s in enumerate(lines, 1) if f'"{key}"' in s), 1)
+    shown = target if len(target) <= 120 else target[:120] + "…"
+    return lazaret.mk_issue(
+        {"id": UNREAD_CODE_RULE, "name": "Extension code outside the extension", "type": "HOTSPOT", "sev": "MAJOR",
+         "msg": (f'"{key}" names {shown!r}, outside the extension\'s folder: VS Code runs that file {when}, the '
+                 f"package does not hold it, and what it runs was not read."),
+         "why": ("VS Code joins an extension's `main` (and `browser`, and a debug adapter's program) to the "
+                 "extension's folder and runs the file it names wherever that is, warning only that one outside the "
+                 "folder might not be portable. No extension needs one: the code would come from another extension's "
+                 "folder, or from a file written there later, and no scan of this package reads it."),
+         "fix": "Find out which file the extension runs, and read it before installing.",
+         "ref": "CWE-829 · Supply chain"}, "package.json", line, lines)
+
+
+def _debugger_lang(path, runtime):
+    """The language a debug adapter's file is read in (EG-5): JavaScript for a `.js`, `.cjs` or `.mjs` file or one
+    `node` runs (VS Code forks it), Python for a `.py` file or one Python runs; None for anything else (a program
+    of its own, which the scan classifies as any shipped binary)."""
+    ext = posixpath.splitext(path)[1].lower()
+    run = posixpath.basename(runtime.replace("\\", "/")).lower()
+    if ext in (".js", ".cjs", ".mjs") or run in ("node", "node.exe"):
+        return "js"
+    if ext == ".py" or run.startswith("python"):
+        return "py"
+    return None
+
+
+def _vsix_inert_hook(issue):
+    """A vscode:uninstall command VS Code does not run (vsix_hook_runs): inventory, not followed."""
+    cmd = issue.pop("cmd", None) or ""
+    issue["sev"] = "INFO"
+    issue["name"] = "Uninstall hook"
+    issue["msg"] = f'"vscode:uninstall" script is not one VS Code runs (it runs only `node <file>`): {cmd!r}.'
+    issue["why"] = ("VS Code runs an extension's vscode:uninstall script only when it is `node` and a file of the "
+                    "extension; it logs any other command and runs nothing. Listed for inventory.")
+    issue["fix"] = "Nothing runs it; read it all the same if the extension is unfamiliar."
+
+
+#: Why an extension's vscode:uninstall script matters (E-1), before the reason it was found for.
+_VSIX_HOOK_RUNS = ("VS Code runs an extension's vscode:uninstall script (`node` and a file of the extension) once "
+                   "the extension has been uninstalled, at the editor's next start, with the user's privileges "
+                   "and nobody watching")
+
+
 def canonical_member_path(name, artifact=None):
     """Where an extractor puts an archive member, relative to the package
     root. -> (rel or None, problem or None).
@@ -832,23 +1297,46 @@ def canonical_member_path(name, artifact=None):
     'setup.js'), strip absolute roots, refuse '..'; a member that ends up as
     the package root itself (a top-level file) is not extracted.
     wheel: paths are install paths, nothing stripped.
-    sdist (and the legacy default): '.' / empty segments dropped, then the
-    top directory. Backslashes count as separators (npm on Windows)."""
+    vsix (a VS Code extension, 0.1.9, E-1): VS Code unpacks every member whose
+    name begins with `extension` into the extension's folder, those letters
+    taken off whether a `/` follows them or not (`extension/out/a.js` is
+    `out/a.js`, `extensionout/a.js` too, `extension.vsixmanifest` is
+    `.vsixmanifest`), and nothing else (`[Content_Types].xml`, a signature):
+    `_base.vsix_member_path`, the review of Oct 7.
+    sdist, action (a GitHub Action's repository as GitHub's archive of a
+    commit holds it, under one top directory, 0.1.9, N-4) and the legacy
+    default: '.' / empty segments dropped, then the top directory.
+    Backslashes count as separators (npm on Windows). A `..` in a wheel's or
+    an sdist's member is resolved, as pip resolves it (`x/../setup.py` is
+    setup.py; one that leaves the folder is a problem: pip refuses the
+    archive); anywhere else it is a problem (node-tar, yauzl, cargo and tar
+    refuse the member). Whether pip drops an sdist's top directory at all is
+    `_pip_sdist_disagreement`'s question."""
     p = str(name).replace("\\", "/")
     if artifact == "npm":
         rest = "/".join(p.split("/")[1:])
     elif artifact == "wheel":
         rest = p
+    elif artifact == "vsix":
+        return _base.vsix_member_path(p)
     else:
         parts = [x for x in p.split("/") if x not in ("", ".")]
         rest = "/".join(parts[1:]) if len(parts) > 1 else (parts[0] if parts else "")
+    if artifact == "npm":
+        _roots, rest = _npmtar.strip_absolute(rest)          # node-tar's stripAbsolutePath (`C:x` is `x`, BR-4)
     while True:
         stripped = _DRIVE_ROOT_RE.sub("", rest)
         if stripped == rest:
             break
         rest = stripped
     if ".." in rest.split("/"):
-        return None, "path contains '..'"
+        if artifact not in _PIP_ZIPS:
+            return None, "path contains '..'"
+        # pip resolves it (BR-4, F-11): an sdist's member is written through the path (`x/../setup.py` is
+        # setup.py), a wheel's at the path's normpath; one that leaves the folder makes pip refuse the archive
+        norm = posixpath.normpath(rest)
+        if norm == ".." or norm.startswith("../"):
+            return None, "path contains '..'"
     norm = posixpath.normpath(rest) if rest else ""
     if norm in ("", "."):
         return None, None
@@ -859,6 +1347,72 @@ def strip_root(path):
     """Legacy helper: canonical_member_path() without artifact semantics."""
     rel, _problem = canonical_member_path(path)
     return rel if rel is not None else str(path).replace("\\", "/")
+
+
+# ---------------- Where pip writes an sdist's members (BR-4, F-11) ----------------
+# pip unpacks an sdist with tarfile (zipfile for a .zip) and takes the archive's top folder off only when every
+# member, folders too, has the same one (pip/_internal/utils/unpacking.py's has_leading_dir and split_leading_dir,
+# written out here as pip reads them); otherwise it writes each member under its whole name. The scan takes the first
+# folder off every name. Where the two place a member differently, the scan's reading of what runs when pip builds
+# (setup.py, what it imports) is not pip's.
+
+def _pip_split_leading_dir(path):
+    """pip's split_leading_dir: (the first folder, the rest), at the first `/` or `\\`, after leading slashes."""
+    path = path.lstrip("/").lstrip("\\")
+    if "/" in path and (("\\" in path and path.find("/") < path.find("\\")) or "\\" not in path):
+        return path.split("/", 1)
+    if "\\" in path:
+        return path.split("\\", 1)
+    return [path, ""]
+
+
+def _pip_has_leading_dir(paths):
+    """pip's has_leading_dir: does every name have the same first folder?"""
+    common = None
+    for path in paths:
+        prefix = _pip_split_leading_dir(path)[0]
+        if not prefix or (common is not None and prefix != common):
+            return False
+        common = prefix
+    return True
+
+
+def _pip_sdist_path(name, leading):
+    """Where pip writes an sdist's member, relative to the folder it builds in, as the scan writes paths (`/`, no `.`,
+    `..` resolved): "" for that folder itself, None for a member that leaves it (pip refuses the archive)."""
+    p = _pip_split_leading_dir(name)[1] if leading else name
+    p = p.replace("\\", "/").lstrip("/")       # (pip from 24.1 takes a leading slash off; pip 24.0 refuses the archive)
+    norm = posixpath.normpath(p) if p else "."
+    if norm == ".":
+        return ""
+    if norm == ".." or norm.startswith("../"):
+        return None
+    return norm
+
+
+def _pip_sdist_disagreement(names, placed):
+    """The first member pip writes elsewhere than the scan reads it -> what to say, or None. `names`: every member's
+    name as tarfile (or zipfile) reads it, folders too; `placed`: (name, the scan's path, None when it reads none) for
+    every member that is not a folder."""
+    if not names:
+        return None
+    leading = _pip_has_leading_dir(names)
+    for name, rel in placed:
+        pip = _pip_sdist_path(name, leading)
+        if not pip or pip == rel:
+            # (where pip refuses the archive nothing is built, and a member that is the top folder itself pip writes
+            # nowhere: what the scan read of it is more than pip writes, never less)
+            continue
+        why = ("its members do not all sit in one top folder, so pip writes every member under its whole name"
+               if not leading else
+               f"pip takes only {_pip_split_leading_dir(name)[0][:100]!r} off the front of each name")
+        return (f"pip writes {name[:200]!r} as {pip[:200]!r}, where this scan read it as {(rel or 'nothing')[:200]!r} "
+                f"({why}): the scan cannot vouch for what pip builds")
+    return None
+
+
+def _through_dotdot(name):
+    return ".." in str(name).replace("\\", "/").split("/")
 
 
 def _tar_codec(data, container, artifact):
@@ -887,6 +1441,34 @@ def _tar_codec(data, container, artifact):
                                   f"for this format")
 
 
+def _native_program(raw):
+    """Do a member's first bytes say it is a program the system loads (an ELF, Mach-O or PE file, a WebAssembly or DEX
+    module: core.EXEC_MAGIC), rather than code a runtime reads (a bytenode .jsc, a .pyc) or data? Binary bytes only:
+    a text that starts `MZ=1;` is JavaScript."""
+    return lazaret.looks_binary(raw[:2048]) and (any(raw.startswith(sig) for sig, _what in lazaret.EXEC_MAGIC)
+                                                 or raw.startswith(b"MZ"))
+
+
+def case_fold(rel):
+    """A member's path as file systems that ignore case and Unicode normalization compare it (macOS's, Windows'):
+    two paths with the same fold are one file there (EG-4). NFD, then str.casefold(), on the engine's Unicode 13.0
+    whatever the host Python's (BR-2)."""
+    return _engine.case_fold(rel, "NFD")
+
+
+#: The files an installer opens by their name (EG-4's leftover): npm a package's package.json and binding.gyp, pip an
+#: sdist's pyproject.toml and setup.py, VS Code an extension's package.json
+OPENED_BY_NAME = ("package.json", "binding.gyp", "pyproject.toml", "setup.py")
+
+
+def opened_as(name):
+    """The file of OPENED_BY_NAME a member named `name` is opened as where case and normalization are ignored (macOS,
+    Windows): its fold's, when that is one of them, and None otherwise. `Package.json` there is package.json, written
+    over a package.json before it or opened in its stead (EG-4)."""
+    fold = case_fold(name)
+    return fold if fold in OPENED_BY_NAME else None
+
+
 def _note_member(seen, rel, anomalies):
     if rel in seen:
         if seen[rel] == 1:
@@ -895,6 +1477,11 @@ def _note_member(seen, rel, anomalies):
         seen[rel] += 1
     else:
         seen[rel] = 1
+        first = seen.setdefault(("fold", case_fold(rel)), rel)       # (EG-4; the keys of paths are strings)
+        if first != rel:
+            anomalies.append(("case", rel, f"it differs from {first[:200]!r} only by case or normalization: "
+                                           f"macOS and Windows write the later entry over the earlier, under the "
+                                           f"earlier's name"))
 
 
 def iter_archive(data, container, artifact=None, *, budget=None, anomalies=None):
@@ -928,9 +1515,187 @@ def iter_archive(data, container, artifact=None, *, budget=None, anomalies=None)
     budget = budget if budget is not None else Budget()
     anomalies = anomalies if anomalies is not None else []
     if container == "zip":
-        yield from _iter_zip(data, artifact, budget, anomalies)
+        members = _iter_zip(data, artifact, budget, anomalies)
     else:
-        yield from _iter_tar(data, container, artifact, budget, anomalies)
+        members = _iter_tar(data, container, artifact, budget, anomalies)
+    yield from _timed_members(members)
+
+
+def _timed_members(members):
+    """`members`, the seconds spent reading each (not the caller's, between
+    them) in the archive phase of `--timings`; closed when the caller stops."""
+    try:
+        while True:
+            with timings.span("archive", "iter_archive"):
+                try:
+                    member = next(members)
+                except StopIteration:
+                    return
+            yield member
+    finally:
+        members.close()
+
+
+def iter_folder(root, *, budget=None):
+    """Yield Member(relative_path, real_size, raw_bytes, reason) for every
+    file of a folder, as iter_archive does for an archive: an installed VS
+    Code extension (0.1.9, E-1), whose files are its folder's. The same
+    limits hold (MAX_FILES files, MAX_MEMBER bytes of a file read, the
+    budget's bytes and deadline), and the order is fixed (each folder's
+    names in code point order, depth first).
+
+    `root` may be a link (an extension under development is often linked
+    into the editor's folder), but nothing in it is followed out of it:
+      - a link to a regular file inside the folder is read as that file, as
+        an archive's link is;
+      - any other link (to a folder, out of the folder, or to nothing) is
+        not followed, and the scan says so ("corrupt", with the link's
+        path and why): Node would follow it to code no scan read;
+      - a FIFO, a socket or a device is never opened (no code is loaded
+        from one) and is passed over.
+    A file or folder that cannot be read is "corrupt" too, and so is a
+    root that is not a folder."""
+    budget = budget if budget is not None else Budget()
+    yield from _timed_members(_walk_folder(os.path.realpath(root), budget))
+
+
+#: How a folder's files are opened: never through a link (a link is resolved first and its target opened), never
+#: waiting on a FIFO, never translating line ends (Windows).
+_FOLDER_OPEN_FLAGS = (os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+                      | getattr(os, "O_BINARY", 0))
+
+
+def _os_reason(exc):
+    return exc.strerror or type(exc).__name__
+
+
+def _inside(base, path):
+    """Is `path` (a real path) `base` or below it?"""
+    try:
+        return os.path.commonpath([base, path]) == base
+    except ValueError:                          # (another drive, on Windows)
+        return False
+
+
+def _folder_listing(path):
+    """A folder's entries, by name in code point order: at most MAX_FILES + 1
+    of them, so a folder of millions of names is not held whole to be
+    sorted (as _zip_preflight refuses a zip that declares too many)."""
+    out = []
+    with os.scandir(path) as entries:
+        for entry in entries:
+            out.append(entry)
+            if len(out) > MAX_FILES:
+                break
+    return sorted(out, key=lambda e: e.name)
+
+
+def _read_regular(path, limit, budget):
+    """(the first `limit` bytes, charged to `budget`) of the regular file at
+    `path`, or None when what is there is not a regular file once opened.
+    OSError when it cannot be read; ArchiveLimit past the budget."""
+    fd = os.open(path, _FOLDER_OPEN_FLAGS)
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return None
+        chunks, want = [], limit
+        while want > 0:
+            budget.check()
+            chunk = os.read(fd, min(want, _OUTPUT_CHUNK))
+            if not chunk:
+                break
+            budget.charge(len(chunk))
+            chunks.append(chunk)
+            want -= len(chunk)
+        return b"".join(chunks)
+    finally:
+        os.close(fd)
+
+
+def _folder_link(base, entry):
+    """The file a link in the folder is read as, or (None, why it is not followed); None, None for a link to
+    something that holds no code (a FIFO, a socket, a device), which is passed over."""
+    target = os.path.realpath(entry.path)
+    if not os.path.exists(target):
+        return None, "a link to nothing"
+    if not _inside(base, target):
+        return None, "a link out of the folder"
+    if os.path.isdir(target):
+        return None, "a link to a folder"
+    if os.path.isfile(target):
+        return target, None
+    return None, None
+
+
+def _walk_folder(base, budget):
+    count, last = 0, "(folder)"
+    try:
+        listing = _folder_listing(base)
+    except OSError as exc:
+        yield Member("(folder)", 0, b"", "corrupt", f"the folder could not be read ({_os_reason(exc)})")
+        return
+    if len(listing) > MAX_FILES:
+        yield Member("(folder)", 0, b"", "files", f"the folder holds more than {MAX_FILES:,} names")
+        return
+    stack = [("", iter(listing))]
+    while stack:
+        prefix, entries = stack[-1]
+        entry = next(entries, None)
+        if entry is None:
+            stack.pop()
+            continue
+        rel = prefix + entry.name
+        try:
+            budget.check()
+        except ArchiveLimit as lim:
+            yield Member(last, 0, b"", lim.reason, lim.detail)
+            return
+        try:
+            if entry.is_symlink():
+                path, why = _folder_link(base, entry)
+                if path is None:
+                    if why:
+                        yield Member(rel, 0, b"", "corrupt", f"{rel} is {why}, which the scan does not follow")
+                    continue
+            elif entry.is_dir(follow_symlinks=False):
+                try:
+                    listing = _folder_listing(entry.path)
+                except OSError as exc:
+                    yield Member(rel, 0, b"", "corrupt", f"the folder {rel} could not be read ({_os_reason(exc)})")
+                    continue
+                if len(listing) > MAX_FILES:
+                    yield Member(rel, 0, b"", "files", f"the folder {rel} holds more than {MAX_FILES:,} names")
+                    return
+                stack.append((rel + "/", iter(listing)))
+                continue
+            elif entry.is_file(follow_symlinks=False):
+                path = entry.path
+            else:
+                continue                          # a FIFO, a socket, a device: no code
+        except OSError as exc:
+            yield Member(rel, 0, b"", "corrupt", f"{rel} could not be read ({_os_reason(exc)})")
+            continue
+        count += 1
+        if count > MAX_FILES:
+            yield Member(rel, 0, b"", "files", f"the folder holds more than {MAX_FILES:,} files (stopped at {rel})")
+            return
+        last = rel
+        try:
+            raw = _read_regular(path, MAX_MEMBER + 1, budget)
+        except ArchiveLimit as lim:
+            detail = lim.detail or (f"the folder's files are more than {budget.limit:,} bytes in all (stopped at "
+                                    f"{rel})" if lim.reason == "total" else "")
+            yield Member(rel, 0, b"", lim.reason, detail)
+            return
+        except OSError as exc:
+            yield Member(rel, 0, b"", "corrupt", f"{rel} could not be read ({_os_reason(exc)})")
+            continue
+        if raw is None:
+            continue                              # (it was swapped for something else than a file)
+        if len(raw) > MAX_MEMBER:
+            yield Member(rel, SAMPLE, raw[:SAMPLE], "member")
+            continue
+        yield Member(rel, len(raw), raw, None)
 
 
 def _iter_tar(data, container, artifact, budget, anomalies):
@@ -938,7 +1703,11 @@ def _iter_tar(data, container, artifact, budget, anomalies):
     try:
         codec = _tar_codec(data, container, artifact)
         reader = _Inflater(data, codec, budget)
-        tf = _TarReader.open(fileobj=reader, mode="r|", ignore_zeros=True)
+        # (npm's node-tar writes regular files only, and skips the rest)
+        kinds = {"crate": {"tarinfo": _CargoTarInfo}, "npm": {}}.get(artifact, {"tarinfo": _PipTarInfo})
+        # (npm's own reading beside tarfile's, to compare: BR-4)
+        tee = _Tee(reader, _npmtar.NodeTar()) if artifact == "npm" else None
+        tf = _TarReader.open(fileobj=tee or reader, mode="r|", ignore_zeros=True, **kinds)
     except ArchiveLimit as lim:
         yield Member(last, 0, b"", lim.reason, lim.detail)
         return
@@ -946,13 +1715,23 @@ def _iter_tar(data, container, artifact, budget, anomalies):
         yield Member(last, 0, b"", "corrupt", f"not a readable tar archive ({type(exc).__name__})")
         return
     seen, links, offsets, count = {}, [], [], 0
+    read = {}                                          # the regular files tarfile read, by where their data is
+    pip_names, placed = [], []                         # (an sdist: where pip writes each member, BR-4)
     try:
         for m in tf:
             budget.check()
             offsets.append(m.offset)
+            if artifact == "sdist":
+                pip_names.append(m.name)
             if m.isdir():
                 continue
             rel, problem = canonical_member_path(m.name, artifact)
+            if artifact == "sdist":
+                placed.append((m.name, None if problem else rel))
+            if rel is not None and not problem and artifact in _PIP_ZIPS and _through_dotdot(m.name):
+                anomalies.append(("dotdot", m.name, f"pip installs it as {rel[:200]!r}"))
+            if tee is not None and m.isfile():
+                read[m.offset_data] = (None if problem else rel, m.size)
             if m.issym() or m.islnk():
                 if artifact != "npm":                  # pacote drops links
                     links.append((m.name, m.linkname, m.issym(), rel, problem))
@@ -964,6 +1743,10 @@ def _iter_tar(data, container, artifact, budget, anomalies):
                 continue
             if rel is None:
                 continue                               # the extractor drops it
+            if getattr(m, "odd_type", None) is not None:
+                writer = {"crate": "cargo", "action": "the runner's tar"}.get(artifact, "pip")
+                anomalies.append(("type", rel, f"a tar entry of type {m.odd_type.decode('latin-1')!r}, which "
+                                               f"{writer} writes as a regular file and other tar readers skip"))
             count += 1
             if count > MAX_FILES:
                 yield Member(rel, 0, b"", "files")
@@ -996,6 +1779,29 @@ def _iter_tar(data, container, artifact, budget, anomalies):
     leftover = reader.produced - tf.offset
     if 0 < leftover <= len(reader.tail) and reader.tail[-leftover:].strip(b"\x00"):
         yield Member("(archive)", 0, b"", "corrupt", "data after the last tar entry")
+    if artifact == "sdist":
+        disagreement = _pip_sdist_disagreement(pip_names, placed)
+        if disagreement:
+            yield Member("(archive)", 0, b"", "corrupt", disagreement)
+    if tee is not None:
+        # what npm writes from this archive (node-tar's reading) against what tarfile read (BR-4): an entry npm
+        # writes that tarfile read at another place, under another name or not at all, a header node-tar finds
+        # invalid: the scan cannot vouch for what npm installs
+        try:
+            while tee.read(_OUTPUT_CHUNK):             # (what tarfile left unread, to its end)
+                pass
+        except ArchiveLimit as lim:
+            yield Member(last, 0, b"", lim.reason, lim.detail)
+            return
+        except (zlib.error, lzma.LZMAError, OSError, ValueError, EOFError) as exc:
+            yield Member("(archive)", 0, b"", "corrupt", f"archive could not be read to its end ({type(exc).__name__})")
+            return
+        if tee.failed is not None:
+            yield Member("(archive)", 0, b"", "corrupt", f"npm's reading of the archive could not be followed "
+                                                         f"({tee.failed})")
+        else:
+            for _where, detail in _npmtar.disagreements(tee.node.finish(), read):
+                yield Member("(archive)", 0, b"", "corrupt", detail)
     if links:
         yield from _resolve_tar_links(data, codec, artifact, links, seen, budget, anomalies, count)
 
@@ -1079,6 +1885,97 @@ def _zip_is_symlink(info):
     return (info.external_attr >> 16) & 0o170000 == 0o120000
 
 
+#: The Info-ZIP Unicode Path extra field: an entry's name again, in UTF-8, after the CRC-32 of its header's name bytes
+_UNICODE_PATH = 0x7075
+#: yauzl's CP437 (VS Code's zip reader) has graphic characters for 0x01-0x1F and 0x7F, where Python's codec has the
+#: control characters
+_YAUZL_CP437 = str.maketrans(dict(zip(map(chr, [*range(1, 32), 127]), "☺☻♥♦♣♠•◘○◙♂♀♪♫☼►◄↕‼¶§▬↨↑↓→←∟↔▲▼⌂")))
+#: The artifacts pip extracts with zipfile, whose reading of names changed in Python 3.12
+_PIP_ZIPS = ("wheel", "sdist")
+
+
+def _zip_extra_fields(extra):
+    """An entry's extra data split into its fields, [(id, data)], as zipfile and yauzl split it (zipfile has refused
+    an archive whose field runs past the end; what is left after the last whole field is no field)."""
+    fields, i = [], 0
+    while len(extra) - i >= 4:
+        tp, ln = struct.unpack_from("<HH", extra, i)
+        fields.append((tp, extra[i + 4:i + 4 + ln]))
+        i += 4 + ln
+    return fields
+
+
+def zip_entry_names(info):
+    """The names a zip entry goes by, by who reads it (the review of Oct 7) -> (header, vscode, from_field, pip312,
+    refused312):
+    - header: the name in its header as zipfile reads it (UTF-8 when its flag says so, else CP437) and kept it before
+      Python 3.12 (cut at a NUL): what pip installs it as on those versions;
+    - vscode: the name yauzl gives it, which VS Code extracts: the first Info-ZIP Unicode Path field (0x7075) of
+      version 1 that holds a name and whose CRC-32 is that of the header's name bytes, read as UTF-8 (a bad sequence
+      replaced), else the header's (yauzl's CP437 has graphic characters for the control bytes); backslashes are
+      slashes. `from_field` says it came from such a field;
+    - pip312: the name zipfile gives it from Python 3.12, which pip installs it as there: the last such field whose
+      name is UTF-8 and not empty, cut at a NUL, else `header`;
+    - refused312: why zipfile from Python 3.12 refuses the whole archive over this entry (a Unicode Path field too short
+      to read, or one that applies with a name that is not UTF-8), else None.
+    Read from the header's name and the extra data as they are, so the answer is the same on every Python."""
+    utf8 = bool(info.flag_bits & 0x800)
+    raw = info.orig_filename.encode("utf-8" if utf8 else "cp437")
+    header = info.orig_filename.split("\0", 1)[0]
+    crc = zlib.crc32(raw) & 0xFFFFFFFF
+    vscode = pip312 = refused = None
+    for tp, data in _zip_extra_fields(info.extra):
+        if tp != _UNICODE_PATH:
+            continue
+        if len(data) < 5:
+            refused = refused or "a Unicode path field too short to read"
+            continue
+        version, field_crc = struct.unpack_from("<BL", data)
+        if version != 1 or field_crc != crc:
+            continue
+        if vscode is None and len(data) > 5:
+            vscode = data[5:].decode("utf-8", "replace")
+        try:
+            name = data[5:].decode("utf-8")
+        except UnicodeDecodeError:
+            refused = refused or "a Unicode path field whose name is not UTF-8"
+            continue
+        if name:
+            pip312 = name.split("\0", 1)[0]
+    from_field = vscode is not None
+    if vscode is None:
+        vscode = info.orig_filename if utf8 else info.orig_filename.translate(_YAUZL_CP437)
+    return header, vscode.replace("\\", "/"), from_field, header if pip312 is None else pip312, refused
+
+
+def _zip_member_names(info, artifact, anomalies):
+    """The names `artifact`'s installer extracts a zip entry under (zip_entry_names): VS Code's for a .vsix, pip's
+    for a wheel or a zip sdist (the header's, and the Unicode Path field's when pip from Python 3.12 reads another), the
+    header's for the rest (Go's archive/zip reads no Unicode Path field). A directory's name is left out. Two names
+    for one entry are an anomaly, and so is an entry that makes zipfile from Python 3.12 refuse the archive: pip there
+    installs nothing of it, and Lazaret there reads none of it (INCOMPLETE). -> (names, refused or None)."""
+    header, vscode, from_field, pip312, refused312 = zip_entry_names(info)
+    refused = None
+    if artifact == "vsix":
+        names = [vscode]
+        if from_field and vscode != header.replace("\\", "/"):
+            anomalies.append(("unicode", vscode, f"its header names it {header[:200]!r}, and VS Code extracts it under "
+                                                 f"the name its Unicode path field gives"))
+        rel, _problem = _base.vsix_member_path(vscode)
+        if rel is not None and not vscode.startswith(VSIX_ROOT + "/") and vscode != VSIX_MANIFEST:
+            anomalies.append(("vsixname", vscode, f"VS Code installs it as {rel[:200]!r}"))
+    elif artifact in _PIP_ZIPS:
+        names = [header] if pip312 == header else [header, pip312]
+        if pip312 != header:
+            anomalies.append(("unicode", pip312, f"its header names it {header[:200]!r}: pip installs it under that "
+                                                 f"name before Python 3.12, and under this one from 3.12"))
+    else:
+        names = [header]
+    if refused312:
+        refused = f"zipfile from Python 3.12 refuses the archive: {refused312}"
+    return [n for n in names if not n.endswith("/")], refused
+
+
 _ZIP_EOCD_SIG, _ZIP64_LOC_SIG, _ZIP64_EOCD_SIG = b"PK\x05\x06", b"PK\x06\x07", b"PK\x06\x06"
 _ZIP_CD_SIG = b"PK\x01\x02"
 _ZIP_EOCD = struct.Struct("<4s4H2LH")            # 22 bytes
@@ -1090,9 +1987,10 @@ _ZIP64_EOCD = struct.Struct("<4sQ2H2L4Q")        # 56 bytes
 MAX_ZIP_CENTRAL_DIR = 64 * 1024 * 1024
 
 
-def _zip_preflight(data):
+def _zip_preflight(data, max_files=None):
     """Refuse a zip whose central directory is too big to parse, BEFORE
-    zipfile.ZipFile() reads it -> None (fine) or the reason.
+    zipfile.ZipFile() reads it -> None (fine) or the reason. `max_files`:
+    the most entries (MAX_FILES; a Go module zip's limit is Go's).
 
     zipfile parses the whole central directory — ~340 MB and 4 s for a
     million records — before MAX_FILES can apply. Read the End Of Central
@@ -1102,6 +2000,7 @@ def _zip_preflight(data):
     more than MAX_FILES record signatures (a count field can lie; zipfile
     parses records until the declared SIZE is consumed). Anything this
     reader can't make sense of is left to zipfile, which reports it."""
+    max_files = MAX_FILES if max_files is None else max_files
     if not isinstance(data, (bytes, bytearray)):
         data = bytes(data)
     n = len(data)
@@ -1128,9 +2027,9 @@ def _zip_preflight(data):
     if not sizes:          # no ZIP64 record: the classic fields are the real ones
         counts, sizes = [count_disk, count], [cd_size]
     declared = max(counts)
-    if declared > MAX_FILES:
+    if declared > max_files:
         return (f"zip central directory declares {declared:,} entries — more than the "
-                f"{MAX_FILES:,}-file limit; the archive was not opened")
+                f"{max_files:,}-file limit; the archive was not opened")
     size = max(sizes)
     if size > MAX_ZIP_CENTRAL_DIR:
         return (f"zip central directory declares {size:,} bytes — more than the "
@@ -1139,8 +2038,8 @@ def _zip_preflight(data):
     # (ZIP64) end record; count their signatures without copying
     start = max(0, min(records) - size)
     found = data.count(_ZIP_CD_SIG, start, pos)
-    if found > MAX_FILES:
-        return (f"zip central directory holds more than {MAX_FILES:,} entries "
+    if found > max_files:
+        return (f"zip central directory holds more than {max_files:,} entries "
                 f"({found:,} records, {declared:,} declared); the archive was not opened")
     return None
 
@@ -1186,7 +2085,9 @@ def _zip_overlaps(data, infos):
             continue
         sig, n_name, n_extra = _ZIP_LOCAL.unpack_from(data, at)
         if sig == b"PK\x03\x04":
-            spans.append((at, at + _ZIP_LOCAL.size + n_name + n_extra + info.compress_size, info.filename))
+            # (the header's name: zipfile from Python 3.12 may give another, its Unicode Path field's)
+            spans.append((at, at + _ZIP_LOCAL.size + n_name + n_extra + info.compress_size,
+                          info.orig_filename.split("\0", 1)[0]))
     out, reach = [], -1
     for at, end, name in sorted(spans):
         if at < reach:
@@ -1225,48 +2126,75 @@ def _iter_zip(data, artifact, budget, anomalies):
 
     for name in _zip_overlaps(data, infos):
         anomalies.append(("overlap", name, "its bytes overlap another entry's"))
+    # (a zip sdist: where pip writes each member, by the names pip before Python 3.12 reads, the header's, and by
+    # those pip from 3.12 reads: BR-4)
+    pip_views = (([], []), ([], [])) if artifact == "sdist" else ()
     with zf:
         try:
             for info in infos:
                 budget.check()
-                if not info.filename:
-                    # no extractor can place it, and Python 3.10's is_dir()
-                    # raised IndexError on it (F-6); 3.11+ dropped it silently
-                    anomalies.append(("noname", "(archive)", "an entry with no name, which was not read"))
+                if pip_views:
+                    header, _vscode, _from_field, pip312, _refused = zip_entry_names(info)
+                    for (view_names, view_placed), name in zip(pip_views, (header, pip312)):
+                        view_names.append(name)
+                        if not name.endswith("/"):
+                            rel, problem = canonical_member_path(name, artifact)
+                            view_placed.append((name, None if problem else rel))
+                names, refused = _zip_member_names(info, artifact, anomalies)
+                if refused:
+                    # (pip on Python 3.12 and later installs nothing of it, and Lazaret there reads none of it)
+                    yield Member(last, 0, b"", "corrupt", refused)
+                if not any(names):
+                    if not info.orig_filename.split("\0", 1)[0]:
+                        # no extractor can place an entry no reader names (a
+                        # Unicode path field can name one whose header does not),
+                        # and Python 3.10's is_dir() raised IndexError on it (F-6)
+                        anomalies.append(("noname", "(archive)", "an entry with no name, which was not read"))
                     continue
-                if info.is_dir():
+                rels = []
+                for name in names:
+                    rel, problem = canonical_member_path(name, artifact)
+                    if problem:
+                        anomalies.append(("path", name, problem))
+                    elif rel is not None and rel not in rels:
+                        rels.append(rel)
+                        if artifact in _PIP_ZIPS and _through_dotdot(name):
+                            anomalies.append(("dotdot", name, f"pip installs it as {rel[:200]!r}"))
+                if not rels:
                     continue
-                rel, problem = canonical_member_path(info.filename, artifact)
-                if problem:
-                    anomalies.append(("path", info.filename, problem))
-                    continue
-                if rel is None:
-                    continue
-                count += 1
-                if count > MAX_FILES:
-                    yield Member(rel, 0, b"", "files")
-                    return
-                if _zip_is_symlink(info):
-                    # pip ignores a zip entry's symlink mode bits: it installs
-                    # the stored bytes as a regular file (wheels and zip sdists
-                    # alike), so those bytes are what is scanned. Lazaret used to
-                    # read them as a link target and skip the entry when no
-                    # member had that name: code pip installs went unscanned.
-                    anomalies.append(("ziplink", rel, "pip installs its stored bytes as a regular "
-                                                      "file, which is what was scanned; unzip "
-                                                      "would create a symlink instead"))
-                _note_member(seen, rel, anomalies)
-                last = rel
+                for rel in rels:
+                    count += 1
+                    if count > MAX_FILES:
+                        yield Member(rel, 0, b"", "files")
+                        return
+                    if _zip_is_symlink(info):
+                        # pip ignores a zip entry's symlink mode bits: it installs
+                        # the stored bytes as a regular file (wheels and zip sdists
+                        # alike), so those bytes are what is scanned. Lazaret used to
+                        # read them as a link target and skip the entry when no
+                        # member had that name: code pip installs went unscanned.
+                        anomalies.append(("ziplink", rel, f"{'VS Code' if artifact == 'vsix' else 'pip'} installs "
+                                                          "its stored bytes as a regular file, which is what was "
+                                                          "scanned; unzip would create a symlink instead"))
+                    _note_member(seen, rel, anomalies)
+                last = rels[0]
                 try:
-                    raw = read(info, rel, MAX_MEMBER + 1)     # bounded, real bytes
+                    raw = read(info, last, MAX_MEMBER + 1)     # bounded, real bytes
                 except _ZIP_READ_ERRORS as exc:
                     why = str(exc) if str(exc).startswith("an LZMA dictionary") else type(exc).__name__
-                    yield Member(rel, 0, b"", "corrupt", f"member {rel} could not be read ({why})")
+                    for rel in rels:
+                        yield Member(rel, 0, b"", "corrupt", f"member {rel} could not be read ({why})")
                     continue
-                if len(raw) > MAX_MEMBER:
-                    yield Member(rel, SAMPLE, raw[:SAMPLE], "member")
-                    continue
-                yield Member(rel, len(raw), raw, None)
+                for rel in rels:
+                    if len(raw) > MAX_MEMBER:
+                        yield Member(rel, SAMPLE, raw[:SAMPLE], "member")
+                    else:
+                        yield Member(rel, len(raw), raw, None)
+            for view_names, view_placed in pip_views:
+                disagreement = _pip_sdist_disagreement(view_names, view_placed)
+                if disagreement:
+                    yield Member("(archive)", 0, b"", "corrupt", disagreement)
+                    break
         except ArchiveLimit as lim:
             yield Member(last, 0, b"", lim.reason, lim.detail)
 
@@ -1307,14 +2235,47 @@ STRONG_SEVERITIES = ("BLOCKER", "CRITICAL")
 VERDICT_RANK = {"OK": 0, "WARN": 1, "INCOMPLETE": 2, "SUSPICIOUS": 3}
 # Rules that mean "not fully scanned": they make a scan INCOMPLETE instead
 # of counting as indicators.
-TRUNCATION_RULES = ("SC-TRUNCATED", "SC-MANIFEST-UNPARSEABLE")
+TRUNCATION_RULES = ("SC-TRUNCATED", "SC-MANIFEST-UNPARSEABLE", "SC-UNREAD-CODE")
+# Why an archive's scan is INCOMPLETE, as its result's `incomplete` says (the
+# guard blocks these by default, T-1 and decision 9; --allow-incomplete lets
+# them through): "time", its deadline passed; "work", the engine could not
+# finish a file or a step (its work budget spent on the input, an internal
+# error); "code", code that runs, or a source file, a manifest or a reader's
+# code, not read whole (cut at the size limit, beyond the text budget or a
+# reader's, a hook command longer than is followed, code outside the package,
+# bytecode that runs: a bytenode .jsc);
+# "archive", the archive not read whole (more entries or bytes than are read,
+# a structure that cannot be read on). Each is something a package can be made
+# to do to hide what it holds, unlike a program too large to read, which is
+# none of them (a 16 MB native library).
+INCOMPLETE_KINDS = ("time", "work", "code", "archive")
+# N-1 (0.1.9): code in a language the engine has no detectors for, by the
+# artifact that ships it: such an artifact is never OK, one SC-UNREAD-CODE
+# finding says what was not read, and the verdict is INCOMPLETE. A Go
+# module's .go files and a crate's .rs files were such code until the Go and
+# Rust readers (G-1, R-1) were wired in (Part C): they are read now
+# (PACKAGE_CODE), so none is left here; the finding stays for code a reader
+# could not hold (_package_code).
+UNREAD_CODE = {}
+UNREAD_CODE_RULE = "SC-UNREAD-CODE"
+# The code a module or a crate is read for, by artifact: (its language, the
+# extensions of its source, the extensions of the other files its reader
+# reads). A Go module's .go files are read with its cgo packages' C (.c, .h);
+# a crate's .rs files. Each source file gets the file rules too (dependency
+# mode, as a package's JavaScript and Python do).
+PACKAGE_CODE = {"gomod": ("go", (".go",), (".c", ".h")), "crate": ("rs", (".rs",), ())}
+# The most a reader takes of one module or crate, in characters: the reader
+# holds all of it at once (the text, each file's tree), so a larger one is
+# not read and the scan is INCOMPLETE (aws-sdk-go v1, Go's largest module in
+# common use, is 207 million characters of Go and peaks at 2.4 GB read).
+PACKAGE_CODE_CHARS = lazaret.PACKAGE_CODE_CHARS        # (300,000,000; --deps reads with core's)
 # Directory names that hold tests / fixtures (exact names, case-insensitive).
 # Weaker findings in them are listed as INFO unless the file is reachable from
 # an entry point (main/bin/exports, an install hook, setup.py).
 TEST_DIR_NAMES = {"test", "tests", "testing", "__tests__", "spec", "specs", "fixtures",
                   "__fixtures__", "testdata", "test_data", "test-data", "test-fixtures",
                   "unittests", "test cases"}
-_TEST_FILE_RE = re.compile(r"(?:^test_.*\.py|.*_test\.py|.*\.(?:test|spec)\.[cm]?[jt]sx?)$", re.I)
+_TEST_FILE_RE = re.compile(r"(?:^test_.*\.py|.*_test\.(?:py|go)|.*\.(?:test|spec)\.[cm]?[jt]sx?)$", re.I)
 
 
 def is_test_path(rel):
@@ -1346,19 +2307,20 @@ USE_RISK_SKIP_DIRS = {"example", "examples", "doc", "docs", "demo", "demos", "sa
 # The test costs time on every file it reads, so it reads none once the
 # package is SUSPICIOUS anyway (the Shai-Hulud 2.0 releases' 10 MB
 # bun_environment.js took 10 s each, and changed no verdict), no file of more
-# than USE_RISK_MAX_CHARS characters, and stops after USE_RISK_SECONDS per
-# archive, smallest files first: next 15.5 (4,573 files) took 25 s more to
-# read whole; bounded, a first guarded plan of next, react, react-dom,
-# typescript and eslint took 53 s (50 s with 0.1.7), and every sample of the
-# benchmark this test catches was read in time. What it did not read is not
-# "not scanned" — the rules of the file scan read every file — so the verdict
-# is not INCOMPLETE.
-USE_RISK_MAX_CHARS = 8_000_000
-USE_RISK_SECONDS = 3.0
-# The native engine reads a batch of files at a time, and the time is checked
-# between batches: a batch holds at most USE_RISK_BATCH_CHARS characters
-# (or one file), or a batch of large bundles overran the time many times over
-# (truffle's: 20 s).
+# than USE_RISK_MAX_CHARS characters, and at most USE_RISK_CHARS characters
+# per archive, smallest files first. The bound is work, not time, so every
+# machine reads the same files (P-14). It was 3 s per archive, which read
+# less on a slower machine, and the report didn't say. 24 million characters
+# read what 3 s read on two cores, at the same cost: all of a litellm wheel's
+# 20 million, 32% of next 16.3.8's 74 million (3 s: 26%). Reading all of
+# next's made its scan 32 s instead of 14 s. What it did not read is not "not
+# scanned" — the rules of the file scan read every file — so the verdict is
+# not INCOMPLETE; the artifact's "useTime" says how much it read.
+USE_RISK_MAX_CHARS = lazaret.USE_RISK_MAX_CHARS        # (8,000,000)
+USE_RISK_CHARS = lazaret.USE_RISK_CHARS                # (24,000,000)
+# The native engine reads a batch of files at a time; the archive's deadline
+# (Budget) is checked between batches, which hold at most
+# USE_RISK_BATCH_CHARS characters (or one file) in this step.
 USE_RISK_BATCH_CHARS = 1_000_000
 
 
@@ -1388,7 +2350,9 @@ def decide_verdict(issues, truncated):
     """-> (verdict, reason, strong_count, weak_count)."""
     # a truncation finding always counts, even one that reached `issues`
     # without going through _ArtifactScan.truncate (verdict integrity)
-    truncated = max(truncated, len({i.get("file") for i in issues if i["rule"] in TRUNCATION_RULES}))
+    unread = sorted({i["name"].removesuffix(" code not read") for i in issues if i["rule"] == UNREAD_CODE_RULE})
+    truncated = max(truncated, len({i.get("file") for i in issues
+                                    if i["rule"] in TRUNCATION_RULES and i["rule"] != UNREAD_CODE_RULE}))
     indicators = [i for i in issues if i["rule"].startswith("SC-")
                   and i["rule"] not in TRUNCATION_RULES and i["sev"] != "INFO"]
     strong = sum(1 for i in indicators if i["sev"] in STRONG_SEVERITIES)
@@ -1396,9 +2360,12 @@ def decide_verdict(issues, truncated):
     plural = lambda n, word: f"{n} {word}{'' if n == 1 else 's'}"
     if strong:
         return "SUSPICIOUS", plural(strong, "strong supply-chain indicator"), strong, weak
-    if truncated:
-        return ("INCOMPLETE", f"scan incomplete: {plural(truncated, 'part')} not fully scanned, "
-                "so the package can't be cleared", strong, weak)
+    if truncated or unread:
+        parts = ([f"{plural(truncated, 'part')} not fully scanned"] if truncated else []) + (
+            [f"its {' and '.join(unread)} code not read (Lazaret has no {' or '.join(unread)} detectors yet)"]
+            if unread else [])
+        return ("INCOMPLETE", f"scan incomplete: {', and '.join(parts)}, so the package can't be cleared",
+                strong, weak)
     if weak:
         return "WARN", plural(weak, "weaker supply-chain indicator") + " to review", strong, weak
     return "OK", "no supply-chain indicators", strong, weak
@@ -1457,6 +2424,38 @@ def _package_entry_targets(data):
     return targets
 
 
+def _npm_main_targets(data):
+    """The files an npm package's main entry and its commands start from (D-13): main (index.js without one), the
+    "." entry of exports under every condition but types, and bin. Not a subpath export: it runs when a user
+    imports it by name."""
+    main = data.get("main")
+    targets = [main if isinstance(main, str) and main.strip() else "index.js"]
+    bins = data.get("bin")
+    if isinstance(bins, str):
+        targets.append(bins)
+    elif isinstance(bins, dict):
+        targets += [v for v in bins.values() if isinstance(v, str)]
+    exports = data.get("exports")
+    if isinstance(exports, dict) and any(isinstance(k, str) and k.startswith(".") for k in exports):
+        exports = exports.get(".")
+    stack, nodes = [exports], 0
+    while stack and nodes < 10_000:
+        node = stack.pop()
+        nodes += 1
+        if isinstance(node, str):
+            if node.startswith("./") and "*" not in node:
+                targets.append(node)
+        elif isinstance(node, dict):
+            stack.extend(v for k, v in node.items() if k != "types")
+        elif isinstance(node, list):
+            stack.extend(node)
+    return targets
+
+
+#: TypeScript's declaration files: types alone, which nothing runs
+_TS_DECLARATIONS = (".d.ts", ".d.cts", ".d.mts")
+
+
 def _pattern_regex(pattern):
     """Regex for the members an exports pattern target resolves to: Node puts
     the matched subpath (non-empty; it may contain '/') in place of every
@@ -1502,23 +2501,169 @@ _SDIST_NOT_MODULES = frozenset((
 # the directory prefix the modules of a root live under (a wheel's
 # .data/purelib/, an sdist's src/), for absolute imports
 _PY_BASE_RE = re.compile(r"^((?:[^/]+\.data/(?:purelib|platlib)|src)/)")
-_PY_REACH_MAX = 300
-# `import a.b`, `from a.b import c, d`, `from .x import (a, b)`, `from . import a`
+# An import statement: `import a.b as c, d`, `from a.b import c, d`, `from .x import (a, b)`, `from . import a`;
+# at the start of a line, or after a `;` or a compound statement's `:` on it (`x = 1; import y`, `try: import y`).
+# A parenthesized name list is read from its `(` (_py_import_targets).
 _PY_IMPORT_STMT_RE = re.compile(
-    r"^[ \t]*(?:from[ \t]+(?P<dots>\.*)(?P<mod>[A-Za-z_][\w.]*)?[ \t]+import[ \t]+(?P<names>\([^)]{0,2000}\)|[^\n#;]{0,2000})"
-    r"|import[ \t]+(?P<imod>[A-Za-z_][\w.]*))", re.M)
+    r"(?:^|[;:])[ \t]*(?:from[ \t]+(?P<dots>\.*)[ \t]*(?P<mod>[A-Za-z_][\w.]*)?[ \t]*import\b[ \t]*"
+    r"(?:(?P<paren>\()|(?P<names>[^\n#;]*))|import[ \t]+(?P<imods>[^\n#;]*))", re.M)
+# A module named by a literal to importlib's import_module() (a relative name, with its package argument: a literal,
+# or the module's own __name__, __package__ or __spec__.parent), to __import__() or to runpy's run_module()
+_PY_DYNAMIC_IMPORT_RE = re.compile(
+    r"""\b(?P<fn>import_module|__import__|run_module)[ \t]*\(\s*[rRuU]?(?P<q>['"])(?P<name>\.*[A-Za-z_][\w.]*)(?P=q)"""
+    r"""(?:\s*,\s*(?:package\s*=\s*)?(?:[rRuU]?(?P<q2>['"])(?P<pkg>[A-Za-z_][\w.]*)(?P=q2)"""
+    r"""|(?P<anchor>__name__|__package__|__spec__\.parent)\b))?""")
+_PY_COMMENT_RE = re.compile(r"#[^\n]*")
+
+
+def _dotted(name):
+    """Is `name` a dotted module name (`a.b`)?"""
+    return all(part.isidentifier() for part in name.split("."))
 
 
 def _import_names(names):
-    """The plain names of an import list (`a, b as c`, `(a,\n b)`); not *."""
+    """The plain names of a `from … import` list (`a, b as c`, `(a,\n b)`, comments between them); not *."""
     if not names:
         return []
     out = []
-    for part in names.strip().strip("()").split(","):
-        name = part.strip().split(" as ")[0].strip()
-        if name.isidentifier():
-            out.append(name)
-    return out[:50]
+    for part in _PY_COMMENT_RE.sub("", names).replace("(", " ").replace(")", " ").split(","):
+        words = part.split()
+        if words and words[0].isidentifier():
+            out.append(words[0])
+    return out
+
+
+def _import_modules(modules):
+    """The dotted modules of an `import` statement's list (`a.b as c, d`)."""
+    out = []
+    for part in modules.split(","):
+        words = part.split()
+        if words and _dotted(words[0]):
+            out.append(words[0])
+    return out
+
+
+def _py_prefixes(dotted, base):
+    """A module and each package above it, as (dotted name, base) pairs: importing a.b.c runs a/__init__.py, then
+    a/b/__init__.py, then a/b/c."""
+    parts = dotted.split(".")
+    return [(".".join(parts[:k]), base) for k in range(1, len(parts) + 1)]
+
+
+_PY_LIST_LINE_RE = re.compile(r"[\w \t,()]*")      # what a line of an import's name list holds, its comment cut
+_PY_IMPORT_WORD_RE = re.compile(r"\b(?:import|from)\b")
+
+
+def _paren_list(text, start):
+    """(the names, the end) of the parenthesized name list of a `from … import (` whose `(` ends at `start`: line by
+    line, each line's comment cut (a `#` in a name list starts one, so a `)` after it closes nothing), to the `)`.
+    A line that holds what no name list holds (another statement, the list not closed, or not one: text in a
+    docstring) ends it before that line. Each line is read by one list at most (a statement in a list's comments
+    is not read: _py_import_targets)."""
+    lines, pos = [], start
+    while True:
+        nl = text.find("\n", pos)
+        stop = len(text) if nl < 0 else nl
+        line = text[pos:stop]
+        cut = line.find("#")
+        code = line if cut < 0 else line[:cut]
+        close = code.find(")")
+        if close >= 0:
+            lines.append(code[:close])
+            return "\n".join(lines), pos + close
+        if lines and (not _PY_LIST_LINE_RE.fullmatch(code) or _PY_IMPORT_WORD_RE.search(code)):
+            return "\n".join(lines), pos
+        lines.append(code)
+        if nl < 0:
+            return "\n".join(lines), stop
+        pos = nl + 1
+
+
+def _import_statements(text):
+    """_PY_IMPORT_STMT_RE's matches in a text, in order, read on the lines that hold the word `import` alone (the
+    regex tried at every `;` and `:` took 1.9 s of a 92 MB release's walk; so read, 0.1 s)."""
+    pos = 0
+    while (at := text.find("import", pos)) >= 0:
+        start = text.rfind("\n", 0, at) + 1
+        end = text.find("\n", at)
+        end = len(text) if end < 0 else end
+        yield from _PY_IMPORT_STMT_RE.finditer(text, start, end)
+        pos = end
+
+
+def _dynamic_imports(text):
+    """_PY_DYNAMIC_IMPORT_RE's matches in a text, in order, each tried where one of the functions' names is."""
+    found = []
+    for word in ("import_module", "__import__", "run_module"):
+        at = text.find(word)
+        while at >= 0:
+            m = _PY_DYNAMIC_IMPORT_RE.match(text, at)
+            if m:
+                found.append(m)
+            at = text.find(word, at + 1)
+    return sorted(found, key=lambda m: m.start())
+
+
+def _py_import_targets(current, text):
+    """The modules the Python module `current` (its archive path) names to import, as (dotted name, base) pairs:
+    `base` is the directory a relative import is read under, None for an absolute import, which each walk reads
+    against its own roots. Over-inclusive (a regex reading, which also takes what a string or a comment says):
+    each module of an import list and the packages above it; a `from a import b` name, which may be a submodule;
+    lines a backslash continues joined, and a parenthesized name list read to its `)` (_paren_list); a module
+    named by a literal to import_module(), __import__() or run_module() (BR-5)."""
+    text = lazaret.normalize_newlines(text).replace("\\\n", " ")
+    out = []
+    listed = 0                  # where the last parenthesized list ends: a statement before it is in its comments
+
+    def package_of(anchor, level):
+        # the directory a relative name of `level` dots is read under: the package's (dirname), or a module's
+        # own name taken as a package's (import_module(".x", __name__) in a/b.py names a.b.x)
+        base = anchor
+        for _ in range(level - 1):
+            base = posixpath.dirname(base)
+        return base
+
+    for m in _import_statements(text):
+        if m.start() < listed:
+            continue
+        if m["imods"] is not None:                             # import a.b as c, d
+            for name in _import_modules(m["imods"]):
+                out.extend(_py_prefixes(name, None))
+            continue
+        names = m["names"]
+        if m["paren"] is not None:
+            names, listed = _paren_list(text, m.end())
+        dots, mod = m["dots"], m["mod"]
+        if dots:                                               # from .x import a / from . import a
+            base = package_of(posixpath.dirname(current), len(dots))
+            if mod:
+                out.extend(_py_prefixes(mod, base))
+            pkg = _rel_join(base, mod.replace(".", "/")) if mod else base
+            out.extend((n, pkg) for n in _import_names(names))
+        elif mod:                                              # from a.b import c
+            out.extend(_py_prefixes(mod, None))
+            out.extend((mod + "." + n, None) for n in _import_names(names))
+    for m in _dynamic_imports(text):
+        name = m["name"]
+        rest = name.lstrip(".")
+        level = len(name) - len(rest)
+        if not _dotted(rest):
+            continue
+        if not level:                                          # import_module("a.b"), __import__("a.b")
+            out.extend(_py_prefixes(rest, None))
+        elif m["fn"] != "import_module":
+            continue                                           # (a relative name is import_module's alone)
+        elif m["pkg"] is not None:                             # import_module(".b", "a")
+            bits = m["pkg"].rsplit(".", level - 1)
+            if len(bits) == level and _dotted(bits[0]):
+                out.extend(_py_prefixes(bits[0] + "." + rest, None))
+        elif m["anchor"] == "__name__":
+            own = (posixpath.dirname(current) if posixpath.basename(current) == "__init__.py"
+                   else current.removesuffix(".py"))
+            out.extend(_py_prefixes(rest, package_of(own, level)))
+        elif m["anchor"] is not None:                          # __package__, __spec__.parent
+            out.extend(_py_prefixes(rest, package_of(posixpath.dirname(current), level)))
+    return out
 
 
 def startup_module_issue(rel, text):
@@ -1549,18 +2694,43 @@ def _archive_issue(kind, path, detail):
                  "A symlink or hardlink pointing outside the extraction directory can make "
                  "the installer read or overwrite files elsewhere on the machine."),
         "ziplink": ("SC-ARCHIVE-LINK", "Zip entry marked as a symlink",
-                    "pip ignores the mark and installs the entry's bytes as a regular file, "
-                    "while unzip creates a symlink: the same archive installs differently, and "
+                    "pip (and VS Code, for an extension) ignores the mark and installs the entry's bytes as a "
+                    "regular file, while unzip creates a symlink: the same archive installs differently, and "
                     "no packaging tool produces one."),
         "path": ("SC-ARCHIVE-PATH", "Unsafe archive path",
                  "An entry with '..' in its path tries to escape the extraction directory; "
                  "installers refuse it, and no legitimate package tool produces one."),
+        "dotdot": ("SC-ARCHIVE-PATH", "Archive path through '..'",
+                   "pip resolves the '..' of an sdist's or a wheel's entry and installs it under the path it comes "
+                   "to ('x/../setup.py' is setup.py), where a listing of the archive shows another name, so what a "
+                   "reviewer sees is not what gets built or installed, and no packaging tool writes one. The entry "
+                   "was scanned where pip writes it."),
         "noname": ("SC-ARCHIVE-PATH", "Unnamed archive entry",
                    "No extractor can place an entry with no name: installers fail on it or skip it, so "
                    "its bytes are neither installed nor reviewed, and no packaging tool produces one."),
+        "case": ("SC-ARCHIVE-DUP", "Archive paths that differ only by case",
+                 "On macOS and Windows, whose file systems ignore case (and Unicode normalization), two such "
+                 "entries are one file: the later one's bytes under the earlier one's name, so the code that "
+                 "runs there is not the file a listing names. Each was scanned as code that runs when either "
+                 "does; no packaging tool writes such a pair on purpose."),
+        "unicode": ("SC-ARCHIVE-PATH", "Archive entry with two names",
+                    "A zip entry's Info-ZIP Unicode Path field names it otherwise than its header: VS Code and "
+                    "pip from Python 3.12 install it under the field's name, older pips and most listings show "
+                    "the header's, so what a reviewer sees is not what gets installed. The entry was scanned "
+                    "under each name an installer uses; no packaging tool writes one."),
+        "vsixname": ("SC-ARCHIVE-PATH", "Extension file outside extension/",
+                     "VS Code extracts every entry of a .vsix whose name begins with 'extension', with a '/' "
+                     "after it or not: 'extensionout/a.js' is installed as 'out/a.js'. A listing shows it "
+                     "outside the extension, and no packaging tool writes one. It was scanned where VS Code "
+                     "writes it."),
         "overlap": ("SC-ARCHIVE-OVERLAP", "Overlapping archive entries",
                     "Two entries of the zip archive share their bytes: the shape of a zip bomb (one "
                     "compressed stream counted many times), and no packaging tool produces one."),
+        "type": ("SC-ARCHIVE-TYPE", "Archive entry of an unusual type",
+                 "pip writes a tar entry of a type no tool writes as a regular file, and cargo any entry but "
+                 "a directory or a link (a device, a FIFO too), where other tar readers skip it: what is "
+                 "installed or built is not what a reviewer listing the archive sees, and no packaging tool "
+                 "writes one. The entry was read and scanned as the file the installer writes."),
     }
     rid, name, why = rules[kind]
     return {"rule": rid, "name": name, "type": "HOTSPOT", "sev": "MAJOR",
@@ -1596,17 +2766,97 @@ class _OutOfTime(Exception):
     """Internal: the archive's deadline passed while scanning (recorded)."""
 
 
+def _unread_code(artifact, rel):
+    """Is `rel`, a member of an `artifact`, code in a language nothing reads
+    (UNREAD_CODE), and not test code its build leaves out?"""
+    lang = UNREAD_CODE.get(artifact)
+    return lang is not None and rel.lower().endswith(lang[1]) and not is_test_path(rel)
+
+
+def _never_built(artifact, rel):
+    """Is `rel`, a source file of a Go module or a crate, one no build of a
+    dependent compiles, as the readers say (core.never_built: a Go
+    *_test.go file, a file named with "_" or "." first, one under testdata/
+    or vendor/; a crate's tests/, benches/ and examples/)? Neither the reader
+    nor the file rules read it: the toolchain never runs it in a dependent
+    (rivo/uniseg's line-break tests hold escaped URLs)."""
+    if artifact == "gomod":
+        return lazaret.never_built("go", _go_root_file(rel))
+    if artifact == "crate":
+        return lazaret.never_built("crate", rel)
+    return False
+
+
+def _go_root_file(rel):
+    """The path of a Go module's member below its "<path>@<version>" root
+    directory (the member paths start below the module path's host; a
+    module whose path is a host alone has its root stripped)."""
+    parts = rel.split("/")
+    root = next((k for k, p in enumerate(parts) if "@" in p), -1)
+    return "/".join(parts[root + 1:])
+
+
+#: JS-PARSE-STRICT: JavaScript of a package that the engine's parser refused (INFO): the tests that read a file's
+#: syntax tree read only its text there
+UNPARSED_CODE_RULE = "SC-UNPARSED-CODE"
+
+
+def _unparsed_code_issue(found):
+    """The SC-UNPARSED-CODE finding (INFO) for the JavaScript members the parser refused: `found`, rel -> (line,
+    reason), or None where the reason is not known (D-13's read of a module)."""
+    rels = sorted(found)
+
+    def one(rel):
+        why = found[rel]
+        return f"{rel} (line {why[0]}: {str(why[1])[:80]})" if why else rel
+    shown = ", ".join(one(r) for r in rels[:3]) + (", …" if len(rels) > 3 else "")
+    first = found[rels[0]]
+    return {"rule": UNPARSED_CODE_RULE, "name": "JavaScript the parser could not read", "type": "HOTSPOT",
+            "sev": "INFO",
+            "msg": (f"{len(rels)} JavaScript file{'' if len(rels) == 1 else 's'} the parser could not read ({shown}): "
+                    "the supply-chain tests that read a file's syntax tree read only its text there."),
+            "why": ("Most such files are broken, and Node refuses them too; but the parser is stricter than V8 in "
+                    "places (nesting past its bound), so a file Node runs could hide from the tests that read its "
+                    "tree: what it writes into another package, a program it carves out of another file, the modules "
+                    "it loads."),
+            "fix": "Check that the file is one Node would refuse (`node --check FILE`); if Node runs it, review it.",
+            "ref": "CWE-506 · Supply chain", "file": rels[0], "line": first[0] if first else 1, "snippet": [],
+            "snipStart": 1}
+
+
+def _unread_code_issue(artifact, rels):
+    """The SC-UNREAD-CODE finding for an artifact whose code in `rels`
+    (sorted) nothing reads (N-1)."""
+    lang, _ext = UNREAD_CODE[artifact]
+    shown = ", ".join(rels[:3]) + (", …" if len(rels) > 3 else "")
+    return {"rule": UNREAD_CODE_RULE, "name": f"{lang} code not read", "type": "HOTSPOT", "sev": "MAJOR",
+            "msg": (f"{len(rels)} {lang} file{'' if len(rels) == 1 else 's'} not read ({shown}): Lazaret has no "
+                    f"{lang} detectors yet, so what that code does when the package is built or used was not "
+                    "checked, and the package can't be cleared."),
+            "why": (f"A package's {lang} code runs on the machine that builds or uses it. The package's checksum, age "
+                    "and archive were checked, and its other files were read; what its code does was not, so a clean "
+                    "verdict would say more than the scan knows."),
+            "fix": f"Review the package's {lang} code.",
+            "ref": "CWE-506 · Supply chain", "file": rels[0], "line": 1, "snippet": [], "snipStart": 1}
+
+
 class _ArtifactScan:
     """Scan state for one archive: classify members as they stream by, then
     resolve what package.json / setup.py say runs (entry points, install
     hooks, build backends) once every member is known."""
 
-    def __init__(self, artifact, full, budget=None):
+    def __init__(self, artifact, full, budget=None, memo=None, action_root=None):
         self.artifact, self.full = artifact, full
         self.budget = budget       # the archive's Budget (its deadline names itself)
+        self.memo = _cache.NULL if memo is None else memo     # the engine's answers by content (P-2a)
+        self.texts = _engine.Texts()       # the engine's copies of the texts the steps read (FE-1): released at the end
+        self.digests = _cache.Digests()    # each text's SHA-256 for the memo's keys, worked out once (FE-1)
+        self._spawned = {}                 # (text, lang) -> spawned_scripts' answer, asked a batch at a time
+        self._candidates = {}              # path -> node_candidates' answer (Node's names for it), asked once
         self.issues, self.files_scanned, self.binaries = [], 0, 0
         self.truncated, self.truncated_emitted = 0, 0
         self.truncated_at = {}     # rel -> its SC-TRUNCATED issue (None past the cap)
+        self.cut = set()           # why the scan is incomplete, of INCOMPLETE_KINDS (T-1, decision 9)
         self.timed_out = False     # the deadline passed (recorded once)
         self.sources = {}          # rel -> (text, lang) scanned as source
         self.pending = []          # source files queued for scan_pending (a batch)
@@ -1617,20 +2867,49 @@ class _ArtifactScan:
         self.shell = {}            # rel -> text of shell scripts
         self.binary = set()        # classified as binary
         self.oversize = set()
+        self.native = set()        # members whose first bytes are a program's (ELF, Mach-O, PE, WebAssembly, DEX)
         self.members = set()
         self.manifests = {}        # rel -> text (package.json, binding.gyp, pyproject.toml)
         self.entries = set()       # rels that run when installed / imported
+        self._twins = None         # rel -> the members whose paths differ from it only by case (_case_twins)
+        self._declared = False     # the release's declared names (_declared_names; None: not known)
+        self._own = False          # its own name (_own_name; None: not known)
+        self._fold_index = None    # (members counted, {case fold: member}) (_folds)
+        self.vsix_main = set()     # vsix: the entries of `main` and `browser`
+        self.vsix_special = {}     # vsix: rel -> when it runs, for an entry a contribution names (EG-5)
+        self._vsix_whens = None    # vsix: rel -> when it runs, for what those reach and `main` does not (_vsix_when)
         self.install_scripts = set()   # hook targets, setup.py & co (install_script_risk)
         self.startup = set()       # a wheel's sitecustomize / usercustomize
         self.unread = False        # a member the archive's limits left unread
         self.unused_dependencies = []  # npm: registry names no file uses (_unused_dependencies)
+        self.extension_dependencies = []   # vsix: the extensions it brings (_vsix_entry_points)
+        self.vsix_startup = None   # vsix: the activation event that starts it with the editor, if any
+        self.vsix_identity = None  # vsix: its package.json's publisher, name and version
+        self.use_time = None       # what SC-USE-RISK's step read (_use_time_code), None: not run
+        self.unread_code = []      # N-1: members whose code nothing reads yet (UNREAD_CODE)
+        self.unparsed = {}         # JS-PARSE-STRICT: JavaScript members the parser refused -> (line, reason) or None
+        self.code_text = {}        # rel -> raw: what a reader reads besides the scanned sources (a Go
+        self.code_bytes = 0        # module's cgo C; an sdist's .rs and Cargo.toml files, N-17), kept
+        self.code_dropped = set()  # within PACKAGE_CODE_CHARS bytes (code_dropped: not kept)
+        # action (N-4): the action's directory in the repository ('' for its root), its action.yml's text
+        # (rel -> text), what it runs (_action_entry_points: action_info), and the files it runs as code
+        # (rel -> how: 'runs.main', 'step 2', ...)
+        self.action_root = (action_root or "").strip("/") if artifact == "action" else None
+        self.action_meta_paths = (frozenset(_rel_join(self.action_root, n) for n in _actionmeta.METADATA)
+                                  if artifact == "action" else frozenset())
+        self.action_meta = {}
+        self.action_info = None
+        self.action_entries = {}
 
     # ---- bookkeeping ----
-    def truncate(self, rel, detail):
+    def truncate(self, rel, detail, kind=None):
         """One SC-TRUNCATED finding, and one "part not fully scanned", per
         file: another reason for the same file (it also runs at install time,
         and package.json can name it as main, bin and exports) is added to
-        that finding's message instead of repeating it."""
+        that finding's message instead of repeating it. `kind`: why, of
+        INCOMPLETE_KINDS (the result's `incomplete`), None for another."""
+        if kind is not None:
+            self.cut.add(kind)
         self.scan_pending()                   # (the files queued before come first)
         if rel in self.truncated_at:
             issue = self.truncated_at[rel]
@@ -1669,7 +2948,7 @@ class _ArtifactScan:
             self.budget.check()
         except ArchiveLimit as lim:
             self.timed_out = True
-            self.truncate("(archive)", lim.detail or self.limit_detail(lim.reason, where))
+            self.truncate("(archive)", lim.detail or self.limit_detail(lim.reason, where), "time")
             return True
         return False
 
@@ -1681,7 +2960,7 @@ class _ArtifactScan:
     def add_decode_issues(self, extra, keep_encoding=True):
         for i in extra:
             if i["rule"] == "SC-TRUNCATED":
-                self.truncate(i["file"], i["msg"].removeprefix("File not fully scanned: ").rstrip("."))
+                self.truncate(i["file"], i["msg"].removeprefix("File not fully scanned: ").rstrip("."), "code")
             elif keep_encoding or i["rule"] != "Q-ENCODING":
                 self.issues.append(i)
 
@@ -1696,10 +2975,10 @@ class _ArtifactScan:
         self.sources[rel] = (text, lang)
         self.pending.append((rel, text, lang))
         # The engine reads a batch of the first pass's files on threads
-        # (engine.py); a --full scan (project mode: core's passes follow the
-        # engine's rules) and the second pass, whose steps read what they
-        # scan, go one at a time.
-        batch = _engine.BATCH if self.first_pass and not self.full else 1
+        # (engine.py), in dependency mode and in a --full scan's project mode
+        # alike; the second pass, whose steps read what they scan, goes one
+        # at a time.
+        batch = _engine.BATCH if self.first_pass else 1
         if len(self.pending) >= batch:
             self.scan_pending()
 
@@ -1710,62 +2989,206 @@ class _ArtifactScan:
         pending, self.pending = self.pending, []
         if not pending:
             return
-        found = _engine.scan_files([(rel, text, lang, not self.full) for rel, text, lang in pending])
+        found = self._scan_files([(rel, text, lang, not self.full) for rel, text, lang in pending])
         for (rel, _text, _lang), issues in zip(pending, found):
             self.files_scanned += 1
             for i in issues:
                 if i["rule"] in TRUNCATION_RULES:
                     # part of the file was not scanned (the engine's work budget
-                    # spent, an internal error, the time budget of core's passes),
-                    # so the release can't be cleared (it used to be listed while
-                    # the verdict stayed OK)
-                    self.truncate(rel, i["msg"].removeprefix("File not fully scanned: ").rstrip("."))
+                    # spent, an internal error), so the release can't be cleared
+                    # (it used to be listed while the verdict stayed OK)
+                    self.truncate(rel, i["msg"].removeprefix("File not fully scanned: ").rstrip("."), "work")
                 else:
                     self.issues.append(i)
+
+    # ---- the engine, through the memo (P-2a) ----
+    def _key(self, kind, text, lang, flags):
+        return _cache.file_key(kind, None, text, lang, flags, pack=ENGINE_VERSION, engine=_engine.describe(),
+                               digest=self.digests)
+
+    def release(self):
+        """Let go of what the scan kept for the engine's calls (FE-1): the engine's copies of its texts, and their
+        digests. Called at the end of the scan, and in scan_members' `finally` whatever happened."""
+        self.texts.close()
+        self.digests.clear()
+        self._spawned, self._candidates = {}, {}
+
+    def _scan_files(self, items):
+        """engine.scan_files, asking the engine once for each distinct call
+        (its name, its arguments and the text: it reads no path) and building
+        each file's issues for its own path. A call the engine could not
+        answer is not kept."""
+        calls = _engine.scan_calls(items)
+        todo = [k for k, call in enumerate(calls) if call is not None]
+        keys = [self._key("scan", items[k][1], items[k][2], dict(calls[k][1], call=calls[k][0])) for k in todo]
+        asked = dict(zip(keys, [(calls[k][0], calls[k][1], items[k][1]) for k in todo]))
+
+        def compute(missing):
+            return [_cache.Uncacheable(a) if _engine.unanswered(a) else a
+                    for a in _engine.call_answers([asked[key] for key in missing], texts=self.texts)]
+        answers = self.memo.get_or_compute_many(keys, compute)
+        out = [[] for _ in items]
+        for k, answer in zip(todo, answers):
+            rel, text, lang, _dep = items[k]
+            out[k] = _engine.scan_issues(rel, text, lang, calls[k][0], answer)
+        return out
+
+    def _import_risks(self, items, declared=None):
+        """engine.import_time_risks for [(text, lang)], once for each distinct
+        file (an answer the engine could not give is not kept); `declared`,
+        the release's declared names, for its D-12 test (_declared_names);
+        the release's own name (D-9, _own_name). Each answer is (reasons,
+        line, refused): the parser's refusal of a JavaScript file, said in
+        the report (_note_unparsed)."""
+        flags = {"budget": _engine.WORK_BUDGET, "refused": True}
+        if declared is not None:
+            flags["declared"] = hashlib.sha256("\n".join(declared).encode("utf-8", "surrogatepass")).hexdigest()
+        own = self._own_name()
+        if own:
+            flags["own"] = own
+        keys = [self._key("import-risk", text, lang, flags) for text, lang in items]
+        asked = dict(zip(keys, items))
+
+        def compute(missing):
+            return [_cache.Uncacheable(a) if _engine.unanswered(a) else a
+                    for a in _engine.import_time_risks([asked[key] for key in missing], texts=self.texts,
+                                                       declared=declared, own=own, refused=True)]
+        return self.memo.get_or_compute_many(keys, compute)
+
+    def _declared_names(self):
+        """The release's own name and the packages its manifest names, or None where they are not known (D-12: a
+        package manager's install of any other, in code that runs when the package is loaded, is a strong reason).
+        npm: package.json's name and its dependencies of every kind, bundled ones too; a wheel's METADATA and an
+        sdist's PKG-INFO: the Name and each Requires-Dist, an extra's too. An sdist whose PKG-INFO names no
+        dependency is not known (its setup.py may), nor is any other artifact's."""
+        if self._declared is not False:
+            return self._declared
+        out = None
+        if self.artifact == "npm":
+            text = self.manifests.get("package.json")
+            data, _problems = lazaret.load_manifest("package.json", text) if text else (None, None)
+            if isinstance(data, dict):
+                out = lazaret.npm_declared_names(data)
+        elif self.artifact in ("wheel", "sdist"):
+            if self.artifact == "wheel":
+                rel = next((r for r in sorted(self.deferred) if r.count("/") == 1
+                            and r.endswith(".dist-info/METADATA")), None)
+            else:
+                rel = "PKG-INFO" if "PKG-INFO" in self.deferred else None
+            if rel is not None:
+                names, requires = lazaret.metadata_declared_names(self.deferred[rel].decode("utf-8", "replace"))
+                if requires or self.artifact == "wheel":
+                    out = names
+        self._declared = sorted(out) if out is not None else None
+        return self._declared
+
+    def _own_name(self):
+        """An npm release's own name (package.json's), or None (D-9: a rewrite of its own package's code, or of one
+        of its scope, is its own)."""
+        if self._own is False:
+            self._own = None
+            if self.artifact == "npm":
+                text = self.manifests.get("package.json")
+                data, _problems = lazaret.load_manifest("package.json", text) if text else (None, None)
+                name = data.get("name") if isinstance(data, dict) else None
+                self._own = name if isinstance(name, str) and name else None
+        return self._own
+
+    def _spawned_scripts(self, text, lang):
+        """engine.spawned_scripts, once for each distinct script (a call the
+        engine could not answer raises, and is not kept)."""
+        got = self._spawned.get((text, lang))
+        if got is not None:
+            return got
+        return self.memo.get_or_compute(self._key("spawned", text, lang, ()),
+                                        lambda: _engine.spawned_scripts(text, lang))
+
+    def _prefetch_spawned(self, items):
+        """_spawned_scripts for [(text, lang)], a batch at a time (FE-1: they were asked one file at a time). An
+        answer the engine could not give is not kept: the walk asks for it alone where it needs it, and that call
+        raises as it did."""
+        items = [item for item in dict.fromkeys(items) if item not in self._spawned]
+        if not items:
+            return
+        keys = [self._key("spawned", text, lang, ()) for text, lang in items]
+        asked = dict(zip(keys, items))
+
+        def compute(missing):
+            return [_cache.Uncacheable(a) if _engine.unanswered(a) else a
+                    for a in _engine.spawned_scripts_many([asked[key] for key in missing], texts=self.texts)]
+        for item, answer in zip(items, self.memo.get_or_compute_many(keys, compute)):
+            if not _engine.unanswered(answer):
+                self._spawned[item] = answer
 
     # ---- pass 1: members ----
     def member(self, m):
         rel, size, raw, reason = m
         if reason in ("files", "total", "time", "corrupt"):
             self.unread = True
-            self.truncate(rel, getattr(m, "detail", "") or self.limit_detail(reason, rel, size))
+            self.truncate(rel, getattr(m, "detail", "") or self.limit_detail(reason, rel, size),
+                          "time" if reason == "time" else "archive")
             self.timed_out = self.timed_out or reason == "time"
             return
         self.members.add(rel)
+        if self.artifact in UNREAD_CODE and _unread_code(self.artifact, rel):
+            self.unread_code.append(rel)
         base = os.path.basename(rel)
         ext = os.path.splitext(base)[1].lower()
-        wants_text = (base in _MANIFEST_NAMES or ext in lazaret.EXTS
-                      or ext in (".pth", ".gyp", ".gypi"))
+        named = opened_as(base)                  # (package.json as `Package.json` too: EG-4's leftover)
+        code = PACKAGE_CODE.get(self.artifact)
+        wants_text = (named in _MANIFEST_NAMES or lazaret.dep_source_lang(ext) is not None
+                      or ext == ".pth" or (ext in (".gyp", ".gypi") and self.artifact not in ("vsix", "action"))
+                      # a file a reader reads: a Go module's .go and cgo C, a crate's .rs (an
+                      # sdist's .rs is known to be a crate's only at the end: _sdist_crates)
+                      or (code is not None and ext in code[1] + code[2] and not _never_built(self.artifact, rel)))
         if reason == "member":
             self.oversize.add(rel)
+            if _native_program(raw):
+                self.native.add(rel)
             if wants_text and not (ext in lazaret.MPEG_TS_EXTS and lazaret._mpeg_ts(raw[:512])):
                 # Verdict integrity (audit C2/G16): a cut-short scan is a
                 # signal, not a clean verdict — whatever the first bytes look like.
-                self.truncate(rel, _TRUNC_DETAILS["member"](rel, size))
+                self.truncate(rel, _TRUNC_DETAILS["member"](rel, size), "code")
             # still classifiable by magic/entropy from the decompressed prefix
-            disguised = lazaret.disguised_binary(rel, raw) if ext in lazaret.EXTS else None
+            disguised = lazaret.disguised_binary(rel, raw) if lazaret.dep_source_lang(ext) else None
             if disguised:
                 self.binaries += 1
                 self.issues.append(disguised)
             else:
                 self.classify(rel, raw, size)
             return
-        if base == "package.json":
+        if rel in self.action_meta_paths:
+            # the action's action.yml (N-4), read in the second pass (_action_entry_points)
+            if len(raw) > _actionmeta.MAX_METADATA_BYTES:
+                self.truncate(rel, f"the action's metadata is larger than {_actionmeta.MAX_METADATA_BYTES:,} bytes, "
+                                   f"so what it runs was not read")
+            else:
+                self.action_meta[rel] = raw.decode("utf-8", "replace").removeprefix("﻿")
+            return
+        if named == "package.json":
             text, extra = lazaret.decode_member(rel, raw)
             self.add_decode_issues(extra, keep_encoding=False)
             self.manifests[rel] = text
             self._deadline(rel)
+            # (a VS Code extension: the editor runs no npm script, only the root's vscode:uninstall, E-1; an
+            # action's runner installs nothing, N-4)
+            hooks = (None if self.artifact not in ("vsix", "action")
+                     else VSIX_HOOKS if self.artifact == "vsix" and case_fold(rel) == "package.json" else ())
             try:
-                found = lazaret.scan_manifest(rel, text, registry=True)
+                found = lazaret.scan_manifest(rel, text, registry=True, hooks=hooks)
             except _engine.NativeError as exc:
                 self._unanswered(rel, exc)
                 return
             for i in found:
                 if i["rule"] == "SC-MANIFEST-UNPARSEABLE":
                     self.truncated += 1
+                if self.artifact == "vsix" and i["rule"] == "SC-INSTALL-HOOK" and not vsix_hook_runs(i["cmd"]):
+                    _vsix_inert_hook(i)
+                self._npm_never_installs(i)
                 self.issues.append(i)
             return
-        if base in ("binding.gyp",) or ext in (".gyp", ".gypi"):
+        # (an extension's binding.gyp is data: VS Code builds nothing, E-1; nor does an action's runner, N-4)
+        if self.artifact not in ("vsix", "action") and (named == "binding.gyp" or ext in (".gyp", ".gypi")):
             text, extra = lazaret.decode_member(rel, raw)
             self.add_decode_issues(extra, keep_encoding=False)
             self.manifests[rel] = text
@@ -1778,10 +3201,20 @@ class _ArtifactScan:
             for i in found:
                 if i["rule"] == "SC-MANIFEST-UNPARSEABLE":
                     self.truncated += 1
+                self._npm_never_installs(i)
                 self.issues.append(i)
             return
-        if base == "pyproject.toml":
+        if named == "pyproject.toml":
             self.manifests[rel] = raw.decode("utf-8", "replace")
+            return
+        if ((self.artifact == "sdist" and (ext == ".rs" or base == "Cargo.toml"))
+                or (code is not None and ext in code[2] and not _never_built(self.artifact, rel))) \
+                and not lazaret.looks_binary(raw[:2048]):
+            # read by a package reader at the end (_package_code, _sdist_crates), whatever text came
+            # before: a Go module's cgo C, and the files of a Rust crate inside an sdist (N-17), which
+            # cargo builds when pip builds the sdist; which crate a file is in is known once every
+            # Cargo.toml is
+            self._keep_code(rel, raw)
             return
         if ext == ".pth":
             text = raw.decode("utf-8-sig", "replace")
@@ -1791,7 +3224,9 @@ class _ArtifactScan:
                 self._unanswered(rel, exc)
             self.scan_source(rel, text, "py")
             return
-        lang = lazaret.EXTS.get(ext)
+        lang = lazaret.dep_source_lang(ext)
+        if lang is None and code is not None and ext in code[1] and not _never_built(self.artifact, rel):
+            lang = code[0]                       # a Go module's .go, a crate's .rs (Part C)
         if lang is not None:
             text, extra = lazaret.decode_member(rel, raw)
             self.add_decode_issues(extra)
@@ -1806,6 +3241,8 @@ class _ArtifactScan:
             return
         if lazaret.looks_binary(raw[:2048]):
             self.binary.add(rel)
+            if _native_program(raw):
+                self.native.add(rel)
             self.classify(rel, raw, size)
             return
         # Text without a source extension: a script by its #! line, or kept
@@ -1823,11 +3260,35 @@ class _ArtifactScan:
             if kind == "sh":
                 self.shell[rel] = text
                 return
-        if self.deferred_bytes + len(raw) <= DEFERRED_TEXT_BUDGET:
+        if self.deferred_bytes + len(raw) <= DEFERRED_TEXT_BUDGET or (
+                # a module's go.mod (Go's limit is 16 MiB) is read for its names whatever came before it
+                self.artifact == "gomod" and len(raw) <= _gomod.MAX_GOMOD and _go_root_file(rel) == "go.mod"):
             self.deferred[rel] = raw
             self.deferred_bytes += len(raw)
         else:
             self.dropped.add(rel)
+
+    def _npm_never_installs(self, issue):
+        """N-18: an npm manifest or a binding.gyp inside a Go module or a crate
+        (a web front end's, an npm wrapper of the crate's binary) is not one npm
+        installs from there, so its hooks, the implicit `node-gyp rebuild`
+        among them, are inventory: INFO, with the reason. A hostile command
+        stays CRITICAL, and a hook is still followed to the script it names,
+        which escalates it when the script looks hostile (a build script can
+        run npm there)."""
+        if self.artifact in PACKAGE_CODE and issue["rule"] == "SC-INSTALL-HOOK" and issue["sev"] not in STRONG_SEVERITIES:
+            issue["sev"] = "INFO"
+            what = "Go module" if self.artifact == "gomod" else "crate"
+            issue["msg"] = issue["msg"].rstrip() + f" (npm never installs a package from inside a {what}: listed, not counted)"
+
+    def _keep_code(self, rel, raw):
+        """Keep a file a package reader reads (code_text), within PACKAGE_CODE_CHARS bytes in all: the
+        reader holds a package at once, and one larger is not read anyway (code_dropped)."""
+        if self.code_bytes + len(raw) <= PACKAGE_CODE_CHARS:
+            self.code_text[rel] = raw
+            self.code_bytes += len(raw)
+        else:
+            self.code_dropped.add(rel)
 
     # ---- pass 2: what runs ----
     def _find(self, candidates):
@@ -1840,20 +3301,53 @@ class _ArtifactScan:
         (LOAD_AS_FILE, then LOAD_AS_DIRECTORY). The "main" step was missing:
         `main: "lib"` with lib/package.json naming core.dat ran core.dat,
         and it was neither scanned nor counted."""
-        candidates = _node_candidates(path)
-        found = self._find(candidates[:6])                 # the file, .js, .json, ...
+        candidates = self._node_candidates(path)
+        found = self._find_node(candidates[:6])            # the file, .js, .json, ...
         if found:
             return found
         manifest_rel = _rel_join(path.rstrip("/"), "package.json")
-        text = self.manifests.get(manifest_rel)
+        text = self.manifests.get(self._find_node([manifest_rel]) or manifest_rel)
         if text is not None:
             data, _problems = lazaret.load_manifest(manifest_rel, text)
             main = data.get("main") if isinstance(data, dict) else None
             if isinstance(main, str) and main.strip():
-                found = self._find(_node_candidates(_rel_join(path.rstrip("/"), main)))
+                found = self._find_node(self._node_candidates(_rel_join(path.rstrip("/"), main)))
                 if found:
                     return found
-        return self._find(candidates[6:])                  # index.js, ...
+        return self._find_node(candidates[6:])             # index.js, ...
+
+    def _node_candidates(self, path):
+        """The names Node tries for `path`, in its order (core.node_candidates), asked once per path: a package's
+        modules require the same few paths from many files (monaco-editor asked 8,340 times, FE-1)."""
+        got = self._candidates.get(path)
+        if got is None:
+            got = self._candidates[path] = tuple(_node_candidates(path))
+        return got
+
+    def _find_node(self, candidates):
+        """The member Node opens for the first of `candidates` that names one, in Node's order: the path itself, else
+        one that differs from it only by case, which macOS and Windows open in its place (`node Setup` runs setup.js
+        there before it tries Setup.json, EG-4, EG-9). Python's imports stay exact (`_find`): its importer compares the
+        case itself (PEP 235)."""
+        folds = None
+        for c in candidates:
+            if c in self.members:
+                return c
+            if folds is None:
+                folds = self._folds()
+            hit = folds.get(case_fold(c))
+            if hit is not None:
+                return hit
+        return None
+
+    def _folds(self):
+        """{case fold: the first member, by path, with it} (EG-4): what a path names where case is ignored."""
+        if self._fold_index is None or self._fold_index[0] != len(self.members):
+            index = {}
+            for rel in sorted(self.members):
+                index.setdefault(case_fold(rel), rel)
+            self._fold_index = (len(self.members), index)
+        return self._fold_index[1]
 
     def _text_of(self, rel, as_lang="js", exported=False, imported=False):
         """Text of a member that is run as code, scanning it as `as_lang`
@@ -1894,18 +3388,23 @@ class _ArtifactScan:
             return None          # an image, font or stylesheet a bundler loads
         if rel in self.dropped:
             self.truncate(rel, f"{rel} runs at install/import time but was not kept for "
-                               f"scanning (text budget exhausted)")
+                               f"scanning (text budget exhausted)", "code")
         elif rel in self.oversize:
+            # (code that runs, cut at the limit: blocked by the guard; a program's bytes are not code it reads, as
+            # @img/sharp-libvips' 16 MB library is not)
             self.truncate(rel, "it runs at install/import time" if rel in self.truncated_at
                           else f"{rel} runs at install/import time but is larger than the "
-                               f"{MAX_MEMBER:,}-byte source-scan limit")
+                               f"{MAX_MEMBER:,}-byte source-scan limit",
+                          None if rel in self.native else "code")
         elif rel in self.binary:
+            # (bytecode or another blob that runs as code, a bytenode .jsc: code no one can read, blocked by the guard;
+            # a program is not, as above)
             self.truncate(rel, f"{rel} runs at install/import time but is not text, so it "
-                               f"could not be scanned")
+                               f"could not be scanned", None if rel in self.native else "code")
         elif rel in self.members:
             # every member lands in one of the sets above; should one ever
             # not, it runs unscanned: never a silent None
-            self.truncate(rel, f"{rel} runs at install/import time but was not scanned")
+            self.truncate(rel, f"{rel} runs at install/import time but was not scanned", "code")
         return None
 
     def _entry_points(self, manifest_rel, data):
@@ -1942,24 +3441,405 @@ class _ArtifactScan:
         """npm runs `node-gyp rebuild` for a root binding.gyp when the package
         defines no install/preinstall script (and gypfile isn't false)."""
         scripts = data.get("scripts") if isinstance(data.get("scripts"), dict) else {}
-        if "binding.gyp" not in self.members or data.get("gypfile") is False:
+        if not any(case_fold(m) == "binding.gyp" for m in self.members) or data.get("gypfile") is False:
             return
         if any(isinstance(scripts.get(h), str) and scripts[h].strip() for h in ("install", "preinstall")):
             return
-        self.issues.append(lazaret._sc_install_hook_issue(
-            "binding.gyp", 1, [], "install (implicit)", "node-gyp rebuild", False))
+        issue = lazaret._sc_install_hook_issue("binding.gyp", 1, [], "install (implicit)", "node-gyp rebuild", False)
+        self._npm_never_installs(issue)
+        self.issues.append(issue)
 
     def _entry_point_manifests(self):
-        """The root package.json's entry points and its implicit node-gyp hook."""
+        """The root package.json's entry points and its implicit node-gyp hook; an action's are its
+        action.yml's (_action_entry_points)."""
+        if self.artifact == "action":
+            self._action_entry_points()
+            return
         for rel, text in list(self.manifests.items()):
-            if os.path.basename(rel) != "package.json":
+            if opened_as(os.path.basename(rel)) != "package.json":
                 continue
             data, _problems = lazaret.load_manifest(rel, text)
             if data is None:
                 continue
-            if rel == "package.json":
+            # (a root manifest's case twin is the manifest on macOS and Windows: its entries run too, EG-4)
+            root = case_fold(rel) == "package.json"
+            if root and self.artifact == "vsix":
+                self._vsix_entry_points(rel, data)
+            elif root:
                 self._entry_points(rel, data)
                 self._implicit_gyp_hook(rel, data)
+
+    def _vsix_entry_points(self, manifest_rel, data):
+        """A VS Code extension's code entries (E-1): `main` (the desktop's Node
+        host) and `browser` (the web worker host), which the editor loads, and
+        whose `activate` it calls, when it activates the extension; an
+        extension with neither runs no code. `*` and `onStartupFinished` in
+        `activationEvents` mean at every start. And the extensions it brings:
+        an extension pack's members are installed with it, and its
+        `extensionDependencies` are what it needs to activate."""
+        base = posixpath.dirname(manifest_rel)
+        self.vsix_identity = {key: data.get(key) if isinstance(data.get(key), str) else None
+                              for key in ("publisher", "name", "version")}
+        for key in ("main", "browser"):
+            target = data.get(key)
+            if isinstance(target, str) and target.strip():
+                path = _rel_join(base, target)
+                rel = self._resolve(path)
+                if rel:
+                    self.entries.add(rel)
+                    self.vsix_main.add(rel)
+                    self._text_of(rel, "js", False)
+                elif path == ".." or path.startswith("../"):
+                    # (VS Code joins it to the extension's folder and runs what it names, wherever that is)
+                    self.issues.append(_vsix_outside_issue(key, target, self.manifests.get(manifest_rel, "")))
+        contributes = data.get("contributes")
+        if isinstance(contributes, dict):
+            self._vsix_contributions(base, contributes, self.manifests.get(manifest_rel, ""))
+        events = data.get("activationEvents")
+        events = [e for e in events[:1000] if isinstance(e, str)] if isinstance(events, list) else []
+        self.vsix_startup = next((e for e in events if e in VSIX_STARTUP_EVENTS), None)
+        found = set()
+        for key in ("extensionDependencies", "extensionPack"):
+            listed = data.get(key)
+            if isinstance(listed, list):
+                found.update(v.lower() for v in listed[:MAX_VSIX_DEPENDENCIES]
+                             if isinstance(v, str) and VSCODE_ID_RE.fullmatch(v))
+        self.extension_dependencies = sorted(found)
+
+    def _vsix_contributions(self, base, contributes, text):
+        """Code an extension's `contributes` names, which VS Code (or a process it starts) runs without the
+        extension's `main` (EG-5): each file is an entry point, so it and what it loads get the import-time test,
+        with when it runs (`vsix_special`). VS Code's and TypeScript's code (MIT, Apache-2.0) say where:
+        - `typescriptServerPlugins`: the TypeScript server loads `node_modules/<name>` from every installed
+          extension's folder (`--globalPlugins`, `--pluginProbeLocations`), with all of the user's access, whenever
+          a JavaScript or TypeScript file is open, whether or not the extension is activated;
+        - `debuggers`: a debug adapter's `program` (not absolute), and its `runtime` when it begins `./`, joined to
+          the folder, in each platform's block too, started when a debug session of its type starts (Node forks
+          the program when the runtime is `node`); one that leaves the folder is not read and is said (EG-3's
+          finding);
+        - `notebookRenderer`'s `entrypoint` and `markdown.previewScripts`: scripts a webview runs (a notebook's
+          output, the Markdown preview)."""
+        def listed(key):
+            value = contributes.get(key)
+            return value[:MAX_VSIX_CONTRIBUTIONS] if isinstance(value, list) else []
+
+        for plugin in listed("typescriptServerPlugins"):
+            name = plugin.get("name") if isinstance(plugin, dict) else None
+            if isinstance(name, str) and _PLUGIN_NAME_RE.fullmatch(name):
+                self._vsix_special(_rel_join(base, "node_modules/" + name), "js",
+                                   "runs in the TypeScript server whenever a JavaScript or TypeScript file is open, "
+                                   "whether or not the editor activates the extension (contributes."
+                                   "typescriptServerPlugins)")
+        for dbg in listed("debuggers"):
+            if not isinstance(dbg, dict):
+                continue
+            kind = dbg.get("type") if isinstance(dbg.get("type"), str) else ""
+            when = (f"when a debug session of type {kind[:40]!r} starts" if kind else "when a debug session starts")
+            for block in [dbg] + [dbg.get(p) for p in _DEBUGGER_PLATFORMS]:
+                if not isinstance(block, dict):
+                    continue
+                runtime = block.get("runtime") if isinstance(block.get("runtime"), str) else ""
+                for key, target in (("program", block.get("program")), ("runtime", runtime)):
+                    if not (isinstance(target, str) and target.strip()):
+                        continue
+                    if key == "runtime" and not target.startswith("./"):
+                        continue                    # (a command on the PATH: node, python, mono)
+                    if key == "program" and (target.startswith("/") or re.match(r"[A-Za-z]:[\\/]", target)):
+                        continue                    # (an absolute path: not the extension's)
+                    path = _rel_join(base, target)
+                    if path == ".." or path.startswith("../"):
+                        self.issues.append(_vsix_outside_issue(key, target, text, when))
+                        continue
+                    lang = _debugger_lang(path, runtime if key == "program" else "")
+                    if lang:
+                        self._vsix_special(path, lang, f"runs as the extension's debug adapter {when} "
+                                                       f"(contributes.debuggers)")
+        for renderer in listed("notebookRenderer"):
+            entry = renderer.get("entrypoint") if isinstance(renderer, dict) else None
+            entry = entry.get("path") if isinstance(entry, dict) else entry
+            if isinstance(entry, str) and entry.strip():
+                self._vsix_special(_rel_join(base, entry), "js",
+                                   "runs in a notebook's output webview when an output it renders is shown "
+                                   "(contributes.notebookRenderer)")
+        for script in listed("markdown.previewScripts"):
+            if isinstance(script, str) and script.strip():
+                self._vsix_special(_rel_join(base, script), "js",
+                                   "runs in the Markdown preview's webview while a preview is open "
+                                   "(contributes.markdown.previewScripts)")
+
+    def _vsix_special(self, path, lang, when):
+        """An entry point a contribution names (EG-5), if the package holds it."""
+        rel = self._resolve(path) if lang == "js" else (path if path in self.members else None)
+        if rel and rel not in self.vsix_special:
+            self.entries.add(rel)
+            self.vsix_special[rel] = when
+            self._text_of(rel, lang, False)
+
+    def _reach_of(self, start):
+        """`start` and the local modules it loads, transitively, as `_reachable` walks them (on the texts it read)."""
+        seen, queue = {start}, [start]
+        while queue:
+            rel = queue.pop()
+            text, lang = self.sources.get(rel, (None, None))
+            if not text or lang != "js":
+                continue
+            folder = posixpath.dirname(rel)
+            for _q, target in _JS_LOCAL_DEP_RE.findall(text):
+                dep = self._resolve(_rel_join(folder, target))
+                if dep and dep not in seen:
+                    seen.add(dep)
+                    queue.append(dep)
+        return seen
+
+    def _vsix_when(self, rel):
+        """When a file an extension's contribution names runs (EG-5), or a file it loads that `main` does not; None
+        for the rest (they run when the editor activates the extension)."""
+        if self._vsix_whens is None:
+            by_main = set()
+            for start in self.vsix_main:
+                by_main |= self._reach_of(start)
+            self._vsix_whens = {}
+            for start, when in self.vsix_special.items():
+                for f in self._reach_of(start):
+                    if f not in by_main:
+                        self._vsix_whens.setdefault(f, when)
+        return self._vsix_whens.get(rel)
+
+    # ---- an action (N-4) ----
+    def _action_entry_points(self):
+        """What a GitHub Action runs, from its action.yml (actionmeta.read): a JavaScript action's runs.pre,
+        runs.main and runs.post (entry points: the import-time test reads them and the modules they load); a
+        composite action's run steps (_action_steps); a Docker action's Dockerfile (_action_docker).
+        self.action_info says what was found: {metadata, using, runs: {how: file}, missing: [(how, path)],
+        notes, bases: [(dockerfile, line, image, pinned)], image}."""
+        root = self.action_root
+        meta_rel = next((r for r in (_rel_join(root, n) for n in _actionmeta.METADATA) if r in self.action_meta),
+                        None)
+        info = self.action_info = {"metadata": meta_rel, "using": None, "runs": {}, "missing": [], "notes": [],
+                                   "bases": [], "image": None}
+        if meta_rel is None:
+            return
+        text = self.action_meta[meta_rel]
+        meta = _actionmeta.read(text)
+        info["using"] = meta.using
+        if meta.using.startswith("node"):
+            for key in ("pre", "main", "post"):
+                value, _line = meta.runs.get(key, ("", 0))
+                if value:
+                    self._action_code(f"runs.{key}", _rel_join(root, _actionmeta.unquote_json(value)))
+        elif meta.using == "composite":
+            self._action_steps(meta, meta_rel, text)
+        elif meta.using == "docker":
+            self._action_docker(meta, meta_rel, text)
+        elif meta.using:
+            info["notes"].append(f"runs.using is {meta.using!r}, which Lazaret does not read: what it runs was not "
+                                 f"checked")
+            self.truncate(meta_rel, f"the action's runs.using {meta.using[:40]!r} is not one Lazaret reads")
+        else:
+            info["notes"].append("action.yml says nothing under runs.using: the runner refuses it")
+
+    def _action_code(self, how, path):
+        """A JavaScript or Python file the action runs (`how`: 'runs.main', 'step 2'): an entry point, read
+        with the files it loads by the import-time test. -> its member, or None (said in action_info)."""
+        rel = self._resolve(path) if path else None
+        if rel is None:
+            self.action_info["missing"].append((how, path))
+            return None
+        self.action_info["runs"].setdefault(how, rel)
+        self.entries.add(rel)
+        self.action_entries.setdefault(rel, []).append(how)
+        self._text_of(rel, "py" if rel.endswith(".py") else "js")
+        return rel
+
+    def _action_script(self, how, path):
+        """A script an action's step or entrypoint runs that is neither JavaScript nor Python (a shell script, a
+        program): read as an install script is (install_script_risk). -> (member, its text) or (None, None)."""
+        rel = self._find([path])
+        if rel is None:
+            self.action_info["missing"].append((how, path))
+            return None, None
+        self.action_info["runs"].setdefault(how, rel)
+        self.entries.add(rel)
+        self.install_scripts.add(rel)
+        return rel, self._text_of(rel, "sh")
+
+    def _action_follow(self, how, cmd, base):
+        """The files of the action a command runs (lazaret.follow_hook, the action's directory written as
+        actionmeta.ACTION_DIR; `base`: the directory they are relative to, the action's or the Docker build
+        context's): JavaScript and Python files are entry points (_action_code); other scripts are read as
+        install scripts, and the scripts they start with node or python too. -> [(target, reasons)] of the
+        scripts read by the install-script test, each with the reasons it gave."""
+        targets, complete = lazaret.follow_hook(cmd)
+        if not complete:
+            self.truncate(self.action_info["metadata"] or "(action)",
+                          f"a command of the action ({how}) is more than Lazaret follows")
+        out = []
+        for target in targets:
+            inside = _actionmeta.in_action(target)
+            if inside is None:
+                continue                        # the job's workspace, a program of the runner's: not the action's
+            path = _rel_join(base, inside)
+            ext = posixpath.splitext(path)[1].lower()
+            if ext in (".js", ".mjs", ".cjs", ".ts", ".mts", ".cts", ".py"):
+                self._action_code(how, path)
+                continue
+            rel, text = self._action_script(how, path)
+            if rel is None:
+                continue
+            lang = _engine.script_lang(rel)
+            reasons = _engine.install_script_risk(text, lang=lang, own=self._own_name()) if text else []
+            out.append((rel, reasons))
+            # (a step's script runs in the job's workspace: only a path built from its own place is the action's)
+            for started, more in self._started_scripts(rel, text, None, self.install_scripts):
+                self.action_entries.setdefault(started, []).append(how)
+                more = (_engine.install_script_risk(more, lang=_engine.script_lang(started), own=self._own_name())
+                        if more else [])
+                out.append((f"{rel}, which starts {started}", more))
+        return out
+
+    def _action_issue(self, where, line, text, what, cmd_reasons, followed, docker=False):
+        """SC-INSTALL-HOOK at `where`:`line` (`text`: that file's) for a command an action runs (a composite
+        step's script, a Docker action's entrypoint), when the command or a script it runs does what
+        actionmeta.judge counts: CRITICAL for a shape no action needs, MAJOR for the rest (a script fetched
+        and run as it arrives, among them). Nothing when nothing counts."""
+        sev, counted = _actionmeta.judge(cmd_reasons)
+        parts, every = ([f"{what} {'; and '.join(counted)}"] if counted else []), list(counted)
+        for target, reasons in followed:
+            s, c = _actionmeta.judge(reasons)
+            if c:
+                parts.append(f"{what} runs {target}, which {'; and '.join(c)}")
+                every.extend(c)
+                sev = "CRITICAL" if "CRITICAL" in (sev, s) else "MAJOR"
+        if not parts:
+            return
+        if sev == "CRITICAL":
+            why = (f"{'A Docker action runs its entrypoint' if docker else 'A composite action runs its steps'} in "
+                   "the job, with its token and every secret the workflow hands the action, and this does what a "
+                   "stealer or a backdoor does: no action needs that.")
+            fix = "Do not run this action; report it to its repository's owner and to GitHub."
+        elif all(r.startswith(_actionmeta.FETCH_AND_RUN) for r in every):
+            why = _actionmeta.PIPE_SHELL_WHY
+            fix = ("Read what it fetches and runs. Prefer an action that installs its tools at a pinned version "
+                   "with a checksum; at least pin this action to a commit you have read.")
+        else:
+            why = ("An action's commands run in the job with its token and the secrets the workflow hands it; "
+                   "this one does something an action rarely needs. Read it before the workflow runs it.")
+            fix = "Read the command and the scripts it runs; pin the action to a commit you have read."
+        self.issues.append(lazaret.mk_issue(
+            {"id": "SC-INSTALL-HOOK", "name": "Action entrypoint" if docker else "Action step", "type": "HOTSPOT",
+             "sev": sev, "msg": "; and ".join(parts) + ".", "why": why, "fix": fix,
+             "ref": "CWE-506 · Supply chain"}, where, line, text.split("\n")))
+
+    def _action_steps(self, meta, meta_rel, text):
+        """A composite action's run steps (N-4): each script read as an install hook's command is
+        (hook_command_risk; a Python, Node or PowerShell one by the install-script test in its language),
+        and the action's own files it runs followed (_action_follow). What a step's `uses:` runs is another
+        action's: registry/actions.py checks it. A step's script in a language Lazaret does not read (a shell
+        of its own, `perl {0}`) makes the scan INCOMPLETE."""
+        root = self.action_root
+        for n, step in enumerate(meta.steps, 1):
+            self._deadline(meta_rel)
+            if step.run is None or not step.run.strip():
+                continue
+            how, what = f"step {n}", f"Step {n} of the action"
+            kind = _actionmeta.step_shell(_actionmeta.unquote_json(step.shell))
+            script = _actionmeta.substitute(step.run)
+            if kind in ("py", "js"):
+                reasons = _engine.install_script_risk(script, shell=False, lang=kind, own=self._own_name())
+                self._action_issue(meta_rel, step.run_line, text, what, reasons, [])
+                continue
+            if kind == "other":
+                self.action_info["notes"].append(f"{how} runs its script with {step.shell!r}, which Lazaret does "
+                                                 f"not read")
+                self.truncate(meta_rel, f"{how} of the action runs its script with a shell Lazaret does not read "
+                                        f"({step.shell[:40]!r})")
+                continue
+            reasons = lazaret.hook_command_risk(_actionmeta.powershell_command(script) if kind == "ps" else script)
+            followed = []
+            if kind == "sh":
+                cmds, complete = _actionmeta.commands(step.run, step.workdir)
+                if not complete:
+                    self.truncate(meta_rel, f"{how} of the action has more commands than Lazaret follows")
+                for cmd in cmds:
+                    followed.extend(self._action_follow(how, cmd, root))
+            self._action_issue(meta_rel, step.run_line, text, what, reasons, followed)
+
+    def _dockerfile(self, rel):
+        """The text of a Dockerfile of the archive, or None (said: missing, or not kept)."""
+        if rel in self.deferred:
+            raw = self.deferred[rel]
+        elif rel in self.shell:
+            return self.shell[rel]
+        elif rel in self.sources:
+            return self.sources[rel][0]
+        elif rel in self.manifests:
+            return self.manifests[rel]
+        else:
+            if rel in self.dropped or rel in self.oversize or rel in self.binary:
+                self.truncate(rel, f"the action's Dockerfile {rel} could not be read (too large, or not text)")
+            return None
+        if len(raw) > _actionmeta.MAX_DOCKERFILE_BYTES:
+            self.truncate(rel, f"the action's Dockerfile is larger than {_actionmeta.MAX_DOCKERFILE_BYTES:,} bytes")
+            return None
+        return raw.decode("utf-8", "replace")
+
+    def _action_docker(self, meta, meta_rel, text):
+        """A Docker action (N-4): an image pulled (`docker://`, checked by registry/actions.py), or one built
+        from a Dockerfile of the action's directory: its base images (action_info["bases"]: one not pinned
+        to a digest is reported there), and what the image runs, runs.pre-entrypoint, runs.entrypoint (else the
+        Dockerfile's ENTRYPOINT, else its CMD) and runs.post-entrypoint, followed to the files of the build
+        context the COPY and ADD lines put at those paths. What the image's own layers hold is not read."""
+        info = self.action_info
+        image, line = meta.runs.get("image", ("", 0))
+        image = _actionmeta.unquote_json(image.strip())
+        info["image"] = image or None
+        if not image:
+            info["notes"].append("a Docker action with no runs.image: the runner refuses it")
+            return
+        if image.startswith("docker://"):
+            info["notes"].append(f"runs the image {image[:200]}: its code is the image's, not the repository's, "
+                                 f"and was not read")
+            return
+        df = _rel_join(self.action_root, image)
+        body = self._dockerfile(df)
+        if body is None:
+            if df not in self.members:
+                info["missing"].append(("runs.image", image))
+            return
+        d = _actionmeta.dockerfile(body)
+        info["bases"] = [(df, at, base, pinned) for at, base, pinned, _alias in d.bases]
+        context = posixpath.dirname(df)
+        members = sorted(self.members)
+
+        def is_file(rel):
+            return _rel_join(context, rel) in self.members
+
+        def is_dir(rel):
+            head = _rel_join(context, rel) + "/"
+            k = bisect.bisect_left(members, head)
+            return k < len(members) and members[k].startswith(head)
+
+        # (what runs, its command, the file and line that say so, that file's text)
+        runs = [(f"runs.{key}", meta.runs[key][0], meta_rel, meta.runs[key][1], text)
+                for key in ("pre-entrypoint", "entrypoint", "post-entrypoint") if meta.runs.get(key, ("",))[0]]
+        if "entrypoint" not in meta.runs or not meta.runs["entrypoint"][0]:
+            own = d.entrypoint or d.cmd
+            if own is not None:
+                at, words, _exec = own
+                runs.append(("ENTRYPOINT" if own is d.entrypoint else "CMD", " ".join(words), df, at, body))
+        for how, value, where, at, where_text in runs:
+            mapped = []
+            for w in _actionmeta.unquote_json(value).split():
+                path = w if w.startswith("/") else posixpath.join(d.workdir, w) if ("/" in w or "." in w) else None
+                found = _actionmeta.context_file(path, d.copies, is_file, is_dir) if path else None
+                mapped.append(f"{_actionmeta.ACTION_DIR}/{found}" if found else w)
+            cmd = " ".join(mapped)
+            followed = self._action_follow(how, cmd, context)
+            if not any(w.startswith(_actionmeta.ACTION_DIR + "/") for w in mapped):
+                info["notes"].append(f"what the image runs ({how}: {value[:120]}) is not a file the Dockerfile "
+                                     f"copies from the repository, so it was not read")
+            self._action_issue(where, at, where_text, f"The action's {how}", lazaret.hook_command_risk(cmd),
+                               followed, docker=True)
 
     def _follow_hooks(self):
         """Follow each install hook to the scripts it runs; escalate the hook
@@ -1982,7 +3862,7 @@ class _ArtifactScan:
                 self.truncate(issue["file"], "its install hook is more than Lazaret follows "
                               f"({lazaret.HOOK_MAX_COMMANDS:,} commands, {lazaret.HOOK_MAX_TARGETS} "
                               f"scripts, {lazaret.HOOK_MAX_CHARS:,} characters, "
-                              f"{lazaret.HOOK_MAX_PATH:,}-character paths)")
+                              f"{lazaret.HOOK_MAX_PATH:,}-character paths)", "code")
             for target in targets:
                 rel = self._resolve(_rel_join(base, target))
                 if rel is None:
@@ -1991,17 +3871,40 @@ class _ArtifactScan:
                 self.install_scripts.add(rel)
                 lang = "sh" if rel.endswith(".sh") else "js"
                 text = self._text_of(rel, lang)
-                reasons = _engine.install_script_risk(text, lang=_engine.script_lang(rel)) if text else []
+                reasons = (_engine.install_script_risk(text, lang=_engine.script_lang(rel), own=self._own_name())
+                           if text else [])
                 if reasons and issue["sev"] not in STRONG_SEVERITIES:
                     issue["sev"] = "CRITICAL"
                     issue["msg"] = f"Install hook runs {target}, which {'; and '.join(reasons)}."
                 # the scripts it starts with node or python (0.1.8, core.spawned_scripts)
                 for started, more in self._started_scripts(rel, text, base, self.install_scripts):
-                    more = _engine.install_script_risk(more, lang=_engine.script_lang(started)) if more else []
+                    more = (_engine.install_script_risk(more, lang=_engine.script_lang(started), own=self._own_name())
+                            if more else [])
                     if more and issue["sev"] not in STRONG_SEVERITIES:
                         issue["sev"] = "CRITICAL"
                         issue["msg"] = (f"Install hook runs {target}, which starts {started}, which "
                                         f"{'; and '.join(more)}.")
+
+    def _vsix_hook_words(self):
+        """An extension's vscode:uninstall findings in the editor's words, once
+        _follow_hooks has read the script (E-1): VS Code runs it when the
+        extension has been uninstalled, not npm at install."""
+        for issue in self.issues:
+            if issue["rule"] != "SC-INSTALL-HOOK" or case_fold(issue["file"]) != "package.json" or issue["sev"] == "INFO":
+                continue
+            msg = issue["msg"]
+            for old, new in (("Install hook command ", "The vscode:uninstall command "),
+                             ("Install hook runs ", "The vscode:uninstall script runs ")):
+                if msg.startswith(old):
+                    msg = new + msg[len(old):]
+            issue["msg"] = msg.replace(" at install time: ", " when VS Code uninstalls the extension: ", 1)
+            issue["name"] = "Uninstall hook"
+            if issue["sev"] in STRONG_SEVERITIES:
+                issue["why"] = _VSIX_HOOK_RUNS + ", and this command does what malicious install hooks do."
+            else:
+                issue["why"] = _VSIX_HOOK_RUNS + (". A few extensions use it to clean up after themselves, so on "
+                                                  "its own it is a capability to review, not evidence of malice.")
+            issue["fix"] = "Read the script it runs before installing the extension."
 
     def _started_scripts(self, rel, text, cwd, into):
         """[(rel, text)] for the package scripts `rel` starts with node or
@@ -2016,7 +3919,7 @@ class _ArtifactScan:
             cur, cur_text, depth = queue.pop(0)
             if not cur_text or depth >= lazaret._SPAWN_MAX_DEPTH:
                 continue
-            for where, path in _engine.spawned_scripts(lazaret.normalize_newlines(cur_text), _engine.script_lang(cur)):
+            for where, path in self._spawned_scripts(lazaret.normalize_newlines(cur_text), _engine.script_lang(cur)):
                 if where != "dir" and cwd is None:
                     continue
                 start = posixpath.dirname(cur) if where == "dir" else cwd
@@ -2035,42 +3938,32 @@ class _ArtifactScan:
     def _python_install_scripts(self):
         """Python code pip runs to build/install an sdist: setup.py and an
         in-tree PEP 517 backend (build-system.backend-path)."""
-        scripts = []
-        if "setup.py" in self.sources:
-            scripts.append("setup.py")
-        backend, paths = _pep517_backend(self.manifests.get("pyproject.toml", ""))
-        if backend and paths:
-            mod = backend.split(":", 1)[0].replace(".", "/")
-            for p in paths:
-                root = _rel_join("", p)
-                rel = self._find([_rel_join(root, mod + ".py"), _rel_join(root, mod + "/__init__.py")])
-                if rel:
-                    scripts.append(rel)
+        # (each file pip opens as setup.py or pyproject.toml where case is ignored: EG-4)
+        scripts = sorted(r for r in self.sources if case_fold(r) == "setup.py")
+        bases = ["", "src"]
+        for project in sorted(r for r in self.manifests if case_fold(r) == "pyproject.toml"):
+            backend, paths = _pep517_backend(self.manifests[project])
+            if backend and paths:
+                mod = backend.split(":", 1)[0].replace(".", "/")
+                for p in paths:
+                    root = _rel_join("", p)
+                    rel = self._find([_rel_join(root, mod + ".py"), _rel_join(root, mod + "/__init__.py")])
+                    if rel and rel not in scripts:
+                        scripts.append(rel)
+                    if root not in bases:
+                        bases.append(root)
         # modules they import from the sdist itself run at install time too —
-        # in the sdist's root or its src/ directory, or relative to the
-        # importing module (`from .main import x`)
-        queue, seen = list(scripts), set(scripts)
-        while queue and len(seen) < 200:
-            current = queue.pop()
-            text, lang = self.sources.get(current, ("", None))
-            if lang != "py":
-                continue
-            found = []
-            for m in _PY_LOCAL_IMPORT_RE.finditer(text):
-                mod = (m.group(1) or m.group(2)).replace(".", "/")
-                found.append(self._find([mod + ".py", mod + "/__init__.py",
-                                         "src/" + mod + ".py", "src/" + mod + "/__init__.py"]))
-            for m in _PY_RELATIVE_IMPORT_RE.finditer(text):
-                base = posixpath.dirname(current)
-                for _ in range(len(m.group(1)) - 1):
-                    base = posixpath.dirname(base)
-                mod = _rel_join(base, m.group(2).replace(".", "/"))
-                found.append(self._find([mod + ".py", mod + "/__init__.py"]))
-            for rel in found:
-                if rel and rel not in seen:
-                    seen.add(rel)
-                    scripts.append(rel)
-                    queue.append(rel)
+        # in the sdist's root, its src/ directory or a backend-path directory
+        # (pip puts those on sys.path), or relative to the importing module
+        # (`from .main import x`)
+        def module(dotted, base):
+            path = dotted.replace(".", "/")
+            for prefix in ([base] if base is not None else bases):
+                rel = self._find([_rel_join(prefix, path + ".py"), _rel_join(prefix, path + "/__init__.py")])
+                if rel:
+                    return rel
+            return None
+        scripts = self._py_walk(scripts, module)
         for rel in list(scripts):                  # and the scripts they start with python or node (0.1.8)
             for started, _text in self._started_scripts(rel, self.sources.get(rel, ("", "py"))[0], "",
                                                         self.install_scripts):
@@ -2080,7 +3973,7 @@ class _ArtifactScan:
             self.entries.add(rel)
             self.install_scripts.add(rel)
             text = self.sources.get(rel, ("", "py"))[0]
-            reasons = _engine.install_script_risk(text, lang=_engine.script_lang(rel))
+            reasons = _engine.install_script_risk(text, lang=_engine.script_lang(rel), own=self._own_name())
             # a download written to a file and run: CRITICAL in the code pip
             # runs to install an sdist (a prebuilt-binary installer's shape
             # keeps it MAJOR-only in npm hooks and import-time code)
@@ -2113,44 +4006,44 @@ class _ArtifactScan:
 
     def _python_reach(self, roots):
         """The Python modules of the archive that `roots` import, roots
-        included: absolute imports of a package the archive holds (at its
-        root, in src/, or in a wheel's .data directory), relative imports,
-        and `from pkg import name` where name is a submodule. At most
-        _PY_REACH_MAX modules."""
+        included (_py_import_targets): absolute imports of a package the
+        archive holds (at its root, in src/, or in a wheel's .data
+        directory), relative imports, `from pkg import name` where name is a
+        submodule, and modules named by a literal to import_module(),
+        __import__() or run_module()."""
         py = {rel for rel, (_t, lang) in self.sources.items() if lang == "py"}
         bases = sorted({m.group(1) for m in map(_PY_BASE_RE.match, roots) if m} | {""})
 
-        def module(dotted, base=None):
+        def module(dotted, base):
             path = dotted.replace(".", "/")
             for prefix in ([base] if base is not None else bases):
                 for cand in (_rel_join(prefix, path + ".py"), _rel_join(prefix, path + "/__init__.py")):
                     if cand in py:
                         return cand
             return None
+        return self._py_walk([r for r in roots if r in py], module)
 
-        out, queue = list(dict.fromkeys(r for r in roots if r in py)), []
-        queue.extend(out)
-        seen = set(out)
-        while queue and len(seen) < _PY_REACH_MAX:
+    def _py_walk(self, start, module):
+        """`start` and the modules it imports, transitively, in the order
+        found: each (dotted name, base) _py_import_targets reads is the
+        archive member `module` finds for it, or none. No cap: what is seen
+        is the archive's members, and the deadline is checked as each module
+        is read (BR-5: the walks stopped at 300 modules seen, setup.py's at
+        200, so a module imported past them, by padding, got no test)."""
+        out = list(dict.fromkeys(start))
+        seen, queue, found = set(out), list(out), {}
+        while queue:
             current = queue.pop()
-            text = self.sources[current][0]
-            found = []
-            for m in _PY_IMPORT_STMT_RE.finditer(text):
-                dots, mod, names = m.group("dots"), m.group("mod") or m.group("imod"), m.group("names")
-                if dots:                                  # from .x import a / from . import a
-                    base = posixpath.dirname(current)
-                    for _ in range(len(dots) - 1):
-                        base = posixpath.dirname(base)
-                    target = module(mod, base) if mod else None
-                    found.append(target)
-                    pkg = _rel_join(base, mod.replace(".", "/")) if mod else base
-                    found.extend(module(n, pkg) for n in _import_names(names))
-                elif mod:                                 # import a.b / from a.b import c
-                    parts = mod.split(".")
-                    found.extend(module(".".join(parts[:k])) for k in range(1, len(parts) + 1))
-                    if names is not None:
-                        found.extend(module(mod + "." + n) for n in _import_names(names))
-            for rel in found:
+            self._deadline(current)
+            text, lang = self.sources.get(current, ("", None))
+            if lang != "py" or not text:
+                continue
+            for n, target in enumerate(_py_import_targets(current, text), 1):
+                if n % 4096 == 0:
+                    self._deadline(current)
+                if target not in found:
+                    found[target] = module(*target)
+                rel = found[target]
                 if rel and rel not in seen:
                     seen.add(rel)
                     out.append(rel)
@@ -2175,12 +4068,14 @@ class _ArtifactScan:
                                               and posixpath.basename(rel) not in _SDIST_NOT_MODULES))
         else:
             files = reachable
-        # and the package scripts that code starts with node or python (0.1.8)
+        # and the package scripts that code starts with node or python (0.1.8); what each file starts is asked
+        # a batch at a time first (FE-1), and the walk reads those answers
         started = set()
-        for rel in sorted(files):
-            text, lang = self.sources.get(rel, (None, None))
-            if text and lang in ("js", "py") and rel not in self.install_scripts:
-                self._started_scripts(rel, text, None, started)
+        starts = [(rel, text) for rel in sorted(files) for text, lang in (self.sources.get(rel, (None, None)),)
+                  if text and lang in ("js", "py") and rel not in self.install_scripts]
+        self._prefetch_spawned([(lazaret.normalize_newlines(text), _engine.script_lang(rel)) for rel, text in starts])
+        for rel, text in starts:
+            self._started_scripts(rel, text, None, started)
         files = set(files) | {rel for rel in started if rel not in self.install_scripts}
         todo = []
         for rel in sorted(files):
@@ -2189,20 +4084,44 @@ class _ArtifactScan:
             text, lang = self.sources.get(rel, (None, None))
             if text and lang in ("js", "py"):
                 todo.append((rel, text, lang))
-        for rel, text, lang, risk in self._import_time_risks(todo):
+        for rel, text, lang, risk in self._import_time_risks(todo, declared=self._declared_names()):
             if _engine.unanswered(risk):
                 self._unanswered(rel, risk)
                 continue
-            reasons, line = risk
+            reasons, line, refused = risk
+            self._note_unparsed(rel, refused)
             if not reasons:
                 continue
+            when, runs = "runs when the package is loaded", (
+                "Code the package's entry points reach (in a wheel or an sdist, its top-level modules and what "
+                "they import) runs whenever the package is imported or its command runs.")
+            sev = lazaret.import_time_severity(reasons)
+            if self.artifact == "action":
+                sev, reasons = _actionmeta.judge(reasons)
+                if sev is None:
+                    continue
+                hows = self.action_entries.get(rel)
+                when = "runs when the action runs" + (f" ({', '.join(hows)})" if hows else "")
+                runs = ("An action's scripts (runs.pre, runs.main and runs.post, or what its steps run) and the "
+                        "modules they load run in the job, with its token, the secrets the workflow hands the action "
+                        "and the runner's own tokens.")
+            elif self.artifact == "vsix" and self._vsix_when(rel):
+                when = self._vsix_when(rel)
+                runs = ("Code an extension's contributions name runs without its main module: a TypeScript server "
+                        "plugin in the TypeScript server, with all of the user's access, whenever a JavaScript or "
+                        "TypeScript file is open; a debug adapter as its own process when a debug session starts; a "
+                        "notebook renderer or a Markdown preview script in a webview.")
+            elif self.artifact == "vsix":
+                when = ("runs when the editor activates the extension" + (
+                    f" (at every start: activation event {self.vsix_startup!r})" if self.vsix_startup else ""))
+                runs = ("An extension's main module (and its browser one) and the modules they load run in the "
+                        "editor's extension host, with all of the user's access, when the editor activates the "
+                        "extension: at every start for the activation events '*' and 'onStartupFinished'.")
             self.issues.append(lazaret.mk_issue(
                 {"id": "SC-IMPORT-RISK", "name": "Risky import-time code", "type": "HOTSPOT",
-                 "sev": lazaret.import_time_severity(reasons),
-                 "msg": f"{rel} runs when the package is loaded, and it {'; and '.join(reasons)}.",
-                 "why": ("Code the package's entry points reach (in a wheel or an sdist, its "
-                         "top-level modules and what they import) runs whenever the package is "
-                         "imported or its command runs. Collecting credentials or the whole "
+                 "sev": sev,
+                 "msg": f"{rel} {when}, and it {'; and '.join(reasons)}.",
+                 "why": (f"{runs} Collecting credentials or the whole "
                          "environment next to a network call is the shape of an import-time "
                          "stealer; SDKs read the few variables they need. MAJOR where the file "
                          "may have a reason; CRITICAL for code no library needs — code fetched "
@@ -2213,36 +4132,61 @@ class _ArtifactScan:
         self._use_time_code(set(files))
         self._cross_file_code()
 
-    def _import_time_risks(self, todo, stop=None):
+    def _import_time_risks(self, todo, short_batches=False, declared=None):
         """(rel, text, lang, import_time_risk's answer) for [(rel, text, lang)]
         (the text with its newlines normalized), in order, a batch at a time
         (engine.py: the engine reads a batch on threads; an answer it could
         not give is the NativeError it stands for, engine.unanswered); the
-        deadline is checked before each batch, and past `stop`
-        (time.monotonic()) no batch is started — with a stop, a batch holds
-        at most USE_RISK_BATCH_CHARS characters, or one file."""
+        deadline is checked before each batch. With `short_batches`, a batch
+        holds at most USE_RISK_BATCH_CHARS characters, or one file."""
         size = _engine.BATCH
         start = 0
         while start < len(todo):
-            if stop is not None and time.monotonic() > stop:
-                return
             end, chars = start + 1, len(todo[start][1] or "")
             while end < len(todo) and end - start < size:
                 more = len(todo[end][1] or "")
-                if stop is not None and chars + more > USE_RISK_BATCH_CHARS:
-                    break                   # (stop is checked between batches: keep one short)
+                if short_batches and chars + more > USE_RISK_BATCH_CHARS:
+                    break
                 chars += more
                 end += 1
             chunk = [(rel, lazaret.normalize_newlines(text), lang) for rel, text, lang in todo[start:end]]
             start = end
             self._deadline(chunk[0][0])
-            for (rel, text, lang), risk in zip(chunk, _engine.import_time_risks([(t, lg) for _r, t, lg in chunk])):
+            for (rel, text, lang), risk in zip(chunk, self._import_risks([(t, lg) for _r, t, lg in chunk], declared)):
                 yield rel, text, lang, risk
+
+    def _note_unparsed(self, rel, refused):
+        """A JavaScript member the parser refused (import_time_risk's `refused`, js_refusal's: (line, reason)), its
+        tree unread by the tests that read one: kept for SC-UNPARSED-CODE. Not a TypeScript declaration, which
+        nothing runs."""
+        if refused and not rel.lower().endswith(_TS_DECLARATIONS):
+            self.unparsed[rel] = refused
+
+    def _unparsed_install_scripts(self):
+        """The JavaScript install scripts (a hook's targets, the scripts they start) the parser refused, whose test
+        read only their text there (JS-PARSE-STRICT): kept for SC-UNPARSED-CODE, as the import-time test's are. The
+        parse alone (the engine's js_refusal), once for each distinct file: a few files, read once more."""
+        todo = [(rel, lazaret.normalize_newlines(text)) for rel in sorted(self.install_scripts)
+                if rel not in self.unparsed and not rel.lower().endswith(_TS_DECLARATIONS)
+                for text, lang in (self.sources.get(rel, (None, None)),) if text and lang == "js"]
+        if not todo:
+            return
+        self._deadline(todo[0][0])
+        keys = [self._key("scan", text, "js", {"call": "js_refusal"}) for _r, text in todo]
+        asked = dict(zip(keys, [("js_refusal", {}, text) for _r, text in todo]))
+
+        def compute(missing):
+            return [_cache.Uncacheable(a) if _engine.unanswered(a) else a
+                    for a in _engine.call_answers([asked[key] for key in missing], texts=self.texts)]
+        for (rel, _t), refused in zip(todo, self.memo.get_or_compute_many(keys, compute)):
+            if not _engine.unanswered(refused) and refused:
+                self._note_unparsed(rel, tuple(refused))
 
     def _unanswered(self, rel, exc):
         """A file the engine could not read for a test (engine.unanswered):
         SC-TRUNCATED, once per file (truncate), in engine.error_issue's words."""
-        self.truncate(rel, _engine.error_issue(rel, exc)["msg"].removeprefix("File not fully scanned: ").rstrip("."))
+        self.truncate(rel, _engine.error_issue(rel, exc)["msg"].removeprefix("File not fully scanned: ").rstrip("."),
+                      "work")
 
     def _phase(self, where, step, *args):
         """Run one step of finish() once the deadline check passes. A call the
@@ -2255,7 +4199,7 @@ class _ArtifactScan:
         except _engine.NativeError as exc:
             why = (_engine.EXHAUSTED if isinstance(exc, _engine.NativeExhausted)
                    else f"an internal error of the engine ({type(exc).__name__})")
-            self.truncate("(release)", f"the engine could not finish {where}: {why}")
+            self.truncate("(release)", f"the engine could not finish {where}: {why}", "work")
             return None
 
     def _suspicious(self):
@@ -2266,37 +4210,69 @@ class _ArtifactScan:
     def _use_time_code(self, loaded):
         """SC-USE-RISK (CRITICAL): the strong import-time shapes in the other
         JavaScript and Python files of the package — code it runs when it is
-        used (see USE_RISK_SKIP_DIRS)."""
+        used (see USE_RISK_SKIP_DIRS), smallest files first, within
+        USE_RISK_CHARS characters. self.use_time says how much of it was
+        read: files and characters, of how many."""
         if self._suspicious():
             return
-        stop = time.monotonic() + USE_RISK_SECONDS
-        # smallest first: within the time, as many files as can be read (droppers are small)
-        todo = []
+        # smallest first, within USE_RISK_CHARS: as many files as fit (droppers are small), and the
+        # same ones on every machine. Every candidate counts toward the share: a file over
+        # USE_RISK_MAX_CHARS, or past the bound, is one not read.
+        todo, files, chars, room = [], 0, 0, USE_RISK_CHARS
         for rel in sorted(self.sources, key=lambda r: (len(self.sources[r][0] or ""), r)):
             if rel in loaded or rel in self.install_scripts or rel in self.startup or _not_used_code(rel):
                 continue
             text, lang = self.sources[rel]
-            if text and lang in ("js", "py") and len(text) <= USE_RISK_MAX_CHARS:
-                todo.append((rel, text, lang))
-        for rel, text, lang, risk in self._import_time_risks(todo, stop):
-            if _engine.unanswered(risk):
-                self._unanswered(rel, risk)
+            if not text or lang not in ("js", "py"):
                 continue
-            reasons, line = risk
+            files += 1
+            chars += len(text)
+            if len(text) <= min(room, USE_RISK_MAX_CHARS):
+                todo.append((rel, text, lang))
+                room -= len(text)
+            else:
+                room = -1                   # sizes only grow from here: read nothing after a file left out
+        self.use_time = {"files": 0, "ofFiles": files, "chars": 0, "ofChars": chars, "boundChars": USE_RISK_CHARS}
+        for rel, text, lang, risk in self._import_time_risks(todo, short_batches=True):
+            if _engine.unanswered(risk):
+                self._unanswered(rel, risk)     # SC-TRUNCATED: not read
+                continue
+            self.use_time["files"] += 1
+            self.use_time["chars"] += len(self.sources[rel][0])
+            reasons, line, refused = risk
+            self._note_unparsed(rel, refused)
             strong = [r for r in reasons if r.startswith(lazaret._STRONG_IMPORT_REASONS)]
             if not strong:
                 continue
+            sev = "CRITICAL"
+            if self.artifact == "action":
+                sev, strong = _actionmeta.judge(strong)     # (a script fetched and run is MAJOR in an action)
+                if sev is None:
+                    continue
+                later = ("The action's scripts do not load it as far as Lazaret can tell: it runs if the action's "
+                         "code starts it some other way.")
+                where = "an action's code can load or start any file of its repository"
+                fix = "Do not run the action; report it to its repository's owner and to GitHub."
+            elif self.artifact == "vsix":
+                later = ("The editor does not load it when it activates the extension: it runs when the "
+                         "extension's code calls it.")
+                where = ("a command, a debug adapter, a language server or a script the extension starts runs it "
+                         "when the extension is used")
+                fix = "Uninstall the extension; report it to the marketplace that serves it."
+            else:
+                later = "Nothing loads it at install or import: it runs when the package's code calls it."
+                where = ("a logger's constructor, a middleware or a script the package spawns runs it the first "
+                         "time your code uses the package")
+                fix = "Don't use the package; report it to the registry."
             self.issues.append(lazaret.mk_issue(
                 {"id": "SC-USE-RISK", "name": "Hostile code the package runs when used", "type": "HOTSPOT",
-                 "sev": "CRITICAL",
-                 "msg": f"{rel} {'; and '.join(strong)}. Nothing loads it at install or import: it runs when "
-                        f"the package's code calls it.",
-                 "why": ("A payload need not run on install or import to reach you: a logger's constructor, a "
-                         "middleware or a script the package spawns runs it the first time your code uses the "
-                         "package. These are the shapes no library needs: code fetched and run, a reverse shell, "
+                 "sev": sev,
+                 "msg": f"{rel} {'; and '.join(strong)}. {later}",
+                 "why": (f"A payload need not run on install or import to reach you: {where}. These are the "
+                         "shapes no library needs: code fetched and run, a reverse shell, "
                          "hidden PowerShell, credentials sent to an exfiltration service, a beacon to a "
                          "data-capture service."),
-                 "fix": "Don't use the package; report it to the registry.",
+                 "fix": fix,
                  "ref": "CWE-506 · Supply chain"}, rel, line, text.split("\n")))
 
     def _cross_file_code(self):
@@ -2331,29 +4307,243 @@ class _ArtifactScan:
         if len(files) < 2:
             return
         self._deadline("the cross-file follower")
-        for issue in _engine.cross_file_issues(files, who=lambda path: back[path], one_package=True):
+        todo, args = _engine.cross_file_args(files, who=lambda path: back[path], one_package=True)
+        key = _cache.cross_file_key([(f["path"], f["lang"], f["content"]) for f in todo],
+                                    {k: v for k, v in args.items() if k not in ("files", "threads")},
+                                    pack=ENGINE_VERSION, engine=_engine.describe(), digest=self.digests)
+
+        def compute():
+            issues, complete = _engine.cross_file_answer(files, who=lambda path: back[path], one_package=True,
+                                                         texts=self.texts)
+            return issues if complete else _cache.Uncacheable(issues)    # (a package cut short is not clean)
+        for issue in self.memo.get_or_compute(key, compute):
             issue["file"] = back[issue["file"]]
             self.issues.append(issue)
 
     def _agent_hijack(self):
         """SC-AGENT-HIJACK (CRITICAL): a package file that launches an AI
         coding agent in an autonomous mode (core.agent_hijack). A package is a
-        dependency, so every source file is dependency code."""
-        for rel in sorted(self.sources):
-            text, lang = self.sources.get(rel, (None, None))
-            if not text or lang not in ("js", "py"):
+        dependency, so every source file is dependency code. The engine is
+        asked a batch at a time (FE-1: one file at a time before), the deadline
+        checked before each; a file it could not answer raises as the call
+        alone did (_phase: the release is INCOMPLETE)."""
+        todo = [(rel, lazaret.normalize_newlines(text)) for rel in sorted(self.sources)
+                for text, lang in (self.sources.get(rel, (None, None)),) if text and lang in ("js", "py")]
+        for start in range(0, len(todo), _engine.BATCH):
+            chunk = todo[start:start + _engine.BATCH]
+            self._deadline(chunk[0][0])
+            for (rel, text), found in zip(chunk, _engine.agent_hijacks([t for _r, t in chunk], texts=self.texts)):
+                if _engine.unanswered(found):
+                    raise found
+                self._agent_issue(rel, text, found)
+
+    def _agent_issue(self, rel, text, found):
+        """The agent check's finding for one file, from the engine's answer."""
+        issue = lazaret.dependency_agent_issue(rel, text, found)
+        if issue is not None:
+            if self.artifact == "action" and issue["sev"] in STRONG_SEVERITIES:
+                # an action may exist to run an agent in CI (a review bot): MAJOR, worth reading, not proof
+                issue["sev"] = "MAJOR"
+                issue["msg"] = issue["msg"].rstrip() + (" An action may exist to run an AI agent in the job; "
+                                                        "the agent then acts with the job's token, on whatever "
+                                                        "reaches its prompt.")
+            self.issues.append(issue)
+
+    def _go_mods(self):
+        """[(rel, text, gomod.parse's answer)] of the go.mod in a Go module's root
+        directory ("<path>@<version>/"; the member paths have lost the host, so
+        its module line names the module). Go refuses a zip with another root;
+        this reads each."""
+        out = []
+        for rel in sorted(r for r in self.deferred if _go_root_file(r) == "go.mod"):
+            text = self.deferred[rel].decode("utf-8", "replace")
+            out.append((rel, text, _gomod.parse(text)))
+        return out
+
+    def _package_code(self):
+        """Part C (0.1.9): a Go module's or a crate's code read for what it
+        does, by the engine's readers (G-1: engine.go_package; R-1:
+        engine.rs_crate), with the tests a package's JavaScript and Python
+        get for the same moment and the same reasons and severities:
+        - Go: the code a package's init functions, package-level variables'
+          initializers and cgo constructors reach runs when any program that
+          imports the package starts: the import-time test (SC-IMPORT-RISK);
+        - Rust: a build script, and a procedural-macro crate's code, run on
+          the machine that builds a dependent: the install-script test
+          (SC-INSTALL-HOOK, CRITICAL); #[ctor] and load sections run before
+          a program's main: the import-time test;
+        - the rest runs when the module's or the crate's code is called: its
+          strong reasons are SC-USE-RISK (CRITICAL), as for _use_time_code,
+          within the same bounds (useTime says how much was read).
+        A module's //go:generate commands are listed (SC-GO-GENERATE, INFO):
+        they run only when someone runs go generate. Code larger than
+        PACKAGE_CODE_CHARS is not read (SC-TRUNCATED: INCOMPLETE), and so is
+        a module whose cgo C was not all kept."""
+        code = PACKAGE_CODE.get(self.artifact)
+        if code is None:
+            return
+        lang, _exts, others = code
+        rels = sorted(rel for rel, (text, lg) in self.sources.items() if lg == lang and text is not None)
+        if not rels:
+            return
+        what = "module" if self.artifact == "gomod" else "crate"
+        texts = {rel: self.sources[rel][0] for rel in rels}
+        for rel in sorted(self.code_text):
+            if os.path.splitext(rel)[1].lower() in others:
+                texts[rel] = self.code_text[rel].decode("utf-8", "replace")
+        order = sorted(texts)
+        place = _go_root_file if self.artifact == "gomod" else (lambda r: r)
+        files = [(place(rel), texts[rel]) for rel in order]
+        size = sum(len(t) for _p, t in files)
+        if size > PACKAGE_CODE_CHARS or self.code_dropped:
+            amount = f"{size:,} characters" if not self.code_dropped else "its C files not all kept"
+            self.truncate(rels[0], f"the {what}'s code ({amount}) is more than the reader takes at once "
+                                   f"({PACKAGE_CODE_CHARS:,}), so it was not read", "code")
+            return
+        self._deadline(rels[0])
+        if self.artifact == "gomod":
+            mods = self._go_mods()
+            module = mods[0][2]["module"] if mods else None
+            answer = _engine.go_package(files, module=module, use_file_chars=USE_RISK_MAX_CHARS,
+                                        use_chars=USE_RISK_CHARS)
+        else:
+            from lazaret.registry.ecosystems import crates as _crates
+            manifest = self.deferred.get("Cargo.toml", b"").decode("utf-8", "replace")
+            script, lib, proc_macro = _crates.ECOSYSTEM.layout({"Cargo.toml": manifest}, self.members)
+            answer = _engine.rs_crate(files, build=script, proc_macro=proc_macro, lib=lib,
+                                      use_file_chars=USE_RISK_MAX_CHARS, use_chars=USE_RISK_CHARS)
+        self._reader_findings(answer, order, texts, what)
+
+    def _sdist_crates(self):
+        """N-17 (Part C): the Rust crates inside an sdist. A maturin or
+        setuptools-rust project ships its crate (or a workspace of them), and
+        pip has cargo build it when it installs the sdist; each is read as a
+        crate's code is (_package_code): every .rs file with the file rules,
+        each crate with the Rust reader. A crate is a directory with a
+        Cargo.toml, a .rs file is in the nearest one above it, and one in
+        none is not built by cargo, nor are a crate's tests/, benches/ and
+        examples/: those are not read. A build script and a procedural macro
+        run when pip builds the sdist (SC-INSTALL-HOOK, CRITICAL, as
+        setup.py's code); #[ctor] and load sections when the extension module
+        is loaded (SC-IMPORT-RISK); the strong reasons of the rest are
+        SC-USE-RISK, the crates sharing one USE_RISK_CHARS. A crate's file
+        that was not kept (over the member limit, or past PACKAGE_CODE_CHARS
+        in all) makes the sdist INCOMPLETE."""
+        manifests = {posixpath.dirname(rel): raw for rel, raw in self.code_text.items()
+                     if posixpath.basename(rel) == "Cargo.toml"}
+        unkept = {posixpath.dirname(rel) for rel in self.code_dropped if posixpath.basename(rel) == "Cargo.toml"}
+
+        def crate_of(rel):
+            folder = posixpath.dirname(rel)
+            while True:
+                if folder in manifests or folder in unkept:
+                    return folder
+                if not folder:
+                    return None
+                folder = posixpath.dirname(folder)
+
+        def inside(root, rel):
+            return rel[len(root) + 1:] if root else rel
+
+        crates = {}
+        for rel in sorted(set(self.code_text) | self.code_dropped | {r for r in self.oversize if r.endswith(".rs")}):
+            if not rel.endswith(".rs"):
                 continue
-            self._deadline(rel)
-            issue = lazaret.dependency_agent_issue(rel, lazaret.normalize_newlines(text))
-            if issue is not None:
-                self.issues.append(issue)
+            root = crate_of(rel)
+            if root is None or _never_built("crate", inside(root, rel)):
+                continue                                  # not a file cargo builds
+            if rel in self.oversize:
+                self.truncate(rel, f"{rel} is the code of a Rust crate this sdist builds, and it is larger than the "
+                                   f"{MAX_MEMBER:,}-byte source-scan limit", "code")
+            elif rel in self.code_dropped or root in unkept:
+                self.truncate(rel, f"{rel} is the code of a Rust crate this sdist builds, and the sdist's Rust is more "
+                                   f"than the {PACKAGE_CODE_CHARS:,} characters a reader takes", "code")
+            else:
+                crates.setdefault(root, []).append(rel)
+        if not crates:
+            return
+        # the file rules, a batch at a time (as the first pass reads sources)
+        for root in sorted(crates):
+            for rel in crates[root]:
+                self._deadline(rel)
+                text, extra = lazaret.decode_member(rel, self.code_text[rel])
+                self.add_decode_issues(extra)
+                self.sources[rel] = (text, "rs")
+                self.pending.append((rel, text, "rs"))
+                if len(self.pending) >= _engine.BATCH:
+                    self.scan_pending()
+        self.scan_pending()
+        if self._suspicious():
+            room = 0                                       # (no use-time reading once SUSPICIOUS, as _use_time_code)
+        else:
+            room = USE_RISK_CHARS
+        from lazaret.registry.ecosystems import crates as _crates
+        for root in sorted(crates):
+            order = crates[root]
+            texts = {rel: self.sources[rel][0] for rel in order}
+            files = [(inside(root, rel), texts[rel]) for rel in order]
+            manifest = manifests[root].decode("utf-8", "replace")
+            script, lib, proc_macro = _crates.ECOSYSTEM.layout({"Cargo.toml": manifest}, [p for p, _t in files])
+            self._deadline(order[0])
+            answer = _engine.rs_crate(files, build=script, proc_macro=proc_macro, lib=lib,
+                                      use_file_chars=USE_RISK_MAX_CHARS, use_chars=max(0, room))
+            room -= int((answer.get("useRead") or {}).get("chars", 0))
+            self._reader_findings(answer, order, texts, "sdist")
+
+    def _reader_findings(self, answer, order, texts, what):
+        """The findings of a package reader's answer (go_package, rs_crate)
+        for the files `order` (archive paths, in the order the reader was
+        given them; `texts` their text): core.package_reader_issues, with
+        `what` "module", "crate" or "sdist" (a crate inside an sdist, N-17)
+        for the words; what its use-time step read goes to useTime."""
+        issues, read = lazaret.package_reader_issues(answer, order, texts, what)
+        self.issues.extend(issues)
+        mine = dict(read, boundChars=USE_RISK_CHARS)
+        if self.use_time is None:
+            self.use_time = mine
+        else:
+            for key in ("files", "ofFiles", "chars", "ofChars"):
+                self.use_time[key] = self.use_time.get(key, 0) + mine[key]
 
     def _lookalike_names(self):
         """SC-TYPOSQUAT (MAJOR, 0.1.8): the release's own name, or a
         dependency it declares, one change from a popular package's
         (registry/lookalike.py). npm: package.json's name, dependencies and
         optionalDependencies; PyPI: the Name and Requires-Dist (optional
-        extras left out) of a wheel's METADATA or an sdist's PKG-INFO."""
+        extras left out) of a wheel's METADATA or an sdist's PKG-INFO; Go
+        (0.1.9, N-3): the module line of the module's go.mod and the paths
+        it requires; a crate (N-3's second part): its Cargo.toml's name and
+        the crates it depends on to build (not [dev-dependencies]; a renamed
+        one by the name crates.io knows it by). A VS Code extension (E-1's
+        third part): its package.json's publisher.name and the extensions it
+        brings (extensionDependencies, extensionPack), against the
+        most-installed extensions (lookalike.vscode_lookalike); the npm
+        packages it bundles are not installed from npm, so not compared."""
+        if self.artifact == "action":
+            return
+        if self.artifact == "vsix":
+            ident = self.vsix_identity or {}
+            publisher, name = ident.get("publisher"), ident.get("name")
+            own = f"{publisher}.{name}" if publisher and name and VSCODE_ID_RE.fullmatch(f"{publisher}.{name}") \
+                else None
+            if own or self.extension_dependencies:
+                self.issues.extend(_lookalike.issues("vscode", own, self.extension_dependencies, "package.json",
+                                                     self.manifests.get("package.json") or ""))
+            return
+        if self.artifact == "gomod":
+            for rel, text, parsed in self._go_mods():
+                deps = {p for p, _v, _i in parsed["require"]} | {p for p, _i in parsed["unversioned"]}
+                self.issues.extend(_lookalike.issues("go", parsed["module"], deps, rel, text))
+            return
+        if self.artifact == "crate":
+            from lazaret.registry.ecosystems import crates as _crates
+            raw = self.deferred.get("Cargo.toml")
+            if raw is not None:
+                text = raw.decode("utf-8", "replace")
+                declared = _crates.ECOSYSTEM.declared("crate", {"Cargo.toml": text}, self.members)
+                self.issues.extend(_lookalike.issues("crates", declared.name, set(declared.dependencies),
+                                                     "Cargo.toml", text))
+            return
         if self.artifact == "wheel":
             rel = next((r for r in sorted(self.deferred) if r.count("/") == 1
                         and r.endswith(".dist-info/METADATA")), None)
@@ -2406,6 +4596,84 @@ class _ArtifactScan:
             self.unused_dependencies = [_unused.npm_registry_name(dep, spec) for dep, spec in found]
             self.issues.append(_unused_dependency_issue([dep for dep, _spec in found], text))
 
+    def _dev_only_loads(self, reachable):
+        """SC-DEV-DEPENDENCY (MAJOR, D-13): a package an npm release's code loads when the package is loaded (or its
+        command runs) that its package.json names only in devDependencies, which npm does not install for the
+        package's users. The code is what the package's main entry and its commands reach (_npm_main_targets; not a
+        subpath export, which runs when a user imports it by name: @cucumber/cucumber's `./lib/*` exports its test
+        helpers, which load its test tools; not a type declaration), the loads the engine's reading of each module
+        (js_loads: a require() given a literal outside any function, class body and try statement, an import or
+        export-from declaration); a module is read only when it quotes such a name (unused_deps.quoted_in). Not one of npm's most-downloaded packages, which is no
+        payload's carrier (es-abstract 1.24.2 loads for-each, which it lists only in devDependencies), one of the
+        release's own scope, or Ember's own modules (@ember/*, @glimmer/*: the Ember app provides them). A package no field names
+        is not one either: a framework's adapter loads the framework its user brings (cypress/svelte)."""
+        if self.artifact != "npm" or not reachable:
+            return
+        text = self.manifests.get("package.json")
+        data, _problems = lazaret.load_manifest("package.json", text) if text else (None, None)
+        if not isinstance(data, dict) or not isinstance(data.get("devDependencies"), dict):
+            return
+        runtime = set()
+        for key in ("dependencies", "optionalDependencies", "peerDependencies"):
+            if isinstance(data.get(key), dict):
+                runtime.update(data[key])
+        for key in ("bundleDependencies", "bundledDependencies"):
+            if isinstance(data.get(key), list):
+                runtime.update(k for k in data[key] if isinstance(k, str))
+        own = data.get("name") if isinstance(data.get("name"), str) else ""
+        scope = own.split("/", 1)[0] + "/" if own.startswith("@") and "/" in own else None
+        wanted = {dep for dep, spec in data["devDependencies"].items()
+                  if isinstance(dep, str) and dep and dep not in runtime and dep != own
+                  and not (scope and dep.startswith(scope)) and not dep.startswith(_HOST_PROVIDED_SCOPES)
+                  and not _lookalike.popular("npm", _unused.npm_registry_name(dep, spec))}
+        if not wanted:
+            return
+        reach = set()
+        for target in _npm_main_targets(data):
+            start = self._resolve(_rel_join("", target))
+            if start and start not in reach:
+                reach |= self._reach_of(start)
+        files = [(rel, t) for rel in sorted(reach & set(reachable)) for t, lang in (self.sources.get(rel, (None, None)),)
+                 if t and lang == "js" and not rel.lower().endswith(_TS_DECLARATIONS)
+                 and any(_unused.quoted_in(dep, [t]) for dep in wanted)]
+        found = {}
+        for (rel, _t), loads in zip(files, self._js_loads(files)):
+            if loads is None:
+                self.unparsed.setdefault(rel, None)     # (the parser refused it: said, SC-UNPARSED-CODE)
+                continue
+            if _engine.unanswered(loads) or not isinstance(loads, list):
+                continue
+            for _spec, line, _how, package in loads:
+                if package in wanted and package not in found:
+                    found[package] = (rel, line)
+        if found:
+            first = self.sources[next(iter(found.values()))[0]][0]
+            self.issues.append(_dev_only_load_issue(found, first.split("\n")))
+
+    def _js_loads(self, files):
+        """engine js_loads for [(rel, text)] (the dialect by the extension), once for each distinct file:
+        [[specifier, line, how, package]] each, None where the module does not parse, or the error the engine
+        gave."""
+        exts = [posixpath.splitext(rel)[1].lower() or ".js" for rel, _t in files]
+        keys = [self._key("scan", text, "js", {"call": "js_loads", "ext": ext}) for (_r, text), ext in zip(files, exts)]
+        asked = dict(zip(keys, [("js_loads", {"path": "module" + ext}, text) for (_r, text), ext in zip(files, exts)]))
+
+        def compute(missing):
+            return [_cache.Uncacheable(a) if _engine.unanswered(a) else a
+                    for a in _engine.call_answers([asked[key] for key in missing], texts=self.texts)]
+        return self.memo.get_or_compute_many(keys, compute)
+
+    def _case_twins(self):
+        """{rel: [the other members whose paths have its case fold]} for the members that have such a twin (EG-4):
+        on macOS and Windows they are one file, whichever entry came last."""
+        if self._twins is None:
+            groups = {}
+            for rel in self.members:
+                groups.setdefault(case_fold(rel), []).append(rel)
+            self._twins = {rel: sorted(t for t in group if t != rel)
+                           for group in groups.values() if len(group) > 1 for rel in group}
+        return self._twins
+
     def _reachable(self):
         """Entry files plus local files they require/import (JS), transitively.
         A file reached this way runs when the package is loaded: one not
@@ -2415,10 +4683,17 @@ class _ArtifactScan:
         # `seen` holds archive members only (at most MAX_FILES) and the deadline
         # is checked per file; the old cap of 10,000 files skipped the walk
         # altogether once exports patterns made that many files entry points
+        twins = self._case_twins()
         seen, queue = set(self.entries), list(self.entries)
         while queue:
             rel = queue.pop()
             self._deadline(rel)
+            for twin in twins.get(rel, ()):
+                # (macOS and Windows write a case twin over the file that runs, under its name: EG-4)
+                if twin not in seen:
+                    seen.add(twin)
+                    self._text_of(twin, self.sources.get(rel, (None, None))[1] or "js", imported=True)
+                    queue.append(twin)
             text, lang = self.sources.get(rel, (None, None))
             if not text or lang != "js":
                 continue
@@ -2450,9 +4725,16 @@ class _ArtifactScan:
             reachable = self._phase("the files the entry points load", self._reachable)
             self._phase("the import-time code", self._import_time_code,
                         reachable if reachable is not None else set(self.entries))
+            if self.artifact in PACKAGE_CODE:
+                self._phase(f"the {'module' if self.artifact == 'gomod' else 'crate'}'s code", self._package_code)
+            if self.artifact == "sdist" and (self.code_text or self.code_dropped):
+                self._phase("the Rust crates' code", self._sdist_crates)
             self._phase("the agent-hijack check", self._agent_hijack)
             self._phase("the package's names", self._lookalike_names)
             self._phase("the dependencies nothing uses", self._unused_dependencies)
+            self._phase("the devDependencies the code loads", self._dev_only_loads,
+                        reachable if reachable is not None else set(self.entries))
+            self._phase("the install scripts the parser refused", self._unparsed_install_scripts)
             # interprocedural / cross-file taint (full profile only — needs whole source)
             if self.full and getattr(lazaret, "lazaret_flow", None) is not None:
                 self._deadline("the cross-file analysis")
@@ -2465,39 +4747,45 @@ class _ArtifactScan:
                           f"({type(exc).__name__})", file=sys.stderr)
         except _OutOfTime:
             pass                              # recorded: the archive is INCOMPLETE
+        if self.unread_code:
+            self.issues.append(_unread_code_issue(self.artifact, sorted(self.unread_code)))
+        if self.unparsed:
+            self.issues.append(_unparsed_code_issue(self.unparsed))
+        if self.artifact == "vsix":
+            self._vsix_hook_words()
         _demote_test_findings(self.issues, reachable if reachable is not None else self.entries)
-        # F9b: the decompressed sources are no longer needed
-        self.sources, self.deferred, self.shell = {}, {}, {}
+        # F9b: the decompressed sources are no longer needed (nor the engine's copies of them: FE-1)
+        self.sources, self.deferred, self.shell, self.code_text = {}, {}, {}, {}
+        self.release()
 
 
-_PY_LOCAL_IMPORT_RE = re.compile(r"^\s*(?:from\s+([A-Za-z_][\w.]*)\s+import\b|import\s+([A-Za-z_][\w.]*))", re.M)
-# `from .main import x` / `from ..util import y`: a module of the importing
-# file's own package (or one above it)
-_PY_RELATIVE_IMPORT_RE = re.compile(r"^\s*from\s+(\.+)([A-Za-z_][\w.]*)\s+import\b", re.M)
 _PEP517_SECTION_RE = re.compile(r"^\s*\[build-system\]\s*$(.*?)(?=^\s*\[|\Z)", re.M | re.S)
 
 
 def _pep517_backend(pyproject):
-    """(build-backend, backend-path list) from pyproject.toml text; tomllib
-    where available (3.11+), a narrow regex reader on 3.10."""
+    """(build-backend, backend-path list) from pyproject.toml text, as pip
+    reads it: with a TOML reader (sca.load_toml: tomllib from Python 3.11,
+    the subset reader on 3.10), and a narrow regex reader only for a text
+    that one cannot read. On 3.10 the regex alone was the reader, and it
+    missed the backend in six of seven forms TOML allows (a comment after
+    the header, dotted keys, an inline table, quoted keys, an escape, a decoy
+    section inside a string): the backend pip runs got no install-script
+    test there (BR-1)."""
     if not pyproject:
         return None, []
+    from lazaret.scanner import sca as _sca           # (loaded with the scanner already)
     try:
-        # stdlib from Python 3.11; loaded by name so the 3.10 stdlib guard
-        # (tests/architecture) does not see an import it cannot resolve
-        tomllib = importlib.import_module("tomllib")
-    except ImportError:
-        tomllib = None
-    if tomllib is not None:
-        try:
-            section = tomllib.loads(pyproject).get("build-system") or {}
-        except (ValueError, RecursionError):       # TOMLDecodeError is a ValueError
-            section = None
-        if isinstance(section, dict):
-            backend = section.get("build-backend")
-            paths = section.get("backend-path")
-            return (backend if isinstance(backend, str) else None,
-                    [p for p in paths if isinstance(p, str)] if isinstance(paths, list) else [])
+        doc = _sca.load_toml(pyproject)
+    except ValueError:                                # (TOMLDecodeError, and a text the subset reader cannot read)
+        doc = None
+    if isinstance(doc, dict):
+        section = doc.get("build-system")
+        if not isinstance(section, dict):
+            return None, []
+        backend = section.get("build-backend")
+        paths = section.get("backend-path")
+        return (backend if isinstance(backend, str) else None,
+                [p for p in paths if isinstance(p, str)] if isinstance(paths, list) else [])
     m = _PEP517_SECTION_RE.search(pyproject)
     if not m:
         return None, []
@@ -2508,26 +4796,78 @@ def _pep517_backend(pyproject):
             re.findall(r"""["']([^"']+)["']""", paths.group(1)) if paths else [])
 
 
-def _scan_artifact(data, container, artifact, full, budget):
-    """Scan one archive -> per-artifact result fields (issues, counts, verdict)."""
-    st = _ArtifactScan(artifact, full, budget)
+def _scan_artifact(data, container, artifact, full, budget, memo=None):
+    """Scan one archive -> per-artifact result fields (issues, counts, verdict).
+    `memo`: the engine's answers by content, shared with the release's other
+    files (contentcache.Memo; none by default)."""
     anomalies = []
+    return scan_members(iter_archive(data, container, artifact, budget=budget, anomalies=anomalies),
+                        anomalies, artifact, full, budget, memo)
+
+
+def scan_members(members, anomalies, artifact, full, budget, memo=None, action_root=None):
+    """Scan a package's files -> per-artifact result fields (_scan_artifact):
+    `members` yields them as iter_archive does (Member), from an archive or a
+    folder (iter_folder: an installed VS Code extension, E-1), and
+    `anomalies` is the list the reader adds its (kind, path, detail) to.
+    A VS Code extension's result says which extensions it brings
+    (`extensionDependencies`), the activation event that starts it with the
+    editor (`startupEvent`, None when none does) and who it says it is
+    (`manifest`: its package.json's publisher, name and version, each None
+    when it is not a string; None when the scan did not get that far). A
+    GitHub Action's (artifact "action", `action_root` its directory in the
+    repository, N-4) says what it runs (`action`: _ArtifactScan.action_info,
+    None when the scan did not get that far)."""
+    st = _ArtifactScan(artifact, full, budget, memo, action_root=action_root)
     try:
-        for m in iter_archive(data, container, artifact, budget=budget, anomalies=anomalies):
-            st.member(m)
-            if st.out_of_time("(archive)"):          # between members
-                break
-    except _OutOfTime:
-        pass                             # inside a member: recorded where it stopped
-    except ArchiveLimit as lim:          # (defensive: iter_archive yields its limits)
-        st.truncate("(archive)", lim.detail or st.limit_detail(lim.reason, "(archive)"))
-    st.finish(anomalies)
+        try:
+            for m in members:
+                st.member(m)
+                if st.out_of_time("(archive)"):          # between members
+                    break
+        except _OutOfTime:
+            pass                             # inside a member: recorded where it stopped
+        except ArchiveLimit as lim:          # (defensive: the readers yield their limits)
+            st.truncate("(archive)", lim.detail or st.limit_detail(lim.reason, "(archive)"),
+                        "time" if lim.reason == "time" else "archive")
+        finally:
+            close = getattr(members, "close", None)
+            if close is not None:
+                close()                      # (a reader stopped early lets go of its archive or folder now)
+        st.finish(anomalies)
+    finally:
+        st.release()                         # the engine's copies of the texts go whatever happened (FE-1)
     issues = st.issues
     verdict, reason, strong, weak = decide_verdict(issues, st.truncated)
-    return {"issues": issues, "filesScanned": st.files_scanned, "binaryArtifacts": st.binaries,
-            "truncated": st.truncated, "verdict": verdict, "verdictReason": reason,
-            "strongIndicators": strong, "weakIndicators": weak,
-            "unusedDependencies": st.unused_dependencies}
+    if any(i["rule"] == UNREAD_CODE_RULE for i in issues):
+        st.cut.add("code")               # (code that runs and was not read: N-1, EG-3)
+    out = {"issues": issues, "filesScanned": st.files_scanned, "binaryArtifacts": st.binaries,
+           "truncated": st.truncated, "verdict": verdict, "verdictReason": reason,
+           "strongIndicators": strong, "weakIndicators": weak,
+           "unusedDependencies": st.unused_dependencies, "useTime": st.use_time,
+           "incomplete": sorted(st.cut) if verdict == "INCOMPLETE" else []}
+    if artifact == "vsix":
+        out["extensionDependencies"] = st.extension_dependencies
+        out["startupEvent"] = st.vsix_startup
+        out["manifest"] = st.vsix_identity
+    if artifact == "action":
+        out["action"] = st.action_info
+    return out
+
+
+def scan_action(data, root="", budget=None, memo=None):
+    """A GitHub Action at a commit (0.1.9, N-4): `data`, the .tar.gz GitHub
+    serves for the commit of its repository (what the runner fetches), scanned
+    as the action in the directory `root` ('' for the repository's root) runs:
+    its action.yml says what runs, and the scan reads that as an npm package's
+    entry points and install hooks are read (_ArtifactScan, artifact
+    "action"). -> scan_members's fields. `budget`: a Budget (by default the
+    archive budget and the scan timeout)."""
+    if budget is None:
+        budget = Budget(deadline=time.monotonic() + SCAN_TIMEOUT)
+    anomalies = []
+    return scan_members(iter_archive(data, "tgz", "action", budget=budget, anomalies=anomalies), anomalies, "action",
+                        False, budget, memo, action_root=root)
 
 
 def _fmt_bytes(n):
@@ -2578,7 +4918,7 @@ def _skipped_summary(skipped, byte_budget, limit):
     if "filesize" in groups:
         items = groups["filesize"]
         issues.append(lazaret.truncated_issue(
-            "(release)", f"{len(items)} release file(s) not downloaded: each is larger than "
+            "(release)", f"{len(items)} release file(s) not scanned: each is larger than "
                          f"the {_fmt_bytes(MAX_DOWNLOAD_BYTES)} per-file download limit "
                          f"({names(items)})"))
         labels.append(f"over the {_fmt_bytes(MAX_DOWNLOAD_BYTES)} per-file limit")
@@ -2629,7 +4969,19 @@ def _always_redacted(fn):
 # maintainer of the package also maintains; (the detection round) on PyPI
 # one an owner or maintainer of the project also owns or maintains, or its
 # organization owns (the JSON API's "ownership"); an optional extra's
-# requirement (PyPI); a git, file or URL dependency. Best effort: a document over the
+# requirement (PyPI); a git, file or URL dependency. A crate (0.1.9, N-3's
+# second part) is compared with the version crates.io published before it
+# from the sparse index alone (its lines are in publishing order, each with
+# its `pubtime`, and a crate's first line is when it was published), its
+# normal and build dependencies only (a dev dependency is never built for a
+# user); a crate an owner of the release's crate also owns (crates.io's API,
+# one request a second) is not counted. A VS Code extension (E-1's third part,
+# openvsx: and vscode:) is compared with the version its registry published
+# before it, by the registry's history of its versions (Open VSX's query API,
+# the Marketplace's gallery query), on the extensions it brings
+# (extensionDependencies and extensionPack: GlassWorm's way in, 2026); one of
+# its own publisher, or on Open VSX one the account that published the release
+# published, is not counted. Best effort: a document over the
 # metadata budget (an established package's) or a registry that does not
 # answer is not a finding, and a release with no dependencies costs no
 # request. LAZARET_NO_DEPENDENCY_HISTORY=1 turns it off (an offline scan).
@@ -2642,13 +4994,9 @@ _PY_REQ_NAME_RE = re.compile(r"\s*([A-Za-z0-9][A-Za-z0-9._-]*)")
 
 
 def _iso_time(value):
-    """An aware datetime from registry time text ('2026-06-17T02:06:22.156Z'), else None."""
-    if not isinstance(value, str):
-        return None
-    try:
-        return _to_utc(datetime.datetime.fromisoformat(value.strip().replace("Z", "+00:00")))
-    except ValueError:
-        return None
+    """An aware datetime from registry time text ('2026-06-17T02:06:22.156Z'), else None (base.parse_time: any number
+    of fraction digits, on Python 3.10 too)."""
+    return _base.parse_time(value)
 
 
 def _npm_scope(name):
@@ -2740,6 +5088,40 @@ def _unused_dependency_issue(names, text):
          "msg": msg, "why": _UNUSED_WHY,
          "fix": "Find out why the package declares it, and read it before installing the package.",
          "ref": "CWE-506 · Supply chain"}, "package.json", line, lines)
+
+
+#: (D-13) scopes whose modules the app provides: Ember's (ember-source resolves @ember/* and @glimmer/* for an
+#: addon), so an addon lists them in devDependencies for its own tests
+_HOST_PROVIDED_SCOPES = ("@ember/", "@glimmer/")
+_DEV_ONLY_WHY = ("npm installs a package's dependencies, optionalDependencies and peerDependencies for the people "
+                 "who install it, not its devDependencies. Code that runs when the package is loaded and loads a "
+                 "package named only there fails for them, unless that package arrives another way, which is where "
+                 "a payload can wait: dotenv-express 17.4.3, a copy of dotenv, requires environment-gate, which its "
+                 "package.json lists only in devDependencies, and calls it first in config(). One of npm's "
+                 "most-downloaded packages, one of the release's own scope and Ember's own modules (@ember/*, "
+                 "@glimmer/*, which the Ember app provides) are not flagged.")
+
+
+def _dev_only_load_issue(found, lines):
+    """SC-DEV-DEPENDENCY (MAJOR, D-13) for {package: (file, line)}: the packages an npm release loads when it is
+    loaded that its package.json names only in devDependencies, at the first one's load (`lines`: its file's)."""
+    (first, (rel, line)), rest = next(iter(found.items())), len(found) - 1
+    if not rest:
+        msg = (f'{rel}, which runs when the package is loaded or its command runs, loads "{first}", and '
+               "package.json names it only in devDependencies: npm does not install it with the package, so it is "
+               "missing where the package runs or brought there another way.")
+    else:
+        names = list(found)
+        shown = ", ".join(f'"{n}"' for n in names[:5]) + (f" and {len(names) - 5} more" if len(names) > 5 else "")
+        msg = (f"The package's code that runs when it is loaded or its command runs loads {len(names)} packages that "
+               f"package.json names only in devDependencies ({shown}; {rel} the first): npm does not install them "
+               "with the package, so they are missing where the package runs or brought there another way.")
+    return lazaret.mk_issue(
+        {"id": "SC-DEV-DEPENDENCY", "name": "A devDependency the package loads", "type": "HOTSPOT", "sev": "MAJOR",
+         "msg": msg, "why": _DEV_ONLY_WHY,
+         "fix": "Find out what the package it loads is and why only devDependencies name it; read it before "
+                "installing the package.",
+         "ref": "CWE-829 · Supply chain"}, rel, line or 1, lines)
 
 
 def _new_dependency_issue(eco, dep, age, previous, owners, unused=False):
@@ -2864,15 +5246,143 @@ def pypi_new_dependencies(name, version, info, fetch=None):
     return previous, found
 
 
-def new_dependency_issues(eco, name, version, resolved, unused=()):
+def crates_new_dependencies(name, version, resolved, fetch=None):
+    """-> (previous version, [(dependency, age, its owners)]) for the crates a
+    release adds as normal or build dependencies that are recent (see
+    above). `resolved`: the crates module's Resolution of the release."""
+    from lazaret.registry.ecosystems import crates as _crates
+    module = registry_module("crates")
+    fetch = fetch or module_fetch(module)
+    try:
+        entry = resolved.artifacts[0]["entry"]
+        mine = {n for n, kind in entry["deps"] if kind in ("normal", "build")}
+    except (AttributeError, IndexError, KeyError, TypeError):
+        return None, []
+    when = _iso_time(entry.get("pubtime"))
+    if not mine or when is None:
+        return None, []
+    records = module.records(name, fetch)
+    prerelease = lambda v: _crates.semver_key(v)[3] == 0              # noqa: E731
+    times = {r["vers"]: r["pubtime"] for r in records if r.get("pubtime")}
+    _when, previous = _previous_release(times, entry["vers"], times, prerelease)
+    if previous is None:
+        return None, []
+    prev = next(r for r in records if r["vers"] == previous)
+    added = sorted(mine - {n for n, kind in prev["deps"] if kind in ("normal", "build")})
+    ours, found = None, []
+    for dep in added:
+        if len(found) >= NEW_DEP_LOOKUPS:
+            break
+        try:
+            firsts = [t for t in (_iso_time(r.get("pubtime")) for r in module.records(dep, fetch)) if t is not None]
+        except (FetchError, SpecError):
+            continue                     # unreachable, or not a crate the index names
+        if not firsts:
+            continue
+        age = max(when - min(firsts), datetime.timedelta(0))
+        if age >= NEW_DEP_RECENT:
+            continue
+        try:
+            theirs = module.owners(dep, fetch)
+        except (FetchError, SpecError):
+            theirs = set()               # (the API did not answer: counted, with no owners named)
+        if ours is None:
+            try:
+                ours = module.owners(name, fetch)
+            except (FetchError, SpecError):
+                ours = set()
+        if ours & theirs:
+            continue                     # the crate's own owners'
+        found.append((dep, age, sorted(theirs)))
+    return previous, found
+
+
+_EXTENSION_WHY = ("GlassWorm's operators (2026) updated benign-looking VS Code extensions to list a malicious one in their "
+                  "extensionPack or extensionDependencies: the editor installs a pack's members and an extension's "
+                  "dependencies with it, so the malicious one came in with them, and runs with the user's full access "
+                  "when it activates. A release rarely brings an extension that did not exist a week earlier, of "
+                  "another publisher.")
+
+
+def _new_extension_issue(dep, age, previous):
+    """SC-NEW-DEPENDENCY for a VS Code extension's release (E-1's third part): CRITICAL under NEW_DEP_CRITICAL, else
+    MAJOR."""
+    return lazaret.mk_issue(
+        {"id": "SC-NEW-DEPENDENCY", "name": "A release adds a brand-new dependency", "type": "HOTSPOT",
+         "sev": "CRITICAL" if age < NEW_DEP_CRITICAL else "MAJOR",
+         "msg": (f'Brings "{dep}" (its extensionDependencies or extensionPack), which {previous} did not: an '
+                 f'extension first published {_age_text(age)} before this release, by another publisher '
+                 f'("{dep.split(".", 1)[0]}").'),
+         "why": _EXTENSION_WHY,
+         "fix": f'Read "{dep}" before installing this release; keep the previous one ({previous}) until you have.',
+         "ref": "CWE-506 · Supply chain"},
+        "(release)", 1, [])
+
+
+def extension_new_dependencies(eco, name, version, resolved, brings, fetch=None):
+    """-> (previous version, [(extension, age)]) for the extensions a VS Code extension's release brings (`brings`:
+    its package.json's extensionDependencies and extensionPack) that the version the registry published before it
+    did not, first published less than NEW_DEP_RECENT before the release (E-1's third part). The previous version is
+    the one published last before this one (a release is compared with releases only, a pre-release with any); an
+    extension of the release's own publisher is not counted, nor, on Open VSX, one the account that published the
+    release published. At most NEW_DEP_LOOKUPS added ones are looked up. `resolved`: the module's Resolution."""
+    module = registry_module(eco)
+    fetch = fetch or module_fetch(module)
+    mine = {b.lower() for b in brings if isinstance(b, str)}
+    if not mine:
+        return None, []
+    info = getattr(resolved, "info", None)
+    info = info if isinstance(info, dict) else {}
+    history = module.history(name, fetch)
+    entry = next((h for h in history if h[0] == version), None)
+    when = entry[1] if entry else _iso_time(info.get("timestamp") or info.get("lastUpdated"))
+    if when is None:
+        return None, []
+    pre = entry[3] if entry else info.get("preRelease") is True
+    before = [h for h in history if h[0] != version and h[1] < when and (pre or not h[3])]
+    if not before:
+        return None, []
+    previous = max(before, key=lambda h: h[1])
+    own, account = name.lower().split(".", 1)[0], (entry[4] if entry else info.get("publishedBy"))
+    found, looked = [], 0
+    for dep in sorted(mine - previous[2]):
+        if dep.split(".", 1)[0] == own:
+            continue                     # (the release's own publisher's)
+        if looked >= NEW_DEP_LOOKUPS:
+            break
+        looked += 1
+        try:
+            first, by = module.first_published(dep, fetch, old_enough=lambda t: when - t >= NEW_DEP_RECENT)
+        except (FetchError, SpecError):
+            continue                     # unreachable, or not an extension the registry names
+        if first is None:
+            continue
+        age = max(when - first, datetime.timedelta(0))
+        if age >= NEW_DEP_RECENT or (account and account in by):
+            continue
+        found.append((dep, age))
+    return previous[0], found
+
+
+def new_dependency_issues(eco, name, version, resolved, unused=(), brings=()):
     """SC-NEW-DEPENDENCY findings for one release (best effort: [] when the
     registry can't say). unused: the registry names of the dependencies no
-    file of the release names (the artifact scan's unusedDependencies)."""
-    if os.environ.get("LAZARET_NO_DEPENDENCY_HISTORY"):
+    file of the release names (the artifact scan's unusedDependencies).
+    brings: a VS Code extension's (openvsx, vscode) extensionDependencies
+    and extensionPack, as its package.json lists them."""
+    if os.environ.get("LAZARET_NO_DEPENDENCY_HISTORY") or eco not in ("npm", "pypi", "crates", "openvsx", "vscode"):
         return []
+    if eco in ("openvsx", "vscode"):
+        try:
+            previous, found = extension_new_dependencies(eco, name, version, resolved, brings)
+        except (FetchError, SpecError, ValueError):
+            return []
+        return [_new_extension_issue(dep, age, previous) for dep, age in found]
     try:
         if eco == "npm":
             previous, found = npm_new_dependencies(name, version, resolved[4])
+        elif eco == "crates":
+            previous, found = crates_new_dependencies(name, version, resolved)
         else:
             previous, found = pypi_new_dependencies(name, version, getattr(resolved, "info", None))
     except (FetchError, ValueError):
@@ -2911,6 +5421,7 @@ def scan_package(eco, name, version=None, full=False, *, resolved=None, deadline
     also gets SCAN_TIMEOUT. cancel: callable; True stops the scan with
     ScanCancelled."""
     started = time.monotonic()
+    module = registry_module(eco)       # go and crates: their module downloads and checks
     if resolved is None:
         resolved = resolve(eco, name, version)
     version, url, container, artifact, meta_entry = resolved
@@ -2938,8 +5449,11 @@ def scan_package(eco, name, version=None, full=False, *, resolved=None, deadline
         else:
             not_installed.append((s.get("filename"), "not-installable", size))
     per, all_issues, truncated, unused = [], [], 0, set()
+    brings, startup = set(), None           # a VS Code extension's (E-1): what it brings, what starts it with the editor
+    attested = []                           # (file, digest) the provenance check is given (npm: SHA-512; PyPI: SHA-256)
     multi = len(refs) > 1
     downloaded = 0
+    memo = new_memo()                      # (the release's files share the engine's answers: P-2a)
     for ref in refs:
         size = declared_size(ref.get("entry"))
         if cancel is not None and cancel():
@@ -2953,12 +5467,25 @@ def scan_package(eco, name, version=None, full=False, *, resolved=None, deadline
         if downloaded >= byte_budget or (size is not None and downloaded + size > byte_budget):
             skipped.append((ref.get("filename"), "budget", size))
             continue
-        data = http_bytes(ref["url"])
+        try:
+            if module is None:
+                data = http_bytes(ref["url"])
+            else:
+                data = module_fetch(module).bytes(ref["url"], MAX_DOWNLOAD_BYTES)
+        except TooLarge:
+            # (a file whose size the registry does not declare, a Go module's zip among them, found over the
+            # per-file limit as it came: not scanned, as one declared over it is not: N-21)
+            skipped.append((ref.get("filename"), "filesize", size))
+            downloaded += MAX_DOWNLOAD_BYTES
+            continue
         downloaded += max(len(data), size or 0)
         # G15: verify the artifact against the registry-published digest BEFORE
         # scanning anything — a mismatch raises and nothing is persisted under
         # this name/version.
-        digest = verify_digest(data, ref["entry"], eco, name, version)
+        digest = (verify_digest(data, ref["entry"], eco, name, version) if module is None
+                  else _module_digest(module, data, ref["entry"], eco, name, version))
+        if eco in ("npm", "pypi") and _provenance.enabled():
+            attested.append((ref.get("filename"), (hashlib.sha512 if eco == "npm" else hashlib.sha256)(data).hexdigest()))
         stop = time.monotonic() + SCAN_TIMEOUT
         if deadline is not None and deadline < stop:
             # the caller's deadline comes first: say so, not "120 s exceeded"
@@ -2968,7 +5495,7 @@ def scan_package(eco, name, version=None, full=False, *, resolved=None, deadline
         else:
             budget = Budget(deadline=stop, cancel=cancel, deadline_detail=(
                 f"scan time budget of {SCAN_TIMEOUT:g} s per archive (--scan-timeout) exceeded"))
-        r = _scan_artifact(data, ref["container"], ref["artifact"], full, budget)
+        r = _scan_artifact(data, ref["container"], ref["artifact"], full, budget, memo)
         prefix = f"{ref['filename']}/" if multi and ref.get("filename") else ""
         for issue in r["issues"]:
             if prefix:
@@ -2977,12 +5504,16 @@ def scan_package(eco, name, version=None, full=False, *, resolved=None, deadline
             all_issues.append(issue)
         truncated += r["truncated"]
         unused.update(r.get("unusedDependencies") or ())
+        brings.update(r.get("extensionDependencies") or ())
+        startup = startup or r.get("startupEvent")
         per.append({"filename": ref.get("filename"), "kind": ref["artifact"], "url": ref["url"],
                     "archiveBytes": len(data), "digest": digest,
                     **{k: r[k] for k in ("verdict", "verdictReason", "filesScanned",
                                          "binaryArtifacts", "truncated",
-                                         "strongIndicators", "weakIndicators")}})
-    all_issues.extend(new_dependency_issues(eco, name, version, resolved, unused))
+                                         "strongIndicators", "weakIndicators", "useTime")}})
+    all_issues.extend(new_dependency_issues(eco, name, version, resolved, unused, brings))
+    provenance_issues, provenance = _provenance.check_release(eco, name, version, resolved, attested, _provenance_fetch)
+    all_issues.extend(provenance_issues)
     skip_issues, skip_label = _skipped_summary(skipped, byte_budget, limit)
     # one part per release file left out; skip_issues holds one finding per
     # REASON, and used to be counted instead ("1 part" for 3 skipped files)
@@ -3012,7 +5543,7 @@ def scan_package(eco, name, version=None, full=False, *, resolved=None, deadline
     # This defensive sweep exists so the registry path cannot regress.
     all_issues = lazaret.redact_result({"issues": list(all_issues)})["issues"]
     kinds = [p["kind"] for p in per]
-    artifact_label = kinds[0] if len(kinds) == 1 else (
+    artifact_label = kinds[0] if len(kinds) == 1 else f"{len(kinds)} vsix files" if set(kinds) == {"vsix"} else (
         "+".join(filter(None, ["sdist" if "sdist" in kinds else "",
                                f"{kinds.count('wheel')} wheel{'s' if kinds.count('wheel') != 1 else ''}"
                                if "wheel" in kinds else ""])))
@@ -3027,7 +5558,108 @@ def scan_package(eco, name, version=None, full=False, *, resolved=None, deadline
             "digest": per[0]["digest"] if per else None, "artifacts": per,
             "skippedArtifacts": [{"filename": f, "reason": kind, "declaredBytes": size}
                                  for f, kind, size in skipped + not_installed],
-            "scannedAt": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")}
+            "useTime": use_time_total([p["useTime"] for p in per]),
+            "scannedAt": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
+            **({"provenance": provenance} if provenance is not None else {}),
+            **_extension_fields(eco, resolved, brings, startup, kinds)}
+
+
+def _provenance_fetch(url, max_bytes, accept):
+    """The provenance check's fetch (registry/provenance.py): `_fetch` with the metadata timeout."""
+    return _fetch(url, max_bytes=max_bytes, timeout=METADATA_TIMEOUT, **({"accept": accept} if accept else {}))
+
+
+def _extension_fields(eco, resolved, brings, startup, kinds):
+    """A VS Code extension's result fields (E-1): the extensions it brings (as
+    its package.json says, every platform's file together), the activation
+    event that starts it with the editor, and what the registry says of its
+    publisher (Open VSX: whether the namespace is verified, who published it,
+    a pre-release, deprecated). {} for any other package."""
+    if "vsix" not in kinds:
+        return {}
+    info = getattr(resolved, "info", None)
+    info = info if isinstance(info, dict) else {}
+    keys = REGISTRY_INFO_KEYS.get(eco, ())
+    registry = {k: info.get(k) for k in keys if k in info}
+    return {"extensionDependencies": sorted(brings), "startupEvent": startup,
+            **({"registryInfo": registry} if keys else {})}
+
+
+#: what a VS Code extension's registry says of its publisher, kept in the
+#: result (`registryInfo`): Open VSX's namespace and publisher, the
+#: Marketplace's publisher, its verified domain, the install count, and that
+#: it publishes no digest (`digest`: None); a pre-release, and why one was
+#: taken with no version asked for (`preReleaseReason`, OVSX-LATEST)
+REGISTRY_INFO_KEYS = {
+    "openvsx": ("verified", "unrelatedPublisher", "publishedBy", "provider", "preRelease", "preReleaseReason",
+                "deprecated", "timestamp"),
+    "vscode": ("publisher", "publisherDisplayName", "verified", "domain", "installs", "preRelease", "preReleaseReason",
+               "lastUpdated", "digest"),
+}
+
+
+def registry_lines(res):
+    """What print_scan says of an extension's publisher, from `registryInfo`:
+    Open VSX's namespace verified or not, who published the version, a
+    pre-release (and why one was taken with no version asked for),
+    deprecated; the Marketplace's publisher's domain verified or not, the
+    install count, a pre-release, and that it publishes no digest."""
+    info = res.get("registryInfo") or {}
+    if not info:
+        return []
+    if res.get("ecosystem") == "vscode":
+        name = "Visual Studio Marketplace"
+        if info.get("verified"):
+            line = f"{name}: the publisher's domain is verified" + (f" ({info['domain']})" if info.get("domain") else "")
+        else:
+            line = f"{name}: the publisher's domain is not verified"
+        if isinstance(info.get("installs"), int):
+            line += f"; {info['installs']:,} installs"
+        lines = [line]
+        if info.get("preRelease"):
+            why = info.get("preReleaseReason")
+            lines.append(f"{name}: a pre-release version" + (f", taken with no version asked for: {why}" if why else ""))
+        lines.append(f"{name}: no digest is published, so the files were scanned unverified")
+        return lines
+    who = info.get("publishedBy")
+    by = f", published by {who}" + (f" ({info['provider']})" if info.get("provider") else "") if who else ""
+    if info.get("verified"):
+        lines = [f"Open VSX: the namespace is verified{by}"]
+    else:
+        lines = [f"Open VSX: the namespace is not verified (Open VSX has not confirmed who owns it){by}"]
+    if info.get("unrelatedPublisher"):
+        lines.append("Open VSX: the publisher is not a member of the namespace")
+    if info.get("preRelease"):
+        why = info.get("preReleaseReason")
+        lines.append("Open VSX: a pre-release version" + (f", taken with no version asked for: {why}" if why else ""))
+    if info.get("deprecated"):
+        lines.append("Open VSX: the extension is deprecated")
+    return lines
+
+
+def use_time_total(parts):
+    """The release's use-time share (_ArtifactScan.use_time): the sums over
+    the release files the step read, with the bound per file it read them
+    with, or None when it ran on none of them (each was SUSPICIOUS before
+    it)."""
+    parts = [p for p in parts if p]
+    if not parts:
+        return None
+    total = {k: sum(p[k] for p in parts) for k in ("files", "ofFiles", "chars", "ofChars")}
+    total["boundChars"] = max(p.get("boundChars", USE_RISK_CHARS) for p in parts)
+    return total
+
+
+def use_time_line(use_time):
+    """One line for a report when the use-time step left code unread (None
+    otherwise): how much it read, of how much, and why the rest is not."""
+    if not use_time or use_time["chars"] >= use_time["ofChars"]:
+        return None
+    percent = use_time["chars"] * 100 // use_time["ofChars"]          # rounded down: 99%, never 100%
+    return (f"SC-USE-RISK read {use_time['files']:,} of the {use_time['ofFiles']:,} files that run only "
+            f"when the package is used, {percent}% of their characters (smallest first, none over "
+            f"{USE_RISK_MAX_CHARS:,} characters, {use_time.get('boundChars', USE_RISK_CHARS):,} in all per "
+            f"release file)")
 
 
 # ---------------- State store (SQLite / Postgres) ----------------
@@ -3578,12 +6210,28 @@ def print_scan(res, top=15):
     print(f"\n{lazaret.sanitize_term(res['ecosystem'])}:"
           f"{lazaret.sanitize_term(res['name'])}@"
           f"{lazaret.sanitize_term(res['version'])}  {v}")
+    if res.get("location"):
+        print(f"  {lazaret.sanitize_term(res['location'])}")
     if res.get("verdictReason"):
         print(f"  {lazaret.sanitize_term(res['verdictReason'])}")
+    for line in registry_lines(res):
+        print(f"  {lazaret.sanitize_term(line)}")
+    provenance = _provenance.line(res.get("provenance"))
+    if provenance:
+        print(f"  {lazaret.sanitize_term(provenance)}")
+    if res.get("startupEvent"):
+        print(f"  starts with the editor (activation event {lazaret.sanitize_term(res['startupEvent'])!r})")
+    if res.get("extensionDependencies"):
+        brings = res["extensionDependencies"]
+        print(f"  brings {len(brings)} extension{'s' if len(brings) != 1 else ''}: "
+              f"{lazaret.sanitize_term(', '.join(brings[:10]))}{', …' if len(brings) > 10 else ''}")
     print(f"  {res['filesScanned']} source files · {res.get('binaryArtifacts', 0)} binary "
           f"artifacts · {res['archiveBytes']//1024} KB {res.get('artifact','')} "
           f"· profile: {res['profile']}")
     arts = res.get("artifacts") or []
+    use_time = use_time_line(res.get("useTime") or use_time_total([a.get("useTime") for a in arts]))
+    if use_time:
+        print(f"  {use_time}")
     if len(arts) > 1:
         for a in arts:
             print(f"    {lazaret.sanitize_term(a.get('verdict'))!s:<10} "
@@ -4569,11 +7217,15 @@ def _finish_sweep(errors, bad, ci):
 def main():
     global SCAN_TIMEOUT, MAX_ARTIFACTS, MAX_PACKAGE_DOWNLOAD_BYTES, MAX_MEMBER
     lazaret.configure_stdio()
-    ap = argparse.ArgumentParser(prog="lazaret-registry", description="Lazaret npm/PyPI registry scanner")
+    ap = argparse.ArgumentParser(prog="lazaret-registry",
+                                 description="Lazaret registry scanner: npm, PyPI, Go modules, crates and VS Code "
+                                             "extensions (Open VSX, the Visual Studio Marketplace)")
     ap.add_argument("--version", action="version",
                     version=f"lazaret-registry {lazaret.VERSION} (engine: {_engine.describe()})")
     ap.add_argument("command", choices=["add", "scan", "scan-all", "list", "report", "discover"])
-    ap.add_argument("specs", nargs="*", help="npm:<name>[@ver] or pypi:<name>[@ver]")
+    ap.add_argument("specs", nargs="*", help="npm:<name>[@ver], pypi:<name>[@ver], go:<module>[@vX.Y.Z], "
+                                             "crates:<name>[@ver], openvsx:<namespace>.<name>[@ver] or "
+                                             "vscode:<publisher>.<name>[@ver]")
     ap.add_argument("--db", default=os.environ.get("LAZARET_DB", "lazaret-registry.db"),
                     help="SQLite path (or sqlite:PATH), postgres:// URL or libpq "
                          "'host=… dbname=…' string (env LAZARET_DB)")
@@ -4623,6 +7275,9 @@ def main():
                     help="discover: scan the discovered packages (and track them)")
     ap.add_argument("--add", action="store_true",
                     help="discover: add discovered packages to the watchlist")
+    ap.add_argument("--timings", action="store_true",
+                    help="say on stderr where the time went: the network, reading archives, "
+                         "the engine (by call), the rest")
     args = ap.parse_args()
     try:
         _engine.require()
@@ -4652,6 +7307,11 @@ def main():
         # sys.exit — the MCP server dispatches it); here the CLI keeps the
         # exact legacy behavior.
         sys.exit(str(exc))
+    kept = timings.Timings() if args.timings else None
+    timed = contextlib.ExitStack()
+    if kept is not None:
+        timed.enter_context(timings.capture(kept))
+        timed.enter_context(kept.run())
     try:
         errors = []
         args._errors = errors
@@ -4750,6 +7410,10 @@ def main():
 
     finally:
         store.close()
+        timed.close()
+        if kept is not None:
+            for line in timings.render(kept.report()):
+                print(line, file=sys.stderr)
 
 
 if __name__ == "__main__":

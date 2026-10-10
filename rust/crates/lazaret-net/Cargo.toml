@@ -1,0 +1,21 @@
+[package]
+name = "lazaret-net"
+description = "Lazaret's network layer on pratique: HTTPS with a host rule on every redirect, URL limits, timeouts and byte budgets"
+version.workspace = true
+edition.workspace = true
+license = "Apache-2.0"
+rust-version = "1.87"
+repository.workspace = true
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+# The whole library, `net` included (its default): TLS 1.3, HTTP/1.1 with a keep-alive pool, sockets. Only the
+# native library links this crate (lazaret-ffi, not for WebAssembly), never the engine.
+pratique = { path = "../pratique" }
+
+[dev-dependencies]
+# pratique's TLS test server, for this crate's tests against a real peer on 127.0.0.1 (never in a build).
+pratique = { path = "../pratique", features = ["server"] }

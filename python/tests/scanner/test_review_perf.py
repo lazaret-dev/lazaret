@@ -89,11 +89,17 @@ class BackstopTests(unittest.TestCase):
 
     def test_budget_exceeded_emits_sc_truncated(self):
         core.SCAN_TIME_BUDGET = -1.0
-        issues = core.scan_file("slow.py", "import os\nos.system(input())  # nosec\n", "py")
+        # a config file's scan is core's, bounded by the clock
+        issues = core.scan_config_file("settings.env", "TOKEN=abc\nOTHER=1\n")
         trunc = [i for i in issues if i["rule"] == "SC-TRUNCATED"]
         self.assertEqual(len(trunc), 1)
         self.assertIn("scan time budget exceeded", trunc[0]["msg"])
         self.assertEqual(trunc[0]["sev"], "CRITICAL")
+        # a source file's is the engine's, bounded by its work budget and not the clock (Q-1: the passes after
+        # the rules moved into the engine)
+        found = {i["rule"] for i in core.scan_file("slow.py", "import os\nos.system(input())\n", "py")}
+        self.assertNotIn("SC-TRUNCATED", found)
+        self.assertIn("T-CMD", found)
 
     def test_default_budget_is_30_seconds(self):
         self.assertEqual(self._budget, 30.0)

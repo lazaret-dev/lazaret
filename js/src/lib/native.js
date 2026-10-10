@@ -204,14 +204,25 @@ export function packValues(...names) {
 
 /** Reasons an install-time script looks hostile ([] if none). `shell`: read a shell script as a program
  * too; `command`: the text is a hook's command; `lang`: the script's language when known ("js", "py": its
- * strings are read as its runtime reads them). core.install_script_risk */
-export const installScriptRisk = (text, shell = true, command = false, lang = null) =>
-  call("install_script_risk", lang ? { shell, command, lang } : { shell, command }, text);
+ * strings are read as its runtime reads them); `own`: the package's name, when known (D-9: a rewrite of its
+ * own code is its own). core.install_script_risk */
+export const installScriptRisk = (text, shell = true, command = false, lang = null, own = null) => {
+  const args = lang ? { shell, command, lang } : { shell, command };
+  if (own) args.own = own;
+  return call("install_script_risk", args, text);
+};
 /** The language a script runs in, for the tests that read its strings: "py" for a .py file, null for a
  * shell script (.sh), "js" for the rest (what node runs). core's engine.script_lang */
 export const scriptLang = (path) => (path.endsWith(".py") ? "py" : path.endsWith(".sh") ? null : "js");
-/** [reasons, line] of the weaker import-time test ([] and null if none); `lang` "py", "js" or null. */
-export const importTimeRisk = (text, lang = null) => call("import_time_risk", lang ? { lang } : {}, text);
+/** [reasons, line] of the weaker import-time test ([] and null if none); `lang` "py", "js" or null; `names`: the
+ * package's [declared, own], when known (D-12: an install of a package it does not name is a reason; D-9: a
+ * rewrite of its own code is its own). core.import_time_risk */
+export const importTimeRisk = (text, lang = null, names = null) => {
+  const args = lang ? { lang } : {};
+  if (names && names[0] != null) args.declared = names[0];
+  if (names && names[1]) args.own = names[1];
+  return call("import_time_risk", args, text);
+};
 /** "CRITICAL" when one of importTimeRisk's reasons is a strong one, else "MAJOR". */
 export const importTimeSeverity = (reasons) => call("import_time_severity", { reasons });
 /** [targets, complete]: the files an install hook's command runs, and whether it was read to the end
@@ -234,6 +245,8 @@ export const shebangLang = (text) => call("shebang_lang", {}, text);
 export const spawnedScripts = (text, lang = null) => call("spawned_scripts", lang ? { lang } : {}, text);
 /** What a text plants to run again (a login item, a cron job, a shell profile …). */
 export const persistenceReasons = (text) => call("persistence_reasons", {}, text);
+/** Why a .pth file's import line is hostile (SC-PTH-EXEC CRITICAL), or []. core.pth_issues */
+export const pthLineRisk = (line) => call("pth_line_risk", {}, line);
 /** [agent, flag, line] when dependency code hands an AI agent's CLI a flag that turns off its confirmations
  * to an exec call, else null. */
 export const agentHijack = (text) => call("agent_hijack", {}, text);
@@ -301,6 +314,35 @@ export function crossFileIssues(files, skipPaths = new Set(), { who = "Dependenc
   }
   return out;
 }
+
+// ---- Go modules and crates (0.1.9): the readers, and what a vendored manifest says ----
+
+/** The Go reader (G-1; the Python package's engine.go_package) on a module's files, [[path below the module's root,
+ * text]] of its .go files and its cgo packages' .c and .h files; `module`: its path. */
+export function goPackage(files, { module = null, useFileChars = null, useChars = null } = {}) {
+  const args = { files: files.map(([path, text]) => [path, codePoints(text)]) };
+  if (module) args.module = module;
+  if (useFileChars !== null) args.use_file_chars = useFileChars;
+  if (useChars !== null) args.use_chars = useChars;
+  return call("go_package", args, files.map(([, text]) => text));
+}
+
+/** The Rust reader (R-1; engine.rs_crate) on a crate's .rs files, [[path below the crate's root, text]]: `build` its
+ * build script's path, `procMacro` whether its library is a procedural macro, `lib` its library's root. */
+export function rsCrate(files, { build = null, procMacro = false, lib = null, useFileChars = null, useChars = null } = {}) {
+  const args = { proc_macro: Boolean(procMacro), files: files.map(([path, text]) => [path, codePoints(text)]) };
+  if (build) args.build = build;
+  if (lib) args.lib = lib;
+  if (useFileChars !== null) args.use_file_chars = useFileChars;
+  if (useChars !== null) args.use_chars = useChars;
+  return call("rs_crate", args, files.map(([, text]) => text));
+}
+
+/** What a crate's Cargo.toml says of its build script and library ({build: a path, false or null, lib, proc_macro});
+ * engine.cargo_layout. */
+export const cargoLayout = (text) => call("cargo_layout", {}, text);
+/** The module paths a vendor/modules.txt says are vendored, longest first (engine.go_vendored_modules). */
+export const goVendoredModules = (text) => call("go_vendored_modules", {}, text);
 
 // ---- the cross-file JavaScript taint pass ----
 
@@ -370,10 +412,29 @@ export function scanDependencyFile(path, content, lang, { jsx = true, redact = t
 }
 
 /**
- * scan_file's first part in project mode (core.scan_rules): every pattern rule of the language,
- * the supply-chain and credential families, the file-level ones and the whole-text rules, in core's
- * order, before the passes that follow them, the suppression markers and the cap.
+ * scan_file in project mode (core.scan_file(dep=False); Q-1, 0.1.9): every pattern rule of the
+ * language, the supply-chain and credential families, the file-level and whole-text rules, then the
+ * SQL statements without WHERE, the intra-file taint, the SQL built from strings into execute(), the
+ * function metrics, the suppression markers and the cap, as core lists them.
  */
-export function scanRules(path, content, lang, { jsx = true, redact = true } = {}) {
-  return issuesOf(path, call("scan_rules", { lang, jsx, redact, neumaier: false }, content));
+export function scanProjectFile(path, content, lang, { jsx = true, redact = true } = {}) {
+  return issuesOf(path, call("scan_file", { lang, dep: false, jsx, redact, neumaier: false }, content));
+}
+
+const LEXED = new Set(["py", "js", "sql", "go", "rs"]);
+
+/**
+ * A project file's line metrics (core.compute_metrics' part for one file; Q-1 step 4, the engine's metrics.rs):
+ * {ncloc, comments, measured, windows}, `windows` the duplication windows' keys as one string of 16 hexadecimal
+ * digits each. `lang` as the scan read it; `jsx` false for a TypeScript file.
+ */
+export function fileMetrics(content, lang, { jsx = true } = {}) {
+  const args = { jsx };
+  if (LEXED.has(lang)) args.lang = lang;
+  return call("file_metrics", args, content);
+}
+
+/** Project mode's intra-file taint alone (core.taint_scan): its T-* findings, before the markers and the cap. */
+export function taintFindings(path, content, lang, { jsx = true, redact = true } = {}) {
+  return issuesOf(path, call("taint_scan", { lang, jsx, redact, neumaier: false }, content));
 }

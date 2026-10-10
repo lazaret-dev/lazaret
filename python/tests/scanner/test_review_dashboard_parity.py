@@ -33,6 +33,7 @@ credentials are dummies.
 
 import base64
 import collections
+import hashlib
 import json
 import os
 import tempfile
@@ -40,9 +41,15 @@ import unittest
 
 from lazaret.scanner import core
 from tests import _support
+from tests.registry._review_support import B64_DATA, DATA_B64, FAKE_WASM_B64
 from tests.scanner import _dashboard_vm as dash
 
 LANGS = {".py": "py", ".js": "js", ".sql": "sql"}
+
+
+def _one_class(n):
+    """n hex digits that do not repeat a period (SHA-256 of the counting numbers)."""
+    return "".join(hashlib.sha256(str(i).encode()).hexdigest() for i in range(n // 64 + 2))[:n]
 
 
 def fixture_files():
@@ -102,6 +109,19 @@ ADVERSARIAL = [
     ("hidden_unicode.js", "js", "const s=v=>[...v].map(w=>w.codePointAt(0));\n"
      "eval(Buffer.from(s(`\U0000FE00\U0000FE01\U0000FE09\U0000FE0C\U0000FE0F\U0000FE01\U0000FE04`)).toString());\n"
      "const bare = `\U0000FE01\U0000FE02`;\n"),
+    # G-5: runs of digits, hex digits (after 0x or not) or letters alone, and short periods, are not base64 data
+    ("b64_plain.js", "js", "const h = '" + "fd0c71ecb7ed16a9" * 16 + "';\nconst x = '0x" + "E0A67598CD1B763B" * 14 + "';\n"
+     "const t = '" + "SundayMondayTuesdayWednesdayThursdayFridaySaturday" * 5 + "';\nconst d = '" + "1336927655" * 25
+     + "';\nconst p = '" + "01234567890ABCDEFGHIJK" * 10 + "';\nconst q = '" + "01234567890ABCDEFGHIJK" * 10 + "Zz';\n"
+     "const both = ['" + "ab" * 110 + "', '" + B64_DATA + "'];\n"),
+    # N-4: the base64 of a whole WebAssembly module, PNG, GIF or WAV is data; a payload behind a module's header is not
+    ("b64_data.js", "js", "".join(f"const {k} = '{v}';\n" for k, v in DATA_B64.items()) + f"const fake = '{FAKE_WASM_B64}';\n"),
+    # G-5's bound: one class up to 16,384 characters is passed over, one more is reported; a period never is
+    ("b64_bound.js", "js", "const h = '" + _one_class(16384) + "';\nconst k = '" + _one_class(16385) + "';\n"
+     "const x = '0x" + _one_class(16383) + "';\nconst p = '" + "Zm9v" * 5000 + "';\n"),
+    # N-23: a presentation selector repeated up to four times is no carrier; five, or two different, are
+    ("hidden_unicode_emoji.js", "js", "// \u2622\ufe0f\ufe0f hazmat\nconst a = '\u2620\ufe0f \ufe0f\ufe0f\ufe0f';\n"
+     "const b = `\ufe0f\ufe0f\ufe0f\ufe0f\ufe0f`;\nconst c = `\ufe0e\ufe0f`;\nconst d = '\ufe0e\ufe0e';\n"),
     ("lookalike_strings.py", "py", 'def f():\n    """\n    v\u0430lue\n    """\n    return \u0435val(x)\n'
      "s = 'it\\'s' + \u0435val(x) + 'y'\nx = f'{\u0435val(p)}'\n"),
     # FIX-SPEC 1: comment state across lines; U+2028/U+2029 end JS lines
@@ -159,9 +179,23 @@ ADVERSARIAL = [
     ("pem.py", "py", 'K = """-----BEGIN RSA PRIVATE KEY-----\n' + PEM_LINE * 3 + '-----END RSA PRIVATE KEY-----"""\n'
      'eval(x)\nH = "-----BEGIN OPENSSH PRIVATE KEY-----"\neval(y)\n'),
     ("pem.js", "js", 'k = "-----BEGIN EC PRIVATE KEY-----' + PEM_LINE.strip() + '-----END EC PRIVATE KEY-----"; eval(k)\n'),
+    # S-TOKEN-PEM: a header counts only with its key right after it (on its line past a string's separators, or at
+    # the start of the next line that holds anything), and past one without, the line's other tokens are read
+    ("pem_jose.js", "js", 'async function E(e){if(0!==e.indexOf("-----BEGIN PRIVATE KEY-----"))throw new TypeError("x")}'
+     'var t="' + PEM_LINE.strip() + '",k="AKI' + 'AQWERTYUIOPASDFGH";\nconst H = "-----BEGIN PRIVATE KEY-----"\n'
+     'const p = "src/runtime/node/key/import/pkcs8/whatever/aaaaaaaa"\n'),
+    ("pem_strings.js", "js", "const j = '-----BEGIN PRIVATE KEY-----\\\\n' +\n  '" + PEM_LINE.strip() + "';\n"
+     "const k = `-----BEGIN RSA PRIVATE KEY-----\\n" + PEM_LINE.strip() + "`;\n"),
+    ("pem_lines.py", "py", 'K = [\n    "-----BEGIN RSA PRIVATE KEY-----",\n    "' + PEM_LINE.strip() + '",\n]\n'
+     "# -----BEGIN PRIVATE KEY-----\n# " + PEM_LINE + 'E = """-----BEGIN RSA ' 'PRIVATE KEY-----\n' 'Proc-Type: 4,ENCRYPTED\n'
+     'DEK-Info: AES-128-CBC,0123456789ABCDEF\n\n' + PEM_LINE + '"""\nF = """-----BEGIN RSA PRIVATE KEY-----\n\n\n'
+     + PEM_LINE + '"""\nG = "-----BEGIN RSA ' 'PRIVATE KEY-----\\nProc-Type: 4,ENCRYPTED\\nDEK-Info: AES-128-CBC,0123\\n"\n'
+     'H = "-----BEGIN RSA PRIVATE KEY-----\\n" \\\n    "' + PEM_LINE.strip() + '\\n"\n'
+     '$k = "-----BEGIN PRIVATE KEY-----\\n" .\n    "' + PEM_LINE.strip() + '";\n'
+     'B = (\n    b"-----BEGIN PRIVATE KEY-----\\n"\n    b"' + PEM_LINE.strip() + '\\n"\n)\n'),
     ("tokens.js", "js", 'const t = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.abc";\neval(t)\n'
      'const g = "github_pat_' + "A1b2" * 7 + '";\neval(g)\nconst s = "' + "eyJ" * 50 + '";\n'),
-    ("tokens.py", "py", 'a = "AKIAIOSFODNN7ABCDEFG"\nb = "xoxb-1234567890-abcdef"\nc = "sk_live_' + "a1" * 10 + '"\n'
+    ("tokens.py", "py", 'a = "AKI\x41IOSFODNN7ABCDEFG"\nb = "xox\x62-1234567890-abcdef"\nc = "sk_live_' + "a1" * 10 + '"\n'
      'd = "AIza' + "B" * 35 + '"\ne = "ghp_' + "x" * 36 + '"\nlit = "Aq3vN5mR1tY7wK2pL9xB4cJ6hF0dS"\n'
      'print("Aq3vN5mR1tY7wK2pL9xB4cJ6hF0dS")\n'),
     ("entropy.js", "js", 'const k = "q8Z3vN5mR1tY7wK2pL9xB4cJ6hF0dS"; // test\nconst path = "/usr/local/lib/node_modules/x";\n'
@@ -188,7 +222,7 @@ ADVERSARIAL = [
      "t = '\\x68\\x65\\x6c\\x6c\\x6f\\x20\\x77\\x6f\\x72\\x6c\\x64'\n"),
     ("obfuscated.js", "js", "String.fromCharCode(101,118,97,108,40,97,116,111,98,40,120,41,41)\n"
      "const _0x1a2b = 1, _0x3c4d = 2, _0x5e6f = 3, _0x7a8b = 4, _0x9c0d = 5;\n"
-     "const b = '" + "QUJD" * 60 + "';\n//# sourceMappingURL=data:application/json;base64," + "QUJD" * 60 + "\n"
+     "const b = '" + B64_DATA + "';\n//# sourceMappingURL=data:application/json;base64," + "QUJD" * 60 + "\n"
      "eval(function(p,a,c,k,e,d){return p})\n"),
     ("decode.js", "js", "eval(\n  atob(p))\nFunction(globalThis.atob(q))()\nvm.runInThisContext(Buffer.from(z, 'base64'))\n"
      "eval( // x\n  unescape(y)\n)\n"),

@@ -27,6 +27,7 @@ import unittest
 from tests import _support
 from lazaret.scanner import core as lazaret
 from lazaret.scanner import flow as lazaret_flow
+from lazaret.scanner import _native
 from lazaret.scanner import taintspec
 
 PY = sys.executable or "python3"
@@ -42,27 +43,20 @@ STR_IS_SAFE = {"python": {"sanitizers": {"full": ["str"]}}}
 
 class _EngineState:
     """Snapshot/restore every global table both engines' config loaders
-    mutate, so these tests cannot leak rules into other tests."""
+    mutate (the intra-file model's configured part, core._TAINT_CONFIGURED,
+    and the flow's), so these tests cannot leak rules into other tests."""
 
     def __init__(self):
-        self.saved = (dict(lazaret.TAINT_SOURCES),
-                      {k: list(v) for k, v in lazaret.TAINT_SINKS.items()},
-                      dict(lazaret._FULL_SAN), copy.deepcopy(lazaret._PARTIAL_SAN),
+        self.saved = (copy.deepcopy(lazaret._TAINT_CONFIGURED),
                       list(lazaret_flow._PY_SOURCE_EXTRA), list(lazaret_flow._EXTRA_PY_SINKS),
                       set(lazaret_flow.FULL_SANITIZERS_PY), dict(lazaret_flow._EXTRA_PARTIAL_PY),
                       list(lazaret_flow._JS_SOURCES), list(lazaret_flow._JS_SINKS),
                       set(lazaret_flow._JS_FULL_SAN), dict(lazaret_flow._JS_PARTIAL_SAN))
 
     def restore(self):
-        (srcs, sinks, full, part, pse, eps, fsp, epp, jsrc, jsinks, jfull, jpart) = self.saved
-        lazaret.TAINT_SOURCES.clear()
-        lazaret.TAINT_SOURCES.update(srcs)
-        for k, v in sinks.items():
-            lazaret.TAINT_SINKS[k][:] = v
-        lazaret._FULL_SAN.clear()
-        lazaret._FULL_SAN.update(full)
-        lazaret._PARTIAL_SAN.clear()
-        lazaret._PARTIAL_SAN.update(part)
+        (configured, pse, eps, fsp, epp, jsrc, jsinks, jfull, jpart) = self.saved
+        lazaret._TAINT_CONFIGURED.clear()
+        lazaret._TAINT_CONFIGURED.update(copy.deepcopy(configured))
         lazaret_flow._PY_SOURCE_EXTRA[:] = pse
         lazaret_flow._EXTRA_PY_SINKS[:] = eps
         lazaret_flow.FULL_SANITIZERS_PY.clear()
@@ -252,6 +246,22 @@ class ValidatorUnit(unittest.TestCase):
             with self.subTest(pat=pat):
                 self.assertIsNotNone(taintspec.check_pattern(pat)[0])
 
+    @unittest.skipUnless(_native.available(), "native engine not built")
+    def test_patterns_linre_does_not_run_are_rejected(self):
+        # the static check passes these, but linre, which runs a config's
+        # patterns in the cross-file taint passes, does not (P-16: there is
+        # no backtracking matcher to run them): rejected with its reason
+        cases = [("(?:a?)*b", "empty string"), ("(?<=a{1001})b", "lookbehind wider than 1000"),
+                 (r"\w{40000}", "too large")]
+        if sys.version_info >= (3, 11):
+            cases.append(("(?>ab)c", "atomic group"))
+        for pat, why in cases:
+            with self.subTest(pat=pat):
+                gp, reason = taintspec.check_pattern(pat)
+                self.assertIsNone(gp)
+                self.assertIn("linear-time regex engine does not run it", reason)
+                self.assertIn(why, reason)
+
     def test_match_text_is_capped(self):
         gp, _ = taintspec.check_pattern("needle")
         cap = taintspec.MAX_MATCH_TEXT
@@ -259,6 +269,16 @@ class ValidatorUnit(unittest.TestCase):
         self.assertIsNone(gp.search("x" * cap + "needle"))
         hits = [m.start() for m in gp.finditer("needle\n" + "x" * 50 + "needle")]
         self.assertEqual(hits, [0, 57])
+
+    def test_the_engine_holds_a_configured_pattern_to_the_same_bound(self):
+        # (Q-1: the intra-file pass is the engine's, which clips a configured pattern's text itself)
+        self.assertEqual(_support.pack("_TAINT_MAX_MATCH_TEXT"), taintspec.MAX_MATCH_TEXT)
+        lazaret.apply_taint_config({"python": {"sources": [r"tainted_\w+"],
+                                               "sinks": [{"pattern": r"far_sink\(", "category": "code injection"}]}})
+        near = "x = tainted_one()\nfar_sink(x)\n"
+        far = "x = tainted_one()\n" + " " * taintspec.MAX_MATCH_TEXT + "far_sink(x)\n"
+        self.assertEqual([i["rule"] for i in lazaret.taint_scan("a.py", near.split("\n"), "py")], ["T-CODE"])
+        self.assertEqual([i["rule"] for i in lazaret.taint_scan("a.py", far.split("\n"), "py")], [])
 
     def test_polynomial_pattern_on_huge_line_is_bounded(self):
         """An accepted pattern with one unbounded repeat is O(n^2) per
@@ -275,10 +295,10 @@ class ValidatorUnit(unittest.TestCase):
 
     def test_intra_file_source_union_still_matches_builtin(self):
         lazaret.apply_taint_config({"python": {"sources": [r"my\.source\b"]}})
-        src = lazaret.TAINT_SOURCES["py"]
-        self.assertIsNotNone(src.search("x = request.args['q']"))
-        self.assertIsNotNone(src.search("x = my.source()"))
-        self.assertIsNone(src.search("x = 1"))
+        lines = ["import os", "x = request.args['q']", "os.system(x)", "y = my.source()", "os.system(y)",
+                 "z = 1", "os.system(z)"]
+        found = {(i["rule"], i["line"]) for i in lazaret.taint_scan("x.py", lines, "py")}
+        self.assertEqual(found, {("T-CMD", 3), ("T-CMD", 5)})
 
 
 if __name__ == "__main__":

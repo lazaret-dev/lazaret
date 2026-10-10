@@ -48,6 +48,8 @@ thread_local! {
     /// What the search in progress read, where a path that read less than
     /// the span it covered says so (Regex::find charges it).
     static READ: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
+    /// What its lookaheads' memoized walks read (Regex::find charges it too).
+    static WALKED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 /// The search in progress read `n` characters (see READ).
@@ -201,10 +203,12 @@ impl Regex {
         let lead_lits = an.prefix(&lowered.hir).filter(|l| l.iter().all(|s| !s.is_empty()));
         let progs = nfa::compile(&lowered.hir, lowered.sets.clone(), &lowered.looks, parsed.groups)?;
         let shape = DfaShape::new(&progs);
-        // (the scan for a lead's strings finds more false starts the more
-        // common their characters are; it beats the DFA up to a point, and
-        // further for a large program, whose DFA states cost most to build)
-        let dense = if progs.fwd.insts.len() > 2000 { 200 } else { 100 };
+        // (the scan for a lead's strings stops at more false starts the
+        // more common their characters are, but it checks each one for a
+        // whole string before a try, and over a long text it goes by where
+        // the strings' pairs stand: it beats the DFA up to a point, further
+        // for a large program, whose DFA states cost most to build)
+        let dense = if progs.fwd.insts.len() > 2000 { 400 } else { 300 };
         let lead = lead_lits
             .as_ref()
             .and_then(|l| literal::LitSet::new(l))
@@ -271,6 +275,13 @@ impl Regex {
         }
     }
 
+    /// Strings one of which every match holds: those it scans for (the
+    /// need), or else those every match starts with (the lead). None when
+    /// it has none worth a scan.
+    pub fn required(&self) -> Option<&literal::LitSet> {
+        self.inner.need.as_ref().or(self.inner.lead.as_ref())
+    }
+
     /// The group number of a named group.
     pub fn group_index(&self, name: &str) -> Option<usize> {
         let n: Vec<u32> = name.chars().map(|c| c as u32).collect();
@@ -309,8 +320,17 @@ impl Regex {
     /// Pike VM answers whatever the DFAs give up on, and a match whose start
     /// lies past the window's end.
     fn find(&self, s: &[u32], start: usize, end: usize, mode: Mode, must_advance: bool) -> Option<(Vec<isize>, usize)> {
+        self.find_kept(s, start, end, mode, must_advance, None)
+    }
+
+    /// `find`, with the buffers of `kept` when given (one finditer's: the
+    /// memos of its lookaheads hold from one of its searches to the next,
+    /// over the same text, when its flag says this is a later search) or
+    /// else the pool's (memos started afresh).
+    fn find_kept(&self, s: &[u32], start: usize, end: usize, mode: Mode, must_advance: bool, kept: Option<(&mut Cache, bool)>) -> Option<(Vec<isize>, usize)> {
         READ.with(|r| r.set(None));
-        let found = self.find_unbudgeted(s, start, end, mode, must_advance);
+        WALKED.with(|w| w.set(0));
+        let found = self.find_unbudgeted(s, start, end, mode, must_advance, kept);
         // The work budget of the engine call in progress (crate::budget): a
         // sixteenth of the characters the automata read. That is the span
         // the search covered, but where less was read: nothing for a search
@@ -325,13 +345,14 @@ impl Regex {
                 None => end.saturating_sub(start),
             },
         };
+        let covered = covered.saturating_add(WALKED.with(|w| w.take()));
         if covered >= 16 && !crate::budget::spend(covered as u64 / 16) {
             return None;
         }
         found
     }
 
-    fn find_unbudgeted(&self, s: &[u32], start: usize, end: usize, mode: Mode, must_advance: bool) -> Option<(Vec<isize>, usize)> {
+    fn find_unbudgeted(&self, s: &[u32], start: usize, end: usize, mode: Mode, must_advance: bool, kept: Option<(&mut Cache, bool)>) -> Option<(Vec<isize>, usize)> {
         if mode == Mode::Search && start > end {
             return None;
         }
@@ -350,7 +371,7 @@ impl Regex {
                 });
             }
         }
-        self.with_cache(|c| {
+        let run = |c: &mut Cache| {
             if start <= end && inner.shape.usable {
                 let r = match mode {
                     Mode::Search => self.search_dfa(s, start, end, must_advance, c),
@@ -366,7 +387,17 @@ impl Regex {
                 Mode::Full => (&p.full, true),
             };
             pike::search(p, prog, s, start, end, Want { anchored, must_advance, end_at: None }, &mut c.pike)
-        })
+        };
+        let run = |c: &mut Cache, keep: bool| {
+            c.pike.oracle.begin(s, end, keep);
+            let found = run(c);
+            WALKED.with(|w| w.set(c.pike.oracle.walked));
+            found
+        };
+        match kept {
+            Some((c, keep)) => run(c, keep),
+            None => self.with_cache(|c| run(c, false)),
+        }
     }
 
     fn skip(&self) -> Option<&dyn Skip> {
@@ -566,7 +597,7 @@ impl Regex {
     /// pattern.finditer(s, pos, endpos)
     pub fn finditer_at<'s>(&'s self, s: &'s [u32], pos: isize, endpos: isize) -> FindIter<'s> {
         let (a, b) = Self::clamp(s, pos, endpos);
-        FindIter { re: self, s, at: a, pos: a, end: b, must_advance: false, done: false }
+        FindIter { re: self, s, at: a, pos: a, end: b, must_advance: false, done: false, cache: None }
     }
 
     pub fn finditer<'s>(&'s self, s: &'s [u32]) -> FindIter<'s> {
@@ -670,7 +701,9 @@ impl<'s> Match<'s> {
 }
 
 /// pattern.finditer: each match after the last, an empty match not again
-/// where the last one ended.
+/// where the last one ended. Its searches share one set of buffers, taken
+/// from the pattern's pool at the first and given back when it is dropped,
+/// so what their lookaheads' walks learn of the text holds for the next.
 pub struct FindIter<'s> {
     re: &'s Regex,
     s: &'s [u32],
@@ -679,6 +712,19 @@ pub struct FindIter<'s> {
     end: usize,
     must_advance: bool,
     done: bool,
+    cache: Option<Box<Cache>>,
+}
+
+impl Drop for FindIter<'_> {
+    fn drop(&mut self) {
+        if let Some(c) = self.cache.take() {
+            if let Ok(mut p) = self.re.inner.pool.lock() {
+                if p.len() < 8 {
+                    p.push(c);
+                }
+            }
+        }
+    }
 }
 
 impl<'s> Iterator for FindIter<'s> {
@@ -687,7 +733,16 @@ impl<'s> Iterator for FindIter<'s> {
         if self.done {
             return None;
         }
-        match self.re.find(self.s, self.at, self.end, Mode::Search, self.must_advance) {
+        // (its first search starts the memos afresh: buffers from the pool
+        // may hold what a search learnt of another text, one that sat at the
+        // same address with the same length)
+        let first = self.cache.is_none();
+        if first {
+            let taken = self.re.inner.pool.lock().ok().and_then(|mut p| p.pop());
+            self.cache = Some(taken.unwrap_or_else(|| Box::new(Cache::new())));
+        }
+        let kept = self.cache.as_deref_mut().map(|c| (c, !first));
+        match self.re.find_kept(self.s, self.at, self.end, Mode::Search, self.must_advance, kept) {
             Some(f) => {
                 let m = self.re.make_match(self.s, f, self.pos, self.end);
                 self.must_advance = m.end() == m.start();

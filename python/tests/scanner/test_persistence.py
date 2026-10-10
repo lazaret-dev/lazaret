@@ -440,9 +440,14 @@ class WorkflowTests(unittest.TestCase):
         res = scan({".github/workflows/discussion.yaml": WORM_BACKDOOR, ".github/workflows/formatter_1.yml": WORM_ARTIFACT,
                     ".github/workflows/copilot.yml": "on: push\njobs:\n  a:\n    env:\n      V: ${{ toJSON(secrets) }}\n",
                     "docs/formatter.yml": WORM_ARTIFACT})
-        self.assertEqual(found(res), [("SC-WORKFLOW-BACKDOOR", "CRITICAL", ".github/workflows/discussion.yaml", 12),
-                                      ("SC-WORKFLOW-SECRETS", "CRITICAL", ".github/workflows/formatter_1.yml", 8),
-                                      ("SC-WORKFLOW-SECRETS", "MAJOR", ".github/workflows/copilot.yml", 5)])
+        worms = [f for f in found(res) if f[0] not in core.HARDENING_RULES]
+        self.assertEqual(worms, [("SC-WORKFLOW-BACKDOOR", "CRITICAL", ".github/workflows/discussion.yaml", 12),
+                                 ("SC-WORKFLOW-SECRETS", "CRITICAL", ".github/workflows/formatter_1.yml", 8),
+                                 ("SC-WORKFLOW-SECRETS", "MAJOR", ".github/workflows/copilot.yml", 5)])
+        # (and since 0.1.9 the workflows' hardening checks: no permissions set, actions at a tag)
+        self.assertEqual({f[0] for f in found(res)} - {f[0] for f in worms},
+                         {"SC-WORKFLOW-PERMISSIONS", "SC-WORKFLOW-UNPINNED"})
+        self.assertFalse([f for f in found(res) if f[2] == "docs/formatter.yml"])
         msgs = {i["rule"] + i["sev"]: i["msg"] for i in res["issues"]}
         self.assertEqual(msgs["SC-WORKFLOW-BACKDOORCRITICAL"],
                          "The job \"process\" puts github.event.discussion.body into a command on a self-hosted runner, "

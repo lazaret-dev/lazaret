@@ -19,11 +19,46 @@ import { mkIssue, fileIssue } from "./issue.js";
 import { pthIssues } from "./pth.js";
 import { registerScanContext, SECRET_SKIP_RE } from "./redact.js";
 import { isConfigFile, ownReport, CONFIG_SCAN_CAP } from "./configsecrets.js";
+import { cmpCodePoints } from "./pycompat.js";
 
 export const EXTS = {
   ".py": "py", ".pyw": "py", ".js": "js", ".jsx": "js", ".ts": "js", ".tsx": "js",
   ".mts": "js", ".cts": "js", ".mjs": "js", ".cjs": "js", ".sql": "sql",
+  ".go": "go", ".rs": "rs",
 };
+// The languages a dependency tree's files (--deps) are read in (twin of
+// core.DEP_LANGS): a project's own Go and Rust files are read; a package's
+// are, in a Go or cargo vendor tree (VENDOR_CODE, 0.1.9: deps.js vendoredCode).
+export const DEP_LANGS = new Set(["py", "js", "sql"]);
+// A vendor tree's code (twin of core.VENDOR_CODE): Go's (vendor/modules.txt) and cargo's (a .cargo-checksum.json in
+// each crate's directory).
+export const VENDOR_CODE = { go: ".go", cargo: ".rs" };
+const VENDOR_PROBE = 256;            // the directories of a vendor tree looked at for a .cargo-checksum.json
+
+/** Is `rel` ("/"-separated, below a Go module's root for "go", a crate's for "crate") a file no build of a dependent
+ * compiles (twin of core.never_built): a Go *_test.go file, a name with "_" or "." first, one under testdata/ or
+ * vendor/; a crate's tests/, benches/ and examples/. */
+export function neverBuilt(kind, rel) {
+  if (kind === "go") {
+    const parts = rel.split("/");
+    const name = parts[parts.length - 1];
+    return name.startsWith("_") || name.startsWith(".") || name.toLowerCase().endsWith("_test.go")
+      || parts.slice(0, -1).some((p) => p === "testdata" || p === "vendor");
+  }
+  if (kind === "crate") return ["tests", "benches", "examples"].includes(rel.split("/")[0]);
+  return false;
+}
+
+/** "go" or "rs" for a file of a Go or cargo vendor tree (`vendor`: [its kind, its rel]) that a build compiles, else
+ * null. Twin of core._vendor_lang. */
+function vendorLang(vendor, rel, ext) {
+  if (!vendor || ext !== VENDOR_CODE[vendor[0]]) return null;
+  const below = rel.slice(vendor[1].length + 1).split(sep).join("/");
+  if (vendor[0] === "go") return neverBuilt("go", below) ? null : "go";
+  const slash = below.indexOf("/");
+  const inside = slash < 0 ? "" : below.slice(slash + 1);
+  return !inside || neverBuilt("crate", inside) ? null : "rs";
+}
 // gyp files, whatever their name (twin of core.GYP_EXTS): binding.gyp pulls
 // others in ('includes': ['build/common.gypi']) and node-gyp runs their
 // actions and command expansions too, so every one goes to scanGyp.
@@ -40,7 +75,7 @@ export function normalizeNewlines(text) {
 }
 
 /** posixpath.normpath of a relative '/'-separated path. */
-function normpathRel(path) {
+export function normpathRel(path) {
   const comps = [];
   for (const c of path.split("/")) {
     if (c === "" || c === ".") continue;
@@ -242,9 +277,35 @@ const DEP_TREE_MARKERS = {
   venv: [["pyvenv.cfg"], []], ".venv": [["pyvenv.cfg"], []], env: [["pyvenv.cfg"], []],
   vendor: [["modules.txt", "autoload.php", "package.json"], [".dist-info", ".egg-info"]],
 };
-/** Is directory `name` a dependency tree (always for node_modules & co; vendor/venv only with a marker)? */
+/** "go" when the vendor directory `dirBuf` is Go's (vendor/modules.txt), "cargo" when it is cargo's (a regular
+ * .cargo-checksum.json in one of its first VENDOR_PROBE directories), else null; no link followed. Twin of
+ * core._vendor_kind. */
+export function vendorKind(dirBuf) {
+  let names;
+  try { names = readdirSync(dirBuf, { encoding: "buffer" }); } catch { return null; }
+  const entries = names.map((nb) => ({ nb, n: fsNameToString(nb) })).sort((a, b) => cmpCodePoints(a.n, b.n));
+  if (entries.some((e) => e.n === "modules.txt")) return "go";
+  const dirs = [];
+  for (const e of entries) {
+    if (dirs.length >= VENDOR_PROBE) break;
+    try { if (lstatSync(childPath(dirBuf, e.nb)).isDirectory()) dirs.push(e); } catch { /* gone: not one */ }
+  }
+  for (const e of dirs) {
+    try {
+      if (lstatSync(childPath(childPath(dirBuf, e.nb), Buffer.from(".cargo-checksum.json"))).isFile()) return "cargo";
+    } catch { /* none */ }
+  }
+  return null;
+}
+
+/** Is directory `name` a dependency tree (always for node_modules & co; vendor/venv only with a marker)? A vendor
+ * directory of Go's or cargo's is "go" or "cargo" (vendorKind): --deps reads its code. */
 function isDependencyTree(name, dirBuf) {
   if (DEP_TREES.has(name)) return true;
+  if (name === "vendor") {
+    const kind = vendorKind(dirBuf);
+    if (kind) return kind;
+  }
   const markers = DEP_TREE_MARKERS[name];
   if (!markers) return false;
   const [names, suffixes] = markers;
@@ -337,8 +398,9 @@ export function collectFiles(root, { includeDeps = false, exclude = [], maxFileB
       try { key = dirKey(lstatSync(full, { bigint: true })); } catch { /* no identity: walked, not loop-checked */ }
       if (key && seen.has(key)) { issues.push(unreadableIssue(rel, "directory already visited (filesystem loop)")); continue; }
       if (key) seen.add(key);
-      const dep = dir.dep || isDependencyTree(name, full);
+      let dep = dir.dep || isDependencyTree(name, full);
       if (dep && !dir.dep && !includeDeps) { skipTree(full, rel); continue; }
+      if (typeof dep === "string") dep = [dep, rel];      // a Go or cargo vendor tree: its kind and where it is
       push.push({ buf: full, rel, dep });
     }
     for (let k = push.length - 1; k >= 0; k--) stack.push(push[k]);   // pop order = sorted, depth-first
@@ -366,7 +428,9 @@ function collectFile(full, rel, name, st, dep, col) {
   const ext = pyExt(name).toLowerCase();       // os.path.splitext, as core
   const kind = name === "package.json" || name === "binding.gyp" ? name : GYP_EXTS.has(ext) ? "gyp" : null;
   const pth = !kind && ext === ".pth";
-  let lang = kind || pth ? null : EXTS[ext];
+  const vendor = Array.isArray(dep) ? dep : null;      // (a vendor tree's kind, its rel)
+  let lang = kind || pth ? null : EXTS[ext] ?? null;
+  if (dep && lang !== null && !DEP_LANGS.has(lang)) lang = vendorLang(vendor, rel, ext);
   const size = st.size;
   if (!kind && !pth && !lang) {
     // spec 9: every other regular file is classified by magic bytes — unless
@@ -413,7 +477,7 @@ function collectFile(full, rel, name, st, dep, col) {
   }
   if (kind) {
     const content = normalizeNewlines(new TextDecoder("utf-8", { ignoreBOM: true }).decode(data));
-    col.manifests.push({ kind, path: rel, content, dep });
+    col.manifests.push({ kind, path: rel, content, dep: Boolean(dep) });
     return;
   }
   if (pth) {                // only the .pth check runs on it (decoded as the registry does: utf-8-sig)
@@ -432,7 +496,9 @@ function collectFile(full, rel, name, st, dep, col) {
   for (const i of found) col.binaryIssues.push(i);
   const dis = disguisedBinary(rel, data);       // a program under a source file's name (0.1.8)
   if (dis) col.binaryIssues.push(dis);
-  col.files.push({ path: rel, content, lang, dep });
+  const entry = { path: rel, content, lang, dep: Boolean(dep) };
+  if (vendor && (lang === "go" || lang === "rs")) entry.vendor = vendor[1];   // (its module or crate is read whole)
+  col.files.push(entry);
 }
 
 /**

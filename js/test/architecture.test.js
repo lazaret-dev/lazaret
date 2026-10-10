@@ -84,12 +84,12 @@ test("architecture: zero dependencies, shipped files only, its licenses", () => 
   assert.deepEqual(pkg.scripts, { build: "node scripts/build-wasm.js", prepack: "node scripts/build-wasm.js --check",
     test: "node --test" });
   assert.deepEqual(pkg.files, ["bin/", "src/", "native/lazaret.wasm", "native/NOTICE", "README.md", "LICENSE",
-    "LICENSE-PYTHON", "LICENSE-UNICODE", "NOTICE",
+    "LICENSE-UNICODE", "NOTICE",
     "!**/.*", "!**/*.pem", "!**/*.key", "!**/id_rsa*", "!**/id_ed25519*"]);   // never pack dotfiles (.env*, ._*, .DS_Store) or keys
-  // the native engine (native/lazaret.wasm, its notices in native/NOTICE) holds translations of CPython code (its
-  // regex engine, shlex) and Unicode 13.0 data, and lib/unicode13.js and lib/codecs.js hold Unicode data (NOTICE):
-  // the package carries both licenses and declares them
-  assert.equal(pkg.license, "Apache-2.0 AND Python-2.0.1 AND Unicode-3.0");
+  // the native engine (native/lazaret.wasm, its notices in native/NOTICE) holds Unicode 13.0 data, and lib/unicode13.js
+  // and lib/codecs.js hold Unicode data (NOTICE): the package carries the Unicode License and declares it. The codec
+  // names lib/codecs.js lists are what Python's codecs answer to, facts about Python, not its code
+  assert.equal(pkg.license, "Apache-2.0 AND Unicode-3.0");
 });
 
 test("architecture: the native engine imports nothing from its host", () => {

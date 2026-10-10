@@ -30,7 +30,7 @@ mod tests;
 
 use crate::jsparse::tree::{self as jt, Kind, NodeId, Tree, NONE};
 use crate::pystr::PyStr;
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::rc::Rc;
 
 pub use driver::{analyze, Config, Out};
@@ -41,6 +41,24 @@ pub const MAX_OPEN: usize = 4;
 pub const MAX_ITERS: u32 = 50;
 pub const MAX_PARAMS: usize = 64;
 pub const PARAM_BASE: u64 = 1 << 20;
+/// A parameter's key, set on a value read through a member of the parameter whose name is not the environment's
+/// (the supply-chain model, D-16: `env.platform`, `env.readConfig()`): what a call gives such a parameter is,
+/// there, its value without the whole environment.
+pub const MEMBER_KEY: u64 = 1 << 63;
+/// A method's receiver, `this`, as a parameter's index (the supply-chain model, B-3): a method of a class made in
+/// several places reads `this` as the value it is called on, so what one method of an instance was given reaches
+/// what another method of that instance does with it (`r.setCode(t); r.run()`), and no other instance's.
+pub const RECV_INDEX: usize = (PARAM_BASE - 1) as usize;
+
+/// The function a parameter's key is of.
+pub fn key_owner(key: u64) -> FnId {
+    ((key & !MEMBER_KEY) / PARAM_BASE) as FnId
+}
+
+/// A parameter's key's index among its function's parameters.
+pub fn key_index(key: u64) -> usize {
+    ((key & !MEMBER_KEY) % PARAM_BASE) as usize
+}
 pub const EXPORT_HOPS: u32 = 8;
 pub const ALIAS_DEPTH: u32 = 16;
 pub const WORK_BASE: u64 = 200_000;
@@ -386,7 +404,7 @@ impl V {
         if self.params.is_empty() {
             return self.clone();
         }
-        let params: Vec<u64> = self.params.iter().copied().filter(|&k| fids.contains(&((k / PARAM_BASE) as u32))).collect();
+        let params: Vec<u64> = self.params.iter().copied().filter(|&k| fids.contains(&key_owner(k))).collect();
         if params.len() == self.params.len() {
             return self.clone();
         }
@@ -394,6 +412,19 @@ impl V {
             return V::empty();
         }
         V::new(self.src, self.origin, self.fname.clone(), self.via.clone(), Rc::from(params), self.clean, self.built, self.kind)
+            .with_sc(self.sc.clone())
+    }
+
+    /// The value read through a member of a name that is not the environment's: its parameters' keys with
+    /// MEMBER_KEY set (D-16).
+    pub fn through_member(&self) -> V {
+        if self.params.iter().all(|&k| k & MEMBER_KEY != 0) {
+            return self.clone();
+        }
+        let mut keys: Vec<u64> = self.params.iter().map(|&k| k | MEMBER_KEY).collect();
+        keys.sort_unstable();
+        keys.dedup();
+        V::new(self.src, self.origin, self.fname.clone(), self.via.clone(), Rc::from(keys), self.clean, self.built, self.kind)
             .with_sc(self.sc.clone())
     }
 
@@ -527,8 +558,10 @@ pub struct Func {
     pub route: u8,
     /// param index -> category -> the sink it reaches
     pub reach: BTreeMap<usize, BTreeMap<u8, Entry>>,
-    /// param index -> (clean, built) of the value it returns
-    pub ret_params: BTreeMap<usize, (u8, bool)>,
+    /// (param index, category) -> whether it reaches the sink through a member alone (MEMBER_KEY, D-16)
+    pub reach_member: BTreeMap<(usize, u8), bool>,
+    /// param index -> (clean, built, through a member alone: MEMBER_KEY) of the value it returns
+    pub ret_params: BTreeMap<usize, (u8, bool, bool)>,
     /// request data it returns
     pub ret_src: Option<V>,
     /// key of an enclosing function's parameter it returns -> (clean, built)
@@ -536,6 +569,9 @@ pub struct Func {
     /// param index -> the closure variables it is written to (the
     /// supply-chain model's: `res.on('data', d => body += d)`)
     pub param_writes: BTreeMap<usize, BTreeSet<BindId>>,
+    /// param index -> the files it is written to: (the keys of the path, where), the supply-chain model's (D-2:
+    /// `request.get(u, (e, r, body) => fs.writeFileSync(p, body))`, a callback given a download)
+    pub param_files: BTreeMap<usize, BTreeSet<(Vec<PyStr>, u32)>>,
     /// fid -> the parameters it passed tainted values in its last reading
     pub callers: BTreeMap<FnId, BTreeSet<usize>>,
     pub runs: u32,
@@ -1052,6 +1088,15 @@ pub struct Program {
     /// (the supply-chain model) a member of `this` — (class or object
     /// literal, its id, the member's name) — as a binding of its own
     pub sc_props: HashMap<(u8, u32, PyStr), BindId>,
+    /// (the supply-chain model) the classes whose instances are made in more
+    /// than one place (`new C(…)` of them or of a subclass): made when first
+    /// asked (descs::Program::sc_made_widely)
+    pub sc_wide: Option<HashSet<ClassId>>,
+    /// (the supply-chain model) a class's `this.x` binding -> the class
+    pub sc_this_class: HashMap<BindId, ClassId>,
+    /// (the supply-chain model) a module -> the names of the members of a name it puts anything into
+    /// (`o.list.push(…)`, `Object.assign(o.opts, …)`): made when first asked (supply::collected_members, D-3b)
+    pub sc_collected: HashMap<ModId, HashSet<PyStr>>,
 }
 
 impl Program {
@@ -1075,6 +1120,9 @@ impl Program {
             nodes: 0,
             anc: HashMap::new(),
             sc_props: HashMap::new(),
+            sc_wide: None,
+            sc_this_class: HashMap::new(),
+            sc_collected: HashMap::new(),
         }
     }
 
@@ -1155,10 +1203,12 @@ impl Program {
             is_module: true,
             route: 0,
             reach: BTreeMap::new(),
+            reach_member: BTreeMap::new(),
             ret_params: BTreeMap::new(),
             ret_src: None,
             ret_outer: BTreeMap::new(),
             param_writes: BTreeMap::new(),
+            param_files: BTreeMap::new(),
             callers: BTreeMap::new(),
             runs: 0,
             calls: Vec::new(),
@@ -1633,10 +1683,12 @@ impl Program {
             is_module: false,
             route: 0,
             reach: BTreeMap::new(),
+            reach_member: BTreeMap::new(),
             ret_params: BTreeMap::new(),
             ret_src: None,
             ret_outer: BTreeMap::new(),
             param_writes: BTreeMap::new(),
+            param_files: BTreeMap::new(),
             callers: BTreeMap::new(),
             runs: 0,
             calls: Vec::new(),

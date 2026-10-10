@@ -23,6 +23,16 @@ fn any_in(text: &[u32], needles: &pystr::Needles) -> bool {
     needles.any_in(text)
 }
 
+/// The reason of received code's category, and for code a model saw run out of sight, its words for that (GR-8: the
+/// strength of a reason is read by its start, so the words after it change none).
+fn received_reason(p: &Pack, cat: &str, model: Option<&ModelFacts>) -> PyStr {
+    let r = cat_reason(p, cat);
+    if cat == "run" && model.is_some_and(|m| m.received_hidden) {
+        return pystr::concat(&[&r, &u(crate::model::facts::HIDDEN_RUN)]);
+    }
+    r
+}
+
 pub(crate) fn cat_reason(p: &Pack, cat: &str) -> PyStr {
     p.map_strs("_DL_CATEGORY_REASON")
         .iter()
@@ -566,6 +576,12 @@ pub fn wallet_swap_at(p: &Pack, text: &[u32]) -> Option<(usize, PyStr)> {
 /// core._exfil_signs: (offset, reason) of the exfiltration shapes and a
 /// miner. `host`: where _HOST_INFO_RE matches.
 pub fn exfil_signs(p: &Pack, text: &[u32], host: Option<usize>) -> Vec<(usize, PyStr)> {
+    exfil_signs_net(p, text, host, false)
+}
+
+/// [`exfil_signs`], with `net`: a model has seen the code talk to the network (Go's and Rust's network
+/// calls are not the text's `_NETWORK_RE`).
+fn exfil_signs_net(p: &Pack, text: &[u32], host: Option<usize>, net: bool) -> Vec<(usize, PyStr)> {
     let mut signs: Vec<(usize, PyStr)> = Vec::new();
     let at = miner_at(p, text);
     if at >= 0 {
@@ -580,12 +596,12 @@ pub fn exfil_signs(p: &Pack, text: &[u32], host: Option<usize>) -> Vec<(usize, P
     if let Some(endpoint) = crate::flow::secret_endpoint_at(p, text) {
         signs.push(endpoint);
     }
-    let mut net: Option<bool> = None;
+    let mut known: Option<bool> = if net { Some(true) } else { None };
     let mut network = || -> bool {
-        if net.is_none() {
-            net = Some(p.re("_NETWORK_RE").search(text).is_some());
+        if known.is_none() {
+            known = Some(p.re("_NETWORK_RE").search(text).is_some());
         }
-        net.unwrap_or(false)
+        known.unwrap_or(false)
     };
     if let Some((at, names)) = credential_sweep_at(p, text) {
         if network() {
@@ -1013,6 +1029,20 @@ fn lexed(lang: Option<&str>) -> bool {
     matches!(lang, Some("js" | "py"))
 }
 
+/// Where a text runs code it reads back from itself (its own file, its docstring, a data file shipped with it): a
+/// Python text (`tree`) on its tree, where the supply-chain model follows what it reads back through its scopes and
+/// calls to what each call runs (N-19: `subprocess.run(["gh", *args])` runs gh, not code; a function's parameter is
+/// not the module's variable of that name); any other text, and one the tree can't read, by `runs_own_source_at` with
+/// `lang`.
+fn own_source_run_at(p: &Pack, text: &[u32], tree: Option<&str>, lang: Option<&str>) -> isize {
+    if tree == Some("py") {
+        if let Some(at) = crate::pyflow::supply::own_run(text) {
+            return at.map_or(-1, |a| a as isize);
+        }
+    }
+    runs_own_source_at(p, text, lang)
+}
+
 /// core.runs_own_source_at. `lang`: the text's language, when the lexers
 /// read it (what is code is then the lexers' reading: `prose_spans`).
 pub fn runs_own_source_at(p: &Pack, text: &[u32], lang: Option<&str>) -> isize {
@@ -1370,7 +1400,160 @@ pub fn service_reasons(p: &Pack, text: &[u32]) -> Vec<PyStr> {
     if autostart.search(text).is_some() && (writes || shell_writes(p, text, autostart)) {
         reasons.push(u("adds a desktop autostart entry"));
     }
+    if let Some(file) = shell_rc_written(p, text, writes, false) {
+        reasons.push(shell_rc_reason(&file));
+    }
     reasons
+}
+
+// ---------------- a shell's startup file (B-4) ----------------
+
+/// The reason for a command written to a shell's startup file.
+fn shell_rc_reason(file: &[u32]) -> PyStr {
+    cat(&[&u("adds a command to a shell's startup file ("), head(file, 40), &u(")")])
+}
+
+/// The file's name, from the path a pattern found (its last part, unquoted).
+fn rc_name(found: &[u32]) -> PyStr {
+    let file = &found[found.iter().rposition(|&ch| ch == c('/') || ch == c('\\')).map(|k| k + 1).unwrap_or(0)..];
+    file.iter().copied().filter(|&ch| !matches!(ch, 0x22 | 0x27 | 0x60)).collect()
+}
+
+/// Whether the text names a shell's startup file, in either spelling.
+fn shell_rc_named(p: &Pack, text: &[u32]) -> bool {
+    p.re("_SVC_SHELL_RC_RE").search(text).is_some() || p.re("_SVC_SHELL_RC_SH_RE").search(text).is_some()
+}
+
+/// The shell startup file (.bashrc, .zshrc, .profile, fish's config.fish, …)
+/// the script writes a command to that downloads or runs code: every line of
+/// it runs at every shell start (MITRE ATT&CK T1546.004). -> the file's name.
+/// A line that only sets a variable, an alias or a completion is not judged:
+/// CLIs add those (@asyncapi/cli's `postinstall` appends its completion
+/// script to the .zshrc), and what they write comes from a command's output.
+/// `any`: whatever the line, for a file named only in strings the script
+/// decodes as it runs (install_script_risk_with: alinet's install script puts
+/// its own command first in the startup file its $SHELL reads).
+fn shell_rc_written(p: &Pack, text: &[u32], writes: bool, any: bool) -> Option<PyStr> {
+    let (rc, sh) = (p.re("_SVC_SHELL_RC_RE"), p.re("_SVC_SHELL_RC_SH_RE"));
+    let runs = p.re("_SVC_SHELL_RC_RUN_RE");
+    // the file API: a path to one, written to, and what is written
+    if writes {
+        if let Some(m) = rc.search(text) {
+            if any || written_runs(p, text, runs) {
+                return Some(rc_name(m.group0()));
+            }
+        }
+    }
+    // the shell's spelling (`echo '…' >> ~/.bashrc`, `… | tee -a $HOME/.profile`): what the line writes
+    let shell_write = p.re("_PERSIST_SHELL_WRITE_RE");
+    let (max, line_max) = (p.usize("_PERSIST_MAX_LINES"), p.usize("_SVC_LINE_MAX"));
+    let mut m = sh.search(text);
+    let mut lines = 0usize;
+    while let Some(mm) = m {
+        if lines >= max {
+            break;
+        }
+        let start = pystr::rfind_char(text, c('\n'), 0, mm.start()).map(|i| i + 1).unwrap_or(0);
+        let end = pystr::find_char(text, c('\n'), mm.end()).unwrap_or(text.len());
+        if end - start <= line_max
+            && shell_write.search_at(text, start as isize, end as isize).is_some()
+            && (any || runs.search_at(text, start as isize, mm.start() as isize).is_some())
+        {
+            return Some(rc_name(mm.group0()));
+        }
+        lines += 1;
+        m = sh.search_at(text, end as isize, text.len() as isize);
+    }
+    None
+}
+
+/// Whether what a script writes downloads or runs code: the arguments of a
+/// write call, or the text a name among them is first given (`LINE = '…'`
+/// then `f.write(LINE)`).
+fn written_runs(p: &Pack, text: &[u32], runs: &crate::pyre::Regex) -> bool {
+    let call = p.re("_SVC_RC_CONTENT_CALL_RE");
+    let (max, span) = (p.usize("_PERSIST_MAX_LINES"), p.usize("_SVC_RC_ARGS_MAX"));
+    let mut names: Vec<&[u32]> = Vec::new();
+    let mut m = call.search(text);
+    let mut calls = 0usize;
+    while let Some(mm) = m {
+        if calls >= max {
+            break;
+        }
+        calls += 1;
+        let end = args_end(text, mm.end(), span);
+        if runs.search_at(text, mm.end() as isize, end as isize).is_some() {
+            return true;
+        }
+        for name in arg_names(&text[mm.end()..end]) {
+            if names.len() < 16 && !names.contains(&name) {
+                names.push(name);
+            }
+        }
+        m = call.search_at(text, end as isize, text.len() as isize);
+    }
+    // (one hop, for at most 16 names: each is looked for once)
+    names.into_iter().any(|name| {
+        first_given(text, name).is_some_and(|at| {
+            let stop = pystr::find_char(text, c('\n'), at).unwrap_or(text.len()).min(at + span);
+            runs.search_at(text, at as isize, stop as isize).is_some()
+        })
+    })
+}
+
+/// Where a call's arguments end: its closing parenthesis, or `span` characters on.
+fn args_end(text: &[u32], from: usize, span: usize) -> usize {
+    let stop = (from + span).min(text.len());
+    let mut depth = 1usize;
+    for (i, &ch) in text[from..stop].iter().enumerate() {
+        if ch == c('(') {
+            depth += 1;
+        } else if ch == c(')') {
+            depth -= 1;
+            if depth == 0 {
+                return from + i;
+            }
+        }
+    }
+    stop
+}
+
+/// The names in a call's arguments (not a member's: `.join`), first to last, once each.
+fn arg_names(args: &[u32]) -> Vec<&[u32]> {
+    let ident = |ch: u32| ch == c('_') || ch == c('$') || pystr::is_alnum(ch);
+    let mut out: Vec<&[u32]> = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        if ident(args[i]) && !(c('0')..=c('9')).contains(&args[i]) && (i == 0 || (args[i - 1] != c('.') && !ident(args[i - 1]))) {
+            let j = args[i..].iter().position(|&ch| !ident(ch)).map(|k| i + k).unwrap_or(args.len());
+            if !out.contains(&&args[i..j]) {
+                out.push(&args[i..j]);
+            }
+            i = j;
+        } else {
+            i += 1;
+        }
+    }
+    out
+}
+
+/// Where the text first gives `name` a value (`name = …`, not `==` or `=>`): just after the `=`.
+fn first_given(text: &[u32], name: &[u32]) -> Option<usize> {
+    let ident = |ch: u32| ch == c('_') || ch == c('$') || pystr::is_alnum(ch);
+    let mut from = 0usize;
+    for _ in 0..50 {
+        let at = pystr::find(text, name, from)?;
+        let end = at + name.len();
+        from = end;
+        if (at > 0 && (ident(text[at - 1]) || text[at - 1] == c('.'))) || (end < text.len() && ident(text[end])) {
+            continue;
+        }
+        let k = end + text[end..].iter().take_while(|&&ch| ch == c(' ') || ch == c('\t')).count();
+        if k < text.len() && text[k] == c('=') && text.get(k + 1).map_or(true, |&ch| ch != c('=') && ch != c('>')) {
+            return Some(k + 1);
+        }
+    }
+    None
 }
 
 // ---------------- code that drives an AI coding agent ----------------
@@ -2163,7 +2346,7 @@ struct CcWalk {
 fn cc_walks(p: &Pack, body: &[u32]) -> Vec<CcWalk> {
     let own = |g: Option<&[u32]>| g.map(|x| x.to_vec());
     let mut out: Vec<CcWalk> = Vec::new();
-    for m in p.re("_DV_CC_FOR_RE").finditer(body) {
+    for m in rxutil::finditer_same(p.re("_DV_CC_FOR_RE"), body, 0, body.len(), &[("i", "i_again")]) {
         out.push(CcWalk { at: m.start(), data: m.name("d").unwrap_or(&[]).to_vec(), elem: None,
                           index: own(m.name("i")), split: false, js_map: false });
     }
@@ -2295,7 +2478,9 @@ fn cc_argument(
             let esc = crate::pyre::escape(s);
             let head_src = p.text("_DV_NAME_HEAD");
             let array = rxutil::dynamic(cat(&[&head_src, &esc, &p.text("_DV_CC_ARRAY_TAIL")]), 0);
-            let value = match array.search(view) {
+            let most = p.usize("_DV_CC_ARRAY_MAX_INTS");
+            let fits = |m: &crate::pyre::Match| rxutil::count_numbers(m.name("items").unwrap_or(&[])) <= most;
+            let value = match rxutil::search_checked(&array, view, 0, view.len(), fits) {
                 None => None,
                 Some(a) => {
                     let mutated = rxutil::dynamic(cat(&[&head_src, &esc, &p.text("_DV_MUTATED_TAIL")]), 0);
@@ -2393,7 +2578,14 @@ fn cc_literal_sub(p: &Pack, m: &crate::pyre::Match) -> PyStr {
 /// core._dv_char_codes: the view with the character codes it holds and the
 /// calls of its own character-code decoders read as their text.
 fn dv_char_codes(p: &Pack, view: &[u32]) -> PyStr {
-    let view = p.re("_DV_CC_LITERAL_RE").sub_fn(view, 0, |m| cc_literal_sub(p, m));
+    // (the comprehension's second name is its first, and each list at most
+    // _DV_CC_LITERAL_MAX_INTS numbers: what the pattern held before P-16)
+    let most = p.usize("_DV_CC_LITERAL_MAX_INTS");
+    let fits = |m: &crate::pyre::Match| {
+        rxutil::same_groups(m, &[("v", "v_again")])
+            && ["a", "b", "c", "d", "e", "f"].iter().all(|g| m.name(g).map_or(true, |l| rxutil::count_numbers(l) <= most))
+    };
+    let view = rxutil::sub_checked(p.re("_DV_CC_LITERAL_RE"), view, fits, |m| cc_literal_sub(p, m));
     let decoders = cc_decoders(p, &view);
     if decoders.is_empty() {
         return view;
@@ -2409,7 +2601,9 @@ fn dv_char_codes(p: &Pack, view: &[u32]) -> PyStr {
     let mut work = p.usize("_DV_CC_MAX_WORK");
     let mut calls = 0usize;
     let mut arrays = std::collections::HashMap::new();
-    call.sub_fn(&view, 0, |m| {
+    let (most, longest) = (p.usize("_DV_CC_CALL_MAX_ITEMS"), p.usize("_DV_CC_CALL_MAX_CHARS"));
+    let fits = |m: &crate::pyre::Match| cc_call_fits(m.name("args").unwrap_or(&[]), most, longest);
+    rxutil::sub_checked(&call, &view, fits, |m| {
         if calls >= max_calls {
             return m.group0().to_vec();
         }
@@ -2691,13 +2885,65 @@ fn dv_decoders(p: &Pack, mut view: PyStr) -> PyStr {
     view
 }
 
+/// _DV_CC_CALL_TAIL's own limits (as _DV_ARRAY_RE's below): at most `most`
+/// items in the arguments, a character outside a string or a string each,
+/// and no string longer than `longest`.
+pub(crate) fn cc_call_fits(args: &[u32], most: usize, longest: usize) -> bool {
+    let (mut n, mut i) = (0usize, 0usize);
+    while i < args.len() {
+        let q = args[i];
+        if q == '\'' as u32 || q == '"' as u32 {
+            let from = i + 1;
+            let mut j = from;
+            while j < args.len() && args[j] != q {
+                j += 1;
+            }
+            if j - from > longest {
+                return false;
+            }
+            i = j + 1;
+        } else {
+            i += 1;
+        }
+        n += 1;
+    }
+    n <= most
+}
+
+/// _DV_ARRAY_RE's own limits (counts larger than a program holds, so its
+/// repeats are unbounded and these are checked after it matched): at most
+/// `max_items` strings, each of at most `max_chars` characters.
+pub(crate) fn dv_array_fits(items: &[u32], max_items: usize, max_chars: usize) -> bool {
+    let (mut n, mut i) = (0usize, 0usize);
+    while i < items.len() {
+        let q = items[i];
+        if q == '\'' as u32 || q == '"' as u32 {
+            let from = i + 1;
+            let mut j = from;
+            while j < items.len() && items[j] != q {
+                j += 1;
+            }
+            if j - from > max_chars {
+                return false;
+            }
+            n += 1;
+            i = j + 1;
+        } else {
+            i += 1;
+        }
+    }
+    n <= max_items
+}
+
 /// The last steps of core._decoded_view: constant arrays read where
 /// indexed, members named by literals.
 fn dv_arrays_and_members(p: &Pack, mut view: PyStr) -> PyStr {
     let max_arrays = p.usize("_DV_MAX_ARRAYS");
-    let found: Vec<(PyStr, Vec<PyStr>)> = p
-        .re("_DV_ARRAY_RE")
-        .finditer(&view)
+    let (max_items, max_chars) = (p.usize("_DV_ARRAY_MAX_ITEMS"), p.usize("_DV_ARRAY_MAX_CHARS"));
+    let found: Vec<(PyStr, Vec<PyStr>)> = rxutil::finditer_checked(p.re("_DV_ARRAY_RE"), &view, 0, view.len(), |m| {
+        dv_array_fits(m.name("items").unwrap_or(&[]), max_items, max_chars)
+    })
+    .into_iter()
         .map(|m| {
             let items = p.re("_DV_STR_ITEM_RE").findall(m.name("items").unwrap_or(&[])).into_iter().map(|s| s.to_vec()).collect();
             (m.name("name").unwrap_or(&[]).to_vec(), items)
@@ -3025,6 +3271,123 @@ pub fn offscreen_code(p: &Pack, line: &[u32], lang: &str) -> Option<(usize, usiz
     Some((m.end(), m.end() - m.start(), hidden, runs))
 }
 
+// ---------------- a .pth file's import lines ----------------
+
+/// Why an `import` line of a .pth file is hostile — SC-PTH-EXEC CRITICAL
+/// (core.pth_issues, pth.js) — or nothing (_PTH_REASONS): it executes or
+/// decodes a payload (_PTH_EXEC_RE), reaches the network (_NETWORK_RE) or
+/// starts another program (_PTH_RUN_RE) — what no library does at every
+/// interpreter start — or its code does what the install-script and
+/// import-time tests look for. `exec('…')` or `eval('…')` of a plain
+/// literal runs the literal's code: that code is judged in the call's
+/// place, as if the line held it (code in plain sight: coverage's
+/// a1_coverage.pth runs the lines a .pth line can't hold; the worms' .pth
+/// files download Bun and start it). A literal with any escape but \n \t
+/// \r \\ \' \" is not plain (`'\x69\x6d…'`): the call stays, and is a payload.
+pub fn pth_line_risk(p: &Pack, line: &[u32]) -> Vec<PyStr> {
+    let mut out: Vec<PyStr> = Vec::new();
+    pth_risk_of(p, line, 0, &mut out);
+    let mut seen = HashSet::new();
+    out.retain(|r| seen.insert(r.clone()));
+    out
+}
+
+fn pth_risk_of(p: &Pack, code: &[u32], depth: u32, out: &mut Vec<PyStr>) {
+    let (rest, codes) = if depth < 4 { plain_literal_runs(code) } else { (code.to_vec(), Vec::new()) };
+    let reasons = p.strs("_PTH_REASONS");
+    for (k, name) in ["_PTH_EXEC_RE", "_NETWORK_RE", "_PTH_RUN_RE"].iter().enumerate() {
+        if p.re(name).search(&rest).is_some() {
+            out.push(reasons[k].clone());
+        }
+    }
+    out.extend(install_script_risk_with(p, &rest, false, false, Some("py")));
+    out.extend(import_time_risk(p, &rest, Some("py")).0);
+    for c in codes {
+        pth_risk_of(p, &c, depth + 1, out);
+    }
+}
+
+/// The calls of exec or eval given one plain string literal (u its only
+/// prefix; escapes \n \t \r \\ \' \" only): (the text with each replaced by
+/// `None`, the literals' values).
+fn plain_literal_runs(text: &[u32]) -> (PyStr, Vec<PyStr>) {
+    let word = |c: u32| c == 0x5F || char::from_u32(c).is_some_and(|ch| ch.is_alphanumeric());
+    let (mut rest, mut codes) = (Vec::with_capacity(text.len()), Vec::new());
+    let mut i = 0;
+    while i < text.len() {
+        let named = (pystr::starts_with_at(text, i, "exec") || pystr::starts_with_at(text, i, "eval"))
+            && (i == 0 || !word(text[i - 1]))
+            && !text.get(i + 4).is_some_and(|&c| word(c));
+        if named {
+            if let Some((end, code)) = plain_literal_call(text, i + 4) {
+                rest.extend(u("None"));
+                codes.push(code);
+                i = end;
+                continue;
+            }
+        }
+        rest.push(text[i]);
+        i += 1;
+    }
+    (rest, codes)
+}
+
+/// `( 'literal' )` from `j` (after a callee's name): the index after `)`
+/// and the literal's value, when the literal is plain.
+fn plain_literal_call(text: &[u32], mut j: usize) -> Option<(usize, PyStr)> {
+    let blank = |c: u32| c == 0x20 || c == 0x09;
+    while text.get(j).is_some_and(|&c| blank(c)) {
+        j += 1;
+    }
+    if *text.get(j)? != 0x28 {
+        return None;
+    }
+    j += 1;
+    while text.get(j).is_some_and(|&c| blank(c)) {
+        j += 1;
+    }
+    if matches!(text.get(j), Some(&0x75) | Some(&0x55)) {
+        j += 1;
+    }
+    let q = *text.get(j)?;
+    if q != 0x27 && q != 0x22 {
+        return None;
+    }
+    j += 1;
+    let mut value = Vec::new();
+    loop {
+        let c = *text.get(j)?;
+        if c == q {
+            j += 1;
+            break;
+        }
+        match c {
+            0x0A | 0x0D => return None,
+            0x5C => {
+                value.push(match *text.get(j + 1)? {
+                    0x6E => 0x0A,
+                    0x74 => 0x09,
+                    0x72 => 0x0D,
+                    e @ (0x5C | 0x27 | 0x22) => e,
+                    _ => return None,
+                });
+                j += 2;
+            }
+            _ => {
+                value.push(c);
+                j += 1;
+            }
+        }
+    }
+    while text.get(j).is_some_and(|&c| blank(c)) {
+        j += 1;
+    }
+    if *text.get(j)? != 0x29 {
+        return None;
+    }
+    Some((j + 1, value))
+}
+
 // ---------------- the install-script test ----------------
 
 /// core.install_script_risk (a script: shell=True, command=False)
@@ -3037,14 +3400,27 @@ pub fn install_script_risk(p: &Pack, text: &[u32], lang: Option<&str>) -> Vec<Py
 /// command; `lang`, the script's language when known ("js", "py": its
 /// strings are read as its runtime reads them).
 pub fn install_script_risk_with(p: &Pack, text: &[u32], shell: bool, command: bool, lang: Option<&str>) -> Vec<PyStr> {
-    let mut reasons = install_script_risk_of(p, text, shell, command, lang);
+    let mut reasons = install_script_risk_of(p, text, shell, command, lang, None);
+    for (_, r) in rewrite_reasons(p, text, lang) {
+        push_new(&mut reasons, r);
+    }
     let view = decoded_view(p, text, lang);
     if view != text {
         let _gate = crate::textgate::open(&view);
         let note = p.text("_DV_NOTE");
-        for r in install_script_risk_of(p, &view, shell, command, lang) {
+        for r in install_script_risk_of(p, &view, shell, command, lang, None) {
             if !reasons.contains(&r) {
                 reasons.push(cat(&[&r, &note]));
+            }
+        }
+        // (a shell's startup file named only in strings the script decodes: whatever it writes there)
+        if !shell_rc_named(p, text) {
+            let writes = p.re("_PERSIST_WRITE_RE").search(&view).is_some();
+            if let Some(file) = shell_rc_written(p, &view, writes, true) {
+                let r = shell_rc_reason(&file);
+                if !reasons.iter().any(|x| x.starts_with(&r)) {
+                    reasons.push(cat(&[&r, &note]));
+                }
             }
         }
     }
@@ -3069,15 +3445,82 @@ fn destination<'s>(p: &'s Pack, text: &'s [u32]) -> Option<crate::pyre::Match<'s
 
 /// core._label_sends: adds the label of where the data goes, when one of the reasons sends it.
 pub(crate) fn label_sends(p: &Pack, text: &[u32], reasons: &mut Vec<PyStr>) {
+    label_sends_to(p, text, &[], reasons)
+}
+
+/// [`label_sends`], the addresses a model resolved read too.
+fn label_sends_to(p: &Pack, text: &[u32], dests: &[PyStr], reasons: &mut Vec<PyStr>) {
     let sends = p.strs("_SEND_REASONS");
     if reasons.iter().any(|r| sends.iter().any(|s| r.starts_with(s))) {
-        if let Some(m) = destination(p, text) {
-            let label = cat(&[&u("contacts an address typical of data exfiltration ("), head(m.group0(), 40), &u(")")]);
+        let found: Option<PyStr> = destination(p, text)
+            .map(|m| head(m.group0(), 40).to_vec())
+            .or_else(|| dests.iter().find_map(|d| destination(p, d).map(|m| head(m.group0(), 40).to_vec())));
+        if let Some(m) = found {
+            let label = cat(&[&u("contacts an address typical of data exfiltration ("), &m, &u(")")]);
             if !reasons.contains(&label) {
                 reasons.push(label);
             }
         }
     }
+}
+
+/// What a language's model read of a text's code, for the install-script and import-time tests in place of
+/// the text detectors and the JavaScript and Python trees, which do not read that language (Go and Rust,
+/// 0.1.9: `rsread`). Offsets are the text's; lines are 1-based.
+#[derive(Clone, Debug, Default)]
+pub struct ModelFacts {
+    /// The strongest send of local data: (offset, kind, what, whether only an address held it).
+    pub sent: Option<(usize, &'static str, PyStr, bool)>,
+    /// The addresses the code sends to or reads from, as it builds them.
+    pub dests: Vec<PyStr>,
+    /// The first code received over the network and run: (line, category).
+    pub received: Option<(usize, &'static str)>,
+    /// Code received over the network is run out of sight (GR-8: no window, no console, its output thrown away).
+    pub received_hidden: bool,
+    /// The first file written then run: (line, reason).
+    pub dropped: Option<(usize, PyStr)>,
+    /// The commands the code runs, as a shell reads them: (offset, command line).
+    pub commands: Vec<(usize, PyStr)>,
+    /// What only the model sees (a reverse shell, a DNS lookup of a name it builds): (offset, reason).
+    pub signs: Vec<(usize, PyStr)>,
+    /// The code talks to the network.
+    pub network: bool,
+}
+
+/// The install-script test of code a model read (a build script, a procedural macro): the text's own signs
+/// and the model's facts, then the text's decoded view on its text alone.
+pub fn install_script_risk_model(p: &Pack, text: &[u32], m: &ModelFacts) -> Vec<PyStr> {
+    let mut reasons = install_script_risk_of(p, text, false, false, None, Some(m));
+    let view = decoded_view(p, text, None);
+    if view != text {
+        let _gate = crate::textgate::open(&view);
+        let note = p.text("_DV_NOTE");
+        for r in install_script_risk_of(p, &view, false, false, None, None) {
+            if !reasons.contains(&r) {
+                reasons.push(cat(&[&r, &note]));
+            }
+        }
+    }
+    reasons
+}
+
+/// The import-time test of code a model read (Go's `init`, Rust's start-up functions): (reasons, the 1-based
+/// line of the first sign).
+pub fn import_time_risk_model(p: &Pack, text: &[u32], m: &ModelFacts) -> (Vec<PyStr>, Option<usize>) {
+    let (mut reasons, mut line) = import_time_risk_of(p, text, None, Some(m));
+    let view = decoded_view(p, text, None);
+    if view != text {
+        let _gate = crate::textgate::open(&view);
+        let (more, at) = import_time_risk_of(p, &view, None, None);
+        let note = p.text("_DV_NOTE");
+        for r in more {
+            if !reasons.contains(&r) {
+                reasons.push(cat(&[&r, &note]));
+                line = line.or(at);
+            }
+        }
+    }
+    (reasons, line)
 }
 
 fn push_new(reasons: &mut Vec<PyStr>, r: PyStr) {
@@ -3122,13 +3565,16 @@ pub(crate) fn received_code(p: &Pack, text: &[u32], lang: Option<&str>) -> Optio
     received::received_code_kind(p, text, &[], &[])
 }
 
-fn install_script_risk_of(p: &Pack, text: &[u32], shell: bool, command: bool, lang: Option<&str>) -> Vec<PyStr> {
+fn install_script_risk_of(p: &Pack, text: &[u32], shell: bool, command: bool, lang: Option<&str>, model: Option<&ModelFacts>) -> Vec<PyStr> {
     let mut reasons: Vec<PyStr> = Vec::new();
     // a download piped or substituted into a shell, and PowerShell: in code, where an exec call is handed them
+    // (a model's commands are read below, as hook commands)
     let code = !command && crate::shell::code_text(p, text);
-    let rows: Vec<&[u32]> = if has(text, "curl") || has(text, "wget") { pystr::split_char(text, c('\n')) } else { Vec::new() };
+    let rows: Vec<&[u32]> = if model.is_none() && (has(text, "curl") || has(text, "wget")) { pystr::split_char(text, c('\n')) } else { Vec::new() };
     let exec = p.re("_EXEC_CALL_RE");
-    let piped = if code {
+    let piped = if model.is_some() {
+        false
+    } else if code {
         rows.iter().any(|row| pipes_download_to_shell(p, row) && exec.search(row).is_some())
     } else {
         pipes_download_to_shell(p, text)
@@ -3136,15 +3582,25 @@ fn install_script_risk_of(p: &Pack, text: &[u32], shell: bool, command: bool, la
     if piped {
         reasons.push(u("pipes a download into a shell"));
     }
+    if !code && model.is_none() {
+        // (N-4) what a pipeline decodes or downloads and hands a shell or an interpreter on stdin
+        for r in crate::shell::piped_run_reasons(p, text) {
+            push_new(&mut reasons, r);
+        }
+    }
     let substituted = rows.iter().any(|row| runs_substituted_download(p, row) && (!code || exec.search(row).is_some()));
-    let received = received_code(p, text, lang);
+    let received = match model {
+        Some(m) => m.received,
+        None => received_code(p, text, lang),
+    };
     if substituted {
         reasons.push(cat_reason(p, "run"));
     } else if let Some((_, kind)) = &received {
-        reasons.push(cat_reason(p, kind));
+        reasons.push(received_reason(p, kind, model));
     }
     let ps = powershell_risk(p, text);
-    if !ps.is_empty() && (!code || powershell_run_at(p, text) >= 0) {
+    let ps_run = model.is_some_and(|m| m.commands.iter().any(|(_, c)| p.re("_PS_RE").search(c).is_some()));
+    if !ps.is_empty() && (!code || ps_run || powershell_run_at(p, text) >= 0) {
         reasons.extend(ps);
     }
     let received_runs = matches!(&received, Some((_, k)) if *k == "run");
@@ -3155,33 +3611,54 @@ fn install_script_risk_of(p: &Pack, text: &[u32], shell: bool, command: bool, la
         reasons.push(u("opens a reverse shell"));
     }
     let host = p.re("_HOST_INFO_RE").search(text).map(|m| m.start());
-    for (_at, reason) in exfil_signs(p, text, host) {
+    for (_at, reason) in exfil_signs_net(p, text, host, model.is_some_and(|m| m.network)) {
         push_new(&mut reasons, reason);
     }
+    let dests: &[PyStr] = model.map(|m| m.dests.as_slice()).unwrap_or(&[]);
     let ip: Option<PyStr> = match p.re("_RAW_IP_URL_RE").search(text) {
         Some(m) => Some(head(m.group0(), 40).to_vec()),
-        None => raw_ip_connect(p, text),
+        None => raw_ip_connect(p, text).or_else(|| dests.iter().find_map(|d| p.re("_RAW_IP_URL_RE").search(d).map(|m| head(m.group0(), 40).to_vec()))),
     };
     if let Some(ip) = ip {
         reasons.push(cat(&[&u("contacts an address typical of data exfiltration ("), &ip, &u(")")]));
     }
-    if runs_own_source_at(p, text, None) >= 0 {
+    if model.is_none() && own_source_run_at(p, text, lang, None) >= 0 {
         reasons.push(u("runs code it reads back from its own file or a data file shipped with it"));
     }
     // (0.1.8) data read from the machine and sent, whatever the address; the
     // commands the script runs, read as programs; where the data goes
-    if let Some((_at, kind, what, in_address)) = local_data_sent(p, text, lang) {
+    let sent = match model {
+        Some(m) => m.sent.clone(),
+        None => local_data_sent(p, text, lang),
+    };
+    if let Some((_at, kind, what, in_address)) = sent {
         let sent = p.map_text("_LD_REASONS", kind);
         let mut reason = sent.clone();
         if kind == "environment" || kind == "file" || kind == "report" {
             reason = cat(&[&sent, &u(" ("), head(&what, 60), &u(")")]);
         }
-        if !reasons.iter().any(|r| r.starts_with(&sent)) && (!in_address || capture_service(p, text).is_some()) {
+        let captured = capture_service(p, text).is_some() || dests.iter().any(|d| capture_service(p, d).is_some());
+        if !reasons.iter().any(|r| r.starts_with(&sent)) && (!in_address || captured) {
             reasons.push(reason);
         }
     }
-    for r in crate::shell::exec_command_reasons(p, text) {
-        push_new(&mut reasons, r);
+    match model {
+        // the commands a model saw run, each read as an install hook's command
+        Some(m) => {
+            for (_, cmd) in &m.commands {
+                for r in crate::shell::hook_command_risk(p, cmd, true) {
+                    push_new(&mut reasons, r);
+                }
+            }
+            for (_, r) in &m.signs {
+                push_new(&mut reasons, r.clone());
+            }
+        }
+        None => {
+            for r in crate::shell::exec_command_reasons(p, text) {
+                push_new(&mut reasons, r);
+            }
+        }
     }
     if shell && crate::shell::shell_text(p, text) {
         let mut walk = crate::shell::HookWalk::new();
@@ -3189,7 +3666,7 @@ fn install_script_risk_of(p: &Pack, text: &[u32], shell: bool, command: bool, la
             push_new(&mut reasons, r);
         }
     }
-    label_sends(p, text, &mut reasons);
+    label_sends_to(p, text, dests, &mut reasons);
     reasons.extend(persistence_reasons(p, text));
     if p.re("_PUBLISH_CMD_RE").search(text).is_some() {
         reasons.push(u("publishes a package to a registry (npm publish)"));
@@ -3199,6 +3676,12 @@ fn install_script_risk_of(p: &Pack, text: &[u32], shell: bool, command: bool, la
     }
     if let Some(dll) = runs_dll(p, text) {
         reasons.push(cat(&[&u("runs a DLL with rundll32 or regsvr32 ("), head(&dll, 40), &u(")")]));
+    }
+    if let Some(m) = model {
+        if let Some((_, r)) = &m.dropped {
+            push_dropped(&mut reasons, r.clone());
+        }
+        return reasons;
     }
     if let Some((_, interp)) = received::downloads_and_runs(p, text) {
         if let Some(interp) = py_run_or(p, text, &interp) {
@@ -3234,16 +3717,73 @@ const DROPPED_REASONS: &[(&str, &str)] = &[
 /// the trees' a script run with cmd).
 fn push_dropped(reasons: &mut Vec<PyStr>, r: PyStr) {
     let named = |x: &[u32]| DROPPED_REASONS.iter().position(|(n, _)| pystr::starts_with(x, n));
-    let kind = |x: &[u32]| named(x).or_else(|| DROPPED_REASONS.iter().position(|(_, b)| !b.is_empty() && pystr::eq(x, b)));
+    // (a bare reason, or the same with what the model adds after it: ", out of sight", GR-8)
+    let kind = |x: &[u32]| named(x).or_else(|| DROPPED_REASONS.iter().position(|(_, b)| !b.is_empty() && pystr::starts_with(x, b)));
     if let Some(k) = kind(&r) {
         if let Some(i) = reasons.iter().position(|x| kind(x) == Some(k)) {
-            if named(&r).is_some() && named(&reasons[i]).is_none() {
+            let extends = r.len() > reasons[i].len() && r.starts_with(&reasons[i]);
+            if (named(&r).is_some() && named(&reasons[i]).is_none()) || extends {
                 reasons[i] = r;
             }
             return;
         }
     }
     push_new(reasons, r);
+}
+
+/// The code files in other packages' folders a JavaScript text writes (D-9: @dinzid04/libsignal-node 2.2.5 replaced
+/// @whiskeysockets/baileys's `lib/Socket/newsletter.js` when it was loaded), read on its tree: (the first write's
+/// line, "rewrites another package's code (<package>)"), one per package, at most three; not the release's own
+/// package nor one of its scope (`own_release`), which are its own code.
+fn rewrite_reasons(p: &Pack, text: &[u32], lang: Option<&str>) -> Vec<(usize, PyStr)> {
+    if lang != Some("js") {
+        return Vec::new();
+    }
+    let mut out: Vec<(usize, PyStr)> = Vec::new();
+    for (line, pkg) in crate::jsflow::supply::rewrote(text).unwrap_or_default() {
+        if own_package(&pkg) {
+            continue;
+        }
+        let r = cat(&[&p.text("_REWRITE_REASON"), &u(" ("), head(&pkg, 80), &u(")")]);
+        if out.len() < 3 && !out.iter().any(|(_, x)| *x == r) {
+            out.push((line, r));
+        }
+    }
+    out
+}
+
+thread_local! {
+    // the release's name while a call given it runs (the API's `own`, D-9)
+    static OWN: std::cell::RefCell<Option<PyStr>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Names the release (`own`: its name) for what runs on this thread until the guard is dropped (D-9: the API's
+/// `install_script_risk` and `import_time_risk` are given it): a rewrite of its own package's code, or of one of its
+/// scope's, is its own, wherever the test reads it (a script's text, code a command hands an interpreter).
+pub fn own_release(own: &[u32]) -> OwnRelease {
+    OwnRelease(OWN.with(|o| o.replace(Some(own.to_vec()))))
+}
+
+/// own_release's guard: the name before it, put back when it is dropped.
+pub struct OwnRelease(Option<PyStr>);
+
+impl Drop for OwnRelease {
+    fn drop(&mut self) {
+        let before = self.0.take();
+        OWN.with(|o| *o.borrow_mut() = before);
+    }
+}
+
+/// Is `pkg` the release's own package, or one of its scope (own_release)?
+fn own_package(pkg: &[u32]) -> bool {
+    OWN.with(|o| match o.borrow().as_deref() {
+        Some(own) => {
+            pkg == own
+                || (own.first() == Some(&c('@'))
+                    && own.iter().position(|&x| x == c('/')).is_some_and(|k| pkg.starts_with(&own[..=k])))
+        }
+        None => false,
+    })
 }
 
 /// A file the text writes, then runs, holding code or a program it decodes,
@@ -3282,7 +3822,37 @@ pub fn import_time_severity(p: &Pack, reasons: &[PyStr]) -> &'static str {
 
 /// core.import_time_risk: (reasons, 1-based line of the first sign).
 pub fn import_time_risk(p: &Pack, text: &[u32], lang: Option<&str>) -> (Vec<PyStr>, Option<usize>) {
+    import_time_risk_with(p, text, lang, None)
+}
+
+/// [`import_time_risk`], and with `declared` (the release's own name and the packages its manifest names, when the
+/// caller knows them) a package manager's install of a package that is none of them (D-12: crypto-hash-sdk 1.0.1
+/// ran `npm install prettier-sdk` when it was loaded). Only at import time: an installer's script fetches what the
+/// package declares as optional pieces (@swc/core's postinstall installs @swc/wasm), and a command line tool
+/// installs plugins when it is used.
+pub fn import_time_risk_with(p: &Pack, text: &[u32], lang: Option<&str>, declared: Option<&[PyStr]>) -> (Vec<PyStr>, Option<usize>) {
     let (mut reasons, mut line) = import_time_reading(p, text, lang);
+    for (at, r) in rewrite_reasons(p, text, lang) {
+        line = line.or(Some(at));
+        push_new(&mut reasons, r);
+    }
+    if let Some(declared) = declared {
+        let mut found = undeclared_installs(p, text, declared, lang);
+        let mut note: PyStr = Vec::new();
+        if found.is_none() {
+            let view = decoded_view(p, text, lang);
+            if view != text {
+                let _gate = crate::textgate::open(&view);
+                found = undeclared_installs(p, &view, declared, lang);
+                note = p.text("_DV_NOTE");
+            }
+        }
+        if let Some((at, names)) = found {
+            let listed = pystr::join(&u(", "), &names.iter().map(|n| n.as_slice()).collect::<Vec<_>>());
+            reasons.push(cat(&[&p.text("_PM_REASON"), &u(" ("), head(&listed, 80), &u(")"), &note]));
+            line = line.or(Some(at));
+        }
+    }
     let view = decoded_view(p, text, lang);
     if view != text {
         let _gate = crate::textgate::open(&view);
@@ -3302,14 +3872,400 @@ pub fn import_time_risk(p: &Pack, text: &[u32], lang: Option<&str>) -> (Vec<PySt
     (reasons, line)
 }
 
+/// The packages a package manager is asked to install in the command lines a text hands an exec call (a command
+/// line, or a program and its arguments as a list: `spawn('npm', ['i', 'x'])`, `[sys.executable, '-m', 'pip',
+/// 'install', 'x']`) that are none of `declared` nor a package manager itself: (the 1-based line of the first, the
+/// packages as written, without versions). A name the text builds is not one. In Python, an install in a function's
+/// body is not run when the module is loaded, unless the module runs that function when it is loaded ([`PyLoad`]):
+/// litellm installs an integration's package when the integration is set up, onnxruntime's whisper helper
+/// `datasets` when a method needs it (the benchmark's benign litellm was SUSPICIOUS when they counted).
+fn undeclared_installs(p: &Pack, text: &[u32], declared: &[PyStr], lang: Option<&str>) -> Option<(usize, Vec<PyStr>)> {
+    if !p.needles("_PM_NEEDLES").any_in(text) {
+        return None;
+    }
+    let mut lines = crate::shell::exec_command_lines(p, text);
+    for m in p.re("_PM_ARGV_RE").finditer(text) {
+        let mut words: Vec<PyStr> = Vec::new();
+        if let Some(prog) = m.name("prog") {
+            words.push(argv_word(prog));
+        }
+        for item in pystr::split_char(m.name("items").unwrap_or(&[]), c(',')) {
+            words.push(argv_word(pystr::strip(item)));
+        }
+        lines.push((m.start(), pystr::join(&u(" "), &words.iter().map(|w| w.as_slice()).collect::<Vec<_>>())));
+    }
+    let npm_declared: HashSet<PyStr> = declared.iter().map(|d| pystr::lower(d)).collect();
+    let pip_declared: HashSet<PyStr> = declared.iter().map(|d| pip_canonical(d)).collect();
+    let own = p.strs("_PM_SELF");
+    let mut first: Option<usize> = None;
+    let mut out: Vec<PyStr> = Vec::new();
+    let load = if lang == Some("py") && !lines.is_empty() { Some(PyLoad::read(text)) } else { None };
+    for (at, cmd) in lines {
+        let runs = match &load {
+            None => true,
+            Some(Some(load)) => load.runs(at),
+            Some(None) => py_runs_at_load(text, at),
+        };
+        if !runs {
+            continue;
+        }
+        for (spec, pip) in installed_packages(p, &cmd) {
+            let known = if pip { pip_declared.contains(&pip_canonical(&spec)) } else { npm_declared.contains(&pystr::lower(&spec)) };
+            if known || own.iter().any(|o| *o == pystr::lower(&spec)) || out.contains(&spec) {
+                continue;
+            }
+            first = first.or(Some(line_of(text, at)));
+            out.push(spec);
+        }
+    }
+    first.map(|l| (l, out))
+}
+
+/// Python: what of a module does not run when the module is loaded, read from its tokens (so a string's lines, a
+/// comment and the lines inside brackets are not lines of the module's): the body of a function, and the module's
+/// `if __name__ == '__main__':` block (its `else:` runs). A function of the module's own (not a method nor a function
+/// within a function) runs when the module refers to it where the module runs when loaded: calls it (`_setup()`),
+/// hands it on (`atexit.register(_setup)`, `Thread(target=_setup).start()`), or decorates it with
+/// `@atexit.register`.
+struct PyLoad {
+    /// each span [start, end) that does not run when loaded, with the name of the module's own function whose body
+    /// it is (None: a method's, a function's within a function, the `__main__` block)
+    lazy: Vec<(usize, usize, Option<PyStr>)>,
+    /// the names the module refers to where it runs when loaded, and the functions `@atexit.register` decorates
+    loaded: HashSet<PyStr>,
+}
+
+impl PyLoad {
+    /// None when the tokenizer refuses the text (Python does not load it either; [`py_runs_at_load`] decides).
+    fn read(text: &[u32]) -> Option<PyLoad> {
+        use crate::pyparse::lexer::{self as pl, T};
+        let lexed = pl::tokenize_with(text, true).ok()?;
+        if lexed.fail.is_some() {
+            return None;
+        }
+        let toks = &lexed.toks;
+        fn tok_word<'a>(text: &'a [u32], toks: &[pl::Tok], k: usize) -> &'a [u32] {
+            toks.get(k).map_or(&[][..], |t| &text[(t.s as usize).min(text.len())..(t.e as usize).min(text.len())])
+        }
+        let word = |k: usize| tok_word(text, toks, k);
+        let op = |k: usize, o: u8| toks.get(k).is_some_and(|t| t.t == T::Op && t.k == o);
+        let kw = |k: usize, w: u8| toks.get(k).is_some_and(|t| t.t == T::Kw && t.k == w);
+        let name = |k: usize, n: &str| toks.get(k).is_some_and(|t| t.t == T::Name) && pystr::eq(word(k), n);
+        let main = |k: usize| toks.get(k).is_some_and(|t| t.t == T::Str) && (pystr::eq(word(k), "'__main__'") || pystr::eq(word(k), "\"__main__\""));
+        // the blocks open: what opened each (0 another statement, 1 a class, 2 a function of the module's own,
+        // 3 another function, 4 the `__main__` block), the function's name, where its body starts
+        let mut open: Vec<(u8, Option<PyStr>, usize)> = Vec::new();
+        let mut lazy: Vec<(usize, usize, Option<PyStr>)> = Vec::new();
+        let mut refs: Vec<(PyStr, usize)> = Vec::new();
+        let mut loaded: HashSet<PyStr> = HashSet::new();
+        let mut head: (u8, Option<PyStr>) = (0, None); // the logical line's, when it opens a block
+        let mut pending: (u8, Option<PyStr>) = (0, None); // the header whose block the next INDENT opens
+        let mut colon: Option<usize> = None; // the header's colon
+        let mut starts = true; // the next token starts a logical line
+        let mut atexit = false; // `@atexit.register` decorates the next `def`
+        let mut depth = 0usize;
+        for k in 0..toks.len() {
+            let t = toks[k];
+            match t.t {
+                T::Newline => {
+                    if let Some(at) = colon {
+                        if at + 1 == k {
+                            pending = head.clone();
+                        } else if head.0 >= 2 {
+                            // (a body on the header's line: `def f(): os.system(…)`)
+                            lazy.push((toks[at].e as usize, t.s as usize, if head.0 == 2 { head.1.clone() } else { None }));
+                        }
+                    }
+                    head = (0, None);
+                    colon = None;
+                    depth = 0;
+                    starts = true;
+                }
+                T::Indent => {
+                    let (kind, name) = std::mem::take(&mut pending);
+                    open.push((kind, name, t.s as usize));
+                }
+                T::Dedent => {
+                    if let Some((kind, name, start)) = open.pop() {
+                        if kind >= 2 {
+                            lazy.push((start, t.s as usize, if kind == 2 { name } else { None }));
+                        }
+                    }
+                }
+                T::End | T::Error => {}
+                _ => {
+                    if starts {
+                        starts = false;
+                        pending = (0, None);
+                        let within = open.iter().any(|o| (1..=3).contains(&o.0));
+                        let def = if kw(k, pl::KW_DEF) {
+                            Some(k)
+                        } else if kw(k, pl::KW_ASYNC) && kw(k + 1, pl::KW_DEF) {
+                            Some(k + 1)
+                        } else {
+                            None
+                        };
+                        head = if let Some(d) = def {
+                            let fname = toks.get(d + 1).filter(|n| n.t == T::Name).map(|_| word(d + 1).to_vec());
+                            if within {
+                                (3, None)
+                            } else {
+                                if atexit {
+                                    loaded.extend(fname.clone());
+                                }
+                                (2, fname)
+                            }
+                        } else if kw(k, pl::KW_CLASS) {
+                            (1, None)
+                        } else if kw(k, pl::KW_IF)
+                            && !within
+                            && ((name(k + 1, "__name__") && op(k + 2, pl::EQEQUAL) && main(k + 3))
+                                || (main(k + 1) && op(k + 2, pl::EQEQUAL) && name(k + 3, "__name__")))
+                            && op(k + 4, pl::COLON)
+                        {
+                            (4, None)
+                        } else {
+                            (0, None)
+                        };
+                        if op(k, pl::AT) {
+                            atexit |= name(k + 1, "atexit") && op(k + 2, pl::DOT) && name(k + 3, "register");
+                        } else {
+                            atexit = false;
+                        }
+                    }
+                    if t.t == T::Op {
+                        if matches!(t.k, pl::LPAR | pl::LSQB | pl::LBRACE) {
+                            depth += 1;
+                        } else if matches!(t.k, pl::RPAR | pl::RSQB | pl::RBRACE) {
+                            depth = depth.saturating_sub(1);
+                        } else if t.k == pl::COLON && depth == 0 && head.0 != 0 && colon.is_none() {
+                            colon = Some(k);
+                        }
+                    }
+                    if t.t == T::Name && !(k > 0 && (op(k - 1, pl::DOT) || kw(k - 1, pl::KW_DEF) || kw(k - 1, pl::KW_CLASS))) {
+                        refs.push((word(k).to_vec(), t.s as usize));
+                    }
+                }
+            }
+        }
+        for (n, at) in refs {
+            if !lazy.iter().any(|&(s, e, _)| s <= at && at < e) {
+                loaded.insert(n);
+            }
+        }
+        Some(PyLoad { lazy, loaded })
+    }
+
+    /// Does the statement at `at` run when the module is loaded?
+    fn runs(&self, at: usize) -> bool {
+        let mut own: Option<&PyStr> = None;
+        for (s, e, name) in &self.lazy {
+            if *s <= at && at < *e {
+                match name {
+                    None => return false,
+                    Some(n) => own = Some(n),
+                }
+            }
+        }
+        own.map_or(true, |n| self.loaded.contains(n))
+    }
+}
+
+/// [`PyLoad`] read by indentation, for a text the tokenizer refuses: each line above that is less indented than
+/// the one below it opens the block around it (a line a closing bracket starts closes a statement's brackets: a
+/// signature's `):`); a module's own function runs where the module calls it at its top level.
+fn py_runs_at_load(text: &[u32], at: usize) -> bool {
+    let indent = |line: &[u32]| line.iter().take_while(|&&ch| ch == c(' ') || ch == c('\t')).count();
+    let start = pystr::rfind_char(text, c('\n'), 0, at).map_or(0, |k| k + 1);
+    let mut want = indent(pystr::sub(text, start, at));
+    let mut end = start;
+    while want > 0 && end > 0 {
+        let from = pystr::rfind_char(text, c('\n'), 0, end - 1).map_or(0, |k| k + 1);
+        let line = pystr::sub(text, from, end - 1);
+        end = from;
+        let ind = indent(line);
+        let code = &line[ind..];
+        if code.is_empty() || code[0] == c('#') || code[0] == c(')') || code[0] == c(']') || code[0] == c('}') || ind >= want {
+            continue;
+        }
+        want = ind;
+        let def = if pystr::starts_with(code, "def ") {
+            Some(&code[4..])
+        } else if pystr::starts_with(code, "async def ") {
+            Some(&code[10..])
+        } else {
+            None
+        };
+        if let Some(rest) = def {
+            let name: PyStr = pystr::lstrip(rest).iter().take_while(|&&ch| ch == c('_') || pystr::is_alnum(ch)).copied().collect();
+            return ind == 0 && !name.is_empty() && py_module_calls(text, &name);
+        }
+        // (a script's own block runs when it is run, not when it is imported)
+        if ind == 0 && pystr::starts_with(code, "if __name__") {
+            return false;
+        }
+    }
+    true
+}
+
+/// Does a line of the module's own (not indented, not a definition) call `name`?
+fn py_module_calls(text: &[u32], name: &[u32]) -> bool {
+    let mut call = name.to_vec();
+    call.push(c('('));
+    pystr::split_char(text, c('\n')).iter().any(|line| {
+        line.first().is_some_and(|&ch| ch != c(' ') && ch != c('\t') && ch != c('#'))
+            && !pystr::starts_with(line, "def ")
+            && !pystr::starts_with(line, "async def ")
+            && !pystr::starts_with(line, "class ")
+            && pystr::find(line, &call, 0).is_some_and(|k| k == 0 || !(line[k - 1] == c('_') || line[k - 1] == c('.') || pystr::is_alnum(line[k - 1])))
+    })
+}
+
+/// An item of a list of a program's arguments, as the command line holds it: a literal's text; the interpreter's
+/// own name for `sys.executable` and `process.execPath`; `?` for anything else (a name the text builds).
+fn argv_word(item: &[u32]) -> PyStr {
+    let item = pystr::strip(item);
+    if item.len() >= 2 {
+        let (a, b) = (item[0], item[item.len() - 1]);
+        if a == b && (a == c('\'') || a == c('"') || a == c('`')) && !item[1..item.len() - 1].contains(&a) {
+            return item[1..item.len() - 1].to_vec();
+        }
+    }
+    if pystr::eq(item, "sys.executable") {
+        return u("python");
+    }
+    if pystr::eq(item, "process.execPath") {
+        return u("node");
+    }
+    u("?")
+}
+
+/// PEP 503's normalized name: lower case, each run of `-`, `_` and `.` one `-`.
+fn pip_canonical(name: &[u32]) -> PyStr {
+    let mut out: PyStr = Vec::new();
+    for &ch in pystr::lower(name).iter() {
+        if ch == c('-') || ch == c('_') || ch == c('.') {
+            if out.last() != Some(&c('-')) {
+                out.push(c('-'));
+            }
+        } else {
+            out.push(ch);
+        }
+    }
+    out
+}
+
+/// The packages a command line asks a package manager to install, each (as written without its version or
+/// extras, read as pip's): npm's, pnpm's, yarn's, bun's `install`, `i` and `add` (and npm's other spellings of
+/// install); pip's `install`, run as pip or as `python -m pip`, and uv's `pip install`. A local path is not one;
+/// a URL or a git source is, as written.
+fn installed_packages(p: &Pack, cmd: &[u32]) -> Vec<(PyStr, bool)> {
+    let managers = p.strs("_PM_JS_MANAGERS");
+    let installs = p.strs("_PM_INSTALL_WORDS");
+    let npm_values = p.strs("_PM_NPM_VALUE_OPTIONS");
+    let pip_values = p.strs("_PM_PIP_VALUE_OPTIONS");
+    let mut out: Vec<(PyStr, bool)> = Vec::new();
+    for command in crate::shell::sh_parse(p, cmd) {
+        let (pi, name, _) = crate::shell::sh_program(p, &command);
+        let Some(pi) = pi else { continue };
+        let name = if pystr::ends_with(&name, ".cmd") { name[..name.len() - 4].to_vec() } else { name };
+        let mut args: &[PyStr] = &command.words[pi + 1..];
+        let pip = if managers.iter().any(|m| *m == name) {
+            false
+        } else if p.re("_PM_PIP_RE").fullmatch(&name).is_some() {
+            true
+        } else if p.re("_PYTHON_NAME_RE").match_(&name).is_some() && args.len() >= 2 && pystr::eq(&args[0], "-m") && p.re("_PM_PIP_RE").fullmatch(&args[1]).is_some() {
+            args = &args[2..];
+            true
+        } else if pystr::eq(&name, "uv") && args.first().is_some_and(|a| pystr::eq(a, "pip")) {
+            args = &args[1..];
+            true
+        } else {
+            continue;
+        };
+        let values = if pip { pip_values } else { npm_values };
+        let mut sub: Option<PyStr> = None;
+        let mut k = 0;
+        while k < args.len() {
+            let a = &args[k];
+            k += 1;
+            if pystr::starts_with(a, "-") {
+                if values.iter().any(|v| *v == *a) {
+                    k += 1; // (its value)
+                }
+                continue;
+            }
+            match &sub {
+                None => {
+                    // (`yarn global add x`)
+                    if !pip && pystr::eq(a, "global") {
+                        continue;
+                    }
+                    sub = Some(a.clone());
+                    let wanted = if pip { pystr::eq(a, "install") } else { installs.iter().any(|w| *w == *a) };
+                    if !wanted {
+                        break;
+                    }
+                }
+                Some(_) => {
+                    if let Some(spec) = if pip { pip_spec(a) } else { npm_spec(a) } {
+                        out.push((spec, pip));
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
+/// The package an npm spec names: `@scope/name@1.2` the scoped name, `name@^1` the name; a local path is none.
+fn npm_spec(spec: &[u32]) -> Option<PyStr> {
+    if spec.is_empty() || pystr::eq(spec, "?") || spec.contains(&2) || [".", "/", "~"].iter().any(|s| pystr::starts_with(spec, s)) || pystr::starts_with(spec, "file:") {
+        return None;
+    }
+    if pystr::contains(spec, "://") || pystr::contains(spec, ":") {
+        return Some(spec.to_vec()); // a URL, a git source, an alias (`npm:x`): as written
+    }
+    let from = if spec[0] == c('@') { 1 } else { 0 };
+    let end = spec[from..].iter().position(|&x| x == c('@')).map(|i| i + from).unwrap_or(spec.len());
+    let name = &spec[..end];
+    if name.is_empty() || name == [c('@')] {
+        None
+    } else {
+        Some(name.to_vec())
+    }
+}
+
+/// The package a pip requirement names, without its extras, version or marker; a local path or an archive file is
+/// none; a URL is, as written.
+fn pip_spec(spec: &[u32]) -> Option<PyStr> {
+    if spec.is_empty() || pystr::eq(spec, "?") || spec.contains(&2) || [".", "/", "~"].iter().any(|s| pystr::starts_with(spec, s)) {
+        return None;
+    }
+    if pystr::contains(spec, "://") {
+        return Some(spec.to_vec());
+    }
+    let lowered = pystr::lower(spec);
+    if [".whl", ".tar.gz", ".zip", ".tgz", ".tar.bz2"].iter().any(|e| pystr::ends_with(&lowered, e)) || pystr::contains(spec, "/") {
+        return None;
+    }
+    let end = spec.iter().position(|&x| "[=<>!~;@ ".chars().any(|ch| x == ch as u32)).unwrap_or(spec.len());
+    let name = &spec[..end];
+    if name.is_empty() {
+        None
+    } else {
+        Some(name.to_vec())
+    }
+}
+
 fn import_time_reading(p: &Pack, text: &[u32], lang: Option<&str>) -> (Vec<PyStr>, Option<usize>) {
-    let (reasons, line) = import_time_risk_of(p, text, lang);
+    let (reasons, line) = import_time_risk_of(p, text, lang, None);
     if !reasons.is_empty() {
         if let Some(l) = lang.filter(|l| *l == "py" || *l == "js") {
             let code = import_code(p, text, l);
             if code != text {
                 let _gate = crate::textgate::open(&code);
-                return import_time_risk_of(p, &code, lang);
+                return import_time_risk_of(p, &code, lang, None);
             }
         }
     }
@@ -3467,8 +4423,12 @@ fn runs_download_through_shell(p: &Pack, row: &[u32]) -> bool {
 /// core._import_flow: (offset, kind, what, in_address) of the first local
 /// data text sends (local_data_sent_at, then the command lines it hands a
 /// shell), else None. `flows`: exec_command_flows(text).
-fn import_flow(p: &Pack, text: &[u32], flows: &[(usize, PyStr)], lang: Option<&str>) -> Option<(usize, &'static str, PyStr, bool)> {
-    if let Some(flow) = local_data_sent(p, text, lang) {
+fn import_flow(p: &Pack, text: &[u32], flows: &[(usize, PyStr)], lang: Option<&str>, model: Option<&ModelFacts>) -> Option<(usize, &'static str, PyStr, bool)> {
+    let sent = match model {
+        Some(m) => m.sent.clone(),
+        None => local_data_sent(p, text, lang),
+    };
+    if let Some(flow) = sent {
         return Some(flow);
     }
     for (at, reason) in flows {
@@ -3483,11 +4443,15 @@ fn import_flow(p: &Pack, text: &[u32], flows: &[(usize, PyStr)], lang: Option<&s
     None
 }
 
-fn import_time_risk_of(p: &Pack, text: &[u32], lang: Option<&str>) -> (Vec<PyStr>, Option<usize>) {
+fn import_time_risk_of(p: &Pack, text: &[u32], lang: Option<&str>, model: Option<&ModelFacts>) -> (Vec<PyStr>, Option<usize>) {
     let mut reasons: Vec<PyStr> = Vec::new();
     let mut line: Option<usize> = None;
-    let flows = crate::shell::exec_command_flows(p, text);
-    if let Some((at, kind, what, in_address)) = import_flow(p, text, &flows, lang) {
+    let flows = match model {
+        Some(m) => crate::shell::command_flows(p, &m.commands),
+        None => crate::shell::exec_command_flows(p, text),
+    };
+    let dests: &[PyStr] = model.map(|m| m.dests.as_slice()).unwrap_or(&[]);
+    if let Some((at, kind, what, in_address)) = import_flow(p, text, &flows, lang, model) {
         // a data-capture service for any local data; a service a client talks
         // to with its user's key for what no client sends: the whole
         // environment, the instance's credentials, a credential store
@@ -3498,14 +4462,21 @@ fn import_time_risk_of(p: &Pack, text: &[u32], lang: Option<&str>) -> (Vec<PyStr
                 || (kind == "file"
                     && p.re("_CRED_STORE_RE").search(&what).is_some()
                     && p.re("_PUBLIC_KEY_FILE_RE").search(&what).is_none()));
-        let dest = capture_service(p, text).or_else(|| if harvest { p.re("_EXFIL_SERVICE_RE").search(text) } else { None });
-        let ip = if dest.is_none() && !in_address { p.re("_PUBLIC_IP_URL_RE").search(text) } else { None };
+        // (in the text, then in the addresses a model resolved)
+        let find = |re: &str| -> Option<PyStr> {
+            p.re(re).search(text).map(|m| m.group0().to_vec()).or_else(|| dests.iter().find_map(|d| p.re(re).search(d).map(|m| m.group0().to_vec())))
+        };
+        let dest: Option<PyStr> = capture_service(p, text)
+            .map(|m| m.group0().to_vec())
+            .or_else(|| dests.iter().find_map(|d| capture_service(p, d).map(|m| m.group0().to_vec())))
+            .or_else(|| if harvest { find("_EXFIL_SERVICE_RE") } else { None });
+        let ip = if dest.is_none() && !in_address { find("_PUBLIC_IP_URL_RE") } else { None };
         // (a raw socket's hard-coded public address is an IP address too)
         let raw = if dest.is_none() && ip.is_none() && !in_address { raw_public_ip(p, text) } else { None };
         if let Some(dest) = dest {
-            reasons.push(cat(&[&p.map_text("_IMPORT_SENT_REASONS", kind), &u(" ("), head(dest.group0(), 40), &u(")")]));
+            reasons.push(cat(&[&p.map_text("_IMPORT_SENT_REASONS", kind), &u(" ("), head(&dest, 40), &u(")")]));
         } else if let Some(ip) = ip {
-            let g = ip.group0();
+            let g = &ip[..];
             let rest = match pystr::find_str(g, "//", 0) {
                 Some(i) => pystr::from(g, i + 2),
                 None => g,
@@ -3525,15 +4496,42 @@ fn import_time_risk_of(p: &Pack, text: &[u32], lang: Option<&str>) -> (Vec<PyStr
             line = Some(line_of(text, at));
         }
     }
-    if has(text, "curl") || has(text, "wget") {
-        let mut piped = false;
-        for (i, row) in pystr::split_char(text, c('\n')).iter().enumerate() {
-            if runs_download_through_shell(p, row) {
+    if model.is_some() {
+        // a model's commands: a download piped or substituted into a shell
+        let run = cat_reason(p, "run");
+        for (at, r) in &flows {
+            if pystr::eq(r, "pipes a download into a shell") || *r == run {
                 reasons.push(u("runs a downloaded script through a shell"));
-                line = line.or(Some(i + 1));
+                line = line.or(Some(line_of(text, *at)));
+                break;
+            }
+        }
+    } else if has(text, "curl") || has(text, "wget") {
+        let mut piped = false;
+        // (only a row that holds curl or wget can run a download through a
+        // shell — runs_download_through_shell asks that first — so the rows
+        // read are those, in order: each place of either word, its row)
+        let (mut curl, mut wget) = (pystr::find_str(text, "curl", 0), pystr::find_str(text, "wget", 0));
+        let mut from = 0;
+        loop {
+            if curl.is_some_and(|k| k < from) {
+                curl = pystr::find_str(text, "curl", from);
+            }
+            if wget.is_some_and(|k| k < from) {
+                wget = pystr::find_str(text, "wget", from);
+            }
+            let Some(k) = curl.into_iter().chain(wget).min() else {
+                break;
+            };
+            let start = pystr::rfind_char(text, c('\n'), from, k).map_or(from, |n| n + 1);
+            let end = pystr::find_char(text, c('\n'), k).unwrap_or(text.len());
+            if runs_download_through_shell(p, &text[start..end]) {
+                reasons.push(u("runs a downloaded script through a shell"));
+                line = line.or(Some(line_of(text, start)));
                 piped = true;
                 break;
             }
+            from = end + 1;
         }
         if !piped {
             // (0.1.8) or a command line built in names, handed to an exec call
@@ -3547,26 +4545,45 @@ fn import_time_risk_of(p: &Pack, text: &[u32], lang: Option<&str>) -> (Vec<PyStr
             }
         }
     }
-    let received = received_code(p, text, lang);
+    // (N-4) a command line handed to a shell that pipes what it decodes, or a download, into a shell or an
+    // interpreter reading its script on stdin (shell::piped_run_reasons)
+    for (at, r) in &flows {
+        if (pystr::starts_with(r, "pipes code it decodes into ") || pystr::starts_with(r, "downloads a script and runs it with "))
+            && !reasons.contains(r)
+        {
+            reasons.push(r.clone());
+            line = line.or(Some(line_of(text, *at)));
+        }
+    }
+    let received = match model {
+        Some(m) => m.received,
+        None => received_code(p, text, lang),
+    };
     if let Some((at, kind)) = &received {
-        reasons.push(cat_reason(p, kind));
+        reasons.push(received_reason(p, kind, model));
         line = line.or(Some(*at));
     }
-    if let Some((at, interp)) = received::downloads_and_runs(p, text) {
-        match py_run_or(p, text, &interp).filter(|i| !i.is_empty()) {
-            Some(i) => reasons.push(cat(&[&u("downloads a script and runs it with "), &i])),
-            None => reasons.push(u("downloads a file and then runs it")),
+    if model.is_none() {
+        if let Some((at, interp)) = received::downloads_and_runs(p, text) {
+            match py_run_or(p, text, &interp).filter(|i| !i.is_empty()) {
+                Some(i) => reasons.push(cat(&[&u("downloads a script and runs it with "), &i])),
+                None => reasons.push(u("downloads a file and then runs it")),
+            }
+            line = line.or(Some(at));
         }
-        line = line.or(Some(at));
-    }
-    if let Some((at, interp)) = received::decodes_and_runs(p, text) {
-        match py_run_or(p, text, &interp).filter(|i| !i.is_empty()) {
-            Some(i) => reasons.push(cat(&[&u("writes code it decodes to a file and runs it with "), &i])),
-            None => reasons.push(u("writes a file it decodes and runs it")),
+        if let Some((at, interp)) = received::decodes_and_runs(p, text) {
+            match py_run_or(p, text, &interp).filter(|i| !i.is_empty()) {
+                Some(i) => reasons.push(cat(&[&u("writes code it decodes to a file and runs it with "), &i])),
+                None => reasons.push(u("writes a file it decodes and runs it")),
+            }
+            line = line.or(Some(at));
         }
-        line = line.or(Some(at));
     }
-    if let Some((at, r)) = dropped_reason(text, lang) {
+    let dropped = match model {
+        Some(m) => m.dropped.clone(),
+        None => dropped_reason(text, lang),
+    };
+    if let Some((at, r)) = dropped {
         let before = reasons.len();
         push_dropped(&mut reasons, r);
         if reasons.len() > before {
@@ -3577,6 +4594,11 @@ fn import_time_risk_of(p: &Pack, text: &[u32], lang: Option<&str>) -> (Vec<PyStr
     let ps = powershell_risk(p, text);
     if let Some(first) = ps.first() {
         let at = powershell_run_at(p, text);
+        let at = if at < 0 {
+            model.and_then(|m| m.commands.iter().find(|(_, c)| p.re("_PS_RE").search(c).is_some()).map(|(a, _)| *a as isize)).unwrap_or(-1)
+        } else {
+            at
+        };
         if at >= 0 {
             signs.push((at as usize, first.clone()));
         }
@@ -3593,7 +4615,7 @@ fn import_time_risk_of(p: &Pack, text: &[u32], lang: Option<&str>) -> (Vec<PyStr
         signs.push((at as usize, u("opens a reverse shell")));
     }
     let host = p.re("_HOST_INFO_RE").search(text).map(|m| m.start());
-    let at = runs_own_source_at(p, text, lang);
+    let at = if model.is_some() { -1 } else { own_source_run_at(p, text, lang, lang) };
     if at >= 0 {
         signs.push((at as usize, u("runs code it reads back from its own file or a data file shipped with it")));
     }
@@ -3602,10 +4624,154 @@ fn import_time_risk_of(p: &Pack, text: &[u32], lang: Option<&str>) -> (Vec<PyStr
             signs.push((m.start(), u("carries a GitHub Actions workflow that dumps every repository secret")));
         }
     }
-    signs.extend(exfil_signs(p, text, host));
+    signs.extend(exfil_signs_net(p, text, host, model.is_some_and(|m| m.network)));
+    if let Some(m) = model {
+        for (at, r) in &m.signs {
+            if !signs.iter().any(|(_, x)| x == r) {
+                signs.push((*at, r.clone()));
+            }
+        }
+    }
     for (at, reason) in signs {
         reasons.push(reason);
         line = line.or(Some(line_of(text, at)));
     }
     (reasons, line)
+}
+
+#[cfg(test)]
+mod package_install_tests {
+    use super::*;
+    use crate::pack;
+
+    fn cps(s: &str) -> Vec<u32> {
+        s.chars().map(|c| c as u32).collect()
+    }
+
+    fn installs(cmd: &str) -> Vec<(String, bool)> {
+        installed_packages(&pack::current(), &cps(cmd)).into_iter().map(|(n, pip)| (pystr::to_string(&n), pip)).collect()
+    }
+
+    fn undeclared(text: &str, declared: &[&str]) -> Option<(usize, Vec<String>)> {
+        let declared: Vec<PyStr> = declared.iter().map(|d| cps(d)).collect();
+        let lang = if text.contains("require(") || text.contains("import {") { "js" } else { "py" };
+        undeclared_installs(&pack::current(), &cps(text), &declared, Some(lang))
+            .map(|(line, names)| (line, names.iter().map(|n| pystr::to_string(n)).collect()))
+    }
+
+    #[test]
+    fn the_packages_a_command_line_installs() {
+        let npm = |names: &[&str]| names.iter().map(|n| (n.to_string(), false)).collect::<Vec<_>>();
+        let pip = |names: &[&str]| names.iter().map(|n| (n.to_string(), true)).collect::<Vec<_>>();
+        assert_eq!(installs("npm uninstall prettier-sdk && npm install prettier-sdk"), npm(&["prettier-sdk"]));
+        assert_eq!(installs("npm i -g --registry https://r.invalid x@1.2.3 @s/y@^2 z"), npm(&["x", "@s/y", "z"]));
+        assert_eq!(installs("yarn global add x; pnpm add -D y; bun i z; cnpm install w"), npm(&["x", "y", "z", "w"]));
+        assert_eq!(installs("npm install ./local ../up /abs file:x"), npm(&[]));
+        assert_eq!(installs("npm install github:u/r https://h.invalid/x.tgz"), npm(&["github:u/r", "https://h.invalid/x.tgz"]));
+        assert_eq!(installs("npm install"), npm(&[]));
+        assert_eq!(installs("npm run build && npm test"), npm(&[]));
+        assert_eq!(installs("pip install requests==2.0 'x[extra]>=1' -r req.txt -e . --index-url https://i.invalid y"),
+                   pip(&["requests", "x", "y"]));
+        assert_eq!(installs("python3 -m pip install --upgrade z"), pip(&["z"]));
+        assert_eq!(installs("uv pip install w; pip3.11 install v"), pip(&["w", "v"]));
+        assert_eq!(installs("pip install ./dist/x-1.0.whl x.tar.gz"), pip(&[]));
+        assert_eq!(installs("pip download x; pip show y"), pip(&[]));
+    }
+
+    #[test]
+    fn an_install_of_what_the_release_does_not_declare() {
+        // crypto-hash-sdk 1.0.1's shape: at import, hidden, a package it does not depend on
+        let chs = "import { execSync } from 'child_process';\n(function () {\n  try {\n    \
+                   execSync('npm uninstall prettier-sdk && npm install prettier-sdk', { stdio: 'ignore', windowsHide: true });\n  \
+                   } catch (e) {}\n})();\n";
+        assert_eq!(undeclared(chs, &["crypto-hash-sdk", "child-process"]), Some((4, vec!["prettier-sdk".to_string()])));
+        assert_eq!(undeclared(chs, &["crypto-hash-sdk", "prettier-sdk"]), None);
+        // a program and its arguments as a list (Python's and Node's), a declared name by PEP 503's normalizing
+        let py = "import subprocess, sys\nsubprocess.check_call([sys.executable, '-m', 'pip', 'install', 'Evil_Pkg'])\n";
+        assert_eq!(undeclared(py, &["x"]), Some((2, vec!["Evil_Pkg".to_string()])));
+        assert_eq!(undeclared(py, &["x", "evil-pkg"]), None);
+        let js = "const { spawn } = require('child_process');\nspawn('npm', ['install', '--no-save', 'evil'], { stdio: 'ignore' });\n";
+        assert_eq!(undeclared(js, &["x"]), Some((2, vec!["evil".to_string()])));
+        // a package manager itself, a name the code builds, a command line that is only text: none
+        assert_eq!(undeclared("execSync('npm install -g npm@latest')\n", &["x"]), None);
+        assert_eq!(undeclared("spawn('npm', ['install', name])\n", &["x"]), None);
+        assert_eq!(undeclared("console.log('run npm install foo first')\n", &["x"]), None);
+        // a value the code builds (an f-string's hole)
+        assert_eq!(undeclared("import subprocess\nsubprocess.check_output(f'pip install {pkgs}', shell=True)\n", &["x"]), None);
+        // Python: in a function's body, not at load; unless the module calls it
+        let lazy = "import subprocess, sys\n\ndef _install():\n    subprocess.check_call([sys.executable, '-m', 'pip', 'install', 'supabase'])\n";
+        assert_eq!(undeclared(lazy, &["x"]), None);
+        assert_eq!(undeclared(&format!("{}\n_install()\n", lazy), &["x"]), Some((4, vec!["supabase".to_string()])));
+        let block = "import os, sys\ntry:\n    import y\nexcept ImportError:\n    os.system('pip install y-evil')\n";
+        assert_eq!(undeclared(block, &["x"]), Some((5, vec!["y-evil".to_string()])));
+        let method = "import os\nclass C:\n    def go(self):\n        os.system('pip install z')\n";
+        assert_eq!(undeclared(method, &["x"]), None);
+        let main = "import os\nif __name__ == '__main__':\n    os.system('pip install z')\n";
+        assert_eq!(undeclared(main, &["x"]), None);
+        // read from the tokens: a signature's lines and a docstring's are not the module's (onnxruntime's whisper
+        // helper installs `datasets` in a static method whose signature closes with `):`)
+        let signature = "import os\n\nclass H:\n    @staticmethod\n    def verify(\n        a,\n        b=1,\n    ):\n        \
+                         try:\n            import datasets\n        except Exception:\n            \
+                         cmd = 'pip install datasets'\n            os.system(cmd)\n";
+        assert_eq!(undeclared(signature, &["x"]), None);
+        let doc = "import os\n\ndef f():\n    \"\"\"Installs.\nAt the left edge.\n\"\"\"\n    os.system('pip install z')\n";
+        assert_eq!(undeclared(doc, &["x"]), None);
+        // nor do a string's lines hide a statement of the module's
+        let hidden = "import os\ntry:\n    s = '''\ndef fake():\n    '''\n    os.system('pip install z')\nexcept Exception:\n    pass\n";
+        assert_eq!(undeclared(hidden, &["x"]), Some((6, vec!["z".to_string()])));
+        // a function the module hands on, or that `@atexit.register` decorates, runs when it is loaded
+        for tail in ["atexit.register(_install)\n", "threading.Thread(target=_install).start()\n"] {
+            assert_eq!(undeclared(&format!("{}\n{}", lazy, tail), &["x"]), Some((4, vec!["supabase".to_string()])));
+        }
+        let decorated = lazy.replace("def _install", "@atexit.register\ndef _install");
+        assert_eq!(undeclared(&decorated, &["x"]), Some((5, vec!["supabase".to_string()])));
+        // a body on its header's line; the `__main__` block's `else:`
+        assert_eq!(undeclared("import os\ndef f(): os.system('pip install z')\n", &["x"]), None);
+        assert_eq!(undeclared("import os\ndef f(): os.system('pip install z')\nf()\n", &["x"]), Some((2, vec!["z".to_string()])));
+        let other = "import os\nif __name__ == '__main__':\n    pass\nelse:\n    os.system('pip install z')\n";
+        assert_eq!(undeclared(other, &["x"]), Some((5, vec!["z".to_string()])));
+        // what the tokenizer refuses is read by indentation (a signature's `):` closes no block there either)
+        let refused = format!("{}\nx = '\u{0}'\n", signature);
+        assert_eq!(undeclared(&refused, &["x"]), None);
+    }
+}
+
+#[cfg(test)]
+mod rewrite_tests {
+    use super::*;
+    use crate::pack;
+
+    fn cps(s: &str) -> Vec<u32> {
+        s.chars().map(|c| c as u32).collect()
+    }
+
+    fn strs(r: &[PyStr]) -> Vec<String> {
+        r.iter().map(|x| pystr::to_string(x)).collect()
+    }
+
+    #[test]
+    fn another_packages_code_and_the_releases_own() {
+        // D-9: a code file written into another package's folder, in the import-time and the install-script tests;
+        // the release's own package and its scope's are its own code (the API's `own`, own_release)
+        let p = pack::current();
+        let text = cps("const fs = require('fs'), path = require('path');\nconst MOD = 'x';\n\
+                        fs.writeFileSync(path.join(process.cwd(), 'node_modules', '@acme', 'core', 'index.js'), MOD);\n");
+        let reason = "rewrites another package's code (@acme/core)".to_string();
+        let (reasons, line) = import_time_risk_with(&p, &text, Some("js"), None);
+        assert_eq!((strs(&reasons), line), (vec![reason.clone()], Some(3)));
+        assert!(strs(&install_script_risk_with(&p, &text, true, false, Some("js"))).contains(&reason));
+        // (read in JavaScript alone)
+        assert!(!strs(&import_time_risk_with(&p, &text, Some("py"), None).0).contains(&reason));
+        for own in ["@acme/core", "@acme/cli"] {
+            let _own = own_release(&cps(own));
+            assert_eq!(import_time_risk_with(&p, &text, Some("js"), None), (Vec::new(), None), "{}", own);
+            assert!(!strs(&install_script_risk_with(&p, &text, true, false, Some("js"))).contains(&reason), "{}", own);
+        }
+        // another release's name, and none once its guard is dropped: the rewrite is reported
+        {
+            let _own = own_release(&cps("acme"));
+            assert_eq!(strs(&import_time_risk_with(&p, &text, Some("js"), None).0), vec![reason.clone()]);
+        }
+        assert_eq!(strs(&import_time_risk_with(&p, &text, Some("js"), None).0), vec![reason]);
+    }
 }

@@ -1,15 +1,7 @@
-// SPDX-License-Identifier: Apache-2.0 AND Python-2.0.1
-//
-// In part (shlex_split) a Rust translation of CPython's Lib/shlex.py,
-// changed as rust/NOTICE summarizes, and distributed under CPython's
-// license (rust/LICENSE-PYTHON) as well as Lazaret's. CPython's notice:
-//
-//   Copyright (c) 2001 Python Software Foundation; All Rights Reserved
-
 //! Following an install hook to the files it runs: a port of
 //! lazaret.scanner.core's `_hook_tokens`, `follow_hook` and their helpers
-//! (section "Following a hook command to the files it runs"), with CPython's
-//! shlex (posix, punctuation_chars, whitespace_split, no commenters) and
+//! (section "Following a hook command to the files it runs"), with a
+//! command's words read as Python's shlex reads them (`shlex_split`) and
 //! `node_candidates` / `shebang_lang`.
 
 use crate::pack::Pack;
@@ -20,140 +12,84 @@ const fn c(ch: char) -> u32 {
     ch as u32
 }
 
+/// shlex's whitespace: space, tab, CR, LF (no other character).
 fn is_shlex_ws(ch: u32) -> bool {
     matches!(ch, 0x20 | 0x09 | 0x0D | 0x0A)
 }
 
+/// shlex's punctuation characters (`punctuation_chars=True`): `();<>|&`.
 fn is_punct(ch: u32) -> bool {
-    matches!(ch, 0x28 | 0x29 | 0x3B | 0x3C | 0x3E | 0x7C | 0x26) // ();<>|&
+    matches!(ch, 0x28 | 0x29 | 0x3B | 0x3C | 0x3E | 0x7C | 0x26)
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum St {
-    Space,
-    Word,
-    Punct,
-    Quote(u32),
-    Escape,
-    Eof,
-}
-
-/// CPython's shlex.shlex(cmd, posix=True, punctuation_chars=True) with
-/// whitespace_split = True and commenters = "": list(lex), or None where it
-/// raises ValueError (an open quote or a trailing backslash).
+/// A hook command's words as Python's `shlex` reads them in the mode the
+/// scanners use (`posix=True`, `punctuation_chars=True`,
+/// `whitespace_split=True`, no comment characters), by the rules shlex's
+/// documentation gives ("Parsing Rules", "Improved Compatibility with
+/// Shells"):
+///
+/// - space, tab, CR and LF separate words;
+/// - a run of the characters `();<>|&` is a word of its own, and ends the
+///   word before it;
+/// - outside quotes, a backslash keeps the character after it, whatever it
+///   is (a newline too);
+/// - single quotes keep everything up to the next one;
+/// - double quotes keep everything up to the next unescaped one; in them a
+///   backslash escapes only `"` and itself, and is kept before anything else;
+/// - quotes do not end a word (`a"b"'c'` is `abc`), and a word of empty
+///   quotes is the empty string.
+///
+/// None where shlex raises ValueError: a quote left open, or a backslash at
+/// the end of the command. (`test_shell_words.py` holds it to Python's
+/// shlex.)
 pub fn shlex_split(cmd: &[u32]) -> Option<Vec<PyStr>> {
-    let mut i = 0usize;
-    let mut pushback: Vec<u32> = Vec::new();
-    let mut state = St::Space;
-    let mut out = Vec::new();
-    loop {
-        // read_token
-        let mut quoted = false;
-        let mut escapedstate = St::Space;
-        let mut token: PyStr = Vec::new();
-        loop {
-            let nextchar = if let Some(ch) = pushback.pop() {
-                Some(ch)
-            } else if i < cmd.len() {
+    let mut words = Vec::new();
+    let mut i = 0;
+    while i < cmd.len() {
+        let ch = cmd[i];
+        if is_shlex_ws(ch) {
+            i += 1;
+        } else if is_punct(ch) {
+            let run = cmd[i..].iter().take_while(|&&x| is_punct(x)).count();
+            words.push(cmd[i..i + run].to_vec());
+            i += run;
+        } else {
+            let mut word = Vec::new();
+            while let Some(&ch) = cmd.get(i).filter(|&&x| !is_shlex_ws(x) && !is_punct(x)) {
                 i += 1;
-                Some(cmd[i - 1])
-            } else {
-                None
-            };
-            match state {
-                St::Eof => {
-                    token.clear();
-                    break;
-                }
-                St::Space => match nextchar {
-                    None => {
-                        state = St::Eof;
-                        break;
-                    }
-                    Some(ch) if is_shlex_ws(ch) => {
-                        if !token.is_empty() || quoted {
+                if ch == c('\\') {
+                    word.push(*cmd.get(i)?);
+                    i += 1;
+                } else if ch == c('\'') {
+                    let len = cmd[i..].iter().position(|&x| x == c('\''))?;
+                    word.extend_from_slice(&cmd[i..i + len]);
+                    i += len + 1;
+                } else if ch == c('"') {
+                    loop {
+                        let inner = *cmd.get(i)?;
+                        i += 1;
+                        if inner == c('"') {
                             break;
                         }
-                    }
-                    Some(ch) if ch == c('\\') => {
-                        escapedstate = St::Word;
-                        state = St::Escape;
-                    }
-                    Some(ch) if is_punct(ch) => {
-                        token = vec![ch];
-                        state = St::Punct;
-                    }
-                    Some(ch) if ch == c('\'') || ch == c('"') => state = St::Quote(ch),
-                    Some(ch) => {
-                        token = vec![ch];
-                        state = St::Word;
-                    }
-                },
-                St::Quote(q) => {
-                    quoted = true;
-                    match nextchar {
-                        None => return None, // No closing quotation
-                        Some(ch) if ch == q => state = St::Word,
-                        Some(ch) if ch == c('\\') && q == c('"') => {
-                            escapedstate = St::Quote(q);
-                            state = St::Escape;
-                        }
-                        Some(ch) => token.push(ch),
-                    }
-                }
-                St::Escape => match nextchar {
-                    None => return None, // No escaped character
-                    Some(ch) => {
-                        if let St::Quote(eq) = escapedstate {
-                            if ch != c('\\') && ch != eq {
-                                token.push(c('\\'));
+                        if inner == c('\\') {
+                            let next = *cmd.get(i)?;
+                            i += 1;
+                            if next != c('"') && next != c('\\') {
+                                word.push(inner);
                             }
-                        }
-                        token.push(ch);
-                        state = escapedstate;
-                    }
-                },
-                St::Word | St::Punct => match nextchar {
-                    None => {
-                        state = St::Eof;
-                        break;
-                    }
-                    Some(ch) if is_shlex_ws(ch) => {
-                        state = St::Space;
-                        if !token.is_empty() || quoted {
-                            break;
-                        }
-                    }
-                    Some(ch) if state == St::Punct => {
-                        if is_punct(ch) {
-                            token.push(ch);
+                            word.push(next);
                         } else {
-                            pushback.push(ch); // (not whitespace: handled above)
-                            state = St::Space;
-                            break;
+                            word.push(inner);
                         }
                     }
-                    Some(ch) if ch == c('\'') || ch == c('"') => state = St::Quote(ch),
-                    Some(ch) if ch == c('\\') => {
-                        escapedstate = St::Word;
-                        state = St::Escape;
-                    }
-                    Some(ch) if !is_punct(ch) => token.push(ch),
-                    Some(ch) => {
-                        pushback.push(ch);
-                        state = St::Space;
-                        if !token.is_empty() || quoted {
-                            break;
-                        }
-                    }
-                },
+                } else {
+                    word.push(ch);
+                }
             }
+            words.push(word);
         }
-        if !quoted && token.is_empty() {
-            return Some(out); // None: the end
-        }
-        out.push(token);
     }
+    Some(words)
 }
 
 /// core._hook_tokens: shlex's tokens, or the fallback's where shlex raises.
@@ -676,4 +612,36 @@ pub fn shebang_lang(p: &Pack, text: &[u32]) -> Option<&'static str> {
         return Some("sh");
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn words(cmd: &str) -> Option<Vec<String>> {
+        let cps: Vec<u32> = cmd.chars().map(|ch| ch as u32).collect();
+        shlex_split(&cps).map(|ws| ws.iter().map(|w| w.iter().map(|&x| char::from_u32(x).unwrap()).collect()).collect())
+    }
+
+    fn are(cmd: &str, want: &[&str]) {
+        assert_eq!(words(cmd), Some(want.iter().map(|s| s.to_string()).collect()), "{cmd:?}");
+    }
+
+    #[test]
+    fn words_as_shlex_reads_them() {
+        // the examples of shlex's documentation, and the cases around them
+        are("a && b; c >> d?e", &["a", "&&", "b", ";", "c", ">>", "d?e"]);
+        are("a&&b||c", &["a", "&&", "b", "||", "c"]);
+        are("\"Do\"Not\"Separate\"", &["DoNotSeparate"]);
+        are("a \"\" ''b '' ", &["a", "", "b", ""]);
+        are("'a;b' \"c|d\" e\\;f", &["a;b", "c|d", "e;f"]);
+        are("\"a\\\"b\\\\c\\d\" 'e\\f'", &["a\"b\\c\\d", "e\\f"]);
+        are("a\\\nb \"c\\\nd\"", &["a\nb", "c\\\nd"]);
+        are(" \t\r\n", &[]);
+        are("x\u{a0}y\u{b}z #c", &["x\u{a0}y\u{b}z", "#c"]);
+        are("(cd lib;node a.js)|&;x", &["(", "cd", "lib", ";", "node", "a.js", ")|&;", "x"]);
+        assert_eq!(words("node 'a.js"), None); // a quote left open
+        assert_eq!(words("node \"a.js\\"), None);
+        assert_eq!(words("node x.js \\"), None); // a backslash at the end
+    }
 }

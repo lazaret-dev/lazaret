@@ -6,7 +6,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { scanFile, setScanTimeBudget } from "../src/index.js";
+import { scanFile, scanConfigFile, setScanTimeBudget } from "../src/index.js";
 
 const LIMIT_MS = 4000;
 const CASES = {
@@ -38,16 +38,20 @@ for (const [label, [lang, content]] of Object.entries(CASES)) {
   });
 }
 
-test("the per-file time backstop stops a file with SC-TRUNCATED", () => {
+test("the per-file time backstop stops a config file with SC-TRUNCATED", () => {
   setScanTimeBudget(0);
   try {
-    const issues = scanFile({ name: "t.js", content: "eval(a)\n".repeat(5000), lang: "js" });
+    const issues = scanConfigFile("settings.env", "TOKEN=abc\n".repeat(5000));
     const t = issues.filter((i) => i.rule === "SC-TRUNCATED");
     assert.equal(t.length, 1);
     assert.equal(t[0].sev, "CRITICAL");
     assert.equal(t[0].msg, "File not fully scanned: scan time budget exceeded.");
+    // a source file's scan is the engine's, bounded by its work budget and not the clock (Q-1, 0.1.9)
+    const found = scanFile({ name: "t.js", content: "eval(a)\n".repeat(5000), lang: "js" });
+    assert.ok(!found.some((i) => i.rule === "SC-TRUNCATED"));
+    assert.ok(found.some((i) => i.rule === "S-EVAL-JS"));
   } finally {
     setScanTimeBudget();                      // back to the 30 s default
   }
-  assert.ok(!scanFile({ name: "t.js", content: "eval(a)\n", lang: "js" }).some((i) => i.rule === "SC-TRUNCATED"));
+  assert.ok(!scanConfigFile("settings.env", "TOKEN=abc\n").some((i) => i.rule === "SC-TRUNCATED"));
 });

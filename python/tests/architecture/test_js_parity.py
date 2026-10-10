@@ -175,7 +175,7 @@ ADVERSARIAL = {
     "sec/creds.sql": "create user bob identified by 'hunter2hunter2';\nGRANT ALL ON t TO PUBLIC;\n",
     "sec/markup.jsx": '<Input password="hunter2hunter2" />\n',
     # config and data files: credentials only (configsecrets), never read as code
-    "cfg/.env": ("# service\nDB_PASSWORD=Zq8!vN3pL0wX7r\nAPI_KEY=${API_KEY}\nAWS_KEY=AKIAIOSFODNN7EXAMPLE\n"
+    "cfg/.env": ("# service\nDB_PASSWORD=Zq8!vN3pL0wX7r\nAPI_KEY=${API_KEY}\nAWS_KEY=AKI\x41IOSFODNN7EXAMPLE\n"
                  "GITHUB_TOKEN=ghp_" + "a1B2" * 9 + "  # nosec\n"
                  "SAMPLE_JWT=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6Ikpv"
                  "aG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c\n"
@@ -189,12 +189,17 @@ ADVERSARIAL = {
     "cfg/settings.json": ('{\n  "api_key": "d41d8cd98f00b204e9800998ecf8427e",\n  "password": "changeme",\n'
                           '  "nextPageToken": "Zq8vN3pL0wX7rT2m",\n  "accessKey": "ACCESS_KEY",\n'
                           '  "private_key": "-----BEGIN PRIVATE KEY-----\\nMIIEvQIBADANBgkqhkiG9w0BAQEFAASC\\n"\n}\n'),
-    "cfg/deploy.sh": ('#!/bin/sh\nexport SLACK_BOT_TOKEN="xoxb-1234567890-abcdefghijkl"\n'
+    "cfg/deploy.sh": ('#!/bin/sh\nexport SLACK_BOT_TOKEN="xox\x62-1234567890-abcdefghijkl"\n'
                       'mysql --password="$DB_PASSWORD" -e "select 1"\n'),
     "cfg/key.pem": ("-----BEGIN RSA PRIVATE KEY-----\nMIIEpAIBAAKCAQEA3Bq7" + "Zq8vN3pL0wX7rT2mK9sB" * 2
                     + "\n-----END RSA PRIVATE KEY-----\n"),
     "cfg/template.pem": ("-----BEGIN RSA PRIVATE KEY-----\n" + "privatekey" * 6
                          + "\n-----END RSA PRIVATE KEY-----\n"),
+    # S-TOKEN-PEM: a header counts only with its key right after it (an encrypted key's Proc-Type: too)
+    "cfg/pem-note.yaml": ('header: "-----BEGIN PRIVATE KEY-----"  # see MIIEpAIBAAKCAQEA3Bq7' + "Zq8vN3pL0wX7rT2mK9sB\n"
+                          'pk: "-----BEGIN PRIVATE KEY-----\\n...\\n-----END PRIVATE KEY-----"\n'),
+    "cfg/enc.pem": ("-----BEGIN RSA " "PRIVATE KEY-----\nProc-Type: 4,ENCRYPTED\nDEK-Info: AES-128-CBC,0123456789ABCDEF\n\n"
+                    "MIIEpAIBAAKCAQEA3Bq7" + "Zq8vN3pL0wX7rT2mK9sB" * 2 + "\n-----END RSA PRIVATE KEY-----\n"),
     "cfg/Dockerfile": "FROM scratch\nENV API_TOKEN=Zq8vN3pL0wX7rT2m\nARG NPM_TOKEN\n",
     "cfg/.npmrc": "//registry.invalid/:_authToken=Zq8vN3pL0wX7rT2mK9sB4hF6jD1\n",
     "cfg/package-lock.json": '{"packages": {"": {"token": "ghp_' + "e5F6" * 9 + '"}}}\n',   # a lockfile: not read
@@ -449,6 +454,46 @@ class EngineParityTests(unittest.TestCase):
                     self.assertGreaterEqual(rules["SC-TRUNCATED"], 3)
                     self.assertEqual(sum(1 for i in js[1]["issues"] if i["rule"] == "SC-INSTALL-HOOK"
                                          and i["msg"].startswith("Install hook runs ")), 10)
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_vendored_code_agrees(self):
+        """--deps reads a Go vendor tree and a cargo vendor tree with the engine's readers (0.1.9, Part C;
+        tests/scanner/test_vendored_code.py has the samples): both engines find the same, and prune both trees
+        without --deps."""
+        from tests.registry import test_package_code as samples
+        from tests.scanner import test_vendored_code as vendored
+        files = dict(vendored.GO_PROJECT, **{
+            "vendor/example.test/evil/e.go": vendored.go_file("evil", samples.INIT_GO),
+            "vendor/example.test/evil/u.go": vendored.go_file("evil", samples.USE_GO),
+            "vendor/example.test/evil/e_test.go": vendored.go_file("evil", samples.INIT_GO),
+            "vendor/example.test/ok/sub/c.go": vendored.go_file("sub", samples.CGO_GO),
+            "vendor/example.test/ok/sub/g.go": f'package sub\n\n//go:generate stringer -type=K\nvar blob = "{vendored.BLOB}"\n',
+            "vendor/example.test/other/x/e.go": vendored.go_file("x", samples.INIT_GO),
+            "rust/Cargo.toml": vendored.RUST_PROJECT["Cargo.toml"], "rust/src/main.rs": "fn main() {}\n"})
+        files.update({f"rust/{rel}": text for rel, text in dict(
+            **vendored.crate("buildevil", {"build.rs": samples.BUILD_RS, "src/lib.rs": samples.CLEAN_RS}),
+            **vendored.crate("macro", {"src/lib.rs": samples.MACRO_RS},
+                             '[package]\nname = "macro"\nversion = "1.0.0"\n\n[lib]\nproc-macro = true\n'),
+            **vendored.crate("macro2", {"src/lib.rs": samples.MACRO_RS},          # (cargo's other spelling, rule set 2.34)
+                             '[package]\nname = "macro2"\nversion = "1.0.0"\n\n[lib]\ncrate-type = ["proc-macro"]\n'),
+            **vendored.crate("gen", {"tools/gen.rs": samples.BUILD_RS, "src/lib.rs": samples.USE_RS},
+                             '[package]\nname = "gen"\nbuild = "tools/gen.rs"\n'),
+            **vendored.crate("c", {"src/lib.rs": samples.CTOR_RS, "tests/t.rs": samples.CTOR_RS})).items()})
+        root = tempfile.mkdtemp(prefix="lz-parity-vendor-")
+        try:
+            for rel, text in files.items():
+                path = os.path.join(root, *rel.split("/"))
+                os.makedirs(os.path.dirname(path), exist_ok=True)
+                with open(path, "w", encoding="utf-8") as fh:
+                    fh.write(text)
+            for deps in (True, False):
+                js, py = both(root, deps=deps)
+                with self.subTest(deps=deps):
+                    self.assert_same(js, py, label=f"vendored code (deps={deps})")
+                    rules = collections.Counter(i["rule"] for i in js[1]["issues"] if i["rule"].startswith("SC-"))
+                    self.assertEqual(dict(rules), {"SC-IMPORT-RISK": 4, "SC-USE-RISK": 2, "SC-INSTALL-HOOK": 4,
+                                                   "SC-B64": 1, "SC-GO-GENERATE": 1} if deps else {})
         finally:
             shutil.rmtree(root, ignore_errors=True)
 

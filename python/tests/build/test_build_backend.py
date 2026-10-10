@@ -104,7 +104,7 @@ class BuildTests(unittest.TestCase):
         meta = read_member(self.wheel, f"lazaret-{self.version}.dist-info/METADATA").decode()
         self.assertIn(f"Version: {self.version}\n", meta)
         self.assertIn("Requires-Python: >=3.10\n", meta)
-        self.assertIn("License-Expression: Apache-2.0 AND Python-2.0.1 AND Unicode-3.0\n", meta)   # PEP 639
+        self.assertIn("License-Expression: Apache-2.0 AND Unicode-3.0\n", meta)   # PEP 639
         self.assertNotIn("Requires-Dist", meta)
 
     def test_record_hashes_match(self):
@@ -179,12 +179,13 @@ class BuildTests(unittest.TestCase):
         with tarfile.open(self.sdist) as t:
             self.assertFalse([n for n in t.getnames() if "/_native/" in n])
 
-    def test_every_artifact_carries_cpythons_license_and_the_notice(self):
-        """Part of the native engine is a Rust translation of CPython code
-        (rust/NOTICE): every wheel carries CPython's LICENSE and that notice
-        as license files and declares both licenses, and so does the sdist,
-        which carries the engine's source (the files at its root, where
-        PKG-INFO's License-File finds them)."""
+    def test_every_artifact_carries_the_engines_notice(self):
+        """Every wheel carries the engine's notice (rust/NOTICE) as a license
+        file beside LICENSE and LICENSE-UNICODE and declares Apache-2.0 AND
+        Unicode-3.0, and so does the sdist, which carries the engine's source
+        (the files at its root, where PKG-INFO's License-File finds them). The
+        engine is Lazaret's own since P-16, and no artifact carries CPython's
+        license (the codec names the dashboard lists are facts about Python)."""
         dist_info = f"lazaret-{self.version}.dist-info"
         with tempfile.TemporaryDirectory() as d:
             lib = pathlib.Path(d, "built.so")
@@ -193,23 +194,22 @@ class BuildTests(unittest.TestCase):
             for wheel in (self.wheel, platform_wheel):
                 with self.subTest(wheel=os.path.basename(wheel)):
                     meta = read_member(wheel, f"{dist_info}/METADATA").decode()
-                    self.assertIn("License-Expression: Apache-2.0 AND Python-2.0.1 AND Unicode-3.0\n", meta)
+                    self.assertIn("License-Expression: Apache-2.0 AND Unicode-3.0\n", meta)
                     self.assertEqual(re.findall(r"^License-File: (.+)$", meta, re.M),
-                                     ["LICENSE", "LICENSE-UNICODE", "LICENSE-PYTHON", "NOTICE"])
-                    for name in ("LICENSE-PYTHON", "NOTICE"):
-                        self.assertEqual(read_member(wheel, f"{dist_info}/licenses/{name}"),
-                                         pathlib.Path(_support.REPO_ROOT, "rust", name).read_bytes())
-                    self.assertIn(b"Copyright (c) 2001 Python Software Foundation; All Rights Reserved",
-                                  read_member(wheel, f"{dist_info}/licenses/LICENSE-PYTHON"))
+                                     ["LICENSE", "LICENSE-UNICODE", "NOTICE"])
+                    self.assertEqual(read_member(wheel, f"{dist_info}/licenses/NOTICE"),
+                                     pathlib.Path(_support.REPO_ROOT, "rust", "NOTICE").read_bytes())
+                    with zipfile.ZipFile(wheel) as z:
+                        self.assertFalse([n for n in z.namelist() if n.endswith("LICENSE-PYTHON")])
             with unittest.mock.patch.dict(self.b.NATIVE_LICENSE_FILES, {"NOTICE": pathlib.Path(d, "missing")}):
                 with self.assertRaises(RuntimeError) as cm:                 # no notices, no platform wheel
                     self.b.build_platform_wheel(d, "win_amd64", str(lib))
                 self.assertIn("missing", str(cm.exception))
         base = f"lazaret-{self.version}/"
         with tarfile.open(self.sdist) as t:
-            for name in ("LICENSE-PYTHON", "NOTICE"):
-                self.assertEqual(t.extractfile(base + name).read(),
-                                 pathlib.Path(_support.REPO_ROOT, "rust", name).read_bytes())
+            self.assertEqual(t.extractfile(base + "NOTICE").read(),
+                             pathlib.Path(_support.REPO_ROOT, "rust", "NOTICE").read_bytes())
+            self.assertFalse([n for n in t.getnames() if n.endswith("LICENSE-PYTHON")])
             pkg_info = t.extractfile(base + "PKG-INFO").read().decode()
         self.assertEqual(pkg_info, read_member(self.wheel, f"{dist_info}/METADATA").decode())
 
@@ -286,16 +286,32 @@ class BuildTests(unittest.TestCase):
         base = f"lazaret-{self.version}/"
         with tarfile.open(self.sdist) as tf:
             names = tf.getnames()
-            for must in ("PKG-INFO", "pyproject.toml", "_build/lazaret_build.py", "LICENSE", "LICENSE-PYTHON",
+            for must in ("PKG-INFO", "pyproject.toml", "_build/lazaret_build.py", "LICENSE", "LICENSE-UNICODE",
                          "NOTICE", "src/lazaret/scanner/core.py", "src/lazaret/registry/schema.sql",
                          # the engine's sources, which pip compiles where no platform wheel fits
-                         "rust/Cargo.toml", "rust/Cargo.lock", "rust/NOTICE", "rust/LICENSE-PYTHON",
+                         "rust/Cargo.toml", "rust/Cargo.lock", "rust/NOTICE", "rust/LICENSE-UNICODE",
                          "rust/crates/lazaret-engine/Cargo.toml", "rust/crates/lazaret-engine/src/lib.rs",
                          "rust/crates/lazaret-engine/rules/lazaret-rules.json",
-                         "rust/crates/lazaret-ffi/Cargo.toml", "rust/crates/lazaret-ffi/src/lib.rs"):
+                         "rust/crates/lazaret-ffi/Cargo.toml", "rust/crates/lazaret-ffi/src/lib.rs",
+                         # the network layer (NET-1), and the library it is built on, which ships with its licence
+                         # and its notices
+                         "rust/crates/lazaret-net/Cargo.toml", "rust/crates/lazaret-net/src/lib.rs",
+                         "rust/crates/lazaret-verify/Cargo.toml", "rust/crates/lazaret-verify/src/lib.rs",
+                         "rust/crates/pratique/Cargo.toml", "rust/crates/pratique/LICENSE", "rust/crates/pratique/NOTICE",
+                         "rust/crates/pratique/src/lib.rs", "rust/crates/pratique/src/http/hostrules.rs",
+                         # the Sigstore TUF root pratique builds in (src/tuf.rs)
+                         "rust/crates/pratique/roots/sigstore_tuf_root.json"):
                 self.assertIn(base + must, names)
-            self.assertFalse([n for n in names if "/tests/" in n or "__pycache__" in n or "/target/" in n
-                              or "/examples/" in n or "/." in n or n.endswith((".so", ".dll", ".dylib"))])
+            # pratique's test and example sources ship (cargo reads every target its manifest declares before it
+            # builds any), and nothing else of its tests: no data, no vectors, no documents
+            vendored = base + "rust/crates/pratique/"
+            self.assertFalse([n for n in names if ("/tests/" in n or "/examples/" in n)
+                              and not (n.startswith(vendored) and n.endswith(".rs") and "/tests/data/" not in n)])
+            self.assertFalse([n for n in names if n.startswith(vendored) and n.endswith((".md", ".txt", ".json", ".der",
+                                                                                          ".pem", ".sha256"))
+                              and n != vendored + "roots/sigstore_tuf_root.json"])
+            self.assertFalse([n for n in names if "__pycache__" in n or "/target/" in n
+                              or "/." in n or n.endswith((".so", ".dll", ".dylib"))])
             with tempfile.TemporaryDirectory() as d:
                 tf.extractall(d, filter="data") if hasattr(tarfile, "data_filter") else tf.extractall(d)
                 # a wheel built from the sdist (with the same library) is the one built from the repo
@@ -365,6 +381,33 @@ class BuildTests(unittest.TestCase):
             placed = src / "lazaret" / "_native" / self.b.native_library_name(self.platform)
             self.assertEqual(placed.read_bytes(), pathlib.Path(the_library()).read_bytes())
 
+    def test_a_second_editable_install_replaces_the_library_with_a_new_file(self):
+        """The library is never rewritten in place: macOS keeps the code signature it read for a
+        file, and on Apple silicon kills a process that loads a library whose bytes changed under
+        it ("zsh: killed" after a second `pip install -e`). It is written beside it, renamed over it."""
+        with tempfile.TemporaryDirectory() as d:
+            src = pathlib.Path(d, "src")
+            native = src / "lazaret" / "_native"
+            native.mkdir(parents=True)
+            placed = native / self.b.native_library_name(self.platform)
+            placed.write_bytes(b"the library an earlier install built")
+            before = os.stat(placed).st_ino
+            with unittest.mock.patch.object(self.b, "SRC", src), unittest.mock.patch.dict(os.environ, self.env):
+                self.b.build_editable(d)
+            self.assertEqual(placed.read_bytes(), pathlib.Path(the_library()).read_bytes())
+            self.assertNotEqual(os.stat(placed).st_ino, before)            # a new file, not the old one rewritten
+            self.assertEqual([p.name for p in native.iterdir()], [placed.name])   # and no temporary file left
+
+    def test_a_failed_replacement_keeps_the_old_library(self):
+        with tempfile.TemporaryDirectory() as d:
+            target = pathlib.Path(d, "liblazaret_native.so")
+            target.write_bytes(b"old")
+            with unittest.mock.patch.object(self.b.os, "replace", side_effect=PermissionError("in use")):
+                with self.assertRaises(PermissionError):
+                    self.b._replace_file(target, b"new")
+            self.assertEqual(target.read_bytes(), b"old")
+            self.assertEqual(os.listdir(d), ["liblazaret_native.so"])
+
     def test_an_editable_installs_library_never_ships(self):
         """src/lazaret/_native/ (where build_editable puts the library) is not
         packed from the tree: the wheel's library is the one it is built with."""
@@ -375,6 +418,11 @@ class BuildTests(unittest.TestCase):
             (pkg / "_native" / "liblazaret_native.so").write_bytes(b"\x7fELF-stale")
             with unittest.mock.patch.object(self.b, "PKG", pkg):
                 self.assertEqual([p.name for p in self.b._package_files()], ["__init__.py"])
+
+    def test_git_ignores_an_editable_installs_library(self):
+        """`git status` after `pip install -e python` lists no src/lazaret/_native/."""
+        with open(os.path.join(_support.REPO_ROOT, ".gitignore"), encoding="utf-8") as f:
+            self.assertIn("python/src/lazaret/_native/", {line.strip() for line in f})
 
     def test_command_line_build(self):
         env = dict(os.environ, **self.env)

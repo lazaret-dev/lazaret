@@ -116,7 +116,7 @@ impl Config {
     /// Patterns that fail to compile match nothing (taintspec refused them
     /// before they got here).
     pub fn new(extra_sources: &[PyStr], extra_sinks: &[(PyStr, u8)], full: &[PyStr], partial: &[(PyStr, u8)]) -> Config {
-        let compile = |p: &PyStr| crate::rxutil::dynamic(p.clone(), 0);
+        let compile = |p: &PyStr| crate::rxutil::dynamic_user(p.clone(), 0);
         let mut part: HashMap<PyStr, u8> = HashMap::new();
         for (name, bits) in partial {
             *part.entry(name.clone()).or_insert(0) |= bits;
@@ -210,6 +210,13 @@ pub enum Out {
     /// write's, what it held: `K_DECODED`, `K_CARVED` or `K_RECEIVED`, the
     /// carved file, the interpreter)
     Dropped { at: u32, from: u32, kinds: u16, what: PyStr, interp: Option<PyStr> },
+    /// the supply-chain model (Python's): what the script reads back from
+    /// its own file, its docstring or a data file shipped with it, reaching
+    /// code run (the run's offset)
+    Own { at: u32 },
+    /// the supply-chain model (JavaScript's): a code file in another
+    /// package's folder written (the write's offset, the package): D-9
+    Rewrote { at: u32, pkg: PyStr },
 }
 
 fn commas(n: u64) -> String {
@@ -440,7 +447,7 @@ pub(super) fn fixpoint(prog: &mut Program, findings: &mut Vec<Out>) -> Vec<Out> 
                 // parameter of a function around it returned
                 let hit = *src
                     || !params.is_disjoint(&used)
-                    || outer.iter().any(|&k| prog.scope_fns(c).contains(&((k / PARAM_BASE) as FnId)));
+                    || outer.iter().any(|&k| prog.scope_fns(c).contains(&super::key_owner(k)));
                 if hit {
                     deps.push(c);
                 }

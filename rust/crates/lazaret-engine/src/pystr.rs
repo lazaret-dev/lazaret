@@ -107,12 +107,12 @@ pub fn find_str(h: &[u32], needle: &str, start: usize) -> Option<usize> {
             return None;
         }
         // (each place the needle's rarest character is, in order: pyre/scan.rs)
-        let at = crate::pyre::scan::rarest(nb);
+        let at = crate::scan::rarest(nb);
         let c = nb[at] as u32;
         let stop = last_start + at + 1;
         let mut p = start + at;
         while p < stop {
-            let q = crate::pyre::scan::find1(h, p, stop, c)?;
+            let q = crate::scan::find1(h, p, stop, c)?;
             if needle_eq(h, q - at, nb) {
                 return Some(q - at);
             }
@@ -154,7 +154,7 @@ pub fn find_in(h: &[u32], n: &[u32], start: usize, end: usize) -> Option<usize> 
         return None; // (the text lacks one of its pairs: textgate.rs)
     }
     // (each place the needle's rarest character is, in order: pyre/scan.rs)
-    let lit = crate::pyre::scan::Literal::new(n);
+    let lit = crate::scan::Literal::new(n);
     lit.find(h, n, start, end)
 }
 
@@ -219,8 +219,20 @@ pub fn ends_with(h: &[u32], needle: &str) -> bool {
 /// h == needle
 pub fn eq(h: &[u32], needle: &str) -> bool {
     let b = needle.as_bytes();
-    if h.len() == b.len() && b.is_ascii() {
-        return needle_eq(h, 0, b);
+    // (the common answer, no: more characters than the needle has bytes,
+    // or a first character that differs from an ASCII first byte; the
+    // models compare each name against tables of names this way)
+    if h.len() > b.len() {
+        return false;
+    }
+    match (h.first(), b.first()) {
+        (None, None) => return true,
+        (Some(&c), Some(&d)) if d < 0x80 && c != d as u32 => return false,
+        (None, Some(_)) => return false,
+        _ => {}
+    }
+    if h.len() == b.len() {
+        return b.is_ascii() && needle_eq(h, 0, b);
     }
     !b.is_ascii() && h.iter().copied().eq(needle.chars().map(|c| c as u32))
 }
@@ -468,6 +480,10 @@ pub struct Needles {
     /// the strings that start past ASCII
     other: Vec<u32>,
     has_empty: bool,
+    /// the strings as the regex engine's literal scan holds them (a scan
+    /// that looks for the characters the strings have at their rarest
+    /// place), for a list it can hold: up to 64 strings, none empty
+    scan: Option<crate::linre::literal::LitSet>,
 }
 
 impl Needles {
@@ -482,7 +498,9 @@ impl Needles {
                 Some(_) => other.push(k as u32),
             }
         }
-        Needles { list: list.to_vec(), by_first, other, has_empty }
+        let lits: Vec<crate::linre::literal::Lit> = list.iter().map(|n| n.iter().map(|&c| vec![c]).collect()).collect();
+        let scan = if has_empty { None } else { crate::linre::literal::LitSet::new(&lits) };
+        Needles { list: list.to_vec(), by_first, other, has_empty, scan }
     }
 
     /// Does `h` hold one of the strings?
@@ -494,6 +512,11 @@ impl Needles {
             && crate::textgate::ask(h, |p| self.list.iter().all(|n| !p.may_hold(n))).unwrap_or(false)
         {
             return false; // (each string has a pair the text lacks: textgate.rs)
+        }
+        if let Some(scan) = &self.scan {
+            // (where it stops, one of the strings starts: the scan keeps
+            // each string or one that starts it, so the answer is the same)
+            return scan.find(h, 0, h.len()).is_some();
         }
         for (i, &c) in h.iter().enumerate() {
             let cands = if c < 128 { &self.by_first[c as usize] } else { &self.other };

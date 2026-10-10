@@ -5,7 +5,7 @@
 
 import { resolve, isAbsolute } from "node:path";
 import { readFileSync } from "node:fs";
-import { SEV_ORDER } from "./scanner/rules.js";
+import { SEV_ORDER, HARDENING_RULES } from "./scanner/rules.js";
 import { computeMetrics, worstSevRating, maintainabilityRating } from "./scanner/metrics.js";
 import { ENGINE_VERSION, ENGINE_MARKER, HTML_ENGINE_MARKER } from "./lib/fs.js";
 import { cmpCodePoints, pyStrip, isPrintable, pyFloatRepr } from "./lib/pycompat.js";
@@ -28,26 +28,49 @@ function localIso(d = new Date()) {
  */
 export const CROSS_FILE_LABEL = "No cross-file taint flows";
 
-export function buildResult(root, files, issues) {
-  issues.sort((a, b) =>
-    (SEV_ORDER[a.sev] - SEV_ORDER[b.sev]) ||
-    cmpCodePoints(String(a.file), String(b.file)) ||
-    (a.line - b.line));
-  const metrics = computeMetrics(files);
+const sortIssues = (issues) => issues.sort((a, b) =>
+  (SEV_ORDER[a.sev] - SEV_ORDER[b.sev]) ||
+  cmpCodePoints(String(a.file), String(b.file)) ||
+  (a.line - b.line));
+
+/** (counts by type, the security and reliability ratings, the gate's two conditions on severities) of `issues` (core._severity_grades). */
+function severityGrades(issues) {
   const counts = { VULN: 0, HOTSPOT: 0, BUG: 0, SMELL: 0 };
   for (const i of issues) counts[i.type]++;
-  const ratings = {
-    security: worstSevRating(issues, ["VULN"]),
-    reliability: worstSevRating(issues, ["BUG"]),
-    maintainability: maintainabilityRating(issues, metrics.ncloc),
-  };
+  const ratings = { security: worstSevRating(issues, ["VULN"]), reliability: worstSevRating(issues, ["BUG"]) };
   const conds = [
     { label: "No blocker issues", ok: !issues.some((i) => i.sev === "BLOCKER") },
     { label: "No critical vulnerabilities",
       ok: !issues.some((i) => i.type === "VULN" && (i.sev === "CRITICAL" || i.sev === "BLOCKER")) },
+  ];
+  return { counts, ratings, conds };
+}
+
+/**
+ * `res` graded again from its issues, after something changed their severities or types (--verify-secrets: a live
+ * credential is a BLOCKER vulnerability, verify.js): the order of its issues, the counts, the security and reliability
+ * ratings, the gate's two conditions on severities and the gate. The other conditions are left as they are (core.regrade).
+ */
+export function regrade(res) {
+  sortIssues(res.issues);
+  const { counts, ratings, conds } = severityGrades(res.issues);
+  res.counts = counts;
+  Object.assign(res.ratings, ratings);
+  const now = new Map(conds.map((c) => [c.label, c.ok]));
+  for (const cond of res.conditions) if (now.has(cond.label)) cond.ok = now.get(cond.label);
+  res.pass = res.conditions.every((c) => c.ok);
+  return res;
+}
+
+export function buildResult(root, files, issues) {
+  sortIssues(issues);
+  const metrics = computeMetrics(files);
+  const { counts, ratings, conds } = severityGrades(issues);
+  ratings.maintainability = maintainabilityRating(issues, metrics.ncloc);
+  conds.push(
     { label: "Duplication < 10%", ok: metrics.dupPct < 10 },
     { label: "Maintainability ≥ C", ok: "ABC".includes(ratings.maintainability) },
-  ];
+  );
   // Keys are file names: one named __proto__ is an ordinary key here (an
   // assignment set the object's prototype instead, losing the count).
   const perFile = {};
@@ -58,8 +81,12 @@ export function buildResult(root, files, issues) {
   }
   let supply = 0, crossFile = 0;
   // INFO supply-chain entries are inventory (a project's own prepare hook,
-  // shared semantics 3), not indicators.
-  for (const i of issues) { if (i.rule.startsWith("SC-") && i.sev !== "INFO") supply++; if (i.rule.startsWith("X-")) crossFile++; }
+  // shared semantics 3), not indicators; nor is a CI file's hardening check
+  // below CRITICAL (HARDENING_RULES).
+  for (const i of issues) {
+    if (i.rule.startsWith("SC-") && i.sev !== "INFO" && (!HARDENING_RULES.has(i.rule) || i.sev === "CRITICAL")) supply++;
+    if (i.rule.startsWith("X-")) crossFile++;
+  }
   conds.push({ label: "No supply-chain indicators", ok: supply === 0 });
   conds.push({ label: CROSS_FILE_LABEL, ok: crossFile === 0 });
   return {
@@ -208,13 +235,30 @@ export function issueExcerpt(issue, width = EXCERPT_WIDTH) {
   return safeExcerpt(snip[idx], width);
 }
 
+/**
+ * The report's line on --verify-secrets (core.verification_line): what the providers said of the credentials asked
+ * about, and the secret findings no provider could be asked about.
+ */
+export function verificationLine(v) {
+  const cred = v.credentials ?? {}, found = v.findings ?? {};
+  const n = (o, k) => o[k] ?? 0;
+  const asked = n(cred, "live") + n(cred, "rejected") + n(cred, "unknown");
+  let text = `Secrets verified  ${n(cred, "live")} live, ${n(cred, "rejected")} rejected, ${n(cred, "unknown")} unknown `
+    + `(of ${asked} asked about)`;
+  if (found.notVerified) {
+    text += `; ${found.notVerified} secret finding${found.notVerified !== 1 ? "s" : ""} no provider can be asked about`;
+  }
+  return text;
+}
+
 /** Terminal summary. `out` receives lines (injectable for tests). */
 export function printReport(res, { out = console.log, quiet = false } = {}) {
   const m = res.metrics;
   out("");
   out(`Lazaret scan — ${sanitizeTermLine(res.project)}`);
   const configs = m.configFiles ? ` · ${m.configFiles} config files` : "";
-  out(`  ${m.files} files · ${m.ncloc} lines of code · ${typeof m.dupPct === "number" ? pyFloatRepr(m.dupPct) : m.dupPct}% duplication${configs}`);
+  const left = m.dupLeftOut ? ` (${m.dupLeftOut} lines of Go and Rust not measured)` : "";
+  out(`  ${m.files} files · ${m.ncloc} lines of code · ${typeof m.dupPct === "number" ? pyFloatRepr(m.dupPct) : m.dupPct}% duplication${left}${configs}`);
   out("");
   out(`  Quality gate: ${res.pass ? "PASSED" : "FAILED"}`);
   for (const cond of res.conditions) out(`  ${cond.ok ? "✓" : "✗"} ${sanitizeTermLine(cond.label)}`);
@@ -222,6 +266,7 @@ export function printReport(res, { out = console.log, quiet = false } = {}) {
   out(`  Issues: ${res.counts.VULN} vulnerabilities · ${res.counts.HOTSPOT} hotspots · ${res.counts.BUG} bugs · ${res.counts.SMELL} smells · ${res.supplyChain} supply-chain`);
   if (m.depFiles) out(`  Dependency files scanned: ${m.depFiles}`);
   if ("newIssues" in res) out(`  New issues vs baseline: ${res.newIssues}`);
+  if (res.verification && typeof res.verification === "object") out(`  ${verificationLine(res.verification)}`);
   if (!quiet) {
     const shown = res.issues.slice(0, 40);
     for (const i of shown) {
@@ -287,8 +332,10 @@ export function sarifReport(res, root = null) {
     const file = String(i.file);
     const loc = isAbsolute(file) ? { uri: fileUri(file) } : { uri: sarifUri(file), uriBaseId: SARIF_SRCROOT };
     const line = Math.max(1, Math.trunc(Number(i.line)) || 1);
-    results.push({ ruleId: i.rule, ruleIndex: [...rules.keys()].indexOf(i.rule), level: SARIF_LEVEL[i.sev] ?? "note",
-      message: { text: i.msg }, locations: [{ physicalLocation: { artifactLocation: loc, region: { startLine: line } } }] });
+    const result = { ruleId: i.rule, ruleIndex: [...rules.keys()].indexOf(i.rule), level: SARIF_LEVEL[i.sev] ?? "note",
+      message: { text: i.msg }, locations: [{ physicalLocation: { artifactLocation: loc, region: { startLine: line } } }] };
+    if (i.verified && typeof i.verified === "object") result.properties = { verified: { ...i.verified } };   // (no part of the credential)
+    results.push(result);
   }
   let rootUri = fileUri(resolve(root ?? res.project));
   if (!rootUri.endsWith("/")) rootUri += "/";

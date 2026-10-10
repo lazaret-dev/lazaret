@@ -1,0 +1,50 @@
+# A nightly check of the native engine's speed (0.1.9, P-10): the eight packages of the profile, each scanned
+# three times from archives fetched by pinned sha256, and the seconds the engine spent against a budget.
+# Own file, not ci.yml: a schedule runs only from the default branch, and this job reads no pull request.
+# Same rules as ci.yml: actions pinned to full commit SHAs, contents: read, no secrets, no restored caches.
+# A package without a budget (budget.engine_s null in scripts/profile/packages.json) is reported, never failed;
+# `perf_check.py calibrate` turns the reports of several nights on this runner into budgets.
+name: Performance
+
+on:
+  schedule:
+    - cron: "41 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# One timing run at a time: two jobs sharing a runner pool are no measurement of each other.
+concurrency:
+  group: performance
+  cancel-in-progress: false
+
+jobs:
+  engine:
+    name: Engine timings
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.13"
+      - name: The native engine
+        working-directory: rust
+        run: cargo build --release --offline --locked
+      # Fetched and hashed before anything is timed; a file that is not the pinned bytes stops the job.
+      - name: The pinned archives
+        run: python scripts/profile/perf_check.py fetch --cache "$RUNNER_TEMP/perf-archives"
+      - name: Time the engine
+        run: >
+          python scripts/profile/perf_check.py run --cache "$RUNNER_TEMP/perf-archives" --runs 3
+          --json "$RUNNER_TEMP/perf-report.json" --summary "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: perf-report
+          path: ${{ runner.temp }}/perf-report.json
+          if-no-files-found: ignore
+          retention-days: 90

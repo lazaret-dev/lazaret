@@ -10,6 +10,7 @@ page's linear token matcher (findSecretToken) and core's (_TokenPattern,
 new with this fix) redact the same text."""
 
 import json
+import re
 import unittest
 
 from lazaret.scanner import core
@@ -58,6 +59,22 @@ class DashboardLinearPatternTests(unittest.TestCase):
                  "//" + "eyJ" * 5000]
         (page,) = dash.run([{"op": "eval", "expr": f"{json.dumps(lines)}.map(redactContextLine)"}])
         self.assertEqual(page, [core._redact_context_line(line) for line in lines])
+
+    def test_token_matches_are_cores(self):
+        """V-2: the page's findSecretToken finds what core's pattern finds, match by match, in both modes, on the
+        texts the npm package's twin is held to (test_js_parity_tokens: every format's pieces and edges)."""
+        from tests.architecture.test_js_parity_tokens import texts
+        cases = texts()
+        expr = ("(() => { const spans = (s, redact) => { const out = []; let pos = 0, t; "
+                "while ((t = findSecretToken(s, pos, { redact }))) { out.push([t.index, t.end]); pos = t.end; } "
+                f"return out; }}; return {json.dumps(cases)}.map((s) => [spans(s, false), spans(s, true)]); }})()")
+        (page,) = dash.run([{"op": "eval", "expr": expr}])
+        detect = re.compile(core._TOKEN_PATTERN.pattern)
+        redact = re.compile(core._TOKEN_REDACT_PATTERN.pattern)
+        self.assertEqual(len(page), len(cases))
+        for s, (d, r) in zip(cases, page):
+            self.assertEqual(d, [list(m.span()) for m in detect.finditer(s)], repr(s))
+            self.assertEqual(r, [list(m.span()) for m in redact.finditer(s)], repr(s))
 
 
 if __name__ == "__main__":

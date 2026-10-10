@@ -56,7 +56,7 @@ QUIET = (
     "API_KEY=$API_KEY", "password: {{ .Values.password }}", "token: <your-token>",
     "password: '%(db_password)s'", "GITHUB_TOKEN=your-github-token-here",
     "API_KEY=xxxxxxxxxxxxxxxxxxxx", "password: ********", "secret_key = ...",
-    "AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+    "AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDEN\x47/bPxRfiCYEXAMPLEKEY",
     "password: postgres", "password: supersecret1", "PASSWORD: P@ssw0rd!",
     "PASSWORD_MIN_LENGTH=12", "PASSWORD_FIELD=password", "PASSWORD_RESET_URL=/account/reset",
     "TOKEN_EXPIRY=3600", "max_tokens: 4096", "token_type: bearer", "tokenizer: gpt2-large",
@@ -162,7 +162,7 @@ class SecretValues(unittest.TestCase):
 class ScanConfigFile(unittest.TestCase):
     def test_tokens_on_every_line_secrets_outside_comments(self):
         text = (f"# GITHUB_TOKEN={TOKEN}\n# DB_PASSWORD={PASS}\n"
-                f"DB_PASSWORD={PASS}\nAWS_KEY=AKIAIOSFODNN7EXAMPLE\nKEY=AKIA2345ABCD6789WXYZ\n")
+                f"DB_PASSWORD={PASS}\nAWS_KEY=AKI\x41IOSFODNN7EXAMPLE\nKEY=AKI\x412345ABCD6789WXYZ\n")
         self.assertEqual(found(".env", text), [("S-SECRET", 3), ("S-TOKEN", 1), ("S-TOKEN", 5)])
 
     def test_fine_grained_github_tokens(self):
@@ -179,9 +179,9 @@ class ScanConfigFile(unittest.TestCase):
     def test_documentation_tokens_are_not_reported(self):
         jwt_io = ("eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9." + C.JWT_IO_PAYLOAD
                   + ".SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c")
-        self.assertEqual(found("a.yaml", f"k: {jwt_io}\nid: AKIAIOSFODNN7EXAMPLE\n"), [])
+        self.assertEqual(found("a.yaml", f"k: {jwt_io}\nid: AKI\x41IOSFODNN7EXAMPLE\n"), [])
         # a documentation sample first, a real-looking token after it: the second counts
-        self.assertEqual(found("b.yaml", f"k: AKIAIOSFODNN7EXAMPLE {TOKEN}\n"), [("S-TOKEN", 1)])
+        self.assertEqual(found("b.yaml", f"k: AKI\x41IOSFODNN7EXAMPLE {TOKEN}\n"), [("S-TOKEN", 1)])
 
     def test_private_keys_need_material(self):
         body = "MIIEpAIBAAKCAQEA3Bq7Zq8vN3pL0wX7rT2mK9sBZq8vN3pL0wX7rT2mK9sB"
@@ -209,6 +209,168 @@ class ScanConfigFile(unittest.TestCase):
         for raw in (PASS, "d41d8cd98f00b204e9800998ecf8427e", TOKEN, "x7!"):
             self.assertNotIn(raw, shown)
         self.assertTrue(all(i["sev"] == "BLOCKER" and i["type"] == "VULN" for i in issues))
+
+
+class NetrcAndCratesTokens(unittest.TestCase):
+    """0.1.9: a .netrc's password tokens (N-12: `machine HOST login USER password PASS`, blanks between the
+    tokens, no key = value), and crates.io's API tokens (R-4: "cio" and 32 letters and digits; cargo keeps one in
+    ~/.cargo/credentials.toml)."""
+
+    def test_a_netrc_password(self):
+        text = (f"machine api.example.invalid login alice password {PASS}\n"
+                "machine ftp.example.invalid\n  login bob\n  password changeme\n"
+                f"default login anon password \"{PASS}\"\n# password {PASS}\n")
+        for name in (".netrc", "_netrc", "home/.NETRC"):
+            with self.subTest(name):
+                self.assertEqual(found(name, text), [("S-SECRET", 1), ("S-SECRET", 5)])
+        # the keyword is a whole token: a login ending in "password" is not one
+        self.assertEqual(found(".netrc", f"machine h.invalid login app_password password {PASS}\n"), [("S-SECRET", 1)])
+        self.assertNotIn(PASS, json.dumps(core.scan_config_file(".netrc", f"login app_password password {PASS}\n")))
+        # another config file's prose is not a .netrc's token
+        self.assertEqual(found("notes.cfg", f"hint = the password {PASS} is not this\n"), [])
+        # the snippet never shows the password, on its line or a line around it
+        self.assertNotIn(PASS, json.dumps(core.scan_config_file(".netrc", text)))
+
+    def test_an_anonymous_ftp_login_is_no_secret(self):
+        """N-25: the password of an entry whose login is anonymous FTP's (`anonymous`, `ftp`, in any case) is by
+        convention an e-mail address, wherever the login sits in the entry; any other entry's still counts."""
+        text = ("machine ftp.host.invalid login anonymous password jdoe@mailhost.invalid\n"
+                "default\n  password jdoe@mailhost.invalid\n  login FTP\n"
+                f"machine api.host.invalid login alice password {PASS}\n"
+                "macdef init\ncd /pub\n\n"
+                f"machine other.invalid\n login ftpuser\n password {PASS}\n"
+                "machine more.invalid login anonymous\n"
+                f"machine last.invalid password {PASS}\n")
+        self.assertEqual(found(".netrc", text), [("S-SECRET", 5), ("S-SECRET", 11), ("S-SECRET", 13)])
+        # the same lines in another config file are prose, not tokens
+        self.assertEqual(found("ftp.cfg", "login anonymous password jdoe@mailhost.invalid\n"), [])
+
+    def test_a_crates_io_token(self):
+        tok = "cio" + "Zq8vN3pL0wX7rT2mK9sB4hF6jD1aE5cG"
+        self.assertEqual(len(tok), 35)
+        self.assertEqual(found("credentials.toml", f'[registry]\ntoken = "{tok}"\n'), [("S-SECRET", 2), ("S-TOKEN", 2)])
+        got = core.scan_file("src/lib.rs", f'pub const CRATES_IO: &str = "{tok}";\n', "rs")
+        self.assertEqual([i["rule"] for i in got if i["rule"].startswith("S-")], ["S-TOKEN"])
+        self.assertNotIn(tok, json.dumps(got))
+        # in code too, a "cio" inside a longer run is chance
+        for text in (f'const X: &str = "A{tok}";\n', f'const X: &str = "{tok}9";\n'):
+            with self.subTest(text):
+                self.assertNotIn("S-TOKEN", [i["rule"] for i in core.scan_file("src/x.rs", text, "rs")])
+        # nor on another finding's context line
+        got = core.scan_file("src/lib.rs", f'fn f() {{ let password = "hunter22hunter"; }}\nfn g() -> &\'static str {{ "{tok}" }}\n', "rs")
+        self.assertEqual(sorted(i["rule"] for i in got if i["rule"].startswith("S-")), ["S-SECRET", "S-TOKEN"])
+        self.assertNotIn(tok, json.dumps(got))
+        # inside a longer run (base64, an identifier) it is chance, not a token
+        for text in (f'x = "A{tok}"\n', f'x = "{tok}9"\n', f'x = "{tok[:-1]}"\n'):
+            with self.subTest(text):
+                self.assertNotIn("S-TOKEN", [r for r, _ in found("a.toml", text)])
+
+
+# V-2: npm's access tokens, Anthropic's keys and tokens and OpenAI's keys, made up and built in pieces so the source
+# holds no token-shaped literal (GitHub's push protection knows these formats)
+NPM = "npm" + "_" + "a1B2" * 9
+ANTHROPIC = "sk-ant-" + "api03-" + "Ab1_-" * 18 + "Ab1" + "AA"
+ANTHROPIC_ADMIN = "sk-ant-" + "admin01-" + "x1Y2z" * 18 + "x1Y" + "AA"
+ANTHROPIC_OAUTH = "sk-ant-" + "oat01-" + "Q7r_p" * 12
+# the Console's personal keys (S-TOKEN-USR): 106 long, 12, 76 and 5 characters between their dashes
+ANTHROPIC_USR = "sk-ant-" + "usr-" + "1a2B3c4D5e6F" + "-" + "Gh7Ij8Kl9Mn0" * 6 + "Op1Q" + "-" + "Rs2Tu"
+OPENAI = "sk-" + "a1B2C" * 4 + "T3Blbk" + "FJ" + "d3E4f" * 4
+OPENAI_PROJECT = "sk-" + "proj-" + "Ab1_-" * 14 + "Ab1_" + "T3Blbk" + "FJ" + "Cd2-_" * 14 + "Cd2-"
+OPENAI_ADMIN = "sk-" + "admin-" + "Zz9y8" * 11 + "Zz9" + "T3Blbk" + "FJ" + "Yy8x7" * 11 + "Yy8"
+PROVIDER_KEYS = (NPM, ANTHROPIC, ANTHROPIC_ADMIN, ANTHROPIC_OAUTH, ANTHROPIC_USR, OPENAI, OPENAI_PROJECT, OPENAI_ADMIN)
+
+
+class ProviderKeyFormats(unittest.TestCase):
+    """V-2: S-TOKEN reads npm's access tokens ("npm_" and 36 letters and digits), Anthropic's keys and tokens
+    ("sk-ant-", a kind such as api03, admin01 or oat01, or usr, and 40 to 200 more) and OpenAI's keys ("sk-", the kind's
+    name if any, "T3BlbkFJ" in the middle), each a whole run of its characters. They got only S-ENTROPY, or S-SECRET by
+    a variable's name, before."""
+
+    def test_in_code_of_each_language(self):
+        for tok in PROVIDER_KEYS:
+            for path, text, lang in (("app.py", f'KEY = "{tok}"\n', "py"), ("app.js", f"const key = '{tok}';\n", "js"),
+                                     ("main.go", f'var k = "{tok}"\n', "go"),
+                                     ("src/lib.rs", f'const K: &str = "{tok}";\n', "rs")):
+                with self.subTest(tok=tok[:12], lang=lang):
+                    got = core.scan_file(path, text, lang)
+                    self.assertIn("S-TOKEN", [i["rule"] for i in got])
+                    self.assertNotIn(tok, json.dumps(got))
+
+    def test_in_config_files(self):
+        for tok in PROVIDER_KEYS:
+            for path, text in ((".env", f"KEY={tok}\n"), ("ci.yml", f"env:\n  K: {tok}\n"),
+                               (".npmrc", f"//registry.npmjs.org/:_authToken={tok}\n")):
+                with self.subTest(tok=tok[:12], path=path):
+                    self.assertIn("S-TOKEN", [r for r, _ in found(path, text)])
+                    self.assertNotIn(tok, json.dumps(core.scan_config_file(path, text)))
+
+    def test_each_is_the_whole_run(self):
+        p = core._TOKEN_PATTERN
+        for tok in PROVIDER_KEYS:
+            for text in (tok, f'"{tok}"', f"Bearer {tok};", f"KEY={tok}\n"):
+                with self.subTest(text=text[:20]):
+                    self.assertEqual(p.search(text).group(0), tok)
+
+    def test_what_is_not_one(self):
+        not_ones = [
+            "x" + NPM, NPM + "9", NPM[:-1], "npm" + "_" + "config_" + "a" * 36,   # a longer run, too short, a name
+            "_" + ANTHROPIC, "sk-ant-" + "api03-" + "a" * 39,                       # glued, too short
+            "sk-ant-" + "api03-" + "a" * 201, "sk-ant-" + "ap03-" + "a" * 50,     # too long, a kind too short
+            "sk-ant-" + "abcdef03-" + "a" * 50, "sk-ant-" + "api003-" + "a" * 50,  # a kind too long, three digits
+            "sk-ant-" + "api03-...", "sk-ant-" + "api03-xxxx",                      # documentation's samples
+            "sk-ant-" + "usr-" + "a" * 39, "sk-ant-" + "usra-" + "a" * 50,         # usr: too short; four letters
+            "sk-ant-" + "ust-" + "a" * 50, "sk-ant-" + "usr-...",                   # another kind; a sample
+            "x" + OPENAI, "sk-" + "a" * 19 + "T3Blbk" + "FJ" + "a" * 20,           # glued, the first part short
+            "sk-" + "a" * 20 + "T3Blbk" + "FJ" + "a" * 19, "sk-" + "a" * 91 + "T3Blbk" + "FJ" + "a" * 20,
+            "sk-" + "a" * 20 + "T3Blbk" + "FJ" + "a" * 75, "sk-" + "a" * 48,       # the last part long; no marker
+        ]
+        for text in not_ones:
+            with self.subTest(text=text[:24]):
+                self.assertIsNone(core._TOKEN_PATTERN.search(text))
+                self.assertNotIn("S-TOKEN", [r for r, _ in found(".env", f"K={text}\n")])
+
+    def test_redacted_on_another_findings_line(self):
+        for tok in PROVIDER_KEYS:
+            with self.subTest(tok=tok[:12]):
+                self.assertEqual(core._redact_context_line(f"x = '{tok}' # a"), "x = '[redacted]' # a")
+                got = core.scan_file("app.py", f'password = "hunter22hunter"\nk = ["{tok}"]\n', "py")
+                self.assertNotIn(tok, json.dumps(got))
+
+
+class LinesReadTests(unittest.TestCase):
+    """A config or data file's lines are read only where a test can report (0.1.9): the S-TOKEN test where the
+    token pattern matches, found by one pass over the whole text, and S-SECRET's where a credential-named key meets a
+    separator (configsecrets.SECRET_KV_HINT_RE, on the text lowered) or a URL is; a large data file's other lines
+    are passed over. The findings are those of reading every line."""
+
+    def test_every_credential_named_key_has_the_hint(self):
+        import random
+        rnd = random.Random(2)
+        ends = ["password", "passwd", "passphrase", "secret", "token", "apikey", "api_key", "api-key", "accessKey",
+                "client_secret", "SIGNING_KEY", "pass", "pwd", "pat", "auth", "db.pass", "x-auth"]
+        heads = ["", "db_", "MY_", "app.", "a-", "Prod", "x"]
+        for _ in range(2000):
+            key = rnd.choice(heads) + "".join(c.upper() if rnd.random() < 0.3 else c for c in rnd.choice(ends))
+            for form in ('{k}={v}', '"{k}": "{v}"', "{k}: {v}", "{k} = {v}", "'{k}'\t:\t{v}"):
+                text = form.format(k=key, v="Zq8!vN3pL0wX7r")
+                for m in C.KV_RE.finditer(text):
+                    if C.secret_key(m.group(1)):
+                        with self.subTest(text=text):
+                            self.assertTrue(C.SECRET_KV_HINT_RE.search(text.lower()))
+
+    def test_the_same_findings_as_reading_every_line(self):
+        import random
+        rnd = random.Random(9)
+        pieces = list(REPORTED) + list(QUIET) + [TOKEN, PAT, f"key: {TOKEN}", "# " + TOKEN, "", "  ", "[x]",
+                                                 "machine h.invalid login u password " + PASS, "eyJhbGciOiJIUzI1NiJ9.e"]
+        every = lambda rx, text: set(range(text.count("\n") + 1))           # noqa: E731
+        for k in range(300):
+            text = "\n".join(rnd.choice(pieces) for _ in range(rnd.randint(1, 25))) + "\n"
+            name = rnd.choice([".env", "config.yml", "a.json", ".netrc", "x.ini", "Dockerfile"])
+            with self.subTest(k=k):
+                fast = core.scan_config_file(name, text)
+                with mock.patch.object(core, "_match_lines", every):
+                    self.assertEqual(fast, core.scan_config_file(name, text))
 
 
 class ProjectScan(unittest.TestCase):
