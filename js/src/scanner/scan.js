@@ -48,7 +48,7 @@ export function detectLang(name, content) {
   // content heuristic: SQL keywords dominate and no JS/py structure
   if (/\b(SELECT|INSERT\s+INTO|UPDATE|DELETE\s+FROM|CREATE\s+(TABLE|PROCEDURE|USER)|GRANT|ALTER\s+TABLE)\b/i.test(content)
      && !/\b(function|=>|def |import )\b/.test(content)) return "sql";
-  if (/^\s*(def |import |from \w+ import|class \w+.*:)/m.test(content) && !/[{};]\s*$/m.test(content)) return "py";
+  if (/^[^\S\n\r\u2028\u2029]*(def |import |from \w+ import|class \w.*:)/m.test(content) && !/[{};]\s*$/m.test(content)) return "py";
   return /\b(def |elif |None|self\.)/.test(content) && !/\b(const|let|=>|function)\b/.test(content) ? "py" : "js";
 }
 

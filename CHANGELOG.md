@@ -875,6 +875,12 @@ aggregate):
 
 ### Fixed
 
+- **The npm package's guess at a file's language read a long run of line breaks in quadratic time (CodeQL).**
+  `scanFile` without a `lang` (the library API, and the dashboard's pasted code) guesses it from the content, and
+  the Python test's `^\s*` crossed line breaks, so each of a run of them rescanned the rest: 100,000 took about 9
+  seconds, a megabyte of blank lines hours, and a long `class` line with no colon the same. The test reads a line's
+  own leading blanks now, with the same answers (200,000 random texts compared). A project scan, which knows each
+  file's language from its name or its `#!` line, never took this path.
 - **A second `pip install -e ./python` could leave Python killed on a Mac with Apple silicon.** An editable install
   wrote the new engine over the old library in place. macOS keeps the code signature it read for a file and kills a
   process that loads a library whose bytes changed under it (`zsh: killed`, "Python quit unexpectedly"), so after an
