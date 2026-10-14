@@ -1,6 +1,6 @@
 // The project scan (the Python package's core.scan_project), shared by `lazaret <dir>` (cli.js) and `lazaret hook`
-// (hook.js): collect, each file's scan, the config files, the manifests, the dependency checks, the skipped trees, the
-// cross-file flows, then the result built and redacted. Prints nothing.
+// (hook.js): collect, each file's scan, the config files, the manifests, what the project's own install hooks run, the
+// dependency checks, the skipped trees, the cross-file flows, then the result built and redacted. Prints nothing.
 
 import { collectFiles, ScanTargetError, scanErrorIssue, MAX_FILE_BYTES } from "./lib/fs.js";
 import { fsNameToString } from "./lib/encoding.js";
@@ -9,7 +9,7 @@ import { scanManifest, scanGyp } from "./lib/supplychain.js";
 import { redactResult } from "./lib/redact.js";
 import { buildResult } from "./report.js";
 import { clipLine } from "./lib/issue.js";
-import { dependencyChecks } from "./deps.js";
+import { dependencyChecks, projectHookChecks } from "./deps.js";
 import { Pool, threadsFor, mapTasks } from "./pool.js";
 import { analyzeFlows, redactFlowIssues } from "./scanner/flow.js";
 
@@ -63,6 +63,9 @@ export function scanCollected(root, col, { exclude = [], env = process.env, extr
           : scanManifest(mf.path, mf.content, { registry: !!mf.dep }));
       } catch (e) { issues.push(scanErrorIssue(mf.path, e)); }
     }
+    // the project's own install hooks: what they run (projectHookChecks)
+    add(projectHookChecks(root, files, manifests, issues,
+      { exclude, pruned: skippedIssues.map((i) => i.file), maxFileBytes: col.maxFileBytes }));
     // --deps: what the dependencies run (install hooks, import-time code)
     const deps = dependencyChecks(root, files, manifests, issues, { exclude, maxFileBytes: col.maxFileBytes, pool });
     add(deps.issues);

@@ -35,6 +35,7 @@ import { REDACT, redactText, registerScanContext, SECRET_SKIP_RE } from "./lib/r
 import { mapTasks } from "./pool.js";
 import { pyStrip, pyStripChars, pyRepr, cmpCodePoints, pyEntries, pyRe, cpLen, cpPrefix, isPySpace } from "./lib/pycompat.js";
 import { EXHAUSTED } from "./scanner/scan.js";
+import { isObfuscated } from "./scanner/engine.js";
 
 const DEP_IMPORT_RISK_WHY = "An installed package's code runs with the application's privileges when it is loaded " +
   "or its command runs. Collecting credentials or the whole environment next to a network call is the shape of an " +
@@ -68,14 +69,17 @@ const decodeScript = (path, data) => decodeMember(path, data, "js");
 /**
  * What a --deps scan knows of the tree, to follow a dependency's install
  * hook: the files it read and, for the others, the disk under the scan
- * root. Twin of core._DependencyTree.
+ * root. `pruned`: the directories the walk pruned, when nothing in them is to
+ * be read either (a project's own hooks: projectHookChecks). Twin of
+ * core._DependencyTree.
  */
 class DependencyTree {
-  constructor(root, files, manifests, exclude, maxFileBytes) {
+  constructor(root, files, manifests, exclude, maxFileBytes, pruned = []) {
     this.root = resolve(root);
     this.sources = new Map(files.map((f) => [posix(f.path), f]));
     this.manifests = new Map(manifests.map((m) => [posix(m.path), m]));
     this.excludes = new Set([...(exclude || []), ".git"]);
+    this.pruned = new Set(pruned.map(posix));
     this.maxFileBytes = maxFileBytes;
     this.regular = new Map();
     this.read = new Map();
@@ -90,6 +94,7 @@ class DependencyTree {
   onDisk(rel) {
     const parts = rel.split("/");
     if (parts.slice(0, -1).some((p) => this.excludes.has(p) || p === "" || p === "." || p === "..")) return false;
+    if (this.inPruned(parts)) return false;
     let path = this.root;
     try {
       for (let k = 0; k < parts.length; k++) {
@@ -102,6 +107,11 @@ class DependencyTree {
       }
     } catch { /* missing, unreadable, or a name the OS refuses */ }
     return false;
+  }
+
+  /** Is one of the folders of `parts` (a path's, split at "/") a tree the walk pruned? core._DependencyTree._in_pruned */
+  inPruned(parts) {
+    return this.pruned.size > 0 && parts.slice(0, -1).some((_, k) => this.pruned.has(parts.slice(0, k + 1).join("/")));
   }
 
   /** The file Node runs for `path`, or null (twin of core._DependencyTree.resolve). */
@@ -731,10 +741,7 @@ function followDependencyHook(tree, issue, cmd, out, extra, run, truncated, name
   const [targets, complete] = followHook(cmd);
   if (!complete && !truncated.has(manifest)) {
     truncated.add(manifest);
-    const [commands, scripts, chars, path] = packValues("HOOK_MAX_COMMANDS", "HOOK_MAX_TARGETS", "HOOK_MAX_CHARS",
-      "HOOK_MAX_PATH");
-    out.push(truncatedIssue(manifest, `its install hook is more than Lazaret follows (${withCommas(commands)} ` +
-      `commands, ${scripts} scripts, ${withCommas(chars)} characters, ${withCommas(path)}-character paths)`));
+    out.push(hookNotFollowedIssue(manifest));
   }
   for (const target of targets) {
     const path = treeJoin(base, target);
@@ -750,7 +757,8 @@ function followDependencyHook(tree, issue, cmd, out, extra, run, truncated, name
     const agent = text ? dependencyAgentIssue(native(rel), text) : null;
     if (agent) out.push(agent);
     // the scripts it starts with node or python (0.1.8, spawnedScripts)
-    for (const [started, stext] of startedScripts(tree, rel, text, base, out, extra, run)) {
+    const read = (nxt, lang) => scriptText(tree, nxt, lang, out, extra, run);
+    for (const [started, stext] of startedScripts(tree, rel, text, base, read)) {
       const more = stext ? installScriptRisk(stext, true, false, scriptLang(started), ownName) : [];
       if (more.length && issue.sev !== "BLOCKER" && issue.sev !== "CRITICAL") {
         const shown = base && started.startsWith(base + "/") ? started.slice(base.length + 1) : started;
@@ -762,8 +770,17 @@ function followDependencyHook(tree, issue, cmd, out, extra, run, truncated, name
   }
 }
 
-/** [[rel, text]] for the scripts an install script starts with node or python, and those they start. core._started_dependency_scripts. */
-function startedScripts(tree, rel, text, cwd, out, extra, run) {
+/** SC-TRUNCATED for a manifest whose install hook is more than followHook reads (core._hook_not_followed_issue). */
+function hookNotFollowedIssue(manifest) {
+  const [commands, scripts, chars, path] = packValues("HOOK_MAX_COMMANDS", "HOOK_MAX_TARGETS", "HOOK_MAX_CHARS",
+    "HOOK_MAX_PATH");
+  return truncatedIssue(manifest, `its install hook is more than Lazaret follows (${withCommas(commands)} ` +
+    `commands, ${scripts} scripts, ${withCommas(chars)} characters, ${withCommas(path)}-character paths)`);
+}
+
+/** [[rel, text]] for the scripts an install script starts with node or python, and those they start; `read(rel,
+ * lang)`: a started script's text, or null. core._started_scripts */
+function startedScripts(tree, rel, text, cwd, read) {
   const [SPAWN_MAX_DEPTH, SPAWN_MAX_FILES] = packValues("_SPAWN_MAX_DEPTH", "_SPAWN_MAX_FILES");
   const found = [], seen = new Set([rel]), queue = [[rel, text, 0]];
   while (queue.length && seen.size <= SPAWN_MAX_FILES) {
@@ -775,7 +792,7 @@ function startedScripts(tree, rel, text, cwd, out, extra, run) {
       if (nxt === null || seen.has(nxt) || seen.size > SPAWN_MAX_FILES) continue;
       seen.add(nxt);
       const lang = nxt.endsWith(".py") ? "py" : nxt.endsWith(".sh") ? "sh" : "js";
-      const ntext = scriptText(tree, nxt, lang, out, extra, run);
+      const ntext = read(nxt, lang);
       found.push([nxt, ntext]);
       queue.push([nxt, ntext, depth + 1]);
     }
@@ -791,8 +808,9 @@ function scriptText(tree, rel, asLang, out, extra, run) {
   return tree.read.get(rel);
 }
 
-/** A file an install hook runs that the walk did not read as source (twin of core._read_dependency_script). */
-function readScript(tree, rel, asLang, out, extra) {
+/** A file an install hook runs that the walk did not read as source; scan=false (a project's own hook): only read,
+ * for the tests of what the hook runs (twin of core._read_dependency_script). */
+function readScript(tree, rel, asLang, out, extra, scan = true) {
   const disp = native(rel);
   const cap = tree.maxFileBytes;
   let data;
@@ -816,9 +834,103 @@ function readScript(tree, rel, asLang, out, extra) {
   }
   const [text, decodeFindings] = decodeScript(disp, data);
   for (const i of decodeFindings) out.push(i);
-  for (const i of scanFile({ name: disp, path: disp, content: text, lang: "js", dep: true })) out.push(i);
-  extra.push({ path: disp, content: text, lang: "js", dep: true });
+  if (scan) {
+    for (const i of scanFile({ name: disp, path: disp, content: text, lang: "js", dep: true })) out.push(i);
+    extra.push({ path: disp, content: text, lang: "js", dep: true });
+  }
   return text;
+}
+
+// ---- A project's own install hooks (SC-INSTALL-HOOK, 0.1.9) ----
+// Twin of core's section of the same name: each install hook of every package.json that is not a dependency's is
+// followed as a dependency's is, to the files it runs (followHook, then Node's resolution; into nothing the walk
+// pruned: no dependency tree without --deps) and the scripts those start (spawnedScripts). The hook becomes CRITICAL
+// when one of them fails installScriptRisk (`own`: the manifest's name) or is obfuscated (isObfuscated, as
+// SC-AUTORUN), the test's reasons first. A file the walk did not read as source is read for these tests only, not
+// scanned; one that cannot be read as text, and a hook more than followHook reads, are SC-TRUNCATED.
+
+/**
+ * The follow of a project's own install hooks, after the manifests were scanned: escalates the SC-INSTALL-HOOK
+ * findings of the package.json files that are not a dependency's in `issues` in place and returns the findings to
+ * add. `pruned`: the directories the walk pruned. Twin of core.project_hook_checks.
+ */
+export function projectHookChecks(root, files, manifests, issues, { exclude = [], pruned = [], maxFileBytes = MAX_FILE_BYTES } = {}) {
+  const ownManifests = new Map(manifests.filter((m) => !m.dep && m.kind === "package.json").map((m) => [m.path, m]));
+  const hooks = issues.filter((i) => i.rule === "SC-INSTALL-HOOK" && HOOK_COMMANDS.get(i) && ownManifests.has(i.file));
+  const out = [];
+  if (!hooks.length) return out;
+  const tree = new DependencyTree(root, files, manifests, exclude, maxFileBytes, pruned);
+  const truncated = new Set(), names = new Map();
+  for (const issue of hooks) {
+    const manifest = issue.file;
+    if (!names.has(manifest)) names.set(manifest, manifestName(ownManifests.get(manifest)));
+    try { followProjectHook(tree, issue, HOOK_COMMANDS.get(issue), out, truncated, names.get(manifest)); }
+    catch (e) { out.push(scanErrorIssue(manifest, e)); }        // one manifest must never kill the run
+  }
+  return out;
+}
+
+/** A package.json's "name", or null (core._manifest_name). */
+function manifestName(manifest) {
+  const [data] = loadManifest(manifest.path, manifest.content);
+  const name = own(data, "name");
+  return typeof name === "string" && name ? name : null;
+}
+
+function followProjectHook(tree, issue, cmd, out, truncated, ownName) {
+  const manifest = issue.file;
+  const base = dirname(posix(manifest));
+  const [targets, complete] = followHook(cmd);
+  if (!complete && !truncated.has(manifest)) {
+    truncated.add(manifest);
+    out.push(hookNotFollowedIssue(manifest));
+  }
+  for (const target of targets) {
+    const path = treeJoin(base, target);
+    const rel = path === null ? null : tree.resolve(path);
+    if (rel !== null) testProjectScript(tree, issue, out, base, target, rel, ownName);
+  }
+}
+
+/** The tests of `rel`, the file `target` a project's install hook runs, then of the scripts it starts with node,
+ * python (spawnedScripts). core._test_project_script */
+function testProjectScript(tree, issue, out, base, target, rel, ownName) {
+  const read = (nxt, asLang) => projectScriptText(tree, nxt, asLang, out);
+  const text = read(rel, rel.endsWith(".sh") ? "sh" : "js");
+  const reasons = text ? projectScriptRisk(text, rel, ownName) : [];
+  if (reasons.length) escalateHook(issue, `Install hook runs ${target}, which ${reasons.join("; and ")}.`);
+  for (const [started, stext] of startedScripts(tree, rel, text, base, read)) {
+    const more = stext ? projectScriptRisk(stext, started, ownName) : [];
+    if (more.length) {
+      const shown = base && started.startsWith(base + "/") ? started.slice(base.length + 1) : started;
+      escalateHook(issue, `Install hook runs ${target}, which starts ${shown}, which ${more.join("; and ")}.`);
+    }
+  }
+}
+
+/** Why a file a project's install hook runs looks hostile: installScriptRisk's reasons, then "is obfuscated"
+ * (core._project_script_risk). */
+function projectScriptRisk(text, rel, ownName) {
+  const reasons = [...installScriptRisk(text, true, false, scriptLang(rel), ownName)];
+  if (isObfuscated(text)) reasons.push("is obfuscated");
+  return reasons;
+}
+
+/** The SC-INSTALL-HOOK finding made CRITICAL with `msg`, unless it already is (core._escalate_hook). */
+function escalateHook(issue, msg) {
+  if (issue.sev !== "BLOCKER" && issue.sev !== "CRITICAL") {
+    issue.sev = "CRITICAL";
+    issue.msg = REDACT.on ? redactText(msg) : msg;
+  }
+}
+
+/** Text of a file a project's install hook runs (the walk's, else read here and not scanned), or null
+ * (core._project_script_text). */
+function projectScriptText(tree, rel, asLang, out) {
+  if (tree.sources.has(rel)) return tree.sources.get(rel).content;
+  if (tree.manifests.has(rel)) return tree.manifests.get(rel).content;
+  if (!tree.read.has(rel)) tree.read.set(rel, readScript(tree, rel, asLang, out, null, false));
+  return tree.read.get(rel);
 }
 
 /** SC-IMPORT-RISK (MAJOR, or CRITICAL: importTimeSeverity) for a dependency's file (`lang` "js" or "py") that fails

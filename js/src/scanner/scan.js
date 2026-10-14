@@ -6,7 +6,7 @@
 // are the engine's too); this module scans config and data files (credentials,
 // auto-run settings, workflows), whose checks are still the package's own.
 import { normalizeSource } from "./lines.js";
-import { OBF_IDENT_RE, SECRET_SKIP_RE, makeSuppressor, mkIssue } from "./engine.js";
+import { isObfuscated, SECRET_SKIP_RE, makeSuppressor, mkIssue } from "./engine.js";
 import { lexLines, jsxReading } from "../lib/lexer.js";
 import { cpLen, cpPrefix, pyRepr, isPySpace } from "../lib/pycompat.js";
 import { findSecretToken, registerScanContext, REDACT } from "../lib/redact.js";
@@ -204,8 +204,7 @@ function autorunRisk(command, base, read) {
     const text = rel !== null ? read(rel) : null;
     if (text === null) continue;
     const found = autorunScriptRisk(text, scriptLang(rel));
-    OBF_IDENT_RE.lastIndex = 0;
-    if (new Set(text.match(OBF_IDENT_RE) ?? []).size >= 5) found.push("is obfuscated");
+    if (isObfuscated(text)) found.push("is obfuscated");
     if (found.length) return [found, target];
     // (0.1.8) the scripts it starts (spawnedScripts): a loader that fetches a runtime and runs a file of the tree with it
     for (const [where, path] of spawnedScripts(normalizeNewlines(text), scriptLang(rel))) {

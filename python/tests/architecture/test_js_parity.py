@@ -452,8 +452,9 @@ class EngineParityTests(unittest.TestCase):
                     rules = collections.Counter(i["rule"] for i in js[1]["issues"])
                     self.assertEqual(rules["SC-IMPORT-RISK"], 3)
                     self.assertGreaterEqual(rules["SC-TRUNCATED"], 3)
+                    # 10 of the dependencies' and (0.1.9) the project's own
                     self.assertEqual(sum(1 for i in js[1]["issues"] if i["rule"] == "SC-INSTALL-HOOK"
-                                         and i["msg"].startswith("Install hook runs ")), 10)
+                                         and i["msg"].startswith("Install hook runs ")), 11)
         finally:
             shutil.rmtree(root, ignore_errors=True)
 

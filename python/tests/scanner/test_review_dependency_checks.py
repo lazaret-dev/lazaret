@@ -33,7 +33,7 @@ def pkg(name, **scripts):
 #: package -> files (inert); the tree the parity test uses too
 TREE = {
     "package.json": pkg("app", postinstall="node build.js"),
-    "build.js": EXFIL,                                           # first-party: its hook is not followed
+    "build.js": EXFIL,                  # first-party: followed by the project's own follow (test_review_project_hooks)
     "scripts/first-party.js": EXFIL,
     # a hook that runs a file the walk does not read as source: read, scanned as JavaScript
     "node_modules/a/package.json": pkg("a", postinstall="node install.dat"),
@@ -139,6 +139,8 @@ class DependencyCheckTests(unittest.TestCase):
             "node_modules/q/package.json": "Install hook runs ./pre.js, which pipes a download into a shell.",
             "node_modules/r/package.json": '"postinstall" script pipes a download into a shell.',
             "node_modules/t/package.json": "Install hook runs script, which pipes a download into a shell.",
+            # (0.1.9) the project's own hook too (core.project_hook_checks)
+            "package.json": f"Install hook runs build.js, which {env}.",
         }
         for manifest, msg in want_critical.items():
             with self.subTest(manifest=manifest):
@@ -152,7 +154,7 @@ class DependencyCheckTests(unittest.TestCase):
                           ("MAJOR", '"install (implicit)" script runs code at install time: \'node-gyp rebuild\'.')])
         for manifest in ("node_modules/e/package.json", "node_modules/g/package.json", "node_modules/h/package.json",
                          "node_modules/j/package.json", "node_modules/l/package.json", "node_modules/o/package.json",
-                         "node_modules/u/package.json", "package.json"):
+                         "node_modules/u/package.json"):
             with self.subTest(manifest=manifest):
                 if manifest == "node_modules/e/package.json" and not self.linked:
                     continue
@@ -196,7 +198,8 @@ class DependencyCheckTests(unittest.TestCase):
         rules = {i["rule"] for i in res["issues"]}
         self.assertFalse(rules & {"SC-IMPORT-RISK", "SC-TRUNCATED"}, rules)
         (hook,) = [i for i in res["issues"] if i["rule"] == "SC-INSTALL-HOOK"]
-        self.assertEqual((hook["file"], hook["sev"]), ("package.json", "MAJOR"))
+        # the project's own hook is followed without --deps too (0.1.9, core.project_hook_checks)
+        self.assertEqual((hook["file"], hook["sev"]), ("package.json", "CRITICAL"))
 
     def test_a_stop_during_the_checks_leaves_the_scan_incomplete(self):
         calls = []

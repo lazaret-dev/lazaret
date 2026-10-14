@@ -103,6 +103,8 @@ test("--deps: hooks escalate on what they run; import-time code; what cannot be 
       "node_modules/q/package.json": "Install hook runs ./pre.js, which pipes a download into a shell.",
       "node_modules/r/package.json": '"postinstall" script pipes a download into a shell.',
       "node_modules/t/package.json": "Install hook runs script, which pipes a download into a shell.",
+      // (0.1.9) the project's own hook too (projectHookChecks)
+      "package.json": `Install hook runs build.js, which ${ENV}.`,
     };
     for (const [manifest, msg] of Object.entries(critical)) assert.deepEqual(hooks[manifest], [["CRITICAL", msg]], manifest);
     assert.deepEqual(hooks["node_modules/k/package.json"], [["CRITICAL", `Install hook runs x.dat, which ${ENV}.`], ["CRITICAL", `Install hook runs x.dat, which ${ENV}.`]]);
@@ -112,7 +114,7 @@ test("--deps: hooks escalate on what they run; import-time code; what cannot be 
       ["CRITICAL", "Install hook runs gen.sh, which pipes a download into a shell."],
       ["MAJOR", `"install (implicit)" script runs code at install time: 'node-gyp rebuild'.`]]);
     for (const manifest of ["node_modules/g/package.json", "node_modules/h/package.json", "node_modules/j/package.json",
-      "node_modules/l/package.json", "node_modules/o/package.json", "node_modules/u/package.json", "package.json",
+      "node_modules/l/package.json", "node_modules/o/package.json", "node_modules/u/package.json",
       ...(linked ? ["node_modules/e/package.json"] : [])]) {
       assert.deepEqual(hooks[manifest].map(([sev]) => sev), ["MAJOR"], manifest);
     }
@@ -128,9 +130,10 @@ test("--deps: hooks escalate on what they run; import-time code; what cannot be 
     assert.ok(!redacted.snippet.join("\n").includes("ghp_") && !redacted.snippet.join("\n").includes("Zq8vN3pL0wX7rT2mK9sB4hF6"));
     assert.equal(rep.metrics.depFiles, 12);
 
-    const plain = scan(root, "--exclude", "excluded");                  // without --deps: nothing new
+    // without --deps: nothing of the dependencies; the project's own hook is followed (0.1.9, projectHookChecks)
+    const plain = scan(root, "--exclude", "excluded");
     assert.deepEqual(plain.issues.filter((i) => i.rule.startsWith("SC-")).map((i) => [i.rule, i.file, i.sev]),
-      [["SC-INSTALL-HOOK", "package.json", "MAJOR"]]);
+      [["SC-INSTALL-HOOK", "package.json", "CRITICAL"]]);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

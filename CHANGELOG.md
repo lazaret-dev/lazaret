@@ -627,6 +627,27 @@ aggregate):
 
 ### Changed
 
+- **SC-INSTALL-HOOK follows a project's own install hooks (decided October 14).** A project scan judged the
+  project's own install hook by its command only: `"preinstall": "node lib/setup.mjs"` was MAJOR for being there,
+  whatever `lib/setup.mjs` held, and only a dependency's hooks were followed into the files they run (`--deps`). The
+  tensorlake worm (Mini Shai-Hulud; tensorlake 0.5.144, published October 8 by the project's own release workflow)
+  committed exactly that hook to the project's own `typescript/package.json`, running an obfuscated loader committed
+  beside it. Now each install hook of every `package.json` that is not a dependency's — the root's and every nested
+  one's, `preinstall`, `install`, `postinstall` and the prepare family — is followed as a dependency's is: to the
+  files it runs (Node's resolution from the manifest's folder; regular files inside the scanned tree only, through no
+  link, and into no dependency tree without `--deps`) and the scripts those start with node or python (three starts
+  deep, 20 files). The hook is CRITICAL when one of them fails the install-script test (given the manifest's `name`
+  as the package's own, D-9c) or is obfuscated (five or more distinct `_0x` names, as SC-AUTORUN judges a file), the
+  test's reasons first: "Install hook runs lib/setup.mjs, which is obfuscated.", "Install hook runs tools/start.js,
+  which starts tools/second.js, which sends environment variables over the network (the whole environment)." A file
+  the walk does not read as source (a shell script, a `.dat`) is read for these tests and not scanned; one that can't
+  be read as text, and a hook longer than the follower reads, are SC-TRUNCATED, as in the dependency follow. A benign
+  hook keeps its severity (MAJOR, a harmless prepare-family hook INFO). Registry and guard scans are unchanged: they
+  followed a package's hooks already. Both packages (`core.project_hook_checks`, `deps.js` `projectHookChecks`); the
+  `--deps` tests' first-party `postinstall` (`node build.js`, which sends the environment out) is now CRITICAL in both.
+  Tests: `test_review_project_hooks` (8) and `review-project-hooks.test.js`, on inert stand-ins (an "obfuscated" file
+  that only names five `_0x` variables, `.invalid` hosts), and `test_js_parity_project_hooks` (the two CLIs, with and
+  without `--deps`).
 - **pratique's production server commit, f28b6d39: a stricter TLS client, and a proxy's login decoded (NET-1).**
   `rust/crates/pratique` is pratique's `f28b6d39`. Most of the commit is the library's server, behind its `server`
   feature, which no package of Lazaret's builds (only `lazaret-net`'s tests use it): the HTTP/1.1 and HTTP/2 server,

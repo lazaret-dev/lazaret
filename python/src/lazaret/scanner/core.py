@@ -1383,6 +1383,17 @@ def shannon_entropy(s):
 
 ENTROPY_VALUE_RE = re.compile(r"[=:]\s*[\"']([A-Za-z0-9+/=_\-]{20,})[\"']")
 OBF_IDENT_RE = re.compile(r"\b_0x[0-9a-f]{4,}\b")
+#: The distinct `_0x` names (OBF_IDENT_RE) that make a file "obfuscated" where a file is judged for what it runs:
+#: what an editor's or agent's settings run (SC-AUTORUN) and what a project's own install hooks run
+#: (SC-INSTALL-HOOK). javascript-obfuscator renames every identifier so.
+OBF_MIN_NAMES = 5
+
+
+def is_obfuscated(text):
+    """Does `text` hold OBF_MIN_NAMES or more distinct `_0x` names?"""
+    return len(set(OBF_IDENT_RE.findall(text))) >= OBF_MIN_NAMES
+
+
 # Verdict-integrity fix (audit C2/G2): the bare word `test` matched anywhere on
 # the line — including in a comment — and silently disabled every entropy/secret
 # check on it. REMOVED: `test` must not gate entropy detection at all. The
@@ -2532,7 +2543,7 @@ def _autorun_risk(command, base, read):
         if text is None:
             continue
         found = _autorun_script_risk(text, engine.script_lang(rel))
-        if len(set(OBF_IDENT_RE.findall(text))) >= 5:
+        if is_obfuscated(text):
             found.append("is obfuscated")
         if found:
             return found, target
@@ -4582,13 +4593,17 @@ class _DependencyTree:
     """What a --deps scan knows of the tree, to follow a dependency's install
     hook: the files it read (by '/'-separated path) and, for the others, the
     disk under the scan root — regular files only, reached through no link
-    and no directory an exclusion prunes."""
+    and no directory an exclusion prunes. `pruned`: the directories the walk
+    pruned (their '/'-separated paths), when nothing in them is to be read
+    either (a project's own hooks: project_hook_checks, where a dependency
+    tree is not read without --deps)."""
 
-    def __init__(self, root, files, manifests, excludes):
+    def __init__(self, root, files, manifests, excludes, pruned=()):
         self.root = os.fspath(root)
         self.sources = {f["path"].replace(os.sep, "/"): f for f in files}
         self.manifests = {m["path"].replace(os.sep, "/"): m for m in manifests}
         self.excludes = set(excludes or ()) | ALWAYS_PRUNE_DIRS
+        self.pruned = {p.replace(os.sep, "/") for p in pruned}
         self.regular = {}                   # rel -> is a regular file (not read as source)
         self.read = {}                      # rel -> its text, read here (None: not text)
 
@@ -4603,6 +4618,8 @@ class _DependencyTree:
         parts = rel.split("/")
         if any(p in self.excludes or p in ("", ".", "..") for p in parts[:-1]):
             return False
+        if self._in_pruned(parts):
+            return False
         path = self.root
         try:
             for k, part in enumerate(parts):
@@ -4615,6 +4632,11 @@ class _DependencyTree:
             return _stat.S_ISREG(st.st_mode)
         except (OSError, ValueError):       # ValueError: a NUL in the name
             return False
+
+    def _in_pruned(self, parts):
+        """Is one of the folders of `parts` (a path's, split at '/') a tree the
+        walk pruned?"""
+        return bool(self.pruned) and any("/".join(parts[:k]) in self.pruned for k in range(1, len(parts)))
 
     def resolve(self, path):
         """The file Node runs for `path` (LOAD_AS_FILE, then LOAD_AS_DIRECTORY:
@@ -5361,10 +5383,7 @@ def _follow_dependency_hook(tree, issue, out, extra, run, followed_to_end, names
     targets, complete = follow_hook(issue["cmd"])
     if not complete and manifest not in followed_to_end:
         followed_to_end[manifest] = True
-        out.append(truncated_issue(manifest, (
-            f"its install hook is more than Lazaret follows ({HOOK_MAX_COMMANDS:,} commands, "
-            f"{HOOK_MAX_TARGETS} scripts, {HOOK_MAX_CHARS:,} characters, "
-            f"{HOOK_MAX_PATH:,}-character paths)")))
+        out.append(_hook_not_followed_issue(manifest))
     for target in targets:
         path = _tree_join(base, target)
         rel = tree.resolve(path) if path is not None else None
@@ -5380,7 +5399,8 @@ def _follow_dependency_hook(tree, issue, out, extra, run, followed_to_end, names
         if agent is not None:
             out.append(agent)
         # the scripts it starts with node or python (0.1.8, spawned_scripts)
-        for started, stext in _started_dependency_scripts(tree, rel, text, base, out, extra, run):
+        for started, stext in _started_dependency_scripts(
+                tree, rel, text, base, lambda nxt, lang: _dependency_script_text(tree, nxt, lang, out, extra, run)):
             more = engine.install_script_risk(stext, lang=engine.script_lang(started), own=own) if stext else []
             if more and issue["sev"] not in ("BLOCKER", "CRITICAL"):
                 shown = started[len(base) + 1:] if base and started.startswith(base + "/") else started
@@ -5389,11 +5409,22 @@ def _follow_dependency_hook(tree, issue, out, extra, run, followed_to_end, names
                 issue["msg"] = _redact_text(msg) if REDACT_SECRETS else msg
 
 
-def _started_dependency_scripts(tree, rel, text, cwd, out, extra, run):
-    """[(rel, text)] for the scripts a dependency's install script `rel`
-    starts with node or python, and those they start (spawned_scripts), at
-    most _SPAWN_MAX_DEPTH starts deep and _SPAWN_MAX_FILES files. `cwd`: the
-    package's directory, where a plain literal path is read from."""
+def _hook_not_followed_issue(manifest):
+    """SC-TRUNCATED for a manifest whose install hook is more than follow_hook
+    reads (the dependency follow's, and a project's own hooks')."""
+    return truncated_issue(manifest, (
+        f"its install hook is more than Lazaret follows ({HOOK_MAX_COMMANDS:,} commands, "
+        f"{HOOK_MAX_TARGETS} scripts, {HOOK_MAX_CHARS:,} characters, "
+        f"{HOOK_MAX_PATH:,}-character paths)"))
+
+
+def _started_dependency_scripts(tree, rel, text, cwd, script_text):
+    """[(rel, text)] for the scripts an install script `rel` (a dependency's,
+    a project's own) starts with node or python, and those they start
+    (spawned_scripts), at most _SPAWN_MAX_DEPTH starts deep and
+    _SPAWN_MAX_FILES files. `cwd`: the package's directory, where a plain
+    literal path is read from. script_text(rel, lang): a started script's
+    text (None: it can't be read as text)."""
     found, seen, queue = [], {rel}, [(rel, text, 0)]
     while queue and len(seen) <= _SPAWN_MAX_FILES:
         cur, cur_text, depth = queue.pop(0)
@@ -5406,7 +5437,7 @@ def _started_dependency_scripts(tree, rel, text, cwd, out, extra, run):
                 continue
             seen.add(nxt)
             lang = "py" if nxt.endswith(".py") else ("sh" if nxt.endswith(".sh") else "js")
-            ntext = _dependency_script_text(tree, nxt, lang, out, extra, run)
+            ntext = script_text(nxt, lang)
             found.append((nxt, ntext))
             queue.append((nxt, ntext, depth + 1))
     return found
@@ -5425,10 +5456,12 @@ def _dependency_script_text(tree, rel, as_lang, out, extra, run):
     return tree.read[rel]
 
 
-def _read_dependency_script(tree, rel, as_lang, out, extra):
+def _read_dependency_script(tree, rel, as_lang, out, extra, scan=True):
     """A file an install hook runs that the walk did not read as source:
     read it, and scan it as a dependency's JavaScript (node runs
-    lib/install.dat as JavaScript) unless it is a shell script."""
+    lib/install.dat as JavaScript) unless it is a shell script. scan=False
+    (a project's own hook: project_hook_checks): only read, to test what the
+    hook runs."""
     disp = rel.replace("/", os.sep)
     try:
         data = _read_prefix(os.path.join(tree.root, *rel.split("/")), SOURCE_SIZE_CAP + 1)
@@ -5447,9 +5480,125 @@ def _read_dependency_script(tree, rel, as_lang, out, extra):
         return normalize_newlines(data.decode("utf-8", "replace"))
     text, decode_issues = decode_member(disp, data, lang="js")
     out.extend(decode_issues)
-    out.extend(engine.scan_file(disp, text, "js", dep=True))
-    extra.append({"path": disp, "content": text, "lang": "js", "dep": True})
+    if scan:
+        out.extend(engine.scan_file(disp, text, "js", dep=True))
+        extra.append({"path": disp, "content": text, "lang": "js", "dep": True})
     return text
+
+
+# ---------------- A project's own install hooks (SC-INSTALL-HOOK, 0.1.9) ----------------
+# A project scan judged the project's own install hooks by their command alone; only a dependency's hooks were
+# followed (--deps, above). The tensorlake worm (Mini Shai-Hulud, October 2026) committed `"preinstall": "node
+# lib/setup.mjs"` to the project's own typescript/package.json, with an obfuscated loader beside it. Now each install
+# hook of every package.json that is not a dependency's (NPM_LOCAL_INSTALL_SCRIPTS) is followed as a dependency's is:
+# to the files it runs (follow_hook, from the manifest's folder, by Node's resolution, into nothing the walk pruned:
+# no dependency tree without --deps), then to the scripts those start (spawned_scripts, the same limits). The hook
+# is CRITICAL when one of them fails the install-script test (install_script_risk; `own`: the manifest's name), else
+# when one is obfuscated (is_obfuscated, as SC-AUTORUN): the test's reasons come first, in the dependency follow's
+# messages. A file the walk did not read as source is read, not scanned; one that can't be read as text, like a hook
+# too long to follow, is SC-TRUNCATED. Twin of the npm engine's js/src/deps.js (projectHookChecks).
+
+def project_hook_checks(root, files, manifests, issues, excludes=(), skipped=(), should_stop=None):
+    """The follow of a project's own install hooks (see the section
+    comment), after the manifests were scanned: escalates the SC-INSTALL-HOOK
+    findings of the package.json files that are not a dependency's in
+    `issues` in place. -> (new_issues, stopped): the findings to add
+    (SC-TRUNCATED, Q-ENCODING), with should_stop's reason when it stopped the
+    checks (None: not stopped). `skipped`: the walk's pruned trees,
+    [(rel, files, bytes)]."""
+    hooks, names = _own_install_hooks(manifests, issues)
+    out = []
+    if not hooks:
+        return out, None
+    tree = _DependencyTree(root, files, manifests, excludes, [rel for rel, *_counts in skipped])
+    followed_to_end = {}
+    for issue in hooks:
+        stopped = should_stop() if should_stop is not None else None
+        if stopped:
+            return out, stopped
+        try:
+            _follow_project_hook(tree, issue, out, followed_to_end, names[issue["file"]])
+        except Exception as exc:            # one manifest must never kill the run
+            out.append(engine.error_issue(issue["file"], exc))
+    return out, None
+
+
+def _own_install_hooks(manifests, issues):
+    """(the SC-INSTALL-HOOK findings with a command of the package.json files
+    that are not a dependency's, {each such manifest: its "name"})."""
+    names = {m["path"]: _manifest_name(m) for m in manifests if not m.get("dep")
+             and posixpath.basename(m["path"].replace(os.sep, "/")) == "package.json"}
+    return [i for i in issues if i["rule"] == "SC-INSTALL-HOOK" and i.get("cmd") and i["file"] in names], names
+
+
+def _manifest_name(manifest):
+    """A package.json's "name" (None: it has none)."""
+    data, _problems = load_manifest(manifest["path"], manifest["content"])
+    name = data.get("name") if isinstance(data, dict) else None
+    return name if isinstance(name, str) and name else None
+
+
+def _follow_project_hook(tree, issue, out, followed_to_end, own):
+    """A project's own install hook (`issue`, its SC-INSTALL-HOOK finding)
+    followed to the files it runs (_test_project_script)."""
+    manifest = issue["file"]
+    base = posixpath.dirname(manifest.replace(os.sep, "/"))
+    targets, complete = follow_hook(issue["cmd"])
+    if not complete and manifest not in followed_to_end:
+        followed_to_end[manifest] = True
+        out.append(_hook_not_followed_issue(manifest))
+    for target in targets:
+        path = _tree_join(base, target)
+        rel = tree.resolve(path) if path is not None else None
+        if rel is not None:
+            _test_project_script(tree, issue, out, base, target, rel, own)
+
+
+def _test_project_script(tree, issue, out, base, target, rel, own):
+    """The tests of `rel`, the file `target` a project's install hook runs,
+    then of the scripts it starts with node, python (spawned_scripts)."""
+    def script_text(nxt, as_lang):
+        return _project_script_text(tree, nxt, as_lang, out)
+
+    text = script_text(rel, "sh" if rel.endswith(".sh") else "js")
+    reasons = _project_script_risk(text, rel, own) if text else []
+    if reasons:
+        _escalate_hook(issue, f"Install hook runs {target}, which {'; and '.join(reasons)}.")
+    for started, stext in _started_dependency_scripts(tree, rel, text, base, script_text):
+        more = _project_script_risk(stext, started, own) if stext else []
+        if more:
+            shown = started[len(base) + 1:] if base and started.startswith(base + "/") else started
+            _escalate_hook(issue, f"Install hook runs {target}, which starts {shown}, which {'; and '.join(more)}.")
+
+
+def _project_script_risk(text, rel, own):
+    """Why a file a project's install hook runs looks hostile: the
+    install-script test's reasons, then "is obfuscated"."""
+    reasons = list(engine.install_script_risk(text, lang=engine.script_lang(rel), own=own))
+    if is_obfuscated(text):
+        reasons.append("is obfuscated")
+    return reasons
+
+
+def _escalate_hook(issue, msg):
+    """The SC-INSTALL-HOOK finding made CRITICAL with `msg`, unless it already
+    is: the first reason found stands, as in the dependency follow."""
+    if issue["sev"] not in ("BLOCKER", "CRITICAL"):
+        issue["sev"] = "CRITICAL"
+        issue["msg"] = _redact_text(msg) if REDACT_SECRETS else msg
+
+
+def _project_script_text(tree, rel, as_lang, out):
+    """Text of a file a project's install hook runs: the walk's, else read
+    here, not scanned (None: it can't be read as text; an SC-TRUNCATED
+    finding then says why)."""
+    if rel in tree.sources:
+        return tree.sources[rel]["content"]
+    if rel in tree.manifests:
+        return tree.manifests[rel]["content"]
+    if rel not in tree.read:
+        tree.read[rel] = _read_dependency_script(tree, rel, as_lang, out, None, scan=False)
+    return tree.read[rel]
 
 
 def dependency_import_issue(path, text, lang=None, risk=None, names=None):
@@ -5523,7 +5672,9 @@ def redact_file_issues(issues, files):
 def scan_project(root, exclude=(), include_deps=False, taint_config=None,
                  redact_secrets=True, extra_issues=(), should_stop=None):
     """The complete project scan, shared by the CLI (main) and the MCP server:
-    collect -> scan files -> manifests / binding.gyp -> collection findings
+    collect -> scan files -> manifests / binding.gyp -> what the project's own
+    install hooks run (project_hook_checks) -> --deps' dependency checks ->
+    collection findings
     (binary, pyc, encoding, symlink, unreadable, truncated) -> interprocedural
     flow analysis (guarded: a failure degrades to the intra-file engine with a
     visible warning) -> pruned-tree notes -> metrics / quality gate ->
@@ -5638,16 +5789,25 @@ def scan_project(root, exclude=(), include_deps=False, taint_config=None,
             except Exception as exc:
                 issues.append(engine.error_issue(mf["path"], exc))
         if not stopped:
-            # --deps: what the dependencies run (install hooks, import-time code)
-            found, extra, dep_stopped = dependency_checks(root, files, manifests, issues, exclude, should_stop)
+            # the project's own install hooks: what they run (project_hook_checks)
+            found, hook_stopped = project_hook_checks(root, files, manifests, issues, exclude, col["skipped"],
+                                                      should_stop)
             issues.extend(found)
-            numbered.extend(found)
-            files.extend(extra)
-            scanned.extend(extra)
-            if dep_stopped:
-                stopped = dep_stopped
+            if hook_stopped:
+                stopped = hook_stopped
                 issues.append(truncated_issue(
-                    ".", f"{stopped}: what the dependencies run was not checked to the end"))
+                    ".", f"{stopped}: what the project's install hooks run was not checked to the end"))
+            else:
+                # --deps: what the dependencies run (install hooks, import-time code)
+                found, extra, dep_stopped = dependency_checks(root, files, manifests, issues, exclude, should_stop)
+                issues.extend(found)
+                numbered.extend(found)
+                files.extend(extra)
+                scanned.extend(extra)
+                if dep_stopped:
+                    stopped = dep_stopped
+                    issues.append(truncated_issue(
+                        ".", f"{stopped}: what the dependencies run was not checked to the end"))
         else:
             total = len(files) + len(configs)
             issues.append(truncated_issue(
