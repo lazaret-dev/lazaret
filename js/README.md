@@ -75,7 +75,10 @@ resolving to one file. Writes are atomic
   an argv list, `<!pymod_do_main(module)`: CRITICAL when one fetches or
   evaluates code, INFO inventory when it runs a file of the package; at most
   100 listed per file, SC-TRUNCATED past 100,000 values); an unparseable
-  root manifest (`SC-MANIFEST-UNPARSEABLE`); decode-then-execute
+  root manifest (`SC-MANIFEST-UNPARSEABLE`); a dependency npm would fetch
+  over plain http or from a raw IP address (`SC-DEP-URL`, MAJOR, since 0.1.9;
+  a package's root manifest, and a project's devDependencies too);
+  decode-then-execute
   (`SC-EVAL-DECODE`, also across lines, through an inline import such as
   `__import__("base64").b64decode`, and, in dependencies, across statements
   within 10,000 characters of the decode);

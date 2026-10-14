@@ -64,6 +64,21 @@ aggregate):
   Part F's 4,620 or the installed Python and npm packages. The whole-run alternatives now start with their literal
   (crates.io's too), so Python's `re` has a first character to look for: its token pattern takes about half the time
   it took, with the three formats added. Rule set 2.48.0.
+- **A dependency npm would fetch over plain http or from a raw IP address is a weaker indicator (D-14; rule set
+  2.68.0).** npm installs a dependency from wherever its spec says, a tarball or a git URL too. One given as a
+  plain-http URL (`http:`, `git+http:`) is fetched with no integrity check, and one at a raw IP address names no
+  registry and no domain; five of the benchmark's in-sample releases did this (D-1's reading). Such a dependency is
+  now SC-DEP-URL (MAJOR, so WARN in the registry): "Dependency "c" (optionalDependencies) is fetched from a raw IP
+  address (203.0.113.7): 'https://203.0.113.7/c.tgz'." A host is an IP address when it is bracketed (IPv6) or its last
+  label is a number, as the URL standard reads `https://3405803783/` and `https://0xcb.0.113.7/`; a `git+ssh` URL at
+  one counts too, and a credential in the URL is redacted. Read: a package's root manifest for the fields npm
+  installs from (dependencies, optionalDependencies, peerDependencies), in registry and guard scans and `--deps`;
+  a project's own manifests (the root's and every workspace's) for its devDependencies too. Not a nested manifest
+  npm never installs from (a fixture's), and not a VS Code extension's or an action's. Measured first: none of the
+  popular set's 801 npm releases has one, in 8,437 dependency specs, devDependencies included. PyPI refuses an upload
+  whose metadata names a direct URL, so npm's manifests alone are read. Both packages (`core.dependency_url_issues`,
+  `supplychain.js` `dependencyUrlIssues`); tests `test_dep_url` (10), `dep-url.test.js` and
+  `test_js_parity_dep_url`.
 - **Code written into another package's folder is a strong reason (D-9; rule set 2.56.0).** @dinzid04/libsignal-node
   2.2.5 finds @whiskeysockets/baileys (`require.resolve('@whiskeysockets/baileys/package.json')`, or a path joined
   from `node_modules`) and, a second after it is loaded, writes its own text over baileys's

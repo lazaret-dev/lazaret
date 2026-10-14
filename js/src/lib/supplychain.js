@@ -192,11 +192,12 @@ export function scanManifest(path, content, { registry = isDependencyManifest(pa
   // the first line naming it (review: a dependency called "install" took the
   // finding). Keys are compared decoded, and a repeated key or "scripts"
   // object counts where it last appears, as the parser keeps the last one
-  // (twin of core._script_key_lines).
+  // (twin of core._script_key_lines; `section`: "scripts", or a dependency
+  // field for D-14).
   // The document's tokens, /"(?:[^"\\]|\\.)*"|[{}[\],:]/g as core's
   // _JSON_TOKEN_RE finds them, read with a loop: V8 overflowed its stack on
   // a string of a few million characters (review B3).
-  const scriptKeyLines = () => {
+  const scriptKeyLines = (section = "scripts") => {
     const containers = [];
     const n = body.length;
     let found = new Map(), topKey = null, inScripts = false, expectKey = false, line = 1, pos = 0;
@@ -218,7 +219,7 @@ export function scanManifest(path, content, { registry = isDependencyManifest(pa
           const key = JSON.parse(body.slice(start, e + 1));
           if (depth === 1) {
             topKey = key;
-            if (key === "scripts") found = new Map();          // a later "scripts" replaces an earlier one
+            if (key === section) found = new Map();            // a later section of the name replaces an earlier one
           } else {
             for (let k = body.indexOf("\n", pos); k !== -1 && k < start; k = body.indexOf("\n", k + 1)) line++;
             pos = start;
@@ -227,7 +228,7 @@ export function scanManifest(path, content, { registry = isDependencyManifest(pa
         }
         expectKey = false;
       } else if (tok === "{" || tok === "[") {
-        if (depth === 1 && tok === "{") inScripts = topKey === "scripts";   // at depth 1, "{" is topKey's value
+        if (depth === 1 && tok === "{") inScripts = topKey === section;     // at depth 1, "{" is topKey's value
         containers.push(tok);
         expectKey = tok === "{";
       } else if (tok === "}" || tok === "]") {
@@ -252,7 +253,66 @@ export function scanManifest(path, content, { registry = isDependencyManifest(pa
       issues.push(scInstallHookIssue(path, lineNo, lines, hook, cmd, reasons, sev, hint));
     }
   }
+  for (const i of dependencyUrlIssues(path, data, lines, registry, scriptKeyLines)) issues.push(i);    // (D-14)
   return issues;
+}
+
+// ---- Dependencies from an insecure source (SC-DEP-URL, D-14; twin of core's section of the name) ----
+export const NPM_DEP_FIELDS = ["dependencies", "optionalDependencies", "peerDependencies"];
+export const NPM_LOCAL_DEP_FIELDS = [...NPM_DEP_FIELDS, "devDependencies"];
+const DEP_URL_RE = pyRe(String.raw`^\s*(?<scheme>[A-Za-z][A-Za-z0-9+.\-]*)://(?:[^@/?#\s]*@)?(?<host>\[[^\]/?#\s]*\]|[^:/?#\s]*)`);
+const IP_LABEL_RE = /^(?:[0-9]+|0[xX][0-9a-fA-F]*)$/;
+const DEP_URL_WHY = "npm installs a dependency from wherever its spec says. Over plain http it is fetched with no integrity " +
+  "check, so anyone on the network path can replace it; at a raw IP address it comes from no registry and no " +
+  "domain anyone can vet. Packages from a registry name versions, and git dependencies use https or ssh.";
+
+/** What makes a dependency's spec risky to fetch: ["a plain-http URL", "a raw IP address (HOST)"], the ones that
+ * apply; [] for none. Twin of core.dependency_url_risk. */
+export function dependencyUrlRisk(spec) {
+  const m = typeof spec === "string" ? spec.match(DEP_URL_RE) : null;
+  if (!m) return [];
+  const reasons = [];
+  if (["http", "git+http"].includes(m.groups.scheme.toLowerCase())) reasons.push("a plain-http URL");
+  const host = m.groups.host;
+  const trimmed = host.replace(/\.+$/, "");
+  const last = trimmed.slice(trimmed.lastIndexOf(".") + 1);
+  if ((host.startsWith("[") && host.endsWith("]")) || (last && IP_LABEL_RE.test(last))) reasons.push(`a raw IP address (${host})`);
+  return reasons;
+}
+
+/** Does npm install dependencies from this manifest: a project's own (`registry` false), a package's root one?
+ * core._installs_from (the npm package scans no extension, no action). */
+const installsFrom = (path, registry) => !registry || atPackageRoot(path);
+
+/** Is the manifest at `path` a package's root one: at the top of the package, or node_modules/<name>/? core._at_package_root */
+function atPackageRoot(path) {
+  if (isRootManifest(path)) return true;
+  const parts = String(path).replace(/\\/g, "/").split("/").slice(0, -1);
+  return parts.length >= 2 && (parts[parts.length - 2] === "node_modules" || (
+    parts.length >= 3 && parts[parts.length - 3] === "node_modules" && parts[parts.length - 2].startsWith("@")));
+}
+
+/** SC-DEP-URL (MAJOR) for each dependency of `data` npm would fetch from a risky source: a project's own manifest
+ * (`registry` false), a package's root one. Twin of core.dependency_url_issues. */
+function dependencyUrlIssues(path, data, lines, registry, keyLines) {
+  const out = [];
+  if (!installsFrom(path, registry)) return out;
+  for (const field of registry ? NPM_DEP_FIELDS : NPM_LOCAL_DEP_FIELDS) {
+    const deps = own(data, field);
+    if (!deps || typeof deps !== "object" || Array.isArray(deps)) continue;
+    let where = null;
+    for (const [name, spec] of pyEntries(deps)) {
+      const reasons = dependencyUrlRisk(spec);
+      if (!reasons.length) continue;
+      where ??= keyLines(field);
+      const msg = `Dependency "${name}" (${field}) is fetched from ${reasons.join(" and ")}: ${pyRepr(spec)}.`;
+      out.push(mkIssue({ id: "SC-DEP-URL", name: "Dependency from an insecure source", type: "HOTSPOT", sev: "MAJOR",
+        msg: REDACT.on ? redactText(msg) : msg, why: DEP_URL_WHY,
+        fix: "Depend on a registry version, else an https URL (or ssh) at a domain you trust.",
+        ref: "CWE-494 · Supply chain" }, path, where.get(name) ?? 1, lines));
+    }
+  }
+  return out;
 }
 
 // gyp command expansions run a command while node-gyp configures the build:

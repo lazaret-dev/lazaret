@@ -3284,12 +3284,13 @@ def script_source_lang(head):
 _JSON_TOKEN_RE = re.compile(r'"(?:[^"\\]|\\.)*"|[{}\[\],:]')
 
 
-def _script_key_lines(text):
-    """{script name: 1-based line of its key} for the keys of the top-level
-    "scripts" object of `text`, a JSON document that parsed. Keys are
-    compared decoded (`"post\\u0069nstall"` too), and a repeated key or
-    "scripts" object counts where it last appears, as the parser keeps the
-    last one. Twin of the locator in the npm engine's scanManifest."""
+def _script_key_lines(text, section="scripts"):
+    """{key: 1-based line of the key} for the keys of the top-level object
+    `section` ("scripts", "dependencies", …: D-14) of `text`, a
+    JSON document that parsed. Keys are compared decoded
+    (`"post\\u0069nstall"` too), and a repeated key or section counts where
+    it last appears, as the parser keeps the last one. Twin of the locator
+    in the npm engine's scanManifest."""
     found, depth, containers = {}, 0, []
     top_key, in_scripts, expect_key = None, False, False
     line, pos = 1, 0
@@ -3300,8 +3301,8 @@ def _script_key_lines(text):
                 key = json.loads(tok)
                 if depth == 1:
                     top_key = key
-                    if key == "scripts":
-                        found = {}                  # a later "scripts" replaces an earlier one
+                    if key == section:
+                        found = {}                  # a later section of the name replaces an earlier one
                 else:
                     line += text.count("\n", pos, m.start())
                     pos = m.start()
@@ -3309,7 +3310,7 @@ def _script_key_lines(text):
             expect_key = False
         elif tok in "{[":
             if depth == 1 and tok == "{":
-                in_scripts = top_key == "scripts"   # at depth 1, "{" is the value of top_key
+                in_scripts = top_key == section     # at depth 1, "{" is the value of top_key
             containers.append(tok)
             depth += 1
             expect_key = tok == "{"
@@ -3376,7 +3377,84 @@ def scan_manifest(path, content, registry=False, hooks=None):
                 (i + 1 for i, l in enumerate(lines) if f'"{hook}"' in l), 1)
             issues.append(_sc_install_hook_issue(path, line_no, lines, hook, cmd,
                                                  reasons, sev=sev, hint=hint))
+    issues.extend(dependency_url_issues(path, data, body, lines, registry, hooks))      # (D-14)
     return issues
+
+
+NPM_DEP_FIELDS = ("dependencies", "optionalDependencies", "peerDependencies")
+NPM_LOCAL_DEP_FIELDS = NPM_DEP_FIELDS + ("devDependencies",)
+# ---------------- Dependencies from an insecure source (SC-DEP-URL, D-14) ----------------
+# npm installs a dependency from wherever its spec says: a tarball URL, a git URL. One given as a plain-http URL
+# (http:, git+http:) is fetched with no integrity, so anyone on the path can swap it, and one at a raw IP address
+# names no registry and no domain: five of the benchmark's in-sample releases did this (D-1's reading), and no
+# release of the popular npm set does (scripts/popular/releases.jsonl's 801, measured Oct 14). A package installed
+# from a registry is read for the fields npm installs from (NPM_DEP_FIELDS), a project's own manifest for its
+# devDependencies too; only a package's root manifest counts in a registry or --deps scan, since npm installs
+# from no other. A host is an IP address when it is bracketed (IPv6) or its last label is a number: the URL
+# standard reads `http://3405803783/` and `http://0xcb.0.113.7/` as IPv4 addresses. MAJOR (WARN in the registry).
+# PyPI refuses an upload whose metadata names a direct URL, so this reads npm's manifests only. Twin of the npm
+# engine's supplychain.js (dependencyUrlIssues). NPM_DEP_FIELDS and NPM_LOCAL_DEP_FIELDS (above): the fields read.
+_DEP_URL_RE = re.compile(r"\s*(?P<scheme>[A-Za-z][A-Za-z0-9+.\-]*)://(?:[^@/?#\s]*@)?(?P<host>\[[^\]/?#\s]*\]|[^:/?#\s]*)")
+_IP_LABEL_RE = re.compile(r"[0-9]+|0[xX][0-9a-fA-F]*")
+_DEP_URL_WHY = (
+    "npm installs a dependency from wherever its spec says. Over plain http it is fetched with no integrity "
+    "check, so anyone on the network path can replace it; at a raw IP address it comes from no registry and no "
+    "domain anyone can vet. Packages from a registry name versions, and git dependencies use https or ssh.")
+
+
+def dependency_url_risk(spec):
+    """What makes a dependency's spec risky to fetch: ["a plain-http URL",
+    "a raw IP address (HOST)"], the ones that apply; [] for none."""
+    m = _DEP_URL_RE.match(spec) if isinstance(spec, str) else None
+    if m is None:
+        return []
+    reasons = []
+    if m["scheme"].lower() in ("http", "git+http"):
+        reasons.append("a plain-http URL")
+    host = m["host"]
+    last = host.rstrip(".").rsplit(".", 1)[-1]
+    if (host.startswith("[") and host.endswith("]")) or (last and _IP_LABEL_RE.fullmatch(last)):
+        reasons.append(f"a raw IP address ({host})")
+    return reasons
+
+
+def _installs_from(path, registry, hooks):
+    """Does npm install dependencies from this manifest: a project's own
+    (`registry` false), a package's root one, npm's (`hooks` None)?"""
+    return hooks is None and (not registry or _at_package_root(path))
+
+
+def _at_package_root(path):
+    """Is the manifest at `path` a package's root one: at the top of the
+    package (a registry scan's), or node_modules/<name>/ (--deps)?"""
+    base = posixpath.dirname(path.replace(os.sep, "/"))
+    return base in ("", ".") or _is_package_root(base)
+
+
+def dependency_url_issues(path, data, body, lines, registry, hooks=None):
+    """SC-DEP-URL (MAJOR) for each dependency of the manifest `data` (its
+    text `body`, split into `lines`) npm would fetch from a risky source
+    (dependency_url_risk): a project's own manifest (`registry` false), a
+    package's root one; none where `hooks` are not npm's (an extension's,
+    an action's: nothing is installed)."""
+    out = []
+    if not _installs_from(path, registry, hooks):
+        return out
+    for field in (NPM_DEP_FIELDS if registry else NPM_LOCAL_DEP_FIELDS):
+        deps = data.get(field)
+        found = [(name, spec, dependency_url_risk(spec)) for name, spec in deps.items()] if isinstance(deps, dict) else []
+        key_lines = _script_key_lines(body, field) if any(why for _n, _s, why in found) else {}
+        out.extend(_dep_url_issue(path, lines, field, name, spec, why, key_lines.get(name, 1))
+                   for name, spec, why in found if why)
+    return out
+
+
+def _dep_url_issue(path, lines, field, name, spec, reasons, line):
+    msg = f'Dependency "{name}" ({field}) is fetched from {" and ".join(reasons)}: {spec!r}.'
+    return mk_issue({"id": "SC-DEP-URL", "name": "Dependency from an insecure source", "type": "HOTSPOT",
+                     "sev": "MAJOR", "msg": _redact_text(msg) if REDACT_SECRETS else msg, "why": _DEP_URL_WHY,
+                     "fix": "Depend on a registry version, else an https URL (or ssh) at a domain you trust.",
+                     "ref": "CWE-494 · Supply chain"}, path, line, lines)
 
 
 # gyp command expansions run a command while node-gyp configures the build:
