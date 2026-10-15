@@ -948,6 +948,13 @@ aggregate):
 
 ### Fixed
 
+- **The Actions check no longer fails on GitHub's own actions for the tools they ship.**
+  `python -m lazaret.registry.actions` found `actions/setup-node`'s `externals/7zr.exe` (7-Zip,
+  which it extracts Node with on Windows) as SC-BINARY, MAJOR, and exited 1 on Lazaret's own
+  `ci.yml` and `release.yml` (the live run of Oct 10). A binary in an action of `actions/` or
+  `github/` is MINOR now, as a version tag of theirs already was; in another's action it is
+  MAJOR, and a strong finding of their code is not lowered. The command exits 1 for a finding
+  of MAJOR or above; a MINOR one is listed and leaves the exit as it is.
 - **S-EXEC-JS took RegExp's `exec` for child_process's (rule set 2.69.0).** The rule flags `exec` and `execSync`
   called with a command built at run time on any receiver but `this`, so a regex's own `exec` in a matching loop
   (`while ((m = re.exec(s)))`) was a CRITICAL "Shell exec" in any package that matches text. A call on a regex is

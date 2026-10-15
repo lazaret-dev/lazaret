@@ -276,9 +276,12 @@ repository by the use-time test (SC-USE-RISK). In an action, what CI code does a
 token sent to its service, a file uploaded, a package published) is not counted, a script fetched and
 run as it arrives (`curl … | sh`) is MAJOR, as it is in a workflow, and a stealer's or a backdoor's shape
 (the whole environment sent, a decoded script written and run, a reverse shell) is CRITICAL. `--no-code`
-skips it. It prints JSON and exits 1 for a finding, 3 when something could not be checked (GitHub allows
-60 requests an hour without `GITHUB_TOKEN`; a private repository; an expression in a ref; an action's
-code not read whole), 2 for a usage error: an action that was not checked is never cleared.
+skips it. A binary one of GitHub's own actions ships is MINOR (`actions/setup-node`'s
+`externals/7zr.exe`, the 7-Zip it extracts Node with on Windows); in another's action it is MAJOR, and a
+strong finding of GitHub's own actions' code counts in full. It prints JSON and exits 1 for a finding of
+MAJOR or above (a MINOR one is listed only), 3 when something could not be checked (GitHub allows 60
+requests an hour without `GITHUB_TOKEN`; a private repository; an expression in a ref; an action's code
+not read whole), 2 for a usage error: an action that was not checked is never cleared.
 
 ### Before you commit (`lazaret hook`)
 

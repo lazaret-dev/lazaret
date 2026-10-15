@@ -41,8 +41,12 @@ the pin book.
     python -m lazaret.registry.actions [--no-pins | --pins FILE] [--accept-moved]
                                        [--max-calls N] [--no-code] WORKFLOW...
 
-prints the report as JSON; exit 1 for a finding, 3 when something could not be
-checked, 2 for a usage error.
+prints the report as JSON; exit 1 for a finding of MAJOR or above, 3 when
+something could not be checked, 2 for a usage error. A MINOR finding is listed
+and does not change the exit: a GitHub-owned action at a version tag, an
+official Docker image at one, and a binary one of GitHub's own actions ships
+(actions/setup-node's externals/7zr.exe, the 7-Zip it extracts Node with on
+Windows), where any strong finding of their code still counts in full.
 """
 
 import json
@@ -74,6 +78,11 @@ MAX_WORKFLOW_BYTES = 2 * 1024 * 1024
 MAX_CODE_SCANS = 60         # actions' archives fetched and scanned in one run (N-4)
 MAX_CODE_BYTES = 1024 ** 3  # bytes of those archives in one run
 MAX_CODE_FINDINGS = 20      # findings reported for one action's code; the rest are counted in a note
+#: the severities that make the command exit 1 (a MINOR finding is listed only)
+COUNTED = ("MAJOR", "CRITICAL", "BLOCKER")
+#: weak findings of an action's code that are MINOR in GitHub's own actions (ghworkflow.FIRST_PARTY): the tools they
+#: ship (a binary: actions/setup-node's externals/7zr.exe). A strong finding of their code is not lowered
+FIRST_PARTY_SMALL = frozenset({"SC-BINARY"})
 #: Docker's official images (`alpine`, `docker.io/library/python`): at a version tag, a smaller risk than another's
 _OFFICIAL_IMAGE_RE = re.compile(r"^(?:(?:docker\.io|index\.docker\.io|registry-1\.docker\.io)/)?(?:library/)?"
                                 r"[a-z0-9]+(?:[._-][a-z0-9]+)*:v?\d[\w.-]*$")
@@ -803,7 +812,7 @@ def rule(kind, d):
     if kind == "code":
         path = f"/{d['path']}" if d.get("path") else ""
         return {
-            "id": d["rule"], "name": d["name"], "type": "HOTSPOT", "sev": d["sev"],
+            "id": d["rule"], "name": d["name"], "type": "HOTSPOT", "sev": _code_severity(d),
             "msg": f"In the code of {who}{path} at {d['sha'][:12]}{via}, {d['file']}:{d['at']}: {d['msg']}",
             "why": d["why"] or _CODE_WHY, "fix": d["fix"] or _CODE_FIX, "ref": d["ref"] or "CWE-506 · Supply chain"}
     small = d.get("kind") == "action" and d.get("first") and d.get("tag")
@@ -814,6 +823,17 @@ def rule(kind, d):
         "why": _NESTED_WHY,
         "fix": "Use a version of the action that pins what it uses, or a different action.",
         "ref": "CWE-829 · Supply chain"}
+
+
+def _code_severity(d):
+    """A code finding's severity: its scan's, but MINOR for a weak FIRST_PARTY_SMALL one in GitHub's own action."""
+    first = f"{d.get('owner', '')}/{d.get('repo', '')}".lower().startswith(ghworkflow.FIRST_PARTY)
+    return "MINOR" if first and d["sev"] == "MAJOR" and d["rule"] in FIRST_PARTY_SMALL else d["sev"]
+
+
+def counted(rules):
+    """Do these rules hold a finding that makes the command exit 1 (MAJOR or above)?"""
+    return any(r["sev"] in COUNTED for r in rules)
 
 
 # ------------------------------------------------------------------ the command
@@ -875,7 +895,7 @@ def main(argv=None):
         doc["file"] = path
         doc["rules"] = [rule(f.kind, f.detail) for f in rep.findings]
         rep_all.append(doc)
-        if rep.findings:
+        if counted(doc["rules"]):
             code = max(code, 1)
         elif not rep.complete and code == 0:
             code = 3

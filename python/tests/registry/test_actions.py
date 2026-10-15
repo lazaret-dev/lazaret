@@ -543,6 +543,24 @@ class CodeTests(Base):
         self.assertEqual(rep.actions[f"o/act@{r.sha}"]["code"]["verdict"], "SUSPICIOUS")
         self.assertTrue(rep.complete)
 
+    def test_a_binary_githubs_own_action_ships_is_minor(self):
+        # actions/setup-node ships externals/7zr.exe (7-Zip, which it extracts Node with on Windows): MAJOR in another's
+        # action, MINOR in GitHub's own; a strong finding of GitHub's own action's code is not lowered
+        files = {"action.yml": fx.action_yml("node20", main="dist/index.js"), "dist/index.js": "module.exports = 1;\n",
+                 "externals/7zr.exe": b"MZ" + b"\x00" * 300}
+        sevs = {}
+        for name in ("actions/setup-x", "github/codeql-x", "o/act", "actions-x/setup"):
+            r = self.repo_with(files, name=name)
+            found = self.code(self.audit(workflow(f"{name}@{r.sha}"), r))
+            self.assertEqual([(f.detail["rule"], f.detail["sev"]) for f in found], [("SC-BINARY", "MAJOR")], name)
+            sevs[name] = actions.rule("code", found[0].detail)["sev"]
+        self.assertEqual(sevs, {"actions/setup-x": "MINOR", "github/codeql-x": "MINOR", "o/act": "MAJOR",
+                                "actions-x/setup": "MAJOR"})
+        r = self.repo_with({"action.yml": fx.action_yml("node20", main="dist/index.js"), "dist/index.js": DECODED_RUN},
+                           name="actions/setup-x")
+        found = self.code(self.audit(workflow(f"actions/setup-x@{r.sha}"), r))
+        self.assertEqual([actions.rule("code", f.detail)["sev"] for f in found], ["CRITICAL"])
+
     def test_npm_scripts_and_files_nothing_runs_are_not_the_actions(self):
         r = self.repo_with({"action.yml": fx.action_yml("node20", main="dist/index.js"),
                             "dist/index.js": "module.exports = 1;\n",
@@ -759,6 +777,17 @@ class CommandTests(Base):
         code, out, _, gh = self.run_main(["--no-pins", "--no-code", wf], r)
         self.assertEqual((code, json.loads(out)[0]["findings"]), (0, []))
         self.assertFalse([u for u in gh.calls if "codeload" in u])
+
+    def test_a_minor_finding_alone_exits_0(self):
+        files = {"action.yml": fx.action_yml("node20", main="i.js"), "i.js": "module.exports = 1;\n",
+                 "externals/7zr.exe": b"MZ" + b"\x00" * 300}
+        for name, want, sev in (("actions/setup-x", 0, "MINOR"), ("o/act", 1, "MAJOR")):
+            r = fx.Repo(name)
+            c = r.commit(files=files)
+            r.commit(c, branch="main")
+            code, out, _, _ = self.run_main(["--no-pins", self.write(workflow(f"{name}@{c}"))], r)
+            doc = json.loads(out)[0]
+            self.assertEqual((code, [ru["sev"] for ru in doc["rules"]]), (want, [sev]), name)
 
     def test_the_budget_option(self):
         r = release_repo()
