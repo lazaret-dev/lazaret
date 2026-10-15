@@ -289,6 +289,38 @@ every release whose verdict or strong findings moved — read each one —
 and `--aggregate-only` gives the counts alone, for the holdout. The
 samples themselves are kept outside the repository (`STRUCTURE.md` §6).
 
+**Every set in one command.** `run --jobs N` scans N releases at once, each
+in a worker process of the guard's pool, and writes the records a run with
+one job writes (a scan that ran out of time beside the others is scanned
+again alone at the end, and a finished run is in the manifest's order).
+`scripts/bench.py all SETS.json` runs every set a sets file names, with
+`--jobs` (half the cores by default), and compares each with that set's
+last finished run:
+
+```
+{"results": "runs", "report": "~/Projects/lazaret/Claude outputs/bench",
+ "sets": [{"name": "benchmark", "manifest": "benchmark/manifest.jsonl"},
+          {"name": "holdout", "manifest": "holdout/manifest.jsonl", "aggregate_only": true},
+          {"name": "popular", "manifest": "popular/manifest.jsonl"},
+          {"name": "ubuntu", "manifest": "packaged/ubuntu.jsonl"},
+          {"name": "gostd", "manifest": "packaged/gostd.jsonl"},
+          {"name": "extra43", "manifest": "extra43/manifest.jsonl"}]}
+```
+
+Paths are relative to the sets file. It refuses an engine library that may
+not be the tree's (its rule set is not the pack's, or it was built before
+the engine's sources last changed: rebuild with `pip install -e ./python`,
+or give `--allow-stale-engine`, which the summary records), labels the run
+with the commit (and a digest of uncommitted changes), keeps the runs in
+`RESULTS/LABEL/`, and writes each comparison and a `summary.txt` to
+`REPORT/LABEL/`; the holdout's in counts only, and nothing it prints names
+a holdout release. `--only benchmark,holdout` runs some sets, `--baseline
+LABEL` compares with another run, and the same command, stopped, goes on
+where it stopped (a label's runs never mix two engine libraries). The sets
+of real malicious releases (the benchmark and the holdout, and the Go and
+Rust malicious set) are run on a maintainer's machine, not in an agent's
+session.
+
 **The popular releases: the release gate's benign set.** The benchmark's 429
 popular packages are mostly small libraries, and they did not hold the nine
 popular releases 0.1.8 made SUSPICIOUS (vite, vitest, monaco-editor,

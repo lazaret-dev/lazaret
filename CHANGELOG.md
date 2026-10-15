@@ -323,6 +323,16 @@ aggregate):
   publishes and only under the licences the crates are taken under. `--top` now pins anew
   only the ecosystems it is given a count for, and a redirect is followed only to https on
   a registry's own host (`docs/TESTING.md` §4).
+- **For contributors: every benchmark set in one command, and `--jobs`.** `scripts/bench.py
+  run --jobs N` scans N releases at once, each in a worker process of the guard's pool, and
+  writes the records one job writes: a scan that ran out of time beside the others is
+  scanned again alone, and a finished run is in the manifest's order. `scripts/bench.py all
+  SETS.json` runs every set a sets file names (the benchmark, the holdout, the popular set,
+  the Go and Rust sets and any other), compares each with its last finished run and writes
+  the comparisons and a summary to the folder the file names; the holdout's in counts
+  only. It refuses an engine library built before the engine's sources last changed or
+  with another rule set (an editable install not rebuilt), labels each run with the commit,
+  and goes on where it stopped (`docs/TESTING.md` §4).
 - **Credentials in Go's and Rust's declarations, crates.io's tokens and a `.netrc`'s
   passwords (G-4, R-4, N-12).** S-SECRET read `name = "…"` and `name: "…"`, so Go's
   `apiKey := "…"` and `var password string = "…"` and Rust's `const API_KEY: &str = "…"`,
