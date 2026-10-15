@@ -11,7 +11,7 @@ the command, or a file of the tree it runs, looks hostile), and a workflow
 that hands out every secret or runs event text on a self-hosted runner is
 SC-WORKFLOW-SECRETS / SC-WORKFLOW-BACKDOOR. The npm engine's twins are held to
 these by js/test/persistence.test.js and tests/architecture/
-test_js_parity_persistence.py.
+test_js_parity_persistence.py (the workflows are the engine's: test_snapshot_ci.py).
 
 Everything is inert text: hosts are .invalid (the Bun release path is matched
 as text), and nothing is written outside a temporary directory or executed.

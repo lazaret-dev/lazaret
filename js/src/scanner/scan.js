@@ -4,7 +4,7 @@
 // project mode alike (Q-1, 0.1.9: the SQL statements without WHERE, taint,
 // the SQL-sink pass, the function metrics, the suppression markers and the cap
 // are the engine's too); this module scans config and data files (credentials,
-// auto-run settings, workflows), whose checks are still the package's own.
+// auto-run settings), whose checks are still the package's own; a CI file's are the engine's.
 import { normalizeSource } from "./lines.js";
 import { isObfuscated, SECRET_SKIP_RE, makeSuppressor, mkIssue } from "./engine.js";
 import { lexLines, jsxReading } from "../lib/lexer.js";
@@ -14,10 +14,7 @@ import { truncatedIssue, normalizeNewlines, treeJoin } from "../lib/fs.js";
 import { pinUnicode } from "../lib/unicode13.js";
 import { documentationToken, keyFollows, secretCol, redactConfigValues, NETRC_NAMES, netrcAnonymous } from "../lib/configsecrets.js";
 import { configKind, ownerDir, entries as autorunEntries, localCommand } from "../lib/autorun.js";
-import { isWorkflow, findings as workflowFindings, hardening as workflowHardening,
-  hardeningRule as workflowHardeningRule } from "../lib/ghworkflow.js";
-import { isGitlabCi, hardening as gitlabHardening, hardeningRule as gitlabHardeningRule } from "../lib/gitlabci.js";
-import { agentHijackInCommand, installScriptRisk, followHook, nodeCandidates, spawnedScripts, scriptLang, packValues,
+import { call, agentHijackInCommand, installScriptRisk, followHook, nodeCandidates, spawnedScripts, scriptLang, packValues,
   scanDependencyFile, scanProjectFile, taintFindings, NativeExhausted } from "../lib/native.js";
 
 export { isComment } from "./engine.js";
@@ -254,55 +251,15 @@ export function autorunIssues(path, lines, read = null) {
   return out;
 }
 
-// ---- workflows the worms planted (SC-WORKFLOW-*; core.workflow_issues) ----
-const WORKFLOW_SECRETS_WHY =
-  "`${{ toJSON(secrets) }}` is every secret of the repository in one value: a job that holds it can " +
-  "leak them all, and a workflow that also sends it out is how the Shai-Hulud worms stole secrets " +
-  "from the repositories they reached (a webhook.site upload, a build artifact).";
-const WORKFLOW_BACKDOOR_WHY =
-  "A `${{ … }}` expression is pasted into the script before it runs, so text from an issue, a " +
-  "discussion or a pull request becomes shell commands; on a self-hosted runner they run on that " +
-  "machine. The second Shai-Hulud wave registered its victims' machines as self-hosted runners and " +
-  "planted exactly this workflow (discussion.yaml): opening a discussion ran commands on the victim's " +
-  "machine.";
-
-/** SC-WORKFLOW-SECRETS / SC-WORKFLOW-BACKDOOR for a GitHub Actions workflow (core.workflow_issues). */
-export function workflowIssues(path, lines) {
-  const out = [];
-  const text = lines.join("\n");
-  for (const [kind, line, d] of workflowFindings(text)) {
-    if (kind === "secrets") {
-      const sent = d.how !== null;
-      out.push(mkIssue({
-        id: "SC-WORKFLOW-SECRETS", name: "Workflow hands out every secret", type: "HOTSPOT",
-        sev: sent ? "CRITICAL" : "MAJOR",
-        msg: sent ? `The workflow hands every repository secret to ${d.where} and sends data out ` +
-            `(${d.how}): the Shai-Hulud worms planted workflows like this.`
-          : `The workflow hands every repository secret to ${d.where} (toJSON(secrets)): any ` +
-            "step there can read them all.",
-        why: WORKFLOW_SECRETS_WHY,
-        fix: "Delete the workflow unless you wrote it, then rotate every secret of the repository. " +
-          "A job should get only the secrets it uses, by name (${{ secrets.NAME }}).",
-        ref: "CWE-200 · Supply chain" }, path, line, lines));
-    } else {
-      out.push(mkIssue({
-        id: "SC-WORKFLOW-BACKDOOR", name: "Workflow runs event text on a self-hosted runner",
-        type: "HOTSPOT", sev: "CRITICAL",
-        msg: `The job "${d.job}" puts ${d.expr} into a command on a self-hosted runner, and ` +
-          `${d.event} events start it: anyone who can ${d.act} runs commands on that machine.`,
-        why: WORKFLOW_BACKDOOR_WHY,
-        fix: "Delete the workflow unless you wrote it, and remove any runner you did not register. " +
-          "Otherwise pass the text through an environment variable and quote it in the script.",
-        ref: "CWE-94 · Supply chain" }, path, line, lines));
-    }
-  }
-  for (const [kind, line, d] of workflowHardening(text)) out.push(mkIssue(workflowHardeningRule(kind, d), path, line, lines));
-  return out;
-}
-
-/** A GitLab CI file's hardening checks (core.gitlab_issues). */
-export function gitlabIssues(path, lines) {
-  return gitlabHardening(lines.join("\n")).map(([kind, line, d]) => mkIssue(gitlabHardeningRule(kind, d), path, line, lines));
+// ---- CI files (SC-WORKFLOW-*, SC-GITLAB-*; core.ci_issues) ----
+/**
+ * The issues of a CI file (core.ci_issues): a GitHub Actions workflow's SC-WORKFLOW-* or a GitLab CI file's
+ * SC-GITLAB-*, nothing for another file. The engine reads the file (BR-7: `ci_issues`); the path is asked
+ * first, so another file's text is not handed over.
+ */
+export function ciIssues(path, lines) {
+  if (call("ci_kind", {}, path) === null) return [];
+  return call("ci_issues", { path }, lines.join("\n")).map(([line, rule]) => mkIssue(rule, path, line, lines));
 }
 
 /**
@@ -339,8 +296,7 @@ export function scanConfigFile(path, rawContent, read = null) {
   const issues = [];
   try {
     if (configKind(path) !== null) issues.push(...autorunIssues(path, lines, read));
-    if (isWorkflow(path)) issues.push(...workflowIssues(path, lines));
-    else if (isGitlabCi(path)) issues.push(...gitlabIssues(path, lines));
+    issues.push(...ciIssues(path, lines));
     const anonymous = netrc ? netrcAnonymous(lex.code) : new Map();
     for (let i = 0; i < lines.length; i++) {
       if (Date.now() > deadline) throw new ScanBudgetExceeded();

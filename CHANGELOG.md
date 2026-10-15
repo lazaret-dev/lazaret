@@ -737,6 +737,16 @@ aggregate):
 
 ### Changed
 
+- **One reader of CI files, the engine's (BR-7, step 1).** GitHub Actions workflows (SC-WORKFLOW-*) and GitLab CI
+  files (SC-GITLAB-*) are read by the native engine for both packages (`rust/crates/lazaret-engine/src/ci/`, the
+  `ci_*` calls), where `scanner/ghworkflow.py` and `gitlabci.py` and their npm twins `js/src/lib/ghworkflow.js` and
+  `gitlabci.js` each read them until now; the rule texts are in the rule pack. Nothing found changes: the engine's
+  answers equal the Python modules' on every case of the three parity tests' corpora (outlines, findings, rules,
+  `uses:`, the line checks: 42,995 answers on 5,231 files and the helpers' cases) and on 23,202 real workflow files
+  of 6,813 repositories. The npm twins (1,248 lines) are gone, and the Python modules (1,258 lines) are 168 lines
+  that keep the names the package calls, over the engine. `test_js_parity_workflow_hardening`, `test_js_parity_gitlabci` and the YAML part of
+  `test_js_parity_persistence` gave way to `test_snapshot_ci` (their corpora, hashes recorded from the Python
+  modules) and `test_wasm_parity_ci`.
 - **Security: S-XML is a parser set to resolve external entities, not an import of xml.etree, xml.dom or xml.sax
   (Q-3; rule set 2.80.0).** Since Python 3.7.1 none of them resolves an external entity unless told to, and Expat
   2.4.1 refuses entity bombs, so the import flagged safe code: all 20 of BenchmarkPython's safe XXE cases (its 8 real

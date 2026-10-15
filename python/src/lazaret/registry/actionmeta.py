@@ -319,8 +319,16 @@ def context_file(path, copies, is_file, is_dir):
 ROUTINE = ("uploads a local file over the network", "starts another program", "publishes a package to a registry",
            "reads files outside the package and sends them over the network")
 _ENV_SENT = "sends environment variables over the network"
-#: Why a script piped into a shell matters (the workflow check's words)
-PIPE_SHELL_WHY = ghworkflow.PIPE_SHELL_WHY
+
+
+def __getattr__(name):
+    # PIPE_SHELL_WHY: why a script piped into a shell matters (the workflow check's words, the engine's pack: read
+    # when first asked, so importing this module never needs the engine)
+    if name == "PIPE_SHELL_WHY":
+        return ghworkflow.PIPE_SHELL_WHY
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
 _WHOLE_ENV = "(the whole environment)"
 #: A script fetched and run as it arrives: MAJOR in an action, as SC-WORKFLOW-PIPE-SHELL rates it in a workflow
 #: (setup actions install rustup, poetry or a linter that way), not CRITICAL as in an npm install hook

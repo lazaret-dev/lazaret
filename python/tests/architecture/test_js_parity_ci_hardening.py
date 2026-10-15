@@ -1,9 +1,9 @@
 """Engine parity for the CI files' hardening checks in project scans (S-4):
 the Python CLI and the npm CLI report the same findings, metrics, gate and
-exit code on a tree of GitHub workflows and GitLab CI files (the modules'
-own parity, finding for finding, is test_js_parity_workflow_hardening.py
-and test_js_parity_gitlabci.py; this holds the two scanners' wiring and the
-gate's supply-chain condition to each other). Expectations are in
+exit code on a tree of GitHub workflows and GitLab CI files (the files are
+read by the engine since BR-7, held to its recorded outputs by
+test_snapshot_ci.py; this holds the two scanners' wiring and the gate's
+supply-chain condition to each other). Expectations are in
 tests/scanner/test_ci_hardening_wired.py. Skipped where the npm engine is
 not built.
 """

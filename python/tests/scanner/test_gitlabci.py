@@ -1,6 +1,6 @@
 """GitLab CI checks (0.1.9, S-3): what gitlabci.hardening() reports for a `.gitlab-ci.yml`'s text, and
-the rule each finding becomes (hardening_rule). The npm twin is compared in
-tests/architecture/test_js_parity_gitlabci.py.
+the rule each finding becomes (hardening_rule). The engine reads the file (BR-7: ci/gitlab.rs), for both
+packages; tests/architecture/test_snapshot_ci.py holds it to its recorded outputs.
 
 Each check has the shapes it must report, the lookalikes it must not, and where it matters the line it
 reports. All content is inert text: hosts are .invalid.

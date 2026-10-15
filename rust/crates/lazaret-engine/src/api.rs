@@ -71,6 +71,9 @@ pub const CALLS: &[&str] = &[
     "go_package",
     // 0.1.9 (Part C): what a vendored crate's Cargo.toml and a vendor/modules.txt say (vendor.rs), for --deps
     "cargo_layout", "go_vendored_modules",
+    // 0.1.9 (BR-7 step 1): CI files read for what they run — GitHub Actions workflows and GitLab CI files
+    "ci_kind", "ci_outline", "ci_workflow", "ci_gitlab", "ci_rule", "ci_issues", "ci_uses", "ci_parse_uses", "ci_check",
+    "ci_logical_lines",
     // the JavaScript parser (jsparse.py's trees)
     "js_parse", "js_parse_file",
     // the Python parser (Python 3.13's ast trees)
@@ -488,6 +491,82 @@ fn dispatch(name: &str, args: &Value, text: &[u32]) -> Result<Value, CallError> 
         "cross_file" => cross_file(p, args, text)?,
         "rs_crate" => rs_crate(args, text.to_vec())?,
         "go_package" => go_package(args, text.to_vec())?,
+        "ci_kind" => crate::ci::kind_of(text).map(Value::str).unwrap_or(Value::Null),
+        "ci_outline" => {
+            let items = matches!(args.get("items"), Some(Value::Bool(true)));
+            let seq_blocks = matches!(args.get("seq_blocks"), Some(Value::Bool(true)));
+            Value::Arr(crate::ci::outline::outline(text, items, seq_blocks).iter().map(|r| r.to_value(items)).collect())
+        }
+        "ci_workflow" => Value::obj(vec![
+            ("findings", Value::Arr(crate::ci::workflow_findings(p, text).iter().map(crate::ci::found_value).collect())),
+            ("hardening", Value::Arr(crate::ci::workflow::hardening(p, text).iter().map(crate::ci::found_value).collect())),
+        ]),
+        "ci_gitlab" => Value::obj(vec![(
+            "hardening",
+            Value::Arr(crate::ci::gitlab::hardening(p, text).iter().map(crate::ci::found_value).collect()),
+        )]),
+        "ci_rule" => {
+            let ci = crate::pystr::to_string(&arg_str(args, "ci")?);
+            let kind = crate::pystr::to_string(&arg_str(args, "kind")?);
+            let detail = args.get("detail").cloned().unwrap_or(Value::Null);
+            crate::ci::rule(p, &ci, &kind, &detail).map(|r| crate::ci::rule_value(&r)).unwrap_or(Value::Null)
+        }
+        "ci_issues" => {
+            let path = arg_str(args, "path")?;
+            Value::Arr(
+                crate::ci::issues(p, &path, text)
+                    .iter()
+                    .map(|(line, r)| Value::Arr(vec![Value::Int(*line as i64), crate::ci::rule_value(r)]))
+                    .collect(),
+            )
+        }
+        "ci_uses" => Value::Arr(
+            crate::ci::workflow::uses(text)
+                .into_iter()
+                .map(|(line, v)| Value::Arr(vec![Value::Int(line as i64), Value::Str(v)]))
+                .collect(),
+        ),
+        "ci_parse_uses" => match crate::ci::workflow::parse_uses(text) {
+            Some((kind, name, r, pinned)) => {
+                Value::Arr(vec![Value::str(kind), Value::Str(name), Value::Str(r), Value::Bool(pinned)])
+            }
+            None => Value::Null,
+        },
+        "ci_check" => {
+            // one of the readers' line checks, for the packages' tests and the Actions check
+            let check = crate::pystr::to_string(&arg_str(args, "check")?);
+            match check.as_str() {
+                "pipe_to_shell" => opt_s(crate::ci::workflow::pipe_to_shell(p, text)),
+                "install" => opt_s(crate::ci::workflow::install_command(p, text)),
+                "publish" => opt_s(crate::ci::workflow::publish_command(p, text)),
+                "mr_text" => match crate::ci::gitlab::mr_text(p, text) {
+                    Some((var, how)) => Value::Arr(vec![Value::Str(var), Value::str(how)]),
+                    None => Value::Null,
+                },
+                "flow_items" => Value::Arr(crate::ci::gitlab::flow_items(text).iter().map(|i| i.to_value()).collect()),
+                "parse_image" => {
+                    let (name, tag, digest) = crate::ci::gitlab::parse_image(text);
+                    Value::Arr(vec![Value::Str(name), Value::Str(tag), Value::Str(digest)])
+                }
+                _ => return Err(CallError::BadArgs(format!("ci_check: unknown check {}", check))),
+            }
+        }
+        "ci_logical_lines" => {
+            let bad = || CallError::BadArgs("ci_logical_lines: lines".into());
+            let mut lines: Vec<(usize, PyStr)> = Vec::new();
+            for item in args.get("lines").and_then(|l| l.as_arr()).ok_or_else(bad)? {
+                let pair = item.as_arr().ok_or_else(bad)?;
+                let n = pair.first().and_then(|v| v.as_i64()).ok_or_else(bad)?;
+                let t = pair.get(1).and_then(|v| v.as_str()).ok_or_else(bad)?;
+                lines.push((n.max(0) as usize, t.to_vec()));
+            }
+            Value::Arr(
+                crate::ci::workflow::logical_lines(&lines)
+                    .into_iter()
+                    .map(|(n, t)| Value::Arr(vec![Value::Int(n as i64), Value::Str(t)]))
+                    .collect(),
+            )
+        }
         "cargo_layout" => {
             let l = crate::vendor::cargo_layout(text);
             Value::obj(vec![

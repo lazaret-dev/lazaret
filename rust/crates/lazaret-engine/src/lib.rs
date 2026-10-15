@@ -10,6 +10,7 @@
 
 pub mod api;
 pub mod budget;
+pub mod ci;
 pub mod crossfile;
 pub mod datafmt;
 pub mod filectx;

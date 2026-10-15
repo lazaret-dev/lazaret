@@ -10498,6 +10498,284 @@
   "_GLOBAL_OBJECT": {
    "value": "(?:(?:window|globalThis|self|global|top|parent|frames)\\s*\\.\\s*)?"
   },
+  "_GL_ARG_RE": {
+   "flags": "",
+   "re": "\\s+(\\\"(?:[^\\\"\\\\]|\\\\.)*\\\"|'[^']*'|[^\\s;&|\\\"']+)"
+  },
+  "_GL_COMMAND_VAR_RE": {
+   "flags": "",
+   "re": "(?:^|[;&|(]|\\b(?:then|do|else|if|elif|while|until|sudo|time|exec|command)\\s)\\s*(?:[A-Za-z_][A-Za-z0-9_]*=[^\\s;&|()]*\\s+)*(\\$\\{?(?:CI_MERGE_REQUEST_(?:TITLE|DESCRIPTION|SOURCE_BRANCH_NAME|LABELS)|CI_COMMIT_(?:MESSAGE|TITLE|DESCRIPTION|REF_NAME|BRANCH|TAG_MESSAGE)|CI_EXTERNAL_PULL_REQUEST_SOURCE_BRANCH_NAME)\\b\\}?)"
+  },
+  "_GL_EVAL_RE": {
+   "flags": "",
+   "re": "(?:^|[;&|(]|\\b(?:then|do|else|if|elif|while|until|sudo|time|exec|command)\\s)\\s*(?:[A-Za-z_][A-Za-z0-9_]*=[^\\s;&|()]*\\s+)*eval\\b"
+  },
+  "_GL_EXACT_RE": {
+   "flags": "",
+   "re": "\\Av?\\d+\\.\\d+\\.\\d+(?:[-+][0-9A-Za-z.+-]*)?\\Z"
+  },
+  "_GL_GLOBAL_KEYS": {
+   "list": [
+    {
+     "value": "image"
+    },
+    {
+     "value": "services"
+    },
+    {
+     "value": "before_script"
+    },
+    {
+     "value": "after_script"
+    }
+   ]
+  },
+  "_GL_IMAGE_RULE": {
+   "map": {
+    "fix": {
+     "value": "Pin it to a digest and keep the tag next to it for readers (`image: python:3.12@sha256:<digest>`); let Renovate propose the updates."
+    },
+    "id": {
+     "value": "SC-GITLAB-IMAGE"
+    },
+    "msg": {
+     "value": "{who} {image}, which is not pinned to a digest: whoever controls that tag can change what runs in your pipeline."
+    },
+    "name": {
+     "value": "Pipeline runs an image not pinned to a digest"
+    },
+    "ref": {
+     "value": "CWE-829 \u00b7 Supply chain"
+    },
+    "sev": {
+     "value": "MAJOR"
+    },
+    "type": {
+     "value": "HOTSPOT"
+    },
+    "why": {
+     "value": "A tag names whatever image its owner pushed last, and `latest` or any tag a maintainer can push again lets them, or an attacker with their account, change the image your jobs run in, with the job's variables and token. A digest (`@sha256:\u2026`) names one image."
+    }
+   }
+  },
+  "_GL_INCLUDE_COMPONENT_RULE": {
+   "map": {
+    "fix": {
+     "value": "Copy the file into the repository, or include it from a project at a full commit SHA (`ref: <sha>`) or a component at one (`component: gitlab.com/group/project/name@<sha>`), where a change is a commit you can review; let Renovate propose the updates."
+    },
+    "id": {
+     "value": "SC-GITLAB-INCLUDE"
+    },
+    "msg": {
+     "value": "The pipeline uses the component {component} at {at}, not a full commit SHA: whoever publishes to it changes what runs in your pipeline."
+    },
+    "name": {
+     "value": "Pipeline uses a component that is not pinned to a commit"
+    },
+    "ref": {
+     "value": "CWE-829 \u00b7 Supply chain"
+    },
+    "sev": {
+     "value": "MAJOR"
+    },
+    "type": {
+     "value": "HOTSPOT"
+    },
+    "why": {
+     "value": "An included file becomes part of the pipeline: its jobs run with the project's variables, its secrets and its runners. A file from a URL can't be pinned to a commit or a hash, so it can change between two pipelines with no change in the repository (a new file at that address, a domain that expired and was bought, a man in the middle on plain HTTP). A branch moves with every push to it, and a tag can be moved too."
+    }
+   }
+  },
+  "_GL_INCLUDE_PROJECT_RULE": {
+   "map": {
+    "fix": {
+     "value": "Copy the file into the repository, or include it from a project at a full commit SHA (`ref: <sha>`) or a component at one (`component: gitlab.com/group/project/name@<sha>`), where a change is a commit you can review; let Renovate propose the updates."
+    },
+    "id": {
+     "value": "SC-GITLAB-INCLUDE"
+    },
+    "msg": {
+     "value": "The pipeline includes a file from {project} at {at}, not a full commit SHA: whoever can push to that ref changes what runs in your pipeline."
+    },
+    "name": {
+     "value": "Pipeline includes a project's file that is not pinned to a commit"
+    },
+    "ref": {
+     "value": "CWE-829 \u00b7 Supply chain"
+    },
+    "sev": {
+     "value": "MAJOR"
+    },
+    "type": {
+     "value": "HOTSPOT"
+    },
+    "why": {
+     "value": "An included file becomes part of the pipeline: its jobs run with the project's variables, its secrets and its runners. A file from a URL can't be pinned to a commit or a hash, so it can change between two pipelines with no change in the repository (a new file at that address, a domain that expired and was bought, a man in the middle on plain HTTP). A branch moves with every push to it, and a tag can be moved too."
+    }
+   }
+  },
+  "_GL_INCLUDE_REMOTE_RULE": {
+   "map": {
+    "fix": {
+     "value": "Copy the file into the repository, or include it from a project at a full commit SHA (`ref: <sha>`) or a component at one (`component: gitlab.com/group/project/name@<sha>`), where a change is a commit you can review; let Renovate propose the updates."
+    },
+    "id": {
+     "value": "SC-GITLAB-INCLUDE"
+    },
+    "msg": {
+     "value": "The pipeline includes {url}: GitLab fetches it every time a pipeline runs{how} whoever controls that address decides what the pipeline does."
+    },
+    "name": {
+     "value": "Pipeline includes a file from a URL"
+    },
+    "ref": {
+     "value": "CWE-829 \u00b7 Supply chain"
+    },
+    "sev": {
+     "value": "MAJOR"
+    },
+    "type": {
+     "value": "HOTSPOT"
+    },
+    "why": {
+     "value": "An included file becomes part of the pipeline: its jobs run with the project's variables, its secrets and its runners. A file from a URL can't be pinned to a commit or a hash, so it can change between two pipelines with no change in the repository (a new file at that address, a domain that expired and was bought, a man in the middle on plain HTTP). A branch moves with every push to it, and a tag can be moved too."
+    }
+   }
+  },
+  "_GL_MR_TEXT_RULE": {
+   "map": {
+    "fix": {
+     "value": "Don't pass these through `eval` or `sh -c`. As an argument of a command (`\"$CI_COMMIT_TITLE\"`) the text is data; inside a script that you run, read it from the environment, and check it against a short pattern first."
+    },
+    "id": {
+     "value": "SC-GITLAB-MR-TEXT"
+    },
+    "msg": {
+     "value": "The job \"{job}\" puts {variable} in {how}: it is text of a merge request, a commit or a branch, which anyone who can open one writes, and the shell reads it as commands."
+    },
+    "name": {
+     "value": "Script runs text anyone can write as code"
+    },
+    "ref": {
+     "value": "CWE-94 \u00b7 Supply chain"
+    },
+    "sev": {
+     "value": "MAJOR"
+    },
+    "type": {
+     "value": "HOTSPOT"
+    },
+    "why": {
+     "value": "A variable holds the text as it is, but `eval` and `sh -c` read their argument again as shell code. A merge request's title and description, a commit message and a branch name can hold `$(\u2026)` and backticks, and whoever can open a merge request or push a branch writes them: they can run commands in the job, with its variables and token."
+    }
+   }
+  },
+  "_GL_MR_VAR_RE": {
+   "flags": "",
+   "re": "\\$\\{?(?:CI_MERGE_REQUEST_(?:TITLE|DESCRIPTION|SOURCE_BRANCH_NAME|LABELS)|CI_COMMIT_(?:MESSAGE|TITLE|DESCRIPTION|REF_NAME|BRANCH|TAG_MESSAGE)|CI_EXTERNAL_PULL_REQUEST_SOURCE_BRANCH_NAME)\\b\\}?"
+  },
+  "_GL_NOT_JOBS": {
+   "list": [
+    {
+     "value": "variables"
+    },
+    {
+     "value": "stages"
+    },
+    {
+     "value": "include"
+    },
+    {
+     "value": "workflow"
+    },
+    {
+     "value": "cache"
+    },
+    {
+     "value": "spec"
+    },
+    {
+     "value": "inputs"
+    }
+   ]
+  },
+  "_GL_PIPE_SHELL_RULE": {
+   "map": {
+    "fix": {
+     "value": "Save the script to a file, check its SHA-256 against a value kept in the repository, then run it; or install the tool from a package manager at a version, with its hash."
+    },
+    "id": {
+     "value": "SC-GITLAB-PIPE-SHELL"
+    },
+    "msg": {
+     "value": "The job \"{job}\" fetches a script and runs it as it arrives (`{command}`): it runs whatever that address serves at that moment."
+    },
+    "name": {
+     "value": "Pipeline runs a script it downloads without reading it"
+    },
+    "ref": {
+     "value": "CWE-494 \u00b7 Supply chain"
+    },
+    "sev": {
+     "value": "MAJOR"
+    },
+    "type": {
+     "value": "HOTSPOT"
+    },
+    "why": {
+     "value": "A script piped into a shell is not read before it runs: whoever controls the host, or anyone on the path when the address is not HTTPS, decides what runs, with the job's token and secrets. The Codecov Bash Uploader, piped into a shell by thousands of pipelines, was changed for two months in 2021 to send each job's environment to a server of the attacker's."
+    }
+   }
+  },
+  "_GL_SCRIPT_KEYS": {
+   "list": [
+    {
+     "value": "before_script"
+    },
+    {
+     "value": "script"
+    },
+    {
+     "value": "after_script"
+    }
+   ]
+  },
+  "_GL_SHELL_C_RE": {
+   "flags": "",
+   "re": "(?:^|[;&|(]|\\b(?:then|do|else|if|elif|while|until|sudo|time|exec|command)\\s)\\s*(?:[A-Za-z_][A-Za-z0-9_]*=[^\\s;&|()]*\\s+)*(?:[\\w./-]*/)?(?:ba|z|da|k|a|c)?sh(?:\\s+-[A-Za-z]+)*\\s+-[A-Za-z]*c(?![A-Za-z])"
+  },
+  "_GL_TOKEN_INSTALL_RULE": {
+   "map": {
+    "fix": {
+     "value": "Install and build in a job without the credential, pass the result on as an artifact, and publish from a separate job that only downloads it and installs nothing."
+    },
+    "id": {
+     "value": "SC-GITLAB-TOKEN-INSTALL"
+    },
+    "msg": {
+     "value": "The job \"{job}\" holds a publishing credential ({grant}) and runs `{command}`: an install script or build hook of a dependency runs with it."
+    },
+    "name": {
+     "value": "Job that installs dependencies holds a publishing credential"
+    },
+    "ref": {
+     "value": "CWE-250 \u00b7 Supply chain"
+    },
+    "sev": {
+     "value": "MAJOR"
+    },
+    "type": {
+     "value": "HOTSPOT"
+    },
+    "why": {
+     "value": "Dependencies run code while they install and build, with the job's variables. An OIDC token (`id_tokens`), a registry's token and the secrets a job fetches are what a registry, a cloud account or a signing service takes as proof of identity, so code that can read one can publish or deploy as the pipeline."
+    }
+   }
+  },
+  "_GL_TOKEN_VAR_RE": {
+   "flags": "",
+   "re": "\\$\\{?(?:NPM_TOKEN|NODE_AUTH_TOKEN|PYPI_[A-Z_]{0,30}TOKEN|TWINE_PASSWORD|CARGO_REGISTRY_TOKEN|GEM_HOST_API_KEY|RUBYGEMS_API_KEY|CI_JOB_JWT(?:_V2)?)\\b\\}?"
+  },
   "_GO_GENERATE_WHY": {
    "value": "A //go:generate line names a command for go generate to run. Nothing runs it when the module is built or imported; it runs when someone runs go generate in the module's folders, which is a developer's step, so it is listed rather than judged."
   },
@@ -16186,6 +16464,562 @@
   "_VIEW_RETURN_SKIP_RE": {
    "flags": "",
    "re": "\\s*(?:\\{|\\[|dict\\s*\\(|(?:[A-Za-z_][\\w.]*\\.)?(?:redirect|jsonify|url_for|send_file|send_from_directory|send_static_file|abort|render_template)\\s*\\()"
+  },
+  "_WF_BACKDOOR_RULE": {
+   "map": {
+    "fix": {
+     "value": "Delete the workflow unless you wrote it, and remove any runner you did not register. Otherwise pass the text through an environment variable and quote it in the script."
+    },
+    "id": {
+     "value": "SC-WORKFLOW-BACKDOOR"
+    },
+    "msg": {
+     "value": "The job \"{job}\" puts {expr} into a command on a self-hosted runner, and {event} events start it: anyone who can {act} runs commands on that machine."
+    },
+    "name": {
+     "value": "Workflow runs event text on a self-hosted runner"
+    },
+    "ref": {
+     "value": "CWE-94 \u00b7 Supply chain"
+    },
+    "sev": {
+     "value": "CRITICAL"
+    },
+    "type": {
+     "value": "HOTSPOT"
+    },
+    "why": {
+     "value": "A `${{ \u2026 }}` expression is pasted into the script before it runs, so text from an issue, a discussion or a pull request becomes shell commands; on a self-hosted runner they run on that machine. The second Shai-Hulud wave registered its victims' machines as self-hosted runners and planted exactly this workflow (discussion.yaml): opening a discussion ran commands on the victim's machine."
+    }
+   }
+  },
+  "_WF_CACHE_ACTIONS": {
+   "list": [
+    {
+     "value": "actions/cache"
+    },
+    {
+     "value": "swatinem/rust-cache"
+    }
+   ]
+  },
+  "_WF_CACHE_RULE": {
+   "map": {
+    "fix": {
+     "value": "Build the release without restored caches: no actions/cache, `cache:` off in the setup actions, `package-manager-cache: false` for setup-node. The build is slower, and its inputs are the ones in the commit."
+    },
+    "id": {
+     "value": "SC-WORKFLOW-CACHE"
+    },
+    "msg": {
+     "value": "The job \"{job}\" restores a cache ({what}) in a workflow where {why}: what the cache holds runs with the release's token."
+    },
+    "name": {
+     "value": "Release workflow restores a build cache"
+    },
+    "ref": {
+     "value": "CWE-345 \u00b7 Supply chain"
+    },
+    "sev": {
+     "value": "MAJOR"
+    },
+    "type": {
+     "value": "HOTSPOT"
+    },
+    "why": {
+     "value": "A cache entry can be written by any job that can write to the repository's cache, and the next run restores it as it is: a poisoned entry changes the build that gets published without any change to the source."
+    }
+   }
+  },
+  "_WF_COMMAND_START": {
+   "value": "(?:^|[;&|(]|\\b(?:then|do|else|if|elif|while|until|sudo|time|exec|command)\\s)\\s*(?:[A-Za-z_][A-Za-z0-9_]*=[^\\s;&|()]*\\s+)*"
+  },
+  "_WF_EVENT_WORD_RE": {
+   "flags": "",
+   "re": "[A-Za-z_]+"
+  },
+  "_WF_EXPR_MAX": {
+   "value": 500
+  },
+  "_WF_FETCHED_ARG_RE": {
+   "flags": "i",
+   "re": "(?:\\b(?:ba|z|da|k|a|c)?sh|\\bsource|(?<![\\w.])\\.)(?:\\s+-[A-Za-z]+)*\\s+[\\\"']?<\\(\\s*(?:curl|wget|iwr|irm)\\b|\\b(?:(?:ba|z|da|k|a|c)?sh(?:\\s+-[A-Za-z]+)*\\s+-[A-Za-z]*c|eval)\\s+[\\\"']?\\$\\(\\s*(?:curl|wget|iwr|irm)\\b|\\b(?:iex|Invoke-Expression)\\b[\\s\\\"'&{($]{0,20}(?:iwr|irm|Invoke-WebRequest|Invoke-RestMethod|New-Object\\b)"
+  },
+  "_WF_FETCH_RE": {
+   "flags": "i",
+   "re": "(?:^|[;&|(]|\\b(?:then|do|else|if|elif|while|until|sudo|time|exec|command)\\s)\\s*(?:[A-Za-z_][A-Za-z0-9_]*=[^\\s;&|()]*\\s+)*((?:curl|wget|iwr|irm|Invoke-WebRequest|Invoke-RestMethod)\\b)"
+  },
+  "_WF_FIRST_PARTY": {
+   "list": [
+    {
+     "value": "actions/"
+    },
+    {
+     "value": "github/"
+    }
+   ]
+  },
+  "_WF_GH_PR_CHECKOUT_RE": {
+   "flags": "",
+   "re": "\\bgh\\s+pr\\s+checkout\\b"
+  },
+  "_WF_INSTALL_RE": {
+   "flags": "",
+   "re": "(?:^|[;&|(]|\\b(?:then|do|else|if|elif|while|until|sudo|time|exec|command)\\s)\\s*(?:[A-Za-z_][A-Za-z0-9_]*=[^\\s;&|()]*\\s+)*((?:npm\\s+(?:ci|install|i|add)|pnpm\\s+(?:install|i|add)|yarn\\s+(?:install|add)|bun\\s+(?:install|i|add)|pip3?\\s+install|python3?\\s+-m\\s+pip\\s+install|uv\\s+(?:sync|add|pip\\s+install)|poetry\\s+install|pipenv\\s+install|bundle\\s+install|composer\\s+(?:install|update)|cargo\\s+(?:build|fetch|install)|go\\s+(?:get|install|build|mod\\s+download))(?![\\w-])|yarn(?=\\s*(?:$|[;&|)])))"
+  },
+  "_WF_NETWORK_RE": {
+   "flags": "i",
+   "re": "\\b(?:curl|wget|nc|ncat|netcat|Invoke-WebRequest|Invoke-RestMethod|iwr|irm)\\b|https?://|/dev/tcp/"
+  },
+  "_WF_OIDC_INSTALL_RULE": {
+   "map": {
+    "fix": {
+     "value": "Install and build in a job without `id-token: write`, upload the result as an artifact, and publish from a separate job that only downloads it and installs nothing."
+    },
+    "id": {
+     "value": "SC-WORKFLOW-OIDC-INSTALL"
+    },
+    "msg": {
+     "value": "The job \"{job}\" can request an OIDC token ({source}) and runs `{command}`: an install script or build hook of a dependency can request it too."
+    },
+    "name": {
+     "value": "Job that installs dependencies can request an OIDC token"
+    },
+    "ref": {
+     "value": "CWE-250 \u00b7 Supply chain"
+    },
+    "sev": {
+     "value": "MAJOR"
+    },
+    "type": {
+     "value": "HOTSPOT"
+    },
+    "why": {
+     "value": "Dependencies run code while they install and build, with the job's permissions. An OIDC token is what a package registry's trusted publishing and a cloud account's federation take as proof of identity, so code that can request one can publish or deploy as the workflow."
+    }
+   }
+  },
+  "_WF_OUTSIDER_ACTS": {
+   "list": [
+    {
+     "value": "open a discussion"
+    },
+    {
+     "value": "comment on a discussion"
+    },
+    {
+     "value": "open an issue"
+    },
+    {
+     "value": "comment on an issue"
+    },
+    {
+     "value": "open a pull request"
+    },
+    {
+     "value": "open a pull request"
+    },
+    {
+     "value": "review a pull request"
+    },
+    {
+     "value": "comment on a pull request's code"
+    }
+   ]
+  },
+  "_WF_OUTSIDER_EVENTS": {
+   "list": [
+    {
+     "value": "discussion"
+    },
+    {
+     "value": "discussion_comment"
+    },
+    {
+     "value": "issues"
+    },
+    {
+     "value": "issue_comment"
+    },
+    {
+     "value": "pull_request_target"
+    },
+    {
+     "value": "pull_request"
+    },
+    {
+     "value": "pull_request_review"
+    },
+    {
+     "value": "pull_request_review_comment"
+    }
+   ]
+  },
+  "_WF_PERMS_MISSING_RULE": {
+   "map": {
+    "fix": {
+     "value": "Set `permissions: contents: read` at the top of the workflow and grant more only where a job needs it."
+    },
+    "id": {
+     "value": "SC-WORKFLOW-PERMISSIONS"
+    },
+    "msg": {
+     "value": "The workflow sets no top-level `permissions:`, and {who} none of its own: the token gets the repository's default permissions, which can include write access."
+    },
+    "name": {
+     "value": "Workflow sets no permissions"
+    },
+    "ref": {
+     "value": "CWE-250 \u00b7 Supply chain"
+    },
+    "sev": {
+     "value": "MINOR"
+    },
+    "type": {
+     "value": "HOTSPOT"
+    },
+    "why": {
+     "value": "A job should get only the access it uses. A workflow-level `permissions:` with a write scope hands it to every job, the ones that run third-party actions and install dependencies among them."
+    }
+   }
+  },
+  "_WF_PERMS_RULE": {
+   "map": {
+    "fix": {
+     "value": "Set `permissions: contents: read` at the top of the workflow and grant a write scope only in the job that needs it."
+    },
+    "id": {
+     "value": "SC-WORKFLOW-PERMISSIONS"
+    },
+    "msg": {
+     "value": "The workflow's token has write access in every job ({scopes}): a step in any job, or any action it runs, can use it."
+    },
+    "name": {
+     "value": "Workflow grants write permissions to every job"
+    },
+    "ref": {
+     "value": "CWE-250 \u00b7 Supply chain"
+    },
+    "sev": {
+     "value": "MAJOR"
+    },
+    "type": {
+     "value": "HOTSPOT"
+    },
+    "why": {
+     "value": "A job should get only the access it uses. A workflow-level `permissions:` with a write scope hands it to every job, the ones that run third-party actions and install dependencies among them."
+    }
+   }
+  },
+  "_WF_PIPELINE_RE": {
+   "flags": "",
+   "re": "\\|\\||&&|[;\\n]"
+  },
+  "_WF_PIPE_SHELL_RULE": {
+   "map": {
+    "fix": {
+     "value": "Save the script to a file, check its SHA-256 against a value kept in the repository, then run it; or install the tool from a package manager at a version, with its hash."
+    },
+    "id": {
+     "value": "SC-WORKFLOW-PIPE-SHELL"
+    },
+    "msg": {
+     "value": "The job \"{job}\" fetches a script and runs it as it arrives (`{command}`): it runs whatever that address serves at that moment."
+    },
+    "name": {
+     "value": "Workflow runs a script it downloads without reading it"
+    },
+    "ref": {
+     "value": "CWE-494 \u00b7 Supply chain"
+    },
+    "sev": {
+     "value": "MAJOR"
+    },
+    "type": {
+     "value": "HOTSPOT"
+    },
+    "why": {
+     "value": "A script piped into a shell is not read before it runs: whoever controls the host, or anyone on the path when the address is not HTTPS, decides what runs, with the job's token and secrets. The Codecov Bash Uploader, piped into a shell by thousands of pipelines, was changed for two months in 2021 to send each job's environment to a server of the attacker's."
+    }
+   }
+  },
+  "_WF_PR_CHECKOUT_CMD_RE": {
+   "flags": "",
+   "re": "\\bgit\\s+(?:checkout|fetch|switch|pull|merge|cherry-pick)\\b"
+  },
+  "_WF_PR_CHECKOUT_RULE": {
+   "map": {
+    "fix": {
+     "value": "Run a pull request's code under `pull_request` (no secrets, a read-only token). If a job needs secrets, check out only the base branch and treat the pull request's files as data: never install, build or run them."
+    },
+    "id": {
+     "value": "SC-WORKFLOW-PR-CHECKOUT"
+    },
+    "msg": {
+     "value": "The job \"{job}\" runs on pull_request_target and checks out the pull request's code ({via}: {expr}): whatever it then installs, builds or runs gets the repository's secrets and a token that can write."
+    },
+    "name": {
+     "value": "pull_request_target job checks out the pull request"
+    },
+    "ref": {
+     "value": "CWE-94 \u00b7 Supply chain"
+    },
+    "sev": {
+     "value": "CRITICAL"
+    },
+    "type": {
+     "value": "HOTSPOT"
+    },
+    "why": {
+     "value": "pull_request_target runs the base repository's workflow with its secrets and a token that can write, so that a workflow can answer a pull request from a fork. Running the fork's code there lets anyone who can open a pull request run commands with that access (the \"pwn request\")."
+    }
+   }
+  },
+  "_WF_PR_HEAD_RE": {
+   "flags": "",
+   "re": "github\\.event\\.pull_request\\.head\\.(?:sha|ref|repo)|github\\.head_ref|refs/pull/|\\bpull/(?:\\d|\\$\\{\\{)"
+  },
+  "_WF_PUBLISH_ACTIONS": {
+   "list": [
+    {
+     "value": "pypa/gh-action-pypi-publish"
+    },
+    {
+     "value": "softprops/action-gh-release"
+    },
+    {
+     "value": "ncipollo/release-action"
+    },
+    {
+     "value": "goreleaser/goreleaser-action"
+    },
+    {
+     "value": "actions/create-release"
+    },
+    {
+     "value": "actions/attest-build-provenance"
+    },
+    {
+     "value": "actions/attest"
+    },
+    {
+     "value": "rust-lang/crates-io-auth-action"
+    },
+    {
+     "value": "js-devtools/npm-publish"
+    },
+    {
+     "value": "slsa-framework/slsa-github-generator"
+    },
+    {
+     "value": "sigstore/gh-action-sigstore-python"
+    }
+   ]
+  },
+  "_WF_PUBLISH_RE": {
+   "flags": "",
+   "re": "(?:^|[;&|(]|\\b(?:then|do|else|if|elif|while|until|sudo|time|exec|command)\\s)\\s*(?:[A-Za-z_][A-Za-z0-9_]*=[^\\s;&|()]*\\s+)*((?:npm|pnpm|bun)\\s+publish\\b|yarn\\s+(?:npm\\s+)?publish\\b|twine\\s+upload\\b|uv\\s+publish\\b|poetry\\s+publish\\b|cargo\\s+publish\\b|gh\\s+release\\s+create\\b|docker\\s+push\\b|vsce\\s+publish\\b|ovsx\\s+publish\\b|gem\\s+push\\b|dotnet\\s+nuget\\s+push\\b|helm\\s+push\\b)"
+  },
+  "_WF_SCRIPT_HEAD_RE": {
+   "flags": "i",
+   "re": "\\s*(?:sudo\\b(?:\\s+-\\S+)*\\s+)?(?:env\\s+)?(?:[A-Za-z_][A-Za-z0-9_]*=[^\\s;&|()]*\\s+)*(?:[\\w./-]*/)?((?:ba|z|da|k|a|c)?sh|python[0-9.]*|node|perl|ruby|iex|Invoke-Expression|pwsh|powershell)\\b"
+  },
+  "_WF_SECRETS_HELD_RULE": {
+   "map": {
+    "fix": {
+     "value": "Delete the workflow unless you wrote it, then rotate every secret of the repository. A job should get only the secrets it uses, by name (${{ secrets.NAME }})."
+    },
+    "id": {
+     "value": "SC-WORKFLOW-SECRETS"
+    },
+    "msg": {
+     "value": "The workflow hands every repository secret to {where} (toJSON(secrets)): any step there can read them all."
+    },
+    "name": {
+     "value": "Workflow hands out every secret"
+    },
+    "ref": {
+     "value": "CWE-200 \u00b7 Supply chain"
+    },
+    "sev": {
+     "value": "MAJOR"
+    },
+    "type": {
+     "value": "HOTSPOT"
+    },
+    "why": {
+     "value": "`${{ toJSON(secrets) }}` is every secret of the repository in one value: a job that holds it can leak them all, and a workflow that also sends it out is how the Shai-Hulud worms stole secrets from the repositories they reached (a webhook.site upload, a build artifact)."
+    }
+   }
+  },
+  "_WF_SECRETS_RE": {
+   "flags": "i",
+   "re": "\\btoJSON\\s*\\(\\s*secrets\\s*\\)"
+  },
+  "_WF_SECRETS_SENT_RULE": {
+   "map": {
+    "fix": {
+     "value": "Delete the workflow unless you wrote it, then rotate every secret of the repository. A job should get only the secrets it uses, by name (${{ secrets.NAME }})."
+    },
+    "id": {
+     "value": "SC-WORKFLOW-SECRETS"
+    },
+    "msg": {
+     "value": "The workflow hands every repository secret to {where} and sends data out ({how}): the Shai-Hulud worms planted workflows like this."
+    },
+    "name": {
+     "value": "Workflow hands out every secret"
+    },
+    "ref": {
+     "value": "CWE-200 \u00b7 Supply chain"
+    },
+    "sev": {
+     "value": "CRITICAL"
+    },
+    "type": {
+     "value": "HOTSPOT"
+    },
+    "why": {
+     "value": "`${{ toJSON(secrets) }}` is every secret of the repository in one value: a job that holds it can leak them all, and a workflow that also sends it out is how the Shai-Hulud worms stole secrets from the repositories they reached (a webhook.site upload, a build artifact)."
+    }
+   }
+  },
+  "_WF_SETUP_CACHE_ACTIONS": {
+   "list": [
+    {
+     "value": "actions/setup-node"
+    },
+    {
+     "value": "actions/setup-python"
+    },
+    {
+     "value": "actions/setup-go"
+    },
+    {
+     "value": "actions/setup-java"
+    },
+    {
+     "value": "actions/setup-dotnet"
+    },
+    {
+     "value": "ruby/setup-ruby"
+    },
+    {
+     "value": "astral-sh/setup-uv"
+    }
+   ]
+  },
+  "_WF_SETUP_CACHE_KEYS": {
+   "list": [
+    {
+     "value": "cache"
+    },
+    {
+     "value": "cache"
+    },
+    {
+     "value": "cache"
+    },
+    {
+     "value": "cache"
+    },
+    {
+     "value": "cache"
+    },
+    {
+     "value": "bundler-cache"
+    },
+    {
+     "value": "enable-cache"
+    }
+   ]
+  },
+  "_WF_SETUP_CACHE_ON": {
+   "list": [
+    {
+     "value": "actions/setup-go"
+    },
+    {
+     "value": "astral-sh/setup-uv"
+    }
+   ]
+  },
+  "_WF_SHELLS": {
+   "list": [
+    {
+     "value": "sh"
+    },
+    {
+     "value": "bash"
+    },
+    {
+     "value": "zsh"
+    },
+    {
+     "value": "dash"
+    },
+    {
+     "value": "ksh"
+    },
+    {
+     "value": "ash"
+    },
+    {
+     "value": "csh"
+    },
+    {
+     "value": "iex"
+    },
+    {
+     "value": "invoke-expression"
+    },
+    {
+     "value": "pwsh"
+    },
+    {
+     "value": "powershell"
+    }
+   ]
+  },
+  "_WF_STDIN_ONLY_RE": {
+   "flags": "",
+   "re": "(?:\\s+-[A-Za-z]+)*(?:\\s+-)?\\s*\\Z"
+  },
+  "_WF_UNPINNED_RULE": {
+   "map": {
+    "fix": {
+     "value": "Pin it to the full 40-character commit SHA and keep the version in a comment (`uses: owner/repo@<sha> # v4.1.0`); let Dependabot or Renovate propose the updates. For an image, pin `@sha256:\u2026`."
+    },
+    "id": {
+     "value": "SC-WORKFLOW-UNPINNED"
+    },
+    "msg": {
+     "value": "The workflow runs {what}{uses}, which is not pinned to {pin}: whoever controls that ref can change what runs in your pipeline."
+    },
+    "name": {
+     "value": "Workflow runs something not pinned to a commit"
+    },
+    "ref": {
+     "value": "CWE-829 \u00b7 Supply chain"
+    },
+    "sev": {
+     "value": "MAJOR"
+    },
+    "type": {
+     "value": "HOTSPOT"
+    },
+    "why": {
+     "value": "A tag or a branch can be moved to other code after you reviewed it: in March 2025 the tags of tj-actions/changed-files were rewritten to a commit that printed the secrets of every workflow that used it into its build log. A full commit SHA, or an image digest, can't be moved."
+    }
+   }
+  },
+  "_WF_UNTRUSTED_RE": {
+   "flags": "",
+   "re": "\\bgithub\\.head_ref\\b|\\bgithub\\.event\\.(?:discussion|issue|comment|pull_request|review|review_comment|head_commit|commits|pages|workflow_run)\\b[\\w.\\[\\]*-]{0,200}?\\.(?:title|body|message|name|email|ref|label|head_branch|page_name|default_branch)\\b"
+  },
+  "_WF_WRITE_SCOPE_RE": {
+   "flags": "",
+   "re": "([A-Za-z-]+)\\s*:\\s*write\\b"
   },
   "_WORKFLOW_BACKDOOR_WHY": {
    "value": "A `${{ \u2026 }}` expression is pasted into the script before it runs, so text from an issue, a discussion or a pull request becomes shell commands; on a self-hosted runner they run on that machine. The second Shai-Hulud wave registered its victims' machines as self-hosted runners and planted exactly this workflow (discussion.yaml): opening a discussion ran commands on the victim's machine."

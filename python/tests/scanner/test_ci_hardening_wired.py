@@ -119,13 +119,16 @@ class HardeningInProjectScanTests(unittest.TestCase):
                           ("SC-GITLAB-PIPE-SHELL", 6)])
 
     def test_the_set_is_the_modules_rules(self):
-        """Every id a hardening_rule() can give, and no other."""
-        import inspect
-        import re
-        from lazaret.scanner import ghworkflow, gitlabci
-        ids = set()
-        for module in (ghworkflow, gitlabci):
-            ids |= set(re.findall(r'"id": "(SC-[A-Z-]+)"', inspect.getsource(module.hardening_rule)))
+        """Every id a hardening check's rule can give, and no other: the rules of the engine's rule pack
+        (the CI readers' since BR-7) but the worms' shapes (SC-WORKFLOW-SECRETS, SC-WORKFLOW-BACKDOOR)."""
+        import json
+        from tests import _support
+        pack = os.path.join(_support.REPO_ROOT, "rust", "crates", "lazaret-engine", "rules", "lazaret-rules.json")
+        with open(pack, encoding="utf-8") as f:
+            values = json.load(f)["values"]
+        shapes = {"_WF_SECRETS_SENT_RULE", "_WF_SECRETS_HELD_RULE", "_WF_BACKDOOR_RULE"}
+        ids = {v["map"]["id"]["value"] for k, v in values.items()
+               if k.startswith(("_WF_", "_GL_")) and k.endswith("_RULE") and k not in shapes}
         self.assertEqual(ids, core.HARDENING_RULES)
 
 if __name__ == "__main__":

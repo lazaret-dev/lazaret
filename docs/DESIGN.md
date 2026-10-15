@@ -223,10 +223,12 @@ shared by the CLI and the MCP server. In order it:
    on their own (SC-AUTORUN: `lazaret.scanner.autorun`, a JSON-with-comments
    reader that keeps lines, and what each file makes its tool run; the commands
    are followed into the files of the tree they run, read by `tree_reader`, and
-   judged by the install-script test), and GitHub Actions workflows
-   (SC-WORKFLOW-*: `lazaret.scanner.ghworkflow`, an outline reader of the YAML a
-   workflow needs, not a YAML parser); twins `js/src/lib/autorun.js`,
-   `js/src/lib/ghworkflow.js`;
+   judged by the install-script test; twin `js/src/lib/autorun.js`), and CI
+   files: GitHub Actions workflows (SC-WORKFLOW-*) and GitLab CI files
+   (SC-GITLAB-*), read by the engine for both packages since BR-7
+   (`rust/crates/lazaret-engine/src/ci/`, the `ci_*` calls: an outline reader
+   of the YAML a pipeline needs, not a YAML parser; `core.ci_issues` and
+   `scan.js` `ciIssues` shape what it answers into issues);
 3. **scans manifests** (`package.json`, `binding.gyp`, …);
 4. **runs `--deps` checks** (`dependency_checks`) — what dependencies run at
    install and import time (install hooks followed to the files they run,
@@ -295,9 +297,11 @@ set on Python and JavaScript (Go's standard library measures 2 to 13% with
 its six-line windows, popular crates 4 to 54%), while they count in the
 lines of code the maintainability rating divides by.
 
-**CI files' hardening (0.1.9, S-4).** `scan_config_file` runs
-`ghworkflow.hardening` on a workflow and `gitlabci.hardening` on a GitLab CI
-file (both twins), each kind's rule from `hardening_rule`. These are
+**CI files' hardening (0.1.9, S-4).** `scan_config_file` asks the engine for
+a CI file's issues (`ci_issues`: on a workflow its findings, then its
+hardening checks; on a GitLab CI file its checks), each with its rule from
+the rule pack (the engine's since BR-7; until then `ghworkflow.py` and
+`gitlabci.py` and their npm twins). These are
 practices, not the worms' shapes: `build_result` counts one against the
 supply-chain condition only when it is CRITICAL (`core.HARDENING_RULES`,
 `rules.js` `HARDENING_RULES`), so a repository is not failed for running
@@ -1180,7 +1184,7 @@ digest, a composite action's unpinned steps, two levels deep). What it could
 not ask (the rate limit, its call budget, an expression in a ref, a private
 repository) is `incomplete`, and an action not checked is not cleared. A
 project scan does not call it: it needs the network, and the offline checks
-(`ghworkflow.hardening`) are the scan's.
+(the engine's `ci_workflow`) are the scan's.
 
 Since N-4 it also reads each action's own code at the commit it resolves
 to: the archive the runner fetches (GitHub's archive of the commit, from
@@ -1963,7 +1967,8 @@ leaves the texts to go with their calls, which gives the same answers:
 | `python/src/lazaret/scanner/flow.py` | Interprocedural cross-file taint: hands the engine's passes the files and the configured model, builds their findings (Python's own AST pass until phase 3) |
 | `rust/crates/lazaret-engine/src/jsparse/`, `jsflow/` | The JavaScript / TypeScript reader and the JS cross-file pass (the `js_parse` and `js_flow` calls, both packages'; jsparse.py, jsflow.py and their npm twins until phase 3) |
 | `rust/crates/lazaret-engine/src/pyparse/`, `pyflow/` | The Python reader (Python 3.13's trees) and the Python cross-file pass (the `py_parse` and `py_flow` calls, both packages'; flow.py's own pass until phase 3) |
-| `python/src/lazaret/scanner/autorun.py`, `ghworkflow.py`, `gitlabci.py` | Editor and AI-agent settings that run commands (SC-AUTORUN), the workflows the Shai-Hulud worms planted (SC-WORKFLOW-SECRETS, -BACKDOOR) and the CI files' hardening checks (the other SC-WORKFLOW-* ids, SC-GITLAB-*); twins `js/src/lib/autorun.js`, `ghworkflow.js`, `gitlabci.js` |
+| `python/src/lazaret/scanner/autorun.py` | Editor and AI-agent settings that run commands (SC-AUTORUN); twin `js/src/lib/autorun.js` |
+| `rust/crates/lazaret-engine/src/ci/` | CI files (the `ci_*` calls, both packages'; since BR-7): the workflows the Shai-Hulud worms planted (SC-WORKFLOW-SECRETS, -BACKDOOR) and the CI files' hardening checks (the other SC-WORKFLOW-* ids, SC-GITLAB-*); `scanner/ghworkflow.py` and `gitlabci.py` keep the names the package calls, over the engine |
 | `python/src/lazaret/scanner/sca_feeds.py`, `sca_index.py`, `gomod.py` | CVE bundle build (OSV/KEV/EPSS), the indexed bundle, the `go.mod` reader |
 | `python/src/lazaret/{registry,mcp,pg,safexml}/` | Registry auditor, MCP server, Postgres client, safe XML |
 | `python/src/lazaret/registry/guard.py`, `python/src/lazaret/_cli.py` | The install guard (`lazaret guard`) and the `lazaret` command's dispatch |

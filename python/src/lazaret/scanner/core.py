@@ -63,8 +63,6 @@ from lazaret.scanner import taintspec  # taint-config validation shared by both 
 from lazaret.scanner import _unicode13  # the Unicode every engine reads source text in
 from lazaret.scanner import configsecrets  # config and data files: credentials only
 from lazaret.scanner import autorun  # editor and AI-agent settings that run commands (SC-AUTORUN)
-from lazaret.scanner import ghworkflow  # GitHub Actions workflows: the worms' shapes, hardening (SC-WORKFLOW-*)
-from lazaret.scanner import gitlabci  # GitLab CI files: hardening (SC-GITLAB-*)
 from lazaret.scanner import _native, engine  # the native engine: every detector below
 
 
@@ -2628,21 +2626,9 @@ def autorun_issues(path, lines, read=None):
     return out
 
 
-# ---------------- Workflows the worms planted (SC-WORKFLOW-*) ----------------
-_WORKFLOW_SECRETS_WHY = (
-    "`${{ toJSON(secrets) }}` is every secret of the repository in one value: a job that holds it can "
-    "leak them all, and a workflow that also sends it out is how the Shai-Hulud worms stole secrets "
-    "from the repositories they reached (a webhook.site upload, a build artifact).")
-_WORKFLOW_BACKDOOR_WHY = (
-    "A `${{ … }}` expression is pasted into the script before it runs, so text from an issue, a "
-    "discussion or a pull request becomes shell commands; on a self-hosted runner they run on that "
-    "machine. The second Shai-Hulud wave registered its victims' machines as self-hosted runners and "
-    "planted exactly this workflow (discussion.yaml): opening a discussion ran commands on the victim's "
-    "machine.")
-
-
-#: The CI files' hardening checks (0.1.9: ghworkflow.hardening and
-#: gitlabci.hardening): the practices a pipeline should follow, not the shapes
+# ---------------- CI files (SC-WORKFLOW-*, SC-GITLAB-*) ----------------
+#: The CI files' hardening checks (0.1.9; the engine's ci/workflow.rs and
+#: ci/gitlab.rs since BR-7): the practices a pipeline should follow, not the shapes
 #: of one that was tampered with. They are reported, and only a CRITICAL one
 #: (a pull_request_target job that runs a pull request's code, a file included
 #: over plain http) counts against the gate's supply-chain condition: most
@@ -2654,47 +2640,16 @@ HARDENING_RULES = frozenset({
     "SC-GITLAB-INCLUDE", "SC-GITLAB-IMAGE", "SC-GITLAB-PIPE-SHELL", "SC-GITLAB-MR-TEXT", "SC-GITLAB-TOKEN-INSTALL"})
 
 
-def workflow_issues(path, lines):
-    """SC-WORKFLOW-SECRETS / SC-WORKFLOW-BACKDOOR for a GitHub Actions workflow
-    (ghworkflow.is_workflow(path)) whose text is lines, and its hardening
-    checks (HARDENING_RULES)."""
-    out = []
-    text = "\n".join(lines)
-    for kind, line, d in ghworkflow.findings(text):
-        if kind == "secrets":
-            sent = d["how"] is not None
-            out.append(mk_issue({
-                "id": "SC-WORKFLOW-SECRETS", "name": "Workflow hands out every secret", "type": "HOTSPOT",
-                "sev": "CRITICAL" if sent else "MAJOR",
-                "msg": (f"The workflow hands every repository secret to {d['where']} and sends data out "
-                        f"({d['how']}): the Shai-Hulud worms planted workflows like this." if sent else
-                        f"The workflow hands every repository secret to {d['where']} (toJSON(secrets)): any "
-                        f"step there can read them all."),
-                "why": _WORKFLOW_SECRETS_WHY,
-                "fix": ("Delete the workflow unless you wrote it, then rotate every secret of the repository. "
-                        "A job should get only the secrets it uses, by name (${{ secrets.NAME }})."),
-                "ref": "CWE-200 · Supply chain"}, path, line, lines))
-        else:
-            out.append(mk_issue({
-                "id": "SC-WORKFLOW-BACKDOOR", "name": "Workflow runs event text on a self-hosted runner",
-                "type": "HOTSPOT", "sev": "CRITICAL",
-                "msg": (f"The job \"{d['job']}\" puts {d['expr']} into a command on a self-hosted runner, and "
-                        f"{d['event']} events start it: anyone who can {d['act']} runs commands on that "
-                        f"machine."),
-                "why": _WORKFLOW_BACKDOOR_WHY,
-                "fix": ("Delete the workflow unless you wrote it, and remove any runner you did not register. "
-                        "Otherwise pass the text through an environment variable and quote it in the script."),
-                "ref": "CWE-94 · Supply chain"}, path, line, lines))
-    for kind, line, d in ghworkflow.hardening(text):
-        out.append(mk_issue(ghworkflow.hardening_rule(kind, d), path, line, lines))
-    return out
-
-
-def gitlab_issues(path, lines):
-    """A GitLab CI file's hardening checks (gitlabci.is_gitlab_ci(path);
-    HARDENING_RULES)."""
-    return [mk_issue(gitlabci.hardening_rule(kind, d), path, line, lines)
-            for kind, line, d in gitlabci.hardening("\n".join(lines))]
+def ci_issues(path, lines):
+    """The issues of a CI file whose text is lines: a GitHub Actions workflow's
+    SC-WORKFLOW-* (the worms' shapes, then the hardening checks) or a GitLab CI
+    file's SC-GITLAB-* (HARDENING_RULES); nothing for another file. The engine
+    reads the file (BR-7: `ci_issues`) and answers each issue's line and rule;
+    the path is asked first, so another file's text is not handed over."""
+    if _native.call("ci_kind", {}, path) is None:
+        return []
+    return [mk_issue(rule, path, line, lines)
+            for line, rule in _native.call("ci_issues", {"path": path}, "\n".join(lines))]
 
 
 def tree_reader(files, configs):
@@ -2737,10 +2692,7 @@ def scan_config_file(path, content, read=None):
         try:
             if autorun.config_kind(path) is not None:
                 issues.extend(autorun_issues(path, lines, read))
-            if ghworkflow.is_workflow(path):
-                issues.extend(workflow_issues(path, lines))
-            elif gitlabci.is_gitlab_ci(path):
-                issues.extend(gitlab_issues(path, lines))
+            issues.extend(ci_issues(path, lines))
             anonymous = configsecrets.netrc_anonymous(ctx.code) if ctx.netrc else {}
             # the lines either test can report on, each found by one pass over the whole text (no pattern here
             # matches across a newline, nor looks at one but as it looks at a line's end): a line with no token

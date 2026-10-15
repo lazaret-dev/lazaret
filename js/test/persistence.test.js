@@ -5,7 +5,8 @@
 // every secret is CRITICAL at import time too. In a scanned tree, settings
 // that make an editor or an agent run a command are SC-AUTORUN, and the
 // workflows the worms planted SC-WORKFLOW-SECRETS / SC-WORKFLOW-BACKDOOR.
-// tests/architecture/test_js_parity_persistence.py compares the engines.
+// tests/architecture/test_js_parity_persistence.py compares the engines (the workflows: the
+// engine's, test_snapshot_ci.py).
 // Inert text only: hosts are .invalid, nothing is executed.
 
 import { test } from "node:test";
@@ -15,12 +16,15 @@ import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
-import { persistenceReasons, installScriptRisk, importTimeRisk, importTimeSeverity } from "../src/lib/native.js";
+import { call, persistenceReasons, installScriptRisk, importTimeRisk, importTimeSeverity } from "../src/lib/native.js";
 import { parseJsonc, JsoncError, configKind, ownerDir, entries, localCommand } from "../src/lib/autorun.js";
-import { isWorkflow, findings, outline } from "../src/lib/ghworkflow.js";
 import { HARDENING_RULES } from "../src/scanner/rules.js";
 import { scanConfigFile } from "../src/scanner/scan.js";
 
+// the workflows are the engine's to read (BR-7: its `ci_*` calls)
+const isWorkflow = (path) => call("ci_kind", {}, path) === "workflow";
+const findings = (text) => call("ci_workflow", {}, text).findings;
+const outline = (text) => call("ci_outline", {}, text);
 const CLI = join(dirname(fileURLToPath(import.meta.url)), "..", "bin", "lazaret.js");
 // the 2026 setup.mjs loaders: Bun fetched, then a file of the package run with it (followed, not named)
 const LOADER = "const DIR = path.dirname(fileURLToPath(import.meta.url));\n" +

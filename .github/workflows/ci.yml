@@ -210,4 +210,4 @@ jobs:
             tests.architecture.test_wasm_parity_crossfile tests.architecture.test_wasm_parity_jsparse \
             tests.architecture.test_wasm_parity_jsflow tests.architecture.test_wasm_parity_pyparse \
             tests.architecture.test_wasm_parity_pyflow tests.architecture.test_wasm_parity_project \
-            tests.architecture.test_wasm_parity_secrets -v
+            tests.architecture.test_wasm_parity_secrets tests.architecture.test_wasm_parity_ci -v

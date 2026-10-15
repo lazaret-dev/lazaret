@@ -1,7 +1,7 @@
 """GitHub workflow hardening checks (0.1.9, S-2, offline half): what
 ghworkflow.hardening() reports for a workflow's text, and the rule each finding
-becomes (hardening_rule). The npm twin is compared in
-tests/architecture/test_js_parity_workflow_hardening.py.
+becomes (hardening_rule). The engine reads the workflow (BR-7: ci/workflow.rs),
+for both packages; test_snapshot_ci.py holds it to its recorded outputs.
 
 Each check has the shapes it must report, the lookalikes it must not, and where
 it matters the line it reports. All content is inert text.
