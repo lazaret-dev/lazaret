@@ -1032,6 +1032,20 @@ aggregate):
 
 ### Fixed
 
+- **Security: what a JavaScript method keeps in a member of `this` is the instance's it is called on (D-3c; rule set
+  2.81.0).** D-3b left out what a method is given and puts into a container that is a member of `this`
+  (`record(d) { this.events.push(d); }`): put into every instance's member it held what every caller recorded, and in
+  monaco-editor's loader that joined unrelated flows. So `r.record(process.env)` then a send of `r.events`, of
+  `r.all()` (a method returning `this.events`), of `r` or by `r.flush()` (sending `this.events`) was not followed.
+  Now it is the method's summary: a call on a name puts what it gives there into that name and its member's
+  container, and a call on `this` (`this.record(d)` in another method) makes the caller keep its own parameter so;
+  every class's methods read `this` as their receiver, the value they are called on (B-3, for a class made in several
+  places only before), and a method that returns a member gives a call on a name what that name's member holds.
+  Another instance holds none of it, and a call on anything but a name (`this.recorder.record(…)`) puts it nowhere.
+  Measured: the four tree answers on the 21,786 JavaScript files of the npm packages installed here and on
+  monaco-editor 0.57.0's 1,603 are unchanged, and so is its scan; the popular set's 1,703 releases: no verdict and no
+  finding moved. Owed (John): the benchmark and holdout.
+
 - **Taint: an escaped quote in a Python literal, a `for` statement's targets, values put with `set()` and read with
   `get()` (Q-2; rule set 2.80.0).** Project mode, Python. A literal holding an escaped quote (`'…[@id=\'' + name +
   '\']'`) was read as ending there, and the next literal began at its real end, so `+ name +` was read as a string

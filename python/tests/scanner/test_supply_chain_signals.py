@@ -396,8 +396,8 @@ class InstanceTests(unittest.TestCase):
     """B-3 (0.1.9): a method reads `this` as the value it is called on, in a class made in several places, whose
     instances B-1 keeps apart (vite's MagicString). What one method of an instance was given reached nothing another
     method of that instance did with it (`r.setCode(t); r.run()`, where `run` evals `this.c`): such a class's `this.c`
-    holds nothing a call on an instance gives. Now it reaches it, and no other instance's. A class made once is
-    followed as before."""
+    holds nothing a call on an instance gives. Now it reaches it, and no other instance's. (Since D-3c every class's
+    methods read `this` so: KeptMemberTests.)"""
 
     CLASS = "class R {\n  setCode(t) { this.c = t; }\n  go() { this.run(); }\n  run() { eval(this.c); }\n}\n"
     MADE = "const a = new R();\nconst b = new R();\n"
@@ -415,6 +415,39 @@ class InstanceTests(unittest.TestCase):
         text = self.CLASS + self.MADE + self.GET.replace("a.RUN()", "b.run()")
         reasons, _line = core.import_time_risk(text, lang="js")
         self.assertNotIn(self.RUNS, reasons)
+
+
+class KeptMemberTests(unittest.TestCase):
+    """D-3c (0.1.9): what a method is given and puts into a member of `this` as into a container
+    (`record(d) { this.events.push(d); }`) is the instance's it is called on, in a class made once too. D-3b left it
+    out, since put into every instance's member it held what every caller recorded (monaco-editor's loader); now a call
+    on a name puts it into that name, read back by another method's `this` (each class's methods read `this` as their
+    receiver, B-3 for every class), by a method that returns the member, by the member or the instance; not by
+    another instance."""
+
+    SEND = ContainerTests.SEND
+    WHOLE = ContainerTests.WHOLE
+    CLASS = ("class R {\n  constructor() { this.events = []; }\n  record(d) { this.events.push(d); }\n"
+             "  log(d) { this.record(d); }\n  all() { return this.events; }\n  flush() { %s }\n}\n")
+
+    def test_the_instance_keeps_it(self):
+        sends = self.CLASS % (self.SEND % "JSON.stringify(this.events)")
+        plain = self.CLASS % "return 0;"
+        for text in (sends + "const r = new R();\nr.record(process.env);\nr.flush();\n",
+                     sends + "const r = new R();\nr.log(process.env);\nr.flush();\n",
+                     plain + "const r = new R();\nr.record(process.env);\n" + self.SEND % "JSON.stringify(r.all())",
+                     plain + "const r = new R();\nr.record(process.env);\n" + self.SEND % "JSON.stringify(r.events)"):
+            with self.subTest(text=text):
+                self.assertEqual(core.install_script_risk(text, lang="js"), [self.WHOLE])
+
+    def test_another_instance_does_not(self):
+        sends = self.CLASS % (self.SEND % "JSON.stringify(this.events)")
+        plain = self.CLASS % "return 0;"
+        for text in (sends + "const r = new R();\nconst q = new R();\nr.record(process.env);\nq.flush();\n",
+                     plain + "const r = new R();\nconst q = new R();\nr.record(process.env);\n"
+                     + self.SEND % "JSON.stringify(q.all())"):
+            with self.subTest(text=text):
+                self.assertEqual(core.install_script_risk(text, lang="js"), [])
 
 
 class NamedListTests(unittest.TestCase):

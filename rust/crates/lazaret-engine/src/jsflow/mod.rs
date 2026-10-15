@@ -611,6 +611,13 @@ pub struct Func {
     /// param index -> the files it is written to: (the keys of the path, where), the supply-chain model's (D-2:
     /// `request.get(u, (e, r, body) => fs.writeFileSync(p, body))`, a callback given a download)
     pub param_files: BTreeMap<usize, BTreeSet<(Vec<PyStr>, u32)>>,
+    /// param index -> the members of `this` it is put into as into a container (`record(r, c) {
+    /// this._events.push(new Event(r, c)) }`): the supply-chain model's (D-3c), which a call on an instance puts into
+    /// that instance (sc_kept), not into every instance's member
+    pub param_kept: BTreeMap<usize, BTreeSet<PyStr>>,
+    /// the members of `this` it returns as written (`all() { return this._events; }`): the supply-chain model's
+    /// (D-3c), which a call on a name gives what that name's member holds (sc_kept_returned)
+    pub ret_kept: BTreeSet<PyStr>,
     /// param index -> what the function calls the parameter with, by position: the supply-chain model's (D-19:
     /// `function withEnv(cb) { cb(JSON.stringify(process.env)); }`), which runs the function a caller gives there
     /// with those values, as a built-in's callback is run
@@ -1265,6 +1272,8 @@ impl Program {
             param_writes: BTreeMap::new(),
             param_files: BTreeMap::new(),
             param_calls: BTreeMap::new(),
+            param_kept: BTreeMap::new(),
+            ret_kept: BTreeSet::new(),
             eval_with: false,
             callers: BTreeMap::new(),
             runs: 0,
@@ -1750,6 +1759,8 @@ impl Program {
             param_writes: BTreeMap::new(),
             param_files: BTreeMap::new(),
             param_calls: BTreeMap::new(),
+            param_kept: BTreeMap::new(),
+            ret_kept: BTreeSet::new(),
             eval_with: false,
             callers: BTreeMap::new(),
             runs: 0,

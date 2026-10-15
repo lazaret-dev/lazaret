@@ -2202,10 +2202,14 @@ comprehensive, so weigh marginal value against FP risk):
   0.1.9 (B-3) a method of such a class reads `this` as a parameter, the
   value it is called on: a value given to one method from outside and run
   by another method of the same instance (`r.setCode(t); r.run()` where
-  `run` evals `this.c`) is followed, for that instance and no other. Left:
-  what a method of a class made once is given, put into a container that is
-  a member of `this` (D-3c: a recorder's events, monaco-editor's loader),
-  and `this` of a class made once as the receiver.
+  `run` evals `this.c`) is followed, for that instance and no other. Since
+  D-3c (0.1.9) every class's methods read `this` so, and what a method is
+  given and puts into a container that is a member of `this` (a recorder's
+  `this._events.push(…)`) is the instance's it is called on: a call on a
+  name puts it into that name (and its member's container), which another
+  method's `this`, a method that returns the member, the member and the
+  instance read back; never into every instance's member, which joined
+  every caller's flows (monaco-editor's loader).
 - *What the cross-file follower doesn't follow* (the adversarial pass's known
   misses, kept as tests; the event emitter, relays, 16 hops, `getattr` names
   a file builds and a distribution's modules were built in 0.1.8): a name

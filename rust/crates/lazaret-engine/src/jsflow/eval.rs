@@ -46,6 +46,10 @@ pub struct Eval<'p> {
     pub recv_val: Option<V>,
     /// (the supply-chain model) (key of a parameter, what it is called with, by position: D-19)
     pub pc_adds: Vec<(u64, Vec<V>)>,
+    /// (the supply-chain model) (key of a method's parameter, the member of `this` it is put into: D-3c)
+    pub pk_adds: Vec<(u64, PyStr)>,
+    /// (the supply-chain model) the members of `this` this function returns as written (D-3c)
+    pub rk_adds: Vec<PyStr>,
 }
 
 /// The changes a reading made to summaries: fid -> (returned request data
@@ -82,6 +86,8 @@ impl<'p> Eval<'p> {
             pw_adds: Vec::new(),
             pf_adds: Vec::new(),
             pc_adds: Vec::new(),
+            pk_adds: Vec::new(),
+            rk_adds: Vec::new(),
             recv_val: None,
         }
     }
@@ -290,7 +296,12 @@ impl<'p> Eval<'p> {
             }
             Kind::ReturnStatement => {
                 let v = match self.a().opt(st, A) {
-                    Some(e) => self.expr(Some(e), cur)?,
+                    Some(e) => {
+                        if self.p.cfg.supply.is_some() {
+                            self.sc_returns_member(e);
+                        }
+                        self.expr(Some(e), cur)?
+                    }
                     None => V::empty(),
                 };
                 self.ret(v);
@@ -2046,8 +2057,20 @@ impl<'p> Eval<'p> {
     /// (monotone). Returns the functions whose summaries changed, each with
     /// what changed, and the bindings whose value grew.
     pub fn commit(self) -> (Changes, Vec<BindId>) {
-        let Eval { p, fid, emit, reach_adds, ret_val, shared_writes, reads, uses, pw_adds, pf_adds, pc_adds, .. } = self;
+        let Eval { p, fid, emit, reach_adds, ret_val, shared_writes, reads, uses, pw_adds, pf_adds, pc_adds, pk_adds, rk_adds, .. } =
+            self;
         let mut changes: Changes = BTreeMap::new();
+        for name in rk_adds {
+            if p.fns[fid as usize].ret_kept.insert(name) {
+                changes.entry(fid).or_default().0 = true;
+            }
+        }
+        for (key, name) in pk_adds {
+            let (owner, i) = (key_owner(key), key_index(key));
+            if p.fns[owner as usize].param_kept.entry(i).or_default().insert(name) {
+                changes.entry(owner).or_default().1.insert(i);
+            }
+        }
         for (key, given) in pc_adds {
             let (owner, i) = (key_owner(key), key_index(key));
             if merge_given(p.fns[owner as usize].param_calls.entry(i).or_default(), &given) {
