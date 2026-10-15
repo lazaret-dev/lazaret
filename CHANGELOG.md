@@ -990,6 +990,16 @@ aggregate):
 
 ### Fixed
 
+- **Security: what an extension's entry point requires from its own node_modules is load-time code (EG-6; rule set
+  2.79.0).** vsce packs the packages an extension ships into its `.vsix`, and Node resolves `require('dep')` to
+  `node_modules/dep` in the requiring file's folder or the nearest above it; the walk from `main` followed relative
+  requires alone, so a bundled package's code had the use-time test only (its strongest shapes) though it runs when
+  the editor activates the extension. A bare require or import is now followed into the archive's own node_modules (a
+  built-in module and `vscode` are no folder's; a package the archive does not hold is the registry's), for an
+  extension and for an npm package's bundleDependencies, which its tarball packs the same way; an archive without a
+  node_modules folder reads nothing more. The popular set's 1,703 releases: no verdict and no finding moved. Not
+  done: TypeScript loads a server plugin by name from every installed extension's node_modules, so one extension's
+  plugin name can load another's package.
 - **Security: code built around JS-Confuser's string concealing is CRITICAL for that alone (D-11; rule set
   2.78.0; John: "seems like we would want that to be Critical").** As a string array the decoded view reads is,
   install-time code built around one is CRITICAL and import-time code a strong reason: "hides its strings in one

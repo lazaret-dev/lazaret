@@ -1259,7 +1259,13 @@ editor's rules for what runs and when instead of npm's:
 - `main` and `browser` are the entries (an extension with neither runs no
   code: there is no `index.js` default), and they and what they load get
   the import-time test, whose finding says when the editor starts them at
-  every start; the rest of the code gets the use-time test. VS Code runs an
+  every start; the rest of the code gets the use-time test. What they load
+  is what Node loads: a relative require, and since 0.1.9 (EG-6) a bare one
+  into the extension's own `node_modules` (the nearest folder's, as Node
+  walks up from the requiring file; `_js_deps`, `_resolve_bare`), where vsce
+  packs the packages it ships: a built-in module and `vscode` are no
+  folder's. An npm package's bundleDependencies, packed in its tarball's
+  `node_modules`, are followed the same way. VS Code runs an
   entry that leaves the extension's folder too (`../other.ext-1.0.0/x.js`,
   with only a warning), so such an entry is SC-UNREAD-CODE and the
   extension INCOMPLETE (EG-3): what it runs is not in the package;

@@ -347,7 +347,7 @@ SAMPLE = 8192              # header/entropy sample read from oversized files
 #      entry points and hook targets, Python install scripts
 # 2.3: verdict tiers, decoded hex, install-script inspection; 2.2:
 #      verdict-integrity; 2.1: binary-artifact awareness
-ENGINE_VERSION = "2.78.0"
+ENGINE_VERSION = "2.79.0"
 
 # ---------------- The content memo (P-2a, registry/contentcache.py) ----------------
 # One per scan_package run: the engine answers once for content several of a
@@ -2476,6 +2476,18 @@ def _pattern_regex(pattern):
 _JS_LOCAL_DEP_RE = re.compile(
     r"""(?:\brequire\s*\(\s*|\bimport\s*\(\s*|\bfrom\s+|^\s*import\s+|\bexport\s+[^'"\n;]*?\bfrom\s+)"""
     r"""(['"])(\.{1,2}/[^'"\n]+)\1""", re.M)
+#: (EG-6) a bare module specifier a require or an import names: a package Node looks for in node_modules folders
+_JS_BARE_DEP_RE = re.compile(
+    r"""(?:\brequire\s*\(\s*|\bimport\s*\(\s*|\bfrom\s+|^\s*import\s+|\bexport\s+[^'"\n;]*?\bfrom\s+)"""
+    r"""(['"])((?:@[\w.-]+/)?[\w][\w.-]*(?:/[^'"\n]*)?)\1""", re.M)
+#: (EG-6) what Node or the editor gives a require by that name, never a node_modules folder's: Node's built-in modules
+#: (Node 22's `require('module').builtinModules`) and VS Code's API
+_NODE_PROVIDED = frozenset((
+    "assert", "async_hooks", "buffer", "child_process", "cluster", "console", "constants", "crypto", "dgram",
+    "diagnostics_channel", "dns", "domain", "events", "fs", "http", "http2", "https", "inspector", "module", "net",
+    "os", "path", "perf_hooks", "process", "punycode", "querystring", "readline", "repl", "stream", "string_decoder",
+    "sys", "timers", "tls", "trace_events", "tty", "url", "util", "v8", "vm", "wasi", "worker_threads", "zlib",
+    "vscode"))
 _MANIFEST_NAMES = ("package.json", "binding.gyp", "pyproject.toml")
 # A script's language by its #! line: the scanner's (project and --deps scans
 # read such scripts as source too).
@@ -2871,6 +2883,8 @@ class _ArtifactScan:
         self.digests = _cache.Digests()    # each text's SHA-256 for the memo's keys, worked out once (FE-1)
         self._spawned = {}                 # (text, lang) -> spawned_scripts' answer, asked a batch at a time
         self._candidates = {}              # path -> node_candidates' answer (Node's names for it), asked once
+        self._bare = {}                    # (folder, specifier) -> _resolve_bare's answer (EG-6)
+        self._node_modules = None          # does the archive hold a node_modules folder (_has_node_modules)
         self.issues, self.files_scanned, self.binaries = [], 0, 0
         self.truncated, self.truncated_emitted = 0, 0
         self.truncated_at = {}     # rel -> its SC-TRUNCATED issue (None past the cap)
@@ -3602,13 +3616,53 @@ class _ArtifactScan:
             text, lang = self.sources.get(rel, (None, None))
             if not text or lang != "js":
                 continue
-            folder = posixpath.dirname(rel)
-            for _q, target in _JS_LOCAL_DEP_RE.findall(text):
-                dep = self._resolve(_rel_join(folder, target))
-                if dep and dep not in seen:
+            for dep in self._js_deps(rel, text):
+                if dep not in seen:
                     seen.add(dep)
                     queue.append(dep)
         return seen
+
+    def _js_deps(self, rel, text):
+        """The members a JavaScript member at `rel` loads: its relative requires and imports (Node's LOAD_AS_FILE and
+        LOAD_AS_DIRECTORY, _resolve) and, where the archive holds a node_modules folder (an extension's bundled
+        dependencies, an npm package's bundleDependencies), its bare ones (EG-6: _resolve_bare)."""
+        folder = posixpath.dirname(rel)
+        for _q, target in _JS_LOCAL_DEP_RE.findall(text):
+            dep = self._resolve(_rel_join(folder, target))
+            if dep:
+                yield dep
+        if self._has_node_modules():
+            for _q, spec in _JS_BARE_DEP_RE.findall(text):
+                dep = self._resolve_bare(folder, spec)
+                if dep:
+                    yield dep
+
+    def _has_node_modules(self):
+        """Does the archive hold a node_modules folder (EG-6)? Asked once."""
+        if self._node_modules is None:
+            self._node_modules = any(r.startswith("node_modules/") or "/node_modules/" in r for r in self.members)
+        return self._node_modules
+
+    def _resolve_bare(self, folder, spec):
+        """(EG-6) The member Node loads for a bare specifier required from `folder`: `node_modules/<spec>` in that
+        folder and in each one above it (a folder named node_modules itself passed over), the first that resolves;
+        None for a built-in module, VS Code's API, or a package the archive does not hold."""
+        if _unused.npm_package(spec) in _NODE_PROVIDED or spec.startswith("node:"):
+            return None
+        key = (folder, spec)
+        if key not in self._bare:
+            self._bare[key] = None
+            d = folder
+            while True:
+                if posixpath.basename(d) != "node_modules":
+                    found = self._resolve(_rel_join(d, "node_modules/" + spec))
+                    if found:
+                        self._bare[key] = found
+                        break
+                if not d:
+                    break
+                d = posixpath.dirname(d)
+        return self._bare[key]
 
     def _vsix_when(self, rel):
         """When a file an extension's contribution names runs (EG-5), or a file it loads that `main` does not; None
@@ -4751,10 +4805,8 @@ class _ArtifactScan:
             text, lang = self.sources.get(rel, (None, None))
             if not text or lang != "js":
                 continue
-            base = posixpath.dirname(rel)
-            for _q, target in _JS_LOCAL_DEP_RE.findall(text):
-                dep = self._resolve(_rel_join(base, target))
-                if dep and dep not in seen:
+            for dep in self._js_deps(rel, text):
+                if dep not in seen:
                     seen.add(dep)
                     self._text_of(dep, "js", imported=True)
                     queue.append(dep)

@@ -159,8 +159,9 @@ Kiro, Positron and code-server, and on a remote host for the VS Code and Cursor 
 scans the extension folders, extensions folders and `.vsix` files you name. An extension runs in the
 editor's extension host with all of your access, so it is read as `lazaret-registry` reads an npm package
 (see *Registry scanning*), with the editor's rules for what runs: its `main` and `browser` modules and what
-they load run when the editor activates it (at every start for the activation events `*` and
-`onStartupFinished`, which the result says) and get the import-time test; so does the code its contributions
+they load (the packages it bundles in its own `node_modules` too, since 0.1.9) run when the editor activates
+it (at every start for the activation events `*` and `onStartupFinished`, which the result says) and get the
+import-time test; so does the code its contributions
 name, which runs without them, and the finding says when: a TypeScript server plugin
 (`typescriptServerPlugins`, loaded by the TypeScript server whenever a JavaScript or TypeScript file is open,
 the extension activated or not), a debug adapter's program (`debuggers`, started with a debug session), a
