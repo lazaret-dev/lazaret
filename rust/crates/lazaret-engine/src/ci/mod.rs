@@ -3,6 +3,7 @@
 //! (workflow.rs: SC-WORKFLOW-*) and GitLab CI files (gitlab.rs: SC-GITLAB-*), both read on the YAML's outline
 //! (outline.rs). Both packages ask the engine (`ci_*` calls, api.rs) and shape the issues it answers.
 
+pub mod exfil;
 pub mod gitlab;
 pub mod outline;
 pub mod workflow;
@@ -22,17 +23,24 @@ pub fn kind_of(path: &[u32]) -> Option<&'static str> {
     }
 }
 
-/// A workflow's findings, in the order its issues are made: the worms' shapes, then the backdoor.
+/// A workflow's findings, in the order its issues are made: the worms' shapes (every secret handed out), the
+/// secrets sent out by name and the credential sweeps (RA-1, exfil.rs), then the backdoor.
 pub fn workflow_findings(p: &Pack, text: &[u32]) -> Vec<workflow::Found> {
     let mut out = workflow::findings(p, text);
+    out.extend(exfil::exfil(p, text));
     out.extend(workflow::backdoor(p, text));
     out
+}
+
+/// The rule of a workflow's finding (workflow.rs's kinds, exfil.rs's).
+fn workflow_rule(p: &Pack, kind: &str, d: &Value) -> Option<RuleText> {
+    workflow::rule(p, kind, d).or_else(|| exfil::rule(p, kind, d))
 }
 
 /// The rule of a finding of the `ci` reader ("workflow" or "gitlab").
 pub fn rule(p: &Pack, ci: &str, kind: &str, d: &Value) -> Option<RuleText> {
     match ci {
-        "workflow" => workflow::rule(p, kind, d),
+        "workflow" => workflow_rule(p, kind, d),
         "gitlab" => gitlab::rule(p, kind, d),
         _ => None,
     }
@@ -45,7 +53,7 @@ pub fn issues(p: &Pack, path: &[u32], text: &[u32]) -> Vec<(usize, RuleText)> {
     match kind_of(path) {
         Some("workflow") => {
             for (kind, line, d) in workflow_findings(p, text).into_iter().chain(workflow::hardening(p, text)) {
-                if let Some(r) = workflow::rule(p, kind, &d) {
+                if let Some(r) = workflow_rule(p, kind, &d) {
                     out.push((line, r));
                 }
             }

@@ -227,7 +227,9 @@ rust/
                              until then): outline.rs (the outline of the YAML a pipeline needs:
                              keys, sequence items, block and quoted scalars, comments, `${{ }}`),
                              workflow.rs (GitHub Actions: the worms' shapes, SC-WORKFLOW-SECRETS
-                             and -BACKDOOR, and the hardening checks), gitlab.rs (SC-GITLAB-*),
+                             and -BACKDOOR, and the hardening checks), exfil.rs (RA-1: a step's
+                             script read as the shell reads it, for secrets sent out by name and
+                             credential searches sent: SC-WORKFLOW-EXFIL), gitlab.rs (SC-GITLAB-*),
                              mod.rs (which file is which, the issues of one: `ci_issues`)
     src/taint.rs             project mode's intra-file taint (core.taint_scan, 0.1.9): sources,
                              sinks, sanitizers, guards, scopes, Flask views and route parameters;
@@ -562,7 +564,7 @@ builds is held to linear time.
 | `test_snapshot_js_flow` | project mode's cross-file JavaScript taint (`js_flow`, §16): every output in order, with the default model and a configured one; files that are not text, a lowered per-reading limit | the corpus it was held to jsflow.py on: the review's cases, generated projects (`jsgen.py`), token soups |
 | `test_snapshot_js_parse` | the JavaScript parser (`js_parse`, §12): each tree's or error's JSON text (its SHA-256: a tree may be deeper than `json.loads` reads), with spans and without | jsparse_cases.py's inputs: the reader's snippets and its own, every construct that nests around the depth limit, soups, generated projects and mutations of them |
 | `test_snapshot_py_flow` | project mode's cross-file Python taint (`py_flow`, §17): every output in order, with the default model and a configured one; files that are not text, each limit lowered (and not raised), the frames, a chain whose work counts | the review's cases and generated projects (`pygen.py`), on which it was held to flow.py |
-| `test_snapshot_ci` | the CI files' readers (`ci_*`, BR-7): the outline three ways, a workflow's findings, `uses:` and issues, a GitLab CI file's findings and issues, the script-line checks, image references, flow collections, paths, `uses:` values and continued lines; recorded from the Python modules the engine replaced, which answered every case alike (and 23,202 real workflow files) | the corpora the npm twins were held to the Python modules on (`test_js_parity_persistence`'s YAML part, `_workflow_hardening`, `_gitlabci`) |
+| `test_snapshot_ci` | the CI files' readers (`ci_*`, BR-7): the outline three ways, a workflow's findings (RA-1's sends among them: `ci_exfil`), `uses:` and issues, a GitLab CI file's findings and issues, the script-line checks, image references, flow collections, paths, `uses:` values and continued lines; recorded from the Python modules the engine replaced, which answered every case alike (and 23,202 real workflow files) | the corpora the npm twins were held to the Python modules on (`test_js_parity_persistence`'s YAML part, `_workflow_hardening`, `_gitlabci`); workflows built from RA-1's shapes |
 
 Twins the engine is still compared with, call for call:
 

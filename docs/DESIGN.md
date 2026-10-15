@@ -576,6 +576,42 @@ worm's pair (a SessionStart hook and a folder-open task running its loader) is
 CRITICAL because the followed loader fails the install-script test; writing
 the agent's own settings is not held against an agent's hook.
 
+Workflows that send secrets out (0.1.9, RA-1; the engine's `ci/exfil.rs`,
+for both packages: `ghworkflow.exfil` asks it): GhostAction's workflows named the
+secrets they sent, or sent what `grep` found in the checkout and `git log -p`,
+so SC-WORKFLOW-SECRETS (`toJSON(secrets)`) read neither. Each step's script is
+read as the shell reads it, as far as the question needs: logical lines split
+into pipelines at `;`, `&&`, `||`, `&` and `|` outside quotes and `$( … )`;
+words with their quotes taken off and redirections apart (`<`, `<<` with its
+here-document, `<<<`, `>`, `>>`); each `${{ … }}` replaced by a mark first,
+since the runner pastes it in before the shell reads the line. What a word
+holds is a set of secret names and, when it carries one, a credential search's
+output: its expressions' `secrets.X` (and `env.Y`), the variables it reads
+(the script's own assignments, then the step's, job's and workflow's `env:`),
+and the output of what it substitutes, read to `_WFX_DEPTH` (4) levels. A
+command's output carries its input and what its words hold (a send's output
+is the answer, and carries nothing); a dump of the environment (`env`,
+`printenv`, `set`, `gci env:`) carries every secret of it; a search for
+credentials (`grep`, `rg`, `git grep` with a credential pattern, `git log -p`)
+its own text. Files a job's steps write keep what was written to them. A send
+(curl, wget, nc, socat, a redirection to `/dev/tcp`, `Invoke-WebRequest`,
+`Invoke-RestMethod`; `xargs` handing its input on) gathers what it sends —
+its body, its query, a header that is not a credential's, a file it uploads,
+its input — and reads it once its address is known: a header or a query
+parameter whose name is a credential's is not counted, and neither is a
+body's field that is (`client_secret=`, `"password":`) when the address is
+https to a named host; an address that comes from a secret is the
+repository's own service (nothing counted), the runner's own (localhost, a
+private address, a name without a dot: a service container) too, and a secret
+whose name names an https host (`DOCKERHUB_TOKEN` and hub.docker.com) is for
+it. The rule rates what is left: CRITICAL to plain HTTP (or a
+raw socket), a raw IP address or a data-capture service (`capture_service`),
+or two secrets or more in one request, MAJOR otherwise; a search's output
+sent, CRITICAL. A logical line over `_WFX_LINE_MAX` (100,000 code points) is
+not read. Not read: scripts in other languages (`python -c`, an inline
+`actions/github-script`), a variable handed between steps through
+`$GITHUB_ENV`, a composite action's steps.
+
 0.1.8, both engines (and the dashboard for the per-file rules): SC-SELF-PUBLISH
 is three signs in one file — a publish command an exec call runs, an assignment
 to an object's `name`, a package.json write whose arguments name that object

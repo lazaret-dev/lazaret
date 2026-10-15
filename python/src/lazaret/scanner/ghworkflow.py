@@ -4,9 +4,10 @@ The reading is the native engine's since 0.1.9 (BR-7: `rust/crates/lazaret-engin
 as it is for the npm package; until then this module and js/src/lib/ghworkflow.js were twins held equal by parity
 tests. This module asks the engine and keeps the names the rest of the package calls: the outline of a YAML file
 (`outline`, `records`, which the registry's Actions check reads action.yml with), the findings (`findings`: the
-worms' shapes, SC-WORKFLOW-SECRETS and SC-WORKFLOW-BACKDOOR; `hardening`: the practices a pipeline should follow),
-the rule of a finding, a workflow's `uses:` and the line checks the hardening reads (`install_command`,
-`publish_command`, `pipe_to_shell`, `logical_lines`). docs/DESIGN.md says what each reads.
+worms' shapes, SC-WORKFLOW-SECRETS, SC-WORKFLOW-EXFIL (`exfil`) and SC-WORKFLOW-BACKDOOR; `hardening`: the
+practices a pipeline should follow), the rule of a finding, a workflow's `uses:` and the line checks the hardening
+reads (`install_command`, `publish_command`, `pipe_to_shell`, `logical_lines`). docs/DESIGN.md says what each
+reads.
 """
 from . import _native, engine
 
@@ -15,8 +16,11 @@ EXPR_MAX = 500
 
 # The pack's values the rest of the package names, read when first asked (importing never needs the engine):
 # FIRST_PARTY (GitHub's own action owners), OUTSIDER_EVENTS ((event, who can start it)), COMMAND_START (where a
-# command can start in a script line), PIPE_SHELL_WHY and PIPE_SHELL_FIX (the words of a script run unread).
+# command can start in a script line), PIPE_SHELL_WHY and PIPE_SHELL_FIX (the words of a script run unread),
+# EXFIL_LINE_MAX (the longest script line exfil() reads) and EXFIL_DEPTH (how deep it reads `$( … )` in `$( … )`).
 _LAZY = {
+    "EXFIL_LINE_MAX": lambda: engine.pack_value("_WFX_LINE_MAX"),
+    "EXFIL_DEPTH": lambda: engine.pack_value("_WFX_DEPTH"),
     "FIRST_PARTY": lambda: tuple(engine.pack_value("_WF_FIRST_PARTY")),
     "OUTSIDER_EVENTS": lambda: tuple(zip(engine.pack_value("_WF_OUTSIDER_EVENTS"),
                                          engine.pack_value("_WF_OUTSIDER_ACTS"))),
@@ -65,8 +69,18 @@ def _found(answer):
 
 def findings(text):
     """-> [(kind, line, detail)] for a workflow's text: kind 'secrets' (detail {"where", "how"}: how None when
-    nothing sends them out) or 'backdoor' (detail {"job", "expr", "event", "act"})."""
+    nothing sends them out), the kinds of exfil() ('exfil', 'sweep'), or 'backdoor' (detail {"job", "expr",
+    "event", "act"})."""
     return _found(_native.call("ci_workflow", {}, text)["findings"])
+
+
+def exfil(text):
+    """-> [(kind, line, detail)] for a workflow's text, in the order of its steps (RA-1, SC-WORKFLOW-EXFIL): 'exfil'
+    {"job", "names" (the secrets it sends, sorted), "how" (the command), "to" (the address as written, or None),
+    "plain" ('http' for an address without TLS, 'socket' for a raw socket, or None), "raw_ip"}; 'sweep' {"job",
+    "search" (the command that searches for credentials), "how"}: a step that sends secrets out by name, or what a
+    search of the repository or its history for credentials found."""
+    return [f for f in findings(text) if f[0] in ("exfil", "sweep")]
 
 
 def hardening(text):

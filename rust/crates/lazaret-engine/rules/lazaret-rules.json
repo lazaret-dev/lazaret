@@ -1,6 +1,6 @@
 {
  "format": 1,
- "rule_set": "2.81.0",
+ "rule_set": "2.82.0",
  "source": "lazaret.scanner.core, extracted by scripts/make_rust_tables.py \u2014 do not edit",
  "values": {
   "ALWAYS_PRUNE_DIRS": {
@@ -16464,6 +16464,545 @@
   "_VIEW_RETURN_SKIP_RE": {
    "flags": "",
    "re": "\\s*(?:\\{|\\[|dict\\s*\\(|(?:[A-Za-z_][\\w.]*\\.)?(?:redirect|jsonify|url_for|send_file|send_from_directory|send_static_file|abort|render_template)\\s*\\()"
+  },
+  "_WFX_ASSIGN_RE": {
+   "flags": "",
+   "re": "[A-Za-z_][A-Za-z0-9_]*="
+  },
+  "_WFX_CRED_KEY_RE": {
+   "flags": "i",
+   "re": "auth|token|key|secret|cookie|pass|session|signature|bearer|jwt|credential|user|login|client|account"
+  },
+  "_WFX_CRED_NAME_RE": {
+   "flags": "i",
+   "re": "auth|token|key|secret|cookie|pass|session|signature|bearer|jwt|credential|sig\\b"
+  },
+  "_WFX_CRED_PATTERN_RE": {
+   "flags": "i",
+   "re": "pass(?:word|wd)|secret|token|api[_-]?key|apikey|access[_-]?key|private[_-]?key|private key|AKIA|ASIA|gh[pousr]_|github_pat|glpat|xox[abprs]|sk_live|credential|bearer|aws_"
+  },
+  "_WFX_CURL_BODY": {
+   "set": [
+    "F",
+    "T",
+    "d",
+    "data",
+    "data-ascii",
+    "data-binary",
+    "data-raw",
+    "data-urlencode",
+    "form",
+    "form-string",
+    "json",
+    "upload-file"
+   ]
+  },
+  "_WFX_CURL_HEADER": {
+   "set": [
+    "H",
+    "header",
+    "proxy-header"
+   ]
+  },
+  "_WFX_CURL_LONG_VALUE": {
+   "set": [
+    "abstract-unix-socket",
+    "aws-sigv4",
+    "cacert",
+    "capath",
+    "cert",
+    "cert-type",
+    "ciphers",
+    "config",
+    "connect-timeout",
+    "connect-to",
+    "continue-at",
+    "cookie",
+    "cookie-jar",
+    "create-file-mode",
+    "crlfile",
+    "data",
+    "data-ascii",
+    "data-binary",
+    "data-raw",
+    "data-urlencode",
+    "dns-servers",
+    "dump-header",
+    "engine",
+    "etag-compare",
+    "etag-save",
+    "expect100-timeout",
+    "form",
+    "form-string",
+    "ftp-port",
+    "happy-eyeballs-timeout-ms",
+    "header",
+    "hostpubmd5",
+    "interface",
+    "json",
+    "keepalive-time",
+    "key",
+    "key-type",
+    "limit-rate",
+    "local-port",
+    "mail-auth",
+    "mail-from",
+    "mail-rcpt",
+    "max-filesize",
+    "max-redirs",
+    "max-time",
+    "netrc-file",
+    "noproxy",
+    "oauth2-bearer",
+    "output",
+    "output-dir",
+    "parallel-max",
+    "pass",
+    "preproxy",
+    "proto",
+    "proto-default",
+    "proto-redir",
+    "proxy",
+    "proxy-cacert",
+    "proxy-cert",
+    "proxy-header",
+    "proxy-key",
+    "proxy-user",
+    "pubkey",
+    "quote",
+    "range",
+    "rate",
+    "referer",
+    "request",
+    "request-target",
+    "resolve",
+    "retry",
+    "retry-all-errors-count",
+    "retry-delay",
+    "retry-max-time",
+    "sasl-authzid",
+    "service-name",
+    "socks4",
+    "socks5",
+    "socks5-hostname",
+    "speed-limit",
+    "speed-time",
+    "stderr",
+    "telnet-option",
+    "time-cond",
+    "tls-max",
+    "trace",
+    "trace-ascii",
+    "unix-socket",
+    "upload-file",
+    "url",
+    "url-query",
+    "user",
+    "user-agent",
+    "variable",
+    "write-out"
+   ]
+  },
+  "_WFX_CURL_SHORT_VALUE": {
+   "value": "AbcCdDeEFHKmoPQrtTuUwxXyYz"
+  },
+  "_WFX_DEPTH": {
+   "value": 4
+  },
+  "_WFX_ENV_NAME_RE": {
+   "flags": "",
+   "re": "\\benv\\s*(?:\\.\\s*([A-Za-z_][A-Za-z0-9_-]*)|\\[\\s*'([^'\\\"\\]]{1,100})'\\s*\\]|\\[\\s*\\\"([^'\\\"\\]]{1,100})\\\"\\s*\\])"
+  },
+  "_WFX_GENERIC_LABELS": {
+   "set": [
+    "accounts",
+    "apis",
+    "cloud",
+    "example",
+    "files",
+    "gateway",
+    "global",
+    "hooks",
+    "internal",
+    "invalid",
+    "local",
+    "oauth",
+    "oauth2",
+    "online",
+    "static",
+    "storage",
+    "uploads"
+   ]
+  },
+  "_WFX_GENERIC_WORDS": {
+   "set": [
+    "access",
+    "account",
+    "address",
+    "admin",
+    "apikey",
+    "auth",
+    "build",
+    "channel",
+    "chat",
+    "client",
+    "code",
+    "config",
+    "data",
+    "deploy",
+    "deployment",
+    "email",
+    "endpoint",
+    "hook",
+    "host",
+    "info",
+    "login",
+    "name",
+    "notification",
+    "notify",
+    "pass",
+    "passwd",
+    "password",
+    "personal",
+    "private",
+    "prod",
+    "production",
+    "public",
+    "release",
+    "remote",
+    "repo",
+    "secret",
+    "secrets",
+    "server",
+    "service",
+    "staging",
+    "test",
+    "tests",
+    "token",
+    "tokens",
+    "upload",
+    "user",
+    "username",
+    "value",
+    "webhook",
+    "webhooks"
+   ]
+  },
+  "_WFX_GREPS": {
+   "list": [
+    {
+     "value": "grep"
+    },
+    {
+     "value": "egrep"
+    },
+    {
+     "value": "fgrep"
+    },
+    {
+     "value": "zgrep"
+    },
+    {
+     "value": "rg"
+    },
+    {
+     "value": "ag"
+    },
+    {
+     "value": "ack"
+    },
+    {
+     "value": "findstr"
+    },
+    {
+     "value": "select-string"
+    },
+    {
+     "value": "sls"
+    }
+   ]
+  },
+  "_WFX_HEREDOC_RE": {
+   "flags": "",
+   "re": "(?<!<)<<(?!<)-?\\s*(?:'([A-Za-z_][A-Za-z0-9_]*)'|\"([A-Za-z_][A-Za-z0-9_]*)\"|([A-Za-z_][A-Za-z0-9_]*))"
+  },
+  "_WFX_IPV4_RE": {
+   "flags": "",
+   "re": "([0-9]{1,3})\\.([0-9]{1,3})\\.([0-9]{1,3})\\.([0-9]{1,3})\\Z"
+  },
+  "_WFX_LINE_MAX": {
+   "value": 100000
+  },
+  "_WFX_MARK_RE": {
+   "flags": "",
+   "re": "\\x01([0-9]+)\\x01"
+  },
+  "_WFX_NC_VALUE": {
+   "set": [
+    "--exec",
+    "--idle-timeout",
+    "--lua-exec",
+    "--output",
+    "--proxy",
+    "--proxy-auth",
+    "--proxy-type",
+    "--sh-exec",
+    "--source",
+    "--source-port",
+    "--wait",
+    "-G",
+    "-I",
+    "-O",
+    "-P",
+    "-T",
+    "-V",
+    "-W",
+    "-X",
+    "-c",
+    "-e",
+    "-g",
+    "-i",
+    "-o",
+    "-p",
+    "-q",
+    "-s",
+    "-w",
+    "-x"
+   ]
+  },
+  "_WFX_PS_ASSIGN_RE": {
+   "flags": "i",
+   "re": "\\s*\\$(?:env:)?([A-Za-z_][A-Za-z0-9_]*)\\s*=(?!=)"
+  },
+  "_WFX_PS_SWITCHES": {
+   "set": [
+    "allowinsecureredirect",
+    "allowunencryptedauthentication",
+    "disablekeepalive",
+    "nobodyprogress",
+    "passthru",
+    "preserveauthorizationonredirect",
+    "preservehttpmethodonredirect",
+    "resume",
+    "skipcertificatecheck",
+    "skipheadervalidation",
+    "skiphttperrorcheck",
+    "usebasicparsing",
+    "usedefaultcredentials"
+   ]
+  },
+  "_WFX_REF_RE": {
+   "flags": "i",
+   "re": "\\x01[0-9]+\\x01|\\$env:[A-Za-z_][A-Za-z0-9_]*|\\$\\{?[A-Za-z_][A-Za-z0-9_]*\\}?|%[A-Za-z_][A-Za-z0-9_]*%"
+  },
+  "_WFX_SECRET_NAME_RE": {
+   "flags": "",
+   "re": "\\bsecrets\\s*(?:\\.\\s*([A-Za-z_][A-Za-z0-9_-]*)|\\[\\s*'([^'\\\"\\]]{1,100})'\\s*\\]|\\[\\s*\\\"([^'\\\"\\]]{1,100})\\\"\\s*\\])"
+  },
+  "_WFX_SENDERS": {
+   "list": [
+    {
+     "value": "curl"
+    },
+    {
+     "value": "wget"
+    },
+    {
+     "value": "nc"
+    },
+    {
+     "value": "ncat"
+    },
+    {
+     "value": "netcat"
+    },
+    {
+     "value": "socat"
+    },
+    {
+     "value": "invoke-webrequest"
+    },
+    {
+     "value": "iwr"
+    },
+    {
+     "value": "invoke-restmethod"
+    },
+    {
+     "value": "irm"
+    }
+   ]
+  },
+  "_WFX_SENT_CHECK_RULE": {
+   "map": {
+    "fix": {
+     "value": "Delete the workflow unless you wrote it, then rotate every secret it names and any credential the repository or its history holds. A step should send a secret only to the service it is for, as that service's credential."
+    },
+    "id": {
+     "value": "SC-WORKFLOW-EXFIL"
+    },
+    "msg": {
+     "value": "The job \"{job}\" sends {names} out with {how} {where}, not as a credential of that service: check that this is the service the secret is for."
+    },
+    "name": {
+     "value": "Workflow sends secrets out"
+    },
+    "ref": {
+     "value": "CWE-200 \u00b7 Supply chain"
+    },
+    "sev": {
+     "value": "MAJOR"
+    },
+    "type": {
+     "value": "HOTSPOT"
+    },
+    "why": {
+     "value": "GhostAction (August to October 2026) committed workflows under the identities of the accounts it had stolen: the first wave named the secrets the repository's own workflows use and sent their values in one request to a raw IP address over plain HTTP; the October wave checked out the whole history, searched the tree and `git log -p` for credentials and sent what it found. A secret sent as the credential of the service it is for (an Authorization or token header, `-u`, a token parameter), or that is the address itself (a webhook's URL), is not counted."
+    }
+   }
+  },
+  "_WFX_SENT_RULE": {
+   "map": {
+    "fix": {
+     "value": "Delete the workflow unless you wrote it, then rotate every secret it names and any credential the repository or its history holds. A step should send a secret only to the service it is for, as that service's credential."
+    },
+    "id": {
+     "value": "SC-WORKFLOW-EXFIL"
+    },
+    "msg": {
+     "value": "The job \"{job}\" sends {names} out with {how} {where} ({why}): GhostAction's workflows sent repositories' secrets this way."
+    },
+    "name": {
+     "value": "Workflow sends secrets out"
+    },
+    "ref": {
+     "value": "CWE-200 \u00b7 Supply chain"
+    },
+    "sev": {
+     "value": "CRITICAL"
+    },
+    "type": {
+     "value": "HOTSPOT"
+    },
+    "why": {
+     "value": "GhostAction (August to October 2026) committed workflows under the identities of the accounts it had stolen: the first wave named the secrets the repository's own workflows use and sent their values in one request to a raw IP address over plain HTTP; the October wave checked out the whole history, searched the tree and `git log -p` for credentials and sent what it found. A secret sent as the credential of the service it is for (an Authorization or token header, `-u`, a token parameter), or that is the address itself (a webhook's URL), is not counted."
+    }
+   }
+  },
+  "_WFX_SOCAT_ADDR_RE": {
+   "flags": "i",
+   "re": "(tcp[46]?|udp[46]?|tcp[46]?-connect|udp[46]?-sendto|udp[46]?-connect|openssl|openssl-connect|ssl):(\\[[^\\]]*\\]|[^:,]+)"
+  },
+  "_WFX_SWEEP_RULE": {
+   "map": {
+    "fix": {
+     "value": "Delete the workflow unless you wrote it, then rotate every secret it names and any credential the repository or its history holds. A step should send a secret only to the service it is for, as that service's credential."
+    },
+    "id": {
+     "value": "SC-WORKFLOW-EXFIL"
+    },
+    "msg": {
+     "value": "The job \"{job}\" searches the repository for credentials (`{search}`) and sends what it finds out with {how}: GhostAction's workflows swept repositories and their history this way."
+    },
+    "name": {
+     "value": "Workflow sends secrets out"
+    },
+    "ref": {
+     "value": "CWE-200 \u00b7 Supply chain"
+    },
+    "sev": {
+     "value": "CRITICAL"
+    },
+    "type": {
+     "value": "HOTSPOT"
+    },
+    "why": {
+     "value": "GhostAction (August to October 2026) committed workflows under the identities of the accounts it had stolen: the first wave named the secrets the repository's own workflows use and sent their values in one request to a raw IP address over plain HTTP; the October wave checked out the whole history, searched the tree and `git log -p` for credentials and sent what it found. A secret sent as the credential of the service it is for (an Authorization or token header, `-u`, a token parameter), or that is the address itself (a webhook's URL), is not counted."
+    }
+   }
+  },
+  "_WFX_VAR_RE": {
+   "flags": "i",
+   "re": "\\$env:([A-Za-z_][A-Za-z0-9_]*)|\\$\\{?([A-Za-z_][A-Za-z0-9_]*)|%([A-Za-z_][A-Za-z0-9_]*)%"
+  },
+  "_WFX_WGET_LONG_VALUE": {
+   "set": [
+    "accept",
+    "append-output",
+    "base",
+    "bind-address",
+    "body-data",
+    "body-file",
+    "ca-certificate",
+    "certificate",
+    "directory-prefix",
+    "domains",
+    "exclude-directories",
+    "execute",
+    "header",
+    "http-password",
+    "http-user",
+    "include-directories",
+    "input-file",
+    "level",
+    "limit-rate",
+    "load-cookies",
+    "method",
+    "output-document",
+    "output-file",
+    "password",
+    "post-data",
+    "post-file",
+    "private-key",
+    "proxy-password",
+    "proxy-user",
+    "quota",
+    "referer",
+    "reject",
+    "save-cookies",
+    "timeout",
+    "tries",
+    "user",
+    "user-agent",
+    "wait"
+   ]
+  },
+  "_WFX_WGET_SHORT_VALUE": {
+   "value": "OoaPUetTwiBQlARDXI"
+  },
+  "_WFX_WRAPPERS": {
+   "list": [
+    {
+     "value": "sudo"
+    },
+    {
+     "value": "env"
+    },
+    {
+     "value": "time"
+    },
+    {
+     "value": "command"
+    },
+    {
+     "value": "exec"
+    },
+    {
+     "value": "nohup"
+    },
+    {
+     "value": "builtin"
+    },
+    {
+     "value": "nice"
+    },
+    {
+     "value": "stdbuf"
+    },
+    {
+     "value": "timeout"
+    }
+   ]
   },
   "_WF_BACKDOOR_RULE": {
    "map": {

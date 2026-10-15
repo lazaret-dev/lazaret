@@ -26,6 +26,26 @@ aggregate):
 
 ### Added
 
+- **Security: a workflow that sends named secrets out, or searches the repository for credentials and sends what it
+  finds, is SC-WORKFLOW-EXFIL (RA-1; the engine's, for both packages; rule set 2.82.0).** GhostAction (August to
+  October 2026) committed workflows under the identities of the accounts it had stolen, some 30,000 repositories'
+  worth on October 8 and 9: the first wave named the secrets the repository's own workflows use
+  (`${{ secrets.VPS_HOST }}`, `VPS_SSH_KEY`, …) and sent them in one `curl -X POST -d` to a raw IP over plain HTTP;
+  the October wave checked out the whole history and sent what `grep` found in the tree and in `git log -p`.
+  SC-WORKFLOW-SECRETS read neither: it fires on `toJSON(secrets)` alone. Each step's script is now read as the shell
+  reads it, as far as the question needs (commands, pipes, redirections, here-documents, `$( … )`, variables, the
+  step's, job's and workflow's `env:`, the files a job's steps write; curl, wget, nc, socat, `/dev/tcp`, PowerShell's
+  `Invoke-WebRequest` and `Invoke-RestMethod`): a secret in a request's body, its query, a header that is not a
+  credential's or what the command reads from its input is sent; CRITICAL to plain HTTP, a raw IP address or a
+  data-capture service, or two secrets or more in one request, MAJOR otherwise; a search for credentials (`grep`, `rg`
+  or `git grep` of credential patterns, `git log -p`) whose output is sent, CRITICAL. Not counted: a secret sent as a
+  credential of the service (an Authorization or token header, `-u`, a token parameter, a login's or OAuth's fields
+  over https), one that is the address itself (a webhook kept secret), one sent over https to the host its name names
+  (`TELEGRAM_CHAT_ID` to api.telegram.org), and anything sent to the runner itself (localhost, a private address, a
+  service container). On the GitHub Actions workflows of the 6,813 repositories GH-NEW-REPOS compares new ones with
+  (popular packages' repositories, fetched as text; 23,202 files): no finding. The reader is the engine's
+  (`ci/exfil.rs`), written first in Python and held to it on 20,000 generated workflows (33,855 findings) and those
+  files: no difference. GitLab CI's reading follows once this is measured.
 - **Taint and rules for BenchmarkPython's five categories without one: trust boundary, LDAP and XPath injection, weak
   randomness, cookies without the Secure flag (Q-2; rule set 2.80.0).** Project mode, Python. New sinks of the
   intra-file taint pass: a value or a key put in the session (T-TRUST, MINOR, CWE-501: Flask's `session[k] = v`,

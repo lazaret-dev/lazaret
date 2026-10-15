@@ -72,9 +72,8 @@ fn has_event(events: &[PyStr], name: &str) -> bool {
     events.iter().any(|e| pystr::eq(e, name))
 }
 
-/// The worms' shapes in a workflow's text: kind 'secrets' {where, how} (how null when nothing sends them out),
-/// 'backdoor' {job, expr, event, act}; and, where `extra` gives them, the findings that sit between the two
-/// (RA-1's sends, read by the caller).
+/// The worms' first shape in a workflow's text: kind 'secrets' {where, how} (how null when nothing sends them out).
+/// The findings of a workflow are these, then exfil.rs's sends (RA-1), then the backdoor (mod.rs).
 pub fn findings(p: &Pack, text: &[u32]) -> Vec<Found> {
     let records = outline::outline(text, false, false);
     let mut out: Vec<Found> = Vec::new();
@@ -227,7 +226,7 @@ fn in_actions(name: &[u32], names: &[PyStr]) -> bool {
 }
 
 /// [(job, its records)]: the steps of every job, in order (records from outline(text, items)).
-fn steps(records: &[Rec]) -> Vec<(PyStr, Vec<&Rec>)> {
+pub(super) fn steps(records: &[Rec]) -> Vec<(PyStr, Vec<&Rec>)> {
     let mut out: Vec<(PyStr, Vec<&Rec>)> = Vec::new();
     for r in records {
         let p = &r.path;
@@ -268,7 +267,7 @@ fn with_get<'a>(withs: &'a [(PyStr, PyStr, usize)], key: &str) -> Option<(&'a [u
 }
 
 /// [(line, text)] of a step's script.
-fn step_run_lines(recs: &[&Rec]) -> Vec<(usize, PyStr)> {
+pub(super) fn step_run_lines(recs: &[&Rec]) -> Vec<(usize, PyStr)> {
     let mut out = Vec::new();
     for r in recs {
         let p = &r.path;
