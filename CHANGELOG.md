@@ -935,6 +935,15 @@ aggregate):
   to `o` is a member access or another property's `defineProperty`: an object passed on, aliased, assigned through
   a computed key or with another operator, or given to `Object.assign`, proves nothing. vite's scan loses that one
   finding and nothing else. The engine's (`jsflow/eval.rs`, both packages).
+
+- **The Python parser put an error after a `with` item's target on the `with` line.** Python's error pass reads what
+  follows `as` as an expression too (`invalid_with_item`), so an expression right after the target is read and its
+  error is the one Python reports: `with a as b{k: v,` then `w = x}:` on the next line is "':' expected after
+  dictionary key" on that line, and `with (a as b c):` is "invalid syntax. Perhaps you forgot a comma?". The engine
+  said "invalid syntax" on the `with` line. Found by `test_pyparse_native_b`, whose seeded mutations of the
+  repository's own sources changed when GH-NEW-REPOS added files. Only a file Python cannot read is affected, and its
+  error's line reaches a report only as the taint pass's "syntax error at line N"; no verdict reads it, and the rule
+  set is unchanged. The engine's (`pyparse/parser.rs`, both packages).
 - **The npm package's guess at a file's language read a long run of line breaks in quadratic time (CodeQL).**
   `scanFile` without a `lang` (the library API, and the dashboard's pasted code) guesses it from the content, and
   the Python test's `^\s*` crossed line breaks, so each of a run of them rescanned the rest: 100,000 took about 9

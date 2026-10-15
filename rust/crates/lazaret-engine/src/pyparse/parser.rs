@@ -1537,6 +1537,13 @@ impl<'a> Parser<'a> {
             let next = self.tok();
             let fine = next.t == T::Op && (next.k == COMMA || next.k == COLON || (next.k == RPAR && in_parens));
             if !fine && !(next.t == T::Op && next.k == RPAR) {
+                // (an expression right after the target: Python's error pass
+                // reads the target as an expression — invalid_with_item's
+                // `expression 'as' expression` — and its error there is the
+                // one reported: `with a as b{k: v, w = x}`, at `w`)
+                if self.adjacent() && self.ahead == 0 && self.kind(t.n) != Kind::Starred {
+                    self.adjacent_expression(t)?;
+                }
                 return self.fail("invalid syntax");
             }
             vars = t.n;

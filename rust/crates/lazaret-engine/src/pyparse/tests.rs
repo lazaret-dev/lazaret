@@ -166,6 +166,11 @@ fn which_error_python_reports() {
     // whatever follows), a value missing after `:` (at the `:`)
     assert_eq!(error("x = {'a': 1,\n 'b' c}"), (2, "':' expected after dictionary key".to_string()));
     assert_eq!(error("{1: 1,\n 2 if 3}").0, 2);
+    // … and in an expression right after a `with` item's target, which
+    // Python's error pass reads as an expression
+    assert_eq!(error("with a as b{t:\n c,\n d = f}:\n pass"), (3, "':' expected after dictionary key".to_string()));
+    assert_eq!(error("with (a as b c):\n pass"), (1, "invalid syntax. Perhaps you forgot a comma?".to_string()));
+    assert_eq!(error("with a as b c:\n pass"), (1, "invalid syntax".to_string()));
     assert_eq!(error("x = {'a':\n}"), (1, "expression expected after dictionary key and ':'".to_string()));
     // a statement `x, f(…)` whose call's arguments do not read: Python's
     // error pass reads from the call's `(` again (invalid_assignment), and

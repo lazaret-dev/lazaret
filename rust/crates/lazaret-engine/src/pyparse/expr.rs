@@ -270,7 +270,7 @@ impl<'a> Parser<'a> {
     /// Can the token start an expression though no expression goes on with
     /// it (so that right after one, it is an error)?
     #[inline]
-    fn adjacent(&self) -> bool {
+    pub(super) fn adjacent(&self) -> bool {
         let t = self.tok();
         match t.t {
             T::Name | T::Number | T::Str | T::FStart => true,
@@ -290,7 +290,7 @@ impl<'a> Parser<'a> {
     /// - after a name alone, it reads the expressions after it, its own
     ///   checks on (an error they find is the error): after `print` or
     ///   `exec`, "Missing parentheses in call to …".
-    fn adjacent_expression(&mut self, a: Ex) -> R<()> {
+    pub(super) fn adjacent_expression(&mut self, a: Ex) -> R<()> {
         let node = self.tree.nodes[a.n as usize];
         let bare = node.kind == Kind::Name && a.s == node.start;
         let legacy = if bare {
