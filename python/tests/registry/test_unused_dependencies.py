@@ -6,7 +6,9 @@ dependency on easy-day-js that no file named. A registry scan of an npm
 release lists such a dependency (INFO: packages also keep ones their build
 inlined), unless it is one of npm's most-downloaded packages or of the
 package's own scope; a brand-new one is SC-NEW-DEPENDENCY, CRITICAL
-(tests/registry/test_new_dependency.py). Archives are built in memory;
+(tests/registry/test_new_dependency.py). Since D-5 (0.1.9) a PyPI
+release's requirements too, read against its imports by the names a
+distribution is commonly imported as. Archives are built in memory;
 package names are made up; nothing runs.
 """
 import json
@@ -99,11 +101,92 @@ class RegistryTests(unittest.TestCase):
             r = repo._scan_artifact(tarball(files), "tgz", "npm", False, None)
         self.assertEqual((r["unusedDependencies"], issues(r, "SC-UNUSED-DEPENDENCY")), ([], []))
 
-    def test_python_releases_are_not_read(self):
+
+
+# ---------------- PyPI (D-5) ----------------
+
+META = "Metadata-Version: 2.1\nName: acme-files\nVersion: 1.0\n"
+
+
+def wheel_files(requires, modules, extra=None):
+    """A wheel of acme_files: METADATA with `requires`, and {path: text} modules."""
+    meta = META + "".join(f"Requires-Dist: {r}\n" for r in requires) + "\nA description.\n"
+    return {"acme_files-1.0.dist-info/METADATA": meta, "acme_files/__init__.py": "", **modules, **(extra or {})}
+
+
+class PypiInterfaceTests(unittest.TestCase):
+    def test_the_names_a_distribution_is_imported_as(self):
+        self.assertEqual(U.pypi_import_keys("python-dateutil"), {"python-dateutil", "dateutil"})
+        self.assertEqual(U.pypi_import_keys("PyYAML"), {"pyyaml", "yaml"})
+        self.assertEqual(U.pypi_import_keys("pyjwt"), {"pyjwt", "jwt"})
+        self.assertIn("redis", U.pypi_import_keys("redis-py"))
+        self.assertIn("acme", U.pypi_import_keys("acme-sdk"))
+        self.assertEqual(U.pypi_used_keys(["google.cloud.storage"]),
+                         {"google", "google-cloud", "google-cloud-storage"})
+
+    def test_pypi_unused(self):
+        declared = ["requests", "python-dateutil", "PyYAML", "google-cloud-storage", "typing_extensions", "easy-day",
+                    "quoted-plugin", "Easy_Day", "types-requests", "acme-stubs"]
+        imports = ["requests.adapters", "dateutil.parser", "yaml", "google.cloud.storage", "typing_extensions"]
+        texts = ["from importlib.metadata import version\nversion('quoted-plugin')\n"]
+        self.assertEqual(U.pypi_unused(declared, imports, texts), ["easy-day"])
+
+    def test_the_modules_of_a_distributions_files(self):
+        self.assertEqual(U.pypi_modules(["pkg/__init__.py", "pkg/sub.py", "mod.py", "fast.cpython-312-x86_64-linux-gnu.so",
+                                         "pkg-1.0.dist-info/RECORD", "pkg-1.0.data/purelib/other/__init__.py",
+                                         "hook.pth", "README.md"]), {"pkg", "mod", "fast", "other"})
+        self.assertEqual(U.pypi_modules(["setup.py", "PKG-INFO", "src/acme_x/__init__.py", "tests/test_a.py",
+                                         "docs/conf.py", "tool.py"], sdist=True), {"acme-x", "tool"})
+        self.assertEqual(U.pypi_modules(["setup.py", "PKG-INFO", "setup.cfg"], sdist=True), set())
+
+
+class PypiRegistryTests(unittest.TestCase):
+    def test_a_requirement_no_module_imports(self):
+        from tests.registry._review_support import scan_wheel
+        res = scan_wheel(wheel_files(["requests>=2", "python-dateutil", "easy-day (>=0.1)", "pytest-mock; extra == 'test'"],
+                                     {"acme_files/core.py": "import requests\nfrom dateutil import parser\n"}))
+        self.assertEqual(unused_msgs(res), [(
+            "INFO", 6, 'Requires "easy-day", which no module of the release imports by the names it is commonly '
+                       "imported as: installing the release installs it, and builds it if it is an sdist, for nothing "
+                       "the release does.")])
+        self.assertEqual(res["verdict"], "OK", res["verdictReason"])
+
+    def test_the_files_scan_gives_the_modules_its_code_imports(self):
+        from tests.registry._review_support import zipball
+        data = zipball(wheel_files(["easy-day"], {"acme_files/core.py": "import os.path\nfrom .x import y\n"
+                                                                        "import importlib\n"
+                                                                        "importlib.import_module('json')\n"}))
+        r = repo._scan_artifact(data, "zip", "wheel", False, None)
+        self.assertEqual(r["unusedDependencies"], ["easy-day"])
+        self.assertEqual(r["importedModules"], ["importlib", "json", "os"])
+
+    def test_what_is_a_use(self):
         from tests.registry._review_support import scan_sdist
-        res = scan_sdist({"setup.py": "from setuptools import setup\nsetup(name='x', install_requires=['stray'])\n",
-                          "PKG-INFO": "Name: x\nVersion: 1.0\nRequires-Dist: stray\n"})
-        self.assertEqual(unused_msgs(res), [])
+        # an import of the name, of a chain of it, a quoted name; setup.py's install_requires is no use
+        res = scan_sdist({"PKG-INFO": META + "Requires-Dist: acme-plugins\nRequires-Dist: zope.interface\n"
+                                            "Requires-Dist: entry-pointed\nRequires-Dist: declared-only\n",
+                          "setup.py": "from setuptools import setup\nsetup(install_requires=['declared-only'])\n",
+                          "acme/__init__.py": "import acme_plugins\nfrom zope.interface import Interface\n",
+                          "setup.cfg": "[options.entry_points]\nx = 'entry-pointed'\n",
+                          "acme/data.json": '{"plugin": "entry-pointed"}'})
+        self.assertEqual([m.split(",")[0] for _s, _l, m in unused_msgs(res)], ['Requires "declared-only"'])
+
+    def test_several_and_popular_ones(self):
+        from tests.registry._review_support import scan_wheel
+        res = scan_wheel(wheel_files([f"stray-{i}" for i in range(6)] + ["numpy", "beautifulsoup4"],
+                                     {"acme_files/core.py": "x = 1\n"}))
+        self.assertEqual([m for _s, _l, m in unused_msgs(res)], [
+            'Requires 6 distributions no module of the release imports by the names they are commonly imported as '
+            '("stray-0", "stray-1", "stray-2", "stray-3", "stray-4" and 1 more): installing the release installs '
+            "them, and builds those that are sdists, for nothing the release does."])
+
+    def test_not_when_a_text_was_not_read(self):
+        from tests.registry._review_support import zipball
+        files = wheel_files(["easy-day"], {"acme_files/big.py": "x = 1\n" * 400})
+        with mock.patch.object(repo, "MAX_MEMBER", 1000):
+            r = repo._scan_artifact(zipball(files), "zip", "wheel", False, None)
+        self.assertEqual((r["unusedDependencies"], r["importedModules"], issues(r, "SC-UNUSED-DEPENDENCY")),
+                         ([], None, []))
 
 
 if __name__ == "__main__":

@@ -751,13 +751,25 @@ them and the comparison once made (`_prior_kept`; one the registry did not
 answer is made again, from the cached rules), and the predecessor's file
 is fetched, checked against the registry's digest and scanned like any
 other, its verdict cached under its own key. SC-UNUSED-DEPENDENCY (`_ArtifactScan._unused_dependencies`,
-npm only, INFO) lists the runtime dependencies no text of the release names
+INFO) lists an npm release's runtime dependencies no text of it names
 and that are neither among npm's 5,000 most-downloaded packages nor in its
 own scope, when every text member was read whole; `_scan_artifact` returns
 their registry names (`unusedDependencies`), and `scan_package` makes a new
 one among them CRITICAL. The comparison itself, `registry/unused_deps.py`,
 takes declared names, used names and an ecosystem's normalizer, so a crate's
-or a Go module's dependencies go through the same function.
+or a Go module's dependencies go through the same function. Since 0.1.9 (D-5)
+a wheel's or an sdist's requirements too (`_pypi_unused`; not an extra's):
+a distribution's name is not its import name, so a requirement is used when
+an import answers for one of the names it is commonly imported as
+(`pypi_import_keys`: its own, without `python-`/`py-`, a `-python`-like
+suffix or a `py` prefix; a dotted import for each of its chains) or another
+text quotes it (setup.py and the other declaring files are not read for that);
+PyPI's most-downloaded distributions are left out. That is a guess, so it is
+INFO; the scan returns the modules the code imports (`importedModules`), and
+`new_dependency_issues` reads a brand-new requirement exactly
+(`pypi_unused_new`: its latest release's smallest wheel, else sdist, listed by
+the archive reader, the modules it makes importable against those imports),
+CRITICAL when the release imports none of them.
 SC-UNPARSED-CODE (0.1.9, JS-PARSE-STRICT; INFO) lists the JavaScript members
 the parser refused where a test that reads the syntax tree read them (the
 import-time test, SC-USE-RISK's, the install-script test's, D-13's loads),

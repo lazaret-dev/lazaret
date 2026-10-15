@@ -26,6 +26,19 @@ aggregate):
 
 ### Added
 
+- **A PyPI release's requirements no module of it imports: SC-UNUSED-DEPENDENCY for wheels and sdists (D-5;
+  rule set 2.77.0).** npm's check (0.1.8) compared names; a distribution's name is not its import name
+  (beautifulsoup4 is bs4), so a requirement (not an extra's) is now used when one of the release's imports answers
+  for a name it is commonly imported as (its own; without `python-` or `py-`, a `-python`-like suffix or a `py`
+  prefix; a dotted import for each of its chains: `google.cloud.storage`) or another text quotes it (setup.py and
+  the other files that declare requirements are not read for that). PyPI's most-downloaded distributions are left
+  out. That reading is a guess, so it is INFO. A requirement the dependency history finds brand-new (7 to 30 days,
+  another account's) is read exactly: its latest release's smallest wheel, else sdist, is listed by the archive
+  reader (nothing is unpacked or run), and when the release imports none of the modules it makes importable (an
+  sdist of setup.py alone makes none) SC-NEW-DEPENDENCY is CRITICAL, "no module of this release imports"; MAJOR as
+  before otherwise. A stub distribution (`types-x`, `x-stubs`) is left out, as npm's `@types/`. The popular set's
+  404 PyPI files: none (their requirements are popular ones; without that, 148 requirements of 85 files, nearly
+  all distributions imported by other names: protobuf, proto-plus, grpcio, tzdata …).
 - **A release compared with its established predecessor: SC-NEW-INDICATOR (rule set 2.73.0; John, Oct 14: "if the
   latest release has findings then we review the prior release vs it").** A registry scan of an npm, PyPI or
   crates.io release whose files have weaker indicators only (it would be WARN) scans the release's established

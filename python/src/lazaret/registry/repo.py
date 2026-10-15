@@ -347,7 +347,7 @@ SAMPLE = 8192              # header/entropy sample read from oversized files
 #      entry points and hook targets, Python install scripts
 # 2.3: verdict tiers, decoded hex, install-script inspection; 2.2:
 #      verdict-integrity; 2.1: binary-artifact awareness
-ENGINE_VERSION = "2.76.0"
+ENGINE_VERSION = "2.77.0"
 
 # ---------------- The content memo (P-2a, registry/contentcache.py) ----------------
 # One per scan_package run: the engine answers once for content several of a
@@ -2899,7 +2899,8 @@ class _ArtifactScan:
         self.install_scripts = set()   # hook targets, setup.py & co (install_script_risk)
         self.startup = set()       # a wheel's sitecustomize / usercustomize
         self.unread = False        # a member the archive's limits left unread
-        self.unused_dependencies = []  # npm: registry names no file uses (_unused_dependencies)
+        self.unused_dependencies = []  # npm: registry names no file uses (_unused_dependencies); PyPI's (D-5)
+        self.imported_modules = None   # wheel, sdist: the top-level modules its code imports (_pypi_unused)
         self.extension_dependencies = []   # vsix: the extensions it brings (_vsix_entry_points)
         self.vsix_startup = None   # vsix: the activation event that starts it with the editor, if any
         self.vsix_identity = None  # vsix: its package.json's publisher, name and version
@@ -4562,12 +4563,7 @@ class _ArtifactScan:
                 self.issues.extend(_lookalike.issues("crates", declared.name, set(declared.dependencies),
                                                      "Cargo.toml", text))
             return
-        if self.artifact == "wheel":
-            rel = next((r for r in sorted(self.deferred) if r.count("/") == 1
-                        and r.endswith(".dist-info/METADATA")), None)
-        elif self.artifact == "sdist":
-            rel = "PKG-INFO" if "PKG-INFO" in self.deferred else None
-        else:
+        if self.artifact not in ("wheel", "sdist"):
             text = self.manifests.get("package.json")
             data, _problems = lazaret.load_manifest("package.json", text) if text else (None, None)
             if isinstance(data, dict):
@@ -4575,18 +4571,23 @@ class _ArtifactScan:
                 self.issues.extend(_lookalike.issues("npm", name if isinstance(name, str) else None,
                                                      npm_dependency_names(data), "package.json", text))
             return
+        meta = self._pypi_metadata()
+        if meta is not None:
+            rel, text, name, requires = meta
+            self.issues.extend(_lookalike.issues("pypi", name, pypi_dependency_names(requires), rel, text))
+
+    def _pypi_metadata(self):
+        """A wheel's METADATA or an sdist's PKG-INFO: (its path, its text, its Name, its Requires-Dist lines), else
+        None."""
+        if self.artifact == "wheel":
+            rel = next((r for r in sorted(self.deferred) if r.count("/") == 1
+                        and r.endswith(".dist-info/METADATA")), None)
+        else:
+            rel = "PKG-INFO" if self.artifact == "sdist" and "PKG-INFO" in self.deferred else None
         if rel is None:
-            return
+            return None
         text = self.deferred[rel].decode("utf-8", "replace")
-        name, requires = None, []
-        for line in text.split("\n"):           # the headers, up to the first empty line
-            if not line.strip():
-                break
-            if line.startswith("Name:") and name is None:
-                name = line[5:].strip()
-            elif line.startswith("Requires-Dist:"):
-                requires.append(line[14:].strip())
-        self.issues.extend(_lookalike.issues("pypi", name, pypi_dependency_names(requires), rel, text))
+        return (rel, text) + _metadata_headers(text)
 
     def _unused_dependencies(self):
         """SC-UNUSED-DEPENDENCY (INFO, 0.1.8): the runtime dependencies of an
@@ -4595,9 +4596,15 @@ class _ArtifactScan:
         inlined) nor one of the package's own scope. Only when every text
         member was read whole: one past the archive's limits, over the size
         limit or the text budget, or not reached in time could name it.
-        Kept for scan_package, which makes a brand-new one CRITICAL."""
-        if self.artifact != "npm" or self.unread or self.dropped or self.oversize or self.timed_out:
+        Kept for scan_package, which makes a brand-new one CRITICAL. A wheel's or an sdist's: _pypi_unused."""
+        if self.unread or self.dropped or self.oversize or self.timed_out:
             return
+        read = {"npm": self._npm_unused, "wheel": self._pypi_unused, "sdist": self._pypi_unused}.get(self.artifact)
+        if read is not None:
+            read()
+
+    def _npm_unused(self):
+        """_unused_dependencies for an npm release."""
         text = self.manifests.get("package.json")
         data, _problems = lazaret.load_manifest("package.json", text) if text else (None, None)
         if not isinstance(data, dict):
@@ -4613,6 +4620,35 @@ class _ArtifactScan:
         if found:
             self.unused_dependencies = [_unused.npm_registry_name(dep, spec) for dep, spec in found]
             self.issues.append(_unused_dependency_issue([dep for dep, _spec in found], text))
+
+    def _pypi_unused(self):
+        """SC-UNUSED-DEPENDENCY (INFO, D-5) for a wheel or an sdist: the requirements (not an extra's) that none of its
+        Python modules' imports answers for and no other text quotes (unused_deps.pypi_unused; the files that declare
+        the requirements, setup.py and the like, are not read for that), but not one of PyPI's most-downloaded
+        distributions. Keeps the top-level modules its code imports (importedModules) for scan_package, which reads
+        a brand-new requirement exactly (pypi_unused_new)."""
+        meta = self._pypi_metadata()
+        if meta is None:
+            return
+        rel, text, _name, requires = meta
+        dotted = self._python_imports()
+        self.imported_modules = _top_level_keys(dotted)
+        found = _pypi_unused_found(_pypi_requirements(requires), dotted, self._quoting_texts(rel))
+        if found:
+            self.unused_dependencies = [_pep503(d) for d in found]
+            self.issues.append(_pypi_unused_issue(found, rel, text))
+
+    def _python_imports(self):
+        """The absolute imports (dotted names) of the release's Python modules (_py_import_targets)."""
+        return [name for path, (t, lang) in self.sources.items() if t and lang == "py"
+                for name, base in _py_import_targets(path, t) if base is None]
+
+    def _quoting_texts(self, meta_rel):
+        """The texts whose quoting a requirement is a use of it: all but the metadata (`meta_rel`) and the files
+        that declare requirements (_declares_requirements)."""
+        texts = [t for r, (t, _lang) in self.sources.items() if t and not _declares_requirements(r)]
+        texts += [t for r, t in self.manifests.items() if t and not _declares_requirements(r)]
+        return texts + [t for r, t in self.deferred.items() if r != meta_rel and not _declares_requirements(r)]
 
     def _dev_only_loads(self, reachable):
         """SC-DEV-DEPENDENCY (MAJOR, D-13): a package an npm release's code loads when the package is loaded (or its
@@ -4864,13 +4900,19 @@ def scan_members(members, anomalies, artifact, full, budget, memo=None, action_r
            "strongIndicators": strong, "weakIndicators": weak,
            "unusedDependencies": st.unused_dependencies, "useTime": st.use_time,
            "incomplete": sorted(st.cut) if verdict == "INCOMPLETE" else []}
-    if artifact == "vsix":
-        out["extensionDependencies"] = st.extension_dependencies
-        out["startupEvent"] = st.vsix_startup
-        out["manifest"] = st.vsix_identity
-    if artifact == "action":
-        out["action"] = st.action_info
+    out.update(_artifact_fields(artifact, st))
     return out
+
+
+def _artifact_fields(artifact, st):
+    """scan_members' fields for one kind of artifact: a wheel's or an sdist's imports (D-5), a VS Code extension's
+    and a GitHub Action's own."""
+    if artifact in ("wheel", "sdist"):
+        return {"importedModules": st.imported_modules}
+    if artifact == "vsix":
+        return {"extensionDependencies": st.extension_dependencies, "startupEvent": st.vsix_startup,
+                "manifest": st.vsix_identity}
+    return {"action": st.action_info} if artifact == "action" else {}
 
 
 def scan_action(data, root="", budget=None, memo=None):
@@ -5082,6 +5124,15 @@ def _age_text(age):
     return f"{n} day{'s' if n != 1 else ''}"
 
 
+#: (D-5) the files that declare a Python release's requirements: their naming one is no use of it
+_PY_DECLARING = ("setup.py", "setup.cfg", "pyproject.toml", "PKG-INFO", "METADATA", "requires.txt", "Pipfile",
+                 "Pipfile.lock", "poetry.lock", "pdm.lock", "uv.lock")
+_PY_UNUSED_WHY = ("A requirement is installed with the release, and an sdist's build runs, whether the release's "
+                  "code imports it or not: the @mastra compromise (June 2026) added a dependency no file used, which "
+                  "carried the payload. A distribution is imported by a name of its own that need not be its "
+                  "distribution's (beautifulsoup4 is bs4), and this is read by the names one commonly is, so on its "
+                  "own this is context; a scan that sees the requirement is brand-new reads its own modules and makes "
+                  "it SC-NEW-DEPENDENCY, CRITICAL, when the release imports none of them.")
 _UNUSED_WHY = ("A dependency is installed with the package, and its install scripts run, whether the package's "
                "code uses it or not. The @mastra compromise (June 2026) changed no code: each hijacked release gained "
                "a dependency on easy-day-js, which no file of it named and which carried the payload. Packages also "
@@ -5106,6 +5157,76 @@ def _unused_dependency_issue(names, text):
          "msg": msg, "why": _UNUSED_WHY,
          "fix": "Find out why the package declares it, and read it before installing the package.",
          "ref": "CWE-506 · Supply chain"}, "package.json", line, lines)
+
+
+def _declares_requirements(rel):
+    """Is `rel` a file that declares a Python release's requirements (_PY_DECLARING, requirements*.txt / .in)?"""
+    base = posixpath.basename(rel)
+    return base in _PY_DECLARING or (base.startswith("requirements") and base.endswith((".txt", ".in")))
+
+
+def _metadata_headers(text):
+    """(Name, [Requires-Dist]) of a METADATA or PKG-INFO text: its headers, up to the first empty line."""
+    name, requires = None, []
+    for line in text.split("\n"):
+        if not line.strip():
+            break
+        if line.startswith("Name:") and name is None:
+            name = line[5:].strip()
+        elif line.startswith("Requires-Dist:"):
+            requires.append(line[14:].strip())
+    return name, requires
+
+
+def _pypi_requirements(requires):
+    """The distributions Requires-Dist lines name, an extra's left out, as written and in order."""
+    return [m.group(1) for req in requires if not re.search(r"\bextra\s*==", req)
+            for m in (_PY_REQ_NAME_RE.match(req),) if m]
+
+
+def _requires_line(lines, name):
+    """The 1-based line of the Requires-Dist header naming `name` (PEP 503 alike), else 1."""
+    want = _pep503(name)
+    for i, line in enumerate(lines):
+        m = _PY_REQ_NAME_RE.match(line[14:]) if line.startswith("Requires-Dist:") else None
+        if m and _pep503(m.group(1)) == want:
+            return i + 1
+    return 1
+
+
+def _pypi_unused_issue(names, rel, text):
+    """SC-UNUSED-DEPENDENCY (INFO, D-5) for a PyPI release's requirements no module of it imports, at the first one's
+    Requires-Dist line of `rel` (its METADATA or PKG-INFO)."""
+    lines = (text or "").split("\n")
+    return lazaret.mk_issue(
+        {"id": "SC-UNUSED-DEPENDENCY", "name": "A dependency nothing uses", "type": "HOTSPOT", "sev": "INFO",
+         "msg": _pypi_unused_msg(names), "why": _PY_UNUSED_WHY,
+         "fix": "Find out why the release requires it, and read it before installing the release.",
+         "ref": "CWE-506 · Supply chain"}, rel, _requires_line(lines, names[0]), lines)
+
+
+def _pypi_unused_msg(names):
+    """_pypi_unused_issue's message."""
+    if len(names) == 1:
+        msg = (f'Requires "{names[0]}", which no module of the release imports by the names it is commonly imported '
+               "as: installing the release installs it, and builds it if it is an sdist, for nothing the release "
+               "does.")
+    else:
+        shown = ", ".join(f'"{n}"' for n in names[:5]) + (f" and {len(names) - 5} more" if len(names) > 5 else "")
+        msg = (f"Requires {len(names)} distributions no module of the release imports by the names they are commonly "
+               f"imported as ({shown}): installing the release installs them, and builds those that are sdists, for "
+               "nothing the release does.")
+    return msg
+
+
+def _pypi_unused_found(declared, dotted, texts):
+    """The requirements of `declared` unused_deps.pypi_unused finds unused, PyPI's most-downloaded left out."""
+    return [d for d in _unused.pypi_unused(declared, dotted, texts) if not _lookalike.popular("pypi", d)]
+
+
+def _top_level_keys(dotted):
+    """The keys of the top-level modules of dotted import names, sorted."""
+    return sorted({_unused.pypi_key(d.split(".", 1)[0]) for d in dotted})
 
 
 #: (D-13) scopes whose modules the app provides: Ember's (ember-source resolves @ember/* and @glimmer/* for an
@@ -5144,10 +5265,12 @@ def _dev_only_load_issue(found, lines):
 
 def _new_dependency_issue(eco, dep, age, previous, owners, unused=False):
     """SC-NEW-DEPENDENCY: CRITICAL under NEW_DEP_CRITICAL, or when no file of
-    the release uses it (`unused`, npm), else MAJOR."""
+    the release uses it (`unused`: npm's names; PyPI's, its modules none of
+    the release's imports, D-5), else MAJOR."""
     sev = "CRITICAL" if age < NEW_DEP_CRITICAL or unused else "MAJOR"
     by = f" by {', '.join(owners[:3])}" if owners else ""
-    had = f"which {previous} did not have" + (" and no file of this release names" if unused else "")
+    nothing = " and no module of this release imports" if eco == "pypi" else " and no file of this release names"
+    had = f"which {previous} did not have" + (nothing if unused else "")
     return lazaret.mk_issue(
         {"id": "SC-NEW-DEPENDENCY", "name": "A release adds a brand-new dependency", "type": "HOTSPOT", "sev": sev,
          "msg": (f'Adds a dependency on "{dep}", {had}: a package first published '
@@ -5382,12 +5505,16 @@ def extension_new_dependencies(eco, name, version, resolved, brings, fetch=None)
     return previous[0], found
 
 
-def new_dependency_issues(eco, name, version, resolved, unused=(), brings=()):
+def new_dependency_issues(eco, name, version, resolved, unused=(), brings=(), imports=None):
     """SC-NEW-DEPENDENCY findings for one release (best effort: [] when the
     registry can't say). unused: the registry names of the dependencies no
     file of the release names (the artifact scan's unusedDependencies).
     brings: a VS Code extension's (openvsx, vscode) extensionDependencies
-    and extensionPack, as its package.json lists them."""
+    and extensionPack, as its package.json lists them. imports: the top-level
+    modules a PyPI release's code imports (its files' importedModules), None
+    when no file of it was read whole: a brand-new requirement is unused when
+    the release imports none of its own modules (pypi_unused_new, D-5), which
+    the offline reading of names (`unused`) only guesses."""
     if os.environ.get("LAZARET_NO_DEPENDENCY_HISTORY") or eco not in ("npm", "pypi", "crates", "openvsx", "vscode"):
         return []
     if eco in ("openvsx", "vscode"):
@@ -5405,8 +5532,65 @@ def new_dependency_issues(eco, name, version, resolved, unused=(), brings=()):
             previous, found = pypi_new_dependencies(name, version, getattr(resolved, "info", None))
     except (FetchError, ValueError):
         return []
-    unused = set(unused)
+    unused = _unused_new(eco, found, unused, imports)
     return [_new_dependency_issue(eco, dep, age, previous, owners, dep in unused) for dep, age, owners in found]
+
+
+def _unused_new(eco, found, unused, imports):
+    """The new dependencies of `found` no file of the release uses: npm's and the others' by name (`unused`); PyPI's
+    (D-5) read exactly, those old enough for it to matter that the release imports none of the modules of
+    (pypi_unused_new), none when no file of it was read whole (`imports` None)."""
+    if eco != "pypi":
+        return set(unused)
+    if imports is None:
+        return set()
+    return {dep for dep, age, _owners in found if age >= NEW_DEP_CRITICAL and pypi_unused_new(dep, imports)}
+
+
+#: (D-5) the most of a brand-new requirement's file pypi_unused_new fetches to list its modules
+PYPI_DEP_LIST_BYTES = 8 * 1024 * 1024
+
+
+def pypi_unused_new(dep, imports, fetch=None, fetch_bytes=None):
+    """D-5: does the release import none of a brand-new requirement's modules? Its latest release's smallest wheel,
+    else its smallest sdist, under PYPI_DEP_LIST_BYTES, is fetched and its members listed by the archive reader
+    (nothing is unpacked or run): the top-level modules it makes importable (unused_deps.pypi_modules), against
+    `imports` (the release's, as keys). A file that names none (setup.py alone, a .pth) is imported by nothing.
+    False when it cannot say (no file, one over the limit, a fetch or an archive that fails)."""
+    fetch = fetch or http_json
+    fetch_bytes = fetch_bytes or (lambda url: _fetch(url, max_bytes=PYPI_DEP_LIST_BYTES))
+    try:
+        f = _pypi_listed_file(fetch(f"https://pypi.org/pypi/{_quote_seg(dep)}/json"))
+        sdist = f is not None and f.get("packagetype") == "sdist"
+        paths = None if f is None else _archive_paths(fetch_bytes(f["url"]), pypi_container(f.get("filename") or
+                                                                                          f["url"]), sdist)
+    except (FetchError, ValueError, OSError, EOFError, tarfile.TarError, zipfile.BadZipFile):
+        return False
+    return paths is not None and not _unused.pypi_modules(paths, sdist=sdist) & set(imports)
+
+
+def _pypi_listed_file(doc):
+    """The file of a PyPI JSON document's latest release pypi_unused_new lists: the smallest wheel, else the
+    smallest sdist, under PYPI_DEP_LIST_BYTES; None."""
+    files = [f for f in (doc.get("urls") if isinstance(doc, dict) else None) or ()
+             if isinstance(f, dict) and isinstance(f.get("url"), str) and isinstance(f.get("size"), int)]
+    for kind in ("bdist_wheel", "sdist"):
+        mine = sorted((f for f in files if f.get("packagetype") == kind), key=lambda f: f["size"])
+        if mine and mine[0]["size"] <= PYPI_DEP_LIST_BYTES:
+            return mine[0]
+    return None
+
+
+def _archive_paths(data, container, sdist):
+    """The member paths of a wheel's or an sdist's archive (iter_archive, its own budget), None when it stopped
+    short of them (too many, too big, out of time, damaged)."""
+    paths = []
+    for m in iter_archive(data, container, "sdist" if sdist else "wheel",
+                          budget=Budget(deadline=time.monotonic() + METADATA_TIMEOUT)):
+        if m[3] in ("files", "total", "time", "corrupt"):
+            return None
+        paths.append(m[0])
+    return paths
 
 
 @_always_redacted
@@ -5466,7 +5650,7 @@ def scan_package(eco, name, version=None, full=False, *, resolved=None, deadline
             skipped.append((s.get("filename"), "packagetype", size))
         else:
             not_installed.append((s.get("filename"), "not-installable", size))
-    per, all_issues, truncated, unused = [], [], 0, set()
+    per, all_issues, truncated, unused, imports = [], [], 0, set(), None
     brings, startup = set(), None           # a VS Code extension's (E-1): what it brings, what starts it with the editor
     attested = []                           # (file, digest) the provenance check is given (npm: SHA-512; PyPI: SHA-256)
     multi = len(refs) > 1
@@ -5522,6 +5706,7 @@ def scan_package(eco, name, version=None, full=False, *, resolved=None, deadline
             all_issues.append(issue)
         truncated += r["truncated"]
         unused.update(r.get("unusedDependencies") or ())
+        imports = _with_imports(imports, r)
         brings.update(r.get("extensionDependencies") or ())
         startup = startup or r.get("startupEvent")
         per.append({"filename": ref.get("filename"), "kind": ref["artifact"], "url": ref["url"],
@@ -5529,7 +5714,7 @@ def scan_package(eco, name, version=None, full=False, *, resolved=None, deadline
                     **{k: r[k] for k in ("verdict", "verdictReason", "filesScanned",
                                          "binaryArtifacts", "truncated",
                                          "strongIndicators", "weakIndicators", "useTime")}})
-    provenance, prior = _release_findings(eco, name, version, resolved, all_issues, per, (attested, unused, brings),
+    provenance, prior = _release_findings(eco, name, version, resolved, all_issues, per, (attested, unused, brings, imports),
                                           (deadline, cancel, memo))
     skip_issues, skip_label = _skipped_summary(skipped, byte_budget, limit)
     # one part per release file left out; skip_issues holds one finding per
@@ -5581,15 +5766,23 @@ def scan_package(eco, name, version=None, full=False, *, resolved=None, deadline
             **_extension_fields(eco, resolved, brings, startup, kinds)}
 
 
+def _with_imports(imports, r):
+    """(D-5) the modules a PyPI release's files import, a file's result (`importedModules`) added; None while no file
+    of it was read whole."""
+    got = r.get("importedModules")
+    return imports if got is None else (imports or set()) | set(got)
+
+
 def _release_findings(eco, name, version, resolved, issues, per, found, limits):
     """The release's own findings beside its files', added to `issues` (its files' findings): SC-NEW-INDICATOR
     (registry/prior.py: asked of those findings alone), SC-NEW-DEPENDENCY, provenance's. found: (the files'
-    digests the provenance check is given, the dependencies no file names, what a VS Code extension brings);
-    limits: (deadline, cancel, memo) -> (provenance's summary, the prior release's)."""
-    attested, unused, brings = found
+    digests the provenance check is given, the dependencies no file names, what a VS Code extension brings, the
+    modules a PyPI release's code imports or None); limits: (deadline, cancel, memo) -> (provenance's summary, the
+    prior release's)."""
+    attested, unused, brings, imports = found
     deadline, cancel, memo = limits
     prior_issues, prior = _prior.release_issues(eco, name, version, resolved, issues, per, deadline, cancel, memo)
-    issues.extend(new_dependency_issues(eco, name, version, resolved, unused, brings))
+    issues.extend(new_dependency_issues(eco, name, version, resolved, unused, brings, imports))
     provenance_issues, provenance = _provenance.check_release(eco, name, version, resolved, attested, _provenance_fetch)
     issues.extend(provenance_issues)
     issues.extend(prior_issues)
