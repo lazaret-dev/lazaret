@@ -325,7 +325,8 @@ js/
 │   └── lib/              leaf helpers: native (the WebAssembly engine: its
 │                         loader, one call, the rule pack's values), fs
 │                         (collection, report paths), encoding and codecs
-│                         (BOM/UTF-16/PEP 263), binary (magic bytes), lexer
+│                         (BOM/UTF-16/PEP 263), binary and pth (the engine's
+│                         calls, a file's bytes as latin-1 text), lexer
 │                         (the comment layout, the engine's lexers'), redact
 │                         and issue (the findings this package builds, made
 │                         and redacted by the engine), configsecrets (which

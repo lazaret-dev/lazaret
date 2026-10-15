@@ -1453,10 +1453,9 @@ def _tar_codec(data, container, artifact):
 
 def _native_program(raw):
     """Do a member's first bytes say it is a program the system loads (an ELF, Mach-O or PE file, a WebAssembly or DEX
-    module: core.EXEC_MAGIC), rather than code a runtime reads (a bytenode .jsc, a .pyc) or data? Binary bytes only:
-    a text that starts `MZ=1;` is JavaScript."""
-    return lazaret.looks_binary(raw[:2048]) and (any(raw.startswith(sig) for sig, _what in lazaret.EXEC_MAGIC)
-                                                 or raw.startswith(b"MZ"))
+    module: the engine's EXEC_MAGIC), rather than code a runtime reads (a bytenode .jsc, a .pyc) or data? Binary bytes
+    only: a text that starts `MZ=1;` is JavaScript (BR-7 step 3 d: binary.rs)."""
+    return lazaret._native.call("binary_check", {"check": "program"}, lazaret._bytes_text(bytes(raw[:2048])))
 
 
 def case_fold(rel):

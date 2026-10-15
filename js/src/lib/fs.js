@@ -14,7 +14,7 @@ import { randomBytes } from "node:crypto";
 import { decodeSource, fsNameToString } from "./encoding.js";
 import { classifyBinary, HEADER_SAMPLE, PYC_HEADER, pycIssues, pycModule, pyExt, looksBinary, mpegTs, MPEG_TS_EXTS,
   disguisedBinary, DISGUISE_SAMPLE } from "./binary.js";
-import { shebangLang } from "./native.js";
+import { EXHAUSTED, NativeError, NativeExhausted, shebangLang } from "./native.js";
 import { mkIssue, fileIssue } from "./issue.js";
 import { pthIssues } from "./pth.js";
 import { registerScanContext } from "./redact.js";
@@ -482,7 +482,14 @@ function collectFile(full, rel, name, st, dep, col) {
   }
   if (pth) {                // only the .pth check runs on it (decoded as the registry does: utf-8-sig)
     col.pth.push(rel);
-    for (const i of pthIssues(rel, new TextDecoder("utf-8").decode(data))) col.binaryIssues.push(i);
+    let found;
+    try {
+      found = pthIssues(rel, new TextDecoder("utf-8").decode(data));
+    } catch (e) {
+      if (!(e instanceof NativeError)) throw e;
+      found = [e instanceof NativeExhausted ? truncatedIssue(rel, EXHAUSTED) : scanErrorIssue(rel, e)];
+    }
+    for (const i of found) col.binaryIssues.push(i);
     return;
   }
   if (APPLE_DOUBLE_MAGIC.some((m) => data.subarray(0, 4).equals(m))) {

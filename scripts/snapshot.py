@@ -42,7 +42,8 @@ MODULES = ("tests.architecture.test_snapshot_hooks", "tests.architecture.test_sn
            "tests.architecture.test_snapshot_js_parse", "tests.architecture.test_snapshot_py_flow",
            "tests.architecture.test_snapshot_project", "tests.architecture.test_snapshot_ci",
            "tests.architecture.test_snapshot_autorun", "tests.architecture.test_snapshot_config",
-           "tests.architecture.test_snapshot_manifest", "tests.architecture.test_snapshot_redact")
+           "tests.architecture.test_snapshot_manifest", "tests.architecture.test_snapshot_redact",
+           "tests.architecture.test_snapshot_binary")
 # calls answering a parsed tree, which may be deeper than json.loads reads:
 # recorded as the answer's JSON text ({"ok_text": …})
 RAW_CALLS = ("js_parse", "js_parse_file", "py_parse")

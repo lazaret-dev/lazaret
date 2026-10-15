@@ -83,6 +83,8 @@ pub const CALLS: &[&str] = &[
     "scan_manifest", "scan_gyp", "manifest_data", "manifest_check",
     // 0.1.9 (BR-7 step 3 c): the one redactor, for the findings the packages build (redact.rs)
     "issue_make", "redact_text", "redact_issues", "redact_file", "clip_line", "pem_lines",
+    // BR-7 step 3 d: binaries, bytecode and .pth files (a file's bytes as latin-1 text)
+    "binary_check", "binary_classify", "binary_disguised", "pyc_issues", "pth_issues",
     // the JavaScript parser (jsparse.py's trees)
     "js_parse", "js_parse_file",
     // the Python parser (Python 3.13's ast trees)
@@ -652,6 +654,44 @@ fn dispatch(name: &str, args: &Value, text: &[u32]) -> Result<Value, CallError> 
                 ("data", data.as_ref().map_or(Value::Null, crate::manifest::data_value)),
                 ("issues", Value::Arr(early.iter().map(|f| none.issue(f)).collect())),
             ])
+        }
+        "binary_check" | "binary_classify" | "binary_disguised" | "pyc_issues" => {
+            // the bytes of a file as latin-1 text (a character per byte); `windows`: "\\" separates a path's
+            // folders too (os.path on Windows)
+            use crate::binary;
+            let data = binary::bytes_of(text)
+                .ok_or_else(|| CallError::BadArgs("the bytes come as latin-1 text: a character past U+00FF".into()))?;
+            let flag = |k: &str| matches!(args.get(k), Some(Value::Bool(true)));
+            let path = opt_str(args, "path").unwrap_or_default();
+            let or_null = |v: Option<Value>| v.unwrap_or(Value::Null);
+            match name {
+                // {check: looks | mpeg_ts | program} -> core.looks_binary, core._mpeg_ts, the registry's
+                // _native_program
+                "binary_check" => match crate::pystr::to_string(&arg_str(args, "check")?).as_str() {
+                    "looks" => Value::Bool(binary::looks_binary(p, &data)),
+                    "mpeg_ts" => Value::Bool(binary::mpeg_ts(&data)),
+                    "program" => Value::Bool(binary::native_program(p, &data)),
+                    other => return Err(CallError::BadArgs(format!("binary_check: no check {other:?}"))),
+                },
+                // {path, size, context, windows, neumaier} -> core.classify_binary's issue, or null
+                "binary_classify" => {
+                    let context = opt_str(args, "context").map(|c| crate::pystr::to_string(&c)).unwrap_or_default();
+                    let size = opt_int(args, "size").unwrap_or(data.len() as i64).max(0) as u64;
+                    or_null(binary::classify(p, &path, &data, size, &context, flag("windows"), flag("neumaier")))
+                }
+                // {path, windows} -> core.disguised_binary's issue, or null
+                "binary_disguised" => or_null(binary::disguised(p, &path, &data, flag("windows"))),
+                // {path, has_source} -> core.pyc_issues
+                _ => Value::Arr(binary::pyc_issues(p, &path, &data, flag("has_source"))),
+            }
+        }
+        "pth_issues" => {
+            // {redact, neumaier} + a .pth file's text -> core.pth_issues' issues
+            let flag = |k: &str, d: bool| match args.get(k) {
+                Some(Value::Bool(b)) => *b,
+                _ => d,
+            };
+            Value::Arr(crate::binary::pth_issues(p, text, flag("redact", true), flag("neumaier", false)))
         }
         "issue_make" => {
             // {items: [[rule {id, name, type, sev, msg, why, fix, ref}, line, col or null]…], redact, context, neumaier}

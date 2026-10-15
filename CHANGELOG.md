@@ -851,6 +851,21 @@ aggregate):
   entropy test and the PEM reader are gone, and with them `test_js_parity_tokens`), and `redactResult` always clips
   (it took the clipper as an argument). `test_snapshot_redact` (hashes checked to be the Python's answers) and
   `test_wasm_parity_redact` hold the engine.
+- **One reader of binaries, bytecode and .pth files, the engine's (BR-7, step 3 d).** Whether a file's bytes are
+  text, a program or a transport stream, the SC-BINARY, SC-NESTED-ARCHIVE and SC-OPAQUE-BLOB findings of a file that
+  is not source, a program under a source file's name (SC-BINARY, CRITICAL), bytecode's SC-PYC-UNCHECKED and
+  SC-PYC-ORPHAN, and a .pth file's SC-PTH-EXEC are the engine's for both packages
+  (`rust/crates/lazaret-engine/src/binary.rs`: the `binary_check`, `binary_classify`, `binary_disguised`,
+  `pyc_issues` and `pth_issues` calls, a file's bytes handed over as latin-1 text), where core's `looks_binary`,
+  `classify_binary`, `disguised_binary`, `pyc_issues` and `pth_issues` and the npm package's `binary.js` and
+  `pth.js` did it until now; the signatures, limits and texts are in the rule pack. The same answers as the
+  Python's on 33,300 cases (byte samples of every signature, size and extension in each context, bytecode headers,
+  2,500 .pth files) and on 150 generated trees scanned whole, with --deps and without, and read as an npm tarball
+  and a wheel (3,309 issues); the npm package's the same answers as its own old code on 30,836 cases and 120 scans
+  of 60 generated trees (976 issues). The npm package's work budget (`setWorkBudget`) no longer bounds these calls,
+  as the Python package never asked them with one. `binary.js` is 88 lines (from 241), `pth.js` 20 (from 56), core
+  156 lines shorter.
+  `test_snapshot_binary` (hashes checked to be the Python's answers) and `test_wasm_parity_binary` hold the engine.
 - **Security: S-XML is a parser set to resolve external entities, not an import of xml.etree, xml.dom or xml.sax
   (Q-3; rule set 2.80.0).** Since Python 3.7.1 none of them resolves an external entity unless told to, and Expat
   2.4.1 refuses entity bombs, so the import flagged safe code: all 20 of BenchmarkPython's safe XXE cases (its 8 real

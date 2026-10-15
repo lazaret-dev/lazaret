@@ -211,4 +211,5 @@ jobs:
             tests.architecture.test_wasm_parity_pyflow tests.architecture.test_wasm_parity_project \
             tests.architecture.test_wasm_parity_secrets tests.architecture.test_wasm_parity_ci \
             tests.architecture.test_wasm_parity_autorun tests.architecture.test_wasm_parity_config \
-            tests.architecture.test_wasm_parity_manifest tests.architecture.test_wasm_parity_redact -v
+            tests.architecture.test_wasm_parity_manifest tests.architecture.test_wasm_parity_redact \
+            tests.architecture.test_wasm_parity_binary -v

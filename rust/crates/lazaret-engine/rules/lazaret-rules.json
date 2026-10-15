@@ -27,6 +27,106 @@
    "flags": "",
    "re": "[\\\"'][A-Za-z0-9+/]{200,}={0,2}[\\\"']"
   },
+  "BENIGN_MAGIC": {
+   "list": [
+    {
+     "value": "\u0089PNG"
+    },
+    {
+     "value": "\u00ff\u00d8\u00ff"
+    },
+    {
+     "value": "GIF8"
+    },
+    {
+     "value": "RIFF"
+    },
+    {
+     "value": "OggS"
+    },
+    {
+     "value": "BM"
+    },
+    {
+     "value": "\u0000\u0000\u0001\u0000"
+    },
+    {
+     "value": "wOFF"
+    },
+    {
+     "value": "wOF2"
+    },
+    {
+     "value": "ID3"
+    },
+    {
+     "value": "%PDF"
+    },
+    {
+     "value": "II*\u0000"
+    },
+    {
+     "value": "MM\u0000*"
+    },
+    {
+     "value": "\u001aE\u00df\u00a3"
+    },
+    {
+     "value": "ftyp"
+    },
+    {
+     "value": "\u00ffO\u00ffQ"
+    },
+    {
+     "value": "\u0000\u0000\u0000\fjP  "
+    },
+    {
+     "value": "8BPS"
+    },
+    {
+     "value": "icns"
+    },
+    {
+     "value": "DDS "
+    },
+    {
+     "value": "OTTO"
+    },
+    {
+     "value": "ttcf"
+    },
+    {
+     "value": "%!PS"
+    },
+    {
+     "value": "\u00c5\u00d0\u00d3\u00c6"
+    },
+    {
+     "value": "gimp xcf"
+    },
+    {
+     "value": "\u0001\u00da"
+    },
+    {
+     "value": "Y\u00a6j\u0095"
+    },
+    {
+     "value": "SIMPLE  ="
+    },
+    {
+     "value": "qoif"
+    },
+    {
+     "value": "#?RADIANCE"
+    },
+    {
+     "value": "fLaC"
+    },
+    {
+     "value": "\u0000\u0000\u0002\u0000"
+    }
+   ]
+  },
   "CAP_PER_RULE": {
    "value": 200
   },
@@ -284,6 +384,9 @@
     }
    }
   },
+  "DISGUISE_SAMPLE_BYTES": {
+   "value": 2048
+  },
   "ELLIPSIS": {
    "value": "\u2026"
   },
@@ -303,6 +406,90 @@
   },
   "EXCERPT_WIDTH": {
    "value": 100
+  },
+  "EXEC_MAGIC": {
+   "list": [
+    {
+     "list": [
+      {
+       "value": "\u007fELF"
+      },
+      {
+       "value": "ELF binary (Linux/Unix executable or shared object)"
+      }
+     ]
+    },
+    {
+     "list": [
+      {
+       "value": "\u00fe\u00ed\u00fa\u00ce"
+      },
+      {
+       "value": "Mach-O binary (macOS)"
+      }
+     ]
+    },
+    {
+     "list": [
+      {
+       "value": "\u00fe\u00ed\u00fa\u00cf"
+      },
+      {
+       "value": "Mach-O 64-bit binary (macOS)"
+      }
+     ]
+    },
+    {
+     "list": [
+      {
+       "value": "\u00ce\u00fa\u00ed\u00fe"
+      },
+      {
+       "value": "Mach-O binary (macOS)"
+      }
+     ]
+    },
+    {
+     "list": [
+      {
+       "value": "\u00cf\u00fa\u00ed\u00fe"
+      },
+      {
+       "value": "Mach-O 64-bit binary (macOS)"
+      }
+     ]
+    },
+    {
+     "list": [
+      {
+       "value": "\u00ca\u00fe\u00ba\u00be"
+      },
+      {
+       "value": "Mach-O universal binary or Java .class"
+      }
+     ]
+    },
+    {
+     "list": [
+      {
+       "value": "\u0000asm"
+      },
+      {
+       "value": "WebAssembly module"
+      }
+     ]
+    },
+    {
+     "list": [
+      {
+       "value": "dex\n"
+      },
+      {
+       "value": "Android DEX bytecode"
+      }
+     ]
+    }
+   ]
   },
   "EXIT_GATE": {
    "value": 1
@@ -470,6 +657,70 @@
     },
     {
      "value": ".m2ts"
+    }
+   ]
+  },
+  "NESTED_ARCHIVE_MAGIC": {
+   "list": [
+    {
+     "list": [
+      {
+       "value": "PK\u0003\u0004"
+      },
+      {
+       "value": "zip"
+      }
+     ]
+    },
+    {
+     "list": [
+      {
+       "value": "\u001f\u008b"
+      },
+      {
+       "value": "gzip"
+      }
+     ]
+    },
+    {
+     "list": [
+      {
+       "value": "BZh"
+      },
+      {
+       "value": "bzip2"
+      }
+     ]
+    },
+    {
+     "list": [
+      {
+       "value": "\u00fd7zXZ\u0000"
+      },
+      {
+       "value": "xz"
+      }
+     ]
+    },
+    {
+     "list": [
+      {
+       "value": "7z\u00bc\u00af'\u001c"
+      },
+      {
+       "value": "7-zip"
+      }
+     ]
+    },
+    {
+     "list": [
+      {
+       "value": "Rar!"
+      },
+      {
+       "value": "rar"
+      }
+     ]
     }
    ]
   },
@@ -4868,6 +5119,190 @@
   },
   "_BIDI_CONTROLS": {
    "value": "\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069"
+  },
+  "_BINARY_WHERE": {
+   "map": {
+    "npm": {
+     "value": "an npm package"
+    },
+    "repo": {
+     "value": "the source tree"
+    },
+    "sdist": {
+     "value": "a source distribution"
+    }
+   }
+  },
+  "_BINARY_WHERE_ELSE": {
+   "value": "the package"
+  },
+  "_BIN_DISGUISED_RULE": {
+   "map": {
+    "fix": {
+     "value": "Treat the package or tree that ships it as compromised: find what loads or runs the file, and remove it."
+    },
+    "id": {
+     "value": "SC-BINARY"
+    },
+    "msg": {
+     "value": "{base} is not source code but a program: {desc}."
+    },
+    "name": {
+     "value": "Binary artifact in package"
+    },
+    "ref": {
+     "value": "CWE-506 \u00b7 Supply chain"
+    },
+    "sev": {
+     "value": "CRITICAL"
+    },
+    "type": {
+     "value": "HOTSPOT"
+    },
+    "why": {
+     "value": "A source file is read, reviewed and diffed as text; a program under a source file's name hides from that review and from every rule that reads code. No build ships one: compiled code goes in files named for what they are (.so, .pyd, .node, .exe)."
+    }
+   }
+  },
+  "_BIN_NESTED_RULE": {
+   "map": {
+    "fix": {
+     "value": "Extract and inspect the archive's contents."
+    },
+    "id": {
+     "value": "SC-NESTED-ARCHIVE"
+    },
+    "msg": {
+     "value": "Embedded {kind} archive inside the package."
+    },
+    "name": {
+     "value": "Nested archive in package"
+    },
+    "ref": {
+     "value": "CWE-506 \u00b7 Supply chain"
+    },
+    "sev": {
+     "value": "MINOR"
+    },
+    "type": {
+     "value": "HOTSPOT"
+    },
+    "why": {
+     "value": "Nested archives can conceal second-stage payloads from source review (a known supply-chain evasion technique)."
+    }
+   }
+  },
+  "_BIN_OPAQUE_RULE": {
+   "map": {
+    "fix": {
+     "value": "Identify what this file is and why it ships; reject unexplained binary blobs."
+    },
+    "id": {
+     "value": "SC-OPAQUE-BLOB"
+    },
+    "msg": {
+     "value": "Opaque high-entropy file ({size} bytes, entropy {entropy}/8)."
+    },
+    "name": {
+     "value": "High-entropy binary blob"
+    },
+    "ref": {
+     "value": "CWE-506 \u00b7 Supply chain"
+    },
+    "sev": {
+     "value": "MAJOR"
+    },
+    "type": {
+     "value": "HOTSPOT"
+    },
+    "why": {
+     "value": "Encrypted or packed data shipped in a package can be a second-stage payload that is decoded and executed at runtime."
+    }
+   }
+  },
+  "_BIN_RULE": {
+   "map": {
+    "fix": {
+     "value": "Confirm the binary's provenance; build from source instead of trusting a prebuilt blob."
+    },
+    "id": {
+     "value": "SC-BINARY"
+    },
+    "msg": {
+     "value": "Executable/compiled binary in {where}: {desc}."
+    },
+    "name": {
+     "value": "Binary artifact in package"
+    },
+    "ref": {
+     "value": "CWE-506 \u00b7 Supply chain"
+    },
+    "sev": {
+     "value": "MAJOR"
+    },
+    "type": {
+     "value": "HOTSPOT"
+    },
+    "why": {
+     "value": "Prebuilt binaries can't be reviewed as source, and smuggled binaries are a known compromise vector. Many legitimate packages ship some (Windows launcher stubs, test fixtures), so on its own this is a capability to review, not evidence of malice."
+    }
+   }
+  },
+  "_BIN_TAR_RULE": {
+   "map": {
+    "fix": {
+     "value": "Extract and inspect the archive's contents."
+    },
+    "id": {
+     "value": "SC-NESTED-ARCHIVE"
+    },
+    "msg": {
+     "value": "Embedded tar archive inside the package."
+    },
+    "name": {
+     "value": "Nested archive in package"
+    },
+    "ref": {
+     "value": "CWE-506 \u00b7 Supply chain"
+    },
+    "sev": {
+     "value": "MINOR"
+    },
+    "type": {
+     "value": "HOTSPOT"
+    },
+    "why": {
+     "value": "Nested archives can conceal second-stage payloads from source review."
+    }
+   }
+  },
+  "_BIN_WHEEL_RULE": {
+   "map": {
+    "fix": {
+     "value": "Cross-check against the upstream build; prefer building from source in sensitive contexts."
+    },
+    "id": {
+     "value": "SC-BINARY"
+    },
+    "msg": {
+     "value": "Bundled binary: {desc}."
+    },
+    "name": {
+     "value": "Binary artifact in package"
+    },
+    "ref": {
+     "value": "CWE-506 \u00b7 Supply chain"
+    },
+    "sev": {
+     "value": "INFO"
+    },
+    "type": {
+     "value": "HOTSPOT"
+    },
+    "why": {
+     "value": "Wheels legitimately ship compiled extensions. Listed for inventory; verify it matches the project's published, reproducible build."
+    }
+   }
   },
   "_BRACKET_DELTA": {
    "map": {
@@ -10727,6 +11162,19 @@
    "flags": "",
    "re": "^(\\s*)(?:async\\s+)?def\\s+(\\w+)"
   },
+  "_FONT_MAGIC": {
+   "list": [
+    {
+     "value": "\u0000\u0001\u0000\u0000"
+    },
+    {
+     "value": "true"
+    },
+    {
+     "value": "typ1"
+    }
+   ]
+  },
   "_FOR_NAME_RE": {
    "flags": "",
    "re": "[A-Za-z_]\\w*"
@@ -13066,6 +13514,9 @@
   "_LOOKALIKE_WHY": {
    "value": "A name written with letters from another alphabet that look like Latin ones, or with an invisible character inside it, is not the name a reviewer reads: `const eval = eval` with a Cyrillic e (U+0435) makes a second eval that runs where no one sees eval called, and an isAdmin with a Cyrillic i is not isAdmin (CVE-2021-42694, the homoglyph half of Trojan Source)."
   },
+  "_LOOKS_SAMPLE": {
+   "value": 2048
+  },
   "_MANIFEST_WRITE_RE": {
    "flags": "",
    "re": "\\b(?:writeFileSync|writeFile|outputJsonSync|outputJson|writeJsonSync|writeJson|outputFileSync|outputFile|write_text|dump)\\s*\\("
@@ -13520,6 +13971,15 @@
   "_OFFSCREEN_WHY": {
    "value": "A long run of blanks pushes code past the right edge of editors, diffs and code review, while the interpreter runs it all the same: @react-native-aria/radio 0.2.14 hid its loader 731 columns right. No formatter puts code there."
   },
+  "_OPAQUE_ENTROPY": {
+   "value": 7.2
+  },
+  "_OPAQUE_MIN_SIZE": {
+   "value": 1024
+  },
+  "_OPAQUE_SAMPLE": {
+   "value": 8192
+  },
   "_PACKAGE_RULE_NAMES": {
    "map": {
     "SC-GO-GENERATE": {
@@ -13744,6 +14204,9 @@
   "_PERSIST_WRITE_SRC": {
    "value": "\\b(?:writeFileSync|writeFile|appendFileSync|appendFile|createWriteStream|outputFileSync|outputFile|outputJsonSync|outputJson|writeJsonSync|writeJson|copyFileSync|copyFile|cpSync|renameSync|symlinkSync|write_text|write_bytes|createOrUpdateFileContents)\\s*\\(|\\bjson\\.dump\\s*\\(|\\bshutil\\.(?:copy\\w*|move)\\s*\\(|\\bopen\\s*\\([^()\\n]{0,300}?[\"'][wax]b?\\+?[\"']"
   },
+  "_PE_DESC": {
+   "value": "Windows PE executable/DLL"
+  },
   "_PIPE_SCAN_RE": {
    "flags": "",
    "re": "\\|\\s*(?:sudo\\s+)?(?:[\\w.~-]*/)*(?:env\\s+)?(?:ba|z|da|k)?sh\\b|[\\n|;&]|\\b(?:curl|wget)\\b"
@@ -13964,6 +14427,9 @@
     }
    ]
   },
+  "_PTH_PAYLOAD_TAIL": {
+   "value": " and executes or decodes a payload."
+  },
   "_PTH_REASONS": {
    "list": [
     {
@@ -13976,6 +14442,34 @@
      "value": "starts another program"
     }
    ]
+  },
+  "_PTH_RULE": {
+   "map": {
+    "fix": {
+     "value": "Find out why the package ships executable .pth code; remove it if unexplained."
+    },
+    "id": {
+     "value": "SC-PTH-EXEC"
+    },
+    "msg": {
+     "value": ".pth line runs code at every Python start{tail}"
+    },
+    "name": {
+     "value": "Code in a .pth file"
+    },
+    "ref": {
+     "value": "CWE-506 \u00b7 Supply chain"
+    },
+    "sev": {
+     "value": "MAJOR"
+    },
+    "type": {
+     "value": "HOTSPOT"
+    },
+    "why": {
+     "value": "site.py executes .pth lines that start with 'import' whenever the interpreter starts, whether or not the package is imported \u2014 a persistence and execution vector that needs no install hook."
+    }
+   }
   },
   "_PTH_RUN_RE": {
    "flags": "",
@@ -14063,6 +14557,62 @@
   "_PX_USE_RE": {
    "flags": "",
    "re": "(?<![\\w$.])([A-Za-z_$][\\w$]*)\\s*\\[\\s*(?:'([^'\\\\\\n]*)'|\"([^\"\\\\\\n]*)\")\\s*\\]"
+  },
+  "_PYC_ORPHAN_RULE": {
+   "map": {
+    "fix": {
+     "value": "Delete the file, or restore the source it was compiled from and review it."
+    },
+    "id": {
+     "value": "SC-PYC-ORPHAN"
+    },
+    "msg": {
+     "value": "{path} has no matching source file."
+    },
+    "name": {
+     "value": "Bytecode without source"
+    },
+    "ref": {
+     "value": "CWE-506 \u00b7 Supply chain"
+    },
+    "sev": {
+     "value": "MAJOR"
+    },
+    "type": {
+     "value": "HOTSPOT"
+    },
+    "why": {
+     "value": "Bytecode without its source cannot be reviewed, and a .pyc can be run directly (python file.pyc) or loaded by a custom importer."
+    }
+   }
+  },
+  "_PYC_UNCHECKED_RULE": {
+   "map": {
+    "fix": {
+     "value": "Delete the __pycache__ directory, keep bytecode out of version control and rebuild from reviewed source."
+    },
+    "id": {
+     "value": "SC-PYC-UNCHECKED"
+    },
+    "msg": {
+     "value": "{path} is an unchecked-hash .pyc (PEP 552): Python imports it without checking the source."
+    },
+    "name": {
+     "value": "Unchecked-hash bytecode"
+    },
+    "ref": {
+     "value": "CWE-506 \u00b7 Supply chain"
+    },
+    "sev": {
+     "value": "CRITICAL"
+    },
+    "type": {
+     "value": "HOTSPOT"
+    },
+    "why": {
+     "value": "An unchecked-hash .pyc is loaded on import even when the .py next to it says something else, so code that was never reviewed runs while the reviewed source looks benign."
+    }
+   }
   },
   "_PYTHON_NAME_RE": {
    "flags": "i",

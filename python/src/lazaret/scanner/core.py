@@ -1582,62 +1582,23 @@ def is_suppressed(issue, lines, lang=None, dep=False):
 # Wheels legitimately ship compiled extensions, so presence there is inventory,
 # not alarm. Detection is by content (magic bytes), not just file extension.
 
-EXEC_MAGIC = [
-    (b"\x7fELF", "ELF binary (Linux/Unix executable or shared object)"),
-    (b"\xfe\xed\xfa\xce", "Mach-O binary (macOS)"),
-    (b"\xfe\xed\xfa\xcf", "Mach-O 64-bit binary (macOS)"),
-    (b"\xce\xfa\xed\xfe", "Mach-O binary (macOS)"),
-    (b"\xcf\xfa\xed\xfe", "Mach-O 64-bit binary (macOS)"),
-    (b"\xca\xfe\xba\xbe", "Mach-O universal binary or Java .class"),
-    (b"\x00asm", "WebAssembly module"),
-    (b"dex\n", "Android DEX bytecode"),
-]
 COMPILED_EXTS = {".so", ".pyd", ".dll", ".dylib", ".node", ".a", ".lib", ".o",
                  ".obj", ".exe", ".pyc", ".pyo", ".class", ".wasm",
                  ".dex", ".jar", ".msi", ".dmg",
                  ".jsc"}              # V8 bytecode (bytenode): JavaScript no one can read
-# Recognized benign binary assets — data, not code. Not flagged.
-BENIGN_MAGIC = [b"\x89PNG", b"\xff\xd8\xff", b"GIF8", b"RIFF", b"OggS", b"BM",
-                b"\x00\x00\x01\x00", b"wOFF", b"wOF2", b"ID3", b"%PDF",
-                b"II*\x00", b"MM\x00*", b"\x1a\x45\xdf\xa3", b"ftyp",
-                # JPEG 2000 (codestream, JP2), Photoshop, Apple icons, DirectDraw,
-                # OpenType / TrueType collections, PostScript, GIMP, SGI, Sun raster,
-                # FITS, QOI, Radiance HDR, FLAC, cursors
-                b"\xff\x4f\xff\x51", b"\x00\x00\x00\x0cjP  ", b"8BPS", b"icns", b"DDS ",
-                b"OTTO", b"ttcf", b"%!PS", b"\xc5\xd0\xd3\xc6", b"gimp xcf", b"\x01\xda",
-                b"\x59\xa6\x6a\x95", b"SIMPLE  =", b"qoif", b"#?RADIANCE", b"fLaC",
-                b"\x00\x00\x02\x00"]
-# Formats identified by a signature that isn't at offset 0, or by extension
-# because their magic is too generic to trust alone.
-# Document and asset formats that are zip or gzip containers by design.
-CONTAINER_DOCUMENT_EXTS = {".docx", ".xlsx", ".pptx", ".odt", ".ods", ".odp", ".odg", ".epub",
-                           ".dia", ".svgz", ".ora", ".kmz", ".3mf", ".xmind", ".vsdx"}
-FONT_EXTS = {".ttf", ".otf", ".ttc", ".woff", ".woff2", ".eot", ".pfb", ".pcf", ".bdf"}
 #: MPEG transport stream video (a camera's AVCHD .mts): the extensions it shares
 #: with TypeScript (.ts, .mts), and Blu-ray's .m2ts
 MPEG_TS_EXTS = (".ts", ".mts", ".m2ts")
 
 
-def is_benign_media(header, ext):
-    if any(header.startswith(sig) for sig in BENIGN_MAGIC) or b"ftyp" in header[:16]:
-        return True
-    if header[36:40] == b"acsp":                       # ICC color profile
-        return True
-    if ext in MPEG_TS_EXTS and _mpeg_ts(header):        # video
-        return True
-    return ext in FONT_EXTS and header[:4] in (b"\x00\x01\x00\x00", b"true", b"typ1")
-NESTED_ARCHIVE_MAGIC = [(b"PK\x03\x04", "zip"), (b"\x1f\x8b", "gzip"),
-                        (b"BZh", "bzip2"), (b"\xfd7zXZ\x00", "xz"),
-                        (b"7z\xbc\xaf\x27\x1c", "7-zip"), (b"Rar!", "rar")]
+#: The engine reads a path's folders as os.path does here: "\\" separates them on Windows (binary.rs)
+_WINDOWS_PATHS = os.sep == "\\"
 
-def byte_entropy(data):
-    if not data:
-        return 0.0
-    freq = [0] * 256
-    for b in data:
-        freq[b] += 1
-    n = len(data)
-    return -sum((c / n) * math.log2(c / n) for c in freq if c)
+
+def _bytes_text(data):
+    """`data` as the engine reads a file's bytes: latin-1 text, a character per byte."""
+    return bytes(data or b"").decode("latin-1")
+
 
 # Characters that cannot occur in text: bytes of invalid UTF-8 sequences
 # (decoded with surrogateescape to U+DC80..U+DCFF) and C0 controls other than
@@ -1657,19 +1618,17 @@ def looks_binary(sample):
     NUL inside a comment does not turn a source file into a "binary" that is
     never scanned. Callers must not use this to decide whether a file with a
     source extension or a manifest name gets scanned: those are always
-    scanned as text (see decode_source)."""
+    scanned as text (see decode_source). The engine's (BR-7 step 3 d:
+    binary.rs)."""
     if not sample:
         return False
-    sample = bytes(sample)
-    text = sample.decode("utf-8", "surrogateescape")
-    bad = len(_NON_TEXT_CHARS_RE.findall(text))
-    return bad / len(sample) > _NON_TEXT_SHARE
+    return _native.call("binary_check", {"check": "looks"}, _bytes_text(sample))
 
 
 def _mpeg_ts(header):
     """MPEG transport stream (.ts / .mts video): sync byte every 188 bytes.
-    Shares the .ts and .mts extensions with TypeScript."""
-    return len(header) >= 377 and header[0] == header[188] == header[376] == 0x47
+    Shares the .ts and .mts extensions with TypeScript (binary.rs)."""
+    return _native.call("binary_check", {"check": "mpeg_ts"}, _bytes_text(bytes(header[:377])))
 
 
 # ---------------- Source decoding for archive members (registry, MCP) ----------------
@@ -1719,81 +1678,23 @@ def decode_member(path, data, lang=None):
     return text, extra
 
 def classify_binary(path, data, size, context):
-    """Return a supply-chain issue dict for a suspicious non-source file, or None.
+    """Return a supply-chain issue dict for a suspicious non-source file, or None:
+    SC-BINARY for an executable or a compiled artifact (by its magic bytes, or
+    its extension: inventory in a wheel, a capability to review elsewhere),
+    SC-NESTED-ARCHIVE for an archive inside the package, SC-OPAQUE-BLOB for a
+    high-entropy binary blob; nothing for an image, font, media or document
+    file. The engine's (BR-7 step 3 d: binary.rs).
 
     context: 'sdist' | 'npm' | 'wheel' | 'repo'
-    data:    leading bytes of the file (>= a few KB is ideal for entropy)
+    data:    leading bytes of the file (>= a few KB is ideal for entropy; the
+             first 8,192 are read)
     size:    full file size in bytes
     """
-    header = data[:512]
-    ext = os.path.splitext(path)[1].lower()
-
-    def issue(rid, name, sev, msg, why, fix):
-        return {"rule": rid, "name": name, "type": "HOTSPOT", "sev": sev, "msg": msg,
-                "why": why, "fix": fix, "ref": "CWE-506 · Supply chain",
-                "file": path, "line": 1, "snippet": [], "snipStart": 1}
-
-    is_bin = looks_binary(data[:2048])
-    # 1) executable / compiled artifact (by magic, or extension as fallback)
-    desc = next((d for sig, d in EXEC_MAGIC if header.startswith(sig)), None)
-    if desc is None and is_bin and header.startswith(b"MZ"):
-        desc = "Windows PE executable/DLL"
-    if desc is None and ext in COMPILED_EXTS:
-        desc = f"compiled artifact ({ext})"
-    if desc:
-        if context == "wheel":
-            return issue("SC-BINARY", "Binary artifact in package", "INFO",
-                f"Bundled binary: {desc}.",
-                "Wheels legitimately ship compiled extensions. Listed for inventory; "
-                "verify it matches the project's published, reproducible build.",
-                "Cross-check against the upstream build; prefer building from source in sensitive contexts.")
-        where = {"sdist": "a source distribution", "npm": "an npm package",
-                 "repo": "the source tree"}.get(context, "the package")
-        return issue("SC-BINARY", "Binary artifact in package", "MAJOR",
-            f"Executable/compiled binary in {where}: {desc}.",
-            "Prebuilt binaries can't be reviewed as source, and smuggled binaries are a "
-            "known compromise vector. Many legitimate packages ship some (Windows "
-            "launcher stubs, test fixtures), so on its own this is a capability to "
-            "review, not evidence of malice.",
-            "Confirm the binary's provenance; build from source instead of trusting a prebuilt blob.")
-    # 2) nested archive — a known way to hide a second-stage payload from review
-    #    (document formats that are zip/gzip containers by design are data)
-    if ext in CONTAINER_DOCUMENT_EXTS:
-        return None
-    if header[257:262] == b"ustar":
-        return issue("SC-NESTED-ARCHIVE", "Nested archive in package", "MINOR",
-            "Embedded tar archive inside the package.",
-            "Nested archives can conceal second-stage payloads from source review.",
-            "Extract and inspect the archive's contents.")
-    for sig, kind in NESTED_ARCHIVE_MAGIC:
-        if header.startswith(sig):
-            if context == "wheel" and kind == "zip":
-                break
-            return issue("SC-NESTED-ARCHIVE", "Nested archive in package", "MINOR",
-                f"Embedded {kind} archive inside the package.",
-                "Nested archives can conceal second-stage payloads from source review "
-                "(a known supply-chain evasion technique).",
-                "Extract and inspect the archive's contents.")
-    # 3) recognized benign asset (image/font/media/pdf) -> ignore
-    if is_benign_media(header, ext):
-        return None
-    # 4) opaque high-entropy blob -> possible packed/encrypted payload
-    if is_bin and size >= 1024:
-        ent = byte_entropy(data[:8192])
-        if ent > 7.2:
-            return issue("SC-OPAQUE-BLOB", "High-entropy binary blob", "MAJOR",
-                f"Opaque high-entropy file ({size} bytes, entropy {ent:.1f}/8).",
-                "Encrypted or packed data shipped in a package can be a second-stage "
-                "payload that is decoded and executed at runtime.",
-                "Identify what this file is and why it ships; reject unexplained binary blobs.")
-    return None
+    got = _native.call("binary_classify", {"path": path, "size": size, "context": context, "windows": _WINDOWS_PATHS,
+                                           "neumaier": False}, _bytes_text(bytes(data[:8192])))
+    return None if got is None else engine._issues(path, [got])[0]
 
 
-_DISGUISED_WHY = ("A source file is read, reviewed and diffed as text; a program under a source file's "
-                  "name hides from that review and from every rule that reads code. No build ships one: "
-                  "compiled code goes in files named for what they are (.so, .pyd, .node, .exe).")
-_DISGUISED_FIX = ("Treat the package or tree that ships it as compromised: find what loads or runs the "
-                  "file, and remove it.")
 #: The leading bytes disguised_binary reads: an oversized source file's prefix
 #: is read this far (the header test reads the first 512).
 DISGUISE_SAMPLE_BYTES = 2048
@@ -1806,19 +1707,11 @@ def disguised_binary(path, data):
     directory scan (`--deps` too) or one an MCP client names. Unlike a
     binary named for what it is (classify_binary: inventory in a wheel, a
     capability to review elsewhere) it is a disguise, in a wheel too:
-    num2words 0.5.15's `_build.py` is a Windows executable. Else None.
-    Twin: js/src/lib/binary.js disguisedBinary."""
-    data = bytes(data or b"")
-    header = data[:512]
-    desc = next((d for sig, d in EXEC_MAGIC if header.startswith(sig)), None)
-    if desc is None and header.startswith(b"MZ"):
-        desc = "Windows PE executable/DLL"
-    if desc is None or not looks_binary(data[:DISGUISE_SAMPLE_BYTES]):
-        return None
-    return {"rule": "SC-BINARY", "name": "Binary artifact in package", "type": "HOTSPOT", "sev": "CRITICAL",
-            "msg": f"{os.path.basename(path)} is not source code but a program: {desc}.",
-            "why": _DISGUISED_WHY, "fix": _DISGUISED_FIX, "ref": "CWE-506 · Supply chain",
-            "file": path, "line": 1, "snippet": [], "snipStart": 1}
+    num2words 0.5.15's `_build.py` is a Windows executable. Else None. The
+    engine's (BR-7 step 3 d: binary.rs)."""
+    got = _native.call("binary_disguised", {"path": path, "windows": _WINDOWS_PATHS},
+                       _bytes_text(bytes(data or b"")[:DISGUISE_SAMPLE_BYTES]))
+    return None if got is None else engine._issues(path, [got])[0]
 
 
 # ---------------- Truncation accounting (verdict integrity, audit C2/G16) ----------------
@@ -3143,12 +3036,6 @@ def scan_error_issue(path, exc):
     return issue
 
 
-def _pyc_issue(rid, name, sev, path, msg, why, fix):
-    return {"rule": rid, "name": name, "type": "HOTSPOT", "sev": sev, "msg": msg,
-            "why": why, "fix": fix, "ref": "CWE-506 · Supply chain",
-            "file": path, "line": 1, "snippet": [], "snipStart": 1}
-
-
 # ---------------- .pth files (SC-PTH-EXEC) ----------------
 # site.py executes every line of a .pth file in site-packages that starts
 # with 'import' at EVERY interpreter start. The registry has checked archive
@@ -3162,11 +3049,6 @@ _PTH_EXEC_RE = re.compile(
     r"|\.decode\s*\(|\bmarshal\.loads\b|\bzlib\.decompress\b|\bcodecs\.decode\b|\\x[0-9a-fA-F]{2}")
 
 
-_PTH_IMPORT = ("import ", "import\t")
-# the engine's reason for a line _PTH_EXEC_RE matches
-_PTH_PAYLOAD = "executes or decodes a payload"
-
-
 def pth_issues(path, text):
     """SC-PTH-EXEC: site.py executes every line of a .pth file in
     site-packages that starts with 'import' at EVERY interpreter start — no
@@ -3176,8 +3058,8 @@ def pth_issues(path, text):
     literal as the literal's code: coverage's a1_coverage.pth); MAJOR
     otherwise (setuptools' distutils shim and namespace .pth files are this
     shape: listed for review). The registry's check (lazaret.registry.repo)
-    and the project walk share this one helper's semantics; the npm engine's
-    twin is js/src/lib/pth.js.
+    and the project walk share it; the engine reads the file (BR-7 step 3 d:
+    binary.rs), for the npm package's walk too.
 
     Lines are taken both ways site.py splits them: at \\n, \\r and \\r\\n
     (iterating the file: 3.10, 3.11, early 3.12 releases), and with
@@ -3186,57 +3068,16 @@ def pth_issues(path, text):
     notes\\fimport sys; …` gave no finding while python3.13 ran its import.
     A finding is reported at the physical (\\n) line holding the statement,
     once per line."""
-    out, lines = [], normalize_newlines(text).split("\n")
-    for i, line in enumerate(lines):
-        if not (line.startswith(_PTH_IMPORT)
-                or any(part.startswith(_PTH_IMPORT) for part in line.splitlines())):
-            continue
-        try:
-            reasons = _ask("pth_line_risk", line)
-        except _native.NativeError:
-            reasons = [_PTH_PAYLOAD]        # (no answer: judged as the worst)
-        if not reasons:
-            tail = "."
-        elif _PTH_PAYLOAD in reasons:
-            tail = " and executes or decodes a payload."
-        else:
-            tail = ", and it " + "; and ".join(reasons) + "."
-        out.append(mk_issue(
-            {"id": "SC-PTH-EXEC", "name": "Code in a .pth file", "type": "HOTSPOT",
-             "sev": "CRITICAL" if reasons else "MAJOR",
-             "msg": ".pth line runs code at every Python start" + tail,
-             "why": ("site.py executes .pth lines that start with 'import' whenever the "
-                     "interpreter starts, whether or not the package is imported — a "
-                     "persistence and execution vector that needs no install hook."),
-             "fix": "Find out why the package ships executable .pth code; remove it if unexplained.",
-             "ref": "CWE-506 · Supply chain"}, path, i + 1, lines))
-    return out
+    return engine._issues(path, _native.call("pth_issues", {"redact": bool(REDACT_SECRETS), "neumaier": False}, text))
 
 
 def pyc_issues(path, header, has_source):
     """SC-PYC-UNCHECKED / SC-PYC-ORPHAN for one .pyc in a __pycache__ dir.
     `header` is at least the first 8 bytes; `has_source` whether the
-    matching <module>.py sits next to the __pycache__ directory."""
-    out = []
-    if (len(header) >= 8 and header[2:4] == b"\r\n"
-            and int.from_bytes(header[4:8], "little") == 0b01):
-        out.append(_pyc_issue(
-            "SC-PYC-UNCHECKED", "Unchecked-hash bytecode", "CRITICAL", path,
-            f"{path} is an unchecked-hash .pyc (PEP 552): Python imports it without "
-            "checking the source.",
-            "An unchecked-hash .pyc is loaded on import even when the .py next to it says "
-            "something else, so code that was never reviewed runs while the reviewed "
-            "source looks benign.",
-            "Delete the __pycache__ directory, keep bytecode out of version control and "
-            "rebuild from reviewed source."))
-    if not has_source:
-        out.append(_pyc_issue(
-            "SC-PYC-ORPHAN", "Bytecode without source", "MAJOR", path,
-            f"{path} has no matching source file.",
-            "Bytecode without its source cannot be reviewed, and a .pyc can be run "
-            "directly (python file.pyc) or loaded by a custom importer.",
-            "Delete the file, or restore the source it was compiled from and review it."))
-    return out
+    matching <module>.py sits next to the __pycache__ directory. The
+    engine's (BR-7 step 3 d: binary.rs)."""
+    return engine._issues(path, _native.call("pyc_issues", {"path": path, "has_source": bool(has_source)},
+                                             _bytes_text(bytes(header[:16]))))
 
 
 def detect_encoding(head):
@@ -3646,7 +3487,10 @@ def _collect_file(path, rel, st, in_dep, col):
         return
     if pth:                # only the .pth check runs on it (decoded as the registry does)
         col["pth"].append(disp)
-        issues.extend(pth_issues(disp, data.decode("utf-8-sig", "replace")))
+        try:
+            issues.extend(pth_issues(disp, data.decode("utf-8-sig", "replace")))
+        except _native.NativeError as exc:
+            issues.append(engine.error_issue(disp, exc))
         return
     if data[:4] in APPLE_DOUBLE_MAGIC:
         bi = classify_binary(disp, data[:HEADER_SAMPLE_BYTES], size, "repo")
