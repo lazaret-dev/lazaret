@@ -2293,10 +2293,11 @@ def mk_issue(rule_or_dict, path, line_no, lines, col=None, redactor=None):
     """Issue dict for rule `rule_or_dict` at 1-based `line_no` of `lines`.
     `col` (0-based character offset of the match on the flagged line, if
     known) centres the flagged line's snippet window on the match.
-    `redactor` (a _Redactor, or scan_gyp's _LineRedactor, over these same
-    `lines`) supplies the file's entropy literals and PEM blocks and caches
-    each redacted line for a producer of many findings in one file; by
-    default the active scan_file context does, when it is scanning `lines`."""
+    `redactor` (a _Redactor over these same `lines`) supplies the file's
+    entropy literals and PEM blocks and caches each redacted line for a
+    producer of many findings in one file; without one, the PEM blocks and
+    the line patterns are redacted (the engine makes a scanned file's
+    findings, with its own redaction: findings.rs)."""
     r = rule_or_dict
     start = max(0, line_no - 3)
     stop = min(len(lines), line_no + 2)
@@ -2726,9 +2727,12 @@ def json_error_where(exc):
     return f"line {lineno} column {colno}"
 
 
-def load_manifest(path, content, python_literal=False):
-    """Parse manifest-shaped, attacker-controlled text the way the package
-    manager does. -> (data, issues).
+def load_manifest(path, content):
+    """Parse a package.json, attacker-controlled text, the way npm does:
+    -> (data, issues). The data the registry's and --deps' decisions read
+    (json.loads' own); the findings a manifest gets are the engine's
+    (scan_manifest, scan_gyp: rust/crates/lazaret-engine/src/manifest/, which
+    reads it as this does, and a .gyp file as gyp does).
 
     A leading UTF-8 BOM is stripped first (npm does). data is None when the
     text cannot be parsed; issues then holds SC-MANIFEST-DEPTH for a document
@@ -2736,12 +2740,27 @@ def load_manifest(path, content, python_literal=False):
     result does not depend on the interpreter's recursion limit or on where
     a syntax error sits), or SC-MANIFEST-UNPARSEABLE when the manifest
     is at the root (a nested unreadable manifest is not a hook npm runs).
-    A top level that is not an object counts as unparseable too.
-    python_literal: also accept Python literal syntax (binding.gyp / .gypi:
-    gyp reads them as Python, so single quotes, comments and trailing commas
-    are normal there)."""
-    data, issues, _ = _load_manifest(path, content, python_literal)
-    return data, issues
+    A top level that is not an object counts as unparseable too."""
+    root = is_root_manifest(path)
+    if not isinstance(content, str):
+        return None, ([manifest_unparseable_issue(path, "not text")] if root else [])
+    text = content[1:] if content.startswith("\ufeff") else content
+    if json_depth_exceeds(text):
+        return None, [_sc_manifest_depth_issue(path)]
+    reason = None
+    try:
+        data = json.loads(text, parse_int=_json_int)
+    except RecursionError:              # backstop: a deep caller stack
+        return None, [_sc_manifest_depth_issue(path)]
+    except (ValueError, TypeError) as exc:
+        data = None
+        reason = (f"{type(exc).__name__}: {json_error_where(exc)}"
+                  if isinstance(exc, json.JSONDecodeError) else type(exc).__name__)
+    if not isinstance(data, dict):
+        if data is not None:
+            reason = f"top level is a {type(data).__name__}, not an object"
+        return None, ([manifest_unparseable_issue(path, reason or "unparseable")] if root else [])
+    return data, []
 
 
 def _json_loads_manifest(path, content):
@@ -2751,127 +2770,6 @@ def _json_loads_manifest(path, content):
     data, issues = load_manifest(path, content)
     depth = next((i for i in issues if i["rule"] == "SC-MANIFEST-DEPTH"), None)
     return data, depth
-
-
-def _load_manifest(path, content, python_literal=False, locate=None):
-    """load_manifest, plus -> where: with `locate` (a key), for every dict of
-    the result that holds that key, {id(d): (d, offset)} where offset is the
-    position in the BOM-stripped text of the key token the parser kept (the
-    last of equal keys). The parse itself is the same: json.loads (with an
-    object_pairs_hook building the same dicts) or ast.literal_eval of the
-    ast.parse tree."""
-    if not isinstance(content, str):
-        return None, ([manifest_unparseable_issue(path, "not text")]
-                      if is_root_manifest(path) else []), {}
-    text = content[1:] if content.startswith("\ufeff") else content
-    if json_depth_exceeds(text):
-        return None, [_sc_manifest_depth_issue(path)], {}
-    reason, where, built, hook = None, {}, [], None
-    if locate is not None:
-        def hook(pairs):
-            d = dict(pairs)
-            built.append((d, pairs))
-            return d
-    try:
-        data = json.loads(text, parse_int=_json_int, object_pairs_hook=hook)
-    except RecursionError:              # backstop: a deep caller stack
-        return None, [_sc_manifest_depth_issue(path)], {}
-    except (ValueError, TypeError) as exc:
-        data = None
-        reason = (f"{type(exc).__name__}: {json_error_where(exc)}"
-                  if isinstance(exc, json.JSONDecodeError) else type(exc).__name__)
-    if data is not None and locate is not None:
-        where = _json_key_offsets(text, built, locate)
-    if data is None and python_literal:
-        import ast
-        try:
-            src = text.strip()
-            tree = ast.parse(src, mode="eval")     # what ast.literal_eval(src) parses
-            data = ast.literal_eval(tree)
-            reason = None
-            if locate is not None:
-                where = _ast_key_offsets(tree, data, locate, src, len(text) - len(text.lstrip()))
-        except RecursionError:
-            return None, [_sc_manifest_depth_issue(path)], {}
-        except (ValueError, TypeError, SyntaxError, MemoryError, OverflowError) as exc:
-            data = None
-            reason = reason or type(exc).__name__
-    if not isinstance(data, dict):
-        if data is not None:
-            reason = f"top level is a {type(data).__name__}, not an object"
-        return None, ([manifest_unparseable_issue(path, reason or "unparseable")]
-                      if is_root_manifest(path) else []), {}
-    return data, [], where
-
-
-# (named apart from _script_key_lines's _JSON_TOKEN_RE, which shadowed it)
-_JSON_OBJ_TOKEN_RE = re.compile(r'"[^"\\]*(?:\\.[^"\\]*)*"|[{}]', re.S)
-_JSON_COLON_RE = re.compile(r"[ \t\n\r]*:")
-
-
-def _json_key_offsets(text, built, key):
-    """_load_manifest's `where` for a document json.loads parsed: its
-    object_pairs_hook saw every object (`built`: (dict, pairs)) in the order
-    the objects close, and in valid JSON the keys are exactly the strings
-    followed by ':'."""
-    objects, stack = [], []
-    for m in _JSON_OBJ_TOKEN_RE.finditer(text):
-        c = text[m.start()]
-        if c == "{":
-            stack.append([])
-        elif c == "}":
-            if not stack:
-                return {}
-            objects.append(stack.pop())
-        elif stack and _JSON_COLON_RE.match(text, m.end()):
-            stack[-1].append(m.start())
-    if len(objects) != len(built):
-        return {}                        # not reachable for text json.loads accepted
-    where = {}
-    for (d, pairs), offsets in zip(built, objects):
-        if len(offsets) != len(pairs):
-            return {}
-        last = None
-        for k, (name, _) in enumerate(pairs):
-            if name == key:
-                last = k
-        if last is not None:
-            where[id(d)] = (d, offsets[last])
-    return where
-
-
-_PY_NEWLINE_RE = re.compile(r"\r\n|\r|\n")
-
-
-def _ast_key_offsets(tree, data, key, src, base):
-    """_load_manifest's `where` for a document ast.literal_eval built from
-    `tree` (parsed from src, which starts at offset `base` of the text). The
-    tree is walked alongside the data; a dict keeps the first of equal keys
-    with the last value, so the key token wanted is the last equal one. ast
-    positions are (line, UTF-8 byte column) with \\r\\n, \\r and \\n all
-    ending a line."""
-    import ast
-    starts = [0] + [m.end() for m in _PY_NEWLINE_RE.finditer(src)]
-
-    def offset(node):
-        a = starts[node.lineno - 1]
-        head = src[a:a + node.col_offset].encode("utf-8", "surrogatepass")[:node.col_offset]
-        return base + a + len(head.decode("utf-8", "surrogatepass"))
-
-    where, stack = {}, [(tree.body, data)]
-    while stack:
-        node, value = stack.pop()
-        if isinstance(node, ast.Dict) and isinstance(value, dict):
-            last = {}
-            for k, v in zip(node.keys, node.values):
-                last[ast.literal_eval(k)] = (k, v)
-            for name, (k, v) in last.items():
-                if isinstance(name, str) and name == key:
-                    where[id(value)] = (value, offset(k))
-                stack.append((v, value[name]))
-        elif isinstance(node, (ast.List, ast.Tuple)) and isinstance(value, (list, tuple)):
-            stack.extend(zip(node.elts, value))
-    return where
 
 
 # Following a hook is bounded (review: a 16 MB hook of `cd a;` took hours, one
@@ -3091,48 +2989,12 @@ def script_source_lang(head):
     return lang if lang in ("js", "py") else None
 
 
-_JSON_TOKEN_RE = re.compile(r'"(?:[^"\\]|\\.)*"|[{}\[\],:]')
-
-
 def _script_key_lines(text, section="scripts"):
     """{key: 1-based line of the key} for the keys of the top-level object
-    `section` ("scripts", "dependencies", …: D-14) of `text`, a
-    JSON document that parsed. Keys are compared decoded
-    (`"post\\u0069nstall"` too), and a repeated key or section counts where
-    it last appears, as the parser keeps the last one. Twin of the locator
-    in the npm engine's scanManifest."""
-    found, depth, containers = {}, 0, []
-    top_key, in_scripts, expect_key = None, False, False
-    line, pos = 1, 0
-    for m in _JSON_TOKEN_RE.finditer(text):
-        tok = m.group()
-        if tok[0] == '"':
-            if expect_key and (depth == 1 or (depth == 2 and in_scripts)):
-                key = json.loads(tok)
-                if depth == 1:
-                    top_key = key
-                    if key == section:
-                        found = {}                  # a later section of the name replaces an earlier one
-                else:
-                    line += text.count("\n", pos, m.start())
-                    pos = m.start()
-                    found[key] = line
-            expect_key = False
-        elif tok in "{[":
-            if depth == 1 and tok == "{":
-                in_scripts = top_key == section     # at depth 1, "{" is the value of top_key
-            containers.append(tok)
-            depth += 1
-            expect_key = tok == "{"
-        elif tok in "}]":
-            containers.pop()
-            depth -= 1
-            if depth < 2:
-                in_scripts = False
-            expect_key = False
-        elif tok == ",":
-            expect_key = containers[-1] == "{"
-    return found
+    `section` ("scripts", "dependencies", …) of a JSON document that parsed,
+    as scan_manifest places its findings (the engine's: manifest::key_lines;
+    for the tests)."""
+    return _native.call("manifest_check", {"check": "key_lines", "section": section}, text)
 
 
 def is_dependency_manifest(path):
@@ -3144,15 +3006,17 @@ def is_dependency_manifest(path):
 
 
 def scan_manifest(path, content, registry=False, hooks=None):
-    """Check package.json / pyproject.toml install hooks — the primary
-    supply-chain attack vector.
+    """Check package.json install hooks — the primary supply-chain attack
+    vector — and its dependencies from an insecure source. The engine's
+    (BR-7 step 3 b: rust/crates/lazaret-engine/src/manifest/, the
+    `scan_manifest` call).
 
     G11: mere *presence* of a lifecycle script is flagged (MAJOR); a hook whose
     command does what malicious hooks do, read as a program
     (hook_command_risk, 0.1.8), escalates to CRITICAL. The command's download
     and evaluation tools (INSTALL_HOOK_RE) are only a hint in the MAJOR
-    finding's message: tokens a binary installer shares. Also covers setup.py
-    and binding.gyp via scan_file()/scan_gyp() (see collect_files).
+    finding's message: tokens a binary installer shares. Each finding's
+    `cmd` is the command, which the registry and --deps follow.
 
     Shared semantics 3: a leading BOM is stripped before parsing; an
     unparseable ROOT manifest is SC-MANIFEST-UNPARSEABLE (MAJOR). registry /
@@ -3162,408 +3026,69 @@ def scan_manifest(path, content, registry=False, hooks=None):
     project's own build step, e.g. `husky install`), while a hostile one
     stays CRITICAL. `hooks`: the scripts that run, when they are not npm's
     (a VS Code extension's vscode:uninstall, 0.1.9, E-1; none for a
-    package.json the tool that installs it never reads for scripts)."""
-    data, issues = load_manifest(path, content)
-    if data is None:
-        return issues
-    body = content[1:] if content.startswith("\ufeff") else content
-    lines = body.split("\n")
-    scripts = data.get("scripts")
-    if isinstance(scripts, dict):
-        key_lines = None
-        for hook in (hooks if hooks is not None else NPM_INSTALL_SCRIPTS if registry else NPM_LOCAL_INSTALL_SCRIPTS):
-            cmd = scripts.get(hook)
-            if not isinstance(cmd, str) or not cmd.strip():
-                continue
-            reasons = hook_command_risk(cmd)
-            hint = not reasons and _hook_is_suspicious(cmd)
-            sev = "INFO" if (not registry and hook in NPM_PREPARE_SCRIPTS
-                             and not reasons and not hint) else None
-            # the hook's key inside "scripts", not the first line naming it
-            # (review: a dependency called "install" took the finding)
-            if key_lines is None:
-                key_lines = _script_key_lines(body)
-            line_no = key_lines.get(hook) or next(
-                (i + 1 for i, l in enumerate(lines) if f'"{hook}"' in l), 1)
-            issues.append(_sc_install_hook_issue(path, line_no, lines, hook, cmd,
-                                                 reasons, sev=sev, hint=hint))
-    issues.extend(dependency_url_issues(path, data, body, lines, registry, hooks))      # (D-14)
-    return issues
+    package.json the tool that installs it never reads for scripts).
 
-
-NPM_DEP_FIELDS = ("dependencies", "optionalDependencies", "peerDependencies")
-NPM_LOCAL_DEP_FIELDS = NPM_DEP_FIELDS + ("devDependencies",)
-# ---------------- Dependencies from an insecure source (SC-DEP-URL, D-14) ----------------
-# npm installs a dependency from wherever its spec says: a tarball URL, a git URL. One given as a plain-http URL
-# (http:, git+http:) is fetched with no integrity, so anyone on the path can swap it, and one at a raw IP address
-# names no registry and no domain: five of the benchmark's in-sample releases did this (D-1's reading), and no
-# release of the popular npm set does (scripts/popular/releases.jsonl's 801, measured Oct 14). A package installed
-# from a registry is read for the fields npm installs from (NPM_DEP_FIELDS), a project's own manifest for its
-# devDependencies too; only a package's root manifest counts in a registry or --deps scan, since npm installs
-# from no other. A host is an IP address when it is bracketed (IPv6) or its last label is a number: the URL
-# standard reads `http://3405803783/` and `http://0xcb.0.113.7/` as IPv4 addresses. MAJOR (WARN in the registry).
-# PyPI refuses an upload whose metadata names a direct URL, so this reads npm's manifests only. Twin of the npm
-# engine's supplychain.js (dependencyUrlIssues). NPM_DEP_FIELDS and NPM_LOCAL_DEP_FIELDS (above): the fields read.
-_DEP_URL_RE = re.compile(r"\s*(?P<scheme>[A-Za-z][A-Za-z0-9+.\-]*)://(?:[^@/?#\s]*@)?(?P<host>\[[^\]/?#\s]*\]|[^:/?#\s]*)")
-_IP_LABEL_RE = re.compile(r"[0-9]+|0[xX][0-9a-fA-F]*")
-_DEP_URL_WHY = (
-    "npm installs a dependency from wherever its spec says. Over plain http it is fetched with no integrity "
-    "check, so anyone on the network path can replace it; at a raw IP address it comes from no registry and no "
-    "domain anyone can vet. Packages from a registry name versions, and git dependencies use https or ssh.")
+    SC-DEP-URL (D-14): npm installs a dependency from wherever its spec says.
+    One given as a plain-http URL (http:, git+http:) is fetched with no
+    integrity, and one at a raw IP address names no registry and no domain
+    (five of the benchmark's in-sample releases; none of the popular npm
+    set's 801). A package installed from a registry is read for the fields npm
+    installs from, a project's own manifest for its devDependencies too; only
+    a package's root manifest counts in a registry or --deps scan, and none
+    whose `hooks` are not npm's. MAJOR (WARN in the registry)."""
+    if not isinstance(content, str):
+        return load_manifest(path, content)[1]
+    args = engine._budget({"path": path, "registry": bool(registry), "redact": bool(REDACT_SECRETS),
+                           "hooks": list(hooks) if hooks is not None else None})
+    try:
+        return engine._issues(path, _native.call("scan_manifest", args, content)["issues"])
+    except _native.NativeError as exc:
+        return [engine.error_issue(path, exc)]
 
 
 def dependency_url_risk(spec):
     """What makes a dependency's spec risky to fetch: ["a plain-http URL",
-    "a raw IP address (HOST)"], the ones that apply; [] for none."""
-    m = _DEP_URL_RE.match(spec) if isinstance(spec, str) else None
-    if m is None:
+    "a raw IP address (HOST)"], the ones that apply; [] for none (the
+    engine's: manifest::dependency_url_risk; for the tests)."""
+    if not isinstance(spec, str):
         return []
-    reasons = []
-    if m["scheme"].lower() in ("http", "git+http"):
-        reasons.append("a plain-http URL")
-    host = m["host"]
-    last = host.rstrip(".").rsplit(".", 1)[-1]
-    if (host.startswith("[") and host.endswith("]")) or (last and _IP_LABEL_RE.fullmatch(last)):
-        reasons.append(f"a raw IP address ({host})")
-    return reasons
+    return _native.call("manifest_check", {"check": "dep_url_risk"}, spec)
 
 
-def _installs_from(path, registry, hooks):
-    """Does npm install dependencies from this manifest: a project's own
-    (`registry` false), a package's root one, npm's (`hooks` None)?"""
-    return hooks is None and (not registry or _at_package_root(path))
-
-
-def _at_package_root(path):
-    """Is the manifest at `path` a package's root one: at the top of the
-    package (a registry scan's), or node_modules/<name>/ (--deps)?"""
-    base = posixpath.dirname(path.replace(os.sep, "/"))
-    return base in ("", ".") or _is_package_root(base)
-
-
-def dependency_url_issues(path, data, body, lines, registry, hooks=None):
-    """SC-DEP-URL (MAJOR) for each dependency of the manifest `data` (its
-    text `body`, split into `lines`) npm would fetch from a risky source
-    (dependency_url_risk): a project's own manifest (`registry` false), a
-    package's root one; none where `hooks` are not npm's (an extension's,
-    an action's: nothing is installed)."""
-    out = []
-    if not _installs_from(path, registry, hooks):
-        return out
-    for field in (NPM_DEP_FIELDS if registry else NPM_LOCAL_DEP_FIELDS):
-        deps = data.get(field)
-        found = [(name, spec, dependency_url_risk(spec)) for name, spec in deps.items()] if isinstance(deps, dict) else []
-        key_lines = _script_key_lines(body, field) if any(why for _n, _s, why in found) else {}
-        out.extend(_dep_url_issue(path, lines, field, name, spec, why, key_lines.get(name, 1))
-                   for name, spec, why in found if why)
-    return out
-
-
-def _dep_url_issue(path, lines, field, name, spec, reasons, line):
-    msg = f'Dependency "{name}" ({field}) is fetched from {" and ".join(reasons)}: {spec!r}.'
-    return mk_issue({"id": "SC-DEP-URL", "name": "Dependency from an insecure source", "type": "HOTSPOT",
-                     "sev": "MAJOR", "msg": _redact_text(msg) if REDACT_SECRETS else msg, "why": _DEP_URL_WHY,
-                     "fix": "Depend on a registry version, else an https URL (or ssh) at a domain you trust.",
-                     "ref": "CWE-494 · Supply chain"}, path, line, lines)
-
-
-# gyp command expansions run a command while node-gyp configures the build:
-# '<!(cmd)', '<!@(cmd)', and the same in gyp's later phases, '>!(cmd)' and
-# '^!(cmd)'; '<!([argv…])' runs an argv list without a shell, and
-# '<!pymod_do_main(module args)' imports `module` from the gyp file's
-# directory and calls its DoMain. (gyp: pylib/gyp/input.py, ExpandVariables.)
-_GYP_EXPANSION_RE = re.compile(r"[<>^]!@?(?:pymod_do_main)?\(")
-# Any expansion or variable reference inside a command — '<(var)',
-# '<!(cmd)', '<@(list)', '<|(file)' — whose value only gyp knows. Following
-# the command, '<(module_root_dir)' and '<(DEPTH)' stand for the directory
-# of the root binding.gyp, and any other one for a path outside the package.
-_GYP_REFERENCE_RE = re.compile(r"[<>^](?:!?@?|\|)?(?:[-a-zA-Z0-9_.]+)?\(")
-_GYP_ROOT_VARIABLES = frozenset({"module_root_dir", "DEPTH"})
-# The ubiquitous benign form: print an include path of a dependency.
-_GYP_NODE_REQUIRE_RE = re.compile(
-    r"""node\s+-[ep]\s+(?:"|')\s*require\(\s*\\?["'][\w@./-]+\\?["']\s*\)(?:\.[\w$]+)*\s*;?\s*(?:"|')""")
-# Bounds on one gyp document (review: scan_gyp was quadratic — 8,000 actions
-# took 11.4 s, 4,000 expansions in one 60 KB string 29.5 s — and a document
-# with more values than the walk visits was reported clean). Past either
-# limit the walk stops and the file gets SC-TRUNCATED. Characters are code
-# points, as Python counts them (the npm engine counts the same way).
-_GYP_MAX_NODES = 100_000                 # values visited
-_GYP_MAX_COMMAND_CHARS = 2_000_000       # characters of action/expansion commands examined
 #: SC-INSTALL-HOOK findings listed per gyp file; the rest are summed up in one
 #: more finding at the highest severity among them.
 GYP_MAX_HOOK_FINDINGS = 100
 
 
-# str() refuses an int of more than 4300 digits (a long hex literal in an
-# action raised ValueError out of scan_gyp); such an int is shown in hex,
-# as the npm engine shows it (pycompat.js pyIntStr).
-_INT_STR_LIMIT = 10 ** 4300
-
-
-def _gyp_str(value):
-    """str(value) for an action argument, never refusing a large int."""
-    try:
-        return str(value)
-    except ValueError:
-        return _gyp_repr(value)
-
-
-def _gyp_repr(value):
-    if isinstance(value, int) and not isinstance(value, bool):
-        if abs(value) < _INT_STR_LIMIT:
-            try:
-                return repr(value)
-            except ValueError:             # a lower sys.set_int_max_str_digits()
-                pass
-        return hex(value)
-    if isinstance(value, list):
-        return "[" + ", ".join(_gyp_repr(v) for v in value) + "]"
-    if isinstance(value, tuple):
-        return "(" + ", ".join(_gyp_repr(v) for v in value) + ("," if len(value) == 1 else "") + ")"
-    if isinstance(value, dict):
-        return "{" + ", ".join(f"{_gyp_repr(k)}: {_gyp_repr(v)}" for k, v in value.items()) + "}"
-    if isinstance(value, (set, frozenset)):
-        return "{" + ", ".join(_gyp_repr(v) for v in value) + "}" if value else "set()"
-    return repr(value)
-
-
-def _gyp_closing_parens(text):
-    """{offset of '(': offset of its balanced ')'}, in one pass (a stack)."""
-    close, opened = {}, []
-    for m in re.finditer(r"[()]", text):
-        if text[m.start()] == "(":
-            opened.append(m.start())
-        elif opened:
-            close[opened.pop()] = m.start()
-    return close
-
-
-def _gyp_expansion_commands(text):
-    """(command, is_pymod) for every expansion in `text`, in order: the
-    command up to its balanced closing parenthesis, or to the end of the
-    string. The closing parenthesis of every '(' is found in one pass, not by
-    a scan per expansion."""
-    close = _gyp_closing_parens(text)
-    for m in _GYP_EXPANSION_RE.finditer(text):
-        i = m.end() - 1                  # its '('
-        j = close.get(i)
-        yield (text[i + 1:] if j is None else text[i + 1:j]), "pymod_do_main" in m.group()
-
-
-def _gyp_hook_command(cmd, kind):
-    """The shell command an expansion's `cmd` runs, as follow_hook reads it:
-    the expansions and variables in it replaced ('<(module_root_dir)' and
-    '<(DEPTH)' by '.', any other by '/_', a path outside the package), an
-    argv list ('[…]') joined, and `pymod_do_main(module args)` as
-    `python -m module args`."""
-    close = _gyp_closing_parens(cmd)
-    out, pos = [], 0
-    for m in _GYP_REFERENCE_RE.finditer(cmd):
-        if m.start() < pos:
-            continue                     # inside one replaced already
-        i = m.end() - 1
-        j = close.get(i, len(cmd) - 1)
-        variable = m.group() in ("<(", ">(", "^(")
-        out.append(cmd[pos:m.start()])
-        out.append("." if variable and cmd[i + 1:j].strip() in _GYP_ROOT_VARIABLES else "/_")
-        pos = j + 1
-    out.append(cmd[pos:])
-    flat = "".join(out)
-    if kind == "pymod":
-        return "python -m " + flat
-    if flat.lstrip().startswith("["):
-        import ast
-        import shlex
-        try:
-            argv = ast.literal_eval(flat.strip())
-        except (ValueError, TypeError, SyntaxError, MemoryError, RecursionError):
-            return flat
-        if isinstance(argv, list) and argv and all(isinstance(a, str) for a in argv):
-            return shlex.join(argv)
-    return flat
-
-
-def _gyp_package_files(follow):
-    """The files of the package an expansion's command runs (a script, a
-    `require('./x')`; not a tool, a path outside the package or a JSON file),
-    as a frozenset (empty when none)."""
-    targets, _complete = follow_hook(follow)
-    return frozenset(t for t in targets
-                     if not t.replace("\\", "/").startswith("/") and not t.lower().endswith(".json"))
-
-
-def _gyp_commands(data):
-    """-> (commands, truncated): (command, kind, node) for every action/rule
-    command (kind "action", node: the dict holding "action") and every command
-    expansion (kind "expansion", or "pymod" for pymod_do_main, whose command
-    is its module and arguments; node None) anywhere in a parsed gyp document
-    (targets, conditions, target_defaults, variables ...), and why the walk
-    stopped early (None if it did not). Bounded walk, no recursion."""
-    out, stack, seen, chars = [], [data], 0, 0
-    truncated = None
-    while stack:
-        if seen >= _GYP_MAX_NODES:
-            truncated = f"more than {_GYP_MAX_NODES} values in the gyp document"
-            break
-        node = stack.pop()
-        seen += 1
-        if isinstance(node, dict):
-            for key, value in node.items():
-                if key == "action" and isinstance(value, (list, tuple)):
-                    cmd = " ".join(_gyp_str(a) for a in value)
-                    out.append((cmd, "action", node))
-                    chars += len(cmd)
-                stack.append(key)
-                stack.append(value)
-        elif isinstance(node, (list, tuple, set, frozenset)):
-            stack.extend(node)
-        elif isinstance(node, str) and _GYP_EXPANSION_RE.search(node):
-            for cmd, pymod in _gyp_expansion_commands(node):
-                out.append((cmd, "pymod" if pymod else "expansion", None))
-                chars += len(cmd)
-                if chars > _GYP_MAX_COMMAND_CHARS:
-                    break
-        if chars > _GYP_MAX_COMMAND_CHARS:
-            truncated = f"more than {_GYP_MAX_COMMAND_CHARS} characters of gyp commands"
-            break
-    out.reverse()
-    return out, truncated
-
-
-class _LineRedactor:
-    """mk_issue's redaction of one file's lines when no scan context is
-    active (PEM key blocks whole, the secret patterns on other lines, no
-    entropy literals), computed once per line instead of once per finding
-    (review: a gyp file with thousands of actions re-ran it for every one)."""
-
-    def __init__(self, lines):
-        self.lines = lines
-        self._pem = None
-        self._red = {}
-
-    def secrets(self):
-        return None
-
-    def redacted(self, k):
-        r = self._red.get(k)
-        if r is None:
-            if self._pem is None:
-                self._pem = _pem_block_lines(self.lines)
-            r = REDACTED if k in self._pem else _redact_context_line(self.lines[k])
-            self._red[k] = r
-        return r
-
-
-_GYP_EXPANSION_FILE_WHY = (
-    "A binding.gyp command expansion runs while node-gyp configures the build, on npm install, with no "
-    "install script needed. This one runs a file of the package: it is listed for inventory, and in a "
-    "dependency Lazaret follows it to that file and checks it like an install script (CRITICAL when it "
-    "ships the environment or credentials off the machine, or runs code it downloads).")
-
-
 def scan_gyp(path, content):
     """G11: binding.gyp custom build actions run arbitrary commands at
-    `node-gyp rebuild` (i.e. `npm install` of any native module). Flag each
-    action whose command looks hostile read as a program (hook_command_risk)
-    CRITICAL, and any action at all as MAJOR — same policy as package.json
-    lifecycle scripts.
-
-    gyp files are Python literals (single quotes, comments, trailing commas),
-    so both JSON and Python-literal syntax are accepted. Actions and rules
-    are found anywhere in the document (conditions, target_defaults ...).
-    Command expansions ('<!(cmd)', '>!(cmd)', '^!(cmd)', '<!([argv])',
-    '<!pymod_do_main(module)') also run at configure time: they are flagged
-    CRITICAL when the command looks hostile (its value is what it prints,
-    so a request it prints is kept), MAJOR when it runs a download or
-    evaluation tool (INSTALL_HOOK_RE: a hint), and listed as INFO
-    inventory when it runs a file of the package (`node index.js`,
-    `node -p "require('./lib/x')"`, a pymod_do_main module) — the Miasma
-    trick: a payload run from binding.gyp, with no install script. Such a
-    finding's `cmd` is the command as it runs (see _gyp_hook_command), so
-    a --deps scan and the registry follow it to that file and escalate it to
-    CRITICAL when the file fails the install-script test. The usual
-    `<!(node -p "require('node-addon-api').include")` and pkg-config calls
-    are not findings. An unparseable ROOT binding.gyp is
-    SC-MANIFEST-UNPARSEABLE.
-
-    An action's finding is on the line of its own "action" key; an
-    expansion's on the first line holding its command. At most
-    GYP_MAX_HOOK_FINDINGS are listed, then one finding sums up the rest; a
-    document past the walk's bounds (_GYP_MAX_NODES values,
-    _GYP_MAX_COMMAND_CHARS of commands) is SC-TRUNCATED, never silently
-    clean. Linear in the size of the file."""
-    data, issues, where = _load_manifest(path, content, python_literal=True, locate="action")
-    if data is None:
-        return issues
-    body = content[1:] if content.startswith("\ufeff") else content
-    lines = body.split("\n")
-    commands, truncated = _gyp_commands(data)
-    hooks = []                           # (cmd shown, kind, node, reasons, command followed, sev, hint)
-    listed = set()                       # the files the listed INFO expansions run
-    for cmd, kind, node in commands:
-        if kind == "action":
-            reasons = hook_command_risk(cmd)
-            hooks.append((cmd, kind, node, reasons, None, None, not reasons and bool(INSTALL_HOOK_RE.search(cmd))))
-            continue
-        follow = _gyp_hook_command(cmd, kind)
-        # an expansion's output is its value: a request it prints is kept
-        reasons = hook_command_risk(follow, output_kept=True)
-        hint = not reasons and bool(INSTALL_HOOK_RE.search(_GYP_NODE_REQUIRE_RE.sub(" ", cmd)))
-        if not reasons and not hint:
-            runs = _gyp_package_files(follow)
-            if not runs or runs in listed:
-                continue                 # the usual include-path queries; a file listed already
-            listed.add(runs)
-        shown = f"pymod_do_main({cmd})" if kind == "pymod" else cmd
-        hooks.append((shown, kind, node, reasons, follow, None if reasons or hint else "INFO", hint))
-    newlines = [m.start() for m in re.finditer("\n", body)] if hooks else []
-    first_line = {}
-
-    def line_of(cmd, kind, node):
-        if kind == "action":
-            at = where.get(id(node))
-            return 1 if at is None else bisect.bisect_left(newlines, at[1]) + 1
-        if not cmd or "\n" in cmd:
-            return 1                     # no single line holds it
-        if cmd not in first_line:
-            at = body.find(cmd)
-            if at < 0:                   # written with \' or \" in a quoted string
-                at = next((a for a in (body.find(cmd.replace("'", "\\'")), body.find(cmd.replace('"', '\\"')))
-                           if a >= 0), -1)
-            first_line[cmd] = 1 if at < 0 else bisect.bisect_left(newlines, at) + 1
-        return first_line[cmd]
-
-    redactor = _LineRedactor(lines)
-    for cmd, kind, node, reasons, follow, sev, hint in hooks[:GYP_MAX_HOOK_FINDINGS]:
-        issue = _sc_install_hook_issue(
-            path, line_of(cmd, kind, node), lines,
-            "binding.gyp action" if kind == "action" else "binding.gyp command expansion",
-            cmd, reasons, sev=sev, redactor=redactor, hint=hint)
-        if follow is not None:
-            issue["cmd"] = follow        # what a --deps scan and the registry follow
-        if sev == "INFO":
-            issue["why"] = _GYP_EXPANSION_FILE_WHY
-        issues.append(issue)
-    rest = hooks[GYP_MAX_HOOK_FINDINGS:]
-    if rest:
-        n_bad = sum(1 for h in rest if h[3])
-        issues.append(mk_issue(
-            {"id": "SC-INSTALL-HOOK", "name": "Install hook", "type": "HOTSPOT",
-             "sev": "CRITICAL" if n_bad else ("MAJOR" if any(h[5] != "INFO" for h in rest) else "INFO"),
-             "msg": (f"{len(rest)} more binding.gyp actions and command expansions run code at "
-                     f"install time ({n_bad} of them look hostile); only the first "
-                     f"{GYP_MAX_HOOK_FINDINGS} are listed."),
-             "why": ("Each action and command expansion in a binding.gyp runs a command during "
-                     "`node-gyp rebuild` (npm install). A file with this many is listed in part "
-                     "so the report stays readable; this finding carries the highest severity "
-                     "among the ones not listed."),
-             "fix": "Review every action and command expansion in the file; use --ignore-scripts "
-                    "in CI if unneeded.",
-             "ref": "CWE-506 · Supply chain"},
-            path, line_of(rest[0][0], rest[0][1], rest[0][2]), lines, redactor=redactor))
-    if truncated:
-        issues.append(truncated_issue(path, truncated))
-    return issues
+    `node-gyp rebuild` (i.e. `npm install` of any native module), and its
+    command expansions ('<!(cmd)', '>!(cmd)', '^!(cmd)', '<!([argv])',
+    '<!pymod_do_main(module)') while node-gyp configures the build. The
+    engine's (BR-7 step 3 b: rust/crates/lazaret-engine/src/manifest/gyp.rs,
+    the `scan_gyp` call; the file is read as JSON or else as the Python
+    literal gyp reads, single quotes, comments and trailing commas allowed).
+    An action whose command looks hostile read as a program
+    (hook_command_risk) is CRITICAL, any other MAJOR; an expansion is
+    CRITICAL when its command looks hostile (its value is what it prints, so
+    a request it prints is kept), MAJOR when it runs a download or evaluation
+    tool (INSTALL_HOOK_RE: a hint), and INFO inventory when it runs a file of
+    the package (`node index.js`, a pymod_do_main module): the Miasma trick,
+    a payload run from binding.gyp with no install script. Such a finding's
+    `cmd` is the command as it runs, so a --deps scan and the registry follow
+    it to that file and escalate it to CRITICAL when the file fails the
+    install-script test. The usual `<!(node -p "require('node-addon-api').include")`
+    and pkg-config calls are not findings. An unparseable ROOT binding.gyp is
+    SC-MANIFEST-UNPARSEABLE. At most GYP_MAX_HOOK_FINDINGS are listed, then
+    one finding sums up the rest; a document past the walk's bounds is
+    SC-TRUNCATED, never silently clean. Linear in the size of the file."""
+    if not isinstance(content, str):
+        return load_manifest(path, content)[1]
+    args = engine._budget({"path": path, "redact": bool(REDACT_SECRETS)})
+    try:
+        return engine._issues(path, _native.call("scan_gyp", args, content)["issues"])
+    except _native.NativeError as exc:
+        return [engine.error_issue(path, exc)]
 
 import codecs as _codecs
 import pathlib as _pathlib

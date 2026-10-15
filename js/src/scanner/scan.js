@@ -9,8 +9,10 @@ import { mkIssue } from "./engine.js";
 import { jsxReading } from "../lib/lexer.js";
 import { REDACT } from "../lib/redact.js";
 import { truncatedIssue, normalizeNewlines } from "../lib/fs.js";
-import { call, nodeCandidates, scanDependencyFile, scanProjectFile, scanConfig, taintFindings, NativeExhausted }
+import { call, nodeCandidates, scanDependencyFile, scanProjectFile, scanConfig, taintFindings, NativeExhausted, EXHAUSTED }
   from "../lib/native.js";
+
+export { EXHAUSTED };
 
 export { isComment } from "./engine.js";
 
@@ -55,7 +57,6 @@ export function scanFile(file) {
     return [truncatedIssue(path, EXHAUSTED)];
   }
 }
-export const EXHAUSTED = "reading it spent the engine's work budget (a pattern that backtracks without end on this text)";
 
 // ---- settings that run commands (SC-AUTORUN; core's section comment) ----
 /** How many times a settings file's issues are asked for at most (core._AUTORUN_ROUNDS). */

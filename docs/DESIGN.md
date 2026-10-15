@@ -235,7 +235,15 @@ shared by the CLI and the MCP server. In order it:
    (`rust/crates/lazaret-engine/src/ci/`, the `ci_*` calls: an outline reader
    of the YAML a pipeline needs, not a YAML parser; `core.ci_issues` and
    `scan.js` `ciIssues` shape what it answers into issues);
-3. **scans manifests** (`package.json`, `binding.gyp`, …);
+3. **scans manifests** (`package.json`'s install hooks and dependencies from
+   an insecure source, `binding.gyp`'s actions and command expansions), read
+   by the engine for both packages since BR-7's step 3 (b)
+   (`rust/crates/lazaret-engine/src/manifest/`, the `scan_manifest` and
+   `scan_gyp` calls: a package.json as `json.loads` reads it, a .gyp file as
+   JSON or else as the Python literal gyp reads, `ast.literal_eval` on the
+   engine's Python parser); `core.load_manifest` keeps the data the
+   registry's and `--deps`' decisions read (the npm package asks the engine,
+   `manifest_data`);
 4. **runs `--deps` checks** (`dependency_checks`) — what dependencies run at
    install and import time (install hooks followed to the files they run,
    import-time received-code, and the cross-file follower);
@@ -2021,7 +2029,8 @@ leaves the texts to go with their calls, which gives the same answers:
 | `python/src/lazaret/registry/extensions.py` | VS Code extensions: `lazaret FILE.vsix` and `lazaret --extensions` (the editors' installed extensions), read with the editor's rules for what runs |
 | `rust/crates/lazaret-engine/src/lex/`, `goparse/`, `rsparse/` | The lexers (JavaScript, Python, Go, Rust), the Go parser and the Rust item reader, with their hooks (not used by a scan yet) |
 | `js/src/lib/native.js`, `js/scripts/build-wasm.js` | The npm package's native engine (WebAssembly: the loader, one call, the pack's values) and its build (`npm run build`) |
-| `js/src/lib/supplychain.js`, `js/src/deps.js`, `js/src/scanner/flow.js`, `js/src/index.js`, `js/src/pool.js` | Install-hook checks, `--deps`, flow twin, npm CLI, its worker threads |
+| `rust/crates/lazaret-engine/src/manifest/` | Manifests (the `scan_manifest`, `scan_gyp`, `manifest_data` and `manifest_check` calls, both packages'; since BR-7's step 3 (b)): SC-INSTALL-HOOK, SC-DEP-URL, SC-MANIFEST-DEPTH and -UNPARSEABLE; `pyjson.rs` (json.loads), `pylit.rs` (ast.literal_eval), `pyval.rs` (Python's values, their str() and repr()), `gyp.rs` |
+| `js/src/lib/supplychain.js`, `js/src/deps.js`, `js/src/scanner/flow.js`, `js/src/index.js`, `js/src/pool.js` | The manifests' calls and the install-hook finding `--deps` makes, `--deps`, flow twin, npm CLI, its worker threads |
 | `python/tests/architecture/test_js_parity*.py` | The package-parity guards (need `npm run build`) |
 | `rust/crates/lazaret-engine`, `lazaret-ffi` | The native engine (supply-chain tests, `scan_file`, the cross-file follower, linre, the rule pack: **the source of the rules**), its C ABI and its WebAssembly exports (`docs/RUST_ENGINE.md`) |
 | `python/src/lazaret/scanner/engine.py`, `_native.py` | The engine's calls: batching and threads, the work budget, an unanswered file SC-TRUNCATED; the ctypes loader |

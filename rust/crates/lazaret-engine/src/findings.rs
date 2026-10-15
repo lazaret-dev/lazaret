@@ -428,6 +428,9 @@ pub struct Snippets<'a> {
     /// A config file's (Some: whether it is a .netrc): a line is shown with the value of every credential-named key
     /// redacted too (config::redact_values)
     config: Option<bool>,
+    /// The file's entropy literals are redacted too (a scan's context); false: mk_issue with none (a manifest's
+    /// findings: the PEM key blocks and the line patterns only)
+    literals: bool,
 }
 
 impl<'a> Snippets<'a> {
@@ -441,13 +444,26 @@ impl<'a> Snippets<'a> {
             pem: OnceCell::new(),
             red: RefCell::new(HashMap::new()),
             config: None,
+            literals: true,
         }
+    }
+
+    /// The snippets of findings made with no scan context (core.mk_issue's `ctx is None`, its `_LineRedactor`): no
+    /// entropy literals are redacted.
+    pub fn plain(mut self) -> Snippets<'a> {
+        self.literals = false;
+        self
     }
 
     /// The snippets of a config file's findings (core._ConfigCtx): `netrc`, it is a .netrc.
     pub fn config(mut self, netrc: bool) -> Snippets<'a> {
         self.config = Some(netrc);
         self
+    }
+
+    /// Are its snippets and messages redacted (core.REDACT_SECRETS)?
+    pub fn redacts(&self) -> bool {
+        self.redact
     }
 
     /// The file's entropy literals (_Redactor.secrets).
@@ -463,6 +479,8 @@ impl<'a> Snippets<'a> {
         let pem = self.pem.get_or_init(|| pem_block_lines(self.p, &self.lines));
         let r = if pem.contains(&k) {
             self.p.text("REDACTED")
+        } else if !self.literals {
+            redact_context_line(self.p, self.lines[k])
         } else if let Some(netrc) = self.config {
             let shown = crate::config::redact_values(self.p, self.lines[k], netrc);
             self.secrets().redact(self.p, &redact_context_line(self.p, &shown))
@@ -473,8 +491,8 @@ impl<'a> Snippets<'a> {
         r
     }
 
-    /// core._redact_text, with this file's literals.
-    fn redact_text(&self, text: &[u32]) -> PyStr {
+    /// core._redact_text, with this file's literals (none for `plain` snippets).
+    pub fn redact_text(&self, text: &[u32]) -> PyStr {
         if text.contains(&('\n' as u32)) {
             let parts = pystr::split_char(text, '\n' as u32);
             let pem = pem_block_lines(self.p, &parts);
@@ -485,11 +503,16 @@ impl<'a> Snippets<'a> {
                 }
                 if pem.contains(&k) {
                     out.extend(self.p.text("REDACTED"));
+                } else if !self.literals {
+                    out.extend(redact_context_line(self.p, l));
                 } else {
                     out.extend(self.secrets().redact(self.p, &redact_context_line(self.p, l)));
                 }
             }
             return out;
+        }
+        if !self.literals {
+            return redact_context_line(self.p, text);
         }
         self.secrets().redact(self.p, &redact_context_line(self.p, text))
     }
@@ -549,6 +572,17 @@ impl<'a> Snippets<'a> {
             v.push(Value::Str(typ.clone()));
         }
         Value::Arr(v)
+    }
+
+    /// `issue`, with fields the finding carries after mk_issue's (a hook's `cmd`): an object after `snipStart`.
+    pub fn issue_with(&self, f: &Finding, extra: Vec<(&str, Value)>) -> Value {
+        let mut v = self.issue(f);
+        if let Value::Arr(items) = &mut v {
+            if !extra.is_empty() {
+                items.push(Value::obj(extra));
+            }
+        }
+        v
     }
 }
 

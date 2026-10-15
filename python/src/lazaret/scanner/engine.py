@@ -387,7 +387,9 @@ def _issues(path, answer):
     for a in answer:
         issue = dict(zip(_ISSUE_KEYS, a[:8]))
         issue.update(file=path, line=a[8], snippet=a[9], snipStart=a[10])
-        if len(a) > 11:                           # a Q-CAPPED note: what it stands for
+        if len(a) > 11 and isinstance(a[11], dict):   # the finding's own fields after mk_issue's (a hook's "cmd")
+            issue.update(a[11])
+        elif len(a) > 11:                         # a Q-CAPPED note: what it stands for
             issue.update(omitted=a[11], omittedType=a[12])
         out.append(issue)
     return out

@@ -29,6 +29,9 @@ const MEMORY_KEEP = 512 * 1024 * 1024;   // bytes of module memory kept between 
 export class NativeError extends Error {
   constructor(message) { super(message); this.name = "NativeError"; }
 }
+/** SC-TRUNCATED's detail for a file whose reading spent the engine's work budget. */
+export const EXHAUSTED = "reading it spent the engine's work budget (a pattern that backtracks without end on this text)";
+
 /** The call's work budget was spent (a hostile input): it has no answer. */
 export class NativeExhausted extends NativeError {
   constructor(message) { super(message); this.name = "NativeExhausted"; }
@@ -389,7 +392,8 @@ export function pyFlow(files, { maxIters = null, maxFiles = null, maxBytes = nul
 const ISSUE_KEYS = ["rule", "name", "type", "sev", "msg", "why", "fix", "ref"];
 
 /** The engine's findings as this package's issues (lib/issue.js mkIssue's keys, in its order). */
-function issuesOf(path, answer) {
+/** The engine's issues ([rule, name, type, sev, msg, why, fix, ref, line, snippet, snipStart, …]) as this package's. */
+export function issuesOf(path, answer) {
   return answer.map((a) => {
     const issue = {};
     ISSUE_KEYS.forEach((k, i) => { issue[k] = a[i]; });
@@ -397,7 +401,8 @@ function issuesOf(path, answer) {
     issue.line = a[8];
     issue.snippet = a[9];
     issue.snipStart = a[10];
-    if (a.length > 11) { issue.omitted = a[11]; issue.omittedType = a[12]; }
+    if (a.length > 11 && a[11] !== null && typeof a[11] === "object") Object.assign(issue, a[11]);   // (a hook's "cmd")
+    else if (a.length > 11) { issue.omitted = a[11]; issue.omittedType = a[12]; }
     return issue;
   });
 }

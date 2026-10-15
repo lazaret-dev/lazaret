@@ -473,6 +473,19 @@
     }
    ]
   },
+  "NPM_DEP_FIELDS": {
+   "list": [
+    {
+     "value": "dependencies"
+    },
+    {
+     "value": "optionalDependencies"
+    },
+    {
+     "value": "peerDependencies"
+    }
+   ]
+  },
   "NPM_INSTALL_SCRIPTS": {
    "list": [
     {
@@ -505,6 +518,22 @@
     },
     {
      "value": "postprepare"
+    }
+   ]
+  },
+  "NPM_LOCAL_DEP_FIELDS": {
+   "list": [
+    {
+     "value": "dependencies"
+    },
+    {
+     "value": "optionalDependencies"
+    },
+    {
+     "value": "peerDependencies"
+    },
+    {
+     "value": "devDependencies"
     }
    ]
   },
@@ -5484,6 +5513,13 @@
   },
   "_DEP_IMPORT_RISK_WHY": {
    "value": "An installed package's code runs with the application's privileges when it is loaded or its command runs. Collecting credentials or the whole environment next to a network call is the shape of an import-time stealer; SDKs read the few variables they need. A weaker indicator than the same code in an install script: the file may have a reason."
+  },
+  "_DEP_URL_RE": {
+   "flags": "",
+   "re": "\\s*(?P<scheme>[A-Za-z][A-Za-z0-9+.\\-]*)://(?:[^@/?#\\s]*@)?(?P<host>\\[[^\\]/?#\\s]*\\]|[^:/?#\\s]*)"
+  },
+  "_DEP_URL_WHY": {
+   "value": "npm installs a dependency from wherever its spec says. Over plain http it is fetched with no integrity check, so anyone on the network path can replace it; at a raw IP address it comes from no registry and no domain anyone can vet. Packages from a registry name versions, and git dependencies use https or ssh."
   },
   "_DJANGO_IMPORT_RE": {
    "flags": "",
@@ -11364,6 +11400,10 @@
     "\u200d"
    ]
   },
+  "_IP_LABEL_RE": {
+   "flags": "",
+   "re": "[0-9]+|0[xX][0-9a-fA-F]*"
+  },
   "_IP_LITERAL_MAX": {
    "value": 100
   },
@@ -13032,6 +13072,173 @@
   },
   "_MANIFEST_WRITE_SRC": {
    "value": "\\b(?:writeFileSync|writeFile|outputJsonSync|outputJson|writeJsonSync|writeJson|outputFileSync|outputFile|write_text|dump)\\s*\\("
+  },
+  "_MF_DEPTH_RULE": {
+   "map": {
+    "fix": {
+     "value": "Reject this package/file at your ingestion boundary; investigate the source."
+    },
+    "id": {
+     "value": "SC-MANIFEST-DEPTH"
+    },
+    "msg": {
+     "value": "Manifest is too deeply nested to parse (more than 500 levels)."
+    },
+    "name": {
+     "value": "Hostile manifest nesting depth"
+    },
+    "ref": {
+     "value": "CWE-506 \u00b7 Supply chain"
+    },
+    "sev": {
+     "value": "CRITICAL"
+    },
+    "type": {
+     "value": "HOTSPOT"
+    },
+    "why": {
+     "value": "A manifest nested this deep cannot be produced by any real build tool \u2014 it exists purely to crash or blind security scanners. Treating it as data would silently drop every other finding in the package."
+    }
+   }
+  },
+  "_MF_DEP_URL_RULE": {
+   "map": {
+    "fix": {
+     "value": "Depend on a registry version, else an https URL (or ssh) at a domain you trust."
+    },
+    "id": {
+     "value": "SC-DEP-URL"
+    },
+    "msg": {
+     "value": "Dependency \"{name}\" ({field}) is fetched from {reasons}: {spec!r}."
+    },
+    "name": {
+     "value": "Dependency from an insecure source"
+    },
+    "ref": {
+     "value": "CWE-494 \u00b7 Supply chain"
+    },
+    "sev": {
+     "value": "MAJOR"
+    },
+    "type": {
+     "value": "HOTSPOT"
+    },
+    "why": {
+     "value": "npm installs a dependency from wherever its spec says. Over plain http it is fetched with no integrity check, so anyone on the network path can replace it; at a raw IP address it comes from no registry and no domain anyone can vet. Packages from a registry name versions, and git dependencies use https or ssh."
+    }
+   }
+  },
+  "_MF_GYP_REST_FIX": {
+   "value": "Review every action and command expansion in the file; use --ignore-scripts in CI if unneeded."
+  },
+  "_MF_GYP_REST_MSG": {
+   "value": "{n} more binding.gyp actions and command expansions run code at install time ({bad} of them look hostile); only the first {limit} are listed."
+  },
+  "_MF_GYP_REST_WHY": {
+   "value": "Each action and command expansion in a binding.gyp runs a command during `node-gyp rebuild` (npm install). A file with this many is listed in part so the report stays readable; this finding carries the highest severity among the ones not listed."
+  },
+  "_MF_HOOK_HINT_MSG": {
+   "value": "\"{script}\" script runs a download or evaluation command at install time: {cmd!r}."
+  },
+  "_MF_HOOK_HOSTILE_MSG": {
+   "value": "\"{script}\" script {reasons}."
+  },
+  "_MF_HOOK_HOSTILE_WHY": {
+   "value": "Install hooks execute automatically on npm install \u2014 the most common supply-chain compromise vector \u2014 and this command does what malicious install hooks do."
+  },
+  "_MF_HOOK_MSG": {
+   "value": "\"{script}\" script runs code at install time: {cmd!r}."
+  },
+  "_MF_HOOK_PREPARE_WHY": {
+   "value": "A prepare-family script runs on `npm install` in this checkout; it is the project's own build step (husky, patch-package, a compile), listed for inventory. Hostile commands here stay CRITICAL."
+  },
+  "_MF_HOOK_WHY": {
+   "value": "Install hooks run automatically with user privileges on npm install, before anyone reviews the package. Many legitimate packages use one (to fetch a platform binary, for example), so on its own this is a capability to review, not evidence of malice."
+  },
+  "_MF_INSTALL_HOOK_RULE": {
+   "map": {
+    "fix": {
+     "value": "Review the {script} script; use --ignore-scripts in CI if unneeded."
+    },
+    "id": {
+     "value": "SC-INSTALL-HOOK"
+    },
+    "msg": {
+     "value": ""
+    },
+    "name": {
+     "value": "Install hook"
+    },
+    "ref": {
+     "value": "CWE-506 \u00b7 Supply chain"
+    },
+    "sev": {
+     "value": "MAJOR"
+    },
+    "type": {
+     "value": "HOTSPOT"
+    },
+    "why": {
+     "value": ""
+    }
+   }
+  },
+  "_MF_TRUNCATED_RULE": {
+   "map": {
+    "fix": {
+     "value": "Review the file manually or raise the limit and re-scan."
+    },
+    "id": {
+     "value": "SC-TRUNCATED"
+    },
+    "msg": {
+     "value": "File not fully scanned: {detail}."
+    },
+    "name": {
+     "value": "Scan truncated"
+    },
+    "ref": {
+     "value": "CWE-506 \u00b7 Supply chain"
+    },
+    "sev": {
+     "value": "CRITICAL"
+    },
+    "type": {
+     "value": "HOTSPOT"
+    },
+    "why": {
+     "value": "Scanning stopped early, so a clean verdict for this file is not evidence of anything \u2014 the unscanned bytes are exactly where a hostile artifact would put its payload (audit C2/G16: declared sizes and entry counts are attacker-controlled and were used to skip files with zero signal)."
+    }
+   }
+  },
+  "_MF_UNPARSEABLE_RULE": {
+   "map": {
+    "fix": {
+     "value": "Make the manifest valid JSON (binding.gyp: a Python/JSON literal) and review its scripts by hand."
+    },
+    "id": {
+     "value": "SC-MANIFEST-UNPARSEABLE"
+    },
+    "msg": {
+     "value": "{name} could not be parsed ({reason}); its install hooks could not be checked."
+    },
+    "name": {
+     "value": "Unparseable manifest"
+    },
+    "ref": {
+     "value": "CWE-506 \u00b7 Supply chain"
+    },
+    "sev": {
+     "value": "MAJOR"
+    },
+    "type": {
+     "value": "HOTSPOT"
+    },
+    "why": {
+     "value": "Package managers are more forgiving than a strict parser in places (a byte-order mark, number formats), so a manifest the scanner cannot read may still run install scripts when the package is installed. An unreadable root manifest is reported instead of treated as empty."
+    }
+   }
   },
   "_MINER_ARG_NEEDLES": {
    "list": [

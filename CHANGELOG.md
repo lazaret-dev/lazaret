@@ -793,6 +793,26 @@ aggregate):
   `configsecrets.py` is 137 lines (from 388) and `js/src/lib/configsecrets.js` 36 (from 293): which files are config
   files, and the reader's checks for the tests over the `config_check` call. `test_snapshot_config` (hashes checked to
   be the Python's answers) and `test_wasm_parity_config` hold the engine.
+- **One reader of manifests, the engine's (BR-7, step 3 b).** A package.json's install hooks (SC-INSTALL-HOOK) and
+  its dependencies from an insecure source (SC-DEP-URL), a binding.gyp's actions and command expansions, and the
+  manifests that cannot be read (SC-MANIFEST-DEPTH, SC-MANIFEST-UNPARSEABLE) are the engine's for both packages
+  (`rust/crates/lazaret-engine/src/manifest/`, the `scan_manifest` and `scan_gyp` calls), where core's
+  scan_manifest and scan_gyp and the npm package's supplychain.js did it until now. The engine reads a package.json
+  as `json.loads` does (`pyjson.rs`, CPython's C scanner) and a .gyp file as JSON or else as the Python literal gyp
+  reads (`pylit.rs`: `ast.literal_eval` on the engine's Python parser, which reads every `\N{…}` name and number
+  form Python reads), to Python's values (`pyval.rs`: equal keys, `str()` and `repr()`). The same answers as the
+  Python's, issue for issue with snippets and each hook's `cmd`, redacted and not, on 3,000 generated package.json
+  files (4,810 issues) and 2,500 gyp files (8,577 issues, more than are listed and past the walk's bound among
+  them), the 2,308 package.json and 11 gyp files of the packages installed on the build machine, and 4,600 cases of
+  the readers alone. `js/src/lib/pynames.js` is gone, `supplychain.js` is 175 lines (from 542) and `pyjson.js` 170
+  (from 511: the baseline's JSON reader stays); core is 475 lines shorter, `load_manifest` keeping the data the
+  registry's and --deps' decisions read (the npm package asks the engine for it, `manifest_data`). Where the readers
+  differed from the Python's on rare inputs, the engine follows the Python: a JSON `\u` escape that ends the text
+  (CPython 3.13: an unterminated string), any `\N{…}` name Python knows (the npm package took one outside its table
+  as U+FFFD). A too-large int added to an imaginary number in an expansion's argv list, which made core's scan_gyp
+  raise, leaves the command as written. A set's items stay in the order given (Python orders a set of str by a
+  per-run hash). `test_snapshot_manifest` (hashes checked to be the Python's answers) and `test_wasm_parity_manifest`
+  hold the engine.
 - **Security: S-XML is a parser set to resolve external entities, not an import of xml.etree, xml.dom or xml.sax
   (Q-3; rule set 2.80.0).** Since Python 3.7.1 none of them resolves an external entity unless told to, and Expat
   2.4.1 refuses entity bombs, so the import flagged safe code: all 20 of BenchmarkPython's safe XXE cases (its 8 real

@@ -78,6 +78,9 @@ pub const CALLS: &[&str] = &[
     "autorun_kind", "autorun_owner", "autorun_jsonc", "autorun_entries", "autorun_local_command", "autorun_issues",
     // 0.1.9 (BR-7 step 3): a config or data file's scan (config.rs: S-TOKEN, S-SECRET, SC-AUTORUN, the CI checks)
     "scan_config", "config_check",
+    // 0.1.9 (BR-7 step 3 b): manifests (manifest/: package.json's install hooks and dependencies, binding.gyp's
+    // actions and expansions; json.loads and ast.literal_eval as Python reads them)
+    "scan_manifest", "scan_gyp", "manifest_data", "manifest_check",
     // the JavaScript parser (jsparse.py's trees)
     "js_parse", "js_parse_file",
     // the Python parser (Python 3.13's ast trees)
@@ -616,6 +619,70 @@ fn dispatch(name: &str, args: &Value, text: &[u32]) -> Result<Value, CallError> 
             match crate::config::scan(p, &path, text, &opts, &mut tree) {
                 Ok(issues) => Value::obj(vec![("issues", Value::Arr(issues))]),
                 Err(need) => Value::obj(vec![("need", Value::Arr(need.into_iter().map(Value::Str).collect()))]),
+            }
+        }
+        "scan_manifest" => {
+            // {path, registry, hooks: [script…] or null, redact} -> {"issues": [scan_file's issues…, a hook's {"cmd"}]}
+            let path = arg_str(args, "path")?;
+            let registry = matches!(args.get("registry"), Some(Value::Bool(true)));
+            let redact = !matches!(args.get("redact"), Some(Value::Bool(false)));
+            let hooks: Option<Vec<PyStr>> = match args.get("hooks") {
+                Some(Value::Arr(_)) => Some(arg_strs(args, "hooks")),
+                _ => None,
+            };
+            let issues = crate::manifest::scan_manifest(p, &path, text, registry, hooks.as_deref(), redact);
+            Value::obj(vec![("issues", Value::Arr(issues))])
+        }
+        "scan_gyp" => {
+            // {path, redact} -> {"issues": [scan_file's issues…, a hook's {"cmd"}]}
+            let path = arg_str(args, "path")?;
+            let redact = !matches!(args.get("redact"), Some(Value::Bool(false)));
+            Value::obj(vec![("issues", Value::Arr(crate::manifest::gyp::scan_gyp(p, &path, text, redact)))])
+        }
+        "manifest_data" => {
+            // {path, redact} -> {"data": a package.json's data (manifest::data_value) or null, "issues": why not}: what
+            // the npm package's --deps reading reads (core.load_manifest)
+            let path = opt_str(args, "path").unwrap_or_default();
+            let redact = !matches!(args.get("redact"), Some(Value::Bool(false)));
+            let (data, early) = crate::manifest::load(p, &path, text, false, None);
+            let none = crate::findings::Snippets::new(p, Vec::new(), redact, false).plain();
+            Value::obj(vec![
+                ("data", data.as_ref().map_or(Value::Null, crate::manifest::data_value)),
+                ("issues", Value::Arr(early.iter().map(|f| none.issue(f)).collect())),
+            ])
+        }
+        "manifest_check" => {
+            // one of the manifest readers' parts, for the packages' tests: json (json.loads: {"ok": repr, "type"} or
+            // {"error": "line L column C"} or {"depth": true}), literal (ast.literal_eval of the stripped text: {"ok",
+            // "type"} or {"error": the exception's name} or {"depth": true}), key_lines {section} ({key: line}),
+            // dep_url_risk ([reason…]), gyp_command {pymod} (an expansion's command as it runs), is_root
+            use crate::manifest::{self, gyp, pyjson, pylit, pyval};
+            let check = crate::pystr::to_string(&arg_str(args, "check")?);
+            let shown = |v: &pyval::PyVal| {
+                Value::obj(vec![("ok", Value::Str(pyval::repr(v))), ("type", Value::Str(u(v.type_name())))])
+            };
+            match check.as_str() {
+                "literal" => match pylit::literal_eval(crate::pystr::strip(text), None, 0) {
+                    Ok(v) => shown(&v),
+                    Err(pylit::Fail::Depth) => Value::obj(vec![("depth", Value::Bool(true))]),
+                    Err(pylit::Fail::Error(name)) => Value::obj(vec![("error", Value::Str(u(name)))]),
+                },
+                "json" if pyjson::depth_exceeds(text, p.usize("MAX_MANIFEST_DEPTH")) => Value::obj(vec![("depth", Value::Bool(true))]),
+                "json" => match pyjson::loads(text, None) {
+                    Ok(v) => shown(&v),
+                    Err(pyjson::Error::Depth) => Value::obj(vec![("depth", Value::Bool(true))]),
+                    Err(pyjson::Error::At(at)) => Value::obj(vec![("error", Value::Str(u(&pyjson::error_where(text, at))))]),
+                },
+                "key_lines" => {
+                    let section = opt_str(args, "section").unwrap_or_else(|| u("scripts"));
+                    let mut found: Vec<(PyStr, usize)> = manifest::key_lines(text, &crate::pystr::to_string(&section)).into_iter().collect();
+                    found.sort();
+                    Value::Obj(found.into_iter().map(|(k, l)| (k, Value::Int(l as i64))).collect())
+                }
+                "dep_url_risk" => Value::Arr(manifest::dependency_url_risk(p, text).into_iter().map(Value::Str).collect()),
+                "gyp_command" => Value::Str(gyp::hook_command_of(p, text, matches!(args.get("pymod"), Some(Value::Bool(true))))),
+                "is_root" => Value::Bool(manifest::is_root(text)),
+                _ => return Err(CallError::BadArgs(format!("manifest_check: unknown check {}", check))),
             }
         }
         "config_check" => {
