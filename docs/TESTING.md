@@ -349,6 +349,39 @@ of real malicious releases (the benchmark and the holdout, and the Go and
 Rust malicious set) are run on a maintainer's machine, not in an agent's
 session.
 
+**The malicious sets, step by step** (a maintainer's machine; every folder
+named here outside the repository and any synced folder):
+
+1. Clone DataDog's dataset once, without a checkout:
+   `git clone --filter=blob:none --no-checkout https://github.com/DataDog/malicious-software-packages-dataset.git ~/lazaret-datadog`
+   (a shallow clone needs `git fetch --unshallow --filter=blob:none origin`:
+   the holdout's draw reads the audit's commit, `b302ad0b`).
+2. Write the two manifests:
+   `python3 scripts/datadog.py ~/lazaret-datadog ~/lazaret-corpus`. It
+   writes `benchmark/manifest.jsonl` and `holdout/manifest.jsonl` there and
+   prints their two entries of a sets file; stopped, the same command goes
+   on.
+3. Write the sets file once, `~/lazaret-bench/sets.json` (a `~` is the home
+   folder; any other relative path is the sets file's folder's):
+
+   ```
+   {"results": "runs", "report": "~/Projects/lazaret/Claude outputs/bench",
+    "sets": [{"name": "benchmark", "manifest": "~/lazaret-corpus/benchmark/manifest.jsonl"},
+             {"name": "holdout", "manifest": "~/lazaret-corpus/holdout/manifest.jsonl", "aggregate_only": true}]}
+   ```
+
+4. With the commit to measure checked out and its engine built
+   (`pip install -e ./python`: the run refuses a library that is not the
+   tree's), from the repository's root:
+   `python3 scripts/bench.py all ~/lazaret-bench/sets.json --only benchmark,holdout`.
+   A set's first run is its baseline; each later one is compared with the
+   set's last finished run (`--baseline LABEL`: another).
+5. What a session reads back is the report folder,
+   `Claude outputs/bench/LABEL/`: `summary.txt`, `benchmark.txt` (the
+   verdicts by category and every release that moved) and `holdout.txt`
+   (counts alone). The runs (`~/lazaret-bench/runs/`), the manifests and
+   the samples stay on the machine.
+
 **The popular releases: the release gate's benign set.** The benchmark's 429
 popular packages are mostly small libraries, and they did not hold the nine
 popular releases 0.1.8 made SUSPICIOUS (vite, vitest, monaco-editor,
