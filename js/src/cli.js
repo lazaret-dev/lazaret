@@ -15,7 +15,7 @@ import { pyRepr } from "./lib/pycompat.js";
 import { setRedactSecrets } from "./lib/redact.js";
 import {
   jsonReportChunks, htmlReportChunks, printReport, sarifReport, sarifChunks,
-  sanitizeTerm, sanitizeTermLine, setExcerptWidth,
+  sanitizeTerm, sanitizeTermLine, setExcerptWidth, flaggedLines, showSecretsOn,
 } from "./report.js";
 import { applyBaseline, BASELINE_KEY_ENV } from "./baseline.js";
 import { loadError } from "./lib/native.js";
@@ -59,6 +59,9 @@ Options:
                         A baseline inside the scanned tree is trusted only when
                         ${BASELINE_KEY_ENV} is set and its signature verifies.
   --no-redact-secrets   Keep credential lines in reports (default: redacted).
+  --show-secrets        Show each finding's flagged line unredacted on the
+                        terminal (only when the output is a terminal); the
+                        reports and the baseline stay redacted.
   --verify-secrets      After the scan, ask each secret's provider whether it is
                         live (GitHub, Slack, Stripe, npm, OpenAI and Anthropic
                         tokens, AWS key pairs): each credential goes to its own
@@ -95,6 +98,7 @@ const OPTIONS = [
   { flag: "--deps", dest: "deps" },
   { flag: "--include-deps", dest: "deps" },
   { flag: "--no-redact-secrets", dest: "noRedact" },
+  { flag: "--show-secrets", dest: "showSecrets" },
   { flag: "--verify-secrets", dest: "verifySecrets" },
   { flag: "--quiet", short: "-q", dest: "quiet" },
   { flag: "--ci", dest: "ci" },
@@ -356,10 +360,13 @@ function runChecked(argv, io) {
     if (e instanceof ScanTargetError) { err(`error: ${sanitizeTermLine(e.message)}`); return EXIT_USAGE; }
     throw e;
   }
+  const showSecrets = showSecretsOn(!!opts.showSecrets, io.isTTY ?? !!process.stdout.isTTY, err);
   return scanAndReport();
 
   function scanAndReport() {
     const { res, files, configs } = scanCollected(root, col, { exclude: opts.exclude, env });
+    // --show-secrets: the flagged lines as read, for the terminal alone (never in the result)
+    const rawLines = showSecrets ? flaggedLines(res.issues, [...files, ...col.manifests, ...configs]) : null;
     if (opts.verifySecrets) {
       // V-1 (John's decision 4): only when asked; each credential to its own provider, after a note that says where.
       // A finding's line is read from the text the scan read (verifyscan.lines_of reads it again from the file).
@@ -368,16 +375,16 @@ function runChecked(argv, io) {
       for (const c of configs) if (!read.has(c.path)) read.set(c.path, [c.content, "cfg"]);
       const linesOf = (file) => (read.has(file) ? splitLines(...read.get(file)) : null);
       return verifyFindings(res, linesOf, { verifier: io.verifier ?? null, err: (s) => err(sanitizeTermLine(s)) })
-        .then(() => report(res));
+        .then(() => report(res, rawLines));
     }
-    return report(res);
+    return report(res, rawLines);
   }
 
-  function report(res) {
+  function report(res, rawLines) {
     if (opts.baseline) {
       applyBaseline(res, opts.baseline, { root, env, warn: (m) => err(sanitizeTermLine(m)) });
     }
-    printReport(res, { out, quiet: !!opts.quiet });
+    printReport(res, { out, quiet: !!opts.quiet, rawLines });
 
     // ---- reports (atomic, no-clobber, marker-checked) ----------------------
     // Written in pieces: a report can be too big for one string (report.js).

@@ -385,6 +385,8 @@ SCAN_TIMEOUT = _env_number("LAZARET_SCAN_TIMEOUT", 120.0, float)
 # Popular binary packages publish 60-90 files per release (numpy, grpcio,
 # pillow); 50 made every one of them permanently INCOMPLETE.
 MAX_ARTIFACTS = _env_number("LAZARET_MAX_ARTIFACTS", 200)
+#: --show-secrets (the scan command, on a terminal): each finding's flagged line printed unredacted, never stored
+SHOW_SECRETS = False
 # Total bytes downloaded for ONE package (all its release files together);
 # checked BEFORE each download against the sizes PyPI's metadata declares, so
 # a release that cannot fit is not fetched at all. Files that don't fit are
@@ -2891,6 +2893,7 @@ class _ArtifactScan:
         self.cut = set()           # why the scan is incomplete, of INCOMPLETE_KINDS (T-1, decision 9)
         self.timed_out = False     # the deadline passed (recorded once)
         self.sources = {}          # rel -> (text, lang) scanned as source
+        self.shown = None          # --show-secrets: {(file, line): the line as read}, filled by finish (scan_members)
         self.pending = []          # source files queued for scan_pending (a batch)
         self.first_pass = True     # members as they stream by; finish() is the second pass
         self.deferred = {}         # rel -> raw bytes (text, not scanned yet)
@@ -3045,6 +3048,13 @@ class _ArtifactScan:
         self.texts.close()
         self.digests.clear()
         self._spawned, self._candidates = {}, {}
+
+    def read_texts(self):
+        """The members read as text, as core.flagged_lines takes them ([{path, content, lang}]): the sources, the
+        manifests and the shell scripts the hooks run (--show-secrets)."""
+        out = [{"path": rel, "content": text, "lang": lang} for rel, (text, lang) in self.sources.items()]
+        return out + [{"path": rel, "content": text} for texts in (self.manifests, self.shell)
+                      for rel, text in texts.items() if rel not in self.sources]
 
     def _scan_files(self, items):
         """engine.scan_files, asking the engine once for each distinct call
@@ -4860,6 +4870,8 @@ class _ArtifactScan:
         if self.artifact == "vsix":
             self._vsix_hook_words()
         _demote_test_findings(self.issues, reachable if reachable is not None else self.entries)
+        if self.shown is not None:            # (--show-secrets: while the texts are in hand)
+            self.shown.update(lazaret.flagged_lines(self.issues, self.read_texts()))
         # F9b: the decompressed sources are no longer needed (nor the engine's copies of them: FE-1)
         self.sources, self.deferred, self.shell, self.code_text = {}, {}, {}, {}
         self.release()
@@ -4902,16 +4914,16 @@ def _pep517_backend(pyproject):
             re.findall(r"""["']([^"']+)["']""", paths.group(1)) if paths else [])
 
 
-def _scan_artifact(data, container, artifact, full, budget, memo=None):
+def _scan_artifact(data, container, artifact, full, budget, memo=None, shown=None):
     """Scan one archive -> per-artifact result fields (issues, counts, verdict).
     `memo`: the engine's answers by content, shared with the release's other
-    files (contentcache.Memo; none by default)."""
+    files (contentcache.Memo; none by default). `shown`: see scan_members."""
     anomalies = []
     return scan_members(iter_archive(data, container, artifact, budget=budget, anomalies=anomalies),
-                        anomalies, artifact, full, budget, memo)
+                        anomalies, artifact, full, budget, memo, shown=shown)
 
 
-def scan_members(members, anomalies, artifact, full, budget, memo=None, action_root=None):
+def scan_members(members, anomalies, artifact, full, budget, memo=None, action_root=None, shown=None):
     """Scan a package's files -> per-artifact result fields (_scan_artifact):
     `members` yields them as iter_archive does (Member), from an archive or a
     folder (iter_folder: an installed VS Code extension, E-1), and
@@ -4923,8 +4935,12 @@ def scan_members(members, anomalies, artifact, full, budget, memo=None, action_r
     when it is not a string; None when the scan did not get that far). A
     GitHub Action's (artifact "action", `action_root` its directory in the
     repository, N-4) says what it runs (`action`: _ArtifactScan.action_info,
-    None when the scan did not get that far)."""
+    None when the scan did not get that far). `shown` (--show-secrets): a dict
+    filled with each finding's flagged line as read, {(file, line): text},
+    while the members are in hand: for the terminal alone, never the result
+    or the store (core.flagged_lines)."""
     st = _ArtifactScan(artifact, full, budget, memo, action_root=action_root)
+    st.shown = shown
     try:
         try:
             for m in members:
@@ -5647,7 +5663,7 @@ def _archive_paths(data, container, sdist):
 
 @_always_redacted
 def scan_package(eco, name, version=None, full=False, *, resolved=None, deadline=None,
-                 cancel=None, max_artifacts=None, max_download_bytes=None):
+                 cancel=None, max_artifacts=None, max_download_bytes=None, shown=None):
     """Fetch and scan one package version. Returns a result dict.
 
     Every archive member is classified as source or binary. Source files (by
@@ -5749,8 +5765,11 @@ def scan_package(eco, name, version=None, full=False, *, resolved=None, deadline
         else:
             budget = Budget(deadline=stop, cancel=cancel, deadline_detail=(
                 f"scan time budget of {SCAN_TIMEOUT:g} s per archive (--scan-timeout) exceeded"))
-        r = _scan_artifact(data, ref["container"], ref["artifact"], full, budget, memo)
+        part = {} if shown is not None else None          # (--show-secrets: scan_members)
+        r = _scan_artifact(data, ref["container"], ref["artifact"], full, budget, memo, shown=part)
         prefix = f"{ref['filename']}/" if multi and ref.get("filename") else ""
+        if part:
+            shown.update({(prefix + path, line): text for (path, line), text in part.items()})
         for issue in r["issues"]:
             if prefix:
                 issue["file"] = prefix + issue["file"]
@@ -6565,7 +6584,7 @@ def c(code, s):
 
 VERDICT_COLOR = {"OK": "42;30", "WARN": "43;30", "INCOMPLETE": "44;97", "SUSPICIOUS": "41;97"}
 
-def print_scan(res, top=15):
+def print_scan(res, top=15, shown=None):
     # audit H1: the verdict badge is wrapped in its own SGR sequence by c(),
     # so the sanitized value must be the ARGUMENT of c() — sanitizing the
     # result would strip Lazaret's own color codes and leave the span open.
@@ -6611,7 +6630,7 @@ def print_scan(res, top=15):
         # i['msg'] embeds scanned content (install-hook cmd, X-FLOW paths).
         print(f"{prefix}{lazaret.sanitize_term(i['file'])}:{i['line']} — "
               f"{lazaret.sanitize_term(i['msg'])}")
-        ex = lazaret.issue_excerpt(i)
+        ex = lazaret.issue_excerpt(i, shown=shown)
         if ex:
             print(" " * len(prefix) + c('2', '» ' + ex))   # aligned under the file path
     if len(res["issues"]) > top:
@@ -7594,11 +7613,12 @@ def cmd_scan(store, specs, full, rescan, errors=None):
                           f"use --rescan to redo")
                     exit_bad |= stored in BAD_VERDICTS
                     continue
+            shown = {} if SHOW_SECRETS else None              # (the terminal's alone: never stored)
             if eco == "github":
                 from lazaret.registry import ghdiscover
-                res, _calls = ghdiscover.scan_repository(name, ver)
+                res, _calls = ghdiscover.scan_repository(name, ver, shown=shown)
             else:
-                res = scan_package(eco, name, ver, full, resolved=resolved)
+                res = scan_package(eco, name, ver, full, resolved=resolved, shown=shown)
         except Exception as exc:
             # audit H1: {spec} is echoed verbatim and {exc} embeds registry
             # response text (FetchError URL/reason, JSON parse position) —
@@ -7625,7 +7645,7 @@ def cmd_scan(store, specs, full, rescan, errors=None):
             exit_bad = True
             if errors is not None:
                 errors.append(spec)
-        print_scan(res)
+        print_scan(res, shown=shown)
         exit_bad |= res["verdict"] in BAD_VERDICTS  # a partial scan never passes
     return exit_bad
 
@@ -7661,7 +7681,7 @@ def _finish_sweep(errors, bad, ci):
 
 
 def main():
-    global SCAN_TIMEOUT, MAX_ARTIFACTS, MAX_PACKAGE_DOWNLOAD_BYTES, MAX_MEMBER
+    global SCAN_TIMEOUT, MAX_ARTIFACTS, MAX_PACKAGE_DOWNLOAD_BYTES, MAX_MEMBER, SHOW_SECRETS
     lazaret.configure_stdio()
     ap = argparse.ArgumentParser(prog="lazaret-registry",
                                  description="Lazaret registry scanner: npm, PyPI, Go modules, crates and VS Code "
@@ -7682,8 +7702,12 @@ def main():
                     help="Exit 1 if any package is SUSPICIOUS or INCOMPLETE")
     ap.add_argument("--no-redact-secrets", action="store_true",
                     help="No effect, kept so existing scripts keep working: registry "
-                         "results are always redacted, on screen and in the state DB "
-                         "(the scanned archive has the original lines)")
+                         "results are always redacted in the state DB (--show-secrets "
+                         "shows the original lines on a terminal)")
+    ap.add_argument("--show-secrets", action="store_true",
+                    help="Show each finding's flagged line unredacted on the terminal as a "
+                         "package is scanned (only when the output is a terminal; the state "
+                         "DB stays redacted)")
     ap.add_argument("--excerpt-width", type=int, metavar="N",
                     help="Chars of the matched line to show under each finding (default 100)")
     ap.add_argument("--scan-timeout", type=float, metavar="SECONDS",
@@ -7741,7 +7765,8 @@ def main():
         # review P2: a raw credential line must never reach the state DB,
         # which other tools (the MCP server, a shared Postgres) read back
         print("note: --no-redact-secrets has no effect: registry results are always "
-              "redacted, on screen and in the state DB", file=sys.stderr)
+              "redacted in the state DB (--show-secrets shows the lines on a terminal)", file=sys.stderr)
+    SHOW_SECRETS = lazaret.show_secrets_on(args.show_secrets)
     if args.excerpt_width:
         lazaret.EXCERPT_WIDTH = args.excerpt_width
     if args.scan_timeout and args.scan_timeout > 0:

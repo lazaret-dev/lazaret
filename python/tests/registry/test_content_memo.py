@@ -122,9 +122,9 @@ class CallSiteTests(unittest.TestCase):
         seen = []
         real = repo._scan_artifact
 
-        def recording(*args):
+        def recording(*args, **kwargs):
             seen.append(args[5])
-            return real(*args)
+            return real(*args, **kwargs)
 
         def run(env):
             with mock.patch.dict(os.environ, env), mock.patch.object(repo, "http_bytes", return_value=data), \

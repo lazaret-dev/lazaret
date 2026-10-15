@@ -4947,7 +4947,7 @@ def _apply_redaction(issues, got):
 
 
 def scan_project(root, exclude=(), include_deps=False, taint_config=None,
-                 redact_secrets=True, extra_issues=(), should_stop=None):
+                 redact_secrets=True, extra_issues=(), should_stop=None, shown=None):
     """The complete project scan, shared by the CLI (main) and the MCP server:
     collect -> scan files -> manifests / binding.gyp -> what the project's own
     install hooks run (project_hook_checks) -> --deps' dependency checks ->
@@ -4978,6 +4978,9 @@ def scan_project(root, exclude=(), include_deps=False, taint_config=None,
                     SC-TRUNCATED finding (so a partial scan can never pass the
                     gate), the cross-file pass is skipped, and the result
                     carries "incomplete": True and "incompleteReason".
+    shown           optional dict (--show-secrets): filled with each finding's
+                    flagged line as read, {(file, line): text}, for the
+                    terminal alone (print_report); the result stays redacted
 
     Returns the build_result() dict — project, scannedAt, pass, conditions,
     metrics, counts, ratings, supplyChain, crossFile, perFile, issues — plus
@@ -5113,6 +5116,8 @@ def scan_project(root, exclude=(), include_deps=False, taint_config=None,
         res["warnings"] = warnings
         if stopped:
             res.update(incomplete=True, incompleteReason=stopped)
+        if shown is not None:
+            shown.update(flagged_lines(res["issues"], files + manifests + configs))
         # L1: belt-and-braces — no SECRET-rule issue may reach a report or
         # the baseline fingerprinter with its raw flagged line.
         redact_result(res)
@@ -5419,8 +5424,54 @@ def safe_excerpt(text, width=None):
             out.append("·")
     return "".join(out) + ("…" if len(text) > width else "")
 
-def issue_excerpt(issue, width=None):
-    """Sanitized excerpt of an issue's flagged source line ('' if unavailable)."""
+SHOW_SECRETS_NOT_A_TERMINAL = ("note: --show-secrets shows credentials on a terminal only, and the output is not one: "
+                               "they stay redacted")
+
+
+def show_secrets_on(asked, stream=None):
+    """--show-secrets: True when it was asked for and `stream` (stdout) is a
+    terminal; asked for elsewhere (a pipe, a file, a CI log), a note on
+    stderr says the credentials stay redacted."""
+    if not asked:
+        return False
+    stream = sys.stdout if stream is None else stream
+    try:
+        tty = bool(stream.isatty())
+    except (AttributeError, ValueError, OSError):
+        tty = False
+    if not tty:
+        print(SHOW_SECRETS_NOT_A_TERMINAL, file=sys.stderr)
+    return tty
+
+
+def flagged_lines(issues, entries):
+    """{(file, line): that line of the file as read, unredacted} for each of
+    `issues` in a file of `entries` ([{path, content, lang?}]: its scan lines,
+    source_lines): what --show-secrets prints in place of the redacted
+    excerpt. Kept apart from the result, for the terminal alone: it never
+    reaches a report, the baseline, the registry's store or an MCP answer."""
+    by_path = {e["path"]: e for e in entries if isinstance(e.get("content"), str)}
+    lines_of, out = {}, {}
+    for i in issues:
+        path, ln = i.get("file"), i.get("line")
+        e = by_path.get(path)
+        if e is None or not isinstance(ln, int) or ln < 1:
+            continue
+        lines = lines_of.get(path)
+        if lines is None:
+            lines = lines_of[path] = source_lines(e["content"], e.get("lang"))
+        if ln <= len(lines):
+            out[(path, ln)] = lines[ln - 1]
+    return out
+
+
+def issue_excerpt(issue, width=None, shown=None):
+    """Sanitized excerpt of an issue's flagged source line ('' if unavailable).
+    `shown` (--show-secrets: flagged_lines' {(file, line): text}) gives the
+    line as read, unredacted, where it has it: for the terminal alone."""
+    raw = shown.get((issue.get("file"), issue.get("line"))) if shown else None
+    if isinstance(raw, str):
+        return safe_excerpt(raw, width)
     snip = issue.get("snippet") or []
     idx = issue["line"] - issue.get("snipStart", issue["line"])
     if not (0 <= idx < len(snip)):
@@ -5476,7 +5527,7 @@ def verification_line(v):
     return text
 
 
-def print_report(res, quiet):
+def print_report(res, quiet, shown=None):
     m, ct, rt = res["metrics"], res["counts"], res["ratings"]
     print()
     print(c("1", f"Lazaret scan — {sanitize_term_line(res['project'])}"))
@@ -5527,7 +5578,7 @@ def print_report(res, quiet):
             # the f-string, AFTER the colored severity span — sanitizing the
             # whole colored string would strip c()'s own SGR reset.
             print(f"    L{i['line']:<5} {c(SEV_COLOR[i['sev']], sev_txt)} [{i['rule']}] {sanitize_term_line(i['msg'])}")
-            ex = issue_excerpt(i)
+            ex = issue_excerpt(i, shown=shown)
             if ex:
                 print(" " * len(prefix) + c('2', '» ' + ex))   # aligned under the message
         print()
@@ -6047,6 +6098,9 @@ def _main(argv=None, source=None):
                          "By default the flagged line is replaced with a placeholder in "
                          "every artifact — terminal, JSON/HTML/SARIF reports — so scans of "
                          "your own code do not persist credentials into CI artifacts.")
+    ap.add_argument("--show-secrets", action="store_true",
+                    help="Show each finding's flagged line unredacted on the terminal (only when "
+                         "the output is a terminal). The reports and the baseline stay redacted.")
     ap.add_argument("--verify-secrets", action="store_true",
                     help="After the scan, ask each secret's provider whether it is live (GitHub, Slack, Stripe, npm, "
                          "OpenAI and Anthropic tokens, AWS key pairs): each credential goes to its own provider "
@@ -6118,9 +6172,10 @@ def _main(argv=None, source=None):
     # (collect -> scan -> manifests -> collection findings -> flow ->
     # skipped-tree notes -> gate -> redaction; see scan_project). The taint
     # config above is already applied, so none is passed here.
+    shown = {} if show_secrets_on(args.show_secrets) else None      # (the terminal's alone: never in the result)
     try:
         res = scan_project(args.directory, args.exclude, include_deps=args.deps,
-                           redact_secrets=REDACT_SECRETS, extra_issues=taint_notes)
+                           redact_secrets=REDACT_SECRETS, extra_issues=taint_notes, shown=shown)
     except ScanTargetError as exc:
         print(f"error: {sanitize_term_line(exc)}", file=sys.stderr)
         sys.exit(EXIT_USAGE)
@@ -6138,7 +6193,7 @@ def _main(argv=None, source=None):
     # ---- SEAM (flow-sca): baseline block ---------------------------------
     if args.baseline:
         apply_baseline(res, args.baseline, scan_root=args.directory)
-    print_report(res, args.quiet)
+    print_report(res, args.quiet, shown)
 
     # Writes are validated (writability + no-clobber) before the scan; each
     # write re-checks and is atomic (temp file + rename), so a mid-write

@@ -318,7 +318,7 @@ def git_form(path):
     return path if os.sep == "/" else path.replace(os.sep, "/")
 
 
-def report(checked, issues, failed_conditions, quiet):
+def report(checked, issues, failed_conditions, quiet, raw_lines=None):
     c, line = core.c, core.sanitize_term_line
     if not quiet or issues:
         print(f"lazaret hook: {len(checked)} file{'s' if len(checked) != 1 else ''} checked")
@@ -330,7 +330,7 @@ def report(checked, issues, failed_conditions, quiet):
         sev = f"{i['sev']:<8}"
         prefix = f"    L{i['line']:<5} {sev} [{i['rule']}] "
         print(f"    L{i['line']:<5} {c(core.SEV_COLOR[i['sev']], sev)} [{i['rule']}] {line(i['msg'])}")
-        ex = core.issue_excerpt(i)
+        ex = core.issue_excerpt(i, shown=raw_lines)
         if ex and not quiet:
             print(" " * len(prefix) + c("2", "» " + ex))
     if failed_conditions:
@@ -341,9 +341,11 @@ def report(checked, issues, failed_conditions, quiet):
         print(f"  Commit gate: {c('42;30', ' PASSED ')}")
 
 
-def run(files, cwd=None, quiet=False):
-    """Check `files` (or the staged files) -> the exit code."""
+def run(files, cwd=None, quiet=False, show_secrets=False):
+    """Check `files` (or the staged files) -> the exit code. `show_secrets`:
+    the findings' flagged lines unredacted on the terminal (--show-secrets)."""
     cwd = os.getcwd() if cwd is None else cwd
+    raw_lines = {} if show_secrets else None
     with tempfile.TemporaryDirectory(prefix="lazaret-hook-") as tmp:
         dest = os.path.join(tmp, "commit")
         os.mkdir(dest)
@@ -356,13 +358,13 @@ def run(files, cwd=None, quiet=False):
         try:
             # --deps: a file committed in a dependency's folder is read as one (the project scan leaves those
             # folders out, so they went unchecked: H-2's review)
-            res = core.scan_project(dest, include_deps=True, extra_issues=not_read)
+            res = core.scan_project(dest, include_deps=True, extra_issues=not_read, shown=raw_lines)
         except core.ScanTargetError:
             res = core.build_result(dest, [], not_read)      # (nothing Lazaret reads: no finding but these)
     issues = [i for i in res["issues"] if shown(i)]
     failed_conditions = [cond["label"] for cond in res["conditions"]
                          if cond["label"] in GATE and not cond["ok"]]
-    report(checked, issues, failed_conditions, quiet)
+    report(checked, issues, failed_conditions, quiet, raw_lines)
     return core.EXIT_GATE if failed_conditions else core.EXIT_OK
 
 
@@ -381,6 +383,8 @@ def main(argv=None):
                     help="check the files staged for commit (what no FILE means)")
     ap.add_argument("-q", "--quiet", action="store_true",
                     help="print only what fails the gate, and the findings")
+    ap.add_argument("--show-secrets", action="store_true",
+                    help="show each finding's flagged line unredacted (only when the output is a terminal)")
     args = ap.parse_args(argv)
     if args.staged and args.files:
         ap.error("--staged checks the staged files: name no FILE with it")
@@ -390,7 +394,7 @@ def main(argv=None):
         print(f"error: {exc}", file=sys.stderr)
         return core.EXIT_USAGE
     try:
-        return run(args.files, quiet=args.quiet)
+        return run(args.files, quiet=args.quiet, show_secrets=core.show_secrets_on(args.show_secrets))
     except HookError as exc:
         print(f"error: {core.sanitize_term_line(str(exc))}", file=sys.stderr)
         return core.EXIT_USAGE

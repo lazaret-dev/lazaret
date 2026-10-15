@@ -186,7 +186,9 @@ line yourself.
   for the findings it makes and the ones the packages build (`mk_issue`,
   `redact_result`, `redact_file_issues`, and their npm callers).
   `--no-redact-secrets` keeps credential lines in a project scan's reports
-  (registry results are always redacted).
+  (registry results are always redacted); `--show-secrets` prints each
+  finding's flagged line as read on a terminal, kept apart from the result
+  (`core.flagged_lines`), so nothing written ever holds it.
 - **Inert fixtures only.** Everything under `python/tests/fixtures/` looks
   malicious but does nothing: network references point at `.invalid`, TEST-NET
   (`192.0.2.0/24`) or private addresses; credentials are dummies; nothing is

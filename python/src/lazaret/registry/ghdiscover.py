@@ -328,19 +328,20 @@ def _checked(store, cand, doc):
     return "waiting"
 
 
-def scan_repository(full_name, ref=None, *, env=None, http=None):
+def scan_repository(full_name, ref=None, *, env=None, http=None, shown=None):
     """github:full_name at `ref` (the default branch's head when None), fetched and scanned as a project: -> (the
-    registry result, the checkout's API calls)."""
+    registry result, the checkout's API calls). `shown` (--show-secrets): filled with each finding's flagged line as
+    read, for the terminal alone (core.scan_project)."""
     ck = sources.checkout(f"github:{full_name}" + (f"@{ref}" if ref else ""), env=env, http=http)
     try:
-        return result(full_name, ck), len(ck.calls)
+        return result(full_name, ck, shown), len(ck.calls)
     finally:
         ck.cleanup()
 
 
-def result(full_name, ck):
+def result(full_name, ck, shown=None):
     """The registry's result for a checkout (the shape Store.save_scan and print_scan take)."""
-    issues, truncated, reason_more = _project_issues(ck)
+    issues, truncated, reason_more = _project_issues(ck, shown)
     counted = [i for i in issues if i["rule"] not in core.HARDENING_RULES or i["sev"] == "CRITICAL"]
     verdict, reason, strong, weak = _repo.decide_verdict(counted, truncated)
     if reason_more:
@@ -357,11 +358,11 @@ def result(full_name, ck):
             "scannedAt": datetime.datetime.now(UTC).isoformat(timespec="seconds")}
 
 
-def _project_issues(ck):
+def _project_issues(ck, shown=None):
     """The project scan of a checkout: (its findings, the parts not read whole, why)."""
     issues, truncated, why = [], len(ck.incomplete), [detail for _kind, detail in ck.incomplete]
     try:
-        res = core.scan_project(ck.root)
+        res = core.scan_project(ck.root, shown=shown)
     except core.ScanTargetError:
         return issues, truncated, why                  # (nothing in it Lazaret reads)
     if res.get("incomplete"):

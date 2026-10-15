@@ -33,7 +33,7 @@ import { findProgram } from "./lib/programs.js";
 import { cmpCodePoints } from "./lib/pycompat.js";
 import { setRedactSecrets } from "./lib/redact.js";
 import { collectProject, scanCollected } from "./project.js";
-import { buildResult, CROSS_FILE_LABEL, issueExcerpt, sanitizeTermLine } from "./report.js";
+import { buildResult, CROSS_FILE_LABEL, flaggedLines, issueExcerpt, sanitizeTermLine, showSecretsOn } from "./report.js";
 import { SEV_ORDER } from "./scanner/rules.js";
 
 const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
@@ -61,6 +61,8 @@ conditions; duplication and maintainability are not checked.
                  staged for commit
   --staged       check the files staged for commit (what no FILE means)
   -q, --quiet    print only what fails the gate, and the findings
+  --show-secrets show each finding's flagged line unredacted (only when the
+                 output is a terminal)
   --version      print version
   -h, --help     show this help
 
@@ -391,7 +393,7 @@ export function shown(issue) {
 /** A path as git writes it: "/" between folders, on Windows too (the project scan writes the system's separator). */
 export const gitForm = (path) => (sep === "/" ? String(path) : String(path).split(sep).join("/"));
 
-function report(checked, issues, failedConditions, quiet, out) {
+function report(checked, issues, failedConditions, quiet, out, rawLines = null) {
   if (!quiet || issues.length) out(`lazaret hook: ${checked.length} file${checked.length !== 1 ? "s" : ""} checked`);
   let cur = null;
   const sorted = [...issues].sort((a, b) => cmpCodePoints(gitForm(a.file), gitForm(b.file))
@@ -403,7 +405,7 @@ function report(checked, issues, failedConditions, quiet, out) {
     }
     const prefix = `    L${String(i.line).padEnd(5)} ${i.sev.padEnd(8)} [${i.rule}] `;
     out(prefix + sanitizeTermLine(i.msg));
-    const ex = issueExcerpt(i);
+    const ex = issueExcerpt(i, undefined, rawLines);
     if (ex && !quiet) out(" ".repeat(prefix.length) + "» " + ex);
   }
   if (failedConditions.length) {
@@ -419,9 +421,9 @@ function report(checked, issues, failedConditions, quiet, out) {
  * file or manifest read (env LAZARET_MAX_SOURCE_BYTES, as the CLI reads it).
  */
 export async function check(files, { cwd = process.cwd(), quiet = false, out = console.log, env = process.env,
-  maxFileBytes = MAX_FILE_BYTES } = {}) {
+  maxFileBytes = MAX_FILE_BYTES, showSecrets = false } = {}) {
   const tmp = mkdtempSync(join(tmpdir(), "lazaret-hook-"));
-  let checked, res;
+  let checked, res, rawLines = null;
   try {
     const dest = join(tmp, "commit");
     mkdirSync(dest);
@@ -433,7 +435,11 @@ export async function check(files, { cwd = process.cwd(), quiet = false, out = c
       return 0;
     }
     try {
-      res = scanCollected(dest, collectProject(dest, { deps: true, maxFileBytes }), { env, extraIssues: notRead }).res;
+      const col = collectProject(dest, { deps: true, maxFileBytes });
+      const got = scanCollected(dest, col, { env, extraIssues: notRead });
+      res = got.res;
+      // --show-secrets: the flagged lines as read, for the terminal alone (never in the result)
+      if (showSecrets) rawLines = flaggedLines(res.issues, [...got.files, ...col.manifests, ...got.configs]);
     } catch (e) {
       if (!(e instanceof ScanTargetError)) throw e;
       res = buildResult(dest, [], notRead);                  // (nothing Lazaret reads: no finding but these)
@@ -443,7 +449,7 @@ export async function check(files, { cwd = process.cwd(), quiet = false, out = c
   }
   const issues = res.issues.filter(shown);
   const failedConditions = res.conditions.filter((c) => GATE.includes(c.label) && !c.ok).map((c) => c.label);
-  report(checked, issues, failedConditions, quiet, out);
+  report(checked, issues, failedConditions, quiet, out, rawLines);
   return failedConditions.length ? 1 : 0;
 }
 
@@ -451,6 +457,7 @@ export async function check(files, { cwd = process.cwd(), quiet = false, out = c
 const FLAGS = [
   { flag: "--staged", dest: "staged" },
   { flag: "--quiet", short: "-q", dest: "quiet" },
+  { flag: "--show-secrets", dest: "showSecrets" },
   { flag: "--version", dest: "version" },
   { flag: "--help", short: "-h", dest: "help" },
 ];
@@ -517,9 +524,11 @@ export function runHook(argv, io = {}, { maxFileBytes = MAX_FILE_BYTES } = {}) {
     return 2;
   }
   setRedactSecrets(true);
-  return check(files, { cwd: io.cwd ?? process.cwd(), quiet: !!opts.quiet, out, env, maxFileBytes }).catch((e) => {
-    if (!(e instanceof HookError)) throw e;
-    err(`error: ${sanitizeTermLine(e.message)}`);
-    return 2;
-  });
+  const showSecrets = showSecretsOn(!!opts.showSecrets, io.isTTY ?? !!process.stdout.isTTY, err);
+  return check(files, { cwd: io.cwd ?? process.cwd(), quiet: !!opts.quiet, out, env, maxFileBytes, showSecrets })
+    .catch((e) => {
+      if (!(e instanceof HookError)) throw e;
+      err(`error: ${sanitizeTermLine(e.message)}`);
+      return 2;
+    });
 }

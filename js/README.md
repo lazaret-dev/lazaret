@@ -219,7 +219,7 @@ resolving to one file. Writes are atomic
 ```
 lazaret check <directory> [options]
 lazaret <directory> [options]          # the same, like the Python CLI
-lazaret hook [FILE …] [--staged] [-q]  # the commit-time gate (below)
+lazaret hook [FILE …] [--staged] [-q] [--show-secrets]  # the commit-time gate (below)
 
   --out-dir DIR         directory for the default reports (default: the scan
                         root); must already exist and be writable
@@ -234,6 +234,9 @@ lazaret hook [FILE …] [--staged] [-q]  # the commit-time gate (below)
   --exclude NAME        extra directory name to skip (repeatable)
   --baseline PATH       previous JSON report; findings not in it are marked new
   --no-redact-secrets   keep credential lines in reports (default: redacted)
+  --show-secrets        show each finding's flagged line unredacted on the
+                        terminal (only when the output is a terminal); the
+                        reports and the baseline stay redacted
   --verify-secrets      ask each secret's provider whether it is live (below)
   --excerpt-width N     characters of the flagged line shown per finding
   --max-source-bytes N  largest source file or manifest read (16,000,000; env

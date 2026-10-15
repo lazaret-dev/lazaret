@@ -10,6 +10,7 @@ import { computeMetrics, worstSevRating, maintainabilityRating } from "./scanner
 import { ENGINE_VERSION, ENGINE_MARKER, HTML_ENGINE_MARKER } from "./lib/fs.js";
 import { cmpCodePoints, pyStrip, isPrintable, pyFloatRepr } from "./lib/pycompat.js";
 import { REDACT, SECRET_RULES } from "./lib/redact.js";
+import { splitLines } from "./scanner/lines.js";
 import { reportSignature, SIGNATURE_FIELD } from "./baseline.js";
 
 const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
@@ -227,7 +228,43 @@ export function safeExcerpt(text, width = EXCERPT_WIDTH) {
   return out + (cps.length > width ? "…" : "");
 }
 
-export function issueExcerpt(issue, width = EXCERPT_WIDTH) {
+export const SHOW_SECRETS_NOT_A_TERMINAL = "note: --show-secrets shows credentials on a terminal only, and the output "
+  + "is not one: they stay redacted";
+
+/** --show-secrets (core.show_secrets_on): true when asked for and the output is a terminal (`isTTY`); asked for
+ * elsewhere (a pipe, a file, a CI log), a note on `err` says the credentials stay redacted. */
+export function showSecretsOn(asked, isTTY, err) {
+  if (!asked) return false;
+  if (!isTTY) err(SHOW_SECRETS_NOT_A_TERMINAL);
+  return !!isTTY;
+}
+
+const shownKey = (file, line) => `${line}\u0000${file}`;
+
+/**
+ * Each of `issues`' flagged line as read, unredacted (core.flagged_lines), for the files of `entries` ([{path,
+ * content, lang?}]: their scan lines, splitLines): what --show-secrets prints in place of the redacted excerpt. Kept
+ * apart from the result, for the terminal alone: it never reaches a report or the baseline.
+ */
+export function flaggedLines(issues, entries) {
+  const byPath = new Map();
+  for (const e of entries) if (typeof e.content === "string") byPath.set(e.path, e);
+  const linesOf = new Map(), out = new Map();
+  for (const i of issues) {
+    const e = byPath.get(i.file);
+    if (!e || !Number.isInteger(i.line) || i.line < 1) continue;
+    let lines = linesOf.get(i.file);
+    if (!lines) linesOf.set(i.file, (lines = splitLines(e.content, e.lang ?? null)));
+    if (i.line <= lines.length) out.set(shownKey(i.file, i.line), lines[i.line - 1]);
+  }
+  return out;
+}
+
+/** Sanitized excerpt of an issue's flagged source line ("" if unavailable); `shown` (flaggedLines') gives the line as
+ * read, unredacted, where it has it (--show-secrets, for the terminal alone). */
+export function issueExcerpt(issue, width = EXCERPT_WIDTH, shown = null) {
+  const raw = shown ? shown.get(shownKey(issue.file, issue.line)) : undefined;
+  if (typeof raw === "string") return safeExcerpt(raw, width);
   const snip = Array.isArray(issue.snippet) ? issue.snippet : [];
   const idx = issue.line - (issue.snipStart ?? issue.line);
   if (!(idx >= 0 && idx < snip.length) || typeof snip[idx] !== "string") return "";
@@ -252,7 +289,7 @@ export function verificationLine(v) {
 }
 
 /** Terminal summary. `out` receives lines (injectable for tests). */
-export function printReport(res, { out = console.log, quiet = false } = {}) {
+export function printReport(res, { out = console.log, quiet = false, rawLines = null } = {}) {
   const m = res.metrics;
   out("");
   out(`Lazaret scan — ${sanitizeTermLine(res.project)}`);
@@ -271,7 +308,7 @@ export function printReport(res, { out = console.log, quiet = false } = {}) {
     const shown = res.issues.slice(0, 40);
     for (const i of shown) {
       out(`  ${i.sev} ${i.rule} ${sanitizeTermLine(i.file)}:${i.line} — ${safeExcerpt(i.msg, 90)}`);
-      const ex = issueExcerpt(i);
+      const ex = issueExcerpt(i, undefined, rawLines);
       if (ex) out(`      » ${ex}`);
     }
     if (res.issues.length > shown.length)

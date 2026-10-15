@@ -26,6 +26,14 @@ aggregate):
 
 ### Added
 
+- **`--show-secrets`: the credentials on the terminal, and nowhere else.** Every finding is redacted where it is made,
+  so a secret finding's line was a placeholder on the terminal too. `lazaret . --show-secrets`, `lazaret hook
+  --show-secrets` and `lazaret-registry scan --show-secrets` print each finding's flagged line as it was read, kept
+  apart from the result (`core.flagged_lines`, the npm package's `flaggedLines`): the JSON, HTML and SARIF reports,
+  the baseline, the registry's state DB and the MCP server's answers stay redacted. A registry scan keeps the lines
+  while the package's files are in hand; a version skipped as already scanned, and `report`, show the redacted lines.
+  It takes effect only when the output is a terminal: in a pipe, a file or a CI log, a note says the credentials stay
+  redacted.
 - **Security: a workflow that sends named secrets out, or searches the repository for credentials and sends what it
   finds, is SC-WORKFLOW-EXFIL (RA-1; the engine's, for both packages; rule set 2.82.0).** GhostAction (August to
   October 2026) committed workflows under the identities of the accounts it had stolen, some 30,000 repositories'
