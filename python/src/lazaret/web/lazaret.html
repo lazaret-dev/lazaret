@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-tEgJRs95gcV7F3e2FJa9LGsmRLQKek5CrjbVNc+W8pE='; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-vLvDS5WEZ7YttHbBjPMO5ZakgWt5fsv2/b6rzhDL6a8='; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'">
 <title>Lazaret — Security &amp; Quality Review</title>
 <style>
   :root{
@@ -1771,12 +1771,21 @@ id:"S-HTTP", name:"Cleartext HTTP URL", type:"HOTSPOT", sev:"MINOR", langs:["py"
 },
 {
 id:"S-RANDOM", name:"Non-crypto randomness for secret", type:"HOTSPOT", sev:"MAJOR", langs:["py", "js"],
- re:pyRe("(random\\.(random|randint|choice|randrange|getrandbits)|Math\\.random)\\s*\\(", ""),
+ re:pyRe("(random\\.(random|randint|randrange|choice|choices|sample|shuffle|uniform|triangular|getrandbits|randbytes|gauss|normalvariate|lognormvariate|betavariate|expovariate|gammavariate|paretovariate|vonmisesvariate|weibullvariate|binomialvariate)|Math\\.random)\\s*\\(", ""),
  need:pyRe("(token|secret|password|otp|nonce|session|key|reset|csrf)", "i"),
  msg:"PRNG used in a security-sensitive value.",
  why:"random/Math.random are predictable; generated tokens can be guessed.",
  fix:"Use secrets module (Python) or crypto.randomBytes / crypto.getRandomValues (JS).",
  ref:"CWE-338",
+},
+{
+id:"S-WEAKRAND", name:"Pseudo-random generator", type:"HOTSPOT", sev:"MINOR", langs:["py"],
+ re:pyRe("(?<![\\w.])random\\.(?:random|randint|randrange|choice|choices|sample|shuffle|uniform|triangular|getrandbits|randbytes|gauss|normalvariate|lognormvariate|betavariate|expovariate|gammavariate|paretovariate|vonmisesvariate|weibullvariate|binomialvariate)\\s*\\(", ""),
+ skip:pyRe("(token|secret|password|otp|nonce|session|key|reset|csrf)", "i"),
+ msg:"The random module's generator in use.",
+ why:"random is a Mersenne Twister: what it gives next can be worked out from what it gave, so a value an attacker must not guess (a token, a password, a session or reset key) made with it can be guessed.",
+ fix:"Use the secrets module (secrets.token_urlsafe, secrets.choice) or random.SystemRandom where the value must not be guessed; random is fine for simulations, sampling and tests.",
+ ref:"CWE-330",
 },
 {
 id:"S-INNERHTML", name:"HTML injection sink", type:"HOTSPOT", sev:"MAJOR", langs:["js"],
@@ -1917,11 +1926,11 @@ id:"S-SSTI", name:"Template injection risk", type:"VULN", sev:"CRITICAL", langs:
  ref:"CWE-1336 · OWASP A03",
 },
 {
-id:"S-XML", name:"XML parsing without a hardened parser", type:"HOTSPOT", sev:"MINOR", langs:["py"],
- re:pyRe("(?:^|\\s)(?:import\\s+xml\\.(?:etree|dom|sax)|from\\s+xml\\.(?:etree|dom|sax))", ""),
- msg:"Stdlib XML parsers are unsafe for untrusted input.",
- why:"xml.etree/dom/sax are vulnerable to entity-expansion and (historically) XXE attacks.",
- fix:"Parse untrusted XML with a hardened parser such as defusedxml or lazaret.safexml.",
+id:"S-XML", name:"XML external entities enabled", type:"VULN", sev:"MAJOR", langs:["py"],
+ re:pyRe("setFeature\\s*\\(\\s*(?:[\\w.]*\\.)?feature_external_(?:ges|pes)\\s*,\\s*(?:True|1)\\s*\\)|setFeature\\s*\\(\\s*[rRuU]?[\\\"']http://xml\\.org/sax/features/external-(?:general|parameter)-entities[\\\"']\\s*,\\s*(?:True|1)\\s*\\)|\\bresolve_entities\\s*=\\s*True\\b", ""),
+ msg:"XML parser set to resolve external entities.",
+ why:"With external entities on, a document can make the parser read local files or fetch URLs (XXE) and put what they hold in what it parses.",
+ fix:"Leave them off (xml.sax and xml.dom's default since Python 3.7.1; resolve_entities=False with lxml), or parse untrusted XML with defusedxml or lazaret.safexml.",
  ref:"CWE-611",
 },
 {
@@ -2214,6 +2223,15 @@ const TAINT_SINKS = {
     // a response body built from the value (Flask / Werkzeug, Django, Starlette / FastAPI),
     // or the value marked as safe HTML; a Flask view's own `return` is checked too
     ["XSS", pyRe(String.raw`make_response\s*\(|(?<![\w.])Response\s*\(|(?<![\w.])HttpResponse\s*\(|(?<![\w.])HTMLResponse\s*\(|(?<![\w.])Markup\s*\(|mark_safe\s*\(|(?<![\w.])SafeString\s*\(`), "cross-site scripting", "MAJOR", "CWE-79", "Escape the value (or render it through an autoescaping template) before it is returned."],
+    // (Q-2; a seventh field names the arguments read) a value or a key put in the session (Flask's, Django's
+    // request.session): the rest of the statement, `session[key] = value`
+    ["TRUST", pyRe(String.raw`\bsession(?=\s*\[[^\n]*\]\s*=(?!=))`), "trust boundary violation", "MINOR", "CWE-501", "Validate the value (and the key) before the session holds it: what the session holds is trusted later.", "rest"],
+    ["TRUST", pyRe(String.raw`\bsession\s*\.\s*(?:update|setdefault|__setitem__)\s*\(`), "trust boundary violation", "MINOR", "CWE-501", "Validate the value (and the key) before the session holds it: what the session holds is trusted later.", "extent"],
+    // an LDAP search (ldap3's, python-ldap's), in a file that imports one (SINK_IMPORTS)
+    ["LDAP", pyRe(String.raw`(?<![\w.])(?!re\.|regex\.)(?:[A-Za-z_]\w*\.)+(?:search|search_s|search_st|search_ext|search_ext_s|paged_search)\s*\(`), "LDAP injection", "MAJOR", "CWE-90", "Escape the values put into a filter or a DN (ldap3.utils.conv.escape_filter_chars, ldap.filter.filter_format).", "extent"],
+    // an XPath expression (lxml's, elementpath's): not its variables, keyword arguments
+    ["XPATH", pyRe(String.raw`\.\s*xpath\s*\(|(?<![\w])XPath\s*\(`), "XPath injection", "MAJOR", "CWE-643", "Pass the value as an XPath variable (tree.xpath(\"//u[@id=$id]\", id=value)), never into the expression.", "first"],
+    ["XPATH", pyRe(String.raw`\belementpath\s*\.\s*(?:select|iter_select|Selector)\s*\(`), "XPath injection", "MAJOR", "CWE-643", "Pass the value as an XPath variable (tree.xpath(\"//u[@id=$id]\", id=value)), never into the expression.", "positional"],
   ],
   js: [
     ["CMD", pyRe(String.raw`\b(exec|execSync|spawn|spawnSync)\s*\(`), "command injection", "CRITICAL", "CWE-78", "Use execFile/spawn with an args array; validate the value."],
@@ -2243,6 +2261,9 @@ const NON_HTML_CHAIN_RE = pyRe(String.raw`\.(?:type\s*\(|(?:set|header)\s*\(\s*[
 const TEMPLATE_SINK_SOURCE = pyRe(String.raw`(?<![\w.])Template\s*\(`).source;
 const TEMPLATE_SINK_RE = TAINT_SINKS.py.find((r) => r[1].source === TEMPLATE_SINK_SOURCE)[1];
 const TEMPLATE_IMPORT_RE = pyRe(String.raw`(?<![^\n])[ \t]*from[ \t]+(?:jinja2|mako\.template|django\.template)[ \t]+import\b[^\n]*\bTemplate\b`);
+// (Q-2) the rows of a category that count only in a file importing a module: LDAP's search() is a regex's
+// search() elsewhere (core._SINK_IMPORTS)
+const SINK_IMPORTS = { LDAP: pyRe(String.raw`(?<![^\n])[ \t]*(?:from|import)[ \t]+ldap3?\b`) };
 
 // Spec 12: a Python annotated assignment `x: T = source` binds x (the
 // optional `: T` part), and a JS destructuring declaration binds every name
@@ -2280,8 +2301,40 @@ function destructuredNames(pattern) {
   return names;
 }
 
-/** {names, rhs} of an assignment line, or null (twin of core._assignment). */
+// (Q-2) a name a `for` statement binds
+const FOR_NAME_RE = pyRe(String.raw`^[A-Za-z_]\w*$`);
+/** {names, rhs} of a Python `for` statement: its target names and what it iterates over, or null (twin of the
+    engine's for_targets; Q-2). */
+function forTargets(line) {
+  let rest = pyLstrip(line);
+  if (rest.startsWith("async") && rest.length > 5 && isPySpace(rest[5])) rest = pyLstrip(rest.slice(5));
+  if (!rest.startsWith("for") || !(rest.length > 3 && (isPySpace(rest[3]) || rest[3] === "("))) return null;
+  rest = rest.slice(3);
+  let at = -1;
+  for (let k = 1; k < rest.length - 2; k++) {
+    if (rest[k] === "i" && rest[k + 1] === "n" && (isPySpace(rest[k - 1]) || rest[k - 1] === ")")
+        && (isPySpace(rest[k + 2]) || rest[k + 2] === "(" || rest[k + 2] === "[")) { at = k; break; }
+  }
+  if (at < 0) return null;
+  let target = pyStrip(rest.slice(0, at));
+  if (target.startsWith("(") && target.endsWith(")")) target = pyStrip(target.slice(1, -1));
+  const names = [];
+  for (let part of target.split(",")) {
+    part = pyStrip(part);
+    if (!part) continue;
+    if (!FOR_NAME_RE.test(part)) return null;
+    names.push(part);
+  }
+  if (!names.length) return null;
+  return { names, rhs: pyStrip(topSplit(rest.slice(at + 2), ":")[0]) };
+}
+
+/** {names, rhs} of an assignment line, or null (twin of core._assignment); a Python `for` statement's (Q-2). */
 function parseAssignment(line, lang) {
+  if (lang === "py") {
+    const f = forTargets(line);
+    if (f) return f;
+  }
   const m = ASSIGN_RE[lang].exec(line);
   if (m) {
     const name = m[1];
@@ -2304,7 +2357,8 @@ function parseAssignment(line, lang) {
 // A value put into a container — an element assigned or added — taints the
 // container, a weak update (core._CONTAINER_WRITE_RE / _container_write).
 const CONTAINER_WRITE_RE = {
-  py: pyRe(String.raw`^\s*([A-Za-z_]\w*)\s*(?:\[[^\[\]\n]*\]\s*(?:[-+*/%&|^@]|//|\*\*|<<|>>)?=(?!=)|\.\s*(?:append|extend|insert|add)\s*\()\s*(.+)`, "d"),
+  // (Q-2: set(), configparser's set(section, option, value), a cache's set(key, value))
+  py: pyRe(String.raw`^\s*([A-Za-z_]\w*)\s*(?:\[[^\[\]\n]*\]\s*(?:[-+*/%&|^@]|//|\*\*|<<|>>)?=(?!=)|\.\s*(?:append|extend|insert|add|set)\s*\()\s*(.+)`, "d"),
   js: pyRe(String.raw`^\s*([A-Za-z_$][\w$]*)\s*(?:\[[^\[\]\n]*\]\s*(?:[-+*/%&|^]|\*\*|<<|>>>?|&&|\|\||\?\?)?=(?![=>])|\.\s*(?:push|unshift)\s*\()\s*(.+)`, "d"),
 };
 /** [container name, the value written] of a line that puts a value into a container, or null (core._container_write). */
@@ -2318,14 +2372,56 @@ function containerWrite(line, lang) {
 // (core._KEYED_WRITE_RE / _KEYED_READ_RE / _keyed_reads).
 const KEYED_WRITE_RE = pyRe(String.raw`^\s*([A-Za-z_$][\w$]*)\s*\[\s*(["'])([^"'\\\n]*)\2\s*\]\s*=(?![=>])`);
 const KEYED_READ_RE = pyRe(String.raw`(?<![\w$.])([A-Za-z_$][\w$]*)\s*\[\s*(["'])([^"'\\\n]*)\2\s*\]`, "g");
-/** `text` with its reads of container elements known to hold no untrusted data blanked (core._keyed_reads). */
-function keyedReads(text, keyed) {
-  if (!keyed.size || !text.includes("[")) return text;
-  return text.replace(KEYED_READ_RE, (m, name, _q, key) => {
+// (Q-2) set(<literals>, value) puts the value under the key its literals make (joined by NUL), and a Python get()
+// of literal keys reads it: configparser's get(section, option), a dict's get(key)
+const KEYED_SET_RE = pyRe(String.raw`^\s*([A-Za-z_]\w*)\s*\.\s*set\s*\(`);
+const KEYED_GET_RE = pyRe(String.raw`(?<![\w$.])([A-Za-z_]\w*)\s*\.\s*get\s*\(\s*((?:(["'])[^"'\\\n]*\3\s*,\s*)*(["'])[^"'\\\n]*\4)\s*,?\s*\)`, "g");
+const KEY_LITERAL_RE = pyRe(String.raw`(["'])([^"'\\\n]*)\1`, "g");
+const KEY_LITERAL_WHOLE_RE = pyRe(String.raw`^(["'])([^"'\\\n]*)\1$`);
+/** `text` with its reads of container elements known to hold no untrusted data blanked (core._keyed_reads); in
+    Python, a get() of literal keys too (Q-2). */
+function keyedReads(text, keyed, lang) {
+  if (!keyed.size) return text;
+  const blank = (m, name, key) => {
     const keys = keyed.get(name);
     if (!keys || !keys.has(key) || keys.get(key) !== null) return m;
     return " ".repeat(cpLen(m));
-  });
+  };
+  if (text.includes("[")) text = text.replace(KEYED_READ_RE, (m, name, _q, key) => blank(m, name, key));
+  if (lang === "py" && text.includes("get")) {
+    text = text.replace(KEYED_GET_RE, (m, name, lits) =>
+      blank(m, name, [...lits.matchAll(KEY_LITERAL_RE)].map((l) => l[2]).join("\0")));
+  }
+  return text;
+}
+/** A call's arguments, `text` being what follows its opening parenthesis; an empty last one, after a trailing
+    comma, left out (the engine's call_args; Q-2). */
+function callArgs(text) {
+  const out = [];
+  let i = 0;
+  for (;;) {
+    const end = argsEnd(text, i);
+    out.push(text.slice(i, end));
+    if (end >= text.length || text[end] !== ",") break;
+    i = end + 1;
+  }
+  if (out.length > 1 && !pyStrip(out[out.length - 1])) out.pop();
+  return out;
+}
+/** The key a set() call puts its value under: its literal arguments but the last, joined by NUL; null when one is
+    not a string literal (the engine's keyed_set; Q-2). */
+function keyedSet(stmt, name) {
+  const m = KEYED_SET_RE.exec(stmt);
+  if (!m || m[1] !== name) return null;
+  const args = callArgs(stmt.slice(m.index + m[0].length));
+  if (args.length < 2) return null;
+  const parts = [];
+  for (const a of args.slice(0, -1)) {
+    const l = KEY_LITERAL_WHOLE_RE.exec(pyStrip(a));
+    if (!l) return null;
+    parts.push(l[2]);
+  }
+  return parts.join("\0");
 }
 
 const STRING_LIT_RE = pyRe(String.raw`\"[^\"]*\"|'[^']*'|` + "`[^`]*`", "g");
@@ -2357,6 +2453,9 @@ const PARTIAL_SAN = {
     REDIR: pyRe(String.raw`(?<![\w.])(?:[A-Za-z_][\w.]*\.)?(?:url_for|reverse|reverse_lazy)\s*\(` + SAN_BODY + String.raw`\)`
       + String.raw`|request\.(?:META\.get|headers\.get)\s*\(\s*[\"'](?:HTTP_REFERER|[Rr]eferr?er)[\"']` + SAN_BODY
       + String.raw`\)|request\.META\s*\[\s*[\"']HTTP_REFERER[\"']\s*\]`, "g"),
+    // (Q-2) LDAP's escapes; a quote replaced, as a value is escaped for an XPath string
+    LDAP: pyRe(String.raw`(?<!\w)(?:[A-Za-z_][\w.]*\.)?(?:escape_filter_chars|escape_dn_chars|escape_rdn|filter_format)\s*\(` + SAN_BODY + String.raw`\)`, "g"),
+    XPATH: pyRe(String.raw`(?<![\w.])[A-Za-z_][\w.]*\s*\.\s*replace\s*\(\s*[rRuU]?(?:"'"|'\\''|'"'|"\\"")\s*,` + SAN_BODY + String.raw`\)`, "g"),
   },
   js: {
     XSS: pyRe(String.raw`(?:DOMPurify\.sanitize|encodeURIComponent|escapeHtml|sanitizeHtml|he\.(?:encode|escape)|validator\.escape|filterXSS|xssFilters\.\w+|_\.escape|lodash\.escape)\s*\(` + SAN_BODY + String.raw`\)`, "g"),
@@ -2389,7 +2488,8 @@ function neutralize(text, lang, suffix) {
    Python literal's prefix (r, b, u, f or a pair) is part of the literal, not
    a name. */
 const FIELD_RE = { py: pyRe(String.raw`\{([^{}]*)\}`, "g"), js: pyRe(String.raw`\$\{([^{}]*)\}`, "g") };
-const PY_LIT_RE = pyRe(String.raw`(?:(?<![A-Za-z0-9_])([rRbBuUfF]{1,2}))?(\"[^\"]*\"|'[^']*'|` + "`[^`]*`)", "g");
+// (Q-2) a literal's escapes: `'it\'s'` is one literal
+const PY_LIT_RE = pyRe(String.raw`(?:(?<![A-Za-z0-9_])([rRbBuUfF]{1,2}))?("(?:[^"\\\n]|\\.)*"|'(?:[^'\\\n]|\\.)*'|` + "`[^`]*`)", "g");
 const ASCII_WORD = new Set("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_$");
 const JS_TAG_KEYWORDS = new Set(["return", "typeof", "case", "in", "of", "yield", "await", "throw",
   "delete", "void", "else", "do", "new"]);
@@ -2547,6 +2647,8 @@ const SINK_ARGS = new Map([
   ...TAINT_SINKS.py.filter((r) => r[1].source.includes("send_from_directory")).map((r) => [r[1], "first"]),
   ...TAINT_SINKS.js.filter((r) => ["SQL", "SSTI"].includes(r[0]) || (r[0] === "PATH" && r[1].source.includes("writeFile"))
     || (r[0] === "XSS" && r[1].source.includes("send"))).map((r) => [r[1], "first"]),
+  // (Q-2) a row's seventh field names them
+  ...TAINT_SINKS.py.filter((r) => r.length > 6).map((r) => [r[1], r[6]]),
 ]);
 // A redirect to a path on this site, or to a URL on a fixed host; a value
 // assigned from one is clean for open redirect (core._SAME_SITE_RE).
@@ -2566,7 +2668,8 @@ function offsiteArgs(args) {
 /** The part of a sink's arguments that carries the injection (core._sink_args). */
 function sinkArgs(text, sinkRe, lang, suffix) {
   const mode = SINK_ARGS.get(sinkRe);
-  const args = mode === "first" ? firstArg(text) : mode === "positional" ? positionalArgs(text) : extent(text);
+  const args = mode === "first" ? firstArg(text) : mode === "positional" ? positionalArgs(text)
+    : mode === "rest" ? text : extent(text);
   return suffix === "REDIR" ? offsiteArgs(args) : args;
 }
 
@@ -3636,6 +3739,52 @@ function parenCloseMap(line) {
  * Append S-SQL-PY issues for execute()/executemany() calls on `lines`
  * (matching text) to `issues`; `snipLines` (default: lines) feed snippets.
  */
+/* A cookie set without the Secure flag (twin of the engine's cookie_flags; Q-2): set_cookie (Flask's and
+   Werkzeug's, Django's, Starlette's, aiohttp's) given secure=False (or 0, None), or not given secure at all, by
+   keyword or as its seventh positional argument; a call passing *args or **kwargs, or a value that is an
+   expression, is left alone. Read on the call's statement. */
+const COOKIE_CALL_RE = pyRe(String.raw`\.\s*set_cookie\s*\(`);
+const COOKIE_SECURE_KW_RE = pyRe(String.raw`^secure\s*=(?!=)(.*)`);
+const KWARG_NAME_RE = pyRe(String.raw`^[A-Za-z_]\w*\s*=(?!=)`);
+const COOKIE_OFF = ["False", "0", "None"];
+const COOKIE_SECURE_ARG = 6;
+const COOKIE_HOW = { false: "with secure=False", missing: "without secure=True" };
+function cookieScan(file, lines, ctx, issues) {
+  if (!ctx.content.includes("set_cookie")) return;
+  for (let i = 0; i < lines.length; i++) {
+    if (ctx.cmask[i]) continue;
+    const line = ctx.mcode(i);
+    const m = COOKIE_CALL_RE.exec(line);
+    if (!m) continue;
+    const stmt = taintStatement(ctx, i, line);
+    let secure = null, spread = false, positional = 0;
+    for (let a of callArgs(stmt.slice(m.index + m[0].length))) {
+      a = pyStrip(a);
+      if (!a) continue;
+      if (a[0] === "*") spread = true;
+      else {
+        const k = COOKIE_SECURE_KW_RE.exec(a);
+        if (k) secure = pyStrip(k[1]);
+        else if (!KWARG_NAME_RE.test(a)) {
+          if (positional === COOKIE_SECURE_ARG) secure = a;
+          positional++;
+        }
+      }
+    }
+    let how;
+    if (secure === null) {
+      if (spread) continue;
+      how = "missing";
+    } else if (COOKIE_OFF.includes(secure)) how = "false";
+    else continue;
+    issues.push(mkIssue({ id: "S-COOKIE", name: "Cookie without the Secure flag", type: "HOTSPOT", sev: "MINOR",
+      msg: `Cookie set ${COOKIE_HOW[how]}: the browser also sends it over plain HTTP.`,
+      why: "A cookie without the Secure flag goes out with every http:// request to the site, where anyone on the network path can read it (a session or remember-me value among them).",
+      fix: "Pass secure=True (and httponly=True for a cookie no script reads).", ref: "CWE-614 · OWASP A05" },
+      file, i + 1, lines, m.index));
+  }
+}
+
 function sqlSinkScan(file, lines, issues, snipLines = lines) {
   const tmap = sqlTemplateMap(lines);
   const flagged = new Set(issues.filter((i) => i.rule === "S-SQL-PY").map((i) => i.line));
@@ -4645,6 +4794,24 @@ const IDENT_RUN_RE = { py: /[\p{L}\p{N}_]+/gu, js: /[\p{L}\p{N}_$]+/gu };
  * same block, or an enclosing one, replaces the value, one in a nested or
  * sibling block adds to it; path guards that leave clear path traversal.
  */
+/** Line i's code (`line`) joined with the lines that continue its open brackets, at most TAINT_JOIN_MAX_LINES of
+    them and TAINT_JOIN_MAX_CHARS of their text (the taint pass's statements; the cookie pass's, Q-2). */
+function taintStatement(ctx, i, line) {
+  let depth = bracketDepth(line);
+  if (depth <= 0) return line;
+  const parts = [line];
+  let total = 0;
+  for (let j = i + 1; depth > 0 && j < ctx.lines.length && j <= i + TAINT_JOIN_MAX_LINES
+       && total < TAINT_JOIN_MAX_CHARS; j++) {
+    if (ctx.cmask[j]) continue;
+    const nxt = cpHead(ctx.mcode(j), TAINT_JOIN_MAX_CHARS - total);
+    parts.push(nxt);
+    total += cpLen(nxt);
+    depth += bracketDepth(nxt);
+  }
+  return parts.join(" ");
+}
+
 function taintScan(file, lines, lang, ctx = null) {
   const src = TAINT_SOURCES[lang];
   if (!src) return [];                   // SQL and others: pattern rules only
@@ -4657,6 +4824,7 @@ function taintScan(file, lines, lang, ctx = null) {
   const tainted = new Map();
   let sinks = TAINT_SINKS[lang];
   if (lang === "py" && !TEMPLATE_IMPORT_RE.test(ctx.content)) sinks = sinks.filter((r) => r[1] !== TEMPLATE_SINK_RE);
+  sinks = sinks.filter((r) => !SINK_IMPORTS[r[0]] || SINK_IMPORTS[r[0]].test(ctx.content));
   const partial = PARTIAL_SAN[lang] || {};
   const suffixes = [...new Set(sinks.map((r) => r[0]))];
   const identRe = IDENT_RUN_RE[lang];
@@ -4682,26 +4850,12 @@ function taintScan(file, lines, lang, ctx = null) {
     }
     return [...found].sort((a, b) => tainted.get(a).order - tainted.get(b).order);
   };
-  const statement = (i, line) => {
-    let depth = bracketDepth(line);
-    if (depth <= 0) return line;
-    const parts = [line];
-    let total = 0;
-    for (let j = i + 1; depth > 0 && j < lines.length && j <= i + TAINT_JOIN_MAX_LINES
-         && total < TAINT_JOIN_MAX_CHARS; j++) {
-      if (ctx.cmask[j]) continue;
-      const nxt = cpHead(ctx.mcode(j), TAINT_JOIN_MAX_CHARS - total);
-      parts.push(nxt);
-      total += cpLen(nxt);
-      depth += bracketDepth(nxt);
-    }
-    return parts.join(" ");
-  };
+  const statement = (i, line) => taintStatement(ctx, i, line);
   const keyed = new Map();               // container -> Map(literal key -> clean Set, or null: no untrusted data)
   const allowed = [];                    // [indent, name, taint order, clean Set before] of the allowlist guards open
   // null when the value carries no untrusted data, else the sink suffixes it is clean for (core's value_clean)
   const valueClean = (rhs) => {
-    rhs = keyedReads(rhs, keyed);
+    rhs = keyedReads(rhs, keyed, lang);
     const base = taintCode(neutralize(rhs, lang), lang);   // full sanitizers stripped
     if (!src.test(base) && !carriers(base, null).length) return null;
     const clean = new Set();
@@ -4714,7 +4868,7 @@ function taintScan(file, lines, lang, ctx = null) {
     return clean;
   };
   const report = (suffix, cat, sev, cwe, fix, text, i, col) => {
-    const restCode = taintCode(neutralize(keyedReads(text, keyed), lang, suffix), lang);
+    const restCode = taintCode(neutralize(keyedReads(text, keyed, lang), lang, suffix), lang);
     const found = carriers(restCode, suffix);
     if (!found.length && !src.test(restCode)) return;
     const what = found.length ? `untrusted data via '${found[0]}' (tainted at line ${tainted.get(found[0]).line})` : "untrusted data";
@@ -4814,9 +4968,10 @@ function taintScan(file, lines, lang, ctx = null) {
       if (joined !== null && joined[0] === container) written = joined[1];
       const clean = valueClean(written);
       const km = KEYED_WRITE_RE.exec(stmt);
-      if (km && km[1] === container) {
+      const key = km && km[1] === container ? km[3] : lang === "py" ? keyedSet(stmt, container) : null;
+      if (key !== null) {
         if (!keyed.has(container)) keyed.set(container, new Map());
-        keyed.get(container).set(km[3], clean);
+        keyed.get(container).set(key, clean);
       }
       if (clean !== null) {
         const old = tainted.get(container);
@@ -5262,9 +5417,10 @@ function scanLines(path, content, lines, lang, ctx, issues) {
   }
   ctx.checkTime();
   for (const t of taintScan(path, lines, lang, ctx)) issues.push(t);
-  // G12: whole-argument SQL-sink analysis (Python, project mode)
+  // G12: whole-argument SQL-sink analysis (Python, project mode); Q-2: cookies without the Secure flag
   if (lang === "py") {
     try { sqlSinkScan(path, mlines, issues, lines); } catch (e) { if (e instanceof ScanBudgetExceeded) throw e; }
+    cookieScan(path, lines, ctx, issues);
   }
   ctx.checkTime();
   for (const fn of extractFunctions(lines, lang)) {

@@ -26,6 +26,23 @@ aggregate):
 
 ### Added
 
+- **Taint and rules for BenchmarkPython's five categories without one: trust boundary, LDAP and XPath injection, weak
+  randomness, cookies without the Secure flag (Q-2; rule set 2.80.0).** Project mode, Python. New sinks of the
+  intra-file taint pass: a value or a key put in the session (T-TRUST, MINOR, CWE-501: Flask's `session[k] = v`,
+  Django's `request.session`, `session.update(…)`), an LDAP search (T-LDAP, MAJOR, CWE-90: ldap3's `search`,
+  python-ldap's `search_s` and the like, in a file that imports `ldap3` or `ldap`, so that a regex's `search()` is
+  not one; `escape_filter_chars`, `escape_dn_chars`, `escape_rdn` and `filter_format` clear it) and an XPath
+  expression (T-XPATH, MAJOR, CWE-643: lxml's `.xpath()` and `XPath()`, elementpath's `select`, but not the
+  variables passed beside the expression, `tree.xpath("//u[@id=$id]", id=value)`; a value whose quotes are replaced,
+  as it is escaped for an XPath string, is clean for it). S-WEAKRAND (HOTSPOT, MINOR, CWE-330): a call of one of the
+  random module's generators on a line S-RANDOM does not take (Bandit's B311, Sonar's S2245). S-COOKIE (HOTSPOT,
+  MINOR, CWE-614), a project pass: `set_cookie` (Flask's, Django's, Starlette's, aiohttp's) given `secure=False` or
+  no `secure` at all, read over the lines of its call; one passing `**kwargs`, or a value that is an expression, is
+  left alone. On BenchmarkPython 0.1 (OWASP's scorer, as the audits run it; its test sources are not read) the score
+  is +0.541, from +0.215 (true positives 161 to 368 of 452, false positives 110 to 154 of 778): securecookie and
+  weakrand +1.00, ldapi +0.71, xpathi +0.41, trustbound +0.35, and with the taint fixes below xss +0.62, pathtraver
+  +0.48, redirect +0.33 (with S-XML below, xxe +0.65). Dependency scans read none of these, so the popular set is
+  unchanged.
 - **A PyPI release's requirements no module of it imports: SC-UNUSED-DEPENDENCY for wheels and sdists (D-5;
   rule set 2.77.0).** npm's check (0.1.8) compared names; a distribution's name is not its import name
   (beautifulsoup4 is bs4), so a requirement (not an extra's) is now used when one of the release's imports answers
@@ -720,6 +737,18 @@ aggregate):
 
 ### Changed
 
+- **Security: S-XML is a parser set to resolve external entities, not an import of xml.etree, xml.dom or xml.sax
+  (Q-3; rule set 2.80.0).** Since Python 3.7.1 none of them resolves an external entity unless told to, and Expat
+  2.4.1 refuses entity bombs, so the import flagged safe code: all 20 of BenchmarkPython's safe XXE cases (its 8 real
+  ones turn the feature on). S-XML ("XML external entities enabled", VULN, MAJOR, CWE-611) is now
+  `setFeature(feature_external_ges | feature_external_pes, True)` (or the feature's URL) and lxml's
+  `resolve_entities=True`. BenchmarkPython's XXE score: +0.65, from 0.00 (true positives 8 of 8, false positives
+  20 to 7 of 20, which turn the feature on too). S-RANDOM reads each of the random module's generators (`sample`,
+  `choices`, `uniform`, `shuffle`, `randbytes` … too), on a line naming a secret as before. The code-injection rule
+  is unchanged: S-EVAL-PY flags all 53 of BenchmarkPython's code-injection cases, 33 of them safe, and what keeps
+  those safe is a check of the value that does not make `eval` safe in general, so the taint pass does not read it
+  as a sanitizer (the progress log).
+
 - **The supply-chain model's tree on a bundle (P-17).** On fourteen benign files of 2.4 to 13.3 million
   characters (monaco, plotly, notebook, jsdom), the tree took 110.3 s and now 25.8 s, the answers the same: a
   reading that can answer nothing (a function cut, the iteration cap met, the budget spent: the file is the text
@@ -1002,6 +1031,15 @@ aggregate):
   Python rather than CPython's code.
 
 ### Fixed
+
+- **Taint: an escaped quote in a Python literal, a `for` statement's targets, values put with `set()` and read with
+  `get()` (Q-2; rule set 2.80.0).** Project mode, Python. A literal holding an escaped quote (`'…[@id=\'' + name +
+  '\']'`) was read as ending there, and the next literal began at its real end, so `+ name +` was read as a string
+  and `name` went unseen. A `for` statement bound nothing: `for name in request.args.keys():` gave `name` no taint
+  (its targets are now bound to what it iterates over, as an assignment would). And a value put into an object with
+  `set()` (configparser's `set(section, option, value)`, a cache's) was not followed: the object takes its taint
+  now, followed by the literal keys (`conf.get('s', 'keyA')` stays clean after `conf.set('s', 'keyB', q)`), and a
+  dict's `get('k')` is read by its key as `d['k']` is.
 
 - **Security: what an extension's entry point requires from its own node_modules is load-time code (EG-6; rule set
   2.79.0).** vsce packs the packages an extension ships into its `.vsix`, and Node resolves `require('dep')` to

@@ -28,6 +28,7 @@ pub fn passes(ctx: &FileCtx, found: &mut Vec<Finding>, model: &taint::Model) {
     taint::scan(ctx, model, found);
     if ctx.lang == Lang::Py {
         sql_sinks(p, ctx, found);
+        cookie_flags(p, ctx, found);
     }
     let len_limit = p.usize("FN_LEN_LIMIT");
     let cx_limit = p.usize("FN_CX_LIMIT");
@@ -393,6 +394,58 @@ fn sql_sinks(p: &Pack, ctx: &FileCtx, found: &mut Vec<Finding>) {
             rule.msg = findings::format(&rule.msg, &[("how", Arg::S(how))]);
             found.push(Finding::new(rule, i + 1, None));
         }
+    }
+}
+
+// ---------------------------------------------------------------- cookies (Q-2)
+
+/// A cookie set without the Secure flag (Q-2): `set_cookie` (Flask's and Werkzeug's, Django's, Starlette's,
+/// aiohttp's), given `secure=False` (or 0, None), or not given `secure` at all, by keyword or as its seventh
+/// positional argument (_COOKIE_SECURE_ARG), all of which default it to off. A call that passes `*args` or `**kwargs`
+/// may hold it, and one whose value is an expression may be true: both are left alone. Read on the call's statement
+/// (the lines that continue its brackets).
+fn cookie_flags(p: &Pack, ctx: &FileCtx, found: &mut Vec<Finding>) {
+    if !pystr::contains(&ctx.content, "set_cookie") {
+        return;
+    }
+    let call_re = p.re("_COOKIE_CALL_RE");
+    let kw_re = p.re("_COOKIE_SECURE_KW_RE");
+    let named = p.re("_KWARG_NAME_RE");
+    let off = p.strs("_COOKIE_OFF");
+    let at = p.usize("_COOKIE_SECURE_ARG");
+    for i in 0..ctx.len() {
+        if ctx.cmask[i] {
+            continue;
+        }
+        let line = ctx.mcode(i);
+        let Some(m) = call_re.search(line) else { continue };
+        let stmt = taint::statement_at(ctx, i, line);
+        let (mut secure, mut spread, mut positional): (Option<PyStr>, bool, usize) = (None, false, 0);
+        for a in taint::call_args(&stmt[m.end().min(stmt.len())..]) {
+            let a = pystr::strip(a);
+            if a.is_empty() {
+                continue;
+            }
+            if a[0] == '*' as u32 {
+                spread = true;
+            } else if let Some(k) = kw_re.match_(a) {
+                secure = Some(pystr::strip(k.group(1).unwrap_or(&[])).to_vec());
+            } else if named.match_(a).is_none() {
+                if positional == at {
+                    secure = Some(a.to_vec());
+                }
+                positional += 1;
+            }
+        }
+        let how = match &secure {
+            None if spread => continue,
+            None => "missing",
+            Some(v) if off.iter().any(|o| o == v) => "false",
+            Some(_) => continue,
+        };
+        let mut rule = RuleText::of(p, "_COOKIE_RULE");
+        rule.msg = findings::format(&rule.msg, &[("how", Arg::S(p.map_text("_COOKIE_HOW", how)))]);
+        found.push(Finding::new(rule, i + 1, Some(m.start())));
     }
 }
 

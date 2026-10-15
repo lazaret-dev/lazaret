@@ -169,12 +169,27 @@ fn suffix_of(p: &Pack, cat: &[u32]) -> PyStr {
 
 // ---------------------------------------------------------------- the pack's model, read once
 
-/// How much of a built-in sink's arguments carries the injection (core._SINK_ARGS).
+/// How much of a built-in sink's arguments carries the injection (core._SINK_ARGS; a row's seventh field when it
+/// has one, Q-2).
 #[derive(Clone, Copy, PartialEq)]
 enum ArgMode {
     First,
     Positional,
     Extent,
+    /// the rest of the statement: `session[key] = value`'s key and value (Q-2)
+    Rest,
+}
+
+impl ArgMode {
+    fn named(name: &[u32]) -> Option<ArgMode> {
+        match pystr::to_string(name).as_str() {
+            "first" => Some(ArgMode::First),
+            "positional" => Some(ArgMode::Positional),
+            "extent" => Some(ArgMode::Extent),
+            "rest" => Some(ArgMode::Rest),
+            _ => None,
+        }
+    }
 }
 
 struct BaseSink {
@@ -205,7 +220,10 @@ fn base_sinks<'p>(p: &'p Pack, lang: &str) -> &'p [BaseSink] {
                     let suffix = text(0);
                     let s = pystr::to_string(&suffix);
                     let has = |needle: &str| pystr::contains(&src, needle);
-                    let mode = if py {
+                    let named = f.get(6).and_then(|m| m.get("value")).and_then(|x| x.as_str()).and_then(ArgMode::named);
+                    let mode = if let Some(m) = named {
+                        m
+                    } else if py {
                         if has("send_from_directory") {
                             ArgMode::First
                         } else if ["SQL", "XSS", "REDIR", "SSTI", "CODE"].contains(&s.as_str()) && !has("extra") {
@@ -483,6 +501,7 @@ fn sink_args(p: &Pack, text: &[u32], mode: ArgMode, suffix: &[u32]) -> PyStr {
             args_where(text, |a| kw.match_(a).is_none())
         }
         ArgMode::Extent => extent(text).to_vec(),
+        ArgMode::Rest => text.to_vec(),
     };
     if pystr::eq(suffix, "REDIR") {
         let same = p.re("_SAME_SITE_RE");
@@ -523,8 +542,54 @@ fn destructured_names(p: &Pack, pattern: &[u32]) -> Vec<PyStr> {
     names
 }
 
-/// core._assignment: (the names an assignment line binds, its right-hand side).
+/// A Python `for` statement's targets and what it iterates over (Q-2): `for k, v in request.args.items():` binds `k`
+/// and `v` to what `request.args` holds, as an assignment of it would. The targets are names (in parentheses or
+/// not); the iterable ends at the header's colon.
+fn for_targets(p: &Pack, line: &[u32]) -> Option<(Vec<PyStr>, PyStr)> {
+    let mut rest = pystr::lstrip(line);
+    if pystr::starts_with(rest, "async") && rest.get(5).is_some_and(|&c| pystr::is_space(c)) {
+        rest = pystr::lstrip(&rest[5..]);
+    }
+    if !pystr::starts_with(rest, "for") || !rest.get(3).is_some_and(|&c| pystr::is_space(c) || c == '(' as u32) {
+        return None;
+    }
+    let rest = &rest[3..];
+    // the word `in` after the targets
+    let at = (1..rest.len().saturating_sub(2)).find(|&k| {
+        rest[k] == 'i' as u32 && rest[k + 1] == 'n' as u32
+            && (pystr::is_space(rest[k - 1]) || rest[k - 1] == ')' as u32)
+            && (pystr::is_space(rest[k + 2]) || rest[k + 2] == '(' as u32 || rest[k + 2] == '[' as u32)
+    })?;
+    let mut target = pystr::strip(&rest[..at]);
+    if target.first() == Some(&('(' as u32)) && target.last() == Some(&(')' as u32)) {
+        target = pystr::strip(&target[1..target.len() - 1]);
+    }
+    let mut names = Vec::new();
+    for part in pystr::split_char(target, ',' as u32) {
+        let part = pystr::strip(part);
+        if part.is_empty() {
+            continue;
+        }
+        if p.re("_FOR_NAME_RE").fullmatch(part).is_none() {
+            return None;
+        }
+        names.push(part.to_vec());
+    }
+    if names.is_empty() {
+        return None;
+    }
+    let iterable = frameworks::top_split(&rest[at + 2..], ':' as u32)[0];
+    Some((names, pystr::strip(iterable).to_vec()))
+}
+
+/// core._assignment: (the names an assignment line binds, its right-hand side); a Python `for` statement's targets
+/// and its iterable (Q-2).
 fn assignment(p: &Pack, line: &[u32], lang: Lang) -> Option<(Vec<PyStr>, PyStr)> {
+    if lang == Lang::Py {
+        if let Some(bound) = for_targets(p, line) {
+            return Some(bound);
+        }
+    }
     let key = if lang == Lang::Py { "py" } else { "js" };
     if let Some(m) = p.map_re("ASSIGN_RE", key).match_(line) {
         let name = m.group(1).unwrap_or(&[]);
@@ -565,19 +630,67 @@ fn container_write(p: &Pack, line: &[u32], lang: Lang) -> Option<(PyStr, PyStr)>
 /// Containers' elements under literal keys: {container: [(key, clean set or None: no untrusted data)]}.
 type Keyed = HashMap<PyStr, Vec<(PyStr, Option<Clean>)>>;
 
-/// core._keyed_reads: `text` with its reads of container elements known to hold no untrusted data blanked.
-fn keyed_reads(p: &Pack, text: &[u32], keyed: &Keyed) -> PyStr {
-    if keyed.is_empty() || !text.contains(&('[' as u32)) {
+/// core._keyed_reads: `text` with its reads of container elements known to hold no untrusted data blanked; in
+/// Python, a `get()` of literal keys too (Q-2: `conf.get('section', 'keyA')`, `d.get('k')`).
+fn keyed_reads(p: &Pack, text: &[u32], keyed: &Keyed, lang: Lang) -> PyStr {
+    if keyed.is_empty() {
         return text.to_vec();
     }
-    p.re("_KEYED_READ_RE").sub_fn(text, 0, |m| {
-        let keys = keyed.get(m.group(1).unwrap_or(&[]));
-        let key = m.group(3).unwrap_or(&[]);
-        match keys.and_then(|ks| ks.iter().find(|(k, _)| k.as_slice() == key)) {
+    let blank = |m: &pyre::Match, name: &[u32], key: &[u32]| -> PyStr {
+        match keyed.get(name).and_then(|ks| ks.iter().find(|(k, _)| k.as_slice() == key)) {
             Some((_, None)) => spaces(m.group0().len()),
             _ => m.group0().to_vec(),
         }
-    })
+    };
+    let mut out = text.to_vec();
+    if out.contains(&('[' as u32)) {
+        out = p.re("_KEYED_READ_RE").sub_fn(&out, 0, |m| blank(m, m.group(1).unwrap_or(&[]), m.group(3).unwrap_or(&[])));
+    }
+    if lang == Lang::Py && pystr::contains(&out, "get") {
+        let lit = p.re("_KEY_LITERAL_RE");
+        out = p.re("_KEYED_GET_RE").sub_fn(&out, 0, |m| {
+            let parts: Vec<&[u32]> = lit.finditer(m.group(2).unwrap_or(&[])).map(|l| l.group(2).unwrap_or(&[])).collect();
+            blank(m, m.group(1).unwrap_or(&[]), &pystr::join(&[0], &parts))
+        });
+    }
+    out
+}
+
+/// The arguments of a call, `text` being what follows its opening parenthesis (an empty last one, after a trailing
+/// comma, left out).
+pub(crate) fn call_args(text: &[u32]) -> Vec<&[u32]> {
+    let (mut out, mut i) = (Vec::new(), 0usize);
+    loop {
+        let end = arg_end(text, i);
+        out.push(&text[i..end]);
+        if end >= text.len() || text[end] != ',' as u32 {
+            break;
+        }
+        i = end + 1;
+    }
+    if out.len() > 1 && pystr::strip(out[out.len() - 1]).is_empty() {
+        out.pop();
+    }
+    out
+}
+
+/// The key a `set()` call puts its value under (Q-2): `conf.set('section', 'keyB', value)` puts it under its
+/// literal arguments but the last, joined by NUL as `get()`'s are read; None when one is not a string literal.
+fn keyed_set(p: &Pack, stmt: &[u32], name: &[u32]) -> Option<PyStr> {
+    let m = p.re("_KEYED_SET_RE").match_(stmt)?;
+    if m.group(1)? != name {
+        return None;
+    }
+    let args = call_args(&stmt[m.end()..]);
+    if args.len() < 2 {
+        return None;
+    }
+    let lit = p.re("_KEY_LITERAL_RE");
+    let mut parts: Vec<&[u32]> = Vec::new();
+    for a in &args[..args.len() - 1] {
+        parts.push(lit.fullmatch(pystr::strip(a))?.group(2).unwrap_or(&[]));
+    }
+    Some(pystr::join(&[0], &parts))
 }
 
 // ---------------------------------------------------------------- guards
@@ -896,6 +1009,30 @@ fn literal_continuations(ctx: &FileCtx) -> HashSet<usize> {
 
 // ---------------------------------------------------------------- the pass
 
+/// Line i's code (`line`) joined with the lines that continue its open brackets, at most TAINT_JOIN_MAX_LINES of them
+/// and TAINT_JOIN_MAX_CHARS of their text (the pass's statements; the cookie pass's, Q-2).
+pub(crate) fn statement_at(ctx: &FileCtx, i: usize, line: &[u32]) -> PyStr {
+    let p = ctx.p;
+    let mut depth = bracket_depth(p, line);
+    if depth <= 0 {
+        return line.to_vec();
+    }
+    let (join_max, join_chars) = (p.usize("TAINT_JOIN_MAX_LINES"), p.usize("TAINT_JOIN_MAX_CHARS"));
+    let mut parts: Vec<PyStr> = vec![line.to_vec()];
+    let (mut total, mut j) = (0usize, i + 1);
+    while depth > 0 && j < ctx.len() && j <= i + join_max && total < join_chars {
+        if !ctx.cmask[j] {
+            let next = ctx.mcode(j);
+            let next = &next[..next.len().min(join_chars - total)];
+            parts.push(next.to_vec());
+            total += next.len();
+            depth += bracket_depth(p, next);
+        }
+        j += 1;
+    }
+    pystr::join(&[' ' as u32], &parts.iter().map(|x| x.as_slice()).collect::<Vec<_>>())
+}
+
 /// The sink categories a value is clean for (a sorted set of suffixes).
 type Clean = Vec<PyStr>;
 
@@ -953,9 +1090,14 @@ pub fn scan(ctx: &FileCtx, model: &Model, found: &mut Vec<Finding>) {
         base_src.search(t).is_some() || model.sources.iter().any(|r| r.search(&t[..clip(t)]).is_some())
     };
     let template_ok = lang != Lang::Py || p.re("_TEMPLATE_IMPORT_RE").search(&ctx.content).is_some();
+    let gates = p.raw("_SINK_IMPORTS").and_then(|v| v.get("map"));
+    let imported = |suffix: &[u32]| -> bool {
+        let name = pystr::to_string(suffix);
+        gates.and_then(|m| m.get(&name)).is_none() || p.map_re("_SINK_IMPORTS", &name).search(&ctx.content).is_some()
+    };
     let mut sinks: Vec<Sink> = base_sinks(p, key)
         .iter()
-        .filter(|s| template_ok || !s.template)
+        .filter(|s| (template_ok || !s.template) && imported(&s.suffix))
         .map(|s| Sink { suffix: s.suffix.clone(), re: &s.re, guarded: false, cat: s.cat.clone(), sev: s.sev.clone(),
                         cwe: s.cwe.clone(), fix: s.fix.clone(), mode: s.mode })
         .collect();
@@ -1002,7 +1144,6 @@ pub fn scan(ctx: &FileCtx, model: &Model, found: &mut Vec<Finding>) {
     let guard_if = p.map_re("_GUARD_IF_RE", key);
     let inside = literal_continuations(ctx);
     let join_max = p.usize("TAINT_JOIN_MAX_LINES");
-    let join_chars = p.usize("TAINT_JOIN_MAX_CHARS");
     let same_site = p.re("_SAME_SITE_RE");
 
     let mut tainted: HashMap<PyStr, Taint> = HashMap::new();
@@ -1036,29 +1177,10 @@ pub fn scan(ctx: &FileCtx, model: &Model, found: &mut Vec<Finding>) {
         out.sort_by_key(|v| tainted[v].order);
         out
     };
-    // line i's code joined with the lines that continue its open brackets
-    let statement = |i: usize, line: &[u32]| -> PyStr {
-        let mut depth = bracket_depth(p, line);
-        if depth <= 0 {
-            return line.to_vec();
-        }
-        let mut parts: Vec<PyStr> = vec![line.to_vec()];
-        let (mut total, mut j) = (0usize, i + 1);
-        while depth > 0 && j < ctx.len() && j <= i + join_max && total < join_chars {
-            if !ctx.cmask[j] {
-                let next = ctx.mcode(j);
-                let next = &next[..next.len().min(join_chars - total)];
-                parts.push(next.to_vec());
-                total += next.len();
-                depth += bracket_depth(p, next);
-            }
-            j += 1;
-        }
-        pystr::join(&[' ' as u32], &parts.iter().map(|x| x.as_slice()).collect::<Vec<_>>())
-    };
+    let statement = |i: usize, line: &[u32]| -> PyStr { statement_at(ctx, i, line) };
     // the categories value `rhs` is clean for, or None when it carries no untrusted data
     let value_clean = |tainted: &HashMap<PyStr, Taint>, keyed: &Keyed, rhs: &[u32]| -> Option<Clean> {
-        let rhs = keyed_reads(p, rhs, keyed);
+        let rhs = keyed_reads(p, rhs, keyed, lang);
         let base = taint_code(p, &neutralize(&rhs, None), lang);
         if !(src_search(&base) || !carriers_in(tainted, &base, None).is_empty()) {
             return None;
@@ -1086,7 +1208,7 @@ pub fn scan(ctx: &FileCtx, model: &Model, found: &mut Vec<Finding>) {
     let what_plain = p.text("_TAINT_WHAT");
     // a T-* finding when `text` (a sink's arguments, a view's return value) carries untrusted data for the sink
     let report = |tainted: &HashMap<PyStr, Taint>, keyed: &Keyed, found: &mut Vec<Finding>, sink: &Sink, text: &[u32], i: usize, col: usize| {
-        let rest = taint_code(p, &neutralize(&keyed_reads(p, text, keyed), Some(&sink.suffix)), lang);
+        let rest = taint_code(p, &neutralize(&keyed_reads(p, text, keyed, lang), Some(&sink.suffix)), lang);
         let carriers = carriers_in(tainted, &rest, Some(&sink.suffix));
         if carriers.is_empty() && !src_search(&rest) {
             return;
@@ -1232,14 +1354,16 @@ pub fn scan(ctx: &FileCtx, model: &Model, found: &mut Vec<Finding>) {
                 }
             }
             let clean = value_clean(&tainted, &keyed, &written);
-            if let Some(km) = p.re("_KEYED_WRITE_RE").match_(&s) {
-                if km.group(1).unwrap_or(&[]) == name.as_slice() {
-                    let key = km.group(3).unwrap_or(&[]).to_vec();
-                    let entry = keyed.entry(name.clone()).or_default();
-                    match entry.iter_mut().find(|(k, _)| *k == key) {
-                        Some(e) => e.1 = clean.clone(),
-                        None => entry.push((key, clean.clone())),
-                    }
+            let key = match p.re("_KEYED_WRITE_RE").match_(&s) {
+                Some(km) if km.group(1).unwrap_or(&[]) == name.as_slice() => Some(km.group(3).unwrap_or(&[]).to_vec()),
+                _ if lang == Lang::Py => keyed_set(p, &s, &name),
+                _ => None,
+            };
+            if let Some(key) = key {
+                let entry = keyed.entry(name.clone()).or_default();
+                match entry.iter_mut().find(|(k, _)| *k == key) {
+                    Some(e) => e.1 = clean.clone(),
+                    None => entry.push((key, clean.clone())),
                 }
             }
             stmt = Some(s);

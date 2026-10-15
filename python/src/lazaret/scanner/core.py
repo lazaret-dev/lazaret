@@ -642,6 +642,14 @@ _INDIRECT_EVAL = (
     r"|" + _EVAL_BY_NAME + r"\s*\(")
 
 
+# (Q-2, 0.1.9) each of the random module's generators; and on a line naming none of the words S-RANDOM needs, any
+# call of one is S-WEAKRAND, a review hotspot (Bandit's B311, Sonar's S2245): none of BenchmarkPython's 99
+# weak-randomness cases names one of those words where it calls the generator.
+_RANDOM_FNS = ("random|randint|randrange|choice|choices|sample|shuffle|uniform|triangular|getrandbits|randbytes|gauss|"
+               "normalvariate|lognormvariate|betavariate|expovariate|gammavariate|paretovariate|vonmisesvariate|"
+               "weibullvariate|binomialvariate")
+_SECRET_WORDS = r"(token|secret|password|otp|nonce|session|key|reset|csrf)"
+
 RULES = [
 R("S-EVAL-PY", "Dynamic code execution", "VULN", "CRITICAL", ("py",),
   r"(?<![\w.])(eval|exec)\s*\(",
@@ -768,12 +776,21 @@ R("S-HTTP", "Cleartext HTTP URL", "HOTSPOT", "MINOR", ("py", "js"),
   "Use https:// unless this is a deliberate local/dev endpoint.",
   "CWE-319 · OWASP A02"),
 R("S-RANDOM", "Non-crypto randomness for secret", "HOTSPOT", "MAJOR", ("py", "js"),
-  r"(random\.(random|randint|choice|randrange|getrandbits)|Math\.random)\s*\(",
+  r"(random\.(" + _RANDOM_FNS + r")|Math\.random)\s*\(",
   "PRNG used in a security-sensitive value.",
   "random/Math.random are predictable; generated tokens can be guessed.",
   "Use secrets module (Python) or crypto.randomBytes / crypto.getRandomValues (JS).",
   "CWE-338",
-  need=r"(token|secret|password|otp|nonce|session|key|reset|csrf)"),
+  need=_SECRET_WORDS),
+R("S-WEAKRAND", "Pseudo-random generator", "HOTSPOT", "MINOR", ("py",),
+  r"(?<![\w.])random\.(?:" + _RANDOM_FNS + r")\s*\(",
+  "The random module's generator in use.",
+  "random is a Mersenne Twister: what it gives next can be worked out from what it gave, so a value an attacker must "
+  "not guess (a token, a password, a session or reset key) made with it can be guessed.",
+  "Use the secrets module (secrets.token_urlsafe, secrets.choice) or random.SystemRandom where the value must not be "
+  "guessed; random is fine for simulations, sampling and tests.",
+  "CWE-330",
+  skip=_SECRET_WORDS),
 R("S-INNERHTML", "HTML injection sink", "HOTSPOT", "MAJOR", ("js",),
   r"\.(innerHTML|outerHTML)\s*=|document\.write\s*\(|insertAdjacentHTML\s*\(",
   "Assigning raw HTML — potential XSS sink.",
@@ -887,11 +904,18 @@ R("S-SSTI", "Template injection risk", "VULN", "CRITICAL", ("py",),
   "User input compiled as a Jinja2 template is server-side template injection → RCE.",
   "Pass data as template parameters; never build template source from input.",
   "CWE-1336 · OWASP A03"),
-R("S-XML", "XML parsing without a hardened parser", "HOTSPOT", "MINOR", ("py",),
-  r"(?:^|\s)(?:import\s+xml\.(?:etree|dom|sax)|from\s+xml\.(?:etree|dom|sax))",
-  "Stdlib XML parsers are unsafe for untrusted input.",
-  "xml.etree/dom/sax are vulnerable to entity-expansion and (historically) XXE attacks.",
-  "Parse untrusted XML with a hardened parser such as defusedxml or lazaret.safexml.",
+# (Q-3, 0.1.9) a parser set to resolve external entities, no longer every import of xml.etree, xml.dom or xml.sax:
+# since Python 3.7.1 none resolves an external entity unless told to, and Expat 2.4.1 refuses entity bombs, so the
+# import flagged safe code (all 20 of BenchmarkPython's safe XXE cases; its 8 real ones turn the feature on).
+R("S-XML", "XML external entities enabled", "VULN", "MAJOR", ("py",),
+  r"setFeature\s*\(\s*(?:[\w.]*\.)?feature_external_(?:ges|pes)\s*,\s*(?:True|1)\s*\)"
+  r"|setFeature\s*\(\s*[rRuU]?[\"']http://xml\.org/sax/features/external-(?:general|parameter)-entities[\"']"
+  r"\s*,\s*(?:True|1)\s*\)|\bresolve_entities\s*=\s*True\b",
+  "XML parser set to resolve external entities.",
+  "With external entities on, a document can make the parser read local files or fetch URLs (XXE) and put what they "
+  "hold in what it parses.",
+  "Leave them off (xml.sax and xml.dom's default since Python 3.7.1; resolve_entities=False with lxml), or parse "
+  "untrusted XML with defusedxml or lazaret.safexml.",
   "CWE-611"),
 R("S-MARKSAFE", "mark_safe usage", "HOTSPOT", "MAJOR", ("py",),
   r"mark_safe\s*\(",

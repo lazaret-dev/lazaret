@@ -59,6 +59,58 @@ fn what_an_assignment_binds() {
 }
 
 #[test]
+fn what_a_for_statement_binds() {
+    // (Q-2) its targets, to what it iterates over
+    let p = crate::pack::current();
+    let bound = |line: &str| for_targets(&p, &cps(line)).map(|(names, rhs)| {
+        (names.iter().map(|n| st(n)).collect::<Vec<_>>(), st(&rhs))
+    });
+    let one = |n: &str, rhs: &str| Some((vec![n.to_string()], rhs.to_string()));
+    assert_eq!(bound("for name in request.args.keys():"), one("name", "request.args.keys()"));
+    assert_eq!(bound("    async for (k, v) in items(q): pass"), Some((vec!["k".to_string(), "v".to_string()], "items(q)".to_string())));
+    assert_eq!(bound("for x in d[1:]:"), one("x", "d[1:]"));
+    assert_eq!(bound("for index in range(3):"), one("index", "range(3)"));
+    assert_eq!(bound("for a.b in xs:"), None);
+    assert_eq!(bound("for x[0] in xs:"), None);
+    assert_eq!(bound("format = input()"), None);
+    // what assignment() answers for a Python line, not a JavaScript one
+    assert_eq!(assignment(&p, &cps("for q in input():"), Lang::Py).map(|(n, _)| n.len()), Some(1));
+    assert_eq!(assignment(&p, &cps("for q in input():"), Lang::Js), None);
+}
+
+#[test]
+fn keyed_sets_and_gets() {
+    // (Q-2) set(<literals>, value) under the key its literals make; get(<literals>) reading it, in Python
+    let p = crate::pack::current();
+    let key = |stmt: &str, name: &str| keyed_set(&p, &cps(stmt), &cps(name)).map(|k| st(&k));
+    assert_eq!(key("conf.set('s', \"keyB\", value)", "conf"), Some("s\u{0}keyB".to_string()));
+    assert_eq!(key("cache.set('k', v,)", "cache"), Some("k".to_string()));
+    assert_eq!(key("conf.set(section, 'k', v)", "conf"), None);
+    assert_eq!(key("conf.set('k')", "conf"), None);
+    assert_eq!(key("conf.set('a', 'b', v)", "other"), None);
+    let mut keyed: Keyed = HashMap::new();
+    keyed.insert(cps("conf"), vec![(cps("s\u{0}a"), None), (cps("s\u{0}b"), Some(Vec::new()))]);
+    keyed.insert(cps("d"), vec![(cps("k"), None)]);
+    let text = "x = conf.get('s', 'a') + conf.get('s', 'b') + d.get('k') + d['k'] + d.get('k', 'z')";
+    assert_eq!(st(&keyed_reads(&p, &cps(text), &keyed, Lang::Py)),
+               format!("x = {} + conf.get('s', 'b') + {} + {} + d.get('k', 'z')", " ".repeat(18), " ".repeat(10), " ".repeat(6)));
+    assert_eq!(st(&keyed_reads(&p, &cps("y = d.get('k') + d['k']"), &keyed, Lang::Js)), format!("y = d.get('k') + {}", " ".repeat(6)));
+    assert_eq!(call_args(&cps(" a, f(b, c), 'd,e',)")).iter().map(|a| st(a)).collect::<Vec<_>>(), [" a", " f(b, c)", " 'd,e'"]);
+}
+
+#[test]
+fn a_rows_named_arguments() {
+    // (Q-2) a sink row's seventh field; the rest of the statement for the session's key and value
+    let p = crate::pack::current();
+    assert!(ArgMode::named(&cps("rest")) == Some(ArgMode::Rest) && ArgMode::named(&cps("all")).is_none());
+    assert_eq!(st(&sink_args(&p, &cps("[key] = value; other(q)"), ArgMode::Rest, &cps("TRUST"))), "[key] = value; other(q)");
+    let rows = base_sinks(&p, "py");
+    let mode = |suffix: &str| rows.iter().filter(|r| st(&r.suffix) == suffix).map(|r| r.mode).collect::<Vec<_>>();
+    assert!(mode("TRUST") == [ArgMode::Rest, ArgMode::Extent] && mode("XPATH") == [ArgMode::First, ArgMode::Positional]);
+    assert!(mode("LDAP") == [ArgMode::Extent] && mode("SQL") == [ArgMode::First, ArgMode::Extent]);
+}
+
+#[test]
 fn indexes_guards_and_containers() {
     // (the cases the npm package's twin of this pass was held to: js/test/taint-frameworks.test.js)
     let p = crate::pack::current();

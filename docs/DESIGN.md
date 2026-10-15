@@ -253,12 +253,20 @@ codecs, binary artifacts) plus intra-file taint that follows request-shaped
 input (`request.*`, `req.*`, `argv`, decoders) through assignments, f-string
 and template-literal fields and multi-line statements into sinks (SQL,
 command, code, path traversal, SSRF, open redirect, XSS — Flask/Django
-responses and a Flask view's return value —, SSTI). Only a sink's injectable
-arguments are read; path guards that leave clear path traversal; a taint is
-scoped to the function body (by indentation) it was made in, and a
-reassignment in the same block replaces it. Containers (`d["k"] = q`,
-`xs.append(q)`) take the taint of what is written into them, by literal key;
-allowlist checks clear a value where it passed. Framework models (0.1.7):
+responses and a Flask view's return value —, SSTI; since 0.1.9, Q-2, the
+session's keys and values, LDAP searches in a file that imports an LDAP
+client, XPath expressions). Only a sink's injectable arguments are read (a
+row's seventh field names them where the category's default does not fit:
+an XPath call's expression and not its variables, the rest of a
+`session[k] = v` statement); path guards that leave clear path traversal; a
+taint is scoped to the function body (by indentation) it was made in, and a
+reassignment in the same block replaces it. A Python `for` statement binds
+its targets as an assignment of what it iterates over would (0.1.9).
+Containers (`d["k"] = q`, `xs.append(q)`, Python's `conf.set("s", "k", q)`)
+take the taint of what is written into them, by literal key, read back by
+subscript or by `get()` of the same literals; allowlist checks clear a value
+where it passed. After the taint pass, Python's cookie pass (0.1.9, Q-2,
+S-COOKIE) reads each `set_cookie` call's arguments for its Secure flag. Framework models (0.1.7):
 the parameters a route handler gets from the request are sources — a Flask
 view's URL variables, a FastAPI path operation's parameters (not injected
 dependencies, not types that validate to no free text), a Django view's URL

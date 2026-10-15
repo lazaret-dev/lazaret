@@ -94,8 +94,10 @@ Decisions (fixed):
   (0.1.9, Q-1; `engine.scan_files`, in the same batches on the same
   threads): the rules part — every pattern rule and family on every line,
   the file-level rules and `TEXT_RULES` — then the SQL statements without
-  WHERE, the intra-file taint, the SQL-sink pass and the function metrics,
-  then the suppression markers and the cap (`project.rs`, `taint.rs`). A
+  WHERE, the intra-file taint, the SQL-sink pass, the cookie pass (Python's
+  `set_cookie` without the Secure flag: S-COOKIE, 0.1.9, Q-2) and the
+  function metrics, then the suppression markers and the cap (`project.rs`,
+  `taint.rs`). A
   taint configuration (`--taint-config`, a trusted `.lazaret-taint.json`)
   goes with each Python and JavaScript file's call as its `"taint"`
   argument (`core.taint_args`: what `core.apply_taint_config` validated and
@@ -223,7 +225,9 @@ rust/
                              reading (scan_file with "metrics") or on their own (file_metrics)
     src/taint.rs             project mode's intra-file taint (core.taint_scan, 0.1.9): sources,
                              sinks, sanitizers, guards, scopes, Flask views and route parameters;
-                             a taint configuration's sources, sinks and sanitizers for one call
+                             a taint configuration's sources, sinks and sanitizers for one call;
+                             (Q-2) a row's argument mode, sinks a module's import enables
+                             (_SINK_IMPORTS), `for` targets, keyed set() and get()
     src/secrets.rs           live secret verification's table and logic (0.1.9, V-1 stage 2):
                              the pack's _VERIFY_PROVIDERS read and checked; `secrets.find` (the
                              credentials of a file's flagged lines; AWS's pairs), `secrets.identify`,

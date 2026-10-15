@@ -1,6 +1,6 @@
 {
  "format": 1,
- "rule_set": "2.79.0",
+ "rule_set": "2.80.0",
  "source": "lazaret.scanner.core, extracted by scripts/make_rust_tables.py \u2014 do not edit",
  "values": {
   "ALWAYS_PRUNE_DIRS": {
@@ -1375,7 +1375,7 @@
       },
       "re": {
        "flags": "",
-       "re": "(random\\.(random|randint|choice|randrange|getrandbits)|Math\\.random)\\s*\\("
+       "re": "(random\\.(random|randint|randrange|choice|choices|sample|shuffle|uniform|triangular|getrandbits|randbytes|gauss|normalvariate|lognormvariate|betavariate|expovariate|gammavariate|paretovariate|vonmisesvariate|weibullvariate|binomialvariate)|Math\\.random)\\s*\\("
       },
       "ref": {
        "value": "CWE-338"
@@ -1391,6 +1391,52 @@
       },
       "why": {
        "value": "random/Math.random are predictable; generated tokens can be guessed."
+      }
+     }
+    },
+    {
+     "map": {
+      "fix": {
+       "value": "Use the secrets module (secrets.token_urlsafe, secrets.choice) or random.SystemRandom where the value must not be guessed; random is fine for simulations, sampling and tests."
+      },
+      "id": {
+       "value": "S-WEAKRAND"
+      },
+      "langs": {
+       "list": [
+        {
+         "value": "py"
+        }
+       ]
+      },
+      "msg": {
+       "value": "The random module's generator in use."
+      },
+      "name": {
+       "value": "Pseudo-random generator"
+      },
+      "need": {
+       "value": null
+      },
+      "re": {
+       "flags": "",
+       "re": "(?<![\\w.])random\\.(?:random|randint|randrange|choice|choices|sample|shuffle|uniform|triangular|getrandbits|randbytes|gauss|normalvariate|lognormvariate|betavariate|expovariate|gammavariate|paretovariate|vonmisesvariate|weibullvariate|binomialvariate)\\s*\\("
+      },
+      "ref": {
+       "value": "CWE-330"
+      },
+      "sev": {
+       "value": "MINOR"
+      },
+      "skip": {
+       "flags": "i",
+       "re": "(token|secret|password|otp|nonce|session|key|reset|csrf)"
+      },
+      "type": {
+       "value": "HOTSPOT"
+      },
+      "why": {
+       "value": "random is a Mersenne Twister: what it gives next can be worked out from what it gave, so a value an attacker must not guess (a token, a password, a session or reset key) made with it can be guessed."
       }
      }
     },
@@ -2219,7 +2265,7 @@
     {
      "map": {
       "fix": {
-       "value": "Parse untrusted XML with a hardened parser such as defusedxml or lazaret.safexml."
+       "value": "Leave them off (xml.sax and xml.dom's default since Python 3.7.1; resolve_entities=False with lxml), or parse untrusted XML with defusedxml or lazaret.safexml."
       },
       "id": {
        "value": "S-XML"
@@ -2232,32 +2278,32 @@
        ]
       },
       "msg": {
-       "value": "Stdlib XML parsers are unsafe for untrusted input."
+       "value": "XML parser set to resolve external entities."
       },
       "name": {
-       "value": "XML parsing without a hardened parser"
+       "value": "XML external entities enabled"
       },
       "need": {
        "value": null
       },
       "re": {
        "flags": "",
-       "re": "(?:^|\\s)(?:import\\s+xml\\.(?:etree|dom|sax)|from\\s+xml\\.(?:etree|dom|sax))"
+       "re": "setFeature\\s*\\(\\s*(?:[\\w.]*\\.)?feature_external_(?:ges|pes)\\s*,\\s*(?:True|1)\\s*\\)|setFeature\\s*\\(\\s*[rRuU]?[\\\"']http://xml\\.org/sax/features/external-(?:general|parameter)-entities[\\\"']\\s*,\\s*(?:True|1)\\s*\\)|\\bresolve_entities\\s*=\\s*True\\b"
       },
       "ref": {
        "value": "CWE-611"
       },
       "sev": {
-       "value": "MINOR"
+       "value": "MAJOR"
       },
       "skip": {
        "value": null
       },
       "type": {
-       "value": "HOTSPOT"
+       "value": "VULN"
       },
       "why": {
-       "value": "xml.etree/dom/sax are vulnerable to entity-expansion and (historically) XXE attacks."
+       "value": "With external entities on, a document can make the parser read local files or fetch URLs (XXE) and put what they hold in what it parses."
       }
      }
     },
@@ -4065,6 +4111,136 @@
          "value": "Escape the value (or render it through an autoescaping template) before it is returned."
         }
        ]
+      },
+      {
+       "list": [
+        {
+         "value": "TRUST"
+        },
+        {
+         "flags": "",
+         "re": "\\bsession(?=\\s*\\[[^\\n]*\\]\\s*=(?!=))"
+        },
+        {
+         "value": "trust boundary violation"
+        },
+        {
+         "value": "MINOR"
+        },
+        {
+         "value": "CWE-501"
+        },
+        {
+         "value": "Validate the value (and the key) before the session holds it: what the session holds is trusted later."
+        },
+        {
+         "value": "rest"
+        }
+       ]
+      },
+      {
+       "list": [
+        {
+         "value": "TRUST"
+        },
+        {
+         "flags": "",
+         "re": "\\bsession\\s*\\.\\s*(?:update|setdefault|__setitem__)\\s*\\("
+        },
+        {
+         "value": "trust boundary violation"
+        },
+        {
+         "value": "MINOR"
+        },
+        {
+         "value": "CWE-501"
+        },
+        {
+         "value": "Validate the value (and the key) before the session holds it: what the session holds is trusted later."
+        },
+        {
+         "value": "extent"
+        }
+       ]
+      },
+      {
+       "list": [
+        {
+         "value": "LDAP"
+        },
+        {
+         "flags": "",
+         "re": "(?<![\\w.])(?!re\\.|regex\\.)(?:[A-Za-z_]\\w*\\.)+(?:search|search_s|search_st|search_ext|search_ext_s|paged_search)\\s*\\("
+        },
+        {
+         "value": "LDAP injection"
+        },
+        {
+         "value": "MAJOR"
+        },
+        {
+         "value": "CWE-90"
+        },
+        {
+         "value": "Escape the values put into a filter or a DN (ldap3.utils.conv.escape_filter_chars, ldap.filter.filter_format)."
+        },
+        {
+         "value": "extent"
+        }
+       ]
+      },
+      {
+       "list": [
+        {
+         "value": "XPATH"
+        },
+        {
+         "flags": "",
+         "re": "\\.\\s*xpath\\s*\\(|(?<![\\w])XPath\\s*\\("
+        },
+        {
+         "value": "XPath injection"
+        },
+        {
+         "value": "MAJOR"
+        },
+        {
+         "value": "CWE-643"
+        },
+        {
+         "value": "Pass the value as an XPath variable (tree.xpath(\"//u[@id=$id]\", id=value)), never into the expression."
+        },
+        {
+         "value": "first"
+        }
+       ]
+      },
+      {
+       "list": [
+        {
+         "value": "XPATH"
+        },
+        {
+         "flags": "",
+         "re": "\\belementpath\\s*\\.\\s*(?:select|iter_select|Selector)\\s*\\("
+        },
+        {
+         "value": "XPath injection"
+        },
+        {
+         "value": "MAJOR"
+        },
+        {
+         "value": "CWE-643"
+        },
+        {
+         "value": "Pass the value as an XPath variable (tree.xpath(\"//u[@id=$id]\", id=value)), never into the expression."
+        },
+        {
+         "value": "positional"
+        }
+       ]
       }
      ]
     }
@@ -4790,9 +4966,71 @@
     },
     "py": {
      "flags": "",
-     "re": "^\\s*([A-Za-z_]\\w*)\\s*(?:\\[[^\\[\\]\\n]*\\]\\s*(?:[-+*/%&|^@]|//|\\*\\*|<<|>>)?=(?!=)|\\.\\s*(?:append|extend|insert|add)\\s*\\()\\s*(.+)"
+     "re": "^\\s*([A-Za-z_]\\w*)\\s*(?:\\[[^\\[\\]\\n]*\\]\\s*(?:[-+*/%&|^@]|//|\\*\\*|<<|>>)?=(?!=)|\\.\\s*(?:append|extend|insert|add|set)\\s*\\()\\s*(.+)"
     }
    }
+  },
+  "_COOKIE_CALL_RE": {
+   "flags": "",
+   "re": "\\.\\s*set_cookie\\s*\\("
+  },
+  "_COOKIE_HOW": {
+   "map": {
+    "false": {
+     "value": "with secure=False"
+    },
+    "missing": {
+     "value": "without secure=True"
+    }
+   }
+  },
+  "_COOKIE_OFF": {
+   "list": [
+    {
+     "value": "False"
+    },
+    {
+     "value": "0"
+    },
+    {
+     "value": "None"
+    }
+   ]
+  },
+  "_COOKIE_RULE": {
+   "map": {
+    "fix": {
+     "value": "Pass secure=True (and httponly=True for a cookie no script reads)."
+    },
+    "id": {
+     "value": "S-COOKIE"
+    },
+    "msg": {
+     "value": "Cookie set {how}: the browser also sends it over plain HTTP."
+    },
+    "name": {
+     "value": "Cookie without the Secure flag"
+    },
+    "ref": {
+     "value": "CWE-614 \u00b7 OWASP A05"
+    },
+    "sev": {
+     "value": "MINOR"
+    },
+    "type": {
+     "value": "HOTSPOT"
+    },
+    "why": {
+     "value": "A cookie without the Secure flag goes out with every http:// request to the site, where anyone on the network path can read it (a session or remember-me value among them)."
+    }
+   }
+  },
+  "_COOKIE_SECURE_ARG": {
+   "value": 6
+  },
+  "_COOKIE_SECURE_KW_RE": {
+   "flags": "",
+   "re": "secure\\s*=(?!=)(.*)"
   },
   "_CP_ALIAS_RE": {
    "flags": "",
@@ -10228,6 +10466,10 @@
    "flags": "",
    "re": "^(\\s*)(?:async\\s+)?def\\s+(\\w+)"
   },
+  "_FOR_NAME_RE": {
+   "flags": "",
+   "re": "[A-Za-z_]\\w*"
+  },
   "_FULL_SAN": {
    "map": {
     "js": {
@@ -10820,13 +11062,29 @@
    "flags": "",
    "re": "[A-Za-z0-9_\\-]*"
   },
+  "_KEYED_GET_RE": {
+   "flags": "",
+   "re": "(?<![\\w$.])([A-Za-z_]\\w*)\\s*\\.\\s*get\\s*\\(\\s*((?:([\"'])[^\"'\\\\\\n]*\\3\\s*,\\s*)*([\"'])[^\"'\\\\\\n]*\\4)\\s*,?\\s*\\)"
+  },
   "_KEYED_READ_RE": {
    "flags": "",
    "re": "(?<![\\w$.])([A-Za-z_$][\\w$]*)\\s*\\[\\s*([\"'])([^\"'\\\\\\n]*)\\2\\s*\\]"
   },
+  "_KEYED_SET_RE": {
+   "flags": "",
+   "re": "^\\s*([A-Za-z_]\\w*)\\s*\\.\\s*set\\s*\\("
+  },
   "_KEYED_WRITE_RE": {
    "flags": "",
    "re": "^\\s*([A-Za-z_$][\\w$]*)\\s*\\[\\s*([\"'])([^\"'\\\\\\n]*)\\2\\s*\\]\\s*=(?![=>])"
+  },
+  "_KEY_LITERAL_RE": {
+   "flags": "",
+   "re": "([\"'])([^\"'\\\\\\n]*)\\1"
+  },
+  "_KWARG_NAME_RE": {
+   "flags": "",
+   "re": "[A-Za-z_]\\w*\\s*=(?!=)"
   },
   "_KWARG_RE": {
    "flags": "",
@@ -12611,6 +12869,10 @@
        "flags": "",
        "re": "(?:shlex|pipes)\\.quote\\s*\\((?:[^()]|\\([^()]*\\))*\\)"
       },
+      "LDAP": {
+       "flags": "",
+       "re": "(?<!\\w)(?:[A-Za-z_][\\w.]*\\.)?(?:escape_filter_chars|escape_dn_chars|escape_rdn|filter_format)\\s*\\((?:[^()]|\\([^()]*\\))*\\)"
+      },
       "PATH": {
        "flags": "",
        "re": "(?:os\\.path\\.basename|basename|secure_filename|safe_join)\\s*\\((?:[^()]|\\([^()]*\\))*\\)"
@@ -12618,6 +12880,10 @@
       "REDIR": {
        "flags": "",
        "re": "(?<![\\w.])(?:[A-Za-z_][\\w.]*\\.)?(?:url_for|reverse|reverse_lazy)\\s*\\((?:[^()]|\\([^()]*\\))*\\)|request\\.(?:META\\.get|headers\\.get)\\s*\\(\\s*[\\\"'](?:HTTP_REFERER|[Rr]eferr?er)[\\\"'](?:[^()]|\\([^()]*\\))*\\)|request\\.META\\s*\\[\\s*[\\\"']HTTP_REFERER[\\\"']\\s*\\]"
+      },
+      "XPATH": {
+       "flags": "",
+       "re": "(?<![\\w.])[A-Za-z_][\\w.]*\\s*\\.\\s*replace\\s*\\(\\s*[rRuU]?(?:\"'\"|'\\\\''|'\"'|\"\\\\\"\")\\s*,(?:[^()]|\\([^()]*\\))*\\)"
       },
       "XSS": {
        "flags": "",
@@ -13140,7 +13406,7 @@
   },
   "_PY_LIT_RE": {
    "flags": "",
-   "re": "(?:(?<![A-Za-z0-9_])([rRbBuUfF]{1,2}))?(\\\"[^\\\"]*\\\"|'[^']*'|`[^`]*`)"
+   "re": "(?:(?<![A-Za-z0-9_])([rRbBuUfF]{1,2}))?(\"(?:[^\"\\\\\\n]|\\\\.)*\"|'(?:[^'\\\\\\n]|\\\\.)*'|`[^`]*`)"
   },
   "_PY_NEWLINE_RE": {
    "flags": "",
@@ -14569,6 +14835,14 @@
   "_SIBLING_PATH_RE": {
    "flags": "",
    "re": "(?:__file__|__dirname|import\\.meta\\.url)[^\\n]{0,200}?(?:[\\\"'`]|\\}[/\\\\])(?:[^\\\"'`{}$\\n]{1,100}\\.(?:txt|dat|bin|png|jpe?g|gif|ico|bmp|svg|wav|mp3|mp4|woff2?|ttf|json|md|cfg|ini|log|db|pyc|so|dll|dylib|exe)|(?:[^\\\"'`{}$\\n]{0,100}[/\\\\])?(?:LICEN[CS]E|COPYING|NOTICE|README|AUTHORS|CHANGELOG|CHANGES|HISTORY|PATENTS)(?:[-.]\\w{1,10})?)[\\\"'`]"
+  },
+  "_SINK_IMPORTS": {
+   "map": {
+    "LDAP": {
+     "flags": "",
+     "re": "(?<![^\\n])[ \\t]*(?:from|import)[ \\t]+ldap3?\\b"
+    }
+   }
   },
   "_SKIPPED_TREES": {
    "list": []

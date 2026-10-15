@@ -32,7 +32,7 @@ PAGE_TABLES = r"""(() => {
   return {
     rules: RULES.map(rule), textRules: TEXT_RULES.map(rule),
     sources: map(TAINT_SOURCES, pat),
-    sinks: map(TAINT_SINKS, (rows) => rows.map(([suf, re, cat, sev, cwe, fix]) => [suf, pat(re), cat, sev, cwe, fix])),
+    sinks: map(TAINT_SINKS, (rows) => rows.map(([suf, re, ...rest]) => [suf, pat(re), ...rest])),
     assign: map(ASSIGN_RE, pat), fullSan: map(FULL_SAN, pat), partialSan: map(PARTIAL_SAN, (o) => map(o, pat)),
     stringLit: pat(STRING_LIT_RE), suppress: pat(SUPPRESS_RE), secretSkip: pat(SECRET_SKIP_RE),
     entropy: pat(ENTROPY_VALUE_RE), b64: pat(B64_BLOB_RE), obf: pat(OBF_IDENT_RE),

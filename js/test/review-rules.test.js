@@ -82,5 +82,5 @@ test("message and name text is the Python engine's", () => {
   assert.deepEqual(hex.map((i) => i.rule), ["SC-HEXSTR"]);
   const rule = (id) => packValues("RULES")[0].find((r) => r.id === id);   // the native engine's (core's) table
   assert.equal(rule("S-EVAL-JS").msg, "Use of eval enables arbitrary code execution.");
-  assert.equal(rule("S-XML").name, "XML parsing without a hardened parser");
+  assert.equal(rule("S-XML").name, "XML external entities enabled");
 });
