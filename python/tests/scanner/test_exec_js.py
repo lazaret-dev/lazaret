@@ -2,9 +2,10 @@
 execJsRegex; js/test/exec-js.test.js has the npm package's twin).
 
 S-EXEC-JS flagged every `x.exec(…)` with a non-literal argument as child_process's, so RegExp's `exec` in a matching
-loop (`while ((m = re.exec(s)))`) was CRITICAL in any script that matches text. Now a call on a regex is left out: a literal the lexer reads as one, or a name the file assigns a whole regex
-and nothing else. Everything else counts as before, whatever the file loads: a receiver can come from another file
-(`require('./a').exec(cmd)`) or a computed name, so the rule does not ask where it came from. Benign code only.
+loop (`while ((m = re.exec(s)))`) was CRITICAL in any script that matches text. Now a call on a regex is left out: a
+literal the lexer reads as one, or a name the file assigns a whole regex and nothing else. Everything else counts as
+before, whatever the file loads: a receiver can come from another file (`require('./a').exec(cmd)`) or a computed
+name, so the rule does not ask where it came from. Benign code only.
 """
 import time
 import unittest

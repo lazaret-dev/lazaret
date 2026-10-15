@@ -924,6 +924,17 @@ aggregate):
   left, 122 are the test files' examples, in strings, and 21 are regexes the rule cannot tell from a name: made by a
   function (the npm package's `pyRe(…)`) or passed in.
 
+- **X-CMD took a regex held in a property for a command (rule set 2.70.0).** The cross-file taint pass leaves
+  RegExp's `exec` out of the command sinks when it can prove the receiver is a regex, but it proved only a literal, a
+  `RegExp` constructor or a variable; a property was never a regex to it. vite 8.3.2 bundles convert-source-map, whose
+  `exports.commentRegex` is a getter that returns a regex literal, and a project scan of vite reported a CRITICAL
+  command injection from its dev server's `if-none-match` header to `exports.commentRegex.exec(comment)`. A property
+  is a regex now when every definition of it in the file is one (`o.p = /…/` or `new RegExp(…)`,
+  `Object.defineProperty(o, 'p', …)` with a getter that only returns one or a value that is one, or the object literal
+  `o` was made with), `o` is a parameter or a variable made once from an object literal, and every other reference
+  to `o` is a member access or another property's `defineProperty`: an object passed on, aliased, assigned through
+  a computed key or with another operator, or given to `Object.assign`, proves nothing. vite's scan loses that one
+  finding and nothing else. The engine's (`jsflow/eval.rs`, both packages).
 - **The npm package's guess at a file's language read a long run of line breaks in quadratic time (CodeQL).**
   `scanFile` without a `lang` (the library API, and the dashboard's pasted code) guesses it from the content, and
   the Python test's `^\s*` crossed line breaks, so each of a run of them rescanned the rest: 100,000 took about 9

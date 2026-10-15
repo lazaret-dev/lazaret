@@ -1406,6 +1406,9 @@ impl<'p> Eval<'p> {
         if self.regexp_construction(obj, scope) {
             return true;
         }
+        if self.a().kind(obj) == Kind::MemberExpression {
+            return self.regexp_member(obj, scope);
+        }
         if self.a().kind(obj) != Kind::Identifier {
             return false;
         }
@@ -1440,6 +1443,183 @@ impl<'p> Eval<'p> {
             }
         }
         true
+    }
+
+    /// `o.p`, a property of a variable of this module whose every definition here is a regex: `o.p = /…/` (or
+    /// `new RegExp(…)`), `Object.defineProperty(o, 'p', …)` with a getter that only returns one or a value that is
+    /// one, or the object literal `o` was made with. Every other reference to `o` is a member access (another
+    /// property, read or written, or `p` read) or another property's defineProperty, so nothing out of sight writes
+    /// `p`; `o` is a parameter or a variable made once from an object literal. convert-source-map's
+    /// `exports.commentRegex`, a getter in the CommonJS wrapper's `exports` (vite and every bundler that ships it).
+    fn regexp_member(&mut self, obj: NodeId, scope: ScopeId) -> bool {
+        use jt::A;
+        let a = self.a();
+        if a.computed(obj) || a.flag(obj, jt::OPTIONAL) {
+            return false;
+        }
+        let (base, prop) = match (a.at(obj, A), a.prop_name(obj)) {
+            (b, Some(p)) if a.kind(b) == Kind::Identifier => (b, p),
+            _ => return false,
+        };
+        let b = match self.bind(base, scope) {
+            None => return false,
+            Some(b) => b,
+        };
+        let key = (b, prop);
+        if let Some(&known) = self.p.mods[self.m as usize].regexp_props.get(&key) {
+            return known;
+        }
+        let proved = self.regexp_member_proof(key.0, &key.1);
+        self.p.mods[self.m as usize].regexp_props.insert(key, proved);
+        proved
+    }
+
+    /// regexp_member's reading of binding `b`'s property `prop` (one answer per binding and name: a bundle calls
+    /// `exec` on one many times).
+    fn regexp_member_proof(&self, b: BindId, prop: &[u32]) -> bool {
+        use jt::{A, B};
+        let a = self.a();
+        let bind = &self.p.binds[b as usize];
+        let mut defs = 0usize;
+        match (bind.kind, bind.writes.as_slice()) {
+            (BindKind::Param, [Write::Param { .. }]) => {}
+            (BindKind::Const | BindKind::Let | BindKind::Var, [Write::Init { node, path, .. }]) if path.is_empty() => {
+                let init = a.unwrap(*node);
+                if a.kind(init) != Kind::ObjectExpression {
+                    return false;
+                }
+                for &pr in a.list(init, A) {
+                    if a.kind(pr) != Kind::Property || a.computed(pr) {
+                        return false; // a spread, a computed key: it may be `prop`
+                    }
+                    if a.key_name(pr).is_some_and(|k| k == prop) {
+                        if a.op(pr) != jt::P_INIT || a.flag(pr, jt::METHOD) || !self.regexp_value(a.at(pr, B)) {
+                            return false;
+                        }
+                        defs += 1;
+                    }
+                }
+            }
+            _ => return false,
+        }
+        let md = &self.p.mods[self.m as usize];
+        for &(r, parent) in &bind.refs {
+            if parent == NONE {
+                return false;
+            }
+            match a.kind(parent) {
+                Kind::MemberExpression if a.at(parent, A) == r => {
+                    let asg = md.asg[parent as usize];
+                    if a.computed(parent) {
+                        if asg {
+                            return false; // `o[k] = …` may write `prop`
+                        }
+                        continue;
+                    }
+                    if !asg || !a.prop_name(parent).is_some_and(|q| q == prop) {
+                        continue; // another property, or `prop` read
+                    }
+                    match md.member_rhs.get(&parent) {
+                        Some(&(right, true)) if self.regexp_value(right) => defs += 1,
+                        _ => return false,
+                    }
+                }
+                Kind::CallExpression if a.list(parent, B).first() == Some(&r) && self.define_property(parent) => {
+                    let args = a.list(parent, B);
+                    match args.get(1).and_then(|&k| a.str_value(k)) {
+                        None => return false, // a name not written out may be `prop`
+                        Some(k) if k != prop => continue,
+                        Some(_) => match args.get(2) {
+                            Some(&d) if self.regexp_descriptor(d) => defs += 1,
+                            _ => return false,
+                        },
+                    }
+                }
+                _ => return false, // the object goes where something else may write `prop`
+            }
+        }
+        defs > 0
+    }
+
+    /// Is identifier `node` the global `name`: no declaration of the file binds it there (`bind_at`, resolved while
+    /// the module was read)?
+    fn global_ident(&self, node: NodeId, name: &str) -> bool {
+        self.a().is_ident_named(node, name) && self.p.mods[self.m as usize].bind_at[node as usize] == GLOBAL
+    }
+
+    /// `Object.defineProperty(…)`, Object being the global.
+    fn define_property(&self, call: NodeId) -> bool {
+        let a = self.a();
+        let callee = a.at(call, jt::A);
+        if a.kind(callee) != Kind::MemberExpression || a.computed(callee) || a.flag(call, jt::OPTIONAL) {
+            return false;
+        }
+        self.global_ident(a.at(callee, jt::A), "Object") && a.prop_name(callee).is_some_and(|n| eq(&n, "defineProperty"))
+    }
+
+    /// A property descriptor that gives a regex: an object literal whose `get` only returns one (a plain function or
+    /// an arrow) or whose `value` is one, its other keys `enumerable`, `configurable`, `writable`.
+    fn regexp_descriptor(&self, d: NodeId) -> bool {
+        use jt::{A, B, C};
+        let a = self.a();
+        let d = a.unwrap(d);
+        if a.kind(d) != Kind::ObjectExpression {
+            return false;
+        }
+        let mut gives = false;
+        for &pr in a.list(d, A) {
+            if a.kind(pr) != Kind::Property || a.computed(pr) || a.op(pr) != jt::P_INIT {
+                return false;
+            }
+            let key = match a.key_name(pr) {
+                Some(k) => k,
+                None => return false,
+            };
+            let v = a.unwrap(a.at(pr, B));
+            if eq(&key, "value") {
+                if !self.regexp_value(v) {
+                    return false;
+                }
+                gives = true;
+            } else if eq(&key, "get") {
+                let returned = match a.kind(v) {
+                    Kind::FunctionExpression | Kind::ArrowFunctionExpression
+                        if !a.flag(v, jt::ASYNC) && !a.flag(v, jt::GENERATOR) =>
+                    {
+                        let body = a.at(v, C);
+                        if a.kind(v) == Kind::ArrowFunctionExpression && a.flag(v, jt::EXPRESSION) {
+                            Some(body)
+                        } else {
+                            match a.list(body, A) {
+                                [st] if a.kind(*st) == Kind::ReturnStatement => a.opt(*st, A),
+                                _ => None,
+                            }
+                        }
+                    }
+                    _ => None,
+                };
+                if !returned.is_some_and(|r| self.regexp_value(r)) {
+                    return false;
+                }
+                gives = true;
+            } else if !is_in(&["enumerable", "configurable", "writable"], &key) {
+                return false;
+            }
+        }
+        gives
+    }
+
+    /// A regex literal, or `new RegExp(…)` / `RegExp(…)` of the global RegExp, never rebound in the file.
+    fn regexp_value(&self, node: NodeId) -> bool {
+        let a = self.a();
+        let node = a.unwrap(node);
+        match a.kind(node) {
+            Kind::Literal => a.op(node) == jt::L_REGEX,
+            Kind::NewExpression | Kind::CallExpression => {
+                self.global_ident(a.at(node, jt::A), "RegExp") && !self.p.mods[self.m as usize].regexp_rebound
+            }
+            _ => false,
+        }
     }
 
     /// `new RegExp(…)` / `RegExp(…)`, RegExp being the global.

@@ -678,6 +678,11 @@ pub struct Mod {
     pub oid_at: Vec<u32>,
     pub bind_at: Vec<u32>,
     pub asg: Vec<bool>,
+    /// a member assignment's right side, by its left node, and whether its operator is `=` (`o.p = …`; not a
+    /// destructuring's member, which has none)
+    pub member_rhs: HashMap<NodeId, (NodeId, bool)>,
+    /// (eval.rs, regexp_member) whether a binding's property holds only a regex, by binding and name
+    pub regexp_props: HashMap<(BindId, PyStr), bool>,
     pub text_memo: HashMap<NodeId, Rc<PyStr>>,
 }
 
@@ -1237,6 +1242,8 @@ impl Program {
             oid_at: vec![NONE; n],
             bind_at: vec![UNSET; n],
             asg: vec![false; n],
+            member_rhs: HashMap::new(),
+            regexp_props: HashMap::new(),
             text_memo: HashMap::new(),
         });
         self.by_path.entry(norm).or_insert(idx);
@@ -2053,6 +2060,7 @@ impl Program {
             return;
         }
         self.mods[m as usize].asg[left as usize] = true;
+        self.mods[m as usize].member_rhs.insert(left, (right, op_eq));
         let (name, obj) = {
             let a = Ast(&self.mods[m as usize].tree);
             (a.prop_name(left), a.at(left, A))
