@@ -26,6 +26,19 @@ aggregate):
 
 ### Added
 
+- **A release compared with its established predecessor: SC-NEW-INDICATOR (rule set 2.73.0; John, Oct 14: "if the
+  latest release has findings then we review the prior release vs it").** A registry scan of an npm, PyPI or
+  crates.io release whose files have weaker indicators only (it would be WARN) scans the release's established
+  predecessor, the newest release published at least a week before it (an attacker's own earlier release of the
+  day before is not one), as it scanned the release; a weaker indicator whose rule the predecessor had no finding of
+  is SC-NEW-INDICATOR, CRITICAL, so the release is SUSPICIOUS. A hijacked release is a change to an established
+  package: the Shai-Hulud worm gave each package it republished a postinstall script, a payload the scan need not
+  recognise. What a release may well ship anew (a binary, an opaque blob, a nested archive) is not compared. On the
+  popular set's 42 WARN releases, pnpm 12.8.1's new postinstall (against 11.27.1) is the one finding; 7 others had
+  every rule in their predecessor. Best effort: a history over 16 MB (vite's packument is 39 MB), a registry that
+  doesn't answer, or a predecessor's file that doesn't check out is no finding, and the result's `priorRelease` says
+  what was compared. `LAZARET_NO_PRIOR_RELEASE=1` turns it off. `scripts/bench.py prior RUN MANIFEST OUT` measures it
+  on a run's WARN releases (`run` scans the files alone). The guard doesn't run it yet.
 - **New GitHub repositories, found and filtered: `lazaret-registry discover --ecosystem github --resume` (GH-NEW-REPOS;
   John's scope of Oct 14: every new public repository, filtered).** GitHub's `/repositories` lists every public
   repository in the order it is created; discovery reads it from a cursor (the last repository ID, stored after each

@@ -5,6 +5,7 @@ releases, and the comparison of two runs.
     python3 scripts/bench.py run MANIFEST OUT.jsonl [--deadline S] [--stop-after S] [--jobs N]
     python3 scripts/bench.py compare BEFORE.jsonl AFTER.jsonl [--aggregate-only] [--show N]
     python3 scripts/bench.py summary RUN.jsonl
+    python3 scripts/bench.py prior RUN.jsonl MANIFEST OUT.jsonl [--aggregate-only]
     python3 scripts/bench.py all SETS.json [--jobs N] [--only NAME,...] [--label L] [--baseline L]
 
 MANIFEST is JSON lines, one release each: "id"; "artifact_path", the
@@ -40,6 +41,14 @@ writes: a scan that ran out of time while the others ran beside it is not
 written then, but scanned again alone once the rest is done (a busy
 machine is not a verdict, T-1), and a run that finishes is written in the
 manifest's order.
+
+`prior` takes a run's WARN releases (npm, PyPI and crates.io ones), scans
+each again and compares it with its established predecessor as a registry
+scan does (registry/prior.py, SC-NEW-INDICATOR: the predecessor is fetched
+from the registry, the release read from the manifest's file), one line
+each in OUT (going on where it was), and prints how many would have the
+finding, by category: what `run`, which scans the files alone, does not
+measure.
 
 `compare` reads two runs of the same releases: the verdicts by category in
 each, and the releases whose verdict or strong findings differ. With
@@ -389,6 +398,78 @@ def compare(before_path, after_path, aggregate_only, show):
     return 1 if verdicts or findings or errors else 0
 
 
+# ---------------------------------------------------------------- the prior release (SC-NEW-INDICATOR)
+PRIOR_ECOSYSTEMS = ("npm", "pypi", "crates")
+
+
+def release_of(rec):
+    """(ecosystem, name, version) of a manifest line: its "eco", "name" and "version", else its id's last two
+    `:`-separated parts (`popular:npm:@img/sharp-linux-x64@0.35.5`); None for another registry's release."""
+    eco, name, version = rec.get("eco"), rec.get("name"), rec.get("version")
+    if not (eco and name and version):
+        parts = str(rec.get("id", "")).split(":")
+        if len(parts) < 2 or "@" not in parts[-1][1:]:
+            return None
+        eco, (name, version) = parts[-2], parts[-1].rsplit("@", 1)
+    return (eco, name, version) if eco in PRIOR_ECOSYSTEMS else None
+
+
+def prior_one(rec, deadline_s):
+    """A WARN release of a run, scanned again and compared with its established predecessor as a registry scan
+    compares it (registry/prior.py: the predecessor fetched from the registry) -> its line of the `prior` file."""
+    from lazaret.registry import prior, repo
+    release = release_of(rec)
+    if release is None:
+        return _row(rec, {"prior": {"notCompared": "not a release of npm, PyPI or crates.io"}})
+    data, container, kind = _release(rec)
+    budget = repo.Budget(deadline=time.monotonic() + _timeout(deadline_s), deadline_detail="budget")
+    res = repo._scan_artifact(data, container, kind, False, budget)
+    per = [{"filename": rec.get("filename") or str(rec.get("url") or "").rsplit("/", 1)[-1] or None, "kind": kind}]
+    _issues, summary = prior.release_issues(*release, None, res["issues"], per)
+    return _row(rec, {"prior": summary or {"notCompared": "no weaker indicator it is asked about"}})
+
+
+def prior_run(run_path, manifest, out_path, aggregate_only, deadline_s=28.0):
+    """`prior`: each WARN release of a run compared with its established predecessor, a line each in OUT (which
+    goes on where it was), and the counts by category."""
+    rows = {r["id"]: r for r in read_jsonl(run_path)}
+    done = {r["id"] for r in read_jsonl(out_path)} if os.path.exists(out_path) else set()
+    with open(out_path, "a", encoding="utf-8") as out:
+        for rec in read_jsonl(manifest):
+            if rows.get(rec["id"], {}).get("verdict") != "WARN" or rec["id"] in done:
+                continue
+            try:
+                line = prior_one(rec, deadline_s)
+            except Exception as exc:                         # noqa: BLE001 -- recorded, the run goes on
+                line = _error_row(rec, f"{type(exc).__name__}: {exc}")
+            out.write(json.dumps(line) + "\n")
+            out.flush()
+    return prior_counts(read_jsonl(out_path), aggregate_only)
+
+
+def _prior_outcome(line):
+    found = line.get("prior") or {}
+    if "error" in line:
+        return "error"
+    if found.get("newRules"):
+        return "SC-NEW-INDICATOR"
+    return "compared, nothing new" if "newRules" in found else "not compared"
+
+
+def prior_counts(lines, aggregate_only):
+    """Print what `prior` found, by category (and with --aggregate-only nothing that names a release)."""
+    table = collections.defaultdict(collections.Counter)
+    for line in lines:
+        table[_group(line.get("cat", ""))][_prior_outcome(line)] += 1
+    for group in sorted(table):
+        print(f"{group} WARN releases: " + ", ".join(f"{k} {n}" for k, n in table[group].most_common()))
+    for line in [] if aggregate_only else lines:
+        if _prior_outcome(line) == "SC-NEW-INDICATOR":
+            found = line["prior"]
+            print(f"  {line['id']}: {', '.join(found['newRules'])} (against {found['version']})")
+    return 0
+
+
 # ---------------------------------------------------------------- every set, one command
 class SetupError(Exception):
     """The sets file, the engine or the results folder is not fit to run on."""
@@ -699,6 +780,11 @@ def _parser():
     p.add_argument("--show", type=int, default=50, help="releases shown at most (default 50)")
     p = sub.add_parser("summary", help="one run's verdicts by category")
     p.add_argument("run")
+    p = sub.add_parser("prior", help="a run's WARN releases compared with their predecessors (SC-NEW-INDICATOR)")
+    p.add_argument("run")
+    p.add_argument("manifest")
+    p.add_argument("out")
+    p.add_argument("--aggregate-only", action="store_true", help="counts only, nothing that names a release")
     p = sub.add_parser("all", help="every set of a sets file, run and compared with its last run")
     p.add_argument("sets", help="the sets file (JSON; see this script's docstring)")
     p.add_argument("--jobs", type=int, default=None, help="releases scanned at once (default: half the cores)")
@@ -719,6 +805,8 @@ def main(argv=None):
         return run(args.manifest, args.out, args.deadline, args.stop_after, max(1, args.jobs))
     if args.command == "compare":
         return compare(args.before, args.after, args.aggregate_only, args.show)
+    if args.command == "prior":
+        return prior_run(args.run, args.manifest, args.out, args.aggregate_only)
     if args.command == "all":
         try:
             return run_all(args.sets, max(1, args.jobs or _default_jobs()),

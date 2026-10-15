@@ -71,6 +71,7 @@ from lazaret.registry import actionmeta as _actionmeta  # noqa: E402
 from lazaret.registry import contentcache as _cache     # noqa: E402
 from lazaret.registry import lookalike as _lookalike    # noqa: E402
 from lazaret.registry import npmtar as _npmtar          # noqa: E402
+from lazaret.registry import prior as _prior            # noqa: E402
 from lazaret.registry import provenance as _provenance  # noqa: E402
 from lazaret.registry import unused_deps as _unused     # noqa: E402
 from lazaret.registry.ecosystems import base as _base   # noqa: E402
@@ -346,7 +347,7 @@ SAMPLE = 8192              # header/entropy sample read from oversized files
 #      entry points and hook targets, Python install scripts
 # 2.3: verdict tiers, decoded hex, install-script inspection; 2.2:
 #      verdict-integrity; 2.1: binary-artifact awareness
-ENGINE_VERSION = "2.72.0"
+ENGINE_VERSION = "2.73.0"
 
 # ---------------- The content memo (P-2a, registry/contentcache.py) ----------------
 # One per scan_package run: the engine answers once for content several of a
@@ -5528,9 +5529,8 @@ def scan_package(eco, name, version=None, full=False, *, resolved=None, deadline
                     **{k: r[k] for k in ("verdict", "verdictReason", "filesScanned",
                                          "binaryArtifacts", "truncated",
                                          "strongIndicators", "weakIndicators", "useTime")}})
-    all_issues.extend(new_dependency_issues(eco, name, version, resolved, unused, brings))
-    provenance_issues, provenance = _provenance.check_release(eco, name, version, resolved, attested, _provenance_fetch)
-    all_issues.extend(provenance_issues)
+    provenance, prior = _release_findings(eco, name, version, resolved, all_issues, per, (attested, unused, brings),
+                                          (deadline, cancel, memo))
     skip_issues, skip_label = _skipped_summary(skipped, byte_budget, limit)
     # one part per release file left out; skip_issues holds one finding per
     # REASON, and used to be counted instead ("1 part" for 3 skipped files)
@@ -5577,8 +5577,28 @@ def scan_package(eco, name, version=None, full=False, *, resolved=None, deadline
                                  for f, kind, size in skipped + not_installed],
             "useTime": use_time_total([p["useTime"] for p in per]),
             "scannedAt": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
-            **({"provenance": provenance} if provenance is not None else {}),
+            **_release_fields(provenance, prior),
             **_extension_fields(eco, resolved, brings, startup, kinds)}
+
+
+def _release_findings(eco, name, version, resolved, issues, per, found, limits):
+    """The release's own findings beside its files', added to `issues` (its files' findings): SC-NEW-INDICATOR
+    (registry/prior.py: asked of those findings alone), SC-NEW-DEPENDENCY, provenance's. found: (the files'
+    digests the provenance check is given, the dependencies no file names, what a VS Code extension brings);
+    limits: (deadline, cancel, memo) -> (provenance's summary, the prior release's)."""
+    attested, unused, brings = found
+    deadline, cancel, memo = limits
+    prior_issues, prior = _prior.release_issues(eco, name, version, resolved, issues, per, deadline, cancel, memo)
+    issues.extend(new_dependency_issues(eco, name, version, resolved, unused, brings))
+    provenance_issues, provenance = _provenance.check_release(eco, name, version, resolved, attested, _provenance_fetch)
+    issues.extend(provenance_issues)
+    issues.extend(prior_issues)
+    return provenance, prior
+
+
+def _release_fields(provenance, prior):
+    """The result's `provenance` and `priorRelease`, where there is one."""
+    return {k: v for k, v in (("provenance", provenance), ("priorRelease", prior)) if v is not None}
 
 
 def _provenance_fetch(url, max_bytes, accept):

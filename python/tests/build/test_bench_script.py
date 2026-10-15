@@ -19,6 +19,7 @@ import subprocess
 import tempfile
 import threading
 import unittest
+from unittest import mock
 
 from lazaret.scanner import _native
 from tests import _support
@@ -126,6 +127,55 @@ class BenchTests(unittest.TestCase):
         self.assertEqual(self.quietly("run", self.manifest, out, "--stop-after", 60)[0], 0)
         got = {r["id"]: (r["verdict"], [s[0] for s in r["strong"]]) for r in self.b.read_jsonl(out)}
         self.assertEqual(got, {"ext-plain": ("OK", []), "ext-main": ("SUSPICIOUS", ["SC-IMPORT-RISK"])})
+
+    def warn_run(self):
+        """A manifest of four releases, each a package whose postinstall runs a file that prints, and a run that
+        found three of them WARN: (manifest, run, their ids)."""
+        hooked = tarball({"package.json": manifest(scripts={"postinstall": "node install.js"}),
+                          "install.js": "console.log('ready');\n"})
+        releases = (("benign:npm:files-kit@1.0.2", "benign", {}, "WARN"),
+                    ("x1", "malicious_intent", {"eco": "pypi", "name": "pkg", "version": "1.1"}, "WARN"),
+                    ("benign:go:example.org/m@v1.0.0", "benign", {}, "WARN"), ("ok-one", "benign", {}, "OK"))
+        rows = []
+        for n, (rid, cat, extra, _verdict) in enumerate(releases):
+            path = self.dir / f"{n}.tgz"
+            path.write_bytes(hooked)
+            rows.append({"id": rid, "cat": cat, "artifact_path": str(path), "container": "tgz", "kind": "npm", **extra})
+        manifest_path, run_path = self.dir / "m.jsonl", self.dir / "run.jsonl"
+        manifest_path.write_text("".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
+        run_path.write_text("".join(json.dumps({"id": r[0], "cat": r[1], "verdict": r[3]}) + "\n" for r in releases),
+                            encoding="utf-8")
+        return manifest_path, run_path, [r["id"] for r in rows]
+
+    def test_prior_compares_the_warn_releases(self):
+        # `prior`: each WARN release of a run, scanned again and compared with its predecessor by registry/prior.py
+        # (faked here: it would fetch the predecessor); the counts by category, and no names with --aggregate-only
+        from lazaret.registry import prior
+        manifest_path, run_path, ids = self.warn_run()
+        out, asked = self.dir / "prior.jsonl", []
+
+        def compared(eco, name, version, resolved, issues, per, *rest):
+            asked.append((eco, name, version, sorted({i["rule"] for i in issues if i["rule"].startswith("SC-")})))
+            return [], {"version": "1.0.0", "publishedBefore": "30 days", "files": [],
+                        "newRules": {"npm": ["SC-INSTALL-HOOK"]}.get(eco, [])}
+        with mock.patch.object(prior, "release_issues", compared):
+            code, text = self.quietly("prior", run_path, manifest_path, out)
+        self.assertEqual(code, 0)
+        self.assertEqual(asked, [("npm", "files-kit", "1.0.2", ["SC-INSTALL-HOOK"]),
+                                 ("pypi", "pkg", "1.1", ["SC-INSTALL-HOOK"])])
+        lines = [json.loads(x) for x in out.read_text(encoding="utf-8").splitlines()]
+        self.assertEqual([x["id"] for x in lines], ids[:3])                              # the OK release is not asked
+        self.assertEqual(lines[2]["prior"], {"notCompared": "not a release of npm, PyPI or crates.io"})
+        self.assertIn("benign WARN releases: SC-NEW-INDICATOR 1, not compared 1", text)
+        self.assertIn("malicious WARN releases: compared, nothing new 1", text)
+        self.assertIn("benign:npm:files-kit@1.0.2: SC-INSTALL-HOOK (against 1.0.0)", text)
+        with mock.patch.object(prior, "release_issues", compared):
+            code, text = self.quietly("prior", run_path, manifest_path, out, "--aggregate-only")
+        self.assertEqual(len(asked), 2)                                                 # gone on: nothing again
+        self.assertNotIn("files-kit", text)
+        self.assertEqual(self.b.release_of({"id": "popular:npm:@img/sharp-linux-x64@0.35.5"}),
+                         ("npm", "@img/sharp-linux-x64", "0.35.5"))
+        self.assertIsNone(self.b.release_of({"id": "no-version-here"}))
 
     def test_compare(self):
         before, after = self.dir / "before.jsonl", self.dir / "after.jsonl"

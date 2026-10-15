@@ -714,7 +714,31 @@ count (npm's maintainers; PyPI's owners, maintainers and organization, from
 the JSON API's `ownership`). The guard scans each package with
 `_scan_artifact`, so it gets SC-USE-RISK and the follower but not the dependency history (it
 already scans the new dependency itself, and holds back a release younger
-than --min-age). SC-UNUSED-DEPENDENCY (`_ArtifactScan._unused_dependencies`,
+than --min-age). SC-NEW-INDICATOR (0.1.9, `registry/prior.py`, called by
+`scan_package` through `_release_findings`; John, Oct 14: "if the latest
+release has findings then we review the prior release vs it"): a release
+whose files have weaker indicators only is compared with its established
+predecessor, the newest release published at least `prior.GAP` (7 days)
+before it, a pre-release only for a pre-release (npm: the packument's
+times; PyPI: the Simple API's upload times, and the predecessor's file of
+the same name with the version changed, else the first of the kind;
+crates: the index's publish times, a yanked release none), scanned as the
+release's files were (`_scan_artifact`, the run's memo shared, so the
+files the two have alike are answered once); each weaker indicator's rule
+the predecessor has no finding of, but those of what a release may well
+ship anew (`NOT_COMPARED`: SC-BINARY, SC-OPAQUE-BLOB, SC-NESTED-ARCHIVE), is
+CRITICAL. Best effort: a history over `MAX_HISTORY_BYTES` (16 MB), a
+registry that does not answer, a predecessor's file whose digest is not
+the registry's or whose scan was not complete, is no finding, and the
+result's `priorRelease` says what was compared (`notCompared` and why).
+`LAZARET_NO_PRIOR_RELEASE=1` turns it off, as `LAZARET_NO_DEPENDENCY_HISTORY=1`
+does; the tests turn it off (`tests/__init__.py`) but its own. The popular
+set's 42 WARN releases (Oct 15): 33 have only rules not compared, 7 had a
+finding of each rule in their predecessor, pnpm 12.8.1's new postinstall
+(against 11.27.1) is the one SC-NEW-INDICATOR, and vite's packument (39 MB)
+is over the budget. `bench.py prior`
+measures it on a run's WARN releases, which `run` (the files alone) does
+not. The guard does not run it yet. SC-UNUSED-DEPENDENCY (`_ArtifactScan._unused_dependencies`,
 npm only, INFO) lists the runtime dependencies no text of the release names
 and that are neither among npm's 5,000 most-downloaded packages nor in its
 own scope, when every text member was read whole; `_scan_artifact` returns

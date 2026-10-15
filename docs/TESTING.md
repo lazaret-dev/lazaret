@@ -152,6 +152,9 @@ Notes:
   (`LAZARET_NO_PROVENANCE=1`, unless the environment sets it): a scan asks
   the registry for a release's attestations and for the release before it,
   and the tests scan made-up releases that must not reach the network.
+  The comparison with a release's predecessor (SC-NEW-INDICATOR) is off
+  the same way (`LAZARET_NO_PRIOR_RELEASE=1`), and
+  `tests.registry.test_prior_release` turns it on over made-up registries.
   `tests.registry.test_provenance` turns it on over pratique's real npm
   and PyPI attestations (sigstore 0.2.0, 2.2.0 and 4.0.0; pypi-attestations
   0.0.30), with the registries' other documents built in their shapes.
