@@ -738,7 +738,15 @@ finding of each rule in their predecessor, pnpm 12.8.1's new postinstall
 (against 11.27.1) is the one SC-NEW-INDICATOR, and vite's packument (39 MB)
 is over the budget. `bench.py prior`
 measures it on a run's WARN releases, which `run` (the files alone) does
-not. The guard does not run it yet. SC-UNUSED-DEPENDENCY (`_ArtifactScan._unused_dependencies`,
+not. The guard runs it (`guard.with_prior`, `prior.compare` over its
+fetcher and scanner) on a WARN release from npm's or PyPI's public
+registry in the provenance window (`PROVENANCE_DAYS`), from the lockfile
+and through the pip index: the scan's answer keeps its findings' rules
+(`rules_of`: the first finding of each, in short), the verdict cache keeps
+them and the comparison once made (`_prior_kept`; one the registry did not
+answer is made again, from the cached rules), and the predecessor's file
+is fetched, checked against the registry's digest and scanned like any
+other, its verdict cached under its own key. SC-UNUSED-DEPENDENCY (`_ArtifactScan._unused_dependencies`,
 npm only, INFO) lists the runtime dependencies no text of the release names
 and that are neither among npm's 5,000 most-downloaded packages nor in its
 own scope, when every text member was read whole; `_scan_artifact` returns

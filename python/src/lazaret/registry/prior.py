@@ -97,9 +97,9 @@ def _json(url, accept=None):
     return repo._deep_safe_loads(raw, f"registry response from {url}")
 
 
-def _npm(name, version, _resolved):
+def _npm(name, version, _resolved, fetch_json):
     """npm: (when, (predecessor, its time), its files) by the packument's times."""
-    doc = _json("https://registry.npmjs.org/" + urllib.parse.quote(name, safe="@"))
+    doc = fetch_json("https://registry.npmjs.org/" + urllib.parse.quote(name, safe="@"), None)
     times = doc.get("time") if isinstance(doc, dict) else None
     versions = doc.get("versions") if isinstance(doc, dict) else None
     if not isinstance(times, dict) or not isinstance(versions, dict):
@@ -147,10 +147,10 @@ def _pypi_ref(f):
             "artifact": "wheel" if f["filename"].endswith(".whl") else "sdist", "filename": f["filename"]}
 
 
-def _pypi(name, version, _resolved):
+def _pypi(name, version, _resolved, fetch_json):
     """PyPI: (when, (predecessor, its time), its files pip may install) by the Simple API's upload times."""
     repo = _repo()
-    files = _pypi_files(_json(f"https://pypi.org/simple/{repo._pep503(name)}/", PYPI_SIMPLE_JSON))
+    files = _pypi_files(fetch_json(f"https://pypi.org/simple/{repo._pep503(name)}/", PYPI_SIMPLE_JSON))
     times = _pypi_times(files)
     when, best = established(times, version, times, lambda v: not repo._PEP440_FINAL_RE.match(v))
     refs = [r for r in map(_pypi_ref, files.get(best[0], ()) if best else ()) if r is not None]
@@ -164,8 +164,9 @@ def _crate_entry(resolved):
     return entry if isinstance(entry, dict) and isinstance(entry.get("vers"), str) else None
 
 
-def _crates(name, version, resolved):
-    """crates: (when, (predecessor, its time), its .crate) by the index's publish times (a yanked release is none)."""
+def _crates(name, version, resolved, _fetch_json):
+    """crates: (when, (predecessor, its time), its .crate) by the index's publish times (a yanked release is none),
+    over the crates module's own fetch."""
     from lazaret.registry.ecosystems import crates as _crates_module
     repo = _repo()
     module = repo.registry_module("crates")
@@ -204,10 +205,17 @@ def counterparts(per, flagged, version, prev, refs):
     return out[:MAX_FILES]
 
 
+def rules_found(issues):
+    """The rules a scan's findings name, as the comparison counts them (a supply-chain finding that is not INFO)."""
+    return {i["rule"] for i in issues if i["rule"].startswith("SC-") and i["sev"] != "INFO"}
+
+
 def _scan(eco, name, prev, ref, deadline, cancel, memo):
     """One of the predecessor's files, fetched, checked against its digest and scanned as the release's were: the set
-    of rules it has a finding of, or None when its scan was not complete."""
+    of rules it has a finding of, or why it was not compared (its scan was not complete)."""
     repo = _repo()
+    if deadline is not None and time.monotonic() > deadline:
+        return "out of time"
     module = repo.registry_module(eco)
     if module is None:
         data = repo.http_bytes(ref["url"])
@@ -219,21 +227,16 @@ def _scan(eco, name, prev, ref, deadline, cancel, memo):
     budget = repo.Budget(deadline=stop if deadline is None else min(stop, deadline), cancel=cancel,
                          deadline_detail="the prior release's scan ran out of time")
     r = repo._scan_artifact(data, ref["container"], ref["artifact"], False, budget, memo)
-    if r["truncated"]:
-        return None
-    return {i["rule"] for i in r["issues"] if i["rule"].startswith("SC-") and i["sev"] != "INFO"}
+    return f"{ref.get('filename')} was not scanned whole" if r["truncated"] else rules_found(r["issues"])
 
 
-def _rules_of(eco, name, prev, files, limits):
+def _rules_of(prev, files, scan_file):
     """(the rules the predecessor's files have a finding of, None), or (None, why it was not compared)."""
-    deadline, cancel, memo = limits
     before = set()
     for ref in files:
-        if deadline is not None and time.monotonic() > deadline:
-            return None, "out of time"
-        rules = _scan(eco, name, prev, ref, deadline, cancel, memo)
-        if rules is None:
-            return None, f"{ref.get('filename')} was not scanned whole"
+        rules = scan_file(ref, prev)
+        if isinstance(rules, str):
+            return None, rules
         before |= rules
     return before, None
 
@@ -252,8 +255,9 @@ def _issue(rule, first, prev, age):
             "snipStart": first.get("snipStart", 1), **({"artifact": first["artifact"]} if "artifact" in first else {})}
 
 
-def _compare(eco, name, version, resolved, asked, per, deadline, cancel, memo):
-    when, best, refs = _HISTORY[eco](name, version, resolved)
+def _compare(eco, name, version, asked, per, ops):
+    fetch_json, scan_file, resolved = ops
+    when, best, refs = _HISTORY[eco](name, version, resolved, fetch_json)
     if best is None:
         return [], {"notCompared": "the registry gives no time for this release" if when is None else
                     "no release published a week or more before this one"}
@@ -262,13 +266,25 @@ def _compare(eco, name, version, resolved, asked, per, deadline, cancel, memo):
     files = counterparts(per, flagged, version, prev, refs)
     if not files:
         return [], {"version": prev, "notCompared": "no file of it to compare"}
-    before, why = _rules_of(eco, name, prev, files, (deadline, cancel, memo))
+    before, why = _rules_of(prev, files, scan_file)
     if why:
         return [], {"version": prev, "notCompared": why}
     new = sorted(set(asked) - before)
     age = _age(when - best[1])
     summary = {"version": prev, "publishedBefore": age, "files": [r.get("filename") for r in files], "newRules": new}
     return [_issue(rule, asked[rule], prev, age) for rule in new], summary
+
+
+def compare(eco, name, version, asked, per, fetch_json, scan_file, resolved=None):
+    """The comparison of a release whose findings asked about are `asked` (`candidates`) with its established
+    predecessor, over the caller's fetch and scan: `fetch_json(url, accept)` a registry document, `scan_file(ref,
+    version)` one of the predecessor's files fetched, checked and scanned -> the rules it has a finding of
+    (`rules_found`), or why it was not compared -> (SC-NEW-INDICATOR findings, summary). The registry's errors are a
+    summary that says why it was not compared (lazaret guard runs it so, over its own fetcher and scanner)."""
+    try:
+        return _compare(eco, name, version, asked, per, (fetch_json, scan_file, resolved))
+    except (_base.FetchError, _base.SpecError, _base.DigestError, ValueError) as exc:
+        return [], {"notCompared": f"{type(exc).__name__}: {_base.show(str(exc))}"}
 
 
 def release_issues(eco, name, version, resolved, issues, per, deadline=None, cancel=None, memo=None):
@@ -279,7 +295,5 @@ def release_issues(eco, name, version, resolved, issues, per, deadline=None, can
     asked = candidates(issues)
     if not asked:
         return [], None
-    try:
-        return _compare(eco, name, version, resolved, asked, per, deadline, cancel, memo)
-    except (_base.FetchError, _base.SpecError, _base.DigestError, ValueError) as exc:
-        return [], {"notCompared": f"{type(exc).__name__}: {_base.show(str(exc))}"}
+    return compare(eco, name, version, asked, per, _json,
+                   lambda ref, prev: _scan(eco, name, prev, ref, deadline, cancel, memo), resolved)

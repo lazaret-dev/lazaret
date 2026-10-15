@@ -89,7 +89,11 @@ blocked); a release with none of the provenance the release before it had is WAR
 trustPolicy no-downgrade; --trust lets it through), and one with provenance from another owner's repository WARN
 (--block-warn blocks it); --json says what was found. LAZARET_NO_PROVENANCE=1 turns it off. A
 verdict is cached with whether that check ran to the end: one cached while the registry's answers could not be read,
-or with the check off, is scanned and checked again while the release is in that window (EG-10).
+or with the check off, is scanned and checked again while the release is in that window (EG-10). In the same window a
+WARN release from npm's or PyPI's public registry is compared with its established predecessor as `lazaret-registry`
+compares it (registry/prior.py): a weaker indicator whose rule the predecessor had no finding of is SC-NEW-INDICATOR,
+CRITICAL, and the release is SUSPICIOUS (blocked); the comparison is kept with the verdict, the predecessor's own
+verdict in the cache. LAZARET_NO_PRIOR_RELEASE=1 turns it off.
 
 The resolutions made outside the project (cargo install, yarn 1, npm install -g, go install pkg@version, --plan) are made
 in a folder of the user's own (private_scratch), and the package manager is found in PATH's absolute folders only
@@ -136,8 +140,8 @@ import urllib.request
 
 from lazaret.scanner import core as lazaret
 from lazaret.scanner import gomod, nativenet, programs, sca, timings
-from lazaret.registry import cargosrc, goproxy, keepalive as keepalive_, pmsettings, provenance as provenance_, repo, \
-    scanpool
+from lazaret.registry import cargosrc, goproxy, keepalive as keepalive_, pmsettings, prior as prior_, \
+    provenance as provenance_, repo, scanpool
 from lazaret.registry.ecosystems import crates, golang
 
 #: Releases published less than this long ago get npm's and PyPI's provenance check (registry/provenance.py, NET-1): an
@@ -649,6 +653,7 @@ class Check:
         self.age = None                     # seconds since it was published, when known
         self.digest = None
         self.provenance = None              # what the provenance check said, when it ran (provenance.release_issues)
+        self.prior = None                   # what the comparison with the release before said, when it ran (prior.py)
 
     def label(self):
         return f"{self.name}@{self.version}" if self.version else self.name
@@ -658,7 +663,7 @@ class Check:
                 "verdict": self.verdict, "reason": self.reason, "indicators": self.indicators,
                 "blocked": self.blocked, "notes": self.notes, "trusted": self.trusted,
                 "ageSeconds": self.age, "digest": self.digest,
-                **({"provenance": self.provenance} if self.provenance is not None else {})}
+                **{k: v for k, v in (("provenance", self.provenance), ("priorRelease", self.prior)) if v is not None}}
 
 
 _SEV_RANK = {"BLOCKER": 0, "CRITICAL": 1, "MAJOR": 2, "MINOR": 3, "INFO": 4}
@@ -669,6 +674,17 @@ def summarize(result, limit=3):
     found = [i for i in result.get("issues", []) if str(i.get("rule", "")).startswith("SC-") and i.get("sev") != "INFO"]
     found.sort(key=lambda i: (_SEV_RANK.get(i.get("sev"), 9), i.get("file", ""), i.get("line", 0)))
     return [f"{i['rule']} ({i['sev']}) {i.get('file', '')}: {i.get('msg', '')}"[:400] for i in found[:limit]]
+
+
+def rules_of(result):
+    """{rule: its first finding, in short} of a scan result's supply-chain findings: what the comparison with the
+    release before asks about (prior.candidates) and counts (prior.rules_found), kept with the verdict."""
+    out = {}
+    for i in result.get("issues", []):
+        if i["rule"] in prior_.rules_found([i]):
+            out.setdefault(i["rule"], {"rule": i["rule"], "sev": i["sev"], "name": i.get("name", ""),
+                                       "file": i.get("file", ""), "line": i.get("line", 1), "msg": i["msg"][:400]})
+    return out
 
 
 #: What the guard says of each reason a scan is INCOMPLETE that blocks it (repo.INCOMPLETE_KINDS)
@@ -719,6 +735,83 @@ def with_provenance(check, hit, eco, report):
             "indicators": summarize({"issues": found}) + list(hit["indicators"])}
 
 
+# ---------------- The release before (SC-NEW-INDICATOR) ----------------
+def prior_due(hit, published, public):
+    """Is a verdict `hit` to be compared with the release's established predecessor (registry/prior.py)? A WARN from a
+    scan that kept its findings' rules, of a release from the public registry, in the provenance window, not compared
+    yet."""
+    return (public and prior_.enabled() and hit.get("verdict") == "WARN" and "rules" in hit and "prior" not in hit
+            and (published is None or (now() - published).total_seconds() < PROVENANCE_DAYS * 86400))
+
+
+def _prior_scan(ctx, fetcher, eco, name):
+    """The comparison's scan of one of the predecessor's files, over the guard's fetcher and scanner: fetched,
+    checked against the registry's digest, its verdict cached as the release's own would be -> the rules it has a
+    finding of, or why it was not compared."""
+    def scan_file(ref, prev):
+        with ctx.scanner.holding(UNDECLARED_HOLD):
+            data = fetcher.get(ref["url"])
+            repo.verify_digest(data, ref["entry"], eco, name, prev)
+            digest = (f"sha256:{hashlib.sha256(data).hexdigest()}" if eco == "pypi"
+                      else "{}-{}".format(*(registry_digest(ref["entry"]) or ("sha512", ""))))
+            key = VerdictCache.key(eco, pep503(name) if eco == "pypi" else name, prev, digest)
+            hit = ctx.scanner.cached(key)
+            if hit is None or ("rules" not in hit and hit.get("verdict") != "OK"):    # (OK: it has none)
+                hit = ctx.scanner.scan(data, ref["container"], ref["artifact"])
+                ctx.scanner.remember(key, hit, None)
+        if hit.get("verdict") == "INCOMPLETE" or hit.get("incomplete"):
+            return f"{ref.get('filename')} was not scanned whole"
+        return set(hit.get("rules") or ())
+    return scan_file
+
+
+def _prior_kept(hit):
+    """What the verdict cache keeps of the comparison with the release before: the scan's rules (asked about, or
+    counted when it is the predecessor), and the comparison once it was made or nothing was asked (one the registry
+    did not answer is made again)."""
+    kept = {"rules": hit["rules"]} if isinstance(hit.get("rules"), dict) and hit["rules"] else {}
+    if "prior" in hit and (hit["prior"] is None or "newRules" in hit["prior"]):
+        kept["prior"] = hit["prior"]
+    return kept
+
+
+def with_prior(ctx, check, hit, fetcher, filename, kind):
+    """The scan's verdict `hit` (WARN) compared with the release's established predecessor (prior.compare): a weaker
+    indicator whose rule the predecessor had no finding of is SC-NEW-INDICATOR, CRITICAL, and makes it SUSPICIOUS,
+    its line first among the indicators; what the comparison said is kept on `check` (--json) and with the verdict."""
+    asked = prior_.candidates(list(hit["rules"].values()))
+    summary = None
+    if asked:
+        def fetch_json(url, accept):
+            raw = fetcher.get(url, prior_.MAX_HISTORY_BYTES, accept, repo.METADATA_TIMEOUT)
+            return repo._deep_safe_loads(raw, f"registry response from {url}")
+        issues, summary = prior_.compare(check.eco, check.name, check.version, asked,
+                                         [{"filename": filename, "kind": kind}], fetch_json,
+                                         _prior_scan(ctx, fetcher, check.eco, check.name))
+        if issues:
+            hit = {**hit, "verdict": "SUSPICIOUS", "reason": issues[0]["msg"][:400],
+                   "indicators": summarize({"issues": issues}) + list(hit["indicators"])}
+    check.prior = summary
+    return {**hit, "prior": summary}
+
+
+def with_history(ctx, check, hit, fetcher, when, report, release):
+    """The scan's verdict `hit` with what the release's history says: its provenance (`report()`, the provenance
+    check's report, asked after a fresh scan of a release from the public registry in the window) and the comparison
+    with the release before (with_prior). when: (published, from the public registry, scanned now); release: (its
+    file's name, its kind)."""
+    published, public, scanned = when
+    if scanned and public and provenance_due(published):
+        hit = with_provenance(check, hit, check.eco, report())
+    if prior_due(hit, published, public):
+        hit = with_prior(ctx, check, hit, fetcher, *release)
+    return hit
+
+
+def pypi_kind(filename):
+    return "wheel" if filename.lower().endswith(".whl") else "sdist"
+
+
 class VerdictCache:
     """Verdicts by artifact (ecosystem, name, version, digest) and engine
     version, with the release's publish time, in a JSON file of the user's
@@ -767,6 +860,7 @@ class VerdictCache:
             kinds = [k for k in hit.get("incomplete") or () if k in repo.INCOMPLETE_KINDS]
             if kinds:                              # (why it is INCOMPLETE: the guard blocks it, T-1)
                 self.data[key]["incomplete"] = kinds
+            self.data[key].update(_prior_kept(hit))
             self.dirty = True
 
     def save(self):
@@ -852,12 +946,12 @@ def _scan_one(data, container, kind, timeout, timed=False):
         with timings.span("scan", "artifact"):
             res = repo._scan_artifact(data, container, kind, False, budget)
         return {"verdict": res["verdict"], "reason": res["verdictReason"], "indicators": summarize(res),
-                "incomplete": list(res.get("incomplete") or ())}
+                "incomplete": list(res.get("incomplete") or ()), "rules": rules_of(res)}
     here = timings.Timings()
     with timings.capture(here), here.run(), timings.span("scan", "artifact"):
         res = repo._scan_artifact(data, container, kind, False, budget)
     return {"verdict": res["verdict"], "reason": res["verdictReason"], "indicators": summarize(res),
-            "incomplete": list(res.get("incomplete") or ()), "timings": here.report()}
+            "incomplete": list(res.get("incomplete") or ()), "rules": rules_of(res), "timings": here.report()}
 
 
 #: The bytes of archives the guard holds in memory to scan at once (`Scanner.holding`), across the requests a package
@@ -1607,9 +1701,9 @@ def check_npm_package(ctx, fetcher, pkg):
                 scanned = hashlib.sha512(data).hexdigest()
         if ctx.cutoff is not None and (published is None or published > ctx.cutoff):
             published = npm_publish_time(fetcher, pkg["registry"], name, version) or published
-        if scanned and provenance_due(published) and public:
-            hit = with_provenance(check, hit, "npm", provenance_.guard_npm(name, version, scanned,
-                                                                          provenance_fetch(fetcher)))
+        hit = with_history(ctx, check, hit, fetcher, (published, public, bool(scanned)),
+                           lambda: provenance_.guard_npm(name, version, scanned, provenance_fetch(fetcher)),
+                           (pkg["tarball"].rsplit("/", 1)[-1], "npm"))
         ctx.scanner.remember(key, hit, published)
         ctx.scanner.remember(alt, hit, published)
         ctx.apply(check, hit)
@@ -1708,14 +1802,14 @@ def check_file(ctx, fetcher, name, version, f):
             if hashlib.sha256(data).hexdigest() != sha:
                 ctx.block(check, "its SHA-256 is not the lockfile's")
                 return check
-            hit = ctx.scanner.scan(data, container, "wheel" if f["filename"].lower().endswith(".whl") else "sdist")
+            hit = ctx.scanner.scan(data, container, pypi_kind(f["filename"]))
             scanned = True
         published = published or parse_time(hit.get("published"))
         if published is None and ctx.cutoff is not None and public:
             published = pypi_upload_time(fetcher, name, version, f["filename"])
-        if scanned and provenance_due(published) and public:
-            hit = with_provenance(check, hit, "pypi", provenance_.check_pypi(name, version, [(f["filename"], sha)],
-                                                                             provenance_fetch(fetcher)))
+        hit = with_history(ctx, check, hit, fetcher, (published, public, scanned),
+                           lambda: provenance_.check_pypi(name, version, [(f["filename"], sha)], provenance_fetch(fetcher)),
+                           (f["filename"], pypi_kind(f["filename"])))
         ctx.scanner.remember(key, hit, published)
         ctx.apply(check, hit)
         ctx.provenance_block(check, hit, published)
@@ -1911,6 +2005,11 @@ class PypiIndex:
             return [(n, i) for n, i in self.files.items()
                     if pep503(i["project"]) == want and _same_version(i["version"], version)]
 
+    def _provenance(self, info, sha):
+        """The provenance check of one file the index relays, asked when it is due (with_history)."""
+        return lambda: provenance_.check_pypi(info["project"], info["version"], [(info["filename"], sha)],
+                                              provenance_fetch(self.fetcher))
+
     def scan(self, number):
         """(Check, spooled file) for a file the index served, fetched,
         verified and scanned once; the file is None when it is blocked, or
@@ -1951,16 +2050,14 @@ class PypiIndex:
                             hit = None
                         fresh = hit is None
                         if fresh:
-                            hit = self.ctx.scanner.scan(
-                                data, container, "wheel" if info["filename"].lower().endswith(".whl") else "sdist")
+                            hit = self.ctx.scanner.scan(data, container, pypi_kind(info["filename"]))
                         fd, spooled = tempfile.mkstemp(dir=self.spool)     # (removed below if it is blocked)
                         with os.fdopen(fd, "wb") as f:
                             f.write(data)
                     del data
                 if hit is not None:
-                    if fresh and provenance_due(info["published"]) and public:
-                        hit = with_provenance(check, hit, "pypi", provenance_.check_pypi(
-                            info["project"], info["version"], [(info["filename"], sha)], provenance_fetch(self.fetcher)))
+                    hit = with_history(self.ctx, check, hit, self.fetcher, (info["published"], public, fresh),
+                                       self._provenance(info, sha), (info["filename"], pypi_kind(info["filename"])))
                     self.ctx.scanner.remember(key, hit, info["published"])
                     self.ctx.apply(check, hit)
                     self.ctx.provenance_block(check, hit, info["published"])

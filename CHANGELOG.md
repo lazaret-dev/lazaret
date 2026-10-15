@@ -38,7 +38,9 @@ aggregate):
   every rule in their predecessor. Best effort: a history over 16 MB (vite's packument is 39 MB), a registry that
   doesn't answer, or a predecessor's file that doesn't check out is no finding, and the result's `priorRelease` says
   what was compared. `LAZARET_NO_PRIOR_RELEASE=1` turns it off. `scripts/bench.py prior RUN MANIFEST OUT` measures it
-  on a run's WARN releases (`run` scans the files alone). The guard doesn't run it yet.
+  on a run's WARN releases (`run` scans the files alone). `lazaret guard` runs it too, on a WARN release
+  from npm's or PyPI's public registry published in the last 30 days (the provenance check's window): such a
+  release is SUSPICIOUS and blocked, and the comparison is kept with the cached verdict.
 - **New GitHub repositories, found and filtered: `lazaret-registry discover --ecosystem github --resume` (GH-NEW-REPOS;
   John's scope of Oct 14: every new public repository, filtered).** GitHub's `/repositories` lists every public
   repository in the order it is created; discovery reads it from a cursor (the last repository ID, stored after each
