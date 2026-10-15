@@ -382,6 +382,20 @@ named here outside the repository and any synced folder):
    (counts alone). The runs (`~/lazaret-bench/runs/`), the manifests and
    the samples stay on the machine.
 
+**Where the sets run, and when** (John, Oct 15: the Mac is the gate, "although
+don't make it be a blocker"). `bench.py all` over the sets file, the popular
+set beside the benchmark and the holdout, runs on the maintainer's Mac after
+each delivery is applied: minutes there, where an agent's sandbox of two
+cores takes some 40 minutes for the popular set alone and times out on its
+largest releases. A session does not wait for it: it delivers once its own
+checks pass (the tests, the self-scan, and the files the change reads,
+before and after it: a JavaScript change's on the installed npm packages'
+JavaScript files, say), says in the changelog what the run owes, and reads
+the run's report folder afterwards; anything that moved is a follow-up. The
+popular set is fetched there once (`popular.py fetch --cache
+~/lazaret-corpus/popular --manifest ~/lazaret-corpus/popular/manifest.jsonl`)
+and named in the sets file with the other two.
+
 **The popular releases: the release gate's benign set.** The benchmark's 429
 popular packages are mostly small libraries, and they did not hold the nine
 popular releases 0.1.8 made SUSPICIOUS (vite, vitest, monaco-editor,
