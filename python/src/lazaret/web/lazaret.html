@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-ZkQvOsjkYfFNkptb2UIf2CDjuYeCKj6Ey92f+Dt5tlM='; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-tEgJRs95gcV7F3e2FJa9LGsmRLQKek5CrjbVNc+W8pE='; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'">
 <title>Lazaret — Security &amp; Quality Review</title>
 <style>
   :root{
@@ -3975,6 +3975,105 @@ function setScanTimeBudget(ms) { timeBudgetMs = ms ?? SCAN_TIME_BUDGET_MS; }
 
 const COMMENT_LINE_RULES = new Set(["Q-TODO", "S-TOKEN", "S-BIDI"]);
 
+// S-EXEC-JS (0.1.9): is the receiver of the `exec` / `execSync` call the rule matched at `col` of line `i` a regex,
+// so the call RegExp's own? A literal the lexer read as one (`/…/g.exec(s)`), or a name the file assigns a regex and
+// nothing else (regexNames). Anything else counts as before. The engine's scanfile.rs exec_js_regex and its helpers.
+const ASSIGN_NAME_RE = pyRe(String.raw`(?<![\w$.])([A-Za-z_$][\w$]*)\s*(\*\*|<<|>>>|>>|&&|\|\||\?\?|[-+*/%&|^])?=(?![=>])\s*`, "g");
+const REGEX_CTOR_RE = pyRe(String.raw`(?:new\s+)?RegExp\s*\(`, "y");
+const REGEX_CTOR_REACH = 1000;
+const ASCII_IDENT_RE = /[A-Za-z0-9_$]/;
+const ASCII_IDENTS_RE = /^[A-Za-z0-9_$]*$/;
+function execJsRegex(ctx, i, col, state) {
+  if (ctx.mlines[i] !== ctx.lines[i]) return false;
+  const line = ctx.lines[i];
+  const back = (k) => { while (k > 0 && isPySpace(line[k - 1])) k--; return k; };
+  let k = back(Math.min(col, line.length));
+  if (k === 0 || line[k - 1] !== ".") return false;                 // a free call
+  k--;
+  if (k > 0 && line[k - 1] === "?") k--;                            // x?.exec(…)
+  const end = back(k);
+  const lits = execJsLits(ctx, state);
+  if (regexLiteralBefore(ctx, lits, ctx.lex.starts[i] + end)) return true;
+  let start = end;
+  while (start > 0 && ASCII_IDENT_RE.test(line[start - 1])) start--;
+  if (start === end || (start > 0 && line.charCodeAt(start - 1) >= 0x80)) return false;
+  const before = back(start);
+  if (before > 0 && line[before - 1] === ".") return false;         // a member
+  state.names ??= regexNames(ctx, lits);
+  return state.names.has(line.slice(start, end));
+}
+function execJsLits(ctx, state) {
+  const all = ctx.lex.literals ?? [];
+  return (state.lits ??= { starts: all.map((s) => s[0]), ends: all.map((s) => s[1]) });
+}
+function regexNames(ctx, lits) {
+  const regex = new Set(), other = new Set();
+  for (const m of ctx.content.matchAll(ASSIGN_NAME_RE)) {
+    if (!m[2] && wholeRegex(ctx, lits, m.index + m[0].length)) regex.add(m[1]);
+    else other.add(m[1]);
+  }
+  for (const n of other) regex.delete(n);
+  return regex;
+}
+function wholeRegex(ctx, lits, at) {
+  const content = ctx.content;
+  const j = lowerBound(lits.starts, at);
+  let end;
+  if (j < lits.starts.length && lits.starts[j] === at && content[at] === "/") {
+    end = lits.ends[j];
+    while (end < content.length && ASCII_IDENT_RE.test(content[end])) end++;    // its flags
+  } else {
+    REGEX_CTOR_RE.lastIndex = at;
+    const m = REGEX_CTOR_RE.exec(content);
+    if (!m) return false;
+    end = closeParen(ctx, lits, at + m[0].length, REGEX_CTOR_REACH);
+    if (end === null) return false;
+  }
+  return expressionEnds(ctx, end);
+}
+// Does a regex literal end at `pos`, its flags included? (This lexer ends a literal at its closing slash, the
+// engine's after its flags: both skip them.)
+function regexLiteralBefore(ctx, lits, pos) {
+  const j = lowerBound(lits.starts, pos);
+  if (j === 0) return false;
+  const s = lits.starts[j - 1], e = lits.ends[j - 1];
+  return e <= pos && ctx.content[s] === "/" && ASCII_IDENTS_RE.test(ctx.content.slice(e, pos));
+}
+function inCommentAt(ctx, pos) {
+  const j = Math.max(upperBound(ctx.lex.starts, pos) - 1, 0);
+  return ctx.lex.inComment(j, pos - ctx.lex.starts[j]);
+}
+function closeParen(ctx, lits, from, reach) {
+  const content = ctx.content;
+  const line = Math.max(upperBound(ctx.lex.starts, from) - 1, 0), base = ctx.lex.starts[line];
+  const comments = ctx.lex.spans.has(line);             // (the scan stays on this line)
+  let j = lowerBound(lits.starts, from), depth = 1, q = from, steps = 0;
+  while (q < content.length && content[q] !== "\n") {
+    if (++steps > reach) return null;
+    while (j < lits.starts.length && lits.starts[j] < q) j++;
+    if (j < lits.starts.length && lits.starts[j] === q) { q = lits.ends[j]; j++; continue; }
+    if (!comments || !ctx.lex.inComment(line, q - base)) {
+      if (content[q] === "(") depth++;
+      else if (content[q] === ")" && --depth === 0) return q + 1;
+    }
+    q++;
+  }
+  return null;
+}
+function expressionEnds(ctx, pos) {
+  const content = ctx.content;
+  let newline = false;
+  for (; pos < content.length; pos++) {
+    const c = content[pos];
+    if (c === "\n") newline = true;
+    else if (!isPySpace(c) && !inCommentAt(ctx, pos)) break;
+  }
+  if (pos >= content.length) return true;
+  const c = content[pos];
+  if (";,)]}".includes(c)) return true;
+  return newline && (ASCII_LETTER_RE.test(c) || "_$'\"".includes(c));
+}
+
 /* ---------------- Analyzers ---------------- */
 function detectLang(name, content) {
   if (/\.(py|pyw)$/i.test(name)) return "py";
@@ -5028,6 +5127,7 @@ function scanLines(path, content, lines, lang, ctx, issues) {
   const words = () => (fileWords ??= new Set(content.match(ASCII_WORD_RE) ?? []));
   let runsCodeFlag = null;                 // whether the file runs code from a string (SC-HIDDEN-UNICODE severity)
   const fileRunsCode = () => (runsCodeFlag ??= HIDDEN_EXEC_RE.test(content));
+  const execJs = {};                       // what S-EXEC-JS reads of the whole file (execJsRegex)
   for (let i = 0; i < lines.length; i++) {
     ctx.checkTime();
     const line = lines[i];
@@ -5048,6 +5148,7 @@ function scanLines(path, content, lines, lang, ctx, issues) {
       if (col < 0) continue;
       if (r.need && !r.need.test(mline)) continue;
       if (r.skip && r.skip.test(mline)) continue;
+      if (r.id === "S-EXEC-JS" && execJsRegex(ctx, i, col, execJs)) continue;
       if (r.id === "S-TOKEN" && (col = tokenCol(mline, mlines, i)) < 0) continue;
       if (r.id === "S-TOKEN" || r.id === "S-SECRET") secretLines.add(i);
       issues.push(mkIssue(r, path, i + 1, lines, col));

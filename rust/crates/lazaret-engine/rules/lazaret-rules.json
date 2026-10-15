@@ -1,6 +1,6 @@
 {
  "format": 1,
- "rule_set": "2.68.0",
+ "rule_set": "2.69.0",
  "source": "lazaret.scanner.core, extracted by scripts/make_rust_tables.py \u2014 do not edit",
  "values": {
   "ALWAYS_PRUNE_DIRS": {
@@ -4453,6 +4453,10 @@
   "_ASCII_WORD_RE": {
    "flags": "",
    "re": "[A-Za-z0-9_$]+"
+  },
+  "_ASSIGN_NAME_RE": {
+   "flags": "",
+   "re": "(?<![\\w$.])(?P<name>[A-Za-z_$][\\w$]*)\\s*(?P<op>\\*\\*|<<|>>>|>>|&&|\\|\\||\\?\\?|[-+*/%&|^])?=(?![=>])\\s*"
   },
   "_AUG_ASSIGN_RE": {
    "map": {
@@ -13180,6 +13184,13 @@
   "_REDIRECT_TOKEN_RE": {
    "flags": "",
    "re": "\\d?[<>]{1,2}&?\\d?"
+  },
+  "_REGEX_CTOR_RE": {
+   "flags": "",
+   "re": "(?:new\\s+)?RegExp\\s*\\("
+  },
+  "_REGEX_CTOR_REACH": {
+   "value": 1000
   },
   "_RETURN_RE": {
    "flags": "",

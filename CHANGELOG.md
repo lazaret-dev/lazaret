@@ -911,6 +911,19 @@ aggregate):
 
 ### Fixed
 
+- **S-EXEC-JS took RegExp's `exec` for child_process's (rule set 2.69.0).** The rule flags `exec` and `execSync`
+  called with a command built at run time on any receiver but `this`, so a regex's own `exec` in a matching loop
+  (`while ((m = re.exec(s)))`) was a CRITICAL "Shell exec" in any package that matches text. A call on a regex is
+  left out now: a regex literal as the lexer reads one (`/…/g.exec(s)`), or a
+  name the file assigns a whole regex (a literal, `new RegExp(…)` or `RegExp(…)`, the expression ending there) and
+  nothing else. A name also assigned something else (`re = cp`, `re &&= cp`), a regex that is not the whole value
+  (`/x/ && cp`) and another object's member (`config.re`) still count, and so does every other receiver: where one
+  came from is not read, since another file can hand a script child_process (`require('./run').exec(cmd)`), so
+  `db.exec(sql + where)` is flagged as before. The engine's (`scanfile.rs`, both packages) and the dashboard's.
+  Lazaret's scan of its own repository: 13 fewer findings (5,120 to 5,107), none new. Of the 143 S-EXEC-JS findings
+  left, 122 are the test files' examples, in strings, and 21 are regexes the rule cannot tell from a name: made by a
+  function (the npm package's `pyRe(…)`) or passed in.
+
 - **The npm package's guess at a file's language read a long run of line breaks in quadratic time (CodeQL).**
   `scanFile` without a `lang` (the library API, and the dashboard's pasted code) guesses it from the content, and
   the Python test's `^\s*` crossed line breaks, so each of a run of them rescanned the rest: 100,000 took about 9

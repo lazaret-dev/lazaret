@@ -54,7 +54,8 @@ resolving to one file. Writes are atomic
 
 - **Injection**: `eval`/`exec`, shell command execution (`exec`/`execSync` as
   a free call or on a receiver like `cp.exec` — not on `this.`/`self.`/
-  `super.`, and not method definitions), SQL injection —
+  `super.`, not method definitions, and not on a regex: RegExp's own
+  `exec`), SQL injection —
   including the flow-sensitive SQL-sink analyzer that catches SQL built into a
   variable and then passed to `execute(q)` (G12).
 - **Taint flows**: request/argv input reaching command/XSS/SQL sinks without

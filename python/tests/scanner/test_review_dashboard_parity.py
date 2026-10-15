@@ -76,6 +76,17 @@ PEM_LINE = "MIIEowIBAAKCAQEAu1SU1LfVLPHCozMxH2Mo4lgOEePzNm0tRgeLezV6ffAt0gun\n"
 
 # (file name, language, content) — text as pasted.
 ADVERSARIAL = [
+    # 0.1.9: S-EXEC-JS leaves out a call on a regex (the engine's scanfile.rs exec_js_regex); RUN stands for exec,
+    # so that Lazaret's scan of its own sources does not read these strings as calls
+    *[(name, "js", text.replace("RUN", "exec")) for name, text in (
+        ("regex_exec.js", "const RE = /a(b)/g;\nlet m;\nwhile ((m = RE.RUN(text))) use(m);\ndb.RUN(sql + where);\n"
+         "var re2 = RegExp('(' + x + ')', 'g') // why\n, n = 0;\nre2?.RUN(line);\nconst m2 = /a\\/b/g . RUN(s);\n"),
+        ("shell_exec.js", "const cp = require('child_process');\nconst d = /^[A-Za-z]:/i.RUN(p);\n"
+         "const re = new RegExp(x);\nre.RUN(line);\ncp.RUN(cmd);\nconfig.re.RUN(cmd);\nrunner?.RUN(cmd);\n"
+         "RUN('ls ' + dir);\nlet r = /x/;\nr &&= cp;\nr.RUN(cmd);\nconst q = /x/\n  && cp;\nq.RUN(cmd);\n"
+         "x = \"(/\" + 1 /ig.RUN(cmd);\nconst ig = cp;\n"),
+        ("computed_require.js", "const m = require(name);\nm.RUNSync(cmd);\nconst w = /x/;\nw.RUN(s);\n"
+         "require('./run').RUN(cmd);\nconst c = require('child_' + 'process');\nc.RUN(cmd);\n"))],
     # 0.1.8: code hidden off-screen (CRITICAL, MAJOR, and in a string or comment: none) and self-publishing code
     ("offscreen.js", "js", "module.exports = 1;\n});" + " " * 300 + "global['r']=require;(function(){r('x')})();\n"
      "const a = 2;" + " " * 200 + "a.b = [1, 2];\nconst s = '" + " " * 200 + "require(1)';\n// " + " " * 200

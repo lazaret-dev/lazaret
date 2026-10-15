@@ -697,7 +697,13 @@ R("S-SHELL-TRUE", "subprocess with shell=True", "VULN", "CRITICAL", ("py",),
 # lib/: `async exec (args) {`, `return this.exec(args)`). Free calls
 # (`exec(cmd)`, a destructured `const { exec } = require('child_process')`)
 # and calls on any other receiver (`cp.exec(…)`, `child_process.exec(…)`,
-# `require('child_process').exec(…)`) are still flagged.
+# `require('child_process').exec(…)`) are still flagged, but not a call on
+# a regex (0.1.9): a literal the lexer reads as one (`/…/g.exec(s)`), or a
+# name the file assigns a whole regex and nothing else (_ASSIGN_NAME_RE,
+# _REGEX_CTOR_RE): the engine's scanfile.rs exec_js_regex. RegExp's `exec`
+# in a matching loop (`while ((m = re.exec(s)))`) was CRITICAL. Where a
+# receiver came from is not read: another file can hand one child_process
+# (`require('./a').exec(cmd)`).
 R("S-EXEC-JS", "Shell exec", "HOTSPOT", "CRITICAL", ("js",),
   r"(?<![#$])(?<!\bthis\.)(?<!\bself\.)(?<!\bsuper\.)(?<!\basync\s)(?<!\bstatic\s)(?<!\bget\s)"
   r"(?<!\bset\s)(?<!\bfunction\s)\b(exec|execSync)\s*\((?![^()]*\)\s*\{)"

@@ -1312,6 +1312,187 @@ enum Kind {
     EvalDecode,
     Token,
     Secret,
+    ExecJs,
+}
+
+/// S-EXEC-JS (0.1.9): is the receiver of the `exec` / `execSync` call the rule matched at `col` of line `i` a regex,
+/// so the call RegExp's own? A literal the lexer read as one (`/…/g.exec(s)`), or a name the file assigns a regex and
+/// nothing else ([`regex_names`]). Anything else counts as before: a free call, a member's (`cp.re.exec(…)`), a
+/// call's result, a line whose match text is not its own (decoded escapes). RegExp's `exec` was CRITICAL wherever a
+/// script matched text in a loop (`while ((m = re.exec(s)))`). What module a receiver came from is not read: a file
+/// can be handed child_process by another (`require('./a').exec(cmd)`).
+fn exec_js_regex(p: &Pack, ctx: &FileCtx, i: usize, col: usize, names: &OnceCell<HashSet<PyStr>>) -> bool {
+    if ctx.mline_differs(i) {
+        return false;
+    }
+    let line = ctx.line(i);
+    let back = |mut k: usize| {
+        while k > 0 && unicode::is_space(line[k - 1]) {
+            k -= 1;
+        }
+        k
+    };
+    let mut k = back(col.min(line.len()));
+    if k == 0 || line[k - 1] != '.' as u32 {
+        return false; // a free call
+    }
+    k -= 1;
+    if k > 0 && line[k - 1] == '?' as u32 {
+        k -= 1; // x?.exec(…)
+    }
+    let end = back(k);
+    if regex_literal_before(ctx, ctx.starts[i] + end) {
+        return true;
+    }
+    let mut start = end;
+    while start > 0 && ascii_ident(line[start - 1]) {
+        start -= 1;
+    }
+    if start == end || (start > 0 && line[start - 1] >= 0x80) {
+        return false;
+    }
+    let before = back(start);
+    if before > 0 && line[before - 1] == '.' as u32 {
+        return false; // a member
+    }
+    names.get_or_init(|| regex_names(p, ctx)).contains(&line[start..end])
+}
+
+/// The names a file assigns a regex and nothing else (S-EXEC-JS): every assignment to a name (_ASSIGN_NAME_RE: `=`,
+/// a declaration's too, and `&&=`, `+=`…) is a plain `=` whose right side is a whole regex: a literal the lexer read as
+/// one, or `new RegExp(…)` / `RegExp(…)` closed on its line, and the expression ending there.
+fn regex_names(p: &Pack, ctx: &FileCtx) -> HashSet<PyStr> {
+    let mut regex: HashSet<PyStr> = HashSet::new();
+    let mut other: HashSet<PyStr> = HashSet::new();
+    for m in p.re("_ASSIGN_NAME_RE").finditer(&ctx.content) {
+        let Some(name) = m.name("name") else { continue };
+        let plain = m.name("op").map_or(true, |o| o.is_empty());
+        if plain && whole_regex(p, ctx, m.end()) {
+            regex.insert(name.to_vec());
+        } else {
+            other.insert(name.to_vec());
+        }
+    }
+    regex.retain(|n| !other.contains(n));
+    regex
+}
+
+/// Is the expression at `at` a regex alone: a regex literal, or `new RegExp(…)` / `RegExp(…)` (_REGEX_CTOR_RE)
+/// closed on its line, and nothing after it but the end of the expression ([`expression_ends`])?
+fn whole_regex(p: &Pack, ctx: &FileCtx, at: usize) -> bool {
+    let content = &ctx.content;
+    let lits = ctx.literals().unwrap_or(&[]);
+    let j = lits.partition_point(|&(s, _)| s < at);
+    let end = if j < lits.len() && lits[j].0 == at && at < content.len() && content[at] == '/' as u32 {
+        let mut e = lits[j].1;
+        while e < content.len() && ascii_ident(content[e]) {
+            e += 1; // its flags
+        }
+        e
+    } else if let Some(m) = p.re("_REGEX_CTOR_RE").match_at(content, at as isize, content.len() as isize) {
+        match close_paren(ctx, m.end(), p.usize("_REGEX_CTOR_REACH")) {
+            Some(e) => e,
+            None => return false,
+        }
+    } else {
+        return false;
+    };
+    expression_ends(ctx, end)
+}
+
+/// A letter, a digit, `_` or `$`, in ASCII.
+fn ascii_ident(c: u32) -> bool {
+    c < 0x80 && (pystr::is_alnum(c) || c == '_' as u32 || c == '$' as u32)
+}
+
+/// Does a regex literal end at `pos`, its flags included? (The engine's lexer reads a literal's flags as part of it,
+/// the dashboard's not: both skip them here.)
+fn regex_literal_before(ctx: &FileCtx, pos: usize) -> bool {
+    let Some(lits) = ctx.literals() else { return false };
+    let j = lits.partition_point(|&(s, _)| s < pos);
+    if j == 0 {
+        return false;
+    }
+    let (s, e) = lits[j - 1];
+    e <= pos && ctx.content[s] == '/' as u32 && ctx.content[e..pos].iter().all(|&c| ascii_ident(c))
+}
+
+/// Is `pos` in a comment?
+fn in_comment(ctx: &FileCtx, pos: usize) -> bool {
+    let i = ctx.starts.partition_point(|&x| x <= pos).saturating_sub(1);
+    line_comment_at(ctx, i, pos - ctx.starts[i])
+}
+
+/// Is offset `rel` of line `i` in a comment? (A line's comment spans are sorted and disjoint: a binary search, as the
+/// dashboard's.)
+fn line_comment_at(ctx: &FileCtx, i: usize, rel: usize) -> bool {
+    let spans = &ctx.cspans[i];
+    let k = spans.partition_point(|&(_, b)| b <= rel); // the first span ending after rel
+    k < spans.len() && spans[k].0 <= rel
+}
+
+/// Just past the `)` that closes the parenthesis opened before `from`, on the same line and within `reach` steps (a
+/// literal is one step; literals and comments skipped), or None.
+fn close_paren(ctx: &FileCtx, from: usize, reach: usize) -> Option<usize> {
+    let content = &ctx.content;
+    let lits = ctx.literals().unwrap_or(&[]);
+    let line = ctx.starts.partition_point(|&x| x <= from).saturating_sub(1); // (the scan stays on this line)
+    let (base, comments) = (ctx.starts[line], !ctx.cspans[line].is_empty());
+    let mut j = lits.partition_point(|&(s, _)| s < from);
+    let mut depth = 1usize;
+    let mut q = from;
+    let mut steps = 0usize;
+    while q < content.len() && content[q] != '\n' as u32 {
+        steps += 1;
+        if steps > reach {
+            return None;
+        }
+        while j < lits.len() && lits[j].0 < q {
+            j += 1;
+        }
+        if j < lits.len() && lits[j].0 == q {
+            q = lits[j].1;
+            j += 1;
+            continue;
+        }
+        if !comments || !line_comment_at(ctx, line, q - base) {
+            if content[q] == '(' as u32 {
+                depth += 1;
+            } else if content[q] == ')' as u32 {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(q + 1);
+                }
+            }
+        }
+        q += 1;
+    }
+    None
+}
+
+/// Does an expression end at `pos`: after blanks and comments, the end of the text or `;` `,` `)` `]` `}`; or, past
+/// a line break (where JavaScript ends a statement), a name or a string?
+fn expression_ends(ctx: &FileCtx, mut pos: usize) -> bool {
+    let content = &ctx.content;
+    let mut newline = false;
+    while pos < content.len() {
+        let c = content[pos];
+        if c == '\n' as u32 {
+            newline = true;
+        } else if !unicode::is_space(c) && !in_comment(ctx, pos) {
+            break;
+        }
+        pos += 1;
+    }
+    if pos >= content.len() {
+        return true;
+    }
+    let c = content[pos];
+    if [';', ',', ')', ']', '}'].iter().any(|&t| c == t as u32) {
+        return true;
+    }
+    let letter = (('a' as u32)..=('z' as u32)).contains(&c) || (('A' as u32)..=('Z' as u32)).contains(&c);
+    newline && (letter || ['_', '$', '\'', '"'].iter().any(|&t| c == t as u32))
 }
 
 /// A rule of RULES as this file's per-line pass runs it.
@@ -1342,6 +1523,7 @@ pub fn findings_of(ctx: &FileCtx, lang_name: Option<&str>, opts: &Options, snipp
                 _ if is(&r.text.id, "SC-EVAL-DECODE") => Kind::EvalDecode,
                 _ if is(&r.text.id, "S-TOKEN") => Kind::Token,
                 _ if is(&r.text.id, "S-SECRET") => Kind::Secret,
+                _ if is(&r.text.id, "S-EXEC-JS") => Kind::ExecJs,
                 _ => Kind::Plain,
             },
             on_comments: comment_rules.contains(&r.text.id),
@@ -1356,6 +1538,7 @@ pub fn findings_of(ctx: &FileCtx, lang_name: Option<&str>, opts: &Options, snipp
             .contains(w)
     };
     let runs_code: OnceCell<bool> = OnceCell::new();
+    let exec_js_names: OnceCell<HashSet<PyStr>> = OnceCell::new(); // S-EXEC-JS's (exec_js_regex)
     let hexstr_text = RuleText::of(p, "_HEXSTR_TEXT_RULE");
     let hexstr_name = RuleText::of(p, "_HEXSTR_NAME_RULE");
     let lookalike = RuleText::of(p, "_LOOKALIKE_RULE");
@@ -1443,6 +1626,9 @@ pub fn findings_of(ctx: &FileCtx, lang_name: Option<&str>, opts: &Options, snipp
                 if skip.search(mline).is_some() {
                     continue;
                 }
+            }
+            if a.kind == Kind::ExecJs && exec_js_regex(p, ctx, i, col, &exec_js_names) {
+                continue;
             }
             let col = if a.kind == Kind::Token {
                 match token_col(ctx, &r.re, mline, i) {
