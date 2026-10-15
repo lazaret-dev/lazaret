@@ -1,0 +1,2 @@
+# autorun_commands: 57 outputs, a hash per 100 (tests/architecture/_snapshots.py)
+e773696bd3b4569d

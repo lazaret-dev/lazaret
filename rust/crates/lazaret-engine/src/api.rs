@@ -74,6 +74,8 @@ pub const CALLS: &[&str] = &[
     // 0.1.9 (BR-7 step 1): CI files read for what they run — GitHub Actions workflows and GitLab CI files
     "ci_kind", "ci_outline", "ci_workflow", "ci_gitlab", "ci_rule", "ci_issues", "ci_uses", "ci_parse_uses", "ci_check",
     "ci_logical_lines",
+    // 0.1.9 (BR-7 step 2): editor and AI-agent settings that run commands (autorun.rs; SC-AUTORUN)
+    "autorun_kind", "autorun_owner", "autorun_jsonc", "autorun_entries", "autorun_local_command", "autorun_issues",
     // the JavaScript parser (jsparse.py's trees)
     "js_parse", "js_parse_file",
     // the Python parser (Python 3.13's ast trees)
@@ -566,6 +568,57 @@ fn dispatch(name: &str, args: &Value, text: &[u32]) -> Result<Value, CallError> 
                     .map(|(n, t)| Value::Arr(vec![Value::Int(n as i64), Value::Str(t)]))
                     .collect(),
             )
+        }
+        "autorun_kind" => match crate::autorun::config_kind(text) {
+            Some((kind, tool)) => Value::Arr(vec![Value::str(kind), Value::str(tool)]),
+            None => Value::Null,
+        },
+        "autorun_owner" => Value::Str(crate::autorun::owner_dir(text)),
+        "autorun_jsonc" => match crate::autorun::parse_jsonc(text) {
+            Ok(v) => Value::obj(vec![("ok", v.to_value())]),
+            Err((line, reason)) => {
+                Value::obj(vec![("error", Value::Arr(vec![Value::Int(line as i64), Value::Str(reason)]))])
+            }
+        },
+        "autorun_entries" => {
+            let kind = crate::pystr::to_string(&arg_str(args, "kind")?);
+            let tool = crate::pystr::to_string(&arg_str(args, "tool")?);
+            let (entries, error) = crate::autorun::entries(&kind, &tool, text);
+            Value::obj(vec![
+                ("entries", Value::Arr(entries.iter().map(|e| e.to_value()).collect())),
+                (
+                    "error",
+                    error
+                        .map(|(line, reason)| Value::Arr(vec![Value::Int(line as i64), Value::Str(reason)]))
+                        .unwrap_or(Value::Null),
+                ),
+            ])
+        }
+        "autorun_local_command" => Value::Str(crate::autorun::local_command(p, text)),
+        "autorun_issues" => {
+            // {path, follow, files: {rel: text or null}} -> {"issues": [[line, rule]…]}, or {"need": [rel…]}: the
+            // files of the tree it has yet to be given (the package reads them and asks again)
+            let path = arg_str(args, "path")?;
+            let follow = !matches!(args.get("follow"), Some(Value::Bool(false)));
+            let mut files: std::collections::BTreeMap<PyStr, Option<PyStr>> = std::collections::BTreeMap::new();
+            if let Some(Value::Obj(items)) = args.get("files") {
+                for (k, v) in items {
+                    files.insert(k.clone(), v.as_str().map(|x| x.to_vec()));
+                }
+            }
+            let mut tree = crate::autorun::Tree { follow, files: &files, need: Vec::new() };
+            match crate::autorun::issues(p, &path, text, &mut tree) {
+                Ok(found) => Value::obj(vec![(
+                    "issues",
+                    Value::Arr(
+                        found
+                            .iter()
+                            .map(|(line, r)| Value::Arr(vec![Value::Int(*line as i64), crate::ci::rule_value(r)]))
+                            .collect(),
+                    ),
+                )]),
+                Err(need) => Value::obj(vec![("need", Value::Arr(need.into_iter().map(Value::Str).collect()))]),
+            }
         }
         "cargo_layout" => {
             let l = crate::vendor::cargo_layout(text);

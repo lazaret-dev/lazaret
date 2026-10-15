@@ -223,6 +223,12 @@ rust/
                              file, 0.1.9, Q-1 step 4): comment lines, lines of code, the windows
                              of six lines of code keyed for the duplication; from the scan's own
                              reading (scan_file with "metrics") or on their own (file_metrics)
+    src/autorun.rs           editor and AI-agent settings that run commands (BR-7 step 2, 0.1.9;
+                             autorun.py, core.autorun_issues and their npm twins until then): a
+                             JSON-with-comments reader that keeps lines, the commands each kind of
+                             settings file makes its tool run, the issues (SC-AUTORUN), each command
+                             followed into the files of the tree it runs, which it names for the
+                             package to read
     src/ci/                  CI files (BR-7, 0.1.9; ghworkflow.py, gitlabci.py and their npm twins
                              until then): outline.rs (the outline of the YAML a pipeline needs:
                              keys, sequence items, block and quoted scalars, comments, `${{ }}`),
@@ -565,6 +571,7 @@ builds is held to linear time.
 | `test_snapshot_js_parse` | the JavaScript parser (`js_parse`, §12): each tree's or error's JSON text (its SHA-256: a tree may be deeper than `json.loads` reads), with spans and without | jsparse_cases.py's inputs: the reader's snippets and its own, every construct that nests around the depth limit, soups, generated projects and mutations of them |
 | `test_snapshot_py_flow` | project mode's cross-file Python taint (`py_flow`, §17): every output in order, with the default model and a configured one; files that are not text, each limit lowered (and not raised), the frames, a chain whose work counts | the review's cases and generated projects (`pygen.py`), on which it was held to flow.py |
 | `test_snapshot_ci` | the CI files' readers (`ci_*`, BR-7): the outline three ways, a workflow's findings (RA-1's sends among them: `ci_exfil`), `uses:` and issues, a GitLab CI file's findings and issues, the script-line checks, image references, flow collections, paths, `uses:` values and continued lines; recorded from the Python modules the engine replaced, which answered every case alike (and 23,202 real workflow files) | the corpora the npm twins were held to the Python modules on (`test_js_parity_persistence`'s YAML part, `_workflow_hardening`, `_gitlabci`); workflows built from RA-1's shapes |
+| `test_snapshot_autorun` | the settings reader (`autorun_*`, BR-7 step 2): each value's kind, line and text or the error, each kind of settings file's commands, the folder variables, and the issues of settings trees with the files they run and without; recorded from the Python the engine replaced, which answered every case alike | the corpus `test_js_parity_persistence` held the npm twin to the Python on; settings files of every kind over a small tree of loaders, payloads, scripts and an obfuscated file |
 
 Twins the engine is still compared with, call for call:
 
@@ -575,6 +582,7 @@ Twins the engine is still compared with, call for call:
 | `test_wasm_parity_jsparse` | the parser in the WebAssembly build against the library, byte for byte | the snippets, this repository's JavaScript, soups, every construct that nests at its deepest |
 | `test_wasm_parity_jsflow` | the JavaScript taint pass in the WebAssembly build against the library, byte for byte | `test_snapshot_js_flow`'s sets; every construct that nests at its deepest, request data followed through it |
 | `test_wasm_parity_ci` | the CI files' readers in the WebAssembly build against the library, byte for byte (BR-7) | `test_snapshot_ci`'s sets |
+| `test_wasm_parity_autorun` | the settings reader in the WebAssembly build against the library, byte for byte (BR-7 step 2) | `test_snapshot_autorun`'s sets |
 | `test_wasm_parity_project` | project mode in the WebAssembly build against the library, byte for byte (0.1.9, Q-1): `scan_file` with and without a taint configuration, the function lists, the intra-file taint alone | `test_snapshot_project`'s sets; the project corpus |
 | `test_wasm_parity_pyflow` | the Python taint pass in the WebAssembly build against the library, byte for byte | `test_snapshot_py_flow`'s sets; every construct that nests at its deepest, `elif` chains at the frames the pass holds |
 | `test_pyparse_native`, `_b`, `_c` | the Python parser (`py_parse`) against Python 3.13's `ast.parse` (a `python3.13` subprocess; skipped without one), node for node as JSON text, with the errors' lines; spans; its Unicode 15.1 data (§13) | pyparse_cases.py's inputs; every identifier character and character name |
@@ -896,7 +904,8 @@ only.
    cache, the guard's scan isolated.
 3. The rest of the npm engine's twins (BR-7, one step each): the CI files
    (`ghworkflow.js`, `gitlabci.js`: in the engine since 0.1.9, `src/ci/`),
-   the settings checks (`autorun.js`), the config-file credentials, the
+   the settings checks (`autorun.js`: in the engine since 0.1.9,
+   `src/autorun.rs`), the config-file credentials, the
    manifest checks (`supplychain.js`), the reports; the dashboard keeps its
    own script until it can load the same module.
 4. Archive reading for registry scans in the engine, where it reads as the

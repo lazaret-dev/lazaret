@@ -767,6 +767,17 @@ aggregate):
   that keep the names the package calls, over the engine. `test_js_parity_workflow_hardening`, `test_js_parity_gitlabci` and the YAML part of
   `test_js_parity_persistence` gave way to `test_snapshot_ci` (their corpora, hashes recorded from the Python
   modules) and `test_wasm_parity_ci`.
+- **One reader of editor and agent settings, the engine's (BR-7, step 2).** SC-AUTORUN's reading (which files make
+  a tool run commands, a JSON-with-comments reader that keeps lines, the commands each kind of file makes VS Code,
+  Claude Code, Cursor or Gemini CLI run) and its issues (each command judged by the install-script test and followed
+  into the files of the tree it runs) are the engine's for both packages (`rust/crates/lazaret-engine/src/autorun.rs`,
+  the `autorun_*` calls), where `scanner/autorun.py`, `core.autorun_issues` and their npm twins did it until now. The
+  engine reads no file: it names the files of the tree a command runs, and the package reads them and asks again. The
+  same answers as the Python's on the corpus the twins were held to (2,254 files read as each kind of settings file),
+  57 commands' folder variables and 1,500 settings trees over a tree of loaders, payloads and scripts (2,364 issues,
+  877 of them CRITICAL), with a reader and without. `js/src/lib/autorun.js` (432 lines) is gone, `autorun.py` is 102
+  lines over the engine (from 462), and `test_js_parity_persistence` keeps only its scan of a tree by both CLIs;
+  `test_snapshot_autorun` (hashes checked to be the Python's answers) and `test_wasm_parity_autorun` replace the rest.
 - **Security: S-XML is a parser set to resolve external entities, not an import of xml.etree, xml.dom or xml.sax
   (Q-3; rule set 2.80.0).** Since Python 3.7.1 none of them resolves an external entity unless told to, and Expat
   2.4.1 refuses entity bombs, so the import flagged safe code: all 20 of BenchmarkPython's safe XXE cases (its 8 real

@@ -4646,6 +4646,156 @@
     }
    }
   },
+  "_AUTORUN_DIR_VARS_RE": {
+   "flags": "",
+   "re": "\\$\\{workspace(?:Folder(?::[^}\\n]{0,200})?|Root)\\}|\\$\\{(?:CLAUDE|GEMINI)_PROJECT_DIR\\}|\\$(?:CLAUDE|GEMINI)_PROJECT_DIR\\b|%(?:CLAUDE|GEMINI)_PROJECT_DIR%"
+  },
+  "_AUTORUN_HOSTILE_FILE_RULE": {
+   "map": {
+    "fix": {
+     "value": "Do not open the folder in the editor or start the agent in it. Remove the entry and what it runs, find the commit that added them, and rotate the credentials this machine holds if it already ran."
+    },
+    "id": {
+     "value": "SC-AUTORUN"
+    },
+    "msg": {
+     "value": "{trigger}: {shown!r}, which runs {target}; that file {said}."
+    },
+    "name": {
+     "value": "Settings run a command automatically"
+    },
+    "ref": {
+     "value": "CWE-506 \u00b7 Supply chain"
+    },
+    "sev": {
+     "value": "CRITICAL"
+    },
+    "type": {
+     "value": "HOTSPOT"
+    },
+    "why": {
+     "value": "Editors and AI coding agents run these commands on their own \u2014 when the folder is opened, a session starts or the agent uses a tool \u2014 with your privileges, without asking each time. The 2026 Shai-Hulud worms (Mini Shai-Hulud, the keyv wave) committed a Claude Code SessionStart hook and a VS Code folder-open task to every repository they reached, so opening a checkout ran the worm. This one runs code that looks hostile."
+    }
+   }
+  },
+  "_AUTORUN_HOSTILE_RULE": {
+   "map": {
+    "fix": {
+     "value": "Do not open the folder in the editor or start the agent in it. Remove the entry and what it runs, find the commit that added them, and rotate the credentials this machine holds if it already ran."
+    },
+    "id": {
+     "value": "SC-AUTORUN"
+    },
+    "msg": {
+     "value": "{trigger}: {shown!r} \u2014 a command that {said}."
+    },
+    "name": {
+     "value": "Settings run a command automatically"
+    },
+    "ref": {
+     "value": "CWE-506 \u00b7 Supply chain"
+    },
+    "sev": {
+     "value": "CRITICAL"
+    },
+    "type": {
+     "value": "HOTSPOT"
+    },
+    "why": {
+     "value": "Editors and AI coding agents run these commands on their own \u2014 when the folder is opened, a session starts or the agent uses a tool \u2014 with your privileges, without asking each time. The 2026 Shai-Hulud worms (Mini Shai-Hulud, the keyv wave) committed a Claude Code SessionStart hook and a VS Code folder-open task to every repository they reached, so opening a checkout ran the worm. This one runs code that looks hostile."
+    }
+   }
+  },
+  "_AUTORUN_LISTED_COMMAND_RULE": {
+   "map": {
+    "fix": {
+     "value": "Check that you added it, and what it runs."
+    },
+    "id": {
+     "value": "SC-AUTORUN"
+    },
+    "msg": {
+     "value": "{trigger}: {shown!r}."
+    },
+    "name": {
+     "value": "Settings run a command automatically"
+    },
+    "ref": {
+     "value": "CWE-506 \u00b7 Supply chain"
+    },
+    "sev": {
+     "value": "INFO"
+    },
+    "type": {
+     "value": "HOTSPOT"
+    },
+    "why": {
+     "value": "Editors and AI coding agents run these commands on their own \u2014 when the folder is opened, a session starts or the agent uses a tool \u2014 with your privileges, without asking each time. The 2026 Shai-Hulud worms (Mini Shai-Hulud, the keyv wave) committed a Claude Code SessionStart hook and a VS Code folder-open task to every repository they reached, so opening a checkout ran the worm. Listed for inventory."
+    }
+   }
+  },
+  "_AUTORUN_LISTED_RULE": {
+   "map": {
+    "fix": {
+     "value": "Check that you added it."
+    },
+    "id": {
+     "value": "SC-AUTORUN"
+    },
+    "msg": {
+     "value": "{trigger}."
+    },
+    "name": {
+     "value": "Settings run a command automatically"
+    },
+    "ref": {
+     "value": "CWE-506 \u00b7 Supply chain"
+    },
+    "sev": {
+     "value": "INFO"
+    },
+    "type": {
+     "value": "HOTSPOT"
+    },
+    "why": {
+     "value": "Editors and AI coding agents run these commands on their own \u2014 when the folder is opened, a session starts or the agent uses a tool \u2014 with your privileges, without asking each time. The 2026 Shai-Hulud worms (Mini Shai-Hulud, the keyv wave) committed a Claude Code SessionStart hook and a VS Code folder-open task to every repository they reached, so opening a checkout ran the worm. Listed for inventory."
+    }
+   }
+  },
+  "_AUTORUN_MAX_DEPTH": {
+   "value": 256
+  },
+  "_AUTORUN_MAX_TASKS": {
+   "value": 100
+  },
+  "_AUTORUN_UNREADABLE_RULE": {
+   "map": {
+    "fix": {
+     "value": "Fix the file so it can be read, and check every command it names."
+    },
+    "id": {
+     "value": "SC-AUTORUN"
+    },
+    "msg": {
+     "value": "These {tool} settings could not be read as JSON (line {line}: {reason}), but they name commands for {tool} to run: read them by hand."
+    },
+    "name": {
+     "value": "Settings run a command automatically"
+    },
+    "ref": {
+     "value": "CWE-506 \u00b7 Supply chain"
+    },
+    "sev": {
+     "value": "MAJOR"
+    },
+    "type": {
+     "value": "HOTSPOT"
+    },
+    "why": {
+     "value": "Editors and AI coding agents run these commands on their own \u2014 when the folder is opened, a session starts or the agent uses a tool \u2014 with your privileges, without asking each time. The 2026 Shai-Hulud worms (Mini Shai-Hulud, the keyv wave) committed a Claude Code SessionStart hook and a VS Code folder-open task to every repository they reached, so opening a checkout ran the worm."
+    }
+   }
+  },
   "_AUTORUN_WHY": {
    "value": "Editors and AI coding agents run these commands on their own \u2014 when the folder is opened, a session starts or the agent uses a tool \u2014 with your privileges, without asking each time. The 2026 Shai-Hulud worms (Mini Shai-Hulud, the keyv wave) committed a Claude Code SessionStart hook and a VS Code folder-open task to every repository they reached, so opening a checkout ran the worm."
   },

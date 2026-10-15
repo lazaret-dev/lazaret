@@ -2528,102 +2528,31 @@ def _config_token_col(line, lines, i):
 # SessionStart hook and a folder-open task running the worm's loader
 # (`node .claude/setup.mjs`, which fetches Bun to run the payload) to every
 # repository they reached. A file that cannot be read as JSON but names what
-# its tool runs is MAJOR: the tool may read it more leniently.
-AUTORUN_SHOW = 200                 # code points of a command a message shows
-_AUTORUN_WHY = (
-    "Editors and AI coding agents run these commands on their own — when the folder is opened, a "
-    "session starts or the agent uses a tool — with your privileges, without asking each time. The "
-    "2026 Shai-Hulud worms (Mini Shai-Hulud, the keyv wave) committed a Claude Code SessionStart hook "
-    "and a VS Code folder-open task to every repository they reached, so opening a checkout ran the "
-    "worm.")
-
-
-def _autorun_rule(sev, msg, why, fix):
-    return {"id": "SC-AUTORUN", "name": "Settings run a command automatically", "type": "HOTSPOT",
-            "sev": sev, "msg": msg, "why": why, "fix": fix, "ref": "CWE-506 · Supply chain"}
-
-
-_AGENT_SETTINGS_REASON = "writes an AI agent's or editor's auto-run settings"
-
-
-def _autorun_script_risk(text, lang=None):
-    """install_script_risk for what a settings file runs, but for writing an
-    agent's or editor's settings: an agent's own hooks manage them (a
-    WorktreeCreate hook copies settings.local.json into the new worktree).
-    `lang`: a script's language, when known."""
-    return [r for r in install_script_risk(text, lang=lang) if not r.startswith(_AGENT_SETTINGS_REASON)]
-
-
-def _autorun_risk(command, base, read):
-    """-> (reasons, target): why a command a settings file runs looks hostile,
-    and the file of the tree it runs that does (None when it is the command
-    itself); ([], None) when nothing does."""
-    reasons = []
-    hijack = agent_hijack_in_command(command)
-    if hijack is not None:
-        reasons.append(f'starts the AI agent "{hijack[0]}" with {hijack[1]}')
-    reasons.extend(_autorun_script_risk(command))
-    if reasons or read is None:
-        return reasons, None
-    for target in follow_hook(autorun.local_command(command))[0]:
-        rel = _tree_join(base, target)
-        text = read(rel) if rel is not None else None
-        if text is None:
-            continue
-        found = _autorun_script_risk(text, engine.script_lang(rel))
-        if is_obfuscated(text):
-            found.append("is obfuscated")
-        if found:
-            return found, target
-        # (0.1.8) the scripts it starts (spawned_scripts): a loader that fetches
-        # a runtime and runs a file of the tree with it
-        for where, path in spawned_scripts(normalize_newlines(text), engine.script_lang(rel)):
-            srel = _tree_join(posixpath.dirname(rel) if where == "dir" else base, path)
-            stext = read(srel) if srel is not None else None
-            more = _autorun_script_risk(stext, engine.script_lang(srel)) if stext else []
-            if more:
-                return [f"starts {srel}, which {'; and '.join(more)}"], target
-    return [], None
+# its tool runs is MAJOR: the tool may read it more leniently. The reading and
+# the judgment are the engine's (autorun.rs), the reading of the tree's files
+# this module's.
+#: How many times a settings file's issues are asked for at most: each answer that is not the issues names the files
+#: of the tree the engine has yet to read (the files a command runs, then the scripts those start)
+_AUTORUN_ROUNDS = 64
 
 
 def autorun_issues(path, lines, read=None):
     """SC-AUTORUN findings for a settings file (autorun.config_kind(path) is
     not None) whose text is lines; read(rel) returns the text of a file of
     the tree ('/'-separated, root-relative) or None, to follow a command into
-    the files it runs (None: the commands alone are judged)."""
-    kind, tool = autorun.config_kind(path)
-    found, error = autorun.entries(kind, tool, "\n".join(lines))
-    if error is not None:
-        return [mk_issue(_autorun_rule(
-            "MAJOR", f"These {tool} settings could not be read as JSON (line {error[0]}: {error[1]}), "
-                     f"but they name commands for {tool} to run: read them by hand.",
-            _AUTORUN_WHY, "Fix the file so it can be read, and check every command it names.",
-        ), path, error[0], lines)]
-    base = autorun.owner_dir(path)
-    out = []
-    for e in found:
-        cmd = e["command"]
-        if cmd is None:
-            out.append(mk_issue(_autorun_rule(
-                "INFO", f"{e['trigger']}.", _AUTORUN_WHY + " Listed for inventory.",
-                "Check that you added it."), path, e["line"], lines))
-            continue
-        shown = cmd if len(cmd) <= AUTORUN_SHOW else cmd[:AUTORUN_SHOW] + "…"
-        reasons, target = _autorun_risk(cmd, base, read)
-        if not reasons:
-            out.append(mk_issue(_autorun_rule(
-                "INFO", f"{e['trigger']}: {shown!r}.", _AUTORUN_WHY + " Listed for inventory.",
-                "Check that you added it, and what it runs."), path, e["line"], lines))
-            continue
-        said = "; and ".join(reasons)
-        msg = (f"{e['trigger']}: {shown!r} — a command that {said}." if target is None else
-               f"{e['trigger']}: {shown!r}, which runs {target}; that file {said}.")
-        out.append(mk_issue(_autorun_rule(
-            "CRITICAL", msg, _AUTORUN_WHY + " This one runs code that looks hostile.",
-            "Do not open the folder in the editor or start the agent in it. Remove the entry and what it "
-            "runs, find the commit that added them, and rotate the credentials this machine holds if it "
-            "already ran."), path, e["line"], lines))
-    return out
+    the files it runs (None: the commands alone are judged). The engine reads
+    the file and judges each command (BR-7 step 2: `autorun_issues`); it names
+    the files of the tree it follows a command into, and they are read here."""
+    text = "\n".join(lines)
+    files = {}
+    for _ in range(_AUTORUN_ROUNDS):
+        got = _native.call("autorun_issues", {"path": path, "follow": read is not None, "files": files}, text)
+        if "issues" in got:
+            return [mk_issue(rule, path, line, lines) for line, rule in got["issues"]]
+        for rel in got["need"]:
+            files[rel] = read(rel)
+    got = _native.call("autorun_issues", {"path": path, "follow": False}, text)
+    return [mk_issue(rule, path, line, lines) for line, rule in got["issues"]]
 
 
 # ---------------- CI files (SC-WORKFLOW-*, SC-GITLAB-*) ----------------

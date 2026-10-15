@@ -3,19 +3,19 @@
 // scan is the native engine's (../lib/native.js), in dependency mode and in
 // project mode alike (Q-1, 0.1.9: the SQL statements without WHERE, taint,
 // the SQL-sink pass, the function metrics, the suppression markers and the cap
-// are the engine's too); this module scans config and data files (credentials,
-// auto-run settings), whose checks are still the package's own; a CI file's are the engine's.
+// are the engine's too); this module scans config and data files for
+// credentials, whose checks are still the package's own; an editor's or
+// agent's settings and a CI file are the engine's to read (BR-7).
 import { normalizeSource } from "./lines.js";
-import { isObfuscated, SECRET_SKIP_RE, makeSuppressor, mkIssue } from "./engine.js";
+import { SECRET_SKIP_RE, makeSuppressor, mkIssue } from "./engine.js";
 import { lexLines, jsxReading } from "../lib/lexer.js";
-import { cpLen, cpPrefix, pyRepr, isPySpace } from "../lib/pycompat.js";
+import { isPySpace } from "../lib/pycompat.js";
 import { findSecretToken, registerScanContext, REDACT } from "../lib/redact.js";
-import { truncatedIssue, normalizeNewlines, treeJoin } from "../lib/fs.js";
+import { truncatedIssue, normalizeNewlines } from "../lib/fs.js";
 import { pinUnicode } from "../lib/unicode13.js";
 import { documentationToken, keyFollows, secretCol, redactConfigValues, NETRC_NAMES, netrcAnonymous } from "../lib/configsecrets.js";
-import { configKind, ownerDir, entries as autorunEntries, localCommand } from "../lib/autorun.js";
-import { call, agentHijackInCommand, installScriptRisk, followHook, nodeCandidates, spawnedScripts, scriptLang, packValues,
-  scanDependencyFile, scanProjectFile, taintFindings, NativeExhausted } from "../lib/native.js";
+import { call, nodeCandidates, packValues, scanDependencyFile, scanProjectFile, taintFindings, NativeExhausted }
+  from "../lib/native.js";
 
 export { isComment } from "./engine.js";
 
@@ -171,84 +171,24 @@ function configTokenCol(line, lines, i) {
 }
 
 // ---- settings that run commands (SC-AUTORUN; core's section comment) ----
-export const AUTORUN_SHOW = 200;           // code points of a command a message shows
-const AUTORUN_WHY =
-  "Editors and AI coding agents run these commands on their own — when the folder is opened, a " +
-  "session starts or the agent uses a tool — with your privileges, without asking each time. The " +
-  "2026 Shai-Hulud worms (Mini Shai-Hulud, the keyv wave) committed a Claude Code SessionStart hook " +
-  "and a VS Code folder-open task to every repository they reached, so opening a checkout ran the " +
-  "worm.";
+/** How many times a settings file's issues are asked for at most (core._AUTORUN_ROUNDS). */
+const AUTORUN_ROUNDS = 64;
 
-const autorunRule = (sev, msg, why, fix) => ({
-  id: "SC-AUTORUN", name: "Settings run a command automatically", type: "HOTSPOT", sev, msg, why, fix,
-  ref: "CWE-506 · Supply chain",
-});
-
-const AGENT_SETTINGS_REASON = "writes an AI agent's or editor's auto-run settings";
-/** installScriptRisk for what a settings file runs, but for writing an agent's settings (core._autorun_script_risk). */
-const autorunScriptRisk = (text, lang = null) =>
-  installScriptRisk(text, true, false, lang).filter((r) => !r.startsWith(AGENT_SETTINGS_REASON));
-
-/** [reasons, target] for a command a settings file runs (core._autorun_risk). */
-function autorunRisk(command, base, read) {
-  const reasons = [];
-  const hijack = agentHijackInCommand(command);
-  if (hijack !== null) reasons.push(`starts the AI agent "${hijack[0]}" with ${hijack[1]}`);
-  reasons.push(...autorunScriptRisk(command));
-  if (reasons.length || read === null) return [reasons, null];
-  for (const target of followHook(localCommand(command))[0]) {
-    const rel = treeJoin(base, target);
-    const text = rel !== null ? read(rel) : null;
-    if (text === null) continue;
-    const found = autorunScriptRisk(text, scriptLang(rel));
-    if (isObfuscated(text)) found.push("is obfuscated");
-    if (found.length) return [found, target];
-    // (0.1.8) the scripts it starts (spawnedScripts): a loader that fetches a runtime and runs a file of the tree with it
-    for (const [where, path] of spawnedScripts(normalizeNewlines(text), scriptLang(rel))) {
-      const srel = treeJoin(where === "dir" ? (rel.includes("/") ? rel.slice(0, rel.lastIndexOf("/")) : "") : base, path);
-      const stext = srel !== null ? read(srel) : null;
-      const more = stext ? autorunScriptRisk(stext, scriptLang(srel)) : [];
-      if (more.length) return [[`starts ${srel}, which ${more.join("; and ")}`], target];
-    }
-  }
-  return [[], null];
-}
-
-/** SC-AUTORUN findings for an editor's or AI agent's settings file (core.autorun_issues). */
+/**
+ * SC-AUTORUN findings for an editor's or AI agent's settings file (core.autorun_issues). The engine reads the file
+ * and judges each command (BR-7 step 2: `autorun_issues`); it names the files of the tree it follows a command
+ * into, and `read` reads them (null: the commands alone are judged).
+ */
 export function autorunIssues(path, lines, read = null) {
-  const [kind, tool] = configKind(path);
-  const [found, error] = autorunEntries(kind, tool, lines.join("\n"));
-  if (error !== null) {
-    return [mkIssue(autorunRule("MAJOR",
-      `These ${tool} settings could not be read as JSON (line ${error[0]}: ${error[1]}), ` +
-      `but they name commands for ${tool} to run: read them by hand.`,
-      AUTORUN_WHY, "Fix the file so it can be read, and check every command it names."), path, error[0], lines)];
+  const text = lines.join("\n");
+  const files = {};
+  for (let k = 0; k < AUTORUN_ROUNDS; k++) {
+    const got = call("autorun_issues", { path, follow: read !== null, files }, text);
+    if (got.issues) return got.issues.map(([line, rule]) => mkIssue(rule, path, line, lines));
+    for (const rel of got.need) files[rel] = read(rel);
   }
-  const base = ownerDir(path);
-  const out = [];
-  for (const e of found) {
-    const cmd = e.command;
-    if (cmd === null) {
-      out.push(mkIssue(autorunRule("INFO", `${e.trigger}.`, AUTORUN_WHY + " Listed for inventory.",
-        "Check that you added it."), path, e.line, lines));
-      continue;
-    }
-    const shown = cpLen(cmd) <= AUTORUN_SHOW ? cmd : cpPrefix(cmd, AUTORUN_SHOW) + "…";
-    const [reasons, target] = autorunRisk(cmd, base, read);
-    if (!reasons.length) {
-      out.push(mkIssue(autorunRule("INFO", `${e.trigger}: ${pyRepr(shown)}.`, AUTORUN_WHY + " Listed for inventory.",
-        "Check that you added it, and what it runs."), path, e.line, lines));
-      continue;
-    }
-    const said = reasons.join("; and ");
-    const msg = target === null ? `${e.trigger}: ${pyRepr(shown)} — a command that ${said}.`
-      : `${e.trigger}: ${pyRepr(shown)}, which runs ${target}; that file ${said}.`;
-    out.push(mkIssue(autorunRule("CRITICAL", msg, AUTORUN_WHY + " This one runs code that looks hostile.",
-      "Do not open the folder in the editor or start the agent in it. Remove the entry and what it " +
-      "runs, find the commit that added them, and rotate the credentials this machine holds if it " +
-      "already ran."), path, e.line, lines));
-  }
-  return out;
+  const got = call("autorun_issues", { path, follow: false }, text);
+  return got.issues.map(([line, rule]) => mkIssue(rule, path, line, lines));
 }
 
 // ---- CI files (SC-WORKFLOW-*, SC-GITLAB-*; core.ci_issues) ----
@@ -295,7 +235,7 @@ export function scanConfigFile(path, rawContent, read = null) {
   const deadline = Date.now() + timeBudgetMs;
   const issues = [];
   try {
-    if (configKind(path) !== null) issues.push(...autorunIssues(path, lines, read));
+    if (call("autorun_kind", {}, path) !== null) issues.push(...autorunIssues(path, lines, read));
     issues.push(...ciIssues(path, lines));
     const anonymous = netrc ? netrcAnonymous(lex.code) : new Map();
     for (let i = 0; i < lines.length; i++) {

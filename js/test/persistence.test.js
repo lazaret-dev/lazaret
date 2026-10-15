@@ -17,10 +17,24 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 import { call, persistenceReasons, installScriptRisk, importTimeRisk, importTimeSeverity } from "../src/lib/native.js";
-import { parseJsonc, JsoncError, configKind, ownerDir, entries, localCommand } from "../src/lib/autorun.js";
 import { HARDENING_RULES } from "../src/scanner/rules.js";
 import { scanConfigFile } from "../src/scanner/scan.js";
 
+// the settings are the engine's to read (BR-7 step 2: its `autorun_*` calls), as Python's autorun module asks it
+class JsoncError extends Error {
+  constructor(line, reason) { super(`line ${line}: ${reason}`); this.line = line; this.reason = reason; }
+}
+const node = (v) => ({ kind: v.k, line: v.l,
+  value: v.k === "object" ? new Map(v.v.map(([k, x]) => [k, node(x)])) : v.k === "array" ? v.v.map(node) : v.v });
+const parseJsonc = (text) => {
+  const got = call("autorun_jsonc", {}, text);
+  if (got.error) throw new JsoncError(...got.error);
+  return node(got.ok);
+};
+const configKind = (path) => call("autorun_kind", {}, path);
+const ownerDir = (path) => call("autorun_owner", {}, path);
+const entries = (kind, tool, text) => { const got = call("autorun_entries", { kind, tool }, text); return [got.entries, got.error]; };
+const localCommand = (cmd) => call("autorun_local_command", {}, cmd);
 // the workflows are the engine's to read (BR-7: its `ci_*` calls)
 const isWorkflow = (path) => call("ci_kind", {}, path) === "workflow";
 const findings = (text) => call("ci_workflow", {}, text).findings;
