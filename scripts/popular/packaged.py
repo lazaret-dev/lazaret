@@ -7,13 +7,14 @@ distribution packages and what Go itself ships: every golang-*-dev (Go modules) 
 of Ubuntu 24.04's universe, and Go's standard library with the modules it vendors. Each module or crate is packed as
 its registry serves it, a module zip (path@version/...) or a .crate (name-version/...), for scripts/bench.py:
 
-    python3 scripts/popular/packaged.py ubuntu --debs DEBS --cache DIR --manifest DIR/ubuntu.jsonl
+    python3 scripts/popular/packaged.py ubuntu --debs DEBS --cache DIR --manifest DIR/ubuntu.jsonl [--jobs N] [--mirror URL]
     python3 scripts/popular/packaged.py gostd [--goroot GOROOT] --cache DIR --manifest DIR/gostd.jsonl
     python3 scripts/bench.py run DIR/ubuntu.jsonl RUN.jsonl          (looped, as for the benchmark)
 
 `ubuntu` reads noble's universe index (its Packages.xz, pinned by sha256: the release pocket never changes, and the
 index holds each .deb's sha256), downloads into DEBS each package's .deb not there already (https from
-archive.ubuntu.com; bytes with another sha256 than the index's are refused), and keeps a package only when every
+archive.ubuntu.com, or the mirror --mirror names; bytes with another sha256 than the index's are refused, so a
+mirror is trusted for nothing), and keeps a package only when every
 licence its DEP-5 copyright file names (debian/ aside) is one Apache-2.0's terms can take in (MIT, Apache-2.0, the
 BSD licences, ISC, Zlib, ...): the findings on this set are read, and code under other licences is not reviewed. A
 .deb is read with dpkg-deb when there is one, else here (ar, then xz, gzip or bzip2; zstd, which Ubuntu uses, needs
@@ -26,7 +27,10 @@ module src/vendor/modules.txt and src/cmd/vendor/modules.txt name, at its versio
 
 The packed files go into DIR named by their sha256 (packing is deterministic: sorted, dated 1980 or 0); the manifest
 has one line per module or crate, in the category "benign", and --left-out FILE lists the packages left out and why.
-Standard library only; nothing is built or run here.
+--jobs N (default 8) works on N packages at once, in threads: the downloads go over Lazaret's native client where
+its engine library is installed (fetching.py: connections kept alive and reused), and a .deb is unpacked while
+others download; the manifest is the same whatever N is. Standard library only, besides that client; nothing is built
+or run here.
 """
 import argparse
 import bz2
@@ -42,8 +46,13 @@ import shutil
 import subprocess
 import sys
 import tarfile
+import tempfile
+import urllib.parse
 import urllib.request
 import zipfile
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import fetching  # noqa: E402
 
 UBUNTU = "https://archive.ubuntu.com/ubuntu/"
 INDEX_PATH = "dists/noble/universe/binary-amd64/Packages.xz"
@@ -86,14 +95,16 @@ def sha256_file(path):
     return h.hexdigest()
 
 
-def download(url, dest, expect, limit, opener=urllib.request.urlopen):
-    """Download `url` to `dest` (https on archive.ubuntu.com only): SetError unless its sha256 is `expect`."""
-    if not url.startswith(UBUNTU):
-        raise SetError(f"only {UBUNTU} is fetched: {url}")
-    part = dest + f".part-{os.getpid()}"
+def download(url, dest, expect, limit, opener=urllib.request.urlopen, base=UBUNTU):
+    """Download `url` to `dest` (https under `base`, archive.ubuntu.com's or a mirror's, only): SetError unless its
+    sha256 is `expect`."""
+    if not url.startswith(base):
+        raise SetError(f"only {base} is fetched: {url}")
+    part = _part_file(dest)
     h, size = hashlib.sha256(), 0
     try:
         req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+        req.download, req.max_bytes = True, limit + 1                  # (read by fetching.Opener)
         with opener(req, timeout=FETCH_TIMEOUT) as resp, open(part, "wb") as out:
             while True:
                 chunk = resp.read(1 << 20)
@@ -113,6 +124,21 @@ def download(url, dest, expect, limit, opener=urllib.request.urlopen):
         with contextlib.suppress(OSError):
             os.remove(part)
     return dest
+
+
+def _part_file(dest):
+    """A new empty file beside `dest` to write it in before it is renamed (one of its own for each thread)."""
+    fd, part = tempfile.mkstemp(dir=os.path.dirname(dest) or ".", prefix=os.path.basename(dest) + ".part-")
+    os.close(fd)
+    return part
+
+
+def mirror_base(text):
+    """--mirror's URL as a base for the archive's paths: https, a host, and a path ending in "/"."""
+    parts = urllib.parse.urlsplit(text)
+    if parts.scheme != "https" or not parts.hostname or parts.query or parts.fragment or "@" in parts.netloc:
+        raise SetError(f"a mirror is https://host/path/: {text}")
+    return text if text.endswith("/") else text + "/"
 
 
 # ---- the index
@@ -136,10 +162,10 @@ def read_index(data, expect=INDEX_SHA256):
     return sorted(out, key=lambda r: r["package"])
 
 
-def the_index(path, expect, opener=urllib.request.urlopen):
+def the_index(path, expect, opener=urllib.request.urlopen, base=UBUNTU):
     """The index's bytes: `path` when it exists (its sha256 checked by read_index), else downloaded to it."""
     if not os.path.isfile(path):
-        download(UBUNTU + INDEX_PATH, path, expect, 64 << 20, opener)
+        download(base + INDEX_PATH, path, expect, 64 << 20, opener, base)
     with open(path, "rb") as fh:
         return fh.read()
 
@@ -319,7 +345,7 @@ def store(data, cache):
     digest = sha256_bytes(data)
     path = os.path.join(cache, digest)
     if not (os.path.isfile(path) and os.path.getsize(path) == len(data)):
-        part = path + f".part-{os.getpid()}"
+        part = _part_file(path)                       # (two packages can hold one unit: each thread writes its own)
         with open(part, "wb") as fh:
             fh.write(data)
         os.replace(part, path)
@@ -350,11 +376,11 @@ def pack_units(eco, units, version_of, cache):
 
 
 # ---- the sets
-def ubuntu_package(row, debs, cache, use_dpkg=True, opener=urllib.request.urlopen):
+def ubuntu_package(row, debs, cache, use_dpkg=True, opener=urllib.request.urlopen, base=UBUNTU):
     """-> (manifest lines, None) for one package of the index, or ([], why it is left out)."""
     deb = os.path.join(debs, os.path.basename(row["filename"]))
     if not (os.path.isfile(deb) and sha256_file(deb) == row["sha256"]):
-        download(UBUNTU + row["filename"], deb, row["sha256"], MAX_DEB_BYTES, opener)
+        download(base + row["filename"], deb, row["sha256"], MAX_DEB_BYTES, opener, base)
     files = deb_files(deb, use_dpkg)
     copyright = files.get(f"usr/share/doc/{row['package']}/copyright")
     if copyright is None:
@@ -424,30 +450,54 @@ def write_manifest(path, lines):
             fh.write(json.dumps(line, ensure_ascii=False) + "\n")
 
 
-def cmd_ubuntu(args, opener=urllib.request.urlopen):
+def _source(args, opener):
+    """-> (the archive's base URL, the opener to fetch from it): --mirror's or archive.ubuntu.com's; the native client
+    confined to that host unless the caller gives an opener. SetError for a mirror that is not https://host/path/."""
+    base = mirror_base(args.mirror) if args.mirror else UBUNTU
+    return base, opener or fetching.Opener((urllib.parse.urlsplit(base).netloc.lower(),), urllib.request.urlopen)
+
+
+def _package_or_why(row, args, opener, base):
+    """ubuntu_package's answer for `row`, an error made its reason -> (manifest lines, why it is left out, 1 if it
+    failed, else 0)."""
+    try:
+        got, why = ubuntu_package(row, args.debs, args.cache, not args.no_dpkg, opener, base)
+        return got, why, 0
+    except (SetError, OSError, tarfile.TarError, lzma.LZMAError, EOFError, ValueError) as exc:
+        why = f"error: {exc}"[:300]
+        _say(f"{row['package']}: {why}")
+        return [], why, 1
+
+
+def _every(step, total, what):
+    """A progress callback for fetching.each: a line each `step` finished."""
+    return lambda n: None if n % step else _say(f"{n} of {total} {what}")
+
+
+def cmd_ubuntu(args, opener=None):
+    try:
+        base, opener = _source(args, opener)
+    except SetError as exc:
+        _say(f"error: {exc}")
+        return EXIT_USAGE
     os.makedirs(args.debs, exist_ok=True)
     os.makedirs(args.cache, exist_ok=True)
     try:
-        rows = read_index(the_index(args.index or os.path.join(args.debs, "Packages.xz"), args.index_sha256, opener),
-                          args.index_sha256)
+        rows = read_index(the_index(args.index or os.path.join(args.debs, "Packages.xz"), args.index_sha256, opener,
+                                    base), args.index_sha256)
     except SetError as exc:
         _say(f"error: {exc}")
         return EXIT_FAIL
     if args.only:
         rows = [r for r in rows if args.only in r["package"]]
+    answers = fetching.each(rows, lambda row: _package_or_why(row, args, opener, base), max(1, args.jobs),
+                            _every(200, len(rows), "packages"))
     lines, left, failed = [], [], 0
-    for n, row in enumerate(rows, 1):
-        try:
-            got, why = ubuntu_package(row, args.debs, args.cache, not args.no_dpkg, opener)
-        except (SetError, OSError, tarfile.TarError, lzma.LZMAError, EOFError, ValueError) as exc:
-            failed += 1
-            got, why = [], f"error: {exc}"[:300]
-            _say(f"{row['package']}: {why}")
+    for row, (got, why, bad) in zip(rows, answers):   # in the index's order, whatever finished first
         lines.extend(got)
+        failed += bad
         if why:
             left.append({"package": row["package"], "eco": row["eco"], "why": why})
-        if n % 200 == 0:
-            _say(f"{n} of {len(rows)} packages")
     write_manifest(args.manifest, lines)
     if args.left_out:
         write_manifest(args.left_out, left)
@@ -495,6 +545,10 @@ def build_parser():
     u.add_argument("--index-sha256", default=INDEX_SHA256, help=argparse.SUPPRESS)
     u.add_argument("--only", help="the packages whose name holds this")
     u.add_argument("--no-dpkg", action="store_true", help="read the .debs here, not with dpkg-deb")
+    u.add_argument("--jobs", type=int, default=fetching.JOBS,
+                   help=f"packages fetched and read at once (default {fetching.JOBS})")
+    u.add_argument("--mirror", help="an Ubuntu mirror's https URL to fetch from (each .deb is still checked against "
+                                    "the pinned index's sha256)")
     u.set_defaults(func=cmd_ubuntu)
     g = sub.add_parser("gostd", help="Go's standard library, cmd and the modules they vendor")
     g.add_argument("--goroot", help="default: `go env GOROOT`")

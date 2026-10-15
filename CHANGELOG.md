@@ -333,6 +333,15 @@ aggregate):
   only. It refuses an engine library built before the engine's sources last changed or
   with another rule set (an editable install not rebuilt), labels each run with the commit,
   and goes on where it stopped (`docs/TESTING.md` §4).
+- **For contributors: the benign sets fetched in parallel, over Lazaret's own client.**
+  `scripts/popular/popular.py fetch` and `pin` and `scripts/popular/packaged.py ubuntu` take
+  `--jobs N` (default 8) and fetch over Lazaret's native client where its engine library is
+  installed (connections kept alive and reused, the same host rule on every redirect), else
+  over urllib as before; crates.io's API and Open VSX keep their pace, and the pinned file
+  and the manifests are the same whatever N is. `packaged.py ubuntu --mirror URL` fetches
+  from an Ubuntu mirror, each `.deb` still checked against the pinned index. Measured on 130
+  of Ubuntu's packages: 79 s one at a time over urllib, 27 s with eight over the native
+  client (the downloads 62 s and 6 s), the manifests identical.
 - **Credentials in Go's and Rust's declarations, crates.io's tokens and a `.netrc`'s
   passwords (G-4, R-4, N-12).** S-SECRET read `name = "…"` and `name: "…"`, so Go's
   `apiKey := "…"` and `var password string = "…"` and Rust's `const API_KEY: &str = "…"`,

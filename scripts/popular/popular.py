@@ -58,8 +58,13 @@ crate is. Its file's URL answers with a redirect to Open VSX's content
 host.
 
 Only https from the registries' own hosts is fetched, a redirect's target
-too. Standard library only; nothing is unpacked or run here (bench.py scans
-in memory).
+too. `fetch` and `pin` take --jobs N (default 8): N files fetched at once,
+over Lazaret's native client where its engine library is installed
+(fetching.py: connections kept alive and reused, the same host rule on every
+redirect), else over urllib; crates.io's API and Open VSX keep their pace
+whatever N is, and the pinned file and the manifest are the same. Standard
+library only, besides that client; nothing is unpacked or run here
+(bench.py scans in memory).
 """
 import argparse
 import contextlib
@@ -69,12 +74,17 @@ import os
 import pathlib
 import re
 import sys
+import tempfile
+import threading
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
 
 HERE = pathlib.Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE))
+import fetching  # noqa: E402
+
 ROOT = HERE.parent.parent
 RELEASES = HERE / "releases.jsonl"
 NAMES = ROOT / "python" / "src" / "lazaret" / "registry" / "popular_names.json"
@@ -141,8 +151,11 @@ class _Redirects(urllib.request.HTTPRedirectHandler):
         return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
-#: urlopen, with redirects checked (_Redirects)
-urlopen = urllib.request.build_opener(_Redirects).open
+#: urllib's opener, with redirects checked (_Redirects)
+urllib_open = urllib.request.build_opener(_Redirects).open
+#: what every request goes through: the native client, its host rule HOSTS on the URL and every redirect, where it is
+#: here; urllib_open otherwise (fetching.Opener)
+urlopen = fetching.Opener(HOSTS, urllib_open)
 
 
 # ---- the pinned file
@@ -285,6 +298,7 @@ def get(url, limit, opener=urlopen):
     """The body at `url`, at most `limit` bytes (PinError past it, or on a network error)."""
     try:
         req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT, "Accept": "application/json, */*"})
+        req.max_bytes = limit + 1                                       # (read by fetching.Opener)
         with opener(req, timeout=FETCH_TIMEOUT) as resp:
             data = resp.read(limit + 1)
     except (OSError, ValueError) as exc:               # (URLError and HTTPError are OSErrors)
@@ -302,14 +316,17 @@ def get_json(url, opener=urlopen):
 
 
 _last_request = {}
+_pace_lock = threading.Lock()
 
 
 def _pace(host, interval):
-    """At most one request to `host` each `interval` seconds."""
-    wait = _last_request.get(host, float("-inf")) + interval - time.monotonic()
-    if wait > 0:
-        time.sleep(wait)
-    _last_request[host] = time.monotonic()
+    """At most one request to `host` each `interval` seconds, from any thread: each takes the next free moment."""
+    with _pace_lock:
+        now = time.monotonic()
+        moment = max(now, _last_request.get(host, float("-inf")) + interval)
+        _last_request[host] = moment
+    if moment > now:
+        time.sleep(moment - now)
 
 
 def crates_api(path, opener=urlopen):
@@ -340,10 +357,12 @@ def download(url, eco, cache, opener=urlopen, expect=None):
     if urllib.parse.urlsplit(url).hostname == OPENVSX_HOST:
         _pace(OPENVSX_HOST, OPENVSX_INTERVAL)
     os.makedirs(cache, exist_ok=True)
-    part = os.path.join(cache, f".part-{os.getpid()}")
+    fd, part = tempfile.mkstemp(dir=cache, prefix=".part-")
+    os.close(fd)
     h, size = hashlib.sha256(), 0
     try:
         req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+        req.download, req.max_bytes = True, MAX_FILE_BYTES + 1
         with opener(req, timeout=FETCH_TIMEOUT) as resp, open(part, "wb") as out:
             while True:
                 chunk = resp.read(1 << 20)
@@ -636,6 +655,34 @@ def _say(text):
     print(text, file=sys.stderr, flush=True)
 
 
+def _every(step, total, what):
+    """A progress callback for fetching.each: a line each `step` finished."""
+    return lambda n: None if n % step else _say(f"{n} of {total} {what}")
+
+
+def _fetched_or_none(row, cache, opener):
+    """fetch_file's path for `row`, or None (said) when it can't be fetched as pinned."""
+    try:
+        return fetch_file(row, cache, opener)
+    except PinError as exc:
+        _say(f"error: {exc}")
+        return None
+
+
+def _fetched_paths(rows, got):
+    """{sha256: path} of the rows whose file was fetched (`got`: each row's path or None, in order)."""
+    return {row["sha256"]: path for row, path in zip(rows, got) if path is not None}
+
+
+def _pinned_or_none(spec, cache, opener):
+    """pin_one's row for (ecosystem, name, version), or None (said) when it is left out."""
+    try:
+        return pin_one(*spec, cache, opener)
+    except PinError as exc:
+        _say(f"left out: {exc}")
+        return None
+
+
 def cmd_check(args):
     try:
         rows = read_releases(args.releases)
@@ -660,15 +707,10 @@ def cmd_fetch(args, opener=urlopen):
         return EXIT_INVALID
     if args.only:
         rows = [r for r in rows if r["ecosystem"] == args.only]
-    paths, failed = {}, 0
-    for n, row in enumerate(rows, 1):
-        try:
-            paths[row["sha256"]] = fetch_file(row, args.cache, opener)
-        except PinError as exc:
-            failed += 1
-            _say(f"error: {exc}")
-        if n % 100 == 0:
-            _say(f"{n} of {len(rows)} files")
+    got = fetching.each(rows, lambda row: _fetched_or_none(row, args.cache, opener), max(1, args.jobs),
+                        _every(100, len(rows), "files"))
+    paths = _fetched_paths(rows, got)
+    failed = got.count(None)
     ok = [r for r in rows if r["sha256"] in paths]
     if args.manifest:
         with open(args.manifest, "w", encoding="utf-8", newline="\n") as fh:
@@ -694,15 +736,10 @@ def cmd_pin(args, opener=urlopen):
     except (OSError, ValueError) as exc:
         _say(f"error: {exc}")
         return EXIT_USAGE
-    pinned, failed = [], 0
-    for n, (eco, name, version) in enumerate(wanted, 1):
-        try:
-            pinned.append(pin_one(eco, name, version, args.cache, opener))
-        except PinError as exc:
-            failed += 1
-            _say(f"left out: {exc}")
-        if n % 100 == 0:
-            _say(f"{n} of {len(wanted)} releases")
+    got = fetching.each(wanted, lambda spec: _pinned_or_none(spec, args.cache, opener), max(1, args.jobs),
+                        _every(100, len(wanted), "releases"))
+    pinned = [r for r in got if r is not None]
+    failed = len(got) - len(pinned)
     names = {(r["ecosystem"], normal(r["ecosystem"], r["name"])) for r in pinned}
     rows = [r for r in keep if (r["ecosystem"], normal(r["ecosystem"], r["name"])) not in names] + pinned
     write_releases(rows, args.releases)
@@ -720,6 +757,7 @@ def build_parser():
     f.add_argument("--cache", required=True, help="where the files go, named by sha256")
     f.add_argument("--manifest", help="write scripts/bench.py's manifest here")
     f.add_argument("--only", choices=ECOSYSTEMS, help="one ecosystem's releases")
+    f.add_argument("--jobs", type=int, default=fetching.JOBS, help=f"files fetched at once (default {fetching.JOBS})")
     f.set_defaults(func=cmd_fetch)
     n = sub.add_parser("pin", help="resolve releases, hash their files and write the pinned file")
     n.add_argument("specs", nargs="*", metavar="ecosystem:name[@version]")
@@ -728,6 +766,8 @@ def build_parser():
                         "ecosystems anew; one given no count, or 0, keeps its pins)")
     n.add_argument("--exclude", help="names to leave out of --top, one per line")
     n.add_argument("--cache", required=True, help="where the downloaded files go, named by sha256")
+    n.add_argument("--jobs", type=int, default=fetching.JOBS,
+                   help=f"releases resolved and fetched at once (default {fetching.JOBS})")
     n.set_defaults(func=cmd_pin)
     return p
 

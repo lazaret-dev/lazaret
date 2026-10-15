@@ -15,6 +15,7 @@ import time
 import unittest
 import urllib.error
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor as ThreadPool
 
 from tests import _support
 
@@ -452,8 +453,13 @@ class RedirectTests(unittest.TestCase):
                 handler.redirect_request(req, io.BytesIO(), 302, "Found", {}, bad)
 
     def test_the_default_opener_checks_them(self):
-        self.assertTrue(any(isinstance(h, pop._Redirects) for h in pop.urlopen.__self__.handlers))
-        self.assertIs(pop.get.__defaults__[-1], pop.urlopen)
+        # the native client with HOSTS as its rule for every hop, and urllib's opener with _Redirects behind it
+        self.assertEqual(pop.urlopen.hosts, tuple(sorted(pop.HOSTS)))
+        self.assertTrue(any(isinstance(h, pop._Redirects) for h in pop.urlopen.fallback.__self__.handlers))
+        self.assertIs(pop.urllib_open, pop.urlopen.fallback)
+        for fn in (pop.get, pop.fetch_file, pop.pin_one, pop.cmd_fetch, pop.cmd_pin):
+            self.assertIs(fn.__defaults__[-1], pop.urlopen, fn.__name__)
+        self.assertIs(pop.download.__defaults__[0], pop.urlopen)
 
 
 class FetchTests(unittest.TestCase):
@@ -510,6 +516,39 @@ class FetchTests(unittest.TestCase):
         self.assertEqual({k: lines[0][k] for k in ("id", "cat", "container", "kind")},
                          {"id": "popular:npm:left-pad@1.3.0", "cat": "benign", "container": "tgz", "kind": "npm"})
         self.assertEqual(os.path.basename(lines[0]["artifact_path"]), sha(b"good"))
+
+    def fetch_with_jobs(self, rows, pages, jobs):
+        with tempfile.TemporaryDirectory() as d:
+            releases, cache, manifest = (os.path.join(d, n) for n in ("r.jsonl", "cache", "m.jsonl"))
+            pop.write_releases(rows, releases)
+            args = pop.build_parser().parse_args(["--releases", releases, "fetch", "--cache", cache,
+                                                  "--manifest", manifest, "--jobs", str(jobs)])
+            reg = Registry(pages)
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                code = pop.cmd_fetch(args, reg)
+            with open(manifest, encoding="utf-8") as fh:
+                text = fh.read().replace(cache, "CACHE")
+            return code, text, sorted(os.listdir(cache)), sorted(reg.asked)
+
+    def test_fetch_with_jobs_writes_what_one_job_writes(self):
+        rows = [row(name=f"pkg{n:02d}", data=f"file {n}".encode()) for n in range(24)]
+        pages = {r["url"]: f"file {n}".encode() for n, r in enumerate(rows)}
+        del pages[rows[5]["url"]]                                  # one fails, in both
+        one, eight = self.fetch_with_jobs(rows, pages, 1), self.fetch_with_jobs(rows, pages, 8)
+        self.assertEqual(one, eight)                               # the manifest, the cache, every file asked for
+        self.assertEqual(one[0], pop.EXIT_FETCH)
+        self.assertEqual(len(one[2]), 23)                          # no part file left behind
+
+
+class PaceTests(unittest.TestCase):
+    def test_threads_keep_the_pace(self):
+        # six threads asking at once: each takes the next free moment, so the sixth goes five intervals on at least
+        host, interval, times = "pace.invalid", 0.05, []
+        started = time.monotonic()
+        with ThreadPool(6) as pool:
+            list(pool.map(lambda _n: (pop._pace(host, interval), times.append(time.monotonic())), range(6)))
+        self.assertEqual(len(times), 6)
+        self.assertGreaterEqual(max(times) - started, 5 * interval)
 
 
 class NamesAndSpecsTests(unittest.TestCase):

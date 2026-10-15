@@ -340,15 +340,22 @@ python3 scripts/bench.py compare BEFORE.jsonl RUN.jsonl
 
 `fetch` downloads them once (about 710 MB; a file already in DIR is hashed
 again, other bytes than the pinned ones are refused; `--only crates` takes
-one ecosystem's). Run the set before and after a detection change and
-before a release, as the benchmark: no release may be SUSPICIOUS, and every
-verdict or strong finding that moves is read. 0.1.8 makes the nine
-SUSPICIOUS on it, and 0.1.9 none of the npm and PyPI releases (32 WARN, and
-1 INCOMPLETE: sharp's 16 MB libvips library, counted as unscanned code) nor
-of the crates (16 WARN: 13 for the prebuilt libraries and objects they ship,
-the windows and winapi import libraries, ring's and aws-lc-sys's assembly
-and wit-bindgen's WebAssembly; 3 for test data, SC-HEXSTR, SC-OPAQUE-BLOB
-and SC-NESTED-ARCHIVE). At each release, refresh it:
+one ecosystem's; `--jobs N`, default 8, fetches N at once, over Lazaret's
+native client where its engine library is installed). Run the set before
+and after a detection change and before a release, as the benchmark: no
+release may be SUSPICIOUS, and every verdict or strong finding that moves
+is read. 0.1.8 makes the nine SUSPICIOUS on it, and 0.1.9 none of its 1,703
+releases: on rule set 2.70.0 (Oct 14, `bench.py all`), 43 WARN and 1
+INCOMPLETE (sharp's 16 MB libvips library, counted as unscanned code). When
+the crates joined it (rule set 2.33.0) the npm and PyPI releases gave 32
+WARN and the crates 16 (13 for the prebuilt libraries and objects they
+ship, the windows and winapi import libraries, ring's and aws-lc-sys's
+assembly and wit-bindgen's WebAssembly; 3 for test data, SC-HEXSTR,
+SC-OPAQUE-BLOB and SC-NESTED-ARCHIVE); N-4's SC-B64 change (rule set
+2.39.0: data that decodes to WebAssembly or an image) took five npm and
+PyPI releases to OK (@vitest/mocker, es-module-lexer, loader-utils, tsx,
+nltk). At each release, refresh it (`pin` takes `--jobs` too; crates.io's
+API and Open VSX keep their pace whatever N is):
 `popular.py pin --top 800,400,500 --exclude FILE --cache DIR` takes the
 latest release of the first 800 npm, 400 PyPI and 500 crates names of
 `python/src/lazaret/registry/popular_names.json` (the most downloaded),
@@ -392,7 +399,10 @@ python3 scripts/bench.py run DIR/ubuntu.jsonl RUN.jsonl        # looped under a 
 `ubuntu` takes every `golang-*-dev` and `librust-*-dev` package of Ubuntu
 24.04's universe (noble's index, pinned by sha256: the release pocket never
 changes; about 575 MB of `.deb`s, fetched once into DEBS and checked
-against the index), keeping a package only when its DEP-5 copyright file
+against the index; `--jobs N`, default 8, fetches and unpacks N at once,
+over Lazaret's native client where its engine library is installed, and
+`--mirror URL` fetches from an Ubuntu mirror, trusted for nothing since the
+index's sha256 is checked), keeping a package only when its DEP-5 copyright file
 names licences Apache-2.0 can take in: of 4,746 packages, 4,040, with 1,953
 Go modules and 2,151 crates. `gostd` packs Go's `std`, `cmd` and the
 modules they vendor (`go env GOROOT`). The gate is the popular set's: none

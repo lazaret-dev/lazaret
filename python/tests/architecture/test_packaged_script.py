@@ -16,7 +16,9 @@ import tarfile
 import tempfile
 import unittest
 import urllib.error
+import urllib.request
 import zipfile
+from unittest import mock
 
 from tests import _support
 
@@ -250,6 +252,50 @@ class UbuntuTests(unittest.TestCase):
         with self.assertRaisesRegex(pk.SetError, "only"):
             pk.download("http://archive.ubuntu.com/ubuntu/x.deb", os.path.join(self.dir, "x"), "0" * 64, 10,
                         Archive({}))
+
+    def test_jobs_write_what_one_job_writes(self):
+        self.place("golang-example-a-dev", "golang-example-gpl-dev")
+        name, data = self.debs["librust-foo-dev"]
+        archive = Archive({pk.UBUNTU + f"pool/universe/x/librust-foo-dev/{name}": data})
+        one = self.run_ubuntu("--no-dpkg", "--jobs", "1", opener=archive, tag="1")
+        os.remove(os.path.join(self.debs_dir, name))                             # fetched again, beside the others
+        four = self.run_ubuntu("--no-dpkg", "--jobs", "4", opener=archive, tag="4")
+        self.assertEqual(one[:3], four[:3])                                      # exit, manifest, packages left out
+        self.assertEqual(len(archive.asked), 2)
+        self.assertEqual([n for n in os.listdir(os.path.join(self.dir, "cache")) if ".part-" in n], [])
+        self.assertEqual([n for n in os.listdir(self.debs_dir) if ".part-" in n], [])
+
+    def test_a_mirror(self):
+        self.place("golang-example-a-dev", "golang-example-gpl-dev")
+        name, data = self.debs["librust-foo-dev"]
+        mirror = "https://mirror.example.invalid/ubuntu/"
+        archive = Archive({mirror + f"pool/universe/x/librust-foo-dev/{name}": data})
+        code, lines, _, said = self.run_ubuntu("--no-dpkg", "--mirror", mirror.rstrip("/"), opener=archive)
+        self.assertEqual(code, pk.EXIT_OK, said)
+        self.assertEqual(archive.asked, [mirror + f"pool/universe/x/librust-foo-dev/{name}"])
+        self.assertIn("foo-1.0.0", [x["name"] for x in lines])
+        for bad in ("http\x3a//mirror.example.invalid/ubuntu/", "https://u:p@mirror.example.invalid/", "ftp://m/",
+                    "https://mirror.example.invalid/ubuntu/?x=1"):
+            with self.subTest(mirror=bad):
+                self.assertEqual(self.run_ubuntu("--mirror", bad, tag="bad")[0], pk.EXIT_USAGE)
+        with self.assertRaisesRegex(pk.SetError, "only"):                       # a URL outside the mirror's base
+            pk.download(pk.UBUNTU + "x.deb", os.path.join(self.dir, "x"), "0" * 64, 10, Archive({}), mirror)
+
+    def test_the_default_opener(self):
+        # the native client confined to the archive's host (or the mirror's), urllib's urlopen behind it
+        captured = {}
+        with mock.patch.object(pk, "ubuntu_package", side_effect=AssertionError("not reached")), \
+                mock.patch.object(pk, "the_index", side_effect=lambda path, expect, opener, base:
+                                  captured.update(opener=opener, base=base) or b""), \
+                mock.patch.object(pk, "read_index", return_value=[]):
+            args = pk.build_parser().parse_args(["ubuntu", "--debs", self.debs_dir, "--cache", self.dir,
+                                                 "--manifest", os.path.join(self.dir, "m.jsonl"),
+                                                 "--mirror", "https://Mirror.Example.invalid:8443/ubuntu"])
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(pk.cmd_ubuntu(args), pk.EXIT_OK)
+        self.assertEqual(captured["opener"].hosts, ("mirror.example.invalid:8443",))
+        self.assertIs(captured["opener"].fallback, urllib.request.urlopen)
+        self.assertEqual(captured["base"], "https://Mirror.Example.invalid:8443/ubuntu/")
 
 
 class GoStdTests(unittest.TestCase):
