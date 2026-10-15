@@ -2106,7 +2106,13 @@ declaration binds), and a URL literal whose host the data continues
 (`'https://' + host + '.x.example'`: resolved, so sent). What the pass adds
 to follow them: a callback of anything but the script's own functions gets
 what the call holds (a read's callback what was read: `exec(c, (e, out) =>
-…)`); a parameter written to a closure's variable is in the function's
+…)`); a parameter the script's function calls with values runs the function
+a caller gives there with them, as a built-in's callback is run (D-19,
+0.1.9: `function withEnv(cb) { cb(JSON.stringify(process.env)); }` then
+`withEnv((d) => send(d))` was not followed; `Func::param_calls` holds what
+each position is given, a value the function was given itself is bound to
+what the caller gives, and a parameter of the caller given there is called
+with them too, so `outer(cb) { inner(cb); }` carries it); a parameter written to a closure's variable is in the function's
 summary (`res.on('data', d => body += d)`), and so is a parameter of a
 function around it written to a variable declared outside that function
 (D-15, 0.1.9: `p = body` in the `'end'` callback, `p` the module's: the

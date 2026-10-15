@@ -44,6 +44,8 @@ pub struct Eval<'p> {
     pub pf_adds: Vec<(u64, Vec<PyStr>, u32)>,
     /// (the supply-chain model) the value a method call is made on, for the next apply: its receiver (B-3)
     pub recv_val: Option<V>,
+    /// (the supply-chain model) (key of a parameter, what it is called with, by position: D-19)
+    pub pc_adds: Vec<(u64, Vec<V>)>,
 }
 
 /// The changes a reading made to summaries: fid -> (returned request data
@@ -79,6 +81,7 @@ impl<'p> Eval<'p> {
             ancestors,
             pw_adds: Vec::new(),
             pf_adds: Vec::new(),
+            pc_adds: Vec::new(),
             recv_val: None,
         }
     }
@@ -2034,8 +2037,14 @@ impl<'p> Eval<'p> {
     /// (monotone). Returns the functions whose summaries changed, each with
     /// what changed, and the bindings whose value grew.
     pub fn commit(self) -> (Changes, Vec<BindId>) {
-        let Eval { p, fid, emit, reach_adds, ret_val, shared_writes, reads, uses, pw_adds, pf_adds, .. } = self;
+        let Eval { p, fid, emit, reach_adds, ret_val, shared_writes, reads, uses, pw_adds, pf_adds, pc_adds, .. } = self;
         let mut changes: Changes = BTreeMap::new();
+        for (key, given) in pc_adds {
+            let (owner, i) = (key_owner(key), key_index(key));
+            if merge_given(p.fns[owner as usize].param_calls.entry(i).or_default(), &given) {
+                changes.entry(owner).or_default().1.insert(i);
+            }
+        }
         for (key, b) in pw_adds {
             let owner = key_owner(key);
             let i = key_index(key);
@@ -2168,8 +2177,27 @@ fn bound_or_recv(args: &[V], spread: isize, rest: isize, i: usize, recv: &V) -> 
     bound(args, spread, rest, i)
 }
 
+/// What a parameter is called with (Func::param_calls, D-19), `given` merged into it, position by position: whether
+/// it grew.
+fn merge_given(old: &mut Vec<V>, given: &[V]) -> bool {
+    let mut grown = false;
+    for (k, g) in given.iter().enumerate() {
+        if k >= old.len() {
+            old.push(g.clone());
+            grown |= !g.is_empty();
+            continue;
+        }
+        let merged = old[k].union(g);
+        if merged != old[k] {
+            old[k] = merged;
+            grown = true;
+        }
+    }
+    grown
+}
+
 /// The value parameter i of a function receives.
-fn bound(args: &[V], spread: isize, rest: isize, i: usize) -> V {
+pub(super) fn bound(args: &[V], spread: isize, rest: isize, i: usize) -> V {
     if i as isize == rest {
         return union_all(args.iter().skip(i));
     }

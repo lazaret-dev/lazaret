@@ -572,6 +572,10 @@ pub struct Func {
     /// param index -> the files it is written to: (the keys of the path, where), the supply-chain model's (D-2:
     /// `request.get(u, (e, r, body) => fs.writeFileSync(p, body))`, a callback given a download)
     pub param_files: BTreeMap<usize, BTreeSet<(Vec<PyStr>, u32)>>,
+    /// param index -> what the function calls the parameter with, by position: the supply-chain model's (D-19:
+    /// `function withEnv(cb) { cb(JSON.stringify(process.env)); }`), which runs the function a caller gives there
+    /// with those values, as a built-in's callback is run
+    pub param_calls: BTreeMap<usize, Vec<V>>,
     /// fid -> the parameters it passed tainted values in its last reading
     pub callers: BTreeMap<FnId, BTreeSet<usize>>,
     pub runs: u32,
@@ -1214,6 +1218,7 @@ impl Program {
             ret_outer: BTreeMap::new(),
             param_writes: BTreeMap::new(),
             param_files: BTreeMap::new(),
+            param_calls: BTreeMap::new(),
             callers: BTreeMap::new(),
             runs: 0,
             calls: Vec::new(),
@@ -1696,6 +1701,7 @@ impl Program {
             ret_outer: BTreeMap::new(),
             param_writes: BTreeMap::new(),
             param_files: BTreeMap::new(),
+            param_calls: BTreeMap::new(),
             callers: BTreeMap::new(),
             runs: 0,
             calls: Vec::new(),
