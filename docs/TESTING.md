@@ -273,8 +273,9 @@ The corpora also double as timing evidence: the sweeps finish in seconds
 **What carries over: the holdout.** The malware benchmark's 516 releases were
 read while the detectors were written, so a change measured only on them is
 measured in-sample. Score a detection change on the holdout too (`DESIGN.md`
-§7: 747 other malicious releases of the same dataset, each marked when it
-shares a code file with a benchmark sample), and look at its aggregates only —
+§7: other malicious releases of the same dataset; Sept 30's 747, each marked
+when it shares a code file with a benchmark sample, and since Oct 15 a new
+draw, below), and look at its aggregates only —
 the share SUSPICIOUS, by ecosystem and category, by whether a release shares
 code with the benchmark, and how much of it rests on a behaviour or a generic
 technique rather than a tool's mark or a list. Never open a holdout sample or
@@ -291,6 +292,22 @@ BEFORE.jsonl AFTER.jsonl` gives the verdicts by category in each run and
 every release whose verdict or strong findings moved — read each one —
 and `--aggregate-only` gives the counts alone, for the holdout. The
 samples themselves are kept outside the repository (`STRUCTURE.md` §6).
+
+**The malicious sets.** `scripts/datadog.py DATASET OUT` writes the
+benchmark's and the holdout's manifests from a clone of DataDog's
+malicious-software-packages-dataset (a plain clone or a `--filter=blob:none`
+one, not a shallow one), and prints the two entries of a sets file. The
+benchmark is the audit's draw (the dataset at `b302ad0b`, seed 20260928):
+the same 516 releases. The draw of Sept 30's holdout was not kept, so the
+script draws a new holdout of the same shape (seed 20261015: 300 npm and 300
+PyPI malicious-intent packages and 150 compromised npm releases, among those
+the benchmark does not hold); its first run is its baseline, and 0.1.9's
+figures for the old one stay as they were. Each sample is read in memory
+from git and written as its registry serves the release (the September
+harness's rules: the folder with the dataset's `package_info`, never an
+upstream `sources/` tree), and a stopped run goes on where it stopped. Run it
+on a maintainer's machine, with OUT outside the repository (it refuses a
+folder inside a checkout).
 
 **Every set in one command.** `run --jobs N` scans N releases at once, each
 in a worker process of the guard's pool, and writes the records a run with

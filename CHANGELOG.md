@@ -370,6 +370,16 @@ aggregate):
   from an Ubuntu mirror, each `.deb` still checked against the pinned index. Measured on 130
   of Ubuntu's packages: 79 s one at a time over urllib, 27 s with eight over the native
   client (the downloads 62 s and 6 s), the manifests identical.
+- **For contributors: the benchmark's malicious releases and a holdout, rebuilt from
+  DataDog's dataset.** `scripts/datadog.py DATASET OUT` writes the manifests `bench.py`
+  runs from a clone of DataDog's malicious-software-packages-dataset: the benchmark as the
+  audit drew it (the dataset at `b302ad0b`, seed 20260928: the same 516 releases), and a
+  holdout of the same shape drawn anew (seed 20261015: 300 npm and 300 PyPI
+  malicious-intent packages and 150 compromised npm releases the benchmark does not hold),
+  since the draw of Sept 30's was not kept. Each sample is read in memory from git (a
+  blobless clone fetches the samples drawn in one request) and written as its registry
+  serves the release, by the September harness's rules; a stopped run goes on where it
+  stopped, and a folder inside a checkout is refused (`docs/TESTING.md` §4).
 - **Credentials in Go's and Rust's declarations, crates.io's tokens and a `.netrc`'s
   passwords (G-4, R-4, N-12).** S-SECRET read `name = "…"` and `name: "…"`, so Go's
   `apiKey := "…"` and `var password string = "…"` and Rust's `const API_KEY: &str = "…"`,

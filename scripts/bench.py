@@ -17,10 +17,11 @@ the Marketplace and Open VSX serve it, extension/ inside, container zip);
 and "cat", the release's category,
 where "benign" marks a package that should pass and anything else a
 malicious release. (lz_path, lz_container and lz_kind are read too: the
-names the corpus preparation writes.) scripts/popular/ writes the benign
-manifests: popular.py the popular releases (npm, PyPI, crates, Open VSX's
-extensions), packaged.py the Go modules and crates Ubuntu packages and Go's
-own tree.
+names the September harness's corpus preparation wrote.) scripts/datadog.py
+writes the malicious manifests, the benchmark's and a holdout's, from
+DataDog's dataset; scripts/popular/ the benign ones: popular.py the popular
+releases (npm, PyPI, crates, Open VSX's extensions), packaged.py the Go
+modules and crates Ubuntu packages and Go's own tree.
 
 `run` scans each release as `lazaret-registry` does (in memory: nothing
 in it is unpacked to disk or run), on the engine the package loads
