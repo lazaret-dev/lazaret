@@ -35,6 +35,45 @@ use std::rc::Rc;
 
 pub use driver::{analyze, Config, Out};
 
+/// The hash of the pass's maps keyed by its own numbers (a binding's, a node's, a function's): one multiply per word
+/// (FxHash's). SipHash, the standard maps' default, was a twentieth of a bundle's reading (P-17); its resistance to
+/// chosen keys is not needed for numbers the pass assigns in order. Maps keyed by a text keep SipHash.
+#[derive(Default, Clone, Copy)]
+pub struct IdHasher(u64);
+
+const ID_SEED: u64 = 0x51_7c_c1_b7_27_22_0a_95;
+
+impl std::hash::Hasher for IdHasher {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+
+    fn write(&mut self, bytes: &[u8]) {
+        for &b in bytes {
+            self.0 = (self.0.rotate_left(5) ^ b as u64).wrapping_mul(ID_SEED);
+        }
+    }
+
+    fn write_u8(&mut self, i: u8) {
+        self.0 = (self.0.rotate_left(5) ^ i as u64).wrapping_mul(ID_SEED);
+    }
+
+    fn write_u32(&mut self, i: u32) {
+        self.0 = (self.0.rotate_left(5) ^ i as u64).wrapping_mul(ID_SEED);
+    }
+
+    fn write_u64(&mut self, i: u64) {
+        self.0 = (self.0.rotate_left(5) ^ i).wrapping_mul(ID_SEED);
+    }
+
+    fn write_usize(&mut self, i: usize) {
+        self.0 = (self.0.rotate_left(5) ^ i as u64).wrapping_mul(ID_SEED);
+    }
+}
+
+/// A map keyed by the pass's own numbers (IdHasher).
+pub type IdMap<K, V> = HashMap<K, V, std::hash::BuildHasherDefault<IdHasher>>;
+
 pub const MAX_FILE: usize = 2_000_000;
 pub const MAX_TOTAL: usize = 8_000_000;
 pub const MAX_OPEN: usize = 4;
@@ -684,10 +723,10 @@ pub struct Mod {
     pub asg: Vec<bool>,
     /// a member assignment's right side, by its left node, and whether its operator is `=` (`o.p = …`; not a
     /// destructuring's member, which has none)
-    pub member_rhs: HashMap<NodeId, (NodeId, bool)>,
+    pub member_rhs: IdMap<NodeId, (NodeId, bool)>,
     /// (eval.rs, regexp_member) whether a binding's property holds only a regex, by binding and name
     pub regexp_props: HashMap<(BindId, PyStr), bool>,
-    pub text_memo: HashMap<NodeId, Rc<PyStr>>,
+    pub text_memo: IdMap<NodeId, Rc<PyStr>>,
 }
 
 impl Mod {
@@ -1084,16 +1123,16 @@ pub struct Program {
     /// function name -> [fid], every project function of that name
     pub by_name: HashMap<PyStr, Vec<FnId>>,
     /// bid -> everything written to a shared binding
-    pub shared: HashMap<BindId, V>,
+    pub shared: IdMap<BindId, V>,
     /// bid -> who reads a shared binding (in the order they first did)
-    pub readers: HashMap<BindId, Vec<FnId>>,
-    pub desc_memo: HashMap<BindId, Rc<Vec<descs::D>>>,
-    pub tg_memo: HashMap<(ModId, NodeId), Rc<(Vec<FnId>, descs::How)>>,
+    pub readers: IdMap<BindId, Vec<FnId>>,
+    pub desc_memo: IdMap<BindId, Rc<Vec<descs::D>>>,
+    pub tg_memo: IdMap<(ModId, NodeId), Rc<(Vec<FnId>, descs::How)>>,
     pub cfg: Rc<Config>,
     pub work: u64,
     pub budget: u64,
     pub nodes: u64,
-    pub anc: HashMap<FnId, Rc<BTreeSet<FnId>>>,
+    pub anc: IdMap<FnId, Rc<BTreeSet<FnId>>>,
     /// (the supply-chain model) a member of `this` — (class or object
     /// literal, its id, the member's name) — as a binding of its own
     pub sc_props: HashMap<(u8, u32, PyStr), BindId>,
@@ -1102,10 +1141,13 @@ pub struct Program {
     /// asked (descs::Program::sc_made_widely)
     pub sc_wide: Option<HashSet<ClassId>>,
     /// (the supply-chain model) a class's `this.x` binding -> the class
-    pub sc_this_class: HashMap<BindId, ClassId>,
+    pub sc_this_class: IdMap<BindId, ClassId>,
     /// (the supply-chain model) a module -> the names of the members of a name it puts anything into
     /// (`o.list.push(…)`, `Object.assign(o.opts, …)`): made when first asked (supply::collected_members, D-3b)
     pub sc_collected: HashMap<ModId, HashSet<PyStr>>,
+    /// (the supply-chain model) a callee's names (supply's `sc_names`), by its node: what it is never changes
+    /// while the pass reads, and every reading of a call asked it again (P-17)
+    pub sc_names_memo: IdMap<(ModId, NodeId), Rc<Vec<PyStr>>>,
 }
 
 impl Program {
@@ -1119,19 +1161,20 @@ impl Program {
             binds: Vec::new(),
             scopes: Vec::new(),
             by_name: HashMap::new(),
-            shared: HashMap::new(),
-            readers: HashMap::new(),
-            desc_memo: HashMap::new(),
-            tg_memo: HashMap::new(),
+            shared: IdMap::default(),
+            readers: IdMap::default(),
+            desc_memo: IdMap::default(),
+            tg_memo: IdMap::default(),
             cfg,
             work: 0,
             budget: WORK_BASE,
             nodes: 0,
-            anc: HashMap::new(),
+            anc: IdMap::default(),
             sc_props: HashMap::new(),
             sc_wide: None,
-            sc_this_class: HashMap::new(),
+            sc_this_class: IdMap::default(),
             sc_collected: HashMap::new(),
+            sc_names_memo: IdMap::default(),
         }
     }
 
@@ -1247,9 +1290,9 @@ impl Program {
             oid_at: vec![NONE; n],
             bind_at: vec![UNSET; n],
             asg: vec![false; n],
-            member_rhs: HashMap::new(),
+            member_rhs: IdMap::default(),
             regexp_props: HashMap::new(),
-            text_memo: HashMap::new(),
+            text_memo: IdMap::default(),
         });
         self.by_path.entry(norm).or_insert(idx);
         if root != NONE {

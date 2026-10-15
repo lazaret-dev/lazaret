@@ -2078,6 +2078,27 @@ doesn't read (a fragment, TypeScript it can't, a file over 2 MB) or a
 reading past the pass's budget is the text follower's to answer; so is any
 text not handed as JavaScript or Python (Python's model is §19).
 
+**Its cost on a bundle (P-17, 0.1.9).** The tree reads a file several
+times what the text follower takes: the fixpoint reads each function about
+twice and the reporting pass once more, and the parse alone is about half
+the text follower's time. Measured on the popular set's fourteen files of
+2.4 to 13.3 million characters (D-8's would read them; today's limit is
+2,000,000), in `examples`' timing of the two calls: 110.3 s on the tree
+before, 25.8 s after, against 6.0 s for the text follower, the answers the
+same. What changed: a reading that can answer nothing stops there
+(`driver::fixpoint`'s `give_up`: in the supply-chain model a function cut,
+the iteration cap met or the budget spent makes the file the text
+follower's, and the pass read on to a fixpoint and reported anyway; monaco's
+TypeScript workers met the cap and read 12 to 22 s more, 1.5 to 3 s now); a
+callee's names are made once per call node (`Program::sc_names_memo`), a
+dotted name is compared without being built (`eq_dotted`: `receives` and
+`dotted2` built `"axios.post"` and the like for every call, a tenth of a
+bundle's instructions), and the maps keyed by the pass's own numbers hash
+with FxHash's multiply (`IdMap`). The files the tree reads to the end, 18.9 s
+before and 15.9 s after, are still about nine times the text follower: what
+is left is spread over the evaluation's allocations (a value's union, a
+member's name copied out of the tree) and the parse.
+
 **Why.** The text follower followed names in a window of text: a quote in a
 regular expression or a backtick in a comment opened a string over the
 code after it, a name that meant two things in a bundle joined two flows

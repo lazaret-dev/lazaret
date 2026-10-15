@@ -694,6 +694,13 @@ aggregate):
 
 ### Changed
 
+- **The supply-chain model's tree on a bundle (P-17).** On fourteen benign files of 2.4 to 13.3 million
+  characters (monaco, plotly, notebook, jsdom), the tree took 110.3 s and now 25.8 s, the answers the same: a
+  reading that can answer nothing (a function cut, the iteration cap met, the budget spent: the file is the text
+  follower's then) stops at once instead of reading on to a fixpoint (monaco's TypeScript workers: 12 to 22 s, now
+  1.5 to 3 s), a callee's names are made once, dotted names are compared without being built, and the pass's own
+  maps hash with FxHash's multiply. The files it reads to the end are still about nine times the text follower (D-8
+  keeps the 2,000,000-character limit for now).
 - **An sdist's or a wheel's file that pip installs through `..` is CRITICAL (BR-4; rule set 2.71.0).** Such a
   member (`pkg-1.0/x/../setup.py`, a wheel's `x/../evil.pth`) is read where pip writes it, as it was, and its
   SC-ARCHIVE-PATH ("Archive path through '..'") is CRITICAL now, whatever the file holds: no packaging tool writes

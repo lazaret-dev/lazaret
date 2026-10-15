@@ -16,7 +16,7 @@ pub enum Halt {
 pub(super) type R<T> = Result<T, Halt>;
 
 /// An environment: what each of the function's own bindings holds.
-type Env = HashMap<BindId, V>;
+type Env = IdMap<BindId, V>;
 
 pub struct Eval<'p> {
     pub p: &'p mut Program,
@@ -69,7 +69,7 @@ impl<'p> Eval<'p> {
             m,
             emit,
             findings,
-            env: HashMap::new(),
+            env: IdMap::default(),
             version: 0,
             cur,
             reach_adds: Vec::new(),

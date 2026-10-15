@@ -419,7 +419,14 @@ pub(super) fn fixpoint(prog: &mut Program, findings: &mut Vec<Out>) -> Vec<Out> 
     prog.budget = WORK_BASE + WORK_PER_NODE * prog.nodes;
     let mut stopped: Option<FnId> = None;
     let mut stopped_at = [0u64, 0u64];
+    // (the supply-chain model answers nothing once a reading is incomplete, a function cut, the cap met, the budget
+    // spent: its facts are the text followers' then. So it stops there, rather than read on to a fixpoint and
+    // report for nothing: P-17, monaco's TypeScript worker met the cap and read 14 s more)
+    let give_up = prog.cfg.supply.is_some();
     while let Some(Reverse((_, fid))) = heap.pop() {
+        if give_up && !(cut.is_empty() && cutoff.is_empty()) {
+            break;
+        }
         queued[fid as usize] = false;
         prog.fns[fid as usize].runs += 1;
         let mut ev = Eval::new(prog, fid, false, findings);
@@ -475,7 +482,8 @@ pub(super) fn fixpoint(prog: &mut Program, findings: &mut Vec<Out>) -> Vec<Out> 
     // the reporting pass: every function once, in order of definition
     prog.budget = prog.work + WORK_BASE + EMIT_PER_NODE * prog.nodes;
     let mut emit_stopped: Option<FnId> = None;
-    for fid in 0..n as FnId {
+    let incomplete = stopped.is_some() || !cut.is_empty() || !cutoff.is_empty();
+    for fid in 0..(if give_up && incomplete { 0 } else { n as FnId }) {
         let mut ev = Eval::new(prog, fid, true, findings);
         match ev.run() {
             Ok(()) => {}

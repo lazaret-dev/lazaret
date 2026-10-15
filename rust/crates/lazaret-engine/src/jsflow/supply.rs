@@ -655,7 +655,13 @@ pub(super) fn collected_members(a: &Ast) -> HashSet<PyStr> {
 }
 
 fn dotted2<'a>(a: &'a str, b: &'a [&'a str]) -> impl Fn(&[u32]) -> bool + 'a {
-    move |name: &[u32]| b.iter().any(|m| eq(name, &format!("{}.{}", a, m)))
+    move |name: &[u32]| b.iter().any(|m| eq_dotted(name, a, m))
+}
+
+/// Is `name` `a` + "." + `b`? (P-17: without making that string, which every call's names were asked of)
+fn eq_dotted(name: &[u32], a: &str, b: &str) -> bool {
+    let la = a.chars().count();
+    name.len() == la + 1 + b.chars().count() && name[la] == 0x2E && eq(&name[..la], a) && eq(&name[la + 1..], b)
 }
 
 /// Is a literal's text a URL that its host continues past (`'https://'`,
@@ -800,7 +806,7 @@ fn receives(names: &[PyStr]) -> bool {
         ) {
             return true;
         }
-        POSTERS.iter().chain(REQUEST_CLIENTS).any(|m| eq(n, m) || CLIENT_CALLS.iter().chain(&["del"]).any(|c| eq(n, &format!("{}.{}", m, c))))
+        POSTERS.iter().chain(REQUEST_CLIENTS).any(|m| eq(n, m) || CLIENT_CALLS.iter().chain(&["del"]).any(|c| eq_dotted(n, m, c)))
     })
 }
 
@@ -920,7 +926,17 @@ impl<'p> Eval<'p> {
     /// The names a callee resolves to: `os.hostname`, `https.request`,
     /// `axios.post` (a package's member), `fetch` (a global, also through
     /// globalThis, window, self or global).
-    fn sc_names(&mut self, callee: NodeId, scope: ScopeId) -> Vec<PyStr> {
+    fn sc_names(&mut self, callee: NodeId, scope: ScopeId) -> Rc<Vec<PyStr>> {
+        if let Some(hit) = self.p.sc_names_memo.get(&(self.m, callee)) {
+            return hit.clone();
+        }
+        let names = Rc::new(self.sc_names_of(callee, scope));
+        self.p.sc_names_memo.insert((self.m, callee), names.clone());
+        names
+    }
+
+    /// sc_names, made.
+    fn sc_names_of(&mut self, callee: NodeId, scope: ScopeId) -> Vec<PyStr> {
         let m = self.m;
         let mut out: Vec<PyStr> = Vec::new();
         let (member, obj) = {
