@@ -866,6 +866,27 @@ aggregate):
   as the Python package never asked them with one. `binary.js` is 88 lines (from 241), `pth.js` 20 (from 56), core
   156 lines shorter.
   `test_snapshot_binary` (hashes checked to be the Python's answers) and `test_wasm_parity_binary` hold the engine.
+- **--deps' decisions, the engine's (BR-7, step 3 e).** The follow of a dependency's install hooks and of a
+  project's own (to the files they run and the scripts those start: the escalation and its message, a hook too long
+  to follow, an agent a hook or a file it runs launches), npm's implicit node-gyp hook, which dependency files are a
+  web app's static assets, each installed package's names (D-12b, D-9c), the site-packages groups of the cross-file
+  follower, and the SC-IMPORT-RISK and SC-AGENT-HIJACK findings of a dependency's files are the engine's for both
+  packages (`rust/crates/lazaret-engine/src/deps.rs`: the `deps_hooks`, `deps_files`, `deps_script`,
+  `deps_targets`, `dep_file_issues`, `agent_issue` and `declared_names` calls), where core's `dependency_checks`,
+  `project_hook_checks` and their helpers and the npm package's `deps.js` made them until now; the registry asks
+  the engine for a release's declared names too. The packages keep file access: a call asks for what it needs to
+  know of the tree (whether a path is a file it may read, a manifest's text, what a file a hook runs does, what a
+  JavaScript file loads, a folder's entries or every file below it, a file's head) and is asked again with the
+  answers, as the settings reader is; a file a hook runs that the walk did not read is read, and scanned, by the
+  package. The same findings as the Python's on 140 trees put together from the dependency tests' fixtures, scanned
+  with --deps and without (280 scans, 3,036 issues), and the npm package's the same as its own old code's. Three
+  differences, all in the npm package's favour or none: on worker threads the npm package's import-time test is now
+  given each package's names, as on one thread and in the Python package (with two threads it answered otherwise on
+  46 of the 140 trees); a check that spends its work budget during a hook's follow makes the manifest SC-TRUNCATED
+  as running out of budget (the npm package said its scan failed); and a scan its time budget stops while the hooks
+  are being followed keeps none of the follow (it kept the hooks followed before the stop; the scan is incomplete
+  either way). core is 367 lines shorter, `deps.js` 632 lines (from 973; 220 of them the vendored modules' and
+  crates' readers, which stay). `test_snapshot_deps` and `test_wasm_parity_deps` hold the engine.
 - **Security: S-XML is a parser set to resolve external entities, not an import of xml.etree, xml.dom or xml.sax
   (Q-3; rule set 2.80.0).** Since Python 3.7.1 none of them resolves an external entity unless told to, and Expat
   2.4.1 refuses entity bombs, so the import flagged safe code: all 20 of BenchmarkPython's safe XXE cases (its 8 real

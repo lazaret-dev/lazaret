@@ -85,19 +85,6 @@ export function normpathRel(path) {
   return comps.join("/") || ".";
 }
 
-/**
- * A hook's `target` joined with the directory `base` (relative to the scan
- * root), normalized; null when it is absolute or leaves the scan root.
- * Twin of core._tree_join.
- */
-export function treeJoin(base, target) {
-  target = target.replaceAll("\\", "/");
-  if (target.startsWith("/") || /^[A-Za-z]:/.test(target)) return null;
-  const joined = normpathRel(`${base || "."}/${target}`);
-  if (joined === "." || joined === ".." || joined.startsWith("../")) return null;
-  return joined;
-}
-
 // Spec 8: `.git` (exactly that name) is always skipped; dependency trees are
 // pruned unless --deps; __pycache__ is never source-scanned but its .pyc
 // files are checked. Every pruned tree is reported (Q-SKIPPED-TREE).

@@ -314,8 +314,8 @@ js/
 │   ├── report.js         report format (JSON + HTML), terminal output
 │   ├── verify.js         --verify-secrets: the scan's secrets asked about, over
 │   │                     node:https (the engine's table and logic)
-│   ├── deps.js           --deps: a dependency's install hooks followed to the
-│   │                     files they run; the import-time test on its code
+│   ├── deps.js           --deps: the tree read for the engine's decisions
+│   │                     (deps_hooks, deps_files), the vendored readers
 │   ├── pool.js           worker threads for the per-file work (pool-worker.js:
 │   │                     a worker, its own instance of the engine)
 │   ├── scanner/          the scan loop (each file the native engine's, in

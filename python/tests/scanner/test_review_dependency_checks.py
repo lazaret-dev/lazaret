@@ -9,9 +9,11 @@ is followed to the files it runs and escalates to CRITICAL when one fails the
 install-script test (as in the registry), and every other JavaScript or
 Python file of a dependency gets the import-time test (SC-IMPORT-RISK).
 
-The npm engine's twin is js/src/deps.js (tests/architecture/test_js_parity.py
-compares the two CLIs on the tree below). Payloads are inert text: hosts are
-.invalid, and nothing is executed.
+The decisions are the engine's since BR-7 step 3e (deps.rs: its unit tests
+hold the paths a hook's target joins to, and the entry points a package.json
+names); both packages read the tree for it, and js/test/
+review-dependency-checks.test.js has the same cases. Payloads are inert
+text: hosts are .invalid, and nothing is executed.
 """
 import json
 import os
@@ -271,28 +273,16 @@ class WebAssetTests(unittest.TestCase):
                     "content": json.dumps({"name": "w", "version": "1.0.0", "main": "lib/f0.js"})}
         root = tempfile.mkdtemp(prefix="lz-deps-pad-")
         self.addCleanup(shutil.rmtree, root, True)
-        self.assertEqual(core._deps_web_assets(core._DependencyTree(root, files, [manifest], ()), files), set())
+        plan, _stopped = core._deps_plan(core._DependencyTree(root, files, [manifest], ()), files)
+        self.assertEqual(plan["assets"], [])
+        # an entry point past 6,000 exports
         exports = {f"./p{i}": f"./p{i}.js" for i in range(6_000)}
-        self.assertEqual(len(core._deps_npm_entries({"exports": exports})), 6_000)
-
-    def test_entries(self):
-        self.assertEqual(core._deps_npm_entries({"main": "a.js", "module": "b.mjs", "bin": {"c": "c.js", "d": 1},
-                                                 "exports": {".": {"import": "./e.mjs", "require": ["./f.js", "./g.js"]},
-                                                             "./*": "./h/*.js"}}),
-                         ["a.js", "b.mjs", "c.js", "./e.mjs", "./f.js", "./g.js"])
-        self.assertEqual(core._deps_npm_entries({"bin": "x.js", "exports": "./y.js"}), ["x.js", "./y.js"])
-
-
-class HelperTests(unittest.TestCase):
-    def test_tree_join(self):
-        cases = {("node_modules/a", "x.js"): "node_modules/a/x.js", ("node_modules/a", "./b/../x.js"): "node_modules/a/x.js",
-                 ("node_modules/a", "../../y.js"): "y.js", ("node_modules/a", "../../../y.js"): None,
-                 ("node_modules/a", "/usr/y.js"): None, ("node_modules/a", "C:/y.js"): None,
-                 ("node_modules/a", "lib\\z.js"): "node_modules/a/lib/z.js", ("", "x.js"): "x.js", ("", ".."): None,
-                 ("a", "."): "a", ("a", ".."): None, ("a", "b//c/"): "a/b/c"}
-        for (base, target), want in cases.items():
-            with self.subTest(base=base, target=target):
-                self.assertEqual(core._tree_join(base, target), want)
+        exports["./run"] = "./static/run.js"
+        files = [{"path": "node_modules/v/static/run.js", "content": WEB, "lang": "js", "dep": True}]
+        manifest = {"path": "node_modules/v/package.json",
+                    "content": json.dumps({"name": "v", "version": "1.0.0", "exports": exports})}
+        plan, _stopped = core._deps_plan(core._DependencyTree(root, files, [manifest], ()), files)
+        self.assertEqual(plan["assets"], [])
 
 
 if __name__ == "__main__":

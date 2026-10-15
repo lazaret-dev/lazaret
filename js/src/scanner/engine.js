@@ -12,13 +12,6 @@ export { isComment } from "../lib/lexer.js";
 
 export const B64_BLOB_RE = pyRe(String.raw`[\"'][A-Za-z0-9+/]{200,}={0,2}[\"']`);
 export const OBF_IDENT_RE = pyRe(String.raw`\b_0x[0-9a-f]{4,}\b`, "g");
-/** The distinct `_0x` names that make a file "obfuscated" where a file is judged for what it runs (SC-AUTORUN, a
- * project's own install hooks): core.OBF_MIN_NAMES. */
-export const OBF_MIN_NAMES = 5;
-/** Does `text` hold OBF_MIN_NAMES or more distinct `_0x` names? core.is_obfuscated */
-export function isObfuscated(text) {
-  return new Set(String(text).match(OBF_IDENT_RE) ?? []).size >= OBF_MIN_NAMES;
-}
 export const CHARCODE_RE = /String\.fromCharCode/;
 
 // ---------------- Inline suppression (shared semantics spec 2) --------------

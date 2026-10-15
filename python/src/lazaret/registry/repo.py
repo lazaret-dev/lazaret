@@ -3108,9 +3108,8 @@ class _ArtifactScan:
         out = None
         if self.artifact == "npm":
             text = self.manifests.get("package.json")
-            data, _problems = lazaret.load_manifest("package.json", text) if text else (None, None)
-            if isinstance(data, dict):
-                out = lazaret.npm_declared_names(data)
+            if text:                        # (the engine reads it: deps.rs declared_names; null when not an object)
+                out = lazaret._native.call("declared_names", {"kind": "npm"}, text)
         elif self.artifact in ("wheel", "sdist"):
             if self.artifact == "wheel":
                 rel = next((r for r in sorted(self.deferred) if r.count("/") == 1
@@ -3118,7 +3117,8 @@ class _ArtifactScan:
             else:
                 rel = "PKG-INFO" if "PKG-INFO" in self.deferred else None
             if rel is not None:
-                names, requires = lazaret.metadata_declared_names(self.deferred[rel].decode("utf-8", "replace"))
+                names, requires = lazaret._native.call("declared_names", {"kind": "metadata"},
+                                                       self.deferred[rel].decode("utf-8", "replace"))
                 if requires or self.artifact == "wheel":
                     out = names
         self._declared = sorted(out) if out is not None else None

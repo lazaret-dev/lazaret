@@ -42,9 +42,12 @@ let engine = null;         // the instance's exports
 let workBudget = null;     // steps of the regex matcher a call may take (null: the engine's default)
 // The calls that make and redact the findings a scan reports (BR-7 step 3 c), and that classify a file's bytes and
 // read its bytecode and .pth lines (step 3 d), run on the engine's default budget whatever setWorkBudget asks, as
-// the Python package asks them: a file that spent its budget still gets its SC-TRUNCATED finding, redacted.
+// the Python package asks them: a file that spent its budget still gets its SC-TRUNCATED finding, redacted. So do
+// --deps' calls (step 3 e), whose checks each have a budget of their own, as each was a call of its own (deps.rs);
+// dep_file_issues, the import-time test of a file, is budgeted.
 const UNBUDGETED = new Set(["batch", "issue_make", "redact_text", "redact_issues", "redact_file", "clip_line",
-  "pem_lines", "binary_check", "binary_classify", "binary_disguised", "pyc_issues", "pth_issues"]);
+  "pem_lines", "binary_check", "binary_classify", "binary_disguised", "pyc_issues", "pth_issues",
+  "deps_hooks", "deps_script", "deps_targets", "deps_files", "agent_issue", "declared_names"]);
 
 /** The work each call may do, in steps of the engine's regex matcher (null: its default, about 4e9). */
 export function setWorkBudget(steps = null) {

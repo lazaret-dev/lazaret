@@ -827,7 +827,7 @@ fn script_risk(p: &Pack, text: &[u32], lang: Option<&str>) -> Vec<PyStr> {
     crate::signs::install_script_risk(p, text, lang).into_iter().filter(|r| !r.starts_with(&own)).collect()
 }
 
-fn is_obfuscated(p: &Pack, text: &[u32]) -> bool {
+pub fn is_obfuscated(p: &Pack, text: &[u32]) -> bool {
     let mut names: Vec<&[u32]> = p.re("OBF_IDENT_RE").finditer(text).map(|m| m.group0()).collect();
     names.sort();
     names.dedup();

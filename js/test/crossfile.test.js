@@ -14,7 +14,7 @@ import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { run } from "../src/index.js";
 import { crossFileIssues } from "../src/lib/native.js";
-import { siteGroups } from "../src/deps.js";
+import { planFiles } from "../src/deps.js";
 
 const U = "'https://c2.invalid/p'";
 const PY_NET = "import requests\n\ndef pull():\n    return requests.get(" + U + ").text\n";
@@ -169,7 +169,7 @@ test("a distribution's top-level modules are one package: its RECORD lists them 
       writeFileSync(join(root, rel), data);
     }
     const deps = ["a.py", "b.py", "c.py"].map((n) => ({ path: join(site, n), lang: "py", dep: true, content: files[`${site}/${n}`] }));
-    assert.deepEqual(siteGroups(root, deps), { [`${site}/a.py`]: `${site}/x-1.0.dist-info`, [`${site}/b.py`]: `${site}/x-1.0.dist-info` });
+    assert.deepEqual(planFiles(root, deps).groups, [[`${site}/a.py`, `${site}/x-1.0.dist-info`], [`${site}/b.py`, `${site}/x-1.0.dist-info`]]);
     run(["check", root, "--deps", "--out-dir", out, "--no-html", "--quiet"], { out: () => {}, err: () => {}, env: {} });
     const rep = JSON.parse(readFileSync(join(out, "lazaret-report.json"), "utf8"));
     const got = rep.issues.filter((i) => i.rule === "SC-IMPORT-RISK").map((i) => [i.file.replaceAll("\\", "/"), i.sev]);

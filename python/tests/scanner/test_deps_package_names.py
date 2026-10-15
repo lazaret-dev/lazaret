@@ -9,7 +9,7 @@ its package.json's names (its own and those it depends on, of every kind) and it
 scripts' test is given too; an installed Python distribution's files, the Name and Requires-Dist of the *.dist-info
 whose RECORD lists their top-level module or package. Where neither is known, the tests read as before.
 
-The npm package's twin is js/src/deps.js (InstalledNames). Payloads are inert: hosts are .invalid, nothing is
+The names are the engine's to read (BR-7 step 3e: deps.rs, which both packages ask). Payloads are inert: hosts are .invalid, nothing is
 installed or run.
 """
 import json
@@ -18,7 +18,7 @@ import shutil
 import tempfile
 import unittest
 
-from lazaret.scanner import core
+from lazaret.scanner import _native, core
 
 CHS = ("const { execSync } = require('child_process');\n(function () {\n  try {\n"
        "    execSync('npm uninstall prettier-sdk && npm install prettier-sdk', { stdio: 'ignore', windowsHide: true });\n"
@@ -116,11 +116,14 @@ class PythonTests(unittest.TestCase):
 
 class NamesTests(unittest.TestCase):
     def test_the_registrys_readings(self):
-        self.assertEqual(core.npm_declared_names({"name": "x", "dependencies": {"a": "1"}, "bundleDependencies": ["b"],
-                                                  "devDependencies": {"c": "1"}, "peerDependencies": {"d": "1"}}),
-                         {"x", "a", "b", "c", "d"})
-        self.assertEqual(core.metadata_declared_names("Name: x\nRequires-Dist: a (>=1)\nRequires-Dist: b[s]; extra == 'y'"
-                                                      "\n\nRequires-Dist: not-a-header\n"), ({"x", "a", "b"}, 2))
+        # (the engine's: deps.rs declared_names, BR-7 step 3e)
+        npm = json.dumps({"name": "x", "dependencies": {"a": "1"}, "bundleDependencies": ["b"],
+                          "devDependencies": {"c": "1"}, "peerDependencies": {"d": "1"}})
+        self.assertEqual(_native.call("declared_names", {"kind": "npm"}, npm), ["a", "b", "c", "d", "x"])
+        self.assertIsNone(_native.call("declared_names", {"kind": "npm"}, "[1]"))
+        self.assertEqual(_native.call("declared_names", {"kind": "metadata"},
+                                      "Name: x\nRequires-Dist: a (>=1)\nRequires-Dist: b[s]; extra == 'y'"
+                                      "\n\nRequires-Dist: not-a-header\n"), [["a", "b", "x"], 2])
 
 
 if __name__ == "__main__":

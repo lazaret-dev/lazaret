@@ -1408,15 +1408,6 @@ def shannon_entropy(s):
 
 ENTROPY_VALUE_RE = re.compile(r"[=:]\s*[\"']([A-Za-z0-9+/=_\-]{20,})[\"']")
 OBF_IDENT_RE = re.compile(r"\b_0x[0-9a-f]{4,}\b")
-#: The distinct `_0x` names (OBF_IDENT_RE) that make a file "obfuscated" where a file is judged for what it runs:
-#: what an editor's or agent's settings run (SC-AUTORUN) and what a project's own install hooks run
-#: (SC-INSTALL-HOOK). javascript-obfuscator renames every identifier so.
-OBF_MIN_NAMES = 5
-
-
-def is_obfuscated(text):
-    """Does `text` hold OBF_MIN_NAMES or more distinct `_0x` names?"""
-    return len(set(OBF_IDENT_RE.findall(text))) >= OBF_MIN_NAMES
 
 
 # Verdict-integrity fix (audit C2/G2): the bare word `test` matched anywhere on
@@ -2682,22 +2673,13 @@ def _downloads_and_runs_file(text):
 # ---------------- Dependency drives your AI agent (SC-AGENT-HIJACK) ----------------
 
 
-_AGENT_HIJACK_WHY = (
-    "A dependency that runs your AI coding agent hands the attacker your agent's access to your machine "
-    "and accounts, and a flag like --dangerously-skip-permissions or --yolo runs it with every "
-    "confirmation turned off: the s1ngularity / Nx attack spawned the agent from a postinstall hook to "
-    "search the disk for secrets, wallets and SSH keys and write them out (the first weaponized-AI-agent "
-    "malware). No package needs to launch your agent.")
-
-
-def _agent_hijack_issue(path, line_no, lines, agent, flag, col=None, redactor=None):
-    return mk_issue(
-        {"id": "SC-AGENT-HIJACK", "name": "Dependency drives your AI agent", "type": "HOTSPOT", "sev": "CRITICAL",
-         "msg": f"Dependency launches the {agent!r} AI agent with {flag} — running your coding agent "
-                f"with its confirmations turned off.",
-         "why": _AGENT_HIJACK_WHY,
-         "fix": "Do not install or run this package; read what it tells the agent to do. Report it to the registry.",
-         "ref": "CWE-506 · Supply chain"}, path, line_no, lines, col, redactor)
+def _agent_hijack_issue(path, line_no, lines, agent, flag, context=False):
+    """SC-AGENT-HIJACK (CRITICAL) at line `line_no` of `lines`, for the agent
+    and flag agent_hijack or agent_hijack_in_command found: the engine's
+    (deps.rs); `context`, the file's entropy literals redacted too."""
+    answer = _native.call("agent_issue", {"agent": agent, "flag": flag, "line": line_no, "context": bool(context),
+                                          "redact": bool(REDACT_SECRETS), "neumaier": False}, _lines_text(lines))
+    return engine._issues(path, [answer])[0]
 
 
 _ASK = object()
@@ -2713,8 +2695,7 @@ def dependency_agent_issue(path, text, found=_ASK):
     if found is None:
         return None
     agent, flag, line = found
-    lines = text.split("\n")
-    return _agent_hijack_issue(path, line, lines, agent, flag, redactor=_Redactor(lines))
+    return _agent_hijack_issue(path, line, text.split("\n"), agent, flag, context=True)
 
 
 # ---------------- Scripts by their #! line ----------------
@@ -3661,65 +3642,60 @@ def _scan_manifest_entry(mf):
 #     tested; a hook the walk cannot follow to the end is SC-TRUNCATED.
 #   * a dependency whose package root holds a binding.gyp and whose
 #     package.json names no install or preinstall script gets the hook npm
-#     runs for it, `node-gyp rebuild` (MAJOR, _implicit_gyp_hooks), as the
-#     registry lists it.
+#     runs for it, `node-gyp rebuild` (MAJOR), as the registry lists it.
 #   * every JavaScript or Python file of a dependency that no hook runs gets
 #     import_time_risk: SC-IMPORT-RISK (MAJOR). On a real node_modules of
 #     14,286 JavaScript files (webpack, next, jest, eslint, typescript ...)
 #     it found nothing. (The detection round) But not a web app's static
 #     assets, which run in a browser, not in Node or Python: a JavaScript
-#     file in a _next, static or public directory of its package
-#     (_DEPS_WEB_DIRS) that none of its npm package's entry points reach —
-#     main, module, bin and exports, then the local files they require and
-#     import and the scripts they start (_deps_web_assets) — is left out of
-#     the import-time test and the cross-file follower, as the registry
-#     leaves it out of what runs.
+#     file in a _next, static or public directory of its package that none
+#     of its npm package's entry points reach — main, module, bin and
+#     exports, then the local files they require and import and the scripts
+#     they start — is left out of the import-time test and the cross-file
+#     follower, as the registry leaves it out of what runs.
 #     litellm's proxy UI ships a Next.js export whose chunk of guardrail test
 #     prompts (one shows `curl … | sh`) the test read as code, CRITICAL; a
 #     package whose main points into static/ is still read.
-# Twin of the npm engine's js/src/deps.js.
-_DEPS_WEB_DIRS = frozenset({"_next", "static", "public"})
-_DEPS_LOCAL_DEP_RE = re.compile(
-    r"""(?:\brequire\s*\(\s*|\bimport\s*\(\s*|\bfrom\s+|^\s*import\s+|\bexport\s+[^'"\n;]*?\bfrom\s+)"""
-    r"""(['"])(\.{1,2}/[^'"\n]+)\1""", re.M)
-_DEP_IMPORT_RISK_WHY = (
-    "An installed package's code runs with the application's privileges when it is loaded "
-    "or its command runs. Collecting credentials or the whole environment next to a network "
-    "call is the shape of an import-time stealer; SDKs read the few variables they need. A "
-    "weaker indicator than the same code in an install script: the file may have a reason.")
-_DRIVE_RE = re.compile(r"[A-Za-z]:")
+# The decisions are the engine's (BR-7 step 3e: rust/crates/lazaret-engine/src/deps.rs; both packages made them until
+# then): its deps_hooks call follows the hooks and deps_files says which files are assets, which the import-time and
+# agent checks read and with what names, and how site-packages groups into distributions. This module reads the tree
+# for them (_DependencyTree): each call asks for what it needs to know — whether a path is a file it may read, a
+# manifest's text, what a file a hook runs does (read here, scanned when it is a dependency's JavaScript the walk did
+# not read: those findings are this module's), what a JavaScript file loads, a directory's entries, a file's head —
+# and is asked again with the answers, until it answers. The npm package's js/src/deps.js reads the tree the same way.
+
+#: How many times a --deps call is asked at most: each answer that is not the call's names what it has yet to know
+#: of the tree (the files a hook runs, then the scripts those start, …)
+_DEPS_ROUNDS = 4096
+#: what a file a hook runs does, when the engine could not say (its checks are then taken to have spent their budget:
+#: the hook's manifest is SC-TRUNCATED)
+_DEPS_UNANSWERED = {"exhausted": ["risk", "agent", "obfuscated", "spawned"]}
 
 
-def _tree_join(base, target):
-    """A hook's `target` joined with the directory `base` ('/'-separated,
-    relative to the scan root), normalized; None when it is absolute (a file
-    of the machine, not of the tree) or leaves the scan root."""
-    target = target.replace("\\", "/")
-    if target.startswith("/") or _DRIVE_RE.match(target):
-        return None
-    joined = posixpath.normpath(posixpath.join(base or ".", target))
-    if joined in (".", "..") or joined.startswith("../"):
-        return None
-    return joined
+def _slash(path):
+    """A path '/'-separated, as the engine's --deps calls take it."""
+    return path.replace(os.sep, "/")
 
 
 class _DependencyTree:
-    """What a --deps scan knows of the tree, to follow a dependency's install
-    hook: the files it read (by '/'-separated path) and, for the others, the
-    disk under the scan root — regular files only, reached through no link
-    and no directory an exclusion prunes. `pruned`: the directories the walk
-    pruned (their '/'-separated paths), when nothing in them is to be read
-    either (a project's own hooks: project_hook_checks, where a dependency
-    tree is not read without --deps)."""
+    """What a --deps scan knows of the tree, to answer what the engine's --deps
+    calls ask (deps.rs): the files it read (by '/'-separated path) and, for
+    the others, the disk under the scan root — regular files only, reached
+    through no link and no directory an exclusion prunes. `pruned`: the
+    directories the walk pruned (their '/'-separated paths), when nothing in
+    them is to be read either (a project's own hooks: project_hook_checks,
+    where a dependency tree is not read without --deps); `project`: a file
+    a hook runs is then read, not scanned."""
 
-    def __init__(self, root, files, manifests, excludes, pruned=()):
+    def __init__(self, root, files, manifests, excludes, pruned=(), project=False):
         self.root = os.fspath(root)
-        self.sources = {f["path"].replace(os.sep, "/"): f for f in files}
-        self.manifests = {m["path"].replace(os.sep, "/"): m for m in manifests}
+        self.sources = {_slash(f["path"]): f for f in files}
+        self.manifests = {_slash(m["path"]): m for m in manifests}
         self.excludes = set(excludes or ()) | ALWAYS_PRUNE_DIRS
-        self.pruned = {p.replace(os.sep, "/") for p in pruned}
+        self.pruned = {_slash(p) for p in pruned}
+        self.project = project
         self.regular = {}                   # rel -> is a regular file (not read as source)
-        self.read = {}                      # rel -> its text, read here (None: not text)
+        self.read = {}                      # rel -> (findings, the file as scanned or None, text) of a file read here
 
     def is_file(self, rel):
         if rel in self.sources or rel in self.manifests:
@@ -3752,25 +3728,173 @@ class _DependencyTree:
         walk pruned?"""
         return bool(self.pruned) and any("/".join(parts[:k]) in self.pruned for k in range(1, len(parts)))
 
-    def resolve(self, path):
-        """The file Node runs for `path` (LOAD_AS_FILE, then LOAD_AS_DIRECTORY:
-        its package.json "main", its index file), or None. Twin of the
-        registry's _ArtifactScan._resolve."""
-        candidates = node_candidates(path)
-        found = next((c for c in candidates[:6] if self.is_file(c)), None)
-        if found:
-            return found
-        manifest = self.manifests.get(posixpath.join(path.rstrip("/"), "package.json"))
-        if manifest is not None:
-            data, _problems = load_manifest(manifest["path"], manifest["content"])
-            main = data.get("main") if isinstance(data, dict) else None
-            if isinstance(main, str) and main.strip():
-                target = _tree_join(path.rstrip("/"), main)
-                if target is not None:
-                    found = next((c for c in node_candidates(target) if self.is_file(c)), None)
-                    if found:
-                        return found
-        return next((c for c in candidates[6:] if self.is_file(c)), None)
+    def ask(self, call, args, should_stop=None):
+        """The engine's answer to the --deps call `call` (deps_hooks,
+        deps_files), what it asks of the tree answered here, round after
+        round -> (its answer, should_stop's reason when it stopped the
+        rounds: None otherwise). Raises _native.NativeError when the engine
+        could not answer."""
+        known = {"stat": {}, "manifest": {}, "script": [], "targets": {}, "list": {}, "head": [], "under": {}}
+        for _ in range(_DEPS_ROUNDS):
+            stopped = should_stop() if should_stop is not None else None
+            if stopped:
+                return None, stopped
+            got = _native.call(call, dict(args, known=known))
+            if "need" not in got:
+                return got, None
+            self._answer(got["need"], known)
+        raise _native.NativeError(f"{call}: still asking after {_DEPS_ROUNDS} rounds")
+
+    def _answer(self, need, known):
+        for rel in need["stat"]:
+            known["stat"][rel] = self.is_file(rel)
+        for rel in need["manifest"]:
+            m = self.manifests.get(rel)
+            known["manifest"][rel] = m["content"] if m is not None else None
+        scripts = [(rel, release) + self._script_text(rel) for rel, release in need["script"]]
+        base = {"project": self.project, "redact": bool(REDACT_SECRETS), "neumaier": False}
+        facts = iter(engine.call_answers([("deps_script", dict(base, rel=rel, **({"own": release} if release else {})),
+                                           text) for rel, release, _disk, text in scripts if text]))
+        for rel, release, disk, text in scripts:
+            f = next(facts) if text else None
+            known["script"].append([rel, release, disk, _DEPS_UNANSWERED if engine.unanswered(f) else f])
+        js = [rel for rel in need["targets"] if (self.sources.get(rel) or {}).get("lang") == "js"]
+        found = dict(zip(js, engine.call_answers([("deps_targets", {}, self.sources[rel]["content"]) for rel in js])))
+        for rel in need["targets"]:
+            f = found.get(rel)
+            known["targets"][rel] = {"targets": [], "exhausted": True} if engine.unanswered(f) else f
+        for folder in need["list"]:
+            known["list"][folder] = self._entries(folder)
+        for folder in need["under"]:
+            known["under"][folder] = self._under(folder)
+        for path, cap in need["head"]:
+            try:
+                data = _read_prefix(os.path.join(self.root, *path.split("/")), cap + 1)
+            except (OSError, ValueError):
+                known["head"].append([path, cap, None])
+            else:
+                known["head"].append([path, cap, [data[:cap].decode("utf-8", "replace"), len(data) > cap]])
+
+    def _entries(self, folder):
+        """[[name, a real directory]] of a directory of the tree, or None when
+        it can't be listed (no link is followed to tell a directory)."""
+        where = os.path.join(self.root, *folder.split("/"))
+        try:
+            names = sorted(os.listdir(where))
+        except OSError:
+            return None
+        out = []
+        for name in names:
+            try:
+                st = os.lstat(os.path.join(where, name))
+            except OSError:
+                out.append([name, False])
+                continue
+            out.append([name, _stat.S_ISDIR(st.st_mode) and not _is_reparse_point(st)])
+        return out
+
+    def _under(self, folder):
+        """Every path below the directory `folder` is_file answers True for:
+        the walk's files, and the disk's regular files below it, reached
+        through no link and into nothing an exclusion or the walk pruned."""
+        prefix = folder + "/"
+        out = {rel for rel in self.sources if rel.startswith(prefix)}
+        out.update(rel for rel in self.manifests if rel.startswith(prefix))
+        parts = folder.split("/")
+        if any(p in self.excludes or p in ("", ".", "..") for p in parts) or self._in_pruned(parts + [""]):
+            return sorted(out)
+        path = self.root
+        try:                                # (the folder itself: a real directory, reached through no link)
+            for part in parts:
+                path = os.path.join(path, part)
+                st = os.lstat(path)
+                if not _stat.S_ISDIR(st.st_mode) or _is_reparse_point(st):
+                    return sorted(out)
+        except (OSError, ValueError):
+            return sorted(out)
+        stack = [(path, folder)]
+        while stack:
+            where, rel = stack.pop()
+            try:
+                with os.scandir(where) as it:
+                    entries = list(it)
+            except OSError:
+                continue
+            for e in entries:
+                sub = f"{rel}/{e.name}"
+                try:
+                    st = e.stat(follow_symlinks=False)
+                except OSError:
+                    continue
+                if _stat.S_ISLNK(st.st_mode) or _is_reparse_point(st):
+                    continue
+                if _stat.S_ISDIR(st.st_mode):
+                    if e.name not in self.excludes and sub not in self.pruned:
+                        stack.append((e.path, sub))
+                elif _stat.S_ISREG(st.st_mode):
+                    out.add(sub)
+        return sorted(out)
+
+    def _script_text(self, rel):
+        """(read from the disk, text) of a file a hook runs: the walk's source
+        or manifest, else read here once (None: it can't be read as text; an
+        SC-TRUNCATED finding then says why)."""
+        if rel in self.sources:
+            return False, self.sources[rel]["content"]
+        if rel in self.manifests:
+            return False, self.manifests[rel]["content"]
+        if rel not in self.read:
+            self.read[rel] = self._read_script(rel)
+        return True, self.read[rel][2]
+
+    def _read_script(self, rel):
+        """A file a hook runs that the walk did not read as source, read ->
+        (the findings of reading it, the file as scanned or None, its text or
+        None): scanned as a dependency's JavaScript (node runs lib/install.dat
+        as JavaScript) unless it is a shell script, or a project's own hook
+        runs it (only read, to test what the hook runs)."""
+        disp = rel.replace("/", os.sep)
+        try:
+            data = _read_prefix(os.path.join(self.root, *rel.split("/")), SOURCE_SIZE_CAP + 1)
+        except OSError as exc:
+            reason = str(exc) if isinstance(exc, _NotRegularFile) else exc.strerror or type(exc).__name__
+            return [truncated_issue(disp, f"it runs at install time but could not be read ({reason})")], None, None
+        if len(data) > SOURCE_SIZE_CAP:
+            return [truncated_issue(disp, f"it runs at install time but is larger than the "
+                                          f"{SOURCE_SIZE_CAP:,}-byte file limit")], None, None
+        if looks_binary(data[:2048]):
+            return [truncated_issue(disp, "it runs at install time but is not text, so it could not be scanned")], \
+                None, None
+        if rel.endswith(".sh") or shebang_lang(data[:HEADER_SAMPLE_BYTES].decode("utf-8", "replace")) == "sh":
+            return [], None, normalize_newlines(data.decode("utf-8", "replace"))
+        text, decode_issues = decode_member(disp, data, lang="js")
+        if self.project:
+            return list(decode_issues), None, text
+        return (list(decode_issues) + engine.scan_file(disp, text, "js", dep=True),
+                {"path": disp, "content": text, "lang": "js", "dep": True}, text)
+
+    def take(self, got, hooks, out, extra=None):
+        """deps_hooks' answer applied: each of `hooks` (the SC-INSTALL-HOOK
+        findings followed) gets its new severity and message, `out` the
+        findings in order (a file read here: the findings of reading it, and
+        the file as scanned to `extra`) -> the files the hooks run."""
+        for issue, change in zip(hooks, got["hooks"]):
+            if change:
+                issue["sev"], issue["msg"] = change
+        for item in got["out"]:
+            if item[0] == "read":
+                findings, scanned, _text = self.read[item[1]]
+                out.extend(findings)
+                if scanned is not None and extra is not None:
+                    extra.append(scanned)
+            else:
+                out.extend(engine._issues(item[1].replace("/", os.sep), [item[2]]))
+        return set(got["run"])
+
+
+def _hook_rows(hooks):
+    """SC-INSTALL-HOOK findings as deps_hooks takes them: [manifest, line, severity, command]."""
+    return [[_slash(i["file"]), i["line"], i["sev"], i["cmd"]] for i in hooks]
 
 
 # ---------------- Go modules and crates: the readers' findings, and --deps's vendor trees (0.1.9, Part C) ----------------
@@ -4102,194 +4226,9 @@ def _vendored_code(tree, files, should_stop=None):
 
 
 # ---------------- Cross-file received code (the engine's cross_file, 0.1.8) ----------------
-# The follower is the native engine's (engine.cross_file_issues); what stays
-# here is how a --deps scan groups the dependency files into packages.
-_XF_DEP_MARKERS = ("site-packages", "dist-packages", "vendor")
-
-
-def _xf_js_package(path):
-    """The npm package root ('/'-separated) a dependency file lives in
-    (node_modules/<name> or node_modules/@scope/<name>, innermost), else None."""
-    parts = path.replace(os.sep, "/").split("/")
-    for i in range(len(parts) - 2, -1, -1):
-        if parts[i] == "node_modules":
-            if parts[i + 1].startswith("@") and i + 2 < len(parts):
-                return "/".join(parts[:i + 3])
-            return "/".join(parts[:i + 2])
-    return None
-
-
-# (the detection round) The top-level modules and packages one distribution
-# installs into site-packages are one package to the follower in a --deps
-# scan too, as a registry scan reads a release (one_package): the
-# distribution's .dist-info/RECORD lists them (_xf_site_groups). Top-level
-# names no RECORD lists together stay packages of their own (two
-# distributions). At most _XF_RECORD_BYTES of a RECORD are read.
-_XF_RECORD_BYTES = 4 << 20
-_XF_SITE_MARKERS = ("site-packages", "dist-packages")
-
-
-def _xf_site_groups(root, files):
-    """{'/'-separated path: group} for the dependency Python files under a
-    site-packages or dist-packages directory of the scan root `root` whose
-    top-level module or package a distribution's RECORD lists with another
-    (see above): the group is that directory and the first such
-    .dist-info's name, by name."""
-    sites = {}                                      # site dir -> {top-level name: [paths]}
-    for f in files:
-        if not f.get("dep") or f["lang"] != "py":
-            continue
-        path = f["path"].replace(os.sep, "/")
-        parts = path.split("/")
-        idx = max((len(parts) - 1 - parts[::-1].index(m) for m in _XF_DEP_MARKERS if m in parts), default=-1)
-        if idx < 0 or idx >= len(parts) - 1 or parts[idx] not in _XF_SITE_MARKERS:
-            continue
-        sites.setdefault("/".join(parts[:idx + 1]), {}).setdefault(parts[idx + 1], []).append(path)
-    out = {}
-    for site, tops in sites.items():
-        if len(tops) < 2:
-            continue
-        where = os.path.join(root, *site.split("/"))
-        try:
-            names = sorted(n for n in os.listdir(where) if n.endswith(".dist-info"))
-        except OSError:
-            continue
-        label = {}                                  # top-level name -> its group's .dist-info
-        for name in names:
-            try:                                    # (a real directory: no link is followed)
-                st = os.lstat(os.path.join(where, name))
-            except OSError:
-                continue
-            if not _stat.S_ISDIR(st.st_mode) or _is_reparse_point(st):
-                continue
-            listed = sorted({t for t in _xf_record_tops(os.path.join(where, name, "RECORD")) if t in tops})
-            if len(listed) < 2:
-                continue
-            joined = {name} | {label[t] for t in listed if t in label}
-            first = min(joined)
-            for t in [t for t, g in label.items() if g in joined] + listed:
-                label[t] = first
-        for top, group in label.items():
-            for path in tops[top]:
-                out[path] = site + "/" + group
-    return out
-
-
-def _xf_record_tops(path):
-    """The top-level names a RECORD lists (its rows' first path parts), none
-    when it cannot be read as one (not a regular file, too large, not text)."""
-    try:
-        data = _read_prefix(path, _XF_RECORD_BYTES + 1)
-    except (OSError, ValueError):
-        return set()
-    if len(data) > _XF_RECORD_BYTES:
-        return set()
-    out = set()
-    for row in data.decode("utf-8", "replace").split("\n"):
-        entry = row.split(",", 1)[0].strip().strip('"').replace("\\", "/")
-        top = entry.split("/", 1)[0]
-        if top and top not in (".", "..") and ":" not in top:
-            out.add(top)
-    return out
-
-
-def npm_declared_names(data):
-    """A package.json's (`data`, as read) own name and the packages it names, dependencies of every kind, bundled
-    ones too: what a package manager may install for it (D-12)."""
-    out = {data["name"]} if isinstance(data.get("name"), str) else set()
-    for key in ("dependencies", "devDependencies", "optionalDependencies", "peerDependencies"):
-        if isinstance(data.get(key), dict):
-            out.update(k for k in data[key] if isinstance(k, str))
-    for key in ("bundleDependencies", "bundledDependencies"):
-        if isinstance(data.get(key), list):
-            out.update(k for k in data[key] if isinstance(k, str))
-    return out
-
-
-def metadata_declared_names(text):
-    """A distribution's METADATA or PKG-INFO headers: (its Name and each Requires-Dist's name, an extra's too; how
-    many Requires-Dist it has), D-12."""
-    names, requires = set(), 0
-    for line in text.split("\n"):
-        if not line.strip():
-            break                                   # (the headers end at the first empty line)
-        if line.startswith(("Name:", "Requires-Dist:")):
-            requires += line.startswith("Requires-Dist:")
-            name = re.split(r"[\s;\[(<>=!~@]", line.split(":", 1)[1].strip(), maxsplit=1)[0]
-            if name:
-                names.add(name)
-    return names, requires
-
-
-_METADATA_HEAD_BYTES = 1 << 20
-
-
-class _InstalledNames:
-    """The names of the installed package a dependency file belongs to, for the tests a --deps scan runs on it,
-    as the registry gives a release's (repo's _declared_names and _own_name): (declared, own), or None where they
-    are not known. An npm package's: its package.json's (node_modules/<name> or node_modules/@scope/<name>, the
-    nearest), its name and the packages it names, and its name as its own (D-12b, D-9c: an install at import of
-    any other is a reason, and a rewrite of its own folder is its own code); a Python distribution's: the
-    *.dist-info whose RECORD lists the file's top-level module or package, its METADATA's Name and Requires-Dist
-    (D-12b; several that list one, all of theirs)."""
-
-    def __init__(self, tree):
-        self.tree = tree
-        self.npm = {}                       # package directory -> (declared, own) or None
-        self.sites = {}                     # site-packages directory -> {top-level name: (declared, None)}
-
-    def of(self, path):
-        parts = path.replace(os.sep, "/").split("/")
-        k = max((i for i, part in enumerate(parts[:-1]) if part == "node_modules"), default=-1)
-        if k >= 0:
-            end = k + 3 if parts[k + 1].startswith("@") else k + 2
-            if end >= len(parts) or not _is_package_root("/".join(parts[:end])):
-                return None
-            directory = "/".join(parts[:end])
-            if directory not in self.npm:
-                self.npm[directory] = self._npm_names(directory)
-            return self.npm[directory]
-        idx = max((i for i, part in enumerate(parts[:-1]) if part in _XF_SITE_MARKERS), default=-1)
-        if idx < 0:
-            return None
-        site = "/".join(parts[:idx + 1])
-        if site not in self.sites:
-            self.sites[site] = self._site_names(site)
-        return self.sites[site].get(parts[idx + 1])
-
-    def _npm_names(self, directory):
-        manifest = self.tree.manifests.get(directory + "/package.json")
-        if manifest is None:
-            return None
-        data, _problems = load_manifest(manifest["path"], manifest["content"])
-        if not isinstance(data, dict):
-            return None
-        name = data.get("name") if isinstance(data.get("name"), str) and data.get("name") else None
-        return sorted(npm_declared_names(data)), name
-
-    def _site_names(self, site):
-        where = os.path.join(self.tree.root, *site.split("/"))
-        try:
-            infos = sorted(n for n in os.listdir(where) if n.endswith(".dist-info"))
-        except OSError:
-            return {}
-        names = {}                          # top-level name -> the names of the distributions that list it
-        for info in infos:
-            directory = os.path.join(where, info)
-            try:                            # (a real directory: no link is followed)
-                st = os.lstat(directory)
-            except OSError:
-                continue
-            if not _stat.S_ISDIR(st.st_mode) or _is_reparse_point(st):
-                continue
-            try:                            # (its headers: they come first)
-                data = _read_prefix(os.path.join(directory, "METADATA"), _METADATA_HEAD_BYTES)
-            except (OSError, ValueError):
-                continue
-            declared, _requires = metadata_declared_names(data.decode("utf-8", "replace"))
-            for top in _xf_record_tops(os.path.join(directory, "RECORD")):
-                names.setdefault(top, set()).update(declared)
-        return {top: (sorted(declared), None) for top, declared in names.items()}
+# The follower is the native engine's (engine.cross_file_issues), and so is how a --deps scan groups the dependency
+# files into packages (deps_files: a distribution's .dist-info/RECORD lists the top-level modules and packages it
+# installs into site-packages, which are one package to the follower, as a registry scan reads a release).
 
 
 def dependency_checks(root, files, manifests, issues, excludes=(), should_stop=None):
@@ -4300,53 +4239,52 @@ def dependency_checks(root, files, manifests, issues, excludes=(), should_stop=N
     and scanned here (to add to the scanned files), and should_stop's reason
     when it stopped the checks (None otherwise)."""
     tree = _DependencyTree(root, files, manifests, excludes)
-    names = _InstalledNames(tree)
     dep_manifests = {m["path"] for m in manifests if m.get("dep")}
+    hooks = [i for i in issues if i["rule"] == "SC-INSTALL-HOOK" and i.get("cmd") and i["file"] in dep_manifests]
     out, extra, run = [], [], set()
-    followed_to_end = {}                    # manifest -> SC-TRUNCATED issue added for it
-    out.extend(_implicit_gyp_hooks(tree, manifests))
-    for issue in issues:
-        if issue["rule"] != "SC-INSTALL-HOOK" or not issue.get("cmd") or issue["file"] not in dep_manifests:
-            continue
-        if should_stop is not None:
-            stopped = should_stop()
-            if stopped:
-                return out, extra, stopped
+    args = {"project": False, "hooks": _hook_rows(hooks), "redact": bool(REDACT_SECRETS), "neumaier": False,
+            "manifests": [[_slash(m["path"]), bool(m.get("dep"))] for m in manifests]}
+    got, stopped = None, None
+    if dep_manifests:                       # (npm's implicit node-gyp hooks, then each hook)
         try:
-            _follow_dependency_hook(tree, issue, out, extra, run, followed_to_end, names)
-        except Exception as exc:            # one manifest must never kill the run
-            out.append(engine.error_issue(issue["file"], exc))
-    # the import-time test for each dependency file, a batch at a time (the
-    # engine reads a batch on threads), given the names of the package it is
-    # in (D-12b, D-9c: _InstalledNames); a file it could not answer about is
-    # SC-TRUNCATED (engine.error_issue)
-    assets = _deps_web_assets(tree, files)
-    todo = [f for f in files
-            if f.get("dep") and f["lang"] in ("js", "py") and f["path"].replace(os.sep, "/") not in run
-            and f["path"].replace(os.sep, "/") not in assets]
+            got, stopped = tree.ask("deps_hooks", args, should_stop)
+        except _native.NativeError as exc:  # (the run goes on: each hook's manifest says why)
+            out.extend(engine.error_issue(path, exc) for path in dict.fromkeys(i["file"] for i in hooks))
+    if stopped:
+        return out, extra, stopped
+    if got is not None:
+        run = tree.take(got, hooks, out, extra)
+    # the import-time and agent checks for each dependency file no hook runs, a batch at a time (the engine reads a
+    # batch on threads), given the names of the package it is in (D-12b, D-9c); a file it could not answer about is
+    # SC-TRUNCATED (engine.error_issue). (the detection round) a web app's static assets are left out
+    dep = [f for f in files if f.get("dep") and f["lang"] in ("js", "py")]
+    plan = {"assets": [], "todo": [], "groups": []}
+    try:
+        if dep:
+            plan, stopped = _deps_plan(tree, dep, run, should_stop)
+    except _native.NativeError:             # (every file is read then: none is taken for an asset)
+        plan, stopped = {"assets": [], "groups": [], "todo": [[_slash(f["path"]), None] for f in dep
+                                                              if _slash(f["path"]) not in run]}, None
+    if stopped:
+        return out, extra, stopped
+    assets = set(plan["assets"])
+    names = {rel: named for rel, named in plan["todo"]}
+    todo = [f for f in dep if _slash(f["path"]) in names]
     for start in range(0, len(todo), engine.BATCH):
         if should_stop is not None:
             stopped = should_stop()
             if stopped:
                 return out, extra, stopped
         chunk = todo[start:start + engine.BATCH]
-        named = [names.of(f["path"]) for f in chunk]
         try:
-            risks = engine.import_time_risks([(f["content"], f["lang"]) for f in chunk], names=named)
-        except Exception:                   # each file is then read on its own below
-            risks = [None] * len(chunk)
-        for f, risk, name in zip(chunk, risks, named):
-            try:
-                if engine.unanswered(risk):
-                    raise risk
-                found = dependency_import_issue(f["path"], f["content"], f["lang"], risk=risk, names=name)
-                agent = dependency_agent_issue(f["path"], f["content"])
-            except Exception as exc:
-                found, agent = engine.error_issue(f["path"], exc), None
-            if found is not None:
-                out.append(found)
-            if agent is not None:
-                out.append(agent)
+            answers = engine.dep_file_issues([(f["content"], f["lang"], names[_slash(f["path"])]) for f in chunk])
+        except _native.NativeError as exc:
+            answers = [exc] * len(chunk)
+        for f, answer in zip(chunk, answers):
+            if engine.unanswered(answer):
+                out.append(engine.error_issue(f["path"], answer))
+            else:
+                out.extend(engine._issues(f["path"], [a for a in answer if a is not None]))
     # (0.1.9, Part C) the vendored Go modules' and crates' code, by the
     # engine's readers (_vendored_code)
     found, stopped = _vendored_code(tree, files, should_stop)
@@ -4360,244 +4298,21 @@ def dependency_checks(root, files, manifests, issues, excludes=(), should_stop=N
     # should_stop), so no extra should_stop call here — it is a bounded pass.
     # Skips the files already flagged CRITICAL single-file (a MAJOR one can
     # still be found running what another file received).
-    flagged = {i["file"].replace(os.sep, "/") for i in out if i["rule"] == "SC-IMPORT-RISK" and i["sev"] == "CRITICAL"}
-    code = [f for f in files if f["path"].replace(os.sep, "/") not in assets] if assets else files
-    out.extend(engine.cross_file_issues(code, flagged, site_groups=_xf_site_groups(tree.root, code)))
+    flagged = {_slash(i["file"]) for i in out if i["rule"] == "SC-IMPORT-RISK" and i["sev"] == "CRITICAL"}
+    code = [f for f in files if _slash(f["path"]) not in assets] if assets else files
+    out.extend(engine.cross_file_issues(code, flagged, site_groups=dict(plan["groups"])))
     return out, extra, None
 
 
-def _deps_web_assets(tree, files):
-    """The '/'-separated paths of the dependency JavaScript files that are a
-    web app's static assets (see the section comment): in a _next, static
-    or public directory of their package, and reached from none of its npm
-    package's entry points."""
-    found = {}                              # npm package root (None: not npm's) -> [paths]
-    for f in files:
-        if not f.get("dep") or f["lang"] != "js":
-            continue
-        path = f["path"].replace(os.sep, "/")
-        root = _xf_js_package(path)
-        rel = path[len(root) + 1:] if root is not None else path
-        if any(part.lower() in _DEPS_WEB_DIRS for part in rel.split("/")[:-1]):
-            found.setdefault(root, []).append(path)
-    out = set()
-    for root, paths in found.items():
-        reached = _deps_npm_reach(tree, root) if root is not None else set()
-        out.update(p for p in paths if p not in reached)
-    return out
-
-
-def _deps_npm_entries(data):
-    """The paths an npm package.json's main, module, bin and exports name."""
-    out = []
-    for key in ("main", "module"):
-        if isinstance(data.get(key), str):
-            out.append(data[key])
-    b = data.get("bin")
-    out.extend([b] if isinstance(b, str) else [v for v in b.values() if isinstance(v, str)] if isinstance(b, dict) else [])
-    stack = [data.get("exports")]
-    while stack:
-        e = stack.pop()
-        if isinstance(e, str):
-            if "*" not in e:
-                out.append(e)
-        elif isinstance(e, dict):
-            stack.extend(reversed(list(e.values())))
-        elif isinstance(e, list):
-            stack.extend(reversed(e))
-    return out
-
-
-def _deps_npm_reach(tree, root):
-    """The files of the npm package at `root` its entry points reach: what
-    Node runs for the package itself and for each entry point, then the
-    local files they require or import and the scripts they start with
-    node (spawned_scripts), transitively. No cap: each file of the package
-    is read once (BR-5: the walk stopped at 5,000 files, and the exports
-    read at 5,000 entry points, so a file reached past them by padding
-    was left out as a web asset)."""
-    manifest = tree.manifests.get(root + "/package.json")
-    data = None
-    if manifest is not None:
-        data, _problems = load_manifest(manifest["path"], manifest["content"])
-    entries = _deps_npm_entries(data) if isinstance(data, dict) else []
-    queue = [tree.resolve(root)] + [tree.resolve(t) for t in (_tree_join(root, e) for e in entries) if t is not None]
-    seen = set()
-    while queue:
-        rel = queue.pop()
-        if rel is None or rel in seen or not rel.startswith(root + "/"):
-            continue
-        seen.add(rel)
-        f = tree.sources.get(rel)
-        if f is None or f.get("lang") != "js":
-            continue
-        base = posixpath.dirname(rel)
-        targets = [(base, t) for _q, t in _DEPS_LOCAL_DEP_RE.findall(f["content"])]
-        targets += [(base if where == "dir" else root, t) for where, t in spawned_scripts(f["content"], "js")]
-        for at, target in targets:
-            joined = _tree_join(at, target)
-            if joined is not None:
-                queue.append(tree.resolve(joined))
-    return seen
-
-
-def _is_package_root(directory):
-    """Is `directory` ('/'-separated) an installed npm package's own root:
-    node_modules/<name> or node_modules/@scope/<name>?"""
-    parts = directory.split("/")
-    return len(parts) >= 2 and (parts[-2] == "node_modules" or (
-        len(parts) >= 3 and parts[-3] == "node_modules" and parts[-2].startswith("@")))
-
-
-def _implicit_gyp_hooks(tree, manifests):
-    """SC-INSTALL-HOOK (MAJOR) for each dependency npm builds with node-gyp:
-    for a package whose root holds a binding.gyp, and whose package.json
-    names no install or preinstall script (and does not set "gypfile":
-    false), npm runs `node-gyp rebuild` on install — the hook the registry
-    lists as "install (implicit)" (_ArtifactScan._implicit_gyp_hook). A
-    package with no install script at all ran its binding.gyp's actions and
-    command expansions without a hook finding."""
-    out = []
-    for m in manifests:
-        rel = m["path"].replace(os.sep, "/")
-        if not m.get("dep") or posixpath.basename(rel) != "package.json":
-            continue
-        base = posixpath.dirname(rel)
-        gyp = posixpath.join(base, "binding.gyp")
-        if not _is_package_root(base) or gyp not in tree.manifests:
-            continue
-        data, _problems = load_manifest(m["path"], m["content"])
-        if not isinstance(data, dict) or data.get("gypfile") is False:
-            continue
-        scripts = data.get("scripts") if isinstance(data.get("scripts"), dict) else {}
-        if any(isinstance(scripts.get(h), str) and scripts[h].strip() for h in ("install", "preinstall")):
-            continue
-        out.append(_sc_install_hook_issue(tree.manifests[gyp]["path"], 1, [], "install (implicit)",
-                                          "node-gyp rebuild", False))
-    return out
-
-
-def _follow_dependency_hook(tree, issue, out, extra, run, followed_to_end, names=None):
-    manifest = issue["file"]
-    named = names.of(manifest) if names is not None else None
-    own = named[1] if named else None               # (D-9c: the package's own name, for its install scripts)
-    base = posixpath.dirname(manifest.replace(os.sep, "/"))
-    direct = agent_hijack_in_command(issue["cmd"])         # the hook runs the agent itself
-    if direct is not None:
-        m = tree.manifests.get(manifest.replace(os.sep, "/"))
-        if m is not None:
-            mlines = m["content"].split("\n")
-            out.append(_agent_hijack_issue(manifest, issue["line"], mlines, direct[0], direct[1],
-                                           redactor=_Redactor(mlines)))
-    persist = persistence_reasons(issue["cmd"])            # the command itself plants something
-    if persist and issue["sev"] not in ("BLOCKER", "CRITICAL"):
-        msg = f"Install hook command {'; and '.join(persist)}."
-        issue["sev"] = "CRITICAL"
-        issue["msg"] = _redact_text(msg) if REDACT_SECRETS else msg
-    targets, complete = follow_hook(issue["cmd"])
-    if not complete and manifest not in followed_to_end:
-        followed_to_end[manifest] = True
-        out.append(_hook_not_followed_issue(manifest))
-    for target in targets:
-        path = _tree_join(base, target)
-        rel = tree.resolve(path) if path is not None else None
-        if rel is None:
-            continue
-        text = _dependency_script_text(tree, rel, "sh" if rel.endswith(".sh") else "js", out, extra, run)
-        reasons = engine.install_script_risk(text, lang=engine.script_lang(rel), own=own) if text else []
-        if reasons and issue["sev"] not in ("BLOCKER", "CRITICAL"):
-            msg = f"Install hook runs {target}, which {'; and '.join(reasons)}."
-            issue["sev"] = "CRITICAL"
-            issue["msg"] = _redact_text(msg) if REDACT_SECRETS else msg
-        agent = dependency_agent_issue(rel.replace("/", os.sep), text) if text else None
-        if agent is not None:
-            out.append(agent)
-        # the scripts it starts with node or python (0.1.8, spawned_scripts)
-        for started, stext in _started_dependency_scripts(
-                tree, rel, text, base, lambda nxt, lang: _dependency_script_text(tree, nxt, lang, out, extra, run)):
-            more = engine.install_script_risk(stext, lang=engine.script_lang(started), own=own) if stext else []
-            if more and issue["sev"] not in ("BLOCKER", "CRITICAL"):
-                shown = started[len(base) + 1:] if base and started.startswith(base + "/") else started
-                msg = f"Install hook runs {target}, which starts {shown}, which {'; and '.join(more)}."
-                issue["sev"] = "CRITICAL"
-                issue["msg"] = _redact_text(msg) if REDACT_SECRETS else msg
-
-
-def _hook_not_followed_issue(manifest):
-    """SC-TRUNCATED for a manifest whose install hook is more than follow_hook
-    reads (the dependency follow's, and a project's own hooks')."""
-    return truncated_issue(manifest, (
-        f"its install hook is more than Lazaret follows ({HOOK_MAX_COMMANDS:,} commands, "
-        f"{HOOK_MAX_TARGETS} scripts, {HOOK_MAX_CHARS:,} characters, "
-        f"{HOOK_MAX_PATH:,}-character paths)"))
-
-
-def _started_dependency_scripts(tree, rel, text, cwd, script_text):
-    """[(rel, text)] for the scripts an install script `rel` (a dependency's,
-    a project's own) starts with node or python, and those they start
-    (spawned_scripts), at most _SPAWN_MAX_DEPTH starts deep and
-    _SPAWN_MAX_FILES files. `cwd`: the package's directory, where a plain
-    literal path is read from. script_text(rel, lang): a started script's
-    text (None: it can't be read as text)."""
-    found, seen, queue = [], {rel}, [(rel, text, 0)]
-    while queue and len(seen) <= _SPAWN_MAX_FILES:
-        cur, cur_text, depth = queue.pop(0)
-        if not cur_text or depth >= _SPAWN_MAX_DEPTH:
-            continue
-        for where, path in engine.spawned_scripts(cur_text, engine.script_lang(cur)):
-            joined = _tree_join(posixpath.dirname(cur) if where == "dir" else cwd, path)
-            nxt = tree.resolve(joined) if joined is not None else None
-            if nxt is None or nxt in seen or len(seen) > _SPAWN_MAX_FILES:
-                continue
-            seen.add(nxt)
-            lang = "py" if nxt.endswith(".py") else ("sh" if nxt.endswith(".sh") else "js")
-            ntext = script_text(nxt, lang)
-            found.append((nxt, ntext))
-            queue.append((nxt, ntext, depth + 1))
-    return found
-
-
-def _dependency_script_text(tree, rel, as_lang, out, extra, run):
-    """Text of a file an install hook runs, or None when it cannot be read
-    as text (an SC-TRUNCATED finding then says why)."""
-    run.add(rel)
-    if rel in tree.sources:
-        return tree.sources[rel]["content"]
-    if rel in tree.manifests:
-        return tree.manifests[rel]["content"]
-    if rel not in tree.read:
-        tree.read[rel] = _read_dependency_script(tree, rel, as_lang, out, extra)
-    return tree.read[rel]
-
-
-def _read_dependency_script(tree, rel, as_lang, out, extra, scan=True):
-    """A file an install hook runs that the walk did not read as source:
-    read it, and scan it as a dependency's JavaScript (node runs
-    lib/install.dat as JavaScript) unless it is a shell script. scan=False
-    (a project's own hook: project_hook_checks): only read, to test what the
-    hook runs."""
-    disp = rel.replace("/", os.sep)
-    try:
-        data = _read_prefix(os.path.join(tree.root, *rel.split("/")), SOURCE_SIZE_CAP + 1)
-    except OSError as exc:
-        reason = str(exc) if isinstance(exc, _NotRegularFile) else exc.strerror or type(exc).__name__
-        out.append(truncated_issue(disp, f"it runs at install time but could not be read ({reason})"))
-        return None
-    if len(data) > SOURCE_SIZE_CAP:
-        out.append(truncated_issue(disp, f"it runs at install time but is larger than the "
-                                         f"{SOURCE_SIZE_CAP:,}-byte file limit"))
-        return None
-    if looks_binary(data[:2048]):
-        out.append(truncated_issue(disp, "it runs at install time but is not text, so it could not be scanned"))
-        return None
-    if as_lang == "sh" or shebang_lang(data[:HEADER_SAMPLE_BYTES].decode("utf-8", "replace")) == "sh":
-        return normalize_newlines(data.decode("utf-8", "replace"))
-    text, decode_issues = decode_member(disp, data, lang="js")
-    out.extend(decode_issues)
-    if scan:
-        out.extend(engine.scan_file(disp, text, "js", dep=True))
-        extra.append({"path": disp, "content": text, "lang": "js", "dep": True})
-    return text
+def _deps_plan(tree, dep, run=(), should_stop=None):
+    """deps_files' answer for a --deps scan's dependency JavaScript and
+    Python files `dep` (in the walk's order) after the hooks ran the files
+    `run`: ({"assets": the web app's static assets, "todo": [[path, names]]
+    the files the import-time and agent checks read, with their package's
+    names, "groups": [[path, group]] the site-packages distributions} (paths
+    '/'-separated), should_stop's reason when it stopped the rounds)."""
+    args = {"files": [[_slash(f["path"]), f["lang"]] for f in dep], "run": sorted(run)}
+    return tree.ask("deps_files", args, should_stop)
 
 
 # ---------------- A project's own install hooks (SC-INSTALL-HOOK, 0.1.9) ----------------
@@ -4607,10 +4322,10 @@ def _read_dependency_script(tree, rel, as_lang, out, extra, scan=True):
 # hook of every package.json that is not a dependency's (NPM_LOCAL_INSTALL_SCRIPTS) is followed as a dependency's is:
 # to the files it runs (follow_hook, from the manifest's folder, by Node's resolution, into nothing the walk pruned:
 # no dependency tree without --deps), then to the scripts those start (spawned_scripts, the same limits). The hook
-# is CRITICAL when one of them fails the install-script test (install_script_risk; `own`: the manifest's name), else
-# when one is obfuscated (is_obfuscated, as SC-AUTORUN): the test's reasons come first, in the dependency follow's
-# messages. A file the walk did not read as source is read, not scanned; one that can't be read as text, like a hook
-# too long to follow, is SC-TRUNCATED. Twin of the npm engine's js/src/deps.js (projectHookChecks).
+# is CRITICAL when one of them fails the install-script test (install_script_risk), else when one is obfuscated
+# (the engine's is_obfuscated, as SC-AUTORUN): the test's reasons come first, in the dependency follow's messages. A file the walk
+# did not read as source is read, not scanned; one that can't be read as text, like a hook too long to follow, is
+# SC-TRUNCATED. The follow is the engine's (deps_hooks, as a dependency's), the reading of the tree this module's.
 
 def project_hook_checks(root, files, manifests, issues, excludes=(), skipped=(), should_stop=None):
     """The follow of a project's own install hooks (see the section
@@ -4620,117 +4335,35 @@ def project_hook_checks(root, files, manifests, issues, excludes=(), skipped=(),
     (SC-TRUNCATED, Q-ENCODING), with should_stop's reason when it stopped the
     checks (None: not stopped). `skipped`: the walk's pruned trees,
     [(rel, files, bytes)]."""
-    hooks, names = _own_install_hooks(manifests, issues)
+    own = {m["path"] for m in manifests
+           if not m.get("dep") and posixpath.basename(_slash(m["path"])) == "package.json"}
+    hooks = [i for i in issues if i["rule"] == "SC-INSTALL-HOOK" and i.get("cmd") and i["file"] in own]
     out = []
     if not hooks:
         return out, None
-    tree = _DependencyTree(root, files, manifests, excludes, [rel for rel, *_counts in skipped])
-    followed_to_end = {}
-    for issue in hooks:
-        stopped = should_stop() if should_stop is not None else None
-        if stopped:
-            return out, stopped
-        try:
-            _follow_project_hook(tree, issue, out, followed_to_end, names[issue["file"]])
-        except Exception as exc:            # one manifest must never kill the run
-            out.append(engine.error_issue(issue["file"], exc))
+    tree = _DependencyTree(root, files, manifests, excludes, [rel for rel, *_counts in skipped], project=True)
+    args = {"project": True, "hooks": _hook_rows(hooks), "redact": bool(REDACT_SECRETS), "neumaier": False}
+    try:
+        got, stopped = tree.ask("deps_hooks", args, should_stop)
+    except _native.NativeError as exc:      # one manifest must never kill the run
+        out.extend(engine.error_issue(path, exc) for path in dict.fromkeys(i["file"] for i in hooks))
+        return out, None
+    if stopped:
+        return out, stopped
+    tree.take(got, hooks, out)
     return out, None
 
 
-def _own_install_hooks(manifests, issues):
-    """(the SC-INSTALL-HOOK findings with a command of the package.json files
-    that are not a dependency's, {each such manifest: its "name"})."""
-    names = {m["path"]: _manifest_name(m) for m in manifests if not m.get("dep")
-             and posixpath.basename(m["path"].replace(os.sep, "/")) == "package.json"}
-    return [i for i in issues if i["rule"] == "SC-INSTALL-HOOK" and i.get("cmd") and i["file"] in names], names
-
-
-def _manifest_name(manifest):
-    """A package.json's "name" (None: it has none)."""
-    data, _problems = load_manifest(manifest["path"], manifest["content"])
-    name = data.get("name") if isinstance(data, dict) else None
-    return name if isinstance(name, str) and name else None
-
-
-def _follow_project_hook(tree, issue, out, followed_to_end, own):
-    """A project's own install hook (`issue`, its SC-INSTALL-HOOK finding)
-    followed to the files it runs (_test_project_script)."""
-    manifest = issue["file"]
-    base = posixpath.dirname(manifest.replace(os.sep, "/"))
-    targets, complete = follow_hook(issue["cmd"])
-    if not complete and manifest not in followed_to_end:
-        followed_to_end[manifest] = True
-        out.append(_hook_not_followed_issue(manifest))
-    for target in targets:
-        path = _tree_join(base, target)
-        rel = tree.resolve(path) if path is not None else None
-        if rel is not None:
-            _test_project_script(tree, issue, out, base, target, rel, own)
-
-
-def _test_project_script(tree, issue, out, base, target, rel, own):
-    """The tests of `rel`, the file `target` a project's install hook runs,
-    then of the scripts it starts with node, python (spawned_scripts)."""
-    def script_text(nxt, as_lang):
-        return _project_script_text(tree, nxt, as_lang, out)
-
-    text = script_text(rel, "sh" if rel.endswith(".sh") else "js")
-    reasons = _project_script_risk(text, rel, own) if text else []
-    if reasons:
-        _escalate_hook(issue, f"Install hook runs {target}, which {'; and '.join(reasons)}.")
-    for started, stext in _started_dependency_scripts(tree, rel, text, base, script_text):
-        more = _project_script_risk(stext, started, own) if stext else []
-        if more:
-            shown = started[len(base) + 1:] if base and started.startswith(base + "/") else started
-            _escalate_hook(issue, f"Install hook runs {target}, which starts {shown}, which {'; and '.join(more)}.")
-
-
-def _project_script_risk(text, rel, own):
-    """Why a file a project's install hook runs looks hostile: the
-    install-script test's reasons, then "is obfuscated"."""
-    reasons = list(engine.install_script_risk(text, lang=engine.script_lang(rel), own=own))
-    if is_obfuscated(text):
-        reasons.append("is obfuscated")
-    return reasons
-
-
-def _escalate_hook(issue, msg):
-    """The SC-INSTALL-HOOK finding made CRITICAL with `msg`, unless it already
-    is: the first reason found stands, as in the dependency follow."""
-    if issue["sev"] not in ("BLOCKER", "CRITICAL"):
-        issue["sev"] = "CRITICAL"
-        issue["msg"] = _redact_text(msg) if REDACT_SECRETS else msg
-
-
-def _project_script_text(tree, rel, as_lang, out):
-    """Text of a file a project's install hook runs: the walk's, else read
-    here, not scanned (None: it can't be read as text; an SC-TRUNCATED
-    finding then says why)."""
-    if rel in tree.sources:
-        return tree.sources[rel]["content"]
-    if rel in tree.manifests:
-        return tree.manifests[rel]["content"]
-    if rel not in tree.read:
-        tree.read[rel] = _read_dependency_script(tree, rel, as_lang, out, None, scan=False)
-    return tree.read[rel]
-
-
-def dependency_import_issue(path, text, lang=None, risk=None, names=None):
+def dependency_import_issue(path, text, lang=None, names=None):
     """SC-IMPORT-RISK (MAJOR, or CRITICAL: import_time_severity) for a
     dependency's JavaScript or Python file (`lang` 'js' or 'py') that fails
-    the import-time test (import_time_risk; `risk`: its answer, when the
-    caller has it already; `names`: its package's (declared, own), when
-    known), else None."""
-    reasons, line = risk if risk is not None else import_time_risk(text, lang, *(names or (None, None)))
-    if not reasons:
-        return None
-    lines = text.split("\n")
-    return mk_issue(
-        {"id": "SC-IMPORT-RISK", "name": "Risky import-time code", "type": "HOTSPOT",
-         "sev": import_time_severity(reasons),
-         "msg": f"Dependency code {'; and '.join(reasons)}.", "why": _DEP_IMPORT_RISK_WHY,
-         "fix": "Read the file: what does it collect, and where does it send it?",
-         "ref": "CWE-506 · Supply chain"}, path, line, lines, redactor=_Redactor(lines))
+    the import-time test (`names`: its package's (declared, own), when
+    known), else None: the engine's (deps.rs, dep_file_issues). Raises
+    _native.NativeError when the engine could not answer."""
+    answer = engine.dep_file_issues([(text, lang, names)])[0]
+    if engine.unanswered(answer):
+        raise answer
+    return engine._issues(path, [answer[0]])[0] if answer[0] is not None else None
 
 
 def redact_file_issues(issues, files):

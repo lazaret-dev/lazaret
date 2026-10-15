@@ -85,6 +85,9 @@ pub const CALLS: &[&str] = &[
     "issue_make", "redact_text", "redact_issues", "redact_file", "clip_line", "pem_lines",
     // BR-7 step 3 d: binaries, bytecode and .pth files (a file's bytes as latin-1 text)
     "binary_check", "binary_classify", "binary_disguised", "pyc_issues", "pth_issues",
+    // BR-7 step 3 e: --deps' decisions (deps.rs; the packages answer what the calls ask of the tree)
+    "deps_hooks", "deps_script", "deps_targets", "deps_files", "dep_file_issues", "declared_names",
+    "agent_issue",
     // the JavaScript parser (jsparse.py's trees)
     "js_parse", "js_parse_file",
     // the Python parser (Python 3.13's ast trees)
@@ -415,6 +418,96 @@ pub fn texts_put_answer(r: Result<Vec<u64>, crate::texts::PutError>) -> Result<V
     }
 }
 
+fn flag(args: &Value, name: &str, default: bool) -> bool {
+    match args.get(name) {
+        Some(Value::Bool(b)) => *b,
+        _ => default,
+    }
+}
+
+fn deps_opts(args: &Value) -> crate::deps::Opts {
+    crate::deps::Opts { redact: flag(args, "redact", true), neumaier: flag(args, "neumaier", false) }
+}
+
+/// ['/'-separated path, a dependency's] pairs, or the strings of a list of strings.
+fn path_flags(args: &Value, name: &str) -> Vec<(PyStr, bool)> {
+    args.get(name)
+        .and_then(|v| v.as_arr())
+        .unwrap_or(&[])
+        .iter()
+        .filter_map(|x| {
+            let a = x.as_arr()?;
+            Some((a.first()?.as_str()?.to_vec(), matches!(a.get(1), Some(Value::Bool(true)))))
+        })
+        .collect()
+}
+
+/// `deps_hooks`: {project, hooks: [[manifest, line, sev, cmd]…], manifests: [[path, dep]…] (a dependency's hooks: for
+/// npm's implicit node-gyp hooks), known, redact, neumaier} -> {"need": {…}} (deps::Need), or {"hooks": [[sev, msg]
+/// or null…], "out": [["issue", file, issue] or ["read", rel]…], "run": [rel…]}.
+fn deps_hooks(p: &Pack, args: &Value) -> Result<Value, CallError> {
+    let mut hooks = Vec::new();
+    for h in args.get("hooks").and_then(|v| v.as_arr()).unwrap_or(&[]) {
+        let a = h.as_arr().ok_or_else(|| CallError::BadArgs("deps_hooks: a hook".into()))?;
+        let s = |k: usize| a.get(k).and_then(|v| v.as_str()).map(|x| x.to_vec());
+        let (Some(file), Some(sev), Some(cmd)) = (s(0), s(2), s(3)) else {
+            return Err(CallError::BadArgs("deps_hooks: a hook's manifest, severity and command".into()));
+        };
+        let line = a.get(1).and_then(|v| v.as_i64()).unwrap_or(1).max(0) as usize;
+        hooks.push(crate::deps::Hook { file, line, sev, cmd, msg: None });
+    }
+    let known = crate::deps::Known::from_value(args.get("known"));
+    let manifests = path_flags(args, "manifests");
+    Ok(match crate::deps::follow_hooks(p, &known, flag(args, "project", false), &hooks, &manifests, &deps_opts(args)) {
+        Err(need) => Value::obj(vec![("need", need.to_value())]),
+        Ok(done) => Value::obj(vec![
+            (
+                "hooks",
+                Value::Arr(
+                    done.hooks
+                        .into_iter()
+                        .map(|h| h.map(|(sev, msg)| Value::Arr(vec![Value::Str(sev), Value::Str(msg)])).unwrap_or(Value::Null))
+                        .collect(),
+                ),
+            ),
+            ("out", Value::Arr(done.out.iter().map(|o| o.to_value()).collect())),
+            ("run", strs(&done.run)),
+        ]),
+    })
+}
+
+/// `deps_files`: {files: [[path, lang]…] (a --deps scan's dependency JavaScript and Python files, in order), run:
+/// [rel…], known} -> {"need": {…}}, or {"assets": [path…], "todo": [[path, [declared, own] or null]…], "groups":
+/// [[path, group]…]}.
+fn deps_files(p: &Pack, args: &Value) -> Result<Value, CallError> {
+    let files: Vec<(PyStr, PyStr)> = args
+        .get("files")
+        .and_then(|v| v.as_arr())
+        .unwrap_or(&[])
+        .iter()
+        .filter_map(|x| {
+            let a = x.as_arr()?;
+            Some((a.first()?.as_str()?.to_vec(), a.get(1)?.as_str()?.to_vec()))
+        })
+        .collect();
+    let run: std::collections::HashSet<PyStr> = arg_strs(args, "run").into_iter().collect();
+    let known = crate::deps::Known::from_value(args.get("known"));
+    Ok(match crate::deps::plan_files(p, &known, &files, &run) {
+        Err(need) => Value::obj(vec![("need", need.to_value())]),
+        Ok(plan) => Value::obj(vec![
+            ("assets", strs(&plan.assets)),
+            (
+                "todo",
+                Value::Arr(plan.todo.iter().map(|(f, n)| Value::Arr(vec![Value::Str(f.clone()), crate::deps::names_value(n)])).collect()),
+            ),
+            (
+                "groups",
+                Value::Arr(plan.groups.iter().map(|(f, g)| Value::Arr(vec![Value::Str(f.clone()), Value::Str(g.clone())])).collect()),
+            ),
+        ]),
+    })
+}
+
 fn strs(v: &[PyStr]) -> Value {
     Value::Arr(v.iter().map(|s| Value::Str(s.clone())).collect())
 }
@@ -693,6 +786,30 @@ fn dispatch(name: &str, args: &Value, text: &[u32]) -> Result<Value, CallError> 
             };
             Value::Arr(crate::binary::pth_issues(p, text, flag("redact", true), flag("neumaier", false)))
         }
+        "deps_hooks" => deps_hooks(p, args)?,
+        "deps_script" => {
+            // {rel, project, own, redact, neumaier} + the text of a file a hook runs -> what it does (deps::script_facts);
+            // `own`: the name of the package whose hook runs it, when known (D-9c)
+            let o = deps_opts(args);
+            let release = opt_str(args, "own");
+            crate::deps::script_facts(p, &arg_str(args, "rel")?, text, flag(args, "project", false), release.as_deref(), &o)
+        }
+        "deps_targets" => crate::deps::file_targets(p, text),
+        "deps_files" => deps_files(p, args)?,
+        "dep_file_issues" => {
+            // {lang, declared, own, redact, neumaier} + a dependency's file -> [SC-IMPORT-RISK or null, SC-AGENT-HIJACK
+            // or null]; `declared` and `own`: its package's names and its own name (D-12b, D-9c), when known
+            let declared = args.get("declared").filter(|d| !matches!(d, Value::Null)).map(|_| arg_strs(args, "declared"));
+            let release = opt_str(args, "own");
+            crate::deps::dep_file_issues(p, text, lang, declared.as_deref(), release.as_deref(), &deps_opts(args))
+        }
+        "agent_issue" => {
+            // {agent, flag, line, context, redact, neumaier} + the file's text -> its SC-AGENT-HIJACK issue
+            let line = opt_int(args, "line").unwrap_or(1).max(0) as usize;
+            let (agent, flag_) = (arg_str(args, "agent")?, arg_str(args, "flag")?);
+            crate::deps::agent_issue_of(p, text, &agent, &flag_, line, flag(args, "context", false), &deps_opts(args))
+        }
+        "declared_names" => crate::deps::declared_names(p, &crate::pystr::to_string(&arg_str(args, "kind")?), text),
         "issue_make" => {
             // {items: [[rule {id, name, type, sev, msg, why, fix, ref}, line, col or null]…], redact, context, neumaier}
             // + the file's lines joined by "\n" -> {"issues": [mk_issue's…]}; `context`: the file's entropy literals

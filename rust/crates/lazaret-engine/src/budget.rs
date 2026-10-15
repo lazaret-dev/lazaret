@@ -67,3 +67,26 @@ pub fn call_with<T>(steps: u64, f: impl FnOnce() -> T) -> Result<T, Exhausted> {
         Ok(out)
     }
 }
+
+/// Run `f` with `steps` of its own, as if it were a call of its own (a step of a larger call that the packages used
+/// to make as a call: --deps' checks of a script, deps.rs), then give the call in progress back its own budget as it
+/// was: Err when `f` ran out (the call in progress has not).
+pub fn isolated<T>(steps: u64, f: impl FnOnce() -> T) -> Result<T, Exhausted> {
+    let (left, spent) = (LEFT.with(|l| l.get()), SPENT.with(|s| s.get()));
+    reset(steps);
+    let out = f();
+    let gone = exhausted();
+    LEFT.with(|l| l.set(left));
+    SPENT.with(|s| s.set(spent));
+    if gone {
+        Err(Exhausted)
+    } else {
+        Ok(out)
+    }
+}
+
+/// The call in progress is to answer as one that ran out (a step of it that ran out of its own budget: isolated).
+pub fn exhaust() {
+    LEFT.with(|l| l.set(0));
+    SPENT.with(|s| s.set(true));
+}

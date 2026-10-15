@@ -109,7 +109,7 @@ Decisions (fixed):
   dependency files one after another in the text (`[path, lang, length]`
   each in the arguments; `groups`, the package a Python file of a `--deps`
   scan is read in when a distribution's RECORD joins top-level modules:
-  `core._xf_site_groups`), each package on its own work budget, on up to 8
+  the engine's `deps_files`), each package on its own work budget, on up to 8
   threads, the findings in the follower's order. A package the engine
   reports as failed (its budget spent, an internal error) gives no
   cross-file finding, and neither does a call the engine refuses, as in
@@ -275,6 +275,14 @@ rust/
                              SC-OPAQUE-BLOB (`binary_classify`), a program under a source file's
                              name (`binary_disguised`), SC-PYC-* (`pyc_issues`), SC-PTH-EXEC
                              (`pth_issues`)
+    src/deps.rs              --deps' decisions (BR-7 step 3 e, 0.1.9; core's dependency_checks and
+                             project_hook_checks, and the npm package's deps.js, until then): the
+                             follow of a dependency's and a project's own install hooks
+                             (`deps_hooks`), static assets, installed packages' names and
+                             site-packages groups (`deps_files`), what a file a hook runs does
+                             (`deps_script`), what a JavaScript file loads (`deps_targets`), a
+                             dependency file's SC-IMPORT-RISK and SC-AGENT-HIJACK
+                             (`dep_file_issues`); the packages answer what a call asks of the tree
     src/redact.rs            the one redactor for the findings the packages build (BR-7 step 3 c,
                              0.1.9; core's mk_issue, redact_result, redact_file_issues and
                              _redact_text, and the npm package's issue.js and redact.js, until
@@ -605,6 +613,7 @@ builds is held to linear time.
 | `test_snapshot_manifest` | manifests (`scan_manifest`, `scan_gyp`, `manifest_data`, `manifest_check`, BR-7 step 3 b): a package.json's and a gyp file's issues with the snippets redacted and not, the data --deps reads, and the readers alone (json.loads, ast.literal_eval, where a key is, the dependency-URL test, an expansion's command as it runs); recorded from the Python the engine replaced, which answered every case alike | package.json files of every shape at every kind of path, as a project's and a registry's; gyp files written as JSON and as Python literals, every kind of value and expansion, more than are listed, past the walk's bound; pieces of JSON and of literals |
 | `test_snapshot_redact` | the one redactor (`issue_make`, `redact_issues`, `redact_file`, `redact_text`, `pem_lines`, `clip_line`, BR-7 step 3 c): a file's findings made and redacted, with its entropy literals and without, results swept, a file's redaction for the findings built outside its scan, free text and lines; recorded from the Python the engine replaced, which answered every case alike | files put together from lines that hold provider tokens, password assignments, SQL credentials, credentials in URLs, PEM keys whole, cut short and on one line, entropy literals and their reuse, long lines, non-ASCII text and lone surrogates; findings of every kind at every line and past the end |
 | `test_snapshot_binary` | binaries, bytecode and .pth files (`binary_check`, `binary_classify`, `binary_disguised`, `pyc_issues`, `pth_issues`, BR-7 step 3 d): byte samples tested for text, a transport stream and a program, classified in each context and checked for a program under a source file's name, bytecode headers, .pth files redacted and not; recorded from the Python the engine replaced, which answered every case alike | byte samples put together from the signatures the classifier knows, valid and invalid UTF-8, controls and random bytes at every size around the limits, under paths of every extension; .pth files of import lines, paths, comments and the line breaks str.splitlines() adds |
+| `test_snapshot_deps` | --deps' decisions (`deps_hooks`, `deps_files`, `deps_script`, `deps_targets`, `dep_file_issues`, BR-7 step 3 e): every round of every call --deps scans make, with what the tree had answered by then; recorded from the engine after the step's gate held those scans to the Python it replaced, issue for issue | --deps scans of trees put together from the dependency tests' fixtures, some files left out, packages moved under a scope or into another's node_modules |
 | `test_snapshot_autorun` | the settings reader (`autorun_*`, BR-7 step 2): each value's kind, line and text or the error, each kind of settings file's commands, the folder variables, and the issues of settings trees with the files they run and without; recorded from the Python the engine replaced, which answered every case alike | the corpus `test_js_parity_persistence` held the npm twin to the Python on; settings files of every kind over a small tree of loaders, payloads, scripts and an obfuscated file |
 
 Twins the engine is still compared with, call for call:
@@ -621,6 +630,7 @@ Twins the engine is still compared with, call for call:
 | `test_wasm_parity_manifest` | the manifest readers in the WebAssembly build against the library, byte for byte (BR-7 step 3 b) | `test_snapshot_manifest`'s sets |
 | `test_wasm_parity_redact` | the one redactor in the WebAssembly build against the library, byte for byte (BR-7 step 3 c) | `test_snapshot_redact`'s sets |
 | `test_wasm_parity_binary` | binaries, bytecode and .pth files in the WebAssembly build against the library, byte for byte (BR-7 step 3 d) | `test_snapshot_binary`'s sets |
+| `test_wasm_parity_deps` | --deps' decisions in the WebAssembly build against the library, byte for byte (BR-7 step 3 e) | `test_snapshot_deps`' sets |
 | `test_wasm_parity_project` | project mode in the WebAssembly build against the library, byte for byte (0.1.9, Q-1): `scan_file` with and without a taint configuration, the function lists, the intra-file taint alone | `test_snapshot_project`'s sets; the project corpus |
 | `test_wasm_parity_pyflow` | the Python taint pass in the WebAssembly build against the library, byte for byte | `test_snapshot_py_flow`'s sets; every construct that nests at its deepest, `elif` chains at the frames the pass holds |
 | `test_pyparse_native`, `_b`, `_c` | the Python parser (`py_parse`) against Python 3.13's `ast.parse` (a `python3.13` subprocess; skipped without one), node for node as JSON text, with the errors' lines; spans; its Unicode 15.1 data (§13) | pyparse_cases.py's inputs; every identifier character and character name |
@@ -950,7 +960,8 @@ only.
    `pynames.js`: in the engine since 0.1.9, `src/manifest/`), the redaction of
    the findings the packages build (`issue.js`'s and `redact.js`'s: in the
    engine since 0.1.9, `src/redact.rs`), the binaries, bytecode and .pth files
-   (`binary.js`, `pth.js`: in the engine since 0.1.9, `src/binary.rs`), the
+   (`binary.js`, `pth.js`: in the engine since 0.1.9, `src/binary.rs`), --deps'
+   decisions (`deps.js`'s: in the engine since 0.1.9, `src/deps.rs`), the
    reports;
    the dashboard keeps its own script until it can load the same module.
 4. Archive reading for registry scans in the engine, where it reads as the

@@ -265,6 +265,23 @@ def import_time_risk(text, lang=None, declared=None, own=None):
     return answer[0], answer[1]
 
 
+def dep_file_issues(items, texts=None):
+    """[(text, lang, names)] -> for each dependency file no install hook runs, the import-time and agent checks'
+    findings, [SC-IMPORT-RISK, SC-AGENT-HIJACK] as the engine's issues (each None when it found nothing), in order,
+    a batch at a time (deps.rs; an item the engine could not answer: the _native.NativeError it stands for).
+    `names`: the (declared, own) of the package the file is in, or None (D-12b: _names_args). `texts`: the scan's
+    Texts."""
+    from lazaret.scanner import core
+    base = {"redact": bool(core.REDACT_SECRETS), "neumaier": False}
+    calls = []
+    for text, lang, names in items:
+        args = dict(base, **_names_args(*names)) if names is not None else dict(base)
+        if lang:
+            args["lang"] = lang
+        calls.append((args, text))
+    return _batch("dep_file_issues", calls, texts)
+
+
 def install_script_risks(items):
     """[(text, lang)] -> the install-script test's reasons for each, in order
     (an item the engine could not answer: the _native.NativeError it stands

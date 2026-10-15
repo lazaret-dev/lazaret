@@ -251,7 +251,9 @@ shared by the CLI and the MCP server. In order it:
    `manifest_data`);
 4. **runs `--deps` checks** (`dependency_checks`) — what dependencies run at
    install and import time (install hooks followed to the files they run,
-   import-time received-code, and the cross-file follower);
+   import-time received-code, and the cross-file follower); the decisions are
+   the engine's (`deps.rs`, BR-7 step 3 e), which asks for what it needs to
+   know of the tree and is answered (`_DependencyTree`);
 5. **runs the interprocedural flow engine** (`lazaret_flow.analyze`), guarded so
    a failure degrades to the intra-file engine with a visible warning;
 6. **adds coverage notes** (skipped trees, symlinks, unreadable/truncated);
@@ -493,7 +495,7 @@ each package on its own work budget) catch a value received in one file of a
 package and run in another — source and sink split across modules — in Python
 and npm packages: a dependency's under `--deps` (both packages; the top-level
 modules and packages a distribution's `.dist-info/RECORD` lists together are
-one package, `_xf_site_groups` / deps.js `siteGroups`), and a release's
+one package, the engine's `deps_files`), and a release's
 in the registry and the guard (`_ArtifactScan._cross_file_code`: one
 distribution is one package; the files SC-USE-RISK reads; not once the package
 is SUSPICIOUS).
@@ -580,8 +582,8 @@ Every other JavaScript and Python file of a dependency gets the import-time
 test, but (the detection round) not a web app's static assets: a JavaScript
 file in a `_next`, `static` or `public` directory of its package that none of
 its npm package's entry points reach — main, module, bin and exports, then
-what they require, import or start with node (`_deps_web_assets`; deps.js
-`webAssets`) — is left out of it and of the follower (litellm's proxy UI).
+what they require, import or start with node (the engine's `deps_files`) — is
+left out of it and of the follower (litellm's proxy UI).
 
 Persistence targets (0.1.7): the install-script test also fails on what makes
 an AI agent, an editor or GitHub Actions run something later — writing an
@@ -2035,7 +2037,7 @@ leaves the texts to go with their calls, which gives the same answers:
 | `rust/crates/lazaret-engine/src/lex/`, `goparse/`, `rsparse/` | The lexers (JavaScript, Python, Go, Rust), the Go parser and the Rust item reader, with their hooks (not used by a scan yet) |
 | `js/src/lib/native.js`, `js/scripts/build-wasm.js` | The npm package's native engine (WebAssembly: the loader, one call, the pack's values) and its build (`npm run build`) |
 | `rust/crates/lazaret-engine/src/manifest/` | Manifests (the `scan_manifest`, `scan_gyp`, `manifest_data` and `manifest_check` calls, both packages'; since BR-7's step 3 (b)): SC-INSTALL-HOOK, SC-DEP-URL, SC-MANIFEST-DEPTH and -UNPARSEABLE; `pyjson.rs` (json.loads), `pylit.rs` (ast.literal_eval), `pyval.rs` (Python's values, their str() and repr()), `gyp.rs` |
-| `js/src/lib/supplychain.js`, `js/src/deps.js`, `js/src/scanner/flow.js`, `js/src/index.js`, `js/src/pool.js` | The manifests' calls and the install-hook finding `--deps` makes, `--deps`, flow twin, npm CLI, its worker threads |
+| `js/src/lib/supplychain.js`, `js/src/deps.js`, `js/src/scanner/flow.js`, `js/src/index.js`, `js/src/pool.js` | The manifests' calls, `--deps` (the tree read for the engine's decisions, the vendored readers), flow twin, npm CLI, its worker threads |
 | `python/tests/architecture/test_js_parity*.py` | The package-parity guards (need `npm run build`) |
 | `rust/crates/lazaret-engine`, `lazaret-ffi` | The native engine (supply-chain tests, `scan_file`, the cross-file follower, linre, the rule pack: **the source of the rules**), its C ABI and its WebAssembly exports (`docs/RUST_ENGINE.md`) |
 | `python/src/lazaret/scanner/engine.py`, `_native.py` | The engine's calls: batching and threads, the work budget, an unanswered file SC-TRUNCATED; the ctypes loader |

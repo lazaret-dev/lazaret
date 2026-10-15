@@ -44,12 +44,13 @@ async function setUp(module, config) {
   const { setRedactSecrets } = await import("./lib/redact.js");
   setRedactSecrets(config.redact);
   const { scanFile } = await import("./scanner/scan.js");
-  const { dependencyImportIssue, dependencyAgentIssue } = await import("./deps.js");
+  const { depFileIssues } = await import("./deps.js");
   return {
     /** a source file's scan (cli.js) */
     scan: (file) => scanFile(file),
-    /** a dependency file's import-time and agent checks (deps.js): [import issue, agent issue] */
-    dep: ([path, content, lang]) => [dependencyImportIssue(path, content, lang), dependencyAgentIssue(path, content)],
+    /** a dependency file's import-time and agent checks, given its package's names (deps.js): [import issue, agent
+     * issue] */
+    dep: (args) => depFileIssues(...args),
     /** the cross-file follower over a scan's dependency files, no file skipped (deps.js) */
     xf: ({ files, redact, siteGroups }) => native.crossFileIssues(files, new Set(), { redact, siteGroups }),
   };

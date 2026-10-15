@@ -212,4 +212,4 @@ jobs:
             tests.architecture.test_wasm_parity_secrets tests.architecture.test_wasm_parity_ci \
             tests.architecture.test_wasm_parity_autorun tests.architecture.test_wasm_parity_config \
             tests.architecture.test_wasm_parity_manifest tests.architecture.test_wasm_parity_redact \
-            tests.architecture.test_wasm_parity_binary -v
+            tests.architecture.test_wasm_parity_binary tests.architecture.test_wasm_parity_deps -v

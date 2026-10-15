@@ -45,6 +45,7 @@ pub mod quickhash;
 pub mod received;
 pub mod redact;
 pub mod binary;
+pub mod deps;
 pub mod rsparse;
 pub mod rsread;
 pub mod rxutil;

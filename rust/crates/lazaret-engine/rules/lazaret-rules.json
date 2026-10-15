@@ -491,6 +491,9 @@
     }
    ]
   },
+  "EXHAUSTED": {
+   "value": "reading it spent the engine's work budget (a pattern that backtracks without end on this text)"
+  },
   "EXIT_GATE": {
    "value": 1
   },
@@ -5931,9 +5934,80 @@
    "flags": "",
    "re": "^\\s*(?:async\\s+def|def|class)\\b"
   },
+  "_DEPS_AGENT_RULE": {
+   "map": {
+    "fix": {
+     "value": "Do not install or run this package; read what it tells the agent to do. Report it to the registry."
+    },
+    "id": {
+     "value": "SC-AGENT-HIJACK"
+    },
+    "msg": {
+     "value": "Dependency launches the {agent} AI agent with {flag} \u2014 running your coding agent with its confirmations turned off."
+    },
+    "name": {
+     "value": "Dependency drives your AI agent"
+    },
+    "ref": {
+     "value": "CWE-506 \u00b7 Supply chain"
+    },
+    "sev": {
+     "value": "CRITICAL"
+    },
+    "type": {
+     "value": "HOTSPOT"
+    },
+    "why": {
+     "value": "A dependency that runs your AI coding agent hands the attacker your agent's access to your machine and accounts, and a flag like --dangerously-skip-permissions or --yolo runs it with every confirmation turned off: the s1ngularity / Nx attack spawned the agent from a postinstall hook to search the disk for secrets, wallets and SSH keys and write them out (the first weaponized-AI-agent malware). No package needs to launch your agent."
+    }
+   }
+  },
+  "_DEPS_HOOK_COMMAND_MSG": {
+   "value": "Install hook command {reasons}."
+  },
+  "_DEPS_HOOK_NOT_FOLLOWED": {
+   "value": "its install hook is more than Lazaret follows ({commands} commands, {scripts} scripts, {chars} characters, {path}-character paths)"
+  },
+  "_DEPS_HOOK_RUNS_MSG": {
+   "value": "Install hook runs {target}, which {reasons}."
+  },
+  "_DEPS_HOOK_STARTS_MSG": {
+   "value": "Install hook runs {target}, which starts {shown}, which {reasons}."
+  },
+  "_DEPS_IMPORT_RULE": {
+   "map": {
+    "fix": {
+     "value": "Read the file: what does it collect, and where does it send it?"
+    },
+    "id": {
+     "value": "SC-IMPORT-RISK"
+    },
+    "msg": {
+     "value": "Dependency code {reasons}."
+    },
+    "name": {
+     "value": "Risky import-time code"
+    },
+    "ref": {
+     "value": "CWE-506 \u00b7 Supply chain"
+    },
+    "sev": {
+     "value": "MAJOR"
+    },
+    "type": {
+     "value": "HOTSPOT"
+    },
+    "why": {
+     "value": "An installed package's code runs with the application's privileges when it is loaded or its command runs. Collecting credentials or the whole environment next to a network call is the shape of an import-time stealer; SDKs read the few variables they need. A weaker indicator than the same code in an install script: the file may have a reason."
+    }
+   }
+  },
   "_DEPS_LOCAL_DEP_RE": {
    "flags": "m",
    "re": "(?:\\brequire\\s*\\(\\s*|\\bimport\\s*\\(\\s*|\\bfrom\\s+|^\\s*import\\s+|\\bexport\\s+[^'\"\\n;]*?\\bfrom\\s+)(['\"])(\\.{1,2}/[^'\"\\n]+)\\1"
+  },
+  "_DEPS_OBFUSCATED": {
+   "value": "is obfuscated"
   },
   "_DEPS_WEB_DIRS": {
    "set": [
@@ -13523,6 +13597,9 @@
   },
   "_MANIFEST_WRITE_SRC": {
    "value": "\\b(?:writeFileSync|writeFile|outputJsonSync|outputJson|writeJsonSync|writeJson|outputFileSync|outputFile|write_text|dump)\\s*\\("
+  },
+  "_METADATA_HEAD_BYTES": {
+   "value": 1048576
   },
   "_MF_DEPTH_RULE": {
    "map": {
