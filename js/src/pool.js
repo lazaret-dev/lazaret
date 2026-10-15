@@ -26,7 +26,6 @@ import { Worker, MessageChannel, receiveMessageOnPort } from "node:worker_thread
 import { availableParallelism } from "node:os";
 import { wasmModule, workBudgetSteps } from "./lib/native.js";
 import { REDACT } from "./lib/redact.js";
-import { scanTimeBudget } from "./scanner/scan.js";
 
 export const MAX_THREADS = 8;
 export const MIN_CHARS = 1_000_000;          // what a scan reads besides its largest file before it starts workers
@@ -63,7 +62,7 @@ export class Pool {
     this.workers = [];
     this.closed = false;
     this.started = false;                    // (a worker has answered)
-    const config = { redact: REDACT.on, timeBudgetMs: scanTimeBudget(), workBudget: workBudgetSteps() };
+    const config = { redact: REDACT.on, workBudget: workBudgetSteps() };
     for (let k = 0; k < n; k++) {
       const { port1, port2 } = new MessageChannel();
       const worker = new Worker(new URL("./pool-worker.js", import.meta.url), {

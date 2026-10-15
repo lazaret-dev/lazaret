@@ -3,37 +3,16 @@
 // scan is the native engine's (../lib/native.js), in dependency mode and in
 // project mode alike (Q-1, 0.1.9: the SQL statements without WHERE, taint,
 // the SQL-sink pass, the function metrics, the suppression markers and the cap
-// are the engine's too); this module scans config and data files for
-// credentials, whose checks are still the package's own; an editor's or
-// agent's settings and a CI file are the engine's to read (BR-7).
-import { normalizeSource } from "./lines.js";
-import { SECRET_SKIP_RE, makeSuppressor, mkIssue } from "./engine.js";
-import { lexLines, jsxReading } from "../lib/lexer.js";
-import { isPySpace } from "../lib/pycompat.js";
-import { findSecretToken, registerScanContext, REDACT } from "../lib/redact.js";
+// are the engine's too), and so is a config or data file's (BR-7: its
+// credentials, an editor's or agent's settings, a CI file's checks).
+import { mkIssue } from "./engine.js";
+import { jsxReading } from "../lib/lexer.js";
+import { REDACT } from "../lib/redact.js";
 import { truncatedIssue, normalizeNewlines } from "../lib/fs.js";
-import { pinUnicode } from "../lib/unicode13.js";
-import { documentationToken, keyFollows, secretCol, redactConfigValues, NETRC_NAMES, netrcAnonymous } from "../lib/configsecrets.js";
-import { call, nodeCandidates, packValues, scanDependencyFile, scanProjectFile, taintFindings, NativeExhausted }
+import { call, nodeCandidates, scanDependencyFile, scanProjectFile, scanConfig, taintFindings, NativeExhausted }
   from "../lib/native.js";
 
 export { isComment } from "./engine.js";
-
-export const LONG_LINE = 160;
-/** Spec 7: per (file, rule) cap for every non-security rule (S-, T-, SC-, X-, SQL- are never capped). */
-export const CAP_PER_RULE = 200;
-export const FINDING_CAP = CAP_PER_RULE;
-const NEVER_CAPPED_PREFIXES = ["S-", "T-", "SC-", "X-", "SQL-"];
-/**
- * Spec 14: per-file backstop of a config or data file's scan (scanConfigFile). A source file's scan
- * is the engine's, bounded by its work budget instead (a file that spends it is SC-TRUNCATED).
- */
-export const SCAN_TIME_BUDGET_MS = 30_000;
-let timeBudgetMs = SCAN_TIME_BUDGET_MS;
-export function setScanTimeBudget(ms) { timeBudgetMs = ms ?? SCAN_TIME_BUDGET_MS; }
-/** The time each config file's scan may take (ms). */
-export function scanTimeBudget() { return timeBudgetMs; }
-
 
 /* ---------------- Analyzers ---------------- */
 export function detectLang(name, content) {
@@ -49,9 +28,6 @@ export function detectLang(name, content) {
   return /\b(def |elif |None|self\.)/.test(content) && !/\b(const|let|=>|function)\b/.test(content) ? "py" : "js";
 }
 
-class ScanBudgetExceeded extends Error {}
-const isBlank = (s) => { for (const ch of s) if (!isPySpace(ch)) return false; return true; };
-
 /**
  * Project mode's intra-file taint alone (twin of core.taint_scan; the engine's, taint.rs): the T-*
  * findings of a file's lines, before the suppression markers and the cap. scanFile runs the same pass.
@@ -59,60 +35,6 @@ const isBlank = (s) => { for (const ch of s) if (!isPySpace(ch)) return false; r
 export function taintScan(file, lines, lang) {
   if (lang !== "py" && lang !== "js") return [];
   return taintFindings(file, lines.join("\n"), lang, { jsx: jsxReading(file), redact: REDACT.on });
-}
-
-// ---- findings cap (spec 7) -------------------------------------------------
-// Findings identical on (rule, file, line, msg) are reported once (the first
-// is kept): same line, same snippet text in every report. Then every rule
-// that is not a security rule (S-, T-, SC-, X-, SQL-) is capped at
-// CAP_PER_RULE findings per file, whatever its severity or type (review: a
-// MAJOR B-EMPTY-CATCH gave 130,001 findings, an 87.7 MB report, for one
-// 1.95 MB line). Twin of core.dedupe_issues / cap_issues.
-function cappable(i) {
-  return !NEVER_CAPPED_PREFIXES.some((p) => String(i.rule).startsWith(p));
-}
-/** `issues` without repeats of the same (rule, file, line, msg); the first of each is kept, in order. */
-export function dedupeIssues(issues) {
-  const seen = new Set(), out = [];
-  for (const i of issues) {
-    const key = JSON.stringify([i.rule, i.file, i.line, i.msg]);
-    if (seen.has(key)) continue;
-    seen.add(key);
-    out.push(i);
-  }
-  return out;
-}
-/** Deduplicated; then at most CAP_PER_RULE findings per rule, in line order; one Q-CAPPED per capped rule at its first omitted line. */
-export function capIssues(path, issues, lines) {
-  issues = dedupeIssues(issues);
-  const order = issues.map((_, k) => k).sort((a, b) => (issues[a].line ?? 0) - (issues[b].line ?? 0) || a - b);
-  const counts = new Map(), dropped = new Set(), omitted = new Map();
-  for (const k of order) {
-    const i = issues[k];
-    if (!cappable(i)) continue;
-    const n = (counts.get(i.rule) ?? 0) + 1;
-    counts.set(i.rule, n);
-    if (n > CAP_PER_RULE) {
-      dropped.add(k);
-      const o = omitted.get(i.rule);
-      if (o) o[0]++; else omitted.set(i.rule, [1, i.line, i.type]);
-    }
-  }
-  if (!dropped.size) return issues;
-  const out = issues.filter((_, k) => !dropped.has(k));
-  for (const [rid, [n, first, type]] of omitted) {
-    const note = mkIssue({ id: "Q-CAPPED", name: "Findings capped", type: "SMELL", sev: "INFO",
-      msg: `${n} more ${rid} findings omitted`,
-      why: "Findings of one rule that repeat hundreds of times in one file are capped so reports stay readable; security findings are never capped.",
-      fix: `Fix or deliberately suppress the ${rid} pattern in this file, then re-scan to see the remaining occurrences.`,
-      ref: "Maintainability" }, path, first, lines);
-    // what the note stands for: the maintainability rating counts the
-    // omitted findings, not the note (metrics.js maintainabilityRating)
-    note.omitted = n;
-    note.omittedType = type;
-    out.push(note);
-  }
-  return out;
 }
 
 /**
@@ -134,41 +56,6 @@ export function scanFile(file) {
   }
 }
 export const EXHAUSTED = "reading it spent the engine's work budget (a pattern that backtracks without end on this text)";
-
-// ---- config and data files (credentials only; core.scan_config_file) -------
-let tokenRule = null;
-/** core's S-TOKEN rule (its texts), from the native engine's rule pack. */
-function TOKEN_RULE() {
-  if (tokenRule === null) {
-    const [rules] = packValues("RULES");
-    const r = rules.find((x) => x.id === "S-TOKEN");
-    tokenRule = { id: r.id, name: r.name, type: r.type, sev: r.sev, msg: r.msg, why: r.why, fix: r.fix, ref: r.ref };
-  }
-  return tokenRule;
-}
-export const CONFIG_SECRET_RULE = {
-  id: "S-SECRET", name: "Hardcoded credential", type: "VULN", sev: "BLOCKER",
-  msg: "Credential appears to be hardcoded in a config file.",
-  why: "Config files are committed, copied into images and shared: a credential in one leaks with every copy, and rotating it means finding them all.",
-  fix: "Reference it instead (${VAR}, a secrets manager), and rotate this one now.",
-  ref: "CWE-798 · OWASP A07",
-};
-
-/**
- * Column of the first S-TOKEN match on a config line that is reported: not a
- * documentation sample, and a private-key header only with its key right after
- * it, on the line or at the start of the next (core._config_token_col). -1 if none.
- */
-function configTokenCol(line, lines, i) {
-  let t, from = 0;
-  while ((t = findSecretToken(line, from))) {
-    from = t.end;
-    if (documentationToken(t.text)) continue;
-    if (t.text.startsWith("-----BEGIN") && !keyFollows(line, t.end, lines.slice(i + 1, i + 3))) continue;
-    return t.index;
-  }
-  return -1;
-}
 
 // ---- settings that run commands (SC-AUTORUN; core's section comment) ----
 /** How many times a settings file's issues are asked for at most (core._AUTORUN_ROUNDS). */
@@ -220,39 +107,25 @@ export function treeReader(files, configs) {
 }
 
 /**
- * Credentials in a config or data file (twin of core.scan_config_file):
- * S-TOKEN on every line, S-SECRET outside comments, nothing else — it is not
- * code. Suppression markers work in the file's comments, as in code. An
- * editor's or AI agent's settings that run commands also get SC-AUTORUN, and
- * a GitHub Actions workflow the SC-WORKFLOW-* checks.
+ * Credentials in a config or data file (core.scan_config_file): S-TOKEN on every line, S-SECRET outside comments,
+ * nothing else — it is not code. Suppression markers work in the file's comments, as in code. An editor's or AI
+ * agent's settings that run commands also get SC-AUTORUN, and a CI file its checks. The engine reads the file (BR-7
+ * step 3: `scan_config`) and names the files of the tree a settings file's commands run; `read` reads them (null:
+ * the commands alone are judged). A file that spends the engine's work budget is SC-TRUNCATED.
  */
 export function scanConfigFile(path, rawContent, read = null) {
-  const content = pinUnicode(normalizeSource(rawContent, "cfg"));
-  const lines = content.split("\n");
-  const lex = lexLines(lines, "cfg", content);
-  const netrc = NETRC_NAMES.has(path.replace(/\\/g, "/").split("/").pop().toLowerCase());
-  registerScanContext(lines, SECRET_SKIP_RE, (line) => redactConfigValues(line, netrc));
-  const deadline = Date.now() + timeBudgetMs;
-  const issues = [];
+  const content = String(rawContent ?? "");
+  const files = {};
+  const args = { path, follow: read !== null, files, redact: REDACT.on, neumaier: false };
   try {
-    if (call("autorun_kind", {}, path) !== null) issues.push(...autorunIssues(path, lines, read));
-    issues.push(...ciIssues(path, lines));
-    const anonymous = netrc ? netrcAnonymous(lex.code) : new Map();
-    for (let i = 0; i < lines.length; i++) {
-      if (Date.now() > deadline) throw new ScanBudgetExceeded();
-      const line = lines[i];
-      if (!line || isBlank(line)) continue;
-      let col = configTokenCol(line, lines, i);
-      if (col >= 0) issues.push(mkIssue(TOKEN_RULE(), path, i + 1, lines, col));
-      if (!lex.comment[i]) {
-        col = secretCol(lex.code[i], netrc, anonymous.get(i));
-        if (col >= 0) issues.push(mkIssue(CONFIG_SECRET_RULE, path, i + 1, lines, col));
-      }
+    for (let k = 0; k < AUTORUN_ROUNDS; k++) {
+      const got = scanConfig(path, args, content);
+      if (got.issues) return got.issues;
+      for (const rel of got.need) files[rel] = read(rel);
     }
+    return scanConfig(path, { ...args, follow: false }, content).issues;
   } catch (e) {
-    if (!(e instanceof ScanBudgetExceeded)) throw e;
-    issues.push(truncatedIssue(path, "scan time budget exceeded"));
+    if (!(e instanceof NativeExhausted)) throw e;
+    return [truncatedIssue(path, EXHAUSTED)];
   }
-  const suppressed = makeSuppressor(lines, "cfg", { lex });
-  return capIssues(path, issues.filter((i) => !suppressed(i)), lines);
 }

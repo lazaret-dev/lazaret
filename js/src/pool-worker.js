@@ -43,8 +43,7 @@ async function setUp(module, config) {
   native.setWorkBudget(config.workBudget);
   const { setRedactSecrets } = await import("./lib/redact.js");
   setRedactSecrets(config.redact);
-  const { scanFile, setScanTimeBudget } = await import("./scanner/scan.js");
-  setScanTimeBudget(config.timeBudgetMs);
+  const { scanFile } = await import("./scanner/scan.js");
   const { dependencyImportIssue, dependencyAgentIssue } = await import("./deps.js");
   return {
     /** a source file's scan (cli.js) */

@@ -15,7 +15,9 @@ import time
 import unittest
 
 from tests import _support  # noqa: F401
-from lazaret.scanner import core
+from unittest import mock
+
+from lazaret.scanner import core, engine
 
 # Loose on purpose (cross-platform rule 7: a bound, not an expectation). The
 # fixed code takes 1-2 s per case on a busy 3.10; the smallest old quadratic
@@ -83,26 +85,24 @@ class DependencyModeFlowPerfTests(unittest.TestCase):
 
 
 class BackstopTests(unittest.TestCase):
-    def setUp(self):
-        self._budget = core.SCAN_TIME_BUDGET
-        self.addCleanup(setattr, core, "SCAN_TIME_BUDGET", self._budget)
-
     def test_budget_exceeded_emits_sc_truncated(self):
-        core.SCAN_TIME_BUDGET = -1.0
-        # a config file's scan is core's, bounded by the clock
-        issues = core.scan_config_file("settings.env", "TOKEN=abc\nOTHER=1\n")
-        trunc = [i for i in issues if i["rule"] == "SC-TRUNCATED"]
-        self.assertEqual(len(trunc), 1)
-        self.assertIn("scan time budget exceeded", trunc[0]["msg"])
-        self.assertEqual(trunc[0]["sev"], "CRITICAL")
-        # a source file's is the engine's, bounded by its work budget and not the clock (Q-1: the passes after
-        # the rules moved into the engine)
+        # a config file's scan is the engine's (BR-7 step 3), bounded by its work budget and not a clock, as a
+        # source file's is (Q-1: the passes after the rules moved into the engine)
+        found = {i["rule"] for i in core.scan_config_file("settings.env", "API_TOKEN=" + "Zq8!vN3p" + "L0wX7r\nOTHER=1\n")}
+        self.assertEqual(found, {"S-SECRET"})
         found = {i["rule"] for i in core.scan_file("slow.py", "import os\nos.system(input())\n", "py")}
         self.assertNotIn("SC-TRUNCATED", found)
         self.assertIn("T-CMD", found)
+        content = "TOKEN=abc\nOTHER=" + "abcdefgh" * 200 + "\n"      # a line long enough that reading it costs steps
+        self.assertEqual(core.scan_config_file("settings.env", content), [])
+        with mock.patch.object(engine, "WORK_BUDGET", 1):
+            issues = core.scan_config_file("settings.env", content)
+        (t,) = issues
+        self.assertEqual((t["rule"], t["sev"]), ("SC-TRUNCATED", "CRITICAL"))
+        self.assertIn(engine.EXHAUSTED, t["msg"])
 
-    def test_default_budget_is_30_seconds(self):
-        self.assertEqual(self._budget, 30.0)
+    def test_the_default_is_the_engines_own_budget(self):
+        self.assertIsNone(engine.WORK_BUDGET)
         self.assertNotIn("SC-TRUNCATED",
                          {i["rule"] for i in core.scan_file("a.py", "x = 1\n", "py")})
 

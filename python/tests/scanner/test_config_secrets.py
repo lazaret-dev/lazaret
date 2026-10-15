@@ -338,10 +338,9 @@ class ProviderKeyFormats(unittest.TestCase):
 
 
 class LinesReadTests(unittest.TestCase):
-    """A config or data file's lines are read only where a test can report (0.1.9): the S-TOKEN test where the
-    token pattern matches, found by one pass over the whole text, and S-SECRET's where a credential-named key meets a
-    separator (configsecrets.SECRET_KV_HINT_RE, on the text lowered) or a URL is; a large data file's other lines
-    are passed over. The findings are those of reading every line."""
+    """A config or data file's lines are read by S-SECRET only where a credential-named key meets a separator
+    (configsecrets.SECRET_KV_HINT_RE, on the line lowered) or a URL is; a large data file's other lines are passed
+    over (0.1.9; the engine's config.rs since BR-7's step 3). The hint misses no key S-SECRET reads."""
 
     def test_every_credential_named_key_has_the_hint(self):
         import random
@@ -357,20 +356,6 @@ class LinesReadTests(unittest.TestCase):
                     if C.secret_key(m.group(1)):
                         with self.subTest(text=text):
                             self.assertTrue(C.SECRET_KV_HINT_RE.search(text.lower()))
-
-    def test_the_same_findings_as_reading_every_line(self):
-        import random
-        rnd = random.Random(9)
-        pieces = list(REPORTED) + list(QUIET) + [TOKEN, PAT, f"key: {TOKEN}", "# " + TOKEN, "", "  ", "[x]",
-                                                 "machine h.invalid login u password " + PASS, "eyJhbGciOiJIUzI1NiJ9.e"]
-        every = lambda rx, text: set(range(text.count("\n") + 1))           # noqa: E731
-        for k in range(300):
-            text = "\n".join(rnd.choice(pieces) for _ in range(rnd.randint(1, 25))) + "\n"
-            name = rnd.choice([".env", "config.yml", "a.json", ".netrc", "x.ini", "Dockerfile"])
-            with self.subTest(k=k):
-                fast = core.scan_config_file(name, text)
-                with mock.patch.object(core, "_match_lines", every):
-                    self.assertEqual(fast, core.scan_config_file(name, text))
 
 
 class ProjectScan(unittest.TestCase):

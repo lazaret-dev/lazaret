@@ -76,6 +76,8 @@ pub const CALLS: &[&str] = &[
     "ci_logical_lines",
     // 0.1.9 (BR-7 step 2): editor and AI-agent settings that run commands (autorun.rs; SC-AUTORUN)
     "autorun_kind", "autorun_owner", "autorun_jsonc", "autorun_entries", "autorun_local_command", "autorun_issues",
+    // 0.1.9 (BR-7 step 3): a config or data file's scan (config.rs: S-TOKEN, S-SECRET, SC-AUTORUN, the CI checks)
+    "scan_config", "config_check",
     // the JavaScript parser (jsparse.py's trees)
     "js_parse", "js_parse_file",
     // the Python parser (Python 3.13's ast trees)
@@ -595,6 +597,63 @@ fn dispatch(name: &str, args: &Value, text: &[u32]) -> Result<Value, CallError> 
             ])
         }
         "autorun_local_command" => Value::Str(crate::autorun::local_command(p, text)),
+        "scan_config" => {
+            // {path, follow, files: {rel: text or null}, redact, neumaier} -> {"issues": [scan_file's issues…]}, or
+            // {"need": [rel…]}: the files of the tree a settings file's commands run, still to be read
+            let path = arg_str(args, "path")?;
+            let flag = |k: &str, d: bool| match args.get(k) {
+                Some(Value::Bool(b)) => *b,
+                _ => d,
+            };
+            let mut files: std::collections::BTreeMap<PyStr, Option<PyStr>> = std::collections::BTreeMap::new();
+            if let Some(Value::Obj(items)) = args.get("files") {
+                for (k, v) in items {
+                    files.insert(k.clone(), v.as_str().map(|x| x.to_vec()));
+                }
+            }
+            let mut tree = crate::autorun::Tree { follow: flag("follow", true), files: &files, need: Vec::new() };
+            let opts = crate::config::Options { redact: flag("redact", true), neumaier: flag("neumaier", false) };
+            match crate::config::scan(p, &path, text, &opts, &mut tree) {
+                Ok(issues) => Value::obj(vec![("issues", Value::Arr(issues))]),
+                Err(need) => Value::obj(vec![("need", Value::Arr(need.into_iter().map(Value::Str).collect()))]),
+            }
+        }
+        "config_check" => {
+            // one of the config reader's checks, for the packages' tests: secret_col {netrc, skip}, redact_values
+            // {netrc}, comment_spans, key_follows {end, following}, documentation_token, secret_key, secret_value
+            let check = crate::pystr::to_string(&arg_str(args, "check")?);
+            let netrc = matches!(args.get("netrc"), Some(Value::Bool(true)));
+            match check.as_str() {
+                "secret_col" => {
+                    let skip: Vec<usize> = args
+                        .get("skip")
+                        .and_then(|v| v.as_arr())
+                        .map(|a| a.iter().filter_map(|x| x.as_i64()).map(|x| x.max(0) as usize).collect())
+                        .unwrap_or_default();
+                    match crate::config::secret_col(p, text, netrc, &skip) {
+                        Some(col) => Value::Int(col as i64),
+                        None => Value::Null,
+                    }
+                }
+                "redact_values" => Value::Str(crate::config::redact_values(p, text, netrc)),
+                "comment_spans" => Value::Arr(
+                    crate::config::comment_spans(text)
+                        .into_iter()
+                        .map(|(a, b)| Value::Arr(vec![Value::Int(a as i64), Value::Int(b as i64)]))
+                        .collect(),
+                ),
+                "key_follows" => {
+                    let end = args.get("end").and_then(|v| v.as_i64()).unwrap_or(0).max(0) as usize;
+                    let following = arg_strs(args, "following");
+                    let refs: Vec<&[u32]> = following.iter().map(|x| x.as_slice()).collect();
+                    Value::Bool(crate::config::key_follows(p, text, end.min(text.len()), &refs))
+                }
+                "documentation_token" => Value::Bool(crate::config::documentation_token(p, text)),
+                "secret_key" => Value::Bool(crate::config::secret_key(p, text)),
+                "secret_value" => Value::Bool(crate::config::secret_value(p, text)),
+                _ => return Err(CallError::BadArgs(format!("config_check: unknown check {}", check))),
+            }
+        }
         "autorun_issues" => {
             // {path, follow, files: {rel: text or null}} -> {"issues": [[line, rule]…]}, or {"need": [rel…]}: the
             // files of the tree it has yet to be given (the package reads them and asks again)

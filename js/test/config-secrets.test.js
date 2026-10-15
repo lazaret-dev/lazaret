@@ -1,7 +1,7 @@
-// Audit P0: credentials in config and data files (twin of
-// python/tests/scanner/test_config_secrets.py; the two engines are held to
-// each other by tests/architecture/test_js_parity_config.py). Fixtures are
-// inert: hosts are .invalid, every credential is made up.
+// Audit P0: credentials in config and data files (the cases of
+// python/tests/scanner/test_config_secrets.py; the reading is the engine's
+// since BR-7's step 3, for both packages). Fixtures are inert: hosts are
+// .invalid, every credential is made up.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -9,9 +9,17 @@ import { mkdtempSync, writeFileSync, mkdirSync, rmSync, readFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { run, scanConfigFile, isConfigFile } from "../src/index.js";
-import {
-  configCommentSpans, secretCol, redactConfigValues, documentationToken, keyFollows as keyFollowsAt, JWT_IO_PAYLOAD,
-} from "../src/lib/configsecrets.js";
+import { call, packValues } from "../src/lib/native.js";
+
+// the reading is the engine's (BR-7 step 3: config.rs), as Python's configsecrets asks it; these lines are BMP text,
+// whose code points are its UTF-16 units
+const check = (name, text, args = {}) => call("config_check", { ...args, check: name }, text);
+const configCommentSpans = (content) => check("comment_spans", content);
+const secretCol = (code, netrc = false) => check("secret_col", code, { netrc }) ?? -1;
+const redactConfigValues = (line, netrc = false) => check("redact_values", line, { netrc });
+const documentationToken = (text) => check("documentation_token", text);
+const keyFollowsAt = (line, end, following) => check("key_follows", line, { end, following });
+const [JWT_IO_PAYLOAD] = packValues("_CFG_JWT_IO_PAYLOAD");
 
 const PASS = "Zq8!vN3pL0wX7r";
 const TOKEN = "ghp_" + "a1B2".repeat(9);

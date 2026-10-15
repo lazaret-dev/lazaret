@@ -48,8 +48,6 @@ import os
 import posixpath
 import re
 import sys
-import threading
-import time
 import types
 import warnings
 
@@ -62,7 +60,6 @@ from lazaret.scanner import reports as lazaret_report  # report paths: pre-scan 
 from lazaret.scanner import taintspec  # taint-config validation shared by both taint engines
 from lazaret.scanner import _unicode13  # the Unicode every engine reads source text in
 from lazaret.scanner import configsecrets  # config and data files: credentials only
-from lazaret.scanner import autorun  # editor and AI-agent settings that run commands (SC-AUTORUN)
 from lazaret.scanner import _native, engine  # the native engine: every detector below
 
 
@@ -1575,10 +1572,7 @@ def is_suppressed(issue, lines, lang=None, dep=False):
     # crosses files: the marker must be in `lines`, the finding's own file.
     if dep or str(issue.get("rule", "")).startswith(UNSUPPRESSIBLE_PREFIXES):
         return False
-    ctx = _active_ctx(lines)
-    if ctx is None or ctx.lang != lang:
-        ctx = _FileCtx(lines, lang)
-    return _suppressed_in(issue, ctx)
+    return _suppressed_in(issue, _FileCtx(lines, lang))
 
 
 # ---------------- Binary / compiled-artifact detection ----------------
@@ -2044,21 +2038,13 @@ def source_lines(content, lang):
     return content.split("\n")
 
 
-class _ScanBudgetExceeded(Exception):
-    """Raised inside scan_config_file when the per-file time budget is spent."""
-
-
-_TLS = threading.local()      # the scan_config_file context active on this thread
-
-
 class _Redactor:
     """One file's redaction facts, shared by every snippet built from its
     lines: the lines of its PEM private-key blocks, its entropy literals
     (_SecretLiterals) and each line as any snippet may show it.
-    scan_config_file's context is one; encoding_issues and redact_file_issues
-    build their own, so a finding made outside a file's scan redacts the
-    file's secrets too (a source file's scan is the engine's, which redacts
-    its own snippets)."""
+    encoding_issues and redact_file_issues build one, so a finding made
+    outside a file's scan redacts the file's secrets too (a source or config
+    file's scan is the engine's, which redacts its own snippets)."""
 
     def __init__(self, lines):
         self.lines = lines
@@ -2091,17 +2077,15 @@ class _Redactor:
 
 
 class _FileCtx(_Redactor):
-    """A config or data file's facts (scan_config_file), computed once and
-    shared by its checks, the suppression check and mk_issue: the comment
-    layout, the parsed suppression markers and the redaction caches. (A
-    source file's are the engine's: filectx.rs.)"""
+    """A file's facts for is_suppressed, computed once: the comment layout,
+    the parsed suppression markers and the redaction caches. (A source or
+    config file's scan is the engine's, with its own: filectx.rs.)"""
 
-    def __init__(self, lines, lang, content=None, deadline=None, jsx=True):
+    def __init__(self, lines, lang, content=None, jsx=True):
         super().__init__(lines)
         self.lang = lang
         self.content = "\n".join(lines) if content is None else content
         self.cmask, self.cspans, self.code = _comment_layout(self.content, lines, lang, None, jsx)
-        self.deadline = deadline
         self._markers = {}
 
     def marker(self, k):
@@ -2118,37 +2102,6 @@ class _FileCtx(_Redactor):
         if dep or str(issue.get("rule", "")).startswith(UNSUPPRESSIBLE_PREFIXES):
             return False
         return _suppressed_in(issue, self)
-
-    def check_time(self):
-        if self.deadline is not None and time.monotonic() > self.deadline:
-            raise _ScanBudgetExceeded()
-
-
-class _ConfigCtx(_FileCtx):
-    """A config file's context (scan_config_file): a line any snippet shows
-    also has the value of every credential-named key redacted — a .env's
-    `DB_PASS=hunter2` matches none of the code patterns — and a .netrc's
-    password tokens (`netrc`)."""
-
-    netrc = False
-
-    def redacted(self, k):
-        r = self._red.get(k)
-        if r is None:
-            if self._pem is None:
-                self._pem = _pem_block_lines(self.lines)
-            if k in self._pem:
-                r = REDACTED
-            else:
-                r = self.secrets().redact(
-                    _redact_context_line(configsecrets.redact_values(self.lines[k], self.netrc)))
-            self._red[k] = r
-        return r
-
-
-def _active_ctx(lines):
-    ctx = getattr(_TLS, "ctx", None)
-    return ctx if ctx is not None and ctx.lines is lines else None
 
 # Line-level matchers for redacting credentials that appear on CONTEXT lines
 # of a snippet (audit L1: a finding's ±2-line context can carry a DIFFERENT
@@ -2363,8 +2316,8 @@ def mk_issue(rule_or_dict, path, line_no, lines, col=None, redactor=None):
     # command line, a hex-decoded preview) — review: a PAT in a `prepare`
     # script reached the terminal, JSON, HTML and SARIF through msg.
     msg = r["msg"]
-    if redactor is None or redactor.lines is not lines:
-        redactor = _active_ctx(lines)
+    if redactor is not None and redactor.lines is not lines:
+        redactor = None
     ctx = redactor if REDACT_SECRETS else None
     if REDACT_SECRETS:
         msg = _redact_text(msg, ctx.secrets() if ctx is not None else None)
@@ -2480,41 +2433,11 @@ def normalize_newlines(text):
     return text.replace("\r\n", "\n").replace("\r", "\n") if "\r" in text else text
 
 
-#: Per-file time backstop (review fix, shared semantics 14) of a config or
-#: data file's scan (scan_config_file): when it has run this many seconds
-#: (checked between lines), it stops with an SC-TRUNCATED finding. A source
-#: file's scan is the engine's, bounded by its work budget instead (a file
-#: that spends it is SC-TRUNCATED: the same file gets the same findings on
-#: every machine).
-SCAN_TIME_BUDGET = 30.0
-
-
 # ---------------- Config and data files (credentials only) ----------------
 # .env, JSON, YAML, TOML, INI, .properties, shell, PEM keys, Dockerfiles,
 # .npmrc / .pypirc, Terraform variables (configsecrets.is_config_file): read
-# as text and checked by the two credential rules, never as code.
-_TOKEN_RULE = next(r for r in RULES if r["id"] == "S-TOKEN")
-CONFIG_SECRET_RULE = {
-    "id": "S-SECRET", "name": "Hardcoded credential", "type": "VULN", "sev": "BLOCKER",
-    "msg": "Credential appears to be hardcoded in a config file.",
-    "why": ("Config files are committed, copied into images and shared: a credential in one "
-            "leaks with every copy, and rotating it means finding them all."),
-    "fix": "Reference it instead (${VAR}, a secrets manager), and rotate this one now.",
-    "ref": "CWE-798 · OWASP A07"}
-
-
-def _config_token_col(line, lines, i):
-    """Column of the first S-TOKEN match on a config line that is reported: not
-    a documentation sample, and a private-key header only with its key right
-    after it, on the line or at the start of the next (configsecrets.key_follows)."""
-    for m in _TOKEN_RULE["re"].finditer(line):
-        text = m.group(0)
-        if configsecrets.documentation_token(text):
-            continue
-        if text.startswith("-----BEGIN") and not configsecrets.key_follows(line, m.end(), lines[i + 1:i + 3]):
-            continue
-        return m.start()
-    return None
+# as text and checked by the two credential rules, never as code. The reading
+# is the engine's (config.rs, BR-7 step 3: scan_config_file).
 
 
 # ---------------- Settings that run commands (SC-AUTORUN) ----------------
@@ -2597,55 +2520,29 @@ def tree_reader(files, configs):
     return read
 
 
-def _match_lines(rx, text):
-    """The indices of the lines of `text` (split at "\n") on which `rx` matches, by one finditer over it."""
-    starts = _line_starts(text)
-    return {bisect.bisect_right(starts, m.start()) - 1 for m in rx.finditer(text)}
-
-
 def scan_config_file(path, content, read=None):
     """Credentials in a config or data file (see configsecrets): S-TOKEN on
     every line, S-SECRET outside comments. Nothing else runs — it is not
     code. Suppression markers work in the file's comments, as in code. An
     editor's or AI agent's settings that run commands also get SC-AUTORUN
     (read: see autorun_issues), a GitHub Actions workflow the
-    SC-WORKFLOW-* checks and a GitLab CI file the SC-GITLAB-* ones."""
-    lines = source_lines(_unicode13.pin(content), "cfg")
-    content = "\n".join(lines)
-    ctx = _ConfigCtx(lines, "cfg", content, time.monotonic() + SCAN_TIME_BUDGET, False)
-    ctx.netrc = os.path.basename(path.replace("\\", "/")).lower() in configsecrets.NETRC_NAMES
-    outer = getattr(_TLS, "ctx", None)
-    _TLS.ctx = ctx
+    SC-WORKFLOW-* checks and a GitLab CI file the SC-GITLAB-* ones. The
+    engine reads the file (BR-7 step 3: `scan_config`), and names the files
+    of the tree a settings file's commands run; they are read here."""
+    files = {}
+    args = engine._budget({"path": path, "follow": read is not None, "files": files,
+                           "redact": bool(REDACT_SECRETS), "neumaier": False})
     try:
-        issues = []
-        try:
-            if autorun.config_kind(path) is not None:
-                issues.extend(autorun_issues(path, lines, read))
-            issues.extend(ci_issues(path, lines))
-            anonymous = configsecrets.netrc_anonymous(ctx.code) if ctx.netrc else {}
-            # the lines either test can report on, each found by one pass over the whole text (no pattern here
-            # matches across a newline, nor looks at one but as it looks at a line's end): a line with no token
-            # match, no credential-named key before a separator (SECRET_KV_HINT_RE) and no URL is reported on by
-            # neither, and most lines of a large data file are such lines
-            token_lines = _match_lines(_TOKEN_RULE["re"], content)
-            kv_lines = _match_lines(configsecrets.SECRET_KV_HINT_RE, "\n".join(ctx.code).lower())
-            for i, line in enumerate(lines):
-                ctx.check_time()
-                if not line or line.isspace():
-                    continue
-                if i in token_lines:
-                    col = _config_token_col(line, lines, i)
-                    if col is not None:
-                        issues.append(mk_issue(_TOKEN_RULE, path, i + 1, lines, col))
-                if not ctx.cmask[i] and (ctx.netrc or i in kv_lines or "://" in ctx.code[i]):
-                    col = configsecrets.secret_col(ctx.code[i], ctx.netrc, anonymous.get(i, ()))
-                    if col is not None:
-                        issues.append(mk_issue(CONFIG_SECRET_RULE, path, i + 1, lines, col))
-        except _ScanBudgetExceeded:
-            issues.append(truncated_issue(path, "scan time budget exceeded"))
-        return cap_issues(path, [i for i in issues if not ctx.suppressed(i)], lines)
-    finally:
-        _TLS.ctx = outer
+        for _ in range(_AUTORUN_ROUNDS):
+            got = _native.call("scan_config", args, content)
+            if "issues" in got:
+                return engine._issues(path, got["issues"])
+            for rel in got["need"]:
+                files[rel] = read(rel)
+        got = _native.call("scan_config", dict(args, follow=False), content)
+        return engine._issues(path, got["issues"])
+    except _native.NativeError as exc:
+        return [engine.error_issue(path, exc)]
 
 
 # ---------------- The per-line pass's findings ----------------

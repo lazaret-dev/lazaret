@@ -12,6 +12,7 @@ pub mod api;
 pub mod budget;
 pub mod autorun;
 pub mod ci;
+pub mod config;
 pub mod crossfile;
 pub mod datafmt;
 pub mod filectx;

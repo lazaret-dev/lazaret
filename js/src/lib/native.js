@@ -421,6 +421,16 @@ export function scanProjectFile(path, content, lang, { jsx = true, redact = true
   return issuesOf(path, call("scan_file", { lang, dep: false, jsx, redact, neumaier: false }, content));
 }
 
+/**
+ * A config or data file's scan (core.scan_config_file; BR-7 step 3, the engine's config.rs): {issues} as this
+ * package's issues, or {need}: the files of the tree a settings file's commands run, still to be read. `args`:
+ * {path, follow, files, redact, neumaier}.
+ */
+export function scanConfig(path, args, content) {
+  const got = call("scan_config", args, content);
+  return got.issues ? { issues: issuesOf(path, got.issues) } : { need: got.need };
+}
+
 const LEXED = new Set(["py", "js", "sql", "go", "rs"]);
 
 /**

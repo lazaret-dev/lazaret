@@ -24,6 +24,8 @@ pub enum Lang {
     /// families every text gets
     Go,
     Rs,
+    /// a config or data file (config.rs): its comments as the formats share them
+    Cfg,
     Other,
 }
 
@@ -35,6 +37,7 @@ impl Lang {
             Some("sql") => Lang::Sql,
             Some("go") => Lang::Go,
             Some("rs") => Lang::Rs,
+            Some("cfg") => Lang::Cfg,
             _ => Lang::Other,
         }
     }
@@ -46,6 +49,7 @@ impl Lang {
             Lang::Sql => Some("sql"),
             Lang::Go => Some("go"),
             Lang::Rs => Some("rs"),
+            Lang::Cfg => Some("cfg"),
             Lang::Other => None,
         }
     }

@@ -98,6 +98,8 @@ python/
 │   │   ├── gitlabci.py     GitLab CI files (SC-GITLAB-*), the same way
 │   │   ├── autorun.py      editor and AI-agent settings that run commands
 │   │   │                   (SC-AUTORUN), over the engine's reader (autorun.rs)
+│   │   ├── configsecrets.py which files are config or data files; the reader's
+│   │   │                   checks for the tests, over the engine's (config.rs)
 │   │   ├── timings.py      where a run's time goes (`--timings`)
 │   │   ├── programs.py     where a program Lazaret runs is: PATH's absolute
 │   │   │                   folders only, never the current one (the guard's
@@ -291,7 +293,7 @@ pytest also runs the suite unchanged, for anyone who prefers it, but nothing req
 
 ## 5. JavaScript package
 
-The npm package `lazaret` is a zero-dependency, ES-module project scanner with the same rules and results as `lazaret.scanner`, tested with Node's built-in `node --test` (Node 22+). Since 0.1.8 its rules run in the native engine (`rust/`) compiled to WebAssembly: `native/lazaret.wasm`, built by `npm run build` (`scripts/build-wasm.js`; it needs Rust and its `wasm32-unknown-unknown` target) and loaded by `src/lib/native.js` — the supply-chain tests, `scan_file` in dependency mode and in project mode (its rules, then the SQL statements without WHERE, the intra-file taint, the SQL sinks, the function metrics, the suppression markers and the cap: since 0.1.9's Q-1), the cross-file follower and the cross-file taint passes for JavaScript and Python (see `docs/RUST_ENGINE.md`). A scan with a megabyte or more to read besides its largest file runs on worker threads (`src/pool.js`, `LAZARET_THREADS`), each with its own instance of the engine; the report is the same. JavaScript keeps the orchestration and what the native engine does not answer yet: the project metrics, the manifest checks (the CI files and an editor's or agent's settings are the engine's since BR-7), config-file credentials, encoding handling and the reports. Registry auditing, custom taint specs and SCA are Python-only; the cross-file taint passes, for JavaScript and for Python, are the native engine's in both packages (`src/scanner/flow.js` builds the findings, compared by `python/tests/architecture/test_js_parity_flow.py`). The browser dashboard (`python/src/lazaret/web/lazaret.html`) carries its own single-file port of the project scanner in JavaScript (no dependency mode or supply-chain tests, and no Go or Rust reading as the two CLIs have), held to the Python engine by `test_review_dashboard_parity.py`, until it can load the same module.
+The npm package `lazaret` is a zero-dependency, ES-module project scanner with the same rules and results as `lazaret.scanner`, tested with Node's built-in `node --test` (Node 22+). Since 0.1.8 its rules run in the native engine (`rust/`) compiled to WebAssembly: `native/lazaret.wasm`, built by `npm run build` (`scripts/build-wasm.js`; it needs Rust and its `wasm32-unknown-unknown` target) and loaded by `src/lib/native.js` — the supply-chain tests, `scan_file` in dependency mode and in project mode (its rules, then the SQL statements without WHERE, the intra-file taint, the SQL sinks, the function metrics, the suppression markers and the cap: since 0.1.9's Q-1), the cross-file follower and the cross-file taint passes for JavaScript and Python (see `docs/RUST_ENGINE.md`). A scan with a megabyte or more to read besides its largest file runs on worker threads (`src/pool.js`, `LAZARET_THREADS`), each with its own instance of the engine; the report is the same. JavaScript keeps the orchestration and what the native engine does not answer yet: the project metrics, the manifest checks (the CI files, an editor's or agent's settings and a config file's credentials are the engine's since BR-7), encoding handling and the reports. Registry auditing, custom taint specs and SCA are Python-only; the cross-file taint passes, for JavaScript and for Python, are the native engine's in both packages (`src/scanner/flow.js` builds the findings, compared by `python/tests/architecture/test_js_parity_flow.py`). The browser dashboard (`python/src/lazaret/web/lazaret.html`) carries its own single-file port of the project scanner in JavaScript (no dependency mode or supply-chain tests, and no Go or Rust reading as the two CLIs have), held to the Python engine by `test_review_dashboard_parity.py`, until it can load the same module.
 
 ```
 js/
@@ -317,7 +319,7 @@ js/
 │   ├── pool.js           worker threads for the per-file work (pool-worker.js:
 │   │                     a worker, its own instance of the engine)
 │   ├── scanner/          the scan loop (each file the native engine's, in
-│   │                     either mode; config files the package's own),
+│   │                     either mode; a config file's too, scan_config),
 │   │                     metrics, cross-file flows in Python and JavaScript
 │   │                     (flow.js: the engine's passes)
 │   └── lib/              leaf helpers: native (the WebAssembly engine: its
@@ -325,7 +327,8 @@ js/
 │                         (collection, report paths), encoding and codecs
 │                         (BOM/UTF-16/PEP 263), binary (magic bytes), lexer
 │                         (the comment layout, the engine's lexers'), redact,
-│                         issue, supplychain
+│                         issue, configsecrets (which files are config
+│                         files), supplychain
 │                         (install hooks), programs (the git PATH names by an
 │                         absolute path), pyjson/pycompat/pynames
 │                         (Python-compatible JSON, literals and text); never

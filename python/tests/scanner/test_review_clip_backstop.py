@@ -15,13 +15,13 @@ inside one rule's per-match loop — Python engine and dashboard.
   engine reads the rules under its work budget (steps of its regex matcher,
   engine.WORK_BUDGET), not a clock: a file that spends it is SC-TRUNCATED.
   Since Q-1 (0.1.9) the passes after the rules in project mode (taint, SQL,
-  function metrics) are the engine's too, so a source file's scan reads no
-  clock at all; the clock bounds a config file's scan, which is core's.
+  function metrics) are the engine's too, and since BR-7's step 3 a config
+  file's scan, so the packages read no clock while scanning a file; the
+  dashboard's page keeps its own.
 
 Timing bounds are loose (slow CI runners): far above today's cost, far below
 the old one. All content is inert.
 """
-import itertools
 import json
 import time
 import unittest
@@ -33,25 +33,6 @@ from tests.scanner import _dashboard_vm as dash
 REPEATS = (2_500, 5_000, 10_000, 20_000)
 LIMIT_S = 4.0
 E = "…"
-
-
-class ticking_clock:
-    """Patch core's monotonic clock: each read is 1 ms after the previous one;
-    the per-file budget is `ticks` reads."""
-
-    def __init__(self, ticks):
-        self.ticks = ticks
-
-    def __enter__(self):
-        counter = itertools.count()
-        self.patches = [mock.patch.object(core.time, "monotonic", lambda: next(counter) / 1000),
-                        mock.patch.object(core, "SCAN_TIME_BUDGET", self.ticks / 1000)]
-        for p in self.patches:
-            p.start()
-
-    def __exit__(self, *exc):
-        for p in reversed(self.patches):
-            p.stop()
 
 
 def reported(issues, rule):
@@ -82,11 +63,10 @@ class PythonPackageTests(unittest.TestCase):
         self.assertEqual(len(out), 240)
         self.assertTrue(out.startswith(E) and out.endswith("catch(e){}"))
 
-    def test_a_project_scan_is_bounded_by_the_work_budget_not_the_clock(self):
-        # (Q-1: the same file gets the same findings on every machine, however slow its clock says it is)
+    def test_a_project_scan_is_bounded_by_the_work_budget(self):
+        # (Q-1: the same file gets the same findings on every machine, however slow it is)
         n = 20_000
-        with ticking_clock(40):
-            issues = core.scan_file("t.js", "try{}catch(e){}\n" * n, "js")
+        issues = core.scan_file("t.js", "try{}catch(e){}\n" * n, "js")
         self.assertNotIn("SC-TRUNCATED", {i["rule"] for i in issues})
         self.assertEqual(reported(issues, "B-EMPTY-CATCH"), n)
         with mock.patch.object(engine, "WORK_BUDGET", 10_000):

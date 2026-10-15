@@ -121,7 +121,9 @@ class DashboardTableTests(unittest.TestCase):
             # the page keeps 2,000,000 (it scans on the tab's main thread); the
             # CLIs default to 16,000,000 (core.SOURCE_SIZE_CAP)
             "MAX_FILE_BYTES": 2_000_000,
-            "SCAN_TIME_BUDGET_MS": int(core.SCAN_TIME_BUDGET * 1000)})
+            # the page's own clock, 30 s a file; the CLIs' scans are the engine's, bounded by its work budget
+            # (engine.WORK_BUDGET: a config file's too, since BR-7's step 3)
+            "SCAN_TIME_BUDGET_MS": 30_000})
         self.assertEqual(self.page["neverCapped"], list(core._NEVER_CAPPED_PREFIXES))
         self.assertEqual(self.page["sevOrder"], core.SEV_ORDER)
         self.assertEqual(self.page["types"], core.TYPE_LABEL)

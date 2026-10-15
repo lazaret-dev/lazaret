@@ -5009,6 +5009,81 @@
     }
    }
   },
+  "_CFG_JWT_IO_PAYLOAD": {
+   "value": "eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ"
+  },
+  "_CFG_KV_RE": {
+   "flags": "",
+   "re": "(?<![A-Za-z0-9_.\\-])[\\\"']?([A-Za-z0-9_.\\-]{1,128})[\\\"']?[ \\t]*([:=])[ \\t]*(\\\"[^\\\"\\n]*\\\"|'[^'\\n]*'|[^\\s\\\"',;#{}\\[\\]]+)"
+  },
+  "_CFG_LOCAL_HOSTS": {
+   "set": [
+    "0.0.0.0",
+    "127.0.0.1",
+    "host.docker.internal",
+    "localhost"
+   ]
+  },
+  "_CFG_NAME_RE": {
+   "flags": "",
+   "re": "[A-Za-z][a-z]*[0-9]{0,2}(?:[\\-._/:][A-Za-z][a-z]*[0-9]{0,2})+|[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+"
+  },
+  "_CFG_NETRC_ANONYMOUS": {
+   "set": [
+    "anonymous",
+    "ftp"
+   ]
+  },
+  "_CFG_NETRC_NAMES": {
+   "set": [
+    ".netrc",
+    "_netrc"
+   ]
+  },
+  "_CFG_NETRC_PASSWORD_RE": {
+   "flags": "",
+   "re": "(?<![^ \\t])password[ \\t]+(\"[^\"\\n]*\"|[^\\s\"]+)"
+  },
+  "_CFG_NETRC_TOKEN_RE": {
+   "flags": "",
+   "re": "\"[^\"\\n]*\"|[^\\s\"]+"
+  },
+  "_CFG_NOT_SECRET_KEY_RE": {
+   "flags": "i",
+   "re": "(?:page|continuation|next|cursor|sync|csrf|xsrf|idempotency)[_\\-]?token$"
+  },
+  "_CFG_PEM_BODY_RE": {
+   "flags": "",
+   "re": "[A-Za-z0-9+/]{40,}={0,2}"
+  },
+  "_CFG_PLACEHOLDER_RE": {
+   "flags": "i",
+   "re": "example|sample|dummy|placeholder|change[_\\-.]?(?:me|this|it)|your[_\\-.]|xxx|\\*\\*\\*|\\.\\.\\.|redacted|replace|insert[_\\-.]|enter[_\\-.]|todo|fixme|fake|mock|encoded|secret|passw|p[a@4]ssw[o0]rd|string|123456|654321|abcdef|a1b2c3|<|>|\\$\\{|\\{\\{|\\}\\}|%\\(|\\$\\("
+  },
+  "_CFG_SECRET_KEY_RE": {
+   "flags": "i",
+   "re": "(?:password|passwd|passphrase|secret|token|(?:api|access|account|app|client|encryption|master|private|restricted|secret|signing)[_\\-]?key)$|(?:^|[_.\\-])(?:pass|pwd|pat|auth)$"
+  },
+  "_CFG_SECRET_KV_HINT_RE": {
+   "flags": "",
+   "re": "(?:password|passwd|passphrase|secret|token|key|pass|pwd|pat|auth)[\\\"']?[ \\t]*[:=]"
+  },
+  "_CFG_STRING_PREFIX_RE": {
+   "flags": "",
+   "re": "[A-Za-z][A-Za-z0-9]{0,2}#*[\\\"']"
+  },
+  "_CFG_URL_CRED_RE": {
+   "flags": "",
+   "re": "(?<![A-Za-z0-9+.\\-])[A-Za-z][A-Za-z0-9+.\\-]{0,31}://([^\\s/:@'\\\"]{1,256}):([^\\s/@'\\\"]{1,512})@([^\\s/:?#'\\\"]{1,256})"
+  },
+  "_CFG_URL_START_RE": {
+   "flags": "",
+   "re": "[A-Za-z][A-Za-z0-9+.\\-]*://"
+  },
+  "_CFG_WEBHOOK_RE": {
+   "flags": "",
+   "re": "https://hooks\\.slack\\.com/services/T[A-Z0-9]{8,12}/B[A-Z0-9]{8,12}/[A-Za-z0-9]{20,32}|https://(?:ptb\\.|canary\\.)?discord(?:app)?\\.com/api/webhooks/[0-9]{5,20}/[A-Za-z0-9_\\-]{20,100}"
+  },
   "_CGO_EXTS": {
    "list": [
     {

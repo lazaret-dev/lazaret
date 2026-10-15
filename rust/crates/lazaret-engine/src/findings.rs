@@ -425,11 +425,29 @@ pub struct Snippets<'a> {
     secrets: OnceCell<SecretLiterals>,
     pem: OnceCell<HashSet<usize>>,
     red: RefCell<HashMap<usize, PyStr>>,
+    /// A config file's (Some: whether it is a .netrc): a line is shown with the value of every credential-named key
+    /// redacted too (config::redact_values)
+    config: Option<bool>,
 }
 
 impl<'a> Snippets<'a> {
     pub fn new(p: &'a Pack, lines: Vec<&'a [u32]>, redact: bool, neumaier: bool) -> Snippets<'a> {
-        Snippets { p, lines, redact, neumaier, secrets: OnceCell::new(), pem: OnceCell::new(), red: RefCell::new(HashMap::new()) }
+        Snippets {
+            p,
+            lines,
+            redact,
+            neumaier,
+            secrets: OnceCell::new(),
+            pem: OnceCell::new(),
+            red: RefCell::new(HashMap::new()),
+            config: None,
+        }
+    }
+
+    /// The snippets of a config file's findings (core._ConfigCtx): `netrc`, it is a .netrc.
+    pub fn config(mut self, netrc: bool) -> Snippets<'a> {
+        self.config = Some(netrc);
+        self
     }
 
     /// The file's entropy literals (_Redactor.secrets).
@@ -445,6 +463,9 @@ impl<'a> Snippets<'a> {
         let pem = self.pem.get_or_init(|| pem_block_lines(self.p, &self.lines));
         let r = if pem.contains(&k) {
             self.p.text("REDACTED")
+        } else if let Some(netrc) = self.config {
+            let shown = crate::config::redact_values(self.p, self.lines[k], netrc);
+            self.secrets().redact(self.p, &redact_context_line(self.p, &shown))
         } else {
             self.secrets().redact(self.p, &redact_context_line(self.p, self.lines[k]))
         };

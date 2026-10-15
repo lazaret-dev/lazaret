@@ -217,8 +217,12 @@ shared by the CLI and the MCP server. In order it:
 2. **scans each file** (`scan_file`) — rules, intra-file taint, SQL sinks,
    obfuscation/secret detection, per its language — and each config or data
    file (`scan_config_file`: `.env`, JSON, YAML, TOML, INI, shell, keys,
-   Dockerfiles; `lazaret.scanner.configsecrets` and `js/src/lib/configsecrets.js`)
-   for credentials; config files are not code and count in no code metric. Two
+   Dockerfiles) for credentials, read by the engine for both packages since
+   BR-7's step 3 (`rust/crates/lazaret-engine/src/config.rs`, the `scan_config`
+   call: S-TOKEN and S-SECRET's config form, the suppression markers, the cap
+   and the snippets, redacted by the engine's one redactor; which files are
+   config files is still each package's, `configsecrets.is_config_file` and
+   `js/src/lib/configsecrets.js`); config files are not code and count in no code metric. Two
    kinds get more (0.1.7): an editor's or AI agent's settings that run commands
    on their own (SC-AUTORUN: a JSON-with-comments reader that keeps lines, and
    what each file makes its tool run; the commands are followed into the files
@@ -2005,6 +2009,7 @@ leaves the texts to go with their calls, which gives the same answers:
 | `python/src/lazaret/scanner/flow.py` | Interprocedural cross-file taint: hands the engine's passes the files and the configured model, builds their findings (Python's own AST pass until phase 3) |
 | `rust/crates/lazaret-engine/src/jsparse/`, `jsflow/` | The JavaScript / TypeScript reader and the JS cross-file pass (the `js_parse` and `js_flow` calls, both packages'; jsparse.py, jsflow.py and their npm twins until phase 3) |
 | `rust/crates/lazaret-engine/src/pyparse/`, `pyflow/` | The Python reader (Python 3.13's trees) and the Python cross-file pass (the `py_parse` and `py_flow` calls, both packages'; flow.py's own pass until phase 3) |
+| `rust/crates/lazaret-engine/src/config.rs` | A config or data file's scan (the `scan_config` call, both packages'; since BR-7's step 3): S-TOKEN and S-SECRET's config form, the autorun and CI issues, the suppression markers, the cap and the redacted snippets; `scanner/configsecrets.py` says which files are config files and keeps the reader's checks for the tests (`config_check`) |
 | `rust/crates/lazaret-engine/src/autorun.rs` | Editor and AI-agent settings that run commands (SC-AUTORUN; the `autorun_*` calls, both packages'; since BR-7's step 2): the JSON-with-comments reader, the commands each file makes its tool run, the issues; `scanner/autorun.py` keeps the names the package calls, over the engine |
 | `rust/crates/lazaret-engine/src/ci/` | CI files (the `ci_*` calls, both packages'; since BR-7): the workflows the Shai-Hulud worms planted (SC-WORKFLOW-SECRETS, -BACKDOOR) and the CI files' hardening checks (the other SC-WORKFLOW-* ids, SC-GITLAB-*); `scanner/ghworkflow.py` and `gitlabci.py` keep the names the package calls, over the engine |
 | `python/src/lazaret/scanner/sca_feeds.py`, `sca_index.py`, `gomod.py` | CVE bundle build (OSV/KEV/EPSS), the indexed bundle, the `go.mod` reader |

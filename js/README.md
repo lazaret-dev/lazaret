@@ -144,10 +144,9 @@ resolving to one file. Writes are atomic
   CRITICAL; one whose bytes don't decode to text is `SC-TRUNCATED`.
   Sources and manifests over 16,000,000 bytes
   (`--max-source-bytes`, env `LAZARET_MAX_SOURCE_BYTES`) are `SC-TRUNCATED`,
-  never silently skipped; so is a source file whose reading spends the
-  engine's work budget (a backstop: the rules are linear-time, and the
-  budget is work, not time, so every machine reads the same) and a config
-  file whose scan passes a 30-second time backstop.
+  never silently skipped; so is a source, config or data file whose reading
+  spends the engine's work budget (a backstop: the rules are linear-time,
+  and the budget is work, not time, so every machine reads the same).
 - Encodings are sniffed (UTF-8/UTF-16 byte-order marks, BOM-less UTF-16, PEP
   263 coding cookies in `.py` files): anything but plain UTF-8 is decoded
   explicitly and reported as `Q-ENCODING`.

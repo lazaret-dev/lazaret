@@ -778,6 +778,21 @@ aggregate):
   877 of them CRITICAL), with a reader and without. `js/src/lib/autorun.js` (432 lines) is gone, `autorun.py` is 102
   lines over the engine (from 462), and `test_js_parity_persistence` keeps only its scan of a tree by both CLIs;
   `test_snapshot_autorun` (hashes checked to be the Python's answers) and `test_wasm_parity_autorun` replace the rest.
+- **One reader of config and data files' credentials, the engine's, with its one redactor (BR-7, step 3).** A config
+  or data file's scan (S-TOKEN and S-SECRET's config form: a key = value pair, a URL with a password, a webhook, a
+  .netrc's password; the comments of each format, the suppression markers, the cap, and each snippet's lines
+  redacted) is the engine's for both packages (`rust/crates/lazaret-engine/src/config.rs`, the `scan_config` call,
+  which also asks for the files a settings file's commands run, as `autorun_issues` does), where
+  `scanner/configsecrets.py`, `core.scan_config_file`'s context and their npm twins did it until now. The same
+  answers as the Python's on 3,000 generated config files of every format (25,111 issues, with the snippets redacted
+  and without), 1,500 settings trees with the files they run, this repository's 299 config files and 23,202 real
+  workflow files (79,334 issues). A config file's scan is bounded by the engine's work budget like a source file's,
+  not by a 30-second clock (`core.SCAN_TIME_BUDGET` and the npm package's `setScanTimeBudget` export are gone; a file
+  that spends the budget is SC-TRUNCATED "reading it spent the engine's work budget", where it was "scan time budget
+  exceeded"), so a file gets the same findings on every machine; the dashboard keeps its own clock.
+  `configsecrets.py` is 137 lines (from 388) and `js/src/lib/configsecrets.js` 36 (from 293): which files are config
+  files, and the reader's checks for the tests over the `config_check` call. `test_snapshot_config` (hashes checked to
+  be the Python's answers) and `test_wasm_parity_config` hold the engine.
 - **Security: S-XML is a parser set to resolve external entities, not an import of xml.etree, xml.dom or xml.sax
   (Q-3; rule set 2.80.0).** Since Python 3.7.1 none of them resolves an external entity unless told to, and Expat
   2.4.1 refuses entity bombs, so the import flagged safe code: all 20 of BenchmarkPython's safe XXE cases (its 8 real

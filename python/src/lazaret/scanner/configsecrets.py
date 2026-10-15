@@ -22,14 +22,17 @@ count in no code metric (core.scan_config_file):
             (`machine HOST login USER password PASS`), a password token's,
             unless the entry's login is anonymous FTP's (N-25).
 
-This module holds the pure parts (names, matching, comments, redaction); the
-npm engine has a twin (js/src/lib/configsecrets.js). Every pattern here runs
-in linear time: a key is matched only from the start of a key-character run,
-and every repetition is bounded or cannot backtrack.
+The reading is the native engine's since 0.1.9 (BR-7 step 3: rust/crates/
+lazaret-engine/src/config.rs, the `scan_config` call; the patterns are the
+rule pack's `_CFG_*`), as it is for the npm package; until then this module
+and js/src/lib/configsecrets.js were twins. This module keeps which files are
+read (is_config_file, own_report: the collection's) and the names the tests
+call, over the engine.
 """
-import math
 import os
 import re
+
+from . import _native, engine
 
 #: Extensions of config and data files (os.path.splitext, lowercased).
 CONFIG_EXTS = frozenset((
@@ -41,8 +44,6 @@ CONFIG_NAMES = frozenset((
     ".env", ".envrc", ".npmrc", ".pypirc", ".netrc", "_netrc", ".git-credentials", ".dockercfg",
     "dockerfile", "containerfile", "id_rsa", "id_dsa", "id_ecdsa", "id_ed25519",
 ))
-#: A .netrc's names (curl's, git's, pip's and ftp's credentials; _netrc on Windows).
-NETRC_NAMES = frozenset((".netrc", "_netrc"))
 #: Lockfiles: generated, full of integrity hashes, never where a credential is kept.
 CONFIG_SKIP_NAMES = frozenset((
     "package-lock.json", "npm-shrinkwrap.json", "pnpm-lock.yaml", "packages.lock.json",
@@ -72,317 +73,65 @@ def own_report(text):
     return bool(_OWN_REPORT_RE.match(text))
 
 
-# ---- comments ---------------------------------------------------------------
-# The common ground of the formats read: a '#' or '// ' (a space, tab or the
-# end of the line after it: .npmrc's `//registry.invalid/:_authToken=…` is a
-# setting) at the start of a line or after a space or tab, or a ';' at the
-# start of a line, begins a comment that runs to the end of the line —
-# outside '…' and "…" quotes (a backslash escapes in "…"). JSON has none;
-# JSONC, YAML, TOML, INI, .env, .properties, shell and Dockerfiles use these.
-def _comment_start(line):
-    if "#" not in line and "//" not in line and ";" not in line:
-        return None
-    quote = None
-    blank = True                   # only spaces and tabs so far
-    i, n = 0, len(line)
-    while i < n:
-        ch = line[i]
-        if quote is not None:
-            if ch == "\\" and quote == '"':
-                i += 2
-                continue
-            if ch == quote:
-                quote = None
-        elif ch == '"' or ch == "'":
-            quote = ch
-        elif (ch == "#" or (ch == "/" and line.startswith("//", i)
-                            and line[i + 2:i + 3] in ("", " ", "\t"))) and (
-                blank or line[i - 1] in " \t"):
-            return i
-        elif ch == ";" and blank:
-            return i
-        if ch != " " and ch != "\t":
-            blank = False
-        i += 1
-    return None
+# ---- the engine's reading, for the tests ----------------------------------------
+# The pack's values, read when first asked (importing never needs the engine): KV_RE (key = value in the forms the
+# formats share), SECRET_KV_HINT_RE (where a pair S-SECRET can report on may be, in the text lowered), JWT_IO_PAYLOAD
+# (jwt.io's sample token's payload), NETRC_NAMES (a .netrc's names).
+_LAZY = {"KV_RE": lambda: engine.pack_pattern("_CFG_KV_RE"),
+         "SECRET_KV_HINT_RE": lambda: engine.pack_pattern("_CFG_SECRET_KV_HINT_RE"),
+         "JWT_IO_PAYLOAD": lambda: engine.pack_value("_CFG_JWT_IO_PAYLOAD"),
+         "NETRC_NAMES": lambda: frozenset(engine.pack_value("_CFG_NETRC_NAMES"))}
+
+
+def __getattr__(name):
+    if name in _LAZY:
+        value = _LAZY[name]()
+        globals()[name] = value
+        return value
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+def _check(check, text, **args):
+    return _native.call("config_check", dict(args, check=check), text)
 
 
 def comment_spans(content):
     """Absolute (start, end) spans of the comments of a config file."""
-    spans = []
-    pos = 0
-    for line in content.split("\n"):
-        c = _comment_start(line)
-        if c is not None:
-            spans.append((pos + c, pos + len(line)))
-        pos += len(line) + 1
-    return spans
-
-
-# ---- S-SECRET ----------------------------------------------------------------
-# key = value in the forms the formats share: KEY=v, key: v, "key": "v",
-# key = "v", export KEY="v", ENV KEY=v. The key starts where a run of key
-# characters starts (so each run is tried once), the value is a quoted string
-# or a run without spaces, quotes or separators.
-KV_RE = re.compile(
-    r"(?<![A-Za-z0-9_.\-])[\"']?([A-Za-z0-9_.\-]{1,128})[\"']?[ \t]*([:=])[ \t]*"
-    r"(\"[^\"\n]*\"|'[^'\n]*'|[^\s\"',;#{}\[\]]+)")
-#: Where a key-value pair S-SECRET can report on may be, in the text lowered (a key is ASCII): a name ending as
-#: SECRET_KEY_RE's names end, then the separator. A line without it has no such pair (scan_config_file reads only
-#: the lines that have it, or a URL). (Lowered, not re.I: an alternation re.I searches is six times slower.)
-SECRET_KV_HINT_RE = re.compile(r"(?:password|passwd|passphrase|secret|token|key|pass|pwd|pat|auth)[\"']?[ \t]*[:=]")
-#: A key named like a credential: by its last word, or its last segment.
-SECRET_KEY_RE = re.compile(
-    r"(?:password|passwd|passphrase|secret|token|(?:api|access|account|app|client|encryption|"
-    r"master|private|restricted|secret|signing)[_\-]?key)$|(?:^|[_.\-])(?:pass|pwd|pat|auth)$", re.I)
-#: Tokens that are not credentials: a page cursor, an anti-CSRF or idempotency token.
-NOT_SECRET_KEY_RE = re.compile(
-    r"(?:page|continuation|next|cursor|sync|csrf|xsrf|idempotency)[_\-]?token$", re.I)
-#: Values that are documentation, templates or placeholders, not credentials:
-#: the words, runs like 123456 / abcdef / A1B2C3, and P@ssw0rd spellings.
-PLACEHOLDER_RE = re.compile(
-    r"example|sample|dummy|placeholder|change[_\-.]?(?:me|this|it)|your[_\-.]|xxx|\*\*\*|\.\.\.|"
-    r"redacted|replace|insert[_\-.]|enter[_\-.]|todo|fixme|fake|mock|encoded|secret|passw|p[a@4]ssw[o0]rd|string|"
-    r"123456|654321|abcdef|a1b2c3|<|>|\$\{|\{\{|\}\}|%\(|\$\(",
-    re.I)
-#: A name or words, not a credential: words (lowercase after their first
-#: letter) joined by - . _ / or : (a Kubernetes secret's name "root-ca", a
-#: reference "default/basic-auth", an icon "mdi:lock", a translation
-#: "Palavra-passe"), or an environment variable's name standing in for its
-#: value ("ACCESS_TOKEN").
-_NAME_RE = re.compile(r"[A-Za-z][a-z]*[0-9]{0,2}(?:[\-._/:][A-Za-z][a-z]*[0-9]{0,2})+|[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+")
-_URL_START_RE = re.compile(r"[A-Za-z][A-Za-z0-9+.\-]*://")
-_WS_RE = re.compile(r"\s")
-_LETTER_RE = re.compile(r"[A-Za-z]")
-_NOT_LETTER_RE = re.compile(r"[^A-Za-z]")
-# a reference, a template, a YAML anchor / alias / tag / block, a path
-_REFERENCE_FIRST = frozenset("$%<{@!(*&~/.\\#[|>")
-
-
-def unquote(value):
-    if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
-        return value[1:-1]
-    return value
-
-
-def secret_value(value):
-    """True for a (quoted or bare) value that looks like a credential: at
-    least 8 ASCII characters, no whitespace, letters and something else, not
-    a reference ($VAR, ${…}, {{…}}, %(…)s, @Vault(…)), a YAML anchor or tag,
-    a path, a URL, a name (_NAME_RE) or a placeholder (changeme,
-    your-token-here, xxxx, …EXAMPLE…, or anything containing "secret" or
-    "passw"). A translation ("Contraseña") is not ASCII."""
-    v = unquote(value)
-    if len(v) < 8 or not v.isascii() or _WS_RE.search(v) or v[0] in _REFERENCE_FIRST:
-        return False
-    if _URL_START_RE.match(v) or PLACEHOLDER_RE.search(v) or _NAME_RE.fullmatch(v):
-        return False
-    return bool(_LETTER_RE.search(v) and _NOT_LETTER_RE.search(v)) and entropy(v) >= 2.5
-
-
-def entropy(v):
-    """Shannon entropy of `v` in bits per character: under 2.5 a value
-    repeats itself ("WPAPSKWPA2PSK", "aaaa1111") rather than looks random."""
-    counts = {}
-    for ch in v:
-        counts[ch] = counts.get(ch, 0) + 1
-    n = len(v)
-    h = 0.0
-    for c in counts.values():
-        h -= c / n * math.log2(c / n)
-    return h
+    return [tuple(s) for s in _check("comment_spans", content)]
 
 
 def secret_key(key):
-    """True for a key named like a credential (SECRET_KEY_RE, not NOT_SECRET_KEY_RE)."""
-    return bool(SECRET_KEY_RE.search(key)) and not NOT_SECRET_KEY_RE.search(key)
+    """True for a key named like a credential (and not a cursor's or an anti-CSRF token's)."""
+    return _check("secret_key", key)
 
 
-# scheme://user:password@host — each part bounded, the scheme from a run start
-URL_CRED_RE = re.compile(
-    r"(?<![A-Za-z0-9+.\-])[A-Za-z][A-Za-z0-9+.\-]{0,31}://([^\s/:@'\"]{1,256}):"
-    r"([^\s/@'\"]{1,512})@([^\s/:?#'\"]{1,256})")
-LOCAL_HOSTS = frozenset(("localhost", "127.0.0.1", "0.0.0.0", "host.docker.internal"))
-#: Webhook URLs that carry their own secret (Slack, Discord).
-WEBHOOK_RE = re.compile(
-    r"https://hooks\.slack\.com/services/T[A-Z0-9]{8,12}/B[A-Z0-9]{8,12}/[A-Za-z0-9]{20,32}"
-    r"|https://(?:ptb\.|canary\.)?discord(?:app)?\.com/api/webhooks/[0-9]{5,20}/[A-Za-z0-9_\-]{20,100}")
-
-
-#: A .netrc's password token and its value: a run without blanks, or "…" quoted.
-NETRC_PASSWORD_RE = re.compile(r'(?<![^ \t])password[ \t]+("[^"\n]*"|[^\s"]+)')
-#: A .netrc's tokens: a run without blanks, or "…" quoted.
-_NETRC_TOKEN_RE = re.compile(r'"[^"\n]*"|[^\s"]+')
-#: The logins of anonymous FTP, whose password is by convention an e-mail address, not a secret (N-25).
-NETRC_ANONYMOUS = frozenset(("anonymous", "ftp"))
-
-
-def netrc_anonymous(code_lines):
-    """{line index: {column}} of the password values of a .netrc's entries
-    whose login is anonymous FTP's (`anonymous`, `ftp`, in any case), which
-    S-SECRET does not report (N-25). An entry runs from `machine NAME` or
-    `default` to the next one, over as many lines as it takes, its login
-    before or after its password; a `macdef`'s lines, up to an empty one, are
-    not tokens. `code_lines`: the file's lines, comments removed."""
-    skip, login, passwords = {}, None, []
-    pending, in_macro = None, False
-
-    def close():
-        if login is not None and unquote(login).lower() in NETRC_ANONYMOUS:
-            for i, col in passwords:
-                skip.setdefault(i, set()).add(col)
-    for i, line in enumerate(code_lines):
-        if in_macro:
-            in_macro = bool(line.strip())
-            continue
-        for m in _NETRC_TOKEN_RE.finditer(line):
-            token = m.group(0)
-            if pending is not None:
-                if pending == "login":
-                    login = token
-                elif pending == "password":
-                    passwords.append((i, m.start()))
-                elif pending == "macdef":
-                    in_macro = True                 # (its body is the lines that follow, to an empty one)
-                pending = None
-                if in_macro:
-                    break
-                continue
-            if token in ("machine", "default"):
-                close()
-                login, passwords = None, []
-                pending = "machine" if token == "machine" else None
-            elif token in ("login", "password", "account", "macdef"):
-                pending = token
-    close()
-    return skip
+def secret_value(value):
+    """True for a (quoted or bare) value that looks like a credential."""
+    return _check("secret_value", value)
 
 
 def secret_col(code, netrc=False, skip=()):
     """Column of the first credential S-SECRET reports on a config line (its
     comment text removed), else None. `netrc`: the line is a .netrc's;
-    `skip`: the columns of its password values that are not secrets
-    (netrc_anonymous)."""
-    if netrc:
-        for m in NETRC_PASSWORD_RE.finditer(code):
-            if m.start(1) not in skip and secret_value(m.group(1)):
-                return m.start(1)
-    for m in KV_RE.finditer(code):
-        value = m.group(3)
-        if value[0] not in "\"'":
-            after = code[m.end(3):]
-            if after[:1] in ("{", "}"):
-                continue                # part of a template: ${VAR:default}, pre${VAR}
-            if m.group(2) == ":" and after.strip():
-                continue                # a YAML phrase: `key: some words` is all value
-        if secret_key(m.group(1)) and secret_value(value):
-            return m.start(1)
-    if "://" in code:
-        for m in URL_CRED_RE.finditer(code):
-            user, password, host = m.group(1), m.group(2), m.group(3)
-            if password != user and host.lower() not in LOCAL_HOSTS and secret_value(password):
-                return m.start(2)
-        m = WEBHOOK_RE.search(code)
-        if m:
-            return m.start()
-    return None
+    `skip`: the columns of its password values that are not secrets."""
+    return _check("secret_col", code, netrc=bool(netrc), skip=sorted(skip))
 
 
 def redact_values(line, netrc=False):
     """`line` with the value of every credential-named key replaced by
-    [redacted] — whatever the value looks like, unless it is a reference or
-    a template ($VAR, {{…}}, <…>, %…): a snippet's context lines are shown
-    only as far as they cannot carry a credential. `netrc`: a .netrc's line,
-    whose password tokens' values are redacted too."""
-    if netrc:
-        line = NETRC_PASSWORD_RE.sub(lambda m: m.group(0)[:m.start(1) - m.start(0)] + "[redacted]", line)
-    out, pos = [], 0
-    for m in KV_RE.finditer(line):
-        value = unquote(m.group(3))
-        if not secret_key(m.group(1)) or not value or value[0] in "${<%":
-            continue
-        out.append(line[pos:m.start(3)])
-        out.append("[redacted]")
-        pos = m.end(3)
-    if not out:
-        return line
-    out.append(line[pos:])
-    return "".join(out)
-
-
-# ---- S-TOKEN in config files ---------------------------------------------------
-#: jwt.io's sample token (HS256; sub 1234567890, name John Doe): its payload.
-JWT_IO_PAYLOAD = "eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ"
-
-
-_PEM_BODY_RE = re.compile(r"[A-Za-z0-9+/]{40,}={0,2}")
-_MIXED_RE = (re.compile(r"[A-Z]"), re.compile(r"[a-z]"), re.compile(r"[0-9]"))
-
-
-_STRING_PREFIX_RE = re.compile(r"[A-Za-z][A-Za-z0-9]{0,2}#*[\"']")
-
-
-def _past_pem_separators(text, k, line_start):
-    """The index past what a string or a concatenation puts between a private-key header and its key: blanks, the
-    escapes \\n \\r \\t (with any number of backslashes), backslashes that end the line (a line continued),
-    quotes and a string's prefix before one (`b"`, `rb'`, `u8"`, Rust's `r#"`), `#` (a raw string's closing marks, a
-    comment's), `+`, `,` and `.` (PHP's and Perl's concatenation); at the start of a line after the header's, a
-    comment's `*` and `/` too."""
-    while k < len(text):
-        c = text[k]
-        if c.isspace() or c in "\"'`+,.#" or (line_start and c in "*/"):
-            k += 1
-        elif c == "\\":
-            j = k + 1
-            while j < len(text) and text[j] == "\\":
-                j += 1
-            if j < len(text) and text[j] in "nrt":
-                k = j + 1
-                continue
-            while j < len(text) and text[j].isspace():
-                j += 1
-            if j < len(text):
-                break
-            k = j
-        else:
-            m = _STRING_PREFIX_RE.match(text, k)       # a string's prefix and its quote
-            if not m:
-                break
-            k = m.end()
-    return k
-
-
-def _key_at(text, k):
-    """True when a private key begins at `text[k]`: key material, a base64 run of 40 or more characters that mixes
-    upper case, lower case and digits (a template's "privatekeyprivatekey…" does not), or an encrypted key's
-    "Proc-Type:"."""
-    m = _PEM_BODY_RE.match(text, k)
-    return bool(m and all(r.search(m.group()) for r in _MIXED_RE)) or text.startswith("Proc-Type:", k)
+    [redacted], unless it is a reference or a template. `netrc`: a .netrc's
+    line, whose password tokens' values are redacted too."""
+    return _check("redact_values", line, netrc=bool(netrc))
 
 
 def key_follows(line, end, following):
-    """True when a private-key header's key comes right after it (S-TOKEN-PEM): key material, or an encrypted key's
-    "Proc-Type:" (_key_at), past the separators a string or a concatenation puts there, on the header's line (`line`,
-    the header ending at `end`: read in place, as a line can hold many headers); or, where that line ends with them,
-    at the start of the first of the `following` lines (the caller's window: the next two) that holds anything. Key
-    material further on is not the header's: a minified line runs on for megabytes, and a library keeps a header
-    alone to recognize a key."""
-    k = _past_pem_separators(line, end, False)
-    if k < len(line):
-        return _key_at(line, k)
-    for line in following:
-        k = _past_pem_separators(line, 0, True)
-        if k < len(line):
-            return _key_at(line, k)
-    return False
+    """True when a private-key header's key comes right after it (S-TOKEN-PEM),
+    on its line (the header ending at `end`) or at the start of the first of
+    the `following` lines that holds anything."""
+    return _check("key_follows", line, end=end, following=list(following))
 
 
 def documentation_token(text):
-    """True for a token-rule match that is a documentation sample, not a
-    credential: AWS's example access key ids (AKIA…EXAMPLE) and the jwt.io
-    sample token."""
-    if text.startswith("AKIA"):
-        return text.endswith("EXAMPLE")
-    if text.startswith("eyJ"):
-        return text.partition(".")[2] == JWT_IO_PAYLOAD
-    return False
+    """True for a token-rule match that is a documentation sample (AKIA…EXAMPLE,
+    jwt.io's sample token)."""
+    return _check("documentation_token", text)
