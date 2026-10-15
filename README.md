@@ -478,6 +478,27 @@ A time window is only checked as far back as the feeds reach: a daily `discover 
 
 Why a flag rather than using a cursor automatically: `--since` keeps meaning a time window. A one-off `discover --since 2h` neither jumps to a scheduled job's cursor nor moves it, which would make the job skip what the one-off listed; only `--resume` runs read and write the cursors. There is one cursor per registry per database, so run one `--resume` job per database. What it doesn't list: npm reports only each changed package's latest version, so an npm version superseded between two runs is seen only as its package's newest one; and PyPI files added to an existing release later (a new wheel) aren't changes of their own.
 
+#### New GitHub repositories: `--ecosystem github`
+
+A worm that steals credentials often publishes them in new public repositories under its victims' accounts, and a squatter creates a repository named like a popular one. `discover --ecosystem github --resume` lists every new public repository GitHub creates and keeps the likely-hostile ones:
+
+```bash
+export GITHUB_TOKEN=…                                      # read-only; required (60 requests an hour cannot keep up)
+lazaret-registry discover --ecosystem github --resume      # list and filter; check the candidates for content
+lazaret-registry discover --ecosystem github --resume --scan --ci   # and scan them; exit 1 on SUSPICIOUS,
+                                                           # INCOMPLETE or a campaign repository
+lazaret-registry list                                      # the candidates: waiting, ready, scanned, dropped, reported
+lazaret-registry report github:owner/repo                  # a scanned repository's findings
+```
+
+- **Listing:** GitHub's `/repositories` gives every public repository in the order it was created; the cursor (`discovery_cursors`, `github`) is the last repository ID listed, stored after each page. The first run finds the newest repository (about 32 requests) and lists what comes after it from then on. A repository created private and made public later keeps its old ID and is not listed.
+- **Filters, from the listing alone:** a look-alike of a popular repository (an owner one change from a popular repository's, its separators changed, `-go` or the like added: `shopsprint/decimal` for `shopspring/decimal`), against the repositories of npm's and PyPI's most-downloaded packages and the Go modules on github.com; a copy of a popular repository under another owner with the original's description (when the names file has the descriptions); a campaign marker in the name or description (the Shai-Hulud worms' exfiltration repositories, case and separators folded), reported when listed, with its URL, and **never downloaded**; and your own patterns, `--github-filters FILE` (JSON: `{"include": {"full_name": [regex, …], "description": […]}, "exclude": {…}}`).
+- **Waiting for content:** a new repository is almost always empty, so a candidate is checked 1, 6, 24 and 72 hours after it was listed; empty after the last check, deleted or made private, it is dropped (`list` says which).
+- **Scanning (`--scan`):** the default branch's head, fetched as `lazaret scan github:owner/repo` fetches it, scanned as a project and stored with the commit as its version. The verdict counts the supply-chain findings, a CI file's hardening check only at CRITICAL, as the gate does: an unpinned action alone does not make a repository WARN. A checkout not read whole is INCOMPLETE.
+- **Budgets:** `--max-calls` (default 1,000) across the content checks and scans, then the listing; the run also stops when GitHub's rate limit is nearly spent or answers with a rate limit, and keeps its cursor and its candidates for the next run. Static only: nothing in a repository runs, and secrets are never verified.
+
+Before turning on `--scan` for a schedule, a day of listing and filtering alone shows how many repositories an hour are listed, what each filter keeps and how many candidates get content: set the schedule and `--max-calls` from that.
+
 ### Binary artifacts
 
 Archives are classified file by file. Source files run through the normal ruleset; **binary/compiled files are inspected by content (magic bytes), not extension**, because smuggled binaries are a primary supply-chain vector — malicious code inside a compiled blob never appears in reviewable source. The scanner flags:

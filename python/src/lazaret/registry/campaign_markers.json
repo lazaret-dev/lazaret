@@ -1,0 +1,8 @@
+{
+ "_about": "Campaign markers for GitHub discovery (GH-NEW-REPOS, registry/ghdiscover.py): the names and descriptions of repositories a known campaign creates. A new public repository whose name (field \"name\") or description (\"description\") is one of these, compared with case and every character but letters and digits folded away, is reported when it is listed and never downloaded: such a repository publishes what the campaign stole. A new wave adds a line. Sources: the public reports on the Shai-Hulud npm worms (2025), as the plan quotes them (specs/lazaret-github-new-repos-plan-2026-10-14.md).",
+ "markers": [
+  {"field": "name", "text": "Shai-Hulud", "campaign": "Shai-Hulud: the worm's exfiltration repository"},
+  {"field": "description", "text": "Shai-Hulud Migration", "campaign": "Shai-Hulud: a victim's repository made public"},
+  {"field": "description", "text": "Sha1-Hulud: The Second Coming", "campaign": "Shai-Hulud's second wave: the worm's exfiltration repository"}
+ ]
+}

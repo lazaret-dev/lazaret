@@ -52,8 +52,15 @@ names are the other identifiers of the pages one change from a target, and
 known publishers the other publishers of the pages that look like a
 target's publisher (lookalike.publisher_lookalike), never flagged.
 
+  GitHub  the repositories new GitHub repositories are compared with (GH-NEW-REPOS, lookalike.github_tables):
+        where the npm and PyPI targets keep their code (npm's `repository` field; PyPI's project URLs and home
+        page) and, when fetched with a token, GitHub's most-starred repositories, with their descriptions (the copy
+        test's): the files scripts/fetch-github-targets.py writes (npm.jsonl, pypi.jsonl, stars.jsonl). Owner and
+        repository names only, lower-cased, and the most-starred repositories' descriptions. The "go" targets on
+        github.com are compared too, from the "go" section.
+
 Usage: python3 scripts/update-popular-names.py [NPM_LIB_DIR TOP_PYPI_JSON]
-           [--crates PAGES_DIR [UBUNTU_SOURCES...]] [--vscode PAGES_DIR]
+           [--crates PAGES_DIR [UBUNTU_SOURCES...]] [--vscode PAGES_DIR] [--github FILES_DIR]
            [--go AWESOME_GO_README UBUNTU_SOURCES...] [--check]
 A list not given is kept as it is in the file. An Ubuntu index may be
 xz-compressed. --check compares with the file in the tree instead of
@@ -121,7 +128,8 @@ ABOUT = ("Names for the registry's look-alike check (SC-TYPOSQUAT, lazaret/regis
          f"{TARGETS:,} most-downloaded packages of npm, of PyPI and of crates.io (targets), and the other popular ones "
          "that are one change from a target (known); the Go modules awesome-go lists and Debian packages (targets); "
          "the most-installed VS Code extensions of the Visual Studio Marketplace and Open VSX (targets, known names "
-         "and known publishers). Written by scripts/update-popular-names.py.")
+         "and known publishers); the GitHub repositories of the npm and PyPI targets and the most-starred ones "
+         "(targets, the most-starred ones' descriptions). Written by scripts/update-popular-names.py.")
 
 
 def npm_pypi_sections(npm_lib, top_pypi):
@@ -283,6 +291,114 @@ def go_section(readme, sources):
         "targets": targets}}
 
 
+_GITHUB_REPO_RE = re.compile(r"github\.com[/:]([A-Za-z0-9](?:[A-Za-z0-9-]{0,38}))/([A-Za-z0-9._-]{1,100})",
+                             re.IGNORECASE)
+#: path segments under github.com that are no owner
+_GITHUB_NOT_OWNERS = frozenset({"sponsors", "orgs", "apps", "marketplace", "features", "topics", "settings", "users",
+                                "about", "pricing", "collections", "login", "explore", "site", "enterprise"})
+#: PyPI's project_urls labels that name the code, in the order they are taken (the first that has a repository)
+_PYPI_CODE_LABELS = ("source", "source code", "repository", "code", "github", "homepage", "home", "home page")
+_NPM_HOSTS = ("gitlab:", "bitbucket:", "gist:")
+
+
+def github_repo(text):
+    """The GitHub repository a URL names, `owner/repo` lower-cased, else None."""
+    if not isinstance(text, str):
+        return None
+    m = _GITHUB_REPO_RE.search(text)
+    if not m or m.group(1).lower() in _GITHUB_NOT_OWNERS:
+        return None
+    repo = re.sub(r"\.git$", "", m.group(2)).rstrip(".")
+    return f"{m.group(1)}/{repo}".lower() if repo and repo not in (".", "..") else None
+
+
+def npm_github_repo(field):
+    """npm's `repository` field (a URL, npm's owner/repo shorthand, github:owner/repo, or {url}) -> owner/repo."""
+    url = field.get("url") if isinstance(field, dict) else field
+    if not isinstance(url, str) or url.startswith(_NPM_HOSTS):
+        return None
+    if url.startswith("github:"):
+        url = "github.com/" + url[len("github:"):]
+    elif re.fullmatch(r"[A-Za-z0-9-]+/[A-Za-z0-9._-]+", url):
+        url = "github.com/" + url
+    return github_repo(url)
+
+
+def pypi_github_repo(row):
+    """A PyPI project's code repository: its first project URL whose label names the code (_PYPI_CODE_LABELS), then
+    any project URL, then its home page."""
+    urls = row.get("project_urls") if isinstance(row.get("project_urls"), dict) else {}
+    labelled = {str(k).strip().lower(): v for k, v in urls.items()}
+    for label in _PYPI_CODE_LABELS:
+        found = github_repo(labelled.get(label))
+        if found:
+            return found
+    for v in urls.values():
+        found = github_repo(v)
+        if found:
+            return found
+    return github_repo(row.get("home_page"))
+
+
+def _jsonl(path):
+    p = pathlib.Path(path)
+    if not p.exists():
+        return [], None
+    raw = p.read_bytes()
+    return [json.loads(line) for line in raw.decode("utf-8").splitlines() if line.strip()], hashlib.sha256(raw).hexdigest()
+
+
+def github_section(files_dir):
+    """The "github" section from scripts/fetch-github-targets.py's files: the targets ranked by their package's
+    rank (npm's before PyPI's at one rank, the most-starred after both), each once; the most-starred ones'
+    descriptions."""
+    d = pathlib.Path(files_dir)
+    ranked, sums = _github_ranked(d)
+    if not sums:
+        raise SystemExit(f"--github: no npm.jsonl, pypi.jsonl or stars.jsonl in {d}")
+    targets, descriptions = _github_targets(ranked)
+    return {"github": {
+        "source": ("where npm's and PyPI's targets keep their code (the npm registry's /<name>/latest `repository`; "
+                   "PyPI's /pypi/<name>/json project URLs and home page) and GitHub's most-starred repositories "
+                   "(/search/repositories, when fetched), as scripts/fetch-github-targets.py wrote them ("
+                   + ", ".join(sums) + ")"),
+        "license": ("repository names, which are facts about the packages; the most-starred repositories' "
+                    "descriptions as GitHub gives them, kept for the copy test"),
+        "changes": ("owner/repo only, lower-cased, each once, ranked by its package's rank; descriptions with their "
+                    "white space folded"),
+        "targets": targets, "descriptions": dict(sorted(descriptions.items()))}}
+
+
+_GITHUB_FILES = (("npm.jsonl", lambda r: npm_github_repo(r.get("repository")), 0),
+                 ("pypi.jsonl", pypi_github_repo, 1),
+                 ("stars.jsonl", lambda r: github_repo("github.com/" + str(r.get("full_name") or "")), 2))
+
+
+def _github_ranked(d):
+    """-> ([(rank, list order, owner/repo, row)] of the rows that name a repository, the files' digests)."""
+    ranked, sums = [], []
+    for name, pick, order in _GITHUB_FILES:
+        rows, digest = _jsonl(d / name)
+        if digest:
+            sums.append(f"{name} {digest[:16]}…")
+        good = [row for row in rows if isinstance(row, dict) and "error" not in row]
+        ranked += [(row.get("rank", 0), order, repo, row) for row in good for repo in [pick(row)] if repo]
+    return ranked, sums
+
+
+def _github_targets(ranked):
+    """-> (the repositories in rank order, each once; the most-starred ones' descriptions, white space folded)."""
+    targets, seen, descriptions = [], set(), {}
+    for _rank, order, repo, row in sorted(ranked, key=lambda x: (x[0], x[1], x[2])):
+        if repo not in seen:
+            seen.add(repo)
+            targets.append(repo)
+        text = row.get("description")
+        if order == 2 and isinstance(text, str) and text.strip():
+            descriptions.setdefault(repo, " ".join(text.split()))
+    return targets, descriptions
+
+
 def _extension_ids(text, pages, registry, digest):
     """The identifiers (publisher.name, lower-cased) of one registry's pages, in order."""
     out = []
@@ -340,7 +456,7 @@ def vscode_section(pages_dir):
         "targets": targets, "known": known, "known_publishers": known_publishers}}
 
 
-def build(current, npm_lib=None, top_pypi=None, go=None, crates=None, vscode=None):
+def build(current, npm_lib=None, top_pypi=None, go=None, crates=None, vscode=None, github=None):
     """The file: `current` (the file's data) with the lists given rebuilt."""
     out = {"_about": ABOUT}
     if npm_lib is not None:
@@ -350,6 +466,10 @@ def build(current, npm_lib=None, top_pypi=None, go=None, crates=None, vscode=Non
     out.update(crates_section(*crates) if crates is not None else {"crates": current["crates"]})
     out.update(go_section(*go) if go is not None else {"go": current["go"]})
     out.update(vscode_section(vscode) if vscode is not None else {"vscode": current["vscode"]})
+    if github is not None:
+        out.update(github_section(github))
+    elif "github" in current:
+        out["github"] = current["github"]
     return out
 
 
@@ -364,6 +484,13 @@ def main(argv):
             print(__doc__.split("\n\n")[-1].strip(), file=sys.stderr)
             return 2
         crates, args = (args[at + 1], args[at + 2:end]), args[:at] + args[end:]
+    github = None
+    if "--github" in args:
+        at = args.index("--github")
+        if at + 1 >= len(args) or args[at + 1].startswith("--"):
+            print(__doc__.split("\n\n")[-1].strip(), file=sys.stderr)
+            return 2
+        github, args = args[at + 1], args[:at] + args[at + 2:]
     vscode = None
     if "--vscode" in args:
         at = args.index("--vscode")
@@ -376,7 +503,8 @@ def main(argv):
         at = args.index("--go")
         args, files = args[:at], args[at + 1:]
         go = (files[0], files[1:]) if len(files) >= 2 else ()          # (the README, then the indices)
-    if len(args) not in ((0, 2) if go is not None or crates is not None or vscode is not None else (2,)) or go == ():
+    if len(args) not in ((0, 2) if go is not None or crates is not None or vscode is not None or github is not None
+                         else (2,)) or go == ():
         print(__doc__.split("\n\n")[-1].strip(), file=sys.stderr)
         return 2
     current = json.loads(OUT.read_text(encoding="utf-8")) if OUT.exists() else {}
@@ -384,7 +512,8 @@ def main(argv):
             or (crates is None and "crates" not in current) or (vscode is None and "vscode" not in current)):
         print(f"{OUT.relative_to(ROOT)} has no list to keep: give every source", file=sys.stderr)
         return 2
-    text = json.dumps(build(current, *args, go=go, crates=crates, vscode=vscode), indent=1, ensure_ascii=False) + "\n"
+    text = json.dumps(build(current, *args, go=go, crates=crates, vscode=vscode, github=github), indent=1,
+                      ensure_ascii=False) + "\n"
     if "--check" in argv:
         now = OUT.read_text(encoding="utf-8") if OUT.exists() else ""
         if now != text:
@@ -398,7 +527,9 @@ def main(argv):
           f"known; PyPI {len(data['pypi']['targets'])} targets, {len(data['pypi']['known'])} known; crates "
           f"{len(data['crates']['targets'])} targets, {len(data['crates']['known'])} known; Go "
           f"{len(data['go']['targets'])} modules; VS Code {len(data['vscode']['targets'])} targets, "
-          f"{len(data['vscode']['known'])} known, {len(data['vscode']['known_publishers'])} known publishers")
+          f"{len(data['vscode']['known'])} known, {len(data['vscode']['known_publishers'])} known publishers"
+          + (f"; GitHub {len(data['github']['targets'])} repositories, {len(data['github']['descriptions'])} "
+             f"descriptions" if "github" in data else ""))
     return 0
 
 

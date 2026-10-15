@@ -143,6 +143,7 @@ def _load():
         for eco in ("npm", "pypi", "crates"):
             _DATA[eco] = tables(raw[eco]["targets"], raw[eco]["known"])
         _DATA["go"] = go_tables(raw["go"]["targets"])
+        _DATA["github"] = github_tables(raw.get("github") or {}, raw["go"]["targets"])
         vscode = raw.get("vscode") or {}
         _DATA["vscode"] = vscode_tables(vscode.get("targets") or (), vscode.get("known") or (),
                                         vscode.get("known_publishers") or ())
@@ -443,6 +444,41 @@ def go_lookalike(path, data=None, own=None):
         return None
     major = _go_major(p)
     return min(hits, key=lambda h: (_go_major(h[0]) != major, rank[h[0]]))
+
+
+def github_tables(section, go_targets):
+    """The look-alike tables of GitHub repositories (GH-NEW-REPOS): go_tables() of the popular repositories as Go
+    paths (github.com/owner/repo) — popular_names.json's "github" targets (owner/repo) and the "go" targets on
+    github.com — and, by repository name lower-cased, the [(owner, description)] the "github" section's
+    "descriptions" give ({"owner/repo": description}), for the copy test."""
+    paths = [f"github.com/{t.lower()}" for t in section.get("targets") or () if _owner_repo(t)]
+    paths += [t for t in go_targets if _github_module(t)]
+    return go_tables(filter(None, map(go_path, paths))), _copies(section.get("descriptions") or {})
+
+
+def _owner_repo(text):
+    return isinstance(text, str) and text.count("/") == 1
+
+
+def _github_module(path):
+    """A Go module path that is a GitHub repository's root (github.com/owner/repo)."""
+    return path.startswith("github.com/") and path.count("/") == 2
+
+
+def _copies(descriptions):
+    """{"owner/repo": description} -> {repo lower-cased: [(owner lower-cased, description)]}, empty ones left out."""
+    copies = {}
+    for full, text in sorted(descriptions.items()):
+        if _owner_repo(full) and isinstance(text, str) and text.strip():
+            owner, name = full.lower().split("/")
+            copies.setdefault(name, []).append((owner, text))
+    return copies
+
+
+def github_lookalike(full_name, data=None):
+    """go_lookalike() of a GitHub repository, `owner/repo`, against the popular repositories (github_tables)."""
+    tables_ = data if data is not None else _load()["github"][0]
+    return go_lookalike(f"github.com/{full_name}", data=tables_) if isinstance(full_name, str) else None
 
 
 def _line_of(text, needles):

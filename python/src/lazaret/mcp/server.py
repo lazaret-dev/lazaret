@@ -676,6 +676,9 @@ def tool_scan_package(args):
         raise ValueError("spec must be a string like npm:left-pad@1.3.0")
     ctx = _ctx()
     eco, name, ver = lazaret_repo.parse_spec(spec)
+    if eco == "github":                   # (a repository: lazaret-registry scan github:… or lazaret scan github:…)
+        raise ValueError("scan_package scans registry packages: scan a GitHub repository with "
+                         "`lazaret scan github:owner/repo` or `lazaret-registry scan github:owner/repo`")
     # open the state DB first: an unreachable DB is a tool error before any download
     with lazaret_repo.Store(REGISTRY_DB) as store:
         res = lazaret_repo.scan_package(eco, name, ver, full=bool(args.get("full")),

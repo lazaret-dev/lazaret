@@ -1686,6 +1686,35 @@ as a client without the floor would reach it), and both CLIs against the same
 stub with the same results (`test_js_parity_verify`). `scripts/verifylive` is the manual check
 against the real services, run before a release.
 
+### l. New GitHub repositories (`ghdiscover.py`, GH-NEW-REPOS)
+
+`lazaret-registry discover --ecosystem github --resume [--scan]` lists every
+new public repository and keeps the likely-hostile ones (John's scope, Oct
+14; specs/lazaret-github-new-repos-plan-2026-10-14.md). GitHub's
+`/repositories` is the complete source: every public repository in creation
+order, 100 a page, paged by the last ID alone; the cursor is that ID
+(`discovery_cursors`, `github`), stored after each page, so a stopped run
+repeats at most one page. The first run finds the newest repository by a
+search on `since` (doubling, then halving) and starts there. The filters read
+the listing alone: a look-alike by Go's owner rules (`lookalike.
+github_lookalike`, on `popular_names.json`'s "github" targets and the "go"
+targets on github.com), a copy with the original's description, a campaign
+marker (`campaign_markers.json`, compared whole with case and separators
+folded: a repository that publishes stolen credentials is reported and never
+downloaded) and the user's patterns. A candidate (`github_candidates`, in
+SQLite and Postgres) waits for content: `GET /repos/{owner}/{repo}` at 1, 6,
+24 and 72 hours after it was listed; dropped when still empty, gone or made
+private. A scan is `sources.checkout` and `core.scan_project`, stored with
+eco `github` and the commit as its version, profile `project`; its verdict
+is `decide_verdict` over the findings with a CI file's hardening check below
+CRITICAL left out (`core.HARDENING_RULES`, as the gate leaves it out), and a
+checkout not read whole is a truncated part (INCOMPLETE at best). The run's
+calls (`--max-calls`) go to what is due first (checks, then scans), then to
+the listing; GitHub's rate limit (`X-RateLimit-Remaining` at `RATE_FLOOR`, a
+403 or 429 that says so) stops the run with its cursor and candidates kept.
+`sources.Client.get` hands the answer's headers back (`reply_headers`) for
+that. A token is required; nothing runs; secrets are never verified.
+
 ## 6. How to add or change a rule — the loop
 
 This is the working method. Follow it; it is why the tool has stayed trustworthy.

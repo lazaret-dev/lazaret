@@ -65,5 +65,27 @@ CREATE TABLE IF NOT EXISTS discovery_cursors (
     updated_at TEXT NOT NULL             -- when a --resume run last stored it
 );
 
-GRANT SELECT, INSERT, UPDATE, DELETE ON packages, scans, discovery_cursors TO lazaret_app;
+-- `discover --ecosystem github --resume` (GH-NEW-REPOS): the new public
+-- repositories a filter kept, each waiting for content, scanned, reported (a
+-- campaign repository, never downloaded) or dropped
+CREATE TABLE IF NOT EXISTS github_candidates (
+    repo_id        BIGINT PRIMARY KEY,   -- GitHub's repository ID
+    full_name      TEXT NOT NULL,        -- owner/repo
+    description    TEXT,
+    fork           INTEGER NOT NULL,     -- 1 for a fork
+    filters        TEXT NOT NULL,        -- JSON list: what matched
+    listed_at      TEXT NOT NULL,        -- ISO 8601 UTC
+    state          TEXT NOT NULL,        -- 'waiting' | 'ready' | 'scanned' | 'reported' | 'dropped'
+    next_check     TEXT,                 -- when its content is checked next (waiting)
+    checks         INTEGER NOT NULL,
+    size           INTEGER,              -- GitHub's size, KB
+    pushed_at      TEXT,
+    default_branch TEXT,
+    commit_sha     TEXT,                 -- the commit scanned
+    verdict        TEXT,
+    last_error     TEXT,                 -- why it was dropped, or what failed last
+    updated_at     TEXT NOT NULL
+);
+
+GRANT SELECT, INSERT, UPDATE, DELETE ON packages, scans, discovery_cursors, github_candidates TO lazaret_app;
 GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO lazaret_app;

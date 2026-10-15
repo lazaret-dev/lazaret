@@ -532,6 +532,13 @@ def parse_spec(spec):
                         f"openvsx:<namespace>.<name> or vscode:<publisher>.<name> — got {spec!r}")
     eco, rest = spec.split(":", 1)
     eco = eco.strip().lower()
+    if eco == "github":                           # a repository discovery found (GH-NEW-REPOS): ref is the version
+        from lazaret.registry import sources
+        try:
+            src = sources.parse_source(f"github:{rest.strip()}")
+        except sources.SourceError as exc:
+            raise SpecError(str(exc)) from None
+        return eco, src.path, src.ref
     if eco not in ECOSYSTEMS:
         raise SpecError(f"Unknown ecosystem {eco!r} (use npm, pypi, go, crates, openvsx or vscode)")
     module = registry_module(eco)
@@ -5770,6 +5777,25 @@ def _cursor_table(t=""):
             f"updated_at TEXT NOT NULL)")
 
 
+def _candidate_table(t=""):
+    """DDL of the GitHub candidates (GH-NEW-REPOS, registry/ghdiscover.py; the same for SQLite and Postgres): a new
+    public repository a filter kept, by GitHub's repository ID. filters is a JSON list of what matched; state is
+    waiting (a content check is due at next_check), ready (it has content, not scanned yet), scanned, reported (a
+    campaign repository: never downloaded) or dropped (still empty after the last check, gone or made private:
+    last_error says which); the times are ISO 8601 UTC."""
+    return (f"CREATE TABLE IF NOT EXISTS {t}github_candidates ("
+            f"repo_id BIGINT PRIMARY KEY, full_name TEXT NOT NULL, description TEXT, fork INTEGER NOT NULL, "
+            f"filters TEXT NOT NULL, listed_at TEXT NOT NULL, state TEXT NOT NULL, next_check TEXT, "
+            f"checks INTEGER NOT NULL, size INTEGER, pushed_at TEXT, default_branch TEXT, commit_sha TEXT, "
+            f"verdict TEXT, last_error TEXT, updated_at TEXT NOT NULL)")
+
+
+#: github_candidates' columns, in order (Store.github_candidates' rows are dicts of them)
+CANDIDATE_COLUMNS = ("repo_id", "full_name", "description", "fork", "filters", "listed_at", "state", "next_check",
+                     "checks", "size", "pushed_at", "default_branch", "commit_sha", "verdict", "last_error",
+                     "updated_at")
+
+
 class Store:
     def __init__(self, dsn):
         kind, target = classify_dsn(dsn)
@@ -5885,7 +5911,8 @@ class Store:
                 ALTER TABLE {self.t}scans ADD COLUMN IF NOT EXISTS artifacts JSONB;
                 CREATE INDEX IF NOT EXISTS idx_scans_package
                 ON {self.t}scans(package_id, scanned_at DESC);
-                {_cursor_table(self.t)}""")
+                {_cursor_table(self.t)};
+                {_candidate_table(self.t)}""")
             return
         cur = self.conn.cursor()
         serial, jsontype = "INTEGER PRIMARY KEY AUTOINCREMENT", "TEXT"
@@ -5907,6 +5934,7 @@ class Store:
         cur.execute(f"CREATE INDEX IF NOT EXISTS idx_scans_package "
                     f"ON {self.t}scans(package_id, scanned_at DESC)")
         cur.execute(_cursor_table(self.t))
+        cur.execute(_candidate_table(self.t))
         self.conn.commit()
 
     def _pg_call(self, run):
@@ -6114,6 +6142,70 @@ class Store:
         except Exception:
             self.conn.rollback()
             raise
+
+    def _write(self, sql, values):
+        """One write statement, its own transaction (every caller's is an idempotent upsert or update)."""
+        if self.pg:
+            self._pg_call(lambda: self.conn.execute(sql, *values))
+            return
+        try:
+            self.conn.execute("BEGIN IMMEDIATE")
+            self.conn.execute(sql, values)
+            self.conn.commit()
+        except Exception:
+            self.conn.rollback()
+            raise
+
+    def add_github_candidate(self, repo_id, full_name, description, fork, filters, listed_at, state, next_check):
+        """Keep a repository a filter matched (GH-NEW-REPOS). One already kept stays as it is: a run that lists a
+        page again (after a stop) changes nothing."""
+        now = datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")
+        values = (int(repo_id), _db_text(full_name), _db_text(description) if description else None,
+                  1 if fork else 0, db_json(list(filters)), listed_at, state, next_check, 0, now)
+        sql = (f"INSERT INTO {self.t}github_candidates (repo_id,full_name,description,fork,filters,listed_at,"
+               f"state,next_check,checks,updated_at) VALUES ({','.join(self._phs(len(values)))}) "
+               f"ON CONFLICT (repo_id) DO NOTHING")
+        self._write(sql, values)
+
+    def update_github_candidate(self, repo_id, **fields):
+        """Set some of a candidate's columns (CANDIDATE_COLUMNS, not repo_id); updated_at is set too."""
+        fields = {k: v for k, v in fields.items() if k in CANDIDATE_COLUMNS and k not in ("repo_id", "updated_at")}
+        fields["updated_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")
+        names = sorted(fields)
+        values = [_db_text(fields[k]) if isinstance(fields[k], str) else fields[k] for k in names]
+        phs = self._phs(len(names) + 1)
+        sets = ", ".join(f"{k}={ph}" for k, ph in zip(names, phs))
+        self._write(f"UPDATE {self.t}github_candidates SET {sets} WHERE repo_id={phs[-1]}",
+                    tuple(values) + (int(repo_id),))
+
+    def github_candidates(self, states=None, due_by=None):
+        """The candidates (dicts of CANDIDATE_COLUMNS, filters parsed), oldest listed first; only those in `states`
+        when given, and with `due_by` (ISO 8601 UTC) only those whose next check is due by then."""
+        where, args = [], []
+        if states:
+            phs = self._phs(len(args) + len(states))[len(args):]
+            where.append(f"state IN ({','.join(phs)})")
+            args += list(states)
+        if due_by is not None:
+            where.append(f"next_check IS NOT NULL AND next_check <= {self._phs(len(args) + 1)[-1]}")
+            args.append(due_by)
+        sql = (f"SELECT {','.join(CANDIDATE_COLUMNS)} FROM {self.t}github_candidates"
+               + (" WHERE " + " AND ".join(where) if where else "") + " ORDER BY listed_at, repo_id")
+        if self.pg:
+            rows = self._pg_call(lambda: self.conn.fetch(sql, *args))
+        else:
+            cur = self.conn.cursor()
+            cur.execute(sql, args)
+            rows = cur.fetchall()
+        out = []
+        for row in rows:
+            d = dict(zip(CANDIDATE_COLUMNS, row))
+            try:
+                d["filters"] = lazaret.json_loads_bounded(d["filters"]) if isinstance(d["filters"], str) else []
+            except (ValueError, TypeError):
+                d["filters"] = []
+            out.append(d)
+        return out
 
     def status(self):
         sql = (f"""
@@ -7052,6 +7144,12 @@ def cmd_discover(store, args):
     cutoff = parse_since(args.since)
     ecos = args.ecosystem or ["pypi", "npm"]
     resume = bool(getattr(args, "resume", False))
+    github_bad = False
+    if "github" in ecos:
+        github_bad = _discover_github(store, args)
+        ecos = [e for e in ecos if e != "github"]
+        if not ecos:
+            return github_bad
     # --resume lists everything since the last run unless --limit says otherwise
     limit = args.limit if args.limit is not None else (0 if resume else 50)
     notes = {}
@@ -7119,7 +7217,60 @@ def cmd_discover(store, args):
         print("hint: `discover --resume` continues where the previous --resume run stopped, "
               "so a scheduled run sees every release (README: Discovering new packages).",
               file=sys.stderr)
-    return gaps or bad or not saved
+    return gaps or bad or not saved or github_bad
+
+
+def _discover_github(store, args):
+    """discover --ecosystem github --resume (GH-NEW-REPOS, registry/ghdiscover.py): due content checks, scans with
+    --scan, then the new repositories since the cursor, filtered. Returns True when --ci should fail the run: a
+    scan of this run SUSPICIOUS or INCOMPLETE, or a campaign repository listed. A scan that failed is an error of
+    the run (exit 1), as any package's is."""
+    from lazaret.registry import ghdiscover
+    if not getattr(args, "resume", False):
+        raise ghdiscover.DiscoveryError("github discovery reads GitHub's list of new repositories from a stored "
+                                        "cursor: use discover --ecosystem github --resume")
+    patterns = ghdiscover.load_patterns(args.github_filters) if getattr(args, "github_filters", None) else None
+    max_calls = args.max_calls if getattr(args, "max_calls", None) else ghdiscover.DEFAULT_MAX_CALLS
+    out = ghdiscover.run(store, scan=args.scan, max_calls=max_calls, filters=ghdiscover.Filters(patterns=patterns))
+    _print_github_run(out)
+    bad = bool(out["campaigns"])
+    for res in out["scans"]:
+        print_scan(res)
+        bad |= res["verdict"] in BAD_VERDICTS
+    _github_run_errors(out, getattr(args, "_errors", None))
+    return bad
+
+
+def _print_github_run(out):
+    """What a github discovery run listed, kept, reported and checked."""
+    s = lazaret.sanitize_term
+    print("GitHub:")
+    if not out["first"]:
+        print(f"  listed {out['listed']:,} new repositories in {out['pages']} page(s), up to ID {out['cursor']}"
+              + ("; caught up" if out["caughtUp"] else ""))
+    elif out["cursor"] is not None:
+        print(f"  first run: the newest public repository is ID {out['cursor']}; the next run lists the ones "
+              f"created after it")
+    if out["matches"]:
+        print(f"  kept {len(out['candidates']) + len(out['campaigns'])}: "
+              + ", ".join(f"{k} {v}" for k, v in sorted(out["matches"].items())))
+    for full, marker, url in out["campaigns"]:
+        print(f"  {c('41;97', ' CAMPAIGN ')} github:{s(full)} — {s(marker)!r} — {s(url)} (not downloaded)")
+    if out["checked"]:
+        print("  content checks: " + ", ".join(f"{k} {v}" for k, v in sorted(out["checked"].items())))
+
+
+def _github_run_errors(out, errors):
+    """A github discovery run's errors (a failed scan is an error of the run) and why it stopped early."""
+    s = lazaret.sanitize_term
+    for e in out["errors"]:
+        print(f"error: {s(e)}", file=sys.stderr)
+        if errors is not None and e.startswith("github:"):
+            errors.append(e.split(": ", 1)[0])
+    if not out["stopped"]:
+        return
+    more = f"; the next --resume run continues from repository {out['cursor']}" if out["cursor"] is not None else ""
+    print(f"warning: github discovery stopped early: {s(out['stopped'])}{more}", file=sys.stderr)
 
 
 def _report_discovery_gaps(ecos, notes):
@@ -7149,7 +7300,7 @@ def cmd_scan(store, specs, full, rescan, errors=None):
             eco, name, ver = parse_spec(spec)
             pid, _ = store.add_package(eco, name)
             resolved = None
-            if not rescan:
+            if not rescan and eco != "github":         # (a repository's head is known only by fetching it)
                 if ver is None:
                     # scan-all specs carry no version: ask the registry which
                     # version is current BEFORE downloading, so an already
@@ -7168,7 +7319,11 @@ def cmd_scan(store, specs, full, rescan, errors=None):
                           f"use --rescan to redo")
                     exit_bad |= stored in BAD_VERDICTS
                     continue
-            res = scan_package(eco, name, ver, full, resolved=resolved)
+            if eco == "github":
+                from lazaret.registry import ghdiscover
+                res, _calls = ghdiscover.scan_repository(name, ver)
+            else:
+                res = scan_package(eco, name, ver, full, resolved=resolved)
         except Exception as exc:
             # audit H1: {spec} is echoed verbatim and {exc} embeds registry
             # response text (FetchError URL/reason, JSON parse position) —
@@ -7180,7 +7335,7 @@ def cmd_scan(store, specs, full, rescan, errors=None):
                 errors.append(spec)
             continue
         try:
-            if not rescan and store.has_scan(pid, res["version"], profile):
+            if not rescan and store.has_scan(pid, res["version"], res["profile"]):
                 # audit H1: res['version'] is re-read from registry metadata.
                 print(f"{lazaret.sanitize_term(eco)}:{lazaret.sanitize_term(name)}@"
                       f"{lazaret.sanitize_term(res['version'])} already scanned "
@@ -7198,6 +7353,22 @@ def cmd_scan(store, specs, full, rescan, errors=None):
         print_scan(res)
         exit_bad |= res["verdict"] in BAD_VERDICTS  # a partial scan never passes
     return exit_bad
+
+
+def _print_candidates(candidates):
+    """`list`: the new GitHub repositories discovery kept (GH-NEW-REPOS), each with its state, what matched, the
+    verdict of its scan or why it was dropped."""
+    s = lazaret.sanitize_term
+    counts = {}
+    for cand in candidates:
+        counts[cand["state"]] = counts.get(cand["state"], 0) + 1
+    print("\nGitHub candidates: " + ", ".join(f"{k} {v}" for k, v in sorted(counts.items())))
+    for cand in candidates:
+        what = (cand["filters"] or ["?"])[0]
+        tail = {"scanned": f"{cand['verdict']} at {str(cand['commit_sha'])[:12]}",
+                "waiting": f"next check {cand['next_check']}", "dropped": cand["last_error"] or "",
+                "reported": "a campaign repository: not downloaded", "ready": "has content"}.get(cand["state"], "")
+        print(f"  {cand['state']:<9} github:{s(cand['full_name']):<40} {s(tail)} — {s(what)}")
 
 
 def _finish_sweep(errors, bad, ci):
@@ -7269,8 +7440,15 @@ def main():
                     help="discover: max packages to return (default 50, 0 for no limit); "
                          "with --resume, per registry and no limit by default, and the rest "
                          "is left for the next run")
-    ap.add_argument("--ecosystem", action="append", choices=["pypi", "npm"],
-                    help="discover: restrict to pypi and/or npm (default both)")
+    ap.add_argument("--ecosystem", action="append", choices=["pypi", "npm", "github"],
+                    help="discover: restrict to pypi and/or npm (default both); github (with --resume): new "
+                         "public GitHub repositories, filtered (needs GITHUB_TOKEN)")
+    ap.add_argument("--max-calls", type=int, metavar="N",
+                    help="discover --ecosystem github: GitHub requests this run may make, across content checks, "
+                         "scans and the listing (default 1000)")
+    ap.add_argument("--github-filters", metavar="FILE",
+                    help='discover --ecosystem github: your own patterns, JSON: {"include": {"full_name": [regex, '
+                         '…], "description": […]}, "exclude": {…}}')
     ap.add_argument("--scan", action="store_true",
                     help="discover: scan the discovered packages (and track them)")
     ap.add_argument("--add", action="store_true",
@@ -7354,8 +7532,13 @@ def main():
 
         elif args.command == "list":
             rows = store.status()
-            if not rows:
+            candidates = store.github_candidates()
+            if not rows and not candidates:
                 print("no tracked packages")
+                return
+            if candidates:
+                _print_candidates(candidates)
+            if not rows:
                 return
             print(f"\n{'package':<40} {'last scan':<22} {'version':<12} {'verdict':<11} issues")
             for eco, name, ver, profile, at, verdict, n, supply in rows:

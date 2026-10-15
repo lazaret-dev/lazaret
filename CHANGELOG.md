@@ -26,6 +26,24 @@ aggregate):
 
 ### Added
 
+- **New GitHub repositories, found and filtered: `lazaret-registry discover --ecosystem github --resume` (GH-NEW-REPOS;
+  John's scope of Oct 14: every new public repository, filtered).** GitHub's `/repositories` lists every public
+  repository in the order it is created; discovery reads it from a cursor (the last repository ID, stored after each
+  page; the first run finds the newest repository) and keeps a repository the listing alone shows to be likely
+  hostile: a look-alike of a popular repository (an owner one change from its owner's, its separators changed, "-go"
+  and the like added: `shopsprint/decimal`), against the repositories of npm's and PyPI's 5,000 most-downloaded
+  packages and the Go modules on github.com (`popular_names.json`'s new "github" section,
+  `scripts/fetch-github-targets.py` and `update-popular-names.py --github`); a copy of a popular repository under
+  another owner with the original's description, when the names file carries GitHub's descriptions; a campaign marker
+  (`campaign_markers.json`: the Shai-Hulud worms' exfiltration repositories), reported when listed and never
+  downloaded; and your own patterns (`--github-filters FILE`). A candidate is checked for content 1, 6, 24 and 72
+  hours after it was listed, and dropped when still empty, deleted or made private; with `--scan` its default
+  branch's head is scanned as a project (`github:owner/repo` stored with the commit as its version), its verdict the
+  registry's over the supply-chain findings with a CI file's hardening check counted only at CRITICAL. `--max-calls`
+  (default 1,000) and GitHub's rate limit bound a run, which keeps its cursor and candidates for the next; `--ci`
+  fails on a SUSPICIOUS or INCOMPLETE scan or a campaign repository; `list` shows the candidates and `report
+  github:owner/repo` a scan; `lazaret-registry scan github:owner/repo` scans one. `GITHUB_TOKEN` is required. A
+  repository created private and made public later is not listed (GH Archive, phase 2).
 - **Platform wheels for musl Linux and Windows ARM64 (W-1).** `musllinux_1_2_x86_64` and `musllinux_1_2_aarch64`
   (Alpine and other musl systems, musl 1.2 or later) and `win_arm64`, so pip installs the engine there without Rust,
   where it compiled the sdist before (eight platform wheels in all). The musl libraries are built in PyPA's

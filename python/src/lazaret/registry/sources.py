@@ -223,12 +223,20 @@ def _explain(status, headers, url, what, has_token, kind):
 _TOKEN_HEADERS = ("authorization", "private-token")
 
 
-def _http(url, headers, max_bytes, hosts, auth_host, what="fetch", has_token=False, kind="github", auth_path="/"):
+def _keep_headers(into, pairs):
+    """An answer's headers, lower-cased, into the dict `into` (None: nowhere)."""
+    if into is not None:
+        into.update({str(k).lower(): str(v) for k, v in pairs})
+
+
+def _http(url, headers, max_bytes, hosts, auth_host, what="fetch", has_token=False, kind="github", auth_path="/",
+          reply_headers=None):
     """The real fetch: a byte-budgeted read, through the native transport (NET-1, scanner/nativenet.py: `hosts` the
     rule for the URL and every redirect), with the token as a credential of `auth_host` and the paths under
     `auth_path` (decision 14: the native client gives it to those hops and to no other, DESIGN.md §5j; a GitLab
     under a path prefix has the prefix); through urllib and `_Hop`, which takes a token off a redirect anywhere
-    else, where the native transport is not to be used."""
+    else, where the native transport is not to be used. `reply_headers`, a dict, gets the answer's headers,
+    lower-cased, an error's too (GH-NEW-REPOS reads GitHub's rate limit from them)."""
     if _net.chosen(url):
         plain = [(k, v) for k, v in headers.items() if k.lower() not in _TOKEN_HEADERS]
         key = _net.host_key(f"https://{auth_host}/")
@@ -248,6 +256,7 @@ def _http(url, headers, max_bytes, hosts, auth_host, what="fetch", has_token=Fal
                 raise SourceError(f"{what}: network error ({exc.kind})") from None
             raise SourceError(f"{what}: {exc}") from None
         else:
+            _keep_headers(reply_headers, reply.headers)
             if 200 <= reply.status < 300:
                 return reply.body
             err = SourceError(_explain(reply.status, {k.lower(): v for k, v in reply.headers}, url, what, has_token,
@@ -258,6 +267,7 @@ def _http(url, headers, max_bytes, hosts, auth_host, what="fetch", has_token=Fal
     req = urllib.request.Request(url, headers=headers)
     try:
         with opener.open(req, timeout=_repo.DOWNLOAD_TIMEOUT) as r:
+            _keep_headers(reply_headers, r.headers.items())
             buf = bytearray()
             while True:
                 chunk = r.read(_repo.FETCH_CHUNK)
@@ -267,6 +277,7 @@ def _http(url, headers, max_bytes, hosts, auth_host, what="fetch", has_token=Fal
                 if len(buf) > max_bytes:
                     raise SourceError(f"{what}: response exceeds the {max_bytes // (1024 * 1024)}MB budget")
     except urllib.error.HTTPError as exc:
+        _keep_headers(reply_headers, exc.headers.items())
         err = SourceError(_explain(exc.code, {k.lower(): v for k, v in exc.headers.items()},
                                    url, what, has_token, kind))
         err.status = exc.code
@@ -304,7 +315,7 @@ class Client:
             self.hosts = {self.auth_host}
         self.calls = []                          # the URLs asked for, for the report and the tests
 
-    def get(self, url, what, accept=None, max_bytes=None):
+    def get(self, url, what, accept=None, max_bytes=None, reply_headers=None):
         parts = urllib.parse.urlsplit(url)
         if parts.scheme != "https" or parts.netloc.lower() not in self.hosts:
             raise SourceError(f"{what}: host not allowed ({parts.netloc!r})")
@@ -319,8 +330,9 @@ class Client:
             else:
                 headers["PRIVATE-TOKEN"] = self.token
         self.calls.append(_shown(url))
+        more = {} if reply_headers is None else {"reply_headers": reply_headers}   # (a seam need not take it)
         return self._http(url, headers, max_bytes or _repo.MAX_FEED_BYTES, self.hosts, self.auth_host,
-                          what=what, has_token=bool(self.token), kind=self.kind, auth_path=self.auth_path)
+                          what=what, has_token=bool(self.token), kind=self.kind, auth_path=self.auth_path, **more)
 
     # -- GitHub
     def _gh(self, src):
