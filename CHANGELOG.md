@@ -887,6 +887,15 @@ aggregate):
   are being followed keeps none of the follow (it kept the hooks followed before the stop; the scan is incomplete
   either way). core is 367 lines shorter, `deps.js` 632 lines (from 973; 220 of them the vendored modules' and
   crates' readers, which stay). `test_snapshot_deps` and `test_wasm_parity_deps` hold the engine.
+- **The package readers' findings, the engine's (BR-7, step 3 f).** What the Go reader and the Rust reader answer for
+  a module or a crate becomes its findings in the engine (`rust/crates/lazaret-engine/src/readers.rs`: a build
+  script's and a procedural macro's SC-INSTALL-HOOK, the import-time test of what runs at start, SC-USE-RISK,
+  SC-GO-GENERATE): `go_package` and `rs_crate` add them to their answer when asked whose code it is ("module",
+  "crate", "sdist") with the files' names, where core's `package_reader_issues` and the npm package's
+  `packageReaderIssues` made them, for a --deps scan's vendored modules and crates and the registry's releases. The
+  same findings as the Python's on 498 readings (every one the reader tests make, and 400 put together from their
+  samples; 857 findings): no difference; the npm package's the same as its own old code. `test_snapshot_readers` and
+  `test_wasm_parity_readers` hold the engine.
 - **Security: S-XML is a parser set to resolve external entities, not an import of xml.etree, xml.dom or xml.sax
   (Q-3; rule set 2.80.0).** Since Python 3.7.1 none of them resolves an external entity unless told to, and Expat
   2.4.1 refuses entity bombs, so the import flagged safe code: all 20 of BenchmarkPython's safe XXE cases (its 8 real

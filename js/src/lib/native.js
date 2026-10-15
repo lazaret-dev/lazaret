@@ -328,25 +328,36 @@ export function crossFileIssues(files, skipPaths = new Set(), { who = "Dependenc
 
 // ---- Go modules and crates (0.1.9): the readers, and what a vendored manifest says ----
 
+/** A reader's arguments, asking for its findings when `what` is given ("module", "crate", "sdist": whose code it is,
+ * for the words) with the files' `names` as the findings show them (readers.rs, BR-7 step 3 f; engine._reader_args). */
+function readerArgs(args, what, names, redact) {
+  if (what !== null) Object.assign(args, { what, names: [...names], redact: Boolean(redact), neumaier: false });
+  return args;
+}
+
 /** The Go reader (G-1; the Python package's engine.go_package) on a module's files, [[path below the module's root,
- * text]] of its .go files and its cgo packages' .c and .h files; `module`: its path. */
-export function goPackage(files, { module = null, useFileChars = null, useChars = null } = {}) {
+ * text]] of its .go files and its cgo packages' .c and .h files; `module`: its path. With `what` and `names`, its
+ * answer's `issues` are its findings, [[file index, issue]]. */
+export function goPackage(files, { module = null, useFileChars = null, useChars = null, what = null, names = [],
+  redact = true } = {}) {
   const args = { files: files.map(([path, text]) => [path, codePoints(text)]) };
   if (module) args.module = module;
   if (useFileChars !== null) args.use_file_chars = useFileChars;
   if (useChars !== null) args.use_chars = useChars;
-  return call("go_package", args, files.map(([, text]) => text));
+  return call("go_package", readerArgs(args, what, names, redact), files.map(([, text]) => text));
 }
 
 /** The Rust reader (R-1; engine.rs_crate) on a crate's .rs files, [[path below the crate's root, text]]: `build` its
- * build script's path, `procMacro` whether its library is a procedural macro, `lib` its library's root. */
-export function rsCrate(files, { build = null, procMacro = false, lib = null, useFileChars = null, useChars = null } = {}) {
+ * build script's path, `procMacro` whether its library is a procedural macro, `lib` its library's root; `what` and
+ * `names` as goPackage's. */
+export function rsCrate(files, { build = null, procMacro = false, lib = null, useFileChars = null, useChars = null,
+  what = null, names = [], redact = true } = {}) {
   const args = { proc_macro: Boolean(procMacro), files: files.map(([path, text]) => [path, codePoints(text)]) };
   if (build) args.build = build;
   if (lib) args.lib = lib;
   if (useFileChars !== null) args.use_file_chars = useFileChars;
   if (useChars !== null) args.use_chars = useChars;
-  return call("rs_crate", args, files.map(([, text]) => text));
+  return call("rs_crate", readerArgs(args, what, names, redact), files.map(([, text]) => text));
 }
 
 /** What a crate's Cargo.toml says of its build script and library ({build: a path, false or null, lib, proc_macro});

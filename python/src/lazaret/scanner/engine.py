@@ -317,11 +317,22 @@ def _package_call(name, files, args):
     return _native.call(name, args, "".join(text for _path, text in files))
 
 
-def go_package(files, module=None, use_file_chars=None, use_chars=None):
+def _reader_args(args, what, names):
+    """A reader's arguments, asking for its findings when `what` is given ("module", "crate", "sdist": whose code it
+    is, for the words) with the files' names as the findings show them (readers.rs, BR-7 step 3 f)."""
+    if what is not None:
+        from lazaret.scanner import core
+        args.update(what=what, names=list(names), redact=bool(core.REDACT_SECRETS), neumaier=False)
+    return args
+
+
+def go_package(files, module=None, use_file_chars=None, use_chars=None, what=None, names=None):
     """The Go reader (G-1, docs/RUST_ENGINE.md section 22) on a module's files: [(path below the module's root, text)]
     of its .go files and its cgo packages' .c and .h files; `module` is its go.mod's module path. -> {"start": [{"file",
     "reasons", "line"}, …] (what init code reaches: the import-time test), "uses": […] (the rest: every reason, of
-    which SC-USE-RISK counts the strong ones), "read", "unparsed", "generate", "linkname", "useRead"}."""
+    which SC-USE-RISK counts the strong ones), "read", "unparsed", "generate", "linkname", "useRead"}; with `what` and
+    `names` (the files' names, as the findings show them), "issues" too: [[file index, issue], …]
+    (core.package_reader_issues)."""
     args = {}
     if module:
         args["module"] = module
@@ -329,14 +340,16 @@ def go_package(files, module=None, use_file_chars=None, use_chars=None):
         args["use_file_chars"] = int(use_file_chars)
     if use_chars is not None:
         args["use_chars"] = int(use_chars)
-    return _package_call("go_package", files, args)
+    return _package_call("go_package", files, _reader_args(args, what, names))
 
 
-def rs_crate(files, build=None, proc_macro=False, lib=None, use_file_chars=None, use_chars=None):
+def rs_crate(files, build=None, proc_macro=False, lib=None, use_file_chars=None, use_chars=None, what=None,
+             names=None):
     """The Rust reader (R-1, docs/RUST_ENGINE.md section 21) on a crate's .rs files: [(path below the crate's root,
     text)]; `build` is its build script's path, `proc_macro` whether its library is a procedural macro, `lib` its
     library's root. -> {"build": finding or None (the install-script test), "macros": finding or None, "start":
-    [finding, …] (#[ctor], load sections: the import-time test), "uses": […] (the rest), "read", "useRead"}."""
+    [finding, …] (#[ctor], load sections: the import-time test), "uses": […] (the rest), "read", "useRead"}; with
+    `what` and `names`, "issues" too (as go_package's)."""
     args = {"proc_macro": bool(proc_macro)}
     if build:
         args["build"] = build
@@ -346,7 +359,7 @@ def rs_crate(files, build=None, proc_macro=False, lib=None, use_file_chars=None,
         args["use_file_chars"] = int(use_file_chars)
     if use_chars is not None:
         args["use_chars"] = int(use_chars)
-    return _package_call("rs_crate", files, args)
+    return _package_call("rs_crate", files, _reader_args(args, what, names))
 
 
 def cargo_layout(text):

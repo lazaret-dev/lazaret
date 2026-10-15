@@ -14775,6 +14775,76 @@
    "flags": "i",
    "re": "https?://(?:\\d{1,3}\\.){3}\\d{1,3}\\b"
   },
+  "_READER_TEXTS": {
+   "map": {
+    "build_crate": {
+     "value": "is the crate's build script: cargo runs it on the machine that builds any crate that depends on it"
+    },
+    "build_sdist": {
+     "value": "is the build script of a Rust crate in this sdist: pip has cargo build the crate when it installs the sdist, and cargo runs the script on that machine"
+    },
+    "generate_fix": {
+     "value": "Read the commands before running go generate in this module."
+    },
+    "generate_msg": {
+     "value": "{path} has `{cmd}`{more}: go generate runs such commands when someone runs it in the module's folders; a build never does."
+    },
+    "hook_fix_crate": {
+     "value": "Do not build with this crate; report it to crates.io."
+    },
+    "hook_fix_sdist": {
+     "value": "Do not install this sdist; report it to PyPI."
+    },
+    "hook_msg": {
+     "value": "{path} {how}, and it {reasons}."
+    },
+    "macros_crate": {
+     "value": "is a procedural macro: it runs inside the compiler of every crate that uses it"
+    },
+    "macros_sdist": {
+     "value": "is a procedural macro of a Rust crate in this sdist: it runs inside the compiler when pip builds the sdist"
+    },
+    "ref": {
+     "value": "CWE-506 \u00b7 Supply chain"
+    },
+    "start_crate": {
+     "value": "runs before a program's main (#[ctor], a load section, an exported main)"
+    },
+    "start_fix": {
+     "value": "Read that code: what does it run, and where does it send what it collects?"
+    },
+    "start_module": {
+     "value": "runs when any program that imports its package starts (init functions, package-level variables' initializers, cgo constructors)"
+    },
+    "start_sdist": {
+     "value": "runs when the package's Rust extension is loaded, before any of its code is called (#[ctor], a load section)"
+    },
+    "use_fix": {
+     "value": "Don't use the {what}; report it to its registry."
+    },
+    "use_fix_sdist": {
+     "value": "Don't use the package; report it to PyPI."
+    },
+    "use_msg": {
+     "value": "{path} {strong}. Nothing runs it at {when}: it runs when {whose} is called."
+    },
+    "use_when": {
+     "value": "build or start"
+    },
+    "use_when_sdist": {
+     "value": "build or load"
+    },
+    "whose_crate": {
+     "value": "the crate's code"
+    },
+    "whose_module": {
+     "value": "the module's code"
+    },
+    "whose_sdist": {
+     "value": "the package's Rust code"
+    }
+   }
+  },
   "_READ_CALLBACK_RE": {
    "flags": "",
    "re": "\\(\\s*[A-Za-z_$][\\w$]*\\s*,\\s*([A-Za-z_$][\\w$]*)\\s*\\)\\s*(?:=>|\\{)"

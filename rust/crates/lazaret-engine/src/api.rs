@@ -1726,9 +1726,12 @@ fn rs_crate(args: &Value, text: Vec<u32>) -> Result<Value, CallError> {
     if let Some(n) = opt_int(args, "use_chars").filter(|&n| n >= 0) {
         opts.use_chars = n as usize;
     }
+    let spans: Vec<(usize, usize)> = files.iter().map(|(_, a, b)| (*a, *b)).collect();
+    let text = std::sync::Arc::new(text);
+    let shared = text.clone();
     let answer = on_own_stack(move || {
         let pack = crate::pack::current();
-        let refs: Vec<(PyStr, &[u32])> = files.iter().map(|(p, a, b)| (p.clone(), &text[*a..*b])).collect();
+        let refs: Vec<(PyStr, &[u32])> = files.iter().map(|(p, a, b)| (p.clone(), &shared[*a..*b])).collect();
         read_crate(&pack, &refs, &opts)
     });
     let finding = |f: &Found| {
@@ -1739,7 +1742,7 @@ fn rs_crate(args: &Value, text: Vec<u32>) -> Result<Value, CallError> {
         ])
     };
     let findings = |fs: &[Found]| Value::Arr(fs.iter().map(finding).collect());
-    Ok(Value::obj(vec![
+    Ok(with_reader_issues(args, &spans, &text, Value::obj(vec![
         ("build", answer.build.as_ref().map(finding).unwrap_or(Value::Null)),
         ("macros", answer.macros.as_ref().map(finding).unwrap_or(Value::Null)),
         ("start", findings(&answer.start)),
@@ -1754,7 +1757,31 @@ fn rs_crate(args: &Value, text: Vec<u32>) -> Result<Value, CallError> {
                 ("ofChars", Value::Int(answer.use_read.of_chars as i64)),
             ]),
         ),
-    ]))
+    ])))
+}
+
+/// A reader's answer with its findings (readers.rs), when the call says whose code it is: {"what": "module",
+/// "crate" or "sdist", "names": [the files' names as the findings show them], "redact", "neumaier"} -> "issues":
+/// [[file index, issue]…]. `spans`: each file's place in `text`.
+fn with_reader_issues(args: &Value, spans: &[(usize, usize)], text: &[u32], answer: Value) -> Value {
+    let Some(what) = opt_str(args, "what").map(|w| crate::pystr::to_string(&w)) else { return answer };
+    let names = arg_strs(args, "names");
+    let texts: Vec<&[u32]> = spans.iter().map(|&(a, b)| &text[a..b]).collect();
+    let reading = crate::readers::Reading {
+        what: &what,
+        names: &names,
+        texts: &texts,
+        redact: flag(args, "redact", true),
+        neumaier: flag(args, "neumaier", false),
+    };
+    let found = crate::readers::issues(&crate::pack::current(), &answer, &reading);
+    match answer {
+        Value::Obj(mut items) => {
+            items.push((crate::pystr::u("issues"), crate::readers::issues_value(found)));
+            Value::Obj(items)
+        }
+        other => other,
+    }
 }
 
 /// go_package: {"files": [[path, length], …] (their contents, concatenated, are
@@ -1778,9 +1805,12 @@ fn go_package(args: &Value, text: Vec<u32>) -> Result<Value, CallError> {
     if let Some(n) = opt_int(args, "use_chars").filter(|&n| n >= 0) {
         opts.use_chars = n as usize;
     }
+    let spans: Vec<(usize, usize)> = files.iter().map(|(_, a, b)| (*a, *b)).collect();
+    let text = std::sync::Arc::new(text);
+    let shared = text.clone();
     let answer = on_own_stack(move || {
         let pack = crate::pack::current();
-        let refs: Vec<(PyStr, &[u32])> = files.iter().map(|(p, a, b)| (p.clone(), &text[*a..*b])).collect();
+        let refs: Vec<(PyStr, &[u32])> = files.iter().map(|(p, a, b)| (p.clone(), &shared[*a..*b])).collect();
         read_module(&pack, &refs, &opts)
     });
     let finding = |f: &Found| {
@@ -1795,7 +1825,7 @@ fn go_package(args: &Value, text: Vec<u32>) -> Result<Value, CallError> {
         Value::Arr(ds.iter().map(|(f, l, t)| Value::Arr(vec![Value::Int(*f as i64), Value::Int(*l as i64), Value::Str(t.clone())])).collect())
     };
     let ints = |v: &[usize]| Value::Arr(v.iter().map(|&k| Value::Int(k as i64)).collect());
-    Ok(Value::obj(vec![
+    Ok(with_reader_issues(args, &spans, &text, Value::obj(vec![
         ("start", findings(&answer.start)),
         ("uses", findings(&answer.uses)),
         ("read", ints(&answer.read)),
@@ -1811,7 +1841,7 @@ fn go_package(args: &Value, text: Vec<u32>) -> Result<Value, CallError> {
                 ("ofChars", Value::Int(answer.use_read.of_chars as i64)),
             ]),
         ),
-    ]))
+    ])))
 }
 
 /// js_flow: {"files": [[path, length], …] (their contents, concatenated,

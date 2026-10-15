@@ -4005,119 +4005,17 @@ def cargo_layout(manifest, members):
     return (script if script in present else None, root, root is not None and said.get("proc_macro") is True)
 
 
-_PACKAGE_RULE_NAMES = {"SC-INSTALL-HOOK": "Install hook", "SC-IMPORT-RISK": "Risky import-time code",
-                       "SC-USE-RISK": "Hostile code the package runs when used",
-                       "SC-GO-GENERATE": "A go:generate command"}
-_BUILD_SCRIPT_WHY = ("cargo compiles and runs a dependency's build script with the user's privileges, before anything "
-                     "is reviewed, whenever a crate that depends on it is built: the Rust twin of an npm install hook "
-                     "and an sdist's setup.py, where proc-macro1 and rustdecimal ran their payloads.")
-_PROC_MACRO_WHY = ("A procedural macro is a program the compiler loads and runs, with the user's privileges, while it "
-                   "builds every crate that uses the macro: the moment of a build script, an install hook's twin.")
-_SDIST_BUILD_WHY = ("pip builds an sdist's Rust extension with cargo when it installs the sdist (maturin, "
-                    "setuptools-rust), and cargo compiles and runs the crate's build script with the user's "
-                    "privileges before anything is reviewed: the moment of setup.py, and where proc-macro1 and "
-                    "rustdecimal ran their payloads on crates.io.")
-_SDIST_PROC_MACRO_WHY = ("A procedural macro is a program the compiler loads and runs, with the user's privileges, "
-                         "while pip builds the sdist's Rust extension: the moment of setup.py.")
-_GO_START_WHY = ("Go runs nothing when a module is downloaded, but a package's init functions and the initializers of "
-                 "its package-level variables run when any program that imports the package starts, and so does a "
-                 "cgo constructor: where Go malware puts its payload (the 2025 typosquats ran `wget -O - … | "
-                 "/bin/bash` from init). Collecting credentials or the whole environment next to a network call is "
-                 "the shape of a stealer; MAJOR where the code may have a reason, CRITICAL for code no library "
-                 "needs: code fetched and run, a reverse shell, a beacon to a data-capture service.")
-_RUST_START_WHY = ("A function marked #[ctor], placed in a load section (.init_array) or exported as C's main runs "
-                   "before Rust's own main in every program the crate is linked into: an import-time payload's "
-                   "place. MAJOR where the code may have a reason; CRITICAL for code no library needs.")
-_SDIST_START_WHY = ("A function marked #[ctor] or placed in a load section (.init_array) runs when the package's "
-                    "Rust extension module is loaded, at import, before any of its code is called: an import-time "
-                    "payload's place. MAJOR where the code may have a reason; CRITICAL for code no library needs.")
-_PACKAGE_USE_RISK_WHY = ("A payload need not run on install or import to reach you: a logger's constructor, a "
-                         "middleware or a script the package spawns runs it the first time your code uses the "
-                         "package. These are the shapes no library needs: code fetched and run, a reverse shell, "
-                         "hidden PowerShell, credentials sent to an exfiltration service, a beacon to a data-capture "
-                         "service.")
-_GO_GENERATE_WHY = ("A //go:generate line names a command for go generate to run. Nothing runs it when the module is "
-                    "built or imported; it runs when someone runs go generate in the module's folders, which is a "
-                    "developer's step, so it is listed rather than judged.")
-
-
-def _one_line(text, limit):
-    """`text` on one line, at most `limit` characters."""
-    text = " ".join(str(text).split())
-    return text if len(text) <= limit else text[:limit - 1] + "…"
-
-
-def package_reader_issues(answer, order, texts, what):
-    """The findings of a reader's answer (engine.go_package, engine.rs_crate)
-    for the files `order` (their paths, in the order the reader was given
-    them; `texts`: path -> text) -> (issues, what its use-time step read).
-    `what`: "module" (a Go module's), "crate" (a crate's) or "sdist" (the
-    crate inside an sdist, N-17), for the words. A build script and a
-    procedural macro are SC-INSTALL-HOOK, CRITICAL for any reason; what runs
-    at start (Go's init code, #[ctor]) the import-time test; the strong
-    reasons of the rest SC-USE-RISK; //go:generate SC-GO-GENERATE (INFO)."""
-    issues = []
-
-    def at(found):
-        return order[found["file"]] if 0 <= found.get("file", -1) < len(order) else order[0]
-
-    def issue(rule, sev, path, line, msg, why, fix):
-        lines = (texts.get(path) or "").split("\n")
-        issues.append(mk_issue({"id": rule, "name": _PACKAGE_RULE_NAMES[rule], "type": "HOTSPOT", "sev": sev,
-                                "msg": msg, "why": why, "fix": fix, "ref": "CWE-506 · Supply chain"},
-                               path, line, lines, redactor=_Redactor(lines)))      # (the file's own literals too)
-
-    sdist = what == "sdist"
-    for found, how, why in (
-            (answer.get("build"),
-             "is the build script of a Rust crate in this sdist: pip has cargo build the crate when it installs "
-             "the sdist, and cargo runs the script on that machine" if sdist else
-             "is the crate's build script: cargo runs it on the machine that builds any crate that depends on it",
-             _SDIST_BUILD_WHY if sdist else _BUILD_SCRIPT_WHY),
-            (answer.get("macros"),
-             "is a procedural macro of a Rust crate in this sdist: it runs inside the compiler when pip builds "
-             "the sdist" if sdist else
-             "is a procedural macro: it runs inside the compiler of every crate that uses it",
-             _SDIST_PROC_MACRO_WHY if sdist else _PROC_MACRO_WHY)):
-        if found and found.get("reasons"):
-            path = at(found)
-            issue("SC-INSTALL-HOOK", "CRITICAL", path, found.get("line") or 1,
-                  f"{path} {how}, and it {'; and '.join(found['reasons'])}.", why,
-                  "Do not install this sdist; report it to PyPI." if sdist else
-                  "Do not build with this crate; report it to crates.io.")
-    start_how, start_why = {
-        "module": ("runs when any program that imports its package starts (init functions, package-level "
-                   "variables' initializers, cgo constructors)", _GO_START_WHY),
-        "crate": ("runs before a program's main (#[ctor], a load section, an exported main)", _RUST_START_WHY),
-        "sdist": ("runs when the package's Rust extension is loaded, before any of its code is called (#[ctor], "
-                  "a load section)", _SDIST_START_WHY)}[what]
-    for found in answer.get("start") or []:
-        reasons = found.get("reasons") or []
-        if reasons:
-            path = at(found)
-            issue("SC-IMPORT-RISK", import_time_severity(reasons), path, found.get("line") or 1,
-                  f"{path} {start_how}, and it {'; and '.join(reasons)}.", start_why,
-                  "Read that code: what does it run, and where does it send what it collects?")
-    whose = {"module": "the module's code", "crate": "the crate's code", "sdist": "the package's Rust code"}[what]
-    for found in answer.get("uses") or []:
-        strong = [r for r in found.get("reasons") or [] if r.startswith(_STRONG_IMPORT_REASONS)]
-        if strong:
-            path = at(found)
-            issue("SC-USE-RISK", "CRITICAL", path, found.get("line") or 1,
-                  f"{path} {'; and '.join(strong)}. Nothing runs it at "
-                  f"{'build or load' if sdist else 'build or start'}: it runs when {whose} is called.",
-                  _PACKAGE_USE_RISK_WHY,
-                  "Don't use the package; report it to PyPI." if sdist else
-                  f"Don't use the {what}; report it to its registry.")
-    generate = answer.get("generate") or []
-    if generate:
-        k, line, cmd = generate[0]
-        path = order[k] if 0 <= k < len(order) else order[0]
-        more = f" (and {len(generate) - 1:,} more)" if len(generate) > 1 else ""
-        issue("SC-GO-GENERATE", "INFO", path, line,
-              f"{path} has `{_one_line(cmd, 200)}`{more}: go generate runs such commands when someone runs it in "
-              f"the module's folders; a build never does.", _GO_GENERATE_WHY,
-              "Read the commands before running go generate in this module.")
+def package_reader_issues(answer, order):
+    """The findings of a reader's answer (engine.go_package, engine.rs_crate,
+    asked with `what` and the files' names: the engine makes them, readers.rs,
+    BR-7 step 3 f) for the files `order` (their paths, in the order the
+    reader was given them) -> (issues, what its use-time step read). A build
+    script and a procedural macro are SC-INSTALL-HOOK, CRITICAL for any
+    reason; what runs at start (Go's init code, #[ctor]) the import-time
+    test; the strong reasons of the rest SC-USE-RISK; //go:generate
+    SC-GO-GENERATE (INFO)."""
+    issues = [engine._issues(order[k] if 0 <= k < len(order) else order[0], [issue])[0]
+              for k, issue in answer.get("issues") or []]
     read = answer.get("useRead") or {}
     return issues, {key: int(read.get(key, 0)) for key in ("files", "ofFiles", "chars", "ofChars")}
 
@@ -4202,7 +4100,6 @@ def _vendored_code(tree, files, should_stop=None):
                 named.extend((_fs_display(rel.replace("/", os.sep)), rel[len(base) + 1:], text)
                              for rel, text in _cgo_texts(tree, folder))
         order = [p for p, _r, _t in named]
-        texts = {p: t for p, _r, t in named}
         size = sum(len(t) for _p, _r, t in named)
         what = "module" if lang == "go" else "crate"
         if size > PACKAGE_CODE_CHARS:
@@ -4212,16 +4109,18 @@ def _vendored_code(tree, files, should_stop=None):
         try:
             if lang == "go":
                 answer = engine.go_package([(r, t) for _p, r, t in named], module=module,
-                                           use_file_chars=USE_RISK_MAX_CHARS, use_chars=USE_RISK_CHARS)
+                                           use_file_chars=USE_RISK_MAX_CHARS, use_chars=USE_RISK_CHARS,
+                                           what=what, names=order)
             else:
                 script, lib, proc_macro = cargo_layout(_vendor_text(tree, f"{base}/Cargo.toml"),
                                                        [r for _p, r, _t in named])
                 answer = engine.rs_crate([(r, t) for _p, r, t in named], build=script, proc_macro=proc_macro, lib=lib,
-                                         use_file_chars=USE_RISK_MAX_CHARS, use_chars=USE_RISK_CHARS)
+                                         use_file_chars=USE_RISK_MAX_CHARS, use_chars=USE_RISK_CHARS,
+                                         what=what, names=order)
         except Exception as exc:                # one module must never kill the run
             out.append(engine.error_issue(order[0], exc))
             continue
-        out.extend(package_reader_issues(answer, order, texts, what)[0])
+        out.extend(package_reader_issues(answer, order)[0])
     return out, None
 
 

@@ -4487,14 +4487,14 @@ class _ArtifactScan:
             mods = self._go_mods()
             module = mods[0][2]["module"] if mods else None
             answer = _engine.go_package(files, module=module, use_file_chars=USE_RISK_MAX_CHARS,
-                                        use_chars=USE_RISK_CHARS)
+                                        use_chars=USE_RISK_CHARS, what=what, names=order)
         else:
             from lazaret.registry.ecosystems import crates as _crates
             manifest = self.deferred.get("Cargo.toml", b"").decode("utf-8", "replace")
             script, lib, proc_macro = _crates.ECOSYSTEM.layout({"Cargo.toml": manifest}, self.members)
             answer = _engine.rs_crate(files, build=script, proc_macro=proc_macro, lib=lib,
-                                      use_file_chars=USE_RISK_MAX_CHARS, use_chars=USE_RISK_CHARS)
-        self._reader_findings(answer, order, texts, what)
+                                      use_file_chars=USE_RISK_MAX_CHARS, use_chars=USE_RISK_CHARS, what=what, names=order)
+        self._reader_findings(answer, order)
 
     def _sdist_crates(self):
         """N-17 (Part C): the Rust crates inside an sdist. A maturin or
@@ -4568,17 +4568,19 @@ class _ArtifactScan:
             script, lib, proc_macro = _crates.ECOSYSTEM.layout({"Cargo.toml": manifest}, [p for p, _t in files])
             self._deadline(order[0])
             answer = _engine.rs_crate(files, build=script, proc_macro=proc_macro, lib=lib,
-                                      use_file_chars=USE_RISK_MAX_CHARS, use_chars=max(0, room))
+                                      use_file_chars=USE_RISK_MAX_CHARS, use_chars=max(0, room), what="sdist",
+                                      names=order)
             room -= int((answer.get("useRead") or {}).get("chars", 0))
-            self._reader_findings(answer, order, texts, "sdist")
+            self._reader_findings(answer, order)
 
-    def _reader_findings(self, answer, order, texts, what):
-        """The findings of a package reader's answer (go_package, rs_crate)
-        for the files `order` (archive paths, in the order the reader was
-        given them; `texts` their text): core.package_reader_issues, with
-        `what` "module", "crate" or "sdist" (a crate inside an sdist, N-17)
-        for the words; what its use-time step read goes to useTime."""
-        issues, read = lazaret.package_reader_issues(answer, order, texts, what)
+    def _reader_findings(self, answer, order):
+        """The findings of a package reader's answer (go_package, rs_crate,
+        asked with "module", "crate" or "sdist" (a crate inside an sdist,
+        N-17) for the words, and the files' names) for the files `order`
+        (archive paths, in the order the reader was given them):
+        core.package_reader_issues; what its use-time step read goes to
+        useTime."""
+        issues, read = lazaret.package_reader_issues(answer, order)
         self.issues.extend(issues)
         mine = dict(read, boundChars=USE_RISK_CHARS)
         if self.use_time is None:
