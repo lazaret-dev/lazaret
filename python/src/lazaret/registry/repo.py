@@ -346,7 +346,7 @@ SAMPLE = 8192              # header/entropy sample read from oversized files
 #      entry points and hook targets, Python install scripts
 # 2.3: verdict tiers, decoded hex, install-script inspection; 2.2:
 #      verdict-integrity; 2.1: binary-artifact awareness
-ENGINE_VERSION = "2.70.0"
+ENGINE_VERSION = "2.71.0"
 
 # ---------------- The content memo (P-2a, registry/contentcache.py) ----------------
 # One per scan_package run: the engine answers once for content several of a
@@ -2692,6 +2692,16 @@ def startup_module_issue(rel, text):
          "ref": "CWE-506 · Supply chain"}, rel, 1, lazaret.normalize_newlines(text).split("\n"))
 
 
+#: The archive shapes that are CRITICAL whatever the file holds (the others are MAJOR): an sdist's or a wheel's entry
+#: through '..' that pip resolves inside the folder (BR-4; John, Oct 14), which no packaging tool writes and whose one
+#: effect is to install a file under another name than a listing shows.
+CRITICAL_ARCHIVE_KINDS = frozenset({"dotdot"})
+
+
+def _archive_severity(kind):
+    return "CRITICAL" if kind in CRITICAL_ARCHIVE_KINDS else "MAJOR"
+
+
 def _archive_issue(kind, path, detail):
     rules = {
         "dup": ("SC-ARCHIVE-DUP", "Duplicate archive path",
@@ -2708,10 +2718,10 @@ def _archive_issue(kind, path, detail):
                  "An entry with '..' in its path tries to escape the extraction directory; "
                  "installers refuse it, and no legitimate package tool produces one."),
         "dotdot": ("SC-ARCHIVE-PATH", "Archive path through '..'",
-                   "pip resolves the '..' of an sdist's or a wheel's entry and installs it under the path it comes "
-                   "to ('x/../setup.py' is setup.py), where a listing of the archive shows another name, so what a "
-                   "reviewer sees is not what gets built or installed, and no packaging tool writes one. The entry "
-                   "was scanned where pip writes it."),
+                   "pip resolves the '..' of an sdist's or a wheel's entry and installs it where that leads "
+                   "('x/../setup.py' is setup.py), not under the name a listing shows. No packaging tool writes one, "
+                   "and hiding a file is all it does: CRITICAL whatever the file holds. The entry was scanned where "
+                   "pip writes it."),
         "noname": ("SC-ARCHIVE-PATH", "Unnamed archive entry",
                    "No extractor can place an entry with no name: installers fail on it or skip it, so "
                    "its bytes are neither installed nor reviewed, and no packaging tool produces one."),
@@ -2740,7 +2750,7 @@ def _archive_issue(kind, path, detail):
                  "writes one. The entry was read and scanned as the file the installer writes."),
     }
     rid, name, why = rules[kind]
-    return {"rule": rid, "name": name, "type": "HOTSPOT", "sev": "MAJOR",
+    return {"rule": rid, "name": name, "type": "HOTSPOT", "sev": _archive_severity(kind),
             "msg": f"{name}: {path} — {detail}.", "why": why,
             "fix": "Inspect the archive listing (tar -tvf / unzip -l) before installing.",
             "ref": "CWE-506 · Supply chain", "file": str(path), "line": 1,

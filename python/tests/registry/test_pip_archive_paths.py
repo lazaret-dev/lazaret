@@ -4,7 +4,8 @@ pip resolves the `..` of an sdist's member (tarfile writes `pkg-1.0/x/../setup.p
 over the one before it) and of a wheel's (its installer writes each file at the path's normpath, so `x/../evil.pth`
 is a .pth file in site-packages). The scan refused such a member as an unsafe path, MAJOR, and never read it: a
 release whose setup.py pip runs was WARN, which the guard installs. Now the member is read where pip writes it, with
-an SC-ARCHIVE-PATH of its own. A `..` that leaves the folder makes pip refuse the archive, and the scan reads none.
+an SC-ARCHIVE-PATH of its own, CRITICAL whatever the file holds (rule set 2.71.0: no tool writes one, and it hides the
+file from a listing). A `..` that leaves the folder makes pip refuse the archive, and the scan reads none.
 
 pip takes an sdist's top folder off only when every member has the same one (its `has_leading_dir`); otherwise it
 writes each member under its whole name, where the scan takes the first folder off every name. Such an archive, and
@@ -112,12 +113,33 @@ class DotDotTests(unittest.TestCase):
         if written is not None:
             self.assertEqual(written.get("setup.py"), EVIL_SETUP)
 
+    def test_a_harmless_file_through_dotdot_is_suspicious_too(self):
+        # what the file holds does not matter: the shape is the finding (BR-4; John, Oct 14)
+        for container, artifact, data in (
+                ("tgz", "sdist", sdist(("pkg-1.0/PKG-INFO", PKG_INFO), ("pkg-1.0/setup.py", SETUP),
+                                       ("pkg-1.0/pkg/x/../util.py", b"VALUE = 1\n"))),
+                ("zip", "wheel", zipped(("pkg/__init__.py", b"VALUE = 1\n"), ("pkg/x/../util.py", b"VALUE = 2\n"),
+                                        ("pkg-1.0.dist-info/METADATA", PKG_INFO)))):
+            with self.subTest(artifact=artifact):
+                res = scan_bytes(data, container=container, artifact=artifact, eco="pypi")
+                self.assertEqual(res["verdict"], "SUSPICIOUS", res["verdictReason"])
+                paths = issues(res, "SC-ARCHIVE-PATH")
+                self.assertEqual([(i["name"], i["sev"]) for i in paths], [("Archive path through '..'", "CRITICAL")])
+                self.assertIn("CRITICAL whatever the file holds", paths[0]["why"])
+        # the same files without the '..' are OK, and the other archive shapes stay MAJOR
+        plain = zipped(("pkg/__init__.py", b"VALUE = 1\n"), ("pkg/util.py", b"VALUE = 2\n"),
+                       ("pkg-1.0.dist-info/METADATA", PKG_INFO))
+        self.assertEqual(scan_bytes(plain, container="zip", artifact="wheel", eco="pypi")["verdict"], "OK")
+        self.assertEqual({repo._archive_issue(k, "p", "d")["sev"] for k in ("path", "dup", "case", "unicode", "link")},
+                         {"MAJOR"})
+
     def test_a_dotdot_that_leaves_the_folder(self):
         # pip refuses the archive; the scan reads nothing there either
         data = sdist(("pkg-1.0/setup.py", SETUP), ("pkg-1.0/../evil.py", EVIL_SETUP))
         self.assertNotIn(EVIL_SETUP, read(data).values())
         res = scan_bytes(data, artifact="sdist", eco="pypi")
-        self.assertEqual([i["name"] for i in issues(res, "SC-ARCHIVE-PATH")], ["Unsafe archive path"])
+        self.assertEqual([(i["name"], i["sev"]) for i in issues(res, "SC-ARCHIVE-PATH")],
+                         [("Unsafe archive path", "MAJOR")])                  # pip refuses the archive: nothing lands
         self.assertIn(pip_writes(data), (None, {}))
 
     def test_a_zip_sdist_through_dotdot(self):

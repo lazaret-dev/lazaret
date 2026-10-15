@@ -865,7 +865,8 @@ that tarfile read at another place, under another name or not at all, or a heade
 archive corrupt), and an sdist whose members pip places otherwise than the registry reads them (BR-4, F-11: pip takes
 the top folder off only when every member has the same one, `repo._pip_sdist_disagreement`). A wheel's or an sdist's
 member whose path goes through `..` and stays in the folder is read where pip writes it (`x/../setup.py` is setup.py),
-with an SC-ARCHIVE-PATH of its own; node-tar, cargo, Go and VS Code refuse one. `Context.apply`
+with an SC-ARCHIVE-PATH of its own, CRITICAL whatever the file holds since rule set 2.71.0 (no tool writes one, and it
+hides the file from a listing); node-tar, cargo, Go and VS Code refuse one. `Context.apply`
 blocks those unless `--allow-incomplete`; a program too large to read (a
 native library a package names) is none of them, and goes through as
 before. A time-out is scanned once more (`Scanner.scan`), since a machine

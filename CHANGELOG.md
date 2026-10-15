@@ -679,6 +679,13 @@ aggregate):
 
 ### Changed
 
+- **An sdist's or a wheel's file that pip installs through `..` is CRITICAL (BR-4; rule set 2.71.0).** Such a
+  member (`pkg-1.0/x/../setup.py`, a wheel's `x/../evil.pth`) is read where pip writes it, as it was, and its
+  SC-ARCHIVE-PATH ("Archive path through '..'") is CRITICAL now, whatever the file holds: no packaging tool writes
+  one, and all it does is install a file under another name than a listing shows. A release with one is
+  SUSPICIOUS, which the guard blocks. A `..` that leaves the folder is MAJOR as before (pip refuses the archive), and
+  the other archive shapes stay MAJOR. None of the benchmark's, the popular set's, Part F's or extra43's releases
+  holds one (BR-4's measurement).
 - **SC-INSTALL-HOOK follows a project's own install hooks (decided October 14).** A project scan judged the
   project's own install hook by its command only: `"preinstall": "node lib/setup.mjs"` was MAJOR for being there,
   whatever `lib/setup.mjs` held, and only a dependency's hooks were followed into the files they run (`--deps`). The
