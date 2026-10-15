@@ -309,6 +309,16 @@ upstream `sources/` tree), and a stopped run goes on where it stopped. Run it
 on a maintainer's machine, with OUT outside the repository (it refuses a
 folder inside a checkout).
 
+`--commit` draws the sets at another commit of the dataset, with the same
+seeds and shapes: John restarted the measurements at the dataset's newest
+commit on Oct 15 (`--commit HEAD`; the script prints the commit to give
+again). New sets' first runs are their baselines, and their holdout also
+leaves out the packages of the audit's benchmark, the releases the detectors
+were written from, so the clone needs the audit's commit in its history (a
+shallow clone gets it, without the old samples, from `git fetch --unshallow
+--filter=blob:none origin`). The default, `b302ad0b`, gives the audit's
+benchmark, on which 0.1.9's figures were measured.
+
 **Every set in one command.** `run --jobs N` scans N releases at once, each
 in a worker process of the guard's pool, and writes the records a run with
 one job writes (a scan that ran out of time beside the others is scanned

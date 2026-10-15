@@ -2,8 +2,8 @@
 """The benchmark's malicious releases and a holdout, from DataDog's
 malicious-software-packages-dataset: the manifests scripts/bench.py runs.
 
-    git clone --no-checkout https://github.com/DataDog/malicious-software-packages-dataset.git DATASET
-    python3 scripts/datadog.py DATASET OUT [--commit b302ad0b] [--only benchmark|holdout] [--holdout-seed N]
+    git clone --filter=blob:none --no-checkout https://github.com/DataDog/malicious-software-packages-dataset.git DATASET
+    python3 scripts/datadog.py DATASET OUT [--commit b302ad0b|HEAD|SHA] [--only benchmark|holdout] [--holdout-seed N]
 
 writes OUT/benchmark/manifest.jsonl and OUT/holdout/manifest.jsonl, each
 release's file in its set's files/ folder, and prints the two entries of a
@@ -21,6 +21,14 @@ and 150 compromised npm releases, among the packages the benchmark does not
 hold (and any compromised PyPI release it does not hold: none at b302ad0b).
 Its first run is its baseline, and it is read in aggregate only
 (docs/TESTING.md).
+
+Another commit (--commit HEAD: the clone's newest) draws new sets there, with
+the same seeds and shapes; their first runs are their baselines, and the
+script prints the commit to give again. Their holdout also leaves out the
+packages of the audit's benchmark, the releases the detectors were written
+from, so the clone needs the audit's commit in its history: a shallow clone
+gets the history, without the old samples, from
+`git fetch --unshallow --filter=blob:none origin`.
 
 A sample is a zip, encrypted with the dataset's password ("infected"), of a
 release's files and, for some compromised releases, the upstream sources
@@ -63,7 +71,7 @@ import zipfile
 import zlib
 
 PASSWORD = b"infected"
-COMMIT = "b302ad0b"                                   # the audit's (Sept 28, 2026)
+AUDIT_COMMIT = "b302ad0b"                             # the audit's (Sept 28, 2026)
 BENCHMARK_SEED = 20260928
 HOLDOUT_SEED = 20261015
 EVERY = 10 ** 9                                       # a subset's size meaning "every package of it"
@@ -136,11 +144,10 @@ class Dataset:
         self.path = pathlib.Path(path).expanduser()
         if not self.path.is_dir():
             raise SetupError(f"{self.path} is not a folder")
-        found = self._git("rev-parse", "--verify", "--quiet", commit + "^{commit}")
-        if found.returncode != 0:
-            raise SetupError(f"{self.path} has no commit {commit}: it needs a clone with the dataset's history "
-                             "(a plain clone, or one made with --filter=blob:none; a shallow clone lacks it)")
-        self.sha = found.stdout.decode("ascii").strip()
+        self.sha = self.resolve(commit)
+        if self.sha is None:
+            raise SetupError(self.lacks(commit, "the commit given"))
+        self.blob_ids = {}
         self._proc = None
 
     def _git(self, *args):
@@ -150,19 +157,38 @@ class Dataset:
         except FileNotFoundError:
             raise SetupError("git is not installed") from None
 
-    def paths(self):
-        """Every path at the commit, as `git ls-tree -r` prints it; each blob's id kept for prefetch."""
-        listed = self._git("ls-tree", "-r", self.sha)
+    def resolve(self, commit):
+        """The commit's full id, or None when the clone does not have it."""
+        found = self._git("rev-parse", "--verify", "--quiet", commit + "^{commit}")
+        return found.stdout.decode("ascii").strip() if found.returncode == 0 else None
+
+    def lacks(self, commit, what):
+        """Why the clone lacks a commit, and what adds it."""
+        if self._git("rev-parse", "--is-shallow-repository").stdout.strip() == b"true":
+            return (f"{self.path} is a shallow clone, without {what} ({commit}). Add the dataset's history (its "
+                    f"commits and file lists, not its old samples): git -C '{self.path}' fetch --unshallow "
+                    "--filter=blob:none origin")
+        return f"{self.path} has no commit {commit} ({what})"
+
+    def date(self, sha):
+        return self._git("show", "-s", "--format=%cs", sha).stdout.decode("ascii", "replace").strip()
+
+    def paths(self, sha=None):
+        """Every path at a commit (this one by default), as `git ls-tree -r` prints it; this commit's blob ids
+        are kept for prefetch."""
+        listed = self._git("ls-tree", "-r", sha or self.sha)
         if listed.returncode != 0:
             raise SetupError(f"git ls-tree failed: {listed.stderr.decode(errors='replace').strip()}")
-        self.blob_ids, paths = {}, []
+        blob_ids, paths = {}, []
         for line in listed.stdout.decode("utf-8", "surrogateescape").split("\n"):
             meta, tab, path = line.partition("\t")
             if tab:
                 fields = meta.split()
                 if len(fields) == 3 and fields[1] == "blob":
-                    self.blob_ids[path] = fields[2]
+                    blob_ids[path] = fields[2]
                 paths.append(path)
+        if sha in (None, self.sha):
+            self.blob_ids = blob_ids
         return paths
 
     def prefetch(self, paths, log):
@@ -510,16 +536,28 @@ def lazaret_checkout(path):
     return None
 
 
-def prepare(dataset_path, out, commit=COMMIT, only=None, holdout_seed=HOLDOUT_SEED, log=print):
+def prepare(dataset_path, out, commit=None, only=None, holdout_seed=HOLDOUT_SEED, log=print):
     out = pathlib.Path(out).expanduser().resolve()
     inside = lazaret_checkout(out)
     if inside:
         raise SetupError(f"{out} is inside the repository {inside}: keep the samples' files outside it")
-    dataset = Dataset(dataset_path, commit)
+    dataset = Dataset(dataset_path, commit or AUDIT_COMMIT)
     try:
+        audit = dataset.resolve(AUDIT_COMMIT)
+        at_audit = dataset.sha == audit
+        log(f"the dataset at {dataset.sha} ({dataset.date(dataset.sha)})" +
+            ("" if at_audit else f", not the audit's {AUDIT_COMMIT}: new sets, whose first runs are their baselines"))
         groups = samples_by_package(dataset.paths())
         benchmark = draw(groups, BENCHMARK_SEED, SIZES["benchmark"])
-        holdout = draw(groups, holdout_seed, SIZES["holdout"], {(i["eco"], i["name"]) for i in benchmark})
+        leave_out, holdout_about = {(i["eco"], i["name"]) for i in benchmark}, {}
+        if not at_audit:
+            # The detectors were written from the audit's benchmark: a holdout holds none of its packages.
+            if audit is None:
+                raise SetupError(dataset.lacks(AUDIT_COMMIT, "the audit's commit, whose benchmark the holdout leaves out"))
+            written_from = draw(samples_by_package(dataset.paths(audit)), BENCHMARK_SEED, SIZES["benchmark"])
+            leave_out |= {(i["eco"], i["name"]) for i in written_from}
+            holdout_about = {"leaves_out": f"the audit's benchmark, drawn at {audit}"}
+        holdout = draw(groups, holdout_seed, SIZES["holdout"], leave_out)
         sets = [(name, seed, chosen) for name, seed, chosen in
                 (("benchmark", BENCHMARK_SEED, benchmark), ("holdout", holdout_seed, holdout)) if only in (None, name)]
         dataset.prefetch([item["path"] for _name, _seed, chosen in sets for item in chosen], log)
@@ -527,14 +565,14 @@ def prepare(dataset_path, out, commit=COMMIT, only=None, holdout_seed=HOLDOUT_SE
         for name, seed, chosen in sets:
             about = {"dataset": "DataDog/malicious-software-packages-dataset", "commit": dataset.sha, "seed": seed,
                      "sizes": {f"{eco} {cat}": n for (eco, cat), n in SIZES[name].items()},
-                     "releases": len(chosen), "draw": fingerprint(chosen)}
+                     "releases": len(chosen), "draw": fingerprint(chosen), **(holdout_about if name == "holdout" else {})}
             log(f"{name}: {len(chosen)} releases drawn (draw {about['draw'][:16]})")
             manifest, kept, skipped = prepare_set(dataset, out / name, name, chosen, about, log)
             log(f"{name}: {len(kept)} releases ({subsets(kept)}), {len(skipped)} skipped")
             if name == "benchmark":
                 for line in skipped:
                     log(f"  skipped {line['id']}: {line['skipped']}")
-                if not dataset.sha.startswith(COMMIT) or len(chosen) != AUDIT_BENCHMARK or skipped:
+                if at_audit and (len(chosen) != AUDIT_BENCHMARK or skipped):
                     log(f"  The audit's benchmark has {AUDIT_BENCHMARK} releases: this one differs, so its numbers "
                         "are not the ones the README and the CHANGELOG give.")
             elif skipped:
@@ -545,6 +583,8 @@ def prepare(dataset_path, out, commit=COMMIT, only=None, holdout_seed=HOLDOUT_SE
             entries.append(entry)
     finally:
         dataset.close()
+    if not at_audit:
+        log(f"These sets are drawn at {dataset.sha}: give --commit {dataset.sha} to draw them again.")
     log("A sets file's entries for them (scripts/bench.py all):")
     for entry in entries:
         log("  " + json.dumps(entry) + ",")
@@ -564,9 +604,11 @@ def main(argv=None):
     parser = argparse.ArgumentParser(
         description="Write the benchmark's and a holdout's manifests from DataDog's malicious-software-packages-"
                     "dataset, for scripts/bench.py.")
-    parser.add_argument("dataset", help="a clone of DataDog/malicious-software-packages-dataset (not a shallow one)")
+    parser.add_argument("dataset", help="a clone of DataDog/malicious-software-packages-dataset, with its history")
     parser.add_argument("out", help="the folder the sets go to: outside the repository and any synced folder")
-    parser.add_argument("--commit", default=COMMIT, help="the dataset's commit (default: the audit's, %(default)s)")
+    parser.add_argument("--commit", default=AUDIT_COMMIT,
+                        help="the dataset's commit the sets are drawn at (default: the audit's, %(default)s; "
+                             "HEAD: the clone's newest)")
     parser.add_argument("--only", choices=("benchmark", "holdout"), help="write one set")
     parser.add_argument("--holdout-seed", type=int, default=HOLDOUT_SEED,
                         help="the holdout's draw (default %(default)s); another seed draws another holdout")

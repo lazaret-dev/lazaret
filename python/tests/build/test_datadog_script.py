@@ -256,9 +256,27 @@ class RunTests(unittest.TestCase):
         self.dataset = self.tmp / "dataset"
         self.dataset.mkdir()
         self.git(self.dataset, "init", "-q")
-        for eco, cat, n in (("npm", "malicious_intent", 5), ("pypi", "malicious_intent", 4),
-                            ("npm", "compromised_lib", 3), ("pypi", "compromised_lib", 1)):
-            for i in range(n):
+        self.add_samples({("npm", "malicious_intent"): range(5), ("pypi", "malicious_intent"): range(4),
+                          ("npm", "compromised_lib"): range(3), ("pypi", "compromised_lib"): range(1)})
+        self.git(self.dataset, "add", "-A")
+        self.git(self.dataset, "commit", "-q", "-m", "samples")
+        self.sha = self.git(self.dataset, "rev-parse", "HEAD").strip()   # stands for the audit's commit
+        self.add_samples({("npm", "malicious_intent"): range(5, 10), ("pypi", "malicious_intent"): range(4, 7),
+                          ("npm", "compromised_lib"): range(3, 5)})
+        (self.dataset / "README.md").write_text("later\n", encoding="utf-8")
+        self.git(self.dataset, "add", "-A")
+        self.git(self.dataset, "commit", "-q", "-m", "later")             # the head: more samples
+        sizes = {"benchmark": {("npm", "malicious_intent"): 3, ("pypi", "malicious_intent"): 2,
+                               ("npm", "compromised_lib"): 2, ("pypi", "compromised_lib"): self.d.EVERY},
+                 "holdout": {("npm", "malicious_intent"): 2, ("pypi", "malicious_intent"): 2,
+                             ("npm", "compromised_lib"): 1, ("pypi", "compromised_lib"): self.d.EVERY}}
+        for patcher in (mock.patch.object(self.d, "SIZES", sizes), mock.patch.object(self.d, "AUDIT_COMMIT", self.sha)):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def add_samples(self, numbers):
+        for (eco, cat), indexes in numbers.items():
+            for i in indexes:
                 name = f"{cat[0]}{eco[0]}{i}"
                 files = {"package/package.json": PJ, "package/index.js": JS} if eco == "npm" else \
                     {f"{name}-1.0/setup.py": PY}
@@ -266,19 +284,6 @@ class RunTests(unittest.TestCase):
                 dest = self.dataset / "samples" / eco / cat / name / "1.0" / f"2026-09-01-{name}-v1.0.zip"
                 dest.parent.mkdir(parents=True)
                 dest.write_bytes(encrypted_zip(files))
-        self.git(self.dataset, "add", "-A")
-        self.git(self.dataset, "commit", "-q", "-m", "samples")
-        self.sha = self.git(self.dataset, "rev-parse", "HEAD").strip()
-        (self.dataset / "README.md").write_text("later\n", encoding="utf-8")
-        self.git(self.dataset, "add", "-A")
-        self.git(self.dataset, "commit", "-q", "-m", "later")             # the commit given is not the head
-        sizes = {"benchmark": {("npm", "malicious_intent"): 3, ("pypi", "malicious_intent"): 2,
-                               ("npm", "compromised_lib"): 2, ("pypi", "compromised_lib"): self.d.EVERY},
-                 "holdout": {("npm", "malicious_intent"): 2, ("pypi", "malicious_intent"): 2,
-                             ("npm", "compromised_lib"): 1, ("pypi", "compromised_lib"): self.d.EVERY}}
-        patcher = mock.patch.object(self.d, "SIZES", sizes)
-        patcher.start()
-        self.addCleanup(patcher.stop)
 
     def git(self, cwd, *args):
         return subprocess.run([GIT, *args], cwd=cwd, env=self.env, check=True, capture_output=True,
@@ -346,7 +351,41 @@ class RunTests(unittest.TestCase):
         self.git(self.tmp, "clone", "-q", "--depth", "1", self.dataset.as_uri(), str(shallow))
         code, said = self.run_script(shallow, self.tmp / "other", "--commit", self.sha[:8])
         self.assertEqual(code, 2)
-        self.assertIn("a shallow clone lacks it", said)
+        self.assertIn("is a shallow clone, without the commit given", said)
+
+    def test_new_sets_at_a_later_commit_leave_out_the_audit_benchmark(self):
+        head = self.git(self.dataset, "rev-parse", "HEAD").strip()
+        audit_out, out = self.tmp / "audit", self.tmp / "corpus"
+        self.assertEqual(self.run_script(self.dataset, audit_out, "--only", "benchmark")[0], 0)  # the default: audit's
+        code, said = self.run_script(self.dataset, out, "--commit", "HEAD")
+        self.assertEqual(code, 0, said)
+        self.assertIn(f"not the audit's {self.sha}: new sets", said)
+        self.assertIn(f"give --commit {head} to draw them again", said)
+        packages = lambda rows: {(r["eco"], r["name"]) for r in rows}                      # noqa: E731
+        written_from = packages(self.manifest(audit_out, "benchmark"))
+        bench, hold = packages(self.manifest(out, "benchmark")), packages(self.manifest(out, "holdout"))
+        self.assertTrue(written_from - bench)                       # the audit's benchmark is not this one's
+        self.assertEqual(len(hold), 5)
+        self.assertFalse(hold & bench)
+        self.assertFalse(hold & written_from)                       # none of what the detectors were written from
+        about = json.loads((out / "holdout" / "draw.json").read_text(encoding="utf-8"))
+        self.assertEqual((about["commit"], about["leaves_out"]), (head, f"the audit's benchmark, drawn at {self.sha}"))
+
+        shallow = self.tmp / "shallow"                              # a --depth 1 clone has no history to draw from
+        self.git(self.tmp, "clone", "-q", "--depth", "1", self.dataset.as_uri(), str(shallow))
+        code, said = self.run_script(shallow, self.tmp / "again", "--commit", "HEAD")
+        self.assertEqual(code, 2)
+        self.assertIn(f"git -C '{shallow}' fetch --unshallow --filter=blob:none origin", said)
+        self.git(self.dataset, "config", "uploadpack.allowFilter", "true")
+        try:
+            self.git(shallow, "fetch", "-q", "--unshallow", "--filter=blob:none", "origin")
+        except subprocess.CalledProcessError as exc:
+            self.skipTest(f"this git cannot add history without blobs: {exc.stderr.decode(errors='replace').strip()}")
+        code, said = self.run_script(shallow, self.tmp / "again", "--commit", "HEAD")
+        self.assertEqual(code, 0, said)
+        for name in ("benchmark", "holdout"):
+            self.assertEqual([(r["id"], r["sha256"]) for r in self.manifest(self.tmp / "again", name)],
+                             [(r["id"], r["sha256"]) for r in self.manifest(out, name)])
 
     def test_a_blobless_clone_fetches_the_samples_drawn_in_one_request(self):
         self.git(self.dataset, "config", "uploadpack.allowFilter", "true")

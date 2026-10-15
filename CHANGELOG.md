@@ -379,7 +379,10 @@ aggregate):
   since the draw of Sept 30's was not kept. Each sample is read in memory from git (a
   blobless clone fetches the samples drawn in one request) and written as its registry
   serves the release, by the September harness's rules; a stopped run goes on where it
-  stopped, and a folder inside a checkout is refused (`docs/TESTING.md` §4).
+  stopped, and a folder inside a checkout is refused (`docs/TESTING.md` §4). `--commit HEAD`
+  draws new sets at the dataset's newest commit, as John's measurements now are; their
+  holdout also leaves out the audit benchmark's packages, the releases the detectors were
+  written from.
 - **Credentials in Go's and Rust's declarations, crates.io's tokens and a `.netrc`'s
   passwords (G-4, R-4, N-12).** S-SECRET read `name = "…"` and `name: "…"`, so Go's
   `apiKey := "…"` and `var password string = "…"` and Rust's `const API_KEY: &str = "…"`,
