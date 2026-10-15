@@ -1,6 +1,7 @@
 // What npm installs from a package tarball: pacote's extraction (npm's lib/fetcher.js, #tarxOptions), with the
 // node-tar that npm itself bundles. One JSON line in per tarball ({"path": FILE}), one JSON line out:
-// {"ok": bool, "error": message or null, "files": [[path, sha256, size], ...], "warnings": [[code, message], ...]}.
+// {"ok": bool, "error": message or null, "files": [[path, sha256, size], ...], "warnings": [[code, message], ...],
+// "tar": node-tar's version}.
 // Links are dropped and a .gitignore is written as .npmignore unless one was seen, as pacote does; the first
 // path part is stripped (strip: 1). LAZARET_NPM_DIR names npm's folder (default: beside this node's binary).
 'use strict'
@@ -20,6 +21,7 @@ function npmDir () {
 }
 
 const tar = require(path.join(npmDir(), 'node_modules', 'tar'))
+const tarVersion = JSON.parse(fs.readFileSync(path.join(npmDir(), 'node_modules', 'tar', 'package.json'), 'utf8')).version
 
 function options (cwd, warnings) {
   const sawIgnores = new Set()
@@ -71,7 +73,7 @@ function extract (file) {
       const files = []
       try { walk(dest, dest, files) } catch (e) { error = error || String(e) }
       fs.rmSync(dest, { recursive: true, force: true })
-      resolve({ ok: !error, error: error || null, files, warnings })
+      resolve({ ok: !error, error: error || null, files, warnings, tar: tarVersion })
     }
     const extractor = tar.x(options(dest, warnings))
     extractor.on('end', () => finish(null))
@@ -91,7 +93,7 @@ async function drain () {
   while (queue.length) {
     const line = queue.shift()
     let answer
-    try { answer = await extract(JSON.parse(line).path) } catch (e) { answer = { ok: false, error: 'harness: ' + e, files: [], warnings: [] } }
+    try { answer = await extract(JSON.parse(line).path) } catch (e) { answer = { ok: false, error: 'harness: ' + e, files: [], warnings: [], tar: tarVersion } }
     process.stdout.write(JSON.stringify(answer) + '\n')
   }
   busy = false

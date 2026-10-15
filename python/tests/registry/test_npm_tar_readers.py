@@ -9,9 +9,12 @@ regular file whose name ends in `/`, a directory to node-tar, which reads its da
 an archive the two readers disagree about: INCOMPLETE. Tarballs written the usual ways read the same in both.
 
 Where node and npm's bundled node-tar are here, each case is also unpacked by node-tar as npm unpacks it, to show
-what npm writes. Payloads are inert: hosts are .invalid, nothing is installed or run."""
+what npm writes: npm 10 bundles node-tar 6.2 and npm 11 node-tar 7.5, which take a path's roots off at different
+moments, so where the two write an entry differently the expectation names both, and the archive is held to both
+(`npmtar.WRITERS`). Payloads are inert: hosts are .invalid, nothing is installed or run."""
 import gzip
 import io
+import json
 import os
 import subprocess
 import tarfile
@@ -93,9 +96,22 @@ NPM_X = ("const tar=require(process.argv[1]);const fs=require('fs');const path=r
          "fs.readFileSync(f).toString('latin1')}};walk(process.argv[3]);console.log(JSON.stringify(out))")
 
 
+def bundled_tar_major():
+    """The major version of the node-tar npm bundles here (6 in npm 10, 7 in npm 11), or None without it."""
+    found = node_tar()
+    if not found:
+        return None
+    with open(os.path.join(found[1], "package.json"), encoding="utf-8") as fh:
+        return int(json.load(fh)["version"].split(".")[0])
+
+
+def by_npm(npm10, npm11):
+    """What the npm here does: npm10 where its node-tar is 6, npm11 otherwise."""
+    return npm10 if bundled_tar_major() == 6 else npm11
+
+
 def npm_writes(data):
     """{path: bytes} npm writes from this tarball (node-tar as pacote runs it), or None without node-tar."""
-    import json
     found = node_tar()
     if not found:
         return None
@@ -181,24 +197,29 @@ class DisagreementTests(unittest.TestCase):
         self.check(data, "this reader read it as 'a.js'", "a.js\n" + "b" * 86)
 
     def test_a_unc_root_written_with_backslashes(self):
-        # node-tar takes a UNC root off by Windows' rules on every platform: npm on Linux and macOS writes
+        # node-tar 7 takes a UNC root off by Windows' rules on every platform: npm 11 on Linux and macOS writes
         # package/\\\\srv\\sh\\index.js as index.js; npm on Windows, where backslashes are separators, as
-        # srv/sh/index.js, which is how the registry reads it
+        # srv/sh/index.js, which is how the registry reads it; npm 10 (node-tar 6.2, which takes roots off before
+        # the first part) as a file of that name, backslashes and all
         data = tgz(entry(b"package/package.json", PJ), entry(b"package/\\\\srv\\sh\\index.js", EVIL))
-        self.check(data, "as 'index.js', this reader read it as 'srv/sh/index.js'", "index.js")
+        self.check(data, "as 'index.js', this reader read it as 'srv/sh/index.js'",
+                   by_npm("\\\\srv\\sh\\index.js", "index.js"))
 
 
 class RootTests(unittest.TestCase):
     def test_a_drive_relative_root(self):
-        # `C:index.js` is index.js to node-tar, on every platform: the registry reads it so too (it kept `C:`)
+        # `C:index.js` is index.js to node-tar 7 (npm 11), on every platform: the registry reads it so too (it kept
+        # `C:`); node-tar 6.2 (npm 10) takes no root off there, and writes a file named `C:index.js`, so the archive
+        # is one the two npms install differently
         self.assertEqual(repo.canonical_member_path("package/C:index.js", "npm"), ("index.js", None))
         self.assertEqual(repo.canonical_member_path("package/C:/D:x/a.js", "npm"), ("x/a.js", None))
         data = tgz(entry(b"package/package.json", PJ), entry(b"package/C:index.js", EVIL))
-        self.assertEqual(corrupt(data), [])
+        self.assertEqual(corrupt(data), ["npm 10 writes the entry at byte 1536 as 'C:index.js', this reader read it "
+                                         "as 'index.js'"])
         self.assertIn("index.js", [m[0] for m in repo.iter_archive(data, "tgz", "npm") if m[3] is None])
         written = npm_writes(data)
         if written is not None:
-            self.assertEqual(written.get("index.js"), EVIL)
+            self.assertEqual(written.get(by_npm("C:index.js", "index.js")), EVIL)
 
     def test_node_tars_roots(self):
         cases = {"C:index.js": ("C:", "index.js"), "//srv/sh/x": ("//", "srv/sh/x"),
@@ -208,6 +229,60 @@ class RootTests(unittest.TestCase):
         for path, want in cases.items():
             with self.subTest(path=path):
                 self.assertEqual(npmtar.strip_absolute(path), want)
+
+
+class Npm10Tests(unittest.TestCase):
+    """npm 10 bundles node-tar 6.2, which refuses a `..` part by `/` alone (a backslash is a letter of a name on
+    Linux and macOS) and takes the roots off the path the archive names, before the first part is dropped: it writes
+    files npm 11 refuses, and others under other names. Each such archive is INCOMPLETE."""
+
+    def test_where_each_npm_writes(self):
+        cases = {"package/index.js": ("index.js", "index.js"), "package/..\\x.js": (None, "..\\x.js"),
+                 "package/a\\..\\x.js": (None, "a\\..\\x.js"), "package/C:..": (None, "C:.."),
+                 "package/C:index.js": ("index.js", "C:index.js"), "C:x/index.js": ("index.js", "x/index.js"),
+                 "\\\\srv\\sh\\a/b.js": ("b.js", "a/b.js"), "package//srv/x.js": ("srv/x.js", None),
+                 "C:../x/y.js": ("x/y.js", None), "/package/index.js": ("package/index.js", "package/index.js"),
+                 "package/../x.js": (None, None), "package/a/./b//c.js": ("a/b/c.js", "a/b/c.js"),
+                 "package": (None, None), "package/" + "d/" * 1024 + "x.js": (None, None)}
+        for path, (npm11, npm10) in cases.items():
+            with self.subTest(path=path[:40]):
+                self.assertEqual((npmtar.written_path(path), npmtar.written_path_npm10(path)), (npm11, npm10))
+
+    def test_a_backslash_dotdot_file_main_requires(self):
+        # npm 10 on Linux and macOS writes `..\x.js` as a file, and main can require it; the scan read none of it,
+        # and the release was WARN (SC-ARCHIVE-PATH alone)
+        data = tgz(entry(b"package/package.json", PJ), entry(b"package/index.js", b"require('./..\\\\x.js');\n"),
+                   entry(b"package/..\\x.js", EVIL))
+        self.assertEqual(corrupt(data), ["npm 10 writes the entry at byte 2560 as '..\\\\x.js', which this reader "
+                                         "does not extract"])
+        res = scan_bytes(data)
+        self.assertEqual(res["verdict"], "INCOMPLETE", res["verdictReason"])
+        written = npm_writes(data)
+        if written is not None:
+            self.assertEqual(written.get("..\\x.js"), by_npm(EVIL, None))
+
+    def test_other_names_npm_10_writes(self):
+        for name, needle, npm10 in (
+                (b"package/C:..", "as 'C:..', which this reader does not extract", "C:.."),
+                (b"package/a\\..\\x.js", "as 'a\\\\..\\\\x.js', which this reader does not extract", "a\\..\\x.js"),
+                (b"C:x/index.js", "as 'x/index.js', this reader read it as 'index.js'", "x/index.js")):
+            with self.subTest(name=name):
+                data = tgz(entry(b"package/package.json", PJ), entry(name, EVIL))
+                self.assertTrue(any(needle in d and d.startswith("npm 10 ") for d in corrupt(data)), corrupt(data))
+                res = scan_bytes(data)                 # (SUSPICIOUS where what was read is strong: index.js)
+                self.assertEqual(res["verdict"], "SUSPICIOUS" if name.endswith(b"index.js") else "INCOMPLETE")
+                self.assertTrue(any(needle in i["msg"] for i in issues(res, "SC-TRUNCATED")))
+                written = npm_writes(data)
+                if written is not None and bundled_tar_major() == 6:
+                    self.assertEqual(written.get(npm10), EVIL)
+
+    def test_what_both_write_alike_reads_alike(self):
+        # a path npm 10 does not write (`//` after the first part leaves it absolute) is not held against it
+        data = tgz(entry(b"package/package.json", PJ), entry(b"package//srv/x.js", EVIL))
+        self.assertEqual(corrupt(data), [])
+        written = npm_writes(data)
+        if written is not None:
+            self.assertEqual(written.get("srv/x.js"), by_npm(None, EVIL))
 
 
 class AgreementTests(unittest.TestCase):

@@ -862,7 +862,7 @@ runs included; the archive not read whole), each something a package controls, a
 size limit inside its file does (the Go/Rust review's GO-1), and an npm tarball that npm's tar reader and the
 registry's read differently (BR-4: `registry/npmtar.py` follows node-tar's reading beside tarfile's; an entry npm writes
 that tarfile read at another place, under another name or not at all, or a header node-tar finds invalid, makes the
-archive corrupt), and an sdist whose members pip places otherwise than the registry reads them (BR-4, F-11: pip takes
+archive corrupt, where npm 11 (node-tar 7.5) or npm 10 (node-tar 6.2, F-14) writes it), and an sdist whose members pip places otherwise than the registry reads them (BR-4, F-11: pip takes
 the top folder off only when every member has the same one, `repo._pip_sdist_disagreement`). A wheel's or an sdist's
 member whose path goes through `..` and stays in the folder is read where pip writes it (`x/../setup.py` is setup.py),
 with an SC-ARCHIVE-PATH of its own, CRITICAL whatever the file holds since rule set 2.71.0 (no tool writes one, and it

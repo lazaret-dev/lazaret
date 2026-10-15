@@ -955,6 +955,14 @@ aggregate):
 
 ### Fixed
 
+- **Security: an npm tarball npm 10 unpacks otherwise than npm 11 is INCOMPLETE (BR-4, F-14; rule set 2.72.0).**
+  The check of an npm tarball against npm's own reading (F-10) followed node-tar 7.5, which npm 11 bundles; npm 10
+  (Node 22's) bundles node-tar 6.2, which refuses a `..` part by `/` alone, so on Linux and macOS
+  `package/..\x.js` is a file it writes and main can require, which npm 11 refuses and the scan never read: such a
+  release was WARN. It also takes a path's roots off before the first part (`C:x/index.js` is `x/index.js`,
+  `package/C:index.js` a file of that name). Each entry is now held to where both npms write it, and one either
+  writes elsewhere than the scan read it, or the scan did not extract, makes the archive INCOMPLETE, which the guard
+  refuses. The differential fuzz target predicts with the model of the node-tar it runs.
 - **The Actions check no longer fails on GitHub's own actions for the tools they ship.**
   `python -m lazaret.registry.actions` found `actions/setup-node`'s `externals/7zr.exe` (7-Zip,
   which it extracts Node with on Windows) as SC-BINARY, MAJOR, and exited 1 on Lazaret's own

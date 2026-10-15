@@ -10,7 +10,8 @@ document, a broken promise (`check` raises `Violation`), or too much time (the d
 - `archive-npm-diff`: the same reader on an npm tarball against what npm writes from it (BR-4): npm's own node-tar,
   as pacote runs it (`npm_extract.cjs`, with the node on PATH and the npm beside it). A file npm writes is read,
   under the path npm writes it at, or the reader calls the archive corrupt; and `registry.npmtar`, the reader's
-  model of npm's, says what npm writes. Without node and npm's node-tar it compares nothing.
+  model of npm's, says what npm writes (by the node-tar that npm bundles: 6.2 in npm 10, 7.5 in npm 11;
+  `LAZARET_NPM_DIR` names another npm's folder). Without node and npm's node-tar it compares nothing.
 - `xml`, `xml-minidom`: `safexml.ElementTree.fromstring` and `safexml.minidom.parseString`, with the options the
   scanner uses and the limits it can be given.
 - `sca-*`: `scanner.sca.scan_all` over one file of each kind the inventory reads (the npm, yarn, pnpm and bun
@@ -352,16 +353,26 @@ def npm_diff_seeds():
         + tar_entry(b"package/notes.js", EVIL_JS),
         tar_entry(b"package/package.json", PJ) + tar_entry(b"package/x\xe4.js", EVIL_JS),
         tar_entry(b"package/package.json", PJ) + tar_entry(b"package/a.js\x00\n" + b"b" * 86, EVIL_JS),
-        tar_entry(b"package/package.json", PJ) + tar_entry(b"package/\\\\srv\\sh\\index.js", EVIL_JS)]
+        tar_entry(b"package/package.json", PJ) + tar_entry(b"package/\\\\srv\\sh\\index.js", EVIL_JS),
+        # and where npm 10's node-tar (6.2) writes otherwise than npm 11's
+        tar_entry(b"package/package.json", PJ) + tar_entry(b"package/..\\x.js", EVIL_JS)
+        + tar_entry(b"package/C:..", EVIL_JS) + tar_entry(b"C:x/index.js", EVIL_JS)]
     rng = random.Random("archive-npm-diff seeds")
     return ([f + b"\0" * 1024 for f in found] + tar_seeds()[:4] + [tar_bytes(NPM_FILES, tarfile.USTAR_FORMAT)]
             + [npm_generated(rng) for _ in range(16)])
 
 
-def npm_predicted(data):
+def npm_model(npmtar, tar_version):
+    """registry.npmtar's model of where npm writes an entry, for the node-tar of this version (6: npm 10's)."""
+    return npmtar.written_path_npm10 if str(tar_version).split(".")[0] == "6" else npmtar.written_path
+
+
+def npm_predicted(data, tar_version="7"):
     """What registry.npmtar says npm writes from this tar stream: {path: sha256}, a later entry over an earlier
-    one, a .gitignore as .npmignore unless one came first; None where it stops on what it does not follow."""
+    one, a .gitignore as .npmignore unless one came first; None where it stops on what it does not follow. Where
+    npm writes it by the node-tar of `tar_version`: 6 is npm 10's, 7 npm 11's."""
     from lazaret.registry import npmtar
+    where = npm_model(npmtar, tar_version)
     node = npmtar.NodeTar()
     node.feed(data)
     node.finish()
@@ -370,7 +381,7 @@ def npm_predicted(data):
     out, ignores = {}, set()
     for path, start, size in node.files:
         digest = hashlib.sha256(data[start:start + size]).hexdigest()
-        rel = npmtar.written_path(path)
+        rel = where(path)
         if rel is None:
             continue
         base = rel.rsplit("/", 1)[-1]
@@ -449,7 +460,7 @@ def npm_diff_start():
         if npm is None or not npm["ok"]:
             return
         written = {rel: digest for rel, digest, _size in npm["files"] if digest != "other"}
-        predicted = npm_predicted(data)
+        predicted = npm_predicted(data, npm.get("tar", "7"))
         if predicted is not None:
             check(predicted == written, "npm-model", f"registry.npmtar says {sorted(predicted)[:6]}, npm writes "
                                                      f"{sorted(written)[:6]}")

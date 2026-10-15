@@ -568,10 +568,19 @@ class PromisesAreLive(unittest.TestCase):
         if raised.exception.rule != "npm-unread":
             self.fail(raised.exception)
         plain = fuzz_targets.tar_entry(b"package/a.js", b"1;\n") + b"\0" * 1024
-        with mock.patch.object(npmtar, "written_path", lambda path: "elsewhere.js"):
+        with mock.patch.object(npmtar, "written_path", lambda path: "elsewhere.js"), \
+                mock.patch.object(npmtar, "written_path_npm10", lambda path: "elsewhere.js"):   # (npm 11's, 10's)
             with self.assertRaises(fuzz_targets.Violation) as raised:
                 run(plain)
         self.assertEqual(raised.exception.rule, "npm-model")
+
+    def test_the_npm_model_is_the_bundled_node_tars(self):
+        # npm 10 bundles node-tar 6.2 and npm 11 node-tar 7.5: the fuzz target predicts with the model of the one
+        # npm_extract.cjs reports
+        entry = fuzz_targets.tar_entry
+        seed = entry(b"package/package.json", b"{}") + entry(b"package/C:a.js", b"1;\n") + b"\0" * 1024
+        self.assertEqual(sorted(fuzz_targets.npm_predicted(seed, "6.2.1")), ["C:a.js", "package.json"])
+        self.assertEqual(sorted(fuzz_targets.npm_predicted(seed, "7.5.22")), ["a.js", "package.json"])
 
     def test_the_pip_diff_promises(self):
         # BR-4, F-11: with the reader refusing a `..` again, pip writes the setup.py the reader never read; with its

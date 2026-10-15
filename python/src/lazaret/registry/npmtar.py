@@ -13,7 +13,7 @@ writes what the scan did not read. Found by the differential fuzzer (scripts/fuz
   `X` header, a name whose bytes are not UTF-8 (U+FFFD in node-tar), a NUL before a newline in a name: each
   reads one way in npm and another in tarfile.
 
-`NodeTar` is node-tar's parser (7.5, which npm 10 and 11 bundle) as npm runs it, fed the bytes of the tar stream
+`NodeTar` is node-tar's parser (7.5, which npm 11 bundles) as npm runs it, fed the bytes of the tar stream
 in order: for each entry npm writes, its path as node-tar reads it (before the first part is stripped), where
 its data starts in the stream and its size, and node-tar's warnings. Two readers that take an entry's data from
 the same place in the same stream, for the same size, read the same bytes: the comparison is of those. `repo._iter_tar` feeds it the
@@ -22,6 +22,11 @@ place, under another name or not at all, and a header node-tar finds invalid or 
 archive corrupt (INCOMPLETE): the scan cannot vouch for what npm installs. Tarballs written by npm, yarn,
 pnpm, bun and git read the same in both.
 
+npm 10 (Node 22's) bundles node-tar 6.2, whose parser reads as 7.5's (the fuzz target held to each finds no
+difference) but which places a path otherwise (`written_path_npm10`): a `..` part only by `/`, so on Linux and
+macOS `..\\x.js` is a file it writes, which npm 11 refuses and the scan did not read; and a path's roots taken off
+before its first part, so `C:index.js` is a file of that name. Each entry is held to where both write it.
+
 Written to match node-tar's behaviour (lib/parse.js, header.js, pax.js, read-entry.js, unpack.js and
 large-numbers.js; BlueOak-1.0.0), JavaScript's semantics included (`parseInt`, `trim`, a regex `.` that stops
 at a line terminator, UTF-8 decoded with U+FFFD for what is not UTF-8), and held to npm's own node-tar by the
@@ -29,6 +34,7 @@ fuzz target. Not modelled: a pax or long-name record whose UTF-8 is split where 
 (node-tar decodes chunk by chunk); npm on Windows (backslashes are separators there, as the registry's paths
 already read them)."""
 
+import posixpath
 import re
 
 BLOCK = 512
@@ -428,10 +434,53 @@ def written_path(path):
     return "/".join(parts) or None
 
 
+def written_path_npm10(path):
+    """Where npm 10 on Linux or macOS writes an entry of this path, or None: node-tar 6.2's Unpack (lib/unpack.js,
+    ISC), which npm 10 bundles, with strip 1. As node-tar 7 it drops the first part and writes no path deeper than
+    1,024 and none with a `..` part, but by `/` alone (a backslash is a letter of a name there); it takes the roots
+    off the path as the archive names it, before the first part is dropped, and when it took any, writes what is
+    left whole (`C:x/a.js` is `x/a.js`); without any, a path left absolute or one that climbs out is not written.
+    So `..\\a.js` and `C:..` are files to it, which npm 11 refuses, and `C:index.js` is a file of that name, which
+    npm 11 writes as index.js."""
+    rest = path.split("/")[1:]
+    if len(rest) > 1024 or ".." in rest:
+        return None
+    taken, stripped = strip_absolute(path)
+    return _inside(stripped if taken else "/".join(rest))
+
+
+def _inside(p):
+    """Where node-tar 6.2 writes a path resolved against the package's folder, or None: absolute, the folder itself
+    or above it."""
+    norm = posixpath.normpath(p) if p else "."
+    return None if p.startswith("/") or norm in (".", "..") or norm.startswith("../") else norm
+
+
+#: Who writes an entry where: npm 11 (node-tar 7.5) and npm 10 (6.2), on Linux and macOS
+WRITERS = (("npm", written_path), ("npm 10", written_path_npm10))
+
+
+def _disagreement(who, npm, mine, start, size):
+    """Where one npm writes an entry against the registry's reading of it -> (where, detail), or None."""
+    if npm is None:
+        return None
+    theirs = "/".join(x for x in npm.replace("\\", "/").split("/") if x not in ("", "."))
+    if mine is None:
+        return npm, f"{who} writes {npm!r} from data at byte {start}, which this reader did not read as a file"
+    if mine[0] is None:
+        return npm, f"{who} writes the entry at byte {start} as {npm!r}, which this reader does not extract"
+    if mine[0] != theirs:
+        return npm, f"{who} writes the entry at byte {start} as {npm!r}, this reader read it as {mine[0]!r}"
+    if mine[1] != size:
+        return npm, f"{who} reads {size} bytes for {npm!r} at byte {start}, this reader {mine[1]}"
+    return None
+
+
 def disagreements(node, read):
     """node: a finished NodeTar; read: {data offset: (path or None, size)} of the regular files tarfile read, each
     path where the registry puts it (repo.canonical_member_path: None when it reads none there) -> what makes the
-    archive one the scan cannot vouch for, as (where, detail), the first few."""
+    archive one the scan cannot vouch for, as (where, detail), the first few. Each entry is held to where npm 11
+    writes it and where npm 10 does (`WRITERS`)."""
     out = []
     for code, message in node.warnings:
         if code in AMBIGUOUS:
@@ -439,19 +488,11 @@ def disagreements(node, read):
                                      f"disagree about what the archive holds"))
             break
     for path, start, size in node.files:
-        npm = written_path(path)
-        if npm is None:
-            continue
-        mine = read.get(start)
-        theirs = "/".join(x for x in npm.replace("\\", "/").split("/") if x not in ("", "."))
-        if mine is None:
-            out.append((npm, f"npm writes {npm!r} from data at byte {start}, which this reader did not read as a file"))
-        elif mine[0] != theirs:
-            out.append((npm, f"npm writes the entry at byte {start} as {npm!r}, this reader read it as "
-                             f"{mine[0]!r}" if mine[0] is not None else
-                             f"npm writes the entry at byte {start} as {npm!r}, which this reader does not extract"))
-        elif mine[1] != size:
-            out.append((npm, f"npm reads {size} bytes for {npm!r} at byte {start}, this reader {mine[1]}"))
+        for who, where in WRITERS:
+            found = _disagreement(who, where(path), read.get(start), start, size)
+            if found:
+                out.append(found)
+                break
         if len(out) >= 3:
             break
     return out
