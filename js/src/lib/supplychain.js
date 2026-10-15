@@ -12,7 +12,7 @@ import { pyRe, pyRepr, MAX_JSON_DEPTH, PY_ORDER } from "./pycompat.js";
 import { call, hookIsSuspicious, issuesOf, NativeExhausted, EXHAUSTED } from "./native.js";
 import { REDACT, redactText } from "./redact.js";
 
-export { SECRET_RULES, REDACT_PLACEHOLDER, redactContextLine, redactSecretSnippet, redactResult, setRedactSecrets } from "./redact.js";
+export { SECRET_RULES, REDACT_PLACEHOLDER, redactContextLine, redactResult, setRedactSecrets } from "./redact.js";
 
 // Scripts npm runs when a package is installed as a dependency. Publisher-side
 // scripts (prepack, prepublishOnly, postpublish, ...) only ever run on the

@@ -6,7 +6,9 @@ inside one rule's per-match loop — Python engine and dashboard.
   `try{}catch(e){}` on ONE line took 1.1 / 3.5 / 12.6 / > 44 s (the page:
   10k in 10.2 s). Clipping is O(window) now, with output identical to
   core.clip_snippet_line (code points, surrogate pairs never split) — checked
-  here against the page on astral characters and lone surrogates.
+  here against the page on astral characters and lone surrogates. Since
+  BR-7's step 3 c (0.1.9) the engine clips for both packages, all of a file's
+  findings in one call.
 * The 30 s per-file backstop was checked between rules only, so a text rule
   with thousands of matches ran to the end (a 2 s budget: 13.5 s and all 10k
   findings). The deadline is checked inside per-match loops; the backstop
@@ -55,13 +57,18 @@ class PythonPackageTests(unittest.TestCase):
                 self.assertNotIn("SC-TRUNCATED", {i["rule"] for i in issues})
 
     def test_clip_is_windowed(self):
+        # (since BR-7's step 3 c the engine makes the snippets of the findings the packages build: a file's in one
+        # call, mk_issues)
         line = "try{}catch(e){}" * 20_000
+        rule = {"id": "B-EMPTY-CATCH", "name": "n", "type": "BUG", "sev": "MAJOR", "msg": "m", "why": "w", "fix": "f",
+                "ref": "r"}
         started = time.monotonic()
-        for k in range(20_000):
-            out = core.clip_snippet_line(line, k * 15 + 5)
+        issues = core.mk_issues("t.js", ["// header", line, "// footer"], [(rule, 2, k * 15 + 5) for k in range(20_000)])
         self.assertLess(time.monotonic() - started, LIMIT_S)
+        out = issues[-1]["snippet"][1]
         self.assertEqual(len(out), 240)
         self.assertTrue(out.startswith(E) and out.endswith("catch(e){}"))
+        self.assertEqual(issues[0]["snippet"], ["// header", line[:239] + E, "// footer"])
 
     def test_a_project_scan_is_bounded_by_the_work_budget(self):
         # (Q-1: the same file gets the same findings on every machine, however slow it is)

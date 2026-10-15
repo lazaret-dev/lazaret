@@ -81,6 +81,8 @@ pub const CALLS: &[&str] = &[
     // 0.1.9 (BR-7 step 3 b): manifests (manifest/: package.json's install hooks and dependencies, binding.gyp's
     // actions and expansions; json.loads and ast.literal_eval as Python reads them)
     "scan_manifest", "scan_gyp", "manifest_data", "manifest_check",
+    // 0.1.9 (BR-7 step 3 c): the one redactor, for the findings the packages build (redact.rs)
+    "issue_make", "redact_text", "redact_issues", "redact_file", "clip_line", "pem_lines",
     // the JavaScript parser (jsparse.py's trees)
     "js_parse", "js_parse_file",
     // the Python parser (Python 3.13's ast trees)
@@ -650,6 +652,61 @@ fn dispatch(name: &str, args: &Value, text: &[u32]) -> Result<Value, CallError> 
                 ("data", data.as_ref().map_or(Value::Null, crate::manifest::data_value)),
                 ("issues", Value::Arr(early.iter().map(|f| none.issue(f)).collect())),
             ])
+        }
+        "issue_make" => {
+            // {items: [[rule {id, name, type, sev, msg, why, fix, ref}, line, col or null]…], redact, context, neumaier}
+            // + the file's lines joined by "\n" -> {"issues": [mk_issue's…]}; `context`: the file's entropy literals
+            // redacted too (core's _Redactor over these lines)
+            let flag = |k: &str, d: bool| match args.get(k) {
+                Some(Value::Bool(b)) => *b,
+                _ => d,
+            };
+            let items = args.get("items").and_then(|v| v.as_arr()).unwrap_or(&[]);
+            let issues = crate::redact::make_issues(p, text, items, flag("redact", true), flag("context", false), flag("neumaier", false));
+            Value::obj(vec![("issues", Value::Arr(issues))])
+        }
+        "redact_text" => {
+            // {mode, context, neumaier}: core._redact_text (mode "text", the default: the PEM blocks, the line patterns;
+            // with `context`, a file's lines joined by "\n", its entropy literals too), _redact_context_line ("line":
+            // the line patterns alone) or _SecretLiterals(context).redact ("literals": the literals alone)
+            let neumaier = matches!(args.get("neumaier"), Some(Value::Bool(true)));
+            let lits = opt_str(args, "context").map(|c| crate::redact::literals(p, &c, neumaier));
+            let mode = opt_str(args, "mode").map(|m| crate::pystr::to_string(&m)).unwrap_or_default();
+            Value::Str(match mode.as_str() {
+                "line" => crate::findings::redact_context_line(p, text),
+                "literals" => match &lits {
+                    Some(l) => l.redact(p, text),
+                    None => text.to_vec(),
+                },
+                _ => crate::redact::redact_text(p, text, lits.as_ref()),
+            })
+        }
+        "pem_lines" => {
+            // the lines (of a text split at "\n") inside a PEM private key's block: core._pem_block_lines
+            let lines = crate::pystr::split_char(text, '\n' as u32);
+            let mut found: Vec<usize> = crate::findings::pem_block_lines(p, &lines).into_iter().collect();
+            found.sort_unstable();
+            Value::Arr(found.into_iter().map(|k| Value::Int(k as i64)).collect())
+        }
+        "redact_issues" => {
+            // {issues: [[rule, line, snipStart or null, snippet or null, msg or null, cmd or null]…], redact} ->
+            // {"issues": [[snippet, msg, cmd]…]}: core.redact_result's sweep
+            let redact = !matches!(args.get("redact"), Some(Value::Bool(false)));
+            let issues = args.get("issues").and_then(|v| v.as_arr()).unwrap_or(&[]);
+            Value::obj(vec![("issues", Value::Arr(crate::redact::redact_issues(p, issues, redact)))])
+        }
+        "redact_file" => {
+            // {issues: [[lines or null, msg or null, cmd or null]…], neumaier} + the file's scan lines joined by "\n" ->
+            // {"issues": [[shown, msg, cmd]…]}: core.redact_file_issues for one file (`lines`: the indices of the file's
+            // lines a snippet still shows raw; `shown`: each as the scan's snippets show it)
+            let neumaier = matches!(args.get("neumaier"), Some(Value::Bool(true)));
+            let issues = args.get("issues").and_then(|v| v.as_arr()).unwrap_or(&[]);
+            Value::obj(vec![("issues", Value::Arr(crate::redact::redact_file(p, text, issues, neumaier)))])
+        }
+        "clip_line" => {
+            // {col or null} -> core.clip_snippet_line
+            let col = args.get("col").and_then(|v| v.as_i64()).filter(|&c| c >= 0).map(|c| c as usize);
+            Value::Str(crate::findings::clip_snippet_line(p, text, col))
         }
         "manifest_check" => {
             // one of the manifest readers' parts, for the packages' tests: json (json.loads: {"ok": repr, "type"} or

@@ -813,6 +813,22 @@ aggregate):
   raise, leaves the command as written. A set's items stay in the order given (Python orders a set of str by a
   per-run hash). `test_snapshot_manifest` (hashes checked to be the Python's answers) and `test_wasm_parity_manifest`
   hold the engine.
+- **One redactor, the engine's (BR-7, step 3 c).** The findings the packages still build (an encoding note, the
+  package checks', the dependency follow's, a cap's note, the autorun and CI files' issues) are made and redacted by
+  the engine as it makes its own (`rust/crates/lazaret-engine/src/redact.rs`, the `issue_make` call: the ±2 lines
+  clipped around the match, a secret rule's flagged line the placeholder, the others' PEM blocks, credential patterns
+  and, with the file's lines, its entropy literals), and so are the sweep of a whole result before it is written
+  (`redact_issues`) and a file's redaction of the findings built outside its scan (`redact_file`), where core's
+  `mk_issue`, `redact_result`, `redact_file_issues` and `_redact_text` and the npm package's `issue.js` and `redact.js`
+  did it until now. A file's lines go to the engine once for all of its findings (`core.mk_issues`, `mkIssues`). The
+  same answers as the Python's on 2,326 generated files' findings, sweeps and redactions with redaction on and off,
+  60 generated projects and three of this repository's folders scanned whole (Python), and 12,000 cases and four
+  folders scanned whole through the npm package; the one difference is a Python string holding a UTF-16 surrogate
+  pair as two characters (only a `surrogatepass` decode makes one), which the engine reads as one, so a sweep's
+  placeholder for such a line counts one character less. `redact.js` is 123 lines (from 369: the token matcher, the
+  entropy test and the PEM reader are gone, and with them `test_js_parity_tokens`), and `redactResult` always clips
+  (it took the clipper as an argument). `test_snapshot_redact` (hashes checked to be the Python's answers) and
+  `test_wasm_parity_redact` hold the engine.
 - **Security: S-XML is a parser set to resolve external entities, not an import of xml.etree, xml.dom or xml.sax
   (Q-3; rule set 2.80.0).** Since Python 3.7.1 none of them resolves an external entity unless told to, and Expat
   2.4.1 refuses entity bombs, so the import flagged safe code: all 20 of BenchmarkPython's safe XXE cases (its 8 real

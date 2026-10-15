@@ -74,7 +74,7 @@ the same way. Baselines keep matching because the placeholder is deterministic
 for a given rule + secret. Pass `--no-redact-secrets` when you are auditing a
 leak and need the exact bytes in the report. It applies to project scans only:
 registry results are always redacted, because they are stored (see *Registry
-scanning*).
+scanning*). The redaction is the native engine's, for both packages (0.1.9).
 
 **Live secrets (`--verify-secrets`, off by default):** after the scan, each
 secret finding is asked about where a provider can say whether it is live: a

@@ -5,28 +5,25 @@
 // scanner's engine.js re-exports it, so existing scanner-side imports keep
 // working unchanged.
 //
-// Twin of lazaret.scanner.core.mk_issue / clip_snippet_line: snippets
-// (spec 7) and redaction (spec 6) happen HERE, so library callers of
+// core.mk_issue / clip_snippet_line: the engine makes the snippets (spec 7)
+// and redacts them (spec 6) for the findings this package still builds, as it
+// does its own (BR-7 step 3 c, 0.1.9: redact.rs), so library callers of
 // scanFile never see a raw credential or a multi-megabyte snippet either.
 
 import { cpIndex } from "./pycompat.js";
-import {
-  REDACT, SECRET_RULES, REDACTED, scanContext, contextSecrets, contextRedacted,
-  pemBlockLines, redactContextLine, redactText, secretPlaceholder,
-} from "./redact.js";
+import { call } from "./native.js";
+import { REDACT, isScanContext, linesText, redactText } from "./redact.js";
 
 export const SNIPPET_MAX = 240;      // characters (code points) per snippet line
 export const SNIPPET_LEAD = 60;      // context kept before the match on the flagged line
-const ELLIPSIS = "…";
 
 // Code-point offsets (Python's str indexing) into a long line, in O(log n)
-// per finding: clipLine used to build Array.from(line) and mkIssue
-// cpLen(line.slice(0, col)) for EVERY finding, so 10k findings on one 150 KB
-// line took 12.6 s (20k: > 44 s). The view of a line — the UTF-16 offsets of
+// per finding: mkIssue's `col` is a UTF-16 offset, the engine's a code-point
+// one, and cpLen(line.slice(0, col)) for EVERY finding made 10k findings on
+// one 150 KB line take seconds. The view of a line — the UTF-16 offsets of
 // its surrogate pairs, or null when it has none (then code-point and UTF-16
 // offsets coincide) — is computed once and kept for the few most recent long
-// lines; the output is exactly the code-point-based clipping of
-// core.clip_snippet_line.
+// lines.
 const CP_VIEW_CACHE = 8;
 const cpViews = new Map();
 const PAIR_RE = /[\ud800-\udbff][\udc00-\udfff]/g;
@@ -45,13 +42,6 @@ function surrogatePairs(s) {
   cpViews.set(s, v);
   return v;
 }
-/** UTF-16 offset of code point `c` (pair j starts at code point pairs[j] - j). */
-function unitAt(pairs, c) {
-  if (!pairs) return c;
-  let lo = 0, hi = pairs.length;
-  while (lo < hi) { const mid = (lo + hi) >> 1; if (pairs[mid] - mid < c) lo = mid + 1; else hi = mid; }
-  return c + lo;
-}
 /** cpIndex(s, off) — the code-point index of UTF-16 offset `off` — for any line length. */
 export function cpIndexOf(s, off) {
   if (s.length <= SNIPPET_MAX || off < 0) return cpIndex(s, off);
@@ -64,58 +54,48 @@ export function cpIndexOf(s, off) {
 }
 
 /**
- * Clip one snippet line to SNIPPET_MAX characters. The flagged line is
- * windowed around the match (`col`, a code-point offset): the window starts
- * SNIPPET_LEAD characters before it (never past the point where it would
- * run off the end) and "…" marks each side that was cut. Other lines keep
- * their start. O(window) per call once the line's view is cached.
+ * Clip one snippet line to SNIPPET_MAX characters (core.clip_snippet_line, the engine's). The flagged line is
+ * windowed around the match (`col`, a code-point offset): the window starts SNIPPET_LEAD characters before it (never
+ * past the point where it would run off the end) and "…" marks each side that was cut. Other lines keep their start.
  */
 export function clipLine(text, col = null) {
   if (typeof text !== "string" || text.length <= SNIPPET_MAX) return text;
-  const pairs = surrogatePairs(text);
-  const n = text.length - (pairs ? pairs.length : 0);
-  if (n <= SNIPPET_MAX) return text;
-  let start = col == null ? 0 : Math.max(0, col - SNIPPET_LEAD);
-  start = Math.min(start, n - (SNIPPET_MAX - 1));
-  const head = start > 0 ? ELLIPSIS : "";
-  const end = start + SNIPPET_MAX - head.length;
-  const from = unitAt(pairs, start);
-  if (end < n) return head + text.slice(from, unitAt(pairs, end - 1)) + ELLIPSIS;
-  return head + text.slice(from);
+  return call("clip_line", { col: Number.isInteger(col) ? col : null }, text);
+}
+
+const RULE_TEXTS = ["id", "name", "type", "sev", "msg", "why", "fix", "ref"];
+
+/**
+ * Build a finding (mkIssues, for one). `rule` is a table row or a hand-built row with {id, name, type, sev, msg, why,
+ * fix, ref}; `file` is {name} / {path} or the name. Snippet is ±2 lines around the finding line. `col` is the UTF-16
+ * offset of the match on the flagged line (optional).
+ */
+export function mkIssue(rule, file, line, lines, col = null) {
+  return mkIssues(file, lines, [[rule, line, col]])[0];
 }
 
 /**
- * Build a finding. `rule` is a table row or a hand-built row with
- * {id, name, type, sev, msg, why, fix, ref}; `file` is {name} / {path} or
- * the name. Snippet is ±2 lines around the finding line. `col` is the
- * UTF-16 offset of the match on the flagged line (optional).
+ * A finding for each of `rows` ([rule, line, col]: mkIssue's) of the file `file` whose lines are `lines`, made by the
+ * engine (core.mk_issues; the lines handed over once). With redaction on, a secret rule's flagged line is the
+ * placeholder and the other lines and the message are redacted: with the file's entropy literals too when `lines`
+ * are a registered file's (registerScanContext; core's _Redactor).
  */
-export function mkIssue(rule, file, line, lines, col = null) {
+export function mkIssues(file, lines, rows) {
+  if (!rows.length) return [];
   const name = typeof file === "string" ? file : (file.name ?? file.path);
-  const start = Math.max(0, line - 3);
-  const stop = Math.min(lines.length, line + 2);
-  const flag = line - 1;
-  const ctx = REDACT.on ? scanContext(lines) : null;
-  const msg = REDACT.on ? redactText(rule.msg, ctx ? contextSecrets(ctx) : null) : rule.msg;
-  const redact = REDACT.on && flag >= 0 && flag < lines.length;
-  const pem = redact && !ctx ? pemBlockLines(lines) : null;
-  const cpCol = col != null && typeof lines[flag] === "string" ? cpIndexOf(lines[flag], col) : null;
-  const snippet = [];
-  for (let k = start; k < stop; k++) {
-    let l = lines[k];
-    if (typeof l !== "string") { snippet.push(l); continue; }
-    if (redact) {
-      if (k === flag && SECRET_RULES.has(rule.id)) l = secretPlaceholder(rule.id, l);
-      else if (ctx) l = contextRedacted(ctx, k);
-      else l = pem.has(k) ? REDACTED : redactContextLine(l);
-    }
-    snippet.push(clipLine(l, k === flag ? cpCol : null));
-  }
-  return {
-    rule: rule.id, name: rule.name, type: rule.type, sev: rule.sev, msg,
+  const items = rows.map(([rule, line, col = null]) => {
+    const flagged = lines[line - 1];
+    const cp = col != null && typeof flagged === "string" ? cpIndexOf(flagged, col) : null;
+    return [Object.fromEntries(RULE_TEXTS.map((k) => [k, rule[k]])), line, cp];
+  });
+  const got = call("issue_make", { items, redact: REDACT.on, context: isScanContext(lines), neumaier: false },
+    linesText(lines)).issues;
+  return rows.map(([rule, line], k) => ({
+    rule: rule.id, name: rule.name, type: rule.type, sev: rule.sev,
+    msg: typeof rule.msg === "string" ? got[k][4] : rule.msg,
     why: rule.why, fix: rule.fix, ref: rule.ref, file: name, line,
-    snippet, snipStart: start + 1,
-  };
+    snippet: got[k][9], snipStart: got[k][10],
+  }));
 }
 
 /** File-level synthetic finding with an empty snippet (walker/truncation). */

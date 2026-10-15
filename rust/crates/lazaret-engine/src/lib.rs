@@ -43,6 +43,7 @@ pub mod pyre;
 pub mod pystr;
 pub mod quickhash;
 pub mod received;
+pub mod redact;
 pub mod rsparse;
 pub mod rsread;
 pub mod rxutil;

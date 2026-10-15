@@ -1,5 +1,5 @@
-// Obfuscation/entropy/suppression helpers — twins of lazaret.scanner.core
-// (B64_BLOB_RE, OBF_IDENT_RE, SECRET_SKIP_RE, SUPPRESS_RE, is_suppressed).
+// Obfuscation/suppression helpers — twins of lazaret.scanner.core
+// (B64_BLOB_RE, OBF_IDENT_RE, SUPPRESS_RE, is_suppressed).
 // mkIssue itself lives in the leaf ../lib/issue.js and is re-exported here so
 // scanner-side imports stay as they were (scanner→lib is the allowed direction;
 // lib must never import scanner).
@@ -7,8 +7,7 @@
 import { pyRe } from "../lib/pycompat.js";
 import { lexLines } from "../lib/lexer.js";
 
-export { shannonEntropy, ENTROPY_VALUE_RE, entropySecretish, SECRET_SKIP_RE } from "../lib/redact.js";
-export { mkIssue } from "../lib/issue.js";
+export { mkIssue, mkIssues } from "../lib/issue.js";
 export { isComment } from "../lib/lexer.js";
 
 export const B64_BLOB_RE = pyRe(String.raw`[\"'][A-Za-z0-9+/]{200,}={0,2}[\"']`);

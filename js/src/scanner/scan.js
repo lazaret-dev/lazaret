@@ -5,7 +5,7 @@
 // the SQL-sink pass, the function metrics, the suppression markers and the cap
 // are the engine's too), and so is a config or data file's (BR-7: its
 // credentials, an editor's or agent's settings, a CI file's checks).
-import { mkIssue } from "./engine.js";
+import { mkIssues } from "./engine.js";
 import { jsxReading } from "../lib/lexer.js";
 import { REDACT } from "../lib/redact.js";
 import { truncatedIssue, normalizeNewlines } from "../lib/fs.js";
@@ -72,11 +72,11 @@ export function autorunIssues(path, lines, read = null) {
   const files = {};
   for (let k = 0; k < AUTORUN_ROUNDS; k++) {
     const got = call("autorun_issues", { path, follow: read !== null, files }, text);
-    if (got.issues) return got.issues.map(([line, rule]) => mkIssue(rule, path, line, lines));
+    if (got.issues) return mkIssues(path, lines, got.issues.map(([line, rule]) => [rule, line]));
     for (const rel of got.need) files[rel] = read(rel);
   }
   const got = call("autorun_issues", { path, follow: false }, text);
-  return got.issues.map(([line, rule]) => mkIssue(rule, path, line, lines));
+  return mkIssues(path, lines, got.issues.map(([line, rule]) => [rule, line]));
 }
 
 // ---- CI files (SC-WORKFLOW-*, SC-GITLAB-*; core.ci_issues) ----
@@ -87,7 +87,7 @@ export function autorunIssues(path, lines, read = null) {
  */
 export function ciIssues(path, lines) {
   if (call("ci_kind", {}, path) === null) return [];
-  return call("ci_issues", { path }, lines.join("\n")).map(([line, rule]) => mkIssue(rule, path, line, lines));
+  return mkIssues(path, lines, call("ci_issues", { path }, lines.join("\n")).map(([line, rule]) => [rule, line]));
 }
 
 /**

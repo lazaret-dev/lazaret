@@ -17,7 +17,7 @@ import { classifyBinary, HEADER_SAMPLE, PYC_HEADER, pycIssues, pycModule, pyExt,
 import { shebangLang } from "./native.js";
 import { mkIssue, fileIssue } from "./issue.js";
 import { pthIssues } from "./pth.js";
-import { registerScanContext, SECRET_SKIP_RE } from "./redact.js";
+import { registerScanContext } from "./redact.js";
 import { isConfigFile, ownReport, CONFIG_SCAN_CAP } from "./configsecrets.js";
 import { cmpCodePoints } from "./pycompat.js";
 
@@ -573,7 +573,7 @@ export function encodingIssues(rel, content, dec) {
     // the file's own entropy literals and PEM blocks, as scanFile's findings
     // have (twin of core.encoding_issues): the Q-ENCODING snippet of a
     // UTF-8-BOM settings.py showed the literal its S-ENTROPY redacted
-    registerScanContext(lines, SECRET_SKIP_RE);
+    registerScanContext(lines);
     out.push(mkIssue({ id: "Q-ENCODING", name: "Non-UTF-8 source encoding",
       type: "SMELL", sev: "INFO",
       msg: `Source file is not UTF-8 (detected ${dec.encoding}); decoded explicitly.`,

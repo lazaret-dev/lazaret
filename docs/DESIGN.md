@@ -181,9 +181,12 @@ line yourself.
   bar; "it stays silent on 80,000 real files" is the other half.
 - **Secrets are always redacted.** Any finding's snippet, message and the
   registry's stored results are swept for credentials before they reach a
-  report, the baseline fingerprinter, or the registry store
-  (`_Redactor`, `redact_result`, `redact_file_issues`). A `--no-redact-secrets`
-  flag exists but the SECRET-rule lines are redacted regardless.
+  report, the baseline fingerprinter, or the registry store. There is one
+  redactor, the engine's (`redact.rs`, `findings.rs`; since BR-7's step 3 c),
+  for the findings it makes and the ones the packages build (`mk_issue`,
+  `redact_result`, `redact_file_issues`, and their npm callers).
+  `--no-redact-secrets` keeps credential lines in a project scan's reports
+  (registry results are always redacted).
 - **Inert fixtures only.** Everything under `python/tests/fixtures/` looks
   malicious but does nothing: network references point at `.invalid`, TEST-NET
   (`192.0.2.0/24`) or private addresses; credentials are dummies; nothing is

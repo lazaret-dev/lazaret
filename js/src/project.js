@@ -8,7 +8,6 @@ import { scanFile, scanConfigFile, treeReader } from "./scanner/scan.js";
 import { scanManifest, scanGyp } from "./lib/supplychain.js";
 import { redactResult } from "./lib/redact.js";
 import { buildResult } from "./report.js";
-import { clipLine } from "./lib/issue.js";
 import { dependencyChecks, projectHookChecks } from "./deps.js";
 import { Pool, threadsFor, mapTasks } from "./pool.js";
 import { analyzeFlows, redactFlowIssues } from "./scanner/flow.js";
@@ -78,7 +77,7 @@ export function scanCollected(root, col, { exclude = [], env = process.env, extr
   // Python engine's flow.analyze; dependency files are not analyzed). The
   // findings copy raw source lines: they get their file's redaction here.
   add(redactFlowIssues(analyzeFlows(files), files));
-  const res = redactResult(buildResult(root, files, issues), clipLine);
+  const res = redactResult(buildResult(root, files, issues));
   res.metrics.configFiles = configs.length;
   return { res, files, configs };
 }

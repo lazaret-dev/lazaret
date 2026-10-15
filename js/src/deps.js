@@ -31,7 +31,7 @@ import { readBounded, truncatedIssue, scanErrorIssue, strerror, normalizeNewline
   MAX_FILE_BYTES, normpathRel } from "./lib/fs.js";
 import { looksBinary, HEADER_SAMPLE, pyExt } from "./lib/binary.js";
 import { mkIssue } from "./lib/issue.js";
-import { REDACT, redactText, registerScanContext, SECRET_SKIP_RE } from "./lib/redact.js";
+import { REDACT, redactText, registerScanContext } from "./lib/redact.js";
 import { mapTasks } from "./pool.js";
 import { pyStrip, pyStripChars, pyRepr, cmpCodePoints, pyEntries, pyRe, cpLen, cpPrefix, isPySpace } from "./lib/pycompat.js";
 import { EXHAUSTED } from "./scanner/scan.js";
@@ -522,7 +522,7 @@ export function packageReaderIssues(answer, order, texts, what) {
   };
   const issue = (rule, sev, path, line, msg, why, fix) => {
     const lines = (texts.get(path) ?? "").split("\n");
-    registerScanContext(lines, SECRET_SKIP_RE);       // (the file's own literals too: core's _Redactor(lines))
+    registerScanContext(lines);       // (the file's own literals too: core's _Redactor(lines))
     issues.push(mkIssue({ id: rule, name: names[rule], type: "HOTSPOT", sev, msg, why, fix,
       ref: "CWE-506 · Supply chain" }, path, line, lines));
   };
@@ -940,7 +940,7 @@ export function dependencyImportIssue(path, text, lang = null, names = null) {
   const [reasons, line] = importTimeRisk(text, lang, names);
   if (!reasons.length) return null;
   const lines = text.split("\n");
-  registerScanContext(lines, SECRET_SKIP_RE);     // the file's own entropy literals (core: _Redactor(lines))
+  registerScanContext(lines);     // the file's own entropy literals (core: _Redactor(lines))
   return mkIssue({ id: "SC-IMPORT-RISK", name: "Risky import-time code", type: "HOTSPOT", sev: importTimeSeverity(reasons),
     msg: `Dependency code ${reasons.join("; and ")}.`, why: DEP_IMPORT_RISK_WHY,
     fix: "Read the file: what does it collect, and where does it send it?",
@@ -955,7 +955,7 @@ const AGENT_HIJACK_WHY = "A dependency that runs your AI coding agent hands the 
 
 /** SC-AGENT-HIJACK (CRITICAL) at line `lineNo` of `lines`. Twin of core._agent_hijack_issue. */
 function agentHijackIssue(path, lineNo, lines, agent, flag, col = null) {
-  registerScanContext(lines, SECRET_SKIP_RE);
+  registerScanContext(lines);
   return mkIssue({ id: "SC-AGENT-HIJACK", name: "Dependency drives your AI agent", type: "HOTSPOT", sev: "CRITICAL",
     msg: `Dependency launches the ${pyRepr(agent)} AI agent with ${flag} — running your coding agent ` +
       "with its confirmations turned off.",

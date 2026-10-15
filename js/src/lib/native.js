@@ -40,6 +40,11 @@ export class NativeExhausted extends NativeError {
 let compiled = null;       // the WebAssembly.Module (compiled once per process)
 let engine = null;         // the instance's exports
 let workBudget = null;     // steps of the regex matcher a call may take (null: the engine's default)
+// The calls that make and redact the findings a scan reports (BR-7 step 3 c) run on the engine's default budget
+// whatever setWorkBudget asks, as the Python package asks them: a file that spent its budget still gets its
+// SC-TRUNCATED finding, redacted.
+const UNBUDGETED = new Set(["batch", "issue_make", "redact_text", "redact_issues", "redact_file", "clip_line",
+  "pem_lines"]);
 
 /** The work each call may do, in steps of the engine's regex matcher (null: its default, about 4e9). */
 export function setWorkBudget(steps = null) {
@@ -143,7 +148,7 @@ export function codePoints(s) {
  */
 export function call(name, args = {}, text = "") {
   const e = instance();
-  if (workBudget !== null && name !== "batch") args = { ...args, budget: workBudget };
+  if (workBudget !== null && !UNBUDGETED.has(name)) args = { ...args, budget: workBudget };
   const nameBytes = utf8.encode(name);
   const argBytes = utf8.encode(JSON.stringify(args));   // lone surrogates come out as \u escapes
   const textBytes = Array.isArray(text) ? concatBytes(text.map((t) => wtf8(String(t)))) : wtf8(String(text));

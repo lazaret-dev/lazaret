@@ -10,14 +10,46 @@ page's linear token matcher (findSecretToken) and core's (_TokenPattern,
 new with this fix) redact the same text."""
 
 import json
+import random
 import re
 import unittest
 
 from lazaret.scanner import core
 from tests.scanner import _dashboard_vm as dash
 from tests.scanner.test_review_dashboard_perf import timed
+from tests.scanner.test_review_perf_regex import TOKEN_FRAGMENTS
 
 LIMIT_MS = 4000
+
+
+def texts(n=6000, seed=11):
+    """Texts of one to 25 of the formats' pieces, and each format whole in a line of code."""
+    rnd = random.Random(seed)
+    out = ["".join(rnd.choice(TOKEN_FRAGMENTS) for _ in range(rnd.randint(1, 25))) for _ in range(n)]
+    pieces = {"npm": "npm" + "_" + "a1B2" * 9, "anthropic": "sk-ant-" + "api03-" + "Ab1_-" * 18 + "Ab1" + "AA",
+              "anthropic usr": "sk-ant-" + "usr-" + "1a2B3c4D5e6F" + "-" + "Gh7Ij8Kl9Mn0" * 6 + "Op1Q" + "-" + "Rs2Tu",
+              "openai": "sk-" + "proj-" + "Ab1_-" * 14 + "Ab1_" + "T3Blbk" + "FJ" + "Cd2-_" * 14 + "Cd2-"}
+    # each length at and around each format's limits, after and before each kind of neighbour
+    run = "aB3_-"
+    edges = ["npm" + "_" + "a1B2c3"[:1] * n for n in (35, 36, 37)]
+    kinds = ("ab01", "abc01", "abcde01", "abcdef01", "abc1", "abc012", "usr", "usra", "ust", "usr01")  # S-TOKEN-USR
+    edges += ["sk-ant-" + kind + "-" + (run * 41)[:n] for kind in kinds for n in (39, 40, 41, 199, 200, 201)]
+    edges += ["sk-" + (run * 19)[:a] + "T3Blbk" + "FJ" + (run * 15)[:b] for a in (19, 20, 21, 89, 90, 91)
+              for b in (19, 20, 21, 73, 74, 75)]
+    edges += ["sk-" + "x" * 20 + ("T3Blbk" + "FJ") * 3 + "y" * n for n in (4, 12, 20, 66, 74, 82)]
+    for e in edges:
+        out += [e, f"={e}=", f"a{e}", f"_{e}", f"-{e}", f"{e}a", f"{e}_", f"{e}-", f" {e} {e}."]
+    for tok in pieces.values():
+        out += [f'key = "{tok}"', f"KEY={tok}\n", f"x{tok}", f"{tok}!", tok[:-1], tok + tok]
+        # near each format's edges: cut short or run on, behind and before other pieces
+        for _ in range(400):
+            cut = tok[:rnd.randint(len(tok) - 140 if len(tok) > 140 else 4, len(tok))]
+            more = "".join(rnd.choice("aZ9_-.") for _ in range(rnd.choice((0, 0, 1, 2, 30, 120))))
+            out.append("".join(rnd.choice(TOKEN_FRAGMENTS) for _ in range(rnd.randint(0, 2))) + cut + more
+                       + "".join(rnd.choice(TOKEN_FRAGMENTS) for _ in range(rnd.randint(0, 2))))
+    return out
+
+
 CASES = {
     "S-JWT-NONE 'algorithm:' + 200,000 spaces": ("js", '"opts = {algorithm:" + " ".repeat(200000)'),
     "S-JWT-NONE 'algorithm=' + 200,000 spaces (py)": ("py", '"opts = dict(algorithm=" + " ".repeat(200000)'),
@@ -61,9 +93,10 @@ class DashboardLinearPatternTests(unittest.TestCase):
         self.assertEqual(page, [core._redact_context_line(line) for line in lines])
 
     def test_token_matches_are_cores(self):
-        """V-2: the page's findSecretToken finds what core's pattern finds, match by match, in both modes, on the
-        texts the npm package's twin is held to (test_js_parity_tokens: every format's pieces and edges)."""
-        from tests.architecture.test_js_parity_tokens import texts
+        """V-2: the page's findSecretToken finds what core's pattern finds, match by match, in both modes, on
+        texts built from the formats' pieces (TOKEN_FRAGMENTS: every format and its near misses, glued, cut and
+        run together) and each format at and around its limits. (The npm package's twin was held to the same texts
+        until the engine took its redaction: BR-7 step 3 c.)"""
         cases = texts()
         expr = ("(() => { const spans = (s, redact) => { const out = []; let pos = 0, t; "
                 "while ((t = findSecretToken(s, pos, { redact }))) { out.push([t.index, t.end]); pos = t.end; } "

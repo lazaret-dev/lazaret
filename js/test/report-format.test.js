@@ -3,7 +3,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { buildResult, jsonRenderer, printReport, safeExcerpt, issueExcerpt } from "../src/report.js";
-import { scanManifest, scanGyp, redactResult, redactSecretSnippet, INSTALL_HOOK_RE } from "../src/lib/supplychain.js";
+import { scanManifest, scanGyp, redactResult, INSTALL_HOOK_RE } from "../src/lib/supplychain.js";
 import { scanFile } from "../src/scanner/scan.js";
 
 const F = (name, content) => ({ name, content, lang: "py", dep: false });
@@ -88,18 +88,22 @@ test("supply chain: hostile deep manifest is SC-MANIFEST-DEPTH — never a crash
   assert.deepEqual(scanManifest("sub/package.json", "null"), []);
 });
 
+// the sweep of one finding of `rule` flagged at snippet line `idx` (redactResult)
+const sweep = (rule, lines, idx) =>
+  redactResult({ issues: [{ rule, line: idx + 1, snipStart: 1, msg: "", snippet: [...lines] }] }).issues[0].snippet;
+
 test("redaction: SECRET-rule flagged line replaced by deterministic placeholder", () => {
   const lines = ["a=1", 'api_key = "Zk9mS3B4NjdxTW5xU2Y4QWJ"'];
-  const out = redactSecretSnippet("S-ENTROPY", lines, 1, lines[1]);
+  const out = sweep("S-ENTROPY", lines, 1);
   assert.match(out[1], /^\[redacted: secret rule S-ENTROPY\] \(\d+ chars\)$/);
   assert.equal(out[0], "a=1");
   // deterministic: same input twice → same text
-  assert.equal(out[1], redactSecretSnippet("S-ENTROPY", lines, 1, lines[1])[1]);
+  assert.equal(out[1], sweep("S-ENTROPY", lines, 1)[1]);
 });
 
 test("redaction: context lines swept for OTHER credentials (audit L1)", () => {
   const lines = ["aws_key", "AKI\x41IOSFODNN7EXAMPLE", "x=1"];
-  const out = redactSecretSnippet("S-SECRET", lines, 0, lines[0]);
+  const out = sweep("S-SECRET", lines, 0);
   assert.ok(out[1].includes("[redacted]"));
   assert.ok(!out[1].includes("AKI\x41IOSFODNN7EXAMPLE"));
 });

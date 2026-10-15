@@ -2039,50 +2039,38 @@ def source_lines(content, lang):
 
 
 class _Redactor:
-    """One file's redaction facts, shared by every snippet built from its
-    lines: the lines of its PEM private-key blocks, its entropy literals
-    (_SecretLiterals) and each line as any snippet may show it.
-    encoding_issues and redact_file_issues build one, so a finding made
-    outside a file's scan redacts the file's secrets too (a source or config
-    file's scan is the engine's, which redacts its own snippets)."""
+    """One file's lines, for the findings built from them outside the
+    engine's scan of the file (encoding_issues, the package checks, the
+    agent-hijack and import-risk findings): mk_issue with one redacts their
+    snippets and messages with the file's entropy literals too, as the engine
+    redacts the findings of its own scans. The redaction is the engine's
+    (BR-7 step 3 c, 0.1.9: redact.rs); the lines are handed to it joined,
+    once per call (mk_issues: once for all of a file's findings)."""
 
     def __init__(self, lines):
         self.lines = lines
-        self._red = {}
-        self._pem = None
-        self._secrets = None
+        self._text = None
 
-    def secrets(self):
-        """This file's entropy-flagged literals (see _SecretLiterals)."""
-        if self._secrets is None:
-            self._secrets = _SecretLiterals(self.lines)
-        return self._secrets
-
-    def redacted(self, k):
-        """Line k as any snippet may show it: whole-line [redacted] inside a
-        PEM key block, else with secret patterns and this file's entropy
-        literals replaced. Computed once per line, not once per finding
-        whose snippet shows it (review: 3000 findings on one 45 KB line
-        re-ran the redaction 15000 times)."""
-        r = self._red.get(k)
-        if r is None:
-            if self._pem is None:
-                self._pem = _pem_block_lines(self.lines)
-            if k in self._pem:
-                r = REDACTED
-            else:
-                r = self.secrets().redact(_redact_context_line(self.lines[k]))
-            self._red[k] = r
-        return r
+    @property
+    def text(self):
+        if self._text is None:
+            self._text = _lines_text(self.lines)
+        return self._text
 
 
-class _FileCtx(_Redactor):
-    """A file's facts for is_suppressed, computed once: the comment layout,
-    the parsed suppression markers and the redaction caches. (A source or
-    config file's scan is the engine's, with its own: filectx.rs.)"""
+def _lines_text(lines):
+    """`lines` joined as the engine reads a file's lines (anything that is
+    not a string reads as an empty line)."""
+    return "\n".join(l if isinstance(l, str) else "" for l in lines)
+
+
+class _FileCtx:
+    """A file's facts for is_suppressed, computed once: the comment layout
+    and the parsed suppression markers. (A source or config file's scan is
+    the engine's, with its own: filectx.rs.)"""
 
     def __init__(self, lines, lang, content=None, jsx=True):
-        super().__init__(lines)
+        self.lines = lines
         self.lang = lang
         self.content = "\n".join(lines) if content is None else content
         self.cmask, self.cspans, self.code = _comment_layout(self.content, lines, lang, None, jsx)
@@ -2103,12 +2091,15 @@ class _FileCtx(_Redactor):
             return False
         return _suppressed_in(issue, self)
 
-# Line-level matchers for redacting credentials that appear on CONTEXT lines
-# of a snippet (audit L1: a finding's ±2-line context can carry a DIFFERENT
-# secret than the one flagged — e.g. an S-SECRET at line 3 whose context
-# window includes the AWS key at line 4). Secret rules whose regex has no
-# "skip" noise filter run raw; S-SECRET re-uses its own assignment regex so
-# the same detection contract applies on context lines.
+# The redaction of snippets and messages (FIX-SPEC 6, audit L1) is the
+# engine's (BR-7 step 3 c, 0.1.9: redact.rs and findings.rs), for the
+# findings it makes and for the ones the packages still build: a secret
+# rule's flagged line becomes REDACT_PLACEHOLDER and its length; on every
+# other line, the lines of a PEM private key's block are redacted whole and
+# the matches of the line patterns below (and, for a file's own findings, its
+# entropy literals: the strings S-ENTROPY would flag, wherever they appear)
+# become [redacted]. The patterns stay here as data: the rule pack's check
+# and the dashboard's tests compare theirs with them.
 _SECRET_LINE_PATTERNS = [
     # provider token formats (S-TOKEN's list, plus fine-grained github_pat_);
     # a PEM private-key header is redacted through its END marker or, when
@@ -2126,142 +2117,31 @@ _SECRET_LINE_PATTERNS = [
     re.compile(r"(?<=://)[^/\s@'\"]+(?=@)"),
 ]
 REDACTED = "[redacted]"
-_PEM_BEGIN_RE = re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----")
-_PEM_END_RE = re.compile(r"-----END [A-Z ]*PRIVATE KEY-----")
 
 
 def _redact_context_line(line):
-    """Replace every credential-looking match on a context line with
-    [redacted], preserving surrounding code. Returns the new line, or the
-    original line if nothing matched."""
-    out = line
-    for pat in _SECRET_LINE_PATTERNS:
-        out = pat.sub(REDACTED, out)
-    return out
+    """`line` with every match of the line patterns replaced by [redacted]
+    (the engine's: redact.rs)."""
+    return _native.call("redact_text", {"mode": "line"}, line)
 
 
 def _pem_block_lines(lines):
     """Indices of the lines of multi-line PEM private keys that follow the
-    BEGIN line, through the END line — or through the last line when no END
-    follows (review fix: an S-TOKEN on `-----BEGIN RSA PRIVATE KEY-----`
-    redacted the header while the next two key lines shipped in its
-    snippet). Such lines are redacted whole; the BEGIN line itself is
-    handled by the pattern list."""
-    out = set()
-    inside = False
-    for k, line in enumerate(lines):
-        if not isinstance(line, str):
-            continue
-        if inside:
-            out.add(k)
-            if "-----END" in line and _PEM_END_RE.search(line):
-                inside = False
-        elif "PRIVATE KEY-----" in line:
-            m = _PEM_BEGIN_RE.search(line)
-            inside = bool(m) and not _PEM_END_RE.search(line, m.end())
-    return out
+    BEGIN line, through the END line, or through the last line when no END
+    follows (the engine's: findings.rs). Such lines are redacted whole."""
+    return {k for k in _native.call("pem_lines", {}, _lines_text(lines)) if isinstance(lines[k], str)}
 
 
-_SECRET_RUN_RE = re.compile(r"[A-Za-z0-9+/=_\-]{20,}")
-
-
-class _SecretLiterals:
-    """The high-entropy literals S-ENTROPY would flag in one file, redacted
-    as substrings wherever they appear (review fix: a literal redacted in its
-    own S-ENTROPY finding shipped raw in a neighbouring finding's snippet).
-    Candidates are the literals ENTROPY_VALUE_RE finds on any line not
-    matching SECRET_SKIP_RE, comment lines included, that pass
-    entropy_secretish()."""
-
-    def __init__(self, lines):
-        self.lits = set()
-        for line in lines:
-            if not isinstance(line, str) or ("=" not in line and ":" not in line):
-                continue
-            if SECRET_SKIP_RE.search(line):
-                continue
-            for m in ENTROPY_VALUE_RE.finditer(line):
-                if entropy_secretish(m.group(1)):
-                    self.lits.add(m.group(1))
-        self.by_prefix = {}
-        for lit in self.lits:
-            self.by_prefix.setdefault(lit[:20], []).append(lit)
-
-    def redact(self, text):
-        if not self.lits or not isinstance(text, str):
-            return text
-        hits = []
-        for m in _SECRET_RUN_RE.finditer(text):
-            run, base = m.group(), m.start()
-            if run in self.lits:
-                hits.append((base, m.end()))
-                continue
-            for p in range(len(run) - 19):
-                for lit in self.by_prefix.get(run[p:p + 20], ()):
-                    if run.startswith(lit, p):
-                        hits.append((base + p, base + p + len(lit)))
-        if not hits:
-            return text
-        hits.sort()
-        parts, pos = [], 0
-        for a, b in hits:
-            if b <= pos:
-                continue
-            parts.append(text[pos:max(a, pos)])
-            parts.append(REDACTED)
-            pos = b
-        parts.append(text[pos:])
-        return "".join(parts)
-
-
-def _redact_lines(lines, secrets=None):
-    """Redacted copies of a list of lines: PEM blocks whole, then the
-    pattern list and the file's entropy literals."""
-    pem = _pem_block_lines(lines)
-    out = []
-    for k, l in enumerate(lines):
-        if not isinstance(l, str):
-            out.append(l)
-        elif k in pem:
-            out.append(REDACTED)
-        else:
-            l = _redact_context_line(l)
-            out.append(secrets.redact(l) if secrets is not None else l)
-    return out
-
-
-def _redact_text(text, secrets=None):
-    """Redaction for free text that may copy source (issue msg, hook cmd)."""
+def _redact_text(text, context=None):
+    """Redaction for free text that may copy source (an issue's msg, a hook's
+    cmd): the PEM blocks whole, then the line patterns, and with `context`
+    (a file's lines) the file's entropy literals (the engine's: redact.rs)."""
     if not isinstance(text, str):
         return text
-    if "\n" in text:
-        return "\n".join(_redact_lines(text.split("\n"), secrets))
-    text = _redact_context_line(text)
-    return secrets.redact(text) if secrets is not None else text
-
-
-def redact_secret_snippet(rid, snippet, flagged_idx, raw_line):
-    """Redact a secret-bearing snippet copy.
-
-    Two things happen, on a COPY (the caller's `snippet` is never mutated):
-
-    1. The FLAGGED line is replaced by the REDACT_PLACEHOLDER plus its
-       length, so two scans of the same line redact to the same text and
-       baselines still match (fingerprint() hashes the flagged line; the
-       placeholder is deterministic for a stable rule + secret length).
-    2. Every OTHER line in the context window is scanned with the
-       line-level secret matchers: a snippet around a flagged S-SECRET
-       commonly contains a SECOND credential the flagged rule didn't match
-       (my probe: S-SECRET at line 3, AKIA… at line 4 in the same snippet).
-       Only the matched substring is replaced; surrounding code stays
-       readable. Lines of a PEM key block that starts in the snippet are
-       redacted whole.
-    """
-    out = _redact_lines(snippet)
-    if 0 <= flagged_idx < len(out):
-        out[flagged_idx] = (REDACT_PLACEHOLDER.replace("{RULE}", rid)
-                            + f" ({len(raw_line)} chars)")
-    return out
+    args = {"mode": "text", "neumaier": False}
+    if context is not None:
+        args["context"] = _lines_text(context)
+    return _native.call("redact_text", args, text)
 
 
 # ---------------- Snippets (review fix: shared semantics 7) ----------------
@@ -2270,78 +2150,55 @@ def redact_secret_snippet(rid, snippet, flagged_idx, raw_line):
 # clipped to SNIPPET_MAX characters. The flagged line is windowed around the
 # match: the window starts SNIPPET_LEAD characters before the match column
 # (never past the point where it would run off the end), and "…" marks each
-# side that was cut. Other lines keep their start.
+# side that was cut. Other lines keep their start. Redaction runs on the
+# whole line, before clipping, so a clip boundary can never cut a secret into
+# a no-longer-matching fragment. The engine clips (findings.rs).
 SNIPPET_MAX = 240
 SNIPPET_LEAD = 60
-ELLIPSIS = "\u2026"
+ELLIPSIS = "…"
 
 
 def clip_snippet_line(text, col=None):
     """`text` clipped to at most SNIPPET_MAX characters (see above)."""
     if not isinstance(text, str) or len(text) <= SNIPPET_MAX:
         return text
-    start = 0 if col is None else max(0, col - SNIPPET_LEAD)
-    start = min(start, len(text) - (SNIPPET_MAX - 1))
-    head = ELLIPSIS if start > 0 else ""
-    end = start + SNIPPET_MAX - len(head)
-    if end < len(text):
-        return head + text[start:end - 1] + ELLIPSIS
-    return head + text[start:]
+    return _native.call("clip_line", {"col": col if isinstance(col, int) else None}, text)
+
+
+_RULE_TEXTS = ("id", "name", "type", "sev", "msg", "why", "fix", "ref")
 
 
 def mk_issue(rule_or_dict, path, line_no, lines, col=None, redactor=None):
-    """Issue dict for rule `rule_or_dict` at 1-based `line_no` of `lines`.
-    `col` (0-based character offset of the match on the flagged line, if
-    known) centres the flagged line's snippet window on the match.
-    `redactor` (a _Redactor over these same `lines`) supplies the file's
-    entropy literals and PEM blocks and caches each redacted line for a
-    producer of many findings in one file; without one, the PEM blocks and
-    the line patterns are redacted (the engine makes a scanned file's
-    findings, with its own redaction: findings.rs)."""
-    r = rule_or_dict
-    start = max(0, line_no - 3)
-    stop = min(len(lines), line_no + 2)
-    flag = line_no - 1
-    snippet = []
-    # L1 (artifact hygiene): the flagged line of a SECRET-rule finding is
-    # redacted at creation time, so EVERY sink — terminal excerpt, JSON/HTML
-    # report, SARIF region, the registry Store blob — persists the
-    # placeholder, never the credential. Previously only issue_excerpt()
-    # (terminal) honored REDACT_SECRETS while reports shipped the raw line.
-    # Additionally, ANY rule's ±2-line context window is swept for
-    # secret-shaped substrings (a snippet around an os.system finding
-    # routinely contains the file's actual credentials on adjacent lines).
-    # Redaction runs on the whole line, before clipping, so a clip boundary
-    # can never cut a secret into a no-longer-matching fragment.
-    # The message is redacted too: some embed source text (an install hook's
-    # command line, a hex-decoded preview) — review: a PAT in a `prepare`
-    # script reached the terminal, JSON, HTML and SARIF through msg.
-    msg = r["msg"]
-    if redactor is not None and redactor.lines is not lines:
-        redactor = None
-    ctx = redactor if REDACT_SECRETS else None
-    if REDACT_SECRETS:
-        msg = _redact_text(msg, ctx.secrets() if ctx is not None else None)
-    redact = REDACT_SECRETS and 0 <= flag < len(lines)
-    pem = _pem_block_lines(lines) if redact and ctx is None else ()
-    for k in range(start, stop):
-        l = lines[k]
-        if not isinstance(l, str):
-            snippet.append(l)
-            continue
-        if redact:
-            if k == flag and r["id"] in SECRET_RULES:
-                l = REDACT_PLACEHOLDER.replace("{RULE}", r["id"]) + f" ({len(l)} chars)"
-            elif ctx is not None:
-                l = ctx.redacted(k)
-            else:
-                l = REDACTED if k in pem else _redact_context_line(l)
-        snippet.append(clip_snippet_line(l, col if k == flag else None))
-    return {"rule": r["id"], "name": r["name"], "type": r["type"], "sev": r["sev"],
-            "msg": msg, "why": r["why"], "fix": r["fix"], "ref": r["ref"],
-            "file": path, "line": line_no,
-            "snippet": snippet,
-            "snipStart": start + 1}
+    """Issue dict for rule `rule_or_dict` at 1-based `line_no` of `lines`
+    (mk_issues, for one finding)."""
+    return mk_issues(path, lines, [(rule_or_dict, line_no, col)], redactor)[0]
+
+
+def mk_issues(path, lines, items, redactor=None):
+    """An issue dict for each of `items` ((rule, line_no, col)), findings of
+    the file `path` whose lines are `lines`, made by the engine (redact.rs;
+    the lines handed over once). A finding's snippet is its ±2 lines, each
+    clipped; `col` (the 0-based character offset of the match on the flagged
+    line, or None) centres the flagged line's window on the match. With
+    REDACT_SECRETS, the flagged line of a secret rule is the placeholder and
+    the other lines and the message are redacted: with the file's entropy
+    literals too when `redactor` is a _Redactor over these same `lines` (the
+    engine makes a scanned file's findings, with the same redaction)."""
+    items = [tuple(it) for it in items]
+    if not items:
+        return []
+    context = redactor is not None and redactor.lines is lines
+    rows = [[{k: r[k] for k in _RULE_TEXTS}, line_no, col if isinstance(col, int) else None]
+            for r, line_no, col in items]
+    got = _native.call("issue_make", {"items": rows, "redact": bool(REDACT_SECRETS), "context": context,
+                                      "neumaier": False},
+                       redactor.text if context else _lines_text(lines))["issues"]
+    out = []
+    for (r, line_no, _), a in zip(items, got):
+        out.append({"rule": r["id"], "name": r["name"], "type": r["type"], "sev": r["sev"],
+                    "msg": a[4] if isinstance(r["msg"], str) else r["msg"], "why": r["why"], "fix": r["fix"],
+                    "ref": r["ref"], "file": path, "line": line_no, "snippet": a[9], "snipStart": a[10]})
+    return out
 
 
 # ---------------- Per-file finding cap (review fix: shared semantics 7) ----------------
@@ -2472,11 +2329,11 @@ def autorun_issues(path, lines, read=None):
     for _ in range(_AUTORUN_ROUNDS):
         got = _native.call("autorun_issues", {"path": path, "follow": read is not None, "files": files}, text)
         if "issues" in got:
-            return [mk_issue(rule, path, line, lines) for line, rule in got["issues"]]
+            return mk_issues(path, lines, [(rule, line, None) for line, rule in got["issues"]])
         for rel in got["need"]:
             files[rel] = read(rel)
     got = _native.call("autorun_issues", {"path": path, "follow": False}, text)
-    return [mk_issue(rule, path, line, lines) for line, rule in got["issues"]]
+    return mk_issues(path, lines, [(rule, line, None) for line, rule in got["issues"]])
 
 
 # ---------------- CI files (SC-WORKFLOW-*, SC-GITLAB-*) ----------------
@@ -2501,8 +2358,8 @@ def ci_issues(path, lines):
     the path is asked first, so another file's text is not handed over."""
     if _native.call("ci_kind", {}, path) is None:
         return []
-    return [mk_issue(rule, path, line, lines)
-            for line, rule in _native.call("ci_issues", {"path": path}, "\n".join(lines))]
+    return mk_issues(path, lines, [(rule, line, None)
+                                   for line, rule in _native.call("ci_issues", {"path": path}, "\n".join(lines))])
 
 
 def tree_reader(files, configs):
@@ -5036,18 +4893,18 @@ def redact_file_issues(issues, files):
     """Apply each scanned file's redaction to the findings numbered by its
     scan lines (source_lines) that were built outside the engine's scan of
     it: the flow engine's and the dependency checks' (scan_project passes
-    those; the engine redacts its own as mk_issue does), in place.
+    those; the engine redacts its own), in place.
 
     redact_result sweeps snippets with the secret patterns only, and a PEM
     block only when its BEGIN line is in the same snippet: a finding built
     from raw lines outside scan_file lacked the file's entropy literals and
     PEM blocks (review: the X-CMD snippet of a flow showed the `seed = "…"`
-    literal S-ENTROPY redacted, in the JSON and the HTML report). Per file,
-    the literal set and the file-wide PEM set are built once; every snippet
-    line that is still the raw text of its file line becomes that line as
-    mk_issue would show it (a line its builder already redacted or clipped
-    is left alone), and msg / cmd get the file's literals. One file's lines
-    are held at a time."""
+    literal S-ENTROPY redacted, in the JSON and the HTML report). The engine
+    reads each file once, with all of its findings (redact.rs redact_file):
+    every snippet line that is still the raw text of its file line becomes
+    that line as the file's own findings show it (a line its builder already
+    redacted or clipped is left alone), and msg / cmd get the file's
+    literals."""
     if not REDACT_SECRETS:
         return issues
     by_path = {f["path"]: f for f in files}
@@ -5057,29 +4914,36 @@ def redact_file_issues(issues, files):
             groups.setdefault(i["file"], []).append(i)
     for path, group in groups.items():
         f = by_path[path]
-        red = _Redactor(source_lines(f["content"], f.get("lang")))
+        lines = source_lines(f["content"], f.get("lang"))
+        rows, raw = [], []
         for i in group:
-            for key in ("msg", "cmd"):
-                v = i.get(key)
-                if isinstance(v, str):
-                    nv = _redact_text(v, red.secrets())
-                    if nv != v:
-                        i[key] = nv
             snip, start = i.get("snippet"), i.get("snipStart")
-            if not isinstance(snip, list) or not isinstance(start, int):
-                continue
-            out = None
-            for k, line in enumerate(snip):
-                j = start - 1 + k
-                if isinstance(line, str) and 0 <= j < len(red.lines) and line == red.lines[j]:
-                    shown = red.redacted(j)
-                    if shown != line:
-                        if out is None:
-                            out = list(snip)
-                        out[k] = shown
-            if out is not None:
-                i["snippet"] = out
+            at = []                                         # (k, j): snippet line k is still file line j's raw text
+            if isinstance(snip, list) and isinstance(start, int):
+                at = [(k, start - 1 + k) for k, line in enumerate(snip)
+                      if isinstance(line, str) and 0 <= start - 1 + k < len(lines) and line == lines[start - 1 + k]]
+            raw.append(at)
+            rows.append([[j for _k, j in at], *(i.get(k) if isinstance(i.get(k), str) else None for k in ("msg", "cmd"))])
+        got = _native.call("redact_file", {"issues": rows, "neumaier": False}, "\n".join(lines))["issues"]
+        for i, at, (shown, msg, cmd) in zip(group, raw, got):
+            if at:
+                snip = list(i["snippet"])
+                for (k, _j), line in zip(at, shown):
+                    snip[k] = line
+                shown = snip
+            _apply_redaction([i], [(shown if at else None, msg, cmd)])
     return issues
+
+
+def _apply_redaction(issues, got):
+    """The engine's [snippet, msg, cmd] for each of `issues` put in place
+    where they changed."""
+    for i, (snip, msg, cmd) in zip(issues, got):
+        for key, v in (("msg", msg), ("cmd", cmd)):
+            if isinstance(v, str) and v != i.get(key):
+                i[key] = v
+        if isinstance(snip, list) and snip != i.get("snippet"):
+            i["snippet"] = snip
 
 
 def scan_project(root, exclude=(), include_deps=False, taint_config=None,
@@ -5493,7 +5357,7 @@ def sanitize_term_line(s):
     return str(s).translate(_SANITIZE_TERM_TAB).translate(_LINE_BREAKS_TAB)
 
 # Rules whose flagged line reveals a credential. The flagged LINE is redacted
-# in every persistent artifact by default (see redact_secret_snippet — audit
+# in every persistent artifact by default (see mk_issue and redact_result — audit
 # L1: the old --redact-secrets flag only sanitized the TERMINAL excerpt while
 # JSON/HTML/SARIF reports and the registry DB embedded the full line);
 # --no-redact-secrets is the opt-out for audit workflows that need to see the
@@ -5574,8 +5438,7 @@ def redact_result(res):
 
     Two layers (audit L1):
     * Any SECRET-rule issue still carrying an unredacted flagged line
-      (embedded from an unpatched engine path) is redacted in place via
-      redact_secret_snippet.
+      (embedded from an unpatched engine path) gets the placeholder.
     * EVERY issue's snippet — secret rule or not — has its context lines
       swept with the line-level secret matchers: a snippet around an
       os.system finding routinely contains the file's actual credentials on
@@ -5586,37 +5449,18 @@ def redact_result(res):
     mk_issue is the primary fix; this is the belt-and-braces pass so a leak
     requires BOTH mk_issue to miss AND this sweep to miss. The sweep also
     clips every snippet line to SNIPPET_MAX characters (issues built outside
-    mk_issue, e.g. by the flow engine, get the same size bound).
-    """
-    for i in res.get("issues", []):
-        if REDACT_SECRETS:
-            # free-text fields that can copy source: the message, and the
-            # install-hook command kept for the registry (`cmd`)
-            for key in ("msg", "cmd"):
-                v = i.get(key)
-                if isinstance(v, str):
-                    nv = _redact_text(v)
-                    if nv != v:
-                        i[key] = nv
+    mk_issue, e.g. by the flow engine, get the same size bound). The engine
+    sweeps (redact.rs redact_issues), the whole result in one call."""
+    issues = [i for i in res.get("issues", []) if isinstance(i, dict)]
+    if not issues:
+        return res
+    rows = []
+    for i in issues:
         snip = i.get("snippet")
-        if not isinstance(snip, list):
-            continue
-        if not REDACT_SECRETS:
-            clipped = [clip_snippet_line(l) for l in snip]
-            if clipped != snip:
-                i["snippet"] = clipped
-            continue
-        idx = i["line"] - i.get("snipStart", i["line"])
-        secret = i.get("rule") in SECRET_RULES
-        if secret and 0 <= idx < len(snip) and isinstance(snip[idx], str) \
-                and REDACT_FINGERPRINT not in snip[idx]:
-            i["snippet"] = [clip_snippet_line(l) for l in
-                            redact_secret_snippet(i["rule"], snip, idx, snip[idx])]
-            continue
-        # non-secret rule (or already-redacted secret): sweep context lines
-        cleaned = [clip_snippet_line(l) for l in _redact_lines(snip)]
-        if cleaned != snip:
-            i["snippet"] = cleaned
+        rows.append([i.get("rule"), i.get("line"), i.get("snipStart"), snip if isinstance(snip, list) else None,
+                     *(i.get(k) if isinstance(i.get(k), str) else None for k in ("msg", "cmd"))])
+    got = _native.call("redact_issues", {"issues": rows, "redact": bool(REDACT_SECRETS)})["issues"]
+    _apply_redaction(issues, got)
     return res
 
 def verification_line(v):

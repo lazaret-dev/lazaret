@@ -471,6 +471,12 @@ impl<'a> Snippets<'a> {
         self.secrets.get_or_init(|| SecretLiterals::new(self.p, self.lines.iter().copied(), self.neumaier))
     }
 
+    /// Line k as any snippet may show it (_Redactor.redacted), for a finding built outside the scan
+    /// (redact::redact_file).
+    pub fn shown_line(&self, k: usize) -> PyStr {
+        self.redacted(k)
+    }
+
     /// Line k as any snippet may show it (_Redactor.redacted).
     fn redacted(&self, k: usize) -> PyStr {
         if let Some(r) = self.red.borrow().get(&k) {
