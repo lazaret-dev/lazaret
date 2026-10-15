@@ -617,6 +617,9 @@ pub struct Func {
     pub param_calls: BTreeMap<usize, Vec<V>>,
     /// fid -> the parameters it passed tainted values in its last reading
     pub callers: BTreeMap<FnId, BTreeSet<usize>>,
+    /// a direct eval() in its own code, or a with statement (the module's eval_with, by function: what either can
+    /// rebind is the names of the functions within it, D-20's sc_checked)
+    pub eval_with: bool,
     pub runs: u32,
     /// (call node, scope) of its call sites
     pub calls: Vec<(NodeId, ScopeId)>,
@@ -1262,6 +1265,7 @@ impl Program {
             param_writes: BTreeMap::new(),
             param_files: BTreeMap::new(),
             param_calls: BTreeMap::new(),
+            eval_with: false,
             callers: BTreeMap::new(),
             runs: 0,
             calls: Vec::new(),
@@ -1620,6 +1624,7 @@ impl Program {
             }
             if t == Kind::WithStatement {
                 self.mods[m as usize].eval_with = true;
+                self.fns[fn_ as usize].eval_with = true;
             } else if t == Kind::AssignmentExpression {
                 let (left, right) = {
                     let a = Ast(&self.mods[m as usize].tree);
@@ -1745,6 +1750,7 @@ impl Program {
             param_writes: BTreeMap::new(),
             param_files: BTreeMap::new(),
             param_calls: BTreeMap::new(),
+            eval_with: false,
             callers: BTreeMap::new(),
             runs: 0,
             calls: Vec::new(),
@@ -1857,6 +1863,7 @@ impl Program {
                     let callee = a.at(node, A);
                     if t == Kind::CallExpression && a.is_ident_named(callee, "eval") {
                         self.mods[m as usize].eval_with = true;
+                        self.fns[fid as usize].eval_with = true;
                     }
                     self.fns[fid as usize].calls.push((node, scope));
                 }

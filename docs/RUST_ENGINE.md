@@ -2118,7 +2118,7 @@ is one variable). Sources and sends are the text follower's, from the same
 tables of the rule pack: an environment variable by its name, the whole
 environment (a selection of it by a test that names no secret is not), the
 os module's names, a read of a path outside the package (`flow::ld_outside`,
-and a path passed in: `dump('/etc')`), what a command prints
+and a path passed in: `dump('/etc')`; a system folder ends at a separator, a quote or an interpolation, D-20, 0.1.9: at `\b` the route `/app-config` was `/app`), what a command prints
 (`shell::sh_output_data`), the instance's metadata and a public-IP lookup;
 the sends of `_LD_SEND_RE` and its siblings, with the arguments they count
 as addresses, resolved by binding (`require`, `import`, `node:` names,
@@ -2266,6 +2266,29 @@ prints; a variable of the environment holds what the script stores in it.
 A command line that runs a fixed program with the data as its argument
 (`` `curl …?ip=${ip}` ``, `npm publish --registry=…`) runs no code it
 received; an interpreter given it (`node -e`, `sh -c`) does.
+
+A text that passed a test no code passes runs nothing it received (D-20,
+0.1.9). JupyterLab's gettext makes the plural forms its server sends a
+function, `Function('n', 'let plural, nplurals; ' + forms + …)`, after
+`if (!RegExp('^\\s*nplurals\\s*=\\s*\\d+\\s*;\\s*plural\\s*=[\\s\\-?|&=!<>+*/%:;n0-9_()]+$').test(forms)) throw …`:
+what passes is arithmetic on `n`. After `if (!re.test(x))` whose branch
+throws or returns, with no `else`, x is clean for CODE (`sc_checked`; a
+received-code sink skips a value clean for it, and a function's summary
+keeps the bit, so a checking function's result is clean too) when `re` is a
+literal, a `RegExp(…)` of constants or a name given one once, and its
+pattern (`inert_pattern`) runs from `^` to `$` over single characters,
+`\s`, `\d`, escaped punctuation and classes of them, each repeated or not,
+and lets through no quote, backquote, backslash, `.`, bracket or brace,
+and at most one letter in a class or a repeat (`$` counts as one; `_` and
+digits do not): such a text names no property, builds no string and can
+call only what its fixed words and one letter's names are. A group, an
+alternation, a negated class, `\w`, `\b`, an escape by number or code, and
+the flags `i`, `m` and `v` are not read; gettext.js's own test, which stops
+short of `$`, lets `plural=n; fetch(…)` through and is not one. `RegExp` is
+the global unless the file assigns it or `RegExp.prototype`, or a direct
+`eval` or a `with` is in a function around the test (`Func::eval_with`:
+elsewhere they change the global as any code can, and a literal's `test`
+too, which the reading takes as the runtime's, as `regexp_receiver` does).
 
 Held to the text detector in the same way: on the benchmark's 20,066
 in-sample JavaScript files the two agree but for three — two payloads the

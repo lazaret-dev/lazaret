@@ -1,6 +1,6 @@
 {
  "format": 1,
- "rule_set": "2.74.0",
+ "rule_set": "2.75.0",
  "source": "lazaret.scanner.core, extracted by scripts/make_rust_tables.py \u2014 do not edit",
  "values": {
   "ALWAYS_PRUNE_DIRS": {
@@ -10839,7 +10839,7 @@
   },
   "_LD_ABSOLUTE_IN_RE": {
    "flags": "",
-   "re": "[\"'`](?:/(?:etc|proc|home|root|Users|var|opt|flag|tmp|usr|srv|mnt|run|sys|dev|boot|data|app|workspace|secrets?)\\b|~[/\\\\]|[A-Za-z]:[\\\\/]|\\$HOME\\b|\\$\\{HOME\\}|%(?:USERPROFILE|APPDATA|LOCALAPPDATA|HOMEPATH|PROGRAMDATA)%)"
+   "re": "[\"'`](?:/(?:etc|proc|home|root|Users|var|opt|flag|tmp|usr|srv|mnt|run|sys|dev|boot|data|app|workspace|secrets?)(?=[/\\\\\"'`{$])|~[/\\\\]|[A-Za-z]:[\\\\/]|\\$HOME\\b|\\$\\{HOME\\}|%(?:USERPROFILE|APPDATA|LOCALAPPDATA|HOMEPATH|PROGRAMDATA)%)"
   },
   "_LD_ABSOLUTE_RE": {
    "flags": "",
@@ -10995,10 +10995,10 @@
   },
   "_LD_FS_ROOT_RE": {
    "flags": "",
-   "re": "[fFrRbBuU]{0,2}[\"'`](?:/(?:etc|proc|home|root|Users|var|opt|flag|tmp|usr|srv|mnt|run|sys|dev|boot|data|app|workspace|secrets?)\\b|~[/\\\\]|[A-Za-z]:[\\\\/]|\\$HOME\\b|\\$\\{HOME\\}|%(?:USERPROFILE|APPDATA|LOCALAPPDATA|HOMEPATH|PROGRAMDATA)%)"
+   "re": "[fFrRbBuU]{0,2}[\"'`](?:/(?:etc|proc|home|root|Users|var|opt|flag|tmp|usr|srv|mnt|run|sys|dev|boot|data|app|workspace|secrets?)(?=[/\\\\\"'`{$])|~[/\\\\]|[A-Za-z]:[\\\\/]|\\$HOME\\b|\\$\\{HOME\\}|%(?:USERPROFILE|APPDATA|LOCALAPPDATA|HOMEPATH|PROGRAMDATA)%)"
   },
   "_LD_FS_ROOT_SRC": {
-   "value": "[\"'`](?:/(?:etc|proc|home|root|Users|var|opt|flag|tmp|usr|srv|mnt|run|sys|dev|boot|data|app|workspace|secrets?)\\b|~[/\\\\]|[A-Za-z]:[\\\\/]|\\$HOME\\b|\\$\\{HOME\\}|%(?:USERPROFILE|APPDATA|LOCALAPPDATA|HOMEPATH|PROGRAMDATA)%)"
+   "value": "[\"'`](?:/(?:etc|proc|home|root|Users|var|opt|flag|tmp|usr|srv|mnt|run|sys|dev|boot|data|app|workspace|secrets?)(?=[/\\\\\"'`{$])|~[/\\\\]|[A-Za-z]:[\\\\/]|\\$HOME\\b|\\$\\{HOME\\}|%(?:USERPROFILE|APPDATA|LOCALAPPDATA|HOMEPATH|PROGRAMDATA)%)"
   },
   "_LD_FUNC_RE": {
    "flags": "",
