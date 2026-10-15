@@ -113,9 +113,9 @@ fn alphabet(v: &[u32]) -> bool {
     true
 }
 
-/// The decoders: a function declaration's name and the alphabet it holds.
-fn decoders(code: &Code) -> HashMap<PyStr, Vec<u32>> {
-    let mut out: HashMap<PyStr, Option<Vec<u32>>> = HashMap::new();
+/// The decoders: a function declaration's name, the alphabet it holds and where it begins.
+fn decoders(code: &Code) -> HashMap<PyStr, (Vec<u32>, u32)> {
+    let mut out: HashMap<PyStr, Option<(Vec<u32>, u32)>> = HashMap::new();
     for i in 0..code.toks.len() {
         if !code.is(i, Kind::Name, "function") {
             continue;
@@ -137,8 +137,9 @@ fn decoders(code: &Code) -> HashMap<PyStr, Vec<u32>> {
         let index_of = body.clone().any(|j| code.is(j, Kind::Name, "indexOf"));
         if let ([table], true) = (tables.as_slice(), index_of) {
             // (a name declared twice is not read)
-            let slot = out.entry(name.to_vec()).or_insert_with(|| Some(table.clone()));
-            if slot.as_ref() != Some(table) {
+            let at = code.toks[i].start;
+            let slot = out.entry(name.to_vec()).or_insert_with(|| Some((table.clone(), at)));
+            if slot.as_ref().map(|(t, _)| t) != Some(table) {
                 *slot = None;
             }
         }
@@ -147,7 +148,7 @@ fn decoders(code: &Code) -> HashMap<PyStr, Vec<u32>> {
 }
 
 /// The retrievers: `function F(a,b){return D(X["slice"](a,a+b))}` (or `X.slice(…)`): F's name, D's, X's.
-fn retrievers(code: &Code, decoders: &HashMap<PyStr, Vec<u32>>) -> HashMap<PyStr, (PyStr, PyStr)> {
+fn retrievers(code: &Code, decoders: &HashMap<PyStr, (Vec<u32>, u32)>) -> HashMap<PyStr, (PyStr, PyStr)> {
     let mut out = HashMap::new();
     for i in 0..code.toks.len() {
         if !code.is(i, Kind::Name, "function") {
@@ -304,8 +305,8 @@ fn decode(table: &[u32], piece: &[u32]) -> Option<Vec<u32>> {
 }
 
 /// The decoded view's reading of JS-Confuser's string concealing in `text`: each call of a retriever written as its
-/// string; None when it reads none.
-pub fn jc_read(text: &[u32], max_chars: usize) -> Option<PyStr> {
+/// string, and where the first decoder whose strings it read begins; None when it reads none.
+pub fn jc_read(text: &[u32], max_chars: usize) -> Option<(PyStr, usize)> {
     if text.len() > max_chars || !crate::pystr::contains(text, "slice") || !crate::pystr::contains(text, "indexOf") {
         return None;
     }
@@ -322,7 +323,7 @@ pub fn jc_read(text: &[u32], max_chars: usize) -> Option<PyStr> {
     let lists = lists(&code, &given);
     let mut blobs: HashMap<&[u32], Option<Vec<u32>>> = HashMap::new();
     let mut out: PyStr = Vec::with_capacity(text.len());
-    let (mut pos, mut read) = (0usize, 0usize);
+    let (mut pos, mut read, mut first) = (0usize, 0usize, usize::MAX);
     for i in 0..code.toks.len() {
         let Some(f) = code.name(i) else {
             continue;
@@ -353,19 +354,21 @@ pub fn jc_read(text: &[u32], max_chars: usize) -> Option<PyStr> {
         if e > blob.len() || code.toks[i].start < pos as u32 {
             continue;
         }
-        let Some(value) = decode(&decoders[d], &blob[s..e]) else {
+        let (table, at) = &decoders[d];
+        let Some(value) = decode(table, &blob[s..e]) else {
             continue;
         };
         out.extend_from_slice(&text[pos..code.toks[i].start as usize]);
         out.extend(crate::strarr::sa_quote(&value));
         pos = code.toks[after].end as usize;
         read += 1;
+        first = first.min(*at as usize);
     }
     if read == 0 {
         return None;
     }
     out.extend_from_slice(&text[pos..]);
-    Some(out)
+    Some((out, first))
 }
 
 #[cfg(test)]
@@ -437,7 +440,7 @@ mod tests {
 
     fn read(src: &str) -> Option<String> {
         let text: Vec<u32> = src.chars().map(|c| c as u32).collect();
-        jc_read(&text, 1 << 24).map(|v| v.iter().filter_map(|&c| char::from_u32(c)).collect())
+        jc_read(&text, 1 << 24).map(|(v, _)| v.iter().filter_map(|&c| char::from_u32(c)).collect())
     }
 
     const TABLE: &str = "p|VjqzHcC[.>#tLO26i{v@X4F<w~u^%J;T]7*+\"=)b8W?`h:kmP1IQNSYRGa/rMxoeA9d$y5gf_(U0KnE,3!Zl}sDB&";
@@ -454,6 +457,9 @@ mod tests {
         // non-ASCII text, quotes
         let odd = concealed(TABLE, &["héllo 'x' \\ \"y\""], "say({0});\n", false);
         assert!(read(&odd).expect("read").ends_with("say('héllo \\'x\\' \\\\ \"y\"');\n"), "{:?}", read(&odd));
+        // where its decoder begins (after the low preset's list)
+        let text: Vec<u32> = low.chars().map(|c| c as u32).collect();
+        assert_eq!(jc_read(&text, 1 << 24).map(|(_, at)| at), low.find("function D(").map(|b| low[..b].chars().count()));
     }
 
     #[test]

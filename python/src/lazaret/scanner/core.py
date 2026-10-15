@@ -3189,7 +3189,8 @@ _EXEC_CALL_RE = re.compile(
 # miner, a download run with the Python interpreter (a script, not a
 # binary), a GitHub Actions workflow that dumps every repository secret
 # (see persistence targets), wallet addresses swapped, and code built around
-# a string array (_SA_TECHNIQUE_REASON). Since rule set 2.17, what no client
+# a string array (_SA_TECHNIQUE_REASON) or JS-Confuser's string concealing
+# (_JC_TECHNIQUE_REASON, D-11). Since rule set 2.17, what no client
 # sends (the whole environment, a credential store) and what local commands
 # print about the machine count wherever they are sent, and a raw socket's
 # hard-coded public address is an IP address.
@@ -3211,7 +3212,8 @@ _STRONG_IMPORT_REASONS = (
     "sends the machine's user or host name in a DNS lookup",
     "sends the machine's user or host name to an address it fetches",
     "runs a cryptocurrency miner", "swaps the cryptocurrency wallet addresses",
-    "hides its code in a string array", "runs a program it extracts from inside another file",
+    "hides its code in a string array", "hides its strings in one long string",
+    "runs a program it extracts from inside another file",
     "pipes code it decodes into", "installs packages the release does not depend on",
     "rewrites another package's code")
 

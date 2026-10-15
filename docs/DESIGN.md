@@ -648,7 +648,9 @@ all three engines:
    reads JS-Confuser 2's string concealing (Rust `jcstr.rs`): each
    `F(start, length)` is its slice of the file's one long string, decoded
    with base91 over the alphabet its decoder shuffled, written where it
-   decodes to UTF-8; unlike a string array, it is not a sign of its own.
+   decodes to UTF-8; as a string array is, code built around it is a sign
+   of its own (`concealed_strings_line`, `_JC_TECHNIQUE_REASON`: CRITICAL at
+   install, a strong import-time reason; rule set 2.78.0).
 4. *What a script starts is followed* (`spawned_scripts`): node and python,
    the other JavaScript runtimes in a hook (`_JS_RUNTIMES`), any program a
    variable names when it is given a file of code (`_SPAWN_SCRIPT_EXT_RE`, at

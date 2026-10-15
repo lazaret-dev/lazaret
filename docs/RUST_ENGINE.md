@@ -1884,8 +1884,11 @@ of the items of a list of literals assigned once (the "low" preset's
 `C[0x11]`), is written as its slice decoded, where that is UTF-8. Nothing
 is run. What its stronger presets do (the whole program a string
 `Function` runs, other encodings) is not read, nor its 1.x string array
-with a cached accessor; a file it reads is not a sign of its own, as a
-string array is (`string_array_line` names none).
+with a cached accessor. Code built around it is a sign of its own, as a
+string array is (rule set 2.78.0): the reading carries its first decoder's
+line (`signs::concealed_strings_line`), and the install-script and
+import-time tests give `_JC_TECHNIQUE_REASON`, one of
+`_STRONG_IMPORT_REASONS`.
 
 On the benchmark one release moved: num2words 0.5.15, SUSPICIOUS to
 INCOMPLETE. Its `_build.py` is a Windows executable (an `MZ` header) named

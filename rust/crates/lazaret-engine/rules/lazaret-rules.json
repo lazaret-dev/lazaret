@@ -1,6 +1,6 @@
 {
  "format": 1,
- "rule_set": "2.77.0",
+ "rule_set": "2.78.0",
  "source": "lazaret.scanner.core, extracted by scripts/make_rust_tables.py \u2014 do not edit",
  "values": {
   "ALWAYS_PRUNE_DIRS": {
@@ -10626,6 +10626,9 @@
    "flags": "",
    "re": "[\"'](?!(?:127|0|255)\\.)((?:(?:25[0-5]|2[0-4]\\d|1?\\d?\\d)\\.){3}(?:25[0-5]|2[0-4]\\d|1?\\d?\\d))[\"']"
   },
+  "_JC_TECHNIQUE_REASON": {
+   "value": "hides its strings in one long string it decodes as it runs (JS-Confuser's string concealing)"
+  },
   "_JSON_COLON_RE": {
    "flags": "",
    "re": "[ \\t\\n\\r]*:"
@@ -15012,6 +15015,9 @@
     },
     {
      "value": "hides its code in a string array"
+    },
+    {
+     "value": "hides its strings in one long string"
     },
     {
      "value": "runs a program it extracts from inside another file"

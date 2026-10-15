@@ -2623,7 +2623,8 @@ fn dv_char_codes(p: &Pack, view: &[u32]) -> PyStr {
 }
 
 /// A text's decoded view and the line of the string array it reads.
-type Reading = (PyStr, Option<usize>);
+/// (the view, the string array's line, JS-Confuser's string concealing's line: D-11)
+type Reading = (PyStr, Option<usize>, Option<usize>);
 
 /// The language a decoded view reads its literals in: JavaScript or Python
 /// (with the lexers), else none (the patterns: a shell script, a command).
@@ -2671,6 +2672,12 @@ pub fn decoded_view(p: &Pack, text: &[u32], lang: Option<&str>) -> PyStr {
 /// built around (one whose calls decoded_view reads), else None.
 pub fn string_array_line(p: &Pack, text: &[u32], lang: Option<&str>) -> Option<usize> {
     dv_reading(p, text, lang).1
+}
+
+/// The 1-based line where the decoder begins of the JS-Confuser string concealing `text` is built around (one whose
+/// calls decoded_view reads, D-11), else None.
+pub fn concealed_strings_line(p: &Pack, text: &[u32], lang: Option<&str>) -> Option<usize> {
+    dv_reading(p, text, lang).2
 }
 
 /// Is a string value one the decoded view writes as a literal: printable
@@ -2794,11 +2801,18 @@ fn decoded_view_of(p: &Pack, text: &[u32], lang: Option<&'static str>) -> Readin
         Some((view, at)) => (Some(view), Some(1 + source[..at.min(source.len())].iter().filter(|&&ch| ch == c('\n')).count())),
         None => (None, None),
     };
-    // (JS-Confuser's concealed strings, D-11: in what the string arrays leave)
-    let arrays = match lang {
-        Some("py") => arrays,
-        _ => crate::jcstr::jc_read(arrays.as_deref().unwrap_or(&source), p.usize("_SA_MAX_CHARS")).or(arrays),
+    // (JS-Confuser's concealed strings, D-11: in what the string arrays leave, which keeps the rows; its decoder's line)
+    let (concealed, jc_line) = match lang {
+        Some("py") => (None, None),
+        _ => {
+            let input: &[u32] = arrays.as_deref().unwrap_or(&source);
+            match crate::jcstr::jc_read(input, p.usize("_SA_MAX_CHARS")) {
+                Some((view, at)) => (Some(view), Some(1 + input[..at.min(input.len())].iter().filter(|&&ch| ch == c('\n')).count())),
+                None => (None, None),
+            }
+        }
     };
+    let arrays = concealed.or(arrays);
     let proxies = crate::strarr::dv_proxies(p, arrays.as_deref().unwrap_or(&source));
     let base: PyStr = match (proxies, arrays) {
         (Some(x), _) => x,
@@ -2809,7 +2823,7 @@ fn decoded_view_of(p: &Pack, text: &[u32], lang: Option<&'static str>) -> Readin
     let read_any = unescaped || base != source;
     let max = p.usize("_DV_MAX_CHARS");
     if !read_any && (text.len() > max || !any_in(text, p.needles("_DV_NEEDLES"))) {
-        return (text.to_vec(), None);
+        return (text.to_vec(), None, None);
     }
     let joined: PyStr = match lang {
         // (the literals a string array or a proxy object was read as, joined)
@@ -2824,9 +2838,9 @@ fn decoded_view_of(p: &Pack, text: &[u32], lang: Option<&'static str>) -> Readin
         view = dv_decoders(p, view);
     }
     if view == joined && !read_any {
-        return (text.to_vec(), None);
+        return (text.to_vec(), None, None);
     }
-    (dv_arrays_and_members(p, view), line)
+    (dv_arrays_and_members(p, view), line, jc_line)
 }
 
 /// core._dv_decoders: the decoders' calls on literals read as their text.
@@ -3432,6 +3446,9 @@ pub fn install_script_risk_with(p: &Pack, text: &[u32], shell: bool, command: bo
     if string_array_line(p, text, lang).is_some() {
         reasons.push(p.text("_SA_TECHNIQUE_REASON"));
     }
+    if concealed_strings_line(p, text, lang).is_some() {
+        reasons.push(p.text("_JC_TECHNIQUE_REASON"));
+    }
     reasons
 }
 
@@ -3873,6 +3890,10 @@ pub fn import_time_risk_with(p: &Pack, text: &[u32], lang: Option<&str>, declare
     if let Some(sa) = string_array_line(p, text, lang) {
         reasons.push(p.text("_SA_TECHNIQUE_REASON"));
         line = line.or(Some(sa));
+    }
+    if let Some(jc) = concealed_strings_line(p, text, lang) {
+        reasons.push(p.text("_JC_TECHNIQUE_REASON"));
+        line = line.or(Some(jc));
     }
     (reasons, line)
 }
