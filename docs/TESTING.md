@@ -381,6 +381,17 @@ named here outside the repository and any synced folder):
    verdicts by category and every release that moved) and `holdout.txt`
    (counts alone). The runs (`~/lazaret-bench/runs/`), the manifests and
    the samples stay on the machine.
+6. When a session is to write stories from the benchmark's misses:
+   `python3 scripts/bench.py misses ~/lazaret-bench/sets.json benchmark`.
+   It scans again, in memory, each malicious release of the set's last
+   finished run that is not SUSPICIOUS (`--label`: another run) and writes
+   `benchmark-misses.jsonl` to the same report folder, a line each: the
+   verdict and its reason, every finding (rule, severity, file, line,
+   message), the files (path, size, text or binary) and the manifest's
+   install hooks and dependencies, each value cut short. No file's
+   contents and no finding's snippet are written, and a set marked
+   `aggregate_only` (the holdout) is refused: its releases are looked at
+   only in aggregate.
 
 **Where the sets run, and when** (John, Oct 15: the Mac is the gate, "although
 don't make it be a blocker"). `bench.py all` over the sets file, the popular

@@ -428,6 +428,16 @@ aggregate):
   fetches the samples drawn in one request) and written as its registry serves the
   release, by the September harness's rules; a stopped run goes on where it stopped, and a
   folder inside a checkout is refused (`docs/TESTING.md` §4).
+- **For contributors: a set's misses described without their contents.** `scripts/bench.py
+  misses SETS.json NAME` scans again, in memory, each malicious release of the set's last
+  finished run that is not SUSPICIOUS and writes one line for each to
+  `REPORT/LABEL/NAME-misses.jsonl`: the run's verdict and this scan's with its reason, every
+  finding (rule, severity, file, line, message), the files as the scan read them (path,
+  size, text or binary), the unused dependencies, and the manifest's install hooks with
+  their commands and its dependencies with their ranges (npm), or its Name, Version and
+  Requires-Dist (PyPI), each value cut short. It writes no file's contents and no finding's
+  snippet, so the benchmark's misses can be read for stories in a session that never opens
+  a sample, and it refuses a set marked `aggregate_only` (the holdout) (`docs/TESTING.md` §4).
 - **Credentials in Go's and Rust's declarations, crates.io's tokens and a `.netrc`'s
   passwords (G-4, R-4, N-12).** S-SECRET read `name = "…"` and `name: "…"`, so Go's
   `apiKey := "…"` and `var password string = "…"` and Rust's `const API_KEY: &str = "…"`,

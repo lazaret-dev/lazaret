@@ -7,6 +7,7 @@ releases, and the comparison of two runs.
     python3 scripts/bench.py summary RUN.jsonl
     python3 scripts/bench.py prior RUN.jsonl MANIFEST OUT.jsonl [--aggregate-only]
     python3 scripts/bench.py all SETS.json [--jobs N] [--only NAME,...] [--label L] [--baseline L]
+    python3 scripts/bench.py misses SETS.json NAME [--label L] [--out PATH]
 
 MANIFEST is JSON lines, one release each: "id"; "artifact_path", the
 release file as the registry serves it; "container" (tgz, zip) and "kind"
@@ -76,6 +77,19 @@ the set's last finished run, and writes each comparison, and a summary,
 to REPORT/LABEL/. A holdout's comparison is in counts only, and nothing
 `all` prints names one of its releases. Stopped, the same command goes on
 where it was; a label's runs are never mixed with another engine library's.
+
+`misses` reads what a set's misses are without anyone opening them: each
+malicious release of the set's last finished run (or --label's) that is not
+SUSPICIOUS is scanned again in memory, as `run` scans it, and gets one line
+in REPORT/LABEL/NAME-misses.jsonl (--out: another file): the run's verdict
+and this scan's, with its reason; every finding (rule, severity, file, line,
+message); the release's files as the scan read them (path, size, text or
+binary); its unused dependencies and what SC-USE-RISK read; and its own
+manifest's facts (npm: name, version, main, bin, the install hooks and their
+commands, the other scripts' names, the dependencies with their ranges;
+PyPI: Name, Version, each Requires-Dist), each value cut short. Never a
+file's contents, nor a finding's snippet: a session reads the file, and the
+releases stay on the machine. A set marked "aggregate_only" is refused.
 
 What a change to detection is checked with (docs/TESTING.md): a run before
 it and a run after it, on the benchmark (compare, every difference read)
@@ -749,6 +763,205 @@ def _set_line(head, against, wanted, text):
     return f"{head}; against {against}: {'; '.join(counts)}"
 
 
+# ---------------------------------------------------------------- a set's misses, without their contents
+#: What `misses` lists of a release at most: files, findings, and the characters of a script's command, a
+#: dependency's range or any other manifest value, and of a finding's message.
+MISS_FILES, MISS_FINDINGS, MISS_TEXT, MISS_MESSAGE = 300, 200, 300, 400
+#: Entries of a manifest's map or list (dependencies, bin, scripts' names) listed at most.
+MISS_ENTRIES = 100
+_SEVERITIES = ("BLOCKER", "CRITICAL", "MAJOR", "MINOR", "INFO")
+#: package.json's fields `misses` lists whole (each entry cut short): what npm installs, and devDependencies.
+_NPM_DEPENDENCY_FIELDS = ("dependencies", "optionalDependencies", "peerDependencies", "devDependencies",
+                          "bundleDependencies", "bundledDependencies")
+
+
+def misses_run(sets_path, name, label=None, out=None, deadline_s=28.0, allow_stale=False):
+    """`misses`: each malicious release of a set's run that is not SUSPICIOUS, scanned again in memory as `run`
+    scans it, a line each (describe_miss) in OUT -> 0. A set looked at only in aggregate (a holdout) is refused:
+    the lines name its releases. Prints counts, never a release's name; OUT is written once, at the end."""
+    conf = load_sets(sets_path)
+    entry = _named_set(conf, name)
+    label, run_path = _misses_run_path(conf["results"], name, label)
+    identity, _stale = _checked_engine(allow_stale)
+    rows = {r["id"]: r for r in read_jsonl(run_path)}
+    chosen = [rec for rec in read_jsonl(entry["manifest"]) if _is_miss(rows.get(rec["id"]))]
+    target = pathlib.Path(out).expanduser().resolve() if out else conf["report"] / label / f"{name}-misses.jsonl"
+    _write_lines(target, [_miss_line(rec, rows[rec["id"]], deadline_s) for rec in chosen])
+    _misses_said(name, label, target, rows, chosen)
+    if _read_json(conf["results"] / label / "engine.json", {}).get("sha256") != identity["sha256"]:
+        print(f"note: the engine library is not the one run {label} was made with: a release's verdict here may "
+              "differ from the run's (each line has both)")
+    return 0
+
+
+def _named_set(conf, name):
+    """The set `misses` reads; SetupError for one looked at only in aggregate."""
+    entry = _chosen(conf["sets"], [name])[0]
+    if entry["aggregate_only"]:
+        raise SetupError(f"set {name} is looked at only in aggregate (\"aggregate_only\"): `misses` names its "
+                         "releases, and no detector is written from a holdout's")
+    return entry
+
+
+def _misses_run_path(results, name, label):
+    """(the label of the run `misses` reads: `label`, else the set's last finished run (RESULTS/history.json,
+    which `all` keeps); that run's file)."""
+    if label:
+        label = _checked_label(label)
+    else:
+        finished = _read_json(results / "history.json", {}).get(name) or []
+        if not finished:
+            raise SetupError(f"set {name} has no finished run in {results}: run `all` first, or give --label")
+        label = finished[-1]
+    run_path = results / label / f"{name}.jsonl"
+    if not run_path.is_file():
+        raise SetupError(f"set {name} has no run {label} in {results}")
+    return label, run_path
+
+
+def _is_miss(row):
+    """A run's line for a malicious release that is not SUSPICIOUS (None: the release is not in the run)."""
+    return row is not None and _group(row.get("cat")) == "malicious" and row.get("verdict") != "SUSPICIOUS"
+
+
+def _miss_line(rec, row, deadline_s):
+    try:
+        return describe_miss(rec, row, deadline_s)
+    except Exception as exc:                             # noqa: BLE001 -- recorded, the others go on
+        return _row(rec, {"runVerdict": row.get("verdict", "error"), "error": f"{type(exc).__name__}: {exc}"[:300]})
+
+
+def _write_lines(target, lines):
+    target.parent.mkdir(parents=True, exist_ok=True)
+    tmp = target.with_name(target.name + ".tmp")
+    tmp.write_text("".join(json.dumps(line) + "\n" for line in lines), encoding="utf-8")
+    os.replace(tmp, target)
+
+
+def _misses_said(name, label, target, rows, chosen):
+    """`misses`' line on the terminal: counts, never a release's name."""
+    counts = collections.Counter(rows[rec["id"]].get("verdict", "error") for rec in chosen)
+    malicious = sum(1 for r in rows.values() if _group(r.get("cat")) == "malicious")
+    shown = f" ({', '.join(f'{v} {n}' for v, n in sorted(counts.items()))})" if counts else ""
+    print(f"misses: {len(chosen)} of {malicious} malicious releases of {name} at {label} are not SUSPICIOUS{shown}; "
+          f"written to {target}")
+
+
+def describe_miss(rec, run_row, deadline_s):
+    """A release `misses` reads, scanned again as `run` scans it -> its line: the run's verdict and the scan's
+    (with its reason and every finding: _miss_findings), the release's files as the scan read them (path, size,
+    and "text", "binary" or the reader's reason for not reading it whole), the unused dependencies, what
+    SC-USE-RISK read, and its manifest (_package_facts). Never a file's contents, nor a finding's snippet: the
+    line is read in a session that does not open the release."""
+    from lazaret.registry import repo
+    data, container, kind = _release(rec)
+    budget = repo.Budget(deadline=time.monotonic() + _timeout(deadline_s), deadline_detail="budget")
+    files, kept, anomalies = [], {}, []
+    members = _observed(repo.iter_archive(data, container, kind, budget=budget, anomalies=anomalies),
+                        files, kept, _manifest_wanted(kind))
+    res = repo.scan_members(members, anomalies, kind, False, budget)
+    findings = _miss_findings(res["issues"])
+    return _row(rec, {"runVerdict": run_row.get("verdict", "error"), "verdict": res["verdict"],
+                      "verdictReason": res.get("verdictReason"), "kind": kind, "container": container,
+                      "bytes": len(data), "filesTotal": len(files), "files": files[:MISS_FILES],
+                      "package": _package_facts(kind, kept), "unusedDependencies": res.get("unusedDependencies"),
+                      "findingsTotal": len(findings), "findings": findings[:MISS_FINDINGS],
+                      "useTime": res.get("useTime"), "incomplete": res.get("incomplete") or []})
+
+
+def _observed(members, files, kept, wanted):
+    """The archive's members, passed on to the scan as they come, each noted in `files` ([path, size, "text",
+    "binary" or the reader's reason]); the bytes of those `wanted(path)` names (the package's manifest) kept."""
+    from lazaret.scanner import core
+    try:
+        for m in members:
+            rel, size, raw, reason = m
+            files.append([rel, size, reason or ("binary" if core.looks_binary((raw or b"")[:2048]) else "text")])
+            if reason is None and wanted(rel):
+                kept[rel] = raw
+            yield m
+    finally:
+        close = getattr(members, "close", None)
+        if close is not None:
+            close()                          # (the scan stopped early: the reader lets go of the archive now)
+
+
+def _miss_findings(issues):
+    """Every finding as [rule, severity, file, line, message cut short], the strongest first; never its snippet."""
+    rows = [[i.get("rule"), i.get("sev"), i.get("file") or "", i.get("line") or 0,
+             str(i.get("msg") or "")[:MISS_MESSAGE]] for i in issues]
+    return sorted(rows, key=lambda f: (_severity_rank(f[1]), f[2], f[3], str(f[0])))
+
+
+def _severity_rank(sev):
+    return _SEVERITIES.index(sev) if sev in _SEVERITIES else len(_SEVERITIES)
+
+
+def _manifest_wanted(kind):
+    """Which member is the release's own manifest: npm's package.json at its root, a wheel's METADATA, an sdist's
+    PKG-INFO."""
+    if kind == "npm":
+        return lambda rel: rel.lower() == "package.json"
+    if kind == "wheel":
+        return lambda rel: rel.count("/") == 1 and rel.endswith(".dist-info/METADATA")
+    if kind == "sdist":
+        return lambda rel: rel == "PKG-INFO"
+    return lambda rel: False
+
+
+def _package_facts(kind, kept):
+    """What the release's own manifest says, as `misses` lists it (_npm_facts, _metadata_facts); None without
+    one."""
+    if not kept:
+        return None
+    text = kept.get("package.json", kept[sorted(kept)[0]]).decode("utf-8", "replace")
+    return _npm_facts(text) if kind == "npm" else _metadata_facts(text)
+
+
+def _npm_facts(text):
+    """package.json read as the scan reads it: its name, version, main and bin, the install hooks
+    (NPM_LOCAL_INSTALL_SCRIPTS) with their commands, the other scripts' names, and the dependencies of each kind
+    with their ranges, each value cut at MISS_TEXT characters."""
+    from lazaret.scanner import core
+    data, _issues = core.load_manifest("package.json", text)
+    if not isinstance(data, dict):
+        return {"unreadable": True}
+    scripts = data["scripts"] if isinstance(data.get("scripts"), dict) else {}
+    hooks = core.NPM_LOCAL_INSTALL_SCRIPTS
+    facts = {"name": _miss_value(data.get("name")), "version": _miss_value(data.get("version")),
+             "main": _miss_value(data.get("main")), "bin": _miss_value(data.get("bin")),
+             "hooks": {h: _miss_value(scripts[h]) for h in hooks if h in scripts},
+             "otherScripts": sorted(str(k)[:MISS_TEXT] for k in scripts if k not in hooks)[:MISS_ENTRIES]}
+    facts.update({key: _miss_value(data[key]) for key in _NPM_DEPENDENCY_FIELDS if key in data})
+    return facts
+
+
+def _metadata_facts(text):
+    """A METADATA's or PKG-INFO's Name, Version and Requires-Dist headers (they end at the first empty line)."""
+    facts = {"name": None, "version": None, "requires": []}
+    for line in text.split("\n"):
+        if not line.strip():
+            break
+        field, _, value = line.partition(":")
+        if field in ("Name", "Version"):
+            facts[field.lower()] = _miss_value(value.strip())
+        elif field == "Requires-Dist" and len(facts["requires"]) < MISS_ENTRIES:
+            facts["requires"].append(_miss_value(value.strip()))
+    return facts
+
+
+def _miss_value(value):
+    """A manifest's value as `misses` lists it: a string cut at MISS_TEXT characters, a map's or a list's first
+    MISS_ENTRIES entries each cut so, anything else as JSON text."""
+    if isinstance(value, dict):
+        return {str(k)[:MISS_TEXT]: _miss_value(v) for k, v in list(value.items())[:MISS_ENTRIES]}
+    if isinstance(value, list):
+        return [_miss_value(v) for v in value[:MISS_ENTRIES]]
+    if value is None or isinstance(value, str):
+        return value if value is None else value[:MISS_TEXT]
+    return json.dumps(value)[:MISS_TEXT]
+
+
 # ---------------------------------------------------------------- the command line
 def _configure_stdio():
     for stream in (sys.stdout, sys.stderr):
@@ -796,6 +1009,15 @@ def _parser():
     p.add_argument("--show", type=int, default=50, help="releases a comparison names at most (default 50)")
     p.add_argument("--allow-stale-engine", action="store_true",
                    help="run on an engine library that may not be the tree's (the summary says so)")
+    p = sub.add_parser("misses", help="a set's malicious releases that are not SUSPICIOUS, described without their "
+                                      "contents (never a holdout's)")
+    p.add_argument("sets", help="the sets file (JSON; see this script's docstring)")
+    p.add_argument("name", help="the set (one not marked aggregate_only)")
+    p.add_argument("--label", help="the run to read (default: the set's last finished run)")
+    p.add_argument("--out", help="the file to write (default: REPORT/LABEL/NAME-misses.jsonl)")
+    p.add_argument("--deadline", type=float, default=28.0, help="seconds each release may take (default 28)")
+    p.add_argument("--allow-stale-engine", action="store_true",
+                   help="read on an engine library that may not be the tree's")
     return parser
 
 
@@ -809,18 +1031,27 @@ def main(argv=None):
     if args.command == "prior":
         return prior_run(args.run, args.manifest, args.out, args.aggregate_only)
     if args.command == "all":
-        try:
-            return run_all(args.sets, max(1, args.jobs or _default_jobs()),
-                           [x for x in (args.only or "").split(",") if x] or None, args.label, args.baseline,
-                           args.deadline, args.show, args.allow_stale_engine)
-        except SetupError as exc:
-            print(f"error: {exc}", file=sys.stderr)
-            return 2
-        except KeyboardInterrupt:
-            print("stopped; the same command goes on from there", file=sys.stderr)
-            return 3
+        return _from_sets_file(lambda: run_all(
+            args.sets, max(1, args.jobs or _default_jobs()), [x for x in (args.only or "").split(",") if x] or None,
+            args.label, args.baseline, args.deadline, args.show, args.allow_stale_engine), resumable=True)
+    if args.command == "misses":
+        return _from_sets_file(lambda: misses_run(args.sets, args.name, args.label, args.out, args.deadline,
+                                                  args.allow_stale_engine))
     _print_table(args.run, read_jsonl(args.run))
     return 0
+
+
+def _from_sets_file(command, resumable=False):
+    """A command that reads a sets file -> its exit status: 2 for a SetupError, 3 when stopped (Ctrl-C)."""
+    try:
+        return command()
+    except SetupError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    except KeyboardInterrupt:
+        print("stopped; the same command goes on from there" if resumable else "stopped; nothing was written",
+              file=sys.stderr)
+        return 3
 
 
 if __name__ == "__main__":

