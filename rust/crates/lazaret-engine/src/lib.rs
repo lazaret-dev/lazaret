@@ -19,6 +19,7 @@ pub mod generated;
 pub mod goparse;
 pub mod goread;
 pub mod hooks;
+pub mod jcstr;
 pub mod json;
 pub mod jsflow;
 pub mod jsloads;

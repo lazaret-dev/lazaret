@@ -2794,6 +2794,11 @@ fn decoded_view_of(p: &Pack, text: &[u32], lang: Option<&'static str>) -> Readin
         Some((view, at)) => (Some(view), Some(1 + source[..at.min(source.len())].iter().filter(|&&ch| ch == c('\n')).count())),
         None => (None, None),
     };
+    // (JS-Confuser's concealed strings, D-11: in what the string arrays leave)
+    let arrays = match lang {
+        Some("py") => arrays,
+        _ => crate::jcstr::jc_read(arrays.as_deref().unwrap_or(&source), p.usize("_SA_MAX_CHARS")).or(arrays),
+    };
     let proxies = crate::strarr::dv_proxies(p, arrays.as_deref().unwrap_or(&source));
     let base: PyStr = match (proxies, arrays) {
         (Some(x), _) => x,

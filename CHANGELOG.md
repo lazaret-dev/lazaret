@@ -977,6 +977,16 @@ aggregate):
 
 ### Fixed
 
+- **Security: JS-Confuser's string concealing is read in the decoded view (D-11; rule set 2.76.0).** JS-Confuser 2
+  replaces each string of three characters or more with `F(start, length)`: a slice of one long string the file
+  holds, decoys around each piece, decoded with base91 over an alphabet each decoder shuffles. An exfiltration so
+  obfuscated hid `request`, `env` and its host from the install-script and import-time tests, and a release whose
+  main was one was OK; each call is now read as its string, without running anything (a decoder holds the 91
+  characters, each once, and calls `indexOf`; a retriever returns a decoder's call on the long string's slice; the
+  arguments are numbers, or items of a list of literals, which its "low" preset uses), so such a release is
+  SUSPICIOUS, "(in strings it decodes as it runs)". Its "medium" and "high" presets, which put the whole program in
+  a string `Function` runs, and JS-Confuser 1's string array are not read; unlike a string array, a file it reads
+  is not a sign of its own. The popular set's 1,703 releases: no verdict and no finding moved.
 - **Two false positives the supply model's tree gave on benign bundles (D-20; rule set 2.75.0).** Files over
   2,000,000 characters are the text followers' today, so neither showed; D-8's raised limit would have read them on
   the tree. notebook 7.6.3's `notebook_core` bundle "runs code it receives over the network": JupyterLab's gettext

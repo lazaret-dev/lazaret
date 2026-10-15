@@ -681,7 +681,7 @@ impl Accessor {
 }
 
 /// core._sa_quote: a single-quoted literal on one row.
-fn sa_quote(s: &[u32]) -> PyStr {
+pub(crate) fn sa_quote(s: &[u32]) -> PyStr {
     let mut out: PyStr = vec![c('\'')];
     for &ch in s {
         match ch {

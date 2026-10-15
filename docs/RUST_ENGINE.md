@@ -198,6 +198,7 @@ rust/
                              base64 (0.1.9)
     src/strarr.rs            javascript-obfuscator's string arrays and proxy objects, for the
                              decoded view
+    src/jcstr.rs             JS-Confuser's string concealing, for the decoded view (D-11, 0.1.9)
     src/lex/                 the lexers (§15): js.rs (JavaScript, TypeScript, JSX: templates and
                              their holes, regular expressions), py.rs (Python, with pyparse's
                              tokenizer), go.rs and rs.rs (Go and Rust: raw strings, runes and
@@ -1870,6 +1871,21 @@ a token Python's tokenizer refuses, strings read plainly (no punctuators
 known) taken for adjacent ones, which joined a string array's items into
 one: Python's gaps are now read character by character (blanks, comments,
 continuations).
+
+**JS-Confuser's string concealing (D-11, 0.1.9).** `jcstr.rs` reads it on
+the lexer's tokens, after the string arrays and before the proxies: a
+decoder is a function declaration holding one literal of base91's 91
+characters, shuffled, each once, and calling `indexOf`; a retriever,
+`function F(a, b) { return D(X["slice"](a, a + b)) }` (or `.slice`, or
+`b + a`), names a decoder and the long string; that string is the one
+string literal its name is assigned (JS-Confuser's renaming gives the same
+name to other values in other functions); a call `F(m, n)` of numbers, or
+of the items of a list of literals assigned once (the "low" preset's
+`C[0x11]`), is written as its slice decoded, where that is UTF-8. Nothing
+is run. What its stronger presets do (the whole program a string
+`Function` runs, other encodings) is not read, nor its 1.x string array
+with a cached accessor; a file it reads is not a sign of its own, as a
+string array is (`string_array_line` names none).
 
 On the benchmark one release moved: num2words 0.5.15, SUSPICIOUS to
 INCOMPLETE. Its `_build.py` is a Windows executable (an `MZ` header) named

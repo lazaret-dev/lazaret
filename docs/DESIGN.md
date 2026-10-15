@@ -644,7 +644,11 @@ all three engines:
    and bounded (`_SA_*`, `_PX_*`, `_DV_CC_*`). A string array is read only
    when the rotation reproduces its checksum loop's target, in JavaScript's
    double arithmetic — the guard against a false decoding; rows are kept, so
-   a reason found there names a line of the file.
+   a reason found there names a line of the file. Since 0.1.9 (D-11) it also
+   reads JS-Confuser 2's string concealing (Rust `jcstr.rs`): each
+   `F(start, length)` is its slice of the file's one long string, decoded
+   with base91 over the alphabet its decoder shuffled, written where it
+   decodes to UTF-8; unlike a string array, it is not a sign of its own.
 4. *What a script starts is followed* (`spawned_scripts`): node and python,
    the other JavaScript runtimes in a hook (`_JS_RUNTIMES`), any program a
    variable names when it is given a file of code (`_SPAWN_SCRIPT_EXT_RE`, at
