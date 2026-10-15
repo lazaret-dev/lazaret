@@ -266,11 +266,13 @@ class RunTests(unittest.TestCase):
         (self.dataset / "README.md").write_text("later\n", encoding="utf-8")
         self.git(self.dataset, "add", "-A")
         self.git(self.dataset, "commit", "-q", "-m", "later")             # the head: more samples
+        self.head = self.git(self.dataset, "rev-parse", "HEAD").strip()   # stands for the measurements' commit
         sizes = {"benchmark": {("npm", "malicious_intent"): 3, ("pypi", "malicious_intent"): 2,
                                ("npm", "compromised_lib"): 2, ("pypi", "compromised_lib"): self.d.EVERY},
                  "holdout": {("npm", "malicious_intent"): 2, ("pypi", "malicious_intent"): 2,
                              ("npm", "compromised_lib"): 1, ("pypi", "compromised_lib"): self.d.EVERY}}
-        for patcher in (mock.patch.object(self.d, "SIZES", sizes), mock.patch.object(self.d, "AUDIT_COMMIT", self.sha)):
+        for patcher in (mock.patch.object(self.d, "SIZES", sizes), mock.patch.object(self.d, "AUDIT_COMMIT", self.sha),
+                        mock.patch.object(self.d, "COMMIT", self.head)):
             patcher.start()
             self.addCleanup(patcher.stop)
 
@@ -353,14 +355,18 @@ class RunTests(unittest.TestCase):
         self.assertEqual(code, 2)
         self.assertIn("is a shallow clone, without the commit given", said)
 
-    def test_new_sets_at_a_later_commit_leave_out_the_audit_benchmark(self):
-        head = self.git(self.dataset, "rev-parse", "HEAD").strip()
+    def test_the_measurements_sets_leave_out_the_audit_benchmark(self):
+        head = self.head
         audit_out, out = self.tmp / "audit", self.tmp / "corpus"
-        self.assertEqual(self.run_script(self.dataset, audit_out, "--only", "benchmark")[0], 0)  # the default: audit's
-        code, said = self.run_script(self.dataset, out, "--commit", "HEAD")
+        code, said = self.run_script(self.dataset, audit_out, "--commit", self.sha, "--only", "benchmark")
         self.assertEqual(code, 0, said)
-        self.assertIn(f"not the audit's {self.sha}: new sets", said)
-        self.assertIn(f"give --commit {head} to draw them again", said)
+        self.assertIn(f"the dataset at {self.sha} (", said)
+        self.assertIn("the audit's sets", said)
+        code, said = self.run_script(self.dataset, out)                   # the default: the measurements' commit
+        self.assertEqual(code, 0, said)
+        self.assertIn(f"the dataset at {head} (", said)
+        self.assertIn("the measurements' sets (since Oct 15)", said)
+        self.assertNotIn("give --commit", said)
         packages = lambda rows: {(r["eco"], r["name"]) for r in rows}                      # noqa: E731
         written_from = packages(self.manifest(audit_out, "benchmark"))
         bench, hold = packages(self.manifest(out, "benchmark")), packages(self.manifest(out, "holdout"))
@@ -386,6 +392,11 @@ class RunTests(unittest.TestCase):
         for name in ("benchmark", "holdout"):
             self.assertEqual([(r["id"], r["sha256"]) for r in self.manifest(self.tmp / "again", name)],
                              [(r["id"], r["sha256"]) for r in self.manifest(out, name)])
+        with mock.patch.object(self.d, "COMMIT", "0" * 40):              # another commit than the measurements'
+            code, said = self.run_script(self.dataset, self.tmp / "other", "--commit", "HEAD", "--only", "benchmark")
+        self.assertEqual(code, 0, said)
+        self.assertIn("new sets, whose first runs are their baselines", said)
+        self.assertIn(f"give --commit {head} to draw them again", said)
 
     def test_a_blobless_clone_fetches_the_samples_drawn_in_one_request(self):
         self.git(self.dataset, "config", "uploadpack.allowFilter", "true")

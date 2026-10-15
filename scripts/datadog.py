@@ -3,32 +3,32 @@
 malicious-software-packages-dataset: the manifests scripts/bench.py runs.
 
     git clone --filter=blob:none --no-checkout https://github.com/DataDog/malicious-software-packages-dataset.git DATASET
-    python3 scripts/datadog.py DATASET OUT [--commit b302ad0b|HEAD|SHA] [--only benchmark|holdout] [--holdout-seed N]
+    python3 scripts/datadog.py DATASET OUT [--commit SHA|HEAD] [--only benchmark|holdout] [--holdout-seed N]
 
 writes OUT/benchmark/manifest.jsonl and OUT/holdout/manifest.jsonl, each
 release's file in its set's files/ folder, and prints the two entries of a
 sets file (`bench.py all`) that run them.
 
-The benchmark is the audit's draw (audits/lazaret-audit-2026-10-01.md,
-Appendix: the dataset at b302ad0b, seed 20260928): 200 npm and 200 PyPI
-malicious-intent packages, 100 compromised npm releases and every
-compromised PyPI release (16), one version of each, drawn as the audit's
-harness drew them (prepare_corpus.py's pick_malicious), so the same commit
-gives the same 516 releases. The holdout of Sept 30 (747 releases) cannot be
-drawn again: its draw was not kept. The holdout here is a new draw of the
-same shape (seed 20261015): 300 npm and 300 PyPI malicious-intent packages
-and 150 compromised npm releases, among the packages the benchmark does not
-hold (and any compromised PyPI release it does not hold: none at b302ad0b).
-Its first run is its baseline, and it is read in aggregate only
-(docs/TESTING.md).
+The sets are drawn at the dataset's commit of Oct 15, 2026 (0cf258a4), where
+John restarted the measurements, unless --commit gives another. The
+benchmark: 200 npm and 200 PyPI malicious-intent packages, 100 compromised
+npm releases and every compromised PyPI release, one version of each, drawn
+as the audit's harness drew them (prepare_corpus.py's pick_malicious, seed
+20260928): 517 releases at 0cf258a4. The holdout: 300 npm and 300 PyPI
+malicious-intent packages and 150 compromised npm releases (seed 20261015),
+among the packages the benchmark does not hold and those of the audit's
+benchmark, the releases the detectors were written from. So the clone needs
+the audit's commit (b302ad0b) in its history: a shallow clone gets the
+history, without the old samples, from
+`git fetch --unshallow --filter=blob:none origin`. The holdout is read in
+aggregate only (docs/TESTING.md).
 
-Another commit (--commit HEAD: the clone's newest) draws new sets there, with
-the same seeds and shapes; their first runs are their baselines, and the
-script prints the commit to give again. Their holdout also leaves out the
-packages of the audit's benchmark, the releases the detectors were written
-from, so the clone needs the audit's commit in its history: a shallow clone
-gets the history, without the old samples, from
-`git fetch --unshallow --filter=blob:none origin`.
+--commit b302ad0b gives the audit's benchmark (audits/lazaret-audit-2026-10-01.md,
+Appendix): the 516 releases 0.1.9's figures were measured on, with a holdout
+of the same shape (the audit's own, of Sept 30, cannot be drawn again: its
+draw was not kept). Another commit (HEAD: the clone's newest) draws new sets
+there, whose first runs are their baselines; the script prints the commit to
+give again.
 
 A sample is a zip, encrypted with the dataset's password ("infected"), of a
 release's files and, for some compromised releases, the upstream sources
@@ -71,7 +71,8 @@ import zipfile
 import zlib
 
 PASSWORD = b"infected"
-AUDIT_COMMIT = "b302ad0b"                             # the audit's (Sept 28, 2026)
+AUDIT_COMMIT = "b302ad0b"                             # the audit's (Sept 28, 2026): detectors were written from its benchmark
+COMMIT = "0cf258a43d8baf58aeb01a7e67dbdb63206dc554"   # the measurements' since Oct 15, 2026 (John restarted them there)
 BENCHMARK_SEED = 20260928
 HOLDOUT_SEED = 20261015
 EVERY = 10 ** 9                                       # a subset's size meaning "every package of it"
@@ -168,7 +169,7 @@ class Dataset:
             return (f"{self.path} is a shallow clone, without {what} ({commit}). Add the dataset's history (its "
                     f"commits and file lists, not its old samples): git -C '{self.path}' fetch --unshallow "
                     "--filter=blob:none origin")
-        return f"{self.path} has no commit {commit} ({what})"
+        return f"{self.path} has no commit {commit} ({what}): fetch the dataset's newer ones (git -C '{self.path}' fetch origin)"
 
     def date(self, sha):
         return self._git("show", "-s", "--format=%cs", sha).stdout.decode("ascii", "replace").strip()
@@ -541,12 +542,13 @@ def prepare(dataset_path, out, commit=None, only=None, holdout_seed=HOLDOUT_SEED
     inside = lazaret_checkout(out)
     if inside:
         raise SetupError(f"{out} is inside the repository {inside}: keep the samples' files outside it")
-    dataset = Dataset(dataset_path, commit or AUDIT_COMMIT)
+    dataset = Dataset(dataset_path, commit or COMMIT)
     try:
         audit = dataset.resolve(AUDIT_COMMIT)
-        at_audit = dataset.sha == audit
-        log(f"the dataset at {dataset.sha} ({dataset.date(dataset.sha)})" +
-            ("" if at_audit else f", not the audit's {AUDIT_COMMIT}: new sets, whose first runs are their baselines"))
+        at_audit, at_default = dataset.sha == audit, dataset.sha == dataset.resolve(COMMIT)
+        log(f"the dataset at {dataset.sha} ({dataset.date(dataset.sha)}): " +
+            ("the audit's sets" if at_audit else "the measurements' sets (since Oct 15)" if at_default else
+             "new sets, whose first runs are their baselines"))
         groups = samples_by_package(dataset.paths())
         benchmark = draw(groups, BENCHMARK_SEED, SIZES["benchmark"])
         leave_out, holdout_about = {(i["eco"], i["name"]) for i in benchmark}, {}
@@ -583,7 +585,7 @@ def prepare(dataset_path, out, commit=None, only=None, holdout_seed=HOLDOUT_SEED
             entries.append(entry)
     finally:
         dataset.close()
-    if not at_audit:
+    if not (at_audit or at_default):
         log(f"These sets are drawn at {dataset.sha}: give --commit {dataset.sha} to draw them again.")
     log("A sets file's entries for them (scripts/bench.py all):")
     for entry in entries:
@@ -606,9 +608,9 @@ def main(argv=None):
                     "dataset, for scripts/bench.py.")
     parser.add_argument("dataset", help="a clone of DataDog/malicious-software-packages-dataset, with its history")
     parser.add_argument("out", help="the folder the sets go to: outside the repository and any synced folder")
-    parser.add_argument("--commit", default=AUDIT_COMMIT,
-                        help="the dataset's commit the sets are drawn at (default: the audit's, %(default)s; "
-                             "HEAD: the clone's newest)")
+    parser.add_argument("--commit", default=COMMIT,
+                        help="the dataset's commit the sets are drawn at (default: the measurements', since Oct 15, "
+                             f"%(default).8s; {AUDIT_COMMIT}: the audit's; HEAD: the clone's newest)")
     parser.add_argument("--only", choices=("benchmark", "holdout"), help="write one set")
     parser.add_argument("--holdout-seed", type=int, default=HOLDOUT_SEED,
                         help="the holdout's draw (default %(default)s); another seed draws another holdout")
