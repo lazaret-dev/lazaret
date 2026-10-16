@@ -25,52 +25,31 @@ count in no code metric (core.scan_config_file):
 The reading is the native engine's since 0.1.9 (BR-7 step 3: rust/crates/
 lazaret-engine/src/config.rs, the `scan_config` call; the patterns are the
 rule pack's `_CFG_*`), as it is for the npm package; until then this module
-and js/src/lib/configsecrets.js were twins. This module keeps which files are
-read (is_config_file, own_report: the collection's) and the names the tests
-call, over the engine.
+and js/src/lib/configsecrets.js were twins. Which files are read is the
+engine's too since step 4 (e) (collect.rs: is_config_file, own_report); this
+module keeps the names the package and the tests call, over the engine.
 """
 import os
 import re
 
 from . import _native, engine
 
-#: Extensions of config and data files (os.path.splitext, lowercased).
-CONFIG_EXTS = frozenset((
-    ".env", ".json", ".jsonc", ".json5", ".yaml", ".yml", ".toml", ".ini", ".cfg", ".conf",
-    ".properties", ".sh", ".bash", ".zsh", ".pem", ".key", ".tfvars",
-))
-#: Whole names (lowercased): credential dotfiles, container builds, SSH keys.
-CONFIG_NAMES = frozenset((
-    ".env", ".envrc", ".npmrc", ".pypirc", ".netrc", "_netrc", ".git-credentials", ".dockercfg",
-    "dockerfile", "containerfile", "id_rsa", "id_dsa", "id_ecdsa", "id_ed25519",
-))
-#: Lockfiles: generated, full of integrity hashes, never where a credential is kept.
-CONFIG_SKIP_NAMES = frozenset((
-    "package-lock.json", "npm-shrinkwrap.json", "pnpm-lock.yaml", "packages.lock.json",
-    "pylock.toml",
-))
 #: Config files larger than this are not read (a Q-SKIPPED-CONFIG note says
-#: so): a data file that size is not where a credential is configured.
+#: so): a data file that size is not where a credential is configured. (The
+#: rule pack's CONFIG_SCAN_CAP; the collection's limit, which it hands the
+#: engine, and the MCP server's.)
 CONFIG_SCAN_CAP = 2_000_000
-#: Lazaret's own JSON reports (lazaret-report.json, lazaret-sca.json, a
-#: baseline) start with the provenance marker; they are not read.
-_OWN_REPORT_RE = re.compile(r'\A\ufeff?\s*\{\s*"generatedBy"\s*:\s*"lazaret-')
 
 
 def is_config_file(name):
-    """True for a file (by its base name) that is read as config or data."""
-    low = name.lower()
-    if low in CONFIG_SKIP_NAMES or (low.startswith("pylock.") and low.endswith(".toml")):
-        return False
-    if (low in CONFIG_NAMES or low.startswith(".env.") or low.startswith("dockerfile.")
-            or low.endswith(".dockerfile")):
-        return True
-    return os.path.splitext(low)[1] in CONFIG_EXTS
+    """True for a file (by its base name) that is read as config or data (the engine's: CONFIG_NAMES, CONFIG_EXTS,
+    CONFIG_SKIP_NAMES)."""
+    return _native.call("collect_check", {"check": "config_name", "name": name})
 
 
 def own_report(text):
     """True for the text of one of Lazaret's own JSON reports."""
-    return bool(_OWN_REPORT_RE.match(text))
+    return _native.call("collect_check", {"check": "own_report"}, text)
 
 
 # ---- the engine's reading, for the tests ----------------------------------------

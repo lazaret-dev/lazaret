@@ -11,7 +11,6 @@ import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { run, scanFile } from "../src/index.js";
 import { jsxReading } from "../src/lib/lexer.js";
-import { EXTS } from "../src/lib/collect.js";
 
 /** The name SC-HEXSTR says a line's escapes hide, else null (core.hex_hidden_name, as its message shows it). */
 const hexHiddenName = (line) => {
@@ -71,8 +70,7 @@ test("project: .mts/.cts sources, videos, .jsc, inline os import, hidden names",
 });
 
 test("the tables", () => {
-  assert.equal(EXTS[".mts"], "js");
-  assert.equal(EXTS[".cts"], "js");
+  // (EXTS is the engine's: collect.rs, held by test_collect_engine)
   assert.equal(jsxReading("x.MTS") || jsxReading("x.cts"), false);
 });
 

@@ -139,7 +139,7 @@ class CargoVendorTests(VendoredCodeTests):
         self.assertEqual(self.scan(files, deps=False), [("SC-B64", "MAJOR", "vendor/y/src/lib.rs", 2)])
         root = self.tree(dict(RUST_PROJECT, **{"elsewhere.json": "{}", "vendor/y/src/lib.rs": samples.CTOR_RS}))
         os.symlink(os.path.join(root, "elsewhere.json"), os.path.join(root, "vendor", "y", ".cargo-checksum.json"))
-        self.assertIsNone(core._vendor_kind(os.path.join(root, "vendor")))      # (a link is not cargo's file)
+        self.assertIs(core._dep_tree_kind("vendor", os.path.join(root, "vendor")), False)  # (a link is not cargo's file)
 
     def test_a_crate_too_large_or_unanswered_is_not_cleared(self):
         files = dict(RUST_PROJECT, **crate("c", {"src/lib.rs": samples.CLEAN_RS}))

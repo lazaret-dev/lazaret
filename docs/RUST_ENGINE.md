@@ -10,8 +10,8 @@ sources, which pip compiles where no platform wheel fits (§4). What the
 Python package still does in Python: walking a project, reading archives,
 the registry and the guard, and writing what the engine answers (since
 0.1.9 the manifest and workflow checks, project mode's passes after the
-rules, the suppression markers, a scan's result, the reports' forms and
-baselines are the engine's: BR-7, Q-1); project mode's taint is the engine's, for
+rules, the suppression markers, a scan's result, the reports' forms,
+baselines and what the walk reads are the engine's: BR-7, Q-1); project mode's taint is the engine's, for
 JavaScript and for Python (phase 3: `js_flow`, §16; `py_flow`, §17), in
 both packages. Since 0.1.8 the npm
 package runs the same engine compiled to WebAssembly
@@ -252,6 +252,17 @@ rust/
                              trust rules and the marks, and N-15's acceptance of the SC-* and X-*
                              findings a signed baseline holds (baseline_fingerprints,
                              baseline_sign, baseline_apply)
+    src/collect.rs           a project scan's collection (BR-7 step 4 e, 0.1.9; core's _collect,
+                             _collect_file, _collect_config and _check_pycache, npm's
+                             collectFiles and collectEntry until then): what each entry of a
+                             folder is to the walk (read, skipped, followed, reported; a
+                             dependency tree by its markers, a Go or cargo vendor tree), how a
+                             file is read (its language, a manifest, a .pth file, a config
+                             file, a binary by its first bytes, the size limits) and the
+                             coverage notes, the packages listing and reading as asked
+                             (collect_dir, collect_file, collect_pycache, collect_issue,
+                             collect_check); and the registry's test code (test_paths,
+                             demote_tests)
     src/autorun.rs           editor and AI-agent settings that run commands (BR-7 step 2, 0.1.9;
                              autorun.py, core.autorun_issues and their npm twins until then): a
                              JSON-with-comments reader that keeps lines, the commands each kind of
@@ -999,7 +1010,8 @@ only.
    decisions (`deps.js`'s: in the engine since 0.1.9, `src/deps.rs`), the
    reports (`report.js`'s forms: in the engine since 0.1.9, `src/report.rs`),
    baselines (`baseline.js`'s and `pyjson.js`: in the engine since 0.1.9,
-   `src/baseline.rs`);
+   `src/baseline.rs`), the walk's decisions (`collect.js`'s and `fs.js`'s:
+   in the engine since 0.1.9, `src/collect.rs`);
    the dashboard loads the same module since 0.1.9 (BR-7 step 5: the page
    carries it, and runs the npm package's scan on it).
 4. Archive reading for registry scans in the engine, where it reads as the

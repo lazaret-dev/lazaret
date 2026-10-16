@@ -17,7 +17,6 @@ import { join, dirname } from "node:path";
 import { run } from "../src/index.js";
 import { shebangLang } from "../src/lib/native.js";
 import { collectFiles } from "../src/lib/fs.js";
-import { scriptSourceLang } from "../src/lib/collect.js";
 
 test("the language a #! line names (the first line only)", () => {
   const cases = [
@@ -31,13 +30,7 @@ test("the language a #! line names (the first line only)", () => {
     ["", null], ["node\n", null], [" #!/usr/bin/node\n", null], ["\ufeff#!/usr/bin/node\n", null],
   ];
   for (const [text, want] of cases) assert.equal(shebangLang(text), want, JSON.stringify(text));
-  const bytes = (s) => Buffer.from(s, "latin1");
-  assert.equal(scriptSourceLang(bytes("#!/usr/bin/env node\nx()\n")), "js");
-  assert.equal(scriptSourceLang(bytes("#!/usr/bin/python3\n")), "py");
-  assert.equal(scriptSourceLang(bytes("#!/bin/sh\nls\n")), null);
-  assert.equal(scriptSourceLang(Buffer.concat([bytes("#!/usr/bin/node\n"), Buffer.from([...Array(32).keys()].flatMap((b) => Array(12).fill(b)))])), null);
-  assert.equal(scriptSourceLang(bytes("\x7fELF#!/usr/bin/node\n")), null);
-  assert.equal(scriptSourceLang(Buffer.alloc(0)), null);
+  // (a script by its #! line: the engine's, collect.rs' script_source_lang and its tests)
 });
 
 const FILES = {

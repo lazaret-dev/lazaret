@@ -7,7 +7,6 @@
 // here for the existing import paths.
 
 import { mkIssue } from "./issue.js";
-import { DEP_MARKERS } from "./collect.js";
 import { truncatedIssue } from "./issue.js";
 import { pyRe, pyRepr, MAX_JSON_DEPTH, PY_ORDER } from "./pycompat.js";
 import { call, hookIsSuspicious, issuesOf, NativeExhausted, EXHAUSTED } from "./native.js";
@@ -24,12 +23,6 @@ export const NPM_PREPARE_SCRIPTS = ["preprepare", "prepare", "postprepare"];
 export const NPM_LOCAL_INSTALL_SCRIPTS = [...NPM_INSTALL_SCRIPTS, ...NPM_PREPARE_SCRIPTS];
 export const NPM_LIFECYCLE_SCRIPTS = NPM_LOCAL_INSTALL_SCRIPTS;   // backwards-compatible name
 
-// A manifest inside an installed-dependency directory belongs to a package that
-// came from a registry: only the consumer-run scripts apply to it.
-// Twin of lazaret.scanner.core.is_dependency_manifest (same DEP_MARKERS list).
-export function isDependencyManifest(path) {
-  return String(path).split(/[\\/]/).slice(0, -1).some((part) => DEP_MARKERS.has(part));
-}
 /** A manifest at the top of the scanned tree / package (no directory part). */
 export function isRootManifest(path) {
   const p = String(path).replace(/\\/g, "/").replace(/^\/+/, "");
@@ -149,8 +142,8 @@ function fromEngine(v) {
  * (D-14). An unparseable root manifest is SC-MANIFEST-UNPARSEABLE. The
  * engine's (core.scan_manifest).
  */
-export function scanManifest(path, content, { registry = isDependencyManifest(path) } = {}) {
-  return engineIssues(path, "scan_manifest", { registry: !!registry, hooks: null }, content);
+export function scanManifest(path, content, { registry = null } = {}) {
+  return engineIssues(path, "scan_manifest", { registry: registry === null ? null : !!registry, hooks: null }, content);
 }
 
 /** What makes a dependency's spec risky to fetch: ["a plain-http URL", "a raw IP address (HOST)"], the ones that

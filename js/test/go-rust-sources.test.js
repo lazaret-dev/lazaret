@@ -12,7 +12,6 @@ import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { collectFiles, detectLang, scanFile, computeMetrics } from "../src/index.js";
-import { EXTS, DEP_LANGS } from "../src/lib/collect.js";
 import { commentSpans } from "../src/lib/lexer.js";
 import { redactContextLine } from "../src/lib/redact.js";
 
@@ -29,9 +28,7 @@ function tree(files) {
 }
 
 test("the extension tables", () => {
-  assert.equal(EXTS[".go"], "go");
-  assert.equal(EXTS[".rs"], "rs");
-  assert.deepEqual([...DEP_LANGS].sort(), ["js", "py", "sql"]);
+  // (EXTS and DEP_LANGS are the engine's: collect.rs)
   assert.equal(detectLang("cmd/main.go", "package main\n"), "go");
   assert.equal(detectLang("src/LIB.RS", "fn main() {}\n"), "rs");
 });

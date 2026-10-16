@@ -1,9 +1,9 @@
 // Directory walking and report-path safety — zero-dependency leaf helpers.
 // Never import from ../scanner/ (RESTRUCTURE.md §5).
 //
-// Twin of lazaret.scanner.core.collect_files (shared semantics specs 4, 8, 9,
-// 11, 15) and lazaret.scanner.reports (validate_out_dir, _validate_path,
-// is_our_report, write_report).
+// The walk (collectFiles) lists folders, reads files and keeps the folders it has seen; what each entry is to the
+// scan is the engine's (collect.rs, BR-7 step 4 e), as for core's walk. Report paths: twin of
+// lazaret.scanner.reports (validate_out_dir, _validate_path, is_our_report, write_report).
 
 import {
   readdirSync, lstatSync, statSync, openSync, readSync, closeSync, fstatSync, fsyncSync, readlinkSync,
@@ -12,10 +12,9 @@ import {
 import { join, sep, resolve, dirname, basename, isAbsolute } from "node:path";
 import { randomBytes } from "node:crypto";
 import { fsNameToString } from "./encoding.js";
-import { PYC_HEADER, pycIssues, pycModule } from "./binary.js";
 import { scanErrorIssue } from "./issue.js";
-import { collectEntry, MAX_FILE_BYTES } from "./collect.js";
-import { cmpCodePoints } from "./pycompat.js";
+import { call, bytesText } from "./native.js";
+import { collectEntry, collectIssue, pathIssues, MAX_FILE_BYTES, WINDOWS } from "./collect.js";
 
 /** posixpath.normpath of a relative '/'-separated path. */
 export function normpathRel(path) {
@@ -27,19 +26,6 @@ export function normpathRel(path) {
   }
   return comps.join("/") || ".";
 }
-
-// Spec 8: `.git` (exactly that name) is always skipped; dependency trees are
-// pruned unless --deps; __pycache__ is never source-scanned but its .pyc
-// files are checked. Every pruned tree is reported (Q-SKIPPED-TREE).
-export const SKIP_DIRS = new Set([".git", "__pycache__"]);
-export const OPTIN_SKIP_DIRS = [
-  "node_modules", "venv", ".venv", "env", "dist", "build", ".next",
-  "coverage", "vendor", "site-packages", ".tox", ".mypy_cache",
-  ".pytest_cache", "migrations",
-];
-const VENDOR_PROBE = 256;            // the directories of a vendor tree looked at for a .cargo-checksum.json
-const DEP_TREES = new Set(["node_modules", "bower_components", "site-packages"]);
-const VENV_TREES = new Set(["venv", ".venv", "env"]);
 
 const O_NOFOLLOW = C.O_NOFOLLOW ?? 0;
 const O_NONBLOCK = C.O_NONBLOCK ?? 0;
@@ -75,34 +61,9 @@ function specialKind(st) {
   return "not a regular file";
 }
 
-const coverage = (rule, name, path, msg, why, fix, ref = "Maintainability") => ({
-  rule, name, type: "SMELL", sev: "INFO", msg, why, fix, ref, file: path, line: 1, snippet: [], snipStart: 1,
-});
-export function symlinkIssue(path, target) {
-  target = String(target);
-  if (Array.from(target).length > 200) target = Array.from(target).slice(0, 197).join("") + "...";
-  return coverage("Q-SYMLINK", "Symbolic link (not followed)", path,
-    `Symbolic link ${path} -> ${target} was not followed; its target was not scanned.`,
-    "Following links would let a repository pull files from outside the scanned tree (host credentials, /dev/urandom) into the scan and its reports, or loop forever. The link target is not part of the tree under review.",
-    "If the target belongs to the project, scan it directly.",
-    "CWE-59 · Scan coverage");
-}
-export function unreadableIssue(path, reason) {
-  return coverage("Q-UNREADABLE", "Unreadable entry (not scanned)", path,
-    `${path} could not be read (${reason}); it was not scanned.`,
-    "An entry the scanner cannot read is invisible to every rule. Special files (named pipes, sockets, devices) are never opened: reading one can hang or exhaust the scan.",
-    "Fix the permissions (or remove the special file) and re-scan.",
-    "Scan coverage");
-}
-export function skippedTreeIssue(rel, nFiles, nBytes) {
-  return {
-    rule: "Q-SKIPPED-TREE", name: "Skipped directory (not scanned)", type: "SMELL", sev: "INFO",
-    msg: `Directory ${rel} was skipped (${nFiles} files, ${nBytes} bytes unread).`,
-    why: "Skipped trees are invisible to every rule — the classic hiding places (dist, build, .git) hold published code and committed-then-deleted secrets. Generated trees you own are fine to skip on purpose; unexpected entries here are blind spots.",
-    fix: "Only exclude generated trees you control; remove the exclusion otherwise so the tree is scanned.",
-    ref: "Maintainability", file: rel, line: 1, snippet: [], snipStart: 1,
-  };
-}
+export const symlinkIssue = (path, target) => collectIssue("symlink", path, { target: String(target) });
+export const unreadableIssue = (path, reason) => collectIssue("unreadable", path, { reason: String(reason) });
+export const skippedTreeIssue = (rel, nFiles, nBytes) => collectIssue("skipped_tree", rel, { files: nFiles, bytes: nBytes });
 /** Read at most `limit` bytes of a REGULAR file (never follows links, never blocks on a FIFO). */
 export function readBounded(path, limit) {
   const fd = openSync(path, C.O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_NOCTTY);
@@ -133,12 +94,13 @@ function fileEntry(full, rel, name, size, dep) {
       try {
         return readBounded(full, limit);
       } catch (e) {
-        if (!(e instanceof NotRegularFile || (e && e.code))) throw e;
+        if (!ioError(e)) throw e;
         return Buffer.alloc(0);
       }
     },
   };
 }
+const ioError = (e) => e instanceof NotRegularFile || Boolean(e && e.code);
 
 function lexists(p) { try { lstatSync(p); return true; } catch { return false; } }
 /**
@@ -178,49 +140,38 @@ function readlinkText(p) {
   try { return fsNameToString(readlinkSync(p, { encoding: "buffer" })); } catch { return "?"; }
 }
 
-// name → (marker names directly inside, marker suffixes directly inside)
-const DEP_TREE_MARKERS = {
-  venv: [["pyvenv.cfg"], []], ".venv": [["pyvenv.cfg"], []], env: [["pyvenv.cfg"], []],
-  vendor: [["modules.txt", "autoload.php", "package.json"], [".dist-info", ".egg-info"]],
-};
-/** "go" when the vendor directory `dirBuf` is Go's (vendor/modules.txt), "cargo" when it is cargo's (a regular
- * .cargo-checksum.json in one of its first VENDOR_PROBE directories), else null; no link followed. Twin of
- * core._vendor_kind. */
-export function vendorKind(dirBuf) {
-  let names;
-  try { names = readdirSync(dirBuf, { encoding: "buffer" }); } catch { return null; }
-  const entries = names.map((nb) => ({ nb, n: fsNameToString(nb) })).sort((a, b) => cmpCodePoints(a.n, b.n));
-  if (entries.some((e) => e.n === "modules.txt")) return "go";
-  const dirs = [];
-  for (const e of entries) {
-    if (dirs.length >= VENDOR_PROBE) break;
-    try { if (lstatSync(childPath(dirBuf, e.nb)).isDirectory()) dirs.push(e); } catch { /* gone: not one */ }
-  }
-  for (const e of dirs) {
-    try {
-      if (lstatSync(childPath(childPath(dirBuf, e.nb), Buffer.from(".cargo-checksum.json"))).isFile()) return "cargo";
-    } catch { /* none */ }
-  }
-  return null;
+/** [[name, is a folder]] of a folder's entries (no link followed), or null when it cannot be listed. */
+function listing(dirBuf) {
+  try {
+    return readdirSync(dirBuf, { encoding: "buffer", withFileTypes: true })
+      .map((d) => [fsNameToString(d.name), d.isDirectory()]);
+  } catch { return null; }
 }
 
-/** Is directory `name` a dependency tree (always for node_modules & co; vendor/venv only with a marker)? A vendor
- * directory of Go's or cargo's is "go" or "cargo" (vendorKind): --deps reads its code. */
-function isDependencyTree(name, dirBuf) {
-  if (DEP_TREES.has(name)) return true;
-  if (name === "vendor") {
-    const kind = vendorKind(dirBuf);
-    if (kind) return kind;
+/** collect_dir until it needs nothing more (the folders it asks about: their entries; a vendor folder's
+ * .cargo-checksum.json files). */
+function dirPlan(rel, dep, listed, paths, exclude, includeDeps) {
+  const answers = { lists: [], cargo: [] };
+  for (;;) {
+    const got = call("collect_dir", { dir: rel, dep, entries: listed, excludes: exclude, includeDeps, windows: WINDOWS,
+      answers });
+    if (!got.need) return got;
+    for (const k of got.need.lists) answers.lists.push([k, listing(paths[k])]);
+    for (const [k, dirs] of got.need.cargo) {
+      answers.cargo.push([k, dirs.filter((d) => {
+        try { return lstatSync(Buffer.concat([paths[k], SEP, Buffer.from(d), SEP, Buffer.from(".cargo-checksum.json")])).isFile(); }
+        catch { return false; }
+      })]);
+    }
   }
-  const markers = DEP_TREE_MARKERS[name];
-  if (!markers) return false;
-  const [names, suffixes] = markers;
-  let entries;
-  try { entries = readdirSync(dirBuf, { encoding: "buffer" }); } catch { return false; }
-  return entries.some((nb) => {
-    const n = fsNameToString(nb);
-    return names.includes(n) || suffixes.some((x) => n.endsWith(x));
-  });
+}
+
+/** "go" when the vendor directory `dirBuf` is Go's, "cargo" when it is cargo's, else null (the engine's: collect.rs).
+ * The npm package's twin of core._dep_tree_kind for a vendor folder, for its tests. */
+export function vendorKind(dirBuf) {
+  const got = dirPlan("", false, [["vendor", "dir", null, false]], [dirBuf], [], true);
+  const walk = got.do.find(([, action]) => action === "walk");
+  return walk && Array.isArray(walk[2][1]) ? walk[2][1][0] : null;
 }
 
 /** (file count, byte count) of a pruned tree — iterative, links not followed. */
@@ -244,7 +195,7 @@ function treeStats(dirBuf) {
 }
 
 /**
- * Collect the files to scan under `root` (twin of core._collect).
+ * Collect the files to scan under `root` (core._collect's walk; what each entry is: the engine's, collect.rs).
  * Returns { files, manifests, pth, configs, binaryIssues, skippedIssues } —
  * files: [{path, content, lang, dep}], manifests: package.json and gyp
  * entries [{kind, path, content, dep}] (kind "package.json", "binding.gyp",
@@ -259,7 +210,7 @@ function treeStats(dirBuf) {
 export function collectFiles(root, { includeDeps = false, exclude = [], maxFileBytes = MAX_FILE_BYTES } = {}) {
   const col = { files: [], manifests: [], pth: [], configs: [], binaryIssues: [], skippedIssues: [], maxFileBytes };
   const issues = col.binaryIssues;
-  const excluded = new Set(exclude);
+  const excluded = [...new Set(exclude)].sort();
   const rootBuf = Buffer.from(resolve(root));
   const seen = new Set();
   const skipTree = (buf, rel) => { const [n, bytes] = treeStats(buf); col.skippedIssues.push(skippedTreeIssue(rel, n, bytes)); };
@@ -275,62 +226,68 @@ export function collectFiles(root, { includeDeps = false, exclude = [], maxFileB
       issues.push(unreadableIssue(dir.rel, strerror(e)));
       continue;
     }
-    const names = new Set(entries.map((e) => e.str));
-    const subdirs = [];
+    const listed = [], stats = [], paths = [];
     for (const ent of entries) {
       const full = childPath(dir.buf, ent.buf);
+      paths.push(full);
+      let st = null;
+      try { st = lstatSync(full, { bigint: true }); } catch (e) { listed.push([ent.str, "error", strerror(e)]); stats.push(null); continue; }
+      stats.push(st);
+      if (isLink(ent, full, st)) listed.push([ent.str, "link", readlinkText(full)]);
+      else if (st.isDirectory()) { const key = dirKey(st); listed.push([ent.str, "dir", key, key !== null && seen.has(key)]); }
+      else if (!st.isFile()) listed.push([ent.str, "special", specialCode(st)]);
+      else listed.push([ent.str, "file", Number(st.size)]);
+    }
+    const got = dirPlan(dir.rel, dir.dep, listed, paths, excluded, includeDeps);
+    for (const key of got.seen) seen.add(key);
+    const names = entries.map((e) => e.str);
+    const push = [];
+    for (const [k, action, extra] of got.do) {
+      const ent = entries[k], full = paths[k];
       const rel = dir.rel ? `${dir.rel}${sep}${ent.str}` : ent.str;
-      let st;
-      try { st = lstatSync(full); } catch (e) { issues.push(unreadableIssue(rel, strerror(e))); continue; }
-      if (isLink(ent, full, st)) issues.push(symlinkIssue(rel, readlinkText(full)));
-      else if (st.isDirectory()) subdirs.push({ ent, full, rel, st });
-      else if (!st.isFile()) issues.push(unreadableIssue(rel, specialKind(st)));
-      else {
-        try { collectEntry(fileEntry(full, rel, ent.str, st.size, dir.dep), col); } catch (e) {
-          if (e instanceof NotRegularFile || (e && e.code)) issues.push(unreadableIssue(rel, strerror(e)));
+      if (action === "issue") issues.push(pathIssues([extra])[0]);
+      else if (action === "file") {
+        try {
+          collectEntry(fileEntry(full, rel, ent.str, Number(stats[k].size), dir.dep), col, { ioError, strerror });
+        } catch (e) {
+          if (ioError(e)) issues.push(unreadableIssue(rel, strerror(e)));
           else issues.push(scanErrorIssue(rel, e));
         }
-      }
-    }
-    const push = [];
-    for (const { ent, full, rel, st } of subdirs) {
-      const name = ent.str;
-      if (name === ".git" || excluded.has(name)) { skipTree(full, rel); continue; }
-      if (name === "__pycache__") {
+      } else if (action === "skip") skipTree(full, rel);
+      else if (action === "pycache") {
         try { checkPycache(full, rel, names, issues); } catch (e) { issues.push(scanErrorIssue(rel, e)); }
-        continue;
-      }
-      let key = null;
-      try { key = dirKey(lstatSync(full, { bigint: true })); } catch { /* no identity: walked, not loop-checked */ }
-      if (key && seen.has(key)) { issues.push(unreadableIssue(rel, "directory already visited (filesystem loop)")); continue; }
-      if (key) seen.add(key);
-      let dep = dir.dep || isDependencyTree(name, full);
-      if (dep && !dir.dep && !includeDeps) { skipTree(full, rel); continue; }
-      if (typeof dep === "string") dep = [dep, rel];      // a Go or cargo vendor tree: its kind and where it is
-      push.push({ buf: full, rel, dep });
+      } else push.push({ buf: full, rel, dep: dir.dep || (Array.isArray(extra[1]) ? [extra[1][0], rel] : extra[1]) });
     }
     for (let k = push.length - 1; k >= 0; k--) stack.push(push[k]);   // pop order = sorted, depth-first
   }
   return col;
 }
 
-/** __pycache__ is not source-scanned; every .pyc directly inside is checked. */
+const specialCode = (st) => (st.isFIFO() ? "fifo" : st.isSocket() ? "socket" : st.isCharacterDevice() ? "char"
+  : st.isBlockDevice() ? "block" : "other");
+
+/** __pycache__ is not source-scanned; every .pyc directly inside is checked (the engine's: collect.rs). */
 function checkPycache(dirBuf, rel, parentNames, issues) {
   let entries;
   try { entries = listDir(dirBuf); } catch (e) { issues.push(unreadableIssue(rel, strerror(e))); return; }
+  const listed = [], paths = {};
   for (const ent of entries) {
     const full = childPath(dirBuf, ent.buf);
-    const prel = `${rel}${sep}${ent.str}`;
     let st;
-    try { st = lstatSync(full); } catch (e) { issues.push(unreadableIssue(prel, strerror(e))); continue; }
+    try { st = lstatSync(full); } catch (e) { listed.push([ent.str, "error", strerror(e)]); continue; }
     // as core._check_pycache: any reparse point counts, file or directory
-    if (st.isSymbolicLink() || ent.link) { issues.push(symlinkIssue(prel, readlinkText(full))); continue; }
-    if (!st.isFile() || !ent.str.endsWith(".pyc")) continue;
-    let header;
-    try { header = readBounded(full, PYC_HEADER); } catch (e) { issues.push(unreadableIssue(prel, strerror(e))); continue; }
-    const module = pycModule(ent.str);
-    const hasSource = parentNames.has(`${module}.py`) || parentNames.has(`${module}.pyw`);
-    for (const i of pycIssues(prel, header, hasSource)) issues.push(i);
+    if (st.isSymbolicLink() || ent.link) listed.push([ent.str, "link", readlinkText(full)]);
+    else if (st.isFile()) { listed.push([ent.str, "file", st.size]); paths[ent.str] = full; }
+    else listed.push([ent.str, "special", "other"]);
+  }
+  const headers = {};
+  for (;;) {
+    const got = call("collect_pycache", { dir: rel, entries: listed, parent: [...parentNames].sort(), windows: WINDOWS,
+      answers: { headers } });
+    if (!got.need) { for (const i of pathIssues(got.issues)) issues.push(i); return; }
+    for (const name of got.need) {
+      try { headers[name] = bytesText(readBounded(paths[name], 16)); } catch (e) { headers[name] = { error: strerror(e) }; }
+    }
   }
 }
 

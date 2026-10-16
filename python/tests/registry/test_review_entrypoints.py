@@ -195,14 +195,7 @@ class TestPathTests(unittest.TestCase):
                 f"{d}/index.js": self.BLOB + "module.exports = require('./native.node');\n",
                 f"{d}/native.node": ELF}
 
-    def test_exact_test_dir_names_only(self):
-        for path, expected in [("testkit/a.js", False), ("src/testing/a.js", True),
-                               ("testutils/x.py", False), ("integration_tests/x.py", False),
-                               ("tests/a.py", True), ("__tests__/a.js", True), ("spec/a.js", True),
-                               ("lib/a.test.js", True), ("x_test.py", True), ("test_x.py", True),
-                               ("pkg/test cases/x.sh", True), ("meson/unittests/t.py", True)]:
-            with self.subTest(path=path):
-                self.assertIs(repo.is_test_path(path), expected)
+    # (the exact test folder names: the engine's, collect.rs' tests)
 
     def test_main_into_test_dir_is_not_demoted(self):
         for d in ("test", "testkit", "src/testing"):

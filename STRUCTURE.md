@@ -99,8 +99,9 @@ python/
 │   │   ├── gitlabci.py     GitLab CI files (SC-GITLAB-*), the same way
 │   │   ├── autorun.py      editor and AI-agent settings that run commands
 │   │   │                   (SC-AUTORUN), over the engine's reader (autorun.rs)
-│   │   ├── configsecrets.py which files are config or data files; the reader's
-│   │   │                   checks for the tests, over the engine's (config.rs)
+│   │   ├── configsecrets.py which files are config or data files and the
+│   │   │                   reader's checks for the tests, over the engine's
+│   │   │                   (collect.rs, config.rs)
 │   │   ├── timings.py      where a run's time goes (`--timings`)
 │   │   ├── programs.py     where a program Lazaret runs is: PATH's absolute
 │   │   │                   folders only, never the current one (the guard's
@@ -294,7 +295,7 @@ pytest also runs the suite unchanged, for anyone who prefers it, but nothing req
 
 ## 5. JavaScript package
 
-The npm package `lazaret` is a zero-dependency, ES-module project scanner with the same rules and results as `lazaret.scanner`, tested with Node's built-in `node --test` (Node 22+). Since 0.1.8 its rules run in the native engine (`rust/`) compiled to WebAssembly: `native/lazaret.wasm`, built by `npm run build` (`scripts/build-wasm.js`; it needs Rust and its `wasm32-unknown-unknown` target) and loaded by `src/lib/native.js` — the supply-chain tests, `scan_file` in dependency mode and in project mode (its rules, then the SQL statements without WHERE, the intra-file taint, the SQL sinks, the function metrics, the suppression markers and the cap: since 0.1.9's Q-1), the cross-file follower and the cross-file taint passes for JavaScript and Python (see `docs/RUST_ENGINE.md`). A scan with a megabyte or more to read besides its largest file runs on worker threads (`src/pool.js`, `LAZARET_THREADS`), each with its own instance of the engine; the report is the same. JavaScript keeps the orchestration and what the native engine does not answer yet: the directory walk and writing the reports (the CI files, an editor's or agent's settings, a config file's credentials, the manifests, since BR-7's step 4 (a) the result's grading and the project metrics, since step 4 (b) the decoding of source files, and since step 4 (c) the reports' forms, the same bytes as the Python package's, are the engine's). Registry auditing, custom taint specs and SCA are Python-only; the cross-file taint passes, for JavaScript and for Python, are the native engine's in both packages (`src/scanner/flow.js` builds the findings, compared by `python/tests/architecture/test_js_parity_flow.py`). The browser dashboard (`python/src/lazaret/web/lazaret.html`) runs this package's scan since BR-7's step 5: `dashboard/` holds the page's own input and output (`page.html`, `page.js`, and `wasmload.js`, which takes `src/lib/wasmload.js`'s place and hands over the engine the page carries), and `scripts/make_dashboard.py` builds the page from them and the modules they import (`src/lib/collect.js`, `src/scancollection.js`, `src/result.js` and theirs, which use nothing of Node's), held to the CLI by `test_review_dashboard_parity.py`.
+The npm package `lazaret` is a zero-dependency, ES-module project scanner with the same rules and results as `lazaret.scanner`, tested with Node's built-in `node --test` (Node 22+). Since 0.1.8 its rules run in the native engine (`rust/`) compiled to WebAssembly: `native/lazaret.wasm`, built by `npm run build` (`scripts/build-wasm.js`; it needs Rust and its `wasm32-unknown-unknown` target) and loaded by `src/lib/native.js` — the supply-chain tests, `scan_file` in dependency mode and in project mode (its rules, then the SQL statements without WHERE, the intra-file taint, the SQL sinks, the function metrics, the suppression markers and the cap: since 0.1.9's Q-1), the cross-file follower and the cross-file taint passes for JavaScript and Python (see `docs/RUST_ENGINE.md`). A scan with a megabyte or more to read besides its largest file runs on worker threads (`src/pool.js`, `LAZARET_THREADS`), each with its own instance of the engine; the report is the same. JavaScript keeps the orchestration and what the native engine does not answer yet: the directory walk and writing the reports (the CI files, an editor's or agent's settings, a config file's credentials, the manifests, since BR-7's step 4 (a) the result's grading and the project metrics, since step 4 (b) the decoding of source files, since step 4 (c) the reports' forms, the same bytes as the Python package's, since step 4 (d) baselines, and since step 4 (e) what the walk does with each entry it lists and each file it reads, are the engine's). Registry auditing, custom taint specs and SCA are Python-only; the cross-file taint passes, for JavaScript and for Python, are the native engine's in both packages (`src/scanner/flow.js` builds the findings, compared by `python/tests/architecture/test_js_parity_flow.py`). The browser dashboard (`python/src/lazaret/web/lazaret.html`) runs this package's scan since BR-7's step 5: `dashboard/` holds the page's own input and output (`page.html`, `page.js`, and `wasmload.js`, which takes `src/lib/wasmload.js`'s place and hands over the engine the page carries), and `scripts/make_dashboard.py` builds the page from them and the modules they import (`src/lib/collect.js`, `src/scancollection.js`, `src/result.js` and theirs, which use nothing of Node's), held to the CLI by `test_review_dashboard_parity.py`.
 
 ```
 js/
@@ -334,15 +335,16 @@ js/
 │   └── lib/              leaf helpers: native (the WebAssembly engine: one
 │                         call, the rule pack's values) and wasmload (where
 │                         the engine comes from: native/lazaret.wasm), fs
-│                         (the walk, report paths), collect (what the
-│                         collection does with each file it meets; nothing
-│                         of Node's), encoding (the engine's decoding of a
+│                         (the walk's listing and reading, report paths),
+│                         collect (each file the walk meets, as the engine
+│                         says to read it: collect.rs; nothing of Node's),
+│                         encoding (the engine's decoding of a
 │                         file's bytes), binary and pth (the engine's
 │                         calls, a file's bytes as latin-1 text), lexer
 │                         (the comment layout, the engine's lexers'), redact
 │                         and issue (the findings this package builds, made
 │                         and redacted by the engine), configsecrets (which
-│                         files are config files), supplychain (the
+│                         files are config files: the engine's), supplychain (the
 │                         manifests' calls; the install-hook finding --deps
 │                         makes), programs (the
 │                         git PATH names by an absolute path), pycompat

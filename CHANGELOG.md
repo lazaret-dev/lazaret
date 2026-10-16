@@ -998,6 +998,27 @@ aggregate):
   one that does not verify accept nothing. Held to core's code as it was on 500 generated baselines and 4,000
   entries, and the npm package's `applyBaseline` to the Python package's (`test_baseline_engine`). Gone: core's and
   the reports module's baseline code, npm's `pyjson.js` and its JSON and str() helpers.
+- **What a project scan's walk reads, the engine's (BR-7, step 4 e); in the registry, Rust's test files and a secret in
+  test code (rule set 2.85.0).** core's walk decided what each entry of a folder is to the scan and how each file it
+  meets is read (`_collect`, `_collect_file`, `_collect_config`, `_check_pycache`, `_dep_tree_kind` and the vendor
+  trees' kind and language, the coverage notes, configsecrets' `is_config_file` and `own_report`), and the npm package
+  its twin (`lib/fs.js` collectFiles and checkPycache, `lib/collect.js` collectEntry, `lib/configsecrets.js`). The
+  engine decides for both (`rust/crates/lazaret-engine/src/collect.rs`: `collect_dir`, `collect_file`,
+  `collect_pycache`, `collect_issue`, `collect_check`): a folder's entries in order, each read, skipped (`.git`, an
+  excluded name, a dependency tree without `--deps`), followed (with the dependency or vendor tree it belongs to) or
+  reported (a link, a special file, a folder seen twice), and each file's language, manifest, `.pth`, config or
+  binary reading, the size limits and what is read of it, asked again with the bytes it needs. The packages list
+  folders, read bytes, keep the folders they have seen and count a pruned tree; whether a manifest is a dependency's
+  is the engine's too. The npm package's walk now lists a folder in Python's order (by code point; it sorted by UTF-16
+  unit). Held to core's code as it was on 60 generated trees (links, named pipes, venvs, Go and cargo vendor trees,
+  `__pycache__` folders, files over the limits) and the npm package's walk to the Python package's
+  (`test_collect_engine`); the dashboard, which collects its uploads with the npm package's code, was rebuilt. The
+  registry's test code is the engine's as well (`test_paths`, `demote_tests`), with two changes from SECRET-FP's
+  leftovers: Rust's `tests.rs` and `*_test.rs` are test files, and a secret (`S-SECRET`, `S-TOKEN`) in test code no
+  entry point reaches is listed as INFO ("in test code: listed, not counted"), as a weaker supply-chain finding there
+  is (a secret never decided a verdict). Gone: core's and npm's collection tables and decisions, npm's
+  `isDependencyManifest` and `configsecrets.js` tables, the registry's `TEST_DIR_NAMES`, `_TEST_FILE_RE` and
+  `USE_RISK_SKIP_DIRS`.
 - **Security: S-XML is a parser set to resolve external entities, not an import of xml.etree, xml.dom or xml.sax
   (Q-3; rule set 2.80.0).** Since Python 3.7.1 none of them resolves an external entity unless told to, and Expat
   2.4.1 refuses entity bombs, so the import flagged safe code: all 20 of BenchmarkPython's safe XXE cases (its 8 real

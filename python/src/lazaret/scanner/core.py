@@ -1715,8 +1715,10 @@ def dep_source_lang(ext):
 #   * dependency trees are pruned unless --deps (then walked, their files
 #     marked dep=True): node_modules / bower_components / site-packages
 #     always, vendor / venv / .venv / env only when they LOOK like a
-#     dependency tree (DEP_TREE_MARKERS) — a first-party app/vendor/ helper
-#     module used to be pruned by name alone, hiding it from every rule.
+#     dependency tree (a marker inside: pyvenv.cfg, modules.txt, …) — a
+#     first-party app/vendor/ helper module used to be pruned by name alone,
+#     hiding it from every rule.
+# These decisions are the engine's since 0.1.9 (collect.rs, BR-7 step 4 e).
 #   * --exclude NAME prunes any directory of that name (explicit, always).
 # Every other classic "build output" directory — dist, build, migrations,
 # coverage — is scanned: npm packages are *published from* dist/, migrations
@@ -1725,14 +1727,6 @@ def dep_source_lang(ext):
 SKIP_DIRS = {".git", "__pycache__"}     # never source-scanned (see above)
 ALWAYS_PRUNE_DIRS = frozenset({".git"})
 PYCACHE_DIR = "__pycache__"
-DEP_TREE_DIRS = frozenset({"node_modules", "bower_components", "site-packages"})
-# name -> (marker names directly inside, marker suffixes directly inside)
-DEP_TREE_MARKERS = {
-    "venv": (("pyvenv.cfg",), ()),
-    ".venv": (("pyvenv.cfg",), ()),
-    "env": (("pyvenv.cfg",), ()),
-    "vendor": (("modules.txt", "autoload.php", "package.json"), (".dist-info", ".egg-info")),
-}
 # Legacy convenience names kept for reference; they are NOT skipped unless
 # listed with --exclude.
 OPTIN_SKIP_DIRS = ["node_modules", "venv", ".venv", "env", "dist", "build",
@@ -1786,18 +1780,7 @@ def _count_skipped_tree(root, tree_path, rel=None, into=None):
     (_SKIPPED_TREES if into is None else into).append((rel, n_files, n_bytes))
 
 def _skipped_issue(rel, n_files, n_bytes):
-    return {
-        "rule": "Q-SKIPPED-TREE", "name": "Skipped directory (not scanned)",
-        "type": "SMELL", "sev": "INFO",
-        "msg": f"Directory {rel} was skipped ({n_files} files, {n_bytes} bytes unread).",
-        "why": "Skipped trees are invisible to every rule — the classic hiding places "
-               "(dist, build, .git) hold published code and committed-then-deleted "
-               "secrets. Generated trees you own are fine to skip on purpose; "
-               "unexpected entries here are blind spots.",
-        "fix": "Only exclude generated trees you control; remove the exclusion "
-               "otherwise so the tree is scanned.",
-        "ref": "Maintainability",
-        "file": rel, "line": 1, "snippet": [], "snipStart": 1}
+    return collect_issue("skipped_tree", rel, files=n_files, bytes=n_bytes)
 
 def skipped_tree_issues(skipped=None):
     """INFO issues summarizing the pruned trees (.git, dependency trees,
@@ -2245,8 +2228,6 @@ def scan_config_file(path, content, read=None):
 
 # ---------------- The per-line pass's findings ----------------
 
-DEP_MARKERS = {"node_modules", "site-packages", "bower_components", "vendor",
-               "venv", ".venv"}
 INSTALL_HOOK_RE = re.compile(
     r"curl|wget|iwr|Invoke-WebRequest|node\s+-e|bash\s+-c|sh\s+-c|powershell|base64|\beval\b", re.I)
 # G11: npm lifecycle scripts — the command list above is a bypassable denylist
@@ -2684,14 +2665,6 @@ def _script_key_lines(text, section="scripts"):
     return _native.call("manifest_check", {"check": "key_lines", "section": section}, text)
 
 
-def is_dependency_manifest(path):
-    """A manifest inside an installed-dependency directory (node_modules/, ...)
-    belongs to a package that came from a registry: only the scripts npm runs
-    for an installed dependency apply to it, not `prepare`."""
-    parts = path.replace("\\", "/").split("/")[:-1]
-    return any(part in DEP_MARKERS for part in parts)
-
-
 def scan_manifest(path, content, registry=False, hooks=None):
     """Check package.json install hooks — the primary supply-chain attack
     vector — and its dependencies from an insecure source. The engine's
@@ -2722,10 +2695,13 @@ def scan_manifest(path, content, registry=False, hooks=None):
     set's 801). A package installed from a registry is read for the fields npm
     installs from, a project's own manifest for its devDependencies too; only
     a package's root manifest counts in a registry or --deps scan, and none
-    whose `hooks` are not npm's. MAJOR (WARN in the registry)."""
+    whose `hooks` are not npm's. MAJOR (WARN in the registry). `registry`
+    None: a manifest under a dependency folder (DEP_MARKERS) is a
+    dependency's (the engine's: collect.rs)."""
     if not isinstance(content, str):
         return load_manifest(path, content)[1]
-    args = engine._budget({"path": path, "registry": bool(registry), "redact": bool(REDACT_SECRETS),
+    args = engine._budget({"path": path, "registry": None if registry is None else bool(registry),
+                           "redact": bool(REDACT_SECRETS),
                            "hooks": list(hooks) if hooks is not None else None})
     try:
         return engine._issues(path, _native.call("scan_manifest", args, content)["issues"])
@@ -2825,10 +2801,6 @@ MANIFEST_NAMES = ("package.json", "binding.gyp")
 #: ['build/common.gypi']) and node-gyp runs their actions and command
 #: expansions too, so every one is parsed by scan_gyp (as the registry does).
 GYP_EXTS = (".gyp", ".gypi")
-#: AppleDouble / AppleSingle metadata ("._name" files macOS writes on non-HFS
-#: volumes and into tarballs). Starts with a NUL, so it can never be Python or
-#: JavaScript source; it is classified like any other non-source file.
-APPLE_DOUBLE_MAGIC = (b"\x00\x05\x16\x07", b"\x00\x05\x16\x00")
 
 
 class ScanTargetError(ValueError):
@@ -2906,48 +2878,20 @@ def _read_prefix(path, limit):
         os.close(fd)
 
 
-def _coverage_issue(rule, name, path, msg, why, fix, ref="Maintainability"):
-    return {"rule": rule, "name": name, "type": "SMELL", "sev": "INFO",
-            "msg": msg, "why": why, "fix": fix, "ref": ref,
-            "file": path, "line": 1, "snippet": [], "snipStart": 1}
+def collect_issue(kind, path, **args):
+    """A coverage note the collection's I/O finds, the engine's (collect.rs): "unreadable" (reason), "symlink"
+    (target) or "skipped_tree" (files, bytes)."""
+    return engine._issues(path, [_native.call("collect_issue", dict(args, kind=kind, path=path))])[0]
 
 
 def symlink_issue(path, target):
     """Q-SYMLINK: a symbolic link inside the tree (never followed)."""
-    target = _safe_text(target)
-    if len(target) > 200:
-        target = target[:197] + "..."
-    return _coverage_issue(
-        "Q-SYMLINK", "Symbolic link (not followed)", path,
-        f"Symbolic link {path} -> {target} was not followed; its target was not scanned.",
-        "Following links would let a repository pull files from outside the scanned tree "
-        "(host credentials, /dev/urandom) into the scan and its reports, or loop forever. "
-        "The link target is not part of the tree under review.",
-        "If the target belongs to the project, scan it directly.",
-        "CWE-59 · Scan coverage")
+    return collect_issue("symlink", path, target=str(target))
 
 
 def unreadable_issue(path, reason):
     """Q-UNREADABLE: an entry that could not be read (permissions, special file)."""
-    return _coverage_issue(
-        "Q-UNREADABLE", "Unreadable entry (not scanned)", path,
-        f"{path} could not be read ({_safe_text(reason)}); it was not scanned.",
-        "An entry the scanner cannot read is invisible to every rule. Special files "
-        "(named pipes, sockets, devices) are never opened: reading one can hang or "
-        "exhaust the scan.",
-        "Fix the permissions (or remove the special file) and re-scan.",
-        "Scan coverage")
-
-
-def config_skipped_issue(path, detail):
-    """Q-SKIPPED-CONFIG: a config or data file too large to check for credentials."""
-    return _coverage_issue(
-        "Q-SKIPPED-CONFIG", "Config file not checked (too large)", path,
-        f"{path} was not checked for credentials: {_safe_text(detail)}.",
-        "Config and data files are read only to look for credentials, and one this large is "
-        "data rather than configuration: a credential in it would not be reported.",
-        "Keep credentials out of large data files, and real configuration in files of its own.",
-        "Scan coverage")
+    return collect_issue("unreadable", path, reason=str(reason))
 
 
 def scan_error_issue(path, exc):
@@ -3046,62 +2990,108 @@ def encoding_issues(path, text, info):
     return engine._issues(path, _native.call("encoding_issues", {"info": info, "redact": bool(REDACT_SECRETS)}, text))
 
 
+def _dep_arg(in_dep):
+    """The walk's dependency tree as the engine reads it: false, true, or a Go or cargo vendor tree's [kind, path]."""
+    if isinstance(in_dep, tuple):
+        return [in_dep[0], _fs_display(in_dep[1])]
+    return bool(in_dep)
+
+
+def _dep_of(value, rel):
+    """A folder's dependency tree as the engine names it, as the walk keeps it: a vendor tree its kind and its path
+    (`rel`, the folder's)."""
+    return (value[0], rel) if isinstance(value, list) else bool(value)
+
+
+def _regular(path):
+    try:
+        return _stat.S_ISREG(os.lstat(path).st_mode)
+    except OSError:
+        return False
+
+
+def _listing(path):
+    """[[name, is a folder]] of a folder's entries (no link followed), or None when it cannot be listed."""
+    try:
+        with os.scandir(path) as it:
+            return [[_fs_display(e.name), e.is_dir(follow_symlinks=False)] for e in it]
+    except OSError:
+        return None
+
+
+def _dir_plan(rel_dir, in_dep, listed, paths, excludes, include_deps):
+    """collect_dir until it needs nothing more: the probes of the folders it asks about (their entries; a vendor
+    folder's .cargo-checksum.json files)."""
+    answers = {"lists": [], "cargo": []}
+    while True:
+        got = _native.call("collect_dir", {"dir": _fs_display(rel_dir), "dep": _dep_arg(in_dep), "entries": listed,
+                                           "excludes": excludes, "includeDeps": bool(include_deps),
+                                           "windows": _WINDOWS_PATHS, "answers": answers})
+        need = got.get("need")
+        if need is None:
+            return got
+        for k in need["lists"]:
+            answers["lists"].append([k, _listing(paths[k])])
+        for k, dirs in need["cargo"]:
+            answers["cargo"].append([k, [d for d in dirs
+                                         if _regular(os.path.join(paths[k], d, ".cargo-checksum.json"))]])
+
+
 def _dep_tree_kind(name, path):
     """True when directory `name` at `path` is a dependency tree: always for
     node_modules / bower_components / site-packages; for vendor / venv /
-    .venv / env only when a marker (DEP_TREE_MARKERS) sits directly inside.
-    A vendor directory of Go's or cargo's is "go" or "cargo" (_vendor_kind):
-    --deps reads its code (0.1.9, Part C)."""
-    if name in DEP_TREE_DIRS:
-        return True
-    if name == "vendor":
-        kind = _vendor_kind(path)
-        if kind is not None:
-            return kind
-    markers = DEP_TREE_MARKERS.get(name)
-    if markers is None:
-        return False
-    names, suffixes = markers
-    try:
-        with os.scandir(path) as it:
-            for e in it:
-                if e.name in names or (suffixes and e.name.endswith(suffixes)):
-                    return True
-    except OSError:
-        pass
+    .venv / env only when a marker sits directly inside; "go" or "cargo" for a
+    vendor directory of Go's or cargo's (the engine's: collect.rs)."""
+    got = _dir_plan("", False, [[_fs_display(name), "dir", None, False]], [path], [], True)
+    for _k, action, extra in got["do"]:
+        if action == "walk":
+            dep = extra[1]
+            return dep[0] if isinstance(dep, list) else dep
     return False
+
+
+_SPECIAL_CODES = ((_stat.S_ISFIFO, "fifo"), (_stat.S_ISSOCK, "socket"), (_stat.S_ISCHR, "char"),
+                  (_stat.S_ISBLK, "block"))
 
 
 def _check_pycache(rel_dir, path, parent_names, out):
     """__pycache__ is not source-scanned; every .pyc directly inside is
-    checked (PEP 552 flags, matching source). Symlinks -> Q-SYMLINK."""
+    checked (PEP 552 flags, matching source; the engine's: collect.rs).
+    Symlinks -> Q-SYMLINK."""
     try:
         with os.scandir(path) as it:
-            entries = sorted(it, key=lambda e: e.name)
+            entries = list(it)
     except OSError as exc:
         out.append(unreadable_issue(_fs_display(rel_dir), exc.strerror or type(exc).__name__))
         return
+    listed, paths = [], {}
     for e in entries:
-        rel = os.path.join(rel_dir, e.name)
-        disp = _fs_display(rel)
+        name = _fs_display(e.name)
         try:
             st = e.stat(follow_symlinks=False)
         except OSError as exc:
-            out.append(unreadable_issue(disp, exc.strerror or type(exc).__name__))
+            listed.append([name, "error", exc.strerror or type(exc).__name__])
             continue
         if _stat.S_ISLNK(st.st_mode) or _is_reparse_point(st):
-            out.append(symlink_issue(disp, _readlink(e.path)))
-            continue
-        if not (_stat.S_ISREG(st.st_mode) and e.name.endswith(".pyc")):
-            continue
-        try:
-            header = _read_prefix(e.path, 16)
-        except OSError as exc:
-            out.append(unreadable_issue(disp, exc.strerror or str(exc) or type(exc).__name__))
-            continue
-        module = e.name.split(".", 1)[0]
-        has_source = (module + ".py") in parent_names or (module + ".pyw") in parent_names
-        out.extend(pyc_issues(disp, header, has_source))
+            listed.append([name, "link", _readlink(e.path)])
+        elif _stat.S_ISREG(st.st_mode):
+            listed.append([name, "file", st.st_size])
+            paths[name] = e.path
+        else:
+            listed.append([name, "special", "other"])
+    headers = {}
+    while True:
+        got = _native.call("collect_pycache", {"dir": _fs_display(rel_dir), "entries": listed,
+                                               "parent": sorted(_fs_display(n) for n in parent_names),
+                                               "windows": _WINDOWS_PATHS, "answers": {"headers": headers}})
+        if "need" not in got:
+            break
+        for name in got["need"]:
+            try:
+                headers[name] = _bytes_text(_read_prefix(paths[name], 16))
+            except OSError as exc:
+                headers[name] = {"error": exc.strerror or str(exc) or type(exc).__name__}
+    out.extend(engine._issues(path, [row])[0] for path, row in got["issues"])
 
 
 def _readlink(path):
@@ -3130,109 +3120,46 @@ def link_target_text(target):
 
 
 def _collect_file(path, rel, st, in_dep, col):
-    """Classify and read one regular file (see the section comment)."""
-    name = os.path.basename(rel)
+    """Classify and read one regular file (the engine's decisions: collect.rs, collect_file, asked again with what
+    it needs read)."""
     disp = _fs_display(rel)
-    ext = os.path.splitext(name)[1].lower()
-    size = st.st_size
-    manifest = name in MANIFEST_NAMES or ext in GYP_EXTS
-    pth = not manifest and ext == PTH_EXT
-    vendor = in_dep if isinstance(in_dep, tuple) else None      # (a vendor tree's kind, its rel)
-    lang = (None if manifest or pth else (_vendor_lang(vendor, rel, ext) or dep_source_lang(ext)) if in_dep
-            else EXTS.get(ext))
-    issues = col["issues"]
-    if not manifest and not pth and lang is None:
-        # FIX-SPEC 9: every non-source regular file is classified by magic
-        # bytes from a header sample (repo mode used to look at a fixed list
-        # of extensions only: an ELF named `helper` or `logo.png` passed) —
-        # unless its #! line makes it a Node or Python script: then it is
-        # source (script_source_lang).
-        head = _read_prefix(path, HEADER_SAMPLE_BYTES)
-        lang = script_source_lang(head)
-        if lang is None:
-            bi = classify_binary(disp, head, size, "repo")
-            if bi:
-                issues.append(bi)
-            elif not in_dep and configsecrets.is_config_file(name) and (
-                    head.startswith((b"\xff\xfe", b"\xfe\xff")) or not looks_binary(head)):
-                _collect_config(path, disp, size, col)          # text (UTF-16 with its BOM too)
-            return
-    if lang is not None and ext in MPEG_TS_EXTS:
-        head = _read_prefix(path, HEADER_SAMPLE_BYTES)
-        if _mpeg_ts(head):                  # a video (a camera's .mts), not TypeScript
-            bi = classify_binary(disp, head, size, "repo")
-            if bi:
-                issues.append(bi)
-            return
-    # FIX-SPEC 9: the size cap applies only to files that would be read whole.
-    # Verdict integrity (audit C2/G16): an oversize file is an SC-TRUNCATED
-    # finding, never a silent skip, and it is not added to the scanned files.
-    if size > SOURCE_SIZE_CAP:
-        issues.append(truncated_issue(
-            disp, f"{size:,} bytes exceeds the {SOURCE_SIZE_CAP:,}-byte file limit"))
-        if lang is not None:             # its first bytes still tell a program (as in the registry)
-            try:
-                head = _read_prefix(path, DISGUISE_SAMPLE_BYTES)
-            except OSError:              # not read: the SC-TRUNCATED stands alone, as before
-                head = b""
-            disguised = disguised_binary(disp, head)
-            if disguised:
-                issues.append(disguised)
-        return
-    data = _read_prefix(path, SOURCE_SIZE_CAP + 1)
-    if len(data) > SOURCE_SIZE_CAP:      # grew between the lstat and the read
-        issues.append(truncated_issue(
-            disp, f"read exceeded the {SOURCE_SIZE_CAP:,}-byte file limit"))
-        disguised = disguised_binary(disp, data) if lang is not None else None
-        if disguised:
-            issues.append(disguised)
-        return
-    if manifest:
-        col["manifests"].append({"path": disp, "dep": bool(in_dep),
-                                 "content": normalize_newlines(data.decode("utf-8", "replace"))})
-        return
-    if pth:                # only the .pth check runs on it (decoded as the registry does)
-        col["pth"].append(disp)
+    args = {"rel": disp, "name": _fs_display(os.path.basename(rel)), "size": st.st_size, "dep": _dep_arg(in_dep),
+            "cap": SOURCE_SIZE_CAP, "configCap": configsecrets.CONFIG_SCAN_CAP, "windows": _WINDOWS_PATHS,
+            "neumaier": False, "redact": bool(REDACT_SECRETS)}
+    answers, text = {}, ""
+    while True:
+        got = _native.call("collect_file", dict(args, answers=answers), text)
+        need = got.get("need")
+        if need is None:
+            break
+        what = need["read"]
         try:
-            issues.extend(pth_issues(disp, data.decode("utf-8-sig", "replace")))
-        except _native.NativeError as exc:
-            issues.append(engine.error_issue(disp, exc))
-        return
-    if data[:4] in APPLE_DOUBLE_MAGIC:
-        bi = classify_binary(disp, data[:HEADER_SAMPLE_BYTES], size, "repo")
-        if bi:
-            issues.append(bi)
-        return
-    # read as the registry reads a member (0.1.8): bytes that don't decode to
-    # anything text-like are SC-TRUNCATED, not mojibake no rule can read
-    text, extra = decode_member(disp, data, lang)
-    issues.extend(extra)
-    disguised = disguised_binary(disp, data)     # a program under a source file's name (0.1.8)
-    if disguised:
-        issues.append(disguised)
-    entry = {"path": disp, "content": text, "lang": lang, "dep": bool(in_dep)}
-    if vendor is not None and lang in ("go", "rs"):
-        entry["vendor"] = _fs_display(vendor[1])                # (its module or crate is read whole: _vendored_code)
-    col["files"].append(entry)
-
-
-def _collect_config(path, disp, size, col):
-    """Read a config or data file for scan_config_file (see configsecrets):
-    decoded like source but without the encoding notes, since it is not
-    code; over CONFIG_SCAN_CAP a Q-SKIPPED-CONFIG note instead."""
-    cap = configsecrets.CONFIG_SCAN_CAP
-    if size > cap:
-        col["issues"].append(config_skipped_issue(
-            disp, f"{size:,} bytes is over the {cap:,}-byte limit for config files"))
-        return
-    data = _read_prefix(path, cap + 1)
-    if len(data) > cap:                  # grew between the lstat and the read
-        col["issues"].append(config_skipped_issue(
-            disp, f"it grew past the {cap:,}-byte limit for config files while it was read"))
-        return
-    text = decode_source(data)[0]
-    if not configsecrets.own_report(text):          # a report of Lazaret's own is not config
-        col["configs"].append({"path": disp, "content": text})
+            data = _bytes_text(_read_prefix(path, need["limit"]))
+        except OSError as exc:
+            if what == "sample":                 # not read: the SC-TRUNCATED stands alone, as before
+                answers[what] = ""
+                continue
+            answers[what] = {"error": str(exc) if isinstance(exc, _NotRegularFile)
+                             else exc.strerror or type(exc).__name__}
+            continue
+        if what == "data":                       # a file read whole goes as the call's text, not in its JSON
+            answers[what], text = True, data
+        else:
+            answers[what] = data
+    col["issues"].extend(engine._issues(p, [row])[0] for p, row in got["issues"])
+    if "file" in got:
+        f = got["file"]
+        entry = {"path": f["path"], "content": f["content"], "lang": f["lang"], "dep": f["dep"]}
+        if "vendor" in f:
+            entry["vendor"] = f["vendor"]          # (its module or crate is read whole: _vendored_code)
+        col["files"].append(entry)
+    if "manifest" in got:
+        m = got["manifest"]
+        col["manifests"].append({"path": m["path"], "dep": m["dep"], "content": m["content"]})
+    if "config" in got:
+        col["configs"].append(got["config"])
+    if got.get("pth"):
+        col["pth"].append(disp)
 
 
 def _collect(root, excludes=(), include_deps=False):
@@ -3245,8 +3172,10 @@ def _collect(root, excludes=(), include_deps=False):
     configs = [{path, content}] config and data files outside dependency
     trees (scan_config_file). Paths are root-relative (os.sep separators) and
     valid UTF-8. Raises ScanTargetError when the root itself cannot be
-    listed."""
-    excludes = set(excludes or ())
+    listed. What each entry is to the walk is the engine's (collect.rs:
+    collect_dir); listing, the folders' identities, reading and counting are
+    this package's."""
+    excludes = sorted(_fs_display(x) for x in set(excludes or ()))
     col = {"files": [], "manifests": [], "pth": [], "issues": [], "skipped": [], "configs": []}
     issues = col["issues"]
     seen_dirs = set()
@@ -3256,7 +3185,7 @@ def _collect(root, excludes=(), include_deps=False):
         full_dir = os.path.join(root, rel_dir) if rel_dir else root
         try:
             with os.scandir(full_dir) as it:
-                entries = sorted(it, key=lambda e: e.name)
+                entries = list(it)
             st_dir = os.stat(full_dir) if not rel_dir else None
         except OSError as exc:
             if not rel_dir:
@@ -3266,58 +3195,54 @@ def _collect(root, excludes=(), include_deps=False):
             issues.append(unreadable_issue(_fs_display(rel_dir), exc.strerror or type(exc).__name__))
             continue
         if st_dir is not None and st_dir.st_ino:
-            seen_dirs.add((st_dir.st_dev, st_dir.st_ino))
-        names = {e.name for e in entries}
-        subdirs = []
+            seen_dirs.add(f"{st_dir.st_dev}:{st_dir.st_ino}")
+        listed, stats = [], []
         for e in entries:
-            rel = os.path.join(rel_dir, e.name) if rel_dir else e.name
+            name = _fs_display(e.name)
             try:
                 st = e.stat(follow_symlinks=False)
             except OSError as exc:
-                issues.append(unreadable_issue(_fs_display(rel), exc.strerror or type(exc).__name__))
+                listed.append([name, "error", exc.strerror or type(exc).__name__])
+                stats.append(None)
                 continue
+            stats.append(st)
             mode = st.st_mode
             if _stat.S_ISLNK(mode) or (_stat.S_ISDIR(mode) and _is_reparse_point(st)):
-                issues.append(symlink_issue(_fs_display(rel), _readlink(e.path)))
+                listed.append([name, "link", _readlink(e.path)])
             elif _stat.S_ISDIR(mode):
-                subdirs.append((e, rel, st))
+                key = f"{st.st_dev}:{st.st_ino}" if st.st_ino else None
+                listed.append([name, "dir", key, key in seen_dirs])
             elif not _stat.S_ISREG(mode):
-                issues.append(unreadable_issue(_fs_display(rel), _special_kind(mode)))
+                listed.append([name, "special", next((c for test, c in _SPECIAL_CODES if test(mode)), "other")])
             else:
+                listed.append([name, "file", st.st_size])
+        got = _dir_plan(rel_dir, in_dep, listed, [e.path for e in entries], excludes, include_deps)
+        seen_dirs.update(got["seen"])
+        names = {e.name for e in entries}
+        push = []
+        for k, action, extra in got["do"]:
+            e = entries[k]
+            rel = os.path.join(rel_dir, e.name) if rel_dir else e.name
+            if action == "issue":
+                issues.append(engine._issues(extra[0], [extra[1]])[0])
+            elif action == "file":
                 try:
-                    _collect_file(e.path, rel, st, in_dep, col)
+                    _collect_file(e.path, rel, stats[k], in_dep, col)
                 except OSError as exc:
                     reason = (str(exc) if isinstance(exc, _NotRegularFile)
                               else exc.strerror or type(exc).__name__)
                     issues.append(unreadable_issue(_fs_display(rel), reason))
                 except Exception as exc:        # one file must never kill the walk
                     issues.append(engine.error_issue(_fs_display(rel), exc))
-        push = []
-        for e, rel, st in subdirs:
-            name = e.name
-            if name in ALWAYS_PRUNE_DIRS or name in excludes:
+            elif action == "skip":
                 _count_skipped_tree(root, e.path, _fs_display(rel), col["skipped"])
-                continue
-            if name == PYCACHE_DIR:
+            elif action == "pycache":
                 try:
                     _check_pycache(rel, e.path, names, issues)
                 except Exception as exc:
                     issues.append(engine.error_issue(_fs_display(rel), exc))
-                continue
-            key = (st.st_dev, st.st_ino)
-            if st.st_ino and key in seen_dirs:
-                issues.append(unreadable_issue(_fs_display(rel),
-                                               "directory already visited (filesystem loop)"))
-                continue
-            if st.st_ino:
-                seen_dirs.add(key)
-            dep = in_dep or _dep_tree_kind(name, e.path)
-            if dep and not in_dep and not include_deps:
-                _count_skipped_tree(root, e.path, _fs_display(rel), col["skipped"])
-                continue
-            if isinstance(dep, str):
-                dep = (dep, rel)                # a Go or cargo vendor tree: its kind and where it is
-            push.append((rel, dep))
+            else:                               # "walk"
+                push.append((rel, in_dep or _dep_of(extra[1], rel)))
         stack.extend(reversed(push))       # pop order = sorted, depth-first (like os.walk)
     return col
 
@@ -3340,10 +3265,7 @@ def _scan_manifest_entry(mf):
     tree gets the registry hook set."""
     if os.path.splitext(mf["path"])[1].lower() in GYP_EXTS:
         return scan_gyp(mf["path"], mf["content"])
-    dep = mf.get("dep")
-    if dep is None:
-        dep = is_dependency_manifest(mf["path"])
-    return scan_manifest(mf["path"], mf["content"], registry=dep)
+    return scan_manifest(mf["path"], mf["content"], registry=mf.get("dep"))
 
 
 # ---------------- --deps: what a dependency runs ----------------
@@ -3637,7 +3559,6 @@ PACKAGE_CODE_CHARS = 300_000_000
 USE_RISK_MAX_CHARS = 8_000_000
 USE_RISK_CHARS = 24_000_000
 VENDOR_CODE = {"go": ".go", "cargo": ".rs"}
-_VENDOR_PROBE = 256                         # the directories of a vendor tree looked at for a .cargo-checksum.json
 _VENDOR_TEXT_CAP = 4 << 20                  # a modules.txt or a Cargo.toml read, at most
 _CGO_EXTS = (".c", ".h")
 
@@ -3656,40 +3577,6 @@ def never_built(kind, rel):
     if kind == "crate":
         return rel.split("/", 1)[0] in ("tests", "benches", "examples")
     return False
-
-
-def _vendor_kind(path):
-    """"go" when the vendor directory at `path` is Go's (vendor/modules.txt,
-    as DEP_TREE_MARKERS has it), "cargo" when it is cargo's (a regular
-    .cargo-checksum.json in one of its first _VENDOR_PROBE directories), else
-    None. No link is followed."""
-    try:
-        with os.scandir(path) as it:
-            entries = sorted(it, key=lambda e: e.name)
-    except OSError:
-        return None
-    if any(e.name == "modules.txt" for e in entries):
-        return "go"
-    for e in [e for e in entries if e.is_dir(follow_symlinks=False)][:_VENDOR_PROBE]:
-        try:
-            st = os.lstat(os.path.join(e.path, ".cargo-checksum.json"))
-        except OSError:
-            continue
-        if _stat.S_ISREG(st.st_mode):
-            return "cargo"
-    return None
-
-
-def _vendor_lang(vendor, rel, ext):
-    """"go" or "rs" for a file of a Go or cargo vendor tree (`vendor`: its
-    kind and its rel) that a build compiles, else None."""
-    if vendor is None or ext != VENDOR_CODE.get(vendor[0]):
-        return None
-    below = rel[len(vendor[1]) + 1:].replace(os.sep, "/")
-    if vendor[0] == "go":
-        return None if never_built("go", below) else "go"
-    _crate, _, inside = below.partition("/")
-    return None if not inside or never_built("crate", inside) else "rs"
 
 
 _LAYOUT_ROOT_RE = re.compile(r"^(?:[A-Za-z]:)?/+")

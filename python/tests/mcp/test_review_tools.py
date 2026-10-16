@@ -78,8 +78,7 @@ class ProjectScanParityTests(unittest.TestCase):
             want += lazaret.scan_file(f["path"], f["content"], f["lang"], dep=f.get("dep", False))
         for mf in manifests:
             want += (lazaret.scan_gyp(mf["path"], mf["content"]) if mf["path"].endswith("binding.gyp")
-                     else lazaret.scan_manifest(mf["path"], mf["content"],
-                                                registry=lazaret.is_dependency_manifest(mf["path"])))
+                     else lazaret.scan_manifest(mf["path"], mf["content"], registry=None))
         got = server.run_project_scan(root)["issues"]
         key = lambda i: (i["rule"], i["file"], i["line"], i["sev"])        # noqa: E731
         self.assertTrue(want)

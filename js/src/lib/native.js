@@ -57,7 +57,10 @@ const UNBUDGETED = new Set(["batch", "issue_make", "redact_text", "redact_issues
   "term", "issue_excerpt", "report_json", "report_items", "sarif_rules", "sarif_frame", "sarif_items", "html_frame",
   "html_items", "text_frame", "text_order", "text_items",
   // the baselines' fingerprints, signature and application (step 4 d)
-  "baseline_fingerprints", "baseline_sign", "baseline_apply"]);
+  "baseline_fingerprints", "baseline_sign", "baseline_apply",
+  // the collection (step 4 e): what a folder's entries and a file are to the scan, and the coverage notes; its steps
+  // that run patterns each have a budget of their own, as each was a call of its own
+  "collect_dir", "collect_file", "collect_pycache", "collect_issue", "collect_check"]);
 
 /** The work each call may do, in steps of the engine's regex matcher (null: its default, about 4e9). */
 export function setWorkBudget(steps = null) {

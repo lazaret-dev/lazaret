@@ -1,6 +1,6 @@
 {
  "format": 1,
- "rule_set": "2.84.0",
+ "rule_set": "2.85.0",
  "source": "lazaret.scanner.core, extracted by scripts/make_rust_tables.py \u2014 do not edit",
  "values": {
   "ALWAYS_PRUNE_DIRS": {
@@ -216,6 +216,48 @@
     ".wasm"
    ]
   },
+  "CONFIG_EXTS": {
+   "set": [
+    ".bash",
+    ".cfg",
+    ".conf",
+    ".env",
+    ".ini",
+    ".json",
+    ".json5",
+    ".jsonc",
+    ".key",
+    ".pem",
+    ".properties",
+    ".sh",
+    ".tfvars",
+    ".toml",
+    ".yaml",
+    ".yml",
+    ".zsh"
+   ]
+  },
+  "CONFIG_NAMES": {
+   "set": [
+    ".dockercfg",
+    ".env",
+    ".envrc",
+    ".git-credentials",
+    ".netrc",
+    ".npmrc",
+    ".pypirc",
+    "_netrc",
+    "containerfile",
+    "dockerfile",
+    "id_dsa",
+    "id_ecdsa",
+    "id_ed25519",
+    "id_rsa"
+   ]
+  },
+  "CONFIG_SCAN_CAP": {
+   "value": 2000000
+  },
   "CONFIG_SECRET_RULE": {
    "map": {
     "fix": {
@@ -243,6 +285,15 @@
      "value": "Config files are committed, copied into images and shared: a credential in one leaks with every copy, and rotating it means finding them all."
     }
    }
+  },
+  "CONFIG_SKIP_NAMES": {
+   "set": [
+    "npm-shrinkwrap.json",
+    "package-lock.json",
+    "packages.lock.json",
+    "pnpm-lock.yaml",
+    "pylock.toml"
+   ]
   },
   "CONTAINER_DOCUMENT_EXTS": {
    "set": [
@@ -4556,6 +4607,28 @@
     }
    }
   },
+  "TEST_DIR_NAMES": {
+   "set": [
+    "__fixtures__",
+    "__tests__",
+    "fixtures",
+    "spec",
+    "specs",
+    "test",
+    "test cases",
+    "test-data",
+    "test-fixtures",
+    "test_data",
+    "testdata",
+    "testing",
+    "tests",
+    "unittests"
+   ]
+  },
+  "TEST_FILE_RE": {
+   "flags": "i",
+   "re": "(?:^test_.*\\.py|.*_test\\.(?:py|go|rs)|^tests\\.rs|.*\\.(?:test|spec)\\.[cm]?[jt]sx?)$"
+  },
   "TEXT_RULES": {
    "list": [
     {
@@ -4740,6 +4813,19 @@
     }
    ]
   },
+  "TRUNCATION_RULES": {
+   "list": [
+    {
+     "value": "SC-TRUNCATED"
+    },
+    {
+     "value": "SC-MANIFEST-UNPARSEABLE"
+    },
+    {
+     "value": "SC-UNREAD-CODE"
+    }
+   ]
+  },
   "TYPE_LABEL": {
    "map": {
     "BUG": {
@@ -4771,6 +4857,25 @@
   },
   "USE_RISK_MAX_CHARS": {
    "value": 8000000
+  },
+  "USE_RISK_SKIP_DIRS": {
+   "set": [
+    "__mocks__",
+    "_next",
+    "bench",
+    "benchmark",
+    "benchmarks",
+    "demo",
+    "demos",
+    "doc",
+    "docs",
+    "example",
+    "examples",
+    "public",
+    "sample",
+    "samples",
+    "static"
+   ]
   },
   "VALID_CATEGORIES": {
    "list": [
@@ -5657,6 +5762,118 @@
     "wsl",
     "xargs"
    ]
+  },
+  "_COLLECT_SKIPPED_CONFIG_RULE": {
+   "map": {
+    "fix": {
+     "value": "Keep credentials out of large data files, and real configuration in files of its own."
+    },
+    "id": {
+     "value": "Q-SKIPPED-CONFIG"
+    },
+    "msg": {
+     "value": "{path} was not checked for credentials: {detail}."
+    },
+    "name": {
+     "value": "Config file not checked (too large)"
+    },
+    "ref": {
+     "value": "Scan coverage"
+    },
+    "sev": {
+     "value": "INFO"
+    },
+    "type": {
+     "value": "SMELL"
+    },
+    "why": {
+     "value": "Config and data files are read only to look for credentials, and one this large is data rather than configuration: a credential in it would not be reported."
+    }
+   }
+  },
+  "_COLLECT_SKIPPED_TREE_RULE": {
+   "map": {
+    "fix": {
+     "value": "Only exclude generated trees you control; remove the exclusion otherwise so the tree is scanned."
+    },
+    "id": {
+     "value": "Q-SKIPPED-TREE"
+    },
+    "msg": {
+     "value": "Directory {path} was skipped ({files} files, {bytes} bytes unread)."
+    },
+    "name": {
+     "value": "Skipped directory (not scanned)"
+    },
+    "ref": {
+     "value": "Maintainability"
+    },
+    "sev": {
+     "value": "INFO"
+    },
+    "type": {
+     "value": "SMELL"
+    },
+    "why": {
+     "value": "Skipped trees are invisible to every rule \u2014 the classic hiding places (dist, build, .git) hold published code and committed-then-deleted secrets. Generated trees you own are fine to skip on purpose; unexpected entries here are blind spots."
+    }
+   }
+  },
+  "_COLLECT_SYMLINK_RULE": {
+   "map": {
+    "fix": {
+     "value": "If the target belongs to the project, scan it directly."
+    },
+    "id": {
+     "value": "Q-SYMLINK"
+    },
+    "msg": {
+     "value": "Symbolic link {path} -> {target} was not followed; its target was not scanned."
+    },
+    "name": {
+     "value": "Symbolic link (not followed)"
+    },
+    "ref": {
+     "value": "CWE-59 \u00b7 Scan coverage"
+    },
+    "sev": {
+     "value": "INFO"
+    },
+    "type": {
+     "value": "SMELL"
+    },
+    "why": {
+     "value": "Following links would let a repository pull files from outside the scanned tree (host credentials, /dev/urandom) into the scan and its reports, or loop forever. The link target is not part of the tree under review."
+    }
+   }
+  },
+  "_COLLECT_UNREADABLE_RULE": {
+   "map": {
+    "fix": {
+     "value": "Fix the permissions (or remove the special file) and re-scan."
+    },
+    "id": {
+     "value": "Q-UNREADABLE"
+    },
+    "msg": {
+     "value": "{path} could not be read ({reason}); it was not scanned."
+    },
+    "name": {
+     "value": "Unreadable entry (not scanned)"
+    },
+    "ref": {
+     "value": "Scan coverage"
+    },
+    "sev": {
+     "value": "INFO"
+    },
+    "type": {
+     "value": "SMELL"
+    },
+    "why": {
+     "value": "An entry the scanner cannot read is invisible to every rule. Special files (named pipes, sockets, devices) are never opened: reading one can hang or exhaust the scan."
+    }
+   }
   },
   "_COMMENT_LINE_RULES": {
    "set": [

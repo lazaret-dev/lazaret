@@ -65,6 +65,7 @@ import urllib.request
 import warnings
 
 from lazaret.scanner import core as lazaret  # noqa: E402
+from lazaret.scanner import _native            # noqa: E402
 
 from lazaret import safexml as _safexml                 # noqa: E402
 from lazaret.registry import actionmeta as _actionmeta  # noqa: E402
@@ -347,7 +348,7 @@ SAMPLE = 8192              # header/entropy sample read from oversized files
 #      entry points and hook targets, Python install scripts
 # 2.3: verdict tiers, decoded hex, install-script inspection; 2.2:
 #      verdict-integrity; 2.1: binary-artifact awareness
-ENGINE_VERSION = "2.84.0"
+ENGINE_VERSION = "2.85.0"
 
 # ---------------- The content memo (P-2a, registry/contentcache.py) ----------------
 # One per scan_package run: the engine answers once for content several of a
@@ -2278,24 +2279,22 @@ PACKAGE_CODE = {"gomod": ("go", (".go",), (".c", ".h")), "crate": ("rs", (".rs",
 # not read and the scan is INCOMPLETE (aws-sdk-go v1, Go's largest module in
 # common use, is 207 million characters of Go and peaks at 2.4 GB read).
 PACKAGE_CODE_CHARS = lazaret.PACKAGE_CODE_CHARS        # (300,000,000; --deps reads with core's)
-# Directory names that hold tests / fixtures (exact names, case-insensitive).
-# Weaker findings in them are listed as INFO unless the file is reachable from
-# an entry point (main/bin/exports, an install hook, setup.py).
-TEST_DIR_NAMES = {"test", "tests", "testing", "__tests__", "spec", "specs", "fixtures",
-                  "__fixtures__", "testdata", "test_data", "test-data", "test-fixtures",
-                  "unittests", "test cases"}
-_TEST_FILE_RE = re.compile(r"(?:^test_.*\.py|.*_test\.(?:py|go)|.*\.(?:test|spec)\.[cm]?[jt]sx?)$", re.I)
+# Tests and fixtures: a member under a folder named for them (TEST_DIR_NAMES:
+# exact names, in any case; testkit/, testutils/, attestation/ are code), or a
+# test file by its name (TEST_FILE_RE, Rust's tests.rs and *_test.rs among
+# them since 0.1.9). Weaker findings in them are listed as INFO unless the
+# file is reachable from an entry point (main/bin/exports, an install hook,
+# setup.py). The engine's (collect.rs, BR-7 step 4 e).
+
+
+def _test_paths(rels):
+    """[(is a test path, is code the package does not run when it is used)] for each of `rels`."""
+    got = _native.call("test_paths", {"paths": list(rels)})
+    return list(zip(got["test"], got["unused"]))
 
 
 def is_test_path(rel):
-    parts = rel.replace("\\", "/").split("/")
-    return (any(_is_test_dir(part.lower()) for part in parts[:-1])
-            or bool(_TEST_FILE_RE.match(parts[-1])))
-
-
-def _is_test_dir(name):
-    # exact names only: testkit/, testutils/, attestation/ are code, not tests
-    return name in TEST_DIR_NAMES
+    return _test_paths([rel])[0][0]
 
 
 # The strong shapes anywhere in a package (SC-USE-RISK, 0.1.8). The
@@ -2310,9 +2309,8 @@ def _is_test_dir(name):
 # is used are left out: tests and fixtures (is_test_path), examples, docs,
 # demos and benchmarks, and a web app's static assets (a Next.js export's
 # _next/static chunks: one minified line held an exec call and a `curl … | sh`
-# string, the only popular package of 429 the test flagged anywhere).
-USE_RISK_SKIP_DIRS = {"example", "examples", "doc", "docs", "demo", "demos", "sample", "samples", "benchmark",
-                      "benchmarks", "bench", "__mocks__", "_next", "static", "public"}
+# string, the only popular package of 429 the test flagged anywhere). The
+# folders: the rule pack's USE_RISK_SKIP_DIRS (_not_used_code, the engine's).
 # The test costs time on every file it reads, so it reads none once the
 # package is SUSPICIOUS anyway (the Shai-Hulud 2.0 releases' 10 MB
 # bun_environment.js took 10 s each, and changed no verdict), no file of more
@@ -2335,8 +2333,7 @@ USE_RISK_BATCH_CHARS = 1_000_000
 
 def _not_used_code(rel):
     """Is `rel` a file the package does not run when it is used (see above)?"""
-    parts = rel.replace("\\", "/").split("/")
-    return is_test_path(rel) or any(part.lower() in USE_RISK_SKIP_DIRS for part in parts[:-1])
+    return _test_paths([rel])[0][1]
 
 
 def _demote_test_findings(issues, reachable=frozenset()):
@@ -2345,14 +2342,17 @@ def _demote_test_findings(issues, reachable=frozenset()):
     tests are neither imported nor run when the package is installed. Strong
     findings are never demoted: hiding a payload in tests/ doesn't make it safe.
     Nor is anything reachable from an entry point: a main that points into
-    test/ makes that code the package."""
-    for issue in issues:
-        if (issue["rule"].startswith("SC-") and issue["rule"] not in TRUNCATION_RULES
-                and issue["sev"] not in STRONG_SEVERITIES + ("INFO",)
-                and issue["file"] not in reachable
-                and is_test_path(issue["file"])):
+    test/ makes that code the package. A secret in test code (S-SECRET,
+    S-TOKEN) is listed as INFO too (0.1.9, SECRET-FP). The engine's
+    (collect.rs, demote_tests)."""
+    if not issues:
+        return
+    msgs = _native.call("demote_tests", {"issues": [[i["rule"], i["sev"], i["file"], i["msg"]] for i in issues],
+                                         "reachable": sorted(reachable)})
+    for issue, msg in zip(issues, msgs):
+        if msg is not None:
             issue["sev"] = "INFO"
-            issue["msg"] = issue["msg"].rstrip() + " (in test code: listed, not counted)"
+            issue["msg"] = msg
 
 
 def decide_verdict(issues, truncated):

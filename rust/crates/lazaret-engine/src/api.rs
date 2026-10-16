@@ -123,6 +123,12 @@ pub const CALLS: &[&str] = &[
     "html_items", "text_frame", "text_order", "text_items",
     // 0.1.9 (BR-7 step 4 d): baselines (baseline.rs): findings' fingerprints, the signature, a baseline applied
     "baseline_fingerprints", "baseline_sign", "baseline_apply",
+    // 0.1.9 (BR-7 step 4 e): a project scan's collection (collect.rs): a folder's entries, a file, a __pycache__, the
+    // coverage notes of what the packages' I/O finds
+    "collect_dir", "collect_file", "collect_pycache", "collect_issue", "collect_check",
+    // and the registry's test code (collect.rs): which members are tests, fixtures or code a package does not run
+    // when it is used, and which findings in them are listed only
+    "test_paths", "demote_tests",
 ];
 
 fn arr_arg<'a>(args: &'a Value, name: &str) -> &'a [Value] {
@@ -134,6 +140,135 @@ fn count_arg(args: &Value, name: &str) -> Result<usize, CallError> {
         Some(Value::Int(n)) if *n >= 0 => Ok(*n as usize),
         _ => Err(CallError::BadArgs(format!("{name}: a count"))),
     }
+}
+
+/// A folder's entries as the packages list them: [[name, what, extra…]]: "file" and its size, "dir" with its
+/// identity (or null) and whether the walk has seen it, "link" and its target, "special" and its kind, "error" and
+/// why it could not be read.
+fn entries_arg(args: &Value) -> Result<Vec<(PyStr, crate::collect::Entry)>, CallError> {
+    use crate::collect::Entry;
+    arr_arg(args, "entries").iter().enumerate().map(|(k, e)| {
+        let bad = || CallError::BadArgs(format!("entries[{k}] is not [name, what, …]"));
+        let a = e.as_arr().ok_or_else(bad)?;
+        let name = a.first().and_then(|v| v.as_str()).ok_or_else(bad)?.to_vec();
+        let what = a.get(1).and_then(|v| v.as_str()).map(crate::pystr::to_string).ok_or_else(bad)?;
+        let text = |j: usize| a.get(j).and_then(|v| v.as_str()).map(|s| s.to_vec()).unwrap_or_default();
+        let entry = match what.as_str() {
+            "file" => Entry::File(a.get(2).and_then(|v| v.as_i64()).unwrap_or(0).max(0) as u64),
+            "dir" => Entry::Dir(a.get(2).and_then(|v| v.as_str()).map(|s| s.to_vec()), matches!(a.get(3), Some(Value::Bool(true)))),
+            "link" => Entry::Link(text(2)),
+            "special" => Entry::Special(text(2)),
+            "error" => Entry::Error(text(2)),
+            _ => return Err(bad()),
+        };
+        Ok((name, entry))
+    }).collect()
+}
+
+/// A read's answer: the bytes as latin-1 text (true: the call's text, so that a large file is not escaped into
+/// JSON), or {"error": why}; None: not read.
+fn read_arg(v: Option<&Value>, text: &[u32]) -> Result<crate::collect::Read, CallError> {
+    match v {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::Bool(true)) => crate::binary::bytes_of(text)
+            .map(|b| Some(Ok(b)))
+            .ok_or_else(|| CallError::BadArgs("a read's bytes come as latin-1 text".into())),
+        Some(Value::Str(t)) => crate::binary::bytes_of(t)
+            .map(|b| Some(Ok(b)))
+            .ok_or_else(|| CallError::BadArgs("a read's bytes come as latin-1 text".into())),
+        Some(o @ Value::Obj(_)) => Ok(Some(Err(o.get("error").and_then(|e| e.as_str()).map(|s| s.to_vec()).unwrap_or_default()))),
+        _ => Err(CallError::BadArgs("a read is latin-1 text or {error}".into())),
+    }
+}
+
+/// The collection's calls (collect.rs).
+fn collect_call(p: &Pack, name: &str, args: &Value, text: &[u32]) -> Result<Value, CallError> {
+    use crate::collect;
+    let flag = |k: &str| matches!(args.get(k), Some(Value::Bool(true)));
+    let sep = if flag("windows") { u("\\") } else { u("/") };
+    let answers = args.get("answers");
+    Ok(match name {
+        "collect_dir" => {
+            // {dir, dep, entries, excludes, includeDeps, windows, answers: {lists: [[index, [[child, is a folder]] or
+            // null]], cargo: [[index, [folders with a regular .cargo-checksum.json]]]}} -> {"do", "seen"} or {"need"}
+            let mut a = collect::DirAnswers::default();
+            let pairs = |key: &str| -> Vec<(usize, Value)> {
+                answers.and_then(|x| x.get(key)).and_then(|x| x.as_arr()).unwrap_or(&[]).iter().filter_map(|it| {
+                    let pair = it.as_arr()?;
+                    Some((pair.first()?.as_i64()?.max(0) as usize, pair.get(1).cloned().unwrap_or(Value::Null)))
+                }).collect()
+            };
+            for (k, v) in pairs("lists") {
+                let list = v.as_arr().map(|items| {
+                    items.iter().filter_map(|it| {
+                        let pair = it.as_arr()?;
+                        Some((pair.first()?.as_str()?.to_vec(), matches!(pair.get(1), Some(Value::Bool(true)))))
+                    }).collect()
+                });
+                a.lists.push((k, list));
+            }
+            for (k, v) in pairs("cargo") {
+                let found = v.as_arr().unwrap_or(&[]).iter().filter_map(|x| x.as_str().map(|s| s.to_vec())).collect();
+                a.cargo.push((k, found));
+            }
+            let d = collect::DirIn {
+                dir: opt_str(args, "dir").unwrap_or_default(),
+                dep: collect::Dep::of(args.get("dep")),
+                entries: entries_arg(args)?,
+                excludes: arr_arg(args, "excludes").iter().filter_map(|x| x.as_str().map(|s| s.to_vec())).collect(),
+                include_deps: flag("includeDeps"),
+                sep,
+                answers: &a,
+            };
+            collect::dir(p, &d)
+        }
+        "collect_file" => {
+            // {rel, name, size, dep, cap, configCap, windows, neumaier, redact, answers: {head, data, sample}} -> {"need": {read,
+            // limit}} or {"issues": [[path, issue]], "file", "manifest", "config", "pth"}
+            let f = collect::FileIn {
+                rel: arg_str(args, "rel")?,
+                name: arg_str(args, "name")?,
+                size: opt_int(args, "size").unwrap_or(0).max(0) as u64,
+                dep: collect::Dep::of(args.get("dep")),
+                cap: opt_int(args, "cap").map(|c| c.max(0) as u64).unwrap_or(p.usize("SOURCE_SIZE_CAP") as u64),
+                config_cap: opt_int(args, "configCap").map(|c| c.max(0) as u64).unwrap_or(p.usize("CONFIG_SCAN_CAP") as u64),
+                windows: flag("windows"),
+                neumaier: flag("neumaier"),
+                redact: !matches!(args.get("redact"), Some(Value::Bool(false))),
+                head: read_arg(answers.and_then(|x| x.get("head")), text)?,
+                data: read_arg(answers.and_then(|x| x.get("data")), text)?,
+                sample: match read_arg(answers.and_then(|x| x.get("sample")), text)? {
+                    None => None,
+                    Some(Ok(b)) => Some(b),
+                    Some(Err(_)) => Some(Vec::new()), // (not read: the SC-TRUNCATED stands alone)
+                },
+            };
+            collect::file(p, &f)
+        }
+        "collect_pycache" => {
+            // {dir, entries, parent: [the folder's names], windows, answers: {headers: {name: 16 bytes or {error}}}}
+            // -> {"issues"} or {"need": [names]}
+            let entries = entries_arg(args)?;
+            let parent: Vec<PyStr> = arr_arg(args, "parent").iter().filter_map(|x| x.as_str().map(|s| s.to_vec())).collect();
+            let mut headers = Vec::new();
+            for (k, v) in answers.and_then(|x| x.get("headers")).and_then(|x| x.as_obj()).unwrap_or(&[]) {
+                if let Some(r) = read_arg(Some(v), text)? {
+                    headers.push((k.clone(), r));
+                }
+            }
+            collect::pycache(p, &opt_str(args, "dir").unwrap_or_default(), &sep, &entries, &parent, &headers)
+        }
+        _ => {
+            // {kind: unreadable | symlink | skipped_tree, path, reason | target | files and bytes} -> the issue
+            let path = arg_str(args, "path")?;
+            match crate::pystr::to_string(&arg_str(args, "kind")?).as_str() {
+                "unreadable" => collect::unreadable_issue(p, &path, &opt_str(args, "reason").unwrap_or_default()),
+                "symlink" => collect::symlink_issue(p, &path, &opt_str(args, "target").unwrap_or_default()),
+                "skipped_tree" => collect::skipped_tree_issue(p, &path, opt_int(args, "files").unwrap_or(0), opt_int(args, "bytes").unwrap_or(0)),
+                other => return Err(CallError::BadArgs(format!("collect_issue: no kind {other:?}"))),
+            }
+        }
+    })
 }
 
 /// The reports' calls (report.rs): a frame's {head, tail}, a batch of findings' {text}.
@@ -843,7 +978,11 @@ fn dispatch(name: &str, args: &Value, text: &[u32]) -> Result<Value, CallError> 
         "scan_manifest" => {
             // {path, registry, hooks: [script…] or null, redact} -> {"issues": [scan_file's issues…, a hook's {"cmd"}]}
             let path = arg_str(args, "path")?;
-            let registry = matches!(args.get("registry"), Some(Value::Bool(true)));
+            // (registry null: a manifest under a dependency folder is a dependency's, collect.rs)
+            let registry = match args.get("registry") {
+                Some(Value::Bool(b)) => *b,
+                _ => crate::collect::is_dependency_manifest(p, &path),
+            };
             let redact = !matches!(args.get("redact"), Some(Value::Bool(false)));
             let hooks: Option<Vec<PyStr>> = match args.get("hooks") {
                 Some(Value::Arr(_)) => Some(arg_strs(args, "hooks")),
@@ -1283,6 +1422,33 @@ fn dispatch(name: &str, args: &Value, text: &[u32]) -> Result<Value, CallError> 
             let issues = crate::result::findings_arg(args.get("issues")).map_err(bad)?;
             let conditions = crate::result::conditions_arg(args.get("conditions")).map_err(bad)?;
             crate::result::regrade(p, &issues, &conditions).map_err(bad)?
+        }
+        "collect_dir" | "collect_file" | "collect_pycache" | "collect_issue" => collect_call(p, name, args, text)?,
+        "collect_check" => match crate::pystr::to_string(&arg_str(args, "check")?).as_str() {
+            // {check: config_name, name} -> configsecrets.is_config_file; {check: own_report} + a text ->
+            // configsecrets.own_report
+            "config_name" => Value::Bool(crate::collect::is_config_file(p, &arg_str(args, "name")?)),
+            "own_report" => Value::Bool(crate::collect::own_report(text)),
+            other => return Err(CallError::BadArgs(format!("collect_check: no check {other:?}"))),
+        },
+        "test_paths" => {
+            // {paths} -> {"test": [is a test path], "unused": [is code the package does not run when it is used]}
+            let paths: Vec<PyStr> = arr_arg(args, "paths").iter().filter_map(|x| x.as_str().map(|s| s.to_vec())).collect();
+            Value::obj(vec![
+                ("test", Value::Arr(paths.iter().map(|r| Value::Bool(crate::collect::is_test_path(p, r))).collect())),
+                ("unused", Value::Arr(paths.iter().map(|r| Value::Bool(crate::collect::not_used_code(p, r))).collect())),
+            ])
+        }
+        "demote_tests" => {
+            // {issues: [[rule, sev, file, msg]], reachable: [paths]} -> [the demoted message, or null]
+            let mut issues = Vec::new();
+            for (k, it) in arr_arg(args, "issues").iter().enumerate() {
+                let a = it.as_arr().filter(|a| a.len() == 4).ok_or_else(|| CallError::BadArgs(format!("demote_tests: issue {k}")))?;
+                let t = |j: usize| a[j].as_str().map(|s| s.to_vec()).unwrap_or_default();
+                issues.push([t(0), t(1), t(2), t(3)]);
+            }
+            let reachable: Vec<PyStr> = arr_arg(args, "reachable").iter().filter_map(|x| x.as_str().map(|s| s.to_vec())).collect();
+            Value::Arr(crate::collect::demoted(p, &issues, &reachable).into_iter().map(|m| m.map_or(Value::Null, Value::Str)).collect())
         }
         "baseline_fingerprints" => {
             // {issues: [a finding, …]} -> {"fingerprints": [rule|path|line, or null where Python's fingerprint raises]}

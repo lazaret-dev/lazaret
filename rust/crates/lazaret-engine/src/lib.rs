@@ -10,6 +10,7 @@
 
 pub mod api;
 pub mod budget;
+pub mod collect;
 pub mod autorun;
 pub mod baseline;
 pub mod ci;

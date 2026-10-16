@@ -208,12 +208,7 @@ class VerdictPolicyTests(unittest.TestCase):
                     # Windows can't delete the temp dir while the database is open
                     store.conn.close()
 
-    def test_test_path_detection(self):
-        for path, expected in [("tests/a.py", True), ("pkg/test cases/x.sh", True), ("meson/unittests/t.py", True),
-                               ("src/test_util.py", True), ("lib/a.spec.js", True), ("src/pkg/contest.py", False),
-                               ("lib/attestation/sign.js", False), ("src/main.py", False)]:
-            with self.subTest(path=path):
-                self.assertIs(lazaret_repo.is_test_path(path), expected)
+    # (is_test_path's cases: the engine's, collect.rs' tests)
 
 
 if __name__ == "__main__":
