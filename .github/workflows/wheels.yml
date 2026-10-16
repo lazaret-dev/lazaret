@@ -105,7 +105,7 @@ jobs:
               "$py" scripts/check_native_library.py "$lib" "$TAG" --load
               cd python
               LAZARET_NATIVE_LIB="$lib" "$py" -m unittest discover -s tests -t .'
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: native-${{ matrix.tag }}
           path: rust/target/${{ matrix.target }}/release/liblazaret_native.so
@@ -167,7 +167,7 @@ jobs:
       - name: The Python suite on this library (its recorded outputs among them)
         working-directory: python
         run: python -m unittest discover -s tests -t .
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: native-${{ matrix.tag }}
           path: rust/target/${{ matrix.target }}/release/${{ matrix.library }}
@@ -213,7 +213,7 @@ jobs:
           python scripts/check_native_library.py --dist python/dist
           --expect manylinux_2_28_x86_64 --expect manylinux_2_28_aarch64
           --expect macosx_11_0_arm64 --expect macosx_10_12_x86_64 --expect win_amd64
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: python-dist
           path: python/dist/
