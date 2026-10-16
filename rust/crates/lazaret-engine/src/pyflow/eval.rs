@@ -605,6 +605,7 @@ impl<'p> Analyzer<'p> {
         if let Some(v) = self.env.get(&key(name)) {
             if self.supply {
                 // (what a nested function gave the variable)
+                self.p.note_back(self.f);
                 if let Some(back) = self.p.closure_back.get(&self.f).and_then(|vars| vars.get(&name)) {
                     return v.union(back);
                 }
@@ -617,6 +618,7 @@ impl<'p> Analyzer<'p> {
                 return v;
             }
         }
+        self.p.note_global(self.m, name);
         self.p.mods[self.m as usize].globals.get(&name).cloned().unwrap_or_else(Taint::empty)
     }
 
@@ -635,9 +637,11 @@ impl<'p> Analyzer<'p> {
         if let Some(&hit) = self.p.src_memo.get(&(self.m, e)) {
             return hit;
         }
+        let w0 = self.p.first_begin();
         let (s, links) = dotted_links(self.t(), e);
         self.p.charge(links + 3 * s.len() as u64);
         let hit = self.is_source_text(&s);
+        self.p.first_end(w0);
         self.p.src_memo.insert((self.m, e), hit);
         hit
     }
@@ -1001,6 +1005,7 @@ impl<'p> Analyzer<'p> {
         let mut bound_all: Vec<(FnId, Vec<(NameId, Taint)>)> = Vec::new();
         for &(g, skip) in &res.targets {
             let bound = bind(&self.p.fns[g as usize], &pos, starred.as_ref(), &kws, dstar.as_ref(), skip);
+            self.p.note_fn(g);
             let pts = self.p.fns[g as usize].param_to_sink.clone();
             for (pname, cats) in pts {
                 let t = match bound_get(&bound, pname) {
@@ -1038,6 +1043,7 @@ impl<'p> Analyzer<'p> {
         if !bound_all.is_empty() || res.ctor.is_some() {
             let mut t = Taint::empty();
             for (g, bound) in &bound_all {
+                self.p.note_fn(*g);
                 let gf = &self.p.fns[*g as usize];
                 if let Some(rs) = &gf.ret_source {
                     t = t.union(&Taint { via: Some(*g), ..rs.as_source() });
@@ -1162,6 +1168,9 @@ impl<'p> Analyzer<'p> {
                 }
             }
         }
+        if changed {
+            self.p.mark_fn(f);
+        }
         if let Some(c) = self.p.fns[f as usize].cls {
             let writes = std::mem::take(&mut self.attr_writes);
             let cls = &mut self.p.classes[c as usize];
@@ -1181,6 +1190,9 @@ impl<'p> Analyzer<'p> {
                     cls_changed = true;
                 }
             }
+            if cls_changed {
+                self.p.mark_class(c);
+            }
         }
         if self.supply && (self.sc_commit() || self.sc_dirty) {
             glob_changed = true;
@@ -1188,6 +1200,7 @@ impl<'p> Analyzer<'p> {
         if self.p.fns[f as usize].pseudo {
             let m = self.m;
             let entries: Vec<(Key, Taint)> = self.env.iter().map(|(k, v)| (*k, v.clone())).collect();
+            let mut marked: Vec<NameId> = Vec::new();
             let globals = &mut self.p.mods[m as usize].globals;
             for (k, t) in entries {
                 if k >> 32 != 0 || !(t.source || t.marks != 0) {
@@ -1211,7 +1224,11 @@ impl<'p> Analyzer<'p> {
                 if update {
                     globals.insert(name, new);
                     glob_changed = true;
+                    marked.push(name);
                 }
+            }
+            for name in marked {
+                self.p.mark_global(m, name);
             }
         }
         (changed, cls_changed, glob_changed)

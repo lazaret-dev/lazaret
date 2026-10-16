@@ -199,6 +199,11 @@ fn note_overflow(p: &Project, overflow: &mut BTreeMap<PyStr, u32>, f: FnId) {
 /// (summary changed, class attributes changed, globals changed).
 fn read(p: &mut Project, findings: &mut Vec<Out>, overflow: &mut BTreeMap<PyStr, u32>, cut: &mut Vec<FnId>, f: FnId, emit: bool) -> (bool, bool, bool) {
     p.frames = 0;
+    // (P-1) a reading of the fixpoint is recorded: what it read, and when it began
+    let (start, w0) = (p.epoch, p.work);
+    if !emit {
+        p.reading_begins();
+    }
     let mut a = Analyzer::new(p, f, emit, findings);
     let r = a.run();
     let out = match r {
@@ -213,6 +218,15 @@ fn read(p: &mut Project, findings: &mut Vec<Out>, overflow: &mut BTreeMap<PyStr,
         Err(_) => (false, false, false),
     };
     drop(a);
+    if !emit {
+        let reads = p.reads.borrow_mut().take().unwrap_or_default();
+        if r.is_ok() {
+            let steps = p.work - w0 - p.first_work;
+            p.last_read.insert(f, (start, steps, reads));
+        } else {
+            p.last_read.remove(&f);
+        }
+    }
     if r == Err(Halt::Overflow) {
         note_overflow(p, overflow, f);
     }
@@ -366,7 +380,15 @@ pub fn analyze_with(files: &[(PyStr, Option<PyStr>)], mut trees: Vec<Option<crat
         queue.pop_front();
         queued[f as usize] = false;
         p.fns[f as usize].runs += 1;
-        let (changed, cls_changed, glob_changed) = read(&mut p, &mut findings, &mut overflow, &mut cut, f, false);
+        // (P-1) a function none of whose reading's state changed since its last reading began reads as that one did:
+        // its steps, and no change
+        let (changed, cls_changed, glob_changed) = match p.unchanged(f) {
+            Some(steps) => {
+                p.work += steps;
+                (false, false, false)
+            }
+            None => read(&mut p, &mut findings, &mut overflow, &mut cut, f, false),
+        };
         let mut deps: Vec<FnId> = Vec::new();
         let mut dset: QuickSet<FnId> = QuickSet::default();
         let mut add = |d: FnId, deps: &mut Vec<FnId>| {

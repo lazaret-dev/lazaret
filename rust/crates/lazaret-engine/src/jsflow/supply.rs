@@ -3998,7 +3998,13 @@ fn facts_or_why(text: &[u32]) -> Result<Rc<Facts>, Unread> {
         return hit;
     }
     let owned = text.to_vec();
-    let got = crate::api::on_own_stack(move || facts_here(&owned)).map(Rc::new);
+    // (the copy's searches ask the call's gate: P-1)
+    let gate = crate::textgate::share(text);
+    let got = crate::api::on_own_stack(move || {
+        let _gate = gate.and_then(|g| crate::textgate::adopt(&owned, g));
+        facts_here(&owned)
+    })
+    .map(Rc::new);
     LAST.with(|l| *l.borrow_mut() = Some((text.to_vec(), got.clone())));
     got
 }

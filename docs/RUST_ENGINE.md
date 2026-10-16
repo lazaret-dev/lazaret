@@ -775,8 +775,18 @@ at, so its answer is the scan's: on a bundle the scans had read the text
 some 40 to 60 times. The gate also keeps, until it closes, what a call's
 tests make of the whole text more than once (`memo`: the lexers' tokens,
 the download tests' lines that hold a write, the assignments three tests
-read). `pystr`'s `find` and `in` scan for a string by its rarest character
-(`scan.rs`).
+read). A gate is shared with the thread the supply-chain models run on
+(their own stack, §16), which reads a copy of the text: their searches ask
+the call's pairs, and the places either thread lists serve both, as does
+what `memo_shared` keeps (the literals' spans) (`share`, `adopt`; P-1). The
+pairs, the triples and how often each pair stands are read in one pass as
+the gate opens, and the places in one more when first asked for. `pystr`'s
+`find` and `in` scan for a string by its rarest character (`scan.rs`); a
+list of ASCII strings (`Needles`) is looked for by an Aho-Corasick automaton
+that reads each character once, except over a long text whose pairs list
+fewer than one place in eight for its strings, where the pairs' places are
+visited (P-1: on a bundle a scan for `curl`, `host `, `ping` and the like
+stopped at most of its characters).
 
 Beyond the regex engine, a few patterns core runs on every line or every
 token are matched or prefiltered by hand, each written for one pattern text
@@ -2201,6 +2211,22 @@ the engine's does not. Natively the pass runs on the engine's own 8 MiB
 stack (§16); in WebAssembly its frames are on Node's own stack, about
 1 MB, which the frames keep it within: `test_wasm_parity_pyflow` reads
 every construct at its deepest.
+
+**A reading like the last (P-1, 0.1.9).** The fixpoint reads a function
+again when a summary, a class's attributes or a global it may read has
+changed, and most such readings read nothing that changed since the last
+began. Each reading records what it reads of the state readings change
+(the summaries of the functions it calls, classes' attributes, modules'
+globals, the variables a function gives the functions nested in it and
+those they give back, the environment a script stores) and when it began;
+a function none of whose reads changed since is not read again but counted
+as the steps its last reading took, less those spent making what later
+readings find made (a name resolved, a call's targets, a class's bases, a
+name classified, a callee's names in the supply-chain model), so the
+budgets stop where they stopped and the answers and notes are the same.
+Held there on 6,790 files (litellm, botocore, requests, next, eslint,
+express, TypeScript): the same answers, and each file's pass counted the
+same steps.
 
 **Held to its recorded outputs.** `test_snapshot_py_flow` (§5): every
 output, in order, on the review's cases and seeded generated projects

@@ -1287,9 +1287,21 @@ aggregate):
   characters are common (each place is checked for a whole string before the matcher
   tries it), one that could only look for a common first character runs its automaton
   over the text instead of trying each place, and the automaton reads two characters a
-  round. On litellm's `proxy_server.py` (0.82 MB) the test runs 36% fewer instructions,
-  and on playwright-core's bundles (3 to 3.5 MB, each read after the other) 47% to 48%
-  fewer, with the same answers.
+  round. The Python model reads a function again only when something its last reading
+  read has changed since (a summary, a class's attributes, a global, a closure's
+  variables, the environment the script stores); a reading it skips counts the steps the
+  last one took, so its budgets stop where they stopped. A callee's names are read once
+  per function, and a function's own nodes walked once; the parser's tokens are the
+  lexers' too; the models' own thread searches the text by the call's character pairs, as
+  the call does, and shares what both read (the literals' spans); a list of strings
+  whose characters are common in the text (`curl`, `host `, `ping`, … in a bundle) is
+  looked for by an automaton that reads each character once; the decoded view's copy of
+  the text gets character pairs of its own; a text's pairs and their places are read in
+  two passes where they took four; the assignments the data-flow test reads are read by
+  hand. Measured on the same harness before P-1 and now, in instructions per call on a
+  warm engine: litellm's `proxy_server.py` (0.82 MB) 1,546 M to 764 M, playwright-core's
+  `coreBundle.js` 5,815 M to 2,860 M and `utilsBundle.js` 8,580 M to 4,124 M: half or
+  less, with the same answers.
 - **SC-USE-RISK reads the same files on every machine.** Registry and guard scans read a
   package's code that runs only when it is used, smallest files first, for at most 3
   seconds per release file: a slower machine read less, and nothing said so. The bound

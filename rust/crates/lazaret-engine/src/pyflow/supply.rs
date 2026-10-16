@@ -177,8 +177,17 @@ pub struct Supply {
     stored: RefCell<Option<HashSet<PyStr>>>,
     /// a name's alias of a callee (`s = os.system`): the names it resolves to
     alias_memo: RefCell<HashMap<(FnId, PyStr), Vec<PyStr>>>,
+    /// (P-1) a callee's names in a function (sc_names), and the work their reading charges once the aliases it reads
+    /// are known: what each later reading of the function gives and charges for them
+    names_memo: RefCell<crate::quickhash::QuickMap<(FnId, NodeId), (Rc<Vec<PyStr>>, u64)>>,
+    /// (P-1) aliases being read (sc_alias_names, not from its memo), and the work sc_names_at charged outside them
+    alias_active: std::cell::Cell<u32>,
+    steady: std::cell::Cell<u64>,
     /// each function's assignments of a name and its loops' targets
     fn_index: RefCell<HashMap<FnId, Rc<FnIndex>>>,
+    /// (P-1) each function's own nodes (`own_nodes` of its body), walked once for its index and its `global` and
+    /// `nonlocal` declarations
+    own: RefCell<crate::quickhash::QuickMap<FnId, Rc<Vec<NodeId>>>>,
     /// the files the script writes code or a program to (a run of one is
     /// a dropper's)
     pub written: RefCell<Vec<Written>>,
@@ -209,7 +218,11 @@ impl Supply {
             env_store: RefCell::new(HashMap::new()),
             stored: RefCell::new(None),
             alias_memo: RefCell::new(HashMap::new()),
+            names_memo: RefCell::new(Default::default()),
+            alias_active: std::cell::Cell::new(0),
+            steady: std::cell::Cell::new(0),
             fn_index: RefCell::new(HashMap::new()),
+            own: RefCell::new(Default::default()),
             written: RefCell::new(Vec::new()),
             own_starts: own_starts(&pack, text),
             pack,
@@ -549,6 +562,7 @@ impl<'p> Analyzer<'p> {
     /// One variable of the environment, by its name (and what the script
     /// stored in it).
     fn sc_env_var(&self, name: &[u32], at: u32) -> Taint {
+        self.p.note_env();
         let stored = self.sup().env_store.borrow().get(name).cloned();
         let v = self.sc_env_var_read(name, at);
         match stored {
@@ -591,8 +605,23 @@ impl<'p> Analyzer<'p> {
     /// The names a callee resolves to: its dotted text with an import alias
     /// at its head replaced (`requests.post`, `urllib.request.urlopen` for
     /// `from urllib.request import urlopen as u; u(…)`), then as written.
-    pub(super) fn sc_names(&mut self, func: NodeId) -> Vec<PyStr> {
-        self.sc_names_at(func, 0)
+    ///
+    /// The names a callee resolves to in a function are its text's, its function's and the module's, read once
+    /// (P-1): after the first reading, which also reads the aliases it meets (each read once: `alias_memo`), each
+    /// reading gives the same names and charges what sc_names_at charges with those aliases known, so a function's
+    /// later readings take them from `names_memo` and charge the same.
+    pub(super) fn sc_names(&mut self, func: NodeId) -> Rc<Vec<PyStr>> {
+        let k = (self.f, func);
+        let sup = self.sup();
+        if let Some((names, work)) = sup.names_memo.borrow().get(&k) {
+            self.p.work += *work;
+            return names.clone();
+        }
+        let before = sup.steady.replace(0);
+        let names = Rc::new(self.sc_names_at(func, 0));
+        let work = sup.steady.replace(before);
+        sup.names_memo.borrow_mut().insert(k, (names.clone(), work));
+        names
     }
 
     fn sc_names_at(&mut self, func: NodeId, depth: u32) -> Vec<PyStr> {
@@ -629,7 +658,12 @@ impl<'p> Analyzer<'p> {
         }
         let (d, links) = dotted_links(self.t(), func);
         let canon = self.p.canonical(self.m, &d);
+        let before = self.p.work;
         self.p.charge(links + (d.len() + canon.len()) as u64);
+        let sup = self.sup();
+        if sup.alias_active.get() == 0 {
+            sup.steady.set(sup.steady.get() + (self.p.work - before));
+        }
         let mut out = Vec::with_capacity(2);
         if !canon.is_empty() {
             out.push(normalize_name(&canon));
@@ -658,18 +692,29 @@ impl<'p> Analyzer<'p> {
         out
     }
 
+    /// Function `f`'s own nodes, its body's (walked once: P-1).
+    fn sc_own_nodes(&self, f: FnId) -> Rc<Vec<NodeId>> {
+        if let Some(nodes) = self.sup().own.borrow().get(&f) {
+            return nodes.clone();
+        }
+        let fnode = self.p.fns[f as usize].node;
+        let nodes = Rc::new(own_nodes(self.t(), body_of(self.t(), fnode)));
+        self.sup().own.borrow_mut().insert(f, nodes.clone());
+        nodes
+    }
+
     /// Function `f`'s index of its own assignments (built when first asked).
     fn sc_index(&mut self, f: FnId) -> Rc<FnIndex> {
         if let Some(ix) = self.sup().fn_index.borrow().get(&f) {
             return ix.clone();
         }
-        let fnode = self.p.fns[f as usize].node;
-        let body: Vec<u32> = body_of(self.t(), fnode).to_vec();
-        let nodes = own_nodes(self.t(), &body);
+        let nodes = self.sc_own_nodes(f);
+        let w0 = self.p.first_begin();
         self.p.charge(nodes.len() as u64);
+        self.p.first_end(w0);
         let mut ix = FnIndex::default();
         let t = self.t();
-        for x in nodes {
+        for &x in nodes.iter() {
             match t.kind(x) {
                 Kind::Assign => {
                     let targets = t.list(a_(t, x));
@@ -734,6 +779,9 @@ impl<'p> Analyzer<'p> {
             return hit.clone();
         }
         self.sup().alias_memo.borrow_mut().insert(memo_key.clone(), Vec::new());
+        let sup = self.sup();
+        sup.alias_active.set(sup.alias_active.get() + 1);
+        let w0 = self.p.first_begin();
         let mut values: Vec<NodeId> = Vec::new();
         let fns = {
             let mut v = vec![self.f];
@@ -760,6 +808,8 @@ impl<'p> Analyzer<'p> {
             }
         }
         self.sup().alias_memo.borrow_mut().insert(memo_key, out.clone());
+        self.p.first_end(w0);
+        sup.alias_active.set(sup.alias_active.get() - 1);
         out
     }
 
@@ -830,6 +880,7 @@ impl<'p> Analyzer<'p> {
             if hops > 16 {
                 break;
             }
+            self.p.note_closure(f);
             if let Some(v) = self.p.closure.get(&f).and_then(|vars| vars.get(&name)) {
                 return Some(v.clone());
             }
@@ -1333,7 +1384,9 @@ impl<'p> Analyzer<'p> {
                 if let Some(hit) = self.sup().const_memo.borrow().get(&memo_key) {
                     return hit.clone();
                 }
+                let w0 = self.p.first_begin();
                 let got = self.sc_const_strs_of(&name, depth);
+                self.p.first_end(w0);
                 self.sup().const_memo.borrow_mut().insert(memo_key, got.clone());
                 got
             }
@@ -2390,6 +2443,7 @@ impl<'p> Analyzer<'p> {
         };
         for &(g, skip) in targets {
             let bound = super::eval::bind(&self.p.fns[g as usize], pos, starred, kws, dstar, skip);
+            self.p.note_fn(g);
             let pts = self.p.fns[g as usize].param_to_sink.clone();
             // (the index of a parameter among the call's positional arguments)
             let all_pos: Vec<NameId> = {
@@ -2506,6 +2560,7 @@ impl<'p> Analyzer<'p> {
                 }
             }
             // its value: what it returns
+            self.p.note_fn(g);
             let gf = &self.p.fns[g as usize];
             if let Some(rs) = &gf.ret_source {
                 out = out.union(&Taint { via: Some(g), ..rs.as_source() });
@@ -2872,6 +2927,8 @@ impl<'p> Analyzer<'p> {
         if store.get(&name) != Some(&new) {
             store.insert(name, new);
             self.sc_dirty = true;
+            drop(store);
+            self.p.mark_env();
         }
     }
 
@@ -2913,6 +2970,7 @@ impl<'p> Analyzer<'p> {
                 .map(|(k, v)| (*k as NameId, v.as_source()))
                 .collect();
             let vars = self.p.closure.entry(f).or_default();
+            let mut marked = false;
             for (name, t) in entries {
                 let new = match vars.get(&name) {
                     None => t,
@@ -2921,7 +2979,11 @@ impl<'p> Analyzer<'p> {
                 if vars.get(&name) != Some(&new) {
                     vars.insert(name, new);
                     changed = true;
+                    marked = true;
                 }
+            }
+            if marked {
+                self.p.mark_closure(f);
             }
         }
         // `nonlocal x`, and a container of the function around this one that
@@ -2947,6 +3009,7 @@ impl<'p> Analyzer<'p> {
             if vars.get(&n) != Some(&new) {
                 vars.insert(n, new);
                 changed = true;
+                self.p.mark_back(f);
             }
         }
         // `global x`: x is the module's; so is a container of the module's
@@ -2963,6 +3026,7 @@ impl<'p> Analyzer<'p> {
                 .iter()
                 .filter_map(|&n| self.env.get(&key(n)).filter(|v| v.source || v.marks != 0).map(|v| (n, v.as_source())))
                 .collect();
+            let mut marked: Vec<NameId> = Vec::new();
             let globals = &mut self.p.mods[m as usize].globals;
             for (name, t) in entries {
                 let new = match globals.get(&name) {
@@ -2972,7 +3036,11 @@ impl<'p> Analyzer<'p> {
                 if globals.get(&name) != Some(&new) {
                     globals.insert(name, new);
                     changed = true;
+                    marked.push(name);
                 }
+            }
+            for name in marked {
+                self.p.mark_global(m, name);
             }
         }
         changed
@@ -2985,9 +3053,7 @@ impl<'p> Analyzer<'p> {
         }
         let mut out: Vec<NameId> = Vec::new();
         if !self.p.fns[self.f as usize].pseudo {
-            let fnode = self.p.fns[self.f as usize].node;
-            let body: Vec<u32> = body_of(self.t(), fnode).to_vec();
-            for n in own_nodes(self.t(), &body) {
+            for &n in self.sc_own_nodes(self.f).iter() {
                 if self.t().kind(n) == Kind::Global {
                     let sids: Vec<u32> = {
                         let t = self.t();
@@ -3059,9 +3125,7 @@ impl<'p> Analyzer<'p> {
         }
         let mut out: Vec<NameId> = Vec::new();
         if !self.p.fns[self.f as usize].pseudo {
-            let fnode = self.p.fns[self.f as usize].node;
-            let body: Vec<u32> = body_of(self.t(), fnode).to_vec();
-            for n in own_nodes(self.t(), &body) {
+            for &n in self.sc_own_nodes(self.f).iter() {
                 if self.t().kind(n) == Kind::Nonlocal {
                     let sids: Vec<u32> = {
                         let t = self.t();
@@ -3137,6 +3201,7 @@ impl<'p> Analyzer<'p> {
         }
         self.env = saved;
         if let Some(c) = cls {
+            let mut marked = false;
             let cls = &mut self.p.classes[c as usize];
             for (k, v) in attrs {
                 let new = match cls.attr_taint.get(&k) {
@@ -3146,7 +3211,11 @@ impl<'p> Analyzer<'p> {
                 if cls.attr_taint.get(&k) != Some(&new) {
                     cls.attr_taint.insert(k, new);
                     self.sc_dirty = true;
+                    marked = true;
                 }
+            }
+            if marked {
+                self.p.mark_class(c);
             }
         }
         Ok(())
@@ -3365,7 +3434,15 @@ pub fn facts(text: &[u32]) -> Option<Rc<Facts>> {
         return hit;
     }
     let owned = text.to_vec();
-    let got = crate::api::on_own_stack(move || facts_here(&owned)).map(Rc::new);
+    // (its tokens made here, where the call's gate keeps them for the decoded view's lexer; the copy's searches ask
+    // the call's gate: P-1)
+    let lexed = crate::pyparse::lexer::shared(text);
+    let gate = crate::textgate::share(text);
+    let got = crate::api::on_own_stack(move || {
+        let _gate = gate.and_then(|g| crate::textgate::adopt(&owned, g));
+        facts_here(&owned, Some(lexed))
+    })
+    .map(Rc::new);
     LAST.with(|l| *l.borrow_mut() = Some((text.to_vec(), got.clone())));
     got
 }
@@ -3402,10 +3479,14 @@ pub fn dropped_run(text: &[u32]) -> Option<Option<DropRun>> {
     facts(text).map(|f| f.dropped.clone())
 }
 
-fn facts_here(text: &[u32]) -> Option<Facts> {
+fn facts_here(text: &[u32], lexed: Option<std::sync::Arc<Result<crate::pyparse::lexer::Lexed, crate::pyparse::lexer::LexError>>>) -> Option<Facts> {
     let pack = crate::pack::current();
     let path = u("script.py");
-    let tree = crate::pyparse::parse(text).ok()?;
+    let tree = match lexed {
+        Some(l) => crate::pyparse::parse_shared(text, l),
+        None => crate::pyparse::parse(text),
+    }
+    .ok()?;
     let sup = Rc::new(Supply::new(pack, text));
     let (outside, values) = outside_names(&tree, &sup);
     *sup.outside.borrow_mut() = outside;
@@ -3462,7 +3543,7 @@ mod tests {
 
     fn read(src: &str) -> Facts {
         let text: Vec<u32> = src.chars().map(|c| c as u32).collect();
-        facts_here(&text).unwrap_or_else(|| panic!("not read: {}", src))
+        facts_here(&text, None).unwrap_or_else(|| panic!("not read: {}", src))
     }
 
     fn sent(src: &str) -> Option<(&'static str, String, bool)> {

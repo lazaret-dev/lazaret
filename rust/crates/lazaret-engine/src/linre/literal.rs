@@ -541,6 +541,17 @@ impl LitSet {
         }
     }
 
+    /// How many places a search of all of `text` would visit by its strings' pairs (P-1): the places of the pairs of
+    /// its column in the open text `text` is part of. None: it would not go by them (no such column, a text too short
+    /// or with its pairs' places not listed).
+    pub fn pair_places(&self, text: &[u32]) -> Option<usize> {
+        let (_, codes) = self.pairs.as_ref()?;
+        if text.len() < crate::textgate::PAIRS_RANGE {
+            return None;
+        }
+        crate::textgate::with_bigrams(text, |_, bg| codes.iter().map(|&b| bg.of(b as usize).len()).sum())
+    }
+
     /// Does the open text gate say none of the strings is in the text?
     pub fn gated_out(&self, text: &[u32], start: usize, end: usize) -> bool {
         end >= start + crate::textgate::MIN_RANGE

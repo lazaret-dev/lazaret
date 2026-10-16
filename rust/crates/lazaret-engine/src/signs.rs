@@ -967,8 +967,12 @@ pub(crate) fn call_args_len(text: &[u32]) -> usize {
     n
 }
 
-/// core._literal_spans
-pub(crate) fn literal_spans(p: &Pack, text: &[u32]) -> Vec<(usize, usize)> {
+/// core._literal_spans: made once a call, for the tests on either of its threads that read them (P-1).
+pub(crate) fn literal_spans(p: &Pack, text: &[u32]) -> std::sync::Arc<Vec<(usize, usize)>> {
+    crate::textgate::memo_shared(text, "literal spans", || literal_spans_of(p, text))
+}
+
+fn literal_spans_of(p: &Pack, text: &[u32]) -> Vec<(usize, usize)> {
     let max = p.usize("_LITERAL_SPANS_MAX");
     let n = text.len();
     let mut out = Vec::new();
@@ -1009,7 +1013,7 @@ pub(crate) fn literal_spans(p: &Pack, text: &[u32]) -> Vec<(usize, usize)> {
 fn prose_spans(p: &Pack, text: &[u32], lang: Option<&str>) -> Vec<(usize, usize)> {
     let st = match lang.and_then(|l| crate::lex::structure(text, l, true)) {
         Some(st) => st,
-        None => return literal_spans(p, text),
+        None => return literal_spans(p, text).to_vec(),
     };
     let mut all = st.literals;
     all.extend(st.comments);
@@ -2796,7 +2800,11 @@ fn decoded_view_of(p: &Pack, text: &[u32], lang: Option<&'static str>) -> Readin
             None => (text.to_vec(), false),
         },
     };
-    let (arrays, line) = match crate::strarr::sa_read(p, &source) {
+    // (P-1: the reading's searches ask a gate, as the text's do: the text's own, which the call keeps open, when the
+    // literals read as written are the text, else one opened for them)
+    let src: &[u32] = if source == text { text } else { &source };
+    let _gate = if source == text { None } else { crate::textgate::open(&source) };
+    let (arrays, line) = match crate::strarr::sa_read(p, src) {
         // (unescaping and joining keep the rows)
         Some((view, at)) => (Some(view), Some(1 + source[..at.min(source.len())].iter().filter(|&&ch| ch == c('\n')).count())),
         None => (None, None),
@@ -2805,7 +2813,7 @@ fn decoded_view_of(p: &Pack, text: &[u32], lang: Option<&'static str>) -> Readin
     let (concealed, jc_line) = match lang {
         Some("py") => (None, None),
         _ => {
-            let input: &[u32] = arrays.as_deref().unwrap_or(&source);
+            let input: &[u32] = arrays.as_deref().unwrap_or(src);
             match crate::jcstr::jc_read(input, p.usize("_SA_MAX_CHARS")) {
                 Some((view, at)) => (Some(view), Some(1 + input[..at.min(input.len())].iter().filter(|&&ch| ch == c('\n')).count())),
                 None => (None, None),
@@ -2813,7 +2821,7 @@ fn decoded_view_of(p: &Pack, text: &[u32], lang: Option<&'static str>) -> Readin
         }
     };
     let arrays = concealed.or(arrays);
-    let proxies = crate::strarr::dv_proxies(p, arrays.as_deref().unwrap_or(&source));
+    let proxies = crate::strarr::dv_proxies(p, arrays.as_deref().unwrap_or(src));
     let base: PyStr = match (proxies, arrays) {
         (Some(x), _) => x,
         (None, Some(a)) => a,
@@ -2834,8 +2842,10 @@ fn decoded_view_of(p: &Pack, text: &[u32], lang: Option<&'static str>) -> Readin
     };
     let mut view = joined.clone();
     // (a longer text with a string array: its strings only)
-    if base.len() <= max && any_in(&base, p.needles("_DV_NEEDLES")) {
-        view = dv_decoders(p, view);
+    let base_in: &[u32] = if base.as_slice() == src { src } else { &base };
+    if base.len() <= max && any_in(base_in, p.needles("_DV_NEEDLES")) {
+        let gated = (view.as_slice() == src).then_some(src);
+        view = dv_decoders(p, view, gated);
     }
     if view == joined && !read_any {
         return (text.to_vec(), None, None);
@@ -2843,24 +2853,38 @@ fn decoded_view_of(p: &Pack, text: &[u32], lang: Option<&'static str>) -> Readin
     (dv_arrays_and_members(p, view), line, jc_line)
 }
 
-/// core._dv_decoders: the decoders' calls on literals read as their text.
-fn dv_decoders(p: &Pack, mut view: PyStr) -> PyStr {
-    if has(&view, "Buffer") {
-        view = sub_decoded(p.re("_DV_BUFFER_RE"), &view, |m| {
+/// core._dv_decoders: the decoders' calls on literals read as their text. `gated` (P-1): a text with an open gate that
+/// holds what the view does: each step searches it (by its pairs of characters) rather than the view, a copy, until a
+/// step changes the view.
+fn dv_decoders(p: &Pack, mut view: PyStr, mut gated: Option<&[u32]>) -> PyStr {
+    // (a step's answer: the view it gives; the gated text stays the view while a step changes nothing)
+    fn step(view: &mut PyStr, gated: &mut Option<&[u32]>, new: PyStr) {
+        if gated.is_some_and(|g| g == new.as_slice()) {
+            return;
+        }
+        *view = new;
+        *gated = None;
+    }
+    if has(gated.unwrap_or(&view), "Buffer") {
+        let new = sub_decoded(p.re("_DV_BUFFER_RE"), gated.unwrap_or(&view), |m| {
             let enc = m.name("enc").unwrap_or(&[]);
             dv_decode(p, pystr::eq(enc, "hex"), dv_literal(m).unwrap_or(&[]))
         });
+        step(&mut view, &mut gated, new);
     }
-    if has(&view, "atob") {
-        view = sub_decoded(p.re("_DV_ATOB_RE"), &view, |m| dv_decode(p, false, dv_literal(m).unwrap_or(&[])));
+    if has(gated.unwrap_or(&view), "atob") {
+        let new = sub_decoded(p.re("_DV_ATOB_RE"), gated.unwrap_or(&view), |m| dv_decode(p, false, dv_literal(m).unwrap_or(&[])));
+        step(&mut view, &mut gated, new);
     }
-    if has(&view, "fromhex") || has(&view, "unhexlify") || has(&view, "b64decode") {
-        view = sub_decoded(p.re("_DV_PY_RE"), &view, |m| {
+    let here = gated.unwrap_or(&view);
+    if has(here, "fromhex") || has(here, "unhexlify") || has(here, "b64decode") {
+        let new = sub_decoded(p.re("_DV_PY_RE"), here, |m| {
             let hex = m.name("fh").is_some() || m.name("uh").is_some();
             dv_decode(p, hex, dv_literal(m).unwrap_or(&[]))
         });
+        step(&mut view, &mut gated, new);
     }
-    let helpers = dv_helpers(p, &view);
+    let helpers = dv_helpers(p, gated.unwrap_or(&view));
     if !helpers.is_empty() {
         let mut names: Vec<&PyStr> = helpers.iter().map(|(n, _)| n).collect();
         names.sort();
@@ -2868,14 +2892,15 @@ fn dv_decoders(p: &Pack, mut view: PyStr) -> PyStr {
         let parts: Vec<&[u32]> = alternation.iter().map(|x| x.as_slice()).collect();
         let src = cat(&[&p.text("_DV_NAME_HEAD"), &u("(?P<name>"), &pystr::join(&[c('|')], &parts), &p.text("_DV_HELPER_CALL_TAIL")]);
         let call = rxutil::dynamic(src, 0);
-        view = sub_decoded(&call, &view, |m| {
+        let new = sub_decoded(&call, gated.unwrap_or(&view), |m| {
             let name = m.name("name").unwrap_or(&[]);
             let hex = helpers.iter().find(|(n, _)| n.as_slice() == name).map(|(_, h)| *h).unwrap_or(false);
             dv_decode(p, hex, dv_literal(m).unwrap_or(&[]))
         });
+        step(&mut view, &mut gated, new);
     }
-    if has(&view, "^") {
-        let xors = dv_xor_decoders(p, &view);
+    if has(gated.unwrap_or(&view), "^") {
+        let xors = dv_xor_decoders(p, gated.unwrap_or(&view));
         if !xors.is_empty() {
             let mut names: Vec<&PyStr> = xors.iter().map(|(n, _, _)| n).collect();
             names.sort();
@@ -2883,7 +2908,7 @@ fn dv_decoders(p: &Pack, mut view: PyStr) -> PyStr {
             let parts: Vec<&[u32]> = alternation.iter().map(|x| x.as_slice()).collect();
             let src = cat(&[&p.text("_DV_NAME_HEAD"), &u("(?P<name>"), &pystr::join(&[c('|')], &parts), &p.text("_DV_HELPER_CALL_TAIL")]);
             let call = rxutil::dynamic(src, 0);
-            view = call.sub_fn(&view, 0, |m| {
+            let new = call.sub_fn(gated.unwrap_or(&view), 0, |m| {
                 let name = m.name("name").unwrap_or(&[]);
                 let Some((_, hex, key)) = xors.iter().find(|(n, _, _)| n.as_slice() == name) else {
                     return m.group0().to_vec();
@@ -2896,10 +2921,13 @@ fn dv_decoders(p: &Pack, mut view: PyStr) -> PyStr {
                     _ => m.group0().to_vec(),
                 }
             });
+            step(&mut view, &mut gated, new);
         }
     }
-    if has(&view, "fromCharCode") || has(&view, "chr") || has(&view, "byte") {
-        view = dv_char_codes(p, &view);
+    let here = gated.unwrap_or(&view);
+    if has(here, "fromCharCode") || has(here, "chr") || has(here, "byte") {
+        let new = dv_char_codes(p, here);
+        step(&mut view, &mut gated, new);
     }
     view
 }
@@ -3965,7 +3993,8 @@ impl PyLoad {
     /// None when the tokenizer refuses the text (Python does not load it either; [`py_runs_at_load`] decides).
     fn read(text: &[u32]) -> Option<PyLoad> {
         use crate::pyparse::lexer::{self as pl, T};
-        let lexed = pl::tokenize_with(text, true).ok()?;
+        let shared = pl::shared_with_tstrings(text);
+        let lexed = shared.as_ref().as_ref().ok()?;
         if lexed.fail.is_some() {
             return None;
         }

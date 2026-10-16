@@ -462,6 +462,35 @@ mod tests {
     }
 
     #[test]
+    fn a_list_of_strings_is_found_where_one_is() {
+        // (P-1: Needles::any_in by its automaton, its pairs or its scan, against each string looked for in turn;
+        // seeded lists and texts, short and long, with the text's gate open or not)
+        let alphabet = ['a', 'b', 'c', ' ', '(', '\n', 'x', '\u{e9}'];
+        let mut seed: u64 = 0x5EED_2026_1016_0003;
+        let mut next = move |n: u64| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed % n
+        };
+        for k in 0..4000 {
+            let ascii = if k % 5 == 4 { 8 } else { 7 };
+            let list: Vec<PyStr> =
+                (0..1 + next(6)).map(|_| (0..1 + next(5)).map(|_| alphabet[next(ascii) as usize] as u32).collect()).collect();
+            let needles = Needles::new(&list);
+            let len = if k % 40 == 0 { 5000 + next(5000) as usize } else { next(300) as usize };
+            let text: PyStr = (0..len).map(|_| alphabet[next(8) as usize] as u32).collect();
+            let want = list.iter().any(|n| text.windows(n.len()).any(|w| w == n.as_slice()));
+            let _gate = if k % 2 == 0 { crate::textgate::open(&text) } else { None };
+            assert_eq!(needles.any_in(&text), want, "list {:?}, text {}", list, k);
+            if len > 10 {
+                let part = &text[3..len - 2];
+                assert_eq!(needles.any_in(part), list.iter().any(|n| part.windows(n.len()).any(|w| w == n.as_slice())), "part of text {}", k);
+            }
+        }
+    }
+
+    #[test]
     fn normpath_matches_posixpath() {
         for (a, b) in [("", "."), ("a/../..", ".."), ("/a/../..", "/"), ("//a", "//a"), ("///a/./b/", "/a/b"),
                        ("a/b/../c", "a/c"), ("../x", "../x"), ("./", ".")] {
@@ -484,6 +513,93 @@ pub struct Needles {
     /// that looks for the characters the strings have at their rarest
     /// place), for a list it can hold: up to 64 strings, none empty
     scan: Option<crate::linre::literal::LitSet>,
+    /// the strings as an automaton reads them, a character at a time, for a
+    /// list of ASCII strings, none empty (P-1)
+    ac: Option<Ac>,
+}
+
+/// An Aho-Corasick automaton for a list of ASCII strings, none empty (P-1): does a text hold one of them, read in one
+/// pass. Where the literal scan stops at most places (its characters common in the text), as on a line or a text full
+/// of the strings' characters, it reads each character once instead of trying each place.
+struct Ac {
+    /// the state after a character, by state and character (`128 * state + character`); its high bit set where one of
+    /// the strings ends
+    next: Vec<u16>,
+}
+
+const AC_END: u16 = 0x8000;
+
+/// A search by pairs visiting more than one place in this many characters of the text reads it more slowly than the
+/// automaton does (each place is merged in order and tried for every string).
+const AC_PER_PLACE: usize = 8;
+
+impl Ac {
+    fn new(list: &[Vec<u32>]) -> Option<Ac> {
+        const NONE: u16 = u16::MAX;
+        if list.is_empty() || list.iter().any(|n| n.is_empty() || n.iter().any(|&c| c >= 128)) {
+            return None;
+        }
+        // the strings' tree, then each state's failure and its moves on every character, breadth first
+        let mut go: Vec<[u16; 128]> = vec![[NONE; 128]];
+        let mut ends = vec![false];
+        for n in list {
+            let mut s = 0usize;
+            for &c in n {
+                let c = c as usize;
+                if go[s][c] == NONE {
+                    if go.len() >= AC_END as usize {
+                        return None;
+                    }
+                    go.push([NONE; 128]);
+                    ends.push(false);
+                    go[s][c] = (go.len() - 1) as u16;
+                }
+                s = go[s][c] as usize;
+            }
+            ends[s] = true;
+        }
+        let mut fail = vec![0u16; go.len()];
+        let mut queue = std::collections::VecDeque::new();
+        for c in 0..128 {
+            match go[0][c] {
+                NONE => go[0][c] = 0,
+                t => queue.push_back(t as usize),
+            }
+        }
+        while let Some(s) = queue.pop_front() {
+            let f = fail[s] as usize;
+            ends[s] = ends[s] || ends[f];
+            for c in 0..128 {
+                let t = go[s][c];
+                if t == NONE {
+                    go[s][c] = go[f][c];
+                } else {
+                    fail[t as usize] = go[f][c];
+                    queue.push_back(t as usize);
+                }
+            }
+        }
+        let next = go.iter().flat_map(|row| row.iter().map(|&t| if ends[t as usize] { t | AC_END } else { t })).collect();
+        Some(Ac { next })
+    }
+
+    /// Does `h` hold one of the strings? (A character past ASCII is in none of them: the automaton starts again.)
+    #[inline]
+    fn holds(&self, h: &[u32]) -> bool {
+        let mut s = 0usize;
+        for &c in h {
+            if c >= 128 {
+                s = 0;
+                continue;
+            }
+            let t = self.next[128 * s + c as usize];
+            if t & AC_END != 0 {
+                return true;
+            }
+            s = t as usize;
+        }
+        false
+    }
 }
 
 impl Needles {
@@ -500,7 +616,8 @@ impl Needles {
         }
         let lits: Vec<crate::linre::literal::Lit> = list.iter().map(|n| n.iter().map(|&c| vec![c]).collect()).collect();
         let scan = if has_empty { None } else { crate::linre::literal::LitSet::new(&lits) };
-        Needles { list: list.to_vec(), by_first, other, has_empty, scan }
+        let ac = Ac::new(list);
+        Needles { list: list.to_vec(), by_first, other, has_empty, scan, ac }
     }
 
     /// Does `h` hold one of the strings?
@@ -512,6 +629,15 @@ impl Needles {
             && crate::textgate::ask(h, |p| self.list.iter().all(|n| !p.may_hold(n))).unwrap_or(false)
         {
             return false; // (each string has a pair the text lacks: textgate.rs)
+        }
+        if let Some(ac) = &self.ac {
+            // (a long open text whose pairs list the strings' places, where they are few: the scan goes by them;
+            // anywhere else the automaton reads each character once: P-1)
+            let by_pairs = self.scan.as_ref().filter(|scan| scan.pair_places(h).is_some_and(|n| n.saturating_mul(AC_PER_PLACE) <= h.len()));
+            return match by_pairs {
+                Some(scan) => scan.find(h, 0, h.len()).is_some(),
+                None => ac.holds(h),
+            };
         }
         if let Some(scan) = &self.scan {
             // (where it stops, one of the strings starts: the scan keeps

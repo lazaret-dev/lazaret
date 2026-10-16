@@ -91,7 +91,8 @@ impl LiteralTest {
         let is_ff = |x: u32| x == c('f') || x == c('F');
         let is_rb = |x: u32| x == c('r') || x == c('R') || x == c('b') || x == c('B');
         let spans: Vec<(usize, usize)> = literal_spans(p, text)
-            .into_iter()
+            .iter()
+            .copied()
             .filter(|&(a, _)| {
                 text[a] != c('`') && !(a > 0 && is_ff(text[a - 1])) && !(a > 1 && is_ff(text[a - 2]) && is_rb(text[a - 1]))
             })
@@ -557,12 +558,113 @@ impl Assign {
 pub(crate) fn dd_assigns(p: &Pack, text: &[u32]) -> Vec<Assign> {
     let max = p.usize("_DD_MAX_ASSIGNS");
     crate::textgate::memo(text, "_DD_ASSIGN_RE matches", || {
-        p.re("_DD_ASSIGN_RE")
-            .finditer(text)
+        let re = p.re("_DD_ASSIGN_RE");
+        if pystr::eq(&re.pattern, DD_ASSIGN_SRC) && re.flags == crate::pyre::UNICODE {
+            return dd_assigns_by_hand(text, max);
+        }
+        re.finditer(text)
             .take(max)
             .map(|m| Assign { name: (m.start_of(1), m.end_of(1)), value: (m.start_of(2), m.end_of(2)) })
             .collect()
     })
+}
+
+/// _DD_ASSIGN_RE as dd_assigns reads it: by hand (P-1), as NameTokens reads its pattern, for the pattern's search
+/// tried at every place of a long text cost a call's test some 40 M instructions over a large Python file (with
+/// another pattern in the pack, the pattern's matches).
+const DD_ASSIGN_SRC: &str = r"(?:(?<![^\n])|[;{]|=>)[ \t]*(?:(?:const|let|var)[ \t]+)?([A-Za-z_$][\w$]*)[ \t]*\+?=(?![=>])([^;\n]*)";
+
+/// [`DD_ASSIGN_SRC`]'s first `max` matches in `text`, as finditer gives them: at each place in turn, its three starts
+/// tried in order (a line's start, `;` or `{`, `=>`), then blanks, a `const`, `let` or `var` and blanks if the rest
+/// then matches (else none), a name, blanks, `=` or `+=` not followed by `=` or `>`, and the value up to a `;` or a
+/// line's end; the next search from the match's end. (Each repeat but the value's is followed by what it cannot hold,
+/// so the pattern's backtracking finds nothing its greedy reading misses.)
+fn dd_assigns_by_hand(text: &[u32], max: usize) -> Vec<Assign> {
+    let n = text.len();
+    let blank = |ch: u32| ch == c(' ') || ch == c('\t');
+    let word = |ch: u32| crate::unicode::is_word(ch) || ch == c('$');
+    let first = |ch: u32| ch < 128 && ((ch as u8).is_ascii_alphabetic() || ch == c('_') || ch == c('$'));
+    let blanks = |mut i: usize| {
+        while i < n && blank(text[i]) {
+            i += 1;
+        }
+        i
+    };
+    // the name from r: (its start, its end, the value's start, the value's end)
+    let named = |r: usize| -> Option<(usize, usize, usize, usize)> {
+        if r >= n || !first(text[r]) {
+            return None;
+        }
+        let mut e = r + 1;
+        while e < n && word(text[e]) {
+            e += 1;
+        }
+        let k = blanks(e);
+        let eq = if k + 1 < n && text[k] == c('+') && text[k + 1] == c('=') {
+            k + 1
+        } else if k < n && text[k] == c('=') {
+            k
+        } else {
+            return None;
+        };
+        let v = eq + 1;
+        if v < n && (text[v] == c('=') || text[v] == c('>')) {
+            return None;
+        }
+        let mut end = v;
+        while end < n && text[end] != c(';') && text[end] != c('\n') {
+            end += 1;
+        }
+        Some((r, e, v, end))
+    };
+    let rest = |q: usize| -> Option<(usize, usize, usize, usize)> {
+        let q = blanks(q);
+        for kw in ["const", "let", "var"] {
+            if pystr::starts_with(&text[q..], kw) {
+                let k = q + kw.len();
+                if k < n && blank(text[k]) {
+                    if let Some(m) = named(blanks(k)) {
+                        return Some(m);
+                    }
+                }
+                break;
+            }
+        }
+        named(q)
+    };
+    let mut out: Vec<Assign> = Vec::new();
+    let mut i = 0usize;
+    while i < n && out.len() < max {
+        // (to the next place a match can start: a line's start, a `;` or `{`, or a `=` that may start `=>`)
+        if i > 0 && text[i - 1] != c('\n') {
+            match crate::linre::literal::scan_by(text, i, n, |ch| ch == c('\n') || ch == c(';') || ch == c('{') || ch == c('=')) {
+                None => break,
+                Some(q) => i = if text[q] == c('\n') { q + 1 } else { q },
+            }
+            if i >= n {
+                break;
+            }
+        }
+        let ch = text[i];
+        let mut got = None;
+        if i == 0 || text[i - 1] == c('\n') {
+            got = rest(i);
+        }
+        if got.is_none() && (ch == c(';') || ch == c('{')) {
+            got = rest(i + 1);
+        }
+        if got.is_none() && ch == c('=') && i + 1 < n && text[i + 1] == c('>') {
+            got = rest(i + 2);
+        }
+        match got {
+            Some((a, b, v, end)) => {
+                out.push(Assign { name: (a as isize, b as isize), value: (v as isize, end as isize) });
+                i = end;
+            }
+            None => i += 1,
+        }
+    }
+    out
 }
 
 /// _LD_NAME_TOKEN_RE as the follower's names are read (`NameTokens` reads
@@ -1929,7 +2031,7 @@ pub fn secret_endpoint_at(p: &Pack, text: &[u32]) -> Option<(usize, PyStr)> {
     }
     let url_re = p.re("_SE_URL_RE");
     let mut endpoints: Vec<(usize, PyStr)> = Vec::new(); // (start, host) of the literals that hold one
-    for (a, b) in literal_spans(p, text) {
+    for &(a, b) in literal_spans(p, text).iter() {
         if endpoints.len() >= se_max {
             break;
         }
@@ -2071,6 +2173,34 @@ pub fn secret_endpoint_at(p: &Pack, text: &[u32]) -> Option<(usize, PyStr)> {
 #[cfg(test)]
 mod name_token_tests {
     use super::*;
+
+    /// The assignments read by hand are the pattern's matches (P-1), whatever the text, at most `max` of them.
+    #[test]
+    fn assignments_by_hand_are_the_patterns_matches() {
+        let p = crate::pack::current();
+        let re = p.re("_DD_ASSIGN_RE");
+        assert!(pystr::eq(&re.pattern, DD_ASSIGN_SRC) && re.flags == crate::pyre::UNICODE, "the pack's pattern is the one read by hand");
+        let mut seed: u64 = 0x0DDA_5516_2026_1016;
+        let mut next = move |n: u64| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed % n
+        };
+        let pieces = [
+            "a", "Z", "_", "$", "9", "x1", "é", "ſ", "٣", "\u{2160}", " ", "\t", "\n", "\r", ";", "{", "}", "=", "==", "=>", "+=", "+",
+            "+==", ">", "const", "let", "var", "const ", "let\t", "var  ", "constx", "lets", ".", "(", "'", "\"", "-", "\u{2028}",
+        ];
+        for k in 0..20_000 {
+            let text: Vec<u32> = (0..next(30)).flat_map(|_| pieces[next(pieces.len() as u64) as usize].chars().map(|ch| ch as u32)).collect();
+            let max = if k % 7 == 0 { next(4) as usize } else { 5000 };
+            let want: Vec<(isize, isize, isize, isize)> =
+                re.finditer(&text).take(max).map(|m| (m.start_of(1), m.end_of(1), m.start_of(2), m.end_of(2))).collect();
+            let got: Vec<(isize, isize, isize, isize)> =
+                dd_assigns_by_hand(&text, max).iter().map(|a| (a.name.0, a.name.1, a.value.0, a.value.1)).collect();
+            assert_eq!(got, want, "{:?}", text.iter().map(|&ch| char::from_u32(ch).unwrap()).collect::<String>());
+        }
+    }
 
     /// The names read by hand are the pattern's matches, for any text and
     /// range (a range's start may have a name or a spread before it).

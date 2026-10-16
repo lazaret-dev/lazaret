@@ -332,3 +332,68 @@ fn no_input_panics() {
         let _ = parse(&src);
     }
 }
+
+/// A reading of the tokenizer, to compare two by.
+fn reading(r: &Result<lexer::Lexed, lexer::LexError>) -> String {
+    match r {
+        Ok(l) => format!("{:?} {:?} {:?} {:?}", l.toks, l.line_starts, l.comments, l.fail),
+        Err(e) => format!("refused {:?}", e),
+    }
+}
+
+#[test]
+fn the_shared_reading_with_template_strings_is_the_tokenizers() {
+    // (P-1: lexer::shared_with_tstrings takes the parser's reading where it is the same; crafted texts, then seeded
+    // soups of pieces with every `t` prefix, quotes and f-string parts)
+    let crafted = [
+        "x = 1\n",
+        "t'a'\n",
+        "x = t\"{y}\" + 'z'\n",
+        "rt'a' tr\"b\" Rt'c' tR\"d\" T'e'\n",
+        "f\"{t'x'}\"\n",
+        "t\"{'\"'}\"\n",
+        "s = \"{'\" + t + '\"'\n",
+        "at'x' ta'y' bt'z'\n",
+        "t = 1\nprint(t, 'x')\n",
+        "x = 'unterminated\n",
+        "def f(:\n",
+        "\"\"\"doc\"\"\"\nt\n'x'\n",
+    ];
+    let pieces = [
+        "t", "T", "tr", "rt", "Rt", "tR", "f", "rf", "b", "r", "x", "at", "'", "\"", "'''", "\"\"\"", "{", "}", "{x}",
+        "!r", ":", "=", " ", "\n", "\\", "#c", "(", ")", "é", "1",
+    ];
+    let mut rng = Rng(0x2545_F491_4F6C_DD1D);
+    let mut soups: Vec<Vec<u32>> = crafted.iter().map(|s| cp(s)).collect();
+    for _ in 0..6000 {
+        let mut src: Vec<u32> = Vec::new();
+        for _ in 0..rng.below(24) + 1 {
+            src.extend(cp(pieces[rng.below(pieces.len())]));
+        }
+        soups.push(src);
+    }
+    for src in &soups {
+        let shared = lexer::shared_with_tstrings(src);
+        let own = lexer::tokenize_with(src, true);
+        assert_eq!(reading(&shared), reading(&own), "{:?}", src.iter().filter_map(|&c| char::from_u32(c)).collect::<String>());
+    }
+}
+
+#[test]
+fn names_and_keywords_by_table() {
+    // (P-1: lexer::ident_char's table and keyword's filter, against what they replaced)
+    for c in 0..0x300u32 {
+        let before = c >= 0x80 || c == 0x5F || (0x30..=0x39).contains(&c) || (0x41..=0x5A).contains(&c) || (0x61..=0x7A).contains(&c);
+        assert_eq!(lexer::ident_char(c), before, "{:#x}", c);
+    }
+    let before = |text: &[u32]| lexer::KEYWORDS.iter().position(|kw| kw.len() == text.len() && kw.bytes().zip(text).all(|(a, &b)| a as u32 == b));
+    for (k, kw) in lexer::KEYWORDS.iter().enumerate() {
+        assert_eq!(lexer::keyword(&cp(kw)), Some(k));
+        for name in [format!("{}x", kw), kw[1..].to_string(), format!("_{}", kw), kw.to_uppercase(), kw.to_lowercase()] {
+            assert_eq!(lexer::keyword(&cp(&name)), before(&cp(&name)), "{}", name);
+        }
+    }
+    for name in ["", "self", "x", "nonlocals", "Falsey", "\u{e9}", "y", "if_"] {
+        assert_eq!(lexer::keyword(&cp(name)), before(&cp(name)), "{}", name);
+    }
+}
