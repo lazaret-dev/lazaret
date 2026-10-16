@@ -3,8 +3,8 @@ as `lazaret-registry` compares it: for a release from npm's or PyPI's public reg
 guard.PROVENANCE_DAYS ago, over the guard's fetcher and scanner, the predecessor's verdict cached as any other's.
 
 The scans are real (in this process); the registries are recorded answers built here, and nothing opens a socket.
-Names are made up and the payloads inert: an install hook that runs a file that prints, a base64 string of the bytes
-0 to 255."""
+Names are made up and the payloads inert: an install hook that runs a file that prints (and a program it names, never
+run), a base64 string of the bytes 0 to 255."""
 
 import base64
 import datetime
@@ -41,9 +41,11 @@ def sri(data):
     return "sha512-" + base64.b64encode(hashlib.sha512(data).digest()).decode()
 
 
-def npm_package(hook):
-    files = {"package.json": manifest(main="index.js", **({"scripts": {"postinstall": "node install.js"}} if hook
-                                                          else {})),
+def npm_package(hook, clean=False):
+    """With `hook`, a postinstall that runs install.js and a program of its own (an indicator of its own); `clean`:
+    install.js alone, read clean (NEW-HOOK-FP)."""
+    cmd = "node install.js" if clean else "node install.js && npx --yes files-kit-setup"
+    files = {"package.json": manifest(main="index.js", **({"scripts": {"postinstall": cmd}} if hook else {})),
              "index.js": "module.exports = 1;\n", "install.js": "console.log('ready');\n"}
     return tarball(files)
 
@@ -136,6 +138,25 @@ class NpmTests(unittest.TestCase):
         versions = {"1.0.0": (days_ago(30), npm_package(True)), "1.0.2": (days_ago(2), npm_package(True))}
         check, _, _ = self.check(versions, "1.0.2")
         self.assertEqual((check.verdict, check.blocked, check.prior["newRules"]), ("WARN", [], []))
+
+    def test_a_new_hook_read_clean_is_not_compared(self):
+        # NEW-HOOK-FP: the guard keeps the hook's finding as read clean and asks nothing
+        versions = {"1.0.0": (days_ago(30), npm_package(False)), "1.0.2": (days_ago(2), npm_package(True, clean=True))}
+        check, fetcher, scanner = self.check(versions, "1.0.2")
+        self.assertEqual((check.verdict, check.blocked, check.prior, scanner.scans), ("WARN", [], None, 1))
+        self.assertFalse(any(u == NPM + "files-kit" for u in fetcher.asked), fetcher.asked)
+        hit = self.cache.get(guard.VerdictCache.key("npm", "files-kit", "1.0.2", sri(versions["1.0.2"][1])))
+        self.assertEqual(hit["rules"]["SC-INSTALL-HOOK"].get("readClean"), True)
+
+    def test_the_rules_kept_name_a_hook_read_clean_only_when_each_is(self):
+        def hook(line, **more):
+            return {"rule": "SC-INSTALL-HOOK", "sev": "MAJOR", "file": "package.json", "line": line, "msg": "m", **more}
+        self.assertEqual(guard.rules_of({"issues": [hook(3, readClean=True)]})["SC-INSTALL-HOOK"]["readClean"], True)
+        for issues in ([hook(3, readClean=True), hook(4)], [hook(4), hook(3, readClean=True)]):
+            kept = guard.rules_of({"issues": issues})["SC-INSTALL-HOOK"]
+            self.assertEqual((kept["line"], "readClean" in kept), (4, False))
+            asked = prior.candidates(list(guard.rules_of({"issues": issues}).values()))
+            self.assertEqual(asked.keys(), {"SC-INSTALL-HOOK"})
 
     def test_not_compared(self):
         versions = {"1.0.0": (days_ago(70), npm_package(False)), "1.0.2": (days_ago(40), npm_package(True))}

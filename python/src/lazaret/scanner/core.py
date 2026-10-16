@@ -105,6 +105,11 @@ def follow_hook(cmd):
     return targets, complete
 
 
+def hook_runs_only_files(cmd):
+    """Does an install hook's command run files of the package and nothing else, all of it read (NEW-HOOK-FP)?"""
+    return _ask("hook_runs_only_files", cmd)
+
+
 def hook_script_targets(cmd):
     """The files an install hook runs (follow_hook's targets)."""
     return follow_hook(cmd)[0]

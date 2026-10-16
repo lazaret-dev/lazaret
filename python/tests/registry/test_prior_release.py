@@ -5,7 +5,7 @@ postinstall, 2025).
 
 The registries are fakes served by URL (`repo._fetch` for the documents, `repo.http_bytes` for the files; a crate's
 module is a fake too); nothing reaches the network. Names are made up and the payloads inert: an install hook that
-runs a file that prints, a base64 string of the bytes 0 to 255."""
+runs a file that prints (and a program it names, never run), a base64 string of the bytes 0 to 255."""
 import base64
 import datetime
 import hashlib
@@ -32,11 +32,13 @@ def iso(dt):
     return dt.isoformat().replace("+00:00", "Z")
 
 
-def npm_package(hook):
-    """An npm tarball: with `hook`, a postinstall that runs install.js (SC-INSTALL-HOOK, MAJOR)."""
-    files = {"package.json": manifest(main="index.js", **({"scripts": {"postinstall": "node install.js"}} if hook
-                                                          else {})),
-             "index.js": "module.exports = 1;\n", "install.js": "console.log('ready');\n"}
+def npm_package(hook, clean=False, **files):
+    """An npm tarball: with `hook`, a postinstall that runs install.js and a program of its own, `npx` (SC-INSTALL-HOOK,
+    MAJOR, with an indicator of its own); `clean`: install.js alone, which the install-script test reads clean
+    (NEW-HOOK-FP); `files`: more files, or others in their place."""
+    cmd = "node install.js" if clean else "node install.js && npx --yes files-kit-setup"
+    files = {"package.json": manifest(main="index.js", **({"scripts": {"postinstall": cmd}} if hook else {})),
+             "index.js": "module.exports = 1;\n", "install.js": "console.log('ready');\n", **files}
     return tarball(files)
 
 
@@ -119,6 +121,49 @@ class NpmTests(unittest.TestCase):
         res = scan_npm(reg, "files-kit", "1.0.2")
         self.assertEqual((res["verdict"], new_indicators(res)), ("WARN", []))
         self.assertEqual(res["priorRelease"]["newRules"], [])
+
+    def test_a_new_hook_read_clean_is_not_a_new_indicator(self):
+        # NEW-HOOK-FP (John, Oct 15): a new install hook whose files the install-script test reads clean stays MAJOR;
+        # pnpm 12.8.1's shape, `node install.js` as its preinstall and its postinstall (index.js's blob: compared)
+        blob = {"index.js": f"module.exports = '{BLOB}';\n"}
+        new = tarball({"package.json": manifest(main="index.js", scripts={"preinstall": "node install.js",
+                                                                         "postinstall": "node install.js"}),
+                       "install.js": "const os = require('os');\nconsole.log('ready', os.platform());\n", **blob})
+        reg = npm_registry("files-kit", {"1.0.0": (RELEASE - 30 * DAY, npm_package(False, **blob)),
+                                         "1.0.2": (RELEASE, new)})
+        res = scan_npm(reg, "files-kit", "1.0.2")
+        self.assertEqual((res["verdict"], new_indicators(res)), ("WARN", []), res["verdictReason"])
+        self.assertEqual(res["priorRelease"]["newRules"], [])                           # (SC-B64 asked, and had)
+        hooks = [i for i in res["issues"] if i["rule"] == "SC-INSTALL-HOOK"]
+        self.assertEqual([(i["sev"], i.get("readClean")) for i in hooks], [("MAJOR", True)] * 2)
+        # read clean and nothing else asked: nothing to compare, nothing fetched
+        reg = npm_registry("files-kit", {"1.0.0": (RELEASE - 30 * DAY, npm_package(False)),
+                                         "1.0.2": (RELEASE, npm_package(True, clean=True))})
+        res = scan_npm(reg, "files-kit", "1.0.2")
+        self.assertEqual((res["verdict"], "priorRelease" in res, len(reg.fetched)), ("WARN", False, 1))
+
+    def test_a_new_hook_with_an_indicator_of_its_own(self):
+        # each a new hook the install-script test does not read clean: compared, new, CRITICAL (the release's other
+        # weaker finding, index.js's blob, its predecessor had)
+        blob = f"module.exports = '{BLOB}';\n"
+        lib = {"install.js": "require('./lib/setup')();\n", "lib/setup.js": f"module.exports = () => '{BLOB}';\n"}
+        cases = {"a program of its own": ("node install.js && npx --yes files-kit-setup", {}),
+                 "code inline": ('node -e "console.log(1)"', {}),
+                 "a file the package does not hold": ("node missing.js", {}),
+                 "a download or evaluation tool on its face": ("sh scripts/base64-setup.sh",
+                                                              {"scripts/base64-setup.sh": "echo ready\n"}),
+                 "a module it loads with a weaker finding": ("node install.js", lib)}
+        for why, (cmd, files) in cases.items():
+            with self.subTest(why):
+                new = tarball({"package.json": manifest(main="index.js", scripts={"postinstall": cmd}),
+                               "index.js": blob, "install.js": "console.log('ready');\n", **files})
+                old = npm_package(False, **{"index.js": blob})
+                reg = npm_registry("files-kit", {"1.0.0": (RELEASE - 30 * DAY, old), "1.0.2": (RELEASE, new)})
+                res = scan_npm(reg, "files-kit", "1.0.2")
+                self.assertEqual(res["verdict"], "SUSPICIOUS", res["verdictReason"])
+                self.assertEqual(res["priorRelease"]["newRules"], ["SC-INSTALL-HOOK"])
+                [hook] = [i for i in res["issues"] if i["rule"] == "SC-INSTALL-HOOK"]
+                self.assertEqual((hook["sev"], "readClean" in hook), ("MAJOR", False))
 
     def test_no_established_predecessor(self):
         for versions in ({"1.0.2": (RELEASE, npm_package(True))},
@@ -276,6 +321,12 @@ class PartsTests(unittest.TestCase):
                                                   issue("SC-TRUNCATED", "MAJOR"), issue("SC-UNUSED-DEPENDENCY", "INFO"),
                                                   issue("S-EVAL-JS", "MAJOR"), issue("SC-INSTALL-HOOK", "MINOR")])),
                          ["SC-B64", "SC-INSTALL-HOOK"])
+        # an install hook read clean is not asked about (NEW-HOOK-FP); one that is not, beside it, is
+        clean = dict(issue("SC-INSTALL-HOOK", "MAJOR"), readClean=True)
+        self.assertEqual(prior.candidates([clean]), {})
+        other = issue("SC-INSTALL-HOOK", "MAJOR")
+        self.assertIs(prior.candidates([clean, other])["SC-INSTALL-HOOK"], other)
+        self.assertEqual(prior.candidates([dict(issue("SC-B64", "MAJOR"), readClean=True)]).keys(), {"SC-B64"})
         self.assertEqual(prior.candidates([issue("SC-B64", "MAJOR"), issue("SC-PIPE-SHELL", "CRITICAL")]), {})
 
     def test_the_established_predecessor(self):

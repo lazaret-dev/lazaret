@@ -816,7 +816,20 @@ release's files were (`_scan_artifact`, the run's memo shared, so the
 files the two have alike are answered once); each weaker indicator's rule
 the predecessor has no finding of, but those of what a release may well
 ship anew (`NOT_COMPARED`: SC-BINARY, SC-OPAQUE-BLOB, SC-NESTED-ARCHIVE), is
-CRITICAL. Best effort: a history over `MAX_HISTORY_BYTES` (16 MB), a
+CRITICAL. Nor is an install hook the install-script test reads clean
+(NEW-HOOK-FP, rule set 2.86.0; John, Oct 15: it stays MAJOR): the registry
+scan marks a MAJOR SC-INSTALL-HOOK `readClean`
+(`_ArtifactScan._hooks_read_clean`, after the phases) when its command runs
+files of the package and nothing else (the engine's `hook_runs_only_files`:
+each command a file run with node, a JavaScript runtime, a shell or Python,
+or by its path; `cd`, a wrapper such as `env` and `_HOOK_INERT`'s builtins
+aside), names no download or evaluation tool (`_hook_is_suspicious`), the
+walk is complete, each file is one the package holds and was read, and none
+of them, nor the modules they load (`_reach_of`), has a supply-chain
+finding of its own; `prior.candidates` passes it over, and the guard keeps
+it so in a verdict's rules (`guard.rules_of`: read clean only when each of
+the rule's findings is). A new hook with an indicator of its own is still
+compared. Best effort: a history over `MAX_HISTORY_BYTES` (16 MB), a
 registry that does not answer, a predecessor's file whose digest is not
 the registry's or whose scan was not complete, is no finding, and the
 result's `priorRelease` says what was compared (`notCompared` and why).
@@ -824,8 +837,9 @@ result's `priorRelease` says what was compared (`notCompared` and why).
 does; the tests turn it off (`tests/__init__.py`) but its own. The popular
 set's 42 WARN releases (Oct 15): 33 have only rules not compared, 7 had a
 finding of each rule in their predecessor, pnpm 12.8.1's new postinstall
-(against 11.27.1) is the one SC-NEW-INDICATOR, and vite's packument (39 MB)
-is over the budget. `bench.py prior`
+(against 11.27.1) was the one SC-NEW-INDICATOR, and vite's packument (39 MB)
+is over the budget; since NEW-HOOK-FP (Oct 16) pnpm's hooks are read clean
+and the release WARN, and the 41 others compare as they did. `bench.py prior`
 measures it on a run's WARN releases, which `run` (the files alone) does
 not. The guard runs it (`guard.with_prior`, `prior.compare` over its
 fetcher and scanner) on a WARN release from npm's or PyPI's public

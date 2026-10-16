@@ -178,6 +178,7 @@ rust/
                              swept lookaheads, backtracker, Pike VM, prefilters
     src/scan.rs              pystr's find: a string by its rarest character
     src/hooks.rs             shlex, _hook_tokens, follow_hook, node_candidates, node -e, #!
+                             (and hook_runs_only_files: a hook of the package's files alone)
     src/signs.rs             install_script_risk, import_time_risk(+severity), decoded_view
                              (and string_array_line), spawned_scripts, and the detectors they
                              read (exfiltration shapes, wallet swaps, services at login,

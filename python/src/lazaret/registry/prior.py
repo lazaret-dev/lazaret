@@ -13,7 +13,14 @@ earlier is not one; SC-NEW-DEPENDENCY's week), a pre-release only for a pre-rele
 files, and each weaker indicator's rule the predecessor had no finding of is an SC-NEW-INDICATOR, CRITICAL. The rules
 of what a release may well ship anew (NOT_COMPARED: a binary, an opaque blob, a nested archive) are not compared.
 Measured on the popular set (Oct 15: 1,703 benign releases, 42 of them WARN): 41 had a finding of each such rule in
-their predecessor; pnpm 12.8.1's new postinstall (`node install.js`, against 11.27.1) is the one SC-NEW-INDICATOR.
+their predecessor; pnpm 12.8.1's new postinstall (`node install.js`, against 11.27.1) was the one SC-NEW-INDICATOR.
+
+Nor is an install hook the install-script test reads clean (NEW-HOOK-FP; John, Oct 15: it stays MAJOR): one whose
+command runs files of the package and nothing else, each read, none of them nor what they load with a supply-chain
+finding of its own (the registry scan's `readClean`, repo._ArtifactScan._hooks_read_clean). A maintainer's new build
+step reads that way, pnpm 12.8.1's among them. A new hook with an indicator of its own is still asked about: one that
+runs a program of its own (`npx x`) or code inline, a download or evaluation tool on its face, a file the package does
+not hold, or a script with a weaker finding (a hostile one is CRITICAL already, and the release SUSPICIOUS).
 
 The predecessor: npm, by the packument's times; PyPI, by the Simple API's upload times (the first file's of each
 release), its files of the same kind as the release's that were flagged (the same name with the version changed, else
@@ -37,6 +44,7 @@ MAX_HISTORY_BYTES = 16 * 1024 * 1024     # an npm packument or a Simple API docu
 MAX_FILES = 3                            # the predecessor's files downloaded and scanned
 ECOSYSTEMS = ("npm", "pypi", "crates")
 RULE = "SC-NEW-INDICATOR"
+HOOK_RULE = "SC-INSTALL-HOOK"
 #: what a release may well ship anew: not compared
 NOT_COMPARED = frozenset({"SC-BINARY", "SC-OPAQUE-BLOB", "SC-NESTED-ARCHIVE"})
 PYPI_SIMPLE_JSON = "application/vnd.pypi.simple.v1+json"
@@ -60,7 +68,8 @@ def _repo():
 
 def candidates(issues):
     """{rule: its first finding} of the weaker indicators of a release's files that its predecessor is asked about;
-    {} when one of the findings is strong (the release is SUSPICIOUS without it)."""
+    {} when one of the findings is strong (the release is SUSPICIOUS without it). An install hook read clean
+    (`readClean`) is not one (NEW-HOOK-FP)."""
     repo, out = _repo(), {}
     for i in issues:
         rule = i["rule"]
@@ -68,7 +77,7 @@ def candidates(issues):
             continue
         if i["sev"] in repo.STRONG_SEVERITIES:
             return {}
-        if rule not in NOT_COMPARED:
+        if rule not in NOT_COMPARED and not (rule == HOOK_RULE and i.get("readClean") is True):
             out.setdefault(rule, i)
     return out
 

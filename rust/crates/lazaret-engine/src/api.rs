@@ -40,6 +40,8 @@ pub const CALLS: &[&str] = &[
     "version", "batch", "pack.install", "pack.reset", "pack.info", "pyre.probe", "pyre.escape",
     // Phase 1: following install hooks, the install-script and import-time tests
     "shlex_split", "hook_tokens", "follow_hook", "node_candidates", "node_e_codes", "shebang_lang",
+    // a hook that runs files of the package alone (NEW-HOOK-FP)
+    "hook_runs_only_files",
     "install_script_risk", "import_time_risk", "import_time_severity", "decoded_view", "spawned_scripts",
     "self_publish_at", "runs_dll", "join_string_pieces", "received_code_kind", "runs_received_code",
     "downloads_and_runs", "decodes_and_runs", "powershell_risk", "stager_at", "reverse_shell_at",
@@ -1709,6 +1711,7 @@ fn dispatch(name: &str, args: &Value, text: &[u32]) -> Result<Value, CallError> 
             let (targets, complete) = hooks::follow_hook(p, text);
             Value::Arr(vec![strs(&targets), Value::Bool(complete)])
         }
+        "hook_runs_only_files" => Value::Bool(hooks::hook_runs_only_files(p, text)),
         "node_candidates" => strs(&hooks::node_candidates(text)),
         "node_e_codes" => strs(&hooks::node_e_codes(p, text)),
         "shebang_lang" => hooks::shebang_lang(p, text).map(Value::str).unwrap_or(Value::Null),

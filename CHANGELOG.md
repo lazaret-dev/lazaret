@@ -91,9 +91,15 @@ aggregate):
   day before is not one), as it scanned the release; a weaker indicator whose rule the predecessor had no finding of
   is SC-NEW-INDICATOR, CRITICAL, so the release is SUSPICIOUS. A hijacked release is a change to an established
   package: the Shai-Hulud worm gave each package it republished a postinstall script, a payload the scan need not
-  recognise. What a release may well ship anew (a binary, an opaque blob, a nested archive) is not compared. On the
-  popular set's 42 WARN releases, pnpm 12.8.1's new postinstall (against 11.27.1) is the one finding; 7 others had
-  every rule in their predecessor. Best effort: a history over 16 MB (vite's packument is 39 MB), a registry that
+  recognise. What a release may well ship anew (a binary, an opaque blob, a nested archive) is not compared, nor,
+  since rule set 2.86.0 (NEW-HOOK-FP; John, Oct 15: it stays MAJOR), an install hook the install-script test reads
+  clean: one that runs files of the package and nothing else, each read, none of them nor what they load with a
+  supply-chain finding of its own (the registry scan marks it `readClean`). A new hook with an indicator of its own is
+  still compared: one that runs a program of its own (`npx x`, `node-gyp`) or code inline, names a download or
+  evaluation tool, runs a file the package does not hold, or runs a script with a weaker finding. On the popular
+  set's 42 WARN releases, pnpm 12.8.1's new preinstall and postinstall (`node install.js`, against 11.27.1) were the
+  one finding; read clean, the release is WARN, and the 41 others are compared as they were (7 had every rule in
+  their predecessor). Best effort: a history over 16 MB (vite's packument is 39 MB), a registry that
   doesn't answer, or a predecessor's file that doesn't check out is no finding, and the result's `priorRelease` says
   what was compared. `LAZARET_NO_PRIOR_RELEASE=1` turns it off. `scripts/bench.py prior RUN MANIFEST OUT` measures it
   on a run's WARN releases (`run` scans the files alone). `lazaret guard` runs it too, on a WARN release

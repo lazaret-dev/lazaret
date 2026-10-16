@@ -348,7 +348,7 @@ SAMPLE = 8192              # header/entropy sample read from oversized files
 #      entry points and hook targets, Python install scripts
 # 2.3: verdict tiers, decoded hex, install-script inspection; 2.2:
 #      verdict-integrity; 2.1: binary-artifact awareness
-ENGINE_VERSION = "2.85.0"
+ENGINE_VERSION = "2.86.0"
 
 # ---------------- The content memo (P-2a, registry/contentcache.py) ----------------
 # One per scan_package run: the engine answers once for content several of a
@@ -2913,6 +2913,7 @@ class _ArtifactScan:
         self.vsix_special = {}     # vsix: rel -> when it runs, for an entry a contribution names (EG-5)
         self._vsix_whens = None    # vsix: rel -> when it runs, for what those reach and `main` does not (_vsix_when)
         self.install_scripts = set()   # hook targets, setup.py & co (install_script_risk)
+        self.hooks_read = []       # [(an install hook's finding, the files it runs)] each read clean (_follow_hooks)
         self.startup = set()       # a wheel's sitecustomize / usercustomize
         self.unread = False        # a member the archive's limits left unread
         self.unused_dependencies = []  # npm: registry names no file uses (_unused_dependencies); PyPI's (D-5)
@@ -3940,6 +3941,10 @@ class _ArtifactScan:
                 issue["sev"] = "CRITICAL"
                 issue["msg"] = f"Install hook command {'; and '.join(persist)}."
             targets, complete = lazaret.follow_hook(issue["cmd"])
+            # (NEW-HOOK-FP) read clean so far: it runs files of the package and nothing else, nothing on its face
+            clean = (complete and bool(targets) and lazaret.hook_runs_only_files(issue["cmd"])
+                     and not lazaret._hook_is_suspicious(issue["cmd"]))
+            runs = []
             if not complete:            # a limit stopped the walk (core.HOOK_MAX_CHARS)
                 self.truncate(issue["file"], "its install hook is more than Lazaret follows "
                               f"({lazaret.HOOK_MAX_COMMANDS:,} commands, {lazaret.HOOK_MAX_TARGETS} "
@@ -3948,11 +3953,14 @@ class _ArtifactScan:
             for target in targets:
                 rel = self._resolve(_rel_join(base, target))
                 if rel is None:
+                    clean = False       # (a file the package does not hold: nothing of it was read)
                     continue
                 self.entries.add(rel)
                 self.install_scripts.add(rel)
                 lang = "sh" if rel.endswith(".sh") else "js"
                 text = self._text_of(rel, lang)
+                clean = clean and bool(text)
+                runs.append(rel)
                 reasons = (_engine.install_script_risk(text, lang=_engine.script_lang(rel), own=self._own_name())
                            if text else [])
                 if reasons and issue["sev"] not in STRONG_SEVERITIES:
@@ -3960,12 +3968,33 @@ class _ArtifactScan:
                     issue["msg"] = f"Install hook runs {target}, which {'; and '.join(reasons)}."
                 # the scripts it starts with node or python (0.1.8, core.spawned_scripts)
                 for started, more in self._started_scripts(rel, text, base, self.install_scripts):
+                    runs.append(started)
                     more = (_engine.install_script_risk(more, lang=_engine.script_lang(started), own=self._own_name())
                             if more else [])
                     if more and issue["sev"] not in STRONG_SEVERITIES:
                         issue["sev"] = "CRITICAL"
                         issue["msg"] = (f"Install hook runs {target}, which starts {started}, which "
                                         f"{'; and '.join(more)}.")
+            if clean and issue["sev"] == "MAJOR":
+                self.hooks_read.append((issue, runs))
+
+    def _hooks_read_clean(self):
+        """NEW-HOOK-FP (John, Oct 15: a new install hook the install-script test reads clean stays MAJOR): `readClean`
+        on each MAJOR install hook that runs files of the package and nothing else, each read, none of them, nor
+        what they load, with a supply-chain finding of its own. The comparison with the release before
+        (registry/prior.py) does not count such a hook as new; one with an indicator of its own still is."""
+        if not self.hooks_read:
+            return
+        flagged = {}
+        for i in self.issues:
+            if i["rule"].startswith("SC-") and i["sev"] != "INFO" and isinstance(i.get("file"), str):
+                flagged.setdefault(i["file"], []).append(i)
+        for issue, runs in self.hooks_read:
+            files = set()
+            for rel in runs:
+                files |= self._reach_of(rel)
+            if issue["sev"] == "MAJOR" and not any(j is not issue for rel in files for j in flagged.get(rel, ())):
+                issue["readClean"] = True
 
     def _vsix_hook_words(self):
         """An extension's vscode:uninstall findings in the editor's words, once
@@ -4871,6 +4900,7 @@ class _ArtifactScan:
         if self.artifact == "vsix":
             self._vsix_hook_words()
         _demote_test_findings(self.issues, reachable if reachable is not None else self.entries)
+        self._hooks_read_clean()
         if self.shown is not None:            # (--show-secrets: while the texts are in hand)
             self.shown.update(lazaret.flagged_lines(self.issues, self.read_texts()))
         # F9b: the decompressed sources are no longer needed (nor the engine's copies of them: FE-1)

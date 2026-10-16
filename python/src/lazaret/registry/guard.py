@@ -678,12 +678,16 @@ def summarize(result, limit=3):
 
 def rules_of(result):
     """{rule: its first finding, in short} of a scan result's supply-chain findings: what the comparison with the
-    release before asks about (prior.candidates) and counts (prior.rules_found), kept with the verdict."""
+    release before asks about (prior.candidates) and counts (prior.rules_found), kept with the verdict. An install
+    hook read clean (`readClean`, NEW-HOOK-FP) is kept only when every one of the rule's findings is."""
     out = {}
     for i in result.get("issues", []):
         if i["rule"] in prior_.rules_found([i]):
-            out.setdefault(i["rule"], {"rule": i["rule"], "sev": i["sev"], "name": i.get("name", ""),
-                                       "file": i.get("file", ""), "line": i.get("line", 1), "msg": i["msg"][:400]})
+            short = {"rule": i["rule"], "sev": i["sev"], "name": i.get("name", ""), "file": i.get("file", ""),
+                     "line": i.get("line", 1), "msg": i["msg"][:400],
+                     **({"readClean": True} if i.get("readClean") is True else {})}
+            if i["rule"] not in out or (out[i["rule"]].get("readClean") and "readClean" not in short):
+                out[i["rule"]] = short
     return out
 
 

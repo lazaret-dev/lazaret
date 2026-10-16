@@ -215,6 +215,8 @@ pub(crate) fn interpreter_script(args: &[PyStr]) -> (Option<PyStr>, Option<PyStr
 struct Walk {
     commands: usize,
     complete: bool,
+    /// the commands that run no file of the package (hook_runs_only_files)
+    others: usize,
 }
 
 /// core._apply_path: posixpath.normpath's loop on the components kept so far.
@@ -414,6 +416,7 @@ impl<'p> Seg<'p> {
         let mut script: Option<PyStr> = None;
         let mut extra: Vec<PyStr> = Vec::new();
         let mut code: Option<PyStr> = None;
+        let mut inline_read = false;
         let rest = &words[i + 1..];
         let runtimes = p.map_strs("_JS_RUNTIMES");
         let runtime = runtimes.iter().find(|(k, _)| k.as_slice() == base.as_slice());
@@ -432,6 +435,7 @@ impl<'p> Seg<'p> {
             script = s;
             if let Some(inline) = inline {
                 if !inline.is_empty() && self.depth < 2 && in_set(p.strs("_SHELL_NAMES"), &base) {
+                    inline_read = true;
                     let inner = hook_targets(p, &inline, self.depth + 1, walk);
                     for t in inner {
                         let j = self.join(&t, where_.as_ref());
@@ -445,6 +449,16 @@ impl<'p> Seg<'p> {
             || p.re("_SCRIPT_EXT_RE").search(&head).is_some()
         {
             script = Some(head.clone());
+        }
+        // a command that runs no file of the package (a program of its own, code inline), a harmless builtin aside
+        let loads_files = |code: &PyStr| {
+            let local = p.re("_LOCAL_REQUIRE_RE");
+            local.search(code).is_some() && p.re("_INLINE_DANGER_RE").search(&local.sub(code, &[], 0)).is_none()
+        };
+        if script.is_none() && extra.is_empty() && !inline_read && !code.as_ref().map(loads_files).unwrap_or(false)
+            && !in_set(p.strs("_HOOK_INERT"), &base)
+        {
+            walk.others += 1;
         }
         let mut all: Vec<PyStr> = Vec::new();
         if let Some(s) = script {
@@ -512,7 +526,7 @@ pub fn follow_hook(p: &Pack, cmd: &[u32]) -> (Vec<PyStr>, bool) {
     if cmd.len() > p.usize("HOOK_MAX_CHARS") {
         return (Vec::new(), false);
     }
-    let mut walk = Walk { commands: 0, complete: true };
+    let mut walk = Walk { commands: 0, complete: true, others: 0 };
     let mut targets = hook_targets(p, cmd, 0, &mut walk);
     let node_e = p.re("_NODE_E_RE");
     let req = p.re("_LOCAL_REQUIRE_RE");
@@ -541,6 +555,21 @@ pub fn follow_hook(p: &Pack, cmd: &[u32]) -> (Vec<PyStr>, bool) {
         walk.complete = false;
     }
     (out, walk.complete)
+}
+
+/// NEW-HOOK-FP (0.1.9): does an install hook's command run files of the package and nothing else (each file with
+/// node, a JavaScript runtime, a shell or Python, or by its path; `cd` between them, a wrapper such as `env` and a
+/// harmless builtin, `_HOOK_INERT`, aside), all of it read? A command that runs a program of its own (`npx x`,
+/// `node-gyp rebuild`) or code inline (`node -e` that does more than load a file of the package, `python -c`) does
+/// not, nor one that runs no file. The registry's comparison with the release before reads a new hook whose files
+/// the install-script test reads clean as the capability it is (registry/prior.py).
+pub fn hook_runs_only_files(p: &Pack, cmd: &[u32]) -> bool {
+    if pystr::strip(cmd).is_empty() || cmd.len() > p.usize("HOOK_MAX_CHARS") {
+        return false;
+    }
+    let mut walk = Walk { commands: 0, complete: true, others: 0 };
+    let targets = hook_targets(p, cmd, 0, &mut walk);
+    walk.complete && walk.others == 0 && targets.iter().any(|t| !t.is_empty() && !is(t, "-") && !is(t, "."))
 }
 
 /// The code of each `node -e` in a command, as written (the parity tests' view).
@@ -643,5 +672,25 @@ mod tests {
         assert_eq!(words("node 'a.js"), None); // a quote left open
         assert_eq!(words("node \"a.js\\"), None);
         assert_eq!(words("node x.js \\"), None); // a backslash at the end
+    }
+
+    #[test]
+    fn a_hook_that_runs_files_of_the_package_and_nothing_else() {
+        let p = crate::pack::current();
+        let only = |cmd: &str| hook_runs_only_files(&p, &cmd.chars().map(|ch| ch as u32).collect::<Vec<u32>>());
+        for cmd in ["node install.js", "node ./scripts/postinstall.js --quiet", "cd lib && node a.js", "sh ./setup.sh",
+                    "bash scripts/x.sh || true", "node install.js || echo skipped", "cross-env A=1 node build/x.js",
+                    "python3 tools/setup.py", "./bin/install", "node -e \"try{require('./postinstall')}catch(e){}\"",
+                    "sh -c 'node a.js && node b.js'", "bun run.ts", "node a.js; exit 0", "node a.js > out.log 2>&1"] {
+            assert!(only(cmd), "{cmd:?}");
+        }
+        for cmd in ["", "  ", "npx --yes some-tool", "node-gyp rebuild", "prebuild-install || node-gyp rebuild",
+                    "husky install", "node install.js && npx some-tool", "node -e \"console.log(1)\"",
+                    "python -c \"print(1)\"", "node", "node --version", "curl -s https://example.invalid/x -o x",
+                    "node a.js && patch-package", "sh -c 'npx x'", "echo ok", "true"] {
+            assert!(!only(cmd), "{cmd:?}");
+        }
+        let long = format!("node {}.js", "a".repeat(p.usize("HOOK_MAX_CHARS")));
+        assert!(!only(&long));                                                   // (more than the walk reads)
     }
 }

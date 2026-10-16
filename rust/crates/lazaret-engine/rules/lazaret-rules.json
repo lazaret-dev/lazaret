@@ -1,6 +1,6 @@
 {
  "format": 1,
- "rule_set": "2.85.0",
+ "rule_set": "2.86.0",
  "source": "lazaret.scanner.core, extracted by scripts/make_rust_tables.py \u2014 do not edit",
  "values": {
   "ALWAYS_PRUNE_DIRS": {
@@ -12096,6 +12096,14 @@
   "_HOOK_FALLBACK_TOKEN_RE": {
    "flags": "",
    "re": "&&|\\|\\||[;|&()]|[^\\s;|&()]+"
+  },
+  "_HOOK_INERT": {
+   "set": [
+    ":",
+    "echo",
+    "exit",
+    "true"
+   ]
   },
   "_HOOK_REDIRECTS": {
    "set": [
