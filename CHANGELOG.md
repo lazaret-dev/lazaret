@@ -127,7 +127,9 @@ aggregate):
   where it should reach says which part it covered, and `--ci` fails the run: a list that runs back further than a
   run reads is named as not checked and the next run starts from the newest; a page that fails keeps the cursor; a list
   that cannot be read at all is not checked. Each crate is listed once, with the version it published last (the API's
-  `newest_version`, else `default_version`), and `--scan` scans `crates:name@version`.
+  `newest_version`, else `default_version`), and `--scan` scans `crates:name@version`. crates.io's first `--resume`
+  run reads the last hour unless `--since` is given (a week is some 55,000 crates), and a walk of more than five
+  pages says how far it has read on stderr as it goes (John's first run, Oct 15, sat silent for minutes).
 - **Platform wheels for musl Linux and Windows ARM64 (W-1).** `musllinux_1_2_x86_64` and `musllinux_1_2_aarch64`
   (Alpine and other musl systems, musl 1.2 or later) and `win_arm64`, so pip installs the engine there without Rust,
   where it compiled the sdist before (eight platform wheels in all). The musl libraries are built in PyPA's

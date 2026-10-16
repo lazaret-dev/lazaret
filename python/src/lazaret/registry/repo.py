@@ -6962,6 +6962,11 @@ NPM_RESUME_PAGES = 20
 # crawler policy's pace). Measured Oct 16: the 24 hours before were 7,825 crates, 79 pages, 78 s; so 200 pages are
 # about two and a half days of crates.io, read in about 3½ minutes
 CRATES_DISCOVER_PAGES = 200
+# crates.io's first --resume run, without --since: the last hour (some 300 crates, a few pages), not --since's 7 days
+# (some 55,000 crates: the page budget's 3½ minutes, and then a scan of each with --scan)
+CRATES_FIRST_RUN = "1h"
+# a walk this many pages long says so on stderr, and again every CRATES_PROGRESS_EVERY pages: one page a second
+CRATES_PROGRESS_AFTER, CRATES_PROGRESS_EVERY = 5, 25
 
 
 def _npm_feed_names(want):
@@ -7331,9 +7336,20 @@ def _crates_fetch():
     return module_fetch(registry_module("crates"))
 
 
+def _crates_progress(walk):
+    """A line on stderr while a long walk of crates.io's list goes on (one page a second)."""
+    n = walk["pages"]
+    if n == CRATES_PROGRESS_AFTER or (n > CRATES_PROGRESS_AFTER and n % CRATES_PROGRESS_EVERY == 0):
+        back = walk["items"][-1][2] if walk["items"] else None
+        reach = f", back to {back:%Y-%m-%d %H:%M} UTC" if back is not None else ""
+        print(f"crates.io: read {n} of at most {CRATES_DISCOVER_PAGES} pages of its list of recently updated crates "
+              f"({len(walk['items']):,} crates{reach}); one page a second…", file=sys.stderr, flush=True)
+
+
 def _crates_listing(stop, want=0):
     """crates.io's crates updated after `stop` (microseconds), newest first: the crates module's recent_updates."""
-    return registry_module("crates").recent_updates(_crates_fetch(), stop, CRATES_DISCOVER_PAGES, want=want)
+    return registry_module("crates").recent_updates(_crates_fetch(), stop, CRATES_DISCOVER_PAGES, want=want,
+                                                    progress=_crates_progress)
 
 
 def _crates_problem(exc):
@@ -7488,10 +7504,11 @@ def _discover_first_run(eco, cutoff, limit, notes):
     return found, ((position["seq"], now) if "seq" in position else None)
 
 
-def _discover_resumed(store, ecos, cutoff, limit, notes):
+def _discover_resumed(store, ecos, cutoff, limit, notes, first=None):
     """discover --resume: each registry continues from its stored cursor
-    or, the first time, checks the --since window and records where its feed
-    is now. -> (discovered, {eco: new cursor}, {eco: what was covered})."""
+    or, the first time, checks the --since window (or the window `first`
+    names for it) and records where its feed is now. -> (discovered,
+    {eco: new cursor}, {eco: what was covered})."""
     discovered, cursors, covered = [], {}, {}
     since = {"pypi": discover_pypi_since, "npm": discover_npm_since, "crates": discover_crates_since}
     for eco in ("pypi", "npm", "crates"):
@@ -7507,8 +7524,9 @@ def _discover_resumed(store, ecos, cutoff, limit, notes):
             covered[eco] = "not checked (see the warning at the end)"
             continue
         if cursor is None:
-            found, new = _discover_first_run(eco, cutoff, limit, notes)
-            text = f"first --resume run: the window since {cutoff:%Y-%m-%d %H:%M} UTC"
+            start = (first or {}).get(eco, cutoff)
+            found, new = _discover_first_run(eco, start, limit, notes)
+            text = f"first --resume run: the window since {start:%Y-%m-%d %H:%M} UTC"
             if new is not None:
                 text += "; the next run continues from " + (
                     f"changelog serial {new[0]}" if eco == "pypi" else f"change {new[0]}" if eco == "npm"
@@ -7572,9 +7590,13 @@ def cmd_discover(store, args):
     last --resume run. Returns True when --ci should fail the run: a registry
     not (fully) checked, a SUSPICIOUS / INCOMPLETE scan, or a cursor that
     could not be stored."""
-    cutoff = parse_since(args.since)
+    since = getattr(args, "since", None)
+    cutoff = parse_since(since if since is not None else "7d")
     ecos = args.ecosystem or list(DISCOVER_ECOSYSTEMS)
     resume = bool(getattr(args, "resume", False))
+    # crates.io's first --resume run reads the last hour unless --since was given: its list is read back a page a
+    # second, and a week of it is some 55,000 crates
+    first = {"crates": parse_since(CRATES_FIRST_RUN)} if since is None else {}
     github_bad = False
     if "github" in ecos:
         github_bad = _discover_github(store, args)
@@ -7585,7 +7607,7 @@ def cmd_discover(store, args):
     limit = args.limit if args.limit is not None else (0 if resume else 50)
     notes = {}
     if resume:
-        discovered, cursors, covered = _discover_resumed(store, ecos, cutoff, limit, notes)
+        discovered, cursors, covered = _discover_resumed(store, ecos, cutoff, limit, notes, first)
         discovered.sort(key=lambda x: x[3], reverse=True)
         print("Resuming discovery:")
         for eco, text in covered.items():
@@ -7865,9 +7887,10 @@ def main():
                          f"declared sizes before downloading — files that don't fit "
                          f"are not scanned and the verdict is INCOMPLETE")
     # discover options
-    ap.add_argument("--since", default="7d",
+    ap.add_argument("--since", default=None,
                     help="discover: time window — 7d, 2w, 24h, or an ISO date (default 7d); "
-                         "with --resume, the window of a registry's first run")
+                         "with --resume, the window of a registry's first run (crates.io's: the last hour "
+                         "unless --since is given)")
     ap.add_argument("--resume", action="store_true",
                     help="discover: continue each registry's change feed where the last "
                          "--resume run stopped (a cursor per registry, stored in --db), so a "

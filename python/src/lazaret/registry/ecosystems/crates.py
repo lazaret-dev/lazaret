@@ -192,7 +192,7 @@ class Crates(base.Ecosystem):
             raise base.FetchError("crates: the owners answer has no list of users")
         return {u["login"] for u in users[:MAX_OWNERS] if isinstance(u, dict) and isinstance(u.get("login"), str)}
 
-    def recent_updates(self, fetch, stop, pages, want=0):
+    def recent_updates(self, fetch, stop, pages, want=0, progress=None):
         """crates.io's crates by their last update, newest first: the API's list (`sort=recent-updates`, 100 a page,
         each next page as the answer's own `next_page` names it) down to the first crate updated at or before `stop`
         (microseconds since 1970, as `micros` counts them), at most `pages` pages; with `want`, no further than the page
@@ -201,7 +201,8 @@ class Crates(base.Ecosystem):
         -> {"items": [(name, version, updated_at)], newest first, each crate once, all updated after `stop`;
         "reached": the walk got to `stop` or to the end of the list; "pages": the pages read; "rejected": the rows left
         out for a name or a time that is not valid; "head": the newest position read (microseconds), or None; "error":
-        the FetchError that stopped the walk after its first page, or None}.
+        the FetchError that stopped the walk after its first page, or None}. `progress(walk)`, when given, is called
+        after each page with the walk so far.
 
         A crate's version is `newest_version` (the one published last; the API marks the field deprecated), else
         `default_version`, else None (a scan then takes the latest). A first page that cannot be read raises FetchError:
@@ -219,7 +220,10 @@ class Crates(base.Ecosystem):
                 walk["error"] = exc
                 break
             walk["pages"] += 1
-            if self._take(rows, stop, walk, seen) or (want and len(walk["items"]) >= want):
+            done = self._take(rows, stop, walk, seen) or (want and len(walk["items"]) >= want)
+            if progress is not None:
+                progress(walk)
+            if done:
                 break
             if nxt is None:
                 walk["reached"] = True

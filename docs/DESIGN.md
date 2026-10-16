@@ -1860,7 +1860,10 @@ and continue later: a list longer than `CRATES_DISCOVER_PAGES` (200 pages,
 about two and a half days) is listed as far as it was read, the part before
 is named as not checked, and the cursor moves to the newest; a page that
 fails keeps the cursor, so the next run reads back to it again; `--limit`
-lists the oldest first and moves the cursor to the last listed. The version
+lists the oldest first and moves the cursor to the last listed. The first
+`--resume` run reads the last hour unless `--since` is given
+(`CRATES_FIRST_RUN`), and a walk of more than five pages says how far it has
+read on stderr every 25 pages (`_crates_progress`). The version
 listed is the one the crate published last (`newest_version`, which the API
 marks deprecated; else `default_version`; else none, and the scan takes the
 latest). A crate's `updated_at` moves for more than a publish (a yank, an

@@ -262,6 +262,20 @@ class WindowTests(unittest.TestCase):
                                            "page(s) (could not read crates.io's list of recently updated crates "
                                            "(timed out))"})
 
+    def test_a_long_walk_says_so_as_it_goes(self):
+        fake = FakeCrates(per_page=1)
+        for i in range(7):
+            fake.add(f"c{i}", i)
+        found, _notes, err = self.discover(fake, 60, 0)
+        self.assertEqual(len(found), 7)
+        self.assertEqual(err.count("crates.io: read "), 1)
+        self.assertIn("crates.io: read 5 of at most 200 pages of its list of recently updated crates (5 crates, "
+                      "back to 2026-09-26 17:43 UTC); one page a second…", err)
+        with mock.patch.object(repo, "CRATES_PROGRESS_EVERY", 2):
+            _found, _notes, err = self.discover(fake, 60, 0)
+        self.assertEqual([line.split(" of at most")[0] for line in err.splitlines()],
+                         ["crates.io: read 5", "crates.io: read 6"])
+
     def test_rejected_rows_are_a_warning(self):
         fake = FakeCrates()
         fake.add("good", 1)
@@ -404,6 +418,19 @@ class CliTests(unittest.TestCase):
         self.assertIn("crates: the updates of 17:42–18:16 UTC, 1 page(s) of its list", out)
         self.assertEqual(scanned, ["crates:first@0.2.0", "crates:second@1.2.3"])
         self.assertEqual(self.cursor()[0], str(crates.micros(later - datetime.timedelta(minutes=1))))
+
+    def test_the_first_resume_run_reads_the_last_hour_unless_since_says(self):
+        self.fake.add("recent", 30, "0.1.0")
+        self.fake.add("older", 120, "0.2.0")
+        code, out, err = self.run_cli("--resume", "--ecosystem", "crates", "--ci")
+        self.assertEqual(code, 0, err)
+        self.assertIn("crates: first --resume run: the window since 2026-09-26 16:47 UTC", out)
+        self.assertEqual(self.listed(out), ["crates:recent@0.1.0"])
+        os.remove(self.db)
+        code, out, err = self.run_cli("--resume", "--ecosystem", "crates", "--since", "3h", "--ci")
+        self.assertEqual(code, 0, err)
+        self.assertIn("crates: first --resume run: the window since 2026-09-26 14:47 UTC", out)
+        self.assertEqual(self.listed(out), ["crates:recent@0.1.0", "crates:older@0.2.0"])
 
     def test_a_list_that_cannot_be_read_fails_ci_and_keeps_the_cursor(self):
         with repo.Store(self.db) as store:
