@@ -218,6 +218,37 @@ class SampleTests(unittest.TestCase):
         with self.assertRaisesRegex(self.d.Skip, "no files"):
             self.release({"package_info-pkg.json": b"{}"}, "pypi")
 
+    def test_a_sample_zipped_inside_itself(self):
+        pypi = {"package_info-pkg.json": b"{}", "pkg-1.0/setup.py": PY}
+        want = ("tgz", "sdist", {"pkg-1.0/setup.py": PY})
+        plain = io.BytesIO()
+        with zipfile.ZipFile(plain, "w") as z:
+            for name, data in pypi.items():
+                z.writestr(name, data)
+        for label, inner in (("encrypted", encrypted_zip(pypi)), ("not encrypted", plain.getvalue())):
+            with self.subTest(label):
+                self.assertEqual(self.release({"2026-03-24-pkg-v1.0.zip": inner}, "pypi", "pkg", "1.0"), want)
+                self.assertEqual(self.release({"package_info-pkg.json": b"{}", "2026-03-24-pkg-v1.0.zip": inner},
+                                              "pypi", "pkg", "1.0"), want)
+        twice = {"2026-03-24-pkg-v1.0.zip": encrypted_zip({"2026-03-24-pkg-v1.0.zip": encrypted_zip(pypi)})}
+        self.assertEqual(self.release(twice, "pypi", "pkg", "1.0"), want)
+        with self.assertRaisesRegex(self.d.Skip, "zipped inside itself more than 2 times"):
+            self.release({"2026-03-24-pkg-v1.0.zip": encrypted_zip(twice)}, "pypi", "pkg", "1.0")
+        npm = encrypted_zip({"package/package.json": PJ, "package/index.js": JS, "package_info-pkg.json": b"{}"})
+        self.assertEqual(self.release({"2026-03-24-pkg-v1.0.0.zip": npm}),
+                         ("tgz", "npm", {"package/package.json": PJ, "package/index.js": JS}))
+        item = {"eco": "npm", "cat": "malicious_intent", "name": "pkg", "version": "1.0.0",
+                "path": "samples/npm/malicious_intent/pkg/1.0.0/odd.zip"}            # named as the sample itself
+        body, container, kind = self.d.release(self.d.Sample(encrypted_zip({"odd.zip": npm})), item)
+        self.assertEqual(members(body, container), {"package/package.json": PJ, "package/index.js": JS})
+        with self.assertRaisesRegex(self.d.Skip, "no package.json"):
+            self.release({"payload.zip": npm})                                       # another zip: a file
+        own = io.BytesIO()
+        with zipfile.ZipFile(own, "w") as z:
+            z.writestr("pkg-1.0/setup.py", PY)
+        self.assertEqual(self.release({"pkg-1.0.zip": own.getvalue()}, "pypi", "pkg", "1.0"),
+                         ("zip", "sdist", {"pkg-1.0/setup.py": PY}))                 # the release's own sdist
+
     def test_entries_read_as_unzip_reads_them(self):
         link = {"data": b"index.js", "mode": stat.S_IFLNK | 0o777}
         self.assertEqual(self.release({"../package.json": PJ, "./a/../index.js": JS, "/abs/b.js": JS, "c.js": link,
@@ -257,7 +288,8 @@ class RunTests(unittest.TestCase):
         self.dataset.mkdir()
         self.git(self.dataset, "init", "-q")
         self.add_samples({("npm", "malicious_intent"): range(5), ("pypi", "malicious_intent"): range(4),
-                          ("npm", "compromised_lib"): range(3), ("pypi", "compromised_lib"): range(1)})
+                          ("npm", "compromised_lib"): range(3), ("pypi", "compromised_lib"): range(1)},
+                         wrapped={"cp0"})                                  # zipped inside itself
         self.git(self.dataset, "add", "-A")
         self.git(self.dataset, "commit", "-q", "-m", "samples")
         self.sha = self.git(self.dataset, "rev-parse", "HEAD").strip()   # stands for the audit's commit
@@ -276,7 +308,7 @@ class RunTests(unittest.TestCase):
             patcher.start()
             self.addCleanup(patcher.stop)
 
-    def add_samples(self, numbers):
+    def add_samples(self, numbers, wrapped=()):
         for (eco, cat), indexes in numbers.items():
             for i in indexes:
                 name = f"{cat[0]}{eco[0]}{i}"
@@ -285,7 +317,8 @@ class RunTests(unittest.TestCase):
                 files[f"package_info-{name}.json"] = b"{}"
                 dest = self.dataset / "samples" / eco / cat / name / "1.0" / f"2026-09-01-{name}-v1.0.zip"
                 dest.parent.mkdir(parents=True)
-                dest.write_bytes(encrypted_zip(files))
+                sample = encrypted_zip(files)
+                dest.write_bytes(encrypted_zip({dest.name: sample}) if name in wrapped else sample)
 
     def git(self, cwd, *args):
         return subprocess.run([GIT, *args], cwd=cwd, env=self.env, check=True, capture_output=True,
@@ -309,7 +342,7 @@ class RunTests(unittest.TestCase):
         self.assertEqual((len(bench), len(hold)), (8, 5))                  # 3 + 2 + 2 + 1; 2 + 2 + 1
         self.assertFalse({(r["eco"], r["name"]) for r in bench} & {(r["eco"], r["name"]) for r in hold})
         self.assertEqual(sorted(bench[0]), ["artifact_path", "cat", "container", "eco", "id", "kind", "name",
-                                            "set", "sha256", "source", "version"])
+                                            "rules", "set", "sha256", "source", "version"])
         self.assertEqual(bench[0]["id"], f"datadog:npm:malicious_intent:{bench[0]['name']}@1.0")
         entry = {"name": "holdout", "manifest": str(out.resolve() / "holdout" / "manifest.jsonl"), "aggregate_only": True}
         self.assertIn(json.dumps(entry), said)
@@ -335,6 +368,35 @@ class RunTests(unittest.TestCase):
             self.assertEqual(self.run_script(self.dataset, out, "--commit", self.sha[:8], "--only", "benchmark")[0], 0)
             self.assertEqual(len(reads), 4)
         self.assertEqual(self.manifest(out, "benchmark"), bench)
+
+    def test_releases_of_older_rules_are_made_again(self):
+        out = self.tmp / "corpus"
+        args = (self.dataset, out, "--commit", self.sha[:8], "--only", "benchmark")
+        self.assertEqual(self.run_script(*args)[0], 0)
+        bench = self.manifest(out, "benchmark")
+        self.assertEqual({r["rules"] for r in bench}, {self.d.RULES})
+        records = out / "benchmark" / "records.jsonl"
+        lines = [json.loads(line) for line in records.read_text(encoding="utf-8").splitlines()]
+        old = out.resolve() / "benchmark" / "files" / "cp0-as-the-old-rules-made-it.tar.bz2"
+        old.write_bytes(b"made by the rules of version 1")
+        for line in lines:                                            # as the rules of version 1 recorded them
+            del line["rules"]
+            if line["name"] == "cp0":
+                line.update(artifact_path=str(old), container="tbz2", sha256="0" * 64)
+        records.write_text("".join(json.dumps(line) + "\n" for line in lines), encoding="utf-8")
+        code, said = self.run_script(*args)
+        self.assertEqual(code, 0, said)
+        self.assertIn(f"benchmark: {len(bench)} releases made again by the release rules of version "
+                      f"{self.d.RULES}; 1 changed", said)
+        self.assertIn("  changed datadog:pypi:compromised_lib:cp0@1.0", said)
+        self.assertFalse(old.exists())                                # its file of the old rules removed
+        self.assertEqual(self.manifest(out, "benchmark"), bench)      # the others' bytes the same
+        reads = []
+        real = self.d.Dataset.read
+        with mock.patch.object(self.d.Dataset, "read", lambda ds, path: reads.append(path) or real(ds, path)):
+            code, said = self.run_script(*args)
+        self.assertEqual((code, reads), (0, []))
+        self.assertNotIn("made again", said)
 
     def test_what_is_refused(self):
         out = self.tmp / "corpus"

@@ -313,9 +313,13 @@ baselines. `--commit b302ad0b` gives the audit's benchmark, the 516 releases
 the script prints the commit to give again. Each sample is read in memory
 from git and written as its registry serves the release (the September
 harness's rules: the folder with the dataset's `package_info`, never an
-upstream `sources/` tree), and a stopped run goes on where it stopped. Run it
-on a maintainer's machine, with OUT outside the repository (it refuses a
-folder inside a checkout).
+upstream `sources/` tree; a sample zipped inside itself, as litellm
+1.82.8's is at `0cf258a4`, is read from the zip inside), and a stopped run
+goes on where it stopped. Each record keeps the version of the release
+rules: run again after they change, the script makes again the releases
+recorded under older ones and says how many changed (for the benchmark,
+which). Run it on a maintainer's machine, with OUT outside the repository
+(it refuses a folder inside a checkout).
 
 **Every set in one command.** `run --jobs N` scans N releases at once, each
 in a worker process of the guard's pool, and writes the records a run with

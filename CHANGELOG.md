@@ -427,7 +427,11 @@ aggregate):
   figures were measured on. Each sample is read in memory from git (a blobless clone
   fetches the samples drawn in one request) and written as its registry serves the
   release, by the September harness's rules; a stopped run goes on where it stopped, and a
-  folder inside a checkout is refused (`docs/TESTING.md` §4).
+  folder inside a checkout is refused (`docs/TESTING.md` §4). A sample zipped inside itself
+  is read from the zip inside: litellm 1.82.8's at `0cf258a4` had been written as an sdist
+  holding that zip, so the scans never saw the release (`bench.py misses` showed it). Each
+  record keeps the version of the release rules, and a run makes again the releases
+  recorded under older ones and says how many changed.
 - **For contributors: a set's misses described without their contents.** `scripts/bench.py
   misses SETS.json NAME` scans again, in memory, each malicious release of the set's last
   finished run that is not SUSPICIOUS and writes one line for each to

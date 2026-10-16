@@ -40,10 +40,14 @@ or PKG-INFO), never an upstream sources/ tree, with the dataset's doubled
 paths (a/b.py/a/b.py) undone; an npm release is a tarball, package/ inside;
 a PyPI release is its own archive when the sample holds one at the release's
 top, else its files packed as a wheel (a .dist-info folder at the top) or an
-sdist. The zips are read from git at the commit (`git cat-file`), so the
-clone needs no checkout, and one made with --filter=blob:none fetches the
-samples drawn alone, in one request. Stopped, the same command goes on where
-it was.
+sdist. A sample zipped inside itself (its release nothing but one zip named
+as the dataset names its samples: litellm 1.82.8's at 0cf258a4) is read
+from the zip inside. The zips are read from git at the commit (`git
+cat-file`), so the clone needs no checkout, and one made with
+--filter=blob:none fetches the samples drawn alone, in one request.
+Stopped, the same command goes on where it was; each record keeps the
+version of these rules, and a run makes again the releases recorded under
+older ones and says how many changed.
 
 The samples are real malware: run this on a maintainer's machine, never in
 an agent's session; keep OUT outside the repository and any synced folder,
@@ -88,6 +92,13 @@ MARKS = ("PKG-INFO", "setup.py", "pyproject.toml", "package.json")
 SDIST_MARKS = {"PKG-INFO", "setup.py", "pyproject.toml"}
 EXTENSION = {("tgz", "npm"): ".tgz", ("tgz", "sdist"): ".tar.gz", ("tbz2", "sdist"): ".tar.bz2",
              ("txz", "sdist"): ".tar.xz", ("zip", "sdist"): ".zip", ("zip", "wheel"): ".whl"}
+#: The dataset's name for a sample's zip: a date, the package's name, "v" and the version (2026-09-01-pkg-v1.0.zip).
+SAMPLE_NAME = re.compile(r"\d{4}-\d{2}-\d{2}-.+-v.+\.zip\Z")
+#: How many times a sample may be zipped inside itself (release).
+MAX_WRAPS = 2
+#: The version of the release rules, in each record: a release recorded under older ones is made again when the
+#: script runs. 2 (Oct 15): a sample zipped inside itself is read from the zip inside.
+RULES = 2
 PROGRESS_SECONDS = 15.0
 
 
@@ -392,6 +403,20 @@ def release_archive(sample, root, name):
     return None
 
 
+def zipped_inside(sample, files, item):
+    """The sample a sample holds zipped inside it -> a Sample, else None: when the release's files are one zip
+    named as the dataset names its samples (SAMPLE_NAME) or as this sample, whatever its encryption (zipfile reads
+    an entry that has none without the password). A file named for the package is the release's own archive,
+    never this."""
+    if len(files) != 1:
+        return None
+    parts = files[0][1]
+    if parts[-1] != item.get("path", "").rsplit("/", 1)[-1] and not SAMPLE_NAME.match(parts[-1]):
+        return None
+    data = sample.read(parts)
+    return Sample(data) if data[:4] == b"PK\x03\x04" else None
+
+
 def tgz(sample, files, prefix):
     """The files as a gzipped tar, each under `prefix`; gzip's header holds no time, so the same files give
     the same bytes on one machine."""
@@ -420,10 +445,17 @@ def wheel(sample, files):
     return buf.getvalue()
 
 
-def release(sample, item):
-    """(bytes, container, kind) of the release a sample holds, as its registry serves it."""
+def release(sample, item, wraps=0):
+    """(bytes, container, kind) of the release a sample holds, as its registry serves it. A sample whose release
+    is nothing but one zip named as the dataset names its samples (or as this sample) is a sample zipped inside
+    itself (litellm 1.82.8's at 0cf258a4): the zip inside is read as the sample, MAX_WRAPS times at most."""
     root = release_root(sample)
     files = release_files(sample, root)
+    inner = zipped_inside(sample, files, item)
+    if inner is not None:
+        if wraps >= MAX_WRAPS:
+            raise Skip(f"a sample zipped inside itself more than {MAX_WRAPS} times")
+        return release(inner, item, wraps + 1)
     if item["eco"] == "npm":
         keys = {k for k, _ in files}
         if "package.json" not in keys and any(k.startswith("package/") for k in keys):
@@ -480,7 +512,10 @@ def read_lines(path):
 
 def prepare_set(dataset, set_dir, name, chosen, about, log):
     """Write one set: each release's file, a line for each in records.jsonl as it is done (what a stopped run
-    goes on from), then manifest.jsonl (the releases, in the draw's order) and skipped.json."""
+    goes on from), then manifest.jsonl (the releases, in the draw's order) and skipped.json. A release recorded
+    under older release rules (RULES) is made again, its old file removed when the new one has another name.
+    -> (manifest, the releases kept, those skipped, the ids of the releases made again that changed, how many
+    were made again)."""
     files_dir = set_dir / "files"
     files_dir.mkdir(parents=True, exist_ok=True)
     about_path = set_dir / "draw.json"
@@ -493,22 +528,20 @@ def prepare_set(dataset, set_dir, name, chosen, about, log):
         about_path.write_text(json.dumps(about, indent=1) + "\n", encoding="utf-8")
     records = set_dir / "records.jsonl"
     done = {line["id"]: line for line in read_lines(records)}
-    shown = time.monotonic()
+    shown, changed, remade = time.monotonic(), [], 0
     with open(records, "a", encoding="utf-8") as out:
         for n, item in enumerate(chosen, 1):
             rid = release_id(item)
-            if rid in done and "skipped" not in done[rid] and os.path.isfile(done[rid]["artifact_path"]):
+            before = done.get(rid)
+            if before and "skipped" not in before and before.get("rules", 1) == RULES \
+                    and os.path.isfile(before["artifact_path"]):
                 continue                              # done (a skipped one is tried again: a fetch may have failed)
-            try:
-                body, container, kind = release(Sample(dataset.read(item["path"])), item)
-            except Skip as exc:
-                line = {"id": rid, "cat": item["cat"], "set": name, "skipped": str(exc)[:300], "source": item["path"]}
-            else:
-                dest = files_dir / file_name(item, EXTENSION[(container, kind)])
-                write_atomically(dest, body)
-                line = {"id": rid, "cat": item["cat"], "set": name, "eco": item["eco"], "name": registry_name(item),
-                        "version": item["version"], "artifact_path": str(dest), "container": container,
-                        "kind": kind, "sha256": hashlib.sha256(body).hexdigest(), "source": item["path"]}
+            line = make_release(dataset, files_dir, name, item)
+            if before and before.get("rules", 1) != RULES:
+                remade += 1
+                if (before.get("skipped"), before.get("sha256")) != (line.get("skipped"), line.get("sha256")):
+                    changed.append(rid)
+                drop_replaced(before, line, files_dir)
             out.write(json.dumps(line) + "\n")
             out.flush()
             done[rid] = line
@@ -521,7 +554,30 @@ def prepare_set(dataset, set_dir, name, chosen, about, log):
     write_atomically(manifest, "".join(json.dumps(line) + "\n" for line in kept).encode("utf-8"))
     skipped = [line for line in lines if "skipped" in line]
     write_atomically(set_dir / "skipped.json", (json.dumps(skipped, indent=1) + "\n").encode("utf-8"))
-    return manifest, kept, skipped
+    return manifest, kept, skipped, changed, remade
+
+
+def make_release(dataset, files_dir, name, item):
+    """Read one sample, write its release's file -> its record (or the reason it gives no release)."""
+    rid = release_id(item)
+    try:
+        body, container, kind = release(Sample(dataset.read(item["path"])), item)
+    except Skip as exc:
+        return {"id": rid, "cat": item["cat"], "set": name, "skipped": str(exc)[:300], "source": item["path"],
+                "rules": RULES}
+    dest = files_dir / file_name(item, EXTENSION[(container, kind)])
+    write_atomically(dest, body)
+    return {"id": rid, "cat": item["cat"], "set": name, "eco": item["eco"], "name": registry_name(item),
+            "version": item["version"], "artifact_path": str(dest), "container": container, "kind": kind,
+            "sha256": hashlib.sha256(body).hexdigest(), "source": item["path"], "rules": RULES}
+
+
+def drop_replaced(before, line, files_dir):
+    """Remove a release's file of older rules that its new one does not overwrite (another kind, another name)."""
+    old = before.get("artifact_path")
+    if old and old != line.get("artifact_path") and os.path.isfile(old) \
+            and pathlib.Path(old).resolve().parent == files_dir.resolve():
+        os.remove(old)
 
 
 def subsets(lines):
@@ -569,11 +625,16 @@ def prepare(dataset_path, out, commit=None, only=None, holdout_seed=HOLDOUT_SEED
                      "sizes": {f"{eco} {cat}": n for (eco, cat), n in SIZES[name].items()},
                      "releases": len(chosen), "draw": fingerprint(chosen), **(holdout_about if name == "holdout" else {})}
             log(f"{name}: {len(chosen)} releases drawn (draw {about['draw'][:16]})")
-            manifest, kept, skipped = prepare_set(dataset, out / name, name, chosen, about, log)
+            manifest, kept, skipped, changed, remade = prepare_set(dataset, out / name, name, chosen, about, log)
             log(f"{name}: {len(kept)} releases ({subsets(kept)}), {len(skipped)} skipped")
+            if remade:
+                log(f"{name}: {remade} releases made again by the release rules of version {RULES}; "
+                    f"{len(changed)} changed")
             if name == "benchmark":
                 for line in skipped:
                     log(f"  skipped {line['id']}: {line['skipped']}")
+                for rid in changed:
+                    log(f"  changed {rid}")
                 if at_audit and (len(chosen) != AUDIT_BENCHMARK or skipped):
                     log(f"  The audit's benchmark has {AUDIT_BENCHMARK} releases: this one differs, so its numbers "
                         "are not the ones the README and the CHANGELOG give.")
