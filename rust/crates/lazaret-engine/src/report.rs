@@ -860,7 +860,7 @@ pub fn html_items(issues: &[Value], first: bool) -> PyStr {
 
 // ---- the terminal summary (core.print_report) ---------------------------------------------------------------
 
-fn c(color: bool, code: &str, t: &[u32]) -> PyStr {
+pub(crate) fn c(color: bool, code: &str, t: &[u32]) -> PyStr {
     if !color {
         return t.to_vec();
     }
@@ -870,7 +870,7 @@ fn c(color: bool, code: &str, t: &[u32]) -> PyStr {
     out
 }
 
-fn sev_color(sev: &[u32]) -> &'static str {
+pub(crate) fn sev_color(sev: &[u32]) -> &'static str {
     match pystr::to_string(sev).as_str() {
         "BLOCKER" => "41;97",
         "CRITICAL" => "31",
@@ -881,7 +881,7 @@ fn sev_color(sev: &[u32]) -> &'static str {
     }
 }
 
-fn sev_order(sev: &[u32]) -> u8 {
+pub(crate) fn sev_order(sev: &[u32]) -> u8 {
     match pystr::to_string(sev).as_str() {
         "BLOCKER" => 0,
         "CRITICAL" => 1,

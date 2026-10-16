@@ -1019,6 +1019,17 @@ aggregate):
   is (a secret never decided a verdict). Gone: core's and npm's collection tables and decisions, npm's
   `isDependencyManifest` and `configsecrets.js` tables, the registry's `TEST_DIR_NAMES`, `_TEST_FILE_RE` and
   `USE_RISK_SKIP_DIRS`.
+- **The commit-time gate's decisions, the engine's (BR-7, step 4 f; no rule set change).** `lazaret hook` decided in
+  each package which findings it prints (vulnerabilities of MAJOR and above, supply-chain indicators, cross-file
+  flows), which of the result's conditions it gates on, the lines it prints and its exit, what it does with each path
+  the commit holds (a regular file's staged blob, a link or a submodule not followed, a file the index does not hold
+  read from the disk) and why a file could not be read for the scan. The engine decides for both
+  (`rust/crates/lazaret-engine/src/gate.rs`: `gate_report`, `gate_source`, `gate_why`); the packages keep git, the copy
+  of what the commit holds into a temporary tree, the project scan of it and the printing. The npm package's hook now
+  colors its lines on a terminal, as the Python package's does. Held to hook.py's code as it was on 1,500 generated
+  results (`test_gate_engine`); the npm hook test's cases of what the gate shows moved to the engine's tests. Gone:
+  hook.py's `GATE`, `shown`, `git_form`, `COLLISION_WHY` and `UNPRINTED_WHY`, and hook.js' `GATE`, `shown`, `gitForm`
+  and its texts.
 - **Security: S-XML is a parser set to resolve external entities, not an import of xml.etree, xml.dom or xml.sax
   (Q-3; rule set 2.80.0).** Since Python 3.7.1 none of them resolves an external entity unless told to, and Expat
   2.4.1 refuses entity bombs, so the import flagged safe code: all 20 of BenchmarkPython's safe XXE cases (its 8 real

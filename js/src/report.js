@@ -142,7 +142,8 @@ export function showSecretsOn(asked, isTTY, err) {
   return !!isTTY;
 }
 
-const shownKey = (file, line) => `${line}\u0000${file}`;
+/** flaggedLines' key of an issue's line. */
+export const shownKey = (file, line) => `${line}\u0000${file}`;
 
 /**
  * Each of `issues`' flagged line as read, unredacted (core.flagged_lines), for the files of `entries` ([{path,

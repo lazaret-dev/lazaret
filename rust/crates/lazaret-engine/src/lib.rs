@@ -20,6 +20,7 @@ pub mod datafmt;
 pub mod decode;
 pub mod filectx;
 pub mod findings;
+pub mod gate;
 pub mod flow;
 pub mod generated;
 pub mod goparse;

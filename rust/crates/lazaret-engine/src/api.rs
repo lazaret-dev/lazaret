@@ -129,6 +129,9 @@ pub const CALLS: &[&str] = &[
     // and the registry's test code (collect.rs): which members are tests, fixtures or code a package does not run
     // when it is used, and which findings in them are listed only
     "test_paths", "demote_tests",
+    // 0.1.9 (BR-7 step 4 f): the commit-time gate (gate.rs): its lines and exit, what it does with each file the
+    // commit holds, why one could not be read
+    "gate_report", "gate_source", "gate_why",
 ];
 
 fn arr_arg<'a>(args: &'a Value, name: &str) -> &'a [Value] {
@@ -1431,6 +1434,39 @@ fn dispatch(name: &str, args: &Value, text: &[u32]) -> Result<Value, CallError> 
             "own_report" => Value::Bool(crate::collect::own_report(text)),
             other => return Err(CallError::BadArgs(format!("collect_check: no check {other:?}"))),
         },
+        "gate_report" => {
+            // {checked, issues: [[issue, --show-secrets' line or null]], conditions: [[label, ok]], quiet, color,
+            // windows, width, redact} -> {"lines", "exit"}
+            let flag = |k: &str| matches!(args.get(k), Some(Value::Bool(true)));
+            let issues: Vec<(Value, Option<Value>)> = arr_arg(args, "issues").iter().map(|it| match it.as_arr() {
+                Some(a) if a.len() == 2 => (a[0].clone(), match &a[1] { Value::Null => None, v => Some(v.clone()) }),
+                _ => (it.clone(), None),
+            }).collect();
+            let conditions = crate::result::conditions_arg(args.get("conditions")).map_err(|m| CallError::BadArgs(format!("gate_report: {m}")))?;
+            let r = crate::gate::Report {
+                checked: opt_int(args, "checked").unwrap_or(0).max(0) as usize,
+                issues: &issues,
+                conditions: &conditions,
+                quiet: flag("quiet"),
+                color: flag("color"),
+                windows: flag("windows"),
+                width: opt_int(args, "width").unwrap_or(100),
+                redact: !matches!(args.get("redact"), Some(Value::Bool(false))),
+            };
+            let (lines, exit) = crate::gate::report(p, &r);
+            Value::obj(vec![("lines", Value::Arr(lines.into_iter().map(Value::Str).collect())), ("exit", Value::Int(exit))])
+        }
+        "gate_source" => {
+            // {modes: [an index entry's mode, or null]} -> ["blob" | "skip" | "disk"]
+            Value::Arr(arr_arg(args, "modes").iter().map(|m| Value::str(crate::gate::source(m.as_str()))).collect())
+        }
+        "gate_why" => {
+            // {kind, detail} -> why a file the commit holds could not be read for the scan
+            let kind = crate::pystr::to_string(&arg_str(args, "kind")?);
+            crate::gate::why(&kind, &opt_str(args, "detail").unwrap_or_default())
+                .map(Value::Str)
+                .ok_or_else(|| CallError::BadArgs(format!("gate_why: no kind {kind:?}")))?
+        }
         "test_paths" => {
             // {paths} -> {"test": [is a test path], "unused": [is code the package does not run when it is used]}
             let paths: Vec<PyStr> = arr_arg(args, "paths").iter().filter_map(|x| x.as_str().map(|s| s.to_vec())).collect();

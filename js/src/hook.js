@@ -17,7 +17,10 @@
 // never one in the repository's folder.
 //
 // Exit codes: 0 passed (or nothing to check), 1 the gate failed, 2 usage error, 5 internal error (cli.js). runHook
-// returns a promise of the code: the blobs are streamed from git into the temporary tree.
+// returns a promise of the code: the blobs are streamed from git into the temporary tree. Which findings print, the
+// conditions the gate keeps, its lines and exit, what it does with each file the commit holds and why one could not be
+// read are the engine's (gate.rs, BR-7 step 4 f), as the Python package's; git, the copy and the scan are this
+// module's.
 
 import { spawn, spawnSync } from "node:child_process";
 import {
@@ -30,18 +33,14 @@ import { fsNameToString } from "./lib/encoding.js";
 import { ScanTargetError, strerror } from "./lib/fs.js";
 import { MAX_FILE_BYTES } from "./lib/collect.js";
 import { truncatedIssue } from "./lib/issue.js";
-import { loadError } from "./lib/native.js";
+import { call, loadError } from "./lib/native.js";
 import { findProgram } from "./lib/programs.js";
-import { cmpCodePoints } from "./lib/pycompat.js";
-import { setRedactSecrets } from "./lib/redact.js";
+import { REDACT, setRedactSecrets } from "./lib/redact.js";
 import { collectProject, scanCollected } from "./project.js";
-import { buildResult, CROSS_FILE_LABEL, flaggedLines, issueExcerpt, sanitizeTermLine, showSecretsOn } from "./report.js";
-import { SEV_ORDER } from "./scanner/rules.js";
+import { buildResult, EXCERPT_WIDTH, flaggedLines, sanitizeTermLine, shownKey, showSecretsOn } from "./report.js";
 
 const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
 
-/** build_result's conditions this gate keeps (the other two are quality). */
-export const GATE = ["No blocker issues", "No critical vulnerabilities", "No supply-chain indicators", CROSS_FILE_LABEL];
 /** git's empty tree: what a first commit's staged files are compared with. */
 export const EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 const CHUNK = 1 << 20;
@@ -181,14 +180,15 @@ function createFile(dest, path) {
 }
 class CollisionError extends Error {}
 
-/** Why a blob or a file could not be copied for the scan, in the Python package's words. */
+/** Why a file the commit holds could not be read for the scan (the engine's words: gate.rs): "collision" (its name is
+ * another's here), "unprinted", "not_copied", "stopped", "unreadable", "not_regular", "git_missing", "git_failed";
+ * `detail`: the I/O's own. */
+export const why = (kind, detail = "") => call("gate_why", { kind, detail: String(detail) });
+
+/** Why a blob or a file could not be copied for the scan. */
 function notCopied(e) {
-  if (e instanceof CollisionError) {
-    return "its name is another file's on this system (they differ only in case, in their Unicode form or by a "
-      + "backslash), so it could not be copied for the scan";
-  }
-  if (e instanceof OutsideError) return `it could not be copied for the scan (${e.message})`;
-  return `it could not be copied for the scan (${strerror(e)})`;
+  if (e instanceof CollisionError) return why("collision");
+  return why("not_copied", e instanceof OutsideError ? e.message : strerror(e));
 }
 
 /**
@@ -198,7 +198,7 @@ function notCopied(e) {
 function writeBlobs(root, wanted, dest, env) {
   if (!wanted.length) return Promise.resolve([]);
   const prog = findProgram("git", { env });
-  if (prog === null) return Promise.resolve(wanted.map((w) => [w.path.text, "git could not be run (it is not on PATH)"]));
+  if (prog === null) return Promise.resolve(wanted.map((w) => [w.path.text, why("git_missing")]));
   return new Promise((done) => {
     const failed = [];
     let proc;
@@ -206,7 +206,7 @@ function writeBlobs(root, wanted, dest, env) {
       proc = spawn(prog, ["--no-optional-locks", "-C", root, "cat-file", "--batch"],
         { stdio: ["pipe", "pipe", "ignore"], env, windowsHide: true });
     } catch (e) {
-      done(wanted.map((w) => [w.path.text, `git could not be run (${strerror(e)})`]));
+      done(wanted.map((w) => [w.path.text, why("git_failed", strerror(e))]));
       return;
     }
     let k = 0;                  // the blob being read
@@ -216,7 +216,7 @@ function writeBlobs(root, wanted, dest, env) {
     let fd = null;              // where they go (null: dropped)
     let writing = false;        // the body is the blob's, being written
     let spawnError = null;
-    const fail = (why) => failed.push([wanted[k].path.text, why]);
+    const fail = (reason) => failed.push([wanted[k].path.text, reason]);
     const closeFd = () => {
       if (fd !== null) { try { closeSync(fd); } catch { /* (closed) */ } fd = null; }
     };
@@ -233,7 +233,7 @@ function writeBlobs(root, wanted, dest, env) {
           writing = false;
         }
       } else {
-        fail("git could not print it from the index");
+        fail(why("unprinted"));
         if (!(fields.length === 3 && Number.isSafeInteger(size) && size >= 0)) {
           k++;                  // (missing or ambiguous: nothing follows the line)
           return;
@@ -280,18 +280,18 @@ function writeBlobs(root, wanted, dest, env) {
     });
     proc.on("close", () => {
       if (spawnError && k === 0 && !failed.length) {
-        done(wanted.map((w) => [w.path.text, `git could not be run (${strerror(spawnError)})`]));
+        done(wanted.map((w) => [w.path.text, why("git_failed", strerror(spawnError))]));
         return;
       }
       if (k < wanted.length) {
         if (state === "body" && writing && fd !== null) {
-          fail("it could not be copied for the scan (git stopped mid-file)");
+          fail(why("stopped"));
           k++;
         } else if (state === "body" || state === "newline") {
           k++;                  // (its failure is said already, or it was written whole)
         }
         closeFd();
-        for (; k < wanted.length; k++) fail("git could not print it from the index");
+        for (; k < wanted.length; k++) fail(why("unprinted"));
       }
       done(failed);
     });
@@ -303,13 +303,13 @@ function writeBlobs(root, wanted, dest, env) {
  * null. */
 function copyFile(from, dest, path) {
   let st;
-  try { st = lstatSync(from); } catch (e) { return `it could not be read (${strerror(e)})`; }
+  try { st = lstatSync(from); } catch (e) { return why("unreadable", strerror(e)); }
   if (st.isSymbolicLink()) return "";
-  if (!st.isFile()) return "it is not a regular file";
+  if (!st.isFile()) return why("not_regular");
   let src = null, out = null;
   try {
     src = openSync(from, C.O_RDONLY | O_NOFOLLOW | O_NONBLOCK);          // (what was read above, still)
-    if (!fstatSync(src).isFile()) return "it is not a regular file";
+    if (!fstatSync(src).isFile()) return why("not_regular");
     out = createFile(dest, path);
     const buf = Buffer.allocUnsafe(CHUNK);
     for (let n; (n = readSync(src, buf, 0, CHUNK, null)) > 0;) {
@@ -361,16 +361,15 @@ async function gather(files, cwd, dest, env) {
     entries = indexEntries(root, env);
   }
   const blobs = [], failed = [], checked = [], seen = new Set();
-  for (const path of paths) {
-    if (seen.has(path.key)) continue;
-    seen.add(path.key);
-    const entry = entries.get(path.key);
-    if (entry && (entry.mode === "100644" || entry.mode === "100755")) blobs.push({ oid: entry.oid, path });
-    else if (entry) continue;                              // a link or a submodule: not followed
+  const unique = paths.filter((path) => !seen.has(path.key) && seen.add(path.key));
+  const sources = call("gate_source", { modes: unique.map((path) => entries.get(path.key)?.mode ?? null) });
+  for (const [n, path] of unique.entries()) {
+    if (sources[n] === "blob") blobs.push({ oid: entries.get(path.key).oid, path });
+    else if (sources[n] === "skip") continue;             // a link or a submodule: not followed
     else {
-      const why = copyFile(onDisk(base, path), dest, path);
-      if (why === "") continue;                            // (a link on disk)
-      if (why !== null) failed.push([path.text, why]);
+      const reason = copyFile(onDisk(base, path), dest, path);
+      if (reason === "") continue;                         // (a link on disk)
+      if (reason !== null) failed.push([path.text, reason]);
     }
     checked.push(path.text);
   }
@@ -385,45 +384,25 @@ export function trimSeparators(path) {
   return end === path.length ? path : path.slice(0, end);
 }
 
-/** What the gate's conditions read: vulnerabilities of MAJOR and above, supply-chain indicators, cross-file flows. */
-export function shown(issue) {
-  if (issue.rule.startsWith("SC-")) return issue.sev !== "INFO";
-  if (issue.rule.startsWith("X-")) return true;
-  return issue.type === "VULN" && SEV_ORDER[issue.sev] <= SEV_ORDER.MAJOR;
-}
-
-/** A path as git writes it: "/" between folders, on Windows too (the project scan writes the system's separator). */
-export const gitForm = (path) => (sep === "/" ? String(path) : String(path).split(sep).join("/"));
-
-function report(checked, issues, failedConditions, quiet, out, rawLines = null) {
-  if (!quiet || issues.length) out(`lazaret hook: ${checked.length} file${checked.length !== 1 ? "s" : ""} checked`);
-  let cur = null;
-  const sorted = [...issues].sort((a, b) => cmpCodePoints(gitForm(a.file), gitForm(b.file))
-    || (SEV_ORDER[a.sev] - SEV_ORDER[b.sev]) || (a.line - b.line));
-  for (const i of sorted) {
-    if (gitForm(i.file) !== cur) {
-      cur = gitForm(i.file);
-      out(`  ${sanitizeTermLine(cur)}`);
-    }
-    const prefix = `    L${String(i.line).padEnd(5)} ${i.sev.padEnd(8)} [${i.rule}] `;
-    out(prefix + sanitizeTermLine(i.msg));
-    const ex = issueExcerpt(i, undefined, rawLines);
-    if (ex && !quiet) out(" ".repeat(prefix.length) + "» " + ex);
-  }
-  if (failedConditions.length) {
-    out("  Commit gate:  FAILED ");
-    for (const label of failedConditions) out(`    ✗ ${sanitizeTermLine(label)}`);
-  } else if (!quiet) {
-    out("  Commit gate:  PASSED ");
-  }
+/** Print what the gate reads of `res` (vulnerabilities of MAJOR and above, supply-chain indicators and cross-file
+ * flows, each under its path as git writes it) and whether it passed -> the exit code (the engine's: gate.rs). */
+function report(checked, res, { quiet, out, rawLines, color }) {
+  const got = call("gate_report", {
+    checked: checked.length,
+    issues: res.issues.map((i) => [i, (rawLines && rawLines.get(shownKey(i.file, i.line))) ?? null]),
+    conditions: res.conditions.map((c) => [c.label, c.ok]), quiet, color, windows: sep === "\\",
+    width: EXCERPT_WIDTH, redact: REDACT.on,
+  });
+  for (const line of got.lines) out(line);
+  return got.exit;
 }
 
 /**
  * Check `files` (or the staged files) -> a promise of the exit code (hook.run). `maxFileBytes`: the largest source
- * file or manifest read (env LAZARET_MAX_SOURCE_BYTES, as the CLI reads it).
+ * file or manifest read (env LAZARET_MAX_SOURCE_BYTES, as the CLI reads it); `color`: the output is a terminal.
  */
 export async function check(files, { cwd = process.cwd(), quiet = false, out = console.log, env = process.env,
-  maxFileBytes = MAX_FILE_BYTES, showSecrets = false } = {}) {
+  maxFileBytes = MAX_FILE_BYTES, showSecrets = false, color = false } = {}) {
   const tmp = mkdtempSync(join(tmpdir(), "lazaret-hook-"));
   let checked, res, rawLines = null;
   try {
@@ -431,7 +410,7 @@ export async function check(files, { cwd = process.cwd(), quiet = false, out = c
     mkdirSync(dest);
     let failed;
     ({ checked, failed } = await gather(files, cwd, dest, env));
-    const notRead = failed.map(([path, why]) => truncatedIssue(path, why));
+    const notRead = failed.map(([path, reason]) => truncatedIssue(path, reason));
     if (!checked.length) {
       if (!quiet) out("lazaret hook: nothing to check");
       return 0;
@@ -449,10 +428,7 @@ export async function check(files, { cwd = process.cwd(), quiet = false, out = c
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }
-  const issues = res.issues.filter(shown);
-  const failedConditions = res.conditions.filter((c) => GATE.includes(c.label) && !c.ok).map((c) => c.label);
-  report(checked, issues, failedConditions, quiet, out, rawLines);
-  return failedConditions.length ? 1 : 0;
+  return report(checked, res, { quiet, out, rawLines, color });
 }
 
 // ---- the command line (hook.main) -------------------------------------------------
@@ -526,8 +502,10 @@ export function runHook(argv, io = {}, { maxFileBytes = MAX_FILE_BYTES } = {}) {
     return 2;
   }
   setRedactSecrets(true);
-  const showSecrets = showSecretsOn(!!opts.showSecrets, io.isTTY ?? !!process.stdout.isTTY, err);
-  return check(files, { cwd: io.cwd ?? process.cwd(), quiet: !!opts.quiet, out, env, maxFileBytes, showSecrets })
+  const tty = io.isTTY ?? !!process.stdout.isTTY;
+  const showSecrets = showSecretsOn(!!opts.showSecrets, tty, err);
+  return check(files, { cwd: io.cwd ?? process.cwd(), quiet: !!opts.quiet, out, env, maxFileBytes, showSecrets,
+    color: tty })
     .catch((e) => {
       if (!(e instanceof HookError)) throw e;
       err(`error: ${sanitizeTermLine(e.message)}`);

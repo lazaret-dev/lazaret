@@ -90,7 +90,8 @@ python/
 │   │   ├── hook.py         the commit-time gate (`lazaret hook`): the files being
 │   │   │                   committed, from git's index, through scan_project()
 │   │   │                   with --deps; fails on --ci's security and supply-chain
-│   │   │                   conditions (js/src/hook.js is its twin)
+│   │   │                   conditions, which the engine keeps and prints (gate.rs;
+│   │   │                   js/src/hook.js is its twin)
 │   │   ├── taintspec.py    taint-config validation (shared by both taint engines)
 │   │   ├── reports.py      safe report paths, report provenance, baseline signing
 │   │   │                   (the engine's: baseline.rs)
@@ -317,7 +318,7 @@ js/
 │   │                     scan and the dashboard (nothing of Node's)
 │   ├── result.js         the result, graded by the engine (nothing of Node's)
 │   ├── hook.js           `lazaret hook`: the files being committed, from git's
-│   │                     index (hook.py's twin)
+│   │                     index (hook.py's twin; the gate the engine's: gate.rs)
 │   ├── index.js          public exports
 │   ├── report.js         the result (buildResult) and its forms, JSON, HTML,
 │   │                     SARIF and the terminal's (the engine's: report.rs,

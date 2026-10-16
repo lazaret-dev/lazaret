@@ -263,6 +263,12 @@ rust/
                              (collect_dir, collect_file, collect_pycache, collect_issue,
                              collect_check); and the registry's test code (test_paths,
                              demote_tests)
+    src/gate.rs              the commit-time gate (BR-7 step 4 f, 0.1.9; hook.py's shown, GATE
+                             and report and hook.js' until then): which findings it prints, the
+                             conditions it keeps, its lines and exit, what it does with each
+                             path the commit holds and why a file could not be read for it
+                             (gate_report, gate_source, gate_why); the packages keep git, the
+                             copy and the scan
     src/autorun.rs           editor and AI-agent settings that run commands (BR-7 step 2, 0.1.9;
                              autorun.py, core.autorun_issues and their npm twins until then): a
                              JSON-with-comments reader that keeps lines, the commands each kind of
@@ -1011,7 +1017,8 @@ only.
    reports (`report.js`'s forms: in the engine since 0.1.9, `src/report.rs`),
    baselines (`baseline.js`'s and `pyjson.js`: in the engine since 0.1.9,
    `src/baseline.rs`), the walk's decisions (`collect.js`'s and `fs.js`'s:
-   in the engine since 0.1.9, `src/collect.rs`);
+   in the engine since 0.1.9, `src/collect.rs`), the commit-time gate's
+   (`hook.js`'s: in the engine since 0.1.9, `src/gate.rs`);
    the dashboard loads the same module since 0.1.9 (BR-7 step 5: the page
    carries it, and runs the npm package's scan on it).
 4. Archive reading for registry scans in the engine, where it reads as the

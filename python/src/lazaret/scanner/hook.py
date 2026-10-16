@@ -25,9 +25,12 @@ index and print its blobs (`cat-file`, so no filter runs, git-lfs's
 included).
 
 Exit codes: 0 passed (or nothing to check), 1 the gate failed, 2 usage error,
-5 internal error. pre-commit runs it from a mirror repository whose hook
-installs Lazaret's wheel by version (integrations/pre-commit); a plain git
-hook runs `lazaret hook`. The npm package's `lazaret hook` (js/src/hook.js)
+5 internal error. Which findings print, the conditions the gate keeps, its
+lines and exit, what it does with each file the commit holds and why one
+could not be read are the engine's (gate.rs, BR-7 step 4 f); git, the copy
+and the scan are this module's. pre-commit runs it from a mirror repository
+whose hook installs Lazaret's wheel by version (integrations/pre-commit); a
+plain git hook runs `lazaret hook`. The npm package's `lazaret hook` (js/src/hook.js)
 is its twin: the same files checked and the same lines printed.
 """
 import argparse
@@ -40,19 +43,18 @@ import tempfile
 import threading
 
 import lazaret as _lazaret_pkg
-from lazaret.scanner import core, engine, programs
+from lazaret.scanner import _native, core, engine, programs
 
-#: build_result's conditions this gate keeps (the other two are quality)
-GATE = ("No blocker issues", "No critical vulnerabilities", "No supply-chain indicators",
-        "No cross-file taint flows")
 #: git's empty tree: what a first commit's staged files are compared with
 EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
 _CHUNK = 1 << 20
-#: why a file whose name is another's here was not copied (_create)
-COLLISION_WHY = ("its name is another file's on this system (they differ only in case, in their Unicode form or by a "
-                 "backslash), so it could not be copied for the scan")
-#: why a blob git did not print (or printed as something else) was not copied
-UNPRINTED_WHY = "git could not print it from the index"
+
+
+def why(kind, detail=""):
+    """Why a file the commit holds could not be read for the scan (the engine's words: gate.rs): "collision" (its
+    name is another's here), "unprinted", "not_copied", "stopped", "unreadable", "not_regular", "git_missing",
+    "git_failed"; `detail`: the I/O's own."""
+    return _native.call("gate_why", {"kind": kind, "detail": str(detail)})
 
 
 class HookError(Exception):
@@ -149,8 +151,8 @@ def _not_copied(exc):
     """Why a blob or a file could not be copied for the scan (exc: what
     _create or the copy raised)."""
     if isinstance(exc, _Collision):
-        return COLLISION_WHY
-    return f"it could not be copied for the scan ({getattr(exc, 'strerror', None) or exc})"
+        return why("collision")
+    return why("not_copied", getattr(exc, "strerror", None) or exc)
 
 
 def _drop(stream, left):
@@ -171,12 +173,12 @@ def write_blobs(root, wanted, dest):
         return []
     git = programs.find("git")
     if git is None:
-        return [(rel, "git could not be run (it is not on PATH)") for _, rel in wanted]
+        return [(rel, why("git_missing")) for _, rel in wanted]
     cmd = [git, "--no-optional-locks", "-C", root, "cat-file", "--batch"]
     try:
         proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
     except OSError as exc:
-        return [(rel, f"git could not be run ({exc.strerror or type(exc).__name__})") for _, rel in wanted]
+        return [(rel, why("git_failed", exc.strerror or type(exc).__name__)) for _, rel in wanted]
 
     def feed():
         try:
@@ -195,7 +197,7 @@ def write_blobs(root, wanted, dest):
             k += 1
             fields = proc.stdout.readline().split()
             if len(fields) != 3 or fields[1] != b"blob":
-                failed.append((rel, UNPRINTED_WHY))
+                failed.append((rel, why("unprinted")))
                 if not fields:
                     break                       # (git stopped: the rest are below)
                 if len(fields) == 3:            # (another kind of object: its bytes are not the next header)
@@ -217,12 +219,12 @@ def write_blobs(root, wanted, dest):
                             left -= len(chunk)
                             out.write(chunk)
                 except _Stopped:
-                    failed.append((rel, "it could not be copied for the scan (git stopped mid-file)"))
+                    failed.append((rel, why("stopped")))
                 except (OSError, ValueError) as exc:
                     failed.append((rel, _not_copied(exc)))
                     _drop(proc.stdout, left)    # (stay in step with the stream)
             proc.stdout.read(1)                 # the newline after each blob
-        failed += [(rel, UNPRINTED_WHY) for _, rel in wanted[k:]]
+        failed += [(rel, why("unprinted")) for _, rel in wanted[k:]]
     finally:
         proc.stdout.close()
         writer.join(timeout=5)
@@ -236,16 +238,16 @@ def copy_file(path, dest, rel):
     try:
         st = os.lstat(path)
     except OSError as exc:
-        return f"it could not be read ({exc.strerror or type(exc).__name__})"
+        return why("unreadable", exc.strerror or type(exc).__name__)
     if stat.S_ISLNK(st.st_mode):
         return ""                               # (a link is not followed: nothing to say)
     if not stat.S_ISREG(st.st_mode):
-        return "it is not a regular file"
+        return why("not_regular")
     flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_BINARY", 0)
     try:
         with open(os.open(path, flags), "rb") as src:     # (what was read above, still)
             if not stat.S_ISREG(os.fstat(src.fileno()).st_mode):
-                return "it is not a regular file"
+                return why("not_regular")
             with _create(dest, rel) as out:
                 shutil.copyfileobj(src, out, _CHUNK)
     except (_Collision, OSError, ValueError) as exc:
@@ -284,61 +286,37 @@ def gather(files, cwd, dest):
         rels = staged_paths(root)
         entries = index_entries(root)
     blobs, failed, checked = [], [], []
-    for rel in dict.fromkeys(rels):
-        mode, oid = entries.get(rel, (None, None))
-        if mode in ("100644", "100755"):
-            blobs.append((oid, rel))
-        elif mode is not None:
+    rels = list(dict.fromkeys(rels))
+    sources = _native.call("gate_source", {"modes": [entries.get(rel, (None, None))[0] for rel in rels]})
+    for rel, source in zip(rels, sources):
+        if source == "blob":
+            blobs.append((entries[rel][1], rel))
+        elif source == "skip":
             continue                            # a link or a submodule: not followed
         else:
-            why = copy_file(os.path.join(base, *rel.split("/")), dest, rel)
-            if why == "":
+            reason = copy_file(os.path.join(base, *rel.split("/")), dest, rel)
+            if reason == "":
                 continue                        # (a link on disk)
-            if why:
-                failed.append((rel, why))
+            if reason:
+                failed.append((rel, reason))
         checked.append(rel)
     failed += write_blobs(root, blobs, dest) if root else []
     return checked, failed
 
 
-def shown(issue):
-    """What the gate's conditions read: vulnerabilities of MAJOR and above,
-    supply-chain indicators, cross-file flows."""
-    rule, sev = issue["rule"], issue["sev"]
-    if rule.startswith("SC-"):
-        return sev != "INFO"
-    if rule.startswith("X-"):
-        return True
-    return issue["type"] == "VULN" and core.SEV_ORDER[sev] <= core.SEV_ORDER["MAJOR"]
-
-
-def git_form(path):
-    """A path as git writes it: "/" between folders, on Windows too (the
-    project scan writes the system's separator)."""
-    return path if os.sep == "/" else path.replace(os.sep, "/")
-
-
-def report(checked, issues, failed_conditions, quiet, raw_lines=None):
-    c, line = core.c, core.sanitize_term_line
-    if not quiet or issues:
-        print(f"lazaret hook: {len(checked)} file{'s' if len(checked) != 1 else ''} checked")
-    cur = None
-    for i in sorted(issues, key=lambda i: (git_form(i["file"]), core.SEV_ORDER[i["sev"]], i["line"])):
-        if git_form(i["file"]) != cur:
-            cur = git_form(i["file"])
-            print(f"  {c('4', line(cur))}")
-        sev = f"{i['sev']:<8}"
-        prefix = f"    L{i['line']:<5} {sev} [{i['rule']}] "
-        print(f"    L{i['line']:<5} {c(core.SEV_COLOR[i['sev']], sev)} [{i['rule']}] {line(i['msg'])}")
-        ex = core.issue_excerpt(i, shown=raw_lines)
-        if ex and not quiet:
-            print(" " * len(prefix) + c("2", "» " + ex))
-    if failed_conditions:
-        print(f"  Commit gate: {c('41;97', ' FAILED ')}")
-        for label in failed_conditions:
-            print(f"    {c('31', '✗')} {line(label)}")
-    elif not quiet:
-        print(f"  Commit gate: {c('42;30', ' PASSED ')}")
+def report(checked, res, quiet, raw_lines=None):
+    """Print what the gate reads of `res` (vulnerabilities of MAJOR and above, supply-chain indicators and
+    cross-file flows, each under its path as git writes it) and whether it passed -> the exit code (the engine's:
+    gate.rs)."""
+    got = _native.call("gate_report", {
+        "checked": len(checked),
+        "issues": [[i, raw_lines.get((i.get("file"), i.get("line"))) if raw_lines else None] for i in res["issues"]],
+        "conditions": [[c["label"], c["ok"]] for c in res["conditions"]], "quiet": bool(quiet),
+        "color": core._stdout_is_tty(), "windows": os.sep == "\\", "width": core.EXCERPT_WIDTH,
+        "redact": bool(core.REDACT_SECRETS)})
+    for line in got["lines"]:
+        print(line)
+    return core.EXIT_GATE if got["exit"] else core.EXIT_OK
 
 
 def run(files, cwd=None, quiet=False, show_secrets=False):
@@ -350,7 +328,7 @@ def run(files, cwd=None, quiet=False, show_secrets=False):
         dest = os.path.join(tmp, "commit")
         os.mkdir(dest)
         checked, failed = gather(files, cwd, dest)
-        not_read = [core.truncated_issue(core._fs_display(rel), why) for rel, why in failed]
+        not_read = [core.truncated_issue(core._fs_display(rel), reason) for rel, reason in failed]
         if not checked:
             if not quiet:
                 print("lazaret hook: nothing to check")
@@ -361,11 +339,7 @@ def run(files, cwd=None, quiet=False, show_secrets=False):
             res = core.scan_project(dest, include_deps=True, extra_issues=not_read, shown=raw_lines)
         except core.ScanTargetError:
             res = core.build_result(dest, [], not_read)      # (nothing Lazaret reads: no finding but these)
-    issues = [i for i in res["issues"] if shown(i)]
-    failed_conditions = [cond["label"] for cond in res["conditions"]
-                         if cond["label"] in GATE and not cond["ok"]]
-    report(checked, issues, failed_conditions, quiet, raw_lines)
-    return core.EXIT_GATE if failed_conditions else core.EXIT_OK
+    return report(checked, res, quiet, raw_lines)
 
 
 def main(argv=None):

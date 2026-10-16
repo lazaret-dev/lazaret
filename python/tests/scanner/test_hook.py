@@ -173,7 +173,7 @@ class HookTests(unittest.TestCase):
         code, out = self.check()
         self.assertEqual(code, 1, out)
         self.assertIn("  a/b.py\n    L1     BLOCKER  [S-TOKEN]", out)
-        self.assertIn("  a\\b.py\n    L1     CRITICAL [SC-TRUNCATED] File not fully scanned: " + hook.COLLISION_WHY, out)
+        self.assertIn("  a\\b.py\n    L1     CRITICAL [SC-TRUNCATED] File not fully scanned: " + hook.why("collision"), out)
 
     def test_names_that_differ_only_in_case(self):
         # On macOS and Windows `A.py` and `a.py` are one file: the second was written over the first. Put in the
@@ -189,7 +189,7 @@ class HookTests(unittest.TestCase):
         self.addCleanup(shutil.rmtree, probe)
         open(os.path.join(probe, "X"), "wb").close()
         if os.path.exists(os.path.join(probe, "x")):        # (a system whose names ignore case)
-            self.assertIn(hook.COLLISION_WHY, out)
+            self.assertIn(hook.why("collision"), out)
 
     def git_in(self, data, *args):
         return subprocess.run(["git", "-C", self.dir, *args], input=data.encode("utf-8"), check=True,
@@ -204,7 +204,7 @@ class HookTests(unittest.TestCase):
         self.stage("y.py", f"KEY = '{AWS_KEY}'\n")
         code, out = self.check()
         self.assertEqual(code, 1, out)
-        self.assertIn("  x.py\n    L1     CRITICAL [SC-TRUNCATED] File not fully scanned: " + hook.UNPRINTED_WHY, out)
+        self.assertIn("  x.py\n    L1     CRITICAL [SC-TRUNCATED] File not fully scanned: " + hook.why("unprinted"), out)
         self.assertIn("  y.py\n    L1     BLOCKER  [S-TOKEN]", out)
 
     @unittest.skipIf(sys.platform == "win32", "the stand-in git is a shell script")
@@ -225,7 +225,7 @@ class HookTests(unittest.TestCase):
         self.assertEqual(code, 1, out)
         self.assertNotIn("  a.py", out)
         for name in ("b.py", "c.py"):
-            self.assertIn(f"  {name}\n    L1     CRITICAL [SC-TRUNCATED] File not fully scanned: {hook.UNPRINTED_WHY}", out)
+            self.assertIn(f"  {name}\n    L1     CRITICAL [SC-TRUNCATED] File not fully scanned: {hook.why('unprinted')}", out)
 
     def test_usage_errors(self):
         os.mkdir(os.path.join(self.dir, "folder"))
