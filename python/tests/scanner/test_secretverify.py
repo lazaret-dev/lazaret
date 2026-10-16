@@ -35,6 +35,10 @@ SECRETS = {
     "openai": "sk-proj-" + "a1" * 20,
     "anthropic": "sk-ant-api03-" + "Ab1_" * 10,
     "aws": {"id": "AKI\x41ABCDEFGHIJKLMNOP", "secret": "wJalrXUtnFEMI/K7MDEN\x47+bPxRfiCYEXAMPLEKEY"},
+    # the admin keys (V-3): OpenAI's, the Console's, Claude Enterprise's (its Compliance Access Keys)
+    "openai-admin": "sk-" + "admin-" + "a1" * 20,
+    "anthropic-admin": "sk-ant-" + "admin01-" + "Ab1_" * 10,
+    "anthropic-compliance": "sk-ant-" + "api01-" + "Ab1_" * 10,
 }
 AWS_LIVE = (b'<GetCallerIdentityResponse xmlns="https://sts.amazonaws.com/doc/2011-06-15/"><GetCallerIdentityResult>'
             b"<Arn>arn:aws:iam::123456789012:user/alice</Arn><UserId>AIDAEXAMPLE</UserId><Account>123456789012</Account>"
@@ -85,14 +89,16 @@ def verifier(fake=None, **kw):
 class TableTests(unittest.TestCase):
     def test_the_shipped_table_is_valid_and_every_provider_has_a_sample(self):
         self.assertEqual(sv.validate(list(sv.PROVIDERS)), tuple(sv.PROVIDERS))
-        self.assertEqual(sv.provider_ids(), ["github", "slack", "stripe", "npm", "openai", "anthropic", "aws"])
+        self.assertEqual(sv.provider_ids(), ["github", "slack", "stripe", "npm", "openai", "anthropic", "aws", "openai-admin",
+                                             "anthropic-admin", "anthropic-compliance"])
         self.assertEqual(set(SECRETS), set(sv.provider_ids()))
 
     def test_provider_info_says_where_a_credential_would_go(self):
         info = dict((pid, (label, host)) for pid, label, host in sv.provider_info())
         self.assertEqual(info["github"], ("GitHub token", "api.github.com"))
         self.assertEqual(info["aws"], ("AWS access key", "sts.amazonaws.com"))
-        self.assertEqual(len(info), 7)
+        self.assertEqual(info["anthropic-compliance"], ("Claude Enterprise compliance key", "api.anthropic.com"))
+        self.assertEqual(len(info), 10)
 
     def test_every_host_is_a_name_the_transport_will_send_to_and_no_credential_part_is_in_a_path_or_a_query(self):
         for p in sv.PROVIDERS:
@@ -105,7 +111,9 @@ class TableTests(unittest.TestCase):
     def test_the_hosts_are_the_providers_own_and_https_only_by_construction(self):
         self.assertEqual({p["id"]: p["host"] for p in sv.PROVIDERS},
                          {"github": "api.github.com", "slack": "slack.com", "stripe": "api.stripe.com", "npm": "registry.npmjs.org",
-                          "openai": "api.openai.com", "anthropic": "api.anthropic.com", "aws": "sts.amazonaws.com"})
+                          "openai": "api.openai.com", "anthropic": "api.anthropic.com", "aws": "sts.amazonaws.com",
+                          "openai-admin": "api.openai.com", "anthropic-admin": "api.anthropic.com",
+                          "anthropic-compliance": "api.anthropic.com"})
 
     def test_every_request_only_authenticates(self):
         for p in sv.PROVIDERS:
@@ -115,7 +123,8 @@ class TableTests(unittest.TestCase):
                     self.assertEqual((method, p["request"]["body"]), ("POST", "Action=GetCallerIdentity&Version=2011-06-15"))
                 else:
                     self.assertEqual(method, "GET")
-                self.assertIn(path, ("/user", "/api/auth.test", "/v1/balance", "/-/whoami", "/v1/models", "/"))
+                self.assertIn(path, ("/user", "/api/auth.test", "/v1/balance", "/-/whoami", "/v1/models", "/",
+                                     "/v1/organization/projects", "/v1/organizations/me", "/v1/compliance/organizations"))
 
 
 class IdentifyTests(unittest.TestCase):
@@ -137,19 +146,26 @@ class IdentifyTests(unittest.TestCase):
         self.assertEqual(sv.identify("sk-svcacct-" + "a" * 30), ["openai"])
         self.assertEqual(sv.identify("sk-ant" + "a" * 30), ["openai"])            # (no dash after ant: not Anthropic's)
 
+    def test_the_admin_keys_are_their_admin_apis(self):
+        # (V-3) OpenAI's sk-admin-, the Console's sk-ant-admin01-, Claude Enterprise's sk-ant-api01- (its Compliance Access
+        # Keys): each asked about at its own admin API, not where the API keys are
+        self.assertEqual(sv.identify("sk-admin-" + "a" * 30), ["openai-admin"])
+        self.assertEqual(sv.identify("sk-ant-admin01-" + "a" * 30), ["anthropic-admin"])
+        self.assertEqual(sv.identify("sk-ant-api01-" + "a" * 30), ["anthropic-compliance"])
+        self.assertEqual(sv.identify("sk-admin" + "a" * 30), ["openai"])            # (no dash after admin: not an admin key)
+
     def test_what_the_table_does_not_ask_about_is_no_ones(self):
-        # each is detected still (S-TOKEN, S-ENTROPY), but it is not verified: Anthropic's OAuth tokens, its admin keys (the
-        # Console's sk-ant-admin01-, Claude Enterprise's sk-ant-api01-, which are its Compliance Access Keys too: Anthropic's
-        # API keys are sk-ant-api03- and the Console's personal sk-ant-usr-), a key of Anthropic's in no format it
-        # documents, OpenAI's admin keys
-        for prefix in ("sk-ant-oat01-", "sk-ant-admin01-", "sk-ant-api01-", "sk-ant-api02-", "sk-ant-", "sk-ant-api-", "sk-admin-"):
+        # each is detected still (S-TOKEN, S-ENTROPY), but it is not verified: Anthropic's OAuth tokens (Anthropic documents
+        # no call for them), a key of Anthropic's in no format it documents
+        for prefix in ("sk-ant-oat01-", "sk-ant-api02-", "sk-ant-", "sk-ant-api-", "sk-ant-admin02-"):
             with self.subTest(prefix):
                 self.assertEqual(sv.identify(prefix + "a" * 30), [])
 
     def test_the_lengths_are_the_formats(self):
         edge = [("ghp_", "a", 36, 251), ("gho_", "a", 36, 251), ("ghs_", "a", 36, 251), ("github_pat_", "a", 22, 255), ("xoxb-", "a", 10, 250),
                 ("xoxp-", "1", 10, 250), ("sk_live_", "a", 16, 247), ("rk_live_", "a", 16, 247), ("npm_", "a", 36, 36),
-                ("sk-", "a", 20, 200), ("sk-ant-api03-", "a", 20, 200), ("sk-ant-usr-", "a", 20, 200)]
+                ("sk-", "a", 20, 200), ("sk-ant-api03-", "a", 20, 200), ("sk-ant-usr-", "a", 20, 200), ("sk-admin-", "a", 20, 200),
+                ("sk-ant-admin01-", "a", 20, 200), ("sk-ant-api01-", "a", 20, 200)]
         for prefix, ch, low, high in edge:
             with self.subTest(prefix):
                 self.assertNotEqual(sv.identify(prefix + ch * low), [])
@@ -327,6 +343,30 @@ CASES = {
         (403, {"type": "error", "error": {"type": "authentication_error"}}, "unknown", None), (403, b"", "unknown", None),
         (429, b"", "unknown", None), (529, b"", "unknown", None),
     ],
+    # (V-3) the admin keys, by each admin API's documented answers
+    "openai-admin": [
+        (200, {"object": "list", "data": []}, "live", None), (401, {"error": {"code": "invalid_api_key"}}, "rejected", None),
+        (401, b"", "unknown", None), (401, {"error": {"code": "insufficient_permissions"}}, "unknown", None), (403, b"", "unknown", None),
+        (429, b"", "unknown", None), (500, b"", "unknown", None),
+    ],
+    "anthropic-admin": [
+        (200, {"id": "12345678-1234-5678-1234-567812345678", "name": "Organization Name", "type": "organization"}, "live",
+         "Organization Name"),
+        (401, {"type": "error", "error": {"type": "authentication_error", "message": "invalid x-api-key"}}, "rejected", None),
+        (403, {"type": "error", "error": {"type": "permission_error", "message": "x"}}, "live", None),
+        (401, b"", "unknown", None), (404, {"type": "error", "error": {"type": "not_found_error"}}, "unknown", None),
+        (429, b"", "unknown", None),
+    ],
+    "anthropic-compliance": [
+        (200, {"data": [], "has_more": False, "next_page": None}, "live", None),
+        (401, {"type": "error", "error": {"type": "authentication_error", "message": "API key is invalid."}}, "rejected", None),
+        (403, {"type": "error", "error": {"type": "permission_error", "message": "Missing required scopes."}}, "live", None),
+        (400, {"type": "error", "error": {"type": "invalid_request_error",
+                                          "message": "Compliance API is not enabled for this organization"}}, "live", None),
+        (400, {"type": "error", "error": {"type": "invalid_request_error", "message": "Unknown query parameter: x"}}, "unknown", None),
+        (404, {"type": "error", "error": {"type": "not_found_error", "message": "Not found"}}, "unknown", None),
+        (401, b"", "unknown", None), (429, b"", "unknown", None),
+    ],
     "aws": [
         (200, AWS_LIVE, "live", "arn:aws:iam::123456789012:user/alice"), (200, b"<x/>", "live", None),
         (403, aws_error("InvalidClientTokenId"), "rejected", None), (403, aws_error("SignatureDoesNotMatch"), "rejected", None),
@@ -494,7 +534,8 @@ class RequestTests(unittest.TestCase):
         listed = re.search(r"pub const PLAIN_HEADERS: \[&str; \d+\] =\s*\[([^\]]*)\]", source.read_text(encoding="utf-8"))
         plain = set(re.findall(r'"([^"]+)"', listed.group(1)))
         self.assertIn("anthropic-version", plain)
-        named = {"anthropic": ("x-api-key",), "aws": ("authorization",)}
+        named = {"anthropic": ("x-api-key",), "anthropic-admin": ("x-api-key",), "anthropic-compliance": ("x-api-key",),
+                 "aws": ("authorization",)}
         for pid in SECRETS:
             with self.subTest(pid):
                 r = self.build(pid)
@@ -1002,11 +1043,14 @@ class StubTests(StubCase):
     def test_a_run_over_all_the_providers_at_once(self):
         for host, path, body in (("api.github.com", "/user", {"login": "o"}), ("slack.com", "/api/auth.test", {"ok": True}),
                                  ("api.stripe.com", "/v1/balance", {}), ("registry.npmjs.org", "/-/whoami", {"username": "n"}),
-                                 ("api.openai.com", "/v1/models", {}), ("api.anthropic.com", "/v1/models", {})):
+                                 ("api.openai.com", "/v1/models", {}), ("api.anthropic.com", "/v1/models", {}),
+                                 ("api.openai.com", "/v1/organization/projects", {}),
+                                 ("api.anthropic.com", "/v1/organizations/me", {"name": "o"}),
+                                 ("api.anthropic.com", "/v1/compliance/organizations", {})):
             self.answer(host, path, 200, body)
         self.answer("sts.amazonaws.com", "/", 200, AWS_LIVE)
-        got = self.v.verify_all(list(SECRETS.items()), workers=7)
-        self.assertEqual([r.outcome for r in got], ["live"] * 7)
+        got = self.v.verify_all(list(SECRETS.items()), workers=10)
+        self.assertEqual([r.outcome for r in got], ["live"] * 10)
         self.assertEqual({s.host for s in self.seen()}, {p["host"] for p in sv.PROVIDERS})
 
 

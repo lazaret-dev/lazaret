@@ -1761,8 +1761,11 @@ VERIFY_SAMPLES = {
     "github": "ghp_" + "a1B2" * 9, "slack": "xox\x62-1234567890-abcdefghij", "stripe": "sk_live_" + "a1" * 12, "npm": "npm_" + "A1b2" * 9,
     "openai": "sk-proj-" + "a1" * 20, "anthropic": "sk-ant-api03-" + "Ab1_" * 10,
     "aws": {"id": "AKI\x41ABCDEFGHIJKLMNOP", "secret": "wJalrXUtnFEMI/K7MDEN\x47+bPxRfiCYEXAMPLEKEY"},
+    "openai-admin": "sk-" + "admin-" + "a1" * 20, "anthropic-admin": "sk-ant-" + "admin01-" + "Ab1_" * 10,
+    "anthropic-compliance": "sk-ant-" + "api01-" + "Ab1_" * 10,
 }
-VERIFY_FIELDS = ("github", "slack", "stripe", "npm", "openai", "anthropic", "aws")        # (the order of the pack's _VERIFY_PROVIDERS)
+VERIFY_FIELDS = ("github", "slack", "stripe", "npm", "openai", "anthropic", "aws", "openai-admin", "anthropic-admin",
+                 "anthropic-compliance")                                              # (the order of the pack's _VERIFY_PROVIDERS)
 
 
 def verify_answer(index, status, body, truncated=False):
@@ -1774,9 +1777,11 @@ def verify_answer_seeds():
     for index, pid in enumerate(VERIFY_FIELDS):
         secret = VERIFY_SAMPLES[pid]
         part = secret if isinstance(secret, str) else secret["secret"]
-        for status in (200, 401, 403, 429, 500):
+        for status in (200, 400, 401, 403, 404, 429, 500):
             for body in (b"", b'{"login": "octocat"}', b'{"ok": true, "user": "bot"}', b'{"ok": false, "error": "invalid_auth"}',
-                         b'{"error": {"type": "permission_error"}}', b'<Error><Code>InvalidClientTokenId</Code></Error>',
+                         b'{"error": {"type": "permission_error"}}', b'{"name": "o"}', b'{"error": {"code": "invalid_api_key"}}',
+                         b'{"error": {"type": "invalid_request_error", "message": "Compliance API is not enabled for this organization"}}',
+                         b'<Error><Code>InvalidClientTokenId</Code></Error>',
                          b"<Arn>arn:aws:iam::123456789012:user/alice</Arn>", ('{"login": "%s", "user": "%s"}' % (part, part)).encode()):
                 seeds.append(verify_answer(index, status, body))
     seeds.append(verify_answer(0, 200, b'{"login": "x"}', truncated=True))
@@ -1787,7 +1792,8 @@ def verify_answer_seeds():
 
 VERIFY_ANSWER_WORDS = (b'{"ok": ', b'"error"', b'"login"', b'"user"', b'"username"', b'"type"', b'"permission_error"', b"true", b"false", b"null",
                        b"invalid_auth", b"token_revoked", b"ratelimited", b"<Code>", b"</Code>", b"<Arn>", b"</Arn>", b"InvalidClientTokenId",
-                       b"SignatureDoesNotMatch", b"Throttling", b"\x1b[31m", b"\xe2\x80\xae", b"\x00", b"\xff\xfe", b"[", b"{", b'\\ud800', b"\n")
+                       b"SignatureDoesNotMatch", b"Throttling", b"authentication_error", b"invalid_request_error", b"invalid_api_key",
+                       b'"name"', b'"code"', b'"message"', b"\x1b[31m", b"\xe2\x80\xae", b"\x00", b"\xff\xfe", b"[", b"{", b'\\ud800', b"\n")
 
 
 def verify_answers_start():
@@ -1828,9 +1834,14 @@ VERIFY_CREDENTIAL_SEEDS = [
     b"openai\n" + VERIFY_SAMPLES["anthropic"].encode(), b"anthropic\n" + VERIFY_SAMPLES["anthropic"].encode(),
     b"aws\n" + VERIFY_SAMPLES["aws"]["id"].encode() + b"\n" + VERIFY_SAMPLES["aws"]["secret"].encode(), b"aws\nAKIA\nx", b"aws\n\n",
     b"github\n", b"\n", b"", b"nonesuch\nx",
+    b"openai-admin\n" + VERIFY_SAMPLES["openai-admin"].encode(), b"anthropic-admin\n" + VERIFY_SAMPLES["anthropic-admin"].encode(),
+    b"anthropic-compliance\n" + VERIFY_SAMPLES["anthropic-compliance"].encode(),
+    b"anthropic-admin\n" + VERIFY_SAMPLES["anthropic-compliance"].encode(), b"openai\n" + VERIFY_SAMPLES["openai-admin"].encode(),
 ]
-VERIFY_CREDENTIAL_WORDS = (b"github\n", b"slack\n", b"stripe\n", b"npm\n", b"openai\n", b"anthropic\n", b"aws\n", b"ghp_", b"github_pat_", b"xoxb-", b"xoxp-",
-                           b"sk_live_", b"rk_live_", b"npm_", b"sk-", b"sk-ant-", b"sk-ant-api03-", b"sk-ant-oat01-", b"sk-admin-",
+VERIFY_CREDENTIAL_WORDS = (b"github\n", b"slack\n", b"stripe\n", b"npm\n", b"openai\n", b"anthropic\n", b"aws\n", b"openai-admin\n",
+                           b"anthropic-admin\n", b"anthropic-compliance\n", b"ghp_", b"github_pat_", b"xoxb-", b"xoxp-",
+                           b"sk_live_", b"rk_live_", b"npm_", b"sk-", b"sk-ant-", b"sk-ant-api03-", b"sk-ant-oat01-", b"sk-ant-admin01-",
+                           b"sk-ant-api01-", b"sk-admin-",
                            b"sk-proj-", b"AKIA", b"\r\n", b"\n", b"\r", b" ", b"\t", b"\x00",
                            b"\xc3\xa9", b"\xd9\xa1", b"\xe2\x80\xae", b"Bearer ", b"/", b"+", b"=", b"%0d%0a", b"a" * 36, b"A" * 40)
 

@@ -10,10 +10,10 @@ provider it asks about
 
 - **a made-up credential** in the provider's format (it exists nowhere): the provider should say it is not valid, so the
   reading of "rejected" is checked without a key of anyone's, and
-- **a credential of yours, if you give one**, in the environment: `LAZARET_VERIFY_<ID>` (the secret; for AWS
-  `LAZARET_VERIFY_AWS_ID` and `LAZARET_VERIFY_AWS_SECRET`). It is expected to be `live`, or what
-  `LAZARET_VERIFY_<ID>_EXPECT` says (`live`, `rejected` or `unknown`): a revoked key of your own is a second way to check
-  "rejected" against the real thing.
+- **a credential of yours, if you give one**, in the environment: `LAZARET_VERIFY_<ID>` (the secret, the id in capitals with
+  `_` for `-`: `LAZARET_VERIFY_ANTHROPIC_ADMIN`; for AWS `LAZARET_VERIFY_AWS_ID` and `LAZARET_VERIFY_AWS_SECRET`). It is
+  expected to be `live`, or what `LAZARET_VERIFY_<ID>_EXPECT` says (`live`, `rejected` or `unknown`): a revoked key of your
+  own is a second way to check "rejected" against the real thing.
 
 It sends the credentials it is given, and made-up ones, to the providers' hosts in the table and to nobody else, and needs
 `--yes` to say that is meant. It prints each provider, which credential, what was expected, what came back, the HTTP status
@@ -41,6 +41,9 @@ MADE_UP = {
     "openai": "sk-" + "0" * 48,
     "anthropic": "sk-ant-api03-" + "0" * 40,
     "aws": {"id": "AKIA" + "0" * 16, "secret": "0" * 40},
+    "openai-admin": "sk-admin-" + "0" * 48,
+    "anthropic-admin": "sk-ant-admin01-" + "0" * 40,
+    "anthropic-compliance": "sk-ant-api01-" + "0" * 40,
 }
 
 
@@ -58,9 +61,14 @@ def configure_stdio():
             pass
 
 
+def env_name(pid):
+    """A provider's id as an environment variable's name holds it: `anthropic-admin` -> `ANTHROPIC_ADMIN`."""
+    return pid.upper().replace("-", "_")
+
+
 def yours(pid, environ):
     """The credential of this provider the environment gives, or None (for AWS, both parts or none)."""
-    key = f"LAZARET_VERIFY_{pid.upper()}"
+    key = f"LAZARET_VERIFY_{env_name(pid)}"
     if pid == "aws":
         parts = {"id": environ.get(key + "_ID", ""), "secret": environ.get(key + "_SECRET", "")}
         return parts if parts["id"] and parts["secret"] else None
@@ -75,7 +83,7 @@ def plan(ids, environ, made_up=True):
             rows.append((pid, "made-up", MADE_UP[pid], "rejected"))
         own = yours(pid, environ)
         if own is not None:
-            rows.append((pid, "yours", own, environ.get(f"LAZARET_VERIFY_{pid.upper()}_EXPECT") or "live"))
+            rows.append((pid, "yours", own, environ.get(f"LAZARET_VERIFY_{env_name(pid)}_EXPECT") or "live"))
     return rows
 
 

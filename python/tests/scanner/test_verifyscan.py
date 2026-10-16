@@ -153,6 +153,27 @@ class VerifyFindingsTests(Case):
                          [("anthropic", "api.anthropic.com", 1), ("github", "api.github.com", 1), ("slack", "slack.com", 1),
                           ("stripe", "api.stripe.com", 1), ("aws", "sts.amazonaws.com", 1)])
 
+    def test_an_admin_key_is_asked_at_its_admin_api(self):
+        # (V-3: each at the call its admin API documents; made up, in the providers' formats)
+        openai = "sk-" + "admin-" + "a1B2" * 8 + "T3Blbk" + "FJ" + "a1B2" * 8
+        admin, compliance = "sk-ant-" + "admin01-" + "Ab1_" * 12, "sk-ant-" + "api01-" + "Ab1_" * 12
+        root = self.folder("admin", app="", env=f"OPENAI_ADMIN_KEY={openai}\nANTHROPIC_ADMIN_KEY={admin}\nCOMPLIANCE_KEY={compliance}\n")
+        res = self.scan(root)
+        answers = self.verify(res, Answers({"api.openai.com": (200, b'{"data": []}'), "api.anthropic.com": (200, b'{"name": "Acme"}')}),
+                              root=root)
+        self.assertEqual(sorted((r.host, r.path) for r in answers.asked),
+                         [("api.anthropic.com", "/v1/compliance/organizations"), ("api.anthropic.com", "/v1/organizations/me"),
+                          ("api.openai.com", "/v1/organization/projects")])
+        env = sorted((i["line"], i["verified"]["provider"], i["verified"]["outcome"]) for i in res["issues"] if i["file"] == ".env")
+        self.assertEqual(env, [(1, "openai-admin", "live"), (2, "anthropic-admin", "live"), (3, "anthropic-compliance", "live")])
+        (line2,) = [i for i in res["issues"] if i["file"] == ".env" and i["line"] == 2]
+        self.assertIn("Verified live: the provider accepts this Anthropic admin key (the account: Acme). Revoke it now.", line2["msg"])
+        self.assertEqual({p["provider"]: p["label"] for p in res["verification"]["providers"]},
+                         {"openai-admin": "OpenAI admin key", "anthropic-admin": "Anthropic admin key",
+                          "anthropic-compliance": "Claude Enterprise compliance key"})
+        for secret in (openai, admin, compliance):
+            self.assertNotIn(secret, json.dumps(res))
+
     def test_an_aws_key_and_its_secret_are_asked_about_as_a_pair(self):
         res = self.scan()
         answers = self.verify(res, Answers({"sts.amazonaws.com": (403, AWS_REJECTED)}))

@@ -17907,6 +17907,176 @@
        "service": "sts"
       }
      }
+    },
+    {
+     "answers": [
+      {
+       "outcome": "live",
+       "status": [
+        200
+       ]
+      },
+      {
+       "json": {
+        "error.code": "invalid_api_key"
+       },
+       "outcome": "rejected",
+       "status": [
+        401
+       ],
+       "why": "OpenAI says the admin key is not valid"
+      },
+      {
+       "outcome": "unknown",
+       "status": [
+        401,
+        403,
+        429
+       ],
+       "why": "OpenAI refused or rate limited the call"
+      }
+     ],
+     "host": "api.openai.com",
+     "id": "openai-admin",
+     "label": "OpenAI admin key",
+     "parts": {
+      "secret": "sk-admin-[A-Za-z0-9_-]{20,200}"
+     },
+     "request": {
+      "headers": {
+       "Authorization": "Bearer {secret}",
+       "User-Agent": "lazaret-secret-verify"
+      },
+      "method": "GET",
+      "path": "/v1/organization/projects",
+      "query": {}
+     }
+    },
+    {
+     "answers": [
+      {
+       "outcome": "live",
+       "status": [
+        200
+       ],
+       "who": {
+        "json": "name"
+       }
+      },
+      {
+       "json": {
+        "error.type": "authentication_error"
+       },
+       "outcome": "rejected",
+       "status": [
+        401
+       ],
+       "why": "Anthropic says the admin key is not valid"
+      },
+      {
+       "json": {
+        "error.type": "permission_error"
+       },
+       "outcome": "live",
+       "status": [
+        403
+       ],
+       "why": "Anthropic knows the key but it may not read the organization"
+      },
+      {
+       "outcome": "unknown",
+       "status": [
+        401,
+        403,
+        429
+       ],
+       "why": "Anthropic refused or rate limited the call"
+      }
+     ],
+     "host": "api.anthropic.com",
+     "id": "anthropic-admin",
+     "label": "Anthropic admin key",
+     "parts": {
+      "secret": "sk-ant-admin01-[A-Za-z0-9_-]{20,200}"
+     },
+     "request": {
+      "headers": {
+       "User-Agent": "lazaret-secret-verify",
+       "anthropic-version": "2023-06-01",
+       "x-api-key": "{secret}"
+      },
+      "method": "GET",
+      "path": "/v1/organizations/me",
+      "query": {}
+     }
+    },
+    {
+     "answers": [
+      {
+       "outcome": "live",
+       "status": [
+        200
+       ]
+      },
+      {
+       "json": {
+        "error.type": "authentication_error"
+       },
+       "outcome": "rejected",
+       "status": [
+        401
+       ],
+       "why": "Anthropic says the compliance key is not valid"
+      },
+      {
+       "json": {
+        "error.type": "permission_error"
+       },
+       "outcome": "live",
+       "status": [
+        403
+       ],
+       "why": "Anthropic knows the key but it may not list the organizations"
+      },
+      {
+       "json": {
+        "error.message": "Compliance API is not enabled for this organization",
+        "error.type": "invalid_request_error"
+       },
+       "outcome": "live",
+       "status": [
+        400
+       ],
+       "why": "Anthropic knows the key, but its organization has the Compliance API turned off"
+      },
+      {
+       "outcome": "unknown",
+       "status": [
+        400,
+        401,
+        403,
+        404,
+        429
+       ],
+       "why": "Anthropic refused or rate limited the call"
+      }
+     ],
+     "host": "api.anthropic.com",
+     "id": "anthropic-compliance",
+     "label": "Claude Enterprise compliance key",
+     "parts": {
+      "secret": "sk-ant-api01-[A-Za-z0-9_-]{20,200}"
+     },
+     "request": {
+      "headers": {
+       "User-Agent": "lazaret-secret-verify",
+       "anthropic-version": "2023-06-01",
+       "x-api-key": "{secret}"
+      },
+      "method": "GET",
+      "path": "/v1/compliance/organizations",
+      "query": {}
+     }
     }
    ]
   },

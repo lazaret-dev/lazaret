@@ -35,16 +35,21 @@ const GITHUB: &str = concat!("ghp_", "a1B2a1B2a1B2a1B2a1B2", "a1B2a1B2a1B2a1B2")
 const AWS_ID: &str = concat!("AKIA", "ABCDEFGHIJKLMNOP");
 const AWS_SECRET: &str = "wJalrXUtnFEMI/K7MDEN\x47+bPxRfiCYEXAMPLEKEY";
 const ANTHROPIC: &str = concat!("sk-ant-", "api03-", "Ab1_Ab1_Ab1_Ab1_Ab1_", "Ab1_Ab1_Ab1_Ab1_Ab1_");
+// the admin keys (V-3): OpenAI's, the Console's and Claude Enterprise's (its Compliance Access Keys)
+const OPENAI_ADMIN: &str = concat!("sk-", "admin-", "a1a1a1a1a1a1a1a1a1a1", "a1a1a1a1a1a1a1a1a1a1");
+const ANTHROPIC_ADMIN: &str = concat!("sk-ant-", "admin01-", "Ab1_Ab1_Ab1_Ab1_Ab1_", "Ab1_Ab1_Ab1_Ab1_Ab1_");
+const COMPLIANCE: &str = concat!("sk-ant-", "api01-", "Ab1_Ab1_Ab1_Ab1_Ab1_", "Ab1_Ab1_Ab1_Ab1_Ab1_");
 
 // ------------------------------------------------------------------------------------------------ the table
 
 #[test]
-fn the_packs_table_is_the_seven_providers() {
-    assert_eq!(table_now(), ["github", "slack", "stripe", "npm", "openai", "anthropic", "aws"]);
+fn the_packs_table_is_the_ten_providers() {
+    assert_eq!(table_now(), ["github", "slack", "stripe", "npm", "openai", "anthropic", "aws", "openai-admin", "anthropic-admin",
+                             "anthropic-compliance"]);
     let p = pack::current();
     let hosts: Vec<&str> = table(&p).as_ref().unwrap().iter().map(|q| q.host.as_str()).collect();
     assert_eq!(hosts, ["api.github.com", "slack.com", "api.stripe.com", "registry.npmjs.org", "api.openai.com",
-                       "api.anthropic.com", "sts.amazonaws.com"]);
+                       "api.anthropic.com", "sts.amazonaws.com", "api.openai.com", "api.anthropic.com", "api.anthropic.com"]);
 }
 
 #[test]
@@ -121,11 +126,14 @@ fn each_sample_names_its_provider_alone() {
     assert!(ids(AWS_ID).is_empty() && ids(AWS_SECRET).is_empty(), "a pair is not named by a part");
     assert_eq!(ids(&format!("sk-ant{}", "a".repeat(30))), ["openai"]);
     assert_eq!(ids(concat!("sk-ant-", "usr-", "Ab1_Ab1_Ab1_Ab1_Ab1_", "Ab1_Ab1_Ab1_Ab1_Ab1_")), ["anthropic"]); // the Console's personal keys
+    // the admin keys (V-3), each asked about at its own admin API: OpenAI's, the Console's sk-ant-admin01-, Claude
+    // Enterprise's sk-ant-api01- (its Compliance Access Keys)
+    for (id, sample) in [("openai-admin", OPENAI_ADMIN), ("anthropic-admin", ANTHROPIC_ADMIN), ("anthropic-compliance", COMPLIANCE)] {
+        assert_eq!(ids(sample), [id], "{sample}");
+    }
     // what a provider issues but the table does not ask about is no one's (each is detected still; it is not verified):
-    // Anthropic's OAuth tokens, its admin keys (the Console's sk-ant-admin01-, Claude Enterprise's sk-ant-api01-, which are
-    // its Compliance Access Keys too: Anthropic's API keys are sk-ant-api03- and the Console's personal sk-ant-usr-), a key
-    // of Anthropic's in no format it documents, OpenAI's admin keys
-    for prefix in ["sk-ant-oat01-", "sk-ant-admin01-", "sk-ant-api01-", "sk-ant-api02-", "sk-ant-", "sk-ant-api-", "sk-admin-"] {
+    // Anthropic's OAuth tokens (no call is documented for them), a key of Anthropic's in no format it documents
+    for prefix in ["sk-ant-oat01-", "sk-ant-api02-", "sk-ant-", "sk-ant-api-", "sk-ant-admin02-"] {
         assert!(ids(&format!("{prefix}{}", "a".repeat(30))).is_empty(), "{prefix}");
     }
 }
@@ -133,7 +141,8 @@ fn each_sample_names_its_provider_alone() {
 #[test]
 fn the_lengths_are_the_formats_and_a_credential_is_looked_at_to_512_characters() {
     for (prefix, low, high) in [("ghp_", 36, 251), ("github_pat_", 22, 255), ("xoxb-", 10, 250), ("sk_live_", 16, 247), ("npm_", 36, 36),
-                                ("sk-", 20, 200), ("sk-ant-api03-", 20, 200), ("sk-ant-usr-", 20, 200)] {
+                                ("sk-", 20, 200), ("sk-ant-api03-", 20, 200), ("sk-ant-usr-", 20, 200), ("sk-admin-", 20, 200),
+                                ("sk-ant-admin01-", 20, 200), ("sk-ant-api01-", 20, 200)] {
         assert!(!ids(&format!("{prefix}{}", "a".repeat(low))).is_empty(), "{prefix}");
         assert!(!ids(&format!("{prefix}{}", "a".repeat(high))).is_empty(), "{prefix}");
         assert!(ids(&format!("{prefix}{}", "a".repeat(low - 1))).is_empty(), "{prefix}");
@@ -169,6 +178,22 @@ fn each_request_is_stage_ones() {
     assert_eq!(r.secret_headers, ["Authorization"]);
     let r = ask("anthropic", &[("secret", ANTHROPIC)]).unwrap();
     assert_eq!(r.secret_headers, ["x-api-key"]);
+    // the admin keys' calls (V-3): each its admin API's own call that reads who the key is, the key in the header the
+    // provider documents for it
+    let r = ask("openai-admin", &[("secret", OPENAI_ADMIN)]).unwrap();
+    assert_eq!((r.method.as_str(), r.host.as_str(), r.path.as_str(), r.body.as_deref()),
+               ("GET", "api.openai.com", "/v1/organization/projects", None));
+    assert_eq!(r.secret_headers, ["Authorization"]);
+    assert!(r.headers.contains(&("Authorization".to_string(), format!("Bearer {OPENAI_ADMIN}"))));
+    for (id, key, path) in [("anthropic-admin", ANTHROPIC_ADMIN, "/v1/organizations/me"),
+                            ("anthropic-compliance", COMPLIANCE, "/v1/compliance/organizations")] {
+        let r = ask(id, &[("secret", key)]).unwrap();
+        assert_eq!((r.method.as_str(), r.host.as_str(), r.path.as_str()), ("GET", "api.anthropic.com", path), "{id}");
+        let mut headers = r.headers.clone();
+        headers.sort();
+        assert_eq!(headers, pairs(&[("User-Agent", "lazaret-secret-verify"), ("anthropic-version", "2023-06-01"), ("x-api-key", key)]), "{id}");
+        assert_eq!(r.secret_headers, ["x-api-key"]);
+    }
     let r = ask("aws", &[("id", AWS_ID), ("secret", AWS_SECRET)]).unwrap();
     assert_eq!((r.method.as_str(), r.host.as_str(), r.path.as_str()), ("POST", "sts.amazonaws.com", "/"));
     assert_eq!(r.body.as_deref(), Some("Action=GetCallerIdentity&Version=2011-06-15"));
@@ -383,6 +408,46 @@ fn a_key_is_rejected_only_on_its_providers_own_word() {
                    "{status} {body}");
     }
     assert_eq!(judged("anthropic", 200, r#"{"data": []}"#, false).0, "live");
+}
+
+#[test]
+fn an_admin_key_is_read_by_its_admin_apis_documented_answers() {
+    // (V-3) OpenAI's admin keys as its API keys are: rejected on invalid_api_key alone
+    let openai = r#"{"error": {"message": "Incorrect API key provided", "type": "invalid_request_error", "code": "invalid_api_key"}}"#;
+    assert_eq!(judged("openai-admin", 401, openai, false), ("rejected", "OpenAI says the admin key is not valid".into(), None));
+    assert_eq!(judged("openai-admin", 200, r#"{"object": "list", "data": []}"#, false).0, "live");
+    for (status, body) in [(401, ""), (401, r#"{"error": {"code": "insufficient_permissions"}}"#), (403, ""), (429, "")] {
+        assert_eq!(judged("openai-admin", status, body, false).0, "unknown", "{status} {body}");
+    }
+    // the Console's admin keys: GET /v1/organizations/me names the organization
+    let anthropic = |kind: &str| format!(r#"{{"type": "error", "error": {{"type": "{kind}", "message": "x"}}}}"#);
+    let me = r#"{"id": "12345678-1234-5678-1234-567812345678", "name": "Organization Name", "type": "organization"}"#;
+    assert_eq!(judged("anthropic-admin", 200, me, false), ("live", "HTTP 200".into(), Some("Organization Name".into())));
+    assert_eq!(judged("anthropic-admin", 401, &anthropic("authentication_error"), false),
+               ("rejected", "Anthropic says the admin key is not valid".into(), None));
+    assert_eq!(judged("anthropic-admin", 403, &anthropic("permission_error"), false).0, "live");
+    for (status, body) in [(401, "".to_string()), (403, "".to_string()), (429, anthropic("rate_limit_error")), (404, anthropic("not_found_error"))] {
+        assert_eq!(judged("anthropic-admin", status, &body, false).0, "unknown", "{status} {body}");
+    }
+    // Claude Enterprise's Compliance Access Keys, by the Compliance API's error catalogue: 401 authentication_error is a
+    // key that does not authenticate (invalid, deactivated or expired); 403 permission_error a valid key without the
+    // scope; the 400 that says the Compliance API is off a valid key too; the bare 404 a credential it does not take
+    assert_eq!(judged("anthropic-compliance", 200, r#"{"data": [], "has_more": false, "next_page": null}"#, false).0, "live");
+    let error = |kind: &str, message: &str| format!(r#"{{"type": "error", "error": {{"type": "{kind}", "message": "{message}"}}}}"#);
+    assert_eq!(judged("anthropic-compliance", 401, &error("authentication_error", "API key has been deactivated."), false),
+               ("rejected", "Anthropic says the compliance key is not valid".into(), None));
+    let scopes = "Missing required scopes. Got: ['read:compliance_activities'] Needed one of: ['read:compliance_org_data', 'read:org_audit']";
+    assert_eq!(judged("anthropic-compliance", 403, &error("permission_error", scopes), false).0, "live");
+    assert_eq!(judged("anthropic-compliance", 400, &error("invalid_request_error", "Compliance API is not enabled for this organization"), false),
+               ("live", "Anthropic knows the key, but its organization has the Compliance API turned off".into(), None));
+    for (status, body) in [(400, error("invalid_request_error", "Unknown query parameter: x")), (400, error("invalid_request_error", "")),
+                           (404, error("not_found_error", "Not found")), (401, "".to_string()), (403, "".to_string()),
+                           (429, error("rate_limit_error", "x"))] {
+        assert_eq!(judged("anthropic-compliance", status, &body, false), ("unknown", "Anthropic refused or rate limited the call".into(), None),
+                   "{status} {body}");
+    }
+    assert_eq!(judged("anthropic-compliance", 400, &error("invalid_request_error", "Compliance API is not enabled for this organization"), true).0,
+               "unknown", "a body cut short holds no condition");
 }
 
 #[test]

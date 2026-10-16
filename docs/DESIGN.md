@@ -1763,8 +1763,9 @@ target when asked (`github:` and `gitlab:` repositories too), never in the
 guard, the registry auditor, the MCP server or the pre-commit hook.
 
 One copy of the logic, in the engine (decision 7): the provider table is
-the pack's `_VERIFY_PROVIDERS` (seven providers: GitHub, Slack, Stripe and
-npm tokens, OpenAI and Anthropic API keys, AWS key pairs), checked when it
+the pack's `_VERIFY_PROVIDERS` (ten: GitHub, Slack, Stripe and npm tokens,
+OpenAI and Anthropic API keys, AWS key pairs, and OpenAI's, the Console's
+and Claude Enterprise's admin keys), checked when it
 is read and by `make_rust_tables.py --check` (a host is a lower-case DNS
 name; a credential goes in a header, never in the path or the query; a
 signed request sends no secret). `secrets.rs` answers three questions,
@@ -1781,17 +1782,31 @@ body cut at 64 KiB read by its status alone; the account's name printable,
 
 A key is asked about only where the call is documented for it, and is
 rejected only on its provider's own word. OpenAI's pattern takes user,
-project and service account keys (`sk-`, `sk-proj-`, `sk-svcacct-`), not its
-admin keys (`sk-admin-`); Anthropic's takes its API keys (`sk-ant-api03-`,
-and the Console's personal ones, `sk-ant-usr-`),
-not its OAuth tokens (`sk-ant-oat01-`) or admin keys (`sk-ant-admin01-`,
-and Claude Enterprise's `sk-ant-api01-`, its Compliance Access Keys), which
-`/v1/models` is not documented for: a live admin key turned away there must
-not read as rejected. A 401 is rejected only with OpenAI's `error.code`
-`invalid_api_key` or Anthropic's `error.type` `authentication_error`; any
-other 401 (a gateway's, a proxy's, another reason) is unknown, and
-Anthropic's 403 `permission_error` is a key it knows, live, as Stripe's is.
-What the table does not ask about is detected as before.
+project and service account keys (`sk-`, `sk-proj-`, `sk-svcacct-`), and
+Anthropic's its API keys (`sk-ant-api03-`, and the Console's personal ones,
+`sk-ant-usr-`): `/v1/models` is documented for them, not for an admin key,
+which a live admin key turned away there must not read as rejected. The
+admin keys have entries of their own (V-3, 0.1.9), each asked at its admin
+API's own call: OpenAI's (`sk-admin-`) `GET /v1/organization/projects`, the
+Administration API's list, which its reference calls with the admin key;
+the Console's (`sk-ant-admin01-`) `GET /v1/organizations/me`, the Admin
+API's organization of the key, whose name is the answer's owner; Claude
+Enterprise's Compliance Access Keys (`sk-ant-api01-`) `GET
+/v1/compliance/organizations`, read by the Compliance API's error catalogue:
+401 `authentication_error` is a key that does not authenticate (invalid,
+deactivated, expired), 403 `permission_error` a valid key without the
+scope, a 400 that says the Compliance API is not enabled a valid key too,
+and the bare 404 a credential it does not take, unknown. (A Compliance API
+call is one of the organization's audited activities: its admins see it in
+their Activity Feed, as any provider logs the call.) A 401 is rejected only
+with OpenAI's `error.code` `invalid_api_key` or Anthropic's `error.type`
+`authentication_error`; any other 401 (a gateway's, a proxy's, another
+reason) is unknown, and Anthropic's 403 `permission_error` is a key it
+knows, live, as Stripe's is. Anthropic's OAuth tokens (`sk-ant-oat01-`) are
+not asked about: Anthropic documents neither the prefix nor a call for
+them, and the Admin API's OAuth tokens are those with the `org:admin`
+scope, so a live token of another scope could be turned away there. What
+the table does not ask about is detected as before.
 
 Each package keeps what is about a run and makes the call. Python
 (`verifyscan.py`, `secretverify.py`, `secretverify_http.py`): the secret

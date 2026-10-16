@@ -252,8 +252,9 @@ lazaret hook [FILE …] [--staged] [-q] [--show-secrets]  # the commit-time gate
 
 `--verify-secrets` (off by default) asks, after the scan, each secret
 finding's provider whether the credential is live: a GitHub, Slack, Stripe or
-npm token, an OpenAI or Anthropic API key, or an AWS key pair (a key id and a
-secret key in the same file), each sent to its own provider alone in a call
+npm token, an OpenAI or Anthropic API key, an OpenAI, Anthropic or Claude
+Enterprise admin key, or an AWS key pair (a key id and a secret key in the same
+file), each sent to its own provider alone in a call
 that only authenticates, over HTTPS with TLS 1.2 at least and no redirect
 followed (`HTTPS_PROXY` through an `http://` proxy's tunnel, `NO_PROXY`
 honoured). A note on stderr says which providers will be asked, and where each

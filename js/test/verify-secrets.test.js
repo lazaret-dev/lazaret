@@ -352,6 +352,29 @@ test("each provider's credential reaches its own host alone; AWS's signature hol
   assert.ok(!sigv4Holds({ ...sts, body: Buffer.concat([sts.body, Buffer.from("&x=1")]) }, AWS.secret));
 });
 
+test("an admin key is asked at its admin API's documented call (V-3)", { skip: SKIP }, async () => {
+  const items = [["openai-admin", "sk-" + "admin-" + "a1".repeat(20)], ["anthropic-admin", "sk-ant-" + "admin01-" + "Ab1_".repeat(10)],
+    ["anthropic-compliance", "sk-ant-" + "api01-" + "Ab1_".repeat(10)]];
+  reset({ "api.openai.com": { status: 200, body: '{"data": []}' }, "api.anthropic.com": { status: 200, body: '{"name": "Acme"}' } });
+  const v = new Verifier({ transport: through(tunnel) });
+  let got = await v.verifyAll(items);
+  assert.deepEqual(got.map((r) => [r.outcome, r.who]), [[LIVE, null], [LIVE, "Acme"], [LIVE, null]]);
+  assert.deepEqual(stub.requests.map((r) => [r.method, r.host, r.path]), [["GET", "api.openai.com", "/v1/organization/projects"],
+    ["GET", "api.anthropic.com", "/v1/organizations/me"], ["GET", "api.anthropic.com", "/v1/compliance/organizations"]]);
+  assert.equal(stub.requests[0].headers.authorization, `Bearer ${items[0][1]}`);
+  for (const [k, seen] of stub.requests.slice(1).entries()) {
+    assert.deepEqual([seen.headers["x-api-key"], seen.headers["anthropic-version"], seen.headers.authorization],
+      [items[k + 1][1], "2023-06-01", undefined]);
+  }
+  reset({ "api.openai.com": { status: 401, body: '{"error": {"code": "invalid_api_key"}}' },
+    "api.anthropic.com": { status: 401, body: '{"type": "error", "error": {"type": "authentication_error", "message": "invalid x-api-key"}}' } });
+  got = await new Verifier({ transport: through(tunnel) }).verifyAll(items);
+  assert.deepEqual(got.map((r) => r.outcome), [REJECTED, REJECTED, REJECTED]);
+  reset({ "api.anthropic.com": { status: 400,
+    body: '{"error": {"type": "invalid_request_error", "message": "Compliance API is not enabled for this organization"}}' } });
+  assert.equal((await new Verifier({ transport: through(tunnel) }).verify(...items[2])).outcome, LIVE);
+});
+
 test("a credential asked twice is asked once; one not in the format is never sent", { skip: SKIP }, async () => {
   reset(SCRIPT);
   const v = new Verifier({ transport: through(tunnel) });

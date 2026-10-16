@@ -144,7 +144,8 @@ aggregate):
   on stderr says which providers will be asked and where each credential goes. A finding says what its provider said:
   live (a BLOCKER vulnerability, with the account the provider names), rejected (kept as it was: revoke it anyway, the
   history keeps it; only on the provider's own word, such as OpenAI's `invalid_api_key`, never a bare 401) or unknown
-  (kept, with the reason). Admin keys and OAuth tokens are detected, not asked about. The JSON report gains
+  (kept, with the reason). Admin keys are asked at their admin APIs (V-3, below); Anthropic's OAuth tokens are
+  detected, not asked about. The JSON report gains
   `verification` and each such finding `verified`; SARIF carries `verified` in a result's properties. Off by default;
   any target can be verified (`github:` and `gitlab:` repositories too); the guard, the registry auditor, the MCP
   server and the pre-commit hook never verify. A Google API key, a JWT, a private key or a database's password has no
@@ -161,13 +162,25 @@ aggregate):
   user's), which carry `T3BlbkFJ` in the middle; each a whole run of its characters. Such a key got only S-ENTROPY
   (MAJOR), or S-SECRET by its variable's name, or nothing when neither applied; it is S-TOKEN (BLOCKER) now, in code
   and in config files, and is redacted from every snippet line. With `--verify-secrets`, an npm token, an OpenAI key
-  and an Anthropic API key (`sk-ant-api03-` or `sk-ant-usr-`) are then asked about (the admin keys and OAuth tokens
-  are not: V-3). The npm package and
+  and an Anthropic API key (`sk-ant-api03-` or `sk-ant-usr-`) are then asked about (the admin keys since V-3; the
+  OAuth tokens are not). The npm package and
   the dashboard read them the same way (`test_js_parity_tokens`, and the dashboard's twin, held to core's pattern
   match by match). Measured first: none of the formats is in the benchmark's 945 releases, the popular set's 1,205,
   Part F's 4,620 or the installed Python and npm packages. The whole-run alternatives now start with their literal
   (crates.io's too), so Python's `re` has a first character to look for: its token pattern takes about half the time
   it took, with the three formats added. Rule set 2.48.0.
+- **`--verify-secrets` asks about admin keys, each at its admin API (V-3).** An OpenAI admin key (`sk-admin-`) is asked
+  at `GET /v1/organization/projects`, the Administration API's list; an Anthropic admin key (`sk-ant-admin01-`) at
+  `GET /v1/organizations/me`, which names the key's organization (the finding's account); a Claude Enterprise
+  Compliance Access Key (`sk-ant-api01-`) at `GET /v1/compliance/organizations`, read by the Compliance API's error
+  catalogue (a 403 `permission_error`, a key without the scope, and a 400 that says the API is not enabled for the
+  organization are a key Anthropic knows: live). Rejected, as for the API keys, only on the provider's own word
+  (`invalid_api_key`, `authentication_error`); any other refusal is unknown. A compliance call is in the
+  organization's Activity Feed, as any provider logs the call. Anthropic's OAuth tokens (`sk-ant-oat01-`) are still
+  only detected: Anthropic documents neither the prefix nor a call for them. Ten providers in the pack's
+  `_VERIFY_PROVIDERS`, both packages reading the one table; `scripts/verifylive` checks the three against real keys
+  (`LAZARET_VERIFY_OPENAI_ADMIN`, `LAZARET_VERIFY_ANTHROPIC_ADMIN`, `LAZARET_VERIFY_ANTHROPIC_COMPLIANCE`). What is
+  detected is unchanged: no rule set change.
 - **A dependency npm would fetch over plain http or from a raw IP address is a weaker indicator (D-14; rule set
   2.68.0).** npm installs a dependency from wherever its spec says, a tarball or a git URL too. One given as a
   plain-http URL (`http:`, `git+http:`) is fetched with no integrity check, and one at a raw IP address names no

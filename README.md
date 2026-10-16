@@ -85,9 +85,10 @@ packages (0.1.9).
 
 **Live secrets (`--verify-secrets`, off by default):** after the scan, each
 secret finding is asked about where a provider can say whether it is live: a
-GitHub, Slack, Stripe or npm token, an OpenAI or Anthropic API key (not an
-admin key or an OAuth token: those are detected, not asked about), or an AWS
-key pair (a key id and a secret key in the same file). Each credential goes to
+GitHub, Slack, Stripe or npm token, an OpenAI or Anthropic API key, an OpenAI,
+Anthropic or Claude Enterprise admin key (each at its admin API's own call), or
+an AWS key pair (a key id and a secret key in the same file); Anthropic's OAuth
+tokens are detected, not asked about. Each credential goes to
 its own provider alone, over HTTPS, in a call that only authenticates
 (GitHub's `GET /user`, Slack's `auth.test`, AWS STS's `GetCallerIdentity`…),
 never following a redirect; before the first call a note on stderr says which

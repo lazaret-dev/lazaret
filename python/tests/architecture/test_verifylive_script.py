@@ -103,6 +103,14 @@ class PlanTests(unittest.TestCase):
         self.assertEqual(rows[1][2], GITHUB)
         self.assertEqual(rows[5][2], AWS)
 
+    def test_an_id_with_a_dash_is_read_from_a_variable_a_shell_can_set(self):
+        # (V-3: anthropic-admin is LAZARET_VERIFY_ANTHROPIC_ADMIN, as a shell's export takes it)
+        key = "sk-ant-" + "admin01-" + "Ab1_" * 10
+        env = {"LAZARET_VERIFY_ANTHROPIC_ADMIN": key, "LAZARET_VERIFY_ANTHROPIC_ADMIN_EXPECT": "rejected"}
+        rows = verifylive.plan(["anthropic-admin"], env, made_up=False)
+        self.assertEqual(rows, [("anthropic-admin", "yours", key, "rejected")])
+        self.assertIsNone(verifylive.yours("anthropic-admin", {"LAZARET_VERIFY_ANTHROPIC-ADMIN": key}))
+
     def test_a_pair_needs_both_parts_and_an_empty_value_is_none(self):
         for env in ({"LAZARET_VERIFY_AWS_ID": AWS["id"]}, {"LAZARET_VERIFY_AWS_SECRET": AWS["secret"]}, {"LAZARET_VERIFY_AWS_ID": "", "LAZARET_VERIFY_AWS_SECRET": ""}):
             self.assertIsNone(verifylive.yours("aws", env))

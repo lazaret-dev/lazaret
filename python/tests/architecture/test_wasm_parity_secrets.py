@@ -15,12 +15,17 @@ from tests.architecture.test_wasm_parity import both, differences
 SAMPLES = {
     "github": "ghp_" + "a1B2" * 9, "slack": "xox\x62-1234567890-abcdefghij", "stripe": "sk_live_" + "a1" * 12,
     "npm": "npm_" + "A1b2" * 9, "openai": "sk-proj-" + "a1" * 20, "anthropic": "sk-ant-api03-" + "Ab1_" * 10,
+    # the admin keys (V-3)
+    "openai-admin": "sk-" + "admin-" + "a1" * 20, "anthropic-admin": "sk-ant-" + "admin01-" + "Ab1_" * 10,
+    "anthropic-compliance": "sk-ant-" + "api01-" + "Ab1_" * 10,
 }
 AWS = {"id": "AKI\x41ABCDEFGHIJKLMNOP", "secret": "wJalrXUtnFEMI/K7MDEN\x47+bPxRfiCYEXAMPLEKEY"}
 BODIES = [b"", b"not json", b'{"login": "octocat"}', b'{"ok": true, "user": "bot"}', b'{"ok": false, "error": "invalid_auth"}',
           b'{"error": {"type": "permission_error"}}', b'{"username": "alice"}', b"\xff\xfe\x00", b"[" * 3000, b"NaN", b"\xef\xbb\xbf{}",
           b'{"login": "\\ud800"}', b'{"login": "a\\u2028b ' + b"x" * 300 + b'"}', b"<Error><Code>InvalidClientTokenId</Code></Error>",
-          b"<Error><Code>Throttling</Code></Error>", b"<Arn>arn:aws:iam::1:user/a</Arn>", b"<Arn>caf\xc3\xa9\xff</Arn>",
+          b"<Error><Code>Throttling</Code></Error>", b'{"name": "Acme"}', b'{"error": {"code": "invalid_api_key"}}',
+          b'{"error": {"type": "invalid_request_error", "message": "Compliance API is not enabled for this organization"}}',
+          b"<Arn>arn:aws:iam::1:user/a</Arn>", b"<Arn>caf\xc3\xa9\xff</Arn>",
           b'{"login": "' + b"x" * 70 + b"octocat" * 60 + b'", "user": "octobotocat-bot"}', b"<Arn>bot" + b"octocat" * 40 + b"</Arn>"]
 
 #: a file's flagged lines, as `lazaret scan --verify-secrets` hands them to `secrets.find`: (line number, text)
@@ -29,6 +34,7 @@ FIND = [
     [(2, f'GITHUB_TOKEN = "{GITHUB}"'), (3, f'slack = "{SAMPLES["slack"]}"'), (4, f'h = {{"Authorization": "Bearer {SAMPLES["stripe"]}"}}'),
      (5, f'AWS_ACCESS_KEY_ID = "{AWS["id"]}"'), (6, f'AWS_SECRET_ACCESS_KEY = "{AWS["secret"]}"')],
     [(1, f"https://x:{GITHUB}@github.com/a https://example.invalid/hook/{GITHUB} {SAMPLES['openai']},{SAMPLES['anthropic']}")],
+    [(1, f"OPENAI_ADMIN_KEY={SAMPLES['openai-admin']}"), (2, f"k = '{SAMPLES['anthropic-admin']}' {SAMPLES['anthropic-compliance']}")],
     [(1, f"{AWS['id']} {AWS['secret']}"), (40, "AKI\x41ZZZZZZZZZZZZZZZZ"), (41, "abcdefghijABCDEFGHIJ\x30123456789/+abcdefgh")],
     [(k, f"AKIA{k:016} {k:040}") for k in range(100)],
     [(7, "a" * 600 + f" {GITHUB} " + "b/" * 5000)],
@@ -52,7 +58,7 @@ def calls():
     for lines in FIND:
         out.append(("secrets.find", {"lines": [n for n, _ in lines]}, "\n".join(t for _, t in lines)))
     for pid in list(SAMPLES) + ["aws"]:
-        for status in (200, 400, 401, 403, 429, 500, 0):
+        for status in (200, 400, 401, 403, 404, 429, 500, 0):
             for body in BODIES:
                 for truncated in (False, True):
                     out.append(("secrets.judge", {"provider": pid, "status": status, "truncated": truncated,
@@ -72,7 +78,7 @@ class WasmSecretsParityTests(unittest.TestCase):
         self.assertEqual(differences(cs, wasm, native), [])
         self.assertTrue(all(len(a) == 64 for a in wasm))                          # every call answered
         # (the calls were answered, and the requests made: an AWS signature, the refusals)
-        answers = [_native.call(*c) for c in cs[:40]]
+        answers = [_native.call(*c) for c in cs if c[0] == "secrets.request"]
         self.assertTrue(any(isinstance(a, dict) and "authorization" in json.dumps(a) for a in answers))
         self.assertTrue(any(isinstance(a, dict) and "refused" in a for a in answers))
         self.assertTrue(any(c[0] == "secrets.find" and _native.call(*c) for c in cs))

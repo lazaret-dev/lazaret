@@ -25,13 +25,18 @@ is printed.
 | openai | `GET api.openai.com/v1/models` | 401 `invalid_api_key` | 200 |
 | anthropic | `GET api.anthropic.com/v1/models` | 401 `authentication_error` | 200 (or 403 `permission_error`) |
 | aws | `POST sts.amazonaws.com` `GetCallerIdentity`, signed | 403 `InvalidClientTokenId` | 200 and the ARN |
+| openai-admin | `GET api.openai.com/v1/organization/projects` | 401 `invalid_api_key` | 200 |
+| anthropic-admin | `GET api.anthropic.com/v1/organizations/me` | 401 `authentication_error` | 200 and the organization's name (or 403 `permission_error`) |
+| anthropic-compliance | `GET api.anthropic.com/v1/compliance/organizations` | 401 `authentication_error` | 200 (or 403 `permission_error` for a key without `read:compliance_org_data`; 400 when the Compliance API is off) |
 
 The table's answers are from each provider's documentation; the first run of this script is what confirms them. A line marked
 `<-- not what was expected` means the table is wrong for that provider (or the provider changed): read its documentation, change
 the table and its tests, and run this again.
 
 OpenAI's key is a user, project or service account key (`sk-`, `sk-proj-`, `sk-svcacct-`), Anthropic's an API key
-(`sk-ant-api03-`, or the Console's personal `sk-ant-usr-`). Admin keys (OpenAI's `sk-admin-`, Anthropic's `sk-ant-admin01-` and
-Claude Enterprise's `sk-ant-api01-`, which are its Compliance Access Keys too) and Anthropic's OAuth tokens (`sk-ant-oat01-`)
-are not asked about: `/v1/models` is not documented for them, and a 401 there could read as "rejected" for a key that is live. A
-401 without the provider's own error (`invalid_api_key`, `authentication_error`) is `unknown`, never `rejected`.
+(`sk-ant-api03-`, or the Console's personal `sk-ant-usr-`). The admin keys are asked at their admin APIs (V-3): OpenAI's
+`sk-admin-` (`LAZARET_VERIFY_OPENAI_ADMIN`), the Console's `sk-ant-admin01-` (`LAZARET_VERIFY_ANTHROPIC_ADMIN`) and Claude
+Enterprise's Compliance Access Keys, `sk-ant-api01-` (`LAZARET_VERIFY_ANTHROPIC_COMPLIANCE`); the compliance call is logged in
+the organization's Activity Feed. Anthropic's OAuth tokens (`sk-ant-oat01-`) are not asked about: no call is documented for them,
+and a 401 could read as "rejected" for a token that is live. A 401 without the provider's own error (`invalid_api_key`,
+`authentication_error`) is `unknown`, never `rejected`.
