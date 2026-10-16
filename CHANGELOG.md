@@ -1347,6 +1347,13 @@ aggregate):
 
 ### Fixed
 
+- **The supply-chain models spend their call's work budget (found in P-1).** A call's budget (4 billion steps of the
+  regex engines, then the file is SC-TRUNCATED) is its thread's, and each call sets it. The models run on a thread of
+  the engine's own, made once per calling thread and kept, whose budget was set when it was made and never again: every
+  call it ran spent from the same 4 billion steps, so in a long-lived process (a batch, the MCP server, a scan's
+  worker thread) its searches would, once those were spent, answer nothing without saying so, and the call reported
+  what was left. The thread now takes each call's budget and gives back what it left: what the models spend is the
+  call's, natively as in WebAssembly. No file of the corpora comes near the budget.
 - **The secret rules' false positives (SECRET-FP; the engine's, for both packages; rule set 2.83.0).** John's first
   crates.io discovery run (Oct 15, 465 scans) had 30 S-SECRET and S-TOKEN BLOCKERs and 238 S-ENTROPY MAJORs, and every
   one read was not a credential. In source code S-SECRET now tests its value as the config reader does: at least 8

@@ -611,9 +611,14 @@ mod own_stack {
     }
 
     pub fn run<T: Send + 'static, F: FnOnce() -> T + Send + 'static>(f: F) -> T {
-        let (back, answer) = sync_channel::<T>(1);
+        // (the call's budget goes with the job and comes back with its answer: what the job spends is the call's, as
+        // it is when the job runs here, and in WebAssembly)
+        let (back, answer) = sync_channel::<(T, (u64, bool))>(1);
+        let budget = crate::budget::state();
         let job: Job = Box::new(move || {
-            let _ = back.send(f());
+            crate::budget::carry(budget);
+            let out = f();
+            let _ = back.send((out, crate::budget::state()));
         });
         // to this thread's worker (made again if it is gone); kept here if none can be made
         let kept = WORKER.with(|w| {
@@ -640,7 +645,9 @@ mod own_stack {
         if let Some(job) = kept {
             job();
         }
-        answer.recv().expect("the call's own thread ended before answering")
+        let (out, left) = answer.recv().expect("the call's own thread ended before answering");
+        crate::budget::carry(left);
+        out
     }
 }
 

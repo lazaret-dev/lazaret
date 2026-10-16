@@ -2110,7 +2110,11 @@ thread of the engine's own with an 8 MiB stack (`api::OWN_STACK`; 64 MiB
 in a debug build), one per calling thread, made at its first such call and
 kept for the next (the engine's caches, compiled patterns among them, are
 per thread), ending with the calling thread; a call from a thread of 128
-KiB reads the deepest input of every construct (`jsflow/tests.rs`). It
+KiB reads the deepest input of every construct (`jsflow/tests.rs`). The
+call's work budget goes there with each step and comes back with its
+answer (`budget::state`, `carry`), so what the step spends is the call's,
+as in WebAssembly, where the step runs inline (until 0.1.9 the thread kept
+the budget it was made with, which every call it ran spent down). It
 costs about 50 µs a call and 7% of the pass over the 1,490 packages below.
 In WebAssembly a call's frames are on Node's own stack (about 1 MB on its
 main thread), its larger locals on the module's 8 MiB stack;
