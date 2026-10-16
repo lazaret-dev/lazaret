@@ -8,9 +8,10 @@ recorded outputs (§5) instead of to a Python twin. The rule pack is the
 source of the rules. Every wheel carries the engine, and the sdist its
 sources, which pip compiles where no platform wheel fits (§4). What the
 Python package still does in Python: walking a project, reading archives,
-the registry and the guard, the manifest and workflow checks, project
-mode's passes after the rules (SQL, function metrics), the suppression
-markers and the reports; project mode's taint is the engine's, for
+the registry and the guard, and writing what the engine answers (since
+0.1.9 the manifest and workflow checks, project mode's passes after the
+rules, the suppression markers, a scan's result and the reports' forms are
+the engine's: BR-7, Q-1); project mode's taint is the engine's, for
 JavaScript and for Python (phase 3: `js_flow`, §16; `py_flow`, §17), in
 both packages. Since 0.1.8 the npm
 package runs the same engine compiled to WebAssembly
@@ -236,6 +237,13 @@ rust/
                              order, counts, ratings, the gate's conditions, supply-chain and
                              cross-file counts, the findings by file, and the duplication across
                              a project's files (result, regrade, project_metrics)
+    src/report.rs            the reports' forms (BR-7 step 4 c, 0.1.9; core's json_renderer,
+                             sarif_report, html_report and print_report and npm's twins until
+                             then): JSON as json.dumps(indent=2) writes it, SARIF 2.1.0, core's
+                             HTML page and terminal summary, each a frame and its findings in
+                             batches (report_json and report_items, sarif_rules, sarif_frame and
+                             sarif_items, html_frame and html_items, text_frame, text_order and
+                             text_items), and the terminal's sanitizers (term, issue_excerpt)
     src/autorun.rs           editor and AI-agent settings that run commands (BR-7 step 2, 0.1.9;
                              autorun.py, core.autorun_issues and their npm twins until then): a
                              JSON-with-comments reader that keeps lines, the commands each kind of
@@ -981,7 +989,7 @@ only.
    engine since 0.1.9, `src/redact.rs`), the binaries, bytecode and .pth files
    (`binary.js`, `pth.js`: in the engine since 0.1.9, `src/binary.rs`), --deps'
    decisions (`deps.js`'s: in the engine since 0.1.9, `src/deps.rs`), the
-   reports;
+   reports (`report.js`'s forms: in the engine since 0.1.9, `src/report.rs`);
    the dashboard loads the same module since 0.1.9 (BR-7 step 5: the page
    carries it, and runs the npm package's scan on it).
 4. Archive reading for registry scans in the engine, where it reads as the

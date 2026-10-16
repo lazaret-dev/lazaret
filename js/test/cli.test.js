@@ -72,7 +72,7 @@ test("check on clean project: exit 0, gate PASSED, JSON+HTML written", () => {
     writeFileSync(join(d, "app.py"), "def add(a, b):\n    return a + b\n");
     const r = capture(["check", d, "--no-html"]);
     assert.equal(r.code, 0);
-    assert.match(r.out, /Quality gate: PASSED/);
+    assert.match(r.out, /Quality gate: {2}PASSED /);
     const rep = JSON.parse(readFileSync(join(d, "lazaret-report.json"), "utf8"));
     assert.equal(Object.keys(rep)[0], "generatedBy");
     assert.equal(rep.generatedBy, "lazaret-cli-1");
@@ -95,7 +95,7 @@ test("check on vulnerable project: exit 0 without --ci, report records findings"
     // spec 10: only SC-MANIFEST-DEPTH forces a non-zero exit without --ci
     // (this test used to expect exit 1 for any CRITICAL SC- finding)
     assert.equal(r.code, 0);
-    assert.match(r.out, /Quality gate: FAILED/);
+    assert.match(r.out, /Quality gate: {2}FAILED /);
     const rep = JSON.parse(readFileSync(join(d, "lazaret-report.json"), "utf8"));
     assert.equal(rep.pass, false);
     assert.ok(rep.issues.some((i) => i.rule === "S-OSCMD-PY"));

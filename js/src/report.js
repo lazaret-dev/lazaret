@@ -1,20 +1,22 @@
 // Report assembly — the lazaret report format. Mirrors lazaret.py's build_result:
 // {generatedBy (FIRST key), project, scannedAt, pass, conditions, metrics,
-// counts, ratings, supplyChain, crossFile, perFile, issues}; plus the terminal,
-// HTML and SARIF renderers.
+// counts, ratings, supplyChain, crossFile, perFile, issues}; and the reports'
+// forms (JSON, terminal, HTML, SARIF), which the engine makes (report.rs,
+// BR-7 step 4 c), as it makes the Python package's: the same bytes.
 
-import { resolve, isAbsolute } from "node:path";
+import { resolve } from "node:path";
 import { readFileSync } from "node:fs";
 import { gradeResult, localIso } from "./result.js";
-import { ENGINE_VERSION, ENGINE_MARKER, HTML_ENGINE_MARKER } from "./lib/fs.js";
-import { pyStrip, isPrintable, pyFloatRepr } from "./lib/pycompat.js";
-import { REDACT, SECRET_RULES } from "./lib/redact.js";
+import { ENGINE_VERSION, ENGINE_MARKER } from "./lib/fs.js";
+import { call, loadError } from "./lib/native.js";
+import { REDACT } from "./lib/redact.js";
 import { splitLines } from "./scanner/lines.js";
 import { reportSignature, SIGNATURE_FIELD } from "./baseline.js";
 
 export { regrade, CROSS_FILE_LABEL } from "./result.js";
 
 const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
+const WINDOWS = process.platform === "win32";
 
 /**
  * A scan's result (the engine's: result.rs, as core.build_result's) with the version, the project's path and the
@@ -24,66 +26,53 @@ export function buildResult(root, files, issues) {
   return { generatedBy: ENGINE_VERSION, project: resolve(root), scannedAt: localIso(), ...gradeResult(files, issues) };
 }
 
-// ---- JSON, in pieces --------------------------------------------------------------
+// ---- in pieces ------------------------------------------------------------------
 // V8 caps a string at about 2^29 characters, so a report with a million or so
 // findings could not be rendered as one string: JSON.stringify threw "Invalid
 // string length" and the scan ended with exit 3 and no report (the Python
-// engine wrote it). The renderers below yield their text in pieces, one per
-// finding, which writeReport writes as they come; joined, the pieces are
-// exactly the text JSON.stringify(value, null, 2) gives.
-const INDENT = "  ";
-const splittable = (v) => v !== null && typeof v === "object" && typeof v.toJSON !== "function" && !JSON.isRawJSON(v)
-  && !(v instanceof Number || v instanceof String || v instanceof Boolean || v instanceof BigInt);
-const indented = (text, level) => (level && text.includes("\n") ? text.replaceAll("\n", "\n" + INDENT.repeat(level)) : text);
+// engine wrote it). So the engine makes each form in pieces, a frame and its
+// findings a batch at a time, which writeReport writes as they come.
+const BATCH = 2000;                // findings per engine call, at most
+const BATCH_CHARS = 1 << 23;       // and characters of their JSON (a call's request and answer are strings too)
 
-/**
- * JSON.stringify(value, null, 2) as a sequence of strings: arrays and objects
- * down to `depth` levels are split into their members, anything deeper is
- * one piece. keysOf(object) lists a split object's members (JSON.stringify's
- * order by default); `level` is the indentation the value starts at.
- */
-export function* jsonChunks(value, depth = 2, keysOf = Object.keys, level = 0) {
-  if (depth <= 0 || !splittable(value)) {
-    const text = JSON.stringify(value, null, 2);
-    if (text !== undefined) yield indented(text, level);
-    return;
-  }
-  const inner = "\n" + INDENT.repeat(level + 1);
-  const [open, close] = Array.isArray(value) ? ["[", "]"] : ["{", "}"];
-  let first = true;
-  const member = function* (prefix, v) {
-    if (depth > 1 && splittable(v)) {
-      yield (first ? open : ",") + inner + prefix;
-      yield* jsonChunks(v, depth - 1, keysOf, level + 1);
-    } else {
-      const text = JSON.stringify(v, null, 2);
-      if (text === undefined && prefix) return;                      // an object member JSON.stringify leaves out
-      yield (first ? open : ",") + inner + prefix + indented(text ?? "null", level + 1);
+/** [start, end) ranges of `items` for the engine's calls: BATCH of them, or fewer when they are large. */
+function* batches(items) {
+  let start = 0, chars = 0;
+  for (let k = 0; k < items.length; k++) {
+    const n = (JSON.stringify(items[k]) ?? "null").length;
+    if (k > start && (k - start >= BATCH || chars + n > BATCH_CHARS)) {
+      yield [start, k];
+      start = k;
+      chars = 0;
     }
-    first = false;
-  };
-  if (Array.isArray(value)) for (let k = 0; k < value.length; k++) yield* member("", value[k]);
-  else for (const key of keysOf(value)) yield* member(JSON.stringify(key) + ": ", value[key]);
-  yield first ? open + close : "\n" + INDENT.repeat(level) + close;
+    chars += n;
+  }
+  if (start < items.length) yield [start, items.length];
 }
 
 /**
- * JSON report, in pieces: the result dict with the marker as key #1 and, when
- * a baseline key is given ($LAZARET_BASELINE_KEY), the baseline signature as
- * key #2.
+ * A report in pieces: the engine's frame (`name` with `args`, `res` with its findings left out in their place),
+ * then items(batch, first) for each batch of its findings, then the rest of the frame (core's reports.framed).
+ */
+function* framed(name, res, args, items) {
+  const issues = res && Array.isArray(res.issues) ? res.issues : [];
+  const doc = res && Array.isArray(res.issues) ? { ...res, issues: [] } : res;
+  const got = call(name, { ...args, doc, count: issues.length, perFileOrder: res && res.perFile ? perFileKeys(res) : null });
+  yield got.head;
+  for (const [a, b] of batches(issues)) yield items(issues.slice(a, b), a === 0);
+  yield got.tail;
+}
+
+/**
+ * JSON report, in pieces: Python's json.dumps(…, indent=2) of the result with the marker as key #1 and, when a
+ * baseline key is given ($LAZARET_BASELINE_KEY), the baseline signature as key #2 (the engine's: report.rs).
  */
 export function* jsonReportChunks(res, { key = null } = {}) {
+  const prefix = [[ENGINE_MARKER, ENGINE_VERSION]];
   const sig = key ? reportSignature(res, key) : null;
-  const out = { [ENGINE_MARKER]: ENGINE_VERSION };
-  if (sig) out[SIGNATURE_FIELD] = sig;
-  for (const [k, v] of Object.entries(res)) if (k !== ENGINE_MARKER && k !== SIGNATURE_FIELD) out[k] = v;
-  // As the Python engine writes them: dupPct is a float (0.0, 12.0, not 0,
-  // 12), and perFile lists the files in the order they first appear in the
-  // sorted issues (its dict's order; a JavaScript object puts integer-like
-  // keys, a file named 7, first).
-  const dup = out.metrics?.dupPct;
-  if (typeof dup === "number" && Number.isFinite(dup)) out.metrics = { ...out.metrics, dupPct: JSON.rawJSON(pyFloatRepr(dup)) };
-  yield* jsonChunks(out, 2, (o) => (o === res.perFile ? perFileKeys(res) : Object.keys(o)));
+  if (sig) prefix.push([SIGNATURE_FIELD, sig]);
+  yield* framed("report_json", res, { prefix },
+    (items, first) => call("report_items", { items, level: 2, first }).text);
 }
 
 /** res.perFile's keys in the order of the first issue in each file. */
@@ -107,43 +96,39 @@ export function jsonRenderer(res, opts = {}) {
 // ---- terminal ---------------------------------------------------------------
 // Terminal escape-sequence injection (audit H1): every string derived from
 // scanned content — file names, messages, excerpts, the project path — passes
-// through sanitizeTerm()/safeExcerpt() before it reaches a terminal. C0
-// controls except TAB/LF, CR, DEL, the C1 controls (0x9b is a one-byte CSI)
-// and the bidi controls become '·' — exactly the set of the Python engine's
-// sanitize_term (python/tests/scanner/test_review_term_c1.py compares them).
-const TERM_UNSAFE_RE = /[\x00-\x08\x0b-\x1f\x7f-\x9f\u202a-\u202e\u2066-\u2069]/g;
+// through sanitizeTerm()/safeExcerpt() before it reaches a terminal: the C0
+// controls but TAB and LF, CR, DEL, the C1 controls (0x9b is a one-byte CSI)
+// and the bidi controls become '·' (the engine's: report.rs, as core's).
 export function sanitizeTerm(text) {
-  return String(text).replace(TERM_UNSAFE_RE, "·");
+  return term("text", text);
 }
-// Line breaks sanitizeTerm keeps (LF) or does not know (U+2028, U+2029); the
-// other line breaks (CR, VT, FF, U+001C-U+001E, U+0085) are control
-// characters it already maps.
-const LINE_BREAK_RE = /[\n\u2028\u2029]/g;
+
+/**
+ * The engine's term call; without an engine (a checkout that has not built native/lazaret.wasm: the CLI says so,
+ * its own message with this package's path in it) every character but printable ASCII (and TAB and LF in "text"
+ * mode) is '·'.
+ */
+function term(mode, text, args = {}) {
+  if (loadError() !== null) return String(text).replace(mode === "text" ? /[^\x20-\x7e\t\n]/g : /[^\x20-\x7e]/g, "·");
+  return call("term", { mode, ...args }, String(text)).text;
+}
 /**
  * sanitizeTerm for a value printed inside one line of output (a path, a link
  * target, a message): line breaks become '·' too, so the value cannot start
  * a line of its own (review: a file named "zz\n\n  Quality gate:  PASSED
  * \n::notice::…\n  x.py" printed a fake PASSED line and a GitHub workflow
- * command at column 0). Twin of core.sanitize_term_line.
+ * command at column 0). The engine's, as core.sanitize_term_line.
  */
 export function sanitizeTermLine(text) {
-  return sanitizeTerm(text).replace(LINE_BREAK_RE, "·");
+  return term("line", text);
 }
 
 export let EXCERPT_WIDTH = 100;
 export function setExcerptWidth(n) { EXCERPT_WIDTH = n; }
 
-/** Sanitized, trimmed, truncated source excerpt (twin of core.safe_excerpt). */
+/** Sanitized, trimmed, truncated source excerpt (the engine's, as core.safe_excerpt). */
 export function safeExcerpt(text, width = EXCERPT_WIDTH) {
-  text = pyStrip(String(text).replace(/\t/g, " "));
-  if (!text) return "";
-  const cps = Array.from(text);
-  let out = "";
-  for (const ch of cps.slice(0, width)) {                       // text[:width], a negative width too
-    const o = ch.codePointAt(0);
-    out += ch === " " || (o >= 0x20 && o < 0x7f) || (o > 0xa0 && isPrintable(ch) && !/[\u202a-\u202e\u2066-\u2069]/.test(ch)) ? ch : "·";
-  }
-  return out + (cps.length > width ? "…" : "");
+  return term("excerpt", text, { width });
 }
 
 export const SHOW_SECRETS_NOT_A_TERMINAL = "note: --show-secrets shows credentials on a terminal only, and the output "
@@ -179,72 +164,51 @@ export function flaggedLines(issues, entries) {
 }
 
 /** Sanitized excerpt of an issue's flagged source line ("" if unavailable); `shown` (flaggedLines') gives the line as
- * read, unredacted, where it has it (--show-secrets, for the terminal alone). */
+ * read, unredacted, where it has it (--show-secrets, for the terminal alone). The engine's, as core.issue_excerpt. */
 export function issueExcerpt(issue, width = EXCERPT_WIDTH, shown = null) {
   const raw = shown ? shown.get(shownKey(issue.file, issue.line)) : undefined;
-  if (typeof raw === "string") return safeExcerpt(raw, width);
-  const snip = Array.isArray(issue.snippet) ? issue.snippet : [];
-  const idx = issue.line - (issue.snipStart ?? issue.line);
-  if (!(idx >= 0 && idx < snip.length) || typeof snip[idx] !== "string") return "";
-  if (REDACT.on && SECRET_RULES.has(issue.rule)) return "[redacted]";
-  return safeExcerpt(snip[idx], width);
+  return call("issue_excerpt", { issue, width, redact: REDACT.on, shown: raw ?? null }).text;
 }
 
 /**
- * The report's line on --verify-secrets (core.verification_line): what the providers said of the credentials asked
- * about, and the secret findings no provider could be asked about.
+ * The terminal summary, in pieces (the engine's, as core.print_report): the gate, the ratings and the counts, then
+ * (unless `quiet`) the findings by file, each with its flagged line (`rawLines`: --show-secrets' lines as read).
  */
-export function verificationLine(v) {
-  const cred = v.credentials ?? {}, found = v.findings ?? {};
-  const n = (o, k) => o[k] ?? 0;
-  const asked = n(cred, "live") + n(cred, "rejected") + n(cred, "unknown");
-  let text = `Secrets verified  ${n(cred, "live")} live, ${n(cred, "rejected")} rejected, ${n(cred, "unknown")} unknown `
-    + `(of ${asked} asked about)`;
-  if (found.notVerified) {
-    text += `; ${found.notVerified} secret finding${found.notVerified !== 1 ? "s" : ""} no provider can be asked about`;
+export function* reportTextChunks(res, { quiet = false, rawLines = null, color = false } = {}) {
+  const issues = Array.isArray(res.issues) ? res.issues : [];
+  const frame = call("text_frame", { doc: { ...res, issues: [] }, count: issues.length, quiet, color });
+  yield frame.head;
+  if (!quiet && issues.length) {
+    const { order } = call("text_order", { rows: issues.map((i) => [i.file, i.sev, i.line]) });
+    let file = null;
+    const ordered = order.map((n) => issues[n]);
+    for (const [a, b] of batches(ordered)) {
+      const batch = ordered.slice(a, b);
+      const got = call("text_items", { issues: batch, file, color, width: EXCERPT_WIDTH, redact: REDACT.on,
+        shown: batch.map((i) => (rawLines ? rawLines.get(shownKey(i.file, i.line)) ?? null : null)) });
+      file = got.file;
+      yield got.text;
+    }
   }
-  return text;
+  yield frame.tail;
 }
 
-/** Terminal summary. `out` receives lines (injectable for tests). */
-export function printReport(res, { out = console.log, quiet = false, rawLines = null } = {}) {
-  const m = res.metrics;
-  out("");
-  out(`Lazaret scan — ${sanitizeTermLine(res.project)}`);
-  const configs = m.configFiles ? ` · ${m.configFiles} config files` : "";
-  const left = m.dupLeftOut ? ` (${m.dupLeftOut} lines of Go and Rust not measured)` : "";
-  out(`  ${m.files} files · ${m.ncloc} lines of code · ${typeof m.dupPct === "number" ? pyFloatRepr(m.dupPct) : m.dupPct}% duplication${left}${configs}`);
-  out("");
-  out(`  Quality gate: ${res.pass ? "PASSED" : "FAILED"}`);
-  for (const cond of res.conditions) out(`  ${cond.ok ? "✓" : "✗"} ${sanitizeTermLine(cond.label)}`);
-  out(`  Ratings: security ${res.ratings.security} · reliability ${res.ratings.reliability} · maintainability ${res.ratings.maintainability}`);
-  out(`  Issues: ${res.counts.VULN} vulnerabilities · ${res.counts.HOTSPOT} hotspots · ${res.counts.BUG} bugs · ${res.counts.SMELL} smells · ${res.supplyChain} supply-chain`);
-  if (m.depFiles) out(`  Dependency files scanned: ${m.depFiles}`);
-  if ("newIssues" in res) out(`  New issues vs baseline: ${res.newIssues}`);
-  if (res.verification && typeof res.verification === "object") out(`  ${verificationLine(res.verification)}`);
-  if (!quiet) {
-    const shown = res.issues.slice(0, 40);
-    for (const i of shown) {
-      out(`  ${i.sev} ${i.rule} ${sanitizeTermLine(i.file)}:${i.line} — ${safeExcerpt(i.msg, 90)}`);
-      const ex = issueExcerpt(i, undefined, rawLines);
-      if (ex) out(`      » ${ex}`);
-    }
-    if (res.issues.length > shown.length)
-      out(`  … ${res.issues.length - shown.length} more (use --quiet to suppress)`);
+/** Terminal summary. `out` receives lines (injectable for tests); `color` on a terminal. */
+export function printReport(res, { out = console.log, quiet = false, rawLines = null, color = false } = {}) {
+  let pending = "";
+  for (const piece of reportTextChunks(res, { quiet, rawLines, color })) {
+    const lines = (pending + piece).split("\n");
+    pending = lines.pop();
+    for (const line of lines) out(line);
   }
-  out("");
+  if (pending) out(pending);
 }
 
 // ---- HTML ----------------------------------------------------------------------
-const ESC = { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#x27;" };
-const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ESC[c]);
-
-/** HTML report, in pieces: the JSON report in a minimal page carrying the provenance meta tag. */
+/** HTML report, in pieces (the engine's, as core.html_report): with the provenance meta tag in its <head>. */
 export function* htmlReportChunks(res) {
-  yield `<!doctype html>\n<html lang="en"><head><meta charset="utf-8">\n${HTML_ENGINE_MARKER}\n` +
-    `<title>Lazaret report</title></head>\n<body><pre>`;
-  for (const piece of jsonReportChunks(res)) yield esc(piece);      // esc maps single characters: piece by piece is the same
-  yield "</pre></body></html>\n";
+  yield* framed("html_frame", res, { windows: WINDOWS, marker: [ENGINE_MARKER, ENGINE_VERSION] },
+    (issues, first) => call("html_items", { issues, first }).text);
 }
 
 /** HTML report text (htmlReportChunks joined). */
@@ -252,63 +216,36 @@ export function htmlRenderer(res) {
   return [...htmlReportChunks(res)].join("");
 }
 
-// ---- SARIF 2.1.0 (twin of core.sarif_report) ------------------------------------
-const SARIF_LEVEL = { BLOCKER: "error", CRITICAL: "error", MAJOR: "warning", MINOR: "note", INFO: "note" };
-export const SARIF_SRCROOT = "%SRCROOT%";
-export const SARIF_SCHEMA = "https://json.schemastore.org/sarif-2.1.0.json";
-const quoteBytes = (bytes) => {
-  let out = "";
-  for (const b of bytes) {
-    const c = String.fromCharCode(b);
-    out += /[A-Za-z0-9_.~\/-]/.test(c) ? c : "%" + b.toString(16).toUpperCase().padStart(2, "0");
+// ---- SARIF 2.1.0 (the engine's, as core.sarif_report) -----------------------------
+/**
+ * The SARIF log of a scan result, in pieces: the rules in the order of their first finding, each finding's location
+ * below %SRCROOT% (the scan root: `root`, res.project by default); `marked`: with the marker in a top-level property
+ * bag, first.
+ */
+export function* sarifChunks(res, root = null, { marked = true } = {}) {
+  const issues = (Array.isArray(res.issues) ? res.issues : []).filter((i) => i !== null && typeof i === "object");
+  const rules = [], known = [];
+  const ranges = [...batches(issues)];
+  for (const [a, b] of ranges) {
+    const got = call("sarif_rules", { issues: issues.slice(a, b), known }).rules;
+    for (const r of got) { rules.push(r); known.push(r.id); }
   }
-  return out;
-};
-/** urllib.parse.quote(path, safe="/") of a report path, '/' separators. */
-export function sarifUri(path) {
-  return quoteBytes(Buffer.from(String(path).replace(/\\/g, "/"), "utf8"));
-}
-/** An absolute path as a file: URI, as pathlib's as_uri() writes it on the
- * same OS: file:///C:/a%20b (the drive letter and its colon as-is) and
- * file://server/share/x for a UNC path on Windows, file:///a%20b on POSIX. */
-export function fileUri(absPath) {
-  const p = String(absPath).replace(/\\/g, "/");
-  const q = (s) => quoteBytes(Buffer.from(s, "utf8"));
-  const drive = /^[A-Za-z]:(?=\/|$)/.exec(p);
-  if (drive) return "file:///" + drive[0] + q(p.slice(2));
-  if (p.startsWith("//")) return "file:" + q(p);
-  return "file://" + (p.startsWith("/") ? "" : "/") + q(p);
-}
-export function sarifReport(res, root = null) {
-  const rules = new Map(), results = [];
-  for (const i of res.issues) {
-    if (!rules.has(i.rule)) rules.set(i.rule, { id: i.rule, name: i.name,
-      shortDescription: { text: i.name }, fullDescription: { text: i.why }, help: { text: i.fix } });
-    const file = String(i.file);
-    const loc = isAbsolute(file) ? { uri: fileUri(file) } : { uri: sarifUri(file), uriBaseId: SARIF_SRCROOT };
-    const line = Math.max(1, Math.trunc(Number(i.line)) || 1);
-    const result = { ruleId: i.rule, ruleIndex: [...rules.keys()].indexOf(i.rule), level: SARIF_LEVEL[i.sev] ?? "note",
-      message: { text: i.msg }, locations: [{ physicalLocation: { artifactLocation: loc, region: { startLine: line } } }] };
-    if (i.verified && typeof i.verified === "object") result.properties = { verified: { ...i.verified } };   // (no part of the credential)
-    results.push(result);
+  const frame = call("sarif_frame", { rules, root: resolve(root ?? res.project), windows: WINDOWS,
+    version: pkg.version, source: res.source ?? null, marker: marked ? [ENGINE_MARKER, ENGINE_VERSION] : null,
+    count: issues.length });
+  yield frame.head;
+  for (const [a, b] of ranges) {
+    yield call("sarif_items", { issues: issues.slice(a, b), rules: known, windows: WINDOWS, first: a === 0 }).text;
   }
-  let rootUri = fileUri(resolve(root ?? res.project));
-  if (!rootUri.endsWith("/")) rootUri += "/";
-  return {
-    $schema: SARIF_SCHEMA,
-    version: "2.1.0",
-    runs: [{ tool: { driver: { name: "Lazaret", version: pkg.version, informationUri: "https://lazaret.dev",
-      rules: [...rules.values()] } },
-      originalUriBaseIds: { [SARIF_SRCROOT]: { uri: rootUri } },
-      results }],
-  };
-}
-/** SARIF log, in pieces (one per result), with the marker in a top-level property bag, first. */
-export function* sarifChunks(sarif) {
-  yield* jsonChunks({ properties: { [ENGINE_MARKER]: ENGINE_VERSION }, ...sarif }, 4);   // runs[0].results[i]
+  yield frame.tail;
 }
 
 /** SARIF log text (sarifChunks joined). */
-export function sarifRenderer(sarif) {
-  return [...sarifChunks(sarif)].join("");
+export function sarifRenderer(res, root = null) {
+  return [...sarifChunks(res, root)].join("");
+}
+
+/** The SARIF log of a scan result, as an object (without the marker). */
+export function sarifReport(res, root = null) {
+  return JSON.parse([...sarifChunks(res, root, { marked: false })].join(""));
 }

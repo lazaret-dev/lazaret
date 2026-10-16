@@ -16,11 +16,12 @@ returned request value reaching one; a proven RegExp's `exec()` is not a
 command sink; calls bind through `require()`/`import` to the function the
 file names, and a call it can't resolve reaches every project function of
 that name). The checks of config and data files (credentials, auto-run
-settings, CI workflows) and the reports are the package's own JavaScript.
-For a project scan, `npx lazaret` and `python -m lazaret` are tested
+settings, CI workflows) are the engine's too, and so are the reports' forms:
+for a project scan, `npx lazaret` and `python -m lazaret` are tested
 (`python/tests/architecture/test_js_parity.py`) to report the same issues
 (rule, file, line, severity, message), metrics, ratings, gate result and exit
-code. Custom taint configs, registry auditing (`lazaret-registry`), the
+code, and write the same reports, byte for byte
+(`python/tests/architecture/test_report_engine.py`). Custom taint configs, registry auditing (`lazaret-registry`), the
 install guard, SCA and the MCP server come with the Python package (`pip
 install lazaret`). Through 0.1.7 this package ran JavaScript ports of the
 rules and tests; the findings are the same.
@@ -41,7 +42,8 @@ Scans a project directory and writes the **lazaret report format**:
   counters, `perFile`, and the full `issues` list (rule, message, why, fix,
   CWE reference, file/line, ±2-line snippet, each line clipped to 240
   characters).
-- `lazaret-report.html` — the JSON report wrapped in a marker-carrying page.
+- `lazaret-report.html` — the gate, the ratings, the findings by file and
+  every finding with its snippet, in a page carrying the marker.
 - with `--sarif PATH`, a SARIF 2.1.0 report for GitHub code scanning.
 
 Report paths are checked before the scan starts: a directory, symlink, FIFO

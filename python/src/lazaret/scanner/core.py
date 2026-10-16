@@ -40,10 +40,10 @@ import bisect
 import collections
 import datetime
 import errno
-import html as html_mod
 import io
 import json
 import keyword
+import ntpath
 import os
 import posixpath
 import re
@@ -2777,10 +2777,8 @@ def scan_gyp(path, content):
     except _native.NativeError as exc:
         return [engine.error_issue(path, exc)]
 
-import pathlib as _pathlib
 import stat as _stat
 import traceback as _traceback
-import urllib.parse as _urlparse
 
 import lazaret as _lazaret_pkg   # __version__ (the package root imports nothing)
 VERSION = _lazaret_pkg.__version__     # what every command's --version prints
@@ -4328,62 +4326,48 @@ SEV_COLOR = {"BLOCKER": "41;97", "CRITICAL": "31", "MAJOR": "33", "MINOR": "36",
 # plus CR (0x0d), DEL (0x7f), the C1 controls U+0080–U+009F (0x9b is a
 # one-byte CSI introducer on many terminals, 0x9d an OSC) and the bidi
 # embedding/override/isolate controls U+202A–U+202E, U+2066–U+2069 (they
-# reorder what the terminal shows — Trojan Source). The npm engine's
-# sanitizeTerm maps exactly the same set. Built with chr() so the table is
-# exact and readable; ESC (0x1b) and BEL (0x07) — the two bytes the audit
-# PoC used to forge SGR colors and hijack the terminal title — are inside
-# these ranges.
-_BIDI_CONTROLS = (
-    "".join(chr(n) for n in range(0x202a, 0x202f))  # LRE RLE PDF LRO RLO
-    + "".join(chr(n) for n in range(0x2066, 0x206a))  # LRI RLI FSI PDI
-)
-_SANITIZE_TERM_CHARS = (
-    "".join(chr(n) for n in range(0x00, 0x09))      # NUL … BS
-    + "".join(chr(n) for n in (0x0b, 0x0c))         # VT, FF
-    + "".join(chr(n) for n in range(0x0d, 0x20))    # CR, SO … US (incl. ESC)
-    + "".join(chr(n) for n in range(0x7f, 0xa0))    # DEL, C1 controls (incl. CSI)
-    + _BIDI_CONTROLS
-)
-_SANITIZE_TERM_TAB = str.maketrans(
-    {ch: "·" for ch in _SANITIZE_TERM_CHARS})
-
-
+# reorder what the terminal shows — Trojan Source). ESC (0x1b) and BEL
+# (0x07) — the two bytes the audit PoC used to forge SGR colors and hijack
+# the terminal title — are inside these ranges. The engine maps them, for
+# both packages (report.rs, BR-7 step 4 c).
 def sanitize_term(s):
-    """Neutralize terminal-control bytes in a string before printing.
+    """Neutralize terminal-control characters in a string before printing.
 
     Hostile package content reaches the terminal via file paths (archive
     member names, walked repo paths), issue messages (X-FLOW source/sink
     paths, install-hook command text), registry metadata and config paths.
-    Every C0 control byte except newline and tab, plus CR, DEL, the C1
-    controls and the bidi controls (_SANITIZE_TERM_CHARS), maps to
-    '·' — the line terminator is preserved so a multi-line message still
-    prints as multiple lines (the existing behaviour), and tab is printable
-    structure (safe_excerpt keeps tabs too). Same contract as safe_excerpt
-    for a full string, without the truncation.
+    Every C0 control character except newline and tab, plus CR, DEL, the C1
+    controls (0x9b is a one-byte CSI, 0x9d an OSC) and the bidi embedding,
+    override and isolate controls (Trojan Source), maps to '·' (audit H1). The
+    engine's (report.rs, BR-7 step 4 c), as the npm package's sanitizeTerm.
 
-    Applied to every print() that interpolates such a value; safe_excerpt
-    (the truncated single-line variant) already covers the code excerpt.
-    Ordering at the call sites matters: sanitize the ARGUMENT of c(), never
-    its result — sanitizing the result would strip the SGR sequences
-    Lazaret itself emits and leave the color wrapper unclosed.
+    Applied to every print() that interpolates such a value. Ordering at the
+    call sites matters: sanitize the ARGUMENT of c(), never its result —
+    sanitizing the result would strip the SGR sequences Lazaret itself emits
+    and leave the color wrapper unclosed.
     """
-    return str(s).translate(_SANITIZE_TERM_TAB)
+    return _term("text", s)
 
 
-#: Line breaks sanitize_term keeps (\n) or does not know (U+2028, U+2029);
-#: every other line break (\r, \v, \f, \x1c-\x1e, \x85) is a control
-#: character it already maps.
-_LINE_BREAKS_TAB = str.maketrans({"\n": "·", "\u2028": "·", "\u2029": "·"})
+_TERM_FALLBACK = {"text": re.compile(r"[^\x20-\x7e\t\n]"), "line": re.compile(r"[^\x20-\x7e]")}
+
+
+def _term(mode, s, **args):
+    """The engine's term call; without an engine (its own error printed, the library's path in it) every character
+    but printable ASCII (and TAB and LF in "text" mode) is '·'."""
+    if not _native.available():
+        return _TERM_FALLBACK.get(mode, _TERM_FALLBACK["line"]).sub("·", str(s))
+    return _native.call("term", dict(args, mode=mode), str(s))["text"]
 
 
 def sanitize_term_line(s):
     """sanitize_term for a value printed inside one line of output — a
-    path, a link target, a finding's message: line breaks become '·' too,
-    so the value cannot start a line of its own (review: a file named
-    `zz\\n\\n  Quality gate:  PASSED \\n::notice::…\\n  x.py` printed a fake
-    "PASSED" line and a GitHub workflow command at column 0). Twin of the
-    npm engine's sanitizeTermLine."""
-    return str(s).translate(_SANITIZE_TERM_TAB).translate(_LINE_BREAKS_TAB)
+    path, a link target, a finding's message: line breaks (\\n, U+2028,
+    U+2029) become '·' too, so the value cannot start a line of its own
+    (review: a file named `zz\\n\\n  Quality gate:  PASSED \\n::notice::…\\n  x.py`
+    printed a fake "PASSED" line and a GitHub workflow command at column 0).
+    The engine's (report.rs)."""
+    return _term("line", s)
 
 # Rules whose flagged line reveals a credential. The flagged LINE is redacted
 # in every persistent artifact by default (see mk_issue and redact_result — audit
@@ -4427,26 +4411,11 @@ EXCERPT_WIDTH = 100   # overridable via --excerpt-width
 
 def safe_excerpt(text, width=None):
     """Sanitize a source line for terminal display. Scanned code may be hostile
-    (esp. packages), so strip ANSI/control bytes that could rewrite the terminal
-    — ESC, CR, BS, BEL, NUL, C1 controls, bidi controls and anything else
-    str.isprintable() rejects — replacing them with '·'. Tabs become spaces,
-    the line is trimmed and truncated with an ellipsis. (Twin of the npm
-    engine's safeExcerpt; the bidi controls are named explicitly there and
-    here so the result does not hang on a Unicode database's category.)"""
-    if width is None:
-        width = EXCERPT_WIDTH
-    text = text.replace("\t", " ").strip()
-    if not text:
-        return ""
-    out = []
-    for ch in text[:width]:
-        o = ord(ch)
-        if ch == " " or 0x20 <= o < 0x7f or (
-                o > 0xa0 and ch.isprintable() and ch not in _BIDI_CONTROLS):
-            out.append(ch)
-        else:
-            out.append("·")
-    return "".join(out) + ("…" if len(text) > width else "")
+    (esp. packages), so ANSI/control characters that could rewrite the
+    terminal — ESC, CR, BS, BEL, NUL, C1 controls, bidi controls and anything
+    else str.isprintable() rejects — become '·'. Tabs become spaces, the line
+    is trimmed and truncated with an ellipsis. The engine's (report.rs)."""
+    return _term("excerpt", text, width=EXCERPT_WIDTH if width is None else width)
 
 SHOW_SECRETS_NOT_A_TERMINAL = ("note: --show-secrets shows credentials on a terminal only, and the output is not one: "
                                "they stay redacted")
@@ -4492,20 +4461,12 @@ def flagged_lines(issues, entries):
 def issue_excerpt(issue, width=None, shown=None):
     """Sanitized excerpt of an issue's flagged source line ('' if unavailable).
     `shown` (--show-secrets: flagged_lines' {(file, line): text}) gives the
-    line as read, unredacted, where it has it: for the terminal alone."""
+    line as read, unredacted, where it has it: for the terminal alone. A
+    secret rule's line is "[redacted]" (unless --no-redact-secrets). The
+    engine's (report.rs)."""
     raw = shown.get((issue.get("file"), issue.get("line"))) if shown else None
-    if isinstance(raw, str):
-        return safe_excerpt(raw, width)
-    snip = issue.get("snippet") or []
-    idx = issue["line"] - issue.get("snipStart", issue["line"])
-    if not (0 <= idx < len(snip)):
-        return ""
-    if REDACT_SECRETS and issue.get("rule") in SECRET_RULES:
-        # mk_issue already replaced the flagged line with the placeholder;
-        # this guard keeps old/unredacted issues (e.g. a not-yet-redacted
-        # report fed back through print paths) from leaking via the excerpt.
-        return "[redacted]"
-    return safe_excerpt(snip[idx], width)
+    return _native.call("issue_excerpt", {"issue": issue, "width": EXCERPT_WIDTH if width is None else width,
+                                          "redact": bool(REDACT_SECRETS), "shown": raw})["text"]
 
 def redact_result(res):
     """Defensive sweep over a scan result: no credential may survive into a
@@ -4538,276 +4499,85 @@ def redact_result(res):
     _apply_redaction(issues, got)
     return res
 
-def verification_line(v):
-    """The report's line on `--verify-secrets` (verifyscan): what the providers said of the credentials asked about, and the
-    secret findings no provider could be asked about."""
-    cred, found = v.get("credentials", {}), v.get("findings", {})
-    asked = sum(cred.get(k, 0) for k in ("live", "rejected", "unknown"))
-    text = (f"Secrets verified  {cred.get('live', 0)} live, {cred.get('rejected', 0)} rejected, {cred.get('unknown', 0)} unknown "
-            f"(of {asked} asked about)")
-    if found.get("notVerified"):
-        n = found["notVerified"]
-        text += f"; {n} secret finding{'s' if n != 1 else ''} no provider can be asked about"
-    return text
+def report_text_chunks(res, quiet, shown=None, color=False):
+    """The terminal summary in pieces (the engine's: report.rs): the gate, the ratings and the counts, then (unless
+    `quiet`) the findings by file, each with its flagged line (`shown`: --show-secrets' lines as read)."""
+    issues = res.get("issues") or []
+    doc = dict(res)
+    doc["issues"] = []
+    frame = _native.call("text_frame", {"doc": doc, "count": len(issues), "quiet": bool(quiet), "color": color})
+    yield frame["head"]
+    if not quiet and issues:
+        order = _native.call("text_order", {"rows": [[i.get("file"), i.get("sev"), i.get("line")] for i in issues]})
+        ordered = [issues[k] for k in order["order"]]
+        last = None
+        for k in range(0, len(ordered), lazaret_report.BATCH):
+            batch = ordered[k:k + lazaret_report.BATCH]
+            got = _native.call("text_items", {
+                "issues": batch, "file": last, "color": color, "width": EXCERPT_WIDTH, "redact": bool(REDACT_SECRETS),
+                "shown": [shown.get((i.get("file"), i.get("line"))) if shown else None for i in batch]})
+            last = got["file"]
+            yield got["text"]
+    yield frame["tail"]
 
 
 def print_report(res, quiet, shown=None):
-    m, ct, rt = res["metrics"], res["counts"], res["ratings"]
-    print()
-    print(c("1", f"Lazaret scan — {sanitize_term_line(res['project'])}"))
-    configs = f" · {m['configFiles']} config files" if m.get("configFiles") else ""
-    left = f" ({m['dupLeftOut']} lines of Go and Rust not measured)" if m.get("dupLeftOut") else ""
-    print(f"  {m['files']} files · {m['ncloc']} lines of code · {m['dupPct']}% duplication{left}{configs}")
-    print()
-    gate = c("42;30", " PASSED ") if res["pass"] else c("41;97", " FAILED ")
-    print(f"  Quality gate: {gate}")
-    for cond in res["conditions"]:
-        mark = c("32", "✓") if cond["ok"] else c("31", "✗")
-        # audit H1: a gate condition label can embed a scanned file path
-        # ("Taint analysis incomplete → <file>", build_result) — hostile repo.
-        print(f"    {mark} {sanitize_term_line(cond['label'])}")
-    print()
-    print(f"  Vulnerabilities   {ct['VULN']:>4}   Security rating        {rt['security']}")
-    print(f"  Security hotspots {ct['HOTSPOT']:>4}")
-    print(f"  Bugs              {ct['BUG']:>4}   Reliability rating     {rt['reliability']}")
-    print(f"  Code smells       {ct['SMELL']:>4}   Maintainability rating {rt['maintainability']}")
-    sc = res.get("supplyChain", 0)
-    print(f"  Supply-chain      {sc:>4}   (obfuscation/install-hook indicators)")
-    xf = res.get("crossFile", 0)
-    if xf:
-        print(f"  Cross-file flows  {c('31', xf):>4}   (interprocedural taint)")
-    if m.get("depFiles"):
-        print(f"  Dependency files scanned: {m['depFiles']}")
-    if "newIssues" in res:
-        print(f"  New issues vs baseline: {c('1', res['newIssues'])}")
-    if isinstance(res.get("verification"), dict):
-        print(f"  {verification_line(res['verification'])}")
-    print()
-    if not quiet and res["issues"]:
-        print(c("1", "  Issues"))
-        cur_file = None
-        for i in sorted(res["issues"], key=lambda i: (i["file"], SEV_ORDER[i["sev"]], i["line"])):
-            if i["file"] != cur_file:
-                cur_file = i["file"]
-                # audit H1: the path header is attacker-controlled (repo walk
-                # path, or an archive member name in registry mode). Sanitize
-                # the ARGUMENT of c(), never its result — the SGR wrapper
-                # Lazaret emits must survive.
-                print(f"\n  {c('4', sanitize_term_line(cur_file))}")
-            sev_txt = f"{i['sev']:<8}"
-            prefix = f"    L{i['line']:<5} {sev_txt} [{i['rule']}] "
-            # audit H1: i['msg'] is static text for most rules but embeds
-            # attacker data for several (X-FLOW source/sink paths, the
-            # SC-INSTALL-HOOK {cmd!r}, SCA bundle fields). Sanitized inside
-            # the f-string, AFTER the colored severity span — sanitizing the
-            # whole colored string would strip c()'s own SGR reset.
-            print(f"    L{i['line']:<5} {c(SEV_COLOR[i['sev']], sev_txt)} [{i['rule']}] {sanitize_term_line(i['msg'])}")
-            ex = issue_excerpt(i, shown=shown)
-            if ex:
-                print(" " * len(prefix) + c('2', '» ' + ex))   # aligned under the message
-        print()
+    """The terminal summary, colored on a terminal."""
+    for piece in report_text_chunks(res, quiet, shown, _stdout_is_tty()):
+        print(piece, end="")
 
 
 # ---------------- HTML report ----------------
-def esc(s):
-    return html_mod.escape(str(s), quote=True)
+def html_chunks(res, marked=False, windows=os.name == "nt"):
+    """The HTML report in pieces (the engine's: report.rs): the gate, the cards, the findings by file, then every
+    finding with its snippet; `marked`: with the Lazaret provenance meta tag in its <head>, so report files
+    produced by this tool are recognizable and can be safely re-written by a later run. `windows`: the OS whose
+    path rules the project's name is read by (this one's)."""
+    marker = [lazaret_report.ENGINE_MARKER, lazaret_report.ENGINE_VERSION] if marked else None
+    return lazaret_report.framed(
+        "html_frame", res, {"windows": windows, "marker": marker},
+        lambda batch, first: _native.call("html_items", {"issues": batch, "first": first})["text"])
 
-RATING_COLOR = {"A": "#00aa55", "B": "#7dc94a", "C": "#f0c000", "D": "#ed7d20", "E": "#d4380d"}
-
-HTML_CSS = """
-:root{--border:#dde3ea;--muted:#6b7785;--navy:#1a2634;
---blocker:#c4160f;--critical:#d4380d;--major:#e08a00;--minor:#8a9aa8;--info:#4b9fd5;
---mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
-*{box-sizing:border-box;margin:0;padding:0}
-body{font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:#f3f5f7;color:#1f2933}
-header{background:var(--navy);color:#fff;padding:14px 24px}
-header .logo{font-size:17px;font-weight:700}header .logo span{color:#4b9fd5}
-header .meta{font-size:12px;color:#9fb0c0;margin-top:2px}
-.wrap{max-width:1150px;margin:0 auto;padding:20px 24px 60px}
-.panel{background:#fff;border:1px solid var(--border);border-radius:8px;padding:18px;margin-bottom:18px}
-h2{font-size:15px;margin-bottom:12px}
-.gate{display:flex;align-items:center;gap:14px;margin-bottom:16px;flex-wrap:wrap}
-.gate-badge{font-size:15px;font-weight:700;color:#fff;padding:8px 18px;border-radius:6px}
-.gate-badge.pass{background:#00aa55}.gate-badge.fail{background:#d4380d}
-.cond{font-size:12px;padding:4px 10px;border-radius:12px;border:1px solid var(--border)}
-.cond.ok{border-color:#bfe8d2;background:#eefaf3;color:#0a7a44}
-.cond.ko{border-color:#f3c4bb;background:#fdf0ee;color:#b32d16}
-.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px}
-.card{border:1px solid var(--border);border-radius:8px;padding:14px;text-align:center}
-.card .num{font-size:26px;font-weight:700}.card .lbl{font-size:12px;color:var(--muted);margin-top:2px}
-.rating{display:inline-flex;align-items:center;justify-content:center;width:26px;height:26px;border-radius:50%;
-color:#fff;font-size:13px;font-weight:700;margin-left:8px;vertical-align:3px}
-table{width:100%;border-collapse:collapse;font-size:13px}
-td,th{padding:6px 10px;border-bottom:1px solid var(--border);text-align:left}
-th{color:var(--muted);font-size:12px}td.n{text-align:right;font-variant-numeric:tabular-nums}
-details{border:1px solid var(--border);border-radius:8px;margin-bottom:10px;background:#fff;overflow:hidden}
-summary{display:flex;align-items:center;gap:10px;padding:10px 14px;cursor:pointer;list-style:none}
-summary::-webkit-details-marker{display:none}summary:hover{background:#f7f9fb}
-.sev{font-size:10.5px;font-weight:700;color:#fff;padding:2px 8px;border-radius:10px;flex-shrink:0}
-.sev.BLOCKER{background:var(--blocker)}.sev.CRITICAL{background:var(--critical)}
-.sev.MAJOR{background:var(--major)}.sev.MINOR{background:var(--minor)}.sev.INFO{background:var(--info)}
-.itype{font-size:11px;color:var(--muted);border:1px solid var(--border);padding:1px 8px;border-radius:10px;flex-shrink:0}
-.imsg{flex:1;font-weight:600;font-size:13px}
-.iloc{font:11.5px var(--mono);color:var(--muted);flex-shrink:0}
-.body{border-top:1px solid var(--border);padding:12px 14px;background:#fbfcfd}
-.snippet{font:12px/1.6 var(--mono);background:#1a2634;color:#d7e0ea;border-radius:6px;padding:10px 0;margin-bottom:10px;overflow-x:auto}
-.snippet .ln{display:flex}.snippet .no{width:52px;text-align:right;padding-right:12px;color:#5d7186;flex-shrink:0}
-.snippet .hl{background:#5c2b29}.snippet code{white-space:pre}
-.why{margin-bottom:8px}.why b{font-size:12px;text-transform:uppercase;letter-spacing:.5px;color:var(--muted)}
-.refs{font-size:12px;color:var(--muted)}
-footer{max-width:1150px;margin:0 auto;padding:0 24px 30px;font-size:11.5px;color:var(--muted)}
-"""
-
-def rating_badge(r):
-    return f'<span class="rating" style="background:{RATING_COLOR[r]}">{r}</span>'
 
 def html_report(res):
-    m, ct, rt = res["metrics"], res["counts"], res["ratings"]
-    gate_cls = "pass" if res["pass"] else "fail"
-    gate_txt = "Quality Gate: Passed" if res["pass"] else "Quality Gate: Failed"
-    conds = "".join(
-        f'<span class="cond {"ok" if c["ok"] else "ko"}">{"✓" if c["ok"] else "✗"} {esc(c["label"])}</span>'
-        for c in res["conditions"])
-    dup_left = f" ({m['dupLeftOut']} lines of Go and Rust not measured)" if m.get("dupLeftOut") else ""
-    cards = f"""
-<div class="card"><div class="num">{ct['VULN']}{rating_badge(rt['security'])}</div><div class="lbl">Vulnerabilities · Security</div></div>
-<div class="card"><div class="num">{ct['HOTSPOT']}</div><div class="lbl">Security Hotspots</div></div>
-<div class="card"><div class="num">{ct['BUG']}{rating_badge(rt['reliability'])}</div><div class="lbl">Bugs · Reliability</div></div>
-<div class="card"><div class="num">{ct['SMELL']}{rating_badge(rt['maintainability'])}</div><div class="lbl">Code Smells · Maintainability</div></div>
-<div class="card"><div class="num">{m['dupPct']}%</div><div class="lbl">Duplication{dup_left}</div></div>
-<div class="card"><div class="num">{m['ncloc']}</div><div class="lbl">Lines of Code</div></div>
-<div class="card"><div class="num">{m['files']}</div><div class="lbl">Files Scanned</div></div>"""
-    file_rows = "".join(
-        f"<tr><td>{esc(f)}</td><td class='n'>{n}</td></tr>"
-        for f, n in sorted(res["perFile"].items(), key=lambda kv: -kv[1]))
-    file_table = (f"<table><tr><th>File</th><th style='text-align:right'>Issues</th></tr>{file_rows}</table>"
-                  if file_rows else "<p>No issues in any file. 🎉</p>")
-    items = []
-    for i in res["issues"]:
-        snippet = "".join(
-            f'<div class="ln{" hl" if i["snipStart"] + k == i["line"] else ""}">'
-            f'<span class="no">{i["snipStart"] + k}</span><code>{esc(l) or " "}</code></div>'
-            for k, l in enumerate(i["snippet"]))
-        items.append(f"""
-<details><summary><span class="sev {i['sev']}">{i['sev']}</span>
-<span class="itype">{TYPE_LABEL[i['type']]}</span>
-<span class="imsg">{esc(i['msg'])}</span>
-<span class="iloc">{esc(i['file'])}:{i['line']}</span></summary>
-<div class="body"><div class="snippet">{snippet}</div>
-<div class="why"><b>Why it matters</b><div>{esc(i['why'])}</div></div>
-<div class="why"><b>How to fix</b><div>{esc(i['fix'])}</div></div>
-<div class="refs">Rule {i['rule']} · {esc(i['ref'])}</div></div></details>""")
-    issues_html = "\n".join(items) if items else "<p>No issues found. 🎉</p>"
-    verified = (f'<p class="verified">{esc(verification_line(res["verification"]))}</p>'
-                if isinstance(res.get("verification"), dict) else "")
-    return f"""<!DOCTYPE html>
-<html lang="en"><head><meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Lazaret Report — {esc(os.path.basename(res['project']))}</title>
-<style>{HTML_CSS}</style></head><body>
-<header><div class="logo">Laza<span>ret</span> · Project Report</div>
-<div class="meta">{esc(res['project'])} · scanned {esc(res['scannedAt'])}</div></header>
-<div class="wrap">
-<div class="panel"><div class="gate"><div class="gate-badge {gate_cls}">{gate_txt}</div>{conds}</div>
-<div class="cards">{cards}</div>{verified}</div>
-<div class="panel"><h2>Issues by file</h2>{file_table}</div>
-<div class="panel"><h2>All issues ({len(res['issues'])})</h2>{issues_html}</div>
-</div>
-<footer>Generated by Lazaret CLI. Pattern- and heuristic-based static analysis — not a substitute for a full security audit.</footer>
-</body></html>"""
+    return "".join(html_chunks(res))
+
+
+def _html_report_marked(res):
+    return "".join(html_chunks(res, marked=True))
 
 
 # ---------------- SARIF output ----------------
-SARIF_LEVEL = {"BLOCKER": "error", "CRITICAL": "error", "MAJOR": "warning",
-               "MINOR": "note", "INFO": "note"}
-
-def _html_report_marked(res):
-    """html_report() output with the Lazaret provenance meta-tag injected
-    into <head>, so report files produced by this tool are recognizable and
-    can be safely re-written by a later run (no-clobber-by-provenance)."""
-    return html_report(res).replace(
-        '<meta name="viewport"',
-        lazaret_report.HTML_ENGINE_MARKER + '\n<meta name="viewport"',
-        1)
-
-#: SARIF run-level base for every repo-relative artifactLocation.
-SARIF_SRCROOT = "%SRCROOT%"
-LAZARET_INFORMATION_URI = "https://lazaret.dev"
-SARIF_SCHEMA = "https://json.schemastore.org/sarif-2.1.0.json"
-
-
-def sarif_uri(path):
-    """A report path as a SARIF artifactLocation: (uri, uriBaseId or None).
-
-    Review item 8: the uri used to be the raw path — 'my dir/a#1%2.py'
-    verbatim, so '#' started a fragment and '%2.' was a broken escape. Now a
-    root-relative path becomes a percent-encoded relative reference (RFC
-    3986, '/' separators) resolved against %SRCROOT%; an absolute path
-    becomes a file: URI."""
-    p = _safe_text(path)
-    if os.path.isabs(p):
-        return _pathlib.Path(p).as_uri(), None
-    if os.sep != "/":
-        p = p.replace(os.sep, "/")
-    return _urlparse.quote(p, safe="/"), SARIF_SRCROOT
-
-
-def _root_uri(root):
-    uri = _pathlib.Path(os.path.abspath(os.fspath(root))).as_uri()
-    return uri if uri.endswith("/") else uri + "/"
+def sarif_chunks(res, root=None, marked=True, windows=os.name == "nt"):
+    """The SARIF 2.1.0 log of a scan result in pieces (the engine's: report.rs): the rules in the order of their
+    first finding, each finding's location below %SRCROOT%, the scan root (`root`; res['project'] by default).
+    `marked`: with the marker in a top-level property bag, first; `windows`: the OS whose path rules the paths are
+    read by (this one's)."""
+    # L1: the result has been swept by redact_result already; the log embeds the findings' msg/why/fix, so it is
+    # swept again here, so that a caller that skips the main() pass cannot ship an unredacted result.
+    redact_result(res)
+    issues = [i for i in res.get("issues", []) if isinstance(i, dict)]
+    rules, known = [], []
+    for k in range(0, len(issues), lazaret_report.BATCH):
+        got = _native.call("sarif_rules", {"issues": issues[k:k + lazaret_report.BATCH], "known": known})["rules"]
+        rules += got
+        known += [r["id"] for r in got]
+    frame = _native.call("sarif_frame", {
+        "rules": rules,
+        "root": (ntpath if windows else posixpath).abspath(os.fspath(res["project"] if root is None else root)),
+        "windows": windows, "version": _lazaret_pkg.__version__, "source": res.get("source"),
+        "marker": [lazaret_report.ENGINE_MARKER, lazaret_report.ENGINE_VERSION] if marked else None,
+        "count": len(issues)})
+    yield frame["head"]
+    for k in range(0, len(issues), lazaret_report.BATCH):
+        yield _native.call("sarif_items", {"issues": issues[k:k + lazaret_report.BATCH], "rules": known,
+                                           "windows": windows, "first": k == 0})["text"]
+    yield frame["tail"]
 
 
 def sarif_report(res, root=None):
-    """SARIF 2.1.0 log for a scan result. `root` is the scan root (defaults
-    to res['project']); it becomes originalUriBaseIds['%SRCROOT%']."""
-    # L1: sarif_report receives the result AFTER redact_result has swept it,
-    # and it emits no snippet text — but it does embed issue msg/why/fix
-    # strings from the result. Defensively sweep here too so a future caller
-    # that skips the main() pass cannot ship an unredacted result into SARIF.
-    redact_result(res)
-    rules_seen, rule_index, results = {}, {}, []
-    for i in res["issues"]:
-        if i["rule"] not in rules_seen:
-            rule_index[i["rule"]] = len(rules_seen)
-            rules_seen[i["rule"]] = {
-                "id": i["rule"], "name": i["name"],
-                "shortDescription": {"text": i["name"]},
-                "fullDescription": {"text": i["why"]},
-                "help": {"text": i["fix"]}}
-        uri, base = sarif_uri(i["file"])
-        loc = {"uri": uri}
-        if base:
-            loc["uriBaseId"] = base
-        try:
-            line = max(1, int(i.get("line") or 1))
-        except (TypeError, ValueError):
-            line = 1
-        result = {
-            "ruleId": i["rule"],
-            "ruleIndex": rule_index[i["rule"]],
-            "level": SARIF_LEVEL[i["sev"]],
-            "message": {"text": i["msg"]},
-            "locations": [{"physicalLocation": {
-                "artifactLocation": loc,
-                "region": {"startLine": line}}}]}
-        if isinstance(i.get("verified"), dict):
-            result["properties"] = {"verified": dict(i["verified"])}       # (--verify-secrets: no part of the credential)
-        results.append(result)
-    run = {"tool": {"driver": {"name": "Lazaret",
-                               "version": _lazaret_pkg.__version__,
-                               "informationUri": LAZARET_INFORMATION_URI,
-                               "rules": list(rules_seen.values())}},
-           "originalUriBaseIds": {SARIF_SRCROOT: {
-               "uri": _root_uri(res["project"] if root is None else root)}},
-           "results": results}
-    src = res.get("source")
-    if isinstance(src, dict) and src.get("uri") and src.get("commit"):
-        # a github: or gitlab: scan: the files are the repository's at that commit
-        run["versionControlProvenance"] = [{"repositoryUri": src["uri"], "revisionId": src["commit"],
-                                            "mappedTo": {"uriBaseId": SARIF_SRCROOT}}]
-    return {"$schema": SARIF_SCHEMA,
-            "version": "2.1.0",
-            "runs": [run]}
+    """SARIF 2.1.0 log for a scan result, as a dict (sarif_chunks' text, without the marker)."""
+    return json.loads("".join(sarif_chunks(res, root, marked=False)))
 
 
 # ---------------- Baseline (new-code focus) ----------------
@@ -5226,19 +4996,19 @@ def _main(argv=None, source=None):
         if args.sarif:
             sarif_path = lazaret_report.write_report(
                 paths["sarif"],
-                lambda: lazaret_report.sarif_renderer(sarif_report(res, root=args.directory)),
+                lambda: sarif_chunks(res, root=args.directory),
                 kind="sarif", strict=args.force_overwrite)
             print(f"  SARIF report: {sanitize_term_line(sarif_path)}")
         if not args.no_json:
             json_path = lazaret_report.write_report(
                 paths["json"],
-                lambda: lazaret_report.json_renderer(res),
+                lambda: lazaret_report.json_chunks(res),
                 kind="json", strict=args.force_overwrite)
             print(f"  JSON report: {sanitize_term_line(json_path)}")
         if not args.no_html:
             html_path = lazaret_report.write_report(
                 paths["html"],
-                lambda: _html_report_marked(res),
+                lambda: html_chunks(res, marked=True),
                 kind="html", strict=args.force_overwrite)
             print(f"  HTML report: {sanitize_term_line(html_path)}")
     except lazaret_report.ReportPathError as exc:

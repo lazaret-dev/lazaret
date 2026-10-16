@@ -108,6 +108,11 @@ def span_name(name, args):
     return name
 
 
+#: Calls --timings leaves out: the terminal's sanitizers, which printing makes (a refused command line's message
+#: too, which took no time worth telling: the guard's table).
+_UNTIMED = frozenset({"term"})
+
+
 def call_raw(name, args=None, text=""):
     """Run one call of the native engine: (its status, its answer as JSON
     text), the answer not parsed (a parsed tree may be deeper than
@@ -115,6 +120,8 @@ def call_raw(name, args=None, text=""):
     lib = _load()
     if lib is None:
         raise NativeError(_load_error)
+    if name in _UNTIMED:
+        return _call_lib(lib, name, args, text)
     with timings.span("engine", span_name(name, args)):
         return _call_lib(lib, name, args, text)
 

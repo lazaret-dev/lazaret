@@ -12,7 +12,8 @@ Contract (card: "CLI writes reports into CWD"):
      Overwriting a report from an earlier run of this engine is the intended
      re-scan workflow and stays allowed (--force-overwrite overrides).
 
-Imported by lazaret.scanner.core; stdlib only, unit-testable on its own.
+Imported by lazaret.scanner.core. The renderers are the engine's (report.rs, BR-7 step 4 c): a report is made in
+pieces, a frame and its findings a batch at a time, which write_report writes as they come.
 """
 from __future__ import annotations
 
@@ -23,6 +24,8 @@ import os
 import re
 import stat
 import tempfile
+
+from lazaret.scanner import _native
 
 JSON_REPORT_NAME = "lazaret-report.json"
 HTML_REPORT_NAME = "lazaret-report.html"
@@ -496,8 +499,8 @@ def write_report(path, render, kind, strict=False):
     clobber an unrelated file either.
     """
     rendered = render()
-    if isinstance(rendered, str):
-        rendered = _utf8(rendered)
+    if isinstance(rendered, (str, bytes)):
+        rendered = (rendered,)
     parent = os.path.dirname(os.path.abspath(path)) or os.curdir
     # A re-scan must keep an existing report's permissions (a 0600 report
     # used to come back 0644); a new report gets the classic 0666 & ~umask
@@ -514,7 +517,8 @@ def write_report(path, render, kind, strict=False):
     fd, tmp = tempfile.mkstemp(dir=parent, prefix=".lazaret-report-",
                                suffix=".tmp")
     try:
-        _write_all(fd, rendered)
+        for piece in rendered:                 # a report's pieces as they come (one string or bytes, or many)
+            _write_all(fd, _utf8(piece) if isinstance(piece, str) else piece)
         try:
             if hasattr(os, "fchmod"):
                 os.fchmod(fd, mode)
@@ -557,27 +561,43 @@ def _umask():
     return cur
 
 
-def mark_result(res):
-    """Copy of the scan result dict with the engine marker as first key."""
-    out = {ENGINE_MARKER: ENGINE_VERSION}
-    out.update(res)
-    return out
+#: Findings per engine call when a report is made in pieces.
+BATCH = 2000
+
+
+def framed(call, doc, args, items):
+    """A report in pieces: the engine's frame (`call` with `args`, `doc` with its findings left out in their
+    place), then `items(batch, first)` for each batch of its findings, then the rest of the frame."""
+    issues = doc.get("issues") if isinstance(doc, dict) else None
+    if isinstance(issues, list):
+        doc = dict(doc)
+        doc["issues"] = []
+    else:
+        issues = []
+    got = _native.call(call, dict(args, doc=doc, count=len(issues)))
+    yield got["head"]
+    for k in range(0, len(issues), BATCH):
+        yield items(issues[k:k + BATCH], k == 0)
+    yield got["tail"]
+
+
+def json_chunks(res, prefix=None):
+    """The JSON report in pieces: Python's json.dumps(…, indent=2) of the result with the marker as key #1 and,
+    when $LAZARET_BASELINE_KEY is set, the baseline signature as key #2 (the engine's: report.rs)."""
+    if prefix is None:
+        prefix = [[ENGINE_MARKER, ENGINE_VERSION]]
+        sig = report_signature(res)
+        if sig is not None:
+            prefix.append([SIGNATURE_FIELD, sig])
+    return framed("report_json", res, {"prefix": prefix},
+                  lambda batch, first: _native.call("report_items", {"items": batch, "level": 2, "first": first})["text"])
 
 
 def json_renderer(res):
-    """JSON report text: the result dict with the marker as key #1 and, when
-    $LAZARET_BASELINE_KEY is set, the baseline signature as key #2."""
-    out = mark_result(res)
-    sig = report_signature(res)
-    if sig is not None:
-        out = {ENGINE_MARKER: ENGINE_VERSION, SIGNATURE_FIELD: sig}
-        out.update((k, v) for k, v in res.items()
-                   if k not in (ENGINE_MARKER, SIGNATURE_FIELD))
-    return json.dumps(out, indent=2)
+    """JSON report text (json_chunks joined)."""
+    return "".join(json_chunks(res))
 
 
 def sarif_renderer(sarif):
-    """SARIF log text with the marker in a top-level property bag, first."""
-    out = {"properties": {ENGINE_MARKER: ENGINE_VERSION}}
-    out.update(sarif)
-    return json.dumps(out, indent=2)
+    """A SARIF log's text with the marker in a top-level property bag, first."""
+    return "".join(json_chunks(sarif, [["properties", {ENGINE_MARKER: ENGINE_VERSION}]]))

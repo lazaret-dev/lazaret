@@ -961,6 +961,22 @@ aggregate):
   dashboard's copies in `make_codec_tables.py` and `make_unicode_tables.py`, and the tests of the port
   (`test_review_dashboard_engine`, `_lexing`, `_perf`, `_perf_regex`, `_tables`, and the dashboard halves of eleven
   review tests): the page is the npm package's code, held by its tests.
+- **The reports' forms, the engine's (BR-7, step 4 c; no rule set change).** A scan's JSON, SARIF, HTML and terminal
+  forms were made by each package (core's `json_renderer`, `sarif_report` and `sarif_renderer`, `html_report` and
+  `print_report`; npm's `jsonReportChunks`, `sarifReport`, `htmlReportChunks` and `printReport`), and so were the
+  terminal's sanitizers (`sanitize_term`, `sanitize_term_line`, `safe_excerpt`, `issue_excerpt` and their npm twins;
+  `flow.py` kept a third `sanitize_term`). The engine makes them for both (`rust/crates/lazaret-engine/src/report.rs`:
+  the `term`, `issue_excerpt`, `report_json`, `report_items`, `sarif_*`, `html_*` and `text_*` calls), as core made
+  them, so the two packages now write the same bytes: the npm package's JSON report is Python's `json.dumps(…,
+  indent=2)`, every character outside ASCII a `\u` escape (it was JSON.stringify's), its HTML report core's page (it
+  was the JSON in a `<pre>`), and its terminal summary core's, colored on a terminal (it was a shorter one, the first
+  40 findings). Each form is made in pieces, a frame and its findings a batch at a time (at most 2,000, and 8 MiB of
+  them in the npm package), which the packages write as they come, so a report with a million findings is still
+  written. Without an engine the sanitizers map every character but printable ASCII to `·` (the CLIs say the engine
+  is missing). Held to core's code as it was, on generated results whose every text is hostile and on Windows' path
+  rules too, and the npm package's forms, on the WebAssembly build, to the Python package's, byte for byte
+  (`test_report_engine`). The engine grows by 0.1 MiB (WebAssembly 6.80 to 6.90 MB), and the dashboard, which
+  carries it, was rebuilt.
 - **Security: S-XML is a parser set to resolve external entities, not an import of xml.etree, xml.dom or xml.sax
   (Q-3; rule set 2.80.0).** Since Python 3.7.1 none of them resolves an external entity unless told to, and Expat
   2.4.1 refuses entity bombs, so the import flagged safe code: all 20 of BenchmarkPython's safe XXE cases (its 8 real

@@ -3065,17 +3065,17 @@ def _main(argv=None):
     try:
         if "json" in paths:
             p = lazaret_report.write_report(
-                paths["json"], lambda: lazaret_report.json_renderer(res), "json",
+                paths["json"], lambda: lazaret_report.json_chunks(res), "json",
                 strict=args.force_overwrite)
             print("\n  JSON report: %s" % lazaret.sanitize_term(p))
         if "html" in paths:
             p = lazaret_report.write_report(
-                paths["html"], lambda: lazaret._html_report_marked(res), "html",
+                paths["html"], lambda: lazaret.html_chunks(res, marked=True), "html",
                 strict=args.force_overwrite)
             print("  HTML report: %s" % lazaret.sanitize_term(p))
         if "sarif" in paths:
             p = lazaret_report.write_report(
-                paths["sarif"], lambda: lazaret_report.sarif_renderer(lazaret.sarif_report(res)),
+                paths["sarif"], lambda: lazaret.sarif_chunks(res),
                 "sarif", strict=args.force_overwrite)
             print("  SARIF report: %s" % lazaret.sanitize_term(p))
     except (lazaret_report.ReportPathError, OSError) as exc:

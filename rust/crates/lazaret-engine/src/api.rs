@@ -117,7 +117,122 @@ pub const CALLS: &[&str] = &[
     // 0.1.9 (BR-7 step 4 b): a source file's bytes decoded as its interpreter reads them, and bytes in a codec
     // Python has (decode/)
     "decode_source", "encoding_issues", "decode",
+    // 0.1.9 (BR-7 step 4 c): the reports' forms, each a frame and its findings in batches, and the terminal's
+    // sanitizers (report.rs)
+    "term", "issue_excerpt", "report_json", "report_items", "sarif_rules", "sarif_frame", "sarif_items", "html_frame",
+    "html_items", "text_frame", "text_order", "text_items",
 ];
+
+fn arr_arg<'a>(args: &'a Value, name: &str) -> &'a [Value] {
+    args.get(name).and_then(|v| v.as_arr()).unwrap_or(&[])
+}
+
+fn count_arg(args: &Value, name: &str) -> Result<usize, CallError> {
+    match args.get(name) {
+        Some(Value::Int(n)) if *n >= 0 => Ok(*n as usize),
+        _ => Err(CallError::BadArgs(format!("{name}: a count"))),
+    }
+}
+
+/// The reports' calls (report.rs): a frame's {head, tail}, a batch of findings' {text}.
+fn report_call(p: &Pack, name: &str, args: &Value, text: &[u32]) -> Result<Value, CallError> {
+    use crate::report as rep;
+    let pair = |h: String, t: String| Value::obj(vec![("head", Value::str(&h)), ("tail", Value::str(&t))]);
+    let wpair = |h: PyStr, t: PyStr| Value::obj(vec![("head", Value::Str(h)), ("tail", Value::Str(t))]);
+    let doc = || args.get("doc").cloned().ok_or_else(|| CallError::BadArgs(format!("{name}: doc")));
+    let order = args.get("perFileOrder").and_then(|v| v.as_arr());
+    let windows = flag(args, "windows", false);
+    Ok(match name {
+        // {mode: "text" | "line" | "excerpt", width}: the text as sanitize_term, sanitize_term_line or
+        // safe_excerpt (width characters, 100 by default) makes it
+        "term" => {
+            let mode = opt_str(args, "mode").map(|m| crate::pystr::to_string(&m)).unwrap_or_default();
+            let out = match mode.as_str() {
+                "text" => rep::sanitize_term(text),
+                "line" => rep::sanitize_term_line(text),
+                "excerpt" => rep::safe_excerpt(text, opt_int(args, "width").unwrap_or(100)),
+                _ => return Err(CallError::BadArgs("term: mode is text, line or excerpt".into())),
+            };
+            Value::obj(vec![("text", Value::Str(out))])
+        }
+        // {issue, width, redact, shown}: a finding's flagged line for the terminal (core.issue_excerpt): `shown` the
+        // line as read (--show-secrets), else its snippet's, "[redacted]" for a secret rule's when redacting
+        "issue_excerpt" => {
+            let issue = args.get("issue").cloned().unwrap_or(Value::Null);
+            let out = rep::issue_excerpt(p, &issue, opt_int(args, "width").unwrap_or(100), args.get("shown"), flag(args, "redact", true));
+            Value::obj(vec![("text", Value::Str(out))])
+        }
+        // {doc, prefix: [[key, value]], perFileOrder, count}: the JSON report's frame, the findings left out
+        "report_json" => {
+            let count = match args.get("count") {
+                Some(Value::Int(n)) if *n >= 0 => Some(*n as usize),
+                _ => None,
+            };
+            let (h, t) = rep::json_frame(doc()?, arr_arg(args, "prefix"), order, count);
+            pair(h, t)
+        }
+        // {items, level, first}: items of a frame's array, at its level
+        "report_items" => {
+            let level = count_arg(args, "level")?;
+            Value::obj(vec![("text", Value::str(&rep::items_text(arr_arg(args, "items"), level, flag(args, "first", false))))])
+        }
+        // {issues, known: [rule ids]}: the SARIF rules of the findings' rules not known yet
+        "sarif_rules" => {
+            let known: Vec<PyStr> = arr_arg(args, "known").iter().map(rep::py_str).collect();
+            Value::obj(vec![("rules", Value::Arr(rep::sarif_rules(arr_arg(args, "issues"), &known)))])
+        }
+        // {rules, root, windows, version, source, marker, count}: the SARIF log's frame
+        "sarif_frame" => {
+            let root = arg_str(args, "root")?;
+            let (h, t) = rep::sarif_frame(
+                arr_arg(args, "rules").to_vec(),
+                &root,
+                windows,
+                args.get("version").cloned().unwrap_or(Value::Null),
+                args.get("source"),
+                args.get("marker"),
+                count_arg(args, "count")?,
+            );
+            pair(h, t)
+        }
+        // {issues, rules: [rule ids, in their index order], windows, first}: SARIF results
+        "sarif_items" => {
+            let rules: Vec<PyStr> = arr_arg(args, "rules").iter().map(rep::py_str).collect();
+            Value::obj(vec![("text", Value::str(&rep::sarif_items(arr_arg(args, "issues"), &rules, windows, flag(args, "first", false))))])
+        }
+        // {doc, count, windows, marker, perFileOrder}: the HTML report's frame
+        "html_frame" => {
+            let (h, t) = rep::html_frame(&doc()?, count_arg(args, "count")?, windows, args.get("marker"), order);
+            wpair(h, t)
+        }
+        // {issues, first}: the HTML report's items
+        "html_items" => Value::obj(vec![("text", Value::Str(rep::html_items(arr_arg(args, "issues"), flag(args, "first", false))))]),
+        // {doc, count, quiet, color}: the terminal summary's frame
+        "text_frame" => {
+            let (h, t) = rep::text_frame(&doc()?, count_arg(args, "count")?, flag(args, "quiet", false), flag(args, "color", false));
+            wpair(h, t)
+        }
+        // {rows: [[file, sev, line]]}: the order the terminal summary lists the findings in
+        "text_order" => Value::obj(vec![(
+            "order",
+            Value::Arr(rep::text_order(arr_arg(args, "rows")).into_iter().map(|k| Value::Int(k as i64)).collect()),
+        )]),
+        // {issues, file, color, width, redact, shown}: findings, in that order, as the terminal summary lists them
+        _ => {
+            let file = opt_str(args, "file");
+            let (out, last) = rep::text_items(
+                p,
+                arr_arg(args, "issues"),
+                file,
+                flag(args, "color", false),
+                opt_int(args, "width").unwrap_or(100),
+                flag(args, "redact", true),
+                arr_arg(args, "shown"),
+            );
+            Value::obj(vec![("text", Value::Str(out)), ("file", last.map_or(Value::Null, Value::Str))])
+        }
+    })
+}
 
 fn dead_drop(v: Option<(usize, PyStr)>) -> Value {
     match v {
@@ -1194,6 +1309,8 @@ fn dispatch(name: &str, args: &Value, text: &[u32]) -> Result<Value, CallError> 
             let redact = !matches!(args.get("redact"), Some(Value::Bool(false)));
             Value::Arr(crate::decode::encoding_issues(p, text, &info, redact))
         }
+        "term" | "issue_excerpt" | "report_json" | "report_items" | "sarif_rules" | "sarif_frame" | "sarif_items"
+        | "html_frame" | "html_items" | "text_frame" | "text_order" | "text_items" => report_call(p, name, args, text)?,
         "decode" => {
             // the bytes (one code point a byte) in `codec` (any spelling Python's codecs.lookup takes) as
             // bytes.decode(codec, "replace") gives them -> {"codec": its name, "text"}; an escape codec strict

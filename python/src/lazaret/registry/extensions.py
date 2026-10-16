@@ -35,7 +35,6 @@ be written."""
 import argparse
 import datetime
 import hashlib
-import json
 import os
 import sys
 import time
@@ -341,8 +340,8 @@ def _run(args, env, home):
                "scannedAt": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
                "summary": counts, "notes": notes, "extensions": results}
         try:
-            reports.write_report(report, lambda: json.dumps(reports.mark_result(doc), indent=2), "json",
-                                 strict=args.force_overwrite)
+            marker = [[reports.ENGINE_MARKER, reports.ENGINE_VERSION]]
+            reports.write_report(report, lambda: reports.json_chunks(doc, marker), "json", strict=args.force_overwrite)
         except (reports.ReportPathError, OSError) as exc:
             print(f"lazaret: error: the report could not be written: {lazaret.sanitize_term(exc)}", file=sys.stderr)
             return reports.EXIT_OUTPUT

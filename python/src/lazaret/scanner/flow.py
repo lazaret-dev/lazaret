@@ -44,32 +44,15 @@ Public entry point: analyze(files) -> list[issue dict] (never raises)
 import re
 import sys
 
+from lazaret.scanner import _native
 from lazaret.scanner import engine
 from lazaret.scanner import taintspec
 
 # ---------------- terminal-control neutralizer (audit H1) ----------------
-# lazaret.sanitize_term is the canonical copy; lazaret_flow is imported
-# BY lazaret, so it keeps a byte-identical local duplicate rather than
-# importing it (no import cycle). test_terminal_sanitize.py asserts the two
-# agree on a hostile matrix. Mapped set: every C0 control byte except TAB
-# (0x09) and LF (0x0a), plus CR (0x0d), DEL (0x7f), the C1 controls
-# U+0080–U+009F and the bidi controls U+202A–U+202E, U+2066–U+2069 — ESC/BEL,
-# the two bytes of the audit PoC, are inside these ranges.
-_SANITIZE_TERM_CHARS = (
-    "".join(chr(n) for n in range(0x00, 0x09))      # NUL … BS
-    + "".join(chr(n) for n in (0x0b, 0x0c))         # VT, FF
-    + "".join(chr(n) for n in range(0x0d, 0x20))    # CR, SO … US (incl. ESC)
-    + "".join(chr(n) for n in range(0x7f, 0xa0))    # DEL, C1 controls (incl. CSI)
-    + "".join(chr(n) for n in range(0x202a, 0x202f))  # bidi LRE RLE PDF LRO RLO
-    + "".join(chr(n) for n in range(0x2066, 0x206a))  # bidi LRI RLI FSI PDI
-)
-_SANITIZE_TERM_TAB = str.maketrans(
-    {ch: "·" for ch in _SANITIZE_TERM_CHARS})
-
-
 def sanitize_term(s):
-    """Local twin of lazaret.sanitize_term — see the note above."""
-    return str(s).translate(_SANITIZE_TERM_TAB)
+    """lazaret.sanitize_term (the engine's: report.rs), asked here: lazaret_flow is imported BY lazaret, so it
+    does not import it back (no import cycle)."""
+    return _native.call("term", {"mode": "text"}, str(s))["text"]
 
 # ---------------- sink / source models (shared vocabulary) ----------------
 # category -> (severity, cwe, fix)

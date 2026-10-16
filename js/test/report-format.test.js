@@ -136,8 +136,8 @@ test("printReport: gate, conditions, ratings, counts; quiet suppresses issues", 
   const res = buildResult("/p", [F("a.py", "x=1\n")], []);
   printReport(res, { out: (s) => lines.push(s), quiet: true });
   const text = lines.join("\n");
-  assert.match(text, /Quality gate: PASSED/);
-  assert.match(text, /Ratings: security A/);
+  assert.match(text, /\n {2}Quality gate: {2}PASSED \n/);
+  assert.match(text, /\n {2}Vulnerabilities {6}0 {3}Security rating {8}A\n/);
   const noisy = [];
   printReport(buildResult("/p", [F("a.py", "eval(x)\n")],
     scanFile({ name: "a.py", content: "eval(x)\n", lang: "py" })), { out: (s) => noisy.push(s) });

@@ -129,9 +129,9 @@ test("integer options are read as Python's int() reads them", () => {
   const line = "x = eval(y)  # abcdef\n";
   const r = scanTree({ "a.py": line }, ["--excerpt-width", "1_0", "--max-source-bytes", "2_000_000"]);
   assert.equal(r.code, 0);
-  assert.ok(r.out.includes("      » x = eval(y…"), r.out.join("\n"));
+  assert.ok(r.out.some((l) => /^ +» x = eval\(y…$/.test(l)), r.out.join("\n"));
   const neg = scanTree({ "a.py": line }, ["--excerpt-width", "-3"]);
-  assert.ok(neg.out.includes("      » x = eval(y)  # abc…"), neg.out.join("\n"));   // Python: line[:-3] + "…"
+  assert.ok(neg.out.some((l) => /^ +» x = eval\(y\) {2}# abc…$/.test(l)), neg.out.join("\n"));   // Python: line[:-3] + "…"
   const env = scanTree({ "a.py": line }, [], { LAZARET_MAX_SOURCE_BYTES: "\u0661_\u0660" });   // 10 bytes
   assert.deepEqual(env.found, ["a.py:1 SC-TRUNCATED"]);
 });

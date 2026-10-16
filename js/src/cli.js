@@ -15,7 +15,7 @@ import { MAX_FILE_BYTES } from "./lib/collect.js";
 import { pyRepr } from "./lib/pycompat.js";
 import { setRedactSecrets } from "./lib/redact.js";
 import {
-  jsonReportChunks, htmlReportChunks, printReport, sarifReport, sarifChunks,
+  jsonReportChunks, htmlReportChunks, printReport, sarifChunks,
   sanitizeTerm, sanitizeTermLine, setExcerptWidth, flaggedLines, showSecretsOn,
 } from "./report.js";
 import { applyBaseline, BASELINE_KEY_ENV } from "./baseline.js";
@@ -385,14 +385,14 @@ function runChecked(argv, io) {
     if (opts.baseline) {
       applyBaseline(res, opts.baseline, { root, env, warn: (m) => err(sanitizeTermLine(m)) });
     }
-    printReport(res, { out, quiet: !!opts.quiet, rawLines });
+    printReport(res, { out, quiet: !!opts.quiet, rawLines, color: io.isTTY ?? !!process.stdout.isTTY });
 
     // ---- reports (atomic, no-clobber, marker-checked) ----------------------
     // Written in pieces: a report can be too big for one string (report.js).
     const strict = !!opts.force;
     try {
       if (paths.sarif) {
-        writeReport(paths.sarif, () => sarifChunks(sarifReport(res, root)), { kind: "sarif", strict });
+        writeReport(paths.sarif, () => sarifChunks(res, root), { kind: "sarif", strict });
         out(`  SARIF report: ${sanitizeTermLine(paths.sarif)}`);
       }
       if (paths.json) {
