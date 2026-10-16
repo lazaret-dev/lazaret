@@ -112,6 +112,8 @@ pub const CALLS: &[&str] = &[
     "js_loads",
     // 0.1.9 (JS-PARSE-STRICT): the parser's refusal of a text the supply-chain model reads on its tree
     "js_refusal",
+    // 0.1.9 (BR-7 step 4 a): a scan's result, graded again, and a project's metrics (result.rs)
+    "result", "regrade", "project_metrics",
 ];
 
 fn dead_drop(v: Option<(usize, PyStr)>) -> Value {
@@ -1146,6 +1148,25 @@ fn dispatch(name: &str, args: &Value, text: &[u32]) -> Result<Value, CallError> 
             let body: Vec<u8> = text.iter().map(|&c| c as u8).collect();
             let (outcome, why, who) = crate::secrets::judge(rules, status, &body, truncated, &secrets);
             Value::Arr(vec![Value::str(outcome.as_str()), Value::Str(why), who.map_or(Value::Null, Value::Str)])
+        }
+        "result" => {
+            let bad = |m: String| CallError::BadArgs(format!("result: {m}"));
+            // a scan's result from its findings and files (result.rs; core.build_result's, npm's buildResult's)
+            let issues = crate::result::findings_arg(args.get("issues")).map_err(bad)?;
+            let files = crate::result::files_arg(args.get("files")).map_err(bad)?;
+            crate::result::result(p, &issues, &files).map_err(bad)?
+        }
+        "regrade" => {
+            let bad = |m: String| CallError::BadArgs(format!("regrade: {m}"));
+            // a result graded again after its findings changed (result.rs; core.regrade's, npm's regrade's)
+            let issues = crate::result::findings_arg(args.get("issues")).map_err(bad)?;
+            let conditions = crate::result::conditions_arg(args.get("conditions")).map_err(bad)?;
+            crate::result::regrade(p, &issues, &conditions).map_err(bad)?
+        }
+        "project_metrics" => {
+            let bad = |m: String| CallError::BadArgs(format!("project_metrics: {m}"));
+            // a project's metrics from its files' line metrics (result.rs; core.compute_metrics', npm's computeMetrics')
+            crate::result::metrics(&crate::result::files_arg(args.get("files")).map_err(bad)?)
         }
         "file_metrics" => {
             // core.compute_metrics' part for one file (metrics.rs)

@@ -65,7 +65,7 @@ test("architecture: public export surface (index.js) is importable and has the c
   const api = await import(pathToFileURL(join(SRC, "index.js")).href);
   for (const name of [
     "version", "TAGLINE", "run", "scanFile", "detectLang",
-    "SEV_ORDER", "TYPES", "computeMetrics", "worstSevRating", "maintainabilityRating",
+    "SEV_ORDER", "TYPES", "computeMetrics",
     "buildResult", "jsonRenderer", "printReport", "scanManifest", "scanGyp",
     "redactResult", "collectFiles", "reportPaths", "writeReport", "ReportPathError",
     "EXIT_OUTPUT",

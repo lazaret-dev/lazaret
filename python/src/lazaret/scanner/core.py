@@ -2139,7 +2139,7 @@ def cap_issues(path, issues, lines):
         note = mk_issue(dict(_CAPPED_RULE, msg=_CAPPED_RULE["msg"].format(n=n, rule=rid),
                              fix=_CAPPED_RULE["fix"].format(rule=rid)), path, first, lines)
         # what the note stands for: the maintainability rating counts the
-        # omitted findings, not the note (see maintainability_rating)
+        # omitted findings, not the note (the engine's rating: result.rs)
         note["omitted"] = n
         note["omittedType"] = typ
         out.append(note)
@@ -2217,10 +2217,8 @@ def autorun_issues(path, lines, read=None):
 #: over plain http) counts against the gate's supply-chain condition: most
 #: repositories run an action at a version tag or set no permissions, and that
 #: condition is for indicators (build_result).
-HARDENING_RULES = frozenset({
-    "SC-WORKFLOW-UNPINNED", "SC-WORKFLOW-PR-CHECKOUT", "SC-WORKFLOW-CACHE", "SC-WORKFLOW-PERMISSIONS",
-    "SC-WORKFLOW-OIDC-INSTALL", "SC-WORKFLOW-PIPE-SHELL",
-    "SC-GITLAB-INCLUDE", "SC-GITLAB-IMAGE", "SC-GITLAB-PIPE-SHELL", "SC-GITLAB-MR-TEXT", "SC-GITLAB-TOKEN-INSTALL"})
+#: HARDENING_RULES: the pack's since BR-7 step 4 (a), which grades the result in the engine; read when first asked
+#: for (module __getattr__, below), so that importing core needs no engine
 
 
 def ci_issues(path, lines):
@@ -4491,157 +4489,78 @@ def scan_project(root, exclude=(), include_deps=False, taint_config=None,
         REDACT_SECRETS = saved_redact
 
 
-# ---------------- Metrics / ratings ----------------
-#: The languages whose duplication is measured (windows of six code lines
-#: that repeat). A project's Go and Rust files count in the files, lines of
-#: code and comments, but not yet in the duplication: the gate's 10% was set
-#: on Python and JavaScript, and with these windows Go's standard library
-#: measures 2 to 13% and popular crates 4 to 54% (repetitive tests, an API
-#: written for each type, a file per platform), and this repository's Python
-#: and JavaScript under 1%. Go and Rust need a measure of their own; until
-#: then the report says how many of its lines of code the measure left out
-#: (`dupLeftOut`, N-13).
-DUP_LANGS = frozenset({"py", "js", "sql"})
+# ---------------- Metrics, ratings, the gate ----------------
+# (BR-7 step 4 (a): the engine's, result.rs, for both packages: the counts, the ratings, the gate's conditions and
+# the duplication across a project's files; what stays here is the project's path, the time, and asking the engine
+# for each file's line metrics, which a project scan has from its own reading)
+
+
+def _metrics_files(all_files):
+    """Each file as the engine's result reads it: [dep, lang, line metrics] (metrics.rs: lines of code, comment lines,
+    measured lines, the windows' keys), or the text in their place when the engine could not give them (its
+    non-blank lines then count as code: review B3)."""
+    own = [k for k, f in enumerate(all_files) if not f.get("dep")]
+    answers = {k: all_files[k].get("lineMetrics") for k in own}
+    todo = [k for k in own if answers[k] is None]
+    for k, got in zip(todo, engine.file_metrics([(all_files[k].get("path"), all_files[k].get("content"),
+                                                  all_files[k].get("lang")) for k in todo])):
+        answers[k] = got
+    rows = []
+    for k, f in enumerate(all_files):
+        if f.get("dep"):
+            rows.append([True, f.get("lang"), ""])
+        else:
+            got = answers[k]
+            rows.append([False, f.get("lang"), list(got) if got is not None else str(f.get("content") or "")])
+    return rows
+
+
+def _finding_rows(issues):
+    """What the engine's result reads of each finding: [rule, type, severity, file, line, omitted, omittedType] (a
+    Q-CAPPED note's last two: the maintainability rating counts the smells it stands for)."""
+    def omitted(i):
+        n = i.get("omitted")
+        return n if isinstance(n, int) and not isinstance(n, bool) else None
+    return [[i["rule"], i["type"], i["sev"], i["file"], i["line"], omitted(i),
+             i.get("omittedType") if isinstance(i.get("omittedType"), str) else None] for i in issues]
 
 
 def compute_metrics(all_files):
-    """files, lines of code, comment lines and duplication (the share of measured lines of code in a window of six
-    consecutive ones that occurs twice or more: DUP_LANGS) of a project's own files, its dependencies' left out.
-    Each file's part is the engine's (Q-1 step 4, metrics.rs: its lines as this module splits them, at "\n" alone,
-    each window keyed by its six stripped lines joined): a project scan's, from its reading of the file (a file's
-    `lineMetrics`), or engine.file_metrics'; the windows are compared here, across the files. A file the engine could not answer counts its non-blank lines as code (review B3), and its windows
-    are not compared. `dupLeftOut`: the lines of code of the languages the duplication does not measure (Go and
-    Rust, N-13)."""
-    files = [f for f in all_files if not f.get("dep")]  # deps excluded from quality metrics
-    answers = [f.get("lineMetrics") for f in files]     # (a project scan's, from its reading of each file)
-    todo = [k for k, got in enumerate(answers) if got is None]
-    for k, got in zip(todo, engine.file_metrics([(files[k].get("path"), files[k].get("content"), files[k].get("lang"))
-                                                  for k in todo])):
-        answers[k] = got
-    ncloc = comments = measured = left_out = 0
-    starts = {}                                         # a window's key -> where each occurrence starts
-    for f, got in zip(files, answers):
-        dup_lang = f.get("lang") is None or f["lang"] in DUP_LANGS
-        if got is None:                                 # every non-blank line is code
-            lines = [l for l in _unicode13.pin(str(f.get("content") or "")).split("\n") if l.strip()]
-            ncloc += len(lines)
-            if dup_lang:
-                measured += len(lines)
-            else:
-                left_out += len(lines)
-            continue
-        f_ncloc, f_comments, f_measured, windows = got
-        ncloc += f_ncloc
-        if not dup_lang:
-            left_out += f_ncloc
-        comments += f_comments
-        for k in range(0, len(windows), 16):
-            starts.setdefault(windows[k:k + 16], []).append(measured + k // 16)
-        measured += f_measured
-    dup = set()
-    for at in starts.values():
-        if len(at) > 1:
-            for a in at:
-                dup.update(range(a, a + 6))
-    dup_pct = round(100 * len(dup) / measured, 1) if measured else 0.0
-    return {"files": len(files), "depFiles": len(all_files) - len(files),
-            "ncloc": ncloc, "comments": comments, "dupPct": dup_pct, "dupLeftOut": left_out}
-
-def worst_sev_rating(issues, types):
-    sevs = {i["sev"] for i in issues if i["type"] in types}
-    for sev, rating in (("BLOCKER", "E"), ("CRITICAL", "D"), ("MAJOR", "C"), ("MINOR", "B")):
-        if sev in sevs:
-            return rating
-    return "A"
-
-#: INFO scan-coverage notes. Typed SMELL for display, but they describe what
-#: the scanner could not look at, not the code: they do not count toward the
-#: maintainability rating (a single symlink in a small project used to be
-#: enough to fail "Maintainability >= C").
-COVERAGE_RULES = frozenset({"Q-SKIPPED-TREE", "Q-SYMLINK", "Q-UNREADABLE", "Q-SKIPPED-CONFIG",
-                            # analysis-coverage notes from the flow engine (the
-                            # npm engine's JavaScript pass writes the Q-FLOW
-                            # notes too) and the taint-config loader (Python's)
-                            "Q-FLOW-SKIPPED", "Q-FLOW-INCOMPLETE", "Q-FLOW-RECURSION",
-                            "Q-TAINT-CONFIG"})
-
-def _rated_smells(issue):
-    """How many code smells a SMELL finding counts for in the rating: one,
-    except a Q-CAPPED note, which counts the findings it stands for when
-    they are smells (and nothing when they are bugs). The rating is then
-    what it would be without the cap (review: 2000 over-long lines listed
-    as 200 Q-LONGLINE + one Q-CAPPED rated C and passed; they are E)."""
-    if issue.get("rule") == "Q-CAPPED" and isinstance(issue.get("omitted"), int):
-        return issue["omitted"] if issue.get("omittedType") == "SMELL" else 0
-    return 1
-
-
-def maintainability_rating(issues, ncloc):
-    smells = sum(_rated_smells(i) for i in issues
-                 if i["type"] == "SMELL" and i.get("rule") not in COVERAGE_RULES)
-    per100 = 100 * smells / ncloc if ncloc else 0
-    for limit, rating in ((5, "A"), (10, "B"), (20, "C"), (40, "D")):
-        if per100 <= limit:
-            return rating
-    return "E"
-
-def _severity_grades(issues):
-    """(counts by type, the security and reliability ratings, the gate's two conditions on severities) of `issues`."""
-    counts = {t: sum(1 for i in issues if i["type"] == t) for t in TYPE_LABEL}
-    ratings = {"security": worst_sev_rating(issues, ("VULN",)),
-               "reliability": worst_sev_rating(issues, ("BUG",))}
-    conds = [
-        {"label": "No blocker issues",
-         "ok": not any(i["sev"] == "BLOCKER" for i in issues)},
-        {"label": "No critical vulnerabilities",
-         "ok": not any(i["type"] == "VULN" and i["sev"] in ("CRITICAL", "BLOCKER") for i in issues)},
-    ]
-    return counts, ratings, conds
+    """files, lines of code, comment lines and duplication of a project's own files (the engine's: result.rs), its
+    dependencies' left out: the share of measured lines of code in a window of six consecutive ones that occurs twice
+    or more across them, and `dupLeftOut`, the lines of code of the languages it does not measure (Go, Rust: N-13)."""
+    return _native.call("project_metrics", {"files": _metrics_files(all_files)})
 
 
 def regrade(res):
     """`res` graded again from its issues, after something changed their severities or types (`--verify-secrets`: a live
     credential is a BLOCKER vulnerability, verifyscan): the order of its issues, the counts, the security and reliability
-    ratings, the gate's two conditions on severities and the gate. The other conditions are left as they are."""
+    ratings, the gate's two conditions on severities and the gate (the engine's: result.rs). The other conditions are
+    left as they are."""
     issues = res["issues"]
-    issues.sort(key=lambda i: (SEV_ORDER[i["sev"]], i["file"], i["line"]))
-    counts, ratings, conds = _severity_grades(issues)
-    res["counts"] = counts
-    res["ratings"].update(ratings)
-    now = {c["label"]: c["ok"] for c in conds}
-    for cond in res["conditions"]:
-        if cond["label"] in now:
-            cond["ok"] = now[cond["label"]]
-    res["pass"] = all(c["ok"] for c in res["conditions"])
+    got = _native.call("regrade", {"issues": _finding_rows(issues),
+                                   "conditions": [[c["label"], c["ok"]] for c in res["conditions"]]})
+    issues[:] = [issues[k] for k in got["order"]]
+    res["counts"] = got["counts"]
+    res["ratings"].update(got["ratings"])
+    for cond, now in zip(res["conditions"], got["conditions"]):
+        cond["ok"] = now["ok"]
+    res["pass"] = got["pass"]
     return res
 
 
 def build_result(root, files, issues):
-    issues.sort(key=lambda i: (SEV_ORDER[i["sev"]], i["file"], i["line"]))
-    metrics = compute_metrics(files)
-    counts, ratings, conds = _severity_grades(issues)
-    ratings["maintainability"] = maintainability_rating(issues, metrics["ncloc"])
-    conds += [
-        {"label": "Duplication < 10%", "ok": metrics["dupPct"] < 10},
-        {"label": "Maintainability ≥ C", "ok": ratings["maintainability"] in "ABC"},
-    ]
-    per_file = {}
-    for i in issues:
-        per_file[i["file"]] = per_file.get(i["file"], 0) + 1
-    # INFO supply-chain entries are inventory (e.g. a project's own prepare
-    # hook, shared semantics 3), not indicators; nor is a CI file's hardening
-    # check below CRITICAL (HARDENING_RULES).
-    supply = sum(1 for i in issues if i["rule"].startswith("SC-") and i["sev"] != "INFO"
-                 and (i["rule"] not in HARDENING_RULES or i["sev"] == "CRITICAL"))
-    conds.append({"label": "No supply-chain indicators", "ok": supply == 0})
-    cross_file = sum(1 for i in issues if i["rule"].startswith("X-"))
-    conds.append({"label": "No cross-file taint flows", "ok": cross_file == 0})
+    """A scan's result: its issues in their order, the gate and its conditions, the metrics, counts and ratings, the
+    supply-chain indicators and cross-file flows, the issues by file (the engine's: result.rs). `issues` is put in
+    that order where it is."""
+    got = _native.call("result", {"issues": _finding_rows(issues), "files": _metrics_files(files)})
+    issues[:] = [issues[k] for k in got["order"]]
     return {"project": _fs_display(os.path.abspath(os.fspath(root))),
             "scannedAt": datetime.datetime.now().isoformat(timespec="seconds"),
-            "pass": all(c["ok"] for c in conds), "conditions": conds,
-            "metrics": metrics, "counts": counts, "ratings": ratings,
-            "supplyChain": supply, "crossFile": cross_file,
-            "perFile": per_file, "issues": issues}
+            "pass": got["pass"], "conditions": got["conditions"],
+            "metrics": got["metrics"], "counts": got["counts"], "ratings": got["ratings"],
+            "supplyChain": got["supplyChain"], "crossFile": got["crossFile"],
+            "perFile": got["perFile"], "issues": issues}
 
 
 # ---------------- Terminal output ----------------
@@ -5606,6 +5525,19 @@ def _main(argv=None, source=None):
     if any(i.get("rule") == "SC-MANIFEST-DEPTH" for i in res["issues"]):
         sys.exit(EXIT_GATE)
     return EXIT_OK
+
+
+_PACK_SETS = {"HARDENING_RULES": "HARDENING_RULES"}
+
+
+def __getattr__(name):
+    """The rule pack's sets core still names (HARDENING_RULES), read from the engine when first asked for."""
+    if name in _PACK_SETS:
+        value = frozenset(engine.pack_value(_PACK_SETS[name]))
+        globals()[name] = value
+        return value
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
 
 if __name__ == "__main__":
     main()

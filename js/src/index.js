@@ -13,7 +13,7 @@ export { scanFile, scanConfigFile, detectLang, taintScan } from "./scanner/scan.
 export { isConfigFile } from "./lib/configsecrets.js";
 export { analyzeFlows, redactFlowIssues } from "./scanner/flow.js";
 export { SEV_ORDER, TYPES } from "./scanner/rules.js";
-export { computeMetrics, worstSevRating, maintainabilityRating } from "./scanner/metrics.js";
+export { computeMetrics } from "./scanner/metrics.js";
 export {
   buildResult, jsonRenderer, htmlRenderer, printReport, sarifReport, sarifRenderer,
   jsonReportChunks, htmlReportChunks, sarifChunks, sanitizeTerm, sanitizeTermLine, safeExcerpt,

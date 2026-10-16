@@ -223,6 +223,11 @@ rust/
                              file, 0.1.9, Q-1 step 4): comment lines, lines of code, the windows
                              of six lines of code keyed for the duplication; from the scan's own
                              reading (scan_file with "metrics") or on their own (file_metrics)
+    src/result.rs            a scan's result (BR-7 step 4 a, 0.1.9; core.build_result, regrade
+                             and compute_metrics and their npm twins until then): the findings'
+                             order, counts, ratings, the gate's conditions, supply-chain and
+                             cross-file counts, the findings by file, and the duplication across
+                             a project's files (result, regrade, project_metrics)
     src/autorun.rs           editor and AI-agent settings that run commands (BR-7 step 2, 0.1.9;
                              autorun.py, core.autorun_issues and their npm twins until then): a
                              JSON-with-comments reader that keeps lines, the commands each kind of

@@ -14,7 +14,7 @@ A package's Go and Rust files (registry and guard scans) and a Go or cargo
 vendor tree's (--deps) are read with the engine's readers since Part C
 (tests/registry/test_package_code.py, tests/scanner/test_vendored_code.py);
 another dependency tree's are not. The duplication measure counts Python,
-JavaScript and SQL lines (core.DUP_LANGS). Credentials are fakes built by
+JavaScript and SQL lines (the engine's metrics.rs). Credentials are fakes built by
 concatenation; nothing is executed.
 """
 import contextlib
@@ -119,7 +119,12 @@ class LanguageTableTests(unittest.TestCase):
         self.assertEqual(core.DEP_LANGS, frozenset({"py", "js", "sql"}))
         self.assertEqual([core.dep_source_lang(e) for e in (".go", ".rs", ".py", ".ts", ".sql", ".txt")],
                          [None, None, "py", "js", "sql", None])
-        self.assertEqual(core.DUP_LANGS, frozenset({"py", "js", "sql"}))
+        # the duplication is measured on Python, JavaScript and SQL alone (the engine's: metrics.rs measured_lang)
+        block = "".join(f"x{k} = {k}\n" for k in range(6))
+        for lang, measured in (("py", True), ("js", True), ("sql", True), ("go", False), ("rs", False)):
+            m = core.compute_metrics([{"path": f"a.{lang}", "lang": lang, "content": block},
+                                      {"path": f"b.{lang}", "lang": lang, "content": block}])
+            self.assertEqual((m["dupPct"], m["dupLeftOut"]), (100.0, 0) if measured else (0.0, 12), lang)
 
     def test_the_rules_that_list_them(self):
         langs = {r["id"]: r["langs"] for r in core.RULES}

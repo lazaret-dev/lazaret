@@ -5,7 +5,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { scanFile, detectLang } from "../../src/scanner/scan.js";
-import { computeMetrics, worstSevRating, maintainabilityRating } from "../../src/scanner/metrics.js";
+import { computeMetrics } from "../../src/scanner/metrics.js";
 
 const scan = (name, content) =>
   scanFile({ name, content, lang: detectLang(name, content) }).map((i) => i.rule);
@@ -148,12 +148,4 @@ test("computeMetrics: ncloc/comments/dupPct + files/depFiles", () => {
   assert.equal(m.dupPct, 100);   // two identical files: every window occurs twice
 });
 
-test("ratings: worst-severity mapping and maintainability bands", () => {
-  assert.equal(worstSevRating([{ type: "VULN", sev: "BLOCKER" }], ["VULN"]), "E");
-  assert.equal(worstSevRating([{ type: "VULN", sev: "CRITICAL" }], ["VULN"]), "D");
-  assert.equal(worstSevRating([{ type: "BUG", sev: "MAJOR" }], ["VULN"]), "A"); // filtered by type
-  assert.equal(worstSevRating([], ["VULN"]), "A");
-  assert.equal(maintainabilityRating([], 100), "A");
-  assert.equal(maintainabilityRating(new Array(25).fill({ type: "SMELL" }), 100), "D");  // 25/100 → D
-  assert.equal(maintainabilityRating(new Array(50).fill({ type: "SMELL" }), 100), "E"); // 50/100 → E
-});
+// (the ratings are the engine's since BR-7 step 4 (a): python/tests/architecture/test_result_engine.py)

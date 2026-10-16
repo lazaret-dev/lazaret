@@ -5,10 +5,10 @@
 
 import { resolve, isAbsolute } from "node:path";
 import { readFileSync } from "node:fs";
-import { SEV_ORDER, HARDENING_RULES } from "./scanner/rules.js";
-import { computeMetrics, worstSevRating, maintainabilityRating } from "./scanner/metrics.js";
+import { metricsFiles } from "./scanner/metrics.js";
+import { call } from "./lib/native.js";
 import { ENGINE_VERSION, ENGINE_MARKER, HTML_ENGINE_MARKER } from "./lib/fs.js";
-import { cmpCodePoints, pyStrip, isPrintable, pyFloatRepr } from "./lib/pycompat.js";
+import { pyStrip, isPrintable, pyFloatRepr } from "./lib/pycompat.js";
 import { REDACT, SECRET_RULES } from "./lib/redact.js";
 import { splitLines } from "./scanner/lines.js";
 import { reportSignature, SIGNATURE_FIELD } from "./baseline.js";
@@ -29,79 +29,57 @@ function localIso(d = new Date()) {
  */
 export const CROSS_FILE_LABEL = "No cross-file taint flows";
 
-const sortIssues = (issues) => issues.sort((a, b) =>
-  (SEV_ORDER[a.sev] - SEV_ORDER[b.sev]) ||
-  cmpCodePoints(String(a.file), String(b.file)) ||
-  (a.line - b.line));
+/**
+ * What the engine's result reads of each finding (result.rs): [rule, type, severity, file, line, omitted,
+ * omittedType] (a Q-CAPPED note's last two: the maintainability rating counts the smells it stands for).
+ */
+function findingRows(issues) {
+  return issues.map((i) => [i.rule, i.type, i.sev, String(i.file), i.line,
+    Number.isInteger(i.omitted) ? i.omitted : null, typeof i.omittedType === "string" ? i.omittedType : null]);
+}
 
-/** (counts by type, the security and reliability ratings, the gate's two conditions on severities) of `issues` (core._severity_grades). */
-function severityGrades(issues) {
-  const counts = { VULN: 0, HOTSPOT: 0, BUG: 0, SMELL: 0 };
-  for (const i of issues) counts[i.type]++;
-  const ratings = { security: worstSevRating(issues, ["VULN"]), reliability: worstSevRating(issues, ["BUG"]) };
-  const conds = [
-    { label: "No blocker issues", ok: !issues.some((i) => i.sev === "BLOCKER") },
-    { label: "No critical vulnerabilities",
-      ok: !issues.some((i) => i.type === "VULN" && (i.sev === "CRITICAL" || i.sev === "BLOCKER")) },
-  ];
-  return { counts, ratings, conds };
+/** `issues` put in the engine's order, where it is (a loop: a spread of a long list overflows the stack). */
+function reorder(issues, order) {
+  const sorted = order.map((k) => issues[k]);
+  for (let k = 0; k < sorted.length; k++) issues[k] = sorted[k];
 }
 
 /**
  * `res` graded again from its issues, after something changed their severities or types (--verify-secrets: a live
  * credential is a BLOCKER vulnerability, verify.js): the order of its issues, the counts, the security and reliability
- * ratings, the gate's two conditions on severities and the gate. The other conditions are left as they are (core.regrade).
+ * ratings, the gate's two conditions on severities and the gate (the engine's: result.rs). The other conditions are
+ * left as they are.
  */
 export function regrade(res) {
-  sortIssues(res.issues);
-  const { counts, ratings, conds } = severityGrades(res.issues);
-  res.counts = counts;
-  Object.assign(res.ratings, ratings);
-  const now = new Map(conds.map((c) => [c.label, c.ok]));
-  for (const cond of res.conditions) if (now.has(cond.label)) cond.ok = now.get(cond.label);
-  res.pass = res.conditions.every((c) => c.ok);
+  const got = call("regrade", { issues: findingRows(res.issues), conditions: res.conditions.map((c) => [c.label, c.ok]) });
+  reorder(res.issues, got.order);
+  res.counts = got.counts;
+  Object.assign(res.ratings, got.ratings);
+  got.conditions.forEach((now, k) => { res.conditions[k].ok = now.ok; });
+  res.pass = got.pass;
   return res;
 }
 
+/**
+ * A scan's result (the engine's: result.rs, as core.build_result's): its issues in their order (put so where they
+ * are), the gate and its conditions, the metrics, counts and ratings, the supply-chain indicators and cross-file
+ * flows, the issues by file; the version, the project's path and the time are this package's.
+ */
 export function buildResult(root, files, issues) {
-  sortIssues(issues);
-  const metrics = computeMetrics(files);
-  const { counts, ratings, conds } = severityGrades(issues);
-  ratings.maintainability = maintainabilityRating(issues, metrics.ncloc);
-  conds.push(
-    { label: "Duplication < 10%", ok: metrics.dupPct < 10 },
-    { label: "Maintainability ≥ C", ok: "ABC".includes(ratings.maintainability) },
-  );
-  // Keys are file names: one named __proto__ is an ordinary key here (an
-  // assignment set the object's prototype instead, losing the count).
-  const perFile = {};
-  for (const i of issues) {
-    const f = String(i.file);
-    Object.defineProperty(perFile, f, { value: (Object.hasOwn(perFile, f) ? perFile[f] : 0) + 1,
-      enumerable: true, writable: true, configurable: true });
-  }
-  let supply = 0, crossFile = 0;
-  // INFO supply-chain entries are inventory (a project's own prepare hook,
-  // shared semantics 3), not indicators; nor is a CI file's hardening check
-  // below CRITICAL (HARDENING_RULES).
-  for (const i of issues) {
-    if (i.rule.startsWith("SC-") && i.sev !== "INFO" && (!HARDENING_RULES.has(i.rule) || i.sev === "CRITICAL")) supply++;
-    if (i.rule.startsWith("X-")) crossFile++;
-  }
-  conds.push({ label: "No supply-chain indicators", ok: supply === 0 });
-  conds.push({ label: CROSS_FILE_LABEL, ok: crossFile === 0 });
+  const got = call("result", { issues: findingRows(issues), files: metricsFiles(files) });
+  reorder(issues, got.order);
   return {
     generatedBy: ENGINE_VERSION,
     project: resolve(root),
     scannedAt: localIso(),
-    pass: conds.every((c) => c.ok),
-    conditions: conds,
-    metrics,
-    counts,
-    ratings,
-    supplyChain: supply,
-    crossFile,
-    perFile,
+    pass: got.pass,
+    conditions: got.conditions,
+    metrics: got.metrics,
+    counts: got.counts,
+    ratings: got.ratings,
+    supplyChain: got.supplyChain,
+    crossFile: got.crossFile,
+    perFile: got.perFile,
     issues,
   };
 }

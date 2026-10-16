@@ -32,6 +32,10 @@ if not _native.available():
     raise unittest.SkipTest(f"the metrics are the native engine's ({_native.load_error()})")
 
 
+#: core.DUP_LANGS, as it was (the engine's since BR-7 step 4 (a): metrics.rs)
+DUP_LANGS = frozenset({"py", "js", "sql"})
+
+
 def REFERENCE(all_files):
     """core.compute_metrics before Q-1 step 4."""
     files = [f for f in all_files if not f.get("dep")]
@@ -39,7 +43,7 @@ def REFERENCE(all_files):
     win_map = {}
     for f in files:
         code = []
-        dup_lang = f.get("lang") is None or f["lang"] in core.DUP_LANGS
+        dup_lang = f.get("lang") is None or f["lang"] in DUP_LANGS
         flines = _unicode13.pin(f["content"]).split("\n")
         cmask = core.comment_mask(flines, f["lang"], core.jsx_reading(f["path"]))
         for i, l in enumerate(flines):

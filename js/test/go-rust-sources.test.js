@@ -4,7 +4,7 @@
 // two languages (S-SECRET, S-TOKEN, S-BIDI, Q-TODO) and the families every
 // text gets. A dependency tree's Go and Rust files are read only in a Go or cargo vendor tree (twin of
 // core.DEP_LANGS; test/vendored-code.test.js), and duplication is measured on Python, JavaScript and SQL
-// (twin of core.DUP_LANGS). Fake credentials built by concatenation; inert.
+// (the engine's: metrics.rs). Fake credentials built by concatenation; inert.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -13,7 +13,6 @@ import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { collectFiles, detectLang, scanFile, computeMetrics } from "../src/index.js";
 import { EXTS, DEP_LANGS } from "../src/lib/fs.js";
-import { DUP_LANGS } from "../src/scanner/metrics.js";
 import { commentSpans } from "../src/lib/lexer.js";
 import { redactContextLine } from "../src/lib/redact.js";
 
@@ -33,7 +32,6 @@ test("the extension tables", () => {
   assert.equal(EXTS[".go"], "go");
   assert.equal(EXTS[".rs"], "rs");
   assert.deepEqual([...DEP_LANGS].sort(), ["js", "py", "sql"]);
-  assert.deepEqual([...DUP_LANGS].sort(), ["js", "py", "sql"]);
   assert.equal(detectLang("cmd/main.go", "package main\n"), "go");
   assert.equal(detectLang("src/LIB.RS", "fn main() {}\n"), "rs");
 });

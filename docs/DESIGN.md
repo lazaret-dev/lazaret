@@ -262,7 +262,14 @@ shared by the CLI and the MCP server. In order it:
 
 `build_result` returns the dict the CLI and MCP serialize: `project`,
 `metrics`, `counts`, `ratings`, `supplyChain`, `crossFile`, `perFile`,
-`issues`, `warnings`, and (when a stop budget fired) `incomplete`.
+`issues`, `warnings`, and (when a stop budget fired) `incomplete`. Since
+BR-7's step 4 (a) its grading is the engine's (`result.rs`: the `result`,
+`regrade` and `project_metrics` calls), for both packages: the findings'
+order, the counts, the three ratings, the gate's conditions, the
+supply-chain indicators and cross-file flows, the findings by file and the
+duplication across the files. A package hands it each finding's rule, type,
+severity, file, line and a Q-CAPPED note's count, and each file's line
+metrics, and keeps the project's path and the time.
 
 ---
 
@@ -313,7 +320,7 @@ Rust files (registry and guard scans) and a dependency tree's (`--deps`)
 are not read (`core.DEP_LANGS`, `dep_source_lang`): reading them for
 secrets alone would add findings a consumer cannot act on and say nothing
 about what their build scripts and initializers run; and their lines are
-left out of the duplication measure (`core.DUP_LANGS`), whose 10% gate was
+left out of the duplication measure (the engine's `metrics::measured_lang`), whose 10% gate was
 set on Python and JavaScript (Go's standard library measures 2 to 13% with
 its six-line windows, popular crates 4 to 54%), while they count in the
 lines of code the maintainability rating divides by.

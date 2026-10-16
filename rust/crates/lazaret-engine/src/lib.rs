@@ -44,6 +44,7 @@ pub mod pystr;
 pub mod quickhash;
 pub mod received;
 pub mod redact;
+pub mod result;
 pub mod binary;
 pub mod deps;
 pub mod readers;

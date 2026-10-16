@@ -909,6 +909,18 @@ aggregate):
   same findings as the Python's on 498 readings (every one the reader tests make, and 400 put together from their
   samples; 857 findings): no difference; the npm package's the same as its own old code. `test_snapshot_readers` and
   `test_wasm_parity_readers` hold the engine.
+- **A scan's result, the engine's (BR-7, step 4 a).** The findings' order, the counts by type, the security,
+  reliability and maintainability ratings, the gate's six conditions and the gate, the supply-chain indicators,
+  cross-file flows and findings by file, and a project's duplication across its files are graded in the engine
+  (`rust/crates/lazaret-engine/src/result.rs`: the `result`, `regrade` and `project_metrics` calls), where core's
+  `build_result`, `regrade` and `compute_metrics` and the npm package's `buildResult`, `regrade` and `computeMetrics`
+  did it each in its own language. A package hands the engine each finding's rule, type, severity, file, line and a
+  Q-CAPPED note's count, and each file's line metrics, and gets back the findings' order and the grades; it keeps the
+  project's path and the time. `HARDENING_RULES` is the rule pack's. Gone: core's `worst_sev_rating`,
+  `maintainability_rating`, `COVERAGE_RULES` and `DUP_LANGS`, and the npm package's `worstSevRating` and
+  `maintainabilityRating` (no longer exported) and `metrics.js`' twins of them. The same results as core's code had
+  given (`test_result_engine`: that code kept as the reference, on 300 generated sets, every fixture folder's
+  findings, and 200 sets of metrics); `test_result_engine` also holds the WebAssembly build to the library.
 - **Security: S-XML is a parser set to resolve external entities, not an import of xml.etree, xml.dom or xml.sax
   (Q-3; rule set 2.80.0).** Since Python 3.7.1 none of them resolves an external entity unless told to, and Expat
   2.4.1 refuses entity bombs, so the import flagged safe code: all 20 of BenchmarkPython's safe XXE cases (its 8 real

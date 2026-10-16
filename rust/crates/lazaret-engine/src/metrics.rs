@@ -34,8 +34,13 @@ pub struct FileMetrics {
 const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
 const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
 
-/// The languages whose duplication is measured (core.DUP_LANGS), and a file of no language.
-fn measured_lang(lang: Option<&str>) -> bool {
+/// The languages whose duplication is measured, and a file of no language (core's DUP_LANGS until BR-7 step 4 (a)).
+/// A project's Go and Rust files count in the files, lines of code and comments, but not yet in the duplication: the
+/// gate's 10% was set on Python and JavaScript, and with these windows Go's standard library measures 2 to 13% and
+/// popular crates 4 to 54% (repetitive tests, an API written for each type, a file per platform), and this
+/// repository's Python and JavaScript under 1%. Go and Rust need a measure of their own; until then the report says
+/// how many of its lines of code the measure left out (`dupLeftOut`, N-13).
+pub(crate) fn measured_lang(lang: Option<&str>) -> bool {
     matches!(lang, None | Some("py") | Some("js") | Some("sql"))
 }
 

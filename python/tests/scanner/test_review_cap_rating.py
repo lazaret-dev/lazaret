@@ -79,8 +79,10 @@ class RatingTests(unittest.TestCase):
         self.assertEqual(res["ratings"]["maintainability"], "A")
 
     def test_a_note_without_a_count_is_one_smell(self):
-        note = {"rule": "Q-CAPPED", "type": "SMELL"}
-        self.assertEqual(core.maintainability_rating([note] * 6, 100), "B")
+        # six notes without a count over 100 lines of code: 6 smells per 100 is B
+        notes = [{"rule": "Q-CAPPED", "type": "SMELL", "sev": "INFO", "file": "x.py", "line": n + 1} for n in range(6)]
+        res = core.build_result(".", [{"path": "x.py", "lang": "py", "content": "x = 1\n" * 100}], notes)
+        self.assertEqual(res["ratings"]["maintainability"], "B")
 
     def test_cli_gate(self):
         with tempfile.TemporaryDirectory() as root, tempfile.TemporaryDirectory() as out:

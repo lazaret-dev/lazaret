@@ -12,7 +12,10 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 import { scanConfigFile } from "../src/index.js";
-import { HARDENING_RULES } from "../src/scanner/rules.js";
+import { packValues } from "../src/lib/native.js";
+
+// the CI files' hardening checks (the pack's: the engine grades the result, result.rs)
+const HARDENING_RULES = new Set(packValues("HARDENING_RULES")[0]);
 
 const BIN = join(dirname(fileURLToPath(import.meta.url)), "..", "bin", "lazaret.js");
 const WORKFLOW = "name: ci\non: [push, pull_request_target]\njobs:\n  build:\n    runs-on: ubuntu-latest\n    steps:\n" +

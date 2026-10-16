@@ -17,7 +17,10 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 import { call, persistenceReasons, installScriptRisk, importTimeRisk, importTimeSeverity } from "../src/lib/native.js";
-import { HARDENING_RULES } from "../src/scanner/rules.js";
+import { packValues } from "../src/lib/native.js";
+
+// the CI files' hardening checks (the pack's: the engine grades the result, result.rs)
+const HARDENING_RULES = new Set(packValues("HARDENING_RULES")[0]);
 import { scanConfigFile } from "../src/scanner/scan.js";
 
 // the settings are the engine's to read (BR-7 step 2: its `autorun_*` calls), as Python's autorun module asks it
