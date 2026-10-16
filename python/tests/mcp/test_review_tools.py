@@ -229,6 +229,7 @@ class McpDiscoverTests(unittest.TestCase):
                 mock.patch.object(server, "REGISTRY_DB", os.path.join(d, "r.db")), \
                 mock.patch.object(repo, "discover_pypi", return_value=[]), \
                 mock.patch.object(repo, "discover_npm", return_value=found), \
+                mock.patch.object(repo, "discover_crates", return_value=[]), \
                 mock.patch.object(repo, "resolve_npm", side_effect=resolve), \
                 mock.patch.object(repo, "http_bytes", side_effect=lambda u: arts[u.split("/")[3]]), \
                 mock.patch.object(repo, "verify_digest", return_value=None):

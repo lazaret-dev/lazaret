@@ -6065,8 +6065,9 @@ def pg_insecure_auth_options(environ=None):
 def _cursor_table(t=""):
     """DDL of the discovery cursors (the same for SQLite and Postgres): where
     `discover --resume` continues for each registry. seq is PyPI's changelog
-    serial or npm's replication sequence number, as text; seq_time (the time
-    of that change, when known) and updated_at are ISO 8601 UTC."""
+    serial, npm's replication sequence number or, for crates.io, the time of
+    the newest update read in microseconds since 1970, as text; seq_time (the
+    time of that change, when known) and updated_at are ISO 8601 UTC."""
     return (f"CREATE TABLE IF NOT EXISTS {t}discovery_cursors ("
             f"ecosystem TEXT PRIMARY KEY, seq TEXT NOT NULL, seq_time TEXT, "
             f"updated_at TEXT NOT NULL)")
@@ -6417,7 +6418,7 @@ class Store:
 
     def save_discovery_cursor(self, eco, seq, seq_time=None):
         """Store a registry's discovery cursor: seq (PyPI changelog serial,
-        npm replication sequence number) and the time of that change when
+        npm replication sequence number, crates.io's update in microseconds) and the time of that change when
         known (a datetime, stored as ISO 8601 UTC text). One idempotent
         upsert, like every Store write, so _pg_call may retry it."""
         now = datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")
@@ -6957,6 +6958,11 @@ NPM_OLDER_STOP = 5
 # rest waits for the next run.
 NPM_RESUME_PAGES = 20
 
+# crates.io (CRATES-DISCOVER): its API's list of crates by their last update, 100 a page, one page a second (the
+# crawler policy's pace). Measured Oct 16: the 24 hours before were 7,825 crates, 79 pages, 78 s; so 200 pages are
+# about two and a half days of crates.io, read in about 3½ minutes
+CRATES_DISCOVER_PAGES = 200
+
 
 def _npm_feed_names(want):
     """-> (package names, newest first, each once; count of names npm would
@@ -7319,6 +7325,125 @@ def discover_npm_since(cursor, limit, notes=None):
     return [("npm", name, version, when) for name, when, version in rows], new, covered
 
 
+def _crates_fetch():
+    """The fetch crates.io discovery reads through: the crates module's own (crates.io's hosts only, its API paced at
+    one request a second). A seam for tests."""
+    return module_fetch(registry_module("crates"))
+
+
+def _crates_listing(stop, want=0):
+    """crates.io's crates updated after `stop` (microseconds), newest first: the crates module's recent_updates."""
+    return registry_module("crates").recent_updates(_crates_fetch(), stop, CRATES_DISCOVER_PAGES, want=want)
+
+
+def _crates_problem(exc):
+    # audit H1: a fault's text comes from the network
+    return lazaret.sanitize_term(f"could not read crates.io's list of recently updated crates ({exc})")
+
+
+def _crates_walk_notes(walk):
+    if walk["rejected"]:
+        print(f"warning: skipped {walk['rejected']} row(s) of crates.io's list whose crate name or time is not "
+              f"valid.", file=sys.stderr)
+
+
+def discover_crates(cutoff, limit, notes=None, head=None):
+    """Recently published or updated crates: crates.io's list of crates by their last update (its API, a page of 100
+    a second), newest first, until `limit` are found or the list passes the start of the window, at most
+    CRATES_DISCOVER_PAGES pages. Each crate once, with the version published last (as the npm walk lists a package's
+    latest). `head`, a dict, gets head["seq"] and head["time"]: the newest update read, where a following
+    `discover --resume` continues.
+
+    Fail-visible like the other registries: a list that can't be read is "not checked" in notes["crates"]; a walk that
+    stops before the start of the window (at `limit`, at the page budget, or on a page that failed) is "partly
+    checked", with the part that was covered."""
+    from lazaret.registry.ecosystems import crates as _crates
+    now = _now()
+    try:
+        walk = _crates_listing(_crates.micros(cutoff) - 1, want=limit or 0)
+    except (FetchError, ValueError) as exc:
+        problem = _crates_problem(exc)
+        print(f"warning: {problem}; crates.io was not checked.", file=sys.stderr)
+        if notes is not None:
+            notes["crates"] = f"not checked: {problem}"
+        return []
+    if head is not None and walk["head"] is not None:
+        head["seq"], head["time"] = walk["head"], _crates.from_micros(walk["head"])
+    _crates_walk_notes(walk)
+    items = walk["items"][:limit] if limit else walk["items"]
+    if not walk["reached"]:
+        span = _fmt_span(items[-1][2], now) if items else None
+        where = f"covered {span} only" if span else "no crate of the window was read"
+        if walk["error"] is not None:
+            _partly(notes, "crates", f"{where}: its list failed after {walk['pages']} page(s) "
+                                     f"({_crates_problem(walk['error'])})")
+        elif limit and len(walk["items"]) >= limit:
+            _partly(notes, "crates", f"{where}: stopped at the limit of {limit} crates")
+        else:
+            _partly(notes, "crates", f"{where}; read {walk['pages']} pages of its list of recently updated "
+                                     f"crates, the most one run reads")
+    return [("crates", name, version, when) for name, version, when in items]
+
+
+def _crates_since_cursor(walk, cursor, start, oldest, notes):
+    """Where a `--resume` walk of crates.io leaves the cursor, before --limit: the newest update read; the stored
+    cursor (None) when a page failed part way, so the next run reads back to it again; and a list longer than a run
+    reads named as not checked from `start` to `oldest`, the oldest update read."""
+    seq, since_time = cursor
+    if walk["error"] is not None:
+        _partly(notes, "crates", f"its list failed after {walk['pages']} page(s) "
+                                 f"({_crates_problem(walk['error'])}); the next --resume run reads back to "
+                                 f"{start:%Y-%m-%d %H:%M} UTC again")
+        return None
+    if not walk["reached"]:
+        _partly(notes, "crates", f"the updates of {_fmt_span(start, oldest)} were not listed: the list runs back "
+                                 f"further than the {CRATES_DISCOVER_PAGES} pages one run reads (run it more often)")
+    if walk["head"] is not None and walk["head"] > seq:
+        from lazaret.registry.ecosystems import crates as _crates
+        return walk["head"], _crates.from_micros(walk["head"])
+    return seq, since_time
+
+
+def discover_crates_since(cursor, limit, notes=None):
+    """Every crate crates.io updated after a stored position (CRATES-DISCOVER): its list by last update read back to
+    it, at most CRATES_DISCOVER_PAGES pages. `cursor` is (position in microseconds, its time or None). -> (found,
+    oldest first; the new cursor, or None to keep the stored one; what was covered, one line).
+
+    The list runs newest first, so a run cannot stop part way and continue later as npm's walk does: a list that runs
+    back further than the page budget is listed as far as it was read, the part before it is named as not checked
+    ("partly checked"), and the cursor moves to the newest update read. A page that fails part way keeps the stored
+    cursor: the next run reads back to it again (what this run listed comes again, already scanned). `limit` lists
+    the oldest first and moves the cursor to the last one listed, so the next run continues there. A list that can't
+    be read at all is "not checked" and the cursor stays."""
+    from lazaret.registry.ecosystems import crates as _crates
+    seq, since_time = cursor
+    start = since_time or _crates.from_micros(seq)
+    now = _now()
+    try:
+        walk = _crates_listing(seq)
+    except (FetchError, ValueError) as exc:
+        problem = _crates_problem(exc)
+        print(f"warning: {problem}; crates.io was not checked.", file=sys.stderr)
+        if notes is not None:
+            notes["crates"] = f"not checked: {problem}"
+        return [], None, None
+    _crates_walk_notes(walk)
+    items = list(reversed(walk["items"]))                    # oldest first
+    new = _crates_since_cursor(walk, cursor, start, items[0][2] if items else now, notes)
+    if limit and len(items) > limit:
+        rest, items = len(items) - limit, items[:limit]
+        if new is not None:
+            new = (_crates.micros(items[-1][2]), items[-1][2])
+        _partly(notes, "crates", f"stopped at --limit {limit}; {rest} more crate(s) are left for the next "
+                                 f"--resume run")
+    if not items and new is not None and new[0] == seq:
+        covered = f"no updates after {start:%Y-%m-%d %H:%M:%S} UTC"
+    else:
+        end = new[1] if new is not None and new[1] is not None else now
+        covered = f"the updates of {_fmt_span(start, end)}, {walk['pages']} page(s) of its list"
+    return [("crates", name, version, when) for name, version, when in items], new, covered
+
+
 def _stored_cursor(eco, stored):
     """A Store.discovery_cursor() row -> (seq, datetime or None), or None
     when there is none or it isn't a sequence number (a warning: the run
@@ -7354,6 +7479,10 @@ def _discover_first_run(eco, cutoff, limit, notes):
             head = None
         found = discover_pypi(cutoff, limit, notes)
         return found, ((head, now) if head is not None else None)
+    if eco == "crates":
+        position = {}
+        found = discover_crates(cutoff, limit, notes, head=position)
+        return found, ((position["seq"], position["time"]) if "seq" in position else None)
     position = {}
     found = discover_npm(cutoff, limit, notes, head=position)
     return found, ((position["seq"], now) if "seq" in position else None)
@@ -7364,7 +7493,8 @@ def _discover_resumed(store, ecos, cutoff, limit, notes):
     or, the first time, checks the --since window and records where its feed
     is now. -> (discovered, {eco: new cursor}, {eco: what was covered})."""
     discovered, cursors, covered = [], {}, {}
-    for eco in ("pypi", "npm"):
+    since = {"pypi": discover_pypi_since, "npm": discover_npm_since, "crates": discover_crates_since}
+    for eco in ("pypi", "npm", "crates"):
         if eco not in ecos:
             continue
         try:
@@ -7380,11 +7510,11 @@ def _discover_resumed(store, ecos, cutoff, limit, notes):
             found, new = _discover_first_run(eco, cutoff, limit, notes)
             text = f"first --resume run: the window since {cutoff:%Y-%m-%d %H:%M} UTC"
             if new is not None:
-                text += (f"; the next run continues from "
-                         f"{'changelog serial' if eco == 'pypi' else 'change'} {new[0]}")
+                text += "; the next run continues from " + (
+                    f"changelog serial {new[0]}" if eco == "pypi" else f"change {new[0]}" if eco == "npm"
+                    else f"the update of {new[1]:%Y-%m-%d %H:%M:%S} UTC")
         else:
-            since = discover_pypi_since if eco == "pypi" else discover_npm_since
-            found, new, text = since(cursor, limit, notes)
+            found, new, text = since[eco](cursor, limit, notes)
         discovered += found
         if new is not None:
             cursors[eco] = new
@@ -7393,15 +7523,21 @@ def _discover_resumed(store, ecos, cutoff, limit, notes):
     return discovered, cursors, covered
 
 
+#: the registries `discover` reads by default (`--ecosystem github` is asked for by name)
+DISCOVER_ECOSYSTEMS = ("pypi", "npm", "crates")
+
+
 def _discover_window(ecos, cutoff, limit, notes):
     """discover without --resume: what the feeds hold from the --since
-    window, newest first, --limit across both registries."""
+    window, newest first, --limit across the registries."""
     discovered = []
     if "pypi" in ecos:
         # all the feeds hold: --limit applies below, across both registries
         discovered += discover_pypi(cutoff, 0, notes)
     if "npm" in ecos:
         discovered += discover_npm(cutoff, limit, notes)
+    if "crates" in ecos:
+        discovered += discover_crates(cutoff, limit, notes)
     discovered.sort(key=lambda x: x[3], reverse=True)
     if limit and len(discovered) > limit:
         # what --limit leaves out was not checked either: it is neither listed
@@ -7437,7 +7573,7 @@ def cmd_discover(store, args):
     not (fully) checked, a SUSPICIOUS / INCOMPLETE scan, or a cursor that
     could not be stored."""
     cutoff = parse_since(args.since)
-    ecos = args.ecosystem or ["pypi", "npm"]
+    ecos = args.ecosystem or list(DISCOVER_ECOSYSTEMS)
     resume = bool(getattr(args, "resume", False))
     github_bad = False
     if "github" in ecos:
@@ -7740,9 +7876,9 @@ def main():
                     help="discover: max packages to return (default 50, 0 for no limit); "
                          "with --resume, per registry and no limit by default, and the rest "
                          "is left for the next run")
-    ap.add_argument("--ecosystem", action="append", choices=["pypi", "npm", "github"],
-                    help="discover: restrict to pypi and/or npm (default both); github (with --resume): new "
-                         "public GitHub repositories, filtered (needs GITHUB_TOKEN)")
+    ap.add_argument("--ecosystem", action="append", choices=[*DISCOVER_ECOSYSTEMS, "github"],
+                    help="discover: restrict to pypi, npm and/or crates (default all three); github (with --resume): "
+                         "new public GitHub repositories, filtered (needs GITHUB_TOKEN)")
     ap.add_argument("--max-calls", type=int, metavar="N",
                     help="discover --ecosystem github: GitHub requests this run may make, across content checks, "
                          "scans and the listing (default 1000)")

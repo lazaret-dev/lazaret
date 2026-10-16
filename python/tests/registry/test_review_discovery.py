@@ -280,6 +280,7 @@ class DiscoverCliTests(unittest.TestCase):
                 with self.subTest(argv=argv), \
                         mock.patch.object(repo, "discover_pypi", return_value=[]), \
                         mock.patch.object(repo, "discover_npm", return_value=feed), \
+                        mock.patch.object(repo, "discover_crates", return_value=[]), \
                         mock.patch.object(repo, "resolve_npm", return_value=rv), \
                         mock.patch.object(repo, "http_bytes", return_value=GOOD_TGZ), \
                         mock.patch.object(repo, "verify_digest", return_value=None), \

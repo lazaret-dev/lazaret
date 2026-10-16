@@ -1841,6 +1841,32 @@ the listing; GitHub's rate limit (`X-RateLimit-Remaining` at `RATE_FLOOR`, a
 `sources.Client.get` hands the answer's headers back (`reply_headers`) for
 that. A token is required; nothing runs; secrets are never verified.
 
+### m. crates.io discovery (`ecosystems/crates.py`, CRATES-DISCOVER)
+
+crates.io has no change feed to read forward, as npm's replication feed and
+PyPI's changelog are. Its API lists crates by their last update, newest
+first (`/api/v1/crates?sort=recent-updates`, 100 a page, each next page as
+the answer's own `next_page` names it: a seek key), and its crawler policy
+asks for one request a second, which the crates module's fetch keeps for
+its API host. `Crates.recent_updates` walks that list back to a position
+(microseconds since 1970, `micros`: exact, no float), within a page budget,
+and checks each answer: a page of the same list (a `next_page` of plain
+characters that still sorts by update), a crate name the module accepts, a
+time, each crate once. `repo.discover_crates` reads a `--since` window from
+it, `repo.discover_crates_since` everything after the stored cursor
+(`discovery_cursors`, `crates`: the newest update the previous run read).
+Because the list runs newest first, a `--resume` run cannot stop part way
+and continue later: a list longer than `CRATES_DISCOVER_PAGES` (200 pages,
+about two and a half days) is listed as far as it was read, the part before
+is named as not checked, and the cursor moves to the newest; a page that
+fails keeps the cursor, so the next run reads back to it again; `--limit`
+lists the oldest first and moves the cursor to the last listed. The version
+listed is the one the crate published last (`newest_version`, which the API
+marks deprecated; else `default_version`; else none, and the scan takes the
+latest). A crate's `updated_at` moves for more than a publish (a yank, an
+edit of its metadata), so the list holds every crate published since and
+some that were not; a version already scanned is skipped.
+
 ## 6. How to add or change a rule — the loop
 
 This is the working method. Follow it; it is why the tool has stayed trustworthy.

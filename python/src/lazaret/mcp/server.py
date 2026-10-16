@@ -160,18 +160,19 @@ TOOLS = [
     },
     {
         "name": "discover_packages",
-        "description": ("Find npm/PyPI packages newly published or updated within a recent time "
-                        "window (supply-chain threat hunting). Optionally scans them. PyPI uses "
+        "description": ("Find npm/PyPI packages and crates newly published or updated within a recent "
+                        "time window (supply-chain threat hunting). Optionally scans them. PyPI uses "
                         "timestamped RSS feeds; npm uses the replication changes feed plus one "
-                        "registry lookup per package. A registry that could not be checked makes "
+                        "registry lookup per package; crates.io, its API's list of crates by last "
+                        "update. A registry that could not be checked makes "
                         "the result incomplete (incomplete / incompleteReason), so an empty list "
                         "never stands in for one that was not checked."),
         "inputSchema": {
             "type": "object",
             "properties": {
                 "since": {"type": "string", "description": "Time window: 7d, 2w, 24h, or an ISO date (default 7d)"},
-                "ecosystem": {"type": "array", "items": {"type": "string", "enum": ["pypi", "npm"]},
-                              "description": "Restrict to pypi and/or npm (default both)"},
+                "ecosystem": {"type": "array", "items": {"type": "string", "enum": ["pypi", "npm", "crates"]},
+                              "description": "Restrict to pypi, npm and/or crates (default all three)"},
                 "limit": {"type": "integer", "minimum": 1,
                           "description": "Max packages to return (default 25, cap 50)"},
                 "scan": {"type": "boolean", "description": (
@@ -711,12 +712,12 @@ def tool_registry_status(args):
     return {"tracked": len(rows), "packages": rows}
 
 
-DISCOVER_ECOSYSTEMS = ("pypi", "npm")
+DISCOVER_ECOSYSTEMS = ("pypi", "npm", "crates")
 
 
 def _discover_ecosystems(value):
     """The registries a discover_packages call asked for, validated: a list
-    drawn from DISCOVER_ECOSYSTEMS (missing or [] = both). Anything else is
+    drawn from DISCOVER_ECOSYSTEMS (missing or [] = all). Anything else is
     a tool error — ["PyPI"] used to query nothing and answer "0 packages",
     and a plain "npm" was iterated character by character."""
     if value is None or value == []:
@@ -762,7 +763,8 @@ def tool_discover_packages(args):
             notes[eco] = (f"not checked: time budget of {ctx.max_seconds:g} s "
                           f"(LAZARET_MCP_MAX_SECONDS) exceeded")
             continue
-        find = lazaret_repo.discover_pypi if eco == "pypi" else lazaret_repo.discover_npm
+        find = {"pypi": lazaret_repo.discover_pypi, "npm": lazaret_repo.discover_npm,
+                "crates": lazaret_repo.discover_crates}[eco]
         discovered += find(cutoff, limit, notes)
     ctx.check()
     discovered.sort(key=lambda x: x[3], reverse=True)

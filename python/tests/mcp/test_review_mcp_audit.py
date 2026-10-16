@@ -248,7 +248,7 @@ class DiscoverArgumentTests(unittest.TestCase):
                 self.calls.append((eco, limit))
                 return [(eco, f"{eco}-pkg", "1.0.0", NOW)]
             return discover
-        for eco in ("pypi", "npm"):
+        for eco in ("pypi", "npm", "crates"):
             patcher = mock.patch.object(repo, f"discover_{eco}", side_effect=fake(eco))
             patcher.start()
             self.addCleanup(patcher.stop)
@@ -264,8 +264,10 @@ class DiscoverArgumentTests(unittest.TestCase):
         self.assertEqual(self.calls, [])
 
     def test_good_ecosystems(self):
-        for eco, want in ((["npm"], ["npm"]), (["npm", "pypi"], ["pypi", "npm"]), ([], ["pypi", "npm"]),
-                          (None, ["pypi", "npm"]), (["pypi", "pypi"], ["pypi"])):
+        every = ["pypi", "npm", "crates"]
+        for eco, want in ((["npm"], ["npm"]), (["npm", "pypi"], ["pypi", "npm"]), ([], every), (None, every),
+                          (["pypi", "pypi"], ["pypi"]), (["crates"], ["crates"]),
+                          (["crates", "npm"], ["npm", "crates"])):
             with self.subTest(ecosystem=eco):
                 self.calls.clear()
                 out = self.call(**({} if eco is None else {"ecosystem": eco}))
@@ -299,7 +301,7 @@ class DiscoverArgumentTests(unittest.TestCase):
         self.assertEqual(self.calls, [])
         self.assertEqual(out["count"], 0)
         self.assertTrue(out["incomplete"])
-        self.assertEqual(out["incompleteReason"].count("not checked: time budget"), 2)
+        self.assertEqual(out["incompleteReason"].count("not checked: time budget"), 3)
 
         ctx = server.ToolContext()
 

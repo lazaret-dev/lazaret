@@ -117,6 +117,17 @@ aggregate):
   fails on a SUSPICIOUS or INCOMPLETE scan or a campaign repository; `list` shows the candidates and `report
   github:owner/repo` a scan; `lazaret-registry scan github:owner/repo` scans one. `GITHUB_TOKEN` is required. A
   repository created private and made public later is not listed (GH Archive, phase 2).
+- **crates.io discovery: `lazaret-registry discover --ecosystem crates` (CRATES-DISCOVER; John, Oct 15: "Do
+  prioritize … crates.io discovery").** crates.io is one of `discover`'s default registries, with PyPI and npm, and of
+  the MCP tool's `discover_packages`. It reads crates.io's API list of crates by their last update (`sort=recent-updates`,
+  100 a page, each next page as the answer names it, one request a second as crates.io's crawler policy asks), newest
+  first: `--since` reads the window (down to `--limit` crates), and `--resume` reads back to the newest update the
+  previous run read (`discovery_cursors`, `crates`: the position in microseconds), at most 200 pages a run (20,000
+  crates, about two and a half days of crates.io; a day was 7,825 crates, 79 pages, 78 s). A walk that stops short of
+  where it should reach says which part it covered, and `--ci` fails the run: a list that runs back further than a
+  run reads is named as not checked and the next run starts from the newest; a page that fails keeps the cursor; a list
+  that cannot be read at all is not checked. Each crate is listed once, with the version it published last (the API's
+  `newest_version`, else `default_version`), and `--scan` scans `crates:name@version`.
 - **Platform wheels for musl Linux and Windows ARM64 (W-1).** `musllinux_1_2_x86_64` and `musllinux_1_2_aarch64`
   (Alpine and other musl systems, musl 1.2 or later) and `win_arm64`, so pip installs the engine there without Rust,
   where it compiled the sdist before (eight platform wheels in all). The musl libraries are built in PyPA's

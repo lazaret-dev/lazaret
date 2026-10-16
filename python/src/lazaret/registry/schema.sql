@@ -59,8 +59,9 @@ CREATE INDEX IF NOT EXISTS idx_scans_verdict ON scans(verdict);
 -- `discover --resume`: where each registry's change feed was read up to, so
 -- the next run continues there and sees every release in between
 CREATE TABLE IF NOT EXISTS discovery_cursors (
-    ecosystem  TEXT PRIMARY KEY,         -- 'npm' | 'pypi'
-    seq        TEXT NOT NULL,            -- PyPI changelog serial / npm replication seq
+    ecosystem  TEXT PRIMARY KEY,         -- 'npm' | 'pypi' | 'crates' | 'github'
+    seq        TEXT NOT NULL,            -- PyPI changelog serial / npm replication seq / crates.io's newest update read
+                                         -- (microseconds since 1970) / GitHub's last repository ID
     seq_time   TEXT,                     -- when that change was made, if known (ISO 8601 UTC)
     updated_at TEXT NOT NULL             -- when a --resume run last stored it
 );

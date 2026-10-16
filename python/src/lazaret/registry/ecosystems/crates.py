@@ -20,11 +20,14 @@ and saying which of its files run when it is built.
                  crate, the library root; those are `install_scripts`. `entries` are the library root and the binaries.
                  Nothing runs when a crate is merely loaded, so `startup` is empty.
 
-The two CDN hosts have no rate limit. The API (`crates.io`) is declared for one question only, who owns a crate
-(`owners`, for SC-NEW-DEPENDENCY: a release that adds a brand-new crate of strangers), and paced at one request a second,
-as crates.io's crawler policy asks. The module reads the index with `fetch.json_lines` and keeps, for each version, only
-what it needs: the `features` of a large crate are most of its index file. No Rust is run and no build is started."""
+The two CDN hosts have no rate limit. The API (`crates.io`) is asked two things, paced at one request a second, as
+crates.io's crawler policy asks: who owns a crate (`owners`, for SC-NEW-DEPENDENCY: a release that adds a brand-new
+crate of strangers), and which crates were updated lately (`recent_updates`, for `lazaret-registry discover`: its list
+of crates by their last update, newest first, a page of 100 at a time). The module reads the index with
+`fetch.json_lines` and keeps, for each version, only what it needs: the `features` of a large crate are most of its
+index file. No Rust is run and no build is started."""
 
+import datetime
 import hashlib
 import re
 
@@ -43,6 +46,11 @@ MAX_INDEX_BYTES = 64 * 1024 * 1024        # the larger crates' index files are t
 MAX_VERSIONS = 100_000
 MAX_DEPS = 5_000
 MAX_SPEC = 512                            # a version requirement kept as written, no further
+RECENT_PAGE = 100                         # crates in a page of the API's list by last update (its largest page)
+RECENT_URL = f"https://{API_HOST}/api/v1/crates?sort=recent-updates&per_page={RECENT_PAGE}"
+MAX_NEXT_PAGE = 512                       # the API's `next_page` (a query string with a seek key), no longer
+_NEXT_PAGE_RE = re.compile(r"\?[A-Za-z0-9_.~%=&+-]{1,511}")
+_EPOCH = datetime.datetime(1970, 1, 1, tzinfo=datetime.timezone.utc)
 
 _NAME_CHAR = re.compile(r"[A-Za-z0-9_-]")
 _NUM = r"(?:0|[1-9][0-9]*)"
@@ -76,6 +84,17 @@ def semver_key(version):
 
 def _core(version):
     return version.split("+", 1)[0]
+
+
+def micros(when):
+    """An aware datetime as whole microseconds since 1970 (exact: no float), the position `recent_updates` compares and
+    `discover --resume` stores."""
+    return (when - _EPOCH) // datetime.timedelta(microseconds=1)
+
+
+def from_micros(position):
+    """`micros`' count back to an aware UTC datetime."""
+    return _EPOCH + datetime.timedelta(microseconds=position)
 
 
 def _reduce(rec):
@@ -172,6 +191,86 @@ class Crates(base.Ecosystem):
         if not isinstance(users, list):
             raise base.FetchError("crates: the owners answer has no list of users")
         return {u["login"] for u in users[:MAX_OWNERS] if isinstance(u, dict) and isinstance(u.get("login"), str)}
+
+    def recent_updates(self, fetch, stop, pages, want=0):
+        """crates.io's crates by their last update, newest first: the API's list (`sort=recent-updates`, 100 a page,
+        each next page as the answer's own `next_page` names it) down to the first crate updated at or before `stop`
+        (microseconds since 1970, as `micros` counts them), at most `pages` pages; with `want`, no further than the page
+        that brings the crates found to that many.
+
+        -> {"items": [(name, version, updated_at)], newest first, each crate once, all updated after `stop`;
+        "reached": the walk got to `stop` or to the end of the list; "pages": the pages read; "rejected": the rows left
+        out for a name or a time that is not valid; "head": the newest position read (microseconds), or None; "error":
+        the FetchError that stopped the walk after its first page, or None}.
+
+        A crate's version is `newest_version` (the one published last; the API marks the field deprecated), else
+        `default_version`, else None (a scan then takes the latest). A first page that cannot be read raises FetchError:
+        nothing was checked. The API leaves out a crate whose every version is yanked, and a crate's `updated_at` moves
+        for more than a publish (a yank, an edit of its metadata), so the list holds every crate published since, and
+        some that were not: a version already scanned is skipped."""
+        walk = {"items": [], "reached": False, "pages": 0, "rejected": 0, "head": None, "error": None}
+        seen, url = set(), RECENT_URL
+        while walk["pages"] < pages:
+            try:
+                rows, nxt = self._recent_page(fetch.json(url, accept="application/json"))
+            except base.FetchError as exc:
+                if walk["pages"] == 0:
+                    raise
+                walk["error"] = exc
+                break
+            walk["pages"] += 1
+            if self._take(rows, stop, walk, seen) or (want and len(walk["items"]) >= want):
+                break
+            if nxt is None:
+                walk["reached"] = True
+                break
+            url = f"https://{API_HOST}/api/v1/crates{nxt}"
+        return walk
+
+    def _take(self, rows, stop, walk, seen):
+        """A page's rows into `walk`, newest first, until one updated at or before `stop`: True when it was met."""
+        for row in rows:
+            name = row.get("name") if isinstance(row, dict) else None
+            when = base.parse_time(row.get("updated_at")) if isinstance(row, dict) else None
+            if not isinstance(name, str) or not self._name_ok(name) or when is None:
+                walk["rejected"] += 1
+                continue
+            pos = micros(when)
+            walk["head"] = pos if walk["head"] is None else max(walk["head"], pos)
+            if pos <= stop:
+                walk["reached"] = True
+                return True
+            key = self.identity(name)
+            if key not in seen:
+                seen.add(key)
+                walk["items"].append((name, self._recent_version(row), when))
+        return False
+
+    @staticmethod
+    def _recent_page(doc):
+        """One answer of the list by last update -> (its crates, the next page's query string or None)."""
+        crates = doc.get("crates") if isinstance(doc, dict) else None
+        meta = doc.get("meta") if isinstance(doc, dict) else None
+        if not isinstance(crates, list) or len(crates) > 10 * RECENT_PAGE or not isinstance(meta, dict):
+            raise base.FetchError("crates: the list of recently updated crates is not one")
+        nxt = meta.get("next_page")
+        if nxt in (None, ""):
+            return crates, None
+        # the next page of this list and of no other: a query string of plain characters, still sorted by update
+        if (not isinstance(nxt, str) or len(nxt) > MAX_NEXT_PAGE or not _NEXT_PAGE_RE.fullmatch(nxt)
+                or "sort=recent-updates" not in nxt.split("?", 1)[1].split("&")):
+            raise base.FetchError("crates: the list's next page is not a page of the same list")
+        return crates, nxt
+
+    def _recent_version(self, row):
+        for field in ("newest_version", "default_version"):
+            value = row.get(field)
+            if isinstance(value, str):
+                try:
+                    return self.check_version(value)
+                except base.SpecError:
+                    continue
+        return None
 
     def resolve(self, name, version, fetch):
         name = self.check_name(name)
