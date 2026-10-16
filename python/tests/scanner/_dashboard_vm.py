@@ -52,6 +52,33 @@ def scan_request(files=(), paste=None, lang=None):
     return req
 
 
+def folder_request(files, name="project", unreadable=()):
+    """A "scan" request of a folder upload: `files` [(rel, bytes or text)] in the folder `name` picked in the folder
+    control; the files in `unreadable` (rels) can't be read."""
+    folder = []
+    for rel, data in files:
+        f = upload(f"{name}/{rel}", data)
+        f["path"] = f.pop("name")
+        if rel in unreadable:
+            f["unreadable"] = True
+        folder.append(f)
+    return {"op": "scan", "folder": folder}
+
+
+def tree_files(root):
+    """[(rel, bytes)] of the regular files under `root` (no link followed), as a browser uploads the folder."""
+    out = []
+    for top, dirs, names in os.walk(root):
+        dirs.sort()
+        for name in sorted(names):
+            full = os.path.join(top, name)
+            if os.path.islink(full) or not os.path.isfile(full):
+                continue
+            with open(full, "rb") as f:
+                out.append((os.path.relpath(full, root).replace(os.sep, "/"), f.read()))
+    return out
+
+
 def scan(files=(), paste=None, lang=None, html=HTML):
     """The page's result for `files` and `paste` (see scan_request)."""
     return run([scan_request(files, paste, lang)], html=html)[0]

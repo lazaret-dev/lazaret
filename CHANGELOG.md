@@ -1030,6 +1030,16 @@ aggregate):
   results (`test_gate_engine`); the npm hook test's cases of what the gate shows moved to the engine's tests. Gone:
   hook.py's `GATE`, `shown`, `git_form`, `COLLISION_WHY` and `UNPRINTED_WHY`, and hook.js' `GATE`, `shown`, `gitForm`
   and its texts.
+- **The dashboard takes a folder, and walks it as `lazaret <folder>` does (BR-7, step 5 b; no rule set change).** The
+  page scanned only files picked one by one, without a walk, so a project could not be given to it as the CLI is
+  given one. "Upload a folder" now gives it the folder, which it walks on the npm package's walk: the walk's loop moved from `lib/fs.js` collectFiles to
+  `lib/collect.js` (`walkSteps`: each step in the walk's order, the engine's `collect_dir` deciding each entry;
+  `takeStep`: a file collected, a pruned tree counted, a `__pycache__` checked), which uses nothing of Node's, so the
+  CLI takes its steps on the disk and the page on the folder the browser gives it, reading only what the steps read.
+  Without `--deps`, as the CLI's default: a dependency's tree is counted (Q-SKIPPED-TREE), `.git` is never read, a
+  file the browser can't read is Q-UNREADABLE; CI files and an editor's settings are read by their paths, as the CLI
+  reads them. Held to the CLI on the fixture projects whole and on trees that reach each step
+  (`test_review_dashboard_parity`); the npm walk to the Python package's as before (`test_collect_engine`).
 - **Security: S-XML is a parser set to resolve external entities, not an import of xml.etree, xml.dom or xml.sax
   (Q-3; rule set 2.80.0).** Since Python 3.7.1 none of them resolves an external entity unless told to, and Expat
   2.4.1 refuses entity bombs, so the import flagged safe code: all 20 of BenchmarkPython's safe XXE cases (its 8 real

@@ -1,9 +1,11 @@
-// Which files a scan reads, and how: the engine's (collect.rs, BR-7 step 4 e), as core's walk asks it. The
-// directory walk (fs.js collectFiles) hands each regular file it meets to collectEntry, and so does the browser
-// dashboard for each upload (BR-7 step 5); the engine says what it needs read of the file and, once it has it, what
-// the file is to the scan. This module uses nothing of Node's.
+// Which files a scan reads, and how: the engine's (collect.rs, BR-7 step 4 e), as core's walk asks it. The walk of a
+// folder (walkSteps: what each entry is to the scan, in the walk's order) and each step's taking (takeStep: a regular
+// file handed to collectEntry, a pruned tree counted, a __pycache__ checked) are the CLI's (fs.js collectFiles, on the
+// disk) and the browser dashboard's (a folder upload, BR-7 step 5); the engine says what it needs read of a file and,
+// once it has it, what the file is to the scan. This module uses nothing of Node's.
 
 import { call, bytesText, issuesOf } from "./native.js";
+import { scanErrorIssue } from "./issue.js";
 import { REDACT } from "./redact.js";
 import { CONFIG_SCAN_CAP } from "./configsecrets.js";
 
@@ -64,4 +66,114 @@ function addCollected(got, col, rel) {
  * (files, bytes). */
 export function collectIssue(kind, path, args = {}) {
   return issuesOf(path, [call("collect_issue", { ...args, kind, path })])[0];
+}
+export const symlinkIssue = (path, target) => collectIssue("symlink", path, { target: String(target) });
+export const unreadableIssue = (path, reason) => collectIssue("unreadable", path, { reason: String(reason) });
+export const skippedTreeIssue = (rel, nFiles, nBytes) => collectIssue("skipped_tree", rel, { files: nFiles, bytes: nBytes });
+
+/**
+ * A project scan's walk of the folder `root` (core._collect's; what each entry is to the scan: the engine's,
+ * collect_dir), on the folders `tree` lists: each step, in the walk's order (each folder's entries by code point,
+ * depth first). `tree`:
+ *   list(node) -> the folder's entries, [{name, node, kind: "file" (size) | "dir" (key: its identity, or null) |
+ *     "link" (target) | "special" (code: fifo, socket, char, block, other) | "error" (why)}]; throws when the folder
+ *     cannot be listed;
+ *   key(node) -> the root folder's identity (or null), asked once it is listed;
+ *   names(node) -> [[name, is a folder]] of a folder's entries (no link followed), or null when it can't be listed;
+ *   cargo(node, dirs) -> the names among `dirs` (folders in `node`) that hold a regular .cargo-checksum.json;
+ *   strerror(e) -> why a folder could not be listed.
+ * Steps: {issue}, {file: {node, rel, name, size, dep}}, {skip: {node, rel}}, {pycache: {node, rel, names}},
+ * {walk: {node, rel, dep}} (a folder the walk follows, with the dependency or vendor tree it is in: false, true or
+ * [kind, rel]) and {rootError} (the root could not be listed: nothing follows).
+ */
+export function* walkSteps(tree, root, { includeDeps = false, exclude = [] } = {}) {
+  const excluded = [...new Set(exclude)].sort();
+  const seen = new Set();
+  const stack = [{ node: root, rel: "", dep: false }];
+  while (stack.length) {
+    const dir = stack.pop();
+    let entries;
+    try {
+      entries = tree.list(dir.node);
+      if (!dir.rel) { const key = tree.key(dir.node); if (key !== null) seen.add(key); }
+    } catch (e) {
+      if (!dir.rel) { yield { rootError: e }; return; }
+      yield { issue: unreadableIssue(dir.rel, tree.strerror(e)) };
+      continue;
+    }
+    const listed = entries.map((e) => (e.kind === "dir" ? [e.name, "dir", e.key, e.key !== null && seen.has(e.key)]
+      : [e.name, e.kind, e.kind === "file" ? e.size : e.kind === "link" ? e.target : e.kind === "special" ? e.code : e.why]));
+    const answers = { lists: [], cargo: [] };
+    let got;
+    for (;;) {
+      got = call("collect_dir", { dir: dir.rel, dep: dir.dep, entries: listed, excludes: excluded, includeDeps,
+        windows: WINDOWS, answers });
+      if (!got.need) break;
+      for (const k of got.need.lists) answers.lists.push([k, tree.names(entries[k].node)]);
+      for (const [k, dirs] of got.need.cargo) answers.cargo.push([k, tree.cargo(entries[k].node, dirs)]);
+    }
+    for (const key of got.seen) seen.add(key);
+    const names = entries.map((e) => e.name);
+    const push = [];
+    for (const [k, action, extra] of got.do) {
+      const { node, name } = entries[k];
+      const rel = dir.rel ? `${dir.rel}${PATH_SEP}${name}` : name;
+      if (action === "issue") yield { issue: pathIssues([extra])[0] };
+      else if (action === "file") yield { file: { node, rel, name, size: entries[k].size, dep: dir.dep } };
+      else if (action === "skip") yield { skip: { node, rel } };
+      else if (action === "pycache") yield { pycache: { node, rel, names } };
+      else {
+        const walk = { node, rel, dep: dir.dep || (Array.isArray(extra[1]) ? [extra[1][0], rel] : extra[1]) };
+        push.push(walk);
+        yield { walk };                 // (a folder followed: nothing to take)
+      }
+    }
+    for (let k = push.length - 1; k >= 0; k--) stack.push(push[k]);   // pop order = the engine's, depth-first
+  }
+}
+
+/**
+ * Take a step of walkSteps into `col` (collectFiles' collection): a finding, a file collected (collectEntry), a
+ * pruned tree counted (Q-SKIPPED-TREE) or a __pycache__ checked. `tree` as walkSteps', and:
+ *   entry(node, rel, name, size, dep) -> collectEntry's entry for a file;
+ *   stats(node) -> [files, bytes] of a pruned tree;
+ *   list(node, {pycache: true}) -> a __pycache__'s entries (any reparse point a link); head(node, n) -> a file's first
+ *     n bytes (throws when it can't be read).
+ * `ioError(e)`: whether an error is the I/O's (the file is Q-UNREADABLE; anything else: its scan failed).
+ */
+export function takeStep(step, col, tree, { ioError = () => false, strerror = (e) => String(e && e.message) } = {}) {
+  if (step.issue) col.binaryIssues.push(step.issue);
+  else if (step.file) {
+    const { node, rel, name, size, dep } = step.file;
+    try {
+      collectEntry(tree.entry(node, rel, name, size, dep), col, { ioError, strerror });
+    } catch (e) {
+      col.binaryIssues.push(ioError(e) ? unreadableIssue(rel, strerror(e)) : scanErrorIssue(rel, e));
+    }
+  } else if (step.skip) {
+    const [nFiles, nBytes] = tree.stats(step.skip.node);
+    col.skippedIssues.push(skippedTreeIssue(step.skip.rel, nFiles, nBytes));
+  } else if (step.pycache) {
+    try { checkPycache(tree, step.pycache, col.binaryIssues, strerror); } catch (e) {
+      col.binaryIssues.push(scanErrorIssue(step.pycache.rel, e));
+    }
+  }
+}
+
+/** __pycache__ is not source-scanned; every .pyc directly inside is checked (the engine's: collect_pycache). */
+function checkPycache(tree, { node, rel, names }, issues, strerror) {
+  let entries;
+  try { entries = tree.list(node, { pycache: true }); } catch (e) { issues.push(unreadableIssue(rel, strerror(e))); return; }
+  const listed = entries.map((e) => [e.name, e.kind, e.kind === "file" ? e.size : e.kind === "link" ? e.target
+    : e.kind === "special" ? e.code : e.why]);
+  const files = new Map(entries.filter((e) => e.kind === "file").map((e) => [e.name, e.node]));
+  const headers = {};
+  for (;;) {
+    const got = call("collect_pycache", { dir: rel, entries: listed, parent: [...names].sort(), windows: WINDOWS,
+      answers: { headers } });
+    if (!got.need) { for (const i of pathIssues(got.issues)) issues.push(i); return; }
+    for (const name of got.need) {
+      try { headers[name] = bytesText(tree.head(files.get(name), 16)); } catch (e) { headers[name] = { error: strerror(e) }; }
+    }
+  }
 }

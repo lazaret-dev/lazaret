@@ -5,11 +5,15 @@
 //   node _dashboard_vm.js <lazaret.html>  < requests.json  > results.json
 //
 // requests.json: [{op, ...}, ...], each answered in order:
-//   {op: "scan", files?: [{name, content|b64, size?}], paste?: {text, lang?}}
+//   {op: "scan", files?: [{name, content|b64, size?}], folder?: [{path, content|b64, size?, unreadable?}],
+//    paste?: {text, lang?}}
 //       -> the result the page shows ({error} when it shows none): the files picked in its upload control (content
-//          as UTF-8 bytes, b64 a file's raw bytes; size: what the file says its size is, when not its length) and
-//          the code pasted, then "Scan code", the result read from the page's export
+//          as UTF-8 bytes, b64 a file's raw bytes; size: what the file says its size is, when not its length), or the
+//          folder picked in its folder control (each file's path in it, the folder's name first, as a browser gives
+//          webkitRelativePath; unreadable: reading it fails), and the code pasted, then "Scan code", the result read
+//          from the page's export
 //   {op: "upload", files: [...]}   -> the file list the page shows (#filelist's HTML) after the files are picked
+//   {op: "folder", folder: [...]}  -> the same, after the folder is picked
 //   {op: "click", id}              -> clicks the control #id (a sample button, say)
 //   {op: "export"}                 -> {filename, text} of the export the page downloads (null when it doesn't)
 //   {op: "html", id}               -> {html, text, value} of the element #id
@@ -70,17 +74,19 @@ const fire = async (id, type, event = {}) => {
 /** File-like objects (name, size, arrayBuffer(), slice()) for `reqFiles`. A file whose size is more than the bytes
  * sent is one only that much of can be read: reading it all fails, as reading a file that changed under it would. */
 function pickFiles(reqFiles) {
-  const file = (name, bytes, size) => ({
-    name, size,
+  const file = (name, bytes, size, path = "", unreadable = false) => ({
+    name, size, webkitRelativePath: path,
     arrayBuffer: async () => {
+      if (unreadable) throw new Error("The requested file could not be read");
       if (size > bytes.length) throw new Error(`only ${bytes.length} of its ${size} bytes can be read here`);
       return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.length);
     },
-    slice: (start, end) => file(name, bytes.subarray(start, end), Math.min(end, size) - start),
+    slice: (start, end) => file(name, bytes.subarray(start, end), Math.min(end, size) - start, path, unreadable),
   });
   return reqFiles.map((f) => {
     const bytes = f.b64 !== undefined ? Buffer.from(f.b64, "base64") : Buffer.from(f.content, "utf8");
-    return file(f.name, bytes, f.size !== undefined ? f.size : bytes.length);
+    const name = f.path !== undefined ? f.path.split("/").pop() : f.name;
+    return file(name, bytes, f.size !== undefined ? f.size : bytes.length, f.path || "", !!f.unreadable);
   });
 }
 
@@ -95,7 +101,8 @@ async function exported() {
 async function handle(req) {
   switch (req.op) {
     case "scan": {
-      await fire("files", "change", { target: { files: pickFiles(req.files || []) } });
+      if (req.folder) await fire("folder", "change", { target: { files: pickFiles(req.folder) } });
+      else await fire("files", "change", { target: { files: pickFiles(req.files || []) } });
       document.querySelector("#code").value = req.paste ? req.paste.text : "";
       document.querySelector("#lang").value = (req.paste && req.paste.lang) || "auto";
       const before = blobSeq;
@@ -111,6 +118,9 @@ async function handle(req) {
     }
     case "upload":
       await fire("files", "change", { target: { files: pickFiles(req.files) } });
+      return document.querySelector("#filelist").innerHTML;
+    case "folder":
+      await fire("folder", "change", { target: { files: pickFiles(req.folder) } });
       return document.querySelector("#filelist").innerHTML;
     case "click":
       await fire(req.id, "click");

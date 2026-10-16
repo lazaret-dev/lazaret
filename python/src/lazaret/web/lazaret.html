@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-pM6155HlVPMo2vj/Af5uF1s94nzgg9g191BSeE0rhXM=' 'wasm-unsafe-eval'; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-yPbV47rB2uP2r0LxmJjlglFmPWBqWjwpVy7IGjO/tnM=' 'wasm-unsafe-eval'; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'">
 <title>Lazaret — Security &amp; Quality Review</title>
 <style>
   :root{
@@ -98,7 +98,7 @@
   <div class="panel">
     <h2>Analyze code</h2>
     <div class="input-grid">
-      <textarea id="code" spellcheck="false" placeholder="Paste Python, JavaScript, or SQL code here, or upload files →"></textarea>
+      <textarea id="code" spellcheck="false" placeholder="Paste Python, JavaScript, or SQL code here, or upload files or a folder →"></textarea>
       <div class="side">
         <select id="lang">
           <option value="auto">Language: auto-detect</option>
@@ -108,6 +108,9 @@
         </select>
         <label class="filebtn">Upload files
           <input type="file" id="files" multiple>
+        </label>
+        <label class="filebtn">Upload a folder
+          <input type="file" id="folder" webkitdirectory multiple>
         </label>
         <div class="filelist" id="filelist"></div>
         <button class="primary" id="scanBtn">Scan code</button>
@@ -33320,323 +33323,8 @@ function taintFindings(path, content, lang, { jsx = true, redact = true } = {}) 
 return { NativeError, EXHAUSTED, NativeExhausted, setWorkBudget, wasmModule, useModule, workBudgetSteps, loadError, available, bytesText, codePoints, call, packValues, installScriptRisk, scriptLang, importTimeRisk, importTimeSeverity, followHook, hookScriptTargets, shlexSplit, hookTokens, nodeECodes, nodeCandidates, shebangLang, spawnedScripts, persistenceReasons, pthLineRisk, agentHijack, agentHijackInCommand, hookCommandRisk, hookIsSuspicious, importCode, receivedCodeKind, runsReceivedCode, readsOwnSource, runsSubstitutedDownload, decodedView, powershellRisk, stagerAt, reverseShellAt, runsOwnSourceAt, serviceReasons, secretEndpointAt, credentialSweepAt, minerAt, rawIpConnect, dnsBeaconAt, deadDropAt, crossFileIssues, goPackage, rsCrate, cargoLayout, goVendoredModules, jsFlow, pyFlow, issuesOf, scanDependencyFile, scanProjectFile, scanConfig, fileMetrics, taintFindings };
 })();
 
-/* ======== js/src/lib/redact.js ======== */
-const M$2 = (() => {
-const { call } = M$1;
-// Secret redaction (audit L1, shared semantics spec 6) — leaf module.
-//
-// The flagged line of a SECRET-rule finding is replaced by a deterministic
-// placeholder, and every other snippet line (and the issue msg, and any
-// field that copies source text such as an install hook's `cmd`) has
-// credential-shaped substrings replaced by "[redacted]": the matches of the
-// line patterns, the lines of a PEM private key's block whole, and for a
-// file's own findings its entropy literals (the strings S-ENTROPY would
-// flag, wherever they appear). The redaction is the engine's (BR-7 step 3 c,
-// 0.1.9: redact.rs and findings.rs), as it is the Python package's; this
-// module hands it the text. mkIssue() applies all of it, so the library API
-// (`import { scanFile } from "lazaret"`) is covered too.
-
-
-
-const SECRET_RULES = new Set(["S-SECRET", "S-TOKEN", "SQL-CRED", "S-ENTROPY"]);
-const REDACT_PLACEHOLDER = "[redacted: secret rule {RULE}]";
-const REDACT_FINGERPRINT = "[redacted: secret rule ";
-const REDACTED = "[redacted]";
-
-/** Global switch (--no-redact-secrets turns it off for the run). */
-const REDACT = { on: true };
-function setRedactSecrets(on) { REDACT.on = !!on; }
-
-// The lines of the files whose findings this package builds outside the
-// engine's scan of them (the walker's encoding findings, the dependency
-// checks'), registered so mkIssue redacts their snippets and messages with
-// the file's entropy literals too (core's _Redactor): each array, with its
-// lines joined as the engine reads them, once.
-const CONTEXTS = new WeakMap();
-function registerScanContext(lines) {
-  if (Array.isArray(lines) && !CONTEXTS.has(lines)) CONTEXTS.set(lines, null);
-  return lines;
-}
-/** Are `lines` a registered file's (registerScanContext)? */
-function isScanContext(lines) {
-  return Array.isArray(lines) && CONTEXTS.has(lines);
-}
-/** `lines` joined as the engine reads a file's lines (anything that is not a string reads as an empty line). */
-function linesText(lines) {
-  if (isScanContext(lines)) {
-    let text = CONTEXTS.get(lines);
-    if (text === null) CONTEXTS.set(lines, (text = joinLines(lines)));
-    return text;
-  }
-  return joinLines(lines);
-}
-function joinLines(lines) {
-  return lines.map((l) => (typeof l === "string" ? l : "")).join("\n");
-}
-
-/** Replace credential-shaped substrings in one line (core._redact_context_line). */
-function redactContextLine(line) {
-  if (typeof line !== "string" || !line) return line;
-  return call("redact_text", { mode: "line" }, line);
-}
-
-/** Redaction for free text that may copy source (issue msg, hook cmd): the PEM blocks whole, then the line patterns,
- * and with `context` (a file's lines) the file's entropy literals (core._redact_text). */
-function redactText(text, context = null) {
-  if (typeof text !== "string") return text;
-  const args = { mode: "text", neumaier: false };
-  if (context !== null) args.context = linesText(context);
-  return call("redact_text", args, text);
-}
-
-/** The engine's [snippet, msg, cmd] for each of `issues` put in place where they changed. */
-function applyRedaction(issues, got) {
-  issues.forEach((i, k) => {
-    const [snip, msg, cmd] = got[k];
-    if (typeof msg === "string" && msg !== i.msg) i.msg = msg;
-    if (typeof cmd === "string" && cmd !== i.cmd) i.cmd = cmd;
-    if (Array.isArray(snip) && Array.isArray(i.snippet)) i.snippet = snip;
-  });
-}
-
-const strOrNull = (v) => (typeof v === "string" ? v : null);
-
-/**
- * The findings of one file (`lines`: its scan lines) built outside the engine's scan of it, given the file's redaction
- * in place (core.redact_file_issues for one file): every snippet line that is still the raw text of its file line
- * becomes that line as the file's own findings show it, and msg / cmd get the file's entropy literals.
- */
-function redactFileIssues(issues, lines) {
-  if (!REDACT.on || !issues.length) return issues;
-  const raw = issues.map((i) => {
-    const snip = i.snippet, start = i.snipStart;
-    if (!Array.isArray(snip) || !Number.isInteger(start)) return [];
-    const at = [];                                          // [k, j]: snippet line k is still file line j's raw text
-    snip.forEach((line, k) => {
-      const j = start - 1 + k;
-      if (typeof line === "string" && j >= 0 && j < lines.length && line === lines[j]) at.push([k, j]);
-    });
-    return at;
-  });
-  const rows = issues.map((i, n) => [raw[n].map(([, j]) => j), strOrNull(i.msg), strOrNull(i.cmd)]);
-  const got = call("redact_file", { issues: rows, neumaier: false }, lines.join("\n")).issues;
-  issues.forEach((i, n) => {
-    const [shown, msg, cmd] = got[n];
-    let snip = null;
-    if (raw[n].length) {
-      snip = [...i.snippet];
-      raw[n].forEach(([k], m) => { snip[k] = shown[m]; });
-    }
-    applyRedaction([i], [[snip, msg, cmd]]);
-  });
-  return issues;
-}
-
-/**
- * Belt-and-braces sweep over a whole result (core.redact_result): msg and cmd redacted, a secret rule's flagged line
- * that is not yet the placeholder replaced by it, every other snippet line redacted, and every line clipped
- * (SNIPPET_MAX). Without redaction (--no-redact-secrets), the lines are clipped only. One engine call for the result.
- */
-function redactResult(res) {
-  const issues = (res.issues ?? []).filter((i) => i !== null && typeof i === "object");
-  if (!issues.length) return res;
-  const rows = issues.map((i) => [i.rule ?? null, Number.isInteger(i.line) ? i.line : null,
-    Number.isInteger(i.snipStart) ? i.snipStart : null, Array.isArray(i.snippet) ? i.snippet : null,
-    strOrNull(i.msg), strOrNull(i.cmd)]);
-  applyRedaction(issues, call("redact_issues", { issues: rows, redact: REDACT.on }).issues);
-  return res;
-}
-return { SECRET_RULES, REDACT_PLACEHOLDER, REDACT_FINGERPRINT, REDACTED, REDACT, setRedactSecrets, registerScanContext, isScanContext, linesText, redactContextLine, redactText, redactFileIssues, redactResult };
-})();
-
-/* ======== js/src/lib/configsecrets.js ======== */
-const M$3 = (() => {
-const { call } = M$1;
-// Config and data files: which ones are read for credentials: .env, JSON, YAML, TOML, INI, .properties, shell, PEM
-// keys, Dockerfiles, .npmrc / .pypirc and Terraform variables are read as text and checked by the two credential
-// rules only, never as code. Which files they are and how they are read are the native engine's (BR-7 step 3:
-// config.rs, the `scan_config` call, scanConfigFile in ../scanner/scan.js; step 4 e: collect.rs), as for the Python
-// package (lazaret/scanner/configsecrets.py). Never import from ../scanner/ (RESTRUCTURE.md §5).
-
-
-
-/** Config files larger than this are not read (Q-SKIPPED-CONFIG: the rule pack's CONFIG_SCAN_CAP). */
-const CONFIG_SCAN_CAP = 2_000_000;
-
-/** True for the text of one of Lazaret's own JSON reports (a report is not config). */
-function ownReport(text) { return call("collect_check", { check: "own_report" }, String(text)); }
-
-/** True for a file (by its base name) that is read as config or data. */
-function isConfigFile(name) { return call("collect_check", { check: "config_name", name: String(name) }); }
-return { CONFIG_SCAN_CAP, ownReport, isConfigFile };
-})();
-
-/* ======== js/src/lib/collect.js ======== */
-const M$4 = (() => {
-const { call, bytesText, issuesOf } = M$1;
-const { REDACT } = M$2;
-const { CONFIG_SCAN_CAP } = M$3;
-// Which files a scan reads, and how: the engine's (collect.rs, BR-7 step 4 e), as core's walk asks it. The
-// directory walk (fs.js collectFiles) hands each regular file it meets to collectEntry, and so does the browser
-// dashboard for each upload (BR-7 step 5); the engine says what it needs read of the file and, once it has it, what
-// the file is to the scan. This module uses nothing of Node's.
-
-
-
-
-
-/** The path separator of a file's rel ("\\" on Windows, as os.sep; "/" in a browser). */
-const PATH_SEP = typeof process !== "undefined" && process.platform === "win32" ? "\\" : "/";
-const WINDOWS = PATH_SEP === "\\";
-
-// Source files and manifests above this are not read: SC-TRUNCATED (core.SOURCE_SIZE_CAP). The CLI takes
-// --max-source-bytes or LAZARET_MAX_SOURCE_BYTES; collectFiles() takes `maxFileBytes`.
-const MAX_FILE_BYTES = 16_000_000;
-
-/** The engine's [[path, issue]] as this package's issues. */
-const pathIssues = (pairs) => pairs.map(([path, row]) => issuesOf(path, [row])[0]);
-
-/**
- * Collect one regular file (core._collect_file's): the walk's (fs.js collectFiles) and the dashboard's, which hands
- * over its uploads. `entry`: {rel, name, size, dep, read(limit): its first `limit` bytes (throws when it can't be
- * read; `ioError(e)` says whether an error is one), head(limit): the same, or no bytes when it can't be read}; dep:
- * false, true, or a Go or cargo vendor tree's [kind, rel]. Adds the file to `col`'s files, manifests, configs or pth,
- * and its findings to col.binaryIssues; col.maxFileBytes is the size cap.
- */
-function collectEntry(entry, col, { ioError = () => false, strerror = (e) => String(e && e.message) } = {}) {
-  const args = { rel: entry.rel, name: entry.name, size: entry.size, dep: entry.dep, cap: col.maxFileBytes,
-    configCap: CONFIG_SCAN_CAP, windows: WINDOWS, neumaier: false, redact: REDACT.on };
-  const answers = {};
-  let text = "";
-  for (;;) {
-    const got = call("collect_file", { ...args, answers }, text);
-    if (!got.need) { addCollected(got, col, entry.rel); return; }
-    const { read: what, limit } = got.need;
-    if (what === "sample") { answers[what] = bytesText(entry.head(limit)); continue; }   // (none when unread)
-    let data;
-    try {
-      data = bytesText(entry.read(limit));
-    } catch (e) {
-      if (!ioError(e)) throw e;
-      answers[what] = { error: strerror(e) };
-      continue;
-    }
-    if (what === "data") { answers[what] = true; text = data; } else answers[what] = data;   // (a whole file: the text)
-  }
-}
-
-/** What collect_file said a file is, added to `col`. */
-function addCollected(got, col, rel) {
-  for (const i of pathIssues(got.issues)) col.binaryIssues.push(i);
-  if (got.file) {
-    const f = { path: got.file.path, content: got.file.content, lang: got.file.lang, dep: got.file.dep };
-    if (got.file.vendor !== undefined) f.vendor = got.file.vendor;      // (its module or crate is read whole)
-    col.files.push(f);
-  }
-  if (got.manifest) col.manifests.push(got.manifest);
-  if (got.config) col.configs.push(got.config);
-  if (got.pth) col.pth.push(rel);
-}
-
-/** A coverage note the walk's I/O finds (collect_issue): "unreadable" (reason), "symlink" (target), "skipped_tree"
- * (files, bytes). */
-function collectIssue(kind, path, args = {}) {
-  return issuesOf(path, [call("collect_issue", { ...args, kind, path })])[0];
-}
-return { WINDOWS, MAX_FILE_BYTES, pathIssues, collectEntry, collectIssue };
-})();
-
-/* ======== js/src/lib/binary.js ======== */
-const M$5 = (() => {
-const { call, issuesOf, bytesText } = M$1;
-// Binary / compiled-artifact detection and the __pycache__ bytecode checks: core.classify_binary,
-// disguised_binary, looks_binary and pyc_issues, the engine's for both packages (BR-7 step 3 d, 0.1.9: binary.rs),
-// used for every non-source regular file in a directory scan (shared semantics spec 9) and for bytecode (spec 8).
-// A file's bytes go to the engine as latin-1 text, a character per byte. Zero-dependency leaf.
-
-
-
-/** Do paths use "\\" as a separator too (Windows, as os.path does there)? Not in a browser. */
-const WINDOWS = typeof process !== "undefined" && process.platform === "win32";
-
-/**
- * os.path.splitext(path)[1]: from the base name's last dot, but not when every
- * dot before it is leading (".bashrc", "..js", "...py" have no extension;
- * Node's extname says ".js" for "..js"). Separators as os.path uses them here:
- * "/", and on Windows "\\" too.
- */
-function pyExt(path) {
-  const p = String(path);
-  let s = p.lastIndexOf("/");
-  if (WINDOWS) s = Math.max(s, p.lastIndexOf("\\"));
-  const dot = p.lastIndexOf(".");
-  if (dot <= s) return "";
-  for (let i = s + 1; i < dot; i++) if (p[i] !== ".") return p.slice(dot);
-  return "";
-}
-
-/** MPEG transport stream video: the extensions it shares with TypeScript, and .m2ts (core.MPEG_TS_EXTS). */
-const MPEG_TS_EXTS = new Set([".ts", ".mts", ".m2ts"]);
-
-/** Bytes read from each non-source file for classification (spec 9). */
-const HEADER_SAMPLE = 512;
-/** The leading bytes disguisedBinary reads (core.DISGUISE_SAMPLE_BYTES). */
-const DISGUISE_SAMPLE = 2048;
-/** The leading bytes classifyBinary reads (its entropy's sample). */
-const CLASSIFY_SAMPLE = 8192;
-const PYC_HEADER = 16;
-
-/** MPEG transport stream: a sync byte every 188 bytes (core._mpeg_ts). */
-const mpegTs = (h) => call("binary_check", { check: "mpeg_ts" }, bytesText(h, 377));
-
-/**
- * Heuristic text/binary classification from a leading byte sample (core.looks_binary): only bytes that cannot be
- * text count — bytes of invalid UTF-8 sequences and C0 controls other than whitespace and ESC (NUL included); more
- * than 30% of the sample → binary.
- */
-function looksBinary(sample) {
-  if (!sample.length) return false;
-  return call("binary_check", { check: "looks" }, bytesText(sample));
-}
-
-/**
- * Supply-chain issue for a suspicious non-source file, or null (core.classify_binary).
- * context: "sdist" | "npm" | "wheel" | "repo"; data: leading bytes; size: full size.
- */
-function classifyBinary(path, data, size, context = "repo") {
-  const got = call("binary_classify", { path, size, context, windows: WINDOWS, neumaier: false },
-    bytesText(data, CLASSIFY_SAMPLE));
-  return got === null ? null : issuesOf(path, [got])[0];
-}
-
-/**
- * SC-BINARY, CRITICAL, for a program under a source file's name (0.1.8): an executable's or a compiled module's
- * bytes (a Windows PE among them) in a file named as source code. Unlike a binary named for what it is
- * (classifyBinary) it is a disguise. Else null (core.disguised_binary).
- */
-function disguisedBinary(path, data) {
-  const got = call("binary_disguised", { path, windows: WINDOWS }, bytesText(data, DISGUISE_SAMPLE));
-  return got === null ? null : issuesOf(path, [got])[0];
-}
-
-// ---- __pycache__ bytecode (spec 8) ----------------------------------------
-/**
- * SC-PYC-UNCHECKED / SC-PYC-ORPHAN for one .pyc in a __pycache__ directory (core.pyc_issues). `header` is the first
- * bytes of the file; `hasSource` whether the matching <module>.py(w) sits next to __pycache__.
- */
-function pycIssues(path, header, hasSource) {
-  return issuesOf(path, call("pyc_issues", { path, has_source: !!hasSource }, bytesText(header, PYC_HEADER)));
-}
-
-/** The module a __pycache__ entry was compiled from: "x.cpython-311.pyc" → "x". */
-function pycModule(name) {
-  return String(name).split(".")[0];
-}
-return { pyExt, MPEG_TS_EXTS, HEADER_SAMPLE, DISGUISE_SAMPLE, PYC_HEADER, mpegTs, looksBinary, classifyBinary, disguisedBinary, pycIssues, pycModule };
-})();
-
 /* ======== js/src/lib/pycompat.js ======== */
-const M$6 = (() => {
+const M$2 = (() => {
 // Python-compatibility helpers for the JS engine (zero-dependency leaf).
 //
 // The two engines must report the same findings for the same input, and the
@@ -33953,11 +33641,140 @@ function jsonDepthExceeds(text, limit = MAX_JSON_DEPTH) {
 return { WORD_CLASS, pyRegexSource, pyRe, isPySpace, isJsSpace, isSpaceFor, pyStrip, pyStripChars, pyLstrip, pyRstrip, cpLen, cpPrefix, cpIndex, isWordChar, isPrintable, pyRepr, PY_ORDER, pyEntries, pyRound1, cmpCodePoints, MAX_JSON_DEPTH, jsonDepthExceeds };
 })();
 
-/* ======== js/src/lib/issue.js ======== */
-const M$7 = (() => {
-const { cpIndex } = M$6;
+/* ======== js/src/lib/redact.js ======== */
+const M$3 = (() => {
 const { call } = M$1;
-const { REDACT, isScanContext, linesText, redactText } = M$2;
+// Secret redaction (audit L1, shared semantics spec 6) — leaf module.
+//
+// The flagged line of a SECRET-rule finding is replaced by a deterministic
+// placeholder, and every other snippet line (and the issue msg, and any
+// field that copies source text such as an install hook's `cmd`) has
+// credential-shaped substrings replaced by "[redacted]": the matches of the
+// line patterns, the lines of a PEM private key's block whole, and for a
+// file's own findings its entropy literals (the strings S-ENTROPY would
+// flag, wherever they appear). The redaction is the engine's (BR-7 step 3 c,
+// 0.1.9: redact.rs and findings.rs), as it is the Python package's; this
+// module hands it the text. mkIssue() applies all of it, so the library API
+// (`import { scanFile } from "lazaret"`) is covered too.
+
+
+
+const SECRET_RULES = new Set(["S-SECRET", "S-TOKEN", "SQL-CRED", "S-ENTROPY"]);
+const REDACT_PLACEHOLDER = "[redacted: secret rule {RULE}]";
+const REDACT_FINGERPRINT = "[redacted: secret rule ";
+const REDACTED = "[redacted]";
+
+/** Global switch (--no-redact-secrets turns it off for the run). */
+const REDACT = { on: true };
+function setRedactSecrets(on) { REDACT.on = !!on; }
+
+// The lines of the files whose findings this package builds outside the
+// engine's scan of them (the walker's encoding findings, the dependency
+// checks'), registered so mkIssue redacts their snippets and messages with
+// the file's entropy literals too (core's _Redactor): each array, with its
+// lines joined as the engine reads them, once.
+const CONTEXTS = new WeakMap();
+function registerScanContext(lines) {
+  if (Array.isArray(lines) && !CONTEXTS.has(lines)) CONTEXTS.set(lines, null);
+  return lines;
+}
+/** Are `lines` a registered file's (registerScanContext)? */
+function isScanContext(lines) {
+  return Array.isArray(lines) && CONTEXTS.has(lines);
+}
+/** `lines` joined as the engine reads a file's lines (anything that is not a string reads as an empty line). */
+function linesText(lines) {
+  if (isScanContext(lines)) {
+    let text = CONTEXTS.get(lines);
+    if (text === null) CONTEXTS.set(lines, (text = joinLines(lines)));
+    return text;
+  }
+  return joinLines(lines);
+}
+function joinLines(lines) {
+  return lines.map((l) => (typeof l === "string" ? l : "")).join("\n");
+}
+
+/** Replace credential-shaped substrings in one line (core._redact_context_line). */
+function redactContextLine(line) {
+  if (typeof line !== "string" || !line) return line;
+  return call("redact_text", { mode: "line" }, line);
+}
+
+/** Redaction for free text that may copy source (issue msg, hook cmd): the PEM blocks whole, then the line patterns,
+ * and with `context` (a file's lines) the file's entropy literals (core._redact_text). */
+function redactText(text, context = null) {
+  if (typeof text !== "string") return text;
+  const args = { mode: "text", neumaier: false };
+  if (context !== null) args.context = linesText(context);
+  return call("redact_text", args, text);
+}
+
+/** The engine's [snippet, msg, cmd] for each of `issues` put in place where they changed. */
+function applyRedaction(issues, got) {
+  issues.forEach((i, k) => {
+    const [snip, msg, cmd] = got[k];
+    if (typeof msg === "string" && msg !== i.msg) i.msg = msg;
+    if (typeof cmd === "string" && cmd !== i.cmd) i.cmd = cmd;
+    if (Array.isArray(snip) && Array.isArray(i.snippet)) i.snippet = snip;
+  });
+}
+
+const strOrNull = (v) => (typeof v === "string" ? v : null);
+
+/**
+ * The findings of one file (`lines`: its scan lines) built outside the engine's scan of it, given the file's redaction
+ * in place (core.redact_file_issues for one file): every snippet line that is still the raw text of its file line
+ * becomes that line as the file's own findings show it, and msg / cmd get the file's entropy literals.
+ */
+function redactFileIssues(issues, lines) {
+  if (!REDACT.on || !issues.length) return issues;
+  const raw = issues.map((i) => {
+    const snip = i.snippet, start = i.snipStart;
+    if (!Array.isArray(snip) || !Number.isInteger(start)) return [];
+    const at = [];                                          // [k, j]: snippet line k is still file line j's raw text
+    snip.forEach((line, k) => {
+      const j = start - 1 + k;
+      if (typeof line === "string" && j >= 0 && j < lines.length && line === lines[j]) at.push([k, j]);
+    });
+    return at;
+  });
+  const rows = issues.map((i, n) => [raw[n].map(([, j]) => j), strOrNull(i.msg), strOrNull(i.cmd)]);
+  const got = call("redact_file", { issues: rows, neumaier: false }, lines.join("\n")).issues;
+  issues.forEach((i, n) => {
+    const [shown, msg, cmd] = got[n];
+    let snip = null;
+    if (raw[n].length) {
+      snip = [...i.snippet];
+      raw[n].forEach(([k], m) => { snip[k] = shown[m]; });
+    }
+    applyRedaction([i], [[snip, msg, cmd]]);
+  });
+  return issues;
+}
+
+/**
+ * Belt-and-braces sweep over a whole result (core.redact_result): msg and cmd redacted, a secret rule's flagged line
+ * that is not yet the placeholder replaced by it, every other snippet line redacted, and every line clipped
+ * (SNIPPET_MAX). Without redaction (--no-redact-secrets), the lines are clipped only. One engine call for the result.
+ */
+function redactResult(res) {
+  const issues = (res.issues ?? []).filter((i) => i !== null && typeof i === "object");
+  if (!issues.length) return res;
+  const rows = issues.map((i) => [i.rule ?? null, Number.isInteger(i.line) ? i.line : null,
+    Number.isInteger(i.snipStart) ? i.snipStart : null, Array.isArray(i.snippet) ? i.snippet : null,
+    strOrNull(i.msg), strOrNull(i.cmd)]);
+  applyRedaction(issues, call("redact_issues", { issues: rows, redact: REDACT.on }).issues);
+  return res;
+}
+return { SECRET_RULES, REDACT_PLACEHOLDER, REDACT_FINGERPRINT, REDACTED, REDACT, setRedactSecrets, registerScanContext, isScanContext, linesText, redactContextLine, redactText, redactFileIssues, redactResult };
+})();
+
+/* ======== js/src/lib/issue.js ======== */
+const M$4 = (() => {
+const { cpIndex } = M$2;
+const { call } = M$1;
+const { REDACT, isScanContext, linesText, redactText } = M$3;
 // Issue shape-builder — the one shared primitive every producer (scanner
 // engine, SQL-sink analyzer, supply-chain manifest scanner) needs. Lives here
 // so src/lib/supplychain.js can build issues without importing the scanner
@@ -34094,9 +33911,308 @@ function scanErrorIssue(path, err) {
 return { SNIPPET_MAX, SNIPPET_LEAD, cpIndexOf, clipLine, mkIssue, mkIssues, fileIssue, truncatedIssue, scanErrorIssue };
 })();
 
+/* ======== js/src/lib/configsecrets.js ======== */
+const M$5 = (() => {
+const { call } = M$1;
+// Config and data files: which ones are read for credentials: .env, JSON, YAML, TOML, INI, .properties, shell, PEM
+// keys, Dockerfiles, .npmrc / .pypirc and Terraform variables are read as text and checked by the two credential
+// rules only, never as code. Which files they are and how they are read are the native engine's (BR-7 step 3:
+// config.rs, the `scan_config` call, scanConfigFile in ../scanner/scan.js; step 4 e: collect.rs), as for the Python
+// package (lazaret/scanner/configsecrets.py). Never import from ../scanner/ (RESTRUCTURE.md §5).
+
+
+
+/** Config files larger than this are not read (Q-SKIPPED-CONFIG: the rule pack's CONFIG_SCAN_CAP). */
+const CONFIG_SCAN_CAP = 2_000_000;
+
+/** True for the text of one of Lazaret's own JSON reports (a report is not config). */
+function ownReport(text) { return call("collect_check", { check: "own_report" }, String(text)); }
+
+/** True for a file (by its base name) that is read as config or data. */
+function isConfigFile(name) { return call("collect_check", { check: "config_name", name: String(name) }); }
+return { CONFIG_SCAN_CAP, ownReport, isConfigFile };
+})();
+
+/* ======== js/src/lib/collect.js ======== */
+const M$6 = (() => {
+const { call, bytesText, issuesOf } = M$1;
+const { scanErrorIssue } = M$4;
+const { REDACT } = M$3;
+const { CONFIG_SCAN_CAP } = M$5;
+// Which files a scan reads, and how: the engine's (collect.rs, BR-7 step 4 e), as core's walk asks it. The walk of a
+// folder (walkSteps: what each entry is to the scan, in the walk's order) and each step's taking (takeStep: a regular
+// file handed to collectEntry, a pruned tree counted, a __pycache__ checked) are the CLI's (fs.js collectFiles, on the
+// disk) and the browser dashboard's (a folder upload, BR-7 step 5); the engine says what it needs read of a file and,
+// once it has it, what the file is to the scan. This module uses nothing of Node's.
+
+
+
+
+
+
+/** The path separator of a file's rel ("\\" on Windows, as os.sep; "/" in a browser). */
+const PATH_SEP = typeof process !== "undefined" && process.platform === "win32" ? "\\" : "/";
+const WINDOWS = PATH_SEP === "\\";
+
+// Source files and manifests above this are not read: SC-TRUNCATED (core.SOURCE_SIZE_CAP). The CLI takes
+// --max-source-bytes or LAZARET_MAX_SOURCE_BYTES; collectFiles() takes `maxFileBytes`.
+const MAX_FILE_BYTES = 16_000_000;
+
+/** The engine's [[path, issue]] as this package's issues. */
+const pathIssues = (pairs) => pairs.map(([path, row]) => issuesOf(path, [row])[0]);
+
+/**
+ * Collect one regular file (core._collect_file's): the walk's (fs.js collectFiles) and the dashboard's, which hands
+ * over its uploads. `entry`: {rel, name, size, dep, read(limit): its first `limit` bytes (throws when it can't be
+ * read; `ioError(e)` says whether an error is one), head(limit): the same, or no bytes when it can't be read}; dep:
+ * false, true, or a Go or cargo vendor tree's [kind, rel]. Adds the file to `col`'s files, manifests, configs or pth,
+ * and its findings to col.binaryIssues; col.maxFileBytes is the size cap.
+ */
+function collectEntry(entry, col, { ioError = () => false, strerror = (e) => String(e && e.message) } = {}) {
+  const args = { rel: entry.rel, name: entry.name, size: entry.size, dep: entry.dep, cap: col.maxFileBytes,
+    configCap: CONFIG_SCAN_CAP, windows: WINDOWS, neumaier: false, redact: REDACT.on };
+  const answers = {};
+  let text = "";
+  for (;;) {
+    const got = call("collect_file", { ...args, answers }, text);
+    if (!got.need) { addCollected(got, col, entry.rel); return; }
+    const { read: what, limit } = got.need;
+    if (what === "sample") { answers[what] = bytesText(entry.head(limit)); continue; }   // (none when unread)
+    let data;
+    try {
+      data = bytesText(entry.read(limit));
+    } catch (e) {
+      if (!ioError(e)) throw e;
+      answers[what] = { error: strerror(e) };
+      continue;
+    }
+    if (what === "data") { answers[what] = true; text = data; } else answers[what] = data;   // (a whole file: the text)
+  }
+}
+
+/** What collect_file said a file is, added to `col`. */
+function addCollected(got, col, rel) {
+  for (const i of pathIssues(got.issues)) col.binaryIssues.push(i);
+  if (got.file) {
+    const f = { path: got.file.path, content: got.file.content, lang: got.file.lang, dep: got.file.dep };
+    if (got.file.vendor !== undefined) f.vendor = got.file.vendor;      // (its module or crate is read whole)
+    col.files.push(f);
+  }
+  if (got.manifest) col.manifests.push(got.manifest);
+  if (got.config) col.configs.push(got.config);
+  if (got.pth) col.pth.push(rel);
+}
+
+/** A coverage note the walk's I/O finds (collect_issue): "unreadable" (reason), "symlink" (target), "skipped_tree"
+ * (files, bytes). */
+function collectIssue(kind, path, args = {}) {
+  return issuesOf(path, [call("collect_issue", { ...args, kind, path })])[0];
+}
+const symlinkIssue = (path, target) => collectIssue("symlink", path, { target: String(target) });
+const unreadableIssue = (path, reason) => collectIssue("unreadable", path, { reason: String(reason) });
+const skippedTreeIssue = (rel, nFiles, nBytes) => collectIssue("skipped_tree", rel, { files: nFiles, bytes: nBytes });
+
+/**
+ * A project scan's walk of the folder `root` (core._collect's; what each entry is to the scan: the engine's,
+ * collect_dir), on the folders `tree` lists: each step, in the walk's order (each folder's entries by code point,
+ * depth first). `tree`:
+ *   list(node) -> the folder's entries, [{name, node, kind: "file" (size) | "dir" (key: its identity, or null) |
+ *     "link" (target) | "special" (code: fifo, socket, char, block, other) | "error" (why)}]; throws when the folder
+ *     cannot be listed;
+ *   key(node) -> the root folder's identity (or null), asked once it is listed;
+ *   names(node) -> [[name, is a folder]] of a folder's entries (no link followed), or null when it can't be listed;
+ *   cargo(node, dirs) -> the names among `dirs` (folders in `node`) that hold a regular .cargo-checksum.json;
+ *   strerror(e) -> why a folder could not be listed.
+ * Steps: {issue}, {file: {node, rel, name, size, dep}}, {skip: {node, rel}}, {pycache: {node, rel, names}},
+ * {walk: {node, rel, dep}} (a folder the walk follows, with the dependency or vendor tree it is in: false, true or
+ * [kind, rel]) and {rootError} (the root could not be listed: nothing follows).
+ */
+function* walkSteps(tree, root, { includeDeps = false, exclude = [] } = {}) {
+  const excluded = [...new Set(exclude)].sort();
+  const seen = new Set();
+  const stack = [{ node: root, rel: "", dep: false }];
+  while (stack.length) {
+    const dir = stack.pop();
+    let entries;
+    try {
+      entries = tree.list(dir.node);
+      if (!dir.rel) { const key = tree.key(dir.node); if (key !== null) seen.add(key); }
+    } catch (e) {
+      if (!dir.rel) { yield { rootError: e }; return; }
+      yield { issue: unreadableIssue(dir.rel, tree.strerror(e)) };
+      continue;
+    }
+    const listed = entries.map((e) => (e.kind === "dir" ? [e.name, "dir", e.key, e.key !== null && seen.has(e.key)]
+      : [e.name, e.kind, e.kind === "file" ? e.size : e.kind === "link" ? e.target : e.kind === "special" ? e.code : e.why]));
+    const answers = { lists: [], cargo: [] };
+    let got;
+    for (;;) {
+      got = call("collect_dir", { dir: dir.rel, dep: dir.dep, entries: listed, excludes: excluded, includeDeps,
+        windows: WINDOWS, answers });
+      if (!got.need) break;
+      for (const k of got.need.lists) answers.lists.push([k, tree.names(entries[k].node)]);
+      for (const [k, dirs] of got.need.cargo) answers.cargo.push([k, tree.cargo(entries[k].node, dirs)]);
+    }
+    for (const key of got.seen) seen.add(key);
+    const names = entries.map((e) => e.name);
+    const push = [];
+    for (const [k, action, extra] of got.do) {
+      const { node, name } = entries[k];
+      const rel = dir.rel ? `${dir.rel}${PATH_SEP}${name}` : name;
+      if (action === "issue") yield { issue: pathIssues([extra])[0] };
+      else if (action === "file") yield { file: { node, rel, name, size: entries[k].size, dep: dir.dep } };
+      else if (action === "skip") yield { skip: { node, rel } };
+      else if (action === "pycache") yield { pycache: { node, rel, names } };
+      else {
+        const walk = { node, rel, dep: dir.dep || (Array.isArray(extra[1]) ? [extra[1][0], rel] : extra[1]) };
+        push.push(walk);
+        yield { walk };                 // (a folder followed: nothing to take)
+      }
+    }
+    for (let k = push.length - 1; k >= 0; k--) stack.push(push[k]);   // pop order = the engine's, depth-first
+  }
+}
+
+/**
+ * Take a step of walkSteps into `col` (collectFiles' collection): a finding, a file collected (collectEntry), a
+ * pruned tree counted (Q-SKIPPED-TREE) or a __pycache__ checked. `tree` as walkSteps', and:
+ *   entry(node, rel, name, size, dep) -> collectEntry's entry for a file;
+ *   stats(node) -> [files, bytes] of a pruned tree;
+ *   list(node, {pycache: true}) -> a __pycache__'s entries (any reparse point a link); head(node, n) -> a file's first
+ *     n bytes (throws when it can't be read).
+ * `ioError(e)`: whether an error is the I/O's (the file is Q-UNREADABLE; anything else: its scan failed).
+ */
+function takeStep(step, col, tree, { ioError = () => false, strerror = (e) => String(e && e.message) } = {}) {
+  if (step.issue) col.binaryIssues.push(step.issue);
+  else if (step.file) {
+    const { node, rel, name, size, dep } = step.file;
+    try {
+      collectEntry(tree.entry(node, rel, name, size, dep), col, { ioError, strerror });
+    } catch (e) {
+      col.binaryIssues.push(ioError(e) ? unreadableIssue(rel, strerror(e)) : scanErrorIssue(rel, e));
+    }
+  } else if (step.skip) {
+    const [nFiles, nBytes] = tree.stats(step.skip.node);
+    col.skippedIssues.push(skippedTreeIssue(step.skip.rel, nFiles, nBytes));
+  } else if (step.pycache) {
+    try { checkPycache(tree, step.pycache, col.binaryIssues, strerror); } catch (e) {
+      col.binaryIssues.push(scanErrorIssue(step.pycache.rel, e));
+    }
+  }
+}
+
+/** __pycache__ is not source-scanned; every .pyc directly inside is checked (the engine's: collect_pycache). */
+function checkPycache(tree, { node, rel, names }, issues, strerror) {
+  let entries;
+  try { entries = tree.list(node, { pycache: true }); } catch (e) { issues.push(unreadableIssue(rel, strerror(e))); return; }
+  const listed = entries.map((e) => [e.name, e.kind, e.kind === "file" ? e.size : e.kind === "link" ? e.target
+    : e.kind === "special" ? e.code : e.why]);
+  const files = new Map(entries.filter((e) => e.kind === "file").map((e) => [e.name, e.node]));
+  const headers = {};
+  for (;;) {
+    const got = call("collect_pycache", { dir: rel, entries: listed, parent: [...names].sort(), windows: WINDOWS,
+      answers: { headers } });
+    if (!got.need) { for (const i of pathIssues(got.issues)) issues.push(i); return; }
+    for (const name of got.need) {
+      try { headers[name] = bytesText(tree.head(files.get(name), 16)); } catch (e) { headers[name] = { error: strerror(e) }; }
+    }
+  }
+}
+return { WINDOWS, MAX_FILE_BYTES, pathIssues, collectEntry, collectIssue, symlinkIssue, unreadableIssue, skippedTreeIssue, walkSteps, takeStep };
+})();
+
+/* ======== js/src/lib/binary.js ======== */
+const M$7 = (() => {
+const { call, issuesOf, bytesText } = M$1;
+// Binary / compiled-artifact detection and the __pycache__ bytecode checks: core.classify_binary,
+// disguised_binary, looks_binary and pyc_issues, the engine's for both packages (BR-7 step 3 d, 0.1.9: binary.rs),
+// used for every non-source regular file in a directory scan (shared semantics spec 9) and for bytecode (spec 8).
+// A file's bytes go to the engine as latin-1 text, a character per byte. Zero-dependency leaf.
+
+
+
+/** Do paths use "\\" as a separator too (Windows, as os.path does there)? Not in a browser. */
+const WINDOWS = typeof process !== "undefined" && process.platform === "win32";
+
+/**
+ * os.path.splitext(path)[1]: from the base name's last dot, but not when every
+ * dot before it is leading (".bashrc", "..js", "...py" have no extension;
+ * Node's extname says ".js" for "..js"). Separators as os.path uses them here:
+ * "/", and on Windows "\\" too.
+ */
+function pyExt(path) {
+  const p = String(path);
+  let s = p.lastIndexOf("/");
+  if (WINDOWS) s = Math.max(s, p.lastIndexOf("\\"));
+  const dot = p.lastIndexOf(".");
+  if (dot <= s) return "";
+  for (let i = s + 1; i < dot; i++) if (p[i] !== ".") return p.slice(dot);
+  return "";
+}
+
+/** MPEG transport stream video: the extensions it shares with TypeScript, and .m2ts (core.MPEG_TS_EXTS). */
+const MPEG_TS_EXTS = new Set([".ts", ".mts", ".m2ts"]);
+
+/** Bytes read from each non-source file for classification (spec 9). */
+const HEADER_SAMPLE = 512;
+/** The leading bytes disguisedBinary reads (core.DISGUISE_SAMPLE_BYTES). */
+const DISGUISE_SAMPLE = 2048;
+/** The leading bytes classifyBinary reads (its entropy's sample). */
+const CLASSIFY_SAMPLE = 8192;
+const PYC_HEADER = 16;
+
+/** MPEG transport stream: a sync byte every 188 bytes (core._mpeg_ts). */
+const mpegTs = (h) => call("binary_check", { check: "mpeg_ts" }, bytesText(h, 377));
+
+/**
+ * Heuristic text/binary classification from a leading byte sample (core.looks_binary): only bytes that cannot be
+ * text count — bytes of invalid UTF-8 sequences and C0 controls other than whitespace and ESC (NUL included); more
+ * than 30% of the sample → binary.
+ */
+function looksBinary(sample) {
+  if (!sample.length) return false;
+  return call("binary_check", { check: "looks" }, bytesText(sample));
+}
+
+/**
+ * Supply-chain issue for a suspicious non-source file, or null (core.classify_binary).
+ * context: "sdist" | "npm" | "wheel" | "repo"; data: leading bytes; size: full size.
+ */
+function classifyBinary(path, data, size, context = "repo") {
+  const got = call("binary_classify", { path, size, context, windows: WINDOWS, neumaier: false },
+    bytesText(data, CLASSIFY_SAMPLE));
+  return got === null ? null : issuesOf(path, [got])[0];
+}
+
+/**
+ * SC-BINARY, CRITICAL, for a program under a source file's name (0.1.8): an executable's or a compiled module's
+ * bytes (a Windows PE among them) in a file named as source code. Unlike a binary named for what it is
+ * (classifyBinary) it is a disguise. Else null (core.disguised_binary).
+ */
+function disguisedBinary(path, data) {
+  const got = call("binary_disguised", { path, windows: WINDOWS }, bytesText(data, DISGUISE_SAMPLE));
+  return got === null ? null : issuesOf(path, [got])[0];
+}
+
+// ---- __pycache__ bytecode (spec 8) ----------------------------------------
+/**
+ * SC-PYC-UNCHECKED / SC-PYC-ORPHAN for one .pyc in a __pycache__ directory (core.pyc_issues). `header` is the first
+ * bytes of the file; `hasSource` whether the matching <module>.py(w) sits next to __pycache__.
+ */
+function pycIssues(path, header, hasSource) {
+  return issuesOf(path, call("pyc_issues", { path, has_source: !!hasSource }, bytesText(header, PYC_HEADER)));
+}
+
+/** The module a __pycache__ entry was compiled from: "x.cpython-311.pyc" → "x". */
+function pycModule(name) {
+  return String(name).split(".")[0];
+}
+return { pyExt, MPEG_TS_EXTS, HEADER_SAMPLE, DISGUISE_SAMPLE, PYC_HEADER, mpegTs, looksBinary, classifyBinary, disguisedBinary, pycIssues, pycModule };
+})();
+
 /* ======== js/src/scanner/rules.js ======== */
 const M$8 = (() => {
-const { pyRe } = M$6;
+const { pyRe } = M$2;
 // Severity order and type names, and the two whole-text SQL rules the SQL
 // pass (sql.js scanSqlNowhere, twin of core.scan_sql_nowhere) fires: their
 // pattern text copied verbatim from lazaret.scanner.core's TEXT_RULES and
@@ -34137,7 +34253,7 @@ return { SEV_ORDER, TYPES, NOWHERE_RULES };
 
 /* ======== js/src/lib/lexer.js ======== */
 const M$9 = (() => {
-const { pyStrip } = M$6;
+const { pyStrip } = M$2;
 const { call } = M$1;
 // Comment lexer shared by rule skipping, suppression markers, taint and the
 // metrics: the native engine's (`lex_comment_spans`: rust/crates/
@@ -34287,7 +34403,7 @@ return { jsxReading, commentSpans, lineStarts, lexLines, isComment };
 
 /* ======== js/src/scanner/engine.js ======== */
 const M$10 = (() => {
-const { pyRe } = M$6;
+const { pyRe } = M$2;
 const { lexLines } = M$9;
 // Obfuscation/suppression helpers — twins of lazaret.scanner.core
 // (B64_BLOB_RE, OBF_IDENT_RE, SUPPRESS_RE, is_suppressed).
@@ -34372,13 +34488,13 @@ function makeSuppressor(lines, lang, { dep = false, lex = null } = {}) {
 function isSuppressed(issue, lines, lang = "js", dep = false) {
   return makeSuppressor(lines, lang, { dep })(issue);
 }
-return { mkIssue: M$7.mkIssue, mkIssues: M$7.mkIssues, isComment: M$9.isComment, B64_BLOB_RE, OBF_IDENT_RE, CHARCODE_RE, SUPPRESS_RE, UNSUPPRESSIBLE_PREFIXES, makeSuppressor, isSuppressed };
+return { mkIssue: M$4.mkIssue, mkIssues: M$4.mkIssues, isComment: M$9.isComment, B64_BLOB_RE, OBF_IDENT_RE, CHARCODE_RE, SUPPRESS_RE, UNSUPPRESSIBLE_PREFIXES, makeSuppressor, isSuppressed };
 })();
 
 /* ======== js/src/lib/encoding.js ======== */
 const M$11 = (() => {
 const { call, issuesOf, bytesText } = M$1;
-const { REDACT } = M$2;
+const { REDACT } = M$3;
 // Source decoding (shared semantics specs 4 and 15), the engine's for both packages (BR-7 step 4 b, 0.1.9:
 // decode/), and file-name decoding (spec 11).
 
@@ -34474,8 +34590,8 @@ return { decodeSource, decodeMember, normalizeNewlines, fsNameToString };
 const M$12 = (() => {
 const { mkIssues } = M$10;
 const { jsxReading } = M$9;
-const { REDACT } = M$2;
-const { truncatedIssue } = M$7;
+const { REDACT } = M$3;
+const { truncatedIssue } = M$4;
 const { normalizeNewlines } = M$11;
 const { call, nodeCandidates, scanDependencyFile, scanProjectFile, scanConfig, taintFindings, NativeExhausted, EXHAUSTED } = M$1;
 // scanFile — twin of lazaret.scanner.core.scan_file, implementing the
@@ -34615,11 +34731,11 @@ return { isComment: M$10.isComment, EXHAUSTED, detectLang, taintScan, scanFile, 
 
 /* ======== js/src/lib/supplychain.js ======== */
 const M$13 = (() => {
-const { mkIssue } = M$7;
-const { truncatedIssue } = M$7;
-const { pyRe, pyRepr, MAX_JSON_DEPTH, PY_ORDER } = M$6;
+const { mkIssue } = M$4;
+const { truncatedIssue } = M$4;
+const { pyRe, pyRepr, MAX_JSON_DEPTH, PY_ORDER } = M$2;
 const { call, hookIsSuspicious, issuesOf, NativeExhausted, EXHAUSTED } = M$1;
-const { REDACT, redactText } = M$2;
+const { REDACT, redactText } = M$3;
 // Supply-chain manifests (package.json lifecycle scripts and dependencies,
 // binding.gyp actions and command expansions): the engine's since BR-7's step
 // 3 (b) (rust/crates/lazaret-engine/src/manifest/, the scan_manifest,
@@ -34789,7 +34905,7 @@ function dependencyUrlRisk(spec) {
 function scanGyp(path, content) {
   return engineIssues(path, "scan_gyp", {}, content);
 }
-return { SECRET_RULES: M$2.SECRET_RULES, REDACT_PLACEHOLDER: M$2.REDACT_PLACEHOLDER, redactContextLine: M$2.redactContextLine, redactResult: M$2.redactResult, setRedactSecrets: M$2.setRedactSecrets, hookIsSuspicious, NPM_INSTALL_SCRIPTS, NPM_PREPARE_SCRIPTS, NPM_LOCAL_INSTALL_SCRIPTS, NPM_LIFECYCLE_SCRIPTS, isRootManifest, INSTALL_HOOK_RE, HOOK_COMMANDS, scInstallHookIssue, MANIFEST_DEPTH_MSG, GYP_MAX_HOOK_FINDINGS, loadManifest, scanManifest, dependencyUrlRisk, scanGyp };
+return { SECRET_RULES: M$3.SECRET_RULES, REDACT_PLACEHOLDER: M$3.REDACT_PLACEHOLDER, redactContextLine: M$3.redactContextLine, redactResult: M$3.redactResult, setRedactSecrets: M$3.setRedactSecrets, hookIsSuspicious, NPM_INSTALL_SCRIPTS, NPM_PREPARE_SCRIPTS, NPM_LOCAL_INSTALL_SCRIPTS, NPM_LIFECYCLE_SCRIPTS, isRootManifest, INSTALL_HOOK_RE, HOOK_COMMANDS, scInstallHookIssue, MANIFEST_DEPTH_MSG, GYP_MAX_HOOK_FINDINGS, loadManifest, scanManifest, dependencyUrlRisk, scanGyp };
 })();
 
 /* ======== js/src/scanner/lines.js ======== */
@@ -34816,9 +34932,9 @@ return { normalizeSource, splitLines };
 
 /* ======== js/src/scanner/flow.js ======== */
 const M$15 = (() => {
-const { cmpCodePoints } = M$6;
+const { cmpCodePoints } = M$2;
 const { jsFlow, pyFlow } = M$1;
-const { REDACT, redactFileIssues } = M$2;
+const { REDACT, redactFileIssues } = M$3;
 const { splitLines } = M$14;
 // Cross-function and cross-file taint flows in Python and JavaScript: the twin
 // of lazaret/scanner/flow.py (_analyze_python, _analyze_js, analyze). The two
@@ -34997,7 +35113,7 @@ return { FLOW_OPTIONS, analyzeFlows, redactFlowIssues };
 
 /* ======== js/src/scancollection.js ======== */
 const M$16 = (() => {
-const { scanErrorIssue } = M$7;
+const { scanErrorIssue } = M$4;
 const { scanFile, scanConfigFile, treeReader } = M$12;
 const { scanManifest, scanGyp } = M$13;
 const { analyzeFlows, redactFlowIssues } = M$15;
@@ -35178,26 +35294,28 @@ return { localIso, CROSS_FILE_LABEL, findingRows, regrade, gradeResult };
 
 /* ======== js/dashboard/page.js ======== */
 const M$19 = (() => {
-const { collectEntry } = M$4;
-const { HEADER_SAMPLE, DISGUISE_SAMPLE } = M$5;
-const { CONFIG_SCAN_CAP } = M$3;
-const { scanErrorIssue } = M$7;
-const { redactResult } = M$2;
+const { collectEntry, takeStep, walkSteps } = M$6;
+const { HEADER_SAMPLE, DISGUISE_SAMPLE } = M$7;
+const { CONFIG_SCAN_CAP } = M$5;
+const { scanErrorIssue } = M$4;
+const { redactResult } = M$3;
 const { SEV_ORDER, TYPES } = M$8;
 const { detectLang } = M$12;
 const { collectionIssues } = M$16;
 const { gradeResult, localIso } = M$18;
 const { loadEngine } = M$0;
 // The browser dashboard (python/src/lazaret/web/lazaret.html): its input, its output and nothing else. The scan is
-// the npm package's (lib/collect.js collectEntry for each upload, as the CLI's walk collects each file it meets;
-// scancollection.js; result.js) on the engine the page carries (./wasmload.js), so the page reports what the CLI
-// reports for the same files. scripts/make_dashboard.py builds the page from this module and those it imports.
+// the npm package's (lib/collect.js: a folder upload walked as the CLI walks a folder, walkSteps and takeStep, and
+// each file uploaded collected as the walk collects a file it meets, collectEntry; scancollection.js; result.js) on
+// the engine the page carries (./wasmload.js), so the page reports what the CLI reports for the same files.
+// scripts/make_dashboard.py builds the page from this module and those it imports.
 //
-// Where the page and the CLI differ, it is input: the page reads the files it is given (no directory walk, so no
-// pruned trees, links or unreadable entries; nothing is a dependency's) or the code pasted into it; it does not
-// follow a package.json's install hooks into the files they run, which the CLI reads from disk (deps.js
-// projectHookChecks); and it scans on the tab's thread, so a file over PAGE_MAX_FILE_BYTES (the CLI's default
-// limit until 0.1.9) is not read but reported SC-TRUNCATED. Every finding is redacted, as the CLI's by default.
+// Where the page and the CLI differ, it is input: the page reads the files and the folder it is given (a browser
+// gives no links, special files or folders it could not list, and the files it can't read are Q-UNREADABLE) or the
+// code pasted into it; it scans as `lazaret <folder>` does, without --deps (a dependency's tree is counted, not read);
+// it does not follow a package.json's install hooks into the files they run, which the CLI reads from disk (deps.js
+// projectHookChecks); and it scans on the tab's thread, so a file over PAGE_MAX_FILE_BYTES (the CLI's default limit
+// until 0.1.9) is not read but reported SC-TRUNCATED. Every finding is redacted, as the CLI's by default.
 
 
 
@@ -35231,21 +35349,102 @@ function pageEntry(rel, size, bytes) {
   };
 }
 
-/** The result for `entries` (the CLI's scan of a directory holding those files), with their names and the time. */
-function scanEntries(entries) {
+/** A file of a folder upload that could not be read (Q-UNREADABLE, as the CLI's walk reports one). */
+class ReadError extends Error {}
+
+/**
+ * The folders and files of a folder upload, as FOLDER lists and reads them for lib/collect.js' walk: `picked` the
+ * files the browser gives (each with its path in the folder picked, webkitRelativePath). A folder node is
+ * {dirs, files, id}, a file node {file, size, bytes (what the page read of it), error}. -> {root, name: the folder's}
+ */
+function folderTree(picked) {
+  let ids = 0;
+  const folder = () => ({ dirs: new Map(), files: new Map(), id: ids++ });
+  const root = folder();
+  let name = "";
+  for (const f of picked) {
+    const parts = String(f.webkitRelativePath || f.name).split("/");
+    if (parts.length < 2) continue;
+    name = parts[0];                                     // (the folder picked)
+    let d = root;
+    for (const p of parts.slice(1, -1)) {
+      if (!d.dirs.has(p)) d.dirs.set(p, folder());
+      d = d.dirs.get(p);
+    }
+    d.files.set(parts.at(-1), { file: f, size: f.size, bytes: null, error: null });
+  }
+  return { root, name };
+}
+
+/** A folder upload as lib/collect.js' walk lists and reads it (walkSteps' and takeStep's `tree`). */
+const FOLDER = {
+  list(node, { pycache = false } = {}) {
+    return [...[...node.dirs].map(([name, d]) => (pycache ? { name, node: d, kind: "special", code: "other" }
+      : { name, node: d, kind: "dir", key: d.id })),
+    ...[...node.files].map(([name, f]) => ({ name, node: f, kind: "file", size: f.size }))];
+  },
+  key: (node) => node.id,
+  names: (node) => [...[...node.dirs.keys()].map((n) => [n, true]), ...[...node.files.keys()].map((n) => [n, false])],
+  cargo: (node, dirs) => dirs.filter((d) => node.dirs.has(d) && node.dirs.get(d).files.has(".cargo-checksum.json")),
+  strerror: (e) => String(e && e.message),
+  entry(f, rel, name, size, dep) {
+    if (f.error) return { ...pageEntry(rel, size, new Uint8Array(0)), dep, read() { throw f.error; }, head: () => new Uint8Array(0) };
+    return { ...pageEntry(rel, size, f.bytes), dep };
+  },
+  head(f, n) { if (f.error) throw f.error; return f.bytes.subarray(0, n); },
+  stats(node) {
+    let nFiles = 0, nBytes = 0;
+    for (const stack = [node]; stack.length;) {
+      const d = stack.pop();
+      for (const sub of d.dirs.values()) stack.push(sub);
+      for (const f of d.files.values()) { nFiles++; nBytes += f.size; }
+    }
+    return [nFiles, nBytes];
+  },
+};
+
+/** The steps of the CLI's walk of a folder upload (`lazaret <folder>`, no --deps), and the bytes of it they read
+ * (a file the walk collects: whole up to READ_WHOLE, else its first READ_HEAD; a .pyc's header) -> the steps. */
+async function walkFolder(tree) {
+  const steps = [...walkSteps(FOLDER, tree.root)];
+  const reads = [];
+  for (const step of steps) {
+    if (step.file) reads.push([step.file.node, step.file.size > READ_WHOLE ? READ_HEAD : null]);
+    else if (step.pycache) for (const f of step.pycache.node.files.values()) reads.push([f, 16]);
+  }
+  await Promise.all(reads.map(async ([f, limit]) => {
+    try {
+      f.bytes = new Uint8Array(await (limit === null ? f.file : f.file.slice(0, limit)).arrayBuffer());
+    } catch (e) {
+      f.error = new ReadError(e && e.message ? e.message : String(e));
+    }
+  }));
+  return steps;
+}
+
+/** The result for `steps` (walkFolder's of a folder upload) and `entries` (files collected as the walk collects one:
+ * the files uploaded, the code pasted), the CLI's scan of a directory holding them, with their names and the time. */
+function scanEntries(entries, steps = []) {
   const col = { files: [], manifests: [], pth: [], configs: [], binaryIssues: [], skippedIssues: [],
     maxFileBytes: PAGE_MAX_FILE_BYTES };
+  const files = [];
+  for (const step of steps) {
+    if (step.file) files.push(step.file.rel);
+    takeStep(step, col, FOLDER, { ioError: (e) => e instanceof ReadError, strerror: FOLDER.strerror });
+  }
   for (const e of entries) {
+    files.push(e.rel);
     try { collectEntry(e, col); } catch (err) { col.binaryIssues.push(scanErrorIssue(e.rel, err)); }
   }
   const res = redactResult(gradeResult(col.files, collectionIssues(col)));
   res.metrics.configFiles = col.configs.length;
-  return { files: entries.map((e) => e.rel), scannedAt: localIso(), ...res };
+  return { files, scannedAt: localIso(), ...res };
 }
 
 /* ======== the page ======== */
 const $ = (s) => document.querySelector(s);
 let uploaded = [];            // [{rel, size, bytes}] in the walk's order (by name)
+let folderSteps = [];         // a folder upload's walk (walkFolder), its bytes read
 let lastResult = null;
 const fSev = new Set(), fType = new Set();
 let fText = "";
@@ -35264,6 +35463,8 @@ const engineReady = loadEngine().then(() => true, (e) => {
 
 $("#files").addEventListener("change", async (e) => {
   uploaded = [];
+  folderSteps = [];
+  $("#folder").value = "";
   const readErrs = [];
   const picked = [...e.target.files];
   // Read every file at once; a failed read must not abort the batch (G18): collect it, keep going, and always
@@ -35285,6 +35486,29 @@ $("#files").addEventListener("change", async (e) => {
   }
 });
 
+$("#folder").addEventListener("change", async (e) => {
+  uploaded = [];
+  folderSteps = [];
+  $("#filelist").innerHTML = "";
+  const tree = folderTree([...e.target.files]);
+  if (!tree.name) return;
+  setStatus("Reading the folder…");
+  try {
+    if (!(await engineReady)) { setStatus(engineError); return; }
+    await loadEngine();
+    folderSteps = await walkFolder(tree);
+    setStatus("");
+  } catch (err) {
+    setStatus(`<div class="read-errs"><b>The folder could not be read:</b> ${esc(err && err.message ? err.message : err)}</div>`);
+    return;
+  }
+  $("#code").value = "";                                   // a folder replaces pasted code and files
+  $("#files").value = "";
+  const n = folderSteps.filter((s) => s.file).length, skipped = folderSteps.filter((s) => s.skip).length;
+  $("#filelist").innerHTML = `<b>${esc(tree.name)}:</b> ${n} file(s) to scan`
+    + (skipped ? `, ${skipped} folder(s) not read (dependencies, version control: as <code>lazaret &lt;folder&gt;</code> without --deps)` : "");
+});
+
 /** What the page scans: the uploads, and the pasted code as pasted-code.<py|js|sql> (its UTF-8 bytes). */
 function pageEntries() {
   const entries = uploaded.map((f) => pageEntry(f.rel, f.size, f.bytes));
@@ -35301,7 +35525,7 @@ function pageEntries() {
 
 $("#scanBtn").addEventListener("click", async () => {
   const entries = pageEntries();
-  if (!entries.length) { alert("Paste some code or upload files first."); return; }
+  if (!entries.length && !folderSteps.length) { alert("Paste some code or upload files first."); return; }
   const btn = $("#scanBtn");
   btn.disabled = true;
   setStatus("Scanning…");
@@ -35309,7 +35533,7 @@ $("#scanBtn").addEventListener("click", async () => {
     if (!(await engineReady)) { setStatus(engineError); return; }
     await loadEngine();                   // (instances made ahead again, after a scan that used one)
     await nextFrame();                    // the status shown before the scan holds the tab
-    lastResult = scanEntries(entries);
+    lastResult = scanEntries(entries, folderSteps);
     setStatus("");
   } catch (e) {
     setStatus(`<div class="read-errs"><b>The scan failed:</b> ${esc(e && e.message ? e.message : e)}</div>`);
@@ -35532,11 +35756,14 @@ EXEC xp_cmdshell 'whoami';                      -- OS command execution
 SELECT LOAD_FILE('/etc/passwd');                -- filesystem access
 SELECT name INTO OUTFILE '/tmp/out.txt' FROM users;
 `;
-function clearUploads() { uploaded = []; $("#files").value = ""; $("#filelist").innerHTML = ""; }
+function clearUploads() {
+  uploaded = []; folderSteps = [];
+  $("#files").value = ""; $("#folder").value = ""; $("#filelist").innerHTML = "";
+}
 $("#samplePy").addEventListener("click", () => { clearUploads(); $("#code").value = SAMPLE_PY; $("#lang").value = "py"; });
 $("#sampleJs").addEventListener("click", () => { clearUploads(); $("#code").value = SAMPLE_JS; $("#lang").value = "js"; });
 $("#sampleSql").addEventListener("click", () => { clearUploads(); $("#code").value = SAMPLE_SQL; $("#lang").value = "sql"; });
-return { PAGE_MAX_FILE_BYTES, scanEntries, EXPORT_FORMAT };
+return { PAGE_MAX_FILE_BYTES, folderTree, walkFolder, scanEntries, EXPORT_FORMAT };
 })();
 </script>
 </body>

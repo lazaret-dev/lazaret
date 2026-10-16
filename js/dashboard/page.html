@@ -101,7 +101,7 @@
   <div class="panel">
     <h2>Analyze code</h2>
     <div class="input-grid">
-      <textarea id="code" spellcheck="false" placeholder="Paste Python, JavaScript, or SQL code here, or upload files →"></textarea>
+      <textarea id="code" spellcheck="false" placeholder="Paste Python, JavaScript, or SQL code here, or upload files or a folder →"></textarea>
       <div class="side">
         <select id="lang">
           <option value="auto">Language: auto-detect</option>
@@ -111,6 +111,9 @@
         </select>
         <label class="filebtn">Upload files
           <input type="file" id="files" multiple>
+        </label>
+        <label class="filebtn">Upload a folder
+          <input type="file" id="folder" webkitdirectory multiple>
         </label>
         <div class="filelist" id="filelist"></div>
         <button class="primary" id="scanBtn">Scan code</button>

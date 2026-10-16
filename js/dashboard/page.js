@@ -1,15 +1,17 @@
 // The browser dashboard (python/src/lazaret/web/lazaret.html): its input, its output and nothing else. The scan is
-// the npm package's (lib/collect.js collectEntry for each upload, as the CLI's walk collects each file it meets;
-// scancollection.js; result.js) on the engine the page carries (./wasmload.js), so the page reports what the CLI
-// reports for the same files. scripts/make_dashboard.py builds the page from this module and those it imports.
+// the npm package's (lib/collect.js: a folder upload walked as the CLI walks a folder, walkSteps and takeStep, and
+// each file uploaded collected as the walk collects a file it meets, collectEntry; scancollection.js; result.js) on
+// the engine the page carries (./wasmload.js), so the page reports what the CLI reports for the same files.
+// scripts/make_dashboard.py builds the page from this module and those it imports.
 //
-// Where the page and the CLI differ, it is input: the page reads the files it is given (no directory walk, so no
-// pruned trees, links or unreadable entries; nothing is a dependency's) or the code pasted into it; it does not
-// follow a package.json's install hooks into the files they run, which the CLI reads from disk (deps.js
-// projectHookChecks); and it scans on the tab's thread, so a file over PAGE_MAX_FILE_BYTES (the CLI's default
-// limit until 0.1.9) is not read but reported SC-TRUNCATED. Every finding is redacted, as the CLI's by default.
+// Where the page and the CLI differ, it is input: the page reads the files and the folder it is given (a browser
+// gives no links, special files or folders it could not list, and the files it can't read are Q-UNREADABLE) or the
+// code pasted into it; it scans as `lazaret <folder>` does, without --deps (a dependency's tree is counted, not read);
+// it does not follow a package.json's install hooks into the files they run, which the CLI reads from disk (deps.js
+// projectHookChecks); and it scans on the tab's thread, so a file over PAGE_MAX_FILE_BYTES (the CLI's default limit
+// until 0.1.9) is not read but reported SC-TRUNCATED. Every finding is redacted, as the CLI's by default.
 
-import { collectEntry } from "../src/lib/collect.js";
+import { collectEntry, takeStep, walkSteps } from "../src/lib/collect.js";
 import { HEADER_SAMPLE, DISGUISE_SAMPLE } from "../src/lib/binary.js";
 import { CONFIG_SCAN_CAP } from "../src/lib/configsecrets.js";
 import { scanErrorIssue } from "../src/lib/issue.js";
@@ -41,21 +43,102 @@ function pageEntry(rel, size, bytes) {
   };
 }
 
-/** The result for `entries` (the CLI's scan of a directory holding those files), with their names and the time. */
-export function scanEntries(entries) {
+/** A file of a folder upload that could not be read (Q-UNREADABLE, as the CLI's walk reports one). */
+class ReadError extends Error {}
+
+/**
+ * The folders and files of a folder upload, as FOLDER lists and reads them for lib/collect.js' walk: `picked` the
+ * files the browser gives (each with its path in the folder picked, webkitRelativePath). A folder node is
+ * {dirs, files, id}, a file node {file, size, bytes (what the page read of it), error}. -> {root, name: the folder's}
+ */
+export function folderTree(picked) {
+  let ids = 0;
+  const folder = () => ({ dirs: new Map(), files: new Map(), id: ids++ });
+  const root = folder();
+  let name = "";
+  for (const f of picked) {
+    const parts = String(f.webkitRelativePath || f.name).split("/");
+    if (parts.length < 2) continue;
+    name = parts[0];                                     // (the folder picked)
+    let d = root;
+    for (const p of parts.slice(1, -1)) {
+      if (!d.dirs.has(p)) d.dirs.set(p, folder());
+      d = d.dirs.get(p);
+    }
+    d.files.set(parts.at(-1), { file: f, size: f.size, bytes: null, error: null });
+  }
+  return { root, name };
+}
+
+/** A folder upload as lib/collect.js' walk lists and reads it (walkSteps' and takeStep's `tree`). */
+const FOLDER = {
+  list(node, { pycache = false } = {}) {
+    return [...[...node.dirs].map(([name, d]) => (pycache ? { name, node: d, kind: "special", code: "other" }
+      : { name, node: d, kind: "dir", key: d.id })),
+    ...[...node.files].map(([name, f]) => ({ name, node: f, kind: "file", size: f.size }))];
+  },
+  key: (node) => node.id,
+  names: (node) => [...[...node.dirs.keys()].map((n) => [n, true]), ...[...node.files.keys()].map((n) => [n, false])],
+  cargo: (node, dirs) => dirs.filter((d) => node.dirs.has(d) && node.dirs.get(d).files.has(".cargo-checksum.json")),
+  strerror: (e) => String(e && e.message),
+  entry(f, rel, name, size, dep) {
+    if (f.error) return { ...pageEntry(rel, size, new Uint8Array(0)), dep, read() { throw f.error; }, head: () => new Uint8Array(0) };
+    return { ...pageEntry(rel, size, f.bytes), dep };
+  },
+  head(f, n) { if (f.error) throw f.error; return f.bytes.subarray(0, n); },
+  stats(node) {
+    let nFiles = 0, nBytes = 0;
+    for (const stack = [node]; stack.length;) {
+      const d = stack.pop();
+      for (const sub of d.dirs.values()) stack.push(sub);
+      for (const f of d.files.values()) { nFiles++; nBytes += f.size; }
+    }
+    return [nFiles, nBytes];
+  },
+};
+
+/** The steps of the CLI's walk of a folder upload (`lazaret <folder>`, no --deps), and the bytes of it they read
+ * (a file the walk collects: whole up to READ_WHOLE, else its first READ_HEAD; a .pyc's header) -> the steps. */
+export async function walkFolder(tree) {
+  const steps = [...walkSteps(FOLDER, tree.root)];
+  const reads = [];
+  for (const step of steps) {
+    if (step.file) reads.push([step.file.node, step.file.size > READ_WHOLE ? READ_HEAD : null]);
+    else if (step.pycache) for (const f of step.pycache.node.files.values()) reads.push([f, 16]);
+  }
+  await Promise.all(reads.map(async ([f, limit]) => {
+    try {
+      f.bytes = new Uint8Array(await (limit === null ? f.file : f.file.slice(0, limit)).arrayBuffer());
+    } catch (e) {
+      f.error = new ReadError(e && e.message ? e.message : String(e));
+    }
+  }));
+  return steps;
+}
+
+/** The result for `steps` (walkFolder's of a folder upload) and `entries` (files collected as the walk collects one:
+ * the files uploaded, the code pasted), the CLI's scan of a directory holding them, with their names and the time. */
+export function scanEntries(entries, steps = []) {
   const col = { files: [], manifests: [], pth: [], configs: [], binaryIssues: [], skippedIssues: [],
     maxFileBytes: PAGE_MAX_FILE_BYTES };
+  const files = [];
+  for (const step of steps) {
+    if (step.file) files.push(step.file.rel);
+    takeStep(step, col, FOLDER, { ioError: (e) => e instanceof ReadError, strerror: FOLDER.strerror });
+  }
   for (const e of entries) {
+    files.push(e.rel);
     try { collectEntry(e, col); } catch (err) { col.binaryIssues.push(scanErrorIssue(e.rel, err)); }
   }
   const res = redactResult(gradeResult(col.files, collectionIssues(col)));
   res.metrics.configFiles = col.configs.length;
-  return { files: entries.map((e) => e.rel), scannedAt: localIso(), ...res };
+  return { files, scannedAt: localIso(), ...res };
 }
 
 /* ======== the page ======== */
 const $ = (s) => document.querySelector(s);
 let uploaded = [];            // [{rel, size, bytes}] in the walk's order (by name)
+let folderSteps = [];         // a folder upload's walk (walkFolder), its bytes read
 let lastResult = null;
 const fSev = new Set(), fType = new Set();
 let fText = "";
@@ -74,6 +157,8 @@ const engineReady = loadEngine().then(() => true, (e) => {
 
 $("#files").addEventListener("change", async (e) => {
   uploaded = [];
+  folderSteps = [];
+  $("#folder").value = "";
   const readErrs = [];
   const picked = [...e.target.files];
   // Read every file at once; a failed read must not abort the batch (G18): collect it, keep going, and always
@@ -95,6 +180,29 @@ $("#files").addEventListener("change", async (e) => {
   }
 });
 
+$("#folder").addEventListener("change", async (e) => {
+  uploaded = [];
+  folderSteps = [];
+  $("#filelist").innerHTML = "";
+  const tree = folderTree([...e.target.files]);
+  if (!tree.name) return;
+  setStatus("Reading the folder…");
+  try {
+    if (!(await engineReady)) { setStatus(engineError); return; }
+    await loadEngine();
+    folderSteps = await walkFolder(tree);
+    setStatus("");
+  } catch (err) {
+    setStatus(`<div class="read-errs"><b>The folder could not be read:</b> ${esc(err && err.message ? err.message : err)}</div>`);
+    return;
+  }
+  $("#code").value = "";                                   // a folder replaces pasted code and files
+  $("#files").value = "";
+  const n = folderSteps.filter((s) => s.file).length, skipped = folderSteps.filter((s) => s.skip).length;
+  $("#filelist").innerHTML = `<b>${esc(tree.name)}:</b> ${n} file(s) to scan`
+    + (skipped ? `, ${skipped} folder(s) not read (dependencies, version control: as <code>lazaret &lt;folder&gt;</code> without --deps)` : "");
+});
+
 /** What the page scans: the uploads, and the pasted code as pasted-code.<py|js|sql> (its UTF-8 bytes). */
 function pageEntries() {
   const entries = uploaded.map((f) => pageEntry(f.rel, f.size, f.bytes));
@@ -111,7 +219,7 @@ function pageEntries() {
 
 $("#scanBtn").addEventListener("click", async () => {
   const entries = pageEntries();
-  if (!entries.length) { alert("Paste some code or upload files first."); return; }
+  if (!entries.length && !folderSteps.length) { alert("Paste some code or upload files first."); return; }
   const btn = $("#scanBtn");
   btn.disabled = true;
   setStatus("Scanning…");
@@ -119,7 +227,7 @@ $("#scanBtn").addEventListener("click", async () => {
     if (!(await engineReady)) { setStatus(engineError); return; }
     await loadEngine();                   // (instances made ahead again, after a scan that used one)
     await nextFrame();                    // the status shown before the scan holds the tab
-    lastResult = scanEntries(entries);
+    lastResult = scanEntries(entries, folderSteps);
     setStatus("");
   } catch (e) {
     setStatus(`<div class="read-errs"><b>The scan failed:</b> ${esc(e && e.message ? e.message : e)}</div>`);
@@ -342,7 +450,10 @@ EXEC xp_cmdshell 'whoami';                      -- OS command execution
 SELECT LOAD_FILE('/etc/passwd');                -- filesystem access
 SELECT name INTO OUTFILE '/tmp/out.txt' FROM users;
 `;
-function clearUploads() { uploaded = []; $("#files").value = ""; $("#filelist").innerHTML = ""; }
+function clearUploads() {
+  uploaded = []; folderSteps = [];
+  $("#files").value = ""; $("#folder").value = ""; $("#filelist").innerHTML = "";
+}
 $("#samplePy").addEventListener("click", () => { clearUploads(); $("#code").value = SAMPLE_PY; $("#lang").value = "py"; });
 $("#sampleJs").addEventListener("click", () => { clearUploads(); $("#code").value = SAMPLE_JS; $("#lang").value = "js"; });
 $("#sampleSql").addEventListener("click", () => { clearUploads(); $("#code").value = SAMPLE_SQL; $("#lang").value = "sql"; });

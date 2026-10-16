@@ -1,8 +1,8 @@
 // Directory walking and report-path safety — zero-dependency leaf helpers.
 // Never import from ../scanner/ (RESTRUCTURE.md §5).
 //
-// The walk (collectFiles) lists folders, reads files and keeps the folders it has seen; what each entry is to the
-// scan is the engine's (collect.rs, BR-7 step 4 e), as for core's walk. Report paths: twin of
+// The walk (collectFiles) on the disk: it lists folders and reads files for collect.js' walk (walkSteps, takeStep),
+// whose steps the engine decides (collect.rs, BR-7 step 4 e), as for core's walk. Report paths: twin of
 // lazaret.scanner.reports (validate_out_dir, _validate_path, is_our_report, write_report).
 
 import {
@@ -12,9 +12,11 @@ import {
 import { join, sep, resolve, dirname, basename, isAbsolute } from "node:path";
 import { randomBytes } from "node:crypto";
 import { fsNameToString } from "./encoding.js";
-import { scanErrorIssue } from "./issue.js";
-import { call, bytesText } from "./native.js";
-import { collectEntry, collectIssue, pathIssues, MAX_FILE_BYTES, WINDOWS } from "./collect.js";
+import {
+  MAX_FILE_BYTES, skippedTreeIssue, symlinkIssue, takeStep, unreadableIssue, walkSteps,
+} from "./collect.js";
+
+export { skippedTreeIssue, symlinkIssue, unreadableIssue };
 
 /** posixpath.normpath of a relative '/'-separated path. */
 export function normpathRel(path) {
@@ -61,9 +63,6 @@ function specialKind(st) {
   return "not a regular file";
 }
 
-export const symlinkIssue = (path, target) => collectIssue("symlink", path, { target: String(target) });
-export const unreadableIssue = (path, reason) => collectIssue("unreadable", path, { reason: String(reason) });
-export const skippedTreeIssue = (rel, nFiles, nBytes) => collectIssue("skipped_tree", rel, { files: nFiles, bytes: nBytes });
 /** Read at most `limit` bytes of a REGULAR file (never follows links, never blocks on a FIFO). */
 export function readBounded(path, limit) {
   const fd = openSync(path, C.O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_NOCTTY);
@@ -148,30 +147,44 @@ function listing(dirBuf) {
   } catch { return null; }
 }
 
-/** collect_dir until it needs nothing more (the folders it asks about: their entries; a vendor folder's
- * .cargo-checksum.json files). */
-function dirPlan(rel, dep, listed, paths, exclude, includeDeps) {
-  const answers = { lists: [], cargo: [] };
-  for (;;) {
-    const got = call("collect_dir", { dir: rel, dep, entries: listed, excludes: exclude, includeDeps, windows: WINDOWS,
-      answers });
-    if (!got.need) return got;
-    for (const k of got.need.lists) answers.lists.push([k, listing(paths[k])]);
-    for (const [k, dirs] of got.need.cargo) {
-      answers.cargo.push([k, dirs.filter((d) => {
-        try { return lstatSync(Buffer.concat([paths[k], SEP, Buffer.from(d), SEP, Buffer.from(".cargo-checksum.json")])).isFile(); }
-        catch { return false; }
-      })]);
-    }
-  }
-}
+/** The disk as collect.js' walk lists and reads it (walkSteps' and takeStep's `tree`): a node is a Buffer path. */
+const DISK = {
+  list(dirBuf, { pycache = false } = {}) {
+    return listDir(dirBuf).map((ent) => {
+      const node = childPath(dirBuf, ent.buf), name = ent.str;
+      let st;
+      try { st = lstatSync(node, { bigint: true }); } catch (e) { return { name, node, kind: "error", why: strerror(e) }; }
+      if (pycache) {                  // as core._check_pycache: any reparse point counts, file or directory
+        if (st.isSymbolicLink() || ent.link) return { name, node, kind: "link", target: readlinkText(node) };
+        if (st.isFile()) return { name, node, kind: "file", size: Number(st.size) };
+        return { name, node, kind: "special", code: "other" };
+      }
+      if (isLink(ent, node, st)) return { name, node, kind: "link", target: readlinkText(node) };
+      if (st.isDirectory()) return { name, node, kind: "dir", key: dirKey(st) };
+      if (!st.isFile()) return { name, node, kind: "special", code: specialCode(st) };
+      return { name, node, kind: "file", size: Number(st.size) };
+    });
+  },
+  key: (dirBuf) => dirKey(statSync(dirBuf, { bigint: true })),
+  names: listing,
+  cargo: (dirBuf, dirs) => dirs.filter((d) => {
+    try { return lstatSync(Buffer.concat([dirBuf, SEP, Buffer.from(d), SEP, Buffer.from(".cargo-checksum.json")])).isFile(); }
+    catch { return false; }
+  }),
+  strerror,
+  entry: fileEntry,
+  head: readBounded,
+  stats: treeStats,
+};
 
 /** "go" when the vendor directory `dirBuf` is Go's, "cargo" when it is cargo's, else null (the engine's: collect.rs).
  * The npm package's twin of core._dep_tree_kind for a vendor folder, for its tests. */
 export function vendorKind(dirBuf) {
-  const got = dirPlan("", false, [["vendor", "dir", null, false]], [dirBuf], [], true);
-  const walk = got.do.find(([, action]) => action === "walk");
-  return walk && Array.isArray(walk[2][1]) ? walk[2][1][0] : null;
+  const tree = { ...DISK, list: () => [{ name: "vendor", node: dirBuf, kind: "dir", key: null }], key: () => null };
+  for (const step of walkSteps(tree, null, { includeDeps: true })) {
+    if (step.walk) return Array.isArray(step.walk.dep) ? step.walk.dep[0] : null;
+  }
+  return null;
 }
 
 /** (file count, byte count) of a pruned tree — iterative, links not followed. */
@@ -195,8 +208,8 @@ function treeStats(dirBuf) {
 }
 
 /**
- * Collect the files to scan under `root` (core._collect's walk; what each entry is: the engine's, collect.rs).
- * Returns { files, manifests, pth, configs, binaryIssues, skippedIssues } —
+ * Collect the files to scan under `root` (core._collect's walk: collect.js' walkSteps on the disk; what each entry is:
+ * the engine's, collect.rs). Returns { files, manifests, pth, configs, binaryIssues, skippedIssues } —
  * files: [{path, content, lang, dep}], manifests: package.json and gyp
  * entries [{kind, path, content, dep}] (kind "package.json", "binding.gyp",
  * or "gyp" for any other .gyp / .gypi file), pth: paths of the .pth files
@@ -209,87 +222,16 @@ function treeStats(dirBuf) {
  */
 export function collectFiles(root, { includeDeps = false, exclude = [], maxFileBytes = MAX_FILE_BYTES } = {}) {
   const col = { files: [], manifests: [], pth: [], configs: [], binaryIssues: [], skippedIssues: [], maxFileBytes };
-  const issues = col.binaryIssues;
-  const excluded = [...new Set(exclude)].sort();
   const rootBuf = Buffer.from(resolve(root));
-  const seen = new Set();
-  const skipTree = (buf, rel) => { const [n, bytes] = treeStats(buf); col.skippedIssues.push(skippedTreeIssue(rel, n, bytes)); };
-  const stack = [{ buf: rootBuf, rel: "", dep: false }];
-  while (stack.length) {
-    const dir = stack.pop();
-    let entries;
-    try {
-      entries = listDir(dir.buf);
-      if (!dir.rel) { const key = dirKey(statSync(dir.buf, { bigint: true })); if (key) seen.add(key); }
-    } catch (e) {
-      if (!dir.rel) throw new ScanTargetError(`cannot read directory ${fsNameToString(rootBuf)}: ${strerror(e)}`);
-      issues.push(unreadableIssue(dir.rel, strerror(e)));
-      continue;
-    }
-    const listed = [], stats = [], paths = [];
-    for (const ent of entries) {
-      const full = childPath(dir.buf, ent.buf);
-      paths.push(full);
-      let st = null;
-      try { st = lstatSync(full, { bigint: true }); } catch (e) { listed.push([ent.str, "error", strerror(e)]); stats.push(null); continue; }
-      stats.push(st);
-      if (isLink(ent, full, st)) listed.push([ent.str, "link", readlinkText(full)]);
-      else if (st.isDirectory()) { const key = dirKey(st); listed.push([ent.str, "dir", key, key !== null && seen.has(key)]); }
-      else if (!st.isFile()) listed.push([ent.str, "special", specialCode(st)]);
-      else listed.push([ent.str, "file", Number(st.size)]);
-    }
-    const got = dirPlan(dir.rel, dir.dep, listed, paths, excluded, includeDeps);
-    for (const key of got.seen) seen.add(key);
-    const names = entries.map((e) => e.str);
-    const push = [];
-    for (const [k, action, extra] of got.do) {
-      const ent = entries[k], full = paths[k];
-      const rel = dir.rel ? `${dir.rel}${sep}${ent.str}` : ent.str;
-      if (action === "issue") issues.push(pathIssues([extra])[0]);
-      else if (action === "file") {
-        try {
-          collectEntry(fileEntry(full, rel, ent.str, Number(stats[k].size), dir.dep), col, { ioError, strerror });
-        } catch (e) {
-          if (ioError(e)) issues.push(unreadableIssue(rel, strerror(e)));
-          else issues.push(scanErrorIssue(rel, e));
-        }
-      } else if (action === "skip") skipTree(full, rel);
-      else if (action === "pycache") {
-        try { checkPycache(full, rel, names, issues); } catch (e) { issues.push(scanErrorIssue(rel, e)); }
-      } else push.push({ buf: full, rel, dep: dir.dep || (Array.isArray(extra[1]) ? [extra[1][0], rel] : extra[1]) });
-    }
-    for (let k = push.length - 1; k >= 0; k--) stack.push(push[k]);   // pop order = sorted, depth-first
+  for (const step of walkSteps(DISK, rootBuf, { includeDeps, exclude })) {
+    if (step.rootError) throw new ScanTargetError(`cannot read directory ${fsNameToString(rootBuf)}: ${strerror(step.rootError)}`);
+    takeStep(step, col, DISK, { ioError, strerror });
   }
   return col;
 }
 
 const specialCode = (st) => (st.isFIFO() ? "fifo" : st.isSocket() ? "socket" : st.isCharacterDevice() ? "char"
   : st.isBlockDevice() ? "block" : "other");
-
-/** __pycache__ is not source-scanned; every .pyc directly inside is checked (the engine's: collect.rs). */
-function checkPycache(dirBuf, rel, parentNames, issues) {
-  let entries;
-  try { entries = listDir(dirBuf); } catch (e) { issues.push(unreadableIssue(rel, strerror(e))); return; }
-  const listed = [], paths = {};
-  for (const ent of entries) {
-    const full = childPath(dirBuf, ent.buf);
-    let st;
-    try { st = lstatSync(full); } catch (e) { listed.push([ent.str, "error", strerror(e)]); continue; }
-    // as core._check_pycache: any reparse point counts, file or directory
-    if (st.isSymbolicLink() || ent.link) listed.push([ent.str, "link", readlinkText(full)]);
-    else if (st.isFile()) { listed.push([ent.str, "file", st.size]); paths[ent.str] = full; }
-    else listed.push([ent.str, "special", "other"]);
-  }
-  const headers = {};
-  for (;;) {
-    const got = call("collect_pycache", { dir: rel, entries: listed, parent: [...parentNames].sort(), windows: WINDOWS,
-      answers: { headers } });
-    if (!got.need) { for (const i of pathIssues(got.issues)) issues.push(i); return; }
-    for (const name of got.need) {
-      try { headers[name] = bytesText(readBounded(paths[name], 16)); } catch (e) { headers[name] = { error: strerror(e) }; }
-    }
-  }
-}
 
 // ---------------------------------------------------------------------------
 // Report paths (twin of lazaret.scanner.reports)
