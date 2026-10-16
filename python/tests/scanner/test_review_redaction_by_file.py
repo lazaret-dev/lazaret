@@ -32,7 +32,6 @@ from unittest import mock
 
 from lazaret.scanner import core
 from tests import _support
-from tests.scanner import _dashboard_vm as dash
 
 SEED = "q8Zr2LmX0vB7nTg4Wk1pYc9Hs6Jd3Fe5DUMMYVALUE9"
 SETTINGS = b"\xef\xbb\xbf# service settings\nSEED = \"" + SEED.encode() + b"\"\nDEBUG_LEVEL = 1\n"
@@ -147,24 +146,6 @@ class ReportTests(unittest.TestCase):
                 self.assertIn("X-CMD", text)
                 self.assertIn("Q-ENCODING", text)
                 self.assertNotIn(SEED, text, name)
-
-
-@dash.requires_node
-class DashboardTests(unittest.TestCase):
-    def test_uploads_redact_like_the_cli(self):
-        uploads = [("settings.py", SETTINGS), ("u7.py", UTF7),
-                   ("le.js", b"\xff\xfe" + ('const k = "' + SEED + '";\n').encode("utf-16-le"))]
-        (page,) = dash.run([{"op": "uploadScan", "files": [
-            {"name": n, "b64": base64.b64encode(d).decode("ascii")} for n, d in uploads]}])
-        key = lambda i: json.dumps(i, sort_keys=True, ensure_ascii=False)
-        for (name, data), got in zip(uploads, page):
-            with self.subTest(file=name):
-                lang = core.EXTS[os.path.splitext(name)[1]]
-                text, info = core.decode_source(data, lang)
-                cli = core.encoding_issues(name, text, info) + core.scan_file(name, text, lang)
-                self.assertEqual(sorted(map(key, got)), sorted(map(key, cli)))
-                self.assertIn("Q-ENCODING", {i["rule"] for i in got})
-                self.assertNotIn(SEED, json.dumps(got))
 
 
 if __name__ == "__main__":

@@ -12,7 +12,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { collectFiles, detectLang, scanFile, computeMetrics } from "../src/index.js";
-import { EXTS, DEP_LANGS } from "../src/lib/fs.js";
+import { EXTS, DEP_LANGS } from "../src/lib/collect.js";
 import { commentSpans } from "../src/lib/lexer.js";
 import { redactContextLine } from "../src/lib/redact.js";
 

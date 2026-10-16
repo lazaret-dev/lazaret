@@ -3,7 +3,10 @@
 // used for every non-source regular file in a directory scan (shared semantics spec 9) and for bytecode (spec 8).
 // A file's bytes go to the engine as latin-1 text, a character per byte. Zero-dependency leaf.
 
-import { call, issuesOf } from "./native.js";
+import { call, issuesOf, bytesText } from "./native.js";
+
+/** Do paths use "\\" as a separator too (Windows, as os.path does there)? Not in a browser. */
+const WINDOWS = typeof process !== "undefined" && process.platform === "win32";
 
 /**
  * os.path.splitext(path)[1]: from the base name's last dot, but not when every
@@ -14,7 +17,7 @@ import { call, issuesOf } from "./native.js";
 export function pyExt(path) {
   const p = String(path);
   let s = p.lastIndexOf("/");
-  if (process.platform === "win32") s = Math.max(s, p.lastIndexOf("\\"));
+  if (WINDOWS) s = Math.max(s, p.lastIndexOf("\\"));
   const dot = p.lastIndexOf(".");
   if (dot <= s) return "";
   for (let i = s + 1; i < dot; i++) if (p[i] !== ".") return p.slice(dot);
@@ -31,14 +34,6 @@ export const DISGUISE_SAMPLE = 2048;
 /** The leading bytes classifyBinary reads (its entropy's sample). */
 const CLASSIFY_SAMPLE = 8192;
 export const PYC_HEADER = 16;
-
-const WINDOWS = process.platform === "win32";       // ("\\" separates a path's folders too, as os.path does there)
-
-/** The first `n` of `data`'s bytes as the engine reads them: latin-1 text, a character per byte. */
-function bytesText(data, n = data.length) {
-  const buf = Buffer.isBuffer(data) ? data : Buffer.from(data.buffer, data.byteOffset, data.byteLength);
-  return buf.toString("latin1", 0, Math.min(n, buf.length));
-}
 
 /** MPEG transport stream: a sync byte every 188 bytes (core._mpeg_ts). */
 export const mpegTs = (h) => call("binary_check", { check: "mpeg_ts" }, bytesText(h, 377));

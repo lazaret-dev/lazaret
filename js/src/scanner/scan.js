@@ -8,7 +8,8 @@
 import { mkIssues } from "./engine.js";
 import { jsxReading } from "../lib/lexer.js";
 import { REDACT } from "../lib/redact.js";
-import { truncatedIssue, normalizeNewlines } from "../lib/fs.js";
+import { truncatedIssue } from "../lib/issue.js";
+import { normalizeNewlines } from "../lib/encoding.js";
 import { call, nodeCandidates, scanDependencyFile, scanProjectFile, scanConfig, taintFindings, NativeExhausted, EXHAUSTED }
   from "../lib/native.js";
 

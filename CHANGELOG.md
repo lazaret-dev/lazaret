@@ -939,6 +939,28 @@ aggregate):
   Held to core's code as it was, decoding every codec with Python's codecs (`test_decode_engine`,
   `test_decode_engine_codecs`), and the WebAssembly build to the library. The dashboard decodes as before until it
   runs the engine (step 5).
+- **The dashboard runs the engine (BR-7, step 5; no rule set change).** The browser dashboard
+  (`lazaret/web/lazaret.html`) carried its own port of the project scanner in JavaScript, held to the CLI by tests
+  of its rules, tables and decoders, and it drifted all the same (no Go or Rust, the .pth check by a pattern, its own
+  comment lexer, secret tests and clock, decoding as npm did before step 4 b). It now runs the npm package's
+  collection, scan and grading on the engine itself: the page carries the engine built as WebAssembly (gzipped, in a
+  data block it never runs, with the engine's notices, `rust/NOTICE` and the Unicode License v3), and
+  `scripts/make_dashboard.py` builds it from `js/dashboard/` (the page, its input and output) and the npm modules it
+  imports, which therefore use nothing of Node's: `lib/collect.js` (what the collection does with each file it
+  meets, out of `lib/fs.js`), `scancollection.js` (the scan of a collection, out of `project.js`), `result.js` (the
+  grading, out of `report.js`) and `lib/wasmload.js` (where the engine comes from; the page has its own). So an
+  upload is collected as the CLI collects a directory's files: any file is taken, a `.pth` file gets the engine's
+  check (B-5), Go and Rust sources are read (N-14), binaries are classified, config files are read for credentials
+  and the cross-file passes run; the result is the CLI's for a directory holding the files, every field
+  (`test_review_dashboard_parity`), with the files and the time, and the export is marked `lazaret-dashboard-2`. The
+  page does not walk a directory, follow a `package.json`'s install hooks into the files they run, or read a file
+  over 2,000,000 bytes (it scans on the tab's thread: SC-TRUNCATED, as before). Its CSP allows `'wasm-unsafe-eval'`
+  besides the script's hash, and the engine compiles as the page opens (0.13 s in Chromium). The page grows from
+  0.33 MB to 3.3 MB (the engine: 2.36 MB gzipped, 3.1 MB in base64; the script shrinks from 314 KB to 143 KB).
+  Gone: the page's port (its rule tables, lexer, decoders, redaction and grading), `scripts/dashboard_csp.py`, the
+  dashboard's copies in `make_codec_tables.py` and `make_unicode_tables.py`, and the tests of the port
+  (`test_review_dashboard_engine`, `_lexing`, `_perf`, `_perf_regex`, `_tables`, and the dashboard halves of eleven
+  review tests): the page is the npm package's code, held by its tests.
 - **Security: S-XML is a parser set to resolve external entities, not an import of xml.etree, xml.dom or xml.sax
   (Q-3; rule set 2.80.0).** Since Python 3.7.1 none of them resolves an external entity unless told to, and Expat
   2.4.1 refuses entity bombs, so the import flagged safe code: all 20 of BenchmarkPython's safe XXE cases (its 8 real

@@ -1,24 +1,29 @@
-// Runs the dashboard's inline <script> (python/src/lazaret/web/lazaret.html)
-// in node:vm with a minimal DOM stub, so tests can call its scanner and UI
-// handlers without a browser. Not a test itself; driven by _dashboard_vm.py.
+// Runs the dashboard (python/src/lazaret/web/lazaret.html) in node:vm with a minimal DOM stub: its script, on the
+// engine the page carries, as a browser runs it, driven through its controls. Not a test itself; driven by
+// _dashboard_vm.py.
 //
 //   node _dashboard_vm.js <lazaret.html>  < requests.json  > results.json
 //
 // requests.json: [{op, ...}, ...], each answered in order:
-//   {op: "scanFile", file: {name, content, lang?, size?}} -> issues
-//   {op: "runScan", files: [...]}                         -> lastResult
-//   {op: "export"}                                        -> {filename, text} of the export download
-//   {op: "upload", files: [{name, content|b64, size?}]}   -> files the page accepted (name, lang, size, contentLength)
-//   {op: "uploadScan", files: [{name, content|b64}]}       -> each accepted file's findings (analyzeFile)
-//   (content is sent as UTF-8 bytes; b64 is the file's raw bytes, base64)
-//   {op: "eval", expr}                                    -> value of expr in the page's scope
+//   {op: "scan", files?: [{name, content|b64, size?}], paste?: {text, lang?}}
+//       -> the result the page shows ({error} when it shows none): the files picked in its upload control (content
+//          as UTF-8 bytes, b64 a file's raw bytes; size: what the file says its size is, when not its length) and
+//          the code pasted, then "Scan code", the result read from the page's export
+//   {op: "upload", files: [...]}   -> the file list the page shows (#filelist's HTML) after the files are picked
+//   {op: "click", id}              -> clicks the control #id (a sample button, say)
+//   {op: "export"}                 -> {filename, text} of the export the page downloads (null when it doesn't)
+//   {op: "html", id}               -> {html, text, value} of the element #id
 "use strict";
 const fs = require("node:fs");
 const vm = require("node:vm");
 
 const html = fs.readFileSync(process.argv[2], "utf8").replace(/\r\n?/g, "\n");
-const scripts = [...html.matchAll(/<script\b[^>]*>([\s\S]*?)<\/script\s*>/gi)];
-if (scripts.length !== 1) throw new Error(`expected one inline script, found ${scripts.length}`);
+const blocks = [...html.matchAll(/<script\b([^>]*)>([\s\S]*?)<\/script\s*>/gi)];
+const scripts = blocks.filter(([, attrs]) => !/\btype\s*=/i.test(attrs));
+if (scripts.length !== 1) throw new Error(`expected one script, found ${scripts.length}`);
+const engine = blocks.find(([, attrs]) => /\bid="lazaret-engine"/.test(attrs));
+// the script runs where it is in the page: an element after it is not there yet
+const parsed = (block) => block && block.index < scripts[0].index;
 
 function element(selector) {
   const listeners = {};
@@ -35,69 +40,87 @@ function element(selector) {
 const elements = new Map();
 const created = [];
 const blobs = new Map();
+const alerts = [];
 const document = {
   querySelector(sel) {
     if (!elements.has(sel)) elements.set(sel, element(sel));
     return elements.get(sel);
   },
+  getElementById(id) {
+    if (id === "lazaret-engine") return parsed(engine) ? { textContent: engine[2] } : null;
+    return document.querySelector(`#${id}`);
+  },
   createElement(tag) { const el = element(tag); created.push(el); return el; },
 };
-class Blob {
-  constructor(parts, opts) { this.text = parts.join(""); this.type = (opts || {}).type; }
-}
 let blobSeq = 0;
 const URL_ = {
   createObjectURL(blob) { const id = `blob:vm/${++blobSeq}`; blobs.set(id, blob); return id; },
   revokeObjectURL() {},
 };
 const context = vm.createContext({
-  document, Blob, URL: URL_, alert() {}, console, TextEncoder, TextDecoder, setTimeout, clearTimeout,
+  document, Blob, URL: URL_, alert(m) { alerts.push(String(m)); }, console, TextEncoder, TextDecoder,
+  setTimeout, clearTimeout, atob, Response, DecompressionStream, WebAssembly,
 });
-vm.runInContext(scripts[0][1], context, { filename: "lazaret.html#script" });
-const inPage = (expr) => vm.runInContext(expr, context);
+vm.runInContext(scripts[0][2], context, { filename: "lazaret.html#script" });
 
-/** Pick `files` in the page's upload control (File-like objects: name, size, arrayBuffer()). */
-async function upload(reqFiles) {
-  const input = document.querySelector("#files");
-  const files = reqFiles.map((f) => {
-    const bytes = f.b64 !== undefined ? Buffer.from(f.b64, "base64") : Buffer.from(f.content, "utf8");
-    return {
-      name: f.name,
-      size: f.size !== undefined ? f.size : bytes.length,
-      arrayBuffer: async () => bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.length),
-    };
+const fire = async (id, type, event = {}) => {
+  for (const fn of document.querySelector(`#${id}`).listeners[type] || []) await fn(event);
+};
+
+/** File-like objects (name, size, arrayBuffer(), slice()) for `reqFiles`. A file whose size is more than the bytes
+ * sent is one only that much of can be read: reading it all fails, as reading a file that changed under it would. */
+function pickFiles(reqFiles) {
+  const file = (name, bytes, size) => ({
+    name, size,
+    arrayBuffer: async () => {
+      if (size > bytes.length) throw new Error(`only ${bytes.length} of its ${size} bytes can be read here`);
+      return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.length);
+    },
+    slice: (start, end) => file(name, bytes.subarray(start, end), Math.min(end, size) - start),
   });
-  for (const fn of input.listeners.change || []) await fn({ target: { files } });
+  return reqFiles.map((f) => {
+    const bytes = f.b64 !== undefined ? Buffer.from(f.b64, "base64") : Buffer.from(f.content, "utf8");
+    return file(f.name, bytes, f.size !== undefined ? f.size : bytes.length);
+  });
+}
+
+async function exported() {
+  const before = created.length;
+  await fire("exportBtn", "click");
+  const a = created.slice(before).find((el) => el.selector === "a" && el.clicked);
+  if (!a) return null;
+  return { filename: a.download, text: await blobs.get(a.href).text() };
 }
 
 async function handle(req) {
   switch (req.op) {
-    case "scanFile": {
-      const f = Object.assign({}, req.file);
-      if (!f.lang) f.lang = inPage("detectLang")(f.name, f.content);
-      return JSON.parse(JSON.stringify(inPage("scanFile")(f)));
-    }
-    case "runScan": {
-      const files = req.files.map((f) => Object.assign({ lang: inPage("detectLang")(f.name, f.content) }, f));
-      inPage("runScan")(files);
-      return JSON.parse(inPage("JSON.stringify(lastResult)"));
-    }
-    case "export": {
-      const before = created.length;
-      for (const fn of document.querySelector("#exportBtn").listeners.click || []) fn();
-      const a = created.slice(before).find((el) => el.selector === "a" && el.clicked);
-      if (!a) return null;
-      return { filename: a.download, text: blobs.get(a.href).text };
+    case "scan": {
+      await fire("files", "change", { target: { files: pickFiles(req.files || []) } });
+      document.querySelector("#code").value = req.paste ? req.paste.text : "";
+      document.querySelector("#lang").value = (req.paste && req.paste.lang) || "auto";
+      const before = blobSeq;
+      document.querySelector("#status").innerHTML = "";
+      alerts.length = 0;
+      await fire("scanBtn", "click");
+      if (alerts.length) return { error: alerts.join("\n") };
+      const out = await exported();
+      if (!out || blobSeq === before) return { error: document.querySelector("#status").innerHTML || "no result" };
+      const status = document.querySelector("#status").innerHTML;
+      if (status) return { error: status };
+      return JSON.parse(out.text);
     }
     case "upload":
-    case "uploadScan": {
-      await upload(req.files);
-      return JSON.parse(inPage(req.op === "upload"
-        ? "JSON.stringify(uploaded.map(f=>({name:f.name, lang:f.lang, size:f.size, contentLength:f.content.length})))"
-        : "JSON.stringify(uploaded.map(f=>analyzeFile(f)))"));
+      await fire("files", "change", { target: { files: pickFiles(req.files) } });
+      return document.querySelector("#filelist").innerHTML;
+    case "click":
+      await fire(req.id, "click");
+      return null;
+    case "export":
+      return exported();
+    case "html": {
+      const el = document.querySelector(`#${req.id}`);
+      return { html: el.innerHTML, text: el.textContent, value: el.value };
     }
-    case "eval":
-      return JSON.parse(JSON.stringify(inPage(req.expr)));
     default:
       throw new Error(`unknown op ${req.op}`);
   }

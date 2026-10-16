@@ -185,7 +185,7 @@ class BuildTests(unittest.TestCase):
         Unicode-3.0, and so does the sdist, which carries the engine's source
         (the files at its root, where PKG-INFO's License-File finds them). The
         engine is Lazaret's own since P-16, and no artifact carries CPython's
-        license (the codec names the dashboard lists are facts about Python)."""
+        license (the codec names the engine lists are facts about Python)."""
         dist_info = f"lazaret-{self.version}.dist-info"
         with tempfile.TemporaryDirectory() as d:
             lib = pathlib.Path(d, "built.so")

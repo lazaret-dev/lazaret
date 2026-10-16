@@ -2,15 +2,16 @@
 // (hook.js): collect, each file's scan, the config files, the manifests, what the project's own install hooks run, the
 // dependency checks, the skipped trees, the cross-file flows, then the result built and redacted. Prints nothing.
 
-import { collectFiles, ScanTargetError, scanErrorIssue, MAX_FILE_BYTES } from "./lib/fs.js";
+import { collectFiles, ScanTargetError } from "./lib/fs.js";
+import { scanErrorIssue } from "./lib/issue.js";
+import { MAX_FILE_BYTES } from "./lib/collect.js";
 import { fsNameToString } from "./lib/encoding.js";
-import { scanFile, scanConfigFile, treeReader } from "./scanner/scan.js";
-import { scanManifest, scanGyp } from "./lib/supplychain.js";
+import { scanFile } from "./scanner/scan.js";
+import { collectionIssues, scanTask } from "./scancollection.js";
 import { redactResult } from "./lib/redact.js";
 import { buildResult } from "./report.js";
 import { dependencyChecks, projectHookChecks } from "./deps.js";
 import { Pool, threadsFor, mapTasks } from "./pool.js";
-import { analyzeFlows, redactFlowIssues } from "./scanner/flow.js";
 
 /**
  * Collect what the project scan of `root` reads (collectFiles) -> the collection. Throws ScanTargetError (a usage
@@ -33,50 +34,33 @@ export function collectProject(root, { deps = false, exclude = [], maxFileBytes 
  * belong in its result (core.scan_project's extra_issues; the hook's files it could not copy).
  */
 export function scanCollected(root, col, { exclude = [], env = process.env, extraIssues = [] } = {}) {
-  const { files, manifests, configs, binaryIssues, skippedIssues } = col;
-  const issues = [];
-  const add = (list) => { for (const i of list) issues.push(i); };   // never push(...big)
-  add(extraIssues);
-  add(binaryIssues);
+  const { files, manifests, configs, skippedIssues } = col;
   const threads = threadsFor(env, files.reduce((n, f) => n + f.content.length, 0),
     files.reduce((n, f) => Math.max(n, f.content.length), 0));
   let pool = null;
   if (threads > 1) {
     try { pool = new Pool(threads); } catch { pool = null; }        // (no workers here: one thread does it all)
   }
+  let issues;
   try {
-    const scans = mapTasks(pool,
-      files.map((f) => ["scan", { name: f.path, path: f.path, content: f.content, lang: f.lang, dep: f.dep }]),
-      ([, file]) => scanFile(file),
-      ([, file], e) => [scanErrorIssue(file.path, e)]);                  // one file must never kill the run
-    for (const found of scans) add(found);
-    const read = treeReader(files, configs);                            // what an editor's or agent's settings run
-    for (const cf of configs) {                                         // config and data files: credentials only
-      try { add(scanConfigFile(cf.path, cf.content, read)); } catch (e) { issues.push(scanErrorIssue(cf.path, e)); }
-    }
-    for (const mf of manifests) {
-      // binding.gyp and every other .gyp / .gypi → scanGyp (G11); package.json
-      // → scanManifest, with the registry hook set inside a dependency tree.
-      try {
-        add(mf.kind !== "package.json" ? scanGyp(mf.path, mf.content)
-          : scanManifest(mf.path, mf.content, { registry: !!mf.dep }));
-      } catch (e) { issues.push(scanErrorIssue(mf.path, e)); }
-    }
-    // the project's own install hooks: what they run (projectHookChecks)
-    add(projectHookChecks(root, files, manifests, issues,
-      { exclude, pruned: skippedIssues.map((i) => i.file), maxFileBytes: col.maxFileBytes }));
-    // --deps: what the dependencies run (install hooks, import-time code)
-    const deps = dependencyChecks(root, files, manifests, issues, { exclude, maxFileBytes: col.maxFileBytes, pool });
-    add(deps.issues);
-    for (const f of deps.files) files.push(f);
+    issues = collectionIssues(col, {
+      extraIssues,
+      scanAll: (all) => mapTasks(pool, all.map((f) => ["scan", scanTask(f)]),
+        ([, file]) => scanFile(file),
+        ([, file], e) => [scanErrorIssue(file.path, e)]),                // one file must never kill the run
+      checks: (sofar) => {
+        // the project's own install hooks: what they run (projectHookChecks)
+        for (const i of projectHookChecks(root, files, manifests, sofar,
+          { exclude, pruned: skippedIssues.map((i) => i.file), maxFileBytes: col.maxFileBytes })) sofar.push(i);
+        // --deps: what the dependencies run (install hooks, import-time code)
+        const deps = dependencyChecks(root, files, manifests, sofar, { exclude, maxFileBytes: col.maxFileBytes, pool });
+        for (const i of deps.issues) sofar.push(i);
+        for (const f of deps.files) files.push(f);
+      },
+    });
   } finally {
     if (pool) pool.close();
   }
-  add(skippedIssues);
-  // Cross-file taint flows in the project's Python and JavaScript (the
-  // Python engine's flow.analyze; dependency files are not analyzed). The
-  // findings copy raw source lines: they get their file's redaction here.
-  add(redactFlowIssues(analyzeFlows(files), files));
   const res = redactResult(buildResult(root, files, issues));
   res.metrics.configFiles = configs.length;
   return { res, files, configs };

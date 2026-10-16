@@ -5,83 +5,23 @@
 
 import { resolve, isAbsolute } from "node:path";
 import { readFileSync } from "node:fs";
-import { metricsFiles } from "./scanner/metrics.js";
-import { call } from "./lib/native.js";
+import { gradeResult, localIso } from "./result.js";
 import { ENGINE_VERSION, ENGINE_MARKER, HTML_ENGINE_MARKER } from "./lib/fs.js";
 import { pyStrip, isPrintable, pyFloatRepr } from "./lib/pycompat.js";
 import { REDACT, SECRET_RULES } from "./lib/redact.js";
 import { splitLines } from "./scanner/lines.js";
 import { reportSignature, SIGNATURE_FIELD } from "./baseline.js";
 
+export { regrade, CROSS_FILE_LABEL } from "./result.js";
+
 const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
 
-/** Local time, seconds precision, no zone — datetime.now().isoformat(timespec="seconds"). */
-function localIso(d = new Date()) {
-  const p = (n) => String(n).padStart(2, "0");
-  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
-}
-
 /**
- * The cross-file gate condition's label: the Python engine's. (Until phase 3
- * of the Rust-first refactor this engine's flow pass covered JavaScript only,
- * and the label said when the project's Python files were not analyzed; the
- * engine's Python pass runs here too now: flow.js.)
- */
-export const CROSS_FILE_LABEL = "No cross-file taint flows";
-
-/**
- * What the engine's result reads of each finding (result.rs): [rule, type, severity, file, line, omitted,
- * omittedType] (a Q-CAPPED note's last two: the maintainability rating counts the smells it stands for).
- */
-function findingRows(issues) {
-  return issues.map((i) => [i.rule, i.type, i.sev, String(i.file), i.line,
-    Number.isInteger(i.omitted) ? i.omitted : null, typeof i.omittedType === "string" ? i.omittedType : null]);
-}
-
-/** `issues` put in the engine's order, where it is (a loop: a spread of a long list overflows the stack). */
-function reorder(issues, order) {
-  const sorted = order.map((k) => issues[k]);
-  for (let k = 0; k < sorted.length; k++) issues[k] = sorted[k];
-}
-
-/**
- * `res` graded again from its issues, after something changed their severities or types (--verify-secrets: a live
- * credential is a BLOCKER vulnerability, verify.js): the order of its issues, the counts, the security and reliability
- * ratings, the gate's two conditions on severities and the gate (the engine's: result.rs). The other conditions are
- * left as they are.
- */
-export function regrade(res) {
-  const got = call("regrade", { issues: findingRows(res.issues), conditions: res.conditions.map((c) => [c.label, c.ok]) });
-  reorder(res.issues, got.order);
-  res.counts = got.counts;
-  Object.assign(res.ratings, got.ratings);
-  got.conditions.forEach((now, k) => { res.conditions[k].ok = now.ok; });
-  res.pass = got.pass;
-  return res;
-}
-
-/**
- * A scan's result (the engine's: result.rs, as core.build_result's): its issues in their order (put so where they
- * are), the gate and its conditions, the metrics, counts and ratings, the supply-chain indicators and cross-file
- * flows, the issues by file; the version, the project's path and the time are this package's.
+ * A scan's result (the engine's: result.rs, as core.build_result's) with the version, the project's path and the
+ * time this package's: generatedBy, project, scannedAt, then gradeResult's (result.js).
  */
 export function buildResult(root, files, issues) {
-  const got = call("result", { issues: findingRows(issues), files: metricsFiles(files) });
-  reorder(issues, got.order);
-  return {
-    generatedBy: ENGINE_VERSION,
-    project: resolve(root),
-    scannedAt: localIso(),
-    pass: got.pass,
-    conditions: got.conditions,
-    metrics: got.metrics,
-    counts: got.counts,
-    ratings: got.ratings,
-    supplyChain: got.supplyChain,
-    crossFile: got.crossFile,
-    perFile: got.perFile,
-    issues,
-  };
+  return { generatedBy: ENGINE_VERSION, project: resolve(root), scannedAt: localIso(), ...gradeResult(files, issues) };
 }
 
 // ---- JSON, in pieces --------------------------------------------------------------

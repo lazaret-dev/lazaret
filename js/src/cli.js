@@ -9,8 +9,9 @@ import { resolve } from "node:path";
 import { statSync, readFileSync } from "node:fs";
 import {
   reportPaths, writeReport, validateReportPaths, validateOutDir,
-  ReportPathError, EXIT_OUTPUT, ScanTargetError, MAX_FILE_BYTES,
+  ReportPathError, EXIT_OUTPUT, ScanTargetError,
 } from "./lib/fs.js";
+import { MAX_FILE_BYTES } from "./lib/collect.js";
 import { pyRepr } from "./lib/pycompat.js";
 import { setRedactSecrets } from "./lib/redact.js";
 import {

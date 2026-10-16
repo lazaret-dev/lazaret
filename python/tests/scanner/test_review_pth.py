@@ -21,7 +21,6 @@ import unittest
 
 from lazaret.registry import repo
 from lazaret.scanner import core
-from tests.scanner import _dashboard_vm as dash
 
 EVIL = 'import os, base64; exec(base64.b64decode("cHJpbnQoMSk="))\n'
 SHIM = "import _distutils_hack; _distutils_hack.do()\n"         # setuptools' shape: listed for review
@@ -144,39 +143,6 @@ class PlainLiteralTests(unittest.TestCase):
         ((sev, msg),) = self.sevs(line)
         self.assertEqual(sev, "CRITICAL")
         self.assertIn("pipes a download into a shell", msg)
-
-
-def cli_pth(name, data):
-    return core.pth_issues(name, data.decode("utf-8-sig", "replace"))
-
-
-@dash.requires_node
-class DashboardTests(unittest.TestCase):
-    def test_uploaded_pth_files_get_the_same_check(self):
-        uploads = [(f"f{n}.pth", text.encode("utf-8")) for n, text in enumerate(CORPUS)]
-        uploads.append(("latin.pth", b"import os; exec(b'\xe9')\n"))
-        (page,) = dash.run([{"op": "uploadScan", "files": [
-            {"name": n, "b64": base64.b64encode(d).decode("ascii")} for n, d in uploads]}])
-        key = lambda i: json.dumps(i, sort_keys=True, ensure_ascii=False)
-        for (name, data), got in zip(uploads, page):
-            with self.subTest(file=name):
-                self.assertEqual(sorted(map(key, got)), sorted(map(key, cli_pth(name, data))))
-        self.assertEqual([i["sev"] for i in page[0]], ["CRITICAL"])
-
-    def test_oversize_pth_upload_and_metrics(self):
-        accepted, result = dash.run([
-            {"op": "upload", "files": [{"name": "big.pth", "content": "", "size": 3_000_000},
-                                       {"name": "evil.pth", "content": EVIL}, {"name": "a.py", "content": "x = 1\n"}]},
-            {"op": "runScan", "files": [{"name": "big.pth", "content": "", "size": 3_000_000, "pth": True},
-                                        {"name": "evil.pth", "content": EVIL, "pth": True},
-                                        {"name": "a.py", "content": "x = 1\n"}]},
-        ])
-        self.assertEqual([f["name"] for f in accepted], ["big.pth", "evil.pth", "a.py"])
-        rules = sorted((i["rule"], i["file"]) for i in result["issues"])
-        self.assertEqual(rules, [("SC-PTH-EXEC", "evil.pth"), ("SC-TRUNCATED", "big.pth")])
-        cli = core.build_result(".", [{"path": "a.py", "lang": "py", "content": "x = 1\n"}], [])
-        self.assertEqual(result["metrics"], cli["metrics"])                     # .pth files are not source
-        self.assertFalse(result["pass"])
 
 
 if __name__ == "__main__":

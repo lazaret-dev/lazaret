@@ -25,7 +25,6 @@ import unittest
 import warnings
 
 from lazaret.scanner import _native, core
-from tests.scanner import _dashboard_vm as dash
 
 ESCAPE_CODECS = ("unicode-escape", "raw-unicode-escape")
 #: a \N escape: an N after an odd run of backslashes
@@ -120,15 +119,6 @@ class EngineParityTests(unittest.TestCase):
     def test_the_engine(self):
         for case in corpus():
             self.assertEqual(engine_view(case), python_view(case, carried=True), case)
-
-    @dash.requires_node
-    def test_dashboard_decoder(self):
-        cases = corpus()[-16:] + corpus()[:200]
-        got = dash.run([{"op": "eval", "expr": f"[decodeEscapes(new Uint8Array({list(c)}), false), "
-                                               f"decodeEscapes(new Uint8Array({list(c)}), true)]"} for c in cases])
-        self.assertEqual(len(got), len(cases))
-        for case, have in zip(cases, got):
-            self.assertEqual(have, python_view(case), case)
 
 
 class RegistryVerdictTests(unittest.TestCase):

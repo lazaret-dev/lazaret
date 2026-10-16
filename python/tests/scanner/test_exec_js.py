@@ -1,5 +1,5 @@
-"""S-EXEC-JS reads a member call's receiver (0.1.9; the engine's scanfile.rs exec_js_regex, the dashboard's
-execJsRegex; js/test/exec-js.test.js has the npm package's twin).
+"""S-EXEC-JS reads a member call's receiver (0.1.9; the engine's scanfile.rs exec_js_regex; js/test/exec-js.test.js
+has the npm package's twin).
 
 S-EXEC-JS flagged every `x.exec(…)` with a non-literal argument as child_process's, so RegExp's `exec` in a matching
 loop (`while ((m = re.exec(s)))`) was CRITICAL in any script that matches text. Now a call on a regex is left out: a

@@ -11,68 +11,11 @@ import {
 } from "node:fs";
 import { join, sep, resolve, dirname, basename, isAbsolute } from "node:path";
 import { randomBytes } from "node:crypto";
-import { decodeSource, bytesText, fsNameToString } from "./encoding.js";
-import { classifyBinary, HEADER_SAMPLE, PYC_HEADER, pycIssues, pycModule, pyExt, looksBinary, mpegTs, MPEG_TS_EXTS,
-  disguisedBinary, DISGUISE_SAMPLE } from "./binary.js";
-import { EXHAUSTED, NativeError, NativeExhausted, shebangLang, call, issuesOf } from "./native.js";
-import { fileIssue } from "./issue.js";
-import { pthIssues } from "./pth.js";
-import { REDACT } from "./redact.js";
-import { isConfigFile, ownReport, CONFIG_SCAN_CAP } from "./configsecrets.js";
+import { fsNameToString } from "./encoding.js";
+import { PYC_HEADER, pycIssues, pycModule } from "./binary.js";
+import { scanErrorIssue } from "./issue.js";
+import { collectEntry, MAX_FILE_BYTES } from "./collect.js";
 import { cmpCodePoints } from "./pycompat.js";
-
-export const EXTS = {
-  ".py": "py", ".pyw": "py", ".js": "js", ".jsx": "js", ".ts": "js", ".tsx": "js",
-  ".mts": "js", ".cts": "js", ".mjs": "js", ".cjs": "js", ".sql": "sql",
-  ".go": "go", ".rs": "rs",
-};
-// The languages a dependency tree's files (--deps) are read in (twin of
-// core.DEP_LANGS): a project's own Go and Rust files are read; a package's
-// are, in a Go or cargo vendor tree (VENDOR_CODE, 0.1.9: deps.js vendoredCode).
-export const DEP_LANGS = new Set(["py", "js", "sql"]);
-// A vendor tree's code (twin of core.VENDOR_CODE): Go's (vendor/modules.txt) and cargo's (a .cargo-checksum.json in
-// each crate's directory).
-export const VENDOR_CODE = { go: ".go", cargo: ".rs" };
-const VENDOR_PROBE = 256;            // the directories of a vendor tree looked at for a .cargo-checksum.json
-
-/** Is `rel` ("/"-separated, below a Go module's root for "go", a crate's for "crate") a file no build of a dependent
- * compiles (twin of core.never_built): a Go *_test.go file, a name with "_" or "." first, one under testdata/ or
- * vendor/; a crate's tests/, benches/ and examples/. */
-export function neverBuilt(kind, rel) {
-  if (kind === "go") {
-    const parts = rel.split("/");
-    const name = parts[parts.length - 1];
-    return name.startsWith("_") || name.startsWith(".") || name.toLowerCase().endsWith("_test.go")
-      || parts.slice(0, -1).some((p) => p === "testdata" || p === "vendor");
-  }
-  if (kind === "crate") return ["tests", "benches", "examples"].includes(rel.split("/")[0]);
-  return false;
-}
-
-/** "go" or "rs" for a file of a Go or cargo vendor tree (`vendor`: [its kind, its rel]) that a build compiles, else
- * null. Twin of core._vendor_lang. */
-function vendorLang(vendor, rel, ext) {
-  if (!vendor || ext !== VENDOR_CODE[vendor[0]]) return null;
-  const below = rel.slice(vendor[1].length + 1).split(sep).join("/");
-  if (vendor[0] === "go") return neverBuilt("go", below) ? null : "go";
-  const slash = below.indexOf("/");
-  const inside = slash < 0 ? "" : below.slice(slash + 1);
-  return !inside || neverBuilt("crate", inside) ? null : "rs";
-}
-// gyp files, whatever their name (twin of core.GYP_EXTS): binding.gyp pulls
-// others in ('includes': ['build/common.gypi']) and node-gyp runs their
-// actions and command expansions too, so every one goes to scanGyp.
-export const GYP_EXTS = new Set([".gyp", ".gypi"]);
-
-/**
- * Line endings as Python's text mode reads them: \r\n and a lone \r both become \n.
- * Without this, a file with Windows line endings leaves "\r" at the end of every
- * line, which (for one) turns a bare "# nosec" into a suppression that matches no
- * rule. Twin of lazaret.scanner.core.normalize_newlines.
- */
-export function normalizeNewlines(text) {
-  return typeof text === "string" && text.includes("\r") ? text.replace(/\r\n?/g, "\n") : text;
-}
 
 /** posixpath.normpath of a relative '/'-separated path. */
 export function normpathRel(path) {
@@ -94,24 +37,14 @@ export const OPTIN_SKIP_DIRS = [
   "coverage", "vendor", "site-packages", ".tox", ".mypy_cache",
   ".pytest_cache", "migrations",
 ];
-// Name-based markers (is_dependency_manifest): a manifest under one of these
-// belongs to an installed package.
-export const DEP_MARKERS = new Set([
-  "node_modules", "site-packages", "bower_components", "vendor", "venv", ".venv",
-]);
+const VENDOR_PROBE = 256;            // the directories of a vendor tree looked at for a .cargo-checksum.json
 const DEP_TREES = new Set(["node_modules", "bower_components", "site-packages"]);
 const VENV_TREES = new Set(["venv", ".venv", "env"]);
-
-// Source files and manifests above this are not read: SC-TRUNCATED (twin of
-// core.SOURCE_SIZE_CAP). The CLI takes --max-source-bytes or
-// LAZARET_MAX_SOURCE_BYTES; collectFiles() takes `maxFileBytes`.
-export const MAX_FILE_BYTES = 16_000_000;
 
 const O_NOFOLLOW = C.O_NOFOLLOW ?? 0;
 const O_NONBLOCK = C.O_NONBLOCK ?? 0;
 const O_NOCTTY = C.O_NOCTTY ?? 0;
 const SEP = Buffer.from(sep);
-const APPLE_DOUBLE_MAGIC = [Buffer.from([0x00, 0x05, 0x16, 0x07]), Buffer.from([0x00, 0x05, 0x16, 0x00])];
 
 /** The scan target is missing, not a directory, unreadable or empty: usage error (exit 2). */
 export class ScanTargetError extends Error {}
@@ -154,34 +87,12 @@ export function symlinkIssue(path, target) {
     "If the target belongs to the project, scan it directly.",
     "CWE-59 · Scan coverage");
 }
-/** Q-SKIPPED-CONFIG: a config or data file too large to check for credentials (core.config_skipped_issue). */
-export function configSkippedIssue(path, detail) {
-  return coverage("Q-SKIPPED-CONFIG", "Config file not checked (too large)", path,
-    `${path} was not checked for credentials: ${detail}.`,
-    "Config and data files are read only to look for credentials, and one this large is data rather than configuration: a credential in it would not be reported.",
-    "Keep credentials out of large data files, and real configuration in files of its own.",
-    "Scan coverage");
-}
 export function unreadableIssue(path, reason) {
   return coverage("Q-UNREADABLE", "Unreadable entry (not scanned)", path,
     `${path} could not be read (${reason}); it was not scanned.`,
     "An entry the scanner cannot read is invisible to every rule. Special files (named pipes, sockets, devices) are never opened: reading one can hang or exhaust the scan.",
     "Fix the permissions (or remove the special file) and re-scan.",
     "Scan coverage");
-}
-/**
- * SC-TRUNCATED for a file (or directory) whose scan threw (twin of
- * core.scan_error_issue): the run goes on without its findings, and like any
- * file not fully scanned it fails the gate. It was an INFO note
- * (Q-SCAN-ERROR), so a file whose scan died took its CRITICAL findings with
- * it and the gate passed (review B3: a 6 MB string line overflowed V8's
- * regex stack).
- */
-export function scanErrorIssue(path, err) {
-  const issue = truncatedIssue(path, `its scan failed (${(err && err.name) || "Error"}), so its findings are missing`);
-  issue.why = "An internal error stopped this scan; the rest of the project is still scanned and reported, but nothing in this file was checked, so the result can't clear it.";
-  issue.fix = "Review the file manually and report the error (re-run with LAZARET_DEBUG=1 for a traceback).";
-  return issue;
 }
 export function skippedTreeIssue(rel, nFiles, nBytes) {
   return {
@@ -192,14 +103,6 @@ export function skippedTreeIssue(rel, nFiles, nBytes) {
     ref: "Maintainability", file: rel, line: 1, snippet: [], snipStart: 1,
   };
 }
-export function truncatedIssue(path, detail) {
-  return fileIssue({ id: "SC-TRUNCATED", name: "Scan truncated", type: "HOTSPOT", sev: "CRITICAL",
-    msg: `File not fully scanned: ${detail}.`,
-    why: "Scanning stopped early, so a clean verdict for this file is not evidence of anything — the unscanned bytes are exactly where a hostile artifact would put its payload (audit C2/G16: declared sizes and entry counts are attacker-controlled and were used to skip files with zero signal).",
-    fix: "Review the file manually or raise the limit and re-scan.",
-    ref: "CWE-506 · Supply chain" }, path);
-}
-
 /** Read at most `limit` bytes of a REGULAR file (never follows links, never blocks on a FIFO). */
 export function readBounded(path, limit) {
   const fd = openSync(path, C.O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_NOCTTY);
@@ -219,6 +122,22 @@ export function readBounded(path, limit) {
   } finally {
     closeSync(fd);
   }
+}
+
+/** A regular file met by the walk, as collectEntry reads it (lib/collect.js). */
+function fileEntry(full, rel, name, size, dep) {
+  return {
+    rel, name, size, dep,
+    read: (limit) => readBounded(full, limit),
+    head: (limit) => {                // no bytes when it can't be read
+      try {
+        return readBounded(full, limit);
+      } catch (e) {
+        if (!(e instanceof NotRegularFile || (e && e.code))) throw e;
+        return Buffer.alloc(0);
+      }
+    },
+  };
 }
 
 function lexists(p) { try { lstatSync(p); return true; } catch { return false; } }
@@ -367,7 +286,7 @@ export function collectFiles(root, { includeDeps = false, exclude = [], maxFileB
       else if (st.isDirectory()) subdirs.push({ ent, full, rel, st });
       else if (!st.isFile()) issues.push(unreadableIssue(rel, specialKind(st)));
       else {
-        try { collectFile(full, rel, ent.str, st, dir.dep, col); } catch (e) {
+        try { collectEntry(fileEntry(full, rel, ent.str, st.size, dir.dep), col); } catch (e) {
           if (e instanceof NotRegularFile || (e && e.code)) issues.push(unreadableIssue(rel, strerror(e)));
           else issues.push(scanErrorIssue(rel, e));
         }
@@ -393,141 +312,6 @@ export function collectFiles(root, { includeDeps = false, exclude = [], maxFileB
     for (let k = push.length - 1; k >= 0; k--) stack.push(push[k]);   // pop order = sorted, depth-first
   }
   return col;
-}
-
-/** n with thousands separators, as Python's f"{n:,}" writes it. */
-const withCommas = (n) => String(n).replace(/\B(?=(\d{3})+(?!\d))/g, ",");
-
-/**
- * "js" or "py" for a file without a source extension whose leading bytes
- * make it a JavaScript or Python script by its #! line (bin/cli, a hook's
- * ./setup): it runs as code, so it is read as source. null otherwise —
- * shell scripts too. Twin of lazaret.scanner.core.script_source_lang.
- */
-export function scriptSourceLang(head) {
-  head = head.subarray(0, HEADER_SAMPLE);
-  if (head.length < 2 || head[0] !== 0x23 || head[1] !== 0x21 || looksBinary(head)) return null;
-  const lang = shebangLang(new TextDecoder("utf-8").decode(head));
-  return lang === "js" || lang === "py" ? lang : null;
-}
-
-function collectFile(full, rel, name, st, dep, col) {
-  const ext = pyExt(name).toLowerCase();       // os.path.splitext, as core
-  const kind = name === "package.json" || name === "binding.gyp" ? name : GYP_EXTS.has(ext) ? "gyp" : null;
-  const pth = !kind && ext === ".pth";
-  const vendor = Array.isArray(dep) ? dep : null;      // (a vendor tree's kind, its rel)
-  let lang = kind || pth ? null : EXTS[ext] ?? null;
-  if (dep && lang !== null && !DEP_LANGS.has(lang)) lang = vendorLang(vendor, rel, ext);
-  const size = st.size;
-  if (!kind && !pth && !lang) {
-    // spec 9: every other regular file is classified by magic bytes — unless
-    // its #! line makes it a Node or Python script: then it is source
-    const head = readBounded(full, HEADER_SAMPLE);
-    lang = scriptSourceLang(head);
-    if (!lang) {
-      const bi = classifyBinary(rel, head, size, "repo");
-      if (bi) col.binaryIssues.push(bi);
-      else if (!dep && isConfigFile(name) && (utf16Bom(head) || !looksBinary(head))) collectConfig(full, rel, size, col);
-      return;
-    }
-  }
-  if (lang && MPEG_TS_EXTS.has(ext)) {
-    const head = readBounded(full, HEADER_SAMPLE);
-    if (mpegTs(head)) {                                // a video (a camera's .mts), not TypeScript
-      const bi = classifyBinary(rel, head, size, "repo");
-      if (bi) col.binaryIssues.push(bi);
-      return;
-    }
-  }
-  // spec 9: the size cap applies only to files that would be read whole
-  const cap = col.maxFileBytes;
-  if (size > cap) {
-    col.binaryIssues.push(truncatedIssue(rel, `${withCommas(size)} bytes exceeds the ${withCommas(cap)}-byte file limit`));
-    if (lang) {                     // its first bytes still tell a program (as in the registry)
-      let head = Buffer.alloc(0);
-      try {
-        head = readBounded(full, DISGUISE_SAMPLE);
-      } catch (e) {                 // not read: the SC-TRUNCATED stands alone, as before
-        if (!(e instanceof NotRegularFile || (e && e.code))) throw e;
-      }
-      const dis = disguisedBinary(rel, head);
-      if (dis) col.binaryIssues.push(dis);
-    }
-    return;
-  }
-  const data = readBounded(full, cap + 1);
-  if (data.length > cap) {                            // grew between the lstat and the read
-    col.binaryIssues.push(truncatedIssue(rel, `read exceeded the ${withCommas(cap)}-byte file limit`));
-    const dis = lang ? disguisedBinary(rel, data) : null;
-    if (dis) col.binaryIssues.push(dis);
-    return;
-  }
-  if (kind) {
-    const content = normalizeNewlines(new TextDecoder("utf-8", { ignoreBOM: true }).decode(data));
-    col.manifests.push({ kind, path: rel, content, dep: Boolean(dep) });
-    return;
-  }
-  if (pth) {                // only the .pth check runs on it (decoded as the registry does: utf-8-sig)
-    col.pth.push(rel);
-    let found;
-    try {
-      found = pthIssues(rel, new TextDecoder("utf-8").decode(data));
-    } catch (e) {
-      if (!(e instanceof NativeError)) throw e;
-      found = [e instanceof NativeExhausted ? truncatedIssue(rel, EXHAUSTED) : scanErrorIssue(rel, e)];
-    }
-    for (const i of found) col.binaryIssues.push(i);
-    return;
-  }
-  if (APPLE_DOUBLE_MAGIC.some((m) => data.subarray(0, 4).equals(m))) {
-    const bi = classifyBinary(rel, data.subarray(0, HEADER_SAMPLE), size, "repo");
-    if (bi) col.binaryIssues.push(bi);
-    return;
-  }
-  // read as the registry reads a member (0.1.8): bytes that don't decode to
-  // anything text-like are SC-TRUNCATED, not mojibake no rule can read
-  const [content, found] = decodeMember(rel, data, lang);
-  for (const i of found) col.binaryIssues.push(i);
-  const dis = disguisedBinary(rel, data);       // a program under a source file's name (0.1.8)
-  if (dis) col.binaryIssues.push(dis);
-  const entry = { path: rel, content, lang, dep: Boolean(dep) };
-  if (vendor && (lang === "go" || lang === "rs")) entry.vendor = vendor[1];   // (its module or crate is read whole)
-  col.files.push(entry);
-}
-
-/**
- * Read a config or data file for scanConfigFile (core._collect_config):
- * decoded like source but without the encoding notes, since it is not code;
- * over CONFIG_SCAN_CAP a Q-SKIPPED-CONFIG note instead.
- */
-const utf16Bom = (b) => b.length >= 2 && ((b[0] === 0xff && b[1] === 0xfe) || (b[0] === 0xfe && b[1] === 0xff));
-function collectConfig(full, rel, size, col) {
-  const cap = CONFIG_SCAN_CAP;
-  if (size > cap) {
-    col.binaryIssues.push(configSkippedIssue(rel, `${withCommas(size)} bytes is over the ${withCommas(cap)}-byte limit for config files`));
-    return;
-  }
-  const data = readBounded(full, cap + 1);
-  if (data.length > cap) {                            // grew between the lstat and the read
-    col.binaryIssues.push(configSkippedIssue(rel, `it grew past the ${withCommas(cap)}-byte limit for config files while it was read`));
-    return;
-  }
-  const content = decodeSource(data).text;
-  if (!ownReport(content)) col.configs.push({ path: rel, content });   // a report of Lazaret's own is not config
-}
-
-/**
- * core.decode_member: [text, findings] for a file read as `lang` ("py" keeps its coding cookie), in one call to the
- * engine (BR-7 step 4 b: decode/): Q-ENCODING, SC-UTF7, SC-ESCAPE-CODEC and SC-TRUNCATED for a codec it does not
- * decode, and SC-TRUNCATED when the file does not decode to anything text-like (more than 30% invalid bytes or
- * control characters, but a video under TypeScript's extensions), so its scan proves nothing. A directory scan
- * reads every source file this way (0.1.8), as the registry does.
- */
-export function decodeMember(path, data, lang) {
-  const args = { issues: true, redact: REDACT.on, name: path, windows: process.platform === "win32" };
-  if (lang) args.lang = lang;
-  const got = call("decode_source", args, bytesText(data));
-  return [got.text, issuesOf(path, got.issues)];
 }
 
 /** __pycache__ is not source-scanned; every .pyc directly inside is checked. */

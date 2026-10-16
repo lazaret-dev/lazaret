@@ -11,8 +11,8 @@ that holds anything (a comment's marks aside), and an encrypted key's `Proc-Type
 header without its key, the line's other tokens are still read.
 
 Code files: the engine (scanfile.rs's pem_has_material and token_col), with the native library. Config files:
-configsecrets.key_follows. The npm package and the dashboard have twins (js/test/scanner/scan.test.js,
-js/test/config-secrets.test.js, test_review_dashboard_parity's cases). Every key here is made up, and written in
+configsecrets.key_follows. The npm package has twins (js/test/scanner/scan.test.js, js/test/config-secrets.test.js),
+and the dashboard runs it. Every key here is made up, and written in
 pieces (tests/fixtures/README.md)."""
 
 import time

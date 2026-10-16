@@ -19,8 +19,10 @@ import { scanFile } from "./scanner/scan.js";
 import { call, shebangLang, crossFileIssues, NativeError, NativeExhausted, goPackage, rsCrate, cargoLayout,
   goVendoredModules, codePoints, packValues, issuesOf } from "./lib/native.js";
 import { HOOK_COMMANDS } from "./lib/supplychain.js";
-import { readBounded, truncatedIssue, scanErrorIssue, strerror, normalizeNewlines, decodeMember, MAX_FILE_BYTES,
-  normpathRel } from "./lib/fs.js";
+import { readBounded, strerror, normpathRel } from "./lib/fs.js";
+import { truncatedIssue, scanErrorIssue } from "./lib/issue.js";
+import { normalizeNewlines, decodeMember } from "./lib/encoding.js";
+import { MAX_FILE_BYTES } from "./lib/collect.js";
 import { looksBinary, HEADER_SAMPLE, pyExt } from "./lib/binary.js";
 import { REDACT } from "./lib/redact.js";
 import { mapTasks } from "./pool.js";

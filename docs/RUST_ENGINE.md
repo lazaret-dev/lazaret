@@ -929,7 +929,7 @@ A parallel track brings Go and Rust up to Python's and JavaScript's level (R-1, 
   work budget: a file they scan is scanned whole, and a file that spends
   the budget is SC-TRUNCATED, in either mode. Core's `SCAN_TIME_BUDGET`
   (30 s per file) bounded a config or data file's scan until BR-7's step 3
-  moved it into the engine; only the dashboard's page keeps a clock.
+  moved it into the engine (and the dashboard runs the engine since step 5).
 - S-ENTROPY's Shannon entropy is a `sum()` of floats, which Python adds with
   Neumaier's compensation since 3.12: the binding says which way to add
   (`neumaier`), so a value at 4.0's edge is judged as that Python judges it.
@@ -982,7 +982,8 @@ only.
    (`binary.js`, `pth.js`: in the engine since 0.1.9, `src/binary.rs`), --deps'
    decisions (`deps.js`'s: in the engine since 0.1.9, `src/deps.rs`), the
    reports;
-   the dashboard keeps its own script until it can load the same module.
+   the dashboard loads the same module since 0.1.9 (BR-7 step 5: the page
+   carries it, and runs the npm package's scan on it).
 4. Archive reading for registry scans in the engine, where it reads as the
    registries' own tools do.
 5. Record the engine in reports (JSON and SARIF), next to the version.
@@ -1032,8 +1033,9 @@ So:
   `LICENSE-UNICODE`; the npm package carries `native/lazaret.wasm` with
   `rust/NOTICE` as `native/NOTICE` (both written by `npm run build`),
   `LICENSE-UNICODE` and its own `NOTICE` (the Unicode tables of its
-  JavaScript). The codec names the engine (and the dashboard, until it
-  runs the engine) holds to read a coding cookie as Python does are what
+  JavaScript); the browser dashboard carries the engine and, in its
+  notices, `rust/NOTICE` and `LICENSE-UNICODE`. The codec names the engine
+  holds to read a coding cookie as Python does are what
   Python's codecs answer to: facts about Python, not CPython's code; the
   codecs' characters are Unicode data (`generated/codecs.rs`, read from
   Python's decoders), and the decoders that read them are written from the

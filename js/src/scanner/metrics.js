@@ -2,7 +2,7 @@
 // rest is the engine's too (result.rs): the duplication across the files, the lines it leaves out, the counts.
 
 import { jsxReading } from "../lib/lexer.js";
-import { normalizeNewlines } from "../lib/fs.js";
+import { normalizeNewlines } from "../lib/encoding.js";
 import { call, fileMetrics } from "../lib/native.js";
 
 /**

@@ -1,0 +1,153 @@
+<!-- The browser dashboard's page, without its script, its CSP, its engine and the engine's notices, which
+     scripts/make_dashboard.py puts in (from js/dashboard/page.js and the modules it imports, rust/NOTICE and
+     rust/LICENSE-UNICODE, and a build of the engine) to write python/src/lazaret/web/lazaret.html. -->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta http-equiv="Content-Security-Policy" content="@CSP@">
+<title>Lazaret — Security &amp; Quality Review</title>
+<style>
+  :root{
+    --bg:#f3f5f7; --panel:#fff; --border:#dde3ea; --text:#1f2933; --muted:#6b7785;
+    --navy:#1a2634; --blue:#2d6fd2; --blue-d:#1f5bb5;
+    --blocker:#c4160f; --critical:#d4380d; --major:#e08a00; --minor:#8a9aa8; --info:#4b9fd5;
+    --pass:#00aa55; --fail:#d4380d;
+    --rA:#00aa55; --rB:#7dc94a; --rC:#f0c000; --rD:#ed7d20; --rE:#d4380d;
+    --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:var(--bg);color:var(--text)}
+  header{background:var(--navy);color:#fff;padding:0 24px;height:52px;display:flex;align-items:center;gap:12px}
+  header .logo{font-size:17px;font-weight:700;letter-spacing:.3px}
+  header .logo span{color:#4b9fd5}
+  header .tag{font-size:12px;color:#9fb0c0}
+  .wrap{max-width:1200px;margin:0 auto;padding:20px 24px 60px}
+  .panel{background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:18px}
+  h2{font-size:15px;margin-bottom:12px}
+  /* input area */
+  .input-grid{display:grid;grid-template-columns:1fr 260px;gap:16px}
+  textarea{width:100%;height:260px;border:1px solid var(--border);border-radius:6px;padding:10px;font:12.5px/1.5 var(--mono);resize:vertical;background:#fbfcfd}
+  textarea:focus{outline:2px solid var(--blue);outline-offset:-1px}
+  .side{display:flex;flex-direction:column;gap:10px}
+  select,button,.filebtn{font:inherit;border-radius:6px;border:1px solid var(--border);padding:8px 12px;background:#fff;cursor:pointer}
+  select{width:100%}
+  button.primary{background:var(--blue);border-color:var(--blue);color:#fff;font-weight:600;padding:10px}
+  button.primary:hover{background:var(--blue-d)}
+  button.ghost:hover,.filebtn:hover{background:#f0f4f8}
+  .filebtn{display:block;text-align:center}
+  input[type=file]{display:none}
+  .filelist{font-size:12px;color:var(--muted)}
+  .filelist b{color:var(--text)}
+  .read-errs{margin-top:6px;color:var(--blocker);font-size:12px;line-height:1.5}
+  .read-errs b{display:block;margin-bottom:2px}
+  .pg{font-size:12px;color:var(--muted);margin:0 10px}
+  .hint{font-size:12px;color:var(--muted)}
+  /* overview */
+  #overview{display:none;margin-top:20px}
+  .gate{display:flex;align-items:center;gap:14px;margin-bottom:16px}
+  .gate-badge{font-size:15px;font-weight:700;color:#fff;padding:8px 18px;border-radius:6px}
+  .gate-badge.pass{background:var(--pass)} .gate-badge.fail{background:var(--fail)}
+  .gate-conds{display:flex;flex-wrap:wrap;gap:8px}
+  .cond{font-size:12px;padding:4px 10px;border-radius:12px;border:1px solid var(--border);background:#fff}
+  .cond.ok{border-color:#bfe8d2;background:#eefaf3;color:#0a7a44}
+  .cond.ko{border-color:#f3c4bb;background:#fdf0ee;color:#b32d16}
+  .cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px}
+  .card{background:#fff;border:1px solid var(--border);border-radius:8px;padding:14px;text-align:center}
+  .card .num{font-size:26px;font-weight:700}
+  .card .lbl{font-size:12px;color:var(--muted);margin-top:2px}
+  .rating{display:inline-flex;align-items:center;justify-content:center;width:26px;height:26px;border-radius:50%;color:#fff;font-size:13px;font-weight:700;margin-left:8px;vertical-align:3px}
+  /* issues */
+  #issuesPanel{display:none;margin-top:20px}
+  .filters{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:14px;align-items:center}
+  .chip{font-size:12px;padding:5px 12px;border-radius:14px;border:1px solid var(--border);background:#fff;cursor:pointer;user-select:none}
+  .chip.on{background:var(--navy);color:#fff;border-color:var(--navy)}
+  .filters input{flex:1;min-width:160px;border:1px solid var(--border);border-radius:6px;padding:6px 10px;font:inherit}
+  .issue{border:1px solid var(--border);border-radius:8px;background:#fff;margin-bottom:10px;overflow:hidden}
+  .issue-head{display:flex;align-items:center;gap:10px;padding:10px 14px;cursor:pointer}
+  .issue-head:hover{background:#f7f9fb}
+  .sev{font-size:10.5px;font-weight:700;color:#fff;padding:2px 8px;border-radius:10px;letter-spacing:.4px;flex-shrink:0}
+  .sev.BLOCKER{background:var(--blocker)} .sev.CRITICAL{background:var(--critical)}
+  .sev.MAJOR{background:var(--major)} .sev.MINOR{background:var(--minor)} .sev.INFO{background:var(--info)}
+  .itype{font-size:11px;color:var(--muted);flex-shrink:0;border:1px solid var(--border);padding:1px 8px;border-radius:10px}
+  .imsg{flex:1;font-weight:600;font-size:13px}
+  .iloc{font:11.5px var(--mono);color:var(--muted);flex-shrink:0}
+  .issue-body{display:none;border-top:1px solid var(--border);padding:12px 14px;background:#fbfcfd}
+  .issue.open .issue-body{display:block}
+  .snippet{font:12px/1.6 var(--mono);background:#1a2634;color:#d7e0ea;border-radius:6px;padding:10px 0;margin-bottom:10px;overflow-x:auto}
+  .snippet .ln{display:flex}
+  .snippet .no{width:52px;text-align:right;padding-right:12px;color:#5d7186;flex-shrink:0;user-select:none}
+  .snippet .hl{background:#5c2b29}
+  .snippet code{white-space:pre}
+  .why{margin-bottom:8px}
+  .why b{font-size:12px;text-transform:uppercase;letter-spacing:.5px;color:var(--muted)}
+  .refs{font-size:12px;color:var(--muted)}
+  .empty{text-align:center;color:var(--muted);padding:30px}
+  .count-note{font-size:12px;color:var(--muted);margin-bottom:10px}
+  footer{max-width:1200px;margin:0 auto;padding:0 24px 30px;font-size:11.5px;color:var(--muted)}
+  .notices{margin-top:10px} .notices summary{cursor:pointer}
+  .notices pre{white-space:pre-wrap;font:11px/1.45 var(--mono);margin-top:8px}
+  @media(max-width:760px){.input-grid{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+<header>
+  <div class="logo">Lazaret</div>
+  <div class="tag">Static security, supply-chain &amp; quality analysis · Python, JavaScript &amp; SQL</div>
+</header>
+
+<div class="wrap">
+  <div class="panel">
+    <h2>Analyze code</h2>
+    <div class="input-grid">
+      <textarea id="code" spellcheck="false" placeholder="Paste Python, JavaScript, or SQL code here, or upload files →"></textarea>
+      <div class="side">
+        <select id="lang">
+          <option value="auto">Language: auto-detect</option>
+          <option value="py">Python</option>
+          <option value="js">JavaScript / TypeScript</option>
+          <option value="sql">SQL</option>
+        </select>
+        <label class="filebtn">Upload files
+          <input type="file" id="files" multiple>
+        </label>
+        <div class="filelist" id="filelist"></div>
+        <button class="primary" id="scanBtn">Scan code</button>
+        <button class="ghost" id="samplePy">Load sample (vulnerable Python)</button>
+        <button class="ghost" id="sampleJs">Load sample (vulnerable JS)</button>
+        <button class="ghost" id="sampleSql">Load sample (vulnerable SQL)</button>
+        <div class="hint" id="status"></div>
+        <div class="hint">Analysis runs entirely in your browser. No code leaves this page.</div>
+      </div>
+    </div>
+  </div>
+
+  <div id="overview" class="panel">
+    <div class="gate">
+      <div class="gate-badge" id="gateBadge"></div>
+      <div class="gate-conds" id="gateConds"></div>
+    </div>
+    <div class="cards" id="cards"></div>
+  </div>
+
+  <div id="issuesPanel" class="panel">
+    <h2>Issues</h2>
+    <div class="filters" id="filters"></div>
+    <div class="count-note" id="countNote"></div>
+    <div id="issueList"></div>
+    <div id="pager"></div>
+    <button class="ghost" id="exportBtn" style="margin-top:6px">Export report (JSON)</button>
+  </div>
+</div>
+<footer>Lazaret performs pattern- and heuristic-based static analysis. It catches common issues but is not a substitute for a full security audit, dependency scanning, or dynamic testing.
+  <details class="notices"><summary>Notices</summary><p>This page carries Lazaret's engine, built as WebAssembly. Lazaret is licensed under the Apache License 2.0; the engine holds Unicode data under the Unicode License v3.</p><pre>@NOTICES@</pre></details>
+</footer>
+
+<script type="application/octet-stream" id="lazaret-engine" @ENGINE_ATTRS@>
+@ENGINE@
+</script>
+<script>
+@SCRIPT@</script>
+</body>
+</html>

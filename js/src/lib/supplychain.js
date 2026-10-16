@@ -7,7 +7,8 @@
 // here for the existing import paths.
 
 import { mkIssue } from "./issue.js";
-import { DEP_MARKERS, truncatedIssue } from "./fs.js";
+import { DEP_MARKERS } from "./collect.js";
+import { truncatedIssue } from "./issue.js";
 import { pyRe, pyRepr, MAX_JSON_DEPTH, PY_ORDER } from "./pycompat.js";
 import { call, hookIsSuspicious, issuesOf, NativeExhausted, EXHAUSTED } from "./native.js";
 import { REDACT, redactText } from "./redact.js";

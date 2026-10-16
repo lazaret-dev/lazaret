@@ -16,7 +16,8 @@ tool per category, true positives against false positives. Five of its fourteen 
 * S-COOKIE (a hotspot, the project pass): `set_cookie` without `secure=True`.
 * S-XML: a parser set to resolve external entities, no longer an import of xml.etree, xml.dom or xml.sax.
 
-The dashboard is held to the same answers by the dashboard parity test. All content is inert: hosts are .invalid,
+The pass is the engine's, so the npm package and the dashboard answer the same (the WebAssembly build is held to
+the library by tests/architecture/test_wasm_parity*.py). All content is inert: hosts are .invalid,
 nothing is run.
 """
 import unittest

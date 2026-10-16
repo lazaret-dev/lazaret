@@ -16,7 +16,8 @@ import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { run } from "../src/index.js";
 import { shebangLang } from "../src/lib/native.js";
-import { scriptSourceLang, collectFiles } from "../src/lib/fs.js";
+import { collectFiles } from "../src/lib/fs.js";
+import { scriptSourceLang } from "../src/lib/collect.js";
 
 test("the language a #! line names (the first line only)", () => {
   const cases = [

@@ -8,7 +8,7 @@ of the 30 crates'. Base64 of 150 bytes or more mixes letters and digits and does
 passed over, and a run after them on the line that can be base64 is still reported. A run of one class longer than
 16,384 characters is reported all the same: that is what a payload written in hex is (three of the benchmark's malicious
 PyPI releases hold one of 270,000 hex digits or more; the longest of the benign sets' runs is 9,327 digits). The engine
-decides (scanfile.rs, b64_blob_col); the dashboard's twin is held to it by test_review_dashboard_parity."""
+decides (scanfile.rs, b64_blob_col), for the CLIs and the dashboard."""
 
 import hashlib
 import unittest

@@ -27,7 +27,9 @@ import {
 import { tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, sep } from "node:path";
 import { fsNameToString } from "./lib/encoding.js";
-import { MAX_FILE_BYTES, ScanTargetError, strerror, truncatedIssue } from "./lib/fs.js";
+import { ScanTargetError, strerror } from "./lib/fs.js";
+import { MAX_FILE_BYTES } from "./lib/collect.js";
+import { truncatedIssue } from "./lib/issue.js";
 import { loadError } from "./lib/native.js";
 import { findProgram } from "./lib/programs.js";
 import { cmpCodePoints } from "./lib/pycompat.js";

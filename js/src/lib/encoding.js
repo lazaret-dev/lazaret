@@ -1,7 +1,8 @@
 // Source decoding (shared semantics specs 4 and 15), the engine's for both packages (BR-7 step 4 b, 0.1.9:
 // decode/), and file-name decoding (spec 11).
 
-import { call } from "./native.js";
+import { call, issuesOf, bytesText } from "./native.js";
+import { REDACT } from "./redact.js";
 
 /**
  * A source file's bytes decoded as its interpreter reads them (core.decode_source): {text, info}, the text with
@@ -13,10 +14,31 @@ export function decodeSource(buf, lang) {
   return call("decode_source", lang ? { lang } : {}, bytesText(buf));
 }
 
-/** `buf`'s bytes as the engine reads them: latin-1 text, a character per byte. */
-export function bytesText(buf) {
-  const b = Buffer.isBuffer(buf) ? buf : Buffer.from(buf.buffer, buf.byteOffset, buf.byteLength);
-  return b.toString("latin1");
+/** Do paths use "\\" as a separator too? (decodeMember's name: its extension.) */
+const WINDOWS_NAMES = typeof process !== "undefined" && process.platform === "win32";
+
+/**
+ * core.decode_member: [text, findings] for a file read as `lang` ("py" keeps its coding cookie), in one call to the
+ * engine (BR-7 step 4 b: decode/): Q-ENCODING, SC-UTF7, SC-ESCAPE-CODEC and SC-TRUNCATED for a codec it does not
+ * decode, and SC-TRUNCATED when the file does not decode to anything text-like (more than 30% invalid bytes or
+ * control characters, but a video under TypeScript's extensions), so its scan proves nothing. A directory scan
+ * reads every source file this way (0.1.8), as the registry does.
+ */
+export function decodeMember(path, data, lang) {
+  const args = { issues: true, redact: REDACT.on, name: path, windows: WINDOWS_NAMES };
+  if (lang) args.lang = lang;
+  const got = call("decode_source", args, bytesText(data));
+  return [got.text, issuesOf(path, got.issues)];
+}
+
+/**
+ * Line endings as Python's text mode reads them: \r\n and a lone \r both become \n.
+ * Without this, a file with Windows line endings leaves "\r" at the end of every
+ * line, which (for one) turns a bare "# nosec" into a suppression that matches no
+ * rule. Twin of lazaret.scanner.core.normalize_newlines.
+ */
+export function normalizeNewlines(text) {
+  return typeof text === "string" && text.includes("\r") ? text.replace(/\r\n?/g, "\n") : text;
 }
 
 // ---- file names (spec 11) -----------------------------------------------

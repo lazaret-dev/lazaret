@@ -1,9 +1,9 @@
 """Review fixes: the comment lexer and what is built on it.
 
 Each case failed before its fix; the npm engine's side is in
-js/test/review-lexing.test.js, the dashboard's in
-test_review_dashboard_lexing.py, and both CLIs are compared on the same
-inputs in tests/architecture/test_js_parity_lexing.py. All input is inert.
+js/test/review-lexing.test.js, and both CLIs are compared on the same
+inputs in tests/architecture/test_js_parity_lexing.py (the dashboard runs
+the npm package's scan since BR-7 step 5). All input is inert.
 """
 import time
 import unittest

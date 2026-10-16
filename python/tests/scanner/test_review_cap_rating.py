@@ -20,7 +20,6 @@ from unittest import mock
 
 from lazaret.scanner import core, engine
 from tests import _support
-from tests.scanner import _dashboard_vm as dash
 
 TABLE = "".join(f'value_{n:04d} = "' + f"segment-{n:04d} " * 14 + '"\n' for n in range(2000))
 CATCHES = "try { f() } catch (e) {}\n" * 300 + "// TODO later\n" * 15
@@ -93,23 +92,6 @@ class RatingTests(unittest.TestCase):
             self.assertEqual(p.returncode, 1, p.stdout[-500:])                    # was 0
             with open(os.path.join(out, "lazaret-report.json"), encoding="utf-8") as f:
                 self.assertEqual(json.load(f)["ratings"]["maintainability"], "E")
-
-
-@dash.requires_node
-class DashboardTests(unittest.TestCase):
-    def test_report_rates_like_the_cli(self):
-        files = [("table.py", "py", TABLE), ("c.js", "js", CATCHES)]
-        (page,) = dash.run([{"op": "runScan", "files": [
-            {"name": n, "lang": lang, "content": c} for n, lang, c in files]}])
-        issues = []
-        for n, lang, c in files:
-            issues += core.scan_file(n, c, lang)
-        cli = core.build_result(".", [{"path": n, "lang": lang, "content": c} for n, lang, c in files], issues)
-        for key in ("ratings", "pass", "counts", "metrics"):
-            self.assertEqual(page[key], cli[key], key)
-        self.assertEqual(page["ratings"]["maintainability"], "E")
-        notes = lambda r: sorted(json.dumps(i, sort_keys=True) for i in r["issues"] if i["rule"] == "Q-CAPPED")
-        self.assertEqual(notes(page), notes(cli))
 
 
 if __name__ == "__main__":

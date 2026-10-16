@@ -9,17 +9,20 @@ codecs.rs, since BR-7 step 4 b; src/lib/codecs.js until then) list the
 names Python's codecs answer to: facts about Python, not CPython's code, so
 the package carries no CPython license and declares none (it did in 0.1.8).
 The Unicode 13.0 tables (scanner/_unicode13.py,
-js/src/lib/unicode13.js, the dashboard's copy, rust/…/generated/unicode13.rs)
-and the codec tables (rust/…/generated/codecs.rs and the dashboard's copy
-of the single-byte ones) are Unicode data: each carries the Unicode notice,
-every package that ships them carries the Unicode License v3
+js/src/lib/unicode13.js, rust/…/generated/unicode13.rs) and the codec tables
+(rust/…/generated/codecs.rs) are Unicode data: each carries the Unicode
+notice, every package that ships them carries the Unicode License v3
 (LICENSE-UNICODE, one text in python/, js/ and rust/) and declares
-Unicode-3.0. (rust/: test_rust_notices.py.)
+Unicode-3.0. (rust/: test_rust_notices.py.) The dashboard carries the engine
+(BR-7 step 5), and with it the engine's notices, rust/NOTICE and the Unicode
+License v3, in full.
 """
 
 import hashlib
+import html
 import json
 import os
+import re
 import unittest
 
 from tests import _support
@@ -58,11 +61,17 @@ class UnicodeNoticeTests(unittest.TestCase):
                 self.assertIn(UNICODE, head)
                 self.assertIn("Unicode License v3", head)
                 self.assertIn("LICENSE-UNICODE", head)
-        dashboard = read("python/src/lazaret/web/lazaret.html")
-        for section in ("/* ======== lib/unicode13.js ======== */", "/* ======== lib/codecs.js ======== */"):
-            with self.subTest(section):
-                at = dashboard.index(section)
-                self.assertIn(UNICODE, dashboard[at:at + 3000])
+
+    def test_the_dashboard_carries_the_engines_notices(self):
+        page = read("python/src/lazaret/web/lazaret.html")
+        block = re.search(r'<details class="notices">.*?<pre>(.*?)</pre>', page, re.S)
+        self.assertIsNotNone(block, "the dashboard has no notices")
+        text = html.unescape(block.group(1))
+        for rel in ("rust/NOTICE", "rust/LICENSE-UNICODE"):
+            with self.subTest(rel):
+                self.assertIn(read(rel).rstrip("\n"), text)
+        self.assertIn(UNICODE, text)
+        self.assertIn("lazaret.html", read("rust/NOTICE"))
 
 
 class NpmNoticeTests(unittest.TestCase):

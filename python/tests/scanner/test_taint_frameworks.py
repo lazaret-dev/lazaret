@@ -26,8 +26,8 @@ Express.
 * Containers: a value written into one (`d["k"] = q`, `xs.append(q)`,
   `arr.push(q)`) taints it, followed by literal key.
 
-The npm engine and the dashboard are held to the same answers by
-tests/architecture/test_js_parity_taint.py and the dashboard parity test.
+The npm engine is held to the same answers by
+tests/architecture/test_js_parity_taint.py (and the dashboard runs it).
 All content is inert.
 """
 import unittest

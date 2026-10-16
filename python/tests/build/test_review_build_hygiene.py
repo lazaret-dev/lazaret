@@ -268,8 +268,8 @@ class MetadataTests(unittest.TestCase):
 
     def test_pep_639_license_fields(self):
         self.assertEqual(self.headers[0], "Metadata-Version: 2.4")
-        # the Unicode 13.0 table and the dashboard's Unicode and codec tables are Unicode data (0.1.8);
-        # the native engine is Lazaret's own with Unicode data (rust/NOTICE), and every artifact carries it
+        # the Unicode 13.0 table is Unicode data (0.1.8); the native engine is Lazaret's own with Unicode data
+        # (rust/NOTICE), and every artifact carries it (the dashboard carries the engine: BR-7 step 5)
         self.assertEqual(self.field("License-Expression"), ["Apache-2.0 AND Unicode-3.0"])
         self.assertEqual(self.field("License-File"), ["LICENSE", "LICENSE-UNICODE", "NOTICE"])
         self.assertEqual(self.field("License"), [])      # superseded by License-Expression

@@ -107,3 +107,27 @@ export function fileIssue(rule, file, line = 1) {
     snippet: [], snipStart: 1,
   };
 }
+
+/** SC-TRUNCATED for a file not fully scanned (core.truncated_issue): `detail` says why. */
+export function truncatedIssue(path, detail) {
+  return fileIssue({ id: "SC-TRUNCATED", name: "Scan truncated", type: "HOTSPOT", sev: "CRITICAL",
+    msg: `File not fully scanned: ${detail}.`,
+    why: "Scanning stopped early, so a clean verdict for this file is not evidence of anything — the unscanned bytes are exactly where a hostile artifact would put its payload (audit C2/G16: declared sizes and entry counts are attacker-controlled and were used to skip files with zero signal).",
+    fix: "Review the file manually or raise the limit and re-scan.",
+    ref: "CWE-506 · Supply chain" }, path);
+}
+
+/**
+ * SC-TRUNCATED for a file (or directory) whose scan threw (twin of
+ * core.scan_error_issue): the run goes on without its findings, and like any
+ * file not fully scanned it fails the gate. It was an INFO note
+ * (Q-SCAN-ERROR), so a file whose scan died took its CRITICAL findings with
+ * it and the gate passed (review B3: a 6 MB string line overflowed V8's
+ * regex stack).
+ */
+export function scanErrorIssue(path, err) {
+  const issue = truncatedIssue(path, `its scan failed (${(err && err.name) || "Error"}), so its findings are missing`);
+  issue.why = "An internal error stopped this scan; the rest of the project is still scanned and reported, but nothing in this file was checked, so the result can't clear it.";
+  issue.fix = "Review the file manually and report the error (re-run with LAZARET_DEBUG=1 for a traceback).";
+  return issue;
+}

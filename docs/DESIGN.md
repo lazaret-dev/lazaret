@@ -94,11 +94,15 @@ credentials).
   JavaScript twin. The JS twin of a Python helper says so in a comment
   (`Twin of lazaret.scanner.core…`). Parity failing is not a flaky test; it
   means the packages have diverged and one of them is now wrong.
-- **The browser dashboard** (`python/src/lazaret/web/lazaret.html`) carries a
-  third port of the engine and is held to the same findings
-  (`test_review_dashboard_parity.py`). Editing the dashboard's inline script
-  requires re-running `scripts/dashboard_csp.py` (its CSP pins the script by
-  SHA-256).
+- **The browser dashboard** (`python/src/lazaret/web/lazaret.html`) runs the
+  npm package's scan on the engine it carries (BR-7 step 5, 0.1.9):
+  `scripts/make_dashboard.py` builds it from `js/dashboard/`, the package's
+  modules it imports (which therefore use nothing of Node's: the build
+  refuses a `node:` import) and a build of the engine as WebAssembly, and
+  pins the script by SHA-256 in its CSP. It is held to the CLI's results
+  (`test_review_dashboard_parity.py`); after changing a module it imports,
+  rebuild it, and after changing the engine, build the engine and rebuild
+  it with `--engine` (`test_dashboard.py` fails until then).
 - **The native engine** (`rust/crates/lazaret-engine`, 0.1.8) runs core's
   supply-chain tests — the install-script and import-time tests and
   everything they read — `scan_file` in dependency mode and in project mode
@@ -314,7 +318,7 @@ across lines, and a line counts as a comment only if all of it is, and only if
 both readings of ambiguous text agree.
 
 **Go and Rust (0.1.9, S-4).** A project's `.go` and `.rs` files are source
-(`core.EXTS`, `fs.js` `EXTS`): their comments and literals come from the
+(`core.EXTS`, `collect.js` `EXTS`): their comments and literals come from the
 engine's Go and Rust lexers, and they get the rules whose `langs` list them
 (S-SECRET, S-TOKEN, S-BIDI, Q-TODO) and the families every text gets. No
 taint, function metric or supply-chain detector reads them yet. Two limits
@@ -2037,14 +2041,14 @@ leaves the texts to go with their calls, which gives the same answers:
   release.
 - **What ships** is narrow: the wheel/sdist contain only `src/lazaret/` and
   their license files, `LICENSE` and `LICENSE-UNICODE` (the Unicode 13.0
-  table and the dashboard's codec table are Unicode data: `Apache-2.0 AND
-  Unicode-3.0`); a platform wheel adds the native library and the
+  table is Unicode data, and so is the engine the dashboard carries, with its
+  notices: `Apache-2.0 AND Unicode-3.0`); a platform wheel adds the native library and the
   engine's notice, `rust/NOTICE` (the engine is Lazaret's own since P-16,
   with Unicode data); the npm package only `bin/`, `src/`, the engine
   (`native/lazaret.wasm` and its `native/NOTICE`, `rust/NOTICE`) and its
   license files (`NOTICE`, `LICENSE-UNICODE`). Every package is
-  `Apache-2.0 AND Unicode-3.0`: the codec names the npm package and the
-  dashboard list are facts about Python, not CPython's code.
+  `Apache-2.0 AND Unicode-3.0`: the codec names the engine lists are facts
+  about Python, not CPython's code.
   `tests/architecture/test_notices.py` and `test_rust_notices.py` hold the
   notices to the code. `scripts/make_bundle.py` builds a reproducible
   source tarball from tracked files only and refuses credential files.
@@ -2094,8 +2098,9 @@ a file, then run the file").
 
 - **Parity is sacred where twins remain.** The npm package's JavaScript
   twins (the taint, SQL and flow passes, the manifest and settings checks)
-  and the dashboard must change with the Python package: run the parity
-  suites before you believe a flow change is done.
+  must change with the Python package, and the dashboard, which runs them,
+  be rebuilt: run the parity suites before you believe a flow change is
+  done.
 - **Read every recorded difference.** A snapshot test fails on any change to
   what the engine answers; re-recording without reading the cases it moved
   (`scripts/snapshot.py diff`) throws away the only check left that the
@@ -2339,9 +2344,9 @@ comprehensive, so weigh marginal value against FP risk):
   tarball (`next`, 42 MB), which dominates a first install.
 - *From the audit (P1/P2):* a public nightly benchmark, per-rule docs, a
   coverage gate and parser fuzzing in CI, optional live secret verification,
-  splitting `core.py`, generating the dashboard's script from `js/src` (the
-  GitHub Action was built in 0.1.8, and the pre-commit hook, `lazaret hook`,
-  in 0.1.9, in both packages).
+  splitting `core.py` (the GitHub Action was built in 0.1.8, and the
+  pre-commit hook, `lazaret hook`, in 0.1.9, in both packages; since 0.1.9
+  the dashboard's script is built from `js/src`).
 
 Prefer doing detection extensions **reactively** — when a real-world dropper
 uses the pattern — over speculatively. The bar that made this tool good is the
