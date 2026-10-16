@@ -236,6 +236,7 @@ lazaret hook [FILE …] [--staged] [-q] [--show-secrets]  # the commit-time gate
   --deps                also scan dependency trees (alias: --include-deps)
   --exclude NAME        extra directory name to skip (repeatable)
   --baseline PATH       previous JSON report; findings not in it are marked new
+                        (signed: the SC-* and X-* findings it holds accepted)
   --no-redact-secrets   keep credential lines in reports (default: redacted)
   --show-secrets        show each finding's flagged line unredacted on the
                         terminal (only when the output is a terminal); the
@@ -310,7 +311,11 @@ fingerprints, the same as the Python engine's) and a baseline is used only if
 its signature verifies. Without a key, a baseline inside the scanned tree is
 untrusted — the repository under review could have planted it — so keep it
 outside (e.g. in `$RUNNER_TEMP`). An untrusted baseline counts every finding
-as new.
+as new. A signed baseline that verifies accepts the supply-chain and
+cross-file findings it holds (they take no suppression marker): they stay in
+the reports, marked `accepted`, and the gate does not count them. Baselines
+are the engine's (fingerprints, signature, trust and acceptance), as in the
+Python package.
 
 **Terminal output.** File names, messages and excerpts come from the scanned
 tree; C0 control characters (except tab and newline), DEL, C1 controls

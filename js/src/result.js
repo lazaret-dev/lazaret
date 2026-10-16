@@ -22,7 +22,7 @@ export const CROSS_FILE_LABEL = "No cross-file taint flows";
  * What the engine's result reads of each finding (result.rs): [rule, type, severity, file, line, omitted,
  * omittedType] (a Q-CAPPED note's last two: the maintainability rating counts the smells it stands for).
  */
-function findingRows(issues) {
+export function findingRows(issues) {
   return issues.map((i) => [i.rule, i.type, i.sev, String(i.file), i.line,
     Number.isInteger(i.omitted) ? i.omitted : null, typeof i.omittedType === "string" ? i.omittedType : null]);
 }

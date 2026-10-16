@@ -467,6 +467,9 @@ fn sarif_line(v: Option<&Value>) -> i64 {
     n.max(1)
 }
 
+/// Why a finding a signed baseline holds does not count (N-15).
+const ACCEPTED_WHY: &str = "Accepted: held by a baseline whose signature verifies with LAZARET_BASELINE_KEY";
+
 /// One finding as a SARIF result; `rules`: the rule ids in their index order.
 fn sarif_result(i: &Value, rules: &[PyStr], windows: bool) -> Value {
     let id = i.get("rule").cloned().unwrap_or(Value::Null);
@@ -488,6 +491,17 @@ fn sarif_result(i: &Value, rules: &[PyStr], windows: bool) -> Value {
             )])]),
         ),
     ];
+    if truthy(i.get("accepted")) {
+        // a finding a signed baseline accepted (N-15: baseline.rs)
+        out.push((
+            "suppressions",
+            Value::Arr(vec![Value::obj(vec![
+                ("kind", Value::str("external")),
+                ("status", Value::str("accepted")),
+                ("justification", Value::str(ACCEPTED_WHY)),
+            ])]),
+        ));
+    }
     if let Some(v @ Value::Obj(_)) = i.get("verified") {
         out.push(("properties", Value::obj(vec![("verified", v.clone())])));
     }
@@ -663,6 +677,14 @@ fn basename(p: &[u32], windows: bool) -> PyStr {
     p[start..].to_vec()
 }
 
+/// The findings a signed baseline accepted (N-15: baseline.rs).
+fn accepted_line(doc: &Value) -> PyStr {
+    let mut t = s("Accepted by the signed baseline: ");
+    t.extend(get_str(doc, "acceptedIssues"));
+    t.extend(s(" (supply-chain and cross-file findings the gate does not count)"));
+    t
+}
+
 /// core.verification_line: what --verify-secrets' providers said.
 pub fn verification_line(v: &Value) -> PyStr {
     let empty = Value::Obj(Vec::new());
@@ -760,6 +782,9 @@ pub fn html_frame(doc: &Value, count: usize, windows: bool, marker: Option<&Valu
     if let Some(v @ Value::Obj(_)) = doc.get("verification") {
         o.s("<p class=\"verified\">").e(&verification_line(v)).s("</p>");
     }
+    if truthy(doc.get("acceptedIssues")) {
+        o.s("<p class=\"accepted\">").e(&accepted_line(&doc)).s("</p>");
+    }
     o.s("</div>\n<div class=\"panel\"><h2>Issues by file</h2>");
     let mut files: Vec<(PyStr, Value)> = doc.get("perFile").and_then(|p| p.as_obj()).map(|o| o.to_vec()).unwrap_or_default();
     let key = |v: &Value| match v {
@@ -806,6 +831,9 @@ pub fn html_items(issues: &[Value], first: bool) -> PyStr {
         let sev = get_str(i, "sev");
         o.s("\n<details><summary><span class=\"sev ").e(&sev).s("\">").e(&sev).s("</span>\n");
         o.s("<span class=\"itype\">").e(&type_label(&get_str(i, "type"))).s("</span>\n");
+        if truthy(i.get("accepted")) {
+            o.s("<span class=\"itype\">Accepted</span>\n");
+        }
         o.s("<span class=\"imsg\">").ev(i.get("msg")).s("</span>\n");
         o.s("<span class=\"iloc\">").ev(i.get("file")).s(":").ev(i.get("line")).s("</span></summary>\n");
         o.s("<div class=\"body\"><div class=\"snippet\">");
@@ -949,6 +977,11 @@ pub fn text_frame(doc: &Value, count: usize, quiet: bool, color: bool) -> (PyStr
     if doc.get("newIssues").is_some() {
         let mut t = s("  New issues vs baseline: ");
         t.extend(c(color, "1", &get_str(&doc, "newIssues")));
+        line(&mut out, t);
+    }
+    if truthy(doc.get("acceptedIssues")) {
+        let mut t = s("  ");
+        t.extend(accepted_line(&doc));
         line(&mut out, t);
     }
     if let Some(v @ Value::Obj(_)) = doc.get("verification") {

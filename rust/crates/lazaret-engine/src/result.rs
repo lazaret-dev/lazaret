@@ -15,6 +15,9 @@
 //!   HARDENING_RULES) and cross-file flows (X-*), and the findings by file.
 //! * `regrade`: a result graded again after its findings changed (`--verify-secrets`): their order, the counts, the
 //!   security and reliability ratings, the two conditions on severities, and the gate.
+//! * `accept`: the gate without the findings a signed baseline accepted (BR-7 step 4 (d), N-15: baseline.rs): its
+//!   four conditions on findings (no blocker, no critical vulnerability, no supply-chain indicator, no cross-file
+//!   flow) judged on the others; the counts and ratings still count every finding.
 //!
 //! A finding comes as `[rule, type, severity, file, line, omitted, omittedType]` (the last two a Q-CAPPED note's:
 //! the rating counts the smells it stands for), and the answer gives the findings' order (`order`, indices into
@@ -202,6 +205,22 @@ fn severity_grades(issues: &[&Finding]) -> (Value, Vec<(&'static str, Value)>, V
     (counts, ratings, conds)
 }
 
+/// The supply-chain indicators among `issues`: an SC-* finding above INFO, a CI file's hardening check
+/// (HARDENING_RULES) only when CRITICAL.
+fn supply_chain(p: &Pack, issues: &[&Finding]) -> usize {
+    let hardening = p.strs("HARDENING_RULES");
+    issues.iter().filter(|i| {
+        pystr::starts_with(&i.rule, "SC-") && !is(&i.sev, "INFO") && (!hardening.iter().any(|r| *r == i.rule) || is(&i.sev, "CRITICAL"))
+    }).count()
+}
+
+fn cross_file(issues: &[&Finding]) -> usize {
+    issues.iter().filter(|i| pystr::starts_with(&i.rule, "X-")).count()
+}
+
+const SUPPLY: &str = "No supply-chain indicators";
+const CROSS: &str = "No cross-file taint flows";
+
 pub fn result(p: &Pack, issues: &[Finding], files: &[FileIn]) -> Result<Value, String> {
     let ord = order(p, issues)?;
     let sorted: Vec<&Finding> = ord.iter().map(|&k| &issues[k]).collect();
@@ -214,16 +233,13 @@ pub fn result(p: &Pack, issues: &[Finding], files: &[FileIn]) -> Result<Value, S
     let (counts, mut ratings, sev_conds) = severity_grades(&sorted);
     let maint = maintainability(p, &sorted, ncloc);
     ratings.push(("maintainability", Value::str(maint)));
-    let hardening = p.strs("HARDENING_RULES");
-    let supply = sorted.iter().filter(|i| {
-        pystr::starts_with(&i.rule, "SC-") && !is(&i.sev, "INFO") && (!hardening.iter().any(|r| *r == i.rule) || is(&i.sev, "CRITICAL"))
-    }).count();
-    let cross_file = sorted.iter().filter(|i| pystr::starts_with(&i.rule, "X-")).count();
+    let supply = supply_chain(p, &sorted);
+    let cross_file = cross_file(&sorted);
     let mut conds: Vec<(&str, bool)> = sev_conds;
     conds.push(("Duplication < 10%", dup_pct < 10.0));
     conds.push(("Maintainability \u{2265} C", matches!(maint, "A" | "B" | "C")));
-    conds.push(("No supply-chain indicators", supply == 0));
-    conds.push(("No cross-file taint flows", cross_file == 0));
+    conds.push((SUPPLY, supply == 0));
+    conds.push((CROSS, cross_file == 0));
     let mut per_file: Vec<(Vec<u32>, i64)> = Vec::new();
     let mut at: HashMap<&[u32], usize> = HashMap::new();
     for i in &sorted {
@@ -264,6 +280,23 @@ pub fn regrade(p: &Pack, issues: &[Finding], conditions: &[(Vec<u32>, bool)]) ->
         ("counts", counts),
         ("ratings", Value::obj(ratings)),
     ]))
+}
+
+/// `conditions`: the result's, as `[label, ok]`; the four on findings take their values without the findings
+/// `accepted` marks, the others stay.
+pub fn accept(p: &Pack, issues: &[Finding], accepted: &[bool], conditions: &[(Vec<u32>, bool)]) -> Value {
+    let kept: Vec<&Finding> = issues.iter().enumerate().filter(|(k, _)| !accepted.get(*k).copied().unwrap_or(false)).map(|(_, i)| i).collect();
+    let (_, _, mut now) = severity_grades(&kept);
+    now.push((SUPPLY, supply_chain(p, &kept) == 0));
+    now.push((CROSS, cross_file(&kept) == 0));
+    let conds: Vec<(Vec<u32>, bool)> = conditions.iter().map(|(label, ok)| {
+        let new = now.iter().find(|(l, _)| is(label, l)).map(|&(_, v)| v);
+        (label.clone(), new.unwrap_or(*ok))
+    }).collect();
+    Value::obj(vec![
+        ("pass", Value::Bool(conds.iter().all(|c| c.1))),
+        ("conditions", Value::Arr(conds.into_iter().map(|(l, ok)| Value::obj(vec![("label", Value::Str(l)), ("ok", Value::Bool(ok))])).collect())),
+    ])
 }
 
 // ---------------------------------------------------------------- reading a call's arguments

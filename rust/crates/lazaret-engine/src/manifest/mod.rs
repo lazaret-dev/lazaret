@@ -74,7 +74,8 @@ pub fn load(p: &Pack, path: &[u32], content: &[u32], literal: bool, locate: Opti
     let mut data = match pyjson::loads(text, locate) {
         Ok(v) => Some(v),
         Err(pyjson::Error::Depth) => return (None, vec![depth_finding(p)]),
-        Err(pyjson::Error::At(at)) => {
+        Err(pyjson::Error::IntDigits(_)) => None, // (loads_plain's alone)
+        Err(pyjson::Error::At(at, _)) => {
             reason = Some(format!("JSONDecodeError: {}", pyjson::error_where(text, at)));
             None
         }

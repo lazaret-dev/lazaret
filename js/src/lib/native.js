@@ -55,7 +55,9 @@ const UNBUDGETED = new Set(["batch", "issue_make", "redact_text", "redact_issues
   "deps_hooks", "deps_script", "deps_targets", "deps_files", "agent_issue", "declared_names",
   // the reports' forms and the terminal's sanitizers (step 4 c): no matcher runs
   "term", "issue_excerpt", "report_json", "report_items", "sarif_rules", "sarif_frame", "sarif_items", "html_frame",
-  "html_items", "text_frame", "text_order", "text_items"]);
+  "html_items", "text_frame", "text_order", "text_items",
+  // the baselines' fingerprints, signature and application (step 4 d)
+  "baseline_fingerprints", "baseline_sign", "baseline_apply"]);
 
 /** The work each call may do, in steps of the engine's regex matcher (null: its default, about 4e9). */
 export function setWorkBudget(steps = null) {

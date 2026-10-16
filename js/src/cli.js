@@ -58,7 +58,9 @@ Options:
   --exclude NAME        Extra directory name to skip (repeatable).
   --baseline PATH       Previous JSON report; findings not in it are marked new.
                         A baseline inside the scanned tree is trusted only when
-                        ${BASELINE_KEY_ENV} is set and its signature verifies.
+                        ${BASELINE_KEY_ENV} is set and its signature verifies;
+                        a signed one accepts the SC-* and X-* findings it holds
+                        (the gate does not count them).
   --no-redact-secrets   Keep credential lines in reports (default: redacted).
   --show-secrets        Show each finding's flagged line unredacted on the
                         terminal (only when the output is a terminal); the
@@ -383,7 +385,7 @@ function runChecked(argv, io) {
 
   function report(res, rawLines) {
     if (opts.baseline) {
-      applyBaseline(res, opts.baseline, { root, env, warn: (m) => err(sanitizeTermLine(m)) });
+      applyBaseline(res, opts.baseline, { root, env, warn: err });   // (the engine's lines, sanitized)
     }
     printReport(res, { out, quiet: !!opts.quiet, rawLines, color: io.isTTY ?? !!process.stdout.isTTY });
 

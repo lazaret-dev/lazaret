@@ -214,4 +214,5 @@ jobs:
             tests.architecture.test_wasm_parity_manifest tests.architecture.test_wasm_parity_redact \
             tests.architecture.test_wasm_parity_binary tests.architecture.test_wasm_parity_deps \
             tests.architecture.test_wasm_parity_readers tests.architecture.test_result_engine \
-            tests.architecture.test_decode_engine tests.architecture.test_report_engine -v
+            tests.architecture.test_decode_engine tests.architecture.test_report_engine \
+            tests.architecture.test_baseline_engine -v

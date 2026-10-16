@@ -251,38 +251,8 @@ export function pyRepr(s) {
   return out + quote;
 }
 
-/** Python float repr() (shortest round-trip, Python's exponent thresholds). */
-export function pyFloatRepr(x) {
-  if (Number.isNaN(x)) return "nan";
-  if (!Number.isFinite(x)) return x > 0 ? "inf" : "-inf";
-  if (x === 0) return Object.is(x, -0) ? "-0.0" : "0.0";
-  // the exponent of the shortest digits themselves (log10 misjudges values
-  // next to a power of ten, e.g. 9999999999999998.0)
-  const [m, e] = x.toExponential().split("e");
-  const n = parseInt(e, 10);
-  if (n >= 16 || n < -4) return `${m}e${n < 0 ? "-" : "+"}${String(Math.abs(n)).padStart(2, "0")}`;
-  const s = String(x);
-  return /[.e]/.test(s) ? s : s + ".0";
-}
-
-/** Python str() of a JSON-decoded value (dict/list use repr of members). */
-export function pyStr(v) {
-  if (typeof v === "string") return v;
-  return pyReprValue(v);
-}
-function pyReprValue(v) {
-  if (v === null || v === undefined) return "None";
-  if (v === true) return "True";
-  if (v === false) return "False";
-  if (typeof v === "number") return Number.isInteger(v) && Math.abs(v) < 1e21 ? String(v) : pyFloatRepr(v);
-  if (typeof v === "string") return pyRepr(v);
-  if (Array.isArray(v)) return "[" + v.map(pyReprValue).join(", ") + "]";
-  return "{" + Object.entries(v).map(([k, x]) => `${pyRepr(k)}: ${pyReprValue(x)}`).join(", ") + "}";
-}
-
 // ---- a dict's keys in Python's order ------------------------------------
-// pyJsonParse with pyValues, and the manifest data the engine gives
-// (supplychain.js loadManifest), keep each object's keys in Python's order in
+// The manifest data the engine gives (supplychain.js loadManifest) keeps each object's keys in Python's order in
 // its PY_ORDER (a JS object lists integer-like keys such as "1" first).
 export const PY_ORDER = Symbol("key order");         // property names in insertion order
 

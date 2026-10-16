@@ -5,7 +5,10 @@
 //! surrogates from `\u` escapes kept, and on failure the position CPython's
 //! decoder reports (a trailing comma at the comma, as 3.13 reports it), in
 //! code points. The npm package's `pyjson.js` was its twin until BR-7's step
-//! 3 (b).
+//! 3 (b). `loads_plain` is `json.loads` without core's `parse_int` (a
+//! baseline's read: BR-7 step 4 (d)), an int of more than 4,300 digits refused
+//! as Python's int() refuses it; `message` is the error's text, as Python
+//! words it.
 
 use super::pyval::{DictBuilder, PyVal};
 use crate::pystr::{self, PyStr};
@@ -17,12 +20,33 @@ pub const MAX_DEPTH: usize = 500;
 pub enum Error {
     /// nested deeper than MAX_DEPTH
     Depth,
-    /// a JSONDecodeError at this position
-    At(usize),
+    /// a JSONDecodeError at this position, with its message
+    At(usize, &'static str),
+    /// an int literal of this many digits, more than Python's int() takes (`loads_plain`)
+    IntDigits(usize),
+}
+
+/// The limit on an int literal's digits that `loads_plain` keeps (sys.get_int_max_str_digits()'s default).
+pub const INT_MAX_STR_DIGITS: usize = 4300;
+
+const EXPECTING_VALUE: &str = "Expecting value";
+const DELIMITER: &str = "Expecting ',' delimiter";
+const BAD_ESCAPE: &str = "Invalid \\uXXXX escape";
+
+/// str() of the error json.loads raises: a JSONDecodeError's "msg: line L column C (char P)", or int()'s ValueError.
+pub fn message(text: &[u32], e: Error) -> String {
+    match e {
+        Error::At(pos, why) => format!("{why}: {} (char {pos})", error_where(text, pos)),
+        Error::IntDigits(n) => format!(
+            "Exceeds the limit ({INT_MAX_STR_DIGITS} digits) for integer string conversion: value has {n} digits; use \
+             sys.set_int_max_str_digits() to increase the limit"
+        ),
+        Error::Depth => format!("JSON nested deeper than {MAX_DEPTH} levels"),
+    }
 }
 
 /// core.json_depth_exceeds: does `text` nest `[` and `{` deeper than `limit`, outside JSON (double-quoted) strings
-/// (an unterminated one to the end)?
+/// (an unterminated one to the end; core's `_JSON_STRING_RE`, whose `.` takes a newline too: re.S)?
 pub fn depth_exceeds(text: &[u32], limit: usize) -> bool {
     let mut depth: isize = 0;
     let mut in_str = false;
@@ -66,6 +90,8 @@ struct Parser<'a> {
     depth: usize,
     /// the key whose position each object records (`_load_manifest`'s `locate`)
     locate: Option<&'a [u32]>,
+    /// json.loads' own int(): any length up to INT_MAX_STR_DIGITS digits (else core's parse_int)
+    plain: bool,
 }
 
 fn is_ws(c: u32) -> bool {
@@ -110,12 +136,12 @@ impl<'a> Parser<'a> {
                     break;
                 }
                 if c <= 0x1f {
-                    return Err(Error::At(next)); // Invalid control character
+                    return Err(Error::At(next, "Invalid control character at"));
                 }
                 next += 1;
             }
             if next >= n {
-                return Err(Error::At(begin)); // Unterminated string
+                return Err(Error::At(begin, "Unterminated string starting at"));
             }
             out.extend_from_slice(&s[end..next]);
             next += 1;
@@ -123,7 +149,7 @@ impl<'a> Parser<'a> {
                 return Ok((out, next));
             }
             if next == n {
-                return Err(Error::At(begin));
+                return Err(Error::At(begin, "Unterminated string starting at"));
             }
             c = s[next];
             if c != 'u' as u32 {
@@ -137,7 +163,7 @@ impl<'a> Parser<'a> {
                     Some('n') => '\n',
                     Some('r') => '\r',
                     Some('t') => '\t',
-                    _ => return Err(Error::At(end - 2)), // Invalid \escape
+                    _ => return Err(Error::At(end - 2, "Invalid \\escape")),
                 };
                 out.push(ch as u32);
                 continue;
@@ -145,16 +171,16 @@ impl<'a> Parser<'a> {
             next += 1;
             end = next + 4;
             if end > n {
-                return Err(Error::At(next - 1)); // Invalid \uXXXX escape
+                return Err(Error::At(next - 1, BAD_ESCAPE));
             }
             let mut cp = match hex4(&s[next..end]) {
                 Some(v) => v,
-                None => return Err(Error::At(end - 5)),
+                None => return Err(Error::At(end - 5, BAD_ESCAPE)),
             };
             // (a surrogate pair: a low surrogate's escape whole after a high one's)
             if (0xD800..=0xDBFF).contains(&cp) && end + 6 <= n && s[end] == '\\' as u32 && s[end + 1] == 'u' as u32 {
                 let Some(lo) = hex4(&s[end + 2..end + 6]) else {
-                    return Err(Error::At(end + 1));
+                    return Err(Error::At(end + 1, BAD_ESCAPE));
                 };
                 if (0xDC00..=0xDFFF).contains(&lo) {
                     cp = 0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00);
@@ -172,7 +198,7 @@ impl<'a> Parser<'a> {
         if s[i] == '-' as u32 {
             i += 1;
             if i >= n {
-                return Err(Error::At(start));
+                return Err(Error::At(start, EXPECTING_VALUE));
             }
         }
         if (0x31..=0x39).contains(&s[i]) {
@@ -183,7 +209,7 @@ impl<'a> Parser<'a> {
         } else if s[i] == 0x30 {
             i += 1;
         } else {
-            return Err(Error::At(start));
+            return Err(Error::At(start, EXPECTING_VALUE));
         }
         let mut float = false;
         if i + 1 < n && s[i] == '.' as u32 && is_digit(s.get(i + 1)) {
@@ -210,6 +236,13 @@ impl<'a> Parser<'a> {
             }
         }
         let lit = &s[start..i];
+        if !float && self.plain {
+            let digits = lit.len() - (lit[0] == '-' as u32) as usize;
+            if digits > INT_MAX_STR_DIGITS {
+                return Err(Error::IntDigits(digits));
+            }
+            return Ok((PyVal::Int(super::pyval::int_of_json(lit)), i));
+        }
         if !float && lit.len() <= 1000 {
             return Ok((PyVal::Int(super::pyval::int_of_json(lit)), i));
         }
@@ -220,7 +253,7 @@ impl<'a> Parser<'a> {
     fn value(&mut self, i: usize) -> Result<(PyVal, usize), Error> {
         let s = self.s;
         if i >= s.len() {
-            return Err(Error::At(i));
+            return Err(Error::At(i, EXPECTING_VALUE));
         }
         let c = s[i];
         if c == '"' as u32 {
@@ -267,13 +300,13 @@ impl<'a> Parser<'a> {
         if i >= n || s[i] != '}' as u32 {
             loop {
                 if i >= n || s[i] != '"' as u32 {
-                    return Err(Error::At(i)); // Expecting property name enclosed in double quotes
+                    return Err(Error::At(i, "Expecting property name enclosed in double quotes"));
                 }
                 let key_at = i;
                 let (key, k2) = self.string(i + 1)?;
                 i = self.skip(k2);
                 if i >= n || s[i] != ':' as u32 {
-                    return Err(Error::At(i)); // Expecting ':' delimiter
+                    return Err(Error::At(i, "Expecting ':' delimiter"));
                 }
                 i = self.skip(i + 1);
                 let (v, v2) = self.value(i)?;
@@ -286,12 +319,12 @@ impl<'a> Parser<'a> {
                     break;
                 }
                 if i >= n || s[i] != ',' as u32 {
-                    return Err(Error::At(i)); // Expecting ',' delimiter
+                    return Err(Error::At(i, DELIMITER));
                 }
                 let comma = i;
                 i = self.skip(i + 1);
                 if i < n && s[i] == '}' as u32 {
-                    return Err(Error::At(comma)); // Illegal trailing comma before end of object
+                    return Err(Error::At(comma, "Illegal trailing comma before end of object"));
                 }
             }
         }
@@ -312,12 +345,12 @@ impl<'a> Parser<'a> {
                     break;
                 }
                 if i >= n || s[i] != ',' as u32 {
-                    return Err(Error::At(i));
+                    return Err(Error::At(i, DELIMITER));
                 }
                 let comma = i;
                 i = self.skip(i + 1);
                 if i < n && s[i] == ']' as u32 {
-                    return Err(Error::At(comma)); // Illegal trailing comma before end of array
+                    return Err(Error::At(comma, "Illegal trailing comma before end of array"));
                 }
             }
         }
@@ -328,12 +361,24 @@ impl<'a> Parser<'a> {
 /// json.loads(text) (core's parse_int); `locate`: a key whose position each object that holds it records (the
 /// last of equal ones), in its `Dict`'s `at`.
 pub fn loads(text: &[u32], locate: Option<&[u32]>) -> Result<PyVal, Error> {
-    let mut p = Parser { s: text, depth: 0, locate };
+    parse(Parser { s: text, depth: 0, locate, plain: false })
+}
+
+/// json.loads(text) itself: its own int() (Error::IntDigits past INT_MAX_STR_DIGITS digits) and its refusal of a
+/// leading U+FEFF.
+pub fn loads_plain(text: &[u32]) -> Result<PyVal, Error> {
+    if text.first() == Some(&0xFEFF) {
+        return Err(Error::At(0, "Unexpected UTF-8 BOM (decode using utf-8-sig)"));
+    }
+    parse(Parser { s: text, depth: 0, locate: None, plain: true })
+}
+
+fn parse(mut p: Parser) -> Result<PyVal, Error> {
     let start = p.skip(0);
     let (v, end) = p.value(start)?;
     let e = p.skip(end);
-    if e != text.len() {
-        return Err(Error::At(e)); // Extra data
+    if e != p.s.len() {
+        return Err(Error::At(e, "Extra data"));
     }
     Ok(v)
 }
@@ -348,7 +393,7 @@ mod tests {
 
     fn err(s: &str) -> String {
         match loads(&u(s), None) {
-            Err(Error::At(p)) => error_where(&u(s), p),
+            Err(Error::At(p, _)) => error_where(&u(s), p),
             other => format!("{:?}", other),
         }
     }
@@ -382,5 +427,56 @@ mod tests {
         assert_eq!(loads(&u(&"1".repeat(1001)), None).unwrap(), PyVal::Float(f64::INFINITY));
         assert!(depth_exceeds(&u(&"[".repeat(501)), 500));
         assert!(!depth_exceeds(&u(&format!("\"{}\"", "[".repeat(501))), 500));
+        assert!(!depth_exceeds(&u(&"[".repeat(500)), 500));
+        assert!(depth_exceeds(&u(&format!("{}{}", "{".repeat(250), "[".repeat(251))), 500));
+        assert!(!depth_exceeds(&u(&format!("[\"\\\\\", \"{}\"]", "[".repeat(1000))), 500));
+        assert!(depth_exceeds(&u(&format!("[\"\\\\\"{}", "[".repeat(600))), 500));
+        assert!(!depth_exceeds(&u(&"[]".repeat(10000)), 500));
+        // (core's regex is re.S: a backslash escapes a newline too)
+        assert!(!depth_exceeds(&u(&format!("{{\"a\": \"x\\\n{}\"}}", "[".repeat(501))), 500));
+        assert!(!depth_exceeds(&u(&format!("{{\"a\": \"x\\\r{}\"}}", "[".repeat(501))), 500));
+        assert!(!depth_exceeds(&u(&format!("{{\"a\": \"x\\\u{2028}{}\"}}", "[".repeat(501))), 500));
+    }
+
+    #[test]
+    fn trailing_commas_where_python_313_reports_them() {
+        // (the npm package's pyjson.js held these until BR-7's step 4 (d))
+        for (text, at) in [("{\"a\": 1,}", "line 1 column 8"), ("{\"a\": 1,\n}", "line 1 column 8"), ("[1, ]", "line 1 column 3"),
+            ("[1,\n\t\r ]", "line 1 column 3"), ("{\"a\": [[],]}", "line 1 column 10"),
+            // not a trailing comma: where every Python reports it
+            ("{\"a\": 1,]", "line 1 column 9"), ("[1,}", "line 1 column 4"), ("[1,,]", "line 1 column 4"),
+            ("{,}", "line 1 column 2"), ("[1,\u{c}]", "line 1 column 4"), ("{\"a\": 1,", "line 1 column 9")] {
+            assert_eq!(err(text), at, "{text:?}");
+        }
+    }
+
+    #[test]
+    fn plain_loads_messages_are_pythons() {
+        // (Python 3.13: str() of the error json.loads(text) raises)
+        let msg = |s: &str| match loads_plain(&u(s)) {
+            Err(e) => message(&u(s), e),
+            Ok(v) => format!("{v:?}"),
+        };
+        for (text, want) in [
+            ("", "Expecting value: line 1 column 1 (char 0)"),
+            ("{\"a\": 1,}", "Illegal trailing comma before end of object: line 1 column 8 (char 7)"),
+            ("[1, ]", "Illegal trailing comma before end of array: line 1 column 3 (char 2)"),
+            ("{\"a\" 1}", "Expecting ':' delimiter: line 1 column 6 (char 5)"),
+            ("{1: 2}", "Expecting property name enclosed in double quotes: line 1 column 2 (char 1)"),
+            ("[1 2]", "Expecting ',' delimiter: line 1 column 4 (char 3)"),
+            ("\n\"ab", "Unterminated string starting at: line 2 column 1 (char 1)"),
+            ("\"a\u{1}\"", "Invalid control character at: line 1 column 3 (char 2)"),
+            ("\"\\q\"", "Invalid \\escape: line 1 column 2 (char 1)"),
+            ("\"\\u12\"", "Invalid \\uXXXX escape: line 1 column 3 (char 2)"),
+            ("[1] x", "Extra data: line 1 column 5 (char 4)"),
+            ("\u{feff}{}", "Unexpected UTF-8 BOM (decode using utf-8-sig): line 1 column 1 (char 0)"),
+            ("[-]", "Expecting value: line 1 column 2 (char 1)"),
+        ] {
+            assert_eq!(msg(text), want, "{text:?}");
+        }
+        let big = "1".repeat(4301);
+        assert_eq!(msg(&format!("[-{big}]")), "Exceeds the limit (4300 digits) for integer string conversion: value has 4301 digits; \
+            use sys.set_int_max_str_digits() to increase the limit");
+        assert_eq!(loads_plain(&u(&"7".repeat(4300))).unwrap(), PyVal::Int(u(&"7".repeat(4300))));
     }
 }

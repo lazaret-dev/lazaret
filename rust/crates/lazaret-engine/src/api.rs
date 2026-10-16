@@ -121,6 +121,8 @@ pub const CALLS: &[&str] = &[
     // sanitizers (report.rs)
     "term", "issue_excerpt", "report_json", "report_items", "sarif_rules", "sarif_frame", "sarif_items", "html_frame",
     "html_items", "text_frame", "text_order", "text_items",
+    // 0.1.9 (BR-7 step 4 d): baselines (baseline.rs): findings' fingerprints, the signature, a baseline applied
+    "baseline_fingerprints", "baseline_sign", "baseline_apply",
 ];
 
 fn arr_arg<'a>(args: &'a Value, name: &str) -> &'a [Value] {
@@ -1005,7 +1007,8 @@ fn dispatch(name: &str, args: &Value, text: &[u32]) -> Result<Value, CallError> 
                 "json" => match pyjson::loads(text, None) {
                     Ok(v) => shown(&v),
                     Err(pyjson::Error::Depth) => Value::obj(vec![("depth", Value::Bool(true))]),
-                    Err(pyjson::Error::At(at)) => Value::obj(vec![("error", Value::Str(u(&pyjson::error_where(text, at))))]),
+                    Err(e @ pyjson::Error::IntDigits(_)) => Value::obj(vec![("error", Value::Str(u(&pyjson::message(text, e))))]),
+                    Err(pyjson::Error::At(at, _)) => Value::obj(vec![("error", Value::Str(u(&pyjson::error_where(text, at))))]),
                 },
                 "key_lines" => {
                     let section = opt_str(args, "section").unwrap_or_else(|| u("scripts"));
@@ -1280,6 +1283,48 @@ fn dispatch(name: &str, args: &Value, text: &[u32]) -> Result<Value, CallError> 
             let issues = crate::result::findings_arg(args.get("issues")).map_err(bad)?;
             let conditions = crate::result::conditions_arg(args.get("conditions")).map_err(bad)?;
             crate::result::regrade(p, &issues, &conditions).map_err(bad)?
+        }
+        "baseline_fingerprints" => {
+            // {issues: [a finding, …]} -> {"fingerprints": [rule|path|line, or null where Python's fingerprint raises]}
+            let fps: Vec<Value> = arr_arg(args, "issues").iter()
+                .map(|i| crate::baseline::fingerprint(&crate::baseline::pyval_of(i)).map(Value::Str).unwrap_or(Value::Null))
+                .collect();
+            Value::obj(vec![("fingerprints", Value::Arr(fps))])
+        }
+        "baseline_sign" => {
+            // {fingerprints: [str, …], key} -> {"value": the hex HMAC}
+            let key = arg_str(args, "key")?;
+            let fps: Vec<PyStr> = arr_arg(args, "fingerprints").iter().filter_map(|f| f.as_str().map(|s| s.to_vec())).collect();
+            Value::obj(vec![("value", Value::str(&crate::baseline::sign(&fps, &key)))])
+        }
+        "baseline_apply" => {
+            // the baseline's bytes as the text (latin-1, a character a byte), or {error}: why they could not be read;
+            // {path, ours, inside, key, fingerprints, issues (finding rows), conditions} -> {"warnings", and "new",
+            // "newIssues", "untrusted", "accepted", "acceptedIssues", "pass", "conditions" as they apply}
+            let bad = |m: String| CallError::BadArgs(format!("baseline_apply: {m}"));
+            let data = match opt_str(args, "error") {
+                Some(why) => Err(why),
+                None => {
+                    if text.iter().any(|&c| c > 0xFF) {
+                        return Err(bad("the bytes come as latin-1 text: a character past U+00FF".into()));
+                    }
+                    Ok(text.iter().map(|&c| c as u8).collect())
+                }
+            };
+            let a = crate::baseline::ApplyIn {
+                path: arg_str(args, "path")?,
+                ours: matches!(args.get("ours"), Some(Value::Bool(true))),
+                inside: matches!(args.get("inside"), Some(Value::Bool(true))),
+                key: opt_str(args, "key").filter(|k| !k.is_empty()),
+                data,
+                fingerprints: arr_arg(args, "fingerprints").iter().map(|f| f.as_str().map(|s| s.to_vec())).collect(),
+                rows: crate::result::findings_arg(args.get("issues")).map_err(bad)?,
+                conditions: crate::result::conditions_arg(args.get("conditions")).map_err(bad)?,
+            };
+            if a.rows.len() != a.fingerprints.len() {
+                return Err(bad("a fingerprint each finding".into()));
+            }
+            crate::baseline::apply(p, &a)
         }
         "decode_source" => {
             // the file's bytes as the text (one code point a byte); {lang, issues, redact} -> {"text", "info", and

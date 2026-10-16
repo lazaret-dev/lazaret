@@ -10,8 +10,8 @@ sources, which pip compiles where no platform wheel fits (§4). What the
 Python package still does in Python: walking a project, reading archives,
 the registry and the guard, and writing what the engine answers (since
 0.1.9 the manifest and workflow checks, project mode's passes after the
-rules, the suppression markers, a scan's result and the reports' forms are
-the engine's: BR-7, Q-1); project mode's taint is the engine's, for
+rules, the suppression markers, a scan's result, the reports' forms and
+baselines are the engine's: BR-7, Q-1); project mode's taint is the engine's, for
 JavaScript and for Python (phase 3: `js_flow`, §16; `py_flow`, §17), in
 both packages. Since 0.1.8 the npm
 package runs the same engine compiled to WebAssembly
@@ -244,6 +244,14 @@ rust/
                              batches (report_json and report_items, sarif_rules, sarif_frame and
                              sarif_items, html_frame and html_items, text_frame, text_order and
                              text_items), and the terminal's sanitizers (term, issue_excerpt)
+    src/baseline.rs          baselines (BR-7 step 4 d, 0.1.9; core's apply_baseline and the
+                             reports module's fingerprint, sign_fingerprints and verify_signature,
+                             npm's baseline.js over pyjson.js until then): a finding's fingerprint
+                             of any json.loads value, the HMAC-SHA256 signature, a baseline's
+                             bytes read as open(encoding="utf-8") and json.loads read them, the
+                             trust rules and the marks, and N-15's acceptance of the SC-* and X-*
+                             findings a signed baseline holds (baseline_fingerprints,
+                             baseline_sign, baseline_apply)
     src/autorun.rs           editor and AI-agent settings that run commands (BR-7 step 2, 0.1.9;
                              autorun.py, core.autorun_issues and their npm twins until then): a
                              JSON-with-comments reader that keeps lines, the commands each kind of
@@ -989,7 +997,9 @@ only.
    engine since 0.1.9, `src/redact.rs`), the binaries, bytecode and .pth files
    (`binary.js`, `pth.js`: in the engine since 0.1.9, `src/binary.rs`), --deps'
    decisions (`deps.js`'s: in the engine since 0.1.9, `src/deps.rs`), the
-   reports (`report.js`'s forms: in the engine since 0.1.9, `src/report.rs`);
+   reports (`report.js`'s forms: in the engine since 0.1.9, `src/report.rs`),
+   baselines (`baseline.js`'s and `pyjson.js`: in the engine since 0.1.9,
+   `src/baseline.rs`);
    the dashboard loads the same module since 0.1.9 (BR-7 step 5: the page
    carries it, and runs the npm package's scan on it).
 4. Archive reading for registry scans in the engine, where it reads as the

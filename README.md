@@ -119,6 +119,15 @@ alone is public, so it is not trust:
 
 An untrusted baseline counts every finding as new (a warning says why).
 
+**Accepting a reviewed finding (N-15).** Supply-chain (`SC-*`) and cross-file (`X-*`) findings take no
+suppression marker: a marker in the scanned code could be the attacker's. A baseline whose signature verifies
+with `LAZARET_BASELINE_KEY` accepts the ones it holds instead: they stay in the reports (`"accepted": true`, a SARIF
+`external` suppression, an "Accepted" badge in the HTML page) and in the counts and ratings, the result carries
+`acceptedIssues`, and the gate's conditions on findings are judged without them, so a deliberate
+`pull_request_target` workflow or install hook, reviewed once and kept in the signed baseline, no longer fails
+`--ci`; a new one does. A baseline without a key accepts nothing. The fingerprints, the signature and these rules are
+the engine's, for both packages.
+
 **Where reports go, and why a scan never ends in a lost result:** report files are written under the
 directory you scanned (or the directory you pass to `--out-dir`), never the current working directory —
 so read-only CI checkouts and containers don't pay for a full scan and then fail to save it. The CLI

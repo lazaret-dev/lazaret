@@ -93,6 +93,7 @@ python/
 │   │   │                   conditions (js/src/hook.js is its twin)
 │   │   ├── taintspec.py    taint-config validation (shared by both taint engines)
 │   │   ├── reports.py      safe report paths, report provenance, baseline signing
+│   │   │                   (the engine's: baseline.rs)
 │   │   ├── ghworkflow.py   GitHub Actions workflows (SC-WORKFLOW-*): the names
 │   │   │                   the package calls, over the engine's reader (ci/)
 │   │   ├── gitlabci.py     GitLab CI files (SC-GITLAB-*), the same way
@@ -282,7 +283,7 @@ pytest also runs the suite unchanged, for anyone who prefers it, but nothing req
    - Sockets: on Windows a connection reset discards data that arrived but was not read yet, so a server's last message (PostgreSQL's FATAL before it disconnects) must be read before the next send fails. The pg driver drains whatever is readable before each send.
 4. **Line endings.** Treat `\r\n` as a line ending, not as data, when checking output (Windows' text-mode stdout writes `\r\n`). `.gitattributes` keeps checkouts LF.
 5. **OS capabilities.** A test that needs something a platform lacks (FIFOs, symlinks without privilege, control characters or non-UTF-8 bytes in file names, chmod-restricted dirs, a non-root user, paths longer than 1024 bytes) skips with an explicit reason (`_support.require_fs_names()` for non-ASCII names). It never fails and never silently passes. OS APIs can also disagree with each other: on the Windows runners Node's `lstat` reported a file symlink as a regular file, so the npm walker also trusts the directory listing's entry type (every reparse point), as the Python walker trusts `st_file_attributes`. Windows also caps a command line at 32,767 characters (WinError 206): large input to a child process goes through stdin or a file.
-6. **Interpreter drift.** Correctness must not depend on version-specific behavior (recursion/parser limits, error-message wording, `os.path` semantics). Enforce our own limits explicitly; assert on types and codes, not on the interpreter's message text. JSON is the standing example: `json.loads` runs out of recursion near 995 levels on 3.10/3.11, near 10,000 on 3.12/3.13 and, on 3.14, only when the C stack does (a different depth per OS). So every JSON document a hostile input could shape is depth-checked before it is parsed: manifests by `load_manifest` (SC-MANIFEST-DEPTH), taint configs, baselines, CVE bundles, lockfiles, stored scan results and registry responses by `core.json_loads_bounded()`, which refuses anything deeper than 500 levels with `JsonTooDeep` (a `ValueError`); the MCP server bounds frames at 512, and the pg driver returns JSON deeper than `JSON_MAX_DEPTH` (500) as text.
+6. **Interpreter drift.** Correctness must not depend on version-specific behavior (recursion/parser limits, error-message wording, `os.path` semantics). Enforce our own limits explicitly; assert on types and codes, not on the interpreter's message text. JSON is the standing example: `json.loads` runs out of recursion near 995 levels on 3.10/3.11, near 10,000 on 3.12/3.13 and, on 3.14, only when the C stack does (a different depth per OS). So every JSON document a hostile input could shape is depth-checked before it is parsed: manifests (SC-MANIFEST-DEPTH) and baselines by the engine's reader, taint configs, CVE bundles, lockfiles, stored scan results and registry responses by `core.json_loads_bounded()`, which refuses anything deeper than 500 levels with `JsonTooDeep` (a `ValueError`); the MCP server bounds frames at 512, and the pg driver returns JSON deeper than `JSON_MAX_DEPTH` (500) as text.
 7. **Time.** Tests wait on events or on `time.monotonic()` deadlines, never on a count of sleeps: `sleep(0.01)` takes far longer than 10 ms on a loaded macOS or Windows runner. Timeouts are generous upper bounds, not expectations.
 
 `tests/architecture/test_portability.py` enforces what a machine can check: text I/O and subprocess decoding name an encoding, nothing asks the host for its encoding, every CLI configures stdio, the MCP server sets UTF-8, no hard-coded `/tmp`/`/var` paths, no `sorted()` of `glob`/`rglob`/`iterdir` results without a `key=`.
@@ -344,8 +345,8 @@ js/
 │                         files are config files), supplychain (the
 │                         manifests' calls; the install-hook finding --deps
 │                         makes), programs (the
-│                         git PATH names by an absolute path), pyjson/pycompat
-│                         (Python-compatible JSON and text); never
+│                         git PATH names by an absolute path), pycompat
+│                         (Python-compatible text); never
 │                         import src/scanner/
 └── test/
     ├── cli.test.js            CLI commands, exit codes, report paths, suppression

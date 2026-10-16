@@ -4582,9 +4582,8 @@ def sarif_report(res, root=None):
 
 # ---------------- Baseline (new-code focus) ----------------
 def fingerprint(issue):
-    # One definition shared with the report writer (which signs these
-    # fingerprints when $LAZARET_BASELINE_KEY is set): rule | path with
-    # forward slashes (portable across OSes) | stripped flagged line.
+    # rule | path with forward slashes (portable across OSes) | stripped flagged line: the engine's (baseline.rs),
+    # which the report writer signs when $LAZARET_BASELINE_KEY is set
     return lazaret_report.fingerprint(issue)
 # NOTE: redaction (audit L1) happens at mk_issue time, BEFORE this
 # fingerprint is computed — the placeholder text is deterministic for a
@@ -4594,22 +4593,8 @@ def fingerprint(issue):
 # direction for a security tool.
 
 
-def _baseline_untrusted(res, baseline_path, reason):
-    """Count every current finding as new and say why the baseline was not
-    trusted."""
-    # audit H1: baseline_path may resolve inside the scanned repo; the
-    # message text is sanitized before it reaches the terminal.
-    print(f"warning: baseline {sanitize_term_line(baseline_path)} {reason} — "
-          f"treating it as untrusted: all current findings are counted "
-          f"as new", file=sys.stderr)
-    for i in res["issues"]:
-        i["new"] = True
-    res["newIssues"] = len(res["issues"])
-    res["baselineUntrusted"] = True
-
-
 def apply_baseline(res, baseline_path, scan_root=None):
-    """Mark res["issues"] new/not-new against a previous JSON report.
+    """Mark res["issues"] new/not-new against a previous JSON report (the engine's: baseline.rs).
 
     Trust (G17): a baseline is a REPORT-shaped file that CI may gate on, and
     the engine marker is a public constant — a hand-written 5-line file
@@ -4621,78 +4606,41 @@ def apply_baseline(res, baseline_path, scan_root=None):
       * no key: a baseline inside the scanned tree (*scan_root*) is
         untrusted — the scanned repository could have planted it; outside
         the tree the engine-marker check applies.
-    An untrusted baseline counts every finding as new (fail closed)."""
-    if lazaret_report is None:
-        print("warning: baseline validation unavailable (lazaret_report not "
-              "importable); baseline ignored", file=sys.stderr)
-        return
-    if not lazaret_report.is_our_report(baseline_path, "json"):
-        _baseline_untrusted(
-            res, baseline_path,
-            "is not a report produced by this engine (no matching engine "
-            "marker, or wrong shape)")
-        return
-    key = lazaret_report.baseline_key()
-    if (key is None and scan_root is not None
-            and lazaret_report.path_is_inside(baseline_path, scan_root)):
-        _baseline_untrusted(
-            res, baseline_path,
-            f"is inside the scanned tree and ${lazaret_report.BASELINE_KEY_ENV} "
-            f"is not set (the scanned repository could have planted it) — "
-            f"keep baselines outside the scanned tree (e.g. in $RUNNER_TEMP) "
-            f"or set {lazaret_report.BASELINE_KEY_ENV} so reports are signed")
-        return
-    try:
-        with open(baseline_path, encoding="utf-8") as fh:
-            prev = json_loads_bounded(fh.read())
-    except (OSError, ValueError, MemoryError) as exc:
-        # ValueError covers JSONDecodeError, UnicodeDecodeError, the
-        # int-digit limit and JsonTooDeep. audit H1: {exc} can echo hostile baseline content
-        # (JSONDecodeError position text); sanitize both interpolations.
-        print(f"warning: could not read baseline {sanitize_term_line(baseline_path)}: "
-              f"{sanitize_term_line(exc)}", file=sys.stderr)
-        return
-    # 48033f94: validate the baseline's shape before using it. A baseline is
-    # attacker-adjacent input (it usually comes from the scanned repo or CI
-    # artifacts); {"issues":"not-a-list"} raised TypeError and a top-level
-    # list raised AttributeError, both crashing the CLI after the scan had
-    # already run — losing every result.
-    if not isinstance(prev, dict):
-        # audit H1: the baseline path can resolve inside the scanned repo.
-        print(f"warning: baseline {sanitize_term_line(baseline_path)}: top level is "
-              f"{type(prev).__name__}, not an object — expected "
-              f'{{"issues": [...]}}; baseline ignored', file=sys.stderr)
-        return
-    issues = prev.get("issues", [])
-    if not isinstance(issues, list):
-        # audit H1: sanitize the repo-adjacent baseline path before printing.
-        print(f"warning: baseline {sanitize_term_line(baseline_path)}: 'issues' is "
-              f"{type(issues).__name__}, not a list — baseline ignored",
-              file=sys.stderr)
-        return
-    if key is not None:
-        ok, why = lazaret_report.verify_signature(prev, key)
-        if not ok:
-            _baseline_untrusted(res, baseline_path, f"is not trusted: {why}")
-            return
-    known, skipped = set(), 0
-    for i in issues:
-        # Each baseline entry must at least look like an issue (rule/file/line
-        # keys); a malformed entry is skipped with a warning, not a crash.
+    An untrusted baseline counts every finding as new (fail closed).
+
+    N-15: a signed baseline that verifies accepts the findings it holds that no marker can accept (SC-*, X-*): each
+    gets "accepted", the result "acceptedIssues", and the gate's conditions on findings are judged without them. What
+    stays here: whether the file is one of our reports, where it is, its bytes, and printing the warnings."""
+    issues = res["issues"]
+    args = {"path": str(baseline_path), "ours": lazaret_report.is_our_report(baseline_path, "json"),
+            "inside": scan_root is not None and lazaret_report.path_is_inside(baseline_path, scan_root),
+            "key": lazaret_report.baseline_key(), "fingerprints": lazaret_report.fingerprints(issues),
+            "issues": _finding_rows(issues),
+            "conditions": [[c["label"], c["ok"]] for c in res.get("conditions") or []]}
+    data = ""
+    if args["ours"]:
         try:
-            known.add(fingerprint(i))
-        except (KeyError, TypeError, AttributeError):
-            skipped += 1
-    if skipped:
-        # audit H1: sanitize the repo-adjacent baseline path before printing.
-        print(f"warning: baseline {sanitize_term_line(baseline_path)}: {skipped} malformed "
-              f"issue entrie(s) skipped (expected objects with "
-              f"rule/file/line)", file=sys.stderr)
-    new_count = 0
-    for i in res["issues"]:
-        i["new"] = fingerprint(i) not in known
-        new_count += i["new"]
-    res["newIssues"] = new_count
+            with open(baseline_path, "rb") as fh:
+                data = fh.read().decode("latin-1")
+        except (OSError, MemoryError) as exc:
+            args["error"] = str(exc)
+    got = _native.call("baseline_apply", args, data)
+    for line in got["warnings"]:
+        print(line, file=sys.stderr)
+    if "new" in got:
+        for i, new in zip(issues, got["new"]):
+            i["new"] = new
+        res["newIssues"] = got["newIssues"]
+    if got.get("untrusted"):
+        res["baselineUntrusted"] = True
+    if "accepted" in got:
+        for i, accepted in zip(issues, got["accepted"]):
+            if accepted:
+                i["accepted"] = True
+        res["acceptedIssues"] = got["acceptedIssues"]
+        for cond, now in zip(res["conditions"], got["conditions"]):
+            cond["ok"] = now["ok"]
+        res["pass"] = got["pass"]
 
 
 # ---------------- Main ----------------
@@ -4869,7 +4817,9 @@ def _main(argv=None, source=None):
     ap.add_argument("--sarif", metavar="PATH",
                     help="Write SARIF 2.1.0 report (GitHub code scanning)")
     ap.add_argument("--baseline", metavar="PATH",
-                    help="Previous JSON report; issues not in it are marked new")
+                    help="Previous JSON report; issues not in it are marked new. Signed "
+                         "($LAZARET_BASELINE_KEY), it accepts the SC-* and X-* findings it "
+                         "holds: the gate does not count them")
     ap.add_argument("--taint-config", metavar="PATH",
                     help="JSON taint spec adding custom sources/sinks/sanitizers "
                          "(Semgrep-style); trusted fully. A file that can't be "

@@ -977,6 +977,27 @@ aggregate):
   rules too, and the npm package's forms, on the WebAssembly build, to the Python package's, byte for byte
   (`test_report_engine`). The engine grows by 0.1 MiB (WebAssembly 6.80 to 6.90 MB), and the dashboard, which
   carries it, was rebuilt.
+- **Baselines, the engine's; a signed baseline accepts a reviewed supply-chain or cross-file finding (BR-7, step 4 d;
+  N-15; no rule set change).** core applied a baseline (`apply_baseline`, with the reports module's `fingerprint`,
+  `sign_fingerprints` and `verify_signature`) and the npm package its twin (`baseline.js` over `pyjson.js`, its
+  `json.loads`). The engine does it for both (`rust/crates/lazaret-engine/src/baseline.rs`: the
+  `baseline_fingerprints`, `baseline_sign` and `baseline_apply` calls): an entry's fingerprint of any value
+  `json.loads` makes, the HMAC-SHA256 signature, the baseline's bytes read as `open(encoding="utf-8")` and
+  `json.loads` read them (strict UTF-8, universal newlines, `json.loads`' own messages, its 4,300-digit limit on an
+  int), the trust rules of G17 and the shape checks, with the warnings' text. The packages keep whether the file is
+  one of their reports, where it is, its bytes, the key and the printing. Two answers changed: where core raised an
+  error the CLI did not catch (an int too large for a float, in a float's arithmetic; a signature whose value is not
+  ASCII), the entry is skipped, or the signature does not verify. The npm package's messages are now the Python
+  package's (a JSON error was "the baseline is not valid JSON"; the path is sanitized for the terminal). **N-15**
+  (John, Oct 15: "the baseline, with its HMAC"): supply-chain (`SC-*`) and cross-file (`X-*`) findings take no
+  suppression marker, so a reviewed `pull_request_target` workflow or install hook failed the gate for good. A
+  baseline whose signature verifies with `LAZARET_BASELINE_KEY` now accepts the ones it holds: they stay in the reports
+  (`"accepted": true`; in SARIF an `external` suppression, `accepted`; an "Accepted" badge in the HTML page) and in
+  the counts and ratings, the result gets `acceptedIssues` (the terminal and the page say how many), and the gate's
+  four conditions on findings are judged without them. A new finding of the same rule, a baseline without a key and
+  one that does not verify accept nothing. Held to core's code as it was on 500 generated baselines and 4,000
+  entries, and the npm package's `applyBaseline` to the Python package's (`test_baseline_engine`). Gone: core's and
+  the reports module's baseline code, npm's `pyjson.js` and its JSON and str() helpers.
 - **Security: S-XML is a parser set to resolve external entities, not an import of xml.etree, xml.dom or xml.sax
   (Q-3; rule set 2.80.0).** Since Python 3.7.1 none of them resolves an external entity unless told to, and Expat
   2.4.1 refuses entity bombs, so the import flagged safe code: all 20 of BenchmarkPython's safe XXE cases (its 8 real

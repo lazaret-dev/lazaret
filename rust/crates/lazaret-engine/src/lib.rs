@@ -11,6 +11,7 @@
 pub mod api;
 pub mod budget;
 pub mod autorun;
+pub mod baseline;
 pub mod ci;
 pub mod config;
 pub mod crossfile;
