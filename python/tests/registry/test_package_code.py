@@ -213,7 +213,7 @@ class GoTests(unittest.TestCase):
                                        "commands when someone runs it in the module's folders; a build never does.")
 
     def test_a_file_the_parser_refuses_is_still_read_by_the_file_rules(self):
-        res = go({"m.go": CLEAN_GO, "bad.go": 'package m\n\nconst k = "AKIA' + "IOSFODNN7EXAMPLE" + '"\nfunc (\n'})
+        res = go({"m.go": CLEAN_GO, "bad.go": 'package m\n\nconst k = "AKIA' + "Q7R2ZK9M4TXW8B3N" + '"\nfunc (\n'})
         self.assertEqual(res["verdict"], "OK")
         self.assertIn("S-TOKEN", {i["rule"] for i in res["issues"]})
 

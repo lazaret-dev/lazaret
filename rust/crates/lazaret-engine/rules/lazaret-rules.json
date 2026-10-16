@@ -1,6 +1,6 @@
 {
  "format": 1,
- "rule_set": "2.82.0",
+ "rule_set": "2.83.0",
  "source": "lazaret.scanner.core, extracted by scripts/make_rust_tables.py \u2014 do not edit",
  "values": {
   "ALWAYS_PRUNE_DIRS": {
@@ -1434,8 +1434,8 @@
        "value": "BLOCKER"
       },
       "skip": {
-       "flags": "i",
-       "re": "(environ|process\\.env|getenv|config\\[|\\bimport\\b|\\bplaceholder\\b|\\bexample\\b|\\bdummy\\b|\\bsample\\b|\\bmock\\b|\\bmocked\\b|\\bxxxx+\\b|\\{\\{)"
+       "flags": "",
+       "re": "([Ee]nviron|ENVIRON|process\\.env|[Gg]et[Ee]nv|GETENV|config\\[|\\bimport\\b|\\bIMPORT\\b|(?<![A-Za-z0-9])(?:placeholder|example|dummy|sample|mock|mocked|redacted|fake|canary|made[_\\-]?up|PLACEHOLDER|EXAMPLE|DUMMY|SAMPLE|MOCK|MOCKED|REDACTED|FAKE|CANARY|MADE[_\\-]?UP|[xX]{4,}|xxxx+)(?![a-z])|(?<![A-Z0-9])(?:Placeholder|Example|Dummy|Sample|Mock|Mocked|Redacted|Fake|Canary|Made[_\\-]?[Uu]p)(?![a-z])|\\{\\{)"
       },
       "type": {
        "value": "VULN"
@@ -3809,8 +3809,8 @@
    ]
   },
   "SECRET_SKIP_RE": {
-   "flags": "i",
-   "re": "environ|process\\.env|getenv|\\bplaceholder\\b|\\bexample\\b|\\bdummy\\b|\\bsample\\b|\\bmock\\b|\\bredacted\\b|\\bxxxx+\\b"
+   "flags": "",
+   "re": "[Ee]nviron|ENVIRON|process\\.env|[Gg]et[Ee]nv|GETENV|(?<![A-Za-z0-9])(?:placeholder|example|dummy|sample|mock|mocked|redacted|fake|canary|made[_\\-]?up|PLACEHOLDER|EXAMPLE|DUMMY|SAMPLE|MOCK|MOCKED|REDACTED|FAKE|CANARY|MADE[_\\-]?UP|[xX]{4,}|xxxx+)(?![a-z])|(?<![A-Z0-9])(?:Placeholder|Example|Dummy|Sample|Mock|Mocked|Redacted|Fake|Canary|Made[_\\-]?[Uu]p)(?![a-z])|(?:[Pp]ublic|PUBLIC)[_\\- ]?(?:[Kk]ey|KEY)|[Pp]ub[Kk]ey|PUBKEY|[Pp]ub_[Kk]ey|PUB_KEY"
   },
   "SEV_COLOR": {
    "map": {
@@ -16520,6 +16520,18 @@
   "_SQL_WHERE_RE": {
    "flags": "i",
    "re": "\\bWHERE\\b"
+  },
+  "_SRC_CAMEL_NAME_RE": {
+   "flags": "",
+   "re": "(?:[A-Z][a-z]+){2,}|[a-z]+(?:[A-Z][a-z]+)+"
+  },
+  "_SRC_PLACEHOLDER_RE": {
+   "flags": "i",
+   "re": "example|sample|dummy|placeholder|change[_\\-.]?(?:me|this|it)|your[_\\-.]|xxx|\\*\\*\\*|\\.\\.\\.|redacted|replace|insert[_\\-.]|enter[_\\-.]|todo|fixme|fake|mock|canary|made[_\\-.]?up|<|>|\\$\\{|\\{\\{|\\}\\}|%\\(|\\$\\("
+  },
+  "_SRC_QUALIFIED_NAME_RE": {
+   "flags": "",
+   "re": "[A-Za-z_][A-Za-z0-9_]{0,29}(?:(?:\\.|::)[A-Za-z_][A-Za-z0-9_]{0,29}){2,}"
   },
   "_STAGER_MAX_LITERALS": {
    "value": 2000

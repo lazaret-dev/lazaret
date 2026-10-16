@@ -325,6 +325,32 @@ ONLY_IN_THE_CLI = {
 }
 
 
+# SECRET-FP (0.1.9) changed the engine's secret tests, not the page's: a token that says it is a sample, a value that
+# is a name, an entropy literal that is a name, a sequence, an address or an encoded document is no longer reported.
+# The page keeps its own scanner until it runs the engine's (BR-7 step 5, which removes this list with the page's
+# copy; John, Oct 15: "stop making dual copies that we are going to make go away"). In these files the page reports
+# secret findings the CLI does not, and redacts those values in other findings' snippets; the CLI's secret findings
+# must be the page's, and every other finding must agree but for its snippet.
+SECRET_FP_PAGE_ONLY = {"b64_plain.js", "tokens.js", "detection_gaps/encoding_readme.py", "testproj/secrets.py"}
+SECRET_FP_RULES = {"S-SECRET", "S-TOKEN", "S-ENTROPY"}
+
+
+def page_only_secrets(name, cli, page):
+    """The page's secret findings in a SECRET_FP_PAGE_ONLY file that the CLI does not report (rule and line)."""
+    if name not in SECRET_FP_PAGE_ONLY:
+        return []
+    have = collections.Counter((i["rule"], i["line"]) for i in cli if i["rule"] in SECRET_FP_RULES)
+    out = []
+    for i in page:
+        key = (i["rule"], i["line"])
+        if i["rule"] in SECRET_FP_RULES:
+            if have[key] > 0:
+                have[key] -= 1
+            else:
+                out.append(i)
+    return out
+
+
 def cli_upload(name, data):
     """What the CLI reports for a source file with these bytes."""
     lang = core.EXTS[os.path.splitext(name)[1].lower()]
@@ -338,6 +364,11 @@ class DashboardParityTests(unittest.TestCase):
         expected = [i for i in cli if (name, i["rule"], i["line"]) in ONLY_IN_THE_CLI]
         self.assertEqual(len(expected), sum(1 for f, _r, _l in ONLY_IN_THE_CLI if f == name), name)
         cli = [i for i in cli if (name, i["rule"], i["line"]) not in ONLY_IN_THE_CLI]
+        if name in SECRET_FP_PAGE_ONLY:
+            extra = page_only_secrets(name, cli, page)
+            page = [i for i in page if not any(i is x for x in extra)]
+            blank = lambda i: {k: v for k, v in i.items() if k not in ("snippet", "snipStart")}
+            cli, page = list(map(blank, cli)), list(map(blank, page))
         a, b = collections.Counter(map(issue_key, cli)), collections.Counter(map(issue_key, page))
         if a == b:
             return
@@ -438,13 +469,19 @@ class DashboardParityTests(unittest.TestCase):
                 for n, lang, c in files:
                     issues += core.scan_file(n, c, lang)
                 cli = core.build_result(".", [{"path": n, "lang": lang, "content": c} for n, lang, c in files], issues)
-                for key in ("metrics", "counts", "ratings", "supplyChain", "pass"):
+                extra = [x for n, _l, _c in files for x in page_only_secrets(n, [i for i in cli["issues"] if i["file"] == n],
+                                                                          [i for i in page["issues"] if i["file"] == n])]
+                counts = collections.Counter(page["counts"])
+                counts.subtract(collections.Counter(i["type"] for i in extra))
+                self.assertEqual(dict(counts), cli["counts"], "counts")
+                for key in ("metrics", "ratings", "supplyChain", "pass"):
                     self.assertEqual(page[key], cli[key], key)
                 # the CLI's last condition is its cross-file flow engine, which the page doesn't have
                 self.assertEqual(cli["conditions"][-1], {"label": "No cross-file taint flows", "ok": True})
                 self.assertEqual(page["conds"], cli["conditions"][:-1])
-                self.assert_same_findings(label, cli["issues"], page["issues"])
-                self.assertEqual([(i["sev"], i["file"], i["line"]) for i in page["issues"]],
+                page_issues = [i for i in page["issues"] if not any(i is x for x in extra)]
+                self.assert_same_findings(label, cli["issues"], page_issues)
+                self.assertEqual([(i["sev"], i["file"], i["line"]) for i in page_issues],
                                  [(i["sev"], i["file"], i["line"]) for i in cli["issues"]])
         self.assertGreater(page["metrics"]["dupPct"], 0)
 

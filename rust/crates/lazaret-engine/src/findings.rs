@@ -239,7 +239,146 @@ pub fn entropy_secretish(v: &[u32], neumaier: bool) -> bool {
     if !(v.iter().any(|&c| unicode::is_digit(c)) || v.iter().any(|&c| c == '+' as u32 || c == '=' as u32)) {
         return false;
     }
+    // (SECRET-FP, 0.1.9) what high entropy does not make a key: a name, a sequence, an address, an encoded document
+    if identifier_like(v) || sequence_run(v) >= 8 || evm_address(v) || encoded_document(v) {
+        return false;
+    }
     shannon_entropy(v, neumaier) > 4.0
+}
+
+/// A character's shape for `identifier_like`: a lowercase letter, an uppercase letter, a digit, or none of them.
+fn shape(c: u32) -> u8 {
+    match char::from_u32(c) {
+        Some('a'..='z') => b'l',
+        Some('A'..='Z') => b'u',
+        Some('0'..='9') => b'd',
+        _ => b's',
+    }
+}
+
+/// A name, not a key (SECRET-FP, John's discovery run of Oct 15: Hugging Face repositories, protocol and format tags,
+/// generated function names): words joined by separators or written in CamelCase. Few changes of shape between
+/// neighbouring letters and digits (a capital starting a word is none), at most one run of digits in ten characters,
+/// a separator or two capitalised words (then mostly lowercase), and vowels as words have them; no `=`, and a `+`
+/// only before a media type's suffix (`application/vnd.api+json`): base64 has them anywhere. A random key changes
+/// shape at every second character. Of 4,000 random keys of each alphabet that S-ENTROPY flags, this passes over none
+/// of the 32-character base62 or 43-character base64 ones, 1 of the base64url ones and 2 of 2,620 20-character
+/// base62 ones; and 72 of the 92 distinct names the run flagged.
+pub fn identifier_like(v: &[u32]) -> bool {
+    if v.contains(&('=' as u32)) {
+        return false;
+    }
+    if let Some(k) = v.iter().position(|&c| c == '+' as u32) {
+        if k + 1 == v.len() || !v[k + 1..].iter().all(|&c| shape(c) == b'l') {
+            return false;
+        }
+    }
+    let (mut pairs, mut changes) = (0usize, 0usize);
+    for w in v.windows(2) {
+        let (a, b) = (shape(w[0]), shape(w[1]));
+        if a == b's' || b == b's' {
+            continue;
+        }
+        pairs += 1;
+        if a != b && !(a == b'u' && b == b'l') {
+            changes += 1;
+        }
+    }
+    if pairs == 0 || changes * 100 > pairs * 22 {
+        return false;
+    }
+    let mut digit_runs = 0usize;
+    let mut prev_digit = false;
+    for &c in v {
+        let d = shape(c) == b'd';
+        if d && !prev_digit {
+            digit_runs += 1;
+        }
+        prev_digit = d;
+    }
+    if digit_runs * 10 > v.len() {
+        return false;
+    }
+    let separated = v.iter().any(|&c| matches!(char::from_u32(c), Some('-' | '_' | '.' | '/')));
+    let mut capitalised = 0usize;
+    for k in 0..v.len() {
+        if shape(v[k]) == b'u' && k + 2 < v.len() && shape(v[k + 1]) == b'l' && shape(v[k + 2]) == b'l' {
+            capitalised += 1;
+        }
+    }
+    if !separated && capitalised < 2 {
+        return false;
+    }
+    let letters: Vec<u32> = v.iter().copied().filter(|&c| matches!(shape(c), b'l' | b'u')).collect();
+    let vowels = letters.iter().filter(|&&c| matches!(char::from_u32(c), Some('a' | 'e' | 'i' | 'o' | 'u' | 'A' | 'E' | 'I' | 'O' | 'U'))).count();
+    if letters.is_empty() || vowels * 100 < letters.len() * 22 {
+        return false;
+    }
+    // CamelCase words are mostly lowercase (`CreateOAuth2TokenRequestBody`: 78%); a random key's letters are half and
+    // half, and its long runs of one case are what passes the tests above (11 of the 2,620 keys before this one)
+    let lower = letters.iter().filter(|&&c| shape(c) == b'l').count();
+    separated || lower * 100 >= letters.len() * 65
+}
+
+/// The longest run of characters that each follow the one before (`abcdef`, `0123456789`, `ABCDEF`): an alphabet or a
+/// counting sequence written out, not a key.
+pub fn sequence_run(v: &[u32]) -> usize {
+    let (mut best, mut run) = (1usize, 1usize);
+    for w in v.windows(2) {
+        let alnum = |c: u32| matches!(char::from_u32(c), Some('a'..='z' | 'A'..='Z' | '0'..='9'));
+        if alnum(w[0]) && alnum(w[1]) && w[1] == w[0] + 1 {
+            run += 1;
+            best = best.max(run);
+        } else {
+            run = 1;
+        }
+    }
+    if v.is_empty() {
+        0
+    } else {
+        best
+    }
+}
+
+/// `0x` and 40 hexadecimal digits: an Ethereum address (a contract's, an account's), public by nature. A private key
+/// is 64 digits.
+pub fn evm_address(v: &[u32]) -> bool {
+    v.len() == 42 && pystr::starts_with(v, "0x") && v[2..].iter().all(|&c| matches!(char::from_u32(c), Some('0'..='9' | 'a'..='f' | 'A'..='F')))
+}
+
+/// Base64 of a document (XML, JSON: a SAML response, a JSON payload), which a key is not: its first bytes decode to
+/// printable text that starts with `<`, `{` or `[`.
+pub fn encoded_document(v: &[u32]) -> bool {
+    if v.len() < 16 {
+        return false;
+    }
+    let value = |c: u32| -> Option<u32> {
+        match char::from_u32(c)? {
+            ch @ 'A'..='Z' => Some(ch as u32 - 'A' as u32),
+            ch @ 'a'..='z' => Some(ch as u32 - 'a' as u32 + 26),
+            ch @ '0'..='9' => Some(ch as u32 - '0' as u32 + 52),
+            '+' | '-' => Some(62),
+            '/' | '_' => Some(63),
+            _ => None,
+        }
+    };
+    let mut bytes: Vec<u8> = Vec::new();
+    let (mut acc, mut bits) = (0u32, 0u32);
+    for &c in v.iter().take(48) {
+        if c == '=' as u32 {
+            break;
+        }
+        let Some(x) = value(c) else { return false };
+        acc = (acc << 6) | x;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            bytes.push(((acc >> bits) & 0xFF) as u8);
+        }
+    }
+    let printable = bytes.iter().filter(|&&b| (0x20..0x7F).contains(&b) || b == b'\n' || b == b'\t').count();
+    let first = bytes.iter().find(|&&b| b != b' ' && b != b'\n' && b != b'\t');
+    bytes.len() >= 12 && printable * 10 >= bytes.len() * 9 && matches!(first, Some(b'<' | b'{' | b'['))
 }
 
 /// core._SecretLiterals: the high-entropy literals S-ENTROPY would flag in

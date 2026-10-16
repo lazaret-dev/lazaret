@@ -1204,6 +1204,27 @@ aggregate):
 
 ### Fixed
 
+- **The secret rules' false positives (SECRET-FP; the engine's, for both packages; rule set 2.83.0).** John's first
+  crates.io discovery run (Oct 15, 465 scans) had 30 S-SECRET and S-TOKEN BLOCKERs and 238 S-ENTROPY MAJORs, and every
+  one read was not a credential. In source code S-SECRET now tests its value as the config reader does: at least 8
+  characters, not a reference, URL or placeholder (`your-api-key`, `REPLACE-ME`, `…_CANARY`), not a name (words
+  joined by separators, `a.b.c` or `a::b::c`, CamelCase words), with blanks allowed (a passphrase has them); a `PWD`
+  that is the command or a Windows path is the working directory, any other `pwd` a password. S-TOKEN passes over a
+  token that says it is a sample (`EXAMPLE`, `FAKE`, `DUMMY`, `SAMPLE` in it), AWS's and jwt.io's documentation
+  samples, and a JWT whose signature is missing, shorter than 16 characters or a word. S-ENTROPY passes over a name
+  (few changes between lowercase, uppercase and digits, words joined or capitalised: `kernels-community/flash-attn2`,
+  `Win32_NetworkManagement_Ndis`, `CreateOAuth2TokenRequestBody`, `application/3gpp-…+json`), a run of 8 or more
+  characters in sequence (an alphabet), an Ethereum address (`0x` and 40 hex digits), the base64 of a JSON or XML
+  document, and a line that names a public key (`publicKey`, `PUBLIC_KEY`, `pubkey`; not `public` alone). The skip words (`example`, `dummy`, `mock`, `canary`, `made-up`, …) are matched as words, `exampleKey`
+  included, not inside others (`mockingbird`). On the run's 145 flagged lines, scanned again: S-SECRET 0 of 18,
+  S-TOKEN 0 of 12, S-ENTROPY 5 of 115 (three public keys without a name that says so, a generated name). On the
+  popular set's 1,703 releases (in-sample): S-SECRET 480 findings to 87, S-TOKEN 59 to 55 (AWS's and jwt.io's
+  samples), S-ENTROPY 8,208 to 582 (the `windows` crates' feature names were 6,290 of them). Random keys still found:
+  of 4,000 of each alphabet that S-ENTROPY flagged before, none of the 32-character base62 or 43-character base64
+  ones are passed over, 1 base64url one and 2 of the 2,620 20-character base62 ones. Not reported now, by choice:
+  a passphrase of words joined by dashes (`correct-horse-…`, a name to the test; the config reader has always passed
+  over it) and a password under 8 characters. The dashboard keeps its own secret tests until it runs the engine (BR-7
+  step 5).
 - **Security: what a JavaScript method keeps in a member of `this` is the instance's it is called on (D-3c; rule set
   2.81.0).** D-3b left out what a method is given and puts into a container that is a member of `this`
   (`record(d) { this.events.push(d); }`): put into every instance's member it held what every caller recorded, and in

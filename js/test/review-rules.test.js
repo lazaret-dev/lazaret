@@ -11,10 +11,12 @@ import { packValues } from "../src/lib/native.js";
 const rules = (content, lang, { dep = false, name = `t.${lang}` } = {}) =>
   scanFile({ name, content, lang, dep }).map((i) => `${i.rule}@${i.line}`).sort();
 
-test("S-SECRET: markup lines and `example_*` words no longer hide a credential", () => {
-  // was: any `<…>` on the line and substring `example` skipped the rule
+test("S-SECRET: markup lines and words holding `example` no longer hide a credential", () => {
+  // was: any `<…>` on the line and substring `example` skipped the rule; the word is a word of a name too
+  // (`example_user`, `EXAMPLE_KEY`, `exampleKey`: SECRET-FP), not part of another word
   assert.deepEqual(rules('<Input password="hunter2hunter2" />\n', "js", { name: "t.jsx" }), ["S-SECRET@1"]);
-  assert.deepEqual(rules('api_key = "Zq8vN3pL0wX7rT2mK9sB"  # example_user\n', "py"), ["S-SECRET@1"]);
+  assert.deepEqual(rules('api_key = "Zq8vN3pL0wX7rT2mK9sB"  # counterexample\n', "py"), ["S-SECRET@1"]);
+  assert.deepEqual(rules('api_key = "Zq8vN3pL0wX7rT2mK9sB"  # example_user\n', "py"), []);
   assert.deepEqual(rules('api_key = "Zq8vN3pL0wX7rT2mK9sB"  # example\n', "py"), []);
 });
 

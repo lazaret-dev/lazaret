@@ -594,11 +594,11 @@ _TOKEN_PATTERN = _TokenPattern(_TOKEN_ALTS)
 _TOKEN_REDACT_PATTERN = _TokenPattern(_TOKEN_REDACT_ALTS)
 
 
-def R(id, name, type, sev, langs, pat, msg, why, fix, ref, skip=None, need=None, flags=0):
+def R(id, name, type, sev, langs, pat, msg, why, fix, ref, skip=None, need=None, flags=0, skip_flags=re.I):
     return {"id": id, "name": name, "type": type, "sev": sev, "langs": langs,
             "re": pat if isinstance(pat, _TokenPattern) else re.compile(pat, flags),
             "msg": msg, "why": why, "fix": fix, "ref": ref,
-            "skip": re.compile(skip, re.I) if skip else None,
+            "skip": re.compile(skip, skip_flags) if skip else None,
             "need": re.compile(need, re.I) if need else None}
 
 # Inline imports that evaluate to a module (SC-EVAL-DECODE prefix grammar):
@@ -744,8 +744,10 @@ R("S-SECRET", "Hardcoded credential", "VULN", "BLOCKER", ("py", "js", "go", "rs"
   # substrings anywhere on the line. Word-bounded now; the bare `<...>`
   # pattern is gone — a real credential on the same line as an angle-bracket
   # generic no longer blinds the rule.
-  skip=r"(environ|process\.env|getenv|config\[|\bimport\b|\bplaceholder\b|\bexample\b|\bdummy\b|\bsample\b|\bmock\b|\bmocked\b|\bxxxx+\b|\{\{)",
-  flags=re.I),
+  # (SECRET-FP, 0.1.9) the skip words at a word's edge, `_`, `-`, a digit and a case change ending a word as a blank
+  # does (\b never saw PLACEHOLDER_API_KEY): case-sensitive, each word in its three spellings
+  skip=r"([Ee]nviron|ENVIRON|process\.env|[Gg]et[Ee]nv|GETENV|config\[|\bimport\b|\bIMPORT\b|(?<![A-Za-z0-9])(?:placeholder|example|dummy|sample|mock|mocked|redacted|fake|canary|made[_\-]?up|PLACEHOLDER|EXAMPLE|DUMMY|SAMPLE|MOCK|MOCKED|REDACTED|FAKE|CANARY|MADE[_\-]?UP|[xX]{4,}|xxxx+)(?![a-z])|(?<![A-Z0-9])(?:Placeholder|Example|Dummy|Sample|Mock|Mocked|Redacted|Fake|Canary|Made[_\-]?[Uu]p)(?![a-z])|\{\{)",
+  flags=re.I, skip_flags=0),
 R("S-WEAKHASH-PY", "Weak hash algorithm", "VULN", "MAJOR", ("py",),
   r"hashlib\.(md5|sha1)\s*\(",
   "MD5/SHA-1 are cryptographically broken.",
@@ -1415,23 +1417,10 @@ OBF_IDENT_RE = re.compile(r"\b_0x[0-9a-f]{4,}\b")
 # check on it. REMOVED: `test` must not gate entropy detection at all. The
 # remaining tokens are word-bounded so substrings (`latest`, `attested`,
 # `detest`) no longer suppress.
-SECRET_SKIP_RE = re.compile(r"environ|process\.env|getenv|\bplaceholder\b|\bexample\b|"
-                            r"\bdummy\b|\bsample\b|\bmock\b|\bredacted\b|\bxxxx+\b", re.I)
-
-def entropy_secretish(v):
-    """True only if a high-entropy literal actually looks like a credential, not a
-    URL/path, a dotted name, or a CamelCase/snake_case identifier. This filters the
-    common S-ENTROPY false positives (route strings, TypeVar bounds, class names)."""
-    if v.count("/") >= 2 or v.startswith("/") or " " in v or "\\" in v:
-        return False                                  # path, URL, or sentence
-    core = v.replace("_", "").replace("-", "").replace(".", "")
-    if core.isalpha():
-        return False                                  # identifier / CamelCase / word
-    # real tokens carry digits or base64 symbols, not just letters+separators
-    if not (any(c.isdigit() for c in v) or any(c in "+=" for c in v)):
-        return False
-    return shannon_entropy(v) > 4.0
-
+# (SECRET-FP, 0.1.9) the words at a word's edge (`_`, `-`, a digit, a case change: PLACEHOLDER_API_KEY), each in its
+# three spellings, and a line naming a public key (`publicKey`, `PUBLIC_KEY`, `pubkey`; not `public` alone, which is a
+# TypeScript field's modifier)
+SECRET_SKIP_RE = re.compile(r"[Ee]nviron|ENVIRON|process\.env|[Gg]et[Ee]nv|GETENV|(?<![A-Za-z0-9])(?:placeholder|example|dummy|sample|mock|mocked|redacted|fake|canary|made[_\-]?up|PLACEHOLDER|EXAMPLE|DUMMY|SAMPLE|MOCK|MOCKED|REDACTED|FAKE|CANARY|MADE[_\-]?UP|[xX]{4,}|xxxx+)(?![a-z])|(?<![A-Z0-9])(?:Placeholder|Example|Dummy|Sample|Mock|Mocked|Redacted|Fake|Canary|Made[_\-]?[Uu]p)(?![a-z])|(?:[Pp]ublic|PUBLIC)[_\- ]?(?:[Kk]ey|KEY)|[Pp]ub[Kk]ey|PUBKEY|[Pp]ub_[Kk]ey|PUB_KEY")
 
 # ---------------- Inline suppression ----------------
 # Marker grammar (review fix, shared semantics 2): `#`, `//` or `--`, optional

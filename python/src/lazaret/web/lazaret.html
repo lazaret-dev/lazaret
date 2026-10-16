@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-vLvDS5WEZ7YttHbBjPMO5ZakgWt5fsv2/b6rzhDL6a8='; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-7xzGMEIbu3gFNpXLaL8+/ZY62+yY2UuyNpjY9x98S1Y='; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'">
 <title>Lazaret — Security &amp; Quality Review</title>
 <style>
   :root{
@@ -1731,7 +1731,7 @@ id:"S-YAML", name:"Unsafe yaml.load", type:"VULN", sev:"CRITICAL", langs:["py"],
 {
 id:"S-SECRET", name:"Hardcoded credential", type:"VULN", sev:"BLOCKER", langs:["py", "js", "go", "rs"],
  re:pyRe("(password|passwd|pwd|secret|api[_-]?key|access[_-]?key|auth[_-]?token|private[_-]?key)\\s*(?::=|[:=]|:\\s*&(?:'static\\s+)?(?:str|\\[u8\\])\\s*=|[ \\t]+string\\s*=)\\s*(?:b|rb|r#*|br#*)?[\\\"'][^\\\"']{4,}[\\\"']", "i"),
- skip:pyRe("(environ|process\\.env|getenv|config\\[|\\bimport\\b|\\bplaceholder\\b|\\bexample\\b|\\bdummy\\b|\\bsample\\b|\\bmock\\b|\\bmocked\\b|\\bxxxx+\\b|\\{\\{)", "i"),
+ skip:pyRe("([Ee]nviron|ENVIRON|process\\.env|[Gg]et[Ee]nv|GETENV|config\\[|\\bimport\\b|\\bIMPORT\\b|(?<![A-Za-z0-9])(?:placeholder|example|dummy|sample|mock|mocked|redacted|fake|canary|made[_\\-]?up|PLACEHOLDER|EXAMPLE|DUMMY|SAMPLE|MOCK|MOCKED|REDACTED|FAKE|CANARY|MADE[_\\-]?UP|[xX]{4,}|xxxx+)(?![a-z])|(?<![A-Z0-9])(?:Placeholder|Example|Dummy|Sample|Mock|Mocked|Redacted|Fake|Canary|Made[_\\-]?[Uu]p)(?![a-z])|\\{\\{)", ""),
  msg:"Credential appears to be hardcoded in source.",
  why:"Secrets in code leak through version control, logs, and builds; rotation requires a deploy.",
  fix:"Load secrets from environment variables or a secrets manager, and rotate this one now.",
@@ -3574,7 +3574,7 @@ const OBF_IDENT_RE = pyRe(String.raw`\b_0x[0-9a-f]{4,}\b`, "g");
 const CHARCODE_RE = /String\.fromCharCode/;
 // Verdict integrity (audit C2/G2): no bare `test`, word-bounded tokens, so
 // `latest` / `attested` / `# example_user` no longer suppress a real secret.
-const SECRET_SKIP_RE = pyRe(String.raw`environ|process\.env|getenv|\bplaceholder\b|\bexample\b|\bdummy\b|\bsample\b|\bmock\b|\bredacted\b|\bxxxx+\b`, "i");
+const SECRET_SKIP_RE = pyRe(String.raw`[Ee]nviron|ENVIRON|process\.env|[Gg]et[Ee]nv|GETENV|(?<![A-Za-z0-9])(?:placeholder|example|dummy|sample|mock|mocked|redacted|fake|canary|made[_\-]?up|PLACEHOLDER|EXAMPLE|DUMMY|SAMPLE|MOCK|MOCKED|REDACTED|FAKE|CANARY|MADE[_\-]?UP|[xX]{4,}|xxxx+)(?![a-z])|(?<![A-Z0-9])(?:Placeholder|Example|Dummy|Sample|Mock|Mocked|Redacted|Fake|Canary|Made[_\-]?[Uu]p)(?![a-z])|(?:[Pp]ublic|PUBLIC)[_\- ]?(?:[Kk]ey|KEY)|[Pp]ub[Kk]ey|PUBKEY|[Pp]ub_[Kk]ey|PUB_KEY`, "");
 
 // ---------------- Inline suppression (shared semantics spec 2) --------------
 // Marker grammar (twin of core.SUPPRESS_RE): `#`, `//` or `--`, optional

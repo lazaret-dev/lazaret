@@ -152,7 +152,8 @@ class TokenPatternTests(unittest.TestCase):
         self.assertTrue(rule["re"].pattern.endswith(r"|eyJ[A-Za-z0-9_\-]{10,}\.eyJ[A-Za-z0-9_\-]{10,}"))
 
     def test_a_glued_jwt_is_still_found_and_redacted(self):
-        issues = core.scan_file("k.js", "const t = 'x" + JWT + "';\n", "js")
+        # (signed: a JWT with no signature, or a word for one, is a sample since SECRET-FP)
+        issues = core.scan_file("k.js", "const t = 'x" + JWT + "." + "Qm9yZWRJbldoZWVs" + "X3NpZ25hdHVyZTQy" + "';\n", "js")
         self.assertEqual([(i["rule"], i["line"]) for i in issues], [("S-TOKEN", 1)])
         self.assertEqual(core._redact_context_line("k = 'AKIA" + "Q" * 16 + JWT + ".sig'"), "k = '[redacted][redacted].sig'")
 

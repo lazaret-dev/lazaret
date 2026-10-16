@@ -37,7 +37,7 @@ from lazaret.registry import repo as lazaret_repo  # noqa: E402
 SECRET_SRC = ("import os\n"
               "os.system(cmd)\n"
               "password = \"hunter2secr3t\"\n"
-              "aws_key = \"AKI\x41IOSFODNN7EXAMPLE\"\n")
+              "aws_key = \"AKI\x41Q7R2ZK9M4TXW8B3N\"\n")
 
 
 def _read(path):
@@ -97,7 +97,7 @@ class TestSecretRedaction(unittest.TestCase):
         for i in issues:
             for line in i["snippet"]:
                 self.assertNotIn("hunter2secr3t", line, i["rule"])
-                self.assertNotIn("AKI\x41IOSFODNN7EXAMPLE", line, i["rule"])
+                self.assertNotIn("AKI\x41Q7R2ZK9M4TXW8B3N", line, i["rule"])
         self.assertTrue(any(i["rule"] == "S-SECRET" for i in issues))
         self.assertTrue(any(i["rule"] == "S-TOKEN" for i in issues))
 

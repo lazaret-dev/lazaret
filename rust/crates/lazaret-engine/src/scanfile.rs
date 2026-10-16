@@ -443,8 +443,51 @@ fn token_col(ctx: &FileCtx, rule: &Matcher, line: &[u32], i: usize) -> Option<us
     };
     // (one walk over the line's tokens: searching again from each header would read the rest of the line each time)
     t.iter(line, 0)
-        .find(|&(a, b)| !pystr::starts_with(&line[a..], "-----BEGIN") || pem_has_material(ctx, line, b, i))
+        .find(|&(a, b)| {
+            !crate::config::sample_token(ctx.p, line, a, b)
+                && (!pystr::starts_with(&line[a..], "-----BEGIN") || pem_has_material(ctx, line, b, i))
+        })
         .map(|(a, _)| a)
+}
+
+/// Column of the first S-SECRET match on a line whose value is one a credential could be (SECRET-FP, 0.1.9: the
+/// config reader's test of a value, config::secret_value, with blanks allowed: a passphrase has them, N-24), and that
+/// is not the shell's working directory: a `PWD` or `OLDPWD` whose value is the command (`"pwd -P >|"`) or a Windows
+/// path (a value starting with `/` is not one a credential could be). Any other `pwd` is a password's abbreviation
+/// (`{user: 'bob', pwd: '…'}`, ODBC's `Pwd=`), and is reported; a base64 one has `/` in it.
+fn secret_col(p: &Pack, rule: &Matcher, line: &[u32]) -> Option<usize> {
+    let Matcher::Re(re) = rule else {
+        return rule.search(line).map(|s| s.0);
+    };
+    for m in re.finditer(line) {
+        let (start, end) = (m.start(), m.end());
+        let text = &line[start..end];
+        // (the pattern ends in the quoted value: the last quote before the closing one opens it)
+        let close = text.len().saturating_sub(1);
+        let open = match text[..close].iter().rposition(|&ch| ch == '"' as u32 || ch == '\'' as u32) {
+            Some(k) => k,
+            None => continue,
+        };
+        if !crate::config::secret_value_in_code(p, &text[open + 1..close]) {
+            continue;
+        }
+        let word = |ch: u32| matches!(char::from_u32(ch), Some('A'..='Z' | 'a'..='z' | '0'..='9' | '_'));
+        let mut a = start;
+        while a > 0 && word(line[a - 1]) {
+            a -= 1;
+        }
+        let mut b = start;
+        while b < line.len() && word(line[b]) {
+            b += 1;
+        }
+        let name = pystr::to_string(&line[a..b]).to_ascii_lowercase();
+        let value = pystr::to_string(&text[open + 1..close]).to_ascii_lowercase();
+        if (name == "pwd" || name == "oldpwd") && (value.starts_with("pwd") || value.contains('\\')) {
+            continue;
+        }
+        return Some(start);
+    }
+    None
 }
 
 /// core.hex_hidden_text: the readable text hidden in a line's \xNN escapes.
@@ -1630,6 +1673,14 @@ pub fn findings_of(ctx: &FileCtx, lang_name: Option<&str>, opts: &Options, snipp
             if a.kind == Kind::ExecJs && exec_js_regex(p, ctx, i, col, &exec_js_names) {
                 continue;
             }
+            let col = if a.kind == Kind::Secret {
+                match secret_col(p, &r.re, mline) {
+                    None => continue,
+                    Some(c) => c,
+                }
+            } else {
+                col
+            };
             let col = if a.kind == Kind::Token {
                 match token_col(ctx, &r.re, mline, i) {
                     None => continue,

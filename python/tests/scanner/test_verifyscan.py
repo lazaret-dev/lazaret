@@ -29,7 +29,8 @@ GITHUB = "ghp_" + "a1B2" * 9
 SLACK = "xox\x62-1234567890-abcdefghij"
 STRIPE = "sk_live_" + "a1" * 12
 ANTHROPIC = "sk-ant-api03-" + "Ab1_" * 10
-AWS_ID, AWS_SECRET = "AKI\x41ABCDEFGHIJKLMNOP", "wJalrXUtnFEMI/K7MDEN\x47+bPxRfiCYEXAMPLEKEY"
+# (made up, in AWS's formats: its documented example secret is a sample since SECRET-FP)
+AWS_ID, AWS_SECRET = "AKI\x41ABCDEFGHIJKLMNOP", "wJalrXUtnFEMI/K7MDEN\x47+bPxRfiCYq8Zr2LmX0v"
 #: every part of every credential the project holds
 VALUES = (GITHUB, SLACK, STRIPE, ANTHROPIC, AWS_ID, AWS_SECRET)
 APP = (f'import os\nGITHUB_TOKEN = "{GITHUB}"\nslack = "{SLACK}"\nheaders = {{"Authorization": "Bearer {STRIPE}"}}\n'

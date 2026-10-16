@@ -137,6 +137,37 @@ pub fn secret_value(p: &Pack, value: &[u32]) -> bool {
     v.iter().any(|&ch| letter(ch)) && v.iter().any(|&ch| !letter(ch)) && entropy(v) >= 2.5
 }
 
+/// A value in code that a credential could be (SECRET-FP, 0.1.9: S-SECRET in code had no test of its value): at
+/// least 8 ASCII characters, not a reference, a URL or a placeholder (`_SRC_PLACEHOLDER_RE`: the config reader's
+/// placeholders without the words a weak password holds, `secret`, `passw`, `123456`), and not a name: words joined
+/// by separators (`_CFG_NAME_RE`: `tapes-gateway`, `KANADE_JWT_SECRET`), a qualified name (`a.b.c`, `a::b::c`) or
+/// CamelCase words (`JwtSecret`). A blank is allowed (a passphrase has them: N-24, John, Oct 15); letters alone count
+/// in both cases (a key's base64, `MIIEow…`), not in one (a word).
+pub fn secret_value_in_code(p: &Pack, value: &[u32]) -> bool {
+    let v = value;
+    if v.len() < 8 || !pystr::is_ascii(v) || pystr::is_space(v[0]) || any_of(v[0], "$%<{@!(*&~/.\\#[|>") {
+        return false;
+    }
+    if p.re("_CFG_URL_START_RE").match_(v).is_some()
+        || p.re("_SRC_PLACEHOLDER_RE").search(v).is_some()
+        || p.re("_CFG_NAME_RE").fullmatch(v).is_some()
+        || p.re("_SRC_QUALIFIED_NAME_RE").fullmatch(v).is_some()
+        || p.re("_SRC_CAMEL_NAME_RE").fullmatch(v).is_some()
+    {
+        return false;
+    }
+    let letter = |ch: u32| (c('A')..=c('Z')).contains(&ch) || (c('a')..=c('z')).contains(&ch);
+    if !v.iter().any(|&ch| letter(ch)) {
+        return false;
+    }
+    if v.iter().all(|&ch| letter(ch)) {
+        let upper = v.iter().any(|&ch| (c('A')..=c('Z')).contains(&ch));
+        let lower = v.iter().any(|&ch| (c('a')..=c('z')).contains(&ch));
+        return upper && lower && entropy(v) >= 3.0;
+    }
+    entropy(v) >= 2.5
+}
+
 /// A key named like a credential, and not a page cursor's or an anti-CSRF token's.
 pub fn secret_key(p: &Pack, key: &[u32]) -> bool {
     p.re("_CFG_SECRET_KEY_RE").search(key).is_some() && p.re("_CFG_NOT_SECRET_KEY_RE").search(key).is_none()
@@ -365,6 +396,35 @@ pub fn documentation_token(p: &Pack, text: &[u32]) -> bool {
     false
 }
 
+/// A token-rule match (`line[a..b]`) that is a sample, not a credential (SECRET-FP, 0.1.9): a documentation sample
+/// (`documentation_token`); one that says so (`EXAMPLE`, `FAKE`, `DUMMY`, `SAMPLE` in it: AWS's, a secret scanner's own
+/// examples, `eyJFAKE…`); and a JWT with no signature, or a word for one (`….SIGNATURE`: a real one is 43 characters
+/// or more).
+pub fn sample_token(p: &Pack, line: &[u32], a: usize, b: usize) -> bool {
+    let text = &line[a..b];
+    if documentation_token(p, text) {
+        return true;
+    }
+    if pystr::starts_with(text, "-----BEGIN") {
+        return false;
+    }
+    let lower = pystr::to_string(text).to_ascii_lowercase();
+    if ["example", "fake", "dummy", "sample"].iter().any(|w| lower.contains(w)) {
+        return true;
+    }
+    if pystr::starts_with(text, "eyJ") {
+        let sig = if line.get(b) == Some(&c('.')) {
+            let rest = &line[b + 1..];
+            let n = rest.iter().take_while(|&&ch| matches!(char::from_u32(ch), Some('A'..='Z' | 'a'..='z' | '0'..='9' | '_' | '-'))).count();
+            &rest[..n]
+        } else {
+            &line[b..b]
+        };
+        return sig.len() < 16 || sig.iter().all(|&ch| matches!(char::from_u32(ch), Some('A'..='Z' | 'a'..='z')));
+    }
+    false
+}
+
 /// The S-TOKEN rule and its matcher.
 fn token_rule(p: &Pack) -> &crate::scanfile::Rule {
     crate::scanfile::rules(p).iter().find(|r| pystr::eq(&r.text.id, "S-TOKEN")).expect("the pack has S-TOKEN")
@@ -382,7 +442,7 @@ fn token_col(p: &Pack, lines: &[&[u32]], i: usize) -> Option<usize> {
     };
     for (a, b) in spans {
         let text = &line[a..b];
-        if documentation_token(p, text) {
+        if sample_token(p, line, a, b) {
             continue;
         }
         if pystr::starts_with(text, "-----BEGIN") && !key_follows(p, line, b, &following) {
