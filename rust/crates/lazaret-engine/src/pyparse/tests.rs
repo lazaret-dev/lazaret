@@ -184,6 +184,10 @@ fn which_error_python_reports() {
     assert_eq!(error("q = p , f(a=1,\n b='x'= c=2)").0, 2);
     assert_eq!(error("p , g(x, a=1,\n h(b='x'= c=2))"), (2, "positional argument follows keyword argument".to_string()));
     assert_eq!(error("f(**k, h(b=1 =))").1, "positional argument follows keyword argument unpacking");
+    // a keyword's value followed by a comprehension's clauses that read (invalid_kwarg), at the name
+    assert_eq!(error("f(a=\n b for b in c)"), (1, meant.clone()));
+    assert_eq!(error("f(x,\n a=b for b in c if d)"), (2, meant.clone()));
+    assert_eq!(error("f(a=b for)").0, 1);
     // the expression after another: its failing trailers dropped, an error
     // inside the brackets it starts with reported
     assert_eq!(error("[u g(\n b c)]").0, 1);

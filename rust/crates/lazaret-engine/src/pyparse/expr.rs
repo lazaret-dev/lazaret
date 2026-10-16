@@ -1079,6 +1079,10 @@ impl<'a> Parser<'a> {
                 arg!(self.enter(L::KEYWORD_ARG));
                 let x = arg!(self.expression());
                 self.leave(L::KEYWORD_ARG);
+                if self.at_for() && self.ahead == 0 && matches!(self.read_contained(Self::for_if_clauses), Ok(Some(_))) {
+                    // (Python's error pass, invalid_kwarg: `name=value for …` whose clauses read, at the name)
+                    return self.fatal_at(t.s, "invalid syntax. Maybe you meant '==' or ':=' instead of '='?");
+                }
                 let n = self.add(Kind::keyword, 0, t.s, x.e, [t.v, x.n, NONE, NONE]);
                 keywords.push(n);
                 seen_kw = true;
@@ -1269,6 +1273,13 @@ impl<'a> Parser<'a> {
             e = a.e;
         }
         Ok((self.add(Kind::arg, 0, name.s, e, [name.v, ann, NONE, NONE]), e))
+    }
+
+    /// comprehension_clauses as a reading (read_contained's): Python's for_if_clauses.
+    fn for_if_clauses(&mut self) -> R<Ex> {
+        let s = self.tok().s;
+        let n = self.comprehension_clauses()?;
+        Ok(Ex { n, s, e: s })
     }
 
     /// `for … in … if …` clauses: a list of comprehension nodes.

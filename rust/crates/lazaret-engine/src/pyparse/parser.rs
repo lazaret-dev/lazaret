@@ -248,7 +248,7 @@ impl<'a> Parser<'a> {
     /// failed, and an error no reading takes back as Err(where, why) — for
     /// a reading of Python's error pass that may raise its own errors and no
     /// other.
-    fn read_contained(&mut self, read: fn(&mut Self) -> R<Ex>) -> Result<Option<usize>, (u32, String)> {
+    pub(super) fn read_contained(&mut self, read: fn(&mut Self) -> R<Ex>) -> Result<Option<usize>, (u32, String)> {
         let saved = Saved {
             p: self.p,
             nodes: self.tree.nodes.len(),
