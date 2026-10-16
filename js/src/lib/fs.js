@@ -11,13 +11,13 @@ import {
 } from "node:fs";
 import { join, sep, resolve, dirname, basename, isAbsolute } from "node:path";
 import { randomBytes } from "node:crypto";
-import { decodeSource, fsNameToString } from "./encoding.js";
+import { decodeSource, bytesText, fsNameToString } from "./encoding.js";
 import { classifyBinary, HEADER_SAMPLE, PYC_HEADER, pycIssues, pycModule, pyExt, looksBinary, mpegTs, MPEG_TS_EXTS,
   disguisedBinary, DISGUISE_SAMPLE } from "./binary.js";
-import { EXHAUSTED, NativeError, NativeExhausted, shebangLang } from "./native.js";
-import { mkIssue, fileIssue } from "./issue.js";
+import { EXHAUSTED, NativeError, NativeExhausted, shebangLang, call, issuesOf } from "./native.js";
+import { fileIssue } from "./issue.js";
 import { pthIssues } from "./pth.js";
-import { registerScanContext } from "./redact.js";
+import { REDACT } from "./redact.js";
 import { isConfigFile, ownReport, CONFIG_SCAN_CAP } from "./configsecrets.js";
 import { cmpCodePoints } from "./pycompat.js";
 
@@ -512,84 +512,22 @@ function collectConfig(full, rel, size, col) {
     col.binaryIssues.push(configSkippedIssue(rel, `it grew past the ${withCommas(cap)}-byte limit for config files while it was read`));
     return;
   }
-  const content = normalizeNewlines(decodeSource(data, { py: false }).text);
+  const content = decodeSource(data).text;
   if (!ownReport(content)) col.configs.push({ path: rel, content });   // a report of Lazaret's own is not config
 }
 
 /**
- * Q-ENCODING (and SC-UTF7, SC-ESCAPE-CODEC, SC-TRUNCATED) for a decoded
- * source file: `dec` is decodeSource's result, `content` its text with \n
- * line endings. Twin of lazaret.scanner.core.encoding_issues.
- */
-/** Python's f"{x:.0%}": half-even on the exact binary value of x * 100. */
-export function percent(x) {
-  const y = x * 100;
-  const f = Math.floor(y);
-  return `${y - f === 0.5 ? (f % 2 === 0 ? f : f + 1) : Math.round(y)}%`;
-}
-
-/** core._undecodable_share: U+FFFD and control characters in the first 65,536 code points. */
-export function undecodableShare(text) {
-  let n = 0, bad = 0;
-  for (const ch of text) {
-    if (n === 65536) break;
-    n++;
-    const c = ch.codePointAt(0);
-    if (c === 0xfffd || c <= 0x08 || (c >= 0x0e && c <= 0x1a) || (c >= 0x1c && c <= 0x1f) || c === 0x7f
-        || (c >= 0xdc80 && c <= 0xdcff)) bad++;
-  }
-  return n ? bad / n : 0;
-}
-
-/**
- * Twin of core.decode_member: [text, findings] for a file read as `lang`
- * ("py" keeps its coding cookie): Q-ENCODING / SC-UTF7 (encodingIssues), and
- * SC-TRUNCATED when it does not decode to anything text-like (more than 30%
- * invalid bytes or control characters), so its scan proves nothing. A
- * directory scan reads every source file this way (0.1.8), as the registry does.
+ * core.decode_member: [text, findings] for a file read as `lang` ("py" keeps its coding cookie), in one call to the
+ * engine (BR-7 step 4 b: decode/): Q-ENCODING, SC-UTF7, SC-ESCAPE-CODEC and SC-TRUNCATED for a codec it does not
+ * decode, and SC-TRUNCATED when the file does not decode to anything text-like (more than 30% invalid bytes or
+ * control characters, but a video under TypeScript's extensions), so its scan proves nothing. A directory scan
+ * reads every source file this way (0.1.8), as the registry does.
  */
 export function decodeMember(path, data, lang) {
-  const dec = decodeSource(data, { py: lang === "py" });
-  const text = normalizeNewlines(dec.text);
-  const out = encodingIssues(path, text, dec);
-  const share = undecodableShare(text);
-  if (share > 0.3 && !(MPEG_TS_EXTS.has(pyExt(path).toLowerCase()) && mpegTs(data.subarray(0, 512)))) {
-    out.push(truncatedIssue(path, `content is not decodable as text (${percent(share)} invalid bytes or ` +
-      "control characters), so no rule could read it"));
-  }
-  return [text, out];
-}
-
-export function encodingIssues(rel, content, dec) {
-  const out = [];
-  if (dec.reported) {
-    const lines = content.split("\n");
-    // the file's own entropy literals and PEM blocks, as scanFile's findings
-    // have (twin of core.encoding_issues): the Q-ENCODING snippet of a
-    // UTF-8-BOM settings.py showed the literal its S-ENTROPY redacted
-    registerScanContext(lines);
-    out.push(mkIssue({ id: "Q-ENCODING", name: "Non-UTF-8 source encoding",
-      type: "SMELL", sev: "INFO",
-      msg: `Source file is not UTF-8 (detected ${dec.encoding}); decoded explicitly.`,
-      why: "A non-UTF-8 source read as UTF-8 decodes to mojibake, hiding every pattern-based finding — a UTF-16 eval() scans clean.",
-      fix: "Re-save the file as UTF-8 so tooling reads it as written.",
-      ref: "Maintainability" }, rel, 1, lines));
-    if (dec.utf7) out.push(mkIssue({ id: "SC-UTF7", name: "UTF-7 source encoding",
-      type: "HOTSPOT", sev: "CRITICAL",
-      msg: "Python source declares UTF-7; code can hide in comments.",
-      why: "In UTF-7, '+AAo-' decodes to a newline: text that every editor, diff and reviewer shows as a comment becomes executable code when Python reads the file. No legitimate project needs a UTF-7 source file.",
-      fix: "Re-save the file as UTF-8 and review the decoded text (the findings for this file are reported against it).",
-      ref: "CWE-506 · Supply chain" }, rel, dec.cookieLine || 1, lines));
-    if (dec.escapes) out.push(mkIssue({ id: "SC-ESCAPE-CODEC", name: "Escape-sequence source encoding",
-      type: "HOTSPOT", sev: "CRITICAL",
-      msg: `Python source declares ${dec.encoding}; code can hide in escape sequences.`,
-      why: "Python decodes this file's escape sequences before it reads the code: '\\u000a' is a newline and '\\u0065' is 'e', so text that every editor, diff and reviewer shows as a comment or a string escape becomes executable code. No legitimate project needs this source encoding.",
-      fix: "Re-save the file as UTF-8 and review the decoded text (the findings for this file are reported against it).",
-      ref: "CWE-506 · Supply chain" }, rel, dec.cookieLine || 1, lines));
-    if (dec.undecoded) out.push(truncatedIssue(rel,
-      `its source encoding (${dec.encoding}) is not decoded by Lazaret; the file was read as UTF-8`));
-  }
-  return out;
+  const args = { issues: true, redact: REDACT.on, name: path, windows: process.platform === "win32" };
+  if (lang) args.lang = lang;
+  const got = call("decode_source", args, bytesText(data));
+  return [got.text, issuesOf(path, got.issues)];
 }
 
 /** __pycache__ is not source-scanned; every .pyc directly inside is checked. */

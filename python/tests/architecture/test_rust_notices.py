@@ -21,7 +21,8 @@ from tests import _support
 
 RUST = os.path.join(_support.REPO_ROOT, "rust")
 SRC = os.path.join(RUST, "crates", "lazaret-engine", "src")
-# the crates' license: Lazaret's, and the Unicode data of generated/unicode13.rs and pyparse/unidata.rs
+# the crates' license: Lazaret's, and the Unicode data of generated/unicode13.rs, generated/codecs.rs and
+# pyparse/unidata.rs
 CRATES = "Apache-2.0 AND Unicode-3.0"
 # the packages' (python/_build, scripts/check_native_library.py): the same
 PACKAGES = CRATES
@@ -70,6 +71,7 @@ class NoticeTests(unittest.TestCase):
         self.assertNotIn("Fredrik Lundh", notice)
         self.assertNotIn(CNRI, notice)
         self.assertIn("generated/unicode13.rs", notice.split("Unicode data")[1])
+        self.assertIn("generated/codecs.rs", notice.split("\nUnicode data\n")[1])     # (its section)
 
     def test_no_engine_file_carries_cpythons_license(self):
         for rel, text in engine_files():

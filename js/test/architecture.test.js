@@ -86,9 +86,9 @@ test("architecture: zero dependencies, shipped files only, its licenses", () => 
   assert.deepEqual(pkg.files, ["bin/", "src/", "native/lazaret.wasm", "native/NOTICE", "README.md", "LICENSE",
     "LICENSE-UNICODE", "NOTICE",
     "!**/.*", "!**/*.pem", "!**/*.key", "!**/id_rsa*", "!**/id_ed25519*"]);   // never pack dotfiles (.env*, ._*, .DS_Store) or keys
-  // the native engine (native/lazaret.wasm, its notices in native/NOTICE) holds Unicode 13.0 data, and lib/unicode13.js
-  // and lib/codecs.js hold Unicode data (NOTICE): the package carries the Unicode License and declares it. The codec
-  // names lib/codecs.js lists are what Python's codecs answer to, facts about Python, not its code
+  // the native engine (native/lazaret.wasm, its notices in native/NOTICE) holds Unicode data (Unicode 13.0's, the
+  // codecs' tables), and lib/unicode13.js holds Unicode data (NOTICE): the package carries the Unicode License and
+  // declares it. The codec names the engine holds are what Python's codecs answer to, facts about Python, not its code
   assert.equal(pkg.license, "Apache-2.0 AND Unicode-3.0");
 });
 

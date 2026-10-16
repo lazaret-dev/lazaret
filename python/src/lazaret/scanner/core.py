@@ -49,7 +49,6 @@ import posixpath
 import re
 import sys
 import types
-import warnings
 
 try:
     from lazaret.scanner import flow as lazaret_flow  # interprocedural / cross-file taint (optional)
@@ -1580,15 +1579,6 @@ def _bytes_text(data):
     return bytes(data or b"").decode("latin-1")
 
 
-# Characters that cannot occur in text: bytes of invalid UTF-8 sequences
-# (decoded with surrogateescape to U+DC80..U+DCFF) and C0 controls other than
-# whitespace and ESC, NUL included. 0x0E..0x1A are listed one by one: the
-# class is the same, and reads as meant rather than as a wide range.
-_NON_TEXT_CHARS_RE = re.compile("[\udc80-\udcff\x00-\x08\x0e\x0f\x10\x11\x12\x13\x14\x15\x16\x17\x18\x19\x1a"
-                                "\x1c-\x1f\x7f]")
-_NON_TEXT_SHARE = 0.30
-
-
 def looks_binary(sample):
     """Heuristic text/binary classification from a leading byte sample.
 
@@ -1612,25 +1602,6 @@ def _mpeg_ts(header):
 
 
 # ---------------- Source decoding for archive members (registry, MCP) ----------------
-def _text_is_plausible(text):
-    """Does a UTF-16 guess (NUL in the first four bytes, no BOM) read as
-    text? A UTF-8 file with a NUL near the top (`/*\\0*/eval(…)`) decodes to
-    CJK-looking garbage under UTF-16; real UTF-16 source is mostly ASCII."""
-    if not text:
-        return False
-    sample = text[:2048]
-    plain = sum(1 for ch in sample if " " <= ch <= "~" or ch in "\t\r\n")
-    return plain / len(sample) >= 0.70
-
-
-def _undecodable_share(text):
-    if not text:
-        return 0.0
-    sample = text[:65536]
-    bad = sample.count("�") + len(_NON_TEXT_CHARS_RE.findall(sample))
-    return bad / len(sample)
-
-
 def decode_member(path, data, lang=None):
     """Decode one archive member (registry) or one file named by an MCP
     caller the way its runtime reads it. -> (text, extra_issues).
@@ -1643,19 +1614,17 @@ def decode_member(path, data, lang=None):
     adds SC-TRUNCATED — it was "scanned" only as mojibake, so the scan of it
     proves nothing. Never raises on content. `lang`: the language the
     member runs as when its name does not say (a Python script by its #!
-    line keeps its coding cookie); by default, its extension's."""
+    line keeps its coding cookie); by default, its extension's. The engine's
+    (BR-7 step 4 b: decode/), in one call."""
     data = bytes(data or b"")
-    ext = os.path.splitext(path)[1].lower()
     if lang is None:
+        ext = os.path.splitext(path)[1].lower()
         lang = "py" if ext in (".py", ".pyw") else EXTS.get(ext)
-    text, info = decode_source(data, lang)
-    extra = encoding_issues(path, text, info)
-    share = _undecodable_share(text)
-    if share > _NON_TEXT_SHARE and not (ext in MPEG_TS_EXTS and _mpeg_ts(data[:512])):
-        extra.append(truncated_issue(
-            path, f"content is not decodable as text ({share:.0%} invalid bytes or "
-                  f"control characters), so no rule could read it"))
-    return text, extra
+    args = {"issues": True, "redact": bool(REDACT_SECRETS), "name": path, "windows": _WINDOWS_PATHS}
+    if lang:
+        args["lang"] = lang
+    got = _native.call("decode_source", args, _bytes_text(data))
+    return got["text"], engine._issues(path, got["issues"])
 
 def classify_binary(path, data, size, context):
     """Return a supply-chain issue dict for a suspicious non-source file, or None:
@@ -2808,7 +2777,6 @@ def scan_gyp(path, content):
     except _native.NativeError as exc:
         return [engine.error_issue(path, exc)]
 
-import codecs as _codecs
 import pathlib as _pathlib
 import stat as _stat
 import traceback as _traceback
@@ -2863,10 +2831,6 @@ GYP_EXTS = (".gyp", ".gypi")
 #: volumes and into tarballs). Starts with a NUL, so it can never be Python or
 #: JavaScript source; it is classified like any other non-source file.
 APPLE_DOUBLE_MAGIC = (b"\x00\x05\x16\x07", b"\x00\x05\x16\x00")
-#: PEP 263 encoding declaration (Python source), on raw bytes.
-_PY_COOKIE_RE = re.compile(rb"^[ \t\f]*#.*?coding[:=][ \t]*([-\w.]+)")
-_PY_BLANK_RE = re.compile(rb"^[ \t\f]*(?:#.*)?$")
-_UTF7_NAMES = frozenset({"utf-7", "utf7", "u7", "unicode-1-1-utf-7"})
 
 
 class ScanTargetError(ValueError):
@@ -3048,149 +3012,6 @@ def pyc_issues(path, header, has_source):
                                              _bytes_text(bytes(header[:16]))))
 
 
-def detect_encoding(head):
-    """M17 / FIX-SPEC 4: BOM / UTF-16 sniff of a file's first bytes.
-
-    Returns {'encoding': codec, 'reported': bool, 'bom': n}: BOM FF FE ->
-    utf-16-le, FE FF -> utf-16-be, EF BB BF -> utf-8-sig; otherwise a NUL in
-    the first 4 bytes betrays BOM-less UTF-16 (NUL at index 1 or 3 ->
-    utf-16-le, else utf-16-be). reported=True for every non-plain-UTF-8 case
-    (-> Q-ENCODING); bom is the number of BOM bytes to drop before decoding.
-    The old sniff returned the generic 'utf-16' codec for BOM-less input,
-    whose decoder raises UnicodeError ('UTF-16 stream does not start with
-    BOM') — which escaped and killed the whole scan (review item 1)."""
-    if head.startswith(b"\xff\xfe"):
-        return {"encoding": "utf-16-le", "reported": True, "bom": 2}
-    if head.startswith(b"\xfe\xff"):
-        return {"encoding": "utf-16-be", "reported": True, "bom": 2}
-    if head.startswith(b"\xef\xbb\xbf"):
-        return {"encoding": "utf-8-sig", "reported": True, "bom": 0}
-    first = head[:4]
-    if b"\x00" in first:
-        le = first[1:2] == b"\x00" or first[3:4] == b"\x00"
-        return {"encoding": "utf-16-le" if le else "utf-16-be", "reported": True, "bom": 0}
-    return {"encoding": "utf-8", "reported": False, "bom": 0}
-
-
-def _python_cookie(data):
-    """PEP 263 encoding declaration of Python source bytes: (name, line_no) or
-    (None, None). Same rule as the interpreter's tokenizer: line 1, or line 2
-    when line 1 is blank or a comment."""
-    lines = re.split(rb"\r\n|\r|\n", data, maxsplit=2)[:2]
-    for idx, line in enumerate(lines):
-        m = _PY_COOKIE_RE.match(line)
-        if m:
-            return m.group(1).decode("ascii"), idx + 1
-        if not _PY_BLANK_RE.match(line):
-            break
-    return None, None
-
-
-#: Coding-cookie names only newer Pythons know (3.13: windows_31j; 3.14: 874,
-#: ms874, windows_874, cseuckr, iso_8859_8_e, iso_8859_8_i), resolved on every
-#: supported version so a file decodes the same whichever Python scans it
-#: (normalized as encodings.normalize_encoding does, on the lower-cased name).
-CODEC_ALIAS_EXTRAS = {"windows_31j": "cp932", "874": "cp874", "ms874": "cp874",
-                      "windows_874": "cp874", "cseuckr": "euc_kr",
-                      "iso_8859_8_e": "iso8859-8", "iso_8859_8_i": "iso8859-8",
-                      # 3.14.x patch releases (3.14.7 has them, 3.14.0 does not)
-                      "cp01140": "cp1140", "csibm01140": "cp1140", "ibm01140": "cp1140",
-                      "ebcdic_us_37_euro": "cp1140", "cp00858": "cp858", "csibm00858": "cp858",
-                      "ibm00858": "cp858", "pc_multilingual_850_euro": "cp858"}
-#: Codecs that decode with the host's code page (Windows only): unknown here.
-HOST_CODECS = frozenset(("mbcs", "oem"))
-#: Single-byte tables that differ between supported Pythons, as the newest has
-#: them (3.13 maps palmos 0x9B to U+203A; 3.10-3.12 to U+009B).
-CHARMAP_FIXES = {"palmos": {0x9B: "\u203a"}}
-#: Multi-byte codecs the npm engine decodes with the runtime's TextDecoder.
-#: With these, the single-byte codecs (scripts/make_codec_tables.py writes
-#: it Python's tables), UTF-7, Latin-1, ASCII and the escape codecs, both
-#: engines decode what a cookie names; any other codec (UTF-32, ISO-2022-KR,
-#: Shift_JIS-2004, …) is read as UTF-8 by both, with SC-TRUNCATED.
-_TEXTDECODER_CODECS = frozenset((
-    "utf-16", "utf-16-le", "utf-16-be", "shift_jis", "cp932", "euc_jp", "iso2022_jp",
-    "gbk", "gb2312", "cp936", "gb18030", "big5", "cp950", "euc_kr", "cp949"))
-
-
-def _codec_key(name):
-    """A codec name as encodings.normalize_encoding sees it (lower case)."""
-    return re.sub(r"[^a-z0-9.]+", "_", name.lower()).strip("_")
-
-
-def _normal_codec(name):
-    """Codec for a cookie name as the interpreter resolves it (utf-8-* and
-    latin-1-* spellings fold to their base codec), or None if Python has no
-    such text codec. The same on every supported Python and host
-    (CODEC_ALIAS_EXTRAS, HOST_CODECS)."""
-    short = name[:12].lower().replace("_", "-")
-    if short == "utf-8" or short.startswith("utf-8-"):
-        return "utf-8"
-    if short in ("latin-1", "iso-8859-1", "iso-latin-1") or short.startswith(
-            ("latin-1-", "iso-8859-1-", "iso-latin-1-")):
-        return "iso8859-1"
-    key = _codec_key(name)
-    extra = CODEC_ALIAS_EXTRAS.get(key) or CODEC_ALIAS_EXTRAS.get(key.replace(".", "_"))
-    if extra:
-        return extra
-    try:
-        info = _codecs.lookup(name)
-    except LookupError:
-        return None
-    if not getattr(info, "_is_text_encoding", True):
-        return None                     # rot13, hex, zlib… are not text encodings
-    return None if info.name in HOST_CODECS else info.name
-
-
-def charmap_table(codec):
-    """What each byte decodes to in the single-byte (charmap) codec `codec`: a
-    256-character string, U+FFFE for a byte it leaves undefined, as the newest
-    supported Python has it (CHARMAP_FIXES); None for any other codec."""
-    try:
-        info = _codecs.lookup(codec)
-    except LookupError:
-        return None
-    mod = sys.modules.get(getattr(info.incrementaldecoder, "__module__", "") or "")
-    table = getattr(mod, "decoding_table", None)
-    if not isinstance(table, str) or len(table) != 256:
-        return None
-    fix = CHARMAP_FIXES.get(info.name)
-    return table.translate(fix) if fix else table
-
-
-def _decoded_by_both_engines(codec):
-    return (codec in ("utf-7", "ascii", "iso8859-1", "charmap") or codec in _TEXTDECODER_CODECS
-            or codec in ESCAPE_CODECS or charmap_table(codec) is not None)
-
-
-#: Codecs that decode escape sequences before Python reads the code: in a file
-#: that declares one, '\u000a' in a comment is a newline and '\u0065' is 'e'
-#: (SC-ESCAPE-CODEC). Both engines decode them (_decode_escapes).
-ESCAPE_CODECS = ("unicode-escape", "raw-unicode-escape")
-#: A \N escape: an N after an odd run of backslashes (linear: a run is
-#: tried only from the character before it).
-_NAMED_ESCAPE_RE = re.compile(rb"(?:^|[^\\])(?:\\\\)*\\N")
-
-
-def _decode_escapes(body, codec):
-    """`body` as Python's unicode_escape or raw_unicode_escape decodes it, or
-    None where the npm engine (encoding.js decodeEscapes) cannot decode it
-    exactly as Python does: a \\N{name} escape (it has no Unicode name table)
-    or an escape Python rejects, such as a short \\x or a backslash at the end
-    (the interpreter would not run the file)."""
-    if codec == "unicode-escape" and _NAMED_ESCAPE_RE.search(body):
-        return None
-    with warnings.catch_warnings():     # "invalid escape sequence" (kept as written)
-        warnings.simplefilter("ignore")
-        try:
-            return body.decode(codec)
-        except UnicodeDecodeError:
-            return None
-
-
-#: A surrogate code point: never text on its own (see decode_source).
-_SURROGATE_RE = re.compile("[\ud800-\udfff]")
-
-
 def decode_source(data, lang=None):
     """Decode the bytes of a source file the way its interpreter would read
     them. Returns (text, info):
@@ -3200,112 +3021,31 @@ def decode_source(data, lang=None):
               "escapes": True for an escape codec (-> SC-ESCAPE-CODEC),
               "undecoded": True when the codec is not decoded (-> SC-TRUNCATED)}
 
-    FIX-SPEC 4 (BOM / NUL sniff) first; for Python source without a BOM or
-    NUL, FIX-SPEC 15: a PEP 263 cookie naming a codec other than UTF-8 decodes
-    with that codec (Q-ENCODING); UTF-7 additionally sets utf7 (a UTF-7
-    '+AAo-' is a newline, so code can hide inside a comment), and so do the
-    escape codecs ('\\u000a'). An unknown codec
-    decodes as UTF-8 with replacement, and so does a codec the npm engine
-    cannot decode exactly as Python does (undecoded: the file is not fully
+    The engine's (BR-7 step 4 b: decode/). FIX-SPEC 4 (BOM / NUL sniff)
+    first, a BOM-less UTF-16 guess kept only when it reads as text; for
+    Python source without a BOM or NUL, FIX-SPEC 15: a PEP 263 cookie naming
+    a codec other than UTF-8 decodes with that codec (Q-ENCODING), as Python
+    decodes it, for every text codec Python has (the CJK and ISO-2022 codecs
+    included); UTF-7 additionally sets utf7 (a UTF-7 '+AAo-' is a newline,
+    so code can hide inside a comment), and so do the escape codecs
+    ('\\u000a'). An unknown codec decodes as UTF-8 with replacement, and so do
+    idna, punycode and undefined, and an escape codec's file Python would
+    not read or that uses \\N{name} (undecoded: the file is not fully
     scanned). Never raises on content. Line endings are normalized to \\n, as
-    text mode reads them. A surrogate code point left by the codec (UTF-7
-    '+2AA-', unicode_escape '\\udc80') becomes U+FFFD, as in the npm engine's
-    decoders: text holding one cannot be written as UTF-8 (review: the HTML
-    report raised UnicodeEncodeError after the JSON was written, exit 5) and
-    the flow engine could not parse it."""
-    enc = detect_encoding(data[:4])
-    if (enc["reported"] and not enc["bom"] and enc["encoding"].startswith("utf-16")
-            and not _text_is_plausible(data[:4096].decode(enc["encoding"], "replace"))):
-        # A NUL near the top of a UTF-8 file (`/*\0*/eval(…)`) is not UTF-16:
-        # decoded that way the payload turns into CJK-looking garbage that no
-        # rule reads. Accept the BOM-less UTF-16 guess only when it reads as
-        # text (real UTF-16 source is mostly ASCII).
-        enc = {"encoding": "utf-8", "reported": False, "bom": 0}
-    codec, body = enc["encoding"], data[enc["bom"]:]
-    info = {"encoding": codec, "reported": enc["reported"], "utf7": False, "cookieLine": None}
-    if lang == "py" and not enc["reported"]:
-        name, line_no = _python_cookie(data)
-        if name is not None:
-            real = _normal_codec(name)
-            if real is None:
-                info.update(encoding=name, reported=True, cookieLine=line_no)
-            elif real != "utf-8":
-                info.update(encoding=real, reported=True, cookieLine=line_no,
-                            utf7=(real == "utf-7"
-                                  or name.lower().replace("_", "-") in _UTF7_NAMES))
-                if real in ESCAPE_CODECS:
-                    info["escapes"] = True
-                if _decoded_by_both_engines(real):
-                    codec = real
-                else:           # read as UTF-8, as the npm engine can only read it
-                    info["undecoded"] = True
-    text = _decode_escapes(body, codec) if codec in ESCAPE_CODECS else None
-    if codec in ESCAPE_CODECS and text is None:
-        info["undecoded"] = True        # read as UTF-8, as the npm engine can only read it
-        codec = "utf-8"
-    if text is None:
-        try:
-            text = body.decode(codec)
-        except Exception:               # malformed input or a misbehaving codec:
-            try:                        # never abort the scan over content
-                text = body.decode(codec, "replace")
-            except Exception:
-                text = body.decode("utf-8", "replace")
-    fix = CHARMAP_FIXES.get(codec)
-    if fix:
-        text = text.translate(fix)
-    if not text.isascii():
-        text = _SURROGATE_RE.sub("\ufffd", text)
-    return normalize_newlines(text), info
+    text mode reads them, and a surrogate code point the codec leaves (UTF-7
+    '+2AA-', unicode_escape '\\udc80') becomes U+FFFD."""
+    got = _native.call("decode_source", {"lang": lang} if lang else {}, _bytes_text(data))
+    return got["text"], got["info"]
 
 
 def encoding_issues(path, text, info):
-    """Q-ENCODING (and SC-UTF7) findings for a decoded source file. Their
-    snippets are redacted with the file's own entropy literals and PEM
-    blocks, as scan_file's are (review: a UTF-8-BOM settings.py showed the
-    SEED literal its S-ENTROPY finding redacted in the Q-ENCODING snippet)."""
+    """Q-ENCODING, SC-UTF7 and SC-ESCAPE-CODEC for a decoded source file (and
+    SC-TRUNCATED for a codec not decoded), from decode_source's text and
+    info. Their snippets are redacted with the file's own entropy literals
+    and PEM blocks, as scan_file's are. The engine's (decode/mod.rs)."""
     if not info["reported"]:
         return []
-    lines = text.split("\n")
-    red = _Redactor(lines)
-    out = [mk_issue(
-        {"id": "Q-ENCODING", "name": "Non-UTF-8 source encoding", "type": "SMELL",
-         "sev": "INFO",
-         "msg": f"Source file is not UTF-8 (detected {info['encoding']}); decoded explicitly.",
-         "why": "A non-UTF-8 source read as UTF-8 decodes to mojibake, hiding every "
-                "pattern-based finding — a UTF-16 eval() scans clean.",
-         "fix": "Re-save the file as UTF-8 so tooling reads it as written.",
-         "ref": "Maintainability"}, path, 1, lines, redactor=red)]
-    if info["utf7"]:
-        out.append(mk_issue(
-            {"id": "SC-UTF7", "name": "UTF-7 source encoding", "type": "HOTSPOT",
-             "sev": "CRITICAL",
-             "msg": "Python source declares UTF-7; code can hide in comments.",
-             "why": "In UTF-7, '+AAo-' decodes to a newline: text that every editor, diff "
-                    "and reviewer shows as a comment becomes executable code when Python "
-                    "reads the file. No legitimate project needs a UTF-7 source file.",
-             "fix": "Re-save the file as UTF-8 and review the decoded text (the findings "
-                    "for this file are reported against it).",
-             "ref": "CWE-506 · Supply chain"}, path, info["cookieLine"] or 1, lines,
-            redactor=red))
-    if info.get("escapes"):
-        out.append(mk_issue(
-            {"id": "SC-ESCAPE-CODEC", "name": "Escape-sequence source encoding", "type": "HOTSPOT",
-             "sev": "CRITICAL",
-             "msg": f"Python source declares {info['encoding']}; code can hide in escape sequences.",
-             "why": "Python decodes this file's escape sequences before it reads the code: "
-                    "'\\u000a' is a newline and '\\u0065' is 'e', so text that every editor, "
-                    "diff and reviewer shows as a comment or a string escape becomes executable "
-                    "code. No legitimate project needs this source encoding.",
-             "fix": "Re-save the file as UTF-8 and review the decoded text (the findings "
-                    "for this file are reported against it).",
-             "ref": "CWE-506 · Supply chain"}, path, info["cookieLine"] or 1, lines,
-            redactor=red))
-    if info.get("undecoded"):
-        out.append(truncated_issue(
-            path, f"its source encoding ({info['encoding']}) is not decoded by Lazaret; "
-                  f"the file was read as UTF-8"))
-    return out
+    return engine._issues(path, _native.call("encoding_issues", {"info": info, "redact": bool(REDACT_SECRETS)}, text))
 
 
 def _dep_tree_kind(name, path):

@@ -1,50 +1,38 @@
-"""Review fix: a coding cookie decodes to the same text in both engines.
+"""Review fix: a coding cookie decodes to the same text in both packages.
 
 The npm engine and the dashboard decoded a cookie's codec with the runtime's
 TextDecoder, which has no label for 63 of the codecs Python decodes (cp037,
 cp500, cp437, cp850, the mac_* family, utf-32, unicode-escape, …): they
 reported "detected cp037" and then read the file as UTF-8, so
 `# coding: cp037` + `x = eval(input())` gave S-EVAL-PY / T-CODE in npm only.
-(unicode-escape and raw-unicode-escape now decode in both engines too: see
-test_review_escape_codecs.py.)
 Where a label existed, its table was not always Python's (cp1252's undefined
-bytes, cp866, tis-620; no ISO-8859-16 at all). Now:
+bytes, cp866, tis-620; no ISO-8859-16 at all). The fix gave npm Python's
+single-byte tables and read any codec it could not decode exactly as UTF-8
+in both packages, with SC-TRUNCATED.
 
-* single-byte codecs decode with Python's own tables, generated into
-  js/src/lib/codecs.js by scripts/make_codec_tables.py (checked current here);
-* a codec the npm engine cannot decode exactly as Python does is read as
-  UTF-8 by both engines, with Q-ENCODING and SC-TRUNCATED (not fully
-  scanned) — no silent fallback;
-* cookie names only newer Pythons know (windows-874, windows-31j, …) and
-  palmos (its 0x9B changed in 3.13) resolve the same on every Python.
-
-The multi-byte codecs with a TextDecoder label (Shift_JIS, EUC-*, GBK, Big5,
-…) still decode with it: their text can differ from Python's for bytes
-outside the codec's own repertoire. All input is inert.
+Since BR-7 step 4 (b) the engine decodes for both packages, every text codec
+Python has, as Python decodes it (tests/architecture/test_decode_engine.py
+holds it to Python's codecs); its tables are written by
+scripts/make_codec_tables.py (checked current here), which also writes the
+dashboard's copy of the single-byte ones. The dashboard decodes as npm did
+until it runs the engine (BR-7 step 5): it is checked here on the codecs it
+decodes. All input is inert.
 """
-import base64
-import json
 import os
-import shutil
-import subprocess
 import unittest
 
 from tests import _support
 from lazaret.scanner import core
 from tests.scanner import _dashboard_vm as dash
 
-NODE = shutil.which("node")
 SCRIPT = os.path.join(_support.REPO_ROOT, "scripts", "make_codec_tables.py")
-ENCODING_JS = os.path.join(_support.REPO_ROOT, "js", "src", "lib", "encoding.js")
 # every byte once, after the cookie line (NUL-free up front: no UTF-16 sniff)
 BODY = bytes(b for b in range(256) if b not in (0x0a, 0x0d)) + b"\n"
-NPM_DECODE = """
-import { readFileSync } from "node:fs";
-import { pathToFileURL } from "node:url";
-const { decodeSource } = await import(pathToFileURL(process.argv[1]).href);
-const out = JSON.parse(readFileSync(0, "utf8")).map((b64) => decodeSource(Buffer.from(b64, "base64"), { py: true }));
-process.stdout.write(JSON.stringify(out));
-"""
+#: the multi-byte codecs the dashboard decodes with the runtime's TextDecoder: its text can differ from Python's for
+#: bytes outside the codec's repertoire (the residual it had, as npm had, until it runs the engine)
+TEXTDECODER_CODECS = frozenset((
+    "utf-16", "utf-16-le", "utf-16-be", "shift_jis", "cp932", "euc_jp", "iso2022_jp",
+    "gbk", "gb2312", "cp936", "gb18030", "big5", "cp950", "euc_kr", "cp949"))
 
 
 def cookie_file(name):
@@ -58,7 +46,7 @@ def core_view(data):
             "escapes": bool(info.get("escapes"))}
 
 
-def js_view(r):
+def page_view(r):
     return {"text": core.normalize_newlines(r["text"]), "encoding": r["encoding"], "reported": r["reported"],
             "utf7": r["utf7"], "cookieLine": r["cookieLine"], "undecoded": bool(r.get("undecoded")),
             "escapes": bool(r.get("escapes"))}
@@ -66,7 +54,7 @@ def js_view(r):
 
 def aliases():
     """{codec: [names]} as the generator writes it."""
-    return _support.load_script(SCRIPT, "make_codec_tables").codec_aliases(core)
+    return _support.load_script(SCRIPT, "make_codec_tables").codec_aliases()
 
 
 class GeneratedTablesTests(unittest.TestCase):
@@ -74,66 +62,55 @@ class GeneratedTablesTests(unittest.TestCase):
         gen = _support.load_script(SCRIPT, "make_codec_tables")
         self.assertEqual(gen.main(["--check"]), 0, "run python3 scripts/make_codec_tables.py")
 
-    def test_resolution_is_the_same_on_every_python(self):
-        for name, codec in (("windows-874", "cp874"), ("MS874", "cp874"), ("windows_31j", "cp932"),
-                            ("csEUCKR", "euc_kr"), ("ISO-8859-8-I", "iso8859-8"), ("cp01140", "cp1140"),
-                            ("IBM00858", "cp858"), ("mbcs", None),
-                            ("dbcs", None), ("oem", None)):
-            with self.subTest(name=name):
-                self.assertEqual(core._normal_codec(name), codec)
-        text, _ = core.decode_source(b"# coding: palmos\ns = '\x9b'\n", "py")
-        self.assertIn("›", text)          # 3.13+'s mapping, on every version
 
-
-class EngineCodecParityTests(unittest.TestCase):
-    """Every codec a cookie can name (and each of its spellings), through
-    core.decode_source, the npm engine's decodeSource and the dashboard's."""
+class DashboardCodecTests(unittest.TestCase):
+    """Every codec a cookie can name (and each of its spellings) that the dashboard decodes, through
+    core.decode_source and the dashboard's decodeSource (until the dashboard runs the engine: BR-7 step 5)."""
 
     @classmethod
     def setUpClass(cls):
+        gen = _support.load_script(SCRIPT, "make_codec_tables")
+        single = gen.single_byte_tables(aliases())
+        decoded = set(single) | TEXTDECODER_CODECS | {"utf-7", "ascii", "iso8859-1", "unicode-escape",
+                                                      "raw-unicode-escape"}
         cls.cases = []                         # (codec, spelling)
         for codec, names in aliases().items():
-            for name in dict.fromkeys([codec] + names[:3]):
-                cls.cases.append((codec, name))
+            if codec in decoded:
+                for name in dict.fromkeys([codec] + names[:3]):
+                    cls.cases.append((codec, name))
         cls.data = [cookie_file(name) for _, name in cls.cases]
-
-    def check(self, got):
-        self.assertEqual(len(got), len(self.cases))
-        textdecoder = 0
-        for (codec, name), data, page in zip(self.cases, self.data, got):
-            with self.subTest(codec=codec, name=name):
-                want = core_view(data)
-                have = js_view(page)
-                if codec in core._TEXTDECODER_CODECS:       # the known residual (see the docstring)
-                    textdecoder += 1
-                    want.pop("text")
-                    have.pop("text")
-                self.assertEqual(have, want)
-        self.assertLess(textdecoder, len(self.cases) // 3)
-
-    @unittest.skipUnless(NODE, "node is not installed")
-    def test_npm_engine(self):
-        p = subprocess.run([NODE, "--input-type=module", "-e", NPM_DECODE, ENCODING_JS],
-                           input=json.dumps([base64.b64encode(d).decode("ascii") for d in self.data]),
-                           capture_output=True, encoding="utf-8", errors="replace", timeout=40)
-        self.assertEqual(p.returncode, 0, p.stderr[-2000:])
-        self.check(json.loads(p.stdout))
 
     @dash.requires_node
     def test_dashboard(self):
         exprs = [{"op": "eval", "expr": f"decodeSource(new Uint8Array({list(d)}), {{py: true}})"} for d in self.data]
-        self.check(dash.run(exprs))
+        got = dash.run(exprs)
+        self.assertEqual(len(got), len(self.cases))
+        for (codec, name), data, page in zip(self.cases, self.data, got):
+            with self.subTest(codec=codec, name=name):
+                want = core_view(data)
+                have = page_view(page)
+                if codec in TEXTDECODER_CODECS:       # the known residual (see TEXTDECODER_CODECS)
+                    want.pop("text")
+                    have.pop("text")
+                self.assertEqual(have, want)
 
+
+class FindingsTests(unittest.TestCase):
     def test_findings(self):
-        """The review's case, and a codec neither engine decodes."""
+        """The review's case, a codec read as UTF-8 before BR-7 step 4 (b), and one that still is."""
         text, info = core.decode_source(b"# coding: cp037\nprint(1)\nx = eval(input())\n", "py")
         issues = core.encoding_issues("e.py", text, info) + core.scan_file("e.py", text, "py")
         self.assertEqual([i["rule"] for i in issues], ["Q-ENCODING"])      # EBCDIC-decoded: no eval
-        text, info = core.decode_source(b"# coding: utf-32\nx = eval(y)\n", "py")
-        issues = core.encoding_issues("u.py", text, info) + core.scan_file("u.py", text, "py")
+        data = "# coding: euc_jis_2004\n# 漢字\nx = eval(y)\n".encode("euc_jis_2004")
+        text, info = core.decode_source(data, "py")
+        self.assertEqual(text, data.decode("euc_jis_2004"))
+        issues = core.encoding_issues("j.py", text, info) + core.scan_file("j.py", text, "py")
+        self.assertEqual(sorted(i["rule"] for i in issues), ["Q-ENCODING", "S-EVAL-PY"])
+        text, info = core.decode_source(b"# coding: idna\nx = eval(y)\n", "py")
+        issues = core.encoding_issues("i.py", text, info) + core.scan_file("i.py", text, "py")
         self.assertEqual(sorted(i["rule"] for i in issues), ["Q-ENCODING", "S-EVAL-PY", "SC-TRUNCATED"])
         (trunc,) = [i for i in issues if i["rule"] == "SC-TRUNCATED"]
-        self.assertEqual(trunc["msg"], "File not fully scanned: its source encoding (utf-32) is not decoded "
+        self.assertEqual(trunc["msg"], "File not fully scanned: its source encoding (idna) is not decoded "
                                        "by Lazaret; the file was read as UTF-8.")
 
 

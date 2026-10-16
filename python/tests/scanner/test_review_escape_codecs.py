@@ -8,48 +8,61 @@ engine read the file as UTF-8, silently; integrating the codec-parity fix
 made both read it as UTF-8 with SC-TRUNCATED, so the hidden code went
 unscanned and a registry scan said INCOMPLETE instead of SUSPICIOUS. Now:
 
-* both engines decode them exactly as Python does (core._decode_escapes,
-  encoding.js decodeEscapes: checked against CPython below);
-* a \\N{name} escape (the npm engine has no Unicode name table) or an escape
-  Python rejects (it would not run the file) is read as UTF-8 by both, with
-  SC-TRUNCATED, as for any codec an engine cannot decode;
+* they are decoded exactly as Python does: by the engine, for both packages
+  since BR-7 step 4 (b) (decode/escape.rs; core._decode_escapes and
+  encoding.js decodeEscapes before; checked against Python's codecs below);
+* a \\N{name} escape (the engine has no Unicode name table) or an escape
+  Python rejects (it would not run the file) is read as UTF-8, with
+  SC-TRUNCATED, as for any codec the engine does not decode;
 * the cookie itself is SC-ESCAPE-CODEC (CRITICAL), as UTF-7 is SC-UTF7: no
   legitimate project needs this source encoding.
 
 All fixtures are inert text.
 """
-import base64
-import json
-import os
 import random
-import shutil
-import subprocess
+import re
 import unittest
+import warnings
 
-from lazaret.scanner import core
-from tests import _support
+from lazaret.scanner import _native, core
 from tests.scanner import _dashboard_vm as dash
 
-NODE = shutil.which("node")
-ENCODING_JS = os.path.join(_support.REPO_ROOT, "js", "src", "lib", "encoding.js")
-NPM_DECODE = """
-import { readFileSync } from "node:fs";
-import { pathToFileURL } from "node:url";
-const { decodeEscapes } = await import(pathToFileURL(process.argv[1]).href);
-const out = JSON.parse(readFileSync(0, "utf8")).map((b64) => {
-  const b = Buffer.from(b64, "base64");
-  return [decodeEscapes(b, false), decodeEscapes(b, true)];
-});
-process.stdout.write(JSON.stringify(out));
-"""
+ESCAPE_CODECS = ("unicode-escape", "raw-unicode-escape")
+#: a \N escape: an N after an odd run of backslashes
+NAMED_ESCAPE_RE = re.compile(rb"(?:^|[^\\])(?:\\\\)*\\N")
+SURROGATE_RE = re.compile("[\ud800-\udfff]")
 
 
-def python_view(data):
-    """What each codec gives, as decode_source keeps it (None: not decoded)."""
+def python_view(data, carried=False):
+    """What each codec gives, as decode_source keeps it (None: not decoded): Python's codecs, but for \\N{name}
+    (`carried`: as the engine's `decode` answer carries it, as_carried)."""
     out = []
-    for codec in core.ESCAPE_CODECS:
-        text = core._decode_escapes(data, codec)
-        out.append(None if text is None else core._SURROGATE_RE.sub("\ufffd", text))
+    for codec in ESCAPE_CODECS:
+        if codec == "unicode-escape" and NAMED_ESCAPE_RE.search(data):
+            out.append(None)
+            continue
+        with warnings.catch_warnings():     # "invalid escape sequence" (kept as written)
+            warnings.simplefilter("ignore")
+            try:
+                text = data.decode(codec)
+                out.append(SURROGATE_RE.sub("\ufffd", as_carried(text) if carried else text))
+            except UnicodeDecodeError:
+                out.append(None)
+    return out
+
+
+def as_carried(text):
+    """`text` as a JSON answer carries it: a high surrogate and a low one after it read back as one character (the
+    engine's `decode` answer; decode_source's text holds no surrogate)."""
+    return text.encode("utf-16-le", "surrogatepass").decode("utf-16-le", "surrogatepass")
+
+
+def engine_view(data):
+    """The engine's decoding of `data` in each codec (its `decode` call), as decode_source keeps it."""
+    out = []
+    for codec in ESCAPE_CODECS:
+        text = _native.call("decode", {"codec": codec}, data.decode("latin-1"))["text"]
+        out.append(None if text is None else SURROGATE_RE.sub("\ufffd", text))
     return out
 
 
@@ -81,7 +94,7 @@ class DecodeTests(unittest.TestCase):
                 self.assertEqual(text, data.decode("utf-8"))
                 self.assertTrue(info["escapes"] and info["undecoded"])
         # an escaped backslash before N is no \\N escape
-        self.assertEqual(core._decode_escapes(b"\\\\N{X}", "unicode-escape"), "\\N{X}")
+        self.assertEqual(engine_view(b"\\\\N{X}")[0], "\\N{X}")
 
     def test_findings(self):
         text, info = core.decode_source(b"# coding: unicode_escape\n# \\x0aeval(z)\n", "py")
@@ -102,20 +115,11 @@ class DecodeTests(unittest.TestCase):
 
 
 class EngineParityTests(unittest.TestCase):
-    """The npm engine's decoder against this Python's codecs, case by case
-    (CI runs it on every supported Python and Node)."""
+    """The engine's decoder against this Python's codecs, case by case (CI runs it on every supported Python)."""
 
-    @unittest.skipUnless(NODE, "node is not installed")
-    def test_npm_decoder(self):
-        cases = corpus()
-        p = subprocess.run([NODE, "--input-type=module", "-e", NPM_DECODE, ENCODING_JS],
-                           input=json.dumps([base64.b64encode(c).decode("ascii") for c in cases]),
-                           capture_output=True, encoding="utf-8", errors="replace", timeout=40)
-        self.assertEqual(p.returncode, 0, p.stderr[-2000:])
-        results = json.loads(p.stdout)
-        self.assertEqual(len(results), len(cases))
-        for case, got in zip(cases, results):
-            self.assertEqual(got, python_view(case), case)
+    def test_the_engine(self):
+        for case in corpus():
+            self.assertEqual(engine_view(case), python_view(case, carried=True), case)
 
     @dash.requires_node
     def test_dashboard_decoder(self):

@@ -4,15 +4,17 @@ The npm package ships the native engine compiled to WebAssembly
 (js/native/lazaret.wasm, 0.1.8), Lazaret's own work since P-16 retired its
 translations of CPython code, with Unicode 13.0 data. So the package carries
 the engine's own NOTICE beside the module (js/native/NOTICE: rust/NOTICE)
-and a NOTICE of its own. Its codec table (src/lib/codecs.js) lists the
+and a NOTICE of its own. The engine's codec tables (rust/…/generated/
+codecs.rs, since BR-7 step 4 b; src/lib/codecs.js until then) list the
 names Python's codecs answer to: facts about Python, not CPython's code, so
 the package carries no CPython license and declares none (it did in 0.1.8).
 The Unicode 13.0 tables (scanner/_unicode13.py,
 js/src/lib/unicode13.js, the dashboard's copy, rust/…/generated/unicode13.rs)
-and the single-byte codec tables (js/src/lib/codecs.js and the dashboard's
-copy) are Unicode data: each carries the Unicode notice, every package that
-ships them carries the Unicode License v3 (LICENSE-UNICODE, one text in
-python/, js/ and rust/) and declares Unicode-3.0. (rust/: test_rust_notices.py.)
+and the codec tables (rust/…/generated/codecs.rs and the dashboard's copy
+of the single-byte ones) are Unicode data: each carries the Unicode notice,
+every package that ships them carries the Unicode License v3
+(LICENSE-UNICODE, one text in python/, js/ and rust/) and declares
+Unicode-3.0. (rust/: test_rust_notices.py.)
 """
 
 import hashlib
@@ -27,8 +29,9 @@ PSF = "Python Software Foundation"
 UNICODE = "Copyright © 1991-2026 Unicode, Inc."
 # The Unicode License v3 as unicode.org gives it (2026's copyright years); replace it only whole.
 LICENSE_UNICODE_SHA256 = "e7a93b009565cfce55919a381437ac4db883e9da2126fa28b91d12732bc53d96"
-UNICODE_DATA = ("python/src/lazaret/scanner/_unicode13.py", "js/src/lib/unicode13.js", "js/src/lib/codecs.js",
-                "rust/crates/lazaret-engine/src/generated/unicode13.rs")
+UNICODE_DATA = ("python/src/lazaret/scanner/_unicode13.py", "js/src/lib/unicode13.js",
+                "rust/crates/lazaret-engine/src/generated/unicode13.rs",
+                "rust/crates/lazaret-engine/src/generated/codecs.rs")
 
 
 def read(rel):
@@ -65,8 +68,8 @@ class UnicodeNoticeTests(unittest.TestCase):
 class NpmNoticeTests(unittest.TestCase):
     def test_the_native_engine_and_its_notice_are_declared(self):
         notice = read("js/NOTICE")
-        for part in (UNICODE, "native/lazaret.wasm", "native/NOTICE", "src/lib/unicode13.js", "src/lib/codecs.js",
-                     "LICENSE-UNICODE", "Apache-2.0 AND Unicode-3.0", "PY_CODEC_ALIASES"):
+        for part in (UNICODE, "native/lazaret.wasm", "native/NOTICE", "src/lib/unicode13.js",
+                     "LICENSE-UNICODE", "Apache-2.0 AND Unicode-3.0", "the names Python's codecs answer"):
             with self.subTest(part):
                 self.assertIn(part, notice)
         # the engine's notice goes beside the module (npm run build copies it)

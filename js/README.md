@@ -149,7 +149,8 @@ resolving to one file. Writes are atomic
   and the budget is work, not time, so every machine reads the same).
 - Encodings are sniffed (UTF-8/UTF-16 byte-order marks, BOM-less UTF-16, PEP
   263 coding cookies in `.py` files): anything but plain UTF-8 is decoded
-  explicitly and reported as `Q-ENCODING`.
+  explicitly, as Python decodes it (every text codec Python has), and
+  reported as `Q-ENCODING`.
 - `.git` is never scanned. Dependency trees — `node_modules`,
   `bower_components`, `site-packages`, and `vendor`/`venv`/`.venv`/`env` when
   they look like one (`pyvenv.cfg`; `modules.txt`, `autoload.php`, a

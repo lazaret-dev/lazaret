@@ -114,6 +114,9 @@ pub const CALLS: &[&str] = &[
     "js_refusal",
     // 0.1.9 (BR-7 step 4 a): a scan's result, graded again, and a project's metrics (result.rs)
     "result", "regrade", "project_metrics",
+    // 0.1.9 (BR-7 step 4 b): a source file's bytes decoded as its interpreter reads them, and bytes in a codec
+    // Python has (decode/)
+    "decode_source", "encoding_issues", "decode",
 ];
 
 fn dead_drop(v: Option<(usize, PyStr)>) -> Value {
@@ -1162,6 +1165,53 @@ fn dispatch(name: &str, args: &Value, text: &[u32]) -> Result<Value, CallError> 
             let issues = crate::result::findings_arg(args.get("issues")).map_err(bad)?;
             let conditions = crate::result::conditions_arg(args.get("conditions")).map_err(bad)?;
             crate::result::regrade(p, &issues, &conditions).map_err(bad)?
+        }
+        "decode_source" => {
+            // the file's bytes as the text (one code point a byte); {lang, issues, redact} -> {"text", "info", and
+            // with `issues` its encoding findings (decode/mod.rs)}
+            if text.iter().any(|&c| c > 0xFF) {
+                return Err(CallError::BadArgs("decode_source: the bytes are one code point each, up to 0xFF".into()));
+            }
+            let bytes: Vec<u8> = text.iter().map(|&c| c as u8).collect();
+            let (decoded, info) = crate::decode::decode_source(&bytes, lang);
+            let mut items = vec![("text", Value::Str(decoded.clone())), ("info", crate::decode::info_value(&info))];
+            if matches!(args.get("issues"), Some(Value::Bool(true))) {
+                let redact = !matches!(args.get("redact"), Some(Value::Bool(false)));
+                let mut issues = crate::decode::encoding_issues(p, &decoded, &info, redact);
+                // `name`: read as decode_member reads an archive member or a project's file, which is also
+                // SC-TRUNCATED when it does not decode to anything text-like
+                if let Some(Value::Str(name)) = args.get("name") {
+                    let windows = matches!(args.get("windows"), Some(Value::Bool(true)));
+                    issues.extend(crate::decode::not_text_issue(p, &decoded, name, windows, &bytes));
+                }
+                items.push(("issues", Value::Arr(issues)));
+            }
+            Value::obj(items)
+        }
+        "encoding_issues" => {
+            // a decoded file's encoding findings, from its text and decode_source's info {info, redact}
+            let info = crate::decode::info_arg(args.get("info")).map_err(|m| CallError::BadArgs(format!("encoding_issues: {m}")))?;
+            let redact = !matches!(args.get("redact"), Some(Value::Bool(false)));
+            Value::Arr(crate::decode::encoding_issues(p, text, &info, redact))
+        }
+        "decode" => {
+            // the bytes (one code point a byte) in `codec` (any spelling Python's codecs.lookup takes) as
+            // bytes.decode(codec, "replace") gives them -> {"codec": its name, "text"}; an escape codec strict
+            // ("text" null where Python raises, or for \N{name}); a codec Python lacks or the engine does not
+            // decode: {"codec": null or its name, "text": null}
+            if text.iter().any(|&c| c > 0xFF) {
+                return Err(CallError::BadArgs("decode: the bytes are one code point each, up to 0xFF".into()));
+            }
+            let Some(Value::Str(name)) = args.get("codec") else {
+                return Err(CallError::BadArgs("decode: codec is the codec's name".into()));
+            };
+            let bytes: Vec<u8> = text.iter().map(|&c| c as u8).collect();
+            let codec = crate::decode::codec_of(&crate::pystr::to_string(name));
+            let decoded = codec.and_then(|c| crate::decode::decode(c, &bytes));
+            Value::obj(vec![
+                ("codec", codec.map_or(Value::Null, Value::str)),
+                ("text", decoded.map_or(Value::Null, Value::Str)),
+            ])
         }
         "project_metrics" => {
             let bad = |m: String| CallError::BadArgs(format!("project_metrics: {m}"));

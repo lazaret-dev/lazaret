@@ -217,11 +217,11 @@ past 100,000 values or 2,000,000 characters of commands.
 
 **Encodings:** a BOM decides first (UTF-8, UTF-16 LE/BE); a NUL in the first four bytes is read as
 BOM-less UTF-16 only when the result is text (otherwise `/*\0*/eval(…)` would hide as UTF-16 garbage);
-Python files honor PEP 263 coding cookies as the interpreter does: single-byte codecs with Python's own
-tables, UTF-7, the escape codecs and the common multi-byte ones, the same in every engine. Anything that
-isn't plain UTF-8 gets a Q-ENCODING note and is scanned as decoded; a codec Lazaret can't decode exactly as
-Python does (UTF-32, ISO-2022-KR, a `\N{name}` escape under unicode_escape, …) is read as UTF-8 and is
-SC-TRUNCATED, so the file is never passed as fully scanned; so is a source file whose bytes don't decode to
+Python files honor PEP 263 coding cookies as the interpreter does: every text codec Python has (the
+single-byte ones, UTF-7, -16 and -32, the escape codecs, the CJK codecs, HZ and the ISO-2022 family) is
+decoded as Python decodes it, by the engine, for both packages. Anything that isn't plain UTF-8 gets a
+Q-ENCODING note and is scanned as decoded; what Lazaret doesn't decode (idna, punycode, a `\N{name}` escape
+under unicode_escape) is read as UTF-8 and is SC-TRUNCATED, so the file is never passed as fully scanned; so is a source file whose bytes don't decode to
 text at all (more than 30% invalid bytes or control characters), as in the registry. A UTF-7 cookie is SC-UTF7 (CRITICAL) and a
 unicode_escape or raw_unicode_escape cookie is SC-ESCAPE-CODEC (CRITICAL): Python decodes `+AAo-` or
 `\x0a` to a newline before it reads the code, so text every editor shows as a comment can be code.

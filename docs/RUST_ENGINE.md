@@ -223,6 +223,14 @@ rust/
                              file, 0.1.9, Q-1 step 4): comment lines, lines of code, the windows
                              of six lines of code keyed for the duplication; from the scan's own
                              reading (scan_file with "metrics") or on their own (file_metrics)
+    src/decode/              a source file's bytes decoded as its interpreter reads them (BR-7 step
+                             4 b, 0.1.9; core.decode_source, encoding_issues and decode_member and
+                             npm's encoding.js and codecs.js until then): the BOM and NUL sniff,
+                             PEP 263 cookies, every text codec Python has (utf.rs: UTF-8, -16, -32,
+                             -7; escape.rs; cjk.rs: the stateless CJK codecs' tables, gb18030's
+                             four-byte and EUC-KR's make-up forms; iso2022.rs: the ISO-2022 family
+                             and HZ), the encoding findings (decode_source, encoding_issues, decode)
+    src/generated/codecs.rs  the codecs' tables, from Python's decoders (make_codec_tables.py)
     src/result.rs            a scan's result (BR-7 step 4 a, 0.1.9; core.build_result, regrade
                              and compute_metrics and their npm twins until then): the findings'
                              order, counts, ratings, the gate's conditions, supply-chain and
@@ -1024,10 +1032,14 @@ So:
   `LICENSE-UNICODE`; the npm package carries `native/lazaret.wasm` with
   `rust/NOTICE` as `native/NOTICE` (both written by `npm run build`),
   `LICENSE-UNICODE` and its own `NOTICE` (the Unicode tables of its
-  JavaScript). The codec names the npm package and the dashboard list to
-  read a coding cookie as Python does are what Python's codecs answer to:
-  facts about Python, not CPython's code, so no package carries CPython's
-  license (until 0.1.9 they carried it, with `Python-2.0.1`).
+  JavaScript). The codec names the engine (and the dashboard, until it
+  runs the engine) holds to read a coding cookie as Python does are what
+  Python's codecs answer to: facts about Python, not CPython's code; the
+  codecs' characters are Unicode data (`generated/codecs.rs`, read from
+  Python's decoders), and the decoders that read them are written from the
+  RFCs and from what Python's decoders do, held to them by the tests, so no
+  package carries CPython's license (until 0.1.9 they carried it, with
+  `Python-2.0.1`).
   `check_native_library.py --dist` checks the sdist and the wheels before a
   release, and `release.yml` fails a tarball without `native/lazaret.wasm`
   or `native/NOTICE`.

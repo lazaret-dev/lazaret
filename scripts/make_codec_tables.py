@@ -1,29 +1,33 @@
 #!/usr/bin/env python3
-"""Generate js/src/lib/codecs.js: the Python codecs a PEP 263 coding cookie
-can name, for the npm engine and the dashboard (which carries a copy).
+"""Generate the codec tables, from Python's own codecs: the engine's, and the dashboard's copy of two of them.
 
-    python3 scripts/make_codec_tables.py            # rewrite codecs.js and the dashboard's copy
+    python3 scripts/make_codec_tables.py            # rewrite both
     python3 scripts/make_codec_tables.py --check    # exit 1 if either is out of date
 
-Both engines must decode a Python file with a coding cookie to the same
-text. The npm engine has no Python codecs and the browser's TextDecoder
-knows only some of them, and not always with Python's tables (cp1252's
-undefined bytes, cp866, ISO-8859-16, …). This writes, from Python's own
-codecs as lazaret.scanner.core resolves them:
+The engine decodes every source file for both packages (BR-7 step 4 b: decode/), as Python decodes it, for every
+text codec a PEP 263 coding cookie can name. Its data is written here, from Python's codecs, to
+rust/crates/lazaret-engine/src/generated/codecs.rs:
 
-  PY_CODEC_ALIASES    every codec -> the (normalized) names that resolve to it:
-                      encodings.aliases, the encodings package, and
-                      core.CODEC_ALIAS_EXTRAS (names only newer Pythons know);
-                      not core.HOST_CODECS (the host's code page);
-  SINGLE_BYTE_CODECS  every single-byte (charmap) codec -> what bytes
-                      0x80..0xFF decode to (all 256 bytes when 0x00..0x7F are
-                      not ASCII), U+FFFD for a byte the codec leaves undefined
-                      (what errors="replace" gives), core.CHARMAP_FIXES applied.
+  ALIASES             every name a cookie can give (normalized as encodings.normalize_encoding does) and its codec:
+                      encodings.aliases, the encodings package and CODEC_ALIAS_EXTRAS (names only newer Pythons
+                      know); not HOST_CODECS (the host's code page);
+  SINGLE_BYTE         each single-byte (charmap) codec's characters for bytes 0x80..0xFF (all 256 when 0x00..0x7F
+                      are not ASCII), U+FFFD for a byte the codec leaves undefined (what errors="replace" gives),
+                      CHARMAP_FIXES applied;
+  CJK_*               the stateless CJK codecs: Python's multibyte decoders read one character at a time from where
+                      it starts (a character, an error of some bytes, or too few bytes), and which it is depends only
+                      on the bytes from the start of the character, so each codec is a tree of tables, read here byte
+                      by byte from Python's incremental decoder (whose getstate() says what it holds back);
+  GB18030_RANGES      the BMP's gb18030 four-byte sequences by their linear index;
+  EUCKR_*             the jamo of EUC-KR's KS X 1001:1998 make-up sequences;
+  ISO2022_*           the ISO-2022 codecs and HZ: which sets each designates, the two-byte sets (each two bytes
+                      0x21..0x7E, read through the codec with the set designated, most as another codec's
+                      characters and the few where they differ), the one-byte sets and single shift 2's.
 
-The output is the same on every supported Python (3.10-3.14), and
-python/tests/scanner/test_review_codecs.py fails when it is not current.
-Run scripts/dashboard_csp.py is not needed afterwards: the dashboard's
-script hash is updated here.
+The dashboard reads PY_CODEC_ALIASES and SINGLE_BYTE_CODECS from its own copy (its lib/codecs.js section) until it
+runs the engine (BR-7 step 5). The output is the same on every supported Python (3.10-3.14), and
+python/tests/scanner/test_review_codecs.py fails when it is not current. Run scripts/dashboard_csp.py is not
+needed afterwards: the dashboard's script hash is updated here.
 """
 import codecs
 import importlib.util
@@ -34,11 +38,40 @@ import sys
 import unicodedata
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-OUT = os.path.join(REPO, "js", "src", "lib", "codecs.js")
+ENGINE_OUT = os.path.join(REPO, "rust", "crates", "lazaret-engine", "src", "generated", "codecs.rs")
 DASHBOARD = os.path.join(REPO, "python", "src", "lazaret", "web", "lazaret.html")
 SECTION = "/* ======== lib/codecs.js ======== */"
 
-HEADER = """\
+#: Coding-cookie names only newer Pythons know (3.13: windows_31j; 3.14: 874,
+#: ms874, windows_874, cseuckr, iso_8859_8_e, iso_8859_8_i), resolved on every
+#: supported version so a file decodes the same whichever Python wrote the
+#: tables (normalized as encodings.normalize_encoding does, on the lower-cased name).
+CODEC_ALIAS_EXTRAS = {"windows_31j": "cp932", "874": "cp874", "ms874": "cp874",
+                      "windows_874": "cp874", "cseuckr": "euc_kr",
+                      "iso_8859_8_e": "iso8859-8", "iso_8859_8_i": "iso8859-8",
+                      # 3.14.x patch releases (3.14.7 has them, 3.14.0 does not)
+                      "cp01140": "cp1140", "csibm01140": "cp1140", "ibm01140": "cp1140",
+                      "ebcdic_us_37_euro": "cp1140", "cp00858": "cp858", "csibm00858": "cp858",
+                      "ibm00858": "cp858", "pc_multilingual_850_euro": "cp858"}
+#: Codecs that decode with the host's code page (Windows only): unknown here.
+HOST_CODECS = frozenset(("mbcs", "oem"))
+#: Single-byte tables that differ between supported Pythons, as the newest has
+#: them (3.13 maps palmos 0x9B to U+203A; 3.10-3.12 to U+009B).
+CHARMAP_FIXES = {"palmos": {0x9B: "\u203a"}}
+
+ENGINE_HEADER = """\
+// Generated by scripts/make_codec_tables.py from Python's codecs — do not edit; rerun the script.
+//
+// What Python's text codecs decode bytes to (decode/): the names a coding cookie can give, and the characters of
+// the single-byte, CJK and ISO-2022 codecs, read from Python's own decoders.
+//
+// The characters are Unicode data — CPython made its codecs' mappings for the most part from the Unicode
+// Consortium's mapping tables and the vendors' published ones (Microsoft's cp932, cp936, cp949 and cp950) —
+// distributed under the Unicode License v3 (rust/LICENSE-UNICODE):
+//   Copyright © 1991-2026 Unicode, Inc.
+"""
+
+DASHBOARD_HEADER = """\
 // Generated by scripts/make_codec_tables.py from Python's codecs, as
 // lazaret.scanner.core resolves them — do not edit; rerun the script.
 //
@@ -56,7 +89,6 @@ HEADER = """\
 // PY_CODEC_ALIASES lists the codec names CPython's encodings package resolves.
 """
 
-
 def _configure_stdio():
     """Same policy as lazaret.scanner.core.configure_stdio (STRUCTURE.md,
     "Cross-platform rules")."""
@@ -72,33 +104,42 @@ def _configure_stdio():
             pass
 
 
-def _core():
-    src = os.path.join(REPO, "python", "src")
-    if src not in sys.path:
-        sys.path.insert(0, src)
-    from lazaret.scanner import core
-    return core
-
-
-def codec_aliases(core):
+def codec_aliases():
+    """{codec: [every name that resolves to it, normalized]}, for every text codec Python has (not the host's)."""
     import encodings
     import encodings.aliases
     names = set(encodings.aliases.aliases) | set(encodings.aliases.aliases.values())
     names |= {m.name for m in pkgutil.iter_modules(encodings.__path__)}
-    names |= set(core.CODEC_ALIAS_EXTRAS)
+    names |= set(CODEC_ALIAS_EXTRAS)
     table = {}
     for name in sorted(names):
-        codec = core.CODEC_ALIAS_EXTRAS.get(name)
+        codec = CODEC_ALIAS_EXTRAS.get(name)
         if codec is None:
             try:
                 info = codecs.lookup(name)
             except LookupError:
                 continue
-            if not getattr(info, "_is_text_encoding", True) or info.name in core.HOST_CODECS:
+            if not getattr(info, "_is_text_encoding", True) or info.name in HOST_CODECS:
                 continue
             codec = info.name
         table.setdefault(codec, []).append(name)
     return {codec: sorted(v) for codec, v in sorted(table.items())}
+
+
+def charmap_table(codec):
+    """What each byte decodes to in the single-byte (charmap) codec `codec`: a
+    256-character string, U+FFFE for a byte it leaves undefined, as the newest
+    supported Python has it (CHARMAP_FIXES); None for any other codec."""
+    try:
+        info = codecs.lookup(codec)
+    except LookupError:
+        return None
+    mod = sys.modules.get(getattr(info.incrementaldecoder, "__module__", "") or "")
+    table = getattr(mod, "decoding_table", None)
+    if not isinstance(table, str) or len(table) != 256:
+        return None
+    fix = CHARMAP_FIXES.get(info.name)
+    return table.translate(fix) if fix else table
 
 
 def _safe(ch):
@@ -125,27 +166,381 @@ def js_string(s):
     return '"' + "".join(out) + '"'
 
 
-def single_byte_tables(core, codec_names):
+def single_byte_tables(codec_names):
     out = {}
     for codec in codec_names:
-        table = core.charmap_table(codec)
+        table = charmap_table(codec)
         if table is None:
             continue
-        table = table.replace("￾", "�")
+        table = table.replace("\ufffe", "\ufffd")
         assert all(ord(c) < 0x10000 for c in table), codec
         out[codec] = table[128:] if all(ord(table[i]) == i for i in range(128)) else table
     return out
 
 
-def module_text(core):
-    aliases = codec_aliases(core)
-    tables = single_byte_tables(core, aliases)
-    lines = [HEADER, "export const PY_CODEC_ALIASES = {"]
+def module_text(aliases, tables):
+    """The dashboard's lib/codecs.js section."""
+    lines = [DASHBOARD_HEADER, "export const PY_CODEC_ALIASES = {"]
     lines += [f"  {json.dumps(codec)}: [{', '.join(json.dumps(a) for a in names)}]," for codec, names in aliases.items()]
     lines += ["};", "", "export const SINGLE_BYTE_CODECS = {"]
     lines += [f"  {json.dumps(codec)}: {js_string(table)}," for codec, table in tables.items()]
     lines += ["};", ""]
     return "\n".join(lines)
+
+
+# ---- the engine's tables ----
+#: the stateless multibyte codecs, by their codecs.lookup() names
+STATELESS = ["big5", "big5hkscs", "cp932", "cp949", "cp950", "euc_jis_2004", "euc_jisx0213", "euc_jp", "euc_kr",
+             "gb18030", "gb2312", "gbk", "johab", "shift_jis", "shift_jis_2004", "shift_jisx0213"]
+#: the stateful ones (iso2022_codecs reads which sets each designates)
+ISO2022 = ["iso2022_kr", "iso2022_jp", "iso2022_jp_1", "iso2022_jp_2", "iso2022_jp_2004", "iso2022_jp_3", "iso2022_jp_ext"]
+CHAR_MAX, MULTI, ERR, ROW, GB4, MAKEUP = 0x10FFFF, 0x110000, 0x200000, 0x400000, 0x800000, 0x810000
+
+
+def _run(enc, seq):
+    d = codecs.getincrementaldecoder(enc)("replace")
+    out = d.decode(seq, False)
+    held, state = d.getstate()
+    if state != 0:
+        raise AssertionError(f"{enc} keeps a state: not a stateless codec")
+    return out, held
+
+
+def outcome(enc, seq):
+    """What `enc` does from the start of a character with the bytes `seq`: ("char", text) consuming all of them,
+    ("err", n) an error of n bytes, or ("more",) when it needs more."""
+    out, held = _run(enc, seq)
+    if out == "" and held == seq:
+        return ("more",)
+    if out.startswith("�"):
+        for n in range(1, len(seq) + 1):
+            rest, rest_held = _run(enc, seq[n:])
+            if "�" + rest == out and rest_held == held:
+                return ("err", n)
+        raise AssertionError((enc, seq, out, held))
+    if held:
+        raise AssertionError((enc, seq, out, held))
+    return ("char", out)
+
+
+def cjk_tables():
+    """(CJK_FIRST {codec: offset}, the flat entries, CJK_MULTI): each codec's first-byte table, then rows of
+    [lo, hi, entry for lo .. entry for hi] (a byte outside lo..hi is an error of one byte), identical rows shared."""
+    flat, multi, rows_at, first = [], [], {}, {}
+
+    def entry(o):
+        kind = o[0]
+        if kind == "char":
+            if len(o[1]) == 1:
+                return ord(o[1])
+            if o[1] not in multi:
+                multi.append(o[1])
+            return MULTI + multi.index(o[1])
+        if kind == "err":
+            return ERR + o[1]
+        if kind == "gb4":
+            return GB4
+        if kind == "makeup":
+            return MAKEUP
+        if kind == "row":
+            return ROW + row(o[1])
+        raise AssertionError(o)
+
+    def row(entries):
+        es = [entry(o) for o in entries]
+        idx = [k for k, v in enumerate(es) if v != ERR + 1]
+        body = (min(idx), max(idx), *es[min(idx):max(idx) + 1]) if idx else (1, 0)
+        if body not in rows_at:
+            rows_at[body] = len(flat)
+            flat.extend(body)
+        return rows_at[body]
+
+    for enc in STATELESS:
+        level0 = []
+        for b1 in range(256):
+            o = outcome(enc, bytes([b1]))
+            if o[0] == "more":
+                second = []
+                for b2 in range(256):
+                    if enc == "gb18030" and 0x30 <= b2 <= 0x39:
+                        second.append(("gb4",))
+                        continue
+                    if enc == "euc_kr" and (b1, b2) == (0xA4, 0xD4):
+                        second.append(("makeup",))
+                        continue
+                    o2 = outcome(enc, bytes([b1, b2]))
+                    if o2[0] == "more":
+                        third = [outcome(enc, bytes([b1, b2, b3])) for b3 in range(256)]
+                        if any(o3[0] == "more" for o3 in third):
+                            raise AssertionError(f"{enc}: a character of four bytes or more at {b1:02x} {b2:02x}")
+                        o2 = ("row", third)
+                    second.append(o2)
+                o = ("row", second)
+            level0.append(entry(o))
+        first[enc] = len(flat)
+        flat.extend(level0)
+    return first, flat, multi
+
+
+def gb18030_ranges():
+    """[(linear index, code point)] where each run of gb18030's four-byte BMP sequences starts (a run maps its
+    indexes to consecutive code points), from Python's decoder."""
+    out = []
+    for lseq in range(39420):
+        c, rem = divmod(lseq, 12600)
+        c2, rem = divmod(rem, 1260)
+        c3, c4 = divmod(rem, 10)
+        text = bytes([0x81 + c, 0x30 + c2, 0x81 + c3, 0x30 + c4]).decode("gb18030")
+        assert len(text) == 1, lseq
+        cp = ord(text)
+        if not out or cp - lseq != out[-1][1] - out[-1][0]:
+            out.append((lseq, cp))
+    return out
+
+
+def euckr_jamo():
+    """(EUCKR_CHOSEONG, EUCKR_JONGSEONG): for each jamo byte 0xA1..0xBE, its index as an initial and as a final
+    consonant of a make-up sequence (127: it is not one), from Python's decoder."""
+    def syllable(cho, jung, jong):
+        text = bytes([0xA4, 0xD4, 0xA4, cho, 0xA4, jung, 0xA4, jong]).decode("euc_kr", "replace")
+        return ord(text) - 0xAC00 if len(text) == 1 and text != "�" else None
+    choseong = [(s // 588 if (s := syllable(b, 0xBF, 0xD4)) is not None else 127) for b in range(0xA1, 0xBF)]
+    jongseong = [(s % 28 if (s := syllable(0xA1, 0xBF, b)) is not None else 127) for b in range(0xA1, 0xBF)]
+    return choseong, jongseong
+
+
+def iso2022_sets():
+    """{(codec, mark | 0x80): [the character(s) of each two bytes 0x21..0x7E, or None]}, read through each codec
+    with the set designated (in G1 and shifted to, for a codec with SO and SI; HZ: GB2312 after "~{")."""
+    out = {}
+    jobs = [(c, m, sh) for c, dbcs, _sbcs, _g2, sh, _a in iso2022_codecs() for m in dbcs.encode()] + [("hz", ord("A"), False)]
+    for codec, mark, shifts in jobs:
+        if codec == "hz":
+            prefix = b"~{"
+        elif shifts:
+            prefix = b"\x1b$)" + bytes([mark]) + b"\x0e"
+        else:
+            prefix = b"\x1b$(" + bytes([mark])
+        table = []
+        for c1 in range(0x21, 0x7F):
+            for c2 in range(0x21, 0x7F):
+                text = (prefix + bytes([c1, c2])).decode(codec, "replace")
+                table.append(None if "\ufffd" in text else text)
+        out[(codec, mark | 0x80)] = table
+    return out
+
+
+def _designated(codec, seq):
+    """Does the escape sequence `seq` designate a set in `codec` (read whole, no output, nothing held)?"""
+    d = codecs.getincrementaldecoder(codec)("replace")
+    return d.decode(seq, False) == "" and d.getstate()[0] == b""
+
+
+def iso2022_codecs():
+    """[(codec, its two-byte sets' marks, its one-byte sets' marks, single shift 2's sets' marks, SO and SI shift,
+    the JIS X 0208-1990 announcer)]: which escape sequences each ISO-2022 codec takes (ESC $ F, ESC $ ( F and
+    ESC $ ) F a two-byte set, ESC ( F and ESC ) F a one-byte set, ESC . F a set for single shift 2, ESC & @ ESC $ B
+    JIS X 0208 with the announcer before it), and whether SO and SI shift, read from its decoder."""
+    out = []
+    for codec in ISO2022:
+        marks = [bytes([f]) for f in range(0x40, 0x5B)]
+        dbcs = [m for m in marks if all(_designated(codec, b"\x1b" + i + m) for i in (b"$(", b"$)"))]
+        sbcs = [m for m in marks if all(_designated(codec, b"\x1b" + i + m) for i in (b"(", b")"))]
+        g2 = [m for m in marks if _designated(codec, b"\x1b." + m)]
+        for m in marks:     # the forms go together: the decoder (engine) reads them so
+            for intro, among in ((b"$", dbcs), (b"$(", dbcs), (b"$)", dbcs), (b"(", sbcs), (b")", sbcs)):
+                if _designated(codec, b"\x1b" + intro + m) != (m in among):
+                    raise AssertionError(f"{codec}: ESC {intro} {m} is taken otherwise than its set's other forms")
+        d = codecs.getincrementaldecoder(codec)("replace")
+        shifts = d.decode(b"\x0e", False) == ""
+        announcer = _designated(codec, b"\x1b&@\x1b$B")
+        if announcer != (b"B" in dbcs) or any(_designated(codec, b"\x1b" + two + b"\x1b$B") != announcer
+                                             for two in (b"$x", b"((", b"$\x1b", b"&x")):
+            raise AssertionError(f"{codec}: the JIS X 0208-1990 announcer is taken otherwise than as six bytes that "
+                                 "end in ESC $ B, wherever JIS X 0208 is")
+        out.append((codec, b"".join(dbcs).decode(), b"".join(sbcs).decode(), b"".join(g2).decode(), shifts, announcer))
+    return out
+
+
+def iso2022_one_byte():
+    """{mark: what bytes 0x20..0x7F read as in G0 with that one-byte set designated (U+FFFD: an error)}, read
+    through the codecs that take each."""
+    out = {}
+    for codec, _dbcs, sbcs, _g2, _shifts, _announcer in iso2022_codecs():
+        for m in sbcs:
+            table = "".join((b"\x1b(" + m.encode() + bytes([c])).decode(codec, "replace") for c in range(0x20, 0x80))
+            assert len(table) == 96, (codec, m)
+            if out.setdefault(m, table) != table:
+                raise AssertionError(f"{codec}: the one-byte set {m} reads otherwise than in another codec")
+    return dict(sorted(out.items()))
+
+
+def iso2022_single_shift():
+    """{mark: what ESC N and each byte read as with that set in G2 (U+FFFD: an error), or None where Python's decoder
+    raises}, read through iso2022_jp_2 (the one codec with single shift 2)."""
+    out = {}
+    (_c, _d, _s, g2, _sh, _a), = [c for c in iso2022_codecs() if c[3]]
+    for m in g2:
+        try:
+            table = "".join((b"\x1b." + m.encode() + b"\x1bN" + bytes([c])).decode("iso2022_jp_2", "replace")
+                            for c in range(256))
+        except RuntimeError:
+            table = None
+        assert table is None or len(table) == 256, m
+        out[m] = table
+    return out
+
+
+#: the stateless codecs (and the byte before their three-byte rows) whose two-byte characters a set may be
+BASES = [("euc_kr", 0), ("euc_jp", 0), ("euc_jp", 0x8F), ("gb2312", 0), ("euc_jis_2004", 0), ("euc_jis_2004", 0x8F),
+         ("euc_jisx0213", 0), ("euc_jisx0213", 0x8F)]
+
+
+def _base_of(table):
+    """(the stateless codec, the byte before, [(index, characters or None)] where the set differs) of the base that
+    differs least from `table`, the set's 94 x 94 characters."""
+    best = (None, 0, None)
+    for base, lead in BASES:
+        differ = []
+        k = 0
+        for c1 in range(0x21, 0x7F):
+            for c2 in range(0x21, 0x7F):
+                seq = (bytes([lead]) if lead else b"") + bytes([c1 | 0x80, c2 | 0x80])
+                t = seq.decode(base, "replace")
+                if (None if "\ufffd" in t else t) != table[k]:
+                    differ.append((k, table[k]))
+                k += 1
+        if best[2] is None or len(differ) < len(best[2]):
+            best = (base, lead, differ)
+    return best
+
+
+def _hex_delta(cp, prev):
+    return f"{cp - prev:x}" if cp >= prev else f"-{prev - cp:x}"
+
+
+def rust_text(aliases, single_byte):
+    """generated/codecs.rs."""
+    first, flat, multi = cjk_tables()
+    prev, toks = 0, []
+    for v in flat:
+        if v <= CHAR_MAX and v == prev + 1 and toks and toks[-1].startswith("~"):
+            toks[-1] = f"~{int(toks[-1][1:], 16) + 1:x}"
+        elif v <= CHAR_MAX and v == prev + 1:
+            toks.append("~1")
+        elif v <= CHAR_MAX:
+            toks.append(_hex_delta(v, prev))
+        else:
+            toks.append("x" if v == ERR + 1 else f"!{v:x}")
+        if v <= CHAR_MAX:
+            prev = v
+    toks = ["" if t == "~1" else t for t in toks]
+    choseong, jongseong = euckr_jamo()
+    lines = [ENGINE_HEADER,
+             "/// Every codec name a coding cookie can give, normalized, and its codec.",
+             "pub const ALIASES: &[(&str, &str)] = &["]
+    pairs = sorted((alias, codec) for codec, names in aliases.items() for alias in names)
+    lines += [f"    ({_rs(a)}, {_rs(c)})," for a, c in pairs]
+    lines += ["];", "",
+              "/// Each single-byte codec's characters for bytes 0x80..=0xFF (all 256 bytes when the first half is not",
+              "/// ASCII); U+FFFD where it leaves a byte undefined.",
+              "pub const SINGLE_BYTE: &[(&str, &str)] = &["]
+    lines += [f"    ({_rs(c)}, {_rs(t)})," for c, t in single_byte.items()]
+    lines += ["];", "",
+              "/// Where each stateless CJK codec's first-byte table starts in CJK_FLAT.",
+              "pub const CJK_FIRST: &[(&str, usize)] = &["]
+    lines += [f"    ({_rs(c)}, {at})," for c, at in first.items()]
+    lines += ["];", "",
+              f"pub const CJK_ENTRIES: usize = {len(flat)};", "",
+              "/// The stateless CJK codecs' tables (decode/cjk.rs), entry by entry: a character as its distance in",
+              "/// hexadecimal from the previous character (empty: the next one; \"~n\": the next n), \"x\" an error of one",
+              "/// byte, else \"!\" and the entry.",
+              "pub const CJK_FLAT: &str = concat!("]
+    lines += _chunks(",".join(toks))
+    lines += [");", "",
+              "/// The characters that are sequences of code points (an entry MULTI + their index).",
+              "pub const CJK_MULTI: &[&str] = &["]
+    lines += [f"    {_rs(m)}," for m in multi]
+    lines += ["];", "",
+              "/// gb18030's four-byte BMP sequences: (linear index, code point) where each run starts.",
+              "pub const GB18030_RANGES: &[(u32, u32)] = &["]
+    ranges = gb18030_ranges()
+    lines += ["    " + " ".join(f"({a}, 0x{b:04x})," for a, b in ranges[k:k + 6]) for k in range(0, len(ranges), 6)]
+    lines += ["];", "",
+              "/// EUC-KR's make-up sequences: each jamo byte 0xA1..=0xBE as an initial and as a final consonant (127: none).",
+              f"pub const EUCKR_CHOSEONG: [u8; 30] = {choseong};",
+              f"pub const EUCKR_JONGSEONG: [u8; 30] = {jongseong};", "",
+              "/// The ISO-2022 codecs' and HZ's two-byte sets: (codec, mark | 0x80, a stateless codec whose two-byte",
+              "/// characters (after `lead`, when not 0) are the set's with the bytes' high bits set, or \"\" for a table of",
+              "/// its own, that table's index in ISO2022_TABLES).",
+              "pub const ISO2022_SETS: &[(&str, u8, &str, u8, usize)] = &["]
+    texts, diffs = [], []
+    for (codec, mark), table in iso2022_sets().items():
+        base, lead, differ = _base_of(table)
+        if base is not None and len(differ) <= 16:
+            lines += [f"    ({_rs(codec)}, 0x{mark:02x}, {_rs(base)}, 0x{lead:02x}, 0),"]
+            diffs += [(codec, mark, k, t) for k, t in differ]
+            continue
+        prev, toks = 0, []
+        for t in table:
+            if t is None:
+                toks.append("")
+            elif len(t) == 1:
+                toks.append(_hex_delta(ord(t), prev))
+                prev = ord(t)
+            else:
+                toks.append("*" + ".".join(f"{ord(ch):x}" for ch in t))
+        text = ",".join(toks)
+        if text not in texts:
+            texts.append(text)
+        lines += [f"    ({_rs(codec)}, 0x{mark:02x}, \"\", 0, {texts.index(text)}),"]
+    lines += ["];", "",
+              "/// Where a set is not its stateless codec's: (codec, mark | 0x80, (first byte - 0x21) * 94 + second - 0x21,",
+              "/// the character(s), empty for none).",
+              "pub const ISO2022_DIFFS: &[(&str, u8, u16, &str)] = &["]
+    lines += [f"    ({_rs(c)}, 0x{m:02x}, {k}, {_rs(t or '')})," for c, m, k, t in diffs]
+    lines += ["];", "",
+              "/// The ISO-2022 codecs (decode/iso2022.rs): (codec, the marks of its two-byte sets, of its one-byte sets, of",
+              "/// the sets single shift 2 reads (ESC . F), whether SO and SI shift between G0 and G1, whether it takes the",
+              "/// JIS X 0208-1990 announcer, ESC & @).",
+              "pub const ISO2022_CODECS: &[(&str, &str, &str, &str, bool, bool)] = &["]
+    flag = lambda b: "true" if b else "false"
+    lines += [f"    ({_rs(c)}, {_rs(d)}, {_rs(o)}, {_rs(g)}, {flag(sh)}, {flag(a)})," for c, d, o, g, sh, a in iso2022_codecs()]
+    lines += ["];", "",
+              "/// The one-byte sets: (mark, what bytes 0x20..=0x7F read as with the set in G0; U+FFFD an error).",
+              "pub const ISO2022_ONE_BYTE: &[(u8, &str)] = &["]
+    lines += [f"    (b'{m}', {_rs(t)})," for m, t in iso2022_one_byte().items()]
+    lines += ["];", "",
+              "/// Single shift 2's sets: (mark, what ESC N and each byte 0x00..=0xFF read as with the set in G2; U+FFFD an",
+              "/// error), or None where Python's decoder raises (RuntimeError: the file is not decoded).",
+              "pub const ISO2022_SINGLE_SHIFT: &[(u8, Option<&str>)] = &["]
+    lines += [f"    (b'{m}', {'None' if t is None else 'Some(' + _rs(t) + ')'})," for m, t in iso2022_single_shift().items()]
+    lines += ["];", "",
+              "/// The two-byte sets' own tables: the 94 x 94 characters of bytes 0x21..=0x7E, each a code point as its",
+              "/// distance in hexadecimal from the previous one, empty for none, or \"*\" and two code points (a pair).",
+              "pub const ISO2022_TABLES: &[&str] = &["]
+    for text in texts:
+        lines += ["    concat!("] + ["    " + l for l in _chunks(text)] + ["    ),"]
+    lines += ["];", ""]
+    return "\n".join(lines)
+
+
+def _rs(s):
+    """A Rust string literal: printable ASCII as itself, every other character as \\u{…}."""
+    out = []
+    for ch in s:
+        o = ord(ch)
+        if ch in '"\\':
+            out.append("\\" + ch)
+        elif 0x20 <= o < 0x7F:
+            out.append(ch)
+        else:
+            out.append(f"\\u{{{o:x}}}")
+    return '"' + "".join(out) + '"'
+
+
+def _chunks(text, width=110):
+    return [f"    {_rs(text[k:k + width])}," for k in range(0, len(text), width)]
 
 
 def dashboard_text(html, module):
@@ -168,24 +563,27 @@ def main(argv=None):
     _configure_stdio()
     args = sys.argv[1:] if argv is None else list(argv)
     check = "--check" in args
-    module = module_text(_core())
+    aliases = codec_aliases()
+    tables = single_byte_tables(aliases)
+    engine = rust_text(aliases, tables)
+    module = module_text(aliases, tables)
     with open(DASHBOARD, encoding="utf-8", newline="") as f:
         html = f.read()
     want_html = dashboard_text(html.replace("\r\n", "\n"), module)
     try:
-        with open(OUT, encoding="utf-8", newline="") as f:
+        with open(ENGINE_OUT, encoding="utf-8", newline="") as f:
             current = f.read().replace("\r\n", "\n")
     except FileNotFoundError:
         current = None
-    stale = [p for p, ok in ((OUT, current == module),
+    stale = [p for p, ok in ((ENGINE_OUT, current == engine),
                              (DASHBOARD, want_html == html.replace("\r\n", "\n"))) if not ok]
     if check:
         for path in stale:
             print(f"{path}: out of date; run python3 scripts/make_codec_tables.py", file=sys.stderr)
         return 1 if stale else 0
-    if OUT in stale:
-        with open(OUT, "w", encoding="utf-8", newline="\n") as f:
-            f.write(module)
+    if ENGINE_OUT in stale:
+        with open(ENGINE_OUT, "w", encoding="utf-8", newline="\n") as f:
+            f.write(engine)
     if DASHBOARD in stale:
         with open(DASHBOARD, "w", encoding="utf-8", newline="\n") as f:
             f.write(_dashboard_csp().with_hashes(want_html))

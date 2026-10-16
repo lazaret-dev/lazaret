@@ -921,6 +921,24 @@ aggregate):
   `maintainabilityRating` (no longer exported) and `metrics.js`' twins of them. The same results as core's code had
   given (`test_result_engine`: that code kept as the reference, on 300 generated sets, every fixture folder's
   findings, and 200 sets of metrics); `test_result_engine` also holds the WebAssembly build to the library.
+- **Decoding, the engine's, every codec Python has (BR-7, step 4 b; rule set 2.84.0).** A source file's bytes are
+  decoded as its interpreter reads them by the engine, for both packages (`rust/crates/lazaret-engine/src/decode/`:
+  the `decode_source`, `encoding_issues` and `decode` calls): the BOM and NUL sniff, PEP 263 coding cookies, and
+  every text codec Python has, as Python decodes it, where core decoded with Python's codecs and the npm package
+  with generated single-byte tables and the runtime's TextDecoder, and both read what npm could not decode exactly
+  as UTF-8, SC-TRUNCATED. So a cookie naming one of the CJK codecs TextDecoder lacks (EUC-JIS-2004, Shift_JIS-2004,
+  Big5-HKSCS, JOHAB, …), HZ, the ISO-2022 family or UTF-32 is now decoded and scanned as Python reads it (the rule
+  set changes for those files); idna, punycode and undefined, a `\N{name}` escape under unicode_escape, and a file
+  Python's decoder raises on are read as UTF-8 as before. The codecs' tables are read from Python's own decoders by
+  `scripts/make_codec_tables.py` (`generated/codecs.rs`: the same on Python 3.10 to 3.14), the decoders that read
+  them written from the RFCs and from what Python's decoders do; the engine grows by about 0.5 MiB (the WebAssembly
+  module 6.3 to 6.8 MB, 2.16 to 2.36 MB gzipped). Gone: core's `detect_encoding`, `_python_cookie`, `_normal_codec`,
+  `charmap_table`, `_decode_escapes`, `_text_is_plausible` and their tables (the generator keeps
+  `CODEC_ALIAS_EXTRAS`, `HOST_CODECS` and `CHARMAP_FIXES`), the npm package's `lib/codecs.js` and all of
+  `lib/encoding.js` but file names, and `fs.js`' `encodingIssues`; `decode_member` and `decodeMember` are one call.
+  Held to core's code as it was, decoding every codec with Python's codecs (`test_decode_engine`,
+  `test_decode_engine_codecs`), and the WebAssembly build to the library. The dashboard decodes as before until it
+  runs the engine (step 5).
 - **Security: S-XML is a parser set to resolve external entities, not an import of xml.etree, xml.dom or xml.sax
   (Q-3; rule set 2.80.0).** Since Python 3.7.1 none of them resolves an external entity unless told to, and Expat
   2.4.1 refuses entity bombs, so the import flagged safe code: all 20 of BenchmarkPython's safe XXE cases (its 8 real

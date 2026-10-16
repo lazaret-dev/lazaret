@@ -74,7 +74,7 @@ severity, message), the same metrics, ratings, quality gate and exit code.
 Since 0.1.8 most of that is one engine: the npm package runs the native
 engine (below) as WebAssembly for the supply-chain tests, the rules of
 `scan_file` and the cross-file follower, and keeps JavaScript twins only for
-what the native engine does not answer yet (source decoding, the comment
+what the native engine does not answer yet (the comment
 lexer and the suppression markers, the taint, SQL-sink and function passes,
 the flow engine, the manifest, workflow and settings checks, config-file
 credentials).
@@ -218,7 +218,10 @@ runs that engine as WebAssembly and twins the rest. The project-scan pipeline is
 shared by the CLI and the MCP server. In order it:
 
 1. **collects** files and manifests (`_collect`, honouring `--deps`, excludes,
-   size caps, binary/pyc/symlink/encoding checks);
+   size caps, binary/pyc/symlink/encoding checks), each source file decoded as
+   its interpreter reads it by the engine, for both packages since BR-7's step
+   4 (b) (`rust/crates/lazaret-engine/src/decode/`, the `decode_source` call:
+   the BOM and NUL sniff, PEP 263 cookies, every text codec Python has);
 2. **scans each file** (`scan_file`) — rules, intra-file taint, SQL sinks,
    obfuscation/secret detection, per its language — and each config or data
    file (`scan_config_file`: `.env`, JSON, YAML, TOML, INI, shell, keys,

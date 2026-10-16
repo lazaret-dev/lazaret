@@ -15,6 +15,7 @@ pub mod ci;
 pub mod config;
 pub mod crossfile;
 pub mod datafmt;
+pub mod decode;
 pub mod filectx;
 pub mod findings;
 pub mod flow;

@@ -99,7 +99,14 @@ parser's table, unidata.rs in crates/lazaret-engine/src/pyparse/, holds
 data of the Unicode Character Database 15.1 — the characters identifiers
 may hold, normalization data of the characters assigned since 13.0, and
 the character names and their aliases — written by
-scripts/make_pyparse_tables.py from Python 3.13's unicodedata. Both are
-distributed under the Unicode License v3 (LICENSE-UNICODE):
+scripts/make_pyparse_tables.py from Python 3.13's unicodedata. And
+crates/lazaret-engine/src/generated/codecs.rs holds the characters Python's
+single-byte, CJK and ISO-2022 codecs decode bytes to (with the names a
+coding cookie can give, facts about Python), written by
+scripts/make_codec_tables.py from Python's own decoders; CPython made those
+codecs' mappings for the most part from the Unicode Consortium's mapping
+tables and the vendors' published ones (Microsoft's cp932, cp936, cp949 and
+cp950). All three are distributed under the Unicode License v3
+(LICENSE-UNICODE):
 
     Copyright © 1991-2026 Unicode, Inc.

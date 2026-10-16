@@ -112,6 +112,13 @@ pub fn ext_and_base(path: &[u32], windows: bool) -> (PyStr, PyStr) {
     (ext, base)
 }
 
+/// decode_member's exception to "not text": an MPEG transport stream under one of its extensions (MPEG_TS_EXTS:
+/// TypeScript's too) is a video, not source that failed to decode.
+pub(crate) fn mpeg_ts_named(p: &Pack, path: &[u32], windows: bool, data: &[u8]) -> bool {
+    let ext = pystr::lower(&ext_and_base(path, windows).0);
+    has(p, "MPEG_TS_EXTS", &ext) && mpeg_ts(&data[..data.len().min(512)])
+}
+
 /// core.is_benign_media: an image, font, media or document format by its signature, a colour profile, a video
 /// under TypeScript's extensions, a font by its extension and first bytes.
 fn benign_media(p: &Pack, header: &[u8], ext: &[u32]) -> bool {
