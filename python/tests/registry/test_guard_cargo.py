@@ -1776,7 +1776,8 @@ class CratePriorTests(CrateCase):
         self.assertEqual(check.to_json()["priorRelease"], {"version": "0.9.0", "publishedBefore": "28 days",
                                                            "files": ["kit-0.9.0.crate"], "newRules": ["SC-B64"]})
         self.assertIn(STATIC + "kit/kit-0.9.0.crate", self.asked)        # (the predecessor, through the guard's fetcher)
-        self.assertTrue(self.module_urls and all(u == INDEX + "3/k/kit" for u in self.module_urls), self.module_urls)
+        # the index read once (prior.History: the records, and the predecessor's resolution from the same file)
+        self.assertEqual(self.module_urls, [INDEX + "3/k/kit"])
         # the predecessor's verdict is cached under the SHA-256 the index gives it, as check_crate keys a crate's
         self.assertEqual(self.cache.get(self.predecessor_key())["verdict"], "OK")
         self.assertFalse(any(k.endswith("#sha512-") for k in self.cache.data), list(self.cache.data))

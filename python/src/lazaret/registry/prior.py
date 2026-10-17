@@ -30,7 +30,8 @@ does not answer, a history over MAX_HISTORY_BYTES, no established predecessor, a
 (MAX_FILES, the per-file download limit, the caller's time) or whose scan was not complete, give no finding, and the
 result's `priorRelease` says what was compared or why not. LAZARET_NO_PRIOR_RELEASE=1 turns it off, as
 LAZARET_NO_DEPENDENCY_HISTORY=1 (an offline scan) does. The registry's own fetch and scan (`repo`, imported when first
-needed: it imports this module)."""
+needed: it imports this module). A release scan reads the package's history document once for this comparison,
+SC-NEW-DEPENDENCY and SC-VERSION-INFLATION (`History`, RA-7; `version_times` is SC-VERSION-INFLATION's reading of it)."""
 
 import datetime
 import os
@@ -108,7 +109,100 @@ def _json(url, accept=None):
     return repo._deep_safe_loads(raw, f"registry response from {url}")
 
 
-def _npm(name, version, _resolved, fetch_json):
+class History:
+    """The registry documents one release's scan reads about its package, each fetched once (RA-7): npm's packument
+    (SC-NEW-INDICATOR's predecessor, SC-VERSION-INFLATION's history and SC-NEW-DEPENDENCY's previous release), PyPI's
+    Simple API document (the first two; SC-NEW-DEPENDENCY reads PyPI's JSON API), a crate's index file (all three, and
+    the predecessor's resolution). Made for one release scan and dropped with it: nothing is kept past it.
+
+    `json` keys a document by URL and Accept. An answer is kept with its size, and a caller with a smaller budget than
+    the answer's size gets the TooLarge its own fetch would have raised (SC-NEW-DEPENDENCY's MAX_FEED_BYTES beside the
+    history's MAX_HISTORY_BYTES); a failure is kept and raised again, except a TooLarge, which a caller with a larger
+    budget asks again. `module_fetch` is a registry module's fetch whose documents (a crate's index lines) are read once
+    for each URL, Accept and budget."""
+
+    def __init__(self):
+        self._docs = {}
+        self._fetches = {}
+
+    def json(self, url, accept=None, max_bytes=MAX_HISTORY_BYTES, fetch=None):
+        """The JSON document at `url` (`_json`'s fetch, at `max_bytes`); `fetch(url)`, a fetch of its own whose budget
+        is `max_bytes` (repo.http_json), in its place when the document has not been read."""
+        repo = _repo()
+
+        def load():
+            if fetch is not None:
+                return None, fetch(url)                     # (its size: within max_bytes, the fetch's own budget)
+            raw = repo._fetch(url, max_bytes=max_bytes, timeout=repo.METADATA_TIMEOUT,
+                              **({"accept": accept} if accept else {}))
+            return len(raw), repo._deep_safe_loads(raw, f"registry response from {url}")
+        key = (url, accept)
+        kept = self._docs.get(key)
+        if kept is not None:
+            budget, got = kept
+            if isinstance(got, _base.TooLarge) and budget < max_bytes:
+                kept = None                                 # (too large for a smaller budget: asked at this one)
+            elif not isinstance(got, Exception) and got[0] is None and max_bytes < budget:
+                kept = None                                 # (its size not known, only that it fit a larger budget)
+        if kept is None:
+            try:
+                kept = (max_bytes, load())
+            except (_base.FetchError, _base.SpecError, ValueError) as exc:
+                kept = (max_bytes, exc)
+            self._docs[key] = kept
+        budget, got = kept
+        if isinstance(got, Exception):
+            raise got
+        size, doc = got
+        if size is not None and size > max_bytes:
+            raise _base.TooLarge(f"response exceeds {max_bytes // (1024 * 1024)}MB budget: {url}")
+        return doc
+
+    def feed(self, url):
+        """`json` at repo.MAX_FEED_BYTES over repo.http_json: SC-NEW-DEPENDENCY's documents."""
+        repo = _repo()
+        return self.json(url, None, repo.MAX_FEED_BYTES, fetch=lambda u: repo.http_json(u))
+
+    def module_fetch(self, module):
+        """repo.module_fetch(module), its documents each read once."""
+        if module not in self._fetches:
+            self._fetches[module] = _OnceFetch(_repo().module_fetch(module))
+        return self._fetches[module]
+
+
+class _OnceFetch:
+    """A registry module's fetch (`base.Fetch`) whose documents (json_lines, json, text) are each read once for a URL,
+    Accept and budget (and json_lines' `select`); the rest (a download's `bytes`, a POST) as the fetch's own."""
+
+    def __init__(self, fetch):
+        self._fetch, self._kept = fetch, {}
+
+    def __getattr__(self, attr):
+        return getattr(self._fetch, attr)
+
+    def _once(self, key, read):
+        if key not in self._kept:
+            try:
+                self._kept[key] = (True, read())
+            except (_base.FetchError, _base.SpecError, ValueError) as exc:
+                self._kept[key] = (False, exc)
+        ok, got = self._kept[key]
+        if not ok:
+            raise got
+        return got
+
+    def json_lines(self, url, max_bytes=_base.MAX_DOCUMENT_BYTES, accept=None, select=None):
+        return self._once(("lines", url, max_bytes, accept, select),
+                          lambda: self._fetch.json_lines(url, max_bytes=max_bytes, accept=accept, select=select))
+
+    def json(self, url, max_bytes=_base.MAX_DOCUMENT_BYTES, accept=None):
+        return self._once(("json", url, max_bytes, accept), lambda: self._fetch.json(url, max_bytes, accept))
+
+    def text(self, url, max_bytes=_base.MAX_DOCUMENT_BYTES, accept=None):
+        return self._once(("text", url, max_bytes, accept), lambda: self._fetch.text(url, max_bytes, accept))
+
+
+def _npm(name, version, _resolved, fetch_json, _history=None):
     """npm: (when, (predecessor, its time), its files) by the packument's times."""
     doc = fetch_json("https://registry.npmjs.org/" + urllib.parse.quote(name, safe="@"), None)
     times = doc.get("time") if isinstance(doc, dict) else None
@@ -125,11 +219,14 @@ def _npm(name, version, _resolved, fetch_json):
 
 
 def _pypi_files(doc):
-    """{version: [its files]} of a Simple API JSON document (PEP 691, 700)."""
+    """{version: [its files]} of a Simple API JSON document (PEP 691, 700); a document of another shape (`versions` or
+    `files` not a list) lists nothing of what it does not hold as a list."""
     from lazaret.registry import provenance as _provenance
-    versions = set(v for v in doc.get("versions") or () if isinstance(v, str)) if isinstance(doc, dict) else set()
+    listed = doc.get("versions") if isinstance(doc, dict) else None
+    files = doc.get("files") if isinstance(doc, dict) else None
+    versions = set(v for v in listed if isinstance(v, str)) if isinstance(listed, list) else set()
     out = {}
-    for f in (doc.get("files") or ()) if isinstance(doc, dict) else ():
+    for f in files if isinstance(files, list) else ():
         if isinstance(f, dict) and isinstance(f.get("filename"), str) and isinstance(f.get("url"), str):
             v = _provenance._pypi_version_of(f["filename"], versions)
             if v is not None:
@@ -158,7 +255,7 @@ def _pypi_ref(f):
             "artifact": "wheel" if f["filename"].endswith(".whl") else "sdist", "filename": f["filename"]}
 
 
-def _pypi(name, version, _resolved, fetch_json):
+def _pypi(name, version, _resolved, fetch_json, _history=None):
     """PyPI: (when, (predecessor, its time), its files pip may install) by the Simple API's upload times."""
     repo = _repo()
     files = _pypi_files(fetch_json(f"https://pypi.org/simple/{repo._pep503(name)}/", PYPI_SIMPLE_JSON))
@@ -175,13 +272,14 @@ def _crate_entry(resolved):
     return entry if isinstance(entry, dict) and isinstance(entry.get("vers"), str) else None
 
 
-def _crates(name, version, resolved, _fetch_json):
+def _crates(name, version, resolved, _fetch_json, history=None):
     """crates: (when, (predecessor, its time), its .crate) by the index's publish times (a yanked release is none),
-    over the crates module's own fetch."""
+    over the crates module's own fetch (`history`'s, the release scan's: the index file read once for the records
+    and the predecessor's resolution, and for SC-NEW-DEPENDENCY and SC-VERSION-INFLATION)."""
     from lazaret.registry.ecosystems import crates as _crates_module
     repo = _repo()
     module = repo.registry_module("crates")
-    fetch = repo.module_fetch(module)
+    fetch = (history or History()).module_fetch(module)
     records = module.records(name, fetch)
     entry = _crate_entry(resolved) or next((r for r in records if r["vers"] == version), None)
     if entry is None:
@@ -195,6 +293,55 @@ def _crates(name, version, resolved, _fetch_json):
 
 
 _HISTORY = {"npm": _npm, "pypi": _pypi, "crates": _crates}
+
+
+def _npm_times(name, fetch_json):
+    repo = _repo()
+    doc = fetch_json("https://registry.npmjs.org/" + urllib.parse.quote(name, safe="@"), None)
+    times = doc.get("time") if isinstance(doc, dict) else None
+    if not isinstance(times, dict):
+        return {}
+    return {v: t for v, t in times.items()
+            if isinstance(v, str) and v not in ("created", "modified") and isinstance(t, str)
+            and repo._iso_time(t) is not None}
+
+
+def _pypi_version_times(name, fetch_json):
+    repo = _repo()
+    return _pypi_times(_pypi_files(fetch_json(f"https://pypi.org/simple/{repo._pep503(name)}/", PYPI_SIMPLE_JSON)))
+
+
+def _crate_version_times(name, history):
+    """A crate's versions that are not yanked, in the index's order (the order they were published), each with its
+    `pubtime`, or None for a line without one (published before the index recorded it: older than every line with
+    one)."""
+    repo = _repo()
+    module = repo.registry_module("crates")
+    records = module.records(name, history.module_fetch(module))
+    return {r["vers"]: (r["pubtime"] if repo._iso_time(r.get("pubtime")) is not None else None) for r in records
+            if isinstance(r, dict) and isinstance(r.get("vers"), str) and not r.get("yanked")}
+
+
+def version_times(eco, name, resolved=None, history=None):
+    """{version: its publish time (ISO text), or None} of a package's releases, in the registry's order, from the same
+    registry history SC-NEW-INDICATOR reads (RA-7's SC-VERSION-INFLATION uses it): npm's packument times and PyPI's
+    Simple API upload times (a version whose time does not parse is left out), the crates index's `pubtime` (None for
+    a line without one). Over `history` (the release scan's History: each document read once), else a History of its
+    own. Best effort: {} when the history is off, the ecosystem is not one of `ECOSYSTEMS`, or the registry does not
+    answer or answers a document of another shape. `resolved` is unused today (the fetch is by name)."""
+    if eco not in ECOSYSTEMS or not enabled():
+        return {}
+    history = history or History()
+    try:
+        if eco == "npm":
+            return _npm_times(name, history.json)
+        if eco == "pypi":
+            return _pypi_version_times(name, history.json)
+        if eco == "crates":
+            return _crate_version_times(name, history)
+    except (_base.FetchError, _base.SpecError, _base.DigestError, ValueError, TypeError, KeyError, AttributeError):
+        return {}                                   # (a document of another shape than the registry's: no history)
+    return {}
 
 
 def _counterpart(p, version, prev, refs):
@@ -267,8 +414,8 @@ def _issue(rule, first, prev, age):
 
 
 def _compare(eco, name, version, asked, per, ops):
-    fetch_json, scan_file, resolved = ops
-    when, best, refs = _HISTORY[eco](name, version, resolved, fetch_json)
+    fetch_json, scan_file, resolved, history = ops
+    when, best, refs = _HISTORY[eco](name, version, resolved, fetch_json, history)
     if best is None:
         return [], {"notCompared": "the registry gives no time for this release" if when is None else
                     "no release published a week or more before this one"}
@@ -286,25 +433,28 @@ def _compare(eco, name, version, asked, per, ops):
     return [_issue(rule, asked[rule], prev, age) for rule in new], summary
 
 
-def compare(eco, name, version, asked, per, fetch_json, scan_file, resolved=None):
+def compare(eco, name, version, asked, per, fetch_json, scan_file, resolved=None, history=None):
     """The comparison of a release whose findings asked about are `asked` (`candidates`) with its established
     predecessor, over the caller's fetch and scan: `fetch_json(url, accept)` a registry document, `scan_file(ref,
     version)` one of the predecessor's files fetched, checked and scanned -> the rules it has a finding of
     (`rules_found`), or why it was not compared -> (SC-NEW-INDICATOR findings, summary). The registry's errors are a
-    summary that says why it was not compared (lazaret guard runs it so, over its own fetcher and scanner)."""
+    summary that says why it was not compared (lazaret guard runs it so, over its own fetcher and scanner). `history`:
+    the release scan's History, whose crates index `_crates` reads (one of its own otherwise)."""
     try:
-        return _compare(eco, name, version, asked, per, (fetch_json, scan_file, resolved))
+        return _compare(eco, name, version, asked, per, (fetch_json, scan_file, resolved, history))
     except (_base.FetchError, _base.SpecError, _base.DigestError, ValueError) as exc:
         return [], {"notCompared": f"{type(exc).__name__}: {_base.show(str(exc))}"}
 
 
-def release_issues(eco, name, version, resolved, issues, per, deadline=None, cancel=None, memo=None):
+def release_issues(eco, name, version, resolved, issues, per, deadline=None, cancel=None, memo=None, history=None):
     """SC-NEW-INDICATOR findings for one release whose files' findings are `issues` (`per`: its files as scan_package
-    lists them) -> (findings, summary or None when no comparison was asked for)."""
+    lists them) -> (findings, summary or None when no comparison was asked for). `history`: the release scan's History
+    (the registry's documents read once for the release), else one of its own."""
     if eco not in ECOSYSTEMS or not enabled():
         return [], None
     asked = candidates(issues)
     if not asked:
         return [], None
-    return compare(eco, name, version, asked, per, _json,
-                   lambda ref, prev: _scan(eco, name, prev, ref, deadline, cancel, memo), resolved)
+    history = history or History()
+    return compare(eco, name, version, asked, per, history.json,
+                   lambda ref, prev: _scan(eco, name, prev, ref, deadline, cancel, memo), resolved, history)

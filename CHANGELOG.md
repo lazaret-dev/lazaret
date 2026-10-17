@@ -26,6 +26,25 @@ aggregate):
 
 ### Added
 
+- **An inflated version number, the public tell of dependency confusion (RA-7; the registry, no rule-set change).**
+  A release with an inflated version — a major of 99 or more that is not a calendar version (a year from 1990 to the
+  year after it was published, as YYYY, YYYYMM or YYYYMMDD: 2024.x and 20240101 are left alone, 2099.x and
+  99991231.x are not), or a non-zero PyPI epoch (`1!0.0.1` outranks every version without one) — that is new to the
+  package is now **SC-VERSION-INFLATION (MAJOR)**. New to the package is judged on the versions published at or
+  before the release only, so the verdict does not change as later versions appear: the origin of the release's inflated line is the
+  latest inflated version up to it that is the package's first published version, or a jump of 50 majors or more
+  above the highest version published before it (or a new epoch). A squat's 99.0.0 and its 99.0.1 are both flagged;
+  a package that climbs 97, 98, 99 (chromedriver follows Chrome) is not, and one that climbs past 99 and later jumps
+  (130 to 9999) is flagged from the jump. Dependency confusion (Alex Birsan,
+  2021) shadows a private package with a public one of the same name at an outsized version so a misconfigured
+  resolver prefers it; Lazaret can't see the private package, so it reads the public anomaly against the package's
+  own version history (Xygeni reported npm packages published at 19999.x and 99.x through September 2026). The same
+  read reports a flood: more than five releases, pre-releases not counted, published within a 24-hour span that
+  includes the release. The version history (npm's packument, PyPI's Simple API document, the crate's index file) is
+  read for every release that is not already SUSPICIOUS, so a publish-flood on normally-versioned packages is caught
+  too; a release scan reads each such document once, shared with SC-NEW-DEPENDENCY and the predecessor comparison
+  (SC-NEW-INDICATOR), so it adds a request only for a release neither of them read it for. The existing history
+  switches turn it off (`LAZARET_NO_PRIOR_RELEASE`, `LAZARET_NO_DEPENDENCY_HISTORY`). npm, PyPI and crates.
 - **A provenance repository taken over, and the Cargo guard comparing a crate with its predecessor (RA-5, RA-8;
   the registry, no rule-set change).** When a release and the release before it both carry verified provenance
   that names the *same* source-repository URL but a *different* immutable repository ID **and** a *different*

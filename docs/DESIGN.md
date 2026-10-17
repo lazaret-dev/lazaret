@@ -1091,7 +1091,45 @@ the file's verdict nor the comparison is cached): the scan's answer keeps its fi
 them and the comparison once made (`_prior_kept`; one the registry did not
 answer is made again, from the cached rules), and the predecessor's file
 is fetched, checked against the registry's digest and scanned like any
-other, its verdict cached under its own key. SC-UNUSED-DEPENDENCY (`_ArtifactScan._unused_dependencies`,
+other, its verdict cached under its own key. SC-VERSION-INFLATION (RA-7,
+0.1.9, `registry/version_anomaly.py` with `repo.version_inflation_issues`,
+MAJOR) reads the public tell of dependency confusion: a release with an
+inflated version — a non-zero PyPI epoch (which outranks every version
+without one), or a major of `INFLATED_MAJOR` (99) or more that is not a
+calendar version (`calendar_like`: a year from `CALENDAR_FIRST_YEAR`, 1990,
+to the year after the version was published, as YYYY, YYYYMM or YYYYMMDD, so
+2024.x and 20240101 are not it and 2099.x, 999912.x, 100001.x and
+99991231.x are) — that is new to the package. That is judged on the versions
+published at or before the release only (`timeline`: a crate's index lines
+without `pubtime` first, in the index's order, as they predate it), so the
+verdict does not change when later versions appear: the origin of the
+release's inflated line is the latest inflated version up to it that is the
+package's first published version, or a jump — its major at least `JUMP`
+(50) above the highest published before it, or an epoch above every epoch
+before it. A squat's 99.0.0 and 99.0.1 are both flagged; chromedriver's
+97 -> 98 -> 99 is a climb, not flagged; a climb past 99 that later jumps
+(130 -> 9999) is flagged from the jump. Judging it against the package's
+own versions (not an absolute floor alone) is the "internal version" check
+John asked for: the jump within the package's own sequence. The same read
+reports a flood — more than `FLOOD_COUNT` (5) releases within a
+`FLOOD_WINDOW` (24 hours) that contains the release's publish time,
+pre-releases (a SemVer `-…`, a PEP 440 a/b/rc/dev) and versions without a
+time not counted. It uses the version history `prior.version_times` reads
+(npm's packument times, PyPI's Simple API upload times, the crates index's
+`pubtime`), for every release (John, Oct 17: "Unconditional RA-7", after a
+pre-gated version shipped first) that is not SUSPICIOUS already (its MAJOR
+would add nothing), so a publish-flood on normally-versioned releases is
+caught too. A release scan reads each of the package's registry documents
+once (`prior.History`, made in `_release_findings` and dropped with it):
+npm's packument (up to `MAX_HISTORY_BYTES`, 16 MB) is shared by
+SC-NEW-DEPENDENCY, the predecessor comparison and SC-VERSION-INFLATION,
+PyPI's Simple API document by the last two (SC-NEW-DEPENDENCY reads PyPI's
+JSON API), a crate's index file (up to 64 MB) by all three and the
+predecessor's resolution; so the history costs a request per release only
+where neither of the others read it. The guard's comparison of a crate reads
+its index once the same way. The history switches turn it off, the same ones
+as the predecessor comparison (`LAZARET_NO_PRIOR_RELEASE`,
+`LAZARET_NO_DEPENDENCY_HISTORY`). SC-UNUSED-DEPENDENCY (`_ArtifactScan._unused_dependencies`,
 INFO) lists an npm release's runtime dependencies no text of it names
 and that are neither among npm's 5,000 most-downloaded packages nor in its
 own scope, when every text member was read whole; `_scan_artifact` returns

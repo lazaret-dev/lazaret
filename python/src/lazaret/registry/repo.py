@@ -75,6 +75,7 @@ from lazaret.registry import npmtar as _npmtar          # noqa: E402
 from lazaret.registry import prior as _prior            # noqa: E402
 from lazaret.registry import provenance as _provenance  # noqa: E402
 from lazaret.registry import unused_deps as _unused     # noqa: E402
+from lazaret.registry import version_anomaly as _version_anomaly  # noqa: E402
 from lazaret.registry.ecosystems import base as _base   # noqa: E402
 from lazaret.scanner import engine as _engine           # noqa: E402
 from lazaret.scanner import gomod as _gomod             # noqa: E402
@@ -5496,6 +5497,42 @@ def _new_dependency_issue(eco, dep, age, previous, owners, unused=False):
         "package.json" if eco == "npm" else "(release)", 1, [])
 
 
+def version_inflation_issues(eco, name, version, resolved, history=None, found=()):
+    """SC-VERSION-INFLATION (RA-7): MAJOR when a release's version is inflated the way a dependency-confusion squat's
+    is, or it was published in a burst of releases (registry/version_anomaly.py). Best effort over the same registry
+    history SC-NEW-INDICATOR reads (`prior.version_times`, over `history`, the release scan's prior.History: the
+    document SC-NEW-DEPENDENCY and the predecessor comparison read is not fetched again), and off with it
+    (LAZARET_NO_PRIOR_RELEASE / LAZARET_NO_DEPENDENCY_HISTORY): [] when the ecosystem is not one it reads, the history
+    did not come back, or it does not list this release (so a fetch that fails never reads a release as the package's
+    'first'). Read for every release (John, Oct 17: "Unconditional RA-7"), so a publish-flood on normally-versioned
+    releases is caught too, except one already SUSPICIOUS by `found` (the release's other findings), to which a MAJOR
+    adds nothing: nothing is fetched for it."""
+    if eco not in ("npm", "pypi", "crates"):
+        return []
+    if any(i["rule"].startswith("SC-") and i["rule"] not in TRUNCATION_RULES and i["sev"] in STRONG_SEVERITIES
+           for i in found):
+        return []
+    times = _prior.version_times(eco, name, resolved, history)        # {version: ISO text or None}; {} off or failing
+    if version not in times:                                          # no history, or not this release: say nothing
+        return []
+    timed = [(v, _iso_time(t) if t else None) for v, t in times.items()]
+    reasons = [r for r in (_version_anomaly.version_reason(version, timed),
+                           _version_anomaly.flood_reason(eco, version, timed)) if r]
+    if not reasons:
+        return []
+    return [lazaret.mk_issue(
+        {"id": _version_anomaly.RULE, "name": "A release's version number is inflated", "type": "HOTSPOT",
+         "sev": "MAJOR", "msg": ("This release: " + "; and ".join(reasons) + ".")[:1200],
+         "why": ("Dependency confusion shadows a private package with a public one of the same name at a high "
+                 "version, so a misconfigured resolver prefers the public one (Alex Birsan, 2021); a flood of "
+                 "versions is how a name-squat holds a name. Xygeni reported npm packages published at 19999.x and "
+                 "99.x through September 2026."),
+         "fix": (f"Confirm {name} is the package you mean, and read this release before installing it; pin a "
+                 "known-good version until you have."),
+         "ref": "CWE-1104 · Supply chain"},
+        "(release)", 1, [])]
+
+
 def npm_new_dependencies(name, version, manifest, fetch=None):
     """-> (previous version, [(dependency, age, its maintainers)]) for the
     dependencies an npm release adds that are recent (see above)."""
@@ -5717,7 +5754,7 @@ def extension_new_dependencies(eco, name, version, resolved, brings, fetch=None)
     return previous[0], found
 
 
-def new_dependency_issues(eco, name, version, resolved, unused=(), brings=(), imports=None):
+def new_dependency_issues(eco, name, version, resolved, unused=(), brings=(), imports=None, history=None):
     """SC-NEW-DEPENDENCY findings for one release (best effort: [] when the
     registry can't say). unused: the registry names of the dependencies no
     file of the release names (the artifact scan's unusedDependencies).
@@ -5726,7 +5763,10 @@ def new_dependency_issues(eco, name, version, resolved, unused=(), brings=(), im
     modules a PyPI release's code imports (its files' importedModules), None
     when no file of it was read whole: a brand-new requirement is unused when
     the release imports none of its own modules (pypi_unused_new, D-5), which
-    the offline reading of names (`unused`) only guesses."""
+    the offline reading of names (`unused`) only guesses. history: the release
+    scan's prior.History, through which npm's packument and a crate's index
+    file are read once for the release (SC-NEW-INDICATOR and
+    SC-VERSION-INFLATION read them too)."""
     if os.environ.get("LAZARET_NO_DEPENDENCY_HISTORY") or eco not in ("npm", "pypi", "crates", "openvsx", "vscode"):
         return []
     if eco in ("openvsx", "vscode"):
@@ -5737,9 +5777,11 @@ def new_dependency_issues(eco, name, version, resolved, unused=(), brings=(), im
         return [_new_extension_issue(dep, age, previous) for dep, age in found]
     try:
         if eco == "npm":
-            previous, found = npm_new_dependencies(name, version, resolved[4])
+            previous, found = npm_new_dependencies(name, version, resolved[4],
+                                                   history.feed if history is not None else None)
         elif eco == "crates":
-            previous, found = crates_new_dependencies(name, version, resolved)
+            fetch = history.module_fetch(registry_module("crates")) if history is not None else None
+            previous, found = crates_new_dependencies(name, version, resolved, fetch)
         else:
             previous, found = pypi_new_dependencies(name, version, getattr(resolved, "info", None))
     except (FetchError, ValueError):
@@ -5990,15 +6032,20 @@ def _with_imports(imports, r):
 
 def _release_findings(eco, name, version, resolved, issues, per, found, limits):
     """The release's own findings beside its files', added to `issues` (its files' findings): SC-NEW-INDICATOR
-    (registry/prior.py: asked of those findings alone), SC-NEW-DEPENDENCY, provenance's. found: (the files'
-    digests the provenance check is given, the dependencies no file names, what a VS Code extension brings, the
-    modules a PyPI release's code imports or None); limits: (deadline, cancel, memo) -> (provenance's summary, the
-    prior release's)."""
+    (registry/prior.py: asked of those findings alone), SC-NEW-DEPENDENCY, provenance's, SC-VERSION-INFLATION (not
+    asked when the others make the release SUSPICIOUS), the package's registry documents read once for them all (one
+    prior.History). found: (the files' digests the provenance check is given, the dependencies no file names, what a
+    VS Code extension brings, the modules a PyPI release's code imports or None); limits: (deadline, cancel, memo) ->
+    (provenance's summary, the prior release's)."""
     attested, unused, brings, imports = found
     deadline, cancel, memo = limits
-    prior_issues, prior = _prior.release_issues(eco, name, version, resolved, issues, per, deadline, cancel, memo)
-    issues.extend(new_dependency_issues(eco, name, version, resolved, unused, brings, imports))
+    history = _prior.History()             # (the package's registry documents, each read once for this release: RA-7)
+    prior_issues, prior = _prior.release_issues(eco, name, version, resolved, issues, per, deadline, cancel, memo,
+                                                history)
+    issues.extend(new_dependency_issues(eco, name, version, resolved, unused, brings, imports, history))
     provenance_issues, provenance = _provenance.check_release(eco, name, version, resolved, attested, _provenance_fetch)
+    issues.extend(version_inflation_issues(eco, name, version, resolved, history,
+                                           issues + provenance_issues + prior_issues))
     issues.extend(provenance_issues)
     issues.extend(prior_issues)
     return provenance, prior

