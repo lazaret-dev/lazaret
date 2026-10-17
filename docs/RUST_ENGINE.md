@@ -275,7 +275,9 @@ rust/
                              JSON-with-comments reader that keeps lines, the commands each kind of
                              settings file makes its tool run, the issues (SC-AUTORUN), each command
                              followed into the files of the tree it runs, which it names for the
-                             package to read
+                             package to read; since RA-2 Claude Code's plugins and marketplaces, what
+                             a file sends out (SC-AGENT-ENDPOINT) and lets the agent do
+                             (SC-AGENT-CONFIG)
     src/config.rs            a config or data file's scan (BR-7 step 3, 0.1.9; configsecrets.py,
                              core.scan_config_file and their npm twins until then): the comments
                              of the formats it reads, S-TOKEN and S-SECRET's config form (a

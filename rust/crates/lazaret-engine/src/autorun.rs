@@ -12,6 +12,14 @@
 //! the issues of a settings file (`issues`): each command judged by the install-script test, and followed into the
 //! files of the tree it runs. The engine reads no file: `issues` answers the files it needs (`Need`) until the
 //! package has given it each one's text (or none).
+//!
+//! RA-2 (0.1.9): Claude Code plugins too (a plugin's manifest, `hooks/hooks.json`, `monitors/monitors.json`, `.lsp.json`
+//! and a marketplace's `marketplace.json`: their hooks, MCP servers, monitors and language servers, and the files a
+//! manifest names for them), a hook's exec form (`args`) and an MCP server's `headersHelper`; what a file sends out
+//! (SC-AGENT-ENDPOINT: a remote MCP server, an HTTP hook, a model provider's base URL set to another host) and what it
+//! lets the agent do (SC-AGENT-CONFIG: permission prompts bypassed, network-wide allow rules, every project MCP server
+//! approved, plugin marketplaces added, VS Code's chat tools approved); and, of a command, a hidden file outside the
+//! repository it runs (MAJOR), a hook that approves the agent's tool calls or writes its permissions (CRITICAL).
 
 use crate::findings::{self, Arg, RuleText};
 use crate::json::Value;
@@ -32,8 +40,14 @@ pub const MAX_TASKS: usize = 100;
 const KINDS: &[(&str, &str, &str)] = &[
     (".vscode/tasks.json", "vscode-tasks", "VS Code"),
     (".vscode/mcp.json", "vscode-mcp", "VS Code"),
+    (".vscode/settings.json", "vscode-settings", "VS Code"),
     (".claude/settings.json", "claude", "Claude Code"),
     (".claude/settings.local.json", "claude", "Claude Code"),
+    // a Claude Code plugin (RA-2): its manifest, its default hooks and monitors files, and a marketplace's catalog
+    (".claude-plugin/plugin.json", "claude-plugin", "Claude Code"),
+    (".claude-plugin/marketplace.json", "claude-marketplace", "Claude Code"),
+    ("hooks/hooks.json", "claude-hooks", "Claude Code"),
+    ("monitors/monitors.json", "claude-monitors", "Claude Code"),
     (".cursor/hooks.json", "cursor-hooks", "Cursor"),
     (".cursor/mcp.json", "mcp", "Cursor"),
     (".gemini/settings.json", "gemini", "Gemini CLI"),
@@ -49,13 +63,17 @@ fn markers(kind: &str) -> &'static [&'static str] {
             "\"awsAuthRefresh\"",
             "\"awsCredentialExport\"",
             "\"otelHeadersHelper\"",
+            "\"gcpAuthRefresh\"",
+            "\"fileSuggestion\"",
         ],
         "gemini" => &["\"hooks\"", "\"command\""],
+        "vscode-settings" => &["autoApprove"],
         _ => &["\"command\""],
     }
 }
 /// Claude Code settings whose value is a command it runs
-const CLAUDE_HELPERS: &[&str] = &["apiKeyHelper", "awsAuthRefresh", "awsCredentialExport", "otelHeadersHelper"];
+const CLAUDE_HELPERS: &[&str] =
+    &["apiKeyHelper", "awsAuthRefresh", "awsCredentialExport", "otelHeadersHelper", "gcpAuthRefresh"];
 const PLATFORMS: &[(&str, &str)] = &[("windows", "on Windows"), ("linux", "on Linux"), ("osx", "on macOS")];
 
 fn parts(path: &[u32]) -> Vec<PyStr> {
@@ -69,6 +87,9 @@ pub fn config_kind(path: &[u32]) -> Option<(&'static str, &'static str)> {
     if pystr::eq(&pystr::lower(&last), ".mcp.json") {
         return Some(("mcp", "Claude Code"));
     }
+    if pystr::eq(&pystr::lower(&last), ".lsp.json") {
+        return Some(("claude-lsp", "Claude Code"));        // a plugin's language servers (RA-2)
+    }
     if parts.len() < 2 {
         return None;
     }
@@ -77,11 +98,14 @@ pub fn config_kind(path: &[u32]) -> Option<(&'static str, &'static str)> {
 }
 
 /// The folder a settings file belongs to ('/'-separated, '' for the root): the parent of its .vscode / .claude /
-/// .cursor / .gemini directory, or the directory of a .mcp.json. Its commands run there.
+/// .cursor / .gemini directory, or the directory of a .mcp.json. Its commands run there. A plugin's files belong to
+/// the plugin's root: the parent of its .claude-plugin, hooks or monitors directory, or the directory of its .lsp.json
+/// (`${CLAUDE_PLUGIN_ROOT}`).
 pub fn owner_dir(path: &[u32]) -> PyStr {
     let parts = parts(path);
     let n = parts.len();
-    let keep = if pystr::eq(&pystr::lower(&parts[n - 1]), ".mcp.json") { n - 1 } else { n.saturating_sub(2) };
+    let last = pystr::lower(&parts[n - 1]);
+    let keep = if pystr::eq(&last, ".mcp.json") || pystr::eq(&last, ".lsp.json") { n - 1 } else { n.saturating_sub(2) };
     let refs: Vec<&[u32]> = parts[..keep].iter().map(|x| x.as_slice()).collect();
     pystr::join(&u("/"), &refs)
 }
@@ -619,11 +643,11 @@ fn vscode_tasks(root: &JNode, out: &mut Vec<Entry>) {
     }
 }
 
-/// A hooks object: event -> [group] where a group is {matcher, hooks: [{type, command}]} (Claude Code, Gemini CLI),
-/// or event -> [{command}] (Cursor).
-fn hooks(root: &JNode, tool: &str, out: &mut Vec<Entry>, grouped: bool) {
-    let events = match get(Some(root), "hooks", Some("object")).map(|h| &h.kind) {
-        Some(JKind::Object(m)) => m,
+/// Each hook of an event map (event -> [group] where a group is {matcher, hooks: [hook]}, Claude Code's and Gemini
+/// CLI's; event -> [hook], Cursor's): f(event, matcher, hook).
+fn each_hook<'a>(events: &'a JNode, grouped: bool, f: &mut dyn FnMut(&'a PyStr, Option<PyStr>, &'a JNode)) {
+    let events = match &events.kind {
+        JKind::Object(m) => m,
         _ => return,
     };
     for (event, groups) in events {
@@ -636,10 +660,6 @@ fn hooks(root: &JNode, tool: &str, out: &mut Vec<Entry>, grouped: bool) {
                 continue;
             }
             let matcher = text_of(get(Some(g), "matcher", None));
-            let mut trigger = pystr::concat(&[&u(tool), &u(" runs a hook on "), event]);
-            if let Some(m) = matcher.filter(|m| !pystr::eq(m, "*")) {
-                trigger = pystr::concat(&[&trigger, &u(" for \""), &m, &u("\"")]);
-            }
             let hs: Vec<&JNode> = if grouped {
                 match get(Some(g), "hooks", Some("array")).map(|h| &h.kind) {
                     Some(JKind::Array(items)) => items.iter().collect(),
@@ -649,15 +669,42 @@ fn hooks(root: &JNode, tool: &str, out: &mut Vec<Entry>, grouped: bool) {
                 vec![g]
             };
             for h in hs {
-                let kind = text_of(get(Some(h), "type", None));
-                let command = get(Some(h), "command", Some("string"));
-                if kind.as_ref().map_or(true, |k| pystr::eq(k, "command")) && text_of(command).is_some() {
-                    if let (Some(cmd), Some(text)) = (command, str_of(command)) {
-                        out.push(entry(cmd.line, trigger.clone(), Some(text.clone())));
-                    }
-                }
+                f(event, matcher.clone(), h);
             }
         }
+    }
+}
+
+/// "{who} on {event}" and the matcher, as a hook's trigger says it.
+fn hook_trigger(who: &[u32], event: &[u32], matcher: Option<PyStr>) -> PyStr {
+    let mut trigger = pystr::concat(&[who, &u(" on "), event]);
+    if let Some(m) = matcher.filter(|m| !pystr::eq(m, "*")) {
+        trigger = pystr::concat(&[&trigger, &u(" for \""), &m, &u("\"")]);
+    }
+    trigger
+}
+
+/// The command hooks of an event map, `who` saying who runs them ("Claude Code runs a hook"). A hook's exec form
+/// (`args`: the command spawned with them, no shell) is read as the command line it runs.
+fn hook_events(events: &JNode, who: &[u32], out: &mut Vec<Entry>, grouped: bool) {
+    each_hook(events, grouped, &mut |event, matcher, h| {
+        let kind = text_of(get(Some(h), "type", None));
+        let command = get(Some(h), "command", Some("string"));
+        if kind.as_ref().map_or(true, |k| pystr::eq(k, "command")) && text_of(command).is_some() {
+            let args = get(Some(h), "args", Some("array"));
+            let line = if args.is_some() { command_line(command, args) } else { str_of(command).cloned() };
+            if let (Some(cmd), Some(text)) = (command, line) {
+                out.push(entry(cmd.line, hook_trigger(who, event, matcher), Some(text)));
+            }
+        }
+    });
+}
+
+/// A hooks object: event -> [group] where a group is {matcher, hooks: [{type, command}]} (Claude Code, Gemini CLI),
+/// or event -> [{command}] (Cursor).
+fn hooks(root: &JNode, tool: &str, out: &mut Vec<Entry>, grouped: bool) {
+    if let Some(events) = get(Some(root), "hooks", Some("object")) {
+        hook_events(events, &pystr::concat(&[&u(tool), &u(" runs a hook")]), out, grouped);
     }
 }
 
@@ -667,6 +714,12 @@ fn mcp_servers(servers: Option<&JNode>, tool: &str, out: &mut Vec<Entry>) {
         _ => return,
     };
     for (name, server) in servers {
+        // a remote server's headersHelper: a command its tool runs to make the request's headers (RA-2)
+        let helper = get(Some(server), "headersHelper", Some("string"));
+        if let (Some(h), Some(t)) = (helper, text_of(helper)) {
+            let trigger = pystr::concat(&[&u(tool), &u(" runs the headers helper of the MCP server \""), name, &u("\"")]);
+            out.push(entry(h.line, trigger, Some(t)));
+        }
         let command = get(Some(server), "command", Some("string"));
         if text_of(command).is_none() {
             continue;
@@ -674,6 +727,76 @@ fn mcp_servers(servers: Option<&JNode>, tool: &str, out: &mut Vec<Entry>) {
         let cmd = command_line(command, get(Some(server), "args", Some("array")));
         let trigger = pystr::concat(&[&u(tool), &u(" starts the MCP server \""), name, &u("\"")]);
         out.push(entry(command.map_or(0, |c| c.line), trigger, cmd));
+    }
+}
+
+/// The objects of a value that is an object or an array of them (a plugin's component fields).
+fn objects(v: Option<&JNode>) -> Vec<&JNode> {
+    match v.map(|x| (&x.kind, x)) {
+        Some((JKind::Object(_), x)) => vec![x],
+        Some((JKind::Array(items), _)) => items.iter().filter(|i| matches!(i.kind, JKind::Object(_))).collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// A plugin's language servers: name -> {command, args} (Claude Code starts each).
+fn lsp_servers(servers: Option<&JNode>, out: &mut Vec<Entry>) {
+    if let Some(JKind::Object(m)) = servers.map(|s| &s.kind) {
+        for (name, server) in m {
+            let command = get(Some(server), "command", Some("string"));
+            if text_of(command).is_some() {
+                let cmd = command_line(command, get(Some(server), "args", Some("array")));
+                let trigger = pystr::concat(&[&u("Claude Code starts the language server \""), name, &u("\"")]);
+                out.push(entry(command.map_or(0, |c| c.line), trigger, cmd));
+            }
+        }
+    }
+}
+
+/// A plugin's monitors: [{name, command}], each a command Claude Code keeps running in the background.
+fn monitors(list: Option<&JNode>, out: &mut Vec<Entry>) {
+    if let Some(JKind::Array(items)) = list.map(|l| &l.kind) {
+        for m in items {
+            let command = get(Some(m), "command", Some("string"));
+            if let (Some(c), Some(t)) = (command, text_of(command)) {
+                let trigger = match text_of(get(Some(m), "name", None)) {
+                    Some(n) => pystr::concat(&[&u("Claude Code runs the monitor \""), &n, &u("\" in the background")]),
+                    None => u("Claude Code runs a monitor in the background"),
+                };
+                out.push(entry(c.line, trigger, Some(t)));
+            }
+        }
+    }
+}
+
+/// "the plugin \"name\"" (or "a plugin").
+fn plugin_label(v: &JNode) -> PyStr {
+    match text_of(get(Some(v), "name", None)) {
+        Some(n) => pystr::concat(&[&u("the plugin \""), &n, &u("\"")]),
+        None => u("a plugin"),
+    }
+}
+
+/// What a plugin's manifest (or a marketplace's entry for it) declares inline: hooks (an event map with no wrapper,
+/// or an array of them), MCP servers, language servers, monitors, and the settings' subagent status line.
+fn plugin_entries(plugin: &JNode, out: &mut Vec<Entry>) {
+    let who = pystr::concat(&[&u("Claude Code runs a hook of "), &plugin_label(plugin)]);
+    for events in objects(get(Some(plugin), "hooks", None)) {
+        hook_events(events, &who, out, true);
+    }
+    for servers in objects(get(Some(plugin), "mcpServers", None)) {
+        mcp_servers(Some(servers), "Claude Code", out);
+    }
+    for servers in objects(get(Some(plugin), "lspServers", None)) {
+        lsp_servers(Some(servers), out);
+    }
+    monitors(get(get(Some(plugin), "experimental", Some("object")), "monitors", Some("array")), out);
+    monitors(get(Some(plugin), "monitors", Some("array")), out);
+    let status = get(get(Some(plugin), "settings", Some("object")), "subagentStatusLine", Some("object"));
+    let command = get(status, "command", Some("string"));
+    if let (Some(c), Some(t)) = (command, text_of(command)) {
+        let trigger = pystr::concat(&[&u("Claude Code runs the subagent status-line command of "), &plugin_label(plugin)]);
+        out.push(entry(c.line, trigger, Some(t)));
     }
 }
 
@@ -689,6 +812,10 @@ pub fn entries(kind: &str, tool: &str, text: &[u32]) -> (Vec<Entry>, Option<Json
         }
     };
     let mut out = Vec::new();
+    if kind == "claude-monitors" {
+        monitors(Some(&root), &mut out);                  // (the file is the monitors array)
+        return (out, None);
+    }
     if !matches!(root.kind, JKind::Object(_)) {
         return (out, None);
     }
@@ -696,6 +823,11 @@ pub fn entries(kind: &str, tool: &str, text: &[u32]) -> (Vec<Entry>, Option<Json
         "vscode-tasks" => vscode_tasks(&root, &mut out),
         "claude" => {
             hooks(&root, tool, &mut out, true);
+            let suggest = get(Some(&root), "fileSuggestion", Some("object"));
+            let command = get(suggest, "command", Some("string"));
+            if let (Some(c), Some(t)) = (command, text_of(command)) {
+                out.push(entry(c.line, u(&format!("{} runs its fileSuggestion command", tool)), Some(t)));
+            }
             let status = get(Some(&root), "statusLine", Some("object"));
             let command = get(status, "command", Some("string"));
             let stype = text_of(get(status, "type", None));
@@ -720,6 +852,14 @@ pub fn entries(kind: &str, tool: &str, text: &[u32]) -> (Vec<Entry>, Option<Json
         "cursor-hooks" => hooks(&root, tool, &mut out, false),
         "mcp" => mcp_servers(get(Some(&root), "mcpServers", Some("object")), tool, &mut out),
         "vscode-mcp" => mcp_servers(get(Some(&root), "servers", Some("object")), tool, &mut out),
+        "claude-hooks" => hooks(&root, tool, &mut out, true),
+        "claude-plugin" => plugin_entries(&root, &mut out),
+        "claude-marketplace" => {
+            for plugin in objects(get(Some(&root), "plugins", Some("array"))) {
+                plugin_entries(plugin, &mut out);
+            }
+        }
+        "claude-lsp" => lsp_servers(Some(&root), &mut out),
         _ => {}
     }
     (out, None)
@@ -834,18 +974,74 @@ pub fn is_obfuscated(p: &Pack, text: &[u32]) -> bool {
     names.len() >= p.usize("OBF_IDENT_MIN")
 }
 
-/// (reasons, target): why a command a settings file runs looks hostile, and the file of the tree it runs that does
-/// (None when it is the command itself); nothing when nothing does.
-fn risk(p: &Pack, command: &[u32], base: &[u32], tree: &mut Tree) -> (Vec<PyStr>, Option<PyStr>) {
+/// RA-2: a command or a file it runs that writes the agent's permissions (CRITICAL, as a hostile command is).
+fn agent_reasons(p: &Pack, text: &[u32]) -> Vec<PyStr> {
+    match crate::signs::writes_agent_permissions(p, text) {
+        Some(file) => vec![pystr::concat(&[&u("writes the agent's permissions ("), &file, &u(")")])],
+        None => Vec::new(),
+    }
+}
+
+/// RA-2: what a command or a file it runs prints to approve the agent's tool calls itself (a PreToolUse hook's
+/// permissionDecision "allow" or the older decision "approve", a PermissionRequest hook's behavior "allow").
+fn approves(p: &Pack, text: &[u32]) -> Option<PyStr> {
+    p.re("_AGENT_APPROVE_RE").search(text).map(|m| m.group0().to_vec())
+}
+
+/// A file a command runs that is outside the repository (in the home folder, a temporary or absolute path) and
+/// hidden there: a folder or file whose name starts with a dot, the toolchains' own folders aside (_AUTORUN_TOOL_DIRS:
+/// ~/.cargo/bin, ~/.local/bin …). The scan cannot read it.
+fn hidden_outside(p: &Pack, target: &[u32]) -> bool {
+    if p.re("_AUTORUN_OUTSIDE_RE").match_(target).is_none() {
+        return false;
+    }
+    let path = pystr::replace_char(target, c('\\'), c('/'));
+    let tools = p.strs("_AUTORUN_TOOL_DIRS");
+    pystr::split_char(&path, c('/')).into_iter().skip(1).any(|comp| {
+        comp.first() == Some(&c('.')) && !pystr::eq(comp, ".") && !pystr::eq(comp, "..")
+            && !tools.iter().any(|t| t.as_slice() == pystr::lower(comp).as_slice())
+    })
+}
+
+/// What a command a settings file runs does: why it looks hostile (`reasons`), and the file of the tree it runs that
+/// does (`target`, None when it is the command itself); a hidden file outside the repository it runs (hidden_outside),
+/// which the scan cannot read; and what it prints to approve the agent's tool calls, with the file that does
+/// (`approves`).
+struct Risk {
+    reasons: Vec<PyStr>,
+    target: Option<PyStr>,
+    outside: Option<PyStr>,
+    approves: Option<(PyStr, Option<PyStr>)>,
+}
+
+fn risk(p: &Pack, command: &[u32], base: &[u32], tree: &mut Tree) -> Risk {
+    let mut approval = approves(p, command).map(|m| (m, None));
+    let (reasons, target, outside) = risk_of(p, command, base, tree, &mut approval);
+    Risk { reasons, target, outside, approves: approval }
+}
+
+fn risk_of(
+    p: &Pack,
+    command: &[u32],
+    base: &[u32],
+    tree: &mut Tree,
+    approval: &mut Option<(PyStr, Option<PyStr>)>,
+) -> (Vec<PyStr>, Option<PyStr>, Option<PyStr>) {
     let mut reasons: Vec<PyStr> = Vec::new();
     if let Some((agent, how)) = crate::signs::agent_hijack_in_command(p, command) {
         reasons.push(pystr::concat(&[&u("starts the AI agent \""), &agent, &u("\" with "), &how]));
     }
     reasons.extend(script_risk(p, command, None));
+    reasons.extend(agent_reasons(p, command));
+    let targets = crate::hooks::follow_hook(p, &local_command(p, command)).0;
+    let outside = targets.iter().find(|t| hidden_outside(p, t)).cloned();
     if !reasons.is_empty() || !tree.follow {
-        return (reasons, None);
+        return (reasons, None, outside);
     }
-    for target in crate::hooks::follow_hook(p, &local_command(p, command)).0 {
+    for target in targets {
+        if p.re("_AUTORUN_OUTSIDE_RE").match_(&target).is_some() {
+            continue;                                 // (a file of the machine, not of the tree)
+        }
         let rel = match tree_join(base, &target) {
             Some(r) => r,
             None => continue,
@@ -855,12 +1051,16 @@ fn risk(p: &Pack, command: &[u32], base: &[u32], tree: &mut Tree) -> (Vec<PyStr>
             None => continue,
         };
         let lang = script_lang(&rel);
+        if approval.is_none() {
+            *approval = approves(p, &text).map(|m| (m, Some(target.clone())));
+        }
         let mut found = script_risk(p, &text, lang);
+        found.extend(agent_reasons(p, &text));
         if is_obfuscated(p, &text) {
             found.push(u("is obfuscated"));
         }
         if !found.is_empty() {
-            return (found, Some(target));
+            return (found, Some(target), outside);
         }
         // (0.1.8) the scripts it starts: a loader that fetches a runtime and runs a file of the tree with it
         for (where_, path) in crate::signs::spawned_scripts(p, &normalize_newlines(&text), lang) {
@@ -876,17 +1076,372 @@ fn risk(p: &Pack, command: &[u32], base: &[u32], tree: &mut Tree) -> (Vec<PyStr>
             if !more.is_empty() {
                 let refs: Vec<&[u32]> = more.iter().map(|x| x.as_slice()).collect();
                 let said = pystr::join(&u("; and "), &refs);
-                return (vec![pystr::concat(&[&u("starts "), &srel, &u(", which "), &said])], Some(target));
+                return (vec![pystr::concat(&[&u("starts "), &srel, &u(", which "), &said])], Some(target), outside);
             }
         }
     }
-    (Vec::new(), None)
+    (Vec::new(), None, outside)
 }
 
 fn rule(p: &Pack, name: &str, args: &[(&str, Arg)]) -> RuleText {
     let mut r = RuleText::of(p, name);
     r.msg = findings::format(&r.msg, args);
     r
+}
+
+// ---------------------------------------------------------------- what a file sends out, what it lets the agent do
+
+/// (scheme, host) of a URL, lowercased, the host without its port, user or brackets; None when it is not one (or its
+/// host is a variable the tool fills in).
+fn url_host(url: &[u32]) -> Option<(PyStr, PyStr)> {
+    let url = pystr::strip(url);
+    let k = (0..url.len().saturating_sub(2)).find(|&i| url[i] == c(':') && url[i + 1] == c('/') && url[i + 2] == c('/'))?;
+    let scheme = pystr::lower(&url[..k]);
+    let rest = &url[k + 3..];
+    let end = rest.iter().position(|&ch| ch == c('/') || ch == c('?') || ch == c('#')).unwrap_or(rest.len());
+    let mut auth = &rest[..end];
+    if let Some(at) = auth.iter().rposition(|&ch| ch == c('@')) {
+        auth = &auth[at + 1..];
+    }
+    let host = if auth.first() == Some(&c('[')) {
+        let close = auth.iter().position(|&ch| ch == c(']'))?;
+        &auth[1..close]
+    } else {
+        let colon = auth.iter().position(|&ch| ch == c(':')).unwrap_or(auth.len());
+        &auth[..colon]
+    };
+    let host = pystr::lower(pystr::rstrip_chars(host, "."));
+    if host.is_empty() || scheme.is_empty() || host.contains(&c('$')) || host.contains(&c('{')) || host.contains(&c('%')) {
+        return None;
+    }
+    Some((scheme, host))
+}
+
+fn is_ip(host: &[u32]) -> bool {
+    host.contains(&c(':')) || (!host.is_empty() && host.iter().all(|&ch| digit(ch) || ch == c('.')))
+}
+
+fn is_loopback(host: &[u32]) -> bool {
+    pystr::eq(host, "localhost") || pystr::ends_with(host, ".localhost") || pystr::starts_with(host, "127.")
+        || pystr::eq(host, "::1") || pystr::eq(host, "0.0.0.0") || pystr::eq(host, "::")
+}
+
+/// A name of the local network: one with no dot (a container's in a compose file's network, a machine's on the LAN)
+/// or a local suffix (.local, .internal, .lan, .home.arpa).
+fn is_local_name(host: &[u32]) -> bool {
+    (!host.contains(&c('.')) && !is_ip(host))
+        || [".local", ".internal", ".lan", ".home.arpa"].iter().any(|s| pystr::ends_with(host, s))
+}
+
+/// Why sending to `url` is a risk: a tunnel or capture service, a raw IP address, or plain http (or ws) to another
+/// machine; None for anything else (an https host, this machine, a URL the tool fills in).
+fn url_risk(p: &Pack, url: &[u32]) -> Option<PyStr> {
+    let (scheme, host) = url_host(url)?;
+    if p.re("_AGENT_TUNNEL_HOST_RE").search(&host).is_some() {
+        return Some(pystr::concat(&[&u("a tunnel or capture service ("), &host, &u(")")]));
+    }
+    if is_loopback(&host) {
+        return None;
+    }
+    if is_ip(&host) {
+        return Some(pystr::concat(&[&u("a raw IP address ("), &host, &u(")")]));
+    }
+    if (pystr::eq(&scheme, "http") || pystr::eq(&scheme, "ws")) && !is_local_name(&host) {
+        return Some(pystr::concat(&[&u("plain "), &scheme, &u(" to another machine ("), &host, &u(")")]));
+    }
+    None
+}
+
+fn shown(p: &Pack, text: &[u32]) -> PyStr {
+    let show = p.usize("AUTORUN_SHOW");
+    if text.len() <= show { text.to_vec() } else { pystr::concat(&[&text[..show], &[0x2026]]) }
+}
+
+/// SC-AGENT-ENDPOINT for `what` sending to `url`: MAJOR when url_risk says why, else listed (INFO).
+fn endpoint(p: &Pack, line: usize, what: PyStr, url: &[u32]) -> (usize, RuleText) {
+    let args = |extra: Option<PyStr>| {
+        let mut a = vec![("what", Arg::S(what.clone())), ("url", Arg::S(shown(p, url)))];
+        if let Some(e) = extra {
+            a.push(("said", Arg::S(e)));
+        }
+        a
+    };
+    match url_risk(p, url) {
+        Some(why) => (line, rule(p, "_AGENT_ENDPOINT_RISK_RULE", &args(Some(why)))),
+        None => (line, rule(p, "_AGENT_ENDPOINT_LISTED_RULE", &args(None))),
+    }
+}
+
+/// SC-AGENT-CONFIG: what a file lets the agent do (MAJOR), or adds to it (listed, INFO).
+fn config(p: &Pack, line: usize, said: PyStr, risky: bool) -> (usize, RuleText) {
+    let name = if risky { "_AGENT_CONFIG_RISK_RULE" } else { "_AGENT_CONFIG_LISTED_RULE" };
+    (line, rule(p, name, &[("said", Arg::S(said))]))
+}
+
+/// The remote MCP servers of a servers map (no command; a url, Windsurf's serverUrl or Gemini CLI's httpUrl).
+fn remote_servers(p: &Pack, servers: Option<&JNode>, tool: &str, out: &mut Vec<(usize, RuleText)>) {
+    if let Some(JKind::Object(m)) = servers.map(|s| &s.kind) {
+        for (name, server) in m {
+            if text_of(get(Some(server), "command", Some("string"))).is_some() {
+                continue;
+            }
+            for key in ["url", "serverUrl", "httpUrl"] {
+                let v = get(Some(server), key, Some("string"));
+                if let (Some(n), Some(url)) = (v, text_of(v)) {
+                    let what = pystr::concat(&[&u(tool), &u(" connects to the MCP server \""), name, &u("\" at")]);
+                    out.push(endpoint(p, n.line, what, &url));
+                    break;
+                }
+            }
+        }
+    }
+}
+
+/// The HTTP hooks of an event map: each sends the event's input (a tool call's, a prompt's) to its url.
+fn http_hooks(p: &Pack, events: &JNode, who: &[u32], out: &mut Vec<(usize, RuleText)>) {
+    each_hook(events, true, &mut |event, matcher, h| {
+        let kind = text_of(get(Some(h), "type", None));
+        let url = get(Some(h), "url", Some("string"));
+        if kind.is_some_and(|k| pystr::eq(&k, "http")) {
+            if let (Some(n), Some(text)) = (url, text_of(url)) {
+                let what = pystr::concat(&[&hook_trigger(who, event, matcher), &u(", sending its input to")]);
+                out.push(endpoint(p, n.line, what, &text));
+            }
+        }
+    });
+}
+
+/// What a plugin's manifest (or a marketplace's entry) sends out: its remote MCP servers, its HTTP hooks, an MCP
+/// bundle it downloads.
+fn plugin_findings(p: &Pack, plugin: &JNode, out: &mut Vec<(usize, RuleText)>) {
+    let who = pystr::concat(&[&u("Claude Code runs a hook of "), &plugin_label(plugin)]);
+    for events in objects(get(Some(plugin), "hooks", None)) {
+        http_hooks(p, events, &who, out);
+    }
+    for servers in objects(get(Some(plugin), "mcpServers", None)) {
+        remote_servers(p, Some(servers), "Claude Code", out);
+    }
+    let servers = get(Some(plugin), "mcpServers", None);
+    let strings: Vec<&JNode> = match servers.map(|v| &v.kind) {
+        Some(JKind::Str(_)) => vec![servers.unwrap_or(plugin)],
+        Some(JKind::Array(items)) => items.iter().filter(|i| matches!(i.kind, JKind::Str(_))).collect(),
+        _ => Vec::new(),
+    };
+    for v in strings {
+        if let Some(t) = str_of(Some(v)).filter(|t| url_host(t).is_some()) {
+            let what = pystr::concat(&[&u("Claude Code downloads an MCP bundle of "), &plugin_label(plugin), &u(" from")]);
+            out.push(endpoint(p, v.line, what, t));
+        }
+    }
+}
+
+/// Where a marketplace (a source object) gets its plugins: (what it says, a URL to judge).
+fn source_of(source: &JNode) -> Option<(PyStr, Option<PyStr>)> {
+    if let JKind::Str(path) = &source.kind {
+        return Some((path.clone(), url_host(path).map(|_| path.clone())));
+    }
+    let kind = text_of(get(Some(source), "source", None))?;
+    for key in ["url", "repo", "package", "path"] {
+        if let Some(v) = text_of(get(Some(source), key, None)) {
+            let judged = (key == "url").then(|| v.clone());
+            return Some((pystr::concat(&[&kind, &u(": "), &v]), judged));
+        }
+    }
+    Some((kind, None))
+}
+
+/// What a Claude Code settings file sends out and lets the agent do.
+fn claude_settings(p: &Pack, root: &JNode, tool: &str, out: &mut Vec<(usize, RuleText)>) {
+    let these = format!("These {} settings", tool);
+    if let Some(events) = get(Some(root), "hooks", Some("object")) {
+        http_hooks(p, events, &pystr::concat(&[&u(tool), &u(" runs a hook")]), out);
+    }
+    let perms = get(Some(root), "permissions", Some("object"));
+    let mode = get(perms, "defaultMode", Some("string"));
+    if let Some(m) = mode.filter(|m| str_of(Some(*m)).is_some_and(|v| pystr::eq(v, "bypassPermissions"))) {
+        let said = u(&format!(
+            "{} start every session with its permission prompts off (permissions.defaultMode: bypassPermissions)",
+            these
+        ));
+        out.push(config(p, m.line, said, true));
+    }
+    if let Some(JKind::Array(rules)) = get(perms, "allow", Some("array")).map(|a| &a.kind) {
+        let wide_re = p.re("_AGENT_WIDE_ALLOW_RE");
+        let wide: Vec<&JNode> = rules
+            .iter()
+            .filter(|r| str_of(Some(*r)).is_some_and(|t| wide_re.fullmatch(pystr::strip(t)).is_some()))
+            .collect();
+        if let Some(first) = wide.first() {
+            let names: Vec<PyStr> = wide.iter().take(5).filter_map(|r| str_of(Some(*r)).cloned()).collect();
+            let refs: Vec<&[u32]> = names.iter().map(|x| x.as_slice()).collect();
+            let more = if wide.len() > 5 { format!(" and {} more", wide.len() - 5) } else { String::new() };
+            let head = format!("{} let the agent reach the network or run any command without asking: ", these);
+            let said = pystr::concat(&[&u(&head), &pystr::join(&u(", "), &refs), &u(&more)]);
+            out.push(config(p, first.line, said, true));
+        }
+    }
+    let all = get(Some(root), "enableAllProjectMcpServers", None);
+    if let Some(a) = all.filter(|a| matches!(a.kind, JKind::True)) {
+        let said = u(&format!("{} approve every MCP server the project lists (enableAllProjectMcpServers)", these));
+        out.push(config(p, a.line, said, true));
+    }
+    if let Some(JKind::Object(vars)) = get(Some(root), "env", Some("object")).map(|e| &e.kind) {
+        let names = p.strs("_AGENT_BASE_URL_ENVS");
+        for (name, v) in vars {
+            if !names.iter().any(|n| n.as_slice() == name.as_slice()) {
+                continue;
+            }
+            let url = match text_of(Some(v)) {
+                Some(t) => t,
+                None => continue,
+            };
+            let (_, host) = match url_host(&url) {
+                Some(h) => h,
+                None => continue,
+            };
+            let risk = url_risk(p, &url);
+            if risk.is_none() && (is_loopback(&host) || p.re("_AGENT_PROVIDER_HOST_RE").search(&host).is_some()) {
+                continue;
+            }
+            let said = risk.map(|r| pystr::concat(&[&u(", "), &r])).unwrap_or_default();
+            let r = rule(p, "_AGENT_BASE_URL_RULE", &[("tool", Arg::S(u(tool))), ("name", Arg::S(name.clone())),
+                                                        ("url", Arg::S(shown(p, &url))), ("said", Arg::S(said))]);
+            out.push((v.line, r));
+        }
+    }
+    if let Some(JKind::Object(markets)) = get(Some(root), "extraKnownMarketplaces", Some("object")).map(|m| &m.kind) {
+        for (name, market) in markets {
+            let source = get(Some(market), "source", None);
+            let (what, url) = match source.and_then(source_of) {
+                Some(x) => x,
+                None => continue,
+            };
+            let risk = url.as_ref().and_then(|x| url_risk(p, x));
+            let head = format!("{} add the plugin marketplace \"", these);
+            let mut said = pystr::concat(&[&u(&head), name, &u("\" ("), &shown(p, &what), &u(")")]);
+            if let Some(r) = &risk {
+                said = pystr::concat(&[&said, &u(", "), r]);
+            }
+            out.push(config(p, source.map_or(market.line, |s| s.line), said, risk.is_some()));
+        }
+    }
+    if let Some(JKind::Object(plugins)) = get(Some(root), "enabledPlugins", Some("object")).map(|m| &m.kind) {
+        let on: Vec<&PyStr> = plugins.iter().filter(|(_, v)| matches!(v.kind, JKind::True)).map(|(k, _)| k).collect();
+        if !on.is_empty() {
+            let refs: Vec<&[u32]> = on.iter().take(10).map(|x| x.as_slice()).collect();
+            let more = if on.len() > 10 { format!(" and {} more", on.len() - 10) } else { String::new() };
+            let head = format!("{} enable the plugins ", these);
+            let said = pystr::concat(&[&u(&head), &pystr::join(&u(", "), &refs), &u(&more),
+                                       &u(", whose hooks and servers run as the project's own do")]);
+            let line = get(Some(root), "enabledPlugins", None).map_or(1, |e| e.line);
+            out.push(config(p, line, said, false));
+        }
+    }
+}
+
+/// The findings of a settings file that are not commands: SC-AGENT-ENDPOINT and SC-AGENT-CONFIG.
+fn config_findings(p: &Pack, kind: &str, tool: &str, root: &JNode) -> Vec<(usize, RuleText)> {
+    let mut out = Vec::new();
+    if !matches!(root.kind, JKind::Object(_)) {
+        return out;
+    }
+    match kind {
+        "claude" => claude_settings(p, root, tool, &mut out),
+        "claude-hooks" => {
+            if let Some(events) = get(Some(root), "hooks", Some("object")) {
+                http_hooks(p, events, &u("Claude Code runs a hook"), &mut out);
+            }
+        }
+        "mcp" | "gemini" => remote_servers(p, get(Some(root), "mcpServers", Some("object")), tool, &mut out),
+        "vscode-mcp" => remote_servers(p, get(Some(root), "servers", Some("object")), tool, &mut out),
+        "claude-plugin" => plugin_findings(p, root, &mut out),
+        "claude-marketplace" => {
+            for plugin in objects(get(Some(root), "plugins", Some("array"))) {
+                plugin_findings(p, plugin, &mut out);
+                let source = get(Some(plugin), "source", None);
+                if let Some((what, url)) = source.and_then(source_of) {
+                    if url.is_none() && matches!(source.map(|s| &s.kind), Some(JKind::Str(_))) {
+                        continue;                         // (a folder of the marketplace's own repository)
+                    }
+                    let risk = url.as_ref().and_then(|x| url_risk(p, x));
+                    let label = plugin_label(plugin);
+                    let mut said = pystr::concat(&[&u("This marketplace lists "), &label, &u(" from "), &shown(p, &what)]);
+                    if let Some(r) = &risk {
+                        said = pystr::concat(&[&said, &u(", "), r]);
+                    }
+                    out.push(config(p, source.map_or(plugin.line, |s| s.line), said, risk.is_some()));
+                }
+            }
+        }
+        "vscode-settings" => {
+            for key in ["chat.tools.autoApprove", "chat.tools.global.autoApprove"] {
+                if let Some(v) = get(Some(root), key, None).filter(|v| matches!(v.kind, JKind::True)) {
+                    let said =
+                        u(&format!("These VS Code settings approve every tool call of its chat agent without asking ({})", key));
+                    out.push(config(p, v.line, said, true));
+                }
+            }
+        }
+        _ => {}
+    }
+    out
+}
+
+/// The files a plugin's manifest names for its hooks, MCP servers, language servers and monitors (a path each, or
+/// paths in an array): (the line of the path, the kind its file is read as, the path). Its default files, which are
+/// read as files of their own, and MCP bundles are not.
+fn plugin_refs(root: &JNode) -> Vec<(usize, &'static str, PyStr)> {
+    let mut out = Vec::new();
+    let fields: [(Option<&JNode>, &'static str, &str); 5] = [
+        (get(Some(root), "hooks", None), "claude-hooks", "hooks/hooks.json"),
+        (get(Some(root), "mcpServers", None), "mcp-map", ".mcp.json"),
+        (get(Some(root), "lspServers", None), "claude-lsp", ".lsp.json"),
+        (
+            get(get(Some(root), "experimental", Some("object")), "monitors", None),
+            "claude-monitors",
+            "monitors/monitors.json",
+        ),
+        (get(Some(root), "monitors", None), "claude-monitors", "monitors/monitors.json"),
+    ];
+    for (v, kind, default) in fields {
+        let items: Vec<&JNode> = match v.map(|x| (&x.kind, x)) {
+            Some((JKind::Str(_), x)) => vec![x],
+            Some((JKind::Array(items), _)) => items.iter().collect(),
+            _ => Vec::new(),
+        };
+        for item in items {
+            if let JKind::Str(path) = &item.kind {
+                let low = pystr::lower(path);
+                if url_host(path).is_some() || pystr::ends_with(&low, ".mcpb") || pystr::ends_with(&low, ".dxt") {
+                    continue;
+                }
+                if pystr::normpath(path).as_slice() == u(default).as_slice() {
+                    continue;
+                }
+                out.push((item.line, kind, path.clone()));
+            }
+        }
+    }
+    out
+}
+
+/// The commands of a file a plugin's manifest names (plugin_refs), each at the line of its path in the manifest.
+fn referenced_entries(kind: &str, path: &[u32], text: &[u32]) -> Vec<Entry> {
+    let found = if kind == "mcp-map" {
+        // ("a .json file the manifest names is read as an mcpServers map": its mcpServers, or the file itself)
+        match parse_jsonc(text) {
+            Ok(root) => {
+                let mut out = Vec::new();
+                let servers = get(Some(&root), "mcpServers", Some("object")).unwrap_or(&root);
+                mcp_servers(Some(servers), "Claude Code", &mut out);
+                out
+            }
+            Err(_) => Vec::new(),
+        }
+    } else {
+        entries(kind, "Claude Code", text).0
+    };
+    found.into_iter().map(|e| Entry { trigger: pystr::concat(&[&e.trigger, &u(" (in "), path, &u(")")]), ..e }).collect()
 }
 
 /// The issues of a settings file at `path` (config_kind(path) is not None) whose text is `text`: [(line, rule)]; or
@@ -908,6 +1463,19 @@ pub fn issues(p: &Pack, path: &[u32], text: &[u32], tree: &mut Tree) -> Result<V
     let base = owner_dir(path);
     let show = p.usize("AUTORUN_SHOW");
     let mut out = Vec::new();
+    let root = parse_jsonc(text).ok();
+    let mut found = found;
+    if kind == "claude-plugin" && tree.follow {
+        for (line, rkind, rpath) in root.as_ref().map(plugin_refs).unwrap_or_default() {
+            let rel = match tree_join(&base, &rpath) {
+                Some(r) => r,
+                None => continue,
+            };
+            if let Some(t) = tree.read(&rel) {
+                found.extend(referenced_entries(rkind, &rpath, &t).into_iter().map(|e| Entry { line, ..e }));
+            }
+        }
+    }
     for e in &found {
         let cmd = match &e.command {
             Some(c) => c,
@@ -917,9 +1485,31 @@ pub fn issues(p: &Pack, path: &[u32], text: &[u32], tree: &mut Tree) -> Result<V
             }
         };
         let shown = if cmd.len() <= show { cmd.clone() } else { pystr::concat(&[&cmd[..show], &[0x2026]]) };
-        let (reasons, target) = risk(p, cmd, &base, tree);
+        let Risk { reasons, target, outside, approves } = risk(p, cmd, &base, tree);
+        if let Some((said, file)) = approves {
+            let said = match file {
+                Some(f) => {
+                    pystr::concat(&[&u("it runs "), &f, &u(", which approves the agent's tool calls itself ("), &said, &u(")")])
+                }
+                None => pystr::concat(&[&u("a command that approves the agent's tool calls itself ("), &said, &u(")")]),
+            };
+            let shown = if cmd.len() <= show { cmd.clone() } else { pystr::concat(&[&cmd[..show], &[0x2026]]) };
+            let args = [("trigger", Arg::S(e.trigger.clone())), ("shown", Arg::S(shown)), ("said", Arg::S(said))];
+            out.push((e.line, rule(p, "_AGENT_APPROVE_RULE", &args)));
+        }
         let r = if reasons.is_empty() {
-            rule(p, "_AUTORUN_LISTED_COMMAND_RULE", &[("trigger", Arg::S(e.trigger.clone())), ("shown", Arg::S(shown))])
+            match outside {
+                Some(o) => rule(
+                    p,
+                    "_AUTORUN_OUTSIDE_RULE",
+                    &[("trigger", Arg::S(e.trigger.clone())), ("shown", Arg::S(shown)), ("target", Arg::S(o))],
+                ),
+                None => rule(
+                    p,
+                    "_AUTORUN_LISTED_COMMAND_RULE",
+                    &[("trigger", Arg::S(e.trigger.clone())), ("shown", Arg::S(shown))],
+                ),
+            }
         } else {
             let refs: Vec<&[u32]> = reasons.iter().map(|x| x.as_slice()).collect();
             let said = pystr::join(&u("; and "), &refs);
@@ -942,6 +1532,9 @@ pub fn issues(p: &Pack, path: &[u32], text: &[u32], tree: &mut Tree) -> Result<V
             }
         };
         out.push((e.line, r));
+    }
+    if let Some(root) = &root {
+        out.extend(config_findings(p, kind, tool, root));
     }
     if !tree.need.is_empty() {
         return Err(std::mem::take(&mut tree.need));

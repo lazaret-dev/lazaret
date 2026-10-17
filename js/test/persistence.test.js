@@ -118,7 +118,9 @@ test("a JSON reader that keeps lines", () => {
 test("the commands settings make a tool run", () => {
   assert.deepEqual(configKind("a\\.VSCode\\Tasks.JSON"), ["vscode-tasks", "VS Code"]);
   assert.deepEqual(configKind(".mcp.json"), ["mcp", "Claude Code"]);
-  assert.equal(configKind(".vscode/settings.json"), null);
+  assert.deepEqual(configKind(".vscode/settings.json"), ["vscode-settings", "VS Code"]);   // (RA-2: chat.tools.autoApprove)
+  assert.deepEqual(configKind("p/.claude-plugin/plugin.json"), ["claude-plugin", "Claude Code"]);
+  assert.equal(configKind(".vscode/launch.json"), null);
   assert.deepEqual([".vscode/tasks.json", "a/b/.claude/settings.json", "a/.mcp.json"].map(ownerDir), ["", "a/b", "a"]);
   const tasks = JSON.stringify({ tasks: [
     { label: "Dev", command: "node", args: ["srv.js", "a b"], dependsOn: "Build", runOptions: { runOn: "folderOpen" } },

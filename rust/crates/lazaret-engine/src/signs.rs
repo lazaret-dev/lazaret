@@ -1262,6 +1262,17 @@ fn writes_named(p: &Pack, text: &[u32], target: &crate::pyre::Regex) -> bool {
     target.search(text).is_some() && (p.re("_PERSIST_WRITE_RE").search(text).is_some() || shell_writes(p, text, target))
 }
 
+/// RA-2: the agent settings file a text writes, when what it writes there is the agent's permissions (allow rules, a
+/// mode that skips its prompts, a folder's trust, every project MCP server approved: _AGENT_PERMISSION_KEY_RE), else
+/// None. An agent's own hooks copy its settings (a WorktreeCreate hook copies settings.local.json), which is not this.
+pub fn writes_agent_permissions(p: &Pack, text: &[u32]) -> Option<PyStr> {
+    let agent = persist_agent_file(p, text)?;
+    let writes = p.re("_PERSIST_WRITE_RE").search(text).is_some()
+        || shell_writes(p, text, p.re("_PERSIST_AGENT_RE"))
+        || shell_writes(p, text, p.re("_PERSIST_AGENT_SPLIT_RE"));
+    (writes && p.re("_AGENT_PERMISSION_KEY_RE").search(text).is_some()).then_some(agent)
+}
+
 /// core.dumps_workflow_secrets
 pub fn dumps_workflow_secrets(p: &Pack, text: &[u32]) -> bool {
     p.re("_SECRETS_DUMP_RE").search(text).is_some() && p.re("_PERSIST_WORKFLOW_RE").search(text).is_some()

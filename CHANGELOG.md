@@ -34,6 +34,33 @@ aggregate):
   while the package's files are in hand; a version skipped as already scanned, and `report`, show the redacted lines.
   It takes effect only when the output is a terminal: in a pipe, a file or a CI log, a note says the credentials stay
   redacted.
+- **Security: agent configuration Lazaret did not read (RA-2; the engine's, for both packages; rule set 2.87.0).** An
+  AI agent's settings in a tree were read for the commands they run (SC-AUTORUN); what they send out, what they let
+  the agent do and Claude Code's plugins were not. Now: **SC-AGENT-ENDPOINT**, where a file sends data: a remote MCP
+  server (`url`, Windsurf's `serverUrl`, Gemini CLI's `httpUrl`; in `.mcp.json`, Cursor's, VS Code's and Gemini CLI's
+  settings and a plugin's), an HTTP hook (its input is the tool call or the prompt), an MCP bundle a plugin downloads,
+  and a model provider's base URL set in `env` to another host (`ANTHROPIC_BASE_URL` and the Bedrock, Vertex, Foundry
+  and AWS ones; the request and its credential go there), MAJOR; the rest listed (INFO), and MAJOR at a tunnel or a
+  data-capture service, a raw IP address, or plain http to another machine (a container's name or a .local one is the
+  local network's). **SC-AGENT-CONFIG**, what a file lets the agent do: permission prompts bypassed
+  (`permissions.defaultMode: bypassPermissions`), network-wide allow rules (a bare `Bash`, `Bash(*)`, `WebFetch`,
+  `WebFetch(domain:*)`, curl, wget, nc, ssh and the like with any arguments), every project MCP server approved
+  (`enableAllProjectMcpServers`), VS Code's `chat.tools.autoApprove`, and a hook that approves the agent's tool calls
+  itself (a PreToolUse hook's `permissionDecision: "allow"` or the older `decision: "approve"`, a PermissionRequest
+  hook's `behavior: "allow"`), MAJOR; plugin marketplaces and plugins a project adds (`extraKnownMarketplaces`,
+  `enabledPlugins`, a marketplace's catalog), INFO, MAJOR from an insecure URL. It is a setting, not an indicator: it
+  does not fail the gate's supply-chain condition (HARDENING_RULES). **SC-AUTORUN** reads Claude Code's plugins
+  (`.claude-plugin/plugin.json`: its hooks, MCP servers, language servers, monitors and subagent status line, inline
+  or in the files it names; `hooks/hooks.json`, `monitors/monitors.json`, `.lsp.json`; a marketplace's inline
+  entries), `${CLAUDE_PLUGIN_ROOT}` read as the plugin's folder, a hook's exec form (`args`), an MCP server's
+  `headersHelper`, `fileSuggestion` and `gcpAuthRefresh`; a command that runs a hidden file outside the repository
+  (`~/.cache/.x/run.js`, `/tmp/.x.sh`; a toolchain's own folder such as `~/.cargo/bin` aside) is MAJOR, and one that
+  writes the agent's permissions (its settings with allow rules, a mode or a folder's trust) CRITICAL. Measured on the
+  agent files of the 6,813 popular repositories (fetched as text; 2,215 files in 304 repositories): no new finding
+  above INFO on a project's own configuration but five SC-AGENT-CONFIG (nx's `enableAllProjectMcpServers`, swc's
+  `WebFetch`, crawl4ai's `Bash(curl:*)`, pure-rand's PreToolUse hook that approves every Bash call it does not
+  rewrite, a fixture of skillsaw's with `Bash`), and one CRITICAL in skillsaw's fixture of a malicious hooks file; no
+  gate changed.
 - **Security: a workflow that sends named secrets out, or searches the repository for credentials and sends what it
   finds, is SC-WORKFLOW-EXFIL (RA-1; the engine's, for both packages; rule set 2.82.0).** GhostAction (August to
   October 2026) committed workflows under the identities of the accounts it had stolen, some 30,000 repositories'

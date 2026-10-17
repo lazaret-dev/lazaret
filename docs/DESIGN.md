@@ -611,6 +611,42 @@ worm's pair (a SessionStart hook and a folder-open task running its loader) is
 CRITICAL because the followed loader fails the install-script test; writing
 the agent's own settings is not held against an agent's hook.
 
+Agent configuration (0.1.9, RA-2; `autorun.rs`, for both packages). The
+settings files were read for the commands they run; three more questions
+are asked of them. Where a file sends data (SC-AGENT-ENDPOINT): a remote
+MCP server (a server with no `command` and a `url`, Windsurf's `serverUrl`
+or Gemini CLI's `httpUrl`), an HTTP hook (`type: "http"`, which posts each
+event's input), an MCP bundle a plugin downloads, and a model provider's base
+URL set in `env` to a host that is not the provider's or this machine
+(`_AGENT_BASE_URL_ENVS`, `_AGENT_PROVIDER_HOST_RE`), MAJOR; the others INFO,
+MAJOR at a tunnel or data-capture service (`_AGENT_TUNNEL_HOST_RE`), a raw IP
+address, or plain http or ws to another machine (`url_risk`; a name with no
+dot or a .local, .internal, .lan or .home.arpa one is the local network's,
+and a URL whose host the tool fills in is not judged). What it lets the agent
+do (SC-AGENT-CONFIG, in HARDENING_RULES: reported, and counted against the
+gate only when CRITICAL): `permissions.defaultMode: bypassPermissions`, allow
+rules that reach the network or run anything (`_AGENT_WIDE_ALLOW_RE`),
+`enableAllProjectMcpServers`, VS Code's `chat.tools.autoApprove`, and a
+hook whose command or file prints an approval (`_AGENT_APPROVE_RE`), MAJOR;
+plugin marketplaces and plugins a project adds, INFO (MAJOR from an insecure
+URL). An approving hook is MAJOR, not CRITICAL: on the popular repositories'
+agent files one (pure-rand's npm-to-pnpm.sh) approves every Bash call it does
+not rewrite, which is the bypass the other settings are, not a payload.
+Claude Code's plugins are settings files too (`claude-plugin`,
+`claude-marketplace`, `claude-hooks`, `claude-monitors`, `claude-lsp`): a
+manifest's hooks (an event map with no wrapper, or an array of them and
+paths), MCP and language servers, monitors and subagent status line, and the
+files its paths name, read from the tree (`plugin_refs`, `referenced_entries`:
+each command at the line of its path); their folder is the plugin's root
+(`owner_dir`), which `${CLAUDE_PLUGIN_ROOT}` names. Of a command: a hook's
+exec form is read with its `args`; a hidden file outside the repository that
+it runs (`hidden_outside`: a home, temporary or absolute path with a dotted
+component, a toolchain's folder aside) is MAJOR, since the scan cannot read
+what runs; and one that writes the agent's permissions
+(`signs::writes_agent_permissions`: an agent's settings file written with a
+permission key, `_AGENT_PERMISSION_KEY_RE`) is CRITICAL, unlike a copy of the
+settings a worktree hook makes.
+
 Workflows that send secrets out (0.1.9, RA-1; the engine's `ci/exfil.rs`,
 for both packages: `ghworkflow.exfil` asks it): GhostAction's workflows named the
 secrets they sent, or sent what `grep` found in the checkout and `git log -p`,

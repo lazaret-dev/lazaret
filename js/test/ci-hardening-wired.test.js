@@ -43,8 +43,8 @@ function scanTree(files) {
 }
 
 test("the set of hardening rules", () => {
-  assert.equal(HARDENING_RULES.size, 11);
-  for (const r of HARDENING_RULES) assert.match(r, /^SC-(WORKFLOW|GITLAB)-/);
+  assert.equal(HARDENING_RULES.size, 12);                          // (and SC-AGENT-CONFIG, RA-2: a setting too)
+  for (const r of HARDENING_RULES) assert.match(r, /^SC-(WORKFLOW|GITLAB)-|^SC-AGENT-CONFIG$/);
 });
 
 test("a workflow's and a GitLab CI file's checks", () => {

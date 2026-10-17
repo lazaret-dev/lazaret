@@ -206,7 +206,12 @@ class EntriesTests(unittest.TestCase):
         self.assertEqual(autorun.config_kind("sub/.claude/settings.local.json"), ("claude", "Claude Code"))
         self.assertEqual(autorun.config_kind(".mcp.json"), ("mcp", "Claude Code"))
         self.assertEqual(autorun.config_kind(".cursor/mcp.json"), ("mcp", "Cursor"))
-        for path in ("tasks.json", ".vscode/settings.json", ".claude/config.json", "x.mcp.json"):
+        # (RA-2) VS Code's settings, a Claude Code plugin's files and a marketplace's catalog
+        self.assertEqual(autorun.config_kind(".vscode/settings.json"), ("vscode-settings", "VS Code"))
+        self.assertEqual([autorun.config_kind(p)[0] for p in ("p/.claude-plugin/plugin.json", ".claude-plugin/marketplace.json",
+                                                              "p/hooks/hooks.json", "p/monitors/monitors.json", "p/.lsp.json")],
+                         ["claude-plugin", "claude-marketplace", "claude-hooks", "claude-monitors", "claude-lsp"])
+        for path in ("tasks.json", ".vscode/launch.json", ".claude/config.json", "x.mcp.json", "hooks.json", ".claude-plugin/x.json"):
             self.assertIsNone(autorun.config_kind(path))
         self.assertEqual([autorun.owner_dir(p) for p in (".vscode/tasks.json", "a/b/.claude/settings.json",
                                                          "a/.mcp.json", ".mcp.json")], ["", "a/b", "a", ""])

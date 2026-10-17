@@ -1,6 +1,6 @@
 {
  "format": 1,
- "rule_set": "2.86.0",
+ "rule_set": "2.87.0",
  "source": "lazaret.scanner.core, extracted by scripts/make_rust_tables.py \u2014 do not edit",
  "values": {
   "ALWAYS_PRUNE_DIRS": {
@@ -640,6 +640,7 @@
   },
   "HARDENING_RULES": {
    "set": [
+    "SC-AGENT-CONFIG",
     "SC-GITLAB-IMAGE",
     "SC-GITLAB-INCLUDE",
     "SC-GITLAB-MR-TEXT",
@@ -4915,6 +4916,76 @@
     }
    }
   },
+  "_AGENT_APPROVE_RE": {
+   "flags": "",
+   "re": "[\"']?\\b(?:permissionDecision|behavior)[\"']?\\s*[:=]\\s*[\"']allow[\"']|[\"']?\\bdecision[\"']?\\s*[:=]\\s*[\"']approve[\"']"
+  },
+  "_AGENT_APPROVE_RULE": {
+   "map": {
+    "fix": {
+     "value": "Make the hook ask, deny or rewrite a call instead of approving it, or approve only the calls it checks."
+    },
+    "id": {
+     "value": "SC-AGENT-CONFIG"
+    },
+    "msg": {
+     "value": "{trigger}: {shown!r} \u2014 {said}."
+    },
+    "name": {
+     "value": "Agent settings widen what it may do"
+    },
+    "ref": {
+     "value": "CWE-269 \u00b7 Supply chain"
+    },
+    "sev": {
+     "value": "MAJOR"
+    },
+    "type": {
+     "value": "HOTSPOT"
+    },
+    "why": {
+     "value": "A hook that answers the agent's permission check itself (a PreToolUse hook's permissionDecision \"allow\" or the older decision \"approve\", a PermissionRequest hook's behavior \"allow\") lets the agent run what it would have asked about. Committed to a repository, it does so for everyone who opens it with the agent, and a prompt injected into what the agent reads then runs unchecked."
+    }
+   }
+  },
+  "_AGENT_BASE_URL_ENVS": {
+   "set": [
+    "ANTHROPIC_AWS_BASE_URL",
+    "ANTHROPIC_BASE_URL",
+    "ANTHROPIC_BEDROCK_BASE_URL",
+    "ANTHROPIC_BEDROCK_MANTLE_BASE_URL",
+    "ANTHROPIC_FOUNDRY_BASE_URL",
+    "ANTHROPIC_VERTEX_BASE_URL"
+   ]
+  },
+  "_AGENT_BASE_URL_RULE": {
+   "map": {
+    "fix": {
+     "value": "Remove the variable from the project's settings unless it is your organization's gateway, and set a gateway in your own settings instead."
+    },
+    "id": {
+     "value": "SC-AGENT-ENDPOINT"
+    },
+    "msg": {
+     "value": "These {tool} settings send the model's requests, and the credentials with them, to {url!r} ({name}){said}."
+    },
+    "name": {
+     "value": "Agent settings send data to a server"
+    },
+    "ref": {
+     "value": "CWE-200 \u00b7 Supply chain"
+    },
+    "sev": {
+     "value": "MAJOR"
+    },
+    "type": {
+     "value": "HOTSPOT"
+    },
+    "why": {
+     "value": "Claude Code sends each request to the model, and the credential that pays for it, to the base URL its settings give: a project's settings that point it at another host hand that host the conversation, the code the agent reads and the key. An organization's own LLM gateway is set this way; a repository you cloned has no reason to set it."
+    }
+   }
+  },
   "_AGENT_BIN_CMD_RE": {
    "flags": "",
    "re": "(?<![\\w./-])(?:claude|gemini|codex|aider|cline|opencode|cursor-agent|amazon-?q|qchat|q)(?![\\w./-])"
@@ -4929,6 +5000,118 @@
   "_AGENT_BIN_SRC": {
    "value": "(?<=[\"'])(?:claude|gemini|codex|aider|cline|opencode|cursor-agent|amazon-?q|qchat|q)(?=[\"'\\s])"
   },
+  "_AGENT_CONFIG_LISTED_RULE": {
+   "map": {
+    "fix": {
+     "value": "Check that you know the marketplace and the plugins it brings."
+    },
+    "id": {
+     "value": "SC-AGENT-CONFIG"
+    },
+    "msg": {
+     "value": "{said}."
+    },
+    "name": {
+     "value": "Agent settings widen what it may do"
+    },
+    "ref": {
+     "value": "CWE-269 \u00b7 Supply chain"
+    },
+    "sev": {
+     "value": "INFO"
+    },
+    "type": {
+     "value": "HOTSPOT"
+    },
+    "why": {
+     "value": "A plugin marketplace or a plugin that a project's settings add brings code the agent runs: the plugins' hooks, MCP servers and commands. Listed for inventory."
+    }
+   }
+  },
+  "_AGENT_CONFIG_RISK_RULE": {
+   "map": {
+    "fix": {
+     "value": "Remove the setting from the project's files, and grant what you need in your own settings, a command at a time."
+    },
+    "id": {
+     "value": "SC-AGENT-CONFIG"
+    },
+    "msg": {
+     "value": "{said}."
+    },
+    "name": {
+     "value": "Agent settings widen what it may do"
+    },
+    "ref": {
+     "value": "CWE-269 \u00b7 Supply chain"
+    },
+    "sev": {
+     "value": "MAJOR"
+    },
+    "type": {
+     "value": "HOTSPOT"
+    },
+    "why": {
+     "value": "A project's settings can let the AI agent act without asking: start with its permission prompts off, run any command or reach any host, start every MCP server the project lists. Committed to a repository, they apply to everyone who opens it with the agent, and a prompt injected into what the agent reads then runs unchecked. Recent Claude Code versions ignore bypassPermissions in a project's files and hold its allow rules until the folder is trusted; older versions and other agents may not."
+    }
+   }
+  },
+  "_AGENT_ENDPOINT_LISTED_RULE": {
+   "map": {
+    "fix": {
+     "value": "Check that you added it and that you know who runs the server."
+    },
+    "id": {
+     "value": "SC-AGENT-ENDPOINT"
+    },
+    "msg": {
+     "value": "{what} {url!r}."
+    },
+    "name": {
+     "value": "Agent settings send data to a server"
+    },
+    "ref": {
+     "value": "CWE-200 \u00b7 Supply chain"
+    },
+    "sev": {
+     "value": "INFO"
+    },
+    "type": {
+     "value": "HOTSPOT"
+    },
+    "why": {
+     "value": "An AI agent sends what it works on to the servers its settings name: a remote MCP server gets each tool call the agent makes to it, an HTTP hook gets each event's input (the command about to run, the file being written, the prompt). Committed to a repository, the entry sends the agent of everyone who opens it there; a pull request that adds one is how a server is planted. Listed for inventory."
+    }
+   }
+  },
+  "_AGENT_ENDPOINT_RISK_RULE": {
+   "map": {
+    "fix": {
+     "value": "Remove the entry unless you set it up, and give the agent an https address of a server you know."
+    },
+    "id": {
+     "value": "SC-AGENT-ENDPOINT"
+    },
+    "msg": {
+     "value": "{what} {url!r}: {said}."
+    },
+    "name": {
+     "value": "Agent settings send data to a server"
+    },
+    "ref": {
+     "value": "CWE-200 \u00b7 Supply chain"
+    },
+    "sev": {
+     "value": "MAJOR"
+    },
+    "type": {
+     "value": "HOTSPOT"
+    },
+    "why": {
+     "value": "An AI agent sends what it works on to the servers its settings name: a remote MCP server gets each tool call the agent makes to it, an HTTP hook gets each event's input (the command about to run, the file being written, the prompt). Committed to a repository, the entry sends the agent of everyone who opens it there; a pull request that adds one is how a server is planted. A tunnel or a capture service hides who receives the data, a raw IP address names no one, and plain http lets anyone on the way read and change it."
+    }
+   }
+  },
   "_AGENT_FLAG_RE": {
    "flags": "",
    "re": "--(?:dangerously-skip-permissions|yolo|trust-all-tools|dangerously-bypass-approvals-and-sandbox|full-auto|yes-always|allow-all-tools)(?![\\w-])|--(?:approval-mode|permission-mode)[=\\s]+(?:yolo|bypassPermissions)"
@@ -4942,8 +5125,24 @@
   "_AGENT_NAMES": {
    "value": "claude|gemini|codex|aider|cline|opencode|cursor-agent|amazon-?q|qchat|q"
   },
+  "_AGENT_PERMISSION_KEY_RE": {
+   "flags": "",
+   "re": "\\b(?:permissions|defaultMode|bypassPermissions|hasTrustDialogAccepted|enableAllProjectMcpServers|enabledMcpjsonServers|additionalDirectories|skipDangerousModePermissionPrompt|autoApprove|alwaysAllow)\\b"
+  },
+  "_AGENT_PROVIDER_HOST_RE": {
+   "flags": "",
+   "re": "(?:^|\\.)(?:anthropic\\.com|claude\\.ai|api\\.aws|amazonaws\\.com|googleapis\\.com|azure\\.com)$"
+  },
   "_AGENT_SETTINGS_REASON": {
    "value": "writes an AI agent's or editor's auto-run settings"
+  },
+  "_AGENT_TUNNEL_HOST_RE": {
+   "flags": "",
+   "re": "(?:^|\\.)(?:ngrok(?:-free)?\\.(?:app|io|dev)|ngrok\\.com|trycloudflare\\.com|loca\\.lt|localtunnel\\.me|serveo\\.net|serveousercontent\\.com|localhost\\.run|lhr\\.life|lhr\\.rocks|bore\\.pub|pinggy\\.(?:io|link|online)|tunnelmole\\.net|devtunnels\\.ms|zrok\\.io|playit\\.gg|telebit\\.io|pagekite\\.me|webhook\\.site|requestbin\\.(?:com|net|io)|requestb\\.in|pipedream\\.net|interact\\.sh|oast\\.(?:pro|live|site|online|fun|me)|oastify\\.com|burpcollaborator\\.net|beeceptor\\.com|requestcatcher\\.com|hookbin\\.com|postb\\.in|ptsv[23]\\.com|webhook\\.cool|mockbin\\.(?:org|io)|transfer\\.sh|pastebin\\.com)$"
+  },
+  "_AGENT_WIDE_ALLOW_RE": {
+   "flags": "",
+   "re": "\\*|(?:Bash|PowerShell)(?:\\(\\s*\\*?\\s*\\))?|(?:Bash|PowerShell)\\(\\s*(?:sudo\\s+)?(?:curl|wget|nc|ncat|netcat|socat|ssh|scp|sftp|rsync|ftp|telnet|iwr|irm|Invoke-WebRequest|Invoke-RestMethod)\\s*:?\\s*\\*\\s*\\)|WebFetch(?:\\(\\s*(?:domain:\\s*)?\\*\\s*\\))?"
   },
   "_ALLOW_GUARD_RE": {
    "map": {
@@ -5051,7 +5250,7 @@
   },
   "_AUTORUN_DIR_VARS_RE": {
    "flags": "",
-   "re": "\\$\\{workspace(?:Folder(?::[^}\\n]{0,200})?|Root)\\}|\\$\\{(?:CLAUDE|GEMINI)_PROJECT_DIR\\}|\\$(?:CLAUDE|GEMINI)_PROJECT_DIR\\b|%(?:CLAUDE|GEMINI)_PROJECT_DIR%"
+   "re": "\\$\\{workspace(?:Folder(?::[^}\\n]{0,200})?|Root)\\}|\\$\\{(?:(?:CLAUDE|GEMINI)_PROJECT_DIR|CLAUDE_PLUGIN_ROOT)\\}|\\$(?:(?:CLAUDE|GEMINI)_PROJECT_DIR|CLAUDE_PLUGIN_ROOT)\\b|%(?:(?:CLAUDE|GEMINI)_PROJECT_DIR|CLAUDE_PLUGIN_ROOT)%"
   },
   "_AUTORUN_HOSTILE_FILE_RULE": {
    "map": {
@@ -5170,6 +5369,57 @@
   },
   "_AUTORUN_MAX_TASKS": {
    "value": 100
+  },
+  "_AUTORUN_OUTSIDE_RE": {
+   "flags": "",
+   "re": "~|\\$\\{?(?:HOME|USERPROFILE|APPDATA|LOCALAPPDATA|TMPDIR|TEMP|TMP|XDG_[A-Z_]+)\\b\\}?|%(?:USERPROFILE|APPDATA|LOCALAPPDATA|HOMEPATH|TEMP|TMP)%|/|[A-Za-z]:[\\\\/]"
+  },
+  "_AUTORUN_OUTSIDE_RULE": {
+   "map": {
+    "fix": {
+     "value": "Check that you put that file there and what it does; keep what the settings run in the repository."
+    },
+    "id": {
+     "value": "SC-AUTORUN"
+    },
+    "msg": {
+     "value": "{trigger}: {shown!r}, which runs {target}, a hidden file outside the repository."
+    },
+    "name": {
+     "value": "Settings run a command automatically"
+    },
+    "ref": {
+     "value": "CWE-506 \u00b7 Supply chain"
+    },
+    "sev": {
+     "value": "MAJOR"
+    },
+    "type": {
+     "value": "HOTSPOT"
+    },
+    "why": {
+     "value": "Editors and AI coding agents run these commands on their own \u2014 when the folder is opened, a session starts or the agent uses a tool \u2014 with your privileges, without asking each time. The 2026 Shai-Hulud worms (Mini Shai-Hulud, the keyv wave) committed a Claude Code SessionStart hook and a VS Code folder-open task to every repository they reached, so opening a checkout ran the worm. This command runs a hidden file in the home folder, a temporary folder or another place outside the repository: what runs is not in the repository, the scan cannot read it, and a payload left there earlier runs each time."
+    }
+   }
+  },
+  "_AUTORUN_TOOL_DIRS": {
+   "set": [
+    ".asdf",
+    ".bun",
+    ".cargo",
+    ".deno",
+    ".dotnet",
+    ".local",
+    ".npm-global",
+    ".nvm",
+    ".pyenv",
+    ".rbenv",
+    ".rustup",
+    ".sdkman",
+    ".volta",
+    ".wallaby",
+    ".yarn"
+   ]
   },
   "_AUTORUN_UNREADABLE_RULE": {
    "map": {
