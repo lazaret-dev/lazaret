@@ -46,6 +46,11 @@ to the filters' ready candidates first, then to the queue newest first; the queu
 the rest are skipped, counted: some ten thousand repositories are created an hour, more than one token's requests
 can scan, so the run says what share it covered. A repository is scanned once, at the first push seen.
 
+Where the hourly files come from is --github-events-url (env LAZARET_GITHUB_EVENTS_URL; ghevents.source): GH Archive
+by default, which has missed most events since 2025 (a run says so when an hour it read is thin), or OpenDigger's
+mirror of the same files (ghevents.MIRROR). A repository gone, made private or empty when its scan comes (GitHub's
+404 or 409) is dropped and counted, not an error of the run. A long run says on stderr where it is (`progress`).
+
 Budgets: --max-calls (DEFAULT_MAX_CALLS) across what is due first (the checks and scans) and then the listing, so a
 listing that has fallen behind does not keep a candidate waiting; and GitHub's: the run stops when
 X-RateLimit-Remaining falls to RATE_FLOOR, or on a rate-limit answer (403 or 429), keeping its cursor and its
@@ -86,6 +91,10 @@ ARCHIVE_HOURS = 3
 ARCHIVE_GIVE_UP = 6
 ARCHIVE_ECO = "gharchive"
 SCAN_ALL_ECO = "github-scan-all"
+#: the listing says on stderr how far it is every this many pages
+LISTING_PROGRESS_EVERY = 25
+#: a scan's answers that mean the repository is gone, made private (404) or empty (409: no commit to read)
+GONE = (404, 409)
 #: what a queued repository's `filters` says
 ALL_PUSHED = "all: got code (GH Archive)"
 ALL_PUBLIC = "all: made public (GH Archive)"
@@ -426,11 +435,12 @@ def _scan(store, budget, cand, env, http, out):
         budget.spend(SCAN_CALLS)
         if budget.refused(exc):
             raise
-        if getattr(exc, "status", None) == 404:
-            store.update_github_candidate(cand["repo_id"], state="dropped", last_error="gone or made private")
-        else:
-            store.update_github_candidate(cand["repo_id"], last_error=str(exc)[:500],
-                                          **_failed_state(cand))
+        if getattr(exc, "status", None) in GONE:
+            # (deleted, made private or empty since it was kept: churn, not a failure of the run)
+            store.update_github_candidate(cand["repo_id"], state="dropped", last_error="gone, made private or empty")
+            out["gone"] += 1
+            return None
+        store.update_github_candidate(cand["repo_id"], last_error=str(exc)[:500], **_failed_state(cand))
         out["errors"].append(f"github:{cand['full_name']}: {exc}")
         return None
     except Exception as exc:                                        # noqa: BLE001
@@ -455,12 +465,14 @@ def _failed_state(cand):
 
 
 # ---------------------------------------------------------------- GH Archive (--github-archive, --github-scan-all)
-def _archive(store, filters, scan_all, now, out, http):
+def _archive(store, filters, scan_all, now, out, http, base=ghevents.DEFAULT_SOURCE, say=lambda text: None):
     """The GH Archive hours not read yet (at most ARCHIVE_HOURS, each one complete), applied in order; then
     scan-all's queue and pending repositories kept within their bounds. A file that cannot be read stops the
     archive's part of the run (its cursor kept), not the run."""
+    host = urllib.parse.urlsplit(base).hostname
     info = out["archive"] = {"hours": [], "events": 0, "pushed": 0, "ready": 0, "public": 0, "next": None,
-                             "unpublished": False, "error": None, "missing": []}
+                             "unpublished": False, "error": None, "missing": [], "source": host, "thin": False,
+                             "default": base == ghevents.DEFAULT_SOURCE}
     if scan_all:
         out["queue"] = {"queued": 0, "pending": 0, "promoted": 0, "excluded": 0, "skipped": 0, "left": 0,
                         "since": _scan_all_start(store)}
@@ -475,8 +487,9 @@ def _archive(store, filters, scan_all, now, out, http):
     for _ in range(ARCHIVE_HOURS):
         if hour + datetime.timedelta(hours=1) > now:
             break                                   # (not over yet)
+        say(f"events: reading the hour {ghevents.hour_name(hour)} UTC from {host}…")
         try:
-            body = ghevents.fetch(hour, http)
+            body = ghevents.fetch(hour, http, base)
         except ghevents.ArchiveError as exc:
             info["error"] = str(exc)
             out["errors"].append(f"GH Archive: {exc}")
@@ -499,6 +512,7 @@ def _archive(store, filters, scan_all, now, out, http):
         store.save_discovery_cursor(ARCHIVE_ECO, ghevents.hour_name(hour), hour)
         info["hours"].append(ghevents.hour_name(hour))
         info["events"] += events.events
+        info["thin"] = info["thin"] or events.events < ghevents.THIN_HOUR
         hour += datetime.timedelta(hours=1)
     info["next"] = ghevents.hour_name(hour)
     if scan_all:
@@ -585,15 +599,17 @@ def _judge(store, filters, rid, name, desc, why, state, at, rows, out):
 
 # ---------------------------------------------------------------- the run
 def run(store, *, scan=False, max_calls=DEFAULT_MAX_CALLS, filters=None, env=None, http=None, now=None,
-        archive=False, scan_all=False, max_scans=None, archive_http=None):
+        archive=False, scan_all=False, max_scans=None, archive_http=None, events_url=None, progress=None):
     """One `discover --ecosystem github --resume` run. -> a dict: listed, pages, caughtUp, matches (filter kind ->
     count), candidates (full names kept), campaigns ([(full_name, marker, url)]), checked ({state: count}),
     scans (results), errors, stopped (why the run stopped early, or None), cursor (the ID listed up to), first
     (True on the first run, which only finds where to start), archive (what GH Archive's hours gave, or None), and
     queue (scan-all's: queued, pending, skipped, left). `archive` reads GH Archive (ghevents; `archive_http` its
     network seam), `scan_all` makes every new repository that gets code a candidate (it reads GH Archive and
-    scans), `max_scans` caps the run's scans (SCAN_ALL_MAX_SCANS with scan_all). DiscoveryError without
-    GITHUB_TOKEN."""
+    scans), `max_scans` caps the run's scans (SCAN_ALL_MAX_SCANS with scan_all), `events_url` is where the hourly
+    files come from (ghevents.source's form; GH Archive by default), `progress(text)` hears where a long run is,
+    and `gone` counts the scans of repositories gone, made private or empty. DiscoveryError without GITHUB_TOKEN
+    or with an events URL that is not one."""
     env = os.environ if env is None else env
     token = sources._token("github", env)
     if not token:
@@ -606,16 +622,21 @@ def run(store, *, scan=False, max_calls=DEFAULT_MAX_CALLS, filters=None, env=Non
     archive, scan = archive or scan_all, scan or scan_all
     if scan_all and max_scans is None:
         max_scans = SCAN_ALL_MAX_SCANS
+    try:
+        events_url = ghevents.source(events_url) if events_url else ghevents.DEFAULT_SOURCE
+    except ValueError as exc:
+        raise DiscoveryError(f"--github-events-url: {exc}") from None
+    say = progress or (lambda text: None)
     out = {"listed": 0, "pages": 0, "caughtUp": False, "matches": {}, "candidates": [], "campaigns": [],
            "checked": {}, "scans": [], "errors": [], "stopped": None, "cursor": None, "first": False,
-           "archive": None, "queue": None}
+           "archive": None, "queue": None, "gone": 0}
     try:
         _checks(store, client, budget, now, out)
         if archive:
-            _archive(store, filters, scan_all, now, out, archive_http)
+            _archive(store, filters, scan_all, now, out, archive_http, events_url, say)
         if scan:
-            _scans(store, budget, max_scans, env, http, out)
-        _listing(store, client, budget, filters, now, out, scan_all)
+            _scans(store, budget, max_scans, env, http, out, say)
+        _listing(store, client, budget, filters, now, out, scan_all, say)
     except sources.SourceError as exc:
         if not budget.refused(exc) and budget.stopped is None:
             out["errors"].append(str(exc))
@@ -644,17 +665,19 @@ def _checks(store, client, budget, now, out):
         out["checked"][state] = out["checked"].get(state, 0) + 1
 
 
-def _scans(store, budget, max_scans, env, http, out):
+def _scans(store, budget, max_scans, env, http, out, say=lambda text: None):
     """The scans (--scan): the ready candidates, oldest first, then scan-all's queue, newest first, at most
     `max_scans` in all."""
     made = 0
     queue = out["queue"]
+    cap = "" if max_scans is None else f" of at most {max_scans}"
     for states, newest in ((("ready",), False), (("queued",), True)):
         limit = None if max_scans is None else max(0, max_scans - made)
         for cand in store.github_candidates(states=states, newest_first=newest, limit=limit):
             if (max_scans is not None and made >= max_scans) or not budget.can(SCAN_CALLS):
                 break
             made += 1
+            say(f"scanning {made}{cap}: github:{cand['full_name']}…")
             res = _scan(store, budget, cand, env, http, out)
             if res is not None:
                 out["scans"].append(res)
@@ -712,7 +735,7 @@ def _keep(store, item, matched, listed_at, out):
         out["candidates"].append(full)
 
 
-def _listing(store, client, budget, filters, now, out, scan_all=False):
+def _listing(store, client, budget, filters, now, out, scan_all=False, say=lambda text: None):
     """New repositories from the cursor on, each page's candidates kept, then the cursor. With scan-all, what the
     listing judges is kept for GH Archive's pushes too: excluded and campaign repositories, and the pending ones
     (pushed before the listing reached them) queued or reported."""
@@ -744,3 +767,5 @@ def _listing(store, client, budget, filters, now, out, scan_all=False):
         since = max(since, max(i["id"] for i in page))
         store.save_discovery_cursor(ECO, since, now)
         out["cursor"] = since
+        if out["pages"] % LISTING_PROGRESS_EVERY == 0:
+            say(f"listing: {out['pages']} pages, {out['listed']:,} new repositories, up to ID {since}…")

@@ -1952,7 +1952,16 @@ and counted, so each run says what share of the stream it covered (some ten
 thousand new repositories an hour against a token's 5,000 requests, three a
 scan). A queued repository's failed scan drops it; a repository is scanned
 once. No schema change: the states are new values of `github_candidates`'s
-`state`, and the two cursors rows of `discovery_cursors`.
+`state`, and the two cursors rows of `discovery_cursors`. GH Archive has
+missed most events since 2025, so the files' source is a setting
+(`--github-events-url`, `LAZARET_GITHUB_EVENTS_URL`; `ghevents.source`: an
+https host and a folder, the default port, no credential, query or
+fragment): OpenDigger's mirror (`ghevents.MIRROR`) serves the same files,
+and a run whose hour holds under `THIN_HOUR` events says so. A scan GitHub
+answers 404 or 409 (gone, made private, empty) drops its candidate and is
+counted (`gone`), not an error of the run. The CLI prints an OK scan in one
+line and the others in full, and `progress` lines on stderr (an hour being
+read, every `LISTING_PROGRESS_EVERY` pages, each scan).
 
 ### m. crates.io discovery (`ecosystems/crates.py`, CRATES-DISCOVER)
 

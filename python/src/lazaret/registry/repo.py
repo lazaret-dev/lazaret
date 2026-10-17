@@ -7792,12 +7792,22 @@ def _discover_github(store, args):
         raise ghdiscover.DiscoveryError("--max-scans takes a number of scans, 0 or more")
     out = ghdiscover.run(store, scan=args.scan, max_calls=max_calls, filters=ghdiscover.Filters(patterns=patterns),
                          archive=getattr(args, "github_archive", False), scan_all=getattr(args, "github_scan_all", False),
-                         max_scans=max_scans)
+                         max_scans=max_scans, events_url=getattr(args, "github_events_url", None),
+                         progress=_github_progress)
     _print_github_run(out)
     bad = bool(out["campaigns"])
+    quiet = [res for res in out["scans"] if res["verdict"] == "OK"]
     for res in out["scans"]:
-        print_scan(res)
+        if res["verdict"] != "OK":
+            print_scan(res)                       # (in full: what to look at)
         bad |= res["verdict"] in BAD_VERDICTS
+    if quiet:
+        print(f"\n{len(quiet)} scanned OK (no supply-chain indicator; `lazaret-registry report github:OWNER/REPO` "
+              f"lists a scan's findings):")
+        for res in quiet:
+            print(f"  {c(VERDICT_COLOR['OK'], ' OK ')} github:{lazaret.sanitize_term(res['name'])}@"
+                  f"{lazaret.sanitize_term(str(res['version'])[:12])}  {res['filesScanned']:,} files, "
+                  f"{_fmt_bytes(res['archiveBytes'])}")
     _github_run_errors(out, getattr(args, "_errors", None))
     return bad
 
@@ -7824,6 +7834,11 @@ def _print_github_run(out):
     _print_github_archive(out)
 
 
+def _github_progress(text):
+    """Where a long github discovery run is, on stderr (the report comes at the end, on stdout)."""
+    print(f"github: {lazaret.sanitize_term(text)}", file=sys.stderr, flush=True)
+
+
 def _print_github_archive(out):
     """What GH Archive's hours gave a github discovery run (--github-archive, --github-scan-all), and scan-all's
     share: what got code, what was queued, scanned and skipped."""
@@ -7831,19 +7846,27 @@ def _print_github_archive(out):
     info, queue = out.get("archive"), out.get("queue")
     if info is None:
         return
+    from lazaret.registry import ghevents
+    host = lazaret.sanitize_term(info.get("source") or "?")
+    label = "GH Archive" if info.get("default", True) else f"events ({host})"
     if info["hours"]:
         hours = info["hours"][0] + (f" to {info['hours'][-1]}" if len(info["hours"]) > 1 else "")
-        print(f"  GH Archive: read {len(info['hours'])} hour(s) ({hours} UTC), {info['events']:,} events; "
+        print(f"  {label}: read {len(info['hours'])} hour(s) ({hours} UTC), {info['events']:,} events; "
               f"{info['ready']} kept repositories got code, {info['public']} made public")
     else:
-        print("  GH Archive: no hour read")
+        print(f"  {label}: no hour read")
     if info["error"]:
-        print(f"  GH Archive: stopped: {lazaret.sanitize_term(info['error'])}")
+        print(f"  {label}: stopped: {lazaret.sanitize_term(info['error'])}")
     elif info["unpublished"]:
-        print(f"  GH Archive: the hour {info['next']} UTC is not published yet; the next run reads it")
+        print(f"  {label}: the hour {info['next']} UTC is not published yet; the next run reads it")
     if info.get("missing"):
-        print(f"  GH Archive: passed over {', '.join(info['missing'])} UTC, still not published "
-              f"{ghdiscover.ARCHIVE_GIVE_UP} hours after (a gap in GH Archive)")
+        print(f"  {label}: passed over {', '.join(info['missing'])} UTC, still not published "
+              f"{ghdiscover.ARCHIVE_GIVE_UP} hours after (a gap in the archive)")
+    if info.get("thin"):
+        hint = (f"; --github-events-url {ghevents.MIRROR} reads OpenDigger's mirror of the same files"
+                if info.get("default", True) else "")
+        print(f"  {label}: thin: under {ghevents.THIN_HOUR:,} events in an hour, where GitHub's public timeline has "
+              f"some 150,000 (GH Archive has missed most since 2025){hint}")
     if queue is None:
         return
     if queue["since"] is None:
@@ -7854,7 +7877,8 @@ def _print_github_archive(out):
           f"{queue['promoted']:,} that waited reached by the listing")
     skipped = (f", {queue['skipped']:,} skipped (the queue keeps the newest {ghdiscover.QUEUE_MAX:,})"
                if queue["skipped"] else "")
-    print(f"  scanned {len(out['scans'])} this run; {queue['left']:,} left in the queue{skipped}")
+    gone = f", {out['gone']} gone, made private or empty before the scan" if out.get("gone") else ""
+    print(f"  scanned {len(out['scans'])} this run{gone}; {queue['left']:,} left in the queue{skipped}")
 
 
 def _github_run_errors(out, errors):
@@ -8026,6 +8050,8 @@ HELP_EXAMPLES = """examples:
     lazaret-registry discover --ecosystem github --resume --scan --github-filters filters.json
     lazaret-registry discover --ecosystem github --resume --github-archive --scan
     lazaret-registry discover --ecosystem github --resume --github-scan-all --max-scans 50
+    lazaret-registry discover --ecosystem github --resume --github-scan-all \\
+        --github-events-url https://gharchive.open-digger.cn      the hourly events from OpenDigger's mirror
 
   The state database is --db (env LAZARET_DB): a SQLite path, by default lazaret-registry.db
   here, or a postgres:// URL. Exit codes: 0 ok, 1 a failure or (--ci) a SUSPICIOUS or
@@ -8112,6 +8138,11 @@ def main():
                     help="discover --ecosystem github: scan every new repository that gets code, not only the ones "
                          "a filter keeps (reads GH Archive, scans: --github-archive --scan); your excludes and the "
                          "campaign markers still apply, and --max-scans caps a run's scans")
+    ap.add_argument("--github-events-url", metavar="URL", default=os.environ.get("LAZARET_GITHUB_EVENTS_URL"),
+                    help="discover --ecosystem github: where the hourly event files come from (default "
+                         "https://data.gharchive.org, GH Archive, which has missed most events since 2025; "
+                         "https://gharchive.open-digger.cn is OpenDigger's mirror of the same files; env "
+                         "LAZARET_GITHUB_EVENTS_URL)")
     ap.add_argument("--max-scans", type=int, metavar="N",
                     help="discover --ecosystem github: repositories scanned this run at most (default: as many as "
                          "--max-calls allows; with --github-scan-all, 100), filter matches first, then the newest")
@@ -8125,7 +8156,10 @@ def main():
     args = ap.parse_args()
     github_only = [name for name, on in (("--github-archive", args.github_archive),
                                          ("--github-scan-all", args.github_scan_all),
-                                         ("--max-scans", args.max_scans is not None)) if on]
+                                         ("--max-scans", args.max_scans is not None),
+                                         ("--github-events-url", "--github-events-url" in sys.argv[1:]
+                                          or any(a.startswith("--github-events-url=") for a in sys.argv[1:])))
+                   if on]
     if github_only and (args.command != "discover" or "github" not in (args.ecosystem or [])):
         ap.error(f"{', '.join(github_only)}: these go with discover --ecosystem github --resume")
     try:

@@ -17,6 +17,12 @@ GitHub trimmed the events' payloads in 2025 (a push's commits, for one); what is
 the event's type, which every event keeps. GH Archive can miss an event, so a repository a filter keeps is still
 checked as before (ghdiscover.check); this only makes it ready sooner.
 
+GH Archive has missed most of GitHub's events since 2025 (gharchive.org's issues #310, #320 and #323; an hour of
+October 2026 held some 5,000 events where the public timeline has some 150,000), so where the files come from is a
+setting (`source`: --github-events-url, env LAZARET_GITHUB_EVENTS_URL): OpenDigger's mirror
+(https://gharchive.open-digger.cn, since September 2026) serves the same names and format. A source is an https URL,
+its host the only one asked, on the default port, with no credential, query or fragment.
+
 Bounds, since the file is someone else's: the compressed file (ARCHIVE_BYTES), the text it unpacks to (TEXT_BYTES),
 a line (LINE_BYTES: a longer one is passed over, counted), and an event's fields (an ID a positive integer, a name
 owner/repo by GitHub's rules, a description cut to ghdiscover.MAX_TEXT). The file goes only to data.gharchive.org,
@@ -26,19 +32,28 @@ import datetime
 import gzip
 import io
 import json
+import re
+import urllib.parse
 
 from lazaret.registry import repo as _repo
 from lazaret.registry import sources
 
-__all__ = ["HOST", "Hour", "hour_name", "parse_hour", "url", "fetch", "read", "ArchiveError"]
+__all__ = ["HOST", "DEFAULT_SOURCE", "MIRROR", "Hour", "hour_name", "parse_hour", "source", "url", "fetch", "read",
+           "ArchiveError"]
 
 UTC = datetime.timezone.utc
 HOST = "data.gharchive.org"
+DEFAULT_SOURCE = f"https://{HOST}"
+#: OpenDigger's mirror of GH Archive's files (the same names and format)
+MIRROR = "https://gharchive.open-digger.cn"
+#: an hour with fewer events is thin: GitHub's public timeline has some 150,000 an hour
+THIN_HOUR = 50_000
 ARCHIVE_BYTES = 768 * 1024 * 1024       # one hour's file, compressed (some 70 MB in 2026)
 TEXT_BYTES = 8 * 1024 * 1024 * 1024     # what it unpacks to
 LINE_BYTES = 1024 * 1024                # one event
 MAX_TEXT = 1000                         # characters of a name or description kept
 _WANTED = (b"PushEvent", b"CreateEvent", b"PublicEvent")
+_HOST_RE = re.compile(r"(?=.{1,253}$)[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+")
 
 
 class ArchiveError(Exception):
@@ -72,17 +87,36 @@ def parse_hour(name):
     return datetime.datetime(d.year, d.month, d.day, int(hour), tzinfo=UTC)
 
 
-def url(t):
-    return f"https://{HOST}/{hour_name(t)}.json.gz"
-
-
-def fetch(t, http=None):
-    """The hour's file (bytes, compressed), or None when GH Archive has not published it yet (404). `http` is the
-    network seam (sources._http's signature); ArchiveError for anything else that fails."""
-    http = http or sources._http
-    what = f"reading GH Archive's hour {hour_name(t)}"
+def source(text):
+    """A source of the hourly files (an https URL: its host, and a folder on it) -> its canonical form, no
+    trailing slash; ValueError for one that is not one."""
+    parts = urllib.parse.urlsplit(str(text or "").strip())
+    host = (parts.hostname or "").lower()
+    path = parts.path.rstrip("/")
     try:
-        return http(url(t), {"User-Agent": _repo.USER_AGENT}, ARCHIVE_BYTES, {HOST}, HOST, what=what,
+        port = parts.port
+    except ValueError:
+        port = -1
+    if parts.scheme != "https" or not host or parts.username is not None or parts.password is not None \
+            or parts.query or parts.fragment or port not in (None, 443) or not _HOST_RE.fullmatch(host):
+        raise ValueError(f"not an https URL of a host (no credential, port, query or fragment): {text!r}")
+    if any(seg in (".", "..") or "%" in seg or "\\" in seg for seg in path.split("/")):
+        raise ValueError(f"an unusable path in {text!r}")
+    return f"https://{host}{path}"
+
+
+def url(t, base=DEFAULT_SOURCE):
+    return f"{base}/{hour_name(t)}.json.gz"
+
+
+def fetch(t, http=None, base=DEFAULT_SOURCE):
+    """The hour's file (bytes, compressed) from `base` (source()'s form), or None when it is not published yet
+    (404). `http` is the network seam (sources._http's signature); ArchiveError for anything else that fails."""
+    http = http or sources._http
+    host = urllib.parse.urlsplit(base).hostname
+    what = f"reading the hour {hour_name(t)} from {host}"
+    try:
+        return http(url(t, base), {"User-Agent": _repo.USER_AGENT}, ARCHIVE_BYTES, {host}, host, what=what,
                     has_token=False, kind="github")
     except sources.SourceError as exc:
         if getattr(exc, "status", None) == 404:

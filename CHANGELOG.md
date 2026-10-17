@@ -41,6 +41,11 @@ aggregate):
   `lazaret-registry.db`, the state database without `--db`. New: `registry/ghevents.py`; the store's
   `add_github_candidates`, `github_candidate_states`, `prune_github_candidates`; candidate states `queued`, `pending`
   and `excluded` (no schema change).
+  After John's first scan-all run (an hour of GH Archive held 4,859 events, a known degradation since 2025): the
+  hourly files' source is a setting (`--github-events-url`, `LAZARET_GITHUB_EVENTS_URL`; OpenDigger's mirror,
+  `https://gharchive.open-digger.cn`, serves the same files) and a thin hour is said; a repository gone, made private
+  or empty before its scan (GitHub's 404 or 409) is counted, not an error that fails the run; an OK scan is one line
+  in the run's output, a scan that is not OK in full; a long run says on stderr where it is.
 - **`--show-secrets`: the credentials on the terminal, and nowhere else.** Every finding is redacted where it is made,
   so a secret finding's line was a placeholder on the terminal too. `lazaret . --show-secrets`, `lazaret hook
   --show-secrets` and `lazaret-registry scan --show-secrets` print each finding's flagged line as it was read, kept

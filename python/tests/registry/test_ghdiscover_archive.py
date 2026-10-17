@@ -24,7 +24,7 @@ from unittest import mock
 
 from tests import _support  # noqa: F401
 from lazaret.registry import ghdiscover, ghevents, repo
-from tests.registry.test_ghdiscover import BENIGN, ENV, NOW, Case, FakeGitHub, at, failure, item
+from tests.registry.test_ghdiscover import API, BENIGN, ENV, HOSTILE, NOW, Case, FakeGitHub, at, failure, item
 
 UTC = datetime.timezone.utc
 HOUR = NOW - datetime.timedelta(hours=1)          # the last complete hour at NOW (11:00 UTC)
@@ -56,15 +56,16 @@ def hour_file(events, raw=None):
 
 
 class FakeArchive:
-    """GH Archive's hours: {hour name: [events]}; an hour not in it is not published (404)."""
+    """GH Archive's hours (or a mirror's, at `base`): {hour name: [events]}; an hour not in it is not published
+    (404)."""
 
-    def __init__(self, hours=None):
-        self.hours = dict(hours or {})
+    def __init__(self, hours=None, base="https://data.gharchive.org"):
+        self.hours, self.base = dict(hours or {}), base
         self.seen = []
 
     def __call__(self, url, headers, max_bytes, hosts, auth_host, **kw):
         self.seen.append((url, dict(headers), set(hosts)))
-        m = re.fullmatch(r"https://data\.gharchive\.org/(\d{4}-\d\d-\d\d-\d{1,2})\.json\.gz", url)
+        m = re.fullmatch(re.escape(self.base) + r"/(\d{4}-\d\d-\d\d-\d{1,2})\.json\.gz", url)
         if not m or m.group(1) not in self.hours:
             raise failure("reading GH Archive: not found", 404)
         got = self.hours[m.group(1)]
@@ -118,6 +119,26 @@ class ReadTests(unittest.TestCase):
             ghevents.fetch(HOUR, broken)
 
 
+class SourceTests(unittest.TestCase):
+    def test_a_source_is_an_https_host_and_a_folder(self):
+        self.assertEqual(ghevents.source("https://gharchive.open-digger.cn/"), ghevents.MIRROR)
+        self.assertEqual(ghevents.source("https://Mirror.Example.org/gh/archive/"),
+                         "https://mirror.example.org/gh/archive")
+        for bad in ("http://gharchive.open-digger.cn", "https://u:p@mirror.example.org",
+                    "https://mirror.example.org:8443", "https://mirror.example.org/?x=1", "https://mirror.example.org/#f",
+                    "https://mirror.example.org/a/../b", "https://mirror.example.org/%2e%2e", "https://localhost",
+                    "file:///tmp/x", ""):
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                ghevents.source(bad)
+
+    def test_the_fetch_goes_to_the_sources_host_alone(self):
+        archive = FakeArchive({"2026-10-14-11": [push(1, "a/b")]}, base="https://mirror.example.org/gh")
+        self.assertTrue(ghevents.fetch(HOUR, archive, "https://mirror.example.org/gh"))
+        url, headers, hosts = archive.seen[0]
+        self.assertEqual((url, hosts, sorted(headers)), ("https://mirror.example.org/gh/2026-10-14-11.json.gz",
+                                                          {"mirror.example.org"}, ["User-Agent"]))
+
+
 class ArchiveCase(Case):
     def setUp(self):
         super().setUp()
@@ -167,6 +188,24 @@ class ArchiveTests(ArchiveCase):
         self.assertEqual((out["archive"]["hours"], out["archive"]["missing"]),
                          (["2026-10-14-13"], ["2026-10-14-12", "2026-10-14-14"]))
         self.assertEqual(self.store.discovery_cursor("gharchive")[0], "2026-10-14-14")
+
+    def test_a_mirror_is_read_and_a_thin_hour_said(self):
+        mirror = FakeArchive({"2026-10-14-11": [push(1001, "shopsprint/decimal")]}, base=ghevents.MIRROR)
+        out = self.run_gh(FakeGitHub(), events=mirror, archive=True, events_url=ghevents.MIRROR + "/")
+        info = out["archive"]
+        self.assertEqual((info["source"], info["default"], info["hours"], info["thin"]),
+                         ("gharchive.open-digger.cn", False, ["2026-10-14-11"], True))
+        with self.assertRaisesRegex(ghdiscover.DiscoveryError, "--github-events-url"):
+            self.run_gh(FakeGitHub(), events=mirror, archive=True, events_url="http://plain.example.org")
+
+    def test_a_long_run_says_where_it_is(self):
+        heard = []
+        archive = FakeArchive({"2026-10-14-11": []})
+        repos = [item(1000 + k, f"user{k}/project{k}") for k in range(1, 2602)]
+        with mock.patch.object(ghdiscover, "LISTING_PROGRESS_EVERY", 10):
+            self.run_gh(FakeGitHub(repos), events=archive, archive=True, progress=heard.append)
+        self.assertEqual(heard[0], "events: reading the hour 2026-10-14-11 UTC from data.gharchive.org…")
+        self.assertIn("listing: 20 pages, 2,000 new repositories, up to ID 3000…", heard)
 
     def test_an_hour_that_cannot_be_read_stops_the_archive_not_the_run(self):
         archive = FakeArchive({"2026-10-14-11": b"\x1f\x8bbroken"})
@@ -250,6 +289,16 @@ class ScanAllTests(ArchiveCase):
         out = self.scan_all(FakeGitHub(), FakeArchive(), when=at(73), max_scans=0)
         self.assertEqual((self.candidates(), out["queue"]["skipped"]), ({}, 1))
 
+    def test_a_repository_gone_or_empty_before_its_scan_is_counted_not_an_error(self):
+        self.store.save_discovery_cursor("github-scan-all", 900)
+        archive = FakeArchive({"2026-10-14-11": [push(901, "u/deleted"), push(902, "u/empty")]})
+        gh = FakeGitHub()
+        gh.fail[f"{API}/repos/u/deleted/commits/HEAD"] = failure("resolving github:u/deleted@HEAD: not found", 404)
+        gh.fail[f"{API}/repos/u/empty/commits/HEAD"] = failure("resolving github:u/empty@HEAD: HTTP 409", 409)
+        out = self.scan_all(gh, archive)
+        self.assertEqual((out["errors"], out["gone"]), ([], 2))
+        self.assertEqual({c["state"] for c in self.store.github_candidates()}, {"dropped"})
+
     def test_a_failed_scan_drops_a_queued_repository(self):
         self.store.save_discovery_cursor("github-scan-all", 900)
         out = self.scan_all(FakeGitHub(), FakeArchive({"2026-10-14-11": [push(901, "u/gone")]}))
@@ -271,7 +320,8 @@ class CommandLineTests(Case):
 
     def test_the_options_go_with_github_discovery(self):
         for argv in (("discover", "--github-scan-all"), ("scan", "npm:x", "--max-scans", "3"),
-                     ("discover", "--ecosystem", "npm", "--github-archive")):
+                     ("discover", "--ecosystem", "npm", "--github-archive"),
+                     ("discover", "--github-events-url", "https://gharchive.open-digger.cn")):
             with self.subTest(argv=argv):
                 code, _out, err = self.cli(*argv, "--db", self.db)
                 self.assertEqual(code, 2)
@@ -297,10 +347,34 @@ class CommandLineTests(Case):
                                        "--db", self.db, env=ENV)
         self.assertIn("kept 0: no look-alike", out)
         self.assertIn("GH Archive: read 1 hour(s)", out)
+        self.assertIn("thin: under 50,000 events in an hour", out)
+        self.assertIn("--github-events-url https://gharchive.open-digger.cn reads OpenDigger's mirror", out)
+        self.assertIn("1 scanned OK (no supply-chain indicator", out)
+        self.assertRegex(out, r"  .* OK .* github:u1/tool@0123456789ab  2 files, ")
+        self.assertNotIn("profile: project", out)                 # (an OK scan in one line)
+        self.assertIn("github: events: reading the hour", _err)
+        self.assertIn("github: scanning 1 of at most 100: github:u1/tool…", _err)
         self.assertRegex(out, r"every new repository \(newer than ID 1000\): 1 got code; queued 1")
         self.assertIn("scanned 1 this run", out)
         code, out, _err = self.cli("list", "--db", self.db)
         self.assertIn("Every new repository (--github-scan-all): scanned 1", out)
+
+    def test_a_scan_that_is_not_ok_is_shown_in_full(self):
+        self.store.save_discovery_cursor("github", 1001, NOW)
+        self.store.save_discovery_cursor("github-scan-all", 1000)
+        gh = FakeGitHub([], files={"u1/tool": HOSTILE})
+        archive = FakeArchive({ghevents.hour_name(datetime.datetime.now(UTC) - datetime.timedelta(hours=1)):
+                               [push(1001, "u1/tool")]})
+
+        def both(url, *a, **kw):
+            return (archive if "gharchive" in url else gh)(url, *a, **kw)
+        with mock.patch.object(ghdiscover.sources, "_http", both):
+            code, out, _err = self.cli("discover", "--ecosystem", "github", "--resume", "--github-scan-all", "--ci",
+                                       "--db", self.db, env=ENV)
+        self.assertEqual(code, 1)
+        self.assertIn("SUSPICIOUS", out)
+        self.assertIn("profile: project", out)
+        self.assertNotIn("scanned OK", out)
 
 
 class PostgresTests(unittest.TestCase):
