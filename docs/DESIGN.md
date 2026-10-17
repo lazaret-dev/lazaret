@@ -1137,7 +1137,36 @@ module's `verify`, its verdict cached by its SHA-256 as an extension's
 is), for an install or an update alike. Cost: the history document and at
 most `MAX_FILES` of the predecessor's files for a release with compiled
 code (none when the predecessor's wheels are platform wheels); not measured
-on the popular set yet. SC-VERSION-INFLATION (RA-7,
+on the popular set yet. SC-YANK-TO-PUSH (RA-10, 0.1.9,
+`registry/yanks.py`, MAJOR): a crate release whose publisher (its publish
+action's user, else `published_by`; one account by id, else login) yanked
+`YANK_COUNT` (2) or more of the crate's stable versions before it by
+SemVer, within `YANK_WINDOW` (a day) of its publication, either side,
+each yanked still (its last yank or unyank a yank), read from crates.io's
+version records (`/api/v1/crates/{name}/versions`, `audit_actions`). One
+yank is not it: a maintainer yanks the broken release its fix replaces.
+It is a release-level finding (file `(release)`) that `_release_findings`
+adds before the comparison, and the comparison asks about it as a weaker
+indicator: `prior.compare`'s `own` is {rule: test(predecessor)} for such
+findings (`yanks.own`: `reason` of the predecessor, from the same
+records), nothing of the predecessor downloaded for them; a finding of
+the release's own without a test is not compared. So it is SC-NEW-INDICATOR
+(CRITICAL) when the predecessor's publication came with no such yanks.
+The records are asked only when the index (`earlier_yanked`, the records
+History already holds) lists `YANK_COUNT` earlier stable versions as
+yanked, through the History's crates fetch (read once; `own` reads them
+from there), paced by the module's `rate`; a failure or an answer of
+another shape is no finding. The Cargo guard (`with_yanks`, before
+`with_prior` in `check_crate`): a crate from crates.io's own index
+(`registry.default`), not offline, in `PROVENANCE_DAYS`, not SUSPICIOUS;
+the index text is kept from the publish-time read (`crate_index_text`,
+`keep`) or read once (its `pubtime` the publish time when nothing else
+gave one), the records asked under `_api_lock` and `CRATES_API_INTERVAL`
+(`yanks.MAX_VERSIONS_BYTES`, 16 MB); a finding is added to the verdict's
+rules (WARN at least, the comparison made again) and `own` handed to
+`with_prior`; `yanks` (cached) settles it once read a day or more after
+publication. PyPI's yanks (PEP 592) carry no time in the JSON or Simple
+API, so they are not read. SC-VERSION-INFLATION (RA-7,
 0.1.9, `registry/version_anomaly.py` with `repo.version_inflation_issues`,
 MAJOR) reads the public tell of dependency confusion: a release with an
 inflated version — a non-zero PyPI epoch (which outranks every version

@@ -77,6 +77,7 @@ from lazaret.registry import prior as _prior            # noqa: E402
 from lazaret.registry import provenance as _provenance  # noqa: E402
 from lazaret.registry import unused_deps as _unused     # noqa: E402
 from lazaret.registry import version_anomaly as _version_anomaly  # noqa: E402
+from lazaret.registry import yanks as _yanks            # noqa: E402
 from lazaret.registry.ecosystems import base as _base   # noqa: E402
 from lazaret.scanner import engine as _engine           # noqa: E402
 from lazaret.scanner import gomod as _gomod             # noqa: E402
@@ -6167,19 +6168,22 @@ def _with_imports(imports, r):
 
 
 def _release_findings(eco, name, version, resolved, issues, per, found, limits):
-    """The release's own findings beside its files', added to `issues` (its files' findings): SC-NEW-INDICATOR
-    (registry/prior.py: asked of those findings alone), SC-NEW-DEPENDENCY, provenance's, SC-VERSION-INFLATION (not
-    asked when the others make the release SUSPICIOUS), the package's registry documents read once for them all (one
-    prior.History). found: (the files' digests the provenance check is given, the dependencies no file names, what a
-    VS Code extension brings, the modules a PyPI release's code imports or None); limits: (deadline, cancel, memo) ->
-    (provenance's summary, the prior release's). First, a look-alike dependency that is an established package is
-    made INFO (TYPO-ESTABLISHED, registry/lookalike_history.py), so the comparison does not ask about it."""
+    """The release's own findings beside its files', added to `issues` (its files' findings): SC-YANK-TO-PUSH (a
+    crate's, registry/yanks.py: RA-10), SC-NEW-INDICATOR (registry/prior.py: asked of those findings alone and the
+    yanks), SC-NEW-DEPENDENCY, provenance's, SC-VERSION-INFLATION (not asked when the others make the release
+    SUSPICIOUS), the package's registry documents read once for them all (one prior.History). found: (the files'
+    digests the provenance check is given, the dependencies no file names, what a VS Code extension brings, the
+    modules a PyPI release's code imports or None); limits: (deadline, cancel, memo) -> (provenance's summary, the
+    prior release's). First, a look-alike dependency that is an established package is made INFO
+    (TYPO-ESTABLISHED, registry/lookalike_history.py), so the comparison does not ask about it."""
     attested, unused, brings, imports = found
     deadline, cancel, memo = limits
     _lookalike_history.release_issues(eco, resolved, issues, per)
     history = _prior.History()             # (the package's registry documents, each read once for this release: RA-7)
+    # (RA-10: a crate's earlier releases yanked as it was published, compared as the files' weaker indicators are)
+    issues.extend(_yanks.release_issues(eco, name, version, history, issues))
     prior_issues, prior = _prior.release_issues(eco, name, version, resolved, issues, per, deadline, cancel, memo,
-                                                history)
+                                                history, own=_yanks.own(eco, name, history))
     issues.extend(new_dependency_issues(eco, name, version, resolved, unused, brings, imports, history))
     issues.extend(publisher_lookalike_issues(eco, name, resolved))   # (after it: a crate's owners are asked once, RA-9)
     provenance_issues, provenance = _provenance.check_release(eco, name, version, resolved, attested, _provenance_fetch)

@@ -20,10 +20,12 @@ and saying which of its files run when it is built.
                  crate, the library root; those are `install_scripts`. `entries` are the library root and the binaries.
                  Nothing runs when a crate is merely loaded, so `startup` is empty.
 
-The two CDN hosts have no rate limit. The API (`crates.io`) is asked two things, paced at one request a second, as
+The two CDN hosts have no rate limit. The API (`crates.io`) is asked three things, paced at one request a second, as
 crates.io's crawler policy asks: who owns a crate (`owners`, for SC-NEW-DEPENDENCY: a release that adds a brand-new
-crate of strangers), and which crates were updated lately (`recent_updates`, for `lazaret-registry discover`: its list
-of crates by their last update, newest first, a page of 100 at a time). The module reads the index with
+crate of strangers), which crates were updated lately (`recent_updates`, for `lazaret-registry discover`: its list
+of crates by their last update, newest first, a page of 100 at a time), and, for a release whose index lists earlier
+versions yanked, a crate's version records with who published and yanked each, and when (`/versions`, for
+SC-YANK-TO-PUSH: registry/yanks.py, RA-10). The module reads the index with
 `fetch.json_lines` and keeps, for each version, only what it needs: the `features` of a large crate are most of its
 index file. No Rust is run and no build is started."""
 

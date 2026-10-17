@@ -26,6 +26,22 @@ aggregate):
 
 ### Added
 
+- **A crate's earlier releases yanked as it was published: SC-YANK-TO-PUSH (RA-10; the registry and the Cargo guard,
+  no rule-set change).** arrayref's attacker yanked the crate's earlier versions to push its users to the new ones
+  (Wiz): cargo takes no yanked version for a new resolution. A crate release whose publisher yanked two or more of
+  the crate's stable versions before it (by SemVer; pre-releases not counted), each still yanked, within a day of
+  its publication, either side, is now **SC-YANK-TO-PUSH (MAJOR)** — "its earlier releases were yanked as it was
+  published" — read from crates.io's version records (`/api/v1/crates/{name}/versions`: each version's
+  `audit_actions`, publish, yank and unyank, with the user and the time). It is compared as a weaker indicator is:
+  when the established predecessor's own publication came with no such yanks (the same records), it is
+  **SC-NEW-INDICATOR (CRITICAL)** and the release SUSPICIOUS; a maintainer who yanks that way as a habit stays
+  MAJOR. One yank — the broken release a fix replaces — is not it. The records are asked for only when the crate's
+  index (read for the release anyway) lists two or more earlier stable versions as yanked, so most crates cost no
+  request, and one that does costs one, paced at crates.io's one a second. In the registry scan of a crate, and in
+  the Cargo guard for a crate from crates.io's index in the 30-day window (the index it already reads for the
+  crate's publish time; settled and cached once read a day after publication; nothing under `cargo --offline`). An
+  API that does not answer is no finding, never an error of the scan. PyPI's yanks (PEP 592) carry no time in its
+  APIs, so they are not read.
 - **Compiled code new in a release, and extension releases compared with their predecessor (RA-13; the registry
   and the guard, no rule-set change).** A release whose files ship compiled code — an ELF, Mach-O or PE file, or a
   `.so`, `.pyd`, `.dylib`, `.dll`, `.node` or `.exe` whose bytes are not text — when its established predecessor's

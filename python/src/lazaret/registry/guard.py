@@ -71,8 +71,11 @@ and the wrappers the project's configuration names, which cargo runs to learn th
 resolves, are set aside (CARGO_PLAN_CONFIG): a dry run runs none of the project's programs. Cargo.lock lists the crates
 of every platform, so the guard checks those cargo would not build here too (a verdict is kept by checksum: once). A crate
 from git, a vendor folder or a local registry, from a registry with a git index, or from one that wants credentials, is
-INCOMPLETE, not checked. Not wrapped: `cargo install` of a git repository or a folder, --registry, --index, and the
-credentials of registries. What the scan reads in a crate is what it reads in any archive; its Rust rules (build.rs,
+INCOMPLETE, not checked. A crate from crates.io's index published in the last 30 days whose index lists two or more
+stable versions before it as yanked is looked up in crates.io's version records (one request, paced): when the account
+that published it yanked them within a day of its publication it is SC-YANK-TO-PUSH (MAJOR, WARN), compared with its
+predecessor as a weaker indicator is (RA-10, registry/yanks.py). Not wrapped: `cargo install` of a git repository or a
+folder, --registry, --index, and the credentials of registries. What the scan reads in a crate is what it reads in any archive; its Rust rules (build.rs,
 procedural macros) read `.rs` files once the engine routes them (0.1.9, S-4).
 
 VS Code and the editors built on it (`<editor> --install-extension ID[@VERSION] | FILE.vsix`): the version the editor would
@@ -155,7 +158,7 @@ import urllib.request
 from lazaret.scanner import core as lazaret
 from lazaret.scanner import gomod, nativenet, programs, sca, timings
 from lazaret.registry import cargosrc, goproxy, keepalive as keepalive_, pmsettings, prior as prior_, \
-    provenance as provenance_, repo, scanpool
+    provenance as provenance_, repo, scanpool, yanks as yanks_
 from lazaret.registry import lookalike_history as lookalikes_
 from lazaret.registry import lookalike as lookalike_
 from lazaret.registry.ecosystems import crates, golang
@@ -829,14 +832,15 @@ def _prior_kept(hit):
     return kept
 
 
-def with_prior(ctx, check, hit, fetcher, filename, kind, scan_file=None, history=None):
+def with_prior(ctx, check, hit, fetcher, filename, kind, scan_file=None, history=None, own=None):
     """The scan's verdict `hit` compared with the release's established predecessor (prior.compare), for its weaker
     indicators (a WARN) and (RA-13) its compiled code: a weaker indicator whose rule the predecessor had no finding of
     is SC-NEW-INDICATOR, CRITICAL, and makes it SUSPICIOUS; compiled code the predecessor's files of the kind had none
     of is SC-NEW-COMPILED-CODE, MAJOR (an OK verdict is WARN), CRITICAL beside an SC-NEW-INDICATOR; their lines first
     among the indicators; what the comparison said is kept on `check` (--json) and with the verdict. `scan_file` and
     `history`: the comparison's scan and history (lazaret guard <editor>'s, over its registry module's fetch), else
-    the guard's fetcher's (`_prior_scan`)."""
+    the guard's fetcher's (`_prior_scan`). `own`: the comparison's tests of the predecessor for the release's own
+    findings among the verdict's rules (a crate's SC-YANK-TO-PUSH: with_yanks)."""
     asked = prior_.candidates(list((hit.get("rules") or {}).values()))
     compiled = [str(p) for p in hit.get("compiled") or ()]
     summary = None
@@ -849,7 +853,7 @@ def with_prior(ctx, check, hit, fetcher, filename, kind, scan_file=None, history
         per = [{"filename": filename, "kind": kind, **({"compiledCode": compiled} if compiled else {})}]
         issues, summary = prior_.compare(check.eco, check.name, check.version, asked, per, fetch_json,
                                          scan_file or _prior_scan(ctx, fetcher, check.eco, check.name),
-                                         history=history)
+                                         history=history, own=own)
         hit = with_release_issues(hit, issues)
     check.prior = summary
     return {**hit, "prior": summary}
@@ -964,6 +968,8 @@ class VerdictCache:
             kinds = [k for k in hit.get("incomplete") or () if k in repo.INCOMPLETE_KINDS]
             if kinds:                              # (why it is INCOMPLETE: the guard blocks it, T-1)
                 self.data[key]["incomplete"] = kinds
+            if hit.get("yanks") is True:           # (the yanks around it read, for good: RA-10)
+                self.data[key]["yanks"] = True
             if isinstance(hit.get("compiled"), list):   # (its compiled code, [] for none: RA-13)
                 self.data[key]["compiled"] = [str(p) for p in hit["compiled"]][:COMPILED_KEPT]
             self.data[key].update(_prior_kept(hit))
@@ -4704,18 +4710,30 @@ class CrateRegistry:
             self.error = exc
 
 
-def crate_index_record(fetcher, registry, pkg):
-    """What the registry's index says of one release (cargosrc.index_record), or None when it lists none."""
+def crate_index_text(fetcher, registry, pkg, keep=None):
+    """The registry's index file of a crate, as text; `keep`, a dict: kept in it (`text`) and read from it, so that what
+    else reads it (RA-10's yanks) does not fetch it again."""
+    if keep is not None and "text" in keep:
+        return keep["text"]
     text = fetcher.get(cargosrc.index_url(registry.base, pkg.name), MAX_CRATE_INDEX).decode("utf-8", "replace")
-    return cargosrc.index_record(text, pkg.version)
+    if keep is not None:
+        keep["text"] = text
+    return text
 
 
-def crate_publish_time(fetcher, registry, pkg, record):
+def crate_index_record(fetcher, registry, pkg, keep=None):
+    """What the registry's index says of one release (cargosrc.index_record), or None when it lists none. `keep`: as
+    crate_index_text's."""
+    return cargosrc.index_record(crate_index_text(fetcher, registry, pkg, keep), pkg.version)
+
+
+def crate_publish_time(fetcher, registry, pkg, record, keep=None):
     """When the registry says a release was published: the index's `pubtime` (optional), else crates.io's API for crates.io's own
-    index (one request a second); None when neither says. -> (the time or None, the index record or None)."""
+    index (one request a second); None when neither says. -> (the time or None, the index record or None). `keep`: as
+    crate_index_text's."""
     if record is None:
         try:
-            record = crate_index_record(fetcher, registry, pkg)
+            record = crate_index_record(fetcher, registry, pkg, keep)
         except repo.FetchError:
             record = None
     if record is not None and record["pubtime"]:
@@ -4732,6 +4750,60 @@ def crate_publish_time(fetcher, registry, pkg, record):
     return (parse_time(version.get("created_at")) if isinstance(version, dict) else None), record
 
 
+def with_yanks(hit, fetcher, registry, pkg, published, index):
+    """RA-10 (registry/yanks.py): SC-YANK-TO-PUSH for a crate from crates.io's own index in the comparison's window
+    (PROVENANCE_DAYS; a release whose time is not known too). Its index file (`index`: read already for its checksum or
+    its publish time, else read once) lists YANK_COUNT or more stable versions before it as yanked -> crates.io's
+    version records (one request, paced as its API asks), and a release its publisher published within a day of
+    yanking them is MAJOR: an OK verdict is WARN, the rule is kept in its rules, and it is compared with the
+    predecessor (again, if it was), whose own publication the same records answer for (the returned `own`). Settled
+    (`yanks`, kept in the cache) when read a day or more after its publication, as later yanks are not counted; an
+    index or an API that does not answer is nothing, and read again next time. -> (hit, the comparison's `own` or
+    None)."""
+    rules = hit.get("rules") or {}
+    flagged = yanks_.RULE in rules
+    old = lambda when: (now() - when).total_seconds() >= PROVENANCE_DAYS * 86400                 # noqa: E731
+    if (hit.get("verdict") == "SUSPICIOUS" or not yanks_.enabled() or (flagged and "prior" in hit)
+            or (hit.get("yanks") and not flagged) or (published is not None and old(published))):
+        return hit, None
+    if not flagged or published is None:
+        try:
+            text = crate_index_text(fetcher, registry, pkg, index)
+        except repo.FetchError:
+            return hit, None
+        if published is None:
+            # (its time from its index line, when nothing else gave it: a line without one predates the field, 2025,
+            # and so the window; either way settled, and not read again)
+            record = cargosrc.index_record(text, pkg.version)
+            published = parse_time(record["pubtime"]) if record and record["pubtime"] else None
+            if published is None or old(published):
+                return {**hit, "yanks": True}, None
+        if not flagged and len(yanks_.earlier_yanked_text(text, pkg.version)) < yanks_.YANK_COUNT:
+            return ({**hit, "yanks": True} if now() - published >= yanks_.YANK_WINDOW else hit), None
+    settled = now() - published >= yanks_.YANK_WINDOW
+    with _api_lock:
+        try:
+            raw = fetcher.get(yanks_.versions_url(pkg.name), yanks_.MAX_VERSIONS_BYTES, "application/json",
+                              repo.METADATA_TIMEOUT)
+            doc = repo._deep_safe_loads(raw, f"from {pmsettings.shown(yanks_.versions_url(pkg.name))}")
+            found = yanks_.reason(doc, pkg.version)
+        except (repo.FetchError, ValueError):
+            doc = found = None
+        time.sleep(CRATES_API_INTERVAL)
+    if doc is None:
+        return hit, None
+    own = yanks_.own("crates", pkg.name, doc=doc)
+    hit = {**hit, "yanks": True} if settled else dict(hit)
+    if flagged or found is None:
+        return hit, own
+    issue = yanks_.issue(found)
+    short = {"rule": issue["rule"], "sev": issue["sev"], "name": issue["name"], "file": issue["file"], "line": 1,
+             "msg": issue["msg"][:400]}
+    hit = with_release_issues({**hit, "rules": {**rules, yanks_.RULE: short}}, [issue])
+    hit.pop("prior", None)                   # (compared again, the yanks asked about)
+    return hit, own
+
+
 def check_crate(ctx, fetcher, registry, pkg, home, offline, keep=None):
     """Check one crate: pkg is a cargosrc.Package. Its `.crate` is read from cargo's own cache or fetched from where cargo
     fetches it, checked against the lockfile's checksum (or, with none, the index's), and scanned. A verdict that is already
@@ -4743,11 +4815,11 @@ def check_crate(ctx, fetcher, registry, pkg, home, offline, keep=None):
             raise repo.SpecError("not a crate name and version the guard fetches")
         if registry.error is not None:
             raise registry.error
-        record, digest = None, pkg.checksum
+        record, digest, index = None, pkg.checksum, {}
         if digest is None and offline:
             raise repo.FetchError("offline, and the lockfile gives no checksum to check it against")
         if digest is None:
-            record = crate_index_record(fetcher, registry, pkg)
+            record = crate_index_record(fetcher, registry, pkg, index)
             digest = record["cksum"] if record else None
             if digest is None:
                 raise repo.FetchError("neither the lockfile nor the registry's index gives a checksum to check it against")
@@ -4774,16 +4846,21 @@ def check_crate(ctx, fetcher, registry, pkg, home, offline, keep=None):
             if hit is None:
                 hit = ctx.scanner.scan(data, "tgz", "crate")
         if ctx.cutoff is not None and published is None and not offline:
-            published, record = crate_publish_time(fetcher, registry, pkg, record)
+            published, record = crate_publish_time(fetcher, registry, pkg, record, index)
         if record is not None and record["yanked"]:
             check.notes.append("yanked on the registry")
         hit = with_lookalikes(check, hit, fetcher, published, registry.default and not offline)    # (TYPO-ESTABLISHED)
+        # RA-10: its earlier releases yanked as it was published (SC-YANK-TO-PUSH), from crates.io's own index and API;
+        # compared with the predecessor below as a weaker indicator is (`own`). Not offline: nothing is asked then.
+        own = None
+        if not offline and registry.default:
+            hit, own = with_yanks(hit, fetcher, registry, pkg, published, index)
         # RA-8: compare a WARN crate with its established predecessor, as npm and PyPI are (prior.ECOSYSTEMS has crates);
         # crates.io has no provenance, so only with_prior runs. registry.default is the public index its history is read from.
         # Not offline (cargo --offline): the comparison reads the index and downloads the predecessor, and a run that does
         # not use the network asks nothing of it.
         if not offline and prior_due(hit, published, registry.default):
-            hit = with_prior(ctx, check, hit, fetcher, f"{pkg.name}-{pkg.version}.crate", "crate")
+            hit = with_prior(ctx, check, hit, fetcher, f"{pkg.name}-{pkg.version}.crate", "crate", own=own)
         ctx.scanner.remember(key, hit, published)
         ctx.apply(check, hit)
         ctx.age_check(check, published)

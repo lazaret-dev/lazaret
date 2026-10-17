@@ -23,6 +23,10 @@ step reads that way, pnpm 12.8.1's among them. A new hook with an indicator of i
 runs a program of its own (`npx x`) or code inline, a download or evaluation tool on its face, a file the package does
 not hold, or a script with a weaker finding (a hostile one is CRITICAL already, and the release SUSPICIOUS).
 
+A finding of the release's own that is compared too (RA-10's SC-YANK-TO-PUSH, registry/yanks.py: its earlier
+releases yanked as it was published) comes with its own test of the predecessor (`own`), read from the registry's
+documents: nothing of the predecessor is downloaded for it.
+
 Compiled code new in a release (RA-13; John, Oct 15) is a narrower comparison, asked of a release that is not
 SUSPICIOUS whatever its other findings: a release whose files ship compiled code (repo._compiled_code: an ELF, Mach-O
 or PE file, or a .so, .pyd, .dylib, .dll, .node or .exe that is not text; the files' `compiledCode`) when its
@@ -71,6 +75,7 @@ RULE = "SC-NEW-INDICATOR"
 COMPILED_RULE = "SC-NEW-COMPILED-CODE"   # RA-13
 COMPILED_NAMED = 3                       # the release's compiled files a finding names
 HOOK_RULE = "SC-INSTALL-HOOK"
+RELEASE_FILE = "(release)"               # the file of a finding of the release's own, not of one of its files
 #: what a release may well ship anew: not compared (SC-NESTED-CODE: generated code, a new minifier's or a new data
 #: table's, nests past the parser's bound too; JS-NEST)
 NOT_COMPARED = frozenset({"SC-BINARY", "SC-OPAQUE-BLOB", "SC-NESTED-ARCHIVE", "SC-NESTED-CODE"})
@@ -563,16 +568,17 @@ def _compiled_issue(new_code, kinds, prev, age, multi, critical):
 
 
 def _compare(eco, name, version, asked, per, ops):
-    fetch_json, scan_file, resolved, history = ops
+    fetch_json, scan_file, resolved, history, own = ops
     compiled = compiled_files(per)
     when, best, refs = _HISTORY[eco](name, version, resolved, fetch_json, history)
     if best is None:
         return [], {"notCompared": "the registry gives no time for this release" if when is None else
                     "no release published a week or more before this one"}
     prev = best[0]
+    of_files = {rule: i for rule, i in asked.items() if rule not in own}
     files = []
-    if asked:
-        flagged = {i.get("artifact") for i in asked.values()}
+    if of_files:
+        flagged = {i.get("artifact") for i in of_files.values()}
         files = counterparts(per, flagged, version, prev, refs)
         if not files:
             return [], {"version": prev, "notCompared": "no file of it to compare"}
@@ -584,6 +590,7 @@ def _compare(eco, name, version, asked, per, ops):
     if why:
         return [], {"version": prev, "notCompared": why}
     before = set().union(*(rules for ref, rules, _code in scanned if any(ref is f for f in files)))
+    before |= {rule for rule, had in own.items() if rule in asked and had(prev)}     # (the release's own: RA-10)
     new = sorted(set(asked) - before)
     new_code = _new_compiled(compiled, plan, scanned)
     age = _age(when - best[1])
@@ -597,7 +604,7 @@ def _compare(eco, name, version, asked, per, ops):
     return issues, summary
 
 
-def compare(eco, name, version, asked, per, fetch_json, scan_file, resolved=None, history=None):
+def compare(eco, name, version, asked, per, fetch_json, scan_file, resolved=None, history=None, own=None):
     """The comparison of a release whose findings asked about are `asked` (`candidates`) with its established
     predecessor, over the caller's fetch and scan: `fetch_json(url, accept)` a registry document, `scan_file(ref,
     version)` one of the predecessor's files fetched, checked and scanned -> (the rules it has a finding of
@@ -605,18 +612,27 @@ def compare(eco, name, version, asked, per, fetch_json, scan_file, resolved=None
     SC-NEW-COMPILED-CODE findings, summary). The release's files (`per`) that list `compiledCode` are compared for it
     (RA-13: `newCompiledCode` in the summary). The registry's errors are a summary that says why it was not compared
     (lazaret guard runs it so, over its own fetcher and scanner). `history`: the release scan's History, whose crates
-    index `_crates` and extension history `_extension` read (one of its own otherwise)."""
+    index `_crates` and extension history `_extension` read (one of its own otherwise). `own`: {rule: test(predecessor)
+    -> had it} for the release's own findings (not its files': RA-10's SC-YANK-TO-PUSH, registry/yanks.py), compared by
+    that test, nothing of the predecessor downloaded for them; a finding of the release's own (its file "(release)")
+    without a test is not compared."""
+    own = own or {}
+    asked = {rule: i for rule, i in asked.items() if rule in own or i.get("file") != RELEASE_FILE}
+    if not asked and not compiled_files(per):
+        return [], None
     try:
-        return _compare(eco, name, version, asked, per, (fetch_json, scan_file, resolved, history))
+        return _compare(eco, name, version, asked, per, (fetch_json, scan_file, resolved, history, own))
     except (_base.FetchError, _base.SpecError, _base.DigestError, ValueError) as exc:
         return [], {"notCompared": f"{type(exc).__name__}: {_base.show(str(exc))}"}
 
 
-def release_issues(eco, name, version, resolved, issues, per, deadline=None, cancel=None, memo=None, history=None):
+def release_issues(eco, name, version, resolved, issues, per, deadline=None, cancel=None, memo=None, history=None,
+                   own=None):
     """SC-NEW-INDICATOR and SC-NEW-COMPILED-CODE findings for one release whose files' findings are `issues` (`per`:
     its files as scan_package lists them, their `compiledCode`) -> (findings, summary or None when no comparison was
     asked for: the release is SUSPICIOUS, or has no weaker indicator asked about and no compiled code). `history`: the
-    release scan's History (the registry's documents read once for the release), else one of its own."""
+    release scan's History (the registry's documents read once for the release), else one of its own. `own`: compare's
+    tests of the predecessor for the release's own findings among `issues` (SC-YANK-TO-PUSH)."""
     if eco not in ECOSYSTEMS or not enabled() or strong(issues):
         return [], None
     asked = candidates(issues)
@@ -624,4 +640,4 @@ def release_issues(eco, name, version, resolved, issues, per, deadline=None, can
         return [], None
     history = history or History()
     return compare(eco, name, version, asked, per, history.json,
-                   lambda ref, prev: _scan(eco, name, prev, ref, deadline, cancel, memo), resolved, history)
+                   lambda ref, prev: _scan(eco, name, prev, ref, deadline, cancel, memo), resolved, history, own)
