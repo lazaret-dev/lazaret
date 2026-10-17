@@ -2260,7 +2260,11 @@ on how deep its caller's stack was (the command, the MCP server, a test);
 the engine's does not. Natively the pass runs on the engine's own 8 MiB
 stack (§16); in WebAssembly its frames are on Node's own stack, about
 1 MB, which the frames keep it within: `test_wasm_parity_pyflow` reads
-every construct at its deepest.
+every construct at its deepest. `pyflow/tests.rs` reads the deepest on a
+thread of its own (`on_a_stack`, 0.1.9, DBG-STACK): measured, the chain of
+987 operators takes 446 KiB in a release build and 8,096 KiB in a debug
+one, more than a test thread's 2 MiB, so the thread has 16 MiB in a debug
+build (as `api::OWN_STACK` has 64 MiB there) and 2 MiB in a release one.
 
 **A reading like the last (P-1, 0.1.9).** The fixpoint reads a function
 again when a summary, a class's attributes or a global it may read has
