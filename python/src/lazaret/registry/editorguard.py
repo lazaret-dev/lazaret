@@ -34,7 +34,11 @@ the editor's own `--install-extension` does, up to the download, and then has th
                     vscode:uninstall), with the verdict cache, --min-age (the registry's publish time), --trust,
                     --allow-new and --block-warn as for the package managers; and the list of extensions the editor's
                     gallery has found malicious (product.json's controlUrl; the Marketplace's own for its extensions),
-                    which the editor applies to what it downloads itself, and not to a file it is given.
+                    which the editor applies to what it downloads itself, and not to a file it is given. A file from the
+                    gallery published in the last 30 days that is WARN, or ships compiled code, is compared with its
+                    established predecessor as `lazaret-registry` compares a release (registry/prior.py, RA-13: a
+                    weaker indicator new in it is SC-NEW-INDICATOR and blocks it; compiled code new in it is
+                    SC-NEW-COMPILED-CODE, WARN), an install and an update alike.
     replaced        an extension the gallery's control list says to migrate (`migrateToPreRelease`, a `deprecated`
                     entry with `autoMigrate`, and the product's `defaultChatAgent`: VS Code's Copilot) is not the one
                     the editor installs: it installs the replacement, at its newest version (a pre-release when the
@@ -92,7 +96,7 @@ import types
 import urllib.parse
 import zipfile
 
-from lazaret.registry import editorcompat, repo
+from lazaret.registry import editorcompat, prior, repo
 from lazaret.registry import guard as G
 from lazaret.registry.ecosystems import base
 from lazaret.scanner import core as lazaret
@@ -918,10 +922,29 @@ class Run:
                 ctx.not_checked(check, exc)
                 return
         published = item.candidate.when if item.candidate is not None else None
+        if item.source is None and G.prior_due(hit, published, True):
+            # RA-13: an extension from the gallery in the window, WARN or shipping compiled code, compared with its
+            # established predecessor as `lazaret-registry` compares a release (registry/prior.py), over this run's fetch
+            hit = G.with_prior(ctx, check, hit, None, item.artifact.get("filename"), "vsix",
+                               scan_file=self._prior_scan(item), history=prior.History(self.fetch))
         ctx.scanner.remember(key, hit, published)
         ctx.apply(check, hit)
         if item.source is None:
             ctx.age_check(check, published)
+
+    def _prior_scan(self, item):
+        """The comparison's scan of one of the predecessor's files (prior.compare's `scan_file`): fetched over this
+        run's fetch, checked against the registry's digest (Open VSX's SHA-256; the Marketplace publishes none, and its
+        file is taken as the release's is), its verdict cached by its SHA-256 as an extension's is (G.prior_scanned)."""
+        ctx = self.ctx
+
+        def scan_file(ref, prev):
+            with ctx.scanner.holding(G.UNDECLARED_HOLD):
+                data = self.fetch.bytes(ref["url"], repo.MAX_DOWNLOAD_BYTES)
+                self.module.verify(data, ref["entry"], item.id, prev)
+                key = G.VerdictCache.key(self.editor.gallery, item.id, prev, "sha256:" + hashlib.sha256(data).hexdigest())
+                return G.prior_scanned(ctx, key, data, ref)
+        return scan_file
 
     # ---- what an extension brings
     def brings(self, item):

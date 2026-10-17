@@ -1464,6 +1464,24 @@ def _native_program(raw):
     return lazaret._native.call("binary_check", {"check": "program"}, lazaret._bytes_text(bytes(raw[:2048])))
 
 
+#: (RA-13) the names of compiled code a loader opens: Python's extension modules and the shared libraries they load,
+#: Node's addons, a Windows program
+COMPILED_CODE_EXTS = frozenset((".so", ".pyd", ".dylib", ".dll", ".node", ".exe"))
+#: the most of a file's compiled code its result lists (`compiledCode`)
+MAX_COMPILED_LISTED = 50
+
+
+def _compiled_code(rel, raw, native):
+    """(RA-13) Is a binary member compiled code, as the comparison with the release before reads it (prior.py's
+    SC-NEW-COMPILED-CODE): a program the system loads by its first bytes (`native`: _native_program's answer; an ELF,
+    Mach-O or PE file, not a WebAssembly or DEX module, which a runtime of their own runs, nor a Java class), or a file
+    under a name a loader opens as one (COMPILED_CODE_EXTS) whose bytes are not text."""
+    ext = os.path.splitext(rel)[1].lower()
+    if native:
+        return not bytes(raw[:4]).startswith((b"\0asm", b"dex\n")) and ext not in (".class", ".jar")
+    return ext in COMPILED_CODE_EXTS and lazaret.looks_binary(raw[:2048])
+
+
 def case_fold(rel):
     """A member's path as file systems that ignore case and Unicode normalization compare it (macOS's, Windows'):
     two paths with the same fold are one file there (EG-4). NFD, then str.casefold(), on the engine's Unicode 13.0
@@ -2983,6 +3001,7 @@ class _ArtifactScan:
         self.binary = set()        # classified as binary
         self.oversize = set()
         self.native = set()        # members whose first bytes are a program's (ELF, Mach-O, PE, WebAssembly, DEX)
+        self.compiled = set()      # RA-13: members that are compiled code (_compiled_code: the result's compiledCode)
         self.members = set()
         self.manifests = {}        # rel -> text (package.json, binding.gyp, pyproject.toml)
         self.entries = set()       # rels that run when installed / imported
@@ -3274,8 +3293,11 @@ class _ArtifactScan:
                      and lazaret.agentdoc_kind(rel) is not None)
         if reason == "member":
             self.oversize.add(rel)
-            if _native_program(raw):
+            native = _native_program(raw)
+            if native:
                 self.native.add(rel)
+            if _compiled_code(rel, raw, native):
+                self.compiled.add(rel)
             if agent_doc:
                 self.truncate(rel, _TRUNC_DETAILS["member"](rel, size), "code")
             elif wants_text and not (ext in lazaret.MPEG_TS_EXTS and lazaret._mpeg_ts(raw[:512])):
@@ -3368,14 +3390,18 @@ class _ArtifactScan:
                 # a program under a source file's name: a disguise, CRITICAL (0.1.8)
                 self.binaries += 1
                 self.issues.append(disguised)
+                self.compiled.add(rel)
             elif any(i["rule"] == "SC-TRUNCATED" for i in extra):
                 self.classify(rel, raw, size)   # an ELF named index.js is still an ELF
             self.scan_source(rel, text, lang)
             return
         if lazaret.looks_binary(raw[:2048]):
             self.binary.add(rel)
-            if _native_program(raw):
+            native = _native_program(raw)
+            if native:
                 self.native.add(rel)
+            if _compiled_code(rel, raw, native):
+                self.compiled.add(rel)
             self.classify(rel, raw, size)
             return
         # An AI agent's skill or instruction file (RA-3): read in the second pass for what it tells the agent to do
@@ -5147,7 +5173,8 @@ def scan_members(members, anomalies, artifact, full, budget, memo=None, action_r
            "truncated": st.truncated, "verdict": verdict, "verdictReason": reason,
            "strongIndicators": strong, "weakIndicators": weak,
            "unusedDependencies": st.unused_dependencies, "useTime": st.use_time,
-           "incomplete": sorted(st.cut) if verdict == "INCOMPLETE" else []}
+           "incomplete": sorted(st.cut) if verdict == "INCOMPLETE" else [],
+           "compiledCode": sorted(st.compiled)[:MAX_COMPILED_LISTED]}
     out.update(_artifact_fields(artifact, st))
     return out
 
@@ -5869,14 +5896,16 @@ def new_dependency_issues(eco, name, version, resolved, unused=(), brings=(), im
     when no file of it was read whole: a brand-new requirement is unused when
     the release imports none of its own modules (pypi_unused_new, D-5), which
     the offline reading of names (`unused`) only guesses. history: the release
-    scan's prior.History, through which npm's packument and a crate's index
-    file are read once for the release (SC-NEW-INDICATOR and
-    SC-VERSION-INFLATION read them too)."""
+    scan's prior.History, through which npm's packument, a crate's index
+    file and an extension's version history are read once for the release
+    (SC-NEW-INDICATOR and SC-VERSION-INFLATION read them too)."""
     if os.environ.get("LAZARET_NO_DEPENDENCY_HISTORY") or eco not in ("npm", "pypi", "crates", "openvsx", "vscode"):
         return []
     if eco in ("openvsx", "vscode"):
+        # (the version history read once for the release: SC-NEW-INDICATOR reads it too, RA-13)
+        fetch = history.module_fetch(registry_module(eco)) if history is not None else None
         try:
-            previous, found = extension_new_dependencies(eco, name, version, resolved, brings)
+            previous, found = extension_new_dependencies(eco, name, version, resolved, brings, fetch)
         except (FetchError, SpecError, ValueError):
             return []
         return [_new_extension_issue(dep, age, previous) for dep, age in found]
@@ -6075,7 +6104,9 @@ def scan_package(eco, name, version=None, full=False, *, resolved=None, deadline
                     "archiveBytes": len(data), "digest": digest,
                     **{k: r[k] for k in ("verdict", "verdictReason", "filesScanned",
                                          "binaryArtifacts", "truncated",
-                                         "strongIndicators", "weakIndicators", "useTime")}})
+                                         "strongIndicators", "weakIndicators", "useTime")},
+                    # (RA-13: the file's compiled code, which the comparison with the release before reads)
+                    **({"compiledCode": r["compiledCode"]} if r.get("compiledCode") else {})})
     provenance, prior = _release_findings(eco, name, version, resolved, all_issues, per, (attested, unused, brings, imports),
                                           (deadline, cancel, memo))
     skip_issues, skip_label = _skipped_summary(skipped, byte_budget, limit)

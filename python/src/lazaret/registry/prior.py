@@ -23,6 +23,27 @@ step reads that way, pnpm 12.8.1's among them. A new hook with an indicator of i
 runs a program of its own (`npx x`) or code inline, a download or evaluation tool on its face, a file the package does
 not hold, or a script with a weaker finding (a hostile one is CRITICAL already, and the release SUSPICIOUS).
 
+Compiled code new in a release (RA-13; John, Oct 15) is a narrower comparison, asked of a release that is not
+SUSPICIOUS whatever its other findings: a release whose files ship compiled code (repo._compiled_code: an ELF, Mach-O
+or PE file, or a .so, .pyd, .dylib, .dll, .node or .exe that is not text; the files' `compiledCode`) when its
+established predecessor's files of the same kind ship none at all is SC-NEW-COMPILED-CODE, MAJOR, naming a few of the
+files, and CRITICAL when the comparison finds an SC-NEW-INDICATOR too. Shai-Hulud's PyPI wave (June 2026) gave pure-
+Python bioinformatics and ML packages native extensions that run on import (`ensmallen_*.abi3.so`), beside a .pth
+loader; GlassWorm v2 (April 2026) published 73 Open VSX extensions benign and activated six through ordinary updates
+that brought .node binaries and a downloader, so 67 of the 73 would pass any one-time scan. Like with like: a release's
+sdist with its predecessor's sdist, a wheel with its wheels, a `.vsix` with its `.vsix` files; a predecessor's wheel
+whose tags are not pure Python's (an ABI tag other than `none`, or a platform other than `any`) ships compiled code by
+its name, and nothing of it is downloaded; else its files of the kind (the counterparts, as below) are scanned, and
+the release's compiled code is new when none of them ships any. So a package that always had platform wheels adding
+another, or one whose sdist is pure Python and whose wheels are not, is not asked about. Which files of a release are
+compiled code is that release's own scan; SC-BINARY (an inventory finding in a wheel, MAJOR elsewhere) stays as it is.
+
+Open VSX's and the Marketplace's releases are compared too (RA-13), by the version history SC-NEW-DEPENDENCY reads for
+them (the module's `history`: each version's earliest time across its platforms, whether it is a pre-release), the
+predecessor's files resolved as the release's were (each Open VSX file checked against its SHA-256; the Marketplace
+publishes none, and its files are scanned unverified, as the release's are). `lazaret guard <editor>` compares an
+extension it installs or updates from its gallery the same way (registry/editorguard.py).
+
 The predecessor: npm, by the packument's times; PyPI, by the Simple API's upload times (the first file's of each
 release), its files of the same kind as the release's that were flagged (the same name with the version changed, else
 the first of the kind); crates, by the index's publish times. Best effort, as SC-NEW-DEPENDENCY is: a registry that
@@ -34,6 +55,7 @@ needed: it imports this module). A release scan reads the package's history docu
 SC-NEW-DEPENDENCY and SC-VERSION-INFLATION (`History`, RA-7; `version_times` is SC-VERSION-INFLATION's reading of it)."""
 
 import datetime
+import json
 import os
 import time
 import urllib.parse
@@ -44,8 +66,10 @@ OFF_ENV = "LAZARET_NO_PRIOR_RELEASE"
 GAP = datetime.timedelta(days=7)
 MAX_HISTORY_BYTES = 16 * 1024 * 1024     # an npm packument or a Simple API document of a package with many releases
 MAX_FILES = 3                            # the predecessor's files downloaded and scanned
-ECOSYSTEMS = ("npm", "pypi", "crates")
+ECOSYSTEMS = ("npm", "pypi", "crates", "openvsx", "vscode")
 RULE = "SC-NEW-INDICATOR"
+COMPILED_RULE = "SC-NEW-COMPILED-CODE"   # RA-13
+COMPILED_NAMED = 3                       # the release's compiled files a finding names
 HOOK_RULE = "SC-INSTALL-HOOK"
 #: what a release may well ship anew: not compared (SC-NESTED-CODE: generated code, a new minifier's or a new data
 #: table's, nests past the parser's bound too; JS-NEST)
@@ -58,6 +82,15 @@ WHY = ("A finding a package's releases have long had is how the package is made;
        "had no finding of this rule. A maintainer's new build step reads the same way: read what changed.")
 FIX = ("Compare this release with the one named (npm diff, or the two archives' listings) and read what the new "
        "finding points at before installing; pin the earlier release until the change is explained.")
+COMPILED_WHY = ("Compiled code runs when it is imported or loaded, and no review of a package's source reads it. "
+                "Shai-Hulud's PyPI wave (June 2026) gave pure-Python packages native extensions that run on import "
+                "(ensmallen_*.abi3.so); GlassWorm v2 (April 2026) published 73 Open VSX extensions benign and activated "
+                "six through ordinary updates that brought .node binaries, so 67 of the 73 would pass any one-time scan. "
+                "Lazaret scanned the newest release published at least a week before this one, and its files of the "
+                "same kind ship no compiled code. A project that starts building native code reads the same way: read "
+                "its changelog.")
+COMPILED_FIX = ("Compare this release with the one named and find what builds and loads the new compiled files before "
+                "installing; pin the earlier release until they are explained.")
 
 
 def enabled():
@@ -83,6 +116,30 @@ def candidates(issues):
         if rule not in NOT_COMPARED and not (rule == HOOK_RULE and i.get("readClean") is True):
             out.setdefault(rule, i)
     return out
+
+
+def strong(issues):
+    """Is a release SUSPICIOUS by its findings (a supply-chain finding of STRONG_SEVERITIES)? Nothing is asked of it."""
+    repo = _repo()
+    return any(i["rule"].startswith("SC-") and i["rule"] not in repo.TRUNCATION_RULES
+               and i["sev"] in repo.STRONG_SEVERITIES for i in issues)
+
+
+def compiled_files(per):
+    """(RA-13) {filename: (its kind, [its compiled code's paths])} of the release's files (`per`) that ship compiled
+    code (their `compiledCode`)."""
+    return {p.get("filename"): (p.get("kind"), list(p["compiledCode"])) for p in per
+            if isinstance(p.get("compiledCode"), list) and p["compiledCode"]}
+
+
+def compiled_by_name(ref):
+    """(RA-13) Does a predecessor's file ship compiled code by its name: a wheel whose tags are not pure Python's (an ABI
+    tag other than `none`, or a platform other than `any`: `{name}-{version}(-{build})?-{python}-{abi}-{platform}.whl`)."""
+    name = ref.get("filename") or ""
+    if ref.get("artifact") != "wheel" or not name.lower().endswith(".whl"):
+        return False
+    parts = name[:-len(".whl")].split("-")
+    return len(parts) >= 5 and (parts[-2].lower() != "none" or parts[-1].lower() != "any")
 
 
 def established(times, version, versions, prerelease, gap=GAP):
@@ -118,12 +175,14 @@ class History:
     `json` keys a document by URL and Accept. An answer is kept with its size, and a caller with a smaller budget than
     the answer's size gets the TooLarge its own fetch would have raised (SC-NEW-DEPENDENCY's MAX_FEED_BYTES beside the
     history's MAX_HISTORY_BYTES); a failure is kept and raised again, except a TooLarge, which a caller with a larger
-    budget asks again. `module_fetch` is a registry module's fetch whose documents (a crate's index lines) are read once
-    for each URL, Accept and budget."""
+    budget asks again. `module_fetch` is a registry module's fetch whose documents (a crate's index lines, an extension's
+    version history) are read once for each URL, Accept and budget. `fetch`: the base.Fetch module_fetch wraps, in
+    place of repo.module_fetch's (lazaret guard's editor run: its own)."""
 
-    def __init__(self):
+    def __init__(self, fetch=None):
         self._docs = {}
         self._fetches = {}
+        self._given = fetch
 
     def json(self, url, accept=None, max_bytes=MAX_HISTORY_BYTES, fetch=None):
         """The JSON document at `url` (`_json`'s fetch, at `max_bytes`); `fetch(url)`, a fetch of its own whose budget
@@ -164,15 +223,16 @@ class History:
         return self.json(url, None, repo.MAX_FEED_BYTES, fetch=lambda u: repo.http_json(u))
 
     def module_fetch(self, module):
-        """repo.module_fetch(module), its documents each read once."""
+        """repo.module_fetch(module) (or the fetch given), its documents each read once."""
         if module not in self._fetches:
-            self._fetches[module] = _OnceFetch(_repo().module_fetch(module))
+            self._fetches[module] = _OnceFetch(self._given if self._given is not None else _repo().module_fetch(module))
         return self._fetches[module]
 
 
 class _OnceFetch:
-    """A registry module's fetch (`base.Fetch`) whose documents (json_lines, json, text) are each read once for a URL,
-    Accept and budget (and json_lines' `select`); the rest (a download's `bytes`, a POST) as the fetch's own."""
+    """A registry module's fetch (`base.Fetch`) whose documents (json_lines, json, text, and a query POSTed: the
+    Marketplace's version history, RA-13) are each read once for a URL, Accept and budget (and json_lines' `select`, a
+    POST's body); the rest (a download's `bytes`) as the fetch's own."""
 
     def __init__(self, fetch):
         self._fetch, self._kept = fetch, {}
@@ -200,6 +260,10 @@ class _OnceFetch:
 
     def text(self, url, max_bytes=_base.MAX_DOCUMENT_BYTES, accept=None):
         return self._once(("text", url, max_bytes, accept), lambda: self._fetch.text(url, max_bytes, accept))
+
+    def post_json(self, url, body, max_bytes=_base.MAX_DOCUMENT_BYTES, accept=None):
+        return self._once(("post", url, json.dumps(body, sort_keys=True), max_bytes, accept),
+                          lambda: self._fetch.post_json(url, body, max_bytes=max_bytes, accept=accept))
 
 
 def _npm(name, version, _resolved, fetch_json, _history=None):
@@ -292,7 +356,32 @@ def _crates(name, version, resolved, _fetch_json, history=None):
     return when, best, refs
 
 
-_HISTORY = {"npm": _npm, "pypi": _pypi, "crates": _crates}
+def _extension(eco):
+    """Open VSX, the Marketplace (RA-13): the reader of (when, (predecessor, its time), its files) by the version history
+    SC-NEW-DEPENDENCY reads (the module's `history`: a version's earliest time across its platforms, a pre-release or
+    not), over the module's fetch (`history`'s, the release scan's: read once for both); the release's own time and
+    kind from its resolution when the history does not list it. The predecessor's files are its resolution's (each
+    platform's, each Open VSX file with its SHA-256)."""
+    def read(name, version, resolved, _fetch_json, history=None):
+        module = _repo().registry_module(eco)
+        fetch = (history or History()).module_fetch(module)
+        entries = module.history(name, fetch)
+        times = {e[0]: e[1].isoformat() for e in entries}
+        pre = {e[0] for e in entries if e[3]}
+        info = getattr(resolved, "info", None)
+        info = info if isinstance(info, dict) else {}
+        if version not in times and isinstance(info.get("timestamp") or info.get("lastUpdated"), str):
+            times[version] = info.get("timestamp") or info.get("lastUpdated")
+            if info.get("preRelease") is True:
+                pre.add(version)
+        when, best = established(times, version, times, lambda v: v in pre)
+        refs = module.resolve(name, best[0], fetch).artifacts if best else []
+        return when, best, refs
+    return read
+
+
+_HISTORY = {"npm": _npm, "pypi": _pypi, "crates": _crates, "openvsx": _extension("openvsx"),
+            "vscode": _extension("vscode")}
 
 
 def _npm_times(name, fetch_json):
@@ -369,8 +458,8 @@ def rules_found(issues):
 
 
 def _scan(eco, name, prev, ref, deadline, cancel, memo):
-    """One of the predecessor's files, fetched, checked against its digest and scanned as the release's were: the set
-    of rules it has a finding of, or why it was not compared (its scan was not complete)."""
+    """One of the predecessor's files, fetched, checked against its digest and scanned as the release's were: (the set
+    of rules it has a finding of, its compiled code's paths), or why it was not compared (its scan was not complete)."""
     repo = _repo()
     if deadline is not None and time.monotonic() > deadline:
         return "out of time"
@@ -385,18 +474,57 @@ def _scan(eco, name, prev, ref, deadline, cancel, memo):
     budget = repo.Budget(deadline=stop if deadline is None else min(stop, deadline), cancel=cancel,
                          deadline_detail="the prior release's scan ran out of time")
     r = repo._scan_artifact(data, ref["container"], ref["artifact"], False, budget, memo)
-    return f"{ref.get('filename')} was not scanned whole" if r["truncated"] else rules_found(r["issues"])
+    if r["truncated"]:
+        return f"{ref.get('filename')} was not scanned whole"
+    return rules_found(r["issues"]), list(r.get("compiledCode") or ())
 
 
-def _rules_of(prev, files, scan_file):
-    """(the rules the predecessor's files have a finding of, None), or (None, why it was not compared)."""
-    before = set()
+def _scanned(prev, files, scan_file):
+    """([(file, the rules it has a finding of, its compiled code's paths or None: not known)] of the predecessor's
+    `files`, None), or (None, why one was not compared). `scan_file` answers (rules, compiled code), the rules alone
+    (its compiled code not known), or why."""
+    out = []
     for ref in files:
-        rules = scan_file(ref, prev)
-        if isinstance(rules, str):
-            return None, rules
-        before |= rules
-    return before, None
+        got = scan_file(ref, prev)
+        if isinstance(got, str):
+            return None, got
+        rules, compiled = got if isinstance(got, tuple) else (got, None)
+        out.append((ref, set(rules), None if compiled is None else list(compiled)))
+    return out, None
+
+
+def _compiled_plan(compiled, version, prev, refs):
+    """(RA-13) What the comparison reads of the predecessor for the release's files that ship compiled code
+    (`compiled_files`), kind by kind, like with like: ({kind: its files of the kind to scan}, the kinds whose files ship
+    compiled code by their names (`compiled_by_name`: nothing scanned), the kinds it has no file of (not compared)).
+    The files scanned of a kind: a counterpart of each of the release's compiled files (the same name with the version
+    changed, else the first of the kind), at most MAX_FILES."""
+    scan, by_name, none = {}, set(), set()
+    for kind in sorted({k for k, _paths in compiled.values()}, key=str):
+        theirs = [r for r in refs if r.get("artifact") == kind]
+        if not theirs:
+            none.add(kind)
+        elif any(compiled_by_name(r) for r in theirs):
+            by_name.add(kind)
+        else:
+            mine = [{"filename": f, "kind": k} for f, (k, _paths) in compiled.items() if k == kind]
+            scan[kind] = counterparts(mine, {m["filename"] for m in mine}, version, prev, theirs)
+    return scan, by_name, none
+
+
+def _new_compiled(compiled, plan, scanned):
+    """(RA-13) [(the release's file, a path of its compiled code)] of the kinds whose predecessor's files scanned ship
+    no compiled code (each of them read, none listing any); [] for a kind one of them ships some of, or whose compiled
+    code is not known."""
+    code = [(ref, paths) for ref, _rules, paths in scanned]
+    out = []
+    for kind, files in plan[0].items():
+        theirs = [paths for ref, paths in code if any(ref is f for f in files)]
+        if not files or len(theirs) < len(files) or any(p is None or p for p in theirs):
+            continue
+        out += [(f, p) for f, (k, paths) in sorted(compiled.items(), key=lambda kv: str(kv[0])) if k == kind
+                for p in paths]
+    return out
 
 
 def _age(delta):
@@ -413,33 +541,71 @@ def _issue(rule, first, prev, age):
             "snipStart": first.get("snipStart", 1), **({"artifact": first["artifact"]} if "artifact" in first else {})}
 
 
+_KIND_WORDS = {"wheel": "wheels", "sdist": "sdist", "npm": "package", "crate": "crate", "vsix": ".vsix files"}
+
+
+def _compiled_issue(new_code, kinds, prev, age, multi, critical):
+    """(RA-13) SC-NEW-COMPILED-CODE for the release's compiled code (`new_code`: [(its file, a path)]) whose kinds of
+    file (`kinds`) its predecessor's had none of: MAJOR, CRITICAL beside an SC-NEW-INDICATOR. `multi`: the release has
+    more than one file (the finding names the file it is in, as scan_package's file findings do)."""
+    paths = list(dict.fromkeys(p for _f, p in new_code))
+    files = list(dict.fromkeys(f for f, _p in new_code))
+    named = ", ".join(paths[:COMPILED_NAMED]) + (" and others" if len(paths) > COMPILED_NAMED else "")
+    msg = (f"Compiled code new in this release: {named}" + (f" (in {len(files)} of its files)" if len(files) > 1 else "")
+           + f"; {prev}, published {age} before it, ships none in its "
+           + " or ".join(_KIND_WORDS.get(k, f"{k} files") for k in kinds) + "."
+           + (" A weaker indicator is new in this release too (SC-NEW-INDICATOR)." if critical else ""))
+    first_file, first_path = new_code[0]
+    return {"rule": COMPILED_RULE, "name": "Compiled code new in this release", "type": "HOTSPOT",
+            "sev": "CRITICAL" if critical else "MAJOR", "msg": msg[:1200], "why": COMPILED_WHY, "fix": COMPILED_FIX,
+            "ref": "CWE-506 · Supply chain", "file": f"{first_file}/{first_path}" if multi and first_file else first_path,
+            "line": 1, "snippet": [], "snipStart": 1, **({"artifact": first_file} if multi and first_file else {})}
+
+
 def _compare(eco, name, version, asked, per, ops):
     fetch_json, scan_file, resolved, history = ops
+    compiled = compiled_files(per)
     when, best, refs = _HISTORY[eco](name, version, resolved, fetch_json, history)
     if best is None:
         return [], {"notCompared": "the registry gives no time for this release" if when is None else
                     "no release published a week or more before this one"}
     prev = best[0]
-    flagged = {i.get("artifact") for i in asked.values()}
-    files = counterparts(per, flagged, version, prev, refs)
-    if not files:
-        return [], {"version": prev, "notCompared": "no file of it to compare"}
-    before, why = _rules_of(prev, files, scan_file)
+    files = []
+    if asked:
+        flagged = {i.get("artifact") for i in asked.values()}
+        files = counterparts(per, flagged, version, prev, refs)
+        if not files:
+            return [], {"version": prev, "notCompared": "no file of it to compare"}
+    plan = _compiled_plan(compiled, version, prev, refs)
+    want = list(files)
+    for of_kind in plan[0].values():
+        want += [f for f in of_kind if f not in want]
+    scanned, why = _scanned(prev, want, scan_file)
     if why:
         return [], {"version": prev, "notCompared": why}
+    before = set().union(*(rules for ref, rules, _code in scanned if any(ref is f for f in files)))
     new = sorted(set(asked) - before)
+    new_code = _new_compiled(compiled, plan, scanned)
     age = _age(when - best[1])
-    summary = {"version": prev, "publishedBefore": age, "files": [r.get("filename") for r in files], "newRules": new}
-    return [_issue(rule, asked[rule], prev, age) for rule in new], summary
+    summary = {"version": prev, "publishedBefore": age, "files": [r.get("filename") for r in want], "newRules": new}
+    if compiled:
+        summary["newCompiledCode"] = list(dict.fromkeys(p for _f, p in new_code))[:COMPILED_NAMED]
+    issues = [_issue(rule, asked[rule], prev, age) for rule in new]
+    if new_code:
+        kinds = sorted({compiled[f][0] for f, _p in new_code}, key=str)
+        issues.append(_compiled_issue(new_code, kinds, prev, age, len(per) > 1, bool(new)))
+    return issues, summary
 
 
 def compare(eco, name, version, asked, per, fetch_json, scan_file, resolved=None, history=None):
     """The comparison of a release whose findings asked about are `asked` (`candidates`) with its established
     predecessor, over the caller's fetch and scan: `fetch_json(url, accept)` a registry document, `scan_file(ref,
-    version)` one of the predecessor's files fetched, checked and scanned -> the rules it has a finding of
-    (`rules_found`), or why it was not compared -> (SC-NEW-INDICATOR findings, summary). The registry's errors are a
-    summary that says why it was not compared (lazaret guard runs it so, over its own fetcher and scanner). `history`:
-    the release scan's History, whose crates index `_crates` reads (one of its own otherwise)."""
+    version)` one of the predecessor's files fetched, checked and scanned -> (the rules it has a finding of
+    (`rules_found`), its compiled code's paths), the rules alone, or why it was not compared -> (SC-NEW-INDICATOR and
+    SC-NEW-COMPILED-CODE findings, summary). The release's files (`per`) that list `compiledCode` are compared for it
+    (RA-13: `newCompiledCode` in the summary). The registry's errors are a summary that says why it was not compared
+    (lazaret guard runs it so, over its own fetcher and scanner). `history`: the release scan's History, whose crates
+    index `_crates` and extension history `_extension` read (one of its own otherwise)."""
     try:
         return _compare(eco, name, version, asked, per, (fetch_json, scan_file, resolved, history))
     except (_base.FetchError, _base.SpecError, _base.DigestError, ValueError) as exc:
@@ -447,13 +613,14 @@ def compare(eco, name, version, asked, per, fetch_json, scan_file, resolved=None
 
 
 def release_issues(eco, name, version, resolved, issues, per, deadline=None, cancel=None, memo=None, history=None):
-    """SC-NEW-INDICATOR findings for one release whose files' findings are `issues` (`per`: its files as scan_package
-    lists them) -> (findings, summary or None when no comparison was asked for). `history`: the release scan's History
-    (the registry's documents read once for the release), else one of its own."""
-    if eco not in ECOSYSTEMS or not enabled():
+    """SC-NEW-INDICATOR and SC-NEW-COMPILED-CODE findings for one release whose files' findings are `issues` (`per`:
+    its files as scan_package lists them, their `compiledCode`) -> (findings, summary or None when no comparison was
+    asked for: the release is SUSPICIOUS, or has no weaker indicator asked about and no compiled code). `history`: the
+    release scan's History (the registry's documents read once for the release), else one of its own."""
+    if eco not in ECOSYSTEMS or not enabled() or strong(issues):
         return [], None
     asked = candidates(issues)
-    if not asked:
+    if not asked and not compiled_files(per):
         return [], None
     history = history or History()
     return compare(eco, name, version, asked, per, history.json,

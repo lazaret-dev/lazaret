@@ -1091,7 +1091,53 @@ the file's verdict nor the comparison is cached): the scan's answer keeps its fi
 them and the comparison once made (`_prior_kept`; one the registry did not
 answer is made again, from the cached rules), and the predecessor's file
 is fetched, checked against the registry's digest and scanned like any
-other, its verdict cached under its own key. SC-VERSION-INFLATION (RA-7,
+other, its verdict cached under its own key. SC-NEW-COMPILED-CODE (RA-13,
+0.1.9; John, Oct 15) is a narrower comparison over the same machinery,
+asked of a release that is not SUSPICIOUS (`prior.strong`), OK ones
+included: `_ArtifactScan.compiled` (`repo._compiled_code`: a binary member
+whose first bytes are an ELF, Mach-O or PE program — not a WebAssembly or
+DEX module, nor a Java class — or one named `COMPILED_CODE_EXTS`, .so,
+.pyd, .dylib, .dll, .node, .exe, whose bytes are not text) is a file's
+`compiledCode` (`MAX_COMPILED_LISTED`, 50) and its `artifacts` entry's; a
+release whose files list some (`prior.compiled_files`) is compared kind by
+kind, like with like (`_compiled_plan`): the predecessor's files of the
+kind, and a wheel of them whose tags are not pure Python's
+(`compiled_by_name`: an ABI tag other than `none`, or a platform other
+than `any`) ships compiled code by its name, nothing of it downloaded;
+else the counterparts of the release's compiled files (the same name with
+the version changed, else the first of the kind, `MAX_FILES`) are scanned
+with the files the weaker indicators asked for, once, and the release's
+compiled code is new when none of them lists any (`_new_compiled`). It is
+MAJOR, CRITICAL beside an SC-NEW-INDICATOR, and names `COMPILED_NAMED` (3)
+of the files; `priorRelease` gains `newCompiledCode` when it was asked.
+Shai-Hulud's PyPI wave (June 2026: `ensmallen_*.abi3.so` beside a .pth
+loader, in pure-Python packages) and GlassWorm v2 (April 2026: six of 73
+Open VSX extensions activated by updates that brought .node binaries)
+are its shape. `scan_file` answers (rules, compiled code) now; a set
+alone is the rules with the compiled code not known. Open VSX and the
+Marketplace are `prior.ECOSYSTEMS` (RA-13): `prior._extension` reads the
+module's `history` (each version's earliest time across its platforms, a
+pre-release flag) over `History.module_fetch`, shared with
+SC-NEW-DEPENDENCY's (`new_dependency_issues` passes the History's fetch;
+`_OnceFetch` keeps a POSTed query too, so the Marketplace's one query
+serves the history and the predecessor's resolution), and the
+predecessor's files are `module.resolve`'s (each Open VSX file with its
+SHA-256; the Marketplace's unverified, as the release's). The guard:
+`_scan_one` keeps `compiled` (`compiled_of`, `COMPILED_KEPT` 5, [] for
+none) and the verdict cache stores it; `prior_due` takes an OK or WARN
+verdict whose file ships compiled code as well as a WARN with rules;
+`prior_scanned` (shared by `_prior_scan` and the editor guard) scans a
+cached predecessor again when its verdict has no `compiled` (cached before
+RA-13: its absence is not none); `with_release_issues` makes a CRITICAL
+SUSPICIOUS and a MAJOR an OK verdict WARN. `lazaret guard <editor>`
+(`editorguard.Run._take`) compares an extension from its gallery in the
+window (`prior_due(hit, published, True)`) over its own fetch
+(`prior.History(fetch)`, `Run._prior_scan`: the file checked by the
+module's `verify`, its verdict cached by its SHA-256 as an extension's
+is), for an install or an update alike. Cost: the history document and at
+most `MAX_FILES` of the predecessor's files for a release with compiled
+code (none when the predecessor's wheels are platform wheels); not measured
+on the popular set yet. SC-VERSION-INFLATION (RA-7,
 0.1.9, `registry/version_anomaly.py` with `repo.version_inflation_issues`,
 MAJOR) reads the public tell of dependency confusion: a release with an
 inflated version — a non-zero PyPI epoch (which outranks every version

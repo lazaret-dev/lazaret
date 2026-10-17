@@ -26,6 +26,30 @@ aggregate):
 
 ### Added
 
+- **Compiled code new in a release, and extension releases compared with their predecessor (RA-13; the registry
+  and the guard, no rule-set change).** A release whose files ship compiled code — an ELF, Mach-O or PE file, or a
+  `.so`, `.pyd`, `.dylib`, `.dll`, `.node` or `.exe` whose bytes are not text — when its established predecessor's
+  files of the same kind ship none at all is now **SC-NEW-COMPILED-CODE (MAJOR)**, naming a few of the files, and
+  CRITICAL when the comparison finds an SC-NEW-INDICATOR too. It is asked of any release that is not SUSPICIOUS,
+  OK ones included (a wheel's binary is inventory, SC-BINARY INFO, so such a release was OK). Shai-Hulud's PyPI wave
+  (June 2026) gave pure-Python bioinformatics and ML packages native extensions (`ensmallen_*.abi3.so`) that run on
+  import; GlassWorm v2 (April 2026) published 73 Open VSX extensions benign and activated six through ordinary
+  updates that brought `.node` binaries and a downloader — 67 of the 73 would pass any one-time scan. Like with like:
+  a release's sdist is compared with its predecessor's sdist, a wheel with its wheels, a `.vsix` with its `.vsix`
+  files, so a pure-Python sdist beside platform wheels is normal; a predecessor's wheel tagged for a platform or an
+  ABI ships compiled code by its name (nothing of it is downloaded), so a package that always had platform wheels
+  adding another is not asked about. A scan result's files list their compiled code (`compiledCode`), and
+  `priorRelease` its comparison (`newCompiledCode`). And the comparison (SC-NEW-INDICATOR, and RA-13's) now covers
+  **Open VSX and the Visual Studio Marketplace** (`prior.ECOSYSTEMS`), by the version history SC-NEW-DEPENDENCY
+  already read for them (now read once for both): the established predecessor, `NOT_COMPARED` and the cache as for
+  npm, the predecessor's files resolved as the release's were (each Open VSX file checked against its SHA-256; the
+  Marketplace publishes none, so its files are scanned unverified, as the release's are). `lazaret guard <editor>
+  --update-extensions` (and `--install-extension`) compares an extension from its gallery in the 30-day window the
+  same way, and the npm, PyPI and Cargo guards compare an OK or WARN release whose file ships compiled code; the
+  verdict cache keeps each file's compiled code (a verdict cached without it is scanned again when a comparison
+  needs it). The cost: the history document and at most three of the predecessor's files, now for a release with
+  compiled code as well as a WARN one — none for a PyPI release whose predecessor has platform wheels. Not measured
+  on the popular set yet (owed: John).
 - **A look-alike package from a look-alike account (RA-9; the registry and the guard, no rule-set change).** When an
   npm, PyPI or crates release's own name is one change from a popular package's (SC-TYPOSQUAT), its owners are now
   compared with that package's: an owner whose name is one change from one of theirs, or differs only in its

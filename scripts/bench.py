@@ -447,7 +447,8 @@ def prior_one(rec, deadline_s):
     data, container, kind = _release(rec)
     budget = repo.Budget(deadline=time.monotonic() + _timeout(deadline_s), deadline_detail="budget")
     res = repo._scan_artifact(data, container, kind, False, budget)
-    per = [{"filename": rec.get("filename") or str(rec.get("url") or "").rsplit("/", 1)[-1] or None, "kind": kind}]
+    per = [{"filename": rec.get("filename") or str(rec.get("url") or "").rsplit("/", 1)[-1] or None, "kind": kind,
+            **({"compiledCode": res["compiledCode"]} if res.get("compiledCode") else {})}]      # (RA-13)
     _issues, summary = prior.release_issues(*release, None, res["issues"], per)
     return _row(rec, {"prior": summary or {"notCompared": "no weaker indicator it is asked about"}})
 

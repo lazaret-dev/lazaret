@@ -93,7 +93,10 @@ or with the check off, is scanned and checked again while the release is in that
 WARN release from npm's or PyPI's public registry is compared with its established predecessor as `lazaret-registry`
 compares it (registry/prior.py): a weaker indicator whose rule the predecessor had no finding of is SC-NEW-INDICATOR,
 CRITICAL, and the release is SUSPICIOUS (blocked); the comparison is kept with the verdict, the predecessor's own
-verdict in the cache. LAZARET_NO_PRIOR_RELEASE=1 turns it off. A dependency a freshly scanned release of npm's, PyPI's
+verdict in the cache. So is (RA-13) an OK or WARN release whose file ships compiled code: compiled code its
+predecessor's files of the kind had none of is SC-NEW-COMPILED-CODE, MAJOR (WARN; CRITICAL beside an
+SC-NEW-INDICATOR); a verdict keeps its file's compiled code (`compiled`). LAZARET_NO_PRIOR_RELEASE=1 turns it off.
+A dependency a freshly scanned release of npm's, PyPI's
 or crates.io's public registry declares that looks like a popular package's (SC-TYPOSQUAT) and is itself an
 established package (its history: a year old, three versions, no new publisher) is INFO, so it makes no WARN
 (registry/lookalike_history.py, TYPO-ESTABLISHED; one request a dependency, none offline);
@@ -704,6 +707,17 @@ def rules_of(result):
     return out
 
 
+#: (RA-13) the paths of a file's compiled code a verdict keeps (`compiled`)
+COMPILED_KEPT = 5
+
+
+def compiled_of(result):
+    """(RA-13) The paths of a scan result's compiled code (its `compiledCode`), at most COMPILED_KEPT: kept with the
+    verdict, every one ([] for none), so that the comparison with the release before knows a cached file's (a verdict
+    cached without it, by an earlier version of the guard, is scanned again when a comparison needs it)."""
+    return [str(p) for p in (result.get("compiledCode") or ())][:COMPILED_KEPT]
+
+
 #: What the guard says of each reason a scan is INCOMPLETE that blocks it (repo.INCOMPLETE_KINDS)
 INCOMPLETE_SAID = {"time": "the scan ran out of time, twice", "work": "the engine could not finish reading it",
                    "code": "code was not read whole", "archive": "the archive was not read whole"}
@@ -755,16 +769,32 @@ def with_provenance(check, hit, eco, report):
 # ---------------- The release before (SC-NEW-INDICATOR) ----------------
 def prior_due(hit, published, public):
     """Is a verdict `hit` to be compared with the release's established predecessor (registry/prior.py)? A WARN from a
-    scan that kept its findings' rules, of a release from the public registry, in the provenance window, not compared
-    yet."""
-    return (public and prior_.enabled() and hit.get("verdict") == "WARN" and "rules" in hit and "prior" not in hit
+    scan that kept its findings' rules, or (RA-13) an OK or WARN one whose file ships compiled code (`compiled`), of a
+    release from the public registry, in the provenance window, not compared yet."""
+    return (public and prior_.enabled() and "prior" not in hit
+            and ((hit.get("verdict") == "WARN" and "rules" in hit)
+                 or (hit.get("verdict") in ("OK", "WARN") and bool(hit.get("compiled"))))
             and (published is None or (now() - published).total_seconds() < PROVENANCE_DAYS * 86400))
+
+
+def prior_scanned(ctx, key, data, ref):
+    """One of the predecessor's files in hand (fetched and checked): its verdict from the cache (`key`), else scanned
+    and cached as the release's own would be -> (the rules it has a finding of, its compiled code), or why it was not
+    compared. A cached verdict without its rules (but an OK one: it has none) or without its compiled code (one cached
+    before RA-13) is scanned again."""
+    hit = ctx.scanner.cached(key)
+    if hit is None or ("rules" not in hit and hit.get("verdict") != "OK") or not isinstance(hit.get("compiled"), list):
+        hit = ctx.scanner.scan(data, ref["container"], ref["artifact"])
+        ctx.scanner.remember(key, hit, None)
+    if hit.get("verdict") == "INCOMPLETE" or hit.get("incomplete"):
+        return f"{ref.get('filename')} was not scanned whole"
+    return set(hit.get("rules") or ()), list(hit.get("compiled") or ())
 
 
 def _prior_scan(ctx, fetcher, eco, name):
     """The comparison's scan of one of the predecessor's files, over the guard's fetcher and scanner: fetched,
-    checked against the registry's digest, its verdict cached as the release's own would be -> the rules it has a
-    finding of, or why it was not compared."""
+    checked against the registry's digest, its verdict cached as the release's own would be -> (the rules it has a
+    finding of, its compiled code), or why it was not compared (prior_scanned)."""
     module = repo.registry_module(eco)
 
     def scan_file(ref, prev):
@@ -785,13 +815,7 @@ def _prior_scan(ctx, fetcher, eco, name):
                 digest = (f"sha256:{hashlib.sha256(data).hexdigest()}" if eco == "pypi"
                           else "{}-{}".format(*(registry_digest(ref["entry"]) or ("sha512", ""))))
             key = VerdictCache.key(eco, pep503(name) if eco == "pypi" else name, prev, digest)
-            hit = ctx.scanner.cached(key)
-            if hit is None or ("rules" not in hit and hit.get("verdict") != "OK"):    # (OK: it has none)
-                hit = ctx.scanner.scan(data, ref["container"], ref["artifact"])
-                ctx.scanner.remember(key, hit, None)
-        if hit.get("verdict") == "INCOMPLETE" or hit.get("incomplete"):
-            return f"{ref.get('filename')} was not scanned whole"
-        return set(hit.get("rules") or ())
+            return prior_scanned(ctx, key, data, ref)
     return scan_file
 
 
@@ -805,22 +829,28 @@ def _prior_kept(hit):
     return kept
 
 
-def with_prior(ctx, check, hit, fetcher, filename, kind):
-    """The scan's verdict `hit` (WARN) compared with the release's established predecessor (prior.compare): a weaker
-    indicator whose rule the predecessor had no finding of is SC-NEW-INDICATOR, CRITICAL, and makes it SUSPICIOUS,
-    its line first among the indicators; what the comparison said is kept on `check` (--json) and with the verdict."""
-    asked = prior_.candidates(list(hit["rules"].values()))
+def with_prior(ctx, check, hit, fetcher, filename, kind, scan_file=None, history=None):
+    """The scan's verdict `hit` compared with the release's established predecessor (prior.compare), for its weaker
+    indicators (a WARN) and (RA-13) its compiled code: a weaker indicator whose rule the predecessor had no finding of
+    is SC-NEW-INDICATOR, CRITICAL, and makes it SUSPICIOUS; compiled code the predecessor's files of the kind had none
+    of is SC-NEW-COMPILED-CODE, MAJOR (an OK verdict is WARN), CRITICAL beside an SC-NEW-INDICATOR; their lines first
+    among the indicators; what the comparison said is kept on `check` (--json) and with the verdict. `scan_file` and
+    `history`: the comparison's scan and history (lazaret guard <editor>'s, over its registry module's fetch), else
+    the guard's fetcher's (`_prior_scan`)."""
+    asked = prior_.candidates(list((hit.get("rules") or {}).values()))
+    compiled = [str(p) for p in hit.get("compiled") or ()]
     summary = None
-    if asked:
+    if asked or compiled:
         def fetch_json(url, accept):
+            if fetcher is None:
+                raise repo.FetchError("no registry document is read here")
             raw = fetcher.get(url, prior_.MAX_HISTORY_BYTES, accept, repo.METADATA_TIMEOUT)
             return repo._deep_safe_loads(raw, f"registry response from {url}")
-        issues, summary = prior_.compare(check.eco, check.name, check.version, asked,
-                                         [{"filename": filename, "kind": kind}], fetch_json,
-                                         _prior_scan(ctx, fetcher, check.eco, check.name))
-        if issues:
-            hit = {**hit, "verdict": "SUSPICIOUS", "reason": issues[0]["msg"][:400],
-                   "indicators": summarize({"issues": issues}) + list(hit["indicators"])}
+        per = [{"filename": filename, "kind": kind, **({"compiledCode": compiled} if compiled else {})}]
+        issues, summary = prior_.compare(check.eco, check.name, check.version, asked, per, fetch_json,
+                                         scan_file or _prior_scan(ctx, fetcher, check.eco, check.name),
+                                         history=history)
+        hit = with_release_issues(hit, issues)
     check.prior = summary
     return {**hit, "prior": summary}
 
@@ -835,6 +865,21 @@ def with_lookalikes(check, hit, fetcher, published, due):
         raw = fetcher.get(url, lookalikes_.MAX_HISTORY_BYTES, accept, repo.METADATA_TIMEOUT)
         return repo._deep_safe_loads(raw, f"registry response from {url}")
     return lookalikes_.guard_settle(check.eco, hit, published, fetch_json if due else None)
+
+
+def with_release_issues(hit, issues):
+    """A verdict `hit` with findings of the release's own (the comparison's): a CRITICAL one makes it SUSPICIOUS, a
+    MAJOR one an OK verdict WARN; their lines first among its indicators."""
+    found = sorted((i for i in issues if i["sev"] in ("CRITICAL", "MAJOR")), key=lambda i: _SEV_RANK[i["sev"]])
+    if not found:
+        return hit
+    verdict, reason = hit["verdict"], hit["reason"]
+    if found[0]["sev"] == "CRITICAL" and verdict != "SUSPICIOUS":
+        verdict, reason = "SUSPICIOUS", found[0]["msg"]
+    elif verdict == "OK":
+        verdict, reason = "WARN", found[0]["msg"]
+    return {**hit, "verdict": verdict, "reason": reason[:400],
+            "indicators": summarize({"issues": found}) + list(hit["indicators"])}
 
 
 def with_history(ctx, check, hit, fetcher, when, report, release):
@@ -919,6 +964,8 @@ class VerdictCache:
             kinds = [k for k in hit.get("incomplete") or () if k in repo.INCOMPLETE_KINDS]
             if kinds:                              # (why it is INCOMPLETE: the guard blocks it, T-1)
                 self.data[key]["incomplete"] = kinds
+            if isinstance(hit.get("compiled"), list):   # (its compiled code, [] for none: RA-13)
+                self.data[key]["compiled"] = [str(p) for p in hit["compiled"]][:COMPILED_KEPT]
             self.data[key].update(_prior_kept(hit))
             self.dirty = True
 
@@ -1005,13 +1052,14 @@ def _scan_one(data, container, kind, timeout, timed=False):
         with timings.span("scan", "artifact"):
             res = repo._scan_artifact(data, container, kind, False, budget)
         return {"verdict": res["verdict"], "reason": res["verdictReason"], "indicators": summarize(res),
-                "incomplete": list(res.get("incomplete") or ()), "rules": rules_of(res),
+                "incomplete": list(res.get("incomplete") or ()), "rules": rules_of(res), "compiled": compiled_of(res),
                 **lookalikes_.guard_kept(res, summarize)}
     here = timings.Timings()
     with timings.capture(here), here.run(), timings.span("scan", "artifact"):
         res = repo._scan_artifact(data, container, kind, False, budget)
     return {"verdict": res["verdict"], "reason": res["verdictReason"], "indicators": summarize(res),
-            "incomplete": list(res.get("incomplete") or ()), "rules": rules_of(res), "timings": here.report(),
+            "incomplete": list(res.get("incomplete") or ()), "rules": rules_of(res), "compiled": compiled_of(res),
+            "timings": here.report(),
             **lookalikes_.guard_kept(res, summarize)}
 
 
