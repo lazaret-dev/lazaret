@@ -588,7 +588,11 @@ like the registry does: CRITICAL when the hook's command, read as a program,
 or a file it runs sends data read from the machine over the network, pipes a
 download into a shell (SC-PIPE-SHELL), runs received code, plants persistence,
 or launches an AI coding agent in autonomous mode (SC-AGENT-HIJACK — the
-s1ngularity/Nx attack). A package with a
+s1ngularity/Nx attack). A shell script is read without its comments (0.1.9,
+SH-COMMENT-FP: a `#` that starts a word outside quotes, here-documents and
+arithmetic, to the end of its line), unless it reads its own file (`$0` or
+`$BASH_SOURCE` given to a program that reads it), whose comments may be what it
+runs, or does not read to its end. A package with a
 `binding.gyp` and no install script gets the implicit `node-gyp rebuild` hook
 (MAJOR). Also: look-alike identifiers (SC-HOMOGLYPH), hidden-Unicode carriers
 (SC-HIDDEN-UNICODE), decode-then-execute (SC-EVAL-DECODE, incl. indirect eval).

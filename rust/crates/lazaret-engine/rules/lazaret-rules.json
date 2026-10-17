@@ -1,6 +1,6 @@
 {
  "format": 1,
- "rule_set": "2.87.0",
+ "rule_set": "2.88.0",
  "source": "lazaret.scanner.core, extracted by scripts/make_rust_tables.py \u2014 do not edit",
  "values": {
   "ALWAYS_PRUNE_DIRS": {
@@ -16648,6 +16648,49 @@
   "_SH_SECRET_VAR_RE": {
    "flags": "i",
    "re": "TOKEN|SECRET|PASSW|API_?KEY|PRIVATE_?KEY|ACCESS_?KEY|CREDENTIAL|AUTH"
+  },
+  "_SH_SELF_MAX_DEPTH": {
+   "value": 8
+  },
+  "_SH_SELF_PATH_TOOLS": {
+   "set": [
+    ".",
+    "[",
+    "[[",
+    "ash",
+    "basename",
+    "bash",
+    "case",
+    "cd",
+    "chmod",
+    "dash",
+    "declare",
+    "dirname",
+    "echo",
+    "export",
+    "ksh",
+    "local",
+    "logger",
+    "ls",
+    "printf",
+    "pushd",
+    "readlink",
+    "readonly",
+    "realpath",
+    "sh",
+    "source",
+    "stat",
+    "test",
+    "typeset",
+    "zsh"
+   ]
+  },
+  "_SH_SELF_RESOLVERS": {
+   "set": [
+    "basename",
+    "readlink",
+    "realpath"
+   ]
   },
   "_SH_SHELLS": {
    "set": [

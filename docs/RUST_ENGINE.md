@@ -196,7 +196,9 @@ rust/
     src/shell.rs             a shell text read as a program (_sh_parse … _sh_reasons), the command
                              lines a script hands a shell (exec_command_reasons), and what a
                              pipeline decodes or downloads and hands a shell or an interpreter
-                             on stdin (piped_runs, 0.1.9)
+                             on stdin (piped_runs, 0.1.9); a shell script's comments blanked for
+                             the install-script test unless it reads its own file
+                             (script_without_comments, SH-COMMENT-FP, 0.1.9)
     src/datafmt.rs           a whole file of a data format, read by its structure (a WebAssembly
                              module, a PNG, GIF or WebP image, WAV audio): SC-B64 passes over its
                              base64 (0.1.9)
