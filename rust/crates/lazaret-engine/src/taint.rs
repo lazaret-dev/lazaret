@@ -767,6 +767,149 @@ fn guard_exits(p: &Pack, ctx: &FileCtx, i: usize, stmt: &[u32], lang: Lang) -> b
     false
 }
 
+// ---------------------------------------------------------------- a parsed URL's host (Q-5)
+
+/// What a name holds of a parsed URL (Q-5): `p = urlparse(u)` holds the parsed result, `h = urlparse(u).netloc`
+/// and `h = p.netloc` its host. `version` is the URL's count of assignments when it was parsed and `scope` the
+/// function it was parsed in: a check of the host is one of the URL that was parsed, so it is read only while both
+/// are the same.
+struct ParsedUrl {
+    url: PyStr,
+    host: bool,
+    version: usize,
+    scope: Option<usize>,
+}
+
+/// The URL `name` holds the parsed result of (`host`: the host of), in `scope`, while neither was assigned since.
+fn live_url(parsed: &HashMap<PyStr, ParsedUrl>, versions: &HashMap<PyStr, usize>, scope: Option<usize>, name: &[u32],
+            host: bool) -> Option<PyStr> {
+    let e = parsed.get(name)?;
+    (e.host == host && e.scope == scope && versions.get(&e.url) == Some(&e.version)).then(|| e.url.clone())
+}
+
+/// What `rhs` (an assignment's value) holds of a parsed URL: (the URL's name, whether it is the host), or None.
+/// `live` gives the URL a name holds (`live(name, host)`), when that is still the one it held.
+fn parsed_value(p: &Pack, rhs: &[u32], live: &impl Fn(&[u32], bool) -> Option<PyStr>) -> Option<(PyStr, bool)> {
+    let rhs = pystr::strip(rhs);
+    if let Some(m) = p.re("_URL_PARSED_RE").fullmatch(rhs) {
+        return Some((m.group(1)?.to_vec(), m.group(2).is_some()));
+    }
+    let m = p.re("_URL_HOST_OF_RE").fullmatch(rhs)?;
+    live(m.group(1)?, false).map(|url| (url, true))
+}
+
+/// The test of the Python `if` (or `elif`) statement `stmt`: what follows the keyword, up to the colon outside
+/// brackets and strings (`:=` is no colon).
+fn if_test<'a>(p: &Pack, stmt: &'a [u32]) -> Option<&'a [u32]> {
+    let m = p.map_re("_GUARD_IF_RE", "py").match_(stmt)?;
+    let (start, n) = (m.end(), stmt.len());
+    let (mut depth, mut i) = (0i64, start);
+    while i < n {
+        let ch = stmt[i];
+        if is_quote(ch) {
+            match pystr::find_char(stmt, ch, i + 1) {
+                None => break,
+                Some(j) => {
+                    i = j + 1;
+                    continue;
+                }
+            }
+        }
+        match char::from_u32(ch) {
+            Some('(' | '[' | '{') => depth += 1,
+            Some(')' | ']' | '}') => depth -= 1,
+            Some(':') if depth <= 0 && stmt.get(i + 1) != Some(&('=' as u32)) => return Some(&stmt[start..i]),
+            _ => {}
+        }
+        i += 1;
+    }
+    Some(&stmt[start..])
+}
+
+/// `text`'s parts between the word `word` (`or`, `and`) outside brackets and strings.
+fn bool_parts<'a>(text: &'a [u32], word: &str) -> Vec<&'a [u32]> {
+    let w = pystr::u(word);
+    let ident = |c: u32| pystr::is_alnum(c) || c == '_' as u32;
+    let (mut parts, mut depth, mut start, mut i, n) = (Vec::new(), 0i64, 0usize, 0usize, text.len());
+    while i < n {
+        let ch = text[i];
+        if is_quote(ch) {
+            match pystr::find_char(text, ch, i + 1) {
+                None => break,
+                Some(j) => {
+                    i = j + 1;
+                    continue;
+                }
+            }
+        }
+        match char::from_u32(ch) {
+            Some('(' | '[' | '{') => depth += 1,
+            Some(')' | ']' | '}') => depth -= 1,
+            _ if depth == 0
+                && text[i..].starts_with(&w)
+                && (i == 0 || !ident(text[i - 1]))
+                && text.get(i + w.len()).is_none_or(|&c| !ident(c)) =>
+            {
+                parts.push(&text[start..i]);
+                i += w.len();
+                start = i;
+                continue;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    parts.push(&text[start..]);
+    parts
+}
+
+/// `text` stripped, without the brackets around all of it (`((a or b))` is `a or b`; a few levels).
+fn unparen(text: &[u32]) -> &[u32] {
+    let mut t = pystr::strip(text);
+    for _ in 0..8 {
+        if t.first() != Some(&('(' as u32)) || call_close(t, 1) + 1 != t.len() {
+            break;
+        }
+        t = pystr::strip(&t[1..t.len() - 1]);
+    }
+    t
+}
+
+/// (Q-5) The URLs whose parsed host the Python `if` statement `stmt` checks against a collection, where the check
+/// guards the branch: (the URL's name, the collection, negated). The host is `urlparse(u).netloc` (or `.hostname`,
+/// `urlsplit`, a module's: `urllib.parse.urlparse`), `p.netloc` for `p = urlparse(u)`, or `h` for
+/// `h = urlparse(u).netloc`. `… in C` guards the `if`'s block when the whole test needs it (one of its `and`s, and no
+/// `or`); `… not in C` guards what follows a block that leaves when the test holds whenever it does (one of its
+/// `or`s, alone). C is a name, a call of one, or a list, set or tuple display: `… in 'example.com'`, like
+/// `'example.com' in u` and `u.startswith('https://example.com')`, is a substring test, which a URL the attacker
+/// writes passes (`https://example.com.attacker.invalid/`), and guards nothing.
+fn host_guards(p: &Pack, stmt: &[u32], live: &impl Fn(&[u32], bool) -> Option<PyStr>) -> Vec<(PyStr, PyStr, bool)> {
+    let Some(test) = if_test(p, stmt) else { return Vec::new() };
+    let re = p.re("_HOST_TEST_RE");
+    let mut out = Vec::new();
+    let ors = bool_parts(unparen(test), "or");
+    for d in &ors {
+        let ands = bool_parts(unparen(d), "and");
+        for c in &ands {
+            let Some(m) = re.fullmatch(unparen(c)) else { continue };
+            let negated = m.group(4).is_some();
+            if (negated && ands.len() != 1) || (!negated && ors.len() != 1) {
+                continue;
+            }
+            let url = match (m.group(1), m.group(2), m.group(3)) {
+                (Some(u), _, _) => Some(u.to_vec()),
+                (None, Some(parsed), _) => live(parsed, false),
+                (None, None, Some(host)) => live(host, true),
+                _ => None,
+            };
+            if let Some(url) = url {
+                out.push((url, m.group(5).unwrap_or(&[]).to_vec(), negated));
+            }
+        }
+    }
+    out
+}
+
 // ---------------------------------------------------------------- views and routes
 
 /// Each line's match text without comments, "" for a comment line (core's `code` lists).
@@ -1155,6 +1298,12 @@ pub fn scan(ctx: &FileCtx, model: &Model, found: &mut Vec<Finding>) {
     let (mut open_depth, mut continued) = (0i64, 0usize);
     let mut keyed: Keyed = HashMap::new();
     let mut allowed: Vec<(usize, PyStr, usize, Clean)> = Vec::new(); // (indent, name, taint order, clean before)
+    // (Q-5) what names hold of a parsed URL, the assignments of each URL parsed, and the URLs a `not in` check of
+    // their host clears for a redirect once its block (which leaves) ends: (indent, name, taint order)
+    let mut parsed: HashMap<PyStr, ParsedUrl> = HashMap::new();
+    let mut versions: HashMap<PyStr, usize> = HashMap::new();
+    let mut host_checked: Vec<(usize, PyStr, usize)> = Vec::new();
+    let redir = [pystr::u("REDIR")];
 
     // the tainted names in `text` still dangerous for `suf` (None: any), in their taint order
     let carriers_in = |tainted: &HashMap<PyStr, Taint>, text: &[u32], suf: Option<&[u32]>| -> Vec<PyStr> {
@@ -1263,6 +1412,14 @@ pub fn scan(ctx: &FileCtx, model: &Model, found: &mut Vec<Finding>) {
                         }
                     }
                 }
+                while host_checked.last().is_some_and(|h| indent <= h.0) {
+                    let (_, n, order) = host_checked.pop().expect("there");
+                    if let Some(t) = tainted.get_mut(&n) {
+                        if t.order == order {
+                            t.clean = clean_union(&t.clean, &redir);
+                        }
+                    }
+                }
                 while levels.last().is_some_and(|l| l.0 > indent) {
                     if let Some(gone) = levels.pop().expect("there").2 {
                         for n in in_scope.remove(&gone).unwrap_or_default() {
@@ -1316,6 +1473,20 @@ pub fn scan(ctx: &FileCtx, model: &Model, found: &mut Vec<Finding>) {
             let scope = current_scope(&levels);
             let augmented = aug_re.match_(&s).is_some();
             stmt = Some(s);
+            if lang == Lang::Py {
+                let live = |n: &[u32], host: bool| live_url(&parsed, &versions, scope, n, host);
+                let held = if names.len() == 1 { parsed_value(p, &rhs, &live) } else { None };
+                for name in &names {
+                    parsed.remove(name);
+                    if let Some(v) = versions.get_mut(name) {
+                        *v += 1;
+                    }
+                }
+                if let Some((url, host)) = held {
+                    let version = *versions.entry(url.clone()).or_insert(0);
+                    parsed.insert(names[0].clone(), ParsedUrl { url, host, version, scope });
+                }
+            }
             for name in names {
                 if !augmented {
                     keyed.remove(&name);
@@ -1402,6 +1573,26 @@ pub fn scan(ctx: &FileCtx, model: &Model, found: &mut Vec<Finding>) {
                             allowed.push((indent_of(ctx.line(i)), name.clone(), entry.order, entry.clean.clone()));
                             entry.clean = all_clean.clone();
                         }
+                    }
+                }
+            }
+            if lang == Lang::Py {
+                let scope = current_scope(&levels);
+                let live = |n: &[u32], host: bool| live_url(&parsed, &versions, scope, n, host);
+                for (url, collection, negated) in host_guards(p, &s, &live) {
+                    let Some(order) = tainted.get(&url).map(|t| t.order) else { continue };
+                    let code = taint_code(p, &collection, lang);
+                    if src_search(&code) || !carriers_in(&tainted, &code, None).is_empty() {
+                        continue;
+                    }
+                    if negated {
+                        if guard_exits(p, ctx, i, &s, lang) {
+                            host_checked.push((indent_of(ctx.line(i)), url, order));
+                        }
+                    } else {
+                        let entry = tainted.get_mut(&url).expect("there");
+                        allowed.push((indent_of(ctx.line(i)), url, entry.order, entry.clean.clone()));
+                        entry.clean = clean_union(&entry.clean, &redir);
                     }
                 }
             }

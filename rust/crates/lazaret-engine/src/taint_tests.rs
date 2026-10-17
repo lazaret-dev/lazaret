@@ -127,6 +127,45 @@ fn indexes_guards_and_containers() {
 }
 
 #[test]
+fn a_parsed_urls_host_checked() {
+    // (Q-5) what a name holds of a parsed URL, and the checks of its host that guard a redirect
+    let p = crate::pack::current();
+    let none = |_: &[u32], _: bool| -> Option<PyStr> { None };
+    let held = |rhs: &str| parsed_value(&p, &cps(rhs), &none).map(|(u, h)| (st(&u), h));
+    assert_eq!(held(" urllib.parse.urlparse(next_url)"), Some(("next_url".to_string(), false)));
+    assert_eq!(held("urlsplit( u, scheme='https' ).hostname.lower()"), Some(("u".to_string(), true)));
+    assert_eq!(held("urlparse(a + b)"), None);
+    assert_eq!(held("urlparse(u)[1]"), None);
+    assert_eq!(held("p.netloc"), None, "p holds no parsed URL");
+    let live = |n: &[u32], host: bool| -> Option<PyStr> {
+        match (st(n).as_str(), host) {
+            ("p", false) => Some(cps("u")),
+            ("h", true) => Some(cps("w")),
+            _ => None,
+        }
+    };
+    assert_eq!(parsed_value(&p, &cps("p.hostname"), &live).map(|(u, h)| (st(&u), h)), Some(("u".to_string(), true)));
+    assert_eq!(if_test(&p, &cps("elif (x := f(a)) in {'k': 1} or y: return")).map(st), Some(" (x := f(a)) in {'k': 1} or y".to_string()));
+    let parts = |t: &str, w: &str| bool_parts(&cps(t), w).iter().map(|x| st(x)).collect::<Vec<_>>();
+    assert_eq!(parts("a or (b or c) or 'x or y' or floor or order", "or"), ["a ", " (b or c) ", " 'x or y' ", " floor ", " order"]);
+    assert_eq!(st(unparen(&cps(" ((a and b)) "))), "a and b");
+    assert_eq!(st(unparen(&cps("(a) or (b)"))), "(a) or (b)");
+    let guards = |stmt: &str| host_guards(&p, &cps(stmt), &live).iter().map(|(u, c, n)| (st(u), st(c), *n)).collect::<Vec<_>>();
+    let one = |u: &str, c: &str, n: bool| vec![(u.to_string(), c.to_string(), n)];
+    assert_eq!(guards("if urlparse(x).netloc in ALLOWED:"), one("x", "ALLOWED", false));
+    assert_eq!(guards("if p.netloc not in ['a.invalid', ''] or p.scheme not in ('http', 'https'):"),
+               one("u", "['a.invalid', '']", true));
+    assert_eq!(guards("if (p.scheme == 'https' and (h in settings.HOSTS)):"), one("w", "settings.HOSTS", false));
+    assert_eq!(guards("if urllib.parse.urlsplit(x).hostname.lower() not in allowed(): abort(400)"), one("x", "allowed()", true));
+    for stmt in ["if urlparse(x).netloc in ALLOWED or x:", "if urlparse(x).netloc not in ALLOWED and x:",
+                 "if urlparse(x).netloc in 'a.invalid':", "if 'a.invalid' in x:", "if x.startswith('https://a.invalid/'):",
+                 "if urlparse(x).netloc.endswith('.a.invalid'):", "if not urlparse(x).netloc in ALLOWED:",
+                 "if q.netloc in ALLOWED:", "if p in ALLOWED:", "if urlparse(x) in ALLOWED:", "x = urlparse(y).netloc in A"] {
+        assert_eq!(guards(stmt), Vec::new(), "{stmt}");
+    }
+}
+
+#[test]
 fn view_bodies_scopes_and_guards() {
     let p = crate::pack::current();
     assert!(!view_body(&p, &cps(" User.to_dict(q, page=1)")), "a call of a function that builds no string");
@@ -173,6 +212,20 @@ fn the_helpers_take_linear_time() {
                  args_where(&t, |a| same.match_(a).is_none()));
         let _ = (taint_code(&p, &t, Lang::Py), taint_code(&p, &t, Lang::Js));
         let _ = (scope_opener(&p, &t, Lang::Js), guarded_names(&p, &t, Lang::Py), assignment(&p, &t, Lang::Py));
+        assert!(t0.elapsed().as_secs() < 10, "{}", &text[..12]);
+    }
+    // (Q-5) the host checks' readers
+    let live = |_: &[u32], _: bool| -> Option<PyStr> { Some(cps("u")) };
+    let texts = ["if ".to_string() + &"(".repeat(100_000) + "p.netloc in A" + &")".repeat(100_000) + ":",
+                 "if ".to_string() + &"p.netloc in A or ".repeat(30_000) + "x:",
+                 "if ".to_string() + &"a.".repeat(100_000) + "netloc in A:",
+                 "if ".to_string() + &"urlparse(".repeat(50_000) + "x).netloc in A:",
+                 "if p.netloc in [".to_string() + &"'a', ".repeat(50_000) + ":",
+                 "if ".to_string() + &"'".repeat(200_000), "x = ".to_string() + &"a.".repeat(100_000) + "netloc"];
+    for text in &texts {
+        let t = cps(text);
+        let t0 = std::time::Instant::now();
+        let _ = (host_guards(&p, &t, &live), parsed_value(&p, &t[4..], &live));
         assert!(t0.elapsed().as_secs() < 10, "{}", &text[..12]);
     }
 }

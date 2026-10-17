@@ -1621,6 +1621,20 @@ aggregate):
 
 ### Fixed
 
+- **Taint: a check of the parsed URL's host against a list guards an open redirect (Q-5; the engine's, for both
+  packages; rule set 2.94.0).** Project mode, Python. The allowlist guard read a check of the value
+  itself (`if url in ALLOWED:`), not of the host of the URL parsed from it, so a redirect behind
+  `if urlparse(url).netloc not in [...]: return …` was still T-REDIR. A check of the host —
+  `urlparse(url).netloc` (or `.hostname`, `urlsplit`, `urllib.parse.urlparse`), `parsed.netloc` for
+  `parsed = urlparse(url)`, `host` for `host = urlparse(url).netloc` — against a name, a list, a set or a tuple now
+  clears the URL for the redirect (only: the rest of it is still the request's): `in` for the `if`'s block when the
+  whole test needs it, `not in` after a block that leaves (`return`, `raise`, `abort(…)`) when the test holds
+  whenever it does (`… not in [...] or parsed.scheme not in (...)`). A substring test of the URL or of its host
+  (`'example.com' in url`, `url.startswith(…)`, `….netloc.endswith(…)`, `… in 'example.com'`), the `else` of an
+  `in` check, the block of a `not in` check, and a host parsed before the URL was assigned again clear nothing. On
+  BenchmarkPython 0.1 (its test sources not read) redirect goes from +0.33 to +0.81 (false positives 14 to 4 of 21,
+  true positives 13 of 13 kept) and the score from +0.541 to +0.575 (false positives 154 to 144 of 778); nothing
+  else moved there, nor in the recorded snapshot sets.
 - **A look-alike dependency that is itself an established package is INFO, not MAJOR (TYPO-ESTABLISHED; the
   registry and `lazaret guard`, no rule-set change).** SC-TYPOSQUAT flagged every dependency one change from a
   popular package's name that the known-name lists do not hold, so a real package below the lists' cut made its

@@ -302,7 +302,15 @@ its targets as an assignment of what it iterates over would (0.1.9).
 Containers (`d["k"] = q`, `xs.append(q)`, Python's `conf.set("s", "k", q)`)
 take the taint of what is written into them, by literal key, read back by
 subscript or by `get()` of the same literals; allowlist checks clear a value
-where it passed. After the taint pass, Python's cookie pass (0.1.9, Q-2,
+where it passed. A check of a parsed URL's host against a collection (0.1.9,
+Q-5: `urlparse(u).netloc in ALLOWED`, `p.netloc` for `p = urlparse(u)`, `h`
+for `h = urlparse(u).netloc`, `.hostname`, `urlsplit`) clears the URL for the
+redirect alone: in the `if`'s block when the whole test needs it (an `and`
+of it, no `or`), after a block that leaves when a `not in` is an `or` of the
+test, alone; read while the URL and the parsed result are the ones assigned,
+in one function. A substring test of the raw URL or of the host
+(`'example.com' in u`, `startswith`, `… in 'example.com'`) clears nothing.
+After the taint pass, Python's cookie pass (0.1.9, Q-2,
 S-COOKIE) reads each `set_cookie` call's arguments for its Secure flag. Framework models (0.1.7):
 the parameters a route handler gets from the request are sources — a Flask
 view's URL variables, a FastAPI path operation's parameters (not injected

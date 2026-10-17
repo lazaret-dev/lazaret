@@ -332,7 +332,9 @@ rust/
                              sinks, sanitizers, guards, scopes, Flask views and route parameters;
                              a taint configuration's sources, sinks and sanitizers for one call;
                              (Q-2) a row's argument mode, sinks a module's import enables
-                             (_SINK_IMPORTS), `for` targets, keyed set() and get()
+                             (_SINK_IMPORTS), `for` targets, keyed set() and get(); (Q-5) a
+                             parsed URL's host checked against a collection, a redirect's guard
+                             (host_guards: _URL_PARSED_RE, _URL_HOST_OF_RE, _HOST_TEST_RE)
     src/secrets.rs           live secret verification's table and logic (0.1.9, V-1 stage 2):
                              the pack's _VERIFY_PROVIDERS read and checked; `secrets.find` (the
                              credentials of a file's flagged lines; AWS's pairs), `secrets.identify`,
