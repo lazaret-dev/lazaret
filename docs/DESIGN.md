@@ -1164,7 +1164,36 @@ OK; the short findings are never cached, so a cached verdict is the one so
 made. Off with `LAZARET_NO_DEPENDENCY_HISTORY` or
 `LAZARET_NO_LOOKALIKE_HISTORY` (the tests' default). `bench.py lookalikes`
 reads a run's WARN releases with SC-TYPOSQUAT this way, which `run` (the
-files alone) does not; the popular sets' measurement is owed (John). SC-UNUSED-DEPENDENCY (`_ArtifactScan._unused_dependencies`,
+files alone) does not; the popular sets' measurement is owed (John).
+SC-PUBLISHER-LOOKALIKE (RA-9, 0.1.9, `lookalike.owner_lookalike` with
+`repo.publisher_lookalike_issues`, in `_release_findings` after
+SC-NEW-DEPENDENCY, CRITICAL) is a look-alike name from a look-alike
+account: arrayref's `proc-macro1`, one change from `proc-macro2`,
+published by `dtolney`, one change from `dtolnay`. For npm, PyPI and crates,
+when the release's own name is `lookalike()`'s look-alike of a target whose
+owners `popular_names.json`'s "owners" keeps (`owner_target`), the
+release's owners (`repo.release_owners`: npm's version document —
+`maintainers`, and `_npmUser` when it is an account name, not a workflow's
+"GitHub Actions"; PyPI's JSON `ownership`, roles' users and organization,
+which `resolve_pypi` now keeps on the Resolution; crates.io's owners,
+`repo.crate_owners`, the API's answer kept on the Resolution so
+SC-NEW-DEPENDENCY's and this check read one request, none with
+`LAZARET_NO_DEPENDENCY_HISTORY`) are compared with the target's
+(`owner_change`: one change, or the separators changed, or one change with
+the separators aside — `_publisher_change`'s rules, on names of
+`MIN_OWNER` (5) letters and digits or more). An owner the target has
+suppresses the finding (the maintainer's sibling package), an owner of any
+target is never a look-alike (two real maintainers with like names:
+`tibo-openai` and `tino-openai` own npm targets), and no owners named is no
+finding. The guard (`guard.with_publisher`) compares the owners of the
+documents it reads anyway — npm's packument, fetched for a release that may
+be younger than `--min-age`; PyPI's JSON document, fetched when a lockfile
+gives no upload time — and makes the verdict SUSPICIOUS; it adds no request,
+so it reads no crate's owners and none for a file its local PyPI index
+relays. The owners are account names only, lower-cased and sorted, one line
+a package (`"proc-macro2": "dtolnay"`), at most 64 a package, of all
+5,000 targets of each registry (`scripts/fetch-target-owners.py`, resumable,
+crates.io one request a second; `update-popular-names.py --owners`). SC-UNUSED-DEPENDENCY (`_ArtifactScan._unused_dependencies`,
 INFO) lists an npm release's runtime dependencies no text of it names
 and that are neither among npm's 5,000 most-downloaded packages nor in its
 own scope, when every text member was read whole; `_scan_artifact` returns

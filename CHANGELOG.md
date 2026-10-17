@@ -26,6 +26,23 @@ aggregate):
 
 ### Added
 
+- **A look-alike package from a look-alike account (RA-9; the registry and the guard, no rule-set change).** When an
+  npm, PyPI or crates release's own name is one change from a popular package's (SC-TYPOSQUAT), its owners are now
+  compared with that package's: an owner whose name is one change from one of theirs, or differs only in its
+  separators, is **SC-PUBLISHER-LOOKALIKE (CRITICAL)**, "published by x, whose name imitates y, a maintainer of z".
+  Modeled on arrayref's `proc-macro1` (one change from `proc-macro2`), published by `dtolney` (one change from
+  `dtolnay`, proc-macro2's maintainer): one look-alike can be chance, two together are impersonation. The owners are
+  those of documents the scan already holds — npm's version document (`maintainers`, and `_npmUser` when it names an
+  account: a workflow's publish says "GitHub Actions"), PyPI's JSON `ownership` (its roles' users and its
+  organization) — and for a crate crates.io's owners API, asked only for a look-alike name and once a release (the
+  answer SC-NEW-DEPENDENCY reads, kept on the resolution). Never a finding: an owner the popular package has (the
+  maintainer's own sibling package — no finding at all then), an owner of any popular package (two real maintainers
+  with like names), a name of fewer than 5 letters and digits, or no owners named (offline, a document missing).
+  `popular_names.json` gains an `owners` section — account names only, lower-cased, sorted, one line a package, at
+  most 64 a package — for all 5,000 targets of each registry (4,983 npm, 4,998 PyPI, 5,000 crates, fetched Oct 17
+  by the new `scripts/fetch-target-owners.py` and written by `update-popular-names.py --owners`; 17 npm targets name
+  no maintainers, and PyPI's `ddtrace` document is over the 32 MB limit). `lazaret guard` compares them where it reads npm's packument (a release younger than `--min-age`) or
+  PyPI's JSON document (a lockfile with no upload time) anyway, adding no request; it reads no crate's owners.
 - **An action at a commit outside its repository, and a moved tag (RA-4; the action scan, no rule-set change).**
   GitHub serves a fork's commit under the parent repository's name, and a tag of the parent can be moved onto one:
   in May 2026 every tag of `actions-cool/issues-helper` (and 15 of `actions-cool/maintain-one-comment`) was moved to

@@ -888,7 +888,10 @@ def resolve_pypi(name, version):
     if not artifacts:
         raise ValueError(f"pypi:{name}@{version} has no downloadable archive")
     artifacts.sort(key=lambda a: (a["artifact"] != "sdist", a["filename"]))
-    return Resolution(version, artifacts, skipped, info=info)
+    resolution = Resolution(version, artifacts, skipped, info=info)
+    # (RA-9: who owns the project, the document's "ownership", for SC-PUBLISHER-LOOKALIKE: release_owners)
+    resolution.ownership = meta.get("ownership") if isinstance(meta.get("ownership"), dict) else None
+    return resolution
 
 
 _PEP440_FINAL_RE = re.compile(r"^(\d+(?:\.\d+)*)(?:\.post(\d+))?$")
@@ -5565,6 +5568,79 @@ def version_inflation_issues(eco, name, version, resolved, history=None, found=(
         "(release)", 1, [])]
 
 
+#: an npm account's name (lower-case and URL-safe: `__hai` maintains popular packages); `_npmUser` names "GitHub
+#: Actions" for a release published from a workflow (trusted publishing), which is no account
+_NPM_ACCOUNT_RE = re.compile(r"[a-z0-9._-]{1,214}")
+_UNASKED = object()
+
+
+def npm_owners(manifest, document=None):
+    """The accounts of an npm release (RA-9): its version document's `maintainers` and the account that published it
+    (`_npmUser`, when it names an account), and, given the package's whole document, its `maintainers` too."""
+    out = set()
+    for doc in (manifest, document):
+        people = doc.get("maintainers") if isinstance(doc, dict) else None
+        out |= {m["name"] for m in people if isinstance(m, dict) and isinstance(m.get("name"), str)} \
+            if isinstance(people, list) else set()
+    user = manifest.get("_npmUser") if isinstance(manifest, dict) else None
+    name = user.get("name") if isinstance(user, dict) else None
+    if isinstance(name, str) and _NPM_ACCOUNT_RE.fullmatch(name):
+        out.add(name)
+    return out
+
+
+def pypi_owners(ownership):
+    """The accounts of a PyPI project from its JSON document's `ownership` (RA-9): its roles' users (owners and
+    maintainers) and its organization's name."""
+    users, org = _pypi_ownership({"ownership": ownership})
+    return users | ({org} if org else set())
+
+
+def crate_owners(name, resolved, fetch=None):
+    """crates.io's owners of the release's crate (`module.owners`: its API, one request a second), asked once a release
+    and kept on its Resolution: SC-NEW-DEPENDENCY and SC-PUBLISHER-LOOKALIKE both read them, from one answer. None
+    when the API did not answer."""
+    kept = getattr(resolved, "crate_owners", _UNASKED)
+    if kept is not _UNASKED:
+        return kept
+    module = registry_module("crates")
+    try:
+        kept = module.owners(name, fetch or module_fetch(module))
+    except (FetchError, SpecError):
+        kept = None
+    try:
+        resolved.crate_owners = kept
+    except AttributeError:
+        pass                                 # (not a Resolution: asked again the next time)
+    return kept
+
+
+def release_owners(eco, name, resolved):
+    """The accounts that own a release's package as the registry's documents say (RA-9), or None where they do not:
+    npm's version document (`resolved[4]`, npm_owners), PyPI's JSON document's `ownership` (resolve_pypi keeps it on
+    the Resolution), crates.io's owners (crate_owners: a request, the only one this check makes, and none with
+    LAZARET_NO_DEPENDENCY_HISTORY, an offline scan)."""
+    if eco == "npm":
+        manifest = resolved[4] if isinstance(resolved, tuple) and len(resolved) > 4 else None
+        return npm_owners(manifest) if isinstance(manifest, dict) else None
+    if eco == "pypi":
+        ownership = getattr(resolved, "ownership", None)
+        return pypi_owners(ownership) if isinstance(ownership, dict) else None
+    if eco == "crates" and not os.environ.get("LAZARET_NO_DEPENDENCY_HISTORY"):
+        return crate_owners(name, resolved)
+    return None
+
+
+def publisher_lookalike_issues(eco, name, resolved):
+    """SC-PUBLISHER-LOOKALIKE (CRITICAL, RA-9): a release named one change from a popular package of its registry
+    (SC-TYPOSQUAT on its own name) with an owner whose name is one change from one of that package's owners
+    (registry/lookalike.owner_lookalike). Its owners are read only when the name is such a look-alike, and the
+    popular package's owners are known (popular_names.json's "owners"); [] when the registry's documents name none."""
+    if _lookalike.owner_target(eco, name) is None:
+        return []
+    return _lookalike.owner_issues(eco, name, release_owners(eco, name, resolved))
+
+
 def npm_new_dependencies(name, version, manifest, fetch=None):
     """-> (previous version, [(dependency, age, its maintainers)]) for the
     dependencies an npm release adds that are recent (see above)."""
@@ -5709,10 +5785,7 @@ def crates_new_dependencies(name, version, resolved, fetch=None):
         except (FetchError, SpecError):
             theirs = set()               # (the API did not answer: counted, with no owners named)
         if ours is None:
-            try:
-                ours = module.owners(name, fetch)
-            except (FetchError, SpecError):
-                ours = set()
+            ours = crate_owners(name, resolved, fetch) or set()
         if ours & theirs:
             continue                     # the crate's own owners'
         found.append((dep, age, sorted(theirs)))
@@ -6077,6 +6150,7 @@ def _release_findings(eco, name, version, resolved, issues, per, found, limits):
     prior_issues, prior = _prior.release_issues(eco, name, version, resolved, issues, per, deadline, cancel, memo,
                                                 history)
     issues.extend(new_dependency_issues(eco, name, version, resolved, unused, brings, imports, history))
+    issues.extend(publisher_lookalike_issues(eco, name, resolved))   # (after it: a crate's owners are asked once, RA-9)
     provenance_issues, provenance = _provenance.check_release(eco, name, version, resolved, attested, _provenance_fetch)
     issues.extend(version_inflation_issues(eco, name, version, resolved, history,
                                            issues + provenance_issues + prior_issues))

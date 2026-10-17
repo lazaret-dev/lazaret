@@ -99,6 +99,13 @@ established package (its history: a year old, three versions, no new publisher) 
 (registry/lookalike_history.py, TYPO-ESTABLISHED; one request a dependency, none offline);
 LAZARET_NO_LOOKALIKE_HISTORY=1 turns it off.
 
+A package named one change from a popular one's whose owner's name is one change from one of that package's owners is
+SC-PUBLISHER-LOOKALIKE, CRITICAL, and SUSPICIOUS (RA-9, registry/lookalike.owner_lookalike), where the guard has read
+the registry's document that names the owners anyway: npm's packument (asked for a release that may be younger than
+--min-age) and PyPI's JSON document (asked when the lockfile gives no upload time); no request is added for it. The
+guard reads no crate's owners (crates.io's owners API is not on its path), nor those of a file its local PyPI index
+relays (the Simple API names none): those are the registry scan's.
+
 The resolutions made outside the project (cargo install, yarn 1, npm install -g, go install pkg@version, --plan) are made
 in a folder of the user's own (private_scratch), and the package manager is found in PATH's absolute folders only
 (scanner/programs.py).
@@ -147,6 +154,7 @@ from lazaret.scanner import gomod, nativenet, programs, sca, timings
 from lazaret.registry import cargosrc, goproxy, keepalive as keepalive_, pmsettings, prior as prior_, \
     provenance as provenance_, repo, scanpool
 from lazaret.registry import lookalike_history as lookalikes_
+from lazaret.registry import lookalike as lookalike_
 from lazaret.registry.ecosystems import crates, golang
 
 #: Releases published less than this long ago get npm's and PyPI's provenance check (registry/provenance.py, NET-1): an
@@ -842,6 +850,21 @@ def with_history(ctx, check, hit, fetcher, when, report, release):
     if prior_due(hit, published, public):
         hit = with_prior(ctx, check, hit, fetcher, *release)
     return hit
+
+
+def with_publisher(check, hit, owners):
+    """The verdict `hit` with SC-PUBLISHER-LOOKALIKE (RA-9, lookalike.owner_issues): a package named one change from a
+    popular one's, with an owner one change from one of that package's owners, is SUSPICIOUS, its line first among the
+    indicators. `owners`: the release's owners, from a registry document the guard read anyway; None (it read none)
+    says nothing. A verdict that has the line already (from the cache) is kept as it is."""
+    issues = lookalike_.owner_issues(check.eco, check.name, owners) if owners else []
+    if not issues:
+        return hit
+    lines = summarize({"issues": issues})
+    if lines[0] in hit.get("indicators", ()):
+        return hit
+    return {**hit, "verdict": "SUSPICIOUS", "reason": issues[0]["msg"][:400],
+            "indicators": lines + list(hit["indicators"])}
 
 
 def pypi_kind(filename):
@@ -1678,15 +1701,33 @@ class Registries(pmsettings.NpmSettings):
         return {netloc(u) for u in self.all() if u.startswith("http://")}
 
 
-def npm_publish_time(fetcher, registry, name, version):
-    """When the registry says name@version was published (its packument's
-    `time`), or None."""
+def npm_document(fetcher, registry, name):
+    """The registry's document of an npm package (its packument), or None when it cannot be read."""
     try:
         doc = fetcher.json(registry + urllib.parse.quote(name, safe="@"))
     except (repo.FetchError, ValueError):
         return None
+    return doc if isinstance(doc, dict) else None
+
+
+def npm_document_time(doc, version):
+    """When a packument says `version` was published (its `time`), or None."""
     times = doc.get("time") if isinstance(doc, dict) else None
     return parse_time(times.get(version)) if isinstance(times, dict) else None
+
+
+def npm_publish_time(fetcher, registry, name, version):
+    """When the registry says name@version was published (its packument's
+    `time`), or None."""
+    return npm_document_time(npm_document(fetcher, registry, name), version)
+
+
+def npm_document_owners(doc, version):
+    """The release's owners as its packument names them (repo.npm_owners: the package's maintainers, the version's,
+    and the account that published it), or None for no document or one that does not list the version."""
+    versions = doc.get("versions") if isinstance(doc, dict) else None
+    manifest = versions.get(version) if isinstance(versions, dict) else None
+    return repo.npm_owners(manifest, doc) if isinstance(manifest, dict) else None
 
 
 def check_npm_package(ctx, fetcher, pkg):
@@ -1737,11 +1778,15 @@ def check_npm_package(ctx, fetcher, pkg):
                 published = parse_http_date(headers.get("Last-Modified"))
                 hit = ctx.scanner.scan(data, "tgz", "npm")
                 scanned = hashlib.sha512(data).hexdigest()
+        doc = None
         if ctx.cutoff is not None and (published is None or published > ctx.cutoff):
-            published = npm_publish_time(fetcher, pkg["registry"], name, version) or published
+            doc = npm_document(fetcher, pkg["registry"], name)
+            published = npm_document_time(doc, version) or published
         hit = with_history(ctx, check, hit, fetcher, (published, public, bool(scanned)),
                            lambda: provenance_.guard_npm(name, version, scanned, provenance_fetch(fetcher)),
                            (pkg["tarball"].rsplit("/", 1)[-1], "npm"))
+        # RA-9: the packument read for the publish time names the owners (no request of its own)
+        hit = with_publisher(check, hit, npm_document_owners(doc, version) if public else None)
         ctx.scanner.remember(key, hit, published)
         ctx.scanner.remember(alt, hit, published)
         ctx.apply(check, hit)
@@ -1804,17 +1849,33 @@ def check_lock_entries(ctx, entries, registries, installed, label, env=None, rew
 
 
 # ---------------- PyPI files ----------------
-def pypi_upload_time(fetcher, name, version, filename):
-    """When PyPI says a file was uploaded (its JSON API), or None."""
+def pypi_document(fetcher, name, version):
+    """PyPI's JSON document of a release, or None when it cannot be read."""
     try:
         quote = urllib.parse.quote
         doc = fetcher.json(f"{PYPI_JSON}{quote(name, safe='')}/{quote(version, safe='')}/json")
     except (repo.FetchError, ValueError):
         return None
+    return doc if isinstance(doc, dict) else None
+
+
+def pypi_document_time(doc, filename):
+    """When a release's JSON document says a file was uploaded, or None."""
     for u in doc.get("urls", []) if isinstance(doc, dict) and isinstance(doc.get("urls"), list) else []:
         if isinstance(u, dict) and u.get("filename") == filename:
             return parse_time(u.get("upload_time_iso_8601"))
     return None
+
+
+def pypi_upload_time(fetcher, name, version, filename):
+    """When PyPI says a file was uploaded (its JSON API), or None."""
+    return pypi_document_time(pypi_document(fetcher, name, version), filename)
+
+
+def pypi_document_owners(doc):
+    """The project's owners as a JSON document's `ownership` names them (repo.pypi_owners), or None."""
+    ownership = doc.get("ownership") if isinstance(doc, dict) else None
+    return repo.pypi_owners(ownership) if isinstance(ownership, dict) else None
 
 
 def check_file(ctx, fetcher, name, version, f):
@@ -1842,12 +1903,14 @@ def check_file(ctx, fetcher, name, version, f):
                 return check
             hit = ctx.scanner.scan(data, container, pypi_kind(f["filename"]))
             scanned = True
-        published = published or parse_time(hit.get("published"))
+        published, doc = published or parse_time(hit.get("published")), None
         if published is None and ctx.cutoff is not None and public:
-            published = pypi_upload_time(fetcher, name, version, f["filename"])
+            doc = pypi_document(fetcher, name, version)
+            published = pypi_document_time(doc, f["filename"])
         hit = with_history(ctx, check, hit, fetcher, (published, public, scanned),
                            lambda: provenance_.check_pypi(name, version, [(f["filename"], sha)], provenance_fetch(fetcher)),
                            (f["filename"], pypi_kind(f["filename"])))
+        hit = with_publisher(check, hit, pypi_document_owners(doc))     # (RA-9: the document read for the time)
         ctx.scanner.remember(key, hit, published)
         ctx.apply(check, hit)
         ctx.provenance_block(check, hit, published)

@@ -86,6 +86,25 @@ out. An extension of another publisher with the same name is not one:
 Open VSX carries forks and builds of popular extensions under their
 builders' namespaces.
 
+A look-alike name from a look-alike account (0.1.9, RA-9) is
+SC-PUBLISHER-LOOKALIKE, CRITICAL: proc-macro1, one change from proc-macro2,
+was published to crates.io by dtolney, one change from dtolnay, proc-macro2's
+maintainer (arrayref). One look-alike can be chance; two together are
+impersonation. For npm, PyPI and crates, when a release's own name is one
+change from a popular package's (lookalike()), its owners — npm's
+maintainers and the account that published the version, PyPI's owners and
+maintainers and its organization, crates.io's owners — are compared with
+that package's (popular_names.json's "owners", the targets' accounts
+lower-cased): an owner whose name is one change from one of theirs,
+differs from it only in its separators, or is one change from it with the
+separators aside (_publisher_change's rules), is one. Never an owner that is
+one of theirs (the same maintainer publishing a sibling package is normal:
+no finding at all then), nor an owner of any popular package of the registry
+(two real maintainers with like names), nor a name of fewer than MIN_OWNER
+letters and digits; and nothing is said when popular_names.json has no
+owners of the package, or the registry's documents name none
+(owner_lookalike).
+
 The lists and their licences: scripts/update-popular-names.py, and the
 "source" fields of popular_names.json.
 """
@@ -665,3 +684,115 @@ def issues(eco, name, deps, rel, text=""):
             issue[DEPENDENCY_KEY] = dep          # (TYPO-ESTABLISHED: the registry reads its history, lookalike_history)
         out.append(issue)
     return out
+
+
+# ---- A look-alike name from a look-alike account (0.1.9, RA-9)
+#: the registries whose packages' owners popular_names.json keeps
+OWNER_ECOSYSTEMS = ("npm", "pypi", "crates")
+#: the fewest letters and digits an account's name has to be compared (a short one has hundreds of neighbours)
+MIN_OWNER = 5
+_OWNERS = {}
+
+
+def owner_tables(section):
+    """popular_names.json's "owners" section ({eco: {popular package: its owners, space-separated}}; a list is read
+    too) -> {eco: ({popular package: frozenset of its owners}, frozenset of every owner of a popular package)} for
+    owner_lookalike()."""
+    out = {}
+    for eco in OWNER_ECOSYSTEMS:
+        by_name = section.get(eco) if isinstance(section, dict) else None
+        table = {}
+        for n, owners in (by_name or {}).items():
+            names = owners.split() if isinstance(owners, str) else owners if isinstance(owners, list) else ()
+            kept = frozenset(normalize_owner(o) for o in names if isinstance(o, str) and o.strip())
+            if isinstance(n, str) and kept:
+                table[normalize(eco, n)] = kept
+        out[eco] = table, frozenset().union(*table.values())
+    return out
+
+
+def _owner_data(eco):
+    if not _OWNERS:
+        with open(os.path.join(os.path.dirname(__file__), "popular_names.json"), encoding="utf-8") as f:
+            _OWNERS.update(owner_tables(json.load(f).get("owners") or {}))
+    return _OWNERS.get(eco) or ({}, frozenset())
+
+
+def normalize_owner(name):
+    """An account's name as it is compared: lower-cased (npm's, PyPI's and GitHub's names are one name in any case)."""
+    return name.strip().lower()
+
+
+def owner_change(mine, theirs):
+    """How the account `mine` looks like the account `theirs` (both normalized): "its separators changed", or
+    _how's words ("a character changed"), with ", its separators aside" when they are; None when it does not, when it
+    is `theirs`, or when either has fewer than MIN_OWNER letters and digits."""
+    if mine == theirs or min(len(_bare(mine)), len(_bare(theirs))) < MIN_OWNER:
+        return None
+    if _bare(mine) == _bare(theirs):
+        return "its separators changed"
+    how = _one_change(mine, theirs)
+    if how:
+        return how
+    how = _one_change(_bare(mine), _bare(theirs))
+    return f"{how}, its separators aside" if how else None
+
+
+def owner_target(eco, name, data=None, owner_data=None):
+    """(the popular package, how the name was changed) when `name` looks like a popular package's (lookalike()) whose
+    owners popular_names.json keeps, else None: a release whose owners are worth asking for."""
+    if eco not in OWNER_ECOSYSTEMS:
+        return None
+    found = lookalike(eco, name, data)
+    if found is None or not (owner_data or _owner_data(eco))[0].get(found[0]):
+        return None
+    return found
+
+
+def owner_lookalike(eco, name, owners, data=None, owner_data=None):
+    """(the popular package, how the name was changed, the release's owner, the popular package's owner it looks like,
+    how) when the release `name` looks like a popular package's (owner_target) and one of its `owners` (account names,
+    as the registry gives them) looks like one of that package's owners (owner_change); else None. None too when one
+    of `owners` is one of that package's own, and for an owner of any popular package of the registry (see above)."""
+    found = owner_target(eco, name, data, owner_data)
+    if found is None:
+        return None
+    by_name, everyone = owner_data or _owner_data(eco)
+    target, how_name = found
+    theirs = by_name[target]
+    mine = {normalize_owner(o) for o in owners or () if isinstance(o, str) and o.strip()}
+    if mine & theirs:
+        return None
+    for m in sorted(mine - everyone):
+        for t in sorted(theirs):
+            how = owner_change(m, t)
+            if how:
+                return target, how_name, m, t, how
+    return None
+
+
+_OWNER_WHY = ("proc-macro1, one change from proc-macro2, was published to crates.io by dtolney, one change from "
+              "dtolnay, proc-macro2's maintainer (arrayref). A name one character from a popular package's can be "
+              "chance; an account one character from that package's maintainer's as well is impersonation: it is "
+              "made to be mistaken for the maintainer's own sibling package. The popular packages' own maintainers "
+              "are never flagged; this account is not among them.")
+
+
+def owner_issues(eco, name, owners, rel="(release)"):
+    """SC-PUBLISHER-LOOKALIKE (CRITICAL, RA-9) for a release named `name` whose registry names `owners` as its owners
+    (owner_lookalike); [] when it is not one, or `owners` is empty or None (the registry's documents did not say)."""
+    found = owner_lookalike(eco, name, owners) if name and owners else None
+    if found is None:
+        return []
+    target, how_name, mine, theirs, how = found
+    count, what = f"{len(_load()[eco][0]):,}", _ECO_TEXT[eco]
+    return [lazaret.mk_issue(
+        {"id": "SC-PUBLISHER-LOOKALIKE", "name": "A look-alike package from a look-alike account", "type": "HOTSPOT",
+         "sev": "CRITICAL",
+         "msg": (f'Published by "{mine}", whose name imitates "{theirs}" ({how}), a maintainer of "{target}", one of '
+                 f'the {count} most-downloaded {what}; and the package\'s own name, "{name}", is one change from '
+                 f'"{target}" ({how_name}). Two look-alikes together are impersonation, not chance.')[:1200],
+         "why": _OWNER_WHY,
+         "fix": f'Do not install "{name}"; if you meant "{target}", install that, and report this package to the '
+                "registry.",
+         "ref": "CWE-506 · Supply chain"}, rel, 1, [])]

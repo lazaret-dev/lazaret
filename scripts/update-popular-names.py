@@ -58,9 +58,16 @@ target's publisher (lookalike.publisher_lookalike), never flagged.
         test's): the files scripts/fetch-github-targets.py writes (npm.jsonl, pypi.jsonl, stars.jsonl). Owner and
         repository names only, lower-cased, and the most-starred repositories' descriptions. The "go" targets on
         github.com are compared too, from the "go" section.
+  owners  who owns the npm, PyPI and crates targets (SC-PUBLISHER-LOOKALIKE, RA-9, lookalike.owner_lookalike): npm's
+        /<name>/latest `maintainers`, PyPI's /pypi/<name>/json `ownership` (its roles' users, its organization),
+        crates.io's /api/v1/crates/<name>/owners (users' and teams' logins): the files scripts/fetch-target-owners.py
+        writes (npm.jsonl, pypi.jsonl, crates.jsonl). Account names only, lower-cased, sorted and space-separated
+        (one line a package: no name has a space), at most MAX_OWNERS a package, for the targets only; no e-mail
+        address or other text of the answers. A list whose file is not
+        given has no owners. Without --owners the section is kept, to the targets the file has.
 
 Usage: python3 scripts/update-popular-names.py [NPM_LIB_DIR TOP_PYPI_JSON]
-           [--crates PAGES_DIR [UBUNTU_SOURCES...]] [--vscode PAGES_DIR] [--github FILES_DIR]
+           [--crates PAGES_DIR [UBUNTU_SOURCES...]] [--vscode PAGES_DIR] [--github FILES_DIR] [--owners FILES_DIR]
            [--go AWESOME_GO_README UBUNTU_SOURCES...] [--check]
 A list not given is kept as it is in the file. An Ubuntu index may be
 xz-compressed. --check compares with the file in the tree instead of
@@ -129,7 +136,8 @@ ABOUT = ("Names for the registry's look-alike check (SC-TYPOSQUAT, lazaret/regis
          "that are one change from a target (known); the Go modules awesome-go lists and Debian packages (targets); "
          "the most-installed VS Code extensions of the Visual Studio Marketplace and Open VSX (targets, known names "
          "and known publishers); the GitHub repositories of the npm and PyPI targets and the most-starred ones "
-         "(targets, the most-starred ones' descriptions). Written by scripts/update-popular-names.py.")
+         "(targets, the most-starred ones' descriptions); the accounts that own npm's, PyPI's and crates.io's targets "
+         "(owners, SC-PUBLISHER-LOOKALIKE). Written by scripts/update-popular-names.py.")
 
 
 def npm_pypi_sections(npm_lib, top_pypi):
@@ -456,7 +464,62 @@ def vscode_section(pages_dir):
         "targets": targets, "known": known, "known_publishers": known_publishers}}
 
 
-def build(current, npm_lib=None, top_pypi=None, go=None, crates=None, vscode=None, github=None):
+#: the lists whose targets' owners are kept, and the most owners kept of one package (npm's `arg` has 164 maintainers)
+OWNER_LISTS = ("npm", "pypi", "crates")
+MAX_OWNERS = 64
+#: an account's name as the registries write them, lower-cased (a crates.io team's is github:org:team); anything else,
+#: an e-mail address among them, is never kept
+_ACCOUNT_RE = re.compile(r"[a-z0-9._:-]{1,100}")
+
+
+def _owner_names(values):
+    names = {lookalike.normalize_owner(v) for v in values if isinstance(v, str)}
+    return sorted(n for n in names if _ACCOUNT_RE.fullmatch(n))[:MAX_OWNERS]
+
+
+def _owners_kept(by_name, targets):
+    """{target: its owners, space-separated} of `by_name` ({name: [owners] or "owner owner"}) for the targets only,
+    each as _owner_names keeps them, sorted by name: one line a package in the file."""
+    kept = ((n, _owner_names(o.split() if isinstance(o, str) else o))
+            for n, o in sorted(by_name.items()) if n in targets)
+    return {n: " ".join(o) for n, o in kept if o}
+
+
+def owners_section(files_dir, current, sections):
+    """The "owners" section: for the npm, PyPI and crates targets of `sections` (the file being written), their owners
+    from scripts/fetch-target-owners.py's files in `files_dir` (npm.jsonl, pypi.jsonl, crates.jsonl; a row with an error
+    is left out, and a list whose file is not there has none); with no `files_dir`, `current` (the file's section) kept
+    to the targets."""
+    targets = {eco: set(sections[eco]["targets"]) for eco in OWNER_LISTS}
+    if files_dir is None:
+        out = {k: v for k, v in current.items() if k not in OWNER_LISTS}
+        return {"owners": {**out, **{eco: _owners_kept(current.get(eco) or {}, targets[eco]) for eco in OWNER_LISTS}}}
+    d, sums, lists = pathlib.Path(files_dir), [], {}
+    for eco in OWNER_LISTS:
+        rows, digest = _jsonl(d / f"{eco}.jsonl")
+        if digest:
+            sums.append(f"{eco}.jsonl {digest[:16]}…")
+        found = {lookalike.normalize(eco, r["name"]): r["owners"] for r in rows if isinstance(r, dict)
+                 and isinstance(r.get("name"), str) and isinstance(r.get("owners"), list)}
+        lists[eco] = _owners_kept(found, targets[eco])
+    if not sums:
+        raise SystemExit(f"--owners: no npm.jsonl, pypi.jsonl or crates.jsonl in {d}")
+    counts = ", ".join(f"{label} {len(lists[eco]):,} of its {len(targets[eco]):,}"
+                       for eco, label in (("npm", "npm"), ("pypi", "PyPI"), ("crates", "crates")))
+    return {"owners": {
+        "source": ("who owns npm's, PyPI's and crates.io's targets: the npm registry's /<name>/latest `maintainers`, "
+                   "PyPI's /pypi/<name>/json `ownership` (its roles' users and its organization) and crates.io's "
+                   "/api/v1/crates/<name>/owners (users' and teams' logins), as scripts/fetch-target-owners.py wrote "
+                   "them (" + ", ".join(sums) + ")"),
+        "license": "account names, which are facts about the packages; no e-mail address or other text of the "
+                   "registries' answers is kept",
+        "changes": (f"account names only, lower-cased, sorted, space-separated, at most {MAX_OWNERS} a package, for "
+                    "the targets "
+                    f"whose owners were fetched ({counts})"),
+        **lists}}
+
+
+def build(current, npm_lib=None, top_pypi=None, go=None, crates=None, vscode=None, github=None, owners=None):
     """The file: `current` (the file's data) with the lists given rebuilt."""
     out = {"_about": ABOUT}
     if npm_lib is not None:
@@ -470,6 +533,8 @@ def build(current, npm_lib=None, top_pypi=None, go=None, crates=None, vscode=Non
         out.update(github_section(github))
     elif "github" in current:
         out["github"] = current["github"]
+    if owners is not None or "owners" in current:
+        out.update(owners_section(owners, current.get("owners") or {}, out))
     return out
 
 
@@ -491,6 +556,13 @@ def main(argv):
             print(__doc__.split("\n\n")[-1].strip(), file=sys.stderr)
             return 2
         github, args = args[at + 1], args[:at] + args[at + 2:]
+    owners = None
+    if "--owners" in args:
+        at = args.index("--owners")
+        if at + 1 >= len(args) or args[at + 1].startswith("--"):
+            print(__doc__.split("\n\n")[-1].strip(), file=sys.stderr)
+            return 2
+        owners, args = args[at + 1], args[:at] + args[at + 2:]
     vscode = None
     if "--vscode" in args:
         at = args.index("--vscode")
@@ -504,7 +576,7 @@ def main(argv):
         args, files = args[:at], args[at + 1:]
         go = (files[0], files[1:]) if len(files) >= 2 else ()          # (the README, then the indices)
     if len(args) not in ((0, 2) if go is not None or crates is not None or vscode is not None or github is not None
-                         else (2,)) or go == ():
+                         or owners is not None else (2,)) or go == ():
         print(__doc__.split("\n\n")[-1].strip(), file=sys.stderr)
         return 2
     current = json.loads(OUT.read_text(encoding="utf-8")) if OUT.exists() else {}
@@ -512,8 +584,8 @@ def main(argv):
             or (crates is None and "crates" not in current) or (vscode is None and "vscode" not in current)):
         print(f"{OUT.relative_to(ROOT)} has no list to keep: give every source", file=sys.stderr)
         return 2
-    text = json.dumps(build(current, *args, go=go, crates=crates, vscode=vscode, github=github), indent=1,
-                      ensure_ascii=False) + "\n"
+    text = json.dumps(build(current, *args, go=go, crates=crates, vscode=vscode, github=github, owners=owners),
+                      indent=1, ensure_ascii=False) + "\n"
     if "--check" in argv:
         now = OUT.read_text(encoding="utf-8") if OUT.exists() else ""
         if now != text:
@@ -529,7 +601,9 @@ def main(argv):
           f"{len(data['go']['targets'])} modules; VS Code {len(data['vscode']['targets'])} targets, "
           f"{len(data['vscode']['known'])} known, {len(data['vscode']['known_publishers'])} known publishers"
           + (f"; GitHub {len(data['github']['targets'])} repositories, {len(data['github']['descriptions'])} "
-             f"descriptions" if "github" in data else ""))
+             f"descriptions" if "github" in data else "")
+          + ("; owners of " + ", ".join(f"{len(data['owners'][eco])} {eco} targets" for eco in OWNER_LISTS)
+             if "owners" in data else ""))
     return 0
 
 
