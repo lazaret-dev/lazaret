@@ -18,7 +18,11 @@ This module fetches the attestations, compares the release with the one before i
                                           the project publishes
     SC-PROVENANCE-REPO-CHANGED  MAJOR     both have verified provenance, from different source repositories of
                                           different owners (INFO when the owner is the same: a release repository,
-                                          a monorepo split)
+                                          a monorepo split, the owner's repository recreated under its name)
+    SC-PROVENANCE-REPO-TAKEOVER CRITICAL  both name the same source-repository URL but GitHub's immutable repository
+                                          IDs differ and so do its owners' account IDs (both known): the repository
+                                          behind the name is another account's (a name given up and taken over,
+                                          npm's SlugFest)
     SC-PROVENANCE-UNCHECKED     INFO      an attestation that could not be checked, for a reason that is not the
                                           file's (a log, authority or key the trust here does not know; a form not
                                           read here)
@@ -481,16 +485,40 @@ def release_issues(eco, name, version, report):
     here = repository(verified)
     there = prev.get("repository") if prev else None
     if here is not None and there and not same_repository(here, there):
-        # (a move within the owner's repositories, as projects do for a release repository or a monorepo split, is
-        # said and does not count; one to another owner's does)
-        moved = same_owner(here, there)
-        issues.append(_issue("SC-PROVENANCE-REPO-CHANGED", "INFO" if moved else "MAJOR",
-                             "Provenance from another repository",
-                             f"{version} was built from {_printable(here['uri'], 120)}, and {prev['version']}, the release "
-                             f"before it, from {_printable(there['uri'], 120)}"
-                             + (", a repository of the same owner." if moved else ", another owner's."),
-                             f"Check that {_printable(here['uri'], 120)} is the project's; pin {prev['version']} until "
-                             "you have."))
+        same_url = bool(here.get("id") and there.get("id")) and _norm(here["uri"]) == _norm(there["uri"])
+        if same_url and here.get("ownerId") and there.get("ownerId") and here["ownerId"] != there["ownerId"]:
+            # RA-5: the same source-repository URL, a different immutable repository ID, and a different immutable owner
+            # ID — the repository behind the name is another account's. A name a repository gives up can be taken by
+            # another account (npm's SlugFest, Oct 2026: Trusted Publishing matched repository names, not IDs). Only
+            # another account can take a name, so both owner IDs must be known and differ: an owner that deletes and
+            # recreates its own repository (a new repository ID, the same owner ID) is the same-owner case below, and
+            # without both owner IDs it is that case too. CRITICAL, with a message that names both repository IDs and
+            # both owner IDs (the URLs are identical).
+            issues.append(_issue("SC-PROVENANCE-REPO-TAKEOVER", "CRITICAL",
+                                 "The repository behind the provenance URL changed hands",
+                                 f"{version} and {prev['version']}, the release before it, both name "
+                                 f"{_printable(here['uri'], 120)} as their source repository, but GitHub's immutable "
+                                 f"repository IDs differ ({_printable(here['id'], 40)} now, {_printable(there['id'], 40)} "
+                                 f"before) and so do its owners' account IDs ({_printable(here['ownerId'], 40)} now, "
+                                 f"{_printable(there['ownerId'], 40)} before): the repository at that URL is another "
+                                 "account's, not the one the earlier release was built from. A name a repository gives up "
+                                 "can be taken over by another account (npm's SlugFest, Oct 2026).",
+                                 f"Do not install {version} until you confirm {_printable(here['uri'], 120)} is still the "
+                                 f"project's repository; pin {prev['version']} until you have."))
+        else:
+            # (a move within the owner's repositories, as projects do for a release repository or a monorepo split, is
+            # said and does not count; one to another owner's does. The same URL with a new repository ID and the same
+            # owner, or owner IDs not both known, is the owner's repository recreated under its name: said, INFO.)
+            moved = same_owner(here, there)
+            recreated = (f" (the same URL, a new repository ID: {_printable(here['id'], 40)} now, "
+                         f"{_printable(there['id'], 40)} before)") if same_url else ""
+            issues.append(_issue("SC-PROVENANCE-REPO-CHANGED", "INFO" if moved else "MAJOR",
+                                 "Provenance from another repository",
+                                 f"{version} was built from {_printable(here['uri'], 120)}, and {prev['version']}, the release "
+                                 f"before it, from {_printable(there['uri'], 120)}{recreated}"
+                                 + (", a repository of the same owner." if moved else ", another owner's."),
+                                 f"Check that {_printable(here['uri'], 120)} is the project's; pin {prev['version']} until "
+                                 "you have."))
     summary = {"verified": [{"predicateType": a.get("predicateType"), "signer": a.get("signer"), "time": a.get("time")}
                             for a in verified],
                "files": [{"filename": f.get("filename"),

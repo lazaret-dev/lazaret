@@ -337,6 +337,44 @@ class FindingTests(unittest.TestCase):
                                                                                ("https://github.com/acme/x", "1", "10")))
         self.assertEqual(issues, [])
 
+    def test_the_same_url_another_accounts_repository_is_a_takeover(self):
+        # RA-5 (SlugFest): the URL is identical, but the immutable repository ID and the owner's account ID both changed —
+        # the name was taken by another account
+        issues, _ = provenance.release_issues("npm", "x", "1.1.0", self.report(("https://github.com/acme/x", "9901", "4402"),
+                                                                               ("https://github.com/acme/x", "1107", "3305")))
+        self.assertEqual(rules(issues), [("SC-PROVENANCE-REPO-TAKEOVER", "CRITICAL")])
+        msg = issues[0]["msg"]
+        self.assertIn("https://github.com/acme/x", msg)
+        self.assertIn("repository IDs differ (9901 now, 1107 before)", msg)
+        self.assertIn("account IDs (4402 now, 3305 before)", msg)
+        self.assertIn("taken over by another account", msg)
+        self.assertNotIn("anyone", msg)
+        self.assertIn("SlugFest", msg)
+
+    def test_the_owner_recreating_its_repository_under_its_name_is_not_a_takeover(self):
+        # the same owner deleted its repository and made a new one of the same name: a new repository ID, the same owner
+        # ID. Only another account can take a name, so it is the owner's own change: said, INFO, as before RA-5
+        issues, _ = provenance.release_issues("npm", "x", "1.1.0", self.report(("https://github.com/acme/x", "9901", "3305"),
+                                                                               ("https://github.com/acme/x", "1107", "3305")))
+        self.assertEqual(rules(issues), [("SC-PROVENANCE-REPO-CHANGED", "INFO")])
+        self.assertIn("a new repository ID: 9901 now, 1107 before", issues[0]["msg"])
+        self.assertIn("a repository of the same owner", issues[0]["msg"])
+
+    def test_the_same_url_a_new_repository_id_without_both_owner_ids_is_not_a_takeover(self):
+        # without both owner IDs nothing shows another account has the name: the same-URL owner comparison (INFO)
+        for here_owner, there_owner in ((None, "3305"), ("4402", None), (None, None)):
+            with self.subTest(here=here_owner, there=there_owner):
+                issues, _ = provenance.release_issues(
+                    "npm", "x", "1.1.0", self.report(("https://github.com/acme/x", "9901", here_owner),
+                                                     ("https://github.com/acme/x", "1107", there_owner)))
+                self.assertEqual(rules(issues), [("SC-PROVENANCE-REPO-CHANGED", "INFO")])
+
+    def test_the_same_url_without_both_ids_is_not_a_takeover(self):
+        # without both IDs the URL decides (same URL, same repository); nothing is flagged
+        issues, _ = provenance.release_issues("npm", "x", "1.1.0", self.report(("https://github.com/acme/x", None, "10"),
+                                                                               ("https://github.com/acme/x", "1", "10")))
+        self.assertEqual(issues, [])
+
     def test_without_ids_the_uri(self):
         same, owner = provenance.same_repository, provenance.same_owner
         self.assertTrue(same(repo_of("https://github.com/Acme/X.git"), repo_of("https://github.com/acme/x/", "7")))

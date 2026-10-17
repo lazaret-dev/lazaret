@@ -10,6 +10,8 @@ source replacement, where cargo is installed (skipped where it is not).
 What the scan finds in a crate today is what it finds in any archive (JavaScript and Python files, install hooks, binaries, the
 structure of the archive); the Rust rules of the engine read `.rs` files from the 0.1.9 wiring on."""
 
+import base64
+import datetime
 import io
 import json
 import os
@@ -20,9 +22,11 @@ import tarfile
 import tempfile
 import unittest
 import urllib.parse
+import urllib.request
 from unittest import mock
 
-from lazaret.registry import cargosrc, guard, pmsettings, repo
+from lazaret.registry import cargosrc, guard, pmsettings, prior, repo
+from lazaret.scanner import _native
 from tests.registry import _cargo_support as cs
 from tests.registry import _guard_support as gs
 from tests.registry.test_guard import options
@@ -1691,6 +1695,132 @@ class RealCargoTests(TmpCase):
         self.assertIn("/dl/pleaf/pleaf-1.0.0.crate", asked)
         self.assertNotIn("/dl/pleaf/pleaf-1.0.1.crate", asked)
         self.assertTrue(os.path.exists(os.path.join(root, "bin", "pinned")))
+
+B64_BLOB = base64.b64encode(bytes(range(256)) * 2).decode()
+INDEX = "https://index.crates.io/"
+STATIC = "https://static.crates.io/crates/"
+
+
+@unittest.skipUnless(_native.available(), f"native engine not built ({_native.load_error()})")
+@mock.patch.dict(os.environ, {prior.OFF_ENV: "", "LAZARET_NO_DEPENDENCY_HISTORY": ""})
+class CratePriorTests(CrateCase):
+    """RA-8: check_crate compares a WARN crate from the public index with its established predecessor, as npm and PyPI
+    are (SC-NEW-INDICATOR). On the real path: check_crate -> with_prior -> prior.compare -> prior._crates (the crates
+    module's index read, over repo.module_transport, patched to answer crates.io's index URLs from the fake registry)
+    -> guard._prior_scan (the guard's Fetcher, its host rule applied to crates.io's download URL, the bytes served by
+    the fake registry) -> the real scanner, with a verdict cache read back here. Crate `kit`: 0.9.0, 30 days old, with
+    no finding; 1.0.0, 2 days old (in the window), with a base64 blob (SC-B64, a weaker indicator: WARN)."""
+
+    def setUp(self):
+        super().setUp()
+        self.reg.add("kit", "0.9.0", published=cs.NOW - datetime.timedelta(days=30),
+                     files={"src/lib.rs": "pub const DATA: u8 = 1;\n"})
+        self.reg.add("kit", "1.0.0", published=cs.NOW - datetime.timedelta(days=2),
+                     files={"src/lib.rs": f'pub const DATA: &str = "{B64_BLOB}";\n'})
+        self.cache = guard.VerdictCache(None)
+        self.module_urls, self.asked, self.tampered = [], [], {}
+
+    def loopback(self, path):
+        with urllib.request.urlopen(self.reg.url.rstrip("/") + path) as r:
+            return r.read()
+
+    def transport(self, url, max_bytes=None, accept=None, timeout=None, check_redirect=None, data=None,
+                  content_type=None):
+        self.module_urls.append(url)
+        check_redirect(url)                                       # (the crates module's own host rule)
+        if url.startswith(INDEX):
+            return self.loopback("/" + url[len(INDEX):])
+        raise repo.FetchError("not served here: " + url)
+
+    def mapped_fetcher(self):
+        case = self
+
+        class Mapped(guard.Fetcher):
+            def fetch(self, url, max_bytes=repo.MAX_DOWNLOAD_BYTES, accept=None, timeout=repo.DOWNLOAD_TIMEOUT):
+                case.asked.append(url)
+                self.check(url)                                   # the guard's host rule, on the real URL
+                if url.startswith(STATIC):
+                    if url in case.tampered:
+                        return case.tampered[url], {}
+                    return case.loopback("/dl/" + url[len(STATIC):]), {}
+                return super().fetch(url, max_bytes, accept, timeout)
+
+        f = Mapped({guard.netloc(self.reg.url)})
+        self.addCleanup(f.close)
+        return f
+
+    def check_crate(self, version="1.0.0", default=True, offline=False):
+        scanner = guard.Scanner(self.cache, jobs=1, isolate=False)
+        self.addCleanup(scanner.close)
+        ctx = self.context(scanner=scanner)
+        f = self.mapped_fetcher()
+        if offline:
+            reg = guard._offline_registry(cargosrc.DEFAULT_INDEX)
+            self.put_in_cargo_cache("kit", version)
+        else:
+            reg = self.registry(f)
+            reg.default = default                     # (the fake registry is loopback, not crates.io's index: as if it were)
+            f.allow(STATIC)                           # (as CrateRegistry allows crates.io's `dl`)
+        self.asked.clear()
+        with mock.patch.object(repo, "module_transport", self.transport):
+            return guard.check_crate(ctx, f, reg, self.pkg("kit", version), self.home, offline)
+
+    def predecessor_key(self):
+        return guard.VerdictCache.key("crates", "kit", "0.9.0", "sha256:" + self.reg.checksum("kit", "0.9.0"))
+
+    def test_a_warn_crate_whose_predecessor_lacks_the_rule_is_blocked(self):
+        check = self.check_crate()
+        self.assertEqual(check.verdict, "SUSPICIOUS")
+        self.assertTrue(check.blocked and check.blocked[0].startswith("SUSPICIOUS: "), check.blocked)
+        self.assertTrue(check.indicators[0].startswith("SC-NEW-INDICATOR (CRITICAL)"), check.indicators)
+        self.assertEqual(check.to_json()["priorRelease"], {"version": "0.9.0", "publishedBefore": "28 days",
+                                                           "files": ["kit-0.9.0.crate"], "newRules": ["SC-B64"]})
+        self.assertIn(STATIC + "kit/kit-0.9.0.crate", self.asked)        # (the predecessor, through the guard's fetcher)
+        self.assertTrue(self.module_urls and all(u == INDEX + "3/k/kit" for u in self.module_urls), self.module_urls)
+        # the predecessor's verdict is cached under the SHA-256 the index gives it, as check_crate keys a crate's
+        self.assertEqual(self.cache.get(self.predecessor_key())["verdict"], "OK")
+        self.assertFalse(any(k.endswith("#sha512-") for k in self.cache.data), list(self.cache.data))
+
+    def test_a_predecessor_with_the_rule_is_compared_and_the_crate_stays_warn(self):
+        self.reg.add("kit", "0.9.0", published=cs.NOW - datetime.timedelta(days=30),
+                     files={"src/lib.rs": f'pub const DATA: &str = "{B64_BLOB}";\n'})
+        check = self.check_crate()
+        self.assertEqual((check.verdict, check.blocked, check.prior["newRules"]), ("WARN", [], []))
+
+    def test_a_tampered_predecessor_is_not_compared_and_not_cached(self):
+        # the download of 0.9.0 is not the file the index's cksum names (a CDN or mirror serving other bytes, here one
+        # with the same blob, which would make the comparison find nothing new): the comparison is not made, as npm's and
+        # PyPI's are not on a digest mismatch, and neither the predecessor's verdict nor the comparison is cached
+        self.tampered[STATIC + "kit/kit-0.9.0.crate"] = cs.crate_tgz(
+            "kit", "0.9.0", {"src/lib.rs": f'pub const DATA: &str = "{B64_BLOB}";\n'})
+        check = self.check_crate()
+        self.assertEqual((check.verdict, check.blocked), ("WARN", []))
+        self.assertIn("SC-DIGEST-MISMATCH", check.prior["notCompared"])
+        self.assertNotIn("newRules", check.prior)
+        self.assertIsNone(self.cache.get(self.predecessor_key()))
+        self.assertEqual([k for k in self.cache.data if "@0.9.0#" in k], [])
+        # the next check (the CDN serving the right file again) compares, from the release's cached rules
+        self.tampered.clear()
+        check = self.check_crate()
+        self.assertEqual((check.verdict, check.prior["newRules"]), ("SUSPICIOUS", ["SC-B64"]))
+
+    def test_offline_it_is_not_compared_and_nothing_is_fetched(self):
+        # cargo --offline: the crate from cargo's cache, and neither the index nor the predecessor asked for
+        check = self.check_crate(offline=True)
+        self.assertEqual((check.verdict, check.blocked, check.prior), ("WARN", [], None))
+        self.assertNotIn("priorRelease", check.to_json())
+        self.assertEqual((self.module_urls, self.asked, self.reg.requests), ([], [], []))
+
+    def test_an_ok_crate_is_not_compared(self):
+        check = self.check_crate(version="0.9.0")
+        self.assertEqual((check.verdict, check.prior, "priorRelease" in check.to_json()), ("OK", None, False))
+        self.assertEqual(self.module_urls, [])
+
+    def test_a_crate_from_a_registry_that_is_not_the_public_index_is_not_compared(self):
+        check = self.check_crate(default=False)
+        self.assertEqual((check.verdict, check.prior, "priorRelease" in check.to_json()), ("WARN", None, False))
+        self.assertEqual(self.module_urls, [])
+
 
 if __name__ == "__main__":
     unittest.main()

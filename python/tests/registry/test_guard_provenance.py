@@ -341,5 +341,49 @@ class MergeTests(unittest.TestCase):
         self.assertTrue(got["indicators"][0].startswith("SC-PROVENANCE-DROPPED (MAJOR)"))
 
 
+class TakeoverTests(unittest.TestCase):
+    """RA-5: a release whose provenance names the release before it's repository URL from another account's repository
+    (both repository IDs and both owner IDs differ) is SC-PROVENANCE-REPO-TAKEOVER, CRITICAL, and the guard blocks it —
+    through check_npm_package, the provenance report made here (guard_npm mocked; the scan a stand-in, every archive
+    OK, so what moves the verdict is the provenance alone). Nothing opens a socket; no native library needed."""
+
+    URL = "https://github.com/acme/x"
+
+    def report(self, here_owner):
+        signer = {"kind": "certificate", "repository": self.URL, "repositoryId": "9901", "owner": "https://github.com/acme",
+                  "ownerId": here_owner, "workflow": None}
+        return {"files": [{"filename": None, "attestations": [
+                    {"predicateType": "https://slsa.dev/provenance/v1", "outcome": "verified", "time": 1, "signer": signer}]}],
+                "previous": {"version": "1.0.0", "provenance": True,
+                             "repository": {"uri": self.URL, "id": "1107", "owner": "https://github.com/acme",
+                                            "ownerId": "3305"}}}
+
+    def check(self, here_owner):
+        data = b"a tarball"
+        tarball = NPM + "x/-/x-1.1.0.tgz"
+        fetcher = NpmFetcher({tarball: data}, days_ago(2))
+        ctx = context(tool="npm")
+        ctx.scanner.close()
+        ctx.scanner = OkScanner()
+        pkg = {"name": "x", "version": "1.1.0", "tarball": tarball, "integrity": sri(data), "registry": NPM,
+               "lock_digest": None}
+        with mock.patch.dict(os.environ, TP.ON), \
+                mock.patch.object(provenance, "guard_npm", return_value=self.report(here_owner)) as asked:
+            check = guard.check_npm_package(ctx, fetcher, pkg)
+        self.assertEqual(asked.call_count, 1)
+        return check
+
+    def test_a_takeover_makes_the_release_suspicious_and_blocks_it(self):
+        check = self.check(here_owner="4402")
+        self.assertEqual(check.verdict, "SUSPICIOUS")
+        self.assertTrue(check.blocked and check.blocked[0].startswith("SUSPICIOUS: "), check.blocked)
+        self.assertIn("taken over by another account", check.reason)
+        self.assertTrue(check.indicators[0].startswith("SC-PROVENANCE-REPO-TAKEOVER (CRITICAL)"), check.indicators)
+
+    def test_the_owner_recreating_its_repository_is_not_blocked(self):
+        check = self.check(here_owner="3305")                     # the same owner ID: its own repository, recreated (INFO)
+        self.assertEqual((check.verdict, check.blocked), ("OK", []))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -1074,7 +1074,19 @@ measures it on a run's WARN releases, which `run` (the files alone) does
 not. The guard runs it (`guard.with_prior`, `prior.compare` over its
 fetcher and scanner) on a WARN release from npm's or PyPI's public
 registry in the provenance window (`PROVENANCE_DAYS`), from the lockfile
-and through the pip index: the scan's answer keeps its findings' rules
+and through the pip index, and since RA-8 (0.1.9) on a WARN crate from
+crates.io's own index too (`check_crate`, gated on `registry.default` and
+not under `cargo --offline`, which asks the network nothing; crates have
+no provenance, so only `with_prior` runs — `prior.ECOSYSTEMS` already held
+crates, and the Cargo guard was the one caller that never asked; the
+index is read by `prior._crates` over the crates module's own fetch, as
+`lazaret-registry` reads it, and the predecessor's `.crate` is checked by
+the module's own digest, `repo._module_digest` against the index's
+`cksum` — `verify_digest` reads npm's and PyPI's fields only — and its
+verdict kept under that SHA-256, as `check_crate` keys a crate's; a file
+that does not match its digest, in any of the three, is a DigestError:
+not compared, `notCompared`, the release keeps its verdict, and neither
+the file's verdict nor the comparison is cached): the scan's answer keeps its findings' rules
 (`rules_of`: the first finding of each, in short), the verdict cache keeps
 them and the comparison once made (`_prior_kept`; one the registry did not
 answer is made again, from the cached rules), and the predecessor's file
@@ -1975,7 +1987,16 @@ from repositories with different IDs (or URIs, without IDs) of different
 owners, SC-PROVENANCE-REPO-CHANGED (both MAJOR; the guard blocks a
 DROPPED release in its window, `Context.provenance_block`, as pnpm's
 `trustPolicy: no-downgrade` fails an install, with `--trust` the way out,
-and the verdict stays WARN: decision 13, John, Oct 7). A repository of
+and the verdict stays WARN: decision 13, John, Oct 7). The same
+source-repository URL with a different immutable repository ID and a
+different immutable owner ID (both known) is not a move but a takeover — a
+name a repository gave up, taken by another account (npm's SlugFest, Oct
+2026: Trusted Publishing matched repository names, not IDs); only another
+account can take a name — SC-PROVENANCE-REPO-TAKEOVER (CRITICAL, and so
+SUSPICIOUS and blocked, in the registry scan and the guard alike: RA-5).
+The same URL with a new repository ID and the same owner ID (the owner
+deleted and recreated its repository), or without both owner IDs, is the
+same-owner case. A repository of
 the same owner is INFO: on the popular set's 1,205 releases the two
 changes of repository were both within their owner (scikit-learn 1.9.1 from its release repository,
 @rolldown/pluginutils 1.0.1 from a new plugins repository), and the one

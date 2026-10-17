@@ -752,12 +752,25 @@ def _prior_scan(ctx, fetcher, eco, name):
     """The comparison's scan of one of the predecessor's files, over the guard's fetcher and scanner: fetched,
     checked against the registry's digest, its verdict cached as the release's own would be -> the rules it has a
     finding of, or why it was not compared."""
+    module = repo.registry_module(eco)
+
     def scan_file(ref, prev):
         with ctx.scanner.holding(UNDECLARED_HOLD):
             data = fetcher.get(ref["url"])
-            repo.verify_digest(data, ref["entry"], eco, name, prev)
-            digest = (f"sha256:{hashlib.sha256(data).hexdigest()}" if eco == "pypi"
-                      else "{}-{}".format(*(registry_digest(ref["entry"]) or ("sha512", ""))))
+            if module is not None:
+                # RA-8: a registry module's file (a crate) is checked by the module's own digest — the index's `cksum`
+                # for a crate, which verify_digest (npm's dist.integrity, PyPI's digests.sha256) does not read — and
+                # its verdict kept under that SHA-256, as check_crate keys a crate's. A mismatch, or no digest to check,
+                # is a DigestError: the comparison is not made (prior.compare's notCompared) and nothing is cached.
+                checked = repo._module_digest(module, data, ref["entry"], eco, name, prev)
+                if checked is None:
+                    raise repo.DigestError(f"{eco}:{name}@{prev}: the registry gives no digest to check "
+                                           f"{ref.get('filename')} against")
+                digest = f"{checked[0]}:{checked[1]}"
+            else:
+                repo.verify_digest(data, ref["entry"], eco, name, prev)
+                digest = (f"sha256:{hashlib.sha256(data).hexdigest()}" if eco == "pypi"
+                          else "{}-{}".format(*(registry_digest(ref["entry"]) or ("sha512", ""))))
             key = VerdictCache.key(eco, pep503(name) if eco == "pypi" else name, prev, digest)
             hit = ctx.scanner.cached(key)
             if hit is None or ("rules" not in hit and hit.get("verdict") != "OK"):    # (OK: it has none)
@@ -4632,6 +4645,12 @@ def check_crate(ctx, fetcher, registry, pkg, home, offline, keep=None):
             published, record = crate_publish_time(fetcher, registry, pkg, record)
         if record is not None and record["yanked"]:
             check.notes.append("yanked on the registry")
+        # RA-8: compare a WARN crate with its established predecessor, as npm and PyPI are (prior.ECOSYSTEMS has crates);
+        # crates.io has no provenance, so only with_prior runs. registry.default is the public index its history is read from.
+        # Not offline (cargo --offline): the comparison reads the index and downloads the predecessor, and a run that does
+        # not use the network asks nothing of it.
+        if not offline and prior_due(hit, published, registry.default):
+            hit = with_prior(ctx, check, hit, fetcher, f"{pkg.name}-{pkg.version}.crate", "crate")
         ctx.scanner.remember(key, hit, published)
         ctx.apply(check, hit)
         ctx.age_check(check, published)

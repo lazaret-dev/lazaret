@@ -26,6 +26,22 @@ aggregate):
 
 ### Added
 
+- **A provenance repository taken over, and the Cargo guard comparing a crate with its predecessor (RA-5, RA-8;
+  the registry, no rule-set change).** When a release and the release before it both carry verified provenance
+  that names the *same* source-repository URL but a *different* immutable repository ID **and** a *different*
+  immutable owner (account) ID, the repository behind the name is another account's — a name a repository gave up
+  can be taken over by another account (npm's SlugFest, October 2026: Trusted Publishing matched repository names,
+  not IDs). This was reported as SC-PROVENANCE-REPO-CHANGED (MAJOR) with a message that showed two identical URLs;
+  it is now its own finding, **SC-PROVENANCE-REPO-TAKEOVER (CRITICAL)**, in the registry scan and in `lazaret
+  guard` (SUSPICIOUS, blocked), with a message that names both repository IDs and both owner IDs (RA-5). The same
+  URL with a new repository ID but the *same* owner ID — the owner deleting and recreating its own repository — or
+  without both owner IDs, stays SC-PROVENANCE-REPO-CHANGED (INFO, a repository of the same owner), as before. And
+  the Cargo guard now compares a WARN crate from crates.io with its established predecessor
+  (**SC-NEW-INDICATOR**), as the npm and PyPI guards already did — `check_crate` never called `with_prior`, though
+  `prior.ECOSYSTEMS` has held crates since the feature shipped; `priorRelease` appears in `--json` for crates too.
+  The predecessor's `.crate` is checked against the SHA-256 the index gives it (`cksum`) and its verdict cached
+  under that digest; a download that does not match is not compared (`notCompared`, the crate stays WARN) and
+  nothing of it is cached, as for npm and PyPI. Under `cargo --offline` no comparison is made (RA-8).
 - **Turning off TLS certificate verification, as a weaker install/build reason, and a Windows Script Host launcher
   (RA-12, RA-11; the engine's, for both packages; rule set 2.92.0).** Install-script and build-script code that
   disables TLS certificate verification is now a reason of the install-script test — a *weaker* one. A finding
