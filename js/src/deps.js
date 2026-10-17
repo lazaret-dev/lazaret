@@ -17,7 +17,7 @@ import { lstatSync, readdirSync } from "node:fs";
 import { join, resolve, sep } from "node:path";
 import { scanFile } from "./scanner/scan.js";
 import { call, shebangLang, crossFileIssues, NativeError, NativeExhausted, goPackage, rsCrate, cargoLayout,
-  goVendoredModules, codePoints, packValues, issuesOf } from "./lib/native.js";
+  goVendoredModules, codePoints, packValues, issuesOf, dialectArgs } from "./lib/native.js";
 import { HOOK_COMMANDS } from "./lib/supplychain.js";
 import { readBounded, strerror, normpathRel } from "./lib/fs.js";
 import { truncatedIssue, scanErrorIssue } from "./lib/issue.js";
@@ -532,6 +532,7 @@ function dependencyTaskError([kind, args], error) {
 export function depFileIssues(path, content, lang = null, names = null) {
   const args = { redact: REDACT.on, neumaier: false };
   if (lang) args.lang = lang;
+  if (lang === "js") Object.assign(args, dialectArgs(path));      // (TS-STRIP: a TypeScript file in its dialect)
   if (names && names[0] != null) args.declared = names[0];
   if (names && names[1]) args.own = names[1];
   const [found, agent] = call("dep_file_issues", args, String(content));

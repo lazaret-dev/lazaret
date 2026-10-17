@@ -226,10 +226,31 @@ def _names_args(declared, own):
     return args
 
 
+def js_dialect(path):
+    """The dialect the engine's supply-chain tree reads a JavaScript-family file in, by its name's extension
+    (TS-STRIP): "ts" for .ts, .mts and .cts, "tsx" for .tsx, None for any other name and for none (JavaScript
+    first, then TypeScript: a .js, .mjs, .cjs or .jsx file, a text whose file is not known)."""
+    low = str(path or "").lower()
+    if low.endswith((".ts", ".mts", ".cts")):
+        return "ts"
+    if low.endswith(".tsx"):
+        return "tsx"
+    return None
+
+
+def dialect_args(path):
+    """The engine's `dialect` argument for a file's name: {"dialect": "ts"} or {"dialect": "tsx"} for a TypeScript
+    file's (its text read in that dialect alone), else {} (the call is as it was: JavaScript first)."""
+    dialect = js_dialect(path)
+    return {"dialect": dialect} if dialect else {}
+
+
 def import_time_risks(items, texts=None, declared=None, own=None, names=None, refused=False):
-    """[(text, lang)] -> the import-time test of each, (reasons, line), in
-    order; an item the engine could not answer is the _native.NativeError it
-    stands for (see unanswered, error_issue). `texts`: the scan's Texts.
+    """[(text, lang)] or [(text, lang, path)] -> the import-time test of
+    each, (reasons, line), in order; an item the engine could not answer is
+    the _native.NativeError it stands for (see unanswered, error_issue).
+    `path`: the file's name, when known: a TypeScript file's text is read in
+    its dialect (dialect_args, TS-STRIP). `texts`: the scan's Texts.
     `declared`: the release's own name and the packages its manifest names,
     when known: a package manager's install of any other is a reason (D-12).
     `own`: the release's name, when known (D-9: its own code is not
@@ -243,10 +264,12 @@ def import_time_risks(items, texts=None, declared=None, own=None, names=None, re
         return []
     shared = _names_args(declared, own)
     calls = []
-    for k, (text, lang) in enumerate(items):
+    for k, (text, lang, *path) in enumerate(items):
         extra = dict(shared if names is None or names[k] is None else _names_args(*names[k]))
         if refused:
             extra["refused"] = True
+        if lang == "js" and path:
+            extra.update(dialect_args(path[0]))
         calls.append(({"lang": lang, **extra} if lang else extra, text))
     answers = _batch("import_time_risk", calls, texts)
     if refused:
@@ -254,49 +277,59 @@ def import_time_risks(items, texts=None, declared=None, own=None, names=None, re
     return [a if unanswered(a) else (a[0], a[1]) for a in answers]
 
 
-def import_time_risk(text, lang=None, declared=None, own=None):
+def import_time_risk(text, lang=None, declared=None, own=None, path=None):
     """(reasons, line) of the import-time test (raises _native.NativeError
     when the engine could not answer); `declared` and `own` as for
-    import_time_risks."""
+    import_time_risks; `path`: the file's name, when known (a TypeScript
+    file's text is read in its dialect: dialect_args)."""
     args = _names_args(declared, own)
     if lang:
         args["lang"] = lang
+    if lang == "js":
+        args.update(dialect_args(path))
     answer = _native.call("import_time_risk", args, text)
     return answer[0], answer[1]
 
 
 def dep_file_issues(items, texts=None):
-    """[(text, lang, names)] -> for each dependency file no install hook runs, the import-time and agent checks'
-    findings, [SC-IMPORT-RISK, SC-AGENT-HIJACK] as the engine's issues (each None when it found nothing), in order,
-    a batch at a time (deps.rs; an item the engine could not answer: the _native.NativeError it stands for).
-    `names`: the (declared, own) of the package the file is in, or None (D-12b: _names_args). `texts`: the scan's
-    Texts."""
+    """[(text, lang, names)] or [(text, lang, names, path)] -> for each dependency file no install hook runs, the
+    import-time and agent checks' findings, [SC-IMPORT-RISK, SC-AGENT-HIJACK] as the engine's issues (each None when
+    it found nothing), in order, a batch at a time (deps.rs; an item the engine could not answer: the
+    _native.NativeError it stands for). `names`: the (declared, own) of the package the file is in, or None (D-12b:
+    _names_args); `path`: the file's name (a TypeScript file's text is read in its dialect: dialect_args). `texts`:
+    the scan's Texts."""
     from lazaret.scanner import core
     base = {"redact": bool(core.REDACT_SECRETS), "neumaier": False}
     calls = []
-    for text, lang, names in items:
+    for text, lang, names, *path in items:
         args = dict(base, **_names_args(*names)) if names is not None else dict(base)
         if lang:
             args["lang"] = lang
+        if lang == "js" and path:
+            args.update(dialect_args(path[0]))
         calls.append((args, text))
     return _batch("dep_file_issues", calls, texts)
 
 
 def install_script_risks(items):
-    """[(text, lang)] -> the install-script test's reasons for each, in order
-    (an item the engine could not answer: the _native.NativeError it stands
-    for)."""
+    """[(text, lang)] or [(text, lang, path)] -> the install-script test's
+    reasons for each, in order (an item the engine could not answer: the
+    _native.NativeError it stands for); `path`, the script's name (a
+    TypeScript file's text is read in its dialect: dialect_args)."""
     if not items:
         return []
-    return _batch("install_script_risk", [({"lang": lang} if lang else {}, text) for text, lang in items])
+    return _batch("install_script_risk", [(dict({"lang": lang} if lang else {},
+                                                 **(dialect_args(path[0]) if lang == "js" and path else {})), text)
+                                          for text, lang, *path in items])
 
 
-def install_script_risk(text, shell=True, command=False, lang=None, own=None):
+def install_script_risk(text, shell=True, command=False, lang=None, own=None, path=None):
     """The install-script test's reasons (raises _native.NativeError when the
     engine could not answer). `lang`: the script's language when known
     ("js", "py"): its strings are read as its runtime reads them. `own`: the
     release's name, when known: a rewrite of its own package's code, or of
-    one of its scope, is its own (D-9)."""
+    one of its scope, is its own (D-9). `path`: the script's name, when
+    known: a TypeScript file's text is read in its dialect (dialect_args)."""
     args = {}
     if not shell:
         args["shell"] = False
@@ -304,9 +337,19 @@ def install_script_risk(text, shell=True, command=False, lang=None, own=None):
         args["command"] = True
     if lang:
         args["lang"] = lang
+    if lang == "js":
+        args.update(dialect_args(path))
     if own:
         args["own"] = own
     return _native.call("install_script_risk", args, text)
+
+
+def js_refusal(text, path=None):
+    """The parser's refusal of a JavaScript-family text the supply-chain tests read on its tree, (line, reason), or
+    None (the parse alone: JS-PARSE-STRICT); `path`: the file's name, when known (a TypeScript file's text is read,
+    and refused, in its dialect: dialect_args). Raises _native.NativeError when the engine could not answer."""
+    refused = _native.call("js_refusal", dialect_args(path), text)
+    return tuple(refused) if refused else None
 
 
 def _package_call(name, files, args):
@@ -433,7 +476,8 @@ def scan_calls(items):
     them: Q-1), a project's Python or JavaScript file with the configured
     part of the taint model (core.taint_args). Its answer is a function of
     the name, the args and the text: the engine reads no path (the path's
-    part is `jsx`, from its extension), which is what lets the registry ask
+    part is `jsx` and a TypeScript file's `dialect`, from its extension:
+    dialect_args, TS-STRIP), which is what lets the registry ask
     once for a file that is in several archives (P-2a,
     registry/contentcache.py)."""
     from lazaret.scanner import core
@@ -444,6 +488,8 @@ def scan_calls(items):
             calls.append(None)
             continue
         args = dict(base, lang=lang, jsx=core.jsx_reading(path), dep=bool(dep))
+        if lang == "js":
+            args.update(dialect_args(path))     # (TS-STRIP: the tree's decoded-payload flow, in the file's dialect)
         configured = None if dep else core.taint_args(lang)
         if configured:
             args["taint"] = configured

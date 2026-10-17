@@ -10,7 +10,7 @@ each kind.
 import os
 import unittest
 
-from lazaret.scanner import _native, core
+from lazaret.scanner import _native, core, engine
 from tests import _support
 from tests.architecture import _snapshots
 from tests.architecture.scanfile_corpus import corpus, go_rs_corpus
@@ -42,7 +42,9 @@ def lang_of(path):
 
 
 def call_args(path):
-    return {"lang": lang_of(path), "dep": True, "jsx": core.jsx_reading(path), "neumaier": True}
+    # (as engine.scan_calls asks: a TypeScript file's dialect too, TS-STRIP)
+    a = {"lang": lang_of(path), "dep": True, "jsx": core.jsx_reading(path), "neumaier": True}
+    return dict(a, **engine.dialect_args(path)) if a["lang"] == "js" else a
 
 
 def fixtures():

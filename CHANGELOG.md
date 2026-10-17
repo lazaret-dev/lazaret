@@ -26,6 +26,24 @@ aggregate):
 
 ### Added
 
+- **TypeScript files read in their own dialect by the supply-chain tests (TS-STRIP; rule set 2.93.0).** The hosts
+  handed the engine a `.ts`, `.tsx`, `.mts` or `.cts` file's text alone, as JavaScript, and the supply-chain tree
+  (the data flow of the import-time, use-time and install-script tests, received code, a dropper, D-9's rewrites,
+  `scan_file`'s decoded-payload flow) read it as JavaScript first, then as TypeScript without JSX. No reading was
+  TypeScript with JSX, so a `.tsx` file with TypeScript's own syntax was refused by both — Vite's stock `main.tsx`
+  (`getElementById('root')!`), `as`, `satisfies`, generic arrows, `enum`, `useState<number[]>([])`, 18 of the 52
+  constructs the probe tried — and listed as JavaScript the parser could not read; and JavaScript first read a
+  `.ts` file's call given a type, `post<object>(url, process.env)`, as `(post < object) > (url, process.env)`, with
+  no call and no refusal: the tree found nothing, the text followers were not asked, and the same send without the
+  type is CRITICAL (also `axios.post<Resp>(…)`, `getJSON<string>(url).then(eval)`, `new Sender<object>(…)`; present
+  since F-12, Oct 9). Each call that reaches the tree now takes the file's dialect (the engine's `dialect`, `"ts"` or
+  `"tsx"`, from the file's name: `import_time_risk`, `install_script_risk`, `js_refusal`, `scan_file`,
+  `dep_file_issues`, the `*_tree` calls; `deps_script` from the target's name), and a TypeScript file is read as tsc
+  reads it, in that dialect alone. A JavaScript file, and a text whose file is not known, is read as before.
+  SC-UNPARSED-CODE and SC-NESTED-CODE name the files' language (TypeScript, or JavaScript or TypeScript), and their
+  advice for TypeScript is `tsc --noEmit --jsx preserve FILE` (Node does not run a `.tsx` file), not `node --check`.
+  Both packages (the npm package's `importTimeRisk` and `installScriptRisk` take the file's path; `jsDialect`,
+  `jsRefusal`). Not measured on the benchmark or the popular set (owed (John): a bench run).
 - **An inflated version number, the public tell of dependency confusion (RA-7; the registry, no rule-set change).**
   A release with an inflated version — a major of 99 or more that is not a calendar version (a year from 1990 to the
   year after it was published, as YYYY, YYYYMM or YYYYMMDD: 2024.x and 20240101 are left alone, 2099.x and

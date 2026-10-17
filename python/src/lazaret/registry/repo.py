@@ -349,7 +349,7 @@ SAMPLE = 8192              # header/entropy sample read from oversized files
 #      entry points and hook targets, Python install scripts
 # 2.3: verdict tiers, decoded hex, install-script inspection; 2.2:
 #      verdict-integrity; 2.1: binary-artifact awareness
-ENGINE_VERSION = "2.92.0"
+ENGINE_VERSION = "2.93.0"
 
 # ---------------- The content memo (P-2a, registry/contentcache.py) ----------------
 # One per scan_package run: the engine answers once for content several of a
@@ -2854,12 +2854,15 @@ _UNPARSED_RUNS = frozenset({"install", "import"})
 
 
 def _unparsed_code_issues(found):
-    """The findings for the JavaScript members the parser refused: `found`, rel -> {pass (_UNPARSED_PASSES): (line,
-    reason), or None where the reason is not known (D-13's read of a module)}; a member several passes refused is
-    judged by the strongest of them. A file refused only because it nests past the parser's bound, in a pass whose code
-    runs at install or load time (_UNPARSED_RUNS), is SC-NESTED-CODE (MAJOR, an indicator: deep nesting is the one kind
-    of source V8 compiles that the parser refuses); the rest, nesting refused where the code may never run among them,
-    are SC-UNPARSED-CODE (INFO inventory), each with its reason. {} becomes no finding (JS-NEST)."""
+    """The findings for the JavaScript and TypeScript members the parser refused: `found`, rel -> {pass
+    (_UNPARSED_PASSES): (line, reason), or None where the reason is not known (D-13's read of a module)}; a member
+    several passes refused is judged by the strongest of them. A file refused only because it nests past the
+    parser's bound, in a pass whose code runs at install or load time (_UNPARSED_RUNS), is SC-NESTED-CODE (MAJOR, an
+    indicator: deep nesting is the one kind of source V8 compiles that the parser refuses); the rest, nesting refused
+    where the code may never run among them, are SC-UNPARSED-CODE (INFO inventory), each with its reason. {} becomes
+    no finding (JS-NEST). The words name the files' language: TypeScript when each is a TypeScript file (read in its
+    dialect, TS-STRIP), JavaScript or TypeScript when some are, and the advice is tsc's for TypeScript (Node does
+    not run a .tsx file)."""
     strongest = {rel: min(by.items(), key=lambda kv: _UNPARSED_PASSES.index(kv[0])) for rel, by in found.items() if by}
     nested = {rel: why for rel, (step, why) in strongest.items()
               if step in _UNPARSED_RUNS and why and str(why[1]) == _NESTING_REFUSAL}
@@ -2873,18 +2876,27 @@ def _unparsed_code_issues(found):
             return f"{rel} (line {why[0]}: {str(why[1])[:80]})" if why else rel
         return ", ".join(one(r) for r in rels[:3]) + (", …" if len(rels) > 3 else "")
 
+    def language(rels):
+        ts = sum(1 for rel in rels if _engine.js_dialect(rel))
+        return "TypeScript" if ts == len(rels) else "JavaScript or TypeScript" if ts else "JavaScript"
+
     if nested:
         rels = sorted(nested)
-        out.append({"rule": NESTED_CODE_RULE, "name": "JavaScript nested too deep for the parser", "type": "HOTSPOT",
+        lang = language(rels)
+        out.append({"rule": NESTED_CODE_RULE, "name": f"{lang} nested too deep for the parser", "type": "HOTSPOT",
                     "sev": "MAJOR",
-                    "msg": (f"{len(rels)} JavaScript file{'' if len(rels) == 1 else 's'} nested past the parser's "
+                    "msg": (f"{len(rels)} {lang} file{'' if len(rels) == 1 else 's'} nested past the parser's "
                             f"bound ({shown(rels)}): the supply-chain tests that read a file's syntax tree read only "
                             "its text there."),
-                    "why": ("Such a file runs when the package is installed or loaded, and deep nesting is the one kind "
-                            "of source V8 compiles that the parser refuses: the tests that read a file's syntax tree "
-                            "(another package's code it rewrites, a program it carves out of another file, the "
-                            "modules it loads) read only its text there. Code written by hand rarely nests that deep, "
-                            "but generated code can (long ternary chains, deep data literals)."),
+                    "why": ("Such a file runs when the package is installed or loaded, and " +
+                            ("deep nesting is the one kind of source V8 compiles that the parser refuses"
+                             if lang == "JavaScript" else
+                             "deep nesting is source V8 and tsc compile that the parser refuses (in JavaScript, "
+                             "the one such kind)") +
+                            ": the tests that read a file's syntax tree (another package's code it rewrites, a "
+                            "program it carves out of another file, the modules it loads) read only its text there. "
+                            "Code written by hand rarely nests that deep, but generated code can (long ternary "
+                            "chains, deep data literals)."),
                     "fix": ("Review the file: if it is generated (minified, bundled, a data table), check it against "
                             "its source; if not, read what it does."),
                     "ref": "CWE-506 · Supply chain", "file": rels[0], "line": nested[rels[0]][0], "snippet": [],
@@ -2892,16 +2904,29 @@ def _unparsed_code_issues(found):
     if other:
         rels = sorted(other)
         first = other[rels[0]]
-        out.append({"rule": UNPARSED_CODE_RULE, "name": "JavaScript the parser could not read", "type": "HOTSPOT",
+        lang = language(rels)
+        tsc = "`tsc --noEmit --jsx preserve FILE`, whose syntax errors are TS1xxx"
+        out.append({"rule": UNPARSED_CODE_RULE, "name": f"{lang} the parser could not read", "type": "HOTSPOT",
                     "sev": "INFO",
-                    "msg": (f"{len(rels)} JavaScript file{'' if len(rels) == 1 else 's'} the parser could not read "
+                    "msg": (f"{len(rels)} {lang} file{'' if len(rels) == 1 else 's'} the parser could not read "
                             f"({shown(rels)}): the supply-chain tests that read a file's syntax tree read only its "
                             "text there."),
-                    "why": ("Most such files are broken, and Node refuses them too; but the parser is stricter than "
-                            "V8 in places (nesting past its bound), so a file Node runs could hide from the tests that "
-                            "read its tree: what it writes into another package, a program it carves out of another "
-                            "file, the modules it loads."),
-                    "fix": "Check that the file is one Node would refuse (`node --check FILE`); if Node runs it, review it.",
+                    "why": ({"JavaScript": "Most such files are broken, and Node refuses them too; but the parser is "
+                                           "stricter than V8 in places (nesting past its bound), so a file Node runs could hide",
+                             "TypeScript": "Most such files are broken, and tsc refuses them too; but the parser may "
+                                           "be stricter than tsc in places, so a file that runs (Node strips a .ts "
+                                           "file's types; Deno and Bun run TypeScript) could hide",
+                             }.get(lang, "Most such files are broken, and Node (for a TypeScript file, tsc) refuses "
+                                         "them too; but the parser is stricter than V8 in places (nesting past its bound), and may be than "
+                                         "tsc, so a file that runs could hide") +
+                            " from the tests that read its tree: what it writes into another package, a program it "
+                            "carves out of another file, the modules it loads."),
+                    "fix": {"JavaScript": "Check that the file is one Node would refuse (`node --check FILE`); if Node "
+                                          "runs it, review it.",
+                            "TypeScript": f"Check that the file is one TypeScript refuses ({tsc}); if it compiles, "
+                                          "review it.",
+                            }.get(lang, "Check that the file is one Node would refuse (`node --check FILE`; for a "
+                                        f"TypeScript file, {tsc}); if it runs, review it."),
                     "ref": "CWE-506 · Supply chain", "file": rels[0], "line": first[0] if first else 1, "snippet": [],
                     "snipStart": 1})
     return out
@@ -3130,19 +3155,21 @@ class _ArtifactScan:
         return out
 
     def _import_risks(self, items, declared=None):
-        """engine.import_time_risks for [(text, lang)], once for each distinct
-        file (an answer the engine could not give is not kept); `declared`,
-        the release's declared names, for its D-12 test (_declared_names);
-        the release's own name (D-9, _own_name). Each answer is (reasons,
-        line, refused): the parser's refusal of a JavaScript file, said in
-        the report (_note_unparsed)."""
+        """engine.import_time_risks for [(text, lang, rel)], once for each
+        distinct file in its dialect (a TypeScript member's text is read as
+        TypeScript: TS-STRIP; an answer the engine could not give is not
+        kept); `declared`, the release's declared names, for its D-12 test
+        (_declared_names); the release's own name (D-9, _own_name). Each
+        answer is (reasons, line, refused): the parser's refusal of a
+        JavaScript or TypeScript file, said in the report (_note_unparsed)."""
         flags = {"budget": _engine.WORK_BUDGET, "refused": True}
         if declared is not None:
             flags["declared"] = hashlib.sha256("\n".join(declared).encode("utf-8", "surrogatepass")).hexdigest()
         own = self._own_name()
         if own:
             flags["own"] = own
-        keys = [self._key("import-risk", text, lang, flags) for text, lang in items]
+        keys = [self._key("import-risk", text, lang, dict(flags, **(_engine.dialect_args(rel) if lang == "js" else {})))
+                for text, lang, rel in items]
         asked = dict(zip(keys, items))
 
         def compute(missing):
@@ -3839,13 +3866,13 @@ class _ArtifactScan:
             if rel is None:
                 continue
             lang = _engine.script_lang(rel, text)
-            reasons = _engine.install_script_risk(text, lang=lang, own=self._own_name()) if text else []
+            reasons = _engine.install_script_risk(text, lang=lang, own=self._own_name(), path=rel) if text else []
             out.append((rel, reasons))
             # (a step's script runs in the job's workspace: only a path built from its own place is the action's)
             for started, more in self._started_scripts(rel, text, None, self.install_scripts):
                 self.action_entries.setdefault(started, []).append(how)
                 more = (_engine.install_script_risk(more, lang=_engine.script_lang(started, more),
-                                                    own=self._own_name()) if more else [])
+                                                    own=self._own_name(), path=started) if more else [])
                 out.append((f"{rel}, which starts {started}", more))
         return out
 
@@ -4042,7 +4069,7 @@ class _ArtifactScan:
                 clean = clean and bool(text)
                 runs.append(rel)
                 reasons = (_engine.install_script_risk(text, lang=_engine.script_lang(rel, text),
-                                                       own=self._own_name()) if text else [])
+                                                       own=self._own_name(), path=rel) if text else [])
                 if reasons:
                     clean = False       # a followed script with any reason (weak ones too) is not "read clean"
                     _escalate(reasons, f"Install hook runs {target}, which {'; and '.join(reasons)}.")
@@ -4050,7 +4077,7 @@ class _ArtifactScan:
                 for started, more in self._started_scripts(rel, text, base, self.install_scripts):
                     runs.append(started)
                     more = (_engine.install_script_risk(more, lang=_engine.script_lang(started, more),
-                                                        own=self._own_name()) if more else [])
+                                                        own=self._own_name(), path=started) if more else [])
                     if more:
                         clean = False
                         _escalate(more, f"Install hook runs {target}, which starts {started}, which "
@@ -4165,7 +4192,7 @@ class _ArtifactScan:
             self.entries.add(rel)
             self.install_scripts.add(rel)
             text = self.sources.get(rel, ("", "py"))[0]
-            reasons = _engine.install_script_risk(text, lang=_engine.script_lang(rel, text), own=self._own_name())
+            reasons = _engine.install_script_risk(text, lang=_engine.script_lang(rel, text), own=self._own_name(), path=rel)
             # a download written to a file and run: CRITICAL in the code pip
             # runs to install an sdist (a prebuilt-binary installer's shape
             # keeps it MAJOR-only in npm hooks and import-time code)
@@ -4346,7 +4373,7 @@ class _ArtifactScan:
             chunk = [(rel, lazaret.normalize_newlines(text), lang) for rel, text, lang in todo[start:end]]
             start = end
             self._deadline(chunk[0][0])
-            for (rel, text, lang), risk in zip(chunk, self._import_risks([(t, lg) for _r, t, lg in chunk], declared)):
+            for (rel, text, lang), risk in zip(chunk, self._import_risks([(t, lg, r) for r, t, lg in chunk], declared)):
                 yield rel, text, lang, risk
 
     def _note_unparsed(self, rel, refused, step):
@@ -4367,8 +4394,9 @@ class _ArtifactScan:
         if not todo:
             return
         self._deadline(todo[0][0])
-        keys = [self._key("scan", text, "js", {"call": "js_refusal"}) for _r, text in todo]
-        asked = dict(zip(keys, [("js_refusal", {}, text) for _r, text in todo]))
+        keys = [self._key("scan", text, "js", {"call": "js_refusal", **_engine.dialect_args(rel)})
+                for rel, text in todo]
+        asked = dict(zip(keys, [("js_refusal", _engine.dialect_args(rel), text) for rel, text in todo]))
 
         def compute(missing):
             return [_cache.Uncacheable(a) if _engine.unanswered(a) else a

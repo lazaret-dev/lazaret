@@ -235,13 +235,30 @@ export function packValues(...names) {
 
 // ---- the supply-chain tests (core's functions of the same names) ----
 
+/** The dialect the engine's supply-chain tree reads a JavaScript-family file in, by its name (TS-STRIP): "ts" for
+ * .ts, .mts and .cts, "tsx" for .tsx, null for any other (JavaScript first, then TypeScript). core's
+ * engine.js_dialect */
+export const jsDialect = (path) => {
+  const p = String(path ?? "").toLowerCase();
+  if (p.endsWith(".ts") || p.endsWith(".mts") || p.endsWith(".cts")) return "ts";
+  return p.endsWith(".tsx") ? "tsx" : null;
+};
+/** The engine's `dialect` argument for a file's name: {dialect} for a TypeScript file's, else {} (core's
+ * engine.dialect_args). */
+export const dialectArgs = (path) => {
+  const dialect = jsDialect(path);
+  return dialect ? { dialect } : {};
+};
+
 /** Reasons an install-time script looks hostile ([] if none). `shell`: read a shell script as a program
  * too; `command`: the text is a hook's command; `lang`: the script's language when known ("js", "py": its
  * strings are read as its runtime reads them); `own`: the package's name, when known (D-9: a rewrite of its
- * own code is its own). core.install_script_risk */
-export const installScriptRisk = (text, shell = true, command = false, lang = null, own = null) => {
+ * own code is its own); `path`: the script's name, when known (a TypeScript file's text is read in its
+ * dialect: TS-STRIP). core.install_script_risk */
+export const installScriptRisk = (text, shell = true, command = false, lang = null, own = null, path = null) => {
   const args = lang ? { shell, command, lang } : { shell, command };
   if (own) args.own = own;
+  if (lang === "js") Object.assign(args, dialectArgs(path));
   return call("install_script_risk", args, text);
 };
 /** The language the tests read a script a hook runs in, its comments blanked in it: by its extension ("js" for
@@ -255,13 +272,19 @@ export const scriptLang = (path, text = "") => {
 };
 /** [reasons, line] of the weaker import-time test ([] and null if none); `lang` "py", "js" or null; `names`: the
  * package's [declared, own], when known (D-12: an install of a package it does not name is a reason; D-9: a
- * rewrite of its own code is its own). core.import_time_risk */
-export const importTimeRisk = (text, lang = null, names = null) => {
+ * rewrite of its own code is its own); `path`: the file's name, when known (a .ts, .mts, .cts or .tsx file's text
+ * is read in its dialect alone: TS-STRIP). core.import_time_risk */
+export const importTimeRisk = (text, lang = null, names = null, path = null) => {
   const args = lang ? { lang } : {};
   if (names && names[0] != null) args.declared = names[0];
   if (names && names[1]) args.own = names[1];
+  if (lang === "js") Object.assign(args, dialectArgs(path));
   return call("import_time_risk", args, text);
 };
+/** The parser's refusal of a JavaScript-family text the supply-chain tests read on its tree, [line, reason], or
+ * null (JS-PARSE-STRICT); `path`: the file's name, when known (a TypeScript file is read in its dialect).
+ * core.js_refusal */
+export const jsRefusal = (text, path = null) => call("js_refusal", dialectArgs(path), text);
 /** "CRITICAL" when one of importTimeRisk's reasons is a strong one, else "MAJOR". */
 export const importTimeSeverity = (reasons) => call("import_time_severity", { reasons });
 /** "CRITICAL" when one of installScriptRisk's reasons is a strong one, else "MAJOR" when every reason is a weaker
@@ -463,7 +486,8 @@ export function issuesOf(path, answer) {
  * splits it into lines and pins it to Unicode 13.0 as core does).
  */
 export function scanDependencyFile(path, content, lang, { jsx = true, redact = true } = {}) {
-  return issuesOf(path, call("scan_file", { lang, dep: true, jsx, redact, neumaier: false }, content));
+  const dialect = lang === "js" ? dialectArgs(path) : {};
+  return issuesOf(path, call("scan_file", { lang, dep: true, jsx, redact, neumaier: false, ...dialect }, content));
 }
 
 /**
@@ -473,7 +497,8 @@ export function scanDependencyFile(path, content, lang, { jsx = true, redact = t
  * function metrics, the suppression markers and the cap, as core lists them.
  */
 export function scanProjectFile(path, content, lang, { jsx = true, redact = true } = {}) {
-  return issuesOf(path, call("scan_file", { lang, dep: false, jsx, redact, neumaier: false }, content));
+  const dialect = lang === "js" ? dialectArgs(path) : {};
+  return issuesOf(path, call("scan_file", { lang, dep: false, jsx, redact, neumaier: false, ...dialect }, content));
 }
 
 /**

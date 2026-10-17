@@ -80,11 +80,12 @@ def _tuple(value):
     return None if value is None else tuple(value)
 
 
-def install_script_risk(text, shell=True, command=False, lang=None):
+def install_script_risk(text, shell=True, command=False, lang=None, path=None):
     """The reasons an install script is risky (read as a shell program too
     unless `shell` is false; `command`: a hook's command line; `lang`: the
-    script's language when known, "js" or "py")."""
-    return engine.install_script_risk(text, shell, command, lang)
+    script's language when known, "js" or "py"; `path`: its file's name,
+    when known: a TypeScript file's text is read in its dialect, TS-STRIP)."""
+    return engine.install_script_risk(text, shell, command, lang, path=path)
 
 
 def install_script_severity(reasons):
@@ -97,10 +98,17 @@ def install_script_severity(reasons):
     return _ask("install_script_severity", "", reasons=list(reasons))
 
 
-def import_time_risk(text, lang=None, declared=None, own=None):
+def import_time_risk(text, lang=None, declared=None, own=None, path=None):
     """(reasons, line): the import-time test of a dependency's file; `declared` and `own`, its package's names when
-    known (engine.import_time_risks)."""
-    return engine.import_time_risk(text, lang, declared, own)
+    known (engine.import_time_risks); `path`, the file's name when known (a .ts, .mts, .cts or .tsx file's text is read
+    in its dialect alone: TS-STRIP)."""
+    return engine.import_time_risk(text, lang, declared, own, path=path)
+
+
+def js_refusal(text, path=None):
+    """The parser's refusal of a JavaScript-family text whose tree the supply-chain tests read, (line, reason), or
+    None (engine.js_refusal); `path`, the file's name when known (a TypeScript file is read in its dialect)."""
+    return engine.js_refusal(text, path)
 
 
 def import_time_severity(reasons):
@@ -3870,7 +3878,8 @@ def dependency_checks(root, files, manifests, issues, excludes=(), should_stop=N
                 return out, extra, stopped
         chunk = todo[start:start + engine.BATCH]
         try:
-            answers = engine.dep_file_issues([(f["content"], f["lang"], names[_slash(f["path"])]) for f in chunk])
+            answers = engine.dep_file_issues([(f["content"], f["lang"], names[_slash(f["path"])], f["path"])
+                                              for f in chunk])
         except _native.NativeError as exc:
             answers = [exc] * len(chunk)
         for f, answer in zip(chunk, answers):
@@ -3953,7 +3962,7 @@ def dependency_import_issue(path, text, lang=None, names=None):
     the import-time test (`names`: its package's (declared, own), when
     known), else None: the engine's (deps.rs, dep_file_issues). Raises
     _native.NativeError when the engine could not answer."""
-    answer = engine.dep_file_issues([(text, lang, names)])[0]
+    answer = engine.dep_file_issues([(text, lang, names, path)])[0]
     if engine.unanswered(answer):
         raise answer
     return engine._issues(path, [answer[0]])[0] if answer[0] is not None else None

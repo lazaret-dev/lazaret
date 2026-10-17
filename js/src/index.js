@@ -22,7 +22,7 @@ export { scanManifest, scanGyp, redactResult, setRedactSecrets } from "./lib/sup
 // The supply-chain tests, answered by the native engine (Rust, as WebAssembly: lib/native.js)
 export {
   followHook, hookScriptTargets, installScriptRisk, importTimeRisk, importTimeSeverity, installScriptSeverity, nodeCandidates,
-  persistenceReasons, runsReceivedCode, runsSubstitutedDownload,
+  persistenceReasons, runsReceivedCode, runsSubstitutedDownload, jsDialect, jsRefusal,
 } from "./lib/native.js";
 export {
   collectFiles, reportPaths, writeReport, validateReportPaths, validateOutDir, isOurReport,

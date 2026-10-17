@@ -13,7 +13,7 @@ import os
 import random
 import unittest
 
-from lazaret.scanner import _native, core
+from lazaret.scanner import _native, core, engine
 from tests.architecture import _snapshots, project_corpus, scanfile_corpus
 from tests.architecture.test_snapshot_scanfile import fixtures
 
@@ -48,6 +48,8 @@ def lang_of(path):
 
 def call_args(path, taint=None):
     a = {"lang": lang_of(path), "dep": False, "jsx": core.jsx_reading(path), "redact": True, "neumaier": True}
+    if a["lang"] == "js":
+        a.update(engine.dialect_args(path))     # (as engine.scan_calls asks: TS-STRIP)
     if taint:
         a["taint"] = taint
     return a

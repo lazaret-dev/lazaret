@@ -153,6 +153,8 @@ pub fn script_facts(p: &Pack, rel: &[u32], text: &[u32], project: bool, release:
         return Value::Null;
     }
     let lang = script_lang(p, rel, text);
+    // (a TypeScript file a hook runs, `tsx install.ts`, is read in its dialect: TS-STRIP)
+    let _read = crate::jsflow::supply::read_as(crate::jsflow::supply::Dialect::of_path(rel));
     let mut out: Vec<(&str, Value)> = Vec::new();
     let mut gone: Vec<Value> = Vec::new();
     let risk = own(|| {

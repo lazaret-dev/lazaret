@@ -2313,6 +2313,21 @@ doesn't read (a fragment, TypeScript it can't, a file over 2 MB) or a
 reading past the pass's budget is the text follower's to answer; so is any
 text not handed as JavaScript or Python (Python's model is §19).
 
+**The text's dialect (TS-STRIP, 0.1.9).** A host that knows the file's name
+gives the call its dialect (`dialect`: `"ts"` for `.ts`, `.mts` and `.cts`,
+`"tsx"` for `.tsx`; `dispatch` holds it for the call, `supply::read_as`, as
+`own_release` holds the release's name, and `deps_script` takes it from the
+target's name). `supply_tree` reads a TypeScript file in that dialect alone,
+as tsc does (`jsparse::parse(text, true, jsx)`: `<!--` is `<` `!` `--`), and a
+refusal is that reading's. Without a dialect, or with `"js"`, a text is read
+as before: JavaScript (JSX, Flow's annotations) first, then TypeScript
+without JSX (F-12's second reading of a text with `<!--` after code
+included). JavaScript first read a `.ts` file's `post<object>(url,
+process.env)` as `(post < object) > (url, process.env)`, no call and no
+refusal, and refused a `.tsx` file's `!`, `as` and generics in both readings.
+The last-text cache (`LAST`) is keyed by the dialect and the text, so one text
+asked in two dialects is read in each.
+
 **Its cost on a bundle (P-17, 0.1.9).** The tree reads a file several
 times what the text follower takes: the fixpoint reads each function about
 twice and the reporting pass once more, and the parse alone is about half

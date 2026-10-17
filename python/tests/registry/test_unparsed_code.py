@@ -142,5 +142,64 @@ class UnparsedCodeTests(unittest.TestCase):
         self.assertNotIn(repo.NESTED_CODE_RULE, repo.TRUNCATION_RULES)
 
 
+class TypeScriptTests(unittest.TestCase):
+    """TS-STRIP (0.1.9): a TypeScript member is read, and refused, in its own dialect, and the findings name its
+    language: Node does not run a .tsx file, so `node --check` is no advice for one."""
+
+    def test_a_typescript_files_refusal_is_its_dialects(self):
+        # JSX is no TypeScript in a .ts file: JavaScript's reading, the first tried before, read it
+        view = "const a = 1;\nexport const el = <div>hi</div>;\n"
+        res = scan_npm({"package.json": manifest(main="index.js"), "index.js": PLAIN, "lib/view.ts": view})
+        ((file, line, sev, msg),) = unparsed(res)
+        self.assertEqual((file, line, sev), ("lib/view.ts", 2, "INFO"))
+        self.assertTrue(msg.startswith("1 TypeScript file the parser could not read (lib/view.ts (line 2: "), msg)
+        # and the same text in a .tsx file is read
+        res = scan_npm({"package.json": manifest(main="index.js"), "index.js": PLAIN, "lib/view.tsx": view})
+        self.assertEqual(unparsed(res), [])
+
+    def test_an_install_script_in_its_dialect(self):
+        # (js_refusal, the parse alone, is asked in the script's dialect)
+        res = scan_npm({"package.json": manifest(scripts={"postinstall": "node src/postinstall.ts"}),
+                        "src/postinstall.ts": "const a = 1;\nconst el = <div>hi</div>;\n"})
+        ((file, line, _sev, msg),) = unparsed(res)
+        self.assertEqual((file, line), ("src/postinstall.ts", 2))
+        self.assertTrue(msg.startswith("1 TypeScript file the parser could not read"), msg)
+
+    def test_the_words(self):
+        def one(found):
+            # each file refused by the import-time pass (its code runs: a nesting refusal there is SC-NESTED-CODE)
+            (issue,) = repo._unparsed_code_issues({rel: {"import": why} for rel, why in found.items()})
+            return issue
+
+        broken = (3, "unexpected token '='")
+        ts = one({"a.ts": broken, "b.tsx": broken})
+        self.assertEqual(ts["name"], "TypeScript the parser could not read")
+        self.assertTrue(ts["msg"].startswith("2 TypeScript files the parser could not read (a.ts (line 3: "), ts["msg"])
+        self.assertIn("tsc --noEmit --jsx preserve FILE", ts["fix"])
+        self.assertNotIn("node --check", ts["fix"])
+        self.assertIn("tsc refuses them too", ts["why"])
+        self.assertNotIn("V8", ts["why"])
+        mixed = one({"a.js": broken, "b.mts": broken})
+        self.assertEqual(mixed["name"], "JavaScript or TypeScript the parser could not read")
+        self.assertTrue(mixed["msg"].startswith("2 JavaScript or TypeScript files the parser could not read"))
+        self.assertIn("node --check FILE", mixed["fix"])
+        self.assertIn("tsc --noEmit --jsx preserve FILE", mixed["fix"])
+        js = one({"a.js": broken, "b.cjs": broken})
+        self.assertEqual(js["name"], "JavaScript the parser could not read")
+        self.assertEqual(js["fix"], "Check that the file is one Node would refuse (`node --check FILE`); if Node runs "
+                                    "it, review it.")
+        self.assertNotIn("tsc", js["why"])
+        # SC-NESTED-CODE names the language too
+        deep = (1, "nesting too deep")
+        nested_ts = one({"a.cts": deep})
+        self.assertEqual(nested_ts["name"], "TypeScript nested too deep for the parser")
+        self.assertTrue(nested_ts["msg"].startswith("1 TypeScript file nested past the parser's bound"))
+        self.assertIn("V8 and tsc compile", nested_ts["why"])
+        nested_js = one({"a.js": deep})
+        self.assertEqual(nested_js["name"], "JavaScript nested too deep for the parser")
+        self.assertIn("deep nesting is the one kind of source V8 compiles", nested_js["why"])
+        # (a .d.ts declaration is never listed: _note_unparsed leaves it out)
+
+
 if __name__ == "__main__":
     unittest.main()

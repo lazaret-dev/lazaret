@@ -815,6 +815,17 @@ fn dispatch(name: &str, args: &Value, text: &[u32]) -> Result<Value, CallError> 
     let p: &Pack = &pk;
     let lang_arg = opt_str(args, "lang").map(|l| crate::pystr::to_string(&l));
     let lang = lang_arg.as_deref();
+    // `dialect` (TS-STRIP): "ts" or "tsx", the text is a TypeScript file's (.ts, .mts, .cts; .tsx), and the
+    // supply-chain tree of any call that reads one (import_time_risk, install_script_risk, js_refusal, the *_tree
+    // calls, scan_file's decoded-payload flow, dep_file_issues) reads it in that dialect alone; "js" or none, as
+    // JavaScript first, then as TypeScript
+    let _dialect = match opt_str(args, "dialect") {
+        Some(d) => Some(crate::jsflow::supply::read_as(
+            crate::jsflow::supply::Dialect::of_name(&crate::pystr::to_string(&d))
+                .ok_or_else(|| CallError::BadArgs(format!("{name}: dialect is \"js\", \"ts\" or \"tsx\"")))?,
+        )),
+        None => None,
+    };
     Ok(match name {
         "version" => Value::obj(vec![
             ("engine", Value::str("rust")),

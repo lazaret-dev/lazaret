@@ -1174,6 +1174,22 @@ that deep too (a minifier's if-return chain of 378 ternaries, a deep data
 literal). A file several passes refused is judged by the strongest
 (`_unparsed_code_issues`); the install-script pass reads a hook's file even
 when D-13's read refused it already.
+TS-STRIP (0.1.9, rule set 2.93.0): a TypeScript member is read, and
+refused, in its own dialect. The registry handed the engine a `.ts`, `.tsx`,
+`.mts` or `.cts` member's text alone, as JavaScript, and the supply model read
+it as JavaScript (JSX, Flow) first, then as TypeScript without JSX: a `.tsx`
+file with TypeScript's syntax was refused by both (Vite's `main.tsx`), and a
+`.ts` file's `post<object>(url, process.env)` was two comparisons, no call and
+no refusal, so the tests found nothing. Each pass now gives the engine the
+member's dialect from its name (`engine.dialect_args`: the import-time and
+use-time passes' `_import_risks`, whose memo key holds it; the install
+scripts' `install_script_risk` and `js_refusal`; `scan_calls`' `scan_file`;
+`dep_file_issues`), and the engine reads a TypeScript file as tsc does, in
+that dialect alone; a JavaScript file, and a text whose file is not known, as
+before. SC-UNPARSED-CODE and SC-NESTED-CODE say TypeScript when each listed
+file is TypeScript, JavaScript or TypeScript when some are, and give tsc's
+check (`tsc --noEmit --jsx preserve FILE`, a syntax error a TS1xxx code)
+where `node --check` would mislead (Node runs no `.tsx` file).
 
 SCA for Go and Rust (0.1.9): the inventory reads `go.mod` (its `replace`
 lines applied), `go.sum` only for a module whose `go` directive is before
