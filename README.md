@@ -274,13 +274,19 @@ requirements file with `--hash` lines pins the files too) and run `lazaret . --c
 
 A project scan checks your workflows offline (see "CI files' hardening" under Detection capabilities).
 What their `uses:` lines point to can be checked online too: `python -m lazaret.registry.actions
-.github/workflows/*.yml` asks GitHub about each action once and reports a pin that is in no branch and
-at no tag of its repository, such as a fork's commit GitHub serves under the parent's name
-(SC-ACTION-IMPOSTOR, CRITICAL when every branch and tag was compared); a version tag that points to
-another commit than when it was first seen (SC-ACTION-TAG-MOVED, CRITICAL; what was seen is kept in
-`~/.cache/lazaret/actions-pins.json`, `--pins FILE`, until `--accept-moved`); a tag whose commit is on
-none of the branches compared (SC-ACTION-OFF-BRANCH); `@<sha> # v1.2.3` where the tag names another
-commit (SC-ACTION-PIN-MISMATCH); and, in the action's own `action.yml`, a Docker image without a digest
+.github/workflows/*.yml` asks GitHub about each action once and reports a commit, pinned by its SHA or
+named by a tag, that none of the repository's branches holds: a fork's commit GitHub serves under the
+parent's name (SC-ACTION-IMPOSTOR, CRITICAL). In May 2026 every tag of `actions-cool/issues-helper` was
+moved to such a commit, put in through an attacker's fork, so a tag does not vouch for its commit and
+neither does a pin: each commit is compared with the default branch (GitHub's compare API), then with
+the other branches, release and version names first, at most 9 compares a commit; a check that could
+not finish (branches left past those 9, the rate limit, an API error) is reported as not checked, never
+as the finding. A version tag that points to another commit than when it was first seen is SC-ACTION-TAG-MOVED
+(MAJOR, CRITICAL when the commit it moved to is in none of the branches; what was seen is kept in
+`~/.cache/lazaret/actions-pins.json`, `--pins FILE`, or with `--db DSN` in the registry's database,
+until `--accept-moved`; `LAZARET_NO_ACTION_BRANCHES=1` turns the branch check off). It also reports
+`@<sha> # v1.2.3` where the tag names another commit (SC-ACTION-PIN-MISMATCH); and, in the action's own
+`action.yml`, a Docker image without a digest
 (SC-ACTION-DOCKER-UNPINNED; MINOR for one of Docker's official images at a version tag) or a composite
 action's steps that are not pinned, followed two levels deep (SC-ACTION-NESTED-UNPINNED). It then reads
 each action's own code at the commit its `uses:` resolves to, the archive the runner fetches, as the

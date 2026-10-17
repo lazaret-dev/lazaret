@@ -26,6 +26,25 @@ aggregate):
 
 ### Added
 
+- **An action at a commit outside its repository, and a moved tag (RA-4; the action scan, no rule-set change).**
+  GitHub serves a fork's commit under the parent repository's name, and a tag of the parent can be moved onto one:
+  in May 2026 every tag of `actions-cool/issues-helper` (and 15 of `actions-cool/maintain-one-comment`) was moved to
+  an imposter commit put in through an attacker's fork, while workflows pinned to a SHA of the real history were
+  unaffected. `python -m lazaret.registry.actions` now asks of every action it resolves — pinned by a SHA or named by
+  a tag, a workflow's or a composite step's — whether one of the repository's own branches holds the commit
+  (GitHub's compare API: the default branch first, then release and version branches, `main` and `master`, the rest;
+  at most 9 compares a commit, its answers kept per repository and commit for the run). In none of them, every
+  branch compared, is **SC-ACTION-IMPOSTOR (CRITICAL)**: "the commit is not in owner/repo's branches: a commit from a
+  fork, reached through the repository's name". A check that could not finish (branches left past the budget, the
+  rate limit, the call budget, an API error) is reported as not checked (exit 3), never as the finding. A version
+  tag seen at another commit than when it was first seen is **SC-ACTION-TAG-MOVED**, now MAJOR, and CRITICAL when
+  the commit it moved to is in none of the branches; what was seen can be kept in the registry's database
+  (`--db DSN`, the new table `action_tags`) instead of the pin book file. Changed with it: a pin at a tag's tip is
+  no longer taken as the repository's (the tag may be what was moved), a tag off the branches is SC-ACTION-IMPOSTOR
+  instead of SC-ACTION-OFF-BRANCH (MAJOR; the id is gone), an incompletely checked pin is no longer
+  SC-ACTION-IMPOSTOR MAJOR but not checked, and the report lists the branch found to hold each commit (`branches`).
+  `LAZARET_NO_ACTION_BRANCHES=1` turns the branch check off. A release made by tagging a commit no branch holds now
+  reads as an impostor.
 - **TypeScript files read in their own dialect by the supply-chain tests (TS-STRIP; rule set 2.93.0).** The hosts
   handed the engine a `.ts`, `.tsx`, `.mts` or `.cts` file's text alone, as JavaScript, and the supply-chain tree
   (the data flow of the import-time, use-time and install-script tests, received code, a dropper, D-9's rewrites,
@@ -962,11 +981,11 @@ aggregate):
   a direct network: with `--timings`, the network lines count the connections made and
   reused.
 - **What a workflow's actions point to, checked online.** `python -m
-  lazaret.registry.actions WORKFLOW…` asks GitHub about each `uses:`: a pin that is in no
-  branch and at no tag of its repository, such as a fork's commit (SC-ACTION-IMPOSTOR); a
-  version tag that moved since it was first seen (SC-ACTION-TAG-MOVED; what was seen is
-  kept in `~/.cache/lazaret/actions-pins.json`); a tag off the branches
-  (SC-ACTION-OFF-BRANCH); a pin whose `# v1.2.3` comment names another commit
+  lazaret.registry.actions WORKFLOW…` asks GitHub about each `uses:`: a commit, pinned or
+  tagged, that none of its repository's branches holds, such as a fork's commit
+  (SC-ACTION-IMPOSTOR; as RA-4 above made it); a version tag that moved since it was first
+  seen (SC-ACTION-TAG-MOVED; what was seen is kept in `~/.cache/lazaret/actions-pins.json`);
+  a pin whose `# v1.2.3` comment names another commit
   (SC-ACTION-PIN-MISMATCH); and, in the action's own `action.yml`, a Docker image without
   a digest or composite steps not pinned (SC-ACTION-DOCKER-UNPINNED,
   SC-ACTION-NESTED-UNPINNED). What it could not ask (GitHub's limit of 60 requests an hour

@@ -9,7 +9,10 @@ registry for the release's attestations and for the release before it, and
 the tests scan made-up releases that must not reach the network; the check's
 own tests (tests/registry/test_provenance.py) turn it on over recorded data.
 The comparison with a release's predecessor (LAZARET_NO_PRIOR_RELEASE, registry/prior.py) is off for the same
-reason; tests/registry/test_prior_release.py turns it on over made-up registries.
+reason; tests/registry/test_prior_release.py turns it on over made-up registries. So is the action scan's branch
+check (LAZARET_NO_ACTION_BRANCHES, registry/actionrefs.py: is an action's commit in its repository's branches);
+the action scan's tests (tests/registry/test_actions.py, test_action_refs.py) give it an environment of their own
+and an in-memory GitHub.
 """
 import os
 import sys
@@ -22,3 +25,4 @@ if _SRC not in _existing.split(os.pathsep):
     os.environ["PYTHONPATH"] = os.pathsep.join(p for p in (_SRC, _existing) if p)
 os.environ.setdefault("LAZARET_NO_PROVENANCE", "1")
 os.environ.setdefault("LAZARET_NO_PRIOR_RELEASE", "1")
+os.environ.setdefault("LAZARET_NO_ACTION_BRANCHES", "1")

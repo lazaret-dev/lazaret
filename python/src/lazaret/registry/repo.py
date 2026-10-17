@@ -6306,6 +6306,16 @@ def _candidate_table(t=""):
             f"verdict TEXT, last_error TEXT, updated_at TEXT NOT NULL)")
 
 
+def _action_tag_table(t=""):
+    """DDL of the action tags (RA-4, registry/actionrefs.py; the same for SQLite and Postgres): the commit an action's
+    version tag pointed to when the action scan first saw it (`python -m lazaret.registry.actions --db`), by
+    repository (owner/repo, lower-cased) and tag; moved_to and moved_at, the commit it was seen at since and when,
+    until the move is accepted; the times are ISO 8601 UTC."""
+    return (f"CREATE TABLE IF NOT EXISTS {t}action_tags ("
+            f"repo TEXT NOT NULL, tag TEXT NOT NULL, sha TEXT NOT NULL, first_seen TEXT NOT NULL, "
+            f"last_seen TEXT NOT NULL, moved_to TEXT, moved_at TEXT, PRIMARY KEY (repo, tag))")
+
+
 #: github_candidates' columns, in order (Store.github_candidates' rows are dicts of them)
 CANDIDATE_COLUMNS = ("repo_id", "full_name", "description", "fork", "filters", "listed_at", "state", "next_check",
                      "checks", "size", "pushed_at", "default_branch", "commit_sha", "verdict", "last_error",
@@ -6428,7 +6438,8 @@ class Store:
                 CREATE INDEX IF NOT EXISTS idx_scans_package
                 ON {self.t}scans(package_id, scanned_at DESC);
                 {_cursor_table(self.t)};
-                {_candidate_table(self.t)}""")
+                {_candidate_table(self.t)};
+                {_action_tag_table(self.t)}""")
             return
         cur = self.conn.cursor()
         serial, jsontype = "INTEGER PRIMARY KEY AUTOINCREMENT", "TEXT"
@@ -6451,6 +6462,7 @@ class Store:
                     f"ON {self.t}scans(package_id, scanned_at DESC)")
         cur.execute(_cursor_table(self.t))
         cur.execute(_candidate_table(self.t))
+        cur.execute(_action_tag_table(self.t))
         self.conn.commit()
 
     def _pg_call(self, run):
@@ -6658,6 +6670,29 @@ class Store:
         except Exception:
             self.conn.rollback()
             raise
+
+    def action_tag(self, repo, tag):
+        """An action tag's record (action_tags, RA-4): {sha, first, last[, moved: {to, at}]}, or None."""
+        p1, p2 = self._phs(2)
+        row = self._one(f"SELECT sha, first_seen, last_seen, moved_to, moved_at FROM {self.t}action_tags "
+                        f"WHERE repo={p1} AND tag={p2}", (_db_text(repo), _db_text(tag)))
+        if not row:
+            return None
+        entry = {"sha": row[0], "first": row[1], "last": row[2]}
+        if row[3]:
+            entry["moved"] = {"to": row[3], "at": row[4]}
+        return entry
+
+    def save_action_tag(self, repo, tag, entry):
+        """Store an action tag's record (actionrefs.sighting's shape); one idempotent upsert, like every Store write."""
+        moved = entry.get("moved") or {}
+        values = (_db_text(repo), _db_text(tag), entry["sha"], entry["first"], entry["last"], moved.get("to"),
+                  moved.get("at"))
+        sql = (f"INSERT INTO {self.t}action_tags (repo,tag,sha,first_seen,last_seen,moved_to,moved_at) "
+               f"VALUES ({','.join(self._phs(len(values)))}) ON CONFLICT (repo,tag) DO UPDATE SET sha=excluded.sha, "
+               f"first_seen=excluded.first_seen, last_seen=excluded.last_seen, moved_to=excluded.moved_to, "
+               f"moved_at=excluded.moved_at")
+        self._write(sql, values)
 
     def _write(self, sql, values):
         """One write statement, its own transaction (every caller's is an idempotent upsert or update)."""

@@ -157,6 +157,8 @@ python/
 │   │   ├── actions.py      what a workflow's `uses:` point to, asked of GitHub, and each
 │   │   │                   action's own code at that commit (`python -m lazaret.registry.actions`)
 │   │   ├── actionmeta.py   what an action.yml runs, a Dockerfile, and how an action's code is judged
+│   │   ├── actionrefs.py   is an action's commit in its repository's branches (GitHub's compare API);
+│   │   │                   a version tag's record, to report one that moved
 │   │   ├── ghdiscover.py   new public GitHub repositories found, filtered and scanned
 │   │   │                   (`discover --ecosystem github`)
 │   │   ├── ghevents.py     GH Archive's hourly files of public events: which new

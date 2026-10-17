@@ -3,16 +3,20 @@
 The offline checks (`scanner/ghworkflow.py`, `hardening`) say that a `uses:`
 is not pinned. These ask GitHub what each one points to, each action once:
 
-- **impostor commit**: a pin (a full commit SHA) that is in no branch and no
-  tag of the repository it names. GitHub resolves a commit of any fork in the
-  network under the parent's name, so `actions/checkout@<a commit pushed to a
-  fork>` runs the fork's code while the repository's page shows nothing.
+- **impostor commit** (RA-4, `actionrefs.py`): the commit a `uses:` runs, pinned
+  by its SHA or named by a tag, that none of the repository's branches holds.
+  GitHub resolves a commit of any fork in the network under the parent's name,
+  so `actions/checkout@<a commit pushed to a fork>` runs the fork's code while
+  the repository's page shows nothing, and a tag of the parent can be moved onto
+  such a commit (actions-cool/issues-helper, May 2026: every tag). Each commit is
+  compared with the default branch, then the likeliest other branches, within a
+  budget of compares; a check that could not finish is `incomplete`, never the
+  finding.
 - **a tag that moved**: a version tag (`v4.1.0`; not the floating `v4`) that
-  points to another commit than when it was first seen (the tj-actions shape).
-  What was seen is kept in a small file, the pin book; the first sighting is
-  no finding.
-- **a tag off the branches**: a tag whose commit is in none of the repository's
-  branches that were compared.
+  points to another commit than when it was first seen (the tj-actions shape):
+  MAJOR, and CRITICAL when the commit it moved to is in none of the branches.
+  What was seen is kept in a small file, the pin book, or with `--db` in the
+  registry's database (the table action_tags); the first sighting is no finding.
 - **a pin that does not match its comment**: `@<sha> # v4.1.0`, where v4.1.0
   points to another commit, or to none.
 - **the action's own `action.yml`**: a Docker image not pinned to a digest; for
@@ -36,9 +40,9 @@ repository, are reported as `incomplete`, and an action that was not checked
 is not cleared. The rules are `sources.py`'s: HTTPS to `api.github.com` only,
 every name from the workflow validated before it is put in a URL, a response
 byte-budgeted and read as JSON with limits, nothing run and nothing written but
-the pin book.
+the pin book (or the database's action_tags).
 
-    python -m lazaret.registry.actions [--no-pins | --pins FILE] [--accept-moved]
+    python -m lazaret.registry.actions [--no-pins | --pins FILE | --db DSN] [--accept-moved]
                                        [--max-calls N] [--no-code] WORKFLOW...
 
 prints the report as JSON; exit 1 for a finding of MAJOR or above, 3 when
@@ -58,6 +62,7 @@ import time
 import urllib.parse
 from collections import namedtuple
 
+from lazaret.registry import actionrefs as _refs
 from lazaret.registry import repo as _repo
 from lazaret.registry import sources as _sources
 from lazaret.scanner import core as _core
@@ -69,7 +74,6 @@ SourceError = _sources.SourceError
 
 CALLS_ANONYMOUS = 45        # GitHub allows 60 an hour without a token: some is left for the user's other tools
 CALLS_TOKEN = 400
-MAX_BRANCHES = 8            # branches compared with a commit, after the default branch
 MAX_DEPTH = 2               # an action's steps' actions, and theirs
 MAX_USES = 300              # distinct actions looked at in one run
 MAX_ACTION_YML = 256 * 1024
@@ -197,22 +201,10 @@ class PinBook:
 
     def see(self, key, sha, now):
         """Records a sighting. -> the entry the tag was first seen with when it now
-        points elsewhere, else None."""
-        entry = self.entries.get(key)
-        if entry is None:
-            self.entries[key] = {"sha": sha, "first": _iso(now), "last": _iso(now)}
-            self.dirty = True
-            return None
-        if entry["sha"] == sha:
-            if entry.get("moved") is not None:
-                entry.pop("moved")
-                self.dirty = True
-            entry["last"] = _iso(now)
-            self.dirty = True
-            return None
-        entry["moved"] = {"to": sha, "at": _iso(now)}
+        points elsewhere, else None (actionrefs.sighting)."""
+        self.entries[key], was = _refs.sighting(self.entries.get(key), sha, now)
         self.dirty = True
-        return dict(entry)
+        return was
 
     def accept(self, key, sha, now):
         """Takes the tag's present commit as the one it is meant to have."""
@@ -248,6 +240,7 @@ class Report:
         self.incomplete = []        # (uses, why): not checked, so not cleared
         self.notes = []             # (uses, what): worth saying, not a finding
         self.resolved = {}          # `uses:` value -> the commit it points to now
+        self.branches = {}          # `uses:` value -> the branch of its repository found to hold that commit (RA-4)
         self.actions = {}           # `owner/repo[/path]@ref` -> what its action.yml runs
         self.calls = []
         self.checked = 0
@@ -260,7 +253,8 @@ class Report:
         return {"checked": self.checked, "complete": self.complete,
                 "findings": [{"kind": f.kind, "line": f.line, "uses": f.uses, "detail": f.detail} for f in self.findings],
                 "incomplete": [list(i) for i in self.incomplete], "notes": [list(n) for n in self.notes],
-                "resolved": dict(self.resolved), "actions": dict(self.actions), "calls": list(self.calls)}
+                "resolved": dict(self.resolved), "branches": dict(self.branches), "actions": dict(self.actions),
+                "calls": list(self.calls)}
 
 
 class _Stop(Exception):
@@ -277,12 +271,8 @@ class _Resolution:
         self.kind = None            # 'commit' (a pin), 'tag' or 'branch'
         self.problems = []          # (kind, detail)
         self.notes = []
-
-
-def _branch_rank(name):
-    """Release branches first: a release tag is on one."""
-    low = name.lower()
-    return (0 if low.startswith(("releases/", "release/", "release-", "releases-")) or re.match(r"v?\d", low) else 1, name)
+        self.where = None           # the branch found to hold the commit (RA-4)
+        self.unsettled = []         # what was not checked of it: each an `incomplete` of the uses: line
 
 
 class Auditor:
@@ -299,6 +289,10 @@ class Auditor:
         self.report = Report()
         self.token = bool(token)
         self.stopped = None
+        # RA-4: is each commit in its repository's branches (actionrefs.Branches; its answers kept per repository
+        # and commit for the run); LAZARET_NO_ACTION_BRANCHES=1 turns it off
+        self.branch_check = _refs.enabled(env)
+        self.branches = _refs.Branches(self._json)
         self._memo = {}
         self._done = {}
         self._actions = {}
@@ -354,29 +348,6 @@ class Auditor:
     def _base(owner, repo):
         return f"/repos/{urllib.parse.quote(owner)}/{urllib.parse.quote(repo)}"
 
-    def repo_info(self, owner, repo):
-        what = f"looking up {owner}/{repo}"
-        doc = self._json(self._base(owner, repo), what, missing=True)
-        if doc is None:
-            return None
-        if not isinstance(doc, dict) or not isinstance(doc.get("default_branch"), str):
-            raise SourceError(f"{what}: unexpected answer")
-        return doc
-
-    def _named(self, owner, repo, what):
-        """[(name, commit sha)] of the first 100 tags or branches."""
-        path = f"{self._base(owner, repo)}/{what}?per_page=100"
-        doc = self._json(path, f"listing the {what} of {owner}/{repo}")
-        if not isinstance(doc, list):
-            raise SourceError(f"listing the {what} of {owner}/{repo}: unexpected answer")
-        out = []
-        for e in doc:
-            commit = e.get("commit") if isinstance(e, dict) else None
-            sha = commit.get("sha") if isinstance(commit, dict) else None
-            if isinstance(e, dict) and isinstance(e.get("name"), str) and isinstance(sha, str) and _SHA40_RE.match(sha):
-                out.append((e["name"], sha))
-        return out, len(doc)
-
     def ref_commit(self, owner, repo, ref):
         """('tag' | 'branch', commit sha) of a ref name, or None when there is no such ref."""
         for kind, space in (("tag", "tags"), ("branch", "heads")):
@@ -399,51 +370,41 @@ class Auditor:
             raise SourceError(f"{what}: too many tag objects in a row")
         return None
 
-    def _compare(self, owner, repo, base, sha):
-        """GitHub's status of `sha` against the branch `base`: identical, ahead, behind, diverged, or 'unrelated'."""
-        what = f"comparing {sha[:12]} with {owner}/{repo}@{base}"
-        doc = self._json(f"{self._base(owner, repo)}/compare/{urllib.parse.quote(base, safe='/')}...{sha}?per_page=1",
-                         what, missing=True)
-        if doc is None:
-            return "unrelated"
-        status = doc.get("status") if isinstance(doc, dict) else None
-        if status not in ("identical", "ahead", "behind", "diverged"):
-            raise SourceError(f"{what}: unexpected answer")
-        return status
+    def _branch_answer(self, use, res):
+        """RA-4: the branch check of the commit `res.sha` (actionrefs.Branches.check) -> its Answer, or None when it
+        was not made (LAZARET_NO_ACTION_BRANCHES) or could not finish on an error, the rate limit or the call budget
+        (said in res.unsettled, never a finding). A repository that cannot be seen is raised: the action is not
+        checked at all."""
+        if not self.branch_check:
+            return None
+        label = f"{use.owner}/{use.repo}"
+        try:
+            return self.branches.check(use.owner, use.repo, res.sha)
+        except _Stop as exc:
+            res.unsettled.append(f"whether {res.sha[:12]} is in {label}'s branches was not checked: {exc}")
+        except SourceError as exc:
+            if getattr(exc, "status", None) == 404:
+                raise
+            res.unsettled.append(f"whether {res.sha[:12]} is in {label}'s branches could not be settled: {exc}")
+        return None
 
-    def _exists(self, owner, repo, sha):
-        return self._json(f"{self._base(owner, repo)}/commits/{sha}?per_page=1", f"looking up {owner}/{repo}@{sha[:12]}",
-                          missing=True) is not None
-
-    def reachable(self, owner, repo, sha, tag_tips=True):
-        """Is `sha` in the history of a tag or a branch of the repository? -> ('yes', where),
-        ('no', complete) with `complete` True when every tag tip and every branch was looked at,
-        or ('missing', None) when there is no such commit. With `tag_tips` False the commit is
-        looked for in the branches only (a tag's own commit is the tip of that tag)."""
-        tags, tag_count = self._named(owner, repo, "tags") if tag_tips else ([], 0)
-        for name, tip in tags:
-            if tip == sha:
-                return "yes", f"tag {name}"
-        info = self.repo_info(owner, repo)
-        default = info["default_branch"] if info else None
-        branches, branch_count = self._named(owner, repo, "branches")
-        names = [n for n, _ in branches if n != default]
-        order = ([default] if default else []) + sorted(names, key=_branch_rank)
-        compared = skipped = 0
-        for name in order[:1 + MAX_BRANCHES]:
-            try:
-                _sources._check_ref(name)
-            except SourceError:
-                skipped += 1                    # a name that cannot go in a URL is not looked at
-                continue
-            if self._compare(owner, repo, name, sha) in ("behind", "identical"):
-                return "yes", f"branch {name}"
-            compared += 1
-        if not self._exists(owner, repo, sha):
-            return "missing", None
-        complete = (tag_count < 100 and branch_count < 100 and default is not None
-                    and skipped == 0 and compared == len(order))
-        return "no", complete
+    def _tag_seen(self, use, res):
+        """An exact version tag's sighting in the pin book (or the database's): -> the tag-moved detail when it
+        points elsewhere than when first seen, else None. A record that could not be kept is res.unsettled."""
+        if res.kind != "tag" or self.pins is None or not _exact_version(use.ref):
+            return None
+        key = PinBook.key(use.owner, use.repo, use.ref)
+        try:
+            if self.accept_moved:
+                self.pins.accept(key, res.sha, self.now())
+                return None
+            was = self.pins.see(key, res.sha, self.now())
+        except _refs.BookError as exc:
+            res.unsettled.append(str(exc))
+            return None
+        if was is None:
+            return None
+        return {"tag": use.ref, "was": was["sha"], "now": res.sha, "first": was["first"]}
 
     # ---- one action
     def _resolve(self, use):
@@ -451,33 +412,35 @@ class Auditor:
         owner, repo, ref = use.owner, use.repo, use.ref
         if use.pinned:
             res.sha, res.kind = ref, "commit"
-            where, extra = self.reachable(owner, repo, ref)
-            if where == "no":
-                res.problems.append(("impostor", {"sha": ref, "complete": extra}))
-            elif where == "missing":
+        else:
+            got = self.ref_commit(owner, repo, ref)
+            if got is None:
+                res.notes.append(f"{ref} is neither a tag nor a branch of {owner}/{repo} (the repository may be "
+                                 f"private, renamed or gone)")
+                return res
+            res.kind, res.sha = got
+        moved = self._tag_seen(use, res)
+        # a pin and a tag are checked alike (an imposter can be pinned by its SHA too); a branch's head is its own
+        answer = self._branch_answer(use, res) if res.kind != "branch" else None
+        if answer is not None:
+            if answer.state == "in":
+                res.where = answer.where
+            elif answer.state == "out":
+                res.problems.append(("impostor", {"sha": res.sha, "ref": ref, "tag": res.kind == "tag",
+                                                  "branches": answer.branches}))
+            elif answer.state == "missing" and use.pinned:
                 res.sha = None
                 res.notes.append(f"{ref[:12]} is not a commit of {owner}/{repo} or of a fork of it that GitHub shows "
                                  f"(the repository may be private, renamed or gone)")
-            return res
-        got = self.ref_commit(owner, repo, ref)
-        if got is None:
-            res.notes.append(f"{ref} is neither a tag nor a branch of {owner}/{repo} (the repository may be private, "
-                             f"renamed or gone)")
-            return res
-        res.kind, res.sha = got
-        if res.kind == "tag":
-            if self.pins is not None and _exact_version(ref):
-                key = PinBook.key(owner, repo, ref)
-                if self.accept_moved:
-                    self.pins.accept(key, res.sha, self.now())
-                else:
-                    was = self.pins.see(key, res.sha, self.now())
-                    if was is not None:
-                        res.problems.append(("tag-moved", {"tag": ref, "was": was["sha"], "now": res.sha,
-                                                           "first": was["first"]}))
-            where, extra = self.reachable(owner, repo, res.sha, tag_tips=False)
-            if where == "no":
-                res.problems.append(("off-branch", {"tag": ref, "sha": res.sha, "complete": extra}))
+            elif answer.state == "missing":
+                res.unsettled.append(f"GitHub does not show the commit {res.sha[:12]} the tag {ref} of "
+                                     f"{owner}/{repo} points to, so whether it is in the branches is not settled")
+            else:
+                res.unsettled.append(f"whether {res.sha[:12]} is in {owner}/{repo}'s branches is not settled: "
+                                     f"{answer.why}")
+        if moved is not None:
+            moved["fork"] = answer is not None and answer.state == "out"
+            res.problems.append(("tag-moved", moved))
         return res
 
     def _check(self, use):
@@ -502,7 +465,10 @@ class Auditor:
         got = self.ref_commit(use.owner, use.repo, tag)
         if got is not None and got[0] == "tag" and got[1] == use.ref:
             if self.pins is not None:
-                self.pins.see(PinBook.key(use.owner, use.repo, tag), use.ref, self.now())
+                try:
+                    self.pins.see(PinBook.key(use.owner, use.repo, tag), use.ref, self.now())
+                except _refs.BookError as exc:
+                    self.report.incomplete.append((use.value, str(exc)))
             return []
         return [("pin-mismatch", {"tag": tag, "tag_sha": got[1] if got is not None and got[0] == "tag" else None,
                                   "pin": use.ref})]
@@ -621,9 +587,15 @@ class Auditor:
                                                                     via=chain)))
         for note in res.notes:
             rep.notes.append((use.value, note))
+        for why in res.unsettled:
+            rep.incomplete.append((use.value, why))
         if res.sha is None:
             return
         rep.resolved.setdefault(use.value, res.sha)
+        if res.where is not None:
+            rep.branches.setdefault(use.value, res.where)
+        if self.stopped:
+            return                              # (GitHub answers no more: what is left of it would be refused)
         if use.kind != "action" or depth > MAX_DEPTH:
             return
         text = self._action_yml(use, res.sha)
@@ -691,6 +663,9 @@ class Auditor:
                 rep.incomplete.append((value, str(exc)))
         rep.findings = sorted(set_unique(rep.findings), key=lambda f: (f.line, f.kind, f.uses))
         rep.calls = list(self.client.calls)
+        if not self.branch_check and rep.checked:
+            rep.notes.append(("", f"whether each action's commit is in its repository's branches was not checked "
+                                  f"({_refs.OFF_ENV} is set)"))
         if self.pins is not None:
             if self.pins.problem:
                 rep.notes.append(("", self.pins.problem))
@@ -718,14 +693,17 @@ def audit_text(text, **kw):
 _IMPOSTOR_WHY = (
     "GitHub lets a commit that exists only in a fork be named under the original repository: "
     "`uses: owner/repo@<sha>` runs it, and the repository's own page does not show the commit. An attacker can fork "
-    "an action, push a commit there, and pass the original's name with that commit's SHA off as a pinned release.")
+    "an action, push a commit there, and pass the original's name with that commit's SHA off as a pinned release; "
+    "and a tag of the repository can be moved onto that commit. In May 2026 every tag of actions-cool/issues-helper "
+    "(and 15 of actions-cool/maintain-one-comment) was moved to such a commit, put in through an attacker's fork; the "
+    "workflows pinned to a commit of the repository's own history were not affected. A release is a commit one of "
+    "the repository's branches holds; this one is in none of them.")
 _MOVED_WHY = (
     "A version tag names one release and should never point to another commit. In March 2025 the tags of "
     "tj-actions/changed-files were rewritten to a commit that printed every secret of the workflows that used it "
-    "into their logs; the workflows that pinned a commit were not affected, the ones that trusted the tag were.")
-_OFF_BRANCH_WHY = (
-    "A release tag normally points to a commit on one of the repository's branches. One that does not may be a "
-    "commit that was pushed to a fork, or to a branch that was deleted afterwards, and then given the release's name.")
+    "into their logs, and in May 2026 those of actions-cool/issues-helper to a commit from a fork; the workflows that "
+    "pinned a commit were not affected, the ones that trusted the tag were. A maintainer may retag a release; a tag "
+    "moved to a commit the repository's branches do not hold is not that.")
 _MISMATCH_WHY = (
     "A pin's comment says which release it is, and reviewers trust it. If the tag points to another commit than the "
     "pin, either the pin is stale or wrong, or the tag was moved, and nobody looking at the comment would see it.")
@@ -740,6 +718,14 @@ _CODE_FIX = "Read the code at that commit before the workflow runs it; pin a com
 _NESTED_WHY = (
     "A composite action runs the actions its steps name, with the job's token and secrets. Pinning the action to a "
     "commit does not pin what it uses: a tag in its action.yml can still be moved.")
+_FROM_FORK = "a commit from a fork, reached through the repository's name"
+
+
+def _compared(n):
+    """What the branch check compared, for a message."""
+    if not n:
+        return "its branches were compared"
+    return "its one branch was compared" if n == 1 else f"each of its {n} branches was compared"
 
 
 def rule(kind, d):
@@ -748,42 +734,32 @@ def rule(kind, d):
     who = f"{d['owner']}/{d['repo']}"
     via = f" (through {' > '.join(d['via'])})" if d.get("via") else ""
     if kind == "impostor":
-        sure = d["complete"]
-        if sure:
-            msg = (f"The commit {d['sha'][:12]} of {who}{via} is in none of its branches and at the tip of none of its "
-                   f"tags: it is an impostor commit, one pushed to a fork.")
-        else:
-            msg = (f"The commit {d['sha'][:12]} of {who}{via} was found in none of the tags and branches that were "
-                   f"looked at (the first 100 tags and {MAX_BRANCHES + 1} branches at most): it may be an impostor "
-                   f"commit from a fork, or on a branch that was not compared.")
+        ref = d.get("ref") or d["sha"]
+        named = (f"{who}@{ref}{via} points to the commit {d['sha']}: the commit" if d.get("tag")
+                 else f"{who}@{ref}{via}: the commit")
         return {
-            "id": "SC-ACTION-IMPOSTOR", "name": "Pinned commit is not in the action's repository",
-            "type": "HOTSPOT", "sev": "CRITICAL" if sure else "MAJOR", "msg": msg, "why": _IMPOSTOR_WHY,
-            "fix": ("Open the commit on GitHub and check that it belongs to the repository's own history. Pin the "
-                    "commit of a release you have read instead, and read the action's code before it runs."),
+            "id": "SC-ACTION-IMPOSTOR", "name": "Action's commit is not in its repository's branches",
+            "type": "HOTSPOT", "sev": "CRITICAL",
+            "msg": f"{named} is not in {who}'s branches: {_FROM_FORK} ({_compared(d.get('branches'))}).",
+            "why": _IMPOSTOR_WHY,
+            "fix": ("Do not run it. Open the commit on GitHub: its page says when it does not belong to any branch of "
+                    "the repository. Pin the commit of a release you have read, from the repository's own history; "
+                    + ("a tag that points to a fork's commit was moved or made by whoever can push to the repository: "
+                       "tell its owner and GitHub." if d.get("tag") else "and read the action's code before it runs.")),
             "ref": "CWE-829 · Supply chain"}
     if kind == "tag-moved":
+        fork = bool(d.get("fork"))
         return {
             "id": "SC-ACTION-TAG-MOVED", "name": "Version tag of an action points to another commit",
-            "type": "HOTSPOT", "sev": "CRITICAL",
+            "type": "HOTSPOT", "sev": "CRITICAL" if fork else "MAJOR",
             "msg": f"The tag {d['tag']} of {who}{via} pointed to {d['was'][:12]} when it was first seen "
-                   f"({d['first']}) and points to {d['now'][:12]} now.",
+                   f"({d['first']}) and points to {d['now'][:12]} now"
+                   + (f", which is in none of its branches: {_FROM_FORK}." if fork else "."),
             "why": _MOVED_WHY,
             "fix": (f"Do not run it. Compare {d['was'][:12]} and {d['now'][:12]} on GitHub; if the new commit is a "
                     f"change you can account for, pin that commit by its SHA, and accept the move "
                     f"(`--accept-moved`)."),
             "ref": "CWE-494 · Supply chain"}
-    if kind == "off-branch":
-        sure = d["complete"]
-        return {
-            "id": "SC-ACTION-OFF-BRANCH", "name": "Tag of an action points outside the repository's branches",
-            "type": "HOTSPOT", "sev": "MAJOR",
-            "msg": f"The tag {d['tag']} of {who}{via} points to {d['sha'][:12]}, which is in none of "
-                   + ("its branches." if sure else f"the branches compared ({MAX_BRANCHES + 1} at most) or at the tip "
-                                                   "of any of the first 100 tags."),
-            "why": _OFF_BRANCH_WHY,
-            "fix": f"Check the commit on GitHub, and pin the SHA of a release you have read (now {d['sha']}).",
-            "ref": "CWE-829 · Supply chain"}
     if kind == "pin-mismatch":
         what = (f"points to {d['tag_sha'][:12]}" if d["tag_sha"] else "is not a tag of the repository")
         return {
@@ -838,26 +814,32 @@ def counted(rules):
 
 # ------------------------------------------------------------------ the command
 def main(argv=None):
-    """python -m lazaret.registry.actions [--no-pins | --pins FILE] [--accept-moved] [--max-calls N] [--no-code]
-    WORKFLOW..."""
+    """python -m lazaret.registry.actions [--no-pins | --pins FILE | --db DSN] [--accept-moved] [--max-calls N]
+    [--no-code] WORKFLOW..."""
     _core.configure_stdio()
     argv = list(sys.argv[1:] if argv is None else argv)
-    usage = ("usage: python -m lazaret.registry.actions [--no-pins | --pins FILE] [--accept-moved] "
+    usage = ("usage: python -m lazaret.registry.actions [--no-pins | --pins FILE | --db DSN] [--accept-moved] "
              "[--max-calls N] [--no-code] WORKFLOW...")
     pins_path, use_pins, accept, max_calls, files, scan_code = default_pins_path(), True, False, None, [], True
+    db, books = None, set()           # (the book kinds asked for: one at most)
     i = 0
     while i < len(argv):
         a = argv[i]
         if a == "--no-pins":
             use_pins = False
+            books.add(a)
         elif a == "--no-code":
             scan_code = False
         elif a == "--accept-moved":
             accept = True
-        elif a in ("--pins", "--max-calls") and i + 1 < len(argv):
+        elif a in ("--pins", "--max-calls", "--db") and i + 1 < len(argv):
             i += 1
             if a == "--pins":
                 pins_path = argv[i]
+                books.add(a)
+            elif a == "--db":
+                db = argv[i]
+                books.add(a)
             elif argv[i].isdigit():
                 max_calls = int(argv[i])
             else:
@@ -869,12 +851,29 @@ def main(argv=None):
         else:
             files.append(a)
         i += 1
-    if not files:
+    if not files or len(books) > 1:
         print(usage, file=sys.stderr)
         return 2
+    store = None
+    if db is not None:
+        # RA-4: the tags' records in the registry's database (action_tags), beside its scans
+        try:
+            store = _repo.Store(db)
+        except (_repo.StoreConfigError, RuntimeError, ValueError) as exc:
+            print(f"error: --db: {exc}", file=sys.stderr)
+            return 2
+    try:
+        pins = _refs.StoreBook(store) if store is not None else PinBook(pins_path) if use_pins else None
+        return _run(files, pins, max_calls, accept, scan_code)
+    finally:
+        if store is not None:
+            store.close()
+
+
+def _run(files, pins, max_calls, accept, scan_code):
+    """The command's audit of each workflow file: prints the reports, -> the exit code."""
     rep_all = []
     code = 0
-    pins = PinBook(pins_path) if use_pins else None
     for path in files:
         try:
             with open(path, "rb") as f:

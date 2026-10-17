@@ -1573,15 +1573,56 @@ directory, and `source` says what was read and what was not; SARIF's
 `versionControlProvenance` maps `%SRCROOT%` to the repository at that commit.
 
 `registry/actions.py` asks GitHub about a workflow's `uses:` under the same
-rules: an impostor commit (a pin in no branch and at no tag tip: GitHub
-serves a fork's commit under the parent's name), a version tag that moved
-since the pin book first saw it, a tag off the branches, a pin comment that
-names another commit, and the action's own `action.yml` (an image without a
-digest, a composite action's unpinned steps, two levels deep). What it could
-not ask (the rate limit, its call budget, an expression in a ref, a private
-repository) is `incomplete`, and an action not checked is not cleared. A
-project scan does not call it: it needs the network, and the offline checks
-(the engine's `ci_workflow`) are the scan's.
+rules: an impostor commit, a version tag that moved since the pin book first
+saw it, a pin comment that names another commit, and the action's own
+`action.yml` (an image without a digest, a composite action's unpinned steps,
+two levels deep). What it could not ask (the rate limit, its call budget, an
+expression in a ref, a private repository) is `incomplete`, and an action not
+checked is not cleared. A project scan does not call it: it needs the
+network, and the offline checks (the engine's `ci_workflow`) are the scan's.
+
+An impostor commit (RA-4, `registry/actionrefs.py`, the one helper every
+`uses:` the scan resolves goes through, a workflow's and a composite step's,
+pinned or tagged) is a commit none of the repository's branches holds. GitHub
+serves each commit of a fork network under the parent's name, and a tag of the
+parent can be moved onto one: in May 2026 every tag of
+actions-cool/issues-helper, and 15 of actions-cool/maintain-one-comment, were
+moved to a commit put in through an attacker's fork, while workflows pinned to
+a SHA of the real history were unaffected. So neither a tag nor a tag's tip
+vouches for a commit (before RA-4 a pin at a tag's tip did, and a tag off the
+branches was SC-ACTION-OFF-BRANCH, MAJOR, now folded into SC-ACTION-IMPOSTOR);
+only a branch does. `Branches.check(owner, repo, sha)` asks the compare API
+(`GET /repos/{o}/{r}/compare/{branch}...{sha}`: `behind` or `identical`
+holds it): the default branch first, after the repository's record (two calls
+for most pins), then one page of the branches (100; a branch whose head is the
+commit needs no compare), release branches and version names first, then
+`main` and `master`, then the rest by name, at most `MAX_COMPARES` (9)
+compares a commit. In none of them, every branch compared, and the commit
+itself found (one more call: a commit GitHub does not have is a note) is
+SC-ACTION-IMPOSTOR, CRITICAL. A check that could not finish (branches left
+past the budget, more than a page of branches, a branch name that cannot go
+in a URL, the rate limit, the run's call budget, an API error) is never the
+finding: the use is `incomplete`, as any other unanswered question of this
+scan is (exit 3: the scan's own way, kept apart from the registry's
+`INCOMPLETE_KINDS`, which are a package scan's and the guard's), and the
+action's code is still read. The answers, errors included, are kept per
+(repository, commit) for the run. `LAZARET_NO_ACTION_BRANCHES=1` turns the
+check off (the test suite's default, as the provenance and predecessor checks
+are off there), and the report says it was not made. The cost of a release
+process that tags a commit no branch holds (built files committed on a
+detached head and only the tag pushed) is that its tags read as impostors:
+such a release cannot be told from a moved tag by GitHub's answers alone.
+
+A version tag's commit is recorded the first time it is seen, in the pin book
+(a JSON file in the user's cache) or, with `--db DSN`, in the registry's
+database beside its scans (`StoreBook`; the table `action_tags`, keyed by the
+repository and the tag, with the first commit, the times, and where the tag
+was seen since). A tag seen at another commit is SC-ACTION-TAG-MOVED: MAJOR
+(a maintainer may retag a release), CRITICAL when the commit it moved to is in
+none of the branches; the record keeps its first commit until
+`--accept-moved`. A floating tag (`v4`) moves by design and is not recorded;
+moved onto a fork's commit, the branch check finds it. A record that cannot be
+read or written leaves the use `incomplete`.
 
 Since N-4 it also reads each action's own code at the commit it resolves
 to: the archive the runner fetches (GitHub's archive of the commit, from

@@ -1,10 +1,11 @@
 """GitHub Actions at their pinned commits (0.1.9, S-2 online half): lazaret.registry.actions.
 
 The checks run against an in-memory GitHub (`_actions_support.FakeGitHub`): a pin
-that is in no branch or tag of the repository (an impostor commit from a fork), a
-version tag that moved, a tag off the branches, a pin whose comment names another
-commit, an action.yml that runs an unpinned image or unpinned steps; and what is
-not checked is said (the rate limit, the call budget, a ref that is an expression).
+or a tag whose commit is in none of the repository's branches (an impostor commit
+from a fork; RA-4, whose own tests are test_action_refs.py), a version tag that
+moved, a pin whose comment names another commit, an action.yml that runs an
+unpinned image or unpinned steps; and what is not checked is said (the rate limit,
+the call budget, a ref that is an expression).
 """
 
 import base64
@@ -17,7 +18,7 @@ import unittest
 from contextlib import redirect_stdout, redirect_stderr
 from unittest import mock
 
-from lazaret.registry import actions, sources
+from lazaret.registry import actionrefs, actions, sources
 from lazaret.scanner import ghworkflow
 from tests.registry import _actions_support as fx
 
@@ -65,16 +66,20 @@ def api_calls(gh):
 
 
 class PinnedTests(Base):
-    def test_a_release_commit_is_quiet_and_costs_two_calls(self):
+    def test_a_release_commit_is_quiet_and_costs_three_calls(self):
         r = release_repo()
         rep = self.audit(workflow(f"o/act@{r.shas[1]}"), r)
         self.assertEqual(rep.findings, [])
         self.assertTrue(rep.complete)
         self.assertEqual(rep.checked, 1)
-        self.assertEqual(len(api_calls(self.gh)), 2)            # the tags (a tip matches), then action.yml
+        # the repository (its default branch), the default branch compared with the commit, then action.yml
+        self.assertEqual([u.split("?")[0] for u in api_calls(self.gh)],
+                         [f"{fx.API}/repos/o/act", f"{fx.API}/repos/o/act/compare/main...{r.shas[1]}",
+                          f"{fx.API}/repos/o/act/contents/action.yml"])
         # and the commit's archive, from codeload (not an API call)
-        self.assertEqual(self.gh.calls[2:], [f"https://codeload.github.com/o/act/tar.gz/{r.shas[1]}"])
+        self.assertEqual(self.gh.calls[3:], [f"https://codeload.github.com/o/act/tar.gz/{r.shas[1]}"])
         self.assertEqual(rep.resolved, {f"o/act@{r.shas[1]}": r.shas[1]})
+        self.assertEqual(rep.branches, {f"o/act@{r.shas[1]}": "main"})
 
     def test_a_commit_of_the_default_branch_that_is_not_tagged(self):
         r = release_repo()
@@ -93,27 +98,29 @@ class PinnedTests(Base):
         rep = self.audit(workflow(f"o/act@{evil}"), r)
         self.assertEqual(self.kinds(rep), [("impostor", 7)])
         d = rep.findings[0].detail
-        self.assertEqual((d["sha"], d["complete"], d["owner"], d["repo"]), (evil, True, "o", "act"))
+        self.assertEqual((d["sha"], d["ref"], d["tag"], d["branches"], d["owner"], d["repo"]),
+                         (evil, evil, False, 2, "o", "act"))
         rule = actions.rule("impostor", d)
         self.assertEqual((rule["id"], rule["sev"]), ("SC-ACTION-IMPOSTOR", "CRITICAL"))
-        self.assertIn(evil[:12], rule["msg"])
-        self.assertIn("impostor commit", rule["msg"])
+        self.assertIn(evil, rule["msg"])
+        self.assertIn("the commit is not in o/act's branches: a commit from a fork, reached through the repository's "
+                      "name (each of its 2 branches was compared)", rule["msg"])
 
-    def test_an_impostor_is_a_maybe_when_not_every_branch_was_looked_at(self):
+    def test_an_impostor_is_not_called_one_when_not_every_branch_was_compared(self):
         r = release_repo()
         for i in range(12):
             r.commit(r.shas[1], branch=f"topic-{i:02d}")
         evil = r.commit(r.shas[2], fork=True, files={"action.yml": fx.action_yml()})
         rep = self.audit(workflow(f"o/act@{evil}"), r)
-        self.assertEqual(self.kinds(rep), [("impostor", 7)])
-        self.assertFalse(rep.findings[0].detail["complete"])
-        rule = actions.rule("impostor", rep.findings[0].detail)
-        self.assertEqual(rule["sev"], "MAJOR")
-        self.assertIn("may be an impostor", rule["msg"])
-        # the default branch and the release branches are looked at first, then at most MAX_BRANCHES in all
+        self.assertEqual(rep.findings, [])                      # not CRITICAL, not a finding: incomplete
+        self.assertEqual([u for u, _ in rep.incomplete], [f"o/act@{evil}"])
+        self.assertIn(f"9 of its 14 branches were compared ({actionrefs.MAX_COMPARES} compares a commit at most), 5 "
+                      f"were not", rep.incomplete[0][1])
+        # the default branch and the release branches are looked at first, then at most MAX_COMPARES in all
         compared = [u for u in self.gh.calls if "/compare/" in u]
-        self.assertEqual(len(compared), 1 + actions.MAX_BRANCHES)
+        self.assertEqual(len(compared), actionrefs.MAX_COMPARES)
         self.assertIn("/compare/main...", compared[0])
+        self.assertIn("/compare/releases/v1...", compared[1])
 
     def test_release_branches_are_looked_at_before_the_others(self):
         r = release_repo()
@@ -123,11 +130,12 @@ class PinnedTests(Base):
         rep = self.audit(workflow(f"o/act@{backport}"), r)
         self.assertEqual(rep.findings, [])
 
-    def test_two_pins_of_one_repository_list_its_tags_once(self):
+    def test_three_pins_of_one_repository_look_it_up_once(self):
         r = release_repo()
         rep = self.audit(workflow(f"o/act@{r.shas[1]}", f"o/act@{r.shas[2]}", f"o/act@{r.shas[0]}"), r)
         self.assertEqual(rep.findings, [])
-        self.assertEqual(self.gh.calls.count("https://api.github.com/repos/o/act/tags?per_page=100"), 1)
+        self.assertEqual(self.gh.calls.count("https://api.github.com/repos/o/act"), 1)
+        self.assertFalse([u for u in self.gh.calls if "/tags" in u or "/branches" in u])   # main holds all three
         self.assertEqual(len(self.gh.calls), len(set(self.gh.calls)))
 
     def test_a_commit_that_does_not_exist_is_a_note_not_a_finding(self):
@@ -170,16 +178,19 @@ class TagTests(Base):
         self.assertEqual(rep.resolved, {})
         self.assertIn("is neither a tag nor a branch", rep.notes[0][1])
 
-    def test_a_tag_off_the_branches(self):
+    def test_a_tag_on_a_commit_off_the_branches_is_an_impostor(self):
+        # RA-4: a tag of the repository moved onto (or made for) a commit none of its branches holds: CRITICAL
         r = release_repo()
         stray = r.commit(r.shas[0], fork=True, files={"action.yml": fx.action_yml()})
         r.tag("v3.0.0", stray)
         rep = self.audit(workflow("o/act@v3.0.0"), r)
-        self.assertEqual(self.kinds(rep), [("off-branch", 7)])
+        self.assertEqual(self.kinds(rep), [("impostor", 7)])
         d = rep.findings[0].detail
-        self.assertEqual((d["tag"], d["sha"], d["complete"]), ("v3.0.0", stray, True))
-        self.assertEqual(actions.rule("off-branch", d)["sev"], "MAJOR")
-        self.assertIn(stray, actions.rule("off-branch", d)["fix"])
+        self.assertEqual((d["ref"], d["sha"], d["tag"]), ("v3.0.0", stray, True))
+        rule = actions.rule("impostor", d)
+        self.assertEqual((rule["id"], rule["sev"]), ("SC-ACTION-IMPOSTOR", "CRITICAL"))
+        self.assertIn(f"o/act@v3.0.0 points to the commit {stray}: the commit is not in o/act's branches",
+                      rule["msg"])
 
     def test_a_tag_on_a_release_branch_is_fine(self):
         r = release_repo()
@@ -203,7 +214,8 @@ class MovedTagTests(Base):
         self.assertEqual((d["tag"], d["was"], d["now"]), ("v1.0.0", was, r.shas[2]))
         self.assertRegex(d["first"], r"^\d{4}-\d\d-\d\dT")
         rule = actions.rule("tag-moved", d)
-        self.assertEqual((rule["id"], rule["sev"]), ("SC-ACTION-TAG-MOVED", "CRITICAL"))
+        # RA-4: MAJOR when the commit it moved to is on a branch (a maintainer may retag; CRITICAL for a fork's)
+        self.assertEqual((rule["id"], rule["sev"], d["fork"]), ("SC-ACTION-TAG-MOVED", "MAJOR", False))
         self.assertIn(was[:12], rule["msg"])
         # the alert stays until the move is accepted
         self.assertEqual(self.kinds(self.audit(text, r, pins=True)), [("tag-moved", 7)])
@@ -353,8 +365,9 @@ class NotCheckedTests(Base):
 
     def test_the_rate_limit_stops_the_run_and_leaves_the_rest_unchecked(self):
         a, b = release_repo("o/a"), release_repo("o/b")
-        rep = self.audit(workflow(f"o/a@{a.shas[1]}", f"o/b@{b.shas[1]}", "o/b@v1"), a, b, limit=2)
-        self.assertEqual(len(api_calls(self.gh)), 3)            # nothing is asked after the answer that said stop
+        # o/a: the repository, a compare and action.yml; then o/b's first call is refused
+        rep = self.audit(workflow(f"o/a@{a.shas[1]}", f"o/b@{b.shas[1]}", "o/b@v1"), a, b, limit=3)
+        self.assertEqual(len(api_calls(self.gh)), 4)            # nothing is asked after the answer that said stop
         self.assertEqual(rep.findings, [])
         self.assertEqual([u for u, _ in rep.incomplete], [f"o/b@{b.shas[1]}", "o/b@v1"])
         self.assertIn("rate limit reached", rep.incomplete[0][1])
@@ -675,9 +688,8 @@ class CodeTests(Base):
 class RuleTests(unittest.TestCase):
     D = {"owner": "o", "repo": "r", "via": []}
     CASES = {
-        "impostor": {"sha": "a" * 40, "complete": True},
+        "impostor": {"sha": "a" * 40, "ref": "v1.0.0", "tag": True, "branches": 3},
         "tag-moved": {"tag": "v1.0.0", "was": "a" * 40, "now": "b" * 40, "first": "2026-10-03T00:00:00Z"},
-        "off-branch": {"tag": "v1.0.0", "sha": "a" * 40, "complete": False},
         "pin-mismatch": {"tag": "v1.0.0", "tag_sha": "b" * 40, "pin": "a" * 40},
         "docker-unpinned": {"image": "docker://x:1"},
         "nested-unpinned": {"nested": "a/b@v1", "kind": "action", "first": False, "tag": True},
@@ -693,7 +705,7 @@ class RuleTests(unittest.TestCase):
             self.assertIn(rule["sev"], ("MINOR", "MAJOR", "CRITICAL"))
             self.assertTrue(all(isinstance(rule[k], str) and rule[k] for k in ("msg", "why", "fix", "name", "ref")), kind)
             ids.add(rule["id"])
-        self.assertEqual(len(ids), 6)
+        self.assertEqual(len(ids), 5)
 
     def test_a_code_finding_carries_the_scans_own_rule(self):
         d = dict(self.D, path="sub", sha="c" * 40, rule="SC-USE-RISK", name="Hostile code the package runs when used",
@@ -715,7 +727,8 @@ class CommandTests(Base):
     def run_main(self, argv, *repos, limit=None):
         gh = fx.FakeGitHub(*repos, limit=limit)
         out, err = io.StringIO(), io.StringIO()
-        with mock.patch.object(sources, "_http", gh), mock.patch.dict(os.environ, {"GITHUB_TOKEN": ""}), \
+        with mock.patch.object(sources, "_http", gh), \
+                mock.patch.dict(os.environ, {"GITHUB_TOKEN": "", actionrefs.OFF_ENV: ""}), \
                 redirect_stdout(out), redirect_stderr(err):
             code = actions.main(argv)
         return code, out.getvalue(), err.getvalue(), gh

@@ -89,5 +89,20 @@ CREATE TABLE IF NOT EXISTS github_candidates (
     updated_at     TEXT NOT NULL
 );
 
+-- `python -m lazaret.registry.actions --db` (RA-4): the commit each version tag
+-- of an action pointed to when the action scan first saw it, so a tag that
+-- moves is reported (SC-ACTION-TAG-MOVED)
+CREATE TABLE IF NOT EXISTS action_tags (
+    repo       TEXT NOT NULL,            -- owner/repo, lower-cased
+    tag        TEXT NOT NULL,            -- an exact version tag (v4.1.0)
+    sha        TEXT NOT NULL,            -- the commit it pointed to when first seen (or when its move was accepted)
+    first_seen TEXT NOT NULL,            -- ISO 8601 UTC
+    last_seen  TEXT NOT NULL,
+    moved_to   TEXT,                     -- the commit it was seen at since, until the move is accepted
+    moved_at   TEXT,
+    PRIMARY KEY (repo, tag)
+);
+
 GRANT SELECT, INSERT, UPDATE, DELETE ON packages, scans, discovery_cursors, github_candidates TO lazaret_app;
+GRANT SELECT, INSERT, UPDATE, DELETE ON action_tags TO lazaret_app;
 GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO lazaret_app;
