@@ -77,6 +77,7 @@ CREATE TABLE IF NOT EXISTS github_candidates (
     filters        TEXT NOT NULL,        -- JSON list: what matched
     listed_at      TEXT NOT NULL,        -- ISO 8601 UTC
     state          TEXT NOT NULL,        -- 'waiting' | 'ready' | 'scanned' | 'reported' | 'dropped'
+                                         -- (--github-scan-all: 'queued' | 'pending' | 'excluded')
     next_check     TEXT,                 -- when its content is checked next (waiting)
     checks         INTEGER NOT NULL,
     size           INTEGER,              -- GitHub's size, KB

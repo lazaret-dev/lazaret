@@ -1924,6 +1924,36 @@ the listing; GitHub's rate limit (`X-RateLimit-Remaining` at `RATE_FLOOR`, a
 `sources.Client.get` hands the answer's headers back (`reply_headers`) for
 that. A token is required; nothing runs; secrets are never verified.
 
+GH Archive and every new repository (`ghevents.py`, GH-SCAN-ALL, 0.1.9:
+the plan's phase 2). `--github-archive` reads GH Archive's hourly files of
+public events (`data.gharchive.org/YYYY-MM-DD-H.json.gz`, the Events API's
+events, some 70 MB gzipped, published a while after the hour), in order from
+the cursor `gharchive`, at most `ARCHIVE_HOURS` a run, an hour that answers
+404 waited for (`ARCHIVE_GIVE_UP` hours after it ended, passed over as a gap
+of GH Archive's, and said so); the file goes to that host alone, with no credential, and is
+read within bounds (the file, what it unpacks to, a line; an event's ID and
+name checked as the listing's are). Read of it: `PushEvent` and a branch or
+tag's `CreateEvent` (the repository has code), a repository's `CreateEvent`
+(its description) and `PublicEvent` (made public: a repository created
+private keeps its old ID, so the listing never shows it). A push makes a
+waiting candidate ready; its content checks still run, since GH Archive can
+miss an event. A repository made public goes through the filters by name.
+`--github-scan-all` turns it on, with `--scan`: a repository newer than the
+listing's cursor when scan-all first ran (`github-scan-all`), seen to get
+code, is queued (state `queued`) when the listing has reached it, `pending`
+until then (its verdict the listing's: reported, excluded or queued), and
+judged by GH Archive's name and description where the listing cannot (a
+repository made public). Campaign repositories stay reported and are never
+downloaded; your excludes make a repository `excluded`. The scans
+(`--max-scans`, `SCAN_ALL_MAX_SCANS` by default) take the filters' ready
+candidates first, oldest first, then the queue, newest first; the queue keeps
+`QUEUE_MAX` and a pending repository waits `PENDING_HOURS`, the rest skipped
+and counted, so each run says what share of the stream it covered (some ten
+thousand new repositories an hour against a token's 5,000 requests, three a
+scan). A queued repository's failed scan drops it; a repository is scanned
+once. No schema change: the states are new values of `github_candidates`'s
+`state`, and the two cursors rows of `discovery_cursors`.
+
 ### m. crates.io discovery (`ecosystems/crates.py`, CRATES-DISCOVER)
 
 crates.io has no change feed to read forward, as npm's replication feed and

@@ -510,9 +510,14 @@ export GITHUB_TOKEN=…                                      # read-only; requir
 lazaret-registry discover --ecosystem github --resume      # list and filter; check the candidates for content
 lazaret-registry discover --ecosystem github --resume --scan --ci   # and scan them; exit 1 on SUSPICIOUS,
                                                            # INCOMPLETE or a campaign repository
+lazaret-registry discover --ecosystem github --resume --github-archive --scan   # GH Archive's events: ready sooner
+lazaret-registry discover --ecosystem github --resume --github-scan-all --max-scans 50   # every new repository
 lazaret-registry list                                      # the candidates: waiting, ready, scanned, dropped, reported
 lazaret-registry report github:owner/repo                  # a scanned repository's findings
 ```
+
+Give it a state database of its own (`--db ~/lazaret-registry/github.db`, or `LAZARET_DB`): without `--db` it is
+`lazaret-registry.db` in the folder you run it from, and the next run from another folder starts over.
 
 - **Listing:** GitHub's `/repositories` gives every public repository in the order it was created; the cursor (`discovery_cursors`, `github`) is the last repository ID listed, stored after each page. The first run finds the newest repository (about 32 requests) and lists what comes after it from then on. A repository created private and made public later keeps its old ID and is not listed.
 - **Filters, from the listing alone:** a look-alike of a popular repository (an owner one change from a popular repository's, its separators changed, `-go` or the like added: `shopsprint/decimal` for `shopspring/decimal`), against the repositories of npm's and PyPI's most-downloaded packages and the Go modules on github.com; a copy of a popular repository under another owner with the original's description (when the names file has the descriptions); a campaign marker in the name or description (the Shai-Hulud worms' exfiltration repositories, case and separators folded), reported when listed, with its URL, and **never downloaded**; and your own patterns, `--github-filters FILE` (JSON: `{"include": {"full_name": [regex, …], "description": […]}, "exclude": {…}}`).
@@ -520,7 +525,10 @@ lazaret-registry report github:owner/repo                  # a scanned repositor
 - **Scanning (`--scan`):** the default branch's head, fetched as `lazaret scan github:owner/repo` fetches it, scanned as a project and stored with the commit as its version. The verdict counts the supply-chain findings, a CI file's hardening check only at CRITICAL, as the gate does: an unpinned action alone does not make a repository WARN. A checkout not read whole is INCOMPLETE.
 - **Budgets:** `--max-calls` (default 1,000) across the content checks and scans, then the listing; the run also stops when GitHub's rate limit is nearly spent or answers with a rate limit, and keeps its cursor and its candidates for the next run. Static only: nothing in a repository runs, and secrets are never verified.
 
-Before turning on `--scan` for a schedule, a day of listing and filtering alone shows how many repositories an hour are listed, what each filter keeps and how many candidates get content: set the schedule and `--max-calls` from that.
+- **GH Archive (`--github-archive`):** [GH Archive](https://www.gharchive.org/) publishes GitHub's public events an hour at a time (`data.gharchive.org/YYYY-MM-DD-H.json.gz`, some 70 MB, a while after the hour; no token). Discovery reads the hours in order from a cursor of its own (`gharchive`), at most three a run, and waits for an hour that is not published yet (six hours after the hour ended, it is a gap in GH Archive and passed over). A push to a candidate makes it ready without a content check (the checks still run: GH Archive can miss an event), and a repository made public, which the listing never shows, goes through the filters by its name.
+- **Every new repository (`--github-scan-all`):** scan each new repository that gets code, not only what a filter keeps. It reads GH Archive and scans (`--github-archive --scan`). A repository newer than the listing's cursor when scan-all first ran, that GH Archive saw get code, is queued, once the listing has judged it: a campaign repository is still reported and never downloaded, one your excludes match is kept out, and one pushed before the listing reached it waits until it does. Repositories made public are queued too. Some ten thousand repositories are created an hour, more than a token's 5,000 requests can scan (a scan costs three), so a run scans `--max-scans` (default 100): the filters' candidates first, then the newest of the queue, which keeps the 1,000 newest. Each run says how many got code, were queued, scanned and skipped. A repository is scanned once, at the first push seen.
+
+Before turning on `--scan` for a schedule, a day of listing and filtering alone shows how many repositories an hour are listed, what each filter keeps and how many candidates get content: set the schedule and `--max-calls` from that. Every 15 to 30 minutes keeps up with the listing.
 
 ### Binary artifacts
 

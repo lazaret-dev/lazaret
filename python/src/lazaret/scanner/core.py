@@ -4627,6 +4627,22 @@ class _PipeSafeStdout:
         return getattr(self._stream, name)
 
 
+#: `lazaret --help`'s examples (the other forms are the top-level command's: lazaret._cli)
+SCAN_EXAMPLES = """examples:
+  lazaret .                                 scan this project: lazaret-report.json and .html here
+  lazaret . --ci                            exit 1 when the quality gate fails (CI)
+  lazaret . --deps                          also read node_modules, venv and vendor (supply chain)
+  lazaret . --out-dir reports --no-html     the JSON report alone, in reports/
+  lazaret . --sarif lazaret.sarif           a SARIF report too, for GitHub code scanning
+  lazaret . --baseline last-report.json     mark what is new since that report
+  lazaret github:owner/repo                 a GitHub repository at its default branch's head
+  lazaret github:owner/repo@v1.2.0          at a tag, branch or commit (gitlab:group/project too)
+  lazaret extension.vsix                    a VS Code extension (--extensions: the installed ones)
+  lazaret hook                              the staged files: the commit-time gate
+  lazaret guard npm install left-pad        what a package manager is about to install
+  lazaret-registry --help                   registry releases, watching, new GitHub repositories
+"""
+
 def main(argv=None, source=None):
     """`lazaret` console entry point. argv defaults to sys.argv[1:]. Any
     uncaught exception becomes `error: internal: …` with exit 5 (review item
@@ -4684,7 +4700,8 @@ def set_source(res, source):
 
 def _main(argv=None, source=None):
     global REDACT_SECRETS, EXCERPT_WIDTH, SOURCE_SIZE_CAP
-    ap = argparse.ArgumentParser(prog="lazaret", description="Lazaret — security & quality scanner for Python/JS projects.")
+    ap = argparse.ArgumentParser(prog="lazaret", description="Lazaret — security & quality scanner for Python/JS projects.",
+                                 epilog=SCAN_EXAMPLES, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--version", action="version",
                     version=f"lazaret {_lazaret_pkg.__version__} (engine: {engine.describe()})")
     ap.add_argument("directory", help="Project directory to scan")

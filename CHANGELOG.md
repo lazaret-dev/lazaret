@@ -26,6 +26,21 @@ aggregate):
 
 ### Added
 
+- **Every new GitHub repository, and GH Archive's events (GH-SCAN-ALL; John, Oct 16: "build 1 and two").**
+  `discover --ecosystem github --resume` gets three options. `--github-archive` reads GH Archive's hourly files of
+  GitHub's public events (`data.gharchive.org`, some 70 MB an hour, no token, at most three hours a run, from a cursor
+  of its own; an hour not published yet is waited for, and passed over as a gap six hours on): a push to a candidate makes it ready without a content check,
+  and a repository made public, which GitHub's listing never shows, goes through the filters by its name.
+  `--github-scan-all` scans every new repository GH Archive sees get code, not only what a filter keeps: queued once
+  the listing has judged it (a campaign repository still reported and never downloaded, your excludes kept out, one
+  pushed before the listing reached it waiting until it does), the made-public ones too. `--max-scans N` caps a run's
+  scans (default 100 with scan-all): the filters' candidates first, then the newest of the queue, which keeps the
+  1,000 newest; the run says how many got code, were queued, scanned and skipped. A run that keeps nothing now says
+  so ("kept 0"), `list` sums scan-all's repositories up and names the scans that were not OK, `lazaret-registry
+  --help` and `lazaret --help` show examples (the npm package's `--help` too), and `.gitignore` leaves out
+  `lazaret-registry.db`, the state database without `--db`. New: `registry/ghevents.py`; the store's
+  `add_github_candidates`, `github_candidate_states`, `prune_github_candidates`; candidate states `queued`, `pending`
+  and `excluded` (no schema change).
 - **`--show-secrets`: the credentials on the terminal, and nowhere else.** Every finding is redacted where it is made,
   so a secret finding's line was a placeholder on the terminal too. `lazaret . --show-secrets`, `lazaret hook
   --show-secrets` and `lazaret-registry scan --show-secrets` print each finding's flagged line as it was read, kept

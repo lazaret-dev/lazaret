@@ -157,6 +157,10 @@ python/
 │   │   ├── actions.py      what a workflow's `uses:` point to, asked of GitHub, and each
 │   │   │                   action's own code at that commit (`python -m lazaret.registry.actions`)
 │   │   ├── actionmeta.py   what an action.yml runs, a Dockerfile, and how an action's code is judged
+│   │   ├── ghdiscover.py   new public GitHub repositories found, filtered and scanned
+│   │   │                   (`discover --ecosystem github`)
+│   │   ├── ghevents.py     GH Archive's hourly files of public events: which new
+│   │   │                   repositories got code, which were made public
 │   │   └── schema.sql      PostgreSQL setup for the state DB
 │   ├── mcp/server.py       MCP server (`lazaret-mcp`)
 │   ├── web/lazaret.html    browser dashboard (package data)

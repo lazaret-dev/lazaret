@@ -6108,7 +6108,9 @@ def _candidate_table(t=""):
     public repository a filter kept, by GitHub's repository ID. filters is a JSON list of what matched; state is
     waiting (a content check is due at next_check), ready (it has content, not scanned yet), scanned, reported (a
     campaign repository: never downloaded) or dropped (still empty after the last check, gone or made private:
-    last_error says which); the times are ISO 8601 UTC."""
+    last_error says which); with --github-scan-all (GH-SCAN-ALL) also queued (a new repository GH Archive saw get
+    code, waiting for a scan), pending (one it saw before the listing reached it) and excluded (one your excludes
+    matched, never scanned); the times are ISO 8601 UTC."""
     return (f"CREATE TABLE IF NOT EXISTS {t}github_candidates ("
             f"repo_id BIGINT PRIMARY KEY, full_name TEXT NOT NULL, description TEXT, fork INTEGER NOT NULL, "
             f"filters TEXT NOT NULL, listed_at TEXT NOT NULL, state TEXT NOT NULL, next_check TEXT, "
@@ -6504,9 +6506,78 @@ class Store:
         self._write(f"UPDATE {self.t}github_candidates SET {sets} WHERE repo_id={phs[-1]}",
                     tuple(values) + (int(repo_id),))
 
-    def github_candidates(self, states=None, due_by=None):
-        """The candidates (dicts of CANDIDATE_COLUMNS, filters parsed), oldest listed first; only those in `states`
-        when given, and with `due_by` (ISO 8601 UTC) only those whose next check is due by then."""
+    def add_github_candidates(self, rows):
+        """add_github_candidate for many, in one transaction (GH-SCAN-ALL: an hour of GH Archive's events can make
+        thousands): rows of (repo_id, full_name, description, fork, filters, listed_at, state, next_check)."""
+        rows = list(rows)
+        if not rows:
+            return
+        now = datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")
+        values = [(int(r[0]), _db_text(r[1]), _db_text(r[2]) if r[2] else None, 1 if r[3] else 0, db_json(list(r[4])),
+                   r[5], r[6], r[7], 0, now) for r in rows]
+        sql = (f"INSERT INTO {self.t}github_candidates (repo_id,full_name,description,fork,filters,listed_at,"
+               f"state,next_check,checks,updated_at) VALUES ({','.join(self._phs(10))}) "
+               f"ON CONFLICT (repo_id) DO NOTHING")
+        if self.pg:
+            def insert():
+                with self.conn.transaction():
+                    for v in values:
+                        self.conn.execute(sql, *v)
+            self._pg_call(insert)
+            return
+        try:
+            self.conn.execute("BEGIN IMMEDIATE")
+            self.conn.executemany(sql, values)
+            self.conn.commit()
+        except Exception:
+            self.conn.rollback()
+            raise
+
+    def github_candidate_states(self, ids):
+        """{repo_id: state} of the candidates among `ids` (those with no row are left out)."""
+        ids = sorted({int(i) for i in ids})
+        out = {}
+        for k in range(0, len(ids), 500):
+            part = ids[k:k + 500]
+            sql = (f"SELECT repo_id, state FROM {self.t}github_candidates "
+                   f"WHERE repo_id IN ({','.join(self._phs(len(part)))})")
+            if self.pg:
+                rows = self._pg_call(lambda sql=sql, part=part: self.conn.fetch(sql, *part))
+            else:
+                cur = self.conn.cursor()
+                cur.execute(sql, part)
+                rows = cur.fetchall()
+            out.update({int(r[0]): r[1] for r in rows})
+        return out
+
+    def prune_github_candidates(self, state, keep=None, before=None):
+        """Delete candidates in `state`: all but the `keep` listed last, or those listed before `before` (ISO 8601
+        UTC). -> how many were deleted (GH-SCAN-ALL: the scan queue and the pushes not yet listed stay bounded)."""
+        ph = self._phs(2)
+        if keep is not None:
+            # (LIMIT with the largest BIGINT: an OFFSET alone is Postgres's, not SQLite's)
+            pick = (f"SELECT repo_id FROM {self.t}github_candidates WHERE state={ph[0]} "
+                    f"ORDER BY listed_at DESC, repo_id DESC LIMIT 9223372036854775807 OFFSET {int(keep)}")
+            args = (state,)
+        else:
+            pick = f"SELECT repo_id FROM {self.t}github_candidates WHERE state={ph[0]} AND listed_at < {ph[1]}"
+            args = (state, before)
+        if self.pg:
+            gone = [int(r[0]) for r in self._pg_call(lambda: self.conn.fetch(pick, *args))]
+        else:
+            cur = self.conn.cursor()
+            cur.execute(pick, args)
+            gone = [int(r[0]) for r in cur.fetchall()]
+        for k in range(0, len(gone), 500):
+            part = gone[k:k + 500]
+            self._write(f"DELETE FROM {self.t}github_candidates WHERE repo_id IN ({','.join(self._phs(len(part)))})",
+                        tuple(part))
+        return len(gone)
+
+    def github_candidates(self, states=None, due_by=None, newest_first=False, limit=None):
+        """The candidates (dicts of CANDIDATE_COLUMNS, filters parsed), oldest listed first (`newest_first`: newest
+        first); only those in `states` when given, with `due_by` (ISO 8601 UTC) only those whose next check is due by
+        then, and at most `limit`."""
         where, args = [], []
         if states:
             phs = self._phs(len(args) + len(states))[len(args):]
@@ -6515,8 +6586,10 @@ class Store:
         if due_by is not None:
             where.append(f"next_check IS NOT NULL AND next_check <= {self._phs(len(args) + 1)[-1]}")
             args.append(due_by)
+        order = " ORDER BY listed_at DESC, repo_id DESC" if newest_first else " ORDER BY listed_at, repo_id"
         sql = (f"SELECT {','.join(CANDIDATE_COLUMNS)} FROM {self.t}github_candidates"
-               + (" WHERE " + " AND ".join(where) if where else "") + " ORDER BY listed_at, repo_id")
+               + (" WHERE " + " AND ".join(where) if where else "") + order
+               + (f" LIMIT {int(limit)}" if limit is not None else ""))
         if self.pg:
             rows = self._pg_call(lambda: self.conn.fetch(sql, *args))
         else:
@@ -7714,7 +7787,12 @@ def _discover_github(store, args):
                                         "cursor: use discover --ecosystem github --resume")
     patterns = ghdiscover.load_patterns(args.github_filters) if getattr(args, "github_filters", None) else None
     max_calls = args.max_calls if getattr(args, "max_calls", None) else ghdiscover.DEFAULT_MAX_CALLS
-    out = ghdiscover.run(store, scan=args.scan, max_calls=max_calls, filters=ghdiscover.Filters(patterns=patterns))
+    max_scans = getattr(args, "max_scans", None)
+    if max_scans is not None and max_scans < 0:
+        raise ghdiscover.DiscoveryError("--max-scans takes a number of scans, 0 or more")
+    out = ghdiscover.run(store, scan=args.scan, max_calls=max_calls, filters=ghdiscover.Filters(patterns=patterns),
+                         archive=getattr(args, "github_archive", False), scan_all=getattr(args, "github_scan_all", False),
+                         max_scans=max_scans)
     _print_github_run(out)
     bad = bool(out["campaigns"])
     for res in out["scans"]:
@@ -7725,7 +7803,7 @@ def _discover_github(store, args):
 
 
 def _print_github_run(out):
-    """What a github discovery run listed, kept, reported and checked."""
+    """What a github discovery run listed, kept, reported and checked, and what GH Archive's hours gave it."""
     s = lazaret.sanitize_term
     print("GitHub:")
     if not out["first"]:
@@ -7737,10 +7815,46 @@ def _print_github_run(out):
     if out["matches"]:
         print(f"  kept {len(out['candidates']) + len(out['campaigns'])}: "
               + ", ".join(f"{k} {v}" for k, v in sorted(out["matches"].items())))
+    elif out["listed"] and not out["campaigns"]:
+        print("  kept 0: no look-alike, copy, campaign marker or pattern of yours matched")
     for full, marker, url in out["campaigns"]:
         print(f"  {c('41;97', ' CAMPAIGN ')} github:{s(full)} — {s(marker)!r} — {s(url)} (not downloaded)")
     if out["checked"]:
         print("  content checks: " + ", ".join(f"{k} {v}" for k, v in sorted(out["checked"].items())))
+    _print_github_archive(out)
+
+
+def _print_github_archive(out):
+    """What GH Archive's hours gave a github discovery run (--github-archive, --github-scan-all), and scan-all's
+    share: what got code, what was queued, scanned and skipped."""
+    from lazaret.registry import ghdiscover
+    info, queue = out.get("archive"), out.get("queue")
+    if info is None:
+        return
+    if info["hours"]:
+        hours = info["hours"][0] + (f" to {info['hours'][-1]}" if len(info["hours"]) > 1 else "")
+        print(f"  GH Archive: read {len(info['hours'])} hour(s) ({hours} UTC), {info['events']:,} events; "
+              f"{info['ready']} kept repositories got code, {info['public']} made public")
+    else:
+        print("  GH Archive: no hour read")
+    if info["error"]:
+        print(f"  GH Archive: stopped: {lazaret.sanitize_term(info['error'])}")
+    elif info["unpublished"]:
+        print(f"  GH Archive: the hour {info['next']} UTC is not published yet; the next run reads it")
+    if info.get("missing"):
+        print(f"  GH Archive: passed over {', '.join(info['missing'])} UTC, still not published "
+              f"{ghdiscover.ARCHIVE_GIVE_UP} hours after (a gap in GH Archive)")
+    if queue is None:
+        return
+    if queue["since"] is None:
+        print("  every new repository: starts on the next run (the listing's first run sets where new begins)")
+        return
+    print(f"  every new repository (newer than ID {queue['since']}): {info['pushed']:,} got code; queued "
+          f"{queue['queued']:,}, waiting for the listing {queue['pending']:,}, excluded {queue['excluded']:,}; "
+          f"{queue['promoted']:,} that waited reached by the listing")
+    skipped = (f", {queue['skipped']:,} skipped (the queue keeps the newest {ghdiscover.QUEUE_MAX:,})"
+               if queue["skipped"] else "")
+    print(f"  scanned {len(out['scans'])} this run; {queue['left']:,} left in the queue{skipped}")
 
 
 def _github_run_errors(out, errors):
@@ -7841,11 +7955,26 @@ def cmd_scan(store, specs, full, rescan, errors=None):
 
 def _print_candidates(candidates):
     """`list`: the new GitHub repositories discovery kept (GH-NEW-REPOS), each with its state, what matched, the
-    verdict of its scan or why it was dropped."""
+    verdict of its scan or why it was dropped; --github-scan-all's repositories in counts, and those whose scan was
+    not OK (GH-SCAN-ALL: there are thousands)."""
     s = lazaret.sanitize_term
+    every = [c for c in candidates if _scan_all_row(c)]
+    candidates = [c for c in candidates if not _scan_all_row(c)]
     counts = {}
     for cand in candidates:
         counts[cand["state"]] = counts.get(cand["state"], 0) + 1
+    if every:
+        all_counts = {}
+        for cand in every:
+            all_counts[cand["state"]] = all_counts.get(cand["state"], 0) + 1
+        print("\nEvery new repository (--github-scan-all): "
+              + ", ".join(f"{k} {v}" for k, v in sorted(all_counts.items())))
+        flagged = [c for c in every if c["state"] == "scanned" and c["verdict"] != "OK"]
+        for cand in flagged[-50:]:
+            print(f"  scanned   github:{s(cand['full_name']):<40} {s(cand['verdict'])} at "
+                  f"{s(str(cand['commit_sha'])[:12])}")
+    if not candidates:
+        return
     print("\nGitHub candidates: " + ", ".join(f"{k} {v}" for k, v in sorted(counts.items())))
     for cand in candidates:
         what = (cand["filters"] or ["?"])[0]
@@ -7853,6 +7982,14 @@ def _print_candidates(candidates):
                 "waiting": f"next check {cand['next_check']}", "dropped": cand["last_error"] or "",
                 "reported": "a campaign repository: not downloaded", "ready": "has content"}.get(cand["state"], "")
         print(f"  {cand['state']:<9} github:{s(cand['full_name']):<40} {s(tail)} — {s(what)}")
+
+
+def _scan_all_row(cand):
+    """Is a candidate --github-scan-all's (queued, pending or excluded, or one it queued and scanned)?"""
+    if cand["state"] in ("queued", "pending", "excluded"):
+        return True
+    first = (cand["filters"] or [""])[0]
+    return isinstance(first, str) and first.startswith("all: ")
 
 
 def _finish_sweep(errors, bad, ci):
@@ -7869,12 +8006,41 @@ def _finish_sweep(errors, bad, ci):
         sys.exit(1)
 
 
+#: `lazaret-registry --help`'s examples
+HELP_EXAMPLES = """examples:
+  scan a release (the registry's latest when no version is given), and store the result:
+    lazaret-registry scan npm:left-pad@1.3.0 pypi:requests crates:serde go:github.com/pkg/errors@v0.9.1
+    lazaret-registry scan openvsx:redhat.vscode-yaml vscode:ms-python.python
+    lazaret-registry scan github:owner/repo@v1.2.0       a repository at a tag, branch or commit (GITHUB_TOKEN)
+    lazaret-registry scan npm:left-pad --full --ci       every rule; exit 1 on SUSPICIOUS or INCOMPLETE
+  watch packages and scan them again when they publish:
+    lazaret-registry add npm:express pypi:django
+    lazaret-registry scan-all --ci
+    lazaret-registry list
+    lazaret-registry report npm:express
+  follow the registries' new releases (a cursor per registry in --db):
+    lazaret-registry discover --since 24h --limit 50
+    lazaret-registry discover --ecosystem npm --ecosystem crates --resume --scan
+  new GitHub repositories (GITHUB_TOKEN, read-only; run it every 15 to 30 minutes):
+    lazaret-registry discover --ecosystem github --resume --scan --db ~/lazaret-registry/github.db
+    lazaret-registry discover --ecosystem github --resume --scan --github-filters filters.json
+    lazaret-registry discover --ecosystem github --resume --github-archive --scan
+    lazaret-registry discover --ecosystem github --resume --github-scan-all --max-scans 50
+
+  The state database is --db (env LAZARET_DB): a SQLite path, by default lazaret-registry.db
+  here, or a postgres:// URL. Exit codes: 0 ok, 1 a failure or (--ci) a SUSPICIOUS or
+  INCOMPLETE result, 2 usage.
+"""
+
+
 def main():
     global SCAN_TIMEOUT, MAX_ARTIFACTS, MAX_PACKAGE_DOWNLOAD_BYTES, MAX_MEMBER, SHOW_SECRETS
     lazaret.configure_stdio()
     ap = argparse.ArgumentParser(prog="lazaret-registry",
                                  description="Lazaret registry scanner: npm, PyPI, Go modules, crates and VS Code "
-                                             "extensions (Open VSX, the Visual Studio Marketplace)")
+                                             "extensions (Open VSX, the Visual Studio Marketplace), and new GitHub "
+                                             "repositories",
+                                 epilog=HELP_EXAMPLES, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--version", action="version",
                     version=f"lazaret-registry {lazaret.VERSION} (engine: {_engine.describe()})")
     ap.add_argument("command", choices=["add", "scan", "scan-all", "list", "report", "discover"])
@@ -7938,6 +8104,17 @@ def main():
     ap.add_argument("--github-filters", metavar="FILE",
                     help='discover --ecosystem github: your own patterns, JSON: {"include": {"full_name": [regex, '
                          '…], "description": […]}, "exclude": {…}}')
+    ap.add_argument("--github-archive", action="store_true",
+                    help="discover --ecosystem github: read GH Archive's hourly files of public events "
+                         "(data.gharchive.org, some 70 MB an hour, no token): a kept repository that got code is "
+                         "ready without a content check, and a repository made public goes through the filters")
+    ap.add_argument("--github-scan-all", action="store_true",
+                    help="discover --ecosystem github: scan every new repository that gets code, not only the ones "
+                         "a filter keeps (reads GH Archive, scans: --github-archive --scan); your excludes and the "
+                         "campaign markers still apply, and --max-scans caps a run's scans")
+    ap.add_argument("--max-scans", type=int, metavar="N",
+                    help="discover --ecosystem github: repositories scanned this run at most (default: as many as "
+                         "--max-calls allows; with --github-scan-all, 100), filter matches first, then the newest")
     ap.add_argument("--scan", action="store_true",
                     help="discover: scan the discovered packages (and track them)")
     ap.add_argument("--add", action="store_true",
@@ -7946,6 +8123,11 @@ def main():
                     help="say on stderr where the time went: the network, reading archives, "
                          "the engine (by call), the rest")
     args = ap.parse_args()
+    github_only = [name for name, on in (("--github-archive", args.github_archive),
+                                         ("--github-scan-all", args.github_scan_all),
+                                         ("--max-scans", args.max_scans is not None)) if on]
+    if github_only and (args.command != "discover" or "github" not in (args.ecosystem or [])):
+        ap.error(f"{', '.join(github_only)}: these go with discover --ecosystem github --resume")
     try:
         _engine.require()
     except _engine.EngineError as exc:

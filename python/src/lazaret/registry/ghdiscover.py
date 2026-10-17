@@ -2,6 +2,7 @@
 every new public repository, filtered; specs/lazaret-github-new-repos-plan-2026-10-14.md).
 
     lazaret-registry discover --ecosystem github --resume [--scan] [--max-calls N] [--github-filters FILE]
+                              [--github-archive] [--github-scan-all [--max-scans N]]
 
 1. List. GitHub's `GET /repositories?since=<id>` gives every public repository in the order it was created, 100 a
    page, paged by the last ID seen. The cursor (discovery_cursors, eco "github") is that ID, stored after each page,
@@ -29,6 +30,22 @@ every new public repository, filtered; specs/lazaret-github-new-repos-plan-2026-
    CRITICAL (core.HARDENING_RULES), as the gate counts them: an unpinned action alone does not make a repository
    WARN. A checkout not read whole counts as a truncated part, so the verdict is INCOMPLETE at best.
 
+GH Archive (--github-archive; GH-SCAN-ALL, 0.1.9, ghevents.py): the hourly files of GitHub's public events, read in
+order from the cursor "gharchive" (the last hour read; the first run starts at the last complete hour), at most
+ARCHIVE_HOURS a run, an hour GH Archive has not published yet waited for (ARCHIVE_GIVE_UP hours after it ended,
+passed over as a gap of GH Archive's, and said so). A push (or a branch or tag created) makes
+a waiting candidate ready without its content check, and a repository made public (PublicEvent: GitHub's listing
+never shows one created private) goes through the filters, its name alone. No request to GitHub.
+
+Every new repository (--github-scan-all, which reads GH Archive and scans): a new repository GH Archive saw get code
+is queued for a scan, when it is newer than the listing's cursor at scan-all's first run (the cursor
+"github-scan-all") and the listing has judged it: a campaign repository is reported and never downloaded, one your
+excludes match is kept as excluded, and one pushed before the listing reached it waits as pending until it does.
+A repository made public is queued too, its name judged. The scans (--max-scans, SCAN_ALL_MAX_SCANS by default) go
+to the filters' ready candidates first, then to the queue newest first; the queue keeps the QUEUE_MAX newest and
+the rest are skipped, counted: some ten thousand repositories are created an hour, more than one token's requests
+can scan, so the run says what share it covered. A repository is scanned once, at the first push seen.
+
 Budgets: --max-calls (DEFAULT_MAX_CALLS) across what is due first (the checks and scans) and then the listing, so a
 listing that has fallen behind does not keep a candidate waiting; and GitHub's: the run stops when
 X-RateLimit-Remaining falls to RATE_FLOOR, or on a rate-limit answer (403 or 429), keeping its cursor and its
@@ -43,7 +60,7 @@ import re
 import time
 import urllib.parse
 
-from lazaret.registry import lookalike, sources
+from lazaret.registry import ghevents, lookalike, sources
 from lazaret.registry import repo as _repo
 from lazaret.scanner import core
 
@@ -58,6 +75,20 @@ CHECK_HOURS = (1, 6, 24, 72)
 DEFAULT_MAX_CALLS = 1000
 #: GitHub requests left unspent: the run stops when X-RateLimit-Remaining falls to this
 RATE_FLOOR = 25
+#: --github-scan-all: scans a run makes unless --max-scans says; the queue's size (the newest kept); how long a
+#: repository pushed before the listing reached it waits for the listing (hours)
+SCAN_ALL_MAX_SCANS = 100
+QUEUE_MAX = 1000
+PENDING_HOURS = 72
+#: GH Archive: hours read a run at most; the cursors (the last hour read; the listing's cursor when scan-all began)
+ARCHIVE_HOURS = 3
+#: an hour still not published this many hours after it ended is passed over (GH Archive has gaps), counted
+ARCHIVE_GIVE_UP = 6
+ARCHIVE_ECO = "gharchive"
+SCAN_ALL_ECO = "github-scan-all"
+#: what a queued repository's `filters` says
+ALL_PUSHED = "all: got code (GH Archive)"
+ALL_PUBLIC = "all: made public (GH Archive)"
 #: the first `since` the newest-repository search tries (it doubles until a page comes back empty)
 FRONTIER_START = 1 << 30
 #: the requests a scan makes at least (the commit, the archive, the tree): a scan starts only with these left
@@ -233,6 +264,22 @@ class Filters:
             return [], None
         return self._lookalike(full) + self._copy(full, desc, item.get("fork")) + self._hits("include", texts), None
 
+    def judged(self, full, desc):
+        """What scan-all asks of a repository GH Archive names: -> ("campaign", the marker's text and the marker),
+        ("excluded", None) or (None, None)."""
+        full, desc = full[:MAX_TEXT], (desc or "")[:MAX_TEXT]
+        marker = self._marker(full.partition("/")[2], desc)
+        if marker:
+            return "campaign", marker
+        if self._hits("exclude", {"full_name": full, "description": desc}):
+            return "excluded", None
+        return None, None
+
+    def excluded(self, item):
+        """Do your excludes match a listed repository (and no campaign marker)?"""
+        desc = item.get("description") if isinstance(item.get("description"), str) else ""
+        return self.judged(item["full_name"], desc)[0] == "excluded"
+
     def _marker(self, name, desc):
         """(the text, the marker) of the campaign marker the name or description is, else None."""
         fields = {"name": _fold(name), "description": _fold(desc)}
@@ -382,13 +429,16 @@ def _scan(store, budget, cand, env, http, out):
         if getattr(exc, "status", None) == 404:
             store.update_github_candidate(cand["repo_id"], state="dropped", last_error="gone or made private")
         else:
-            store.update_github_candidate(cand["repo_id"], last_error=str(exc)[:500])
+            store.update_github_candidate(cand["repo_id"], last_error=str(exc)[:500],
+                                          **_failed_state(cand))
         out["errors"].append(f"github:{cand['full_name']}: {exc}")
         return None
     except Exception as exc:                                        # noqa: BLE001
-        # (one repository the scan fails on never ends the run; it stays ready for the next)
+        # (one repository the scan fails on never ends the run; a filter's stays ready for the next, scan-all's
+        # is dropped: the queue moves on)
         budget.spend(SCAN_CALLS)
-        store.update_github_candidate(cand["repo_id"], last_error=f"{type(exc).__name__}: {exc}"[:500])
+        store.update_github_candidate(cand["repo_id"], last_error=f"{type(exc).__name__}: {exc}"[:500],
+                                      **_failed_state(cand))
         out["errors"].append(f"github:{cand['full_name']}: {type(exc).__name__}: {exc}")
         return None
     budget.spend(calls)
@@ -399,12 +449,151 @@ def _scan(store, budget, cand, env, http, out):
     return res
 
 
+def _failed_state(cand):
+    """A failed scan's state change: scan-all's queued repository is dropped, a filter's candidate stays ready."""
+    return {"state": "dropped"} if cand["state"] == "queued" else {}
+
+
+# ---------------------------------------------------------------- GH Archive (--github-archive, --github-scan-all)
+def _archive(store, filters, scan_all, now, out, http):
+    """The GH Archive hours not read yet (at most ARCHIVE_HOURS, each one complete), applied in order; then
+    scan-all's queue and pending repositories kept within their bounds. A file that cannot be read stops the
+    archive's part of the run (its cursor kept), not the run."""
+    info = out["archive"] = {"hours": [], "events": 0, "pushed": 0, "ready": 0, "public": 0, "next": None,
+                             "unpublished": False, "error": None, "missing": []}
+    if scan_all:
+        out["queue"] = {"queued": 0, "pending": 0, "promoted": 0, "excluded": 0, "skipped": 0, "left": 0,
+                        "since": _scan_all_start(store)}
+    stored = store.discovery_cursor(ARCHIVE_ECO)
+    try:
+        hour = ghevents.parse_hour(stored[0]) + datetime.timedelta(hours=1) if stored else None
+    except ValueError:
+        hour = None
+    if hour is None:                                # (the first run: the last complete hour)
+        hour = now.astimezone(UTC).replace(minute=0, second=0, microsecond=0) - datetime.timedelta(hours=1)
+    listed_to = _listing_cursor(store)
+    for _ in range(ARCHIVE_HOURS):
+        if hour + datetime.timedelta(hours=1) > now:
+            break                                   # (not over yet)
+        try:
+            body = ghevents.fetch(hour, http)
+        except ghevents.ArchiveError as exc:
+            info["error"] = str(exc)
+            out["errors"].append(f"GH Archive: {exc}")
+            break
+        if body is None:
+            if now - (hour + datetime.timedelta(hours=1)) < datetime.timedelta(hours=ARCHIVE_GIVE_UP):
+                info["unpublished"] = True
+                break
+            info["missing"].append(ghevents.hour_name(hour))     # (a gap of GH Archive's: the next hour is read)
+            store.save_discovery_cursor(ARCHIVE_ECO, ghevents.hour_name(hour), hour)
+            hour += datetime.timedelta(hours=1)
+            continue
+        try:
+            events = ghevents.read(body, keep=_keep_push(store, scan_all, out))
+        except ghevents.ArchiveError as exc:
+            info["error"] = f"{ghevents.hour_name(hour)}: {exc}"
+            out["errors"].append(f"GH Archive: {info['error']}")
+            break
+        _apply(store, filters, scan_all, events, listed_to, now, out)
+        store.save_discovery_cursor(ARCHIVE_ECO, ghevents.hour_name(hour), hour)
+        info["hours"].append(ghevents.hour_name(hour))
+        info["events"] += events.events
+        hour += datetime.timedelta(hours=1)
+    info["next"] = ghevents.hour_name(hour)
+    if scan_all:
+        queue = out["queue"]
+        queue["skipped"] += store.prune_github_candidates("queued", keep=QUEUE_MAX)
+        queue["skipped"] += store.prune_github_candidates(
+            "pending", before=_iso(now - datetime.timedelta(hours=PENDING_HOURS)))
+
+
+def _listing_cursor(store):
+    stored = store.discovery_cursor(ECO)
+    return int(stored[0]) if stored and str(stored[0]).isdigit() else None
+
+
+def _scan_all_start(store):
+    """The listing's cursor when scan-all first ran (a repository newer than it is new), stored then."""
+    stored = store.discovery_cursor(SCAN_ALL_ECO)
+    if stored and str(stored[0]).isdigit():
+        return int(stored[0])
+    start = _listing_cursor(store)
+    if start is not None:
+        store.save_discovery_cursor(SCAN_ALL_ECO, start)
+    return start
+
+
+def _keep_push(store, scan_all, out):
+    """Which repositories' pushes an hour keeps: scan-all's new ones and the filters' waiting candidates."""
+    since = out["queue"]["since"] if scan_all and out["queue"] else None
+    waiting = {c["repo_id"] for c in store.github_candidates(states=("waiting",))}
+    return lambda rid: (since is not None and rid > since) or rid in waiting
+
+
+def _apply(store, filters, scan_all, events, listed_to, now, out):
+    """One hour's events: the filters' waiting candidates that got code made ready, the repositories made public
+    through the filters (scan-all: queued), and with scan-all the new repositories that got code queued."""
+    info, queue = out["archive"], out["queue"]
+    states = store.github_candidate_states(set(events.pushed) | set(events.public))
+    for rid, state in states.items():
+        if state == "waiting" and rid in events.pushed:
+            name, at = events.pushed[rid]
+            store.update_github_candidate(rid, state="ready", next_check=None, pushed_at=at, last_error=None)
+            info["ready"] += 1
+    rows = []
+    listed_at = _iso(now)
+    for rid, (name, at) in events.public.items():
+        if rid in states:
+            continue
+        info["public"] += 1
+        if scan_all:
+            _judge(store, filters, rid, name, None, ALL_PUBLIC, "queued", at or listed_at, rows, out)
+            continue
+        item = {"id": rid, "full_name": name, "description": None, "fork": False}
+        matched = filters.match(item)
+        _keep(store, item, matched, at or listed_at, out)
+        if matched[0] and not matched[1] and rid in events.pushed_ids:
+            store.update_github_candidate(rid, state="ready", next_check=None, pushed_at=at)
+    if scan_all and queue["since"] is not None:
+        for rid, (name, at) in events.pushed.items():
+            if rid <= queue["since"] or rid in states or rid in events.public:
+                continue
+            info["pushed"] += 1
+            desc = (events.created.get(rid) or (None, None, None))[1]
+            state = "queued" if listed_to is not None and rid <= listed_to else "pending"
+            _judge(store, filters, rid, name, desc, ALL_PUSHED, state, at or listed_at, rows, out)
+    store.add_github_candidates(rows)
+
+
+def _judge(store, filters, rid, name, desc, why, state, at, rows, out):
+    """A repository scan-all would queue: a campaign marker reports it (never downloaded), your excludes keep it
+    out, anything else is a row of `state` (queued, or pending until the listing reaches it)."""
+    queue = out["queue"]
+    verdict, marker = filters.judged(name, desc)
+    if verdict == "campaign":
+        rows.append((rid, name, desc, False, [marker[0]], at, "reported", None))
+        out["campaigns"].append((name, marker[1], f"https://github.com/{name}"))
+        return
+    if verdict == "excluded":
+        rows.append((rid, name, desc, False, ["excluded by your patterns"], at, "excluded", None))
+        queue["excluded"] += 1
+        return
+    rows.append((rid, name, desc, False, [why], at, state, None))
+    queue[state] += 1
+
+
 # ---------------------------------------------------------------- the run
-def run(store, *, scan=False, max_calls=DEFAULT_MAX_CALLS, filters=None, env=None, http=None, now=None):
+def run(store, *, scan=False, max_calls=DEFAULT_MAX_CALLS, filters=None, env=None, http=None, now=None,
+        archive=False, scan_all=False, max_scans=None, archive_http=None):
     """One `discover --ecosystem github --resume` run. -> a dict: listed, pages, caughtUp, matches (filter kind ->
     count), candidates (full names kept), campaigns ([(full_name, marker, url)]), checked ({state: count}),
     scans (results), errors, stopped (why the run stopped early, or None), cursor (the ID listed up to), first
-    (True on the first run, which only finds where to start). DiscoveryError without GITHUB_TOKEN."""
+    (True on the first run, which only finds where to start), archive (what GH Archive's hours gave, or None), and
+    queue (scan-all's: queued, pending, skipped, left). `archive` reads GH Archive (ghevents; `archive_http` its
+    network seam), `scan_all` makes every new repository that gets code a candidate (it reads GH Archive and
+    scans), `max_scans` caps the run's scans (SCAN_ALL_MAX_SCANS with scan_all). DiscoveryError without
+    GITHUB_TOKEN."""
     env = os.environ if env is None else env
     token = sources._token("github", env)
     if not token:
@@ -414,11 +603,19 @@ def run(store, *, scan=False, max_calls=DEFAULT_MAX_CALLS, filters=None, env=Non
     filters = filters or Filters()
     client = sources.Client("github", token=token, http=http)
     budget = Budget(max_calls)
+    archive, scan = archive or scan_all, scan or scan_all
+    if scan_all and max_scans is None:
+        max_scans = SCAN_ALL_MAX_SCANS
     out = {"listed": 0, "pages": 0, "caughtUp": False, "matches": {}, "candidates": [], "campaigns": [],
-           "checked": {}, "scans": [], "errors": [], "stopped": None, "cursor": None, "first": False}
+           "checked": {}, "scans": [], "errors": [], "stopped": None, "cursor": None, "first": False,
+           "archive": None, "queue": None}
     try:
-        _due_work(store, client, budget, scan, env, http, now, out)
-        _listing(store, client, budget, filters, now, out)
+        _checks(store, client, budget, now, out)
+        if archive:
+            _archive(store, filters, scan_all, now, out, archive_http)
+        if scan:
+            _scans(store, budget, max_scans, env, http, out)
+        _listing(store, client, budget, filters, now, out, scan_all)
     except sources.SourceError as exc:
         if not budget.refused(exc) and budget.stopped is None:
             out["errors"].append(str(exc))
@@ -438,21 +635,62 @@ def _why_stopped(out, budget, max_calls):
     return None
 
 
-def _due_work(store, client, budget, scan, env, http, now, out):
-    """The candidates' due checks, then (with --scan) the ready candidates' scans."""
+def _checks(store, client, budget, now, out):
+    """The candidates' due content checks."""
     for cand in store.github_candidates(states=("waiting",), due_by=_iso(now)):
         if not budget.can():
             return
         state = check(store, client, budget, cand)
         out["checked"][state] = out["checked"].get(state, 0) + 1
-    if not scan:
+
+
+def _scans(store, budget, max_scans, env, http, out):
+    """The scans (--scan): the ready candidates, oldest first, then scan-all's queue, newest first, at most
+    `max_scans` in all."""
+    made = 0
+    queue = out["queue"]
+    for states, newest in ((("ready",), False), (("queued",), True)):
+        limit = None if max_scans is None else max(0, max_scans - made)
+        for cand in store.github_candidates(states=states, newest_first=newest, limit=limit):
+            if (max_scans is not None and made >= max_scans) or not budget.can(SCAN_CALLS):
+                break
+            made += 1
+            res = _scan(store, budget, cand, env, http, out)
+            if res is not None:
+                out["scans"].append(res)
+    if queue is not None:
+        queue["left"] = len(store.github_candidates(states=("queued",), limit=QUEUE_MAX + 1))
+
+
+def _scan_all_listed(store, item, matched, held, filters, listed_at, out):
+    """A listed repository with scan-all on: a pending one (pushed before the listing reached it) is queued,
+    reported or excluded as the listing judges it; one your excludes match is kept as excluded; a filter's match is
+    a candidate, ready at once when GH Archive saw it get code."""
+    found, campaign = matched
+    queue = out["queue"]
+    if held == "pending":
+        if campaign:
+            store.update_github_candidate(item["id"], state="reported", filters=_repo.db_json(found))
+            out["campaigns"].append((item["full_name"], campaign, f"https://github.com/{item['full_name']}"))
+        elif filters.excluded(item):
+            store.update_github_candidate(item["id"], state="excluded",
+                                          filters=_repo.db_json(["excluded by your patterns"]))
+        elif found:
+            store.update_github_candidate(item["id"], state="ready", filters=_repo.db_json(found))
+            out["candidates"].append(item["full_name"])
+        else:
+            store.update_github_candidate(item["id"], state="queued")
+        if queue is not None:
+            queue["promoted"] += 1
         return
-    for cand in store.github_candidates(states=("ready",)):
-        if not budget.can(SCAN_CALLS):
-            return
-        res = _scan(store, budget, cand, env, http, out)
-        if res is not None:
-            out["scans"].append(res)
+    if held is not None:
+        return
+    if not found and filters.excluded(item):
+        desc = item.get("description") if isinstance(item.get("description"), str) else None
+        store.add_github_candidate(item["id"], item["full_name"], desc, item.get("fork"),
+                                   ["excluded by your patterns"], listed_at, "excluded", None)
+        return
+    _keep(store, item, matched, listed_at, out)
 
 
 def _keep(store, item, matched, listed_at, out):
@@ -474,8 +712,10 @@ def _keep(store, item, matched, listed_at, out):
         out["candidates"].append(full)
 
 
-def _listing(store, client, budget, filters, now, out):
-    """New repositories from the cursor on, each page's candidates kept, then the cursor."""
+def _listing(store, client, budget, filters, now, out, scan_all=False):
+    """New repositories from the cursor on, each page's candidates kept, then the cursor. With scan-all, what the
+    listing judges is kept for GH Archive's pushes too: excluded and campaign repositories, and the pending ones
+    (pushed before the listing reached them) queued or reported."""
     stored = store.discovery_cursor(ECO)
     since = int(stored[0]) if stored and str(stored[0]).isdigit() else None
     if since is None:
@@ -493,9 +733,14 @@ def _listing(store, client, budget, filters, now, out):
             out["caughtUp"] = True
             return
         out["pages"] += 1
+        held = store.github_candidate_states(i["id"] for i in page) if scan_all else {}
         for item in page:
             out["listed"] += 1
-            _keep(store, item, filters.match(item), listed_at, out)
+            matched = filters.match(item)
+            if scan_all:
+                _scan_all_listed(store, item, matched, held.get(item["id"]), filters, listed_at, out)
+            else:
+                _keep(store, item, matched, listed_at, out)
         since = max(since, max(i["id"] for i in page))
         store.save_discovery_cursor(ECO, since, now)
         out["cursor"] = since

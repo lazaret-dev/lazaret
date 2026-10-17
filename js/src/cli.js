@@ -79,6 +79,14 @@ Options:
   --version             Print version.
   -h, --help            Show this help.
 
+Examples:
+  lazaret .                              scan this project: lazaret-report.json and .html here
+  lazaret . --ci                         exit 1 when the quality gate fails (CI)
+  lazaret . --deps                       also read node_modules and vendor (supply chain)
+  lazaret . --out-dir reports --no-html  the JSON report alone, in reports/
+  lazaret . --sarif lazaret.sarif        a SARIF report too, for GitHub code scanning
+  lazaret hook                           the staged files: the commit-time gate
+
 A scan with much to read uses worker threads, one per core (at most 8);
 env LAZARET_THREADS sets how many (1: none). The report is the same.
 
