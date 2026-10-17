@@ -301,7 +301,11 @@ rust/
                              workflow.rs (GitHub Actions: the worms' shapes, SC-WORKFLOW-SECRETS
                              and -BACKDOOR, and the hardening checks), exfil.rs (RA-1: a step's
                              script read as the shell reads it, for secrets sent out by name and
-                             credential searches sent: SC-WORKFLOW-EXFIL), gitlab.rs (SC-GITLAB-*),
+                             credential searches sent, SC-WORKFLOW-EXFIL; and whether toJSON(secrets)
+                             reaches a send; exfil/scope.rs requires positive clearance of every reachable
+                             sender/upload and tracks each source through runner hand-offs and job boundaries
+                             (WF-SECRETS-SCOPE: CRITICAL on proof or uncertainty, MAJOR only when cleared)),
+                             gitlab.rs (SC-GITLAB-*),
                              mod.rs (which file is which, the issues of one: `ci_issues`)
     src/taint.rs             project mode's intra-file taint (core.taint_scan, 0.1.9): sources,
                              sinks, sanitizers, guards, scopes, Flask views and route parameters;

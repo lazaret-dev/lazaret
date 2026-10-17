@@ -72,29 +72,29 @@ fn has_event(events: &[PyStr], name: &str) -> bool {
     events.iter().any(|e| pystr::eq(e, name))
 }
 
-/// The worms' first shape in a workflow's text: kind 'secrets' {where, how} (how null when nothing sends them out).
-/// The findings of a workflow are these, then exfil.rs's sends (RA-1), then the backdoor (mod.rs).
+/// Bulk secrets in an environment or executable script, including github-script's code input.
+/// The source findings start with how=null. The scope reader positively clears sends or supplies a
+/// source-specific reason for CRITICAL (proved exposure or analysis uncertainty).
 pub fn findings(p: &Pack, text: &[u32]) -> Vec<Found> {
-    let records = outline::outline(text, false, false);
+    let records = super::exfil::scope::records(text);
     let mut out: Vec<Found> = Vec::new();
-    // every secret handed to a job's environment or a script
-    let mut sends: Option<&'static str> = None;
-    let network = p.re("_WF_NETWORK_RE");
-    for r in &records {
-        if r.key_is("uses") && pystr::starts_with(&r.value, "actions/upload-artifact") {
-            sends = sends.or(Some("an artifact upload"));
-        } else if is_run(r) && network.search(&r.text()).is_some() {
-            sends = sends.or(Some("a network command"));
-        }
-    }
     let secrets = p.re("_WF_SECRETS_RE");
     for r in &records {
-        if r.path_has("with") {
+        let github_script = r.key_is("script")
+            && r.path_ends("with")
+            && steps(&records).iter().any(|(_, rs)| {
+                rs.iter().any(|x| x.line == r.line)
+                    && rs.iter().any(|x| {
+                        x.key_is("uses")
+                            && pystr::starts_with(&pystr::lower(&x.value), "actions/github-script@")
+                    })
+            });
+        if r.path_has("with") && !github_script {
             continue;
         }
         let where_ = if r.path_ends("env") && r.key.is_some() {
             "a job's environment"
-        } else if is_run(r) {
+        } else if is_run(r) || github_script {
             "a script"
         } else {
             continue;
@@ -104,7 +104,7 @@ pub fn findings(p: &Pack, text: &[u32]) -> Vec<Found> {
                 out.push((
                     "secrets",
                     line,
-                    Value::obj(vec![("where", Value::str(where_)), ("how", sends.map(Value::str).unwrap_or(Value::Null))]),
+                    Value::obj(vec![("where", Value::str(where_)), ("how", Value::Null)]),
                 ));
                 break;
             }
@@ -119,7 +119,10 @@ pub fn backdoor(p: &Pack, text: &[u32]) -> Vec<Found> {
     let evs = events(p, &records);
     let names = p.strs("_WF_OUTSIDER_EVENTS");
     let acts = p.strs("_WF_OUTSIDER_ACTS");
-    let outsider = names.iter().zip(acts).find(|(e, _)| evs.iter().any(|x| x == *e));
+    let outsider = names
+        .iter()
+        .zip(acts)
+        .find(|(e, _)| evs.iter().any(|x| x == *e));
     let (event, act) = match outsider {
         Some(x) => x,
         None => return Vec::new(),
@@ -129,7 +132,8 @@ pub fn backdoor(p: &Pack, text: &[u32]) -> Vec<Found> {
         let path = &r.path;
         if path.len() >= 2
             && pystr::eq(&path[0], "jobs")
-            && ((path.len() == 2 && r.key_is("runs-on")) || path.get(2).is_some_and(|x| pystr::eq(x, "runs-on")))
+            && ((path.len() == 2 && r.key_is("runs-on"))
+                || path.get(2).is_some_and(|x| pystr::eq(x, "runs-on")))
             && pystr::contains(&pystr::lower(&r.text()), "self-hosted")
             && !hosted.contains(&path[1])
         {
@@ -148,11 +152,15 @@ pub fn backdoor(p: &Pack, text: &[u32]) -> Vec<Found> {
         {
             continue;
         }
-        if !(r.key_is("run") && path.len() == 4) && !(r.key.is_none() && path.len() == 5 && pystr::eq(&path[4], "run")) {
+        if !(r.key_is("run") && path.len() == 4)
+            && !(r.key.is_none() && path.len() == 5 && pystr::eq(&path[4], "run"))
+        {
             continue;
         }
         for (line, t) in r.lines() {
-            let hit = outline::expressions(&t).into_iter().find_map(|e| untrusted.search(e).map(|m| m.group0().to_vec()));
+            let hit = outline::expressions(&t)
+                .into_iter()
+                .find_map(|e| untrusted.search(e).map(|m| m.group0().to_vec()));
             if let Some(expr) = hit {
                 out.push((
                     "backdoor",
@@ -177,7 +185,11 @@ pub fn backdoor(p: &Pack, text: &[u32]) -> Vec<Found> {
 /// none; None for a local path (`./…`).
 pub fn parse_uses(value: &[u32]) -> Option<(&'static str, PyStr, PyStr, bool)> {
     let v = pystr::strip_chars(value, " \t");
-    if v.is_empty() || pystr::eq(v, ".") || pystr::starts_with(v, "./") || pystr::starts_with(v, "../") {
+    if v.is_empty()
+        || pystr::eq(v, ".")
+        || pystr::starts_with(v, "./")
+        || pystr::starts_with(v, "../")
+    {
         return None;
     }
     if pystr::starts_with(v, "docker://") {
@@ -195,8 +207,17 @@ pub fn parse_uses(value: &[u32]) -> Option<(&'static str, PyStr, PyStr, bool)> {
         Some(k) => (&v[..k], &v[k + 1..], true),
         None => (v, &v[v.len()..], false),
     };
-    let kind = if pystr::contains(name, "/.github/workflows/") { "workflow" } else { "action" };
-    Some((kind, name.to_vec(), if at { ref_.to_vec() } else { Vec::new() }, at && is_hex(ref_, 40)))
+    let kind = if pystr::contains(name, "/.github/workflows/") {
+        "workflow"
+    } else {
+        "action"
+    };
+    Some((
+        kind,
+        name.to_vec(),
+        if at { ref_.to_vec() } else { Vec::new() },
+        at && is_hex(ref_, 40),
+    ))
 }
 
 /// [(line, value)] of every `uses:` of a workflow: a step's, and a job's (a reusable workflow).
@@ -222,7 +243,10 @@ fn tag_like(r: &[u32]) -> bool {
 }
 
 fn in_actions(name: &[u32], names: &[PyStr]) -> bool {
-    names.iter().any(|a| name == a.as_slice() || (name.len() > a.len() && name.starts_with(a) && name[a.len()] == c('/')))
+    names.iter().any(|a| {
+        name == a.as_slice()
+            || (name.len() > a.len() && name.starts_with(a) && name[a.len()] == c('/'))
+    })
 }
 
 /// [(job, its records)]: the steps of every job, in order (records from outline(text, items)).
@@ -230,7 +254,11 @@ pub(super) fn steps(records: &[Rec]) -> Vec<(PyStr, Vec<&Rec>)> {
     let mut out: Vec<(PyStr, Vec<&Rec>)> = Vec::new();
     for r in records {
         let p = &r.path;
-        if p.len() >= 4 && pystr::eq(&p[0], "jobs") && pystr::eq(&p[2], "steps") && pystr::eq(&p[3], "-") {
+        if p.len() >= 4
+            && pystr::eq(&p[0], "jobs")
+            && pystr::eq(&p[2], "steps")
+            && pystr::eq(&p[3], "-")
+        {
             if (p.len() == 4 && r.item) || out.last().map_or(true, |(j, _)| *j != p[1]) {
                 out.push((p[1].clone(), Vec::new()));
             }
@@ -244,7 +272,9 @@ pub(super) fn steps(records: &[Rec]) -> Vec<(PyStr, Vec<&Rec>)> {
 
 /// (value, line) of a step's `uses:`.
 fn step_uses(recs: &[&Rec]) -> Option<(PyStr, usize)> {
-    recs.iter().find(|r| r.key_is("uses") && r.path.len() == 4).map(|r| (r.value.clone(), r.line))
+    recs.iter()
+        .find(|r| r.key_is("uses") && r.path.len() == 4)
+        .map(|r| (r.value.clone(), r.line))
 }
 
 /// input -> (value, line) of a step's `with:` (the first of each).
@@ -263,7 +293,10 @@ fn step_with(recs: &[&Rec]) -> Vec<(PyStr, PyStr, usize)> {
 }
 
 fn with_get<'a>(withs: &'a [(PyStr, PyStr, usize)], key: &str) -> Option<(&'a [u32], usize)> {
-    withs.iter().find(|(k, _, _)| pystr::eq(k, key)).map(|(_, v, l)| (v.as_slice(), *l))
+    withs
+        .iter()
+        .find(|(k, _, _)| pystr::eq(k, key))
+        .map(|(_, v, l)| (v.as_slice(), *l))
 }
 
 /// [(line, text)] of a step's script.
@@ -271,7 +304,9 @@ pub(super) fn step_run_lines(recs: &[&Rec]) -> Vec<(usize, PyStr)> {
     let mut out = Vec::new();
     for r in recs {
         let p = &r.path;
-        if (r.key_is("run") && p.len() == 4) || (r.key.is_none() && p.len() == 5 && pystr::eq(&p[4], "run")) {
+        if (r.key_is("run") && p.len() == 4)
+            || (r.key.is_none() && p.len() == 5 && pystr::eq(&p[4], "run"))
+        {
             out.extend(r.lines());
         }
     }
@@ -289,7 +324,10 @@ struct Grants {
 /// owner (None: the workflow; Some(job)) -> its grants, for the workflow and each job that states some.
 fn permissions(p: &Pack, records: &[Rec]) -> Vec<(Option<PyStr>, Grants)> {
     let mut table: Vec<(Option<PyStr>, Grants)> = Vec::new();
-    fn entry<'a>(table: &'a mut Vec<(Option<PyStr>, Grants)>, owner: Option<PyStr>) -> &'a mut Grants {
+    fn entry<'a>(
+        table: &'a mut Vec<(Option<PyStr>, Grants)>,
+        owner: Option<PyStr>,
+    ) -> &'a mut Grants {
         let k = match table.iter().position(|(o, _)| *o == owner) {
             Some(k) => k,
             None => {
@@ -303,7 +341,11 @@ fn permissions(p: &Pack, records: &[Rec]) -> Vec<(Option<PyStr>, Grants)> {
     for r in records {
         let path = &r.path;
         if r.key_is("permissions") && (path.is_empty() || is_job_path(path)) {
-            let owner = if path.is_empty() { None } else { Some(path[1].clone()) };
+            let owner = if path.is_empty() {
+                None
+            } else {
+                Some(path[1].clone())
+            };
             let e = entry(&mut table, owner);
             e.present = true;
             if pystr::eq(&r.value, "write-all") {
@@ -323,7 +365,11 @@ fn permissions(p: &Pack, records: &[Rec]) -> Vec<(Option<PyStr>, Grants)> {
                 && r.path_ends("permissions")
                 && (path.len() == 1 || (path.len() == 3 && pystr::eq(&path[0], "jobs")))
             {
-                let owner = if path.len() == 1 { None } else { Some(path[1].clone()) };
+                let owner = if path.len() == 1 {
+                    None
+                } else {
+                    Some(path[1].clone())
+                };
                 let e = entry(&mut table, owner);
                 e.scopes.push((key.clone(), r.line));
                 if pystr::eq(key, "id-token") {
@@ -336,11 +382,20 @@ fn permissions(p: &Pack, records: &[Rec]) -> Vec<(Option<PyStr>, Grants)> {
 }
 
 fn grants(table: &[(Option<PyStr>, Grants)], owner: Option<&[u32]>) -> Grants {
-    table.iter().find(|(o, _)| o.as_deref() == owner).map(|(_, g)| g.clone()).unwrap_or_default()
+    table
+        .iter()
+        .find(|(o, _)| o.as_deref() == owner)
+        .map(|(_, g)| g.clone())
+        .unwrap_or_default()
 }
 
 /// Why this workflow is a release (it publishes something), or None.
-fn release_why(p: &Pack, table: &[(Option<PyStr>, Grants)], steps: &[(PyStr, Vec<&Rec>)], events: &[PyStr]) -> Option<PyStr> {
+fn release_why(
+    p: &Pack,
+    table: &[(Option<PyStr>, Grants)],
+    steps: &[(PyStr, Vec<&Rec>)],
+    events: &[PyStr],
+) -> Option<PyStr> {
     if has_event(events, "release") {
         return Some(u("it runs when a release is published"));
     }
@@ -383,14 +438,31 @@ fn cache_of(p: &Pack, recs: &[&Rec]) -> Option<(usize, PyStr, bool)> {
         }
         let (v, line) = with_get(&withs, &pystr::to_string(key)).unwrap_or((&[], use_line));
         if !v.is_empty() && !pystr::eq(v, "false") {
-            return Some((line, pystr::concat(&[&aname, &u(" with "), key, &u(": "), v]), true));
+            return Some((
+                line,
+                pystr::concat(&[&aname, &u(" with "), key, &u(": "), v]),
+                true,
+            ));
         }
         if v.is_empty() && pystr::eq(action, "actions/setup-node") {
-            if !with_get(&withs, "package-manager-cache").is_some_and(|(x, _)| pystr::eq(x, "false")) {
-                return Some((use_line, pystr::concat(&[&aname, &u(" (it may cache unless package-manager-cache: false)")]), false));
+            if !with_get(&withs, "package-manager-cache")
+                .is_some_and(|(x, _)| pystr::eq(x, "false"))
+            {
+                return Some((
+                    use_line,
+                    pystr::concat(&[
+                        &aname,
+                        &u(" (it may cache unless package-manager-cache: false)"),
+                    ]),
+                    false,
+                ));
             }
         } else if v.is_empty() && on.contains(action) {
-            return Some((use_line, pystr::concat(&[&aname, &u(" (it caches unless "), key, &u(": false)")]), false));
+            return Some((
+                use_line,
+                pystr::concat(&[&aname, &u(" (it caches unless "), key, &u(": false)")]),
+                false,
+            ));
         }
         return None;
     }
@@ -409,7 +481,9 @@ pub fn install_command(p: &Pack, text: &[u32]) -> Option<PyStr> {
 
 /// The command in a script line that publishes a release (`npm publish`, `twine upload`), or None.
 pub fn publish_command(p: &Pack, text: &[u32]) -> Option<PyStr> {
-    p.re("_WF_PUBLISH_RE").search(text).and_then(|m| m.group(1).map(|g| g.to_vec()))
+    p.re("_WF_PUBLISH_RE")
+        .search(text)
+        .and_then(|m| m.group(1).map(|g| g.to_vec()))
 }
 
 /// A script line that fetches a script and runs it unread: `curl … | sh`, `bash <(curl …)`, `sh -c "$(curl …)"`,
@@ -427,7 +501,11 @@ pub fn pipe_to_shell(p: &Pack, text: &[u32]) -> Option<PyStr> {
                 if let Some(m) = head.match_(seg) {
                     let interp = m.group(1).unwrap_or(&[]);
                     let low = pystr::lower(interp);
-                    if shells.iter().any(|sh| low.starts_with(sh)) || stdin_only.match_at(seg, m.end() as isize, seg.len() as isize).is_some() {
+                    if shells.iter().any(|sh| low.starts_with(sh))
+                        || stdin_only
+                            .match_at(seg, m.end() as isize, seg.len() as isize)
+                            .is_some()
+                    {
                         return Some(pystr::concat(&[f, &u(" … | "), interp]));
                     }
                 }
@@ -439,7 +517,9 @@ pub fn pipe_to_shell(p: &Pack, text: &[u32]) -> Option<PyStr> {
             }
         }
     }
-    p.re("_WF_FETCHED_ARG_RE").search(text).map(|m| m.group0().to_vec())
+    p.re("_WF_FETCHED_ARG_RE")
+        .search(text)
+        .map(|m| m.group0().to_vec())
 }
 
 /// [(line, text)] with a script's continued lines (`… \`) joined to the line they continue, at its first line.
@@ -472,18 +552,43 @@ pub fn hardening(p: &Pack, text: &[u32]) -> Vec<Found> {
     let records = outline::outline(text, true, false);
     let evs = events(p, &records);
     let steps = steps(&records);
-    let jobs: Vec<PyStr> = records.iter().filter(|r| r.path_is(&["jobs"]) && r.key.is_some()).filter_map(|r| r.key.clone()).collect();
+    let jobs: Vec<PyStr> = records
+        .iter()
+        .filter(|r| r.path_is(&["jobs"]) && r.key.is_some())
+        .filter_map(|r| r.key.clone())
+        .collect();
     let mut out: Vec<Found> = Vec::new();
     // write permissions for every job; or none stated, and jobs that state none
     let table = permissions(p, &records);
     let top = grants(&table, None);
     if let Some((_, line)) = top.scopes.first() {
-        out.push(("perms", *line, Value::obj(vec![("scopes", Value::Arr(top.scopes.iter().map(|(sc, _)| s(sc)).collect()))])));
+        out.push((
+            "perms",
+            *line,
+            Value::obj(vec![(
+                "scopes",
+                Value::Arr(top.scopes.iter().map(|(sc, _)| s(sc)).collect()),
+            )]),
+        ));
     } else if !top.present {
-        let bare: Vec<&PyStr> = jobs.iter().filter(|j| !grants(&table, Some(j)).present).collect();
+        let bare: Vec<&PyStr> = jobs
+            .iter()
+            .filter(|j| !grants(&table, Some(j)).present)
+            .collect();
         if !bare.is_empty() {
-            let where_ = records.iter().find(|r| r.path.is_empty() && r.key_is("jobs")).map(|r| r.line).unwrap_or(1);
-            out.push(("perms-missing", where_, Value::obj(vec![("jobs", Value::Arr(bare.iter().map(|j| s(j)).collect()))])));
+            let where_ = records
+                .iter()
+                .find(|r| r.path.is_empty() && r.key_is("jobs"))
+                .map(|r| r.line)
+                .unwrap_or(1);
+            out.push((
+                "perms-missing",
+                where_,
+                Value::obj(vec![(
+                    "jobs",
+                    Value::Arr(bare.iter().map(|j| s(j)).collect()),
+                )]),
+            ));
         }
     }
     // actions, reusable workflows and images that are not pinned
@@ -502,7 +607,12 @@ pub fn hardening(p: &Pack, text: &[u32]) -> Vec<Found> {
                         ("uses", s(&r.value)),
                         ("kind", Value::str(kind)),
                         ("ref", Value::Str(tag.clone())),
-                        ("first", Value::Bool(kind == "action" && first_party.iter().any(|f| low.starts_with(f)))),
+                        (
+                            "first",
+                            Value::Bool(
+                                kind == "action" && first_party.iter().any(|f| low.starts_with(f)),
+                            ),
+                        ),
                         ("tag", Value::Bool(tag_like(&tag))),
                     ]),
                 ));
@@ -521,7 +631,11 @@ pub fn hardening(p: &Pack, text: &[u32]) -> Vec<Found> {
                         for key in ["ref", "repository"] {
                             let (v, line) = with_get(&withs, key).unwrap_or((&[], 0));
                             if let Some(m) = head.search(v) {
-                                hit = Some((line, pystr::concat(&[&u("with "), &u(key)]), m.group0().to_vec()));
+                                hit = Some((
+                                    line,
+                                    pystr::concat(&[&u("with "), &u(key)]),
+                                    m.group0().to_vec(),
+                                ));
                                 break;
                             }
                         }
@@ -530,7 +644,10 @@ pub fn hardening(p: &Pack, text: &[u32]) -> Vec<Found> {
             }
             if hit.is_none() {
                 for (line, t) in step_run_lines(recs) {
-                    let mut m = p.re("_WF_GH_PR_CHECKOUT_RE").search(&t).map(|m| m.group0().to_vec());
+                    let mut m = p
+                        .re("_WF_GH_PR_CHECKOUT_RE")
+                        .search(&t)
+                        .map(|m| m.group0().to_vec());
                     if m.is_none() && p.re("_WF_PR_CHECKOUT_CMD_RE").search(&t).is_some() {
                         m = head.search(&t).map(|m| m.group0().to_vec());
                     }
@@ -541,7 +658,15 @@ pub fn hardening(p: &Pack, text: &[u32]) -> Vec<Found> {
                 }
             }
             if let Some((line, via, expr)) = hit {
-                out.push(("pr-checkout", line, Value::obj(vec![("job", s(job)), ("via", Value::Str(via)), ("expr", Value::Str(expr))])));
+                out.push((
+                    "pr-checkout",
+                    line,
+                    Value::obj(vec![
+                        ("job", s(job)),
+                        ("via", Value::Str(via)),
+                        ("expr", Value::Str(expr)),
+                    ]),
+                ));
             }
         }
     }
@@ -552,7 +677,12 @@ pub fn hardening(p: &Pack, text: &[u32]) -> Vec<Found> {
                 out.push((
                     "cache",
                     line,
-                    Value::obj(vec![("job", s(job)), ("what", Value::Str(what)), ("explicit", Value::Bool(explicit)), ("why", s(&why))]),
+                    Value::obj(vec![
+                        ("job", s(job)),
+                        ("what", Value::Str(what)),
+                        ("explicit", Value::Bool(explicit)),
+                        ("why", s(&why)),
+                    ]),
                 ));
             }
         }
@@ -560,7 +690,11 @@ pub fn hardening(p: &Pack, text: &[u32]) -> Vec<Found> {
     // a job with an OIDC token that installs dependencies
     for job in &jobs {
         let jg = grants(&table, Some(job));
-        let (grant, source) = if jg.present { (jg.token, "job") } else { (top.token, "workflow") };
+        let (grant, source) = if jg.present {
+            (jg.token, "job")
+        } else {
+            (top.token, "workflow")
+        };
         if grant.is_none() {
             continue;
         }
@@ -577,14 +711,26 @@ pub fn hardening(p: &Pack, text: &[u32]) -> Vec<Found> {
             }
         }
         if let Some((line, cmd)) = hit {
-            out.push(("oidc-install", line, Value::obj(vec![("job", s(job)), ("from", Value::str(source)), ("command", Value::Str(cmd))])));
+            out.push((
+                "oidc-install",
+                line,
+                Value::obj(vec![
+                    ("job", s(job)),
+                    ("from", Value::str(source)),
+                    ("command", Value::Str(cmd)),
+                ]),
+            ));
         }
     }
     // a script fetched and run without being read
     for (job, recs) in &steps {
         for (line, t) in logical_lines(&step_run_lines(recs)) {
             if let Some(found) = pipe_to_shell(p, &t) {
-                out.push(("pipe-to-shell", line, Value::obj(vec![("job", s(job)), ("command", Value::Str(found))])));
+                out.push((
+                    "pipe-to-shell",
+                    line,
+                    Value::obj(vec![("job", s(job)), ("command", Value::Str(found))]),
+                ));
                 break;
             }
         }
@@ -596,7 +742,10 @@ pub fn hardening(p: &Pack, text: &[u32]) -> Vec<Found> {
 // ---------------------------------------------------------------- the rules
 
 fn d_str(d: &Value, key: &str) -> PyStr {
-    d.get(key).and_then(|v| v.as_str()).map(|x| x.to_vec()).unwrap_or_default()
+    d.get(key)
+        .and_then(|v| v.as_str())
+        .map(|x| x.to_vec())
+        .unwrap_or_default()
 }
 
 fn d_bool(d: &Value, key: &str) -> bool {
@@ -604,7 +753,14 @@ fn d_bool(d: &Value, key: &str) -> bool {
 }
 
 fn d_strs(d: &Value, key: &str) -> Vec<PyStr> {
-    d.get(key).and_then(|v| v.as_arr()).map(|a| a.iter().filter_map(|x| x.as_str().map(|y| y.to_vec())).collect()).unwrap_or_default()
+    d.get(key)
+        .and_then(|v| v.as_arr())
+        .map(|a| {
+            a.iter()
+                .filter_map(|x| x.as_str().map(|y| y.to_vec()))
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 fn fill(p: &Pack, name: &str, args: &[(&str, Arg)]) -> RuleText {
@@ -619,10 +775,27 @@ pub fn rule(p: &Pack, kind: &str, d: &Value) -> Option<RuleText> {
     let st = |k: &str| Arg::S(d_str(d, k));
     Some(match kind {
         "secrets" => match d.get("how").and_then(|v| v.as_str()) {
-            Some(how) => fill(p, "_WF_SECRETS_SENT_RULE", &[("where", st("where")), ("how", Arg::S(how.to_vec()))]),
+            Some(how) => fill(
+                p,
+                if pystr::starts_with(how, "cannot") || pystr::starts_with(how, "analysis limit") {
+                    "_WF_SECRETS_UNCLEARED_RULE"
+                } else {
+                    "_WF_SECRETS_SENT_RULE"
+                },
+                &[("where", st("where")), ("how", Arg::S(how.to_vec()))],
+            ),
             None => fill(p, "_WF_SECRETS_HELD_RULE", &[("where", st("where"))]),
         },
-        "backdoor" => fill(p, "_WF_BACKDOOR_RULE", &[("job", st("job")), ("expr", st("expr")), ("event", st("event")), ("act", st("act"))]),
+        "backdoor" => fill(
+            p,
+            "_WF_BACKDOOR_RULE",
+            &[
+                ("job", st("job")),
+                ("expr", st("expr")),
+                ("event", st("event")),
+                ("act", st("act")),
+            ],
+        ),
         "unpinned" => {
             let k = d_str(d, "kind");
             let what = if pystr::eq(&k, "docker") {
@@ -632,27 +805,67 @@ pub fn rule(p: &Pack, kind: &str, d: &Value) -> Option<RuleText> {
             } else {
                 ""
             };
-            let pin = if pystr::eq(&k, "docker") { "a digest" } else { "a full commit SHA" };
-            let mut rule = fill(p, "_WF_UNPINNED_RULE", &[("what", Arg::S(u(what))), ("uses", st("uses")), ("pin", Arg::S(u(pin)))]);
+            let pin = if pystr::eq(&k, "docker") {
+                "a digest"
+            } else {
+                "a full commit SHA"
+            };
+            let mut rule = fill(
+                p,
+                "_WF_UNPINNED_RULE",
+                &[
+                    ("what", Arg::S(u(what))),
+                    ("uses", st("uses")),
+                    ("pin", Arg::S(u(pin))),
+                ],
+            );
             let small = pystr::eq(&k, "action") && d_bool(d, "first") && d_bool(d, "tag");
             rule.sev = u(if small { "MINOR" } else { "MAJOR" });
             rule
         }
-        "pr-checkout" => fill(p, "_WF_PR_CHECKOUT_RULE", &[("job", st("job")), ("via", st("via")), ("expr", st("expr"))]),
+        "pr-checkout" => fill(
+            p,
+            "_WF_PR_CHECKOUT_RULE",
+            &[("job", st("job")), ("via", st("via")), ("expr", st("expr"))],
+        ),
         "cache" => {
-            let mut rule = fill(p, "_WF_CACHE_RULE", &[("job", st("job")), ("what", st("what")), ("why", st("why"))]);
-            rule.sev = u(if d_bool(d, "explicit") { "MAJOR" } else { "MINOR" });
+            let mut rule = fill(
+                p,
+                "_WF_CACHE_RULE",
+                &[("job", st("job")), ("what", st("what")), ("why", st("why"))],
+            );
+            rule.sev = u(if d_bool(d, "explicit") {
+                "MAJOR"
+            } else {
+                "MINOR"
+            });
             rule
         }
         "perms" => {
-            let scopes: Vec<PyStr> =
-                d_strs(d, "scopes").into_iter().map(|x| if pystr::eq(&x, "all") { u("write-all") } else { x }).collect();
+            let scopes: Vec<PyStr> = d_strs(d, "scopes")
+                .into_iter()
+                .map(|x| {
+                    if pystr::eq(&x, "all") {
+                        u("write-all")
+                    } else {
+                        x
+                    }
+                })
+                .collect();
             let refs: Vec<&[u32]> = scopes.iter().map(|x| x.as_slice()).collect();
-            fill(p, "_WF_PERMS_RULE", &[("scopes", Arg::S(pystr::join(&u(", "), &refs)))])
+            fill(
+                p,
+                "_WF_PERMS_RULE",
+                &[("scopes", Arg::S(pystr::join(&u(", "), &refs)))],
+            )
         }
         "perms-missing" => {
             let jobs = d_strs(d, "jobs");
-            let quoted: Vec<PyStr> = jobs.iter().take(3).map(|j| pystr::concat(&[&u("\""), j, &u("\"")])).collect();
+            let quoted: Vec<PyStr> = jobs
+                .iter()
+                .take(3)
+                .map(|j| pystr::concat(&[&u("\""), j, &u("\"")]))
+                .collect();
             let refs: Vec<&[u32]> = quoted.iter().map(|x| x.as_slice()).collect();
             let mut names = pystr::join(&u(", "), &refs);
             if jobs.len() > 3 {
@@ -665,10 +878,26 @@ pub fn rule(p: &Pack, kind: &str, d: &Value) -> Option<RuleText> {
             };
             fill(p, "_WF_PERMS_MISSING_RULE", &[("who", Arg::S(who))])
         }
-        "pipe-to-shell" => fill(p, "_WF_PIPE_SHELL_RULE", &[("job", st("job")), ("command", st("command"))]),
+        "pipe-to-shell" => fill(
+            p,
+            "_WF_PIPE_SHELL_RULE",
+            &[("job", st("job")), ("command", st("command"))],
+        ),
         "oidc-install" => {
-            let source = if pystr::eq(&d_str(d, "from"), "job") { "its own permissions" } else { "the workflow permissions" };
-            fill(p, "_WF_OIDC_INSTALL_RULE", &[("job", st("job")), ("source", Arg::S(u(source))), ("command", st("command"))])
+            let source = if pystr::eq(&d_str(d, "from"), "job") {
+                "its own permissions"
+            } else {
+                "the workflow permissions"
+            };
+            fill(
+                p,
+                "_WF_OIDC_INSTALL_RULE",
+                &[
+                    ("job", st("job")),
+                    ("source", Arg::S(u(source))),
+                    ("command", st("command")),
+                ],
+            )
         }
         _ => return None,
     })

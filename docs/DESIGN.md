@@ -687,6 +687,38 @@ not read. Not read: scripts in other languages (`python -c`, an inline
 `actions/github-script`), a variable handed between steps through
 `$GITHUB_ENV`, a composite action's steps.
 
+Bulk secrets use positive clearance (WF-SECRETS-SCOPE, rule set 2.89.0).
+`ci/exfil/scope.rs` tracks `Content.all` and its originating finding lines.
+Each source stays CRITICAL when it reaches a send, or any reachable send-capable
+step is not fully understood. `_WF_NETWORK_RE` is restored as the starting set;
+opaque inline interpreters, shell evaluation and sending CLIs extend it.
+Unsupported network options and unresolvable paths cannot establish clearance.
+`secrets-sent` and `secrets-uncleared` are internal signals, folded by source line
+into the original finding, with different messages for proof and uncertainty.
+The reader follows static or dynamic GITHUB_ENV names, step GITHUB_OUTPUT values,
+`${{ env.X }}`, and job outputs in needs order. Workflow/job/step overrides remove
+the replaced taint. A job's files never leak into another job. Proven exposure
+wins over an uncertainty reason; loopback sends of the complete object count too.
+Named-secret service exemptions remain unchanged and cannot hide bulk exposure.
+
+Upload matching normalizes dot components and workspace references without merging
+absolute paths with workspace-relative paths. A glob matches its literal prefix;
+`.`/`./`/`./**`/`*`/`**` and a missing path cover the workspace. Flow-form `with`
+is read. Unknown variables and home expansion remain unresolved. `!` exclusions
+are intentionally ignored, so they cannot prove clearance. Unmodeled file copies,
+archives, working directories and control-flow retain uncertainty.
+
+The held-value case, unrelated GETs, unrelated uploads, uploads before a write,
+and a literal jq-selected key used as an Authorization credential stay MAJOR.
+Download-only requests are cleared when they do not carry the complete object.
+`github-script`'s script input is executable and conservatively uncleared;
+ordinary action inputs remain outside this rule. Repository scripts and test
+runners (`python x.py`, `npm test`, `make`) are not opaque senders: their code is
+scanned separately. This is a residual risk: the workflow reader does not model
+arbitrary code inside those programs or arbitrary action implementations.
+The synthetic suite establishes these semantics; the 23,202-file real-world
+measurement and malware benchmark/holdout runs are owed (John).
+
 0.1.8, both engines (and the dashboard for the per-file rules): SC-SELF-PUBLISH
 is three signs in one file — a publish command an exec call runs, an assignment
 to an object's `name`, a package.json write whose arguments name that object

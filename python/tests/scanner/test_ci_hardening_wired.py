@@ -127,7 +127,7 @@ class HardeningInProjectScanTests(unittest.TestCase):
         pack = os.path.join(_support.REPO_ROOT, "rust", "crates", "lazaret-engine", "rules", "lazaret-rules.json")
         with open(pack, encoding="utf-8") as f:
             values = json.load(f)["values"]
-        shapes = {"_WF_SECRETS_SENT_RULE", "_WF_SECRETS_HELD_RULE", "_WF_BACKDOOR_RULE"}
+        shapes = {"_WF_SECRETS_UNCLEARED_RULE", "_WF_SECRETS_SENT_RULE", "_WF_SECRETS_HELD_RULE", "_WF_BACKDOOR_RULE"}
         ids = {v["map"]["id"]["value"] for k, v in values.items()
                if k.startswith(("_WF_", "_GL_")) and k.endswith("_RULE") and k not in shapes}
         ids |= {v["map"]["id"]["value"] for k in ("_AGENT_CONFIG_RISK_RULE", "_AGENT_CONFIG_LISTED_RULE",

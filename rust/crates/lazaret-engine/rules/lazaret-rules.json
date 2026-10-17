@@ -1,6 +1,6 @@
 {
  "format": 1,
- "rule_set": "2.88.0",
+ "rule_set": "2.89.0",
  "source": "lazaret.scanner.core, extracted by scripts/make_rust_tables.py \u2014 do not edit",
  "values": {
   "ALWAYS_PRUNE_DIRS": {
@@ -19287,6 +19287,10 @@
    "flags": "",
    "re": "(?:^|[;&|(]|\\b(?:then|do|else|if|elif|while|until|sudo|time|exec|command)\\s)\\s*(?:[A-Za-z_][A-Za-z0-9_]*=[^\\s;&|()]*\\s+)*((?:npm|pnpm|bun)\\s+publish\\b|yarn\\s+(?:npm\\s+)?publish\\b|twine\\s+upload\\b|uv\\s+publish\\b|poetry\\s+publish\\b|cargo\\s+publish\\b|gh\\s+release\\s+create\\b|docker\\s+push\\b|vsce\\s+publish\\b|ovsx\\s+publish\\b|gem\\s+push\\b|dotnet\\s+nuget\\s+push\\b|helm\\s+push\\b)"
   },
+  "_WF_SCOPE_OUTPUT_RE": {
+   "flags": "",
+   "re": "\\b(steps|needs)\\s*\\.\\s*([\\w-]+)\\s*\\.\\s*outputs\\s*\\.\\s*([\\w-]+)"
+  },
   "_WF_SCRIPT_HEAD_RE": {
    "flags": "i",
    "re": "\\s*(?:sudo\\b(?:\\s+-\\S+)*\\s+)?(?:env\\s+)?(?:[A-Za-z_][A-Za-z0-9_]*=[^\\s;&|()]*\\s+)*(?:[\\w./-]*/)?((?:ba|z|da|k|a|c)?sh|python[0-9.]*|node|perl|ruby|iex|Invoke-Expression|pwsh|powershell)\\b"
@@ -19332,7 +19336,7 @@
      "value": "SC-WORKFLOW-SECRETS"
     },
     "msg": {
-     "value": "The workflow hands every repository secret to {where} and sends data out ({how}): the Shai-Hulud worms planted workflows like this."
+     "value": "The workflow hands every repository secret to {where} and sends that value out ({how})."
     },
     "name": {
      "value": "Workflow hands out every secret"
@@ -19347,7 +19351,35 @@
      "value": "HOTSPOT"
     },
     "why": {
-     "value": "`${{ toJSON(secrets) }}` is every secret of the repository in one value: a job that holds it can leak them all, and a workflow that also sends it out is how the Shai-Hulud worms stole secrets from the repositories they reached (a webhook.site upload, a build artifact)."
+     "value": "The complete secrets object reaches a send, or a send-capable step cannot be fully cleared. Unsupported senders, unresolved paths and unmodeled hand-offs remain CRITICAL; MAJOR requires positive clearance."
+    }
+   }
+  },
+  "_WF_SECRETS_UNCLEARED_RULE": {
+   "map": {
+    "fix": {
+     "value": "Delete the workflow unless you wrote it, then rotate every secret of the repository. A job should get only the secrets it uses, by name (${{ secrets.NAME }})."
+    },
+    "id": {
+     "value": "SC-WORKFLOW-SECRETS"
+    },
+    "msg": {
+     "value": "The workflow hands every repository secret to {where}; the reader cannot rule out exposure ({how})."
+    },
+    "name": {
+     "value": "Workflow hands out every secret"
+    },
+    "ref": {
+     "value": "CWE-200 \u00b7 Supply chain"
+    },
+    "sev": {
+     "value": "CRITICAL"
+    },
+    "type": {
+     "value": "HOTSPOT"
+    },
+    "why": {
+     "value": "The complete secrets object reaches a send, or a send-capable step cannot be fully cleared. Unsupported senders, unresolved paths and unmodeled hand-offs remain CRITICAL; MAJOR requires positive clearance."
     }
    }
   },

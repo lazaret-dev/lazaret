@@ -25,9 +25,43 @@ pub fn kind_of(path: &[u32]) -> Option<&'static str> {
 
 /// A workflow's findings, in the order its issues are made: the worms' shapes (every secret handed out), the
 /// secrets sent out by name and the credential sweeps (RA-1, exfil.rs), then the backdoor.
+///
+/// The bulk-secrets reader reports proved sends and uncleared send-capable steps with their source lines.
+/// Internal signals promote only the originating finding; they never promote an unrelated job's value.
+/// Proven exposure takes precedence over uncertainty when both are found.
 pub fn workflow_findings(p: &Pack, text: &[u32]) -> Vec<workflow::Found> {
     let mut out = workflow::findings(p, text);
-    out.extend(exfil::exfil(p, text));
+    let mut reasons = std::collections::BTreeMap::new();
+    for f in exfil::exfil(p, text) {
+        if f.0 == "secrets-sent" || f.0 == "secrets-uncleared" {
+            let proven = f.0 == "secrets-sent";
+            if let Some(sources) = f.2.get("sources").and_then(|v| v.as_arr()) {
+                for source in sources {
+                    if let Value::Int(line) = source {
+                        let reason = f.2.get("how").cloned().unwrap_or(Value::Null);
+                        let slot = reasons
+                            .entry(*line as usize)
+                            .or_insert((proven, reason.clone()));
+                        if proven {
+                            *slot = (true, reason);
+                        }
+                    }
+                }
+            }
+        } else {
+            out.push(f);
+        }
+    }
+    for f in &mut out {
+        if f.0 == "secrets" {
+            let how = reasons
+                .get(&f.1)
+                .map(|(_, how)| how.clone())
+                .unwrap_or(Value::Null);
+            let where_ = f.2.get("where").cloned().unwrap_or(Value::Null);
+            f.2 = Value::obj(vec![("where", where_), ("how", how)]);
+        }
+    }
     out.extend(workflow::backdoor(p, text));
     out
 }
@@ -52,7 +86,10 @@ pub fn issues(p: &Pack, path: &[u32], text: &[u32]) -> Vec<(usize, RuleText)> {
     let mut out = Vec::new();
     match kind_of(path) {
         Some("workflow") => {
-            for (kind, line, d) in workflow_findings(p, text).into_iter().chain(workflow::hardening(p, text)) {
+            for (kind, line, d) in workflow_findings(p, text)
+                .into_iter()
+                .chain(workflow::hardening(p, text))
+            {
                 if let Some(r) = workflow_rule(p, kind, &d) {
                     out.push((line, r));
                 }

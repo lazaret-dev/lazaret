@@ -28,7 +28,7 @@ class WasmCiParityTests(unittest.TestCase):
         self.check("ci_outline")
 
     def test_workflows_gitlab_files_and_helpers(self):
-        self.check("ci_workflow", "ci_gitlab", "ci_helpers")
+        self.check("ci_workflow", "ci_exfil", "ci_gitlab", "ci_helpers")
 
 
 if __name__ == "__main__":

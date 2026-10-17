@@ -1413,6 +1413,18 @@ aggregate):
 
 ### Fixed
 
+- **WF-SECRETS-SCOPE: bulk secrets require positive clearance (rule set 2.89.0).**
+  SC-WORKFLOW-SECRETS is CRITICAL when the complete secrets value reaches a send, or when a reachable
+  send-capable step cannot be cleared. The old network pattern is retained as a starting set; opaque senders,
+  unmodeled hand-offs and unresolved upload paths do not silently become MAJOR. Sources are tracked separately
+  across environment overrides, files, GITHUB_ENV, step outputs and downstream job outputs. Workspace paths,
+  dot paths, glob prefixes and flow-form upload inputs are handled; named-credential and credential-sweep
+  exemptions no longer hide a bulk-secrets send. Distinct messages explain proved exposure and uncertainty.
+  Unrelated GETs/uploads, uploads before a write and properly shadowed values stay MAJOR. Literal jq key
+  extraction is distinguished from sending the complete object. Repository scripts/test runners remain outside
+  the workflow reader; their own code is scanned separately. Artifact exclusions are ignored conservatively.
+  Verification of the 23,202 workflow files from 6,813 repositories is **owed (John)**, not a measured result.
+  The inert held-value regression passes; the real pipecat result and benchmark/holdout runs remain owed.
 - **The engine's Python parser reports a string it cannot decode where Python does (found by `test_pyparse_native_b`
   when GH-SCAN-ALL's new files changed its seeded mutations).** Python decodes a string's escapes as its parser takes
   the token, before its tokenizer reads the next one; the engine took the token first, so a backslash after the

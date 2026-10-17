@@ -27,17 +27,25 @@ const fn c(ch: char) -> u32 {
 
 const MARK: u32 = 1;
 
-/// What a word, a command's output or a file holds: the secrets in it, and the text of the credential search whose
-/// output it is (if any).
+pub(super) mod scope;
+type Origins = BTreeSet<usize>;
+type AllEnv = BTreeMap<PyStr, Origins>;
+
+/// What a word, a command's output or a file holds: the secrets in it, whether it holds every repository secret
+/// (`toJSON(secrets)`, WF-SECRETS-SCOPE), and the text of the credential search whose output it is (if any).
 #[derive(Clone, Default)]
 struct Content {
     names: BTreeSet<PyStr>,
+    all: bool,
+    sources: Origins,
     search: Option<PyStr>,
 }
 
 impl Content {
     fn join(&mut self, b: &Content) {
         self.names.extend(b.names.iter().cloned());
+        self.all |= b.all;
+        self.sources.extend(b.sources.iter().copied());
         if self.search.is_none() {
             self.search = b.search.clone();
         }
@@ -58,7 +66,15 @@ fn is_letter(ch: u32) -> bool {
 
 /// s with its ASCII letters in lower case.
 fn lower(s: &[u32]) -> PyStr {
-    s.iter().map(|&ch| if (c('A')..=c('Z')).contains(&ch) { ch + 32 } else { ch }).collect()
+    s.iter()
+        .map(|&ch| {
+            if (c('A')..=c('Z')).contains(&ch) {
+                ch + 32
+            } else {
+                ch
+            }
+        })
+        .collect()
 }
 
 fn at(s: &[u32], i: usize, lit: &str) -> bool {
@@ -164,12 +180,20 @@ fn pipelines(line: &[u32]) -> Vec<Vec<PyStr>> {
             break;
         } else if ch == c('|') || ch == c(';') || ch == c('&') {
             let pipe = ch == c('|') && !at(line, i, "||");
-            if ch == c('&') && !at(line, i, "&&") && (at(line, i, "&>") || (i > 0 && any_of(line[i - 1], "<>"))) {
+            if ch == c('&')
+                && !at(line, i, "&&")
+                && (at(line, i, "&>") || (i > 0 && any_of(line[i - 1], "<>")))
+            {
                 i += 1; // a redirection's &: `&>f`, `2>&1`
                 continue;
             }
             cut(line, &mut segs, start, i);
-            i += if at(line, i, "||") || at(line, i, "&&") || at(line, i, "|&") || at(line, i, ";;") { 2 } else { 1 };
+            i += if at(line, i, "||") || at(line, i, "&&") || at(line, i, "|&") || at(line, i, ";;")
+            {
+                2
+            } else {
+                1
+            };
             if !pipe && !segs.is_empty() {
                 out.push(std::mem::take(&mut segs));
             }
@@ -210,7 +234,13 @@ fn words(seg: &[u32]) -> (Vec<PyStr>, Vec<(PyStr, PyStr)>) {
         }
     }
     let n = seg.len();
-    let mut w = W { words: Vec::new(), redirs: Vec::new(), cur: Vec::new(), has: false, pending: None };
+    let mut w = W {
+        words: Vec::new(),
+        redirs: Vec::new(),
+        cur: Vec::new(),
+        has: false,
+        pending: None,
+    };
     let mut i = 0;
     while i < n {
         let ch = seg[i];
@@ -224,7 +254,11 @@ fn words(seg: &[u32]) -> (Vec<PyStr>, Vec<(PyStr, PyStr)>) {
             i = j + 1;
         } else if ch == c('"') {
             let j = group_end(seg, i + 1, c('"'));
-            let inner = if seg[j - 1] == c('"') && j - 1 > i { &seg[i + 1..j - 1] } else { &seg[i + 1..j] };
+            let inner = if seg[j - 1] == c('"') && j - 1 > i {
+                &seg[i + 1..j - 1]
+            } else {
+                &seg[i + 1..j]
+            };
             w.cur.extend_from_slice(inner);
             w.has = true;
             i = j;
@@ -270,7 +304,11 @@ fn words(seg: &[u32]) -> (Vec<PyStr>, Vec<(PyStr, PyStr)>) {
                 i = k;
                 continue;
             }
-            w.pending = if is(&op, &["<", "<<", "<<<", ">", ">>"]) { Some(op.clone()) } else { None };
+            w.pending = if is(&op, &["<", "<<", "<<<", ">", ">>"]) {
+                Some(op.clone())
+            } else {
+                None
+            };
             if pystr::eq(&op, "<<") && k < n && seg[k] == c('-') {
                 k += 1;
             }
@@ -326,7 +364,11 @@ fn command(p: &Pack, words: &[PyStr]) -> Command {
     let mut assigns: Vec<(PyStr, PyStr)> = Vec::new();
     let mut xargs = false;
     let mut i = 0;
-    let done = |name: Option<PyStr>, args: Vec<PyStr>, assigns: Vec<(PyStr, PyStr)>, xargs: bool, shown: PyStr| Command {
+    let done = |name: Option<PyStr>,
+                args: Vec<PyStr>,
+                assigns: Vec<(PyStr, PyStr)>,
+                xargs: bool,
+                shown: PyStr| Command {
         name,
         args,
         assigns,
@@ -342,9 +384,13 @@ fn command(p: &Pack, words: &[PyStr]) -> Command {
         }
         let name = base(w);
         let rest = &words[i + 1..];
-        if is(&name, &["export", "declare", "typeset", "local", "readonly"])
-            && i + 1 < words.len()
-            && rest.iter().all(|x| is_assign(x) || pystr::starts_with(x, "-"))
+        if is(
+            &name,
+            &["export", "declare", "typeset", "local", "readonly"],
+        ) && i + 1 < words.len()
+            && rest
+                .iter()
+                .all(|x| is_assign(x) || pystr::starts_with(x, "-"))
             && rest.iter().any(|x| is_assign(x))
         {
             for x in rest {
@@ -362,7 +408,9 @@ fn command(p: &Pack, words: &[PyStr]) -> Command {
             if pystr::eq(&name, "timeout") && j < words.len() {
                 j += 1; // its duration
             }
-            if j >= words.len() || (pystr::eq(&name, "env") && words[j..].iter().all(|x| is_assign(x))) {
+            if j >= words.len()
+                || (pystr::eq(&name, "env") && words[j..].iter().all(|x| is_assign(x)))
+            {
                 // `env` alone prints the environment
                 return done(Some(name), rest.to_vec(), assigns, xargs, shown(w));
             }
@@ -391,7 +439,7 @@ fn command(p: &Pack, words: &[PyStr]) -> Command {
 /// (-> content, in the order they were first set), the files the job wrote (-> content), and the findings.
 struct Ctx<'p> {
     p: &'p Pack,
-    exprs: Vec<PyStr>,
+    exprs: Vec<(usize, PyStr)>,
     env: BTreeMap<PyStr, BTreeSet<PyStr>>,
     values: BTreeMap<PyStr, Option<PyStr>>,
     local: Vec<(PyStr, Content)>,
@@ -401,6 +449,15 @@ struct Ctx<'p> {
     line: usize,
     found: Vec<Found>,
     depth_max: usize,
+    /// The names of the variables (workflow, job or step `env:`) whose value holds `toJSON(secrets)`: reading one
+    /// gives every repository secret (WF-SECRETS-SCOPE).
+    env_all: AllEnv,
+    outputs: AllEnv,
+    next_env: AllEnv,
+    next_outputs: AllEnv,
+    uncertain: Content,
+    cwd_unknown: bool,
+    source_lines: std::rc::Rc<BTreeMap<usize, usize>>,
 }
 
 impl<'p> Ctx<'p> {
@@ -431,7 +488,7 @@ impl<'p> Ctx<'p> {
     fn expr_names(&self, k: usize) -> BTreeSet<PyStr> {
         let mut names = BTreeSet::new();
         let e = match self.exprs.get(k) {
-            Some(e) => e,
+            Some((_, e)) => e,
             None => return names,
         };
         names.extend(secret_names(self.p, e));
@@ -447,7 +504,29 @@ impl<'p> Ctx<'p> {
         if let Some(&k) = self.local_at.get(name) {
             return self.local[k].1.clone();
         }
-        Content { names: self.env.get(name).cloned().unwrap_or_default(), search: None }
+        Content {
+            names: self.env.get(name).cloned().unwrap_or_default(),
+            all: self.env_all.contains_key(name) || self.env_all.contains_key(&u("*")),
+            sources: self
+                .env_all
+                .get(name)
+                .into_iter()
+                .chain(self.env_all.get(&u("*")))
+                .flatten()
+                .copied()
+                .collect(),
+            search: None,
+        }
+    }
+
+    /// Origins of a bulk-secrets expression, including env and runner-output hand-offs.
+    fn expr_sources(&self, k: usize) -> Origins {
+        self.exprs
+            .get(k)
+            .map(|(line, e)| {
+                scope::expression_sources(self.p, e, *line, &self.env_all, &self.outputs)
+            })
+            .unwrap_or_default()
     }
 
     /// What a dump of the environment holds: every secret of it, and the script's variables.
@@ -456,6 +535,9 @@ impl<'p> Ctx<'p> {
         for set in self.env.values() {
             out.names.extend(set.iter().cloned());
         }
+        // a variable of the environment holds every secret (toJSON(secrets)), so a dump of it does too
+        out.all = !self.env_all.is_empty();
+        out.sources.extend(self.env_all.values().flatten().copied());
         for (_, v) in &self.local {
             out.join(v);
         }
@@ -464,22 +546,37 @@ impl<'p> Ctx<'p> {
 
     fn restore(&self, text: &[u32]) -> PyStr {
         self.p.re("_WFX_MARK_RE").sub_fn(text, 0, |m| {
-            let k = m.group(1).and_then(pystr::int_of_digits).map(|k| k as usize);
+            let k = m
+                .group(1)
+                .and_then(pystr::int_of_digits)
+                .map(|k| k as usize);
             match k.and_then(|k| self.exprs.get(k)) {
-                Some(e) => pystr::concat(&[&u("${{"), e, &u("}}")]),
+                Some((_, e)) => pystr::concat(&[&u("${{"), e, &u("}}")]),
                 None => m.group0().to_vec(),
             }
         })
     }
 
     fn file(&self, path: &[u32]) -> Content {
-        let path = if pystr::starts_with(path, "./") { &path[2..] } else { path };
-        self.files.get(path).cloned().unwrap_or_default()
+        let restored = self.restore(path);
+        scope::normal_path(&restored)
+            .and_then(|p| self.files.get(&p).cloned())
+            .unwrap_or_default()
     }
 
     fn set_file(&mut self, path: &[u32], value: &Content, append: bool) {
-        let path = if pystr::starts_with(path, "./") { &path[2..] } else { path };
-        let slot = self.files.entry(path.to_vec()).or_default();
+        let path = self.restore(path);
+        if scope::runner_file(&path).is_some() {
+            return;
+        }
+        let Some(path) = scope::normal_path(&path) else {
+            self.uncertain.join(value);
+            return;
+        };
+        if self.cwd_unknown {
+            self.uncertain.join(value);
+        }
+        let slot = self.files.entry(path).or_default();
         if append {
             slot.join(value);
         } else {
@@ -490,11 +587,17 @@ impl<'p> Ctx<'p> {
 
 /// The name of a `secrets.NAME` / `secrets['NAME']` / `env.NAME` match (whichever group took part).
 fn first_group<'s>(m: &crate::pyre::Match<'s>) -> &'s [u32] {
-    m.group(1).or_else(|| m.group(2)).or_else(|| m.group(3)).unwrap_or(&[])
+    m.group(1)
+        .or_else(|| m.group(2))
+        .or_else(|| m.group(3))
+        .unwrap_or(&[])
 }
 
 fn secret_names(p: &Pack, e: &[u32]) -> Vec<PyStr> {
-    p.re("_WFX_SECRET_NAME_RE").finditer(e).map(|m| first_group(&m).to_vec()).collect()
+    p.re("_WFX_SECRET_NAME_RE")
+        .finditer(e)
+        .map(|m| first_group(&m).to_vec())
+        .collect()
 }
 
 /// The secrets (and a credential search's output) a word holds: its expressions, the variables it reads, the output
@@ -502,42 +605,80 @@ fn secret_names(p: &Pack, e: &[u32]) -> Vec<PyStr> {
 fn content(word: &[u32], ctx: &mut Ctx, depth: usize) -> Content {
     let p = ctx.p;
     let mut out = Content::default();
+    // Keep RA-1's conservative named-secret reading, including references beyond the substitution budget.
     for m in p.re("_WFX_MARK_RE").finditer(word) {
         if let Some(k) = m.group(1).and_then(pystr::int_of_digits) {
             out.names.extend(ctx.expr_names(k as usize));
         }
     }
     for m in p.re("_WFX_VAR_RE").finditer(word) {
-        let v = ctx.var(first_group(&m));
-        out.join(&v);
+        out.names.extend(ctx.var(first_group(&m)).names);
     }
-    if pystr::contains(word, "$(") || word.contains(&c('`')) {
-        let n = word.len();
-        let mut i = 0;
-        while i < n {
-            if at(word, i, "$(") {
-                let j = group_end(word, i + 2, c('('));
-                let inner = if word[j - 1] == c(')') && j - 1 >= i + 2 { &word[i + 2..j - 1] } else { &word[i + 2..j] };
-                let got = eval(inner, ctx, depth + 1, None);
-                out.join(&got);
-                i = j;
-            } else if word[i] == c('`') {
-                let j = find(word, c('`'), i + 1).unwrap_or(n);
-                let got = eval(&word[i + 1..j], ctx, depth + 1, None);
-                out.join(&got);
-                i = j + 1;
+    // References inside a substitution contribute its RESULT, not its unfiltered input.
+    let mut surface = Vec::new();
+    let (mut i, mut start) = (0, 0);
+    while i < word.len() {
+        let substitution = if at(word, i, "$(") {
+            let end = group_end(word, i + 2, c('('));
+            let close = if word.get(end.wrapping_sub(1)) == Some(&c(')')) {
+                end - 1
             } else {
-                i += 1;
-            }
+                end
+            };
+            Some((i + 2, close, end))
+        } else if word[i] == c('`') {
+            let end = find(word, c('`'), i + 1).unwrap_or(word.len());
+            Some((i + 1, end, (end + 1).min(word.len())))
+        } else {
+            None
+        };
+        if let Some((a, b, end)) = substitution {
+            surface.extend_from_slice(&word[start..i]);
+            out.join(&eval(&word[a..b], ctx, depth + 1, None));
+            i = end;
+            start = end;
+        } else {
+            i += 1;
         }
+    }
+    surface.extend_from_slice(&word[start..]);
+    for m in p.re("_WFX_MARK_RE").finditer(&surface) {
+        if let Some(k) = m.group(1).and_then(pystr::int_of_digits) {
+            out.names.extend(ctx.expr_names(k as usize));
+            let sources = ctx.expr_sources(k as usize);
+            out.all |= !sources.is_empty();
+            out.sources.extend(sources);
+        }
+    }
+    for m in p.re("_WFX_VAR_RE").finditer(&surface) {
+        out.join(&ctx.var(first_group(&m)));
     }
     out
 }
 
 /// Read a line of a script (or a substitution's text): the findings of its sends go to ctx; -> the content of what
 /// its last command writes to its output.
-fn eval(text: &[u32], ctx: &mut Ctx, depth: usize, mut heredocs: Option<&mut Vec<Content>>) -> Content {
+fn eval(
+    text: &[u32],
+    ctx: &mut Ctx,
+    depth: usize,
+    mut heredocs: Option<&mut Vec<Content>>,
+) -> Content {
     if depth > ctx.depth_max {
+        let mut reachable = scope::reachable(ctx);
+        for m in ctx.p.re("_WFX_MARK_RE").finditer(text) {
+            if let Some(k) = m.group(1).and_then(pystr::int_of_digits) {
+                reachable.sources.extend(ctx.expr_sources(k as usize));
+            }
+        }
+        reachable.all |= !reachable.sources.is_empty();
+        ctx.uncertain.join(&reachable);
+        scope::signal(
+            ctx,
+            &reachable,
+            "secrets-uncleared",
+            "analysis limit prevents clearance",
+        );
         return Content::default();
     }
     let mut last = Content::default();
@@ -550,12 +691,20 @@ fn eval(text: &[u32], ctx: &mut Ctx, depth: usize, mut heredocs: Option<&mut Vec
 /// The text of a search for credentials this command is (a grep of credential patterns, `git log -p`), or None.
 fn sweep_of(name: &[u32], args: &[PyStr], seg: &[u32], ctx: &Ctx) -> Option<PyStr> {
     let first_is = |w: &str| args.first().is_some_and(|a| pystr::eq(a, w));
-    if pystr::eq(name, "git") && first_is("log") && args.iter().any(|a| is(a, &["-p", "--patch", "-u"])) {
+    if pystr::eq(name, "git")
+        && first_is("log")
+        && args.iter().any(|a| is(a, &["-p", "--patch", "-u"]))
+    {
         return Some(ctx.restore(seg));
     }
     if has(ctx.p.strs("_WFX_GREPS"), name) || (pystr::eq(name, "git") && first_is("grep")) {
         let refs: Vec<&[u32]> = args.iter().map(|a| a.as_slice()).collect();
-        if ctx.p.re("_WFX_CRED_PATTERN_RE").search(&pystr::join(&u(" "), &refs)).is_some() {
+        if ctx
+            .p
+            .re("_WFX_CRED_PATTERN_RE")
+            .search(&pystr::join(&u(" "), &refs))
+            .is_some()
+        {
             return Some(ctx.restore(seg));
         }
     }
@@ -570,13 +719,23 @@ fn is_dump(name: &[u32], args: &[PyStr]) -> bool {
     if is(name, &["set", "export", "declare", "typeset"]) {
         return args.iter().all(|a| is(a, &["-p", "-x", "-px", "-xp"]));
     }
-    if is(name, &["get-childitem", "gci", "dir", "ls", "get-item", "gi"]) {
-        return args.iter().any(|a| pystr::eq(pystr::rstrip_chars(&lower(a), "\\/*"), "env:"));
+    if is(
+        name,
+        &["get-childitem", "gci", "dir", "ls", "get-item", "gi"],
+    ) {
+        return args
+            .iter()
+            .any(|a| pystr::eq(pystr::rstrip_chars(&lower(a), "\\/*"), "env:"));
     }
     false
 }
 
-fn pipeline(segs: &[PyStr], ctx: &mut Ctx, depth: usize, mut heredocs: Option<&mut Vec<Content>>) -> Content {
+fn pipeline(
+    segs: &[PyStr],
+    ctx: &mut Ctx,
+    depth: usize,
+    mut heredocs: Option<&mut Vec<Content>>,
+) -> Content {
     let p = ctx.p;
     let mut inp = Content::default();
     for seg in segs {
@@ -631,15 +790,36 @@ fn pipeline(segs: &[PyStr], ctx: &mut Ctx, depth: usize, mut heredocs: Option<&m
             own.join(&ctx.everything());
         }
         if let Some(search) = sweep_of(&name, &args, seg, ctx) {
-            own.join(&Content { names: BTreeSet::new(), search: Some(search) });
+            own.join(&Content {
+                names: BTreeSet::new(),
+                all: false,
+                sources: Origins::new(),
+                search: Some(search),
+            });
         }
-        if is(&name, &["cat", "type", "get-content", "gc", "base64", "xxd", "gzip", "head", "tail"]) {
+        if is(
+            &name,
+            &[
+                "cat",
+                "type",
+                "get-content",
+                "gc",
+                "base64",
+                "xxd",
+                "gzip",
+                "head",
+                "tail",
+            ],
+        ) {
             for a in &args {
                 if !pystr::starts_with(a, "-") {
                     own.join(&ctx.file(a));
                 }
             }
         }
+        let mut available = own.clone();
+        available.join(&stdin);
+        scope::command_scope(&name, &args, seg, &available, ctx);
         if has(p.strs("_WFX_SENDERS"), &name) {
             send(&name, &cmd.shown, &args, &stdin, cmd.xargs, ctx, depth);
             stdin = Content::default(); // what comes out is the answer
@@ -647,6 +827,25 @@ fn pipeline(segs: &[PyStr], ctx: &mut Ctx, depth: usize, mut heredocs: Option<&m
         }
         let mut out = stdin;
         out.join(&own);
+        // A literal jq field selector yields one key, not the complete secrets object.
+        if pystr::eq(&name, "jq")
+            && args.iter().filter(|a| !pystr::starts_with(a, "-")).count() == 1
+        {
+            if let Some(key) = args.iter().find(|a| !pystr::starts_with(a, "-")) {
+                if key.len() > 1
+                    && key[0] == c('.')
+                    && key[1..]
+                        .iter()
+                        .all(|ch| is_letter(*ch) || is_digit(*ch) || *ch == c('_'))
+                {
+                    if out.all {
+                        out.names.insert(key[1..].to_vec());
+                    }
+                    out.all = false;
+                    out.sources.clear();
+                }
+            }
+        }
         for (op, target) in &redirs {
             if !is(op, &[">", ">>"]) {
                 continue;
@@ -656,16 +855,34 @@ fn pipeline(segs: &[PyStr], ctx: &mut Ctx, depth: usize, mut heredocs: Option<&m
                 let raw: PyStr = parts.get(3).map(|x| x.to_vec()).unwrap_or_default();
                 let host = lower(&raw);
                 let secret = !content(&raw, ctx, depth).names.is_empty();
+                if out.all {
+                    scope::signal(ctx, &out, "secrets-sent", "a network command");
+                }
                 if secret {
                     // an address the repository keeps secret
                 } else if host.contains(&MARK) || host.contains(&c('$')) {
                     let to = ctx.restore(target);
-                    report(ctx, &out, &u("a redirection"), &[], Some("socket"), Some(to));
+                    report(
+                        ctx,
+                        &out,
+                        &u("a redirection"),
+                        &[],
+                        Some("socket"),
+                        Some(to),
+                    );
                 } else if !(!host.is_empty() && local_host(p, &host)) {
                     let to = ctx.restore(target);
-                    report(ctx, &out, &u("a redirection"), &host, Some("socket"), Some(to));
+                    report(
+                        ctx,
+                        &out,
+                        &u("a redirection"),
+                        &host,
+                        Some("socket"),
+                        Some(to),
+                    );
                 }
             } else {
+                scope::handoff(target, &args, &out, ctx);
                 ctx.set_file(target, &out, pystr::eq(op, ">>"));
             }
         }
@@ -673,6 +890,7 @@ fn pipeline(segs: &[PyStr], ctx: &mut Ctx, depth: usize, mut heredocs: Option<&m
             let append = args.iter().any(|a| is(a, &["-a", "--append"]));
             for a in &args {
                 if !pystr::starts_with(a, "-") {
+                    scope::handoff(a, &[], &out, ctx);
                     ctx.set_file(a, &out, append);
                 }
             }
@@ -735,7 +953,12 @@ fn local_host(p: &Pack, host: &[u32]) -> bool {
         return true;
     }
     if let Some([a, b, _, _]) = ipv4(p, host) {
-        return a == 0 || a == 10 || a == 127 || (a == 172 && (16..=31).contains(&b)) || (a == 192 && b == 168) || (a == 169 && b == 254);
+        return a == 0
+            || a == 10
+            || a == 127
+            || (a == 172 && (16..=31).contains(&b))
+            || (a == 192 && b == 168)
+            || (a == 169 && b == 254);
     }
     !host.contains(&c('.')) && !pystr::starts_with(host, "[")
 }
@@ -761,7 +984,8 @@ fn for_service(p: &Pack, secret: &[u32], host: &[u32]) -> bool {
     for word in low.split(|&ch| !word_char(ch)) {
         if word.len() >= 4
             && !has(generic, word)
-            && (pystr::find(host, word, 0).is_some() || labels.iter().any(|x| pystr::find(word, x, 0).is_some()))
+            && (pystr::find(host, word, 0).is_some()
+                || labels.iter().any(|x| pystr::find(word, x, 0).is_some()))
         {
             return true;
         }
@@ -781,8 +1005,18 @@ fn short(text: &[u32], n: usize) -> PyStr {
 
 /// A send of `sent` (content) to `host` (empty when not known; never the runner's own): a finding when it carries a
 /// credential search's output or secrets.
-fn report(ctx: &mut Ctx, sent: &Content, how: &[u32], host: &[u32], plain: Option<&str>, to: Option<PyStr>) {
+fn report(
+    ctx: &mut Ctx,
+    sent: &Content,
+    how: &[u32],
+    host: &[u32],
+    plain: Option<&str>,
+    to: Option<PyStr>,
+) {
     let raw = !host.is_empty() && raw_ip(ctx.p, host);
+    if sent.all {
+        scope::signal(ctx, sent, "secrets-sent", "a network command");
+    }
     if let Some(search) = &sent.search {
         let d = Value::obj(vec![
             ("job", Value::Str(ctx.job.clone())),
@@ -806,7 +1040,10 @@ fn report(ctx: &mut Ctx, sent: &Content, how: &[u32], host: &[u32], plain: Optio
     };
     let d = Value::obj(vec![
         ("job", Value::Str(ctx.job.clone())),
-        ("names", Value::Arr(names.into_iter().map(|n| Value::Str(n.clone())).collect())),
+        (
+            "names",
+            Value::Arr(names.into_iter().map(|n| Value::Str(n.clone())).collect()),
+        ),
         ("how", Value::Str(how.to_vec())),
         ("to", to),
         ("plain", plain.map(Value::str).unwrap_or(Value::Null)),
@@ -896,7 +1133,11 @@ fn header_content(value: &[u32], ctx: &mut Ctx, depth: usize) -> Content {
 
 /// [(option, value)] of a command's arguments, curl's and wget's way: (None, word) for a positional word; a short
 /// option's value attached or the next word; `--name=value` or `--name value`.
-fn options(args: &[PyStr], short_value: &[u32], long_value: &[PyStr]) -> Vec<(Option<PyStr>, Option<PyStr>)> {
+fn options(
+    args: &[PyStr],
+    short_value: &[u32],
+    long_value: &[PyStr],
+) -> Vec<(Option<PyStr>, Option<PyStr>)> {
     let mut out = Vec::new();
     let mut i = 0;
     while i < args.len() {
@@ -974,7 +1215,15 @@ fn place_dest(dest: &mut Option<PyStr>, items: &mut Vec<Item>, value: PyStr) {
 /// A command that sends data out: what it sends, to where, reported (`how`: its name as written). What it sends is
 /// gathered first; then read once the address is known (a body's credentials are not counted when it goes over
 /// https to a named host).
-fn send(name: &[u32], how: &[u32], args: &[PyStr], stdin: &Content, xargs: bool, ctx: &mut Ctx, depth: usize) {
+fn send(
+    name: &[u32],
+    how: &[u32],
+    args: &[PyStr],
+    stdin: &Content,
+    xargs: bool,
+    ctx: &mut Ctx,
+    depth: usize,
+) {
     let p = ctx.p;
     let mut items: Vec<Item> = Vec::new();
     if xargs {
@@ -983,12 +1232,26 @@ fn send(name: &[u32], how: &[u32], args: &[PyStr], stdin: &Content, xargs: bool,
     let mut dest: Option<PyStr> = None;
     let mut plain: Option<&str> = None;
     let mut shown_as: Option<PyStr> = None;
-    let web = is(name, &["curl", "wget", "invoke-webrequest", "iwr", "invoke-restmethod", "irm"]);
+    let web = is(
+        name,
+        &[
+            "curl",
+            "wget",
+            "invoke-webrequest",
+            "iwr",
+            "invoke-restmethod",
+            "irm",
+        ],
+    );
     let socket = is(name, &["nc", "ncat", "netcat", "socat"]);
     if pystr::eq(name, "curl") {
         let header = p.strs("_WFX_CURL_HEADER");
         let body = p.strs("_WFX_CURL_BODY");
-        for (opt, value) in options(args, &p.text("_WFX_CURL_SHORT_VALUE"), p.strs("_WFX_CURL_LONG_VALUE")) {
+        for (opt, value) in options(
+            args,
+            &p.text("_WFX_CURL_SHORT_VALUE"),
+            p.strs("_WFX_CURL_LONG_VALUE"),
+        ) {
             let value = match value {
                 Some(v) => v,
                 None => continue,
@@ -997,7 +1260,16 @@ fn send(name: &[u32], how: &[u32], args: &[PyStr], stdin: &Content, xargs: bool,
             if opt.is_none() || opt_is(&["url"]) {
                 place_dest(&mut dest, &mut items, value);
             } else if opt.as_deref().is_some_and(|o| has(header, o)) {
-                items.push(Item::Header(value));
+                items.push(if pystr::starts_with(&value, "@") {
+                    Item::File(value[1..].to_vec())
+                } else {
+                    Item::Header(value)
+                });
+            } else if opt_is(&["u", "user", "oauth2-bearer"]) {
+                items.push(Item::Header(pystr::concat(&[
+                    &u("Authorization: "),
+                    &value,
+                ])));
             } else if opt_is(&["url-query"]) {
                 items.push(Item::Query(pystr::concat(&[&u("?"), &value])));
             } else if opt_is(&["F", "form", "form-string"]) {
@@ -1006,7 +1278,9 @@ fn send(name: &[u32], how: &[u32], args: &[PyStr], stdin: &Content, xargs: bool,
                     None => &value[..],
                 };
                 let v = partition(after, c(';')).0;
-                if (pystr::starts_with(v, "@") || pystr::starts_with(v, "<")) && !opt_is(&["form-string"]) {
+                if (pystr::starts_with(v, "@") || pystr::starts_with(v, "<"))
+                    && !opt_is(&["form-string"])
+                {
                     items.push(file_or_stdin(&v[1..], &["-"]));
                 } else {
                     items.push(Item::Body(value));
@@ -1027,7 +1301,11 @@ fn send(name: &[u32], how: &[u32], args: &[PyStr], stdin: &Content, xargs: bool,
             }
         }
     } else if pystr::eq(name, "wget") {
-        for (opt, value) in options(args, &p.text("_WFX_WGET_SHORT_VALUE"), p.strs("_WFX_WGET_LONG_VALUE")) {
+        for (opt, value) in options(
+            args,
+            &p.text("_WFX_WGET_SHORT_VALUE"),
+            p.strs("_WFX_WGET_LONG_VALUE"),
+        ) {
             let value = match value {
                 Some(v) => v,
                 None => continue,
@@ -1043,7 +1321,10 @@ fn send(name: &[u32], how: &[u32], args: &[PyStr], stdin: &Content, xargs: bool,
                 items.push(Item::Body(value));
             }
         }
-    } else if is(name, &["invoke-webrequest", "iwr", "invoke-restmethod", "irm"]) {
+    } else if is(
+        name,
+        &["invoke-webrequest", "iwr", "invoke-restmethod", "irm"],
+    ) {
         let switches = p.strs("_WFX_PS_SWITCHES");
         let mut i = 0;
         while i < args.len() {
@@ -1080,7 +1361,9 @@ fn send(name: &[u32], how: &[u32], args: &[PyStr], stdin: &Content, xargs: bool,
                 } else if pystr::eq(&param, "infile") {
                     items.push(Item::File(value));
                 }
-            } else if dest.as_ref().map_or(true, |d| pystr::contains(a, "://") && !pystr::contains(d, "://")) {
+            } else if dest.as_ref().map_or(true, |d| {
+                pystr::contains(a, "://") && !pystr::contains(d, "://")
+            }) {
                 dest = Some(a.clone());
             }
         }
@@ -1088,12 +1371,20 @@ fn send(name: &[u32], how: &[u32], args: &[PyStr], stdin: &Content, xargs: bool,
         let nc_value = p.strs("_WFX_NC_VALUE");
         let listens = args.iter().any(|a| {
             is(a, &["-l", "--listen"])
-                || (pystr::starts_with(a, "-") && !pystr::starts_with(a, "--") && a[1..].contains(&c('l')) && !has(nc_value, a))
+                || (pystr::starts_with(a, "-")
+                    && !pystr::starts_with(a, "--")
+                    && a[1..].contains(&c('l'))
+                    && !has(nc_value, a))
         });
         if listens {
+            scope::signal(ctx, stdin, "secrets-uncleared", "cannot clear a listening socket");
             return;
         }
-        plain = if args.iter().any(|a| pystr::eq(a, "--ssl")) { None } else { Some("socket") };
+        plain = if args.iter().any(|a| pystr::eq(a, "--ssl")) {
+            None
+        } else {
+            Some("socket")
+        };
         items.push(Item::Stdin);
         let mut pos: Vec<&[u32]> = Vec::new();
         let mut i = 0;
@@ -1119,12 +1410,19 @@ fn send(name: &[u32], how: &[u32], args: &[PyStr], stdin: &Content, xargs: bool,
                 continue;
             }
             let la = lower(a);
-            if pystr::eq(a, "-") || pystr::starts_with(&la, "stdin") || pystr::starts_with(&la, "stdio") {
+            if pystr::eq(a, "-")
+                || pystr::starts_with(&la, "stdin")
+                || pystr::starts_with(&la, "stdio")
+            {
                 items.push(Item::Stdin);
             }
             if target.is_none() {
                 if let Some(m) = addr.match_(a) {
-                    target = Some((m.group(1).unwrap_or(&[]).to_vec(), m.group(2).unwrap_or(&[]).to_vec(), a.clone()));
+                    target = Some((
+                        m.group(1).unwrap_or(&[]).to_vec(),
+                        m.group(2).unwrap_or(&[]).to_vec(),
+                        a.clone(),
+                    ));
                 }
             }
         }
@@ -1135,37 +1433,64 @@ fn send(name: &[u32], how: &[u32], args: &[PyStr], stdin: &Content, xargs: bool,
         dest = Some(host);
         shown_as = Some(whole);
         let lk = lower(&kind);
-        plain = if pystr::starts_with(&lk, "openssl") || pystr::starts_with(&lk, "ssl") { None } else { Some("socket") };
+        plain = if pystr::starts_with(&lk, "openssl") || pystr::starts_with(&lk, "ssl") {
+            None
+        } else {
+            Some("socket")
+        };
     }
+    let mut exempt_names = false;
     let (scheme, host) = match &dest {
         None => (Vec::new(), Vec::new()),
         Some(d) => {
             let (scheme, host, secret) = dest_of(d, ctx, depth);
-            if secret {
-                return; // an address the repository keeps secret: its own service
-            }
+            exempt_names |= secret;
             if web {
                 items.push(Item::Query(d.clone()));
             }
             (scheme, host)
         }
     };
-    if !host.is_empty() && local_host(p, &host) {
-        return;
-    }
+    exempt_names |= !host.is_empty() && local_host(p, &host);
     if plain.is_none() && !socket {
-        plain = if (scheme.is_empty() || pystr::eq(&scheme, "http")) && !host.is_empty() { Some("http") } else { None };
+        plain = if (scheme.is_empty() || pystr::eq(&scheme, "http")) && !host.is_empty() {
+            Some("http")
+        } else {
+            None
+        };
     }
     let named_tls = !host.is_empty() && plain.is_none() && !raw_ip(p, &host);
     let mut sent = Content::default();
     if let Some(d) = &dest {
         let path = content(&path_of(d), ctx, depth);
-        if named_tls && !path.names.is_empty() {
-            return; // a resource the repository keeps secret (a bot's token, a repository)
-        }
+        exempt_names |= named_tls && !path.names.is_empty();
         sent = path;
     }
+    if let Some(d) = &dest {
+        let bulk = content(d, ctx, depth);
+        sent.all |= bulk.all;
+        sent.sources.extend(bulk.sources);
+    }
     for item in &items {
+        if let Item::File(path) = item {
+            if scope::normal_path(&ctx.restore(path)).is_none() {
+                let available = scope::reachable(ctx);
+                scope::signal(
+                    ctx,
+                    &available,
+                    "secrets-uncleared",
+                    "cannot resolve a sent file path",
+                );
+            }
+        }
+        // Credential exemptions apply to named credentials, never to the complete secrets object.
+        let bulk = match item {
+            Item::Stdin => stdin.clone(),
+            Item::File(f) => ctx.file(f),
+            Item::Query(v) | Item::Header(v) | Item::Body(v) => content(v, ctx, depth),
+        };
+        sent.all |= bulk.all;
+        sent.sources.extend(bulk.sources);
         let got = match item {
             Item::Stdin => stdin.clone(),
             Item::File(f) => ctx.file(f),
@@ -1183,6 +1508,10 @@ fn send(name: &[u32], how: &[u32], args: &[PyStr], stdin: &Content, xargs: bool,
     }
     let shown_as = shown_as.or(dest);
     let to = shown_as.map(|s| ctx.restore(&s));
+    if exempt_names {
+        sent.names.clear();
+        sent.search = None;
+    }
     report(ctx, &sent, how, &host, plain, to);
 }
 
@@ -1212,7 +1541,9 @@ fn dest_of(word: &[u32], ctx: &mut Ctx, depth: usize) -> (PyStr, PyStr, bool) {
         return (Vec::new(), Vec::new(), true);
     }
     let ctx: &Ctx = ctx;
-    let filled = p.re("_WFX_VAR_RE").sub_fn(word, 0, |m| ctx.value(first_group(m), m.group0()));
+    let filled = p
+        .re("_WFX_VAR_RE")
+        .sub_fn(word, 0, |m| ctx.value(first_group(m), m.group0()));
     let (scheme, host) = host_of(&filled);
     (scheme, host, false)
 }
@@ -1234,19 +1565,40 @@ fn secrets_in(p: &Pack, text: &[u32], env: &BTreeMap<PyStr, BTreeSet<PyStr>>) ->
 type Env = BTreeMap<PyStr, BTreeSet<PyStr>>;
 type Values = BTreeMap<PyStr, Option<PyStr>>;
 
-/// An `env:` entry: the secrets it holds into `env`, its plain value into `values` (None when it has an expression),
-/// so that an entry below one of the same name replaces it.
-fn env_entry(p: &Pack, r: &Rec, env: &mut Env, values: &mut Values, above: Option<&Env>) {
+/// An `env:` entry: the secrets it holds into `env`, its plain value into `values` (None when it has an
+/// expression), and, in `all`, its key when the value holds every repository secret (`toJSON(secrets)`,
+/// WF-SECRETS-SCOPE) — so that an entry below one of the same name replaces it.
+fn env_entry(
+    p: &Pack,
+    r: &Rec,
+    env: &mut Env,
+    values: &mut Values,
+    all: &mut AllEnv,
+    above: Option<&Env>,
+) {
     let value = r.text();
     let key = r.key.clone().unwrap_or_default();
     let names = secrets_in(p, &value, above.unwrap_or(env));
+    let sources = scope::record_sources(p, r, all, &AllEnv::new());
     env.insert(key.clone(), names);
-    values.insert(key, if pystr::contains(&value, "${{") { None } else { Some(value) });
+    values.insert(
+        key.clone(),
+        if pystr::contains(&value, "${{") {
+            None
+        } else {
+            Some(value)
+        },
+    );
+    if !sources.is_empty() {
+        all.insert(key, sources);
+    } else {
+        all.remove(&key);
+    }
 }
 
 /// text with each `${{ … }}` replaced by a mark that holds its index in exprs (the expressions are pasted in before
 /// the shell reads the script, so they are words of their own whatever their spaces).
-fn marked(text: &[u32], exprs: &mut Vec<PyStr>) -> PyStr {
+fn marked(text: &[u32], exprs: &mut Vec<(usize, PyStr)>, line: usize) -> PyStr {
     let mut out = Vec::with_capacity(text.len());
     let mut i = 0;
     for (start, end) in outline::expression_spans(text) {
@@ -1254,99 +1606,54 @@ fn marked(text: &[u32], exprs: &mut Vec<PyStr>) -> PyStr {
         out.push(MARK);
         out.extend(u(&exprs.len().to_string()));
         out.push(MARK);
-        exprs.push(text[start + 3..end - 2].to_vec());
+        exprs.push((line, text[start + 3..end - 2].to_vec()));
         i = end;
     }
     out.extend_from_slice(&text[i..]);
     out
 }
 
+/// An `actions/upload-artifact` step's uploaded paths and the line of its `path:` (or its `uses:`), or None for a
+/// step that is not one. The step's records are `recs` (workflow::steps gives them per step).
+fn artifact_upload(recs: &[&Rec]) -> Option<(Vec<PyStr>, usize)> {
+    let uses = recs
+        .iter()
+        .find(|r| r.key_is("uses") && r.path.len() == 4)?;
+    if !pystr::starts_with(&lower(&uses.value), "actions/upload-artifact") {
+        return None;
+    }
+    let mut paths: Vec<PyStr> = Vec::new();
+    let mut line = uses.line;
+    for r in recs {
+        if r.path.len() == 5
+            && pystr::eq(&r.path[4], "with")
+            && r.key.as_deref().is_some_and(|k| pystr::eq(k, "path"))
+        {
+            line = r.line;
+            for (_, t) in r.lines() {
+                let t = pystr::strip_chars(&t, " \t");
+                if !t.is_empty() {
+                    paths.push(t.to_vec());
+                }
+            }
+        }
+    }
+    paths.extend(scope::flow_upload_paths(recs));
+    // no `path:` means the whole workspace is uploaded
+    if paths.is_empty() {
+        paths.push(u("."));
+    }
+    Some((paths, line))
+}
+
 /// The secrets a workflow sends out by name, and what a search of the repository or its history for credentials
 /// found and sent, in the order of its steps: 'exfil' {job, names (sorted), how (the command), to (the address as
 /// written, or null), plain ('http' for an address without TLS, 'socket' for a raw socket, or null), raw_ip};
-/// 'sweep' {job, search (the command that searches for credentials), how}.
+/// 'sweep' {job, search (the command that searches for credentials), how}; 'secrets-sent' {job, how} when every
+/// repository secret (toJSON(secrets)) reaches a send (WF-SECRETS-SCOPE: a network command, or an artifact upload
+/// of a file that holds it).
 pub fn exfil(p: &Pack, text: &[u32]) -> Vec<Found> {
-    let records = outline::outline(text, true, false);
-    let mut workflow_env: Env = BTreeMap::new();
-    let mut workflow_values: Values = BTreeMap::new();
-    let mut job_env: BTreeMap<PyStr, (Env, Values)> = BTreeMap::new();
-    for r in &records {
-        if r.key.is_none() || !r.path_ends("env") {
-            continue;
-        }
-        if r.path_is(&["env"]) {
-            env_entry(p, r, &mut workflow_env, &mut workflow_values, Some(&BTreeMap::new()));
-        } else if r.path.len() == 3 && pystr::eq(&r.path[0], "jobs") {
-            let slot = job_env.entry(r.path[1].clone()).or_default();
-            env_entry(p, r, &mut slot.0, &mut slot.1, Some(&workflow_env));
-        }
-    }
-    let line_max = p.usize("_WFX_LINE_MAX");
-    let depth_max = p.usize("_WFX_DEPTH");
-    let mut found: Vec<Found> = Vec::new();
-    let mut files_of: BTreeMap<PyStr, BTreeMap<PyStr, Content>> = BTreeMap::new();
-    for (job, recs) in workflow::steps(&records) {
-        let mut env = workflow_env.clone();
-        let mut values = workflow_values.clone();
-        if let Some((e, v)) = job_env.get(&job) {
-            env.extend(e.iter().map(|(k, x)| (k.clone(), x.clone())));
-            values.extend(v.iter().map(|(k, x)| (k.clone(), x.clone())));
-        }
-        for r in &recs {
-            if r.key.is_some() && r.path.len() == 5 && pystr::eq(&r.path[4], "env") {
-                env_entry(p, r, &mut env, &mut values, None);
-            }
-        }
-        let lines = workflow::logical_lines(&workflow::step_run_lines(&recs));
-        if lines.is_empty() {
-            continue;
-        }
-        let files = files_of.remove(&job).unwrap_or_default();
-        let mut ctx = Ctx {
-            p,
-            exprs: Vec::new(),
-            env,
-            values,
-            local: Vec::new(),
-            local_at: BTreeMap::new(),
-            files,
-            job: job.clone(),
-            line: 0,
-            found: std::mem::take(&mut found),
-            depth_max,
-        };
-        let heredoc = p.re("_WFX_HEREDOC_RE");
-        let mut k = 0;
-        while k < lines.len() {
-            let (line, t) = &lines[k];
-            k += 1;
-            if t.len() > line_max {
-                continue;
-            }
-            ctx.line = *line;
-            let mark = marked(t, &mut ctx.exprs);
-            let mut heredocs: Vec<Content> = Vec::new();
-            for m in heredoc.finditer(&mark) {
-                let delimiter = first_group(&m);
-                let mut body: Vec<PyStr> = Vec::new();
-                while k < lines.len() && pystr::strip_chars(&lines[k].1, " \t") != delimiter {
-                    body.push(marked(&lines[k].1, &mut ctx.exprs));
-                    k += 1;
-                }
-                k += 1;
-                let mut got = Content::default();
-                for b in &body {
-                    let c = content(b, &mut ctx, 0);
-                    got.join(&c);
-                }
-                heredocs.push(got);
-            }
-            eval(&mark, &mut ctx, 0, Some(&mut heredocs));
-        }
-        found = std::mem::take(&mut ctx.found);
-        files_of.insert(job, ctx.files);
-    }
-    found
+    scope::read(p, text)
 }
 
 // ---------------------------------------------------------------- the rule
@@ -1359,32 +1666,61 @@ fn names_text(names: &[PyStr]) -> PyStr {
     let shown: Vec<&[u32]> = names.iter().take(5).map(|x| x.as_slice()).collect();
     let more = names.len() - shown.len();
     if more > 0 {
-        return pystr::concat(&[&u("the secrets "), &pystr::join(&u(", "), &shown), &u(&format!(" and {} more", more))]);
+        return pystr::concat(&[
+            &u("the secrets "),
+            &pystr::join(&u(", "), &shown),
+            &u(&format!(" and {} more", more)),
+        ]);
     }
     match shown.split_last() {
-        Some((last, rest)) => pystr::concat(&[&u("the secrets "), &pystr::join(&u(", "), rest), &u(" and "), last]),
+        Some((last, rest)) => pystr::concat(&[
+            &u("the secrets "),
+            &pystr::join(&u(", "), rest),
+            &u(" and "),
+            last,
+        ]),
         None => u("the secrets "),
     }
 }
 
 /// The SC-WORKFLOW-EXFIL rule of one of exfil()'s findings.
 pub fn rule(p: &Pack, kind: &str, d: &Value) -> Option<RuleText> {
-    let st = |k: &str| d.get(k).and_then(|v| v.as_str()).map(|x| x.to_vec()).unwrap_or_default();
+    let st = |k: &str| {
+        d.get(k)
+            .and_then(|v| v.as_str())
+            .map(|x| x.to_vec())
+            .unwrap_or_default()
+    };
     let fill = |name: &str, args: &[(&str, Arg)]| {
         let mut rule = RuleText::of(p, name);
         rule.msg = findings::format(&rule.msg, args);
         rule
     };
     match kind {
-        "sweep" => Some(fill("_WFX_SWEEP_RULE", &[("job", Arg::S(st("job"))), ("search", Arg::S(st("search"))), ("how", Arg::S(st("how")))])),
+        "sweep" => Some(fill(
+            "_WFX_SWEEP_RULE",
+            &[
+                ("job", Arg::S(st("job"))),
+                ("search", Arg::S(st("search"))),
+                ("how", Arg::S(st("how"))),
+            ],
+        )),
         "exfil" => {
             let names: Vec<PyStr> = d
                 .get("names")
                 .and_then(|v| v.as_arr())
-                .map(|a| a.iter().filter_map(|x| x.as_str().map(|y| y.to_vec())).collect())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|x| x.as_str().map(|y| y.to_vec()))
+                        .collect()
+                })
                 .unwrap_or_default();
             let to = st("to");
-            let where_ = if to.is_empty() { u("to an address the step builds") } else { pystr::concat(&[&u("to "), &to]) };
+            let where_ = if to.is_empty() {
+                u("to an address the step builds")
+            } else {
+                pystr::concat(&[&u("to "), &to])
+            };
             let mut why: Vec<PyStr> = Vec::new();
             match d.get("plain").and_then(|v| v.as_str()) {
                 Some(x) if pystr::eq(x, "http") => why.push(u("over plain HTTP")),
@@ -1396,7 +1732,11 @@ pub fn rule(p: &Pack, kind: &str, d: &Value) -> Option<RuleText> {
             }
             if !to.is_empty() {
                 if let Some(m) = crate::signs::capture_service(p, &to) {
-                    why.push(pystr::concat(&[&u("to "), m.group0(), &u(", a data-capture service")]));
+                    why.push(pystr::concat(&[
+                        &u("to "),
+                        m.group0(),
+                        &u(", a data-capture service"),
+                    ]));
                 }
             }
             if names.len() >= 2 {
@@ -1416,7 +1756,10 @@ pub fn rule(p: &Pack, kind: &str, d: &Value) -> Option<RuleText> {
                 fill("_WFX_SENT_CHECK_RULE", &args(Vec::new()))
             } else {
                 let refs: Vec<&[u32]> = why.iter().map(|x| x.as_slice()).collect();
-                fill("_WFX_SENT_RULE", &args(vec![("why", Arg::S(pystr::join(&u(", "), &refs)))]))
+                fill(
+                    "_WFX_SENT_RULE",
+                    &args(vec![("why", Arg::S(pystr::join(&u(", "), &refs)))]),
+                )
             })
         }
         _ => None,
