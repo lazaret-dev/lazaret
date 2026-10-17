@@ -20,7 +20,13 @@ from a target; the others can't match). Neither is a target of fewer than
 MIN_TARGET characters (os, fs, vm, ws have hundreds of real neighbours), nor
 one in the package's own npm scope (its owner names those). A finding is
 MAJOR, a weak indicator: a new package with such a name is worth a look,
-and its code is judged by the other tests.
+and its code is judged by the other tests. A dependency's finding names the
+dependency (DEPENDENCY_KEY), and a registry scan or the guard reads that
+dependency's history: one that is an established package (a year old,
+three versions, no new publisher) is INFO (0.1.9, TYPO-ESTABLISHED:
+registry/lookalike_history.py; djotls depends on roman, one change from
+rowan). Not a dependency named like a Node built-in, nor the release's own
+name.
 
 npm names are also compared with Node's built-in modules that have a
 separator in their name (NODE_BUILTINS): a dependency on child-process
@@ -91,6 +97,9 @@ import lazaret.scanner.core as lazaret
 
 MIN_TARGET = 5
 MAX_NAME = 214                       # npm's longest name; a longer one is not compared
+#: (TYPO-ESTABLISHED) the key of an npm, PyPI or crates dependency's finding that names the dependency, as its
+#: registry knows it: a registry scan or the guard reads its history (registry/lookalike_history.py)
+DEPENDENCY_KEY = "lookalikeDependency"
 _ALPHABET = "abcdefghijklmnopqrstuvwxyz0123456789-._"
 _SEP_RE = re.compile(r"[-_.]")
 _PEP503_RE = re.compile(r"[-_.]+")
@@ -611,7 +620,9 @@ def issues(eco, name, deps, rel, text=""):
     `deps` in `rel` (its text, for the lines). For Go, `name` is the module
     path of a go.mod and `deps` the paths it requires; for a VS Code
     extension, `name` is its publisher.name and `deps` the extensions it
-    brings."""
+    brings. An npm, PyPI or crates dependency's finding names the dependency
+    (DEPENDENCY_KEY; not one like a Node built-in): lookalike_history may
+    make it INFO."""
     out, lines = [], (text or "").split("\n")
     if eco == "go":
         return _go_issues(name, deps, rel, text, lines)
@@ -644,10 +655,13 @@ def issues(eco, name, deps, rel, text=""):
         target, how, builtin = found
         line = _line_of(text, [json.dumps(dep) + ":", f"Requires-Dist: {dep}", f"package = {json.dumps(dep)}",
                                f"dependencies.{dep}]", f"\n{dep} ="])
-        out.append(lazaret.mk_issue(
+        issue = lazaret.mk_issue(
             {"id": "SC-TYPOSQUAT", "name": "A name like a popular package's", "type": "HOTSPOT", "sev": "MAJOR",
              "msg": f'Depends on "{dep}", ' + whose(target, how, builtin),
              "why": _BUILTIN_WHY if builtin else _WHY,
              "fix": f'Check that "{dep}" is the dependency meant, not "{target}", and read it before installing.',
-             "ref": "CWE-506 · Supply chain"}, rel, line, lines))
+             "ref": "CWE-506 · Supply chain"}, rel, line, lines)
+        if not builtin:
+            issue[DEPENDENCY_KEY] = dep          # (TYPO-ESTABLISHED: the registry reads its history, lookalike_history)
+        out.append(issue)
     return out

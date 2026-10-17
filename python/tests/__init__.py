@@ -13,6 +13,8 @@ reason; tests/registry/test_prior_release.py turns it on over made-up registries
 check (LAZARET_NO_ACTION_BRANCHES, registry/actionrefs.py: is an action's commit in its repository's branches);
 the action scan's tests (tests/registry/test_actions.py, test_action_refs.py) give it an environment of their own
 and an in-memory GitHub.
+So is the history of a look-alike dependency (LAZARET_NO_LOOKALIKE_HISTORY, registry/lookalike_history.py:
+TYPO-ESTABLISHED); tests/registry/test_lookalike_history.py turns it on over made-up registries.
 """
 import os
 import sys
@@ -26,3 +28,4 @@ if _SRC not in _existing.split(os.pathsep):
 os.environ.setdefault("LAZARET_NO_PROVENANCE", "1")
 os.environ.setdefault("LAZARET_NO_PRIOR_RELEASE", "1")
 os.environ.setdefault("LAZARET_NO_ACTION_BRANCHES", "1")
+os.environ.setdefault("LAZARET_NO_LOOKALIKE_HISTORY", "1")

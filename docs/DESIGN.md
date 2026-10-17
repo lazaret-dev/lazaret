@@ -1129,7 +1129,42 @@ predecessor's resolution; so the history costs a request per release only
 where neither of the others read it. The guard's comparison of a crate reads
 its index once the same way. The history switches turn it off, the same ones
 as the predecessor comparison (`LAZARET_NO_PRIOR_RELEASE`,
-`LAZARET_NO_DEPENDENCY_HISTORY`). SC-UNUSED-DEPENDENCY (`_ArtifactScan._unused_dependencies`,
+`LAZARET_NO_DEPENDENCY_HISTORY`).
+TYPO-ESTABLISHED (0.1.9, `registry/lookalike_history.py`, no rule-set
+change): an npm, PyPI or crates dependency's SC-TYPOSQUAT finding names the
+dependency (`lookalike.DEPENDENCY_KEY`; not one like a Node built-in, nor the
+release's own name), and `_release_findings`, before `prior.release_issues`,
+reads that dependency's history with one request — npm's packument, PyPI's
+Simple API (JSON), the crates index file over the crates module's fetch —
+for the first `MAX_LOOKUPS` (5) of a release, each once a run (`RUN`, a lock
+per name, `CACHE_SECONDS` for a long-lived process). Established (all of):
+first published more than `MIN_AGE` (a year) before the release (a crate's
+index line's `pubtime`, a PyPI file's first upload; now for npm, whose
+version manifest has no time), at least `MIN_VERSIONS` (3) versions, and on
+npm no new publisher (an account that published the newest version, its
+`_npmUser` else its `maintainers`, published an earlier one; npm not saying
+who is a new one). PyPI's documents and the crates index name no publisher
+per version (crates.io's owners are a second request, to its API, not made),
+so there age and versions decide; a crates line without `pubtime` predates
+the field and counts as old. An established one's finding is INFO, its
+message saying why ("…; it is an established package: first published 2015,
+13 versions."), and each file that had one is given the verdict its scan
+gives without it (`decide_verdict` over its findings, as `scan_members`
+decided it); INFO is no indicator for the verdict, for `prior.candidates` or
+`prior.rules_found`. A new one, a new publisher, a history that fails or is
+over `MAX_HISTORY_BYTES` (16 MB) is MAJOR, as before: it fails closed and is
+never an error of the scan. The guard: `_scan_one` keeps the scan's look-alike
+findings in short (`guard_kept`: each with its indicator line and dependency,
+and the weaker-indicator count) beside the verdict, and `with_lookalikes`
+(first in `with_history`, and in `check_crate` before the comparison) settles
+a fresh scan's of a release from the public registry over the guard's fetcher
+(a crate's over the crates module's fetch, and never `--offline`): the lines
+left out, `rules` kept by a finding that stays, a WARN that rested on them
+OK; the short findings are never cached, so a cached verdict is the one so
+made. Off with `LAZARET_NO_DEPENDENCY_HISTORY` or
+`LAZARET_NO_LOOKALIKE_HISTORY` (the tests' default). `bench.py lookalikes`
+reads a run's WARN releases with SC-TYPOSQUAT this way, which `run` (the
+files alone) does not; the popular sets' measurement is owed (John). SC-UNUSED-DEPENDENCY (`_ArtifactScan._unused_dependencies`,
 INFO) lists an npm release's runtime dependencies no text of it names
 and that are neither among npm's 5,000 most-downloaded packages nor in its
 own scope, when every text member was read whole; `_scan_artifact` returns

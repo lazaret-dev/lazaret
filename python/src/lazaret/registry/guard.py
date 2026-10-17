@@ -93,7 +93,11 @@ or with the check off, is scanned and checked again while the release is in that
 WARN release from npm's or PyPI's public registry is compared with its established predecessor as `lazaret-registry`
 compares it (registry/prior.py): a weaker indicator whose rule the predecessor had no finding of is SC-NEW-INDICATOR,
 CRITICAL, and the release is SUSPICIOUS (blocked); the comparison is kept with the verdict, the predecessor's own
-verdict in the cache. LAZARET_NO_PRIOR_RELEASE=1 turns it off.
+verdict in the cache. LAZARET_NO_PRIOR_RELEASE=1 turns it off. A dependency a freshly scanned release of npm's, PyPI's
+or crates.io's public registry declares that looks like a popular package's (SC-TYPOSQUAT) and is itself an
+established package (its history: a year old, three versions, no new publisher) is INFO, so it makes no WARN
+(registry/lookalike_history.py, TYPO-ESTABLISHED; one request a dependency, none offline);
+LAZARET_NO_LOOKALIKE_HISTORY=1 turns it off.
 
 The resolutions made outside the project (cargo install, yarn 1, npm install -g, go install pkg@version, --plan) are made
 in a folder of the user's own (private_scratch), and the package manager is found in PATH's absolute folders only
@@ -142,6 +146,7 @@ from lazaret.scanner import core as lazaret
 from lazaret.scanner import gomod, nativenet, programs, sca, timings
 from lazaret.registry import cargosrc, goproxy, keepalive as keepalive_, pmsettings, prior as prior_, \
     provenance as provenance_, repo, scanpool
+from lazaret.registry import lookalike_history as lookalikes_
 from lazaret.registry.ecosystems import crates, golang
 
 #: Releases published less than this long ago get npm's and PyPI's provenance check (registry/provenance.py, NET-1): an
@@ -812,12 +817,26 @@ def with_prior(ctx, check, hit, fetcher, filename, kind):
     return {**hit, "prior": summary}
 
 
+def with_lookalikes(check, hit, fetcher, published, due):
+    """TYPO-ESTABLISHED: the verdict `hit` of a fresh scan with each look-alike dependency that is an established
+    package made INFO (registry/lookalike_history.guard_settle), before the provenance check and the comparison with
+    the release before read it. `due`: a release from the public registry (a private one's dependencies are not named
+    to it), and not offline; else nothing is read. npm's and PyPI's histories over the guard's fetcher, a crate's over
+    the crates module's own fetch (as prior.py reads it). `lookalikes` is never kept with the verdict."""
+    def fetch_json(url, accept):
+        raw = fetcher.get(url, lookalikes_.MAX_HISTORY_BYTES, accept, repo.METADATA_TIMEOUT)
+        return repo._deep_safe_loads(raw, f"registry response from {url}")
+    return lookalikes_.guard_settle(check.eco, hit, published, fetch_json if due else None)
+
+
 def with_history(ctx, check, hit, fetcher, when, report, release):
-    """The scan's verdict `hit` with what the release's history says: its provenance (`report()`, the provenance
-    check's report, asked after a fresh scan of a release from the public registry in the window) and the comparison
-    with the release before (with_prior). when: (published, from the public registry, scanned now); release: (its
-    file's name, its kind)."""
+    """The scan's verdict `hit` with what the release's history says: its look-alike dependencies' (with_lookalikes,
+    after a fresh scan of a release from the public registry), its provenance (`report()`, the provenance check's
+    report, asked after a fresh scan of a release from the public registry in the window) and the comparison with the
+    release before (with_prior). when: (published, from the public registry, scanned now); release: (its file's name,
+    its kind)."""
     published, public, scanned = when
+    hit = with_lookalikes(check, hit, fetcher, published, bool(scanned and public))
     if scanned and public and provenance_due(published):
         hit = with_provenance(check, hit, check.eco, report())
     if prior_due(hit, published, public):
@@ -963,12 +982,14 @@ def _scan_one(data, container, kind, timeout, timed=False):
         with timings.span("scan", "artifact"):
             res = repo._scan_artifact(data, container, kind, False, budget)
         return {"verdict": res["verdict"], "reason": res["verdictReason"], "indicators": summarize(res),
-                "incomplete": list(res.get("incomplete") or ()), "rules": rules_of(res)}
+                "incomplete": list(res.get("incomplete") or ()), "rules": rules_of(res),
+                **lookalikes_.guard_kept(res, summarize)}
     here = timings.Timings()
     with timings.capture(here), here.run(), timings.span("scan", "artifact"):
         res = repo._scan_artifact(data, container, kind, False, budget)
     return {"verdict": res["verdict"], "reason": res["verdictReason"], "indicators": summarize(res),
-            "incomplete": list(res.get("incomplete") or ()), "rules": rules_of(res), "timings": here.report()}
+            "incomplete": list(res.get("incomplete") or ()), "rules": rules_of(res), "timings": here.report(),
+            **lookalikes_.guard_kept(res, summarize)}
 
 
 #: The bytes of archives the guard holds in memory to scan at once (`Scanner.holding`), across the requests a package
@@ -4645,6 +4666,7 @@ def check_crate(ctx, fetcher, registry, pkg, home, offline, keep=None):
             published, record = crate_publish_time(fetcher, registry, pkg, record)
         if record is not None and record["yanked"]:
             check.notes.append("yanked on the registry")
+        hit = with_lookalikes(check, hit, fetcher, published, registry.default and not offline)    # (TYPO-ESTABLISHED)
         # RA-8: compare a WARN crate with its established predecessor, as npm and PyPI are (prior.ECOSYSTEMS has crates);
         # crates.io has no provenance, so only with_prior runs. registry.default is the public index its history is read from.
         # Not offline (cargo --offline): the comparison reads the index and downloads the predecessor, and a run that does

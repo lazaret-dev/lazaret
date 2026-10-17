@@ -71,6 +71,7 @@ from lazaret import safexml as _safexml                 # noqa: E402
 from lazaret.registry import actionmeta as _actionmeta  # noqa: E402
 from lazaret.registry import contentcache as _cache     # noqa: E402
 from lazaret.registry import lookalike as _lookalike    # noqa: E402
+from lazaret.registry import lookalike_history as _lookalike_history  # noqa: E402
 from lazaret.registry import npmtar as _npmtar          # noqa: E402
 from lazaret.registry import prior as _prior            # noqa: E402
 from lazaret.registry import provenance as _provenance  # noqa: E402
@@ -4771,7 +4772,10 @@ class _ArtifactScan:
         third part): its package.json's publisher.name and the extensions it
         brings (extensionDependencies, extensionPack), against the
         most-installed extensions (lookalike.vscode_lookalike); the npm
-        packages it bundles are not installed from npm, so not compared."""
+        packages it bundles are not installed from npm, so not compared. An
+        npm, PyPI or crates dependency's finding names the dependency, and the
+        release's scan makes it INFO when that is an established package
+        (TYPO-ESTABLISHED: _release_findings, registry/lookalike_history.py)."""
         if self.artifact == "action":
             return
         if self.artifact == "vsix":
@@ -6064,9 +6068,11 @@ def _release_findings(eco, name, version, resolved, issues, per, found, limits):
     asked when the others make the release SUSPICIOUS), the package's registry documents read once for them all (one
     prior.History). found: (the files' digests the provenance check is given, the dependencies no file names, what a
     VS Code extension brings, the modules a PyPI release's code imports or None); limits: (deadline, cancel, memo) ->
-    (provenance's summary, the prior release's)."""
+    (provenance's summary, the prior release's). First, a look-alike dependency that is an established package is
+    made INFO (TYPO-ESTABLISHED, registry/lookalike_history.py), so the comparison does not ask about it."""
     attested, unused, brings, imports = found
     deadline, cancel, memo = limits
+    _lookalike_history.release_issues(eco, resolved, issues, per)
     history = _prior.History()             # (the package's registry documents, each read once for this release: RA-7)
     prior_issues, prior = _prior.release_issues(eco, name, version, resolved, issues, per, deadline, cancel, memo,
                                                 history)

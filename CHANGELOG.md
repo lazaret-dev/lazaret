@@ -1564,6 +1564,22 @@ aggregate):
 
 ### Fixed
 
+- **A look-alike dependency that is itself an established package is INFO, not MAJOR (TYPO-ESTABLISHED; the
+  registry and `lazaret guard`, no rule-set change).** SC-TYPOSQUAT flagged every dependency one change from a
+  popular package's name that the known-name lists do not hold, so a real package below the lists' cut made its
+  dependents WARN: djotls 0.1.0 (two hours old) depends on the crate `roman` (Roman numerals for Djot's lists, first
+  published 2015, 13 versions), one change from `rowan`. Now, for a flagged dependency only, its own history is read
+  with one request — npm's packument, PyPI's Simple API, crates.io's sparse index file — and an established one (its
+  first version more than a year before the release, at least 3 versions, and on npm no new publisher: the account
+  that published its newest version published an earlier one) stays listed as INFO, its message saying why ("…; it
+  is an established package: first published 2015, 13 versions."); it makes no WARN, and the comparison with the
+  release before does not ask about it. PyPI and the crates index name no publisher per version, so a PyPI project or
+  a crate is judged by its age and versions alone. A new package, one with a new publisher, or a history that does
+  not come back (an error, the budget, offline) keeps the finding MAJOR, as before; so do the release's own name and
+  a dependency named like a Node built-in. Each history is read once a run, and nothing is read for a release with no
+  look-alike dependency, offline (`guard cargo --offline`), or with `LAZARET_NO_DEPENDENCY_HISTORY` or
+  `LAZARET_NO_LOOKALIKE_HISTORY` set. `scripts/bench.py lookalikes` reads a run's WARN releases with a look-alike
+  finding this way; the popular sets are not measured yet.
 - **S-SECRET no longer double-reports a PEM private key in source (N-24; the engine's, for both packages; rule
   set 2.91.0).** A `private_key = "-----BEGIN ... PRIVATE KEY-----..."` assignment was reported by both S-TOKEN
   (which reads PEM blocks) and S-SECRET; S-SECRET in source now skips a value that begins with a header S-TOKEN

@@ -6,6 +6,7 @@ releases, and the comparison of two runs.
     python3 scripts/bench.py compare BEFORE.jsonl AFTER.jsonl [--aggregate-only] [--show N]
     python3 scripts/bench.py summary RUN.jsonl
     python3 scripts/bench.py prior RUN.jsonl MANIFEST OUT.jsonl [--aggregate-only]
+    python3 scripts/bench.py lookalikes RUN.jsonl MANIFEST OUT.jsonl [--aggregate-only]
     python3 scripts/bench.py all SETS.json [--jobs N] [--only NAME,...] [--label L] [--baseline L]
     python3 scripts/bench.py misses SETS.json NAME [--label L] [--out PATH]
 
@@ -51,6 +52,13 @@ from the registry, the release read from the manifest's file), one line
 each in OUT (going on where it was), and prints how many would have the
 finding, by category: what `run`, which scans the files alone, does not
 measure.
+
+`lookalikes` (TYPO-ESTABLISHED) takes a run's WARN releases with a
+look-alike finding (SC-TYPOSQUAT among their MAJOR rules), scans each
+again and reads its look-alike dependencies' histories as a registry scan
+does (registry/lookalike_history.py: one request to the registry each,
+judged against now: the manifest has no publish time), one line each in
+OUT, and prints by category how many the established ones leave OK.
 
 `compare` reads two runs of the same releases: the verdicts by category in
 each, and the releases whose verdict or strong findings differ. With
@@ -482,6 +490,73 @@ def prior_counts(lines, aggregate_only):
         if _prior_outcome(line) == "SC-NEW-INDICATOR":
             found = line["prior"]
             print(f"  {line['id']}: {', '.join(found['newRules'])} (against {found['version']})")
+    return 0
+
+
+# ---------------------------------------------------------------- look-alike dependencies (TYPO-ESTABLISHED)
+def lookalikes_one(rec, deadline_s):
+    """A WARN release of a run with a look-alike finding, scanned again, its look-alike dependencies' histories read as
+    a registry scan reads them (registry/lookalike_history.py) -> its line of the `lookalikes` file: the dependencies
+    flagged, those that are established (and why), and the verdict without them."""
+    from lazaret.registry import lookalike_history, repo
+    release = release_of(rec)
+    if release is None:
+        return _row(rec, {"lookalikes": {"notRead": "not a release of npm, PyPI or crates.io"}})
+    data, container, kind = _release(rec)
+    budget = repo.Budget(deadline=time.monotonic() + _timeout(deadline_s), deadline_detail="budget")
+    res = repo._scan_artifact(data, container, kind, False, budget)
+    flagged = sorted({i[lookalike_history.KEY] for i in lookalike_history.flagged(res["issues"])})
+    per = [{"filename": None, "kind": kind, "truncated": res["truncated"]}]
+    established = lookalike_history.release_issues(release[0], None, res["issues"], per)
+    return _row(rec, {"lookalikes": {"flagged": flagged, "established": established,
+                                     "verdict": per[0].get("verdict", res["verdict"])}})
+
+
+def lookalikes_run(run_path, manifest, out_path, aggregate_only, deadline_s=28.0):
+    """`lookalikes`: each WARN release of a run with SC-TYPOSQUAT among its MAJOR rules, its look-alike dependencies'
+    histories read, a line each in OUT (which goes on where it was), and the counts by category."""
+    rows = {r["id"]: r for r in read_jsonl(run_path)}
+    done = {r["id"] for r in read_jsonl(out_path)} if os.path.exists(out_path) else set()
+    with open(out_path, "a", encoding="utf-8") as out:
+        for rec in read_jsonl(manifest):
+            row = rows.get(rec["id"], {})
+            if row.get("verdict") != "WARN" or "SC-TYPOSQUAT" not in (row.get("weak") or ()) or rec["id"] in done:
+                continue
+            try:
+                line = lookalikes_one(rec, deadline_s)
+            except Exception as exc:                         # noqa: BLE001 -- recorded, the run goes on
+                line = _error_row(rec, f"{type(exc).__name__}: {exc}")
+            out.write(json.dumps(line) + "\n")
+            out.flush()
+    return lookalikes_counts(read_jsonl(out_path), aggregate_only)
+
+
+def _lookalikes_outcome(line):
+    found = line.get("lookalikes") or {}
+    if "error" in line:
+        return "error"
+    if "notRead" in found:
+        return "not read"
+    if not found.get("flagged"):
+        return "no dependency flagged"
+    return f"{found['verdict']} with the established ones INFO" if found.get("established") else "each kept MAJOR"
+
+
+def lookalikes_counts(lines, aggregate_only):
+    """Print what `lookalikes` found, by category (and with --aggregate-only nothing that names a release)."""
+    table = collections.defaultdict(collections.Counter)
+    for line in lines:
+        table[_group(line.get("cat", ""))][_lookalikes_outcome(line)] += 1
+    for group in sorted(table):
+        counts = ", ".join(f"{k} {n}" for k, n in table[group].most_common())
+        print(f"{group} WARN releases with a look-alike: {counts}")
+    for line in [] if aggregate_only else lines:
+        found = line.get("lookalikes") or {}
+        if found.get("flagged"):
+            established = found.get("established") or {}
+            said = [f"{d} established ({established[d]})" if d in established else f"{d} kept MAJOR"
+                    for d in found["flagged"]]
+            print(f"  {line['id']}: {found['verdict']}; " + "; ".join(said))
     return 0
 
 
@@ -999,6 +1074,12 @@ def _parser():
     p.add_argument("manifest")
     p.add_argument("out")
     p.add_argument("--aggregate-only", action="store_true", help="counts only, nothing that names a release")
+    p = sub.add_parser("lookalikes", help="a run's WARN releases with a look-alike finding, their look-alike "
+                                          "dependencies' histories read (TYPO-ESTABLISHED)")
+    p.add_argument("run")
+    p.add_argument("manifest")
+    p.add_argument("out")
+    p.add_argument("--aggregate-only", action="store_true", help="counts only, nothing that names a release")
     p = sub.add_parser("all", help="every set of a sets file, run and compared with its last run")
     p.add_argument("sets", help="the sets file (JSON; see this script's docstring)")
     p.add_argument("--jobs", type=int, default=None, help="releases scanned at once (default: half the cores)")
@@ -1030,6 +1111,8 @@ def main(argv=None):
         return compare(args.before, args.after, args.aggregate_only, args.show)
     if args.command == "prior":
         return prior_run(args.run, args.manifest, args.out, args.aggregate_only)
+    if args.command == "lookalikes":
+        return lookalikes_run(args.run, args.manifest, args.out, args.aggregate_only)
     if args.command == "all":
         return _from_sets_file(lambda: run_all(
             args.sets, max(1, args.jobs or _default_jobs()), [x for x in (args.only or "").split(",") if x] or None,
