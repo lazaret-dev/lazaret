@@ -1431,7 +1431,6 @@ impl<'a> Parser<'a> {
             let t = self.tok();
             match t.t {
                 T::Str => {
-                    self.advance();
                     let bytes = t.k & S_BYTES != 0;
                     if bytes {
                         any_bytes = true;
@@ -1445,8 +1444,11 @@ impl<'a> Parser<'a> {
                     let body = string_body(self.src, t);
                     let how = literal::Body { raw: t.k & S_RAW != 0, bytes, braces: false };
                     if let Err(why) = literal::body(body, how, &mut self.text) {
+                        // (Python decodes the string as it takes its token: its tokenizer has read no further)
+                        self.decode_at = Some(self.p);
                         return self.fatal_at(t.s, &why);
                     }
+                    self.advance();
                     let len = self.text.len() as u32 - at;
                     self.pieces.push(Piece::Text { at, len, s: t.s, e: t.e, u: t.k & S_U != 0 });
                     e = t.e;

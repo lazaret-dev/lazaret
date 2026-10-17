@@ -1393,6 +1393,12 @@ aggregate):
 
 ### Fixed
 
+- **The engine's Python parser reports a string it cannot decode where Python does (found by `test_pyparse_native_b`
+  when GH-SCAN-ALL's new files changed its seeded mutations).** Python decodes a string's escapes as its parser takes
+  the token, before its tokenizer reads the next one; the engine took the token first, so a backslash after the
+  string (`"\U0001F60\", \U0001D41A`, a mutation of the repository's own test inputs) was its error, "unexpected
+  character after line continuation character", where Python reports the string's error, or, as its tokenizer then
+  reads the rest of the text, an open bracket from a line before as "never closed". The error's line is Python's now.
 - **A binding.gyp string of many unclosed command expansions is read in linear time and memory (GYP-SLOW).** An
   unclosed expansion's command runs to the end of its string, and the reader copied every one before it read them up
   to its bound (2,000,000 characters of commands, then SC-TRUNCATED): 20,000 of them in one string held 2.4 GB, and

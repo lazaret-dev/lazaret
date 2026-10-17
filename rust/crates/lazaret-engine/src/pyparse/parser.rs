@@ -125,6 +125,10 @@ pub struct Parser<'a> {
     /// INDENT or a DEDENT, an error its tokenizer raises further on takes
     /// its place (`error`)
     pub err_specific: bool,
+    /// the string token whose escapes Python cannot decode: Python decodes a
+    /// string as its parser takes the token, before its tokenizer reads the
+    /// next one, so the read stopped there whatever was read ahead (`error`)
+    pub decode_at: Option<usize>,
 }
 
 /// What a read ahead puts back.
@@ -187,6 +191,7 @@ impl<'a> Parser<'a> {
             ahead_checked: 0,
             unchecked_at: usize::MAX,
             err_specific: false,
+            decode_at: None,
         }
     }
 
@@ -323,7 +328,7 @@ impl<'a> Parser<'a> {
     /// never closed (neither, where the tokenizer stopped inside an
     /// f-string).
     pub fn error(&mut self) -> (u32, String) {
-        let reached = self.p_max.max(self.p);
+        let reached = self.decode_at.unwrap_or_else(|| self.p_max.max(self.p));
         if let Some(f) = &self.lex_fail {
             if f.tok <= reached {
                 return (f.line, f.reason.clone());

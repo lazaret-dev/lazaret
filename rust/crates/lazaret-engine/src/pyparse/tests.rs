@@ -148,6 +148,13 @@ fn which_error_python_reports() {
     // (not inside an f-string; a string's escapes are the parser's)
     assert_eq!(error("a b\nf'{x!}'\n").0, 1);
     assert_eq!(error("a b\n'\\N{NOSUCH}'\n").0, 1);
+    // a string Python cannot decode is its error as its parser takes the token, before its tokenizer reads on: a
+    // backslash after it then makes a bracket opened on a line before "never closed", and on its own line it stands
+    assert_eq!(error("x = [\"a\",\n  \"\\U0001F60\\\", \"\\U0001D41A\", \"c\"]\n"),
+               (1, "'[' was never closed".to_string()));
+    assert_eq!(error("x = (\"a\",\n b\"\\xZZ\" \\q)\n"), (1, "'(' was never closed".to_string()));
+    assert_eq!(error("x = [\"\\U0001F60\\\", \"\\U0001D41A\", \"c\"]\n"),
+               (1, "truncated \\UXXXXXXXX escape".to_string()));
     // a bracket left open on a line before is reported
     assert_eq!(error("x = (1,\n2 3\n"), (1, "'(' was never closed".to_string()));
     // `$`, `?`, a backquote: tokens the parser refuses
