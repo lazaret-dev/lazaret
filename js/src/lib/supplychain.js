@@ -9,7 +9,7 @@
 import { mkIssue } from "./issue.js";
 import { truncatedIssue } from "./issue.js";
 import { pyRe, pyRepr, MAX_JSON_DEPTH, PY_ORDER } from "./pycompat.js";
-import { call, hookIsSuspicious, issuesOf, NativeExhausted, EXHAUSTED } from "./native.js";
+import { call, hookIsSuspicious, installScriptSeverity, issuesOf, NativeExhausted, EXHAUSTED } from "./native.js";
 import { REDACT, redactText } from "./redact.js";
 
 export { SECRET_RULES, REDACT_PLACEHOLDER, redactContextLine, redactResult, setRedactSecrets } from "./redact.js";
@@ -57,7 +57,8 @@ export const HOOK_COMMANDS = new WeakMap();
  */
 export function scInstallHookIssue(path, lineNo, lines, script, cmd, reasons, sev = null, hint = false) {
   const hostile = Boolean(reasons && reasons.length);
-  sev = sev || (hostile ? "CRITICAL" : "MAJOR");
+  // RA-12: a non-empty reason list is CRITICAL only when a reason is strong; a weaker one (cert-off) is MAJOR
+  sev = sev || (hostile && installScriptSeverity(reasons)) || "MAJOR";
   let msg, why;
   if (hostile) {
     msg = `"${script}" script ${reasons.join("; and ")}.`;

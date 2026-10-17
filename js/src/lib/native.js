@@ -244,9 +244,15 @@ export const installScriptRisk = (text, shell = true, command = false, lang = nu
   if (own) args.own = own;
   return call("install_script_risk", args, text);
 };
-/** The language a script runs in, for the tests that read its strings: "py" for a .py file, null for a
- * shell script (.sh), "js" for the rest (what node runs). core's engine.script_lang */
-export const scriptLang = (path) => (path.endsWith(".py") ? "py" : path.endsWith(".sh") ? null : "js");
+/** The language the tests read a script a hook runs in, its comments blanked in it: by its extension ("js" for
+ * .js, .mjs, .cjs, .ts…; "py" for .py, .pyw; null for a shell script, .sh, .bash…; "bat" for .cmd, .bat; "other" for
+ * another language's, .ps1, .pl, .rb, .vbs…); a file with no such extension, by its `#!` line (`text`: its text, of
+ * which its first line is read), else "js", what node runs. core's engine.script_lang (deps::script_lang) */
+export const scriptLang = (path, text = "") => {
+  const head = (text || "").slice(0, 512);
+  const nl = head.indexOf("\n");
+  return call("script_lang", { path }, nl >= 0 ? head.slice(0, nl) : head);
+};
 /** [reasons, line] of the weaker import-time test ([] and null if none); `lang` "py", "js" or null; `names`: the
  * package's [declared, own], when known (D-12: an install of a package it does not name is a reason; D-9: a
  * rewrite of its own code is its own). core.import_time_risk */
@@ -258,6 +264,9 @@ export const importTimeRisk = (text, lang = null, names = null) => {
 };
 /** "CRITICAL" when one of importTimeRisk's reasons is a strong one, else "MAJOR". */
 export const importTimeSeverity = (reasons) => call("import_time_severity", { reasons });
+/** "CRITICAL" when one of installScriptRisk's reasons is a strong one, else "MAJOR" when every reason is a weaker
+ * one (RA-12: TLS certificate verification turned off); null for no reasons. core.install_script_severity */
+export const installScriptSeverity = (reasons) => call("install_script_severity", { reasons });
 /** [targets, complete]: the files an install hook's command runs, and whether it was read to the end
  * ([[], true] for what is not a string, as core answers). */
 export const followHook = (cmd) => (typeof cmd === "string" ? call("follow_hook", {}, cmd) : [[], true]);

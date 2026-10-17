@@ -39,10 +39,10 @@ fn opt_int(args: &Value, name: &str) -> Option<i64> {
 pub const CALLS: &[&str] = &[
     "version", "batch", "pack.install", "pack.reset", "pack.info", "pyre.probe", "pyre.escape",
     // Phase 1: following install hooks, the install-script and import-time tests
-    "shlex_split", "hook_tokens", "follow_hook", "node_candidates", "node_e_codes", "shebang_lang",
+    "shlex_split", "hook_tokens", "follow_hook", "node_candidates", "node_e_codes", "shebang_lang", "script_lang",
     // a hook that runs files of the package alone (NEW-HOOK-FP)
     "hook_runs_only_files",
-    "install_script_risk", "import_time_risk", "import_time_severity", "decoded_view", "spawned_scripts",
+    "install_script_risk", "install_script_severity", "import_time_risk", "import_time_severity", "decoded_view", "spawned_scripts",
     "self_publish_at", "runs_dll", "join_string_pieces", "received_code_kind", "runs_received_code",
     "downloads_and_runs", "decodes_and_runs", "powershell_risk", "stager_at", "reverse_shell_at",
     "local_data_sent_at", "runs_own_source_at", "reads_own_source", "persistence_reasons",
@@ -724,7 +724,7 @@ fn deps_hooks(p: &Pack, args: &Value) -> Result<Value, CallError> {
             return Err(CallError::BadArgs("deps_hooks: a hook's manifest, severity and command".into()));
         };
         let line = a.get(1).and_then(|v| v.as_i64()).unwrap_or(1).max(0) as usize;
-        hooks.push(crate::deps::Hook { file, line, sev, cmd, msg: None });
+        hooks.push(crate::deps::Hook { file, line, sev, cmd, msg: None, weak_named: false });
     }
     let known = crate::deps::Known::from_value(args.get("known"));
     let manifests = path_flags(args, "manifests");
@@ -1750,6 +1750,8 @@ fn dispatch(name: &str, args: &Value, text: &[u32]) -> Result<Value, CallError> 
         "node_candidates" => strs(&hooks::node_candidates(text)),
         "node_e_codes" => strs(&hooks::node_e_codes(p, text)),
         "shebang_lang" => hooks::shebang_lang(p, text).map(Value::str).unwrap_or(Value::Null),
+        // the language the tests read a script in, by its path and its text (deps::script_lang)
+        "script_lang" => crate::deps::script_lang(p, &arg_str(args, "path")?, text).map(Value::str).unwrap_or(Value::Null),
         "install_script_risk" => {
             let shell = !matches!(args.get("shell"), Some(Value::Bool(false)));
             let command = matches!(args.get("command"), Some(Value::Bool(true)));
@@ -1775,6 +1777,9 @@ fn dispatch(name: &str, args: &Value, text: &[u32]) -> Result<Value, CallError> 
             Value::Arr(out)
         }
         "import_time_severity" => Value::str(signs::import_time_severity(p, &arg_strs(args, "reasons"))),
+        "install_script_severity" => {
+            signs::install_script_severity(p, &arg_strs(args, "reasons")).map(Value::str).unwrap_or(Value::Null)
+        }
         "decoded_view" => Value::Str(signs::decoded_view(p, text, lang)),
         "string_array_line" => signs::string_array_line(p, text, lang).map(|n| Value::Int(n as i64)).unwrap_or(Value::Null),
         "spawned_scripts" => Value::Arr(

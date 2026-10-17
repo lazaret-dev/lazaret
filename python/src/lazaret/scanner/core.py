@@ -87,6 +87,16 @@ def install_script_risk(text, shell=True, command=False, lang=None):
     return engine.install_script_risk(text, shell, command, lang)
 
 
+def install_script_severity(reasons):
+    """'CRITICAL' when one of the install-script reasons is a strong one, else
+    'MAJOR' when every reason is a weaker one (RA-12: TLS certificate
+    verification turned off); None for no reasons (the caller's own severity
+    stands). The severity of every finding the install-script test decides
+    (an install hook, an sdist's setup.py, a start-up module, a .pth line, a
+    build script, an editor's or agent's settings, an agent doc)."""
+    return _ask("install_script_severity", "", reasons=list(reasons))
+
+
 def import_time_risk(text, lang=None, declared=None, own=None):
     """(reasons, line): the import-time test of a dependency's file; `declared` and `own`, its package's names when
     known (engine.import_time_risks)."""
@@ -2301,7 +2311,7 @@ def _sc_install_hook_issue(path, line_no, lines, script, cmd, reasons, sev=None,
     reasons it looks hostile (hook_command_risk), else MAJOR (or `sev`);
     `hint`: the command runs a download or evaluation tool (INSTALL_HOOK_RE),
     worth reading, not evidence (0.1.8)."""
-    sev = sev or ("CRITICAL" if reasons else "MAJOR")
+    sev = sev or install_script_severity(reasons or []) or "MAJOR"
     if reasons:
         msg = f'"{script}" script {"; and ".join(reasons)}.'
         why = ("Install hooks execute automatically on npm install — the most common "

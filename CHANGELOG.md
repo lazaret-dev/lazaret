@@ -26,6 +26,42 @@ aggregate):
 
 ### Added
 
+- **Turning off TLS certificate verification, as a weaker install/build reason, and a Windows Script Host launcher
+  (RA-12, RA-11; the engine's, for both packages; rule set 2.92.0).** Install-script and build-script code that
+  disables TLS certificate verification is now a reason of the install-script test — a *weaker* one. A finding
+  whose only reason is it ("turns off TLS certificate verification") is **MAJOR** (WARN), not CRITICAL: a package
+  whose postinstall, `setup.py` or build script merely turns off certificate checks is a package to review, not an
+  exfil on its own, so one new engine function (`install_script_severity`, exposed as `core.install_script_severity`
+  and `installScriptSeverity`) decides the severity of every finding the install-script test makes — an install
+  hook and the scripts it runs, an sdist's `setup.py`, a build script or procedural macro, a start-up module, a
+  `.pth` line, what an editor's or agent's settings run, an agent doc — CRITICAL for any strong reason, MAJOR when
+  every reason is a weaker one (none for no reasons). A weaker reason never hides a strong one: what an editor's or
+  agent's settings run is followed past a command's or a file's cert-off to the files it runs (a folder-open task
+  `curl -k …; node evil.js` is CRITICAL for `evil.js`), and an install hook followed to its files (`--deps`, a
+  project's own hooks, the registry) names a file's cert-off in its MAJOR finding and is CRITICAL for a strong
+  reason in any of them. It is matched in code (comments blanked, in the lexer of the script's own language: its
+  extension, else its `#!` line — a `#!/bin/sh` script's or a `.cmd` file's `https://…` is not a JavaScript
+  comment, a batch file's `REM` and `::` lines are) in every language and the shell, and the constants
+  case-sensitively: Python (`verify=False`, `ssl._create_unverified_context`, `CERT_NONE`,
+  `check_hostname=False`), Node (`rejectUnauthorized: false`, `NODE_TLS_REJECT_UNAUTHORIZED=0`, `strictSSL: false`),
+  Go (`InsecureSkipVerify: true`), Rust (`danger_accept_invalid_certs(true)`), and `curl -k` / `--insecure`,
+  `wget --no-check-certificate`, `git -c http.sslVerify=false` (git's key in any case, as git reads it; or the
+  `git config … false` space form), `npm config set strict-ssl false`, `GIT_SSL_NO_VERIFY`. (Before, only a
+  project-mode SAST rule for a project's own Python saw it.) It is **not** an import-time reason: a library that
+  implements a `verify=False` option (urllib3, httpx, aiohttp, redis, docker …) is not an indicator when it is
+  merely imported. A Windows Script Host launcher — `wscript`, `cscript` or `mshta` launching a script — stays a
+  strong (CRITICAL) install reason ("runs a script with the Windows Script Host (…)", the launch alone, on one
+  line), mirroring the rundll32/regsvr32 one. It matches, in any case, only where the launcher runs: at a command's
+  start in shell text (a line's or a string's, after `;` `&&` `||` `|` `(` or `$(`, or after a wrapper such as
+  `cmd /c`, `start ""`, `call`, `powershell -c`, `Start-Process`), or as the program of an exec call in code
+  (`spawn('wscript', …)`, `subprocess.run(['cscript', …])`), with its options skipped and its argument on the same
+  line a `.vbs`/`.vbe`/`.js`/`.jse`/`.wsf`/`.wsh`/`.hta` file (any file after `//E:`) or, in code, not a literal —
+  `cp.exec('cscript ' + path.join(__dirname, 'x.vbs'))`, `` execSync(`cscript ${f}`) ``,
+  `subprocess.run(['wscript', p])`; not a name in prose (`run cscript setup.vbs to finish`), a comment, a LOLBin
+  list or a file named after one (`check-wscript.js`). Both are modeled on the proc-macro1 / arrayref build
+  script, whose four shapes (a client with certificate checks off, a host assembled from pieces, a dropped file run
+  with an argument, and the Windows Script Host launcher) are pinned by inert single-technique tests in the Rust
+  reader.
 - **A JavaScript file nested past the parser's bound is an indicator of its own where its code runs (JS-NEST; rule
   set 2.91.0).** The parser's nesting bound (`MAX_DEPTH`) is raised by half, from 256 to 384 — no file of the popular
   set or the benchmark reached the old bound, and the WebAssembly build on Node's main thread has room for about 2.5×

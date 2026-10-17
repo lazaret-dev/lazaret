@@ -928,18 +928,6 @@ fn dirname(path: &[u32]) -> PyStr {
     }
 }
 
-/// The language a script runs in (engine.script_lang): "py" for a .py file, None for a shell script, "js" for the
-/// rest (what node runs).
-fn script_lang(path: &[u32]) -> Option<&'static str> {
-    if pystr::ends_with(path, ".py") {
-        Some("py")
-    } else if pystr::ends_with(path, ".sh") {
-        None
-    } else {
-        Some("js")
-    }
-}
-
 fn normalize_newlines(text: &[u32]) -> PyStr {
     if !text.contains(&c('\r')) {
         return text.to_vec();
@@ -1012,12 +1000,14 @@ struct Risk {
     target: Option<PyStr>,
     outside: Option<PyStr>,
     approves: Option<(PyStr, Option<PyStr>)>,
+    // RA-12: the reasons hold a strong one (CRITICAL), not only a weaker one such as cert-off (MAJOR)
+    strong: bool,
 }
 
 fn risk(p: &Pack, command: &[u32], base: &[u32], tree: &mut Tree) -> Risk {
     let mut approval = approves(p, command).map(|m| (m, None));
-    let (reasons, target, outside) = risk_of(p, command, base, tree, &mut approval);
-    Risk { reasons, target, outside, approves: approval }
+    let (reasons, target, outside, strong) = risk_of(p, command, base, tree, &mut approval);
+    Risk { reasons, target, outside, approves: approval, strong }
 }
 
 fn risk_of(
@@ -1026,18 +1016,25 @@ fn risk_of(
     base: &[u32],
     tree: &mut Tree,
     approval: &mut Option<(PyStr, Option<PyStr>)>,
-) -> (Vec<PyStr>, Option<PyStr>, Option<PyStr>) {
+) -> (Vec<PyStr>, Option<PyStr>, Option<PyStr>, bool) {
     let mut reasons: Vec<PyStr> = Vec::new();
+    let mut strong = false;
     if let Some((agent, how)) = crate::signs::agent_hijack_in_command(p, command) {
         reasons.push(pystr::concat(&[&u("starts the AI agent \""), &agent, &u("\" with "), &how]));
+        strong = true;
     }
     reasons.extend(script_risk(p, command, None));
     reasons.extend(agent_reasons(p, command));
+    strong |= crate::signs::strong_install_reasons(p, &reasons);
     let targets = crate::hooks::follow_hook(p, &local_command(p, command)).0;
     let outside = targets.iter().find(|t| hidden_outside(p, t)).cloned();
-    if !reasons.is_empty() || !tree.follow {
-        return (reasons, None, outside);
+    if strong || !tree.follow {
+        return (reasons, None, outside, strong);
     }
+    // RA-12 review: a weaker reason (cert-off) does not end the search, the command's own or a file's: the files the
+    // command runs and the scripts they start are read still, and the first strong reason stands; with none, the
+    // first weaker one (the command's own, then a file's, then a script's it starts)
+    let mut weak: Option<(Vec<PyStr>, Option<PyStr>)> = if reasons.is_empty() { None } else { Some((reasons, None)) };
     for target in targets {
         if p.re("_AUTORUN_OUTSIDE_RE").match_(&target).is_some() {
             continue;                                 // (a file of the machine, not of the tree)
@@ -1050,17 +1047,23 @@ fn risk_of(
             Some(t) => t,
             None => continue,
         };
-        let lang = script_lang(&rel);
+        let lang = crate::deps::script_lang(p, &rel, &text);
         if approval.is_none() {
             *approval = approves(p, &text).map(|m| (m, Some(target.clone())));
         }
         let mut found = script_risk(p, &text, lang);
         found.extend(agent_reasons(p, &text));
-        if is_obfuscated(p, &text) {
+        let obf = is_obfuscated(p, &text);
+        if obf {
             found.push(u("is obfuscated"));
         }
         if !found.is_empty() {
-            return (found, Some(target), outside);
+            if obf || crate::signs::strong_install_reasons(p, &found) {
+                return (found, Some(target), outside, true);
+            }
+            if weak.is_none() {
+                weak = Some((found, Some(target.clone())));
+            }
         }
         // (0.1.8) the scripts it starts: a loader that fetches a runtime and runs a file of the tree with it
         for (where_, path) in crate::signs::spawned_scripts(p, &normalize_newlines(&text), lang) {
@@ -1070,17 +1073,26 @@ fn risk_of(
                 None => continue,
             };
             let more = match tree.read(&srel) {
-                Some(t) if !t.is_empty() => script_risk(p, &t, script_lang(&srel)),
+                Some(t) if !t.is_empty() => script_risk(p, &t, crate::deps::script_lang(p, &srel, &t)),
                 _ => Vec::new(),
             };
             if !more.is_empty() {
                 let refs: Vec<&[u32]> = more.iter().map(|x| x.as_slice()).collect();
                 let said = pystr::join(&u("; and "), &refs);
-                return (vec![pystr::concat(&[&u("starts "), &srel, &u(", which "), &said])], Some(target), outside);
+                let found = vec![pystr::concat(&[&u("starts "), &srel, &u(", which "), &said])];
+                if crate::signs::strong_install_reasons(p, &more) {
+                    return (found, Some(target), outside, true);
+                }
+                if weak.is_none() {
+                    weak = Some((found, Some(target.clone())));
+                }
             }
         }
     }
-    (Vec::new(), None, outside)
+    match weak {
+        Some((found, target)) => (found, target, outside, false),
+        None => (Vec::new(), None, outside, false),
+    }
 }
 
 fn rule(p: &Pack, name: &str, args: &[(&str, Arg)]) -> RuleText {
@@ -1485,7 +1497,7 @@ pub fn issues(p: &Pack, path: &[u32], text: &[u32], tree: &mut Tree) -> Result<V
             }
         };
         let shown = if cmd.len() <= show { cmd.clone() } else { pystr::concat(&[&cmd[..show], &[0x2026]]) };
-        let Risk { reasons, target, outside, approves } = risk(p, cmd, &base, tree);
+        let Risk { reasons, target, outside, approves, strong } = risk(p, cmd, &base, tree);
         if let Some((said, file)) = approves {
             let said = match file {
                 Some(f) => {
@@ -1497,7 +1509,7 @@ pub fn issues(p: &Pack, path: &[u32], text: &[u32], tree: &mut Tree) -> Result<V
             let args = [("trigger", Arg::S(e.trigger.clone())), ("shown", Arg::S(shown)), ("said", Arg::S(said))];
             out.push((e.line, rule(p, "_AGENT_APPROVE_RULE", &args)));
         }
-        let r = if reasons.is_empty() {
+        let mut r = if reasons.is_empty() {
             match outside {
                 Some(o) => rule(
                     p,
@@ -1531,6 +1543,10 @@ pub fn issues(p: &Pack, path: &[u32], text: &[u32], tree: &mut Tree) -> Result<V
                 ),
             }
         };
+        // RA-12: a command (or a file it runs) whose only risk is a weaker reason (cert-off) is MAJOR, not CRITICAL
+        if !reasons.is_empty() && !strong {
+            r.sev = u("MAJOR");
+        }
         out.push((e.line, r));
     }
     if let Some(root) = &root {

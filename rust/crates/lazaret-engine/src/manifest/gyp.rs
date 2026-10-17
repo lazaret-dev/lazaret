@@ -307,10 +307,12 @@ pub fn scan_gyp(p: &Pack, path: &[u32], content: &[u32], redact: bool) -> Vec<Va
     if hooks.len() > limit {
         let rest = &hooks[limit..];
         let bad = rest.iter().filter(|h| !h.reasons.is_empty()).count();
+        // RA-12: CRITICAL only when one of the rest has a strong reason; a weaker one (cert-off) alone is MAJOR
+        let strong = rest.iter().any(|h| crate::signs::strong_install_reasons(p, &h.reasons));
         let mut rule = RuleText::of(p, "_MF_INSTALL_HOOK_RULE");
-        rule.sev = pystr::u(if bad > 0 {
+        rule.sev = pystr::u(if strong {
             "CRITICAL"
-        } else if rest.iter().any(|h| h.sev != Some("INFO")) {
+        } else if bad > 0 || rest.iter().any(|h| h.sev != Some("INFO")) {
             "MAJOR"
         } else {
             "INFO"

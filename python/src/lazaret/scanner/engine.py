@@ -397,15 +397,16 @@ def agent_hijacks(items, texts=None):
     return [a if unanswered(a) or a is None else tuple(a) for a in answers]
 
 
-def script_lang(path):
-    """The language a script runs in, for the tests that read its strings:
-    "py" for a .py file, None for a shell script (.sh), "js" for the rest
-    (what node runs: a hook's target, a script it starts)."""
-    if path.endswith(".py"):
-        return "py"
-    if path.endswith(".sh"):
-        return None
-    return "js"
+def script_lang(path, text=""):
+    """The language the tests read a script a hook runs in (a hook's target,
+    a script it starts), its comments blanked in it (deps::script_lang): by
+    its extension ("js" for .js, .mjs, .cjs, .ts…; "py" for .py, .pyw; None
+    for a shell script, .sh, .bash…; "bat" for .cmd, .bat; "other" for
+    another language's, .ps1, .pl, .rb, .vbs…); a file with no such
+    extension, by its `#!` line (`text`: its text, of which its first line
+    is read), else "js", what node runs."""
+    head = (text or "")[:512]
+    return _native.call("script_lang", {"path": path}, head.split("\n", 1)[0] if "\n" in head else head)
 
 
 _ISSUE_KEYS = ("rule", "name", "type", "sev", "msg", "why", "fix", "ref")

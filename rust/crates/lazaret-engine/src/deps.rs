@@ -109,15 +109,37 @@ impl Facts {
     }
 }
 
-/// engine.script_lang: "py" for a .py file, None for a shell script, "js" for the rest (what node runs).
-pub fn script_lang(path: &[u32]) -> Option<&'static str> {
-    if pystr::ends_with(path, ".py") {
-        Some("py")
-    } else if pystr::ends_with(path, ".sh") {
-        None
-    } else {
-        Some("js")
+/// engine.script_lang: the language the tests read a script a hook (or an editor's or agent's settings, an agent
+/// doc) runs in, its comments blanked in it: by its extension (_SCRIPT_LANG_EXTS: "js" for .js, .mjs, .cjs, .jsx,
+/// .ts…; "py" for .py, .pyw; None for a shell script, .sh, .bash, .zsh…; "bat" for a batch file, .cmd, .bat; "other"
+/// for another language's, .ps1, .pl, .rb, .vbs…, whose comments are not blanked); a file with no such extension, by
+/// its `#!` line ("js" for node and the other JavaScript runtimes, "py", None for a shell, "other" for any other
+/// program); else "js", what node runs (`node install`).
+pub fn script_lang(p: &Pack, path: &[u32], text: &[u32]) -> Option<&'static str> {
+    let base = basename(path);
+    if let Some(k) = base.iter().rposition(|&x| x == '.' as u32).filter(|&k| k > 0) {
+        let ext = pystr::lower(&base[k..]);
+        for (kind, exts) in p.map_strs("_SCRIPT_LANG_EXTS") {
+            if exts.contains(&ext) {
+                return match pystr::to_string(kind).as_str() {
+                    "js" => Some("js"),
+                    "py" => Some("py"),
+                    "sh" => None,
+                    "bat" => Some("bat"),
+                    _ => Some("other"),
+                };
+            }
+        }
     }
+    if pystr::starts_with(text, "#!") {
+        return match crate::hooks::shebang_lang(p, text) {
+            Some("js") => Some("js"),
+            Some("py") => Some("py"),
+            Some("sh") => None,
+            _ => Some("other"),
+        };
+    }
+    Some("js")
 }
 
 /// `deps_script`: what the file `rel` ('/'-separated) a hook runs does, its text `text` (the walk's, or as the package
@@ -130,7 +152,7 @@ pub fn script_facts(p: &Pack, rel: &[u32], text: &[u32], project: bool, release:
     if text.is_empty() {
         return Value::Null;
     }
-    let lang = script_lang(rel);
+    let lang = script_lang(p, rel, text);
     let mut out: Vec<(&str, Value)> = Vec::new();
     let mut gone: Vec<Value> = Vec::new();
     let risk = own(|| {
@@ -656,6 +678,8 @@ pub struct Hook {
     pub sev: PyStr,
     pub cmd: PyStr,
     pub msg: Option<PyStr>,
+    /// a weaker reason (cert-off) of a file it runs named in `msg` already (escalate)
+    pub weak_named: bool,
 }
 
 /// What a follow keeps across hooks: the files read for it, the files hooks run, the manifests already said to be
@@ -684,12 +708,24 @@ impl Follow {
     }
 }
 
-/// The SC-INSTALL-HOOK finding made CRITICAL with `msg`, unless it already is: the first reason found stands
-/// (core._escalate_hook).
-fn escalate(p: &Pack, hook: &mut Hook, msg: PyStr, o: &Opts) -> R<()> {
-    if !pystr::eq(&hook.sev, "BLOCKER") && !pystr::eq(&hook.sev, "CRITICAL") {
+/// The SC-INSTALL-HOOK finding made CRITICAL with `msg`, unless it already is: the first strong reason found stands
+/// (core._escalate_hook). RA-12: only a strong `reasons` makes it CRITICAL; a weaker one (cert-off) alone leaves the
+/// hook MAJOR, its message then `msg` so the finding names the reason (the first such follow's, as the registry's
+/// _follow_hooks does), and the follow goes on: a strong reason after it still makes it CRITICAL.
+fn escalate(p: &Pack, hook: &mut Hook, msg: PyStr, reasons: &[PyStr], o: &Opts) -> R<()> {
+    let strong = crate::signs::strong_install_reasons(p, reasons);
+    let take = if strong {
+        !pystr::eq(&hook.sev, "BLOCKER") && !pystr::eq(&hook.sev, "CRITICAL")
+    } else {
+        !reasons.is_empty() && pystr::eq(&hook.sev, "MAJOR") && !hook.weak_named
+    };
+    if take {
         let msg = if o.redact { own(|| crate::redact::redact_text(p, &msg, None))? } else { msg };
-        hook.sev = u("CRITICAL");
+        if strong {
+            hook.sev = u("CRITICAL");
+        } else {
+            hook.weak_named = true;
+        }
         hook.msg = Some(msg);
     }
     Ok(())
@@ -764,7 +800,7 @@ fn follow_dependency(p: &Pack, tree: &mut Tree, f: &mut Follow, names: &mut Inst
     }
     let persist = own(|| crate::signs::persistence_reasons(p, &cmd))?;
     if !persist.is_empty() {
-        escalate(p, hook, format(&p.text("_DEPS_HOOK_COMMAND_MSG"), &[("reasons", Arg::S(joined(&persist)))]), o)?;
+        escalate(p, hook, format(&p.text("_DEPS_HOOK_COMMAND_MSG"), &[("reasons", Arg::S(joined(&persist)))]), &persist, o)?;
     }
     follow_targets(p, tree, f, hook, o, false, &base, &release)
 }
@@ -815,7 +851,7 @@ fn follow_targets(
         if let Some(fa) = &facts {
             let reasons = reasons_of(p, fa, project)?;
             if !reasons.is_empty() {
-                escalate(p, hook, runs_msg(p, &target, &reasons), o)?;
+                escalate(p, hook, runs_msg(p, &target, &reasons), &reasons, o)?;
             }
             if !project {
                 if let Some(issue) = fa.agent()? {
@@ -827,7 +863,7 @@ fn follow_targets(
             let Some(sf) = sfacts else { continue };
             let more = reasons_of(p, &sf, project)?;
             if !more.is_empty() {
-                escalate(p, hook, starts_msg(p, &target, &started, base, &more), o)?;
+                escalate(p, hook, starts_msg(p, &target, &started, base, &more), &more, o)?;
             }
         }
     }

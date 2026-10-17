@@ -348,7 +348,7 @@ SAMPLE = 8192              # header/entropy sample read from oversized files
 #      entry points and hook targets, Python install scripts
 # 2.3: verdict tiers, decoded hex, install-script inspection; 2.2:
 #      verdict-integrity; 2.1: binary-artifact awareness
-ENGINE_VERSION = "2.91.0"
+ENGINE_VERSION = "2.92.0"
 
 # ---------------- The content memo (P-2a, registry/contentcache.py) ----------------
 # One per scan_package run: the engine answers once for content several of a
@@ -2703,9 +2703,11 @@ def startup_module_issue(rel, text):
     reasons = _engine.install_script_risk(text, lang="py")
     msg = f"{rel} is installed as {module} in site-packages, which Python imports at every start"
     msg += f", and it {'; and '.join(reasons)}." if reasons else "."
+    # RA-12: CRITICAL when the code looks hostile, MAJOR when the only reason is a weaker one (cert-off), else
+    # MAJOR as a capability to review
     return lazaret.mk_issue(
         {"id": "SC-SITECUSTOMIZE", "name": "Start-up module", "type": "HOTSPOT",
-         "sev": "CRITICAL" if reasons else "MAJOR", "msg": msg,
+         "sev": lazaret.install_script_severity(reasons) or "MAJOR", "msg": msg,
          "why": ("site.py imports sitecustomize (and usercustomize, when the user site is "
                  "enabled) whenever the interpreter starts, whether or not the package is "
                  "imported — the persistence and execution vector of a .pth file, with no "
@@ -3835,14 +3837,14 @@ class _ArtifactScan:
             rel, text = self._action_script(how, path)
             if rel is None:
                 continue
-            lang = _engine.script_lang(rel)
+            lang = _engine.script_lang(rel, text)
             reasons = _engine.install_script_risk(text, lang=lang, own=self._own_name()) if text else []
             out.append((rel, reasons))
             # (a step's script runs in the job's workspace: only a path built from its own place is the action's)
             for started, more in self._started_scripts(rel, text, None, self.install_scripts):
                 self.action_entries.setdefault(started, []).append(how)
-                more = (_engine.install_script_risk(more, lang=_engine.script_lang(started), own=self._own_name())
-                        if more else [])
+                more = (_engine.install_script_risk(more, lang=_engine.script_lang(started, more),
+                                                    own=self._own_name()) if more else [])
                 out.append((f"{rel}, which starts {started}", more))
         return out
 
@@ -4011,6 +4013,17 @@ class _ArtifactScan:
             clean = (complete and bool(targets) and lazaret.hook_runs_only_files(issue["cmd"])
                      and not lazaret._hook_is_suspicious(issue["cmd"]))
             runs = []
+            # RA-12: a weaker-only reason (cert-off) takes over the message once, so the MAJOR finding names it;
+            # a strong reason escalates to CRITICAL. The first reason found stands at each level (_escalate).
+            weak_named = [False]
+            def _escalate(reasons, msg):
+                if lazaret.install_script_severity(reasons) == "CRITICAL":
+                    if issue["sev"] not in STRONG_SEVERITIES:
+                        issue["sev"] = "CRITICAL"
+                        issue["msg"] = msg
+                elif issue["sev"] == "MAJOR" and not weak_named[0]:
+                    issue["msg"] = msg
+                    weak_named[0] = True
             if not complete:            # a limit stopped the walk (core.HOOK_MAX_CHARS)
                 self.truncate(issue["file"], "its install hook is more than Lazaret follows "
                               f"({lazaret.HOOK_MAX_COMMANDS:,} commands, {lazaret.HOOK_MAX_TARGETS} "
@@ -4027,19 +4040,19 @@ class _ArtifactScan:
                 text = self._text_of(rel, lang)
                 clean = clean and bool(text)
                 runs.append(rel)
-                reasons = (_engine.install_script_risk(text, lang=_engine.script_lang(rel), own=self._own_name())
-                           if text else [])
-                if reasons and issue["sev"] not in STRONG_SEVERITIES:
-                    issue["sev"] = "CRITICAL"
-                    issue["msg"] = f"Install hook runs {target}, which {'; and '.join(reasons)}."
+                reasons = (_engine.install_script_risk(text, lang=_engine.script_lang(rel, text),
+                                                       own=self._own_name()) if text else [])
+                if reasons:
+                    clean = False       # a followed script with any reason (weak ones too) is not "read clean"
+                    _escalate(reasons, f"Install hook runs {target}, which {'; and '.join(reasons)}.")
                 # the scripts it starts with node or python (0.1.8, core.spawned_scripts)
                 for started, more in self._started_scripts(rel, text, base, self.install_scripts):
                     runs.append(started)
-                    more = (_engine.install_script_risk(more, lang=_engine.script_lang(started), own=self._own_name())
-                            if more else [])
-                    if more and issue["sev"] not in STRONG_SEVERITIES:
-                        issue["sev"] = "CRITICAL"
-                        issue["msg"] = (f"Install hook runs {target}, which starts {started}, which "
+                    more = (_engine.install_script_risk(more, lang=_engine.script_lang(started, more),
+                                                        own=self._own_name()) if more else [])
+                    if more:
+                        clean = False
+                        _escalate(more, f"Install hook runs {target}, which starts {started}, which "
                                         f"{'; and '.join(more)}.")
             if clean and issue["sev"] == "MAJOR":
                 self.hooks_read.append((issue, runs))
@@ -4096,7 +4109,8 @@ class _ArtifactScan:
             cur, cur_text, depth = queue.pop(0)
             if not cur_text or depth >= lazaret._SPAWN_MAX_DEPTH:
                 continue
-            for where, path in self._spawned_scripts(lazaret.normalize_newlines(cur_text), _engine.script_lang(cur)):
+            cur_lang = _engine.script_lang(cur, cur_text)
+            for where, path in self._spawned_scripts(lazaret.normalize_newlines(cur_text), cur_lang):
                 if where != "dir" and cwd is None:
                     continue
                 start = posixpath.dirname(cur) if where == "dir" else cwd
@@ -4150,7 +4164,7 @@ class _ArtifactScan:
             self.entries.add(rel)
             self.install_scripts.add(rel)
             text = self.sources.get(rel, ("", "py"))[0]
-            reasons = _engine.install_script_risk(text, lang=_engine.script_lang(rel), own=self._own_name())
+            reasons = _engine.install_script_risk(text, lang=_engine.script_lang(rel, text), own=self._own_name())
             # a download written to a file and run: CRITICAL in the code pip
             # runs to install an sdist (a prebuilt-binary installer's shape
             # keeps it MAJOR-only in npm hooks and import-time code)
@@ -4159,9 +4173,10 @@ class _ArtifactScan:
                 reasons.append("downloads a file and then runs it")
             if reasons:
                 lines = lazaret.normalize_newlines(text).split("\n")
+                # RA-12: CRITICAL for a strong reason, MAJOR when the only reason is a weaker one (cert-off)
                 self.issues.append(lazaret.mk_issue(
                     {"id": "SC-INSTALL-HOOK", "name": "Install hook", "type": "HOTSPOT",
-                     "sev": "CRITICAL",
+                     "sev": lazaret.install_script_severity(reasons),
                      "msg": f"{rel} runs when pip builds or installs this sdist, and it "
                             f"{'; and '.join(reasons)}.",
                      "why": ("pip executes an sdist's setup.py (or its in-tree build "
@@ -4250,7 +4265,8 @@ class _ArtifactScan:
         started = set()
         starts = [(rel, text) for rel in sorted(files) for text, lang in (self.sources.get(rel, (None, None)),)
                   if text and lang in ("js", "py") and rel not in self.install_scripts]
-        self._prefetch_spawned([(lazaret.normalize_newlines(text), _engine.script_lang(rel)) for rel, text in starts])
+        self._prefetch_spawned([(lazaret.normalize_newlines(text), _engine.script_lang(rel, text))
+                                for rel, text in starts])
         for rel, text in starts:
             self._started_scripts(rel, text, None, started)
         files = set(files) | {rel for rel in started if rel not in self.install_scripts}

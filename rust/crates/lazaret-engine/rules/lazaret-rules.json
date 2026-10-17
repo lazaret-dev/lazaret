@@ -1,6 +1,6 @@
 {
  "format": 1,
- "rule_set": "2.91.0",
+ "rule_set": "2.92.0",
  "source": "lazaret.scanner.core, extracted by scripts/make_rust_tables.py \u2014 do not edit",
  "values": {
   "ALWAYS_PRUNE_DIRS": {
@@ -5923,6 +5923,10 @@
      ]
     }
    }
+  },
+  "_CERT_OFF_RE": {
+   "flags": "",
+   "re": "\\bverify['\\\"]?\\s*[:=]\\s*False\\b|_create_unverified_context|\\bCERT_NONE\\b|\\bcheck_hostname\\s*=\\s*False\\b|\\brejectUnauthorized['\\\"]?\\s*[:=]\\s*false\\b|\\bNODE_TLS_REJECT_UNAUTHORIZED['\\\"]?\\s*\\]?\\s*[:=]\\s*['\\\"]?0|\\bstrictSSL['\\\"]?\\s*[:=]\\s*false\\b|\\bInsecureSkipVerify\\s*[:=]\\s*true\\b|danger_accept_invalid_certs\\s*\\(\\s*true|danger_accept_invalid_hostnames\\s*\\(\\s*true|\\bGIT_SSL_NO_VERIFY\\b|(?i:\\bhttp\\.(?:[^\\s=]*\\.)?sslverify\\s*=?\\s*false)\\b|\\bstrict-ssl\\s*=?\\s*false\\b|--no-check-certificate\\b|\\bcurl\\b[^\\n`|;&]{0,160}?[\\s'\\\",]--insecure\\b|\\bcurl\\b[^\\n`|;&]{0,160}?[\\s'\\\",]-[A-Za-z]*k\\b"
   },
   "_CFG_JWT_IO_PAYLOAD": {
    "value": "eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ"
@@ -15840,6 +15844,61 @@
    "flags": "",
    "re": "(?:^|(?<=[\\s\\[(,'\"`/\\\\]))(?P<name>bash|sh|zsh|dash|ksh|node|nodejs|deno|bun|pwsh|powershell|perl|ruby|php|osascript|cscript|wscript)(?:\\.exe)?(?=['\"`\\s,\\])])"
   },
+  "_SCRIPT_LANG_EXTS": {
+   "map": {
+    "bat": {
+     "set": [
+      ".bat",
+      ".cmd"
+     ]
+    },
+    "js": {
+     "set": [
+      ".cjs",
+      ".cts",
+      ".js",
+      ".jsx",
+      ".mjs",
+      ".mts",
+      ".ts",
+      ".tsx"
+     ]
+    },
+    "other": {
+     "set": [
+      ".hta",
+      ".jse",
+      ".lua",
+      ".php",
+      ".pl",
+      ".pm",
+      ".ps1",
+      ".psm1",
+      ".rb",
+      ".tcl",
+      ".vbe",
+      ".vbs",
+      ".wsf"
+     ]
+    },
+    "py": {
+     "set": [
+      ".py",
+      ".pyw"
+     ]
+    },
+    "sh": {
+     "set": [
+      ".ash",
+      ".bash",
+      ".dash",
+      ".ksh",
+      ".sh",
+      ".zsh"
+     ]
+    }
+   }
+  },
   "_SCRIPT_LOAD_RE": {
    "flags": "",
    "re": "\\b(?P<fork>fork)\\s*\\(|\\b(?:execfile|run_path)\\s*\\(|(?<![\\w$.])exec\\s*\\(\\s*open\\s*\\("
@@ -18471,6 +18530,13 @@
    "flags": "",
    "re": "\\s*(?:\\{|\\[|dict\\s*\\(|(?:[A-Za-z_][\\w.]*\\.)?(?:redirect|jsonify|url_for|send_file|send_from_directory|send_static_file|abort|render_template)\\s*\\()"
   },
+  "_WEAK_INSTALL_REASONS": {
+   "list": [
+    {
+     "value": "turns off TLS certificate verification"
+    }
+   ]
+  },
   "_WFX_ASSIGN_RE": {
    "flags": "",
    "re": "[A-Za-z_][A-Za-z0-9_]*="
@@ -19693,6 +19759,50 @@
      ]
     }
    }
+  },
+  "_WSH_EXEC_RE": {
+   "flags": "",
+   "re": "(?:\\b(?:execSync|exec|execFileSync|execFile|spawnSync|spawn|execaSync|execa|system|popen|Popen|run|call|check_call|check_output|getoutput|getstatusoutput|create_subprocess_exec|create_subprocess_shell|startfile|Run|Exec|ShellExecute|ShellExecuteEx)|\\bCommand::new|\\bnew\\s+Command|\\bProcessBuilder)\\s*$"
+  },
+  "_WSH_LAUNCHER_RE": {
+   "flags": "i",
+   "re": "(?<![\\w.\\-%$])(?:[A-Za-z]:)?[\\\\/]?(?:[\\w.\\-%$~{}]+[\\\\/])*(?:wscript|cscript|mshta)(?:\\.exe)?\\b"
+  },
+  "_WSH_SCRIPT_RE": {
+   "flags": "i",
+   "re": "[\\w\\-]\\.(?:vbs|vbe|js|jse|wsf|wsh|hta)\\b"
+  },
+  "_WSH_WRAPPERS": {
+   "set": [
+    "ash",
+    "bash",
+    "call",
+    "cmd",
+    "command",
+    "dash",
+    "do",
+    "else",
+    "env",
+    "eval",
+    "exec",
+    "iex",
+    "invoke-expression",
+    "ksh",
+    "nice",
+    "nohup",
+    "powershell",
+    "pwsh",
+    "runas",
+    "saps",
+    "sh",
+    "start",
+    "start-process",
+    "sudo",
+    "then",
+    "time",
+    "wine",
+    "zsh"
+   ]
   },
   "_WS_ADDRESS_RE": {
    "flags": "",

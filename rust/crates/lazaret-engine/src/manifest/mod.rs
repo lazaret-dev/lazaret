@@ -151,7 +151,8 @@ pub fn data_value(v: &PyVal) -> Value {
 /// `hint`: it runs a download or evaluation tool, worth reading, not evidence.
 pub fn hook_finding(p: &Pack, line: usize, script: &[u32], cmd: &[u32], reasons: &[PyStr], sev: Option<&str>, hint: bool) -> Finding {
     let mut rule = RuleText::of(p, "_MF_INSTALL_HOOK_RULE");
-    let sev = sev.unwrap_or(if reasons.is_empty() { "MAJOR" } else { "CRITICAL" });
+    // RA-12: a non-empty reason list is CRITICAL only when a reason is strong; a weaker one (cert-off) is MAJOR
+    let sev = sev.or_else(|| crate::signs::install_script_severity(p, reasons)).unwrap_or("MAJOR");
     rule.sev = pystr::u(sev);
     let args = |extra: (&'static str, Arg)| vec![("script", Arg::S(script.to_vec())), extra];
     if !reasons.is_empty() {

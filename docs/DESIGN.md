@@ -804,6 +804,92 @@ three reasons: `npm publish`, npm tokens collected, a DLL of the package's own
 run with rundll32 / regsvr32 (`core.runs_dll`, which reads the text again with
 adjacent string literals joined).
 
+The install-script test gained two more reasons in 0.1.9 (RA-12, RA-11).
+*TLS certificate verification turned off* (`_CERT_OFF_RE`, matched in code —
+the lexers blank a JavaScript or Python text's comments, and Python's
+docstrings, before the pattern reads it, so a mention in a comment is not a
+reason — case-sensitively over every language and the shell: Python
+`verify=False` / `ssl._create_unverified_context` / `CERT_NONE` /
+`check_hostname=False`, Node `rejectUnauthorized: false` /
+`NODE_TLS_REJECT_UNAUTHORIZED=0` / `strictSSL: false`, Go `InsecureSkipVerify:
+true`, Rust `danger_accept_invalid_certs(true)` /
+`danger_accept_invalid_hostnames(true)`, and `GIT_SSL_NO_VERIFY`,
+`http.sslVerify=false` (git reads its config keys in any case, so this key —
+and a URL's `http.<url>.sslVerify` — is matched in any case, the only part of
+the pattern that is; and the `git config … false` space form),
+`npm config set strict-ssl false`, `wget --no-check-certificate`, `curl
+--insecure`, and a `curl` short-option cluster ending in `k` whose gap to the
+option stops at a shell separator) — before 0.1.9 only a project-mode SAST rule
+for a project's own Python saw it, so a dependency's build script that disabled
+it went unremarked. A script's comments are blanked in the lexer of its real
+language (`signs::comment_lexer`): its `#!` line's when it has one (node and
+the other JavaScript runtimes, Python; a shell's comments are blanked by the
+shell reader before the test reads the script, and any other program's are not
+blanked), else the language `deps::script_lang` gives its file by extension
+(`_SCRIPT_LANG_EXTS`: `.js` `.mjs` `.cjs` `.jsx` `.ts` `.mts` `.cts` `.tsx`
+JavaScript, `.py` `.pyw` Python, `.sh` `.bash` `.zsh` `.ksh` `.dash` `.ash` a
+shell, `.cmd` `.bat` a batch file — read without its `REM` and `::` lines,
+`signs::bat_without_comments` — and `.ps1` `.pl` `.rb` `.vbs` … another
+language, not blanked), a file with none of those extensions by its `#!` line,
+else as JavaScript (what node runs). So a shell script's or a batch file's
+`https://…` is not taken for a JavaScript comment. It is a **weaker** reason:
+it is read only at install and build time (never at import time, where a
+library's `verify=False` option is not an indicator), and a finding whose only
+reason is it is MAJOR, not CRITICAL — a package to review, not an exfil on its
+own. `signs::install_script_severity` (`core.install_script_severity`)
+decides that for every finding the install-script test makes — an install
+hook and the scripts it runs, an sdist's `setup.py`, a build script or
+procedural macro, a start-up module, a `.pth` line, what an editor's or
+agent's settings run, an agent doc — returning CRITICAL when any reason is
+strong, MAJOR when every reason is a weaker one (`_WEAK_INSTALL_REASONS`), and
+None for no reasons (the finding's own severity stands). A weaker reason never
+hides a strong one: what an editor's or agent's settings run (`autorun.rs`)
+is followed past a command's or a file's weaker reason to the files it runs
+and the scripts they start, and the first strong reason stands (else the first
+weaker one); an install hook followed to the files it runs (`--deps` and a
+project's own hooks, `deps.rs`; the registry's `_follow_hooks`) names a file's
+weaker reason in its MAJOR finding (`Install hook runs setup.js, which turns
+off TLS certificate verification.`) and is CRITICAL for a strong one in any
+file it runs, whichever comes first; an agent doc, a build script, a `.pth`
+line and a start-up module read every reason before their severity is
+decided. *A Windows Script Host launcher* (`signs::runs_wsh`, mirroring
+`runs_dll`): `wscript`, `cscript` or `mshta` (`_WSH_LAUNCHER_RE`, in any case,
+a drive, a path or `%SystemRoot%\` before it; not a file named after one,
+`check-wscript.js` or `wscript.js`) launching a script, a *strong* (CRITICAL)
+reason of the install-script test only. It is a launch only where the
+launcher runs (`wsh_launch_at`). In shell text — a hook's command, a shell
+script, a batch file, or the text of a string — the launcher is at a command's
+start: a line's or the string's, after `;` `&` `|` (so `&&`, `||`) `(` `)` a
+backtick or `$(`, or after a wrapper that runs the command it is given
+(`_WSH_WRAPPERS`: `cmd /c`, `start ""`, `call`, `powershell -c`,
+`Start-Process -FilePath`, `sh -c`, `exec`, `then` …: the command's first word
+a wrapper and the last before the launcher a wrapper, its option or a quoted
+title), and a string so placed stands where a command line does — as a
+shell's command (`sh -c '…'`), or where code puts one (an argument, a list
+element, a value assigned, joined or returned; not a word's argument such as
+`echo '…'`). In code the launcher is also the program of an exec call in argv
+form, a list's first element or an exec call's first argument
+(`_WSH_EXEC_RE`: `spawn`, `execFile`, `subprocess.run`, `Popen`,
+`Command::new` …). Its options (`//nologo`, `//B`, `//E:jscript`, `/e:…`,
+`-ArgumentList`) are skipped, and its first other argument, on the same line
+(an argv's elements may be on lines of their own), must be a script file with
+a stem (`.vbs` / `.vbe` / `.js` / `.jse` / `.wsf` / `.wsh` / `.hta`:
+`_WSH_SCRIPT_RE`), or any file once `//E:` names the engine, or not a literal:
+a variable or a call (`subprocess.run(['wscript', p])`), a template's `${…}`
+(`` `cscript ${f}` ``), an f-string's `{…}`, `%f%`, `$f`, or what is joined to
+the string after it (`cp.exec('cscript ' + path.join(__dirname, 'x.vbs'))`).
+A launcher named in prose (`run cscript setup.vbs to finish`, `echo please run
+cscript setup.vbs`, `Usage: cscript tool.vbs`), in a comment, in a LOLBin list
+(`['mshta.exe', 'wscript.exe']`), or followed by its script on the next line is
+not one. The reason shows the launch alone, on one line — the launcher, its
+options and that argument (`runs a script with the Windows Script Host
+(cscript + path.join(__dirname, 'x.vbs'))`). The text is lexed only when it, or
+its string pieces joined (`'wsc'+'ript x.v'+'bs'`), name a launcher, and the
+pieces are joined once for this and the DLL launcher. Both are the single techniques of the proc-macro1 /
+arrayref build-script shape (a build script that fetches a stage over a
+connection with certificate checks off, drops it and runs it), each pinned by
+an inert test in `rsread/tests.rs`.
+
 Also 0.1.8, both engines: programs set to start at login or boot are a reason
 of the install-script test only (`core.service_reasons`, from
 `persistence_reasons`): a systemd unit written (a unit directory and a file

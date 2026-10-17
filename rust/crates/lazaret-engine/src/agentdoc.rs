@@ -447,19 +447,6 @@ fn script_risk(p: &Pack, text: &[u32], lang: Option<&str>) -> Vec<PyStr> {
     without_local_addresses(p, text, crate::signs::install_script_risk(p, text, lang))
 }
 
-/// The language a followed script is read in, by its extension: Python, JavaScript (TypeScript too), or None — a
-/// shell, PowerShell, Ruby or Perl script, read as text (never as JavaScript).
-fn script_lang(path: &[u32]) -> Option<&'static str> {
-    let low = pystr::lower(path);
-    if pystr::ends_with(&low, ".py") {
-        Some("py")
-    } else if [".js", ".mjs", ".cjs", ".ts", ".mts", ".cts"].iter().any(|e| pystr::ends_with(&low, e)) {
-        Some("js")
-    } else {
-        None
-    }
-}
-
 /// A finding reason: (1-based line, whether it is a hostile shape, the phrase for the message).
 struct Reason {
     line: usize,
@@ -528,7 +515,7 @@ pub fn issues(
                 if !risk.is_empty() {
                     reasons.push(Reason {
                         line: cand.line,
-                        strong: true,
+                        strong: crate::signs::strong_install_reasons(p, &risk),
                         phrase: pystr::concat(&[&u("tells the agent to run code that "), &said(&risk), &u(" (`"), &shown(&cand.text), &u("`)")]),
                     });
                 }
@@ -549,7 +536,7 @@ pub fn issues(
                         };
                         reasons.push(Reason {
                             line: at,
-                            strong: true,
+                            strong: crate::signs::strong_install_reasons(p, &risk),
                             phrase: pystr::concat(&[&lead, &said(&risk), &u(" (`"), &shown(&what), &u("`)")]),
                         });
                     }
@@ -561,11 +548,11 @@ pub fn issues(
                 for (target, joined) in local_scripts(p, &cand.text) {
                     let Some(rel) = crate::autorun::tree_join(&base, &joined) else { continue };
                     if let Some(t) = tree.read(&rel) {
-                        let risk = script_risk(p, &t, script_lang(&rel));
+                        let risk = script_risk(p, &t, crate::deps::script_lang(p, &rel, &t));
                         if !risk.is_empty() {
                             reasons.push(Reason {
                                 line: cand.line,
-                                strong: true,
+                                strong: crate::signs::strong_install_reasons(p, &risk),
                                 phrase: pystr::concat(&[&u("points the agent at "), &target, &u(", which "), &said(&risk)]),
                             });
                         }
@@ -812,12 +799,15 @@ mod tests {
 
     #[test]
     fn script_languages() {
-        assert_eq!(script_lang(&u("a/x.py")), Some("py"));
-        assert_eq!(script_lang(&u("a/x.ts")), Some("js"));
-        assert_eq!(script_lang(&u("a/x.MJS")), Some("js"));
-        assert_eq!(script_lang(&u("a/x.rb")), None);
-        assert_eq!(script_lang(&u("a/x.pl")), None);
-        assert_eq!(script_lang(&u("a/x.ps1")), None);
-        assert_eq!(script_lang(&u("a/x.sh")), None);
+        // a followed script is read in deps::script_lang's language: never Ruby, Perl or PowerShell as JavaScript
+        let p = crate::pack::current();
+        let lang = |path: &str| crate::deps::script_lang(&p, &u(path), &u(""));
+        assert_eq!(lang("a/x.py"), Some("py"));
+        assert_eq!(lang("a/x.ts"), Some("js"));
+        assert_eq!(lang("a/x.MJS"), Some("js"));
+        assert_eq!(lang("a/x.rb"), Some("other"));
+        assert_eq!(lang("a/x.pl"), Some("other"));
+        assert_eq!(lang("a/x.ps1"), Some("other"));
+        assert_eq!(lang("a/x.sh"), None);
     }
 }

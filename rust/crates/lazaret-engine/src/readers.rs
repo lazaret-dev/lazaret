@@ -61,9 +61,10 @@ fn joined(reasons: &[PyStr]) -> PyStr {
 }
 
 /// The issues of a reader's answer (`answer`: go_package's or rs_crate's, as the call answers it): [(the index of
-/// the file it is in, the issue)]. A build script and a procedural macro are SC-INSTALL-HOOK, CRITICAL for any
-/// reason; what runs at start (Go's init code, #[ctor]) the import-time test; the strong reasons of the rest
-/// SC-USE-RISK; //go:generate SC-GO-GENERATE (INFO).
+/// the file it is in, the issue)]. A build script and a procedural macro are SC-INSTALL-HOOK, CRITICAL for a strong
+/// reason and MAJOR when every reason is a weaker one (install_script_severity: TLS certificate verification turned
+/// off), the reasons of all the files it reads taken together; what runs at start (Go's init code, #[ctor]) the
+/// import-time test; the strong reasons of the rest SC-USE-RISK; //go:generate SC-GO-GENERATE (INFO).
 pub fn issues(p: &Pack, answer: &Value, r: &Reading) -> Vec<(usize, Value)> {
     let mut out: Vec<(usize, Value)> = Vec::new();
     let n = r.names.len();
@@ -101,7 +102,10 @@ pub fn issues(p: &Pack, answer: &Value, r: &Reading) -> Vec<(usize, Value)> {
             &text(p, "hook_msg"),
             &[("path", Arg::S(name(k))), ("how", Arg::S(variant(key))), ("reasons", Arg::S(joined(&reasons)))],
         );
-        issue("SC-INSTALL-HOOK", "CRITICAL", k, line_of(found), msg, p.text(why), variant("hook_fix"));
+        // RA-12: a build script / procedural macro is CRITICAL for any strong reason, MAJOR for a weaker one
+        // (cert-off) alone
+        let sev = crate::signs::install_script_severity(p, &reasons).unwrap_or("MAJOR");
+        issue("SC-INSTALL-HOOK", sev, k, line_of(found), msg, p.text(why), variant("hook_fix"));
     }
     let (start_how, start_why) = match r.what {
         "module" => (text(p, "start_module"), p.text("_GO_START_WHY")),

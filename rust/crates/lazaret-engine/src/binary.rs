@@ -345,8 +345,9 @@ pub fn pth_issues(p: &Pack, text: &[u32], redact: bool, neumaier: bool) -> Vec<V
         };
         let mut r = RuleText::of(p, "_PTH_RULE");
         r.msg = format(&r.msg, &[("tail", Arg::S(tail))]);
-        if !reasons.is_empty() {
-            r.sev = pystr::u("CRITICAL");
+        // RA-12: CRITICAL for a strong reason, MAJOR for a weaker one (cert-off) alone, MAJOR for none
+        if let Some(sev) = crate::signs::install_script_severity(p, &reasons) {
+            r.sev = pystr::u(sev);
         }
         found.push(Finding::new(r, i + 1, None));
     }
