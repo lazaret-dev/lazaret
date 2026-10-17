@@ -29,7 +29,9 @@ test("linear in the size of the file", () => {
     scanGyp("binding.gyp", text);
     const ms = performance.now() - t0;
     // about 2 s each on a quiet two-core machine, and twice that on a CI runner running other test files beside
-    // it (4,023 ms failed a budget of 4,000 there, Oct 10); the quadratic form took minutes, so 15 s still tells
+    // it (4,023 ms failed a budget of 4,000 there, Oct 10); the quadratic form took minutes, so 15 s still tells.
+    // The unclosed expansions took 7 to 8 s until 0.1.9's GYP-SLOW (each one's command, to the end of the string,
+    // was copied before the reader's bound was applied: 2.4 GB), and take under a second now
     assert.ok(ms < 15_000, `${label}: ${ms.toFixed(0)} ms`);
   }
 });

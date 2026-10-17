@@ -1393,6 +1393,12 @@ aggregate):
 
 ### Fixed
 
+- **A binding.gyp string of many unclosed command expansions is read in linear time and memory (GYP-SLOW).** An
+  unclosed expansion's command runs to the end of its string, and the reader copied every one before it read them up
+  to its bound (2,000,000 characters of commands, then SC-TRUNCATED): 20,000 of them in one string held 2.4 GB, and
+  took 1.4 s natively and 7 to 8 s in WebAssembly (14 s on a loaded machine, past `review-gyp.test.js`'s 15 s budget
+  with a build beside it). The reader now notes where each command is and copies only what it reads: 0.24 s and
+  52 MB natively, under a second in WebAssembly, and the same findings.
 - **A shell script's comments are not its commands (SH-COMMENT-FP; the engine's, for both packages; rule set
   2.88.0).** The install-script test read a shell script whole, comments too, and the shell reader had no notion of a
   comment: agent-sanitizer's `.claude/hooks/session-setup.sh` was SC-AUTORUN CRITICAL ("pipes a download into a

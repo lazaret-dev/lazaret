@@ -45,18 +45,17 @@ fn closing_parens(text: &[u32]) -> HashMap<usize, usize> {
     close
 }
 
-/// core._gyp_expansion_commands: (command, is_pymod) of every expansion in `text`, in order: the command up to its
-/// balanced closing parenthesis, or to the end of the string.
-fn expansion_commands(p: &Pack, text: &[u32]) -> Vec<(PyStr, bool)> {
+/// core._gyp_expansion_commands: where the command of every expansion in `text` is, in order, and whether it is a
+/// pymod_do_main's: (start, end, is_pymod), the command up to its balanced closing parenthesis, or to the end of the
+/// string. Places, not copies (GYP-SLOW, 0.1.9): an unclosed expansion's command runs to the end of the string, so
+/// the commands of n unclosed ones hold some n²/2 characters, which the caller reads only up to its bound.
+fn expansion_commands(p: &Pack, text: &[u32]) -> Vec<(usize, usize, bool)> {
     let close = closing_parens(text);
     let mut out = Vec::new();
     for m in p.re("_GYP_EXPANSION_RE").finditer(text) {
         let i = m.end() - 1;
-        let cmd = match close.get(&i) {
-            Some(&j) => text[i + 1..j].to_vec(),
-            None => text[i + 1..].to_vec(),
-        };
-        out.push((cmd, pystr::contains(m.group0(), "pymod_do_main")));
+        let end = close.get(&i).copied().unwrap_or(text.len());
+        out.push((i + 1, end, pystr::contains(m.group0(), "pymod_do_main")));
     }
     out
 }
@@ -167,9 +166,9 @@ fn commands(p: &Pack, data: &PyVal) -> (Vec<(PyStr, Kind, Option<usize>)>, Optio
             }
             PyVal::List(items) | PyVal::Tuple(items) | PyVal::Set(items) => stack.extend(items.iter()),
             PyVal::Str(s) if expansion.search(s).is_some() => {
-                for (cmd, pymod) in expansion_commands(p, s) {
-                    chars += cmd.len();
-                    out.push((cmd, if pymod { Kind::Pymod } else { Kind::Expansion }, None));
+                for (start, end, pymod) in expansion_commands(p, s) {
+                    chars += end - start;
+                    out.push((s[start..end].to_vec(), if pymod { Kind::Pymod } else { Kind::Expansion }, None));
                     if chars > max_chars {
                         break;
                     }
@@ -363,5 +362,20 @@ mod tests {
         assert_eq!(find(&u("aaab aab"), &u("aab")), Some(1));
         assert_eq!(find(&u("abc"), &u("abd")), None);
         assert_eq!(closing_parens(&u("a(b(c)d)(")).get(&1), Some(&7));
+    }
+
+    #[test]
+    fn an_unclosed_expansions_command_runs_to_the_end_of_its_string() {
+        let p = crate::pack::current();
+        let u = pystr::u;
+        assert_eq!(expansion_commands(&p, &u("<!(a) <!pymod_do_main(m) <!(b")), vec![(3, 4, false), (22, 23, true), (28, 29, false)]);
+        // GYP-SLOW: 20,000 unclosed ones are 20,000 places, and their commands are copied only up to the bound
+        let text: Vec<u32> = u(&format!("{}curl x", "<!(".repeat(20000)));
+        let places = expansion_commands(&p, &text);
+        assert_eq!((places.len(), places[0], places[19999]), (20000, (3, 60006, false), (60000, 60006, false)));
+        let (cmds, truncated) = commands(&p, &PyVal::Str(text.clone()));
+        let chars: usize = cmds.iter().map(|(c, _, _)| c.len()).sum();
+        assert!(chars <= p.usize("_GYP_MAX_COMMAND_CHARS") + text.len(), "{}", chars);
+        assert_eq!(truncated.as_deref(), Some("more than 2000000 characters of gyp commands"));
     }
 }
