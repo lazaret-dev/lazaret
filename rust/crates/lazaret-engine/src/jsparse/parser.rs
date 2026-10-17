@@ -9,8 +9,9 @@ use std::collections::HashMap;
 use super::scan::*;
 use super::tree::*;
 
-/// Nested statements, expressions and types.
-pub const MAX_DEPTH: u32 = 256;
+/// Nested statements, expressions and types (JS-NEST, 0.1.9: raised by half from 256, which none of the
+/// popular set's or benchmark's files reached; a file still refused for nesting is a MAJOR indicator).
+pub const MAX_DEPTH: u32 = 384;
 /// Tokens one speculative read may consume.
 pub const SPECULATION_TOKENS: i64 = 4096;
 /// … and all of a file's: this plus 2 per code point of it.

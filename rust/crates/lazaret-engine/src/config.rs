@@ -148,6 +148,12 @@ pub fn secret_value_in_code(p: &Pack, value: &[u32]) -> bool {
     if v.len() < 8 || !pystr::is_ascii(v) || pystr::is_space(v[0]) || any_of(v[0], "$%<{@!(*&~/.\\#[|>") {
         return false;
     }
+    // a PEM private key as the value is S-TOKEN's, not S-SECRET's (N-24: it is reported once, as a token): only a
+    // header S-TOKEN reads (`_PEM_BEGIN_RE`, `-----BEGIN … PRIVATE KEY-----`), so a PGP private key block, which
+    // S-TOKEN does not read, is still S-SECRET's
+    if p.re("_PEM_BEGIN_RE").match_(v).is_some() {
+        return false;
+    }
     if p.re("_CFG_URL_START_RE").match_(v).is_some()
         || p.re("_SRC_PLACEHOLDER_RE").search(v).is_some()
         || p.re("_CFG_NAME_RE").fullmatch(v).is_some()

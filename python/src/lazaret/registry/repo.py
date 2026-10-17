@@ -348,7 +348,7 @@ SAMPLE = 8192              # header/entropy sample read from oversized files
 #      entry points and hook targets, Python install scripts
 # 2.3: verdict tiers, decoded hex, install-script inspection; 2.2:
 #      verdict-integrity; 2.1: binary-artifact awareness
-ENGINE_VERSION = "2.90.0"
+ENGINE_VERSION = "2.91.0"
 
 # ---------------- The content memo (P-2a, registry/contentcache.py) ----------------
 # One per scan_package run: the engine answers once for content several of a
@@ -2838,29 +2838,70 @@ def _go_root_file(rel):
 #: JS-PARSE-STRICT: JavaScript of a package that the engine's parser refused (INFO): the tests that read a file's
 #: syntax tree read only its text there
 UNPARSED_CODE_RULE = "SC-UNPARSED-CODE"
+NESTED_CODE_RULE = "SC-NESTED-CODE"
+#: The parser's refusal reason for a file nested past its bound (jsparse MAX_DEPTH); such a file is the one shape
+#: V8 compiles that the parser refuses, so it is an indicator where its code runs, not inventory (JS-NEST, John
+#: Oct 15: "both"; Oct 17: MAJOR only where the code runs).
+_NESTING_REFUSAL = "nesting too deep"
+#: The passes that read a JavaScript member's tree and so say the parser refused it, strongest first: the
+#: install-script test (_unparsed_install_scripts) and the import-time test read code that runs when the package is
+#: installed or loaded; the use-time test and D-13's read of a module (_dev_only_loads), code that may never run.
+_UNPARSED_PASSES = ("install", "import", "use", "loads")
+_UNPARSED_RUNS = frozenset({"install", "import"})
 
 
-def _unparsed_code_issue(found):
-    """The SC-UNPARSED-CODE finding (INFO) for the JavaScript members the parser refused: `found`, rel -> (line,
-    reason), or None where the reason is not known (D-13's read of a module)."""
-    rels = sorted(found)
+def _unparsed_code_issues(found):
+    """The findings for the JavaScript members the parser refused: `found`, rel -> {pass (_UNPARSED_PASSES): (line,
+    reason), or None where the reason is not known (D-13's read of a module)}; a member several passes refused is
+    judged by the strongest of them. A file refused only because it nests past the parser's bound, in a pass whose code
+    runs at install or load time (_UNPARSED_RUNS), is SC-NESTED-CODE (MAJOR, an indicator: deep nesting is the one kind
+    of source V8 compiles that the parser refuses); the rest, nesting refused where the code may never run among them,
+    are SC-UNPARSED-CODE (INFO inventory), each with its reason. {} becomes no finding (JS-NEST)."""
+    strongest = {rel: min(by.items(), key=lambda kv: _UNPARSED_PASSES.index(kv[0])) for rel, by in found.items() if by}
+    nested = {rel: why for rel, (step, why) in strongest.items()
+              if step in _UNPARSED_RUNS and why and str(why[1]) == _NESTING_REFUSAL}
+    other = {rel: why for rel, (_step, why) in strongest.items() if rel not in nested}
+    why_of = {**nested, **other}
+    out = []
 
-    def one(rel):
-        why = found[rel]
-        return f"{rel} (line {why[0]}: {str(why[1])[:80]})" if why else rel
-    shown = ", ".join(one(r) for r in rels[:3]) + (", …" if len(rels) > 3 else "")
-    first = found[rels[0]]
-    return {"rule": UNPARSED_CODE_RULE, "name": "JavaScript the parser could not read", "type": "HOTSPOT",
-            "sev": "INFO",
-            "msg": (f"{len(rels)} JavaScript file{'' if len(rels) == 1 else 's'} the parser could not read ({shown}): "
-                    "the supply-chain tests that read a file's syntax tree read only its text there."),
-            "why": ("Most such files are broken, and Node refuses them too; but the parser is stricter than V8 in "
-                    "places (nesting past its bound), so a file Node runs could hide from the tests that read its "
-                    "tree: what it writes into another package, a program it carves out of another file, the modules "
-                    "it loads."),
-            "fix": "Check that the file is one Node would refuse (`node --check FILE`); if Node runs it, review it.",
-            "ref": "CWE-506 · Supply chain", "file": rels[0], "line": first[0] if first else 1, "snippet": [],
-            "snipStart": 1}
+    def shown(rels):
+        def one(rel):
+            why = why_of[rel]
+            return f"{rel} (line {why[0]}: {str(why[1])[:80]})" if why else rel
+        return ", ".join(one(r) for r in rels[:3]) + (", …" if len(rels) > 3 else "")
+
+    if nested:
+        rels = sorted(nested)
+        out.append({"rule": NESTED_CODE_RULE, "name": "JavaScript nested too deep for the parser", "type": "HOTSPOT",
+                    "sev": "MAJOR",
+                    "msg": (f"{len(rels)} JavaScript file{'' if len(rels) == 1 else 's'} nested past the parser's "
+                            f"bound ({shown(rels)}): the supply-chain tests that read a file's syntax tree read only "
+                            "its text there."),
+                    "why": ("Such a file runs when the package is installed or loaded, and deep nesting is the one kind "
+                            "of source V8 compiles that the parser refuses: the tests that read a file's syntax tree "
+                            "(another package's code it rewrites, a program it carves out of another file, the "
+                            "modules it loads) read only its text there. Code written by hand rarely nests that deep, "
+                            "but generated code can (long ternary chains, deep data literals)."),
+                    "fix": ("Review the file: if it is generated (minified, bundled, a data table), check it against "
+                            "its source; if not, read what it does."),
+                    "ref": "CWE-506 · Supply chain", "file": rels[0], "line": nested[rels[0]][0], "snippet": [],
+                    "snipStart": 1})
+    if other:
+        rels = sorted(other)
+        first = other[rels[0]]
+        out.append({"rule": UNPARSED_CODE_RULE, "name": "JavaScript the parser could not read", "type": "HOTSPOT",
+                    "sev": "INFO",
+                    "msg": (f"{len(rels)} JavaScript file{'' if len(rels) == 1 else 's'} the parser could not read "
+                            f"({shown(rels)}): the supply-chain tests that read a file's syntax tree read only its "
+                            "text there."),
+                    "why": ("Most such files are broken, and Node refuses them too; but the parser is stricter than "
+                            "V8 in places (nesting past its bound), so a file Node runs could hide from the tests that "
+                            "read its tree: what it writes into another package, a program it carves out of another "
+                            "file, the modules it loads."),
+                    "fix": "Check that the file is one Node would refuse (`node --check FILE`); if Node runs it, review it.",
+                    "ref": "CWE-506 · Supply chain", "file": rels[0], "line": first[0] if first else 1, "snippet": [],
+                    "snipStart": 1})
+    return out
 
 
 def _unread_code_issue(artifact, rels):
@@ -2931,7 +2972,7 @@ class _ArtifactScan:
         self.vsix_identity = None  # vsix: its package.json's publisher, name and version
         self.use_time = None       # what SC-USE-RISK's step read (_use_time_code), None: not run
         self.unread_code = []      # N-1: members whose code nothing reads yet (UNREAD_CODE)
-        self.unparsed = {}         # JS-PARSE-STRICT: JavaScript members the parser refused -> (line, reason) or None
+        self.unparsed = {}         # JS-PARSE-STRICT: JS members the parser refused -> {pass: (line, reason) or None}
         self.agent_docs = {}       # RA-3: rel -> raw, the AI-agent skill and instruction files (_agent_docs)
         self.code_text = {}        # rel -> raw: what a reader reads besides the scanned sources (a Go
         self.code_bytes = 0        # module's cgo C; an sdist's .rs and Cargo.toml files, N-17), kept
@@ -4225,7 +4266,7 @@ class _ArtifactScan:
                 self._unanswered(rel, risk)
                 continue
             reasons, line, refused = risk
-            self._note_unparsed(rel, refused)
+            self._note_unparsed(rel, refused, "import")
             if not reasons:
                 continue
             when, runs = "runs when the package is loaded", (
@@ -4291,19 +4332,20 @@ class _ArtifactScan:
             for (rel, text, lang), risk in zip(chunk, self._import_risks([(t, lg) for _r, t, lg in chunk], declared)):
                 yield rel, text, lang, risk
 
-    def _note_unparsed(self, rel, refused):
+    def _note_unparsed(self, rel, refused, step):
         """A JavaScript member the parser refused (import_time_risk's `refused`, js_refusal's: (line, reason)), its
-        tree unread by the tests that read one: kept for SC-UNPARSED-CODE. Not a TypeScript declaration, which
-        nothing runs."""
+        tree unread by the tests that read one: kept for SC-UNPARSED-CODE, or SC-NESTED-CODE, by the pass (`step`,
+        _UNPARSED_PASSES) that read it. Not a TypeScript declaration, which nothing runs."""
         if refused and not rel.lower().endswith(_TS_DECLARATIONS):
-            self.unparsed[rel] = refused
+            self.unparsed.setdefault(rel, {})[step] = refused
 
     def _unparsed_install_scripts(self):
         """The JavaScript install scripts (a hook's targets, the scripts they start) the parser refused, whose test
-        read only their text there (JS-PARSE-STRICT): kept for SC-UNPARSED-CODE, as the import-time test's are. The
+        read only their text there (JS-PARSE-STRICT): kept for SC-UNPARSED-CODE, as the import-time test's are (a file
+        D-13's read refused too is read here all the same: the install pass's reason is the stronger, JS-NEST). The
         parse alone (the engine's js_refusal), once for each distinct file: a few files, read once more."""
         todo = [(rel, lazaret.normalize_newlines(text)) for rel in sorted(self.install_scripts)
-                if rel not in self.unparsed and not rel.lower().endswith(_TS_DECLARATIONS)
+                if not rel.lower().endswith(_TS_DECLARATIONS)
                 for text, lang in (self.sources.get(rel, (None, None)),) if text and lang == "js"]
         if not todo:
             return
@@ -4316,7 +4358,7 @@ class _ArtifactScan:
                     for a in _engine.call_answers([asked[key] for key in missing], texts=self.texts)]
         for (rel, _t), refused in zip(todo, self.memo.get_or_compute_many(keys, compute)):
             if not _engine.unanswered(refused) and refused:
-                self._note_unparsed(rel, tuple(refused))
+                self._note_unparsed(rel, tuple(refused), "install")
 
     def _unanswered(self, rel, exc):
         """A file the engine could not read for a test (engine.unanswered):
@@ -4376,7 +4418,7 @@ class _ArtifactScan:
             self.use_time["files"] += 1
             self.use_time["chars"] += len(self.sources[rel][0])
             reasons, line, refused = risk
-            self._note_unparsed(rel, refused)
+            self._note_unparsed(rel, refused, "use")
             strong = [r for r in reasons if r.startswith(lazaret._STRONG_IMPORT_REASONS)]
             if not strong:
                 continue
@@ -4839,8 +4881,8 @@ class _ArtifactScan:
                  and any(_unused.quoted_in(dep, [t]) for dep in wanted)]
         found = {}
         for (rel, _t), loads in zip(files, self._js_loads(files)):
-            if loads is None:
-                self.unparsed.setdefault(rel, None)     # (the parser refused it: said, SC-UNPARSED-CODE)
+            if loads is None:                       # (the parser refused it, its reason unknown: SC-UNPARSED-CODE)
+                self.unparsed.setdefault(rel, {}).setdefault("loads", None)
                 continue
             if _engine.unanswered(loads) or not isinstance(loads, list):
                 continue
@@ -4951,7 +4993,7 @@ class _ArtifactScan:
         if self.unread_code:
             self.issues.append(_unread_code_issue(self.artifact, sorted(self.unread_code)))
         if self.unparsed:
-            self.issues.append(_unparsed_code_issue(self.unparsed))
+            self.issues.extend(_unparsed_code_issues(self.unparsed))
         if self.artifact == "vsix":
             self._vsix_hook_words()
         _demote_test_findings(self.issues, reachable if reachable is not None else self.entries)

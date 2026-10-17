@@ -319,7 +319,8 @@ class PartsTests(unittest.TestCase):
         self.assertEqual(sorted(prior.candidates([issue("SC-B64", "MAJOR"), issue("SC-BINARY", "MAJOR"),
                                                   issue("SC-OPAQUE-BLOB", "MINOR"), issue("SC-NESTED-ARCHIVE", "MINOR"),
                                                   issue("SC-TRUNCATED", "MAJOR"), issue("SC-UNUSED-DEPENDENCY", "INFO"),
-                                                  issue("S-EVAL-JS", "MAJOR"), issue("SC-INSTALL-HOOK", "MINOR")])),
+                                                  issue("S-EVAL-JS", "MAJOR"), issue("SC-INSTALL-HOOK", "MINOR"),
+                                                  issue("SC-NESTED-CODE", "MAJOR")])),     # (generated code: JS-NEST)
                          ["SC-B64", "SC-INSTALL-HOOK"])
         # an install hook read clean is not asked about (NEW-HOOK-FP); one that is not, beside it, is
         clean = dict(issue("SC-INSTALL-HOOK", "MAJOR"), readClean=True)

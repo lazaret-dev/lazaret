@@ -18,7 +18,8 @@ which V8 compiles and leaves to a ReferenceError when the line runs, and
 forms next to those). The one place left where the parser is stricter is
 nesting: it stops past MAX_DEPTH (jsparse), well short of V8, and a
 registry scan says which of a package's files it could not read
-(SC-UNPARSED-CODE). Skipped where node is missing.
+(SC-UNPARSED-CODE; SC-NESTED-CODE for one nested past the bound that runs
+when the package is installed or loaded). Skipped where node is missing.
 """
 import json
 import os
@@ -128,12 +129,13 @@ class JsParseVsV8Tests(unittest.TestCase):
                 self.assertFalse(self.parses(src))
 
     def test_nesting_past_the_bound_is_the_one_place_left(self):
-        # V8 compiles 1,000 nested arrays; the parser reads 127 (MAX_DEPTH, 256, counts two for each): such a file
-        # keeps only the text followers, and a registry scan says so (SC-UNPARSED-CODE)
-        deep = "x = " + "[" * 200 + "]" * 200 + ";\n"
+        # V8 compiles 1,000 nested arrays; the parser reads 191 (MAX_DEPTH, 384 since JS-NEST, counts two for each):
+        # such a file keeps only the text followers, and a registry scan says so (SC-NESTED-CODE, MAJOR, where the
+        # file runs at install or load time; SC-UNPARSED-CODE, INFO, elsewhere)
+        deep = "x = " + "[" * 192 + "]" * 192 + ";\n"
         self.assertTrue(self.v8(deep)["script"])
         self.assertFalse(self.parses(deep))
-        self.assertTrue(self.parses("x = " + "[" * 120 + "]" * 120 + ";\n"))
+        self.assertTrue(self.parses("x = " + "[" * 191 + "]" * 191 + ";\n"))
 
     def test_an_html_comment_hides_nothing_a_module_runs(self):
         # V8 refuses a module that holds an HTML-like comment (Node: "HTML comments are not allowed in modules"),

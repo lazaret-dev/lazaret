@@ -192,26 +192,58 @@ fn a_call_as_a_target_and_let_as_a_name_as_v8_reads_them() {
     }
 }
 
+/// The deepest nesting of `n` that still parses. n.8 is a depth known to parse (jsparse.py's, at the historical bound
+/// of 256; JS-NEST raised MAX_DEPTH to 384, so the real boundary is deeper), and the parser errors one past the
+/// deepest. Searched up from n.8, so the test needs no exact depth for each construct at the current bound
+/// (`every_nesting_ends_where_jsparse_ends_it` holds what it finds to the bound: RAISED_BOUND).
+fn deepest_ok(n: &Nesting) -> usize {
+    let mut d = n.8;
+    while parse(&cp(&nested(n, d + 1)), n.1, n.2).is_ok() {
+        d += 1;
+        assert!(d < 8 * MAX_DEPTH as usize, "{}: no nesting bound found by {}", n.0, d);
+    }
+    d
+}
+
+/// JS-NEST's bound: MAX_DEPTH raised by half, from jsparse.py's 256 (the depths of NESTINGS) to 384.
+const RAISED_BOUND: usize = 384;
+/// How much deeper than its jsparse.py depth scaled by RAISED_BOUND / 256 a construct reads: a construct's few levels
+/// of overhead (its head, the expression around it) are paid once, not scaled, so `arrows` reads 380, not 378.
+/// Measured at 384: 0 to 3 for each of the 51 (3 for `jsx attributes` and `tsx generic arrows`).
+const SCALED_SLACK: usize = 3;
+
 #[test]
 fn every_nesting_ends_where_jsparse_ends_it() {
-    for n in NESTINGS {
-        let deepest = nested(n, n.8);
-        assert!(parse(&cp(&deepest), n.1, n.2).is_ok(), "{} at {}", n.0, n.8);
-        assert_eq!(error(&nested(n, n.8 + 1), n.1, n.2), (1, n.9.to_string()), "{} at {}", n.0, n.8 + 1);
-    }
+    // on a worker with room, since at the raised bound the deepest read is deeper than a test thread's stack
+    let worker = std::thread::Builder::new().stack_size(16 * 1024 * 1024).spawn(|| {
+        for n in NESTINGS {
+            let d = deepest_ok(n);
+            // the bound is pinned: each construct reads half as deep again as at 256, within the levels it pays
+            // once (at 256 each reads n.8; at a bound more than SCALED_SLACK past 384 the cheapest read too deep)
+            let scaled = n.8 * RAISED_BOUND / 256;
+            assert!(scaled <= d && d <= scaled + SCALED_SLACK,
+                    "{} reads to {}, not its depth at 256 ({}) scaled to {} ({}, at most {} more)",
+                    n.0, d, n.8, RAISED_BOUND, scaled, SCALED_SLACK);
+            assert!(parse(&cp(&nested(n, d)), n.1, n.2).is_ok(), "{} at {}", n.0, d);
+            assert_eq!(error(&nested(n, d + 1), n.1, n.2), (1, n.9.to_string()), "{} at {}", n.0, d + 1);
+        }
+    }).unwrap();
+    worker.join().unwrap();
 }
 
 /// The stack the deepest nesting of each construct takes fits `kib` KiB
 /// (a release build; the wasm build has 8 MiB, rust/.cargo/config.toml).
 fn deepest_on_a_stack(kib: usize) {
-    let inputs: Vec<(String, bool, bool)> = NESTINGS.iter().map(|n| (nested(n, n.8), n.1, n.2)).collect();
+    // find the deepest-readable depth and parse it all on the `kib` stack: the depth search must run there too,
+    // since parsing one past it is what the bound protects
     let worker = std::thread::Builder::new()
         .stack_size(kib * 1024)
         .spawn(move || {
-            for (src, ts, jsx) in &inputs {
-                assert!(parse(&cp(src), *ts, *jsx).is_ok());
+            for n in NESTINGS {
+                let src = nested(n, deepest_ok(n));
+                assert!(parse(&cp(&src), n.1, n.2).is_ok());
                 // and the JSON writer, which walks the tree without recursing
-                assert!(to_json(&cp(src), *ts, *jsx, true).starts_with("{\"type\":\"Program\""));
+                assert!(to_json(&cp(&src), n.1, n.2, true).starts_with("{\"type\":\"Program\""));
             }
         })
         .unwrap();

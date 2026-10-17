@@ -93,6 +93,25 @@ class CredentialsTests(unittest.TestCase):
             with self.subTest(value=value[:6]):
                 self.assertIn("S-TOKEN", {r for r, _l in assigned(value, "token")})
 
+    def test_a_pem_private_key_is_reported_once_as_a_token(self):
+        # N-24: a PEM private key (a header S-TOKEN reads, `-----BEGIN … PRIVATE KEY-----`) is S-TOKEN's; source
+        # S-SECRET no longer double-reports it
+        for kind, body in (("RSA ", "MIIBOwIBAAJBA"), ("OPENSSH ", "b3BlbnNzaC1rZXktdjEAAAAA"), ("", "MIIEvQIBADANBg")):
+            pem = f"-----BEGIN {kind}PRIVATE KEY-----\\n{body}{rand(40)}\\n-----END {kind}PRIVATE KEY-----"
+            for lang, line in (("py", f'private_key = "{pem}"'), ("js", f'const privateKey = "{pem}";'),
+                               ("rs", f'let private_key: &str = "{pem}";')):
+                with self.subTest(kind=kind, lang=lang):
+                    self.assertEqual({r for r, _l in rules(f"x = 1\n{line}\n", lang)}, {"S-TOKEN"})
+
+    def test_a_pgp_private_key_is_still_a_secret(self):
+        # N-24's skip is S-TOKEN's headers alone: S-TOKEN does not read a PGP private key block
+        # (`-----BEGIN PGP PRIVATE KEY BLOCK-----`), so S-SECRET still reports it (the skip of any `-----BEGIN` value
+        # had it reported by nothing)
+        pgp = f"-----BEGIN PGP PRIVATE KEY BLOCK-----\\n\\nlQOYBF{rand(40)}\\n-----END PGP PRIVATE KEY BLOCK-----"
+        for lang, line in (("py", f'private_key = "{pgp}"'), ("js", f'const privateKey = "{pgp}";')):
+            with self.subTest(lang=lang):
+                self.assertEqual(rules(f"x = 1\n{line}\n", lang), {("S-SECRET", 2)})
+
     def test_passwords_are_still_hardcoded_credentials(self):
         for lang, line in (("py", f'password = "{rand(20)}"'), ("py", 'password = "sup3r' + 'Secret!"'),
                            ("js", f"const db = {{user: 'bob', pwd: '{rand(20)}'}};"),

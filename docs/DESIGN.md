@@ -959,8 +959,8 @@ crates: the index's publish times, a yanked release none), scanned as the
 release's files were (`_scan_artifact`, the run's memo shared, so the
 files the two have alike are answered once); each weaker indicator's rule
 the predecessor has no finding of, but those of what a release may well
-ship anew (`NOT_COMPARED`: SC-BINARY, SC-OPAQUE-BLOB, SC-NESTED-ARCHIVE), is
-CRITICAL. Nor is an install hook the install-script test reads clean
+ship anew (`NOT_COMPARED`: SC-BINARY, SC-OPAQUE-BLOB, SC-NESTED-ARCHIVE, and
+SC-NESTED-CODE, which generated code can be: JS-NEST), is CRITICAL. Nor is an install hook the install-script test reads clean
 (NEW-HOOK-FP, rule set 2.86.0; John, Oct 15: it stays MAJOR): the registry
 scan marks a MAJOR SC-INSTALL-HOOK `readClean`
 (`_ArtifactScan._hooks_read_clean`, after the phases) when its command runs
@@ -1021,7 +1021,23 @@ The import-time test gives the refusal when it is asked for
 (`import_time_risk`'s `refused`, which `_import_risks` asks for), from the
 supply model's cache, so the file is parsed once; an install script is
 parsed once more (`js_refusal`, the parse alone:
-`_unparsed_install_scripts`); a TypeScript declaration is left out.
+`_unparsed_install_scripts`); a TypeScript declaration is left out. JS-NEST
+(0.1.9) raised the parser's `MAX_DEPTH` by half (256 to 384; no file of the
+popular set or the benchmark reached the old bound) and split off the one
+shape V8 compiles that the parser still refuses, where the code runs: each
+refusal is kept by the pass that read the file (`_note_unparsed`; the scan's
+`unparsed` maps a file to {pass: (line, reason) or None}, the passes of
+`_UNPARSED_PASSES`: the install-script test, the import-time test,
+SC-USE-RISK's, D-13's loads), and a file refused *only* for nesting past the bound (its reason is "nesting too
+deep") by the install-script or the import-time test (`_UNPARSED_RUNS`: code
+that runs when the package is installed or loaded) is SC-NESTED-CODE (MAJOR,
+so it counts as an indicator), apart from the INFO SC-UNPARSED-CODE
+inventory. A nesting refusal where the code may never run (SC-USE-RISK's
+files, D-13's) stays in the inventory with its reason: generated code nests
+that deep too (a minifier's if-return chain of 378 ternaries, a deep data
+literal). A file several passes refused is judged by the strongest
+(`_unparsed_code_issues`); the install-script pass reads a hook's file even
+when D-13's read refused it already.
 
 SCA for Go and Rust (0.1.9): the inventory reads `go.mod` (its `replace`
 lines applied), `go.sum` only for a module whose `go` directive is before

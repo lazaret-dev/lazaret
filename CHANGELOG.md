@@ -26,6 +26,18 @@ aggregate):
 
 ### Added
 
+- **A JavaScript file nested past the parser's bound is an indicator of its own where its code runs (JS-NEST; rule
+  set 2.91.0).** The parser's nesting bound (`MAX_DEPTH`) is raised by half, from 256 to 384 — no file of the popular
+  set or the benchmark reached the old bound, and the WebAssembly build on Node's main thread has room for about 2.5×
+  the new one. Deep nesting is the one kind of source V8 compiles that the parser still refuses, so a package file
+  refused *only* for nesting (its reason is "nesting too deep") by the install-script test or the import-time test —
+  code that runs when the package is installed or loaded — is now its own finding, **SC-NESTED-CODE** (MAJOR, an
+  indicator), split off from the INFO SC-UNPARSED-CODE inventory of files refused for other (usually broken) syntax.
+  Refused for nesting where its code may never run (a file only the use-time test reads: nothing the entry points
+  load reaches it), it stays in that inventory with its reason, since generated code nests that deep too (a
+  minifier's if-return chain of 378 ternaries, a deep data literal); a file several tests refused is judged by the
+  strongest. SC-NEW-INDICATOR does not compare SC-NESTED-CODE with the release before, as it does not a binary: a
+  release may well ship generated code anew.
 - **Agent skill and instruction files are read for what they tell the agent to do (RA-3; the engine's, for both
   packages; rule set 2.90.0).** An AI agent reads a `SKILL.md`, `AGENTS.md`, `CLAUDE.md`, `CLAUDE.local.md`,
   `GEMINI.md`, `.github/copilot-instructions.md`, `.github/instructions/**/*.instructions.md`,
@@ -1444,6 +1456,13 @@ aggregate):
 
 ### Fixed
 
+- **S-SECRET no longer double-reports a PEM private key in source (N-24; the engine's, for both packages; rule
+  set 2.91.0).** A `private_key = "-----BEGIN ... PRIVATE KEY-----..."` assignment was reported by both S-TOKEN
+  (which reads PEM blocks) and S-SECRET; S-SECRET in source now skips a value that begins with a header S-TOKEN
+  reads (`-----BEGIN … PRIVATE KEY-----`), so it is reported once, as a token. A PGP private key block (`-----BEGIN
+  PGP PRIVATE KEY BLOCK-----`), which S-TOKEN does not read, is still S-SECRET's. (A value with a space is still
+  kept — a passphrase has them — which N-24 also settled; a secret in test code stays listed as INFO, as BR-7 step
+  4(e) set it.)
 - **WF-SECRETS-SCOPE: bulk secrets require positive clearance (rule set 2.89.0).**
   SC-WORKFLOW-SECRETS is CRITICAL when the complete secrets value reaches a send, or when a reachable
   send-capable step cannot be cleared. The old network pattern is retained as a starting set; opaque senders,

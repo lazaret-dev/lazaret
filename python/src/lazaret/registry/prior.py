@@ -11,7 +11,8 @@ So when a registry scan of a release finds weaker indicators only (the release w
 established predecessor, the newest release published at least GAP before it (a release of the attacker's own an hour
 earlier is not one; SC-NEW-DEPENDENCY's week), a pre-release only for a pre-release, as it scanned the release's
 files, and each weaker indicator's rule the predecessor had no finding of is an SC-NEW-INDICATOR, CRITICAL. The rules
-of what a release may well ship anew (NOT_COMPARED: a binary, an opaque blob, a nested archive) are not compared.
+of what a release may well ship anew (NOT_COMPARED: a binary, an opaque blob, a nested archive, code nested past the
+parser's bound, as generated code can be) are not compared.
 Measured on the popular set (Oct 15: 1,703 benign releases, 42 of them WARN): 41 had a finding of each such rule in
 their predecessor; pnpm 12.8.1's new postinstall (`node install.js`, against 11.27.1) was the one SC-NEW-INDICATOR.
 
@@ -45,8 +46,9 @@ MAX_FILES = 3                            # the predecessor's files downloaded an
 ECOSYSTEMS = ("npm", "pypi", "crates")
 RULE = "SC-NEW-INDICATOR"
 HOOK_RULE = "SC-INSTALL-HOOK"
-#: what a release may well ship anew: not compared
-NOT_COMPARED = frozenset({"SC-BINARY", "SC-OPAQUE-BLOB", "SC-NESTED-ARCHIVE"})
+#: what a release may well ship anew: not compared (SC-NESTED-CODE: generated code, a new minifier's or a new data
+#: table's, nests past the parser's bound too; JS-NEST)
+NOT_COMPARED = frozenset({"SC-BINARY", "SC-OPAQUE-BLOB", "SC-NESTED-ARCHIVE", "SC-NESTED-CODE"})
 PYPI_SIMPLE_JSON = "application/vnd.pypi.simple.v1+json"
 WHY = ("A finding a package's releases have long had is how the package is made; one a release brings that its "
        "predecessor had none of is a change, and a hijacked release is a change to an established package: the "

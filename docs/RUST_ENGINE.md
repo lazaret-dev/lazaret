@@ -1170,8 +1170,8 @@ A tree can be as deep as its input is long (member and call chains, binary
 operators and `else if` chains are read in loops and nest): walk it with an
 explicit stack, as the writer and `compact` do.
 
-**Limits.** `MAX_DEPTH` 256 (statements, expressions, types, JSX: deeper is
-"nesting too deep"); `SPECULATION_TOKENS` 4096 tokens per read ahead; all of
+**Limits.** `MAX_DEPTH` 384 (statements, expressions, types, JSX: deeper is
+"nesting too deep"; JS-NEST raised it by half from 256); `SPECULATION_TOKENS` 4096 tokens per read ahead; all of
 a file's reads ahead, peeks included, together `SPECULATION_TOTAL` (16 ×
 4096) plus 2 per code point. The parser makes jsparse.py's reads, peeks and
 speculative reads in jsparse.py's order, so each budget runs out at the
@@ -1181,12 +1181,16 @@ and a token, comment or blank run of 48 code points or more is scanned once
 and kept by its start, for the reads ahead that cross it again (jsparse.py
 scanned it again each time: a 1 MB string behind 2,000 `f<` took it 2.7 s,
 the engine 0.04 s). Recursion is bounded by the depth limit (the two chains
-jsparse.py recursed on without it are loops here). The deepest stack — a
-253-deep nesting of tagged templates, of the 51 constructs that nest —
-takes 231 KiB natively (release; the crate's test reads every construct at
-its deepest on a 1 MiB thread) and between 64 and 128 KiB in WebAssembly,
-whose stack is 8 MiB (§3). Every input gives a tree or an error, never a
-panic.
+jsparse.py recursed on without it are loops here). The deepest nesting of
+any of the 51 constructs that nest (tagged templates the costliest) fits
+under 1 MiB natively (release; the crate's test reads every construct at its
+deepest on a 1 MiB thread) and well under that in WebAssembly, whose stack
+is 8 MiB (§3). The crate's test pins the bound: each construct reads its
+jsparse.py depth at 256 (`NESTINGS`) scaled by 384/256, or up to 3 levels
+more (a construct's few levels of overhead are paid once; measured: 0 to 3),
+so it fails at 256 and at a bound more than 3 levels past 384 (the js_parse
+snapshot holds the exact trees and errors at 383, 384 and 385). Every input
+gives a tree or an error, never a panic.
 
 The bound was measured against the stacks the engine parses on (Oct 9,
 JS-PARSE-STRICT; a build with the bound at 4,096, each construct of
@@ -1198,15 +1202,22 @@ own stack (about 984 KB), a call stops with "Maximum call stack size
 exceeded" (the npm package says the engine stopped) from 992 nested tagged
 templates, the costliest construct; every construct reads to a depth of
 976 (in the bound's units: a level of parentheses or arrays counts two, of
-objects three), 3.8 times 256. So the bound stays: a deeper one wants the
-npm package's engine on a thread with a larger stack (a Worker's
+objects three), about 2.5 times the bound of 384. JS-NEST raised the bound by
+half to 384, well within that headroom; a bound deeper still wants the npm
+package's engine on a thread with a larger stack (a Worker's
 `resourceLimits.stackSizeMb`). V8 compiles deeper nesting (1,000 nested
 arrays, objects or blocks, 2,000 parentheses), so a file nested past the
 bound is the one kind of source V8 compiles that the parser refuses since
 JS-PARSE-STRICT (an assignment or an update to a call, `f() = 1`,
 `f()++`, `for (f() in x)`, and `let` as a name before `in` and
 `instanceof` were the others); a registry scan lists the package files
-the parser refuses (SC-UNPARSED-CODE).
+the parser refuses (SC-UNPARSED-CODE, INFO), and a file refused only because
+it nests past the bound, by the install-script or the import-time test (code
+that runs when the package is installed or loaded), is an indicator of its
+own (SC-NESTED-CODE, MAJOR; JS-NEST: no file of the popular set or the
+benchmark reached the old bound). Elsewhere such a file stays INFO with its
+reason, since generated code nests that deep too (a minifier's if-return
+chain of 378 ternaries, a deep data literal).
 
 **jsparse.py's bugs, reproduced:**
 
