@@ -651,6 +651,78 @@ what runs; and one that writes the agent's permissions
 permission key, `_AGENT_PERMISSION_KEY_RE`) is CRITICAL, unlike a copy of the
 settings a worktree hook makes.
 
+Agent skill and instruction files (0.1.9, RA-3; the engine's `agentdoc.rs`,
+for both packages): an AI agent reads a `SKILL.md`, `AGENTS.md`, `CLAUDE.md`,
+`CLAUDE.local.md`, `GEMINI.md`, `.github/copilot-instructions.md`,
+`.github/instructions/**/*.instructions.md`, `.claude/commands/**/*.md`,
+`.claude/agents/**/*.md`, `.cursorrules`, `.cursor/rules/**/*.md|*.mdc` (and a
+`.cursor/rules` file), `.windsurfrules`, `.windsurf/rules/**/*.md` or
+`.clinerules` (a file, or a folder of `.md`/`.mdc`/`.txt` files) as
+instructions and does what it says (`agentdoc::is_agent_doc`), so a dependency
+that ships one turns the agent into its installer past a code-only scanner (the
+clawdhub campaign's `SKILL.md`, Snyk Feb 2026, lured the agent to a glot.io
+snippet that ran `base64 -d | sh` and fetched a second stage from a raw IP,
+with a password-protected GitHub-release archive to hide the payload).
+
+Where they are read. A project scan routes them to the config bucket
+(`collect.rs`, by name before a `#!` line can make one a script), as workflows
+are, but not to the config credential pass — a `CLAUDE.md` example is no
+S-TOKEN. A dependency's are routed too, with `--deps` (a `node_modules`,
+`site-packages` or vendor tree's file; the bucket's entry says `dep`), while a
+dependency's other config files stay unread. The registry and the guard read
+the members of the packages they scan (npm, PyPI wheels and sdists, crates, VS
+Code extensions: `_ArtifactScan._agent_docs`, a phase of the second pass). The
+MCP server's `scan_files` reads one by its name.
+
+The reading. The reader pulls the file's candidates: fenced blocks whose info
+string names a shell, PowerShell (`powershell`, `pwsh`, `ps1`) or cmd
+(`cmd`, `bat`), or none or `text` — read whole whatever their lines look like
+—, indented code blocks, inline code spans, and the text of HTML comments
+(hidden from a human reader); each is read with the hook-command test
+(`shell::hook_command_risk`), one longer than HOOK_MAX_CHARS in pieces cut at
+line ends (a line longer than that in pieces of its own), and a block too long
+for a message is reported at the line that reads hostile on its own. Fenced
+`python` and `js`/`ts` blocks get the install-script test in their language. A
+command that runs a script of the skill's own folder (`_AGENTDOC_LOCAL_SCRIPT_RE`:
+after an interpreter and its flags — `bash -e`, `python3 -u`, `uv run`,
+`npx tsx`, `pwsh -File`, `.`, `source` —, as `./x`, or a bare `scripts/x.sh`
+at a command's place; resolved under the file's directory after the relative
+`cd`s before it, `_AGENTDOC_CD_RE`) is followed through the tree and read with
+the install-script test in its language (Python, JavaScript for .js and .ts,
+text for a shell, PowerShell, Ruby or Perl script); a dependency's script the
+walk did not keep (a `.sh` in `node_modules`) is read from the disk, through no
+link (`core._disk_reader`, `deps.js` `diskReader`). The whole text is also read
+for a password-protected archive (a download and a stated password — `the
+password is`, `password:`, `pass:`, `pw:`, `with password X`, `unzip -P`, `7z
+-p` — in one paragraph, `_AGENTDOC_ARCHIVE_RE`/`_AGENTDOC_PASSWORD_RE`), a
+paste or snippet host (`_AGENTDOC_PASTE_RE`), a public raw IP as an install
+source (a loopback, private, link-local or unspecified address is none, and
+neither is a reason of the hook-command test that only contacts one), text
+hidden from a human reader (invisible carrier characters,
+`scanfile::hidden_unicode_run`; a run of three or more zero-width characters;
+bidirectional overrides and isolates), and an order to send the conversation,
+the environment or credentials out (`_AGENTDOC_EXFIL_RE`, dotted names such as
+`.env` and `~/.ssh/id_rsa` included; an order negated in its sentence — "do not
+send", "never upload", "don't share", `_AGENTDOC_NEGATION_RE` — is none). An
+order is a hostile shape when its paragraph names an address (a capture or
+exfiltration service, a public raw IP, a URL that is not this machine's or a
+private network's), a weaker indicator without one.
+
+What it counts for. One SC-AGENT-SKILL finding per file, at the first chosen
+reason's line. A dependency's file is CRITICAL when any reason is a hostile
+shape (a command or code block the tests flag, a followed hostile script, a
+password-protected archive, an exfiltration order with an address) and MAJOR
+for a weaker indicator alone (a paste host, a raw IP, hidden text, an order with
+no address); it fails the gate, and a registry package with it is SUSPICIOUS.
+The commands keep the hook-command test's semantics: a dependency's skill that
+pipes a download into a shell is CRITICAL from an official installer's host
+too, as its install hook would be. The project's own file is INFO, with what
+was found in its message ("the project's own: listed, not counted") and a fix
+text of its own: the gate (`--ci`, `lazaret hook`, the result's "No
+supply-chain indicators") reads SC-* findings above INFO only, and a project's
+`CLAUDE.md` that installs rustup, uv or Homebrew is its developers' own. A
+clean skill file is no finding.
+
 Workflows that send secrets out (0.1.9, RA-1; the engine's `ci/exfil.rs`,
 for both packages: `ghworkflow.exfil` asks it): GhostAction's workflows named the
 secrets they sent, or sent what `grep` found in the checkout and `git log -p`,
@@ -2209,6 +2281,7 @@ leaves the texts to go with their calls, which gives the same answers:
 | `rust/crates/lazaret-engine/src/pyparse/`, `pyflow/` | The Python reader (Python 3.13's trees) and the Python cross-file pass (the `py_parse` and `py_flow` calls, both packages'; flow.py's own pass until phase 3) |
 | `rust/crates/lazaret-engine/src/config.rs` | A config or data file's scan (the `scan_config` call, both packages'; since BR-7's step 3): S-TOKEN and S-SECRET's config form, the autorun and CI issues, the suppression markers, the cap and the redacted snippets; `scanner/configsecrets.py` says which files are config files and keeps the reader's checks for the tests (`config_check`) |
 | `rust/crates/lazaret-engine/src/autorun.rs` | Editor and AI-agent settings that run commands (SC-AUTORUN; the `autorun_*` calls, both packages'; since BR-7's step 2): the JSON-with-comments reader, the commands each file makes its tool run, the issues; `scanner/autorun.py` keeps the names the package calls, over the engine |
+| `rust/crates/lazaret-engine/src/agentdoc.rs` | Agent skill and instruction files (SC-AGENT-SKILL; the `agentdoc_kind` and `agentdoc_issues` calls and the config scan, both packages', and the registry's members; RA-3, 0.1.9): the commands and code a SKILL.md/AGENTS.md/CLAUDE.md/.cursor/rules tells the agent to run (the hook-command and install-script tests), a script of its folder they run, a password-protected archive, a paste host or public raw IP, hidden text, an order to send data out; a dependency's CRITICAL/MAJOR, the project's own INFO; `core.agentdoc_kind`/`agentdoc_issues` keep the names the package calls, over the engine |
 | `rust/crates/lazaret-engine/src/ci/` | CI files (the `ci_*` calls, both packages'; since BR-7): the workflows the Shai-Hulud worms planted (SC-WORKFLOW-SECRETS, -BACKDOOR) and the CI files' hardening checks (the other SC-WORKFLOW-* ids, SC-GITLAB-*); `scanner/ghworkflow.py` and `gitlabci.py` keep the names the package calls, over the engine |
 | `python/src/lazaret/scanner/sca_feeds.py`, `sca_index.py`, `gomod.py` | CVE bundle build (OSV/KEV/EPSS), the indexed bundle, the `go.mod` reader |
 | `python/src/lazaret/{registry,mcp,pg,safexml}/` | Registry auditor, MCP server, Postgres client, safe XML |

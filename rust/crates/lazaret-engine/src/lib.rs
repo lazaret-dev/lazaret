@@ -11,6 +11,7 @@
 pub mod api;
 pub mod budget;
 pub mod collect;
+pub mod agentdoc;
 pub mod autorun;
 pub mod baseline;
 pub mod ci;

@@ -80,6 +80,30 @@ export function autorunIssues(path, lines, read = null) {
   return mkIssues(path, lines, got.issues.map(([line, rule]) => [rule, line]));
 }
 
+/** The kind of AI-agent skill or instruction file `path` names, or null (core.agentdoc_kind; RA-3). */
+export const agentdocKind = (path) => call("agentdoc_kind", {}, path);
+
+/**
+ * SC-AGENT-SKILL findings for an agent skill or instruction file (core.agentdoc_issues; RA-3). The engine reads
+ * the file (`agentdoc_issues`): the commands and code it tells the agent to run, a script of its folder they run
+ * (followed via `read`), a password-protected archive, a paste host or public raw IP, hidden text, or an order to
+ * send data out. `dep`: a dependency's file (CRITICAL / MAJOR), false the project's own (INFO); null, a file under a
+ * dependency folder is a dependency's.
+ */
+export function agentdocIssues(path, lines, read = null, dep = null) {
+  const text = lines.join("\n");
+  const files = {};
+  const args = { path, follow: read !== null, files };
+  if (dep !== null) args.dep = !!dep;
+  for (let k = 0; k < AUTORUN_ROUNDS; k++) {
+    const got = call("agentdoc_issues", args, text);
+    if (got.issues) return mkIssues(path, lines, got.issues.map(([line, rule]) => [rule, line]));
+    for (const rel of got.need) files[rel] = read(rel);
+  }
+  const got = call("agentdoc_issues", { ...args, follow: false }, text);
+  return mkIssues(path, lines, got.issues.map(([line, rule]) => [rule, line]));
+}
+
 // ---- CI files (SC-WORKFLOW-*, SC-GITLAB-*; core.ci_issues) ----
 /**
  * The issues of a CI file (core.ci_issues): a GitHub Actions workflow's SC-WORKFLOW-* or a GitLab CI file's
@@ -94,9 +118,11 @@ export function ciIssues(path, lines) {
 /**
  * read(rel) for autorunIssues: the text of a scanned source or config file
  * ('/'-separated, root-relative, resolved as nodeCandidates does), or null
- * (core.tree_reader).
+ * (core.tree_reader). `disk`: read(rel) of a file the walk did not keep (a
+ * dependency's shell script its agent skill runs), tried for rel itself when no
+ * scanned file answers.
  */
-export function treeReader(files, configs) {
+export function treeReader(files, configs, disk = null) {
   const texts = new Map();
   for (const f of [...files, ...configs]) {
     const key = f.path.replaceAll("\\", "/");
@@ -104,6 +130,10 @@ export function treeReader(files, configs) {
   }
   return (rel) => {
     for (const cand of nodeCandidates(rel)) if (texts.has(cand)) return normalizeNewlines(texts.get(cand));
+    if (disk !== null) {
+      const text = disk(rel);
+      if (text !== null && text !== undefined) return normalizeNewlines(text);
+    }
     return null;
   };
 }
@@ -111,14 +141,16 @@ export function treeReader(files, configs) {
 /**
  * Credentials in a config or data file (core.scan_config_file): S-TOKEN on every line, S-SECRET outside comments,
  * nothing else — it is not code. Suppression markers work in the file's comments, as in code. An editor's or AI
- * agent's settings that run commands also get SC-AUTORUN, and a CI file its checks. The engine reads the file (BR-7
+ * agent's settings that run commands also get SC-AUTORUN, a CI file its checks, and an AI agent's skill or instruction
+ * file SC-AGENT-SKILL instead of the credential pass (`dep` as agentdocIssues'). The engine reads the file (BR-7
  * step 3: `scan_config`) and names the files of the tree a settings file's commands run; `read` reads them (null:
  * the commands alone are judged). A file that spends the engine's work budget is SC-TRUNCATED.
  */
-export function scanConfigFile(path, rawContent, read = null) {
+export function scanConfigFile(path, rawContent, read = null, dep = null) {
   const content = String(rawContent ?? "");
   const files = {};
   const args = { path, follow: read !== null, files, redact: REDACT.on, neumaier: false };
+  if (dep !== null) args.dep = !!dep;           // (an agent skill or instruction file's SC-AGENT-SKILL: RA-3)
   try {
     for (let k = 0; k < AUTORUN_ROUNDS; k++) {
       const got = scanConfig(path, args, content);

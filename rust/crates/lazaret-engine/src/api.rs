@@ -78,6 +78,7 @@ pub const CALLS: &[&str] = &[
     "ci_logical_lines",
     // 0.1.9 (BR-7 step 2): editor and AI-agent settings that run commands (autorun.rs; SC-AUTORUN)
     "autorun_kind", "autorun_owner", "autorun_jsonc", "autorun_entries", "autorun_local_command", "autorun_issues",
+    "agentdoc_kind", "agentdoc_issues",
     // 0.1.9 (BR-7 step 3): a config or data file's scan (config.rs: S-TOKEN, S-SECRET, SC-AUTORUN, the CI checks)
     "scan_config", "config_check",
     // 0.1.9 (BR-7 step 3 b): manifests (manifest/: package.json's install hooks and dependencies, binding.gyp's
@@ -981,7 +982,9 @@ fn dispatch(name: &str, args: &Value, text: &[u32]) -> Result<Value, CallError> 
                 }
             }
             let mut tree = crate::autorun::Tree { follow: flag("follow", true), files: &files, need: Vec::new() };
-            let opts = crate::config::Options { redact: flag("redact", true), neumaier: flag("neumaier", false) };
+            // (dep absent: a file under a dependency folder is a dependency's, as scan_manifest's registry)
+            let dep = flag("dep", crate::collect::is_dependency_manifest(p, &path));
+            let opts = crate::config::Options { redact: flag("redact", true), neumaier: flag("neumaier", false), dep };
             match crate::config::scan(p, &path, text, &opts, &mut tree) {
                 Ok(issues) => Value::obj(vec![("issues", Value::Arr(issues))]),
                 Err(need) => Value::obj(vec![("need", Value::Arr(need.into_iter().map(Value::Str).collect()))]),
@@ -1207,6 +1210,38 @@ fn dispatch(name: &str, args: &Value, text: &[u32]) -> Result<Value, CallError> 
                 "secret_key" => Value::Bool(crate::config::secret_key(p, text)),
                 "secret_value" => Value::Bool(crate::config::secret_value(p, text)),
                 _ => return Err(CallError::BadArgs(format!("config_check: unknown check {}", check))),
+            }
+        }
+        "agentdoc_kind" => crate::agentdoc::is_agent_doc(text).map(Value::str).unwrap_or(Value::Null),
+        "agentdoc_issues" => {
+            // RA-3: an agent skill/instruction file — {path, follow, files, dep} -> {"issues":[[line,rule]…]} or
+            // {"need":[rel…]} (the scripts of the skill's folder it has yet to be given), like autorun_issues. dep: a
+            // dependency's file (CRITICAL / MAJOR), else the project's own (INFO); absent, a file under a dependency
+            // folder is a dependency's
+            let path = arg_str(args, "path")?;
+            let follow = !matches!(args.get("follow"), Some(Value::Bool(false)));
+            let dep = match args.get("dep") {
+                Some(Value::Bool(b)) => *b,
+                _ => crate::collect::is_dependency_manifest(p, &path),
+            };
+            let mut files: std::collections::BTreeMap<PyStr, Option<PyStr>> = std::collections::BTreeMap::new();
+            if let Some(Value::Obj(items)) = args.get("files") {
+                for (k, v) in items {
+                    files.insert(k.clone(), v.as_str().map(|x| x.to_vec()));
+                }
+            }
+            let mut tree = crate::autorun::Tree { follow, files: &files, need: Vec::new() };
+            match crate::agentdoc::issues(p, &path, text, &mut tree, dep) {
+                Ok(found) => Value::obj(vec![(
+                    "issues",
+                    Value::Arr(
+                        found
+                            .iter()
+                            .map(|(line, r)| Value::Arr(vec![Value::Int(*line as i64), crate::ci::rule_value(r)]))
+                            .collect(),
+                    ),
+                )]),
+                Err(need) => Value::obj(vec![("need", Value::Arr(need.into_iter().map(Value::Str).collect()))]),
             }
         }
         "autorun_issues" => {

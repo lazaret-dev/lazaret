@@ -26,6 +26,37 @@ aggregate):
 
 ### Added
 
+- **Agent skill and instruction files are read for what they tell the agent to do (RA-3; the engine's, for both
+  packages; rule set 2.90.0).** An AI agent reads a `SKILL.md`, `AGENTS.md`, `CLAUDE.md`, `CLAUDE.local.md`,
+  `GEMINI.md`, `.github/copilot-instructions.md`, `.github/instructions/**/*.instructions.md`,
+  `.claude/commands/**/*.md`, `.claude/agents/**/*.md`, `.cursorrules`, `.cursor/rules/**`, `.windsurfrules`,
+  `.windsurf/rules/**` or `.clinerules` (a file or a folder) as instructions and does what it says; a dependency that
+  ships one turns the agent into its installer, past a scanner that only reads code (the clawdhub / ClawHavoc
+  campaign, Snyk Feb 2026: a `SKILL.md` lured the agent to an external snippet that decoded base64 into a shell and
+  fetched a second stage from a raw IP, with a password-protected archive to hide the payload). The engine
+  (`agentdoc.rs`) now reads these files and reports one **SC-AGENT-SKILL** finding, nothing for a clean file: the
+  commands it tells the agent to run (fenced shell, PowerShell and cmd blocks, unlabeled and `text` blocks whatever
+  their lines look like, indented code blocks, inline code, and the text of HTML comments, each read with the
+  hook-command test, a block longer than that test reads in pieces cut at line ends), its fenced Python and
+  JavaScript/TypeScript blocks (the install-script test in their language), a script of the skill's own folder such
+  a command runs (with an interpreter and its flags, `uv run`, `. x.sh`/`source x.sh`, `./x.sh`, a bare
+  `scripts/x.sh`, after a `cd`; .sh, .py, .js/.ts, .ps1, .rb and .pl, followed and read as an install script in its
+  language), an install from a password-protected archive (a download and a stated password in one paragraph), a
+  paste or snippet host or a public raw IP as an install source (a loopback or private address is none), text
+  hidden from a human reader (invisible carrier characters, a run of zero-width characters, bidirectional
+  controls), and an order to send the conversation, the environment or credentials out (`.env` and `~/.ssh` too;
+  "do not send credentials …" is no order; CRITICAL with an address in the same paragraph). **Whose file it is
+  decides what it counts for:** a dependency's — a `--deps` tree's (`node_modules`, `site-packages`, a vendor tree),
+  or a member of a package the registry or the guard scans (npm, PyPI wheels and sdists, crates, VS Code extensions)
+  — is CRITICAL for a hostile shape and MAJOR for a weaker indicator, and fails the gate (a registry package is then
+  SUSPICIOUS); the project's own is INFO, listed with what was found but never failing `--ci`, `lazaret hook` or "No
+  supply-chain indicators" (a `CLAUDE.md` that installs rustup or Homebrew is its developers' own). A dependency's
+  skill that pipes a download into a shell is CRITICAL from an official installer's host too, as its install hook
+  would be. A `#!` first line does not make an agent file a script, a benign skill's `npm install` block is no
+  reason, and these files do not get the config credential pass (a `CLAUDE.md` example is no S-TOKEN; a
+  dependency's other config files are still not read). The MCP server's `scan_files` reads them too. Both packages
+  read this through the engine; `test_agent_skill.py` and `js/test/agent-skill.test.js` are the tests, with an
+  `agentdoc` snapshot set.
 - **Every new GitHub repository, and GH Archive's events (GH-SCAN-ALL; John, Oct 16: "build 1 and two").**
   `discover --ecosystem github --resume` gets three options. `--github-archive` reads GH Archive's hourly files of
   GitHub's public events (`data.gharchive.org`, some 70 MB an hour, no token, at most three hours a run, from a cursor

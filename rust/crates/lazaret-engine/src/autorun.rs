@@ -882,7 +882,7 @@ pub struct Tree<'a> {
 }
 
 impl<'a> Tree<'a> {
-    fn read(&mut self, rel: &[u32]) -> Option<PyStr> {
+    pub(crate) fn read(&mut self, rel: &[u32]) -> Option<PyStr> {
         match self.files.get(rel) {
             Some(v) => v.clone(),
             None => {

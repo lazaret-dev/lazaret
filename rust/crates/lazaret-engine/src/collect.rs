@@ -549,12 +549,15 @@ pub fn file(p: &Pack, f: &FileIn) -> Value {
             Some(Err(why)) => return unreadable(why),
             Some(Ok(h)) => h,
         };
-        lang = script_source_lang(p, head);
+        // An agent skill or instruction file (RA-3) is read by agentdoc in the config bucket, a dependency's too (that
+        // is where the threat is: a package that ships one); a `#!` line does not make it a script. A dependency's
+        // other config files are not read (their credentials are the package's business, not the project's).
+        let agent = crate::agentdoc::is_agent_doc(rel).is_some();
+        lang = if agent { None } else { script_source_lang(p, head) };
         if lang.is_none() {
             if let Some(bi) = classify(head) {
                 done.issues.push(at(rel, bi));
-            } else if !f.dep.any()
-                && is_config_file(p, &f.name)
+            } else if (agent || (!f.dep.any() && is_config_file(p, &f.name)))
                 && (head.starts_with(b"\xff\xfe") || head.starts_with(b"\xfe\xff") || !crate::binary::looks_binary(p, head))
             {
                 return config(p, f);
@@ -682,7 +685,11 @@ fn config(p: &Pack, f: &FileIn) -> Value {
     }
     let (text, _) = crate::decode::decode_source(data, None);
     if !own_report(&text) {
-        done.config = Some(Value::obj(vec![("path", Value::Str(rel.clone())), ("content", Value::Str(text))]));
+        let mut entry = vec![("path", Value::Str(rel.clone())), ("content", Value::Str(text))];
+        if f.dep.any() {
+            entry.push(("dep", Value::Bool(true)));     // (a dependency's agent file: its findings count, RA-3)
+        }
+        done.config = Some(Value::obj(entry));
     }
     done.value()
 }

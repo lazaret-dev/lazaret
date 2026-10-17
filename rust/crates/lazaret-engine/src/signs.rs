@@ -695,7 +695,7 @@ fn raw_public_ip(p: &Pack, text: &[u32]) -> Option<PyStr> {
 
 /// Is an IPv4 address public: not this machine's, a private network's, a
 /// link-local or a carrier-grade NAT address?
-fn public_ipv4(addr: &[u32]) -> bool {
+pub(crate) fn public_ipv4(addr: &[u32]) -> bool {
     let parts: Vec<u32> = pystr::split_char(addr, c('.'))
         .iter()
         .map(|o| o.iter().try_fold(0u32, |n, &d| if (0x30..=0x39).contains(&d) { Some(n * 10 + d - 0x30) } else { None }))

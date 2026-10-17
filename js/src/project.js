@@ -10,7 +10,7 @@ import { scanFile } from "./scanner/scan.js";
 import { collectionIssues, scanTask } from "./scancollection.js";
 import { redactResult } from "./lib/redact.js";
 import { buildResult } from "./report.js";
-import { dependencyChecks, projectHookChecks } from "./deps.js";
+import { dependencyChecks, projectHookChecks, diskReader } from "./deps.js";
 import { Pool, threadsFor, mapTasks } from "./pool.js";
 
 /**
@@ -45,6 +45,8 @@ export function scanCollected(root, col, { exclude = [], env = process.env, extr
   try {
     issues = collectionIssues(col, {
       extraIssues,
+      // a dependency's agent skill (RA-3): the scripts it runs, from the disk when the walk did not keep them
+      diskRead: diskReader(root, files, manifests, { exclude, maxFileBytes: col.maxFileBytes }),
       scanAll: (all) => mapTasks(pool, all.map((f) => ["scan", scanTask(f)]),
         ([, file]) => scanFile(file),
         ([, file], e) => [scanErrorIssue(file.path, e)]),                // one file must never kill the run

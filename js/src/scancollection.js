@@ -22,10 +22,12 @@ export function scanEach(files) {
  * The findings of a scan of `col` (a collection: lib/collect.js collectEntry's, the walk's or the dashboard's), in
  * the project scan's order: `extraIssues` (findings made before the scan that belong in its result), the
  * collection's, each file's (`scanAll(files)`: a list per file; default scanEach), the config files' (credentials
- * only), the manifests', what `checks(issues)` adds to them (the CLI's checks of what is on disk; it may add the
- * files it read to col.files), the skipped trees, then the cross-file flows in col.files, redacted as their files are.
+ * only; a dependency's agent skill or instruction file, RA-3, also reads the scripts it runs through `diskRead`, the
+ * CLI's read of what is on disk), the manifests', what `checks(issues)` adds to them (the CLI's checks of what is on
+ * disk; it may add the files it read to col.files), the skipped trees, then the cross-file flows in col.files,
+ * redacted as their files are.
  */
-export function collectionIssues(col, { extraIssues = [], scanAll = scanEach, checks = null } = {}) {
+export function collectionIssues(col, { extraIssues = [], scanAll = scanEach, checks = null, diskRead = null } = {}) {
   const { files, manifests, configs, binaryIssues, skippedIssues } = col;
   const issues = [];
   const add = (list) => { for (const i of list) issues.push(i); };   // never push(...big)
@@ -33,8 +35,10 @@ export function collectionIssues(col, { extraIssues = [], scanAll = scanEach, ch
   add(binaryIssues);
   for (const found of scanAll(files)) add(found);
   const read = treeReader(files, configs);                            // what an editor's or agent's settings run
+  let depRead = null;                                                 // what a dependency's agent skill runs
   for (const cf of configs) {
-    try { add(scanConfigFile(cf.path, cf.content, read)); } catch (e) { issues.push(scanErrorIssue(cf.path, e)); }
+    if (cf.dep && depRead === null) depRead = treeReader(files, configs, diskRead);
+    try { add(scanConfigFile(cf.path, cf.content, cf.dep ? depRead : read, !!cf.dep)); } catch (e) { issues.push(scanErrorIssue(cf.path, e)); }
   }
   for (const mf of manifests) {
     // binding.gyp and every other .gyp / .gypi → scanGyp (G11); package.json

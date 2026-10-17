@@ -1,6 +1,6 @@
 {
  "format": 1,
- "rule_set": "2.89.0",
+ "rule_set": "2.90.0",
  "source": "lazaret.scanner.core, extracted by scripts/make_rust_tables.py \u2014 do not edit",
  "values": {
   "ALWAYS_PRUNE_DIRS": {
@@ -4915,6 +4915,84 @@
      "value": ".go"
     }
    }
+  },
+  "_AGENTDOC_ARCHIVE_RE": {
+   "flags": "i",
+   "re": "https?://[^\\s'\"`]+\\.(?:zip|tar\\.gz|tgz|7z|rar)\\b|https?://[^\\s'\"`]*github\\.com/[^\\s'\"`]+/releases/"
+  },
+  "_AGENTDOC_BIDI_RE": {
+   "flags": "",
+   "re": "[\u202a-\u202e\u2066-\u2069]"
+  },
+  "_AGENTDOC_CD_RE": {
+   "flags": "m",
+   "re": "(?:^|[;&|(`]|\\b(?:then|do)\\b)[ \\t]*(?:cd|pushd|Set-Location)[ \\t]+[\"']?([^\\s;&|\"'()`]+)"
+  },
+  "_AGENTDOC_EXFIL_RE": {
+   "flags": "i",
+   "re": "\\b(?:send|upload|post|exfiltrate|transmit|e-?mail|forward|leak|share)\\b(?:[^\\n.!?]|\\.(?=[\\w/~-])){0,60}(?:\\b(?:conversation|chat history|chat log|history|context|transcript|messages|environment variables?|secrets?|credentials?|tokens?|api[ _-]?keys?|id_rsa|id_ed25519|id_ecdsa)\\b|(?<![\\w.])\\.(?:env|npmrc|netrc|pypirc|git-credentials)\\b|~/\\.(?:ssh|aws|gnupg)\\b|\\.ssh/)"
+  },
+  "_AGENTDOC_INLINE_RE": {
+   "flags": "",
+   "re": "`([^`\\n]+)`"
+  },
+  "_AGENTDOC_LOCAL_SCRIPT_RE": {
+   "flags": "m",
+   "re": "(?:^|[;&|(`]|\\b(?:then|do|sudo|exec|time)\\b)[ \\t]*(?:[A-Za-z_]\\w*=\\S*[ \\t]+)*(?:(?:env[ \\t]+)?(?:bash|sh|zsh|ksh|dash|fish|source|\\.|python[23]?(?:\\.\\d+)?|py|node|nodejs|deno(?:[ \\t]+run)?|bun(?:[ \\t]+run)?|tsx|ts-node|npx(?:[ \\t]+(?:-y|--yes))?[ \\t]+(?:tsx|ts-node)|uv[ \\t]+run|poetry[ \\t]+run|pipenv[ \\t]+run|pwsh|powershell(?:\\.exe)?|ruby|perl|php)(?:[ \\t]+--?[A-Za-z][\\w=-]*(?:[ \\t]+[A-Za-z]\\w*(?![\\w./\\\\-]))?)*[ \\t]+[\"']?(?:\\.[/\\\\])?((?:[\\w.-]+[/\\\\])*[\\w-][\\w.-]*\\.(?:sh|bash|py|js|mjs|cjs|ts|mts|cts|ps1|rb|pl))|[\"']?\\.[/\\\\]((?:[\\w.-]+[/\\\\])*[\\w-][\\w.-]*\\.(?:sh|bash|py|js|mjs|cjs|ts|mts|cts|ps1|rb|pl))|[\"']?((?:[\\w.-]+[/\\\\])*[\\w-][\\w.-]*\\.(?:sh|bash|ps1)))(?![\\w.-])"
+  },
+  "_AGENTDOC_NEGATION_RE": {
+   "flags": "i",
+   "re": "(?:\\b(?:not|never|nor|cannot|(?:do|does|did|must|should|would|will|can|could|wo|ca|need|may|might)n['\u2019]?t)|\\bno\\s+need),?\\s+(?:(?:ever|accidentally|automatically|directly|intentionally|knowingly|publicly|silently|yourself|just|also|even),?\\s+)?(?:to\\s+)?$"
+  },
+  "_AGENTDOC_OWN_FIX": {
+   "value": "This is the project's own file, so it does not fail the gate (a dependency's would). Check that each command it gives your agent is one you mean it to run, from a source you trust."
+  },
+  "_AGENTDOC_OWN_MSG": {
+   "value": "The {kind} file {said} (the project's own: listed, not counted)."
+  },
+  "_AGENTDOC_PASSWORD_RE": {
+   "flags": "i",
+   "re": "\\b(?:password|passcode|passphrase|pass|pwd|pw)\\b\\s*(?:is\\s+|[:=]\\s*)\\S|\\b(?:with|using|use)\\s+(?:the\\s+)?(?:password|passcode|passphrase|pass|pw)\\s+[\"'`]?[^\\s\"'`.,;]|\\bunzip\\b[^\\n]*\\s-P\\b|\\b7z\\b[^\\n]*\\s-p\\S|--password\\b"
+  },
+  "_AGENTDOC_PASTE_RE": {
+   "flags": "i",
+   "re": "\\b(?:pastebin\\.com|paste\\.ee|glot\\.io|ghostbin\\.com|hastebin\\.com|dpaste\\.(?:com|org)|termbin\\.com|0x0\\.st|transfer\\.sh|controlc\\.com|rentry\\.(?:co|org)|ix\\.io|sprunge\\.us|clbin\\.com)\\b"
+  },
+  "_AGENTDOC_RULE": {
+   "map": {
+    "fix": {
+     "value": "Do not let the agent use this skill or repository, and report it to wherever it came from. A skill should run only code you can read in the repository, from named sources."
+    },
+    "id": {
+     "value": "SC-AGENT-SKILL"
+    },
+    "msg": {
+     "value": "The {kind} file {said}."
+    },
+    "name": {
+     "value": "Hostile instructions in an agent skill or rules file"
+    },
+    "ref": {
+     "value": "CWE-506 \u00b7 Supply chain"
+    },
+    "sev": {
+     "value": "MAJOR"
+    },
+    "type": {
+     "value": "HOTSPOT"
+    },
+    "why": {
+     "value": "An AI agent reads this file as instructions and does what it says \u2014 runs its commands, fetches and runs what it points to, or sends data out. A dependency that ships one (the clawdhub campaign's SKILL.md) turns the agent into its installer, past a scanner that only reads code. These are the shapes no legitimate skill needs: a command that downloads and runs code, a password-protected archive, a paste host or raw IP as an install source, instructions hidden from a human reader, or an order to send the conversation, the environment or credentials out. A dependency's file counts (CRITICAL for a hostile shape, MAJOR for a weaker indicator); the project's own is listed as INFO, since its instructions are its developers' own."
+    }
+   }
+  },
+  "_AGENTDOC_URL_RE": {
+   "flags": "i",
+   "re": "\\bhttps?://[^\\s'\"`)>\\]]+"
+  },
+  "_AGENTDOC_ZERO_WIDTH_RE": {
+   "flags": "",
+   "re": "[\u200b\u200c\u200d\u2060\ufeff]{3,}"
   },
   "_AGENT_APPROVE_RE": {
    "flags": "",

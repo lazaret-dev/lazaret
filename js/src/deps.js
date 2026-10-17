@@ -390,6 +390,23 @@ export function packageReaderIssues(answer, order) {
   return [issues, Object.fromEntries(["files", "ofFiles", "chars", "ofChars"].map((key) => [key, Number(read[key] || 0)]))];
 }
 
+/**
+ * read(rel) of a regular file of the tree the walk did not keep (a dependency's shell or PowerShell script its agent
+ * skill runs, RA-3): read through no link and into nothing an exclusion prunes (DependencyTree), at most
+ * `maxFileBytes`, as text; null for another (binary, too large, missing). Twin of core._disk_reader.
+ */
+export function diskReader(root, files, manifests, { exclude = [], maxFileBytes = MAX_FILE_BYTES } = {}) {
+  let tree = null;                                                    // (made when first asked)
+  return (rel) => {
+    if (tree === null) tree = new DependencyTree(root, files, manifests, exclude, maxFileBytes);
+    if (!tree.isFile(rel)) return null;
+    let data;
+    try { data = readBounded(join(tree.root, ...rel.split("/")), maxFileBytes + 1); } catch { return null; }
+    if (data.length > maxFileBytes || looksBinary(data.subarray(0, 2048))) return null;
+    return new TextDecoder("utf-8", { ignoreBOM: true }).decode(data);
+  };
+}
+
 /** The text of a regular file of the tree ("/"-separated rel), read through no link, at most `cap` bytes; null
  * otherwise (core._vendor_text). */
 function vendorText(tree, rel, cap) {

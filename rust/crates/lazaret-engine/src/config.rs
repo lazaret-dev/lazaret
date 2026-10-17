@@ -467,6 +467,9 @@ pub struct Options {
     pub redact: bool,
     /// This Python's sum() adds floats with Neumaier's compensation (the entropy literals' test).
     pub neumaier: bool,
+    /// The file is a dependency's (a --deps tree's): an agent skill or instruction file's SC-AGENT-SKILL then counts
+    /// (CRITICAL / MAJOR); the project's own is INFO (RA-3).
+    pub dep: bool,
 }
 
 /// The issues of a config or data file at `path` (core.scan_config_file): SC-AUTORUN for an editor's or agent's
@@ -482,6 +485,11 @@ pub fn scan(p: &Pack, path: &[u32], text: &[u32], opts: &Options, tree: &mut Tre
             found.push(Finding::new(r, line, None));
         }
     }
+    if crate::agentdoc::is_agent_doc(path).is_some() {
+        for (line, r) in crate::agentdoc::issues(p, path, &ctx.content, tree, opts.dep)? {
+            found.push(Finding::new(r, line, None));
+        }
+    }
     for (line, r) in crate::ci::issues(p, path, &ctx.content) {
         found.push(Finding::new(r, line, None));
     }
@@ -490,7 +498,13 @@ pub fn scan(p: &Pack, path: &[u32], text: &[u32], opts: &Options, tree: &mut Tre
     let token = RuleText::clone(&token_rule(p).text);
     let secret = RuleText::of(p, "CONFIG_SECRET_RULE");
     let hint = p.re("_CFG_SECRET_KV_HINT_RE");
+    // An agent skill or instruction file reaches this scan only because agentdoc reads it (RA-3): it is not a
+    // config file, so the credential pass does not run on its prose (a CLAUDE.md example is no S-TOKEN).
+    let creds = crate::agentdoc::is_agent_doc(path).is_none();
     for i in 0..lines.len() {
+        if !creds {
+            break;
+        }
         let line = lines[i];
         if line.iter().all(|&ch| pystr::is_space(ch)) {
             continue;

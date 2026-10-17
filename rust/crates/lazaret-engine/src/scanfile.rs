@@ -761,7 +761,7 @@ fn b64_plain(body: &[u32], plain_max: usize, period_max: usize) -> bool {
 /// selector repeated (N-23: U+2622 and U+FE0F twice, in a top-100 crate; one
 /// character repeated a few times carries no data, and GlassWorm's encoding
 /// is a run of many different selectors).
-fn hidden_unicode_run(p: &Pack, line: &[u32]) -> Option<(usize, PyStr)> {
+pub(crate) fn hidden_unicode_run(p: &Pack, line: &[u32]) -> Option<(usize, PyStr)> {
     let base = p.text("_FLAG_EMOJI_BASE");
     let tag_start = p.text("_TAG_START")[0];
     let tag_end = p.text("_TAG_END")[0];

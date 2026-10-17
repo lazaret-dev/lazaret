@@ -563,11 +563,15 @@ def tool_scan_files(args):
             break
         ext = os.path.splitext(p)[1].lower()
         lang = lazaret.EXTS.get(ext)
-        if lang is None and lazaret.configsecrets.is_config_file(os.path.basename(p)):
-            lang = "cfg"                 # a config or data file: credentials only
+        if lang is None and (lazaret.configsecrets.is_config_file(os.path.basename(p))
+                             or lazaret.agentdoc_kind(p) is not None):
+            # a config or data file: credentials only; an AI agent's skill or instruction file (SKILL.md, AGENTS.md,
+            # CLAUDE.md, .cursor/rules/...): what it tells the agent to do (RA-3; a dependency's, under node_modules,
+            # site-packages, ..., counts, the project's own is INFO)
+            lang = "cfg"
         if lang is None:
-            out[p] = {"error": f"Unsupported extension {ext} (need .py/.js/.ts/.jsx/.tsx/.go/.rs, "
-                               "or a config file such as .env, .json or .yaml)"}
+            out[p] = {"error": f"Unsupported extension {ext} (need .py/.js/.ts/.jsx/.tsx/.go/.rs, a config file "
+                               "such as .env, .json or .yaml, or an agent skill or instruction file such as SKILL.md)"}
             continue
         try:
             st = os.stat(p)

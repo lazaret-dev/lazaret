@@ -348,7 +348,7 @@ SAMPLE = 8192              # header/entropy sample read from oversized files
 #      entry points and hook targets, Python install scripts
 # 2.3: verdict tiers, decoded hex, install-script inspection; 2.2:
 #      verdict-integrity; 2.1: binary-artifact awareness
-ENGINE_VERSION = "2.89.0"
+ENGINE_VERSION = "2.90.0"
 
 # ---------------- The content memo (P-2a, registry/contentcache.py) ----------------
 # One per scan_package run: the engine answers once for content several of a
@@ -2267,6 +2267,14 @@ INCOMPLETE_KINDS = ("time", "work", "code", "archive")
 # (PACKAGE_CODE), so none is left here; the finding stays for code a reader
 # could not hold (_package_code).
 UNREAD_CODE = {}
+# AI-agent skill and instruction files (RA-3): the artifacts whose SKILL.md, AGENTS.md, CLAUDE.md, .cursor/rules ...
+# are read for what they tell an agent to do (core.agentdoc_issues, a dependency's: CRITICAL for a hostile shape,
+# MAJOR for a weaker indicator) — the packages a project installs where its agent works: npm's, PyPI's (a wheel, an
+# sdist), crates.io's and VS Code's. The names first looked at here (the engine says which are agent files), and the
+# largest read (core's limit for a config file; one larger is SC-TRUNCATED).
+AGENTDOC_ARTIFACTS = ("npm", "wheel", "sdist", "crate", "vsix")
+_AGENTDOC_HINT_EXTS = (".md", ".mdc", ".txt")
+_AGENTDOC_HINT_NAMES = (".cursorrules", ".windsurfrules", ".clinerules", "rules")
 UNREAD_CODE_RULE = "SC-UNREAD-CODE"
 # The code a module or a crate is read for, by artifact: (its language, the
 # extensions of its source, the extensions of the other files its reader
@@ -2924,6 +2932,7 @@ class _ArtifactScan:
         self.use_time = None       # what SC-USE-RISK's step read (_use_time_code), None: not run
         self.unread_code = []      # N-1: members whose code nothing reads yet (UNREAD_CODE)
         self.unparsed = {}         # JS-PARSE-STRICT: JavaScript members the parser refused -> (line, reason) or None
+        self.agent_docs = {}       # RA-3: rel -> raw, the AI-agent skill and instruction files (_agent_docs)
         self.code_text = {}        # rel -> raw: what a reader reads besides the scanned sources (a Go
         self.code_bytes = 0        # module's cgo C; an sdist's .rs and Cargo.toml files, N-17), kept
         self.code_dropped = set()  # within PACKAGE_CODE_CHARS bytes (code_dropped: not kept)
@@ -3184,11 +3193,17 @@ class _ArtifactScan:
                       # a file a reader reads: a Go module's .go and cgo C, a crate's .rs (an
                       # sdist's .rs is known to be a crate's only at the end: _sdist_crates)
                       or (code is not None and ext in code[1] + code[2] and not _never_built(self.artifact, rel)))
+        # an AI agent's skill or instruction file (RA-3: _agent_docs), by its name (the engine's agentdoc_kind)
+        agent_doc = (self.artifact in AGENTDOC_ARTIFACTS
+                     and (base.lower().endswith(_AGENTDOC_HINT_EXTS) or base.lower() in _AGENTDOC_HINT_NAMES)
+                     and lazaret.agentdoc_kind(rel) is not None)
         if reason == "member":
             self.oversize.add(rel)
             if _native_program(raw):
                 self.native.add(rel)
-            if wants_text and not (ext in lazaret.MPEG_TS_EXTS and lazaret._mpeg_ts(raw[:512])):
+            if agent_doc:
+                self.truncate(rel, _TRUNC_DETAILS["member"](rel, size), "code")
+            elif wants_text and not (ext in lazaret.MPEG_TS_EXTS and lazaret._mpeg_ts(raw[:512])):
                 # Verdict integrity (audit C2/G16): a cut-short scan is a
                 # signal, not a clean verdict — whatever the first bytes look like.
                 self.truncate(rel, _TRUNC_DETAILS["member"](rel, size), "code")
@@ -3288,9 +3303,19 @@ class _ArtifactScan:
                 self.native.add(rel)
             self.classify(rel, raw, size)
             return
+        # An AI agent's skill or instruction file (RA-3): read in the second pass for what it tells the agent to do
+        # (_agent_docs); a #! line does not make it a script. It is kept as other text is too (package.json may name
+        # it as code).
+        if agent_doc:
+            cap = lazaret.configsecrets.CONFIG_SCAN_CAP
+            if len(raw) <= cap:
+                self.agent_docs[rel] = raw
+            else:
+                self.truncate(rel, f"an AI agent's skill or instruction file larger than {cap:,} bytes was not read "
+                                   f"for what it tells the agent to do", "code")
         # Text without a source extension: a script by its #! line, or kept
         # until package.json says whether it runs (main -> lib/core.dat).
-        if raw.startswith(b"#!"):
+        if raw.startswith(b"#!") and not agent_doc:
             text = raw.decode("utf-8", "replace")
             kind = _shebang_lang(text)
             if kind in ("js", "py"):
@@ -4448,6 +4473,34 @@ class _ArtifactScan:
                     raise found
                 self._agent_issue(rel, text, found)
 
+    def _agent_docs(self):
+        """SC-AGENT-SKILL (RA-3): each AI-agent skill or instruction file the
+        package ships (member), read for what it tells an agent to do — a
+        dependency's: CRITICAL for a hostile shape, MAJOR for a weaker
+        indicator (core.agentdoc_issues). A script of its folder that one of its
+        commands runs is followed through the package's members (_member_text).
+        The deadline is checked before each file."""
+        for rel in sorted(self.agent_docs):
+            self._deadline(rel)
+            text = lazaret.normalize_newlines(lazaret.decode_source(self.agent_docs[rel])[0])
+            self.issues.extend(lazaret.agentdoc_issues(rel, text.split("\n"), self._member_text, dep=True))
+
+    def _member_text(self, rel):
+        """The text of a member as this scan holds it (a source, a shell
+        script, other text kept), with \\n line endings, or None: what an agent
+        skill's command runs (_agent_docs)."""
+        got = self.sources.get(rel)
+        if got is not None:
+            return lazaret.normalize_newlines(got[0])
+        if rel in self.shell:
+            return lazaret.normalize_newlines(self.shell[rel])
+        raw = self.deferred.get(rel)
+        if raw is None:
+            raw = self.agent_docs.get(rel)
+        if raw is None or lazaret.looks_binary(raw[:2048]):
+            return None
+        return lazaret.normalize_newlines(raw.decode("utf-8", "replace"))
+
     def _agent_issue(self, rel, text, found):
         """The agent check's finding for one file, from the engine's answer."""
         issue = lazaret.dependency_agent_issue(rel, text, found)
@@ -4876,6 +4929,8 @@ class _ArtifactScan:
             if self.artifact == "sdist" and (self.code_text or self.code_dropped):
                 self._phase("the Rust crates' code", self._sdist_crates)
             self._phase("the agent-hijack check", self._agent_hijack)
+            if self.agent_docs:
+                self._phase("the agent skill and instruction files", self._agent_docs)
             self._phase("the package's names", self._lookalike_names)
             self._phase("the dependencies nothing uses", self._unused_dependencies)
             self._phase("the devDependencies the code loads", self._dev_only_loads,

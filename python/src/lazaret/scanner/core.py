@@ -2166,6 +2166,39 @@ def autorun_issues(path, lines, read=None):
     return mk_issues(path, lines, [(rule, line, None) for line, rule in got["issues"]])
 
 
+def agentdoc_kind(path):
+    """The kind of AI-agent skill or instruction file `path` names ("agent
+    skill", "agent instructions", "agent command", "agent definition",
+    "editor rules"), or None (the engine's agentdoc.is_agent_doc; RA-3)."""
+    return _native.call("agentdoc_kind", {}, path)
+
+
+def agentdoc_issues(path, lines, read=None, dep=None):
+    """SC-AGENT-SKILL findings for an agent skill or instruction file
+    (agentdoc_kind(path) is not None; RA-3): the commands and code it tells the
+    agent to run (the hook-command test; a Python or JavaScript block the
+    install-script test), a script of its folder such a command runs (followed
+    via read(rel), as autorun_issues), a password-protected archive, a paste
+    host or public raw IP, hidden text, or an order to send data out. `dep`:
+    the file is a dependency's (CRITICAL / MAJOR), False the project's own
+    (INFO: listed, never counted); None, a file under a dependency folder
+    (node_modules, site-packages, ...) is a dependency's. The engine reads the
+    file (`agentdoc_issues`); [] for a clean one."""
+    text = "\n".join(lines)
+    files = {}
+    args = {"path": path, "follow": read is not None, "files": files}
+    if dep is not None:
+        args["dep"] = bool(dep)
+    for _ in range(_AUTORUN_ROUNDS):
+        got = _native.call("agentdoc_issues", args, text)
+        if "issues" in got:
+            return mk_issues(path, lines, [(rule, line, None) for line, rule in got["issues"]])
+        for rel in got["need"]:
+            files[rel] = read(rel)
+    got = _native.call("agentdoc_issues", dict(args, follow=False), text)
+    return mk_issues(path, lines, [(rule, line, None) for line, rule in got["issues"]])
+
+
 # ---------------- CI files (SC-WORKFLOW-*, SC-GITLAB-*) ----------------
 #: The CI files' hardening checks (0.1.9; the engine's ci/workflow.rs and
 #: ci/gitlab.rs since BR-7): the practices a pipeline should follow, not the shapes
@@ -2190,10 +2223,13 @@ def ci_issues(path, lines):
                                    for line, rule in _native.call("ci_issues", {"path": path}, "\n".join(lines))])
 
 
-def tree_reader(files, configs):
+def tree_reader(files, configs, disk=None):
     """read(rel) for autorun_issues: the text of a scanned source or config
     file ('/'-separated, root-relative; a path node would load resolves as
-    node_candidates does), with \\n line endings, or None."""
+    node_candidates does), with \\n line endings, or None. `disk`: read(rel)
+    of a file the walk did not keep (a dependency's shell script that its
+    agent skill runs: _disk_reader), tried for rel itself when no scanned
+    file answers."""
     texts = {}
     for f in list(files) + list(configs):
         texts.setdefault(f["path"].replace(os.sep, "/"), f["content"])
@@ -2202,22 +2238,32 @@ def tree_reader(files, configs):
         for cand in node_candidates(rel):
             if cand in texts:
                 return normalize_newlines(texts[cand])
+        if disk is not None:
+            text = disk(rel)
+            if text is not None:
+                return normalize_newlines(text)
         return None
     return read
 
 
-def scan_config_file(path, content, read=None):
+def scan_config_file(path, content, read=None, dep=None):
     """Credentials in a config or data file (see configsecrets): S-TOKEN on
     every line, S-SECRET outside comments. Nothing else runs — it is not
     code. Suppression markers work in the file's comments, as in code. An
     editor's or AI agent's settings that run commands also get SC-AUTORUN
     (read: see autorun_issues), a GitHub Actions workflow the
-    SC-WORKFLOW-* checks and a GitLab CI file the SC-GITLAB-* ones. The
-    engine reads the file (BR-7 step 3: `scan_config`), and names the files
-    of the tree a settings file's commands run; they are read here."""
+    SC-WORKFLOW-* checks and a GitLab CI file the SC-GITLAB-* ones, and an
+    AI agent's skill or instruction file SC-AGENT-SKILL instead of the
+    credential pass (see agentdoc_issues; `dep` as there: a --deps tree's
+    file is a dependency's). The engine reads the file (BR-7 step 3:
+    `scan_config`), and names the files of the tree a settings file's
+    commands run; they are read here."""
     files = {}
-    args = engine._budget({"path": path, "follow": read is not None, "files": files,
-                           "redact": bool(REDACT_SECRETS), "neumaier": False})
+    args = {"path": path, "follow": read is not None, "files": files,
+            "redact": bool(REDACT_SECRETS), "neumaier": False}
+    if dep is not None:
+        args["dep"] = bool(dep)
+    args = engine._budget(args)
     try:
         for _ in range(_AUTORUN_ROUNDS):
             got = _native.call("scan_config", args, content)
@@ -3649,6 +3695,27 @@ def _vendor_text(tree, rel):
     return None if len(data) > _VENDOR_TEXT_CAP else data.decode("utf-8", "replace")
 
 
+def _disk_reader(root, files, manifests, excludes=()):
+    """read(rel) of a regular file of the tree the walk did not keep (a
+    dependency's shell or PowerShell script its agent skill runs, RA-3): read
+    through no link and into nothing an exclusion prunes (_DependencyTree), at
+    most SOURCE_SIZE_CAP bytes, as text; None for another (binary, too large,
+    missing)."""
+    tree = _DependencyTree(root, files, manifests, excludes)
+
+    def read(rel):
+        if not tree.is_file(rel):
+            return None
+        try:
+            data = _read_prefix(os.path.join(tree.root, *rel.split("/")), SOURCE_SIZE_CAP + 1)
+        except (OSError, ValueError):
+            return None
+        if len(data) > SOURCE_SIZE_CAP or looks_binary(data[:2048]):
+            return None
+        return data.decode("utf-8", "replace")
+    return read
+
+
 def _vendored_modules(text):
     """The module paths vendor/modules.txt says are vendored, longest first
     (engine.go_vendored_modules: a `# path version …` line followed by its
@@ -4042,13 +4109,17 @@ def scan_project(root, exclude=(), include_deps=False, taint_config=None,
             k += len(chunk)
         checked = 0                         # config and data files: credentials only
         read = tree_reader(files, configs)  # what an editor's or agent's settings run (SC-AUTORUN)
+        dep_read = None                     # what a dependency's agent skill runs: its scripts, from the disk too
         for cf in configs:
             if not stopped and should_stop is not None:
                 stopped = should_stop()
             if stopped:
                 break
+            if cf.get("dep") and dep_read is None:
+                dep_read = tree_reader(files, configs, disk=_disk_reader(root, files, manifests, exclude))
             try:
-                issues.extend(scan_config_file(cf["path"], cf["content"], read))
+                issues.extend(scan_config_file(cf["path"], cf["content"], dep_read if cf.get("dep") else read,
+                                               dep=bool(cf.get("dep"))))
             except Exception as exc:
                 issues.append(engine.error_issue(cf["path"], exc))
             checked += 1

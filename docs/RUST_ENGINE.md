@@ -280,6 +280,18 @@ rust/
                              package to read; since RA-2 Claude Code's plugins and marketplaces, what
                              a file sends out (SC-AGENT-ENDPOINT) and lets the agent do
                              (SC-AGENT-CONFIG)
+    src/agentdoc.rs          agent skill and instruction files read for what they tell the agent to
+                             do (RA-3, 0.1.9; SKILL.md, AGENTS.md, CLAUDE.md, CLAUDE.local.md,
+                             GEMINI.md, copilot-instructions.md, .github/instructions, .claude/commands
+                             and agents, .cursorrules, .cursor/rules/**, .windsurfrules,
+                             .windsurf/rules, .clinerules): the commands (shell, PowerShell, cmd,
+                             unlabeled and indented blocks, inline code, HTML-comment text) read with
+                             the hook-command test in pieces of HOOK_MAX_CHARS, Python and JavaScript
+                             blocks with the install-script test, a script of the skill's folder they
+                             run followed, a password-protected archive, a paste host or public raw
+                             IP, hidden text, and an order to send data out (not a negated one) — one
+                             SC-AGENT-SKILL finding: a dependency's CRITICAL / MAJOR, the project's
+                             own INFO (`dep`)
     src/config.rs            a config or data file's scan (BR-7 step 3, 0.1.9; configsecrets.py,
                              core.scan_config_file and their npm twins until then): the comments
                              of the formats it reads, S-TOKEN and S-SECRET's config form (a
