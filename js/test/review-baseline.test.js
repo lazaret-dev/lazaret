@@ -1,17 +1,17 @@
-// Review regressions: --baseline with trust rules (review finding 3; twin
-// of the Python engine's apply_baseline / sign_fingerprints). A baseline is
+// Review regressions: --baseline with trust rules (review finding 3), through the CLI. A baseline is
 // report-shaped input that CI gates on, and the engine marker is public, so:
 // with $LAZARET_BASELINE_KEY set a baseline must carry a valid HMAC-SHA256
 // signature; without a key, a baseline inside the scanned tree is untrusted.
-// An untrusted baseline counts every finding as new (fail closed).
+// An untrusted baseline counts every finding as new (fail closed). The rules are the engine's (baseline.rs, BR-7
+// step 4 d), held to core's code as it was by python/tests/architecture/test_baseline_engine.py, which also holds
+// this package's applyBaseline to the Python package's.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, writeFileSync, rmSync, readFileSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { run, baselineSignature, fingerprint } from "../src/index.js";
-import { signFingerprints } from "../src/baseline.js";
+import { run, baselineSignature } from "../src/index.js";
 
 const KEY = "test-key-not-a-secret";
 
@@ -103,15 +103,22 @@ test("with $LAZARET_BASELINE_KEY: reports are signed; only a verifying baseline 
   } finally { rmSync(d, { recursive: true, force: true }); }
 });
 
-test("signature serialization is shared with the Python engine", () => {
-  // HMAC-SHA256(UTF-8 key, b"lazaret-baseline-v1\n" + json.dumps(sorted(set(fps)),
-  // ensure_ascii=True, separators=(",", ":"))) — this hex was produced by
-  // lazaret.scanner.reports.sign_fingerprints on the same input.
-  const fps = ["S-EVAL-JS|src/a.js|eval(y)", 'S-EVAL-PY|café.py|eval("é\u{1F600}")',
-    "S-EVAL-JS|src/a.js|eval(y)", 'Q-TODO|b.js|// TODO \\ "q"\t'];
-  assert.equal(signFingerprints(fps, "test-key-é"),
-    "98eb9a02086a38114576d43088eef92cf35471c29c6a9696ba6c099560041a44");
-  // fingerprint: rule | path with forward slashes | stripped flagged line
-  assert.equal(fingerprint({ rule: "R", file: "a\\b.js", line: 3, snipStart: 2, snippet: ["x", "  eval(q)  ", "z"] }),
-    "R|a/b.js|eval(q)");
+test("N-15: a signed baseline accepts a reviewed install hook; the gate passes with --ci", () => {
+  const d = setup();
+  const env = { LAZARET_BASELINE_KEY: KEY };
+  try {
+    writeFileSync(join(d, "src", "a.js"), "module.exports = 1;\n");
+    writeFileSync(join(d, "src", "package.json"), '{"name": "app", "scripts": {"postinstall": "node setup.js"}}\n');
+    writeFileSync(join(d, "src", "setup.js"), "module.exports = { ready: true };\n");
+    const base = join(d, "out", "base.json");
+    assert.equal(scan(d, ["--json", base, "--ci"], env).code, 1);              // the install hook fails the gate
+    let r = scan(d, ["--json", join(d, "out", "r.json"), "--baseline", base, "--ci"], env);
+    assert.equal(r.code, 0, r.out + r.err);
+    assert.match(r.out, /Accepted by the signed baseline: 1 /);
+    const rep = readJson(join(d, "out", "r.json"));
+    assert.equal(rep.acceptedIssues, 1);
+    assert.deepEqual(rep.issues.filter((i) => i.accepted).map((i) => i.rule), ["SC-INSTALL-HOOK"]);
+    r = scan(d, ["--json", join(d, "out", "r.json"), "--baseline", base, "--ci"]);   // no key: nothing accepted
+    assert.equal(r.code, 1);
+  } finally { rmSync(d, { recursive: true, force: true }); }
 });

@@ -1,2 +1,2 @@
 # crossfile_side_by_side: 1 outputs, a hash per 100 (tests/architecture/_snapshots.py)
-9da46b1904f8efff
+59cd2e65b9b96f7b

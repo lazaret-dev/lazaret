@@ -742,16 +742,36 @@ pub fn forward(
     let mut since_clear = 0usize;
     let fast_end = if shape.has_nlend { end.saturating_sub(1) } else { end };
     loop {
-        // the fast loop: untagged states, known transitions
-        if s & TAG == 0 {
-            while p < fast_end {
-                let t = cache.trans[s as usize + shape.alpha.class(text[p]) as usize];
+        // the fast loop: untagged states, known transitions (over a slice
+        // of the text, two characters a round)
+        if s & TAG == 0 && p < fast_end {
+            let window = &text[p..fast_end];
+            let (trans, ascii) = (&cache.trans[..], &shape.alpha.ascii);
+            let class = |c: u32| if c < 128 { ascii[c as usize] as usize } else { shape.alpha.class(c) as usize };
+            let mut k = 0;
+            while k + 1 < window.len() {
+                let t = trans[s as usize + class(window[k])];
+                if t & TAG != 0 {
+                    break;
+                }
+                let u = trans[t as usize + class(window[k + 1])];
+                if u & TAG != 0 {
+                    s = t;
+                    k += 1;
+                    break;
+                }
+                s = u;
+                k += 2;
+            }
+            while k < window.len() {
+                let t = trans[s as usize + class(window[k])];
                 if t & TAG != 0 {
                     break;
                 }
                 s = t;
-                p += 1;
+                k += 1;
             }
+            p += k;
         }
         if s & TAG != 0 {
             if let Some(k) = skip {

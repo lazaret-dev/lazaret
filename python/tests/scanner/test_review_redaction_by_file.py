@@ -15,7 +15,9 @@ alone. So:
 encoding_issues now builds its findings with the file's own redactor (every
 caller: the project walk, the registry and the MCP server), and scan_project
 applies each file's literal set and file-wide PEM set to every finding
-numbered by that file's scan lines (redact_file_issues). The npm engine and
+numbered by that file's scan lines that the engine's scan of it did not
+build (redact_file_issues: the flows', the dependency checks'; the engine
+redacts its own as mk_issue does). The npm engine and
 the dashboard redact their Q-ENCODING / SC-UTF7 findings the same way.
 Credentials here are dummies; nothing is executed.
 """
@@ -26,10 +28,10 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 from lazaret.scanner import core
 from tests import _support
-from tests.scanner import _dashboard_vm as dash
 
 SEED = "q8Zr2LmX0vB7nTg4Wk1pYc9Hs6Jd3Fe5DUMMYVALUE9"
 SETTINGS = b"\xef\xbb\xbf# service settings\nSEED = \"" + SEED.encode() + b"\"\nDEBUG_LEVEL = 1\n"
@@ -94,6 +96,26 @@ class ScanProjectTests(unittest.TestCase):
         self.assertEqual(flow["snippet"], ["[redacted]", "[redacted]", 'run(request.args.get("c"))', ""])
         self.assertNotIn(PEM_BODY, json.dumps(res))
 
+    def test_only_what_the_engine_did_not_redact_is_swept(self):
+        """The engine's scan of a file redacts its own findings as mk_issue does (the file's literals, its PEM
+        blocks): the sweep takes the findings built outside it alone (the flows', the dependency checks'), as the
+        npm package's redactFlowIssues does, and reads no other file again. The result is the same."""
+        swept = []
+        real = core.redact_file_issues
+
+        def redact_file_issues(issues, files):
+            swept.extend(issues)
+            return real(issues, files)
+        tree = {"app.py": FLOW, "near.py": "import os\nseed = \"" + SEED + "\"\neval(input())\n",
+                "settings.py": SETTINGS}
+        with mock.patch.object(core, "redact_file_issues", redact_file_issues):
+            res = self.scan(tree)
+        self.assertEqual(sorted({i["rule"] for i in swept}), ["X-CMD"])
+        self.assertIn("S-EVAL-PY", {i["rule"] for i in res["issues"]})
+        (ev,) = findings(res, "S-EVAL-PY")
+        self.assertEqual(ev["snippet"][1], 'seed = "[redacted]"')            # (redacted by the engine)
+        self.assertNotIn(SEED, json.dumps(res))
+
     def test_nothing_is_redacted_on_request(self):
         res = self.scan({"app.py": FLOW, "settings.py": SETTINGS}, redact_secrets=False)
         self.assertIn(SEED, findings(res, "X-CMD")[0]["snippet"][1])
@@ -124,24 +146,6 @@ class ReportTests(unittest.TestCase):
                 self.assertIn("X-CMD", text)
                 self.assertIn("Q-ENCODING", text)
                 self.assertNotIn(SEED, text, name)
-
-
-@dash.requires_node
-class DashboardTests(unittest.TestCase):
-    def test_uploads_redact_like_the_cli(self):
-        uploads = [("settings.py", SETTINGS), ("u7.py", UTF7),
-                   ("le.js", b"\xff\xfe" + ('const k = "' + SEED + '";\n').encode("utf-16-le"))]
-        (page,) = dash.run([{"op": "uploadScan", "files": [
-            {"name": n, "b64": base64.b64encode(d).decode("ascii")} for n, d in uploads]}])
-        key = lambda i: json.dumps(i, sort_keys=True, ensure_ascii=False)
-        for (name, data), got in zip(uploads, page):
-            with self.subTest(file=name):
-                lang = core.EXTS[os.path.splitext(name)[1]]
-                text, info = core.decode_source(data, lang)
-                cli = core.encoding_issues(name, text, info) + core.scan_file(name, text, lang)
-                self.assertEqual(sorted(map(key, got)), sorted(map(key, cli)))
-                self.assertIn("Q-ENCODING", {i["rule"] for i in got})
-                self.assertNotIn(SEED, json.dumps(got))
 
 
 if __name__ == "__main__":

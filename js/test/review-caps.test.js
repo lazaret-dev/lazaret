@@ -55,7 +55,7 @@ test("140,000 findings: no RangeError from push(...array), a normal exit", () =>
     const out = [], err = [];
     const code = run(["check", d, "-q", "--no-json", "--no-html"], { out: (s) => out.push(s), err: (s) => err.push(s) });
     assert.equal(code, 0, err.join("\n"));
-    assert.match(out.join("\n"), /Issues: 140000 vulnerabilities/);
+    assert.match(out.join("\n"), /\n {2}Vulnerabilities {3}140000 {3}Security rating/);
   } finally {
     rmSync(d, { recursive: true, force: true });
   }

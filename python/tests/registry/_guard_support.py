@@ -310,10 +310,15 @@ def base_env(tmp):
     env.update({
         "PYTHONPATH": _support.SRC + os.pathsep + _support.PY_ROOT,
         "LAZARET_GUARD_CACHE": os.path.join(tmp, "guard-cache.json"),
+        # (the guard's own folders for a tool's plan: the test's, which is private to the run, rather than ~/.cache's)
+        "LAZARET_GUARD_SCRATCH": os.path.join(tmp, "guard-scratch"),
         "NO_PROXY": "127.0.0.1,localhost", "no_proxy": "127.0.0.1,localhost",
         "npm_config_userconfig": os.path.join(tmp, "npmrc-user"),
         "npm_config_globalconfig": os.path.join(tmp, "npmrc-global"),
         "npm_config_cache": os.path.join(tmp, "npm-cache"), "npm_config_store_dir": os.path.join(tmp, "pnpm-store"),
+        # (pnpm's packuments, kept by registry host and port: in ~/.cache, a registry of another run on the port this
+        # one got answered for this one, with another tarball's digest: N-22)
+        "npm_config_cache_dir": os.path.join(tmp, "pnpm-cache"),
         "npm_config_ignore_scripts": "true", "npm_config_audit": "false", "npm_config_fund": "false",
         "npm_config_update_notifier": "false", "npm_config_noproxy": "127.0.0.1,localhost",
         "npm_config_fetch_retries": "0", "npm_config_loglevel": "error",

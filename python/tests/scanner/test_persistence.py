@@ -11,7 +11,7 @@ the command, or a file of the tree it runs, looks hostile), and a workflow
 that hands out every secret or runs event text on a self-hosted runner is
 SC-WORKFLOW-SECRETS / SC-WORKFLOW-BACKDOOR. The npm engine's twins are held to
 these by js/test/persistence.test.js and tests/architecture/
-test_js_parity_persistence.py.
+test_js_parity_persistence.py (the workflows are the engine's: test_snapshot_ci.py).
 
 Everything is inert text: hosts are .invalid (the Bun release path is matched
 as text), and nothing is written outside a temporary directory or executed.
@@ -206,7 +206,12 @@ class EntriesTests(unittest.TestCase):
         self.assertEqual(autorun.config_kind("sub/.claude/settings.local.json"), ("claude", "Claude Code"))
         self.assertEqual(autorun.config_kind(".mcp.json"), ("mcp", "Claude Code"))
         self.assertEqual(autorun.config_kind(".cursor/mcp.json"), ("mcp", "Cursor"))
-        for path in ("tasks.json", ".vscode/settings.json", ".claude/config.json", "x.mcp.json"):
+        # (RA-2) VS Code's settings, a Claude Code plugin's files and a marketplace's catalog
+        self.assertEqual(autorun.config_kind(".vscode/settings.json"), ("vscode-settings", "VS Code"))
+        self.assertEqual([autorun.config_kind(p)[0] for p in ("p/.claude-plugin/plugin.json", ".claude-plugin/marketplace.json",
+                                                              "p/hooks/hooks.json", "p/monitors/monitors.json", "p/.lsp.json")],
+                         ["claude-plugin", "claude-marketplace", "claude-hooks", "claude-monitors", "claude-lsp"])
+        for path in ("tasks.json", ".vscode/launch.json", ".claude/config.json", "x.mcp.json", "hooks.json", ".claude-plugin/x.json"):
             self.assertIsNone(autorun.config_kind(path))
         self.assertEqual([autorun.owner_dir(p) for p in (".vscode/tasks.json", "a/b/.claude/settings.json",
                                                          "a/.mcp.json", ".mcp.json")], ["", "a/b", "a", ""])
@@ -440,9 +445,14 @@ class WorkflowTests(unittest.TestCase):
         res = scan({".github/workflows/discussion.yaml": WORM_BACKDOOR, ".github/workflows/formatter_1.yml": WORM_ARTIFACT,
                     ".github/workflows/copilot.yml": "on: push\njobs:\n  a:\n    env:\n      V: ${{ toJSON(secrets) }}\n",
                     "docs/formatter.yml": WORM_ARTIFACT})
-        self.assertEqual(found(res), [("SC-WORKFLOW-BACKDOOR", "CRITICAL", ".github/workflows/discussion.yaml", 12),
-                                      ("SC-WORKFLOW-SECRETS", "CRITICAL", ".github/workflows/formatter_1.yml", 8),
-                                      ("SC-WORKFLOW-SECRETS", "MAJOR", ".github/workflows/copilot.yml", 5)])
+        worms = [f for f in found(res) if f[0] not in core.HARDENING_RULES]
+        self.assertEqual(worms, [("SC-WORKFLOW-BACKDOOR", "CRITICAL", ".github/workflows/discussion.yaml", 12),
+                                 ("SC-WORKFLOW-SECRETS", "CRITICAL", ".github/workflows/formatter_1.yml", 8),
+                                 ("SC-WORKFLOW-SECRETS", "MAJOR", ".github/workflows/copilot.yml", 5)])
+        # (and since 0.1.9 the workflows' hardening checks: no permissions set, actions at a tag)
+        self.assertEqual({f[0] for f in found(res)} - {f[0] for f in worms},
+                         {"SC-WORKFLOW-PERMISSIONS", "SC-WORKFLOW-UNPINNED"})
+        self.assertFalse([f for f in found(res) if f[2] == "docs/formatter.yml"])
         msgs = {i["rule"] + i["sev"]: i["msg"] for i in res["issues"]}
         self.assertEqual(msgs["SC-WORKFLOW-BACKDOORCRITICAL"],
                          "The job \"process\" puts github.event.discussion.body into a command on a self-hosted runner, "

@@ -5,7 +5,8 @@
 // every secret is CRITICAL at import time too. In a scanned tree, settings
 // that make an editor or an agent run a command are SC-AUTORUN, and the
 // workflows the worms planted SC-WORKFLOW-SECRETS / SC-WORKFLOW-BACKDOOR.
-// tests/architecture/test_js_parity_persistence.py compares the engines.
+// tests/architecture/test_js_parity_persistence.py compares the engines (the workflows: the
+// engine's, test_snapshot_ci.py).
 // Inert text only: hosts are .invalid, nothing is executed.
 
 import { test } from "node:test";
@@ -15,11 +16,32 @@ import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
-import { persistenceReasons, installScriptRisk, importTimeRisk, importTimeSeverity } from "../src/lib/native.js";
-import { parseJsonc, JsoncError, configKind, ownerDir, entries, localCommand } from "../src/lib/autorun.js";
-import { isWorkflow, findings, outline } from "../src/lib/ghworkflow.js";
+import { call, persistenceReasons, installScriptRisk, importTimeRisk, importTimeSeverity } from "../src/lib/native.js";
+import { packValues } from "../src/lib/native.js";
+
+// the CI files' hardening checks (the pack's: the engine grades the result, result.rs)
+const HARDENING_RULES = new Set(packValues("HARDENING_RULES")[0]);
 import { scanConfigFile } from "../src/scanner/scan.js";
 
+// the settings are the engine's to read (BR-7 step 2: its `autorun_*` calls), as Python's autorun module asks it
+class JsoncError extends Error {
+  constructor(line, reason) { super(`line ${line}: ${reason}`); this.line = line; this.reason = reason; }
+}
+const node = (v) => ({ kind: v.k, line: v.l,
+  value: v.k === "object" ? new Map(v.v.map(([k, x]) => [k, node(x)])) : v.k === "array" ? v.v.map(node) : v.v });
+const parseJsonc = (text) => {
+  const got = call("autorun_jsonc", {}, text);
+  if (got.error) throw new JsoncError(...got.error);
+  return node(got.ok);
+};
+const configKind = (path) => call("autorun_kind", {}, path);
+const ownerDir = (path) => call("autorun_owner", {}, path);
+const entries = (kind, tool, text) => { const got = call("autorun_entries", { kind, tool }, text); return [got.entries, got.error]; };
+const localCommand = (cmd) => call("autorun_local_command", {}, cmd);
+// the workflows are the engine's to read (BR-7: its `ci_*` calls)
+const isWorkflow = (path) => call("ci_kind", {}, path) === "workflow";
+const findings = (text) => call("ci_workflow", {}, text).findings;
+const outline = (text) => call("ci_outline", {}, text);
 const CLI = join(dirname(fileURLToPath(import.meta.url)), "..", "bin", "lazaret.js");
 // the 2026 setup.mjs loaders: Bun fetched, then a file of the package run with it (followed, not named)
 const LOADER = "const DIR = path.dirname(fileURLToPath(import.meta.url));\n" +
@@ -96,7 +118,9 @@ test("a JSON reader that keeps lines", () => {
 test("the commands settings make a tool run", () => {
   assert.deepEqual(configKind("a\\.VSCode\\Tasks.JSON"), ["vscode-tasks", "VS Code"]);
   assert.deepEqual(configKind(".mcp.json"), ["mcp", "Claude Code"]);
-  assert.equal(configKind(".vscode/settings.json"), null);
+  assert.deepEqual(configKind(".vscode/settings.json"), ["vscode-settings", "VS Code"]);   // (RA-2: chat.tools.autoApprove)
+  assert.deepEqual(configKind("p/.claude-plugin/plugin.json"), ["claude-plugin", "Claude Code"]);
+  assert.equal(configKind(".vscode/launch.json"), null);
   assert.deepEqual([".vscode/tasks.json", "a/b/.claude/settings.json", "a/.mcp.json"].map(ownerDir), ["", "a/b", "a"]);
   const tasks = JSON.stringify({ tasks: [
     { label: "Dev", command: "node", args: ["srv.js", "a b"], dependsOn: "Build", runOptions: { runOn: "folderOpen" } },
@@ -153,9 +177,14 @@ test("workflows the worms planted", () => {
     [1, [], "seq", "", []], [2, ["seq", "-"], null, "a", []], [3, ["seq", "-"], "b", "1", []],
     [4, ["seq", "-"], "c", "", [[5, "x: y"], [7, "z"]]]]);
   const rep = scanTree({ ".github/workflows/discussion.yaml": backdoor, ".github/workflows/formatter_1.yml": artifact, "docs/f.yml": artifact });
-  assert.deepEqual(rep.issues.filter((i) => i.rule.startsWith("SC-")).map((i) => [i.rule, i.sev, i.file.replaceAll("\\", "/"), i.line]), [
+  const sc = rep.issues.filter((i) => i.rule.startsWith("SC-"));
+  assert.deepEqual(sc.filter((i) => !HARDENING_RULES.has(i.rule)).map((i) => [i.rule, i.sev, i.file.replaceAll("\\", "/"), i.line]), [
     ["SC-WORKFLOW-BACKDOOR", "CRITICAL", ".github/workflows/discussion.yaml", 12],
     ["SC-WORKFLOW-SECRETS", "CRITICAL", ".github/workflows/formatter_1.yml", 8]]);
+  // (and since 0.1.9 the workflows' hardening checks: no permissions set, actions at a tag)
+  assert.deepEqual([...new Set(sc.filter((i) => HARDENING_RULES.has(i.rule)).map((i) => i.rule))].sort(),
+    ["SC-WORKFLOW-PERMISSIONS", "SC-WORKFLOW-UNPINNED"]);
+  assert.equal(sc.filter((i) => i.file.replaceAll("\\", "/") === "docs/f.yml").length, 0);
 });
 
 test("an install hook's own command", () => {

@@ -146,6 +146,11 @@ struct Lexer<'a> {
 /// The tokens of `s` (`jsx`: elements may appear where an expression may
 /// begin).
 pub fn tokens(s: &[u32], jsx: bool) -> Vec<Token> {
+    // (a call's tests lex its text more than once: the open gate keeps them)
+    crate::textgate::memo(s, if jsx { "js-tokens-jsx" } else { "js-tokens" }, || lex(s, jsx))
+}
+
+fn lex(s: &[u32], jsx: bool) -> Vec<Token> {
     let mut lx = Lexer {
         s,
         jsx,

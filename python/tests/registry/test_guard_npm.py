@@ -57,6 +57,20 @@ class NpmGuardTests(_RegistryCase):
         self.assertEqual(sorted(os.listdir(d)), ["package.json"])
         self.assertEqual(gs.read(os.path.join(d, "package.json")), before)
 
+    def test_a_global_install_is_planned_in_a_folder_no_project_above_takes_in(self):
+        # (the Go/Rust review's CG-1 class: npm looks above a project for a workspace root that names it, and a global
+        # install's plan was made in /tmp, where any user can write such a package.json and its .npmrc)
+        base = self.env["LAZARET_GUARD_SCRATCH"]
+        os.makedirs(base, exist_ok=True)
+        planted = os.path.join(base, "package.json")
+        with open(planted, "w", encoding="utf-8") as f:
+            f.write('{"name": "planted", "version": "1.0.0", "private": true, "workspaces": ["lazaret-guard-*"]}\n')
+        self.addCleanup(os.remove, planted)
+        code, out = self.guard(gs.project(self.tmp), "--plan", "npm", "install", "-g", "dep-parent")
+        self.assertEqual(code, 1, out)
+        self.assertIn("BLOCKED    evil-pkg@1.0.0: SUSPICIOUS", out)
+        self.assertFalse(os.path.exists(os.path.join(base, "package-lock.json")))
+
     def test_npm_works_in_the_nearest_folder_with_a_package_json(self):
         """With no package.json here, npm works in the nearest folder up that
         has one: the guard checks the lockfile npm writes there, says where,

@@ -82,8 +82,9 @@ TOOLS = [
     {
         "name": "scan_directory",
         "description": ("Recursively scan a project directory for security vulnerabilities "
-                        "and code-quality issues in Python/JavaScript files. Returns quality-gate "
-                        "result, metrics, ratings, and the issue list."),
+                        "and code-quality issues in Python/JavaScript files, and for hardcoded "
+                        "credentials, token formats and hidden characters in Go and Rust files. "
+                        "Returns quality-gate result, metrics, ratings, and the issue list."),
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -100,7 +101,8 @@ TOOLS = [
     {
         "name": "scan_files",
         "description": ("Scan specific Python/JavaScript files (e.g. only the files changed in a "
-                        "diff), and config files (.env, JSON, YAML, TOML, INI, shell, keys, "
+                        "diff), Go and Rust files (credentials, token formats, hidden characters), "
+                        "and config files (.env, JSON, YAML, TOML, INI, shell, keys, "
                         "Dockerfiles), which are checked for credentials — and, for editor and AI-agent "
                         "settings and GitHub Actions workflows, for the commands they run automatically. "
                         "Returns issues per file. Use after editing to verify the changes introduce no "
@@ -129,16 +131,21 @@ TOOLS = [
     },
     {
         "name": "scan_package",
-        "description": ("Fetch and scan a public npm or PyPI package for supply-chain "
-                        "compromise (obfuscation, install hooks, secrets) and vulnerabilities. "
-                        "The archive is scanned in memory. Result is recorded in the registry "
-                        "state DB. spec examples: 'npm:left-pad@1.3.0', 'pypi:requests', "
-                        "'npm:@babel/core'."),
+        "description": ("Fetch and scan a public npm or PyPI package, Go module, crate or VS Code "
+                        "extension (Open VSX, the Visual Studio Marketplace) for supply-chain compromise "
+                        "(obfuscation, install hooks, secrets) and vulnerabilities. The archive is scanned "
+                        "in memory. Result is recorded in the registry state DB. spec examples: "
+                        "'npm:left-pad@1.3.0', 'pypi:requests', 'npm:@babel/core', "
+                        "'go:github.com/pkg/errors@v0.9.1', 'crates:serde', 'openvsx:redhat.vscode-yaml', "
+                        "'vscode:redhat.vscode-yaml'."),
         "inputSchema": {
             "type": "object",
             "properties": {
                 "spec": {"type": "string",
-                         "description": "npm:<name>[@version] or pypi:<name>[@version]"},
+                         "description": ("npm:<name>[@version], pypi:<name>[@version], "
+                                         "go:<module path>[@vX.Y.Z], crates:<name>[@version], "
+                                         "openvsx:<namespace>.<name>[@version] or "
+                                         "vscode:<publisher>.<name>[@version]")},
                 "full": {"type": "boolean",
                          "description": "Run the full ruleset (default: supply-chain/secret rules only)"},
             },
@@ -147,24 +154,25 @@ TOOLS = [
     },
     {
         "name": "registry_status",
-        "description": ("List tracked npm/PyPI packages and the verdict of their most recent "
+        "description": ("List tracked packages and the verdict of their most recent "
                         "scan (OK / WARN / INCOMPLETE / SUSPICIOUS) from the registry state DB."),
         "inputSchema": {"type": "object", "properties": {}},
     },
     {
         "name": "discover_packages",
-        "description": ("Find npm/PyPI packages newly published or updated within a recent time "
-                        "window (supply-chain threat hunting). Optionally scans them. PyPI uses "
+        "description": ("Find npm/PyPI packages and crates newly published or updated within a recent "
+                        "time window (supply-chain threat hunting). Optionally scans them. PyPI uses "
                         "timestamped RSS feeds; npm uses the replication changes feed plus one "
-                        "registry lookup per package. A registry that could not be checked makes "
+                        "registry lookup per package; crates.io, its API's list of crates by last "
+                        "update. A registry that could not be checked makes "
                         "the result incomplete (incomplete / incompleteReason), so an empty list "
                         "never stands in for one that was not checked."),
         "inputSchema": {
             "type": "object",
             "properties": {
                 "since": {"type": "string", "description": "Time window: 7d, 2w, 24h, or an ISO date (default 7d)"},
-                "ecosystem": {"type": "array", "items": {"type": "string", "enum": ["pypi", "npm"]},
-                              "description": "Restrict to pypi and/or npm (default both)"},
+                "ecosystem": {"type": "array", "items": {"type": "string", "enum": ["pypi", "npm", "crates"]},
+                              "description": "Restrict to pypi, npm and/or crates (default all three)"},
                 "limit": {"type": "integer", "minimum": 1,
                           "description": "Max packages to return (default 25, cap 50)"},
                 "scan": {"type": "boolean", "description": (
@@ -407,7 +415,8 @@ def _preflight(root, exclude, include_deps, ctx):
             if not stat.S_ISREG(mode):
                 continue
             ext = os.path.splitext(e.name)[1].lower()
-            whole = e.name in _MANIFEST_NAMES or ext == lazaret.PTH_EXT or ext in lazaret.EXTS
+            source = lazaret.dep_source_lang(ext) if in_dep else lazaret.EXTS.get(ext)
+            whole = e.name in _MANIFEST_NAMES or ext == lazaret.PTH_EXT or source is not None
             if not whole and ext not in lazaret.COMPILED_EXTS:
                 continue
             n_files += 1
@@ -557,7 +566,7 @@ def tool_scan_files(args):
         if lang is None and lazaret.configsecrets.is_config_file(os.path.basename(p)):
             lang = "cfg"                 # a config or data file: credentials only
         if lang is None:
-            out[p] = {"error": f"Unsupported extension {ext} (need .py/.js/.ts/.jsx/.tsx, "
+            out[p] = {"error": f"Unsupported extension {ext} (need .py/.js/.ts/.jsx/.tsx/.go/.rs, "
                                "or a config file such as .env, .json or .yaml)"}
             continue
         try:
@@ -668,6 +677,9 @@ def tool_scan_package(args):
         raise ValueError("spec must be a string like npm:left-pad@1.3.0")
     ctx = _ctx()
     eco, name, ver = lazaret_repo.parse_spec(spec)
+    if eco == "github":                   # (a repository: lazaret-registry scan github:… or lazaret scan github:…)
+        raise ValueError("scan_package scans registry packages: scan a GitHub repository with "
+                         "`lazaret scan github:owner/repo` or `lazaret-registry scan github:owner/repo`")
     # open the state DB first: an unreachable DB is a tool error before any download
     with lazaret_repo.Store(REGISTRY_DB) as store:
         res = lazaret_repo.scan_package(eco, name, ver, full=bool(args.get("full")),
@@ -678,7 +690,8 @@ def tool_scan_package(args):
            "profile": res["profile"],
            "filesScanned": res["filesScanned"], "binaryArtifacts": res.get("binaryArtifacts", 0),
            "supplyChainIndicators": res["supplyChain"], "severityCounts": res["sevCounts"],
-           "issueTotal": len(res["issues"]), "issues": [slim(i) for i in res["issues"][:MAX_ISSUES]]}
+           "issueTotal": len(res["issues"]), "issues": [slim(i) for i in res["issues"][:MAX_ISSUES]],
+           "useTime": res.get("useTime")}
     if len(res.get("artifacts") or []) > 1:
         out["artifacts"] = [{k: a.get(k) for k in ("filename", "kind", "verdict", "verdictReason")}
                             for a in res["artifacts"]]
@@ -699,12 +712,12 @@ def tool_registry_status(args):
     return {"tracked": len(rows), "packages": rows}
 
 
-DISCOVER_ECOSYSTEMS = ("pypi", "npm")
+DISCOVER_ECOSYSTEMS = ("pypi", "npm", "crates")
 
 
 def _discover_ecosystems(value):
     """The registries a discover_packages call asked for, validated: a list
-    drawn from DISCOVER_ECOSYSTEMS (missing or [] = both). Anything else is
+    drawn from DISCOVER_ECOSYSTEMS (missing or [] = all). Anything else is
     a tool error — ["PyPI"] used to query nothing and answer "0 packages",
     and a plain "npm" was iterated character by character."""
     if value is None or value == []:
@@ -750,7 +763,8 @@ def tool_discover_packages(args):
             notes[eco] = (f"not checked: time budget of {ctx.max_seconds:g} s "
                           f"(LAZARET_MCP_MAX_SECONDS) exceeded")
             continue
-        find = lazaret_repo.discover_pypi if eco == "pypi" else lazaret_repo.discover_npm
+        find = {"pypi": lazaret_repo.discover_pypi, "npm": lazaret_repo.discover_npm,
+                "crates": lazaret_repo.discover_crates}[eco]
         discovered += find(cutoff, limit, notes)
     ctx.check()
     discovered.sort(key=lambda x: x[3], reverse=True)

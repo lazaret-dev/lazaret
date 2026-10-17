@@ -63,7 +63,9 @@
 //! ahead that crosses it again costs nothing more. Nesting deeper than
 //! [`MAX_DEPTH`] (statements, expressions, types, JSX) is an error,
 //! "nesting too deep": the recursion is bounded by it, and fits a 1 MiB
-//! stack. No input panics: every input gives a tree or an error.
+//! stack (in WebAssembly on Node's main thread every construct reads to 3.8
+//! times the bound: docs/RUST_ENGINE.md §12). No input panics: every input
+//! gives a tree or an error.
 
 pub mod expr;
 pub mod out;
@@ -86,7 +88,13 @@ pub struct SyntaxError {
 
 /// The Program of `src` (its nodes in document order), or the error.
 pub fn parse(src: &[u32], ts: bool, jsx: bool) -> Result<Tree, SyntaxError> {
-    match parser::parse(src, ts, jsx) {
+    parse_with(src, ts, jsx, !ts)
+}
+
+/// parse(), `<!--` opening a line comment (JavaScript's reading) or read as
+/// `<` `!` `--` (tsc's, and a module's by the standard): parser.rs, skip().
+pub fn parse_with(src: &[u32], ts: bool, jsx: bool, html_open: bool) -> Result<Tree, SyntaxError> {
+    match parser::parse_with(src, ts, jsx, html_open) {
         parser::Outcome::Tree(t) => Ok(t.compact()),
         parser::Outcome::Error(line, reason) => Err(SyntaxError { line, reason }),
     }

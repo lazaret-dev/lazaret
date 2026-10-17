@@ -63,6 +63,8 @@ pub struct Tok {
     pub ln: u32,
     pub nl: bool,
     pub esc: bool,
+    /// an HTML-like `<!--` comment is among the blanks and comments before it (skip())
+    pub html: bool,
 }
 
 /// Where a node starts: its line and the offset of the token the line is
@@ -137,6 +139,7 @@ pub(super) struct Saved {
     no_conditional: bool,
     ret_ok: bool,
     spec_budget: i64,
+    html_after_code: bool,
     nnodes: u32,
     nlists: u32,
     nscratch: u32,
@@ -149,6 +152,8 @@ pub struct Parser<'a> {
     pub(super) src: &'a [u32],
     pub(super) ts: bool,
     pub(super) jsx: bool,
+    /// `<!--` opens a line comment (skip(): JavaScript's reading, not tsc's)
+    html_open: bool,
     line_ends: Vec<u32>,
     /// (a position line_at answered for, the line ends before it)
     line_cursor: std::cell::Cell<(u32, u32)>,
@@ -168,7 +173,11 @@ pub struct Parser<'a> {
     /// an arrow function may have a return type here
     pub(super) ret_ok: bool,
     pub(super) spec_budget: i64,
+    /// a token read so far had an HTML-like `<!--` comment before it, and a token before that (Tree::html_after_code)
+    html_after_code: bool,
     // ---- the rest ----
+    /// the first token has been read (start())
+    begun: bool,
     /// speculative reads under way
     pub(super) spec: u32,
     /// tokens every read ahead may still consume
@@ -200,15 +209,22 @@ pub enum Outcome {
 }
 
 pub fn parse(src: &[u32], ts: bool, jsx: bool) -> Outcome {
+    parse_with(src, ts, jsx, !ts)
+}
+
+/// parse(), `<!--` opening a line comment or not (`html_open`: skip()).
+pub fn parse_with(src: &[u32], ts: bool, jsx: bool, html_open: bool) -> Outcome {
     if src.len() >= MAX_LEN {
         // (offsets are u32: a text this long — 16 GB as code points — is refused, not wrapped)
         return Outcome::Error(0, u("the text is too long"));
     }
     let mut p = Parser::new(src, ts, jsx);
+    p.html_open = html_open;
     let r = p.start().and_then(|_| p.parse_program());
     match r {
         Ok(root) => {
             p.tree.root = root;
+            p.tree.html_after_code = p.html_after_code;
             Outcome::Tree(p.tree)
         }
         Err(Fail::Fatal) => match p.fatal {
@@ -248,11 +264,12 @@ impl<'a> Parser<'a> {
             }
             i += 1;
         }
-        let eof = Tok { t: T::Eof, v: EMPTY, x: 0, y: 0, s: 0, e: 0, ln: 1, nl: false, esc: false };
+        let eof = Tok { t: T::Eof, v: EMPTY, x: 0, y: 0, s: 0, e: 0, ln: 1, nl: false, esc: false, html: false };
         Parser {
             src,
             ts,
             jsx,
+            html_open: !ts,
             line_ends,
             line_cursor: std::cell::Cell::new((0, 0)),
             tree: Tree::new(),
@@ -266,6 +283,8 @@ impl<'a> Parser<'a> {
             no_conditional: false,
             ret_ok: true,
             spec_budget: 0,
+            html_after_code: false,
+            begun: false,
             spec: 0,
             spec_left: 2 * src.len() as i64 + SPECULATION_TOTAL,
             covers: Vec::new(),
@@ -349,12 +368,40 @@ impl<'a> Parser<'a> {
     }
 
     /// skip(): blanks and comments from pos: (the token start, a line
-    /// terminator was passed).
-    fn skip(&self, pos: u32) -> Result<(u32, bool), ScanErr> {
+    /// terminator was passed, an HTML-like `<!--` comment was).
+    ///
+    /// Annex B's HTML-like comments (ECMA-262 B.1.1, for web compatibility;
+    /// a script's, not a module's): `<!--` opens a line comment anywhere a
+    /// token may begin (`SingleLineHTMLOpenComment`), and `-->` opens one
+    /// where a line begins — the start of the input, or after only blanks
+    /// and comments since a line terminator (`SingleLineHTMLCloseComment`).
+    /// V8 reads a CommonJS file (a `.cjs`, and a `.js` whose package.json
+    /// does not say `"type": "module"`) so, and refuses a module that holds
+    /// either (Node: "HTML comments are not allowed in modules"); Bun (1.3)
+    /// refuses `<!--` and takes a line's `-->` for a comment, in a module
+    /// too. Before F-12 the parser read `<!--` as `<` `!` `--` and `-->` as
+    /// `--` `>`, so a file that opened with `<!-- a banner` did not parse,
+    /// and its supply-chain facts came from the text followers.
+    ///
+    /// `<!--` opens one only where `html_open` (JavaScript): tsc reads it as
+    /// `<` `!` `--` (6.0.3 compiles `z = 5 <!--y, f()` to
+    /// `z = 5 < !--y, f();`, which calls f), and so does a module by the
+    /// standard, so TypeScript is read as tsc reads it. After a token such a
+    /// reading can be code that the comment hides: the tree says so
+    /// (Tree::html_after_code), and the supply-chain facts, which read a
+    /// TypeScript file's text as JavaScript first, read that text without
+    /// the comment (jsflow::supply::facts). `-->` where a line begins is
+    /// never code in any reading (there `--` is a prefix operator, a line
+    /// terminator before it, and `>` begins no operand), so it is a comment
+    /// in either dialect: it hides nothing a runtime runs.
+    fn skip(&self, pos: u32) -> Result<(u32, bool, bool), ScanErr> {
         let s = self.src;
         let n = s.len();
         let mut b = pos as usize;
         let mut nl = false;
+        let mut html = false;
+        let html_open = self.html_open;
+        let is3 = |b: usize, a: u32, c2: u32, d: u32| b + 2 < n && s[b] == a && s[b + 1] == c2 && s[b + 2] == d;
         loop {
             while b < n {
                 let x = s[b];
@@ -370,6 +417,17 @@ impl<'a> Parser<'a> {
             }
             if b + 1 < n && s[b] == '/' as u32 && s[b + 1] == '/' as u32 {
                 b += 2;
+                while b < n && !is_lt(s[b]) {
+                    b += 1;
+                }
+            } else if html_open && b + 3 < n && s[b] == 0x3c && s[b + 1] == 0x21 && s[b + 2] == 0x2d && s[b + 3] == 0x2d {
+                html = true;
+                b += 4; // `<!--` to the line's end
+                while b < n && !is_lt(s[b]) {
+                    b += 1;
+                }
+            } else if (nl || pos == 0) && is3(b, 0x2d, 0x2d, 0x3e) {
+                b += 3; // `-->` at a line's start (`pos == 0`: the input's), to the line's end
                 while b < n && !is_lt(s[b]) {
                     b += 1;
                 }
@@ -397,7 +455,7 @@ impl<'a> Parser<'a> {
                 break;
             }
         }
-        Ok((b as u32, nl))
+        Ok((b as u32, nl, html))
     }
 
     fn memo_get(&self, mode: Mode, pos: u32) -> Option<Result<Tok, ScanErr>> {
@@ -447,9 +505,9 @@ impl<'a> Parser<'a> {
     }
 
     fn scan_next_inner(&mut self, pos: u32) -> Result<Tok, ScanErr> {
-        let (b, nl) = self.skip(pos)?;
+        let (b, nl, html) = self.skip(pos)?;
         let ln = self.line_at(b);
-        let mut tok = Tok { t: T::Eof, v: EMPTY, x: 0, y: 0, s: b, e: b, ln, nl, esc: false };
+        let mut tok = Tok { t: T::Eof, v: EMPTY, x: 0, y: 0, s: b, e: b, ln, nl, esc: false, html };
         let src = self.src;
         let bu = b as usize;
         if bu >= src.len() {
@@ -567,6 +625,9 @@ impl<'a> Parser<'a> {
         let r = if self.peek_at == pos { Ok(self.peek_tok) } else { self.scan_next(pos) };
         match r {
             Ok(t) => {
+                // (a `<!--` before the first token is a comment in every reading that runs the file)
+                self.html_after_code |= t.html && self.begun;
+                self.begun = true;
                 self.tok = t;
                 Ok(())
             }
@@ -660,6 +721,7 @@ impl<'a> Parser<'a> {
         };
         match r {
             Ok(t) => {
+                self.html_after_code |= t.html;
                 self.tok = t;
                 Ok(())
             }
@@ -668,9 +730,9 @@ impl<'a> Parser<'a> {
     }
 
     fn scan_jsx_tag(&mut self, pos: u32) -> Result<Tok, ScanErr> {
-        let (b, nl) = self.skip(pos)?;
+        let (b, nl, html) = self.skip(pos)?;
         let ln = self.line_at(b);
-        let mut tok = Tok { t: T::Eof, v: EMPTY, x: 0, y: 0, s: b, e: b, ln, nl, esc: false };
+        let mut tok = Tok { t: T::Eof, v: EMPTY, x: 0, y: 0, s: b, e: b, ln, nl, esc: false, html };
         let src = self.src;
         let bu = b as usize;
         if bu >= src.len() {
@@ -727,7 +789,7 @@ impl<'a> Parser<'a> {
 
     fn scan_jsx_text(&mut self, pos: u32) -> Tok {
         let ln = self.line_at(pos);
-        let mut tok = Tok { t: T::Eof, v: EMPTY, x: 0, y: 0, s: pos, e: pos, ln, nl: false, esc: false };
+        let mut tok = Tok { t: T::Eof, v: EMPTY, x: 0, y: 0, s: pos, e: pos, ln, nl: false, esc: false, html: false };
         let src = self.src;
         let p = pos as usize;
         if p >= src.len() {
@@ -784,6 +846,7 @@ impl<'a> Parser<'a> {
             no_conditional: self.no_conditional,
             ret_ok: self.ret_ok,
             spec_budget: self.spec_budget,
+            html_after_code: self.html_after_code,
             nnodes: self.tree.nodes.len() as u32,
             nlists: self.tree.lists.len() as u32,
             nscratch: self.scratch.len() as u32,
@@ -805,6 +868,7 @@ impl<'a> Parser<'a> {
         self.no_conditional = st.no_conditional;
         self.ret_ok = st.ret_ok;
         self.spec_budget = st.spec_budget;
+        self.html_after_code = st.html_after_code;
         // (what a read built after the save is unreachable now)
         self.tree.nodes.truncate(st.nnodes as usize);
         self.tree.lists.truncate(st.nlists as usize);
@@ -1099,7 +1163,7 @@ impl<'a> Parser<'a> {
                 self.semicolon()?;
                 return Ok(Some(self.extend_to_pe(node)));
             }
-            if v == W_LET && (pk == T::Name || (pk == T::P && (pv == P_LBRACK || pv == P_LBRACE))) {
+            if v == W_LET && let_declares(pk, pv) {
                 let node = self.parse_var(LET, false)?;
                 self.semicolon()?;
                 return Ok(Some(self.extend_to_pe(node)));
@@ -1358,7 +1422,7 @@ impl<'a> Parser<'a> {
                 let v = self.tok.v;
                 if v == W_VAR || v == W_CONST {
                     kind = Some(if v == W_VAR { VAR } else { CONST });
-                } else if v == W_LET && (pk == T::Name || (pk == T::P && (pv == P_LBRACK || pv == P_LBRACE))) {
+                } else if v == W_LET && let_declares(pk, pv) {
                     kind = Some(LET);
                 } else if v == W_USING && pk == T::Name && pv != W_OF && pv != W_IN && !pnl {
                     kind = Some(USING);
@@ -1375,7 +1439,7 @@ impl<'a> Parser<'a> {
                 let of = self.tok.v == W_OF;
                 self.next()?;
                 if self.node(init).kind != Kind::VariableDeclaration {
-                    init = self.to_pattern(init, false)?;
+                    init = self.assign_target(init)?;     // (a call too: `for (f() in x)`, as V8 reads it)
                 }
                 let right = if of { self.parse_maybe_assign(false, true)? } else { self.parse_expression(false)? };
                 self.expect_p(P_RPAREN)?;
@@ -2384,6 +2448,12 @@ impl<'a> Parser<'a> {
         let members = self.commit(mark);
         Ok(self.fin(Kind::TSEnumDeclaration, at, [eid, members, NONE, NONE]))
     }
+}
+
+/// `let` followed by this token starts a declaration: a name, `[` or `{`; not `in` or `instanceof`, which make `let` a
+/// name in sloppy code (`for (let in x)`, `let in x`, which V8 compiles in a script: JS-PARSE-STRICT).
+fn let_declares(pk: T, pv: u32) -> bool {
+    (pk == T::Name && pv != W_IN && pv != W_INSTANCEOF) || (pk == T::P && (pv == P_LBRACK || pv == P_LBRACE))
 }
 
 /// _PARAM_MODIFIERS

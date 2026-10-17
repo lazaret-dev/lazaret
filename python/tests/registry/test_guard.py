@@ -18,6 +18,7 @@ import shutil
 import socketserver
 import tempfile
 import threading
+import time
 import unittest
 from unittest import mock
 
@@ -395,6 +396,34 @@ class YarnAndBunLockTests(unittest.TestCase):
                                       "not checked"])])
 
 
+    def test_a_lockfile_url_the_guard_does_not_read_as_npm_does_is_blocked(self):
+        # (the credentials review of decision 14: to npm "https://a\\@b/" is a URL of host a, to the guard of host b)
+        def entry(name, url):
+            return {"name": name, "version": "1.0.0", "resolved": url, "integrity": "sha512-AAA=", "os": [], "cpu": [],
+                    "libc": [], "lock_digest": None}
+
+        ctx = context()
+        seen = []
+        with mock.patch.object(guard, "check_npm_package", side_effect=lambda c, f, p: seen.append(p)), \
+                mock.patch.object(guard, "node_platform", return_value=("linux", "x64", "glibc")):
+            code = guard.check_lock_entries(ctx, [
+                entry("slash", "https://registry.npmjs.org\\@evil.example/x/-/x-1.0.0.tgz"),
+                entry("port", "https://reg.example:+443/p/-/p-1.0.0.tgz"),
+                entry("wild", "https://*.evil.example/w/-/w-1.0.0.tgz"),
+                entry("ok", "https://reg.example/ok/-/ok-1.0.0.tgz"),
+                entry("git", "git+ssh://git@github.com/u/r.git#abc")],
+                guard.Registries({"registry": "https://reg.example/"}), set(), "package-lock.json", rewrite=False)
+        self.assertEqual(code, guard.EXIT_BLOCKED)
+        self.assertEqual([p["name"] for p in seen], ["ok"])
+        got = {c.name: (c.blocked, c.notes) for c in ctx.checks}
+        self.assertEqual(got["slash"][0], ["could not be checked: a backslash in the URL, which URL parsers read "
+                                           "differently"])
+        for name in ("port", "wild"):
+            self.assertEqual(len(got[name][0]), 1)
+            self.assertIn("a host the guard does not read as one", got[name][0][0])
+        self.assertEqual(got["git"], ([], ["not from a registry (git, a local file or a link): not checked"]))
+
+
 class ToolArgumentTests(unittest.TestCase):
     def test_index_options_are_taken_out(self):
         args, default, extras, strategy = guard.take_index_options(
@@ -453,6 +482,14 @@ class CredentialsOnTheWireTests(unittest.TestCase):
                     self.send_header("Content-Length", "0")
                     self.end_headers()
                     return
+                dots = {"/dots-out": base + "/private/%2e%2e/landing", "/dots-in": "/public/../private/landing",
+                        "/to-other-team": other + "/team/x"}
+                if self.path in dots:
+                    self.send_response(302)
+                    self.send_header("Location", dots[self.path])
+                    self.send_header("Content-Length", "0")
+                    self.end_headers()
+                    return
                 self.send_response(200)
                 self.send_header("Content-Length", "2")
                 self.end_headers()
@@ -466,11 +503,12 @@ class CredentialsOnTheWireTests(unittest.TestCase):
             threading.Thread(target=srv.serve_forever, daemon=True).start()
             self.addCleanup(srv.server_close)
             self.addCleanup(srv.shutdown)
-        self.base = f"http://127.0.0.1:{self.servers[0].server_address[1]}"
+        self.base = base = f"http://127.0.0.1:{self.servers[0].server_address[1]}"
         other = f"http://127.0.0.1:{self.servers[1].server_address[1]}"
         self.other = other
         creds = guard.pmsettings.Credentials()
         creds.token(self.base + "/private/", "t0ken")
+        creds.token(other + "/team/", "team-t0ken")
         self.fetcher = guard.Fetcher({self.base[7:], other[7:]}, auth=creds)
 
     def auth_of(self, path):
@@ -491,6 +529,40 @@ class CredentialsOnTheWireTests(unittest.TestCase):
         self.fetcher.get(self.base + "/here")
         self.assertEqual(self.auth_of("/here"), [None])
         self.assertEqual(self.auth_of("/private/landing"), ["Bearer t0ken"])
+
+    def get_soon(self, url):
+        """fetcher.get(url), which must return within 10 s (the review found a lookup that never did)."""
+        out = {}
+        t = threading.Thread(target=lambda: out.setdefault("body", self.fetcher.get(url)), daemon=True)
+        t.start()
+        t.join(10)
+        self.assertFalse(t.is_alive(), f"{url}: no answer")
+        return out.get("body")
+
+    def test_a_path_that_starts_with_two_slashes(self):
+        self.fetcher.auth.token(self.base + "/", "wh0le")
+        self.assertEqual(self.get_soon(self.base + "//private/x"), b"ok")
+        # (http.server reads "//private/x" as "/private/x" since gh-87389; what was sent with it is the whole host's
+        # token, as npm sends: "//private/" is not "/private/")
+        _port, path, auth = self.seen[-1]
+        self.assertEqual(("/" + path.lstrip("/"), auth), ("/private/x", "Bearer wh0le"))
+
+    def test_dots_are_resolved_before_the_credentials_are_chosen(self):
+        # (the credentials review of decision 14: a token for /private/ went with /private/../x, which is /x)
+        for path, sent, auth in [("/private/../public/x", "/public/x", None),
+                                 ("/private/%2e%2e/public/y", "/public/y", None),
+                                 ("/public/../private/z", "/private/z", "Bearer t0ken"),
+                                 ("/dots-out", "/landing", None), ("/dots-in", "/private/landing", "Bearer t0ken")]:
+            with self.subTest(path):
+                self.seen.clear()
+                self.get_soon(self.base + path)
+                self.assertEqual(self.seen[-1][1:], (sent, auth))
+
+    def test_a_redirect_from_another_origin_gets_no_credential_for_a_path(self):
+        self.fetcher.get(self.base + "/to-other-team")
+        self.assertEqual(self.auth_of("/team/x"), [None])
+        self.fetcher.get(self.other + "/team/x")
+        self.assertEqual(self.auth_of("/team/x"), [None, "Bearer team-t0ken"], "asked for itself, it has the path's")
 
     def test_a_urls_own_credentials(self):
         url = self.other.replace("http://", "http://u:" + "s3cret@") + "/y"
@@ -738,12 +810,18 @@ class PolicyTests(unittest.TestCase):
         ctx.not_checked(failed, repo.FetchError("HTTP 404 fetching https://registry.example/x"))
         self.assertEqual(failed.blocked, ["could not be checked: HTTP 404 fetching https://registry.example/x"])
         big = ctx.add(guard.Check("npm", "big", "1.0.0"))
-        ctx.not_checked(big, repo.FetchError("response over 200MB: https://registry.example/big"))
+        ctx.not_checked(big, guard.TooLarge("response over 200MB: https://registry.example/big"))
         self.assertEqual((big.verdict, big.blocked), ("INCOMPLETE", []))
         strict = context(block_warn=True)
         big = strict.add(guard.Check("npm", "big", "1.0.0"))
-        strict.not_checked(big, repo.FetchError("response over 200MB: x"))
+        strict.not_checked(big, guard.TooLarge("response over 200MB: x"))
         self.assertEqual(len(big.blocked), 1)
+        # (by its type, not its text: a server chooses the text, and a redirect to https://response over.example/ made a
+        # failed download pass as one too large to scan: the Go/Rust review's CG-9)
+        posing = ctx.add(guard.Check("npm", "posing", "1.0.0"))
+        ctx.not_checked(posing, repo.FetchError("URL error fetching https://response over 200MB.example/: refused"))
+        self.assertEqual(posing.verdict, None)
+        self.assertEqual(len(posing.blocked), 1)
 
     def test_what_was_installed_but_not_checked(self):
         ctx = context()
@@ -860,6 +938,37 @@ class FetcherTests(unittest.TestCase):
         self.assertTrue(guard.fetchable("https://x.example/a") and guard.fetchable("http://localhost:1/a"))
         self.assertFalse(guard.fetchable("http://x.example/a") or guard.fetchable("git+ssh://x/y"))
 
+    def test_a_host_both_transports_read_alike(self):
+        # (the credentials review of decision 14: one entry the native host rule could not read failed every native
+        # request of its fetcher, and a "*." entry is a wildcard to it; a backslash moves the host for npm)
+        good = ["reg.example", "reg.example:8443", "reg.example.", "a_b.example", "127.0.0.1", "[::1]", "[::1]:8443",
+                "xn--bcher-kva.example"]
+        bad = ["", "x.invalid:+1", "x.invalid: 1", "x.invalid:", "x.invalid:0", "x.invalid:65536", "x.invalid:000443",
+               "x.invalid:" + "4" * 5000, "*.evil.example",
+               "a..b", "-a.example", "a-.example", "[fe80::1%25eth0]", "[::1", "[::1]x", "[nope]", "a b", "h\\x",
+               "bücher.example", "a:b:80", "%61.example"]
+        for loc in good:
+            with self.subTest(loc):
+                self.assertTrue(guard.usable_netloc(loc))
+        for loc in bad:
+            with self.subTest(loc):
+                self.assertFalse(guard.usable_netloc(loc))
+        f = guard.Fetcher(good + bad, http_hosts=["npm.internal:+80", "npm.internal:4873"])
+        self.assertEqual((f.hosts, f.http_hosts), ({h.lower() for h in good}, {"npm.internal:4873"}))
+        for url in ("https://x.invalid:+1/a.whl", "https://*.evil.example/a.whl", "https://reg.example\\@evil.example/x"):
+            with self.subTest(url):
+                f.allow(url)
+                self.assertFalse(guard.fetchable(url))
+                with self.assertRaises(repo.FetchError):
+                    f.check(url)
+        self.assertEqual(f.hosts, {h.lower() for h in good})
+        with self.assertRaisesRegex(repo.FetchError, "backslash"):
+            f.check("https://reg.example/a\\..\\b")
+        f.check("https://reg.example/a?b=\\")                  # (a backslash in the query is data, to every parser)
+        with self.assertRaisesRegex(repo.FetchError, "xn--"):
+            f.check("https://bücher.example/x")
+        self.assertIn("xn--", guard.unreadable("https://bücher.example/simple/"))
+
     def test_redirects_are_held_to_the_same_rule_and_bodies_to_a_budget(self):
         server = _Server({"/away": (302, {"Location": "https://evil.example/x"}, b""),
                           "/big": (200, {}, b"x" * 4096),
@@ -875,6 +984,61 @@ class FetcherTests(unittest.TestCase):
         with self.assertRaises(repo.FetchError) as cm:
             f.get(server.url + "/missing")
         self.assertEqual(cm.exception.status, 404)
+
+
+class _DripServer:
+    """A local HTTP server that sends a body of 64 KiB a chunk at a time, `pause` seconds apart: every read is quick, and
+    the download takes as long as the server likes."""
+
+    def __init__(self, chunks=40, pause=0.1):
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *args):
+                pass
+
+            def do_GET(self):
+                self.send_response(200)
+                self.send_header("Content-Length", str(chunks * 65536))
+                self.end_headers()
+                try:
+                    for _ in range(chunks):
+                        self.wfile.write(b"x" * 65536)
+                        self.wfile.flush()
+                        time.sleep(pause)
+                except OSError:
+                    pass
+
+        class Server(socketserver.ThreadingMixIn, http.server.HTTPServer):
+            daemon_threads = True
+
+        self.server = Server(("127.0.0.1", 0), Handler)
+        self.url = f"http://127.0.0.1:{self.server.server_address[1]}/x"
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+
+    def close(self):
+        self.server.shutdown()
+        self.server.server_close()
+
+
+class DownloadDeadlineTests(unittest.TestCase):
+    """A download has a deadline as a whole, not only per read (the Go/Rust review's CG-9, the backlog's GR-3)."""
+
+    def test_a_download_that_drips_past_the_deadline_stops(self):
+        server = _DripServer()
+        self.addCleanup(server.close)
+        f = guard.Fetcher({server.url[len("http://"):].split("/")[0]})
+        with mock.patch.dict(os.environ, {"LAZARET_GUARD_DOWNLOAD_SECONDS": "1"}):
+            started = time.monotonic()
+            with self.assertRaisesRegex(repo.FetchError, "the download took over 1 s"):
+                f.get(server.url, timeout=5)
+            self.assertLess(time.monotonic() - started, 3.5)
+            with tempfile.TemporaryDirectory() as folder, \
+                    self.assertRaisesRegex(repo.FetchError, "the download took over 1 s"):
+                f.fetch_to_file(server.url, os.path.join(folder, "x"), 10 * 1024 * 1024, timeout=5)
+
+    def test_the_deadline_comes_from_the_environment(self):
+        for text, want in (("90", 90), ("", guard.DOWNLOAD_DEADLINE), ("0", guard.DOWNLOAD_DEADLINE), ("x", guard.DOWNLOAD_DEADLINE)):
+            with self.subTest(text=text), mock.patch.dict(os.environ, {"LAZARET_GUARD_DOWNLOAD_SECONDS": text}):
+                self.assertEqual(guard.download_deadline(), want)
 
 
 class ScannerTests(unittest.TestCase):
@@ -896,6 +1060,15 @@ class ScannerTests(unittest.TestCase):
 class _FakeFetcher:
     def __init__(self, pages, files):
         self.pages, self.files, self.allowed, self.http_hosts = pages, files, [], set()
+        self.opened = []
+
+    def open(self, url, accept=None, timeout=None, max_bytes=None):
+        # (Fetcher.open: the response of the fetcher's own request, with the credentials of its URL)
+        self.opened.append(url)
+        body = self.get(url)
+        response = io.BytesIO(body)
+        response.headers = {"Content-Length": str(len(body))}
+        return response
 
     def json(self, url, accept=None):
         if url not in self.pages:
@@ -971,6 +1144,23 @@ class LocalIndexTests(unittest.TestCase):
         with self.assertRaises(repo.FetchError):
             self.index.scan("999")
 
+    def test_a_file_is_fetched_and_scanned_within_the_byte_budget(self):
+        # (uv fetches many files at once: each is held by the size the index declares, or a fixed amount without one: GR-4)
+        self.index.page("x")
+        numbers = {i["filename"]: n for n, i in self.index.files.items()}
+        held = []
+        real = self.ctx.scanner.holding
+        with mock.patch.object(self.ctx.scanner, "holding", side_effect=lambda n: held.append(n) or real(n)):
+            self.index.scan(numbers["x-1.0-py3-none-any.whl"])
+            self.index.scan(numbers["x-0.7.tar.gz"])
+        self.assertEqual(held, [guard.UNDECLARED_HOLD, guard.UNDECLARED_HOLD])
+        self.assertEqual(self.ctx.scanner.gate.held, 0)
+        self.index.files[numbers["x-0.7.tar.gz"]]["size"] = 123
+        self.index.results.clear()
+        with mock.patch.object(self.ctx.scanner, "holding", side_effect=lambda n: held.append(n) or real(n)):
+            self.index.scan(numbers["x-0.7.tar.gz"])
+        self.assertEqual(held[-1], 123)
+
     def test_the_server(self):
         server = guard.make_index_server(self.index)
         threading.Thread(target=server.serve_forever, daemon=True).start()
@@ -994,6 +1184,25 @@ class LocalIndexTests(unittest.TestCase):
             with self.subTest(path), self.assertRaises(repo.FetchError) as cm:
                 f.get(base + path)
             self.assertEqual(cm.exception.status, 404)
+
+    def test_a_file_too_large_to_scan_is_relayed_by_the_fetchers_own_request(self):
+        # (0.1.9: Fetcher.open, which sends the credentials of the file's URL as the scan's download does; before, the
+        # relay made a request of its own without them)
+        self.fetcher.files["https://files.example/x-0.6.tar.gz"] = b"too large to scan"
+        server = guard.make_index_server(self.index)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        base = f"http://127.0.0.1:{server.server_address[1]}"
+        f = guard.Fetcher({base[len("http://"):]})
+        self.index.page("x")
+        numbers = {i["filename"]: n for n, i in self.index.files.items()}
+        self.assertEqual(f.get(f"{base}/files/{numbers['x-0.6.tar.gz']}/x-0.6.tar.gz"), b"too large to scan")
+        self.assertEqual(self.fetcher.opened, ["https://files.example/x-0.6.tar.gz"])
+        del self.fetcher.files["https://files.example/x-0.6.tar.gz"]
+        with self.assertRaises(repo.FetchError) as cm:
+            f.get(f"{base}/files/{numbers['x-0.6.tar.gz']}/x-0.6.tar.gz")
+        self.assertEqual(cm.exception.status, 502, "the upstream's failure, in the fixed words for the tool")
 
     def test_file_versions(self):
         self.assertEqual([guard.file_version(n) for n in ("x-1.0-py3-none-any.whl", "x_y-2.0.tar.gz",

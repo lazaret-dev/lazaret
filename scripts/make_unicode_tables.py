@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Generate the Unicode 13.0 assignment table both engines pin their input to.
 
-    python3.10 scripts/make_unicode_tables.py            # (re)write all three from unicodedata
-    python3 scripts/make_unicode_tables.py               # rewrite the JS copies from the Python module
+    python3.10 scripts/make_unicode_tables.py            # (re)write both from unicodedata
+    python3 scripts/make_unicode_tables.py               # rewrite the JS copy from the Python module
     python3 scripts/make_unicode_tables.py --check       # exit 1 if any copy is out of date
 
 Python's re and unicodedata, and Node's regexes and ICU, classify code
@@ -17,8 +17,8 @@ before scanning a source file.
 
 Writes python/src/lazaret/scanner/_unicode13.py (the source of truth, from
 unicodedata when run on a Python whose Unicode is 13.0.0), and from it
-js/src/lib/unicode13.js and the dashboard's copy (its script hash updated).
-python/tests/scanner/test_review_unicode_pin.py fails when a copy is stale.
+js/src/lib/unicode13.js. python/tests/scanner/test_review_unicode_pin.py
+fails when a copy is stale.
 """
 import importlib.util
 import os
@@ -28,9 +28,6 @@ import unicodedata
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PY_OUT = os.path.join(REPO, "python", "src", "lazaret", "scanner", "_unicode13.py")
 JS_OUT = os.path.join(REPO, "js", "src", "lib", "unicode13.js")
-DASHBOARD = os.path.join(REPO, "python", "src", "lazaret", "web", "lazaret.html")
-SECTION = "/* ======== lib/unicode13.js ======== */"
-BEFORE = "/* ======== lib/codecs.js ======== */"      # where the section goes in the page
 DIGITS = "0123456789abcdefghijklmnopqrstuvwxyz"
 
 PY_TEMPLATE = '''"""Unicode 13.0's code point assignments (Python 3.10's Unicode, the oldest
@@ -164,24 +161,6 @@ def committed_runs():
     return mod.RUNS
 
 
-def dashboard_text(html, module):
-    body = "\n".join(line[len("export "):] if line.startswith("export ") else line for line in module.split("\n"))
-    block = SECTION + "\n" + body + "\n"
-    if SECTION in html:
-        start = html.index(SECTION)
-        end = html.index("/* ======== ", start + len(SECTION))
-        return html[:start] + block + html[end:]
-    at = html.index(BEFORE)
-    return html[:at] + block + html[at:]
-
-
-def _dashboard_csp():
-    spec = importlib.util.spec_from_file_location("_dashboard_csp", os.path.join(REPO, "scripts", "dashboard_csp.py"))
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod
-
-
 def _read(path):
     try:
         with open(path, encoding="utf-8", newline="") as f:
@@ -199,17 +178,14 @@ def main(argv=None):
     else:
         runs = committed_runs()
     want = {PY_OUT: PY_TEMPLATE.format(runs=runs), JS_OUT: JS_TEMPLATE.format(runs=runs)}
-    html = _read(DASHBOARD)
-    want[DASHBOARD] = dashboard_text(html, want[JS_OUT])
     stale = [p for p, text in want.items() if _read(p) != text]
     if check:
         for path in stale:
             print(f"{path}: out of date; run python3 scripts/make_unicode_tables.py", file=sys.stderr)
         return 1 if stale else 0
     for path in stale:
-        text = _dashboard_csp().with_hashes(want[path]) if path == DASHBOARD else want[path]
         with open(path, "w", encoding="utf-8", newline="\n") as f:
-            f.write(text)
+            f.write(want[path])
         print(f"{path}: written")
     if not stale:
         print("Unicode tables up to date")

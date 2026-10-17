@@ -59,28 +59,27 @@ def rules_for(report, name):
 
 
 class DetectEncoding(unittest.TestCase):
+    """The sniff's table is the engine's (decode/mod.rs' tests: detect_encoding); here, what decode_source makes
+    of it."""
+
     def test_spec_table(self):
-        de = core.detect_encoding
         cases = [
             (b"\xff\xfeA\x00", "utf-16-le", True),
             (b"\xfe\xff\x00A", "utf-16-be", True),
             (b"\xef\xbb\xbfx", "utf-8-sig", True),
-            (b"i\x00m\x00", "utf-16-le", True),     # NUL at index 1
-            (b"im\x00\x00", "utf-16-le", True),     # NUL at index 3 (and 2)
+            (b"i\x00m\x00", "utf-16-le", True),     # NUL at index 1, and reads as text
             (b"\x00i\x00m", "utf-16-be", True),     # NUL at index 0 / 2
-            (b"\x00\x05\x16\x07", "utf-16-be", True),   # AppleDouble magic
-            (b"imp\x00", "utf-16-le", True),
+            (b"im\x00\x00", "utf-8", False),        # a UTF-16 guess that does not read as text
+            (b"\x00\x05\x16\x07", "utf-8", False),   # AppleDouble magic: not text either way
             (b"import os", "utf-8", False),
+            (b"abcd\x00", "utf-8", False),           # a NUL after byte 4 is not sniffed
             (b"ab", "utf-8", False),
             (b"", "utf-8", False),
         ]
         for head, enc, reported in cases:
             with self.subTest(head=head):
-                got = de(head)
-                self.assertEqual((got["encoding"], got["reported"]), (enc, reported))
-
-    def test_nul_after_byte_4_is_not_sniffed(self):
-        self.assertEqual(core.detect_encoding(b"abcd\x00")["encoding"], "utf-8")
+                info = core.decode_source(head, "py")[1]
+                self.assertEqual((info["encoding"], info["reported"]), (enc, reported))
 
     def test_decode_never_raises(self):
         samples = [b"i\x00", b"i\x00m", b"\xff\xfe\x00", b"\x00", b"\x00\xd8\x00",

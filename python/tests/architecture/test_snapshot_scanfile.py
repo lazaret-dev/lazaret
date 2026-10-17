@@ -13,7 +13,7 @@ import unittest
 from lazaret.scanner import _native, core
 from tests import _support
 from tests.architecture import _snapshots
-from tests.architecture.scanfile_corpus import corpus
+from tests.architecture.scanfile_corpus import corpus, go_rs_corpus
 
 FAMILIES = ("S-SECRET", "S-TOKEN", "SC-EVAL-DECODE", "SC-PACKER", "SC-EVAL-DECODER", "SC-MARSHAL", "SC-HEXSTR",
             "SC-HOMOGLYPH", "SC-HIDDEN-UNICODE", "SC-CHARCODE", "SC-B64", "SC-OFFSCREEN-CODE", "S-ENTROPY",
@@ -31,6 +31,10 @@ PROJECT_ONLY = ("Q-LONGLINE", "SC-PIPE-SHELL", "B-EMPTY-CATCH", "B-EXCEPT-PASS")
 REACHED = PROJECT_ONLY + ("B-EQEQ", "Q-TODO", "S-BIDI", "S-EVAL-PY", "S-TOKEN", "SC-EVAL-DECODE", "SC-HEXSTR",
                           "S-ENTROPY")
 MAX_FILE = 300_000                     # characters of a fixture read
+# Go and Rust (S-4): the rules that list the two languages, and the families
+# every text gets, in project mode
+GO_RS_REACHED = ("S-SECRET", "S-TOKEN", "S-BIDI", "Q-TODO", "SC-HEXSTR", "SC-HIDDEN-UNICODE", "SC-B64", "S-ENTROPY",
+                 "Q-LONGLINE")
 
 
 def lang_of(path):
@@ -66,7 +70,10 @@ def snapshot_sets():
         return corpus(seed=7, scale=1)[::2] + fixtures()
     return {"scan_file": lambda: [("scan_file", call_args(p), t) for p, t in files()],
             "scan_rules": lambda: [("scan_rules", call_args(p), t) for p, t in files()],
-            "file_context": lambda: [("file_context", call_args(p), t) for p, t in context()]}
+            "file_context": lambda: [("file_context", call_args(p), t) for p, t in context()],
+            "scan_rules_go_rs": lambda: [("scan_rules", call_args(p), t) for p, t in go_rs_corpus()],
+            "scan_file_go_rs": lambda: [("scan_file", call_args(p), t) for p, t in go_rs_corpus()],
+            "file_context_go_rs": lambda: [("file_context", call_args(p), t) for p, t in go_rs_corpus()[::2]]}
 
 
 def findings(answers):
@@ -116,6 +123,33 @@ class FileContextSnapshotTests(unittest.TestCase):
         answers = _snapshots.run(snapshot_sets()["file_context"]())
         self.assertFalse([a for a in answers if "ok" not in a][:5])
         _snapshots.check(self, "file_context", answers)
+
+
+@unittest.skipUnless(_native.available(), f"native engine not built ({_native.load_error()})")
+class GoRustSnapshotTests(unittest.TestCase):
+    """A project's Go and Rust files (S-4): their rules and families as
+    each language's lexer reads its comments and literals."""
+
+    def test_project_mode_outputs_are_the_recorded_ones(self):
+        answers = _snapshots.run(snapshot_sets()["scan_rules_go_rs"]())
+        self.assertFalse([a for a in answers if "ok" not in a][:5])
+        _snapshots.check(self, "scan_rules_go_rs", answers)
+        found = {rule for issues in findings(answers) for rule, _s, _m in issues}
+        for rule in GO_RS_REACHED:
+            with self.subTest(rule=rule):
+                self.assertIn(rule, found)
+        self.assertFalse({r for r in found if r.startswith(("B-", "S-EVAL", "SC-EVAL", "S-SQL"))},
+                         "only the rules that list Go and Rust, and the families")
+
+    def test_dependency_mode_outputs_are_the_recorded_ones(self):
+        answers = _snapshots.run(snapshot_sets()["scan_file_go_rs"]())
+        self.assertFalse([a for a in answers if "ok" not in a][:5])
+        _snapshots.check(self, "scan_file_go_rs", answers)
+
+    def test_file_context_is_the_recorded_one(self):
+        answers = _snapshots.run(snapshot_sets()["file_context_go_rs"]())
+        self.assertFalse([a for a in answers if "ok" not in a][:5])
+        _snapshots.check(self, "file_context_go_rs", answers)
 
 
 if __name__ == "__main__":

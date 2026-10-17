@@ -11,7 +11,9 @@
   of its library jobs, of the backend's --platform list (each library where
   its artifact lands, under the name _native.py loads), of the check's
   --expect list and of the install job are one set, and release.yml
-  publishes what it builds.
+  publishes what it builds. The musl libraries link musl's libc
+  dynamically and their unwinder in (a minimal Alpine has no libgcc_s), and
+  are installed in the images they were built in.
 - The native engine is the Python package's only engine (the Rust-first
   refactor): every job that runs Python tests first builds or installs the
   library and proves it loads (the engine's own tests skip without it, so a
@@ -149,12 +151,13 @@ class WheelPlatformTests(unittest.TestCase):
         return sorted(TAG_RE.findall(self.jobs[job]))
 
     def test_the_jobs(self):
-        self.assertEqual(sorted(self.jobs), ["dist", "install", "linux", "macos-windows"])
+        self.assertEqual(sorted(self.jobs), ["dist", "install", "linux", "macos-windows", "musllinux"])
 
     def test_every_step_names_the_same_platforms(self):
-        built = sorted(self.tags("linux") + self.tags("macos-windows"))
-        self.assertEqual(built, sorted(["manylinux_2_28_x86_64", "manylinux_2_28_aarch64", "macosx_11_0_arm64",
-                                        "macosx_10_12_x86_64", "win_amd64"]))
+        built = sorted(self.tags("linux") + self.tags("musllinux") + self.tags("macos-windows"))
+        self.assertEqual(built, sorted(["manylinux_2_28_x86_64", "manylinux_2_28_aarch64", "musllinux_1_2_x86_64",
+                                        "musllinux_1_2_aarch64", "macosx_11_0_arm64", "macosx_10_12_x86_64",
+                                        "win_amd64", "win_arm64"]))
         packed = re.findall(r"--platform (\S+?)=(\S+)", self.jobs["dist"])
         self.assertEqual(sorted(tag for tag, _ in packed), built)
         for tag, library in packed:
@@ -164,8 +167,9 @@ class WheelPlatformTests(unittest.TestCase):
                 self.assertTrue(self.check.supported(tag))
         self.assertEqual(sorted(re.findall(r"--expect (\S+)", self.jobs["dist"])), built)
         self.assertEqual(self.tags("install"), built)
-        for job in ("linux", "macos-windows"):
+        for job in ("linux", "musllinux", "macos-windows"):
             self.assertIn("name: native-${{ matrix.tag }}", self.jobs[job])
+        self.assertEqual(re.findall(r"needs: \[(.*)\]", self.jobs["dist"]), ["linux, musllinux, macos-windows"])
         self.assertIn("pattern: native-*", self.jobs["dist"])
 
     def test_each_library_is_built_for_its_tag(self):
@@ -180,10 +184,42 @@ class WheelPlatformTests(unittest.TestCase):
             with self.subTest(tag=tag):
                 block = other[other.index(f"tag: {tag}"):][:400]
                 self.assertIn(f'deployment-target: "{version}"', block)
-        block = other[other.index("tag: win_amd64"):][:400]
-        self.assertIn("rustflags: -C target-feature=+crt-static", block)
+        for tag in ("win_amd64", "win_arm64"):
+            with self.subTest(tag=tag):
+                block = other[other.index(f"tag: {tag}"):][:400]
+                self.assertIn("rustflags: -C target-feature=+crt-static", block)
+        self.assertRegex(other, r"tag: win_arm64\n\s+runner: windows-11-arm\n\s+target: aarch64-pc-windows-msvc\n")
         self.assertIn("MACOSX_DEPLOYMENT_TARGET: ${{ matrix.deployment-target }}", other)
         self.assertIn("RUSTFLAGS: ${{ matrix.rustflags }}", other)
+
+    def test_the_musl_libraries(self):
+        """Built in the musllinux image of their tag with the musl-hosted
+        toolchain, linking musl's libc dynamically (a static one would be a
+        second libc in Python's process) and their unwinder in (the
+        toolchain's libunwind.a, offered as libgcc_s.a: a minimal Alpine has
+        no libgcc_s), and installed in the same images."""
+        musl = self.jobs["musllinux"]
+        images = {}
+        for tag in self.tags("musllinux"):
+            with self.subTest(tag=tag):
+                arch = re.match(r"musllinux_\d+_\d+_(\w+)$", tag).group(1)
+                m = re.search(rf"tag: {tag}\n.*\n\s+target: {arch}-unknown-linux-musl\n"
+                              rf"\s+image: (quay\.io/pypa/{tag}:\S+@sha256:[0-9a-f]{{64}})\n", musl)
+                self.assertTrue(m, f"{tag}: no target or pinned image")
+                images[tag] = m.group(1)
+        self.assertEqual(len(images), 2)
+        self.assertIn('rustup toolchain install "$RUST_VERSION-$TARGET" --profile minimal --force-non-host', musl)
+        self.assertIn('cp "/opt/rust/lib/rustlib/$TARGET/lib/self-contained/libunwind.a" /tmp/unwind/libgcc_s.a',
+                      musl)
+        self.assertIn('RUSTFLAGS="-C target-feature=-crt-static -C linker=gcc -L native=/tmp/unwind"', musl)
+        self.assertIn("cargo build --release --offline --locked", musl)
+        install = self.jobs["install"]
+        for tag, image in images.items():
+            with self.subTest(tag=tag):
+                self.assertRegex(install, rf"tag: {tag}, runner: [\w.-]+,\n\s+image: {re.escape(image)} }}")
+        self.assertIn("if: ${{ matrix.image }}", install)
+        self.assertIn("/tmp/venv/bin/python -m pip install --no-index --find-links dist --only-binary :all: lazaret",
+                      install)
 
     def test_the_toolchain_is_pinned_and_builds_are_locked(self):
         self.assertRegex(self.text, r'(?m)^  RUST_VERSION: "\d+\.\d+\.\d+"$')
@@ -239,8 +275,8 @@ class PythonTestsRunOnTheLibrary(unittest.TestCase):
                                         or "_native.available()" in before, "the engine's tests would skip")
                         self.assertTrue("cargo build" in before or 'cargo +"$RUST_VERSION" build' in before,
                                         "no library is built for them")
-        # ci.yml's python-unit, python-integration, js and rust jobs; wheels.yml's two library jobs
-        self.assertEqual(runs, 6)
+        # ci.yml's python-unit, python-integration, js and rust jobs; wheels.yml's three library jobs
+        self.assertEqual(runs, 7)
 
     def test_the_whole_suite_runs_where_a_library_is_built(self):
         """The snapshot tests (test_snapshot_*) skip without the library: the
@@ -251,7 +287,7 @@ class PythonTestsRunOnTheLibrary(unittest.TestCase):
         whole = [(name, job) for name, workflow in workflows().items() for job, text in jobs(workflow).items()
                  if re.search(r"-m unittest discover -s tests -t \.", text)]
         self.assertEqual(sorted(whole), [("ci.yml", "python-unit"), ("wheels.yml", "linux"),
-                                         ("wheels.yml", "macos-windows")])
+                                         ("wheels.yml", "macos-windows"), ("wheels.yml", "musllinux")])
         self.assertFalse([m for m in os.listdir(arch) if m.startswith("test_rust_parity_")
                           and m != "test_rust_parity_regex.py"], "the Python engine's parity modules are retired")
 

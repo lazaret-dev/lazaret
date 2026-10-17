@@ -1,7 +1,7 @@
 // Line splitting shared by the scanner and the metrics (spec 1): \r\n and a
 // lone \r are newlines (Python text mode), and in JavaScript sources U+2028
 // and U+2029 are line terminators too.
-import { normalizeNewlines } from "../lib/fs.js";
+import { normalizeNewlines } from "../lib/encoding.js";
 
 const JS_LINE_SEP_RE = /[\u2028\u2029]/g;
 

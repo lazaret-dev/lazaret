@@ -78,7 +78,8 @@ class McpToolsCloseTheirStore(Base):
     def test_discover_and_scan(self):
         now = datetime.datetime.now(datetime.timezone.utc)
         self.start(mock.patch.object(repo, "discover_pypi", return_value=[]),
-                   mock.patch.object(repo, "discover_npm", return_value=[("npm", "g", "1.0.0", now)]))
+                   mock.patch.object(repo, "discover_npm", return_value=[("npm", "g", "1.0.0", now)]),
+                   mock.patch.object(repo, "discover_crates", return_value=[]))
         out = server.tool_discover_packages({"since": "1d", "scan": True})
         self.assertEqual([r["verdict"] for r in out["scanned"]], ["OK"])
         self.assert_all_closed()
