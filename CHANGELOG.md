@@ -1623,6 +1623,14 @@ aggregate):
 
 ### Fixed
 
+- **Fetch fallback local checks retain unknown startup readings (D-21; rule set 2.96.0).**
+  The reader checks fallback arguments, writes in the current file and unused class methods. These checks
+  cannot exclude a `node -r` preload, `NODE_OPTIONS`, an earlier script or another package file replacing
+  `fetch`. All existing scan entry points therefore retain the old return/argument reading, including lone
+  files. Received data remains an additional possibility; the unused-Store false positive is not cleared.
+  Function-to-binding names are indexed once per module, avoiding a whole-file scan for each helper.
+  The regression test asserts the local-check branch is reached using a VM sink, without `eval` disabling it.
+
 - **Taint: a check of the parsed URL's host against a list guards an open redirect (Q-5; the engine's, for both
   packages; rule set 2.94.0).** Project mode, Python. The allowlist guard read a check of the value
   itself (`if url in ALLOWED:`), not of the host of the URL parsed from it, so a redirect behind

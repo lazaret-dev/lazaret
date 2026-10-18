@@ -2519,7 +2519,15 @@ makes for its caller — `load(url)`, `request(options)`,
 `` `${this.baseUrl}/x` `` — is not the script's download, and a browser's
 XMLHttpRequest isn't followed (jQuery 1.x's script converter and
 CoffeeScript's `<script type="text/coffeescript">` loader both run what it
-fetches). A response holds what was received, not what was sent. The
+fetches). A response holds what was received, not what was sent, and so
+does a possible platform fetch, alongside its old return/argument reading (D-21).
+`sc_platform_call` checks local fallback arguments, local writes and unused class methods.
+None of these checks excludes startup replacements from preloads, NODE_OPTIONS, earlier scripts
+or another package file. There is no closed-startup guarantee in the current scan API, so even
+eligible calls retain the old reading. The unused-Store twin remains conservative too.
+`sc_not_given` uses a per-module function-to-binding index instead of scanning all bindings
+for every helper. The VM-sink regression asserts both a true local-check cache entry and a
+received-code finding; an eval-only test would not exercise that path. The
 script's own downloader called with its own address (`const get = (u) =>
 fetch(u)`) returns what is received; a command taken from a constant list
 (`for (const c of ['id', 'env']) execSync(c)`) prints what any of them

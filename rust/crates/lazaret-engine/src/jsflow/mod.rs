@@ -1158,6 +1158,16 @@ pub struct Program {
     /// (the supply-chain model) a callee's names (supply's `sc_names`), by its node: what it is never changes
     /// while the pass reads, and every reading of a call asked it again (P-17)
     pub sc_names_memo: IdMap<(ModId, NodeId), Rc<Vec<PyStr>>>,
+    /// (the supply-chain model) a module -> what it writes or defines by name (supply::Defined, D-21): made when
+    /// first asked
+    pub sc_defined: HashMap<ModId, Rc<supply::Defined>>,
+    /// (the supply-chain model) a module -> its classes no code reaches (supply's sc_dead_classes, D-21): made when
+    /// first asked
+    pub sc_dead: HashMap<ModId, Rc<HashSet<ClassId>>>,
+    /// (the supply-chain model) a call -> whether it passes local fetch checks (supply's sc_platform_call, D-21)
+    pub sc_platform: IdMap<(ModId, NodeId), bool>,
+    /// D-21: function node -> binding names and whether there is an outer binding, indexed once per module.
+    pub sc_function_names: HashMap<ModId, Rc<HashMap<NodeId, (Vec<BindId>, bool)>>>,
 }
 
 impl Program {
@@ -1185,6 +1195,10 @@ impl Program {
             sc_this_class: IdMap::default(),
             sc_collected: HashMap::new(),
             sc_names_memo: IdMap::default(),
+            sc_defined: HashMap::new(),
+            sc_dead: HashMap::new(),
+            sc_platform: IdMap::default(),
+            sc_function_names: HashMap::new(),
         }
     }
 

