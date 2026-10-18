@@ -21,7 +21,7 @@ crate's index line from before crates.io recorded `pubtime`) published before ev
     published before it, or an epoch above every epoch before it — and the release is flagged when it has one. A
     squat's 99.0.0 and its 99.0.1 are both flagged; a package that climbs 97 -> 98 -> 99 (chromedriver follows
     Chrome's numbers) is not, and one that climbs past 99 and later jumps (130 -> 9999) is flagged from the jump;
-  * a flood — more than FLOOD_COUNT (5) releases published within a FLOOD_WINDOW (24 hours) that contains this
+  * a flood — more than FLOOD_COUNT (20) releases published within a FLOOD_WINDOW (24 hours) that contains this
     release's publish time; pre-releases (a SemVer `-…`, a PEP 440 a/b/rc/dev) are not counted, as a resolver's range
     does not pick them, nor a version without a time.
 
@@ -36,7 +36,8 @@ import re
 INFLATED_MAJOR = 99                                   # a major this high (not calendar-like, new to the package)
 JUMP = 50                                             # an origin this many majors above the highest before it
 CALENDAR_FIRST_YEAR = 1990                            # the first year a calendar version names
-FLOOD_COUNT = 5                                       # more than this many releases ...
+FLOOD_COUNT = 20                                      # more than this many releases (John, Oct 18: 5 made 13% of a
+                                                      # day's new releases WARN, mostly CI publishing) ...
 FLOOD_WINDOW = datetime.timedelta(hours=24)           # ... within a window this long that holds this release's time
 RULE = "SC-VERSION-INFLATION"
 

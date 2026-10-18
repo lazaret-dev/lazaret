@@ -1203,7 +1203,7 @@ before it. A squat's 99.0.0 and 99.0.1 are both flagged; chromedriver's
 (130 -> 9999) is flagged from the jump. Judging it against the package's
 own versions (not an absolute floor alone) is the "internal version" check
 John asked for: the jump within the package's own sequence. The same read
-reports a flood — more than `FLOOD_COUNT` (5) releases within a
+reports a flood — more than `FLOOD_COUNT` (20) releases within a
 `FLOOD_WINDOW` (24 hours) that contains the release's publish time,
 pre-releases (a SemVer `-…`, a PEP 440 a/b/rc/dev) and versions without a
 time not counted. It uses the version history `prior.version_times` reads

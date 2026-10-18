@@ -144,44 +144,59 @@ class VersionReasonTests(unittest.TestCase):
 
 
 class FloodReasonTests(unittest.TestCase):
-    def test_more_than_five_in_a_day_with_this_release(self):
-        h = [(f"1.0.{n}", dt(1, n)) for n in range(6)]                  # six within six hours
-        self.assertIn("6 of its releases (pre-releases not counted) were published within 24 hours",
-                      va.flood_reason("npm", "1.0.5", h))
+    N = va.FLOOD_COUNT                                                 # more than this many is a flood
+
+    def test_the_limit(self):
+        self.assertEqual(self.N, 20)                                   # John, Oct 18 (it was 5)
+
+    def test_more_than_the_limit_in_a_day_with_this_release(self):
+        N = self.N
+        h = [(f"1.0.{n}", dt(1, n)) for n in range(N + 1)]              # N + 1 within N + 1 hours
+        self.assertIn(f"{N + 1} of its releases (pre-releases not counted) were published within 24 hours",
+                      va.flood_reason("npm", f"1.0.{N}", h))
         self.assertIsNotNone(va.flood_reason("npm", "1.0.0", h))
 
     def test_a_burst_that_does_not_hold_this_release_is_not_its_flood(self):
-        burst = [(f"0.0.{n}", dt(1, n, year=2019)) for n in range(6)]  # a package's first day, years ago
+        N = self.N
+        burst = [(f"0.0.{n}", dt(1, n, year=2019)) for n in range(N + 1)]  # a package's first day, years ago
         self.assertIsNone(va.flood_reason("npm", "2.1.0", burst + [("2.1.0", dt(1))]))
-        later = [(f"2.0.{n}", dt(1, n)) for n in range(6)]              # a burst after an old release
+        later = [(f"2.0.{n}", dt(1, n)) for n in range(N + 1)]          # a burst after an old release
         self.assertIsNone(va.flood_reason("npm", "1.0.0", [("1.0.0", dt(1, year=2020))] + later))
 
     def test_the_window_holds_the_release_on_either_side(self):
-        before = [(f"1.0.{n}", dt(1, n)) for n in range(5)] + [("1.1.0", dt(1, 23))]
-        self.assertIsNotNone(va.flood_reason("npm", "1.1.0", before))   # five earlier the same day, then this one
-        after = [("1.1.0", dt(1, 0))] + [(f"1.2.{n}", dt(1, 20 + n)) for n in range(4)] + [("1.3.0", dt(2, 0))]
-        self.assertIsNotNone(va.flood_reason("npm", "1.1.0", after))    # this one, then five within 24 hours
-        apart = [("1.1.0", dt(1, 0))] + [(f"1.2.{n}", dt(2, 1 + n)) for n in range(5)]
-        self.assertIsNone(va.flood_reason("npm", "1.1.0", apart))       # the five start 25 hours later
+        N = self.N
+        before = [(f"1.0.{n}", dt(1, n)) for n in range(N)] + [("1.1.0", dt(1, 23))]
+        self.assertIsNotNone(va.flood_reason("npm", "1.1.0", before))   # N earlier the same day, then this one
+        after = ([("1.1.0", dt(1, 0))] + [(f"1.2.{n}", dt(1, 24 - N + n)) for n in range(N - 1)]
+                 + [("1.3.0", dt(2, 0))])
+        self.assertIsNotNone(va.flood_reason("npm", "1.1.0", after))    # this one, then N within 24 hours
+        apart = [("1.1.0", dt(1, 0))] + [(f"1.2.{n}", dt(2, 1 + n)) for n in range(N)]
+        self.assertIsNone(va.flood_reason("npm", "1.1.0", apart))       # the N start 25 hours later
 
-    def test_exactly_five_and_spread_out_are_not_a_flood(self):
-        self.assertIsNone(va.flood_reason("npm", "1.0.4", [(f"1.0.{n}", dt(1, n)) for n in range(5)]))
-        self.assertIsNone(va.flood_reason("npm", "1.0.5", [(f"1.0.{n}", dt(1 + n)) for n in range(6)]))
+    def test_exactly_the_limit_and_spread_out_are_not_a_flood(self):
+        N = self.N
+        self.assertIsNone(va.flood_reason("npm", f"1.0.{N - 1}", [(f"1.0.{n}", dt(1, n)) for n in range(N)]))
+        self.assertIsNone(va.flood_reason("npm", f"1.0.{N}", [(f"1.0.{n}", dt(1 + n)) for n in range(N + 1)]))
+        # the Oct 18 discovery run's bursts of 6 to 20 a day: no flood now
+        for burst in (6, 13, 20):
+            self.assertIsNone(va.flood_reason("npm", f"10.1.{burst - 1}", [(f"10.1.{n}", dt(1, n)) for n in range(burst)]))
 
     def test_prereleases_do_not_count(self):
-        canaries = [(f"15.0.0-canary.{n}", dt(1, n)) for n in range(6)]
+        N = self.N
+        canaries = [(f"15.0.0-canary.{n}", dt(1, n)) for n in range(N + 1)]
         self.assertIsNone(va.flood_reason("npm", "15.0.0", canaries + [("15.0.0", dt(1, 7))]))
-        self.assertIsNone(va.flood_reason("npm", "15.0.0-canary.5", canaries))
-        self.assertIsNone(va.flood_reason("crates", "1.0.0", [(f"1.0.0-rc.{n}", dt(1, n)) for n in range(6)]
+        self.assertIsNone(va.flood_reason("npm", f"15.0.0-canary.{N}", canaries))
+        self.assertIsNone(va.flood_reason("crates", "1.0.0", [(f"1.0.0-rc.{n}", dt(1, n)) for n in range(N + 1)]
                                           + [("1.0.0", dt(1, 7))]))
         pypi = [(v, dt(1, n)) for n, v in enumerate(("2.0a1", "2.0a2", "2.0b1", "2.0rc1", "2.0.dev1", "2.0"))]
         self.assertIsNone(va.flood_reason("pypi", "2.0", pypi))
-        finals = [(f"2.0.{n}", dt(1, n)) for n in range(6)]
-        self.assertIsNotNone(va.flood_reason("pypi", "2.0.5", finals))
+        finals = [(f"2.0.{n}", dt(1, n)) for n in range(N + 1)]
+        self.assertIsNotNone(va.flood_reason("pypi", f"2.0.{N}", finals))
 
     def test_versions_without_a_time_do_not_count(self):
-        self.assertIsNone(va.flood_reason("crates", "1.0.5", [(f"1.0.{n}", None) for n in range(5)]
-                                          + [("1.0.5", dt(1))]))
+        N = self.N
+        self.assertIsNone(va.flood_reason("crates", f"1.0.{N}", [(f"1.0.{n}", None) for n in range(N)]
+                                          + [(f"1.0.{N}", dt(1))]))
         self.assertIsNone(va.flood_reason("crates", "1.0.0", [("1.0.0", None)]))
 
 
@@ -205,17 +220,19 @@ class IssueTests(unittest.TestCase):
         self.assertEqual([i["sev"] for i in out], ["MAJOR"])
 
     def test_a_flood_alongside_an_inflated_version_is_reported(self):
-        times = {f"99.0.{n}": dt(1, n).isoformat() for n in range(6)}        # six 99.0.x within six hours
-        out = self.issues("crates", "fastcrate", "99.0.5", times)
+        N = va.FLOOD_COUNT
+        times = {f"99.0.{n}": dt(1, n).isoformat() for n in range(N + 1)}    # N + 1 99.0.x within N + 1 hours
+        out = self.issues("crates", "fastcrate", f"99.0.{N}", times)
         self.assertEqual([i["rule"] for i in out], ["SC-VERSION-INFLATION"])
         self.assertIn("continues the inflated line 99.0.0 began, the package's first published version", out[0]["msg"])
-        self.assertIn("; and 6 of its releases", out[0]["msg"])
+        self.assertIn(f"; and {N + 1} of its releases", out[0]["msg"])
 
     def test_a_pure_flood_on_normal_versions_is_flagged(self):
         # unconditional (John, Oct 17): the history is read for every release, so a publish-flood on normally-versioned
         # releases is caught, not only one that also has an inflated version
-        times = {f"1.0.{n}": dt(1, n).isoformat() for n in range(6)}         # six 1.0.x within six hours
-        out = self.issues("npm", "busy", "1.0.5", times)
+        N = va.FLOOD_COUNT
+        times = {f"1.0.{n}": dt(1, n).isoformat() for n in range(N + 1)}     # N + 1 1.0.x within N + 1 hours
+        out = self.issues("npm", "busy", f"1.0.{N}", times)
         self.assertEqual([i["rule"] for i in out], ["SC-VERSION-INFLATION"])
         self.assertIn("within 24 hours", out[0]["msg"])
         self.assertNotIn("inflated —", out[0]["msg"])

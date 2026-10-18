@@ -153,8 +153,9 @@ aggregate):
   2021) shadows a private package with a public one of the same name at an outsized version so a misconfigured
   resolver prefers it; Lazaret can't see the private package, so it reads the public anomaly against the package's
   own version history (Xygeni reported npm packages published at 19999.x and 99.x through September 2026). The same
-  read reports a flood: more than five releases, pre-releases not counted, published within a 24-hour span that
-  includes the release. The version history (npm's packument, PyPI's Simple API document, the crate's index file) is
+  read reports a flood: more than twenty releases (five until John's discovery run of Oct 18 found that limit
+  flagging ordinary CI publishing), pre-releases not counted, published within a 24-hour span that includes the
+  release. The version history (npm's packument, PyPI's Simple API document, the crate's index file) is
   read for every release that is not already SUSPICIOUS, so a publish-flood on normally-versioned packages is caught
   too; a release scan reads each such document once, shared with SC-NEW-DEPENDENCY and the predecessor comparison
   (SC-NEW-INDICATOR), so it adds a request only for a release neither of them read it for. The existing history
