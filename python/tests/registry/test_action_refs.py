@@ -10,7 +10,10 @@ branch); a release branch's commit and the default branch's are not; the compare
 branches stops at it, and the check is incomplete, not CRITICAL), the call budget, the rate limit, an API error,
 offline and no token; the answers kept per (repository, commit); a moved tag MAJOR, CRITICAL when it moved to a fork's
 commit, in the pin book and in the registry's database (SQLite, and Postgres's wire statements); the switch
-LAZARET_NO_ACTION_BRANCHES; the command's --db.
+LAZARET_NO_ACTION_BRANCHES; the command's --db. And a pin that names an annotated tag's object (the RA-4 follow-up,
+vercel/next.js's `actions/github-script@d746ffe…`): its commit checked in its place, nested objects, an impostor's tag
+object, the question asked only where the default branch does not hold the pin, a failing or refused question
+incomplete, and the comment compared with the object's name.
 """
 
 import io
@@ -146,8 +149,10 @@ class BudgetTests(Base):
         self.assertEqual(rep.findings, [])                     # not CRITICAL
         self.assertEqual(len(compares(self.gh)), actionrefs.MAX_COMPARES)
         self.assertFalse([u for u in self.gh.calls if f"/commits/{evil}" in u])
-        # the repository, its branches, the compares and action.yml: nothing more for the branch check
-        self.assertEqual(len(api_calls(self.gh)), 2 + actionrefs.MAX_COMPARES + 1)
+        # the repository, whether the pin is a tag object (404: main did not hold it), its branches, the compares and
+        # action.yml: nothing more for the branch check
+        self.assertEqual(len(api_calls(self.gh)), 3 + actionrefs.MAX_COMPARES + 1)
+        self.assertIn(f"{fx.API}/repos/o/act/git/tags/{evil}", self.gh.calls)
         self.assertEqual([u for u, _ in rep.incomplete], [f"o/act@{evil}"])
         self.assertIn(f"whether {evil[:12]} is in o/act's branches is not settled: 9 of its 22 branches were compared",
                       rep.incomplete[0][1])
@@ -185,7 +190,7 @@ class BudgetTests(Base):
         evil = r.commit(r.shas[2], fork=True, files={"action.yml": fx.action_yml()})
         rep = self.audit(workflow(f"o/act@{evil}", "o/act@v1"), r, max_calls=3)
         self.assertEqual(rep.findings, [])
-        self.assertEqual(len(api_calls(self.gh)), 3)           # the repository, main, the branches: then no more
+        self.assertEqual(len(api_calls(self.gh)), 3)           # the repository, main, git/tags: then no more
         self.assertEqual([u for u, _ in rep.incomplete], [f"o/act@{evil}", "o/act@v1"])
         self.assertIn("was not checked: the budget of 3 API calls is spent", rep.incomplete[0][1])
         self.assertIn("not checked: the budget of 3 API calls is spent", rep.incomplete[1][1])
@@ -310,6 +315,321 @@ class CacheTests(Base):
         names = ["zeta", "master", "v1", "release/v2", "a-topic", "main", "releases/v3", "2.x"]
         self.assertEqual(sorted(names, key=actionrefs.branch_rank),
                          ["2.x", "release/v2", "releases/v3", "v1", "main", "master", "a-topic", "zeta"])
+
+
+def tagged_repo(topics=28):
+    """The shape of vercel/next.js's `actions/github-script@d746ffe…` (John's run of Oct 18): the release v9.0.0 is an
+    annotated tag, the workflow pins its tag object, and the commit it tags (r.shas[1]) is on main. With 28 topic
+    branches the repository has 30, more than the compare budget reaches. -> (the repository, the tag object)."""
+    r = release_repo(tags=())
+    for i in range(topics):
+        r.commit(r.shas[1], branch=f"topic-{i:02d}")
+    obj = r.tag_object("v9.0.0", r.shas[1])
+    r.tag("v9.0.0", obj)
+    return r, obj
+
+
+def tag_calls(gh):
+    return [u for u in gh.calls if "/git/tags/" in u]
+
+
+class TagObjectTests(Base):
+    """A pin that names an annotated tag's object, which GitHub Actions runs as the commit it tags (the RA-4
+    follow-up)."""
+
+    def test_a_pinned_tag_object_is_its_commit_on_main(self):
+        r, obj = tagged_repo()
+        c = r.shas[1]
+        u, direct = f"o/act@{obj}", f"o/act@{c}"
+        rep = self.audit(workflow(u, direct, comments={u: "v9.0.0"}), r)
+        self.assertEqual((rep.findings, rep.incomplete), ([], []))
+        self.assertEqual(rep.resolved, {u: c, direct: c})
+        self.assertEqual(rep.branches, {u: "main", direct: "main"})
+        self.assertEqual(rep.tag_objects, {u: {"tag": "v9.0.0", "object": obj, "commit": c}})
+        self.assertEqual(rep.notes, [(u, f"pinned to the tag object v9.0.0 ({obj}) of the commit {c}: the runner runs "
+                                         f"that commit, and it is the one checked")])
+        # the code read is the commit's: its archive accepted (it names the commit), fetched once for both lines
+        self.assertEqual((rep.actions[u]["code"]["commit"], rep.actions[u]["code"]["verdict"]), (c, "OK"))
+        self.assertEqual([x for x in self.gh.calls if "codeload" in x],
+                         [f"https://codeload.github.com/o/act/tar.gz/{c}"])
+        # the repository; main and the pin (404: no compare takes a tag object); the tag object; main and its commit;
+        # the comment's tag (its object already asked); action.yml. No branch listing, no budget spent
+        self.assertEqual([x.split("?")[0] for x in api_calls(self.gh)],
+                         [f"{fx.API}/repos/o/act", f"{fx.API}/repos/o/act/compare/main...{obj}",
+                          f"{fx.API}/repos/o/act/git/tags/{obj}", f"{fx.API}/repos/o/act/compare/main...{c}",
+                          f"{fx.API}/repos/o/act/git/ref/tags/v9.0.0", f"{fx.API}/repos/o/act/contents/action.yml"])
+        self.assertEqual(self.aud.api_calls(), 6)                 # each one counted in the run's budget
+        self.assertIn(f"{fx.API}/repos/o/act/git/tags/{obj}", rep.calls)          # and in the report's
+
+    def test_nested_tag_objects_are_followed(self):
+        r = release_repo(tags=())
+        inner = r.tag_object("v2.0.0", r.shas[0])
+        outer = r.tag_object("v2.0.0-signed", inner, kind="tag")
+        u = f"o/act@{outer}"
+        rep = self.audit(workflow(u, u), r)                    # on two lines: said once
+        self.assertEqual((rep.findings, rep.incomplete), ([], []))
+        self.assertEqual(rep.resolved, {u: r.shas[0]})
+        self.assertEqual(rep.tag_objects[u], {"tag": "v2.0.0-signed", "object": outer, "commit": r.shas[0]})
+        self.assertEqual(len(rep.notes), 1)
+        self.assertIn("through 2 tag objects", rep.notes[0][1])
+        self.assertEqual(len(tag_calls(self.gh)), 2)
+        # MAX_TAG_DEPTH tag objects in a row and one more, or a tag of a tree: not known, so incomplete, never a pass
+        deep = r.shas[0]
+        for i in range(actionrefs.MAX_TAG_DEPTH + 1):
+            deep = r.tag_object(f"deep-{i}", deep, kind="commit" if i == 0 else "tag")
+        tree = r.tag_object("a-tree", "ab" * 20, kind="tree")
+        rep = self.audit(workflow(f"o/act@{deep}", f"o/act@{tree}"), r)
+        self.assertEqual(rep.findings, [])
+        self.assertEqual(rep.tag_objects, {})
+        whys = dict((x, []) for x, _ in rep.incomplete)
+        for x, why in rep.incomplete:
+            whys[x].append(why)
+        self.assertIn(f"more than {actionrefs.MAX_TAG_DEPTH} tag objects in a row", whys[f"o/act@{deep}"][0])
+        self.assertIn("could not be settled", whys[f"o/act@{deep}"][0])
+        self.assertIn("it tags a tree, not a commit", whys[f"o/act@{tree}"][0])
+        self.assertEqual(len([u for u in tag_calls(self.gh) if deep in u]), 1)
+        self.assertEqual(len(tag_calls(self.gh)), actionrefs.MAX_TAG_DEPTH + 1)
+        # neither resolves to anything, and neither is said to have no action.yml (a reusable workflow ...)
+        self.assertEqual(rep.resolved, {})
+        self.assertFalse([n for _u, n in rep.notes if "no action.yml" in n])
+        # a nested tag object answered for another SHA than the one asked about: not followed
+        inner = r.tag_object("v4.0.0", r.shas[0])
+        outer = r.tag_object("v4.0.0-signed", inner, kind="tag")
+        answer = fx.FakeGitHub.answer
+
+        def wrong(gh, repo_, rest, query, what):
+            if rest == f"/git/tags/{inner}":
+                return gh.js({"sha": outer, "tag": "v4.0.0", "object": {"type": "commit", "sha": r.shas[0]}})
+            return answer(gh, repo_, rest, query, what)
+        with mock.patch.object(fx.FakeGitHub, "answer", wrong):
+            rep = self.audit(workflow(f"o/act@{outer}"), r)
+        self.assertEqual((rep.findings, rep.resolved, rep.tag_objects), ([], {}, {}))
+        self.assertIn(f"unexpected answer for the tag object {inner[:12]} it tags", rep.incomplete[0][1])
+
+    def test_a_tag_object_of_a_commit_on_no_branch_is_an_impostor(self):
+        r = release_repo()
+        evil = r.commit(r.shas[2], fork=True, files={"action.yml": fx.action_yml()})
+        obj = r.tag_object("v9.0.0", evil)                     # a fork's tag object, reached through the parent's name
+        u = f"o/act@{obj}"
+        rep = self.audit(workflow(u), r)
+        self.assertEqual(self.rules(rep), [("SC-ACTION-IMPOSTOR", "CRITICAL")])
+        d = rep.findings[0].detail
+        self.assertEqual((d["sha"], d["ref"], d["tag_object"], d["tag"]), (evil, obj, "v9.0.0", False))
+        self.assertEqual(actions.rule("impostor", d)["msg"],
+                         f"o/act@{obj}, the tag object v9.0.0, points to the commit {evil}: the commit is not in "
+                         f"o/act's branches: a commit from a fork, reached through the repository's name (each of its "
+                         f"2 branches was compared).")
+        self.assertEqual(rep.tag_objects[u]["commit"], evil)
+        self.assertTrue(rep.complete)
+        # the repository's own tag moved onto that object: the same, through the tag's own resolution
+        r.tag("v9.0.0", obj)
+        rep = self.audit(workflow("o/act@v9.0.0"), r)
+        self.assertEqual(self.rules(rep), [("SC-ACTION-IMPOSTOR", "CRITICAL")])
+
+    def test_a_commit_is_asked_about_only_when_the_default_branch_does_not_hold_it(self):
+        r = release_repo()
+        backport = r.commit(r.shas[1], files={"action.yml": fx.action_yml()})
+        r.commit(backport, branch="release/v2")
+        rep = self.audit(workflow(f"o/act@{r.shas[0]}", f"o/act@{backport}"), r)
+        self.assertEqual((rep.findings, rep.incomplete, rep.tag_objects), ([], [], {}))
+        self.assertEqual(rep.branches, {f"o/act@{r.shas[0]}": "main", f"o/act@{backport}": "release/v2"})
+        # 404 for the backport, before the branches are listed; nothing for the commit main holds
+        self.assertEqual(tag_calls(self.gh), [f"{fx.API}/repos/o/act/git/tags/{backport}"])
+        self.assertEqual([x.split("/compare/")[1].split("?")[0] for x in self.gh.calls if "/compare/" in x],
+                         [f"main...{r.shas[0]}", f"main...{backport}", f"release/v2...{backport}"])
+        self.assertEqual(rep.resolved, {f"o/act@{r.shas[0]}": r.shas[0], f"o/act@{backport}": backport})
+
+    def test_a_question_github_does_not_answer_leaves_a_tag_object_incomplete(self):
+        for state in ("on main", "a fork's commit"):
+            r, obj = tagged_repo(topics=0)
+            if state == "a fork's commit":
+                obj = r.tag_object("v9.0.1", r.commit(r.shas[2], fork=True, files={"action.yml": fx.action_yml()}))
+            aud = self.auditor(r)
+            self.gh.broken["/git/tags/"] = 502
+            u = f"o/act@{obj}"
+            rep = aud.audit(actions.uses_of(workflow(u, comments={u: "v9.0.1"})))
+            # checked as a commit: no branch holds it and GitHub shows no such commit, so it is not known: incomplete
+            self.assertEqual((rep.findings, rep.tag_objects, rep.resolved), ([], {}, {}), state)
+            self.assertEqual([x for x, _ in rep.incomplete], [u], state)
+            self.assertIn(f"GitHub does not show {obj[:12]} as a commit of o/act, and whether it is a tag object could "
+                          f"not be asked: looking up the tag object {obj[:12]} of o/act: HTTP 502",
+                          rep.incomplete[0][1])
+            self.assertEqual(len(tag_calls(self.gh)), 1, state)                                 # asked once
+        # the branch check off: asked on its own, and said; the code is still read at the pin, which is incomplete
+        r, obj = tagged_repo(topics=0)
+        aud = self.auditor(r, env={actionrefs.OFF_ENV: "1"})
+        self.gh.broken["/git/tags/"] = 502
+        rep = aud.audit(actions.uses_of(workflow(f"o/act@{obj}")))
+        self.assertEqual((rep.findings, rep.resolved), ([], {}))
+        self.assertIn(f"whether {obj[:12]} is a commit or a tag object of o/act could not be settled",
+                      rep.incomplete[0][1])
+        # the rate limit on it: not checked
+        rep = self.audit(workflow(f"o/act@{obj}"), r, limit=2)
+        self.assertEqual((rep.findings, rep.resolved), ([], {}))
+        self.assertIn("was not checked", rep.incomplete[0][1])
+        self.assertIn("rate limit reached", rep.incomplete[0][1])
+
+    def test_a_question_github_does_not_answer_leaves_a_commit_checked_as_before(self):
+        # git/tags answering 422 or 5xx for a commit: the check goes on as before the question was asked
+        answer = fx.FakeGitHub.answer
+        for status in (422, 503):
+            def refused(gh, repo_, rest, query, what, status=status):
+                if rest.startswith("/git/tags/"):
+                    raise fx.fail(status, what)
+                return answer(gh, repo_, rest, query, what)
+            with mock.patch.object(fx.FakeGitHub, "answer", refused):
+                r = release_repo()
+                evil = r.commit(r.shas[2], fork=True, files={"action.yml": fx.action_yml()})
+                backport = r.commit(r.shas[1], files={"action.yml": fx.action_yml()})
+                r.commit(backport, branch="release/v2")
+                rep = self.audit(workflow(f"o/act@{evil}", f"o/act@{backport}"), r)
+                # a fork's commit is CRITICAL as before, with a note that the question was not answered
+                self.assertEqual(self.rules(rep), [("SC-ACTION-IMPOSTOR", "CRITICAL")], status)
+                self.assertEqual(rep.findings[0].uses, f"o/act@{evil}")
+                self.assertTrue(rep.complete, status)
+                self.assertEqual([u for u, _ in rep.notes], [f"o/act@{evil}"], status)
+                self.assertIn(f"whether {evil[:12]} is a tag object of o/act could not be asked", rep.notes[0][1])
+                self.assertIn(f"HTTP {status}", rep.notes[0][1])
+                self.assertEqual(rep.branches, {f"o/act@{backport}": "release/v2"})      # a branch holds it: a commit
+                self.assertEqual(rep.resolved, {f"o/act@{evil}": evil, f"o/act@{backport}": backport})
+                # with too many branches to settle: incomplete, as before
+                for i in range(actionrefs.MAX_COMPARES):
+                    r.commit(r.shas[1], branch=f"topic-{i:02d}")
+                rep = self.audit(workflow(f"o/act@{evil}"), r)
+                self.assertEqual(rep.findings, [], status)
+                self.assertIn("is not settled: 9 of its", rep.incomplete[0][1])
+                self.assertEqual(rep.resolved, {})
+        # and a commit GitHub shows as another commit (as it may a tag object it did not say was one): not CRITICAL
+        r = release_repo()
+        evil = r.commit(r.shas[2], fork=True, files={"action.yml": fx.action_yml()})
+
+        def peeled(gh, repo_, rest, query, what):
+            if rest.startswith("/git/tags/"):
+                raise fx.fail(500, what)
+            if rest == f"/commits/{evil}":
+                return gh.js({"sha": r.shas[2], "parents": []})
+            return answer(gh, repo_, rest, query, what)
+        with mock.patch.object(fx.FakeGitHub, "answer", peeled):
+            rep = self.audit(workflow(f"o/act@{evil}"), r)
+        self.assertEqual(rep.findings, [])
+        self.assertIn(f"GitHub shows it as the commit {r.shas[2][:12]}", rep.incomplete[0][1])
+
+    def test_a_refused_question_leaves_every_later_use_not_checked(self):
+        # the branch check off: the budget or the rate limit refuses the first pin's question; the second pin's,
+        # in another repository, is not asked, and both say they were not checked
+        for kw in ({"max_calls": 0}, {"limit": 0}):
+            r1, r2 = release_repo("o/act"), release_repo("p/other")
+            u1, u2 = f"o/act@{r1.shas[1]}", f"p/other@{r2.shas[1]}"
+            rep = self.audit(workflow(u1, u2), r1, r2, env={actionrefs.OFF_ENV: "1"}, **kw)
+            self.assertEqual([u for u, _ in rep.incomplete], [u1, u2], kw)
+            self.assertTrue(all(why.startswith("not checked: ") for _u, why in rep.incomplete), kw)
+            self.assertEqual((rep.findings, rep.resolved, rep.actions), ([], {}, {}), kw)
+            self.assertLessEqual(len(api_calls(self.gh)), 1, kw)
+
+    def test_after_a_stop_a_use_the_run_could_answer_is_still_said_not_checked(self):
+        mono = fx.Repo("o/mono")
+        c = mono.commit(files={"a/action.yml": fx.action_yml(), "b/action.yml": fx.action_yml()})
+        mono.commit(c, branch="main")
+        r = release_repo()
+        # o/mono/a: the repository, main and a/action.yml (3 calls); o/act's first call is refused, which its branch
+        # check says; o/mono/b resolves from what the run has, but its action.yml would be refused: not checked
+        a, other, b = f"o/mono/a@{c}", f"o/act@{r.shas[1]}", f"o/mono/b@{c}"
+        rep = self.audit(workflow(a, other, b), mono, r, max_calls=3)
+        self.assertEqual([u for u, _ in rep.incomplete], [other, b])
+        self.assertIn("was not checked: the budget of 3 API calls is spent", rep.incomplete[0][1])
+        self.assertEqual(rep.incomplete[1][1], "not checked: the budget of 3 API calls is spent; GITHUB_TOKEN "
+                                               "(read-only) raises it")
+        self.assertIn("o/mono/a@" + c, rep.actions)
+        self.assertNotIn("o/mono/b@" + c, rep.actions)
+
+    def test_the_question_is_a_call_of_the_runs_budget(self):
+        r, obj = tagged_repo(topics=0)
+        u = f"o/act@{obj}"
+        rep = self.audit(workflow(u), r, max_calls=2)          # the repository and main: the question is refused
+        self.assertEqual(rep.findings, [])
+        self.assertEqual(len(api_calls(self.gh)), 2)
+        self.assertEqual(tag_calls(self.gh), [])
+        self.assertIn("is in o/act's branches was not checked: the budget of 2 API calls is spent",
+                      rep.incomplete[0][1])
+        self.assertEqual(len(rep.incomplete), 1)                # said once
+        rep = self.audit(workflow(u), r, max_calls=3)          # answered, then main with its commit refused
+        self.assertEqual(rep.findings, [])
+        self.assertEqual(tag_calls(self.gh), [f"{fx.API}/repos/o/act/git/tags/{obj}"])
+        self.assertEqual(len(api_calls(self.gh)), 3)
+        self.assertEqual(rep.resolved, {u: r.shas[1]})           # what was learned is kept
+        self.assertEqual([x for x, _ in rep.incomplete], [u])
+        self.assertIn("the budget of 3 API calls is spent", rep.incomplete[0][1])
+
+    def test_the_comment_is_compared_with_the_tag_objects_name(self):
+        r, obj = tagged_repo(topics=0)
+        c = r.shas[1]
+        u = f"o/act@{obj}"
+        rep = self.audit(workflow(u, comments={u: "v9.0.0"}), r, pins=actions.PinBook(self.book_path))
+        self.assertEqual((rep.findings, rep.incomplete), ([], []))
+        # the pin book records the tag at its commit, not at its object: the tag itself is then not called moved
+        self.assertEqual(actions.PinBook(self.book_path).entries["o/act@v9.0.0"]["sha"], c)
+        self.assertEqual(self.audit(workflow("o/act@v9.0.0"), r, pins=actions.PinBook(self.book_path)).findings, [])
+        # the tag object of another name: the mismatch
+        other = r.tag_object("v8.0.0", c)
+        u = f"o/act@{other}"
+        rep = self.audit(workflow(u, comments={u: "v9.0.0"}), r)
+        self.assertEqual(self.rules(rep), [("SC-ACTION-PIN-MISMATCH", "MAJOR")])
+        d = rep.findings[0].detail
+        self.assertEqual((d["tag"], d["tag_sha"], d["pin"], d["pin_tag"], d["pin_commit"]), ("v9.0.0", c, other,
+                                                                                             "v8.0.0", c))
+        self.assertEqual(actions.rule("pin-mismatch", d)["msg"],
+                         f"o/act is pinned to the tag object v8.0.0 ({other[:12]}, of the commit {c[:12]}) with the "
+                         f"comment v9.0.0, but the tag object's name is v8.0.0, and v9.0.0 points to {c[:12]}.")
+        # a tag object of the comment's name whose tag is at another commit now
+        stray = r.tag_object("v9.0.0", r.shas[0])
+        u = f"o/act@{stray}"
+        rep = self.audit(workflow(u, comments={u: "v9.0.0"}), r)
+        self.assertEqual(self.rules(rep), [("SC-ACTION-PIN-MISMATCH", "MAJOR")])
+        self.assertEqual(actions.rule("pin-mismatch", rep.findings[0].detail)["msg"],
+                         f"o/act is pinned to the tag object v9.0.0 ({stray[:12]}, of the commit {r.shas[0][:12]}) "
+                         f"with the comment v9.0.0, but v9.0.0 points to {c[:12]}.")
+
+    def test_a_mismatch_is_said_of_a_commit_and_not_of_a_pin_not_known(self):
+        r = release_repo()
+        u = f"o/act@{r.shas[0]}"                                # on main: a commit, asked nothing
+        rep = self.audit(workflow(u, comments={u: "v1.0.0"}), r)
+        self.assertEqual(self.rules(rep), [("SC-ACTION-PIN-MISMATCH", "MAJOR")])
+        self.assertNotIn("pin_tag", rep.findings[0].detail)
+        self.assertEqual(tag_calls(self.gh), [])
+        u = f"o/act@{r.shas[1]}"
+        self.assertEqual(self.audit(workflow(u, comments={u: "v1.0.0"}), r).findings, [])
+        self.assertEqual(tag_calls(self.gh), [])
+        # the branch check off and the question failing: no mismatch is said, the use is incomplete
+        aud = self.auditor(r, env={actionrefs.OFF_ENV: "1"})
+        self.gh.broken["/git/tags/"] = 502
+        u = f"o/act@{r.shas[0]}"
+        rep = aud.audit(actions.uses_of(workflow(u, comments={u: "v1.0.0"})))
+        self.assertEqual(rep.findings, [])
+        self.assertEqual([x for x, _ in rep.incomplete], [u])
+        self.assertIn(f"whether {r.shas[0][:12]} is a commit or a tag object of o/act could not be settled",
+                      rep.incomplete[0][1])
+
+    def test_with_the_branch_check_off_the_pin_is_still_its_commit(self):
+        r, obj = tagged_repo(topics=0)
+        u = f"o/act@{obj}"
+        rep = self.audit(workflow(u), r, env={actionrefs.OFF_ENV: "1"})
+        self.assertEqual((rep.findings, rep.incomplete, compares(self.gh)), ([], [], []))
+        self.assertEqual(rep.resolved, {u: r.shas[1]})
+        self.assertEqual(rep.actions[u]["code"]["commit"], r.shas[1])
+        self.assertEqual(tag_calls(self.gh), [f"{fx.API}/repos/o/act/git/tags/{obj}"])
+
+    def test_the_helper_answers_none_for_a_commit_and_keeps_its_answers(self):
+        r, obj = tagged_repo(topics=0)
+        aud = self.auditor(r)
+        self.assertIsNone(aud.branches.tag_object("o", "act", r.shas[1]))
+        got = aud.branches.tag_object("O", "Act", obj.upper())
+        self.assertEqual(got, actionrefs.TagObject(obj, "v9.0.0", r.shas[1], 1))
+        self.assertEqual(aud.branches.tag_object("o", "act", obj), got)
+        self.assertEqual(len(tag_calls(self.gh)), 2)
+        answer = aud.branches.check("o", "act", obj, pinned=True)
+        self.assertEqual((answer.state, answer.where, answer.tag_object), ("in", "main", got))
+        self.assertEqual(aud.branches.check("o", "act", r.shas[1]).tag_object, None)
+        self.assertEqual(len(tag_calls(self.gh)), 2)
 
 
 def moved_repo():

@@ -2,7 +2,15 @@
 with a commit graph, branches, tags (lightweight and annotated), commits that exist
 only in a fork, and files; and the endpoints the auditor asks about, answered from
 it, as the `http` seam of `sources.Client` (url, headers, max_bytes, hosts,
-auth_host, **kw) -> bytes. Nothing is fetched."""
+auth_host, **kw) -> bytes. Nothing is fetched.
+
+An annotated tag's object (`Repo.tag_object`) is answered by git/tags/{sha} with
+its name, and taken for the commit it tags where GitHub takes it so (John's run of
+Oct 18 on vercel/next.js's pin `actions/github-script@d746ffe…`, the object of
+v9.0.0): the contents API, and the archive, whose pax header names the commit. The
+compare API does not take it so (none of the 9 compares of that run held it, though
+the default branch holds its commit): it answers 404 there, as for a commit it does
+not have, and the commits endpoint 422."""
 
 import hashlib
 import io
@@ -28,6 +36,7 @@ class Repo:
         self.parents = {}                   # the repository's own commits: sha -> [parent shas]
         self.fork = {}                      # commits of a fork in the network: sha -> [parent shas]
         self.branches, self.tags = {}, {}   # name -> sha; tag -> sha or ("tag", object sha, commit sha)
+        self.objects = {}                   # the network's tag objects: sha -> (name, its object's type, its sha)
         self.files = {}                     # (sha, path) -> bytes
         self.archived = False
         self._n = 0
@@ -42,12 +51,33 @@ class Repo:
             self.files[(sha, path)] = data if isinstance(data, bytes) else data.encode()
         return sha
 
+    def tag_object(self, name, target, kind="commit"):
+        """An annotated tag's object (`git tag -a`; no ref names it until `tag` does) -> its sha. `target` is a
+        commit, or with kind 'tag' another tag object (or another kind, which GitHub Actions cannot run)."""
+        self._n += 1
+        sha = hashlib.sha1(f"tagobj/{self.full_name}/{self._n}".encode()).hexdigest()
+        self.objects[sha] = (name, kind, target)
+        return sha
+
     def tag(self, name, sha, annotated=False):
-        if annotated:
-            self._n += 1
-            self.tags[name] = ("tag", hashlib.sha1(f"tagobj/{self.full_name}/{self._n}".encode()).hexdigest(), sha)
+        """The tag `name` at the commit `sha` (annotated: through a tag object of its own), or at the tag object
+        `sha` when it is one."""
+        if sha in self.objects:
+            self.tags[name] = ("tag", sha, self.peel(sha))
+        elif annotated:
+            self.tags[name] = ("tag", self.tag_object(name, sha), sha)
         else:
             self.tags[name] = sha
+
+    def peel(self, sha):
+        """The commit a tag object tags, through tag objects; None for a sha that is not a tag object."""
+        if sha not in self.objects:
+            return None
+        for _ in range(10):
+            if sha not in self.objects:
+                return sha
+            sha = self.objects[sha][2]
+        return None
 
     def tag_commit(self, name):
         t = self.tags[name]
@@ -143,6 +173,7 @@ class FakeGitHub:
         return json.dumps(doc).encode()
 
     def archive_of(self, repo, sha, what):
+        sha = repo.peel(sha) or sha             # a tag object's archive is its commit's, and says so
         if not repo.has(sha):
             raise fail(404, what)
         return archive(repo.full_name, sha, {path: data for (s, path), data in repo.files.items() if s == sha})
@@ -169,10 +200,10 @@ class FakeGitHub:
             raise fail(404, what)
         m = re.match(r"^/git/tags/([0-9a-f]{40})$", rest)
         if m:
-            for t in repo.tags.values():
-                if isinstance(t, tuple) and t[1] == m.group(1):
-                    return self.js({"sha": t[1], "object": {"type": "commit", "sha": t[2]}})
-            raise fail(404, what)
+            if m.group(1) not in repo.objects:
+                raise fail(404, what)                        # a commit, or nothing: not a tag object
+            name, kind, target = repo.objects[m.group(1)]
+            return self.js({"sha": m.group(1), "tag": name, "object": {"type": kind, "sha": target}})
         m = re.match(r"^/commits/([0-9a-f]{40})$", rest)
         if m:
             if not repo.has(m.group(1)):
@@ -190,7 +221,7 @@ class FakeGitHub:
         m = re.match(r"^/contents/(.+)$", rest)
         if m:
             ref = query.get("ref", [""])[0]
-            data = repo.files.get((ref, m.group(1)))
+            data = repo.files.get((repo.peel(ref) or ref, m.group(1)))
             if data is None:
                 raise fail(404, what)
             return data

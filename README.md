@@ -283,10 +283,17 @@ moved to such a commit, put in through an attacker's fork, so a tag does not vou
 neither does a pin: each commit is compared with the default branch (GitHub's compare API), then with
 the other branches, release and version names first, at most 9 compares a commit; a check that could
 not finish (branches left past those 9, the rate limit, an API error) is reported as not checked, never
-as the finding. A version tag that points to another commit than when it was first seen is SC-ACTION-TAG-MOVED
-(MAJOR, CRITICAL when the commit it moved to is in none of the branches; what was seen is kept in
-`~/.cache/lazaret/actions-pins.json`, `--pins FILE`, or with `--db DSN` in the registry's database,
-until `--accept-moved`; `LAZARET_NO_ACTION_BRANCHES=1` turns the branch check off). It also reports
+as the finding. A pin may name an annotated tag's object rather than a commit
+(`actions/github-script@d746ffe…` is the object of v9.0.0): it is followed to the commit it tags, which
+the runner runs and which is checked in its place, and the report says which tag object it is. Asking
+costs one call (`git/tags`) for each pinned SHA the default branch's compare does not hold, and with
+the branch check off one for each pinned SHA; a tag object's commit then takes up to 9 compares of its
+own after the pin's one with the default branch, so 10 in all. GitHub not answering that call leaves
+the pin checked as a commit, as before. A version tag that points to another commit than when it was
+first seen is SC-ACTION-TAG-MOVED (MAJOR, CRITICAL when the commit it moved to is in none of the
+branches; what was seen is kept in `~/.cache/lazaret/actions-pins.json`, `--pins FILE`, or with
+`--db DSN` in the registry's database, until `--accept-moved`; `LAZARET_NO_ACTION_BRANCHES=1` turns
+the branch check off). It also reports
 `@<sha> # v1.2.3` where the tag names another commit (SC-ACTION-PIN-MISMATCH); and, in the action's own
 `action.yml`, a Docker image without a digest
 (SC-ACTION-DOCKER-UNPINNED; MINOR for one of Docker's official images at a version tag) or a composite

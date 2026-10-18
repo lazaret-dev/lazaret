@@ -11,14 +11,21 @@ is not pinned. These ask GitHub what each one points to, each action once:
   such a commit (actions-cool/issues-helper, May 2026: every tag). Each commit is
   compared with the default branch, then the likeliest other branches, within a
   budget of compares; a check that could not finish is `incomplete`, never the
-  finding.
+  finding. A pin may name an annotated tag's object rather than a commit
+  (`actions/github-script@d746ffe…`, the object of v9.0.0): the runner runs the
+  commit it tags, so that commit is the one checked, here and below, and the
+  report says which tag object the pin is (`tag_objects`, and a note). Asking
+  (`git/tags/{sha}`) costs a call for each pinned SHA the default branch's
+  compare does not hold, and with the branch check off for each pinned SHA; a
+  pin GitHub does not answer it for is checked as a commit, as before.
 - **a tag that moved**: a version tag (`v4.1.0`; not the floating `v4`) that
   points to another commit than when it was first seen (the tj-actions shape):
   MAJOR, and CRITICAL when the commit it moved to is in none of the branches.
   What was seen is kept in a small file, the pin book, or with `--db` in the
   registry's database (the table action_tags); the first sighting is no finding.
 - **a pin that does not match its comment**: `@<sha> # v4.1.0`, where v4.1.0
-  points to another commit, or to none.
+  points to another commit, or to none, or where the pin is the tag object of
+  another name.
 - **the action's own `action.yml`**: a Docker image not pinned to a digest; for
   a composite action, the `uses:` of its steps that are not pinned, and each of
   those checked the same way, two levels deep.
@@ -241,6 +248,7 @@ class Report:
         self.notes = []             # (uses, what): worth saying, not a finding
         self.resolved = {}          # `uses:` value -> the commit it points to now
         self.branches = {}          # `uses:` value -> the branch of its repository found to hold that commit (RA-4)
+        self.tag_objects = {}       # `uses:` value -> {tag, object, commit}: a pin that names an annotated tag's object
         self.actions = {}           # `owner/repo[/path]@ref` -> what its action.yml runs
         self.calls = []
         self.checked = 0
@@ -253,8 +261,8 @@ class Report:
         return {"checked": self.checked, "complete": self.complete,
                 "findings": [{"kind": f.kind, "line": f.line, "uses": f.uses, "detail": f.detail} for f in self.findings],
                 "incomplete": [list(i) for i in self.incomplete], "notes": [list(n) for n in self.notes],
-                "resolved": dict(self.resolved), "branches": dict(self.branches), "actions": dict(self.actions),
-                "calls": list(self.calls)}
+                "resolved": dict(self.resolved), "branches": dict(self.branches),
+                "tag_objects": dict(self.tag_objects), "actions": dict(self.actions), "calls": list(self.calls)}
 
 
 class _Stop(Exception):
@@ -273,6 +281,13 @@ class _Resolution:
         self.notes = []
         self.where = None           # the branch found to hold the commit (RA-4)
         self.unsettled = []         # what was not checked of it: each an `incomplete` of the uses: line
+        # a pin: the tag object it names (actionrefs.TagObject; `sha` is then its commit), and whether it is known to
+        # be one or a commit (True; False: it could not be told, said in `unsettled`, and `sha` is not reported as
+        # resolved; None: not a pin)
+        self.tag_object = None
+        self.peeled = None
+        self.branch_error = None    # the SourceError the branch check stopped on
+        self.stopped = False        # the branch check was refused (_Stop), and said so in `unsettled`
 
 
 class Auditor:
@@ -379,14 +394,53 @@ class Auditor:
             return None
         label = f"{use.owner}/{use.repo}"
         try:
-            return self.branches.check(use.owner, use.repo, res.sha)
+            return self.branches.check(use.owner, use.repo, res.sha, pinned=use.pinned)
         except _Stop as exc:
+            res.stopped = True
             res.unsettled.append(f"whether {res.sha[:12]} is in {label}'s branches was not checked: {exc}")
         except SourceError as exc:
             if getattr(exc, "status", None) == 404:
                 raise
+            res.branch_error = exc
             res.unsettled.append(f"whether {res.sha[:12]} is in {label}'s branches could not be settled: {exc}")
         return None
+
+    @staticmethod
+    def _pinned_tag(res, obj):
+        """The pin is the tag object `obj`: its commit is what runs, so what the scan checks (the report says so
+        once for the use: _audit_use)."""
+        res.tag_object, res.sha, res.peeled = obj, obj.commit, True
+
+    def _ask_tag_object(self, use, res):
+        """Is the pin a tag object? Asked (actionrefs.Branches.tag_object, kept for the run: an answer the branch
+        check already has costs nothing) where the branch check did not answer it: not made
+        (LAZARET_NO_ACTION_BRANCHES), or stopped on an error or a refusal before it could. Sets res.peeled; a question
+        that fails is said in res.unsettled. Raises _Stop when GitHub answers no more: the run then says the use was
+        not checked."""
+        try:
+            obj = self.branches.tag_object(use.owner, use.repo, use.ref)
+        except SourceError as exc:
+            res.peeled = False
+            if exc is not res.branch_error:     # (the branch check stopped on it: said once)
+                res.unsettled.append(f"whether {use.ref[:12]} is a commit or a tag object of {use.owner}/{use.repo} "
+                                     f"could not be settled: {exc}")
+            return
+        res.peeled = True
+        if obj is not None:
+            self._pinned_tag(res, obj)
+
+    @staticmethod
+    def _pinned_answer(use, res, answer):
+        """What the branch check's answer says of a pin: the tag object it names, or that it is a commit (a branch
+        holds it, GitHub shows it as one, or git/tags said it is no tag object), or that this could not be told
+        (GitHub did not answer git/tags, and the commit check did not settle it)."""
+        if answer.tag_object is not None:
+            Auditor._pinned_tag(res, answer.tag_object)
+            return
+        res.peeled = answer.tag_error is None or answer.state in ("in", "out")
+        if answer.tag_error is not None and answer.state in ("out", "unsettled"):
+            res.notes.append(f"whether {use.ref[:12]} is a tag object of {use.owner}/{use.repo} could not be asked "
+                             f"({answer.tag_error}): it was checked as a commit")
 
     def _tag_seen(self, use, res):
         """An exact version tag's sighting in the pin book (or the database's): -> the tag-moved detail when it
@@ -422,18 +476,38 @@ class Auditor:
         moved = self._tag_seen(use, res)
         # a pin and a tag are checked alike (an imposter can be pinned by its SHA too); a branch's head is its own
         answer = self._branch_answer(use, res) if res.kind != "branch" else None
+        if use.pinned:
+            # a pin may name a tag object: the branch check asks when the default branch does not hold the pin; not
+            # made (LAZARET_NO_ACTION_BRANCHES) or stopped before it could, it is asked here
+            if answer is not None:
+                self._pinned_answer(use, res, answer)
+            else:
+                try:
+                    self._ask_tag_object(use, res)
+                except _Stop:
+                    if not res.stopped:
+                        raise                   # not said of this use yet: the run says it, and of the uses after it
+                    res.peeled = False          # (said: the branch check was refused)
         if answer is not None:
             if answer.state == "in":
                 res.where = answer.where
             elif answer.state == "out":
-                res.problems.append(("impostor", {"sha": res.sha, "ref": ref, "tag": res.kind == "tag",
-                                                  "branches": answer.branches}))
-            elif answer.state == "missing" and use.pinned:
+                detail = {"sha": res.sha, "ref": ref, "tag": res.kind == "tag", "branches": answer.branches}
+                if res.tag_object is not None:
+                    detail["tag_object"] = res.tag_object.tag
+                res.problems.append(("impostor", detail))
+            elif answer.state == "missing" and use.pinned and res.tag_object is None and answer.tag_error is None:
                 res.sha = None
                 res.notes.append(f"{ref[:12]} is not a commit of {owner}/{repo} or of a fork of it that GitHub shows "
                                  f"(the repository may be private, renamed or gone)")
+            elif answer.state == "missing" and use.pinned and res.tag_object is None:
+                res.sha = None                  # (perhaps a tag object, which GitHub did not say)
+                res.unsettled.append(f"GitHub does not show {ref[:12]} as a commit of {owner}/{repo}, and whether it "
+                                     f"is a tag object could not be asked: {answer.tag_error}")
             elif answer.state == "missing":
-                res.unsettled.append(f"GitHub does not show the commit {res.sha[:12]} the tag {ref} of "
+                what = (f"the tag object {res.tag_object.tag} ({ref[:12]})" if res.tag_object is not None
+                        else f"the tag {ref}")
+                res.unsettled.append(f"GitHub does not show the commit {res.sha[:12]} {what} of "
                                      f"{owner}/{repo} points to, so whether it is in the branches is not settled")
             else:
                 res.unsettled.append(f"whether {res.sha[:12]} is in {owner}/{repo}'s branches is not settled: "
@@ -458,20 +532,28 @@ class Auditor:
         return got
 
     def _comment_findings(self, use, res):
-        """A pin whose comment names a version tag that points elsewhere."""
+        """A pin whose comment names a version tag that points elsewhere, or whose tag object is another tag's. A
+        pin that names a tag object is the commit it tags, and the object's name is compared with the comment; a pin
+        not known to be a commit or a tag object (the question failed: the use is incomplete) is no mismatch."""
         tag = _comment_tag(use.comment)
         if not use.pinned or tag is None or not _exact_version(tag):
             return []
         got = self.ref_commit(use.owner, use.repo, tag)
-        if got is not None and got[0] == "tag" and got[1] == use.ref:
-            if self.pins is not None:
-                try:
-                    self.pins.see(PinBook.key(use.owner, use.repo, tag), use.ref, self.now())
-                except _refs.BookError as exc:
-                    self.report.incomplete.append((use.value, str(exc)))
+        tag_sha = got[1] if got is not None and got[0] == "tag" else None
+        obj, commit = res.tag_object, res.sha or use.ref
+        if obj is None and tag_sha != commit and res.peeled is False:
             return []
-        return [("pin-mismatch", {"tag": tag, "tag_sha": got[1] if got is not None and got[0] == "tag" else None,
-                                  "pin": use.ref})]
+        if tag_sha != commit or (obj is not None and obj.tag != tag):
+            detail = {"tag": tag, "tag_sha": tag_sha, "pin": use.ref}
+            if obj is not None:
+                detail.update(pin_tag=obj.tag, pin_commit=obj.commit)
+            return [("pin-mismatch", detail)]
+        if self.pins is not None:
+            try:
+                self.pins.see(PinBook.key(use.owner, use.repo, tag), commit, self.now())
+            except _refs.BookError as exc:
+                self.report.incomplete.append((use.value, str(exc)))
+        return []
 
     def _action_yml(self, use, sha):
         key = (use.owner.lower(), use.repo.lower(), use.path, sha)
@@ -591,17 +673,29 @@ class Auditor:
             rep.incomplete.append((use.value, why))
         if res.sha is None:
             return
-        rep.resolved.setdefault(use.value, res.sha)
+        if res.peeled is not False:             # (a pin not known to be a commit or a tag object resolves to nothing)
+            rep.resolved.setdefault(use.value, res.sha)
+        obj = res.tag_object
+        if obj is not None and use.value not in rep.tag_objects:
+            rep.tag_objects[use.value] = {"tag": obj.tag, "object": obj.sha, "commit": obj.commit}
+            through = f", through {obj.depth} tag objects" if obj.depth > 1 else ""
+            rep.notes.append((use.value, f"pinned to the tag object {obj.tag} ({obj.sha}) of the commit "
+                                         f"{obj.commit}{through}: the runner runs that commit, and it is the one "
+                                         f"checked"))
         if res.where is not None:
             rep.branches.setdefault(use.value, res.where)
         if self.stopped:
-            return                              # (GitHub answers no more: what is left of it would be refused)
+            # GitHub answers no more: what is left of it would be refused, so it is not checked, and says so
+            if not any(u == use.value for u, _ in rep.incomplete):
+                rep.incomplete.append((use.value, f"not checked: {self.stopped}"))
+            return
         if use.kind != "action" or depth > MAX_DEPTH:
             return
         text = self._action_yml(use, res.sha)
         if text is None:
-            rep.notes.append((use.value, "no action.yml or action.yaml at that commit (a reusable workflow, or the "
-                                         "path is wrong)"))
+            if res.peeled is not False:         # (a pin that may be a tag object of no commit: incomplete already)
+                rep.notes.append((use.value, "no action.yml or action.yaml at that commit (a reusable workflow, or "
+                                             "the path is wrong)"))
             return
         records = ghworkflow.outline(text)
         runs = {r["key"]: r["value"] for r in records if r["path"] == ("runs",) and r["key"] is not None}
@@ -735,8 +829,12 @@ def rule(kind, d):
     via = f" (through {' > '.join(d['via'])})" if d.get("via") else ""
     if kind == "impostor":
         ref = d.get("ref") or d["sha"]
-        named = (f"{who}@{ref}{via} points to the commit {d['sha']}: the commit" if d.get("tag")
-                 else f"{who}@{ref}{via}: the commit")
+        if d.get("tag_object"):
+            named = f"{who}@{ref}{via}, the tag object {d['tag_object']}, points to the commit {d['sha']}: the commit"
+        elif d.get("tag"):
+            named = f"{who}@{ref}{via} points to the commit {d['sha']}: the commit"
+        else:
+            named = f"{who}@{ref}{via}: the commit"
         return {
             "id": "SC-ACTION-IMPOSTOR", "name": "Action's commit is not in its repository's branches",
             "type": "HOTSPOT", "sev": "CRITICAL",
@@ -762,10 +860,15 @@ def rule(kind, d):
             "ref": "CWE-494 · Supply chain"}
     if kind == "pin-mismatch":
         what = (f"points to {d['tag_sha'][:12]}" if d["tag_sha"] else "is not a tag of the repository")
+        pinned, but = d["pin"][:12], f"{d['tag']} {what}"
+        if d.get("pin_tag"):
+            pinned = f"the tag object {d['pin_tag']} ({d['pin'][:12]}, of the commit {d['pin_commit'][:12]})"
+            if d["pin_tag"] != d["tag"]:
+                but = f"the tag object's name is {d['pin_tag']}, and {but}"
         return {
             "id": "SC-ACTION-PIN-MISMATCH", "name": "Pinned commit does not match its version comment",
             "type": "HOTSPOT", "sev": "MAJOR",
-            "msg": f"{who}{via} is pinned to {d['pin'][:12]} with the comment {d['tag']}, but {d['tag']} {what}.",
+            "msg": f"{who}{via} is pinned to {pinned} with the comment {d['tag']}, but {but}.",
             "why": _MISMATCH_WHY,
             "fix": ("Find out which is right: if the tag is, update the pin to its commit; if the pin is, correct "
                     "the comment, and check that the tag was not moved."),

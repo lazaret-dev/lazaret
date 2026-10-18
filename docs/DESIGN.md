@@ -1769,6 +1769,46 @@ process that tags a commit no branch holds (built files committed on a
 detached head and only the tag pushed) is that its tags read as impostors:
 such a release cannot be told from a moved tag by GitHub's answers alone.
 
+A pin may name an annotated tag's object instead of a commit (the RA-4
+follow-up: vercel/next.js pins `actions/github-script@d746ffe…`, the object
+of v9.0.0, whose commit 3a2844b… is on `main`). GitHub Actions runs the commit
+the object tags, and so do the contents API and the archive (whose pax header
+names the commit), but the compare API does not take the object for it: John's
+run of Oct 18 compared d746ffe… with 9 of the repository's 30 branches, none
+held it, and the N-4 code fetch refused the archive as another commit's. A
+SHA a branch's compare holds is a commit, so
+`Branches.check(owner, repo, sha, pinned=True)`, for a pin the default branch's
+compare does not hold (or with no default branch to compare), asks
+`GET /repos/{o}/{r}/git/tags/{sha}` before any other branch is listed or
+compared: one call of the run's budget, none for a pin the default branch
+holds (most). With the branch check off (`LAZARET_NO_ACTION_BRANCHES`), or
+stopped before it asked, the scan asks of every pinned SHA on its own; the
+comment check never asks. 404 is no tag object, and the check goes on as
+before; 200 is followed through nested tag objects (`MAX_TAG_DEPTH`, 4, in
+all; each answer's `sha` must be the one asked about) to the commit, which is
+checked in the pin's place (`Answer.tag_object` names the object), with its
+own `MAX_COMPARES` after the pin's one compare: 10 in all. The commit is then
+what the scan checks: the impostor check (a tag object of a commit in none of
+the branches is SC-ACTION-IMPOSTOR, CRITICAL, named as a tag object),
+`action.yml`, the code (its archive accepted because it names that commit) and
+the report (`resolved`, and once for the use a note and `tag_objects`). The
+pin's comment is compared with the object's name (another name is
+SC-ACTION-PIN-MISMATCH; the comment's tag at another commit too), and the pin
+book records the tag at the commit. GitHub not answering the call (an HTTP
+status other than 404, the network: `Answer.tag_error`) is no answer either
+way, so the pin is checked as a commit, as before the question was asked:
+held by a branch, it is one; a fork's commit is SC-ACTION-IMPOSTOR as before,
+with a note, and a commit is called `out` only when GitHub's commits endpoint
+shows it as itself (one it shows as another commit, as it may a tag object's,
+is unsettled); one GitHub does not show is incomplete, not the note a missing
+commit gets. A 200 that cannot be followed to a commit (a tag of a tree, more
+than 4 tag objects, an answer for another SHA), the rate limit and the call
+budget leave the pin's commit unknown: `incomplete`, never a finding and never
+a pass; such a pin is in no `resolved`, gets no "no action.yml" note and no
+pin-mismatch. A refusal (`_Stop`) that this use has not said yet stops the run
+as any other does (it and the uses after it are "not checked"), and a use left
+unread because GitHub answers no more always says so.
+
 A version tag's commit is recorded the first time it is seen, in the pin book
 (a JSON file in the user's cache) or, with `--db DSN`, in the registry's
 database beside its scans (`StoreBook`; the table `action_tags`, keyed by the

@@ -104,6 +104,24 @@ aggregate):
   SC-ACTION-IMPOSTOR MAJOR but not checked, and the report lists the branch found to hold each commit (`branches`).
   `LAZARET_NO_ACTION_BRANCHES=1` turns the branch check off. A release made by tagging a commit no branch holds now
   reads as an impostor.
+- **A pin that names a tag object (RA-4 follow-up; the action scan, no rule-set change).** vercel/next.js pins
+  `actions/github-script@d746ffe…`, which is not a commit but the object of the annotated tag v9.0.0; GitHub Actions
+  runs the commit it tags (3a2844b…, on `main`). The compare API does not take the object for that commit, so the
+  scan compared it with 9 of the repository's 30 branches and said it was not settled, and the action's code was not
+  read either (the archive names the commit, not the pin); a `# v9.0.0` comment was SC-ACTION-PIN-MISMATCH. Now a
+  pin is asked about (`GET /repos/{o}/{r}/git/tags/{sha}`, one call) when the default branch's compare does not
+  hold it, before any other branch is listed or compared, and for every pinned SHA when the branch check is off
+  (`LAZARET_NO_ACTION_BRANCHES`) or stopped before it asked; a pin a branch holds is a commit and is never asked
+  about. A tag object is followed to its commit (nested ones too, at most 4), and that commit is checked in its
+  place: its branches (up to 9 compares of its own, after the pin's one with the default branch: 10 in all), its
+  `action.yml`, its code. The report says it once (a note, "pinned to the tag object v9.0.0 (…) of the commit …",
+  and `tag_objects`); a tag object of a commit in none of the branches is SC-ACTION-IMPOSTOR (CRITICAL) as any
+  other; the pin's comment is compared with the object's name (another name is SC-ACTION-PIN-MISMATCH), and the pin
+  book records the tag at its commit. GitHub not answering the call (an HTTP error other than 404, the network)
+  leaves the pin checked as a commit, as before, with a note: a fork's commit is still SC-ACTION-IMPOSTOR, and the
+  commit is called that only when GitHub shows it as itself. A 200 that cannot be followed to a commit (a tag of a
+  tree, a loop), the rate limit or the call budget leaves the use not checked (exit 3), never a finding and never a
+  pass: it is then in no `resolved`, and no pin-mismatch is said of it.
 - **TypeScript files read in their own dialect by the supply-chain tests (TS-STRIP; rule set 2.93.0).** The hosts
   handed the engine a `.ts`, `.tsx`, `.mts` or `.cts` file's text alone, as JavaScript, and the supply-chain tree
   (the data flow of the import-time, use-time and install-script tests, received code, a dropper, D-9's rewrites,
