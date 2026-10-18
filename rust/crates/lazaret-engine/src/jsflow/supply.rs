@@ -3282,6 +3282,53 @@ impl<'p> Eval<'p> {
 
     /// supply mode: a call (sources, sends, connections, clients,
     /// callbacks). Its value.
+    /// Resolve a deletion's actual path expression and bounded local aliases.
+    fn sc_delete_path(&mut self, n: NodeId, scope: ScopeId, depth: usize) -> crate::model::val::Val {
+        self.sc_delete_path_inner(n, scope, depth, &mut 256)
+    }
+    fn sc_delete_path_inner(&mut self, n: NodeId, scope: ScopeId, depth: usize, work: &mut usize) -> crate::model::val::Val {
+        use crate::model::{val::Val, events::path_join, deletion};
+        if n == NONE || depth > 8 || *work == 0 { return Val::unknown() }
+        *work -= 1;
+        let n=self.a().unwrap(n);
+        if let Some(s)=self.sc_const_str(n) {return Val::text(s)}
+        match self.a().kind(n) {
+            Kind::Identifier => {
+                if let Some(b)=self.bind(n,scope) {
+                    let writes:Vec<Write>=self.p.binds[b as usize].writes.iter().filter(|w|!matches!(w,Write::Nothing{..})).cloned().collect();
+                    if writes.len()==1 {match &writes[0] {
+                        Write::Init{node,scope,path}|Write::Assign{node,scope,path} if path.is_empty()=>return self.sc_delete_path_inner(*node,*scope,depth + 1, work),
+                        Write::Opaque{node,scope} if self.a().kind(*node)==Kind::ForOfStatement=>return self.sc_delete_path_inner(self.a().at(*node,jt::B),*scope,depth + 1, work),
+                        _=>{}
+                    }}
+                }
+            }
+            Kind::BinaryExpression if self.a().operator(n)=="+" => {
+                let a=self.sc_delete_path_inner(self.a().at(n,jt::A),scope,depth + 1, work);let b=self.sc_delete_path_inner(self.a().at(n,jt::B),scope,depth + 1, work);return Val::concat(&a,&b)
+            }
+            Kind::TemplateLiteral => {
+                let qs=self.a().list(n,jt::A).to_vec();let es=self.a().list(n,jt::B).to_vec();let mut v=Val::text(Vec::new());
+                for (k,q) in qs.iter().take(32).enumerate(){v=Val::concat(&v,&Val::text(self.a().s(*q,jt::A).to_vec()));if let Some(e)=es.get(k){v=Val::concat(&v,&self.sc_delete_path_inner(*e,scope,depth + 1, work));}}return v;
+            }
+            Kind::MemberExpression => {
+                let names=self.sc_names(n,scope);
+                if names.iter().any(|s|is_one(s,&["process.env.HOME","process.env.USERPROFILE"])) {return Val::text(u("~"))}
+            }
+            Kind::CallExpression => {
+                let callee=self.a().unwrap(self.a().at(n,jt::A));let args=self.a().list(n,jt::B).to_vec();let names=self.sc_names(callee,scope);
+                if names.iter().any(|s|eq(s,"os.homedir")) {return Val::text(u("~"))}
+                if names.iter().any(|s|is_one(s,&["path.join","path.resolve","path.posix.join","path.win32.join","path.posix.resolve","path.win32.resolve"])) {
+                    let mut v=Val::text(Vec::new());for a in args.iter().take(32){v=path_join(&v,&self.sc_delete_path_inner(*a,scope,depth + 1, work));}return v;
+                }
+                if names.iter().any(|s|is_one(s,&["path.normalize","String"])) {return args.first().map(|&a|self.sc_delete_path_inner(a,scope,depth + 1, work)).unwrap_or_default()}
+                if names.iter().any(|s|eq(s,"path.dirname")) {let v=args.first().map(|&a|self.sc_delete_path_inner(a,scope,depth + 1, work)).unwrap_or_default();return deletion::parent(&v)}
+                if names.iter().any(|s|is_one(s,&["glob.sync","glob.globSync","globSync","fast-glob.sync"])) {let v=args.first().map(|&a|self.sc_delete_path_inner(a,scope,depth + 1, work)).unwrap_or_default();return deletion::glob_path(&v)}
+            }
+            _=>{}
+        }
+        Val::unknown()
+    }
+
     pub(super) fn sc_call(&mut self, node: NodeId, recv: &V, callee_val: &V, args: &[V], spread: isize, scope: ScopeId) -> R<V> {
         let callee = self.a().unwrap(self.a().at(node, jt::A));
         let member = self.a().kind(callee) == Kind::MemberExpression;
@@ -3294,6 +3341,24 @@ impl<'p> Eval<'p> {
         };
         let named = |n: &str| name.as_deref().is_some_and(|x| eq(x, n));
         let names = self.sc_names(callee, scope);
+        if self.emit && names.iter().any(|s| is_one(s, &["fs.rm", "fs.rmSync", "fs.promises.rm", "fs/promises.rm", "fs.unlink", "fs.unlinkSync", "fs.rmdir", "fs.rmdirSync", "fs.promises.rmdir", "fs/promises.rmdir"])) {
+            let nodes=self.a().list(node,jt::B).to_vec();
+            let recursive=nodes.get(1).is_some_and(|&n| {
+                let a = self.a();
+                a.kind(n) == Kind::ObjectExpression && a.list(n, jt::A).iter().rev().find_map(|&p| {
+                    if a.kind(p) != Kind::Property { return Some(false) }
+                    let key = a.at(p, jt::A);
+                    let value = a.at(p, jt::B);
+                    let recursive = a.is_ident_named(key, "recursive") || a.str_value(key).is_some_and(|s| eq(s, "recursive"));
+                    if recursive {
+                        Some(a.kind(value) == Kind::Literal && a.op(value) == jt::L_BOOLEAN && a.flag(value, jt::VALUE))
+                    } else if a.computed(p) && a.str_value(key).is_none() { Some(false) } else { None }
+                }).unwrap_or(false)
+            });
+            if !names.iter().any(|s| pystr::ends_with(s, ".rmdir") || pystr::ends_with(s, ".rmdirSync")) || recursive {
+                if let Some(&n)=nodes.first(){let path=self.sc_delete_path(n,scope,0);let at=self.a().0.nodes[node as usize].start;self.findings.push(Out::Delete{at,path:path.text_or_unknown()});}
+            }
+        }
         // received code: code run, a module's name loaded, data deserialized
         if let Some(r) = self.sc_runs(node, callee, &names, scope) {
             let at = self.a().0.nodes[node as usize].start;
@@ -3954,6 +4019,7 @@ fn outside_names(prog: &Program, sup: &Supply) -> HashSet<PyStr> {
 /// 1-based line and the category), if any.
 #[derive(Clone, Debug)]
 pub struct Facts {
+    pub deletions: Vec<(usize, PyStr)>,
     pub sent: Answer,
     pub received: Option<(usize, &'static str)>,
     /// code the script decodes, run: (the run's offset, the decoding's), in
@@ -4177,6 +4243,7 @@ fn facts_here(text: &[u32], dialect: Dialect) -> Result<Facts, Unread> {
     let mut first: Option<(u32, &'static str)> = None;
     let mut decoded: Vec<(usize, usize)> = Vec::new();
     let mut rewrote: Vec<(u32, PyStr)> = Vec::new();
+    let mut deletions = Vec::new();
     let dropped = first_drop(text, &findings);
     for f in findings {
         match f {
@@ -4191,6 +4258,7 @@ fn facts_here(text: &[u32], dialect: Dialect) -> Result<Facts, Unread> {
                     first = Some((at, cat));
                 }
             }
+            Out::Delete { at, path } => deletions.push((at as usize, path)),
             Out::Decoded { at, from } => decoded.push((at as usize, from as usize)),
             Out::Rewrote { at, pkg } => rewrote.push((at, pkg)),
             _ => {}
@@ -4212,7 +4280,7 @@ fn facts_here(text: &[u32], dialect: Dialect) -> Result<Facts, Unread> {
         let at = (at as usize).min(text.len());
         (text[..at].iter().filter(|&&c| c == 0x0A).count() + 1, cat)
     });
-    Ok(Facts { sent, received, decoded, dropped, rewrote })
+    Ok(Facts { deletions, sent, received, decoded, dropped, rewrote })
 }
 
 #[cfg(test)]

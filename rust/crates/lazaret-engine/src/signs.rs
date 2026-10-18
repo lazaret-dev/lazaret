@@ -4173,6 +4173,8 @@ fn label_sends_to(p: &Pack, text: &[u32], dests: &[PyStr], reasons: &mut Vec<PyS
 /// 0.1.9: `rsread`). Offsets are the text's; lines are 1-based.
 #[derive(Clone, Debug, Default)]
 pub struct ModelFacts {
+    /// RA-6: deletion offset and resolved target.
+    pub deletions: Vec<(usize, crate::model::val::Val)>,
     /// The strongest send of local data: (offset, kind, what, whether only an address held it).
     pub sent: Option<(usize, &'static str, PyStr, bool)>,
     /// The addresses the code sends to or reads from, as it builds them.
@@ -4269,11 +4271,31 @@ pub(crate) fn received_code(p: &Pack, text: &[u32], lang: Option<&str>) -> Optio
     received::received_code_kind(p, text, &[], &[])
 }
 
+fn deletion_at(p: &Pack, text: &[u32], lang: Option<&str>, model: Option<&ModelFacts>, shell_text: bool) -> Option<usize> {
+    use crate::model::deletion::{dangerous, shell_deletes};
+    let paths = if let Some(m)=model {m.deletions.clone()} else {match lang {
+        Some("py") => crate::pyflow::supply::facts(text).map(|f|f.deletions.iter().map(|(at,v)|(*at,crate::model::val::Val::text(v.clone()))).collect()).unwrap_or_default(),
+        Some("js") => crate::jsflow::supply::facts(text).map(|f|f.deletions.iter().map(|(at,v)|(*at,crate::model::val::Val::text(v.clone()))).collect()).unwrap_or_default(),
+        _ if shell_text => shell_deletes(p,text),
+        _ => Vec::new(),
+    }};
+    if let Some((at, _)) = paths.iter().find(|(_, v)| dangerous(v)) { return Some(*at) }
+    if shell_text && lang.is_none() { return None }
+    let commands = model.map(|m| m.commands.clone()).unwrap_or_else(|| crate::shell::exec_command_lines(p, text));
+    let mut strings = Vec::new();
+    let comments = if model.is_none() && !commands.is_empty() {
+        lexer::lex_comment_spans(p, text, lang, Some(&mut strings), true, None)
+    } else { Vec::new() };
+    commands.iter().filter(|(at, _)| !comments.iter().chain(strings.iter()).any(|(a,b)| a <= at && at < b))
+        .find_map(|(at, cmd)| shell_deletes(p, cmd).iter().any(|(_, v)| dangerous(v)).then_some(*at))
+}
+
 fn install_script_risk_of(p: &Pack, text: &[u32], shell: bool, command: bool, lang: Option<&str>, model: Option<&ModelFacts>) -> Vec<PyStr> {
     let mut reasons: Vec<PyStr> = Vec::new();
     // a download piped or substituted into a shell, and PowerShell: in code, where an exec call is handed them
     // (a model's commands are read below, as hook commands)
     let code = !command && crate::shell::code_text(p, text);
+    if deletion_at(p,text,lang,model,shell || command || !code).is_some() { reasons.push(u(crate::model::deletion::REASON)); }
     let rows: Vec<&[u32]> = if model.is_none() && (has(text, "curl") || has(text, "wget")) { pystr::split_char(text, c('\n')) } else { Vec::new() };
     let exec = p.re("_EXEC_CALL_RE");
     let piped = if model.is_some() {
@@ -5204,6 +5226,9 @@ fn import_time_risk_of(p: &Pack, text: &[u32], lang: Option<&str>, model: Option
         Some(m) => crate::shell::command_flows(p, &m.commands),
         None => crate::shell::exec_command_flows(p, text),
     };
+    if let Some(at)=deletion_at(p,text,lang,model,false) {
+        reasons.push(u(crate::model::deletion::REASON)); line=Some(line_of(text,at));
+    }
     let dests: &[PyStr] = model.map(|m| m.dests.as_slice()).unwrap_or(&[]);
     if let Some((at, kind, what, in_address)) = import_flow(p, text, &flows, lang, model) {
         // a data-capture service for any local data; a service a client talks

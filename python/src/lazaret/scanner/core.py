@@ -2662,7 +2662,7 @@ _STRONG_IMPORT_REASONS = (
     "hides its code in a string array", "hides its strings in one long string",
     "runs a program it extracts from inside another file",
     "pipes code it decodes into", "installs packages the release does not depend on",
-    "rewrites another package's code")
+    "rewrites another package's code", "deletes the user's files")
 
 
 # ---------------- Download to a file, then run the file ----------------

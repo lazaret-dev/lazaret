@@ -24,6 +24,8 @@ From a checkout, `pip install ./python` (or `pip install -e ./python` for develo
 
 ## Components
 
+RA-6 (rule set 2.95.0) records deletion paths in the Python, JavaScript, Go and Rust models and reads shell deletion commands. Removing a home directory or its personal files, a filesystem/drive root, or repositories selected through recursive `.git` globs adds “deletes the user's files”: CRITICAL at install/build/import, MAJOR when found only in use-time code. Relative build/dist/fixture cleanup, created temporary directories and named application-cache subtrees are excluded. Unknown paths alone are not evidence of deletion of user files. The check is static; no target path is accessed.
+
 | Module / command | What it is |
 |---|---|
 | `lazaret` (`lazaret.scanner.core`) | CLI: scan a directory tree, or a GitHub or GitLab repository at a commit, and produce project reports; scan VS Code extensions (a `.vsix`, or those installed here) |

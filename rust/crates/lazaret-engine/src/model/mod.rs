@@ -7,6 +7,7 @@
 //! import-time tests ask ([`crate::signs::ModelFacts`]), so the reasons and the severities are the ones
 //! Python's and JavaScript's code gets.
 
+pub mod deletion;
 pub mod events;
 pub mod facts;
 pub mod val;

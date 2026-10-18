@@ -144,7 +144,8 @@ pub fn issues(p: &Pack, answer: &Value, r: &Reading) -> Vec<(usize, Value)> {
             ],
         );
         let fix = if sdist { text(p, "use_fix_sdist") } else { format(&text(p, "use_fix"), &[("what", Arg::S(u(r.what)))]) };
-        issue("SC-USE-RISK", "CRITICAL", k, line_of(found), msg, p.text("_PACKAGE_USE_RISK_WHY"), fix);
+        let sev = if strong.iter().all(|s| s.starts_with(&u(crate::model::deletion::REASON))) { "MAJOR" } else { "CRITICAL" };
+        issue("SC-USE-RISK", sev, k, line_of(found), msg, p.text("_PACKAGE_USE_RISK_WHY"), fix);
     }
     let generate = answer.get("generate").and_then(|g| g.as_arr()).unwrap_or(&[]);
     if let Some(first) = generate.first().and_then(|g| g.as_arr()) {

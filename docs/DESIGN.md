@@ -15,6 +15,8 @@ and the tests are the source of truth — fix the doc.
 
 ## 1. What Lazaret is
 
+RA-6 (rule set 2.95.0) records deletion paths in the Python, JavaScript, Go and Rust models and reads shell deletion commands. Removing a home directory or its personal files, a filesystem/drive root, or repositories selected through recursive `.git` globs adds “deletes the user's files”: CRITICAL at install/build/import, MAJOR when found only in use-time code. Relative build/dist/fixture cleanup, created temporary directories and named application-cache subtrees are excluded. Unknown paths alone are not evidence of deletion of user files. The check is static; no target path is accessed.
+
 Lazaret is a static security, supply-chain and quality scanner for Python,
 JavaScript and SQL projects, plus a registry auditor for npm and PyPI packages,
 Go modules, crates and VS Code extensions, and an install guard. It

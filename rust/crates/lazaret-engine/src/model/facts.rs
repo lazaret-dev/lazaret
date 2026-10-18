@@ -184,6 +184,10 @@ pub fn facts(p: &Pack, text: &[u32], events: &[Ev], anchor: usize) -> FileFacts 
                     }
                 }
             }
+            Ev::Delete { file, at, path } => {
+                out.deletions.push((off(*file, *at), path.clone()));
+                if super::deletion::dangerous(path) { note(*file, *at, &mut first); }
+            }
             Ev::Run { file, at, line: cmd, prog, args, script, conn_io, hidden } => {
                 // a file it wrote, run: by itself, or as the script an interpreter is given
                 let base = base_name(prog);

@@ -619,3 +619,23 @@ mod tests {
     assert!(only_in_tests("test") && only_in_tests("all(test,unix)") && only_in_tests("all(unix,test)"));
     assert!(!only_in_tests("all(not(test),unix)") && !only_in_tests("any(test,unix)") && !only_in_tests("all(testing)"));
 }
+
+#[test]
+fn ra6_deletion_paths() {
+    for body in [r#"std::fs::remove_dir_all("/home/example/Documents").unwrap();"#,
+                 r#"std::fs::remove_dir_all(dirs::home_dir().unwrap().join(".ssh")).unwrap();"#,
+                 r#"std::fs::remove_dir_all("/").unwrap();"#,
+                 r#"for entry in glob::glob("/home/example/**/.git").unwrap() { std::fs::remove_dir_all(entry.unwrap().parent().unwrap()).unwrap(); }"#] {
+        let a = build(body);
+        assert!(has(&rs(&a.build), "deletes the user's files"), "{body}: {a:?}");
+    }
+    for body in [r#"std::fs::remove_dir_all("build").unwrap();"#,
+                 r#"std::fs::remove_dir_all("dist").unwrap();"#,
+                 r#"std::fs::remove_dir_all("/home/example/.cache/example-package").unwrap();"#] {
+        let a = build(body);
+        assert!(!has(&all(&a), "deletes the user's files"), "{body}: {a:?}");
+    }
+    let a = read(&[("src/lib.rs", "pub fn clean() { std::fs::remove_dir_all(\"/home/example\").unwrap(); }\n")], Options::default());
+    assert!(a.start.is_empty());
+    assert!(has(&a.uses.iter().flat_map(|f| f.reasons.iter().map(|r| st(r))).collect::<Vec<_>>(), "deletes the user's files"));
+}

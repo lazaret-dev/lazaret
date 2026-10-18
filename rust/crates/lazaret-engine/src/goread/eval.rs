@@ -2018,11 +2018,24 @@ impl<'k, 'a> Model<'k, 'a> {
                 self.wfiles.push(WState { path: a(0), append: false });
                 Val::obj(Obj::WFile(idx))
             }
+            ("os", "RemoveAll") | ("os", "Remove") => {
+                self.ev(Ev::Delete { file, at, path: a(0) });
+                Val::unknown()
+            }
             ("os", "WriteFile") | ("io/ioutil", "WriteFile") => {
                 self.ev(Ev::Write { file, at, path: a(0), data: a(1), append: false });
                 Val::unknown()
             }
-            ("os", "ReadDir") | ("io/ioutil", "ReadDir") | ("path/filepath", "Glob") => {
+            ("path/filepath", "Glob") => {
+                let source = a(0);
+                let mut v = crate::model::deletion::glob_path(&source);
+                if v.s.is_none() { v = Val::concat(&source, &Val::text(vec!['/' as u32, UNKNOWN])); }
+                v.add_kinds(&source);
+                let mut out = Val::list(vec![v.clone()]);
+                out.add_kinds(&v);
+                out
+            }
+            ("os", "ReadDir") | ("io/ioutil", "ReadDir") => {
                 let mut entry = Val::concat(&a(0), &Val::text(vec!['/' as u32, UNKNOWN]));
                 entry.add_kinds(&a(0));
                 let mut v = Val::list(vec![entry.clone()]);
@@ -2051,7 +2064,8 @@ impl<'k, 'a> Model<'k, 'a> {
                 v
             }
             ("path/filepath", "Abs") | ("path/filepath", "Clean") | ("path", "Clean") | ("path/filepath", "FromSlash") | ("path/filepath", "ToSlash") => a(0),
-            ("path/filepath", "Base") | ("path/filepath", "Dir") | ("path/filepath", "Ext") | ("path", "Base") | ("path", "Dir") => derived(&a(0)),
+            ("path/filepath", "Dir") | ("path", "Dir") => crate::model::deletion::parent(&a(0)),
+            ("path/filepath", "Base") | ("path/filepath", "Ext") | ("path", "Base") => derived(&a(0)),
             // ---- reading and writing
             ("io", "ReadAll") | ("io/ioutil", "ReadAll") => self.read_from(&a(0), at),
             ("bufio", "NewReader") | ("bufio", "NewScanner") | ("bufio", "NewReaderSize") | ("bufio", "NewWriter") | ("bufio", "NewWriterSize") | ("io", "NopCloser")

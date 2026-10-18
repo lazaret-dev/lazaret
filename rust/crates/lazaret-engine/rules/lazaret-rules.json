@@ -1,6 +1,6 @@
 {
  "format": 1,
- "rule_set": "2.94.0",
+ "rule_set": "2.95.0",
  "source": "lazaret.scanner.core, extracted by scripts/make_rust_tables.py \u2014 do not edit",
  "values": {
   "ALWAYS_PRUNE_DIRS": {
@@ -17481,6 +17481,9 @@
     },
     {
      "value": "rewrites another package's code"
+    },
+    {
+     "value": "deletes the user's files"
     }
    ]
   },

@@ -423,3 +423,23 @@ fn the_call_takes_its_text_as_it_is() {
         }
     }
 }
+
+#[test]
+fn ra6_deletion_paths() {
+    for body in [r#"os.RemoveAll("/home/example/Documents")"#,
+                 r#"home, _ := os.UserHomeDir(); os.RemoveAll(filepath.Join(home, ".ssh"))"#,
+                 r#"os.RemoveAll("/")"#,
+                 r#"paths, _ := filepath.Glob("/home/example/**/.git"); for _, path := range paths { os.RemoveAll(filepath.Dir(path)) }"#] {
+        let a = init(body, "\"os\"\n\"path/filepath\"");
+        assert!(has(&reasons(&a.start), "deletes the user's files"), "{body}: {a:?}");
+    }
+    for body in [r#"os.RemoveAll("build")"#, r#"os.RemoveAll("dist")"#,
+                 r#"p, _ := os.MkdirTemp("", "example-"); os.RemoveAll(p)"#,
+                 r#"os.RemoveAll("/home/example/.cache/example-package")"#] {
+        let a = init(body, "\"os\"");
+        assert!(!has(&reasons(&a.start), "deletes the user's files"), "{body}: {a:?}");
+    }
+    let a = read(&[("p.go", "package p\nimport \"os\"\nfunc Clean() { os.RemoveAll(\"/home/example\") }\n")], Options::default());
+    assert!(a.start.is_empty());
+    assert!(has(&reasons(&a.uses), "deletes the user's files"));
+}

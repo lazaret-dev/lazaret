@@ -652,7 +652,7 @@ fn import_finding(p: &Pack, k: &Krate, events: &[events::Ev], file: usize, keep:
 fn sinks(f: &FileRef, it: &rsparse::Item) -> bool {
     const WORDS: &[&str] = &[
         "Command", "TcpStream", "UdpSocket", "reqwest", "ureq", "minreq", "attohttpc", "isahc", "surf", "Easy", "Library",
-        "to_socket_addrs", "lookup_host", "txt_lookup", "OpenOptions", "copy_to", "set_permissions", "Resolver",
+        "to_socket_addrs", "lookup_host", "txt_lookup", "OpenOptions", "copy_to", "set_permissions", "Resolver", "remove_dir_all", "remove_file",
     ];
     if it.body_open == NONE || it.body_close == NONE {
         return false;

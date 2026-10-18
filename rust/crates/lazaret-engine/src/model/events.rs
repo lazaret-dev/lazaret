@@ -56,6 +56,8 @@ pub enum Ev {
     Run { file: u16, at: u32, line: PyStr, prog: Val, args: Vec<Val>, script: Option<Val>, conn_io: bool, hidden: bool },
     /// Data sent to an address (`in_address`: the data is in the address itself).
     Send { file: u16, at: u32, data: Val, dest: Val, in_address: bool },
+    /// A filesystem path deleted (RA-6).
+    Delete { file: u16, at: u32, path: Val },
     /// A file written.
     Write { file: u16, at: u32, path: Val, data: Val, append: bool },
     /// A name looked up in the DNS (`txt`: its TXT records read).
@@ -72,7 +74,7 @@ pub const SHELLS: &[&str] = &["sh", "bash", "zsh", "dash", "ksh", "ash", "fish",
 /// The file an event happened in.
 pub fn ev_file(e: &Ev) -> u16 {
     match e {
-        Ev::Run { file, .. } | Ev::Send { file, .. } | Ev::Write { file, .. } | Ev::Lookup { file, .. } | Ev::Load { file, .. } => *file,
+        Ev::Delete { file, .. } | Ev::Run { file, .. } | Ev::Send { file, .. } | Ev::Write { file, .. } | Ev::Lookup { file, .. } | Ev::Load { file, .. } => *file,
     }
 }
 

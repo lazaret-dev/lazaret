@@ -2596,6 +2596,75 @@ impl<'p> Analyzer<'p> {
     /// supply mode: a call (sources, sends, connections, clients, runners,
     /// the script's own functions). Its value.
     #[allow(clippy::too_many_arguments)]
+    /// Resolve deletion paths on the tree, following bounded local bindings (never the host filesystem).
+    fn sc_delete_path(&mut self, n: NodeId, depth: usize) -> crate::model::val::Val {
+        self.sc_delete_path_inner(n, depth, &mut 256)
+    }
+    fn sc_delete_path_inner(&mut self, n: NodeId, depth: usize, work: &mut usize) -> crate::model::val::Val {
+        use crate::model::{val::Val, events::path_join, deletion};
+        if n == NONE || depth > 8 || *work == 0 { return Val::unknown() }
+        *work -= 1;
+        if let Some(s) = self.sc_const_str(n) { return Val::text(s) }
+        match self.t().kind(n) {
+            Kind::Name => {
+                let name = self.t().str(a_(self.t(), n)).to_vec();
+                let body = self.p.mods[self.m as usize].body_fn;
+                for f in [self.f, body] {
+                    let ix = self.sc_index(f);
+                    if let Some(&it) = ix.loops.get(&name) { return self.sc_delete_path_inner(it, depth + 1, work) }
+                    if let Some(v) = ix.assigns.get(&name) {
+                        if v.len()==1 { return self.sc_delete_path_inner(v[0], depth + 1, work) }
+                        return Val::unknown();
+                    }
+                }
+            }
+            Kind::JoinedStr => {
+                let nodes = self.t().list(a_(self.t(), n)).to_vec();
+                let mut v = Val::text(Vec::new());
+                for n in nodes.into_iter().take(32) {
+                    let n = if self.t().kind(n) == Kind::FormattedValue { a_(self.t(), n) } else { n };
+                    v = Val::concat(&v, &self.sc_delete_path_inner(n, depth + 1, work));
+                }
+                return v;
+            }
+            Kind::BinOp => {
+                let (a,b,op)=(a_(self.t(),n),b_(self.t(),n),self.t().node(n).op);
+                if op==pt::ADD || op==pt::DIV {
+                    let a=self.sc_delete_path_inner(a,depth + 1, work); let b=self.sc_delete_path_inner(b,depth + 1, work);
+                    return if op==pt::DIV {path_join(&a,&b)} else {Val::concat(&a,&b)};
+                }
+            }
+            Kind::Subscript => {
+                let obj=a_(self.t(),n); let key=b_(self.t(),n);
+                if self.node_text(obj).ends_with(&u("environ")) && self.sc_const_str(key).is_some_and(|s|is_one(&s,&["HOME","USERPROFILE"])) {return Val::text(u("~"))}
+            }
+            Kind::Attribute => {
+                if eq(self.t().str(b_(self.t(),n)),"parent") {let v=self.sc_delete_path_inner(a_(self.t(),n),depth + 1, work);return deletion::parent(&v)}
+            }
+            Kind::Call => {
+                let func=a_(self.t(),n); let args=self.t().list(b_(self.t(),n)).to_vec();
+                let names=self.sc_names(func);
+                if any_of(&names,&["pathlib.Path.home","Path.home"]) {return Val::text(u("~"))}
+                if any_of(&names,&["os.getenv","os.environ.get"]) && args.first().and_then(|&n|self.sc_const_str(n)).is_some_and(|s|is_one(&s,&["HOME","USERPROFILE"])) {return Val::text(u("~"))}
+                if any_of(&names,&["os.path.join","posixpath.join","ntpath.join","pathlib.Path","Path"]) {
+                    let mut v=Val::text(Vec::new()); for a in args.iter().take(32) {v=path_join(&v,&self.sc_delete_path_inner(*a,depth + 1, work));} return v;
+                }
+                if any_of(&names,&["os.path.expanduser","os.path.abspath","os.path.normpath","str"]) {return args.first().map(|&a|self.sc_delete_path_inner(a,depth + 1, work)).unwrap_or_default()}
+                if any_of(&names,&["os.path.dirname"]) {let v=args.first().map(|&a|self.sc_delete_path_inner(a,depth + 1, work)).unwrap_or_default();return deletion::parent(&v)}
+                if any_of(&names,&["glob.glob","glob.iglob"]) {let v=args.first().map(|&a|self.sc_delete_path_inner(a,depth + 1, work)).unwrap_or_default();return deletion::glob_path(&v)}
+                if self.t().kind(func)==Kind::Attribute {
+                    let obj=a_(self.t(),func);let method=self.t().str(b_(self.t(),func)).to_vec();
+                    if is_one(&method,&["resolve","absolute","expanduser","as_posix"]) {return self.sc_delete_path_inner(obj,depth + 1, work)}
+                    if eq(&method,"joinpath") {let mut v=self.sc_delete_path_inner(obj,depth + 1, work);for a in args.iter().take(32){v=path_join(&v,&self.sc_delete_path_inner(*a,depth + 1, work));}return v;}
+                    if eq(&method,"rglob") && args.first().and_then(|&a|self.sc_const_str(a)).is_some_and(|s|eq(&s,".git")) {let root=self.sc_delete_path_inner(obj,depth + 1, work);return deletion::repositories(&root)}
+                    if eq(&method,"glob") {let v=args.first().map(|&a|self.sc_delete_path_inner(a,depth + 1, work)).unwrap_or_default();return deletion::glob_path(&v)}
+                }
+            }
+            _ => {}
+        }
+        Val::unknown()
+    }
+
     pub(super) fn sc_call(
         &mut self,
         call: NodeId,
@@ -2621,6 +2690,12 @@ impl<'p> Analyzer<'p> {
             let t = self.t();
             t.list(b_(t, call)).to_vec()
         };
+        if self.emit {
+            let target = if any_of(&names, &["shutil.rmtree", "os.remove", "os.unlink", "pathlib.Path.unlink"]) {
+                arg_nodes.first().copied().or_else(|| self.sc_keyword(call,"path"))
+            } else if named("unlink") || named("rmdir") { Some(a_(self.t(),func)) } else { None };
+            if let Some(n)=target { let path=self.sc_delete_path(n,0); self.findings.push(Out::Delete {at,path:path.text_or_unknown()}); }
+        }
         // received code: code run, a module's name loaded, data deserialized
         if let Some(r) = self.sc_runs(call, &names) {
             let shell = any_of(&names, SHELLS) || any_of(&names, SPAWNS);
@@ -3402,6 +3477,7 @@ fn outside_names(tree: &Tree, sup: &Supply) -> (HashSet<PyStr>, HashMap<PyStr, P
 /// 1-based line and the category), if any.
 #[derive(Clone, Debug)]
 pub struct Facts {
+    pub deletions: Vec<(usize, PyStr)>,
     pub sent: Answer,
     pub received: Option<(usize, &'static str)>,
     /// code the script decodes, run: (the run's offset, the decoding's), in
@@ -3503,6 +3579,7 @@ fn facts_here(text: &[u32], lexed: Option<std::sync::Arc<Result<crate::pyparse::
     let mut first: Option<(u32, &'static str)> = None;
     let mut decoded: Vec<(usize, usize)> = Vec::new();
     let mut own: Option<usize> = None;
+    let mut deletions = Vec::new();
     let dropped = first_drop(text, &findings);
     for f in findings {
         match f {
@@ -3517,6 +3594,7 @@ fn facts_here(text: &[u32], lexed: Option<std::sync::Arc<Result<crate::pyparse::
                     first = Some((at, cat));
                 }
             }
+            Out::Delete { at, path } => deletions.push((at as usize, path)),
             Out::Decoded { at, from } => decoded.push((at as usize, from as usize)),
             Out::Own { at } => own = Some(own.map_or(at as usize, |o: usize| o.min(at as usize))),
             _ => {}
@@ -3532,7 +3610,7 @@ fn facts_here(text: &[u32], lexed: Option<std::sync::Arc<Result<crate::pyparse::
         let at = (at as usize).min(text.len());
         (text[..at].iter().filter(|&&c| c == 0x0A).count() + 1, cat)
     });
-    Some(Facts { sent, received, decoded, dropped, own })
+    Some(Facts { deletions, sent, received, decoded, dropped, own })
 }
 
 #[cfg(test)]

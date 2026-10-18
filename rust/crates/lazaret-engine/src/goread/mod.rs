@@ -728,7 +728,7 @@ fn finding(p: &Pack, src: &[u32], text: &[u32], evs: &[events::Ev], fi: usize, i
 fn sink_call(path: &str, name: &str) -> bool {
     match path {
         "os/exec" | "net" | "net/http" | "crypto/tls" | "plugin" | "golang.org/x/sys/windows" | "syscall" | "golang.org/x/sys/unix" | "C" => true,
-        "os" => matches!(name, "WriteFile" | "Create" | "OpenFile" | "StartProcess" | "CreateTemp" | "Rename"),
+        "os" => matches!(name, "WriteFile" | "Create" | "OpenFile" | "StartProcess" | "CreateTemp" | "Rename" | "Remove" | "RemoveAll"),
         "io/ioutil" => matches!(name, "WriteFile" | "TempFile"),
         _ => false,
     }

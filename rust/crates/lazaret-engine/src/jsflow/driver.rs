@@ -214,6 +214,8 @@ pub enum Out {
     /// its own file, its docstring or a data file shipped with it, reaching
     /// code run (the run's offset)
     Own { at: u32 },
+    /// RA-6: a deletion and the resolved target value.
+    Delete { at: u32, path: PyStr },
     /// the supply-chain model (JavaScript's): a code file in another
     /// package's folder written (the write's offset, the package): D-9
     Rewrote { at: u32, pkg: PyStr },

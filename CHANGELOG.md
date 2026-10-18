@@ -9,6 +9,8 @@ project is pre-1.0, so the 0.x API may still change.
 
 ## [0.1.9] — 2026-10-10
 
+RA-6 (rule set 2.95.0) records deletion paths in the Python, JavaScript, Go and Rust models and reads shell deletion commands. Removing a home directory or its personal files, a filesystem/drive root, or repositories selected through recursive `.git` globs adds “deletes the user's files”: CRITICAL at install/build/import, MAJOR when found only in use-time code. Relative build/dist/fixture cleanup, created temporary directories and named application-cache subtrees are excluded. Unknown paths alone are not evidence of deletion of user files. The check is static; no target path is accessed.
+
 Where the numbers stand (rerun October 10 on this engine: the benchmark's 516 malicious releases and 429
 popular packages are in-sample; the holdout is 745 other malicious releases of the same dataset, read only in
 aggregate):

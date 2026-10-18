@@ -1061,12 +1061,23 @@ impl<'k, 'a> Model<'k, 'a> {
             v.s = None;
             return Some(v);
         }
-        if ends(full, &["fs", "read_dir"]) || ends(full, &["WalkDir", "new"]) || ends(full, &["glob", "glob"]) {
+        if ends(full, &["glob", "glob"]) {
+            let mut v = crate::model::deletion::glob_path(&a0);
+            if v.s.is_none() { v = Val::concat(&a0, &Val::text(vec!['/' as u32, UNKNOWN])); }
+            v.add_kinds(&a0);
+            v.items = Some(Rc::new(vec![v.clone()]));
+            return Some(v);
+        }
+        if ends(full, &["fs", "read_dir"]) || ends(full, &["WalkDir", "new"]) {
             let mut v = Val::concat(&a0, &Val::text(vec!['/' as u32, UNKNOWN]));
             v.add_kinds(&a0);
             let items = vec![v.clone()];
             v.items = Some(Rc::new(items));
             return Some(v);
+        }
+        if ends(full, &["fs", "remove_dir_all"]) || ends(full, &["fs", "remove_file"]) {
+            self.ev(Ev::Delete { file, at, path: a0 });
+            return Some(Val::unknown());
         }
         if ends(full, &["fs", "write"]) {
             self.ev(Ev::Write { file, at, path: a0, data: a1, append: false });
@@ -1774,7 +1785,8 @@ impl<'k, 'a> Model<'k, 'a> {
                 }
                 v
             }
-            "parent" | "file_name" | "file_stem" | "extension" => derived(recv),
+            "parent" => crate::model::deletion::parent(recv),
+            "file_name" | "file_stem" | "extension" => derived(recv),
             "exists" | "is_file" | "is_dir" | "is_empty" | "contains" | "starts_with" | "ends_with" | "eq" | "ne" | "is_ok" | "is_err" | "is_some" | "is_none" | "parse" | "status" | "success" | "code" | "wait" | "kill" | "id" | "is_success" => {
                 if n == "wait" || n == "status" {
                     // a child's wait: nothing more to read

@@ -351,7 +351,7 @@ SAMPLE = 8192              # header/entropy sample read from oversized files
 #      entry points and hook targets, Python install scripts
 # 2.3: verdict tiers, decoded hex, install-script inspection; 2.2:
 #      verdict-integrity; 2.1: binary-artifact awareness
-ENGINE_VERSION = "2.94.0"
+ENGINE_VERSION = "2.95.0"
 
 # ---------------- The content memo (P-2a, registry/contentcache.py) ----------------
 # One per scan_package run: the engine answers once for content several of a
@@ -4462,7 +4462,7 @@ class _ArtifactScan:
                    for i in self.issues)
 
     def _use_time_code(self, loaded):
-        """SC-USE-RISK (CRITICAL): the strong import-time shapes in the other
+        """SC-USE-RISK (CRITICAL; deletion alone MAJOR): the strong import-time shapes in the other
         JavaScript and Python files of the package — code it runs when it is
         used (see USE_RISK_SKIP_DIRS), smallest files first, within
         USE_RISK_CHARS characters. self.use_time says how much of it was
@@ -4498,7 +4498,7 @@ class _ArtifactScan:
             strong = [r for r in reasons if r.startswith(lazaret._STRONG_IMPORT_REASONS)]
             if not strong:
                 continue
-            sev = "CRITICAL"
+            sev = "MAJOR" if all(r.startswith("deletes the user's files") for r in strong) else "CRITICAL"
             if self.artifact == "action":
                 sev, strong = _actionmeta.judge(strong)     # (a script fetched and run is MAJOR in an action)
                 if sev is None:
