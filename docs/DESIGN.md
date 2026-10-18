@@ -314,6 +314,49 @@ of it, no `or`), after a block that leaves when a `not in` is an `or` of the
 test, alone; read while the URL and the parsed result are the ones assigned,
 in one function. A substring test of the raw URL or of the host
 (`'example.com' in u`, `startswith`, `… in 'example.com'`) clears nothing.
+A call of a helper is followed into it (0.1.9, Q-4; Python): a module-level
+function of the file or one it imports from a project module (`f()`,
+`mod.f()`), a method through `self`, through a name holding an instance made
+in the same function (`x = C(…)`, `x = mod.C(…)`, the last such assignment),
+on an instance made in place (`C(…).m()`) or on the class (`C.m()`). A
+helper that returns untrusted data of its own — its body names a source, an
+import whose summary reads one, or such a helper — gets a summary, the
+pass's own reading of its body: the categories what its returns carry is
+clean for. A call of it carries that data too.
+
+Following only adds. The call's text is read as before — what its arguments
+and receiver carry — and a placeholder name tainted with the summary's
+categories is put among its arguments (one Yi syllable the text does not
+hold; what neutralizes the call, `int(…)` or a sanitizer around it,
+neutralizes the placeholder with it, and a finding through it says
+"untrusted data that 'x.m()' returns"). Nothing a call's text carries is
+ever taken away, however the helper is written, whatever state it reads and
+however the call reaches it: a helper returning a constant clears nothing it
+was given. So there is no summary of what a helper does with its parameters,
+and none for a helper with no untrusted data of its own: its calls are their
+text, as before. A helper the file defines twice, a property, a nested def,
+a name more than `_HELPER_SAME_NAME` (8) defs of the file have, and an
+import two of the project's files could be the module of add nothing.
+
+A helper is read only when it may return a source and a call in the file
+names it (a module's: when a file that imports it calls it), its callees
+first; recursion is read as text where it recurses, a chain is followed six
+deep (`_HELPER_DEPTH`), a file's helpers' bodies are read for at most
+`_HELPER_LINES_BASE` + `_HELPER_LINES_PER_LINE` lines a line of it, 32 calls
+of one statement (`_HELPER_CALLS`); a bound reached only leaves a call as
+its text. A file in which nothing can be tainted (no source in its text, no
+route handler, nothing imported that reads one) reads no helper. Another
+file's helpers come from a project pre-pass (`taint_helpers`: the Python
+files' imports resolved as the cross-file pass resolves them — `import a.b
+[as c]`, `from [.]a import b [as c]`, a package's submodule — and, of the
+modules whose text names a source or that import such a module,
+`_HELPER_HOPS` deep, the functions and classes a file calls or reads an
+attribute of summarized, what a module passes on of another's too, within
+`_HELPER_PROJECT_LINES`): each file's scan gets the slice it imports as its
+`"helpers"` argument, so the per-file pass still reads one file (the
+commit-time gate's scan, a project scan of the staged files, follows those
+files' helpers). A scan of a lone file and a registry scan in full mode
+follow the file's own helpers alone.
 After the taint pass, Python's cookie pass (0.1.9, Q-2,
 S-COOKIE) reads each `set_cookie` call's arguments for its Secure flag. Framework models (0.1.7):
 the parameters a route handler gets from the request are sources — a Flask

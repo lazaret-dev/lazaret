@@ -25,6 +25,10 @@ use crate::pystr::{self, PyStr};
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
+#[path = "taint_follow.rs"]
+pub mod follow;
+pub use follow::Slice;
+
 // ---------------------------------------------------------------- the configured part of the model
 
 /// The configured part of the taint model for one language (a `--taint-config` or `.lazaret-taint.json`, as
@@ -38,6 +42,9 @@ pub struct Model {
     partial: Vec<(PyStr, Vec<PyStr>)>,
     /// The sanitizers' patterns with the configured names joined (`full`, by suffix `partial`), made per language.
     joined: Mutex<HashMap<&'static str, Arc<Joined>>>,
+    /// (Q-4) What the file imports from the rest of its project that the pass follows calls into: the call's
+    /// `"helpers"` (`taint_helpers`' slice of the file).
+    pub helpers: Slice,
 }
 
 #[derive(Default)]
@@ -68,11 +75,12 @@ impl Model {
     /// The model a call's arguments give (`"taint"`; none: the pack's alone). A category the pack does not know
     /// is refused, as a pattern that does not compile is (taintspec let neither through).
     pub fn from_args(p: &Pack, args: &Value) -> Result<Model, String> {
-        let Some(t) = args.get("taint") else { return Ok(Model::default()) };
+        let helpers = Slice::from_args(args)?;
+        let Some(t) = args.get("taint") else { return Ok(Model { helpers, ..Model::default() }) };
         if matches!(t, Value::Null) {
-            return Ok(Model::default());
+            return Ok(Model { helpers, ..Model::default() });
         }
-        let mut m = Model::default();
+        let mut m = Model { helpers, ..Model::default() };
         for s in strs(t.get("sources")) {
             m.sources.push(compile(&s)?);
         }
@@ -1195,13 +1203,15 @@ fn clean_inter(a: &Clean, b: &Clean) -> Clean {
 }
 
 /// A tainted name: the line it was tainted at, the categories it is clean for, its taint order, the scope it lives
-/// in, and the blocks ((indent, block id), …) it was tainted in.
+/// in, and the blocks ((indent, block id), …) it was tainted in. `via`: for the name a followed call's value is held
+/// under while a text is read (Q-4), the callee as written.
 struct Taint {
     line: usize,
     clean: Clean,
     order: usize,
     scope: Option<usize>,
     chain: Vec<(usize, usize)>,
+    via: Option<PyStr>,
 }
 
 /// One sink row as the pass reads it (the pack's, then the configuration's).
@@ -1218,6 +1228,39 @@ struct Sink<'a> {
 
 /// core.taint_scan's findings for the file, added to `found`.
 pub fn scan(ctx: &FileCtx, model: &Model, found: &mut Vec<Finding>) {
+    scan_with(ctx, model, &model.helpers, found);
+}
+
+/// [`scan`], with what the file imports from the rest of its project that the pass follows calls into (Q-4: the
+/// file's slice, `taint_helpers`).
+pub fn scan_with(ctx: &FileCtx, model: &Model, imported: &Slice, found: &mut Vec<Finding>) {
+    let p = ctx.p;
+    let lines = follow::Lines {
+        left: std::cell::Cell::new(p.usize("_HELPER_LINES_BASE") + p.usize("_HELPER_LINES_PER_LINE") * ctx.len()),
+    };
+    run(ctx, model, imported, Job::Scan(found), &lines);
+}
+
+/// (Q-4) The summaries of the module-level functions and classes `wanted` names (what they call read first), for
+/// the files that import the module (`taint_helpers`); `lines`: the project's work left. A name the module imports
+/// from another module is passed on as that module's.
+pub(crate) fn exports(ctx: &FileCtx, model: &Model, imported: &Slice, wanted: &follow::Wanted, lines: &follow::Lines)
+                      -> follow::Exports {
+    let mut out = follow::Exports::default();
+    if ctx.lang == Lang::Py {
+        run(ctx, model, imported, Job::Export(wanted, &mut out), lines);
+    }
+    out
+}
+
+enum Job<'a> {
+    Scan(&'a mut Vec<Finding>),
+    Export(&'a follow::Wanted, &'a mut follow::Exports),
+}
+
+/// The pass over one file: its model, its helpers' summaries (Q-4), then the file read for its findings, or the
+/// summaries a module exports.
+fn run(ctx: &FileCtx, model: &Model, imported: &Slice, job: Job, lines_left: &follow::Lines) {
     let lang = ctx.lang;
     if lang != Lang::Py && lang != Lang::Js {
         return; // SQL and the rest: pattern rules only
@@ -1234,13 +1277,13 @@ pub fn scan(ctx: &FileCtx, model: &Model, found: &mut Vec<Finding>) {
     };
     let template_ok = lang != Lang::Py || p.re("_TEMPLATE_IMPORT_RE").search(&ctx.content).is_some();
     let gates = p.raw("_SINK_IMPORTS").and_then(|v| v.get("map"));
-    let imported = |suffix: &[u32]| -> bool {
+    let imported_mod = |suffix: &[u32]| -> bool {
         let name = pystr::to_string(suffix);
         gates.and_then(|m| m.get(&name)).is_none() || p.map_re("_SINK_IMPORTS", &name).search(&ctx.content).is_some()
     };
     let mut sinks: Vec<Sink> = base_sinks(p, key)
         .iter()
-        .filter(|s| (template_ok || !s.template) && imported(&s.suffix))
+        .filter(|s| (template_ok || !s.template) && imported_mod(&s.suffix))
         .map(|s| Sink { suffix: s.suffix.clone(), re: &s.re, guarded: false, cat: s.cat.clone(), sev: s.sev.clone(),
                         cwe: s.cwe.clone(), fix: s.fix.clone(), mode: s.mode })
         .collect();
@@ -1281,29 +1324,26 @@ pub fn scan(ctx: &FileCtx, model: &Model, found: &mut Vec<Finding>) {
     };
     let ident_re = p.map_re("_IDENT_RUN_RE", key);
     let has_at = ctx.content.contains(&('@' as u32));
-    let views = if lang == Lang::Py && has_at { view_returns(p, ctx) } else { HashSet::new() };
-    let routes = if lang == Lang::Py && pystr::contains(&ctx.content, "def") { route_params(p, ctx) } else { HashMap::new() };
+    // (a module's summaries, Q-4, read no view's return and no route handler's parameters)
+    let exporting = matches!(job, Job::Export(..));
+    let views = if lang == Lang::Py && has_at && !exporting { view_returns(p, ctx) } else { HashSet::new() };
+    let routes = if lang == Lang::Py && !exporting && pystr::contains(&ctx.content, "def") { route_params(p, ctx) } else { HashMap::new() };
     let xss_sink = sinks.iter().position(|s| pystr::eq(&s.suffix, "XSS"));
     let guard_if = p.map_re("_GUARD_IF_RE", key);
     let inside = literal_continuations(ctx);
     let join_max = p.usize("TAINT_JOIN_MAX_LINES");
     let same_site = p.re("_SAME_SITE_RE");
-
-    let mut tainted: HashMap<PyStr, Taint> = HashMap::new();
-    let mut levels: Vec<(usize, usize, Option<usize>)> = Vec::new(); // (indent, block id, scope id)
-    let (mut next_block, mut next_scope, mut next_order) = (0usize, 0usize, 0usize);
-    let mut in_scope: HashMap<usize, Vec<PyStr>> = HashMap::new();
-    let mut opener: Option<(usize, usize)> = None; // (indent, scope id) of a function whose body is not yet seen
-    let mut pending: Option<(usize, Vec<PyStr>, usize)> = None; // (scope id, names, def line) of a route handler
-    let (mut open_depth, mut continued) = (0i64, 0usize);
-    let mut keyed: Keyed = HashMap::new();
-    let mut allowed: Vec<(usize, PyStr, usize, Clean)> = Vec::new(); // (indent, name, taint order, clean before)
-    // (Q-5) what names hold of a parsed URL, the assignments of each URL parsed, and the URLs a `not in` check of
-    // their host clears for a redirect once its block (which leaves) ends: (indent, name, taint order)
-    let mut parsed: HashMap<PyStr, ParsedUrl> = HashMap::new();
-    let mut versions: HashMap<PyStr, usize> = HashMap::new();
-    let mut host_checked: Vec<(usize, PyStr, usize)> = Vec::new();
     let redir = [pystr::u("REDIR")];
+    // (Q-4) the helpers the file's calls are followed into: its own definitions, what it imports from its project
+    // (a file's scan in which nothing can be tainted — no source in its text, no route handler, nothing imported that
+    // reads one — reads no helper: following could change nothing there)
+    let can_taint = exporting || !routes.is_empty() || imported.reads_source() || text_names_source(ctx, model);
+    let defs = if lang == Lang::Py && can_taint { follow::Defs::of(ctx) } else { follow::Defs::default() };
+    let no_imports = Slice::default();
+    let resolver = follow::Resolver::new(&defs, if lang == Lang::Py { imported } else { &no_imports });
+    let return_re = p.re("_RETURN_RE");
+    // (calls are followed while the summaries are read, and in the file when one was read or it imports a helper)
+    let following = std::cell::Cell::new(lang == Lang::Py && !resolver.is_empty());
 
     // the tainted names in `text` still dangerous for `suf` (None: any), in their taint order
     let carriers_in = |tainted: &HashMap<PyStr, Taint>, text: &[u32], suf: Option<&[u32]>| -> Vec<PyStr> {
@@ -1352,9 +1392,63 @@ pub fn scan(ctx: &FileCtx, model: &Model, found: &mut Vec<Finding>) {
         clean.sort();
         Some(clean)
     };
+    // (Q-4) `text` with a placeholder put among the arguments of each call the pass follows — a call of a helper that
+    // returns untrusted data of its own —, innermost first: a name tainted with the categories what the helper
+    // returns is clean for (None: no call is followed). The call's text stays as it is: following only adds. The
+    // placeholders go into `tainted` and `placed`: the caller takes them out once the text is read.
+    let follow_calls = |tainted: &mut HashMap<PyStr, Taint>, text: &[u32], at: &follow::At,
+                        sums: &HashMap<usize, follow::Summary>, placed: &mut Vec<PyStr>| -> Option<PyStr> {
+        if !following.get() || (sums.is_empty() && !resolver.imported_source()) {
+            return None;
+        }
+        let calls = resolver.calls(p, text, at, sums);
+        if calls.is_empty() {
+            return None;
+        }
+        let mut out = text.to_vec();
+        // (the text put in so far: (where in `text`, how long), for the calls' spans after it)
+        let mut put: Vec<(usize, usize)> = Vec::new();
+        let moved = |put: &[(usize, usize)], q: usize| q + put.iter().filter(|(o, _)| *o <= q).map(|(_, n)| n).sum::<usize>();
+        let mut names = follow::Placeholders::new(text);
+        for c in &calls {
+            let (start, open, close) = (moved(&put, c.start), moved(&put, c.open), moved(&put, c.close));
+            // a call the model takes for a sanitizer by its name stays one: a full one adds nothing, a partial one's
+            // categories are kept with what the helper returns
+            let call = &out[start..close + 1];
+            let whole = |r: &Regex| r.finditer(call).any(|m| m.end() == call.len() && m.start() <= open - start);
+            if whole(full_san) {
+                continue;
+            }
+            let named: Clean = suffixes.iter().filter(|suf| partial_for(&joined, p, key, suf).is_some_and(|r| whole(r))).cloned().collect();
+            let Some(name) = names.take(text, |n| tainted.contains_key(n)) else { break };
+            out.splice(open + 1..open + 1, [name[0], ' ' as u32]);
+            put.push((c.open + 1, 2));
+            tainted.insert(name.clone(), Taint { line: at.line + 1, clean: clean_union(&c.summary.source, &named),
+                                                 order: usize::MAX / 2 + placed.len(), scope: None, chain: Vec::new(),
+                                                 via: Some(c.callee.clone()) });
+            placed.push(name);
+        }
+        (!placed.is_empty()).then_some(out)
+    };
+    // value_clean of `text` with the calls in it followed
+    let value_followed = |tainted: &mut HashMap<PyStr, Taint>, keyed: &Keyed, text: &[u32], at: &follow::At,
+                          sums: &HashMap<usize, follow::Summary>| -> Option<Clean> {
+        let mut placed = Vec::new();
+        match follow_calls(tainted, text, at, sums, &mut placed) {
+            Some(rw) => {
+                let c = value_clean(tainted, keyed, &rw);
+                for n in placed {
+                    tainted.remove(&n);
+                }
+                c
+            }
+            None => value_clean(tainted, keyed, text),
+        }
+    };
     let rule_texts = RuleText::of(p, "_TAINT_RULE");
     let what_via = p.text("_TAINT_WHAT_VIA");
     let what_plain = p.text("_TAINT_WHAT");
+    let what_call = p.text("_TAINT_WHAT_CALL");
     // a T-* finding when `text` (a sink's arguments, a view's return value) carries untrusted data for the sink
     let report = |tainted: &HashMap<PyStr, Taint>, keyed: &Keyed, found: &mut Vec<Finding>, sink: &Sink, text: &[u32], i: usize, col: usize| {
         let rest = taint_code(p, &neutralize(&keyed_reads(p, text, keyed, lang), Some(&sink.suffix)), lang);
@@ -1363,7 +1457,10 @@ pub fn scan(ctx: &FileCtx, model: &Model, found: &mut Vec<Finding>) {
             return;
         }
         let what = match carriers.first() {
-            Some(c) => findings::format(&what_via, &[("carrier", Arg::S(c.clone())), ("line", Arg::I(tainted[c].line as i64))]),
+            Some(c) => match &tainted[c].via {
+                Some(callee) => findings::format(&what_call, &[("callee", Arg::S(callee.clone()))]),
+                None => findings::format(&what_via, &[("carrier", Arg::S(c.clone())), ("line", Arg::I(tainted[c].line as i64))]),
+            },
             None => what_plain.clone(),
         };
         let mut id = pystr::u("T-");
@@ -1380,258 +1477,571 @@ pub fn scan(ctx: &FileCtx, model: &Model, found: &mut Vec<Finding>) {
         };
         found.push(Finding::new(rule, i + 1, Some(col)));
     };
+    // report, with the calls in `text` followed
+    let report_followed = |tainted: &mut HashMap<PyStr, Taint>, keyed: &Keyed, found: &mut Vec<Finding>, sink: &Sink,
+                           text: &[u32], i: usize, col: usize, at: &follow::At, sums: &HashMap<usize, follow::Summary>| {
+        let mut placed = Vec::new();
+        match follow_calls(tainted, text, at, sums, &mut placed) {
+            Some(rw) => {
+                report(tainted, keyed, found, sink, &rw, i, col);
+                for n in placed {
+                    tainted.remove(&n);
+                }
+            }
+            None => report(tainted, keyed, found, sink, text, i, col),
+        }
+    };
     let current_scope = |levels: &[(usize, usize, Option<usize>)]| levels.iter().rev().find_map(|l| l.2);
     let chain_of = |levels: &[(usize, usize, Option<usize>)]| levels.iter().map(|l| (l.0, l.1)).collect::<Vec<_>>();
     let aug_re = p.map_re("_AUG_ASSIGN_RE", key);
 
-    for i in 0..ctx.len() {
-        if ctx.cmask[i] {
-            continue;
-        }
-        let line = ctx.mcode(i);
-        if line.is_empty() || line.iter().all(|&c| pystr::is_space(c)) {
-            continue;
-        }
-        // ---- the structure
-        let mut structural = false;
-        if !inside.contains(&i) {
-            let depth = if lang == Lang::Py { delta(&ctx.names_code(i)) } else { 0 };
-            if open_depth > 0 && continued < join_max {
-                open_depth = (open_depth + depth).max(0);
-                continued += 1;
-            } else {
-                structural = true;
-                open_depth = depth.max(0);
-                continued = 0;
-                let indent = indent_of(ctx.line(i));
-                while allowed.last().is_some_and(|a| indent <= a.0) {
-                    let (_, n, order, before) = allowed.pop().expect("there");
-                    if let Some(t) = tainted.get_mut(&n) {
-                        if t.order == order {
-                            t.clean = before;
-                        }
-                    }
-                }
-                while host_checked.last().is_some_and(|h| indent <= h.0) {
-                    let (_, n, order) = host_checked.pop().expect("there");
-                    if let Some(t) = tainted.get_mut(&n) {
-                        if t.order == order {
-                            t.clean = clean_union(&t.clean, &redir);
-                        }
-                    }
-                }
-                while levels.last().is_some_and(|l| l.0 > indent) {
-                    if let Some(gone) = levels.pop().expect("there").2 {
-                        for n in in_scope.remove(&gone).unwrap_or_default() {
-                            if tainted.get(&n).is_some_and(|t| t.scope == Some(gone)) {
-                                tainted.remove(&n);
-                            }
-                        }
-                    }
-                }
-                if levels.last().is_none_or(|l| l.0 < indent) {
-                    let scope = match opener {
-                        Some((ind, s)) if indent > ind => Some(s),
-                        _ => None,
-                    };
-                    levels.push((indent, next_block, scope));
-                    next_block += 1;
-                    if let Some((pscope, names, def_line)) = &pending {
-                        if scope == Some(*pscope) {
-                            let chain = chain_of(&levels);
-                            for name in names.clone() {
-                                keyed.remove(&name);
-                                tainted.insert(name.clone(), Taint { line: def_line + 1, clean: Vec::new(), order: next_order,
-                                                                     scope, chain: chain.clone() });
-                                next_order += 1;
-                                in_scope.entry(*pscope).or_default().push(name);
-                            }
-                            pending = None;
-                        }
-                    }
-                }
-                opener = None;
-                if scope_opener(p, line, lang) {
-                    opener = Some((indent, next_scope));
-                    pending = routes.get(&i).map(|names| (next_scope, names.clone(), i));
-                    next_scope += 1;
-                }
+    // One reading of lines from..to: the file's, reporting its sinks into `found`, or (`helper`: the line of the def
+    // whose body it is) a helper's body, answering what its returns carry of untrusted data of its own: the
+    // categories all of them are clean for, None when none carries any.
+    let walk = |from: usize, to: usize, helper: Option<usize>, sums: &HashMap<usize, follow::Summary>,
+                mut found: Option<&mut Vec<Finding>>| -> Option<Clean> {
+        let mut tainted: HashMap<PyStr, Taint> = HashMap::new();
+        let mut levels: Vec<(usize, usize, Option<usize>)> = Vec::new(); // (indent, block id, scope id)
+        let (mut next_block, mut next_scope, mut next_order) = (0usize, 0usize, 0usize);
+        let mut in_scope: HashMap<usize, Vec<PyStr>> = HashMap::new();
+        let mut opener: Option<(usize, usize)> = None; // (indent, scope id) of a function whose body is not yet seen
+        let mut pending: Option<(usize, Vec<PyStr>, usize)> = None; // (scope id, names, def line) of a route handler
+        let (mut open_depth, mut continued) = (0i64, 0usize);
+        let mut keyed: Keyed = HashMap::new();
+        let mut allowed: Vec<(usize, PyStr, usize, Clean)> = Vec::new(); // (indent, name, taint order, clean before)
+        // (Q-5) what names hold of a parsed URL, the assignments of each URL parsed, and the URLs a `not in` check of
+        // their host clears for a redirect once its block (which leaves) ends: (indent, name, taint order)
+        let mut parsed: HashMap<PyStr, ParsedUrl> = HashMap::new();
+        let mut versions: HashMap<PyStr, usize> = HashMap::new();
+        let mut host_checked: Vec<(usize, PyStr, usize)> = Vec::new();
+        // (Q-4) the names holding an instance of a class the pass follows calls into, in the function it was made in;
+        // a helper's own scope, and what its returns carry
+        let mut instances: HashMap<PyStr, (follow::ClassRef, Option<usize>)> = HashMap::new();
+        let mut def_scope: Option<usize> = None;
+        let mut returns: Option<Clean> = None;
+
+        for i in from..to.min(ctx.len()) {
+            if ctx.cmask[i] {
+                continue;
             }
-        }
-        // ---- what the line does
-        let mut stmt: Option<PyStr> = None;
-        let assigned = assignment(p, line, lang);
-        let container = if assigned.is_none() { container_write(p, line, lang) } else { None };
-        if let Some((mut names, mut rhs)) = assigned {
-            let s = statement(i, line);
-            if let Some((jn, jr)) = assignment(p, &s, lang) {
-                names = jn;
-                rhs = jr;
+            let line = ctx.mcode(i);
+            if line.is_empty() || line.iter().all(|&c| pystr::is_space(c)) {
+                continue;
             }
-            let clean = value_clean(&tainted, &keyed, &rhs);
-            let chain = chain_of(&levels);
-            let scope = current_scope(&levels);
-            let augmented = aug_re.match_(&s).is_some();
-            stmt = Some(s);
-            if lang == Lang::Py {
-                let live = |n: &[u32], host: bool| live_url(&parsed, &versions, scope, n, host);
-                let held = if names.len() == 1 { parsed_value(p, &rhs, &live) } else { None };
-                for name in &names {
-                    parsed.remove(name);
-                    if let Some(v) = versions.get_mut(name) {
-                        *v += 1;
-                    }
-                }
-                if let Some((url, host)) = held {
-                    let version = *versions.entry(url.clone()).or_insert(0);
-                    parsed.insert(names[0].clone(), ParsedUrl { url, host, version, scope });
-                }
-            }
-            for name in names {
-                if !augmented {
-                    keyed.remove(&name);
-                }
-                let replaces = match tainted.get(&name) {
-                    Some(old) => structural && !augmented && {
-                        let last = levels.last().expect("structural lines have a level");
-                        old.chain.contains(&(last.0, last.1))
-                    },
-                    None => false,
-                };
-                if !tainted.contains_key(&name) || replaces {
-                    match &clean {
-                        None => {
-                            tainted.remove(&name);
-                        }
-                        Some(c) => {
-                            tainted.insert(name.clone(), Taint { line: i + 1, clean: c.clone(), order: next_order, scope,
-                                                                 chain: chain.clone() });
-                            next_order += 1;
-                            if let Some(s) = scope {
-                                in_scope.entry(s).or_default().push(name);
-                            }
-                        }
-                    }
-                } else if let Some(c) = &clean {
-                    let old = tainted.get_mut(&name).expect("there");
-                    old.clean = clean_inter(&old.clean, c);
-                }
-            }
-        } else if let Some((name, mut written)) = container {
-            let s = statement(i, line);
-            if let Some((jn, jw)) = container_write(p, &s, lang) {
-                if jn == name {
-                    written = jw;
-                }
-            }
-            let clean = value_clean(&tainted, &keyed, &written);
-            let key = match p.re("_KEYED_WRITE_RE").match_(&s) {
-                Some(km) if km.group(1).unwrap_or(&[]) == name.as_slice() => Some(km.group(3).unwrap_or(&[]).to_vec()),
-                _ if lang == Lang::Py => keyed_set(p, &s, &name),
-                _ => None,
-            };
-            if let Some(key) = key {
-                let entry = keyed.entry(name.clone()).or_default();
-                match entry.iter_mut().find(|(k, _)| *k == key) {
-                    Some(e) => e.1 = clean.clone(),
-                    None => entry.push((key, clean.clone())),
-                }
-            }
-            stmt = Some(s);
-            if let Some(c) = &clean {
-                if let Some(old) = tainted.get_mut(&name) {
-                    old.clean = clean_inter(&old.clean, c);
+            // ---- the structure
+            let mut structural = false;
+            if !inside.contains(&i) {
+                let depth = if lang == Lang::Py { delta(&ctx.names_code(i)) } else { 0 };
+                if open_depth > 0 && continued < join_max {
+                    open_depth = (open_depth + depth).max(0);
+                    continued += 1;
                 } else {
-                    let scope = current_scope(&levels);
-                    tainted.insert(name.clone(), Taint { line: i + 1, clean: c.clone(), order: next_order, scope,
-                                                         chain: chain_of(&levels) });
-                    next_order += 1;
-                    if let Some(s) = scope {
-                        in_scope.entry(s).or_default().push(name);
+                    structural = true;
+                    open_depth = depth.max(0);
+                    continued = 0;
+                    let indent = indent_of(ctx.line(i));
+                    while allowed.last().is_some_and(|a| indent <= a.0) {
+                        let (_, n, order, before) = allowed.pop().expect("there");
+                        if let Some(t) = tainted.get_mut(&n) {
+                            if t.order == order {
+                                t.clean = before;
+                            }
+                        }
+                    }
+                    while host_checked.last().is_some_and(|h| indent <= h.0) {
+                        let (_, n, order) = host_checked.pop().expect("there");
+                        if let Some(t) = tainted.get_mut(&n) {
+                            if t.order == order {
+                                t.clean = clean_union(&t.clean, &redir);
+                            }
+                        }
+                    }
+                    while levels.last().is_some_and(|l| l.0 > indent) {
+                        if let Some(gone) = levels.pop().expect("there").2 {
+                            for n in in_scope.remove(&gone).unwrap_or_default() {
+                                if tainted.get(&n).is_some_and(|t| t.scope == Some(gone)) {
+                                    tainted.remove(&n);
+                                }
+                            }
+                        }
+                    }
+                    if levels.last().is_none_or(|l| l.0 < indent) {
+                        let scope = match opener {
+                            Some((ind, s)) if indent > ind => Some(s),
+                            _ => None,
+                        };
+                        levels.push((indent, next_block, scope));
+                        next_block += 1;
+                        if let Some((pscope, names, def_line)) = &pending {
+                            if scope == Some(*pscope) {
+                                let chain = chain_of(&levels);
+                                for name in names.clone() {
+                                    keyed.remove(&name);
+                                    tainted.insert(name.clone(), Taint { line: def_line + 1, clean: Vec::new(), order: next_order,
+                                                                         scope, chain: chain.clone(), via: None });
+                                    next_order += 1;
+                                    in_scope.entry(*pscope).or_default().push(name);
+                                }
+                                pending = None;
+                            }
+                        }
+                    }
+                    opener = None;
+                    if scope_opener(p, line, lang) {
+                        opener = Some((indent, next_scope));
+                        pending = match helper {
+                            Some(def_line) => {
+                                if i == def_line {
+                                    def_scope = Some(next_scope);
+                                }
+                                None
+                            }
+                            None => routes.get(&i).map(|names| (next_scope, names.clone(), i)),
+                        };
+                        next_scope += 1;
                     }
                 }
             }
-        } else if !tainted.is_empty() && guard_if.match_(line).is_some() {
-            let s = statement(i, line);
-            let guarded: Vec<PyStr> = guarded_names(p, &s, lang).into_iter().filter(|n| tainted.contains_key(n)).collect();
-            if !guarded.is_empty() && guard_exits(p, ctx, i, &s, lang) {
-                for n in &guarded {
-                    let t = tainted.get_mut(n).expect("there");
-                    t.clean = clean_union(&t.clean, &[pystr::u("PATH")]);
+            // ---- what the line does
+            let mut stmt: Option<PyStr> = None;
+            let assigned = assignment(p, line, lang);
+            let container = if assigned.is_none() { container_write(p, line, lang) } else { None };
+            if let Some((mut names, mut rhs)) = assigned {
+                let s = statement(i, line);
+                if let Some((jn, jr)) = assignment(p, &s, lang) {
+                    names = jn;
+                    rhs = jr;
                 }
-            }
-            if let Some((name, collection, negated)) = allow_guard(p, &s, lang) {
-                if tainted.contains_key(&name) {
-                    let code = taint_code(p, &collection, lang);
-                    if !src_search(&code) && carriers_in(&tainted, &code, None).is_empty() {
+                let chain = chain_of(&levels);
+                let scope = current_scope(&levels);
+                let clean = {
+                    let at = follow::At { line: i, scope, instances: &instances };
+                    value_followed(&mut tainted, &keyed, &rhs, &at, sums)
+                };
+                let augmented = aug_re.match_(&s).is_some();
+                stmt = Some(s);
+                if lang == Lang::Py {
+                    let live = |n: &[u32], host: bool| live_url(&parsed, &versions, scope, n, host);
+                    let held = if names.len() == 1 { parsed_value(p, &rhs, &live) } else { None };
+                    for name in &names {
+                        parsed.remove(name);
+                        if let Some(v) = versions.get_mut(name) {
+                            *v += 1;
+                        }
+                    }
+                    if let Some((url, host)) = held {
+                        let version = *versions.entry(url.clone()).or_insert(0);
+                        parsed.insert(names[0].clone(), ParsedUrl { url, host, version, scope });
+                    }
+                    // (Q-4) an instance of a class the pass follows calls into: `x = C(…)`, `x = mod.C(…)`
+                    if following.get() {
+                        let made = if names.len() == 1 && !augmented {
+                            resolver.instance_of(p, &rhs, &follow::At { line: i, scope, instances: &instances })
+                        } else {
+                            None
+                        };
+                        for name in &names {
+                            instances.remove(name);
+                        }
+                        if let Some(c) = made {
+                            instances.insert(names[0].clone(), (c, scope));
+                        }
+                    }
+                }
+                for name in names {
+                    if !augmented {
+                        keyed.remove(&name);
+                    }
+                    let replaces = match tainted.get(&name) {
+                        Some(old) => structural && !augmented && {
+                            let last = levels.last().expect("structural lines have a level");
+                            old.chain.contains(&(last.0, last.1))
+                        },
+                        None => false,
+                    };
+                    if !tainted.contains_key(&name) || replaces {
+                        match &clean {
+                            None => {
+                                tainted.remove(&name);
+                            }
+                            Some(c) => {
+                                tainted.insert(name.clone(), Taint { line: i + 1, clean: c.clone(), order: next_order, scope,
+                                                                     chain: chain.clone(), via: None });
+                                next_order += 1;
+                                if let Some(s) = scope {
+                                    in_scope.entry(s).or_default().push(name);
+                                }
+                            }
+                        }
+                    } else if let Some(c) = &clean {
+                        let old = tainted.get_mut(&name).expect("there");
+                        old.clean = clean_inter(&old.clean, c);
+                    }
+                }
+            } else if let Some((name, mut written)) = container {
+                let s = statement(i, line);
+                if let Some((jn, jw)) = container_write(p, &s, lang) {
+                    if jn == name {
+                        written = jw;
+                    }
+                }
+                let clean = {
+                    let at = follow::At { line: i, scope: current_scope(&levels), instances: &instances };
+                    value_followed(&mut tainted, &keyed, &written, &at, sums)
+                };
+                let key = match p.re("_KEYED_WRITE_RE").match_(&s) {
+                    Some(km) if km.group(1).unwrap_or(&[]) == name.as_slice() => Some(km.group(3).unwrap_or(&[]).to_vec()),
+                    _ if lang == Lang::Py => keyed_set(p, &s, &name),
+                    _ => None,
+                };
+                if let Some(key) = key {
+                    let entry = keyed.entry(name.clone()).or_default();
+                    let held = clean.clone();
+                    match entry.iter_mut().find(|(k, _)| *k == key) {
+                        Some(e) => e.1 = held,
+                        None => entry.push((key, held)),
+                    }
+                }
+                stmt = Some(s);
+                if let Some(c) = &clean {
+                    if let Some(old) = tainted.get_mut(&name) {
+                        old.clean = clean_inter(&old.clean, c);
+                    } else {
+                        let scope = current_scope(&levels);
+                        tainted.insert(name.clone(), Taint { line: i + 1, clean: c.clone(), order: next_order, scope,
+                                                             chain: chain_of(&levels), via: None });
+                        next_order += 1;
+                        if let Some(s) = scope {
+                            in_scope.entry(s).or_default().push(name);
+                        }
+                    }
+                }
+            } else if !tainted.is_empty() && guard_if.match_(line).is_some() {
+                let s = statement(i, line);
+                let guarded: Vec<PyStr> = guarded_names(p, &s, lang).into_iter().filter(|n| tainted.contains_key(n)).collect();
+                if !guarded.is_empty() && guard_exits(p, ctx, i, &s, lang) {
+                    for n in &guarded {
+                        let t = tainted.get_mut(n).expect("there");
+                        t.clean = clean_union(&t.clean, &[pystr::u("PATH")]);
+                    }
+                }
+                if let Some((name, collection, negated)) = allow_guard(p, &s, lang) {
+                    if tainted.contains_key(&name) {
+                        let code = taint_code(p, &collection, lang);
+                        if !src_search(&code) && carriers_in(&tainted, &code, None).is_empty() {
+                            if negated {
+                                if guard_exits(p, ctx, i, &s, lang) {
+                                    tainted.get_mut(&name).expect("there").clean = all_clean.clone();
+                                }
+                            } else {
+                                let entry = tainted.get_mut(&name).expect("there");
+                                allowed.push((indent_of(ctx.line(i)), name.clone(), entry.order, entry.clean.clone()));
+                                entry.clean = all_clean.clone();
+                            }
+                        }
+                    }
+                }
+                if lang == Lang::Py {
+                    let scope = current_scope(&levels);
+                    let live = |n: &[u32], host: bool| live_url(&parsed, &versions, scope, n, host);
+                    for (url, collection, negated) in host_guards(p, &s, &live) {
+                        let Some(order) = tainted.get(&url).map(|t| t.order) else { continue };
+                        let code = taint_code(p, &collection, lang);
+                        if src_search(&code) || !carriers_in(&tainted, &code, None).is_empty() {
+                            continue;
+                        }
                         if negated {
                             if guard_exits(p, ctx, i, &s, lang) {
-                                tainted.get_mut(&name).expect("there").clean = all_clean.clone();
+                                host_checked.push((indent_of(ctx.line(i)), url, order));
                             }
                         } else {
-                            let entry = tainted.get_mut(&name).expect("there");
-                            allowed.push((indent_of(ctx.line(i)), name.clone(), entry.order, entry.clean.clone()));
-                            entry.clean = all_clean.clone();
+                            let entry = tainted.get_mut(&url).expect("there");
+                            allowed.push((indent_of(ctx.line(i)), url, entry.order, entry.clean.clone()));
+                            entry.clean = clean_union(&entry.clean, &redir);
                         }
                     }
                 }
+                stmt = Some(s);
             }
-            if lang == Lang::Py {
-                let scope = current_scope(&levels);
-                let live = |n: &[u32], host: bool| live_url(&parsed, &versions, scope, n, host);
-                for (url, collection, negated) in host_guards(p, &s, &live) {
-                    let Some(order) = tainted.get(&url).map(|t| t.order) else { continue };
-                    let code = taint_code(p, &collection, lang);
-                    if src_search(&code) || !carriers_in(&tainted, &code, None).is_empty() {
-                        continue;
-                    }
-                    if negated {
-                        if guard_exits(p, ctx, i, &s, lang) {
-                            host_checked.push((indent_of(ctx.line(i)), url, order));
-                        }
-                    } else {
-                        let entry = tainted.get_mut(&url).expect("there");
-                        allowed.push((indent_of(ctx.line(i)), url, entry.order, entry.clean.clone()));
-                        entry.clean = clean_union(&entry.clean, &redir);
+            // ---- (Q-4) a helper's return, read in its own body (not a nested def's)
+            if helper.is_some() && structural && def_scope.is_some() && current_scope(&levels) == def_scope {
+                if let Some(rm) = return_re.match_(line) {
+                    let s = stmt.get_or_insert_with(|| statement(i, line)).clone();
+                    let start = return_re.match_(&s).map_or(rm.end(), |m| m.end());
+                    let at = follow::At { line: i, scope: def_scope, instances: &instances };
+                    if let Some(c) = value_followed(&mut tainted, &keyed, &s[start.min(s.len())..], &at, sums) {
+                        returns = Some(match returns {
+                            None => c,
+                            Some(r) => clean_inter(&r, &c),
+                        });
                     }
                 }
             }
-            stmt = Some(s);
-        }
-        // ---- the sinks on the line
-        let mut xss_here = false;
-        for k in 0..sinks.len() {
-            let sink = &sinks[k];
-            let Some(sm) = sink_search(sink, line, max_match) else { continue };
-            let (start, end) = (sm.start(), sm.end());
-            let s = stmt.get_or_insert_with(|| statement(i, line)).clone();
-            let is_xss = pystr::eq(&sink.suffix, "XSS");
-            xss_here = xss_here || is_xss;
-            if is_xss {
-                let plain = if lang == Lang::Py {
-                    p.re("_NON_HTML_TYPE_RE").search(extent(&s[end.min(s.len())..])).is_some()
-                } else {
-                    p.re("_NON_HTML_CHAIN_RE").search(sm.group0()).is_some()
-                };
-                if plain {
-                    continue; // a text/plain or JSON response
-                }
-            }
-            let args = sink_args(p, &s[end.min(s.len())..], sink.mode, &sink.suffix);
-            report(&tainted, &keyed, found, sink, &args, i, start);
-        }
-        if views.contains(&i) && !xss_here {
-            if let Some(x) = xss_sink {
+            // ---- the sinks on the line
+            let Some(found) = found.as_deref_mut() else { continue };
+            let at_scope = current_scope(&levels);
+            let mut xss_here = false;
+            for k in 0..sinks.len() {
+                let sink = &sinks[k];
+                let Some(sm) = sink_search(sink, line, max_match) else { continue };
+                let (start, end) = (sm.start(), sm.end());
                 let s = stmt.get_or_insert_with(|| statement(i, line)).clone();
-                if let Some(rm) = p.re("_RETURN_RE").match_(&s) {
-                    let value = first_arg(&s[rm.end()..]);
-                    if !pystr::strip(value).is_empty() && p.re("_VIEW_RETURN_SKIP_RE").match_(value).is_none() && view_body(p, value) {
-                        report(&tainted, &keyed, found, &sinks[x], value, i, rm.end() - 6);
+                let is_xss = pystr::eq(&sink.suffix, "XSS");
+                xss_here = xss_here || is_xss;
+                if is_xss {
+                    let plain = if lang == Lang::Py {
+                        p.re("_NON_HTML_TYPE_RE").search(extent(&s[end.min(s.len())..])).is_some()
+                    } else {
+                        p.re("_NON_HTML_CHAIN_RE").search(sm.group0()).is_some()
+                    };
+                    if plain {
+                        continue; // a text/plain or JSON response
                     }
+                }
+                let args = sink_args(p, &s[end.min(s.len())..], sink.mode, &sink.suffix);
+                let at = follow::At { line: i, scope: at_scope, instances: &instances };
+                report_followed(&mut tainted, &keyed, found, sink, &args, i, start, &at, sums);
+            }
+            if views.contains(&i) && !xss_here {
+                if let Some(x) = xss_sink {
+                    let s = stmt.get_or_insert_with(|| statement(i, line)).clone();
+                    if let Some(rm) = p.re("_RETURN_RE").match_(&s) {
+                        let value = first_arg(&s[rm.end()..]);
+                        if !pystr::strip(value).is_empty() && p.re("_VIEW_RETURN_SKIP_RE").match_(value).is_none() && view_body(p, value) {
+                            let at = follow::At { line: i, scope: at_scope, instances: &instances };
+                            report_followed(&mut tainted, &keyed, found, &sinks[x], value, i, rm.end() - 6, &at, sums);
+                        }
+                    }
+                }
+            }
+        }
+        returns
+    };
+
+    // ---- (Q-4) the helpers' summaries, what each calls read first
+    let mut sums: HashMap<usize, follow::Summary> = HashMap::new();
+    let (scan_found, wanted, exported) = match job {
+        Job::Scan(found) => (Some(found), None, None),
+        Job::Export(w, out) => (None, Some(w), Some(out)),
+    };
+    if !defs.defs.is_empty() {
+        let names = follow::line_names(ctx, &defs);
+        let n_defs = defs.defs.len();
+        // (a property, a nested def, a name more than _HELPER_SAME_NAME defs have: never followed, never read)
+        let followable = |d: usize| defs.defs[d].kind != follow::Kind::Other && !defs.crowded.contains(&defs.defs[d].name);
+        let mut by_name: HashMap<&[u32], Vec<usize>> = HashMap::new();
+        for (d, def) in defs.defs.iter().enumerate() {
+            if followable(d) {
+                by_name.entry(def.name.as_slice()).or_default().push(d);
+            }
+        }
+        let callees = |d: usize| -> Vec<usize> {
+            let def = &defs.defs[d];
+            let mut out: Vec<usize> = Vec::new();
+            let mut seen: HashSet<usize> = HashSet::new();
+            let mut add = |ns: &[PyStr]| {
+                for n in ns {
+                    for &c in by_name.get(n.as_slice()).map(|v| v.as_slice()).unwrap_or(&[]) {
+                        if c != d && seen.insert(c) {
+                            out.push(c);
+                        }
+                    }
+                }
+            };
+            if let Some(text) = &def.inline {
+                add(&follow::called_names(text));
+            }
+            for line in names.iter().take(def.end).skip(def.line + 1) {
+                add(line);
+            }
+            out
+        };
+        let edges: Vec<Vec<usize>> = (0..n_defs).map(|d| if followable(d) { callees(d) } else { Vec::new() }).collect();
+        let body_of = |d: usize| def_body(ctx, &defs.defs[d]);
+        let depth_max = depth_max_of(p);
+        // the defs that may be read: those a call in the file names (a file's scan) or the module is asked for (an
+        // export), and what they call, _HELPER_DEPTH deep (the rest of the file's defs cost nothing more)
+        let roots: Vec<usize> = match wanted {
+            None => {
+                let mut called: HashSet<&[u32]> = HashSet::new();
+                for ns in &names {
+                    for n in ns {
+                        called.insert(n.as_slice());
+                    }
+                }
+                (0..n_defs).filter(|&d| followable(d) && called.contains(defs.defs[d].name.as_slice())).collect()
+            }
+            Some(w) => {
+                let mut out = Vec::new();
+                for name in w {
+                    if let Some(&d) = defs.functions.get(name) {
+                        out.push(d);
+                    } else if let Some(&c) = defs.class_names.get(name) {
+                        out.extend(defs.classes[c].methods.iter().map(|(_, d)| *d));
+                    }
+                }
+                out.retain(|&d| followable(d));
+                out
+            }
+        };
+        let mut relevant = vec![false; n_defs];
+        let mut frontier = roots.clone();
+        for &d in &roots {
+            relevant[d] = true;
+        }
+        for _ in 0..depth_max {
+            let mut next = Vec::new();
+            for d in frontier {
+                for &c in &edges[d] {
+                    if !relevant[c] {
+                        relevant[c] = true;
+                        next.push(c);
+                    }
+                }
+            }
+            if next.is_empty() {
+                break;
+            }
+            frontier = next;
+        }
+        // the helpers that may return untrusted data of their own: a body that names a source, an import whose
+        // summary reads one, or such a helper (the only ones read: any other's call is its text alone)
+        let src_imports: HashSet<PyStr> = resolver.imported.names().map(|n| n.split(|&c| c == '.' as u32).next().unwrap_or(n).to_vec()).collect();
+        // (a line names a source in its code: not in a string, but in an f-string's fields; read once, when asked)
+        let line_src: std::cell::RefCell<Vec<u8>> = std::cell::RefCell::new(vec![0u8; ctx.len()]);
+        let names_source = |d: usize| -> bool {
+            let def = &defs.defs[d];
+            match &def.inline {
+                Some(t) => src_search(&taint_code(p, t, lang)),
+                None => (def.line + 1..def.end.min(ctx.len())).any(|i| {
+                    let known = line_src.borrow()[i];
+                    if known != 0 {
+                        return known == 2;
+                    }
+                    let yes = !ctx.cmask[i] && src_search(ctx.mcode(i)) && src_search(&taint_code(p, ctx.mcode(i), lang));
+                    line_src.borrow_mut()[i] = if yes { 2 } else { 1 };
+                    yes
+                }),
+            }
+        };
+        let mut may_src: Vec<bool> = (0..n_defs).map(|d| {
+            relevant[d] && (names_source(d) || follow::names_any(body_of(d), &src_imports))
+        }).collect();
+        for _ in 0..depth_max {
+            let mut changed = false;
+            for d in 0..n_defs {
+                if !may_src[d] && relevant[d] && edges[d].iter().any(|&c| may_src[c]) {
+                    may_src[d] = true;
+                    changed = true;
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+        let todo: Vec<usize> = roots.iter().copied().filter(|&d| may_src[d]).collect();
+        // what a one-line def (`def f(x): return x`) returns
+        let inline_return = |text: &[u32], line: usize, sums: &HashMap<usize, follow::Summary>| -> Option<Clean> {
+            let m = return_re.match_(text)?;
+            let mut tainted: HashMap<PyStr, Taint> = HashMap::new();
+            let instances = HashMap::new();
+            let at = follow::At { line, scope: None, instances: &instances };
+            value_followed(&mut tainted, &HashMap::new(), &text[m.end()..], &at, sums)
+        };
+        // a helper's summary: the categories what its returns carry of untrusted data of its own is clean for, when
+        // they carry any (None: none, or the work bounds left it unread — its calls are then their text alone)
+        let summarize = |d: usize, sums: &HashMap<usize, follow::Summary>| -> Option<follow::Summary> {
+            let def = &defs.defs[d];
+            if def.kind == follow::Kind::Other || !lines_left.take(def.end.saturating_sub(def.line).max(1)) {
+                return None;
+            }
+            let source = match &def.inline {
+                Some(text) => inline_return(text, def.line, sums),
+                None => walk(def.line, def.end, Some(def.line), sums, None),
+            };
+            source.map(|source| follow::Summary { source })
+        };
+        // each root's summary, what it calls read first (as deep as _HELPER_DEPTH)
+        let mut state = vec![0u8; n_defs];
+        for &root in &todo {
+            if state[root] != 0 {
+                continue;
+            }
+            state[root] = 1;
+            let mut stack: Vec<(usize, usize)> = vec![(root, 0)];
+            while let Some((d, next)) = stack.last_mut() {
+                let d = *d;
+                if *next < edges[d].len() {
+                    let c = edges[d][*next];
+                    *next += 1;
+                    if state[c] == 0 && stack.len() < depth_max && may_src[c] {
+                        state[c] = 1;
+                        stack.push((c, 0));
+                    }
+                    continue;
+                }
+                stack.pop();
+                state[d] = 2;
+                if let Some(s) = summarize(d, &sums) {
+                    sums.insert(d, s);
                 }
             }
         }
     }
+    if let Some(found) = scan_found {
+        walk(0, ctx.len(), None, &sums, Some(found));
+    }
+    if let (Some(w), Some(out)) = (wanted, exported) {
+        for name in w {
+            if let Some(&d) = defs.functions.get(name) {
+                if let Some(s) = sums.get(&d) {
+                    out.functions.push((name.clone(), s.clone()));
+                }
+            } else if let Some(&c) = defs.class_names.get(name) {
+                let methods: Vec<(PyStr, follow::Summary)> = defs.classes[c].methods.iter()
+                    .filter_map(|(m, d)| sums.get(d).map(|s| (m.clone(), s.clone()))).collect();
+                if !methods.is_empty() {
+                    out.classes.push((name.clone(), follow::ExtClass { methods }));
+                }
+            } else {
+                // (passed on as the module it imports it from gives it)
+                match resolver.imported.get(name) {
+                    Some(follow::Entry::Fun(s)) => out.functions.push((name.clone(), s.clone())),
+                    Some(follow::Entry::Class(c)) => out.classes.push((name.clone(), c.clone())),
+                    _ => {}
+                }
+            }
+        }
+    }
+}
+/// (Q-4) Does `ctx`'s text name a source anywhere (the pack's patterns on all of it, the configured ones line by line,
+/// as each sees a line's first characters)?
+fn text_names_source(ctx: &FileCtx, model: &Model) -> bool {
+    let p = ctx.p;
+    let key = lang_key(ctx.lang);
+    let max = p.usize("_TAINT_MAX_MATCH_TEXT");
+    p.map_re("TAINT_SOURCES", key).search(&ctx.content).is_some()
+        || (!model.sources.is_empty() && (0..ctx.len()).any(|i| {
+            let l = ctx.line(i);
+            model.sources.iter().any(|r| r.search(&l[..l.len().min(max)]).is_some())
+        }))
+}
+
+/// (Q-4) A def's body: the text after its colon on its line, or its lines after the def's.
+fn def_body<'a>(ctx: &'a FileCtx, def: &'a follow::Def) -> &'a [u32] {
+    match &def.inline {
+        Some(t) => t,
+        None => {
+            let a = ctx.starts.get(def.line + 1).copied().unwrap_or(ctx.content.len());
+            let e = ctx.starts.get(def.end).copied().unwrap_or(ctx.content.len());
+            &ctx.content[a.min(e)..e]
+        }
+    }
+}
+
+/// (Q-4) How deep a chain of helpers is followed.
+fn depth_max_of(p: &Pack) -> usize {
+    p.usize("_HELPER_DEPTH").max(1)
 }
 
 /// A sink's first match in `t` (a configured sink's in the text's first `max` characters).

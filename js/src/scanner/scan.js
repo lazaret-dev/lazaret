@@ -41,8 +41,10 @@ export function taintScan(file, lines, lang) {
 }
 
 /**
- * Scan one file: {name|path, content, lang, dep}. dep → dependency mode:
- * only supply-chain and secret rules, no suppression markers honored. The
+ * Scan one file: {name|path, content, lang, dep, helpers}. dep → dependency mode:
+ * only supply-chain and secret rules, no suppression markers honored. `helpers`
+ * (a project's Python file): what it imports from the others that the taint
+ * pass follows calls into (taintHelpers; Q-4). The
  * native engine reads the file whole, in either mode; a file that spends the
  * engine's work budget is SC-TRUNCATED.
  */
@@ -52,7 +54,8 @@ export function scanFile(file) {
   const lang = file.lang ?? detectLang(String(path ?? ""), raw);
   const opts = { jsx: jsxReading(path), redact: REDACT.on };
   try {
-    return file.dep ? scanDependencyFile(path, raw, lang, opts) : scanProjectFile(path, raw, lang, opts);
+    return file.dep ? scanDependencyFile(path, raw, lang, opts)
+      : scanProjectFile(path, raw, lang, { ...opts, helpers: file.helpers ?? null });
   } catch (e) {
     if (!(e instanceof NativeExhausted)) throw e;
     return [truncatedIssue(path, EXHAUSTED)];

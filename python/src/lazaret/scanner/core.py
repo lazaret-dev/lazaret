@@ -4097,6 +4097,14 @@ def scan_project(root, exclude=(), include_deps=False, taint_config=None,
         # its own with the file's redaction (mk_issue's): the flows' and the dependency checks' (redact_file_issues)
         numbered = []
         scanned, stopped = [], None
+        # (Q-4) what each project Python file imports from the others that the taint pass follows calls into
+        try:
+            helpers = engine.taint_helpers([(f["path"], f["content"]) for f in files
+                                            if f["lang"] == "py" and not f.get("dep", False)])
+        except Exception as exc:                # the files are then read with their own helpers alone
+            helpers = {}
+            warnings.append(f"taint pass: the helpers other files define were not read "
+                            f"({type(exc).__name__}: {_safe_text(exc)})")
         # Files a batch at a time (the engine reads a batch on threads, each
         # file whole: engine.py); should_stop is checked before each batch.
         batch = engine.BATCH
@@ -4112,7 +4120,7 @@ def scan_project(root, exclude=(), include_deps=False, taint_config=None,
             try:
                 # (each project file's line metrics from the same reading: compute_metrics, Q-1 step 4)
                 results, line_metrics = engine.scan_files_metrics(
-                    [(f["path"], f["content"], f["lang"], f.get("dep", False)) for f in chunk])
+                    [(f["path"], f["content"], f["lang"], f.get("dep", False)) for f in chunk], helpers)
             except Exception:                   # a batch that failed: each file again, on its own
                 results = line_metrics = None
             for n, f in enumerate(chunk):

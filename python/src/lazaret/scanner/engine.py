@@ -469,12 +469,14 @@ def _issues(path, answer):
     return out
 
 
-def scan_calls(items):
+def scan_calls(items, helpers=None):
     """[(path, content, lang, dep)] -> the engine call that scans each, as
     (name, args), or None for a file it does not read: scan_file, in
     dependency mode or in project mode (the rules, then the passes after
     them: Q-1), a project's Python or JavaScript file with the configured
-    part of the taint model (core.taint_args). Its answer is a function of
+    part of the taint model (core.taint_args), and a project's Python file
+    with what it imports from the others that the taint pass follows calls
+    into (`helpers`: {path: slice}, taint_helpers; Q-4). Its answer is a function of
     the name, the args and the text: the engine reads no path (the path's
     part is `jsx` and a TypeScript file's `dialect`, from its extension:
     dialect_args, TS-STRIP), which is what lets the registry ask
@@ -493,6 +495,8 @@ def scan_calls(items):
         configured = None if dep else core.taint_args(lang)
         if configured:
             args["taint"] = configured
+        if helpers and lang == "py" and not dep and path in helpers:
+            args["helpers"] = helpers[path]
         calls.append(("scan_file", args))
     return calls
 
@@ -533,17 +537,35 @@ def scan_files(items):
     return _scan(items, False)[0]
 
 
-def scan_files_metrics(items):
+def scan_files_metrics(items, helpers=None):
     """scan_files, and each project file's line metrics from the same reading of it (Q-1 step 4): ([issues],
     [metrics]), the metrics as file_metrics gives them, None for a dependency's file or one the engine could not
-    answer."""
-    return _scan(items, True)
+    answer. `helpers`: as scan_calls'."""
+    return _scan(items, True, helpers)
 
 
-def _scan(items, metrics):
+def taint_helpers(files):
+    """(Q-4) [(path, content)]: a project's own Python files -> {path: what the file imports from the others that
+    the intra-file taint pass follows calls into} (the slice scan_calls gives its scan_file as "helpers"), for the
+    files that import one: the engine reads the files' imports and summarizes the functions and classes they name
+    (taint_follow.rs), with the configured part of the taint model (core.taint_args). Raises
+    _native.NativeError when the engine cannot answer."""
+    from lazaret.scanner import core
+    todo = [(path, content) for path, content in files if isinstance(content, str)]
+    if len(todo) < 2:
+        return {}
+    args = _budget({"files": [[path, len(content)] for path, content in todo]})
+    configured = core.taint_args("py")
+    if configured:
+        args["taint"] = configured
+    answer = _native.call("taint_helpers", args, "".join(content for _, content in todo))
+    return {path: s for (path, _), s in zip(todo, answer) if s is not None}
+
+
+def _scan(items, metrics, helpers=None):
     if not items:
         return [], []
-    calls = scan_calls(items)
+    calls = scan_calls(items, helpers)
     if metrics:
         calls = [None if call is None else (call[0], dict(call[1], metrics=True)) if not item[3] else call
                  for call, item in zip(calls, items)]

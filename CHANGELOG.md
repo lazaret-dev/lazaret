@@ -30,6 +30,30 @@ aggregate):
 
 ### Added
 
+- **Taint: a call followed into the helper it names (Q-4; the engine's, for both packages; rule set 2.100.0).** Project mode, Python. The intra-file pass read a call as text, so `param = x.get_param('id')` after
+  `x = Wrapper(request)` carried nothing: the receiver holds no request data, but `get_param` returns
+  `self.request.args.get(name)`. A helper defined in the file, or in another file of the project, that returns
+  untrusted data of its own (it reads the request, the command line…) now gets a summary — the pass's own reading of
+  its body: the categories what it returns is clean for (`html.escape` inside it still clears XSS) — and its calls
+  carry that data too: a module-level function (`f()`, `mod.f()`, `pkg.mod.f()`), a method through `self`, through a
+  name holding an instance made in the same function (`x = C(…)`, `x = mod.C(…)`), on an instance made in place
+  (`C(…).m()`) or on the class (`C.m()`, a staticmethod's or classmethod's). **Following only adds**: the call's text
+  is read as before and what the helper returns is put beside it, so nothing the text carries is ever taken away — a
+  helper returning a constant does not clear what it was given, however the helper is written or reached. A helper
+  the file defines twice, a property, a nested def, a name more than eight defs of a file have (`_HELPER_SAME_NAME`),
+  an import two of the project's files could be, and a helper that returns no untrusted data of its own add nothing.
+  Another file's helpers come from one engine call over the project's Python files before their scans
+  (`taint_helpers`: the imports resolved as the cross-file pass resolves them — `import a.b [as c]`,
+  `from [.]a import b [as c]`, a package's submodule — and the functions and classes a file calls summarized), each
+  file's scan given what it imports; a scan of a lone file reads the file's own helpers; when the call fails, both
+  packages warn and read each file with its own. Bounded: a chain is followed six deep, recursion is read as text
+  where it recurses, and a helper is read only when it may return a source and is called, within a few readings of
+  the file's own lines; a bound reached only leaves a call as its text. On BenchmarkPython 0.1 (its test sources not
+  read) the score goes from +0.575 to +0.614 (true positives 368 to 389 of 452: cmdi, ldapi, trustbound and xss all
+  found now; false positives 144 to 155 of 778); 60 findings are added and none removed, and on the two independent
+  reviews' 280 synthetic probes none that the pass reported before is lost. The recorded snapshot sets do not move. A
+  project scan of Lazaret's own Python takes about a sixth longer (0.86 to 1.02 s: its decoders and command-line
+  reads are sources, so its helpers are read); asyncio's and email's 0 to 4%.
 - **A crate's earlier releases yanked as it was published: SC-YANK-TO-PUSH (RA-10; the registry and the Cargo guard,
   no rule-set change).** arrayref's attacker yanked the crate's earlier versions to push its users to the new ones
   (Wiz): cargo takes no yanked version for a new resolution. A crate release whose publisher yanked two or more of

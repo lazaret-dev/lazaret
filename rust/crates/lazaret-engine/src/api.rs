@@ -107,6 +107,8 @@ pub const CALLS: &[&str] = &[
     "texts.put", "texts.drop", "texts.info",
     // 0.1.9 (Q-1): project mode's passes one at a time (scan_file with dep false runs them all)
     "taint_scan", "functions",
+    // 0.1.9 (Q-4): what each of a project's Python files imports from the others that the taint pass follows
+    "taint_helpers",
     // 0.1.9 (Q-1 step 4): a project file's line metrics: comment lines, lines of code, the duplication windows
     "file_metrics",
     // 0.1.9 (V-1 stage 2): live secret verification's table and logic (secrets.rs); each package makes the call
@@ -1380,6 +1382,15 @@ fn dispatch(name: &str, args: &Value, text: &[u32]) -> Result<Value, CallError> 
             let mut found = Vec::new();
             crate::taint::scan(&ctx, &model, &mut found);
             Value::Arr(found.iter().map(|f| snippets.issue(f)).collect())
+        }
+        "taint_helpers" => {
+            // (Q-4) {"files": [[path, length], …] (a project's own Python files, their texts concatenated as the
+            // text), "taint": the configured part of the model} -> for each file, what it imports from the others
+            // that the intra-file taint pass follows calls into: its scan_file's "helpers", or null
+            let files = flow_files(args, text, "taint_helpers")?;
+            let model = crate::taint::Model::from_args(p, args).map_err(|m| CallError::BadArgs(format!("taint_helpers: {m}")))?;
+            let slices = crate::taint::follow::project_slices(p, &files, &model);
+            Value::Arr(slices.into_iter().map(|s| s.map_or(Value::Null, |s| s.to_value())).collect())
         }
         "secrets.providers" => {
             // the table's providers: where each credential would go, for a report's notice before any call

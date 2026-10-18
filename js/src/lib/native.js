@@ -496,9 +496,26 @@ export function scanDependencyFile(path, content, lang, { jsx = true, redact = t
  * SQL statements without WHERE, the intra-file taint, the SQL built from strings into execute(), the
  * function metrics, the suppression markers and the cap, as core lists them.
  */
-export function scanProjectFile(path, content, lang, { jsx = true, redact = true } = {}) {
+export function scanProjectFile(path, content, lang, { jsx = true, redact = true, helpers = null } = {}) {
   const dialect = lang === "js" ? dialectArgs(path) : {};
-  return issuesOf(path, call("scan_file", { lang, dep: false, jsx, redact, neumaier: false, ...dialect }, content));
+  const args = { lang, dep: false, jsx, redact, neumaier: false, ...dialect };
+  if (helpers && lang === "py") args.helpers = helpers;     // (Q-4) what it imports that the taint pass follows
+  return issuesOf(path, call("scan_file", args, content));
+}
+
+/**
+ * (Q-4) What each of a project's own Python files ([{path, content}]) imports from the others that the intra-file
+ * taint pass follows calls into (engine.taint_helpers): a Map of path -> the slice scanProjectFile passes as
+ * `helpers`, for the files that import one.
+ */
+export function taintHelpers(files) {
+  const todo = files.filter((f) => typeof f.content === "string");
+  const out = new Map();
+  if (todo.length < 2) return out;
+  const args = { files: todo.map((f) => [f.path, codePoints(f.content)]) };
+  const answer = call("taint_helpers", args, todo.map((f) => f.content));
+  answer.forEach((slice, k) => { if (slice !== null) out.set(todo[k].path, slice); });
+  return out;
 }
 
 /**

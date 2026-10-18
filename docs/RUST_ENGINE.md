@@ -106,7 +106,12 @@ Decisions (fixed):
   taint configuration (`--taint-config`, a trusted `.lazaret-taint.json`)
   goes with each Python and JavaScript file's call as its `"taint"`
   argument (`core.taint_args`: what `core.apply_taint_config` validated and
-  kept). A file the engine doesn't answer about is SC-TRUNCATED, as in
+  kept), and what a Python file imports from the rest of the project that the
+  taint pass follows calls into as its `"helpers"` (0.1.9, Q-4: one
+  `taint_helpers` call over the project's Python files before the batches,
+  `engine.taint_helpers`, the npm package's `taintHelpers`; when it fails,
+  each file is read with its own helpers and a warning says so, a
+  `LAZARET_TAINT_HELPERS` process warning in npm). A file the engine doesn't answer about is SC-TRUNCATED, as in
   dependency mode; no clock bounds the scan, only the work budget, so a
   file gets the same findings on every machine.
 - The cross-file follower (`engine.cross_file_issues`, for `--deps`,
@@ -345,7 +350,19 @@ rust/
                              (Q-2) a row's argument mode, sinks a module's import enables
                              (_SINK_IMPORTS), `for` targets, keyed set() and get(); (Q-5) a
                              parsed URL's host checked against a collection, a redirect's guard
-                             (host_guards: _URL_PARSED_RE, _URL_HOST_OF_RE, _HOST_TEST_RE)
+                             (host_guards: _URL_PARSED_RE, _URL_HOST_OF_RE, _HOST_TEST_RE); (Q-4)
+                             one reading (`run`'s `walk`) for the file and for a helper's body,
+                             calls of helpers that return untrusted data of their own followed
+                             (`follow_calls`: a placeholder for what the helper returns added
+                             among the call's arguments; the call's text never loses anything)
+    src/taint_follow.rs      (0.1.9, Q-4) what the taint pass follows calls into: a file's defs
+                             and classes (Defs; a name more than _HELPER_SAME_NAME defs have is
+                             not followed), the calls a text names (Resolver), summaries (the
+                             categories a helper's own untrusted data is clean for) and slices
+                             as JSON, and the project pre-pass `taint_helpers` (imports resolved
+                             as pyflow resolves them, an import two files could be adding
+                             nothing; the names a file calls summarized, dependencies first:
+                             project_slices)
     src/secrets.rs           live secret verification's table and logic (0.1.9, V-1 stage 2):
                              the pack's _VERIFY_PROVIDERS read and checked; `secrets.find` (the
                              credentials of a file's flagged lines; AWS's pairs), `secrets.identify`,

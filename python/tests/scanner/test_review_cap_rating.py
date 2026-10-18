@@ -33,11 +33,11 @@ def scan(tree):
         return core.scan_project(root)
 
 
-def uncapped_calls(items):
+def uncapped_calls(items, helpers=None):
     """engine.scan_calls asking for the rules part alone (scan_rules: no markers, no cap): these trees' findings are
     all the rules', so it is their scan uncapped (the cap is the engine's since Q-1, 0.1.9, as the passes are)."""
-    calls = REAL_SCAN_CALLS(items)
-    return [None if c is None else ("scan_rules", {k: v for k, v in c[1].items() if k not in ("dep", "taint")})
+    calls = REAL_SCAN_CALLS(items, helpers)
+    return [None if c is None else ("scan_rules", {k: v for k, v in c[1].items() if k not in ("dep", "taint", "helpers")})
             for c in calls]
 
 

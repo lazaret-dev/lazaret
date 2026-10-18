@@ -1,6 +1,6 @@
 {
  "format": 1,
- "rule_set": "2.99.0",
+ "rule_set": "2.100.0",
  "source": "lazaret.scanner.core, extracted by scripts/make_rust_tables.py \u2014 do not edit",
  "values": {
   "ALWAYS_PRUNE_DIRS": {
@@ -12307,6 +12307,50 @@
     "module_root_dir"
    ]
   },
+  "_HELPER_CALLS": {
+   "value": 32
+  },
+  "_HELPER_CLASS_RE": {
+   "flags": "",
+   "re": "^\\s*class\\s+([A-Za-z_]\\w*)\\s*[(:]"
+  },
+  "_HELPER_DECORATOR_RE": {
+   "flags": "",
+   "re": "^\\s*@\\s*([A-Za-z_][\\w.]*)"
+  },
+  "_HELPER_DEF_RE": {
+   "flags": "",
+   "re": "^\\s*(?:async\\s+)?def\\s+([A-Za-z_]\\w*)\\s*\\("
+  },
+  "_HELPER_DEPTH": {
+   "value": 6
+  },
+  "_HELPER_FROM_RE": {
+   "flags": "",
+   "re": "^\\s*from\\s+(\\.*)\\s*([A-Za-z_][\\w.]*)?\\s+import\\s+(.+)"
+  },
+  "_HELPER_HOPS": {
+   "value": 4
+  },
+  "_HELPER_IMPORT_RE": {
+   "flags": "",
+   "re": "^\\s*import\\s+(.+)"
+  },
+  "_HELPER_LINES_BASE": {
+   "value": 2000
+  },
+  "_HELPER_LINES_PER_LINE": {
+   "value": 4
+  },
+  "_HELPER_NAMES_MAX": {
+   "value": 4096
+  },
+  "_HELPER_PROJECT_LINES": {
+   "value": 2000000
+  },
+  "_HELPER_SAME_NAME": {
+   "value": 8
+  },
   "_HEXSTR_DANGER_WHY": {
    "value": "Escaping ordinary printable characters serves no purpose except hiding them from review and search; this text names code execution, a download, or a URL."
   },
@@ -17741,6 +17785,9 @@
   },
   "_TAINT_WHAT": {
    "value": "untrusted data"
+  },
+  "_TAINT_WHAT_CALL": {
+   "value": "untrusted data that '{callee}()' returns"
   },
   "_TAINT_WHAT_VIA": {
    "value": "untrusted data via '{carrier}' (tainted at line {line})"

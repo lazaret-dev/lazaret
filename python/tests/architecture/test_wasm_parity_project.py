@@ -3,8 +3,10 @@ project mode too (Q-1, 0.1.9: both packages ask the engine for the whole of
 a project file's scan): the WebAssembly build against the native library on
 test_snapshot_project's sets (scan_file in project mode, with and without a
 taint configuration, and the function lists), on the intra-file taint
-alone (taint_scan, the npm package's taintScan) and on the line metrics
-(file_metrics, and scan_file's with "metrics": Q-1 step 4). Skipped where node, the
+alone (taint_scan, the npm package's taintScan), on the line metrics
+(file_metrics, and scan_file's with "metrics": Q-1 step 4) and on what a
+project's Python files import that the taint pass follows calls into
+(taint_helpers, and the scans given it: Q-4). Skipped where node, the
 WebAssembly build or the native library is missing.
 """
 import unittest
@@ -51,6 +53,22 @@ class WasmProjectParityTests(unittest.TestCase):
     def test_the_taint_pass_alone(self):
         calls = [("taint_scan", {"lang": lang_of(p), "jsx": True, "redact": True}, t)
                  for p, t in project_corpus.corpus() if lang_of(p) in ("py", "js")]
+        check(self, calls)
+
+    def test_the_helpers_a_project_imports(self):
+        # (Q-4) taint_helpers over a project's Python files, and each file's scan with what it imports
+        from tests.scanner import test_taint_helpers as helpers
+        trees = [sorted(f.items()) for f, _ in helpers.PROJECT_REPORTED] + [sorted(f.items()) for f in helpers.PROJECT_QUIET]
+        trees += [sorted(f.items()) for f in helpers.PROJECT_KEPT]
+        trees.append([(p, t) for p, t in project_corpus.corpus() if lang_of(p) == "py"])
+        calls = []
+        for files in trees:
+            calls.append(("taint_helpers", {"files": [[p, len(t)] for p, t in files]}, "".join(t for _, t in files)))
+            slices = _native.call(*calls[-1])
+            calls += [("scan_file", {"lang": "py", "jsx": True, "dep": False, "redact": True, "helpers": s}, t)
+                      for (_, t), s in zip(files, slices) if s is not None]
+        # (each reported tree's view has one; a helper that returns no untrusted data of its own gives none)
+        self.assertGreaterEqual(sum(c[0] == "scan_file" for c in calls), len(helpers.PROJECT_REPORTED))
         check(self, calls)
 
 

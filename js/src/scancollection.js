@@ -7,25 +7,47 @@ import { scanErrorIssue } from "./lib/issue.js";
 import { scanFile, scanConfigFile, treeReader } from "./scanner/scan.js";
 import { scanManifest, scanGyp } from "./lib/supplychain.js";
 import { analyzeFlows, redactFlowIssues } from "./scanner/flow.js";
+import { taintHelpers } from "./lib/native.js";
 
-/** What scanFile reads of a collected file. */
-export const scanTask = (f) => ({ name: f.path, path: f.path, content: f.content, lang: f.lang, dep: f.dep });
+/** What scanFile reads of a collected file (`helpers`: projectHelpers' Map). */
+export const scanTask = (f, helpers = null) => {
+  const task = { name: f.path, path: f.path, content: f.content, lang: f.lang, dep: f.dep };
+  const slice = helpers && !f.dep ? helpers.get(f.path) : undefined;
+  if (slice !== undefined) task.helpers = slice;
+  return task;
+};
+
+/**
+ * (Q-4) What each of the collection's own Python files imports from the others that the taint pass follows calls
+ * into (taintHelpers): a Map of path -> slice; an empty one when the engine could not answer (each file is then
+ * read with its own helpers alone, and a process warning says so, as the Python package's scan warns).
+ */
+export function projectHelpers(files) {
+  try {
+    return taintHelpers(files.filter((f) => f.lang === "py" && !f.dep));
+  } catch (e) {
+    const why = `${(e && e.name) || "Error"}: ${String((e && e.message) || e).slice(0, 200)}`;
+    globalThis.process?.emitWarning?.(`taint pass: the helpers other files define were not read (${why})`,
+      { code: "LAZARET_TAINT_HELPERS" });
+    return new Map();
+  }
+}
 
 /** Each file's findings, one file after another (one file must never kill the run). */
-export function scanEach(files) {
+export function scanEach(files, helpers = null) {
   return files.map((f) => {
-    try { return scanFile(scanTask(f)); } catch (e) { return [scanErrorIssue(f.path, e)]; }
+    try { return scanFile(scanTask(f, helpers)); } catch (e) { return [scanErrorIssue(f.path, e)]; }
   });
 }
 
 /**
  * The findings of a scan of `col` (a collection: lib/collect.js collectEntry's, the walk's or the dashboard's), in
  * the project scan's order: `extraIssues` (findings made before the scan that belong in its result), the
- * collection's, each file's (`scanAll(files)`: a list per file; default scanEach), the config files' (credentials
- * only; a dependency's agent skill or instruction file, RA-3, also reads the scripts it runs through `diskRead`, the
- * CLI's read of what is on disk), the manifests', what `checks(issues)` adds to them (the CLI's checks of what is on
- * disk; it may add the files it read to col.files), the skipped trees, then the cross-file flows in col.files,
- * redacted as their files are.
+ * collection's, each file's (`scanAll(files, helpers)`: a list per file, `helpers` projectHelpers'; default
+ * scanEach), the config files' (credentials only; a dependency's agent skill or instruction file, RA-3, also reads
+ * the scripts it runs through `diskRead`, the CLI's read of what is on disk), the manifests', what `checks(issues)`
+ * adds to them (the CLI's checks of what is on disk; it may add the files it read to col.files), the skipped trees,
+ * then the cross-file flows in col.files, redacted as their files are.
  */
 export function collectionIssues(col, { extraIssues = [], scanAll = scanEach, checks = null, diskRead = null } = {}) {
   const { files, manifests, configs, binaryIssues, skippedIssues } = col;
@@ -33,7 +55,7 @@ export function collectionIssues(col, { extraIssues = [], scanAll = scanEach, ch
   const add = (list) => { for (const i of list) issues.push(i); };   // never push(...big)
   add(extraIssues);
   add(binaryIssues);
-  for (const found of scanAll(files)) add(found);
+  for (const found of scanAll(files, projectHelpers(files))) add(found);
   const read = treeReader(files, configs);                            // what an editor's or agent's settings run
   let depRead = null;                                                 // what a dependency's agent skill runs
   for (const cf of configs) {

@@ -47,7 +47,7 @@ export function scanCollected(root, col, { exclude = [], env = process.env, extr
       extraIssues,
       // a dependency's agent skill (RA-3): the scripts it runs, from the disk when the walk did not keep them
       diskRead: diskReader(root, files, manifests, { exclude, maxFileBytes: col.maxFileBytes }),
-      scanAll: (all) => mapTasks(pool, all.map((f) => ["scan", scanTask(f)]),
+      scanAll: (all, helpers) => mapTasks(pool, all.map((f) => ["scan", scanTask(f, helpers)]),
         ([, file]) => scanFile(file),
         ([, file], e) => [scanErrorIssue(file.path, e)]),                // one file must never kill the run
       checks: (sofar) => {
