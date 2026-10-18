@@ -60,9 +60,18 @@ test('RA-6 own folders, protected subtrees, and deleting-call lines', () => {
     }
   }
   for(const c of fixture.sources) {
-    assert.equal(call('install_script_risk',{lang:c.lang},c.text).includes(reason),c.found,c.name);
+    const install=call('install_script_risk',{lang:c.lang},c.text);
+    assert.equal(install.includes(reason),c.found,c.name);
+    if(c.found) assert.equal(call('install_script_severity',{reasons:install}),'CRITICAL',c.name);
     const [reasons,line]=call('import_time_risk',{lang:c.lang},c.text);
     assert.equal(reasons.includes(reason),c.found,c.name);
     if(c.line !== undefined) assert.equal(line,c.line,c.name);
   }
 });
+
+ test('RA-6 listed-name work stays bounded', () => {
+  let text="const fs=require('fs'),path=require('path');const D=require('os').homedir()+'/.tool/state';\n";
+  text+="fs.readdirSync(D).map(n=>fs.rmSync(path.join(D,n),{recursive:true}));\n".repeat(1600);
+  text+="fs.rmSync(require('os').homedir()+'/Documents',{recursive:true});";
+  assert.ok(call('install_script_risk',{lang:'js'},text).includes(reason));
+ });

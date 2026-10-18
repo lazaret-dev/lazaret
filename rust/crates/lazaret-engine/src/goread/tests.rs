@@ -444,3 +444,15 @@ fn ra6_deletion_paths() {
     assert!(a.start.is_empty());
     assert!(has(&reasons(&a.uses), "deletes the user's files"));
 }
+
+#[test]
+fn ra6_rework_shared_paths() {
+    let fixture=crate::json::parse_str(include_str!("../../../../../tests/fixtures/ra6-own-folders.json")).unwrap();
+    for case in fixture.get("paths").unwrap().as_arr().unwrap() {
+        let path=case.get("path").unwrap().as_string().unwrap();
+        let expected=case.get("found")==Some(&crate::json::Value::Bool(true));
+        let mut literal=String::new();crate::json::write_str(&mut literal,&u(&path));
+        let a=init(&format!("os.RemoveAll({literal})"),"\"os\"");
+        assert_eq!(has(&reasons(&a.start),"deletes the user's files"),expected,"{path}: {a:?}");
+    }
+}

@@ -51,3 +51,37 @@ class DeletionPackageTests(unittest.TestCase):
         for result in [go({"p.go":'package p\nimport "os"\nfunc init(){os.RemoveAll("/home/example/.tool/state")}\n'}),
                        rust({"build.rs":'fn main(){std::fs::remove_dir_all("/home/example/.tool/state").unwrap();}', "src/lib.rs":"pub fn f(){}"})]:
             self.assertFalse(any(REASON in i["msg"] for i in result["issues"]), result["issues"])
+
+    def test_rework_categories_in_packages(self):
+        from pathlib import Path
+        fixture=json.loads((Path(__file__).resolve().parents[3]/"tests/fixtures/ra6-own-folders.json").read_text(encoding="utf-8"))
+        for case in fixture["paths"]:
+            if "category" not in case:
+                continue
+            path=case["path"]
+            with self.subTest(path=path):
+                files={"package.json":json.dumps({"name":"example","version":"1.0.0","scripts":{"postinstall":"node clean.js"}}),
+                       "clean.js":"require('fs').rmSync("+json.dumps(path)+",{recursive:true});"}
+                result=scan(crate_tgz(files,root="package"),"tgz","npm")
+                issues=[i for i in result["issues"] if REASON in i["msg"]]
+                self.assertEqual(bool(issues),case["found"],issues)
+                if case["found"]:
+                    self.assertTrue(any(i["sev"]=="CRITICAL" for i in issues),issues)
+
+    def test_review_listing_cases_in_packages(self):
+        from pathlib import Path
+        fixture=json.loads((Path(__file__).resolve().parents[3]/"tests/fixtures/ra6-own-folders.json").read_text(encoding="utf-8"))
+        for case in fixture["sources"]:
+            if not case["name"].startswith("v2-"):
+                continue
+            with self.subTest(name=case["name"]):
+                if case["lang"]=="js":
+                    files={"package.json":json.dumps({"name":"example","version":"1.0.0","scripts":{"postinstall":"node clean.js"}}),"clean.js":case["text"]}
+                    result=scan(crate_tgz(files,root="package"),"tgz","npm")
+                else:
+                    files={"PKG-INFO":"Metadata-Version: 2.1\nName: example\nVersion: 1.0.0\n","setup.py":case["text"]}
+                    result=scan(crate_tgz(files,root="example-1.0.0"),"tgz","sdist")
+                issues=[i for i in result["issues"] if REASON in i["msg"]]
+                self.assertEqual(bool(issues),case["found"],result["issues"])
+                if case["found"]:
+                    self.assertTrue(any(i["sev"]=="CRITICAL" for i in issues),issues)

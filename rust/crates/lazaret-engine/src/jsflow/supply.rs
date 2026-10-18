@@ -642,6 +642,8 @@ pub struct Supply {
     /// the names that hold a path outside the package (core's `outside`)
     pub outside: std::cell::RefCell<HashSet<PyStr>>,
     pub whole: PyStr,
+    listing_guard: std::cell::RefCell<Option<bool>>,
+    listing_reads: std::cell::RefCell<std::collections::HashMap<(BindId,bool,bool),bool>>,
     /// a function given as an argument -> the call it is given to (built
     /// when first asked)
     pub arg_of: std::cell::RefCell<Option<std::collections::HashMap<NodeId, NodeId>>>,
@@ -676,6 +678,8 @@ impl Supply {
             lit,
             outside: std::cell::RefCell::new(HashSet::new()),
             whole,
+            listing_guard: std::cell::RefCell::new(None),
+            listing_reads: std::cell::RefCell::new(std::collections::HashMap::new()),
             arg_of: std::cell::RefCell::new(None),
             written: std::cell::RefCell::new(Vec::new()),
             runs: std::cell::RefCell::new(Vec::new()),
@@ -3910,47 +3914,325 @@ impl<'p> Eval<'p> {
 
     /// supply mode: a call (sources, sends, connections, clients,
     /// callbacks). Its value.
+    fn sc_listing_safe(&mut self) -> bool {
+        if let Some(ok)=*self.sup().listing_guard.borrow() {return ok}
+        let a=self.a();let mut ok=!self.p.mods[self.m as usize].eval_with;
+        let md=&self.p.mods[self.m as usize];
+        let mut scopes=vec![self.p.fns[md.fn_ as usize].scope;a.0.nodes.len()];
+        let mut stack=vec![(a.0.root,scopes[a.0.root as usize])];
+        while let Some((n,outer))=stack.pop() {
+            if n==NONE {continue}
+            let local=md.scope_at[n as usize];let scope=if local==UNSET {outer} else {local};
+            scopes[n as usize]=scope;stack.extend(a.kids(n).into_iter().map(|child|(child,scope)));
+        }
+        let mut escapes=Vec::new();
+        for n in 0..a.0.nodes.len() as NodeId {
+            if matches!(a.kind(n),Kind::AssignmentExpression|Kind::UpdateExpression|Kind::UnaryExpression) {
+                let lhs=a.at(n,jt::A);
+                if lhs!=NONE && a.kind(lhs)==Kind::MemberExpression && (a.computed(lhs) || a.prop_name(lhs).is_some_and(|p|is_one(&p,&["name","path","parentPath","readdir","readdirSync","join","resolve","normalize","dirname","homedir","map","filter","forEach","then","prototype"]))) {ok=false;break}
+            }
+            // Dynamic code can replace native APIs without a visible write.
+            // References cover aliases; constructors receive escaping arguments
+            // just as ordinary calls do.
+            if a.kind(n)==Kind::Identifier && is_one(a.name(n),&["arguments","globalThis","global","window","self","eval","Function"]) {ok=false;break}
+            if a.kind(n)==Kind::MemberExpression && a.prop_name(n).is_some_and(|p|eq(&p,"constructor")) {ok=false;break}
+            if matches!(a.kind(n),Kind::CallExpression|Kind::NewExpression) {
+                let callee=a.unwrap(a.at(n,jt::A));
+                if callee!=NONE && a.kind(callee)==Kind::MemberExpression && a.prop_name(callee).is_some_and(|p|is_one(&p,&["defineProperty","defineProperties","assign","setPrototypeOf","set","symlink","symlinkSync"])) {ok=false;break}
+                escapes.extend(a.list(n,jt::B));
+            }
+            // An opaque consumer can replace a module's methods. Also reject
+            // native objects/functions captured in containers or returned.
+            if a.kind(n)==Kind::Property {escapes.push(a.at(n,jt::B));}
+            if matches!(a.kind(n),Kind::ReturnStatement|Kind::SpreadElement) {escapes.push(a.at(n,jt::A));}
+        }
+        while ok && !escapes.is_empty() {
+            let n=escapes.pop().unwrap();if n==NONE {continue}
+            let scope=scopes[n as usize];
+            let names=self.sc_names(n,scope);
+            if (self.a().is_ident_named(n,"require") && self.bind(n,scope).is_none()) ||
+                names.iter().any(|s|is_one(s,&["fs","path","os"]) || ["fs.","fs/","path.","os."].iter().any(|p|pystr::starts_with(s,p))) {ok=false;break}
+            // Calls return a new value, not necessarily their argument objects.
+            // Their own arguments are already in this work list.
+            if matches!(self.a().kind(n),Kind::ArrayExpression|Kind::ObjectExpression|Kind::Property|Kind::SpreadElement|Kind::ConditionalExpression|Kind::LogicalExpression) {
+                escapes.extend(self.a().kids(n));
+            }
+        }
+        *self.sup().listing_guard.borrow_mut()=Some(ok);ok
+    }
+
+    /// Definite native identity, not the may-resolve names used to find sinks.
+    /// Only one write, a native import/require, and literal member/alias steps
+    /// qualify. Conditional values, parameters and replacements never do.
+    fn sc_listing_native(&self,node:NodeId,scope:ScopeId,depth:usize,work:&mut usize)->Option<PyStr> {
+        if node==NONE || depth>24 || *work==0 {return None} *work-=1;
+        let a=self.a();let n=a.unwrap(node);
+        match a.kind(n) {
+            Kind::Identifier => {
+                let b=self.bind(n,scope)?;let bind=&self.p.binds[b as usize];
+                if bind.module!=self.m {return None}
+                let mut writes=bind.writes.iter().filter(|w|!matches!(w,Write::Nothing{..}));
+                let w=writes.next()?;if writes.next().is_some() {return None}
+                match w {
+                    Write::Init{node,scope,path}|Write::Assign{node,scope,path} => {
+                        let mut out=self.sc_listing_native(*node,*scope,depth+1,work)?;
+                        for key in path {out.push('.' as u32);out.extend(key.as_ref()?);}
+                        Some(out)
+                    }
+                    Write::Import{spec,name,..} => {
+                        let mut out=spec.strip_prefix(u("node:").as_slice()).unwrap_or(spec).to_vec();
+                        if !is_one(&out,&["fs","fs/promises","path","os"]) {return None}
+                        if !is_one(name,&["*","default","="]) {out.push('.' as u32);out.extend(name);}
+                        Some(out)
+                    }
+                    _=>None,
+                }
+            }
+            Kind::MemberExpression => {
+                let mut out=self.sc_listing_native(a.at(n,jt::A),scope,depth+1,work)?;
+                out.push('.' as u32);out.extend(a.prop_name(n)?);Some(out)
+            }
+            Kind::CallExpression => {
+                let callee=a.unwrap(a.at(n,jt::A));let args=a.list(n,jt::B);
+                if args.len()!=1 || !a.is_ident_named(callee,"require") || self.bind(callee,scope).is_some() {return None}
+                let spec=a.str_value(args[0])?;let spec=spec.strip_prefix(u("node:").as_slice()).unwrap_or(spec);
+                is_one(spec,&["fs","fs/promises","path","os"]).then(||spec.to_vec())
+            }
+            _=>None,
+        }
+    }
+
+    fn sc_listing_directory(&self,node:NodeId,scope:ScopeId,depth:usize,work:&mut usize)->bool {
+        if node==NONE || depth>24 || *work==0 {return false} *work-=1;
+        let a=self.a();let n=a.unwrap(node);
+        if a.str_value(n).is_some() {return true}
+        match a.kind(n) {
+            Kind::Identifier => {
+                let Some(b)=self.bind(n,scope) else {return false};
+                let bind=&self.p.binds[b as usize];
+                if bind.module!=self.m {return false}
+                let mut writes=bind.writes.iter().filter(|w|!matches!(w,Write::Nothing{..}));
+                let Some(w)=writes.next() else {return false};
+                if writes.next().is_some() {return false}
+                match w {
+                    Write::Init{node,scope,path}|Write::Assign{node,scope,path} if path.is_empty()=>self.sc_listing_directory(*node,*scope,depth+1,work),
+                    _=>false,
+                }
+            }
+            Kind::BinaryExpression if a.operator(n)=="+" => self.sc_listing_directory(a.at(n,jt::A),scope,depth+1,work) && self.sc_listing_directory(a.at(n,jt::B),scope,depth+1,work),
+            Kind::CallExpression => {
+                let native=self.sc_listing_native(a.at(n,jt::A),scope,depth+1,work);
+                native.is_some_and(|s|is_one(&s,&["os.homedir","path.join","path.resolve","path.posix.join","path.win32.join","path.posix.resolve","path.win32.resolve","path.normalize","path.dirname"])) && a.list(n,jt::B).iter().all(|&v|self.sc_listing_directory(v,scope,depth+1,work))
+            }
+            _=>false,
+        }
+    }
+
+    // RA-6 rework: positive provenance, separate from the permissive value
+    // follower. None never earns an exemption. Every recursive step is charged.
+    fn sc_list_readonly(&self, b: BindId, collection: bool, object: bool) -> bool {
+        let key=(b,collection,object);
+        if let Some(&ok)=self.sup().listing_reads.borrow().get(&key) {return ok}
+        let a=self.a();
+        let ok=self.p.binds[b as usize].refs.iter().all(|&(id,parent)| {
+            if parent==NONE { return false }
+            if a.kind(parent)==Kind::MemberExpression && a.at(parent,jt::A)==id {
+                if self.p.mods[self.m as usize].member_rhs.contains_key(&parent) || self.p.mods[self.m as usize].asg[parent as usize] {return false}
+                if a.computed(parent) {return collection}
+                return a.prop_name(parent).is_some_and(|p| if collection {is_one(&p,&["filter","map","forEach","length"])} else {is_one(&p,&["name","path","parentPath","isDirectory","isFile","isSymbolicLink"])});
+            }
+            if a.kind(parent)==Kind::AssignmentExpression && a.at(parent,jt::A)==id {return true}
+            if collection {return a.kind(parent)==Kind::ForOfStatement && a.at(parent,jt::B)==id}
+            !object // listing strings are immutable; writes to their binding are checked separately
+        });
+        self.sup().listing_reads.borrow_mut().insert(key,ok);ok
+    }
+
+    fn sc_listed(&mut self, node: NodeId, scope: ScopeId, depth: usize, work: &mut usize) -> Option<crate::model::deletion::Listed> {
+        use crate::model::deletion::{Listed, ListKind};
+        if node==NONE || depth>24 || *work==0 || !self.sc_listing_safe() {return None}
+        *work-=1;
+        let n=self.a().unwrap(node);
+        match self.a().kind(n) {
+            Kind::AwaitExpression => self.sc_listed(self.a().at(n,jt::A),scope,depth+1,work),
+            Kind::Identifier => {
+                let b=self.bind(n,scope)?;
+                let bind=&self.p.binds[b as usize];
+                if bind.module!=self.m {return None}
+                let writes:Vec<Write>=bind.writes.iter().filter(|w|!matches!(w,Write::Nothing{..})).take(2).cloned().collect();
+                if writes.len()!=1 {return None}
+                let fid=bind.fid;
+                let mut out=match &writes[0] {
+                    Write::Init{node,scope,path}|Write::Assign{node,scope,path} => {
+                        let mut v=self.sc_listed(*node,*scope,depth+1,work)?;
+                        for part in path {v=match part {None=>v.item()?,Some(p)=>v.member(p)?};}
+                        v
+                    }
+                    Write::Opaque{node,scope} if self.a().kind(*node)==Kind::ForOfStatement => {
+                        let mut v=self.sc_listed(self.a().at(*node,jt::B),*scope,depth+1,work)?.item()?;
+                        let mut pat=self.a().at(*node,jt::A);
+                        if self.a().kind(pat)==Kind::VariableDeclaration {pat=self.a().at(*self.a().list(pat,jt::A).first()?,jt::A);}
+                        let decl=self.a().pattern_names(pat).into_iter().map(|(x,_)|x).find(|&x|self.a().name(x)==self.p.binds[b as usize].name.as_slice())?;
+                        let (path,default)=param_place(&self.a(),pat,decl)?;
+                        if default!=NONE {return None}
+                        for p in path {v=v.member(&p?)?;} v
+                    },
+                    Write::Param{node:pat,index:0,..} => {
+                        let fnode=self.p.fns[fid as usize].node;
+                        if self.p.fns[fid as usize].params.len()>2 || self.p.fns[fid as usize].params.iter().any(|&p|self.a().kind(p)==Kind::RestElement) {return None}
+                        let call=self.sc_call_of_arg(fnode)?;
+                        if self.a().list(call,jt::B).first()!=Some(&fnode) {return None}
+                        let callee=self.a().unwrap(self.a().at(call,jt::A));
+                        if self.a().kind(callee)!=Kind::MemberExpression {return None}
+                        let method=self.a().prop_name(callee)?;
+                        let fscope=self.p.fns[fid as usize].scope;
+                        let outer=self.p.scopes[fscope as usize].parent.unwrap_or(fscope);
+                        let mut v=self.sc_listed(self.a().at(callee,jt::A),outer,depth+1,work)?;
+                        if is_one(&method,&["map","forEach","filter"]) {v=v.item()?}
+                        else if !eq(&method,"then") || !v.kind.collection() {return None}
+                        let decl=self.a().pattern_names(*pat).into_iter().map(|(x,_)|x).find(|&x|self.a().name(x)==self.p.binds[b as usize].name.as_slice())?;
+                        let (path,default)=param_place(&self.a(),*pat,decl)?;
+                        if default!=NONE {return None}
+                        for p in path {v=v.member(&p?)?;}
+                        v
+                    }
+                    _=>return None,
+                };
+                if !self.sc_list_readonly(b,out.kind.collection(),out.kind==ListKind::NodeEntry) {return None}
+                // A declaration in a branch can only qualify if it still has one
+                // source; unknown/other writes above invalidate it.
+                out.dir.id=b;
+                Some(out)
+            }
+            Kind::MemberExpression => {
+                let v=self.sc_listed(self.a().at(n,jt::A),scope,depth+1,work)?;
+                if self.a().computed(n) && v.kind.collection() {v.item()}
+                else {v.member(&self.a().prop_name(n)?)}
+            }
+            Kind::LogicalExpression if self.a().operator(n)=="??" => {
+                let a=self.sc_listed(self.a().at(n,jt::A),scope,depth+1,work)?;
+                let b=self.sc_listed(self.a().at(n,jt::B),scope,depth+1,work)?;
+                if a.kind==ListKind::Parent && b.kind==ListKind::Parent && crate::model::deletion::same_folder(&a.dir,&b.dir) {Some(a)} else {None}
+            }
+            Kind::CallExpression => {
+                let callee=self.a().unwrap(self.a().at(n,jt::A));
+                let args=self.a().list(n,jt::B).to_vec();
+                let native=self.sc_listing_native(callee,scope,0,work);
+                if native.as_ref().is_some_and(|s|is_one(s,&["fs.readdir","fs.readdirSync","fs.promises.readdir","fs/promises.readdir"])) {
+                    if args.is_empty() || args.len()>2 {return None}
+                    let mut dirents=false;
+                    if let Some(&opts)=args.get(1) {
+                        if self.a().kind(opts)!=Kind::ObjectExpression {return None}
+                        for prop in self.a().list(opts,jt::A).to_vec() {
+                            if self.a().kind(prop)!=Kind::Property {return None}
+                            let key=const_key(&self.a(),prop)?;let value=self.a().at(prop,jt::B);
+                            if eq(&key,"withFileTypes") {
+                                if self.a().kind(value)!=Kind::Literal {return None}
+
+                                // Booleans are represented by the literal opcode.
+                                if self.a().op(value)!=jt::L_BOOLEAN {return None}
+                                dirents=self.a().flag(value,jt::VALUE);
+                            } else if eq(&key,"recursive") {
+                                if self.a().op(value)!=jt::L_BOOLEAN || self.a().flag(value,jt::VALUE) {return None}
+                            } else {return None}
+                        }
+                    }
+                    if !self.sc_listing_directory(args[0],scope,0,work) {return None}
+                    let dir=self.sc_delete_path_inner(args[0],scope,0,work,false);
+                    if dir.s.is_none() {return None}
+                    return Some(Listed{dir,kind:if dirents {ListKind::Entries} else {ListKind::Names}})
+                }
+                if self.a().kind(callee)==Kind::MemberExpression && self.a().prop_name(callee).is_some_and(|p|eq(&p,"filter")) {
+                    let v=self.sc_listed(self.a().at(callee,jt::A),scope,depth+1,work)?;
+                    if !v.kind.collection() || args.len()!=1 || !self.a().is_function(args[0]) {return None}
+                    // Every filter receives its mutable source array as its third
+                    // argument, even when its elements are immutable strings.
+                    let fid=self.p.mods[self.m as usize].fid_at[args[0] as usize];
+                    let params=self.p.fns.get(fid as usize)?.params.clone();
+                    if params.len()>2 || params.iter().any(|&p|self.a().kind(p)==Kind::RestElement) {return None}
+                    if v.kind==ListKind::Entries {
+                        for pat in params.iter().take(1) {
+                            for (decl,_) in self.a().pattern_names(*pat) {
+                                let b=self.bind(decl,self.p.fns[fid as usize].scope)?;
+                                if !self.sc_list_readonly(b,false,true) {return None}
+                            }
+                        }
+                    }
+                    return Some(v)
+                }
+                None
+            }
+            _=>None,
+        }
+    }
+
     /// Resolve a deletion's actual path expression and bounded local aliases.
     fn sc_delete_path(&mut self, n: NodeId, scope: ScopeId, depth: usize) -> crate::model::val::Val {
-        self.sc_delete_path_inner(n, scope, depth, &mut 256)
+        self.sc_delete_path_inner(n, scope, depth, &mut 256,true)
     }
-    fn sc_delete_path_inner(&mut self, n: NodeId, scope: ScopeId, depth: usize, work: &mut usize) -> crate::model::val::Val {
+    fn sc_delete_path_inner(&mut self, n: NodeId, scope: ScopeId, depth: usize, work: &mut usize, listings: bool) -> crate::model::val::Val {
         use crate::model::{val::Val, events::path_join, deletion};
         if n == NONE || depth > 8 || *work == 0 { return Val::unknown() }
         *work -= 1;
         let n=self.a().unwrap(n);
         if let Some(s)=self.sc_const_str(n) {return Val::text(s)}
         match self.a().kind(n) {
+            Kind::LogicalExpression if self.a().operator(n)=="??" => {if let Some(v)=if listings { self.sc_listed(n,scope,0,&mut 256) } else {None} {if v.kind==deletion::ListKind::Parent {return v.dir}}}
             Kind::Identifier => {
                 if let Some(b)=self.bind(n,scope) {
-                    let writes:Vec<Write>=self.p.binds[b as usize].writes.iter().filter(|w|!matches!(w,Write::Nothing{..})).cloned().collect();
+                    let writes:Vec<Write>=self.p.binds[b as usize].writes.iter().filter(|w|!matches!(w,Write::Nothing{..})).take(2).cloned().collect();
                     if writes.len()==1 {match &writes[0] {
-                        Write::Init{node,scope,path}|Write::Assign{node,scope,path} if path.is_empty()=>return self.sc_delete_path_inner(*node,*scope,depth + 1, work),
-                        Write::Opaque{node,scope} if self.a().kind(*node)==Kind::ForOfStatement=>return self.sc_delete_path_inner(self.a().at(*node,jt::B),*scope,depth + 1, work),
+                        Write::Init{node,scope,path}|Write::Assign{node,scope,path} if path.is_empty()=>return self.sc_delete_path_inner(*node,*scope,depth + 1, work,listings),
+                        Write::Opaque{node,scope} if self.a().kind(*node)==Kind::ForOfStatement=>return self.sc_delete_path_inner(self.a().at(*node,jt::B),*scope,depth + 1, work,listings),
+                        Write::Param{index:0,..} => {
+                            let fid=self.p.binds[b as usize].fid;
+                            if let Some(call)=self.sc_call_of_arg(self.p.fns[fid as usize].node) {
+                                let callee=self.a().unwrap(self.a().at(call,jt::A));
+                                if self.a().kind(callee)==Kind::MemberExpression && self.a().prop_name(callee).is_some_and(|p|is_one(&p,&["map","forEach","filter"])) {
+                                    let iter=self.a().at(callee,jt::A);
+                                    if self.a().kind(iter)==Kind::CallExpression {
+                                        let outer=self.p.scopes[self.p.fns[fid as usize].scope as usize].parent.unwrap_or(scope);
+                                        let names=self.sc_names(self.a().at(iter,jt::A),outer);
+                                        if names.iter().any(|s|is_one(s,&["glob.sync","glob.globSync","globSync","fast-glob.sync"])) {
+                                            return self.sc_delete_path_inner(iter,outer,depth+1,work,false)
+                                        }
+                                    }
+                                }
+                            }
+                        }
                         _=>{}
                     }}
                 }
             }
             Kind::BinaryExpression if self.a().operator(n)=="+" => {
-                let a=self.sc_delete_path_inner(self.a().at(n,jt::A),scope,depth + 1, work);let b=self.sc_delete_path_inner(self.a().at(n,jt::B),scope,depth + 1, work);return Val::concat(&a,&b)
+                let a=self.sc_delete_path_inner(self.a().at(n,jt::A),scope,depth + 1, work,listings);let b=self.sc_delete_path_inner(self.a().at(n,jt::B),scope,depth + 1, work,listings);return Val::concat(&a,&b)
             }
             Kind::TemplateLiteral => {
                 let qs=self.a().list(n,jt::A).to_vec();let es=self.a().list(n,jt::B).to_vec();let mut v=Val::text(Vec::new());
-                for (k,q) in qs.iter().take(32).enumerate(){v=Val::concat(&v,&Val::text(self.a().s(*q,jt::A).to_vec()));if let Some(e)=es.get(k){v=Val::concat(&v,&self.sc_delete_path_inner(*e,scope,depth + 1, work));}}return v;
+                for (k,q) in qs.iter().take(32).enumerate(){v=Val::concat(&v,&Val::text(self.a().s(*q,jt::A).to_vec()));if let Some(e)=es.get(k){v=Val::concat(&v,&self.sc_delete_path_inner(*e,scope,depth + 1, work,listings));}}return v;
             }
             Kind::MemberExpression => {
+                if let Some(listed)=if listings { self.sc_listed(n,scope,0,&mut 256) } else {None} {if listed.kind==deletion::ListKind::Parent {return listed.dir}}
                 let names=self.sc_names(n,scope);
                 if names.iter().any(|s|is_one(s,&["process.env.HOME","process.env.USERPROFILE"])) {return Val::text(u("~"))}
+                if names.iter().any(|s|eq(s,"process.env.APPDATA")) {return Val::text(u("~/AppData/Roaming"))}
+                if names.iter().any(|s|eq(s,"process.env.LOCALAPPDATA")) {return Val::text(u("~/AppData/Local"))}
             }
             Kind::CallExpression => {
                 let callee=self.a().unwrap(self.a().at(n,jt::A));let args=self.a().list(n,jt::B).to_vec();let names=self.sc_names(callee,scope);
                 if names.iter().any(|s|eq(s,"os.homedir")) {return Val::text(u("~"))}
                 if names.iter().any(|s|is_one(s,&["path.join","path.resolve","path.posix.join","path.win32.join","path.posix.resolve","path.win32.resolve"])) {
-                    let mut v=Val::text(Vec::new());for a in args.iter().take(32){v=path_join(&v,&self.sc_delete_path_inner(*a,scope,depth + 1, work));}return v;
+                    let mut v=Val::text(Vec::new());let mut prefix=true;for a in args.iter().take(32){
+                        let part=if let Some(listed)=if listings { self.sc_listed(*a,scope,0,&mut 256) } else {None} {
+                            if prefix && listed.kind==deletion::ListKind::Name && deletion::exempt_folder(&listed.dir) && deletion::same_folder(&v,&listed.dir) {Val::text(u("<listed-entry>"))}
+                            else if listed.kind==deletion::ListKind::Parent {listed.dir} else {self.sc_delete_path_inner(*a,scope,depth+1,work,listings)}
+                        } else {self.sc_delete_path_inner(*a,scope,depth+1,work,listings)};
+                        v=path_join(&v,&part);prefix &= self.sc_listed(*a,scope,0,&mut 256).is_some_and(|v|v.kind==deletion::ListKind::Parent) || self.sc_listing_directory(*a,scope,0,&mut 256);
+                    }return v;
                 }
-                if names.iter().any(|s|is_one(s,&["path.normalize","String"])) {return args.first().map(|&a|self.sc_delete_path_inner(a,scope,depth + 1, work)).unwrap_or_default()}
-                if names.iter().any(|s|eq(s,"path.dirname")) {let v=args.first().map(|&a|self.sc_delete_path_inner(a,scope,depth + 1, work)).unwrap_or_default();return deletion::parent(&v)}
-                if names.iter().any(|s|is_one(s,&["glob.sync","glob.globSync","globSync","fast-glob.sync"])) {let v=args.first().map(|&a|self.sc_delete_path_inner(a,scope,depth + 1, work)).unwrap_or_default();return deletion::glob_path(&v)}
+                if names.iter().any(|s|is_one(s,&["path.normalize","String"])) {return args.first().map(|&a|self.sc_delete_path_inner(a,scope,depth + 1, work,listings)).unwrap_or_default()}
+                if names.iter().any(|s|eq(s,"path.dirname")) {let v=args.first().map(|&a|self.sc_delete_path_inner(a,scope,depth + 1, work,listings)).unwrap_or_default();return deletion::parent(&v)}
+                if names.iter().any(|s|is_one(s,&["glob.sync","glob.globSync","globSync","fast-glob.sync"])) {let v=args.first().map(|&a|self.sc_delete_path_inner(a,scope,depth + 1, work,listings)).unwrap_or_default();return deletion::glob_path(&v)}
             }
             _=>{}
         }

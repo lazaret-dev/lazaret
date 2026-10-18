@@ -42,10 +42,20 @@ class DeletionTests(unittest.TestCase):
                 args = {"lang":case["lang"]}
                 reasons = _native.call("install_script_risk", args, case["text"])
                 self.assertEqual(REASON in reasons, case["found"], reasons)
+                if case["found"]:
+                    self.assertEqual(_native.call("install_script_severity", {"reasons":reasons}), "CRITICAL")
                 reasons, line = _native.call("import_time_risk", args, case["text"])
                 self.assertEqual(REASON in reasons, case["found"], (reasons,line))
                 if "line" in case:
                     self.assertEqual(line, case["line"], (reasons,line))
+
+    def test_listing_work_is_bounded(self):
+        text="const fs=require('fs'),path=require('path');const D=require('os').homedir()+'/.tool/state';\n"
+        text+="fs.readdirSync(D).map(n=>fs.rmSync(path.join(D,n),{recursive:true}));\n"*1600
+        text+="fs.rmSync(require('os').homedir()+'/Documents',{recursive:true});"
+        self.assertIn(REASON,_native.call("install_script_risk",{"lang":"js"},text))
+        cyclic="const fs=require('fs'),path=require('path');const D=path.join(require('os').homedir(),'.tool',name);const names=fs.readdirSync(D);const name=names[i];fs.rmSync(D,{recursive:true});"
+        self.assertIn(REASON,_native.call("install_script_risk",{"lang":"js"},cyclic))
 
     def test_alias_expansion_is_bounded(self):
         # A tiny alias DAG must not expand exponentially. No source is executed.

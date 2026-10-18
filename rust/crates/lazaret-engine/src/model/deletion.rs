@@ -28,6 +28,206 @@ const CREDENTIALS: &[&str] = &[
     "Library/Keychains", ".npmrc", ".pypirc", ".netrc", ".git-credentials",
 ];
 
+// RA-6 rework: common user-data and credential locations, from categories,
+// never from a sample corpus. The container itself is protected separately.
+const APP_DATA: &[&str] = &[
+    // wallets
+    ".bitcoin",
+    ".bitcoin/testnet3",
+    ".ethereum",
+    ".electrum",
+    ".litecoin",
+    ".dogecoin",
+    ".dashcore",
+    ".zcash",
+    ".monero",
+    ".config/solana",
+    ".config/Exodus",
+    ".config/atomic",
+    ".config/Ledger Live",
+    ".local/share/Bitcoin",
+    ".local/share/Electrum",
+    "Library/Application Support/Bitcoin",
+    "Library/Application Support/Electrum",
+    "Library/Application Support/Ethereum",
+    "Library/Application Support/Exodus",
+    "Library/Application Support/atomic",
+    "Library/Application Support/Ledger Live",
+    "AppData/Roaming/Bitcoin",
+    "AppData/Roaming/Electrum",
+    "AppData/Roaming/Ethereum",
+    "AppData/Roaming/Exodus",
+    "AppData/Roaming/atomic",
+    "AppData/Roaming/Ledger Live",
+    // messengers
+    ".config/discord",
+    "Library/Application Support/discord",
+    "AppData/Roaming/discord",
+    ".config/discordcanary",
+    "Library/Application Support/discordcanary",
+    "AppData/Roaming/discordcanary",
+    ".config/discordptb",
+    "Library/Application Support/discordptb",
+    "AppData/Roaming/discordptb",
+    ".config/Telegram Desktop",
+    "Library/Application Support/Telegram Desktop",
+    "AppData/Roaming/Telegram Desktop",
+    ".config/Slack",
+    "Library/Application Support/Slack",
+    "AppData/Roaming/Slack",
+    ".config/Signal",
+    "Library/Application Support/Signal",
+    "AppData/Roaming/Signal",
+    ".config/WhatsApp",
+    "Library/Application Support/WhatsApp",
+    "AppData/Roaming/WhatsApp",
+    ".config/Element",
+    "Library/Application Support/Element",
+    "AppData/Roaming/Element",
+    ".config/Riot",
+    "Library/Application Support/Riot",
+    "AppData/Roaming/Riot",
+    ".local/share/TelegramDesktop",
+    "Library/Containers/ru.keepcoder.Telegram",
+    "Library/Group Containers/6N38VWS5BX.ru.keepcoder.Telegram",
+    "Library/Containers/net.whatsapp.WhatsApp",
+    "Library/Group Containers/group.net.whatsapp.WhatsApp.shared",
+    "AppData/Local/Packages/5319275A.WhatsAppDesktop_cv1g1gvanyjgm",
+    ".var/app/org.telegram.desktop",
+    ".var/app/org.signal.Signal",
+    ".var/app/com.discordapp.Discord",
+    ".var/app/im.riot.Riot",
+    // password-managers
+    ".config/1Password",
+    ".local/share/1Password",
+    "Library/Application Support/1Password",
+    "AppData/Roaming/1Password",
+    "AppData/Local/1Password",
+    ".config/Bitwarden",
+    ".local/share/Bitwarden",
+    "Library/Application Support/Bitwarden",
+    "AppData/Roaming/Bitwarden",
+    "AppData/Local/Bitwarden",
+    ".config/KeePass",
+    ".local/share/KeePass",
+    "Library/Application Support/KeePass",
+    "AppData/Roaming/KeePass",
+    "AppData/Local/KeePass",
+    ".config/KeePassXC",
+    ".local/share/KeePassXC",
+    "Library/Application Support/KeePassXC",
+    "AppData/Roaming/KeePassXC",
+    "AppData/Local/KeePassXC",
+    ".config/keepassxc",
+    ".local/share/keepassxc",
+    "Library/Application Support/keepassxc",
+    "AppData/Roaming/keepassxc",
+    "AppData/Local/keepassxc",
+    ".password-store",
+    ".gnupg",
+    "Library/Group Containers/2BUA8C4S2C.com.agilebits",
+    "Library/Containers/com.agilebits.onepassword7",
+    ".var/app/com.bitwarden.desktop",
+    ".var/app/org.keepassxc.KeePassXC",
+    // keyrings
+    ".local/share/keyrings",
+    ".pki",
+    "AppData/Roaming/Microsoft/Crypto",
+    "AppData/Roaming/Microsoft/Protect",
+    "AppData/Local/Microsoft/Vault",
+    "AppData/Local/Microsoft/Credentials",
+    "AppData/Roaming/Microsoft/Credentials",
+    // mail
+    ".thunderbird",
+    ".icedove",
+    ".local/share/evolution",
+    ".config/evolution",
+    "Library/Thunderbird",
+    "Library/Containers/com.microsoft.Outlook",
+    "Library/Group Containers/UBF8T346G9.Office",
+    "AppData/Roaming/Thunderbird",
+    "AppData/Local/Microsoft/Outlook",
+    // browsers
+    ".config/opera",
+    ".config/opera-beta",
+    ".config/opera-developer",
+    ".config/vivaldi",
+    ".config/vivaldi-snapshot",
+    ".config/yandex-browser",
+    ".config/microsoft-edge",
+    ".config/google-chrome",
+    ".config/chromium",
+    ".config/BraveSoftware",
+    ".config/librewolf",
+    "Library/Application Support/com.operasoftware.Opera",
+    "Library/Application Support/com.operasoftware.OperaGX",
+    "Library/Application Support/Vivaldi",
+    "Library/Application Support/Arc",
+    "Library/Application Support/Yandex",
+    "Library/Application Support/Chromium",
+    "Library/Application Support/LibreWolf",
+    "Library/Application Support/Firefox",
+    "Library/Application Support/Microsoft Edge",
+    "Library/Application Support/BraveSoftware",
+    "AppData/Roaming/Opera Software",
+    "AppData/Roaming/Vivaldi",
+    "AppData/Roaming/Mozilla",
+    "AppData/Roaming/LibreWolf",
+    "AppData/Local/Vivaldi",
+    "AppData/Local/Yandex",
+    "AppData/Local/Chromium",
+    "AppData/Local/Google",
+    "AppData/Local/Microsoft/Edge",
+    "AppData/Local/BraveSoftware",
+    "AppData/Local/Packages/TheBrowserCompany.Arc_ttt1ap7aakyb4",
+    ".librewolf",
+    ".var/app/org.mozilla.firefox",
+    ".var/app/org.chromium.Chromium",
+    ".var/app/com.google.Chrome",
+    ".var/app/com.brave.Browser",
+    "snap/firefox",
+    "snap/chromium",
+    // credentials
+    ".config/gh",
+    ".cargo/credentials",
+    ".cargo/credentials.toml",
+    ".gem/credentials",
+    ".terraform.d",
+    ".vault-token",
+    ".oci",
+    ".config/doctl",
+    ".config/hub",
+    ".config/helm",
+    ".config/rclone",
+    ".config/sops",
+    ".ansible",
+    ".boto",
+    ".s3cfg",
+    ".gitconfig",
+    ".config/git",
+    ".config/npm",
+    ".config/pypoetry/auth.toml",
+    ".config/containers/auth.json",
+    ".config/op",
+    ".config/age",
+    ".pulumi",
+    ".npm/_auth",
+];
+const CONTAINERS: &[&str] = &[
+    ".local/share",
+    ".local/state",
+    ".config",
+    "AppData/Roaming",
+    "AppData/Local",
+    "AppData/LocalLow",
+    "Library/Application Support",
+    "Library/Containers",
+    "Library/Group Containers",
+    "Library/Preferences",
+    ".var/app",
+    "snap",
+];
+
 fn uncertain(part: &str) -> bool {
     part.chars().any(|c| "*$?[]{}".contains(c) || c == '\u{fffd}' || c.is_control())
 }
@@ -46,6 +246,13 @@ pub fn dangerous(path: &Val) -> bool {
     for h in ["${HOME}", "$HOME", "${USERPROFILE}", "$USERPROFILE", "$env:USERPROFILE", "$env:HOME", "%USERPROFILE%", "%HOME%"] {
         if s == h || s.starts_with(&format!("{h}/")) { s = format!("~{}", &s[h.len()..]); break }
     }
+    for (name, suffix) in [("APPDATA", "AppData/Roaming"), ("LOCALAPPDATA", "AppData/Local")] {
+        for h in [format!("%{name}%"), format!("${name}"), format!("${{{name}}}"), format!("$env:{name}")] {
+            if s.eq_ignore_ascii_case(&h) || (s.len() > h.len() && s.get(..h.len()).is_some_and(|prefix| prefix.eq_ignore_ascii_case(&h)) && s.as_bytes()[h.len()] == b'/') {
+                s = format!("~/{suffix}{}", &s[h.len()..]); break
+            }
+        }
+    }
     let lower = s.to_ascii_lowercase();
     let drive = lower.len() >= 3 && lower.as_bytes()[0].is_ascii_alphabetic() && &lower.as_bytes()[1..3] == b":/";
     let absolute = s.starts_with('/');
@@ -59,6 +266,7 @@ pub fn dangerous(path: &Val) -> bool {
         match p { "" | "." => {}, ".." => { if home && parts.is_empty() { escaped_home = true; } parts.pop(); }, _ => parts.push(p) }
     }
     if parts.is_empty() || parts.iter().all(|x| *x == "*" || *x == "**") { return true }
+    if (absolute || drive) && parts.first().is_some_and(|p| uncertain(p)) { return true }
     let user_parts = if home { &parts[..] }
         else if parts.len() >= 2 && (parts[0].eq_ignore_ascii_case("users") || parts[0] == "home") { &parts[2..] }
         else if parts[0] == "root" && absolute { &parts[1..] }
@@ -74,15 +282,60 @@ pub fn dangerous(path: &Val) -> bool {
     // Preserve the named-cache exception above, including its existing handling
     // of an unknown suffix below a known owner. The whole cache is not exempt.
     if cache_skip > 0 || unknown || escaped_home || user_parts.len() < 2 { return true }
-    if PERSONAL.iter().chain(CREDENTIALS).any(|p| overlaps(user_parts, p)) { return true }
+    if PERSONAL.iter().chain(CREDENTIALS).chain(APP_DATA).any(|p| overlaps(user_parts, p)) { return true }
+    if CONTAINERS.iter().any(|p| user_parts.len() <= p.split('/').count() && overlaps(user_parts, p)) { return true }
     let first = user_parts[0].to_ascii_lowercase();
     if ["onedrive", "dropbox"].iter().any(|p| first == *p || first.starts_with(&format!("{p} - "))
         || first.starts_with(&format!("{p} ("))) { return true }
     if user_parts.iter().any(|part| {
         let part = part.to_ascii_lowercase();
-        part == ".git" || part.ends_with(".photoslibrary") || part.ends_with(".photolibrary")
+        part == ".git" || part == "wallet.dat" || part.ends_with(".kdbx") || part.ends_with(".kdb") || part.ends_with(".photoslibrary") || part.ends_with(".photolibrary")
     }) { return true }
     false
+}
+
+// Positive evidence used only by the deletion readers, never encoded in input text.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ListKind { Names, Entries, Scans, Paths, Name, Entry, NodeEntry, FullPath, Parent }
+impl ListKind {
+    pub fn collection(self) -> bool {matches!(self, Self::Names|Self::Entries|Self::Scans|Self::Paths)}
+}
+#[derive(Clone, Debug)]
+pub struct Listed { pub dir: Val, pub kind: ListKind }
+impl Listed {
+    pub fn item(mut self) -> Option<Self> {
+        self.kind=match self.kind {ListKind::Names=>ListKind::Name,ListKind::Entries=>ListKind::NodeEntry,ListKind::Scans=>ListKind::Entry,ListKind::Paths=>ListKind::FullPath,_=>return None}; Some(self)
+    }
+    pub fn member(mut self, name: &[u32]) -> Option<Self> {
+        self.kind=match (self.kind,pystr::to_string(name).as_str()) {
+            (ListKind::Entry|ListKind::NodeEntry|ListKind::FullPath,"name")=>ListKind::Name,
+            (ListKind::Entry,"path")=>ListKind::FullPath,
+            (ListKind::NodeEntry,"path"|"parentPath")=>ListKind::Parent,
+            _=>return None,
+        };Some(self)
+    }
+}
+pub fn profile_env(name:&[u32]) -> Option<&'static str> {
+    match pystr::to_string(name).as_str() {"HOME"|"USERPROFILE"=>Some("~"),"APPDATA"=>Some("~/AppData/Roaming"),"LOCALAPPDATA"=>Some("~/AppData/Local"),_=>None}
+}
+fn literal_key(path: &Val) -> Option<String> {
+    let mut s=pystr::to_string(path.s.as_ref()?).replace('\\',"/");
+    for h in ["${HOME}","$HOME","${USERPROFILE}","$USERPROFILE","%USERPROFILE%","%HOME%"] {
+        if s==h || s.starts_with(&format!("{h}/")) {s=format!("~{}",&s[h.len()..]);break}
+    }
+    if s.split('/').any(uncertain) {return None}
+    let mut parts=Vec::new();
+    for part in s.split('/') {match part {"."|""=>{},".."=>{parts.pop()?;},_=>parts.push(part)}}
+    Some(format!("{}{}",if s.starts_with('/') {"/"} else {""},parts.join("/")).to_ascii_lowercase())
+}
+pub fn same_folder(a: &Val,b: &Val) -> bool {
+    match (literal_key(a),literal_key(b)) {(Some(a),Some(b))=>a==b,_=>false}
+}
+pub fn exempt_folder(path: &Val) -> bool {
+    let Some(s)=literal_key(path) else {return false};
+    let home=s.starts_with("~/") || s.starts_with("/users/") || s.starts_with("/home/") || s.starts_with("/root/")
+        || (s.len()>3 && s.as_bytes()[0].is_ascii_alphabetic() && s[1..].starts_with(":/users/"));
+    home && !dangerous(path)
 }
 
 pub fn parent(v: &Val) -> Val {
@@ -99,7 +352,7 @@ pub fn parent(v: &Val) -> Val {
 pub fn glob_path(v: &Val) -> Val {
     if v.s.as_ref().is_some_and(|s| { let s=pystr::to_string(s); s.contains("**") && s.split('/').any(|p| p == ".git") }) {
         repositories(v)
-    } else { Val::unknown() }
+    } else { v.clone() }
 }
 
 /// Fixture/build trees contain repositories too; deleting those is ordinary cleanup.
