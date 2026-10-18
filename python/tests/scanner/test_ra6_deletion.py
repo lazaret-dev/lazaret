@@ -5,7 +5,7 @@ import unittest
 from lazaret.scanner import _native
 
 REASON = "deletes the user's files"
-CASES = json.loads((Path(__file__).resolve().parents[3] / "tests/fixtures/ra6-deletion.json").read_text())
+CASES = json.loads((Path(__file__).resolve().parents[3] / "tests/fixtures/ra6-deletion.json").read_text(encoding="utf-8"))
 
 class DeletionTests(unittest.TestCase):
     def test_shared_paths_and_cleanup(self):
