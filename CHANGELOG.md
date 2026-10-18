@@ -1703,6 +1703,29 @@ aggregate):
 
 ### Fixed
 
+- **A download's deadline covers the whole request and holds while a read waits (F-07, the external review of Oct 18; no
+  rule-set change).** On Python's transport (urllib's, and the pool's with `--keepalive`; the native transport has its
+  own total timeout) `lazaret guard`'s deadline for one download (GR-3: 15 minutes, `LAZARET_GUARD_DOWNLOAD_SECONDS`)
+  began only once the response was open, so the connection, TLS, the redirects and the headers were outside it, and it
+  was checked only after `read(64 KiB)` or `read(1 MiB)` returned: a buffered read waits for all its bytes, and a
+  socket's timeout starts again with every byte, so a server that dripped its bytes kept a download going past it (the
+  review's: 100 bytes over a second, a 0.1 s deadline and a 0.2 s socket timeout: 1.007 s), and dripped headers or slow
+  redirects were not held at all. Now the deadline runs from before the request; every connection is made within the
+  time left and watched, and a watchdog shuts it down when the time is up, whatever call waits on it (TLS, the headers,
+  a read); each read of the body waits at most the time left and returns what has come (`read1`); an end of the body the
+  watchdog made is the deadline's error, never a download; and once the time is up no redirect is followed and no
+  connection made, not even its name looked up. `fetch` and `fetch_to_file` raise "the download took over N s" as before
+  (on the native transport too, which said "network error … total time limit"), and the Go proxy still removes what
+  `fetch_to_file` wrote and blocks the module (and leaves no partial zip whatever else stops its scan). A watchdog that
+  cannot start (no thread to be had) fails the download, as a FetchError. On 127.0.0.1 with a 0.2 s deadline and a 0.5 s
+  socket timeout, both paths: a body dripped over 2 s, 2.0 s -> 0.20 s; dripped headers (3.0 s), four hops each 0.15 s
+  late (0.6 s) or with dripped heads (4.3 s), downloads before -> errors at 0.20 s; a server that says nothing, the
+  socket timeout's 0.50 s -> 0.20 s; the review's shape 1.01 s -> 0.10 s; a 64 MiB download at full speed unchanged. The
+  native transport stopped at its own total timeout before and after (0.30 s with a 0.3 s deadline). The pool no longer
+  gives back a connection whose body ended short of its length, nor takes one the watchdog shut down for a stale one
+  (which cost the host's other idle connections). The relays that hand on a file as it comes (pip's and uv's, too large
+  to scan; Go toolchains) keep only their timeout for each read on Python's transport, as before.
+
 - **A tagged template call of a script's wrapper no longer crashes the engine (PANIC-TAGGED; rule set 2.98.0).** John's discovery run of Oct 18: `@epoch32/visage` 1.14.0's `dist/vite/index.js` made the engine panic
   ("index out of bounds" in `jsparse/tree.rs`), so the release was INCOMPLETE with a CRITICAL SC-TRUNCATED; the npm
   package's WASM build aborts on a panic. A tagged template (`` fn`…` ``) runs the function as a call does, and the

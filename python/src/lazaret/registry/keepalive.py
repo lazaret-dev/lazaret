@@ -26,7 +26,15 @@ no header of its own beyond `http.client`'s (`Host`, `Accept-Encoding: identity`
 - **TLS** is `nativenet.tls_context()`: the same verification `urllib` does, with the same
   certificate store and environment (`SSL_CERT_FILE`), and nothing older than TLS 1.2.
 - Connecting (TCP, the tunnel, TLS) is a `network`/`connect` span; each answer is counted under
-  `connections` as `new` or `reused`, so a timed run shows what reuse did."""
+  `connections` as `new` or `reused`, so a timed run shows what reuse did.
+- **A download's deadline** (0.1.9, F-07: the caller's, `guard._Deadline`) is given to `request`: a
+  new connection is made by its `connect` (each address's attempt within the time left, the socket
+  watched, so that its watchdog can shut it down while a call waits on it), a reused one is watched
+  too, and a response read to its end lets the deadline go of its connection before giving it back,
+  or closes it when the deadline has shut it down. A body that ended short of its length is no clean
+  end either: its connection is closed, not given back. A reused connection the watchdog shut down
+  while its answer was awaited is not a stale one: it is not retried, and the host's other idle
+  connections are kept (`deadline.expired()`)."""
 
 import base64
 import http.client
@@ -78,20 +86,25 @@ def proxy_for(url, env_proxies=None):
 
 class Response:
     """What `Pool.request` answers: `status`, `reason`, `headers` (`.get` is case-insensitive), `url`,
-    `read(n)` and `close()`; a context manager. Read to its end, it gives its connection back to
-    the pool; closed before that, it closes the connection."""
+    `read(n)`, `read1(n)` (at most one read of the socket: what has come) and `close()`; a context
+    manager. Read to its end, it gives its connection back to the pool; closed before that, it
+    closes the connection."""
 
-    def __init__(self, pool, key, conn, raw, url):
+    def __init__(self, pool, key, conn, raw, url, deadline=None):
         self._pool, self._key, self._conn, self._raw = pool, key, conn, raw
         self.status, self.reason, self.headers, self.url = raw.status, raw.reason, raw.msg, url
+        self._deadline = deadline
         self._done = False
 
     def _finish(self):
-        """The body has been read to its end (`read` calls this once): the connection goes back to the
-        pool unless the server said it would close it."""
+        """The body has ended (`read` and `read1` call this once): the connection goes back to the
+        pool unless the server said it would close it, the body ended short of its length (a peer
+        that hung up, or a deadline's watchdog that shut the socket down: http.client reads either
+        as an end), or the deadline has shut it down."""
         self._done = True
         conn, self._conn = self._conn, None
-        if self._raw.will_close:
+        released = self._deadline is None or self._deadline.release(conn.sock)
+        if self._raw.will_close or self._raw.length or not released:
             conn.close()
         else:
             self._pool._give(self._key, conn)
@@ -104,6 +117,20 @@ class Response:
         except BaseException:
             self.close()
             raise
+        if self._raw.isclosed():
+            self._finish()
+        return data
+
+    def read1(self, amt=-1):
+        if self._done:
+            return b""
+        try:
+            data = self._raw.read1(amt)
+        except BaseException:
+            self.close()
+            raise
+        if self._raw.length == 0 and not self._raw.isclosed():
+            self._raw.close()                               # (Python before 3.11: read1 leaves a body read to its length open)
         if self._raw.isclosed():
             self._finish()
         return data
@@ -188,7 +215,7 @@ class Pool:
             conn.close()
 
     # ---- connections
-    def _connect(self, scheme, host, port, via, timeout):
+    def _connect(self, scheme, host, port, via, timeout, deadline=None):
         if scheme == "https":
             if via:
                 conn = http.client.HTTPSConnection(via[0], via[1], timeout=timeout, context=self._tls())
@@ -197,18 +224,23 @@ class Pool:
                 conn = http.client.HTTPSConnection(host, port, timeout=timeout, context=self._tls())
         else:
             conn = http.client.HTTPConnection(host, port, timeout=timeout)
+        if deadline is not None:
+            conn._create_connection = deadline.connect      # (the TCP connection, the tunnel and TLS within its time)
         try:
             with timings.span("network", "connect"):
                 conn.connect()
+            if deadline is not None:
+                deadline.using(conn.sock)
         except BaseException:
             conn.close()
             raise
         return conn
 
-    def request(self, url, headers, timeout, via=None):
+    def request(self, url, headers, timeout, via=None, deadline=None):
         """One GET of `url` with `headers` -> Response (any status: the caller decides what a 404 or a
-        redirect means). `via` is `proxy_for`'s answer. OSError and `http.client.HTTPException` are
-        the caller's to turn into its own errors."""
+        redirect means). `via` is `proxy_for`'s answer. `deadline` (guard._Deadline): the download's
+        whole time, which the connection, the request, the answer's head and its body are held to.
+        OSError and `http.client.HTTPException` are the caller's to turn into its own errors."""
         parts = urllib.parse.urlsplit(url)
         scheme, host = parts.scheme, parts.hostname
         if scheme not in ("http", "https") or not host:
@@ -221,15 +253,26 @@ class Pool:
             conn = None if fresh else self._take(key)
             reused = conn is not None
             if conn is None:
-                conn = self._connect(scheme, host, port, via, timeout)
+                conn = self._connect(scheme, host, port, via, timeout, deadline)
             else:
                 conn.timeout = timeout
-                conn.sock.settimeout(timeout)
+                try:
+                    if deadline is None:
+                        conn.sock.settimeout(timeout)
+                    else:
+                        conn.sock.settimeout(deadline.timeout(timeout))
+                        deadline.watch(conn.sock)
+                        deadline.using(conn.sock)
+                except BaseException:
+                    conn.close()
+                    raise
             try:
                 conn.request("GET", target, headers=headers)
                 raw = conn.getresponse()
             except STALE:
                 conn.close()
+                if deadline is not None and deadline.expired():
+                    raise                                   # (the deadline's watchdog shut it down: not stale)
                 if reused and attempt == 0:
                     self._drop(key)                          # what one idle connection found, the others will too
                     with self._lock:
@@ -243,5 +286,5 @@ class Pool:
             with self._lock:
                 self.stats["reused" if reused else "new"] += 1
             timings.add("connections", 0.0, "reused" if reused else "new")
-            return Response(self, key, conn, raw, url)
+            return Response(self, key, conn, raw, url, deadline)
         raise AssertionError("unreachable")                 # (the second attempt raises or returns)

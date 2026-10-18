@@ -659,7 +659,7 @@ class ResourceTests(unittest.TestCase):
     def test_the_default_port_of_each_scheme(self):
         asked = []
 
-        def connect(scheme, host, port, via, timeout):
+        def connect(scheme, host, port, via, timeout, deadline=None):
             asked.append((scheme, host, port))
             raise ConnectionRefusedError
 

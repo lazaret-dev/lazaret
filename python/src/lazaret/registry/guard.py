@@ -144,6 +144,7 @@ import platform
 import re
 import secrets
 import shutil
+import socket
 import socketserver
 import stat
 import subprocess
@@ -372,8 +373,261 @@ class _NativeResponse:
                 raise TooLarge(f"response over {self._max // (1024 * 1024)}MB: {self._shown}") from None
             raise OSError(f"{exc.kind}: {exc}") from None
 
+    read1 = read                                    # (a read of the native stream is one: what has come, at most n)
+
     def close(self):
         self._stream.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.close()
+
+
+class _Deadline:
+    """The time one download has in all (F-07, the external review of Oct 18: GR-3's deadline began once the response
+    was open and was checked only between reads of 64 KiB or 1 MiB, each of which waits for its bytes, a socket's
+    timeout starting again with every byte; a server sending 100 bytes over a second kept a 0.1 s deadline going for
+    1.007 s, and its headers or redirects could be dripped outside it). It runs from before the request (`stop`) through
+    the connections, a proxy's tunnel, TLS, the request, every redirect and the headers to the body's last byte, and it
+    holds while a call waits, not only between calls:
+
+    - every connection is made by `connect` (http.client's `_create_connection`): each address's attempt has at most the
+      time left, and the socket is `watch`ed: a duplicate of it is kept, and when the time is up a watchdog (a timer
+      thread, started with the first socket) shuts it down, so that whatever call waits on it (TLS, the headers, a read)
+      returns at once;
+    - before each read of the body the socket's timeout is cut to the time left (`arm`), and the body is read with read1,
+      which returns what has come rather than wait for a whole chunk.
+
+    Whatever a call returns or raises once the time is up, the download failed: `check` raises the deadline's FetchError
+    ("the download took over N s"), so an end of the body that the watchdog made is never read as the body's end. The
+    native transport is given the time left as its total timeout. A name's DNS lookup cannot be cut short from Python:
+    it has the resolver's own timeouts."""
+
+    def __init__(self, seconds, shown):
+        self.seconds, self.shown = seconds, shown
+        self.stop = time.monotonic() + seconds
+        self._lock = threading.Lock()
+        self._held = None                           # (fd, duplicate) of the connection in use (one at a time)
+        self._sock = None                           # the socket the body is read from
+        self._timer = None
+        self._fired = self._ran_out = self._closed = False
+
+    def left(self):
+        return self.stop - time.monotonic()
+
+    def error(self):
+        return repo.FetchError(f"the download took over {self.seconds} s: {self.shown}")
+
+    def expired(self, exc=None, cut=False):
+        """Is the time up (the watchdog fired, a call cut to the time left timed out, or the clock says so)? With exc
+        and cut: exc is what a call cut to the time left raised."""
+        return self._fired or self._ran_out or time.monotonic() >= self.stop or (
+            cut and isinstance(exc, socket.timeout))
+
+    def check(self, exc=None, cut=False):
+        """FetchError (the deadline's) when the time is up: whatever a call returned or raised, it is no answer."""
+        if self.expired(exc, cut):
+            if cut:
+                self._ran_out = True
+            raise self.error() from None
+
+    def wait(self, timeout):
+        """-> (the timeout for the next call on a socket: `timeout`, or the time left when that is less; whether it
+        was cut). TimeoutError once the time is up. `timeout` None (or http.client's default): the time left."""
+        left = self.left()
+        if self._fired or self._ran_out or left <= 0:
+            raise TimeoutError(f"the download's {self.seconds} s are up")
+        if not isinstance(timeout, (int, float)) or left < timeout:
+            return left, True
+        return timeout, False
+
+    def timeout(self, timeout):
+        return self.wait(timeout)[0]
+
+    def connect(self, address, timeout=None, source_address=None):
+        """socket.create_connection within the time left (http.client's `_create_connection`): nothing once the time is
+        up, not even the name's lookup (a redirect followed after the watchdog ended its body, which urllib reads as its
+        end); each address's attempt gets `wait`'s timeout, and the socket made is watched."""
+        host, port = address
+        error = None
+        self.wait(timeout)
+        for family, kind, proto, _, where in socket.getaddrinfo(host, port, 0, socket.SOCK_STREAM):
+            wait, cut = self.wait(timeout)
+            sock = socket.socket(family, kind, proto)
+            try:
+                sock.settimeout(wait)
+                if source_address:
+                    sock.bind(source_address)
+                sock.connect(where)
+                self.watch(sock)
+            except OSError as exc:
+                sock.close()
+                if cut and isinstance(exc, socket.timeout):
+                    self._ran_out = True
+                error = exc
+                continue
+            except BaseException:
+                sock.close()
+                raise
+            return sock
+        raise error if error is not None else OSError("getaddrinfo returns an empty list")
+
+    def watch(self, sock):
+        """Keep a duplicate of sock (its file descriptor's: the connection itself, whatever wraps or closes the object
+        http.client holds) for the watchdog to shut down; the watchdog starts with the first. A download has one
+        connection at a time, so the duplicate of the one before (a redirect's, read and closed) is closed now rather
+        than held until the end. TimeoutError when the time is up already; OSError when the watchdog's thread cannot
+        start (no download without it: the callers' FetchError)."""
+        fd = sock.fileno()
+        dup = socket.fromfd(fd, sock.family, sock.type, sock.proto)
+        with self._lock:
+            if self._fired or self._closed:
+                dup.close()
+                raise TimeoutError(f"the download's {self.seconds} s are up")
+            if self._timer is None:
+                timer = threading.Timer(min(max(0.0, self.left()), threading.TIMEOUT_MAX), self._fire)
+                timer.daemon = True
+                timer.name = "lazaret-download-deadline"
+                try:
+                    timer.start()
+                except RuntimeError as exc:         # ("can't start new thread")
+                    dup.close()
+                    raise OSError(f"the download's watchdog could not start ({exc})") from None
+                self._timer = timer
+            old, self._held = self._held, (fd, dup)
+            if old is not None:
+                old[1].close()
+
+    def using(self, sock):
+        """The socket the body will be read from (the connection's last: TLS's, for https)."""
+        self._sock = sock
+
+    def release(self, sock):
+        """Let sock go (a connection going back to the pool, whose next request is not this download's) -> False when
+        the watchdog shut it down already, so that it is closed instead."""
+        fd = sock.fileno() if sock is not None else -1
+        with self._lock:
+            if self._held is not None and self._held[0] == fd:
+                self._held[1].close()
+                self._held = None
+            if self._sock is sock:
+                self._sock = None
+            return not self._fired
+
+    def arm(self, timeout):
+        """Before a read of the body: the deadline's FetchError when the time is up; else the socket's timeout cut to
+        the time left -> whether it was cut."""
+        self.check()
+        sock = self._sock
+        if sock is None or sock.fileno() == -1:
+            return False                            # (the response has let its socket go: it reads nothing more)
+        wait, cut = self.wait(timeout)
+        try:
+            sock.settimeout(wait)
+        except OSError:
+            return False
+        return cut
+
+    def _fire(self):
+        with self._lock:                            # (shut down under the lock: `close` cannot close one meanwhile)
+            if self._closed:
+                return
+            self._fired = True
+            if self._held is not None:
+                try:
+                    self._held[1].shutdown(socket.SHUT_RDWR)
+                except OSError:
+                    pass
+
+    def close(self):
+        """The download is over: the watchdog stops and the duplicate is closed."""
+        with self._lock:
+            self._closed = True
+            timer, self._timer = self._timer, None
+            held, self._held = self._held, None
+            self._sock = None
+            if held is not None:
+                held[1].close()
+        if timer is not None:
+            timer.cancel()
+
+
+class _DeadlineConnection:
+    """http.client's connection within a `_Deadline` (`deadline=`): its socket made by the deadline's `connect`, the
+    one it ends with (TLS's, for https) the one its body is read from."""
+
+    def __init__(self, *args, deadline, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._deadline = deadline
+        self._create_connection = deadline.connect
+
+    def connect(self):
+        super().connect()
+        self._deadline.using(self.sock)
+
+
+class _DeadlineHTTPConnection(_DeadlineConnection, http.client.HTTPConnection):
+    pass
+
+
+class _DeadlineHTTPSConnection(_DeadlineConnection, http.client.HTTPSConnection):
+    pass
+
+
+class _DeadlineHandler:
+    """urllib's handler of a scheme, with the connection classes of `_Deadline` for a request that carries one
+    (`lazaret_deadline`; the fetcher's redirect handler carries it to every hop)."""
+
+    def do_open(self, http_class, req, **kwargs):
+        deadline = getattr(req, "lazaret_deadline", None)
+        if deadline is not None:
+            secure = issubclass(http_class, http.client.HTTPSConnection)
+            http_class = _DeadlineHTTPSConnection if secure else _DeadlineHTTPConnection
+            kwargs["deadline"] = deadline
+        return super().do_open(http_class, req, **kwargs)
+
+
+class _HTTPHandler(_DeadlineHandler, urllib.request.HTTPHandler):
+    pass
+
+
+class _HTTPSHandler(_DeadlineHandler, nativenet.HTTPSHandler):
+    pass
+
+
+class _Timed:
+    """A response of urllib's or of the pool's read within its download's `_Deadline` (F-07): `status`, `headers`, `url`;
+    `read(n)` and `read1(n)` (what has come, at most n bytes), each with its socket's timeout cut to the time left and
+    the deadline's FetchError once the time is up, whatever the read returned or raised; `close()` (a context manager)
+    closes the response and ends the deadline."""
+
+    def __init__(self, response, deadline, timeout):
+        self._r, self._deadline, self._timeout = response, deadline, timeout
+        self.status, self.headers, self.url = response.status, response.headers, getattr(response, "url", None)
+
+    def read(self, n=None):
+        return self._call(self._r.read, n)
+
+    def read1(self, n=-1):
+        return self._call(self._r.read1, n)
+
+    def _call(self, read, n):
+        cut = self._deadline.arm(self._timeout)
+        try:
+            data = read() if n is None else read(n)
+        except Exception as exc:
+            self._deadline.check(exc, cut)
+            raise
+        self._deadline.check()
+        return data
+
+    def close(self):
+        try:
+            self._r.close()
+        finally:
+            self._deadline.close()
 
     def __enter__(self):
         return self
@@ -387,7 +641,8 @@ class Fetcher:
     host (a registry served on this machine) or to a host the package
     manager's own settings name as a registry (http_hosts; what comes from
     there is checked against a digest). Redirects are held to the same rule;
-    every response is read in chunks against a byte budget.
+    every response is read in chunks against a byte budget, and a fetch
+    against a deadline for the whole of it (`_Deadline`, F-07).
 
     `auth` (pmsettings.Credentials) holds the credentials the package
     manager's settings give for its registries: a request carries those of
@@ -457,6 +712,9 @@ class Fetcher:
             max_redirections = repo.MAX_REDIRECTS
 
             def redirect_request(self, req, fp, code, msg, headers, newurl):
+                deadline = getattr(req, "lazaret_deadline", None)
+                if deadline is not None and deadline.expired():
+                    raise urllib.error.URLError(f"the download's {deadline.seconds} s are up")   # (no hop after it)
                 newurl = pmsettings.normal_url(newurl)       # (urljoin leaves the dots of an absolute URL)
                 try:
                     fetcher.check(newurl, redirect=True)
@@ -466,9 +724,11 @@ class Fetcher:
                 header = fetcher.auth.header(newurl, from_url=req.full_url) if new is not None else None
                 if header:                                  # (the request's own was not carried over)
                     new.add_unredirected_header("Authorization", header)
+                if new is not None:
+                    new.lazaret_deadline = getattr(req, "lazaret_deadline", None)   # (one deadline for every hop)
                 return new
 
-        handlers = [Redirects, nativenet.HTTPSHandler()]                # (TLS 1.2 at least: nativenet.TLS_FLOOR)
+        handlers = [Redirects, _HTTPHandler(), _HTTPSHandler()]         # (TLS 1.2 at least: nativenet.TLS_FLOOR)
         if _is_loopback(urllib.parse.urlsplit(url).hostname):
             handlers.append(urllib.request.ProxyHandler({}))      # never through a proxy
         return urllib.request.build_opener(*handlers)
@@ -498,11 +758,12 @@ class Fetcher:
                 out.append(nativenet.Credential(host, path, "Authorization", header))
         return out
 
-    def _open_native(self, req, clean, timeout, max_bytes):
+    def _open_native(self, req, clean, timeout, max_bytes, deadline=None):
         """The request through the native transport (NET-1): its hosts the rule for the URL and every redirect (any
         https host for a redirect with `https_redirects`, the first URL being checked already), no proxy for this
-        machine, and its credentials given hop by hop (`_native_credentials`). None, for urllib: a plain-http URL, or
-        one the native transport is not to send (or cannot: a credential outside printable ASCII)."""
+        machine, and its credentials given hop by hop (`_native_credentials`); its total timeout the deadline's time
+        left (download_deadline() without one). None, for urllib: a plain-http URL, or one the native transport is not
+        to send (or cannot: a credential outside printable ASCII)."""
         parts = urllib.parse.urlsplit(clean)
         if parts.scheme != "https" or "@" in parts.netloc or not nativenet.chosen(clean):
             return None
@@ -510,11 +771,14 @@ class Fetcher:
             hosts = None if self.https_redirects else sorted(self.hosts | {netloc(clean)})
         budget = min(max_bytes or NATIVE_STREAM_MAX, NATIVE_STREAM_MAX)
         headers = [(k, v) for k, v in req.header_items() if k.lower() != "authorization"]
+        if deadline is not None:
+            deadline.check()
         try:
             with timings.span("network", "request"):
                 stream = nativenet.open_stream(clean, hosts=hosts, headers=headers, max_bytes=budget,
                                                timeout=timeout, max_redirects=repo.MAX_REDIRECTS,
-                                               total_timeout=download_deadline(),
+                                               total_timeout=download_deadline() if deadline is None else
+                                               max(0.0, deadline.left()) + 0.001,   # (rounded up: it counts ms)
                                                proxy="direct" if _is_loopback(parts.hostname) else None,
                                                credentials=self._native_credentials(req, clean))
         except nativenet.UsePython:
@@ -524,53 +788,88 @@ class Fetcher:
                 raise TooLarge(f"response over {budget // (1024 * 1024)}MB: {clean}") from None
             if exc.kind == "refused":
                 raise repo.FetchError(f"URL error fetching {clean}: redirect blocked: {exc}") from None
+            if deadline is not None:
+                deadline.check()
             raise repo.FetchError(f"network error fetching {clean}: {exc}") from None
         if not 200 <= stream.status < 300:
             stream.close()
             raise self._http_error(stream.status, clean, req)
         return _NativeResponse(stream, clean, budget)
 
-    def open(self, url, accept=None, timeout=repo.DOWNLOAD_TIMEOUT, max_bytes=None):
+    def open(self, url, accept=None, timeout=repo.DOWNLOAD_TIMEOUT, max_bytes=None, deadline=None):
         """The open response for url (the caller closes it); FetchError. `max_bytes`: the most its body may have (the
-        native transport holds it as it reads; the caller holds it too)."""
+        native transport holds it as it reads; the caller holds it too). `deadline` (`_Deadline`, F-07): the time the
+        whole download has, the connections, redirects and headers too; the response of urllib or of the pool is read
+        within it (`_Timed`), and when it is up the error is the deadline's. Without one (the relays, which hand a
+        response on as it comes), urllib's and the pool's have only their timeout for each read, as before."""
         self.check(url)
         req, clean = self.request(url, accept)
-        native = self._open_native(req, clean, timeout, max_bytes)
+        try:
+            return self._open(req, clean, timeout, max_bytes, deadline)
+        except BaseException:
+            if deadline is not None:
+                deadline.close()
+            raise
+
+    def _open(self, req, clean, timeout, max_bytes, deadline):
+        native = self._open_native(req, clean, timeout, max_bytes, deadline)
         if native is not None:
             return native
         if self.pool is not None:
             try:
-                return self._open_kept(req, clean, timeout)
+                resp = self._open_kept(req, clean, timeout, deadline)
+                return resp if deadline is None else _Timed(resp, deadline, timeout)
             except keepalive_.Unsupported:
                 pass                                        # a proxy or URL the pool does not carry: urllib, as before
+        if deadline is not None:
+            req.lazaret_deadline = deadline
         try:
             with timings.span("network", "request"):
-                return self._opener(clean).open(req, timeout=timeout)
+                resp = self._opener(clean).open(req, timeout=timeout)
         except urllib.error.HTTPError as exc:
             exc.close()
+            if deadline is not None:
+                deadline.check()
             raise self._http_error(exc.code, clean, req) from None
         except urllib.error.URLError as exc:
+            if deadline is not None:
+                deadline.check()
             raise repo.FetchError(f"URL error fetching {clean}: {exc.reason}") from exc
-        except OSError as exc:
+        except (OSError, http.client.HTTPException) as exc:
+            if deadline is not None:
+                deadline.check()                            # (a status line cut short by the watchdog: BadStatusLine)
             raise repo.FetchError(f"network error fetching {clean}: {exc}") from exc
+        return resp if deadline is None else _Timed(resp, deadline, timeout)
 
-    def _open_kept(self, req, clean, timeout):
+    def _open_kept(self, req, clean, timeout, deadline=None):
         """The same request through the pool's connections. Redirects are followed here, by the rules of
         `_opener`: at most repo.MAX_REDIRECTS, each target checked by `check`, and a hop carries the headers
-        but only the credentials of its own URL."""
+        but only the credentials of its own URL; every hop within `deadline`."""
         url, headers, visited = clean, dict(req.header_items()), {}
         while True:
             via = None if _is_loopback(urllib.parse.urlsplit(url).hostname) else keepalive_.proxy_for(url)
             try:
                 with timings.span("network", "request"):
-                    resp = self.pool.request(url, headers, timeout, via)
+                    resp = self.pool.request(url, headers, timeout, via, deadline=deadline)
             except (OSError, http.client.HTTPException, UnicodeError) as exc:
+                if deadline is not None:
+                    deadline.check()
                 raise repo.FetchError(f"network error fetching {clean}: {exc}") from exc
             code = resp.status
             if 200 <= code < 300:
                 return resp
-            resp.drain()
-            resp.close()
+            try:
+                if deadline is not None:
+                    deadline.arm(timeout)
+                resp.drain()
+            except (OSError, http.client.HTTPException) as exc:
+                if deadline is not None:
+                    deadline.check()
+                raise repo.FetchError(f"network error fetching {clean}: {exc}") from exc
+            finally:
+                resp.close()
+            if deadline is not None:
+                deadline.check()                            # (a redirect's body the watchdog ended)
             location = resp.headers.get("Location") if code in (301, 302, 303, 307, 308) else None
             if not location:
                 raise self._http_error(code, clean, req)
@@ -592,63 +891,74 @@ class Fetcher:
                 headers["Authorization"] = header
 
     def fetch(self, url, max_bytes=repo.MAX_DOWNLOAD_BYTES, accept=None, timeout=repo.DOWNLOAD_TIMEOUT):
-        """-> (body, response headers). TooLarge for a response over `max_bytes`."""
+        """-> (body, response headers). TooLarge for a response over `max_bytes`; FetchError ("the download took over
+        N s") once download_deadline() has passed, counted from before the request (`_Deadline`: the connection,
+        redirects and headers too, and a read that waits)."""
         clean = pmsettings.shown(url)
         too_big = f"response over {max_bytes // (1024 * 1024)}MB: {clean}"
-        with self.open(url, accept, timeout, max_bytes) as r:
-            try:
-                length = r.headers.get("Content-Length")
-                if length and length.isdigit() and int(length) > max_bytes:
-                    raise TooLarge(too_big)
-                buf = bytearray()
-                stop = time.monotonic() + download_deadline()
-                with timings.span("network", "read"):
-                    while True:
-                        chunk = r.read(64 * 1024)
-                        if not chunk:
-                            break
-                        buf.extend(chunk)
-                        if len(buf) > max_bytes:
-                            raise TooLarge(too_big)
-                        if time.monotonic() > stop:
-                            raise repo.FetchError(f"the download took over {download_deadline()} s: {clean}")
-                if length and length.isdigit() and len(buf) != int(length):
-                    raise repo.FetchError(f"incomplete response ({len(buf)} of {length} bytes): {clean}")
-                return bytes(buf), r.headers
-            except (OSError, http.client.HTTPException) as exc:
-                raise repo.FetchError(f"network error fetching {clean}: {exc}") from exc
+        deadline = _Deadline(download_deadline(), clean)
+        try:
+            with self.open(url, accept, timeout, max_bytes, deadline) as r:
+                try:
+                    length = r.headers.get("Content-Length")
+                    if length and length.isdigit() and int(length) > max_bytes:
+                        raise TooLarge(too_big)
+                    buf = bytearray()
+                    with timings.span("network", "read"):
+                        while True:
+                            chunk = r.read1(64 * 1024)
+                            if not chunk:
+                                break
+                            buf.extend(chunk)
+                            if len(buf) > max_bytes:
+                                raise TooLarge(too_big)
+                            deadline.check()
+                    deadline.check()                        # (an end the watchdog made is not the body's end)
+                    if length and length.isdigit() and len(buf) != int(length):
+                        raise repo.FetchError(f"incomplete response ({len(buf)} of {length} bytes): {clean}")
+                    return bytes(buf), r.headers
+                except (OSError, http.client.HTTPException) as exc:
+                    deadline.check()
+                    raise repo.FetchError(f"network error fetching {clean}: {exc}") from exc
+        finally:
+            deadline.close()
 
     def get(self, url, max_bytes=repo.MAX_DOWNLOAD_BYTES, accept=None, timeout=repo.DOWNLOAD_TIMEOUT):
         return self.fetch(url, max_bytes, accept, timeout)[0]
 
     def fetch_to_file(self, url, path, max_bytes, timeout=repo.DOWNLOAD_TIMEOUT):
         """Write the body of url to `path` (truncated first), as it comes -> (size, its SHA-256 hex). TooLarge past
-        `max_bytes`."""
+        `max_bytes`; the deadline as `fetch`'s. On any error what `path` holds is no download: the caller removes it
+        (GoRelay._scan)."""
         clean = pmsettings.shown(url)
         too_big = f"response over {max_bytes // (1024 * 1024)}MB: {clean}"
         digest, size = hashlib.sha256(), 0
-        with self.open(url, None, timeout, max_bytes) as r, open(path, "wb") as out:
-            try:
-                length = r.headers.get("Content-Length")
-                if length and length.isdigit() and int(length) > max_bytes:
-                    raise TooLarge(too_big)
-                stop = time.monotonic() + download_deadline()
-                with timings.span("network", "read"):
-                    while True:
-                        chunk = r.read(1024 * 1024)
-                        if not chunk:
-                            break
-                        size += len(chunk)
-                        if size > max_bytes:
-                            raise TooLarge(too_big)
-                        digest.update(chunk)
-                        out.write(chunk)
-                        if time.monotonic() > stop:
-                            raise repo.FetchError(f"the download took over {download_deadline()} s: {clean}")
-                if length and length.isdigit() and size != int(length):
-                    raise repo.FetchError(f"incomplete response ({size} of {length} bytes): {clean}")
-            except (OSError, http.client.HTTPException) as exc:
-                raise repo.FetchError(f"network error fetching {clean}: {exc}") from exc
+        deadline = _Deadline(download_deadline(), clean)
+        try:
+            with self.open(url, None, timeout, max_bytes, deadline) as r, open(path, "wb") as out:
+                try:
+                    length = r.headers.get("Content-Length")
+                    if length and length.isdigit() and int(length) > max_bytes:
+                        raise TooLarge(too_big)
+                    with timings.span("network", "read"):
+                        while True:
+                            chunk = r.read1(1024 * 1024)
+                            if not chunk:
+                                break
+                            size += len(chunk)
+                            if size > max_bytes:
+                                raise TooLarge(too_big)
+                            digest.update(chunk)
+                            out.write(chunk)
+                            deadline.check()
+                    deadline.check()                        # (an end the watchdog made is not the body's end)
+                    if length and length.isdigit() and size != int(length):
+                        raise repo.FetchError(f"incomplete response ({size} of {length} bytes): {clean}")
+                except (OSError, http.client.HTTPException) as exc:
+                    deadline.check()
+                    raise repo.FetchError(f"network error fetching {clean}: {exc}") from exc
+        finally:
+            deadline.close()
         return size, digest.hexdigest()
 
     def json(self, url, accept="application/json"):
@@ -4065,6 +4375,9 @@ class GoRelay:
             else:
                 self.ctx.not_checked(check, exc)
             return self.ctx.add(check), None
+        except BaseException:
+            _remove_quietly(spooled)                        # (whatever else stopped it: no half-written zip stays)
+            raise
         if check.blocked:
             os.remove(spooled)
             spooled = None

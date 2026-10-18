@@ -279,9 +279,15 @@ class SourceTests(unittest.TestCase):
         self.assertEqual(stray, [])
 
     def test_a_starred_opener_is_one_the_check_reads(self):
-        # (guard.py builds its opener from a list: the list must hold the handler)
-        guard = (SRC / "registry" / "guard.py").read_text(encoding="utf-8")
-        self.assertIn("handlers = [Redirects, nativenet.HTTPSHandler()]", guard)
+        # (guard.py builds its opener from a list: the list must hold the handler, nativenet's own or, since F-07, the
+        # guard's _HTTPSHandler, which is nativenet's with the download's deadline; so the opener it builds is asked too)
+        from lazaret.registry import guard
+        source = (SRC / "registry" / "guard.py").read_text(encoding="utf-8")
+        self.assertIn("handlers = [Redirects, _HTTPHandler(), _HTTPSHandler()]", source)
+        self.assertTrue(issubclass(guard._HTTPSHandler, nativenet.HTTPSHandler))
+        opener = guard.Fetcher({"registry.invalid"})._opener("https://registry.invalid/x")
+        https = [h for h in opener.handlers if isinstance(h, urllib.request.HTTPSHandler)]
+        self.assertEqual([type(h) for h in https], [guard._HTTPSHandler])
 
 
 if __name__ == "__main__":
