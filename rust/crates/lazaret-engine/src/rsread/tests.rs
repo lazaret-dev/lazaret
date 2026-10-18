@@ -631,7 +631,8 @@ fn ra6_deletion_paths() {
     }
     for body in [r#"std::fs::remove_dir_all("build").unwrap();"#,
                  r#"std::fs::remove_dir_all("dist").unwrap();"#,
-                 r#"std::fs::remove_dir_all("/home/example/.cache/example-package").unwrap();"#] {
+                 r#"std::fs::remove_dir_all("/home/example/.cache/example-package").unwrap();"#,
+                 r#"std::fs::remove_dir_all("/home/example/.tool/state").unwrap();"#] {
         let a = build(body);
         assert!(!has(&all(&a), "deletes the user's files"), "{body}: {a:?}");
     }

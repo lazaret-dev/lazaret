@@ -47,3 +47,22 @@ test('RA-6 npm and Python install hooks are CRITICAL in the npm scanner', () => 
     }
   }
 });
+
+test('RA-6 own folders, protected subtrees, and deleting-call lines', () => {
+  const fixture=JSON.parse(readFileSync(new URL('../../tests/fixtures/ra6-own-folders.json', import.meta.url),'utf8'));
+  for (const c of fixture.paths) {
+    const jp=c.path.startsWith('~') ? "require('os').homedir()+"+JSON.stringify(c.path.slice(1)) : JSON.stringify(c.path);
+    const pp=c.path.startsWith('~') ? "os.path.expanduser('~')+"+JSON.stringify(c.path.slice(1)) : JSON.stringify(c.path);
+    for(const [lang,text] of [['js',"require('fs').rmSync("+jp+",{recursive:true});"],['py',"import os,shutil\nshutil.rmtree("+pp+")"]]) {
+      const reasons=call('install_script_risk',{lang},text);
+      assert.equal(reasons.includes(reason),c.found,`${lang}: ${c.path}: ${reasons}`);
+      if(c.found) assert.equal(call('install_script_severity',{reasons}), 'CRITICAL');
+    }
+  }
+  for(const c of fixture.sources) {
+    assert.equal(call('install_script_risk',{lang:c.lang},c.text).includes(reason),c.found,c.name);
+    const [reasons,line]=call('import_time_risk',{lang:c.lang},c.text);
+    assert.equal(reasons.includes(reason),c.found,c.name);
+    if(c.line !== undefined) assert.equal(line,c.line,c.name);
+  }
+});

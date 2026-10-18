@@ -435,7 +435,8 @@ fn ra6_deletion_paths() {
     }
     for body in [r#"os.RemoveAll("build")"#, r#"os.RemoveAll("dist")"#,
                  r#"p, _ := os.MkdirTemp("", "example-"); os.RemoveAll(p)"#,
-                 r#"os.RemoveAll("/home/example/.cache/example-package")"#] {
+                 r#"os.RemoveAll("/home/example/.cache/example-package")"#,
+                 r#"os.RemoveAll("/home/example/.tool/state")"#] {
         let a = init(body, "\"os\"");
         assert!(!has(&reasons(&a.start), "deletes the user's files"), "{body}: {a:?}");
     }

@@ -36,3 +36,18 @@ class DeletionPackageTests(unittest.TestCase):
                        'setup.py':'from setuptools import setup\nsetup(name="example",version="1.0.0",packages=["ra6pkg"])\n',
                        'ra6pkg/__init__.py':'',path:src}
                 self.check(scan(crate_tgz(files,root='example-1.0.0'),'tgz','sdist'),rule,sev)
+
+    def test_literal_tool_cleanup_is_quiet_in_packages(self):
+        from pathlib import Path
+        fixture = json.loads((Path(__file__).resolve().parents[3] / "tests/fixtures/ra6-own-folders.json").read_text(encoding="utf-8"))
+        for case in fixture["sources"]:
+            if case["found"] or case["lang"] != "js":
+                continue
+            with self.subTest(name=case["name"]):
+                files = {"package.json": json.dumps({"name":"example", "version":"1.0.0", "scripts":{"postinstall":"node clean.js"}}),
+                         "clean.js":case["text"]}
+                result = scan(crate_tgz(files,root="package"),"tgz","npm")
+                self.assertFalse(any(REASON in i["msg"] for i in result["issues"]), result["issues"])
+        for result in [go({"p.go":'package p\nimport "os"\nfunc init(){os.RemoveAll("/home/example/.tool/state")}\n'}),
+                       rust({"build.rs":'fn main(){std::fs::remove_dir_all("/home/example/.tool/state").unwrap();}', "src/lib.rs":"pub fn f(){}"})]:
+            self.assertFalse(any(REASON in i["msg"] for i in result["issues"]), result["issues"])

@@ -5319,8 +5319,10 @@ fn import_time_risk_of(p: &Pack, text: &[u32], lang: Option<&str>, model: Option
             // library posts `ps aux` when it is loaded)
             reasons.push(cat(&[&u("sends what local commands report about the machine over the network ("), head(&what, 40), &u(")")]));
         }
+        // A deletion may already have supplied the reason and its own line.
+        // A harmless local-service send must not claim that reason's location.
         if !reasons.is_empty() {
-            line = Some(line_of(text, at));
+            line = line.or(Some(line_of(text, at)));
         }
     }
     if model.is_some() {
