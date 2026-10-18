@@ -2091,6 +2091,57 @@ aggregate):
   16 listed as before, so no verdict is weaker; the same on every route, native and WebAssembly). Owed:
   John's `bench.py all` (the popular set: a release that ships a checkpoint or a pickle moves; joblib's wheel becomes
   INCOMPLETE for its own `.pkl.bz2`/`.pkl.xz`/`.pkl.lzma` test files).
+- **The text follower reads a function's variable in that function where it is sure of it (FP-GITHUB-SCRIPT; the
+  engine's, for both packages; rule set 2.105.0).** John's run of Oct 18 over vercel/next.js's workflows:
+  the official `actions/github-script` at 3a2844b was SC-IMPORT-RISK CRITICAL on 9 uses ("dist/index.js runs when the
+  action runs (runs.main), and it reads credentials or the whole environment and sends data over the network", line
+  2176, `req.write(data, 'utf8')` in @actions/http-client). Its `dist/index.js` is 2,228,144 characters, past the
+  2,000,000 the supply-chain tree read, so the text follower read it, by names: @actions/exec's `_cloneExecOptions`
+  gives a `result` a child process's environment, and TypeScript's `__importStar` helper, 12 KB on, has a `result` of
+  its own, which was taken for that one; every module imported through the helper then "held the environment", a
+  child's stdout callback's `data` with them, and that `data` was taken for http-client's own `data` parameter.
+  Renaming either `result` made the old engine quiet, and the tree, which reads each name's binding, finds nothing in
+  the same code: a coincidence of names, not a flow. The text follower now asks for the same variable where it can be
+  sure of it. A variable a function declares (`const`, `let`, `var`: a name, a destructuring's, a loop's) and a
+  callback's parameter (`x.on('data', (d) => {…})`, a read's callback, a `.then`) hold what they are given in that
+  function's body, the functions inside it among it, in the calls it makes (the calls of the script's own functions in
+  such a body, read even past the text's first 200) and, by its return, in its callers (`f()`, `this.f()`; and where
+  the old reading reached the same by the name alone, a method's parameter of the variable's name, `this.send(data)`,
+  and a variable of the name an instance's method returns, `const data = s.grab()`), never in another function's
+  variable of the name; but only where
+  the body's end is certain: a brace counter and a JavaScript reading of the body (regular expressions, templates
+  inside templates: `js_block_end`) close it at the same `}`, and no `/` in it is a guess (one after a class's, a
+  function's or an arrow's body or a label's block, after `await`, `yield` or `of`, a regular expression unclosed on
+  its line, an HTML-like comment). Elsewhere (a module's top, an arrow's expression, a body whose end is not certain) a
+  name reaches as before. And a reading that narrowed a name and met any of the follower's limits (the 100 returns,
+  the 200 calls, functions with parameters and matches of each kind, the 5,000 assignments, a pass that still had
+  more to give) reads the text again as before, and what that reading finds is reported (what the narrowing reading
+  finds when it finds nothing): what a narrowed name holds leaves its function only by the paths those lists hold. The external review of Oct 18 found the first
+  version of this fix losing real sends the reading before it found, in three ways: a body ended at a regular
+  expression's `}` after a class's body (with `extends`, a call in it, a static block, a template), a labeled block,
+  or a `break`, `continue`, labeled `break` or `debugger` that a line's end ends; a function returning the environment
+  after 100 others' returns; the call that gives it, or the function given it, past the 200 kept. Each is found now
+  (the environment, `~/.npmrc` and `~/.aws/credentials`, by fetch, `https.request` and axios), at and past each limit,
+  through the follower, past the tree's limit and through the action scan, as the reading before found it. A second
+  external review (Oct 20) found the line terminators U+2028 and U+2029 read as code: after `debugger`, U+2028, then
+  `/}/.test(s)`, both readers took the regular expression for a division and its `}` for the function's end, so their
+  agreeing proved nothing. Both now read ECMAScript's line terminators (LF, CR, U+2028, U+2029: a line comment and a
+  regular expression end at each, and each is a line break to ASI) and white space (NBSP, U+FEFF and every Zs, as
+  well as space, tab, VT and FF) as the grammar does, and a decision that rests on a character they do not model (one
+  outside ASCII, a name's escape, a comment between `break` and its label) makes the end a guess; the end is sure when
+  the JavaScript reading made no guess and the brace counter closes the body at the same `}`. Each such case (U+2028,
+  U+2029, CR and LF after `debugger` and `break`, a line comment each ends, NBSP, U+FEFF and U+3000 before a label, a
+  spread's regular expression) is found through the follower, past the tree's limit and in a text the parser refuses
+  (500 nested brackets), as the reading before found it. On its own
+  this leaves github-script's whole bundle reported: it meets the follower's limits (5,112 assignments, more than the
+  5,000 read), so the follower answers as before, CRITICAL at line 2176, until the tree reads the bundle
+  (BIG-BUNDLE-TAIL); the reduction of its names, and any text that meets no limit, is quiet. Assignments without a
+  keyword, members, Python's names, the 20,000-character reach in a long text and the follower's limits are as before.
+  The whole environment or a credential store really sent stays CRITICAL in every shape tried (a body, a query of its
+  entries, an object it is copied or spread into, a gist on api.github.com, an axios helper, one to three helpers of
+  the script's, a closure, a class's methods, an instance's, a callback, past a brace a regular expression or a
+  template holds): on its own and through the text follower the same answers as before.
+
 - **A download's deadline covers the whole request and holds while a read waits (F-07, the external review of Oct 18; no
   rule-set change).** On Python's transport (urllib's, and the pool's with `--keepalive`; the native transport has its
   own total timeout) `lazaret guard`'s deadline for one download (GR-3: 15 minutes, `LAZARET_GUARD_DOWNLOAD_SECONDS`)

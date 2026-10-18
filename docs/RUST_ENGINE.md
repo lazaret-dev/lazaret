@@ -2459,6 +2459,80 @@ name kept for a module (`const r = module.require; r('http')`) was not that
 module. On the tree a name is its binding: none of these happen, and code
 in a string, or a local object named `process`, is not what it looks like.
 
+**What the text follower still reads, and how it reads a function's names
+(FP-GITHUB-SCRIPT, 0.1.9).** A text over 2,000,000 characters is the text
+follower's whatever its language, and an action's or a CLI's bundle often is:
+actions/github-script's `dist/index.js` (2,228,144) was "reads the whole
+environment and sends data over the network" because @actions/exec's
+`_cloneExecOptions` has a `result` given a child's environment and
+TypeScript's `__importStar` helper, 12 KB on, has a `result` of its own,
+which the follower took for that one (then every module imported through
+the helper, a child's stdout callback's `data`, and @actions/http-client's
+`data` parameter at `req.write(data, 'utf8')`). `flow::local_data_sent_at`
+now gives a variable a function declares (`const`, `let`, `var`: a name, a
+destructuring's, a loop's; `declared_at`) and a callback's parameter (a
+receiver's `.on`/`.then`/`.forEach`… callback, a read's callback and
+`.then`; `callback_scope`) the scope parameters had: the function's body,
+the functions in it among it, where what it holds is read. The function is
+the innermost `_LD_FUNC_RE` sees around the declaration, and its body's end
+must be certain (`sure_block_end`): `ld_block_end` (a brace counter) and
+`js_block_end` close the `{` at the same `}`, and nothing in
+`js_block_end`'s reading was a guess. `js_block_end` reads a body as
+JavaScript does (strings, comments, templates and the code of their `${…}`,
+regular expressions told from divisions by what precedes the `/`: an
+operator, an opening bracket, `return` and its like, a `break`, `continue`
+(and a labeled one) or `debugger` a line's end ends, an
+`if`/`while`/`for`/`with` head's `)`, a block's `}`; a division after a name,
+a literal, `++`, an expression's `}`) and says where it cannot tell: a `/`
+after the `}` of a function's, an arrow's or a class's body or of a label's
+block, after `of`, `yield`, `await` and their like, a regular expression
+with no closing `/` on its line, V8's HTML-like comments (a script's, not a
+module's). Both readers read ECMAScript's line terminators (LF, CR,
+U+2028, U+2029: `js_line_end`; a line comment and a regular expression end
+at each, and each is a line break to ASI) and white space (space, tab, VT,
+FF, NBSP, U+FEFF, every Zs: `js_space`) as the grammar does, and a decision
+on a character `js_block_end` does not model is a guess (`lex_unsure`: one
+outside ASCII where it decides, a reserved word whose name goes on before
+it, `ñreturn`, an escape; a comment between `break` and its label): the
+review of Oct 20 found U+2028 after `debugger` read as code, the `/}/` after
+it as a division and its `}` as the function's end, by both readers, whose
+agreeing then proved nothing. So an end is sure when the JavaScript reading
+made no guess, and the brace counter closes the body at the same `}` (a
+check, not the proof). With no such function or no certain end (a module's
+top, an arrow's expression, a body either reader cannot close or whose end
+is a guess) a name reaches as before. What leaves a scoped function is followed:
+its return reaches its callers (`f()`, `this.f()`), and the calls of the
+script's functions in each scope that holds data (`scoped_calls`: a
+declaration's, a callback's, then each parameter's they give; at most
+`_LD_MAX` a scope and `_DD_MAX_ASSIGNS` in all) give their callees'
+parameters, past the text's first `_LD_MAX` functions and calls that
+`params` and `calls` keep. Where core's reading reached a send by the name
+alone through a method, the narrowing reading reaches it too, and no
+further (`core_near`): a member's call, `this.send(data)`, gives the
+parameter of the variable's name of the function of the method's name, and
+`const data = s.grab()` gives `data` what `grab` returns when that is a
+variable named `data`. The reading takes passes until nothing grows, up to
+four times `_DD_PASSES`. A reading that narrowed a name and met any of
+the follower's limits (`Reading.capped`: the 100 returns, the 200 calls,
+functions with parameters and matches of each kind, the 5,000 assignments,
+a pass that still grew at the last, a `.then` chain past `_DD_THEN_MAX`)
+reads the text again without narrowing, and that reading's answer is
+given (the narrowing one's when it has none): a list a limit cut short may
+not hold the path a
+narrowed name leaves by (the review of Oct 18 lost the 100th return, the
+198th call and the 200th function so, besides the bodies ended at a
+regular expression's `}` after a class body, a labeled block or a `break`
+a line's end ends). github-script's bundle meets those limits, so the
+follower alone reports it as core's reading did; the supply-chain tree,
+which reads each binding, does not. Unchanged: an assignment without a
+keyword, a member (`this.x`), Python's names, the `_LD_NEAR` reach in a
+long text, and the limits (the first `_DD_MAX_ASSIGNS` assignments:
+github-script's bundle has 5,112, the last 133 KB unread); a library's own
+sends reached through its methods (`client.postJson`, `octokit.request`)
+are not followed. On the bundle, which both readings read, the follower
+takes about twice core's time (0.85 to 0.92 s of CPU against 0.42 to 0.46
+s, best of three, twice, on a loaded machine).
+
 **The model.** The pass is jsflow's (§16) with values that carry kinds of
 local data instead of request data (`Sc`: the first read of each kind, in
 the text follower's names — identity, environment, file, report,
