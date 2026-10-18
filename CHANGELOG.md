@@ -1623,6 +1623,14 @@ aggregate):
 
 ### Fixed
 
+- **Conservative address-label comment filtering (D-22; rule set 2.97.0).**
+  Any self-source marker or file-reading capability marker preserves raw text, without requiring a literal
+  script filename. This includes unknown paths, aliases, assembled names and filesystem module access.
+  Python must pass the parser and model budgets before comments/docstrings can be blanked; failures retain raw
+  text. JavaScript retains function/class/method/literal source spans. These are bounded scanner checks,
+  not a claim that arbitrary runtime behavior has been proved absent. Regression cases cover the external
+  review's assembled filename, argv aliases and Python parse/lexer failures.
+
 - **Fetch fallback local checks retain unknown startup readings (D-21; rule set 2.96.0).**
   The reader checks fallback arguments, writes in the current file and unused class methods. These checks
   cannot exclude a `node -r` preload, `NODE_OPTIONS`, an earlier script or another package file replacing

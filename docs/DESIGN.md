@@ -955,7 +955,14 @@ all three engines:
    process's options are sealed, a value only tested (`_ld_tested`) and a
    callback handed to a request (`_ld_arg_spans` skips function values) are
    not data. The service lists (`_EXFIL_SERVICE_RE`, `capture_service`)
-   only label the destination (`_label_sends`) — at import time they and a
+   label sends, and raw IP addresses are independent reasons. D-22's
+   `signs::label_view` blanks comments/docstrings only after the language
+   model reads the text and no self-source or file-reading capability
+   marker occurs. Any file read retains prose regardless of filename
+   spelling, including aliases and assembled paths. Python parse/lex/model
+   failures retain raw text. JavaScript keeps function/class/method/literal
+   source spans. These are conservative scanner checks, not runtime proof
+   (a string's address still counts) — at import time they and a
    public IP address grade the flow (`_import_time_risk`). Gone with it:
    `_import_harvest_at`, `env_copy_serialized_at`, `sends_host_info` and
    `chat_secret_at` (a webhook's secret is now any service's,

@@ -4642,6 +4642,11 @@ pub struct Facts {
     /// the code files it writes in other packages' folders: (the write's
     /// line, the package), in the text's order (D-9)
     pub rewrote: Vec<(usize, PyStr)>,
+    /// (D-22) where a comment is the code's to read, or no comment: the
+    /// spans of its functions, classes and methods (their source is a
+    /// value: `f.toString()`, `String(f)`, `${f}`) and of its literals, as
+    /// the tree reads them, merged and in order
+    pub source_spans: Vec<(usize, usize)>,
 }
 
 /// Why the tree said nothing about a text.
@@ -4829,10 +4834,56 @@ pub fn rewrote(text: &[u32]) -> Option<Vec<(usize, PyStr)>> {
     facts(text).map(|f| f.rewrote.clone())
 }
 
+/// D-22: the spans of a JavaScript text where a comment may be read by its
+/// code, or is no comment (Facts::source_spans); None when the tree did not
+/// read the text.
+pub fn source_spans(text: &[u32]) -> Option<Vec<(usize, usize)>> {
+    facts(text).map(|f| f.source_spans.clone())
+}
+
+/// Facts::source_spans of a tree.
+fn source_spans_of(tree: &crate::jsparse::tree::Tree) -> Vec<(usize, usize)> {
+    let a = Ast(tree);
+    let mut spans: Vec<(usize, usize)> = Vec::new();
+    for id in 0..tree.nodes.len() as NodeId {
+        let kept = match a.kind(id) {
+            Kind::FunctionDeclaration
+            | Kind::FunctionExpression
+            | Kind::ArrowFunctionExpression
+            | Kind::ClassDeclaration
+            | Kind::ClassExpression
+            | Kind::MethodDefinition
+            | Kind::Literal
+            | Kind::TemplateLiteral
+            | Kind::TaggedTemplateExpression
+            | Kind::JSXElement
+            | Kind::JSXFragment
+            | Kind::JSXText => true,
+            // (a method's source begins at its key: `m /* … */ () {}`)
+            Kind::Property => a.is_function(a.at(id, jt::B)),
+            _ => false,
+        };
+        if kept {
+            let n = &tree.nodes[id as usize];
+            spans.push((n.start as usize, n.end as usize));
+        }
+    }
+    spans.sort_unstable();
+    let mut merged: Vec<(usize, usize)> = Vec::with_capacity(spans.len());
+    for (s, e) in spans {
+        match merged.last_mut() {
+            Some(last) if s <= last.1 => last.1 = last.1.max(e),
+            _ => merged.push((s, e)),
+        }
+    }
+    merged
+}
+
 fn facts_here(text: &[u32], dialect: Dialect) -> Result<Facts, Unread> {
     let pack = crate::pack::current();
     let path = u("script.js");
     let tree = supply_tree(text, dialect).map_err(|(line, reason)| Unread::Refused(line, reason))?;
+    let source_spans = source_spans_of(&tree);
     let sup = Rc::new(Supply::new(pack, text));
     let mut cfg = Config::new(&[], &[], &[], &[]);
     cfg.supply = Some(sup.clone());
@@ -4891,7 +4942,7 @@ fn facts_here(text: &[u32], dialect: Dialect) -> Result<Facts, Unread> {
         let at = (at as usize).min(text.len());
         (text[..at].iter().filter(|&&c| c == 0x0A).count() + 1, cat)
     });
-    Ok(Facts { deletions, sent, received, decoded, dropped, rewrote })
+    Ok(Facts { deletions, sent, received, decoded, dropped, rewrote, source_spans })
 }
 
 #[cfg(test)]

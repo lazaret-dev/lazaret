@@ -192,7 +192,14 @@ rust/
                              MAJOR, None for no reasons; not an import-time reason) and a Windows
                              Script Host launcher (runs_wsh: a launch where it runs, a command's
                              start in shell text or an exec call's program in code, its argument
-                             on the same line; a strong install reason), RA-12 / RA-11, 0.1.9
+                             on the same line; a strong install reason), RA-12 / RA-11, 0.1.9;
+                             the address label ("contacts an address typical of data
+                             exfiltration": label_sends_to's, and the raw IP address's, a
+                             reason of its own) read in the code, comments and docstrings
+                             blanked only after language-model success and absence of
+                             self-source/file-reading capability markers (D-22, label_code).
+                             Any file-read marker retains prose regardless of filename;
+                             Python failures retain raw text; JavaScript retains source spans.
     src/received.rs          the received-code detector (spec-driven), downloads/decodes and runs
     src/crossfile.rs         the cross-file follower (_cross_file_received_issues): what each
                              module defines, imports, exports, sets in the environment, emits

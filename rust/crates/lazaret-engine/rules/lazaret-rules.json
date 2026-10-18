@@ -1,6 +1,6 @@
 {
  "format": 1,
- "rule_set": "2.96.0",
+ "rule_set": "2.97.0",
  "source": "lazaret.scanner.core, extracted by scripts/make_rust_tables.py \u2014 do not edit",
  "values": {
   "ALWAYS_PRUNE_DIRS": {
@@ -12814,6 +12814,14 @@
   "_KWARG_RE": {
    "flags": "",
    "re": "\\s*(?!(?:url|uri|file|filename|path|path_or_file|args|cmd|command|src|dst|source|destination)\\s*=)[A-Za-z_]\\w*\\s*=(?!=)"
+  },
+  "_LABEL_FILE_READ_RE": {
+   "flags": "",
+   "re": "(?<![\\w$])(?:open|openSync|readFile(?:Sync)?|createReadStream|read_text|read_bytes|readlines|readline|readinto|readall|read|fs|pathlib|io|builtins|__builtins__|__import__|getattr|exec|eval|Function)(?![\\w$])"
+  },
+  "_LABEL_SELF_READ_RE": {
+   "flags": "",
+   "re": "(?<![\\w$])(?:__doc__|__file__|__filename|__loader__|__spec__|__code__|__cached__|co_consts|f_code|tb_frame|_getframe|currentframe|inspect|linecache|traceback|tokenize|pydoc|get_docstring)(?![\\w$])|\\bhelp\\s*\\(|\\bimportlib(?:\\s*\\.\\s*|_)resources\\b|\\bget_data\\s*\\(|\\bargv\\s*\\[\\s*[01]\\s*\\]|\\bimport\\s*\\.\\s*meta\\b|\\bmodule\\s*\\.\\s*filename\\b|\\brequire\\s*\\.\\s*main\\b|\\bdocument\\s*\\.\\s*(?:currentScript|scripts)\\b|\\b(?:getElementsByTagName|querySelector(?:All)?)\\s*\\(\\s*['\\\"`]script\\b|\\barguments\\s*\\.\\s*callee\\b"
   },
   "_LATER_ID_CONTINUE": {
    "set": [

