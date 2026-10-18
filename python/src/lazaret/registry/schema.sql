@@ -91,7 +91,8 @@ CREATE TABLE IF NOT EXISTS github_candidates (
 
 -- `python -m lazaret.registry.actions --db` (RA-4): the commit each version tag
 -- of an action pointed to when the action scan first saw it, so a tag that
--- moves is reported (SC-ACTION-TAG-MOVED)
+-- moves is reported (SC-ACTION-TAG-MOVED), and whether a release commit only
+-- its tag holds was given SC-ACTION-TAG-ONLY before (FP-IMPOSTOR-TAG)
 CREATE TABLE IF NOT EXISTS action_tags (
     repo       TEXT NOT NULL,            -- owner/repo, lower-cased
     tag        TEXT NOT NULL,            -- an exact version tag (v4.1.0)
@@ -100,8 +101,18 @@ CREATE TABLE IF NOT EXISTS action_tags (
     last_seen  TEXT NOT NULL,
     moved_to   TEXT,                     -- the commit it was seen at since, until the move is accepted
     moved_at   TEXT,
+    tag_only   TEXT,                     -- when SC-ACTION-TAG-ONLY was first given of the tag (FP-IMPOSTOR-TAG)
+    tag_only_sha TEXT,                   -- at which commit (another than sha: a move an older version accepted)
+    moved_from TEXT,                     -- the commit it was at before a move to sha was accepted
+    moved_from_at TEXT,
     PRIMARY KEY (repo, tag)
 );
+
+-- databases created before FP-IMPOSTOR-TAG's columns existed
+ALTER TABLE action_tags ADD COLUMN IF NOT EXISTS tag_only TEXT;
+ALTER TABLE action_tags ADD COLUMN IF NOT EXISTS tag_only_sha TEXT;
+ALTER TABLE action_tags ADD COLUMN IF NOT EXISTS moved_from TEXT;
+ALTER TABLE action_tags ADD COLUMN IF NOT EXISTS moved_from_at TEXT;
 
 GRANT SELECT, INSERT, UPDATE, DELETE ON packages, scans, discovery_cursors, github_candidates TO lazaret_app;
 GRANT SELECT, INSERT, UPDATE, DELETE ON action_tags TO lazaret_app;

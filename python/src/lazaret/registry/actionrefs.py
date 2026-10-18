@@ -20,7 +20,8 @@ itself) is made before a commit is called an imposter, so that a commit GitHub d
 
 - `in`: a branch holds it (`where` names the branch);
 - `out`: every branch was compared, none holds it, and GitHub has the commit: a commit from a fork, reached through
-  the repository's name (SC-ACTION-IMPOSTOR, CRITICAL, in the action scan);
+  the repository's name (SC-ACTION-IMPOSTOR, CRITICAL, in the action scan), unless one of the repository's own
+  version tags holds it (below);
 - `missing`: GitHub has no such commit (the runner would fail on it; the scan says so in a note);
 - `unsettled`: the check could not finish (`why`): the compare budget was spent with branches left, the repository
   has more branches than one page lists, a branch name that cannot go in a URL, no default branch to compare. Never
@@ -44,11 +45,35 @@ SourceError: the pin's commit is unknown, never `in`. GitHub not answering (an H
 is no answer either way: the pin is checked as a commit, as before the question was asked, and the Answer says the
 question failed (`tag_error`); a commit called `out` is then one GitHub's commits endpoint shows as itself.
 
+A commit no branch holds may still be a release: one that was tagged and never merged into a branch, as JavaScript
+actions that build `dist/` only on the release commit often are (John's run of Oct 18: mmastrac/mmm-matrix@3edd85c…,
+held by the lightweight tag v1.0.5 and by none of the repository's 5 branches). So for an `out` answer, and only
+then, the action scan asks whether one of the repository's own exact version tags (v4.1.0; not v4 or latest) points
+to that very commit: `Branches.tags`, `GET /repos/{owner}/{repo}/tags?per_page=100` (each tag's name and
+`commit.sha`, which for an annotated tag is the commit it tags), at most TAG_PAGES pages (a page that is not full is
+the last, so every tag was read; a full last page means more may exist: the Link header is not read), one listing a
+repository for the command (the listings are shared by the Auditors of one command's workflow files), an error's
+included. The outcomes, in the action scan (the pin book's records, below): no exact version tag points to it,
+SC-ACTION-IMPOSTOR (CRITICAL) as before. Two or more exact version tags at the one commit are the shape of tags moved
+onto one commit (actions-cool's), not a release kept by its tag: SC-ACTION-IMPOSTOR whatever the pin book says. Only
+the tags read count, so one found while the listing did not reach every tag may have a second among the rest:
+SC-ACTION-IMPOSTOR as well. Exactly one, every tag read, and the pin book's record of it at this commit carries the
+mark only SC-ACTION-TAG-ONLY writes (`tag_only`: the commit it was given at, this one, and when), made before the
+command began: a note and no finding. Exactly one and no such mark (a first sighting, a record another check wrote, a
+mark that names no commit, no pin book): SC-ACTION-TAG-ONLY (MAJOR: a tag can be moved by whoever can push), and the
+record gets the mark, so that a later command says whether the tag stayed. A tag the pin book saw at another commit,
+or whose move was not accepted, a commit a tag was moved onto and the move accepted (`moved_from`, or a mark at
+another commit than the record's: an older version's accept, which kept no `moved_from`; accepting a move does not
+make a release), a listing that failed or was refused, and a record that could not be read or kept leave the commit
+SC-ACTION-IMPOSTOR, with a note; a commit a tag was moved onto stays so until its record is deleted by hand.
+
 The tags: an exact version tag's commit (v4.1.0; not a floating v4 or latest, which move by design) is recorded the
-first time the scan sees it, in the pin book (`actions.PinBook`, a JSON file of the user's cache directory) or, with
+first time the scan sees it (a use named by it, a pin's comment that names it, a tag that holds an `out` commit), in
+the pin book (`actions.PinBook`, a JSON file of the user's cache directory) or, with
 `--db`, in the registry's database beside its scans (`StoreBook`: the table action_tags). A tag seen later at
 another commit moved: SC-ACTION-TAG-MOVED, MAJOR, and CRITICAL when the commit it moved to is in none of the
-branches. A floating tag moved onto a fork's commit is found by the branch check itself.
+branches. A floating tag moved onto a fork's commit is found by the branch check itself. A record is {sha, first,
+last[, moved: {to, at}][, tag_only: {sha, at}][, moved_from: {sha, at}]} (`sighting`, `accepted`, `mark_of`).
 
 LAZARET_NO_ACTION_BRANCHES=1 turns the branch check off (an offline run, and the test suite's default, as the
 provenance and predecessor checks are off there); the report says that it was not made.
@@ -61,8 +86,9 @@ from collections import namedtuple
 
 from lazaret.registry import sources as _sources
 
-__all__ = ["Answer", "TagObject", "Branches", "StoreBook", "BookError", "sighting", "branch_rank", "enabled",
-           "MAX_COMPARES", "BRANCH_PAGE", "MAX_TAG_DEPTH", "OFF_ENV"]
+__all__ = ["Answer", "TagObject", "Tags", "Branches", "StoreBook", "BookError", "sighting", "accepted", "mark_of",
+           "branch_rank", "enabled",
+           "MAX_COMPARES", "BRANCH_PAGE", "MAX_TAG_DEPTH", "TAG_PAGE", "TAG_PAGES", "OFF_ENV"]
 
 SourceError = _sources.SourceError
 
@@ -73,6 +99,9 @@ MAX_COMPARES = 9
 BRANCH_PAGE = 100
 #: tag objects followed from a pin to the commit it tags at most, the pin's own included (a tag of a tag of ...)
 MAX_TAG_DEPTH = 4
+#: the tags listed of a repository whose commit is `out` (Branches.tags): pages of TAG_PAGE, TAG_PAGES pages at most
+TAG_PAGE = 100
+TAG_PAGES = 3
 #: the compare statuses that mean the branch holds the commit
 HOLDS = ("behind", "identical")
 _STATUSES = ("identical", "ahead", "behind", "diverged")
@@ -86,6 +115,10 @@ Answer = namedtuple("Answer", "state where compared branches why tag_object tag_
 #: a pinned SHA that names an annotated tag's object, not a commit: sha (the pin), tag (the name the object carries),
 #: commit (the commit it tags), depth (the tag objects followed to it, the pin's included)
 TagObject = namedtuple("TagObject", "sha tag commit depth")
+#: a repository's tags as listed (Branches.tags): at, {commit sha: [the names of the tags at it, as listed]} (an
+#: annotated tag at the commit it tags); read, how many were listed; pages, how many pages were read; more, whether it
+#: may have more than were read (the last page read was full)
+Tags = namedtuple("Tags", "at read pages more")
 
 
 def enabled(env):
@@ -115,11 +148,14 @@ class Branches:
     https://api.github.com; the parsed JSON, or None for a 404 or 422 when `missing`); it raises SourceError for an
     answer it cannot use and its own exception when GitHub will answer no more, neither of which is caught here."""
 
-    def __init__(self, get, max_compares=None):
+    def __init__(self, get, max_compares=None, listed=None):
         self._get = get
         self.max_compares = MAX_COMPARES if max_compares is None else max_compares
         self._answers = {}
         self._tags = {}             # (owner, repo, sha) -> TagObject, None (not one) or the SourceError asking raised
+        # (owner, repo) -> Tags, or the SourceError listing them raised; `listed` shares them with other Branches (the
+        # Auditors of one command's workflow files)
+        self._listed = {} if listed is None else listed
         self.compares = 0           # compare calls made in the run
 
     def check(self, owner, repo, sha, pinned=False):
@@ -157,6 +193,48 @@ class Branches:
         if isinstance(got, SourceError):
             raise got
         return got
+
+    def tags(self, owner, repo):
+        """-> the Tags of owner/repo: `GET /repos/{o}/{r}/tags?per_page=100` (each tag's name and `commit.sha`, the
+        commit an annotated tag tags: no call for each tag), then `&page=2` and on while a page is full, TAG_PAGES pages
+        at most; a page that is not full is the last, so every tag was read, and a full last page means the repository
+        may have more (`more`): whether every tag was read is told by a short page, not by the Link header, which is
+        not read. Kept per repository (as `listed` shares them: for the command), an error's included. The scan asks it
+        only for a commit whose answer is `out` (is the commit held by a version tag of the repository?). Raises
+        SourceError for an answer it cannot use; an entry it cannot read is left out (it can only hide a tag, never
+        name one), and the caller's exception when GitHub will answer no more is not caught (nor kept)."""
+        key = (owner.lower(), repo.lower())
+        if key not in self._listed:
+            try:
+                self._listed[key] = self._list_tags(owner, repo)
+            except SourceError as exc:
+                self._listed[key] = exc
+                raise
+        got = self._listed[key]
+        if isinstance(got, SourceError):
+            raise got
+        return got
+
+    def _list_tags(self, owner, repo):
+        base, label = self._base(owner, repo), f"{owner}/{repo}"
+        at, read = {}, 0
+        for page in range(1, TAG_PAGES + 1):
+            what = f"listing the tags of {label}" + (f" (page {page})" if page > 1 else "")
+            listing = self._get(f"{base}/tags?per_page={TAG_PAGE}" + (f"&page={page}" if page > 1 else ""), what)
+            if not isinstance(listing, list):
+                raise SourceError(f"{what}: unexpected answer")
+            read += len(listing)
+            for e in listing:
+                commit = e.get("commit") if isinstance(e, dict) else None
+                sha = commit.get("sha") if isinstance(commit, dict) else None
+                name = e.get("name") if isinstance(e, dict) else None
+                if isinstance(name, str) and name and isinstance(sha, str) and _SHA40_RE.match(sha.lower()):
+                    names = at.setdefault(sha.lower(), [])
+                    if name not in names:
+                        names.append(name)
+            if len(listing) < TAG_PAGE:
+                return Tags(at, read, page, False)
+        return Tags(at, read, TAG_PAGES, True)
 
     def _peel(self, owner, repo, sha):
         base, label = self._base(owner, repo), f"{owner}/{repo}"
@@ -294,19 +372,64 @@ def iso(t):
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(t))
 
 
-def sighting(entry, sha, now):
+#: the scan's time form, iso()'s
+ISO_RE = re.compile(r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$")
+
+
+def mark_of(entry):
+    """A record's SC-ACTION-TAG-ONLY mark (FP-IMPOSTOR-TAG) -> (the commit it was given at, when), or (None, None)
+    for a record without one. A mark that names no commit, or not in the scan's time form, is not one (None, None);
+    one that names a commit other than the record's is returned as it is: the caller takes it for a move onto the
+    record's commit that an accept recorded nowhere (an older version's --accept-moved, whose update of the database's
+    row leaves the mark)."""
+    mark = entry.get("tag_only") if isinstance(entry, dict) else None
+    sha = mark.get("sha") if isinstance(mark, dict) else None
+    at = mark.get("at") if isinstance(mark, dict) else None
+    if not (isinstance(sha, str) and _SHA40_RE.match(sha) and isinstance(at, str) and ISO_RE.match(at)):
+        return None, None
+    return sha, at
+
+
+def _marked(new, sha, stamp):
+    """`new` with SC-ACTION-TAG-ONLY's mark at `sha`: a mark the record already has there is kept (the first time it
+    was given), any other (none, malformed, at another commit) is replaced."""
+    if mark_of(new)[0] != sha:
+        new["tag_only"] = {"sha": sha, "at": stamp}
+    return new
+
+
+def sighting(entry, sha, now, tag_only=False):
     """A tag seen at the commit `sha` at the time `now`: -> (its record after the sighting, the record it was first
-    seen with when it now points elsewhere, else None). A record is {sha, first, last[, moved: {to, at}]}: a tag that
-    moved keeps its first commit (the alert stays until the move is accepted) and says where it went."""
+    seen with when it now points elsewhere, else None). A record is {sha, first, last[, moved: {to, at}][, tag_only:
+    {sha, at}][, moved_from: {sha, at}]}: a tag that moved keeps its first commit (the alert stays until the move is
+    accepted) and says where it went. `tag_only` (FP-IMPOSTOR-TAG): the sighting is SC-ACTION-TAG-ONLY's, of the tag
+    as the one version tag of a commit no branch holds; the record at `sha` keeps the commit and the time it was first
+    given (`tag_only`), the mark a later run's note needs. Any other sighting keeps the record's marks as they are and
+    adds none."""
     stamp = iso(now)
     if entry is None:
-        return {"sha": sha, "first": stamp, "last": stamp}, None
-    if entry["sha"] == sha:
-        kept = {k: v for k, v in entry.items() if k != "moved"}
-        kept["last"] = stamp
-        return kept, None
-    moved = dict(entry, moved={"to": sha, "at": stamp})
-    return moved, dict(moved)
+        new = {"sha": sha, "first": stamp, "last": stamp}
+    elif entry["sha"] == sha:
+        new = {k: v for k, v in entry.items() if k != "moved"}
+        new["last"] = stamp
+    else:
+        moved = dict(entry, moved={"to": sha, "at": stamp})
+        return moved, dict(moved)
+    return (_marked(new, sha, stamp) if tag_only else new), None
+
+
+def accepted(entry, sha, now, tag_only=False):
+    """A tag's record after its present commit `sha` is accepted at `now` (--accept-moved): started again at `sha`.
+    Where the record was at another commit, the commit the tag moved from is kept (`moved_from`: {sha, at}): a commit a
+    tag was moved onto is never taken for a release commit kept by its tag (FP-IMPOSTOR-TAG), accepted or not. At the
+    same commit, the record's marks (`tag_only`, `moved_from`) are kept as they are; `tag_only` as in `sighting`."""
+    stamp = iso(now)
+    new = {"sha": sha, "first": stamp, "last": stamp}
+    if entry is not None and entry.get("sha") != sha:
+        new["moved_from"] = {"sha": entry.get("sha"), "at": stamp}
+    elif entry is not None:
+        new.update({k: entry[k] for k in ("tag_only", "moved_from") if k in entry})
+    return _marked(new, sha, stamp) if tag_only else new
 
 
 class BookError(Exception):
@@ -335,21 +458,29 @@ class StoreBook:
             return None                         # (a row this version did not write: started again)
         return entry
 
-    def see(self, key, sha, now):
+    def record(self, key):
+        """-> the tag's record ({sha, first, last[, moved]}) or None; a database error is a BookError."""
         repo, tag = self._split(key)
         try:
-            entry, was = sighting(self._entry(repo, tag), sha, now)
+            return self._entry(repo, tag)
+        except Exception as exc:                # noqa: BLE001  (as see's)
+            raise BookError(f"the tag {tag} of {repo} could not be read from the registry's database "
+                            f"({type(exc).__name__}: {exc})") from None
+
+    def see(self, key, sha, now, tag_only=False):
+        repo, tag = self._split(key)
+        try:
+            entry, was = sighting(self._entry(repo, tag), sha, now, tag_only)
             self.store.save_action_tag(repo, tag, entry)
         except Exception as exc:                # noqa: BLE001  (sqlite3's, the wire client's, a dropped session)
             raise BookError(f"the tag {tag} of {repo} could not be recorded in the registry's database "
                             f"({type(exc).__name__}: {exc}), so whether it moved was not checked") from None
         return was
 
-    def accept(self, key, sha, now):
+    def accept(self, key, sha, now, tag_only=False):
         repo, tag = self._split(key)
-        stamp = iso(now)
         try:
-            self.store.save_action_tag(repo, tag, {"sha": sha, "first": stamp, "last": stamp})
+            self.store.save_action_tag(repo, tag, accepted(self._entry(repo, tag), sha, now, tag_only))
         except Exception as exc:                # noqa: BLE001
             raise BookError(f"the move of the tag {tag} of {repo} could not be accepted in the registry's database "
                             f"({type(exc).__name__}: {exc})") from None

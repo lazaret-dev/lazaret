@@ -148,6 +148,40 @@ aggregate):
   commit is called that only when GitHub shows it as itself. A 200 that cannot be followed to a commit (a tag of a
   tree, a loop), the rate limit or the call budget leaves the use not checked (exit 3), never a finding and never a
   pass: it is then in no `resolved`, and no pin-mismatch is said of it.
+- **A commit only one of its repository's version tags holds (FP-IMPOSTOR-TAG; RA-4 follow-up, the action scan, no
+  rule-set change).** John's run of Oct 18 over vercel/next.js's workflows had SC-ACTION-IMPOSTOR (CRITICAL) on
+  `mmastrac/mmm-matrix@3edd85c…`: none of its 5 branches holds the commit and it is no tag object, but the
+  lightweight tag v1.0.5 points to it, a release commit tagged and never merged (JavaScript actions often build
+  `dist/` only on the release commit). Now, for a commit every branch was compared with, none holds and GitHub
+  shows, and only then, the scan asks whether exactly one of the repository's own exact version tags (v4.1.0, not
+  v4 or latest; an annotated tag at the commit it tags) points to that commit: `GET /repos/{o}/{r}/tags`, one to
+  three calls (pages of 100), once per repository per command, out of the call budget (so with a tight
+  `--max-calls` a use further on may be left not checked where it was reported before). No such tag:
+  SC-ACTION-IMPOSTOR (CRITICAL) as before. Two or more version tags (annotated or lightweight) at that one commit
+  are the shape of tags moved onto one commit, as in actions-cool's, and stay SC-ACTION-IMPOSTOR whatever the pin
+  book says, with a note and the tags in the finding (`version_tags`, at most 10, and `version_tag_count`). Only
+  the tags read count: one version tag found while the listing did not reach every tag (a full last page) stays
+  CRITICAL, with a note that not every tag was read. The one tag, every tag read, and no SC-ACTION-TAG-ONLY mark on
+  its record from before the command (a first sighting, a record the tag's own use, a pin's comment or an accept
+  wrote, no pin book): **SC-ACTION-TAG-ONLY (MAJOR)**, "the commit is in none of owner/repo's branches …, but the
+  repository's own version tag v1.0.5, and no other, points to it", and the pin book marks the tag at the commit
+  (`tag_only`: the commit and the time). The mark, given at that commit before the command began: a note ("only the tag v1.0.5 of … holds …, none of its 5
+  branches: a release commit kept by its tag, seen at it since …") and no finding. The workflow files of one
+  command are one run: they share its start, the records as they were before it and the listings, so a record one
+  file's audit makes never lowers another's. It stays CRITICAL, with a note, where the tag was seen at another
+  commit or its move was not accepted, where a tag was moved onto the commit and the move accepted (the record keeps
+  the commit it moved from, `moved_from`; a mark given at another commit than the record's says the same of an
+  older version's accept, whose database update leaves the mark: `--accept-moved` silences SC-ACTION-TAG-MOVED,
+  never SC-ACTION-IMPOSTOR, and such a commit stays CRITICAL on every run until the tag's record is deleted by
+  hand, as the README shows for the pin book file, SQLite and Postgres),
+  where the listing failed or was refused (the rate limit, the call budget: the run then stops as before), and where
+  the tag's record could not be read or kept (the use is also incomplete, with the error's text). A pin that names
+  a tag object, and a use named by a tag (floating or not), are checked alike, by the commit that runs; a use whose
+  own tag the pin book found moved is CRITICAL as before, and nothing more is asked. `--accept-moved` takes the
+  tags' present commits as before, and lowers nothing in the run that accepts. The registry's database gains four
+  columns of `action_tags` for the marks (`tag_only`, `tag_only_sha`, `moved_from`, `moved_from_at`), added to an
+  older table when the Store opens it (two processes opening one older SQLite database at once both succeed: a
+  column the other added meanwhile is taken as there).
 - **TypeScript files read in their own dialect by the supply-chain tests (TS-STRIP; rule set 2.93.0).** The hosts
   handed the engine a `.ts`, `.tsx`, `.mts` or `.cts` file's text alone, as JavaScript, and the supply-chain tree
   (the data flow of the import-time, use-time and install-script tests, received code, a dropper, D-9's rewrites,
@@ -1087,7 +1121,8 @@ aggregate):
 - **What a workflow's actions point to, checked online.** `python -m
   lazaret.registry.actions WORKFLOW…` asks GitHub about each `uses:`: a commit, pinned or
   tagged, that none of its repository's branches holds, such as a fork's commit
-  (SC-ACTION-IMPOSTOR; as RA-4 above made it); a version tag that moved since it was first
+  (SC-ACTION-IMPOSTOR; as RA-4 above made it; SC-ACTION-TAG-ONLY, MAJOR, when exactly one of the
+  repository's own version tags holds it, FP-IMPOSTOR-TAG); a version tag that moved since it was first
   seen (SC-ACTION-TAG-MOVED; what was seen is kept in `~/.cache/lazaret/actions-pins.json`);
   a pin whose `# v1.2.3` comment names another commit
   (SC-ACTION-PIN-MISMATCH); and, in the action's own `action.yml`, a Docker image without

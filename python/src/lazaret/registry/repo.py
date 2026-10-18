@@ -6425,10 +6425,39 @@ def _action_tag_table(t=""):
     """DDL of the action tags (RA-4, registry/actionrefs.py; the same for SQLite and Postgres): the commit an action's
     version tag pointed to when the action scan first saw it (`python -m lazaret.registry.actions --db`), by
     repository (owner/repo, lower-cased) and tag; moved_to and moved_at, the commit it was seen at since and when,
-    until the move is accepted; the times are ISO 8601 UTC."""
+    until the move is accepted; tag_only and tag_only_sha, when the scan first gave SC-ACTION-TAG-ONLY of the tag and
+    at which commit (FP-IMPOSTOR-TAG: a later run's note needs it at sha; a mark at another commit than sha says the
+    row was moved by an update that kept no moved_from, an older version's); moved_from and moved_from_at, the commit
+    the tag was at before a move to sha was accepted, and when; the times are ISO 8601 UTC. A table made before the
+    last four is given them (ACTION_TAG_ADDED, Store._init_schema)."""
     return (f"CREATE TABLE IF NOT EXISTS {t}action_tags ("
             f"repo TEXT NOT NULL, tag TEXT NOT NULL, sha TEXT NOT NULL, first_seen TEXT NOT NULL, "
-            f"last_seen TEXT NOT NULL, moved_to TEXT, moved_at TEXT, PRIMARY KEY (repo, tag))")
+            f"last_seen TEXT NOT NULL, moved_to TEXT, moved_at TEXT, tag_only TEXT, tag_only_sha TEXT, "
+            f"moved_from TEXT, moved_from_at TEXT, PRIMARY KEY (repo, tag))")
+
+
+#: action_tags' columns added by FP-IMPOSTOR-TAG, given to a table made before them
+ACTION_TAG_ADDED = ("tag_only", "tag_only_sha", "moved_from", "moved_from_at")
+
+
+def _sqlite_add_columns(cur, table, columns, sqltype="TEXT"):
+    """Give the SQLite table `table` the `columns` it lacks (ALTER TABLE ... ADD COLUMN). Another process opening the
+    same older database at once may add one between the look and the ALTER: its "duplicate column name" error is
+    passed only once the table, read again, has the column; any other error is raised. (Used for action_tags; the
+    older scans.artifacts migration has its own code, as before.)"""
+    import sqlite3
+    have = {row[1] for row in cur.execute(f"PRAGMA table_info({table})")}
+    for column in columns:
+        if column in have:
+            continue
+        try:
+            cur.execute(f"ALTER TABLE {table} ADD COLUMN {column} {sqltype}")
+        except sqlite3.OperationalError as exc:
+            if "duplicate column name" not in str(exc).lower():
+                raise
+            have = {row[1] for row in cur.execute(f"PRAGMA table_info({table})")}
+            if column not in have:
+                raise
 
 
 #: github_candidates' columns, in order (Store.github_candidates' rows are dicts of them)
@@ -6554,7 +6583,9 @@ class Store:
                 ON {self.t}scans(package_id, scanned_at DESC);
                 {_cursor_table(self.t)};
                 {_candidate_table(self.t)};
-                {_action_tag_table(self.t)}""")
+                {_action_tag_table(self.t)};
+                {"; ".join(f"ALTER TABLE {self.t}action_tags ADD COLUMN IF NOT EXISTS {c} TEXT"
+                           for c in ACTION_TAG_ADDED)}""")
             return
         cur = self.conn.cursor()
         serial, jsontype = "INTEGER PRIMARY KEY AUTOINCREMENT", "TEXT"
@@ -6578,6 +6609,7 @@ class Store:
         cur.execute(_cursor_table(self.t))
         cur.execute(_candidate_table(self.t))
         cur.execute(_action_tag_table(self.t))
+        _sqlite_add_columns(cur, f"{self.t}action_tags", ACTION_TAG_ADDED)
         self.conn.commit()
 
     def _pg_call(self, run):
@@ -6787,26 +6819,36 @@ class Store:
             raise
 
     def action_tag(self, repo, tag):
-        """An action tag's record (action_tags, RA-4): {sha, first, last[, moved: {to, at}]}, or None."""
+        """An action tag's record (action_tags, RA-4): {sha, first, last[, moved: {to, at}][, tag_only: {sha, at}]
+        [, moved_from: {sha, at}]}, or None."""
         p1, p2 = self._phs(2)
-        row = self._one(f"SELECT sha, first_seen, last_seen, moved_to, moved_at FROM {self.t}action_tags "
-                        f"WHERE repo={p1} AND tag={p2}", (_db_text(repo), _db_text(tag)))
+        row = self._one(f"SELECT sha, first_seen, last_seen, moved_to, moved_at, tag_only, tag_only_sha, moved_from, "
+                        f"moved_from_at FROM {self.t}action_tags WHERE repo={p1} AND tag={p2}",
+                        (_db_text(repo), _db_text(tag)))
         if not row:
             return None
         entry = {"sha": row[0], "first": row[1], "last": row[2]}
         if row[3]:
             entry["moved"] = {"to": row[3], "at": row[4]}
+        if row[5] or row[6]:
+            entry["tag_only"] = {"sha": row[6], "at": row[5]}
+        if row[7]:
+            entry["moved_from"] = {"sha": row[7], "at": row[8]}
         return entry
 
     def save_action_tag(self, repo, tag, entry):
         """Store an action tag's record (actionrefs.sighting's shape); one idempotent upsert, like every Store write."""
         moved = entry.get("moved") or {}
+        mark = entry.get("tag_only") if isinstance(entry.get("tag_only"), dict) else {}
+        moved_from = entry.get("moved_from") if isinstance(entry.get("moved_from"), dict) else {}
         values = (_db_text(repo), _db_text(tag), entry["sha"], entry["first"], entry["last"], moved.get("to"),
-                  moved.get("at"))
-        sql = (f"INSERT INTO {self.t}action_tags (repo,tag,sha,first_seen,last_seen,moved_to,moved_at) "
-               f"VALUES ({','.join(self._phs(len(values)))}) ON CONFLICT (repo,tag) DO UPDATE SET sha=excluded.sha, "
-               f"first_seen=excluded.first_seen, last_seen=excluded.last_seen, moved_to=excluded.moved_to, "
-               f"moved_at=excluded.moved_at")
+                  moved.get("at"), mark.get("at"), mark.get("sha"), moved_from.get("sha"), moved_from.get("at"))
+        sql = (f"INSERT INTO {self.t}action_tags (repo,tag,sha,first_seen,last_seen,moved_to,moved_at,tag_only,"
+               f"tag_only_sha,moved_from,moved_from_at) VALUES ({','.join(self._phs(len(values)))}) ON CONFLICT "
+               f"(repo,tag) DO UPDATE SET sha=excluded.sha, first_seen=excluded.first_seen, "
+               f"last_seen=excluded.last_seen, moved_to=excluded.moved_to, moved_at=excluded.moved_at, "
+               f"tag_only=excluded.tag_only, tag_only_sha=excluded.tag_only_sha, moved_from=excluded.moved_from, "
+               f"moved_from_at=excluded.moved_from_at")
         self._write(sql, values)
 
     def _write(self, sql, values):

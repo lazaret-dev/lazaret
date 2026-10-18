@@ -1774,13 +1774,14 @@ directory, and `source` says what was read and what was not; SARIF's
 `versionControlProvenance` maps `%SRCROOT%` to the repository at that commit.
 
 `registry/actions.py` asks GitHub about a workflow's `uses:` under the same
-rules: an impostor commit, a version tag that moved since the pin book first
-saw it, a pin comment that names another commit, and the action's own
-`action.yml` (an image without a digest, a composite action's unpinned steps,
-two levels deep). What it could not ask (the rate limit, its call budget, an
-expression in a ref, a private repository) is `incomplete`, and an action not
-checked is not cleared. A project scan does not call it: it needs the
-network, and the offline checks (the engine's `ci_workflow`) are the scan's.
+rules: an impostor commit (or one only a version tag of the repository holds),
+a version tag that moved since the pin book first saw it, a pin comment that
+names another commit, and the action's own `action.yml` (an image without a
+digest, a composite action's unpinned steps, two levels deep). What it could
+not ask (the rate limit, its call budget, an expression in a ref, a private
+repository) is `incomplete`, and an action not checked is not cleared. A
+project scan does not call it: it needs the network, and the offline checks
+(the engine's `ci_workflow`) are the scan's.
 
 An impostor commit (RA-4, `registry/actionrefs.py`, the one helper every
 `uses:` the scan resolves goes through, a workflow's and a composite step's,
@@ -1809,10 +1810,10 @@ scan is (exit 3: the scan's own way, kept apart from the registry's
 action's code is still read. The answers, errors included, are kept per
 (repository, commit) for the run. `LAZARET_NO_ACTION_BRANCHES=1` turns the
 check off (the test suite's default, as the provenance and predecessor checks
-are off there), and the report says it was not made. The cost of a release
-process that tags a commit no branch holds (built files committed on a
-detached head and only the tag pushed) is that its tags read as impostors:
-such a release cannot be told from a moved tag by GitHub's answers alone.
+are off there), and the report says it was not made. A release process that
+tags a commit no branch holds (built files committed on a detached head and
+only the tag pushed) cannot be told from a moved tag by the branches alone;
+such a commit is asked about once more (FP-IMPOSTOR-TAG, below).
 
 A pin may name an annotated tag's object instead of a commit (the RA-4
 follow-up: vercel/next.js pins `actions/github-script@d746ffe…`, the object
@@ -1853,6 +1854,67 @@ a pass; such a pin is in no `resolved`, gets no "no action.yml" note and no
 pin-mismatch. A refusal (`_Stop`) that this use has not said yet stops the run
 as any other does (it and the uses after it are "not checked"), and a use left
 unread because GitHub answers no more always says so.
+
+A commit no branch holds that exactly one of the repository's own exact
+version tags points to is, as far as the tags show, a release commit tagged
+and never merged (FP-IMPOSTOR-TAG: John's run of Oct 18 had
+`mmastrac/mmm-matrix@3edd85c…` CRITICAL, held by the lightweight tag v1.0.5
+and by none of its 5 branches; JavaScript actions often build `dist/` only on
+the release commit). For an `out` answer, and only then, the scan asks
+`Branches.tags`: `GET /repos/{o}/{r}/tags?per_page=100`, whose `commit.sha`
+is the commit an annotated tag tags (no call for each tag, as
+`git/matching-refs/tags`, which names the tag objects, would need), at most
+`TAG_PAGES` (3) pages, a page that is not full meaning every tag was read, a
+full last page that more exist (the Link header is not read): one to three
+calls, once per repository per command (the Auditors of one command's
+workflow files share the listings, `Run`), out of the call budget, so that
+with a tight budget a use further on may be left not checked where the scan
+before FP-IMPOSTOR-TAG reached it. No exact version tag at the commit
+(v4.1.0; a floating v4, latest or nightly does not count) is
+SC-ACTION-IMPOSTOR, CRITICAL, as before. Two or
+more version tags (annotated or lightweight) at that one commit are the shape
+of tags moved onto one commit, as in actions-cool's, not a release kept by its
+tag: CRITICAL whatever the pin book says, the tags named in the finding
+(`version_tags`, at most 10, and `version_tag_count`) and a note. Only the
+tags read count, so one version tag found while the listing did not reach
+every tag (a full last page) may have a second among the rest: CRITICAL too,
+with a note. The one tag, every tag read, is looked up in the pin book, as
+the record was before the command first wrote to it (`Run.before`, shared by
+the command's files): a record at this commit that carries the mark only
+SC-ACTION-TAG-ONLY writes (`tag_only`: the commit it was given at and when,
+`actionrefs.mark_of`), given at this commit before the command began
+(`Run.started`), gives a note and no finding; no such mark (a first
+sighting, a record the tag's own use, a pin's comment or an accept wrote, a
+mark made in this command, one that names no commit, no pin book) gives
+SC-ACTION-TAG-ONLY, MAJOR (a tag can be moved by whoever can push), and the
+record is marked, so that a later command says whether the tag stayed. Only
+that proof lowers it: a tag the pin book saw at another commit, or flagged
+moved, keeps the CRITICAL (the record keeps its first commit and the move), as
+does a commit a tag was moved onto, the move accepted (the record keeps the
+commit it moved from, `moved_from`; a mark given at another commit than the
+record's says the same of an older version's accept, whose update of the
+database's row moves it and leaves the mark: accepting a move silences
+SC-ACTION-TAG-MOVED, never SC-ACTION-IMPOSTOR, as a commit a tag was moved
+onto is not a release commit kept by its tag, and the commit stays CRITICAL
+until the tag's record is deleted by hand: the README gives the one-liners
+for the pin book file, SQLite and Postgres), a listing that failed (an HTTP
+error, a body that cannot be read) or was refused (the rate limit, the call
+budget: the run stops as on any refusal), and a record that could not be read
+or kept (the use `incomplete`, with the error), each with a note. A pin that
+names a tag object and a use named by a tag are checked by the commit that
+runs; a use whose own version tag the pin book found moved is not asked about
+(SC-ACTION-TAG-MOVED and SC-ACTION-IMPOSTOR, CRITICAL, as before).
+`--accept-moved` takes each such tag's present commit as for a use named by
+it, and the run that accepts lowers nothing. In the registry's database the
+marks are the columns `tag_only`, `tag_only_sha`, `moved_from` and
+`moved_from_at` of `action_tags`, given to an older table when the Store
+opens it (`repo._sqlite_add_columns`: a column another process added
+meanwhile, its ALTER failing with "duplicate column name", is taken as there
+once the table read again has it; the older `scans.artifacts` migration keeps
+its own code). An older version's `--accept-moved` over the pin book file
+rewrites the tag's record whole, marks and `moved_from` with it, so a later
+run of this one sees the tag there for the first time: mixing versions over
+one pin book file loses what the newer recorded.
 
 A version tag's commit is recorded the first time it is seen, in the pin book
 (a JSON file in the user's cache) or, with `--db DSN`, in the registry's

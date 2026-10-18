@@ -185,7 +185,12 @@ class FakeGitHub:
         if rest == "":
             return self.js({"full_name": repo.full_name, "default_branch": repo.default, "archived": repo.archived})
         if rest == "/tags":
-            return self.js([{"name": n, "commit": {"sha": repo.tag_commit(n)}} for n in sorted(repo.tags)][:100])
+            # the tags by name, a page at a time (GitHub's default 30 a page, 100 at most); an annotated tag at the
+            # commit it tags, as GitHub lists it
+            per = min(int(query.get("per_page", ["30"])[0]), 100)
+            page = int(query.get("page", ["1"])[0])
+            names = sorted(repo.tags)[(page - 1) * per:page * per]
+            return self.js([{"name": n, "commit": {"sha": repo.tag_commit(n)}} for n in names])
         if rest == "/branches":
             return self.js([{"name": n, "commit": {"sha": s}} for n, s in sorted(repo.branches.items())][:100])
         m = re.match(r"^/git/ref/(tags|heads)/(.+)$", rest)

@@ -289,11 +289,32 @@ the runner runs and which is checked in its place, and the report says which tag
 costs one call (`git/tags`) for each pinned SHA the default branch's compare does not hold, and with
 the branch check off one for each pinned SHA; a tag object's commit then takes up to 9 compares of its
 own after the pin's one with the default branch, so 10 in all. GitHub not answering that call leaves
-the pin checked as a commit, as before. A version tag that points to another commit than when it was
-first seen is SC-ACTION-TAG-MOVED (MAJOR, CRITICAL when the commit it moved to is in none of the
-branches; what was seen is kept in `~/.cache/lazaret/actions-pins.json`, `--pins FILE`, or with
-`--db DSN` in the registry's database, until `--accept-moved`; `LAZARET_NO_ACTION_BRANCHES=1` turns
-the branch check off). It also reports
+the pin checked as a commit, as before. A commit no branch holds that exactly one of the repository's
+own version tags points to (a release commit tagged and never merged, `v1.0.5`, not `v1` or `latest`)
+is SC-ACTION-TAG-ONLY (MAJOR) until a command has given it that finding and the pin book has marked
+the tag there, then a note; it stays SC-ACTION-IMPOSTOR when two or more version tags point to it
+(the shape of tags moved onto one commit), when the tag was seen at another commit or was moved onto
+this one (`--accept-moved` silences SC-ACTION-TAG-MOVED, never this), or when the tags could not all
+be read. Asking costs one to three calls (`GET /repos/{o}/{r}/tags`, pages of 100), once per
+repository per command and only for such a commit; they come out of the call budget, so with a tight
+`--max-calls` a use further on may be left not checked. A version tag that points to another commit
+than when it was first seen is SC-ACTION-TAG-MOVED (MAJOR, CRITICAL when the commit it moved to is
+in none of the branches; what was seen is kept in `~/.cache/lazaret/actions-pins.json`, `--pins
+FILE`, or with `--db DSN` in the registry's database, until `--accept-moved`;
+`LAZARET_NO_ACTION_BRANCHES=1` turns the branch check off). Once a move onto a commit no branch
+holds is accepted, that commit stays SC-ACTION-IMPOSTOR on every run. If you are sure it is the
+release you meant, delete the tag's record by hand, and the next run sees the tag as new (the
+record is keyed by `owner/repo`, lower-cased, and the tag):
+
+```sh
+# the pin book file (or the file --pins names)
+python3 -c 'import json, sys; p, k = sys.argv[1:]; b = json.load(open(p, encoding="utf-8")); del b["tags"][k]; json.dump(b, open(p, "w", encoding="utf-8"), indent=1, sort_keys=True)' ~/.cache/lazaret/actions-pins.json owner/repo@v1.0.5
+# the registry's database (--db): SQLite, then Postgres
+sqlite3 registry.db "DELETE FROM action_tags WHERE repo = 'owner/repo' AND tag = 'v1.0.5'"
+psql "$DSN" -c "DELETE FROM action_tags WHERE repo = 'owner/repo' AND tag = 'v1.0.5'"
+```
+
+It also reports
 `@<sha> # v1.2.3` where the tag names another commit (SC-ACTION-PIN-MISMATCH); and, in the action's own
 `action.yml`, a Docker image without a digest
 (SC-ACTION-DOCKER-UNPINNED; MINOR for one of Docker's official images at a version tag) or a composite

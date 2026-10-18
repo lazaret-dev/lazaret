@@ -179,17 +179,30 @@ class TagTests(Base):
         self.assertIn("is neither a tag nor a branch", rep.notes[0][1])
 
     def test_a_tag_on_a_commit_off_the_branches_is_an_impostor(self):
-        # RA-4: a tag of the repository moved onto (or made for) a commit none of its branches holds: CRITICAL
+        # RA-4: a tag of the repository moved onto a commit none of its branches holds, after the pin book saw it at
+        # a commit of the branches: CRITICAL
         r = release_repo()
         stray = r.commit(r.shas[0], fork=True, files={"action.yml": fx.action_yml()})
+        r.tag("v3.0.0", r.shas[1])
+        self.assertEqual(self.audit(workflow("o/act@v3.0.0"), r, pins=True).findings, [])
         r.tag("v3.0.0", stray)
-        rep = self.audit(workflow("o/act@v3.0.0"), r)
-        self.assertEqual(self.kinds(rep), [("impostor", 7)])
+        rep = self.audit(workflow("o/act@v3.0.0"), r, pins=True)
+        self.assertEqual(self.kinds(rep), [("impostor", 7), ("tag-moved", 7)])
         d = rep.findings[0].detail
         self.assertEqual((d["ref"], d["sha"], d["tag"]), ("v3.0.0", stray, True))
         rule = actions.rule("impostor", d)
         self.assertEqual((rule["id"], rule["sev"]), ("SC-ACTION-IMPOSTOR", "CRITICAL"))
         self.assertIn(f"o/act@v3.0.0 points to the commit {stray}: the commit is not in o/act's branches",
+                      rule["msg"])
+        # FP-IMPOSTOR-TAG: made for that commit, or seen there first (no pin book), the version tag is all that holds
+        # it: MAJOR (SC-ACTION-TAG-ONLY), no longer CRITICAL
+        rep = self.audit(workflow("o/act@v3.0.0"), r)
+        self.assertEqual(self.kinds(rep), [("tag-only", 7)])
+        d = rep.findings[0].detail
+        self.assertEqual((d["ref"], d["sha"], d["tag"], d["recorded"]), ("v3.0.0", stray, "v3.0.0", False))
+        rule = actions.rule("tag-only", d)
+        self.assertEqual((rule["id"], rule["sev"]), ("SC-ACTION-TAG-ONLY", "MAJOR"))
+        self.assertIn(f"o/act@v3.0.0 points to the commit {stray}: the commit is in none of o/act's branches",
                       rule["msg"])
 
     def test_a_tag_on_a_release_branch_is_fine(self):
@@ -706,6 +719,30 @@ class RuleTests(unittest.TestCase):
             self.assertTrue(all(isinstance(rule[k], str) and rule[k] for k in ("msg", "why", "fix", "name", "ref")), kind)
             ids.add(rule["id"])
         self.assertEqual(len(ids), 5)
+
+    def test_the_tag_only_rule_has_what_mk_issue_takes(self):
+        # FP-IMPOSTOR-TAG: a commit no branch holds that only a version tag of the repository holds
+        d = dict(self.D, sha="a" * 40, ref="a" * 40, tag="v1.0.5", branches=1, compared=["main"], recorded=False)
+        rule = actions.rule("tag-only", d)
+        self.assertEqual(sorted(rule), ["fix", "id", "msg", "name", "ref", "sev", "type", "why"])
+        self.assertEqual((rule["id"], rule["sev"], rule["type"]), ("SC-ACTION-TAG-ONLY", "MAJOR", "HOTSPOT"))
+        self.assertTrue(all(isinstance(rule[k], str) and rule[k] for k in ("msg", "why", "fix", "name", "ref")))
+        self.assertTrue(rule["msg"].startswith(f"o/r@{'a' * 40}: the commit is in none of o/r's branches (its one "
+                                               f"branch was compared: main), but the repository's own version tag "
+                                               f"v1.0.5, and no other, points to it"))
+        self.assertIn("keep the pin if it is the release you meant", rule["fix"])
+        # a use named by a tag is told to pin that commit
+        rule = actions.rule("tag-only", dict(d, ref="v1.0.5"))
+        self.assertTrue(rule["msg"].startswith(f"o/r@v1.0.5 points to the commit {'a' * 40}: the commit is in none"))
+        self.assertIn("if it is the release you meant, pin that commit by its SHA", rule["fix"])
+        # an impostor two or more version tags point to says so (the shape of tags moved onto one commit)
+        d = dict(self.CASES["impostor"], **self.D, version_tags=["v1.0.0", "v1.1.0", "v1.2.0", "v1.4.2"],
+                 version_tag_count=5)
+        self.assertTrue(actions.rule("impostor", d)["msg"].endswith(
+            "(each of its 3 branches was compared). 5 version tags of the repository point to it (v1.0.0 … v1.4.2 "
+            "(and 1 more)): the shape of tags moved onto one commit."))
+        d = dict(self.CASES["impostor"], **self.D, version_tags=["v1.0.0"], version_tag_count=1)
+        self.assertTrue(actions.rule("impostor", d)["msg"].endswith("(each of its 3 branches was compared)."))
 
     def test_a_code_finding_carries_the_scans_own_rule(self):
         d = dict(self.D, path="sub", sha="c" * 40, rule="SC-USE-RISK", name="Hostile code the package runs when used",

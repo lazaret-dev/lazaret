@@ -17,7 +17,30 @@ is not pinned. These ask GitHub what each one points to, each action once:
   report says which tag object the pin is (`tag_objects`, and a note). Asking
   (`git/tags/{sha}`) costs a call for each pinned SHA the default branch's
   compare does not hold, and with the branch check off for each pinned SHA; a
-  pin GitHub does not answer it for is checked as a commit, as before.
+  pin GitHub does not answer it for is checked as a commit, as before. A
+  commit no branch holds may be a release that was tagged and never merged
+  (FP-IMPOSTOR-TAG: mmastrac/mmm-matrix@3edd85c…, held by the tag v1.0.5 and
+  by none of its 5 branches): for that answer, and only then, one more
+  question, whether exactly one of the repository's own exact version tags
+  (v4.1.0, not v4 or latest) points to that commit
+  (`GET /repos/{o}/{r}/tags`: one to `actionrefs.TAG_PAGES` calls, once per
+  repository per command, out of the call budget). No such tag:
+  SC-ACTION-IMPOSTOR, CRITICAL. Two or more version tags at that one commit
+  are the shape of tags moved onto one commit (actions-cool's), not a release
+  kept by its tag: CRITICAL whatever the pin book says. One tag found while
+  the listing did not reach every tag (a full last page) may have a second
+  among the rest: CRITICAL as well. The one tag, every tag read, and its
+  record at that commit carries SC-ACTION-TAG-ONLY's own mark, given at that
+  commit before the command began: a note, no finding. No such mark (a first
+  sighting, a record another check wrote, no pin book): SC-ACTION-TAG-ONLY,
+  MAJOR, and the record marked, so that a later command says whether the tag
+  stayed. A tag the pin book saw at another commit (or flagged moved), a
+  commit a tag was moved onto and the move accepted (`moved_from`, or a mark
+  given at another commit: accepting silences SC-ACTION-TAG-MOVED, never
+  this, and the commit stays CRITICAL until its record is deleted by hand), a
+  listing that failed or was refused, a record that could not be read or
+  kept: CRITICAL, with a note. The files of one command share its start, the
+  records as they were before it and the listings (`Run`).
 - **a tag that moved**: a version tag (`v4.1.0`; not the floating `v4`) that
   points to another commit than when it was first seen (the tj-actions shape):
   MAJOR, and CRITICAL when the commit it moved to is in none of the branches.
@@ -60,6 +83,7 @@ official Docker image at one, and a binary one of GitHub's own actions ships
 Windows), where any strong finding of their code still counts in full.
 """
 
+import copy
 import json
 import os
 import re
@@ -75,7 +99,8 @@ from lazaret.registry import sources as _sources
 from lazaret.scanner import core as _core
 from lazaret.scanner import ghworkflow
 
-__all__ = ["Finding", "Report", "PinBook", "Auditor", "Use", "parse_use", "audit_text", "rule", "default_pins_path"]
+__all__ = ["Finding", "Report", "PinBook", "Run", "Auditor", "Use", "parse_use", "audit_text", "rule",
+           "default_pins_path"]
 
 SourceError = _sources.SourceError
 
@@ -89,6 +114,7 @@ MAX_WORKFLOW_BYTES = 2 * 1024 * 1024
 MAX_CODE_SCANS = 60         # actions' archives fetched and scanned in one run (N-4)
 MAX_CODE_BYTES = 1024 ** 3  # bytes of those archives in one run
 MAX_CODE_FINDINGS = 20      # findings reported for one action's code; the rest are counted in a note
+VERSION_TAGS_LISTED = 10    # version tags named in an impostor's detail (FP-IMPOSTOR-TAG); the rest are counted
 #: the severities that make the command exit 1 (a MINOR finding is listed only)
 COUNTED = ("MAJOR", "CRITICAL", "BLOCKER")
 #: weak findings of an action's code that are MINOR in GitHub's own actions (ghworkflow.FIRST_PARTY): the tools they
@@ -123,6 +149,22 @@ def _iso(t):
 def _exact_version(tag):
     """A tag that names one release (v4.1.0), as opposed to a floating one (v4, latest) that moves by design."""
     return bool(_EXACT_VERSION_RE.match(tag))
+
+
+def _version_order(tag):
+    """A sort key of exact version tags: by their numbers (compared as digit strings: no int of any length), a
+    pre-release before its release, then by name."""
+    m = re.match(r"^v?(\d+)\.(\d+)\.(\d+)(.*)$", tag)
+    if not m:
+        return ((), True, tag, tag)
+    nums = tuple((len(g.lstrip("0")), g.lstrip("0")) for g in m.groups()[:3])
+    return (nums, m.group(4) == "", m.group(4), tag)
+
+
+def _tag_span(names, count):
+    """Version tags for a message: a few named, more as the first … the last of those listed."""
+    shown = ", ".join(names) if len(names) <= 3 else f"{names[0]} … {names[-1]}"
+    return shown + (f" (and {count - len(names)} more)" if count > len(names) else "")
 
 
 def _comment_tag(comment):
@@ -206,16 +248,22 @@ class PinBook:
     def key(owner, repo, tag):
         return f"{owner.lower()}/{repo.lower()}@{tag}"
 
-    def see(self, key, sha, now):
+    def record(self, key):
+        """-> the tag's record ({sha, first, last[, moved]}), or None."""
+        entry = self.entries.get(key)
+        return copy.deepcopy(entry) if entry is not None else None
+
+    def see(self, key, sha, now, tag_only=False):
         """Records a sighting. -> the entry the tag was first seen with when it now
-        points elsewhere, else None (actionrefs.sighting)."""
-        self.entries[key], was = _refs.sighting(self.entries.get(key), sha, now)
+        points elsewhere, else None (actionrefs.sighting; `tag_only`: SC-ACTION-TAG-ONLY's)."""
+        self.entries[key], was = _refs.sighting(self.entries.get(key), sha, now, tag_only)
         self.dirty = True
         return was
 
-    def accept(self, key, sha, now):
-        """Takes the tag's present commit as the one it is meant to have."""
-        self.entries[key] = {"sha": sha, "first": _iso(now), "last": _iso(now)}
+    def accept(self, key, sha, now, tag_only=False):
+        """Takes the tag's present commit as the one it is meant to have (actionrefs.accepted:
+        the commit it moved from is kept)."""
+        self.entries[key] = _refs.accepted(self.entries.get(key), sha, now, tag_only)
         self.dirty = True
 
     def save(self):
@@ -290,24 +338,44 @@ class _Resolution:
         self.stopped = False        # the branch check was refused (_Stop), and said so in `unsettled`
 
 
+class Run:
+    """What the Auditors of one command share, over its workflow files and with one pin book (FP-IMPOSTOR-TAG):
+    `started`, the command's start (the first Auditor's clock: a tag's `tag_only` mark made before it is an earlier
+    command's); `before`, each tag's record as it was before the command first wrote to it (Auditor._book_record);
+    `listed`, the repositories' tag listings (actionrefs.Branches.tags: one per repository for the command). An Auditor
+    made without one has its own: the run is then that Auditor's."""
+
+    def __init__(self):
+        self.started = None
+        self.before = {}
+        self.listed = {}
+
+
 class Auditor:
     """Asks GitHub about `uses:` values. `http` is `sources.Client`'s network
-    seam (tests give it fixed answers); `pins` a PinBook or None."""
+    seam (tests give it fixed answers); `pins` a PinBook or None; `run` the Run
+    the command's other Auditors share (one is made when it is not given)."""
 
-    def __init__(self, env=None, http=None, pins=None, max_calls=None, now=None, accept_moved=False, code=True):
+    def __init__(self, env=None, http=None, pins=None, max_calls=None, now=None, accept_moved=False, code=True,
+                 run=None):
         env = os.environ if env is None else env
         token = _sources._token("github", env)
         self.client = _sources.Client("github", token=token, http=http)
         self.max_calls = max_calls if max_calls is not None else (CALLS_TOKEN if token else CALLS_ANONYMOUS)
         self.pins, self.accept_moved = pins, accept_moved
         self.now = now if now is not None else time.time
+        # the command's start, the records as they were before it wrote to them, the tag listings (FP-IMPOSTOR-TAG)
+        self.run = run if run is not None else Run()
+        if self.run.started is None:
+            self.run.started = _iso(self.now())
+        self._started, self._before = self.run.started, self.run.before
         self.report = Report()
         self.token = bool(token)
         self.stopped = None
         # RA-4: is each commit in its repository's branches (actionrefs.Branches; its answers kept per repository
         # and commit for the run); LAZARET_NO_ACTION_BRANCHES=1 turns it off
         self.branch_check = _refs.enabled(env)
-        self.branches = _refs.Branches(self._json)
+        self.branches = _refs.Branches(self._json, listed=self.run.listed)
         self._memo = {}
         self._done = {}
         self._actions = {}
@@ -449,16 +517,146 @@ class Auditor:
             return None
         key = PinBook.key(use.owner, use.repo, use.ref)
         try:
-            if self.accept_moved:
-                self.pins.accept(key, res.sha, self.now())
-                return None
-            was = self.pins.see(key, res.sha, self.now())
+            was = self._book_write(key, res.sha)
         except _refs.BookError as exc:
             res.unsettled.append(str(exc))
             return None
         if was is None:
             return None
         return {"tag": use.ref, "was": was["sha"], "now": res.sha, "first": was["first"]}
+
+    def _book_record(self, key):
+        """The pin book's record of the tag `key` as it was before this run first wrote to it: a dict, None, or the
+        BookError reading it raised (asked once). Taken before each of the run's writes, so that a record made (or a
+        move cleared) earlier in the run is never taken for one an earlier run left."""
+        if key not in self._before:
+            try:
+                entry = self.pins.record(key)
+            except _refs.BookError as exc:
+                entry = exc
+            self._before[key] = copy.deepcopy(entry) if isinstance(entry, dict) else entry
+        return self._before[key]
+
+    def _book_write(self, key, sha, tag_only=False):
+        """A sighting of the tag `key` at `sha` in the pin book, the record before it kept first (_book_record); with
+        --accept-moved, the tag's present commit is taken as the one it is meant to have (PinBook.accept, which keeps
+        the commit it moved from). `tag_only`: SC-ACTION-TAG-ONLY's sighting, which marks the record (`tag_only`).
+        -> the record it was first seen with when it now points elsewhere, else None. Raises BookError."""
+        self._book_record(key)
+        if self.accept_moved:
+            self.pins.accept(key, sha, self.now(), tag_only=tag_only)
+            return None
+        return self.pins.see(key, sha, self.now(), tag_only=tag_only)
+
+    def _held_by_tag(self, use, res, answer):
+        """RA-4's `out` answer (FP-IMPOSTOR-TAG): does exactly one of the repository's own exact version tags point to
+        the commit res.sha (actionrefs.Branches.tags: one listing a repository for the command)? -> ("impostor",
+        extra) when that is not proven, or the tag is not known to have stayed: the commit is an impostor (CRITICAL;
+        `extra`, for its detail, names the version tags found at it), and a note says why where tags were found or
+        could not all be read; ("tag-only", detail) when the one tag's record at the commit has no SC-ACTION-TAG-ONLY
+        mark from before the command (a first sighting, a record `_tag_seen`, `_comment_findings` or an accept wrote,
+        a mark made in this command, one that names no commit), or there is no pin book: MAJOR, and the record marked
+        (`tag_only`: this commit and the time), so that a later command says whether the tag stayed; ("held", note)
+        when the record carries that mark, given at this commit before the command began, with no move flagged and
+        none accepted onto it (no finding). A mark given at another commit than the record's is a move onto it that
+        an accept recorded nowhere (an older version's, whose database update leaves the mark): CRITICAL. Two or more
+        version tags at one commit no branch holds are the shape of tags moved onto one commit (the actions-cool
+        shape), never a release commit kept by its tag: CRITICAL whatever the pin book says. One found while the
+        listing did not reach every tag (a full last page) may have a second among those not read: CRITICAL too. A
+        record whose commit a tag was moved onto, the move accepted (`moved_from`), is CRITICAL: accepting a move
+        silences SC-ACTION-TAG-MOVED, never this. A refusal (_Stop: the rate limit, the call budget) is a note here
+        as well; GitHub answering no more (self.stopped) then leaves this use and the rest of the run "not checked",
+        as any refusal does (_audit_use, audit)."""
+        label, short = f"{use.owner}/{use.repo}", res.sha[:12]
+        stands = "the commit is reported as in none of the branches"
+        try:
+            listed = self.branches.tags(use.owner, use.repo)
+        except _Stop as exc:
+            self.stopped = self.stopped or str(exc)         # (never swallowed: the run stops on it as on any refusal)
+            res.notes.append(f"whether a version tag of {label} points to {short} was not asked ({exc}): {stands}")
+            return "impostor", {}
+        except SourceError as exc:
+            res.notes.append(f"whether a version tag of {label} points to {short} could not be asked ({exc}): "
+                             f"{stands}")
+            return "impostor", {}
+        names = sorted({n for n in listed.at.get(res.sha, ()) if _exact_version(n)}, key=_version_order)
+        pages = f"{listed.pages} page{'' if listed.pages == 1 else 's'} of {_refs.TAG_PAGE}"
+        if not names:
+            if listed.more:
+                res.notes.append(f"none of the {listed.read} tags of {label} read ({pages}) is a version tag at "
+                                 f"{short}, and it has more, which were not read: {stands}")
+            return "impostor", {}
+        found = {"version_tags": names[:VERSION_TAGS_LISTED], "version_tag_count": len(names)}
+        if len(names) > 1:
+            res.notes.append(f"{len(names)} version tags of {label} point to {short}, "
+                             f"{_tag_span(found['version_tags'], len(names))}: the shape of tags moved onto one "
+                             f"commit, not a release commit kept by its tag: {stands}")
+            return "impostor", found
+        tag = names[0]
+        if listed.more:
+            res.notes.append(f"the version tag {tag} of {label} points to {short}, but not every tag was read "
+                             f"({listed.read} in {pages}, and it has more), so another version tag may point to it "
+                             f"as well: {stands}")
+            return "impostor", found
+        detail = {"sha": res.sha, "ref": use.ref, "tag": tag, "branches": answer.branches,
+                  "compared": list(answer.compared), "recorded": False}
+        if res.tag_object is not None:
+            detail["tag_object"] = res.tag_object.tag
+        if self.pins is None:
+            return "tag-only", detail
+        key = PinBook.key(use.owner, use.repo, tag)
+        before, failed, was = self._book_record(key), None, None
+        if isinstance(before, _refs.BookError):
+            failed = before
+            if str(before) not in res.unsettled:
+                res.unsettled.append(str(before))
+        rec = before if isinstance(before, dict) else None
+        elsewhere = rec is not None and rec.get("sha") != res.sha        # first seen at another commit: it moved
+        flagged = rec is not None and not elsewhere and bool(rec.get("moved"))     # moved away, the move not accepted
+        onto = rec is not None and not elsewhere and bool(rec.get("moved_from"))   # moved onto it, the move accepted
+        mark_sha, mark_at = _refs.mark_of(rec)
+        # a mark given at another commit than the record's: the record was moved onto this commit by an accept that
+        # kept no `moved_from` (an older version's, whose update of the database's row leaves the mark): as `onto`
+        unrecorded = rec is not None and not elsewhere and mark_sha is not None and mark_sha != res.sha
+        clean = failed is None and not (elsewhere or flagged or onto or unrecorded)
+        # the note only where SC-ACTION-TAG-ONLY's own mark, given at this commit before the command began, is on a
+        # record at this commit that nothing speaks against (a record another check wrote, or a later one, has none)
+        held = clean and mark_sha == res.sha and mark_at < self._started
+        if not (flagged and not self.accept_moved):
+            try:                            # (not when back at its first commit: a sighting would clear the move)
+                # (see keeps a moved tag's first commit and adds `moved`; the mark is written on a MAJOR only)
+                was = self._book_write(key, res.sha, tag_only=clean and not held)
+            except _refs.BookError as exc:
+                failed = failed or exc
+                if str(exc) not in res.unsettled:
+                    res.unsettled.append(str(exc))
+        if elsewhere or was is not None:
+            seen = rec if elsewhere else was                # (was: recorded at another commit earlier in the command)
+            why = f"the pin book first saw it at {str(seen.get('sha'))[:12]} ({seen.get('first')}): it moved"
+        elif flagged:
+            to = rec["moved"] if isinstance(rec.get("moved"), dict) else {}
+            why = (f"the pin book saw it at {str(to.get('to'))[:12]} since ({to.get('at')})"
+                   + ("" if self.accept_moved else ", a move not accepted"))
+        elif onto:
+            frm = rec["moved_from"] if isinstance(rec.get("moved_from"), dict) else {}
+            why = (f"it was moved onto it (from {str(frm.get('sha'))[:12]}, accepted {frm.get('at')}): accepting a "
+                   f"move does not make it a release commit kept by its tag")
+        elif unrecorded:
+            why = (f"it was moved onto it from {mark_sha[:12]}, where SC-ACTION-TAG-ONLY was given ({mark_at}), by "
+                   f"an accept that kept no record of the move (an older version's): accepting a move does not make "
+                   f"it a release commit kept by its tag")
+        elif failed is not None:
+            why = "its record in the pin book could not be read or kept"
+        else:
+            why = None
+        if why is not None:
+            res.notes.append(f"the version tag {tag} of {label} points to {short}, but {why}: {stands}")
+            return "impostor", found
+        if held:
+            return "held", (f"only the tag {tag} of {label} holds {short}, {_none_of(answer.branches)}: a release "
+                            f"commit kept by its tag, seen at it since {rec.get('first')}")
+        detail["recorded"] = True
+        return "tag-only", detail
 
     # ---- one action
     def _resolve(self, use):
@@ -492,10 +690,19 @@ class Auditor:
             if answer.state == "in":
                 res.where = answer.where
             elif answer.state == "out":
-                detail = {"sha": res.sha, "ref": ref, "tag": res.kind == "tag", "branches": answer.branches}
-                if res.tag_object is not None:
-                    detail["tag_object"] = res.tag_object.tag
-                res.problems.append(("impostor", detail))
+                # held by one of the repository's own version tags (FP-IMPOSTOR-TAG)? Not asked of a tag the pin book
+                # found moved: that stays CRITICAL whatever the tags say
+                held = self._held_by_tag(use, res, answer) if moved is None else ("impostor", {})
+                if held[0] == "impostor":
+                    detail = {"sha": res.sha, "ref": ref, "tag": res.kind == "tag", "branches": answer.branches}
+                    if res.tag_object is not None:
+                        detail["tag_object"] = res.tag_object.tag
+                    detail.update(held[1])          # (the version tags found at it, when any were)
+                    res.problems.append(("impostor", detail))
+                elif held[0] == "tag-only":
+                    res.problems.append(held)
+                else:
+                    res.notes.append(held[1])
             elif answer.state == "missing" and use.pinned and res.tag_object is None and answer.tag_error is None:
                 res.sha = None
                 res.notes.append(f"{ref[:12]} is not a commit of {owner}/{repo} or of a fork of it that GitHub shows "
@@ -549,8 +756,10 @@ class Auditor:
                 detail.update(pin_tag=obj.tag, pin_commit=obj.commit)
             return [("pin-mismatch", detail)]
         if self.pins is not None:
+            key = PinBook.key(use.owner, use.repo, tag)
+            self._book_record(key)
             try:
-                self.pins.see(PinBook.key(use.owner, use.repo, tag), commit, self.now())
+                self.pins.see(key, commit, self.now())
             except _refs.BookError as exc:
                 self.report.incomplete.append((use.value, str(exc)))
         return []
@@ -792,6 +1001,14 @@ _IMPOSTOR_WHY = (
     "(and 15 of actions-cool/maintain-one-comment) was moved to such a commit, put in through an attacker's fork; the "
     "workflows pinned to a commit of the repository's own history were not affected. A release is a commit one of "
     "the repository's branches holds; this one is in none of them.")
+_TAG_ONLY_WHY = (
+    "GitHub serves a commit pushed to any fork under the original repository's name, and a tag of the repository can "
+    "be moved onto such a commit (in May 2026 every tag of actions-cool/issues-helper was), so a commit none of the "
+    "branches holds is checked as an impostor. This one is the commit one of the repository's own version tags, and "
+    "no other, points to: what a release commit that was tagged and never merged into a branch looks like, as "
+    "JavaScript actions that build dist/ only on the release commit often are. So it is not known to be a fork's; "
+    "but a tag can be moved by whoever can push to the repository, so the tag says where the repository points now, "
+    "not that the commit is the release it was when first tagged.")
 _MOVED_WHY = (
     "A version tag names one release and should never point to another commit. In March 2025 the tags of "
     "tj-actions/changed-files were rewritten to a commit that printed every secret of the workflows that used it "
@@ -822,6 +1039,13 @@ def _compared(n):
     return "its one branch was compared" if n == 1 else f"each of its {n} branches was compared"
 
 
+def _none_of(n):
+    """The branches that do not hold a commit, for a note."""
+    if not n:
+        return "none of its branches"
+    return "not its one branch" if n == 1 else f"none of its {n} branches"
+
+
 def rule(kind, d):
     """The issue rule — id, name, type, sev, msg, why, fix, ref, as core.mk_issue takes
     them — for one Finding's kind and detail."""
@@ -835,15 +1059,49 @@ def rule(kind, d):
             named = f"{who}@{ref}{via} points to the commit {d['sha']}: the commit"
         else:
             named = f"{who}@{ref}{via}: the commit"
+        count = d.get("version_tag_count") or 0
+        many = (f" {count} version tags of the repository point to it "
+                f"({_tag_span(list(d.get('version_tags') or ()), count)}): the shape of tags moved onto one commit."
+                if count > 1 else "")
         return {
             "id": "SC-ACTION-IMPOSTOR", "name": "Action's commit is not in its repository's branches",
             "type": "HOTSPOT", "sev": "CRITICAL",
-            "msg": f"{named} is not in {who}'s branches: {_FROM_FORK} ({_compared(d.get('branches'))}).",
+            "msg": f"{named} is not in {who}'s branches: {_FROM_FORK} ({_compared(d.get('branches'))}).{many}",
             "why": _IMPOSTOR_WHY,
             "fix": ("Do not run it. Open the commit on GitHub: its page says when it does not belong to any branch of "
                     "the repository. Pin the commit of a release you have read, from the repository's own history; "
                     + ("a tag that points to a fork's commit was moved or made by whoever can push to the repository: "
                        "tell its owner and GitHub." if d.get("tag") else "and read the action's code before it runs.")),
+            "ref": "CWE-829 · Supply chain"}
+    if kind == "tag-only":
+        ref = d.get("ref") or d["sha"]
+        if d.get("tag_object"):
+            named = f"{who}@{ref}{via}, the tag object {d['tag_object']}, points to the commit {d['sha']}: the commit"
+        elif ref != d["sha"]:
+            named = f"{who}@{ref}{via} points to the commit {d['sha']}: the commit"
+        else:
+            named = f"{who}@{ref}{via}: the commit"
+        compared = d.get("compared") or []
+        listed = f": {', '.join(compared)}" if compared else ""
+        recorded = bool(d.get("recorded"))
+        pinned = bool(d.get("tag_object")) or ref == d["sha"]
+        return {
+            "id": "SC-ACTION-TAG-ONLY", "name": "Action's commit is held only by a tag, not a branch",
+            "type": "HOTSPOT", "sev": "MAJOR",
+            "msg": (f"{named} is in none of {who}'s branches ({_compared(d.get('branches'))}{listed}), but the "
+                    f"repository's own version tag {d['tag']}, and no other, points to it: as far as the tags show, "
+                    f"a release commit tagged and never merged, so it is not known to be a fork's; but a tag can be "
+                    f"moved by whoever can push to the repository. "
+                    + ("A later run with the pin book says whether the tag stayed at it." if recorded
+                       else "Without a pin book, whether the tag stays at it is not known.")),
+            "why": _TAG_ONLY_WHY,
+            "fix": ("Read the action's code at this commit before the workflow runs it; "
+                    + ("keep the pin if it is the release you meant. " if pinned
+                       else "if it is the release you meant, pin that commit by its SHA. ")
+                    + ("The pin book now records the tag at this commit: a later run says whether it stayed (a tag "
+                       "that stays is then a note, one that moved is CRITICAL)." if recorded
+                       else "Run with a pin book (without --no-pins), so that a later run can say whether the tag "
+                            "stayed at this commit.")),
             "ref": "CWE-829 · Supply chain"}
     if kind == "tag-moved":
         fork = bool(d.get("fork"))
@@ -974,9 +1232,12 @@ def main(argv=None):
 
 
 def _run(files, pins, max_calls, accept, scan_code):
-    """The command's audit of each workflow file: prints the reports, -> the exit code."""
+    """The command's audit of each workflow file: prints the reports, -> the exit code. The files' Auditors share one
+    Run (FP-IMPOSTOR-TAG): the command's start, the pin book's records as they were before it, the tag listings; so a
+    record one file's audit makes is never taken in another's for one an earlier command left."""
     rep_all = []
     code = 0
+    run = Run()
     for path in files:
         try:
             with open(path, "rb") as f:
@@ -989,7 +1250,7 @@ def _run(files, pins, max_calls, accept, scan_code):
             return 2
         try:
             rep = audit_text(text.decode("utf-8", "replace"), pins=pins, max_calls=max_calls, accept_moved=accept,
-                             code=scan_code)
+                             code=scan_code, run=run)
         except SourceError as exc:
             print(f"error: {exc}", file=sys.stderr)
             return 2
