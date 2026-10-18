@@ -1642,6 +1642,17 @@ aggregate):
 
 ### Fixed
 
+- **A tagged template call of a script's wrapper no longer crashes the engine (PANIC-TAGGED; rule set 2.98.0).** John's discovery run of Oct 18: `@epoch32/visage` 1.14.0's `dist/vite/index.js` made the engine panic
+  ("index out of bounds" in `jsparse/tree.rs`), so the release was INCOMPLETE with a CRITICAL SC-TRUNCATED; the npm
+  package's WASM build aborts on a panic. A tagged template (`` fn`…` ``) runs the function as a call does, and the
+  supply-chain model's readers of a wrapper of exec and of a script's `getEnv(name)` read the template's slot as the
+  call's argument list (a node's id as a list's). Older than RA-6, D-21 and D-22 (the same panic at DBG-STACK). They
+  now read a call's, a `new`'s and a tagged template's arguments alike (`sc_call_arg_text`): the tag's first
+  parameter is the template's strings, read as their text when the template is one piece, the others its
+  expressions — so `` getEnv`AWS_SECRET_ACCESS_KEY` `` reads that variable (JavaScript's key is the strings' text) and
+  `` run`whoami` `` runs `whoami` for a wrapper that makes text of its argument. And the tree's `list` gives no items,
+  never a panic, for an id that is no list in a release build (a debug build still stops on it).
+
 - **Conservative address-label comment filtering (D-22; rule set 2.97.0).**
   Any self-source marker or file-reading capability marker preserves raw text, without requiring a literal
   script filename. This includes unknown paths, aliases, assembled names and filesystem module access.

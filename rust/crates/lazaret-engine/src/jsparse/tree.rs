@@ -439,9 +439,20 @@ impl Tree {
         if id == NONE {
             return &[];
         }
+        // (an id that is no list — a node's id read from a slot that holds no list — is a reader's mistake: a
+        // debug build stops on it, a release build reads no items rather than panic on a package's file)
         let i = id as usize;
-        let n = self.lists[i] as usize;
-        &self.lists[i + 1..i + 1 + n]
+        let Some(&n) = self.lists.get(i) else {
+            debug_assert!(false, "list id {} past the tree's {} list slots", id, self.lists.len());
+            return &[];
+        };
+        match self.lists.get(i + 1..i + 1 + n as usize) {
+            Some(items) => items,
+            None => {
+                debug_assert!(false, "list {} of {} items past the tree's {} list slots", id, n, self.lists.len());
+                &[]
+            }
+        }
     }
 
     /// The string `id`.
