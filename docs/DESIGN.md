@@ -2613,8 +2613,9 @@ candidates first, oldest first, then the queue, newest first; the queue keeps
 and counted, so each run says what share of the stream it covered (some ten
 thousand new repositories an hour against a token's 5,000 requests, three a
 scan). A queued repository's failed scan drops it; a repository is scanned
-once. No schema change: the states are new values of `github_candidates`'s
-`state`, and the two cursors rows of `discovery_cursors`. GH Archive has
+once. No schema change then: the states are new values of `github_candidates`'s
+`state`, and the two cursors rows of `discovery_cursors` (GH-SCAN-GQL adds
+`github_listed`, below). GH Archive has
 missed most events since 2025, so the files' source is a setting
 (`--github-events-url`, `LAZARET_GITHUB_EVENTS_URL`; `ghevents.source`: an
 https host and a folder, the default port, no credential, query or
@@ -2624,6 +2625,195 @@ answers 404 or 409 (gone, made private, empty) drops its candidate and is
 counted (`gone`), not an error of the run. The CLI prints an OK scan in one
 line and the others in full, and `progress` lines on stderr (an hour being
 read, every `LISTING_PROGRESS_EVERY` pages, each scan).
+
+Which new repositories got code, from GitHub's GraphQL API (GH-SCAN-GQL,
+0.1.9; John's choice of Oct 18). His runs that day: OpenDigger's mirror sent
+his Mac some 1.5 KB/s (a 335 MB hour), and GH Archive's hour 2026-10-17-4
+held 6,044 events and no `PushEvent` or `CreateEvent` at all, so three hours
+of scan-all queued nothing that got code. So scan-all asks GitHub instead:
+each listed repository newer than scan-all's start that no filter, exclude
+or campaign marker kept (a filter's candidate keeps its REST content checks)
+is kept in `github_listed` (repo ID, the listing's `node_id`, name,
+description, fork, `listed_at`, `state` unasked, empty or fork,
+`next_check`, `checks`, `fails`, `last_error`; a table older SQLite and
+Postgres databases get when opened, `CREATE TABLE IF NOT EXISTS` and an
+index on `listed_at`, and `schema.sql`; a table of the first versions,
+without `fails`, gets it then, `LISTED_ADDED`: `_sqlite_add_columns`,
+Postgres's `ADD COLUMN IF NOT EXISTS`, 0 for its rows; the third review's
+p14) before the cursor moves past its page, and asked about after it, one
+call for the page: `POST https://api.github.com/graphql` with `nodes(ids:
+$ids)` (`... on Repository { databaseId nameWithOwner isEmpty isFork
+isPrivate createdAt pushedAt diskUsage }`) and `rateLimit { cost remaining
+resetAt }`, the IDs as the query's variables and nothing else. While it has
+no code it is asked again at `CHECK_HOURS` after it was listed (the first of
+them still to come), in each run after the scans and before the listing, 100
+a call: `GRAPHQL_DUE_SHARE` (a quarter) of the run's calls, and as much of
+its `GRAPHQL_RUN_SECONDS`, go to the due rows listed longest ago, oldest
+first (the nearest their last check, and the first the size bound would
+evict), so that fresh pages cannot starve them; the rest go newest first,
+down to where the oldest-first walk stopped (by (`listed_at`, `repo_id`), a
+row-value keyset the index serves). The answer, node by node, every field
+asked for present and of its type: `isEmpty` false is queued in
+`github_candidates` (`ALL_GRAPHQL`) as of when its code arrived
+(`_code_time`: `pushedAt` held to [`createdAt`, now], the run's time when it
+is not known), judged again by `Filters.judged` on GraphQL's name (a rename
+to a campaign marker is reported and never downloaded; the scan reads the
+default branch under that name), and leaves `github_listed`; empty is asked
+again; a null node that `NOT_FOUND` errors alone name, or a private one, is
+gone, dropped; each counted. A fork is queued once `pushedAt` is later than
+`createdAt` (at the same instant it is not; an untouched fork carries its
+parent's `pushedAt`), which is what GH Archive's push to a fork did: a fork
+was never queued for being made, only for a push. **Fresh and late finds**
+(the re-review's p10, Oct 18): the scans take the queue newest first, so
+what decides between a repository found with code when it is listed (fresh)
+and one found by a later ask (late) is the time each is queued as and when
+each is first offered to the scans. Queued as of the finding run (the first
+amendment), the late finds of a run beat the fresh ones of the run before;
+asked before the scans, they are offered a run sooner than the fresh finds
+of the same hour. The re-review's ruling was `pushedAt` held to
+[`listed_at`, now] with the asks kept before the scans. A model of the
+steady state (each hour 300 fresh finds and 300 late ones, pushed in the
+same hour, 100 scans a run, 40 runs) gave: that ruling, 0 fresh and 4,000
+late scanned (a late find's push comes after the fresh finds' of its hour,
+and it is offered first); [`listed_at`, now] with the asks after the scans,
+3,900 and 0 (a fresh find had its code when listed, so its push is held up
+to its `listed_at`, after every late find's of that hour); [`createdAt`,
+now] with the asks before the scans, 0 and 4,000; [`createdAt`, now] with
+the asks after the scans, 1,919 and 1,981. So the asks come after the scans
+(still before the listing, which cannot starve them: the scans come first
+and GraphQL spends none of REST's calls), and the bound below is
+`createdAt`, which `listed_at` never precedes: each kind is offered to the
+scans in the run after it was found, by its push time. The test
+(`PushTimeTests`) gives each repository its own push times; with one
+`pushedAt` for every repository, as the review's probe has, the ties go to
+the higher repository ID. **Late finds** (John, Oct 20; the third review's
+p10b: a repository found at the 6 hours' ask, pushed 2 to 5 hours after it
+was listed, lost the newest-push queue to each new hour's and was pruned by
+its bound as soon as it was found: none scanned in 14 runs): code found at
+an ask `LATE_HOURS` (6) or more after the listing is queued with `late_at`,
+the run's time (`github_candidates.late_at`, added on open to an older
+table, `CANDIDATE_ADDED`), and `_scans` gives `LATE_SCAN_SHARE` (a quarter)
+of the scans the ready candidates leave, rounded up, to late finds, the
+first found first, then the rest newest push first, late finds among them,
+so that a share not used goes to the other. `_bound_queue` keeps the
+`QUEUE_MAX` newest pushes and, apart, the `QUEUE_MAX` late finds found last
+(`prune_github_candidates(late=)`), each counted as skipped (`lateSkipped`
+the late ones); the report says the late finds queued, scanned and left.
+p10b now scans 21 of them; the test (`LateShareTests`) has 3 of 10 scans a
+run go to them once there are any, and the scans as before without.
+**Dropped for age** only when its last scheduled ask (72 hours) answered
+that it has no code (`expired`); a row never answered (errors, the budget,
+an outage, a row GitHub cannot answer about) waits until it is, however
+long, and the only other bound is `LISTED_MAX` (500,000, the newest kept),
+whose evictions are counted and said on stderr; the report counts those
+waiting from over 72 hours ago (`aged`). **Fail closed** (`read_nodes`): an
+error naming a node leaves that node unanswered unless it is null and every
+error for it is `NOT_FOUND`; a null node no error names, an error naming no
+node (or a node past the list), an answer whose `data.nodes` is not the list
+asked for (shorter, longer), a node with a field missing (`pushedAt` and
+`diskUsage` too, which may be null but must be there), of another type, a
+time UTC cannot hold (`9999-12-31T23:59:59-23:59`) or another repository's
+`databaseId`, an HTTP error, a body over `GRAPHQL_BYTES` or not JSON leave
+every repository concerned as it was (unasked, or its check still due),
+`last_error` set; nothing is dropped or taken as empty. A row GitHub could
+not answer about (an error naming it, its fields) waits 1, 2, 4 … hours, at
+most `GRAPHQL_BACKOFF_MAX_HOURS` (72), before its next ask (`_backoff`, by
+`fails`, which an answer resets), so that the oldest-first share moves past
+it; it is never dropped for it. **A batch of which nothing could be read**
+(an error of the whole query, or an answer not as asked; the re-review's
+p12: one such row kept the 99 others of its batch unanswered run after run,
+and three such batches at the old end spent the run's failures each run, so
+that nothing else was asked) is isolated (`_Asker._isolate`): its halves are
+asked, and the halves of those that fail so, level by level (breadth first)
+down to single rows, `GRAPHQL_SPLIT_DEPTH` (7) levels for 100, within the
+run's calls and seconds; a row that fails so alone, while GitHub answers
+others, is backed off as above, and the rest are answered: one such row
+costs some 15 calls, three in three batches some 45. Two levels in a row of
+which nothing could be read (all four quarters, for a first try) are
+GitHub's failure, or a failing row in every group. A control call elsewhere
+tells which (`_control`; the third review's p12b: three oldest batches with
+such a row in every quarter took 21 calls and stopped the asking, run after
+run, the set waiting growing from 600 to 1,500): about a repository GitHub
+answered about (`_known`: of this run's answers the last, kept as they come,
+`GRAPHQL_CONTROL_KNOWN`, or else the newest an earlier run found empty or a
+fork, in `github_listed`; its answer read, not stored), or else about the
+newest due rows not asked yet this run (an ask like another; the due walk
+leaves them out after, `_batches`). With neither it cannot tell, and the
+batch counts as GitHub's failure: the fourth review's p16 showed why a call
+about no repository (`nodes(ids: [])`, the third amendment's fallback)
+proves nothing, GitHub answering it while failing every query that names
+one, so that the run blamed the rows: 360 calls and 100 healthy rows backed
+off with only fresh rows, 760 and 300 with rows due too; now 21 and 24
+calls, nothing backed off, stopped as an outage. The very first run, with
+nothing answered yet and no other row due, cannot tell either: p12b's first
+run stops so (21 calls), and its next runs find what the halving finds, all
+of it by the third. Answered, the groups are isolated on from their level
+(`_answering`) and the asking goes on (p12b: 288 found by its second and
+third runs, the 12 such rows backed off); not, they wait, with their level,
+for GitHub to answer another call, and a moment's failure of GitHub so backs
+nothing off. What stops the GraphQL part: `GRAPHQL_FAILURES` (3) failures of
+the call (an HTTP error, a body not JSON or over the budget: never split,
+never backed off), or that many batches in a row of which nothing could be
+read, nor of their halves and quarters, nor their control calls (8 calls
+each), with nothing backed off; and `GRAPHQL_RUN_SECONDS` (900) spent in it.
+The seconds split as the calls do: the oldest-first share stops at a quarter
+of either. A header not understood (`X-RateLimit-Remaining: ²`, a reset no
+clock holds) is unknown, in REST's `Budget.read` and `sources._explain` too,
+never an error of the run. Rate limits: `rateLimit.remaining` or the
+answer's `X-RateLimit-Remaining`, the lower, at `GRAPHQL_RATE_FLOOR`, a
+`RATE_LIMITED` error (its type, or its extensions' code) or an error
+speaking of a rate limit, or a 403 with no points left is GraphQL's own
+hourly limit, which stops the asking and not the listing (what it lists
+waits, unasked); a `Retry-After` on any answer (200 included), an error
+about a secondary rate limit, a 429 or another 403 is a secondary limit,
+which GitHub counts over the token's REST and GraphQL calls alike, and stops
+the run as REST's limit does (the cursor, the candidates and the waiting
+rows kept). REST's own limits stop REST's calls alone (`Budget.stopped`):
+GraphQL spends none of them, so its asks go on after the checks or the scans
+stopped on one (the third review's p15: a refusal in a scan left 199 due
+rows unasked, 0 calls; now 2 calls, none left); a REST refusal that is a
+secondary limit (one with a `Retry-After`, or a 429 that does not say REST's
+requests are spent; `sources._refused` keeps an error answer's rate-limit
+headers as `SourceError.limits`) stops them too (`Budget.shared`); a 403
+without a `Retry-After` is REST's own limit (`sources._explain` calls a 403
+a rate limit only with a `Retry-After` or no requests left). Budgets:
+`--max-graphql-calls` (`DEFAULT_MAX_GRAPHQL_CALLS`, 4,000: a 1,000-page
+listing's calls and 3,000 asking again; refused without
+`--github-scan-all`), counted apart from `--max-calls`; GitHub's points
+(5,000 an hour; a nodes query costs 1); the queue's `QUEUE_MAX` holds after
+the listing's asks too. A listing item without a usable `node_id` cannot be
+asked about: it becomes a candidate of the REST content checks
+(`ALL_NO_NODE`), counted and said on stderr. A push GH Archive reads to a
+repository waiting there queues it as before (`ALL_PUSHED`), and the next
+ask leaves it to the candidates. Two runs at once on one Postgres database
+(the review's probe: a deadlock, 40P01, escaped `run()` 3 times of 3):
+`save_github_listed` locks its rows first in `repo_id` order (`SELECT …
+ORDER BY repo_id FOR UPDATE`) and writes them in that order,
+`add_github_listed` and `add_github_candidates` insert in that order, and a
+batch rolled back for a deadlock or a serialization failure (40P01, 40001)
+is done again, `PG_ROLLBACK_TRIES` times at most (each batch is idempotent;
+`Store._pg_batch`). The POST is `sources.Client.post`: https to
+`api.github.com` alone (not codeload or raw), the token with it (a
+credential of that host on the native transport, a header of the one request
+on urllib's), no redirect followed (`max_redirects=0`; urllib's
+`_NoRedirect`), `POST_BYTES` and a total deadline of `GRAPHQL_SECONDS` (the
+native transport's total timeout; on urllib's, `guard._Deadline`, F-07's,
+with its watchdog and each read cut to the time left); the GETs keep their
+per-read timeouts. GitHub's documentation, read Oct 18 (cited in
+`ghdiscover.py`): the endpoint and a JSON body with `query`; the fields'
+names and types; `nodes(ids:)` with no maximum stated, so a call asks about
+100, the most `first`/`last` take; the primary limit answered 200 with an
+error and `X-RateLimit-Remaining` 0, secondary limits 200 or 403 with
+`Retry-After`; the error's `type` and `path` are GitHub's shapes, not
+documented, and anything else fails closed. The run's report and the CLI
+(`_print_github_graphql`): asked about, had code, empty, forks, gone, not
+answered, the calls, the points left, what was dropped, the calls of which
+nothing could be read (`unreadable`) and the rows backed off by isolation
+(`isolated`), the late finds (`late`; the queue's `lateScanned`, `lateLeft`,
+`lateSkipped`), why it stopped and how many wait; `list` counts
+`github_listed` by state. GH Archive stays for the repositories made public;
+its thin hour no longer points to the mirror as the fix (the mirror stays a
+setting).
 
 ### m. crates.io discovery (`ecosystems/crates.py`, CRATES-DISCOVER)
 

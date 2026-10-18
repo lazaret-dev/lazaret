@@ -289,6 +289,16 @@ class SourceTests(unittest.TestCase):
         https = [h for h in opener.handlers if isinstance(h, urllib.request.HTTPSHandler)]
         self.assertEqual([type(h) for h in https], [guard._HTTPSHandler])
 
+    def test_the_posts_starred_opener_is_one_the_check_reads(self):
+        # (GH-SCAN-GQL: sources' POST builds its opener from a list too, the guard's handlers for F-07's deadline)
+        from lazaret.registry import guard, sources
+        source = (SRC / "registry" / "sources.py").read_text(encoding="utf-8")
+        self.assertIn("handlers = [_NoRedirect(), guard._HTTPHandler(), guard._HTTPSHandler()]", source)
+        opener = sources._post_opener(guard)
+        https = [h for h in opener.handlers if isinstance(h, urllib.request.HTTPSHandler)]
+        self.assertEqual([type(h) for h in https], [guard._HTTPSHandler])
+        self.assertTrue(issubclass(guard._HTTPSHandler, nativenet.HTTPSHandler))
+
 
 if __name__ == "__main__":
     unittest.main()

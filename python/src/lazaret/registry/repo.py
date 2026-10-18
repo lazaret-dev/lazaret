@@ -6413,12 +6413,14 @@ def _candidate_table(t=""):
     campaign repository: never downloaded) or dropped (still empty after the last check, gone or made private:
     last_error says which); with --github-scan-all (GH-SCAN-ALL) also queued (a new repository GH Archive saw get
     code, waiting for a scan), pending (one it saw before the listing reached it) and excluded (one your excludes
-    matched, never scanned); the times are ISO 8601 UTC."""
+    matched, never scanned); late_at, when GitHub's GraphQL API said a queued one got code at an ask
+    ghdiscover.LATE_HOURS or more after it was listed (a late find, which has its share of the scans; NULL for the
+    others, and in a table made before it: CANDIDATE_ADDED); the times are ISO 8601 UTC."""
     return (f"CREATE TABLE IF NOT EXISTS {t}github_candidates ("
             f"repo_id BIGINT PRIMARY KEY, full_name TEXT NOT NULL, description TEXT, fork INTEGER NOT NULL, "
             f"filters TEXT NOT NULL, listed_at TEXT NOT NULL, state TEXT NOT NULL, next_check TEXT, "
             f"checks INTEGER NOT NULL, size INTEGER, pushed_at TEXT, default_branch TEXT, commit_sha TEXT, "
-            f"verdict TEXT, last_error TEXT, updated_at TEXT NOT NULL)")
+            f"verdict TEXT, last_error TEXT, updated_at TEXT NOT NULL, late_at TEXT)")
 
 
 def _action_tag_table(t=""):
@@ -6436,15 +6438,62 @@ def _action_tag_table(t=""):
             f"moved_from TEXT, moved_from_at TEXT, PRIMARY KEY (repo, tag))")
 
 
+def _listed_table(t=""):
+    """DDL of the repositories --github-scan-all asks GitHub's GraphQL API about (GH-SCAN-GQL, registry/ghdiscover.py;
+    the same for SQLite and Postgres): a new repository the listing gave scan-all that no filter, exclude or campaign
+    marker kept, by GitHub's repository ID, with its node ID, what GraphQL is asked by. state is unasked (asked at the
+    next run: the GraphQL part stopped before it, or its answer was not understood), empty or fork (GraphQL said it
+    is empty, or a fork with no push of its own: asked again at next_check, CHECK_HOURS after listed_at); checks
+    counts those answers; fails counts the asks in a row GitHub could not answer about it (its own error, or the whole
+    query failing with it alone), which put its next_check off 1, 2, 4 … hours; last_error is why the last ask got
+    none. A repository that got code moves to
+    github_candidates (queued), and one gone, made private or still without code after the last check is deleted
+    (counted by the run): the table holds only those still waiting. The times are ISO 8601 UTC. A database made
+    before it gets it (CREATE TABLE IF NOT EXISTS, Store._init_schema), and a table made before `fails` gets that
+    (LISTED_ADDED: 0 for the rows it holds)."""
+    return (f"CREATE TABLE IF NOT EXISTS {t}github_listed ("
+            f"repo_id BIGINT PRIMARY KEY, node_id TEXT NOT NULL, full_name TEXT NOT NULL, description TEXT, "
+            f"fork INTEGER NOT NULL, listed_at TEXT NOT NULL, state TEXT NOT NULL, next_check TEXT NOT NULL, "
+            f"checks INTEGER NOT NULL, fails INTEGER NOT NULL DEFAULT 0, last_error TEXT, updated_at TEXT NOT NULL)")
+
+
+def _listed_index(t=""):
+    """github_listed's index: the asks go newest first, and the bounds keep the newest."""
+    return f"CREATE INDEX IF NOT EXISTS idx_github_listed_listed ON {t}github_listed(listed_at, repo_id)"
+
+
+def _sqlite_row_values():
+    """Does this SQLite compare row values ((a, b) < (?, ?): since 3.15)?"""
+    import sqlite3
+    return sqlite3.sqlite_version_info >= (3, 15, 0)
+
+
+#: (GH-SCAN-GQL) the times a Postgres transaction of the store is tried when a deadlock or a serialization failure
+#: rolls it back (Store._pg_batch)
+PG_ROLLBACK_TRIES = 4
+
+#: github_listed's columns, in order (Store.github_listed's rows are dicts of them)
+LISTED_COLUMNS = ("repo_id", "node_id", "full_name", "description", "fork", "listed_at", "state", "next_check",
+                  "checks", "fails", "last_error", "updated_at")
+
+
 #: action_tags' columns added by FP-IMPOSTOR-TAG, given to a table made before them
 ACTION_TAG_ADDED = ("tag_only", "tag_only_sha", "moved_from", "moved_from_at")
+
+#: github_listed's columns added after it was first made (GH-SCAN-GQL's backoff), and their type, given to a table
+#: made before them
+LISTED_ADDED = ("fails",)
+LISTED_ADDED_TYPE = "INTEGER NOT NULL DEFAULT 0"
+
+#: github_candidates' columns added by GH-SCAN-GQL (a late find's time), given to a table made before them
+CANDIDATE_ADDED = ("late_at",)
 
 
 def _sqlite_add_columns(cur, table, columns, sqltype="TEXT"):
     """Give the SQLite table `table` the `columns` it lacks (ALTER TABLE ... ADD COLUMN). Another process opening the
     same older database at once may add one between the look and the ALTER: its "duplicate column name" error is
-    passed only once the table, read again, has the column; any other error is raised. (Used for action_tags; the
-    older scans.artifacts migration has its own code, as before.)"""
+    passed only once the table, read again, has the column; any other error is raised. (Used for action_tags,
+    github_candidates and github_listed; the older scans.artifacts migration has its own code, as before.)"""
     import sqlite3
     have = {row[1] for row in cur.execute(f"PRAGMA table_info({table})")}
     for column in columns:
@@ -6463,7 +6512,7 @@ def _sqlite_add_columns(cur, table, columns, sqltype="TEXT"):
 #: github_candidates' columns, in order (Store.github_candidates' rows are dicts of them)
 CANDIDATE_COLUMNS = ("repo_id", "full_name", "description", "fork", "filters", "listed_at", "state", "next_check",
                      "checks", "size", "pushed_at", "default_branch", "commit_sha", "verdict", "last_error",
-                     "updated_at")
+                     "updated_at", "late_at")
 
 
 class Store:
@@ -6563,7 +6612,9 @@ class Store:
     def _init_schema(self):
         """Create the tables, and migrate older ones in place (idempotent):
         scans.artifacts holds the per-file detail of multi-artifact scans;
-        discovery_cursors is created in databases made before it."""
+        discovery_cursors, github_listed (GH-SCAN-GQL) and the others are
+        created in databases made before them, action_tags given its newer
+        columns."""
         if self.pg:
             # Postgres DDL (SERIAL / JSONB): execute_script runs the whole
             # script as ONE implicit transaction via the simple protocol.
@@ -6583,9 +6634,15 @@ class Store:
                 ON {self.t}scans(package_id, scanned_at DESC);
                 {_cursor_table(self.t)};
                 {_candidate_table(self.t)};
+                {"; ".join(f"ALTER TABLE {self.t}github_candidates ADD COLUMN IF NOT EXISTS {c} TEXT"
+                           for c in CANDIDATE_ADDED)};
                 {_action_tag_table(self.t)};
                 {"; ".join(f"ALTER TABLE {self.t}action_tags ADD COLUMN IF NOT EXISTS {c} TEXT"
-                           for c in ACTION_TAG_ADDED)}""")
+                           for c in ACTION_TAG_ADDED)};
+                {_listed_table(self.t)};
+                {"; ".join(f"ALTER TABLE {self.t}github_listed ADD COLUMN IF NOT EXISTS {c} {LISTED_ADDED_TYPE}"
+                           for c in LISTED_ADDED)};
+                {_listed_index(self.t)}""")
             return
         cur = self.conn.cursor()
         serial, jsontype = "INTEGER PRIMARY KEY AUTOINCREMENT", "TEXT"
@@ -6608,8 +6665,12 @@ class Store:
                     f"ON {self.t}scans(package_id, scanned_at DESC)")
         cur.execute(_cursor_table(self.t))
         cur.execute(_candidate_table(self.t))
+        _sqlite_add_columns(cur, f"{self.t}github_candidates", CANDIDATE_ADDED)
         cur.execute(_action_tag_table(self.t))
         _sqlite_add_columns(cur, f"{self.t}action_tags", ACTION_TAG_ADDED)
+        cur.execute(_listed_table(self.t))
+        _sqlite_add_columns(cur, f"{self.t}github_listed", LISTED_ADDED, LISTED_ADDED_TYPE)
+        cur.execute(_listed_index(self.t))
         self.conn.commit()
 
     def _pg_call(self, run):
@@ -6887,23 +6948,26 @@ class Store:
                     tuple(values) + (int(repo_id),))
 
     def add_github_candidates(self, rows):
-        """add_github_candidate for many, in one transaction (GH-SCAN-ALL: an hour of GH Archive's events can make
-        thousands): rows of (repo_id, full_name, description, fork, filters, listed_at, state, next_check)."""
+        """add_github_candidate for many, in one transaction, in repo_id order (GH-SCAN-ALL: an hour of GH Archive's
+        events can make thousands): rows of (repo_id, full_name, description, fork, filters, listed_at, state,
+        next_check[, late_at: a late find's time, GH-SCAN-GQL; None when left out])."""
         rows = list(rows)
         if not rows:
             return
         now = datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")
-        values = [(int(r[0]), _db_text(r[1]), _db_text(r[2]) if r[2] else None, 1 if r[3] else 0, db_json(list(r[4])),
-                   r[5], r[6], r[7], 0, now) for r in rows]
+        values = sorted(((int(r[0]), _db_text(r[1]), _db_text(r[2]) if r[2] else None, 1 if r[3] else 0,
+                          db_json(list(r[4])), r[5], r[6], r[7], 0, now, r[8] if len(r) > 8 else None)
+                         for r in rows), key=lambda v: v[0])
         sql = (f"INSERT INTO {self.t}github_candidates (repo_id,full_name,description,fork,filters,listed_at,"
-               f"state,next_check,checks,updated_at) VALUES ({','.join(self._phs(10))}) "
+               f"state,next_check,checks,updated_at,late_at) VALUES ({','.join(self._phs(11))}) "
                f"ON CONFLICT (repo_id) DO NOTHING")
         if self.pg:
+            # (in repo_id order, and done again after a deadlock: two runs inserting the same rows at once)
             def insert():
                 with self.conn.transaction():
                     for v in values:
                         self.conn.execute(sql, *v)
-            self._pg_call(insert)
+            self._pg_batch(insert)
             return
         try:
             self.conn.execute("BEGIN IMMEDIATE")
@@ -6930,14 +6994,18 @@ class Store:
             out.update({int(r[0]): r[1] for r in rows})
         return out
 
-    def prune_github_candidates(self, state, keep=None, before=None):
+    def prune_github_candidates(self, state, keep=None, before=None, late=None):
         """Delete candidates in `state`: all but the `keep` listed last, or those listed before `before` (ISO 8601
-        UTC). -> how many were deleted (GH-SCAN-ALL: the scan queue and the pushes not yet listed stay bounded)."""
+        UTC). -> how many were deleted (GH-SCAN-ALL: the scan queue and the pushes not yet listed stay bounded).
+        `late` (with `keep`): False, only those that are not late finds; True, only late finds, the `keep` found
+        last kept (GH-SCAN-GQL: each kind bounded on its own)."""
         ph = self._phs(2)
         if keep is not None:
             # (LIMIT with the largest BIGINT: an OFFSET alone is Postgres's, not SQLite's)
-            pick = (f"SELECT repo_id FROM {self.t}github_candidates WHERE state={ph[0]} "
-                    f"ORDER BY listed_at DESC, repo_id DESC LIMIT 9223372036854775807 OFFSET {int(keep)}")
+            kind = {None: "", False: " AND late_at IS NULL", True: " AND late_at IS NOT NULL"}[late]
+            order = "late_at DESC, repo_id DESC" if late else "listed_at DESC, repo_id DESC"
+            pick = (f"SELECT repo_id FROM {self.t}github_candidates WHERE state={ph[0]}{kind} "
+                    f"ORDER BY {order} LIMIT 9223372036854775807 OFFSET {int(keep)}")
             args = (state,)
         else:
             pick = f"SELECT repo_id FROM {self.t}github_candidates WHERE state={ph[0]} AND listed_at < {ph[1]}"
@@ -6954,11 +7022,14 @@ class Store:
                         tuple(part))
         return len(gone)
 
-    def github_candidates(self, states=None, due_by=None, newest_first=False, limit=None):
+    def github_candidates(self, states=None, due_by=None, newest_first=False, limit=None, late=None):
         """The candidates (dicts of CANDIDATE_COLUMNS, filters parsed), oldest listed first (`newest_first`: newest
         first); only those in `states` when given, with `due_by` (ISO 8601 UTC) only those whose next check is due by
-        then, and at most `limit`."""
+        then, and at most `limit`. `late`: True, only late finds, the first found first (GH-SCAN-GQL); False, only
+        the others."""
         where, args = [], []
+        if late is not None:
+            where.append("late_at IS NOT NULL" if late else "late_at IS NULL")
         if states:
             phs = self._phs(len(args) + len(states))[len(args):]
             where.append(f"state IN ({','.join(phs)})")
@@ -6967,6 +7038,8 @@ class Store:
             where.append(f"next_check IS NOT NULL AND next_check <= {self._phs(len(args) + 1)[-1]}")
             args.append(due_by)
         order = " ORDER BY listed_at DESC, repo_id DESC" if newest_first else " ORDER BY listed_at, repo_id"
+        if late:
+            order = " ORDER BY late_at, repo_id"
         sql = (f"SELECT {','.join(CANDIDATE_COLUMNS)} FROM {self.t}github_candidates"
                + (" WHERE " + " AND ".join(where) if where else "") + order
                + (f" LIMIT {int(limit)}" if limit is not None else ""))
@@ -6985,6 +7058,145 @@ class Store:
                 d["filters"] = []
             out.append(d)
         return out
+
+    # -- GH-SCAN-GQL: the listed repositories scan-all asks GitHub's GraphQL API about (github_listed)
+    def _rows(self, sql, args):
+        if self.pg:
+            return self._pg_call(lambda: self.conn.fetch(sql, *args))
+        cur = self.conn.cursor()
+        cur.execute(sql, args)
+        return cur.fetchall()
+
+    def _pg_batch(self, run):
+        """run(), a whole transaction of Store's own whose writes are idempotent, done again when Postgres rolled it
+        back for a deadlock (40P01) or a serialization failure (40001): two scan-all runs at once on one database
+        (GH-SCAN-GQL's review). At most PG_ROLLBACK_TRIES times, then the error is the caller's."""
+        for attempt in range(PG_ROLLBACK_TRIES):
+            try:
+                return self._pg_call(run)
+            except self._pg_errors.TransactionRollbackError as exc:
+                if getattr(exc, "sqlstate", "") not in ("40P01", "40001") or attempt == PG_ROLLBACK_TRIES - 1:
+                    raise
+                time.sleep(0.05 * (attempt + 1))
+
+    def _many(self, statements, lock=()):
+        """[(sql, values)] in one transaction (each a write the caller's batch makes: idempotent as a whole). On
+        Postgres the github_listed rows `lock` names (repo IDs) are locked first, in repo_id order, so that two runs
+        writing the same rows wait for each other instead of deadlocking; the batch is done again after a rollback
+        for a deadlock or a serialization failure (`_pg_batch`)."""
+        statements = [s for s in statements if s]
+        if not statements:
+            return
+        if self.pg:
+            ids = sorted({int(i) for i in lock})
+
+            def run():
+                with self.conn.transaction():
+                    for k in range(0, len(ids), 500):
+                        part = ids[k:k + 500]
+                        self.conn.fetch(f"SELECT repo_id FROM {self.t}github_listed WHERE repo_id IN "
+                                        f"({','.join(self._phs(len(part)))}) ORDER BY repo_id FOR UPDATE", *part)
+                    for sql, values in statements:
+                        self.conn.execute(sql, *values)
+            self._pg_batch(run)
+            return
+        try:
+            self.conn.execute("BEGIN IMMEDIATE")
+            for sql, values in statements:
+                self.conn.execute(sql, values)
+            self.conn.commit()
+        except Exception:
+            self.conn.rollback()
+            raise
+
+    def add_github_listed(self, rows):
+        """Keep listed repositories for scan-all's asks, in one transaction, in repo_id order: rows of (repo_id,
+        node_id, full_name, description, fork, listed_at, state, next_check). One already kept stays as it is."""
+        now = datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")
+        sql = (f"INSERT INTO {self.t}github_listed (repo_id,node_id,full_name,description,fork,listed_at,state,"
+               f"next_check,checks,fails,updated_at) VALUES ({','.join(self._phs(11))}) "
+               f"ON CONFLICT (repo_id) DO NOTHING")
+        self._many([(sql, (int(r[0]), _db_text(r[1]), _db_text(r[2]), _db_text(r[3]) if r[3] else None,
+                           1 if r[4] else 0, r[5], r[6], r[7], 0, 0, now))
+                    for r in sorted(rows, key=lambda r: int(r[0]))])
+
+    def github_listed_known(self, ids):
+        """The IDs among `ids` that github_listed holds."""
+        ids = sorted({int(i) for i in ids})
+        known = set()
+        for k in range(0, len(ids), 500):
+            part = ids[k:k + 500]
+            known.update(int(r[0]) for r in self._rows(
+                f"SELECT repo_id FROM {self.t}github_listed WHERE repo_id IN ({','.join(self._phs(len(part)))})", part))
+        return known
+
+    def github_listed(self, due_by=None, before=None, after=None, limit=None, oldest_first=False):
+        """The listed repositories waiting for an ask (dicts of LISTED_COLUMNS), newest listed first (`oldest_first`:
+        oldest first): with `due_by` (ISO 8601 UTC) those whose next ask is due by then, with `before` and `after`
+        ((listed_at, repo_id) of a row) those below and above it in that order (a row-value comparison, which the
+        index on (listed_at, repo_id) serves), and at most `limit`."""
+        phs, where, args = iter(self._phs(7)), [], []
+        if due_by is not None:
+            where.append(f"next_check <= {next(phs)}")
+            args.append(due_by)
+        for key, op in ((before, "<"), (after, ">")):
+            if key is None:
+                continue
+            if self.pg or _sqlite_row_values():
+                where.append(f"(listed_at, repo_id) {op} ({next(phs)}, {next(phs)})")
+                args += [key[0], int(key[1])]
+            else:                                   # (an SQLite older than 3.15: no row values)
+                where.append(f"(listed_at {op} {next(phs)} OR (listed_at = {next(phs)} AND repo_id {op} {next(phs)}))")
+                args += [key[0], key[0], int(key[1])]
+        order = "" if oldest_first else " DESC"
+        sql = (f"SELECT {','.join(LISTED_COLUMNS)} FROM {self.t}github_listed"
+               + (" WHERE " + " AND ".join(where) if where else "") + f" ORDER BY listed_at{order}, repo_id{order}"
+               + (f" LIMIT {int(limit)}" if limit is not None else ""))
+        return [dict(zip(LISTED_COLUMNS, row)) for row in self._rows(sql, args)]
+
+    def save_github_listed(self, updates=(), deletes=()):
+        """What a batch of asks found, in one transaction and in repo_id order (on Postgres its rows locked first in
+        that order, `_many`): `updates` rows of (repo_id, state, next_check, checks, last_error[, fails: 0 when left
+        out]), `deletes` the IDs no longer waiting (code found, gone, no check left, or past the bound)."""
+        now = datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")
+        p = self._phs(7)
+        sql = (f"UPDATE {self.t}github_listed SET state={p[0]}, next_check={p[1]}, checks={p[2]}, fails={p[3]}, "
+               f"last_error={p[4]}, updated_at={p[5]} WHERE repo_id={p[6]}")
+        gone = sorted({int(i) for i in deletes})
+        dropped = set(gone)
+        changed = sorted((u for u in updates if int(u[0]) not in dropped), key=lambda u: int(u[0]))
+        statements = [(sql, (u[1], u[2], int(u[3]), int(u[5]) if len(u) > 5 else 0, _db_text(str(u[4])) if u[4]
+                             else None, now, int(u[0]))) for u in changed]
+        for k in range(0, len(gone), 500):
+            part = gone[k:k + 500]
+            statements.append((f"DELETE FROM {self.t}github_listed WHERE repo_id IN "
+                               f"({','.join(self._phs(len(part)))})", tuple(part)))
+        self._many(statements, lock=[int(u[0]) for u in changed] + gone)
+
+    def prune_github_listed(self, keep=None, before=None):
+        """Delete listed repositories: all but the `keep` listed last, or those listed before `before` (ISO 8601
+        UTC). -> how many were deleted (GH-SCAN-GQL: the set waiting for code stays bounded)."""
+        ph = self._phs(1)[0]
+        if keep is not None:
+            pick, args = (f"SELECT repo_id FROM {self.t}github_listed ORDER BY listed_at DESC, repo_id DESC "
+                          f"LIMIT 9223372036854775807 OFFSET {int(keep)}"), ()
+        else:
+            pick, args = f"SELECT repo_id FROM {self.t}github_listed WHERE listed_at < {ph}", (before,)
+        gone = [int(r[0]) for r in self._rows(pick, args)]
+        self.save_github_listed(deletes=gone)
+        return len(gone)
+
+    def github_listed_counts(self, due_by=None, listed_before=None):
+        """{state: how many} of the listed repositories waiting for an ask (with `due_by`: those due by then; with
+        `listed_before`: those listed before then)."""
+        phs, where, args = iter(self._phs(2)), [], []
+        for column, op, value in (("next_check", "<=", due_by), ("listed_at", "<", listed_before)):
+            if value is not None:
+                where.append(f"{column} {op} {next(phs)}")
+                args.append(value)
+        rows = self._rows(f"SELECT state, COUNT(*) FROM {self.t}github_listed"
+                          + (" WHERE " + " AND ".join(where) if where else "") + " GROUP BY state", args)
+        return {r[0]: int(r[1]) for r in rows}
 
     def status(self):
         sql = (f"""
@@ -8170,10 +8382,14 @@ def _discover_github(store, args):
     max_scans = getattr(args, "max_scans", None)
     if max_scans is not None and max_scans < 0:
         raise ghdiscover.DiscoveryError("--max-scans takes a number of scans, 0 or more")
+    max_graphql = getattr(args, "max_graphql_calls", None)
+    if max_graphql is not None and max_graphql < 0:
+        raise ghdiscover.DiscoveryError("--max-graphql-calls takes a number of calls, 0 or more")
     out = ghdiscover.run(store, scan=args.scan, max_calls=max_calls, filters=ghdiscover.Filters(patterns=patterns),
                          archive=getattr(args, "github_archive", False), scan_all=getattr(args, "github_scan_all", False),
                          max_scans=max_scans, events_url=getattr(args, "github_events_url", None),
-                         progress=_github_progress)
+                         progress=_github_progress,
+                         max_graphql_calls=ghdiscover.DEFAULT_MAX_GRAPHQL_CALLS if max_graphql is None else max_graphql)
     _print_github_run(out)
     bad = bool(out["campaigns"])
     quiet = [res for res in out["scans"] if res["verdict"] == "OK"]
@@ -8243,10 +8459,13 @@ def _print_github_archive(out):
         print(f"  {label}: passed over {', '.join(info['missing'])} UTC, still not published "
               f"{ghdiscover.ARCHIVE_GIVE_UP} hours after (a gap in the archive)")
     if info.get("thin"):
-        hint = (f"; --github-events-url {ghevents.MIRROR} reads OpenDigger's mirror of the same files"
-                if info.get("default", True) else "")
+        how = ("GitHub's GraphQL API says which new repositories got code, and GH Archive gives the ones made public"
+               if queue is not None else "--github-scan-all asks GitHub's GraphQL API which new repositories got code")
         print(f"  {label}: thin: under {ghevents.THIN_HOUR:,} events in an hour, where GitHub's public timeline has "
-              f"some 150,000 (GH Archive has missed most since 2025){hint}")
+              f"some 150,000 (GH Archive has missed most since 2025); {how}")
+        if info.get("default", True):
+            print(f"  {label}: OpenDigger's mirror of the same files ({ghevents.MIRROR}, --github-events-url) sent "
+                  f"some 1.5 KB/s where it was tried (Oct 2026), too slow to read an hour")
     if queue is None:
         return
     if queue["since"] is None:
@@ -8255,10 +8474,63 @@ def _print_github_archive(out):
     print(f"  every new repository (newer than ID {queue['since']}): {info['pushed']:,} got code; queued "
           f"{queue['queued']:,}, waiting for the listing {queue['pending']:,}, excluded {queue['excluded']:,}; "
           f"{queue['promoted']:,} that waited reached by the listing")
-    skipped = (f", {queue['skipped']:,} skipped (the queue keeps the newest {ghdiscover.QUEUE_MAX:,})"
-               if queue["skipped"] else "")
+    _print_github_graphql(out)
+    late_skipped = f", {queue['lateSkipped']:,} of them late finds" if queue.get("lateSkipped") else ""
+    skipped = (f", {queue['skipped']:,} skipped (the queue keeps the newest {ghdiscover.QUEUE_MAX:,} pushes, and as "
+               f"many late finds apart{late_skipped})" if queue["skipped"] else "")
     gone = f", {out['gone']} gone, made private or empty before the scan" if out.get("gone") else ""
-    print(f"  scanned {len(out['scans'])} this run{gone}; {queue['left']:,} left in the queue{skipped}")
+    late = (f" ({queue.get('lateScanned', 0):,} of them late finds: code found {ghdiscover.LATE_HOURS} hours or more "
+            f"after the listing, which have {ghdiscover.LATE_SCAN_SHARE:.0%} of the queue's scans)"
+            if queue.get("lateScanned") or queue.get("lateLeft") else "")
+    left_late = f" ({queue['lateLeft']:,} late finds)" if queue.get("lateLeft") else ""
+    print(f"  scanned {len(out['scans'])} this run{late}{gone}; {queue['left']:,} left in the queue{left_late}"
+          f"{skipped}")
+
+
+def _print_github_graphql(out):
+    """What GitHub's GraphQL API said of scan-all's listed repositories (GH-SCAN-GQL): how many were asked about,
+    had code (queued), were empty or forks with no push of their own (asked again), gone, not answered; the calls
+    and the points left; what was dropped; the calls of which nothing could be read, and the repositories GitHub
+    could not answer about (backed off); why it stopped, and how many wait to be asked."""
+    from lazaret.registry import ghdiscover
+    g = out.get("graphql")
+    if g is None:
+        return
+    s = lazaret.sanitize_term
+    hours = ghdiscover.CHECK_HOURS
+    if g["calls"]:
+        judged = "".join(f", {n:,} {what}" for n, what in ((g["campaigns"], "campaign repositories (not downloaded)"),
+                                                           (g["excluded"], "excluded by your patterns")) if n)
+        points = f"; {g['points']:,} points left" if g["points"] is not None else ""
+        reset = f" (until {s(g['reset'][11:16])} UTC)" if g["points"] is not None and g["reset"] else ""
+        late = f", {g['late']:,} of them late finds" if g.get("late") else ""
+        print(f"  GraphQL: asked about {g['asked']:,} new repositories in {g['calls']:,} call(s) ({g['fresh']:,} just "
+              f"listed, {g['again']:,} again): {g['code']:,} had code (queued{late}){judged}, {g['empty']:,} empty, "
+              f"{g['forks']:,} forks with no push of their own, {g['gone']:,} gone, {g['unanswered']:,} not answered"
+              f"{points}{reset}")
+    else:
+        print("  GraphQL: asked about none" + (f" ({g['listed']:,} listed)" if g["listed"] else ""))
+    dropped = [f"{n:,} {what}" for n, what in (
+        (g["expired"], f"with no code at their last scheduled ask ({hours[-1]} hours after they were listed)"),
+        (g["over"], f"over the bound (the newest {ghdiscover.LISTED_MAX:,} are kept)")) if n]
+    when = ", ".join(str(h) for h in hours[:-1]) + f" and {hours[-1]}"
+    aged = (f", {g['aged']:,} of them listed over {ghdiscover.PENDING_HOURS} hours ago and not answered yet (kept "
+            f"until they are)") if g["aged"] else ""
+    print(f"  GraphQL: {g['kept']:,} listed repositories wait for code (asked again {when} hours after they were "
+          f"listed){aged}" + (f"; dropped {', '.join(dropped)}" if dropped else ""))
+    if g["noNode"]:
+        print(f"  GraphQL: {g['noNode']:,} listed without a node ID, so not asked: their content is checked by REST "
+              f"instead (as a filter's candidates are)")
+    if g["unreadable"]:
+        isolated = (f"; {g['isolated']:,} repositories GitHub could not answer about wait to be asked again (1, 2, 4 "
+                    f"... hours on, at most {ghdiscover.GRAPHQL_BACKOFF_MAX_HOURS})") if g["isolated"] else ""
+        print(f"  GraphQL: {g['unreadable']:,} call(s) of which nothing could be read (an error of the whole query, "
+              f"or an answer not as asked), their repositories asked again in halves{isolated}")
+    if g["stopped"]:
+        print(f"  GraphQL: stopped: {s(g['stopped'])}; {g['waiting']:,} wait to be asked (the next run asks them)")
+    elif g["failed"]:
+        print(f"  GraphQL: {g['failed']} call(s) failed (the last: {s(g['error'])}); their repositories are asked "
+              f"again on the next run")
 
 
 def _github_run_errors(out, errors):
@@ -8268,6 +8540,17 @@ def _github_run_errors(out, errors):
         print(f"error: {s(e)}", file=sys.stderr)
         if errors is not None and e.startswith("github:"):
             errors.append(e.split(": ", 1)[0])
+    g = out.get("graphql")
+    if g is not None and g["stopped"]:
+        print(f"warning: github discovery's GraphQL part stopped early: {s(g['stopped'])}; {g['waiting']:,} listed "
+              f"repositories wait to be asked, and the next --resume run asks them", file=sys.stderr)
+    if g is not None and g["over"]:
+        from lazaret.registry import ghdiscover
+        print(f"warning: github discovery evicted {g['over']:,} listed repositories still waiting for code: the set "
+              f"keeps the newest {ghdiscover.LISTED_MAX:,} (they are no longer asked about)", file=sys.stderr)
+    if g is not None and g["noNode"]:
+        print(f"warning: GitHub listed {g['noNode']:,} new repositories without a node ID: GraphQL cannot be asked "
+              f"about them, so their content is checked by REST instead", file=sys.stderr)
     if not out["stopped"]:
         return
     more = f"; the next --resume run continues from repository {out['cursor']}" if out["cursor"] is not None else ""
@@ -8357,22 +8640,25 @@ def cmd_scan(store, specs, full, rescan, errors=None):
     return exit_bad
 
 
-def _print_candidates(candidates):
+def _print_candidates(candidates, listed=None):
     """`list`: the new GitHub repositories discovery kept (GH-NEW-REPOS), each with its state, what matched, the
     verdict of its scan or why it was dropped; --github-scan-all's repositories in counts, and those whose scan was
-    not OK (GH-SCAN-ALL: there are thousands)."""
+    not OK (GH-SCAN-ALL: there are thousands), with `listed`, the counts of those waiting for code that GitHub's
+    GraphQL API is asked about (GH-SCAN-GQL: Store.github_listed_counts)."""
     s = lazaret.sanitize_term
     every = [c for c in candidates if _scan_all_row(c)]
     candidates = [c for c in candidates if not _scan_all_row(c)]
     counts = {}
     for cand in candidates:
         counts[cand["state"]] = counts.get(cand["state"], 0) + 1
-    if every:
+    if every or listed:
         all_counts = {}
         for cand in every:
             all_counts[cand["state"]] = all_counts.get(cand["state"], 0) + 1
+        waiting = ("; waiting for code (asked of GitHub's GraphQL API): "
+                   + ", ".join(f"{k} {v:,}" for k, v in sorted(listed.items()))) if listed else ""
         print("\nEvery new repository (--github-scan-all): "
-              + ", ".join(f"{k} {v}" for k, v in sorted(all_counts.items())))
+              + (", ".join(f"{k} {v}" for k, v in sorted(all_counts.items())) or "none queued") + waiting)
         flagged = [c for c in every if c["state"] == "scanned" and c["verdict"] != "OK"]
         for cand in flagged[-50:]:
             print(f"  scanned   github:{s(cand['full_name']):<40} {s(cand['verdict'])} at "
@@ -8431,7 +8717,7 @@ HELP_EXAMPLES = """examples:
     lazaret-registry discover --ecosystem github --resume --github-archive --scan
     lazaret-registry discover --ecosystem github --resume --github-scan-all --max-scans 50
     lazaret-registry discover --ecosystem github --resume --github-scan-all \\
-        --github-events-url https://gharchive.open-digger.cn      the hourly events from OpenDigger's mirror
+        --max-graphql-calls 1000      GraphQL calls asking which new repositories got code (default 4000)
 
   The state database is --db (env LAZARET_DB): a SQLite path, by default lazaret-registry.db
   here, or a postgres:// URL. Exit codes: 0 ok, 1 a failure or (--ci) a SUSPICIOUS or
@@ -8516,13 +8802,17 @@ def main():
                          "ready without a content check, and a repository made public goes through the filters")
     ap.add_argument("--github-scan-all", action="store_true",
                     help="discover --ecosystem github: scan every new repository that gets code, not only the ones "
-                         "a filter keeps (reads GH Archive, scans: --github-archive --scan); your excludes and the "
+                         "a filter keeps (asks GitHub's GraphQL API which new repositories got code, reads GH "
+                         "Archive for those made public, scans: --github-archive --scan); your excludes and the "
                          "campaign markers still apply, and --max-scans caps a run's scans")
+    ap.add_argument("--max-graphql-calls", type=int, metavar="N",
+                    help="discover --ecosystem github --github-scan-all: GraphQL calls this run may make, each asking "
+                         "about 100 new repositories whether they got code (default 4000), apart from --max-calls")
     ap.add_argument("--github-events-url", metavar="URL", default=os.environ.get("LAZARET_GITHUB_EVENTS_URL"),
                     help="discover --ecosystem github: where the hourly event files come from (default "
                          "https://data.gharchive.org, GH Archive, which has missed most events since 2025; "
-                         "https://gharchive.open-digger.cn is OpenDigger's mirror of the same files; env "
-                         "LAZARET_GITHUB_EVENTS_URL)")
+                         "https://gharchive.open-digger.cn is OpenDigger's mirror of the same files, too slow to use "
+                         "where it was tried; env LAZARET_GITHUB_EVENTS_URL)")
     ap.add_argument("--max-scans", type=int, metavar="N",
                     help="discover --ecosystem github: repositories scanned this run at most (default: as many as "
                          "--max-calls allows; with --github-scan-all, 100), filter matches first, then the newest")
@@ -8537,11 +8827,14 @@ def main():
     github_only = [name for name, on in (("--github-archive", args.github_archive),
                                          ("--github-scan-all", args.github_scan_all),
                                          ("--max-scans", args.max_scans is not None),
+                                         ("--max-graphql-calls", args.max_graphql_calls is not None),
                                          ("--github-events-url", "--github-events-url" in sys.argv[1:]
                                           or any(a.startswith("--github-events-url=") for a in sys.argv[1:])))
                    if on]
     if github_only and (args.command != "discover" or "github" not in (args.ecosystem or [])):
         ap.error(f"{', '.join(github_only)}: these go with discover --ecosystem github --resume")
+    if args.max_graphql_calls is not None and not args.github_scan_all:
+        ap.error("--max-graphql-calls goes with --github-scan-all (only scan-all asks GitHub's GraphQL API)")
     try:
         _engine.require()
     except _engine.EngineError as exc:
@@ -8619,11 +8912,12 @@ def main():
         elif args.command == "list":
             rows = store.status()
             candidates = store.github_candidates()
-            if not rows and not candidates:
+            listed = store.github_listed_counts()
+            if not rows and not candidates and not listed:
                 print("no tracked packages")
                 return
-            if candidates:
-                _print_candidates(candidates)
+            if candidates or listed:
+                _print_candidates(candidates, listed)
             if not rows:
                 return
             print(f"\n{'package':<40} {'last scan':<22} {'version':<12} {'verdict':<11} issues")

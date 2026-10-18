@@ -18,10 +18,14 @@ the event's type, which every event keeps. GH Archive can miss an event, so a re
 checked as before (ghdiscover.check); this only makes it ready sooner.
 
 GH Archive has missed most of GitHub's events since 2025 (gharchive.org's issues #310, #320 and #323; an hour of
-October 2026 held some 5,000 events where the public timeline has some 150,000), so where the files come from is a
-setting (`source`: --github-events-url, env LAZARET_GITHUB_EVENTS_URL): OpenDigger's mirror
-(https://gharchive.open-digger.cn, since September 2026) serves the same names and format. A source is an https URL,
-its host the only one asked, on the default port, with no credential, query or fragment.
+October 2026 held some 5,000 events where the public timeline has some 150,000, and the hour 2026-10-17-4 held
+6,044 and no PushEvent or CreateEvent at all), so where the files come from is a setting (`source`:
+--github-events-url, env LAZARET_GITHUB_EVENTS_URL): OpenDigger's mirror (https://gharchive.open-digger.cn, since
+September 2026) serves the same names and format, but sent John's Mac some 1.5 KB/s on Oct 18 (a 335 MB hour), too
+slow to use there. Since GH-SCAN-GQL, --github-scan-all asks GitHub's GraphQL API which new repositories got code
+(ghdiscover); GH Archive still gives it the repositories made public, and a push read here still makes a
+repository ready or queued as before. A source is an https URL, its host the only one asked, on the default port,
+with no credential, query or fragment.
 
 Bounds, since the file is someone else's: the compressed file (ARCHIVE_BYTES), the text it unpacks to (TEXT_BYTES),
 a line (LINE_BYTES: a longer one is passed over, counted), and an event's fields (an ID a positive integer, a name

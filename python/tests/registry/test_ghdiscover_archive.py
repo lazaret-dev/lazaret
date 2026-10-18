@@ -348,7 +348,13 @@ class CommandLineTests(Case):
         self.assertIn("kept 0: no look-alike", out)
         self.assertIn("GH Archive: read 1 hour(s)", out)
         self.assertIn("thin: under 50,000 events in an hour", out)
-        self.assertIn("--github-events-url https://gharchive.open-digger.cn reads OpenDigger's mirror", out)
+        # (GH-SCAN-GQL: the mirror is no longer the fix the thin hour points to; GraphQL says which got code)
+        self.assertIn("GitHub's GraphQL API says which new repositories got code", out)
+        self.assertIn("OpenDigger's mirror of the same files (https://gharchive.open-digger.cn, --github-events-url) "
+                      "sent some 1.5 KB/s", out)
+        self.assertNotIn("reads OpenDigger's mirror", out)
+        self.assertIn("GraphQL: asked about 1 new repositories in 1 call(s) (1 just listed, 0 again): 0 had code "
+                      "(queued), 1 empty", out)
         self.assertIn("1 scanned OK (no supply-chain indicator", out)
         self.assertRegex(out, r"  .* OK .* github:u1/tool@0123456789ab  2 files, ")
         self.assertNotIn("profile: project", out)                 # (an OK scan in one line)
@@ -357,7 +363,8 @@ class CommandLineTests(Case):
         self.assertRegex(out, r"every new repository \(newer than ID 1000\): 1 got code; queued 1")
         self.assertIn("scanned 1 this run", out)
         code, out, _err = self.cli("list", "--db", self.db)
-        self.assertIn("Every new repository (--github-scan-all): scanned 1", out)
+        self.assertIn("Every new repository (--github-scan-all): scanned 1; waiting for code (asked of GitHub's "
+                      "GraphQL API): empty 1", out)
 
     def test_a_scan_that_is_not_ok_is_shown_in_full(self):
         self.store.save_discovery_cursor("github", 1001, NOW)

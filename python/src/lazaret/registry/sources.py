@@ -25,6 +25,13 @@ The rules are the registry module's (`repo.py`), applied to these hosts:
 - Nothing is run: no `git`, no archive hooks. Files are written under a
   fresh directory, by canonical relative path, never through a link.
 
+One POST (GH-SCAN-GQL, 0.1.9: GitHub's GraphQL API, `Client.post`): to the
+API host alone, over HTTPS, the token with it as with a GET, no redirect
+followed, a byte budget on the answer, and a deadline for the whole of it
+(the connection, TLS, the request, the headers and the body: the native
+transport's total timeout, or on urllib's F-07's `guard._Deadline`). The
+GETs keep their timeout for each read, as before.
+
 What an archive cannot show: `git archive` leaves out any path marked
 `export-ignore` in `.gitattributes`, so a payload can sit in the commit and
 out of its tarball. The commit's tree is listed (one call on GitHub, pages
@@ -41,6 +48,7 @@ fail closed, as everywhere in Lazaret.
 
 import contextlib
 import hashlib
+import http.client
 import json
 import os
 import re
@@ -76,14 +84,20 @@ GITLAB_TREE_PAGES = 100                   # of 100 entries: a larger tree is not
 MAX_MISSING_FILES = 300
 #: ... and within this many seconds (the registry's scan budget, LAZARET_SCAN_TIMEOUT)
 MISSING_FILES_SECONDS = _repo.SCAN_TIMEOUT
+#: GH-SCAN-GQL: a POST's answer at most (GitHub's GraphQL API: 100 repositories' fields are some 25 KB) and the
+#: seconds it has in all, from before its connection to its body's last byte
+POST_BYTES = 1024 * 1024
+POST_SECONDS = 60.0
 
 Source = namedtuple("Source", "kind path ref")
 
 
 class SourceError(ValueError):
     """A source was refused or could not be fetched. `status` is the HTTP
-    status when the server answered with an error."""
+    status when the server answered with an error, and `limits` that
+    answer's rate-limit headers (Retry-After, X-RateLimit-*, lower-cased)."""
     status = None
+    limits = None
 
 
 # ---------------------------------------------------------------- specs
@@ -210,17 +224,30 @@ def _explain(status, headers, url, what, has_token, kind):
     limited = status == 429 or "retry-after" in headers or headers.get("x-ratelimit-remaining") == "0"
     if status in (403, 429) and limited:
         when = ""
-        reset = headers.get("x-ratelimit-reset", "")
-        if reset.isdigit():
-            when = " until " + time.strftime("%H:%M UTC", time.gmtime(int(reset)))
-        elif headers.get("retry-after", "").isdigit():
-            when = f" for {headers['retry-after']} seconds"
+        reset, retry = headers.get("x-ratelimit-reset", ""), headers.get("retry-after", "")
+        if reset.isascii() and reset.isdigit() and len(reset) <= 12:
+            try:
+                when = " until " + time.strftime("%H:%M UTC", time.gmtime(int(reset)))
+            except (OverflowError, OSError, ValueError):     # (a time no clock holds: none said)
+                when = ""
+        elif retry.isascii() and retry.isdigit() and len(retry) <= 12:
+            when = f" for {retry} seconds"
         more = "" if has_token else f"; setting {var} (read-only) raises the limit"
         return f"{what}: rate limit reached, wait{when}{more}"
     return f"{what}: HTTP {status} from {_shown(url)}"
 
 
 _TOKEN_HEADERS = ("authorization", "private-token")
+
+
+def _refused(status, pairs, url, what, has_token, kind):
+    """The SourceError of an answer with an error status: `_explain`'s words, the status, and the answer's rate-limit
+    headers (`limits`), which tell GitHub's hourly limit from a secondary one (GH-SCAN-GQL)."""
+    headers = {str(k).lower(): str(v) for k, v in pairs}
+    err = SourceError(_explain(status, headers, url, what, has_token, kind))
+    err.status = status
+    err.limits = {k: v[:40] for k, v in headers.items() if k == "retry-after" or k.startswith("x-ratelimit-")}
+    return err
 
 
 def _keep_headers(into, pairs):
@@ -230,13 +257,19 @@ def _keep_headers(into, pairs):
 
 
 def _http(url, headers, max_bytes, hosts, auth_host, what="fetch", has_token=False, kind="github", auth_path="/",
-          reply_headers=None):
+          reply_headers=None, method="GET", data=None, seconds=None):
     """The real fetch: a byte-budgeted read, through the native transport (NET-1, scanner/nativenet.py: `hosts` the
     rule for the URL and every redirect), with the token as a credential of `auth_host` and the paths under
     `auth_path` (decision 14: the native client gives it to those hops and to no other, DESIGN.md §5j; a GitLab
     under a path prefix has the prefix); through urllib and `_Hop`, which takes a token off a redirect anywhere
     else, where the native transport is not to be used. `reply_headers`, a dict, gets the answer's headers,
-    lower-cased, an error's too (GH-NEW-REPOS reads GitHub's rate limit from them)."""
+    lower-cased, an error's too (GH-NEW-REPOS reads GitHub's rate limit from them). `method` "POST" sends `data`
+    (`_post`: no redirect followed, `seconds` in all); the seam takes a POST as it takes a GET."""
+    if method != "GET":
+        if method != "POST":
+            raise SourceError(f"{what}: the method {method!r} is not one sent")
+        return _post(url, headers, data, max_bytes, hosts, auth_host, what=what, has_token=has_token, kind=kind,
+                     auth_path=auth_path, reply_headers=reply_headers, seconds=seconds or POST_SECONDS)
     if _net.chosen(url):
         plain = [(k, v) for k, v in headers.items() if k.lower() not in _TOKEN_HEADERS]
         key = _net.host_key(f"https://{auth_host}/")
@@ -259,10 +292,7 @@ def _http(url, headers, max_bytes, hosts, auth_host, what="fetch", has_token=Fal
             _keep_headers(reply_headers, reply.headers)
             if 200 <= reply.status < 300:
                 return reply.body
-            err = SourceError(_explain(reply.status, {k.lower(): v for k, v in reply.headers}, url, what, has_token,
-                                       kind))
-            err.status = reply.status
-            raise err
+            raise _refused(reply.status, reply.headers, url, what, has_token, kind)
     opener = urllib.request.build_opener(_Hop(hosts, auth_host, auth_path), _net.HTTPSHandler())
     req = urllib.request.Request(url, headers=headers)
     try:
@@ -278,14 +308,116 @@ def _http(url, headers, max_bytes, hosts, auth_host, what="fetch", has_token=Fal
                     raise SourceError(f"{what}: response exceeds the {max_bytes // (1024 * 1024)}MB budget")
     except urllib.error.HTTPError as exc:
         _keep_headers(reply_headers, exc.headers.items())
-        err = SourceError(_explain(exc.code, {k.lower(): v for k, v in exc.headers.items()},
-                                   url, what, has_token, kind))
-        err.status = exc.code
-        raise err from None
+        raise _refused(exc.code, exc.headers.items(), url, what, has_token, kind) from None
     except urllib.error.URLError as exc:
         raise SourceError(f"{what}: {exc.reason}") from None
     except OSError as exc:                       # includes socket timeouts
         raise SourceError(f"{what}: network error ({type(exc).__name__})") from None
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """A POST follows no redirect: urllib makes the 3xx an HTTPError, the answer's status."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+def _post(url, headers, data, max_bytes, hosts, auth_host, what="post", has_token=False, kind="github", auth_path="/",
+          reply_headers=None, seconds=POST_SECONDS):
+    """A POST of `data` (GH-SCAN-GQL: a query of GitHub's GraphQL API) by `_http`'s rules, `hosts` the URL's, the
+    token a credential of `auth_host` on the native transport (decision 14) and on urllib's a header of this request
+    alone, the answer's headers into `reply_headers`, the body within `max_bytes`; and two more: no redirect is
+    followed (the answer is the API's own, an error otherwise), and `seconds` is the time it has in all, from before
+    the connection to the body's last byte. The native transport takes it as its total timeout; on urllib's it is
+    F-07's deadline (guard._Deadline: each connection made within it, a watchdog that ends a pending TLS handshake,
+    header read or body read when it is up, each read of the body cut to the time left, and an end the watchdog made
+    never taken for the body's end). -> the body; SourceError otherwise (`status` an HTTP error's)."""
+    timeout = min(_repo.METADATA_TIMEOUT, seconds)
+    if _net.chosen(url):
+        plain = [(k, v) for k, v in headers.items() if k.lower() not in _TOKEN_HEADERS]
+        key = _net.host_key(f"https://{auth_host}/")
+        credentials = [_net.Credential(key, auth_path, k, v) for k, v in headers.items()
+                       if k.lower() in _TOKEN_HEADERS]
+        try:
+            reply = _net.request(url, hosts=sorted(hosts), method="POST", headers=plain, data=data,
+                                 credentials=credentials, max_bytes=max_bytes, timeout=timeout, max_redirects=0,
+                                 total_timeout=seconds)
+        except _net.UsePython:
+            pass                                 # (urllib below)
+        except _net.NetError as exc:
+            if exc.kind == "too-large":
+                raise SourceError(f"{what}: response exceeds the {max_bytes // 1024} KB budget") from None
+            if exc.kind == "refused":
+                raise SourceError(f"{what}: redirect blocked ({exc})") from None
+            if "redirect" in str(exc):
+                raise SourceError(f"{what}: answered with a redirect, which a POST does not follow") from None
+            if exc.kind in ("timeout", "network"):
+                raise SourceError(f"{what}: network error ({exc.kind}; {seconds:g} s in all)") from None
+            raise SourceError(f"{what}: {exc}") from None
+        else:
+            _keep_headers(reply_headers, reply.headers)
+            if 200 <= reply.status < 300:
+                return reply.body
+            raise _refused(reply.status, reply.headers, url, what, has_token, kind)
+    from lazaret.registry import guard as _guard          # (F-07's deadline; the guard imports nothing of this module)
+    deadline = _guard._Deadline(seconds, _shown(url))
+    try:
+        return _post_urllib(url, headers, data, max_bytes, what, has_token, kind, reply_headers, deadline, timeout,
+                            _guard)
+    except _repo.FetchError:                     # (the deadline's: whatever a call returned or raised once it was up)
+        raise SourceError(f"{what}: no answer within {seconds:g} s") from None
+    finally:
+        deadline.close()
+
+
+def _post_opener(guard):
+    """urllib's opener for a POST: no redirect followed, and the guard's handlers, whose connections are made and
+    watched within a request's deadline (F-07); its HTTPS one is nativenet's, TLS_FLOOR and all (the TLS floor's
+    check reads this list: tests/scanner/test_tls_floor.py)."""
+    handlers = [_NoRedirect(), guard._HTTPHandler(), guard._HTTPSHandler()]
+    return urllib.request.build_opener(*handlers)
+
+
+def _post_urllib(url, headers, data, max_bytes, what, has_token, kind, reply_headers, deadline, timeout, guard):
+    """`_post` on urllib's transport, within `deadline` (guard._Deadline; its FetchError once the time is up)."""
+    opener = _post_opener(guard)
+    req = urllib.request.Request(url, data=data, headers=headers, method="POST")
+    req.lazaret_deadline = deadline
+    try:
+        resp = opener.open(req, timeout=timeout)
+    except urllib.error.HTTPError as exc:
+        exc.close()
+        deadline.check()
+        _keep_headers(reply_headers, exc.headers.items())
+        raise _refused(exc.code, exc.headers.items(), url, what, has_token, kind) from None
+    except urllib.error.URLError as exc:
+        deadline.check()
+        raise SourceError(f"{what}: {exc.reason}") from None
+    except (OSError, http.client.HTTPException) as exc:
+        deadline.check()
+        raise SourceError(f"{what}: network error ({type(exc).__name__})") from None
+    too_big = f"{what}: response exceeds the {max_bytes // 1024} KB budget"
+    with guard._Timed(resp, deadline, timeout) as r:
+        _keep_headers(reply_headers, r.headers.items())
+        length = r.headers.get("Content-Length")
+        if length and length.isdigit() and int(length) > max_bytes:
+            raise SourceError(too_big)
+        buf = bytearray()
+        while True:
+            try:
+                chunk = r.read1(_repo.FETCH_CHUNK)
+            except (OSError, http.client.HTTPException) as exc:
+                deadline.check()
+                raise SourceError(f"{what}: network error ({type(exc).__name__})") from None
+            if not chunk:
+                break
+            buf.extend(chunk)
+            if len(buf) > max_bytes:
+                raise SourceError(too_big)
+        deadline.check()                         # (an end the watchdog made is not the body's end)
+        if length and length.isdigit() and len(buf) != int(length):
+            raise SourceError(f"{what}: the answer ended after {len(buf)} of its {length} bytes")
+        return bytes(buf)
 
 
 def _json(raw, what):
@@ -333,6 +465,27 @@ class Client:
         more = {} if reply_headers is None else {"reply_headers": reply_headers}   # (a seam need not take it)
         return self._http(url, headers, max_bytes or _repo.MAX_FEED_BYTES, self.hosts, self.auth_host,
                           what=what, has_token=bool(self.token), kind=self.kind, auth_path=self.auth_path, **more)
+
+    def post(self, url, what, data, max_bytes=POST_BYTES, reply_headers=None, seconds=POST_SECONDS):
+        """POST `data` (JSON) to the API host itself, the token with it (GH-SCAN-GQL: `POST
+        https://api.github.com/graphql`, GitHub's GraphQL API): https and that host alone (not the archive's or the
+        raw files'), no redirect followed, `seconds` in all (`_post`). The seam `http` gets it as a GET, with
+        method="POST", data= and seconds=."""
+        parts = urllib.parse.urlsplit(url)
+        if parts.scheme != "https" or parts.netloc.lower() != self.auth_host \
+                or not _covers(parts, self.auth_host, self.auth_path):
+            raise SourceError(f"{what}: host not allowed ({parts.netloc!r})")
+        headers = {"User-Agent": _repo.USER_AGENT, "Accept": "application/json", "Content-Type": "application/json"}
+        if self.token:
+            if self.kind == "github":
+                headers["Authorization"] = f"Bearer {self.token}"
+            else:
+                headers["PRIVATE-TOKEN"] = self.token
+        self.calls.append(_shown(url))
+        more = {} if reply_headers is None else {"reply_headers": reply_headers}
+        return self._http(url, headers, max_bytes, {self.auth_host}, self.auth_host, what=what,
+                          has_token=bool(self.token), kind=self.kind, auth_path=self.auth_path, method="POST",
+                          data=bytes(data), seconds=seconds, **more)
 
     # -- GitHub
     def _gh(self, src):

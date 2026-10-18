@@ -43,8 +43,13 @@ def at(hours):
 
 def item(rid, full, description=None, fork=False):
     owner, name = full.split("/")
-    return {"id": rid, "full_name": full, "name": name, "owner": {"login": owner}, "description": description,
-            "fork": fork, "private": False}
+    return {"id": rid, "node_id": node_id(rid), "full_name": full, "name": name, "owner": {"login": owner},
+            "description": description, "fork": fork, "private": False}
+
+
+def node_id(rid):
+    """A listed repository's node ID, in GitHub's shape (made up)."""
+    return f"R_kgDO{rid:08d}"
 
 
 def failure(text, status):
@@ -74,17 +79,25 @@ def rules(res, sev=None):
 
 
 class FakeGitHub:
-    """The network seam: GitHub's listing, repositories and archives; every URL asked for is kept."""
+    """The network seam: GitHub's listing, repositories and archives, and its GraphQL API (GH-SCAN-GQL: a POST of
+    `nodes(ids:)`); every URL asked for is kept, and every GraphQL call's node IDs (`posts`)."""
 
-    def __init__(self, repos=(), info=None, files=None, page=100, remaining=None, truncated=()):
+    def __init__(self, repos=(), info=None, files=None, page=100, remaining=None, truncated=(), code=()):
         self.repos = sorted(repos, key=lambda r: r["id"])
         self.info = dict(info or {})          # full_name -> /repos answer, or an HTTP status
         self.files = dict(files or {})        # full_name -> {path: text}: what a scan fetches
         self.page, self.remaining, self.truncated = page, remaining, set(truncated)
         self.fail, self.seen, self.pages = {}, [], {}     # pages: since -> a page served as it is
+        self.code = set(code)                 # GraphQL: the repository IDs that have code (the others are empty)
+        self.nodes = {}                       # node ID -> the node GraphQL answers with (None: null), over the default
+        self.answers = []                     # the next GraphQL calls' answers, in turn: a document, bytes or an error
+        self.posts, self.bodies, self.points = [], [], 5000
 
-    def __call__(self, url, headers, max_bytes, hosts, auth_host, reply_headers=None, **kw):
+    def __call__(self, url, headers, max_bytes, hosts, auth_host, reply_headers=None, method="GET", data=None,
+                 **kw):
         self.seen.append(url)
+        if method == "POST":
+            return self._graphql(url, headers, data, hosts, reply_headers)
         self._count(reply_headers)
         if url in self.fail:
             raise self.fail[url]
@@ -99,6 +112,44 @@ class FakeGitHub:
             if body is not None:
                 return body
         raise SourceError(f"no answer for {url}")
+
+    def node(self, rid):
+        """The node GraphQL answers for a listed repository: empty, or with code when `code` has it (a fork made at
+        11:59 and pushed to at 12:30)."""
+        listed = next(r for r in self.repos if r["id"] == rid)
+        has = rid in self.code
+        return {"databaseId": rid, "nameWithOwner": listed["full_name"], "isEmpty": not has,
+                "isFork": bool(listed.get("fork")), "isPrivate": False, "createdAt": "2026-10-14T11:59:00Z",
+                "pushedAt": "2026-10-14T12:30:00Z" if has else None, "diskUsage": 12 if has else 0}
+
+    def _graphql(self, url, headers, data, hosts, reply_headers):
+        if url != f"{API}/graphql" or hosts != {"api.github.com"}:
+            raise SourceError(f"no answer for a POST to {url}")
+        doc = json.loads(data)
+        self.bodies.append((doc, dict(headers)))
+        ids = doc["variables"]["ids"]
+        self.posts.append(ids)
+        if self.answers:
+            ans = self.answers.pop(0)
+            if isinstance(ans, tuple):                  # (an answer, and the headers it comes with)
+                ans, more = ans
+                if reply_headers is not None:
+                    reply_headers.update(more)
+            if isinstance(ans, Exception):
+                raise ans
+            return ans if isinstance(ans, bytes) else json.dumps(ans).encode()
+        by_node = {r.get("node_id"): r["id"] for r in self.repos}
+        nodes = [self.nodes[n] if n in self.nodes else self.node(by_node[n]) if n in by_node else None for n in ids]
+        errors = [{"type": "NOT_FOUND", "path": ["nodes", i], "message": f"Could not resolve to a node with the "
+                   f"global id of '{n}'"} for i, n in enumerate(ids) if nodes[i] is None]
+        self.points -= 1
+        if reply_headers is not None:
+            reply_headers.update({"x-ratelimit-remaining": str(self.points), "x-ratelimit-resource": "graphql"})
+        answer = {"data": {"nodes": nodes, "rateLimit": {"cost": 1, "remaining": self.points,
+                                                         "resetAt": "2026-10-14T13:00:00Z"}}}
+        if errors:
+            answer["errors"] = errors
+        return json.dumps(answer).encode()
 
     def _count(self, reply_headers):
         if self.remaining is None:
@@ -505,7 +556,7 @@ class CandidateConn(FakeConn):
     def execute_script(self, sql):
         super().execute_script(sql)
         for statement in sql.split(";"):
-            if "github_candidates" in statement:
+            if "github_candidates" in statement and "ADD COLUMN IF NOT EXISTS" not in statement:   # (Postgres's)
                 self.db.execute(statement)
 
     def _run(self, op, sql, args):

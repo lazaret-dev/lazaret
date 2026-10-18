@@ -335,6 +335,52 @@ aggregate):
   `https://gharchive.open-digger.cn`, serves the same files) and a thin hour is said; a repository gone, made private
   or empty before its scan (GitHub's 404 or 409) is counted, not an error that fails the run; an OK scan is one line
   in the run's output, a scan that is not OK in full; a long run says on stderr where it is.
+- **Scan-all learns which new repositories got code from GitHub's GraphQL API (GH-SCAN-GQL; John, Oct 18).** His runs
+  of Oct 18: OpenDigger's mirror of GH Archive sent his Mac some 1.5 KB/s (a 335 MB hour), and GH Archive's hour
+  2026-10-17-4 held 6,044 events and no PushEvent or CreateEvent at all, so three hours of scan-all queued no
+  repository that got code (its 18 scans were all of repositories made public). Now each repository the listing gives
+  `--github-scan-all` that nothing kept is asked about by its node ID: `POST https://api.github.com/graphql`,
+  `nodes(ids: …)` for up to 100 at a time (`isEmpty`, `isFork`, `isPrivate`, `createdAt`, `pushedAt`, `diskUsage`, and
+  `rateLimit`), right after its listing page, and while it has no code again 1, 6, 24 and 72 hours after it was
+  listed, after the run's scans and before its listing: a quarter of the run's calls, and of its GraphQL time, for the
+  due ones listed longest ago, oldest first, the rest newest first. Code: queued as of when it arrived (`pushedAt`,
+  held between `createdAt` and now; the run's time when it is not known) and scanned from the next run on, as the
+  listing's finds are, so the scans take finds made when listed and finds made later by push time, neither starved
+  (`all: got code (GraphQL)`, the name GraphQL gives judged again for campaign markers and your excludes); empty:
+  asked again, and dropped when its last scheduled ask (72 hours) says so; a null repository a `NOT_FOUND` error
+  names, or one made private: dropped; each counted. A fork is queued once it was pushed to after it was made, as GH
+  Archive queued a fork only on a push. Fail closed: an error for a repository, a null one no error names, a field
+  missing (`pushedAt` too), of another type, out of range or another repository's, an error of the whole query, a
+  partial or longer answer, an HTTP error, a body over 1 MB or not JSON leave the repository waiting, to be asked
+  again however long that takes; it is never dropped or taken as empty for that, and the run says so. One GitHub
+  cannot answer about waits 1, 2, 4 … hours, at most 72, before its next ask (`fails`), never dropped for it. A call
+  of which nothing could be read is asked again in halves, level by level down to single repositories, so that one
+  whose node fails the whole query is found and made to wait and the rest of its batch answered; when two levels in a
+  row read no better, a call elsewhere, about a repository GitHub has answered about (this run, or an earlier one) or
+  else the newest rows due, tells GitHub failing from such repositories, and three such batches in a row whose control
+  calls fail too, or with none to make, three failed calls (HTTP, not JSON, over the budget) or 900 seconds end the
+  asking for the run, with nothing made to wait. The waiting set keeps the newest 500,000, and what it evicts is
+  counted and said on stderr. GraphQL's own rate limit (`rateLimit.remaining` or the header at 100, `RATE_LIMITED`, a
+  403 with no points left) stops the asking but not the listing; a secondary limit (a `Retry-After` on any answer, 200
+  included, an error about a secondary rate limit, a 429), counted over the token's REST and GraphQL calls alike,
+  stops the run as the REST limit does; REST's own limit stops REST's calls alone, so the asks go on after the scans
+  stopped on it, unless the refusal is a secondary limit (a `Retry-After`, or a 429 that does not say the requests are
+  spent). A header or a date not understood is unknown, never an error of the run (REST's rate-limit headers too). A
+  listing item without a node ID goes to the REST content checks, said on stderr. `--max-graphql-calls N` (default
+  4,000; with `--github-scan-all` only), apart from `--max-calls`. New: the store's `github_listed` table (made in an
+  older SQLite or Postgres database when it is opened; `schema.sql`), an older table given the columns added since
+  (`fails`, and `github_candidates.late_at`), written in repo_id order with its rows locked first on Postgres, and a
+  batch rolled back for a deadlock done again, so two runs at once on one database no longer deadlock;
+  `sources.Client.post` (the API host alone, the token with it, no redirect followed, a 1 MB budget and 60 seconds for
+  the whole call: the native transport's total timeout, or on urllib's F-07's deadline; the GETs are unchanged). Late
+  finds (John, Oct 20): a repository whose code a re-ask 6 hours or more after the listing found (the 6, 24 and 72
+  hours' asks) has a quarter of the queue's scans, rounded up, the first found first, since its push, hours old when
+  found, would lose the newest-push queue to every new hour's; the rest go newest push first, a share not used going
+  to the other; the queue keeps the 1,000 newest pushes and, apart, the 1,000 late finds found last. GH Archive stays
+  for the repositories made public, and its pushes still queue; a thin hour no longer points to the mirror as the fix.
+  The run's report says how many were asked about, had code, were empty, forks, gone or not answered, the calls and
+  the points left, the calls of which nothing could be read and who waits for it, the late finds queued, scanned and
+  left; `list` counts what waits.
 - **`--show-secrets`: the credentials on the terminal, and nowhere else.** Every finding is redacted where it is made,
   so a secret finding's line was a placeholder on the terminal too. `lazaret . --show-secrets`, `lazaret hook
   --show-secrets` and `lazaret-registry scan --show-secrets` print each finding's flagged line as it was read, kept

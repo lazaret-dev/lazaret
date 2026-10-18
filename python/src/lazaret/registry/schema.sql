@@ -86,8 +86,11 @@ CREATE TABLE IF NOT EXISTS github_candidates (
     commit_sha     TEXT,                 -- the commit scanned
     verdict        TEXT,
     last_error     TEXT,                 -- why it was dropped, or what failed last
-    updated_at     TEXT NOT NULL
+    updated_at     TEXT NOT NULL,
+    late_at        TEXT                  -- GH-SCAN-GQL: when a re-ask 6 hours or more after the listing found its
+                                         -- code (a late find, which has a share of the scans); NULL for the others
 );
+ALTER TABLE github_candidates ADD COLUMN IF NOT EXISTS late_at TEXT;
 
 -- `python -m lazaret.registry.actions --db` (RA-4): the commit each version tag
 -- of an action pointed to when the action scan first saw it, so a tag that
@@ -114,6 +117,30 @@ ALTER TABLE action_tags ADD COLUMN IF NOT EXISTS tag_only_sha TEXT;
 ALTER TABLE action_tags ADD COLUMN IF NOT EXISTS moved_from TEXT;
 ALTER TABLE action_tags ADD COLUMN IF NOT EXISTS moved_from_at TEXT;
 
+-- `discover --ecosystem github --resume --github-scan-all` (GH-SCAN-GQL): the
+-- new repositories the listing gave scan-all that nothing kept, waiting for
+-- code, asked of GitHub's GraphQL API by their node IDs; one that got code
+-- moves to github_candidates (queued), one gone or still without code after
+-- the last check is deleted
+CREATE TABLE IF NOT EXISTS github_listed (
+    repo_id     BIGINT PRIMARY KEY,      -- GitHub's repository ID
+    node_id     TEXT NOT NULL,           -- its GraphQL node ID (the listing's node_id)
+    full_name   TEXT NOT NULL,           -- owner/repo, as listed
+    description TEXT,
+    fork        INTEGER NOT NULL,        -- 1 for a fork
+    listed_at   TEXT NOT NULL,           -- ISO 8601 UTC
+    state       TEXT NOT NULL,           -- 'unasked' | 'empty' | 'fork' (a fork with no push of its own)
+    next_check  TEXT NOT NULL,           -- when it is asked next (1, 6, 24 and 72 hours after listed_at)
+    checks      INTEGER NOT NULL,        -- the answers "no code yet" so far
+    fails       INTEGER NOT NULL DEFAULT 0, -- the asks in a row GitHub could not answer about it (each puts
+                                            -- it off longer)
+    last_error  TEXT,                    -- why the last ask got no answer
+    updated_at  TEXT NOT NULL
+);
+ALTER TABLE github_listed ADD COLUMN IF NOT EXISTS fails INTEGER NOT NULL DEFAULT 0;
+CREATE INDEX IF NOT EXISTS idx_github_listed_listed ON github_listed(listed_at, repo_id);
+
 GRANT SELECT, INSERT, UPDATE, DELETE ON packages, scans, discovery_cursors, github_candidates TO lazaret_app;
 GRANT SELECT, INSERT, UPDATE, DELETE ON action_tags TO lazaret_app;
+GRANT SELECT, INSERT, UPDATE, DELETE ON github_listed TO lazaret_app;
 GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO lazaret_app;
