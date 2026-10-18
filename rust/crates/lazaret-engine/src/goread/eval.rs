@@ -20,7 +20,7 @@ use super::lit;
 use crate::goparse::scan::Tok;
 use crate::goparse::tree::{Kind as K, Node, NodeId, Tree, ELLIPSIS, NONE};
 use crate::jsflow::supply::{K_BYTES, K_DECODED, K_IDENTITY, K_PATH, K_WHOLE_ENV};
-use crate::model::events::{self, derived, path_join, text_of_bytes, CmdState, ConnState, Ev, ReqState, WState};
+use crate::model::events::{self, derived, text_of_bytes, CmdState, ConnState, Ev, ReqState, WState};
 use crate::model::val::{self, Obj, Val, UNKNOWN};
 use crate::pack::Pack;
 use crate::pystr::{self, u, PyStr};
@@ -2045,7 +2045,7 @@ impl<'k, 'a> Model<'k, 'a> {
             ("path/filepath", "Walk") | ("path/filepath", "WalkDir") => {
                 // the callback, given a path below the root
                 let root = a(0);
-                let mut p = path_join(&root, &Val::text(vec![UNKNOWN]));
+                let mut p = crate::model::paths::apply(crate::model::paths::Api::GoJoin(crate::model::paths::Flavor::Native), &[root.clone(),Val::text(vec![UNKNOWN])]);
                 p.add_kinds(&root);
                 if let Obj::Closure(k) = a(1).obj {
                     self.call_closure(k, vec![p, Val::unknown(), Val::unknown()], false, Some(f));
@@ -2054,14 +2054,8 @@ impl<'k, 'a> Model<'k, 'a> {
             }
             ("path/filepath", "Join") | ("path", "Join") => {
                 let parts = rest(0);
-                let mut v = match parts.first() {
-                    Some(x) => x.clone(),
-                    None => Val::text(Vec::new()),
-                };
-                for x in parts.iter().skip(1) {
-                    v = path_join(&v, x);
-                }
-                v
+                use crate::model::paths::{apply,Api,Flavor};
+                apply(Api::GoJoin(if p=="path" {Flavor::Posix} else {Flavor::Native}), &parts)
             }
             ("path/filepath", "Abs") | ("path/filepath", "Clean") | ("path", "Clean") | ("path/filepath", "FromSlash") | ("path/filepath", "ToSlash") => a(0),
             ("path/filepath", "Dir") | ("path", "Dir") => crate::model::deletion::parent(&a(0)),
@@ -2218,14 +2212,14 @@ impl<'k, 'a> Model<'k, 'a> {
                 Val::unknown()
             }
             ("os", "CreateTemp") | ("io/ioutil", "TempFile") => {
-                let mut path = path_join(&a(0), &Val::concat(&Val::text(vec![UNKNOWN]), &a(1)));
+                let mut path = crate::model::paths::apply(crate::model::paths::Api::GoJoin(crate::model::paths::Flavor::Native), &[a(0),Val::concat(&Val::text(vec![UNKNOWN]), &a(1))]);
                 path.id = self.fresh_id();
                 let idx = self.wfiles.len() as u32;
                 self.wfiles.push(WState { path, append: false });
                 Val::obj(Obj::WFile(idx))
             }
             ("os", "MkdirTemp") | ("io/ioutil", "TempDir") => {
-                let mut path = path_join(&a(0), &Val::concat(&Val::text(vec![UNKNOWN]), &a(1)));
+                let mut path = crate::model::paths::apply(crate::model::paths::Api::GoJoin(crate::model::paths::Flavor::Native), &[a(0),Val::concat(&Val::text(vec![UNKNOWN]), &a(1))]);
                 path.id = self.fresh_id();
                 path
             }

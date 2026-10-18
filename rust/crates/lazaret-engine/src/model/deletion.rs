@@ -240,6 +240,10 @@ fn overlaps(parts: &[&str], protected: &str) -> bool {
 
 /// Lexical normalization preserves home/absolute namespaces and resolves '..' before cache exclusions.
 pub fn dangerous(path: &Val) -> bool {
+    dangerous_one(path) || path.path_win.as_ref().is_some_and(|s| dangerous_one(&Val::text((**s).clone())))
+}
+
+fn dangerous_one(path: &Val) -> bool {
     let Some(raw) = &path.s else { return false };
     let mut s = pystr::to_string(raw).replace('\\', "/");
     if s == REPOSITORIES { return true }
@@ -319,6 +323,13 @@ pub fn profile_env(name:&[u32]) -> Option<&'static str> {
     match pystr::to_string(name).as_str() {"HOME"|"USERPROFILE"=>Some("~"),"APPDATA"=>Some("~/AppData/Roaming"),"LOCALAPPDATA"=>Some("~/AppData/Local"),_=>None}
 }
 fn literal_key(path: &Val) -> Option<String> {
+    let key=literal_key_one(path)?;
+    if let Some(s)=&path.path_win {
+        if literal_key_one(&Val::text((**s).clone()))?!=key {return None}
+    }
+    Some(key)
+}
+fn literal_key_one(path: &Val) -> Option<String> {
     let mut s=pystr::to_string(path.s.as_ref()?).replace('\\',"/");
     for h in ["${HOME}","$HOME","${USERPROFILE}","$USERPROFILE","%USERPROFILE%","%HOME%"] {
         if s==h || s.starts_with(&format!("{h}/")) {s=format!("~{}",&s[h.len()..]);break}
@@ -339,6 +350,11 @@ pub fn exempt_folder(path: &Val) -> bool {
 }
 
 pub fn parent(v: &Val) -> Val {
+    let mut p=parent_one(v);
+    if let Some(w)=&v.path_win {p.set_windows(parent_one(&Val::text((**w).clone())).text_or_unknown());}
+    p
+}
+fn parent_one(v: &Val) -> Val {
     if v.s.as_ref().is_some_and(|s| pystr::eq(s, REPOSITORIES)) { return v.clone() }
     let Some(s) = &v.s else { return Val::unknown().with_kinds(v) };
     let s = pystr::to_string(s).replace('\\', "/");

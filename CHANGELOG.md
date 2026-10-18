@@ -21,6 +21,14 @@ The native listing callee must have one unambiguous binding, followed through al
 
 Directory expressions at the listing and join also require single-write, scope-qualified literal/native provenance. Augmented, annotated, destructuring and other unsupported writes cannot reuse an earlier decoy value. Global/nonlocal declarations, dynamic namespace access and star imports conservatively disable listing exemptions in that source; failed provenance retains the may-resolve deletion reading. JavaScript global-object access similarly prevents an exemption.
 
+F-05 (rule set 2.102.0) gives the path readers separate operations for Node join and resolve, Python POSIX and Windows joins, Go path/filepath joins, and Rust path pushes/joins. Later absolute components append in Node/Go joins; Python joins can reset the root or drive. Native-platform operations retain two correlated POSIX/Windows interpretations; either can add a deletion or credential-read finding, and a listing exemption requires the directory interpretations to agree. No target cwd or filesystem is consulted. A home API supplies an absolute symbolic anchor; a literal tilde component is not expanded by joining. Dot normalization retains unknown components when their cancellation would discard uncertainty. The shared path helper is removed. The regression matrix compares inert strings with Node/Python path libraries, plus Go standard-library tests selected for the running platform.
+
+F-05 independent v3 review: retain the possible same-drive home reading for Windows drive-relative joins, preserve credential suffixes, and distinguish the home anchor from an unknown cwd. Explicit-drive Node resolution keeps its absolute root; ordinary relative paths remain unknown. A later absolute reset still takes effect.
+
+Path assembly checks a conservative MAX_TEXT bound before allocating intermediates, retains a bounded prefix plus unknown interpretation on overflow, and charges the engine work budget by text length. Callers collect each part once and evaluate the whole API operation only at completion (or once to check a listed-name prefix); resolve selects components before joining instead of repeatedly prepending strings. Shared input conversions and fixed-platform operations avoid duplicate work. These bounds preserve uncertainty instead of exempting truncated paths.
+
+The F-05 loss audit also retainsthe protected reading for Node `os.userInfo().homedir` and the conventional XDG config/data roots when a later slash no longer resets `path.join` to `/`. These are conservative named-root readings; arbitrary environment values remain unknown.
+
 Where the numbers stand (rerun October 10 on this engine: the benchmark's 516 malicious releases and 429
 popular packages are in-sample; the holdout is 745 other malicious releases of the same dataset, read only in
 aggregate):

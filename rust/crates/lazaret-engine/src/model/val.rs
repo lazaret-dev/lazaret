@@ -62,6 +62,9 @@ pub enum Obj {
 pub struct Val {
     /// The text it holds, where the code builds one ([`UNKNOWN`] for a piece not known).
     pub s: Option<Rc<PyStr>>,
+    /// The same path expression on Windows when its POSIX reading differs.
+    /// Two correlated interpretations, never a cross product of alternatives.
+    pub path_win: Option<Rc<PyStr>>,
     /// The items of a list.
     pub items: Option<Rc<Vec<Val>>>,
     /// An integer's value.
@@ -87,6 +90,11 @@ impl Val {
             s.push(UNKNOWN);
         }
         Val { s: Some(Rc::new(s)), ..Val::default() }
+    }
+
+    /// A home-directory API's symbolic path, distinct from a literal tilde.
+    pub fn home(s: PyStr) -> Val {
+        Val::text(s).with_kinds(&Val::source(crate::jsflow::supply::K_PATH,crate::pystr::u("home"),0))
     }
 
     pub fn int(n: i128) -> Val {
@@ -127,7 +135,7 @@ impl Val {
 
     /// Is the whole text known?
     pub fn known(&self) -> bool {
-        self.s.as_ref().is_some_and(|s| !s.contains(&UNKNOWN))
+        self.s.as_ref().is_some_and(|s| !s.contains(&UNKNOWN)) && self.path_win.as_ref().is_none_or(|s| !s.contains(&UNKNOWN))
     }
 
     /// The kinds and sources of `other`, added.
@@ -189,9 +197,22 @@ impl Val {
         let mut s = a.text_or_unknown();
         s.extend(b.text_or_unknown());
         let mut v = Val::text(collapse(s));
+        if a.path_win.is_some() || b.path_win.is_some() {
+            let mut w=a.windows_text();w.extend(b.windows_text());
+            v.set_windows(collapse(w));
+        }
         v.add_kinds(a);
         v.add_kinds(b);
         v
+    }
+
+    pub fn windows_text(&self) -> PyStr {
+        self.path_win.as_ref().map(|s| (**s).clone()).unwrap_or_else(|| self.text_or_unknown())
+    }
+
+    pub fn set_windows(&mut self, s: PyStr) {
+        let s=Val::text(s).s;
+        self.path_win=if s==self.s {None} else {s};
     }
 
     /// A kind's name as the text follower writes it (`environment`, `file`, …).

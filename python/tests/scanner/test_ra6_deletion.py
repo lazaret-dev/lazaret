@@ -57,6 +57,14 @@ class DeletionTests(unittest.TestCase):
         cyclic="const fs=require('fs'),path=require('path');const D=path.join(require('os').homedir(),'.tool',name);const names=fs.readdirSync(D);const name=names[i];fs.rmSync(D,{recursive:true});"
         self.assertIn(REASON,_native.call("install_script_risk",{"lang":"js"},cyclic))
 
+    def test_path_built_file_exfiltration_stays_critical(self):
+        cases=json.loads((Path(__file__).resolve().parents[3]/"tests/fixtures/path-built-reads.json").read_text(encoding="utf-8"))
+        for case in cases:
+            with self.subTest(name=case["name"]):
+                reasons=_native.call("install_script_risk",{"lang":case["lang"]},case["text"])
+                self.assertTrue(any("reads files outside the package and sends them" in r for r in reasons),reasons)
+                self.assertEqual(_native.call("install_script_severity",{"reasons":reasons}),"CRITICAL")
+
     def test_alias_expansion_is_bounded(self):
         # A tiny alias DAG must not expand exponentially. No source is executed.
         py = 'import shutil, os\np0 = os.getenv("HOME")\n'

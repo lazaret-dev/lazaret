@@ -651,3 +651,11 @@ fn ra6_rework_shared_paths() {
         assert_eq!(has(&rs(&a.build),"deletes the user's files"),expected,"{path}: {a:?}");
     }
 }
+
+#[test]
+fn path_join_keeps_the_windows_drive_reset() {
+    let a=build(r#"let p=std::path::PathBuf::from("C:/Users/example/.tool/state").join("D:/Users/example/Documents");std::fs::remove_dir_all(p).unwrap();"#);
+    assert!(has(&rs(&a.build),"deletes the user's files"),"{a:?}");
+    let a=build(r#"let p=std::path::PathBuf::from("/home/example/.tool/state").join("~");std::fs::remove_dir_all(p).unwrap();"#);
+    assert!(!has(&rs(&a.build),"deletes the user's files"),"{a:?}");
+}

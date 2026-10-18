@@ -153,7 +153,7 @@
       "found": true
     },
     {
-      "path": "~/.tool/\ufffd",
+      "path": "~/.tool/�",
       "found": true
     },
     {
@@ -2501,6 +2501,132 @@
       "found": true
     },
     {
+      "name": "v2-path-js-join-absolute-part",
+      "lang": "js",
+      "text": "const fs=require('fs'),path=require('path');fs.rmSync(path.join('/home/example','/Documents'),{recursive:true});",
+      "found": true
+    },
+    {
+      "name": "v2-path-js-resolve-control",
+      "lang": "js",
+      "text": "const fs=require('fs'),path=require('path');fs.rmSync(path.resolve('/home/example','/Documents'),{recursive:true});",
+      "found": false
+    },
+    {
+      "name": "v2-path-py-ntpath-drive-reset",
+      "lang": "py",
+      "text": "import ntpath,shutil\nshutil.rmtree(ntpath.join('C:/Users/example/.tool/state','C:/Users/example/Documents'))",
+      "found": true
+    },
+    {
+      "name": "v2-path-py-ntpath-other-drive-reset",
+      "lang": "py",
+      "text": "import ntpath,shutil\nshutil.rmtree(ntpath.join('C:/Users/example/.tool/state','D:/Users/example/Documents'))",
+      "found": true
+    },
+    {
+      "name": "v2-path-py-posix-absolute-control",
+      "lang": "py",
+      "text": "import os,shutil\nshutil.rmtree(os.path.join('/home/example','/Documents'))",
+      "found": false
+    },
+    {
+      "name": "v2-path-js-join-5",
+      "lang": "js",
+      "text": "require('fs').rmSync(require('path').join(\"/home/example\",\"/Documents\"),{recursive:true});",
+      "found": true
+    },
+    {
+      "name": "v2-path-js-join-6",
+      "lang": "js",
+      "text": "require('fs').rmSync(require('path').join(\"/home/example/.tool/state\",\"~\"),{recursive:true});",
+      "found": false
+    },
+    {
+      "name": "v2-path-js-join-7",
+      "lang": "js",
+      "text": "require('fs').rmSync(require('path').join(\"/home/example/.tool/state\",\"../../Documents\"),{recursive:true});",
+      "found": true
+    },
+    {
+      "name": "v2-path-js-join-8",
+      "lang": "js",
+      "text": "require('fs').rmSync(require('path').join(\"/home/example/.tool/state\",\"../state\",\"cache\"),{recursive:true});",
+      "found": false
+    },
+    {
+      "name": "v2-path-js-posix.join-9",
+      "lang": "js",
+      "text": "require('fs').rmSync(require('path').posix.join(\"/home/example\",\"/Documents\"),{recursive:true});",
+      "found": true
+    },
+    {
+      "name": "v2-path-js-posix.join-10",
+      "lang": "js",
+      "text": "require('fs').rmSync(require('path').posix.join(\"/home/example/.tool/state\",\"~\"),{recursive:true});",
+      "found": false
+    },
+    {
+      "name": "v2-path-js-posix.join-11",
+      "lang": "js",
+      "text": "require('fs').rmSync(require('path').posix.join(\"/home/example/.tool/state\",\"../../Documents\"),{recursive:true});",
+      "found": true
+    },
+    {
+      "name": "v2-path-js-posix.join-12",
+      "lang": "js",
+      "text": "require('fs').rmSync(require('path').posix.join(\"/home/example/.tool/state\",\"../state\",\"cache\"),{recursive:true});",
+      "found": false
+    },
+    {
+      "name": "v2-path-js-win32.join-13",
+      "lang": "js",
+      "text": "require('fs').rmSync(require('path').win32.join(\"/home/example\",\"/Documents\"),{recursive:true});",
+      "found": true
+    },
+    {
+      "name": "v2-path-js-win32.join-14",
+      "lang": "js",
+      "text": "require('fs').rmSync(require('path').win32.join(\"/home/example/.tool/state\",\"~\"),{recursive:true});",
+      "found": false
+    },
+    {
+      "name": "v2-path-js-win32.join-15",
+      "lang": "js",
+      "text": "require('fs').rmSync(require('path').win32.join(\"/home/example/.tool/state\",\"../../Documents\"),{recursive:true});",
+      "found": true
+    },
+    {
+      "name": "v2-path-js-win32.join-16",
+      "lang": "js",
+      "text": "require('fs').rmSync(require('path').win32.join(\"/home/example/.tool/state\",\"../state\",\"cache\"),{recursive:true});",
+      "found": false
+    },
+    {
+      "name": "v2-path-py-ntpath-17",
+      "lang": "py",
+      "text": "import ntpath,shutil\nshutil.rmtree(ntpath.join('C:/Users/example/.tool/state','D:/Users/example/Documents'))",
+      "found": true
+    },
+    {
+      "name": "v2-path-py-ntpath-18",
+      "lang": "py",
+      "text": "import ntpath,shutil\nshutil.rmtree(ntpath.join('C:/Users/example/.tool/state','\\\\Users\\\\example\\\\Documents'))",
+      "found": true
+    },
+    {
+      "name": "v2-path-py-os.path-19",
+      "lang": "py",
+      "text": "import os.path,shutil\nshutil.rmtree(os.path.join('C:/Users/example/.tool/state','D:/Users/example/Documents'))",
+      "found": true
+    },
+    {
+      "name": "v2-path-py-os.path-20",
+      "lang": "py",
+      "text": "import os.path,shutil\nshutil.rmtree(os.path.join('C:/Users/example/.tool/state','\\\\Users\\\\example\\\\Documents'))",
+      "found": true
+    },
+    {
       "name": "v3-directory-path-attribute-write",
       "lang": "py",
       "text": "import os, shutil\nfrom pathlib import Path\nD = Path('/home/example/.mytool/cache')\nD._str = '/home/example/Documents'\nfor n in os.listdir(D):\n    shutil.rmtree(os.path.join(D,n))\n",
@@ -2619,6 +2745,30 @@
       "lang": "py",
       "text": "import os, shutil, sys, glob\nfrom pathlib import Path\nD = os.path.join(os.path.expanduser('~'), '.mytool', 'cache')\nfor n in filter(lambda x: setattr(os, 'listdir', replacement) or True, os.listdir(D)):\n    shutil.rmtree(os.path.join(D, n))\n",
       "found": true
+    },
+    {
+      "name": "v4-root-js|userinfo||join-slash|rmSync",
+      "lang": "js",
+      "text": "const fs=require('fs'),os=require('os'),path=require('path'),cp=require('child_process');\nfs.rmSync((path.join(os.userInfo().homedir, \"/\")), {recursive: true, force: true});\n",
+      "found": true
+    },
+    {
+      "name": "v4-root-js|env-XDG_CONFIG_HOME||join-slash|rmSync",
+      "lang": "js",
+      "text": "const fs=require('fs'),os=require('os'),path=require('path'),cp=require('child_process');\nfs.rmSync((path.join(process.env.XDG_CONFIG_HOME, \"/\")), {recursive: true, force: true});\n",
+      "found": true
+    },
+    {
+      "name": "v4-root-js|env-XDG_DATA_HOME||join-slash|rmSync",
+      "lang": "js",
+      "text": "const fs=require('fs'),os=require('os'),path=require('path'),cp=require('child_process');\nfs.rmSync((path.join(process.env.XDG_DATA_HOME, \"/\")), {recursive: true, force: true});\n",
+      "found": true
+    },
+    {
+      "name": "v4-userinfo-own-cache",
+      "lang": "js",
+      "text": "const os=require('os'),fs=require('fs'),path=require('path');fs.rmSync(path.join(os.userInfo().homedir,'.tool/cache'),{recursive:true});",
+      "found": false
     }
   ]
 }

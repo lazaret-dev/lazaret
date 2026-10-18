@@ -2707,13 +2707,28 @@ impl<'p> Analyzer<'p> {
         }
         self.sc_delete_path_inner(n,depth,work,listings)
     }
+    fn sc_delete_join_args(&mut self,api:crate::model::paths::Api,initial:Option<NodeId>,args:&[NodeId],depth:usize,work:&mut usize,listings:bool)->crate::model::val::Val {
+        use crate::model::{paths,deletion,val::Val};
+        let mut parts=Vec::new();let mut prefix=true;
+        for n in initial.into_iter().chain(args.iter().take(32).copied()) {
+            let listed=if listings && prefix {self.sc_delete_listed(n,0,&mut 256)} else {None};
+            let part=if let Some(v)=listed.filter(|v|v.kind==deletion::ListKind::Name && deletion::exempt_folder(&v.dir)) {
+                let dir=paths::apply(api,&parts);
+                if deletion::same_folder(&dir,&v.dir) {Val::text(u("<listed-entry>"))}
+                else {self.sc_delete_path_inner(n,depth+1,work,listings)}
+            } else {self.sc_delete_path_inner(n,depth+1,work,listings)};
+            if prefix {prefix=self.sc_listing_index().directory(self.t(),n,0,&mut 256)}
+            parts.push(part);
+        }
+        paths::apply(api,&parts)
+    }
     fn sc_delete_path_inner(&mut self, n: NodeId, depth: usize, work: &mut usize, listings: bool) -> crate::model::val::Val {
-        use crate::model::{val::Val, events::path_join, deletion};
+        use crate::model::{val::Val, paths::{self,Api,Flavor}, deletion};
         if n == NONE || depth > 8 || *work == 0 { return Val::unknown() }
         *work -= 1;
         if let Some(s) = self.sc_const_str(n) { return Val::text(s) }
         if let Some(v)=if listings { self.sc_delete_listed(n,0,&mut 256) } else {None} {
-            if v.kind==deletion::ListKind::FullPath {return path_join(&v.dir,&if deletion::exempt_folder(&v.dir) {Val::text(u("<listed-entry>"))} else {Val::unknown()})}
+            if v.kind==deletion::ListKind::FullPath {let part=if deletion::exempt_folder(&v.dir) {Val::text(u("<listed-entry>"))} else {Val::unknown()};return paths::apply(Api::PythonJoin(Flavor::Native),&[v.dir,part])}
         }
         match self.t().kind(n) {
             Kind::Name => {
@@ -2753,13 +2768,13 @@ impl<'p> Analyzer<'p> {
                     let a=self.sc_delete_path_inner(a,depth + 1, work,listings);
                     let prefix=self.sc_listing_index().directory(self.t(),a_(self.t(),n),0,&mut 256);
                     let b=if op==pt::DIV {self.sc_delete_join_part(&a,b,depth+1,work,listings && prefix)} else {self.sc_delete_path_inner(b,depth+1,work,listings)};
-                    return if op==pt::DIV {path_join(&a,&b)} else {Val::concat(&a,&b)};
+                    return if op==pt::DIV {paths::apply(Api::PythonJoin(Flavor::Native),&[a,b])} else {Val::concat(&a,&b)};
                 }
             }
             Kind::Subscript => {
                 let obj=a_(self.t(),n); let key=b_(self.t(),n);
                 if self.node_text(obj).ends_with(&u("environ")) {
-                    if let Some(key)=self.sc_const_str(key) {if let Some(home)=deletion::profile_env(&key) {return Val::text(u(home))}}
+                    if let Some(key)=self.sc_const_str(key) {if let Some(home)=deletion::profile_env(&key) {return Val::home(u(home))}}
                 }
             }
             Kind::Attribute => {
@@ -2768,20 +2783,25 @@ impl<'p> Analyzer<'p> {
             Kind::Call => {
                 let func=a_(self.t(),n); let args=self.t().list(b_(self.t(),n)).to_vec();
                 let names=self.sc_names(func);
-                if any_of(&names,&["pathlib.Path.home","Path.home"]) {return Val::text(u("~"))}
+                if any_of(&names,&["pathlib.Path.home","Path.home"]) {return Val::home(u("~"))}
                 if any_of(&names,&["os.getenv","os.environ.get"]) {
-                    if let Some(key)=args.first().and_then(|&n|self.sc_const_str(n)) {if let Some(home)=deletion::profile_env(&key) {return Val::text(u(home))}}
+                    if let Some(key)=args.first().and_then(|&n|self.sc_const_str(n)) {if let Some(home)=deletion::profile_env(&key) {return Val::home(u(home))}}
                 }
                 if any_of(&names,&["os.path.join","posixpath.join","ntpath.join","pathlib.Path","Path"]) {
-                    let mut v=Val::text(Vec::new()); let mut prefix=true; for a in args.iter().take(32) {v=path_join(&v,&self.sc_delete_join_part(&v,*a,depth+1,work,listings && prefix));prefix &= self.sc_listing_index().directory(self.t(),*a,0,&mut 256);} return v;
+                    let flavor=if any_of(&names,&["posixpath.join"]) {Flavor::Posix} else if any_of(&names,&["ntpath.join"]) {Flavor::Windows} else {Flavor::Native};
+                    return self.sc_delete_join_args(Api::PythonJoin(flavor),None,&args,depth,work,listings);
                 }
-                if any_of(&names,&["os.path.expanduser","os.path.abspath","os.path.normpath","str"]) {return args.first().map(|&a|self.sc_delete_path_inner(a,depth + 1, work,listings)).unwrap_or_default()}
+                if any_of(&names,&["os.path.expanduser","os.path.abspath","os.path.normpath","str"]) {
+                    let mut v=args.first().map(|&a|self.sc_delete_path_inner(a,depth+1,work,listings)).unwrap_or_default();
+                    if any_of(&names,&["os.path.expanduser"]) && v.s.as_ref().is_some_and(|s|s.first()==Some(&('~' as u32))) {v.add_kinds(&Val::home(u("~")));}
+                    return v;
+                }
                 if any_of(&names,&["os.path.dirname"]) {let v=args.first().map(|&a|self.sc_delete_path_inner(a,depth + 1, work,listings)).unwrap_or_default();return deletion::parent(&v)}
                 if any_of(&names,&["glob.glob","glob.iglob"]) {let v=args.first().map(|&a|self.sc_delete_path_inner(a,depth + 1, work,listings)).unwrap_or_default();return deletion::glob_path(&v)}
                 if self.t().kind(func)==Kind::Attribute {
                     let obj=a_(self.t(),func);let method=self.t().str(b_(self.t(),func)).to_vec();
                     if is_one(&method,&["resolve","absolute","expanduser","as_posix"]) {return self.sc_delete_path_inner(obj,depth + 1, work,listings)}
-                    if eq(&method,"joinpath") {let mut v=self.sc_delete_path_inner(obj,depth + 1, work,listings);let mut prefix=self.sc_listing_index().directory(self.t(),obj,0,&mut 256);for a in args.iter().take(32){v=path_join(&v,&self.sc_delete_join_part(&v,*a,depth+1,work,listings && prefix));prefix &= self.sc_listing_index().directory(self.t(),*a,0,&mut 256);}return v;}
+                    if eq(&method,"joinpath") {return self.sc_delete_join_args(Api::PythonJoin(Flavor::Native),Some(obj),&args,depth,work,listings);}
                     if eq(&method,"rglob") && args.first().and_then(|&a|self.sc_const_str(a)).is_some_and(|s|eq(&s,".git")) {let root=self.sc_delete_path_inner(obj,depth + 1, work,listings);return deletion::repositories(&root)}
                     if eq(&method,"glob") {let v=args.first().map(|&a|self.sc_delete_path_inner(a,depth + 1, work,listings)).unwrap_or_default();return deletion::glob_path(&v)}
                 }
@@ -2820,7 +2840,11 @@ impl<'p> Analyzer<'p> {
             let target = if any_of(&names, &["shutil.rmtree", "os.remove", "os.unlink", "pathlib.Path.unlink"]) {
                 arg_nodes.first().copied().or_else(|| self.sc_keyword(call,"path"))
             } else if named("unlink") || named("rmdir") { Some(a_(self.t(),func)) } else { None };
-            if let Some(n)=target { let path=self.sc_delete_path(n,0); self.findings.push(Out::Delete {at,path:path.text_or_unknown()}); }
+            if let Some(n)=target {
+                let path=self.sc_delete_path(n,0);
+                self.findings.push(Out::Delete {at,path:path.text_or_unknown()});
+                if let Some(w)=path.path_win {self.findings.push(Out::Delete {at,path:(*w).clone()});}
+            }
         }
         // received code: code run, a module's name loaded, data deserialized
         if let Some(r) = self.sc_runs(call, &names) {

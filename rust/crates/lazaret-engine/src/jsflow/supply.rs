@@ -4171,7 +4171,7 @@ impl<'p> Eval<'p> {
         self.sc_delete_path_inner(n, scope, depth, &mut 256,true)
     }
     fn sc_delete_path_inner(&mut self, n: NodeId, scope: ScopeId, depth: usize, work: &mut usize, listings: bool) -> crate::model::val::Val {
-        use crate::model::{val::Val, events::path_join, deletion};
+        use crate::model::{val::Val, paths::{self,Api,Flavor}, deletion};
         if n == NONE || depth > 8 || *work == 0 { return Val::unknown() }
         *work -= 1;
         let n=self.a().unwrap(n);
@@ -4214,21 +4214,36 @@ impl<'p> Eval<'p> {
             Kind::MemberExpression => {
                 if let Some(listed)=if listings { self.sc_listed(n,scope,0,&mut 256) } else {None} {if listed.kind==deletion::ListKind::Parent {return listed.dir}}
                 let names=self.sc_names(n,scope);
-                if names.iter().any(|s|is_one(s,&["process.env.HOME","process.env.USERPROFILE"])) {return Val::text(u("~"))}
-                if names.iter().any(|s|eq(s,"process.env.APPDATA")) {return Val::text(u("~/AppData/Roaming"))}
-                if names.iter().any(|s|eq(s,"process.env.LOCALAPPDATA")) {return Val::text(u("~/AppData/Local"))}
+                if names.iter().any(|s|is_one(s,&["process.env.HOME","process.env.USERPROFILE"])) {return Val::home(u("~"))}
+                if names.iter().any(|s|eq(s,"process.env.APPDATA")) {return Val::home(u("~/AppData/Roaming"))}
+                if names.iter().any(|s|eq(s,"process.env.LOCALAPPDATA")) {return Val::home(u("~/AppData/Local"))}
+                if names.iter().any(|s|eq(s,"process.env.XDG_CONFIG_HOME")) {return Val::home(u("~/.config"))}
+                if names.iter().any(|s|eq(s,"process.env.XDG_DATA_HOME")) {return Val::home(u("~/.local/share"))}
+                if self.a().prop_name(n).is_some_and(|p|eq(&p,"homedir")) {
+                    let object=self.a().unwrap(self.a().at(n,jt::A));
+                    if self.a().kind(object)==Kind::CallExpression && self.sc_names(self.a().at(object,jt::A),scope).iter().any(|s|eq(s,"os.userInfo")) {
+                        return Val::home(u("~"))
+                    }
+                }
             }
             Kind::CallExpression => {
                 let callee=self.a().unwrap(self.a().at(n,jt::A));let args=self.a().list(n,jt::B).to_vec();let names=self.sc_names(callee,scope);
-                if names.iter().any(|s|eq(s,"os.homedir")) {return Val::text(u("~"))}
+                if names.iter().any(|s|eq(s,"os.homedir")) {return Val::home(u("~"))}
                 if names.iter().any(|s|is_one(s,&["path.join","path.resolve","path.posix.join","path.win32.join","path.posix.resolve","path.win32.resolve"])) {
-                    let mut v=Val::text(Vec::new());let mut prefix=true;for a in args.iter().take(32){
-                        let part=if let Some(listed)=if listings { self.sc_listed(*a,scope,0,&mut 256) } else {None} {
+                    let flavor=if names.iter().any(|s|is_one(s,&["path.posix.join","path.posix.resolve"])) {Flavor::Posix}
+                        else if names.iter().any(|s|is_one(s,&["path.win32.join","path.win32.resolve"])) {Flavor::Windows} else {Flavor::Native};
+                    let api=if names.iter().any(|s|is_one(s,&["path.join","path.posix.join","path.win32.join"])) {Api::NodeJoin(flavor)} else {Api::NodeResolve(flavor)};
+                    let mut parts=Vec::new();let mut prefix=true;for a in args.iter().take(32){
+                        let listed=if listings && prefix {self.sc_listed(*a,scope,0,&mut 256)} else {None};
+                        let directory=listed.as_ref().is_some_and(|v|v.kind==deletion::ListKind::Parent);
+                        let part=if let Some(listed)=listed {
+                            let v=if prefix && listed.kind==deletion::ListKind::Name {paths::apply(api,&parts)} else {Val::unknown()};
                             if prefix && listed.kind==deletion::ListKind::Name && deletion::exempt_folder(&listed.dir) && deletion::same_folder(&v,&listed.dir) {Val::text(u("<listed-entry>"))}
                             else if listed.kind==deletion::ListKind::Parent {listed.dir} else {self.sc_delete_path_inner(*a,scope,depth+1,work,listings)}
                         } else {self.sc_delete_path_inner(*a,scope,depth+1,work,listings)};
-                        v=path_join(&v,&part);prefix &= self.sc_listed(*a,scope,0,&mut 256).is_some_and(|v|v.kind==deletion::ListKind::Parent) || self.sc_listing_directory(*a,scope,0,&mut 256);
-                    }return v;
+                        parts.push(part);
+                        if prefix {prefix=directory || self.sc_listing_directory(*a,scope,0,&mut 256)}
+                    }return paths::apply(api,&parts);
                 }
                 if names.iter().any(|s|is_one(s,&["path.normalize","String"])) {return args.first().map(|&a|self.sc_delete_path_inner(a,scope,depth + 1, work,listings)).unwrap_or_default()}
                 if names.iter().any(|s|eq(s,"path.dirname")) {let v=args.first().map(|&a|self.sc_delete_path_inner(a,scope,depth + 1, work,listings)).unwrap_or_default();return deletion::parent(&v)}
@@ -4266,7 +4281,11 @@ impl<'p> Eval<'p> {
                 }).unwrap_or(false)
             });
             if !names.iter().any(|s| pystr::ends_with(s, ".rmdir") || pystr::ends_with(s, ".rmdirSync")) || recursive {
-                if let Some(&n)=nodes.first(){let path=self.sc_delete_path(n,scope,0);let at=self.a().0.nodes[node as usize].start;self.findings.push(Out::Delete{at,path:path.text_or_unknown()});}
+                if let Some(&n)=nodes.first(){
+                    let path=self.sc_delete_path(n,scope,0);let at=self.a().0.nodes[node as usize].start;
+                    self.findings.push(Out::Delete{at,path:path.text_or_unknown()});
+                    if let Some(w)=path.path_win {self.findings.push(Out::Delete{at,path:(*w).clone()});}
+                }
             }
         }
         // received code: code run, a module's name loaded, data deserialized
