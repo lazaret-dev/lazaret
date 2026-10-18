@@ -1445,8 +1445,9 @@ class Scanner:
     package manager makes at once hold at most `hold_bytes()` of archives (GR-4)."""
 
     def __init__(self, cache, timeout=repo.SCAN_TIMEOUT, jobs=1, isolate=None, memory_mb=scanpool.DEFAULT_MEMORY_MB,
-                 note=None, hold_budget=None):
+                 note=None, hold_budget=None, isolated_workers=False):
         self.cache = cache
+        self.isolated_workers = isolated_workers         # the workers start with -I (F-01): the command line's
         self.timeout = timeout
         self.jobs = jobs
         self.isolate = (jobs > 1) if isolate is None else bool(isolate)
@@ -1473,7 +1474,8 @@ class Scanner:
     def _get_pool(self):
         with self._lock:
             if self._pool is None and not self._no_pool:
-                self._pool = scanpool.WorkerPool(self.jobs, _scan_one, memory_mb=self.memory_mb)
+                self._pool = scanpool.WorkerPool(self.jobs, _scan_one, memory_mb=self.memory_mb,
+                                                 isolated=self.isolated_workers)
             return self._pool
 
     def _scan_here(self):
@@ -1824,10 +1826,13 @@ _ARCH_ALIASES = {"amd64": "x86_64", "x64": "x86_64", "arm64": "aarch64", "i386":
 
 def interpreter_info(python=None):
     """(implementation, major, minor, os, arch) of a Python — the one given
-    (a path; its answer is read from a short, fixed probe), else this one."""
+    (a path; its answer is read from a short, fixed probe), else this one.
+    The probe runs in the current folder, the project the guard is run in,
+    and `-c` puts that folder first on sys.path: it runs with -I, so a
+    platform.py there (or a PYTHONPATH) is not imported (F-01)."""
     if python:
         try:
-            out = subprocess.run([python, "-c", "import sys, platform; print(sys.implementation.name, "
+            out = subprocess.run([python, "-I", "-c", "import sys, platform; print(sys.implementation.name, "
                                   "sys.version_info[0], sys.version_info[1], sys.platform, platform.machine())"],
                                  capture_output=True, text=True, encoding="utf-8", errors="replace",
                                  timeout=30).stdout.split()
@@ -1913,7 +1918,8 @@ class Context:
         self.cutoff = self.started - datetime.timedelta(seconds=self.min_age) if self.min_age else None
         self.cache = None if opts.no_cache else VerdictCache(default_cache_path())
         self.scanner = Scanner(self.cache, timeout=opts.scan_timeout, jobs=opts.jobs, isolate=getattr(opts, "isolate", None),
-                               memory_mb=getattr(opts, "worker_memory", scanpool.DEFAULT_MEMORY_MB), note=self.say)
+                               memory_mb=getattr(opts, "worker_memory", scanpool.DEFAULT_MEMORY_MB), note=self.say,
+                               isolated_workers=bool(getattr(opts, "isolated_workers", False)))
         self.checks = []
         self.lock = threading.Lock()
         self.out = out or sys.stderr
@@ -5650,6 +5656,8 @@ def main(argv=None):
     if "--" in argv[:first_tool]:
         argv.remove("--")
     opts = build_parser().parse_args(argv)
+    # the command line runs in the project, so its scan workers start with -I (F-01, scanpool._isolate_flags)
+    opts.isolated_workers = True
     if not getattr(opts, "timings", False):
         return _run(opts)
     kept = timings.Timings()

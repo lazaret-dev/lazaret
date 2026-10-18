@@ -8,6 +8,7 @@ in the caller's process; a hung scan ends its workers; a pool that cannot start 
 behind."""
 
 import concurrent.futures
+import json
 import multiprocessing
 import os
 import pickle
@@ -22,6 +23,7 @@ from unittest import mock
 
 from lazaret.registry import scanpool
 from lazaret.scanner import timings
+from tests import _support
 from tests.registry import _scanpool_support as support
 
 try:
@@ -697,6 +699,633 @@ class StartTests(Case):
         with self.assertRaises(scanpool.Died):
             bad.run(b"crash", "tgz", "npm", 7)
         self.assertEqual(bad._live, [])                                       # (the broken one and the one for the retry are done)
+
+
+FLAGS_DRIVER = """\
+import json, multiprocessing, multiprocessing.spawn, multiprocessing.util, subprocess, sys
+sys.path[:0] = [{py_root!r}, {src!r}]
+from lazaret.registry import scanpool
+from tests.registry import _scanpool_support as support
+
+
+def child(queue):
+    queue.put(sys.flags.isolated)
+
+
+def unrelated():
+    ctx = multiprocessing.get_context("spawn")
+    queue = ctx.Queue()
+    proc = ctx.Process(target=child, args=(queue,))
+    proc.start()
+    try:
+        return queue.get(timeout=60)
+    finally:
+        proc.join(60)
+
+
+def stdlib():
+    return multiprocessing.util._args_from_interpreter_flags is subprocess._args_from_interpreter_flags
+
+
+def worker(pool):
+    return pool.run(b"ok", "tgz", "npm", 7)["isolated"]
+
+
+if __name__ == "__main__":
+    out = {{"before": unrelated(), "stdlib before": stdlib()}}
+    one, two = scanpool.WorkerPool(1, support.flags, isolated=True), scanpool.WorkerPool(1, support.flags, isolated=True)
+    out["worker"], out["second worker"] = worker(one), worker(two)
+    cmd = multiprocessing.spawn.get_command_line(pipe_handle=0)
+    out["command line"] = cmd.count("-I") == 1 and cmd.index("-I") < cmd.index("-c")
+    out["unrelated while open"] = unrelated()
+    one.close()
+    out["stdlib with one still open"] = stdlib()
+    two.close()
+    out["stdlib after"], out["after"] = stdlib(), unrelated()
+    plain = scanpool.WorkerPool(1, support.flags)
+    out["library pool worker"], out["stdlib with a library pool"] = worker(plain), stdlib()
+    plain.close()
+
+    def theirs():
+        return ["-B"]
+
+    multiprocessing.util._args_from_interpreter_flags = theirs
+    third = scanpool.WorkerPool(1, support.flags, isolated=True)
+    try:
+        worker(third)
+        out["over another library's"] = "ran"
+    except scanpool.Unavailable:
+        out["over another library's"] = "Unavailable"
+    third.close()
+    out["theirs kept"] = multiprocessing.util._args_from_interpreter_flags is theirs
+    print(json.dumps(out))
+"""
+
+
+OWNERSHIP_DRIVER = """\
+import concurrent.futures, functools, json, multiprocessing.util, subprocess, sys, threading
+from unittest import mock
+sys.path[:0] = [{py_root!r}, {src!r}]
+from lazaret.registry import scanpool
+from tests.registry import _scanpool_support as support
+
+STDLIB = subprocess._args_from_interpreter_flags
+REPLACED = getattr(scanpool, "FlagsReplaced", scanpool.Unavailable)     # (so that an older pool fails on what it does)
+
+
+def worker(pool):
+    try:
+        return pool.run(b"ok", "tgz", "npm", 7)["isolated"]
+    except REPLACED:
+        return "FlagsReplaced"
+    except scanpool.Unavailable as exc:
+        return "Unavailable: " + str(exc)
+
+
+def theirs():
+    return ["-B"]
+
+
+def in_place():
+    return multiprocessing.util._args_from_interpreter_flags
+
+
+if __name__ == "__main__":
+    out = {{}}
+    # another library replaces the function while an isolated pool is open
+    one = scanpool.WorkerPool(1, support.flags, isolated=True)
+    two = scanpool.WorkerPool(1, support.flags, isolated=True)
+    out["first"] = worker(one)
+    multiprocessing.util._args_from_interpreter_flags = theirs
+    out["second pool after the replacement"] = worker(two)
+    out["first pool after the replacement"] = worker(one)
+    try:
+        one._make(1)
+        out["first pool's new executor"] = "made"
+    except REPLACED:
+        out["first pool's new executor"] = "FlagsReplaced"
+    two.close(), one.close()
+    out["theirs kept"], out["holders"] = in_place() is theirs, scanpool._flags_holders
+    multiprocessing.util._args_from_interpreter_flags = STDLIB
+    # a wrapper of the stand-in (functools.wraps copies its attributes) is another library's
+    three = scanpool.WorkerPool(1, support.flags, isolated=True)
+    out["third"] = worker(three)
+    ours = in_place()
+
+    @functools.wraps(ours)
+    def wrapped():
+        return ours()
+
+    multiprocessing.util._args_from_interpreter_flags = wrapped
+    three.close()
+    out["wrapper kept"] = in_place() is wrapped
+    multiprocessing.util._args_from_interpreter_flags = STDLIB
+    # close() while the shared executor is being made: the flags are held until that is over, and the executor
+    # is ended, never published or given a job
+    entered, resume, submitted = threading.Event(), threading.Event(), []
+    real = concurrent.futures.ProcessPoolExecutor
+
+    def counted(executor):
+        submit = executor.submit
+
+        def recorded(*args, **kwargs):
+            submitted.append(args[0].__name__)          # (a submission is where a worker is started)
+            return submit(*args, **kwargs)
+
+        executor.submit = recorded
+        return executor
+
+    def paused(*args, **kwargs):
+        entered.set()
+        resume.wait(30)
+        return counted(real(*args, **kwargs))
+
+    def start(pool, errors):
+        try:
+            pool._shared()
+        except scanpool.Unavailable as exc:
+            errors.append(str(exc))
+
+    four, errors = scanpool.WorkerPool(1, support.flags, isolated=True), []
+    with mock.patch.object(concurrent.futures, "ProcessPoolExecutor", paused):
+        thread = threading.Thread(target=start, args=(four, errors))
+        thread.start()
+        entered.wait(30)
+        four.close()
+        out["held while it is made"] = scanpool._flags_holders == 1 and in_place() is not STDLIB
+        resume.set()
+        thread.join(30)
+    out["making"] = {{"errors": errors, "live": len(four._live), "submitted": submitted,
+                     "holders": scanpool._flags_holders, "stdlib back": in_place() is STDLIB}}
+    # close() after the executor is published, before its first job: no job is submitted
+    five, errors, submitted = scanpool.WorkerPool(1, support.flags, isolated=True), [], []
+    if not hasattr(five, "_publish"):
+        out["published"] = "no _publish"                    # (an older pool: the step is not there to pause)
+    else:
+        entered, resume = threading.Event(), threading.Event()
+        publish = five._publish
+
+        def paused_publish(pool):
+            publish(counted(pool))
+            entered.set()
+            resume.wait(30)
+
+        five._publish = paused_publish
+        thread = threading.Thread(target=start, args=(five, errors))
+        thread.start()
+        entered.wait(30)
+        five.close()
+        resume.set()
+        thread.join(30)
+        out["published"] = {{"errors": errors, "live": len(five._live), "submitted": submitted,
+                            "holders": scanpool._flags_holders, "stdlib back": in_place() is STDLIB}}
+        # replaced after it is published, before its first job: no job, and the executor is ended
+        six, errors, submitted = scanpool.WorkerPool(1, support.flags, isolated=True), [], []
+        entered, resume = threading.Event(), threading.Event()
+        publish = six._publish
+
+        def paused_publish(pool):
+            publish(counted(pool))
+            entered.set()
+            resume.wait(30)
+
+        six._publish = paused_publish
+        thread = threading.Thread(target=start, args=(six, errors))
+        thread.start()
+        entered.wait(30)
+        multiprocessing.util._args_from_interpreter_flags = theirs
+        resume.set()
+        thread.join(30)
+        out["replaced after it is published"] = {{"errors": [e.split(":")[0] for e in errors], "live": len(six._live),
+                                                 "submitted": submitted}}
+        six.close()
+        multiprocessing.util._args_from_interpreter_flags = STDLIB
+    print(json.dumps(out))
+"""
+
+
+LIFECYCLE_DRIVER = """\
+import concurrent.futures, json, multiprocessing.resource_tracker, multiprocessing.util, os, subprocess, sys, tempfile
+import threading, time
+from unittest import mock
+sys.path[:0] = [{py_root!r}, {src!r}]
+from lazaret.registry import scanpool
+from tests.registry import _scanpool_support as support
+
+STDLIB = subprocess._args_from_interpreter_flags
+
+
+def in_place():
+    return multiprocessing.util._args_from_interpreter_flags
+
+
+def worker(pool, data=b"ok"):
+    try:
+        return pool.run(data, "tgz", "npm", 7)["isolated"]
+    except scanpool.Unavailable as exc:
+        return type(exc).__name__
+    except scanpool.Died:
+        return "Died"
+
+
+def theirs():
+    return STDLIB()
+
+
+def tracker_flags():
+    \"\"\"The resource tracker's flags (before its -c), or None where there is no tracker.\"\"\"
+    pid = getattr(multiprocessing.resource_tracker._resource_tracker, "_pid", None)
+    if os.name != "posix" or pid is None:
+        return None
+    try:
+        with open(f"/proc/{{pid}}/cmdline", "rb") as f:
+            argv = [os.fsdecode(a) for a in f.read().split(b"\\0") if a]
+    except OSError:
+        argv = subprocess.run(["ps", "-o", "args=", "-p", str(pid)], capture_output=True, encoding="utf-8",
+                              errors="replace").stdout.split()
+    return argv[1:argv.index("-c")] if "-c" in argv else argv[1:]
+
+
+if __name__ == "__main__":
+    out = {{}}
+    # the resource tracker starts with the pool's first executor: with -I too
+    one = scanpool.WorkerPool(1, support.flags_or_crash, isolated=True)
+    out["first"] = worker(one)
+    out["tracker has -I"] = None if tracker_flags() is None else "-I" in tracker_flags()
+    # a second isolated pool refused at its acquisition holds nothing
+    multiprocessing.util._args_from_interpreter_flags = theirs
+    two = scanpool.WorkerPool(1, support.flags, isolated=True)
+    out["second pool"] = [worker(two), scanpool._flags_holders, two._holds_flags]
+    two.close()
+    multiprocessing.util._args_from_interpreter_flags = scanpool._flags_installed
+    # a replacement while an archive is lost and run alone: FlagsReplaced (the guard scans in its own process),
+    # not Died (which blocks the package)
+    lost = one._lost
+
+    def replaced_when_lost(pool):
+        multiprocessing.util._args_from_interpreter_flags = theirs
+        lost(pool)
+
+    one._lost = replaced_when_lost
+    out["lost, then replaced"] = worker(one, b"crash")
+    one._lost = lost
+    multiprocessing.util._args_from_interpreter_flags = scanpool._flags_installed
+    # one pool closed twice lets go once: another open pool keeps its hold
+    three = scanpool.WorkerPool(1, support.flags, isolated=True)
+    out["third"] = worker(three)
+    one.close(), one.close()
+    out["one closed twice"] = [scanpool._flags_holders, in_place() is scanpool._flags_installed, worker(three)]
+    three.close()
+    out["stdlib back"] = in_place() is STDLIB
+    # the executor's construction raising: whatever it raises, the making is over and close lets go
+    real = concurrent.futures.ProcessPoolExecutor
+    out["construction raising"] = {{}}
+    for exc_type in (OSError, RuntimeError, KeyboardInterrupt):
+        def failing(*args, **kwargs):
+            raise exc_type("made to fail")
+
+        four = scanpool.WorkerPool(1, support.flags, isolated=True)
+        concurrent.futures.ProcessPoolExecutor = failing
+        try:
+            four.run(b"ok", "tgz", "npm", 7)
+            raised = "nothing"
+        except BaseException as exc:
+            raised = type(exc).__name__
+        concurrent.futures.ProcessPoolExecutor = real
+        four.close()
+        out["construction raising"][exc_type.__name__] = [raised, four._starting, scanpool._flags_holders,
+                                                          in_place() is STDLIB]
+    # close() while the first job runs: "the pool is closed", not a worker that could not start
+    mark = os.path.join(tempfile.mkdtemp(prefix="lazaret-ping-"), "running")
+    os.environ["LAZARET_TEST_PING_MARK"] = mark
+    five, errors = scanpool.WorkerPool(1, support.flags, isolated=True), []
+    with mock.patch.object(scanpool, "_ping", support.ping_slowly):
+        def start():
+            try:
+                five._shared()
+            except scanpool.Unavailable as exc:
+                errors.append(str(exc))
+
+        thread = threading.Thread(target=start)
+        thread.start()
+        for _ in range(600):
+            if os.path.exists(mark):
+                break
+            time.sleep(0.05)
+        five.close()
+        thread.join(30)
+    out["close during the first job"] = [errors, scanpool._flags_holders, in_place() is STDLIB]
+    # close() while an archive is run alone after its worker was lost: "the pool is closed" (the caller scans in
+    # its own process), not Died pinned on that archive
+    alone, result = scanpool.WorkerPool(1, support.crash_once_then_wait, isolated=True), []
+    lost_once = os.path.join(tempfile.mkdtemp(prefix="lazaret-alone-"), "seen")
+
+    def run_alone():
+        try:
+            alone.run(lost_once.encode(), "tgz", "npm", 7)
+            result.append("ran")
+        except scanpool.Unavailable as exc:
+            result.append("Unavailable: " + str(exc))
+        except scanpool.Died as exc:
+            result.append("Died: " + str(exc))
+
+    thread = threading.Thread(target=run_alone)
+    thread.start()
+    for _ in range(600):
+        if os.path.exists(lost_once + ".running"):
+            break
+        time.sleep(0.05)
+    alone.close()
+    thread.join(30)
+    out["close while run alone"] = [result, alone.breaks, scanpool._flags_holders]
+    # another library saving the function and putting it back around the last close: the stand-in it puts back
+    # passes the flags through, and the next isolated pool takes it for the function it wraps
+    six = scanpool.WorkerPool(1, support.flags, isolated=True)
+    worker(six)
+    patcher = mock.patch.object(multiprocessing.util, "_args_from_interpreter_flags", theirs)
+    patcher.start()
+    six.close()
+    patcher.stop()
+    library = scanpool.WorkerPool(1, support.flags)
+    seven = scanpool.WorkerPool(1, support.flags, isolated=True)
+    out["stand-in put back"] = [scanpool._flags_holders, in_place() is not STDLIB, worker(library), worker(seven)]
+    library.close(), seven.close()
+    out["stdlib back at the end"] = in_place() is STDLIB
+    print(json.dumps(out))
+"""
+
+
+class StandInLookupTests(unittest.TestCase):
+    """Only a stand-in this module made, known by identity, is taken for the function it wraps; any other callable
+    in place is another library's, and an isolated pool refuses it."""
+
+    def setUp(self):
+        self.assertEqual(scanpool._flags_holders, 0)
+        self.addCleanup(setattr, multiprocessing.util, "_args_from_interpreter_flags",
+                        multiprocessing.util._args_from_interpreter_flags)
+
+    def test_a_callable_that_compares_equal_to_a_stand_in_is_not_taken(self):
+        self.assertTrue(scanpool._isolate_flags())
+        stale = multiprocessing.util._args_from_interpreter_flags              # (kept alive: still in the weak map)
+        scanpool._release_flags()
+
+        class Theirs:
+            def __call__(self):
+                return subprocess._args_from_interpreter_flags()
+
+            def __hash__(self):
+                return hash(stale)
+
+            def __eq__(self, other):
+                return True
+
+        theirs = Theirs()
+        multiprocessing.util._args_from_interpreter_flags = theirs
+        self.assertFalse(scanpool._isolate_flags())
+        self.assertIs(multiprocessing.util._args_from_interpreter_flags, theirs)
+        self.assertEqual(scanpool._flags_holders, 0)
+
+    def test_a_callable_that_takes_no_weak_reference_is_not_taken(self):
+        class Theirs:
+            __slots__ = ()                                       # (no __weakref__: a weak map can't hold it)
+
+            def __call__(self):
+                return ["-B"]
+
+        theirs = Theirs()
+        multiprocessing.util._args_from_interpreter_flags = theirs
+        self.assertFalse(scanpool._isolate_flags())
+        self.assertIs(multiprocessing.util._args_from_interpreter_flags, theirs)
+        self.assertEqual(scanpool._flags_holders, 0)
+
+
+class ClosedPoolTests(Case):
+    """A closed pool makes nothing more: no executor (and so no resource tracker), no staging folder."""
+
+    def test_a_closed_pool_makes_no_executor(self):
+        p = self.pool()
+        p.close()
+        made = []
+        with mock.patch.object(concurrent.futures, "ProcessPoolExecutor", lambda *a, **k: made.append(a)):
+            with self.assertRaises(scanpool.Unavailable):
+                p._make(1)
+        self.assertEqual((made, p._starting), ([], 0))
+
+    def test_a_closed_pool_stages_nothing(self):
+        p = self.pool()
+        p.close()
+        with self.assertRaises(scanpool.Unavailable):
+            p.run(b"ok", "tgz", "npm", 7)
+        self.assertIsNone(p._dir)
+
+    def test_a_close_while_an_archive_is_staged_is_reported_as_closed(self):
+        p = self.pool()
+        staging = p._staging
+
+        def then_closed():
+            folder = staging()
+            p.close()                                                          # (which takes the folder away)
+            return folder
+
+        with mock.patch.object(p, "_staging", then_closed):
+            with self.assertRaises(scanpool.Unavailable) as caught:
+                p.stage(b"ok")
+        self.assertEqual(str(caught.exception), "the pool is closed")
+        other = self.pool()                                                    # (open: a folder gone is left as it is)
+        shutil.rmtree(other._staging())
+        with self.assertRaises(FileNotFoundError):
+            other.stage(b"ok")
+
+
+class HeldExecutor:
+    """An executor whose jobs wait until it is shut down, when `ended` ends each one not done yet (cancelled, as a
+    `ProcessPoolExecutor` cancels the jobs no worker has taken). `answer(fn, future)` may answer a job at once."""
+
+    def __init__(self, answer=lambda fn, future: None, ended=lambda future: future.cancel()):
+        self.answer, self.ended = answer, ended
+        self.futures, self.held, self.shutdowns = [], threading.Event(), 0
+        self._processes = {}
+
+    def submit(self, fn, *args):
+        future = concurrent.futures.Future()
+        self.answer(fn, future)
+        self.futures.append(future)
+        if not future.done():
+            self.held.set()
+        return future
+
+    def shutdown(self, wait=True, cancel_futures=False):
+        self.shutdowns += 1
+        for future in self.futures:
+            if not future.done():
+                self.ended(future)
+
+
+def ping_answered(fn, future):
+    if fn is scanpool._ping:
+        future.set_result(True)
+
+
+class CloseMidwayTests(Case):
+    """close() while a thread is in the middle of the pool: that thread learns the pool is closed (Unavailable,
+    which a scan answers by scanning in its own process), not a worker's loss or a job's cancellation."""
+
+    def held(self, executor, call):
+        """-> what `call` raised in another thread, closing the pool once the executor holds a job."""
+        p, raised = self.pool(), []
+
+        def go():
+            try:
+                call(p)
+            except BaseException as exc:
+                raised.append((type(exc).__name__, str(exc)))
+
+        with mock.patch.object(concurrent.futures, "ProcessPoolExecutor", lambda *a, **k: executor):
+            thread = threading.Thread(target=go)
+            thread.start()
+            self.assertTrue(executor.held.wait(10))
+            p.close()
+            thread.join(10)
+        return raised, p
+
+    def test_a_close_during_the_first_job_is_reported_as_closed(self):
+        raised, p = self.held(HeldExecutor(), lambda p: p._shared())
+        self.assertEqual(raised, [("Unavailable", "the pool is closed")])
+        self.assertEqual(p._unavailable, "")                                  # (not a reason workers cannot be had)
+
+    def test_a_close_during_a_scan_is_reported_as_closed(self):
+        for ended in (lambda future: future.cancel(),                          # (its job had not been taken)
+                      lambda future: future.set_exception(FileNotFoundError("gone"))):   # (its staged file went)
+            raised, p = self.held(HeldExecutor(ping_answered, ended), lambda p: p.run(b"ok", "tgz", "npm", 7))
+            self.assertEqual(raised, [("Unavailable", "the pool is closed")])
+            self.assertEqual(p.breaks, 0)
+
+    def test_a_job_cancelled_or_a_file_missing_while_the_pool_is_open_is_left_as_it_is(self):
+        for answer, error in ((lambda fn, future: future.cancel(), "CancelledError"),
+                              (lambda fn, future: future.set_exception(FileNotFoundError("gone")),
+                               "FileNotFoundError")):
+            p = self.pool()
+            executor = HeldExecutor(lambda fn, future, answer=answer: (ping_answered if fn is scanpool._ping
+                                                                       else answer)(fn, future))
+            with mock.patch.object(concurrent.futures, "ProcessPoolExecutor", lambda *a, **k: executor):
+                with self.assertRaises(Exception) as caught:
+                    p.run(b"ok", "tgz", "npm", 7)
+            self.assertEqual(type(caught.exception).__name__, error)
+
+    def test_a_close_just_after_the_first_job_hands_out_no_pool(self):
+        p = self.pool()
+
+        def close_first(fn, future):
+            p.close()
+            future.set_result(True)
+
+        executor = HeldExecutor(close_first)
+        with mock.patch.object(concurrent.futures, "ProcessPoolExecutor", lambda *a, **k: executor):
+            with self.assertRaises(scanpool.Unavailable) as caught:
+                p._shared()
+        self.assertEqual(str(caught.exception), "the pool is closed")
+        self.assertIsNone(p._pool)
+        self.assertGreaterEqual(executor.shutdowns, 1)
+
+
+class WorkingFolderTests(unittest.TestCase):
+    """F-01: a worker and the resource tracker start as `python -c '…'` in the guard's working directory, the
+    project it is run in, which `-c` puts first on sys.path. A pool made with isolated=True (the guard's command
+    line) starts them with -I while it is open; a library's own pool changes nothing. Each test runs a process of
+    its own, so that this one's multiprocessing is never touched."""
+
+    def driver(self, text, cwd=None):
+        tmp = tempfile.mkdtemp(prefix="lazaret-pool-cwd-")
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        folder = os.path.join(tmp, "driver")
+        os.makedirs(folder)
+        with open(os.path.join(folder, "run_pool.py"), "w", encoding="utf-8") as f:
+            f.write(text)
+        # the guard's process as its console script runs it: a script (its own folder first on sys.path, not the
+        # working directory), not isolated itself
+        done = subprocess.run([sys.executable, os.path.join(folder, "run_pool.py")], cwd=cwd or tmp,
+                              capture_output=True, encoding="utf-8", errors="replace", timeout=120)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        return json.loads(done.stdout.strip().splitlines()[-1]), done
+
+    def test_the_flags_are_isolated_while_an_isolated_pool_is_open_and_put_back(self):
+        out, _done = self.driver(FLAGS_DRIVER.format(py_root=_support.PY_ROOT, src=_support.SRC))
+        self.assertEqual(out, {
+            "before": 0, "stdlib before": True,
+            "worker": 1, "second worker": 1, "command line": True,
+            "unrelated while open": 1,                 # (the scope: this process's children while the pool is open)
+            "stdlib with one still open": False,
+            "stdlib after": True, "after": 0,
+            "library pool worker": 0, "stdlib with a library pool": True,
+            "over another library's": "Unavailable", "theirs kept": True})
+
+    def test_a_replacement_while_a_pool_is_open_and_a_close_while_one_starts(self):
+        """Another library's function in place of the stand-in, put there while an isolated pool is open (or a
+        wrapper of the stand-in): no new pool, executor or job of an isolated pool starts, and the last close
+        leaves that function. A close while the executor is being made, or before its first job: the flags are
+        held until the making is over, and the executor is ended without a worker. Deterministic (events)."""
+        out, _done = self.driver(OWNERSHIP_DRIVER.format(py_root=_support.PY_ROOT, src=_support.SRC))
+        self.maxDiff = None
+        self.assertEqual(out, {
+            "first": 1, "second pool after the replacement": "FlagsReplaced",
+            "first pool after the replacement": "FlagsReplaced", "first pool's new executor": "FlagsReplaced",
+            "theirs kept": True, "holders": 0,
+            "third": 1, "wrapper kept": True,
+            "held while it is made": True,
+            "making": {"errors": ["the pool is closed"], "live": 0, "submitted": [], "holders": 0, "stdlib back": True},
+            "published": {"errors": ["the pool is closed"], "live": 0, "submitted": [], "holders": 0,
+                          "stdlib back": True},
+            "replaced after it is published": {"errors": ["multiprocessing's flags for a child were replaced while "
+                                                          "the pool was open"], "live": 0, "submitted": []}})
+
+    def test_the_lifecycle_of_the_flags(self):
+        """The resource tracker starts with -I too. A second isolated pool refused at its acquisition holds
+        nothing; a replacement while an archive is run alone is FlagsReplaced, not Died; a pool closed twice lets
+        go once; whatever the executor's construction raises, close lets go; a close while the first job runs, or
+        while an archive is run alone, is "the pool is closed"; a stand-in another library puts back after the
+        last close passes the flags through, and the next isolated pool takes it for the function it wraps."""
+        out, _done = self.driver(LIFECYCLE_DRIVER.format(py_root=_support.PY_ROOT, src=_support.SRC))
+        self.maxDiff = None
+        self.assertEqual(out, {
+            "first": 1, "tracker has -I": True if os.name == "posix" else None,
+            "second pool": ["FlagsReplaced", 1, False],
+            "lost, then replaced": "FlagsReplaced",
+            "third": 1, "one closed twice": [1, True, 1], "stdlib back": True,
+            "construction raising": {"OSError": ["Unavailable", 0, 0, True],
+                                     "RuntimeError": ["RuntimeError", 0, 0, True],
+                                     "KeyboardInterrupt": ["KeyboardInterrupt", 0, 0, True]},
+            "close during the first job": [["the pool is closed"], 0, True],
+            "close while run alone": [["Unavailable: the pool is closed"], 1, 0],
+            "stand-in put back": [0, True, 0, 1], "stdlib back at the end": True})
+
+    def test_a_process_run_with_dash_i_gets_it_once(self):
+        """The stand-in puts -I first only when the flags lack it: a process run with -I passes it on once."""
+        code = (f"import multiprocessing.util, sys\nsys.path[:0] = [{_support.PY_ROOT!r}, {_support.SRC!r}]\n"
+                "from lazaret.registry import scanpool\nscanpool._isolate_flags()\n"
+                "print(multiprocessing.util._args_from_interpreter_flags().count('-I'))\n")
+        done = subprocess.run([sys.executable, "-I", "-c", code], capture_output=True, encoding="utf-8",
+                              errors="replace", timeout=60)
+        self.assertEqual(done.stdout.strip(), "1", done.stderr)
+
+    def test_a_pool_run_in_a_project_imports_nothing_of_it(self):
+        tmp = tempfile.mkdtemp(prefix="lazaret-pool-project-")
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        project, markers = os.path.join(tmp, "project"), os.path.join(tmp, "markers")
+        os.makedirs(markers)
+        for name in ("multiprocessing", "concurrent", "lazaret", "tests"):
+            os.makedirs(os.path.join(project, name))
+            with open(os.path.join(project, name, "__init__.py"), "w", encoding="utf-8") as f:
+                f.write(f"import os\nopen(os.path.join({markers!r}, {name!r} + '-' + str(os.getpid())), 'w', "
+                        f"encoding='utf-8').close()\n")
+        out, done = self.driver(
+            f"import json, sys\nsys.path[:0] = [{_support.PY_ROOT!r}, {_support.SRC!r}]\n"
+            "from lazaret.registry import scanpool\nfrom tests.registry import _scanpool_support as support\n"
+            "if __name__ == '__main__':\n"
+            "    pool = scanpool.WorkerPool(1, support.behave, isolated=True)\n"
+            "    try:\n        print(json.dumps(pool.run(b'ok', 'tgz', 'npm', 7)))\n"
+            "    finally:\n        pool.close()\n", cwd=project)
+        self.assertEqual(sorted(os.listdir(markers)), [], done.stderr)
+        self.assertEqual((out["head"], out["length"], out["kind"]), ("ok", 2, "npm"))
 
 
 if __name__ == "__main__":

@@ -3,6 +3,7 @@ runs must be importable by name: nothing here is a test. Each takes what `guard.
 (`data, container, kind, timeout, timed`) and does what the first bytes of `data` say."""
 
 import os
+import sys
 import time
 
 
@@ -55,3 +56,38 @@ def behave(data, container, kind, timeout, timed):
 def exit_now():
     """A stand-in for the pool's trivial first job that ends the worker."""
     os._exit(3)
+
+
+def flags(data, container, kind, timeout, timed):
+    """The worker's interpreter flags: started with -I or not (F-01)."""
+    return {"isolated": sys.flags.isolated, "pid": os.getpid()}
+
+
+def flags_or_crash(data, container, kind, timeout, timed):
+    """`crash`: the process ends at once; else the worker's interpreter flags."""
+    if bytes(data) == b"crash":
+        os._exit(5)
+    return flags(data, container, kind, timeout, timed)
+
+
+def crash_once_then_wait(data, container, kind, timeout, timed):
+    """`data` is a path: the first time (no file there) the process ends at once; the next, it says it is running
+    (the file PATH.running) and takes its time, for a close() while an archive is run alone."""
+    marker = os.fsdecode(bytes(data))
+    if not os.path.exists(marker):
+        with open(marker, "w", encoding="utf-8") as f:
+            f.write("seen")
+        os._exit(9)
+    with open(marker + ".running", "w", encoding="utf-8") as f:
+        f.write(str(os.getpid()))
+    time.sleep(60)
+    return flags(data, container, kind, timeout, timed)
+
+
+def ping_slowly():
+    """A stand-in for the pool's trivial first job that says it is running (the file $LAZARET_TEST_PING_MARK) and
+    then takes its time, for a close() while the first job runs."""
+    with open(os.environ["LAZARET_TEST_PING_MARK"], "w", encoding="utf-8") as f:
+        f.write(str(os.getpid()))
+    time.sleep(60)
+    return os.getpid()

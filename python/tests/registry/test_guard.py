@@ -14,8 +14,11 @@ import http.server
 import io
 import json
 import os
+import platform
 import shutil
 import socketserver
+import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -670,6 +673,48 @@ class WheelTests(unittest.TestCase):
         self.assertEqual(guard.pick_artifacts([sdist, fit, other], self.CP311_LINUX), [fit])
         self.assertEqual(guard.pick_artifacts([sdist, other], self.CP311_LINUX), [sdist])
         self.assertEqual(guard.pick_artifacts([other], self.CP311_LINUX), [other])
+
+
+class InterpreterProbeTests(unittest.TestCase):
+    """interpreter_info asks a Python what it is (`python -I -c …`) in the current folder, the project the guard
+    is run in, which `-c` puts first on sys.path (F-01): a platform.py there, or a PYTHONPATH to it, is not
+    imported, and the answer is that Python's."""
+
+    def test_a_platform_py_in_the_current_folder_is_not_imported(self):
+        tmp = tempfile.mkdtemp(prefix="lazaret-probe-")
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        project, marker = os.path.join(tmp, "project"), os.path.join(tmp, "marker")
+        os.makedirs(project)
+        with open(os.path.join(project, "platform.py"), "w", encoding="utf-8") as f:
+            f.write(f"open({marker!r}, 'w', encoding='utf-8').close()\n\n\ndef machine():\n    return 'planted'\n")
+        here = os.getcwd()
+        os.chdir(project)
+        self.addCleanup(os.chdir, here)                     # (first: Windows cannot remove the current folder)
+        ran, real = [], subprocess.run
+
+        def run(*args, **kw):
+            ran.append(real(*args, **kw))
+            return ran[-1]
+
+        with mock.patch.dict(os.environ, {"PYTHONPATH": project}), mock.patch.object(guard.subprocess, "run", run):
+            got = guard.interpreter_info(sys.executable)
+        self.assertFalse(os.path.exists(marker))
+        self.assertEqual(len(ran[0].stdout.split()), 5, ran[0].stderr)          # (the probe's answer, not the fallback)
+        self.assertEqual(got, (sys.implementation.name, sys.version_info[0], sys.version_info[1], sys.platform,
+                               platform.machine()))
+        self.assertEqual(ran[0].args[1:3], ["-I", "-c"])
+
+    def test_the_command_line_asks_for_isolated_scan_workers(self):
+        """F-01: the guard's command line runs in the project, so its scan pool starts its workers with -I
+        (scanpool.WorkerPool's isolated, scoped to the pool); a Context made otherwise (a library's) does not."""
+        seen = []
+        with mock.patch.object(guard, "_run", lambda opts: seen.append(opts) or 0):
+            self.assertEqual(guard.main(["npm", "install"]), 0)
+        self.assertIs(seen[0].isolated_workers, True)
+        ctx = guard.Context(options(no_cache=True, isolated_workers=True), out=io.StringIO())
+        self.addCleanup(ctx.close)
+        self.assertIs(ctx.scanner.isolated_workers, True)
+        self.assertIs(context().scanner.isolated_workers, False)
 
 
 class RegistriesTests(unittest.TestCase):

@@ -25,10 +25,26 @@ brings the old way back), and the worker is the one that can be hurt:
   in a pool of its own; one that kills its worker again raises `Died` and the guard cannot clear that
   package (it is blocked as "could not be checked", as any scan that fails). The others get their
   answers. A scan that does not answer within the wall limit gets the pool's processes terminated
-  and raises `Hung`. After `MAX_BREAKS` lost workers the pool stops starting new ones.
+  and raises `Hung`. After `MAX_BREAKS` lost workers the pool stops starting new ones. A close in the
+  middle of a scan is not a lost worker: that scan is `Unavailable` ("the pool is closed").
 - **A pool that cannot start is told apart from one that loses a worker.** The first pool is tried
   with a trivial job; if that fails (no `spawn`, a limit too small to import Python, a frozen
   program) `Unavailable` is raised and the caller scans in its own process, saying so.
+
+- **Nothing of the folder it runs in** (`isolated=True`, the guard's command line). A worker, and
+  multiprocessing's resource tracker, start as `python -c 'from multiprocessing.spawn import …'` in this
+  process's working directory: the project the guard is run in. `-c` puts that folder first on sys.path, so a
+  project's `multiprocessing/` ran in them before any scan (F-01). They start with -I (`_isolate_flags`, while
+  the pool is open): no current folder, PYTHON* variable or user site directory on their path; spawn then gives
+  a worker this process's sys.path. When another library has replaced the function the flags come from, before
+  the pool is made or before a job is submitted, no worker is started (`FlagsReplaced`, an `Unavailable`: the
+  guard scans in its own process). That is checked, not prevented: a replacement by another thread between the
+  check and the spawn (in `submit`, or between `_make`'s check and the executor's construction, where the
+  resource tracker starts) starts that worker or the tracker without -I. It is outside the guard's threat
+  model: Lazaret has no runtime dependencies, and nothing else in the guard's process touches multiprocessing.
+  close() lets go only once no executor is being made. A library's own pool (`isolated=False`, the default)
+  changes nothing, and a stand-in of this module's left in place after the last isolated pool let go (another
+  library put it back) passes the flags through unchanged.
 
 What it does not do: no limit on a worker's resident memory on platforms without `RLIMIT_AS`, and
 nothing against a worker that reads the whole disk; the worker is a process of the same user.
@@ -39,11 +55,14 @@ import concurrent.futures.process
 import hashlib
 import itertools
 import multiprocessing
+import multiprocessing.util
 import os
 import shutil
+import subprocess
 import tempfile
 import threading
 import time
+import weakref
 
 try:
     import resource
@@ -52,7 +71,7 @@ except ImportError:                                      # Windows
 
 from lazaret.scanner import timings
 
-__all__ = ["WorkerPool", "Unavailable", "Died", "Hung", "ArchiveChanged", "cores", "threads_for",
+__all__ = ["WorkerPool", "Unavailable", "FlagsReplaced", "Died", "Hung", "ArchiveChanged", "cores", "threads_for",
            "DEFAULT_MEMORY_MB", "MAX_BREAKS", "MAX_ENGINE_THREADS"]
 
 #: Address space a worker may use, in MB (Linux). A 40 MB archive peaks near 1.4 GB; the archive
@@ -147,14 +166,102 @@ def _task(fn, path, digest, container, kind, timeout, timed, cpu_seconds, thread
     return fn(data, container, kind, timeout, timed)
 
 
+# ---------------------------------------------------------------- the workers' command line
+_FLAGS_LOCK = threading.Lock()
+_flags_holders = 0                                       # isolated pools that hold the stand-in now
+_flags_replaced = None                                   # the standard library's function it stands in for
+_flags_installed = None                                  # the stand-in itself: what is ours is this function
+_stand_ins = weakref.WeakKeyDictionary()                 # every stand-in this module made -> the function it wraps
+
+
+class FlagsReplaced(Unavailable):
+    """multiprocessing's flags for a child are not this module's stand-in (another library replaced them): an
+    isolated pool's workers would not start with -I, so none is started."""
+
+
+def _isolate_flags():
+    """Start this process's multiprocessing children with -I while an isolated pool is open (F-01). -> False when
+    that cannot be done here, and the pool is not made.
+
+    A spawned worker and the resource tracker run `python <flags> -c '…'` in this process's working directory,
+    the project the guard is run in, and `-c` puts that folder first on sys.path: a project's `multiprocessing/`
+    was imported before the worker's first line. multiprocessing has no setting for a child's flags or working
+    directory, and changing this process's working directory would move it under the guard's other threads. The
+    flags come from `multiprocessing.util._args_from_interpreter_flags`, the one in `subprocess` (this process's
+    own flags, repeated), which spawn, the resource tracker and the forkserver call by name (3.10 to 3.14): while
+    a pool that asks for it is open, a stand-in puts -I before them. Only the standard library's own function is
+    stood in for, and only the stand-in itself (by identity, not by anything a wrapper could copy) counts as
+    ours: when the function in place is neither, the pool is not made, and `_flags_owned` says so before each
+    submission. Another library can replace the function at any time: it is checked, not prevented, so a
+    replacement by another thread between a check and the spawn it guards (in `submit`, or between `_make`'s check
+    and the executor's construction, which starts the resource tracker) starts that worker or the tracker without
+    -I. That is outside the guard's threat model: Lazaret has no runtime dependencies, and nothing else in the
+    guard's process touches multiprocessing. The last holder to let go puts the standard library's function back,
+    if the stand-in is still the one in place. A stand-in adds -I only while it is the installed, held one: put
+    back later by another library (a save and restore around the last close), it passes the flags through, and
+    the next isolated pool takes it for the function it wraps. -I takes nothing from a worker that it needs: spawn
+    hands it this process's sys.path and working directory before it imports anything of Lazaret's."""
+    global _flags_holders, _flags_replaced, _flags_installed
+    with _FLAGS_LOCK:
+        current = multiprocessing.util._args_from_interpreter_flags
+        if _flags_holders:
+            if current is not _flags_installed:
+                return False
+            _flags_holders += 1
+            return True
+        original = current
+        try:
+            found = _stand_ins.get(current)              # (a weak map's lookup compares by hash and ==, so:)
+        except TypeError:                                # (another library's callable that takes no weak reference)
+            found = None
+        if found is not None and any(ref() is current for ref in _stand_ins.keyrefs()):
+            original = found                             # (our stand-in left in place, by identity: what it wraps)
+        if original is not subprocess._args_from_interpreter_flags:
+            return False
+
+        def isolated():
+            args = original()
+            if not (_flags_holders and _flags_installed is isolated):
+                return args                              # (not the installed, held stand-in: the flags as they are)
+            return args if "-I" in args else ["-I", *args]
+
+        _stand_ins[isolated] = original
+        multiprocessing.util._args_from_interpreter_flags = isolated
+        _flags_replaced, _flags_installed, _flags_holders = original, isolated, 1
+        return True
+
+
+def _flags_owned():
+    """Is the stand-in held and still the function in place?"""
+    with _FLAGS_LOCK:
+        return bool(_flags_holders) and multiprocessing.util._args_from_interpreter_flags is _flags_installed
+
+
+def _release_flags():
+    """An isolated pool lets go: the last holder puts the standard library's function back, if the function in
+    place is still the stand-in (another library's, a wrapper of the stand-in included, is left as it is)."""
+    global _flags_holders, _flags_replaced, _flags_installed
+    with _FLAGS_LOCK:
+        if not _flags_holders:
+            return
+        _flags_holders -= 1
+        if _flags_holders:
+            return
+        if multiprocessing.util._args_from_interpreter_flags is _flags_installed:
+            multiprocessing.util._args_from_interpreter_flags = _flags_replaced
+        _flags_replaced = _flags_installed = None
+
+
 # ---------------------------------------------------------------- in the parent
 class WorkerPool:
     """Runs `fn(data, container, kind, timeout, timed)` for one archive at a time in each of `jobs`
     worker processes. `fn` must be importable by the worker (a module-level function). Any number of
     threads may call `run`."""
 
-    def __init__(self, jobs, fn, memory_mb=DEFAULT_MEMORY_MB, threads=None, wall=None, cpu=None):
+    def __init__(self, jobs, fn, memory_mb=DEFAULT_MEMORY_MB, threads=None, wall=None, cpu=None, isolated=False):
         self.jobs = max(1, jobs)
+        self.isolated = isolated                         # the workers start with -I while this pool is open (F-01)
+        self._holds_flags = False
         self.wall, self.cpu = wall, cpu                  # seconds to wait for an answer, CPU seconds for an archive:
                                                          # None is 2 x the scan timeout + 60, and (2 x timeout + 30) per thread
         self.fn = fn
@@ -173,15 +280,75 @@ class WorkerPool:
         self._proved = False                             # the shared pool has run a trivial job
         self._unavailable = ""                           # why workers cannot be had, once known
         self._closed = False
+        self._starting = 0                               # executors being made now, which close() waits on to let
+                                                         # go of the isolated flags
 
     # ---- pools
     def _make(self, workers):
+        """A new executor, made while the pool is open and counted against close (`_starting`): the caller
+        publishes it (`_publish`), which ends the count. An isolated pool takes the flags' stand-in first, or
+        checks it is still the one in place (FlagsReplaced)."""
+        with self._lock:
+            if self._closed:
+                raise Unavailable("the pool is closed")
+            if self.isolated:
+                if not self._holds_flags:
+                    if not _isolate_flags():
+                        raise FlagsReplaced("multiprocessing's flags for a child are not the standard library's "
+                                            "(another library replaced them): its workers would not start isolated")
+                    self._holds_flags = True
+                elif not _flags_owned():
+                    raise FlagsReplaced("multiprocessing's flags for a child were replaced while the pool was open: "
+                                        "its workers would not start isolated")
+            self._starting += 1
         try:
             return concurrent.futures.ProcessPoolExecutor(
                 max_workers=workers, mp_context=multiprocessing.get_context("spawn"),
                 initializer=_init, initargs=(self.memory_bytes,))
-        except (OSError, ValueError, ImportError, NotImplementedError) as exc:
-            raise Unavailable(f"{type(exc).__name__}: {exc}") from None
+        except BaseException as exc:                     # (whatever it is, the making is over: close can let go)
+            self._started()
+            if isinstance(exc, (OSError, ValueError, ImportError, NotImplementedError)):
+                raise Unavailable(f"{type(exc).__name__}: {exc}") from None
+            raise
+
+    def _started(self):
+        """An executor's making is over: once the pool is closed and none is being made, let go of the flags."""
+        with self._lock:
+            self._starting -= 1
+        self._release_if_idle()
+
+    def _publish(self, pool):
+        """Register an executor `_make` made, for close() to end; if the pool closed while it was being made, it is
+        ended here instead (Unavailable)."""
+        with self._lock:
+            closed = self._closed
+            if not closed:
+                self._live.append(pool)
+        if closed:
+            self._retire(pool, kill=True)
+        self._started()
+        if closed:
+            raise Unavailable("the pool is closed")
+
+    def _release_if_idle(self):
+        """Let go of the isolated flags once the pool is closed and no executor is being made (F-01)."""
+        with self._lock:
+            release = self._closed and not self._starting and self._holds_flags
+            if release:
+                self._holds_flags = False
+        if release:
+            _release_flags()
+
+    def _submit(self, pool, fn, *args):
+        """`pool.submit`, which is where a worker is started, unless the pool is closed (Unavailable) or, for an
+        isolated pool, the flags' stand-in is not the function in place any more (FlagsReplaced)."""
+        with self._lock:
+            if self._closed:
+                raise Unavailable("the pool is closed")
+        if self.isolated and not _flags_owned():
+            raise FlagsReplaced("multiprocessing's flags for a child were replaced while the pool was open: its "
+                                "workers would not start isolated")
+        return pool.submit(fn, *args)
 
     def _shared(self):
         """The pool the archives go to: made, and proved with a trivial job the first time, by one thread while
@@ -201,22 +368,31 @@ class WorkerPool:
                     raise Died(f"{self.breaks} scan workers have been lost; no more are started")
             try:
                 pool = self._make(self.jobs)
+                self._publish(pool)                      # (so that close() ends it; ended here if it closed meanwhile)
             except Unavailable as exc:
                 self._unavailable = str(exc)
                 raise
-            with self._lock:
-                self._live.append(pool)                  # (so that close() ends it)
             if not self._proved:
                 try:
-                    pool.submit(_ping).result(timeout=120)
-                except (concurrent.futures.process.BrokenProcessPool, concurrent.futures.TimeoutError, OSError,
-                        RuntimeError) as exc:
+                    self._submit(pool, _ping).result(timeout=120)
+                except Unavailable:
                     self._retire(pool, kill=True)
+                    raise
+                except (concurrent.futures.process.BrokenProcessPool, concurrent.futures.TimeoutError,
+                        concurrent.futures.CancelledError, OSError, RuntimeError) as exc:
+                    self._retire(pool, kill=True)
+                    if self._closed:
+                        raise Unavailable("the pool is closed") from None
                     self._unavailable = f"a worker could not start ({type(exc).__name__})"
                     raise Unavailable(self._unavailable) from None
                 self._proved = True
             with self._lock:
-                self._pool = pool                        # only a pool that has run a job is handed out
+                closed = self._closed
+                if not closed:
+                    self._pool = pool                    # only a pool that has run a job is handed out
+            if closed:
+                self._retire(pool, kill=True)
+                raise Unavailable("the pool is closed")
             return pool
 
     def _retire(self, pool, kill=False):
@@ -244,6 +420,8 @@ class WorkerPool:
     # ---- files
     def _staging(self):
         with self._lock:
+            if self._closed:
+                raise Unavailable("the pool is closed")
             if self._dir is None:
                 self._dir = tempfile.mkdtemp(prefix="lazaret-guard-")      # mode 0700
             return self._dir
@@ -252,7 +430,12 @@ class WorkerPool:
         """Write `data` where a worker can read it -> (path, sha256 hex)."""
         digest = hashlib.sha256(data).hexdigest()
         path = os.path.join(self._staging(), f"{digest}-{next(self._seq)}.bin")
-        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0), 0o600)
+        try:
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0), 0o600)
+        except FileNotFoundError:
+            if self._closed:                             # (close() took the folder away meanwhile)
+                raise Unavailable("the pool is closed") from None
+            raise
         try:
             with os.fdopen(fd, "wb") as f:
                 f.write(data)
@@ -295,7 +478,7 @@ class WorkerPool:
 
     def _wait(self, pool, args, wall):
         try:
-            future = pool.submit(_task, *args)
+            future = self._submit(pool, _task, *args)
         except concurrent.futures.process.BrokenProcessPool:
             raise
         except RuntimeError:                             # shut down by the thread that found it broken
@@ -306,6 +489,10 @@ class WorkerPool:
         except concurrent.futures.TimeoutError:
             self._retire(pool, kill=True)
             raise Hung("the scan did not finish") from None
+        except (concurrent.futures.CancelledError, FileNotFoundError):
+            if self._closed:                             # (close() cancelled it, or took the staged file away)
+                raise Unavailable("the pool is closed") from None
+            raise
 
     def _lost(self, pool):
         """A worker of the shared `pool` was lost: counted once, by the first thread that sees it."""
@@ -319,20 +506,18 @@ class WorkerPool:
             raise Died("workers keep being lost")
         try:
             pool = self._make(1)
+        except FlagsReplaced:
+            raise                                        # (the caller scans in its own process)
         except Unavailable as exc:
-            raise Died(f"no worker could be started to run it alone ({exc})") from None
-        with self._lock:
             if self._closed:
-                closed = True
-            else:
-                closed = False
-                self._live.append(pool)
-        if closed:
-            self._retire(pool, kill=True)
-            raise Unavailable("the pool is closed")
+                raise
+            raise Died(f"no worker could be started to run it alone ({exc})") from None
+        self._publish(pool)                              # (Unavailable when the pool closed meanwhile)
         try:
             return self._wait(pool, args, wall)
         except concurrent.futures.process.BrokenProcessPool:
+            if self._closed:                             # (close() ended it: not this archive's doing)
+                raise Unavailable("the pool is closed") from None
             with self._lock:
                 self.breaks += 1
             raise Died("the scan worker was lost on this archive, also when it ran alone "
@@ -352,6 +537,7 @@ class WorkerPool:
             _reap(procs, thread, deadline)
         if folder:
             shutil.rmtree(folder, ignore_errors=True)
+        self._release_if_idle()                          # (or the last executor being made does, when it is done)
 
 
 def _reap(procs, thread, deadline):

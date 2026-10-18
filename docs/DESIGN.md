@@ -1730,7 +1730,44 @@ as not checked, as it blocks any scan error. A pool that cannot start at
 all (`Unavailable`: no `spawn`, a limit too small to import Python) is told
 apart from one that lost a worker, and only then does the guard scan in its
 own process, once said. Isolation buys memory and robustness, not speed: the
-wall time is the same.
+wall time is the same. A worker, and multiprocessing's resource tracker,
+start as `python -c '…'` in the guard's working directory, the project, which
+`-c` puts first on `sys.path`: the command line's pool (`WorkerPool(...,
+isolated=True)`, which `guard.main` asks for) starts them with `-I` (F-01),
+so a project's `multiprocessing/` is not imported; spawn gives the worker the
+guard's `sys.path`. multiprocessing has no setting for a child's flags or
+working directory, and moving the process's working directory would move it
+under the guard's other threads, so while such a pool is open the standard
+library's `multiprocessing.util._args_from_interpreter_flags` (the one in
+`subprocess`, which spawn, the resource tracker and the forkserver call by
+name in 3.10 to 3.14) is stood in for by one that puts `-I` first; the last
+such pool to close puts the standard library's back, if the stand-in is still
+the function in place. The stand-in is known by identity, not by an
+attribute a wrapper could copy. Another library's function in place, put
+there before a pool opens or while one is open, starts nothing: the pool, a
+new executor of it or its next job is `FlagsReplaced` (an `Unavailable`: the
+guard scans in its own process), and the last close leaves that function
+where it is (another library can replace it at any moment: it is checked
+before each submission, where a worker starts, and before an executor is
+made, where the resource tracker starts, not prevented; a replacement
+between the check and the start would start that process without `-I`, which
+is outside the guard's threat model: Lazaret has no runtime dependencies,
+and nothing else in its process uses multiprocessing). close() lets go of
+the stand-in only once no executor is being made, whatever the executor's
+constructor raised, and an executor made, or published, after close is ended
+without a job; a close in the middle of the first job, a scan or a scan run
+alone is `Unavailable` (the pool is closed), not a lost worker, so the scan
+falls back to the guard's own process. A stand-in of the pool's that another
+library's save and restore put back after the last pool let go passes the
+flags through unchanged, and a later pool takes it for the function it
+wraps. A library's own pool (`isolated=False`, the default) changes
+nothing. A dedicated broker process run with `-I` and owning the pool was
+considered: it would leave the stdlib alone even while the pool is open, but
+it moves every archive, answer and failure (`Died`, `Hung`,
+`Unavailable`) across a second process boundary, for the guard's command
+line, where this process starts no other multiprocessing children. The
+guard's question to the interpreter uv installs for (`interpreter_info`) is
+`python -I -c …`.
 
 `--from-plan` (pip, opt-in): after pip's plan (`--dry-run --report`) is
 scanned, pip installs the scanned wheels from a folder (`--no-index

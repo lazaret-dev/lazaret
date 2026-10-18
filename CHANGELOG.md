@@ -1726,6 +1726,71 @@ aggregate):
   (which cost the host's other idle connections). The relays that hand on a file as it comes (pip's and uv's, too large
   to scan; Go toolchains) keep only their timeout for each read on Python's transport, as before.
 
+- **Security: nothing of the repository it scans runs in the GitHub Action, and no module of the project in
+  `lazaret guard`'s Pythons (F-01).** An external review's P1. The action ran `python -m venv`, `python -m pip install`
+  and `python -m lazaret` in the checkout it scans (a composite step's working directory), and `python -m` puts the
+  current directory first on `sys.path`. A pull request that added `venv.py`, `pip.py` or `lazaret.py` (or a
+  `sitecustomize.py`, a `usercustomize.py`), or a workflow's `PYTHONPATH` or `PYTHONUSERBASE` into the checkout, had its
+  code run by the action with the job's privileges, and could skip the scan. Now each step's shell starts without
+  `BASH_ENV` and `ENV` (`env -u BASH_ENV -u ENV bash --noprofile --norc -eo pipefail {0}`: bash reads `BASH_ENV` before
+  any script, `--norc` or not). The step drops a function of the environment's named as a command it runs, every
+  `PYTHON*` (and in the install step `PIP_*`) variable, Lazaret's native-library overrides (`LAZARET_NATIVE_LIB`, which
+  the loader takes the engine from, and `LAZARET_NATIVE_LIBRARY` and `LAZARET_WHEEL_PLATFORM`, which put a file's bytes
+  in the wheel in place of the engine the commit builds; still read outside the action) and every Rust variable that
+  picks a tool or adds flags (`CARGO`, `CARGO_*`, `RUSTC`, `RUSTC_WRAPPER`, `RUSTFLAGS`, `RUSTUP_TOOLCHAIN`…, in any
+  case: Windows reads them so; `CARGO_HOME` and `RUSTUP_HOME`, which find the toolchain, are kept), and runs from
+  `$RUNNER_TEMP`. `python3` and `cargo` are taken from `PATH` by their absolute path, and one in the workspace (a
+  folder of it, or a symlink into it, a tool cache installed there included, on purpose) is refused, as is a
+  `CARGO_HOME`, `RUSTUP_HOME` or `$RUNNER_TEMP` inside the workspace (anywhere else, `$RUNNER_TEMP` included, is
+  accepted); the backend is given that cargo, and the build `PATH` without the workspace's folders or relative
+  entries (rustc's linker). Every interpreter runs with `-I` (no current or script directory, `PYTHON*` variable or
+  user site directory on its path); pip runs with `--isolated` and `PIP_CONFIG_FILE` the null device, so it reads no configuration file
+  (`--isolated` alone still read `PIP_CONFIG_FILE` and the global ones, `XDG_CONFIG_DIRS`'s too, whose `[install]
+  target` or `no-build-isolation` would have been taken). A relative `path` is made absolute from `$GITHUB_WORKSPACE`.
+  `-I` alone was not enough: pip starts the build backend in a process of its own, without `-I`, and its environment
+  is the step's (the isolated build replaces only `PYTHONPATH`). The inputs, the `sarif` output and the gate's exit
+  code are unchanged, but for a UNC `sarif` (`\\host\share\r.sarif`), which was advertised as relative
+  (`./\\host\share\r.sarif`, a fault older than F-01) and is now advertised as given, as a drive letter's is.
+  What a step cannot undo is the environment it starts in: the calling workflow must not take environment
+  variables, `PATH` entries or tool paths from the checkout (README, "In CI").
+
+  The same class in the Pythons `lazaret guard` starts in the project it is run in: its question to the interpreter
+  uv installs for (`python -c "import sys, platform; …"`) imported a `platform.py` there, which ran and could name
+  another architecture for the wheels the guard checks; its scan workers and multiprocessing's resource tracker,
+  which start as `python -c '…'` in the project, imported a `multiprocessing/` of it, ran it, and left the pool
+  unable to start, so the guard scanned in its own process. The probe is now `python -I -c`. The command line's
+  scan pool (`WorkerPool(..., isolated=True)`, asked for by `guard.main`) starts its children with `-I` while it is
+  open: multiprocessing has no setting for a child's flags or working directory, so the standard library's
+  `multiprocessing.util._args_from_interpreter_flags` is stood in for by one that puts `-I` first, and the last such
+  pool to close puts it back if the stand-in (known by identity) is still in place. Another library's function in
+  place, before a pool opens or while one is open, starts nothing: the pool, a new executor of it or its next job is
+  refused (`FlagsReplaced`, and the guard scans in its own process), and that function is left where it is. That is
+  checked, not prevented: a replacement between the check and the start of a worker (in `submit`) or of the resource
+  tracker (as the executor is made) would start it without `-I`; Lazaret has no runtime dependencies, and nothing else
+  in the guard's process uses multiprocessing. close() lets go of the stand-in only once no executor is being made,
+  whatever the executor's constructor raised (an `OSError` is `Unavailable`, anything else is raised as it is), and an
+  executor made after close is ended without a job. A close in the middle of the first job, an archive's staging, a
+  scan or a scan run alone is the pool being closed (`Unavailable`: the guard scans in its own process), not a lost
+  worker or a missing file. A stand-in of the
+  pool's left in place after the last pool let go (another library's save and restore put it back) passes the flags
+  through unchanged, and a later pool takes it for the standard library's function it wraps. A library's own pool
+  changes nothing. The package managers the guard runs are their own commands (pip's puts its own folder on
+  `sys.path`, not the working directory), and the commit-time hook starts only git. Tests:
+  `tests/build/test_action_isolation.py` (new: both steps run as the runner runs them, with a real interpreter, in a checkout holding shadow modules, a user site `.pth` file, a `BASH_ENV` script and exported
+  functions, with the variables into it and a pip configuration of its, against a stand-in action pip builds offline;
+  no code of the checkout runs, the build is isolated and reads no configuration, the report is where the output
+  says, the gate's exit code passes through), `tests/build/test_action_backend.py` (new: the install step on this
+  repository's own `python/`, its native-library overrides and Rust variables pointing into the checkout: the real
+  backend goes to the engine's build with the cargo the step resolved, given none of them), `test_review_action.py`
+  (what the install step starts python3 and pip with, the refusals, the UNC report path), `test_guard.py`'s
+  `InterpreterProbeTests` and `test_scanpool.py`'s `WorkingFolderTests` (each in a process of its own: an unrelated
+  spawned child keeps its flags before and after an isolated pool, the standard library's function is back after
+  it, another library's is left alone, put there before or while a pool is open or wrapping the stand-in; a close
+  while the executor is being made or before its first job, timed with events: no job, the flags held until then; the
+  resource tracker's own command line has `-I`; a constructor that raises; a close during the first job, a scan or a
+  run alone; a stand-in put back after the last close), and its `ClosedPoolTests` and `CloseMidwayTests` (with a
+  stand-in executor).
+
 - **A tagged template call of a script's wrapper no longer crashes the engine (PANIC-TAGGED; rule set 2.98.0).** John's discovery run of Oct 18: `@epoch32/visage` 1.14.0's `dist/vite/index.js` made the engine panic
   ("index out of bounds" in `jsparse/tree.rs`), so the release was INCOMPLETE with a CRITICAL SC-TRUNCATED; the npm
   package's WASM build aborts on a panic. A tagged template (`` fn`…` ``) runs the function as a call does, and the
