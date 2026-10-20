@@ -3259,8 +3259,32 @@ fn dv_char_codes(p: &Pack, view: &[u32]) -> PyStr {
 }
 
 /// A text's decoded view and the line of the string array it reads.
-/// (the view, the string array's line, JS-Confuser's string concealing's line: D-11)
-type Reading = (PyStr, Option<usize>, Option<usize>);
+/// (the view, None when it is the text; the string array's line, JS-Confuser's string concealing's line: D-11)
+/// (BIG-BUNDLE-TAIL, memory: a 16,000,000-character bundle's view, the text itself, is not copied for each who asks)
+type Reading = (Option<std::rc::Rc<PyStr>>, Option<usize>, Option<usize>);
+
+/// The text a kept reading was of: the call's own, shared (api::call_text_shared), or a copy.
+enum DvKey {
+    Shared(std::sync::Arc<[u32]>),
+    Copy(PyStr),
+}
+
+impl DvKey {
+    fn of(text: &[u32]) -> DvKey {
+        match crate::api::call_text_shared(text) {
+            Some(t) => DvKey::Shared(t),
+            None => DvKey::Copy(text.to_vec()),
+        }
+    }
+
+    fn is(&self, text: &[u32]) -> bool {
+        let k: &[u32] = match self {
+            DvKey::Shared(t) => t,
+            DvKey::Copy(t) => t,
+        };
+        k == text
+    }
+}
 
 /// The language a decoded view reads its literals in: JavaScript or Python
 /// (with the lexers), else none (the patterns: a shell script, a command).
@@ -3276,7 +3300,7 @@ thread_local! {
     // the last text decoded_view read (in its language), its view and its
     // string array's line (core's _DV_MEMO): the install-script test, the
     // import-time test and the spawned-script follower read the same file
-    static DV_MEMO: std::cell::RefCell<Option<(PyStr, Option<&'static str>, Reading)>> = const { std::cell::RefCell::new(None) };
+    static DV_MEMO: std::cell::RefCell<Option<(DvKey, Option<&'static str>, Reading)>> = const { std::cell::RefCell::new(None) };
 }
 
 /// core._dv_reading: decoded_view's reading of `text` and the line of the
@@ -3284,7 +3308,7 @@ thread_local! {
 fn dv_reading(p: &Pack, text: &[u32], lang: Option<&str>) -> Reading {
     let lang = dv_lang(lang);
     if let Some(r) = DV_MEMO
-        .with(|m| m.borrow().as_ref().filter(|(t, l, _)| *l == lang && t.as_slice() == text).map(|(_, _, r)| r.clone()))
+        .with(|m| m.borrow().as_ref().filter(|(t, l, _)| *l == lang && t.is(text)).map(|(_, _, r)| r.clone()))
     {
         return r;
     }
@@ -3292,7 +3316,7 @@ fn dv_reading(p: &Pack, text: &[u32], lang: Option<&str>) -> Reading {
     // (a reading the work budget cut short is no answer: the call fails,
     // and a later call must not be given it)
     if !crate::budget::exhausted() {
-        DV_MEMO.with(|m| *m.borrow_mut() = Some((text.to_vec(), lang, r.clone())));
+        DV_MEMO.with(|m| *m.borrow_mut() = Some((DvKey::of(text), lang, r.clone())));
     }
     r
 }
@@ -3301,6 +3325,14 @@ fn dv_reading(p: &Pack, text: &[u32], lang: Option<&str>) -> Reading {
 /// strings it decodes as it runs written as their text; `text` itself when
 /// it decodes none.
 pub fn decoded_view(p: &Pack, text: &[u32], lang: Option<&str>) -> PyStr {
+    match dv_reading(p, text, lang).0 {
+        Some(view) => view.to_vec(),
+        None => text.to_vec(),
+    }
+}
+
+/// decoded_view() when it is not `text` itself (shared with the reading kept), else None.
+fn dv_view(p: &Pack, text: &[u32], lang: Option<&str>) -> Option<std::rc::Rc<PyStr>> {
     dv_reading(p, text, lang).0
 }
 
@@ -3332,7 +3364,7 @@ fn dv_plain(v: &[u32]) -> bool {
 /// on. The line breaks a run spans follow it on its line, so that the
 /// lines after it keep their numbers. (view, whether a code escape was
 /// read: joins alone decode nothing.)
-fn dv_literals(p: &Pack, text: &[u32], lang: &'static str) -> (PyStr, bool) {
+fn dv_literals(p: &Pack, text: &[u32], lang: &'static str) -> (Option<PyStr>, bool) {
     // (a run's value is never longer than its text: the view never grows)
     let max = p.usize("_DV_MAX_CHARS");
     let found = if lang == "py" {
@@ -3346,7 +3378,8 @@ fn dv_literals(p: &Pack, text: &[u32], lang: &'static str) -> (PyStr, bool) {
             plain.into_iter().filter(|r| jsx.contains(r)).collect()
         }
     };
-    let mut out: PyStr = Vec::with_capacity(text.len());
+    // (the view, None while it is the text: made at the first literal it writes)
+    let mut out: PyStr = Vec::new();
     let mut pos = 0usize;
     let mut pending = 0usize; // line breaks to write at the next one
     let mut decoded = false;
@@ -3366,6 +3399,9 @@ fn dv_literals(p: &Pack, text: &[u32], lang: &'static str) -> (PyStr, bool) {
         if r.start < pos || !dv_plain(&r.value.chars) {
             continue;
         }
+        if pos == 0 {
+            out.reserve_exact(text.len());
+        }
         copy(&mut out, &text[pos..r.start], &mut pending);
         if r.value.bytes {
             out.push(c('b'));
@@ -3381,11 +3417,11 @@ fn dv_literals(p: &Pack, text: &[u32], lang: &'static str) -> (PyStr, bool) {
         pos = r.end;
     }
     if pos == 0 {
-        return (text.to_vec(), false);
+        return (None, false);
     }
     copy(&mut out, &text[pos..], &mut pending);
     out.extend(std::iter::repeat(c('\n')).take(pending));
-    (out, decoded)
+    (if out == text { None } else { Some(out) }, decoded)
 }
 
 /// core._dv_unescape: `text` with its string literals written wholly in
@@ -3425,20 +3461,21 @@ fn dv_unescape(p: &Pack, text: &[u32]) -> Option<PyStr> {
 /// read with the lexers first (dv_literals); in another language (or none
 /// known) literals written wholly in \\x and \\u escapes are (dv_unescape).
 fn decoded_view_of(p: &Pack, text: &[u32], lang: Option<&'static str>) -> Reading {
-    let (source, unescaped): (PyStr, bool) = match lang {
+    // (the literals read as written; None when they are the text)
+    let (source, unescaped): (Option<PyStr>, bool) = match lang {
         Some(l) => dv_literals(p, text, l),
         None => match dv_unescape(p, text) {
-            Some(v) => (v, true),
-            None => (text.to_vec(), false),
+            Some(v) => (Some(v), true),
+            None => (None, false),
         },
     };
     // (P-1: the reading's searches ask a gate, as the text's do: the text's own, which the call keeps open, when the
     // literals read as written are the text, else one opened for them)
-    let src: &[u32] = if source == text { text } else { &source };
-    let _gate = if source == text { None } else { crate::textgate::open(&source) };
+    let src: &[u32] = source.as_deref().unwrap_or(text);
+    let _gate = if source.is_none() { None } else { crate::textgate::open(src) };
     let (arrays, line) = match crate::strarr::sa_read(p, src) {
         // (unescaping and joining keep the rows)
-        Some((view, at)) => (Some(view), Some(1 + source[..at.min(source.len())].iter().filter(|&&ch| ch == c('\n')).count())),
+        Some((view, at)) => (Some(view), Some(1 + src[..at.min(src.len())].iter().filter(|&&ch| ch == c('\n')).count())),
         None => (None, None),
     };
     // (JS-Confuser's concealed strings, D-11: in what the string arrays leave, which keeps the rows; its decoder's line)
@@ -3454,35 +3491,38 @@ fn decoded_view_of(p: &Pack, text: &[u32], lang: Option<&'static str>) -> Readin
     };
     let arrays = concealed.or(arrays);
     let proxies = crate::strarr::dv_proxies(p, arrays.as_deref().unwrap_or(src));
-    let base: PyStr = match (proxies, arrays) {
-        (Some(x), _) => x,
-        (None, Some(a)) => a,
-        (None, None) => source.clone(),
+    // (what the string arrays and proxy objects leave; the literals read as written when they read none)
+    let base: Option<PyStr> = match (proxies, arrays) {
+        (Some(x), _) => Some(x),
+        (None, Some(a)) => Some(a),
+        (None, None) => None,
     };
+    let base: &[u32] = base.as_deref().unwrap_or(src);
     // (an escape read, a string array or a proxy object read)
-    let read_any = unescaped || base != source;
+    let read_any = unescaped || base != src;
     let max = p.usize("_DV_MAX_CHARS");
     if !read_any && (text.len() > max || !any_in(text, p.needles("_DV_NEEDLES"))) {
-        return (text.to_vec(), None, None);
+        return (None, None, None);
     }
     let joined: PyStr = match lang {
         // (the literals a string array or a proxy object was read as, joined)
-        Some(l) if base != source => dv_literals(p, &base, l).0,
-        Some(_) => base.clone(),
-        None if base.contains(&c('+')) => p.re("_DV_JOIN_RE").sub(&base, &[], 0),
-        None => base.clone(),
+        Some(l) if base != src => dv_literals(p, base, l).0.unwrap_or_else(|| base.to_vec()),
+        Some(_) => base.to_vec(),
+        None if base.contains(&c('+')) => p.re("_DV_JOIN_RE").sub(base, &[], 0),
+        None => base.to_vec(),
     };
     let mut view = joined.clone();
     // (a longer text with a string array: its strings only)
-    let base_in: &[u32] = if base.as_slice() == src { src } else { &base };
+    let base_in: &[u32] = if base == src { src } else { base };
     if base.len() <= max && any_in(base_in, p.needles("_DV_NEEDLES")) {
         let gated = (view.as_slice() == src).then_some(src);
         view = dv_decoders(p, view, gated);
     }
     if view == joined && !read_any {
-        return (text.to_vec(), None, None);
+        return (None, None, None);
     }
-    (dv_arrays_and_members(p, view), line, jc_line)
+    let view = dv_arrays_and_members(p, view);
+    (if view == text { None } else { Some(std::rc::Rc::new(view)) }, line, jc_line)
 }
 
 /// core._dv_decoders: the decoders' calls on literals read as their text. `gated` (P-1): a text with an open gate that
@@ -3804,8 +3844,8 @@ pub fn spawned_scripts(p: &Pack, text: &[u32], lang: Option<&str>) -> Vec<(&'sta
     let mut out = spawned_scripts_of(p, text);
     let max = p.usize("_SPAWN_MAX_TARGETS");
     if out.len() < max {
-        let view = decoded_view(p, text, lang);
-        if view != text {
+        if let Some(view) = dv_view(p, text, lang) {
+            let view: &[u32] = &view;
             for target in spawned_scripts_of(p, &view) {
                 if !out.contains(&target) {
                     out.push(target);
@@ -4105,8 +4145,8 @@ fn install_script_risk_text(p: &Pack, text: &[u32], shell: bool, command: bool, 
     for (_, r) in rewrite_reasons(p, text, lang) {
         push_new(&mut reasons, r);
     }
-    let view = decoded_view(p, text, lang);
-    if view != text {
+    if let Some(view) = dv_view(p, text, lang) {
+        let view: &[u32] = &view;
         let _gate = crate::textgate::open(&view);
         let note = p.text("_DV_NOTE");
         for r in install_script_risk_of(p, &view, shell, command, lang, None) {
@@ -4240,8 +4280,8 @@ pub struct ModelFacts {
 /// and the model's facts, then the text's decoded view on its text alone.
 pub fn install_script_risk_model(p: &Pack, text: &[u32], m: &ModelFacts) -> Vec<PyStr> {
     let mut reasons = install_script_risk_of(p, text, false, false, None, Some(m));
-    let view = decoded_view(p, text, None);
-    if view != text {
+    if let Some(view) = dv_view(p, text, None) {
+        let view: &[u32] = &view;
         let _gate = crate::textgate::open(&view);
         let note = p.text("_DV_NOTE");
         for r in install_script_risk_of(p, &view, false, false, None, None) {
@@ -4257,8 +4297,8 @@ pub fn install_script_risk_model(p: &Pack, text: &[u32], m: &ModelFacts) -> Vec<
 /// line of the first sign).
 pub fn import_time_risk_model(p: &Pack, text: &[u32], m: &ModelFacts) -> (Vec<PyStr>, Option<usize>) {
     let (mut reasons, mut line) = import_time_risk_of(p, text, None, Some(m));
-    let view = decoded_view(p, text, None);
-    if view != text {
+    if let Some(view) = dv_view(p, text, None) {
+        let view: &[u32] = &view;
         let _gate = crate::textgate::open(&view);
         let (more, at) = import_time_risk_of(p, &view, None, None);
         let note = p.text("_DV_NOTE");
@@ -4294,7 +4334,36 @@ pub(crate) fn local_data_sent(p: &Pack, text: &[u32], lang: Option<&str>) -> Opt
         crate::jsflow::supply::Answer::Nothing => return None,
         crate::jsflow::supply::Answer::Unread => {}
     }
-    crate::flow::local_data_sent_at(p, text)
+    let found = crate::flow::local_data_sent_at(p, text);
+    // BIG-BUNDLE-TAIL (the review of Oct 20, HIGH 3): a text the tree did not read whole for a reason a runtime does
+    // not share (the parser refused code V8 compiles, the pass stopped at its budget) is not read whole: the text
+    // follower, which answered for it, may not see a flow the tree follows (a helper's return sent a megabyte on). The
+    // call says so (budget::cut: the file is SC-TRUNCATED, beside what the follower found), whatever the follower
+    // found; a limit the follower met itself is said first.
+    let why = match lang {
+        Some("js") => crate::jsflow::supply::unread_why(text),
+        Some("py") => crate::pyflow::supply::unread_why(text),
+        _ => None,
+    };
+    if let Some(why) = why {
+        crate::budget::cut(&format!("{TREE_UNREAD}{}; its text alone was read for what it sends", note_words(&why)));
+    }
+    found
+}
+
+/// BIG-BUNDLE-TAIL: how the call words a text the supply-chain tree did not read whole (local_data_sent); the hosts
+/// tell it from a limit of the text follower's by these words (a file of code that may never run keeps its answer).
+pub const TREE_UNREAD: &str = "the supply-chain tree did not read it whole: ";
+
+/// A pass's note as a clause: "The JavaScript cross-file pass stopped … nodes); flows through the rest of the code may
+/// be missing." -> "the JavaScript cross-file pass stopped … nodes)".
+fn note_words(why: &str) -> String {
+    let head = why.split("; flows").next().unwrap_or(why).trim_end_matches('.');
+    let mut chars = head.chars();
+    match chars.next() {
+        Some(first) => first.to_lowercase().chain(chars).collect(),
+        None => String::new(),
+    }
 }
 
 /// Received code: data a text receives over the network run as code, a
@@ -4659,8 +4728,8 @@ pub fn import_time_risk_with(p: &Pack, text: &[u32], lang: Option<&str>, declare
         let mut found = undeclared_installs(p, text, declared, lang);
         let mut note: PyStr = Vec::new();
         if found.is_none() {
-            let view = decoded_view(p, text, lang);
-            if view != text {
+            if let Some(view) = dv_view(p, text, lang) {
+                let view: &[u32] = &view;
                 let _gate = crate::textgate::open(&view);
                 found = undeclared_installs(p, &view, declared, lang);
                 note = p.text("_DV_NOTE");
@@ -4672,8 +4741,8 @@ pub fn import_time_risk_with(p: &Pack, text: &[u32], lang: Option<&str>, declare
             line = line.or(Some(at));
         }
     }
-    let view = decoded_view(p, text, lang);
-    if view != text {
+    if let Some(view) = dv_view(p, text, lang) {
+        let view: &[u32] = &view;
         let _gate = crate::textgate::open(&view);
         let (more, at) = import_time_reading(p, &view, lang);
         let note = p.text("_DV_NOTE");

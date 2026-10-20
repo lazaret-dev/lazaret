@@ -405,6 +405,258 @@ pub fn analyze(files: &[(PyStr, Option<PyStr>)], cfg: Config) -> Vec<Out> {
     findings
 }
 
+/// (the supply-chain model) What callers give parameters written to closure variables (Func::param_writes), written
+/// there by the pass rather than by each reading of a call (eval's apply, write): a value a caller gives that grew in
+/// its last reading (Program::pw_grew) to every variable the callee writes the parameter to, and every caller's value
+/// to a variable a summary has just learned of (Program::pw_new); as a reading writes it (not the `this.x` of a class
+/// made in several places from a call on an instance; within the functions around the variable's), with what that
+/// teaches the callers' summaries in turn (a parameter of theirs written there: as a reading's commit learns it, its
+/// callers read again once nothing else is queued when the parameter is new to the summary, `changes`). The bindings
+/// whose value grew are added to `grown`, for their readers.
+fn pw_carry(prog: &mut Program, changes: &mut super::eval::Changes, grown: &mut Vec<BindId>) {
+    loop {
+        if let Some((callee, i, c)) = prog.pw_grew.pop() {
+            let binds: Vec<BindId> =
+                prog.fns[callee as usize].sc_ref().and_then(|s| s.param_writes.get(&i)).map(|s| s.iter().copied().collect()).unwrap_or_default();
+            pw_write(prog, callee, i, c, &binds, changes, grown);
+            continue;
+        }
+        if !prog.pw_new.is_empty() {
+            // (the variables new to each parameter's summary at once, each caller's value read once for them)
+            let mut new = std::mem::take(&mut prog.pw_new);
+            new.sort_unstable();
+            let mut k = 0;
+            while k < new.len() {
+                let (owner, i) = (new[k].0, new[k].1);
+                let mut binds = Vec::new();
+                while k < new.len() && (new[k].0, new[k].1) == (owner, i) {
+                    binds.push(new[k].2);
+                    k += 1;
+                }
+                let callers = prog.pw_callers.get(&(owner, i as u32)).cloned().unwrap_or_default();
+                for c in callers {
+                    pw_write(prog, owner, i, c, &binds, changes, grown);
+                }
+            }
+            continue;
+        }
+        break;
+    }
+}
+
+/// pw_carry's write of what caller `c` gives parameter `i` of `callee` to bindings `binds`.
+fn pw_write(
+    prog: &mut Program,
+    callee: FnId,
+    i: usize,
+    c: FnId,
+    binds: &[BindId],
+    changes: &mut super::eval::Changes,
+    grown: &mut Vec<BindId>,
+) {
+    let (inside, all) = match prog.pw_args.get(&(callee, i as u32, c)) {
+        Some((inside, out)) => (inside.clone(), inside.union(out)),
+        None => return,
+    };
+    if !all.tainted() {
+        return;
+    }
+    let mine = prog.scope_fns(c);
+    // (the last variable's declaring function: what is written there is the same for its neighbours)
+    let mut last: Option<(FnId, bool, Rc<[FnId]>, V)> = None;
+    for &b in binds {
+        let wide = match prog.sc_this_class.get(&b).copied() {
+            Some(cls) => prog.sc_made_widely(cls),
+            None => false,
+        };
+        let t = if wide { &inside } else { &all };
+        if !t.tainted() {
+            continue;
+        }
+        let bfid = prog.binds[b as usize].fid;
+        if !last.as_ref().is_some_and(|l| l.0 == bfid && l.1 == wide) {
+            let outer = prog.scope_fns(bfid);
+            let v = t.within(&outer);
+            last = Some((bfid, wide, outer, v));
+        }
+        let (_, _, outer, v) = last.as_ref().expect("set above");
+        for &key in t.params.iter() {
+            let o = super::key_owner(key);
+            if mine.contains(&o) && !outer.contains(&o) {
+                let k = super::key_index(key);
+                if prog.fns[o as usize].sc_mut().param_writes.entry(k).or_default().insert(b) {
+                    // (as eval's commit learns one: Eval::commit)
+                    if prog.pw_tracked.contains(&(o, k as u32)) {
+                        prog.pw_new.push((o, k, b));
+                    } else {
+                        prog.pw_tracked.insert((o, k as u32));
+                        changes.entry(o).or_default().later_first.insert(k);
+                    }
+                }
+            }
+        }
+        if !v.tainted() && v.kind & super::supply::MARKS == 0 {
+            continue;
+        }
+        let new = match prog.shared.get(&b) {
+            None => v.clone(),
+            Some(o) if o.covers(v) => {
+                continue;
+            }
+            Some(o) => o.union(v),
+        };
+        if prog.shared.get(&b) != Some(&new) {
+            prog.shared.insert(b, new);
+            grown.push(b);
+        }
+    }
+}
+
+/// (the supply-chain model) The kept calls of the functions whose parameter calls grew (Program::pc_changed) run
+/// again, each once for all that grew, until no more grow: what they change read again as a reading's changes are.
+/// The function whose replay spent the budget, if one did.
+fn replays(prog: &mut Program, q: &mut Queue, findings: &mut Vec<Out>) -> Option<FnId> {
+    loop {
+        let mut todo = std::mem::take(&mut prog.pc_changed);
+        if todo.is_empty() {
+            return None;
+        }
+        todo.sort_unstable();
+        todo.dedup();
+        // (each caller's calls run in one replay of it: (caller, callee, parameter, call))
+        let mut jobs: Vec<(FnId, FnId, usize, NodeId)> = Vec::new();
+        for &(f, i) in &todo {
+            if let Some(sites) = prog.pc_by_callee.get(&f) {
+                jobs.extend(sites.iter().map(|&(c, node)| (c, f, i, node)));
+            }
+        }
+        jobs.sort_unstable();
+        let mut k = 0;
+        while k < jobs.len() {
+            let c = jobs[k].0;
+            let mut end = k;
+            while end < jobs.len() && jobs[end].0 == c {
+                end += 1;
+            }
+            let mut sites: Vec<((FnId, FnId, NodeId), PcSite)> = Vec::new();
+            for &(_, f, _, node) in &jobs[k..end] {
+                let key = (f, c, node);
+                if !sites.iter().any(|(s, _)| *s == key) {
+                    if let Some(site) = prog.pc_sites.remove(&key) {
+                        sites.push((key, site));
+                    }
+                }
+            }
+            let mut ev = Eval::new(prog, c, false, findings);
+            ev.replay = true;
+            for &(_, f, i, node) in &jobs[k..end] {
+                if let Some((_, site)) = sites.iter().find(|(s, _)| *s == (f, c, node)) {
+                    ev.cur = site.cur;
+                    ev.sc_pc_replay(node, f, i, site);
+                }
+            }
+            let (mut changes, mut grown) = ev.commit();
+            for (key, site) in sites {
+                prog.pc_sites.insert(key, site);
+            }
+            pw_carry(prog, &mut changes, &mut grown);
+            q.requeue(prog, &changes, &grown);
+            if prog.work > prog.budget {
+                return Some(c);
+            }
+            k = end;
+        }
+    }
+}
+
+/// The fixpoint's queue: the functions to read again, by their place in the order (callees first); the supply-chain
+/// model's to read again once nothing else is queued (`later`: a round's end); the functions past the cap of readings.
+struct Queue {
+    heap: BinaryHeap<Reverse<(usize, FnId)>>,
+    queued: Vec<bool>,
+    later: Vec<FnId>,
+    in_later: Vec<bool>,
+    pos: Vec<usize>,
+    max_iters: u32,
+    cutoff: Vec<FnId>,
+    /// the place in the order of the function being read (usize::MAX between rounds)
+    cur: usize,
+    /// (the supply-chain model) a function to read again whose place is not past the one being read waits for the
+    /// round's end (`again`)
+    rounds: bool,
+}
+
+impl Queue {
+    /// `d` read again (not past its cap of readings: then it is cut off).
+    fn push(&mut self, prog: &Program, d: FnId) {
+        if self.queued[d as usize] {
+            return;
+        }
+        if prog.fns[d as usize].runs >= self.max_iters {
+            if !self.cutoff.contains(&d) {
+                self.cutoff.push(d);
+            }
+            return;
+        }
+        self.queued[d as usize] = true;
+        self.heap.push(Reverse((self.pos[d as usize], d)));
+    }
+
+    /// `d` read again once nothing else is queued.
+    fn later(&mut self, d: FnId) {
+        if !self.in_later[d as usize] {
+            self.in_later[d as usize] = true;
+            self.later.push(d);
+        }
+    }
+
+    /// `d` read again: in this round when its place is past the function being read, else (the supply-chain model) in
+    /// the next, once what this round changes is all known (BIG-BUNDLE-TAIL, John's decision of Oct 21: a function
+    /// ordered before one it reads, in a recursion or a cycle of calls or shared variables, was read again at once at
+    /// each change of each function in it: the busiest of TypeScript's checker 56 times, where rounds read it 8 to 11
+    /// times, and the bundle's functions a third fewer times in all).
+    fn again(&mut self, prog: &Program, d: FnId) {
+        if self.rounds && self.pos[d as usize] <= self.cur {
+            self.later(d);
+        } else {
+            self.push(prog, d);
+        }
+    }
+
+    /// The functions a reading's (or a replay's) changes and grown bindings ask to read again.
+    fn requeue(&mut self, prog: &mut Program, changes: &super::eval::Changes, grown: &[BindId]) {
+        for (owner, ch) in changes {
+            let callers: Vec<(FnId, Vec<u32>)> = prog.fns[*owner as usize].callers.groups();
+            for (c, used) in callers {
+                // a caller is read again when what it used changed: request
+                // data returned, a parameter it passed a tainted value, a
+                // parameter of a function around it returned (what is returned: where a call of it uses that)
+                let params = super::meets(&ch.params, &used);
+                let outer = ch.outer.iter().any(|&k| prog.scope_fns(c).contains(&super::key_owner(k)));
+                if ch.src || params || outer {
+                    self.again(prog, c);
+                } else if ch.later_all || ch.src_later || super::meets(&ch.later_first, &used) {
+                    self.later(c);
+                } else if !ch.params.is_empty() || !ch.later_first.is_empty() {
+                    // (not read again for it: the reporting pass reads it with the summary as it is then; a change
+                    // of what it returns of parameters around it, none around this caller, changes nothing here)
+                    prog.fns[c as usize].emits = true;
+                }
+            }
+        }
+        let mut grown = grown.to_vec();
+        grown.sort_unstable();
+        grown.dedup();
+        let prog: &Program = prog;
+        for bid in &grown {
+            let Some(readers) = prog.readers.get(bid) else { continue };
+            for &d in readers {
+                self.again(prog, d);
+            }
+        }
+    }
+}
+
 /// Summaries to a fixpoint, then the reporting pass; the notes.
 pub(super) fn fixpoint(prog: &mut Program, findings: &mut Vec<Out>) -> Vec<Out> {
     let mut notes = Vec::new();
@@ -414,22 +666,60 @@ pub(super) fn fixpoint(prog: &mut Program, findings: &mut Vec<Out>) -> Vec<Out> 
     for (k, &fid) in order.iter().enumerate() {
         pos[fid as usize] = k;
     }
-    let mut heap: BinaryHeap<Reverse<(usize, FnId)>> = order.iter().enumerate().map(|(k, &f)| Reverse((k, f))).collect();
-    let mut queued = vec![true; n];
-    let mut cutoff: Vec<FnId> = Vec::new();
+    let heap: BinaryHeap<Reverse<(usize, FnId)>> = order.iter().enumerate().map(|(k, &f)| Reverse((k, f))).collect();
+    let queued = vec![true; n];
     let mut cut: Vec<FnId> = Vec::new();
-    prog.budget = WORK_BASE + WORK_PER_NODE * prog.nodes;
     let mut stopped: Option<FnId> = None;
     let mut stopped_at = [0u64, 0u64];
     // (the supply-chain model answers nothing once a reading is incomplete, a function cut, the cap met, the budget
     // spent: its facts are the text followers' then. So it stops there, rather than read on to a fixpoint and
     // report for nothing: P-17, monaco's TypeScript worker met the cap and read 14 s more)
     let give_up = prog.cfg.supply.is_some();
-    while let Some(Reverse((_, fid))) = heap.pop() {
-        if give_up && !(cut.is_empty() && cutoff.is_empty()) {
+    // (BIG-BUNDLE-TAIL, the review of Oct 20: a text the supply-chain model does not read whole is SC-TRUNCATED, so
+    // its budget is one that reads an ordinary bundle whole: twice the taint pass's a node, at most SUPPLY_WORK_MAX,
+    // and a function read again until the budget is spent, not past MAX_ITERS readings: TypeScript's compiler, 6 and
+    // 9 MB, met the cap with one function of its checker read 50 times; read in rounds, its busiest needs 11)
+    prog.budget = if give_up {
+        (WORK_BASE + super::SUPPLY_WORK_PER_NODE * prog.nodes).min(super::SUPPLY_WORK_MAX)
+    } else {
+        WORK_BASE + WORK_PER_NODE * prog.nodes
+    };
+    let max_iters = if give_up { super::SUPPLY_MAX_ITERS } else { MAX_ITERS };
+    let mut q = Queue { heap, queued, later: Vec::new(), in_later: vec![false; n], pos, max_iters, cutoff: Vec::new(), cur: usize::MAX, rounds: give_up };
+    'pass: loop {
+        let fid = match q.heap.pop() {
+            Some(Reverse((_, f))) => f,
+            None => {
+                // (the supply-chain model) the calls of functions whose parameter calls grew, run again once the
+                // pass has nothing else to read (driver's replays): each call once for all its parameter's growth
+                q.cur = usize::MAX;
+                if !prog.pc_changed.is_empty() {
+                    if let Some(c) = replays(prog, &mut q, findings) {
+                        stopped = Some(c);
+                        stopped_at[0] = prog.work;
+                        break 'pass;
+                    }
+                    continue;
+                }
+                // (the supply-chain model) what waited for the pass to have nothing else to read
+                if q.later.is_empty() {
+                    break;
+                }
+                for d in std::mem::take(&mut q.later) {
+                    if q.in_later[d as usize] {
+                        q.in_later[d as usize] = false;
+                        q.push(prog, d);
+                    }
+                }
+                continue;
+            }
+        };
+        if give_up && !(cut.is_empty() && q.cutoff.is_empty()) {
             break;
         }
-        queued[fid as usize] = false;
+        q.queued[fid as usize] = false;
+        q.in_later[fid as usize] = false;
+        q.cur = q.pos[fid as usize];
         prog.fns[fid as usize].runs += 1;
         let mut ev = Eval::new(prog, fid, false, findings);
         match ev.run() {
@@ -445,47 +735,21 @@ pub(super) fn fixpoint(prog: &mut Program, findings: &mut Vec<Out>) -> Vec<Out> 
                 break;
             }
         }
-        let (changes, grown) = ev.commit();
-        let mut deps: Vec<FnId> = Vec::new();
-        for (owner, (src, params, outer)) in &changes {
-            let callers: Vec<(FnId, BTreeSet<usize>)> =
-                prog.fns[*owner as usize].callers.iter().map(|(c, u)| (*c, u.clone())).collect();
-            for (c, used) in callers {
-                // a caller is read again when what it used changed: request
-                // data returned, a parameter it passed a tainted value, a
-                // parameter of a function around it returned
-                let hit = *src
-                    || !params.is_disjoint(&used)
-                    || outer.iter().any(|&k| prog.scope_fns(c).contains(&super::key_owner(k)));
-                if hit {
-                    deps.push(c);
-                }
-            }
-        }
-        for bid in grown {
-            if let Some(r) = prog.readers.get(&bid) {
-                deps.extend(r.iter().copied());
-            }
-        }
-        for d in deps {
-            if queued[d as usize] {
-                continue;
-            }
-            if prog.fns[d as usize].runs >= MAX_ITERS {
-                if !cutoff.contains(&d) {
-                    cutoff.push(d);
-                }
-                continue;
-            }
-            queued[d as usize] = true;
-            heap.push(Reverse((pos[d as usize], d)));
-        }
+        let (mut changes, mut grown) = ev.commit();
+        // (the supply-chain model) what callers give parameters written to closure variables, written there
+        pw_carry(prog, &mut changes, &mut grown);
+        q.requeue(prog, &changes, &grown);
     }
+    let cutoff = std::mem::take(&mut q.cutoff);
     // the reporting pass: every function once, in order of definition
     prog.budget = prog.work + WORK_BASE + EMIT_PER_NODE * prog.nodes;
     let mut emit_stopped: Option<FnId> = None;
     let incomplete = stopped.is_some() || !cut.is_empty() || !cutoff.is_empty();
     for fid in 0..(if give_up && incomplete { 0 } else { n as FnId }) {
+        // (the supply-chain model: a function whose readings came nowhere near a finding is not read for one)
+        if give_up && !prog.fns[fid as usize].emits {
+            continue;
+        }
         let mut ev = Eval::new(prog, fid, true, findings);
         match ev.run() {
             Ok(()) => {}
@@ -511,7 +775,7 @@ pub(super) fn fixpoint(prog: &mut Program, findings: &mut Vec<Out>) -> Vec<Out> 
             &u(&format!(
                 "Interprocedural summaries for {} JavaScript function(s) did not converge within {} re-analyses (first: ",
                 cutoff.len(),
-                MAX_ITERS
+                max_iters
             )),
             &display,
             &u(" in "),

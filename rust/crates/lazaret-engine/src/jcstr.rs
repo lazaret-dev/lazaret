@@ -35,7 +35,7 @@ struct Code<'t> {
 
 impl<'t> Code<'t> {
     fn new(text: &'t [u32]) -> Code<'t> {
-        let toks = lex::js::tokens(text, false).into_iter().filter(|t| t.kind != Kind::Comment).collect();
+        let toks = lex::js::tokens(text, false).iter().copied().filter(|t| t.kind != Kind::Comment).collect();
         Code { text, toks }
     }
 

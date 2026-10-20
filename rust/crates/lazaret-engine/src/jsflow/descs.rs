@@ -27,7 +27,7 @@ pub enum D {
 
 /// How a call's targets were found: by binding only ("definite"), by name
 /// only ("open"), both ("mixed"), or none.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum How {
     Definite,
     Open,
@@ -78,7 +78,7 @@ impl Program {
         // (a cycle reads as unknown)
         self.desc_memo.insert(b, Rc::new(unknown()));
         let writes = self.binds[b as usize].writes.clone();
-        let (bmod, bname) = (self.binds[b as usize].module, self.binds[b as usize].name.clone());
+        let (bmod, bname) = (self.binds[b as usize].module, self.names[self.binds[b as usize].name as usize].clone());
         let mut out: Vec<D> = Vec::new();
         for w in writes {
             match w {
@@ -98,7 +98,7 @@ impl Program {
                             D::Pkg(t) if self.cfg.supply.is_some() => {
                                 out.push(D::Pkg(if eq(&name, "default") { t } else { dotted(&t, &name) }))
                             }
-                            _ => out.push(D::Open(if eq(&name, "default") { bname.clone() } else { name.clone() })),
+                            _ => out.push(D::Open(if eq(&name, "default") { bname.to_vec() } else { (*name).clone() })),
                         }
                     }
                 }
@@ -128,7 +128,15 @@ impl Program {
         if out.is_empty() {
             out.push(D::Local);
         }
-        let out = Rc::new(out);
+        // (one copy of each list, however many bindings have it: BIG-BUNDLE-TAIL, memory)
+        let out = match self.desc_kept.get(&out) {
+            Some(kept) => kept.clone(),
+            None => {
+                let kept = Rc::new(out.clone());
+                self.desc_kept.insert(out, kept.clone());
+                kept
+            }
+        };
         self.desc_memo.insert(b, out.clone());
         out
     }
@@ -458,7 +466,7 @@ impl Program {
         match d {
             D::Mod(idx) => self.member_descs(*idx, name, depth, 0),
             D::Obj(oid) => {
-                let props: Vec<(NodeId, ScopeId)> = self.objs[*oid as usize].props.get(name).cloned().unwrap_or_default();
+                let props: Vec<(NodeId, ScopeId)> = self.obj_prop(*oid, name);
                 let om = self.objs[*oid as usize].module;
                 let mut out = Vec::new();
                 for (node, scope) in props {
@@ -621,7 +629,7 @@ impl Program {
                 break;
             }
             seen += 1;
-            if let Some(&fid) = self.classes[cc as usize].methods.get(&u("constructor")) {
+            if let Some(&fid) = self.classes[cc as usize].methods.get(u("constructor").as_slice()) {
                 return Some(fid);
             }
             c = self.superclass(cc, 0);
@@ -631,6 +639,9 @@ impl Program {
 
     /// (project functions the call may reach, how). Memoized per call.
     pub fn call_targets(&mut self, m: ModId, call: NodeId, scope: ScopeId) -> Rc<(Vec<FnId>, How)> {
+        if self.mods[m as usize].tg_none.get(call) {
+            return self.tg_empty.clone();
+        }
         if let Some(got) = self.tg_memo.get(&(m, call)) {
             return got.clone();
         }
@@ -683,7 +694,7 @@ impl Program {
         let fids = dedupe(fids);
         let mut opens: Vec<FnId> = Vec::new();
         for name in dedupe(open_names) {
-            if let Some(cands) = self.by_name.get(&name) {
+            if let Some(cands) = self.by_name.get(name.as_slice()) {
                 if !cands.is_empty() && cands.len() <= MAX_OPEN {
                     for &c in cands {
                         if !fids.contains(&c) && !opens.contains(&c) {
@@ -706,7 +717,21 @@ impl Program {
         };
         let mut all = fids;
         all.extend(opens);
-        let out = Rc::new((all, how));
+        if all.is_empty() {
+            // (how: None)
+            self.mods[m as usize].tg_none.set(call);
+            return self.tg_empty.clone();
+        }
+        // (one copy of each answer, however many calls have it: BIG-BUNDLE-TAIL, memory)
+        let key = (all, how);
+        let out = match self.tg_kept.get(&key) {
+            Some(kept) => kept.clone(),
+            None => {
+                let kept = Rc::new(key.clone());
+                self.tg_kept.insert(key, kept.clone());
+                kept
+            }
+        };
         self.tg_memo.insert((m, call), out.clone());
         out
     }
@@ -714,10 +739,10 @@ impl Program {
     /// The bindings an import binding reads (a module's exported
     /// variables), following re-exports.
     pub fn import_targets(&mut self, b: BindId) -> Vec<BindId> {
-        if let Some(t) = &self.binds[b as usize].targets {
+        if let Some(t) = self.import_targets.get(&b) {
             return t.clone();
         }
-        self.binds[b as usize].targets = Some(Vec::new());
+        self.import_targets.insert(b, Vec::new());
         let writes = self.binds[b as usize].writes.clone();
         let bmod = self.binds[b as usize].module;
         let mut out = Vec::new();
@@ -732,7 +757,7 @@ impl Program {
             }
         }
         let out = dedupe(out);
-        self.binds[b as usize].targets = Some(out.clone());
+        self.import_targets.insert(b, out.clone());
         out
     }
 

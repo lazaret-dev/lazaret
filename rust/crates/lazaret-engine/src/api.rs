@@ -549,10 +549,29 @@ pub fn call(name: &str, args: &Value, text: &[u32]) -> Result<Value, CallError> 
         if !text.is_empty() {
             return Err(CallError::BadArgs(format!("{name}: a text and a text_id")));
         }
-        let stored = crate::texts::decoded(id).ok_or_else(|| CallError::BadArgs(format!("{name}: no text {id} in the store")))?;
-        return call_text(name, args, &stored);
+        let shared = crate::texts::decoded_shared(id).ok_or_else(|| CallError::BadArgs(format!("{name}: no text {id} in the store")))?;
+        return with_call_text(&shared, || call_text(name, args, &shared));
     }
     call_text(name, args, text)
+}
+
+thread_local! {
+    /// The text of the call in progress, as a shared copy (call_owned, a stored text's call): call_text_shared
+    static CALL_TEXT: std::cell::RefCell<Option<std::sync::Arc<[u32]>>> = const { std::cell::RefCell::new(None) };
+}
+
+/// `f` with `text` as the call's shared text (the one before restored after).
+fn with_call_text<R>(text: &std::sync::Arc<[u32]>, f: impl FnOnce() -> R) -> R {
+    let before = CALL_TEXT.with(|c| c.borrow_mut().replace(text.clone()));
+    let out = f();
+    CALL_TEXT.with(|c| *c.borrow_mut() = before);
+    out
+}
+
+/// The call's shared copy of `text`, when `text` is it (the same characters where they are): what a reading that
+/// keeps the text holds instead of a copy of its own (the supply-chain tree's, BIG-BUNDLE-TAIL).
+pub fn call_text_shared(text: &[u32]) -> Option<std::sync::Arc<[u32]>> {
+    CALL_TEXT.with(|c| c.borrow().as_ref().filter(|t| t.as_ptr() == text.as_ptr() && t.len() == text.len()).cloned())
 }
 
 /// A text_id's value: the id `texts.put` answered.
@@ -582,7 +601,7 @@ fn call_text(name: &str, args: &Value, text: &[u32]) -> Result<Value, CallError>
 /// calls borrow it.
 pub fn call_owned(name: &str, args: &Value, text: Vec<u32>) -> Result<Value, CallError> {
     if name != "go_package" && name != "rs_crate" {
-        return call(name, args, &text);
+        return call_shared(name, args, std::sync::Arc::from(text));
     }
     let steps = match args.get("budget").and_then(|b| b.as_i64()) {
         Some(b) if b > 0 => b as u64,
@@ -601,6 +620,16 @@ pub fn call_owned(name: &str, args: &Value, text: Vec<u32>) -> Result<Value, Cal
         Ok(r) => r,
         Err(_) => Err(CallError::Exhausted),
     }
+}
+
+/// call_owned, given the text as one shared buffer (the WebAssembly build's, decode_wtf8_shared): the call's text is
+/// the one copy the supply-chain tree reads and keeps (call_text_shared, BIG-BUNDLE-TAIL, John's decision of Oct 21),
+/// not copied again while its model lives: at 16,000,000 characters a copy is 64 MB.
+pub fn call_shared(name: &str, args: &Value, text: std::sync::Arc<[u32]>) -> Result<Value, CallError> {
+    if name == "go_package" || name == "rs_crate" {
+        return call_owned(name, args, text.to_vec());
+    }
+    with_call_text(&text, || call(name, args, &text))
 }
 
 /// batch: {"calls": [[name, args, text], …], "threads": n} ->
@@ -713,7 +742,7 @@ mod own_stack {
     pub fn run<T: Send + 'static, F: FnOnce() -> T + Send + 'static>(f: F) -> T {
         // (the call's budget goes with the job and comes back with its answer: what the job spends is the call's, as
         // it is when the job runs here, and in WebAssembly)
-        let (back, answer) = sync_channel::<(T, (u64, bool))>(1);
+        let (back, answer) = sync_channel::<(T, crate::budget::State)>(1);
         let budget = crate::budget::state();
         let job: Job = Box::new(move || {
             crate::budget::carry(budget);
@@ -761,7 +790,9 @@ fn batch_item(item: &Value) -> Value {
     match r {
         Ok(Ok(v)) => Value::obj(vec![("ok", v)]),
         Ok(Err(CallError::Exhausted)) => {
-            Value::obj(vec![("error", Value::str("exhausted")), ("exhausted", Value::Bool(true))])
+            // (BIG-BUNDLE-TAIL: the limit a reading met, when one made the call answer so)
+            let why = crate::budget::last_cut().unwrap_or_else(|| "exhausted".to_string());
+            Value::obj(vec![("error", Value::str(&why)), ("exhausted", Value::Bool(true))])
         }
         Ok(Err(CallError::Unknown(n))) => Value::obj(vec![("error", Value::str(&format!("unknown call {}", n)))]),
         Ok(Err(CallError::BadArgs(m))) => Value::obj(vec![("error", Value::str(&m))]),
@@ -1271,7 +1302,12 @@ fn dispatch(name: &str, args: &Value, text: &[u32]) -> Result<Value, CallError> 
             // or null]; `declared` and `own`: its package's names and its own name (D-12b, D-9c), when known
             let declared = args.get("declared").filter(|d| !matches!(d, Value::Null)).map(|_| arg_strs(args, "declared"));
             let release = opt_str(args, "own");
-            crate::deps::dep_file_issues(p, text, lang, declared.as_deref(), release.as_deref(), &deps_opts(args))
+            // `unread` (BIG-BUNDLE-TAIL, the review of Oct 20): where a reading of the text met a limit before its end,
+            // or the supply-chain tree did not read it whole (budget::cut), a third element, its words, and the call
+            // answers with what it found, where without it such a call answers as one that ran out (a file read whole:
+            // the two elements, as before)
+            let unread = flag(args, "unread", false);
+            crate::deps::dep_file_issues(p, text, lang, declared.as_deref(), release.as_deref(), &deps_opts(args), unread)
         }
         "agent_issue" => {
             // {agent, flag, line, context, redact, neumaier} + the file's text -> its SC-AGENT-HIJACK issue
@@ -1927,8 +1963,8 @@ fn dispatch(name: &str, args: &Value, text: &[u32]) -> Result<Value, CallError> 
             // "go" or "rs"
             let jsx = !matches!(args.get("jsx"), Some(Value::Bool(false)));
             let toks = match lang {
-                Some("js") => crate::lex::js::tokens(text, jsx),
-                Some("py") => crate::lex::py::tokens(text),
+                Some("js") => crate::lex::js::tokens(text, jsx).to_vec(),
+                Some("py") => crate::lex::py::tokens(text).to_vec(),
                 Some("go") => crate::lex::go::tokens(text),
                 Some("rs") => crate::lex::rs::tokens(text),
                 _ => return Err(CallError::BadArgs("lex.tokens needs lang 'js', 'py', 'go' or 'rs'".into())),
@@ -1978,7 +2014,14 @@ fn dispatch(name: &str, args: &Value, text: &[u32]) -> Result<Value, CallError> 
             let command = matches!(args.get("command"), Some(Value::Bool(true)));
             // `own`: the release's name, when the caller knows it (its own package's code is not another's, D-9)
             let _own = if args.get("own").is_some() { Some(signs::own_release(&arg_str(args, "own")?)) } else { None };
-            strs(&signs::install_script_risk_with(p, text, shell, command, lang))
+            let reasons = strs(&signs::install_script_risk_with(p, text, shell, command, lang));
+            // `unread` (BIG-BUNDLE-TAIL): [reasons, the limit a reading met or the tree's not reading the text whole, or
+            // null], as import_time_risk's fourth element
+            if matches!(args.get("unread"), Some(Value::Bool(true))) {
+                Value::Arr(vec![reasons, crate::budget::take_cut().map(|c| Value::Str(u(&c))).unwrap_or(Value::Null)])
+            } else {
+                reasons
+            }
         }
         "import_time_risk" => {
             // `declared`: the release's own name and the packages its manifest names (D-12), when the caller knows them
@@ -1989,11 +2032,18 @@ fn dispatch(name: &str, args: &Value, text: &[u32]) -> Result<Value, CallError> 
             // not read ([line, reason], or null: JS-PARSE-STRICT, said in a registry scan's report); asked first, it
             // reads the text once for the test (facts' cache)
             let refused = matches!(args.get("refused"), Some(Value::Bool(true)));
+            // `unread` (BIG-BUNDLE-TAIL): a fourth element, the limit a reading of the text met before its end (the
+            // text follower's: budget::cut), or null; the call answers then with what it found, where without it a
+            // call whose reading met a limit answers as one that ran out
+            let unread = matches!(args.get("unread"), Some(Value::Bool(true)));
             let why = if refused && lang == Some("js") { crate::jsflow::supply::refusal(text) } else { None };
             let (reasons, line) = signs::import_time_risk_with(p, text, lang, declared.as_deref());
             let mut out = vec![strs(&reasons), line.map(|l| Value::Int(l as i64)).unwrap_or(Value::Null)];
-            if refused {
+            if refused || unread {
                 out.push(why.map(|(l, r)| Value::Arr(vec![Value::Int(l as i64), Value::Str(r)])).unwrap_or(Value::Null));
+            }
+            if unread {
+                out.push(crate::budget::take_cut().map(|c| Value::Str(u(&c))).unwrap_or(Value::Null));
             }
             Value::Arr(out)
         }

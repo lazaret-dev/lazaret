@@ -10,7 +10,8 @@ import { jsxReading } from "../lib/lexer.js";
 import { REDACT } from "../lib/redact.js";
 import { truncatedIssue } from "../lib/issue.js";
 import { normalizeNewlines } from "../lib/encoding.js";
-import { call, nodeCandidates, scanDependencyFile, scanProjectFile, scanConfig, taintFindings, NativeExhausted, EXHAUSTED }
+import { call, nodeCandidates, scanDependencyFile, scanProjectFile, scanConfig, taintFindings, NativeExhausted, EXHAUSTED,
+  exhaustedWhy }
   from "../lib/native.js";
 
 export { EXHAUSTED };
@@ -58,7 +59,7 @@ export function scanFile(file) {
       : scanProjectFile(path, raw, lang, { ...opts, helpers: file.helpers ?? null });
   } catch (e) {
     if (!(e instanceof NativeExhausted)) throw e;
-    return [truncatedIssue(path, EXHAUSTED)];
+    return [truncatedIssue(path, exhaustedWhy(e))];
   }
 }
 
@@ -163,6 +164,6 @@ export function scanConfigFile(path, rawContent, read = null, dep = null) {
     return scanConfig(path, { ...args, follow: false }, content).issues;
   } catch (e) {
     if (!(e instanceof NativeExhausted)) throw e;
-    return [truncatedIssue(path, EXHAUSTED)];
+    return [truncatedIssue(path, exhaustedWhy(e))];
   }
 }

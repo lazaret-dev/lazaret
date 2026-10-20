@@ -43,6 +43,13 @@ THREADS = min(8, os.cpu_count() or 1)
 WORK_BUDGET = None
 # why a file the engine could not finish is SC-TRUNCATED (the npm package's words)
 EXHAUSTED = "reading it spent the engine's work budget (a pattern that backtracks without end on this text)"
+# how the engine words a limit a reading met before a text's end (BIG-BUNDLE-TAIL: flow.rs, Reading.cap)
+CUT_PREFIX = "the text follower reads at most "
+# how the engine words a text the supply-chain tree did not read whole (BIG-BUNDLE-TAIL, the review of Oct 20: the
+# parser refused code V8 compiles, the model's budget ran out; signs.rs TREE_UNREAD): the file is SC-TRUNCATED beside
+# what the text follower found, where its code runs
+TREE_CUT = "the supply-chain tree did not read it whole: "
+CUT_PREFIXES = (CUT_PREFIX, TREE_CUT)
 
 
 class EngineError(RuntimeError):
@@ -203,12 +210,21 @@ def unanswered(value):
 
 def error_issue(path, exc):
     """SC-TRUNCATED for a file whose reading could not finish: EXHAUSTED when
-    the engine spent its work budget, core.scan_error_issue ("its scan
-    failed") for any other error."""
+    the engine spent its work budget, the limit a reading of it met when one
+    stopped it before the text's end (BIG-BUNDLE-TAIL: exhausted_why),
+    core.scan_error_issue ("its scan failed") for any other error."""
     from lazaret.scanner import core
     if isinstance(exc, _native.NativeExhausted):
-        return core.truncated_issue(path, EXHAUSTED)
+        return core.truncated_issue(path, exhausted_why(exc))
     return core.scan_error_issue(path, exc)
+
+
+def exhausted_why(exc):
+    """Why a call answered as one that ran out (BIG-BUNDLE-TAIL): the limit a reading of its text met before the
+    text's end, in the engine's words (the text follower's: "the text follower reads at most ..."; the supply-chain
+    tree's: TREE_CUT), else EXHAUSTED (its work budget spent)."""
+    message = str(exc)
+    return message if message.startswith(CUT_PREFIXES) else EXHAUSTED
 
 
 def _batch(call, items, texts=None):
@@ -245,7 +261,7 @@ def dialect_args(path):
     return {"dialect": dialect} if dialect else {}
 
 
-def import_time_risks(items, texts=None, declared=None, own=None, names=None, refused=False):
+def import_time_risks(items, texts=None, declared=None, own=None, names=None, refused=False, unread=False):
     """[(text, lang)] or [(text, lang, path)] -> the import-time test of
     each, (reasons, line), in order; an item the engine could not answer is
     the _native.NativeError it stands for (see unanswered, error_issue).
@@ -259,7 +275,11 @@ def import_time_risks(items, texts=None, declared=None, own=None, names=None, re
     --deps scan's installed packages: D-12b, D-9c). `refused`: each answer
     is (reasons, line, refused), `refused` the parser's refusal of a
     JavaScript text whose tree the test could not read, (line, reason), or
-    None (JS-PARSE-STRICT: the text followers answered there)."""
+    None (JS-PARSE-STRICT: the text followers answered there). `unread`
+    (BIG-BUNDLE-TAIL): each answer is (reasons, line, refused, unread),
+    `unread` the limit a reading of the text met before its end, in the
+    engine's words, or None; the engine answers with what it found then,
+    where without it such a call is one it could not answer."""
     if not items:
         return []
     shared = _names_args(declared, own)
@@ -268,10 +288,14 @@ def import_time_risks(items, texts=None, declared=None, own=None, names=None, re
         extra = dict(shared if names is None or names[k] is None else _names_args(*names[k]))
         if refused:
             extra["refused"] = True
+        if unread:
+            extra["unread"] = True
         if lang == "js" and path:
             extra.update(dialect_args(path[0]))
         calls.append(({"lang": lang, **extra} if lang else extra, text))
     answers = _batch("import_time_risk", calls, texts)
+    if unread:
+        return [a if unanswered(a) else (a[0], a[1], tuple(a[2]) if a[2] else None, a[3]) for a in answers]
     if refused:
         return [a if unanswered(a) else (a[0], a[1], tuple(a[2]) if len(a) > 2 and a[2] else None) for a in answers]
     return [a if unanswered(a) else (a[0], a[1]) for a in answers]
@@ -293,13 +317,15 @@ def import_time_risk(text, lang=None, declared=None, own=None, path=None):
 
 def dep_file_issues(items, texts=None):
     """[(text, lang, names)] or [(text, lang, names, path)] -> for each dependency file no install hook runs, the
-    import-time and agent checks' findings, [SC-IMPORT-RISK, SC-AGENT-HIJACK] as the engine's issues (each None when
-    it found nothing), in order, a batch at a time (deps.rs; an item the engine could not answer: the
+    import-time and agent checks' findings, [SC-IMPORT-RISK, SC-AGENT-HIJACK] (the engine's issues, each None when
+    it found nothing) and, for a file not read whole, a third element (BIG-BUNDLE-TAIL: the limit a reading of the file
+    met before its end, or the supply-chain tree's not reading it whole, in the engine's words: the file is
+    SC-TRUNCATED beside what was found), in order, a batch at a time (deps.rs; an item the engine could not answer: the
     _native.NativeError it stands for). `names`: the (declared, own) of the package the file is in, or None (D-12b:
     _names_args); `path`: the file's name (a TypeScript file's text is read in its dialect: dialect_args). `texts`:
     the scan's Texts."""
     from lazaret.scanner import core
-    base = {"redact": bool(core.REDACT_SECRETS), "neumaier": False}
+    base = {"redact": bool(core.REDACT_SECRETS), "neumaier": False, "unread": True}
     calls = []
     for text, lang, names, *path in items:
         args = dict(base, **_names_args(*names)) if names is not None else dict(base)
@@ -323,14 +349,18 @@ def install_script_risks(items):
                                           for text, lang, *path in items])
 
 
-def install_script_risk(text, shell=True, command=False, lang=None, own=None, path=None):
+def install_script_risk(text, shell=True, command=False, lang=None, own=None, path=None, unread=False):
     """The install-script test's reasons (raises _native.NativeError when the
     engine could not answer). `lang`: the script's language when known
     ("js", "py"): its strings are read as its runtime reads them. `own`: the
     release's name, when known: a rewrite of its own package's code, or of
     one of its scope, is its own (D-9). `path`: the script's name, when
-    known: a TypeScript file's text is read in its dialect (dialect_args)."""
-    args = {}
+    known: a TypeScript file's text is read in its dialect (dialect_args).
+    `unread` (BIG-BUNDLE-TAIL): (reasons, unread), unread the limit a reading
+    of the script met before its end, or the supply-chain tree's not reading
+    it whole, in the engine's words, or None; the engine answers with what
+    it found then, where without it such a call is one it could not answer."""
+    args = {"unread": True} if unread else {}
     if not shell:
         args["shell"] = False
     if command:
@@ -341,7 +371,8 @@ def install_script_risk(text, shell=True, command=False, lang=None, own=None, pa
         args.update(dialect_args(path))
     if own:
         args["own"] = own
-    return _native.call("install_script_risk", args, text)
+    answer = _native.call("install_script_risk", args, text)
+    return (answer[0], answer[1]) if unread else answer
 
 
 def js_refusal(text, path=None):

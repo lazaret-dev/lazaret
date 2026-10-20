@@ -2091,6 +2091,58 @@ aggregate):
   16 listed as before, so no verdict is weaker; the same on every route, native and WebAssembly). Owed:
   John's `bench.py all` (the popular set: a release that ships a checkpoint or a pickle moves; joblib's wheel becomes
   INCOMPLETE for its own `.pkl.bz2`/`.pkl.xz`/`.pkl.lzma` test files).
+- **A big text's tail is read: the supply-chain tree reads a file up to 16,000,000 characters, and the text follower
+  a text whole or says where it stopped (BIG-BUNDLE-TAIL, D-8; the engine's, for both packages; rule set 2.106.0).**
+  The tree read a JavaScript or Python text up to 2,000,000 characters; past that the text follower
+  answered, and it read a text's first 5,000 assignments, 100 returns, 200 functions with parameters, calls of them
+  and matches of each other kind, four passes, four links of a `.then` chain, quietly: an action's own code, which ncc
+  puts at its bundle's end, was past them (the review of FP-GITHUB-SCRIPT, Oct 18: the whole environment sent after
+  the 5,000th assignment of a bundle was OK). Now the tree reads a text up to 16,000,000 characters, the largest
+  source file the scans read (a larger one is SC-TRUNCATED, as it was), on its own budget; a reading past that budget,
+  or a text the parser refuses, is the text follower's, as before, never an answer of nothing. The follower reads a
+  text whole: each of its lists holds about as many items as a text of its length can (the pack's limit, or one in 8
+  characters for matches and returns, one in 4 for assignments, one in 2 for calls), a return's function and a
+  declaration's are found in one sweep, the script's functions' calls are read name by name, its passes run until
+  nothing grows (at most 256) and a `.then` chain to its end, and what it reads is charged to the call's budget. A
+  limit it still meets before a text's end (a text of little else, a chain past 256 passes) is said: the file is
+  SC-TRUNCATED in the limit's words ("the text follower reads at most 256 passes over the names, and this text's
+  still had more to give"), and the action scan keeps what was found beside it. The tree also knows two API clients'
+  own sends: @actions/http-client's `postJson`, `putJson` and `patchJson`, and Octokit's REST methods
+  (`github.rest.gists.create(...)`) and its `request` given a route (`github.request('POST /gists', ...)`); the text
+  follower's patterns the same. So github-script's bundle, read by the tree, is quiet through the action scan and the
+  import-time test; and an exfiltration in a bundle past 2,000,000 characters is CRITICAL at its start, its middle,
+  its end, and split (a helper that returns the environment, the call that sends it a megabyte later), sent by fetch,
+  a gist, a connection written to, `~/.npmrc` read and sent, http-client and Octokit; the review's tail (0 to 6,000
+  assignments before it) is CRITICAL through the action scan. A second external review (Oct 20) found four more ways
+  this lost a real send or ran unbounded, each fixed: a method's call (`a.send(data)`) was not followed where another
+  object had a method of its name, and is now a call of each function of the name (the text follower alone reports
+  github-script's bundle again, CRITICAL at http-client's `write(data)`: it answers there only where the tree does not
+  read the bundle); a file the tree did not read whole, the parser refusing valid code (500 nested brackets) or the
+  model's budget spent, was the follower's alone, and a split it cannot see was a quiet OK, where now the file is
+  SC-TRUNCATED (CRITICAL) in the tree's words ("the supply-chain tree did not read it whole: the parser refused it at
+  line 1 (nesting too deep); its text alone was read for what it sends") beside whatever the follower found, in the
+  import-time code, an action's scripts, an install script and a dependency's file of both CLIs, the follower's quiet
+  answer never clearing it (code that may never run keeps the follower's answer; a syntax error no runtime runs is not
+  truncated); so the model reads an ordinary bundle whole, its budget twice the taint pass's a node up to 32,000,000
+  steps and a function read up to 1,000 times (TypeScript's compiler, pyright's bundle and Claude Code's `cli.js`, which
+  met the old cap of 50 readings, are read whole now); and 3,000 callbacks of one function, each its own `data`, took
+  the follower 9 s whatever its budget, 8,000 past 45, where its reading of them is linear now (0.1 s; 100,000 in 9 MB:
+  1 s) and charged, with what it reads by hand, to the call's budget (a step a character), which its costliest input
+  runs out of in 18 s of CPU natively and 25 s in WebAssembly. Reading a big bundle whole cost TypeScript's compiler
+  28 to 36 s natively and 37 to 46 s in WebAssembly, which every dependency scan of a project using TypeScript would
+  pay, and a 16 MB bundle 841 MB of memory in WebAssembly, so both were cut before this shipped (John's decisions of
+  Oct 21): the model reads a function again only for what changed of what it uses, writes what callers give a closure
+  variable without reading the callers again, runs again only the calls a change concerns, and reads a recursion or a
+  cycle of calls once a round rather than at each change in it (TypeScript's busiest function 8 and 11 times, where it
+  was read up to 367), and it holds a tree's node without its line, one copy of the text, its per-node marks for the
+  marked nodes alone and its tables in rows. The import-time test of `typescript.js` takes 3.4 s of CPU natively and
+  6.5 s in WebAssembly, of `_tsc.js` 2.1 and 4.4 s (1.4 and 0.6 s natively, 2.8 and 1.7 s in WebAssembly while the
+  tree gave up on them); of a 16 MB synthetic bundle 3.9 and 6.5 s, peaking at 437 and 440 MB (1.0 and 2.1 s, 428 and
+  503 MB, while the tree read 2,000,000 characters); one that sends the environment, through the action scan, 14 to 16
+  s natively and 17 to 19 s in WebAssembly; fourteen local bundles of 2 to 11 MB 25.9 s natively and 54.2 s in
+  WebAssembly (16.8 and 35.2 s before), none cut. The limits of each path, with what is past them before and now:
+  docs/RUST_ENGINE.md, section 18.
+
 - **The text follower reads a function's variable in that function where it is sure of it (FP-GITHUB-SCRIPT; the
   engine's, for both packages; rule set 2.105.0).** John's run of Oct 18 over vercel/next.js's workflows:
   the official `actions/github-script` at 3a2844b was SC-IMPORT-RISK CRITICAL on 9 uses ("dist/index.js runs when the

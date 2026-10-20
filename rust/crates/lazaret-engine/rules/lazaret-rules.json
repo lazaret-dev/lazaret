@@ -1,6 +1,6 @@
 {
  "format": 1,
- "rule_set": "2.105.0",
+ "rule_set": "2.106.0",
  "source": "lazaret.scanner.core, extracted by scripts/make_rust_tables.py \u2014 do not edit",
  "values": {
   "ALWAYS_PRUNE_DIRS": {
@@ -14387,7 +14387,7 @@
   },
   "_LD_OPTIONS_SEND_RE": {
    "flags": "",
-   "re": "\\baxios\\s*\\("
+   "re": "\\baxios\\s*\\(|\\.\\s*rest\\s*\\.\\s*[A-Za-z_$][\\w$]*\\s*\\.\\s*[A-Za-z_$][\\w$]*\\s*\\("
   },
   "_LD_OPTION_KEYS": {
    "set": [
@@ -14641,12 +14641,15 @@
     },
     {
      "value": "ping"
+    },
+    {
+     "value": "rest"
     }
    ]
   },
   "_LD_SEND_RE": {
    "flags": "",
-   "re": "\\b(?:axios|got|needle|superagent|ky|requests|httpx|session|client|aiohttp)\\s*\\.\\s*(?:post|put|patch)\\s*\\(|\\bsendBeacon\\s*\\(|\\bRequest\\s*\\(|\\burlopen\\s*\\(|(?<![\\w$.])fetch\\s*\\(|\\b(?:globalThis|window|self|global)\\s*\\.\\s*fetch\\s*\\("
+   "re": "\\b(?:axios|got|needle|superagent|ky|requests|httpx|session|client|aiohttp)\\s*\\.\\s*(?:post|put|patch)\\s*\\(|\\bsendBeacon\\s*\\(|\\bRequest\\s*\\(|\\burlopen\\s*\\(|(?<![\\w$.])fetch\\s*\\(|\\b(?:globalThis|window|self|global)\\s*\\.\\s*fetch\\s*\\(|\\.\\s*request\\s*\\((?=\\s*[\"'`](?:GET|POST|PUT|PATCH|DELETE|HEAD) /)|\\.\\s*(?:post|put|patch)Json\\s*\\("
   },
   "_LD_STATEMENT_SPAN": {
    "value": 2000

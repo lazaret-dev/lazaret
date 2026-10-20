@@ -14,7 +14,7 @@ import { call, importTimeRisk } from "../src/lib/native.js";
 
 const WHOLE = ["environment", "the whole environment", false];
 const HARVEST = "reads credentials or the whole environment and sends data over the network";
-// functions after which a text is a bundle's (longer than _LD_LONG: more than the follower's limits hold); statements
+// functions after which a text is a bundle's (longer than _LD_LONG, the pack's limits past: BIG-BUNDLE-TAIL); statements
 // after which it is as long and meets none of them; a comment that takes it past the tree's limit; called functions
 // that fill the text's first _LD_MAX functions and calls
 const LONG = Array.from({ length: 8000 }, (_, k) => `function f${k}(a) { return a + ${k}; }\n`).join("");
@@ -62,8 +62,8 @@ test("github-script's bundle: its helpers' names carry nothing", () => {
     assert.equal(sent(text), null, what);
     assert.equal(sent(text + PLAIN), null, what);
     assert.deepEqual(importTimeRisk(text + PAST, "js"), [[], null], what);
-    // the filler's 8,000 functions are more than the follower keeps: what the reading before finds is reported
-    assert.deepEqual(sent(text + LONG), WHOLE, `${what}: a text that meets a limit`);
+    // the filler's 8,000 functions: the follower's lists hold them all (BIG-BUNDLE-TAIL), no limit is met
+    assert.equal(sent(text + LONG), null, `${what}: a bundle's text`);
   }
 });
 

@@ -15,6 +15,7 @@ pub enum Halt {
 
 pub(super) type R<T> = Result<T, Halt>;
 
+
 /// An environment: what each of the function's own bindings holds.
 type Env = IdMap<BindId, V>;
 
@@ -34,9 +35,12 @@ pub struct Eval<'p> {
     /// shared bindings read
     pub reads: BTreeSet<BindId>,
     /// fid -> the parameters of it this reading passed tainted values
-    pub uses: BTreeMap<FnId, BTreeSet<usize>>,
+    /// (fid, a parameter, or NO_USE for the call alone), as they come; grouped at the commit (a reading makes
+    /// many: a list, not a map of sets, BIG-BUNDLE-TAIL, speed)
+    pub uses: Vec<(FnId, u32)>,
     pub limit: u64,
-    pub ancestors: BTreeSet<FnId>,
+    /// the function and those around it (Program::scope_fns, shared)
+    pub ancestors: Rc<[FnId]>,
     /// (the supply-chain model) (key of this function's parameter, the
     /// closure variable it was written to)
     pub pw_adds: Vec<(u64, BindId)>,
@@ -50,23 +54,44 @@ pub struct Eval<'p> {
     pub pk_adds: Vec<(u64, PyStr)>,
     /// (the supply-chain model) the members of `this` this function returns as written (D-3c)
     pub rk_adds: Vec<PyStr>,
+    /// a call run again by the driver (driver's replays), not a whole reading: what it uses of a callee adds to
+    /// what the function's last reading used
+    pub replay: bool,
+    /// a reading of the pass (not the reporting pass) came where the reporting pass may record a finding: the
+    /// reporting pass reads the function (Func::emits)
+    pub would: bool,
 }
 
-/// The changes a reading made to summaries: fid -> (returned request data
-/// changed, parameter indices, enclosing functions' parameter keys).
-pub type Changes = BTreeMap<FnId, (bool, BTreeSet<usize>, BTreeSet<u64>)>;
+/// What a reading changed in one function's summary.
+#[derive(Default, Debug)]
+pub struct Change {
+    /// the request data (local data) it returns
+    pub src: bool,
+    /// the parameters whose part of the summary changed: a caller passing a value there is read again
+    pub params: BTreeSet<usize>,
+    /// the keys of enclosing functions' parameters it returns
+    pub outer: BTreeSet<u64>,
+    /// (the supply-chain model) only where the local data it returns was first read changed (Sc::firsts): its
+    /// callers are read again once the pass has nothing else to read
+    pub src_later: bool,
+    /// (the supply-chain model) the parameters written to a first closure variable, or called a first time: a
+    /// caller giving a value there is read again once the pass has nothing else to read, keeping what it gives
+    /// (pw_args) and its calls (pc_sites) from then on
+    pub later_first: BTreeSet<usize>,
+    /// (the supply-chain model) the function calls a parameter for the first time (Func::param_calls, D-19): every
+    /// caller is read again once the pass has nothing else to read, keeping its calls (pc_sites) from then on
+    pub later_all: bool,
+}
+
+/// The changes a reading made to summaries, by function.
+pub type Changes = BTreeMap<FnId, Change>;
 
 impl<'p> Eval<'p> {
     pub fn new(p: &'p mut Program, fid: FnId, emit: bool, findings: &'p mut Vec<Out>) -> Eval<'p> {
         let m = p.fns[fid as usize].module;
         let cur = p.fns[fid as usize].scope;
         let limit = p.work + p.cfg.run_base + p.cfg.run_per_node * p.fns[fid as usize].size;
-        let mut ancestors = BTreeSet::new();
-        let mut f = Some(fid);
-        while let Some(x) = f {
-            ancestors.insert(x);
-            f = p.fns[x as usize].parent;
-        }
+        let ancestors = p.scope_fns(fid);
         Eval {
             p,
             fid,
@@ -80,7 +105,7 @@ impl<'p> Eval<'p> {
             ret_val: None,
             shared_writes: BTreeMap::new(),
             reads: BTreeSet::new(),
-            uses: BTreeMap::new(),
+            uses: Vec::new(),
             limit,
             ancestors,
             pw_adds: Vec::new(),
@@ -89,7 +114,25 @@ impl<'p> Eval<'p> {
             pk_adds: Vec::new(),
             rk_adds: Vec::new(),
             recv_val: None,
+            replay: false,
+            would: false,
         }
+    }
+
+    /// The reporting pass's reading (it records findings); a reading of the pass notes that it came where one may
+    /// be recorded (`would`).
+    #[inline]
+    pub(super) fn emitting(&mut self) -> bool {
+        if !self.emit {
+            self.would = true;
+        }
+        self.emit
+    }
+
+    /// The module's tree, shared (its lists read while the reading changes itself).
+    #[inline]
+    pub(super) fn tree(&self) -> Rc<crate::jsparse::tree::Tree> {
+        self.p.mods[self.m as usize].tree.clone()
     }
 
     #[inline]
@@ -113,11 +156,11 @@ impl<'p> Eval<'p> {
     pub(super) fn read(&mut self, b: BindId) -> V {
         let bind = &self.p.binds[b as usize];
         if bind.kind == BindKind::Import {
-            let targets = bind.targets.clone().unwrap_or_default();
+            let targets = self.p.import_targets.get(&b).cloned().unwrap_or_default();
             if targets.is_empty() {
                 return V::empty();
             }
-            let name = bind.name.clone();
+            let name = self.p.names[bind.name as usize].clone();
             let mut out = V::empty();
             for t in targets {
                 self.reads.insert(t);
@@ -204,11 +247,16 @@ impl<'p> Eval<'p> {
         self.tick(1 + ((a.len() + b.len()) as u64 >> 5))?;
         let mut out = a.clone();
         for (k, v) in b {
-            let nv = match out.get(k) {
-                None => v.clone(),
-                Some(o) => o.union(v),
-            };
-            out.insert(*k, nv);
+            match out.get_mut(k) {
+                None => {
+                    out.insert(*k, v.clone());
+                }
+                Some(o) => {
+                    if !o.covers(v) {
+                        *o = o.union(v);
+                    }
+                }
+            }
         }
         Ok(out)
     }
@@ -218,8 +266,8 @@ impl<'p> Eval<'p> {
         let f = &self.p.fns[self.fid as usize];
         let node = f.node;
         if f.is_module {
-            let body = self.a().list(node, jt::A).to_vec();
-            return self.stmts(&body);
+            let t = self.tree();
+            return self.stmts(Ast(&t).list(node, jt::A));
         }
         let (params, scope, route, fid) = (f.params.clone(), f.scope, f.route, f.fid);
         for (i, &p) in params.iter().enumerate() {
@@ -236,8 +284,8 @@ impl<'p> Eval<'p> {
         }
         let body = self.a().at(node, jt::C);
         if self.a().kind(body) == Kind::BlockStatement {
-            let sts = self.a().list(body, jt::A).to_vec();
-            self.stmts(&sts)
+            let t = self.tree();
+            self.stmts(Ast(&t).list(body, jt::A))
         } else {
             let v = self.expr(Some(body), scope)?;
             self.ret(v);
@@ -280,8 +328,9 @@ impl<'p> Eval<'p> {
                 self.expr(Some(e), cur)?;
             }
             Kind::VariableDeclaration => {
-                let (decls, is_var) = (self.a().list(st, A).to_vec(), self.a().op(st) == jt::VAR);
-                for d in decls {
+                let t = self.tree();
+                let (decls, is_var) = (Ast(&t).list(st, A), self.a().op(st) == jt::VAR);
+                for &d in decls {
                     let (id, init) = (self.a().at(d, A), self.a().opt(d, B));
                     let v = match init {
                         Some(i) => self.expr(Some(i), cur)?,
@@ -339,8 +388,8 @@ impl<'p> Eval<'p> {
             }
             Kind::BlockStatement => {
                 self.cur = self.scope_or(st, cur);
-                let sts = self.a().list(st, A).to_vec();
-                self.stmts(&sts)?;
+                let t = self.tree();
+                self.stmts(Ast(&t).list(st, A))?;
                 self.cur = cur;
             }
             Kind::ForStatement | Kind::ForInStatement | Kind::ForOfStatement | Kind::WhileStatement | Kind::DoWhileStatement => {
@@ -359,8 +408,8 @@ impl<'p> Eval<'p> {
                         self.bind_pattern(param, V::empty(), c)?;
                     }
                     let body = self.a().at(h, B);
-                    let sts = self.a().list(body, A).to_vec();
-                    self.stmts(&sts)?;
+                    let t = self.tree();
+                    self.stmts(Ast(&t).list(body, A))?;
                     self.cur = cur;
                     let env = std::mem::take(&mut self.env);
                     self.env = self.merge(&after, &env)?;
@@ -376,16 +425,16 @@ impl<'p> Eval<'p> {
                 self.expr(Some(disc), c)?;
                 let before = self.copy_env()?;
                 let mut acc = before.clone();
-                let cases = self.a().list(st, B).to_vec();
-                for case in cases {
+                let t = self.tree();
+                let cases = Ast(&t).list(st, B);
+                for &case in cases {
                     if let Some(test) = self.a().opt(case, A) {
                         let c = self.cur;
                         self.expr(Some(test), c)?;
                     }
                     let env = std::mem::take(&mut self.env);
                     self.env = self.merge(&before, &env)?;
-                    let cons = self.a().list(case, B).to_vec();
-                    self.stmts(&cons)?;
+                    self.stmts(Ast(&t).list(case, B))?;
                     let env = self.env.clone();
                     acc = self.merge(&acc, &env)?;
                 }
@@ -760,7 +809,7 @@ impl<'p> Eval<'p> {
     // ---- sources ----
     fn source(&self, line: u32) -> V {
         let f = &self.p.fns[self.fid as usize];
-        let fname = if f.is_module { None } else { f.name.clone().map(Rc::new) };
+        let fname = if f.is_module { None } else { f.name.as_ref().map(|n| Rc::new(n.to_vec())) };
         V::new(true, Some((self.m, line)), fname, None, V::empty().params, 0, false, 0)
     }
 
@@ -791,9 +840,10 @@ impl<'p> Eval<'p> {
             Kind::ThisExpression if self.p.cfg.supply.is_some() => Ok(self.sc_this_value(scope)),
             Kind::Literal | Kind::ThisExpression | Kind::Super | Kind::MetaProperty => Ok(V::empty()),
             Kind::TemplateLiteral => {
-                let exprs = self.a().list(e, B).to_vec();
+                let t = self.tree();
+                let exprs = Ast(&t).list(e, B);
                 let mut out = V::empty();
-                for (k, x) in exprs.into_iter().enumerate() {
+                for (k, &x) in exprs.iter().enumerate() {
                     let xv = self.expr(Some(x), scope)?.plain();
                     if k == 0 && self.p.cfg.supply.is_some() {
                         self.sc_host_built(e, &xv);
@@ -837,17 +887,17 @@ impl<'p> Eval<'p> {
                 Ok(V::empty())
             }
             Kind::SequenceExpression => {
-                let xs = self.a().list(e, A).to_vec();
+                let t = self.tree();
                 let mut v = V::empty();
-                for x in xs {
+                for &x in Ast(&t).list(e, A) {
                     v = self.expr(Some(x), scope)?;
                 }
                 Ok(v)
             }
             Kind::ArrayExpression => {
-                let xs = self.a().list(e, A).to_vec();
+                let t = self.tree();
                 let mut out = V::empty();
-                for x in xs {
+                for &x in Ast(&t).list(e, A) {
                     if x != NONE {
                         out = out.union(&self.expr(Some(x), scope)?.plain());
                     }
@@ -855,9 +905,9 @@ impl<'p> Eval<'p> {
                 Ok(out)
             }
             Kind::ObjectExpression => {
-                let props = self.a().list(e, A).to_vec();
+                let t = self.tree();
                 let mut out = V::empty();
-                for prop in props {
+                for &prop in Ast(&t).list(e, A) {
                     if self.a().kind(prop) == Kind::SpreadElement {
                         let arg = self.a().at(prop, A);
                         out = out.union(&self.expr(Some(arg), scope)?.plain());
@@ -907,13 +957,13 @@ impl<'p> Eval<'p> {
     /// A function as a value: what it returns (request data, the
     /// parameters of functions around it) — a callback carries it.
     fn function_value(&mut self, fid: FnId) -> V {
-        self.uses.entry(fid).or_default();
+        self.uses.push((fid, NO_USE));
         let f = &self.p.fns[fid as usize];
         let mut out = V::empty();
-        if let Some(rs) = &f.ret_src {
+        if let Some(rs) = f.ret_src() {
             out = out.union(rs);
         }
-        for (&key, &(clean, built)) in &f.ret_outer {
+        for (&key, &(clean, built)) in f.ret_outer() {
             if self.ancestors.contains(&key_owner(key)) {
                 out = out.union(&V::param(key, clean, built, 0));
             }
@@ -1098,7 +1148,7 @@ impl<'p> Eval<'p> {
         if self.p.cfg.supply.is_some() {
             let v = if let Some(v) = self.sc_member(node, obj, &key, scope) {
                 v
-            } else if self.a().prop_name(node).as_deref().is_some_and(|n| eq(n, "length")) {
+            } else if self.a().prop_is(node, "length") {
                 V::empty()
             } else if obj.kind != 0 {
                 obj.plain()
@@ -1133,10 +1183,11 @@ impl<'p> Eval<'p> {
 
     /// The arguments' values, and the index of the first spread (or -1).
     fn args_of(&mut self, node: NodeId, scope: ScopeId) -> R<(Vec<V>, isize)> {
-        let list = self.a().list(node, jt::B).to_vec();
+        let t = self.tree();
+        let list = Ast(&t).list(node, jt::B);
         let mut args = Vec::with_capacity(list.len());
         let mut spread: isize = -1;
-        for a in list {
+        for &a in list {
             if self.a().kind(a) == Kind::SpreadElement {
                 if spread < 0 {
                     spread = args.len() as isize;
@@ -1703,7 +1754,7 @@ impl<'p> Eval<'p> {
         for &key in v.params.iter() {
             self.reach_adds.push((key, cat, entry.clone()));
         }
-        if v.src && v.via.is_some() && self.emit && !needs {
+        if v.src && v.via.is_some() && !needs && self.emitting() {
             let (om, oline) = v.origin.expect("request data has an origin");
             let mut src_loc = self.p.mods[om as usize].path.clone();
             src_loc.push(0x3A);
@@ -1742,7 +1793,6 @@ impl<'p> Eval<'p> {
         // (the supply-chain model: what the script's wrappers of exec print)
         let mut wrapped = V::empty();
         let mut reported: u8 = 0;
-        let name = self.callee_name(node);
         for &fid in fids {
             let (nparams, rest) = {
                 let f = &self.p.fns[fid as usize];
@@ -1755,16 +1805,24 @@ impl<'p> Eval<'p> {
                 };
                 (n, rest)
             };
-            {
-                let used = self.uses.entry(fid).or_default();
-                for i in 0..nparams {
-                    if bound(args, spread, rest, i).tainted() {
-                        used.insert(i);
+            // (the supply-chain model, the pass's readings: what this caller gives each parameter, which the driver
+            // writes to the closure variables the callee's summary writes the parameter to, now and as it learns of
+            // more: driver::pw_carry)
+            let carry = self.p.cfg.supply.is_some() && !self.emit;
+            let mut outside: Option<bool> = None;
+            for i in 0..nparams {
+                if bound_tainted(args, spread, rest, i) {
+                    self.uses.push((fid, i as u32));
+                    if carry && self.p.pw_tracked.contains(&(fid, i as u32)) {
+                        let out = *outside.get_or_insert_with(|| self.sc_on_instance(node));
+                        let t = bound(args, spread, rest, i);
+                        self.p.pw_given(fid, i, self.fid, t.plain(), out);
                     }
                 }
             }
-            let reach: Vec<(usize, BTreeMap<u8, Entry>)> =
-                self.p.fns[fid as usize].reach.iter().map(|(&i, t)| (i, t.clone())).collect();
+            self.uses.push((fid, NO_USE));
+            let reach: Vec<(usize, Rc<VecMap<u8, Entry>>)> =
+                self.p.fns[fid as usize].reach().map(|(&i, t)| (i, t.clone())).collect();
             for (i, table) in reach {
                 let t = bound_or_recv(args, spread, rest, i, &recv);
                 if !t.tainted() {
@@ -1798,7 +1856,7 @@ impl<'p> Eval<'p> {
                     let needs = entry.3 && !t.built;
                     if self.p.cfg.supply.is_some() {
                         // (a sink the parameter reaches through a member alone: not the whole environment, D-16)
-                        let member = self.p.fns[fid as usize].reach_member.get(&(i, cat)).copied().unwrap_or(false);
+                        let member = self.p.fns[fid as usize].sc_ref().and_then(|s| s.reach_member.get(&(i, cat)).copied()).unwrap_or(false);
                         let t = if member { super::supply::sc_through_member(&t) } else { t.clone() };
                         if cat == super::supply::EXEC_CMD || cat == super::supply::READ_PATH || cat == super::supply::ENV_NAME {
                             // (the script's wrappers: of exec given a command line, of a
@@ -1824,11 +1882,11 @@ impl<'p> Eval<'p> {
                         }
                         // (received code the callee runs, loads or deserializes)
                         if let Some(rc) = super::supply::received_cat(cat) {
-                            if t.src && self.emit && t.sc.as_ref().is_some_and(|s| s.kinds & super::supply::K_RECEIVED != 0) {
+                            if t.src && t.sc.as_ref().is_some_and(|s| s.kinds & super::supply::K_RECEIVED != 0) && self.emitting() {
                                 self.findings.push(Out::Received { at: entry.1, cat: rc });
                             }
                             // (code the script decodes, run by the callee)
-                            if t.src && self.emit && cat == super::supply::RUN_CODE {
+                            if t.src && cat == super::supply::RUN_CODE && self.emitting() {
                                 if let Some(from) = t.sc.as_ref().and_then(|s| super::supply::decoded_at(s)) {
                                     self.findings.push(Out::Decoded { at: entry.1, from });
                                 }
@@ -1839,7 +1897,7 @@ impl<'p> Eval<'p> {
                             continue;
                         }
                         // (the supply-chain model: local data at a send the callee reaches)
-                        if t.src && self.emit {
+                        if t.src && t.sc.is_some() && self.emitting() {
                             if let Some(sc) = t.sc.clone() {
                                 self.sc_emit(&sc, cat == super::supply::SEND_ADDR, entry.1);
                             }
@@ -1849,7 +1907,7 @@ impl<'p> Eval<'p> {
                         }
                         continue;
                     }
-                    if t.src && self.emit && !needs && reported & bit(cat) == 0 {
+                    if t.src && !needs && reported & bit(cat) == 0 && self.emitting() {
                         let path = self.p.mods[self.m as usize].path.clone();
                         let mut here = path.clone();
                         here.push(0x3A);
@@ -1860,7 +1918,7 @@ impl<'p> Eval<'p> {
                         there.push(0x20);
                         there.extend_from_slice(&entry.2);
                         let mut via = u("the call to ");
-                        via.extend_from_slice(&name);
+                        via.extend_from_slice(&self.callee_name(node));
                         via.extend(u("()"));
                         self.findings.push(Out::Issue { cat, path, file: self.p.mods[self.m as usize].file, line, source: here, sink: there, via });
                         reported |= bit(cat);
@@ -1873,8 +1931,11 @@ impl<'p> Eval<'p> {
             // (the supply-chain model) the closure variables a parameter is written to
             // (not the `this.x` of a class made in several places, from a call
             // on an instance: the instance holds it, sc_instance_call)
-            let writes: Vec<(usize, Vec<BindId>)> =
-                self.p.fns[fid as usize].param_writes.iter().map(|(&i, bs)| (i, bs.iter().copied().collect())).collect();
+            let writes: Vec<(usize, Vec<BindId>)> = if carry {
+                Vec::new() // (the driver writes them: pw_carry)
+            } else {
+                self.p.fns[fid as usize].sc_ref().map(|s| s.param_writes.iter().map(|(&i, bs)| (i, bs.iter().copied().collect())).collect()).unwrap_or_default()
+            };
             let outside = !writes.is_empty() && self.sc_on_instance(node);
             for (i, binds) in writes {
                 if i == RECV_INDEX {
@@ -1893,7 +1954,7 @@ impl<'p> Eval<'p> {
             // (the supply-chain model) the files a parameter is written to: what it is given here (D-2)
             if self.p.cfg.supply.is_some() {
                 let files: Vec<(usize, Vec<(Vec<PyStr>, u32)>)> =
-                    self.p.fns[fid as usize].param_files.iter().map(|(&i, fs)| (i, fs.iter().cloned().collect())).collect();
+                    self.p.fns[fid as usize].sc_ref().map(|s| s.param_files.iter().map(|(&i, fs)| (i, fs.iter().cloned().collect())).collect()).unwrap_or_default();
                 for (i, fs) in files {
                     if i == RECV_INDEX {
                         continue;
@@ -1910,7 +1971,7 @@ impl<'p> Eval<'p> {
                 continue;
             }
             let f = &self.p.fns[fid as usize];
-            if let Some(rs) = &f.ret_src {
+            if let Some(rs) = f.ret_src() {
                 let mut via = u("the value returned by ");
                 match &f.name {
                     Some(n) if !n.is_empty() => via.extend_from_slice(n),
@@ -1922,9 +1983,8 @@ impl<'p> Eval<'p> {
                         .with_sc(rs.sc.clone()),
                 );
             }
-            let ret_params: Vec<(usize, (u8, bool, bool))> = f.ret_params.iter().map(|(&i, &x)| (i, x)).collect();
-            let ret_outer: Vec<(u64, (u8, bool))> = f.ret_outer.iter().map(|(&k, &x)| (k, x)).collect();
-            for (i, (clean, built, member)) in ret_params {
+            let supply = self.p.cfg.supply.is_some();
+            for (&i, &(clean, built, member)) in f.ret_params.iter() {
                 if i == RECV_INDEX {
                     continue; // (what a method returns of its receiver: B-1's instance gives it, sc_call)
                 }
@@ -1932,7 +1992,7 @@ impl<'p> Eval<'p> {
                 if b.tainted() {
                     b = b.plain();
                     // (returned through a member of a name that is not the environment's: not the whole of it, D-16)
-                    if member && self.p.cfg.supply.is_some() {
+                    if member && supply {
                         b = super::supply::sc_through_member(&b);
                         if !b.tainted() {
                             continue;
@@ -1944,7 +2004,7 @@ impl<'p> Eval<'p> {
                     out = out.union(&if built { b.with_built() } else { b });
                 }
             }
-            for (key, (clean, built)) in ret_outer {
+            for (&key, &(clean, built)) in f.ret_outer() {
                 if self.ancestors.contains(&key_owner(key)) {
                     out = out.union(&V::param(key, clean, built, 0));
                 }
@@ -2057,38 +2117,53 @@ impl<'p> Eval<'p> {
     /// (monotone). Returns the functions whose summaries changed, each with
     /// what changed, and the bindings whose value grew.
     pub fn commit(self) -> (Changes, Vec<BindId>) {
-        let Eval { p, fid, emit, reach_adds, ret_val, shared_writes, reads, uses, pw_adds, pf_adds, pc_adds, pk_adds, rk_adds, .. } =
-            self;
+        let Eval {
+            p, fid, emit, reach_adds, ret_val, shared_writes, reads, uses, pw_adds, pf_adds, pc_adds, pk_adds, rk_adds, replay, would, ..
+        } = self;
+        // (a replay is a call's: what the function's last reading came to stands with it)
+        let emits = &mut p.fns[fid as usize].emits;
+        *emits = would || (replay && *emits);
         let mut changes: Changes = BTreeMap::new();
         for name in rk_adds {
-            if p.fns[fid as usize].ret_kept.insert(name) {
-                changes.entry(fid).or_default().0 = true;
+            if p.fns[fid as usize].sc_mut().ret_kept.insert(name) {
+                changes.entry(fid).or_default().src = true;
             }
         }
         for (key, name) in pk_adds {
             let (owner, i) = (key_owner(key), key_index(key));
-            if p.fns[owner as usize].param_kept.entry(i).or_default().insert(name) {
-                changes.entry(owner).or_default().1.insert(i);
+            if p.fns[owner as usize].sc_mut().param_kept.entry(i).or_default().insert(name) {
+                changes.entry(owner).or_default().params.insert(i);
             }
         }
         for (key, given) in pc_adds {
             let (owner, i) = (key_owner(key), key_index(key));
-            if merge_given(p.fns[owner as usize].param_calls.entry(i).or_default(), &given) {
-                changes.entry(owner).or_default().1.insert(i);
+            if merge_given(p.fns[owner as usize].sc_mut().param_calls.entry(i).or_default(), &given) {
+                if p.pc_tracked.contains(&(owner, i as u32)) {
+                    p.pc_changed.push((owner, i)); // (its callers' calls run again: driver's replays)
+                } else {
+                    p.pc_tracked.insert((owner, i as u32));
+                    p.pc_tracked_fns.insert(owner);
+                    changes.entry(owner).or_default().later_all = true;
+                }
             }
         }
         for (key, b) in pw_adds {
             let owner = key_owner(key);
             let i = key_index(key);
-            if p.fns[owner as usize].param_writes.entry(i).or_default().insert(b) {
-                changes.entry(owner).or_default().1.insert(i);
+            if p.fns[owner as usize].sc_mut().param_writes.entry(i).or_default().insert(b) {
+                if p.pw_tracked.contains(&(owner, i as u32)) {
+                    p.pw_new.push((owner, i, b)); // (the callers' values given there are written to it: pw_carry)
+                } else {
+                    p.pw_tracked.insert((owner, i as u32));
+                    changes.entry(owner).or_default().later_first.insert(i);
+                }
             }
         }
         for (key, keys, at) in pf_adds {
             let owner = key_owner(key);
             let i = key_index(key);
-            if p.fns[owner as usize].param_files.entry(i).or_default().insert((keys, at)) {
-                changes.entry(owner).or_default().1.insert(i);
+            if p.fns[owner as usize].sc_mut().param_files.entry(i).or_default().insert((keys, at)) {
+                changes.entry(owner).or_default().params.insert(i);
             }
         }
         for (key, cat, entry) in reach_adds {
@@ -2096,19 +2171,19 @@ impl<'p> Eval<'p> {
             let i = key_index(key);
             // (reached through a member alone, D-16; once whole, whole)
             let member = key & MEMBER_KEY != 0;
-            let rm = p.fns[owner as usize].reach_member.entry((i, cat)).or_insert(member);
+            let rm = p.fns[owner as usize].sc_mut().reach_member.entry((i, cat)).or_insert(member);
             if *rm && !member {
                 *rm = false;
-                changes.entry(owner).or_default().1.insert(i);
+                changes.entry(owner).or_default().params.insert(i);
             }
-            let d = p.fns[owner as usize].reach.entry(i).or_default();
+            let d = Rc::make_mut(p.fns[owner as usize].more_mut().reach.slot(i, Default::default));
             let replace = match d.get(&cat) {
                 None => true,
                 Some(old) => old.3 && !entry.3,
             };
             if replace {
                 d.insert(cat, entry);
-                changes.entry(owner).or_default().1.insert(i);
+                changes.entry(owner).or_default().params.insert(i);
             }
         }
         let is_module = p.fns[fid as usize].is_module;
@@ -2116,24 +2191,32 @@ impl<'p> Eval<'p> {
             if !is_module && rv.tainted() {
                 if rv.src {
                     let f = &mut p.fns[fid as usize];
-                    match &f.ret_src {
+                    match f.ret_src() {
                         None => {
-                            f.ret_src = Some(
+                            f.more_mut().ret_src = Some(Box::new(
                                 V::new(true, rv.origin, rv.fname.clone(), None, V::empty().params, rv.clean, rv.built, 0)
                                     .with_sc(rv.sc.clone()),
-                            );
-                            changes.entry(fid).or_default().0 = true;
+                            ));
+                            changes.entry(fid).or_default().src = true;
                         }
                         Some(old) => {
                             let clean = old.clean & rv.clean;
                             let built = old.built || rv.built;
                             let sc = sc_union(&old.sc, &rv.sc);
                             if clean != old.clean || built != old.built || sc != old.sc {
-                                f.ret_src = Some(
+                                // (where a kind was first read, alone: its callers later)
+                                let firsts = clean == old.clean
+                                    && built == old.built
+                                    && sc.as_ref().map(|x| x.kinds) == old.sc.as_ref().map(|x| x.kinds);
+                                f.more_mut().ret_src = Some(Box::new(
                                     V::new(true, old.origin, old.fname.clone(), None, V::empty().params, clean, built, 0)
                                         .with_sc(sc),
-                                );
-                                changes.entry(fid).or_default().0 = true;
+                                ));
+                                if firsts {
+                                    changes.entry(fid).or_default().src_later = true;
+                                } else {
+                                    changes.entry(fid).or_default().src = true;
+                                }
                             }
                         }
                     }
@@ -2154,22 +2237,38 @@ impl<'p> Eval<'p> {
                         let new = (clean, built, old.map_or(member, |o| o.2 && member));
                         if old != Some(new) {
                             f.ret_params.insert(k, new);
-                            changes.entry(fid).or_default().1.insert(k);
+                            changes.entry(fid).or_default().params.insert(k);
                         }
                     } else {
-                        let old = f.ret_outer.get(&key).copied();
+                        let old = f.more.as_ref().and_then(|m| m.ret_outer.get(&key).copied());
                         let new = merged(old);
                         if old != Some(new) {
-                            f.ret_outer.insert(key, new);
-                            changes.entry(fid).or_default().2.insert(key);
+                            f.more_mut().ret_outer.insert(key, new);
+                            changes.entry(fid).or_default().outer.insert(key);
                         }
                     }
                 }
             }
         }
         if !emit {
-            for (u_fid, used) in uses {
-                p.fns[u_fid as usize].callers.insert(fid, used);
+            let mut uses = uses;
+            uses.sort_unstable();
+            uses.dedup();
+            let mut k = 0;
+            while k < uses.len() {
+                let u_fid = uses[k].0;
+                let mut used: Vec<u32> = Vec::new();
+                while k < uses.len() && uses[k].0 == u_fid {
+                    if uses[k].1 != NO_USE {
+                        used.push(uses[k].1);
+                    }
+                    k += 1;
+                }
+                if replay {
+                    p.fns[u_fid as usize].callers.merge(fid, &used);
+                } else {
+                    p.fns[u_fid as usize].callers.set(fid, &used);
+                }
             }
         }
         let mut grown = Vec::new();
@@ -2191,9 +2290,13 @@ impl<'p> Eval<'p> {
             }
         }
         for bid in reads {
+            // (ascending: a binding many functions read is searched, not scanned, at each reading)
             let r = p.readers.entry(bid).or_default();
-            if !r.contains(&fid) {
-                r.push(fid);
+            if let Err(k) = r.binary_search(&fid) {
+                if r.len() == r.capacity() {
+                    r.reserve_exact(r.len().max(1));
+                }
+                r.insert(k, fid);
             }
         }
         (changes, grown)
@@ -2229,6 +2332,20 @@ fn merge_given(old: &mut Vec<V>, given: &[V]) -> bool {
 }
 
 /// The value parameter i of a function receives.
+/// (Eval::uses) a call of the function, no parameter
+const NO_USE: u32 = u32::MAX;
+
+/// Is bound()'s value tainted (not made to be asked)?
+fn bound_tainted(args: &[V], spread: isize, rest: isize, i: usize) -> bool {
+    if i as isize == rest {
+        return args.iter().skip(i).any(|a| a.tainted());
+    }
+    if spread >= 0 && spread as usize <= i {
+        return args.iter().skip(spread as usize).any(|a| a.tainted());
+    }
+    args.get(i).is_some_and(|a| a.tainted())
+}
+
 pub(super) fn bound(args: &[V], spread: isize, rest: isize, i: usize) -> V {
     if i as isize == rest {
         return union_all(args.iter().skip(i));

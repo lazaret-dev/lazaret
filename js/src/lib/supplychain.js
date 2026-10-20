@@ -9,7 +9,7 @@
 import { mkIssue } from "./issue.js";
 import { truncatedIssue } from "./issue.js";
 import { pyRe, pyRepr, MAX_JSON_DEPTH, PY_ORDER } from "./pycompat.js";
-import { call, hookIsSuspicious, installScriptSeverity, issuesOf, NativeExhausted, EXHAUSTED } from "./native.js";
+import { call, hookIsSuspicious, installScriptSeverity, issuesOf, NativeExhausted, exhaustedWhy } from "./native.js";
 import { REDACT, redactText } from "./redact.js";
 
 export { SECRET_RULES, REDACT_PLACEHOLDER, redactContextLine, redactResult, setRedactSecrets } from "./redact.js";
@@ -97,7 +97,7 @@ function engineIssues(path, name, args, content) {
     issues = issuesOf(path, call(name, { path, redact: REDACT.on, ...args }, String(content)).issues);
   } catch (e) {
     if (!(e instanceof NativeExhausted)) throw e;
-    return [truncatedIssue(path, EXHAUSTED)];
+    return [truncatedIssue(path, exhaustedWhy(e))];
   }
   for (const issue of issues) {
     if (typeof issue.cmd !== "string") continue;

@@ -7,7 +7,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { call, importTimeRisk } from "../src/lib/native.js";
+import { call, importTimeRisk, TREE_CUT } from "../src/lib/native.js";
 
 const WHOLE = ["environment", "the whole environment", false];
 const HARVEST = "reads credentials or the whole environment and sends data over the network";
@@ -41,7 +41,10 @@ test("the follower keeps the send past each line terminator and white space", ()
 test("the import-time test past the tree's limit, and of a text the parser refuses", () => {
   for (const [what, text] of Object.entries(CASES)) {
     assert.ok(call("js_refusal", {}, NESTING + text) !== null, what);
-    assert.deepEqual(importTimeRisk(NESTING + text, "js")[0], [HARVEST], `${what}: refused`);
+    // (BIG-BUNDLE-TAIL: a text the tree did not read whole is answered with what was found and, beside it, why)
+    const [reasons, , , cut] = call("import_time_risk", { lang: "js", refused: true, unread: true }, NESTING + text);
+    assert.deepEqual(reasons, [HARVEST], `${what}: refused`);
+    assert.ok(cut && cut.startsWith(TREE_CUT), `${what}: ${cut}`);
     if (what.includes("U+20")) assert.deepEqual(importTimeRisk(text + PAST, "js")[0], [HARVEST], `${what}: past the tree's limit`);
   }
 });

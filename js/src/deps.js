@@ -27,7 +27,7 @@ import { looksBinary, HEADER_SAMPLE, pyExt } from "./lib/binary.js";
 import { REDACT } from "./lib/redact.js";
 import { mapTasks } from "./pool.js";
 import { cmpCodePoints, cpLen } from "./lib/pycompat.js";
-import { EXHAUSTED } from "./scanner/scan.js";
+import { exhaustedWhy } from "./lib/native.js";
 
 const posix = (p) => (sep === "/" ? p : p.split(sep).join("/"));
 const native = (p) => (sep === "/" ? p : p.split("/").join(sep));
@@ -44,7 +44,7 @@ function dirname(path) {
 /** SC-TRUNCATED for a file the engine could not answer about: EXHAUSTED when it spent its work budget (a worker's
  * error is {name, message}), "its scan failed" otherwise (core's engine.error_issue). */
 const errorIssue = (path, e) => (e instanceof NativeExhausted || (e && e.name === "NativeExhausted")
-  ? truncatedIssue(path, EXHAUSTED) : scanErrorIssue(path, e));
+  ? truncatedIssue(path, exhaustedWhy(e)) : scanErrorIssue(path, e));
 
 /**
  * The text of a file read the way core.decode_member reads an archive member
@@ -353,9 +353,10 @@ export function dependencyChecks(root, files, manifests, issues,
     redact: REDACT.on, siteGroups: groups,
   }];
   const answers = mapTasks(pool, pool ? [follow, ...checks] : checks, dependencyTask, dependencyTaskError);
-  for (const [found, agent] of pool ? answers.slice(1) : answers) {
+  for (const [found, agent, unread] of pool ? answers.slice(1) : answers) {
     if (found) out.push(found);
     if (agent) out.push(agent);
+    if (unread) out.push(unread);                       // (BIG-BUNDLE-TAIL: not read whole, beside what was found)
   }
   // (0.1.9, Part C) the vendored Go modules' and crates' code, by the engine's readers (vendoredCode)
   for (const i of vendoredCode(tree, files)) out.push(i);
@@ -537,7 +538,7 @@ export function vendoredCode(tree, files) {
           redact: REDACT.on });
       }
     } catch (e) {                               // one module must never kill the run
-      out.push(e instanceof NativeExhausted ? truncatedIssue(order[0], EXHAUSTED) : scanErrorIssue(order[0], e));
+      out.push(e instanceof NativeExhausted ? truncatedIssue(order[0], exhaustedWhy(e)) : scanErrorIssue(order[0], e));
       continue;
     }
     for (const i of packageReaderIssues(answer, order)[0]) out.push(i);
@@ -639,18 +640,20 @@ function dependencyTaskError([kind, args], error) {
 
 /**
  * The import-time and agent checks of a dependency's file no install hook runs (`lang` "js" or "py"; `names`: its
- * package's [declared, own], when known: D-12b): [SC-IMPORT-RISK, SC-AGENT-HIJACK], each or null, the engine's
- * (deps.rs dep_file_issues). Throws NativeError when the engine could not answer (NativeExhausted: it spent its work
- * budget). core's engine.dep_file_issues
+ * package's [declared, own], when known: D-12b): [SC-IMPORT-RISK, SC-AGENT-HIJACK, SC-TRUNCATED], each or null, the
+ * engine's (deps.rs dep_file_issues; SC-TRUNCATED, BIG-BUNDLE-TAIL: the file not read whole, a limit of the text
+ * follower's or the supply-chain tree's not reading it, beside what was found). Throws NativeError when the engine
+ * could not answer (NativeExhausted: it spent its work budget). core's engine.dep_file_issues
  */
 export function depFileIssues(path, content, lang = null, names = null) {
-  const args = { redact: REDACT.on, neumaier: false };
+  const args = { redact: REDACT.on, neumaier: false, unread: true };
   if (lang) args.lang = lang;
   if (lang === "js") Object.assign(args, dialectArgs(path));      // (TS-STRIP: a TypeScript file in its dialect)
   if (names && names[0] != null) args.declared = names[0];
   if (names && names[1]) args.own = names[1];
-  const [found, agent] = call("dep_file_issues", args, String(content));
-  return [found ? issuesOf(path, [found])[0] : null, agent ? issuesOf(path, [agent])[0] : null];
+  const [found, agent, unread] = call("dep_file_issues", args, String(content));
+  return [found ? issuesOf(path, [found])[0] : null, agent ? issuesOf(path, [agent])[0] : null,
+    unread ? truncatedIssue(path, unread) : null];
 }
 
 // ---- A project's own install hooks (SC-INSTALL-HOOK, 0.1.9) ----

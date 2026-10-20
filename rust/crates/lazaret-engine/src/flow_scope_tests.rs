@@ -250,12 +250,11 @@ fn another_functions_variable_of_the_name_is_another_variable() {
         assert_eq!(sent(text), None, "{what}: a short text");
         assert_eq!(sent(&format!("{text}{plain}")), None, "{what}: a long text");
         assert_eq!(import_reasons(&format!("{text}{}", over_the_tree())), Vec::<String>::new(), "{what}: past the tree's limit");
-        // a text that meets one of the follower's limits (the filler's functions are more than the parameters it
-        // keeps): core's reading is given too, which conflates the names (but for the helper's, which it reads quiet)
+        // a bundle's text (BIG-BUNDLE-TAIL: the follower's lists hold every function of the filler, so it meets no
+        // limit, and the narrowing reading answers)
         let (got, capped, narrowed) = reading(&format!("{text}{long}"));
-        assert!(capped && narrowed && got.is_none(), "{what}: a bundle's text");
-        let core = if what == "a helper's own" { None } else { whole() };
-        assert_eq!(sent(&format!("{text}{long}")), core, "{what}: a bundle's text");
+        assert!(!capped && narrowed && got.is_none(), "{what}: a bundle's text");
+        assert_eq!(sent(&format!("{text}{long}")), None, "{what}: a bundle's text");
     }
 }
 

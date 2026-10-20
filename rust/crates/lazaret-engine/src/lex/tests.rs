@@ -123,14 +123,14 @@ fn every_character_once_and_no_panic() {
         for jsx in [false, true] {
             let t = js::tokens(&u(s), jsx);
             let mut at = 0u32;
-            for tok in &t {
+            for tok in t.iter() {
                 assert!(tok.start >= at && tok.end > tok.start && tok.end as usize <= s.chars().count(), "{s:?} {t:?}");
                 at = tok.end;
             }
         }
         let t = py::tokens(&u(s));
         let mut at = 0u32;
-        for tok in &t {
+        for tok in t.iter() {
             assert!(tok.start >= at && tok.end >= tok.start, "{s:?} {t:?}");
             at = tok.end;
         }

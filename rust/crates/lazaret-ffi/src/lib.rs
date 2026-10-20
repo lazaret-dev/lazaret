@@ -49,10 +49,42 @@ fn read_u32(b: &[u8], at: usize) -> Option<usize> {
 
 /// Run one request: (status, JSON answer).
 pub fn handle(req: &[u8]) -> (i32, String) {
-    let r = catch_unwind(AssertUnwindSafe(|| handle_inner(req)));
-    match r {
+    caught(|| handle_inner(Request::Borrowed(req)))
+}
+
+/// handle(), given the request to let go of once its text is read (the WebAssembly build's: BIG-BUNDLE-TAIL, memory,
+/// a 16,000,000-character text's bytes are not held beside its code points while the call runs).
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+fn handle_owned(req: Box<[u8]>) -> (i32, String) {
+    caught(|| handle_inner(Request::Owned(req)))
+}
+
+fn caught(f: impl FnOnce() -> (i32, String)) -> (i32, String) {
+    match catch_unwind(AssertUnwindSafe(f)) {
         Ok(v) => v,
         Err(_) => (STATUS_PANIC, json::write(&Value::obj(vec![("error", Value::str("panic in the native engine"))]))),
+    }
+}
+
+/// A request's text, read.
+enum Text {
+    Owned(Vec<u32>),
+    Shared(std::sync::Arc<[u32]>),
+}
+
+/// A request's bytes, the caller's or the module's own.
+enum Request<'a> {
+    Borrowed(&'a [u8]),
+    #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+    Owned(Box<[u8]>),
+}
+
+impl Request<'_> {
+    fn bytes(&self) -> &[u8] {
+        match self {
+            Request::Borrowed(b) => b,
+            Request::Owned(b) => b,
+        }
     }
 }
 
@@ -60,7 +92,8 @@ fn error(status: i32, msg: &str) -> (i32, String) {
     (status, json::write(&Value::obj(vec![("error", Value::str(msg))])))
 }
 
-fn handle_inner(req: &[u8]) -> (i32, String) {
+fn handle_inner(request: Request) -> (i32, String) {
+    let req = request.bytes();
     let parsed = (|| {
         let nlen = read_u32(req, 0)?;
         let name = std::str::from_utf8(req.get(4..4 + nlen)?).ok()?;
@@ -74,6 +107,8 @@ fn handle_inner(req: &[u8]) -> (i32, String) {
         Some(p) => p,
         None => return error(STATUS_ERROR, "malformed request"),
     };
+    let name = name.to_string();
+    let name = name.as_str();
     let args = if args.is_empty() {
         Value::Obj(Vec::new())
     } else {
@@ -91,17 +126,26 @@ fn handle_inner(req: &[u8]) -> (i32, String) {
             Err(e) => error(STATUS_ERROR, &format!("{e:?}")),
         };
     }
-    let text = match decode_wtf8(text) {
-        Some(t) => t,
-        None => return error(STATUS_ERROR, "text is not UTF-8"),
+    // (a module's or a crate's reading keeps its text as it is, api::call_owned; another call's text is read into
+    // one shared buffer, api::call_shared)
+    let whole = name == "go_package" || name == "rs_crate";
+    let text = if whole { decode_wtf8(text).map(Text::Owned) } else { lazaret_engine::texts::decode_wtf8_shared(text).map(Text::Shared) };
+    let Some(text) = text else {
+        return error(STATUS_ERROR, "text is not UTF-8");
     };
+    drop(request);
     #[cfg(not(target_arch = "wasm32"))]
     if let Some(answer) = verify::call(name, &args) {
         return answer;
     }
-    match api::call_owned(name, &args, text) {
+    let answer = match text {
+        Text::Owned(t) => api::call_owned(name, &args, t),
+        Text::Shared(t) => api::call_shared(name, &args, t),
+    };
+    match answer {
         Ok(v) => (STATUS_OK, json::write(&v)),
-        Err(CallError::Exhausted) => error(STATUS_EXHAUSTED, "work budget spent"),
+        // (BIG-BUNDLE-TAIL: the limit a reading met, when one made the call answer so)
+        Err(CallError::Exhausted) => error(STATUS_EXHAUSTED, &lazaret_engine::budget::last_cut().unwrap_or_else(|| "work budget spent".to_string())),
         Err(CallError::Unknown(n)) => error(STATUS_ERROR, &format!("unknown call {}", n)),
         Err(CallError::BadArgs(m)) => error(STATUS_ERROR, &m),
     }
@@ -633,8 +677,7 @@ mod wasm {
     #[no_mangle]
     pub unsafe extern "C" fn lazaret_call(req: *mut u8, len: usize) -> *mut u8 {
         let request: Box<[u8]> = Box::from_raw(std::ptr::slice_from_raw_parts_mut(req, len));
-        let (status, answer) = handle(&request);
-        drop(request);
+        let (status, answer) = handle_owned(request);
         let mut buf = Vec::with_capacity(8 + answer.len());
         buf.extend_from_slice(&(status as u32).to_le_bytes());
         buf.extend_from_slice(&(answer.len() as u32).to_le_bytes());

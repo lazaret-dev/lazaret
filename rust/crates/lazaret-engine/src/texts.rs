@@ -101,6 +101,27 @@ fn next(b: &[u8], i: usize) -> Option<(u32, usize)> {
     Some((v, n + 1))
 }
 
+/// decode_wtf8 into one shared buffer, made once at its size (BIG-BUNDLE-TAIL, memory: a call's text is held as it is
+/// read, not read into a vector and copied into a shared one, which held 128 MB at once for a 16,000,000-character
+/// text): the bytes are checked and counted first, then read.
+pub fn decode_wtf8_shared(b: &[u8]) -> Option<Arc<[u32]>> {
+    let mut n = 0usize;
+    let mut i = 0;
+    while i < b.len() {
+        i += next(b, i)?.1;
+        n += 1;
+    }
+    let mut out: Arc<[u32]> = std::iter::repeat(0u32).take(n).collect();
+    let slots = Arc::get_mut(&mut out)?;
+    let mut i = 0;
+    for slot in slots.iter_mut() {
+        let (c, k) = next(b, i)?;
+        *slot = c;
+        i += k;
+    }
+    Some(out)
+}
+
 /// Code points as WTF-8 (decode_wtf8's inverse; a lone surrogate is written as itself).
 pub fn encode_wtf8(text: &[u32]) -> Vec<u8> {
     let mut out = Vec::with_capacity(text.len());
@@ -184,6 +205,12 @@ pub fn decoded(id: u64) -> Option<Vec<u32>> {
     decode_wtf8(&bytes)                      // (checked when it was put)
 }
 
+/// decoded(), as one shared buffer (decode_wtf8_shared).
+pub fn decoded_shared(id: u64) -> Option<Arc<[u32]>> {
+    let bytes = get(id)?;
+    decode_wtf8_shared(&bytes)
+}
+
 /// Let texts go: the number the store held (an id it does not hold is passed over).
 pub fn release(ids: &[u64]) -> usize {
     let mut guard = store();
@@ -217,6 +244,21 @@ mod tests {
         let all = vec![0x61, 0xE9, 0x1F600, 0xD800, 0xDFFF, 0x7F, 0x80, 0x7FF, 0x800, 0xFFFF, 0x10000, 0x10FFFF];
         assert_eq!(decode_wtf8(&encode_wtf8(&all)), Some(all.clone()));
         assert_eq!(encode_wtf8(&[]), Vec::<u8>::new());
+    }
+
+    #[test]
+    fn the_shared_reading_is_the_reading() {
+        let cases: [&[u8]; 6] = [
+            "a\u{e9}\u{1F600}".as_bytes(),
+            &[0xED, 0xA0, 0x80],
+            b"",
+            &[0xC0, 0x80],
+            &[0x61, 0xE2, 0x82],
+            &[0xF4, 0x90, 0x80, 0x80],
+        ];
+        for b in cases {
+            assert_eq!(decode_wtf8_shared(b).map(|a| a.to_vec()), decode_wtf8(b), "{b:?}");
+        }
     }
 
     #[test]

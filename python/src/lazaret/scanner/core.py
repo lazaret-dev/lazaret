@@ -5107,7 +5107,10 @@ def dependency_checks(root, files, manifests, issues, excludes=(), should_stop=N
             if engine.unanswered(answer):
                 out.append(engine.error_issue(f["path"], answer))
             else:
-                out.extend(engine._issues(f["path"], [a for a in answer if a is not None]))
+                out.extend(engine._issues(f["path"], [a for a in answer[:2] if a is not None]))
+                if len(answer) > 2 and answer[2]:
+                    # (BIG-BUNDLE-TAIL: the file not read whole, beside what was found)
+                    out.append(truncated_issue(f["path"], answer[2]))
     # (0.1.9, Part C) the vendored Go modules' and crates' code, by the
     # engine's readers (_vendored_code)
     found, stopped = _vendored_code(tree, files, should_stop)

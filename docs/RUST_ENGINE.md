@@ -2522,16 +2522,205 @@ not hold the path a
 narrowed name leaves by (the review of Oct 18 lost the 100th return, the
 198th call and the 200th function so, besides the bodies ended at a
 regular expression's `}` after a class body, a labeled block or a `break`
-a line's end ends). github-script's bundle meets those limits, so the
-follower alone reports it as core's reading did; the supply-chain tree,
-which reads each binding, does not. Unchanged: an assignment without a
-keyword, a member (`this.x`), Python's names, the `_LD_NEAR` reach in a
-long text, and the limits (the first `_DD_MAX_ASSIGNS` assignments:
-github-script's bundle has 5,112, the last 133 KB unread); a library's own
-sends reached through its methods (`client.postJson`, `octokit.request`)
-are not followed. On the bundle, which both readings read, the follower
+a line's end ends). Unchanged: an assignment without a keyword, a member
+(`this.x`), Python's names, the `_LD_NEAR` reach in a long text.
+(github-script's bundle met those limits, so the follower alone reported it
+as core's reading did, until BIG-BUNDLE-TAIL, below.) On the bundle, which both readings read, the follower
 takes about twice core's time (0.85 to 0.92 s of CPU against 0.42 to 0.46
 s, best of three, twice, on a loaded machine).
+
+**A big text's tail (BIG-BUNDLE-TAIL, 0.1.9; D-8).** The supply-chain tree
+read a JavaScript or Python text up to 2,000,000 characters (jsflow's
+`MAX_FILE`, pyflow's `MAX_TEXT`); past that the text follower answered, and
+it read a text's first 5,000 assignments, 100 returns and callbacks on a
+name, 200 matches of each other kind, functions with parameters and calls
+of them, 10,000 calls for a file read, four passes and four links of a
+`.then` chain, and walked back over at most 200 functions to place a return
+— quietly, though an action's own code, which ncc puts at its bundle's end,
+was past them (the review of FP-GITHUB-SCRIPT, Oct 18: the whole
+environment sent after a bundle's 5,000th assignment was OK). Now the tree
+reads a text up to `SUPPLY_MAX_FILE` / `SUPPLY_MAX_TEXT`, 16,000,000
+characters, the largest source file the scans read, on its own budget
+(`WORK_BASE` + `WORK_PER_NODE` a node, the run limit of each function, the
+iteration cap): a reading past it (Q-FLOW-INCOMPLETE) or a text the parser
+refuses is the text follower's, as before, never an answer of nothing. The
+follower reads a text whole: each list holds the pack's limit or the text's
+length over `PER_MATCH` (8: the matches of each kind, functions with
+parameters, the calls of them), `PER_ASSIGN` (4), `PER_RETURN` (8: returns,
+callbacks on a name) or `PER_CALL` (2: the calls read for a file read),
+about what the text can hold; a return's function and a declaration's are
+found by one sweep of the functions open at each place (`owner`,
+`decl_scopes`); the calls of the script's functions, the chained calls of
+one that returns data, the connections and the clients written to are read
+name by name (`name_matches`: linre refuses one pattern of a few thousand
+names, which spends the call's budget, and a bundle's functions are tens of
+thousands); a function's parameter's calls in its body are read once
+(`param_calls`); the passes run until nothing grows, up to `MAX_PASSES`
+(256); a `.then` chain is read to its end; and what it reads by hand (a
+statement's end, a body's, a call's arguments, a span's names) is charged
+to the call's budget (`charge`: a step a character, 8 a name read; the
+review of Oct 20 found a sixteenth of a character, as the regex engines
+charge a scan, too little: a follower's reading could run minutes before
+the default budget ran out). A limit it meets before a text's end
+(`Reading::cap`: a text of little else, a chain past 256 passes) is a cut
+(`budget::cut`): the call answers as one that ran out, its error the
+limit's words (`budget::last_cut`), and both packages make the file
+SC-TRUNCATED in them; the import-time test asked with `unread` (the
+registry's) answers what it found with the cut beside it, and the action
+scan reports both. A member's call, whose receiver the follower does not
+resolve, is a call of each function of its name (`defs_of`: the review of
+Oct 20 found BIG-BUNDLE-TAIL's first version following it only where one
+function had the name, so a second object's `send` hid `a.send(data)`):
+github-script's bundle, which the tree reads quiet, is CRITICAL again
+through the follower alone (`core_near` reaches http-client's `write(data)`
+by the name), which answers for it only where the tree does not read it.
+The tree's not reading a text whole is a cut too (the review's HIGH 3;
+`signs::local_data_sent`, `jsflow::supply::unread_why`,
+`pyflow::supply::unread_why`): where the parser refused code V8 compiles
+(`nesting too deep`) or the model's reading stopped at its budget
+(Q-FLOW-INCOMPLETE, a function cut, the iteration cap), the text follower
+answers, and the call says the tree did not read it (`TREE_UNREAD`: "the
+supply-chain tree did not read it whole: …"), whatever the follower found,
+so a follower that cannot see a helper's return sent a megabyte on never
+makes such a file OK; a refusal of code no runtime runs (a syntax error)
+and a file past the scans' largest (by its size, already SC-TRUNCATED) are
+not cut. The hosts make the file SC-TRUNCATED (CRITICAL) in those words
+beside what the follower found where its code runs (the registry's
+import-time code and action scripts, `_install_risk` for its install
+scripts, both CLIs' dependency files: `dep_file_issues`' and
+`install_script_risk`'s `unread`); the registry's use-time pass, code that
+may never run, keeps the follower's answer. So the model's budget reads
+ordinary bundles whole: twice the taint pass's a node
+(`SUPPLY_WORK_PER_NODE` 48), at most `SUPPLY_WORK_MAX` (32,000,000), a
+function read again up to `SUPPLY_MAX_ITERS` (1,000) times: the four local
+bundles the tree gave up on met the iteration cap of 50 (one function of
+TypeScript's checker needed 367 readings; read in rounds, below, 11), and
+reach their fixpoint within it. And the follower's callbacks are read in
+linear time (the review's HIGH 4: 3,000 callbacks of one function, each its
+own `data`, took 9 s whatever the budget): a name's origins are kept by
+place and scope (`Origins`), `near` reads only those within reach and is
+charged for each it reads, each parameter's calls are kept once and read
+once while nothing the reading follows changed (`given`), and the passes
+stop where the budget is spent. And the tree knows two API clients' own
+sends (`sc_api_send`): @actions/http-client's `postJson`, `putJson` and
+`patchJson`, Octokit's REST methods (`<client>.rest.<scope>.<method>(…)`)
+and its `request` given a route (`request('POST /gists', …)`), whose sends
+Octokit makes through hooks and a table at run time; the follower's
+`_LD_SEND_RE` and `_LD_OPTIONS_SEND_RE` the same.
+
+**Its time and memory (John's decisions of Oct 21).** Read whole,
+TypeScript's compiler took 34 to 36 s natively for `typescript.js` and 27
+to 28 s for `_tsc.js` (1.5 and 0.8 s while the tree gave up on them), which
+every dependency scan of a project using TypeScript pays, and a 16 MB
+bundle peaked at 841 MB in WebAssembly, past its 512 MiB. Where the time
+went (`typescript.js`, 795,472 nodes, 21,718 functions): 153,997 readings
+of functions in 24,435,744 steps, nearly all of it; a function was read
+again whenever a callee's summary changed or a variable it reads grew, the
+busiest 350 times, 36 of them changing its summary; within a reading, the
+time went to its calls (their targets, the callees' summaries applied) and
+to values made, copied and dropped. Now a function is read again only for
+what changed of what it uses (request or local data returned, a parameter
+it gave a tainted value, a parameter of a function around it), and when:
+what a summary learns of a parameter written to a closure variable
+(`param_writes`) is written there by the pass, each caller's value as its
+last reading gave it (`pw_carry`: `pw_args`, `pw_grew`, `pw_new`), not by
+reading the callers again; a parameter's calls that grew (`param_calls`)
+run again only the calls kept of it, each caller's once (`pc_sites`,
+`replays`); and a function whose place in the order (callees first) is not
+past the one being read waits for the round's end (`Queue::again`), so a
+recursion or a cycle of calls or shared variables is read once a round, not
+at each change in it. The reporting pass reads only the functions whose
+readings came near a finding (`Func::emits`). Each reading costs less: the
+calls whose targets are none and the callees that name nothing the model
+asks of are a bit each (`tg_none`, `sc_names_none`), a value that covers
+another is not joined again (`V::covers`), the functions around a function
+are one shared slice (`anc`, `scope_fns`), a caller's uses a sorted vector.
+`typescript.js` is read in 47,840 readings and 3,504,659 steps (its busiest
+function 8 times), `_tsc.js` in 30,891 and 2,921,420 (11); the rounds read
+Claude Code's `cli.js` 7 per cent more (95,212 readings, 8,568,044 steps).
+The memory: a tree's node without its line (28 bytes: a line is found among
+the line ends from its block's, `Tree::line`), the tree compacted in place;
+one copy of the text, shared by the call, the tree and the model
+(`api::call_shared`, `texts::decode_wtf8_shared`; the WebAssembly build's
+request let go once read, its text encoded into the module's memory, not
+into a copy first); a text's tokens and decoded view kept once
+(`lex::js::tokens`, `signs::dv_view`); the model's per-node marks sparse
+once its module is resolved (`Sparse`: a bit a node and the marked nodes'
+marks, found by counting the bits before), the scopes' names and the
+objects' keys in rows (`ScopeNames`, `ObjProps`), a function's callers a
+sorted row (`Callers`), its rarer fields boxed (`FuncMore`), its summary's
+maps sorted vectors (`VecMap`), the functions and bindings kept in parts
+(`Chunked`: a vector grown by moving to a larger room leaves the old one in
+WebAssembly, whose memory never shrinks), a binding's lists grown by what
+they hold (`PushSlim`), the model's vectors at their size before the
+fixpoint. At 16,000,000 characters the import-time call now peaks at 440 MB
+in WebAssembly (841 before; its linear memory 314 MB) and 437 MB natively
+(950); at 2, 4 and 8 MB 171, 205 and 314 MB in WebAssembly and 84, 138 and
+260 MB natively; Claude Code's `cli.js` (11 MB of dense code) 559 MB in
+WebAssembly (673 before, and 585 on FP-GITHUB-SCRIPT's engine, whose tree
+did not read it) and 508 MB natively (745).
+
+Measured on the review's evidence (inert text, natively and in
+WebAssembly): its 296 cases (148 earlier ones, small, past 2,000,000 and
+past 16,000,000 characters; the 43 shapes; 105 new sources) answer as
+54cec46 did but for two precision controls quiet now
+(`independent-functions-safe`, `nested-name-safe-control`), and as this
+commit's first version did but where a refused text is asked without
+`unread` (it answers as one that ran out, by design: the action scan and
+the dependency check say CRITICAL and SC-TRUNCATED); `far-helper-refused`,
+`synthetic-budget-10000-far-helper` and the model's stress of 10,000
+declarations are SC-TRUNCATED (INCOMPLETE; those of 2,000 and 4,000, which
+send nothing, are read whole now and OK), the benign authentication probes
+OK and their refused copies SC-TRUNCATED, with no SC-IMPORT-RISK.
+The review's matrix (each of six sends at the start, the middle and the end
+of a 2, 4, 8 and 16 MB bundle, its far helper and the helper's refused
+copy, the sends' refused copies at 2 MB, a benign bundle; the action scan
+and the dependency check): every send CRITICAL, every refused copy CRITICAL
+and SC-TRUNCATED, the far helper's refused copy SC-TRUNCATED, the benign
+bundle OK, in both builds. The cost (the import-time test, a fresh process
+each, CPU, a shared machine; on FP-GITHUB-SCRIPT's engine, on this one
+before John's decisions of Oct 21, and now): a benign synthetic bundle of
+2, 4, 8 and 16 MB 0.16 to 1.04 s, 0.74 to 6.00 s, and 0.49, 0.84, 1.89 and
+3.93 s natively, 0.71 to 2.10 s, 2.08 to 12.43 s, and 1.63, 2.30, 3.63 and
+6.47 s in WebAssembly (its peak above); a 16 MB bundle that sends the
+environment, through the action scan, 14 to 16 s natively (21 to 26 before)
+and 17 to 19 s in WebAssembly (29 to 34); fourteen local bundles of 2 to 11
+MB 16.8, 77.5 and 25.9 s natively and 35.2, some 138 and 54.2 s in
+WebAssembly, the same answers but github-script's (quiet now), none cut;
+TypeScript's `typescript.js` and `_tsc.js`, read whole now, 1.4 and 0.6 s,
+28 to 36 and 23 to 28 s, and 3.4 and 2.1 s natively, 2.8 and 1.7 s, 46 and
+37 s, and 6.5 and 4.4 s in WebAssembly, peaking at 247 and 197 MB natively
+(456 and 332 before) and 352 and 280 MB in WebAssembly. The most one
+reading can cost is the tree's budget (32,000,000 steps: some 20 to 25 s
+natively and 40 s in WebAssembly at TypeScript's rate now) and then the
+follower's (its costliest input 18 s natively, 25 s in WebAssembly); the
+registry's deadline (120 s, natively) is checked between files, and the
+engine has no clock of its own: `budget::spend`, called in every long loop,
+is where one would go (natively a clock read every few million steps;
+`wasm32-unknown-unknown` has none, and the npm loader would have to give it
+one).
+
+The limits each path has for a big text, and what is past them (JS: the
+import-time test of a JavaScript file; Py: of a Python file; both packages):
+
+| Limit | Path | Before | Now |
+| --- | --- | --- | --- |
+| A source file's size, `SOURCE_SIZE_CAP` / `MAX_MEMBER` (16,000,000 bytes) | JS, Py | SC-TRUNCATED | the same |
+| The supply-chain tree's text, `MAX_FILE` / `MAX_TEXT` (2,000,000 characters) | JS, Py | the text follower answered | 16,000,000 (`SUPPLY_MAX_FILE`, `SUPPLY_MAX_TEXT`): every file read |
+| The tree's work: `WORK_BASE` + `WORK_PER_NODE` (24) a node, `RUN_BASE` + `RUN_PER_NODE` a function, `MAX_ITERS` (50) | JS, Py | the text follower answered (Q-FLOW-INCOMPLETE), quietly | JS: 48 a node (`SUPPLY_WORK_PER_NODE`), at most 32,000,000 (`SUPPLY_WORK_MAX`), a function's readings up to 1,000 (`SUPPLY_MAX_ITERS`); past it (JS, Py) the follower answers and the file is SC-TRUNCATED beside, in the pass's words |
+| A text the parser refuses | JS | the text follower answered (SC-UNPARSED-CODE noted; SC-NESTED-CODE for nesting), quietly | nesting past the parser's bound (code V8 compiles): the follower answers and the file is SC-TRUNCATED beside; a syntax error (code no runtime runs): as before |
+| The follower's `_LD_MAX` (200), `_DD_MAX_ASSIGNS` (5,000), `_DD_MAX_CALLS` (100), `_LD_MAX_CALLS` (10,000) | JS, Py | the rest unread, unsaid | the text's length over 8, 4, 8, 2, at least the pack's; past it a cut: SC-TRUNCATED |
+| The follower's `_DD_PASSES` (4), `_DD_THEN_MAX` (4), its walks (`_LD_MAX` functions) | JS, Py | the rest unread, unsaid | until nothing grows, up to 256 passes (past it a cut); every link; a sweep |
+| `_LD_NEAR` (20,000 characters a name reaches in a text over `_LD_LONG`, 262,144) | JS, Py | a flow farther unfollowed | the same (a rule of the follower's reading, not a list: the tree follows bindings) |
+| `_LD_STATEMENT_SPAN`, `_DD_ARG_SPAN` (2,000), `_LD_BODY_SPAN` (20,000) | JS, Py | a longer statement or call read to its span; a longer body's end unknown | the same |
+| `_LITERAL_SPANS_MAX` (20,000 string literals the follower tells from code) | JS, Py | later literals read as code (more read, not less) | the same |
+| The call's work, `DEFAULT_STEPS` (4,000,000,000 regex steps) | JS, Py | SC-TRUNCATED (its work budget spent) | the same; the follower's own reading charged to it too: a step a character and 8 a name it reads, a step an origin `near` reads (its costliest input runs the budget out in 18 s of CPU natively, 25 s in WebAssembly; real bundles spend at most 5 per cent of it) |
+| The scan's deadline, `SCAN_TIMEOUT` (120 s a package, between batches) | JS, Py | SC-TRUNCATED | the same; a tree past its own budget falls back to the follower, never passes |
+| Other import-time detectors' matches: `_SE_MAX`, `_CRED_SWEEP_MAX`, `_WS_MAX`, `_SELF_PUB_MAX` (200), `_DNS_LOOKUP_MAX`, `_SH_EXEC_MAX` (50), `_IP_LITERAL_MAX` (100), `_PS_EXEC_MAX_NAMES` (200), `_STAGER_MAX_LITERALS` (2,000), `_SELF_READ_MAX_ASSIGNS` (5,000) | JS, Py | the rest unread, unsaid | the same (a sign beside the data flow, which is read whole) |
+| The decoded view, `_DV_MAX_CHARS` (4,000,000); the string-array reading, `_SA_MAX_CHARS` (16,000,000) | JS | a longer text's literals not joined (but where an escape or a string array is read); no string array read | the same |
+| A decoded value's tree confirmation (`dep_decode_flow`, `MAX_TEXT` / `MAX_FILE`, 2,000,000) | JS, Py | past it the text's candidates stand | the same |
+| Findings of one line rule, `CAP_PER_RULE` (200) | JS, Py | the rest summed up in one finding | the same |
+| Use-time code, `USE_RISK_MAX_CHARS` (8,000,000 a file), `USE_RISK_CHARS` (24,000,000) | registry | not read, counted in `useTime` | the same |
 
 **The model.** The pass is jsflow's (§16) with values that carry kinds of
 local data instead of request data (`Sc`: the first read of each kind, in

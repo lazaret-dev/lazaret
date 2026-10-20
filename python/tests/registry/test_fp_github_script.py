@@ -13,8 +13,9 @@ before reached the same by the name alone: a method's parameter of the variable'
 variable of the name an instance's method returns, `const data = s.grab()`), never another function's variable of
 the name. A reading that met one of
 the follower's limits reads the text as before too, and reports what either finds (the review of Oct 18:
-test_fp_github_script_review.py). github-script's whole bundle meets them (its functions are more than the 200 whose
-parameters the follower keeps): the text follower alone still reports it; the cut bundle here does not.
+test_fp_github_script_review.py). BIG-BUNDLE-TAIL: the follower's lists hold what a text of its length can, so
+github-script's whole bundle meets none, and the follower alone is quiet on it too (the supply-chain tree, which reads
+it now, always was).
 
 What is still found: the whole environment (or a credential store) sent in a body, a query, an object it was copied
 or spread into, through helpers (past the text's first 200 functions and calls too), a closure, a class's methods, an
@@ -32,7 +33,7 @@ SHA = "3a2844b7e9c422d3c10d287c895573f7108da1b3"
 WHOLE = ("environment", "the whole environment", False)
 HARVEST = "reads credentials or the whole environment and sends data over the network"
 ACTION_YML = "name: x\nruns:\n  using: node24\n  main: dist/index.js\n"
-# functions after which a text is a bundle's (longer than _LD_LONG: more than the follower's limits hold); statements
+# functions after which a text is a bundle's (longer than _LD_LONG, the pack's limits past: BIG-BUNDLE-TAIL); statements
 # after which it is as long and meets none of them; a comment that takes it past the tree's limit; called functions
 # that fill the text's first _LD_MAX functions and calls
 LONG = "".join("function f%d(a) { return a + %d; }\n" % (k, k) for k in range(8000))
@@ -148,11 +149,12 @@ class GithubScriptTests(unittest.TestCase):
                 self.assertIsNone(sent(text + PLAIN))
                 self.assertEqual(core.import_time_risk(text + PAST, "js"), ([], None))
 
-    def test_a_text_that_meets_a_limit_is_read_as_before_too(self):
-        # the filler's 8,000 functions are more than the follower keeps: what the reading before finds is reported
+    def test_a_bundles_text_is_read_whole(self):
+        # the filler's 8,000 functions: the follower's lists hold them all (BIG-BUNDLE-TAIL), no limit is met, and
+        # the narrowing reading answers
         for what, text in (("github-script", GITHUB_SCRIPT), ("a parameter not given it", NOT_GIVEN)):
             with self.subTest(what):
-                self.assertEqual(sent(text + LONG), WHOLE)
+                self.assertIsNone(sent(text + LONG))
 
     def test_the_action_is_quiet(self):
         self.assertEqual(action_risks(GITHUB_SCRIPT + PAST), [])

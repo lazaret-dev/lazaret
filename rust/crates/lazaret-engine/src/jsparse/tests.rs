@@ -95,6 +95,64 @@ fn a_small_program() {
 }
 
 #[test]
+fn compacting_in_place_is_compacting_by_copy() {
+    // what parsing left behind (a speculative arrow's nodes, a cover grammar's, the expressions in types) is dropped
+    // either way, and the nodes left get the same ids, lists and lines
+    let cases = [
+        ("(a, b) => a + b; (c, d); ({ x = 1 } = y); f(<T>(z) => z);", true, false),
+        ("const o = { a: 1, ...b, [c]: d }; async (x) => { await x }; l: for (const [k, v] of m) { if (k) continue l; }", false, true),
+        ("let t: Array<(a: number) => string> = [];\nfunction g<T extends { k: (x: T) => void }>(p?: T): p is T { return !!p }\nclass C { @dec m() {} }", true, false),
+        ("x = a ? (b) : c => d;\n<div a={(e) => e}>{[1, 2].map((n) => <i>{n}</i>)}</div>", false, true),
+    ];
+    let mut dropped = 0;
+    for (src, ts, jsx) in cases {
+        let parser::Outcome::Tree(t) = parser::parse(&cp(src), ts, jsx) else { panic!("{src:?} did not parse") };
+        let by_copy = t.compact_by_copy(t.root, t.strings.clone(), t.line_ends.clone(), t.line_blocks.clone());
+        let left = t.nodes.len();
+        let in_place = t.compact();
+        dropped += left - in_place.nodes.len();
+        assert_eq!(in_place.root, by_copy.root);
+        assert_eq!(in_place.nodes, by_copy.nodes, "{src:?}");
+        assert_eq!(in_place.lists, by_copy.lists, "{src:?}");
+        let (mut a, mut b) = (String::new(), String::new());
+        out::write_tree(&in_place, in_place.root, true, &mut a);
+        out::write_tree(&by_copy, by_copy.root, true, &mut b);
+        assert_eq!(a, b);
+    }
+    assert!(dropped > 0, "nothing was left behind");
+}
+
+#[test]
+fn a_line_is_the_line_ends_before_it() {
+    // `\r\n` ends one line (at its `\r`), as do `\n`, `\r`, U+2028 and U+2029; the lines past a block of 4096 code
+    // points are found in their block's ends
+    let mut src = String::new();
+    for k in 0..900 {
+        src.push_str(["a;\n", "b;\r\n", "c;\r", "d;\u{2028}", "e;\u{2029}", "\n\n", "/* x\n y */ f;\n"][k % 7]);
+        if k % 50 == 0 {
+            src.push_str(&"g".repeat(5000));
+            src.push_str(";\n");
+        }
+    }
+    let text = cp(&src);
+    let tree = parse(&text, false, true).unwrap();
+    let mut ends = Vec::new();
+    for (i, &c) in text.iter().enumerate() {
+        if c == 0x0D || c == 0x2028 || c == 0x2029 || (c == 0x0A && (i == 0 || text[i - 1] != 0x0D)) {
+            ends.push(i as u32);
+        }
+    }
+    assert_eq!(tree.line_ends, ends);
+    for pos in 0..=text.len() as u32 {
+        assert_eq!(tree.line_at(pos), ends.partition_point(|&x| x < pos) as u32 + 1, "at {pos}");
+    }
+    for id in 0..tree.nodes.len() as u32 {
+        assert_eq!(tree.line(id), tree.line_at(tree.node(id).start));
+    }
+    assert!(tree.line(tree.nodes.len() as u32 - 1) > 1000);
+}
+
+#[test]
 fn annex_b_html_comments_are_comments_in_javascript() {
     // (F-12) `<!--` opens a line comment anywhere a token may begin; `-->` opens one at a line's start (the input's,
     // or after only blanks and comments since a line terminator), as V8 reads a script (Node's CommonJS). Before
@@ -325,7 +383,7 @@ fn spans() {
     };
     for (id, n) in tree.nodes.iter().enumerate() {
         assert!(n.start <= n.end && n.end as usize <= s.len());
-        assert_eq!(n.line, line_at(n.start), "{:?}", n.kind);
+        assert_eq!(tree.line(id as u32), line_at(n.start), "{:?}", n.kind);
         tree.each_child(id as u32, |c| assert!(c > id as u32)); // document order
     }
     let find = |kind: Kind| (0..tree.nodes.len() as u32).find(|&i| tree.kind(i) == kind).unwrap();

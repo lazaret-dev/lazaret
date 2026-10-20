@@ -36,6 +36,16 @@ export class NativeError extends Error {
 }
 /** SC-TRUNCATED's detail for a file whose reading spent the engine's work budget. */
 export const EXHAUSTED = "reading it spent the engine's work budget (a pattern that backtracks without end on this text)";
+// how the engine words a limit a reading met before a text's end (BIG-BUNDLE-TAIL: flow.rs, Reading.cap), and a text
+// the supply-chain tree did not read whole (the review of Oct 20: the parser refused code V8 compiles, the model's
+// budget ran out; signs.rs TREE_UNREAD): the file is SC-TRUNCATED beside what the text follower found
+export const TREE_CUT = "the supply-chain tree did not read it whole: ";
+const CUT_PREFIXES = ["the text follower reads at most ", TREE_CUT];
+const isCut = (why) => typeof why === "string" && CUT_PREFIXES.some((p) => why.startsWith(p));
+/** Why a call answered as one that ran out (BIG-BUNDLE-TAIL): the limit a reading of its text met before the text's
+ * end, or the tree's not reading it whole, in the engine's words, else EXHAUSTED (its work budget spent). A worker's
+ * error is {name, message}. */
+export const exhaustedWhy = (e) => (e && isCut(e.message) ? e.message : EXHAUSTED);
 
 /** The call's work budget was spent (a hostile input): it has no answer. */
 export class NativeExhausted extends NativeError {
@@ -141,6 +151,20 @@ function wtf8(s) {
   return out.subarray(0, n);
 }
 
+/** How many bytes UTF-8 writes `s` in (a well-formed string). */
+function utf8Length(s) {
+  if (typeof Buffer !== "undefined") return Buffer.byteLength(s, "utf8");
+  let n = 0;
+  for (let i = 0; i < s.length; i++) {
+    const c = s.charCodeAt(i);
+    if (c < 0x80) n += 1;
+    else if (c < 0x800) n += 2;
+    else if (c >= 0xd800 && c <= 0xdbff) { n += 4; i++; }       // (a pair: the string is well-formed)
+    else n += 3;
+  }
+  return n;
+}
+
 function concatBytes(parts) {
   const out = new Uint8Array(parts.reduce((n, p) => n + p.length, 0));
   let at = 0;
@@ -177,8 +201,13 @@ export function call(name, args = {}, text = "") {
   if (workBudget !== null && !UNBUDGETED.has(name)) args = { ...args, budget: workBudget };
   const nameBytes = utf8.encode(name);
   const argBytes = utf8.encode(JSON.stringify(args));   // lone surrogates come out as \u escapes
-  const textBytes = Array.isArray(text) ? concatBytes(text.map((t) => wtf8(String(t)))) : wtf8(String(text));
-  const len = 8 + nameBytes.length + argBytes.length + textBytes.length;
+  // (a well-formed text is written into the module's memory as it is encoded, not encoded into a copy first:
+  // BIG-BUNDLE-TAIL, memory, a 16 MB file's copy)
+  const one = Array.isArray(text) ? null : String(text);
+  const direct = one !== null && one.isWellFormed();
+  const textBytes = direct ? null : one === null ? concatBytes(text.map((t) => wtf8(String(t)))) : wtf8(one);
+  const textLength = direct ? utf8Length(one) : textBytes.length;
+  const len = 8 + nameBytes.length + argBytes.length + textLength;
   let status, answer;
   try {
     const req = e.lazaret_alloc(len);
@@ -188,7 +217,12 @@ export function call(name, args = {}, text = "") {
     bytes.set(nameBytes, req + 4);
     view.setUint32(req + 4 + nameBytes.length, argBytes.length, true);
     bytes.set(argBytes, req + 8 + nameBytes.length);
-    bytes.set(textBytes, req + 8 + nameBytes.length + argBytes.length);
+    const at = req + 8 + nameBytes.length + argBytes.length;
+    if (direct) {
+      if (utf8.encodeInto(one, bytes.subarray(at, at + textLength)).written !== textLength) throw new Error("the text's length");
+    } else {
+      bytes.set(textBytes, at);
+    }
     const out = e.lazaret_call(req, len);                  // frees the request
     view = new DataView(e.memory.buffer);
     status = view.getUint32(out, true);
@@ -202,7 +236,11 @@ export function call(name, args = {}, text = "") {
   if (e.memory.buffer.byteLength > MEMORY_KEEP) engine = null;
   const value = JSON.parse(answer);
   if (status === 0) return value;
-  if (status === 2) throw new NativeExhausted(`${name}: the call's work budget was spent`);
+  if (status === 2) {
+    const why = value && value.error;
+    throw new NativeExhausted(isCut(why) ? why
+      : `${name}: the call's work budget was spent`);
+  }
   throw new NativeError(`${name}: ${value && value.error}`);
 }
 

@@ -351,7 +351,7 @@ SAMPLE = 8192              # header/entropy sample read from oversized files
 #      entry points and hook targets, Python install scripts
 # 2.3: verdict tiers, decoded hex, install-script inspection; 2.2:
 #      verdict-integrity; 2.1: binary-artifact awareness
-ENGINE_VERSION = "2.105.0"
+ENGINE_VERSION = "2.106.0"
 
 # ---------------- The content memo (P-2a, registry/contentcache.py) ----------------
 # One per scan_package run: the engine answers once for content several of a
@@ -3472,8 +3472,10 @@ class _ArtifactScan:
         kept); `declared`, the release's declared names, for its D-12 test
         (_declared_names); the release's own name (D-9, _own_name). Each
         answer is (reasons, line, refused): the parser's refusal of a
-        JavaScript or TypeScript file, said in the report (_note_unparsed)."""
-        flags = {"budget": _engine.WORK_BUDGET, "refused": True}
+        JavaScript or TypeScript file, said in the report (_note_unparsed);
+        unread: the limit a reading of the file met before its end, which
+        makes it SC-TRUNCATED beside what was found (BIG-BUNDLE-TAIL)."""
+        flags = {"budget": _engine.WORK_BUDGET, "refused": True, "unread": True}
         if declared is not None:
             flags["declared"] = hashlib.sha256("\n".join(declared).encode("utf-8", "surrogatepass")).hexdigest()
         own = self._own_name()
@@ -3486,7 +3488,7 @@ class _ArtifactScan:
         def compute(missing):
             return [_cache.Uncacheable(a) if _engine.unanswered(a) else a
                     for a in _engine.import_time_risks([asked[key] for key in missing], texts=self.texts,
-                                                       declared=declared, own=own, refused=True)]
+                                                       declared=declared, own=own, refused=True, unread=True)]
         return self.memo.get_or_compute_many(keys, compute)
 
     def _declared_names(self):
@@ -4213,13 +4215,13 @@ class _ArtifactScan:
             if rel is None:
                 continue
             lang = _engine.script_lang(rel, text)
-            reasons = _engine.install_script_risk(text, lang=lang, own=self._own_name(), path=rel) if text else []
+            reasons = self._install_risk(rel, text, lang=lang, own=self._own_name(), path=rel) if text else []
             out.append((rel, reasons))
             # (a step's script runs in the job's workspace: only a path built from its own place is the action's)
             for started, more in self._started_scripts(rel, text, None, self.install_scripts):
                 self.action_entries.setdefault(started, []).append(how)
-                more = (_engine.install_script_risk(more, lang=_engine.script_lang(started, more),
-                                                    own=self._own_name(), path=started) if more else [])
+                more = (self._install_risk(started, more, lang=_engine.script_lang(started, more),
+                                           own=self._own_name(), path=started) if more else [])
                 out.append((f"{rel}, which starts {started}", more))
         return out
 
@@ -4271,7 +4273,7 @@ class _ArtifactScan:
             kind = _actionmeta.step_shell(_actionmeta.unquote_json(step.shell))
             script = _actionmeta.substitute(step.run)
             if kind in ("py", "js"):
-                reasons = _engine.install_script_risk(script, shell=False, lang=kind, own=self._own_name())
+                reasons = self._install_risk(meta_rel, script, shell=False, lang=kind, own=self._own_name())
                 self._action_issue(meta_rel, step.run_line, text, what, reasons, [])
                 continue
             if kind == "other":
@@ -4415,16 +4417,16 @@ class _ArtifactScan:
                 text = self._text_of(rel, lang)
                 clean = clean and bool(text)
                 runs.append(rel)
-                reasons = (_engine.install_script_risk(text, lang=_engine.script_lang(rel, text),
-                                                       own=self._own_name(), path=rel) if text else [])
+                reasons = (self._install_risk(rel, text, lang=_engine.script_lang(rel, text),
+                                              own=self._own_name(), path=rel) if text else [])
                 if reasons:
                     clean = False       # a followed script with any reason (weak ones too) is not "read clean"
                     _escalate(reasons, f"Install hook runs {target}, which {'; and '.join(reasons)}.")
                 # the scripts it starts with node or python (0.1.8, core.spawned_scripts)
                 for started, more in self._started_scripts(rel, text, base, self.install_scripts):
                     runs.append(started)
-                    more = (_engine.install_script_risk(more, lang=_engine.script_lang(started, more),
-                                                        own=self._own_name(), path=started) if more else [])
+                    more = (self._install_risk(started, more, lang=_engine.script_lang(started, more),
+                                               own=self._own_name(), path=started) if more else [])
                     if more:
                         clean = False
                         _escalate(more, f"Install hook runs {target}, which starts {started}, which "
@@ -4539,7 +4541,7 @@ class _ArtifactScan:
             self.entries.add(rel)
             self.install_scripts.add(rel)
             text = self.sources.get(rel, ("", "py"))[0]
-            reasons = _engine.install_script_risk(text, lang=_engine.script_lang(rel, text), own=self._own_name(), path=rel)
+            reasons = self._install_risk(rel, text, lang=_engine.script_lang(rel, text), own=self._own_name(), path=rel)
             # a download written to a file and run: CRITICAL in the code pip
             # runs to install an sdist (a prebuilt-binary installer's shape
             # keeps it MAJOR-only in npm hooks and import-time code)
@@ -4656,8 +4658,10 @@ class _ArtifactScan:
             if _engine.unanswered(risk):
                 self._unanswered(rel, risk)
                 continue
-            reasons, line, refused = risk
+            reasons, line, refused, unread = risk
             self._note_unparsed(rel, refused, "import")
+            if unread:
+                self.truncate(rel, unread, "work")      # (BIG-BUNDLE-TAIL: not read to its end; what was found stands)
             if not reasons:
                 continue
             when, runs = "runs when the package is loaded", (
@@ -4758,6 +4762,16 @@ class _ArtifactScan:
         self.truncate(rel, _engine.error_issue(rel, exc)["msg"].removeprefix("File not fully scanned: ").rstrip("."),
                       "work")
 
+    def _install_risk(self, rel, text, **kwargs):
+        """The install-script test's reasons for the script `rel` (`text`; engine.install_script_risk's arguments),
+        the script SC-TRUNCATED when it was not read whole (BIG-BUNDLE-TAIL, the review of Oct 20: a limit of the text
+        follower's, or the supply-chain tree's not reading it: code V8 compiles that the parser refused, the model's
+        budget spent), beside what was found."""
+        reasons, unread = _engine.install_script_risk(text, unread=True, **kwargs)
+        if unread:
+            self.truncate(rel, unread, "work")
+        return reasons
+
     def _phase(self, where, step, *args):
         """Run one step of finish() once the deadline check passes. A call the
         engine could not answer in it (its work budget spent on a hostile
@@ -4767,7 +4781,7 @@ class _ArtifactScan:
         try:
             return step(*args)
         except _engine.NativeError as exc:
-            why = (_engine.EXHAUSTED if isinstance(exc, _engine.NativeExhausted)
+            why = (_engine.exhausted_why(exc) if isinstance(exc, _engine.NativeExhausted)
                    else f"an internal error of the engine ({type(exc).__name__})")
             self.truncate("(release)", f"the engine could not finish {where}: {why}", "work")
             return None
@@ -4809,8 +4823,11 @@ class _ArtifactScan:
                 continue
             self.use_time["files"] += 1
             self.use_time["chars"] += len(self.sources[rel][0])
-            reasons, line, refused = risk
+            reasons, line, refused, unread = risk
             self._note_unparsed(rel, refused, "use")
+            if unread and not unread.startswith(_engine.TREE_CUT):
+                # (code that may never run: the text follower's answer stands where the tree did not read it whole)
+                self.truncate(rel, unread, "work")
             strong = [r for r in reasons if r.startswith(lazaret._STRONG_IMPORT_REASONS)]
             if not strong:
                 continue

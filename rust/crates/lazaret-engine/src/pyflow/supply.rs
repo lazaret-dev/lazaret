@@ -3641,25 +3641,47 @@ pub struct Facts {
     pub own: Option<usize>,
 }
 
-/// The largest text the tree reads (larger: the text followers).
+/// The largest text the tree reads for `dep_decode_flow`'s confirmation (scanfile.rs: larger, the text's candidates
+/// stand).
 pub const MAX_TEXT: usize = 2_000_000;
 
+/// The largest text the supply-chain tree reads (BIG-BUNDLE-TAIL, as JavaScript's `SUPPLY_MAX_FILE`): larger, or past
+/// the pass's budgets, the text followers answer.
+pub const SUPPLY_MAX_TEXT: usize = 16_000_000;
+
 thread_local! {
-    /// The last text read and what the tree said (None: it could not say).
-    static LAST: RefCell<Option<(Vec<u32>, Option<Rc<Facts>>)>> = const { RefCell::new(None) };
+    /// The last text read and what the tree said (Err: it could not say; why, in words, when the pass stopped at its
+    /// budget: unread_why).
+    static LAST: RefCell<Option<(std::sync::Arc<[u32]>, Result<Rc<Facts>, Option<PyStr>>)>> = const { RefCell::new(None) };
+}
+
+/// BIG-BUNDLE-TAIL (the review of Oct 20, HIGH 3): why the tree did not read a Python text it was given, in words,
+/// when the pass stopped at its budget (its note's words: a file past its budget, a reading past its steps, the
+/// iteration cap). None when the tree read it, when the text is past the scans' largest file (SC-TRUNCATED by its
+/// size), or when the parser refused it (as CPython does: its nesting bounds are CPython's).
+pub fn unread_why(text: &[u32]) -> Option<String> {
+    facts_or_why(text).err().flatten().map(|w| pystr::to_string(&w))
 }
 
 /// The tree's facts about a Python text, or None when it could not say (a
-/// text the parser doesn't read, over 2 MB, or past the pass's budgets):
-/// the text detectors answer then.
+/// text the parser doesn't read, over SUPPLY_MAX_TEXT, or past the pass's
+/// budgets): the text detectors answer then.
 pub fn facts(text: &[u32]) -> Option<Rc<Facts>> {
-    if text.len() > MAX_TEXT {
-        return None;
+    facts_or_why(text).ok()
+}
+
+/// facts(), or why there are none (Some: the pass's budget, in words).
+fn facts_or_why(text: &[u32]) -> Result<Rc<Facts>, Option<PyStr>> {
+    if text.len() > SUPPLY_MAX_TEXT {
+        return Err(None);
     }
-    if let Some(hit) = LAST.with(|l| l.borrow().as_ref().filter(|(t, _)| t.as_slice() == text).map(|(_, f)| f.clone())) {
+    if let Some(hit) = LAST.with(|l| l.borrow().as_ref().filter(|(t, _)| &t[..] == text).map(|(_, f)| f.clone())) {
         return hit;
     }
-    let owned = text.to_vec();
+    // (one copy of the text, the reading's and the cache's, the last text's let go first: jsflow's facts_or_why)
+    LAST.with(|l| *l.borrow_mut() = None);
+    let owned: std::sync::Arc<[u32]> = std::sync::Arc::from(text);
+    let kept = owned.clone();
     // (its tokens made here, where the call's gate keeps them for the decoded view's lexer; the copy's searches ask
     // the call's gate: P-1)
     let lexed = crate::pyparse::lexer::shared(text);
@@ -3669,7 +3691,7 @@ pub fn facts(text: &[u32]) -> Option<Rc<Facts>> {
         facts_here(&owned, Some(lexed))
     })
     .map(Rc::new);
-    LAST.with(|l| *l.borrow_mut() = Some((text.to_vec(), got.clone())));
+    LAST.with(|l| *l.borrow_mut() = Some((kept, got.clone())));
     got
 }
 
@@ -3705,14 +3727,14 @@ pub fn dropped_run(text: &[u32]) -> Option<Option<DropRun>> {
     facts(text).map(|f| f.dropped.clone())
 }
 
-fn facts_here(text: &[u32], lexed: Option<std::sync::Arc<Result<crate::pyparse::lexer::Lexed, crate::pyparse::lexer::LexError>>>) -> Option<Facts> {
+fn facts_here(text: &[u32], lexed: Option<std::sync::Arc<Result<crate::pyparse::lexer::Lexed, crate::pyparse::lexer::LexError>>>) -> Result<Facts, Option<PyStr>> {
     let pack = crate::pack::current();
     let path = u("script.py");
     let tree = match lexed {
         Some(l) => crate::pyparse::parse_shared(text, l),
         None => crate::pyparse::parse(text),
     }
-    .ok()?;
+    .map_err(|_| None)?;
     let sup = Rc::new(Supply::new(pack, text));
     let (outside, values) = outside_names(&tree, &sup);
     *sup.outside.borrow_mut() = outside;
@@ -3720,8 +3742,9 @@ fn facts_here(text: &[u32], lexed: Option<std::sync::Arc<Result<crate::pyparse::
     let mut cfg = Config::new(&[], &[], &[], &[]);
     cfg.supply = Some(sup.clone());
     let findings = super::driver::analyze_with(&[(path, Some(text.to_vec()))], vec![Some(tree)], cfg);
-    if findings.iter().any(|n| matches!(n, Out::Note { .. })) {
-        return None;
+    if let Some(Out::Note { msg, .. }) = findings.iter().find(|n| matches!(n, Out::Note { .. })) {
+        // (the note's words, the module's name aside)
+        return Err(Some(pystr::replace(msg, &u(" in 'script.py'"), &[])));
     }
     // the strongest send: data over what only an address holds, a harvest
     // over other data, then the first; the first received code
@@ -3760,7 +3783,7 @@ fn facts_here(text: &[u32], lexed: Option<std::sync::Arc<Result<crate::pyparse::
         let at = (at as usize).min(text.len());
         (text[..at].iter().filter(|&&c| c == 0x0A).count() + 1, cat)
     });
-    Some(Facts { deletions, sent, received, decoded, dropped, own })
+    Ok(Facts { deletions, sent, received, decoded, dropped, own })
 }
 
 #[cfg(test)]
@@ -3771,7 +3794,7 @@ mod tests {
 
     fn read(src: &str) -> Facts {
         let text: Vec<u32> = src.chars().map(|c| c as u32).collect();
-        facts_here(&text, None).unwrap_or_else(|| panic!("not read: {}", src))
+        facts_here(&text, None).unwrap_or_else(|_| panic!("not read: {}", src))
     }
 
     fn sent(src: &str) -> Option<(&'static str, String, bool)> {

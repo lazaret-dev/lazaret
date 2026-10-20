@@ -41,18 +41,89 @@ type Source = (usize, usize, isize, &'static str, PyStr);
 type Got = (&'static str, PyStr, bool);
 /// Where a parameter holds what it is given: its function, (start, end).
 type Scope = Option<(usize, usize)>;
-/// Where each followed name was given what it holds, and where it holds it.
-type Origins = HashMap<PyStr, Vec<(usize, Scope)>>;
+/// Where each followed name was given what it holds, and where it holds it: each name's origins, kept so that
+/// `near` reads only those that may answer (BIG-BUNDLE-TAIL, the review of Oct 20, HIGH 4: 3,000 callbacks of one
+/// function, each its own `data`, made `near` read every one of the others at each of the function's 1,000 calls of
+/// its parameter, uncharged: 9 seconds whatever the call's budget, 8,000 past 45).
+#[derive(Default)]
+struct Origins {
+    names: HashMap<PyStr, NameOrigins>,
+    /// how many origins there are, all names': an origin added changes it (what a reading read before may differ)
+    total: usize,
+}
+
+/// One name's origins: (where, its scope) in the order given; where those without a scope were given it; those with
+/// one by where (a long text's reach is a span on either side); the scopes, each once.
+#[derive(Default)]
+struct NameOrigins {
+    all: Vec<(usize, Scope)>,
+    free: std::collections::BTreeSet<usize>,
+    scoped: std::collections::BTreeMap<usize, Vec<(usize, usize)>>,
+    scopes: Vec<(usize, usize)>,
+    scope_set: HashSet<(usize, usize)>,
+}
+
+impl Origins {
+    fn get(&self, name: &[u32]) -> Option<&NameOrigins> {
+        self.names.get(name)
+    }
+
+    fn add(&mut self, name: &PyStr, pos: usize, scope: Scope) {
+        let os = match self.names.get_mut(name.as_slice()) {
+            Some(os) => os,
+            None => self.names.entry(name.clone()).or_default(),
+        };
+        os.all.push((pos, scope));
+        match scope {
+            None => {
+                os.free.insert(pos);
+            }
+            Some(s) => {
+                os.scoped.entry(pos).or_default().push(s);
+                if os.scope_set.insert(s) {
+                    os.scopes.push(s);
+                }
+            }
+        }
+        self.total += 1;
+    }
+
+    /// Every origin, every name's.
+    fn every(&self) -> impl Iterator<Item = &(usize, Scope)> + '_ {
+        self.names.values().flat_map(|os| os.all.iter())
+    }
+}
+
+impl NameOrigins {
+    /// Is there an origin of the name from which what it holds may reach `pos` (`long`: within `span` of it), its scope
+    /// (none, or one `fits`) holding pos? Each origin it reads is charged to the call's budget, as a regex step.
+    fn any(&self, long: bool, span: usize, pos: usize, fits: impl Fn((usize, usize)) -> bool) -> bool {
+        let mut read = 0usize;
+        let found = if !long {
+            !self.free.is_empty() || self.scopes.iter().any(|&s| {
+                read += 1;
+                fits(s)
+            })
+        } else {
+            let (lo, hi) = (pos.saturating_sub(span), pos.saturating_add(span));
+            self.free.range(lo..=hi).next().is_some()
+                || self.scoped.range(lo..=hi).any(|(_, ss)| {
+                    ss.iter().any(|&s| {
+                        read += 1;
+                        fits(s)
+                    })
+                })
+        };
+        crate::budget::spend(read as u64 + 1);
+        found
+    }
+}
 
 /// core._local_data_sent_at's near: may what `name` holds reach `pos`? In
 /// a long text, only `span` characters from where it was given it; a
 /// parameter, in its function.
 fn near(origins: &Origins, long: bool, span: usize, name: &[u32], pos: usize) -> bool {
-    origins.get(name).map_or(false, |os| {
-        os.iter().any(|&(o, scope)| {
-            (!long || (pos as isize - o as isize).unsigned_abs() <= span) && scope.map_or(true, |(lo, hi)| lo <= pos && pos <= hi)
-        })
-    })
+    origins.get(name).map_or(false, |os| os.any(long, span, pos, |(lo, hi)| lo <= pos && pos <= hi))
 }
 
 /// core._local_data_sent_at's bind: `name` holds `got` from `pos` (where it
@@ -69,11 +140,11 @@ fn bind_in(followed: &mut HashMap<PyStr, Got>, origins: &mut Origins, long: bool
     let pos = scope.map_or(pos, |(lo, hi)| pos.clamp(lo, hi));
     if !followed.contains_key(name) {
         followed.insert(name.clone(), got);
-        origins.insert(name.clone(), vec![(pos, scope)]);
+        origins.add(name, pos, scope);
         return true;
     }
     if !near(origins, long, span, name, pos) {
-        origins.get_mut(name).expect("a followed name has origins").push((pos, scope));
+        origins.add(name, pos, scope);
         return true;
     }
     false
@@ -81,7 +152,9 @@ fn bind_in(followed: &mut HashMap<PyStr, Got>, origins: &mut Origins, long: bool
 
 /// text[lo:lo+span] clipped, and the length core's _call_args gives it.
 fn args_len(text: &[u32], lo: usize, span: usize) -> usize {
-    call_args_len(pystr::sub(text, lo, lo + span))
+    let n = call_args_len(pystr::sub(text, lo, lo + span));
+    charge(n);
+    n
 }
 
 /// core._ld_literal_test: is a position in a string literal (a template's
@@ -112,8 +185,14 @@ impl LiteralTest {
     }
 }
 
-/// core._ld_statement_end: the end of the statement whose value starts at i.
-pub fn ld_statement_end(p: &Pack, text: &[u32], mut i: usize) -> usize {
+/// core._ld_statement_end: the end of the statement whose value starts at i (what it reads charged: BIG-BUNDLE-TAIL).
+pub fn ld_statement_end(p: &Pack, text: &[u32], i: usize) -> usize {
+    let end = statement_end(p, text, i);
+    charge(end.saturating_sub(i));
+    end
+}
+
+fn statement_end(p: &Pack, text: &[u32], mut i: usize) -> usize {
     let n = text.len().min(i + p.usize("_LD_STATEMENT_SPAN"));
     let mut depth = 0usize;
     while i < n {
@@ -156,11 +235,16 @@ pub fn ld_statement_end(p: &Pack, text: &[u32], mut i: usize) -> usize {
 
 /// core._ld_block_end: the index of the '}' that closes the '{' at text[i]
 /// (string literals and comments skipped), or None when it is not closed
-/// within _LD_BODY_SPAN characters. A line comment ends at any of
-/// ECMAScript's line terminators (js_line_end: LF, CR, U+2028, U+2029), as
-/// in js_block_end (FP-GITHUB-SCRIPT: core ended it at LF alone, which hid
-/// the code after a CR, U+2028 or U+2029 in a comment).
-fn ld_block_end(p: &Pack, text: &[u32], mut i: usize) -> Option<usize> {
+/// within _LD_BODY_SPAN characters (what it reads charged: BIG-BUNDLE-TAIL). A line comment ends at any of
+/// ECMAScript's line terminators (js_line_end: LF, CR, U+2028, U+2029), as in js_block_end (FP-GITHUB-SCRIPT: core
+/// ended it at LF alone, which hid the code after a CR, U+2028 or U+2029 in a comment).
+fn ld_block_end(p: &Pack, text: &[u32], i: usize) -> Option<usize> {
+    let end = block_end(p, text, i);
+    charge(end.map_or_else(|| text.len().min(i + p.usize("_LD_BODY_SPAN")), |e| e + 1).saturating_sub(i));
+    end
+}
+
+fn block_end(p: &Pack, text: &[u32], mut i: usize) -> Option<usize> {
     let n = text.len().min(i + p.usize("_LD_BODY_SPAN"));
     let mut depth: isize = 0;
     while i < n {
@@ -344,6 +428,12 @@ enum Paren {
 /// a division, by both readers alike: their agreeing proves nothing where they share a blind spot). None when the
 /// block is not closed within _LD_BODY_SPAN characters, or a string runs past its line (no JavaScript string does).
 fn js_block_end(p: &Pack, text: &[u32], open: usize) -> Option<(usize, bool)> {
+    let end = js_block_read(p, text, open);
+    charge(end.map_or_else(|| text.len().min(open + p.usize("_LD_BODY_SPAN")), |e| e.0 + 1).saturating_sub(open));
+    end
+}
+
+fn js_block_read(p: &Pack, text: &[u32], open: usize) -> Option<(usize, bool)> {
     let n = text.len().min(open + p.usize("_LD_BODY_SPAN"));
     let mut braces: Vec<Brace> = Vec::new(); // the open braces
     let mut subs: Vec<usize> = Vec::new(); // the brace depth at which each open `${` began
@@ -584,6 +674,12 @@ fn regex_may_start(text: &[u32], last: Option<usize>, closed_paren: Paren, close
 /// blank, a comment or in a string literal; the text's end), or None beyond
 /// _LD_BODY_SPAN characters.
 fn ld_def_end(p: &Pack, text: &[u32], start: usize, lit: &LiteralTest) -> Option<usize> {
+    let end = def_end(p, text, start, lit);
+    charge(end.unwrap_or_else(|| text.len().min(start + p.usize("_LD_BODY_SPAN"))).saturating_sub(start));
+    end
+}
+
+fn def_end(p: &Pack, text: &[u32], start: usize, lit: &LiteralTest) -> Option<usize> {
     let line = pystr::rfind_char(text, c('\n'), 0, start).map_or(0, |k| k + 1);
     let blank = |x: u32| x == c(' ') || x == c('\t');
     let mut k = line;
@@ -1037,7 +1133,7 @@ impl Assign {
 /// lines a shell is handed each read them of one text, so they are kept
 /// for the call while a gate is open for it.
 pub(crate) fn dd_assigns(p: &Pack, text: &[u32]) -> Vec<Assign> {
-    let max = p.usize("_DD_MAX_ASSIGNS");
+    let max = ld_cap(p, "_DD_MAX_ASSIGNS", text, PER_ASSIGN);
     crate::textgate::memo(text, "_DD_ASSIGN_RE matches", || {
         let re = p.re("_DD_ASSIGN_RE");
         if pystr::eq(&re.pattern, DD_ASSIGN_SRC) && re.flags == crate::pyre::UNICODE {
@@ -1166,6 +1262,7 @@ enum NameTokens<'t> {
 
 impl<'t> NameTokens<'t> {
     fn of(p: &'t Pack, text: &'t [u32], lo: usize, hi: usize) -> NameTokens<'t> {
+        charge(hi.min(text.len()).saturating_sub(lo));
         let re = p.re("_LD_NAME_TOKEN_RE");
         if pystr::eq(&re.pattern, NAME_TOKEN_SRC) && re.flags == crate::pyre::UNICODE {
             NameTokens::Hand { text, i: lo, hi: hi.min(text.len()) }
@@ -1198,6 +1295,8 @@ impl Iterator for NameTokens<'_> {
                         end += 1;
                     }
                     *i = end;
+                    // (each name is looked up where it is read: charged as a few characters)
+                    crate::budget::spend(8);
                     return Some((at, end));
                 }
                 None
@@ -1210,6 +1309,7 @@ impl Iterator for NameTokens<'_> {
 /// `...name`): (start, end) of each, in order.
 fn member_tokens(text: &[u32], lo: usize, hi: usize) -> impl Iterator<Item = (usize, usize)> + '_ {
     let hi = hi.min(text.len());
+    charge(hi.saturating_sub(lo));
     let first = |ch: u32| ch < 128 && ((ch as u8).is_ascii_alphabetic() || ch == c('_') || ch == c('$'));
     let name_char = |ch: u32| crate::unicode::is_word(ch) || ch == c('$');
     let mut i = lo.max(1);
@@ -1228,6 +1328,60 @@ fn member_tokens(text: &[u32], lo: usize, hi: usize) -> impl Iterator<Item = (us
         }
         None
     })
+}
+
+/// BIG-BUNDLE-TAIL: where text names one of `names` as `_DV_NAME_HEAD(?:names)` does (no word character, `$` or `.`
+/// before it), or with `receiver` after `this.`, `self.` or `cls.` too (as _LD_OWN_CALL_HEAD does), and `tail`
+/// matches where the name ends: (the match's start, its end, the name), in order. Core matched one pattern of all the
+/// names; linre refuses one of a few thousand names (it spends the call's budget), and a bundle's functions are tens
+/// of thousands, so the text's names are read one by one, once.
+fn name_matches(text: &[u32], names: &HashSet<PyStr>, tail: &crate::pyre::Regex, receiver: bool) -> Vec<(usize, usize, PyStr)> {
+    let mut out = Vec::new();
+    if names.is_empty() {
+        return out;
+    }
+    let n = text.len();
+    charge(n);
+    let name_char = |ch: u32| crate::unicode::is_word(ch) || ch == c('$');
+    let blank = |ch: u32| matches!(char::from_u32(ch), Some(' ' | '\t' | '\n' | '\r'));
+    let mut i = 0;
+    while i < n {
+        let ch = text[i];
+        let first = ch < 128 && ((ch as u8).is_ascii_alphabetic() || ch == c('_') || ch == c('$'));
+        if !first || (i > 0 && name_char(text[i - 1])) {
+            i += 1;
+            continue;
+        }
+        let mut e = i + 1;
+        while e < n && name_char(text[e]) {
+            e += 1;
+        }
+        if names.contains(&text[i..e]) {
+            let start = if i == 0 || text[i - 1] != c('.') {
+                Some(i)
+            } else if receiver {
+                // `this . name`: the receiver's word, before the dot and its blanks
+                let mut k = i - 1;
+                while k > 0 && blank(text[k - 1]) {
+                    k -= 1;
+                }
+                ["this", "self", "cls"].iter().find_map(|w| {
+                    let len = w.len();
+                    (k >= len && is(&text[k - len..k], w) && (k == len || !(name_char(text[k - len - 1]) || text[k - len - 1] == c('.'))))
+                        .then_some(k - len)
+                })
+            } else {
+                None
+            };
+            if let Some(start) = start {
+                if let Some(m) = tail.match_at(text, e as isize, n as isize) {
+                    out.push((start, m.end(), text[i..e].to_vec()));
+                }
+            }
+        }
+        i = e;
+    }
+    out
 }
 
 /// core._ld_names_in: the first name of `names` used in text[lo:hi] (not in a literal).
@@ -1281,7 +1435,7 @@ pub(crate) fn module_names(p: &Pack, module: &[u32]) -> Vec<(PyStr, &'static str
 
 /// core._ld_sources: where text reads local data.
 fn ld_sources(p: &Pack, text: &[u32], lit: &LiteralTest, outside: &HashSet<PyStr>, own: &HashSet<PyStr>, rd: &Reading) -> Vec<Source> {
-    let max = p.usize("_LD_MAX");
+    let max = ld_cap(p, "_LD_MAX", text, PER_MATCH);
     let span = p.usize("_DD_ARG_SPAN");
     let mut out: Vec<Source> = Vec::new();
     let identity_var = p.re("_SH_IDENTITY_VAR_RE");
@@ -1289,7 +1443,7 @@ fn ld_sources(p: &Pack, text: &[u32], lit: &LiteralTest, outside: &HashSet<PyStr
     let quiet = p.re("_LD_ENV_QUIET_RE");
     for (k, m) in p.re("_LD_ENV_RE").finditer(text).enumerate() {
         if k >= max {
-            rd.cap();
+            rd.cap("reads of an environment variable", "_LD_MAX", max);
             break;
         }
         if lit.at(m.start()) {
@@ -1319,7 +1473,7 @@ fn ld_sources(p: &Pack, text: &[u32], lit: &LiteralTest, outside: &HashSet<PyStr
     let whole = p.text("_LD_WHOLE_ENV");
     for (k, m) in p.re("_LD_ENV_ALL_RE").finditer(text).enumerate() {
         if k >= max {
-            rd.cap();
+            rd.cap("reads of the whole environment", "_LD_MAX", max);
             break;
         }
         if lit.at(m.start()) || ld_tested(p, text, m.start(), m.end()) {
@@ -1335,7 +1489,7 @@ fn ld_sources(p: &Pack, text: &[u32], lit: &LiteralTest, outside: &HashSet<PyStr
     }
     for (k, m) in p.re("_LD_IDENTITY_RE").finditer(text).enumerate() {
         if k >= max {
-            rd.cap();
+            rd.cap("reads of the user's or the machine's name", "_LD_MAX", max);
             break;
         }
         if !lit.at(m.start()) {
@@ -1355,7 +1509,7 @@ fn ld_sources(p: &Pack, text: &[u32], lit: &LiteralTest, outside: &HashSet<PyStr
         for (js, pattern) in [(true, p.re("_LD_IMPORT_JS_RE")), (false, p.re("_LD_IMPORT_PY_RE"))] {
             for (k, m) in pattern.finditer(text).enumerate() {
                 if k >= max {
-                    rd.cap();
+                    rd.cap("imports of the machine's modules", "_LD_MAX", max);
                     break;
                 }
                 let (module, names): (PyStr, &[u32]) = if js {
@@ -1387,7 +1541,7 @@ fn ld_sources(p: &Pack, text: &[u32], lit: &LiteralTest, outside: &HashSet<PyStr
         let uses = rxutil::dynamic(src, 0);
         for (k, m) in uses.finditer(text).enumerate() {
             if k >= max {
-                rd.cap();
+                rd.cap("uses of the names imported from them", "_LD_MAX", max);
                 break;
             }
             if !lit.at(m.start()) {
@@ -1405,7 +1559,7 @@ fn ld_sources(p: &Pack, text: &[u32], lit: &LiteralTest, outside: &HashSet<PyStr
     if pystr::contains(text, "os'") || pystr::contains(text, "os\"") {
         for (k, m) in p.re("_LD_ALIAS_JS_RE").finditer(text).enumerate() {
             if k >= max {
-                rd.cap();
+                rd.cap("names given the os module", "_LD_MAX", max);
                 break;
             }
             let name = m.group(1).filter(|g| !g.is_empty()).or_else(|| m.group(2)).unwrap_or(&[]);
@@ -1418,7 +1572,7 @@ fn ld_sources(p: &Pack, text: &[u32], lit: &LiteralTest, outside: &HashSet<PyStr
         let part_re = p.re("_LD_ALIAS_PY_PART_RE");
         for (k, m) in p.re("_LD_ALIAS_PY_RE").finditer(text).enumerate() {
             if k >= max {
-                rd.cap();
+                rd.cap("modules imported under another name", "_LD_MAX", max);
                 break;
             }
             if lit.at(m.start()) {
@@ -1444,7 +1598,7 @@ fn ld_sources(p: &Pack, text: &[u32], lit: &LiteralTest, outside: &HashSet<PyStr
         let os_named = p.strs("_LD_OS_NAMED");
         for (k, m) in uses.finditer(text).enumerate() {
             if k >= max {
-                rd.cap();
+                rd.cap("uses of those names", "_LD_MAX", max);
                 break;
             }
             let local = m.group(1).unwrap_or(&[]);
@@ -1466,7 +1620,7 @@ fn ld_sources(p: &Pack, text: &[u32], lit: &LiteralTest, outside: &HashSet<PyStr
         }
     }
     if p.re("_LD_READS_RE").search(text).is_some() {
-        let max_calls = p.usize("_LD_MAX_CALLS");
+        let max_calls = ld_cap(p, "_LD_MAX_CALLS", text, PER_CALL);
         let not_reads = p.strs("_LD_NOT_READS");
         let readers = p.strs("_LD_READERS");
         let fs_root = p.re("_LD_FS_ROOT_RE");
@@ -1474,7 +1628,7 @@ fn ld_sources(p: &Pack, text: &[u32], lit: &LiteralTest, outside: &HashSet<PyStr
         let empty: HashSet<PyStr> = HashSet::new();
         for (k, m) in p.re("_LD_CALL_RE").finditer(text).enumerate() {
             if k >= max_calls || out.len() >= max * 3 {
-                rd.cap();
+                rd.cap("calls that may read a file", "_LD_MAX_CALLS", max_calls);
                 break;
             }
             let name = m.group(1).unwrap_or(&[]);
@@ -1516,7 +1670,7 @@ fn ld_sources(p: &Pack, text: &[u32], lit: &LiteralTest, outside: &HashSet<PyStr
             .map(|m| m.group(1).unwrap_or(&[]).to_vec())
             .collect();
         if ms.next().is_some() {
-            rd.cap();
+            rd.cap("promisified runners", "_LD_MAX", max);
         }
         names.sort();
         names.dedup();
@@ -1532,7 +1686,7 @@ fn ld_sources(p: &Pack, text: &[u32], lit: &LiteralTest, outside: &HashSet<PyStr
     for runner in std::iter::once(p.re("_LD_EXEC_RE")).chain(runners.iter().map(|r| &**r)) {
         for (k, m) in runner.finditer(text).enumerate() {
             if k >= max {
-                rd.cap();
+                rd.cap("commands run", "_LD_MAX", max);
                 break;
             }
             if lit.at(m.start()) {
@@ -1554,7 +1708,7 @@ fn ld_sources(p: &Pack, text: &[u32], lit: &LiteralTest, outside: &HashSet<PyStr
         let metadata_re = p.re("_LD_METADATA_RE");
         for (k, f) in p.re("_DD_FETCH_RE").finditer(text).enumerate() {
             if k >= max {
-                rd.cap();
+                rd.cap("requests for the instance's metadata or the public address", "_LD_MAX", max);
                 break;
             }
             if lit.at(f.start()) {
@@ -1591,10 +1745,57 @@ impl Reading {
         Reading { narrow, capped: Cell::new(false), narrowed: Cell::new(false) }
     }
 
-    /// A limit stopped a list.
-    fn cap(&self) {
+    /// A limit stopped a list (BIG-BUNDLE-TAIL: `limit` items of `what`, the pack's `name` scaled to the text's
+    /// length): part of the text is unread, which the call says (budget::cut).
+    fn cap(&self, what: &str, name: &str, limit: usize) {
         self.capped.set(true);
+        crate::budget::cut(&if name == "_DD_PASSES" {
+            format!("the text follower reads at most {} {what}, and this text's still had more to give", commas(limit))
+        } else {
+            format!("the text follower reads at most {} {what} of a text this long ({name}), and this one has more", commas(limit))
+        });
     }
+}
+
+/// BIG-BUNDLE-TAIL: the characters of a text for each item a kind of the follower's lists may hold past the pack's
+/// limit. A list holds the pack's limit or the text's length over these, whichever is more: about as many items as the
+/// text can hold (a function takes some 5 characters at the least, a return 7, an assignment 4, a call 3), so only a
+/// text made of little else stops a list before its end, and a bundle's tail is read as its head is. Real bundles'
+/// lists are far sparser: the densest of fourteen local bundles of 2 to 11 MB had a function one in 334 characters, a
+/// return one in 415, an assignment one in 206, a member's one in 162, a call one in 45, any other list's match one in
+/// 5,750.
+const PER_MATCH: usize = 8;
+const PER_ASSIGN: usize = 4;
+const PER_RETURN: usize = 8;
+const PER_CALL: usize = 2;
+/// BIG-BUNDLE-TAIL: the passes a reading takes at most: it takes them until nothing grows (core took _DD_PASSES).
+const MAX_PASSES: usize = 256;
+
+/// A list's room in `text`: the pack's `name`, or the text's length over `per`, whichever is more.
+fn ld_cap(p: &Pack, name: &str, text: &[u32], per: usize) -> usize {
+    p.usize(name).max(text.len() / per)
+}
+
+/// BIG-BUNDLE-TAIL: what the follower reads by hand, charged to the call's budget: a step a character (the review of
+/// Oct 20, HIGH 4: at a sixteenth, as the regex engines charge a scan, the follower's costliest repeatable reading, a
+/// 250-pass chain among 9,000 long values, ran 45 s and answered; charged a step a character and 8 a name read, the
+/// default budget runs out within seconds of reading there, while real bundles spend a few per cent of it): a text
+/// that would take it past its budget is one the call did not read whole.
+fn charge(chars: usize) {
+    crate::budget::spend(chars as u64 + 1);
+}
+
+/// 1234567 as "1,234,567".
+fn commas(n: usize) -> String {
+    let digits = n.to_string();
+    let mut out = String::new();
+    for (k, ch) in digits.chars().enumerate() {
+        if k > 0 && (digits.len() - k) % 3 == 0 {
+            out.push(',');
+        }
+        out.push(ch);
+    }
+    out
 }
 
 /// core.local_data_sent_at: (offset, kind, what, in_address) of the first
@@ -1617,18 +1818,16 @@ pub fn local_data_sent_at(p: &Pack, text: &[u32]) -> Option<(usize, &'static str
     ld_read(p, text, &Reading::new(false)).or(found)
 }
 
-/// FP-GITHUB-SCRIPT: the passes the narrowing reading may take, in core's (`_DD_PASSES`).
-const NARROW_PASSES: usize = 4;
-
 /// local_data_sent_at's reading of text as `rd` says.
 fn ld_read(p: &Pack, text: &[u32], rd: &Reading) -> Option<(usize, &'static str, PyStr, bool)> {
     if !p.needles("_LD_SEND_NEEDLES").any_in(text) || !p.needles("_LD_NEEDLES").any_in(text) {
         return None;
     }
     let lit = LiteralTest::new(p, text);
-    let max = p.usize("_LD_MAX");
-    let max_assigns = p.usize("_DD_MAX_ASSIGNS");
-    let max_calls = p.usize("_DD_MAX_CALLS");
+    // (BIG-BUNDLE-TAIL: each list's room, scaled to the text's length)
+    let max = ld_cap(p, "_LD_MAX", text, PER_MATCH);
+    let max_assigns = ld_cap(p, "_DD_MAX_ASSIGNS", text, PER_ASSIGN);
+    let max_calls = ld_cap(p, "_DD_MAX_CALLS", text, PER_RETURN);
     let span = p.usize("_DD_ARG_SPAN");
     let func_value = p.re("_LD_FUNC_VALUE_RE");
     let not_names = p.strs("_LD_NOT_NAMES");
@@ -1639,7 +1838,7 @@ fn ld_read(p: &Pack, text: &[u32], rd: &Reading) -> Option<(usize, &'static str,
     let mut arrows: Vec<(PyStr, usize, usize)> = Vec::new(); // what an arrow or a lambda returns
     let matched = dd_assigns(p, text);
     if matched.len() >= max_assigns {
-        rd.cap();
+        rd.cap("assignments", "_DD_MAX_ASSIGNS", max_assigns);
     }
     for m in matched {
         if !lit.at(m.name_start()) && !in_set(not_names, m.name(text)) {
@@ -1659,7 +1858,7 @@ fn ld_read(p: &Pack, text: &[u32], rd: &Reading) -> Option<(usize, &'static str,
         // `{a, b: c} = …`, `[a, , b] = …`
         for (k, m) in pattern.finditer(text).enumerate() {
             if k >= max_assigns {
-                rd.cap();
+                rd.cap("destructurings", "_DD_MAX_ASSIGNS", max_assigns);
                 break;
             }
             if lit.at(m.start()) {
@@ -1702,7 +1901,7 @@ fn ld_read(p: &Pack, text: &[u32], rd: &Reading) -> Option<(usize, &'static str,
         // `out, err = p.communicate()`, `user, host = a, b`
         for (k, m) in p.re("_LD_TUPLE_ASSIGN_RE").finditer(text).enumerate() {
             if k >= max_assigns {
-                rd.cap();
+                rd.cap("assignments of several names", "_DD_MAX_ASSIGNS", max_assigns);
                 break;
             }
             if lit.at(m.start_of(1) as usize) {
@@ -1738,7 +1937,7 @@ fn ld_read(p: &Pack, text: &[u32], rd: &Reading) -> Option<(usize, &'static str,
         }
     }
     let passes = p.usize("_DD_PASSES");
-    for pass in 0..(if outside.is_empty() { 0 } else { passes }) {
+    for pass in 0..(if outside.is_empty() { 0 } else { MAX_PASSES }) {
         let mut grown = false;
         for (name, lo, hi) in &assigns[..plain] {
             if !outside.contains(name)
@@ -1753,8 +1952,8 @@ fn ld_read(p: &Pack, text: &[u32], rd: &Reading) -> Option<(usize, &'static str,
         if !grown {
             break;
         }
-        if pass + 1 == passes {
-            rd.cap();
+        if pass + 1 == MAX_PASSES {
+            rd.cap("passes over the paths outside the package", "_DD_PASSES", MAX_PASSES);
         }
     }
     // a copy's destination, of a file outside the package: a name or a literal it is read by
@@ -1762,8 +1961,8 @@ fn ld_read(p: &Pack, text: &[u32], rd: &Reading) -> Option<(usize, &'static str,
         let plain_literal = p.re("_LD_PLAIN_LITERAL_RE");
         let ident = p.re("_IDENT_TOKEN_RE");
         for (k, m) in p.re("_LD_COPY_RE").finditer(text).enumerate() {
-            if k >= p.usize("_LD_MAX") {
-                rd.cap();
+            if k >= max {
+                rd.cap("copies", "_LD_MAX", max);
                 break;
             }
             if lit.at(m.start()) {
@@ -1804,7 +2003,7 @@ fn ld_read(p: &Pack, text: &[u32], rd: &Reading) -> Option<(usize, &'static str,
     let member = p.re("_LD_MEMBER_RE");
     for (k, m) in p.re("_LD_MEMBER_ASSIGN_RE").finditer(text).enumerate() {
         if k >= max_assigns {
-            rd.cap();
+            rd.cap("assignments of members", "_DD_MAX_ASSIGNS", max_assigns);
             break;
         }
         if lit.at(m.start_of(1) as usize) {
@@ -1831,7 +2030,7 @@ fn ld_read(p: &Pack, text: &[u32], rd: &Reading) -> Option<(usize, &'static str,
     }
     for (k, m) in p.re("_LD_COLLECT_RE").finditer(text).enumerate() {
         if k >= max_assigns {
-            rd.cap();
+            rd.cap("collections of values", "_DD_MAX_ASSIGNS", max_assigns);
             break;
         }
         if !lit.at(m.start_of(1) as usize) {
@@ -1844,7 +2043,7 @@ fn ld_read(p: &Pack, text: &[u32], rd: &Reading) -> Option<(usize, &'static str,
         // `Object.assign(o, …)`: o holds the rest
         for (k, m) in p.re("_LD_MERGE_RE").finditer(text).enumerate() {
             if k >= max_assigns {
-                rd.cap();
+                rd.cap("merges", "_DD_MAX_ASSIGNS", max_assigns);
                 break;
             }
             if !lit.at(m.start()) {
@@ -1860,7 +2059,7 @@ fn ld_read(p: &Pack, text: &[u32], rd: &Reading) -> Option<(usize, &'static str,
     let mut loop_declared: Vec<Option<usize>> = Vec::new(); // (as `declared`, for loops)
     for (k, m) in p.re("_DD_FOR_RE").finditer(text).enumerate() {
         if k >= max_assigns {
-            rd.cap();
+            rd.cap("loops", "_DD_MAX_ASSIGNS", max_assigns);
             break;
         }
         if lit.at(m.start()) {
@@ -1881,7 +2080,7 @@ fn ld_read(p: &Pack, text: &[u32], rd: &Reading) -> Option<(usize, &'static str,
     for (k, m) in p.re("_LD_FOR_DESTRUCT_RE").finditer(text).enumerate() {
         // `for (const [k, v] of …)`, `for k, v in …:`
         if k >= max_assigns {
-            rd.cap();
+            rd.cap("loops over destructured names", "_DD_MAX_ASSIGNS", max_assigns);
             break;
         }
         if lit.at(m.start()) {
@@ -1909,11 +2108,15 @@ fn ld_read(p: &Pack, text: &[u32], rd: &Reading) -> Option<(usize, &'static str,
     // `_LD_MAX` that `params` keeps: the calls a scope holding data makes (below) are read with them
     let mut func_params: Vec<Vec<PyStr>> = Vec::new();
     let mut first_def: HashMap<PyStr, usize> = HashMap::new();
+    // (BIG-BUNDLE-TAIL, the review of Oct 20, HIGH 2) the functions of each name that have parameters: a member's
+    // call, whose receiver the follower does not resolve, is a call of each (`a.send(data)` where `b` has a `send`
+    // of its own: the data reaches both; the tree, which resolves a receiver, is precise where it reads the text)
+    let mut defs_of: HashMap<PyStr, Vec<usize>> = HashMap::new();
     let constructors = p.strs("_LD_CONSTRUCTORS");
     let mut classes: Option<Vec<(usize, PyStr)>> = None; // (start, name), once a constructor is found
     for (k, m) in p.re("_LD_FUNC_RE").finditer(text).enumerate() {
         if k >= max_assigns {
-            rd.cap();
+            rd.cap("functions", "_DD_MAX_ASSIGNS", max_assigns);
             break;
         }
         let name = [1usize, 3, 5, 9].iter().find_map(|&g| m.group(g).filter(|x| !x.is_empty())).unwrap_or(&[]).to_vec();
@@ -1929,13 +2132,16 @@ fn ld_read(p: &Pack, text: &[u32], rd: &Reading) -> Option<(usize, &'static str,
         let names = ld_params(p, plist);
         if !names.is_empty() {
             first_def.entry(name.clone()).or_insert(funcs.len() - 1);
+            if !name.is_empty() {
+                defs_of.entry(name.clone()).or_default().push(funcs.len() - 1);
+            }
         }
         func_params.push(names.clone());
         if !names.is_empty() && !params.contains_key(&name) && params.len() < max {
             defined_at.insert(name.clone(), m.start());
             params.insert(name.clone(), names.clone());
         } else if !names.is_empty() && !params.contains_key(&name) {
-            rd.cap();
+            rd.cap("functions with parameters", "_LD_MAX", max);
         }
         if !names.is_empty() && in_set(constructors, &name) {
             // the class's: `new C(…)`, `C(…)`
@@ -1948,7 +2154,7 @@ fn ld_read(p: &Pack, text: &[u32], rd: &Reading) -> Option<(usize, &'static str,
                     .map(|cm| (cm.start(), cm.group(1).unwrap_or(&[]).to_vec()))
                     .collect();
                 if ms.next().is_some() {
-                    rd.cap();
+                    rd.cap("classes", "_DD_MAX_ASSIGNS", max_assigns);
                 }
                 kept
             });
@@ -1959,24 +2165,15 @@ fn ld_read(p: &Pack, text: &[u32], rd: &Reading) -> Option<(usize, &'static str,
                     defined_at.insert(cname.clone(), m.start());
                     params.insert(cname, names);
                 } else if !params.contains_key(&cname) {
-                    rd.cap();
+                    rd.cap("functions with parameters", "_LD_MAX", max);
                 }
             }
         }
     }
     let func_starts: Vec<usize> = funcs.iter().map(|(a, _)| *a).collect();
-    let call_re = if params.is_empty() {
-        None
-    } else {
-        let mut keys: Vec<&PyStr> = params.keys().collect();
-        keys.sort();
-        let escaped: Vec<PyStr> = keys.iter().map(|n| crate::pyre::escape(n)).collect();
-        let parts: Vec<&[u32]> = escaped.iter().map(|x| x.as_slice()).collect();
-        Some(rxutil::dynamic(
-            pystr::concat(&[&p.text("_DV_NAME_HEAD"), &u("("), &pystr::join(&u("|"), &parts), &u(r")\s*\(")]),
-            0,
-        ))
-    };
+    // (the calls of the script's functions: `_DV_NAME_HEAD(names)\s*\(`, read name by name: name_matches)
+    let param_names: HashSet<PyStr> = params.keys().cloned().collect();
+    let open_paren = rxutil::dynamic(u(r"\s*\("), 0);
     let own: HashSet<PyStr> = funcs.iter().map(|(_, n)| n.clone()).collect();
     // (with no name outside the package, the reads found above: they do not
     // depend on `own` then)
@@ -1996,7 +2193,7 @@ fn ld_read(p: &Pack, text: &[u32], rd: &Reading) -> Option<(usize, &'static str,
     }
     let source_starts: Vec<usize> = sources.iter().map(|s| s.0).collect();
     let mut followed: HashMap<PyStr, Got> = HashMap::new(); // name -> the data it holds
-    let mut origins: Origins = HashMap::new(); // name -> where it was given it
+    let mut origins: Origins = Origins::default(); // name -> where it was given it
     let long = text.len() > p.usize("_LD_LONG");
     let near_span = p.usize("_LD_NEAR");
     let mut called: HashSet<PyStr> = HashSet::new(); // the followed names of functions: their calls hold it
@@ -2004,7 +2201,7 @@ fn ld_read(p: &Pack, text: &[u32], rd: &Reading) -> Option<(usize, &'static str,
     let mut spans: Vec<(usize, usize)> = Vec::new();
     for (k, m) in p.re("_LD_SEAL_RE").finditer(text).enumerate() {
         if k >= max {
-            rd.cap();
+            rd.cap("paths a read is given", "_LD_MAX", max);
             break;
         }
         let args = pystr::sub(text, m.end(), m.end() + args_len(text, m.end(), span));
@@ -2016,7 +2213,7 @@ fn ld_read(p: &Pack, text: &[u32], rd: &Reading) -> Option<(usize, &'static str,
     let exec_send = p.re("_LD_EXEC_SEND_RE");
     for (k, m) in exec_send.finditer(text).enumerate() {
         if k >= max {
-            rd.cap();
+            rd.cap("programs run with their options", "_LD_MAX", max);
             break;
         }
         if !lit.at(m.start()) {
@@ -2028,7 +2225,7 @@ fn ld_read(p: &Pack, text: &[u32], rd: &Reading) -> Option<(usize, &'static str,
         // the environment a call is given as a keyword argument: the program's
         for (k, m) in p.re("_LD_ENV_KWARG_RE").finditer(text).enumerate() {
             if k >= max {
-                rd.cap();
+                rd.cap("environments given a program", "_LD_MAX", max);
                 break;
             }
             if !lit.at(m.start()) {
@@ -2137,26 +2334,40 @@ fn ld_read(p: &Pack, text: &[u32], rd: &Reading) -> Option<(usize, &'static str,
             sure_block_end(p, text, open)
         })
     };
-    let mut decl_scope = |at: Option<usize>| -> Scope {
+    // (BIG-BUNDLE-TAIL) each declaration's function, the declarations swept in order with the functions open at each,
+    // as the returns' owners are (the walk back from it, at most _LD_MAX functions, whatever their number): the
+    // innermost function around it whose body has not ended before it; none when its end is not certain
+    let mut decl_scopes = |declared: &[Option<usize>]| -> Vec<Scope> {
+        let mut out: Vec<Scope> = vec![None; declared.len()];
         if !rd.narrow {
-            return None;
+            return out;
         }
-        let pos = at?;
-        let mut k = func_starts.partition_point(|&s| s <= pos);
-        for _ in 0..max {
-            if k == 0 {
-                return None;
+        let mut order: Vec<(usize, usize)> = declared.iter().enumerate().filter_map(|(k, at)| at.map(|a| (a, k))).collect();
+        order.sort_unstable();
+        let mut open: Vec<usize> = Vec::new();
+        let mut next = 0usize;
+        for (pos, k) in order {
+            while next < func_starts.len() && func_starts[next] <= pos {
+                open.push(next);
+                next += 1;
             }
-            match scope_end(k - 1) {
-                Some(end) if end <= pos => k -= 1,
-                Some(end) => return Some((func_starts[k - 1], end)),
-                None => return None,
+            while let Some(&top) = open.last() {
+                match scope_end(top) {
+                    Some(end) if end <= pos => {
+                        open.pop();
+                    }
+                    Some(end) => {
+                        out[k] = Some((func_starts[top], end));
+                        break;
+                    }
+                    None => break,
+                }
             }
         }
-        None
+        out
     };
-    let scopes: Vec<Scope> = declared.iter().map(|&at| decl_scope(at)).collect();
-    let loop_scopes: Vec<Scope> = loop_declared.iter().map(|&at| decl_scope(at)).collect();
+    let scopes: Vec<Scope> = decl_scopes(&declared);
+    let loop_scopes: Vec<Scope> = decl_scopes(&loop_declared);
     let metadata_scopes: Vec<Scope> = assigns
         .iter()
         .zip(&scopes)
@@ -2181,7 +2392,6 @@ fn ld_read(p: &Pack, text: &[u32], rd: &Reading) -> Option<(usize, &'static str,
     let arg_callback = p.re("_DD_ARG_CALLBACK_RE");
     let as_re = p.re("_DD_AS_RE");
     let then_head = p.re("_DD_THEN_HEAD_RE");
-    let then_max = p.usize("_DD_THEN_MAX");
     for s in &sources {
         // what a read gives: its callback, `with … as`, `.then(…)`
         let (opening, kind, what) = (s.2, s.3, &s.4);
@@ -2207,15 +2417,8 @@ fn ld_read(p: &Pack, text: &[u32], rd: &Reading) -> Option<(usize, &'static str,
                 bind(&mut followed, &mut origins, long, near_span, &name.to_vec(), (kind, what.clone(), false), pos);
             }
         }
-        for link in 0..=then_max {
-            let h = match then_head.match_at(text, pos as isize, text.len() as isize) {
-                None => break,
-                Some(h) => h,
-            };
-            if link == then_max {
-                rd.cap();
-                break;
-            }
+        // (BIG-BUNDLE-TAIL: every link, where core read _DD_THEN_MAX)
+        while let Some(h) = then_head.match_at(text, pos as isize, text.len() as isize) {
             let tlen = args_len(text, h.end(), span);
             let scope = first_param_at(text, h.end()).filter(|_| rd.narrow).and_then(|at| callback_scope(p, text, at));
             for name in ld_then_params(p, pystr::sub(text, h.end(), h.end() + tlen)) {
@@ -2229,20 +2432,25 @@ fn ld_read(p: &Pack, text: &[u32], rd: &Reading) -> Option<(usize, &'static str,
     let body_end = |k: usize, ends: &mut HashMap<usize, Option<usize>>| -> Option<usize> {
         *ends.entry(k).or_insert_with(|| ld_func_end(p, text, &func_ms[k], &lit))
     };
-    // the index in funcs of the innermost function whose body holds pos (a
-    // function defined before pos whose body ends before it does not)
-    let owner = |pos: usize, ends: &mut HashMap<usize, Option<usize>>| -> Option<usize> {
-        let mut k = func_starts.partition_point(|&s| s <= pos);
-        for _ in 0..max {
-            if k == 0 {
-                return None;
-            }
-            match body_end(k - 1, ends) {
-                Some(end) if end <= pos => k -= 1,
-                _ => return Some(k - 1),
+    // the index in funcs of the innermost function whose body holds pos (a function defined before pos whose body
+    // ends before it does not): core walked back from pos over the functions, at most _LD_MAX of them; BIG-BUNDLE-TAIL
+    // sweeps the returns in order with the functions open at each (`open`, from `next` on: each function is opened and
+    // closed once), which gives the walk's answer whatever its length
+    let mut open: Vec<usize> = Vec::new();
+    let mut next = 0usize;
+    let mut owner = |pos: usize, ends: &mut HashMap<usize, Option<usize>>| -> Option<usize> {
+        while next < func_starts.len() && func_starts[next] <= pos {
+            open.push(next);
+            next += 1;
+        }
+        while let Some(&top) = open.last() {
+            match body_end(top, ends) {
+                Some(end) if end <= pos => {
+                    open.pop();
+                }
+                _ => return Some(top),
             }
         }
-        rd.cap();
         None
     };
     // where the parameters of the script's function are its own: (its
@@ -2259,7 +2467,7 @@ fn ld_read(p: &Pack, text: &[u32], rd: &Reading) -> Option<(usize, &'static str,
     let mut returns: Vec<(PyStr, usize, usize)> = Vec::new(); // (function, start, end) of what a function returns
     for (k, m) in p.re("_DD_RETURN_RE").finditer(text).enumerate() {
         if k >= max_calls {
-            rd.cap();
+            rd.cap("returns", "_DD_MAX_CALLS", max_calls);
             break;
         }
         let v = m.start_of(1) as usize;
@@ -2273,14 +2481,14 @@ fn ld_read(p: &Pack, text: &[u32], rd: &Reading) -> Option<(usize, &'static str,
     // (the calls of the script's functions, and the callbacks on names, read
     // once: each pass reads them with what is followed by then)
     let mut calls: Vec<(usize, usize, PyStr, usize)> = Vec::new(); // (start, end, function, its arguments' length)
-    if let Some(call_re) = &call_re {
-        for (k, cm) in call_re.finditer(text).enumerate() {
+    {
+        for (k, (start, end, name)) in name_matches(text, &param_names, &open_paren, false).into_iter().enumerate() {
             if k >= max {
-                rd.cap();
+                rd.cap("calls of the script's functions", "_LD_MAX", max);
                 break;
             }
-            if !lit.at(cm.start()) {
-                calls.push((cm.start(), cm.end(), cm.group(1).unwrap_or(&[]).to_vec(), args_len(text, cm.end(), span)));
+            if !lit.at(start) {
+                calls.push((start, end, name, args_len(text, end, span)));
             }
         }
     }
@@ -2289,7 +2497,7 @@ fn ld_read(p: &Pack, text: &[u32], rd: &Reading) -> Option<(usize, &'static str,
     let mut ons: Vec<(usize, PyStr, PyStr, Scope)> = Vec::new();
     for (k, m) in callback_re.finditer(text).enumerate() {
         if k >= max_calls {
-            rd.cap();
+            rd.cap("callbacks on a name", "_DD_MAX_CALLS", max_calls);
             break;
         }
         if let Some(on) = ld_key(p, text, m.group(1).unwrap_or(&[]), m.end_of(1) as usize) {
@@ -2303,7 +2511,12 @@ fn ld_read(p: &Pack, text: &[u32], rd: &Reading) -> Option<(usize, &'static str,
     // the callbacks the script's own functions are given: (the callback's
     // parameters, the callback, the arguments of each call of the
     // function's parameter in its body)
-    let mut callbacks: Vec<(Vec<PyStr>, (usize, usize), Vec<Vec<(usize, usize)>>)> = Vec::new();
+    // (BIG-BUNDLE-TAIL, HIGH 4: the calls of a parameter, kept once in param_calls by (the function, the parameter's
+    // place) and named here by that key, not copied for each callback the function is given)
+    let mut callbacks: Vec<(Vec<PyStr>, (usize, usize), (usize, usize))> = Vec::new();
+    // (BIG-BUNDLE-TAIL: each function's parameter's calls in its body, read once, where core read them at each call
+    // of the function, its first _LD_MAX)
+    let mut param_calls: HashMap<(usize, usize), Vec<Vec<(usize, usize)>>> = HashMap::new();
     let callback_head = p.re("_LD_CALLBACK_HEAD_RE");
     let body_span = p.usize("_LD_BODY_SPAN");
     for (_start, end, fname, alen) in &calls {
@@ -2326,12 +2539,18 @@ fn ld_read(p: &Pack, text: &[u32], rd: &Reading) -> Option<(usize, &'static str,
                 continue;
             }
             let hi = body_end(f, &mut ends).unwrap_or_else(|| text.len().min(at_def + body_span));
+            if let Some(inner) = param_calls.get(&(at_def, i)) {
+                if !inner.is_empty() {
+                    callbacks.push((names, (end + a, end + b), (at_def, i)));
+                }
+                continue;
+            }
             let src = pystr::concat(&[&p.text("_DV_NAME_HEAD"), &crate::pyre::escape(&names_f[i]), &u(r"\s*\(")]);
             let uses = rxutil::dynamic(src, 0);
             let mut inner: Vec<Vec<(usize, usize)>> = Vec::new(); // the arguments of each call of the parameter
             for (j, um) in uses.finditer_at(text, at_def as isize, hi as isize).enumerate() {
                 if j >= max {
-                    rd.cap();
+                    rd.cap("calls of a function's parameter in its body", "_LD_MAX", max);
                     break;
                 }
                 if !lit.at(um.start()) {
@@ -2341,8 +2560,9 @@ fn ld_read(p: &Pack, text: &[u32], rd: &Reading) -> Option<(usize, &'static str,
                 }
             }
             if !inner.is_empty() {
-                callbacks.push((names, (end + a, end + b), inner));
+                callbacks.push((names, (end + a, end + b), (at_def, i)));
             }
+            param_calls.insert((at_def, i), inner);
         }
     }
     // a thread's target given its arguments: its parameters
@@ -2350,7 +2570,7 @@ fn ld_read(p: &Pack, text: &[u32], rd: &Reading) -> Option<(usize, &'static str,
     if !params.is_empty() && pystr::contains(text, "target") {
         for (k, m) in p.re("_LD_THREAD_RE").finditer(text).enumerate() {
             if k >= max {
-                rd.cap();
+                rd.cap("threads' targets", "_LD_MAX", max);
                 break;
             }
             let fname = m.group(1).unwrap_or(&[]);
@@ -2373,11 +2593,10 @@ fn ld_read(p: &Pack, text: &[u32], rd: &Reading) -> Option<(usize, &'static str,
         true
     };
     let then_head_re = p.re("_DD_THEN_HEAD_RE");
-    let then_links = p.usize("_DD_THEN_MAX");
     // (FP-GITHUB-SCRIPT) the scopes whose calls are read: the declarations', the callbacks' (a receiver's, and a
     // read's, among the origins bound above), and the parameters' those calls give
     let owned_scopes: HashSet<(usize, usize)> = scopes.iter().chain(loop_scopes.iter()).filter_map(|s| *s).chain(
-        ons.iter().filter_map(|o| o.3)).chain(origins.values().flatten().filter_map(|o| o.1)).collect();
+        ons.iter().filter_map(|o| o.3)).chain(origins.every().filter_map(|o| o.1)).collect();
     let mut bound_scopes: HashSet<(usize, usize)> = HashSet::new();
     let mut call_scopes: HashSet<(usize, usize)> = HashSet::new(); // (read)
     // (args' start, their length, the callee's start, its parameters, their scope, whether a member's call: `x.f(…)`)
@@ -2385,12 +2604,7 @@ fn ld_read(p: &Pack, text: &[u32], rd: &Reading) -> Option<(usize, &'static str,
     // (FP-GITHUB-SCRIPT) may what `name` holds reach `pos` as core's reading reaches it: `near`, but a declaration's or
     // a callback's scope (a narrowing one) is not one
     let core_near = |origins: &Origins, name: &[u32], pos: usize| -> bool {
-        origins.get(name).map_or(false, |os| {
-            os.iter().any(|&(o, scope)| {
-                (!long || (pos as isize - o as isize).unsigned_abs() <= near_span)
-                    && scope.map_or(true, |s| owned_scopes.contains(&s) || (s.0 <= pos && pos <= s.1))
-            })
-        })
+        origins.get(name).map_or(false, |os| os.any(long, near_span, pos, |s| owned_scopes.contains(&s) || (s.0 <= pos && pos <= s.1)))
     };
     // (FP-GITHUB-SCRIPT) the spans each function returns, by its name
     let mut returned: HashMap<&[u32], Vec<(usize, usize)>> = HashMap::new();
@@ -2399,13 +2613,23 @@ fn ld_read(p: &Pack, text: &[u32], rd: &Reading) -> Option<(usize, &'static str,
             returned.entry(name.as_slice()).or_default().push((*lo, *hi));
         }
     }
-    // (FP-GITHUB-SCRIPT) the narrowing reading follows a narrowed name out of its function by a return or a call, a pass
-    // each, where core's reading reached the same send by the name at once: it reads until nothing grows, up to
-    // NARROW_PASSES times core's passes (a pass that still grew at the last is a limit met)
-    let rounds = if rd.narrow { passes * NARROW_PASSES } else { passes };
-    for pass in 0..rounds {
+    // (BIG-BUNDLE-TAIL) passes until nothing grows (a narrowed name leaves its function by a return or a call, a pass
+    // each; core's _DD_PASSES left a long chain half read), up to MAX_PASSES (a pass that still grew at the last is a
+    // limit met); a reading past the call's budget stops
+    let rounds = MAX_PASSES.max(passes);
+    // (HIGH 4) what each parameter's calls give a callback's parameter, read once while nothing the reading follows
+    // changed (the follower's names, their origins, the functions returning data: their counts), for every callback
+    // the function is given
+    let mut given: HashMap<((usize, usize), usize), ((usize, usize, usize), Option<(Got, usize, usize)>)> = HashMap::new();
+    'passes: for pass in 0..rounds {
+        if crate::budget::exhausted() {
+            break;
+        }
         let mut grown = false;
         for ((name, lo, hi), scope) in assigns.iter().zip(&scopes).chain(loops.iter().zip(&loop_scopes)) {
+            if crate::budget::exhausted() {
+                break 'passes;
+            }
             if !followed.contains_key(name) || !near(&origins, long, near_span, name, *lo) {
                 let mut got = read_in(&ld_value_spans(p, text, *lo, *hi), false, &followed, &called, &origins);
                 if got.is_none() && rd.narrow && !called.is_empty() && core_near(&origins, name, *lo) {
@@ -2413,7 +2637,8 @@ fn ld_read(p: &Pack, text: &[u32], rd: &Reading) -> Option<(usize, &'static str,
                     // followed the name there; the narrowing reading, the member's call of a function that returns a
                     // variable of the name (what core reached by the name, and no more)
                     got = member_tokens(text, *lo, *hi)
-                        .filter(|&(a, b)| called.contains(&text[a..b]) && called_re.match_at(text, b as isize, text.len() as isize).is_some())
+                        .filter(|&(a, b)| called.contains(&text[a..b]))
+                        .filter(|&(_, b)| called_re.match_at(text, b as isize, text.len() as isize).is_some())
                         .find(|&(a, b)| {
                             returned.get(&text[a..b]).is_some_and(|spans| {
                                 spans.iter().any(|&(rlo, rhi)| {
@@ -2460,31 +2685,19 @@ fn ld_read(p: &Pack, text: &[u32], rd: &Reading) -> Option<(usize, &'static str,
         if called.iter().any(|n| !then_names.contains(n)) {
             // `collect().then((d) => …)`, `this.info().then(…)`
             then_names = called.clone();
-            let mut sorted: Vec<&PyStr> = then_names.iter().collect();
-            sorted.sort();
-            let escaped: Vec<PyStr> = sorted.iter().map(|n| crate::pyre::escape(n)).collect();
-            let parts: Vec<&[u32]> = escaped.iter().map(|x| x.as_slice()).collect();
-            let heads = rxutil::dynamic(pystr::concat(&[&p.text("_LD_OWN_CALL_HEAD"), &pystr::join(&u("|"), &parts), &u(r")\s*\(")]), 0);
+            // (`_LD_OWN_CALL_HEAD(names)\s*\(`, read name by name: name_matches)
             thens.clear();
-            for (k, cm) in heads.finditer(text).enumerate() {
+            for (k, (cm_start, cm_end, cm_name)) in name_matches(text, &then_names, &open_paren, true).into_iter().enumerate() {
                 if k >= max {
-                    rd.cap();
+                    rd.cap("chained calls of a function that returns data", "_LD_MAX", max);
                     break;
                 }
-                if lit.at(cm.start()) {
+                if lit.at(cm_start) {
                     continue;
                 }
                 let mut links: Vec<(PyStr, (usize, usize))> = Vec::new();
-                let mut pos = cm.end() + args_len(text, cm.end(), span) + 1;
-                for link in 0..=then_links {
-                    let h = match then_head_re.match_at(text, pos as isize, text.len() as isize) {
-                        None => break,
-                        Some(h) => h,
-                    };
-                    if link == then_links {
-                        rd.cap();
-                        break;
-                    }
+                let mut pos = cm_end + args_len(text, cm_end, span) + 1;
+                while let Some(h) = then_head_re.match_at(text, pos as isize, text.len() as isize) {
                     let tlen = args_len(text, h.end(), span);
                     for name in ld_then_params(p, pystr::sub(text, h.end(), h.end() + tlen)) {
                         links.push((name, (h.end(), h.end() + tlen)));
@@ -2492,7 +2705,7 @@ fn ld_read(p: &Pack, text: &[u32], rd: &Reading) -> Option<(usize, &'static str,
                     pos = h.end() + tlen + 1;
                 }
                 if !links.is_empty() {
-                    thens.push((cm.start(), cm.group(1).unwrap_or(&[]).to_vec(), links));
+                    thens.push((cm_start, cm_name, links));
                 }
             }
         }
@@ -2506,17 +2719,31 @@ fn ld_read(p: &Pack, text: &[u32], rd: &Reading) -> Option<(usize, &'static str,
                 }
             }
         }
-        for (names, scope, inner) in &callbacks {
-            // a callback's parameters: what the function calls it with
-            for args in inner {
-                for (i, (lo, hi)) in args.iter().take(names.len()).enumerate() {
-                    let name = &names[i];
-                    if !followed.contains_key(name) || !near(&origins, long, near_span, name, scope.0) {
-                        if let Some(got) = read_in(&ld_value_spans(p, text, *lo, *hi), false, &followed, &called, &origins) {
-                            if follow(name, got, *lo, *hi, scope.0, Some(*scope), &mut followed, &mut origins, &mut composed) {
-                                grown = true;
-                            }
-                        }
+        for (names, scope, key) in &callbacks {
+            // a callback's parameters: what the function calls it with (the first of its parameter's calls that gives
+            // the parameter's place data)
+            let inner = &param_calls[key];
+            for (i, name) in names.iter().enumerate() {
+                if crate::budget::exhausted() {
+                    break 'passes;
+                }
+                if followed.contains_key(name) && near(&origins, long, near_span, name, scope.0) {
+                    continue;
+                }
+                let now = (followed.len(), origins.total, called.len());
+                let hit = match given.get(&(*key, i)) {
+                    Some((when, hit)) if *when == now => hit.clone(),
+                    _ => {
+                        let hit = inner.iter().filter_map(|args| args.get(i)).find_map(|&(lo, hi)| {
+                            read_in(&ld_value_spans(p, text, lo, hi), false, &followed, &called, &origins).map(|got| (got, lo, hi))
+                        });
+                        given.insert((*key, i), (now, hit.clone()));
+                        hit
+                    }
+                };
+                if let Some((got, lo, hi)) = hit {
+                    if follow(name, got, lo, hi, scope.0, Some(*scope), &mut followed, &mut origins, &mut composed) {
+                        grown = true;
                     }
                 }
             }
@@ -2536,6 +2763,9 @@ fn ld_read(p: &Pack, text: &[u32], rd: &Reading) -> Option<(usize, &'static str,
         }
         for (_start, end, fname, alen) in &calls {
             // a function of the script's called with data: its parameters
+            if crate::budget::exhausted() {
+                break 'passes;
+            }
             let names = match params.get(fname) {
                 Some(n) => n,
                 None => continue,
@@ -2560,42 +2790,61 @@ fn ld_read(p: &Pack, text: &[u32], rd: &Reading) -> Option<(usize, &'static str,
         // gave data) are read, a member's among them (`this.send(d)`: the function of that name, its parameter of the
         // variable's name alone), at most `_LD_MAX` a scope and `_DD_MAX_ASSIGNS` in all, and give their callees'
         // parameters as above.
+        charge(origins.total);
         let pending: Vec<(usize, usize)> = origins
-            .values()
-            .flatten()
+            .every()
             .filter_map(|&(_, scope)| scope)
             .filter(|s| (owned_scopes.contains(s) || bound_scopes.contains(s)) && !call_scopes.contains(s))
             .collect();
         for (lo, hi) in pending {
+            if crate::budget::exhausted() {
+                break 'passes;
+            }
             if !call_scopes.insert((lo, hi)) {
                 continue;
             }
             let mut taken = 0;
             let plain = NameTokens::of(p, text, lo, hi).map(|t| (t, false));
-            for ((start, name_end), member) in plain.chain(member_tokens(text, lo, hi).map(|t| (t, true))) {
+            'calls: for ((start, name_end), member) in plain.chain(member_tokens(text, lo, hi).map(|t| (t, true))) {
                 let Some(open) = called_re.match_at(text, name_end as isize, text.len() as isize) else { continue };
                 let fname = &text[start..name_end];
                 if lit.at(start) || in_set(not_names, fname) {
                     continue;
                 }
-                let callee = match params.get(fname) {
-                    Some(names) => Some((defined_at[fname], names.clone(), scope_of(fname, &mut ends))),
-                    None => first_def.get(fname).map(|&k| (func_starts[k], func_params[k].clone(), body_end(k, &mut ends).map(|e| (func_starts[k], e)))),
+                // (a member's call: each function of the name, HIGH 2; a name's: the function `params` holds, or the
+                // first of the name with parameters)
+                let callees: Vec<(usize, Vec<PyStr>, Scope)> = if member {
+                    defs_of.get(fname).map_or_else(Vec::new, |ks| {
+                        ks.iter().map(|&k| (func_starts[k], func_params[k].clone(), body_end(k, &mut ends).map(|e| (func_starts[k], e)))).collect()
+                    })
+                } else {
+                    match params.get(fname) {
+                        Some(names) => vec![(defined_at[fname], names.clone(), scope_of(fname, &mut ends))],
+                        None => first_def.get(fname).map(|&k| (func_starts[k], func_params[k].clone(), body_end(k, &mut ends).map(|e| (func_starts[k], e)))).into_iter().collect(),
+                    }
                 };
-                let Some((at, names, scope)) = callee else { continue };
+                if callees.is_empty() {
+                    continue;
+                }
                 let alen = args_len(text, open.end(), span);
                 if ld_defined(p, text, start, open.end() + alen) {
                     continue; // (a function's definition, not a call)
                 }
-                if taken >= max || scoped_calls.len() >= max_assigns {
-                    rd.cap();
-                    break;
+                for (at, names, scope) in callees {
+                    if taken >= max || scoped_calls.len() >= max_assigns {
+                        rd.cap("calls made where data is held", "_DD_MAX_ASSIGNS", max_assigns);
+                        break 'calls;
+                    }
+                    charge(names.len() + 1);
+                    scoped_calls.push((open.end(), alen, at, names, scope, member));
+                    taken += 1;
                 }
-                scoped_calls.push((open.end(), alen, at, names, scope, member));
-                taken += 1;
             }
         }
         for (end, alen, at, names, scope, member) in &scoped_calls {
+            if crate::budget::exhausted() {
+                break 'passes;
+            }
             for (param, lo, hi) in ld_bound(p, text, *end, *alen, names) {
                 if func_value.match_at(text, lo as isize, hi as isize).is_some() {
                     continue;
@@ -2621,11 +2870,11 @@ fn ld_read(p: &Pack, text: &[u32], rd: &Reading) -> Option<(usize, &'static str,
             break;
         }
         if pass + 1 == rounds {
-            rd.cap();
+            rd.cap("passes over the names", "_DD_PASSES", MAX_PASSES);
         }
     }
     // (FP-GITHUB-SCRIPT) a name narrowed: given what it holds in a declaration's or a callback's scope
-    if origins.values().flatten().any(|&(_, s)| s.is_some_and(|s| owned_scopes.contains(&s))) {
+    if origins.every().any(|&(_, s)| s.is_some_and(|s| owned_scopes.contains(&s))) {
         rd.narrowed.set(true);
     }
     let mut found: Vec<Found> = Vec::new(); // sends of data
@@ -2637,25 +2886,26 @@ fn ld_read(p: &Pack, text: &[u32], rd: &Reading) -> Option<(usize, &'static str,
         Composed,
         Re(&'r crate::pyre::Regex),
     }
-    let first_send = |re: &crate::pyre::Regex, addresses: isize, where_: Where, process: bool, found: &mut Vec<Found>, in_address: &mut Vec<Found>| {
-        for (k, s) in re.finditer(text).enumerate() {
+    // (the sends' matches: (start, end), a pattern's, or name_matches')
+    let first_send = |sends: &mut dyn Iterator<Item = (usize, usize)>, addresses: isize, where_: Where, process: bool, found: &mut Vec<Found>, in_address: &mut Vec<Found>| {
+        for (k, (s_start, s_end)) in sends.enumerate() {
             if k >= max {
-                rd.cap();
+                rd.cap("sends", "_LD_MAX", max);
                 return;
             }
-            if lit.at(s.start()) {
+            if lit.at(s_start) {
                 continue;
             }
-            let alen = args_len(text, s.end(), span);
-            let args = pystr::sub(text, s.end(), s.end() + alen);
-            let end = s.end() + alen;
-            if ld_defined(p, text, s.start(), end) {
+            let alen = args_len(text, s_end, span);
+            let args = pystr::sub(text, s_end, s_end + alen);
+            let end = s_end + alen;
+            if ld_defined(p, text, s_start, end) {
                 continue;
             }
             match where_ {
                 Where::Any => {}
                 Where::Composed => {
-                    if quote.search(args).is_none() && ld_names_in(p, text, s.end(), end, &composed, &lit).is_none() {
+                    if quote.search(args).is_none() && ld_names_in(p, text, s_end, end, &composed, &lit).is_none() {
                         continue;
                     }
                 }
@@ -2665,24 +2915,24 @@ fn ld_read(p: &Pack, text: &[u32], rd: &Reading) -> Option<(usize, &'static str,
                     }
                 }
             }
-            let spans = ld_arg_spans(p, text, s.end(), end, if addresses < 0 { alen + 1 } else { addresses as usize }, process);
+            let spans = ld_arg_spans(p, text, s_end, end, if addresses < 0 { alen + 1 } else { addresses as usize }, process);
             if let Some(got) = read_in(&spans, false, &followed, &called, &origins) {
-                found.push((s.start(), got.0, got.1));
+                found.push((s_start, got.0, got.1));
                 return;
             }
             if in_address.is_empty() {
                 if let Some(got) = read_in(&spans, true, &followed, &called, &origins) {
-                    in_address.push((s.start(), got.0, got.1));
+                    in_address.push((s_start, got.0, got.1));
                 }
             }
         }
     };
-    first_send(p.re("_LD_SEND_RE"), 1, Where::Any, false, &mut found, &mut in_address);
-    first_send(p.re("_LD_OPTIONS_SEND_RE"), 0, Where::Any, false, &mut found, &mut in_address);
-    first_send(p.re("_LD_REQUEST_SEND_RE"), 2, Where::Any, false, &mut found, &mut in_address);
-    first_send(p.re("_LD_ADDRESS_SEND_RE"), -1, Where::Any, false, &mut found, &mut in_address);
-    first_send(p.re("_LD_LOOKUP_SEND_RE"), -1, Where::Composed, false, &mut found, &mut in_address);
-    first_send(exec_send, 0, Where::Re(p.re("_LD_NET_PROGRAM_RE")), true, &mut found, &mut in_address);
+    first_send(&mut p.re("_LD_SEND_RE").finditer(text).map(|m| (m.start(), m.end())), 1, Where::Any, false, &mut found, &mut in_address);
+    first_send(&mut p.re("_LD_OPTIONS_SEND_RE").finditer(text).map(|m| (m.start(), m.end())), 0, Where::Any, false, &mut found, &mut in_address);
+    first_send(&mut p.re("_LD_REQUEST_SEND_RE").finditer(text).map(|m| (m.start(), m.end())), 2, Where::Any, false, &mut found, &mut in_address);
+    first_send(&mut p.re("_LD_ADDRESS_SEND_RE").finditer(text).map(|m| (m.start(), m.end())), -1, Where::Any, false, &mut found, &mut in_address);
+    first_send(&mut p.re("_LD_LOOKUP_SEND_RE").finditer(text).map(|m| (m.start(), m.end())), -1, Where::Composed, false, &mut found, &mut in_address);
+    first_send(&mut exec_send.finditer(text).map(|m| (m.start(), m.end())), 0, Where::Re(p.re("_LD_NET_PROGRAM_RE")), true, &mut found, &mut in_address);
     let connection = p.re("_LD_CONNECTION_RE");
     let mut connections: Vec<PyStr> = assigns[..plain]
         .iter()
@@ -2692,13 +2942,11 @@ fn ld_read(p: &Pack, text: &[u32], rd: &Reading) -> Option<(usize, &'static str,
     connections.sort();
     connections.dedup();
     if !connections.is_empty() {
-        let escaped: Vec<PyStr> = connections.iter().map(|n| crate::pyre::escape(n)).collect();
-        let parts: Vec<&[u32]> = escaped.iter().map(|x| x.as_slice()).collect();
-        let rx = rxutil::dynamic(
-            pystr::concat(&[&p.text("_DV_NAME_HEAD"), &u("(?:"), &pystr::join(&u("|"), &parts), &u(")"), &p.text("_LD_WRITE_TAIL")]),
-            0,
-        );
-        first_send(&rx, 0, Where::Any, false, &mut found, &mut in_address);
+        // (`_DV_NAME_HEAD(?:names)_LD_WRITE_TAIL`, read name by name: name_matches)
+        let names: HashSet<PyStr> = connections.iter().cloned().collect();
+        let tail = rxutil::dynamic(p.text("_LD_WRITE_TAIL"), 0);
+        let mut sends = name_matches(text, &names, &tail, false).into_iter().map(|(a, b, _)| (a, b));
+        first_send(&mut sends, 0, Where::Any, false, &mut found, &mut in_address);
     }
     // HTTP clients under the script's own names
     let client_re = p.re("_LD_CLIENT_RE");
@@ -2713,7 +2961,7 @@ fn ld_read(p: &Pack, text: &[u32], rd: &Reading) -> Option<(usize, &'static str,
         }
         for (k, m) in pattern.finditer(text).enumerate() {
             if k >= max {
-                rd.cap();
+                rd.cap("imports of an HTTP client", "_LD_MAX", max);
                 break;
             }
             if !lit.at(m.start()) {
@@ -2725,18 +2973,18 @@ fn ld_read(p: &Pack, text: &[u32], rd: &Reading) -> Option<(usize, &'static str,
     clients.sort();
     clients.dedup();
     if !clients.is_empty() {
-        let escaped: Vec<PyStr> = clients.iter().map(|n| crate::pyre::escape(n)).collect();
-        let parts: Vec<&[u32]> = escaped.iter().map(|x| x.as_slice()).collect();
-        let names = pystr::concat(&[&u("(?:"), &pystr::join(&u("|"), &parts)]);
-        let send = rxutil::dynamic(pystr::concat(&[&p.text("_DV_NAME_HEAD"), &names, &p.text("_LD_CLIENT_SEND_TAIL")]), 0);
-        first_send(&send, 1, Where::Any, false, &mut found, &mut in_address);
-        let request = rxutil::dynamic(pystr::concat(&[&p.text("_DV_NAME_HEAD"), &names, &p.text("_LD_CLIENT_REQUEST_TAIL")]), 0);
-        first_send(&request, 2, Where::Any, false, &mut found, &mut in_address);
+        // (`_DV_NAME_HEAD(?:names)` and each tail, the group's `)` that begins it aside, read name by name: name_matches)
+        let names: HashSet<PyStr> = clients.iter().cloned().collect();
+        for (tail, addresses) in [("_LD_CLIENT_SEND_TAIL", 1), ("_LD_CLIENT_REQUEST_TAIL", 2)] {
+            let tail = rxutil::dynamic(p.text(tail)[1..].to_vec(), 0);
+            let mut sends = name_matches(text, &names, &tail, false).into_iter().map(|(a, b, _)| (a, b));
+            first_send(&mut sends, addresses, Where::Any, false, &mut found, &mut in_address);
+        }
     }
     for (k, m) in p.re("_LD_HOST_BUILT_RE").finditer(text).enumerate() {
         // data resolved in a host name: sent
         if k >= max {
-            rd.cap();
+            rd.cap("host names built from data", "_LD_MAX", max);
             break;
         }
         let g = if m.group(2).is_some() {
@@ -2760,7 +3008,7 @@ fn ld_read(p: &Pack, text: &[u32], rd: &Reading) -> Option<(usize, &'static str,
                 break;
             }
             if k >= max {
-                rd.cap();
+                rd.cap("connections", "_LD_MAX", max);
                 break;
             }
             if lit.at(cm.start()) {
@@ -2985,6 +3233,14 @@ mod scope_tests;
 #[cfg(test)]
 #[path = "flow_scope_review_tests.rs"]
 mod scope_review_tests;
+
+#[cfg(test)]
+#[path = "flow_tail_tests.rs"]
+mod tail_tests;
+
+#[cfg(test)]
+#[path = "flow_tail_review_tests.rs"]
+mod tail_review_tests;
 
 #[cfg(test)]
 mod name_token_tests {

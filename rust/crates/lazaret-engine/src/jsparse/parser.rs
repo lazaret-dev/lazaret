@@ -226,6 +226,8 @@ pub fn parse_with(src: &[u32], ts: bool, jsx: bool, html_open: bool) -> Outcome 
         Ok(root) => {
             p.tree.root = root;
             p.tree.html_after_code = p.html_after_code;
+            p.tree.line_ends = std::mem::take(&mut p.line_ends);
+            p.tree.index_lines(src.len());
             Outcome::Tree(p.tree)
         }
         Err(Fail::Fatal) => match p.fatal {
@@ -1019,7 +1021,7 @@ impl<'a> Parser<'a> {
 
     pub(super) fn mk(&mut self, kind: Kind, at: At, end: u32, op: u8, flags: u16, f: [u32; 4]) -> NodeId {
         let id = self.tree.nodes.len() as u32;
-        self.tree.nodes.push(Node { kind, op, flags, line: at.line, start: at.start, end, f });
+        self.tree.nodes.push(Node { kind, op, flags, start: at.start, end, f });
         id
     }
 
@@ -1043,8 +1045,8 @@ impl<'a> Parser<'a> {
 
     #[inline]
     pub(super) fn at_of(&self, id: NodeId) -> At {
-        let n = &self.tree.nodes[id as usize];
-        At { line: n.line, start: n.start }
+        let start = self.tree.nodes[id as usize].start;
+        At { line: self.line_at(start), start }
     }
 
     /// The list of what was pushed on the scratch stack since `mark`.
@@ -1111,7 +1113,7 @@ impl<'a> Parser<'a> {
             let p = self.covers[i];
             let n = *self.node(p);
             if n.f[C as usize] != NONE {
-                return self.fail_at("invalid shorthand property initializer", n.line);
+                return self.fail_at("invalid shorthand property initializer", self.line_at(n.start));
             }
         }
         let body = self.commit(mark);

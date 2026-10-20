@@ -16,6 +16,11 @@ indicator). Refused for nesting where the code may never run (the use-time test'
 points load reaches; D-13's read), it stays in the INFO inventory with its reason: generated code nests that deep too
 (a minifier's ternary chains, a deep data literal). A file several passes refused is judged by the strongest.
 
+BIG-BUNDLE-TAIL (the external review of Oct 20, H3): a file whose code runs and which the supply-chain tree did not read
+whole is SC-TRUNCATED (CRITICAL) in the tree's words ("the supply-chain tree did not read it whole: the parser refused
+it at line 1 (nesting too deep); …") beside what the text follower found, and a quiet follower never clears it, so
+such a package's scan is INCOMPLETE; the SC-NESTED-CODE indicator stays beside it.
+
 Payloads are inert: nothing is installed or run.
 """
 import unittest
@@ -40,6 +45,15 @@ def nested(res):
     return [(i["file"], i["line"], i["sev"], i["msg"]) for i in issues(res, "SC-NESTED-CODE")]
 
 
+def truncated(res):
+    return [(i["file"], i["line"], i["sev"], i["msg"]) for i in issues(res, "SC-TRUNCATED")]
+
+
+# the tree's words for a file it did not read (signs::local_data_sent's TREE_UNREAD, the parser's refusal)
+NOT_READ = ("the supply-chain tree did not read it whole: the parser refused it at line 1 (nesting too deep); "
+            "its text alone was read for what it sends")
+
+
 class UnparsedCodeTests(unittest.TestCase):
     def test_a_file_node_runs_nested_past_the_parsers_bound_is_an_indicator(self):
         # reached at import time (the package's main): its code runs when the package is loaded
@@ -48,13 +62,24 @@ class UnparsedCodeTests(unittest.TestCase):
         self.assertEqual((file, line, sev), ("index.js", 1, "MAJOR"))
         self.assertIn("1 JavaScript file nested past the parser's bound (index.js (line 1: nesting too deep))", msg)
         self.assertEqual(unparsed(res), [])
-        self.assertEqual(res["verdict"], "WARN", res["verdictReason"])     # a MAJOR indicator
+        # H3 (BIG-BUNDLE-TAIL, the review of Oct 20): code that runs and the tree did not read is SC-TRUNCATED beside
+        # the follower's answer, never cleared by a quiet follower, so the verdict is INCOMPLETE (WARN before: the
+        # MAJOR indicator alone)
+        ((file, line, sev, msg),) = truncated(res)
+        self.assertEqual((file, line, sev), ("index.js", 1, "CRITICAL"))
+        self.assertIn(NOT_READ, msg)
+        self.assertEqual(res["verdict"], "INCOMPLETE", res["verdictReason"])
 
     def test_nesting_in_an_install_script_is_an_indicator(self):
         res = scan_npm({"package.json": manifest(scripts={"postinstall": "node install.js"}), "install.js": NESTED})
         ((file, line, sev, _msg),) = nested(res)
         self.assertEqual((file, line, sev), ("install.js", 1, "MAJOR"))
         self.assertEqual(unparsed(res), [])
+        # (H3: the install script runs, the tree did not read it)
+        ((file, line, sev, msg),) = truncated(res)
+        self.assertEqual((file, line, sev), ("install.js", 1, "CRITICAL"))
+        self.assertIn(NOT_READ, msg)
+        self.assertEqual(res["verdict"], "INCOMPLETE", res["verdictReason"])
 
     def test_nesting_where_nothing_loads_the_file_is_inventory(self):
         # the same file, but the entry points do not reach it: only the use-time test reads it, so it is listed
