@@ -14,6 +14,9 @@
 //! - [`vendored_modules`]: the module paths a `vendor/modules.txt` says are vendored (a `# path version` line followed
 //!   by its annotations and packages; a `# ` line with nothing after it is a replacement `go mod vendor` records but
 //!   does not use), longest first, so that a file is given to the module whose path is the longest prefix of its own.
+//! - [`vendored_packages`]: the packages it lists (each line of a module that is not a `#` line), which a build
+//!   compiles (F-06): `go mod vendor` copies a package's files and the files its `//go:embed` patterns match, which
+//!   may be `.go` files below it (a `testdata/` folder's), so a folder it does not list is data.
 //!
 //! Every loop advances or stops, values nest at most [`MAX_DEPTH`] deep, and nothing here panics on any input.
 
@@ -458,6 +461,32 @@ pub fn vendored_modules(src: &[u32]) -> Vec<PyStr> {
     found.iter().map(|m| crate::pystr::u(m)).collect()
 }
 
+/// The packages a `vendor/modules.txt` (`src`) lists, sorted (see the module's comment), read as cmd/go's
+/// readVendorList reads them: a `# path version` (or `# path => …`) line names the module of the lines after it, a
+/// `# ` line of fewer than three fields changes nothing (the module before it goes on), another `# ` line ends it;
+/// below a module, a line of one field that is not a `#` line is a package (annotations start `## `). A version is
+/// any field starting with `v` (cmd/go asks for a valid semantic version: this lists more, never fewer).
+pub fn vendored_packages(src: &[u32]) -> Vec<PyStr> {
+    let text = crate::pystr::to_string(src);
+    let mut found: Vec<&str> = Vec::new();
+    let mut inside = false;
+    for line in text.split('\n').take(MAX_MODULE_LINES) {
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        if line.starts_with("# ") {
+            if fields.len() >= 3 {
+                inside = fields[2].starts_with('v') || fields[2] == "=>";
+            }
+            continue;
+        }
+        if inside && fields.len() == 1 && !fields[0].starts_with('#') {
+            found.push(fields[0]);
+        }
+    }
+    found.sort_unstable();
+    found.dedup();
+    found.iter().map(|m| crate::pystr::u(m)).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -571,5 +600,13 @@ mod tests {
         assert_eq!(got, vec!["a.example/x/v2", "a.example/x", "c.example/z", "d.example/w"]);
         assert!(vendored_modules(&u("")).is_empty());
         assert!(vendored_modules(&u("# \n\n# a.example/x v1\n")).is_empty());
+        // (F-06) the packages it lists: a module's lines that are not `#` lines
+        let got: Vec<String> = vendored_packages(&u(text)).iter().map(|m| crate::pystr::to_string(m)).collect();
+        assert_eq!(got, vec!["a.example/x", "a.example/x/v2", "d.example/w/pkg"]);
+        let got: Vec<String> = vendored_packages(&u("x.example/stray\r\n# a.example/x v1\r\n## explicit\r\na.example/x/testdata/t\r\n\r\n\
+                                                     # short\na.example/x/_y\n# b.example/y notaversion\nb.example/y\n\
+                                                     # c.example/z => ./z\nc.example/z/p\nnot one\n"))
+            .iter().map(|m| crate::pystr::to_string(m)).collect();
+        assert_eq!(got, vec!["a.example/x/_y", "a.example/x/testdata/t", "c.example/z/p"]);
     }
 }

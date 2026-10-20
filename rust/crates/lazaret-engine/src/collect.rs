@@ -390,21 +390,28 @@ fn ext_lang(p: &Pack, ext: &[u32]) -> Option<PyStr> {
         .find(|(k, _)| k.as_slice() == ext).and_then(|(_, v)| v.get("value")).and_then(|v| v.as_str()).map(|v| v.to_vec())
 }
 
-/// core.never_built: a file no build of a dependent compiles (a Go *_test.go, a name with "_" or "." first, one
-/// under testdata/ or vendor/; a crate's tests/, benches/ and examples/). `rel`: "/"-separated, below the module's
-/// or the crate's root.
+/// core.never_built: a file the file rules leave out as no build of a dependent compiles it (a Go *_test.go, a name
+/// with "_" or "." first, one under testdata/ or below a vendor/ folder's own folders; a crate's tests/, benches/ and
+/// examples/). `rel`: "/"-separated, below the module's or the crate's root. A test file's name ends in `_test.go`
+/// exactly, as Go reads it (and goread's never_built): `x_TEST.go` is built. A package in vendor/ itself is the
+/// module's (`m/vendor`: built); one in testdata/ is built when imported, which the Go reader reads (F-06).
 pub fn never_built(kind: &str, rel: &[u32]) -> bool {
     let parts: Vec<&[u32]> = rel.split(|&c| c == '/' as u32).collect();
     match kind {
         "go" => {
-            let name = parts[parts.len() - 1];
-            matches!(name.first(), Some(&c) if c == '_' as u32 || c == '.' as u32)
-                || pystr::lower(name).ends_with(&s("_test.go"))
-                || parts[..parts.len() - 1].iter().any(|p| is(p, "testdata") || is(p, "vendor"))
+            let dirs = &parts[..parts.len() - 1];
+            go_name_never_built(parts[parts.len() - 1])
+                || dirs.iter().any(|p| is(p, "testdata"))
+                || dirs.iter().rev().skip(1).any(|p| is(p, "vendor"))
         }
         "crate" => ["tests", "benches", "examples"].iter().any(|d| is(parts[0], d)),
         _ => false,
     }
+}
+
+/// A Go file no build compiles by its name alone: a test file (`_test.go` exactly), a name with "_" or "." first.
+pub fn go_name_never_built(name: &[u32]) -> bool {
+    matches!(name.first(), Some(&c) if c == '_' as u32 || c == '.' as u32) || pystr::ends_with(name, "_test.go")
 }
 
 /// core._vendor_lang: "go" or "rs" for a file of a Go or cargo vendor tree that a build compiles.
@@ -418,7 +425,11 @@ fn vendor_lang(p: &Pack, dep: &Dep, rel: &[u32], ext: &[u32], sep: &[u32]) -> Op
     let below: PyStr = rel.get(root.len() + 1..).unwrap_or(&[]).to_vec();
     let below = pystr::replace(&below, sep, &s("/"));
     if is(kind, "go") {
-        return (!never_built("go", &below)).then(|| s("go"));
+        // by its name alone (F-06): the path below vendor/ begins with a module's path, which may hold a `testdata`
+        // or a `vendor` (example.test/vendor), and `go mod vendor` copies only the packages a build compiles; the
+        // Go reader reads each module's files below its root (vendor/modules.txt: core._vendored_code)
+        let name = below.rsplit(|&c| c == '/' as u32).next().unwrap_or(&[]);
+        return (!go_name_never_built(name)).then(|| s("go"));
     }
     let inside = match below.iter().position(|&c| c == '/' as u32) {
         Some(k) => below[k + 1..].to_vec(),
@@ -654,6 +665,12 @@ pub fn file(p: &Pack, f: &FileIn) -> Value {
         ("lang", Value::Str(lang.clone())),
         ("dep", Value::Bool(f.dep.any())),
     ];
+    // (F-06) a Go file as the Go toolchain reads it, where that differs from the text: the Go reader's
+    if is(&lang, "go") {
+        if let Some(go) = crate::decode::go_text(data) {
+            entry.push(("goContent", Value::Str(go)));
+        }
+    }
     if let Dep::Vendor(_, root) = &f.dep {
         if is(&lang, "go") || is(&lang, "rs") {
             entry.push(("vendor", Value::Str(root.clone())));
@@ -798,13 +815,45 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_go_file_carries_the_go_readers_text_where_it_differs() {
+        // F-06: the rules read `content`; the Go reader reads `goContent` (decode::go_text), given only where the Go
+        // toolchain reads the bytes otherwise (a lone "\r" here: white space to Go, a line end to the rules)
+        let p = crate::pack::current();
+        let read_at = |rel: &str, data: &[u8]| {
+            let f = FileIn { rel: pystr::u(rel), name: pystr::u(rel.rsplit('/').next().unwrap()), size: data.len() as u64,
+                             dep: Dep::Vendor(s("go"), s("vendor")), cap: 1 << 20, config_cap: 1 << 20, windows: false,
+                             neumaier: false, redact: true, head: Some(Ok(data.to_vec())), data: Some(Ok(data.to_vec())),
+                             sample: None };
+            let got = file(&p, &f);
+            let entry = got.get("file").cloned().expect("a file");
+            let field = |k: &str| entry.get(k).and_then(|v| v.as_str()).map(pystr::to_string);
+            (field("content"), field("goContent"))
+        };
+        let read = |data: &[u8]| read_at("vendor/example.test/m/x.go", data);
+        // (a vendored Go file by its name alone: the path below vendor/ begins with a module's, here example.test/testdata)
+        assert_eq!(read_at("vendor/example.test/testdata/t.go", b"package t\n").0.as_deref(), Some("package t\n"));
+        assert_eq!(read(b"package m\r// c\r\nvar a = 1\n"),
+                   (Some("package m\n// c\nvar a = 1\n".into()), Some("package m\r// c\nvar a = 1\n".into())));
+        assert_eq!(read(b"package m\r\nvar a = 1\n"), (Some("package m\nvar a = 1\n".into()), None));
+    }
+
+    #[test]
     fn never_built_is_cores() {
         let u = pystr::u;
         assert!(never_built("go", &u("x_test.go")));
-        assert!(never_built("go", &u("a/X_TEST.GO")));
+        // (Go's test files end in `_test.go` exactly: these are built, and `.GO` read as `.go` is)
+        assert!(!never_built("go", &u("x_TEST.go")));
+        assert!(!never_built("go", &u("a/x_Test.go")));
+        assert!(!never_built("go", &u("a/X_TEST.GO")));
         assert!(never_built("go", &u("_x.go")));
         assert!(never_built("go", &u("testdata/x.go")));
         assert!(!never_built("go", &u("a/x.go")));
+        // (F-06) a package in vendor/ itself is the module's; below it, another module's
+        assert!(!never_built("go", &u("vendor/v.go")));
+        assert!(!never_built("go", &u("a/vendor/v.go")));
+        assert!(never_built("go", &u("vendor/x/x.go")));
+        // a vendor tree's file by its name alone: its path begins with a module's (example.test/testdata)
+        assert!(go_name_never_built(&u("x_test.go")) && go_name_never_built(&u(".x.go")) && !go_name_never_built(&u("x.go")));
         assert!(never_built("crate", &u("tests/a.rs")));
         assert!(!never_built("crate", &u("src/tests/a.rs")));
     }

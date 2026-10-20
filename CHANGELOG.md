@@ -2096,6 +2096,51 @@ aggregate):
   run alone; a stand-in put back after the last close), and its `ClosedPoolTests` and `CloseMidwayTests` (with a
   stand-in executor).
 
+- **A Go file is left out as never built only for a real `ignore` constraint (F-06, the review of Oct 18; rule set
+  2.103.0).** The Go reader left a file out, unread, when its header held `//go:build` or `// +build`
+  followed directly by `ignore`: it stripped the prefixes without asking for the white space Go's constraint parser
+  (`go/build/constraint`) needs after them, so `//go:buildignore` and `// +buildignore` — plain comments to Go, the
+  file builds — read as `ignore`, and every finding of the file was gone: a package whose `init` deletes the user's
+  Documents folder, SUSPICIOUS (SC-IMPORT-RISK, CRITICAL), was OK with no issue once either comment was added, in the
+  registry and in a `--deps` scan of both packages. The header is now read as `go/build` reads it, and a file is left
+  out only where that is certain: a `//go:build` line needs white space after its prefix and, with one, decides; it
+  leaves the file out when it comes before any block comment or code and is `ignore` and'd with other tags (`&&`,
+  parentheses); two of them are Go's error. Without one, a `// +build` line before the leading comments' last blank
+  line leaves it out when it is one option that holds `ignore` (`ignore,linux`). Read now: a constraint inside a
+  block comment or after the package clause, `||` or `!`, a `// +build ignore` with no blank line before the package
+  clause, a `//go:build ignore` whose own `// +build` lines say otherwise, white space outside ASCII, and a header past
+  the 65,536 characters the old reading looked at, where `//go:build ignore || linux` could be cut to
+  `//go:build ignore`.
+  The reader decides on the file as the Go toolchain reads its bytes (the engine's `go_text`, given to the reader by
+  the registry and both `--deps`): UTF-8, its byte order mark dropped once, "\r\n" folded and a lone "\r" kept,
+  white space to Go and no line end (`// c\r//go:build ignore` is one comment, and `"a\rb"` a string Go compiles,
+  which the parser refused once the "\r" became a line end); a file is never left out with a NUL where Go's reader of
+  the package clause and imports meets one (its error; one past them is none, and such a file is left out as Go
+  leaves it out), a "\r" in its header or a byte order mark left at its start. The rules read the text as before: a
+  UTF-16 or UTF-32 `.go` file is still decoded for them (its tokens are found), while Go, and the reader, refuse its
+  NULs; and the reader's findings are numbered as the rules number lines (a lone "\r" ends one).
+  A `.go` file the engine's parser refuses makes the module INCOMPLETE (SC-TRUNCATED, naming the first and how many
+  more): a build may compile what that parser refuses; not one in a `_`, `.` or `testdata/` folder no import names,
+  which Go builds only when imported, and not one whose bytes are not text to Go (its decoding's SC-TRUNCATED is the
+  file's one; a UTF-16 file has none, and Go refuses it). A package in `testdata/` that the module's code imports is built, and is now read, with the file rules
+  too: the registry decodes a module's testdata/ files, and counts them against the reader's 300,000,000
+  characters, only when the reader asks for their package; one it asks for that was not kept makes the module
+  INCOMPLETE. An import of another module's testdata/ package, which that module's own scan leaves out as data, is
+  the new **SC-GO-TESTDATA-IMPORT** (MAJOR) in the importing module, with the path, and so is an import, under the
+  module's own path, of a `testdata/` folder the module does not have: a nested module's (`example.test/nst` importing
+  `example.test/nst/inner/testdata/x`), which a module zip leaves out. A package in a module's own
+  `vendor/` (`m/vendor`) is read. In a `--deps` vendor tree, a Go file is left out by its name alone (the path below
+  `vendor/` begins with a module's, which may be `example.test/testdata`), and one in a `testdata/`, `_` or `.` folder
+  is Go code as a package `vendor/modules.txt` lists, which the reader then reads whoever imports it, or as one an
+  import of a Go file read names (the project's or the vendor tree's, through a chain: a main module whose `go.mod`
+  says a `go` below 1.23 builds a vendored package modules.txt does not list when an import names it); another is
+  data, as in the registry (`go mod vendor` copies the files a package's `//go:embed` patterns match, `.go` fixtures
+  below it too, and lists every package a build imports): the rules no longer read an unlisted, unimported `_` or `.`
+  folder's `.go` files, which they read before, and read a listed `testdata/` package's, which they did not; a
+  modules.txt that cannot be read, or lists no package, leaves every file read. And a Go test file's name ends in
+  `_test.go` exactly, as Go reads it: `x_TEST.go`, which Go builds, was taken for a test file by the file selection
+  of the registry and of a vendor tree in both packages (`core.never_built`, the engine's `collect`), so neither the
+  reader nor the file rules read it.
 - **A tagged template call of a script's wrapper no longer crashes the engine (PANIC-TAGGED; rule set 2.98.0).** John's discovery run of Oct 18: `@epoch32/visage` 1.14.0's `dist/vite/index.js` made the engine panic
   ("index out of bounds" in `jsparse/tree.rs`), so the release was INCOMPLETE with a CRITICAL SC-TRUNCATED; the npm
   package's WASM build aborts on a panic. A tagged template (`` fn`…` ``) runs the function as a call does, and the

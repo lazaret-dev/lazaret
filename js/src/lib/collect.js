@@ -76,6 +76,7 @@ function addCollected(got, col, rel) {
   if (got.file) {
     const f = { path: got.file.path, content: got.file.content, lang: got.file.lang, dep: got.file.dep };
     if (got.file.vendor !== undefined) f.vendor = got.file.vendor;      // (its module or crate is read whole)
+    if (got.file.goContent !== undefined) f.goContent = got.file.goContent;   // (F-06: the Go reader's text)
     col.files.push(f);
   }
   if (got.manifest) col.manifests.push(got.manifest);

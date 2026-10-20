@@ -1,6 +1,6 @@
 {
  "format": 1,
- "rule_set": "2.102.0",
+ "rule_set": "2.103.0",
  "source": "lazaret.scanner.core, extracted by scripts/make_rust_tables.py \u2014 do not edit",
  "values": {
   "ALWAYS_PRUNE_DIRS": {
@@ -12213,6 +12213,9 @@
   "_GO_START_WHY": {
    "value": "Go runs nothing when a module is downloaded, but a package's init functions and the initializers of its package-level variables run when any program that imports the package starts, and so does a cgo constructor: where Go malware puts its payload (the 2025 typosquats ran `wget -O - \u2026 | /bin/bash` from init). Collecting credentials or the whole environment next to a network call is the shape of a stealer; MAJOR where the code may have a reason, CRITICAL for code no library needs: code fetched and run, a reverse shell, a beacon to a data-capture service."
   },
+  "_GO_TESTDATA_IMPORT_WHY": {
+   "value": "Go's tools leave a testdata/ folder out of a module's packages (go build ./..., go vet ./...), and a scan of that module reads it as test data unless the module's own code imports it. An import path can still name such a package from another module, and a build of the importing module then compiles it and runs its init code: code shipped where a review of either module does not look. A library has no reason to import another module's test data."
+  },
   "_GUARD_BLOCK_LINES": {
    "value": 12
   },
@@ -14774,6 +14777,9 @@
     "SC-GO-GENERATE": {
      "value": "A go:generate command"
     },
+    "SC-GO-TESTDATA-IMPORT": {
+     "value": "An import of another module's test data"
+    },
     "SC-IMPORT-RISK": {
      "value": "Risky import-time code"
     },
@@ -15530,6 +15536,12 @@
     },
     "start_sdist": {
      "value": "runs when the package's Rust extension is loaded, before any of its code is called (#[ctor], a load section)"
+    },
+    "testdata_import_fix": {
+     "value": "Read that package's code in the other module's testdata/ folder before building with this module."
+    },
+    "testdata_import_msg": {
+     "value": "{path} imports {import}{more}, a package in another module's testdata/ folder: a build of this module compiles it, while a scan of that module leaves it out as test data."
     },
     "use_fix": {
      "value": "Don't use the {what}; report it to its registry."

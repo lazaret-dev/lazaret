@@ -1687,6 +1687,17 @@ def decode_member(path, data, lang=None):
     got = _native.call("decode_source", args, _bytes_text(data))
     return got["text"], engine._issues(path, got["issues"])
 
+
+def decode_go_member(path, data):
+    """decode_member for a .go file, and what the Go reader reads of it -> (text, extra_issues, go_text): the bytes
+    as the Go toolchain reads them where that is not the text (UTF-16 or UTF-32, whose NULs Go refuses; a lone
+    "\\r", white space to Go and a line end to the rules), the text otherwise (F-06: the engine's decode::go_text).
+    One call."""
+    data = bytes(data or b"")
+    args = {"issues": True, "redact": bool(REDACT_SECRETS), "name": path, "windows": _WINDOWS_PATHS, "lang": "go"}
+    got = _native.call("decode_source", args, _bytes_text(data))
+    return got["text"], engine._issues(path, got["issues"]), got.get("goText", got["text"])
+
 def classify_binary(path, data, size, context):
     """Return a supply-chain issue dict for a suspicious non-source file, or None:
     SC-BINARY for an executable or a compiled artifact (by its magic bytes, or
@@ -4125,6 +4136,8 @@ def _collect_file(path, rel, st, in_dep, col):
         entry = {"path": f["path"], "content": f["content"], "lang": f["lang"], "dep": f["dep"]}
         if "vendor" in f:
             entry["vendor"] = f["vendor"]          # (its module or crate is read whole: _vendored_code)
+        if "goContent" in f:
+            entry["goContent"] = f["goContent"]    # (F-06: the Go reader's text, where Go reads the bytes otherwise)
         col["files"].append(entry)
     if "manifest" in got:
         m = got["manifest"]
@@ -4164,8 +4177,9 @@ def _collect(root, excludes=(), include_deps=False):
                               f"{exc.strerror or type(exc).__name__}") from None
     try:
         _walk(tree, excludes, include_deps, col)
+        _go_vendor_data(tree, col, excludes)    # (F-06; its modules.txt read through the same root)
         if own:
-            issues.extend(changed_issues(tree))
+            col["issues"].extend(changed_issues(tree))      # (_go_vendor_data gave col a new list)
     finally:
         if own:
             tree.close()
@@ -4259,6 +4273,70 @@ def _walk_tree(tree, excludes, include_deps, col):
                 tree.found.add(at)
                 push.append((rel, in_dep or _dep_of(extra[1], rel), at))
         stack.extend(reversed(push))       # pop order = sorted, depth-first (like os.walk)
+
+
+#: The findings of a file's reading that a file found to be data takes with it (_go_vendor_data).
+_READING_RULES = frozenset({"Q-ENCODING", "SC-UTF7", "SC-ESCAPE-CODEC", "SC-TRUNCATED"})
+
+
+def _go_vendor_data(root, col, excludes=()):
+    """(F-06) A Go vendor tree's .go files that are data: one in a testdata/ folder, or a folder named with "_" or
+    "." first, of a package vendor/modules.txt does not list and no Go file read imports. `go mod vendor` copies a
+    package's files and the files its //go:embed patterns match, which may be .go files below it; it lists every
+    package a build imports, and a main module whose go.mod says `go 1.23` or later builds no other, while one below
+    that builds a vendored package modules.txt does not list when an import names it (cmd/go's importFromModules).
+    So a candidate folder an import of a file read names (the project's Go or a vendor tree's) is code, and the files
+    of its package are read and their imports followed in turn (go_imports); the rest is not read as Go, as the
+    registry reads a module's unimported testdata/ (_package_code): its entries are dropped from col's files, and
+    their reading's findings (_READING_RULES) from col's issues. A vendor tree whose modules.txt cannot be read, or
+    lists no package, keeps every file."""
+    roots = sorted({_slash(f["vendor"]) for f in col["files"] if f.get("vendor") and f["lang"] == "go"},
+                   key=len, reverse=True)
+    if not roots:
+        return
+    tree = _DependencyTree(root, col["files"], col["manifests"], excludes)
+    listed = {}
+    for top in roots:
+        text = _vendor_text(tree, f"{top}/modules.txt")
+        listed[top] = (frozenset(engine.go_vendored_packages(text)) or None) if text is not None else None
+
+    def candidate(path):
+        """The folder (below its vendor tree, its import path) of a file that is data unless an import names it."""
+        rel = _slash(path)
+        top = next((t for t in roots if rel.startswith(t + "/")), None)
+        if top is None or listed[top] is None or not rel.endswith(".go"):
+            return None
+        folder = posixpath.dirname(rel[len(top) + 1:])
+        if (any(d == "testdata" or d[:1] in ("_", ".") for d in folder.split("/"))
+                and folder not in listed[top]):
+            return folder
+        return None
+    folders = {}                                # folder -> its entries, while no import names it
+    read = []
+    for f in col["files"]:
+        folder = candidate(f["path"]) if f.get("vendor") and f["lang"] == "go" else None
+        if folder is not None:
+            folders.setdefault(folder, []).append(f)
+        elif f["lang"] == "go":
+            read.append(f)
+    named = set()
+    while read and folders:
+        imports, refused = set(), False
+        for paths in engine.go_imports([(f["path"], f.get("goContent", f["content"])) for f in read]):
+            if paths is None:
+                refused = True                  # (a file the parser refuses may import any of them: all are code)
+            else:
+                imports.update(paths)
+        read = []
+        for folder in sorted(set(folders) if refused else set(folders) & imports):
+            named.add(folder)
+            read.extend(folders.pop(folder))
+
+    def data(path):
+        folder = candidate(path)
+        return folder is not None and folder not in named
+    col["files"] = [f for f in col["files"] if not (f.get("vendor") and f["lang"] == "go" and data(f["path"]))]
+    col["issues"] = [i for i in col["issues"] if not (i["rule"] in _READING_RULES and data(i["file"]))]
 
 
 def collect_files(root, extra_excludes, include_deps=False):
@@ -4582,18 +4660,35 @@ _CGO_EXTS = (".c", ".h")
 
 def never_built(kind, rel):
     """Is `rel` ('/'-separated, below a Go module's root for "go", a crate's
-    for "crate") a file no build of a dependent compiles, as the readers say
-    (goread/rsread never_built): a Go *_test.go file, a name with "_" or "."
-    first, one under testdata/ or vendor/; a crate's tests/, benches/ and
-    examples/. Neither the readers nor the file rules read it."""
+    for "crate") a file the file rules leave out as no build of a dependent
+    compiles it (goread/rsread never_built): a Go *_test.go file, a name
+    with "_" or "." first, one under testdata/ or below a vendor/ folder's
+    own folders; a crate's tests/, benches/ and examples/. A test file's
+    name ends in `_test.go` exactly, as Go reads it: `x_TEST.go` is built.
+    A package in vendor/ itself (`m/vendor`) is the module's and is built;
+    one in testdata/ is built when an import names it: the Go reader is
+    given those files (go_testdata) and reads such a package (F-06); a
+    vendor tree's are its modules.txt's (_go_vendor_data)."""
     if kind == "go":
         parts = rel.split("/")
-        name = parts[-1]
-        return (name[:1] in ("_", ".") or name.lower().endswith("_test.go")
-                or any(p in ("testdata", "vendor") for p in parts[:-1]))
+        name, dirs = parts[-1], parts[:-1]
+        return (name[:1] in ("_", ".") or name.endswith("_test.go") or "testdata" in dirs
+                or "vendor" in dirs[:-1])
     if kind == "crate":
         return rel.split("/", 1)[0] in ("tests", "benches", "examples")
     return False
+
+
+def go_testdata(rel):
+    """Is `rel` ('/'-separated, below a Go module's root) a .go file that only
+    its testdata/ folder keeps from the file rules (never_built)? Such a file
+    is given to the Go reader all the same: a package in testdata/ is built
+    when an import names it, and the reader reads it then, and the file
+    rules too (F-06)."""
+    parts = rel.split("/")
+    name, dirs = parts[-1], parts[:-1]
+    return (name.lower().endswith(".go") and "testdata" in dirs and "vendor" not in dirs[:-1]
+            and not (name[:1] in ("_", ".") or name.endswith("_test.go")))
 
 
 _LAYOUT_ROOT_RE = re.compile(r"^(?:[A-Za-z]:)?/+")
@@ -4731,7 +4826,10 @@ def _vendored_code(tree, files, should_stop=None):
     section comment) -> (issues, stopped): each module vendor/modules.txt
     lists (a file of none is read with its package's directory), each crate
     of a cargo vendor tree. A module or a crate over PACKAGE_CODE_CHARS is
-    SC-TRUNCATED, and so is one the engine could not answer about."""
+    SC-TRUNCATED, and so is one the engine could not answer about. A Go file
+    is given as the Go toolchain reads it (goContent, where that is not its
+    content), and every package given is one modules.txt lists, built
+    (`listed`: one in testdata/ too; _go_vendor_data dropped the others)."""
     units = {}
     listed = {}
     for f in files:
@@ -4756,7 +4854,8 @@ def _vendored_code(tree, files, should_stop=None):
                 return out, stopped
         base = f"{top}/{unit}" if unit else top
         members = sorted(members, key=lambda f: f["path"].replace(os.sep, "/"))
-        named = [(f["path"], f["path"].replace(os.sep, "/")[len(base) + 1:], f["content"]) for f in members]
+        named = [(f["path"], f["path"].replace(os.sep, "/")[len(base) + 1:], f.get("goContent", f["content"]))
+                 for f in members]
         if lang == "go":
             for folder in sorted({posixpath.dirname(f["path"].replace(os.sep, "/")) for f in members}):
                 named.extend((_fs_display(rel.replace("/", os.sep)), rel[len(base) + 1:], text)
@@ -4772,7 +4871,7 @@ def _vendored_code(tree, files, should_stop=None):
             if lang == "go":
                 answer = engine.go_package([(r, t) for _p, r, t in named], module=module,
                                            use_file_chars=USE_RISK_MAX_CHARS, use_chars=USE_RISK_CHARS,
-                                           what=what, names=order)
+                                           what=what, names=order, listed=True)
             else:
                 script, lib, proc_macro = cargo_layout(_vendor_text(tree, f"{base}/Cargo.toml"),
                                                        [r for _p, r, _t in named])

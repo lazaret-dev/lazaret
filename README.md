@@ -210,8 +210,11 @@ are pruned only when they look like dependency trees (a `pyvenv.cfg`, `modules.t
 `package.json` or `*.dist-info`/`*.egg-info` directly inside, or for `vendor` since 0.1.9 a crate directory
 with `cargo vendor`'s `.cargo-checksum.json`) — otherwise they are first-party code and
 scanned. With `--deps`, a Go `vendor/` and a `cargo vendor` tree are read as the registry reads a module zip and
-a `.crate` (since 0.1.9): the file rules on each `.go` and `.rs` file a build compiles (not `*_test.go`,
-`testdata/`, a crate's `tests/`, `benches/`, `examples/`), and the engine's Go and Rust readers on each module
+a `.crate` (since 0.1.9): the file rules on each `.go` and `.rs` file a build compiles (not `*_test.go` or a
+name with `_` or `.` first, a crate's `tests/`, `benches/`, `examples/`; a `.go` file in a `testdata/`, `_` or `.`
+folder only as a package `vendor/modules.txt` lists or an import of a Go file read names: `go mod vendor` also
+copies embedded fixtures), and the
+engine's Go and Rust readers on each module
 `vendor/modules.txt` lists and each crate, its `Cargo.toml` read for the build script and the library: what a
 Go package's `init` code reaches is SC-IMPORT-RISK, a build script or a procedural macro SC-INSTALL-HOOK
 (CRITICAL), the strong reasons of the rest SC-USE-RISK. `dist/`, `build/` and `migrations/` are scanned. `__pycache__` is not scanned as source, but every

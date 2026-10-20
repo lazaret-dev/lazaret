@@ -15,8 +15,9 @@ files, a camera's .mts videos, config files (UTF-16 ones, Lazaret's own reports,
 limits, links, named pipes, folders seen twice, .git, excluded names, node_modules, venvs with and without
 pyvenv.cfg, Go and cargo vendor trees, __pycache__ folders with .pyc headers, with --deps and without; and the npm
 package's walk to the Python package's. Two answers changed on purpose (0.1.9, rule set 2.85.0: SECRET-FP): Rust's
-tests.rs and *_test.rs are test files, and a secret (S-SECRET, S-TOKEN) in test code is listed as INFO. All content
-is inert.
+tests.rs and *_test.rs are test files, and a secret (S-SECRET, S-TOKEN) in test code is listed as INFO; and one more
+(F-06): a file of a Go vendor tree is left out by its name alone (a test file, `_` or `.` first), since the path below
+vendor/ begins with a module's path, which may hold a `testdata` or a `vendor`. All content is inert.
 """
 import copy
 import json
@@ -400,7 +401,9 @@ def _vendor_lang(vendor, rel, ext):
         return None
     below = rel[len(vendor[1]) + 1:].replace(os.sep, "/")
     if vendor[0] == "go":
-        return None if never_built("go", below) else "go"
+        # (F-06, changed on purpose: by the file's name alone, as the path below vendor/ begins with a module's path)
+        name = below.rsplit("/", 1)[-1]
+        return None if name[:1] in ("_", ".") or name.endswith("_test.go") else "go"
     _crate, _, inside = below.partition("/")
     return None if not inside or never_built("crate", inside) else "rs"
 

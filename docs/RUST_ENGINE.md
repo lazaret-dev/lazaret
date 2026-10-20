@@ -269,7 +269,10 @@ rust/
                              PEP 263 cookies, every text codec Python has (utf.rs: UTF-8, -16, -32,
                              -7; escape.rs; cjk.rs: the stateless CJK codecs' tables, gb18030's
                              four-byte and EUC-KR's make-up forms; iso2022.rs: the ISO-2022 family
-                             and HZ), the encoding findings (decode_source, encoding_issues, decode)
+                             and HZ), the encoding findings (decode_source, encoding_issues, decode);
+                             for the Go reader, Go source as the Go toolchain reads it where that is
+                             not the rules' text (F-06, go_text: UTF-8 only, one BOM dropped,
+                             "\r\n" folded and a lone "\r" kept)
     src/generated/codecs.rs  the codecs' tables, from Python's decoders (make_codec_tables.py)
     src/result.rs            a scan's result (BR-7 step 4 a, 0.1.9; core.build_result, regrade
                              and compute_metrics and their npm twins until then): the findings'
@@ -3001,11 +3004,66 @@ it: a package's functions, methods, types and package-level names are found
 across its files, and a call of another of the module's packages (an import of
 the module's path, `module` in the call; or, with none given, an import that
 ends in one of the module's folders) is followed there. What no build of a
-dependent reads is left out: `_test.go` files, files whose names start with `_`
-or `.`, `testdata/`, `vendor/` (other modules, read on their own) and files
-constrained to `ignore`. A folder whose name starts with `_` or `.` is read: an
-import can name it. A `.go` file the parser refuses could not be built, so
-nothing in it runs; the answer lists it (`unparsed`) for the text rules.
+dependent reads is left out: `_test.go` files (the name ends so exactly, as
+Go's: `x_TEST.go` is built), files whose names start with `_` or `.`, files
+below a `vendor/` folder's own folders (`vendor/x` is imported as `x`, another
+module's, read on its own; a package in `vendor/` itself, `m/vendor`, is the
+module's and is read) and files a build constraint certainly confines to
+`ignore`. A folder whose name starts with `_` or `.` is read: an import can
+name it. A package in a `testdata/` folder is left out by Go's wildcards, not
+by an import: it is read when an import of a file read names it (with the
+module's path; without one, any import that ends in the folder), transitively,
+and with `listed` (a `--deps` vendor tree's modules: modules.txt lists every
+package given, or an import names it) every one given is. An import of the
+module's own `testdata/` package of which no file was given is `wanted` (the
+registry gives those files and asks again); one of another module's, which that
+module's reading leaves out, is `testdataImports`, and the reader's issues make
+it SC-GO-TESTDATA-IMPORT (MAJOR, once, with how many more); and so is one of a
+`testdata/` folder the module does not have under its own path (a nested
+module's: the call's `testdata`, the module's testdata folders given or not). A
+`.go` file the parser refuses is listed (`unparsed`, and `refused`: the line and why, for one
+a build compiles: not one in a `_`, `.` or `testdata/` folder no import names);
+what it does is not read, and since a build may compile what this parser
+refuses, the reader's issues make the module INCOMPLETE (one SC-TRUNCATED
+naming the first such file and how many more; not for a file whose text is not
+text, which its decoding's SC-TRUNCATED already says, or UTF-16, which Go
+refuses).
+
+The text is the file as the Go toolchain reads it (`decode::go_source`): the
+callers give `go_text` where it differs from the rules' text (`decode_source`'s
+answer's `goText`, collect's `goContent`): UTF-8 only (no UTF-16 or UTF-32:
+their NULs are Go's error), one leading UTF-8 byte order mark dropped, "\r\n"
+folded but a lone "\r" kept, white space to Go and no line end. The rules read
+`decode_source`'s text as before, and the reader numbers its lines as they do
+(a lone "\r" ends one: its findings, `refused`, `generate`, the issues'
+snippets). The
+constraint (`build_ignored`, F-06) is read as `go/build` reads it
+(`parseFileHeader`, `shouldBuild`, `go/build/constraint`), and a file is left
+out only where that is certain; anything else is read. The header is the blank
+lines and comments before the first code, split at "\n" (after a last "\n"
+there is no line); a constraint inside a `/* … */` comment is none. A
+`//go:build` line needs white space after its prefix (`//go:buildignore` and
+`// +buildignore` are comments, and the file builds); with one, it decides,
+and leaves the file out when it is in the leading run of blank lines and line
+comments and its expression is `ignore` and'd with other tags (`&&` and
+parentheses: `ignore && linux`, `(ignore)`); two of them are Go's error. Go
+also reads one after a closed block comment, which is read here. Without one,
+a `// +build` line of that run before its last blank line leaves the file out
+when it is one option of tags joined by `,` that holds `ignore`
+(`ignore,linux`). The rule is Go 1.17's and later's, whose `//go:build`
+decides; a `//go:build ignore` beside `// +build` lines of which none says so
+is read all the same: the file's own constraints disagree (`go vet`'s error),
+and one of them says it builds. Read too: `||`, `!`, a syntax error, more than
+100 terms, a constraint after the package clause, a file holding a NUL where
+Go's reader of the package clause and the imports meets it (`go_reader_meets_nul`,
+a port of `go/build`'s `importReader`: Go's error; a NUL past them is none, and
+such a file is left out as Go leaves it out), a "\r" in the header (a lone one
+is no line end to Go), a byte
+order mark left at the start (Go reads a second one as code), and a line (or a
+comment's rest) that begins with a character outside ASCII: only ASCII white
+space is read as Go reads it here (U+00A0 is white space to Go). Spaces and
+tabs separate a constraint's terms here; Go's other white space after a prefix
+makes the line a constraint that is read, not one that leaves the file out.
 
 `eval.rs` evaluates the code as the Rust reader does (§21), on the tree: a value
 is the text the code builds (`+`, `fmt.Sprintf` with `fmt`'s verbs,
@@ -3076,5 +3134,13 @@ module held; aws-sdk-go v1, 207 million characters, now peaks at 2.4 GB, from 3.
 - `go_vendored_modules` (text: a `vendor/modules.txt`) -> the module paths it says are vendored (a `# path version`
   line followed by its annotations or packages; a `# ` line with nothing after it is a replacement `go mod vendor`
   records but does not use), longest first: a file belongs to the module whose path is the longest prefix of its own.
+  With `{"packages": true}` (F-06) -> the packages it lists, read as cmd/go's `readVendorList` reads them (a line of
+  one field below a `# path version` or `# path =>` line; a `# ` line of fewer fields changes nothing), sorted: a
+  vendored `.go` file in a `testdata/`, `_` or `.` folder is Go code only as one of them or as a package an import
+  names (below).
+- `go_imports` (F-06; `{"files": [[path, length], …]}`, the texts concatenated) -> each file's import paths, as the
+  Go parser reads them (escapes unquoted), none for a file a build constraint certainly leaves out, null for one the
+  parser refuses: the unlisted vendored folders a `--deps` scan's Go files import (`core._go_vendor_data`, `deps.js`
+  `goVendorData`; a main module below `go 1.23` builds them), followed through the files of each folder named.
 
 Both are linear in the text, and nothing in them panics on any input (`vendor::tests`).

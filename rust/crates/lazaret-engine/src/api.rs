@@ -72,7 +72,7 @@ pub const CALLS: &[&str] = &[
     // 0.1.9 (G-1): a Go module's code read for what its init code and the rest do
     "go_package",
     // 0.1.9 (Part C): what a vendored crate's Cargo.toml and a vendor/modules.txt say (vendor.rs), for --deps
-    "cargo_layout", "go_vendored_modules",
+    "cargo_layout", "go_vendored_modules", "go_imports",
     // 0.1.9 (BR-7 step 1): CI files read for what they run — GitHub Actions workflows and GitLab CI files
     "ci_kind", "ci_outline", "ci_workflow", "ci_gitlab", "ci_rule", "ci_issues", "ci_uses", "ci_parse_uses", "ci_check",
     "ci_logical_lines",
@@ -1294,6 +1294,18 @@ fn dispatch(name: &str, args: &Value, text: &[u32]) -> Result<Value, CallError> 
                 ("proc_macro", l.proc_macro.map(Value::Bool).unwrap_or(Value::Null)),
             ])
         }
+        // {"files": [[path, length], …]} (the files' texts, concatenated) -> [the import paths of a file's build, or
+        // null for one the parser refuses, …] (F-06: the vendored folders a --deps scan's Go files import)
+        "go_imports" => {
+            let files = package_files(args, text.len()).map_err(|m| CallError::BadArgs(format!("go_imports: {m}")))?;
+            let text = std::sync::Arc::new(text.to_vec());
+            let got = on_own_stack(move || {
+                files.iter().map(|(_, a, b)| crate::goread::file_imports(&text[*a..*b])).collect::<Vec<_>>()
+            });
+            Value::Arr(got.into_iter().map(|f| f.map_or(Value::Null, |v| strs(&v))).collect())
+        }
+        // {"packages": true}: the packages it lists (F-06), not its modules
+        "go_vendored_modules" if matches!(args.get("packages"), Some(Value::Bool(true))) => strs(&crate::vendor::vendored_packages(text)),
         "go_vendored_modules" => strs(&crate::vendor::vendored_modules(text)),
         "js_flow" => js_flow(args, text)?,
         "py_flow" => py_flow(args, text)?,
@@ -1595,14 +1607,20 @@ fn dispatch(name: &str, args: &Value, text: &[u32]) -> Result<Value, CallError> 
             crate::baseline::apply(p, &a)
         }
         "decode_source" => {
-            // the file's bytes as the text (one code point a byte); {lang, issues, redact} -> {"text", "info", and
-            // with `issues` its encoding findings (decode/mod.rs)}
+            // the file's bytes as the text (one code point a byte); {lang, issues, redact} -> {"text", "info", for
+            // "go" "goText" where the Go toolchain reads the bytes otherwise (decode::go_text: the Go reader's text),
+            // and with `issues` its encoding findings (decode/mod.rs)}
             if text.iter().any(|&c| c > 0xFF) {
                 return Err(CallError::BadArgs("decode_source: the bytes are one code point each, up to 0xFF".into()));
             }
             let bytes: Vec<u8> = text.iter().map(|&c| c as u8).collect();
             let (decoded, info) = crate::decode::decode_source(&bytes, lang);
             let mut items = vec![("text", Value::Str(decoded.clone())), ("info", crate::decode::info_value(&info))];
+            if lang == Some("go") {
+                if let Some(go) = crate::decode::go_text(&bytes) {
+                    items.push(("goText", Value::Str(go)));
+                }
+            }
             if matches!(args.get("issues"), Some(Value::Bool(true))) {
                 let redact = !matches!(args.get("redact"), Some(Value::Bool(false)));
                 let mut issues = crate::decode::encoding_issues(p, &decoded, &info, redact);
@@ -2292,20 +2310,35 @@ fn with_reader_issues(args: &Value, spans: &[(usize, usize)], text: &[u32], answ
 }
 
 /// go_package: {"files": [[path, length], …] (their contents, concatenated, are
-/// the text; a module's .go files, and its cgo packages' .c and .h files),
-/// "module" (go.mod's module path, optional), "use_file_chars", "use_chars"
-/// (SC-USE-RISK's bounds, optional)} -> {"start": [finding, …] (the
-/// import-time test of what init code reaches), "uses": [finding, …],
-/// "read": [file index, …], "unparsed": [file index, …] (.go files the
-/// parser refuses), "generate": [[file, line, text], …], "linkname": [[file,
-/// line, text], …], "useRead": {files, chars, ofFiles, ofChars}}. A finding
-/// is {"file": index, "reasons": [str, …], "line": n}. Each module gets the
+/// the text; a module's .go files, as the Go toolchain reads them, and its
+/// cgo packages' .c and .h files), "module" (go.mod's module path,
+/// optional), "use_file_chars", "use_chars" (SC-USE-RISK's bounds,
+/// optional), "listed" (true: the packages a vendor tree's modules.txt
+/// lists, every one built), "testdata" ([folder, …]: the module's testdata/
+/// folders with .go files, given or not; an import of a testdata/ package
+/// that names none of them is another module's, a nested one's included)}
+/// -> {"start": [finding, …] (the import-time test
+/// of what init code reaches), "uses": [finding, …], "read": [file index,
+/// …], "unparsed": [file index, …] (.go files the parser refuses),
+/// "refused": [[file, line, why], …] (those of them a build compiles, where
+/// the parser stopped), "wanted": [import path, …] (the module's testdata/
+/// packages an import names of which no file was given), "testdataImports":
+/// [[file, line, import path], …] (another module's testdata/ packages
+/// imported), "generate": [[file, line, text], …], "linkname": [[file, line,
+/// text], …], "useRead": {files, chars, ofFiles, ofChars}}. A finding is
+/// {"file": index, "reasons": [str, …], "line": n}. Each module gets the
 /// call's budget (crate::goread::read_module).
 fn go_package(args: &Value, text: Vec<u32>) -> Result<Value, CallError> {
     use crate::goread::{read_module, Found, Options};
     let bad = |m: &str| CallError::BadArgs(format!("go_package: {}", m));
     let files = package_files(args, text.len()).map_err(bad)?;
-    let mut opts = Options { module: opt_str(args, "module"), ..Options::default() };
+    let listed = matches!(args.get("listed"), Some(Value::Bool(true)));
+    let testdata_dirs = match args.get("testdata") {
+        None | Some(Value::Null) => None,
+        Some(Value::Arr(a)) => Some(a.iter().map(|d| d.as_str().map(|t| t.to_vec()).ok_or_else(|| bad("testdata is a list of folders"))).collect::<Result<Vec<_>, _>>()?),
+        Some(_) => return Err(bad("testdata is a list of folders")),
+    };
+    let mut opts = Options { module: opt_str(args, "module"), listed, testdata_dirs, ..Options::default() };
     if let Some(n) = opt_int(args, "use_file_chars").filter(|&n| n >= 0) {
         opts.use_file_chars = n as usize;
     }
@@ -2337,6 +2370,9 @@ fn go_package(args: &Value, text: Vec<u32>) -> Result<Value, CallError> {
         ("uses", findings(&answer.uses)),
         ("read", ints(&answer.read)),
         ("unparsed", ints(&answer.unparsed)),
+        ("refused", directives(&answer.refused)),
+        ("wanted", strs(&answer.wanted)),
+        ("testdataImports", directives(&answer.testdata_imports)),
         ("generate", directives(&answer.generate)),
         ("linkname", directives(&answer.linkname)),
         (

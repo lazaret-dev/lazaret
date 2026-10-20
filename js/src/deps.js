@@ -17,7 +17,7 @@ import { lstatSync, readdirSync } from "node:fs";
 import { join, resolve, sep } from "node:path";
 import { scanFile } from "./scanner/scan.js";
 import { call, shebangLang, crossFileIssues, NativeError, NativeExhausted, goPackage, rsCrate, cargoLayout,
-  goVendoredModules, codePoints, packValues, issuesOf, dialectArgs } from "./lib/native.js";
+  goVendoredModules, goVendoredPackages, goImports, codePoints, packValues, issuesOf, dialectArgs } from "./lib/native.js";
 import { HOOK_COMMANDS } from "./lib/supplychain.js";
 import { readBounded, strerror, normpathRel } from "./lib/fs.js";
 import { truncatedIssue, scanErrorIssue } from "./lib/issue.js";
@@ -482,8 +482,10 @@ function cgoTexts(tree, folder, exts) {
 
 /** The readers on a --deps scan's vendored Go modules and crates (see the section comment): each module
  * vendor/modules.txt lists (a file of none is read with its package's directory), each crate of a cargo vendor tree.
- * A module or a crate over PACKAGE_CODE_CHARS is SC-TRUNCATED, and so is one the engine could not answer about.
- * Twin of core._vendored_code. */
+ * A module or a crate over PACKAGE_CODE_CHARS is SC-TRUNCATED, and so is one the engine could not answer about. A Go
+ * file is given as the Go toolchain reads it (goContent, where that is not its content), and every package given is
+ * one modules.txt lists, built (`listed`: one in testdata/ too; goVendorData dropped the others). Twin of
+ * core._vendored_code. */
 export function vendoredCode(tree, files) {
   const [codeChars, useFileChars, useChars, textCap, cgoExts] = packValues("PACKAGE_CODE_CHARS", "USE_RISK_MAX_CHARS",
     "USE_RISK_CHARS", "_VENDOR_TEXT_CAP", "_CGO_EXTS");
@@ -508,7 +510,7 @@ export function vendoredCode(tree, files) {
   for (const { lang, top, unit, module, members } of [...units.values()].sort(cmpUnits)) {
     const base = unit ? `${top}/${unit}` : top;
     const sorted = [...members].sort((a, b) => cmpCodePoints(posix(a.path), posix(b.path)));
-    const named = sorted.map((f) => [f.path, posix(f.path).slice(base.length + 1), f.content]);
+    const named = sorted.map((f) => [f.path, posix(f.path).slice(base.length + 1), f.goContent ?? f.content]);
     if (lang === "go") {
       const folders = [...new Set(sorted.map((f) => dirname(posix(f.path))))].sort(cmpCodePoints);
       for (const folder of folders) {
@@ -526,7 +528,9 @@ export function vendoredCode(tree, files) {
     let answer;
     try {
       const pairs = named.map(([, r, t]) => [r, t]);
-      if (lang === "go") answer = goPackage(pairs, { module, useFileChars, useChars, what, names: order, redact: REDACT.on });
+      if (lang === "go") {
+        answer = goPackage(pairs, { module, useFileChars, useChars, what, names: order, redact: REDACT.on, listed: true });
+      }
       else {
         const [script, lib, procMacro] = crateLayout(vendorText(tree, `${base}/Cargo.toml`, textCap), pairs.map(([r]) => r));
         answer = rsCrate(pairs, { build: script, procMacro, lib, useFileChars, useChars, what, names: order,
@@ -539,6 +543,74 @@ export function vendoredCode(tree, files) {
     for (const i of packageReaderIssues(answer, order)[0]) out.push(i);
   }
   return out;
+}
+
+/** The findings of a file's reading that a file found to be data takes with it (goVendorData). */
+const READING_RULES = new Set(["Q-ENCODING", "SC-UTF7", "SC-ESCAPE-CODEC", "SC-TRUNCATED"]);
+
+/**
+ * (F-06) A Go vendor tree's .go files that are data: one in a testdata/ folder, or a folder named with "_" or "."
+ * first, of a package vendor/modules.txt does not list and no Go file read imports. `go mod vendor` copies a package's
+ * files and the files its //go:embed patterns match, which may be .go files below it; it lists every package a build
+ * imports, and a main module whose go.mod says `go 1.23` or later builds no other, while one below that builds a
+ * vendored package modules.txt does not list when an import names it (cmd/go's importFromModules). So a candidate
+ * folder an import of a file read names (the project's Go or a vendor tree's) is code, and the files of its package
+ * are read and their imports followed in turn (goImports); the rest is not read as Go, as the registry reads a
+ * module's unimported testdata/: its entries are dropped from col.files, and their reading's findings
+ * (READING_RULES) from col.binaryIssues. A vendor tree whose modules.txt cannot be read, or lists no package, keeps
+ * every file. Twin of core._go_vendor_data.
+ */
+export function goVendorData(root, col, { exclude = [], maxFileBytes = MAX_FILE_BYTES } = {}) {
+  const roots = [...new Set(col.files.filter((f) => f.vendor && f.lang === "go").map((f) => posix(f.vendor)))]
+    .sort((a, b) => b.length - a.length);
+  if (!roots.length) return;
+  const textCap = packValues("_VENDOR_TEXT_CAP")[0];
+  const tree = new DependencyTree(root, col.files, col.manifests, exclude, maxFileBytes);
+  const listed = new Map();
+  for (const top of roots) {
+    const text = vendorText(tree, `${top}/modules.txt`, textCap);
+    const packages = text === null ? [] : goVendoredPackages(text);
+    listed.set(top, packages.length ? new Set(packages) : null);
+  }
+  // the folder (below its vendor tree: its import path) of a file that is data unless an import names it
+  const candidate = (path) => {
+    const rel = posix(path);
+    const top = roots.find((t) => rel.startsWith(t + "/"));
+    if (top === undefined || listed.get(top) === null || !rel.endsWith(".go")) return null;
+    const folder = dirname(rel.slice(top.length + 1));
+    return folder.split("/").some((d) => d === "testdata" || d.startsWith("_") || d.startsWith("."))
+      && !listed.get(top).has(folder) ? folder : null;
+  };
+  const folders = new Map();                  // folder -> its entries, while no import names it
+  let read = [];
+  for (const f of col.files) {
+    const folder = f.vendor && f.lang === "go" ? candidate(f.path) : null;
+    if (folder !== null) {
+      if (!folders.has(folder)) folders.set(folder, []);
+      folders.get(folder).push(f);
+    } else if (f.lang === "go") read.push(f);
+  }
+  const named = new Set();
+  while (read.length && folders.size) {
+    const imports = new Set();
+    let refused = false;                      // (a file the parser refuses may import any of them: all are code)
+    for (const paths of goImports(read.map((f) => [f.path, f.goContent ?? f.content]))) {
+      if (paths === null || paths === undefined) refused = true;
+      else for (const p of paths) imports.add(p);
+    }
+    read = [];
+    for (const folder of [...folders.keys()].filter((x) => refused || imports.has(x)).sort(cmpCodePoints)) {
+      named.add(folder);
+      for (const f of folders.get(folder)) read.push(f);
+      folders.delete(folder);
+    }
+  }
+  const data = (path) => {
+    const folder = candidate(path);
+    return folder !== null && !named.has(folder);
+  };
+  col.files = col.files.filter((f) => !(f.vendor && f.lang === "go" && data(f.path)));
+  col.binaryIssues = col.binaryIssues.filter((i) => !(READING_RULES.has(i.rule) && data(i.file)));
 }
 
 /**

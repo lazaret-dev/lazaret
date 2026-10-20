@@ -369,16 +369,25 @@ def _reader_args(args, what, names):
     return args
 
 
-def go_package(files, module=None, use_file_chars=None, use_chars=None, what=None, names=None):
+def go_package(files, module=None, use_file_chars=None, use_chars=None, what=None, names=None, listed=False,
+               testdata=None):
     """The Go reader (G-1, docs/RUST_ENGINE.md section 22) on a module's files: [(path below the module's root, text)]
-    of its .go files and its cgo packages' .c and .h files; `module` is its go.mod's module path. -> {"start": [{"file",
-    "reasons", "line"}, …] (what init code reaches: the import-time test), "uses": […] (the rest: every reason, of
-    which SC-USE-RISK counts the strong ones), "read", "unparsed", "generate", "linkname", "useRead"}; with `what` and
-    `names` (the files' names, as the findings show them), "issues" too: [[file index, issue], …]
-    (core.package_reader_issues)."""
+    of its .go files, as the Go toolchain reads them (core.decode_go_member's), and its cgo packages' .c
+    and .h files; `module` is its go.mod's module path; `listed`: every package given is one a vendor tree's
+    modules.txt lists (a --deps scan's), built even in testdata/. -> {"start": [{"file", "reasons", "line"}, …] (what
+    init code reaches: the import-time test), "uses": […] (the rest: every reason, of which SC-USE-RISK counts the
+    strong ones), "read", "unparsed", "refused", "wanted" (F-06: the module's testdata/ packages an import names of
+    which no file was given), "testdataImports", "generate", "linkname", "useRead"}; with `what` and `names` (the
+    files' names, as the findings show them), "issues" too: [[file index, issue], …] (core.package_reader_issues).
+    `testdata`: the module's testdata/ folders with .go files, given or not (the registry's): an import of a testdata/
+    package that names none of them is another module's, a nested module's too (SC-GO-TESTDATA-IMPORT)."""
     args = {}
     if module:
         args["module"] = module
+    if listed:
+        args["listed"] = True
+    if testdata is not None:
+        args["testdata"] = list(testdata)
     if use_file_chars is not None:
         args["use_file_chars"] = int(use_file_chars)
     if use_chars is not None:
@@ -416,6 +425,36 @@ def go_vendored_modules(text):
     """The module paths a vendor/modules.txt says are vendored (a `# path version` line followed by its annotations
     and packages), longest first (vendor.rs)."""
     return _native.call("go_vendored_modules", {}, text)
+
+
+#: The characters of Go a go_imports call takes at once (go_imports: the calls a batch at a time).
+GO_IMPORTS_CHARS = 32_000_000
+
+
+def go_imports(files):
+    """The import paths of each Go file's build, [(path, text)] -> [[import path, …] or None (the parser refused the
+    file), …]: none for a file a build constraint leaves out (goread::file_imports; F-06: the vendored folders a
+    --deps scan's Go files import, core._go_vendor_data). A batch of at most GO_IMPORTS_CHARS a call."""
+    out, batch, size = [], [], 0
+
+    def flush():
+        out.extend(_native.call("go_imports", _budget({"files": [[p, len(t)] for p, t in batch]}),
+                                "".join(t for _p, t in batch)))
+    for path, text in files:
+        if batch and size + len(text) > GO_IMPORTS_CHARS:
+            flush()
+            batch, size = [], 0
+        batch.append((path, text))
+        size += len(text)
+    if batch:
+        flush()
+    return out
+
+
+def go_vendored_packages(text):
+    """The packages a vendor/modules.txt lists (a module's lines that are not `#` lines), which a build compiles,
+    sorted (vendor.rs; F-06: core._go_vendor_data)."""
+    return _native.call("go_vendored_modules", {"packages": True}, text)
 
 
 def spawned_scripts(text, lang=None):

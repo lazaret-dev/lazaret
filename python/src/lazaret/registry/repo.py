@@ -351,7 +351,7 @@ SAMPLE = 8192              # header/entropy sample read from oversized files
 #      entry points and hook targets, Python install scripts
 # 2.3: verdict tiers, decoded hex, install-script inspection; 2.2:
 #      verdict-integrity; 2.1: binary-artifact awareness
-ENGINE_VERSION = "2.102.0"
+ENGINE_VERSION = "2.103.0"
 
 # ---------------- The content memo (P-2a, registry/contentcache.py) ----------------
 # One per scan_package run: the engine answers once for content several of a
@@ -2311,6 +2311,9 @@ PACKAGE_CODE = {"gomod": ("go", (".go",), (".c", ".h")), "crate": ("rs", (".rs",
 # not read and the scan is INCOMPLETE (aws-sdk-go v1, Go's largest module in
 # common use, is 207 million characters of Go and peaks at 2.4 GB read).
 PACKAGE_CODE_CHARS = lazaret.PACKAGE_CODE_CHARS        # (300,000,000; --deps reads with core's)
+# F-06: the Go reader's passes over a module's testdata/ packages an import names (_package_code): each pass gives
+# the packages the last one's imports named; after this many, every testdata/ package at once.
+TESTDATA_PASSES = 4
 # Tests and fixtures: a member under a folder named for them (TEST_DIR_NAMES:
 # exact names, in any case; testkit/, testutils/, attestation/ are code), or a
 # test file by its name (TEST_FILE_RE, Rust's tests.rs and *_test.rs among
@@ -2839,12 +2842,14 @@ def _unread_code(artifact, rel):
 
 
 def _never_built(artifact, rel):
-    """Is `rel`, a source file of a Go module or a crate, one no build of a
-    dependent compiles, as the readers say (core.never_built: a Go
+    """Is `rel`, a source file of a Go module or a crate, one the file rules
+    leave out as no build of a dependent compiles it (core.never_built: a Go
     *_test.go file, a file named with "_" or "." first, one under testdata/
-    or vendor/; a crate's tests/, benches/ and examples/)? Neither the reader
-    nor the file rules read it: the toolchain never runs it in a dependent
-    (rivo/uniseg's line-break tests hold escaped URLs)."""
+    or below a vendor/ folder's own folders; a crate's tests/, benches/ and
+    examples/)? The toolchain never runs it in a dependent (rivo/uniseg's
+    line-break tests hold escaped URLs), but for a testdata/ package an
+    import names, which the Go reader is given and reads (F-06: go_testdata,
+    _package_code)."""
     if artifact == "gomod":
         return lazaret.never_built("go", _go_root_file(rel))
     if artifact == "crate":
@@ -3029,6 +3034,13 @@ class _ArtifactScan:
         self.code_text = {}        # rel -> raw: what a reader reads besides the scanned sources (a Go
         self.code_bytes = 0        # module's cgo C; an sdist's .rs and Cargo.toml files, N-17), kept
         self.code_dropped = set()  # within PACKAGE_CODE_CHARS bytes (code_dropped: not kept)
+        # F-06: a Go module's .go files in testdata/ folders (rel -> raw, kept within PACKAGE_CODE_CHARS bytes of
+        # their own: over them, testdata_dropped; over the member limit: rel -> size), decoded and given to the Go
+        # reader only when an import of the module's names their package (its answer's "wanted"), and then read
+        # with the file rules too (_package_code); the others are data. go_text: rel -> what the Go reader reads of
+        # a .go file where the Go toolchain reads its bytes otherwise than the rules' text (decode_go_member)
+        self.testdata_go, self.testdata_dropped, self.testdata_oversize, self.testdata_bytes = {}, set(), {}, 0
+        self.go_text = {}
         # action (N-4): the action's directory in the repository ('' for its root), its action.yml's text
         # (rel -> text), what it runs (_action_entry_points: action_info), and the files it runs as code
         # (rel -> how: 'runs.main', 'step 2', ...)
@@ -3292,8 +3304,11 @@ class _ArtifactScan:
         agent_doc = (self.artifact in AGENTDOC_ARTIFACTS
                      and (base.lower().endswith(_AGENTDOC_HINT_EXTS) or base.lower() in _AGENTDOC_HINT_NAMES)
                      and lazaret.agentdoc_kind(rel) is not None)
+        testdata = self.artifact == "gomod" and ext == ".go" and lazaret.go_testdata(_go_root_file(rel))
         if reason == "member":
             self.oversize.add(rel)
+            if testdata:
+                self.testdata_oversize[rel] = size
             native = _native_program(raw)
             if native:
                 self.native.add(rel)
@@ -3363,6 +3378,13 @@ class _ArtifactScan:
         if named == "pyproject.toml":
             self.manifests[rel] = raw.decode("utf-8", "replace")
             return
+        if testdata:
+            # (F-06) kept for the Go reader, which reads it when an import names its package; classified as before
+            if self.testdata_bytes + len(raw) <= PACKAGE_CODE_CHARS:
+                self.testdata_go[rel] = raw
+                self.testdata_bytes += len(raw)
+            else:
+                self.testdata_dropped.add(rel)
         if ((self.artifact == "sdist" and (ext == ".rs" or base == "Cargo.toml"))
                 or (code is not None and ext in code[2] and not _never_built(self.artifact, rel))) \
                 and not lazaret.looks_binary(raw[:2048]):
@@ -3384,7 +3406,12 @@ class _ArtifactScan:
         if lang is None and code is not None and ext in code[1] and not _never_built(self.artifact, rel):
             lang = code[0]                       # a Go module's .go, a crate's .rs (Part C)
         if lang is not None:
-            text, extra = lazaret.decode_member(rel, raw)
+            if lang == "go" and self.artifact == "gomod":
+                text, extra, go = lazaret.decode_go_member(rel, raw)
+                if go != text:
+                    self.go_text[rel] = go           # (F-06: what the Go reader reads, _package_code)
+            else:
+                text, extra = lazaret.decode_member(rel, raw)
             self.add_decode_issues(extra)
             disguised = lazaret.disguised_binary(rel, raw)
             if disguised:
@@ -4660,7 +4687,19 @@ class _ArtifactScan:
         A module's //go:generate commands are listed (SC-GO-GENERATE, INFO):
         they run only when someone runs go generate. Code larger than
         PACKAGE_CODE_CHARS is not read (SC-TRUNCATED: INCOMPLETE), and so is
-        a module whose cgo C was not all kept."""
+        a module whose cgo C was not all kept.
+
+        F-06: the reader reads each .go file as the Go toolchain reads it
+        (go_text), and a module's testdata/ package only when an import of
+        the module's names it: the reader's answer says which it wants, and
+        it is asked again with their files (_testdata_wanted), each decoded
+        then and read with the file rules too; a file of one that was not
+        kept (over the member limit, or past the bytes held) makes the module
+        INCOMPLETE. An import of another module's testdata/ package is
+        SC-GO-TESTDATA-IMPORT (MAJOR), and so is one of a testdata/ folder
+        the module does not have, under its own path: a nested module's,
+        which a module zip leaves out (the reader is told the module's
+        testdata/ folders)."""
         code = PACKAGE_CODE.get(self.artifact)
         if code is None:
             return
@@ -4669,25 +4708,62 @@ class _ArtifactScan:
         if not rels:
             return
         what = "module" if self.artifact == "gomod" else "crate"
-        texts = {rel: self.sources[rel][0] for rel in rels}
+        texts = {rel: self.go_text.get(rel, self.sources[rel][0]) for rel in rels}
         for rel in sorted(self.code_text):
             if os.path.splitext(rel)[1].lower() in others:
                 texts[rel] = self.code_text[rel].decode("utf-8", "replace")
-        order = sorted(texts)
         place = _go_root_file if self.artifact == "gomod" else (lambda r: r)
-        files = [(place(rel), texts[rel]) for rel in order]
-        size = sum(len(t) for _p, t in files)
-        if size > PACKAGE_CODE_CHARS or self.code_dropped:
-            amount = f"{size:,} characters" if not self.code_dropped else "its C files not all kept"
-            self.truncate(rels[0], f"the {what}'s code ({amount}) is more than the reader takes at once "
-                                   f"({PACKAGE_CODE_CHARS:,}), so it was not read", "code")
+
+        def fits():
+            order = sorted(texts)
+            files = [(place(rel), texts[rel]) for rel in order]
+            size = sum(len(t) for _p, t in files)
+            if size > PACKAGE_CODE_CHARS or self.code_dropped:
+                amount = f"{size:,} characters" if not self.code_dropped else "its C files not all kept"
+                self.truncate(rels[0], f"the {what}'s code ({amount}) is more than the reader takes at once "
+                                       f"({PACKAGE_CODE_CHARS:,}), so it was not read", "code")
+                return None
+            return order, files
+        got = fits()
+        if got is None:
             return
+        order, files = got
         self._deadline(rels[0])
         if self.artifact == "gomod":
             mods = self._go_mods()
             module = mods[0][2]["module"] if mods else None
-            answer = _engine.go_package(files, module=module, use_file_chars=USE_RISK_MAX_CHARS,
-                                        use_chars=USE_RISK_CHARS, what=what, names=order)
+            testdata, asked, passes = {}, set(), 0   # (F-06) rel -> (text, extra) of the testdata/ files given
+            # (the module's testdata/ folders, given or not: an import of one it does not have is another module's,
+            # a nested module's too, SC-GO-TESTDATA-IMPORT)
+            dirs = sorted({posixpath.dirname(_go_root_file(rel))
+                           for rel in set(self.testdata_go) | self.testdata_dropped | set(self.testdata_oversize)})
+            while True:
+                answer = _engine.go_package(files, module=module, use_file_chars=USE_RISK_MAX_CHARS,
+                                            use_chars=USE_RISK_CHARS, what=what, names=order, testdata=dirs)
+                folders = self._testdata_wanted(answer.get("wanted") or (), module,
+                                                everything=passes >= TESTDATA_PASSES) - asked
+                if not folders:
+                    break
+                passes += 1
+                asked |= folders
+                for rel in sorted(set(self.testdata_go) | self.testdata_dropped | set(self.testdata_oversize)):
+                    if posixpath.dirname(_go_root_file(rel)) not in folders:
+                        continue
+                    if rel in self.testdata_go:
+                        text, extra, go = lazaret.decode_go_member(rel, self.testdata_go[rel])
+                        testdata[rel] = (text, extra)
+                        texts[rel] = go
+                    elif rel in self.testdata_oversize:
+                        self.truncate(rel, _TRUNC_DETAILS["member"](rel, self.testdata_oversize[rel]), "code")
+                    else:
+                        self.truncate(rel, f"{rel} is in a testdata/ package the module imports, and the module's "
+                                           f"testdata/ files are more than the {PACKAGE_CODE_CHARS:,} bytes kept",
+                                      "code")
+                self._deadline(rels[0])
+                got = fits()
+                if got is None:
+                    return
+                order, files = got
         else:
             from lazaret.registry.ecosystems import crates as _crates
             manifest = self.deferred.get("Cargo.toml", b"").decode("utf-8", "replace")
@@ -4695,6 +4771,36 @@ class _ArtifactScan:
             answer = _engine.rs_crate(files, build=script, proc_macro=proc_macro, lib=lib,
                                       use_file_chars=USE_RISK_MAX_CHARS, use_chars=USE_RISK_CHARS, what=what, names=order)
         self._reader_findings(answer, order)
+        if self.artifact != "gomod":
+            return
+        # (F-06) a testdata/ package the reader read is built: its files get the file rules too
+        read = {order[k] for k in answer.get("read", ()) if 0 <= k < len(order)}
+        for rel, (text, extra) in sorted(testdata.items()):
+            if rel in read:
+                self.add_decode_issues(extra)
+                self.scan_source(rel, text, "go")
+        self.scan_pending()
+
+    def _testdata_wanted(self, wanted, module, everything=False):
+        """(F-06) The folders (below the module's root) of the module's
+        testdata/ .go files that the Go reader's `wanted` import paths name:
+        the module's path and the folder, or, with no module path, a path that
+        ends in the folder (as the reader names its packages). `everything`:
+        every such folder when any is wanted (the passes' bound,
+        TESTDATA_PASSES: a chain longer than that is read at once)."""
+        if not wanted:
+            return set()
+        folders = {posixpath.dirname(_go_root_file(rel))
+                   for rel in set(self.testdata_go) | self.testdata_dropped | set(self.testdata_oversize)}
+        if everything:
+            return folders
+        out = set()
+        for imp in wanted:
+            for folder in folders:
+                if (imp == f"{module}/{folder}" if module
+                        else imp == folder or imp.endswith("/" + folder)):
+                    out.add(folder)
+        return out
 
     def _sdist_crates(self):
         """N-17 (Part C): the Rust crates inside an sdist. A maturin or
@@ -4781,7 +4887,12 @@ class _ArtifactScan:
         core.package_reader_issues; what its use-time step read goes to
         useTime."""
         issues, read = lazaret.package_reader_issues(answer, order)
-        self.issues.extend(issues)
+        for i in issues:
+            if i["rule"] == "SC-TRUNCATED":
+                # (F-06: a file the Go reader's parser refused) one per file: with its decoding's, if it has one
+                self.truncate(i["file"], i["msg"].removeprefix("File not fully scanned: ").rstrip("."), "code")
+            else:
+                self.issues.append(i)
         mine = dict(read, boundChars=USE_RISK_CHARS)
         if self.use_time is None:
             self.use_time = mine
@@ -5080,7 +5191,7 @@ class _ArtifactScan:
         if self.shown is not None:            # (--show-secrets: while the texts are in hand)
             self.shown.update(lazaret.flagged_lines(self.issues, self.read_texts()))
         # F9b: the decompressed sources are no longer needed (nor the engine's copies of them: FE-1)
-        self.sources, self.deferred, self.shell, self.code_text = {}, {}, {}, {}
+        self.sources, self.deferred, self.shell, self.code_text, self.testdata_go, self.go_text = {}, {}, {}, {}, {}, {}
         self.release()
 
 

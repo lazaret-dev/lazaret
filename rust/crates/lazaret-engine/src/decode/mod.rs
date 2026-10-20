@@ -10,7 +10,8 @@
 //! spellings fold to their codec; Python's aliases; ALIASES). UTF-7 and the escape codecs are noted (SC-UTF7,
 //! SC-ESCAPE-CODEC), an unknown codec or one the engine does not decode read as UTF-8 (Q-ENCODING names it; the
 //! latter SC-TRUNCATED). A codec's errors are replaced as Python's errors="replace" replaces them; a lone
-//! surrogate a codec leaves becomes U+FFFD; line endings are normalized to "\n".
+//! surrogate a codec leaves becomes U+FFFD; line endings are normalized to "\n". The text every rule reads; the Go
+//! reader's build constraints and parser read Go source as the Go toolchain reads it (`go_text`, F-06).
 
 pub mod cjk;
 pub mod escape;
@@ -240,17 +241,60 @@ pub fn normalize_newlines(text: &[u32]) -> Vec<u32> {
     out
 }
 
-/// decode_source: the text (pinned to nothing: as the codec gives it, lone surrogates as U+FFFD, line endings
-/// normalized) and what the decoding says of the file.
-pub fn decode_source(data: &[u8], lang: Option<&str>) -> (Vec<u32>, Info) {
-    let (mut codec, mut reported, mut bom) = detect_encoding(&data[..data.len().min(4)]);
+/// "\r\n" becomes "\n"; a lone "\r" stays: Go's line ends (a "\r" is white space to Go, and a `//` comment runs to
+/// the "\n"; a "\r\n" ends a line as "\n" does).
+pub fn normalize_crlf(text: &[u32]) -> Vec<u32> {
+    let mut out = Vec::with_capacity(text.len());
+    let mut i = 0;
+    while i < text.len() {
+        if text[i] == '\r' as u32 && text.get(i + 1) == Some(&('\n' as u32)) {
+            i += 1;
+        }
+        out.push(text[i]);
+        i += 1;
+    }
+    out
+}
+
+/// The codec decode_source reads a file with before any coding cookie (Python's alone): a byte order mark's, or
+/// BOM-less UTF-16 kept only when its first 4096 bytes read as plausible text; (codec, reported, the BOM's bytes).
+fn sniff(data: &[u8]) -> (&'static str, bool, usize) {
+    let (codec, reported, bom) = detect_encoding(&data[..data.len().min(4)]);
     if reported && bom == 0 && codec.starts_with("utf-16") {
         let order = if codec == "utf-16-le" { Order::Le } else { Order::Be };
         if !text_is_plausible(&utf::utf16(&data[..data.len().min(4096)], order)) {
             // a NUL near the top of a UTF-8 file is not UTF-16
-            (codec, reported, bom) = ("utf-8", false, 0);
+            return ("utf-8", false, 0);
         }
     }
+    (codec, reported, bom)
+}
+
+/// Go source as the Go toolchain reads it, where it is not decode_source's text for "go" (F-06): UTF-8 (a UTF-8 byte
+/// order mark at its start dropped, once), "\r\n" folded and a lone "\r" kept (`normalize_crlf`: white space to
+/// Go, no line end; a `//` comment runs to the "\n"). It differs when the file is UTF-16 or UTF-32 (its NULs are
+/// Go's error) or holds a lone "\r"; the build constraints and the Go parser read it (goread), the rules
+/// decode_source's text. Offsets are the text's for a lone "\r" alone.
+pub fn go_text(data: &[u8]) -> Option<Vec<u32>> {
+    let lone_cr = data.iter().enumerate().any(|(k, &b)| b == b'\r' && data.get(k + 1) != Some(&b'\n'));
+    let (codec, _, _) = sniff(data);
+    if !lone_cr && (codec == "utf-8" || codec == "utf-8-sig") {
+        return None;
+    }
+    let body = data.strip_prefix(&[0xEF, 0xBB, 0xBF][..]).unwrap_or(data);
+    let text: Vec<u32> = utf::utf8(body).into_iter().map(|c| if (0xD800..0xE000).contains(&c) { cjk::REPLACEMENT } else { c }).collect();
+    Some(normalize_crlf(&text))
+}
+
+/// What the Go reader reads of a `.go` file's bytes: `go_text`, or decode_source's text where they are the same.
+pub fn go_source(data: &[u8]) -> Vec<u32> {
+    go_text(data).unwrap_or_else(|| decode_source(data, Some("go")).0)
+}
+
+/// decode_source: the text (pinned to nothing: as the codec gives it, lone surrogates as U+FFFD, line endings
+/// normalized) and what the decoding says of the file.
+pub fn decode_source(data: &[u8], lang: Option<&str>) -> (Vec<u32>, Info) {
+    let (mut codec, reported, bom) = sniff(data);
     let body = &data[bom..];
     let mut info = Info { encoding: codec.to_string(), reported, utf7: false, cookie_line: None, escapes: false, undecoded: false };
     if lang == Some("py") && !reported {
@@ -475,5 +519,33 @@ mod tests {
                    ("cp037", true, false, Some(2), true, true));
         assert!(info_arg(None).is_err());
         assert!(info_arg(Some(&crate::json::Value::Int(1))).is_err());
+    }
+
+    #[test]
+    fn go_source_is_read_as_the_go_toolchain_reads_it() {
+        // F-06: what the Go reader reads where Go's reading differs from the rules' text, which stays decode_source's
+        let go = |b: &[u8]| go_text(b).map(|t| t.iter().map(|&c| char::from_u32(c).unwrap()).collect::<String>());
+        let rules = |b: &[u8]| decode_source(b, Some("go")).0.iter().map(|&c| char::from_u32(c).unwrap()).collect::<String>();
+        // a lone "\r" is white space to Go, a line end to the rules; "\r\n" ends a line for both
+        assert_eq!(go(b"// c\r//go:build x\r\n\r\r\nb").as_deref(), Some("// c\r//go:build x\n\r\nb"));
+        assert_eq!(rules(b"// c\r//go:build x\r\n\r\r\nb"), "// c\n//go:build x\n\n\nb");
+        // UTF-16 is NULs to Go (an error); the rules read it decoded
+        assert_eq!(go(b"\xff\xfe/\x00/\x00").as_deref(), Some("\u{fffd}\u{fffd}/\u{0}/\u{0}"));
+        assert_eq!(rules(b"\xff\xfe/\x00/\x00"), "//");
+        assert_eq!(go(b"/\x00/\x00x\x00\n\x00").as_deref(), Some("/\u{0}/\u{0}x\u{0}\n\u{0}"));
+        assert_eq!(go(b"\xff\xfe\x00\x00/\x00\x00\x00").map(|t| t.contains('\u{0}')), Some(true));
+        // UTF-8, with or without one byte order mark (Go drops one, a second is code to it), CRLF: the same text
+        for b in [&b"package p\n"[..], b"\xef\xbb\xbfpackage p\r\n", b"\xef\xbb\xbf\xef\xbb\xbfpackage p\n", b"\x00\x01\x02 not UTF-16"] {
+            assert_eq!(go(b), None, "{b:?}");
+        }
+        assert_eq!(rules(b"\xef\xbb\xbf\xef\xbb\xbfpackage p\n"), "\u{feff}package p\n");
+        // the lone "\r" of a UTF-8 file with a byte order mark: one dropped, as decode_source drops it; and one that
+        // ends the file
+        assert_eq!(go(b"\xef\xbb\xbfa\rb").as_deref(), Some("a\rb"));
+        assert_eq!(go(b"package p\r").as_deref(), Some("package p\r"));
+        // what the reader reads: go_text, or the rules' text where it is the same
+        let source = |b: &[u8]| go_source(b).iter().map(|&c| char::from_u32(c).unwrap()).collect::<String>();
+        assert_eq!(source(b"\xef\xbb\xbfa\r\nb\rc"), "a\nb\rc");
+        assert_eq!(source(b"\xef\xbb\xbf\xef\xbb\xbfa\r\nb"), "\u{feff}a\nb");
     }
 }

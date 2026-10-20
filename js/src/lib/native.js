@@ -390,12 +390,15 @@ function readerArgs(args, what, names, redact) {
 }
 
 /** The Go reader (G-1; the Python package's engine.go_package) on a module's files, [[path below the module's root,
- * text]] of its .go files and its cgo packages' .c and .h files; `module`: its path. With `what` and `names`, its
- * answer's `issues` are its findings, [[file index, issue]]. */
+ * text]] of its .go files, as the Go toolchain reads them (goContent where there is one, F-06), and its cgo
+ * packages' .c and .h files; `module`: its path; `listed`: every package given is one a vendor tree's modules.txt
+ * lists, built even in testdata/. With `what` and `names`, its answer's `issues` are its findings, [[file index,
+ * issue]]. */
 export function goPackage(files, { module = null, useFileChars = null, useChars = null, what = null, names = [],
-  redact = true } = {}) {
+  redact = true, listed = false } = {}) {
   const args = { files: files.map(([path, text]) => [path, codePoints(text)]) };
   if (module) args.module = module;
+  if (listed) args.listed = true;
   if (useFileChars !== null) args.use_file_chars = useFileChars;
   if (useChars !== null) args.use_chars = useChars;
   return call("go_package", readerArgs(args, what, names, redact), files.map(([, text]) => text));
@@ -419,6 +422,27 @@ export function rsCrate(files, { build = null, procMacro = false, lib = null, us
 export const cargoLayout = (text) => call("cargo_layout", {}, text);
 /** The module paths a vendor/modules.txt says are vendored, longest first (engine.go_vendored_modules). */
 export const goVendoredModules = (text) => call("go_vendored_modules", {}, text);
+/** The packages a vendor/modules.txt lists, which a build compiles, sorted (engine.go_vendored_packages; F-06). */
+export const goVendoredPackages = (text) => call("go_vendored_modules", { packages: true }, text);
+/** The characters of Go a goImports call takes at once (engine.GO_IMPORTS_CHARS). */
+const GO_IMPORTS_CHARS = 32_000_000;
+/** The import paths of each Go file's build, [[path, text]] -> [[import path, …] or null (the parser refused it), …]:
+ * none for a file a build constraint leaves out (engine.go_imports; F-06: deps.js goVendorData). A batch at a time. */
+export function goImports(files) {
+  const out = [];
+  let batch = [], size = 0;
+  const flush = () => {
+    for (const r of call("go_imports", { files: batch.map(([p, t]) => [p, codePoints(t)]) }, batch.map(([, t]) => t))) out.push(r);
+  };
+  for (const [path, text] of files) {
+    const n = codePoints(text);
+    if (batch.length && size + n > GO_IMPORTS_CHARS) { flush(); batch = []; size = 0; }
+    batch.push([path, text]);
+    size += n;
+  }
+  if (batch.length) flush();
+  return out;
+}
 
 // ---- the cross-file JavaScript taint pass ----
 

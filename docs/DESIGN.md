@@ -247,7 +247,10 @@ shared by the CLI and the MCP server. In order it:
    size caps, binary/pyc/symlink/encoding checks), each source file decoded as
    its interpreter reads it by the engine, for both packages since BR-7's step
    4 (b) (`rust/crates/lazaret-engine/src/decode/`, the `decode_source` call:
-   the BOM and NUL sniff, PEP 263 cookies, every text codec Python has);
+   the BOM and NUL sniff, PEP 263 cookies, every text codec Python has; for
+   the Go reader, F-06, also `go_text`: Go source as the Go toolchain reads
+   it, UTF-8 only, one BOM dropped, "\r\n" folded and a lone "\r" kept,
+   where that is not the rules' text);
 2. **scans each file** (`scan_file`) — rules, intra-file taint, SQL sinks,
    obfuscation/secret detection, per its language — and each config or data
    file (`scan_config_file`: `.env`, JSON, YAML, TOML, INI, shell, keys,
@@ -1759,9 +1762,45 @@ build script and a procedural-macro crate are SC-INSTALL-HOOK, CRITICAL; the
 strong reasons of the rest are SC-USE-RISK, read within `USE_RISK_CHARS` as
 `_use_time_code` reads (its counts join `useTime`). `//go:generate` lines are
 listed (SC-GO-GENERATE, INFO). A file no build of a dependent compiles (Go's
-`*_test.go`, `testdata/`, `vendor/`, a name with `_` or `.` first; a crate's
-`tests/`, `benches/`, `examples/`: `_never_built`) gets neither the reader
-nor the file rules. A package over `PACKAGE_CODE_CHARS` (300 million
+`*_test.go`, a name with `_` or `.` first, a file below a `vendor/` folder's
+own folders; a crate's `tests/`, `benches/`, `examples/`: `_never_built`)
+gets neither the reader nor the file rules; a Go test file's name ends in
+`_test.go` exactly, as Go reads it (`x_TEST.go` is built), and a package in
+`vendor/` itself (`m/vendor`) is the module's and is read. A package in
+`testdata/` is built when an import names it (F-06): the registry keeps a
+module's testdata `.go` files (`go_testdata`) and gives the Go reader those of
+a package its answer asks for (`wanted`: an import of the module's names it),
+decoded and counted against `PACKAGE_CODE_CHARS` only then, and asks again
+(`_testdata_wanted`, `TESTDATA_PASSES`); those it reads get the file rules
+too, one it asks for that was not kept makes the module INCOMPLETE, and the
+rest of `testdata/` is data. An import of another module's `testdata/`
+package, which that module's own scan leaves out, is SC-GO-TESTDATA-IMPORT
+(MAJOR), and so is one under the module's own path of a `testdata/` folder it
+does not have (a nested module's, which the zip leaves out: the reader is told
+the module's testdata folders). The Go reader reads each file as the Go toolchain reads its bytes
+(`go_text`, given beside the rules' text), leaves out a file a build
+constraint certainly confines to `ignore` (F-06: read as `go/build` reads the
+header; `//go:buildignore` is a comment and the file builds;
+docs/RUST_ENGINE.md §22), and numbers its findings as the rules number lines;
+a `.go` file its parser refuses makes the module INCOMPLETE (SC-TRUNCATED: a
+build may compile it), but for one in a `_`, `.` or `testdata/` folder no
+import names (Go builds it only when imported) and one that does not decode
+to text (its decoding's SC-TRUNCATED is the file's one). A `--deps` scan's
+vendor tree holds what `go mod vendor` copied: the packages a build compiles,
+which `vendor/modules.txt` lists, and the files their `//go:embed` patterns
+match, which may be `.go` files below them (a `testdata/` fixture; with a main
+module below `go 1.22`, the embeds of their tests too: cmd/go's `vendorPkg`). Each of its `.go` files but a test file or
+one named with `_` or `.` first gets the file rules (the path below `vendor/`
+begins with a module's path, which may hold a `testdata` or a `vendor`), but
+one in a `testdata/`, `_` or `.` folder only as a package modules.txt lists
+or one an import of a Go file read names (the project's or the tree's, a
+chain followed: `go_imports`; a main module whose go.mod says a `go` below
+1.23 builds an unlisted vendored package an import names, cmd/go's
+`importFromModules`); another is data, as in the registry
+(`_go_vendor_data`; a modules.txt that cannot be read, or lists no package,
+leaves every file read). The reader
+applies the rules above below each module's root, and reads every package it
+is given (`listed`). A package over `PACKAGE_CODE_CHARS` (300 million
 characters) is not read (SC-TRUNCATED): the reader holds all of it at once,
 and aws-sdk-go v1's 207 million characters of Go peak at 2.4 GB.
 
