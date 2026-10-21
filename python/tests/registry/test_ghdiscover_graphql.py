@@ -1029,8 +1029,10 @@ class IsolationTests(GqlCase):
         self.assertEqual((out["graphql"]["isolated"], out["graphql"]["stopped"]), (2, None))
 
     def test_failures_of_the_call_are_not_split_nor_backed_off(self):
+        # (a 503 here, where it was a 502: since GH-SCAN-GQL-SPEED a 502 or 504 is GitHub's own time limit for a call,
+        # and its batch is asked again in halves: test_ghdiscover_concurrency's TimeLimitTests)
         gh = PoisonGitHub(repos(1001, 300))
-        gh.answers = [failure(f"x: HTTP 502 from {API}/graphql", 502), WHOLE, WHOLE,
+        gh.answers = [failure(f"x: HTTP 503 from {API}/graphql", 503), WHOLE, WHOLE,
                       failure(f"x: HTTP 500 from {API}/graphql", 500)]
         out = self.scan_all(gh)
         self.assertEqual([len(p) for p in gh.posts], [100, 100, 50, 50, 100])
@@ -1243,7 +1245,9 @@ class RunSecondsTests(GqlCase):
             clock[0] += 50
             return post(*a)
         gh._graphql = slow
-        with mock.patch.object(ghdiscover, "_clock", lambda: clock[0]):
+        # (GitHub's CPU-time limit's pacing aside here: test_ghdiscover_concurrency's PacingTests)
+        with mock.patch.object(ghdiscover, "_clock", lambda: clock[0]), \
+                mock.patch.object(ghdiscover, "GRAPHQL_CPU_PER_MINUTE", 1e9):
             out = self.scan_all(gh, when=at(0.25))
         # (225 seconds: 5 calls of the oldest, oldest first; then the newest first until the 900 are spent)
         batches = [(p[0], p[-1], len(p)) for p in gh.posts]               # (compared so: a failure's diff is short)

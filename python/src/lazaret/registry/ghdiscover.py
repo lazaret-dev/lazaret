@@ -2,7 +2,8 @@
 every new public repository, filtered; specs/lazaret-github-new-repos-plan-2026-10-14.md).
 
     lazaret-registry discover --ecosystem github --resume [--scan] [--max-calls N] [--github-filters FILE]
-                              [--github-archive] [--github-scan-all [--max-scans N] [--max-graphql-calls N]]
+                              [--github-archive] [--github-scan-all [--max-scans N] [--max-graphql-calls N]
+                                                  [--graphql-concurrency N] [--graphql-seconds N]]
 
 1. List. GitHub's `GET /repositories?since=<id>` gives every public repository in the order it was created, 100 a
    page, paged by the last ID seen. The cursor (discovery_cursors, eco "github") is that ID, stored after each page,
@@ -88,9 +89,12 @@ repositories that exist, tells which (`_control`: about one GitHub answered abou
 empty or a fork, its answer only read; or else about the newest due rows not asked yet this run); answered, those
 groups are isolated on, and the asking goes on; not, or with no such repository to ask about, they wait as they were
 for GitHub to answer another call, and the batch counts as GitHub's failure (a call about no repository would prove
-nothing: GitHub can answer it while it fails every query about repositories). GRAPHQL_FAILURES such batches in a
-row, their control calls failing too, or GRAPHQL_FAILURES failures of the call (an HTTP error, a body not JSON or
-over the budget), stop the GraphQL part, with nothing backed off; so does GRAPHQL_RUN_SECONDS spent in it. GraphQL's
+nothing: GitHub can answer it while it fails every query about repositories). A batch's call that GitHub ended at its
+own time limit for a call (a 502 or 504, GRAPHQL_TIMEOUTS; John, Oct 20: two 502s in ten calls of some 8 s) is no
+failure of the call: its rows are asked again in halves, isolated as above, which end sooner, and a failure of a half
+is the failure it would have been. GRAPHQL_FAILURES such batches in a row, their control calls failing too, or
+GRAPHQL_FAILURES failures of the call (an HTTP error, a body not JSON or over the budget), stop the GraphQL part, with
+nothing backed off; so does GRAPHQL_RUN_SECONDS spent in it (its wall clock, below). GraphQL's
 own rate limit (rateLimit.remaining or the X-RateLimit-Remaining header, the lower, at GRAPHQL_RATE_FLOOR, a
 RATE_LIMITED error or an error that speaks of a rate limit, a 403 with no points left) stops the GraphQL part: the
 listing goes on, its repositories kept unasked for the next run. A secondary rate limit (a Retry-After on any
@@ -109,6 +113,43 @@ github_candidates made by an earlier version gets the columns added since (fails
 opened. Two runs at once on one Postgres database write github_listed's rows locked in repo_id order, and a batch
 rolled back for a deadlock is done again (Store._pg_batch).
 
+Calls at once, paced (GH-SCAN-GQL-SPEED, 0.1.9; John's go-ahead of Oct 20, when a run's 907 seconds were 903.6
+waiting for GitHub's answers, a call of 100 node IDs some 3.5 s and GitHub's time linear in the repositories asked, so
+that 900 GraphQL seconds asked some 250 calls, 25,000 repositories, while a catch-up listing adds some 85,000 a run):
+up to --graphql-concurrency calls (DEFAULT_GRAPHQL_CONCURRENCY, 1, one at a time as before; at most
+GRAPHQL_CONCURRENCY_MAX, 8) are in flight at once, each call's HTTP on a thread of its own (`_Calls`, the standard
+library's threads), while the run goes on with the next batch or the listing's next page. GitHub's CPU-time limit
+(below) holds a token's GraphQL calls to some 60 seconds of response time a minute, which one call at a time of 3.5 s
+already spends but cannot pass (its calls do not overlap, and CPU time is less than response time): so one at a time
+is not paced. With several at once the run paces its calls (`_paced`): it keeps the response seconds of its calls
+that ended in the last GRAPHQL_CPU_WINDOW seconds of its clock, and starts no call while those, with an estimate for
+each call in flight and for the call itself (the recent calls' median, or the call's own time so far, the more),
+would pass GRAPHQL_CPU_PER_MINUTE (50, a margin under GitHub's 60, as the REST listing shares GitHub's 90): it waits
+for a call in flight to end, or, none in flight, until enough of those calls leave the window. At 3.5 s a call that
+is some 14 calls a minute, fewer than one at a time's 17: more at once help only while GitHub answers fast. A call in
+flight is counted at the median until it passes it, so a sudden slowdown of GitHub's can pass a minute's 50 s, by
+each call in flight's time over the median (at most the concurrency times GitHub's 10 s for a call): GitHub then
+answers with a secondary limit, and the run stops cleanly; so raise the concurrency only while calls are fast. At a
+Ctrl-C the run waits for the calls in flight to end (each has GRAPHQL_SECONDS, a minute, in all); a second Ctrl-C
+exits at once. Everything else stays on the run's thread: each answer is read and stored there, in the order the calls
+end, and each batch's follow-up after it (isolation, a control call, the streak), so that the database, SQLite or
+Postgres, is written from one thread as before. The due asks start in the order above (a quarter oldest listed first,
+the rest newest first); their answers may end in another order without changing what is asked or stored. A run makes one
+call at a time until an answer was read with GitHub's points left in it, and again after any other answer (a failure of
+the call, a rate limit, an error of the whole query, GitHub's time limit): no call starts until the calls then in flight
+have ended, their answers read and stored (nothing lost, nothing stored twice), and then one at a time until a call
+started since is read. A follow-up that makes calls of its own lets every call in flight end first and makes its calls
+one at a time, so isolation and control calls are as above. No call starts once the run's calls are spent
+(--max-graphql-calls counts a call as it starts), nor its GraphQL seconds, nor after a stop, nor while GitHub's points
+left (the latest answer's), less one for each call in flight, would be at GRAPHQL_RATE_FLOOR. The GraphQL seconds
+(--graphql-seconds, GRAPHQL_RUN_SECONDS by default, at most GRAPHQL_RUN_SECONDS_MAX) and the due share's quarter of them
+are the GraphQL part's wall clock while calls are in flight or it waits for GitHub's CPU-time limit, not the sum of the
+calls' times, which would make calls at once gain nothing; a call in flight when they run out still ends and is stored,
+as one call could before. A failure of a call started before the last failure counted was in flight with it and is not
+counted again: GRAPHQL_FAILURES still means that many failures, each of a call started after the one before was seen.
+The transports are safe for it: urllib's makes a connection for each call, and the native one's shared client
+(pratique's) hands each call a connection of its own, or a stream of its own on GitHub's HTTP/2 connection.
+
 What GitHub's documentation says (read Oct 18, 2026): the endpoint, a POST whose JSON body holds `query`, and the
 token as `Authorization: bearer` (docs.github.com/en/graphql/guides/forming-calls-with-graphql); Repository's
 databaseId (Int), nameWithOwner (String!), isEmpty, isFork, isPrivate (Boolean!), createdAt (DateTime!), pushedAt
@@ -120,7 +161,10 @@ entry when fetched), so a call asks about 100, the most a connection's `first` o
 `rateLimit { cost remaining resetAt }`, an exceeded primary limit answered 200 with an error and
 X-RateLimit-Remaining 0, X-RateLimit-Resource always `graphql`, secondary limits (100 concurrent requests shared
 with the REST API, 2,000 points a minute) answered 200 or 403, Retry-After to be waited for, and a call over 10
-seconds ended with a 502 or 504 (docs.github.com/en/graphql/overview/rate-limits-and-query-limits-for-the-graphql-api).
+seconds ended with a 502 or 504 (docs.github.com/en/graphql/overview/rate-limits-and-query-limits-for-the-graphql-api;
+the same page read again Oct 21 for its limit on compute: "No more than 90 seconds of CPU time per 60 seconds of real
+time is allowed", "No more than 60 seconds of this CPU time may be for the GraphQL API", and "You can roughly estimate
+the CPU time by measuring the total response time for your API requests").
 Not in the documentation: an error's `type` (RATE_LIMITED, NOT_FOUND) and `path` (["nodes", i]) are the shapes
 GitHub sends; anything else is not understood, and fails closed as above.
 
@@ -139,21 +183,26 @@ requests an hour without one cannot keep up) and goes only to api.github.com (so
 archive is read into a temporary folder and removed, nothing runs, and no secret is verified (a sweep never logs in
 with strangers' credentials).
 """
+import bisect
 import datetime
 import json
 import math
 import os
+import queue
 import re
+import statistics
+import threading
 import time
 import urllib.parse
+from collections import deque
 
 from lazaret.registry import ghevents, lookalike, sources
 from lazaret.registry import repo as _repo
 from lazaret.scanner import core
 
 __all__ = ["DiscoveryError", "Budget", "Filters", "run", "frontier", "scan_repository", "load_markers",
-           "load_patterns", "read_nodes", "CHECK_HOURS", "DEFAULT_MAX_CALLS", "DEFAULT_MAX_GRAPHQL_CALLS", "RATE_FLOOR",
-           "ECO"]
+           "load_patterns", "read_nodes", "CHECK_HOURS", "DEFAULT_MAX_CALLS", "DEFAULT_MAX_GRAPHQL_CALLS",
+           "DEFAULT_GRAPHQL_CONCURRENCY", "RATE_FLOOR", "ECO"]
 
 UTC = datetime.timezone.utc
 ECO = "github"
@@ -203,11 +252,41 @@ GRAPHQL_RATE_FLOOR = 100
 GRAPHQL_FAILURES = 3
 GRAPHQL_BYTES = 1024 * 1024            # one answer (100 repositories' fields are some 25 KB)
 GRAPHQL_SECONDS = 60.0                 # one call, in all (sources.Client.post)
-#: the seconds a run's GraphQL part may take in all (its calls and what they store), then it asks no more
+#: the seconds a run's GraphQL part may take unless --graphql-seconds says (at most GRAPHQL_RUN_SECONDS_MAX), then it
+#: starts no call: its wall clock while calls are in flight (from the start of a call while none was to the end of
+#: the last one in flight, what their answers store included) and while it waits for GitHub's CPU-time limit (below),
+#: not the sum of the calls' times, which would make calls at once gain nothing (GH-SCAN-GQL-SPEED)
 GRAPHQL_RUN_SECONDS = 900.0
-#: the share of a run's GraphQL calls, and of its GraphQL seconds, for the due asks, oldest listed first (the nearest
-#: their last check, and the first LISTED_MAX would evict): the rest go newest first, so fresh pages cannot starve them
+GRAPHQL_RUN_SECONDS_MAX = 3600.0
+#: the share of a run's GraphQL calls (started), and of its GraphQL seconds (that wall clock), for the due asks,
+#: oldest listed first (the nearest their last check, and the first LISTED_MAX would evict): the rest go newest first,
+#: so fresh pages cannot starve them
 GRAPHQL_DUE_SHARE = 0.25
+#: GH-SCAN-GQL-SPEED (John, Oct 20): GraphQL calls a run makes at once unless --graphql-concurrency says, and the most
+#: it takes. GitHub's time is per repository asked about (a call of 100 some 3.5 s: 25 ids 1.0 s, 50 ids 1.9 s), and
+#: GitHub's CPU-time limit (below) holds a token's GraphQL calls to some 60 seconds of response time a minute, which
+#: one call at a time of 3.5 s already spends: so 1, one at a time, as before, by default; more at once only help
+#: while GitHub answers fast, and a sudden slowdown of GitHub's can pass its limit (below)
+DEFAULT_GRAPHQL_CONCURRENCY = 1
+GRAPHQL_CONCURRENCY_MAX = 8
+#: GitHub's secondary limit on compute (the documentation below): "No more than 90 seconds of CPU time per 60 seconds
+#: of real time", "No more than 60 seconds of this CPU time may be for the GraphQL API", which "you can roughly
+#: estimate ... by measuring the total response time for your API requests". One call at a time cannot spend more
+#: than 60 s of response time in 60 s (its calls do not overlap), and CPU time is less than response time, so it is not
+#: paced (John's runs at some 60 s a minute never met the limit; pacing them to 50 cost 16 to 30% of their calls). With
+#: several at once the run keeps its GraphQL calls' response seconds over the last GRAPHQL_CPU_WINDOW seconds of its
+#: clock, and starts no call while those, with an estimate for the calls in flight and the call itself (its time so
+#: far, or the recent median call's, the more), would pass GRAPHQL_CPU_PER_MINUTE: a margin under GitHub's 60, as the
+#: REST listing's calls share the 90. A call is counted at the median when it starts, so a sudden slowdown of GitHub's
+#: can pass it, by each call in flight's time over the median (at most the concurrency times GitHub's 10 s); GitHub
+#: then answers with a secondary limit, which stops the run cleanly
+GRAPHQL_CPU_PER_MINUTE = 50.0
+GRAPHQL_CPU_WINDOW = 60.0
+#: the calls' response times the median estimate is of (the most recent)
+GRAPHQL_CPU_RECENT = 25
+#: what GitHub answers a call it ended at its own time limit (10 seconds, the documentation below: 502 or 504): such
+#: a batch is asked again in halves, which end sooner, and counts as a failure of the call only when they fail too
+GRAPHQL_TIMEOUTS = (502, 504)
 #: a batch of which nothing could be read is split in halves this many times at most, down to single rows (100 rows:
 #: 7), to find the rows GitHub cannot answer about; those wait 1, 2, 4 … hours, at most this many, before the next ask
 GRAPHQL_SPLIT_DEPTH = 7
@@ -217,8 +296,10 @@ GRAPHQL_BACKOFF_MAX_HOURS = 72
 #: fork), or about the newest due rows not asked yet (looked for in this many pages of them)
 GRAPHQL_CONTROL_KNOWN = 5
 GRAPHQL_CONTROL_PAGES = 3
-#: the clock the GraphQL part's seconds are counted on (a seam for the tests)
+#: the clock the GraphQL part's seconds are counted on, and how it waits for GitHub's CPU-time limit (seams for the
+#: tests)
 _clock = time.monotonic
+_sleep = time.sleep
 #: listed repositories kept waiting for code (the newest: some three days of new repositories still empty). One is
 #: dropped for its age only when its last scheduled ask (CHECK_HOURS[-1]) answered "no code"; one never answered
 #: waits until it is, or until this bound evicts it (counted, and said on stderr)
@@ -921,6 +1002,65 @@ def _key(row):
     return row["listed_at"], row["repo_id"]
 
 
+def _spawn(work, name):
+    """A thread of its own for one GraphQL call's HTTP (GH-SCAN-GQL-SPEED), started -> the thread (a seam for the
+    tests, which choose when calls are answered)."""
+    thread = threading.Thread(target=work, name=name, daemon=True)
+    thread.start()
+    return thread
+
+
+def _outcome(work):
+    """What `work` gave: (its value, None), or (None, what it raised), to be raised on the run's thread."""
+    try:
+        return work(), None
+    except BaseException as exc:                                        # noqa: BLE001
+        return None, exc
+
+
+class _Calls:
+    """The GraphQL calls in flight (GH-SCAN-GQL-SPEED): each call's HTTP on a thread of its own, `width` at most at once
+    (the caller's count), and what it got handed back to the run's thread in the order the calls end (`next`). Only the
+    HTTP runs on those threads: an answer is read and stored on the run's thread. With a width of 1 a call is made on
+    the run's thread itself, with no thread at all, as before."""
+
+    def __init__(self, width):
+        self.width = width
+        self.done = queue.SimpleQueue()         # (ticket, outcome), as the calls end
+        self.threads = {}                       # ticket -> its thread, until its outcome is taken
+        self.made = deque()                     # (a width of 1: the call just made on the run's thread)
+
+    def start(self, ticket, work):
+        if self.width == 1:
+            self.made.append((ticket, _outcome(work)))
+            return
+
+        def call():
+            self.done.put((ticket, _outcome(work)))
+        self.threads[ticket] = _spawn(call, f"lazaret-graphql-{ticket}")
+
+    def next(self, block):
+        """The next call that ended -> (its ticket, its outcome); None when none has (and `block` is false) or none is
+        in flight. Its thread has ended once this returns."""
+        if self.made:
+            return self.made.popleft()
+        if not self.threads:
+            return None
+        try:
+            ticket, outcome = self.done.get(block=block)
+        except queue.Empty:
+            return None
+        self.threads.pop(ticket).join()
+        return ticket, outcome
+
+    def close(self):
+        """Every thread joined (a call ends within its own time, GRAPHQL_SECONDS), what they got dropped: after an
+        error of the run, whose rows those calls leave as they were."""
+        threads, self.threads = list(self.threads.values()), {}
+        for thread in threads:
+            thread.join()
+
+
 class _Asker:
     """GH-SCAN-GQL: which of scan-all's listed repositories got code, asked of GitHub's GraphQL API (the module's
     notes). `keep` stores a listing page's new repositories, `first` asks about them (a call for the page), `due`
@@ -932,21 +1072,53 @@ class _Asker:
     campaigns and excluded (by the name GraphQL gave), expired (no code at the last scheduled ask), over (evicted
     past LISTED_MAX), aged (still waiting, listed over PENDING_HOURS ago), noNode (listing items without a node ID,
     sent to the REST content checks), points and reset (GitHub's), failed (transport and HTTP failures), unreadable
-    (calls of which nothing could be read) and error, seconds (the GraphQL part's), stopped (why it asked no more),
-    waiting (due, not asked) and kept (all waiting)."""
+    (calls of which nothing could be read) and error, timeouts (calls GitHub ended at its own time limit, asked again
+    in halves), seconds (the GraphQL part's wall clock while calls were in flight or it waited for GitHub's CPU-time
+    limit) of runSeconds (--graphql-seconds), paced and pacedSeconds (those waits, and their time), concurrency (the
+    calls it may make at once) and atOnce (the most it made), stopped (why it asked no more), waiting (due, not
+    asked) and kept (all waiting).
 
-    def __init__(self, store, client, budget, filters, now, out, calls, say=lambda text: None):
+    Calls at once (GH-SCAN-GQL-SPEED): a batch's call is started (`ask`) and its HTTP made on a thread of its own
+    (`_Calls`), up to `concurrency` at once, while the run goes on (the next batch, the listing's next page); every
+    answer is read and stored on the run's thread, in the order the calls end (`_ended`), and its batch's follow-up
+    (`_after`: isolation, a control call, the streak) after it, in that order. One call at a time until an answer was
+    read with GitHub's points left in it, and again after any other answer (a failure, a limit, an error of the whole
+    query, GitHub's time limit) until the calls then in flight have ended and a call started since has been read; a
+    follow-up that makes calls of its own lets every call in flight end first and makes them one at a time, as at a
+    concurrency of 1, so isolation and control calls keep their order and meaning. No call starts once the run's calls
+    (--max-graphql-calls, counted as calls start) or seconds are spent or the part stopped, nor while GitHub's points
+    left, less one for each call in flight, would be at GRAPHQL_RATE_FLOOR, nor, with several at once, while
+    GitHub's CPU-time limit would be passed (`_paced`): the calls' response seconds in the last minute, with an
+    estimate for those in flight and for the call, at most GRAPHQL_CPU_PER_MINUTE (`paced` counts the waits,
+    `pacedSeconds` their time, which counts towards the GraphQL seconds, `runSeconds`). A failure of a call started
+    before the last one counted is not counted again (they were in flight together): GRAPHQL_FAILURES still means that
+    many failures, each of a call started after the one before was seen."""
+
+    def __init__(self, store, client, budget, filters, now, out, calls, say=lambda text: None, concurrency=1,
+                 seconds=None):
         self.store, self.client, self.budget, self.filters = store, client, budget, filters
         self.now, self.out = now, out
         self.calls, self.left, self.say = calls, calls, say
         self.since = out["queue"]["since"]
         self.streak, self.answered, self.suspect = 0, set(), []     # (suspect: (rows, level) isolation left)
         self.seen, self.known = set(), []               # (the rows asked about this run; those GitHub answered)
+        self.width = max(1, int(concurrency))
+        self.pool = _Calls(self.width)
+        # (the calls started and not read yet, by ticket: their rows, batch kind or None, probe, what, strikes when
+        # started; the batches read whose follow-up is still to come; a follow-up's own calls' outcomes)
+        self.flight, self.later, self.results = {}, deque(), {}
+        self.strikes, self.closed_at, self.open, self.broken = 0, 0, False, False
+        self.busy, self.began = 0.0, None               # (the GraphQL part's wall clock: spent, and since when now)
+        self.run_seconds = GRAPHQL_RUN_SECONDS if seconds is None else seconds
+        # (GitHub's CPU-time limit: (end, response seconds) of the calls that ended in the window, oldest first; the
+        # recent calls' response seconds, for the median estimate)
+        self.ended, self.recent = [], deque(maxlen=GRAPHQL_CPU_RECENT)
         self.info = out["graphql"] = {
             "listed": 0, "asked": 0, "fresh": 0, "again": 0, "calls": 0, "code": 0, "empty": 0, "forks": 0, "gone": 0,
             "unanswered": 0, "isolated": 0, "late": 0, "campaigns": 0, "excluded": 0, "expired": 0, "aged": 0,
-            "over": 0, "noNode": 0, "points": None, "reset": None, "failed": 0, "unreadable": 0, "error": None,
-            "seconds": 0.0, "stopped": None, "waiting": 0, "kept": 0}
+            "over": 0, "noNode": 0, "points": None, "reset": None, "failed": 0, "unreadable": 0, "timeouts": 0,
+            "error": None, "seconds": 0.0, "concurrency": self.width, "atOnce": 0, "paced": 0, "pacedSeconds": 0.0,
+            "runSeconds": self.run_seconds, "stopped": None, "waiting": 0, "kept": 0}
 
     def keep(self, items):
         """A listing page's repositories scan-all asks about, stored unasked (before the cursor moves past them) ->
@@ -994,19 +1166,23 @@ class _Asker:
         """The listed repositories whose next ask is due by now (an unasked one at once, one with no code yet at
         CHECK_HOURS, one GitHub could not answer about after its backoff): GRAPHQL_DUE_SHARE of the run's calls and of
         its GraphQL seconds for the oldest listed, oldest first (the nearest their last check, and the first
-        LISTED_MAX would evict), then the rest of them newest first with what is left, GRAPHQL_BATCH a call."""
+        LISTED_MAX would evict), then the rest of them newest first with what is left, GRAPHQL_BATCH a call. The share
+        is of the calls started and of the GraphQL part's wall clock; calls still in flight when it returns are read as
+        they end (`poll`, `finish`)."""
         now = _iso(self.now)
         reserve = max(1, int(self.calls * GRAPHQL_DUE_SHARE)) if self.calls else 0
-        seconds = GRAPHQL_DUE_SHARE * GRAPHQL_RUN_SECONDS
-        start, started, after, boundary = self.info["calls"], self.info["seconds"], None, None
+        seconds = GRAPHQL_DUE_SHARE * self.run_seconds
+        start, started, after, boundary = self.info["calls"], self._seconds(), None, None
 
         def share_left():
-            return self.info["calls"] - start < reserve and self.info["seconds"] - started < seconds
+            return self.info["calls"] - start < reserve and self._seconds() - started < seconds
         while share_left():
             after, rows = self._due_rows(now, after=after, oldest_first=True)
             if after is None:
                 return                                  # (every due row was asked oldest first)
             for batch in self._batches(rows):
+                if not self._room():                    # (room first: the share is judged on the clock as it is then)
+                    return
                 if not share_left():
                     break
                 if not self.ask(batch):
@@ -1037,35 +1213,48 @@ class _Asker:
             yield batch
 
     def ask(self, rows, fresh=False):
-        """One batch (at most GRAPHQL_BATCH rows): its call, and when nothing of it could be read its isolation
-        (`_isolate`) -> whether the GraphQL part goes on. Groups isolation leaves (two levels of halves in a row of
-        which nothing could be read) are isolated on when a control call elsewhere is answered (`_control`), and
-        else wait for GitHub to answer another call (`_answering`); GRAPHQL_FAILURES batches in a row of which
-        nothing could be read, nor of their halves and quarters, nor their control calls, stop the GraphQL part, as
-        GitHub's failure, not their rows': those are left as they were."""
-        info, self.answered = self.info, set()
-        self.seen.update(r["repo_id"] for r in rows)
-        got = self._ask(rows)
-        if got is None:
+        """One batch (at most GRAPHQL_BATCH rows): its call started when the run may make one (`_room`) -> whether the
+        GraphQL part goes on. With calls at once (the module's notes) the run goes on while it is in flight; one at a
+        time, its answer and its follow-up (`_after`) come before this returns."""
+        if not self._room():
             return False
+        self.seen.update(r["repo_id"] for r in rows)
+        self._start(rows, "fresh" if fresh else "again")
+        self._collect(wait=None if self.open else "all")
+        return self.info["stopped"] is None
+
+    def poll(self):
+        """The calls that ended since, read and followed up (`_collect`), without waiting: the listing asks before each
+        page, so that a secondary limit one of them met stops it too."""
+        self._collect()
+
+    def _after(self, rows, kind, got):
+        """A batch's follow-up, once its call was read (`_ended`): when nothing of it could be read, its isolation
+        (`_isolate`); and when GitHub ended it at its own time limit (GRAPHQL_TIMEOUTS), its halves asked so too
+        (they end sooner), a failure of theirs counted as the batch's own. Groups isolation leaves (two levels of
+        halves in a row of which nothing could be read) are isolated on when a control call elsewhere is answered
+        (`_control`), and else wait for GitHub to answer another call (`_answering`); GRAPHQL_FAILURES batches in a
+        row of which nothing could be read, nor of their halves and quarters, nor their control calls, stop the
+        GraphQL part, as GitHub's failure, not their rows': those are left as they were."""
+        info = self.info
         info["asked"] += len(rows)
-        info["fresh" if fresh else "again"] += len(rows)
-        read = got == "read"
-        if got == "whole":
+        info[kind] += len(rows)
+        read, self.broken = got == "read", False
+        if got in ("whole", "timeout"):
             read, left = self._isolate([rows])
             self.suspect += left
         info["unanswered"] += sum(1 for r in rows if r["repo_id"] not in self.answered)
+        whole = got == "whole" or (got == "timeout" and not self.broken)    # (a half that failed: that failure)
         if read:
             self._answering()
-        elif got == "whole" and self._control():
+        elif whole and self._control():
             self._answering()                           # (GitHub answers: its rows' fault, isolated on)
-        elif got == "whole":
+        elif whole:
             self.streak += 1
             if self.streak >= GRAPHQL_FAILURES and info["stopped"] is None:
                 # (GitHub's failure, not the rows': none backed off, the groups waiting left as they were)
                 info["stopped"] = (f"{self.streak} batches in a row of which nothing could be read, not even in "
                                    f"halves and quarters, nor a call elsewhere (the last: {info['error']})")
-        return info["stopped"] is None
 
     def _control(self):
         """A batch of which nothing could be read, nor of its halves and quarters: GitHub failing, or rows it cannot
@@ -1129,28 +1318,138 @@ class _Asker:
         self.info["unanswered"] -= len(ids & self.answered)
 
     def _ask(self, rows, probe=False):
-        """One call for `rows`, when the run may make it -> None (it may not: stopped, its calls or its seconds
-        spent), "read" (something of the answer could be read), "whole" (nothing: an error of the whole query, or an
-        answer not as asked), "failed" (a transport or HTTP failure, or a rate limit). A `probe` (a control call
-        about a repository GitHub answered about) has its answer read, not stored."""
+        """One call for `rows` made now, its answer awaited (a follow-up's: isolation, a control call; nothing else is
+        in flight then), when the run may make it -> None (it may not: stopped, its calls or its seconds spent),
+        "read" (something of the answer could be read), "whole" (nothing: an error of the whole query, or an answer
+        not as asked), "failed" (a transport or HTTP failure, or a rate limit). A `probe` (a control call about a
+        repository GitHub answered about) has its answer read, not stored."""
+        held = False
+        while True:
+            if not self._may():
+                return None
+            if self._paced(held):
+                break
+            held = True
+        ticket = self._start(rows, None, probe)
+        while ticket in self.flight:
+            self._end_next(block=True)
+        return self.results.pop(ticket)
+
+    def _may(self):
+        """May the run make another call: not stopped, no limit GraphQL shares met (Budget.shared), its calls
+        (--max-graphql-calls, counted as they start) and its seconds (--graphql-seconds, the wall clock) not spent?"""
         info = self.info
         if info["stopped"] is not None or self.budget.shared is not None:
-            return None
+            return False
         if self.left <= 0:
             info["stopped"] = f"the run's budget of {self.calls} GraphQL calls (--max-graphql-calls) was spent"
-            return None
-        if info["seconds"] >= GRAPHQL_RUN_SECONDS:
-            info["stopped"] = f"the GraphQL part's {GRAPHQL_RUN_SECONDS:g} seconds for a run were spent"
-            return None
+            return False
+        if self._seconds() >= self.run_seconds:
+            info["stopped"] = f"the GraphQL part's {self.run_seconds:g} seconds for a run were spent"
+            return False
+        return True
+
+    def _room(self):
+        """May a batch's call start now? The calls that ended are read first (`_collect`); not when the run may make no
+        more (`_may`); and it waits for calls in flight to end while it has as many as it may (`concurrency`; one, a
+        call answered first, until one started since was read with GitHub's points in it: `_ended`) or while GitHub's
+        points left (the latest answer's), less one for each call in flight, would be at GRAPHQL_RATE_FLOOR; and then
+        for GitHub's CPU-time limit (`_paced`)."""
+        held = False
+        while True:
+            self._collect()
+            if not self._may():
+                return False
+            n, points = len(self.flight), self.info["points"]
+            if n and not (self.open and n < self.width and (points is None or points - n > GRAPHQL_RATE_FLOOR)):
+                self._collect(wait="one")
+            elif self._paced(held):
+                return True
+            else:
+                held = True
+
+    def _paced(self, waiting=False):
+        """GitHub's CPU-time limit (GRAPHQL_CPU_PER_MINUTE), with several calls at once: may a call start now
+        (`_cpu_wait`)? -> True (always one at a time: its calls cannot overlap); else, having waited (for a call in
+        flight to end; or, none in flight, until enough of the window's calls leave it, at most the GraphQL seconds
+        left, which the wait counts towards), False. `paced` counts the waits (`waiting`: this one goes on from the one
+        before), `pacedSeconds` their time."""
+        if self.width == 1:
+            return True
+        wait = self._cpu_wait()
+        if wait <= 0:
+            return True
+        self.info["paced"] += not waiting
         started = _clock()
-        try:
-            return self._call(rows, probe)
-        finally:
-            info["seconds"] += _clock() - started
+        if self.flight:
+            self._end_next(block=True)
+        else:
+            _sleep(min(wait, max(0.0, self.run_seconds - self._seconds())))
+            self.busy += _clock() - started             # (the GraphQL part's seconds run while it waits)
+            self.info["seconds"] = self.busy
+        self.info["pacedSeconds"] += _clock() - started
+        return False
+
+    def _cpu_wait(self):
+        """Seconds until GitHub's CPU-time limit lets a call start (0: now). Its estimate: the response seconds of the
+        calls that ended in the last GRAPHQL_CPU_WINDOW seconds, and for each call in flight and the one to start the
+        median of the recent calls' or its own time so far, the more; at most GRAPHQL_CPU_PER_MINUTE, unless no call
+        ended in the window and none is in flight. The wait is until enough of those calls leave the window."""
+        now = _clock()
+        while self.ended and self.ended[0][0] <= now - GRAPHQL_CPU_WINDOW:
+            self.ended.pop(0)
+        median = statistics.median(self.recent) if self.recent else 0.0
+        over = (sum(seconds for _end, seconds in self.ended) + median - GRAPHQL_CPU_PER_MINUTE
+                + sum(max(now - flight[5], median) for flight in self.flight.values()))
+        if over <= 0 or not (self.ended or self.flight):
+            return 0.0
+        for end, seconds in self.ended:                 # (the oldest leave the window first)
+            over -= seconds
+            if over <= 0:
+                return end + GRAPHQL_CPU_WINDOW - now
+        return self.ended[-1][0] + GRAPHQL_CPU_WINDOW - now if self.ended else GRAPHQL_CPU_WINDOW
+
+    def _collect(self, wait=None):
+        """The calls that ended, each read and stored as it ended (`_ended`): with `wait` "one" at least one, "all"
+        every call in flight. Then the follow-ups of their batches (`_after`), in the order they ended: one that makes
+        calls of its own (isolation, a control call, groups isolated on) first lets every call in flight end, and
+        makes them one at a time."""
+        while self.flight and self._end_next(block=wait is not None):
+            if wait == "one":
+                wait = None
+        while self.later:
+            rows, kind, got = self.later[0]
+            if self.flight and (got in ("whole", "timeout") or (got == "read" and self.suspect)):
+                while self.flight:
+                    self._end_next(block=True)
+                continue
+            self.later.popleft()
+            self._after(rows, kind, got)
+
+    def _end_next(self, block):
+        """The next call that ended, read (`_ended`) -> False when none has (and `block` is false)."""
+        ended = self.pool.next(block)
+        if ended is None:
+            if block:
+                raise RuntimeError("a GraphQL call in flight was lost")     # (each call hands back what it got)
+            return False
+        self._ended(*ended)
+        return True
+
+    def _seconds(self):
+        """The GraphQL part's wall clock while calls were in flight: what was spent, and the time since the calls in
+        flight began."""
+        return self.busy + (_clock() - self.began if self.began is not None else 0.0)
+
+    def close(self):
+        """Every call's thread ended (after an error of the run: what calls still in flight get is not read; their
+        rows stay as they were)."""
+        self.pool.close()
 
     def _isolate(self, groups, depth=1, up=False):
         """Groups of rows asked together of which nothing could be read (an error of the whole query, or an answer
-        not as asked): each one's halves asked, level by level, and the halves of those that fail the same way, down
+        not as asked; or a call GitHub ended at its own time limit, whose halves end sooner): each one's halves asked,
+        one at a time, level by level, and the halves of those that fail the same way, down
         to single rows (GRAPHQL_SPLIT_DEPTH levels in all, within the run's calls and seconds), so that the rows
         GitHub cannot answer about are found and backed off, the others answered. A single row that fails so,
         while GitHub answers others (`up`: it just did), is one. Two levels in a row of which nothing could be read
@@ -1167,6 +1466,7 @@ class _Asker:
                 for half in (group[:mid], group[mid:]):
                     got = self._ask(half)
                     if got is None or got == "failed":      # (stopped, or a failure of the call: the rest as it was)
+                        self.broken = True
                         self._lone(alone, read or up)
                         return read, []
                     if got == "read":
@@ -1199,22 +1499,94 @@ class _Asker:
         self.store.save_github_listed([(r["repo_id"], r["state"], _backoff(r["fails"] + 1, self.now), r["checks"],
                                         why, r["fails"] + 1) for r in rows])
 
-    def _call(self, rows, probe=False):
+    def _start(self, rows, kind=None, probe=False):
+        """A call for `rows` started (`_Calls`: on a thread of its own at a concurrency over 1, the run's own at 1),
+        charged to the run's calls as it starts -> its ticket (its number in the run). `kind` "fresh" or "again": a
+        batch's own call, whose follow-up (`_after`) comes once it was read; None: a follow-up's (`_ask`)."""
         info = self.info
         self.left -= 1
         info["calls"] += 1
+        ticket = info["calls"]
         if info["calls"] % GRAPHQL_PROGRESS_EVERY == 0:
             self.say(f"GraphQL: {info['calls']} calls, {info['asked']:,} new repositories asked about…")
         what = (f"asking GitHub's GraphQL API about {len(rows)} new repositories" if not probe else
                 "asking GitHub's GraphQL API about a repository it answered about (a control call)")
         body = json.dumps({"query": GRAPHQL_QUERY, "variables": {"ids": [r["node_id"] for r in rows]}},
                           separators=(",", ":")).encode("utf-8")
-        headers = {}
+        if not self.flight:
+            self.began = _clock()                       # (the wall clock runs while calls are in flight)
         try:
-            doc = sources._json(self.client.post(GRAPHQL, what, body, max_bytes=GRAPHQL_BYTES, reply_headers=headers,
-                                                 seconds=GRAPHQL_SECONDS), what)
+            self.pool.start(ticket, lambda: self._post(what, body))
+        except BaseException:
+            if not self.flight:
+                self.busy, self.began = self._seconds(), None
+            raise
+        self.flight[ticket] = (rows, kind, probe, what, self.strikes, _clock())
+        info["atOnce"] = max(info["atOnce"], len(self.flight))
+        return ticket
+
+    def _post(self, what, body):
+        """One call's HTTP, and nothing else (on its own thread at a concurrency over 1: sources.Client.post, whose
+        transports are safe for it: urllib's makes a connection for each call, the native one's shared client hands
+        each call a connection of its own, or a stream of its own on HTTP/2) -> (the answer's body or None, the
+        SourceError or None, the answer's headers, when the call began and ended: its response time, which GitHub's
+        CPU-time limit is estimated by)."""
+        headers, began = {}, _clock()
+        try:
+            raw = self.client.post(GRAPHQL, what, body, max_bytes=GRAPHQL_BYTES, reply_headers=headers,
+                                   seconds=GRAPHQL_SECONDS)
+            return raw, None, headers, (began, _clock())
         except sources.SourceError as exc:
-            self._failed([] if probe else rows, exc, headers)
+            return None, exc, headers, (began, _clock())
+
+    def _ended(self, ticket, outcome):
+        """A call that ended, on the run's thread: its answer read and stored (`_answer`); the wall clock stopped when
+        it was the last in flight; one at a time after an answer that is not "read", until a call started since is
+        read with GitHub's points in it; a batch's follow-up queued, a follow-up's own call's outcome kept; its response
+        time kept for GitHub's CPU-time limit (`_cpu_wait`)."""
+        rows, kind, probe, what, strikes, _started = self.flight.pop(ticket)
+        value = outcome[0]
+        if value is not None:
+            began, end = value[3]
+            bisect.insort(self.ended, (end, end - began))
+            self.recent.append(end - began)
+        try:
+            got = self._answer(rows, kind, probe, what, strikes, outcome)
+        finally:
+            if not self.flight and self.began is not None:
+                self.busy, self.began = self._seconds(), None
+                self.info["seconds"] = self.busy
+        if got != "read":
+            self.open, self.closed_at = False, self.info["calls"]
+        elif ticket > self.closed_at and self.info["points"] is not None:
+            self.open = True
+        if kind is None:
+            self.results[ticket] = got
+        else:
+            self.later.append((rows, kind, got))
+
+    def _answer(self, rows, kind, probe, what, strikes, outcome):
+        """What a call got, read and stored (on the run's thread) -> "read", "whole", "failed" (as `_ask` says), or
+        "timeout": a batch's own call of more than one row that GitHub ended at its own time limit (GRAPHQL_TIMEOUTS),
+        its rows kept as they were for its halves (`_after`), not a failure of the call. A failure is counted
+        towards GRAPHQL_FAILURES unless one counted since the call started (`strikes`) was in flight with it."""
+        value, error = outcome
+        if error is not None:
+            raise error                                 # (not GitHub's answer: an error of the run, as before)
+        raw, exc, headers, _times = value
+        info = self.info
+        if exc is None:
+            try:
+                doc = sources._json(raw, what)
+            except sources.SourceError as bad:
+                exc = bad
+        if exc is not None:
+            if (kind is not None and getattr(exc, "status", None) in GRAPHQL_TIMEOUTS and len(rows) > 1
+                    and GRAPHQL_SPLIT_DEPTH >= 1):
+                self._apply(rows, [("unanswered", _CallError(str(exc)[:500]))] * len(rows))
+                info["timeouts"] += 1
+                return "timeout"
+            self._failed([] if probe else rows, exc, headers, counts=strikes == self.strikes)
             return "failed"
         verdicts, rate, limited = read_nodes(doc, rows)
         if not probe:
@@ -1238,17 +1610,20 @@ class _Asker:
         if self.budget.stopped is None:
             self.budget.stopped = why                   # (GraphQL's own part stopped already: info["stopped"])
 
-    def _failure(self, why):
+    def _failure(self, why, counts=True):
+        """A failure of the call: counted (`failed`), and towards GRAPHQL_FAILURES when `counts` (the call started
+        after the last failure counted: calls in flight together fail as one)."""
         info = self.info
         info["failed"] += 1
         info["error"] = why
-        if info["failed"] >= GRAPHQL_FAILURES and info["stopped"] is None:
+        self.strikes += counts
+        if self.strikes >= GRAPHQL_FAILURES and info["stopped"] is None:
             info["stopped"] = f"{info['failed']} GraphQL calls failed (the last: {why})"
 
-    def _failed(self, rows, exc, headers):
+    def _failed(self, rows, exc, headers, counts=True):
         """A call GitHub answered with an error, or that failed: its rows stay to be asked, as they were; a refusal
         stops the GraphQL part (and the run, unless it is GraphQL's own hourly limit); GRAPHQL_FAILURES failures do
-        too."""
+        too (`_failure`)."""
         info, why = self.info, _CallError(str(exc)[:500])
         self._apply(rows, [("unanswered", why)] * len(rows))
         status = getattr(exc, "status", None)
@@ -1259,7 +1634,7 @@ class _Asker:
             if not own:
                 self._stop_run(f"GitHub's GraphQL API refused a call: {why}")
             return
-        self._failure(why)
+        self._failure(why, counts)
 
     def _points(self, rate, headers):
         """GitHub's GraphQL points left (the answer's rateLimit and its X-RateLimit-Remaining, the lower): at
@@ -1333,9 +1708,13 @@ class _Asker:
         self.store.save_github_listed(updates, deletes)
 
     def finish(self):
-        """The set waiting for code kept at the LISTED_MAX newest (the rest evicted, counted), and what is left
-        counted: due and not asked, all, and those listed over PENDING_HOURS ago still waiting for an answer."""
+        """Every call in flight read and followed up, then the set waiting for code kept at the LISTED_MAX newest
+        (the rest evicted, counted), and what is left counted: due and not asked, all, and those listed over
+        PENDING_HOURS ago still waiting for an answer."""
         info = self.info
+        self._collect(wait="all")
+        self.pool.close()
+        info["seconds"] = self.busy
         info["over"] += self.store.prune_github_listed(keep=LISTED_MAX)
         info["waiting"] = sum(self.store.github_listed_counts(due_by=_iso(self.now)).values())
         info["kept"] = sum(self.store.github_listed_counts().values())
@@ -1346,7 +1725,7 @@ class _Asker:
 # ---------------------------------------------------------------- the run
 def run(store, *, scan=False, max_calls=DEFAULT_MAX_CALLS, filters=None, env=None, http=None, now=None,
         archive=False, scan_all=False, max_scans=None, archive_http=None, events_url=None, progress=None,
-        max_graphql_calls=DEFAULT_MAX_GRAPHQL_CALLS):
+        max_graphql_calls=DEFAULT_MAX_GRAPHQL_CALLS, graphql_concurrency=None, graphql_seconds=None):
     """One `discover --ecosystem github --resume` run. -> a dict: listed, pages, caughtUp, matches (filter kind ->
     count), candidates (full names kept), campaigns ([(full_name, marker, url)]), checked ({state: count}), scans
     (results), errors, stopped (why the run stopped early, or None), cursor (the ID listed up to), first (True on
@@ -1355,11 +1734,14 @@ def run(store, *, scan=False, max_calls=DEFAULT_MAX_CALLS, filters=None, env=Non
     (what GitHub's GraphQL API said of scan-all's listed repositories, `_Asker`; or None). `archive` reads GH
     Archive (ghevents; `archive_http` its network seam), `scan_all` makes every new repository that gets code a
     candidate (it asks GraphQL, reads GH Archive and scans; `max_graphql_calls` the GraphQL calls it may make, apart
-    from `max_calls`; GraphQL's POST goes through the `http` seam too, with method="POST"), `max_scans` caps the
-    run's scans (SCAN_ALL_MAX_SCANS with scan_all), `events_url` is where the hourly files come from
-    (ghevents.source's form; GH Archive by default), `progress(text)` hears where a long run is, and `gone` counts
-    the scans of repositories gone, made private or empty. DiscoveryError without GITHUB_TOKEN or with an events URL
-    that is not one."""
+    from `max_calls`, `graphql_concurrency` how many at once, DEFAULT_GRAPHQL_CONCURRENCY when None, and
+    `graphql_seconds` its wall clock, GRAPHQL_RUN_SECONDS when None; GraphQL's POST goes through the `http` seam
+    too, with method="POST", from a thread of its own when calls are made at once),
+    `max_scans` caps the run's scans (SCAN_ALL_MAX_SCANS with scan_all), `events_url` is where the hourly files come
+    from (ghevents.source's form; GH Archive by default), `progress(text)` hears where a long run is, and `gone`
+    counts the scans of repositories gone, made private or empty. DiscoveryError without GITHUB_TOKEN, with an events
+    URL that is not one, a concurrency not from 1 to GRAPHQL_CONCURRENCY_MAX, or GraphQL seconds not from 1 to
+    GRAPHQL_RUN_SECONDS_MAX."""
     env = os.environ if env is None else env
     token = sources._token("github", env)
     if not token:
@@ -1376,6 +1758,12 @@ def run(store, *, scan=False, max_calls=DEFAULT_MAX_CALLS, filters=None, env=Non
         events_url = ghevents.source(events_url) if events_url else ghevents.DEFAULT_SOURCE
     except ValueError as exc:
         raise DiscoveryError(f"--github-events-url: {exc}") from None
+    width = DEFAULT_GRAPHQL_CONCURRENCY if graphql_concurrency is None else graphql_concurrency
+    if not (_int(width) and 1 <= width <= GRAPHQL_CONCURRENCY_MAX):
+        raise DiscoveryError(f"--graphql-concurrency takes a number of calls at once, 1 to {GRAPHQL_CONCURRENCY_MAX}")
+    if graphql_seconds is not None and not (isinstance(graphql_seconds, (int, float)) and not isinstance(
+            graphql_seconds, bool) and 1 <= graphql_seconds <= GRAPHQL_RUN_SECONDS_MAX):
+        raise DiscoveryError(f"--graphql-seconds takes a number of seconds, 1 to {GRAPHQL_RUN_SECONDS_MAX:g}")
     say = progress or (lambda text: None)
     out = {"listed": 0, "pages": 0, "caughtUp": False, "matches": {}, "candidates": [], "campaigns": [],
            "checked": {}, "scans": [], "errors": [], "stopped": None, "cursor": None, "first": False,
@@ -1388,24 +1776,29 @@ def run(store, *, scan=False, max_calls=DEFAULT_MAX_CALLS, filters=None, env=Non
     if archive:                                     # (GH Archive's files: none of GitHub's API calls)
         _archive(store, filters, scan_all, now, out, archive_http, events_url, say)
     if scan_all and out["queue"] is not None and out["queue"]["since"] is not None:
-        asker = _Asker(store, client, budget, filters, now, out, max(0, int(max_graphql_calls)), say)
-    if scan and not failed:
-        try:
-            _scans(store, budget, max_scans, env, http, out, say)
-        except sources.SourceError as exc:
-            failed = _rest_stopped(out, budget, exc)
-    if asker is not None:
-        # (after the scans: what it finds is scanned from the next run on, as what the listing finds is, so that
-        # both compete by push time. GraphQL spends none of REST's calls, so a REST stop of the checks or the scans
-        # leaves it asking; a limit GraphQL shares, Budget.shared, does not)
-        asker.due()
-    if not failed:
-        try:
-            _listing(store, client, budget, filters, now, out, scan_all, say, asker)
-        except sources.SourceError as exc:
-            _rest_stopped(out, budget, exc)
-    if asker is not None:
-        asker.finish()
+        asker = _Asker(store, client, budget, filters, now, out, max(0, int(max_graphql_calls)), say, width,
+                       graphql_seconds)
+    try:
+        if scan and not failed:
+            try:
+                _scans(store, budget, max_scans, env, http, out, say)
+            except sources.SourceError as exc:
+                failed = _rest_stopped(out, budget, exc)
+        if asker is not None:
+            # (after the scans: what it finds is scanned from the next run on, as what the listing finds is, so that
+            # both compete by push time. GraphQL spends none of REST's calls, so a REST stop of the checks or the
+            # scans leaves it asking; a limit GraphQL shares, Budget.shared, does not)
+            asker.due()
+        if not failed:
+            try:
+                _listing(store, client, budget, filters, now, out, scan_all, say, asker)
+            except sources.SourceError as exc:
+                _rest_stopped(out, budget, exc)
+        if asker is not None:
+            asker.finish()                          # (every call in flight read first)
+    finally:
+        if asker is not None:
+            asker.close()                           # (no call's thread outlives the run, an error of it included)
     if scan_all and out["queue"] is not None:
         _bound_queue(store, now, out["queue"])          # (the listing's asks queue too)
     out["stopped"] = out["stopped"] or _why_stopped(out, budget, max_calls)
@@ -1526,11 +1919,20 @@ def _keep(store, item, matched, listed_at, out):
         out["candidates"].append(full)
 
 
+def _goes_on(budget, asker):
+    """Does the listing read another page? The GraphQL calls that ended are read first (`_Asker.poll`): a secondary
+    limit one of them met stops the run's REST calls too."""
+    if asker is not None:
+        asker.poll()
+    return budget.can()
+
+
 def _listing(store, client, budget, filters, now, out, scan_all=False, say=lambda text: None, asker=None):
     """New repositories from the cursor on, each page's candidates kept, then the cursor. With scan-all, what the
     listing judges is kept for GH Archive's pushes too: excluded and campaign repositories, and the pending ones
     (pushed before the listing reached them) queued or reported; and the rest of the page (`asker`, GH-SCAN-GQL)
-    is kept before the cursor moves past it and asked of GitHub's GraphQL API after, one call for the page."""
+    is kept before the cursor moves past it and asked of GitHub's GraphQL API after, one call for the page (with
+    calls at once, GH-SCAN-GQL-SPEED, the listing reads on while it is in flight; `_goes_on`)."""
     stored = store.discovery_cursor(ECO)
     since = int(stored[0]) if stored and str(stored[0]).isdigit() else None
     if since is None:
@@ -1542,7 +1944,7 @@ def _listing(store, client, budget, filters, now, out, scan_all=False, say=lambd
         return
     out["cursor"] = since
     listed_at = _iso(now)
-    while budget.can():
+    while _goes_on(budget, asker):
         page = list_page(client, budget, since)
         if not page:
             out["caughtUp"] = True

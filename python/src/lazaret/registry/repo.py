@@ -8385,11 +8385,20 @@ def _discover_github(store, args):
     max_graphql = getattr(args, "max_graphql_calls", None)
     if max_graphql is not None and max_graphql < 0:
         raise ghdiscover.DiscoveryError("--max-graphql-calls takes a number of calls, 0 or more")
+    at_once = getattr(args, "graphql_concurrency", None)
+    if at_once is not None and not 1 <= at_once <= ghdiscover.GRAPHQL_CONCURRENCY_MAX:
+        raise ghdiscover.DiscoveryError(f"--graphql-concurrency takes a number of calls at once, 1 to "
+                                        f"{ghdiscover.GRAPHQL_CONCURRENCY_MAX}")
+    gql_seconds = getattr(args, "graphql_seconds", None)
+    if gql_seconds is not None and not 1 <= gql_seconds <= ghdiscover.GRAPHQL_RUN_SECONDS_MAX:
+        raise ghdiscover.DiscoveryError(f"--graphql-seconds takes a number of seconds, 1 to "
+                                        f"{ghdiscover.GRAPHQL_RUN_SECONDS_MAX:g}")
     out = ghdiscover.run(store, scan=args.scan, max_calls=max_calls, filters=ghdiscover.Filters(patterns=patterns),
                          archive=getattr(args, "github_archive", False), scan_all=getattr(args, "github_scan_all", False),
                          max_scans=max_scans, events_url=getattr(args, "github_events_url", None),
                          progress=_github_progress,
-                         max_graphql_calls=ghdiscover.DEFAULT_MAX_GRAPHQL_CALLS if max_graphql is None else max_graphql)
+                         max_graphql_calls=ghdiscover.DEFAULT_MAX_GRAPHQL_CALLS if max_graphql is None else max_graphql,
+                         graphql_concurrency=at_once, graphql_seconds=gql_seconds)
     _print_github_run(out)
     bad = bool(out["campaigns"])
     quiet = [res for res in out["scans"] if res["verdict"] == "OK"]
@@ -8490,7 +8499,8 @@ def _print_github_archive(out):
 def _print_github_graphql(out):
     """What GitHub's GraphQL API said of scan-all's listed repositories (GH-SCAN-GQL): how many were asked about,
     had code (queued), were empty or forks with no push of their own (asked again), gone, not answered; the calls
-    and the points left; what was dropped; the calls of which nothing could be read, and the repositories GitHub
+    and the points left; the calls' wall clock and how many were made at once (GH-SCAN-GQL-SPEED); what was dropped;
+    the calls of which nothing could be read, those GitHub ended at its own time limit, and the repositories GitHub
     could not answer about (backed off); why it stopped, and how many wait to be asked."""
     from lazaret.registry import ghdiscover
     g = out.get("graphql")
@@ -8508,6 +8518,12 @@ def _print_github_graphql(out):
               f"listed, {g['again']:,} again): {g['code']:,} had code (queued{late}){judged}, {g['empty']:,} empty, "
               f"{g['forks']:,} forks with no push of their own, {g['gone']:,} gone, {g['unanswered']:,} not answered"
               f"{points}{reset}")
+        print(f"  GraphQL: {g['calls']:,} call(s) in {g['seconds']:,.1f} s of the {g['runSeconds']:,g} allowed (wall "
+              f"clock, while calls were in flight or waited), {g['atOnce']} at once at most of the {g['concurrency']} "
+              f"allowed (--graphql-concurrency)")
+        if g.get("paced"):
+            print(f"  GraphQL: waited {g['pacedSeconds']:,.1f} s in all, {g['paced']:,} time(s), for GitHub's CPU-time "
+                  f"limit ({ghdiscover.GRAPHQL_CPU_PER_MINUTE:g} s of calls a minute at most)")
     else:
         print("  GraphQL: asked about none" + (f" ({g['listed']:,} listed)" if g["listed"] else ""))
     dropped = [f"{n:,} {what}" for n, what in (
@@ -8526,6 +8542,9 @@ def _print_github_graphql(out):
                     f"... hours on, at most {ghdiscover.GRAPHQL_BACKOFF_MAX_HOURS})") if g["isolated"] else ""
         print(f"  GraphQL: {g['unreadable']:,} call(s) of which nothing could be read (an error of the whole query, "
               f"or an answer not as asked), their repositories asked again in halves{isolated}")
+    if g.get("timeouts"):
+        print(f"  GraphQL: {g['timeouts']:,} call(s) GitHub ended at its own time limit for a call (HTTP 502 or 504), "
+              f"their repositories asked again in halves")
     if g["stopped"]:
         print(f"  GraphQL: stopped: {s(g['stopped'])}; {g['waiting']:,} wait to be asked (the next run asks them)")
     elif g["failed"]:
@@ -8718,6 +8737,8 @@ HELP_EXAMPLES = """examples:
     lazaret-registry discover --ecosystem github --resume --github-scan-all --max-scans 50
     lazaret-registry discover --ecosystem github --resume --github-scan-all \\
         --max-graphql-calls 1000      GraphQL calls asking which new repositories got code (default 4000)
+    lazaret-registry discover --ecosystem github --resume --github-scan-all \\
+        --graphql-seconds 1800        a catch-up run's GraphQL time (default 900)
 
   The state database is --db (env LAZARET_DB): a SQLite path, by default lazaret-registry.db
   here, or a postgres:// URL. Exit codes: 0 ok, 1 a failure or (--ci) a SUSPICIOUS or
@@ -8808,6 +8829,17 @@ def main():
     ap.add_argument("--max-graphql-calls", type=int, metavar="N",
                     help="discover --ecosystem github --github-scan-all: GraphQL calls this run may make, each asking "
                          "about 100 new repositories whether they got code (default 4000), apart from --max-calls")
+    ap.add_argument("--graphql-concurrency", type=int, metavar="N",
+                    help="discover --ecosystem github --github-scan-all: GraphQL calls made at once (default 1, at "
+                         "most 8). GitHub's CPU-time limit holds a token's GraphQL calls to some 60 s of response time "
+                         "a minute: one at a time cannot pass it; more at once are kept to 50 s a minute, so raise "
+                         "this only while GitHub answers fast. A sudden slowdown of GitHub's can still pass the limit "
+                         "(by up to N x 10 s), which GitHub answers with a secondary limit that stops the run cleanly. "
+                         "With more than one at once, Ctrl-C waits for the calls in flight (each 60 s at most); a "
+                         "second Ctrl-C exits")
+    ap.add_argument("--graphql-seconds", type=int, metavar="N",
+                    help="discover --ecosystem github --github-scan-all: the run's GraphQL time, on its wall clock, "
+                         "waits for GitHub's CPU-time limit included (default 900, at most 3600)")
     ap.add_argument("--github-events-url", metavar="URL", default=os.environ.get("LAZARET_GITHUB_EVENTS_URL"),
                     help="discover --ecosystem github: where the hourly event files come from (default "
                          "https://data.gharchive.org, GH Archive, which has missed most events since 2025; "
@@ -8828,6 +8860,8 @@ def main():
                                          ("--github-scan-all", args.github_scan_all),
                                          ("--max-scans", args.max_scans is not None),
                                          ("--max-graphql-calls", args.max_graphql_calls is not None),
+                                         ("--graphql-concurrency", args.graphql_concurrency is not None),
+                                         ("--graphql-seconds", args.graphql_seconds is not None),
                                          ("--github-events-url", "--github-events-url" in sys.argv[1:]
                                           or any(a.startswith("--github-events-url=") for a in sys.argv[1:])))
                    if on]
@@ -8835,6 +8869,10 @@ def main():
         ap.error(f"{', '.join(github_only)}: these go with discover --ecosystem github --resume")
     if args.max_graphql_calls is not None and not args.github_scan_all:
         ap.error("--max-graphql-calls goes with --github-scan-all (only scan-all asks GitHub's GraphQL API)")
+    for name, value in (("--graphql-concurrency", args.graphql_concurrency),
+                        ("--graphql-seconds", args.graphql_seconds)):
+        if value is not None and not args.github_scan_all:
+            ap.error(f"{name} goes with --github-scan-all (only scan-all asks GitHub's GraphQL API)")
     try:
         _engine.require()
     except _engine.EngineError as exc:

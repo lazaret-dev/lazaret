@@ -381,6 +381,35 @@ aggregate):
   The run's report says how many were asked about, had code, were empty, forks, gone or not answered, the calls and
   the points left, the calls of which nothing could be read and who waits for it, the late finds queued, scanned and
   left; `list` counts what waits.
+- **Scan-all's GraphQL calls several at once, paced to GitHub's CPU-time limit (GH-SCAN-GQL-SPEED; John, Oct 20).**
+  His profile of a real run: 907 s, 903.6 of them waiting for GitHub's answers; a call about 100 repositories some
+  3.5 s, GitHub's time linear in the repositories asked (25 ids 1.0 s, 50 ids 1.9 s), Lazaret's transport as fast as
+  urllib: the run's 900 GraphQL seconds asked some 250 calls (25,000 repositories) while a catch-up listing adds some
+  85,000 a run. `--graphql-seconds` (default 900, at most 3,600) is the GraphQL part's time in a run, on its wall
+  clock, the pacing's waits included, so a catch-up run can ask longer; the due share's quarter scales with it.
+  `--graphql-concurrency` (default 1, one at a time as before; at most 8) makes several calls at once: each call's
+  HTTP on a thread of its own (the standard library's), while the run goes on with the next batch or the listing's
+  next page; every answer is read and stored on the run's own thread, in the order the calls end, so SQLite and
+  Postgres are written from one thread as before. GitHub's secondary limits allow a token 60 seconds of GraphQL CPU
+  time per 60 seconds of real time, estimated by the calls' response times, which one call at a time of 3.5 s already
+  spends but cannot pass (its calls do not overlap): it is not paced (John's runs at some 60 s a minute never met the
+  limit; pacing them to 50 cost 16 to 30% of their calls). Several at once are paced: the run keeps their response
+  seconds over the last minute of its clock, with an estimate for the calls in flight and the call itself (the recent
+  median, or a call's time so far), at most 50 (a margin, as the REST listing shares GitHub's 90): some 14 calls a
+  minute at 3.5 s a call, so more at once help only while GitHub answers fast. A sudden slowdown of GitHub's can still
+  pass the limit, by up to the concurrency times GitHub's 10 s for a call, as calls in flight are estimated at the
+  median; GitHub answers that with a secondary limit, which stops the run cleanly. With several at once, Ctrl-C waits
+  for the calls in flight (each 60 s at most); a second Ctrl-C exits at once. Also with several at once: one call at a
+  time until an answer was read with GitHub's points left in it, and again after a failure, a rate limit, an answer of
+  which nothing could be read or GitHub's time limit, until the calls then in flight have ended, their answers stored
+  once, and a call started since was read; isolation and control calls one at a time, as before; the GraphQL seconds
+  measured while calls are in flight, not as the sum of the calls' times; `--max-graphql-calls` counting a call as it
+  starts; no call while GitHub's points left, less one for each call in flight, would be at the floor (100); failures
+  of calls in flight together counted as one of the three that stop the asking. A call GitHub ends at its own time
+  limit (a 502 or 504: its GraphQL API ends a call over 10 seconds; John saw two in ten heavier calls of some 8 s) is
+  asked again in halves, which end sooner, and counts as a failure only when a half fails too (a single row, or with
+  no halving, as before). The run's report adds the calls' wall clock of the seconds allowed, how many were made at
+  once, the pacing's waits and the calls GitHub ended at its time limit.
 - **`--show-secrets`: the credentials on the terminal, and nowhere else.** Every finding is redacted where it is made,
   so a secret finding's line was a placeholder on the terminal too. `lazaret . --show-secrets`, `lazaret hook
   --show-secrets` and `lazaret-registry scan --show-secrets` print each finding's flagged line as it was read, kept

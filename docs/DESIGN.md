@@ -2752,14 +2752,16 @@ of it by the third. Answered, the groups are isolated on from their level
 third runs, the 12 such rows backed off); not, they wait, with their level,
 for GitHub to answer another call, and a moment's failure of GitHub so backs
 nothing off. What stops the GraphQL part: `GRAPHQL_FAILURES` (3) failures of
-the call (an HTTP error, a body not JSON or over the budget: never split,
-never backed off), or that many batches in a row of which nothing could be
-read, nor of their halves and quarters, nor their control calls (8 calls
-each), with nothing backed off; and `GRAPHQL_RUN_SECONDS` (900) spent in it.
-The seconds split as the calls do: the oldest-first share stops at a quarter
-of either. A header not understood (`X-RateLimit-Remaining: ²`, a reset no
-clock holds) is unknown, in REST's `Budget.read` and `sources._explain` too,
-never an error of the run. Rate limits: `rateLimit.remaining` or the
+the call (an HTTP error, a body not JSON or over the budget: never backed
+off, and split only when GitHub ended the call at its own time limit, below),
+or that many batches in a row of which nothing could be read, nor of their
+halves and quarters, nor their control calls (8 calls each), with nothing
+backed off; and `GRAPHQL_RUN_SECONDS` (900) spent in it, on its wall clock
+(below). The seconds split as the calls do: the oldest-first share stops at
+a quarter of either. A header not understood (`X-RateLimit-Remaining: ²`, a
+reset no clock holds) is unknown, in REST's `Budget.read` and
+`sources._explain` too, never an error of the run. Rate limits:
+`rateLimit.remaining` or the
 answer's `X-RateLimit-Remaining`, the lower, at `GRAPHQL_RATE_FLOOR`, a
 `RATE_LIMITED` error (its type, or its extensions' code) or an error
 speaking of a rate limit, or a 403 with no points left is GraphQL's own
@@ -2814,6 +2816,121 @@ nothing could be read (`unreadable`) and the rows backed off by isolation
 `github_listed` by state. GH Archive stays for the repositories made public;
 its thin hour no longer points to the mirror as the fix (the mirror stays a
 setting).
+
+Calls at once, paced (GH-SCAN-GQL-SPEED, 0.1.9; John's go-ahead of Oct 20).
+His profile of a real run: 907 s, of which 903.6 s waiting inside
+`nativenet.request` for GitHub's answers; a call about 100 node IDs some 3.5
+s, GitHub's time linear in the repositories asked (some 35 to 40 ms each: 25
+IDs 1.0 s, 50 IDs 1.9 s), Lazaret's transport as fast as urllib, SQLite and
+JSON some 2 s in all. So the run's 900 GraphQL seconds asked some 250 calls
+(25,000 repositories) while a catch-up listing adds some 85,000 a run
+(111,577 were waiting). A cheaper query was measured too: `isEmpty` agrees
+with `defaultBranchRef` and a `HEAD` object on 800 repositories and is the
+fastest of them, so the query stays. **GitHub's CPU-time limit** (its
+rate-limits page, read Oct 21: "No more than 90 seconds of CPU time per 60
+seconds of real time", "No more than 60 seconds of this CPU time may be for
+the GraphQL API", estimated "by measuring the total response time for your
+API requests"): one call at a time of 3.5 s already spends some 60 s of
+response time a minute, so calls at once alone would end every run on a
+secondary limit. One at a time cannot pass it (its calls do not overlap, and
+CPU time is less than response time), and is not paced (the review of Oct
+21: John's runs at some 60 s a minute never met the limit, and pacing them
+to 50 cost 16 to 30% of their calls; `PacingTests`: 3.5 s calls back to
+back, 35 in 120 s, no wait, 60 s of calls in any minute at most). Several at
+once are paced (`_paced`, `_cpu_wait`): the run keeps the response time of
+each call that ended (measured around `Client.post` on the call's own
+thread) over the last `GRAPHQL_CPU_WINDOW` (60) seconds of its clock, and
+starts no call while those, with an estimate for each call in flight and for
+the call itself (the median of the last `GRAPHQL_CPU_RECENT` calls' times,
+or a call's own time so far, the more), would pass `GRAPHQL_CPU_PER_MINUTE`
+(50, a margin under GitHub's 60, as the REST listing's calls share GitHub's
+90); it waits for a call in flight to end, or, none in flight, until enough
+of those calls leave the window. At 3.5 s a call that is some 14 calls a
+minute (a burst of 14, a wait, then one as each leaves the minute), fewer
+than one at a time's 17: more at once help only while GitHub answers fast. A
+call in flight is counted at the median until it passes it, so a sudden
+slowdown of GitHub's can pass the minute's 50 s, by each call in flight's
+time over the median: at most the concurrency times GitHub's 10 s for a call
+(`PacingTests`: calls of 1 s and one of 9 s, 53 s; 58 were a call in flight
+counted at the median alone). GitHub answers a minute over its limit with a
+secondary limit, which stops the run cleanly, as any secondary limit does;
+so `--graphql-concurrency` is raised only while calls are fast. A Ctrl-C
+with calls in flight (over 1 only) waits for them to end, each within its
+`GRAPHQL_SECONDS` (60) in all, their threads joined in `run()`'s `finally`;
+a second Ctrl-C exits at once, the call threads being daemon threads (tried
+by hand at 8: fake calls of 20 s in flight, the first Ctrl-C returned after
+some 20 s, no call thread left; the second at once). **`--graphql-seconds`**
+(`GRAPHQL_RUN_SECONDS`, 900, by default; at most `GRAPHQL_RUN_SECONDS_MAX`,
+3,600) is the GraphQL part's time in a run, so that John can let a catch-up
+run ask longer; the due share's quarter scales with it, and the pacing's
+waits count towards it. **`--graphql-concurrency`**
+(`DEFAULT_GRAPHQL_CONCURRENCY`, 1, one at a time as before; at most
+`GRAPHQL_CONCURRENCY_MAX`, 8) makes several calls at once, which helps only
+while GitHub answers fast. At 1 the call is made on the run's thread, no
+thread made. Over 1, `_Calls` runs each call's HTTP (`_post`:
+`sources.Client.post` and nothing else) on a thread of its own (`_spawn`,
+named `lazaret-graphql-N`) and hands what it got back in the order the calls
+end; everything else stays on the run's thread (`_Asker._ended`: the JSON
+read, `read_nodes`, `_apply`, the points, the limits; `_after`, a batch's
+follow-up: isolation, control calls, the streak), so every database read and
+write is the run's, on SQLite (whose connection would refuse another thread)
+and on Postgres alike. The transports are safe for it: urllib's makes a
+connection for each call (a new opener, F-07's deadline its own); the native
+one's shared client (pratique's clones share the pool behind a lock) hands
+each call a connection of its own on HTTP/1.1, or a stream of its own on
+GitHub's HTTP/2 connection, which pratique's tests run from 8 and 16 threads
+at once (`TransportTests` sends eight POSTs at once on each transport to a
+local HTTPS server that answers none until all eight are in: a connection
+each, each its own answer). **The window** (`_room`, `_ended`): one call at
+a time until an answer was read with GitHub's points left in it (until then
+the points' margin below cannot be kept), then up to the concurrency; any
+other answer (a failure of the call, a rate limit, an answer of which
+nothing could be read, GitHub's time limit) closes it, and no call starts
+until the calls then in flight have ended, their answers read and stored,
+then one at a time until a call started since is read: a secondary limit or
+a failure stops new calls at once, and nothing in flight is lost or stored
+twice. A follow-up that makes calls of its own (`_collect`) lets every call
+in flight end first and makes them one at a time (`_ask`), so isolation
+keeps its exact semantics (its sub-calls are not made at once: simpler, and
+GitHub failing a batch is when fewer calls are wanted) and a control call
+names a repository GitHub answered about, in completion order. **The
+bounds:** the GraphQL seconds and the due share's are the GraphQL part's
+wall clock while calls are in flight or it waits for the CPU-time limit
+(`_seconds`), not the sum of the calls' times, which would make calls at
+once gain nothing; a call in flight when they run out still ends and is
+stored, as one call could before. The due share's room is waited for before
+the share is judged, so it is judged on the clock as it is then.
+`--max-graphql-calls` counts a call as it starts, so the calls in flight are
+within it; no call starts while GitHub's points left (the latest answer's)
+less one for each call in flight would be at `GRAPHQL_RATE_FLOOR`. A failure
+of a call started before the last failure counted was in flight with it and
+is not counted again (`strikes`): three failures still means three calls,
+each started after the one before was seen to fail (`failed` counts them
+all). The due asks start in their order, a quarter oldest listed first and
+the rest newest first; the answers may end in any order without changing
+what is asked or stored. The listing reads the calls that ended before each
+page (`_goes_on`), so a secondary limit one of them met stops it there.
+`run()` ends every call's thread (`_Asker.close`, in a `finally`) after an
+error too; the rows of calls whose answers were not read stay as they were.
+**GitHub's time limit** (John, Oct 20: two 502s in ten heavier calls of some
+8 s; GitHub's GraphQL API ends a call over 10 seconds with a 502 or 504,
+`GRAPHQL_TIMEOUTS`): a batch's call so answered is no failure of the call;
+its rows are kept as they were and asked again in halves through the
+isolation above (smaller calls end sooner), and a half that fails is the
+failure of the call it would have been (counted, the batch's other half left
+as it was, no control call); a single row, or with `GRAPHQL_SPLIT_DEPTH` 0,
+is a failure as before. GitHub answering 502 to everything still stops the
+part after three failures, each batch costing two calls (`timeouts` counts
+them). The run's report adds the calls' wall clock of the seconds allowed,
+the most at once of those allowed, the pacing's waits (`paced`,
+`pacedSeconds`) and the calls GitHub ended at its time limit. **Tests:**
+`test_ghdiscover_concurrency` holds each call on its thread until the run
+waits for one (`Held`), so that calls overlap and end in any order chosen
+(first, last, seeded), or each takes so many seconds on a fake clock (the
+pacing), the same at each run of the tests; the three discovery modules run
+at the default, one call at a time, and `test_ghdiscover_at_eight` runs
+their runs again at eight at once, each call answered before the run goes
+on.
 
 ### m. crates.io discovery (`ecosystems/crates.py`, CRATES-DISCOVER)
 
