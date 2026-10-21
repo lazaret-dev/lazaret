@@ -2178,6 +2178,27 @@ aggregate):
   pymediainfo's tests, seven npm packages, 52 ICC profiles, the system's fonts with Noto's CJK collections) and 460
   keystores (436 `cryptography_vectors` PKCS#12 files, 23 from keytool, OpenSSL and the JDK, the system's `cacerts`:
   123 certificates, 133,175 bytes counted of 1 MiB, the largest part 513 of 16 KiB).
+- **An ordinal in display text is not a look-alike name (FP-HOMOGLYPH-ORDINAL, from John's fp-tally of Oct 21,
+  reworked after the review of Oct 27; rule set 2.112.0).** SC-HOMOGLYPH (MAJOR, WARN) reported "'Nº'
+  reads as 'No' but is spelled with U+00BA for 'o'" on `doomvault/src/library/LocalLibrary.tsx:581`, a label's JSX
+  text. A file that may hold JSX is read with JSX and without, and only the literals both readings agree on were left
+  out of the names; JSX text is code to the reading without JSX. Now an ordinal — digits or one ASCII letter, then one
+  ordinal indicator (ª U+00AA, º U+00BA), with no identifier character before or after it (`1º`, `2ª`, `Nº`, `nº`,
+  `Mª`), not itself a look-alike of a dangerous name — is not read as a name where the file's JSX reading holds it as
+  display text, as the lexer reads it and as the parser reads it (JSX text, a JSX attribute's string, a string, a
+  template's text), in a file that does not parse as JavaScript without JSX (Node runs a `.js`, `.mjs` or `.cjs` file
+  so: one that parses so has no display text) and whose JSX reading parses; the line is read on for the next name.
+  `evªl`, `aºb` and any longer name holding an indicator are never exempt, and a look-alike of a dangerous name
+  (CRITICAL) is never lowered. The JavaScript lexer reads `of` (but after a `for` head's binding) and a keyword used as
+  a property's name (after `.` or `?.`) as operands: the review's `of <b> evªl("1")` and `obj.return <b> evªl("1")`,
+  valid JavaScript (two comparisons) that the first version made quiet on every route, are CRITICAL again in `.js`,
+  `.mjs`, `.cjs`, `.jsx` and `.tsx`. An ordinal in an identifier (`const Nº`), in a file read without JSX, or after no
+  letter or digit, and every other look-alike in display text (`pаypal` with a Cyrillic а), are reported as before;
+  Python reads `Nº` as `No`, as it always did. The rule's other confusables were looked at in JSX text: superscript
+  abbreviation letters (`Mᵐᵉ`), ligatures (`ﬁle`), fullwidth letters beside ASCII, the script l of `mℓ` and a Greek
+  word with a Latin letter are still MAJOR there (not changed: John's call); the micro sign, `№`, Roman numerals and
+  Cyrillic words of mapped letters alone were already quiet.
+
 - **A protobuf file's descriptor that generated code alone uses is not a base64 payload (FP-B64-PROTOBUF, from John's
   fp-tally of Oct 21, reworked after the review of Oct 27; rule set 2.111.0).** protoc-gen-es
   (protobuf-es 2.x) embeds each `.proto` file's serialized FileDescriptorProto as base64 and hands it to

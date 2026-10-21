@@ -275,7 +275,12 @@ rust/
                              match text (NFKC, JS escapes), names
     src/scanfile.rs          scan_file in dependency mode, scan_rules (project mode's rules
                              part), family by family; per-line gates; scan_file in project mode
-                             (scan_project: the rules part, then project.rs)
+                             (scan_project: the rules part, then project.rs); SC-HOMOGLYPH leaves
+                             out an ordinal (digits or one letter, then ª or º: ordinal_token) that
+                             the lexer's and the parser's JSX readings hold as display text, in a
+                             file that does not parse without JSX (ordinal_display_runs,
+                             jsx_display_spans, FileCtx::names_code_with: 0.1.9,
+                             FP-HOMOGLYPH-ORDINAL)
     src/project.rs           project mode after the rules (core's _project_passes, 0.1.9): SQL
                              statements without WHERE, the SQL built from strings into execute(),
                              the function metrics (functions), then the suppression markers and
@@ -2090,7 +2095,11 @@ a call there was not a call.
   expression may begin (after a punctuator but `)`, `]`, `}`, `.` and
   `?.`; after `return`, `typeof`, `case` and the other words an expression
   follows; after an `if`/`for`/`while` head's `)` or a block's `}`), and
-  divides elsewhere; a template's text runs to its backtick or `${`, the
+  divides elsewhere; a name after `.` or `?.` is a property's, an operand
+  whatever word it is, and `of` is the word an expression follows only in
+  a `for (…)` head after the binding, elsewhere a name (0.1.9, the review
+  of FP-HOMOGLYPH-ORDINAL: `of <b> x` and `obj.return <b> x` compare); a
+  template's text runs to its backtick or `${`, the
   hole is code to its `}` (braces counted, templates nested to any depth);
   with JSX, a `<` where an expression may begin, before a name or `>`,
   opens an element (not TypeScript's `<T,>` or `<T extends …>`), whose

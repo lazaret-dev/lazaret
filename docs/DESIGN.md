@@ -877,6 +877,44 @@ its npm package's entry points reach — main, module, bin and exports, then
 what they require, import or start with node (the engine's `deps_files`) — is
 left out of it and of the follower (litellm's proxy UI).
 
+Look-alike names and display text (0.1.9, FP-HOMOGLYPH-ORDINAL). SC-HOMOGLYPH reads names: each line with its
+comments and literals left out (`names_code`), the literals being what every reading of the file agrees on. A file
+that may hold JSX is read with JSX and without, and JSX text is code to the reading without JSX (where it would not
+parse: an element begins where an expression may, `<` there being no operator), so a label's text was read as names:
+`<span>Nº {index + 1}</span>` gave "'Nº' reads as 'No' but is spelled with U+00BA" (MAJOR, WARN; John's fp-tally of
+Oct 21, `doomvault/src/library/LocalLibrary.tsx:581`). "Nº" is the usual way to write "number" in Spanish, Portuguese
+and Italian. A look-alike matters where a name is resolved or trusted — identifiers, import and require specifiers,
+package and host names, URLs, commands, a workflow's `uses:`. Now, when the look-alike found on a line of a file read
+with JSX is a two-character name ending in an ordinal indicator and is not CRITICAL, the line's ordinals that are
+display text are left out of the names too (`FileCtx::names_code_with`) and the line is read again: a look-alike after
+them on the line is still found. A run is left out only when all of these hold (`ordinal_display_runs`; the review of
+Oct 27, which found the first version's H1, ruled each):
+
+- it is an ordinal (`ordinal_token`): digits, or one ASCII letter, then one ordinal indicator (U+00AA ª, U+00BA º),
+  with no identifier character before or after it (a letter, a digit, `$`, `_`, ZWNJ/ZWJ, a `\`, any non-blank
+  character past ASCII): `1º`, `2ª`, `Nº`, `nº`, `Mª`; `evªl`, `aºb`, `nºs` and any longer name holding one never are;
+- it is not itself a look-alike of a dangerous name (CRITICAL is never lowered by this rule);
+- the lexer's JSX reading holds it as text: JSX text, a JSX attribute's string, a string, a template's text, a
+  comment. The lexer reads `of` (but after a `for` head's binding: `for (x of y)`) and a keyword used as a property's
+  name (after `.` or `?.`) as operands: `of <b> evªl("1")` and `obj.return <b> evªl("1")` are valid JavaScript, two
+  comparisons each, that it read as an element, so `evªl("1")` was JSX text (H1);
+- the file is not JavaScript without JSX (`jsx_display_spans`): its plain parse (jsparse, as a script and as a module)
+  fails — Node runs a `.js`, `.mjs` or `.cjs` file without JSX, and a file that parses so holds no display text — and
+  its JSX reading parses (as JavaScript's, or as TypeScript's for a `.tsx` file);
+- the parser's JSX reading holds it as text too: a JSXText node, a string Literal (a JSX attribute's among them) or a
+  template's TemplateElement. Where the lexer's reading and the parser's differ, the run is a name.
+
+The engine is not told a file's extension (the hosts say only whether it is read with JSX), so the plain-parse rule
+holds for every file read with JSX; a `.jsx` or `.tsx` file that holds JSX never parses without it. Every other
+look-alike in display text (`pаypal` with a Cyrillic а in JSX text: MAJOR, as before) and an ordinal in a name
+(`const Nº`), in a file read without JSX, or after no letter or digit, are read as before; Python reads `Nº` as the
+name `No` (NFKC), as it always did. The rule's other confusables were looked at in JSX text (synthetic labels, before
+and after): the micro sign (`10µs`), a Cyrillic word of mapped letters alone (`Сорок`), `№` and Roman numerals (`Ⅻ`)
+were already quiet (their skeleton is not ASCII, or holds no ASCII letter); superscript abbreviation letters (`Mᵐᵉ`,
+`Mˡˡᵉ`), ligatures (`ﬁle`), fullwidth letters beside ASCII (`Ｗi-Fi`), the script l of `mℓ` and a Greek word with a
+Latin letter (`ΗΟΤΕL`) are still MAJOR there: display text by the same reasoning, left as they are (only the ordinals
+were asked for; a superscript letter is the nearest case, its quieting John's call).
+
 Persistence targets (0.1.7): the install-script test also fails on what makes
 an AI agent, an editor or GitHub Actions run something later — writing an
 agent's or editor's auto-run settings, a workflow, an editor extension, a

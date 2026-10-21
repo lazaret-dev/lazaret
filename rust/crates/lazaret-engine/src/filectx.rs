@@ -340,6 +340,31 @@ impl<'p> FileCtx<'p> {
         }
     }
 
+    /// Line i as names are read in it ([`Self::names_code`]) with `extra` spans of the file's text blanked too
+    /// (FP-HOMOGLYPH-ORDINAL: names the JSX reading holds as text).
+    pub fn names_code_with(&self, i: usize, extra: &[(usize, usize)]) -> Vec<u32> {
+        if extra.is_empty() {
+            return self.names_code(i);
+        }
+        let line = self.line(i);
+        let base = self.starts[i];
+        let end = base + line.len();
+        let mut parts = line.to_vec();
+        let literals = self.literals.as_deref().unwrap_or(&[]);
+        for &(s, e) in literals.iter().chain(extra.iter()) {
+            if e <= base || s >= end {
+                continue;
+            }
+            for c in &mut parts[s.max(base) - base..e.min(end) - base] {
+                *c = ' ' as u32;
+            }
+        }
+        match self.lang {
+            Lang::Js => self.js_text(i, true, Some(&parts)),
+            _ => py_match_text(&cut_spans(&parts, &self.cspans[i])),
+        }
+    }
+
     /// Is `pos` (an offset in `content`) code: in no comment and, in
     /// JavaScript and Python, in no literal (a string, a template's or an
     /// f-string's text, a regular expression; a template's or an f-string's

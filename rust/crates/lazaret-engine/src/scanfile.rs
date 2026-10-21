@@ -692,6 +692,97 @@ fn lookalike_name(p: &Pack, code: &[u32], lang: Lang, word_in: &dyn Fn(&[u32]) -
     None
 }
 
+/// FP-HOMOGLYPH-ORDINAL: is the run at `[a, b)` of the file's text `s` an ordinal, digits or one ASCII letter and
+/// then one ordinal indicator (U+00AA ª, U+00BA º): `1º`, `2ª`, `Nº`, `nº`, `Mª`, with no identifier character
+/// before or after it (the review of Oct 27, ruling 1)? `evªl`, `aºb`, `nºs`, `xNº` and any longer name holding one
+/// are not, anywhere.
+fn ordinal_token(s: &[u32], a: usize, b: usize) -> bool {
+    use crate::jsparse::scan::is_id_part;
+    if b < a + 2 || b > s.len() || !matches!(s[b - 1], 0xAA | 0xBA) {
+        return false;
+    }
+    let body = &s[a..b - 1];
+    let digits = body.iter().all(|&c| (0x30..=0x39).contains(&c));
+    let letter = body.len() == 1 && ((0x41..=0x5A).contains(&body[0]) || (0x61..=0x7A).contains(&body[0]));
+    // (an identifier's character: a letter, a digit, `$`, `_`, ZWNJ/ZWJ, any other non-blank character past ASCII,
+    // and `\`, which begins an escape that may spell one)
+    let id = |c: u32| is_id_part(c) || c == 0x5C || c == 0x200C || c == 0x200D;
+    (digits || letter) && !(a > 0 && id(s[a - 1])) && !(b < s.len() && id(s[b]))
+}
+
+/// FP-HOMOGLYPH-ORDINAL: the spans of what a JSX reading of the file holds as display text, by the parser
+/// (jsparse): its JSX text, its strings (a JSX attribute's among them) and its templates' text. Some only when the
+/// file is not JavaScript without JSX (its plain parse fails, as a script and as a module: Node runs a .js, .mjs or
+/// .cjs file so, and a file that parses so has no JSX text) and its JSX reading parses (as JavaScript's, or as
+/// TypeScript's for a .tsx file): what the lexer's JSX reading takes for text is then the parser's too.
+fn jsx_display_spans(content: &[u32]) -> Option<Vec<(usize, usize)>> {
+    let owned = content.to_vec();
+    crate::api::on_own_stack(move || {
+        use crate::jsparse::tree::{Kind, L_STRING};
+        if crate::jsparse::parse_with(&owned, false, false, true).is_ok() || crate::jsparse::parse_with(&owned, false, false, false).is_ok() {
+            return None;
+        }
+        let tree = crate::jsparse::parse(&owned, false, true).or_else(|_| crate::jsparse::parse(&owned, true, true)).ok()?;
+        let mut spans: Vec<(usize, usize)> = tree
+            .nodes
+            .iter()
+            .filter(|n| matches!(n.kind, Kind::JSXText | Kind::TemplateElement) || (n.kind == Kind::Literal && n.op == L_STRING))
+            .map(|n| (n.start as usize, n.end as usize))
+            .collect();
+        spans.sort_unstable();
+        Some(spans)
+    })
+}
+
+/// Is `[a, b)` inside one of `spans` (sorted by their start, none inside another)?
+fn inside_spans(spans: &[(usize, usize)], a: usize, b: usize) -> bool {
+    let k = spans.partition_point(|&(s, _)| s <= a);
+    k > 0 && b <= spans[k - 1].1
+}
+
+/// FP-HOMOGLYPH-ORDINAL: the spans (in the file's text) of line i's ordinals ([`ordinal_token`]) that the file's
+/// JSX reading holds as text, as the lexer reads it (JSX text, a JSX attribute's string, a string, a template's text,
+/// a comment: `display`) and as the parser reads it ([`jsx_display_spans`]: `tree`), each not a look-alike of a
+/// dangerous name itself. A file that may hold JSX is read with JSX and without, and the literals both readings agree
+/// on are what the rules leave out of names; JSX text is code to the reading without JSX, where it would not parse (an
+/// element begins where an expression may, `<` there being no operator), so `<p>Nº 5</p>` was read as a name `Nº`. A
+/// look-alike matters where a name is resolved; an ordinal in a label is display text, the usual way to write
+/// "number" in Spanish, Portuguese and Italian. Any other look-alike there (`pаypal` with a Cyrillic а in JSX text),
+/// a name that holds an ordinal (`evªl`), and an ordinal in a file JavaScript reads without JSX, in a name, an
+/// import, a URL or a command, are read as before.
+fn ordinal_display_runs(
+    p: &Pack,
+    ctx: &FileCtx,
+    i: usize,
+    display: &OnceCell<Vec<(usize, usize)>>,
+    tree: &OnceCell<Option<Vec<(usize, usize)>>>,
+    word_in: &dyn Fn(&[u32]) -> bool,
+) -> Vec<(usize, usize)> {
+    use crate::lex::Kind;
+    let base = ctx.starts[i];
+    let runs: Vec<(usize, usize)> = p
+        .re("_NAME_RUN_RE")
+        .finditer(ctx.line(i))
+        .map(|m| (base + m.start(), base + m.end()))
+        .filter(|&(a, b)| ordinal_token(&ctx.content, a, b))
+        .filter(|&(a, b)| lookalike_name(p, &ctx.content[a..b], Lang::Js, word_in).is_none_or(|f| !f.critical))
+        .collect();
+    if runs.is_empty() {
+        return runs;
+    }
+    let spans = display.get_or_init(|| {
+        crate::lex::js::tokens(&ctx.content, true)
+            .iter()
+            .filter(|t| matches!(t.kind, Kind::JsxText | Kind::JsxStr | Kind::Str | Kind::Template | Kind::Comment))
+            .map(|t| t.span())
+            .collect()
+    });
+    let Some(parsed) = tree.get_or_init(|| jsx_display_spans(&ctx.content)).as_deref() else {
+        return Vec::new();
+    };
+    runs.into_iter().filter(|&(a, b)| inside_spans(spans, a, b) && inside_spans(parsed, a, b)).collect()
+}
+
 /// The column of the first quoted run B64_BLOB_RE finds in `line` that can be
 /// base64 data (G-5): not digits alone, hex digits alone (after a `0x` or
 /// not) or letters alone (a table of names: Go's stringer writes them) up to
@@ -1581,6 +1672,8 @@ pub fn findings_of(ctx: &FileCtx, lang_name: Option<&str>, opts: &Options, snipp
             .contains(w)
     };
     let runs_code: OnceCell<bool> = OnceCell::new();
+    let display: OnceCell<Vec<(usize, usize)>> = OnceCell::new(); // the JSX reading's text (ordinal_display_runs)
+    let display_tree: OnceCell<Option<Vec<(usize, usize)>>> = OnceCell::new(); // and the parser's (jsx_display_spans)
     let exec_js_names: OnceCell<HashSet<PyStr>> = OnceCell::new(); // S-EXEC-JS's (exec_js_regex)
     let hexstr_text = RuleText::of(p, "_HEXSTR_TEXT_RULE");
     let hexstr_name = RuleText::of(p, "_HEXSTR_NAME_RULE");
@@ -1716,7 +1809,20 @@ pub fn findings_of(ctx: &FileCtx, lang_name: Option<&str>, opts: &Options, snipp
         if js_or_py && !cm {
             let code = ctx.mcode(i);
             if !pystr::is_ascii(code) {
-                if let Some(f) = lookalike_name(p, &ctx.names_code(i), lang, &word_in) {
+                let mut found = lookalike_name(p, &ctx.names_code(i), lang, &word_in);
+                // (an ordinal, `Nº` in a label, in what a file read with JSX holds as display text, by its lexer's
+                // and its parser's JSX reading, the file not being JavaScript without JSX; a look-alike of a
+                // dangerous name, CRITICAL, is never lowered so: FP-HOMOGLYPH-ORDINAL, the review of Oct 27)
+                if found.as_ref().is_some_and(|f| !f.critical && f.name.len() == 2 && matches!(f.name[1], 0xAA | 0xBA))
+                    && lang == Lang::Js
+                    && ctx.jsx
+                {
+                    let shown = ordinal_display_runs(p, ctx, i, &display, &display_tree, &word_in);
+                    if !shown.is_empty() {
+                        found = lookalike_name(p, &ctx.names_code_with(i, &shown), lang, &word_in);
+                    }
+                }
+                if let Some(f) = found {
                     let mut rule = lookalike.clone();
                     if !f.critical {
                         rule.sev = pystr::u("MAJOR");
@@ -1856,4 +1962,113 @@ pub fn findings_of(ctx: &FileCtx, lang_name: Option<&str>, opts: &Options, snipp
         }
     }
     out
+}
+
+#[cfg(test)]
+mod ordinal_tests {
+    //! FP-HOMOGLYPH-ORDINAL: an ordinal indicator after a letter or digit in display text is not a look-alike name.
+    use super::*;
+
+    /// (line, severity) of each SC-HOMOGLYPH of `src`, read as JavaScript (with JSX and without when `jsx`).
+    fn homoglyphs(src: &str, jsx: bool) -> Vec<(i64, String)> {
+        let p = crate::pack::current();
+        let text: Vec<u32> = src.chars().map(|c| c as u32).collect();
+        let opts = Options { dep: false, redact: true, neumaier: false };
+        scan_file(&p, &text, Some("js"), jsx, &opts)
+            .iter()
+            .filter_map(|i| match i {
+                Value::Arr(a) if a.first().and_then(|r| r.as_str()) == Some(pystr::u("SC-HOMOGLYPH").as_slice()) => {
+                    let line = if let Some(Value::Int(n)) = a.get(8) { *n } else { 0 };
+                    Some((line, a.get(3).and_then(|s| s.as_string()).unwrap_or_default()))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn an_ordinal_is_digits_or_one_letter_then_the_indicator() {
+        // (each case: the text, and the name run that is asked)
+        let t = |s: &str, a: usize, b: usize| ordinal_token(&pystr::u(s), a, b);
+        assert!(t("Nº", 0, 2) && t(" 1º ", 1, 3) && t("(21ª)", 1, 4) && t("nº:", 0, 2) && t("Mª.", 0, 2));
+        assert!(t("Nº\u{a0}5", 0, 2) && t("<p>Nº</p>", 3, 5));
+        // a longer name that holds one, an identifier's character before or after it, two indicators, none
+        assert!(!t("evªl", 0, 4) && !t("aºb", 0, 3) && !t("nºs", 0, 3) && !t("xNº", 0, 3) && !t("Nº1", 0, 3));
+        assert!(!t("_Nº", 0, 3) && !t("$Nº", 0, 3) && !t("\\Nº", 1, 3) && !t("Nºº", 0, 3) && !t("ºeval", 0, 5));
+        assert!(!t("Nºé", 0, 3) && !t("Nº\u{301}", 0, 2) && !t("éNº", 1, 3) && !t("No", 0, 2) && !t("ab1º", 2, 4));
+        assert!(!t("NNº", 0, 3) && !t("º", 0, 1));
+    }
+
+    #[test]
+    fn display_text_ordinals_are_quiet_names_are_not() {
+        let major = |l: i64| (l, "MAJOR".to_string());
+        let critical = |l: i64| (l, "CRITICAL".to_string());
+        // JSX text, an attribute, a string, a template, a comment, after an apostrophe: quiet
+        for src in [
+            "export const A = () => <span className=\"n\">Nº {index + 1}</span>;\n",
+            "export const B = () => <p>1º lugar, 2ª vez, Mª José</p>;\n",
+            "export const C = () => <p>it's Nº {n}</p>;\n",
+            "export const D = () => <p title=\"Nº\">{'Nº'} {`Nº ${n}`} {/* Nº */}</p>;\n",
+            "export const E = () => <p>Nº\u{a0}5, (Nº), Nº: 3</p>;\n",
+        ] {
+            assert_eq!(homoglyphs(src, true), vec![], "{src}");
+        }
+        // a name that holds an ordinal is no ordinal, in JSX text too: evªl reads as eval (CRITICAL), the others MAJOR
+        assert_eq!(homoglyphs("export const E = () => <p>evªl</p>;\n", true), vec![critical(1)]);
+        for src in ["export const F = () => <p>aºb</p>;\n", "export const G = () => <p>nºs</p>;\n", "export const H = () => <p>xNº</p>;\n"] {
+            assert_eq!(homoglyphs(src, true), vec![major(1)], "{src}");
+        }
+        // in a name, declared and used; in a file read without JSX; another look-alike in JSX text; an ordinal after
+        // no letter; a look-alike name after a display ordinal on the line
+        assert_eq!(homoglyphs("const Nº = 1;\nexport const y = Nº + 1;\n", true), vec![major(1), major(2)]);
+        assert_eq!(homoglyphs("const Nº = 1;\nexport const L = () => <p>{Nº}</p>;\n", true), vec![major(1), major(2)]);
+        assert_eq!(homoglyphs("const evªl = eval;\nevªl('1');\n", true), vec![critical(1), critical(2)]);
+        assert_eq!(homoglyphs("export const K = () => <a>Visit pаypal</a>;\n", true), vec![major(1)]);
+        assert_eq!(homoglyphs("export const M = () => <p>ºeval x</p>;\n", true), vec![major(1)]);
+        assert_eq!(homoglyphs("export const N = () => <p>Nº {isАdmin}</p>;\nconst isAdmin = 1;\n", true), vec![critical(1)]);
+        // TypeScript (no JSX): an ordinal outside a literal is a name
+        assert_eq!(homoglyphs("let x = a <b> Nº;\n", false), vec![major(1)]);
+        // a broken element JavaScript and JSX both refuse (a type assertion's shape): not display text
+        assert_eq!(homoglyphs("const x = <number>Nº;\n", true), vec![major(1)]);
+    }
+
+    #[test]
+    fn the_reviews_comparisons_are_code() {
+        // the review of Oct 27 (H1): valid JavaScript, two comparisons, read with JSX as an element; and the controls
+        let critical = |l: i64| (l, "CRITICAL".to_string());
+        let major = |l: i64| (l, "MAJOR".to_string());
+        for src in [
+            "const of=1,b=2;\nof <b> evªl(\"1\");\n",
+            "const obj={return:1},b=2;\nobj.return <b> evªl(\"1\");\n",
+            "// @jsx h\nconst of=1,b=2;\nof <b> evªl(\"1\");\n",
+            "const a=1,b=2;\na <b> evªl(\"1\");\n",
+        ] {
+            let line = if src.starts_with("//") { 3 } else { 2 };
+            for jsx in [true, false] {
+                assert_eq!(homoglyphs(src, jsx), vec![critical(line)], "{src} jsx={jsx}");
+            }
+        }
+        // an ordinal a comparison holds is a name: the file parses without JSX
+        assert_eq!(homoglyphs("const of=1,b=2;\nof <b> Nº;\n", true), vec![major(2)]);
+        assert_eq!(homoglyphs("const obj={return:1},b=2;\nobj.return <b> Nº;\n", true), vec![major(2)]);
+        // and beside real JSX in the same file (the file does not parse without JSX): the parser reads the
+        // comparison, so the ordinal is still a name
+        let mixed = "export const A = () => <p>Nº 1</p>;\nconst of=1,b=2;\nof <b> Nº;\n";
+        assert_eq!(homoglyphs(mixed, true), vec![major(3)]);
+        // the contextual words, and a keyword as a property's name (after `.` and `?.`)
+        for w in ["of", "yield", "await", "async", "get", "set", "let", "static", "as", "from", "target", "meta", "type", "declare", "satisfies", "keyof", "readonly", "infer", "is", "asserts", "accessor", "using"] {
+            let src = format!("var {w}=1,b=2;\n{w} <b> evªl(\"1\");\n");
+            assert_eq!(homoglyphs(&src, true), vec![critical(2)], "{src}");
+            let src = format!("var {w}=1,b=2;\n{w} <b> Nº;\n");
+            assert_eq!(homoglyphs(&src, true), vec![major(2)], "{src}");
+        }
+        for w in ["return", "typeof", "instanceof", "in", "of", "new", "delete", "void", "throw", "case", "yield", "await", "extends", "default", "else", "do", "try", "finally", "if", "for", "while", "with"] {
+            for dot in [".", "?."] {
+                let src = format!("const o={{}},b=2;\no{dot}{w} <b> evªl(\"1\");\n");
+                assert_eq!(homoglyphs(&src, true), vec![critical(2)], "{src}");
+                let src = format!("const o={{}},b=2;\no{dot}{w} <b> Nº;\n");
+                assert_eq!(homoglyphs(&src, true), vec![major(2)], "{src}");
+            }
+        }
+    }
 }
