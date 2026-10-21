@@ -158,6 +158,12 @@ pub fn byte_entropy(data: &[u8], neumaier: bool) -> f64 {
     -total
 }
 
+/// A file-level finding with its rule's message as it is.
+pub(crate) fn file_issue_of(rule: RuleText) -> Value {
+    let msg = rule.msg.clone();
+    file_issue(rule, msg)
+}
+
 /// A file-level finding (line 1, no snippet), as core's issue() helpers make them.
 fn file_issue(rule: RuleText, msg: PyStr) -> Value {
     let mut r = rule;
@@ -193,6 +199,9 @@ pub enum More<'a> {
     Whole(&'a [u8]),
     /// a walk of the whole file, as its stream passed
     Walked(&'a crate::media::Walked),
+    /// a Gradle wrapper jar (FP-GRADLE-WRAPPER): its bytes (None when it was not read whole) and its
+    /// gradle-wrapper.properties, as its host found it
+    Wrapper { jar: Option<&'a [u8]>, props: crate::gradle::Sibling<'a> },
 }
 
 /// classify_more's answer.
@@ -205,6 +214,8 @@ pub enum Classified {
     /// the whole file is needed (More::Ask): its bytes (More::Whole), or its walk (More::Walked) when it is too
     /// large to read whole
     Need,
+    /// a Gradle wrapper jar: its bytes and the gradle-wrapper.properties beside it are needed (More::Wrapper)
+    Wrapper,
 }
 
 /// core.classify_binary: the SC-BINARY, SC-NESTED-ARCHIVE or SC-OPAQUE-BLOB finding of a file that is not source,
@@ -221,10 +232,24 @@ pub fn classify(p: &Pack, path: &[u32], data: &[u8], size: u64, context: &str, w
 
 /// classify, with what the caller can give past the first bytes (`more`): a keystore read to its end is S-SECRET
 /// (media::keystore), and a file that would be an opaque blob is quiet when it is a format media.rs walks, read to
-/// its end (FP-OPAQUE-MEDIA). With More::Ask, Need when that takes the whole file.
+/// its end (FP-OPAQUE-MEDIA). With More::Ask, Need when that takes the whole file. A Gradle wrapper jar
+/// (`gradle/wrapper/gradle-wrapper.jar`) is judged by its checksum with More::Wrapper (gradle.rs: FP-GRADLE-WRAPPER),
+/// which More::Ask and More::Whole ask for (Classified::Wrapper); given its first bytes alone, it is any jar.
 #[allow(clippy::too_many_arguments)]
 pub fn classify_more(p: &Pack, path: &[u32], data: &[u8], size: u64, context: &str, windows: bool, neumaier: bool,
                      more: More) -> Classified {
+    if crate::gradle::wrapper_path(path, windows) {
+        match more {
+            More::Wrapper { jar, props } => {
+                return match crate::gradle::judge(p, jar, props, size) {
+                    Some(v) => Classified::Issue(v),
+                    None => Classified::Quiet,
+                };
+            }
+            More::Ask | More::Whole(_) => return Classified::Wrapper,
+            More::No | More::Walked(_) => {}
+        }
+    }
     let header = &data[..data.len().min(512)];
     let ext = pystr::lower(&ext_and_base(path, windows).0);
     let is_bin = looks_binary(p, &data[..data.len().min(p.usize("_LOOKS_SAMPLE"))]);
@@ -310,7 +335,9 @@ pub fn classify_more(p: &Pack, path: &[u32], data: &[u8], size: u64, context: &s
         (More::Whole(whole), _) => Some(crate::media::walk(whole)),
         (More::Walked(w), _) => Some(w.clone()),
         (More::Ask, _) => return Classified::Need,
-        (More::No, Some(kind)) => Some(crate::media::Walked::Not(kind.clone(), p.string("_OPAQUE_UNREAD"))),
+        (More::No | More::Wrapper { .. }, Some(kind)) => {
+            Some(crate::media::Walked::Not(kind.clone(), p.string("_OPAQUE_UNREAD")))
+        }
     };
     let r = RuleText::of(p, "_BIN_OPAQUE_RULE");
     let (size_a, ent_a) = (Arg::I(size as i64), Arg::S(pystr::u(&format!("{:.1}", ent))));

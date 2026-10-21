@@ -65,7 +65,7 @@ export function folderTree(picked) {
       if (!d.dirs.has(p)) d.dirs.set(p, folder());
       d = d.dirs.get(p);
     }
-    d.files.set(parts.at(-1), { file: f, size: f.size, bytes: null, error: null });
+    d.files.set(parts.at(-1), { file: f, size: f.size, bytes: null, error: null, dir: d });
   }
   return { root, name };
 }
@@ -83,7 +83,7 @@ const FOLDER = {
   strerror: (e) => String(e && e.message),
   entry(f, rel, name, size, dep) {
     if (f.error) return { ...pageEntry(rel, size, new Uint8Array(0)), dep, read() { throw f.error; }, head: () => new Uint8Array(0) };
-    return { ...pageEntry(rel, size, f.bytes), dep };
+    return { ...pageEntry(rel, size, f.bytes), dep, sibling: (n, limit) => siblingOf(f, n, limit) };
   },
   head(f, n) { if (f.error) throw f.error; return f.bytes.subarray(0, n); },
   stats(node) {
@@ -96,6 +96,16 @@ const FOLDER = {
     return [nFiles, nBytes];
   },
 };
+
+/** FP-GRADLE-WRAPPER: the uploaded file `name` beside `f` (a Gradle wrapper jar's properties), its first `limit`
+ * bytes, or null when there is none. */
+function siblingOf(f, name, limit) {
+  const s = f.dir && f.dir.files.get(name);
+  if (!s) return null;
+  if (s.error) throw s.error;
+  if (!s.bytes) return null;
+  return s.bytes.subarray(0, limit);
+}
 
 /** The steps of the CLI's walk of a folder upload (`lazaret <folder>`, no --deps), and the bytes of it they read
  * (a file the walk collects: whole up to READ_WHOLE, else its first READ_HEAD; a .pyc's header) -> the steps. */

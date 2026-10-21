@@ -1641,6 +1641,88 @@ and `signing/tiles-foss-debug.pkcs12` (a debug signing keystore).
   `classifyBinary(…, {whole})` hand it over only when the first call asks; the registry passes a member whole, or
   the walk of an oversized one's stream. One engine for both packages and the dashboard.
 
+#### The Gradle wrapper: a jar judged by Gradle's checksums (FP-GRADLE-WRAPPER, 0.1.9)
+
+Nearly every Gradle project commits `gradle/wrapper/gradle-wrapper.jar`, and `./gradlew` runs it on every build, on
+developers' machines and in CI, before Gradle itself is downloaded. SC-BINARY (MAJOR: WARN) reported each as a
+compiled artifact to review. In John's fp-tally over 261 GitHub scans (Oct 21) SC-BINARY set 9 WARN verdicts, 3 by it
+alone, this jar among its files. Gradle publishes the SHA-256 of each release's wrapper jar, and its own
+wrapper-validation action fails a build whose jar matches none, so the engine checks the jar as that action does
+(John's decision of Oct 21: "Yes, check checksums"; `rust/crates/lazaret-engine/src/gradle/`):
+
+- **Where.** A file named `gradle-wrapper.jar` exactly, in a folder `wrapper` in a folder `gradle` (any depth: an
+  Android library's `android/gradle/wrapper/`). A jar elsewhere or under another name is judged as any jar
+  (SC-BINARY), as before; so is a wrapper jar of which a caller gives only the first bytes.
+- **Quiet** when the jar's SHA-256 is one of `GRADLE_WRAPPER_CHECKSUMS` (the rule pack: version -> checksum, every
+  release Gradle publishes a wrapper checksum for, 382 versions to Gradle 9.9.0-milestone-2, 97 distinct
+  checksums), whatever version its properties name: the jar is regenerated only when `gradle wrapper` runs, so a
+  project's properties often name a newer Gradle than its jar's (mockito's names 9.4.1 and commits 8.14's jar).
+- **CRITICAL, SC-GRADLE-WRAPPER** (`_GRADLE_WRAPPER_RULE`) when it matches none, unless what follows says it can't
+  be verified yet (the review of Oct 27: whatever else matches no checksum is a changed wrapper). The message names
+  the list's size and newest version and the distribution named.
+- **MAJOR, SC-GRADLE-WRAPPER, "can't be verified"** (`_GRADLE_WRAPPER_UNVERIFIED_RULE`) only when the list cannot
+  judge it yet, and the jar is a wrapper jar: a zip holding `org/gradle/wrapper/GradleWrapperMain.class`. Then:
+  - *the next release*: the version the last `distributionUrl` names (the one `java.util.Properties`, and so the
+    wrapper, reads) is not listed, is in Gradle's release form (`^\d+\.\d+(\.\d+)?(-(rc|milestone)-\d+)?$`) and
+    may well be the next one Gradle publishes (`gradle::newer`): newer than its line's newest listed release by at
+    most two patches (Gradle publishes patches of an older line after newer releases: 9.8.1, on Oct 7 2026, came
+    after 9.9.0-milestone-2), a new line of the list's newest major at most two minors past it, or the next major's
+    first two lines. A nightly build (`9.9.0-20261021152326+0000`) when its base release is one of these and its
+    timestamp is no older than the list (`GRADLE_WRAPPER_CHECKSUMS_DATE`). Any other version (`99.0`, a version of
+    no form of Gradle's) is a changed wrapper's.
+  - *a listed distribution, a newer jar*: the properties name a listed release and the jar's manifest
+    (`Implementation-Version`, which wrappers before 5.0 write) names one that passes the same test
+    (`_GRADLE_WRAPPER_MANIFEST_NEWER`); no properties, or no version named, is CRITICAL.
+  - *no checksum published*: the manifest names a version of `GRADLE_WRAPPER_NO_CHECKSUM`, the versions Gradle
+    publishes no wrapper checksum for (3.3 to 4.0.2 with their release candidates and milestones, whose wrapper
+    jars were not reproducible: Netflix/Hystrix commits 4.0's; and 0.7 to 0.9.2, before Gradle 1.0), an explicit set
+    the update script derives from `versions/all` (the entries without a `wrapperChecksumUrl`).
+  - a Git LFS pointer committed in the jar's place; a jar not read whole (over the size limit) and no larger than
+    `GRADLE_WRAPPER_MAX_BYTES` (1 MiB). One larger is CRITICAL: the 290 distinct wrapper jars gradle/gradle
+    committed from 2012 to 2026 are 43 to 64 KB.
+- **The distribution** (the review of Oct 27): `./gradlew` downloads and runs the distribution its properties name,
+  so a genuine jar is judged by where that comes from too (`gradle::distribution_issue`): MAJOR over plain `http://`
+  or from what is not a URL (`_GRADLE_DISTRIBUTION_RULE`); INFO, listed and not counted, over HTTPS from a host
+  other than services.gradle.org without a `distributionSha256Sum` (`_GRADLE_DISTRIBUTION_HOST_RULE`: a company's
+  mirror, often; there is no allow-list of hosts); quiet with a `distributionSha256Sum`, which the wrapper checks.
+- **As Java reads the properties** (the re-review of Oct 27, N3). Gradle's `WrapperExecutor` reads
+  `gradle-wrapper.properties` with `java.util.Properties.load(InputStream)`, and `gradle::read` reads it so:
+  ISO-8859-1; `\r\n`, `\r` and `\n` each end a line, inside a continuation too; blank lines and `#` or `!`
+  comments skipped; a line ending in an odd number of backslashes goes on with the next, whose leading blanks are
+  dropped; the key ends at the first `=`, `:` or blank not escaped, then blanks and one `=` or `:` are dropped;
+  `\uXXXX`, `\t`, `\n`, `\r`, `\f` and `\x` meaning `x` are decoded in keys and values; the last of a key's
+  lines wins. The distribution judged (the version, the URL's scheme and host) is the last `distributionUrl` so
+  decoded. It can't be verified (MAJOR, saying why; a jar matching no checksum is then CRITICAL, no release named)
+  when the file is longer than `GRADLE_PROPERTIES_MAX_BYTES` (64 KiB: Java reads it whole, and a later
+  `distributionUrl` wins), holds a `\uXXXX` escape that is not one (Properties.load refuses it from Java 17; Java 8
+  and 11 read past the line), is read into another distribution by Java 8 than by later Java (whose reader, from Java
+  9, tells a comment wherever a logical line is still empty and counts no backslash in it: a lone backslash continued
+  onto a comment line, a comment ending in a backslash before a line of backslashes), or is there and not read (a
+  symbolic link, which Java follows and the scan does not). Held to Java itself: 50,038 generated files read by JDK
+  8, 11, 17 and 21's `Properties.load`, every one the engine reads giving the distribution and checksum each JDK that
+  loads it reads, and every one it refuses one that a JDK refuses or that two JDKs read otherwise.
+- **Every route reads the properties.** A project scan's `collect_file` asks for the jar whole and for the file
+  beside it (`{"need": {"read": "sibling", "name": "gradle-wrapper.properties", "limit": 65537}}`, one byte more than
+  is read, so that a longer file is told: core's `_read_sibling`, npm's `readSibling`, the dashboard's uploaded
+  folder), a regular file only; one there and not read is `{error}`. The registry keeps each release's
+  `gradle-wrapper.properties` (its first `GRADLE_PROPERTIES_MAX_BYTES` and one more; one over the member limit as
+  not read) and judges its wrapper jars once every member is read (`_gradle_wrappers`), as an archive may hold the
+  properties after the jar. `classify_binary` takes `props` (bytes, None, or `{"error": why}`).
+- **The list** is Gradle's, as gradle/actions ships it (`sources/src/wrapper-validation/wrapper-checksums.json`,
+  MIT; that repository also holds a proprietary caching component, not used), written into the pack in its
+  canonical form with where it came from and when (`GRADLE_WRAPPER_CHECKSUMS_SOURCE`).
+  `scripts/update_gradle_wrapper_checksums.py` (standard library only) refreshes it from
+  https://services.gradle.org/versions/all, each release's `wrapperChecksumUrl`, over HTTPS with redirects only to
+  Gradle's download hosts and GitHub; each checksum must be 64 hex digits, each new version's jar is downloaded and
+  must hash to it, a published checksum that changed or a version that disappeared is refused; the versions with no
+  `wrapperChecksumUrl` are written as `GRADLE_WRAPPER_NO_CHECKSUM`, the day as `GRADLE_WRAPPER_CHECKSUMS_DATE`;
+  `--from-json` reads gradle/actions' file instead (its date given with `--date`), `--check` checks the pack's list
+  offline. rust/NOTICE, which the wheels and the npm package carry (`native/NOTICE`), says where the list came from;
+  a checksum is a fact computed from a file, so no licence applies to it (John, Oct 28: a checksum is a fact, said where
+  it came from, not a copyright matter).
+- SC-GRADLE-WRAPPER is not compared with a predecessor's (`prior.NOT_COMPARED`, as SC-BINARY): a release that moves
+  to a Gradle newer than the list is not a new indicator.
+
 ### e. Registry auditing (`lazaret.registry`) and SCA
 
 `lazaret-registry` fetches and audits an npm/PyPI artifact with the same rule

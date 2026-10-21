@@ -2008,6 +2008,58 @@ aggregate):
   dashboard's folder test held `z.py` beside `Z.py`, which a Mac's folder cannot: that pair is now a folder of its own,
   compared where the disk holds both and skipped where it cannot.
 
+- **A Gradle wrapper jar is judged by Gradle's published wrapper checksums (FP-GRADLE-WRAPPER, John's decision of Oct
+  21: "Yes, check checksums"; rule set 2.109.0).** SC-BINARY (MAJOR) reported every
+  `gradle/wrapper/gradle-wrapper.jar`, which nearly every Gradle project commits; John's fp-tally over 261 GitHub
+  scans found 9 WARN verdicts SC-BINARY set, 3 by it alone. `./gradlew` runs that jar on every build, which is why
+  Gradle publishes each release's wrapper checksum and validates projects' jars against them. A file named
+  `gradle-wrapper.jar` in a `gradle/wrapper/` folder is now checked by its SHA-256 against `GRADLE_WRAPPER_CHECKSUMS`
+  (the rule pack: 382 Gradle versions to 9.9.0-milestone-2 (9.8.2 the newest release), 97 distinct checksums, from
+  gradle/actions' `wrapper-checksums.json` at 1cff18a4 of 2026-10-20): one of them is quiet; none is the new rule
+  **SC-GRADLE-WRAPPER**, CRITICAL, a changed wrapper. MAJOR ("can't be verified") only when the list cannot judge it
+  yet and the jar is a wrapper jar (a zip holding `org/gradle/wrapper/GradleWrapperMain.class`): the last
+  `distributionUrl` of the `gradle-wrapper.properties` beside it (the one the wrapper reads) names a release in
+  Gradle's form that may well be the next one (at most two patches past its line's newest listed release, Gradle
+  publishing patches of older lines after newer releases; at most two minors past the newest; the next major's first
+  two lines), or a nightly of one, no older than the list; the properties name a listed release and the jar's
+  manifest such a next one; the manifest names a version Gradle publishes no checksum for
+  (`GRADLE_WRAPPER_NO_CHECKSUM`: 3.3 to 4.0.2 with their candidates and milestones, 0.7 to 0.9.2); the file is a Git
+  LFS pointer; it was not read whole and is no larger than a wrapper jar can be (`GRADLE_WRAPPER_MAX_BYTES`, 1 MiB;
+  one larger is CRITICAL). Whatever else matches no checksum is CRITICAL (the review of Oct 27: a version such as
+  `99.0` was MAJOR). A genuine jar is judged by its distribution too, which `./gradlew` downloads and runs: MAJOR over
+  plain HTTP or from what is not a URL, INFO (listed, not counted) over HTTPS from a host other than
+  services.gradle.org with no `distributionSha256Sum`. A jar elsewhere or under another name is SC-BINARY, as before.
+  rust/NOTICE, which the wheels and the npm package carry, says where the list came from: a checksum is a fact, so no
+  licence applies to it (John, Oct 28). Every route reads the properties: the project scan and `--deps`
+  (`collect_file` asks for the file beside the jar: `{"need": {"read": "sibling"}}`), the npm CLI and the dashboard,
+  and the registry, which judges a release's wrapper jars once every member is read.
+  `scripts/update_gradle_wrapper_checksums.py` (standard library only) refreshes the list from services.gradle.org's
+  `versions/all`, verifying each checksum's form and each new jar's hash, and writes the versions with no checksum
+  and the list's date. Measured by route (project scan, `--deps`,
+  the npm CLI and its `--deps`, the registry's sdist, wheel and npm tarball, the GitHub scan route; native and
+  WebAssembly alike): the three genuine jars (butterknife's 4.10.3, mockito's 8.14 with 9.4.1 properties, RxJava's
+  9.8.1), SC-BINARY MAJOR (WARN; INFO in a wheel) → quiet (OK); a byte changed, a class added, no properties, a
+  Gradle no next release has (`99.0`, `8.14.99`), two `distributionUrl` lines whose last is listed, an ELF in the
+  wrapper's place: → SC-GRADLE-WRAPPER CRITICAL (SUSPICIOUS); properties naming the next release (a patch past its
+  line's newest, the next minor or major) or a nightly of one, a manifest naming 3.4: → MAJOR (WARN); a genuine jar
+  whose distribution comes over plain HTTP → MAJOR (WARN), from another host → INFO (OK); a changed jar elsewhere or
+  under another name: SC-BINARY, as before. Real files: react-native-image-picker 8.3.0 and react-native-svg 15.16.0,
+  WARN for their Android wrapper alone → OK; the wrapper folders of fourteen GitHub projects as the GitHub route scans
+  them (butterknife, Hystrix, RxJava, nowinandroid, junit5, mockito, spring-boot, okhttp; and the review's retrofit,
+  timber, gradle/gradle on 9.9.0-milestone-2, detekt, kotlinx.coroutines, ksp), WARN → OK but Hystrix's, a Gradle 4.0
+  wrapper (Gradle publishes no checksum for it) with 8.1.1 properties, → MAJOR (WARN). The properties are read as
+  `java.util.Properties.load(InputStream)` reads them, as Gradle's wrapper does (the re-review of Oct 27: a `\uXXXX`
+  escape in a key, a continuation across `\r\n` and a `distributionUrl` past the first 64 KiB each left a genuine jar
+  quiet beside a plain-HTTP distribution): ISO-8859-1; `\r\n`, `\r` and `\n` each end a line; `#` and `!` comments; a
+  line ending in an odd number of backslashes goes on with the next, whose leading blanks are dropped; `=`, `:` or
+  blanks between key and value; `\uXXXX`, `\t`, `\n`, `\r`, `\f` and `\x` decoded in keys and values; the last of a
+  key's lines. A genuine jar whose properties can't be read so is MAJOR, can't be verified, saying why: longer than
+  `GRADLE_PROPERTIES_MAX_BYTES` (64 KiB; every host reads one byte more, so that a longer file is told), a `\u`
+  escape that is not one, read into another distribution by Java 8 than by later Java, or there and not read (a
+  symbolic link, which Java follows); a changed jar with such properties is CRITICAL. Held to Java itself: 50,038
+  generated files read by JDK 8, 11, 17 and 21's `Properties.load`: every one the engine reads gives the distribution
+  and checksum each JDK that loads it reads (Java 8 refuses 3 of them), and every one it refuses is one that a JDK
+  refuses or that two JDKs read otherwise.
 - **A sound, video, image or font file is read by its structure to its end, and a keystore is a credential file
   (FP-OPAQUE-MEDIA, John's decision of Oct 21; rule set 2.108.0).** SC-OPAQUE-BLOB (MAJOR) reports a
   binary file whose first bytes are near-random, as encrypted or packed data is; compressed media are too, and a list

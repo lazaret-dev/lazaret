@@ -88,6 +88,21 @@ pratique's Mozilla root store (crates/pratique/roots/mozilla.pem, under the
 Mozilla Public License 2.0, as NSS is) is for a feature Lazaret does not
 use; no package of Lazaret's carries it.
 
+Gradle's wrapper checksums
+--------------------------
+
+crates/lazaret-engine/rules/lazaret-rules.json holds, as
+GRADLE_WRAPPER_CHECKSUMS, the SHA-256 of each Gradle release's wrapper jar,
+as Gradle publishes them (https://services.gradle.org, each release's
+wrapperChecksumUrl) and as gradle/actions lists them
+(https://github.com/gradle/actions,
+sources/src/wrapper-validation/wrapper-checksums.json); written by
+scripts/update_gradle_wrapper_checksums.py. A checksum is a fact computed
+from a file, not a work of authorship: the list is named here for where it
+came from, and no licence applies to it. The rule pack is compiled into the
+engine, the native library's and the WebAssembly build's alike, so both
+carry the list.
+
 
 Unicode data
 ------------

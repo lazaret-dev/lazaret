@@ -409,7 +409,29 @@ rust/
                              its end and a keystore S-SECRET (and SC-OPAQUE-BLOB beside it,
                              `Classified::Issues`, when its unread parts are more than a
                              keystore's); the formats no walker reads keep their first-bytes
-                             exemption (`UNWALKED_MAGIC`)
+                             exemption (`UNWALKED_MAGIC`); FP-GRADLE-WRAPPER: a Gradle wrapper
+                             jar asks for itself whole and its properties (`More::Wrapper`,
+                             `Classified::Wrapper`) and is judged by gradle/
+    src/gradle/              a Gradle wrapper jar judged by Gradle's published wrapper checksums
+                             (0.1.9, FP-GRADLE-WRAPPER): `mod.rs` (`wrapper_path`; `judge`: the
+                             jar's SHA-256 against GRADLE_WRAPPER_CHECKSUMS, quiet, CRITICAL or,
+                             what the list cannot judge yet, MAJOR: a wrapper jar (its main
+                             class in it) whose distribution, the last `distributionUrl`, is a
+                             release in Gradle's form that may well be the next one, `newer`
+                             (with properties naming a listed one, the jar manifest's version),
+                             or whose manifest names a version Gradle publishes no checksum
+                             for, GRADLE_WRAPPER_NO_CHECKSUM; the distribution's own check,
+                             `distribution_issue`: MAJOR over plain HTTP, INFO from another
+                             host without `distributionSha256Sum`; properties that can't be read
+                             as Java reads them, MAJOR (the re-review of Oct 27, N3);
+                             `read`, the properties read as java.util.Properties.load reads them,
+                             by Java 9's line reader and Java 17's escapes and by Java 8's, at
+                             most GRADLE_PROPERTIES_MAX_BYTES (`Unread`: longer, a malformed
+                             `\uXXXX`, read otherwise by Java 8); `Sibling`, the properties as a
+                             host found them; `distribution_version`; `Version`, Gradle's order of
+                             releases; `uncovered`; `manifest_version` through pickle's zip
+                             reader), `tests.rs` (tests/fixtures/gradle-wrapper's genuine jars,
+                             changed ones, versions, properties, the review's cases)
     src/media/               sound, video, image and font files walked by their structure to their
                              end (0.1.9, FP-OPAQUE-MEDIA): `mod.rs` (the walk, a state machine fed
                              a file's bytes in order, `feed`, its state, `Walker`, carried by the

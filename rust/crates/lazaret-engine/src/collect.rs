@@ -388,6 +388,9 @@ pub struct FileIn {
     /// a file too large to read whole, walked by its structure as its stream passed (media::feed: FP-OPAQUE-MEDIA),
     /// or why it could not be read
     pub media: Option<Result<crate::media::Walked, PyStr>>,
+    /// the file beside it the engine asked for (a Gradle wrapper jar's gradle-wrapper.properties: FP-GRADLE-WRAPPER):
+    /// Ok(None) when there is no such regular file, or why it could not be read
+    pub sibling: Option<Result<Option<Vec<u8>>, PyStr>>,
 }
 
 /// The languages a dependency tree's files are read in (DEP_LANGS: a package's Go and Rust are its readers').
@@ -752,7 +755,8 @@ pub fn file(p: &Pack, f: &FileIn) -> Value {
 /// (FP-OPAQUE-MEDIA: a keystore, or a near-random file whose first bytes start a format media.rs walks): read whole
 /// up to the size limit, else walked as its stream passes when the package reads files so ({"need": {"read":
 /// "media"}}: core's _stream_media, npm's streamMedia), else judged by its first bytes (an opaque blob stays one).
-/// Err: what to read next.
+/// A Gradle wrapper jar (FP-GRADLE-WRAPPER) is read whole up to the size limit, with the gradle-wrapper.properties
+/// beside it ({"need": {"read": "sibling"}}). Err: what to read next.
 fn classify_read(p: &Pack, f: &FileIn, head: &[u8]) -> Result<Vec<Value>, Value> {
     use crate::binary::{classify_more, Classified, More};
     let sample = &head[..head.len().min(8192)];
@@ -769,6 +773,32 @@ fn classify_read(p: &Pack, f: &FileIn, head: &[u8]) -> Result<Vec<Value>, Value>
             Some(Err(_)) => go(More::No),
         },
         Classified::Need => go(More::No),
+        Classified::Wrapper => {
+            let jar = if f.size <= f.cap {
+                match &f.data {
+                    None => return Err(need("data", f.cap + 1)),
+                    Some(Ok(d)) if d.len() as u64 <= f.cap => Some(d.as_slice()),
+                    _ => None,
+                }
+            } else {
+                None
+            };
+            // (one byte more than the engine reads, so that a longer file is told; one there and not read can't be
+            // verified)
+            let props = match &f.sibling {
+                None => {
+                    return Err(Value::obj(vec![("need", Value::obj(vec![
+                        ("read", Value::str("sibling")),
+                        ("name", Value::str(crate::gradle::PROPERTIES)),
+                        ("limit", Value::Int(crate::gradle::read_limit(p) as i64)),
+                    ]))]));
+                }
+                Some(Ok(Some(b))) => crate::gradle::Sibling::Bytes(b),
+                Some(Ok(None)) => crate::gradle::Sibling::None,
+                Some(Err(e)) => crate::gradle::Sibling::Error(e),
+            };
+            go(More::Wrapper { jar, props })
+        }
         other => other,
     };
     Ok(match got {
@@ -1003,7 +1033,7 @@ mod tests {
             let f = FileIn { rel: pystr::u(rel), name: pystr::u(rel.rsplit('/').next().unwrap()), size: data.len() as u64,
                              dep: Dep::Vendor(s("go"), s("vendor")), cap: 1 << 20, config_cap: 1 << 20, windows: false,
                              neumaier: false, redact: true, head: Some(Ok(data.to_vec())), data: Some(Ok(data.to_vec())),
-                             sample: None, ranged: false, ranges: None, rounds: 0, pth_lines: None, media: None };
+                             sample: None, ranged: false, ranges: None, rounds: 0, pth_lines: None, media: None, sibling: None };
             let got = file(&p, &f);
             let entry = got.get("file").cloned().expect("a file");
             let field = |k: &str| entry.get(k).and_then(|v| v.as_str()).map(pystr::to_string);

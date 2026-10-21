@@ -15,7 +15,10 @@ The native engine
 The engine is Lazaret's own work too, except for the Unicode 13.0 data it
 holds, distributed under the Unicode License v3 (LICENSE-UNICODE; SPDX:
 Unicode-3.0). Until 0.1.9 parts of it were translations of CPython code;
-native/NOTICE (the engine's own notice, rust/NOTICE) says what they were.
+native/NOTICE (the engine's own notice, rust/NOTICE) says what they were. Its
+rule pack holds Gradle's wrapper checksums as Gradle publishes them;
+native/NOTICE says where they came from (a checksum is a fact: no licence
+applies to it).
 
     Copyright © 1991-2026 Unicode, Inc.
 

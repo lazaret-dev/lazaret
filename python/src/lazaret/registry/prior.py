@@ -78,7 +78,8 @@ HOOK_RULE = "SC-INSTALL-HOOK"
 RELEASE_FILE = "(release)"               # the file of a finding of the release's own, not of one of its files
 #: what a release may well ship anew: not compared (SC-NESTED-CODE: generated code, a new minifier's or a new data
 #: table's, nests past the parser's bound too; JS-NEST)
-NOT_COMPARED = frozenset({"SC-BINARY", "SC-OPAQUE-BLOB", "SC-NESTED-ARCHIVE", "SC-NESTED-CODE"})
+NOT_COMPARED = frozenset({"SC-BINARY", "SC-OPAQUE-BLOB", "SC-NESTED-ARCHIVE", "SC-NESTED-CODE",
+                          "SC-GRADLE-WRAPPER"})
 PYPI_SIMPLE_JSON = "application/vnd.pypi.simple.v1+json"
 WHY = ("A finding a package's releases have long had is how the package is made; one a release brings that its "
        "predecessor had none of is a change, and a hijacked release is a change to an established package: the "

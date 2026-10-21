@@ -402,7 +402,11 @@ fn collect_call(p: &Pack, name: &str, args: &Value, text: &[u32]) -> Result<Valu
             // far, their bytes the call's text one after another, and `rounds` how many times they were asked for; a
             // .pth file too large to read whole ({read: "pth"}) is read in chunks through pth_stream, its answer
             // {lines: [[line, latin-1 text]], cuts: [why]} or {error}; one walked as its stream passes ({read:
-            // "media"}: FP-OPAQUE-MEDIA) through media_stream, its answer the walk's end or {error}.
+            // "media"}: FP-OPAQUE-MEDIA) through media_stream, its answer the walk's end or {error}; a file beside
+            // it ({read: "sibling", name, limit}: a Gradle wrapper's gradle-wrapper.properties, FP-GRADLE-WRAPPER;
+            // `limit` is one byte more than the engine reads, so that a longer file is told), its answer `sibling`:
+            // its first `limit` bytes as latin-1 text, false when there is no such regular file, or {error} (one
+            // there and not read: a symbolic link, which Java follows and the scan does not, can't be verified).
             let ranges = match answers.and_then(|x| x.get("ranges")) {
                 None | Some(Value::Null) => None,
                 Some(Value::Arr(layout)) => {
@@ -432,7 +436,16 @@ fn collect_call(p: &Pack, name: &str, args: &Value, text: &[u32]) -> Result<Valu
                     None => Some(Ok(walked_arg(o)?)),
                 },
             };
+            let sibling = match answers.and_then(|x| x.get("sibling")) {
+                None | Some(Value::Null) => None,
+                Some(Value::Bool(false)) => Some(Ok(None)),
+                Some(Value::Str(t)) => Some(Ok(Some(crate::binary::bytes_of(t)
+                    .ok_or_else(|| CallError::BadArgs("a read's bytes come as latin-1 text".into()))?))),
+                Some(o @ Value::Obj(_)) => Some(Err(o.get("error").and_then(|e| e.as_str()).map(|s| s.to_vec()).unwrap_or_default())),
+                _ => return Err(CallError::BadArgs("a file beside it is latin-1 text, false or {error}".into())),
+            };
             let f = collect::FileIn {
+                sibling,
                 media,
                 pth_lines,
                 ranged: flag("ranges"),
@@ -1290,10 +1303,13 @@ fn dispatch(name: &str, args: &Value, text: &[u32]) -> Result<Value, CallError> 
                     "program" => Value::Bool(binary::native_program(p, &data)),
                     other => return Err(CallError::BadArgs(format!("binary_check: no check {other:?}"))),
                 },
-                // {path, size, context, windows, neumaier, whole, walked, more} -> core.classify_binary's issue, or null.
-                // FP-OPAQUE-MEDIA: `whole`, the text is the whole file (its first 8,192 bytes the sample); `walked`, a
-                // walk of it as its stream passed (media_stream's end); `more`, the caller can give either, and is
-                // asked: {"need": "whole"}
+                // {path, size, context, windows, neumaier, whole, walked, more, props} -> core.classify_binary's
+                // issue, or null. FP-OPAQUE-MEDIA: `whole`, the text is the whole file (its first 8,192 bytes the
+                // sample); `walked`, a walk of it as its stream passed (media_stream's end); `more`, the caller can
+                // give either, and is asked: {"need": "whole"}. FP-GRADLE-WRAPPER: a Gradle wrapper jar asks
+                // {"need": "wrapper"} (with `more`, or `whole`), answered with `props`, its gradle-wrapper.properties
+                // as latin-1 text (its first GRADLE_PROPERTIES_MAX_BYTES and one more), null when there are none, or
+                // {error} when it is there and was not read, and `whole` when the text is the whole jar
                 "binary_classify" => {
                     let context = opt_str(args, "context").map(|c| crate::pystr::to_string(&c)).unwrap_or_default();
                     let size = opt_int(args, "size").unwrap_or(data.len() as i64).max(0) as u64;
@@ -1302,7 +1318,24 @@ fn dispatch(name: &str, args: &Value, text: &[u32]) -> Result<Value, CallError> 
                         Some(v) => Some(walked_arg(v)?),
                     };
                     let sample = &data[..data.len().min(8192)];
-                    let more = if flag("whole") {
+                    // (props: latin-1 text, null when there are none, or {error}: there, and not read)
+                    let props = match args.get("props") {
+                        None => None,
+                        Some(Value::Str(t)) => Some(Ok(Some(binary::bytes_of(t).ok_or_else(|| {
+                            CallError::BadArgs("the properties come as latin-1 text".into())
+                        })?))),
+                        Some(o @ Value::Obj(_)) => Some(Err(o.get("error").and_then(|e| e.as_str()).map(|s| s.to_vec())
+                            .unwrap_or_default())),
+                        Some(_) => Some(Ok(None)),
+                    };
+                    let more = if let Some(props) = props.as_ref().filter(|_| crate::gradle::wrapper_path(&path, flag("windows"))) {
+                        let props = match props {
+                            Ok(Some(b)) => crate::gradle::Sibling::Bytes(b),
+                            Ok(None) => crate::gradle::Sibling::None,
+                            Err(e) => crate::gradle::Sibling::Error(e),
+                        };
+                        binary::More::Wrapper { jar: flag("whole").then_some(&data[..]), props }
+                    } else if flag("whole") {
                         binary::More::Whole(&data)
                     } else if let Some(w) = &walked {
                         binary::More::Walked(w)
@@ -1317,6 +1350,7 @@ fn dispatch(name: &str, args: &Value, text: &[u32]) -> Result<Value, CallError> 
                         binary::Classified::Issues(v) => Value::Arr(v),
                         binary::Classified::Quiet => Value::Null,
                         binary::Classified::Need => Value::obj(vec![("need", Value::str("whole"))]),
+                        binary::Classified::Wrapper => Value::obj(vec![("need", Value::str("wrapper"))]),
                     }
                 }
                 // {path, windows} -> core.disguised_binary's issue, or null

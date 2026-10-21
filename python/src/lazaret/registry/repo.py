@@ -351,7 +351,7 @@ SAMPLE = 8192              # header/entropy sample read from oversized files
 #      entry points and hook targets, Python install scripts
 # 2.3: verdict tiers, decoded hex, install-script inspection; 2.2:
 #      verdict-integrity; 2.1: binary-artifact awareness
-ENGINE_VERSION = "2.108.0"
+ENGINE_VERSION = "2.109.0"
 
 # ---------------- The content memo (P-2a, registry/contentcache.py) ----------------
 # One per scan_package run: the engine answers once for content several of a
@@ -3244,6 +3244,7 @@ class _ArtifactScan:
         self._bare = {}                    # (folder, specifier) -> _resolve_bare's answer (EG-6)
         self._node_modules = None          # does the archive hold a node_modules folder (_has_node_modules)
         self.issues, self.files_scanned, self.binaries = [], 0, 0
+        self.wrappers, self.wrapper_props = [], {}      # FP-GRADLE-WRAPPER: _gradle_wrappers
         self.truncated, self.truncated_emitted = 0, 0
         self.truncated_at = {}     # rel -> its SC-TRUNCATED issue (None past the cap)
         self.cut = set()           # why the scan is incomplete, of INCOMPLETE_KINDS (T-1, decision 9)
@@ -3413,8 +3414,27 @@ class _ArtifactScan:
         """classify_binary of a member: `raw` the whole member (`whole`), or an oversized one's first bytes with the
         walk of its structure as its stream passed (`walked`: FP-OPAQUE-MEDIA). A keystore is S-SECRET, listed as
         secrets are (and SC-OPAQUE-BLOB beside it when it holds more than a keystore does); the rest are binary
-        artifacts."""
-        bi = lazaret.classify_binary(rel, raw, size, self.artifact, whole=whole and walked is None, walked=walked)
+        artifacts. A Gradle wrapper jar is judged once every member is read (_gradle_wrappers: FP-GRADLE-WRAPPER)."""
+        if lazaret.gradle_wrapper_path(rel):
+            # (an oversized member's size is not known here: it is larger than the member limit)
+            whole = whole and walked is None
+            self.wrappers.append((rel, raw, size if whole else max(size, MAX_MEMBER + 1), whole))
+            return
+        self._binary_issue(lazaret.classify_binary(rel, raw, size, self.artifact, whole=whole and walked is None,
+                                                   walked=walked))
+
+    def _gradle_wrappers(self):
+        """FP-GRADLE-WRAPPER: each Gradle wrapper jar, judged by its checksum against Gradle's published wrapper
+        checksums with the gradle-wrapper.properties beside it, wherever the archive held that (it may follow the
+        jar). One not read whole (over the member limit) is judged by its size."""
+        wrappers, self.wrappers = self.wrappers, []
+        for rel, raw, size, whole in wrappers:
+            props = self.wrapper_props.get(posixpath.join(posixpath.dirname(rel), "gradle-wrapper.properties"))
+            self._binary_issue(lazaret.classify_binary(rel, raw, size, self.artifact, whole=whole, props=props))
+
+    def _binary_issue(self, bi):
+        """Count and keep classify_binary's answer: an issue, a list of them (a keystore that is an opaque blob too)
+        or None."""
         for issue in bi if isinstance(bi, list) else [bi] if bi else []:
             if issue["rule"].startswith("SC-"):
                 self.binaries += 1
@@ -3591,6 +3611,11 @@ class _ArtifactScan:
             self.timed_out = self.timed_out or reason == "time"
             return
         self.members.add(rel)
+        if posixpath.basename(rel) == "gradle-wrapper.properties":
+            # (FP-GRADLE-WRAPPER: _gradle_wrappers. One byte more than the engine reads, so that a longer file is
+            # told; one over the member limit was not read whole: its wrapper can't be verified)
+            self.wrapper_props[rel] = (raw[:lazaret.engine.pack_value("GRADLE_PROPERTIES_MAX_BYTES") + 1]
+                                       if reason != "member" else {"error": "it is larger than the member size limit"})
         if self.artifact in UNREAD_CODE and _unread_code(self.artifact, rel):
             self.unread_code.append(rel)
         base = os.path.basename(rel)
@@ -5470,6 +5495,7 @@ class _ArtifactScan:
 
     def finish(self, anomalies):
         self.scan_pending()
+        self._gradle_wrappers()
         self.first_pass = False
         for kind, path, detail in anomalies:
             self.issues.append(_archive_issue(kind, path, detail))

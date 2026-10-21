@@ -27,6 +27,7 @@ pub mod flow;
 pub mod generated;
 pub mod goparse;
 pub mod goread;
+pub mod gradle;
 pub mod hooks;
 pub mod jcstr;
 pub mod json;

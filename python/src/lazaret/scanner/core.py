@@ -1698,7 +1698,11 @@ def decode_go_member(path, data):
     got = _native.call("decode_source", args, _bytes_text(data))
     return got["text"], engine._issues(path, got["issues"]), got.get("goText", got["text"])
 
-def classify_binary(path, data, size, context, whole=None, walked=None):
+#: classify_binary's `props` when its caller does not look beside the file (FP-GRADLE-WRAPPER)
+_NOT_GIVEN = object()
+
+
+def classify_binary(path, data, size, context, whole=None, walked=None, props=_NOT_GIVEN):
     """Return a supply-chain issue dict for a suspicious non-source file (a list
     of two for a keystore that is an opaque blob too), or None:
     SC-BINARY for an executable or a compiled artifact (by its magic bytes, or
@@ -1711,11 +1715,20 @@ def classify_binary(path, data, size, context, whole=None, walked=None):
     quiet, when its bytes are that format from start to end (walked by its
     structure: media.rs), and a keystore read to its end is a credential file
     (S-SECRET, listed only; with SC-OPAQUE-BLOB beside it when it holds more
-    bytes no structure reads than a keystore does). Both need the whole file: `whole` when `data` is
-    it (it is handed over only when the first bytes call for it), or `walked`,
-    a walk of it as its stream passed (media_stream_file's answer). Without
-    either, a file that would need them is judged by its first bytes: an
-    opaque blob stays one.
+    bytes no structure reads than a keystore does). Both need the whole file:
+    `whole` when `data` is it (it is handed over only when the first bytes
+    call for it), or `walked`, a walk of it as its stream passed
+    (media_stream_file's answer). Without either, a file that would need them
+    is judged by its first bytes: an opaque blob stays one.
+
+    FP-GRADLE-WRAPPER: a Gradle wrapper jar (gradle/wrapper/gradle-wrapper.jar)
+    is judged by its checksum against Gradle's published wrapper checksums
+    (gradle.rs), with `props`, the bytes of the gradle-wrapper.properties
+    beside it (its first GRADLE_PROPERTIES_MAX_BYTES and one more, so that a
+    longer one is told; None: there are none; {"error": why}: it is there and
+    was not read; not given, as None when `data` is the whole jar, else the
+    jar is judged as any jar). Given `props` without the whole jar, it was not
+    read whole.
 
     context: 'sdist' | 'npm' | 'wheel' | 'repo'
     data:    leading bytes of the file (>= a few KB is ideal for entropy; the
@@ -1726,11 +1739,14 @@ def classify_binary(path, data, size, context, whole=None, walked=None):
     args = {"path": path, "size": size, "context": context, "windows": _WINDOWS_PATHS, "neumaier": False}
     if walked is not None:
         args["walked"] = walked
+    if props is not _NOT_GIVEN:
+        args["props"] = (None if props is None else {"error": str(props.get("error", ""))} if isinstance(props, dict)
+                         else _bytes_text(bytes(props)))
     data = bytes(data or b"")
     if whole is None:
         whole = len(data) == size
     if whole and walked is None:
-        if len(data) <= 8192:
+        if len(data) <= 8192 or "props" in args:
             got = _native.call("binary_classify", dict(args, whole=True), _bytes_text(data))
         else:
             got = _native.call("binary_classify", dict(args, more=True), _bytes_text(data[:8192]))
@@ -1738,9 +1754,20 @@ def classify_binary(path, data, size, context, whole=None, walked=None):
                 got = _native.call("binary_classify", dict(args, whole=True), _bytes_text(data))
     else:
         got = _native.call("binary_classify", args, _bytes_text(data[:8192]))
+    if isinstance(got, dict) and got.get("need") == "wrapper":
+        # (a Gradle wrapper jar its caller gave no properties for: judged with none)
+        got = _native.call("binary_classify", dict(args, whole=True, props=None), _bytes_text(data))
     if isinstance(got, list) and got and isinstance(got[0], list):
         return engine._issues(path, got)          # (a keystore that is an opaque blob too: both findings)
     return None if got is None else engine._issues(path, [got])[0]
+
+
+def gradle_wrapper_path(path):
+    """FP-GRADLE-WRAPPER: whether classify_binary judges a file at `path` as a Gradle wrapper jar, by its checksum
+    with the gradle-wrapper.properties beside it (gradle/wrapper/gradle-wrapper.jar)."""
+    got = _native.call("binary_classify", {"path": path, "size": 0, "context": "repo", "windows": _WINDOWS_PATHS,
+                                           "neumaier": False, "more": True}, "")
+    return isinstance(got, dict) and got.get("need") == "wrapper"
 
 
 def classify_needs_whole(path, data, size, context):
@@ -1748,7 +1775,7 @@ def classify_needs_whole(path, data, size, context):
     keystore, or a near-random file whose first bytes start a format the engine walks), from its first bytes."""
     got = _native.call("binary_classify", {"path": path, "size": size, "context": context, "windows": _WINDOWS_PATHS,
                                            "neumaier": False, "more": True}, _bytes_text(bytes(data or b"")[:8192]))
-    return isinstance(got, dict) and "need" in got
+    return isinstance(got, dict) and got.get("need") == "whole"
 
 
 #: A file walked as its stream passes is read this many bytes at a time (media_stream).
@@ -3970,6 +3997,22 @@ def tree_incomplete(tree):
     return out
 
 
+def _read_sibling(path, name, limit):
+    """FP-GRADLE-WRAPPER: the first `limit` bytes of the regular file `name` beside `path` (a Gradle wrapper jar's
+    gradle-wrapper.properties; the engine asks one byte more than it reads, so that a longer file is told) as latin-1
+    text, False when there is no such regular file, or {error} (a symbolic link among them: Java follows it, the scan
+    does not, and the engine judges the jar as one whose properties were not read). `path`: a path, or (a _Root, the
+    file's names), the file beside it read from the root's descriptor as the walk's other readers read (LZ-03)."""
+    try:
+        data = (path[0].read(path[1][:-1] + (name,), limit) if isinstance(path, tuple)
+                else _read_prefix(os.path.join(os.path.dirname(path), name), limit))
+        return _bytes_text(data)
+    except (_NotRegularFile, FileNotFoundError, NotADirectoryError):
+        return False
+    except OSError as exc:
+        return {"error": exc.strerror or type(exc).__name__}
+
+
 def collect_issue(kind, path, **args):
     """A coverage note the collection's I/O finds, the engine's (collect.rs): "unreadable" (reason), "symlink"
     (target) or "skipped_tree" (files, bytes)."""
@@ -4363,6 +4406,9 @@ def _collect_file(path, rel, st, in_dep, col):
             except OSError as exc:
                 answers[what] = {"error": str(exc) if isinstance(exc, _NotRegularFile)
                                  else exc.strerror or type(exc).__name__}
+            continue
+        if what == "sibling":                    # (FP-GRADLE-WRAPPER: the file beside it, a wrapper's properties)
+            answers[what] = _read_sibling(path, need["name"], need["limit"])
             continue
         if what == "ranges":                     # (every range read so far, their bytes as the text)
             try:

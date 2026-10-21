@@ -45,7 +45,9 @@ export const pathIssues = (pairs) => pairs.map(([path, row]) => issuesOf(path, [
  * Collect one regular file (core._collect_file's): the walk's (fs.js collectFiles) and the dashboard's, which hands
  * over its uploads. `entry`: {rel, name, size, dep, read(limit): its first `limit` bytes (throws when it can't be
  * read; `ioError(e)` says whether an error is one), head(limit): the same, or no bytes when it can't be read,
- * range(offset, length): optional, those bytes (fewer at its end; throws as read does)}; dep: false, true, or a Go or
+ * range(offset, length): optional, those bytes (fewer at its end; throws as read does), sibling(name, limit):
+ * optional, the first `limit` bytes of the regular file `name` beside it, or null when there is none (throws as read
+ * does; FP-GRADLE-WRAPPER: a Gradle wrapper jar's gradle-wrapper.properties)}; dep: false, true, or a Go or
  * cargo vendor tree's [kind, rel]. Adds the file to `col`'s files, manifests, configs or pth, and its findings to
  * col.binaryIssues; col.maxFileBytes is the size cap. An entry that reads by range has a zip model file (a
  * checkpoint, an .npz) of any size read for its pickles, by the ranges the engine asks for (FP-MODEL-FILES).
@@ -65,6 +67,16 @@ export function collectEntry(entry, col, { ioError = () => false, strerror = (e)
       try {                                       // pth_stream, another's structure media_stream)
         answers[what] = what === "pth" ? streamPth((off, len) => entry.range(off, len))
           : streamMedia((off, len) => entry.range(off, len), entry.size);
+      } catch (e) {
+        if (!ioError(e)) throw e;
+        answers[what] = { error: strerror(e) };
+      }
+      continue;
+    }
+    if (what === "sibling") {              // (FP-GRADLE-WRAPPER: the file beside it, a wrapper's properties)
+      try {
+        const b = typeof entry.sibling === "function" ? entry.sibling(got.need.name, limit) : null;
+        answers[what] = b === null ? false : bytesText(b);
       } catch (e) {
         if (!ioError(e)) throw e;
         answers[what] = { error: strerror(e) };

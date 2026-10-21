@@ -110,6 +110,7 @@ function fileEntry(full, rel, name, size, dep) {
     rel, name, size, dep,
     read: (limit) => readBounded(full, limit),
     range: (offset, length) => readRange(full, offset, length),
+    sibling: (n, limit) => readSibling(siblingPath(full, n), limit),
     head: (limit) => {                // no bytes when it can't be read
       try {
         return readBounded(full, limit);
@@ -121,6 +122,23 @@ function fileEntry(full, rel, name, size, dep) {
   };
 }
 const ioError = (e) => e instanceof NotRegularFile || Boolean(e && e.code);
+
+/** The path of the file `name` beside `full` (the walk's paths are bytes: a Buffer, its folders split at SEP). */
+function siblingPath(full, name) {
+  if (typeof full === "string") return join(dirname(full), name);
+  return Buffer.concat([full.subarray(0, full.lastIndexOf(SEP) + 1), Buffer.from(name)]);
+}
+
+/** FP-GRADLE-WRAPPER: the first `limit` bytes of a regular file beside one (a Gradle wrapper jar's properties), or
+ * null when there is none (core._read_sibling). */
+function readSibling(path, limit) {
+  try {
+    return readBounded(path, limit);
+  } catch (e) {
+    if (e instanceof NotRegularFile || (e && (e.code === "ENOENT" || e.code === "ENOTDIR"))) return null;
+    throw e;
+  }
+}
 
 function lexists(p) { try { lstatSync(p); return true; } catch { return false; } }
 /**
