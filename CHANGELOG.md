@@ -2229,6 +2229,18 @@ aggregate):
   well-known types import `fileDesc` by a relative path and keep SC-B64. Residual (John's call): a descriptor's
   options are reachable through the schemas generated code exports (`X.file.proto`, `getOption`), and code that takes
   them out and hands them to a sink the pass does not read (a file run later, the network) is not seen.
+- **SC-EVAL-DECODE exemptions require file-wide integrity and an exact child program
+  (FP-PDFJS-DECODE, external review amendment, Oct 27; rule set 2.113.0).**
+  RegExp literals, intact constructions and single bindings can be proven; reflection,
+  unknown writes and all direct eval invalidate that proof, including above the 2 MB
+  tree boundary. Encoded visible-source exemptions require intact encoders and a direct,
+  untransformed child-process command whose complete program is one supported decoder
+  and sink. Unresolved dynamic execution in visible source keeps BLOCKER. Every round
+  trip on a line retains its own source risk, reasons and location. This deliberately
+  reverses the earlier unsafe precision gains for eval-bearing bundles, replaced encoders,
+  shadowed child decoders, stored/transformed commands and unknown dynamic source.
+  Python and the rule pack are unchanged; shared inert acceptance tests cover native,
+  WASM and both sides of the tree-size boundary.
 
 - **A model file is read for what loading it runs, not reported as an embedded archive (FP-MODEL-FILES, John's OK of
   Oct 20; rule set 2.104.0).** scan-all's run of Oct 20 gave `github:ObsidianArch02/fireredasr2s-mlx`

@@ -413,6 +413,54 @@ impl<'p> FileCtx<'p> {
         Some(out)
     }
 
+    /// Where each character of a JavaScript line's match text is on the line (FP-PDFJS-DECODE: SC-EVAL-DECODE
+    /// reads a match's receiver and arguments on the line itself): for [`Self::mline`] (`drop_comments` false) or
+    /// [`Self::mcode`] (true), the offset on line i of each of its characters (an escape it decodes: the escape's
+    /// first character), then one past its end. The edits are [`Self::js_text`]'s, made in the same order.
+    pub fn js_text_offsets(&self, i: usize, drop_comments: bool) -> Vec<usize> {
+        let line = self.line(i);
+        let cuts: &[(usize, usize)] = if drop_comments { &self.cspans[i] } else { &[] };
+        let mut edits: Vec<(usize, usize, Option<u32>)> = cuts.iter().map(|&(a, b)| (a, b, None)).collect();
+        if pystr::contains(line, "\\u") {
+            let base = self.starts[i];
+            let rx: &Regex = self.p.re("_JS_UESC_RE");
+            let mut c = 0;
+            for m in rx.finditer_at(line, 0, line.len() as isize) {
+                let at = m.start();
+                while c < cuts.len() && cuts[c].1 <= at {
+                    c += 1;
+                }
+                if c < cuts.len() && cuts[c].0 <= at {
+                    continue;
+                }
+                let k = self.strings.partition_point(|&(a, _)| a <= base + at);
+                if k > 0 && self.strings[k - 1].1 > base + at {
+                    continue;
+                }
+                let digits = if m.start_of(1) >= 0 { m.group(1) } else { m.group(2) };
+                if let Some(ch) = js_ident_char(self.p, digits.unwrap_or(&[])) {
+                    edits.push((m.start(), m.end(), Some(ch)));
+                }
+            }
+        }
+        edits.sort_by(|x, y| (x.0, x.1, x.2.is_some(), x.2).cmp(&(y.0, y.1, y.2.is_some(), y.2)));
+        let mut out = Vec::with_capacity(line.len() + 1);
+        let mut p = 0;
+        for (a, b, rep) in edits {
+            if a < p {
+                continue;
+            }
+            out.extend(p..a);
+            if rep.is_some() {
+                out.push(a);
+            }
+            p = b;
+        }
+        out.extend(p..line.len());
+        out.push(line.len());
+        out
+    }
+
     /// _FileCtx._js_text: line i's match text (its identifier escapes
     /// decoded outside '…' "…" literals, U+FEFF read as a space);
     /// `blanked`: line i with some of its text blanked, to read instead.

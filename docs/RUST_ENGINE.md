@@ -584,7 +584,9 @@ rust/
                              reading of a function), driver.rs (the fixpoint, the output);
                              supply.rs (its supply-chain model: local data followed to a
                              network send, and received data to code run, in an install
-                             script or a dependency's code, §18)
+                             script or a dependency's code, §18); decodeuse.rs (what
+                             SC-EVAL-DECODE's line reading asks the tree: a RegExp's own exec,
+                             a round trip in a template's hole, §20)
     src/jsloads.rs           what a JavaScript module loads when it runs (js_loads, 0.1.9, D-13): the
                              specifiers of its require() calls given a literal outside any function,
                              class body and try statement, of its import and export-from
@@ -3309,6 +3311,44 @@ SUSPICIOUS (448 of 516): pywhool (an XOR decoder in setup.py, its result
 run by `eval(compile(…))`), requests-darwin-lite and quasarlib; five more
 gain a reason. The holdout gains two PyPI releases
 (631 of 745), both sharing no code with the benchmark.
+
+SC-EVAL-DECODE keeps BLOCKER unless a narrow proof establishes the exemption.
+A RegExp receiver must be a literal, an intact global construction, or a single
+binding whose uses preserve that proof; members and optional calls are not
+proven. Both the literal fast path and tree path require file-wide integrity.
+Any direct eval (including `eval("require")`), unresolved dynamic code,
+reflection that can reach a regex, unknown computed property, or write to a
+protected constructor, prototype or encoder closes the exemption. The tree can
+prove a constructor/prototype read unrelated for primitive literals and fresh
+containers. Above 2 MB a conservative lexical guard replaces that proof.
+
+A round trip requires a single, unchanged encoding of literal source text and
+an untransformed template passed directly to child_process `exec`/`execSync`.
+The entire command must be plain `node`, one `-e`, `--eval` or `-p` flag, and
+one quoted argument. That argument is parsed as exactly one supported
+`eval`, `Function(…)()`, `new Function(…)()` or `vm.runInThisContext` expression
+with the matching built-in decoder. Bindings, additional statements, command
+options, shell transformations, tagged templates, stored commands, unknown
+computed keys and encoder mutations retain BLOCKER. Proof work is bounded;
+exhausting it leaves the warning intact.
+
+Visible source is checked for unresolved dynamic execution before the
+install-script risk heuristic is consulted. Nonliteral imports/require and
+child commands are refused; eval/Function/vm and timer facilities are
+conservatively refused even where a nested literal might eventually be
+provable. A proven benign source is INFO; a risky source retains its risk
+severity and reasons. Every accepted round trip on a line contributes its own
+finding, including those before or after an unproven BLOCKER. Order and
+minification do not discard a stronger result.
+
+This external-review amendment supersedes the original `eval("name.path")`
+relaxation and broad template-hole exemption. It intentionally gives up
+precision where integrity or the complete child program is uncertain. Real
+pdf.js files containing those facilities can therefore remain BLOCKER.
+Python behavior and the rule-set assignment are unchanged. Acceptance cases
+are shared in `rust/crates/lazaret-engine/tests/data/decode-review.json` and
+run from Rust, Python, npm and native/WASM parity tests, including both sides
+of the 2 MB boundary. Fixtures are inert text and are never executed.
 
 ## 21. The Rust reader (R-1)
 

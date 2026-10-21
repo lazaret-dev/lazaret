@@ -1317,6 +1317,46 @@ string array the view reads is a sign of its own (`string_array_line`,
 the technique, whatever the tool's names. It won back 41 of the holdout's
 56 lost verdicts (§12).
 
+#### SC-EVAL-DECODE: proven visible execution (FP-PDFJS-DECODE, 0.1.9)
+
+SC-EVAL-DECODE keeps BLOCKER unless a narrow proof establishes the exemption.
+A RegExp receiver must be a literal, an intact global construction, or a single
+binding whose uses preserve that proof; members and optional calls are not
+proven. Both the literal fast path and tree path require file-wide integrity.
+Any direct eval (including `eval("require")`), unresolved dynamic code,
+reflection that can reach a regex, unknown computed property, or write to a
+protected constructor, prototype or encoder closes the exemption. The tree can
+prove a constructor/prototype read unrelated for primitive literals and fresh
+containers. Above 2 MB a conservative lexical guard replaces that proof.
+
+A round trip requires a single, unchanged encoding of literal source text and
+an untransformed template passed directly to child_process `exec`/`execSync`.
+The entire command must be plain `node`, one `-e`, `--eval` or `-p` flag, and
+one quoted argument. That argument is parsed as exactly one supported
+`eval`, `Function(…)()`, `new Function(…)()` or `vm.runInThisContext` expression
+with the matching built-in decoder. Bindings, additional statements, command
+options, shell transformations, tagged templates, stored commands, unknown
+computed keys and encoder mutations retain BLOCKER. Proof work is bounded;
+exhausting it leaves the warning intact.
+
+Visible source is checked for unresolved dynamic execution before the
+install-script risk heuristic is consulted. Nonliteral imports/require and
+child commands are refused; eval/Function/vm and timer facilities are
+conservatively refused even where a nested literal might eventually be
+provable. A proven benign source is INFO; a risky source retains its risk
+severity and reasons. Every accepted round trip on a line contributes its own
+finding, including those before or after an unproven BLOCKER. Order and
+minification do not discard a stronger result.
+
+This external-review amendment supersedes the original `eval("name.path")`
+relaxation and broad template-hole exemption. It intentionally gives up
+precision where integrity or the complete child program is uncertain. Real
+pdf.js files containing those facilities can therefore remain BLOCKER.
+Python behavior and the rule-set assignment are unchanged. Acceptance cases
+are shared in `rust/crates/lazaret-engine/tests/data/decode-review.json` and
+run from Rust, Python, npm and native/WASM parity tests, including both sides
+of the 2 MB boundary. Fixtures are inert text and are never executed.
+
 #### Model files: what loading one runs (FP-MODEL-FILES, 0.1.9)
 
 A PyTorch checkpoint is a zip by design (torch.save: `<archive>/data.pkl`, the storages as `data/<n>`, `version`,

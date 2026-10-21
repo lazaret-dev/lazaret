@@ -21,6 +21,7 @@
 //! deduped with `dict.fromkeys`, so does this: the order of a call's
 //! targets decides which of them a finding names.
 
+pub mod decodeuse;
 pub mod descs;
 pub mod driver;
 pub mod eval;

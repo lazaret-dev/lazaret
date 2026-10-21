@@ -1,6 +1,6 @@
 {
  "format": 1,
- "rule_set": "2.112.0",
+ "rule_set": "2.113.0",
  "source": "lazaret.scanner.core, extracted by scripts/make_rust_tables.py \u2014 do not edit",
  "values": {
   "ALWAYS_PRUNE_DIRS": {
@@ -8593,8 +8593,25 @@
   "_DECODE_FLOW_MSG": {
    "value": "Decoded payload (assigned at line {line}) reaches a code-execution sink."
   },
+  "_DECODE_HOLE_ARG_RE": {
+   "flags": "",
+   "re": "\\s*(?:'\\$\\{\\s*([A-Za-z_$][\\w$]*)\\s*\\}'|\\\"\\$\\{\\s*([A-Za-z_$][\\w$]*)\\s*\\}\\\"|`\\$\\{\\s*([A-Za-z_$][\\w$]*)\\s*\\}`|\\$\\{\\s*([A-Za-z_$][\\w$]*)\\s*\\})\\s*(?:,\\s*['\\\"`]([\\w-]+)['\\\"`]\\s*)?\\)(?:\\s*\\.\\s*toString\\s*\\(\\s*(?:['\\\"`]utf-?8['\\\"`]\\s*)?\\))?\\s*\\)"
+  },
+  "_DECODE_JS_DECODER_RE": {
+   "flags": "",
+   "re": "(?:^|[^\\w$.])(?:(?:globalThis|window|self|global)\\s*\\.\\s*)?(atob|decodeURIComponent|unescape|Buffer\\s*\\.\\s*from)\\s*\\(\\s*$"
+  },
   "_DECODE_SAME_CALL_MSG": {
    "value": "Decoded payload reaches a code-execution sink in the same call."
+  },
+  "_DECODE_SEEN_MSG": {
+   "value": "Runs code this file writes itself (line {line}), encoded on the way and decoded here: the code is in sight, and read as code it is no supply-chain sign."
+  },
+  "_DECODE_SEEN_RISK_MSG": {
+   "value": "Runs code this file writes itself (line {line}), encoded on the way and decoded here; read as code, it {reasons}."
+  },
+  "_DECODE_SEEN_WHY": {
+   "value": "A script handed to a child process is often encoded to keep it out of the shell's quoting. What runs is text the file writes, which the scan reads as code (the install-script test, as for a hook's inline code); a decoded payload that is not in sight is what droppers run."
   },
   "_DECODE_SINK_RE": {
    "flags": "",
@@ -13890,6 +13907,10 @@
   "_EXEC_CALL_RE": {
    "flags": "",
    "re": "\\b(?:execSync|exec|execFileSync|execFile|spawnSync|spawn|system|popen|Popen|run|call|check_call|check_output|getoutput|getstatusoutput)\\s*\\("
+  },
+  "_EXEC_PATCH_RE": {
+   "flags": "",
+   "re": "RegExp\\s*\\.\\s*prototype|\\.\\s*exec\\s*(?:\\*\\*|>>>|<<|>>|&&|\\|\\||\\?\\?|[-+*/%&|^])?=(?!=)|\\[\\s*['\\\"`]exec['\\\"`]\\s*\\]\\s*(?:\\*\\*|>>>|<<|>>|&&|\\|\\||\\?\\?|[-+*/%&|^])?=(?!=)|['\\\"`]exec['\\\"`]\\s*:|(?<![\\w$.])exec\\s*:(?!:)|[{,]\\s*exec\\s*[,}]|\\bdefineProperty\\s*\\([^;]{0,200}?['\\\"`]exec['\\\"`]|\\bdelete\\b[^;\\n]{0,120}\\bexec\\b"
   },
   "_EXFIL_SERVICES": {
    "value": "pastebin\\.com|\\bngrok|webhook\\.site|discord(?:app)?\\.com/api/webhooks|api\\.telegram\\.org|oastify\\.com|burpcollaborator|\\binteract\\.sh|\\boast\\.(?:pro|live|site|online|fun|me)\\b|requestbin\\.(?:com|net|io)\\b|\\brequestb\\.in\\b|pipedream\\.net|transfer\\.sh|\\.onion\\b"

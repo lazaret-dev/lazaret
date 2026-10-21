@@ -1111,7 +1111,7 @@ fn tree_decode_flow(ctx: &FileCtx, rule: &RuleText, out: &mut Vec<Finding>) -> O
     };
     let p = ctx.p;
     let content = &ctx.content;
-    let mut have: HashSet<usize> = out.iter().filter(|f| is(&f.rule.id, "SC-EVAL-DECODE")).map(|f| f.line).collect();
+    let mut have: HashSet<usize> = out.iter().filter(|f| decode_run(f, rule)).map(|f| f.line).collect();
     let flow_msg = p.text("_DECODE_FLOW_MSG");
     let same_call_msg = p.text("_DECODE_SAME_CALL_MSG");
     let line_of = |at: usize| pystr::count_char(content, '\n' as u32, 0, at.min(content.len())) + 1;
@@ -1147,14 +1147,22 @@ fn dep_decode_flow(ctx: &FileCtx, rule: &RuleText, out: &mut Vec<Finding>, decod
     dep_decode_flow_text(ctx, rule, out, &mut found, decode, gates, g_decode);
     // (a text over the trees' limit is read on its text alone)
     let limit = if ctx.lang == Lang::Py { crate::pyflow::supply::MAX_TEXT } else { crate::jsflow::MAX_FILE };
-    if matches!(ctx.lang, Lang::Py | Lang::Js)
+    if !(matches!(ctx.lang, Lang::Py | Lang::Js)
         && ctx.content.len() <= limit
         && (!found.is_empty() || may_run_written_decoder(ctx))
-        && tree_decode_flow(ctx, rule, out).is_some()
+        && tree_decode_flow(ctx, rule, out).is_some())
     {
-        return;
+        out.extend(found);
     }
-    out.extend(found);
+    // a line a decoded payload's flow reaches is that finding's, not a round trip's (FP-PDFJS-DECODE)
+    let runs: HashSet<usize> = out.iter().filter(|f| decode_run(f, rule)).map(|f| f.line).collect();
+    out.retain(|f| !is(&f.rule.id, "SC-EVAL-DECODE") || decode_run(f, rule) || !runs.contains(&f.line));
+}
+
+/// Is `f` SC-EVAL-DECODE's finding of a decoded payload run (at the rule's own severity), not of a round trip the
+/// file writes (`seen_finding`)?
+fn decode_run(f: &Finding, rule: &RuleText) -> bool {
+    is(&f.rule.id, "SC-EVAL-DECODE") && f.rule.sev == rule.sev
 }
 
 /// dep_decode_flow on the text: names followed within DEP_FLOW_WINDOW to a
@@ -1163,7 +1171,7 @@ fn dep_decode_flow(ctx: &FileCtx, rule: &RuleText, out: &mut Vec<Finding>, decod
 fn dep_decode_flow_text(ctx: &FileCtx, rule: &RuleText, existing: &[Finding], out: &mut Vec<Finding>, decode: &Regex, gates: &Gates, g_decode: usize) {
     let p = ctx.p;
     let ident = p.map_re("_IDENT_RUN_RE", if ctx.lang == Lang::Py { "py" } else { "js" });
-    let mut have: HashSet<usize> = existing.iter().filter(|f| is(&f.rule.id, "SC-EVAL-DECODE")).map(|f| f.line).collect();
+    let mut have: HashSet<usize> = existing.iter().filter(|f| decode_run(f, rule)).map(|f| f.line).collect();
     // (read when a sink needs them: core reads them first, and they depend on
     // nothing the pass changes)
     let cp_aliases: OnceCell<HashSet<PyStr>> = OnceCell::new();
@@ -1492,6 +1500,241 @@ fn exec_js_regex(p: &Pack, ctx: &FileCtx, i: usize, col: usize, names: &OnceCell
     names.get_or_init(|| regex_names(p, ctx)).contains(&line[start..end])
 }
 
+// ---------------- SC-EVAL-DECODE on a JavaScript line (FP-PDFJS-DECODE, 0.1.9) ----------------
+
+/// A match of SC-EVAL-DECODE's pattern on a JavaScript line that runs nothing hidden.
+enum NotHidden {
+    /// `exec` is a RegExp's own: `i.exec(decodeURIComponent(a))`, `i` bound to a regex literal (pdf.js)
+    RegexExec,
+    /// the decoded text is text the file writes, encoded on the way (a round trip): read as code there
+    Seen(Seen),
+}
+
+/// A round trip the file runs: the text's line, what the install-script test says of it as code, and the severity
+/// the finding takes (INFO when the test says nothing: report-only).
+struct Seen {
+    line: usize,
+    reasons: Vec<PyStr>,
+    sev: &'static str,
+}
+
+/// SC-EVAL-DECODE's reading of a JavaScript file's lines: which matches of the rule run nothing hidden. The line
+/// shows a sink handed a decoder's result; two things it does not show are read on the text's tree
+/// (`jsflow::decodeuse`: whether `exec` is a RegExp's, and what a name in a template's hole holds), and a literal
+/// regex receiver on the text itself, so a file over the tree's limit keeps every finding but those.
+struct EvalDecodeJs<'c, 'p> {
+    ctx: &'c FileCtx<'p>,
+    marks: OnceCell<Option<std::rc::Rc<crate::jsflow::decodeuse::Marks>>>,
+    /// the text writes a member named `exec` or touches RegExp.prototype (`_EXEC_PATCH_RE`, strings too): no
+    /// receiver is proven a RegExp's then
+    patched: OnceCell<bool>,
+}
+
+impl<'c, 'p> EvalDecodeJs<'c, 'p> {
+    fn new(ctx: &'c FileCtx<'p>) -> EvalDecodeJs<'c, 'p> {
+        EvalDecodeJs { ctx, marks: OnceCell::new(), patched: OnceCell::new() }
+    }
+
+    fn marks(&self) -> Option<&crate::jsflow::decodeuse::Marks> {
+        self.marks.get_or_init(|| crate::jsflow::decodeuse::marks(&self.ctx.content)).as_deref()
+    }
+
+    fn patched(&self) -> bool {
+        *self.patched.get_or_init(|| {
+            self.ctx.p.re("_EXEC_PATCH_RE").search(&self.ctx.content).is_some()
+                || if self.ctx.content.len() > 2_000_000 {
+                    !crate::jsflow::decodeuse::large_literal_safe(&self.ctx.content)
+                } else {
+                    !self.marks().is_some_and(|m| m.literal_exec_safe)
+                }
+        })
+    }
+
+    /// The first match on line i that may run hidden code (its column in the match text), and every accepted round
+    /// trip it runs; the line offsets of the matches that run nothing hidden go into `quiet`. A match is read on
+    /// the line itself (`FileCtx::js_text_offsets`: the match text decodes a name's escapes, `\u0065val`), and one
+    /// the match text decodes an escape in is not passed over.
+    fn on_line(&self, i: usize, re: &Regex, quiet: &mut Vec<usize>) -> (Option<usize>, Vec<(usize, Seen)>) {
+        let ctx = self.ctx;
+        let text = ctx.mline(i);
+        let offsets: OnceCell<Vec<usize>> = OnceCell::new();
+        let at = |x: usize| if ctx.mline_differs(i) { offsets.get_or_init(|| ctx.js_text_offsets(i, false))[x] } else { x };
+        let mut seen: Vec<(usize, Seen)> = Vec::new();
+        let mut hidden = None;
+        let mut pos = 0usize;
+        while pos <= text.len() {
+            let Some(m) = re.search_at(text, pos as isize, text.len() as isize) else { break };
+            let s = m.start();
+            pos = s + 1;
+            let (ls, le) = (at(s), at(m.end()));
+            if le - ls != m.end() - s {
+                hidden.get_or_insert(s);
+                continue;
+            }
+            match self.not_hidden(i, ls, le) {
+                None => { hidden.get_or_insert(s); },
+                Some(NotHidden::RegexExec) => quiet.push(ls),
+                Some(NotHidden::Seen(v)) => {
+                    quiet.push(ls);
+                    seen.push((s, v));
+                }
+            }
+        }
+        (hidden, seen)
+    }
+
+    /// core._joined_eval_decode for JavaScript: the first match over the statement that starts on line i and
+    /// continues on the next, that starts on line i, at none of the starts `quiet` holds and not a RegExp's exec.
+    /// `quiet` is sorted (a binary search per match keeps a long line with many quiet matches linear).
+    fn joined(&self, j: &Join, i: usize, re: &Regex, quiet: &[usize]) -> Option<usize> {
+        let ctx = self.ctx;
+        let p = ctx.p;
+        let code = ctx.mcode(i);
+        if j.prefilter && !sink_word_possible(code) {
+            return None;
+        }
+        j.sink_word.search(code)?;
+        let mut depth = paren_balance(p, code);
+        if depth <= 0 {
+            let tail = pystr::rstrip(code);
+            if !j.sink_names.iter().any(|n| tail.ends_with(n)) {
+                return None;
+            }
+        }
+        let mut joined: Vec<u32> = code.to_vec();
+        let mut added = 0;
+        for k in i + 1..ctx.len().min(i + 1 + j.max_lines) {
+            if ctx.cmask[k] {
+                continue;
+            }
+            let nxt = ctx.mcode(k);
+            joined.push(' ' as u32);
+            joined.extend_from_slice(nxt);
+            added += nxt.len();
+            depth += paren_balance(p, nxt);
+            if (depth <= 0 && !is_blank(nxt)) || added > j.max_chars {
+                break;
+            }
+        }
+        // (a start on line i, on the line itself: its comments were cut out of the text read, its escapes decoded)
+        let offsets: OnceCell<Vec<usize>> = OnceCell::new();
+        let at = |x: usize| if ctx.mcode_differs(i) { offsets.get_or_init(|| ctx.js_text_offsets(i, true))[x] } else { x };
+        for m in re.finditer(&joined) {
+            let s = m.start();
+            if s >= code.len() {
+                break;
+            }
+            let p = at(s);
+            if quiet.binary_search(&p).is_ok() || self.regex_exec(i, p) {
+                continue;
+            }
+            return Some(s);
+        }
+        None
+    }
+
+    /// Does the match at [s, e) of line i (offsets on the line) run nothing hidden?
+    fn not_hidden(&self, i: usize, s: usize, e: usize) -> Option<NotHidden> {
+        if self.regex_exec(i, s) {
+            return Some(NotHidden::RegexExec);
+        }
+        self.round_trip(i, s, e).map(NotHidden::Seen)
+    }
+
+    /// Is the sink at column s of line i a call of `exec` on a receiver proven a RegExp: a regex literal the lexer
+    /// read (`/…/.exec(…)`), or one the tree proves (decodeuse::Marks::regex_exec)?
+    fn regex_exec(&self, i: usize, s: usize) -> bool {
+        let ctx = self.ctx;
+        let line = ctx.line(i);
+        if !pystr::starts_with(&line[s..], "exec") {
+            return false;
+        }
+        let mut k = s + 4;
+        while k < line.len() && unicode::is_space(line[k]) {
+            k += 1;
+        }
+        if line.get(k) != Some(&('(' as u32)) {
+            return false; // execSync
+        }
+        let back = |mut k: usize| {
+            while k > 0 && unicode::is_space(line[k - 1]) {
+                k -= 1;
+            }
+            k
+        };
+        let dot = back(s);
+        if dot == 0 || line[dot - 1] != '.' as u32 || (dot >= 2 && line[dot - 2] == '?' as u32) {
+            return false; // a free call, `x?.exec(…)`
+        }
+        if self.patched() {
+            return false;
+        }
+        regex_literal_before(ctx, ctx.starts[i] + back(dot - 1)) || self.marks().is_some_and(|m| m.regex_exec_at(ctx.starts[i] + s))
+    }
+
+    /// The round trip the match at [s, e) of line i runs, read as code: the match is in a literal (a command line's
+    /// text, a script's: the code a child runs, where the decoder is the runtime's own), its sink runs JavaScript
+    /// (eval, Function, vm's runIn…Context, an indirect eval: not exec, which runs a command), its decoder is one
+    /// of JavaScript's (`atob`, `Buffer.from(…, 'base64' | 'base64url' | 'hex')`, `decodeURIComponent`,
+    /// `unescape`, the global object's or none's) and is handed exactly a name in a template's hole
+    /// (`_DECODE_HOLE_ARG_RE`), that name a round trip of the same encoding (decodeuse::Marks::round_trips), and
+    /// the text it holds is JavaScript the parser reads.
+    fn round_trip(&self, i: usize, s: usize, e: usize) -> Option<Seen> {
+        let ctx = self.ctx;
+        let p = ctx.p;
+        let line = ctx.line(i);
+        let at = ctx.starts[i] + s;
+        if ctx.in_code(at) || pystr::starts_with(&line[s..], "exec") || pystr::starts_with(&line[s..], "compile") {
+            return None;
+        }
+        let decoder = p.re("_DECODE_JS_DECODER_RE").search(&line[s..e])?;
+        let name = decoder.group(1)?;
+        let arg = p.re("_DECODE_HOLE_ARG_RE").match_at(line, e as isize, line.len() as isize)?;
+        let g = (1..=4).find(|&g| arg.start_of(g) >= 0)?;
+        let hole = ctx.starts[i] + arg.start_of(g) as usize;
+        let enc = arg.group(5);
+        use crate::jsflow::decodeuse::Enc;
+        let ok = |rt: Enc| match (pystr::eq(name, "atob"), pystr::eq(name, "decodeURIComponent"), pystr::eq(name, "unescape")) {
+            (true, _, _) => enc.is_none() && rt == Enc::Base64,
+            (_, true, _) => enc.is_none() && rt == Enc::Uri,
+            (_, _, true) => enc.is_none() && rt == Enc::Escape,
+            _ => match enc {
+                Some(x) if pystr::eq(x, "base64") || pystr::eq(x, "base64url") => matches!(rt, Enc::Base64 | Enc::Base64Url),
+                Some(x) if pystr::eq(x, "hex") => rt == Enc::Hex,
+                _ => false,
+            },
+        };
+        let rt = self.marks()?.round_trip_at(hole)?;
+        if !ok(rt.enc) {
+            return None;
+        }
+        // the text, read as code: JavaScript the parser reads, given the install-script test (the strongest the
+        // engine has: what a hook's `node -e` code gets)
+        let _js = crate::jsflow::supply::read_as(crate::jsflow::supply::Dialect::Js);
+        if crate::jsflow::supply::parse_refusal(&rt.script).is_some() {
+            return None;
+        }
+        let reasons = signs::install_script_risk(p, &rt.script, Some("js"));
+        let sev = signs::install_script_severity(p, &reasons).unwrap_or("INFO");
+        Some(Seen { line: rt.line, reasons, sev })
+    }
+}
+
+/// SC-EVAL-DECODE's finding for a round trip the line runs: report-only (INFO) when its text, read as code, is no
+/// sign; else at the install-script test's severity, with what the test says.
+fn seen_finding(p: &Pack, rule: &RuleText, line: usize, col: usize, seen: Seen) -> Finding {
+    let mut text = rule.clone();
+    text.sev = pystr::u(seen.sev);
+    if seen.reasons.is_empty() {
+        text.msg = findings::format(&p.text("_DECODE_SEEN_MSG"), &[("line", Arg::I(seen.line as i64))]);
+        text.why = p.text("_DECODE_SEEN_WHY");
+    } else {
+        let reasons = pystr::join(&pystr::u("; and "), &seen.reasons.iter().map(|r| r.as_slice()).collect::<Vec<_>>());
+        text.msg = findings::format(&p.text("_DECODE_SEEN_RISK_MSG"), &[("line", Arg::I(seen.line as i64)), ("reasons", Arg::S(reasons))]);
+    }
+    Finding::new(text, line, Some(col))
+}
+
 /// The names a file assigns a regex and nothing else (S-EXEC-JS): every assignment to a name (_ASSIGN_NAME_RE: `=`,
 /// a declaration's too, and `&&=`, `+=`…) is a plain `=` whose right side is a whole regex: a literal the lexer read as
 /// one, or `new RegExp(…)` / `RegExp(…)` closed on its line, and the expression ending there.
@@ -1706,6 +1949,7 @@ pub fn findings_of(ctx: &FileCtx, lang_name: Option<&str>, opts: &Options, snipp
     let entropy_filter = written_for(p, "ENTROPY_VALUE_RE", ENTROPY_VALUE_TEXT);
     let js_name = if lang == Lang::Js { "js" } else { "py" };
     let join = Join::new(p);
+    let eval_decode_js = EvalDecodeJs::new(ctx);
     let offscreen_min = p.usize("_OFFSCREEN_MIN"); // (offscreen_code reads no shorter line)
     let preview = |t: &[u32]| -> PyStr {
         let max = p.usize("PREVIEW_MAX");
@@ -1739,15 +1983,38 @@ pub fn findings_of(ctx: &FileCtx, lang_name: Option<&str>, opts: &Options, snipp
                 continue;
             }
             let r = a.rule;
+            // (SC-EVAL-DECODE in JavaScript: the matches that run nothing hidden are passed over, FP-PDFJS-DECODE)
+            let ed_js = a.kind == Kind::EvalDecode && lang == Lang::Js;
+            let mut quiet: Vec<usize> = Vec::new();
+            let mut seen: Vec<(usize, Seen)> = Vec::new();
             let mut col = if !own_text && !gates.may(i, j) {
                 None
             } else if a.kind == Kind::EqEq {
                 r.re.search(&string_lit.sub(mline, &pystr::u("\"\""), 0)).map(|s| s.0)
+            } else if ed_js {
+                match &r.re {
+                    Matcher::Re(re) => {
+                        let (run, s) = eval_decode_js.on_line(i, re, &mut quiet);
+                        seen = s;
+                        run
+                    }
+                    other => other.search(mline).map(|s| s.0),
+                }
             } else {
                 r.re.search(mline).map(|s| s.0)
             };
             if col.is_none() && a.kind == Kind::EvalDecode && !cm {
-                col = joined_eval_decode(ctx, &join, i, &r.re);
+                col = match (&r.re, ed_js) {
+                    (Matcher::Re(re), true) => {
+                        quiet.sort_unstable();
+                        quiet.dedup();
+                        eval_decode_js.joined(&join, i, re, &quiet)
+                    }
+                    _ => joined_eval_decode(ctx, &join, i, &r.re),
+                };
+            }
+            for (c, s) in seen {
+                out.push(seen_finding(p, &r.text, i + 1, c, s));
             }
             let col = match col {
                 None => continue,

