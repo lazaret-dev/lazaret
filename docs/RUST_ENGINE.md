@@ -238,6 +238,23 @@ rust/
     src/datafmt.rs           a whole file of a data format, read by its structure (a WebAssembly
                              module, a PNG, GIF or WebP image, WAV audio): SC-B64 passes over its
                              base64 (0.1.9)
+    src/protodesc.rs         a protobuf file's descriptor as protoc-gen-es embeds it: a
+                             FileDescriptorProto read to its end by descriptor.proto's structure,
+                             with no source information, no JSON name but the derived one and no
+                             long default value (file_descriptor); protodesc/usage.rs: the scan's
+                             pass over its SC-B64 findings (the call b64_descriptors, asked once a
+                             project, a --deps tree or a package is read): a descriptor handed whole
+                             to the runtime's loader (_B64_DESCRIPTOR_LOADERS), used only as
+                             generated code uses it in every file of the scan
+                             (_B64_DESCRIPTOR_CONSUMERS; the files that hold script,
+                             _SCRIPT_HOLDER_EXTS, read too), its module read for its members alone
+                             wherever a specifier may lead to it (Resolver: paths, tsconfig paths and
+                             baseUrl, packages), no code running text or loading _B64_RUNNER_MODULES,
+                             the loader not remapped (package.json, tsconfig/jsconfig,
+                             _B64_RESOLVER_CONFIGS), nothing unread (_B64_DESCRIPTOR_UNREAD): its
+                             finding is dropped (0.1.9, FP-B64-PROTOBUF); each reading indexed once
+                             (Index), linear; collect.rs names the holders and the module maps
+                             ("holder", "resolver") for it
     src/strarr.rs            javascript-obfuscator's string arrays and proxy objects, for the
                              decoded view
     src/jcstr.rs             JS-Confuser's string concealing, for the decoded view (D-11, 0.1.9)

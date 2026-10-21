@@ -2178,6 +2178,37 @@ aggregate):
   pymediainfo's tests, seven npm packages, 52 ICC profiles, the system's fonts with Noto's CJK collections) and 460
   keystores (436 `cryptography_vectors` PKCS#12 files, 23 from keytool, OpenSSL and the JDK, the system's `cacerts`:
   123 certificates, 133,175 bytes counted of 1 MiB, the largest part 513 of 16 KiB).
+- **A protobuf file's descriptor that generated code alone uses is not a base64 payload (FP-B64-PROTOBUF, from John's
+  fp-tally of Oct 21, reworked after the review of Oct 27; rule set 2.111.0).** protoc-gen-es
+  (protobuf-es 2.x) embeds each `.proto` file's serialized FileDescriptorProto as base64 and hands it to
+  `fileDesc("…")` from `@bufbuild/protobuf/codegenv2` (`codegenv1` in 2.0 to 2.2); SC-B64 (MAJOR, WARN) reported every
+  such file — the tally found it on `worker/src/gen/listentogether_pb.ts:13`. A descriptor is data the program can
+  read back, so the decision is the whole scan's, not a file's: a project scan, `--deps` and the registry drop a
+  file's SC-B64 finding only when every run of the line is a FileDescriptorProto read to its end by descriptor.proto's
+  structure with no free text (no source information or comments, no JSON name but the one protoc derives from the
+  field's name, default values of 64 characters at most), handed whole to the runtime's loader and bound as generated
+  code binds it, and used only as generated code uses it in every file of the scan (by
+  `messageDesc`/`enumDesc`/`serviceDesc`/`extDesc`, another descriptor's dependency list, the runtime's registry
+  constructors, imports and exports by name), its module read only for its members wherever a specifier may lead to it
+  (relative paths, tsconfig `paths`/`baseUrl`, packages; an undeclared or aliased name may lead anywhere) and never
+  through its own exports by a name made at run time, its file named by no string but a module specifier; when no code
+  of the scan runs text it builds (`eval`, `Function`, vm, a constructor, a global looked up by a computed name),
+  loads a module that runs code (`child_process`, `worker_threads`, `vm`, `module` …), reaches the module registry or
+  loads a module by a name made at run time; when the project does not remap the runtime (a package.json `npm:`,
+  `file:`, `link:`, git, URL or `workspace:` spec under any key that names it, a tsconfig/jsconfig `paths` entry or
+  `baseUrl`, a config `extends` the scan did not read, a bundler's alias or `{ find }`, an import map); and when the
+  scan read everything (`.vue`, `.svelte`, `.html` and other files that hold script are read for it). A file scanned
+  alone keeps its finding. The pass is linear in the scan (each reading indexed once). Each form the generator writes
+  (target ts, js, legacy CommonJS; codegenv1), compiled by tsc, laid out by prettier, is quiet in a project scan,
+  `--deps`, the registry and the npm CLI, as are @bufbuild/protovalidate's, @connectrpc/connect's and
+  @bufbuild/protoc-gen-es's packages and 437 of the 439 files protoc-gen-es generates from googleapis' protos
+  (grafeas' `intoto_statement` and `sbom` keep SC-B64: their descriptors carry a JSON name of their own, `_type`).
+  Base64 that is not such a descriptor, a descriptor read back or handed on, in its file or another, or one whose
+  loader the project remaps, is SC-B64 as before; no path or file name exempts anything. @bufbuild/protobuf's own
+  well-known types import `fileDesc` by a relative path and keep SC-B64. Residual (John's call): a descriptor's
+  options are reachable through the schemas generated code exports (`X.file.proto`, `getOption`), and code that takes
+  them out and hands them to a sink the pass does not read (a file run later, the network) is not seen.
+
 - **A model file is read for what loading it runs, not reported as an embedded archive (FP-MODEL-FILES, John's OK of
   Oct 20; rule set 2.104.0).** scan-all's run of Oct 20 gave `github:ObsidianArch02/fireredasr2s-mlx`
   WARN for one finding, SC-NESTED-ARCHIVE on `golden/golden.pt`: a PyTorch checkpoint is a zip by design, so every

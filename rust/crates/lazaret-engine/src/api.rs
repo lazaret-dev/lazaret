@@ -62,6 +62,8 @@ pub const CALLS: &[&str] = &[
     "dead_drop_at",
     // Phase 2: scan_file, and what it reads
     "normalize", "scan_file", "file_context",
+    // 0.1.9 (FP-B64-PROTOBUF): a scan's SC-B64 findings that are protobuf descriptors used as generated code uses them
+    "b64_descriptors",
     // 0.1.8: what the npm package asks (it runs this engine as WebAssembly)
     "pack.values", "agent_hijack", "agent_hijack_in_command", "hook_command_risk", "hook_is_suspicious",
     "import_code", "scan_rules", "hook_command_view", "hex_view", "lookalike_view",
@@ -1032,6 +1034,57 @@ fn strs(v: &[PyStr]) -> Value {
     Value::Arr(v.iter().map(|s| Value::Str(s.clone())).collect())
 }
 
+/// `b64_descriptors` (FP-B64-PROTOBUF, protodesc::usage): {files: [[path, text]…] (every JavaScript-family file the
+/// scan read whole), holders: [[path, text or null]…] (the files of kinds that hold script it does not read),
+/// manifests: [[path, text]…] (every package.json), configs: [[path, text or null]…] (the files that say where modules
+/// are: tsconfig*.json, jsconfig*.json, `_B64_RESOLVER_CONFIGS`),
+/// findings: [[path, line]…] (the SC-B64 findings to decide), unread: [path…] (the SC-TRUNCATED, Q-UNREADABLE and
+/// Q-SYMLINK findings' files), stopped, package (a package's scan, not a checkout's)} -> {"findings": [[path, line,
+/// null (dropped) or why it stays]…]}, in the order given. Paths '/'-separated.
+fn b64_descriptors(p: &Pack, args: &Value) -> Result<Value, CallError> {
+    let pairs = |k: &str| -> Result<Vec<(String, Option<PyStr>)>, CallError> {
+        let mut out = Vec::new();
+        for r in args.get(k).and_then(|v| v.as_arr()).unwrap_or(&[]) {
+            let a = r.as_arr().ok_or_else(|| CallError::BadArgs(format!("b64_descriptors: {k}")))?;
+            let path = a.first().and_then(|v| v.as_str()).ok_or_else(|| CallError::BadArgs(format!("b64_descriptors: {k}'s path")))?;
+            out.push((crate::pystr::to_string(path).replace('\\', "/"), a.get(1).and_then(|v| v.as_str()).map(|t| t.to_vec())));
+        }
+        Ok(out)
+    };
+    let texts = |k: &str| -> Result<Vec<(String, PyStr)>, CallError> {
+        pairs(k)?.into_iter().map(|(p, t)| t.map(|t| (p, t)).ok_or_else(|| CallError::BadArgs(format!("b64_descriptors: {k}'s text")))).collect()
+    };
+    let mut findings = Vec::new();
+    for r in args.get("findings").and_then(|v| v.as_arr()).unwrap_or(&[]) {
+        let a = r.as_arr().ok_or_else(|| CallError::BadArgs("b64_descriptors: a finding".into()))?;
+        let path = a.first().and_then(|v| v.as_str()).ok_or_else(|| CallError::BadArgs("b64_descriptors: a finding's path".into()))?;
+        let line = a.get(1).and_then(|v| v.as_i64()).ok_or_else(|| CallError::BadArgs("b64_descriptors: a finding's line".into()))?;
+        findings.push((crate::pystr::to_string(path).replace('\\', "/"), usize::try_from(line).unwrap_or(0)));
+    }
+    let flag = |k: &str| matches!(args.get(k), Some(Value::Bool(true)));
+    let input = crate::protodesc::usage::Input {
+        files: texts("files")?,
+        holders: pairs("holders")?,
+        manifests: texts("manifests")?,
+        configs: pairs("configs")?,
+        findings,
+        unread: arg_strs(args, "unread").iter().map(|x| crate::pystr::to_string(x).replace('\\', "/")).collect(),
+        stopped: flag("stopped"),
+        package: flag("package"),
+    };
+    let out = crate::protodesc::usage::decide(p, &input);
+    Ok(Value::obj(vec![(
+        "findings",
+        Value::Arr(
+            out.into_iter()
+                .map(|(path, line, why)| {
+                    Value::Arr(vec![Value::str(&path), Value::Int(line as i64), why.map(|w| Value::str(&w)).unwrap_or(Value::Null)])
+                })
+                .collect(),
+        ),
+    )]))
+}
+
 fn opt_s(v: Option<PyStr>) -> Value {
     v.map(Value::Str).unwrap_or(Value::Null)
 }
@@ -1486,6 +1539,7 @@ fn dispatch(name: &str, args: &Value, text: &[u32]) -> Result<Value, CallError> 
         }
         "deps_targets" => crate::deps::file_targets(p, text),
         "deps_files" => deps_files(p, args)?,
+        "b64_descriptors" => b64_descriptors(p, args)?,
         "dep_file_issues" => {
             // {lang, declared, own, redact, neumaier} + a dependency's file -> [SC-IMPORT-RISK or null, SC-AGENT-HIJACK
             // or null]; `declared` and `own`: its package's names and its own name (D-12b, D-9c), when known

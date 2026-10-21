@@ -724,7 +724,7 @@ const B64_DATA_HEADS: [&str; 4] = ["AGFzbQ", "iVBORw0KGgo", "R0lGOD", "UklGR"];
 /// format code keeps as data, read by its structure (datafmt: a WebAssembly module, a PNG, GIF or WebP image, WAV
 /// audio)? N-4: the WebAssembly HTTP parser every action bundling the Actions toolkit carries (undici's llhttp),
 /// and what made 5 of the popular set's 32 WARNs, were such files.
-fn b64_data(body: &[u32]) -> bool {
+pub(crate) fn b64_data(body: &[u32]) -> bool {
     if body.len() % 4 == 1 || !B64_DATA_HEADS.iter().any(|h| pystr::starts_with(body, h)) {
         return false;
     }
@@ -739,7 +739,7 @@ fn b64_data(body: &[u32]) -> bool {
 /// off) one of the runs b64_blob_col passes over? A period is checked from
 /// the shortest, each stopping at its first mismatch; a period carries no
 /// more than one period's characters, however long the run.
-fn b64_plain(body: &[u32], plain_max: usize, period_max: usize) -> bool {
+pub(crate) fn b64_plain(body: &[u32], plain_max: usize, period_max: usize) -> bool {
     let digit = |c: u32| (0x30..=0x39).contains(&c);
     let hex = |c: u32| digit(c) || (0x41..=0x46).contains(&c) || (0x61..=0x66).contains(&c);
     let letter = |c: u32| (0x41..=0x5a).contains(&c) || (0x61..=0x7a).contains(&c);

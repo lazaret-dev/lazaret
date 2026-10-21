@@ -5,6 +5,7 @@
 // once it has it, what the file is to the scan. This module uses nothing of Node's.
 
 import { call, bytesText, issuesOf } from "./native.js";
+import { looksBinary } from "./binary.js";
 import { scanErrorIssue, truncatedIssue } from "./issue.js";
 import { REDACT } from "./redact.js";
 import { CONFIG_SCAN_CAP } from "./configsecrets.js";
@@ -61,7 +62,7 @@ export function collectEntry(entry, col, { ioError = () => false, strerror = (e)
   let text = "";
   for (;;) {
     const got = call("collect_file", { ...args, answers }, text);
-    if (!got.need) { addCollected(got, col, entry.rel, entry.dep); return; }
+    if (!got.need) { addCollected(got, col, entry.rel, entry.dep, entry); return; }
     const { read: what, limit } = got.need;
     if (what === "pth" || what === "media") {   // (a file too large to read whole, in chunks: a .pth file's lines
       try {                                       // pth_stream, another's structure media_stream)
@@ -164,8 +165,21 @@ function concatBytes(parts) {
   return out;
 }
 
+/**
+ * FP-B64-PROTOBUF: the text of a file the descriptors' pass reads (a "holder" or a "resolver": scancollection.js
+ * b64DescriptorPass), read whole when it is asked for, as core's _disk_reader reads one: null when it is larger than
+ * the cap, cannot be read whole, or looks binary.
+ */
+function wholeText(entry, cap) {
+  if (entry.size > cap) return null;
+  let data;
+  try { data = entry.read(cap + 1); } catch { return null; }
+  if (data.length > cap || data.length !== entry.size || looksBinary(data.subarray(0, 2048))) return null;
+  return new TextDecoder("utf-8", { ignoreBOM: true }).decode(data);
+}
+
 /** What collect_file said a file is, added to `col`. */
-function addCollected(got, col, rel, dep) {
+function addCollected(got, col, rel, dep, entry = null) {
   for (const i of pathIssues(got.issues)) col.binaryIssues.push(i);
   if (got.file) {
     const f = { path: got.file.path, content: got.file.content, lang: got.file.lang, dep: got.file.dep };
@@ -179,6 +193,12 @@ function addCollected(got, col, rel, dep) {
   // (FP-MODEL-FILES) a model file read, the globals of no known kind it imports and the calls with text it holds:
   // modelOwnIssues'
   if (got.model) (col.models ??= []).push([rel, !!dep, got.model.imports, got.model.calls ?? []]);
+  // (FP-B64-PROTOBUF) a file that may hold script, or say where modules are: [rel, read() -> its text or null]
+  for (const key of ["holder", "resolver"]) {
+    if (got[key] !== undefined) {
+      (col[`${key}s`] ??= []).push([rel, () => (entry ? wholeText(entry, col.maxFileBytes ?? MAX_FILE_BYTES) : null)]);
+    }
+  }
 }
 
 /**

@@ -46,6 +46,7 @@ pub mod normalize;
 pub mod pack;
 pub mod pickle;
 pub mod project;
+pub mod protodesc;
 pub mod pyflow;
 pub mod pyparse;
 pub mod pyre;

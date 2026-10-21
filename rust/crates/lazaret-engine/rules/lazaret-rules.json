@@ -1,6 +1,6 @@
 {
  "format": 1,
- "rule_set": "2.110.0",
+ "rule_set": "2.111.0",
  "source": "lazaret.scanner.core, extracted by scripts/make_rust_tables.py \u2014 do not edit",
  "values": {
   "ALWAYS_PRUNE_DIRS": {
@@ -7556,11 +7556,83 @@
   "_AUTORUN_WHY": {
    "value": "Editors and AI coding agents run these commands on their own \u2014 when the folder is opened, a session starts or the agent uses a tool \u2014 with your privileges, without asking each time. The 2026 Shai-Hulud worms (Mini Shai-Hulud, the keyv wave) committed a Claude Code SessionStart hook and a VS Code folder-open task to every repository they reached, so opening a checkout ran the worm."
   },
+  "_B64_DESCRIPTOR_CONSUMERS": {
+   "map": {
+    "createFileRegistry": {
+     "set": [
+      "@bufbuild/protobuf"
+     ]
+    },
+    "createMutableRegistry": {
+     "set": [
+      "@bufbuild/protobuf"
+     ]
+    },
+    "createRegistry": {
+     "set": [
+      "@bufbuild/protobuf"
+     ]
+    }
+   }
+  },
+  "_B64_DESCRIPTOR_LOADERS": {
+   "map": {
+    "enumDesc": {
+     "set": [
+      "@bufbuild/protobuf/codegenv1",
+      "@bufbuild/protobuf/codegenv2"
+     ]
+    },
+    "extDesc": {
+     "set": [
+      "@bufbuild/protobuf/codegenv1",
+      "@bufbuild/protobuf/codegenv2"
+     ]
+    },
+    "fileDesc": {
+     "set": [
+      "@bufbuild/protobuf/codegenv1",
+      "@bufbuild/protobuf/codegenv2"
+     ]
+    },
+    "messageDesc": {
+     "set": [
+      "@bufbuild/protobuf/codegenv1",
+      "@bufbuild/protobuf/codegenv2"
+     ]
+    },
+    "serviceDesc": {
+     "set": [
+      "@bufbuild/protobuf/codegenv1",
+      "@bufbuild/protobuf/codegenv2"
+     ]
+    }
+   }
+  },
+  "_B64_DESCRIPTOR_UNREAD": {
+   "set": [
+    "Q-SYMLINK",
+    "Q-UNREADABLE",
+    "SC-TRUNCATED"
+   ]
+  },
   "_B64_PERIOD_MAX": {
    "value": 64
   },
   "_B64_PLAIN_MAX": {
    "value": 16384
+  },
+  "_B64_RESOLVER_CONFIGS": {
+   "set": [
+    ".babelrc",
+    ".babelrc.json",
+    ".swcrc",
+    "bunfig.toml",
+    "deno.json",
+    "deno.jsonc",
+    "import_map.json",
+    "importmap.json"
+   ]
   },
   "_B64_RULE": {
    "map": {
@@ -7589,6 +7661,18 @@
      "value": "Embedded encoded blobs can carry second-stage payloads."
     }
    }
+  },
+  "_B64_RUNNER_MODULES": {
+   "set": [
+    "child_process",
+    "cluster",
+    "inspector",
+    "module",
+    "repl",
+    "vm",
+    "wasi",
+    "worker_threads"
+   ]
   },
   "_B64_URL_LITERAL_RE": {
    "flags": "",
@@ -18276,6 +18360,22 @@
   "_SCRIPT_EXT_RE": {
    "flags": "i",
    "re": "\\.(?:c|m)?js$|\\.sh$|\\.py$"
+  },
+  "_SCRIPT_HOLDER_EXTS": {
+   "set": [
+    ".astro",
+    ".ejs",
+    ".hbs",
+    ".htm",
+    ".html",
+    ".marko",
+    ".mdx",
+    ".njk",
+    ".riot",
+    ".svelte",
+    ".vue",
+    ".xhtml"
+   ]
   },
   "_SCRIPT_INTERP_RE": {
    "flags": "",

@@ -351,7 +351,7 @@ SAMPLE = 8192              # header/entropy sample read from oversized files
 #      entry points and hook targets, Python install scripts
 # 2.3: verdict tiers, decoded hex, install-script inspection; 2.2:
 #      verdict-integrity; 2.1: binary-artifact awareness
-ENGINE_VERSION = "2.110.0"
+ENGINE_VERSION = "2.111.0"
 
 # ---------------- The content memo (P-2a, registry/contentcache.py) ----------------
 # One per scan_package run: the engine answers once for content several of a
@@ -4986,6 +4986,29 @@ class _ArtifactScan:
             text = lazaret.normalize_newlines(lazaret.decode_source(self.agent_docs[rel])[0])
             self.issues.extend(lazaret.agentdoc_issues(rel, text.split("\n"), self._member_text, dep=True))
 
+    def _b64_descriptors(self):
+        """FP-B64-PROTOBUF (the review of Oct 27): the SC-B64 findings of the release's JavaScript that are protobuf
+        descriptors generated code alone uses, decided over the whole release (core.b64_descriptor_pass): its sources,
+        its manifests, and the members that may hold script or say where modules are (core.b64_mark), as this scan
+        holds them (_member_text: None when it does not). What it did not read keeps them: a member a limit left
+        unread, a text member not kept, a part not fully scanned (SC-TRUNCATED, past the cap on findings too)."""
+        if not any(i["rule"] == "SC-B64" for i in self.issues):
+            return
+        marked = {"holder": [], "resolver": []}
+        for rel in sorted(self.members):
+            kind = lazaret.b64_mark(rel)
+            if kind is not None:
+                marked[kind].append(rel)
+        unread = set(self.truncated_at) | set(self.dropped)
+        if self.unread or self.timed_out:
+            unread.add(".")
+        files = [{"path": rel, "content": text, "lang": lang} for rel, (text, lang) in self.sources.items()]
+        manifests = [{"path": rel, "content": text} for rel, text in self.manifests.items()]
+        note = lazaret.b64_descriptor_pass(self.issues, files, manifests, marked["holder"], marked["resolver"],
+                                           self._member_text, False, True, unread=sorted(unread))
+        if note:
+            print(f"warning: {note}", file=sys.stderr)
+
     def _member_text(self, rel):
         """The text of a member as this scan holds it (a source, a shell
         script, other text kept), with \\n line endings, or None: what an agent
@@ -5527,6 +5550,7 @@ class _ArtifactScan:
             self._phase("the devDependencies the code loads", self._dev_only_loads,
                         reachable if reachable is not None else set(self.entries))
             self._phase("the install scripts the parser refused", self._unparsed_install_scripts)
+            self._phase("the protobuf descriptors", self._b64_descriptors)
             # interprocedural / cross-file taint (full profile only — needs whole source)
             if self.full and getattr(lazaret, "lazaret_flow", None) is not None:
                 self._deadline("the cross-file analysis")

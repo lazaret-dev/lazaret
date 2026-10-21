@@ -4458,6 +4458,9 @@ def _collect_file(path, rel, st, in_dep, col):
         col["pth"].append(disp)
     if "model" in got:                           # (FP-MODEL-FILES: a model file read; its imports and calls, model_own_issues')
         col["models"].append([disp, bool(in_dep), got["model"]["imports"], got["model"].get("calls", [])])
+    for key in ("holder", "resolver"):           # (FP-B64-PROTOBUF: what the descriptors' pass reads, b64_descriptor_pass)
+        if key in got:
+            col[key + "s"].append(got[key])
 
 
 def _collect(root, excludes=(), include_deps=False):
@@ -4480,7 +4483,8 @@ def _collect(root, excludes=(), include_deps=False):
     and not read; with a path for `root`, those are SC-TRUNCATED findings in
     `issues` (scan_project, which gives a _Root, reports them itself)."""
     excludes = sorted(_fs_display(x) for x in set(excludes or ()))
-    col = {"files": [], "manifests": [], "pth": [], "issues": [], "skipped": [], "configs": [], "models": []}
+    col = {"files": [], "manifests": [], "pth": [], "issues": [], "skipped": [], "configs": [], "models": [],
+           "holders": [], "resolvers": []}
     issues = col["issues"]
     try:
         tree, own = _as_root(root)
@@ -5095,6 +5099,65 @@ def _disk_reader(root, files, manifests, excludes=()):
     return read
 
 
+_B64_MARKS = {}
+
+
+def b64_mark(name):
+    """What the descriptors' pass reads a file of this name as (b64_descriptor_pass): "holder" (a kind that holds
+    script the file scan does not read: _SCRIPT_HOLDER_EXTS), "resolver" (it says where modules are: tsconfig*.json,
+    jsconfig*.json, _B64_RESOLVER_CONFIGS), or None. The engine's collect_file says so for a walk (collect.rs)."""
+    if not _B64_MARKS:
+        _B64_MARKS.update(holders=frozenset(engine.pack_value("_SCRIPT_HOLDER_EXTS")),
+                          resolvers=frozenset(engine.pack_value("_B64_RESOLVER_CONFIGS")))
+    low = posixpath.basename(_slash(name)).lower()
+    if os.path.splitext(low)[1] in _B64_MARKS["holders"]:
+        return "holder"
+    if (low.startswith(("tsconfig", "jsconfig")) and low.endswith(".json")) or low in _B64_MARKS["resolvers"]:
+        return "resolver"
+    return None
+
+
+def b64_descriptor_pass(issues, files, manifests, holders, resolvers, read, stopped, package, unread=()):
+    """FP-B64-PROTOBUF (the review of Oct 27): drop from `issues`, in place, the SC-B64 findings of JavaScript files
+    whose every run is a protobuf file's descriptor handed to its runtime's loader and used only as generated code
+    uses it, decided over the whole scan by the engine (b64_descriptors: protodesc/usage.rs). `files` and `manifests`:
+    the scan's, as collected; `holders`, `resolvers`: the paths of the files that may hold script or say where modules
+    are (collect_file's "holder" and "resolver"), read by `read(rel)` ('/'-separated; None when it cannot be read);
+    `stopped`: the scan stopped before its end; `package`: a package's scan; `unread`: the paths of what it did not
+    read whole besides its SC-TRUNCATED, Q-UNREADABLE and Q-SYMLINK findings' ("." for the scan). Fails closed: when
+    the engine cannot answer every finding stays, and the reason is returned (None otherwise)."""
+    js = {}
+    for f in files:
+        if f.get("lang") == "js" and isinstance(f.get("content"), str):
+            js.setdefault(_slash(f["path"]), f["content"])
+    found = [i for i in issues if i.get("rule") == "SC-B64" and _slash(i.get("file") or "") in js
+             and isinstance(i.get("line"), int)]
+    # (a finding can be dropped only in a file that calls the loader's fileDesc: when none does, every one stays
+    # and the scan's text need not be handed over)
+    if not any("fileDesc" in js[_slash(i["file"])] for i in found):
+        return None
+    try:
+        kinds = set(engine.pack_value("_B64_DESCRIPTOR_UNREAD"))
+        args = {
+            "files": [[p, t] for p, t in js.items()],
+            "holders": [[_slash(h), read(_slash(h))] for h in holders],
+            "manifests": [[_slash(m["path"]), m["content"]] for m in manifests
+                          if posixpath.basename(_slash(m["path"])) == "package.json"],
+            "configs": [[_slash(c), read(_slash(c))] for c in resolvers],
+            "findings": [[_slash(i["file"]), i["line"]] for i in found],
+            "unread": sorted({_slash(i.get("file") or ".") for i in issues if i.get("rule") in kinds}
+                             | {_slash(x) for x in unread}),
+            "stopped": bool(stopped), "package": bool(package)}
+        got = _native.call("b64_descriptors", args)["findings"]
+        if len(got) != len(found):
+            raise ValueError(f"{len(got)} answers for {len(found)} findings")
+    except Exception as exc:                    # every finding stays
+        return f"SC-B64: protobuf descriptors were not checked ({type(exc).__name__}: {_safe_text(exc)})"
+    drop = {id(i) for i, (_, _, why) in zip(found, got) if why is None}
+    issues[:] = [i for i in issues if id(i) not in drop]
+    return None
+
+
 def _vendored_modules(text):
     """The module paths vendor/modules.txt says are vendored, longest first
     (engine.go_vendored_modules: a `# path version …` line followed by its
@@ -5601,6 +5664,14 @@ def _scan_project(tree, root, exclude, include_deps, taint_config, redact_secret
                 ".", f"{stopped}: {total - len(scanned) - checked} of {total} files "
                      f"not scanned"))
             files = scanned
+        # FP-B64-PROTOBUF: the SC-B64 findings that are protobuf descriptors generated code alone uses, over the
+        # whole scan (its files, and what else could read them or remap their loader)
+        if any(i.get("rule") == "SC-B64" for i in issues):
+            disk = _disk_reader(root, files, manifests, exclude)
+            note = b64_descriptor_pass(issues, files, manifests, col["holders"], col["resolvers"],
+                                       lambda rel: disk(rel), stopped, package=False)
+            if note:
+                warnings.append(note)
         # G10: skipped-directory accounting — INFO findings make the coverage
         # gap visible instead of silent.
         issues.extend(skipped_tree_issues(col["skipped"]))

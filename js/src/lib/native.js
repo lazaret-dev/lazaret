@@ -67,6 +67,8 @@ const UNBUDGETED = new Set(["batch", "issue_make", "redact_text", "redact_issues
   "pem_lines", "binary_check", "binary_classify", "binary_disguised", "pyc_issues", "pth_issues",
   "model_sniff", "model_file", "model_own", "pth_stream", "pth_kept", "media_walk", "media_stream",
   "deps_hooks", "deps_script", "deps_targets", "deps_files", "agent_issue", "declared_names",
+  // FP-B64-PROTOBUF: the scan's pass over its descriptors (core's asks it on the engine's default budget too)
+  "b64_descriptors",
   // the reports' forms and the terminal's sanitizers (step 4 c): no matcher runs
   "term", "issue_excerpt", "report_json", "report_items", "sarif_rules", "sarif_frame", "sarif_items", "html_frame",
   "html_items", "text_frame", "text_order", "text_items",

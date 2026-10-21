@@ -558,6 +558,36 @@ fn own<T>(f: impl FnOnce() -> T) -> Option<T> {
 
 /// core._collect_file and _collect_config: what to read of a file next ({"need": {read, limit}}), or what it is.
 pub fn file(p: &Pack, f: &FileIn) -> Value {
+    let v = file_read(p, f);
+    // FP-B64-PROTOBUF: a file of a kind that holds script the file scan does not read (`_SCRIPT_HOLDER_EXTS`: .vue,
+    // .svelte, .html …) is named in the final answer ("holder"), and a file that says where modules are (tsconfig*.json,
+    // jsconfig*.json, `_B64_RESOLVER_CONFIGS`) too ("resolver"), in a dependency's tree as well: the descriptors' pass
+    // reads them (protodesc::usage)
+    match b64_mark(p, &f.name) {
+        Some(key) => match v {
+            Value::Obj(mut members) if !members.iter().any(|(k, _)| pystr::eq(k, "need")) => {
+                members.push((s(key), Value::Str(f.rel.clone())));
+                Value::Obj(members)
+            }
+            v => v,
+        },
+        None => v,
+    }
+}
+
+/// "holder" or "resolver" for a file the descriptors' pass reads (see `file`).
+fn b64_mark(p: &Pack, name: &[u32]) -> Option<&'static str> {
+    let low = pystr::lower(name);
+    let ext = pystr::lower(&crate::binary::ext_and_base(name, false).0);
+    if p.strs("_SCRIPT_HOLDER_EXTS").iter().any(|x| x.as_slice() == ext.as_slice()) {
+        return Some("holder");
+    }
+    let ts = (low.starts_with(&s("tsconfig")) || low.starts_with(&s("jsconfig"))) && low.ends_with(&s(".json"));
+    (ts || p.strs("_B64_RESOLVER_CONFIGS").iter().any(|x| *x == low)).then_some("resolver")
+}
+
+/// What a regular file is to the walk, read (see `file`).
+fn file_read(p: &Pack, f: &FileIn) -> Value {
     let rel = &f.rel;
     let sep = if f.windows { s("\\") } else { s("/") };
     let ext = pystr::lower(&crate::binary::ext_and_base(&f.name, false).0);

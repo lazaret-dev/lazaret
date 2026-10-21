@@ -1742,6 +1742,122 @@ project scan, `--deps`, the npm CLI and the GitHub scan route classified every f
 `.svgz` and `.dia`: `CONTAINER_GZIP_EXTS`), else judged as any file (`container_bytes`); `.ts`, `.mts`, `.m2ts` are
 read as transport streams only when their bytes are one; a model file's extension is a hint its bytes must confirm.
 
+#### A protobuf file's descriptor generated code alone uses (FP-B64-PROTOBUF, 0.1.9)
+
+protoc-gen-es (protobuf-es 2.x) embeds each `.proto` file's serialized FileDescriptorProto in the code it generates,
+as base64, and hands it to the runtime: `fileDesc("Ci…", [deps])`, `fileDesc` imported from
+`@bufbuild/protobuf/codegenv2` (`codegenv1` in 2.0 to 2.2), required from it in the CommonJS the generator writes
+(`const { fileDesc } = require(…)`), or called as `(0, x.fileDesc)(…)` once TypeScript, Babel or esbuild compiled the
+file. SC-B64 ("Base64 blob (200+ chars) embedded in code", MAJOR: WARN) reported every such file — John's fp-tally of
+Oct 21 found it on `worker/src/gen/listentogether_pb.ts:13`.
+
+A descriptor is not inert: the runtime keeps it, and the program can read it back (`file_x.proto…`, a schema's
+`.file`, a registry's `getFile`), so text put in it is a payload any code of the program may take out and run. The
+review of Oct 27 showed it (B-1): a comment of the descriptor's source information read and handed to `eval`, `new
+Function`, `execSync` or `vm` went quiet, and on `--deps` and in the registry no other rule reports a dependency's eval
+of a variable. So the file scan keeps reporting SC-B64 (`scanfile.rs` reads no descriptor), and whether a finding is
+dropped is decided over the whole scan — a project, a `--deps` tree, a package: each read whole — where every file
+that could read the descriptor back is in hand: `core.b64_descriptor_pass` (the registry's `_b64_descriptors`
+phase, the npm package's `b64DescriptorPass`) asks the engine's `b64_descriptors` (`protodesc/usage.rs`) once, at the
+end, with the scan's JavaScript, its manifests, and the files that may hold script or say where modules are. A route
+that cannot (a file scanned alone) keeps the finding. A finding is dropped only when every run of its line that
+SC-B64 counts passes, and all of these hold (else it stays):
+
+- **Its bytes are one FileDescriptorProto, with no free text** (`protodesc.rs`, `file_descriptor`): read to its end by
+  descriptor.proto's structure, every field a known field of its message with its wire type (as of protobuf 30 with
+  editions 2024), the file's name a `.proto` path (no `..`), every name a protobuf name and every type name a dotted
+  one, the syntax `proto2`, `proto3` or `editions`, every text UTF-8, each named message's name once, nothing left
+  over, nesting at most 64 deep; and none of the fields that carry free text generated code never holds: no source
+  information (the file's field 9: comments of any length), no JSON name (a field's 10) but the one protoc derives
+  from the field's name (`json_name`: its `_`s dropped, the letter after each upper-cased; protoc-gen-es keeps it on an
+  extension — protovalidate's 8, protoc-gen-es's 2 — and it carries nothing the name does not), a default value of at
+  most 64 characters (`MAX_DEFAULT`; the longest of the 61 real descriptors the review measured was 12). Options are
+  read as well-formed fields (custom options are extensions of any number: protovalidate's rules, googleapis' HTTP
+  bindings); they are not bounded to a share of the descriptor (googleapis' files carry more options than structure:
+  a median of a third of the bytes, up to 78% of 511 measured).
+- **The literal is handed, whole, to the runtime's loader and bound as generated code binds it**: `(` before it and
+  `)` or `,` after it, the callee `fileDesc`, `x.fileDesc` or `(0, x.fileDesc)` (the pack's `_B64_DESCRIPTOR_LOADERS`
+  names the functions and their modules; `fileDesc` bound once by a value import, not aliased, or a destructuring
+  `require` of one of them and used only in calls; `x` bound once by `require` (the call its declaration's whole
+  value) or `import * as` and read only for properties not written to; `require` never rebound), followed by nothing
+  but its dependency list, and its value bound and nothing else: `export const file_x = fileDesc(…)` (a type
+  annotation allowed), `const file_x = …`, `exports.file_x = (0, x.fileDesc)(…)`.
+- **The descriptor is used only as generated code uses it, in every file of the scan**: `file_x` (or `m.file_x`) is
+  the first argument of the loader's `messageDesc`, `enumDesc`, `serviceDesc` or `extDesc`, an element of another
+  `fileDesc`'s dependency list, an argument of the runtime's registry constructors (`_B64_DESCRIPTOR_CONSUMERS`:
+  `createFileRegistry`, `createRegistry`, `createMutableRegistry`; protovalidate builds its registry so, which the
+  review's list did not name: without it protovalidate stays WARN), a name in an import's, an export's or a
+  destructured `require`'s list (not renamed), and in its own file `exports.file_x = file_x` or TypeScript's
+  `exports.… = exports.file_x = … = void 0`. Nothing else names it, no string holds the name, a declaration file is
+  types only, and no string but a module specifier names its file (a path handed to `fs`, `new URL`,
+  `require.resolve`: its text read). A file of a kind that holds script the file scan does not read
+  (`_SCRIPT_HOLDER_EXTS`: `.vue`, `.svelte`, `.html`, `.astro`, `.mdx` …) is read with them: its whole text for the
+  name, its script blocks, front matter, event handlers and template expressions as code.
+- **Its module is read for its members alone, wherever it may be loaded**: every specifier of the scan is resolved as
+  far as the scan can tell — a relative path (the folder it names too: its index, what its package.json's `main`
+  names), a tsconfig's or jsconfig's `paths` and `baseUrl`, a package the scan holds (any of its files: its `exports`
+  map may name any), a package a manifest declares by a version range or one of Node's (none of the scan's files);
+  anything else — undeclared, a `#` import, a name a manifest maps elsewhere (`file:`, `npm:`, a `browser` field) or
+  the code aliases (an object's key, a `find:`), a pattern — may name any file — with its last part read as a file's
+  name too and case ignored. Each module object that may be it is read only for its members (`m.y`, never written),
+  and none loads it whole: `import(…)`, `import.meta.glob`, a `require(…)` handed on or followed by anything but its
+  statement's end (`require(…)[k]`), a rest, computed or nested destructuring, `export * as ns`, a helper
+  (`__importStar(require(…))`, `__exportStar`), a `?raw` or loader-prefixed import (its text). A module that
+  re-exports it (`export * from`, `module.exports = require(…)`) is held to the same. And the module's own scope reads
+  no export by a name made at run time: `exports`, `module`, and in CommonJS `this` and `arguments`, only as
+  `exports.y`, `this.y`, `this && …` and `Object.defineProperty(exports, "__esModule", …)`.
+- **No code of the scan runs text or reaches the module registry**: no `eval`, `Function`, vm call or `with` but with
+  literals alone, no `.constructor(…)` call of text (`(() => {}).constructor(text)` is `Function`), no global looked up
+  by a name made at run time (`globalThis[x]`, `window[x]`), no module loaded by a name made at run time
+  (`require(x)`, `import(x)`, `createRequire`, `require.context`), no `require.cache`, `require.main`,
+  `module.children`, `module.parent`, `process.mainModule`, `process.binding`, and no module of
+  `_B64_RUNNER_MODULES` loaded (`child_process`, `worker_threads`, `vm`, `module`, `cluster`, `inspector`, `repl`,
+  `wasi`, by any name: `node:`, a subpath). A key or a method's definition of such a name (`eval: {` in a type,
+  protovalidate's `eval(val, cursor) {`) is not a reference to it; `c ? eval : x`, `f(eval)` and a call are. (So
+  `--deps` of a project whose dependencies build code or run commands keeps every descriptor's finding.)
+- **The loader is the runtime's** (B-3): no package.json from the descriptor's folder up maps `@bufbuild/protobuf` or
+  a module of it to anything but a version range (`npm:`, `file:`, `link:`, git, a URL, `workspace:`), under any key
+  that names it (its dependencies, `overrides`, `resolutions` and `pnpm.overrides` by `a>@bufbuild/protobuf`,
+  `**/@bufbuild/protobuf`, `@bufbuild/protobuf@^2`, its `browser` field); a package's scan does not carry its own copy
+  in its `node_modules`; no tsconfig or jsconfig of the scan has a `paths` entry that matches the runtime's modules
+  (`*` patterns too), a `baseUrl` that holds an `@bufbuild` folder, or an `extends` the scan did not read (a package's
+  config outside a `--deps` tree); no other file that tells a tool where modules are (`_B64_RESOLVER_CONFIGS`:
+  Babel's, SWC's, Deno's, Bun's, an import map) names `@bufbuild/protobuf`; no code has `"@bufbuild/protobuf…"` as an
+  object's key or a `find:` (a bundler's alias, rollup's and vite's `{ find, replacement }`, an import map in a page)
+  or a pattern that names `bufbuild`; and no code uses a module of the runtime whole (a module object written to or
+  handed on: `require("@bufbuild/protobuf/codegenv2").fileDesc = …` in another file).
+- **The scan read everything**: it did not stop, no JavaScript file, folder or script-holding file of it is
+  SC-TRUNCATED, unreadable or a link (`_B64_DESCRIPTOR_UNREAD`), no such file or module map was too large to read, and
+  in the registry no member a limit left unread or a text member not kept.
+
+The pass costs what one reading of the scan's files costs (B-2): the hosts do not ask it when no finding's file calls
+`fileDesc` (no finding could be dropped); each file is lexed once (twice for one that may hold JSX) and read in turn,
+what it loads, runs and names kept and its tokens dropped (memory holds one file's readings, and the findings'
+files'); each reading's names, brackets (each one's closing bracket and what it holds) and `void 0` chains are
+indexed once, so no question asked of a token walks the reading; the loader bindings, module objects and `require` are
+worked out once and kept; each literal's token is found by a binary search; each specifier is resolved once, and the
+files a module object, a load or a re-export may reach are found through an index of the keys a file may be named by
+(its path, its name, the folders above it), each key and each file visited once. Base64 that is not such a descriptor
+(code, a descriptor with bytes after it, a name that is not a `.proto` path, another message) and a descriptor handed
+to anything else are SC-B64 as before. No path or file name exempts anything (`gen/`, `_pb.ts` or not): file names
+decide only what more the pass reads (the kinds that hold script, the module maps), and what it could not read keeps
+the finding. What other generators write was looked at by generating real code from npm: protobuf-es 1.x
+(`proto3.makeMessageType`), ts-proto 1.40 to 2.18 (an object literal, with `outputSchema=true`), grpc-web with
+protoc-gen-js (jspb), protobufjs's pbjs (static and JSON modules) embed no descriptor as base64. ts-proto with
+`outputSchema=true` embeds a message-typed custom option's value as base64 (`ApiDoc.decode(bytesFromBase64("…"))`):
+another message, so SC-B64 when it is 200 characters or more, as before. @bufbuild/protobuf's own well-known types
+import `fileDesc` by a relative path (`../../../codegenv2/file.js`): a module named by its place, so they keep SC-B64.
+
+Residual (for John's call): a descriptor's options carry bytes of any kind by design, and a schema the descriptor
+made (`messageDesc(file_x, 0)`: what generated code exports and every user of it reads) holds the descriptor
+(`.file`, `.proto`); `getOption`/`getExtension` read a custom option's value. No rule on `file_x` can see that read:
+code that reads options so and runs them through a sink this pass reads (an eval, a `Function`, a vm call, a
+constructor, `child_process`, `worker_threads`) keeps the finding; one that writes them to a file something else
+runs later, sends them on, or hands them to `setTimeout` as a string does not. Where a module leads only at run time
+(`NODE_PATH`, a loader or `--import` flag, a bundler's alias the code computes, a `paths` mapping the scan did not
+read) the pass reads it as the scan's files say. A tree a project scan prunes (`node_modules` without `--deps`, a
+checkout's committed copy of the runtime among it) is not read: what it holds is not scanned either.
+
 ### e. Registry auditing (`lazaret.registry`) and SCA
 
 `lazaret-registry` fetches and audits an npm/PyPI artifact with the same rule

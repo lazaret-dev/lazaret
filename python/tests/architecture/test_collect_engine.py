@@ -18,7 +18,8 @@ package's walk to the Python package's. Two answers changed on purpose (0.1.9, r
 tests.rs and *_test.rs are test files, and a secret (S-SECRET, S-TOKEN) in test code is listed as INFO; and one more
 (F-06): a file of a Go vendor tree is left out by its name alone (a test file, `_` or `.` first), since the path below
 vendor/ begins with a module's path, which may hold a `testdata` or a `vendor`; and the collection's `models`
-(FP-MODEL-FILES: the model files read, none in these trees). All content is inert.
+(FP-MODEL-FILES: the model files read, none in these trees), `holders` and `resolvers` (FP-B64-PROTOBUF: the files
+the descriptors' pass reads, each held to its name's kind). All content is inert.
 """
 import copy
 import json
@@ -571,6 +572,11 @@ def comparable(col):
     col["manifests"] = [{k: m[k] for k in ("path", "dep", "content")} for m in col["manifests"]]
     # (FP-MODEL-FILES) the model files the walk read: these trees hold none, so core's walk as it was is the engine's
     assert col.pop("models", []) == [], "a generated tree held a model file"
+    # (FP-B64-PROTOBUF) the files the descriptors' pass reads, which core's walk as it was did not list: a file of a
+    # kind that holds script ("holder") or that says where modules are ("resolver"), each by its name (core.b64_mark)
+    for key in ("holders", "resolvers"):
+        for rel in col.pop(key, []):
+            assert core.b64_mark(rel) == key[:-1], (key, rel)
     return col
 
 
