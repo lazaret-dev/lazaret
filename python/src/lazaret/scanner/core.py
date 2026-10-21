@@ -1698,22 +1698,110 @@ def decode_go_member(path, data):
     got = _native.call("decode_source", args, _bytes_text(data))
     return got["text"], engine._issues(path, got["issues"]), got.get("goText", got["text"])
 
-def classify_binary(path, data, size, context):
-    """Return a supply-chain issue dict for a suspicious non-source file, or None:
+def classify_binary(path, data, size, context, whole=None, walked=None):
+    """Return a supply-chain issue dict for a suspicious non-source file (a list
+    of two for a keystore that is an opaque blob too), or None:
     SC-BINARY for an executable or a compiled artifact (by its magic bytes, or
     its extension: inventory in a wheel, a capability to review elsewhere),
     SC-NESTED-ARCHIVE for an archive inside the package, SC-OPAQUE-BLOB for a
-    high-entropy binary blob; nothing for an image, font, media or document
-    file. The engine's (BR-7 step 3 d: binary.rs).
+    high-entropy binary blob; nothing for an image or document file. The
+    engine's (BR-7 step 3 d: binary.rs).
+
+    FP-OPAQUE-MEDIA: a near-random file is a sound, video, image or font, and
+    quiet, when its bytes are that format from start to end (walked by its
+    structure: media.rs), and a keystore read to its end is a credential file
+    (S-SECRET, listed only; with SC-OPAQUE-BLOB beside it when it holds more
+    bytes no structure reads than a keystore does). Both need the whole file: `whole` when `data` is
+    it (it is handed over only when the first bytes call for it), or `walked`,
+    a walk of it as its stream passed (media_stream_file's answer). Without
+    either, a file that would need them is judged by its first bytes: an
+    opaque blob stays one.
 
     context: 'sdist' | 'npm' | 'wheel' | 'repo'
     data:    leading bytes of the file (>= a few KB is ideal for entropy; the
-             first 8,192 are read)
+             first 8,192 are read), or all of it with `whole`
     size:    full file size in bytes
+    whole:   `data` is the whole file (None: when it holds `size` bytes)
     """
-    got = _native.call("binary_classify", {"path": path, "size": size, "context": context, "windows": _WINDOWS_PATHS,
-                                           "neumaier": False}, _bytes_text(bytes(data[:8192])))
+    args = {"path": path, "size": size, "context": context, "windows": _WINDOWS_PATHS, "neumaier": False}
+    if walked is not None:
+        args["walked"] = walked
+    data = bytes(data or b"")
+    if whole is None:
+        whole = len(data) == size
+    if whole and walked is None:
+        if len(data) <= 8192:
+            got = _native.call("binary_classify", dict(args, whole=True), _bytes_text(data))
+        else:
+            got = _native.call("binary_classify", dict(args, more=True), _bytes_text(data[:8192]))
+            if isinstance(got, dict) and "need" in got:
+                got = _native.call("binary_classify", dict(args, whole=True), _bytes_text(data))
+    else:
+        got = _native.call("binary_classify", args, _bytes_text(data[:8192]))
+    if isinstance(got, list) and got and isinstance(got[0], list):
+        return engine._issues(path, got)          # (a keystore that is an opaque blob too: both findings)
     return None if got is None else engine._issues(path, [got])[0]
+
+
+def classify_needs_whole(path, data, size, context):
+    """FP-OPAQUE-MEDIA: whether classify_binary needs a file's whole bytes, or a walk of them, to judge it (a
+    keystore, or a near-random file whose first bytes start a format the engine walks), from its first bytes."""
+    got = _native.call("binary_classify", {"path": path, "size": size, "context": context, "windows": _WINDOWS_PATHS,
+                                           "neumaier": False, "more": True}, _bytes_text(bytes(data or b"")[:8192]))
+    return isinstance(got, dict) and "need" in got
+
+
+#: A file walked as its stream passes is read this many bytes at a time (media_stream).
+MEDIA_CHUNK = 1 << 20
+
+
+def media_stream(state, offset, chunk, eof):
+    """FP-OPAQUE-MEDIA: the next chunk of a file walked by its structure as its stream passes: `state` None at its
+    start, else the last answer's; `offset` where the chunk starts (where the last ended, or the answer's `next`, when
+    the bytes between are passed over); `eof` with its last (an empty chunk at its end will do) -> {"state", "next",
+    "end": None while it runs, else {"is": kind}, {"not": kind, "why"} or {"unknown": True}}. The engine's
+    (media::feed)."""
+    return _native.call("media_stream", {"state": state, "offset": offset, "eof": bool(eof)}, _bytes_text(bytes(chunk)))
+
+
+def media_walk(data):
+    """FP-OPAQUE-MEDIA: what a whole file is, walked by its structure to its end: {"is": kind}, {"not": kind, "why"}
+    or {"unknown": True}. The engine's (media::walk)."""
+    return _native.call("media_walk", {}, _bytes_text(bytes(data)))
+
+
+def media_stream_file(read_at, size=None):
+    """The end of a walk of a file (of `size` bytes) read through `read_at(offset, n)` (its bytes from `offset`, at
+    most `n`, b"" at its end), MEDIA_CHUNK at a time, passing over what the walk skips (media_stream), never past the
+    file's end: a part that runs past it is a file cut short (its size not given, the byte before where the walk
+    goes on is read to tell)."""
+    state, offset = None, 0
+    while True:
+        chunk = read_at(offset, MEDIA_CHUNK)
+        got = media_stream(state, offset, chunk, not chunk)
+        if got["end"] is not None:
+            return got["end"]
+        state = got["state"]
+        end, nxt = offset + len(chunk), got["next"]
+        if nxt > end and (nxt > size if size is not None else not read_at(nxt - 1, 1)):
+            # (the file ends before where the walk goes on: it is cut short there)
+            return media_stream(state, end, b"", True)["end"]
+        offset = max(end, nxt)
+
+
+def media_stream_chunks(chunks):
+    """The end of a walk of a file whose bytes come as `chunks` (an iterable of bytes, in order, to its end), each
+    fed whole: a stream that cannot pass over bytes (an archive's member); None when it ended without an answer."""
+    state, offset = None, 0
+    for chunk in chunks:
+        if not chunk:
+            continue
+        got = media_stream(state, offset, chunk, False)
+        if got["end"] is not None:
+            return got["end"]
+        state = got["state"]
+        offset += len(chunk)
+    return media_stream(state, offset, b"", True)["end"]
 
 
 def model_sniff(path, data):
@@ -4235,6 +4323,21 @@ def _stream_pth(path, expect=None):
         os.close(fd)
 
 
+def _stream_media(path, expect=None):
+    """media_stream_file for the REGULAR file `path`, read as _read_prefix reads one (_open_regular; FP-OPAQUE-MEDIA:
+    a file too large to read whole, walked by its structure). Raises OSError (incl. _NotRegularFile, _PathChanged)."""
+    fd = _open_regular(path, expect)
+    try:
+        st = os.fstat(fd)
+
+        def read_at(offset, n):
+            os.lseek(fd, offset, os.SEEK_SET)          # (lseek and read: os.pread is not Windows')
+            return os.read(fd, n)
+        return media_stream_file(read_at, st.st_size)
+    finally:
+        os.close(fd)
+
+
 def _collect_file(path, rel, st, in_dep, col):
     """Classify and read one regular file (the engine's decisions: collect.rs, collect_file, asked again with what
     it needs read; a zip model file's ranges, read by range: FP-MODEL-FILES). `path`: (a _Root, the file's names), read
@@ -4252,9 +4355,9 @@ def _collect_file(path, rel, st, in_dep, col):
         if need is None:
             break
         what = need["read"]
-        if what == "pth":                        # (a .pth file too large to read whole: in chunks, pth_stream)
-            try:
-                answers[what] = _stream_pth(path, st)
+        if what in ("pth", "media"):             # (a file too large to read whole, in chunks: a .pth file's lines
+            try:                                 # pth_stream, another's structure media_stream)
+                answers[what] = _stream_pth(path, st) if what == "pth" else _stream_media(path, st)
             except _PathChanged:
                 raise
             except OSError as exc:

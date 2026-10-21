@@ -50,11 +50,22 @@ export function looksBinary(sample) {
 
 /**
  * Supply-chain issue for a suspicious non-source file, or null (core.classify_binary).
- * context: "sdist" | "npm" | "wheel" | "repo"; data: leading bytes; size: full size.
+ * context: "sdist" | "npm" | "wheel" | "repo"; data: leading bytes; size: full size. FP-OPAQUE-MEDIA: with `whole`
+ * (`data` is the whole file: by default, when it holds `size` bytes), a near-random file that is a sound, video, image or font to its end is quiet, and a
+ * keystore read to its end is S-SECRET (an array of it and SC-OPAQUE-BLOB when it holds more bytes no structure reads
+ * than a keystore does); without it, such a file is judged by its first bytes.
  */
-export function classifyBinary(path, data, size, context = "repo") {
-  const got = call("binary_classify", { path, size, context, windows: WINDOWS, neumaier: false },
-    bytesText(data, CLASSIFY_SAMPLE));
+export function classifyBinary(path, data, size, context = "repo", { whole = data.length === size } = {}) {
+  const args = { path, size, context, windows: WINDOWS, neumaier: false };
+  let got;
+  if (whole && data.length > CLASSIFY_SAMPLE) {
+    got = call("binary_classify", { ...args, more: true }, bytesText(data, CLASSIFY_SAMPLE));
+    if (got !== null && got.need) got = call("binary_classify", { ...args, whole: true }, bytesText(data));
+  } else {
+    got = call("binary_classify", whole ? { ...args, whole: true } : args, bytesText(data, CLASSIFY_SAMPLE));
+  }
+  // (a keystore that is an opaque blob too: both findings, an array of issues, each an array)
+  if (Array.isArray(got) && Array.isArray(got[0])) return issuesOf(path, got);
   return got === null ? null : issuesOf(path, [got])[0];
 }
 

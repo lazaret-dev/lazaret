@@ -65,7 +65,7 @@ let workBudget = null;     // steps of the regex matcher a call may take (null: 
 // dep_file_issues, the import-time test of a file, is budgeted.
 const UNBUDGETED = new Set(["batch", "issue_make", "redact_text", "redact_issues", "redact_file", "clip_line",
   "pem_lines", "binary_check", "binary_classify", "binary_disguised", "pyc_issues", "pth_issues",
-  "model_sniff", "model_file", "model_own", "pth_stream", "pth_kept",
+  "model_sniff", "model_file", "model_own", "pth_stream", "pth_kept", "media_walk", "media_stream",
   "deps_hooks", "deps_script", "deps_targets", "deps_files", "agent_issue", "declared_names",
   // the reports' forms and the terminal's sanitizers (step 4 c): no matcher runs
   "term", "issue_excerpt", "report_json", "report_items", "sarif_rules", "sarif_frame", "sarif_items", "html_frame",

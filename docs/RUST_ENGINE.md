@@ -402,7 +402,52 @@ rust/
                              (`pth_issues`; a .pth file too large to read whole read in chunks
                              for the lines site.py runs, `pth_stream` with the host keeping its
                              state, and those lines checked at their lines, `pth_kept`; bounded by
-                             `PTH_MAX_LINE` a line and `PTH_MAX_KEPT` in all: FP-MODEL-FILES)
+                             `PTH_MAX_LINE` a line and `PTH_MAX_KEPT` in all: FP-MODEL-FILES);
+                             FP-OPAQUE-MEDIA: `classify_more`, with what the caller can give past
+                             the first bytes (`More`: the whole file, a walk of its stream, or asked
+                             for: `Need`), makes a near-random file quiet when media/ walks it to
+                             its end and a keystore S-SECRET (and SC-OPAQUE-BLOB beside it,
+                             `Classified::Issues`, when its unread parts are more than a
+                             keystore's); the formats no walker reads keep their first-bytes
+                             exemption (`UNWALKED_MAGIC`)
+    src/media/               sound, video, image and font files walked by their structure to their
+                             end (0.1.9, FP-OPAQUE-MEDIA): `mod.rs` (the walk, a state machine fed
+                             a file's bytes in order, `feed`, its state, `Walker`, carried by the
+                             host between chunks, `media_stream`; whole, `walk`, `media_walk`; the
+                             first bytes, `starts`; bytes it skips the host may pass over, `at`,
+                             never past the file's end: a part past it fails at `eof`;
+                             `MAX_CARRY` 1 MiB kept between chunks; `MAX_CLAIMS` 65,536 parts a
+                             directory read as its stream passes may name; the review of Oct 27's
+                             bounds: free-form parts at most `FREE_MAX` 64 KiB and a quarter of the
+                             file, `free`, a part walked as a format of its own counted in them,
+                             `walk_part`; raw samples whose differences' entropy is under
+                             `RAW_MAX_BITS`, `raw_samples`), `frames.rs` (MPEG audio and
+                             ADTS frames after ID3v2 tags and their frames, ID3v1, APEv2 and
+                             Lyrics3 after them;
+                             Ogg pages and their CRC; FLAC's metadata and frames, each found by
+                             its sync code, header CRC-8 and the CRC-16 of the frame before it; a
+                             transport stream's packets), `chains.rs` (ISO media boxes, RIFF, RF64,
+                             RIFX and AIFF chunks, Matroska and WebM elements of known and unknown
+                             size, PNG chunks and their CRC, GIF blocks, JPEG segments and
+                             entropy-coded scans with the images and motion photo after them, an
+                             Apple icon's elements), `tables.rs` (a directory's claimed parts, the
+                             bytes between them zero: TrueType and OpenType fonts and collections,
+                             WOFF, WOFF2, BMP as their stream passes, each part passed once, a
+                             table named once, the declared size checked at the end; ICO and CUR
+                             with their PNG and
+                             DIB images, TIFF and BigTIFF with their sub-directories, ICC profiles
+                             and TGA read whole, TIFF's entries and offsets bounded; IM Tools and
+                             Netpbm images), `keystore.rs` (PKCS#12's DER and bags, a signed one's
+                             content, JKS and JCEKS entries with a SealedObject's Java
+                             serialization, BKS: read to their last byte, each part in its shape,
+                             what they hold in the clear counted, the bytes no structure reads
+                             measured: a certificate whole toward the total, its signature and
+                             its bytes past `CERTIFICATE_MAX` one part, an alias's and any unread
+                             value's past `NAME_MAX`),
+                             `tests.rs` (the encoders' files of tests/fixtures/media, whole and in
+                             chunks of every size, appended to, cut (whole and in chunks), a byte
+                             changed, glued onto random bytes; the structures built there, the
+                             review's shapes, free-form parts and raw samples; keystores)
     src/pickle/              model files read for what they would run (0.1.9, FP-MODEL-FILES), never
                              unpickled: `mod.rs` recognizes one by its bytes (a zip whose first
                              member is `<archive>/data.pkl`, an .npy or a pickle by its name,

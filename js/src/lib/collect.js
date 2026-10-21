@@ -61,9 +61,10 @@ export function collectEntry(entry, col, { ioError = () => false, strerror = (e)
     const got = call("collect_file", { ...args, answers }, text);
     if (!got.need) { addCollected(got, col, entry.rel, entry.dep); return; }
     const { read: what, limit } = got.need;
-    if (what === "pth") {                  // (a .pth file too large to read whole: in chunks, pth_stream)
-      try {
-        answers[what] = streamPth((off, len) => entry.range(off, len));
+    if (what === "pth" || what === "media") {   // (a file too large to read whole, in chunks: a .pth file's lines
+      try {                                       // pth_stream, another's structure media_stream)
+        answers[what] = what === "pth" ? streamPth((off, len) => entry.range(off, len))
+          : streamMedia((off, len) => entry.range(off, len), entry.size);
       } catch (e) {
         if (!ioError(e)) throw e;
         answers[what] = { error: strerror(e) };
@@ -115,6 +116,31 @@ export function streamPth(range) {
     for (const c of got.cuts) cuts.push(c);
     if (chunk.length === 0) return { lines, cuts };
     off += chunk.length;
+  }
+}
+
+/** A file walked as its stream passes is read this many bytes at a time (core.MEDIA_CHUNK). */
+const MEDIA_CHUNK = 1 << 20;
+
+/**
+ * FP-OPAQUE-MEDIA: a file too large to read whole walked by its structure, read through `range(offset, length)`
+ * MEDIA_CHUNK at a time, passing over what the walk skips but never past its `size` (a part that runs past it is a
+ * file cut short) -> the walk's end: {is}, {not, why} or {unknown} (the engine's media_stream; core's
+ * media_stream_file).
+ */
+export function streamMedia(range, size) {
+  let state = null, off = 0;
+  for (;;) {
+    const chunk = range(off, MEDIA_CHUNK);
+    const got = call("media_stream", { state, offset: off, eof: chunk.length === 0 }, bytesText(chunk));
+    if (got.end !== null) return got.end;
+    state = got.state;
+    const end = off + chunk.length, next = got.next;
+    // (the file ends before where the walk goes on, its size given or its byte there read: it is cut short there)
+    if (next > end && (size !== undefined ? next > size : range(next - 1, 1).length === 0)) {
+      return call("media_stream", { state, offset: end, eof: true }, "").end;
+    }
+    off = Math.max(end, next);
   }
 }
 

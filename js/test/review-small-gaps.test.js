@@ -19,9 +19,11 @@ const hexHiddenName = (line) => {
   return found ? found.msg.slice("Escape sequences hide a name: ".length + 1, -2) : null;
 };
 
-// an MPEG transport stream: a sync byte (0x47) every 188 bytes
-const VIDEO = Buffer.concat(Array.from({ length: 40 }, (_, k) =>
-  Buffer.from([0x47, ...Array.from({ length: 187 }, (_, n) => (k * 7 + n) % 256)])));
+// an MPEG transport stream: a sync byte (0x47) every 188 bytes, its program association table first (ffmpeg's: a
+// stream without one is no video, FP-OPAQUE-MEDIA's review of Oct 27)
+const PAT = Buffer.concat([Buffer.from("474000100000b00d0001c100000001f0002ab104b2", "hex"), Buffer.alloc(167, 0xff)]);
+const VIDEO = Buffer.concat([PAT, ...Array.from({ length: 40 }, (_, k) =>
+  Buffer.from([0x47, ...Array.from({ length: 187 }, (_, n) => (k * 7 + n) % 256)]))]);
 const FILES = {
   "src/a.mts": "const el = <HTMLInputElement>document.body;\n// eval(z)\neval(atob(p));\n",
   "src/b.cts": "const cp = require('child_process');\ncp.exec(process.argv[2]);\n",

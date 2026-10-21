@@ -144,6 +144,7 @@ jobs:
             tests.architecture.test_js_parity_persistence tests.architecture.test_js_parity_taint \
             tests.architecture.test_js_parity_verify tests.architecture.test_js_parity_project_hooks \
             tests.architecture.test_js_parity_dep_url tests.architecture.test_js_parity_model_files \
+            tests.architecture.test_js_parity_opaque_media \
             tests.architecture.test_review_final_parity tests.architecture.test_notices -v
 
   # The native engine (rust/, docs/RUST_ENGINE.md): no external crates, its

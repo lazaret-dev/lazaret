@@ -1,6 +1,6 @@
 {
  "format": 1,
- "rule_set": "2.107.0",
+ "rule_set": "2.108.0",
  "source": "lazaret.scanner.core, extracted by scripts/make_rust_tables.py \u2014 do not edit",
  "values": {
   "ALWAYS_PRUNE_DIRS": {
@@ -26,106 +26,6 @@
   "B64_BLOB_RE": {
    "flags": "",
    "re": "[\\\"'][A-Za-z0-9+/]{200,}={0,2}[\\\"']"
-  },
-  "BENIGN_MAGIC": {
-   "list": [
-    {
-     "value": "\u0089PNG"
-    },
-    {
-     "value": "\u00ff\u00d8\u00ff"
-    },
-    {
-     "value": "GIF8"
-    },
-    {
-     "value": "RIFF"
-    },
-    {
-     "value": "OggS"
-    },
-    {
-     "value": "BM"
-    },
-    {
-     "value": "\u0000\u0000\u0001\u0000"
-    },
-    {
-     "value": "wOFF"
-    },
-    {
-     "value": "wOF2"
-    },
-    {
-     "value": "ID3"
-    },
-    {
-     "value": "%PDF"
-    },
-    {
-     "value": "II*\u0000"
-    },
-    {
-     "value": "MM\u0000*"
-    },
-    {
-     "value": "\u001aE\u00df\u00a3"
-    },
-    {
-     "value": "ftyp"
-    },
-    {
-     "value": "\u00ffO\u00ffQ"
-    },
-    {
-     "value": "\u0000\u0000\u0000\fjP  "
-    },
-    {
-     "value": "8BPS"
-    },
-    {
-     "value": "icns"
-    },
-    {
-     "value": "DDS "
-    },
-    {
-     "value": "OTTO"
-    },
-    {
-     "value": "ttcf"
-    },
-    {
-     "value": "%!PS"
-    },
-    {
-     "value": "\u00c5\u00d0\u00d3\u00c6"
-    },
-    {
-     "value": "gimp xcf"
-    },
-    {
-     "value": "\u0001\u00da"
-    },
-    {
-     "value": "Y\u00a6j\u0095"
-    },
-    {
-     "value": "SIMPLE  ="
-    },
-    {
-     "value": "qoif"
-    },
-    {
-     "value": "#?RADIANCE"
-    },
-    {
-     "value": "fLaC"
-    },
-    {
-     "value": "\u0000\u0000\u0002\u0000"
-    }
-   ]
   },
   "CAP_PER_RULE": {
    "value": 200
@@ -612,19 +512,6 @@
   "FN_LEN_LIMIT": {
    "value": 60
   },
-  "FONT_EXTS": {
-   "set": [
-    ".bdf",
-    ".eot",
-    ".otf",
-    ".pcf",
-    ".pfb",
-    ".ttc",
-    ".ttf",
-    ".woff",
-    ".woff2"
-   ]
-  },
   "GYP_EXTS": {
    "list": [
     {
@@ -694,6 +581,15 @@
   "INSTALL_HOOK_RE": {
    "flags": "i",
    "re": "curl|wget|iwr|Invoke-WebRequest|node\\s+-e|bash\\s+-c|sh\\s+-c|powershell|base64|\\beval\\b"
+  },
+  "KEYSTORE_ELEMENT_MAX_BYTES": {
+   "value": 16384
+  },
+  "KEYSTORE_MAX_BYTES": {
+   "value": 4194304
+  },
+  "KEYSTORE_OPAQUE_MAX_BYTES": {
+   "value": 1048576
   },
   "LAZARET_INFORMATION_URI": {
    "value": "https://lazaret.dev"
@@ -5722,6 +5618,46 @@
     },
     {
      "value": "X-"
+    }
+   ]
+  },
+  "UNWALKED_MAGIC": {
+   "list": [
+    {
+     "value": "%PDF"
+    },
+    {
+     "value": "\u00ffO\u00ffQ"
+    },
+    {
+     "value": "8BPS"
+    },
+    {
+     "value": "DDS "
+    },
+    {
+     "value": "%!PS"
+    },
+    {
+     "value": "\u00c5\u00d0\u00d3\u00c6"
+    },
+    {
+     "value": "gimp xcf"
+    },
+    {
+     "value": "\u0001\u00da"
+    },
+    {
+     "value": "Y\u00a6j\u0095"
+    },
+    {
+     "value": "SIMPLE  ="
+    },
+    {
+     "value": "qoif"
+    },
+    {
+     "value": "#?RADIANCE"
     }
    ]
   },
@@ -12766,19 +12702,6 @@
    "flags": "",
    "re": "^(\\s*)(?:async\\s+)?def\\s+(\\w+)"
   },
-  "_FONT_MAGIC": {
-   "list": [
-    {
-     "value": "\u0000\u0001\u0000\u0000"
-    },
-    {
-     "value": "true"
-    },
-    {
-     "value": "typ1"
-    }
-   ]
-  },
   "_FOR_NAME_RE": {
    "flags": "",
    "re": "[A-Za-z_]\\w*"
@@ -13731,6 +13654,93 @@
   "_KEYED_WRITE_RE": {
    "flags": "",
    "re": "^\\s*([A-Za-z_$][\\w$]*)\\s*\\[\\s*([\"'])([^\"'\\\\\\n]*)\\2\\s*\\]\\s*=(?![=>])"
+  },
+  "_KEYSTORE_CERTS_RULE": {
+   "map": {
+    "fix": {
+     "value": "Nothing to do for a truststore meant to ship; a keystore meant to hold a key does not."
+    },
+    "id": {
+     "value": "S-SECRET"
+    },
+    "msg": {
+     "value": "Keystore of certificates only: a {kind} that holds no private or secret key ({entries})."
+    },
+    "name": {
+     "value": "Hardcoded credential"
+    },
+    "ref": {
+     "value": "CWE-321 \u00b7 CWE-798"
+    },
+    "sev": {
+     "value": "INFO"
+    },
+    "type": {
+     "value": "VULN"
+    },
+    "why": {
+     "value": "A keystore of trusted certificates (a truststore) holds public data; it is listed so that every keystore a project ships is known."
+    }
+   }
+  },
+  "_KEYSTORE_OPAQUE_MSG": {
+   "value": "Opaque high-entropy file ({size} bytes): a {kind} whose bytes no structure reads (encrypted data, keys, secrets, signatures, certificates, names past a real one's size) are more than a keystore's: its largest such part holds {largest} bytes and all of them {opaque}, where a real keystore's hold at most {one} and {all}."
+  },
+  "_KEYSTORE_RULE": {
+   "map": {
+    "fix": {
+     "value": "Keep keystores out of the repository and the package (load them from a secrets store when building or running), and replace a key that was shipped."
+    },
+    "id": {
+     "value": "S-SECRET"
+    },
+    "msg": {
+     "value": "Credential file: a {kind} that holds a private or secret key ({entries})."
+    },
+    "name": {
+     "value": "Hardcoded credential"
+    },
+    "ref": {
+     "value": "CWE-321 \u00b7 CWE-798"
+    },
+    "sev": {
+     "value": "BLOCKER"
+    },
+    "type": {
+     "value": "VULN"
+    },
+    "why": {
+     "value": "A keystore holds private or secret keys behind a password, often a well-known one (a debug keystore's 'android', 'changeit'): one in a repository or a package leaks its keys with every copy, and whoever has them can sign or decrypt as their owner."
+    }
+   }
+  },
+  "_KEYSTORE_SEALED_RULE": {
+   "map": {
+    "fix": {
+     "value": "Keep keystores out of the repository and the package (load them from a secrets store when building or running), and replace a key that was shipped."
+    },
+    "id": {
+     "value": "S-SECRET"
+    },
+    "msg": {
+     "value": "Credential file: a {kind} whose entries are encrypted, so it may hold a private key ({entries})."
+    },
+    "name": {
+     "value": "Hardcoded credential"
+    },
+    "ref": {
+     "value": "CWE-321 \u00b7 CWE-798"
+    },
+    "sev": {
+     "value": "MAJOR"
+    },
+    "type": {
+     "value": "VULN"
+    },
+    "why": {
+     "value": "A keystore holds private or secret keys behind a password, often a well-known one (a debug keystore's 'android', 'changeit'): one in a repository or a package leaks its keys with every copy, and whoever has them can sign or decrypt as their owner."
+    }
+   }
   },
   "_KEY_LITERAL_RE": {
    "flags": "",
@@ -15656,6 +15666,12 @@
   },
   "_OPAQUE_SAMPLE": {
    "value": 8192
+  },
+  "_OPAQUE_UNREAD": {
+   "value": "it was not read past its first bytes"
+  },
+  "_OPAQUE_WALK_MSG": {
+   "value": "Opaque high-entropy file ({size} bytes, entropy {entropy}/8; read as {kind}, it is not one to its end: {why})."
   },
   "_PACKAGE_RULE_NAMES": {
    "map": {

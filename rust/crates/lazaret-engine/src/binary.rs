@@ -119,21 +119,12 @@ pub(crate) fn mpeg_ts_named(p: &Pack, path: &[u32], windows: bool, data: &[u8]) 
     has(p, "MPEG_TS_EXTS", &ext) && mpeg_ts(&data[..data.len().min(512)])
 }
 
-/// core.is_benign_media: an image, font, media or document format by its signature, a colour profile, a video
-/// under TypeScript's extensions, a font by its extension and first bytes.
-fn benign_media(p: &Pack, header: &[u8], ext: &[u32]) -> bool {
-    if sigs(p, "BENIGN_MAGIC").iter().any(|sig| header.starts_with(sig))
-        || header[..header.len().min(16)].windows(4).any(|w| w == b"ftyp")
-    {
-        return true;
-    }
-    if header.get(36..40) == Some(b"acsp") {
-        return true;
-    }
-    if has(p, "MPEG_TS_EXTS", ext) && mpeg_ts(header) {
-        return true;
-    }
-    has(p, "FONT_EXTS", ext) && sigs(p, "_FONT_MAGIC").iter().any(|m| header.get(..4) == Some(m.as_slice()))
+/// An image or document format by its first bytes alone (UNWALKED_MAGIC: PDF, PostScript, Photoshop, JPEG 2000's
+/// codestream, DDS, GIMP's, SGI's, Sun's, FITS, QOI and Radiance images), as core.is_benign_media judged every
+/// format until FP-OPAQUE-MEDIA. The formats media.rs walks (sound, video, images, fonts, colour profiles) are no
+/// longer taken by their first bytes: a file is one of them when it is one to its end.
+fn unwalked_format(p: &Pack, header: &[u8]) -> bool {
+    sigs(p, "UNWALKED_MAGIC").iter().any(|sig| header.starts_with(sig))
 }
 
 /// core.byte_entropy: -sum(p * log2(p)) over the byte values in order, summed as this Python's sum() adds floats.
@@ -190,10 +181,50 @@ fn s(x: &[u32]) -> Arg {
     Arg::S(x.to_vec())
 }
 
+/// What the caller can give of a file past its first bytes (FP-OPAQUE-MEDIA).
+#[derive(Clone, Copy, Debug)]
+pub enum More<'a> {
+    /// nothing: a file whose first bytes start a format that is walked, or a keystore, is judged without the walk
+    /// (an opaque blob stays one)
+    No,
+    /// the caller reads the whole file, or walks it as its stream passes (media::feed), when asked (Classified::Need)
+    Ask,
+    /// the whole file
+    Whole(&'a [u8]),
+    /// a walk of the whole file, as its stream passed
+    Walked(&'a crate::media::Walked),
+}
+
+/// classify_more's answer.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Classified {
+    Issue(Value),
+    /// a keystore whose unread bytes are more than a keystore's (S-SECRET and SC-OPAQUE-BLOB, in that order)
+    Issues(Vec<Value>),
+    Quiet,
+    /// the whole file is needed (More::Ask): its bytes (More::Whole), or its walk (More::Walked) when it is too
+    /// large to read whole
+    Need,
+}
+
 /// core.classify_binary: the SC-BINARY, SC-NESTED-ARCHIVE or SC-OPAQUE-BLOB finding of a file that is not source,
 /// from its leading bytes (`data`: at least _OPAQUE_SAMPLE of them when it has as many) and its `size`; `context` is
-/// "sdist", "npm", "wheel" or "repo". None for an asset, a document container, or a file that says nothing.
+/// "sdist", "npm", "wheel" or "repo". None for an asset, a document container, or a file that says nothing. A
+/// keystore is S-SECRET, and a near-random file that is a sound, video, image or font to its end is quiet, only
+/// when the whole file is given (classify_more; here it is not).
 pub fn classify(p: &Pack, path: &[u32], data: &[u8], size: u64, context: &str, windows: bool, neumaier: bool) -> Option<Value> {
+    match classify_more(p, path, data, size, context, windows, neumaier, More::No) {
+        Classified::Issue(v) => Some(v),
+        _ => None,
+    }
+}
+
+/// classify, with what the caller can give past the first bytes (`more`): a keystore read to its end is S-SECRET
+/// (media::keystore), and a file that would be an opaque blob is quiet when it is a format media.rs walks, read to
+/// its end (FP-OPAQUE-MEDIA). With More::Ask, Need when that takes the whole file.
+#[allow(clippy::too_many_arguments)]
+pub fn classify_more(p: &Pack, path: &[u32], data: &[u8], size: u64, context: &str, windows: bool, neumaier: bool,
+                     more: More) -> Classified {
     let header = &data[..data.len().min(512)];
     let ext = pystr::lower(&ext_and_base(path, windows).0);
     let is_bin = looks_binary(p, &data[..data.len().min(p.usize("_LOOKS_SAMPLE"))]);
@@ -208,7 +239,7 @@ pub fn classify(p: &Pack, path: &[u32], data: &[u8], size: u64, context: &str, w
         if context == "wheel" {
             let r = RuleText::of(p, "_BIN_WHEEL_RULE");
             let msg = format(&r.msg, &[("desc", s(&desc))]);
-            return Some(file_issue(r, msg));
+            return Classified::Issue(file_issue(r, msg));
         }
         let wheres = p.map_strs("_BINARY_WHERE");
         let where_ = wheres
@@ -218,15 +249,15 @@ pub fn classify(p: &Pack, path: &[u32], data: &[u8], size: u64, context: &str, w
             .unwrap_or_else(|| p.text("_BINARY_WHERE_ELSE"));
         let r = RuleText::of(p, "_BIN_RULE");
         let msg = format(&r.msg, &[("where", s(&where_)), ("desc", s(&desc))]);
-        return Some(file_issue(r, msg));
+        return Classified::Issue(file_issue(r, msg));
     }
     if has(p, "CONTAINER_DOCUMENT_EXTS", &ext) {
-        return None;
+        return Classified::Quiet;
     }
     if header.get(257..262) == Some(b"ustar") {
         let r = RuleText::of(p, "_BIN_TAR_RULE");
         let msg = r.msg.clone();
-        return Some(file_issue(r, msg));
+        return Classified::Issue(file_issue(r, msg));
     }
     for (sig, kind) in pairs(p, "NESTED_ARCHIVE_MAGIC") {
         if header.starts_with(sig) {
@@ -235,24 +266,91 @@ pub fn classify(p: &Pack, path: &[u32], data: &[u8], size: u64, context: &str, w
             }
             let r = RuleText::of(p, "_BIN_NESTED_RULE");
             let msg = format(&r.msg, &[("kind", s(kind))]);
-            return Some(file_issue(r, msg));
+            return Classified::Issue(file_issue(r, msg));
         }
     }
-    if benign_media(p, header, &ext) {
-        return None;
-    }
-    if is_bin && size >= p.int("_OPAQUE_MIN_SIZE") as u64 {
-        let ent = byte_entropy(&data[..data.len().min(p.usize("_OPAQUE_SAMPLE"))], neumaier);
-        if ent > p.float("_OPAQUE_ENTROPY") {
-            let r = RuleText::of(p, "_BIN_OPAQUE_RULE");
-            let msg = format(
-                &r.msg,
-                &[("size", Arg::I(size as i64)), ("entropy", Arg::S(pystr::u(&format!("{:.1}", ent))))],
-            );
-            return Some(file_issue(r, msg));
+    // a keystore read to its end is a credential file, whatever its entropy (S-SECRET: listed, setting no verdict)
+    if crate::media::keystore::sniff(header) {
+        match more {
+            More::Whole(whole) => {
+                if let Ok(k) = crate::media::keystore::read(whole) {
+                    let issue = keystore_issue(p, &k);
+                    // (bytes no structure reads, more than a real keystore holds: an opaque blob too)
+                    let (one, all) = (p.int("KEYSTORE_ELEMENT_MAX_BYTES") as u64, p.int("KEYSTORE_OPAQUE_MAX_BYTES") as u64);
+                    if k.largest > one || k.opaque > all {
+                        let r = RuleText::of(p, "_BIN_OPAQUE_RULE");
+                        let msg = format(&p.text("_KEYSTORE_OPAQUE_MSG"), &[
+                            ("size", Arg::I(size as i64)), ("kind", Arg::S(pystr::u(k.kind))),
+                            ("largest", Arg::I(k.largest as i64)), ("opaque", Arg::I(k.opaque as i64)),
+                            ("one", Arg::I(one as i64)), ("all", Arg::I(all as i64)),
+                        ]);
+                        return Classified::Issues(vec![issue, file_issue(r, msg)]);
+                    }
+                    return Classified::Issue(issue);
+                }
+            }
+            More::Ask if size <= p.int("KEYSTORE_MAX_BYTES").max(0) as u64 => return Classified::Need,
+            _ => {}
         }
     }
-    None
+    if unwalked_format(p, header) {
+        return Classified::Quiet;
+    }
+    if !(is_bin && size >= p.int("_OPAQUE_MIN_SIZE") as u64) {
+        return Classified::Quiet;
+    }
+    let ent = byte_entropy(&data[..data.len().min(p.usize("_OPAQUE_SAMPLE"))], neumaier);
+    if ent <= p.float("_OPAQUE_ENTROPY") {
+        return Classified::Quiet;
+    }
+    // near-random: a sound, video, image or font when its bytes are that format to the end (media.rs), else opaque
+    let starts = crate::media::starts(header);
+    let walked = match (more, &starts) {
+        (_, None) => None,
+        (More::Whole(whole), _) => Some(crate::media::walk(whole)),
+        (More::Walked(w), _) => Some(w.clone()),
+        (More::Ask, _) => return Classified::Need,
+        (More::No, Some(kind)) => Some(crate::media::Walked::Not(kind.clone(), p.string("_OPAQUE_UNREAD"))),
+    };
+    let r = RuleText::of(p, "_BIN_OPAQUE_RULE");
+    let (size_a, ent_a) = (Arg::I(size as i64), Arg::S(pystr::u(&format!("{:.1}", ent))));
+    let msg = match walked {
+        Some(crate::media::Walked::Is(_)) => return Classified::Quiet,
+        Some(crate::media::Walked::Not(kind, why)) => format(
+            &p.text("_OPAQUE_WALK_MSG"),
+            &[("size", size_a), ("entropy", ent_a), ("kind", Arg::S(pystr::u(&kind))), ("why", Arg::S(pystr::u(&why)))],
+        ),
+        _ => format(&r.msg, &[("size", size_a), ("entropy", ent_a)]),
+    };
+    Classified::Issue(file_issue(r, msg))
+}
+
+/// S-SECRET for a keystore read to its end (FP-OPAQUE-MEDIA): BLOCKER when it holds a private or secret key in the
+/// clear part of its structure, MAJOR when its entries are encrypted whole (it may hold one), INFO for certificates
+/// alone.
+fn keystore_issue(p: &Pack, k: &crate::media::keystore::Keystore) -> Value {
+    let rule = if k.keys + k.secrets > 0 {
+        "_KEYSTORE_RULE"
+    } else if k.sealed > 0 {
+        "_KEYSTORE_SEALED_RULE"
+    } else {
+        "_KEYSTORE_CERTS_RULE"
+    };
+    let mut parts = Vec::new();
+    for (n, one, many) in [(k.keys, "private key", "private keys"), (k.secrets, "secret key", "secret keys"),
+                           (k.certs, "certificate", "certificates"), (k.sealed, "encrypted part", "encrypted parts")] {
+        if n > 0 {
+            parts.push(format!("{n} {}", if n == 1 { one } else { many }));
+        }
+    }
+    let entries = match parts.len() {
+        0 => "no entry".to_string(),
+        1 => parts[0].clone(),
+        n => format!("{} and {}", parts[..n - 1].join(", "), parts[n - 1]),
+    };
+    let r = RuleText::of(p, rule);
+    let msg = format(&r.msg, &[("kind", Arg::S(pystr::u(k.kind))), ("entries", Arg::S(pystr::u(&entries)))]);
+    file_issue(r, msg)
 }
 
 /// core.disguised_binary: SC-BINARY, CRITICAL, for a program's bytes (EXEC_MAGIC, a Windows PE) in a file named as

@@ -38,6 +38,7 @@ pub mod lexer;
 pub mod linear;
 pub mod linre;
 pub mod manifest;
+pub mod media;
 pub mod metrics;
 pub mod model;
 pub mod normalize;

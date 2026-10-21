@@ -17,6 +17,11 @@ opcode in the containers the libraries write (a checkpoint's zip, an .npy and an
 of stored blocks, PyTorch's legacy stream, a compression the reader cannot undo), cut, a byte changed or an opcode put
 in (inert: os.system and the like named, never called).
 
+FP-OPAQUE-MEDIA's set (binary_media): sound, video, image and font files the real encoders wrote
+(tests/fixtures/media), the tally's shapes and keystores laid out as keytool, OpenSSL and Bouncy Castle write them
+(tests/_media_files.py), whole and mutated, walked and classified whole; binary_bytes' samples, classified from their
+first bytes, answer as the walk's absence makes them (a first-bytes signature of a walked format no longer exempts).
+
 All content is inert data: no sample is a program, and nothing is executed.
 """
 import random
@@ -266,8 +271,56 @@ def model_calls(seed=20261020, count=1500):
     return out
 
 
+# ---- media files and keystores (FP-OPAQUE-MEDIA): the files the real encoders wrote (tests/fixtures/media), the
+# tally's shapes and keystores (tests/_media_files.py), whole and mutated (cut, a byte changed, bytes appended, zero
+# padding, a format's first bytes glued onto random bytes), walked (media_walk) and classified whole and asked for
+
+def _media_samples(rnd):
+    from tests import _media_files as mf
+    base = list(mf.fixtures().items()) + [
+        ("music1.mp3", mf.raw_mp3(30)), ("bw_gradient.imt", mf.imt_gradient()),
+        ("debug.p12", mf.pkcs12()), ("trust.p12", mf.pkcs12(key=False)),
+        ("certs.p12", mf.pkcs12(key=False, encrypted_certs=False, clear_certs=True)),
+        ("secret.p12", mf.pkcs12(key=False, secret=True)),
+        ("release.jks", mf.jks([(1, mf.jks_key_entry()), (2, mf.jks_cert_entry())])),
+        ("cacerts", mf.jks([(2, mf.jks_cert_entry(k)) for k in range(3)])),
+        ("secret.jceks", mf.jks([(3, mf.sealed_object())], magic=b"\xce\xce\xce\xce")),
+        ("android.bks", mf.bks([(2, mf.bks_key()), (1, mf.bks_cert())]))]
+    out = []
+    for name, data in base:
+        out.append((name, data))
+        for _ in range(12):
+            r = rnd.random()
+            if r < 0.25:
+                d = data[:rnd.randrange(1, len(data))]
+            elif r < 0.45:
+                k = rnd.randrange(len(data))
+                d = data[:k] + bytes([data[k] ^ rnd.randrange(1, 256)]) + data[k + 1:]
+            elif r < 0.6:
+                d = data + bytes(rnd.randrange(256) for _ in range(rnd.choice([1, 3, 100, 2000])))
+            elif r < 0.7:
+                d = data + bytes(rnd.choice([1, 4, 300]))
+            else:
+                d = data[:rnd.choice([4, 16, 64, 512])] + bytes(rnd.randrange(256) for _ in range(rnd.randint(500, 9000)))
+            out.append((name, d))
+    return out
+
+
+def media_calls(seed=20261022):
+    rnd = random.Random(seed)
+    out = []
+    for name, data in _media_samples(rnd):
+        out.append(("media_walk", {}, text(data)))
+        args = {"path": "x/" + name, "size": len(data), "context": rnd.choice(CONTEXTS), "windows": False,
+                "neumaier": False}
+        out.append(("binary_classify", dict(args, whole=True), text(data)))
+        out.append(("binary_classify", dict(args, more=True), text(data[:8192])))
+    return out
+
+
 def snapshot_sets():
-    return {"binary_bytes": byte_calls, "binary_pth": pth_calls, "binary_models": model_calls}
+    return {"binary_bytes": byte_calls, "binary_pth": pth_calls, "binary_models": model_calls,
+            "binary_media": media_calls}
 
 
 @unittest.skipUnless(_native.available(), f"native engine not built ({_native.load_error()})")
@@ -302,6 +355,17 @@ class BinarySnapshotTests(unittest.TestCase):
         for rule in ("SC-PICKLE-CODE", "SC-PICKLE-GLOBAL", "SC-TRUNCATED"):
             self.assertGreater(rules.count(rule), 50, rule)
         self.assertGreater(sum(1 for a in files if not a["issues"]), 200)
+
+    def test_media_files(self):
+        calls = media_calls()
+        got = self.answers("binary_media")
+        walks = [a for (c, _a, _t), a in zip(calls, got) if c == "media_walk"]
+        whole = [a for (c, a_, _t), a in zip(calls, got) if c == "binary_classify" and a_.get("whole")]
+        self.assertGreater(sum(1 for a in walks if "is" in a), 150)
+        self.assertGreater(sum(1 for a in walks if "not" in a), 250)
+        rules = [a[0] for a in whole if a is not None]
+        self.assertGreater(rules.count("SC-OPAQUE-BLOB"), 150)
+        self.assertGreater(rules.count("S-SECRET"), 20)
 
     def test_pth_files(self):
         got = self.answers("binary_pth")

@@ -351,7 +351,7 @@ SAMPLE = 8192              # header/entropy sample read from oversized files
 #      entry points and hook targets, Python install scripts
 # 2.3: verdict tiers, decoded hex, install-script inspection; 2.2:
 #      verdict-integrity; 2.1: binary-artifact awareness
-ENGINE_VERSION = "2.107.0"
+ENGINE_VERSION = "2.108.0"
 
 # ---------------- The content memo (P-2a, registry/contentcache.py) ----------------
 # One per scan_package run: the engine answers once for content several of a
@@ -1806,12 +1806,15 @@ def _oversized_member(rel, first, more):
     """FP-MODEL-FILES: an oversized member (`first`: its first MAX_MEMBER + 1 bytes; `more(n)`: the next bytes, b"" at
     its end) read on, once, as its stream passes, when its first bytes are a zip model file's (a checkpoint, an
     .npz: the pieces _ZipModelKeep keeps) or it is a .pth file (the lines site.py runs, read in chunks: the engine's
-    pth_stream, John's decision of Oct 21) -> (pieces or None, {"lines", "cuts"} or None); (None, None) when it is
-    neither, and nothing more is read."""
+    pth_stream, John's decision of Oct 21), or (FP-OPAQUE-MEDIA) when its first bytes would make it an opaque blob
+    unless it is a sound, video, image or font to its end (its structure walked as the stream passes: the engine's
+    media_stream) -> (pieces or None, {"lines", "cuts"} or None, the walk's end or None); (None, None, None) when it
+    is none of them, and nothing more is read."""
     keep = _ZipModelKeep() if first[:4] == b"PK\x03\x04" and lazaret.model_sniff(rel, first[:512]) else None
     pth = os.path.splitext(posixpath.basename(rel))[1].lower() == ".pth"
-    if keep is None and not pth:
-        return None, None
+    walk = {"state": None, "offset": 0, "end": None} if _wants_walk(rel, first) else None
+    if keep is None and not pth and walk is None:
+        return None, None, None
     state, lines, cuts = None, [], []
 
     def feed(chunk):
@@ -1824,6 +1827,14 @@ def _oversized_member(rel, first, more):
                 state = got["state"]
                 lines.extend(got["lines"])
                 cuts.extend(got["cuts"])
+        if walk is not None and walk["end"] is None:
+            for k in range(0, len(chunk), lazaret.MEDIA_CHUNK):
+                piece = chunk[k:k + lazaret.MEDIA_CHUNK]
+                got = lazaret.media_stream(walk["state"], walk["offset"], piece, False)
+                walk["state"], walk["end"] = got["state"], got["end"]
+                walk["offset"] += len(piece)
+                if walk["end"] is not None:
+                    break
     feed(first)
     while True:
         chunk = more(_OUTPUT_CHUNK)
@@ -1834,19 +1845,28 @@ def _oversized_member(rel, first, more):
         got = lazaret.pth_stream(state, b"", True)
         lines.extend(got["lines"])
         cuts.extend(got["cuts"])
-    return (keep.pieces() if keep is not None else None), ({"lines": lines, "cuts": cuts} if pth else None)
+    if walk is not None and walk["end"] is None:
+        walk["end"] = lazaret.media_stream(walk["state"], walk["offset"], b"", True)["end"]
+    return ((keep.pieces() if keep is not None else None), ({"lines": lines, "cuts": cuts} if pth else None),
+            (walk["end"] if walk is not None else None))
+
+
+def _wants_walk(rel, first):
+    """FP-OPAQUE-MEDIA: whether an oversized member's first bytes call for its structure to be walked (they would
+    make it an opaque blob, and they start a format the engine walks)."""
+    return lazaret.classify_needs_whole(rel, first[:SAMPLE], len(first), "repo")
 
 
 def _folder_oversized_member(rel, path, first, budget):
     """_oversized_member for an oversized file of a folder (`first`: its first bytes), the rest read as _read_regular
-    reads one, charged to `budget`; (None, None) when what is there is no longer a regular file. OSError when it
-    cannot be read; ArchiveLimit past the budget."""
-    if not (first[:4] == b"PK\x03\x04" or os.path.splitext(rel)[1].lower() == ".pth"):
-        return None, None
+    reads one, charged to `budget`; (None, None, None) when what is there is no longer a regular file. OSError when
+    it cannot be read; ArchiveLimit past the budget."""
+    if not (first[:4] == b"PK\x03\x04" or os.path.splitext(rel)[1].lower() == ".pth" or _wants_walk(rel, first)):
+        return None, None, None
     fd = os.open(path, _FOLDER_OPEN_FLAGS)
     try:
         if not stat.S_ISREG(os.fstat(fd).st_mode):
-            return None, None
+            return None, None, None
         os.lseek(fd, len(first), os.SEEK_SET)
 
         def more(n):
@@ -1928,12 +1948,12 @@ def _walk_folder(base, budget):
             big = Member(rel, SAMPLE, raw[:SAMPLE], "member")
             # (FP-MODEL-FILES: a zip model file of any size, read for its pickles; a .pth file for its import lines)
             try:
-                big.model, big.pth = _folder_oversized_member(rel, path, raw, budget)
+                big.model, big.pth, big.media = _folder_oversized_member(rel, path, raw, budget)
             except ArchiveLimit as lim:
                 yield Member(rel, 0, b"", lim.reason, lim.detail)
                 return
             except OSError:
-                big.model = big.pth = None        # (unread: SC-TRUNCATED, as before)
+                big.model = big.pth = big.media = None    # (unread: SC-TRUNCATED, as before)
             yield big
             continue
         yield Member(rel, len(raw), raw, None)
@@ -2000,7 +2020,7 @@ def _iter_tar(data, container, artifact, budget, anomalies):
                 big = Member(rel, SAMPLE, raw[:SAMPLE], "member")
                 # (FP-MODEL-FILES: a zip model file of any size, read for its pickles as the stream passes; a .pth
                 # file for its import lines)
-                big.model, big.pth = _oversized_member(rel, raw, f.read)
+                big.model, big.pth, big.media = _oversized_member(rel, raw, f.read)
                 yield big
                 continue
             yield Member(rel, len(raw), raw, None)
@@ -2110,7 +2130,7 @@ def _resolve_tar_links(data, codec, artifact, links, seen, budget, anomalies, co
             links_to = plan.pop(rel)
             # (the target read on once for all its links: as a .pth file when one of them is named so)
             name = next((n for n in links_to if n.lower().endswith(".pth")), links_to[0])
-            read_as = _oversized_member(name, raw, f.read) if len(raw) > MAX_MEMBER else (None, None)
+            read_as = _oversized_member(name, raw, f.read) if len(raw) > MAX_MEMBER else (None, None, None)
             for link_rel in links_to:
                 count += 1
                 if count > MAX_FILES:
@@ -2120,7 +2140,7 @@ def _resolve_tar_links(data, codec, artifact, links, seen, budget, anomalies, co
                 last = link_rel
                 if len(raw) > MAX_MEMBER:
                     big = Member(link_rel, SAMPLE, raw[:SAMPLE], "member")
-                    big.model, big.pth = read_as
+                    big.model, big.pth, big.media = read_as
                     yield big
                 else:
                     yield Member(link_rel, len(raw), raw, None)
@@ -2452,7 +2472,7 @@ def _iter_zip(data, artifact, budget, anomalies):
                 for rel in rels:
                     if len(raw) > MAX_MEMBER:
                         big = Member(rel, SAMPLE, raw[:SAMPLE], "member")
-                        big.model, big.pth = model or (None, None)
+                        big.model, big.pth, big.media = model or (None, None, None)
                         yield big
                     else:
                         yield Member(rel, len(raw), raw, None)
@@ -3389,11 +3409,16 @@ class _ArtifactScan:
         files = [[rel, False] for rel in sorted(self.members) if rel.endswith(".py")]
         self.issues.extend(lazaret.model_own_issues(self.models, files))
 
-    def classify(self, rel, raw, size):
-        bi = lazaret.classify_binary(rel, raw, size, self.artifact)
-        if bi:
-            self.binaries += 1
-            self.issues.append(bi)
+    def classify(self, rel, raw, size, whole=True, walked=None):
+        """classify_binary of a member: `raw` the whole member (`whole`), or an oversized one's first bytes with the
+        walk of its structure as its stream passed (`walked`: FP-OPAQUE-MEDIA). A keystore is S-SECRET, listed as
+        secrets are (and SC-OPAQUE-BLOB beside it when it holds more than a keystore does); the rest are binary
+        artifacts."""
+        bi = lazaret.classify_binary(rel, raw, size, self.artifact, whole=whole and walked is None, walked=walked)
+        for issue in bi if isinstance(bi, list) else [bi] if bi else []:
+            if issue["rule"].startswith("SC-"):
+                self.binaries += 1
+            self.issues.append(issue)
 
     def scan_source(self, rel, text, lang):
         self._deadline(rel)                  # not one more file past the deadline
@@ -3611,7 +3636,7 @@ class _ArtifactScan:
                 self.binaries += 1
                 self.issues.append(disguised)
             elif model is None or model["opaque"]:
-                self.classify(rel, raw, size)
+                self.classify(rel, raw, size, whole=False, walked=getattr(m, "media", None))
             return
         if rel in self.action_meta_paths:
             # the action's action.yml (N-4), read in the second pass (_action_entry_points)

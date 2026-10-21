@@ -385,6 +385,9 @@ pub struct FileIn {
     /// a .pth file too large to read whole, read in chunks (binary::pth_stream): the lines site.py runs and why one
     /// could not be kept, or why it could not be read
     pub pth_lines: Option<Result<(Vec<(u64, Vec<u8>)>, Vec<String>), PyStr>>,
+    /// a file too large to read whole, walked by its structure as its stream passed (media::feed: FP-OPAQUE-MEDIA),
+    /// or why it could not be read
+    pub media: Option<Result<crate::media::Walked, PyStr>>,
 }
 
 /// The languages a dependency tree's files are read in (DEP_LANGS: a package's Go and Rust are its readers').
@@ -586,8 +589,12 @@ pub fn file(p: &Pack, f: &FileIn) -> Value {
             if !agent && crate::pickle::sniff(p, &f.name, head, f.windows) {
                 return model(p, f, head, Done::default());
             }
-            if let Some(bi) = classify(head) {
-                done.issues.push(at(rel, bi));
+            let bi = match classify_read(p, f, head) {
+                Ok(bi) => bi,
+                Err(need) => return need,
+            };
+            if !bi.is_empty() {
+                done.issues.extend(bi.into_iter().map(|i| at(rel, i)));
             } else if (agent || (!f.dep.any() && is_config_file(p, &f.name)))
                 && (head.starts_with(b"\xff\xfe") || head.starts_with(b"\xfe\xff") || !crate::binary::looks_binary(p, head))
             {
@@ -603,8 +610,9 @@ pub fn file(p: &Pack, f: &FileIn) -> Value {
             Some(Ok(h)) => h,
         };
         if crate::binary::mpeg_ts(&head[..head.len().min(377)]) {
-            if let Some(bi) = classify(head) {
-                done.issues.push(at(rel, bi));
+            match classify_read(p, f, head) {
+                Ok(bi) => done.issues.extend(bi.into_iter().map(|i| at(rel, i))),
+                Err(need) => return need,
             }
             return done.value();
         }
@@ -738,6 +746,36 @@ pub fn file(p: &Pack, f: &FileIn) -> Value {
     }
     done.file = Some(Value::obj(entry));
     done.value()
+}
+
+/// binary::classify of a file that is not source, from its first bytes, and the whole file when it needs it
+/// (FP-OPAQUE-MEDIA: a keystore, or a near-random file whose first bytes start a format media.rs walks): read whole
+/// up to the size limit, else walked as its stream passes when the package reads files so ({"need": {"read":
+/// "media"}}: core's _stream_media, npm's streamMedia), else judged by its first bytes (an opaque blob stays one).
+/// Err: what to read next.
+fn classify_read(p: &Pack, f: &FileIn, head: &[u8]) -> Result<Vec<Value>, Value> {
+    use crate::binary::{classify_more, Classified, More};
+    let sample = &head[..head.len().min(8192)];
+    let go = |more: More| classify_more(p, &f.rel, sample, f.size, "repo", f.windows, f.neumaier, more);
+    let got = match go(More::Ask) {
+        Classified::Need if f.size <= f.cap => match &f.data {
+            None => return Err(need("data", f.cap + 1)),
+            Some(Ok(d)) => go(More::Whole(d)),
+            Some(Err(_)) => go(More::No),
+        },
+        Classified::Need if f.ranged => match &f.media {
+            None => return Err(Value::obj(vec![("need", Value::obj(vec![("read", Value::str("media"))]))])),
+            Some(Ok(walked)) => go(More::Walked(walked)),
+            Some(Err(_)) => go(More::No),
+        },
+        Classified::Need => go(More::No),
+        other => other,
+    };
+    Ok(match got {
+        Classified::Issue(v) => vec![v],
+        Classified::Issues(v) => v,
+        _ => Vec::new(),
+    })
 }
 
 /// FP-MODEL-FILES: a model file (pickle/), read for what its pickles would run: a zip (a checkpoint, an .npz) by
@@ -965,7 +1003,7 @@ mod tests {
             let f = FileIn { rel: pystr::u(rel), name: pystr::u(rel.rsplit('/').next().unwrap()), size: data.len() as u64,
                              dep: Dep::Vendor(s("go"), s("vendor")), cap: 1 << 20, config_cap: 1 << 20, windows: false,
                              neumaier: false, redact: true, head: Some(Ok(data.to_vec())), data: Some(Ok(data.to_vec())),
-                             sample: None, ranged: false, ranges: None, rounds: 0, pth_lines: None };
+                             sample: None, ranged: false, ranges: None, rounds: 0, pth_lines: None, media: None };
             let got = file(&p, &f);
             let entry = got.get("file").cloned().expect("a file");
             let field = |k: &str| entry.get(k).and_then(|v| v.as_str()).map(pystr::to_string);

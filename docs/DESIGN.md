@@ -1525,6 +1525,122 @@ run, never unpickling them (`rust/crates/lazaret-engine/src/pickle/`, RUST_ENGIN
   last returned), and none is put in a container it holds (`CYCLE_LOOK` 64 values looked at; one the look cannot
   clear makes the container a suspect whose contents go with the reading), so nothing a reading makes outlives it.
 
+#### Media files and keystores: what a near-random file is (FP-OPAQUE-MEDIA, 0.1.9)
+
+SC-OPAQUE-BLOB (MAJOR: WARN) reports a binary file whose first bytes are near-random (byte entropy over
+`_OPAQUE_ENTROPY`, 7.2 bits, in its first `_OPAQUE_SAMPLE` bytes; at least `_OPAQUE_MIN_SIZE`): encrypted or packed
+data can be a second stage that code decodes and runs. Compressed sound, pictures, video and fonts are near-random
+too, and until 0.1.9 a list of first-bytes signatures (`BENIGN_MAGIC`, a font by its extension) exempted them, so
+that a PNG signature glued onto a payload was quiet while an MP3 that starts at its first frame, with no ID3v2 tag,
+was not. John's fp-tally over 261 GitHub scans (Oct 21) found 3 WARN verdicts SC-OPAQUE-BLOB set, 2 by it alone:
+`music/music1.mp3` (an MP3 with no ID3v2 tag), Pillow's `Tests/images/bw_gradient.imt` (an IM Tools image: a text
+header, then 2,560 bytes of a grey gradient, each of the 256 levels ten times — 7.9 bits a byte and nothing hidden)
+and `signing/tiles-foss-debug.pkcs12` (a debug signing keystore).
+
+- **By structure, never by name.** A near-random file is quiet only when its bytes are a format the engine walks, from
+  the first byte to the last (`rust/crates/lazaret-engine/src/media/`): the chains of MPEG audio and ADTS frames
+  (after their ID3v2 tags; ID3v1, APEv2 and Lyrics3 tags after them), Ogg pages and FLAC frames with their checksums,
+  a transport stream's packets, ISO media boxes (MP4, MOV, M4A, 3GP, HEIC, AVIF, JPEG 2000), RIFF and AIFF chunks
+  (WAV, AVI, WebP, RF64, big-endian RIFX), Matroska and WebM elements (clusters of unknown size too), PNG chunks with
+  their checksums, JPEG segments and their entropy-coded scans (further images after the first, as a multi-picture
+  file has them, and the MP4 a motion photo appends), GIF blocks, an Apple icon's elements; or the directory that
+  names where a file's parts are: TrueType and OpenType fonts and collections, WOFF and WOFF2, BMP (its pixels a JPEG
+  or PNG too), ICO and CUR, TIFF and BigTIFF (with their SubIFD, Exif and GPS directories), ICC profiles, TGA (raw and
+  run-length pixels, version 2's footer and the areas it names); and an IM Tools or Netpbm (PBM, PGM, PPM, PAM)
+  image's header and its width x height pixels. A directory's parts are claimed ranges: the file must hold each, and
+  every byte no part holds must be zero (padding).
+- **Fail closed.** Bytes the structure does not account for — a payload appended, a gap between a directory's parts,
+  a chain broken anywhere, a checksum that does not match, a file cut short, read whole or as its stream passes (but
+  an MP3's or AAC's last frame, after two whole ones), a first-bytes signature glued onto random bytes — leave the
+  file what it was, SC-OPAQUE-BLOB, now saying what it was read as and where it stopped being that ("read as PNG
+  image, it is not one to its end: bytes follow the image's end (IEND) at byte 7028"). So does a file no walker
+  reads. What a format allows past its end is allowed, and zero bytes, which hold nothing.
+- **Bounded (the review of Oct 27).** A walk to the end proves the file has the format's shape, not what its parts
+  hold, so a header and a payload in a part that walks would be quiet; three bounds keep what a real file has and
+  leave the rest opaque, the message naming the part:
+  - *shapes no real file has*: an ISO media file with no file type box (`ftyp`, `styp`, JPEG 2000's signature) and
+    no movie box (`moov`: QuickTime's older files start without `ftyp`), a box of size 0 (to the end) that is not
+    the media data (`mdat`), a PNG with no image data (IDAT), a JPEG image with no frame header (SOF) or no scan
+    (SOS), a GIF with no image, a transport stream with no program association table, a sound whose format names
+    no channels, rate or block size (a WAV's `fmt ` chunk, an AIFF's `COMM`), a font without the tables every font
+    has (`head` or `bhed`, `cmap`, `hhea`, `hmtx`, `maxp`, `name`), a font directory naming a table twice (the
+    re-review of Oct 27: a TrueType or OpenType font's, each font's of a collection, a WOFF's, a WOFF2's, and each
+    font's of a WOFF2 collection, whose own directory lists a table for each of its fonts), a TIFF directory naming a
+    tag twice, an icon whose images overlap;
+  - *free-form parts*, at most `FREE_MAX` (64 KiB) in all and a quarter of the file (`media::free`): ISO media's
+    `free`, `skip`, `wide`, `uuid` and unknown top-level boxes; a PNG's text chunks and those no one registered; a
+    JPEG's comments and the application segments no one registered (JFIF, Exif, XMP, ICC profiles, MPF, JUMBF,
+    Photoshop's and Adobe's are registered); ID3's private (PRIV), object (GEOB) and unknown frames (the tag's frames
+    are read now, its padding must be zero bytes) and a tag written unsynchronised; RIFF's and AIFF's JUNK, padding,
+    application and unknown chunks, and a LIST of no defined type; a TIFF's private tags (32768 and up) but the
+    well-known ones (Exif's, GPS's, IPTC, Photoshop's, ICC, GeoTIFF's, GDAL's, DNG's, ImageJ's and the microscopes');
+    a font's unregistered tables and a WOFF's metadata and private data; Matroska's Void elements and attachments; a
+    GIF's comments, plain text and application extensions but the looping (NETSCAPE2.0) and XMP ones; an Ogg stream
+    whose first packet names no known codec; a FLAC file's application and undefined metadata blocks (its padding must
+    be zero bytes); a TGA's developer area and an ICC profile's tags of no registered signature (`ICC_TAGS`: ICC.1's
+    and the private ones in wide use; the re-review of Oct 27, N4); and the free-form parts of a part walked as a
+    format of its own (an icon's PNG images), which count toward the file's 64 KiB and quarter;
+  - *raw samples*: the formats that store their samples as they are (Netpbm, IM Tools, TGA, an uncompressed BMP, PCM
+    in WAV, RIFX, RF64 and AIFF, and a WAV format of no name) are quiet only when the first `RAW_SAMPLE` (8 KB)
+    bytes of their samples follow one another: the smallest entropy of their differences at lags 1 to 4 under
+    `RAW_MAX_BITS` (7.0 bits a byte; Pillow's real images measure at most 6.5, random bytes 7.98). A noise-like
+    recording (applause) measures as random bytes do, and stays opaque.
+
+  What stays unbounded is what a codec decodes (an MP4's media data, an audio frame, a scan); a payload there is the
+  code that reads it out, which the scan reads.
+- **Formats still taken by their first bytes** (`UNWALKED_MAGIC`): PDF, PostScript and EPS, Photoshop, JPEG 2000's
+  bare codestream, DDS, GIMP's XCF, SGI, Sun raster, FITS, QOI and Radiance images keep 0.1.8's exemption: no walker
+  reads them yet, and leaving them out would make many PDFs opaque (of the 523 PDFs on the build machine, 222 are
+  near-random in the registry's sample, their first 8 KB, and 144 in a project scan's, their first 512 bytes). A
+  payload behind one of these signatures stays quiet, as it was.
+- **Any size.** A file is walked whole when it is read whole (up to the source-size limit; the registry's members
+  up to `MAX_MEMBER`), and as its stream passes when it is larger: the walk is a state machine fed chunks in order
+  (`media::feed`, the `media_stream` call), its state carried by the host between them (a project scan's
+  `collect_file` asks `{"need": {"read": "media"}}`: core's `_stream_media`, npm's `streamMedia`, a MiB a call,
+  passing over what the walk skips, so a 300 MB MP4 is read in a few KB; the registry's `_oversized_member` feeds an
+  archive member's stream as it passes). The host never passes over the file's end: where a part runs past it, the
+  host says the file ends there (its size, or the byte before where the walk goes on, read) and the walk fails (`feed`
+  checks that no part it began runs past the end), but for what a whole walk allows there too (an MP3's or AAC's last
+  frame after two whole ones): streamed or whole, a file walks alike. A format read by a directory that may lie anywhere (TIFF, ICO,
+  ICC) is read whole up to `MAX_CARRY` (1 MiB) when streamed; past it, it stays opaque. A TIFF's walk reads at most
+  `TIFF_ENTRIES` directory entries and `TIFF_VALUES` strip, tile and directory offsets (a million each), and an icon's
+  image once; a directory read as its stream passes (a font's or a collection's tables, a WOFF's, a bitmap's) names
+  at most `MAX_CLAIMS` (65,536) parts, which the walk holds sorted from the last and drops once passed (the re-review
+  of Oct 27, N1: dropping the first of a vector moved every other, so a collection of a thousand fonts of 4,096
+  tables each cost minutes): past them a file stays opaque, so that no file is a walk of hours. The size a directory
+  declares (a WOFF's, a BMP's) is checked at the file's end however its last chunks came (the re-review's N5: an
+  empty chunk before the end passed over it).
+- **Keystores are credential files.** A PKCS#12 keystore (DER: a version 3 PFX whose content is PKCS#7 data or
+  signed data, its unencrypted parts' bags read, BER's indefinite lengths too), a JKS (0xFEEDFEED) or JCEKS
+  (0xCECECECE) keystore (its entries and digest; a JCEKS secret key's SealedObject read as Java's serialization
+  writes it) or a Bouncy Castle BKS keystore (its salt, entries, end mark and MAC), read to its last byte, is
+  **S-SECRET** (`_KEYSTORE_RULE`, `_KEYSTORE_SEALED_RULE`, `_KEYSTORE_CERTS_RULE`): BLOCKER when it holds a private
+  or secret key in the clear part of its structure (JKS's and BKS's entry types, PKCS#12's key, shrouded-key and
+  secret bags), MAJOR when its entries are encrypted whole (keytool's PKCS#12 truststore: it may hold a key), INFO
+  for certificates alone (a truststore). S-SECRET is the credential family: report-only, never a registry's verdict
+  (SECRET_RULES; INFO in test code), BLOCKER in a project scan as a key in a `.pem` is (S-TOKEN). It is not hidden
+  code: a keystore read to its end is not SC-OPAQUE-BLOB; one with bytes after its end, or cut short, is no keystore
+  and stays opaque. A keystore is read whole, at most `KEYSTORE_MAX_BYTES` (4 MiB). Its parts have their shapes (the
+  review of Oct 27): a certificate is a DER Certificate spanning its bytes (a CRL a DER CRL), an encrypted key an
+  EncryptedPrivateKeyInfo, a key in the clear a PrivateKeyInfo (a BKS public key a SubjectPublicKeyInfo), a signed
+  PKCS#12's content is read as an unsigned one's; a shell around random bytes is no keystore. The bytes no structure
+  reads (encrypted data, a key's or a secret's bytes, a signature) are counted: past `KEYSTORE_ELEMENT_MAX_BYTES`
+  (16 KiB) in one part or `KEYSTORE_OPAQUE_MAX_BYTES` (1 MiB) in all, SC-OPAQUE-BLOB stands beside S-SECRET (the
+  `binary_classify` call answers with both; an RSA-16384 key is under 10 KB, a JDK trust store's certificates are in
+  the clear). A certificate is read for its shape, not its fields (the re-review of Oct 27, N2), so every byte of it
+  counts toward the total (the coordinator's ruling of Oct 27: a store of made-up certificates carries no more than
+  `KEYSTORE_OPAQUE_MAX_BYTES`), and its signature with its bytes past `CERTIFICATE_MAX` (16 KiB: real ones are 1 to
+  2 KB) is one part; an alias, and any other value
+  nothing reads — a PKCS#12's MAC salt, a bag's attributes, an algorithm's parameters, a signer's names, a recipient's
+  key, a serialized object's strings and names — counts past `NAME_MAX` (256) bytes, and a serialized object's
+  arrays count whole, as its byte arrays did. The JDK's `cacerts` (123 certificates: 133,175 bytes counted, its
+  largest part 513) and the 436 PKCS#12 files of `cryptography_vectors` stay under both bounds.
+- **Routes.** `binary.rs`'s `classify_more` (the `binary_classify` call's `whole`, `walked` and `more`): a file whose
+  first bytes would make it an opaque blob and start a walked format, or a keystore, needs the whole file (`Need`);
+  collect.rs's `classify_read` reads it whole or streams it; core's `classify_binary(whole=, walked=)` and npm's
+  `classifyBinary(…, {whole})` hand it over only when the first call asks; the registry passes a member whole, or
+  the walk of an oversized one's stream. One engine for both packages and the dashboard.
+
 ### e. Registry auditing (`lazaret.registry`) and SCA
 
 `lazaret-registry` fetches and audits an npm/PyPI artifact with the same rule

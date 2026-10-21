@@ -229,7 +229,9 @@ ADVERSARIAL = {
     # inline os import; a name hidden in a few escapes; decode-then-run through indirect eval
     "ts/esm.mts": "const el = <HTMLInputElement>document.body;\n// eval(z)\neval(atob(p));\n",
     "ts/cjs.cts": "const cp = require('child_process');\ncp.exec(process.argv[2]);\n",
-    "media/clip.mts": b"".join(b"\x47" + bytes((k * 7 + n) % 256 for n in range(187)) for k in range(40)),
+    # (a transport stream, its program association table first: ffmpeg's)
+    "media/clip.mts": bytes.fromhex("474000100000b00d0001c100000001f0002ab104b2") + b"\xff" * 167
+    + b"".join(b"\x47" + bytes((k * 7 + n) % 256 for n in range(187)) for k in range(40)),
     "dist/app.jsc": b"\x00\x01bytenode\x02" * 10,
     "py/inline_os.py": "__import__('os').system(input())\n",
     "hide/names.js": 'var m = global["\\x72\\x65\\x71\\x75\\x69\\x72\\x65"]("child_process");\n',

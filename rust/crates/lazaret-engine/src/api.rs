@@ -92,6 +92,9 @@ pub const CALLS: &[&str] = &[
     // 0.1.9 (FP-MODEL-FILES): a model file's pickles read for what they would run (pickle/), and the globals of the
     // package's own modules the scan's model files import
     "model_sniff", "model_file", "model_own", "pth_stream", "pth_kept",
+    // 0.1.9 (FP-OPAQUE-MEDIA): a sound, video, image or font file walked by its structure to its end (media/), whole or
+    // as its stream passes
+    "media_walk", "media_stream",
     // BR-7 step 3 e: --deps' decisions (deps.rs; the packages answer what the calls ask of the tree)
     "deps_hooks", "deps_script", "deps_targets", "deps_files", "dep_file_issues", "declared_names",
     "agent_issue",
@@ -231,6 +234,103 @@ fn pth_state_arg(v: Option<&Value>) -> Result<crate::binary::PthStream, CallErro
                                   kept: v.get("kept").and_then(|x| x.as_i64()).unwrap_or(0).max(0) as u64, full: b("full") })
 }
 
+/// A media walk's answer as JSON: {"is": kind}, {"not": kind, "why"}, {"unknown": true}.
+pub fn walked_value(w: &crate::media::Walked) -> Value {
+    use crate::media::Walked;
+    match w {
+        Walked::Is(k) => Value::obj(vec![("is", Value::str(k))]),
+        Walked::Not(k, why) => Value::obj(vec![("not", Value::str(k)), ("why", Value::str(why))]),
+        Walked::Unknown => Value::obj(vec![("unknown", Value::Bool(true))]),
+    }
+}
+
+/// walked_value's JSON back.
+pub fn walked_arg(v: &Value) -> Result<crate::media::Walked, CallError> {
+    use crate::media::Walked;
+    let s = |k: &str| v.get(k).and_then(|x| x.as_str()).map(crate::pystr::to_string);
+    if let Some(k) = s("is") {
+        return Ok(Walked::Is(k));
+    }
+    if let Some(k) = s("not") {
+        return Ok(Walked::Not(k, s("why").unwrap_or_default()));
+    }
+    if matches!(v.get("unknown"), Some(Value::Bool(true))) {
+        return Ok(Walked::Unknown);
+    }
+    Err(CallError::BadArgs("a walk is {is}, {not, why} or {unknown}".into()))
+}
+
+/// A media walk's state as JSON, for the host to give back with the next chunk (every number below 2^53).
+fn media_state_value(w: &crate::media::Walker) -> Value {
+    let n = |v: u64| Value::Int(if v == u64::MAX { -1 } else { v as i64 });
+    Value::obj(vec![
+        ("fmt", Value::Int(w.fmt as i64)),
+        ("phase", Value::Int(w.phase as i64)),
+        ("at", n(w.at)),
+        ("fed", n(w.fed)),
+        ("carry", Value::Str(w.carry.iter().map(|&b| b as u32).collect())),
+        ("n", Value::Arr(w.n.iter().map(|&v| n(v)).collect())),
+        ("x", Value::Arr(w.x.iter().map(|&v| n(v)).collect())),
+        ("crc", Value::Int(w.crc as i64)),
+        ("claims", Value::Arr(w.claims.iter().map(|&(a, b)| Value::Arr(vec![n(a), n(b)])).collect())),
+        ("free", n(w.free)),
+        ("freeWhat", Value::str(&w.free_what)),
+        ("kind", Value::str(&w.kind)),
+        ("why", Value::str(&w.why)),
+        ("end", match &w.end {
+            None => Value::Null,
+            Some(Ok(())) => Value::obj(vec![("ok", Value::Bool(true))]),
+            Some(Err(why)) => Value::obj(vec![("fail", Value::str(why))]),
+        }),
+    ])
+}
+
+/// media_state_value's JSON back (null: a walk's start).
+fn media_state_arg(v: Option<&Value>) -> Result<crate::media::Walker, CallError> {
+    let Some(v @ Value::Obj(_)) = v else { return Ok(crate::media::Walker::new()) };
+    let bad = || CallError::BadArgs("a media walk's state is media_stream's last answer's".into());
+    let n = |x: Option<&Value>| -> Result<u64, CallError> {
+        match x.and_then(|x| x.as_i64()) {
+            Some(-1) => Ok(u64::MAX),
+            Some(i) if i >= 0 => Ok(i as u64),
+            _ => Err(bad()),
+        }
+    };
+    let text = |k: &str| v.get(k).and_then(|x| x.as_str()).map(crate::pystr::to_string).unwrap_or_default();
+    let mut w = crate::media::Walker::new();
+    w.fmt = u8::try_from(n(v.get("fmt"))?).map_err(|_| bad())?;
+    w.phase = u8::try_from(n(v.get("phase"))?).map_err(|_| bad())?;
+    w.at = n(v.get("at"))?;
+    w.fed = n(v.get("fed"))?;
+    w.carry = match v.get("carry") {
+        Some(Value::Str(t)) => crate::binary::bytes_of(t).ok_or_else(bad)?,
+        _ => return Err(bad()),
+    };
+    let ns = v.get("n").and_then(|x| x.as_arr()).filter(|a| a.len() == 8).ok_or_else(bad)?;
+    for (k, x) in ns.iter().enumerate() {
+        w.n[k] = n(Some(x))?;
+    }
+    let xs = v.get("x").and_then(|x| x.as_arr()).filter(|a| a.len() == 4).ok_or_else(bad)?;
+    for (k, x) in xs.iter().enumerate() {
+        w.x[k] = n(Some(x))?;
+    }
+    w.free = n(v.get("free"))?;
+    w.free_what = text("freeWhat");
+    w.crc = u32::try_from(n(v.get("crc"))?).map_err(|_| bad())?;
+    for c in v.get("claims").and_then(|x| x.as_arr()).ok_or_else(bad)? {
+        let a = c.as_arr().filter(|a| a.len() == 2).ok_or_else(bad)?;
+        w.claims.push((n(a.first())?, n(a.get(1))?));
+    }
+    w.kind = text("kind");
+    w.why = text("why");
+    w.end = match v.get("end") {
+        None | Some(Value::Null) => None,
+        Some(e) if matches!(e.get("ok"), Some(Value::Bool(true))) => Some(Ok(())),
+        Some(e) => Some(Err(e.get("fail").and_then(|x| x.as_str()).map(crate::pystr::to_string).ok_or_else(bad)?)),
+    };
+    Ok(w)
+}
+
 /// [[line, latin-1 text]] as (line, bytes).
 pub fn pth_lines_arg(v: Option<&Value>) -> Result<Vec<(u64, Vec<u8>)>, CallError> {
     v.and_then(|x| x.as_arr()).unwrap_or(&[]).iter().map(|x| {
@@ -301,7 +401,8 @@ fn collect_call(p: &Pack, name: &str, args: &Value, text: &[u32]) -> Result<Valu
             // "manifest", "config", "pth", "model"}. The ranges' answer is [[offset, length]] of every range read so
             // far, their bytes the call's text one after another, and `rounds` how many times they were asked for; a
             // .pth file too large to read whole ({read: "pth"}) is read in chunks through pth_stream, its answer
-            // {lines: [[line, latin-1 text]], cuts: [why]} or {error}.
+            // {lines: [[line, latin-1 text]], cuts: [why]} or {error}; one walked as its stream passes ({read:
+            // "media"}: FP-OPAQUE-MEDIA) through media_stream, its answer the walk's end or {error}.
             let ranges = match answers.and_then(|x| x.get("ranges")) {
                 None | Some(Value::Null) => None,
                 Some(Value::Arr(layout)) => {
@@ -324,7 +425,15 @@ fn collect_call(p: &Pack, name: &str, args: &Value, text: &[u32]) -> Result<Valu
                 },
                 _ => return Err(CallError::BadArgs("a .pth file read in chunks is {lines, cuts} or {error}".into())),
             };
+            let media = match answers.and_then(|x| x.get("media")) {
+                None | Some(Value::Null) => None,
+                Some(o) => match o.get("error") {
+                    Some(e) => Some(Err(e.as_str().map(|s| s.to_vec()).unwrap_or_default())),
+                    None => Some(Ok(walked_arg(o)?)),
+                },
+            };
             let f = collect::FileIn {
+                media,
                 pth_lines,
                 ranged: flag("ranges"),
                 ranges,
@@ -1181,11 +1290,34 @@ fn dispatch(name: &str, args: &Value, text: &[u32]) -> Result<Value, CallError> 
                     "program" => Value::Bool(binary::native_program(p, &data)),
                     other => return Err(CallError::BadArgs(format!("binary_check: no check {other:?}"))),
                 },
-                // {path, size, context, windows, neumaier} -> core.classify_binary's issue, or null
+                // {path, size, context, windows, neumaier, whole, walked, more} -> core.classify_binary's issue, or null.
+                // FP-OPAQUE-MEDIA: `whole`, the text is the whole file (its first 8,192 bytes the sample); `walked`, a
+                // walk of it as its stream passed (media_stream's end); `more`, the caller can give either, and is
+                // asked: {"need": "whole"}
                 "binary_classify" => {
                     let context = opt_str(args, "context").map(|c| crate::pystr::to_string(&c)).unwrap_or_default();
                     let size = opt_int(args, "size").unwrap_or(data.len() as i64).max(0) as u64;
-                    or_null(binary::classify(p, &path, &data, size, &context, flag("windows"), flag("neumaier")))
+                    let walked = match args.get("walked") {
+                        None | Some(Value::Null) => None,
+                        Some(v) => Some(walked_arg(v)?),
+                    };
+                    let sample = &data[..data.len().min(8192)];
+                    let more = if flag("whole") {
+                        binary::More::Whole(&data)
+                    } else if let Some(w) = &walked {
+                        binary::More::Walked(w)
+                    } else if flag("more") {
+                        binary::More::Ask
+                    } else {
+                        binary::More::No
+                    };
+                    match binary::classify_more(p, &path, sample, size, &context, flag("windows"), flag("neumaier"), more) {
+                        binary::Classified::Issue(v) => v,
+                        // (a keystore that is an opaque blob too: both findings)
+                        binary::Classified::Issues(v) => Value::Arr(v),
+                        binary::Classified::Quiet => Value::Null,
+                        binary::Classified::Need => Value::obj(vec![("need", Value::str("whole"))]),
+                    }
                 }
                 // {path, windows} -> core.disguised_binary's issue, or null
                 "binary_disguised" => or_null(binary::disguised(p, &path, &data, flag("windows"))),
@@ -1245,6 +1377,29 @@ fn dispatch(name: &str, args: &Value, text: &[u32]) -> Result<Value, CallError> 
             }).collect();
             Value::Arr(crate::pickle::own_imports(p, &models, &files).into_iter()
                 .map(|(path, issue)| Value::Arr(vec![Value::Str(path), issue])).collect())
+        }
+        "media_walk" => {
+            // a whole file as latin-1 text -> what it is, walked by its structure to its end (media::walk):
+            // {"is": kind}, {"not": kind, "why"} or {"unknown": true}
+            let data = crate::binary::bytes_of(text)
+                .ok_or_else(|| CallError::BadArgs("the bytes come as latin-1 text: a character past U+00FF".into()))?;
+            walked_value(&crate::media::walk(&data))
+        }
+        "media_stream" => {
+            // {state: null or the last answer's, offset, eof} + the next chunk of a file, from `offset` (where the last
+            // one ended, or the answer's `next` when the host passes over the bytes the walk skips), as latin-1 text
+            // -> {"state", "next": the offset of the next byte the walk reads, "end": null while it runs, else
+            // media_walk's answer}
+            let data = crate::binary::bytes_of(text)
+                .ok_or_else(|| CallError::BadArgs("the bytes come as latin-1 text: a character past U+00FF".into()))?;
+            let mut w = media_state_arg(args.get("state"))?;
+            let offset = opt_int(args, "offset").unwrap_or(0).max(0) as u64;
+            crate::media::feed(&mut w, offset, &data, flag(args, "eof", false));
+            Value::obj(vec![
+                ("next", Value::Int(w.at.min(crate::media::MAX_OFFSET) as i64)),
+                ("end", w.walked().as_ref().map_or(Value::Null, walked_value)),
+                ("state", media_state_value(&w)),
+            ])
         }
         "pth_stream" => {
             // {state: null or the last answer's, end} + the next chunk of a .pth file too large to read whole, as

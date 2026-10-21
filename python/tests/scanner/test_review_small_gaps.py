@@ -26,8 +26,10 @@ from lazaret.registry import repo
 from lazaret.scanner import core
 from tests.registry._review_support import issues, scan_npm
 
-#: an MPEG transport stream: a sync byte (0x47) every 188 bytes
-VIDEO = b"".join(b"\x47" + bytes((k * 7 + n) % 256 for n in range(187)) for k in range(40))
+#: an MPEG transport stream: a sync byte (0x47) every 188 bytes, its program association table first (ffmpeg's: a
+#: stream without one is no video, FP-OPAQUE-MEDIA's review of Oct 27)
+PAT = bytes.fromhex("474000100000b00d0001c100000001f0002ab104b2") + b"\xff" * 167
+VIDEO = PAT + b"".join(b"\x47" + bytes((k * 7 + n) % 256 for n in range(187)) for k in range(40))
 
 
 def make_tree(files):

@@ -2008,6 +2008,95 @@ aggregate):
   dashboard's folder test held `z.py` beside `Z.py`, which a Mac's folder cannot: that pair is now a folder of its own,
   compared where the disk holds both and skipped where it cannot.
 
+- **A sound, video, image or font file is read by its structure to its end, and a keystore is a credential file
+  (FP-OPAQUE-MEDIA, John's decision of Oct 21; rule set 2.108.0).** SC-OPAQUE-BLOB (MAJOR) reports a
+  binary file whose first bytes are near-random, as encrypted or packed data is; compressed media are too, and a list
+  of first-bytes signatures exempted them (a font by its extension). John's fp-tally over 261 GitHub scans found 3
+  WARN verdicts SC-OPAQUE-BLOB set, 2 by it alone: `music/music1.mp3` (an MP3 that starts at its first frame, with no
+  ID3v2 tag, which no signature named), Pillow's `Tests/images/bw_gradient.imt` (an IM Tools image: a text header,
+  then 2,560 bytes of a grey gradient, each of the 256 levels ten times: 7.9 bits a byte and nothing hidden; not a
+  name exemption: it is recognised by its header and its exact pixel count) and `signing/tiles-foss-debug.pkcs12` (a
+  debug signing keystore). A near-random file is now quiet only when its bytes are a format the engine walks, from the
+  first byte to the last (`rust/crates/lazaret-engine/src/media/`, never the name): MPEG audio and AAC (ADTS) frames
+  after their ID3v2 tags (ID3v1, APEv2 and Lyrics3 after them), Ogg pages and FLAC frames with their checksums, ISO
+  media boxes (MP4, MOV, M4A, 3GP, HEIC, AVIF, JPEG 2000), Matroska and WebM elements, RIFF (WAV, AVI, WebP, RF64,
+  big-endian RIFX) and AIFF chunks, transport-stream packets, PNG chunks with their checksums, JPEG segments and
+  scans, GIF blocks, BMP, TIFF and BigTIFF, ICO and CUR, TGA, Apple icons, ICC profiles, TrueType and OpenType fonts
+  and collections, WOFF and WOFF2, IM Tools and Netpbm (PBM, PGM, PPM, PAM) images. It fails closed: a payload
+  appended, a gap between a directory's parts, a chain or checksum broken, a file cut short (read whole or as its
+  stream passes: the host never passes over a file's end, and a part that runs past it fails the walk), a format's
+  signature glued onto random bytes stay SC-OPAQUE-BLOB, whose message now says what the file was read as and where it
+  stopped being that; so does a file of no format walked. PNG's, JPEG's, a font's and the other walked formats' first
+  bytes no longer exempt a file by themselves; PDF, PostScript, Photoshop, DDS, GIMP's, SGI's, Sun's, FITS, QOI,
+  Radiance and bare JPEG 2000 codestreams still do (`UNWALKED_MAGIC`), as before: no walker reads them yet. A file too
+  large to read whole is walked as it is read, passing over what the walk skips. A walk to the end proves a file's
+  shape, not what its parts hold, so it is bounded (the review of Oct 27), and a header and a payload are quiet only
+  within the bounds. Shapes no real file has are opaque: an ISO media file with neither a file type box nor a movie
+  box, a box of size 0 that is not the media data, a PNG with no IDAT, a JPEG image with no frame header or no scan, a
+  GIF with no image, a transport stream with no program association table, a sound whose format names no channels,
+  rate or block size, a font without the tables every font has, a TIFF directory naming a tag twice, an icon whose
+  images overlap. The parts a format leaves free-form hold at most 64 KiB in all and a quarter of the file; past that
+  the file stays SC-OPAQUE-BLOB, its message naming the part: ISO media's `free`, `skip`, `wide`, `uuid` and unknown
+  boxes; PNG's text, private and unregistered chunks; JPEG's comments and unregistered application segments; ID3's
+  private (PRIV), object (GEOB) and unknown frames (its frames are read now, its padding must be zero bytes); RIFF's
+  and AIFF's JUNK and unknown chunks; TIFF's private tags but the well-known ones; a font's unregistered tables;
+  Matroska's Void elements and attachments; GIF's comments and application extensions but the looping and XMP ones; an
+  Ogg stream of no known codec; FLAC's application blocks (its padding must be zero bytes). The formats that store
+  their samples as they are (Netpbm, IM Tools, TGA, an uncompressed BMP, PCM in WAV, RIFX, RF64 and AIFF) are quiet
+  only when their first 8 KB of samples follow one another (the smallest entropy of their differences at lags 1 to 4
+  is under 7.0 bits a byte). What a codec decodes (an MP4's media data, an audio frame, a JPEG's scan, a WAV of a
+  coded format's data) stays unbounded: a payload there needs code to read it out, which the scan reads. A TIFF's walk
+  reads at most a million directory entries and a million offsets, an icon's image once. A PKCS#12, JKS, JCEKS or BKS
+  keystore read to its end is **S-SECRET**, listed as secrets are and never a registry's verdict: BLOCKER when it
+  holds a private or secret key in the clear part of its structure, MAJOR when its entries are encrypted whole, INFO
+  for certificates alone; not an opaque blob. Each part has its shape (a certificate a DER Certificate spanning its
+  bytes, an encrypted key an EncryptedPrivateKeyInfo, a signed PKCS#12's content read as an unsigned one's), and
+  SC-OPAQUE-BLOB stands beside S-SECRET when one part no structure reads (encrypted data, a key's or a secret's bytes)
+  is over 16 KiB or all of them over 1 MiB. Measured by route (project scan, `--deps`, the registry's sdist, wheel and
+  npm tarball, the npm CLI and its `--deps`; the native and WebAssembly engines alike): the 44 files ffmpeg, Pillow
+  and fontTools wrote (`tests/fixtures/media`: from seeded noise, the raw formats' from a signal, as a real picture's
+  or sound's samples are), 7 or 8 SC-OPAQUE-BLOB → none; the same files' first 64 bytes glued onto random bytes, 9 →
+  43 (the 44th, a transport stream named `.ts`, is TypeScript to the scan, as before); with 2 KB of random bytes
+  appended, 7 → 21 in a project scan, whose sample is a file's first 512 bytes (the other 23 begin with headers that
+  are not near-random, before as now), and 8 → 40 in the registry, whose sample is 8 KB; seven keystores, 5
+  SC-OPAQUE-BLOB and 2 quiet → S-SECRET (4 BLOCKER, 1 MAJOR, 2 INFO), a registry verdict WARN → OK; the tally's three
+  shapes WARN → OK; the review's 33 media and 5 keystore probes (a payload in a free-form part, a raw image or sound
+  of random bytes, a size-0 box, a PNG with no image data, a font of one table, a keystore's shell around random
+  bytes, a file claiming 1 GB and cut short) all SC-OPAQUE-BLOB but the codecs' data (MP3 and AAC frames, an MP4's
+  media data), two whose first bytes are not near-random (the sample's limit, as at the base) and a keystore's secret
+  entry under 16 KiB (S-SECRET). 2,311 real files on the build machine (Pillow's and Go's test images, scipy's WAVs,
+  system and TeX fonts, keystores made with keytool and OpenSSL, the JDK's trust store), classified as the registry
+  does: of 40 SC-OPAQUE-BLOB, 23 quiet (14 TGA, Netpbm, BigTIFF, the IM Tools image), 8 S-SECRET, 9 still opaque (BLP,
+  FLI, a tar, a PNG broken on purpose renamed `.bin`, and scipy's 32-bit RIFX and RF64 test WAVs, whose samples are
+  near-random: 7.50 bits a byte from one to the next); 16 newly opaque: 13 images Pillow's tests break on purpose (cut
+  short, a changed checksum, junk in a JPEG's header, fuzzers' crash files, an old-style JPEG TIFF that names a tag
+  twice, a cut Ultra HDR sample), scipy's 32-bit little-endian test WAV and LibreOffice's `applause.wav` (7.67 bits: a
+  recording like noise measures as random bytes do), a cost of the raw-sample bound: 7 of the 49 WAVs measure as
+  near-random, these 3 and the 4 still opaque; 1,933 of the 2,311 files walk to their end. Pillow's checkout, as the
+  GitHub scan reads it: WARN by 5 SC-OPAQUE-BLOB (the .imt, four TGAs) → WARN by 4 (its PNGs broken on purpose). The
+  19 TrueType fonts of react-native-vector-icons 10.3.0 walk to their end. The reviewer's PyPI sdists (mutagen,
+  fonttools, scikit-image, matplotlib, Pillow) and npm tarballs (font-awesome, bootstrap-icons, @fontsource/roboto,
+  pdfjs-dist, leaflet, ion-sound): no new finding; ion-sound WARN → OK. Classifying the 2,311 files (260 MB) takes 1.1
+  s, from 0.2 s: a candidate is now read whole. Bounded further (the re-review of Oct 27): a font collection's walk
+  passes its tables in linear time (it dropped the first of a vector of parts, which moved every other: 64 fonts of
+  4,096 one-byte tables took 19 s to walk, a 16 MB collection minutes), a font directory naming a table twice is no
+  font's (a TrueType or OpenType font's, each of a collection's, a WOFF's, a WOFF2's, each font's of a WOFF2
+  collection), and a directory read as its stream passes names at most `MAX_CLAIMS` (65,536) parts, past which the
+  file stays opaque; a keystore's certificates are counted, each whole toward the 1 MiB total and its signature with
+  its bytes past 16 KiB as one part, and so are an alias's bytes past 256 and those of any other value no structure
+  reads (a MAC's salt, a bag's attributes, an algorithm's parameters, a signer's names, a serialized object's
+  strings; its arrays whole); the free-form parts of an icon's PNG images count toward the icon's 64 KiB and quarter,
+  and so do a TGA's developer area and an ICC profile's tags of no registered signature (`ICC_TAGS`); the size a WOFF,
+  WOFF2 or BMP declares is checked at the file's end however its last chunks came (an empty chunk before the end
+  passed it over: `noise.woff2` cut by one
+  byte was opaque whole and quiet streamed). The re-review's collections of 16, 32 and 64 fonts and of 16 MB walk in
+  0.02, 0.03, 0.04 and 0.15 s natively (from 0.69, 3.0, 19 s and over 45) and 0.09, 0.10, 0.17 and 0.36 s in
+  WebAssembly (from 0.77, 3.3, 19 s and over 45); the npm tarball holding one takes 0.85, 1.5, 2.7 and 9.3 s (the base
+  1.8, 1.5, 2.7 and 8.7; before, 1.5, 4.4, 24 and 8.8), and they are SC-OPAQUE-BLOB. No answer moved for the reviews'
+  probes on any route, nor for 7,350 real files walked (Pillow's test images, fontTools' fonts, mutagen's and
+  pymediainfo's tests, seven npm packages, 52 ICC profiles, the system's fonts with Noto's CJK collections) and 460
+  keystores (436 `cryptography_vectors` PKCS#12 files, 23 from keytool, OpenSSL and the JDK, the system's `cacerts`:
+  123 certificates, 133,175 bytes counted of 1 MiB, the largest part 513 of 16 KiB).
 - **A model file is read for what loading it runs, not reported as an embedded archive (FP-MODEL-FILES, John's OK of
   Oct 20; rule set 2.104.0).** scan-all's run of Oct 20 gave `github:ObsidianArch02/fireredasr2s-mlx`
   WARN for one finding, SC-NESTED-ARCHIVE on `golden/golden.pt`: a PyTorch checkpoint is a zip by design, so every
