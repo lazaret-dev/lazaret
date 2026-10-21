@@ -1223,6 +1223,23 @@ aggregate):
 
 ### Changed
 
+- **Scan-all lists a repository's own workflow hygiene as INFO (SCANALL-HYGIENE; John's decision of Oct 21, "INFO
+  in scan-all only"; no rule-set change — Python registry code).** Scan-all reads random new repositories for hostile
+  ones; an action not pinned, a workflow's token permissions, a cache in a release and an OIDC token where
+  dependencies install (SC-WORKFLOW-UNPINNED, -PERMISSIONS, -CACHE, -OIDC-INSTALL) are the owner's configuration
+  risks, not signs of that. In a repository scan-all queued, such a finding at MAJOR or MINOR is now stored and
+  reported as INFO, its message ending "(scan-all: the owner's workflow configuration, MAJOR in a project scan:
+  listed, not counted)"; the scan's verdict reason, and an OK scan's line, say how many were listed as INFO, as the
+  owner's configuration. **No verdict changes:** these four are CI hardening checks, which a GitHub repository's
+  registry verdict has counted only at CRITICAL since GH-NEW-REPOS (Oct 14), and the engine grades none of them
+  CRITICAL; so `--ci`, the candidates' verdicts and `list` are as before, and a repository's WARN beside them was
+  always another rule's. What changes is the record: the stored findings and counts say what they are, and a tally of
+  the stored findings by severity no longer reads them as setting verdicts. Exactly these four, in scan-all's own
+  repositories: SC-WORKFLOW-PR-CHECKOUT (still SUSPICIOUS), SC-WORKFLOW-SECRETS and every other finding count as
+  before; a filter's candidate (look-alikes, copies, your patterns), `lazaret-registry scan github:`, `lazaret scan`
+  (and `lazaret scan github:`) and package scans grade the four as before. Scans stored before keep their findings
+  as stored: scan-all scans a repository once, and a rescan (`scan github:owner/repo@commit --rescan`) is not
+  scan-all.
 - **One reader of CI files, the engine's (BR-7, step 1).** GitHub Actions workflows (SC-WORKFLOW-*) and GitLab CI
   files (SC-GITLAB-*) are read by the native engine for both packages (`rust/crates/lazaret-engine/src/ci/`, the
   `ci_*` calls), where `scanner/ghworkflow.py` and `gitlabci.py` and their npm twins `js/src/lib/ghworkflow.js` and

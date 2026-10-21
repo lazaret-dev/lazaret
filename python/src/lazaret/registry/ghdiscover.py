@@ -52,7 +52,12 @@ hours old when found, would lose to each new hour's (John, Oct 20); the rest new
 them, a share not used going to the other. The queue keeps the QUEUE_MAX newest pushes and, apart, the QUEUE_MAX
 late finds found last, and the rest are skipped, counted: some ten thousand repositories are created an hour, more
 than one token's requests can scan, so the run says what share it covered. A repository is scanned once, when it is
-first seen with code.
+first seen with code. Its own workflow hygiene (SCAN_ALL_HYGIENE_RULES: an action not pinned, the token's
+permissions, a cache in a release, an OIDC token where dependencies install) is its owner's configuration, not a sign
+that it is hostile, so scan-all lists it as INFO (SCANALL-HYGIENE; John, Oct 21: "INFO in scan-all only"), each such
+finding's message saying so and what a project scan grades it, and the verdict's reason how many: stored, reported,
+and no verdict set, as below CRITICAL it never set one (item 4). A filter's candidate, `lazaret-registry scan github:`
+and every other scan grade them as before.
 
 GraphQL (GH-SCAN-GQL, 0.1.9; John's choice of Oct 18, when GH Archive's hour 2026-10-17-4 held 6,044 events and no
 PushEvent or CreateEvent at all, so that three hours queued nothing that got code, and OpenDigger's mirror sent his
@@ -235,6 +240,15 @@ LISTING_PROGRESS_EVERY = 25
 SHOWN_GAPS = 5
 #: a scan's answers that mean the repository is gone, made private (404) or empty (409: no commit to read)
 GONE = (404, 409)
+#: SCANALL-HYGIENE (John's decision of Oct 21, "INFO in scan-all only"): the CI hardening checks that are a
+#: repository's own workflow configuration, its owner's risk and no sign that the repository is hostile. In scan-all's
+#: own repositories (repo._scan_all_row: a filter "all: …") such a finding below CRITICAL is listed as INFO, its
+#: message saying so and what a project scan grades it (HYGIENE_NOTE), and the verdict's reason counts them. Exactly
+#: these four: SC-WORKFLOW-PR-CHECKOUT, SC-WORKFLOW-SECRETS and every other rule are graded as before, and so is
+#: every finding of a filter's candidate, of `lazaret-registry scan github:`, of `lazaret scan` and of a package scan
+SCAN_ALL_HYGIENE_RULES = frozenset({"SC-WORKFLOW-UNPINNED", "SC-WORKFLOW-PERMISSIONS", "SC-WORKFLOW-CACHE",
+                                    "SC-WORKFLOW-OIDC-INSTALL"})
+HYGIENE_NOTE = " (scan-all: the owner's workflow configuration, {sev} in a project scan: listed, not counted)"
 #: what a queued repository's `filters` says
 ALL_PUSHED = "all: got code (GH Archive)"
 ALL_PUBLIC = "all: made public (GH Archive)"
@@ -631,24 +645,30 @@ def _checked(store, cand, doc):
     return "waiting"
 
 
-def scan_repository(full_name, ref=None, *, env=None, http=None, shown=None):
+def scan_repository(full_name, ref=None, *, env=None, http=None, shown=None, scan_all=False):
     """github:full_name at `ref` (the default branch's head when None), fetched and scanned as a project: -> (the
     registry result, the checkout's API calls). `shown` (--show-secrets): filled with each finding's flagged line as
-    read, for the terminal alone (core.scan_project)."""
+    read, for the terminal alone (core.scan_project). `scan_all`: the repository is scan-all's own (`result`)."""
     ck = sources.checkout(f"github:{full_name}" + (f"@{ref}" if ref else ""), env=env, http=http)
     try:
-        return result(full_name, ck, shown), len(ck.calls)
+        return result(full_name, ck, shown, scan_all=scan_all), len(ck.calls)
     finally:
         ck.cleanup()
 
 
-def result(full_name, ck, shown=None):
-    """The registry's result for a checkout (the shape Store.save_scan and print_scan take)."""
+def result(full_name, ck, shown=None, scan_all=False):
+    """The registry's result for a checkout (the shape Store.save_scan and print_scan take). With `scan_all` (a
+    repository scan-all queued, not a filter's candidate nor `scan github:`), its own workflow hygiene is listed as
+    INFO (SCANALL-HYGIENE, `_hygiene_listed`): the result's `hygieneInfo` counts it by rule, and the verdict's reason
+    says so. Below CRITICAL it was never counted (core.HARDENING_RULES, below): the verdict is the same either way."""
     issues, truncated, reason_more = _project_issues(ck, shown)
+    hygiene = _hygiene_listed(issues) if scan_all else {}
     counted = [i for i in issues if i["rule"] not in core.HARDENING_RULES or i["sev"] == "CRITICAL"]
     verdict, reason, strong, weak = _repo.decide_verdict(counted, truncated)
     if reason_more:
         reason += "; not read whole: " + "; ".join(reason_more)
+    if hygiene:
+        reason += "; " + hygiene_said(hygiene)
     sev_counts = {s: 0 for s in core.SEV_ORDER}
     for i in issues:
         sev_counts[i["sev"]] += 1
@@ -657,8 +677,32 @@ def result(full_name, ck, shown=None):
             "sevCounts": sev_counts, "supplyChain": strong + weak, "strongIndicators": strong,
             "weakIndicators": weak, "truncated": truncated, "verdict": verdict, "verdictReason": reason,
             "issues": core.redact_result({"issues": issues})["issues"], "artifacts": [],
-            "location": f"https://github.com/{full_name}/tree/{ck.commit}",
+            "location": f"https://github.com/{full_name}/tree/{ck.commit}", "hygieneInfo": hygiene,
             "scannedAt": datetime.datetime.now(UTC).isoformat(timespec="seconds")}
+
+
+def _hygiene_listed(issues):
+    """SCANALL-HYGIENE: a scan-all repository's own workflow hygiene (SCAN_ALL_HYGIENE_RULES at MAJOR or MINOR) made
+    INFO in `issues`, each message saying so and what a project scan grades it, and the findings put back in their
+    severities' order (core.SEV_ORDER; the order is otherwise kept) -> {rule: findings made INFO}. A CRITICAL one
+    (the engine grades none of the four so today) would still count."""
+    listed = {}
+    for i in issues:
+        if i["rule"] in SCAN_ALL_HYGIENE_RULES and i["sev"] in ("MAJOR", "MINOR"):
+            i["msg"] = str(i["msg"]).rstrip() + HYGIENE_NOTE.format(sev=i["sev"])
+            i["sev"] = "INFO"
+            listed[i["rule"]] = listed.get(i["rule"], 0) + 1
+    if listed:
+        issues.sort(key=lambda i: core.SEV_ORDER.get(i["sev"], len(core.SEV_ORDER)))
+    return dict(sorted(listed.items()))
+
+
+def hygiene_said(listed, by_rule=True):
+    """What a scan-all report says of the workflow hygiene `_hygiene_listed` made INFO."""
+    n = sum(listed.values())
+    rules = f" ({', '.join(f'{rule} {k}' for rule, k in sorted(listed.items()))})" if by_rule else ""
+    return (f"{n} workflow hygiene finding{'' if n == 1 else 's'} listed as INFO, as the owner's configuration"
+            f"{rules}")
 
 
 def _project_issues(ck, shown=None):
@@ -685,9 +729,10 @@ def _project_issues(ck, shown=None):
 
 
 def _scan(store, budget, cand, env, http, out):
-    """Scan a ready candidate and store it: -> its result, or None (a failure, kept in last_error)."""
+    """Scan a ready candidate and store it: -> its result, or None (a failure, kept in last_error). One of scan-all's
+    own (repo._scan_all_row, as `list` tells them) gets scan-all's result (`result`: SCANALL-HYGIENE)."""
     try:
-        res, calls = scan_repository(cand["full_name"], env=env, http=http)
+        res, calls = scan_repository(cand["full_name"], env=env, http=http, scan_all=_repo._scan_all_row(cand))
     except sources.SourceError as exc:
         budget.spend(SCAN_CALLS)
         if budget.refused(exc):

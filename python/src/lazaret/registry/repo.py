@@ -8410,9 +8410,12 @@ def _discover_github(store, args):
         print(f"\n{len(quiet)} scanned OK (no supply-chain indicator; `lazaret-registry report github:OWNER/REPO` "
               f"lists a scan's findings):")
         for res in quiet:
+            # (SCANALL-HYGIENE: a scan-all repository's own workflow hygiene, listed as INFO, said in its line)
+            hygiene = res.get("hygieneInfo")
             print(f"  {c(VERDICT_COLOR['OK'], ' OK ')} github:{lazaret.sanitize_term(res['name'])}@"
                   f"{lazaret.sanitize_term(str(res['version'])[:12])}  {res['filesScanned']:,} files, "
-                  f"{_fmt_bytes(res['archiveBytes'])}")
+                  f"{_fmt_bytes(res['archiveBytes'])}"
+                  + (f"; {ghdiscover.hygiene_said(hygiene, by_rule=False)}" if hygiene else ""))
     _github_run_errors(out, getattr(args, "_errors", None))
     return bad
 

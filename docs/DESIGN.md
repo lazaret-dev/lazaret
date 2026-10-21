@@ -2666,6 +2666,36 @@ counted (`gone`), not an error of the run. The CLI prints an OK scan in one
 line and the others in full, and `progress` lines on stderr (an hour being
 read, every `LISTING_PROGRESS_EVERY` pages, each scan).
 
+A scan-all repository's own workflow hygiene (SCANALL-HYGIENE, 0.1.9; John's
+decision of Oct 21, "INFO in scan-all only"). Scan-all reads random new
+repositories for hostile ones, and an action not pinned, a workflow's token
+permissions, a cache in a release, an OIDC token where dependencies install
+(`SCAN_ALL_HYGIENE_RULES`: SC-WORKFLOW-UNPINNED, -PERMISSIONS, -CACHE,
+-OIDC-INSTALL) are the owner's configuration risks, not signs of that. In a
+repository scan-all queued (`repo._scan_all_row`, as `list` tells them: a
+filter `all: …`, so a REST-checked one without a node ID too), `result(…,
+scan_all=True)` makes such a finding at MAJOR or MINOR INFO before anything
+is counted (`_hygiene_listed`): its message ends with `HYGIENE_NOTE` ("(scan-all:
+the owner's workflow configuration, MAJOR in a project scan: listed, not
+counted)"), the findings are put back in severity order, `sevCounts` counts
+them as INFO (the stored `majors` no longer), the result's `hygieneInfo` by
+rule, and the verdict's reason and an OK scan's line say how many were listed
+as INFO, as the owner's configuration. The record says what happened in the
+finding itself, as test code's INFO findings do ("(in test code: listed, not
+counted)"), so every reader of the stored findings (`report`, fp-tally)
+sees it with no new field. No verdict changes: these four are CI
+hardening checks (`core.HARDENING_RULES`), which this section's verdict
+counted only at CRITICAL from the start, and the engine grades none of them
+CRITICAL; one that were CRITICAL would not be listed and would still count.
+So `--ci`, the candidates' verdicts and `list` are as before. Where: `_scan`
+passes `scan_all` for scan-all's own rows only, the one place scan-all alone
+uses; a filter's candidate (in a scan-all run or not), `lazaret-registry scan
+github:` (`cmd_scan`), `lazaret scan github:` and package scans grade the four
+as before, and every other rule (SC-WORKFLOW-PR-CHECKOUT, -SECRETS, …) is
+untouched. Scans stored before keep their findings as stored (MAJOR or MINOR,
+the same verdicts): scan-all scans a repository once, and a rescan
+(`lazaret-registry scan github:owner/repo@commit --rescan`) is not scan-all.
+
 Which new repositories got code, from GitHub's GraphQL API (GH-SCAN-GQL,
 0.1.9; John's choice of Oct 18). His runs that day: OpenDigger's mirror sent
 his Mac some 1.5 KB/s (a 335 MB hour), and GH Archive's hour 2026-10-17-4
