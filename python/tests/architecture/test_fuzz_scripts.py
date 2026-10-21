@@ -560,8 +560,8 @@ class PromisesAreLive(unittest.TestCase):
         self.addCleanup(close)
         prefix_case = fuzz_targets.npm_diff_seeds()[0]
         run(prefix_case)                                   # the reader calls it corrupt: no finding
-        if not fuzz_targets.shutil.which("node"):
-            self.skipTest("no node here")
+        if not (fuzz_targets.shutil.which("node") and fuzz_targets.shutil.which("npm")):
+            self.skipTest("no node or npm here")
         with mock.patch.object(npmtar, "disagreements", lambda node, read: []):
             with self.assertRaises(fuzz_targets.Violation) as raised:
                 run(prefix_case)

@@ -54,6 +54,30 @@ def requires_env(var):
     return unittest.skipUnless(os.environ.get(var), f"{var} not set")
 
 
+def npm_node_tar():
+    """(node, the folder of the node-tar npm bundles) of this machine, (node, None) without it, (None, None) without
+    node. npm's folder is the npm on PATH's (its bin/npm-cli.js, links followed: the npm `npm install` runs), else the
+    one beside the node, Homebrew's libexec too, as scripts/fuzz/npm_extract.cjs finds it. (MAC-TESTS: Homebrew's npm
+    is in HOMEBREW_PREFIX/lib/node_modules and the Cellar's libexec, not beside the node its links lead to, so on such
+    a Mac the tests that compare with npm's node-tar skipped.)"""
+    import shutil
+    node = shutil.which("node")
+    if not node:
+        return None, None
+    npm = shutil.which("npm")
+    cli = os.path.realpath(npm) if npm else ""
+    bindir = os.path.dirname(os.path.realpath(node))
+    prefix = os.path.dirname(bindir)
+    folders = [os.path.dirname(os.path.dirname(cli))] if os.path.basename(cli) == "npm-cli.js" else []
+    folders += [os.path.join(prefix, "lib", "node_modules", "npm"),
+                os.path.join(prefix, "libexec", "lib", "node_modules", "npm"), os.path.join(bindir, "node_modules", "npm")]
+    for folder in folders:
+        tar = os.path.join(folder, "node_modules", "tar")
+        if os.path.isdir(tar):
+            return node, tar
+    return node, None
+
+
 def skip_unless_permissions_enforced(test):
     """For tests that make a directory unwritable with chmod and expect a
     failure. Root ignores directory permissions, and on Windows chmod can't

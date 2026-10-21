@@ -5,7 +5,8 @@ close, answer in HTTP/1.0, send a short or chunked body, close behind its answer
 connection), or redirect. The pool must reuse a connection only when the response was read to its end and
 the server did not close it; a stale one is retried once on a new connection; the guard's rules for
 redirects and credentials stay the guard's, and a request the pool does not carry goes the old way.
-TLS and a CONNECT proxy are tested with a certificate made by `openssl` when there is one."""
+TLS and a CONNECT proxy are tested with a root and a certificate for 127.0.0.1 made when each test starts
+(tests/_pki.py)."""
 
 import contextlib
 import http.client
@@ -17,7 +18,6 @@ import shutil
 import socket
 import socketserver
 import ssl
-import subprocess
 import tempfile
 import threading
 import unittest
@@ -27,7 +27,7 @@ from unittest import mock
 
 from lazaret.registry import guard, keepalive, pmsettings, repo
 from lazaret.scanner import timings
-from tests import _support
+from tests import _pki, _support
 
 BODY = bytes(range(256)) * 4000                      # about 1 MB
 
@@ -192,17 +192,6 @@ class Proxy:
 
     def close(self):
         self.sock.close()
-
-
-def make_certificate(folder):
-    """-> (certfile, keyfile) for 127.0.0.1 and localhost, or None without openssl."""
-    if shutil.which("openssl") is None:
-        return None
-    cert, key = os.path.join(folder, "cert.pem"), os.path.join(folder, "key.pem")
-    run = subprocess.run(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-keyout", key, "-out", cert,
-                          "-days", "2", "-subj", "/CN=localhost", "-addext", "subjectAltName=DNS:localhost,IP:127.0.0.1"],
-                         capture_output=True)
-    return (cert, key) if run.returncode == 0 else None
 
 
 @contextlib.contextmanager
@@ -717,17 +706,14 @@ class ProxyFor(unittest.TestCase):
             self.assertIsNone(keepalive.proxy_for("https://pypi.org/", {"http": "http://proxy:3128"}))
 
 
-@unittest.skipUnless(shutil.which("openssl"), "needs openssl to make a certificate")
 class TlsTests(unittest.TestCase):
     def setUp(self):
         self.dir = tempfile.mkdtemp(prefix="lazaret-ka-")
         self.addCleanup(shutil.rmtree, self.dir, ignore_errors=True)
-        self.cert = make_certificate(self.dir)
-        if self.cert is None:
-            self.skipTest("openssl could not make a certificate")
-        self.server = Server(tls=self.cert)
+        pki = _pki.Pki(self.dir)                                  # (for 127.0.0.1 and localhost)
+        self.server = Server(tls=(pki.cert, pki.key))
         self.addCleanup(self.server.close)
-        self.ctx = ssl.create_default_context(cafile=self.cert[0])
+        self.ctx = ssl.create_default_context(cafile=pki.root)
         self.pool = keepalive.Pool(context=self.ctx)
         self.addCleanup(self.pool.close)
 

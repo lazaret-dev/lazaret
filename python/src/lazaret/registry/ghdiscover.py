@@ -231,6 +231,8 @@ ARCHIVE_ECO = "gharchive"
 SCAN_ALL_ECO = "github-scan-all"
 #: the listing says on stderr how far it is every this many pages
 LISTING_PROGRESS_EVERY = 25
+#: the parts of a checkout not read that a scan's verdict reason names (the rest counted)
+SHOWN_GAPS = 5
 #: a scan's answers that mean the repository is gone, made private (404) or empty (409: no commit to read)
 GONE = (404, 409)
 #: what a queued repository's `filters` says
@@ -660,16 +662,26 @@ def result(full_name, ck, shown=None):
 
 
 def _project_issues(ck, shown=None):
-    """The project scan of a checkout: (its findings, the parts not read whole, why)."""
-    issues, truncated, why = [], len(ck.incomplete), [detail for _kind, detail in ck.incomplete]
+    """The project scan of a checkout and of its twin trees (core.scan_twins: the paths a disk that ignores case held
+    as one name with another, each read at its path in the commit): (their findings, the parts not read whole, why). A
+    file of the commit that the checkout could not write is a part not read (`sources.not_covered`, as `lazaret scan
+    github:…` counts it): it was left out of the verdict before (MAC-TESTS)."""
+    gaps = sources.not_covered(ck)
+    truncated = len(gaps)
+    why = [detail for _kind, detail in gaps[:SHOWN_GAPS]] + ([f"and {len(gaps) - SHOWN_GAPS} more"]
+                                                              if len(gaps) > SHOWN_GAPS else [])
+    twin_issues, _where, twin_why, _read, _own = core.scan_twins(ck.twins, shown=shown,
+                                                                 overlaid=ck.overlaid)    # (MAC-TESTS: sources._Writer)
+    truncated += len(twin_why)
+    why = twin_why + why
     try:
         res = core.scan_project(ck.root, shown=shown)
     except core.ScanTargetError:
-        return issues, truncated, why                  # (nothing in it Lazaret reads)
+        return twin_issues, truncated, why              # (nothing in it Lazaret reads)
     if res.get("incomplete"):
         truncated += 1
         why.insert(0, res.get("incompleteReason") or "the scan stopped early")
-    return list(res["issues"]), truncated, why
+    return core.merge_findings(list(res["issues"]), twin_issues), truncated, why
 
 
 def _scan(store, budget, cand, env, http, out):

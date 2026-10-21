@@ -1778,6 +1778,54 @@ aggregate):
 
 ### Fixed
 
+- **Security: a repository's scan reads every file of the commit at its own path, also where two paths differ only in
+  case, and on a disk that holds them as one name says it was not read whole (MAC-TESTS; no rule-set change).** `lazaret
+  scan github:…` / `gitlab:…` and the registry's GitHub scans (`discover --scan`, `--github-scan-all`) write the
+  commit's archive to a folder and scan the folder. Of two paths that differ only in case or Unicode form (`App.py` and
+  `app.py`, `Package.json` and `package.json`, `Lib/a.py` and `lib/A.py`), the checkout wrote the second as
+  `<path>.lazaret-dupN`, on every disk: a name no rule reads as the file it is, so a Python sink or an install hook in
+  it was not found and the result was OK. On macOS's and Windows' disks, which hold such paths as one name, it lost
+  more: of `Setup.py`, `setup.py` and `SETUP.PY` the third was written over the second, unread, while the anomalies said
+  both were kept; a folder beside a file of its name (`.github/` beside a file `.GITHUB`, `.vscode/` beside `.VSCODE`)
+  could not be made, so its workflows or tasks were not read (the result was incomplete, the paths said to be left out
+  of the archive: `export-ignore`); a folder beside its twin folder (`.github/` beside `.GitHub/`) was merged into it,
+  and its findings were reported at a path the commit does not have. Now every path is written under its own name
+  wherever the disk takes it (each folder made by the checkout, each file created where nothing is, `O_EXCL`), so on a
+  disk that tells the names apart (Linux's) the checkout is the commit's tree as it is and nothing else changes. Where
+  the disk refuses a name, the path is written whole, under its real name, in a twin tree beside the checkout; each twin
+  tree is given the commit's other files it can hold (hard links), and the scan reads it as the commit's own: its
+  workflows, `package.json`, editor settings and sources by their paths, with the scripts, hooks' targets and helpers
+  beside them, every finding reported once at its path in the commit. Two paths that are one name on such a disk are
+  still never side by side, so the scan of a commit that has such paths is INCOMPLETE there, naming them (SUSPICIOUS
+  where a strong indicator is found; `--accept-incomplete` leaves the CLI's exit status to the gate): scan it on Linux
+  or a case-sensitive volume to read it whole. Each path kept apart is a `case` anomaly naming the path it is one name
+  with. A path no twin tree can hold, one the disk refuses outright, or on Windows a name it would not keep as given (a
+  device's name, `name:stream`, a trailing dot or space) is a part not read, in the CLI and now in the registry's scans
+  too: INCOMPLETE, naming the path (it is no longer fetched again by its blob and called `export-ignore`). Found when
+  the suite's test of three such twins failed on a Mac (2 files of 3). Held end to end, on this machine's disk and on
+  one that folds names as macOS's does (simulated on Linux, `tests/_folding_disk.py`): the CLI's report and the
+  registry's result find a workflow's secrets, an install hook, an editor task that runs on open, a Python sink, a
+  task's or a hook's script beside a twin and a tainted call into a helper of the root, each at its path, and every
+  finding this machine's disk gives is given on the folding disk too (`test_checkout_twins`).
+
+- **The suite on a Mac (MAC-TESTS).** The TLS tests' certificates are made in Python (`tests/_pki.py`) and, for the npm
+  package's `verify-secrets.test.js`, with node:crypto: ECDSA on P-256 named, signed with SHA-256, the same on every
+  machine. They were made with the `openssl` on PATH, and macOS's (LibreSSL) wrote the EC keys' curve parameters out in
+  full and signed the server's certificate with a digest pratique does not read: Python's strict checks (3.13 and later)
+  refused the keys ("explicit ECC parameters"), pratique the certificate ("unsupported certificate signature algorithm")
+  and Node's TLS both ("UNSPECIFIED"), in 8 Python modules and `verify-secrets.test.js` (OpenSSL 3 given those defaults
+  on Linux fails the 9 files with the Mac's counts exactly). The PostgreSQL client's tests of a default client
+  certificate, an encrypted key and a TLS-terminating server made RSA keys with `openssl` too; `tests/_pki.py` makes
+  those as well (the encrypted key as OpenSSL 3 writes one: PKCS #8, PBES2, AES-256-CBC), and no test runs `openssl`
+  now. The guard's tests of the real tools are split by tool into twelve modules of a few tests each (`test_guard_npm`,
+  `_npm_lockfile`, `_npm_resolve`, `_pnpm`, `_yarn`, `_bun`, `_private_registry`, `_python`, `_pip_indexes`, `_uv`,
+  `_uv_tool`, `_uv_project`; no test removed): `test_guard_npm` and `test_guard_yarn_bun` ran past the 45 s a module
+  gets alone on a Mac. The `archive-npm-diff` fuzz target, `test_npm_tar_readers` and `test_review_archives` look for
+  npm's node-tar in the npm on PATH first (`tests/_support.npm_node_tar`): Homebrew's npm is not beside the node its
+  links lead to, so on such a Mac the target compared nothing and the tests' comparisons with npm skipped. The
+  dashboard's folder test held `z.py` beside `Z.py`, which a Mac's folder cannot: that pair is now a folder of its own,
+  compared where the disk holds both and skipped where it cannot.
+
 - **A download's deadline covers the whole request and holds while a read waits (F-07, the external review of Oct 18; no
   rule-set change).** On Python's transport (urllib's, and the pool's with `--keepalive`; the native transport has its
   own total timeout) `lazaret guard`'s deadline for one download (GR-3: 15 minutes, `LAZARET_GUARD_DOWNLOAD_SECONDS`)

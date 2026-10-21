@@ -1,12 +1,11 @@
 // `lazaret --verify-secrets` (src/verify.js, V-1 stage 2, step 4): the npm package's runner of live secret verification,
 // against a stub provider over TLS on 127.0.0.1, reached through a CONNECT proxy (no real service is called). The stub's
-// root and its certificate for the providers' hosts are made with `openssl` (skipped without it, and without the
-// engine's WebAssembly build). The twin of the Python package's test_secretverify_http.py and test_verifyscan.py.
+// root and its certificate for the providers' hosts are made here, with node:crypto (skipped without the engine's
+// WebAssembly build). The twin of the Python package's test_secretverify_http.py and test_verifyscan.py.
 
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
-import { createHash, createHmac } from "node:crypto";
+import { createHash, createHmac, generateKeyPairSync, randomBytes, sign } from "node:crypto";
 import http from "node:http";
 import https from "node:https";
 import net from "node:net";
@@ -19,11 +18,7 @@ import { available } from "../src/lib/native.js";
 import { Verifier, httpsTransport, TransportError, checkRequest, proxyFor, amzDate, LIVE, REJECTED, UNKNOWN, NOT_THIS_FORMAT }
   from "../src/verify.js";
 
-const HAVE_OPENSSL = (() => {
-  try { execFileSync("openssl", ["version"], { stdio: "ignore" }); return true; } catch { return false; }
-})();
-const SKIP = !HAVE_OPENSSL ? "the stub provider needs the openssl command"
-  : !available() ? "the native engine is not built (npm run build)" : false;
+const SKIP = !available() ? "the native engine is not built (npm run build)" : false;
 const HOSTS = ["api.github.com", "slack.com", "api.stripe.com", "registry.npmjs.org", "api.openai.com", "api.anthropic.com",
   "sts.amazonaws.com"];
 
@@ -46,22 +41,72 @@ const SCRIPT = {
 
 let dir, keys, stub, tunnel;
 
-function openssl(...args) {
-  execFileSync("openssl", args, { cwd: dir, stdio: "ignore", timeout: 30_000 });
+// A root, and a certificate for the providers' hosts under it: keys ECDSA on P-256 (a named curve), certificates signed
+// with ECDSA-SHA256, with the extensions OpenSSL 3 gives them, valid from an hour ago for two days. Made here, they are the
+// same on every machine: the `openssl` on PATH made them before, and macOS's /usr/bin/openssl (LibreSSL) wrote the curve's
+// parameters out in full, which Node's TLS refused (MAC-TESTS). The Python package's tests/_pki.py makes the same.
+const der = (tag, content) => {
+  const n = content.length;
+  const length = [];
+  for (let v = n; v; v = Math.floor(v / 256)) length.unshift(v % 256);
+  return Buffer.concat([Buffer.from([tag]), Buffer.from(n < 0x80 ? [n] : [0x80 | length.length, ...length]), content]);
+};
+const seq = (...parts) => der(0x30, Buffer.concat(parts));
+const int = (bytes) => {
+  let b = Buffer.from(bytes);
+  while (b.length > 1 && b[0] === 0 && b[1] < 0x80) b = b.subarray(1);
+  return der(0x02, b[0] & 0x80 ? Buffer.concat([Buffer.from([0]), b]) : b);
+};
+const oid = (text) => {
+  const [first, second, ...rest] = text.split(".").map(Number);
+  const out = [40 * first + second];
+  for (let v of rest) {
+    const chunk = [v & 0x7f];
+    for (v = Math.floor(v / 128); v; v = Math.floor(v / 128)) chunk.unshift(0x80 | (v & 0x7f));
+    out.push(...chunk);
+  }
+  return der(0x06, Buffer.from(out));
+};
+const bits = (data, unused = 0) => der(0x03, Buffer.concat([Buffer.from([unused]), data]));
+const utcTime = (d) => der(0x17, Buffer.from(d.toISOString().replace(/[-:T]/g, "").slice(2, 14) + "Z"));
+const dn = (cn) => seq(der(0x31, seq(oid("2.5.4.3"), der(0x0c, Buffer.from(cn, "utf8")))));
+const ext = (id, value, critical = false) => seq(oid(id), ...(critical ? [der(0x01, Buffer.from([0xff]))] : []), der(0x04, value));
+const pem = (label, body) => `-----BEGIN ${label}-----\n${body.toString("base64").match(/.{1,64}/g).join("\n")}\n-----END ${label}-----\n`;
+const ECDSA_SHA256 = "1.2.840.10045.4.3.2";
+
+function keyId(publicKey) {
+  const { x, y } = publicKey.export({ format: "jwk" });
+  return createHash("sha1").update(Buffer.concat([Buffer.from([4]), Buffer.from(x, "base64url"), Buffer.from(y, "base64url")]))
+    .digest();
+}
+
+function certificate(subject, subjectKey, issuer, issuerKey, extensions) {
+  const now = Math.floor(Date.now() / 1000) * 1000;
+  const serial = randomBytes(16);
+  serial[0] = (serial[0] & 0x7f) | 0x40;
+  const tbs = seq(der(0xa0, int([2])), int(serial), seq(oid(ECDSA_SHA256)), dn(issuer),
+    seq(utcTime(new Date(now - 3600_000)), utcTime(new Date(now + 2 * 86400_000))), dn(subject),
+    subjectKey.export({ type: "spki", format: "der" }), der(0xa3, seq(...extensions)));
+  return seq(tbs, seq(oid(ECDSA_SHA256)), bits(sign("sha256", tbs, issuerKey)));
 }
 
 /** A root, and a certificate for the providers' hosts under it. */
 function makePki() {
-  writeFileSync(join(dir, "leaf.ext"), `subjectAltName=${HOSTS.map((h) => `DNS:${h}`).join(",")}\nbasicConstraints=critical,CA:FALSE\n`
-    + "keyUsage=critical,digitalSignature\nextendedKeyUsage=serverAuth\n");
-  openssl("req", "-x509", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:prime256v1", "-nodes", "-keyout", "root.key", "-out",
-    "root.pem", "-days", "2", "-subj", "/CN=lazaret-stub root", "-addext", "basicConstraints=critical,CA:TRUE",
-    "-addext", "keyUsage=critical,keyCertSign,cRLSign");
-  openssl("req", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:prime256v1", "-nodes", "-keyout", "leaf.key", "-out", "leaf.csr",
-    "-subj", "/CN=lazaret-stub");
-  openssl("x509", "-req", "-in", "leaf.csr", "-CA", "root.pem", "-CAkey", "root.key", "-CAcreateserial", "-out", "leaf.pem", "-days", "2",
-    "-extfile", "leaf.ext");
-  return { root: readFileSync(join(dir, "root.pem")), cert: readFileSync(join(dir, "leaf.pem")), key: readFileSync(join(dir, "leaf.key")) };
+  const root = generateKeyPairSync("ec", { namedCurve: "P-256" });
+  const leaf = generateKeyPairSync("ec", { namedCurve: "P-256" });
+  const rootId = keyId(root.publicKey);
+  const rootCert = certificate("lazaret-stub root", root.publicKey, "lazaret-stub root", root.privateKey, [
+    ext("2.5.29.19", seq(der(0x01, Buffer.from([0xff]))), true),            // CA
+    ext("2.5.29.15", bits(Buffer.from([0x06]), 1), true),                     // keyCertSign, cRLSign
+    ext("2.5.29.14", der(0x04, rootId)), ext("2.5.29.35", seq(der(0x80, rootId)))]);
+  const leafCert = certificate("lazaret-stub", leaf.publicKey, "lazaret-stub root", root.privateKey, [
+    ext("2.5.29.17", seq(...HOSTS.map((h) => der(0x82, Buffer.from(h, "ascii"))))),
+    ext("2.5.29.19", seq(), true),                                             // not a CA
+    ext("2.5.29.15", bits(Buffer.from([0x80]), 7), true),                     // digitalSignature
+    ext("2.5.29.37", seq(oid("1.3.6.1.5.5.7.3.1"))),                          // serverAuth
+    ext("2.5.29.14", der(0x04, keyId(leaf.publicKey))), ext("2.5.29.35", seq(der(0x80, rootId)))]);
+  return { root: Buffer.from(pem("CERTIFICATE", rootCert)), cert: Buffer.from(pem("CERTIFICATE", leafCert)),
+    key: Buffer.from(leaf.privateKey.export({ type: "pkcs8", format: "pem" })) };
 }
 
 /** The stub provider: answers as scripted for any of the hosts (by "host path", then host; else 404), and what it was asked. */

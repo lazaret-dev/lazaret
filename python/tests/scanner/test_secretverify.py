@@ -3,7 +3,7 @@
 promised about the credential. Stage 1's tests, kept: the engine is held to what its Python was held to (the engine's own tests,
 secrets_tests.rs, hold AWS's signature vectors, the 512-character limit with a pattern of their own, and the JSON read once). No
 call reaches a real service: a stand-in transport answers, and the last classes ask a stub provider over TLS on 127.0.0.1, over
-urllib and over lazaret-net (skipped without `openssl`, and lazaret-net's where the native transport is not available)."""
+urllib and over lazaret-net (lazaret-net's skipped where the native transport is not available)."""
 
 import copy
 import datetime
@@ -944,7 +944,6 @@ class PromiseTests(unittest.TestCase):
 
 # ------------------------------------------------------------------------------------------------ over TLS, against the stub
 
-@unittest.skipUnless(vs.have_openssl(), "the stub provider needs the openssl command")
 class StubCase(unittest.TestCase):
     @classmethod
     def setUpClass(cls):

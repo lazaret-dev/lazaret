@@ -77,11 +77,12 @@ def _mark(issue, result, label):
         issue["msg"] += f" Not verified: {result.detail}."
 
 
-def verify_findings(root, res, verifier=None, out=None):
+def verify_findings(root, res, verifier=None, out=None, roots=None):
     """Verify the secret findings of `res` (a project scan's result, its files under `root`), in place: each finding of a
     credential a provider names gets `verified`, the result is graded again and gets `verification`. `verifier` is a
     `secretverify.Verifier` (a test's; by default one for this run, over lazaret-net); `out` takes the note before the first
-    call (stderr). Returns `res["verification"]`."""
+    call (stderr); `roots`: {file: the folder it is under} for the files that are not under `root` (a repository's twin
+    trees: core.scan_twins). Returns `res["verification"]`."""
     findings = [i for i in res.get("issues", ()) if i.get("rule") in core.SECRET_RULES and isinstance(i.get("file"), str)
                 and isinstance(i.get("line"), int) and not isinstance(i.get("line"), bool)]
     by_file = collections.defaultdict(list)
@@ -89,7 +90,7 @@ def verify_findings(root, res, verifier=None, out=None):
         by_file[issue["file"]].append(issue)
     credentials = []                                            # (file, {"provider", "parts", "lines"})
     for rel, issues in by_file.items():
-        texts = lines_of(root, rel, sorted({i["line"] for i in issues}))
+        texts = lines_of((roots or {}).get(rel, root), rel, sorted({i["line"] for i in issues}))
         if texts:
             numbers = sorted(texts)
             credentials += [(rel, f) for f in _native.call("secrets.find", {"lines": numbers}, "\n".join(texts[n] for n in numbers))]

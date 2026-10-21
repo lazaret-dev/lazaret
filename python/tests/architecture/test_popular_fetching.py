@@ -8,7 +8,6 @@ import contextlib
 import io
 import json
 import os
-import shutil
 import tempfile
 import threading
 import time
@@ -43,7 +42,6 @@ def request(url, **marks):
     return req
 
 
-@unittest.skipUnless(shutil.which("openssl"), "no openssl command to make the test's certificates with")
 class NativeOpenerTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):

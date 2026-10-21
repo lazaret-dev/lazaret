@@ -6,11 +6,13 @@ out (`export-ignore`), and what is written where. Archives are built in
 memory from inert text and the network seam is a fake: nothing is fetched.
 """
 
+import contextlib
 import email.message
 import io
 import json
 import os
 import shutil
+import stat
 import tarfile
 import tempfile
 import unittest
@@ -21,10 +23,20 @@ from unittest import mock
 
 from lazaret.registry import repo, sources
 from lazaret.registry.sources import SourceError
+from tests._folding_disk import apfs_fold, folding_disk, tells_names_apart
 
 SHA = "0123456789abcdef0123456789abcdef01234567"
 SHA2 = "fedcba9876543210fedcba9876543210fedcba98"
 TOKEN = "ghp_NotARealTokenJustTestText1234567890"
+
+#: what the archive's reader says of a path that is one name with another where case and form are ignored (EG-4), and
+#: what a checkout adds when the disk it writes on is such a disk (MAC-TESTS)
+READER = ("it differs from {!r} only by case or normalization: macOS and Windows write the later entry over the "
+          "earlier, under the earlier's name")
+KEPT = "; this checkout kept it apart and read it at its own path"
+#: the gap a checkout with twin trees has: such paths are never in one tree with their twins (sources.checkout)
+APART = ("{} path(s) were kept apart from the commit's other files on this disk, each one name there with another path "
+         "(names that differ only in case or Unicode form), so rules across files may not have seen them together: {}")
 
 
 def make_archive(sha, files, prefix="o-r-0123456", links=None, comment=True, extra_names=()):
@@ -434,26 +446,216 @@ class CheckoutGitHub(Tmp):
         self.assertEqual(under, ["cron.d/x", "ok.txt"])
         self.assertEqual(len([a for a in ck.anomalies if a[0] == "path"]), 2)
 
-    def test_paths_that_differ_only_in_case_are_both_kept(self):
-        files = {"Setup.py": b"one", "setup.py": b"two", "SETUP.PY": b"three"}
-        ck, _ = self.run_checkout(gh_answers(files=files))
-        names = sorted(os.listdir(ck.root))
-        self.assertEqual(len(names), 3)
-        self.assertEqual(sum(".lazaret-dup" in n for n in names), 2)
-        self.assertEqual(len([a for a in ck.anomalies if a[0] == "case"]), 2)
-        self.assertTrue(ck.complete, ck.incomplete)
-        contents = []
-        for n in names:
-            with open(os.path.join(ck.root, n), "rb") as f:
-                contents.append(f.read())
-        contents.sort()
-        self.assertEqual(contents, [b"one", b"three", b"two"])
+    def kept(self, files, fold=None, check_tree=True, **kw):
+        """The checkout of an archive holding `files` (its tree names them too), on this machine's disk, or on one that
+        folds names as `fold` does -> (the checkout, [{path: bytes} of its own in its root, then in each of its twin
+        trees]): what a twin tree was given of the commit's other files is not its own (`ck.overlaid`). The network
+        seam is `self.net`."""
+        disk = tempfile.mkdtemp(dir=self.tmp)            # (the twin trees are made beside the root: they fold too)
+        self.net = Net(gh_answers(files=files, **kw))
+        with folding_disk(disk, fold) if fold else contextlib.nullcontext():
+            ck = sources.checkout("github:o/r@v1", dest=os.path.join(disk, "out"), env={}, http=self.net,
+                                  check_tree=check_tree)
+        self.assertEqual(ck.twins, [f"{ck.root}.lazaret-twin-{n}" for n in range(1, len(ck.twins) + 1)])
+        self.assertLessEqual(set(ck.overlaid), set(ck.twins))
+        trees = []
+        for top in [ck.root] + ck.twins:
+            got = {}
+            for d, _, names in os.walk(top):
+                for name in names:
+                    rel = os.path.relpath(os.path.join(d, name), top).replace(os.sep, "/")
+                    if rel not in ck.overlaid.get(top, ()):
+                        with open(os.path.join(d, name), "rb") as f:
+                            got[rel] = f.read()
+            trees.append(got)
+        return ck, trees
 
-    def test_a_file_in_the_way_of_a_directory_is_skipped_not_fatal(self):
-        files = {"a": b"file", "a/b.txt": b"under"}
-        ck, _ = self.run_checkout(gh_answers(files=files, tree=["a"]))
-        self.assertEqual(len(ck.skipped), 1)
-        self.assertIn("could not be written", ck.skipped[0][1])
+    def on_both_disks(self, files, want=None, in_root=True, **kw):
+        """`kept` on this machine's disk and on one that ignores case and Unicode form as macOS's and Windows' do. On
+        each, every file of the commit is in one tree only, at its path in the commit, with its bytes (`want`: the
+        files as written, when not `files`); on a disk that tells the names apart, all of them are in the root, as
+        the commit has them, and it is read whole (`in_root`) -> (this disk's (the checkout, its trees), the
+        other's)."""
+        both = []
+        for fold in (None, apfs_fold):
+            ck, trees = self.kept(files, fold=fold, **kw)
+            merged = {}
+            for tree in trees:
+                self.assertFalse(set(tree) & set(merged), trees)
+                merged.update(tree)
+            self.assertEqual(merged, files if want is None else want)
+            both.append((ck, trees))
+        if in_root and tells_names_apart(self.tmp):
+            self.assertEqual((both[0][0].twins, sources.not_covered(both[0][0])), ([], []))
+        return both
+
+    def cases(self, ck):
+        return [a[1:] for a in ck.anomalies if a[0] == "case"]
+
+    def test_paths_that_differ_only_in_case_are_all_kept_at_their_paths(self):
+        # (MAC-TESTS: the twins were written as setup.py.lazaret-dup1 and SETUP.PY.lazaret-dup1, which no rule reads
+        # as a setup.py, and on a disk that ignores case those are one name: the third was written over the second,
+        # unread, while the anomalies said both were kept)
+        files = {"Setup.py": b"one", "setup.py": b"two", "SETUP.PY": b"three"}
+        (here, _), (ck, trees) = self.on_both_disks(files)
+        self.assertEqual(trees, [{"Setup.py": b"one"}, {"setup.py": b"two"}, {"SETUP.PY": b"three"}])
+        self.assertEqual(self.cases(ck), [("setup.py", READER.format("Setup.py") + KEPT),
+                                          ("SETUP.PY", READER.format("Setup.py") + KEPT)])
+        if tells_names_apart(self.tmp):                # (the reader's own: what an installer on a Mac does)
+            self.assertEqual(self.cases(here), [("setup.py", READER.format("Setup.py")),
+                                                ("SETUP.PY", READER.format("Setup.py"))])
+        # two of them are never in one tree there, so what a rule reads across files may not have seen them together
+        self.assertEqual(sources.not_covered(ck), [("case", APART.format(2, "SETUP.PY, setup.py"))])
+
+    def test_names_that_differ_only_in_unicode_form_are_both_kept(self):
+        composed, decomposed = "café.js", "café.js"
+        _, (ck, trees) = self.on_both_disks({composed: b"composed", decomposed: b"decomposed"})
+        self.assertEqual(trees, [{composed: b"composed"}, {decomposed: b"decomposed"}])
+        self.assertEqual(sources.not_covered(ck), [("case", APART.format(1, decomposed))])
+
+    def test_a_file_and_a_folder_that_differ_only_in_case_are_both_kept(self):
+        # (on a disk that ignores case the folder could not be made: a `.github/` beside a `.GITHUB` file was not read)
+        _, (ck, trees) = self.on_both_disks({"A": b"file", "a/b.js": b"under"})
+        self.assertEqual(trees, [{"A": b"file"}, {"a/b.js": b"under"}])
+        self.assertEqual(self.cases(ck), [("a/b.js", "its folder a/ is one name on this disk with A: kept apart and "
+                                                     "read at its own path")])
+        _, (ck, trees) = self.on_both_disks({"a/b.js": b"under", "A": b"file"})
+        self.assertEqual(trees, [{"a/b.js": b"under"}, {"A": b"file"}])
+        self.assertEqual(self.cases(ck), [("A", "one name on this disk with a/: kept apart and read at its own path")])
+        self.assertEqual(sources.not_covered(ck), [("case", APART.format(1, "A"))])
+
+    def test_folders_that_differ_only_in_case_are_not_one_folder(self):
+        # (a disk that ignores case had lib/b.js written into Lib/, and what was found in it reported at Lib/b.js: no
+        # path of the commit)
+        _, (ck, trees) = self.on_both_disks({"Lib/a.js": b"1", "lib/b.js": b"2", "lib/A.js": b"3"})
+        self.assertEqual(trees, [{"Lib/a.js": b"1"}, {"lib/b.js": b"2", "lib/A.js": b"3"}])
+        self.assertEqual(self.cases(ck), [
+            ("lib/b.js", "its folder lib/ is one name on this disk with Lib/: kept apart and read at its own path"),
+            ("lib/A.js", READER.format("Lib/a.js") + KEPT)])
+        _, (ck, trees) = self.on_both_disks({"Lib/x/a.js": b"1", "lib/x/b.js": b"2", "lib/X/c.js": b"3"})
+        self.assertEqual(trees, [{"Lib/x/a.js": b"1"}, {"lib/x/b.js": b"2"}, {"lib/X/c.js": b"3"}])
+        self.assertEqual(self.cases(ck), [   # (each path kept apart, with why each tree before it refused it)
+            ("lib/x/b.js", "its folder lib/ is one name on this disk with Lib/: kept apart and read at its own path"),
+            ("lib/X/c.js", "its folder lib/ is one name on this disk with Lib/; in twin tree 1, its folder lib/X/ is "
+                           "one name on this disk with lib/x/: kept apart and read at its own path")])
+        self.assertEqual(sources.not_covered(ck), [("case", APART.format(2, "lib/X/c.js, lib/x/b.js"))])
+
+    def test_a_name_the_disk_takes_for_another_is_kept_apart_too(self):
+        # the disk decides, not the reader's fold: a disk that takes two names for one where the fold does not refuses
+        # the second's file (O_EXCL), folder (mkdir) or hard link all the same, and it is kept apart
+        def fold(name):
+            return apfs_fold(name).replace("_", "-")
+        ck, trees = self.kept({"a-b.js": b"1", "a_b.js": b"2", "x-y/c.js": b"3", "x_y/d.js": b"4"}, fold=fold)
+        self.assertEqual(trees, [{"a-b.js": b"1", "x-y/c.js": b"3"}, {"a_b.js": b"2", "x_y/d.js": b"4"}])
+        self.assertEqual(ck.overlaid, {ck.twins[0]: set()})                 # (each of the root's is one with its own)
+        self.assertEqual(self.cases(ck), [
+            ("a_b.js", "one name on this disk with a path written before: kept apart and read at its own path"),
+            ("x_y/d.js", "its folder x_y/ is one name on this disk with a path written before: kept apart and read "
+                         "at its own path")])
+        self.assertEqual(sources.not_covered(ck), [("case", APART.format(2, "a_b.js, x_y/d.js"))])
+
+    def test_each_twin_tree_is_given_the_commit_s_other_files(self):
+        # (MAC-TESTS: what a rule reads across files, a hook's script or the helper a tainted call goes into, was not
+        # beside a twin read alone; the scans read each tree's own files and findings once: core.scan_twins)
+        files = {"App.py": b"1", "app.py": b"2", "lib/h.py": b"3", "README.md": b"4", "Lib/x.py": b"5",
+                 "src/m.py": b"6"}
+        ck, trees = self.kept(files, fold=apfs_fold)
+        self.assertEqual(trees, [{"App.py": b"1", "lib/h.py": b"3", "README.md": b"4", "src/m.py": b"6"},
+                                 {"app.py": b"2", "Lib/x.py": b"5"}])
+        twin = ck.twins[0]
+        # every other file it can hold (not App.py, one name with its own app.py; not lib/h.py, whose folder is one
+        # with its own Lib/), each the root's file itself: a hard link
+        self.assertEqual(ck.overlaid, {twin: {"README.md", "src/m.py"}})
+        self.assertTrue(os.path.samefile(os.path.join(twin, "src", "m.py"), os.path.join(ck.root, "src", "m.py")))
+        with mock.patch.object(os, "link", side_effect=OSError("no hard links here")):
+            ck, _ = self.kept(files, fold=apfs_fold)                        # (a copy where the disk makes none)
+        twin = ck.twins[0]
+        self.assertEqual(ck.overlaid, {twin: {"README.md", "src/m.py"}})
+        self.assertFalse(os.path.samefile(os.path.join(twin, "src", "m.py"), os.path.join(ck.root, "src", "m.py")))
+        with open(os.path.join(twin, "src", "m.py"), "rb") as f:
+            self.assertEqual(f.read(), b"6")
+        self.assertEqual(sources.not_covered(ck), [("case", APART.format(2, "Lib/x.py, app.py"))])
+        ck.cleanup()
+        self.assertEqual((ck.twins, ck.overlaid), ([], {}))
+
+    def test_past_the_overlay_s_limit_each_twin_tree_is_read_alone(self):
+        with mock.patch.object(sources, "MAX_OVERLAY_FILES", 4):            # (5 files, 1 twin tree)
+            ck, trees = self.kept({"App.py": b"1", "app.py": b"2", "a.js": b"3", "b.js": b"4", "c.js": b"5"},
+                                  fold=apfs_fold)
+        self.assertEqual(ck.overlaid, {})
+        self.assertEqual(sorted(os.listdir(ck.twins[0])), ["app.py"])
+        self.assertIn("the twin trees were not given the commit's other files (5 files in 1 twin trees is more than "
+                      "4): each is read alone", ck.notes)
+        self.assertEqual(sources.not_covered(ck), [("case", APART.format(1, "app.py"))])
+
+    def test_a_path_that_cannot_be_kept_is_not_read_and_said_and_not_fetched_again(self):
+        with mock.patch.object(sources, "MAX_TWIN_TREES", 1):
+            ck, trees = self.kept({"a.js": b"1", "A.js": b"2", "A.JS": b"3"}, fold=apfs_fold)
+        self.assertEqual(trees, [{"a.js": b"1"}, {"A.js": b"2"}])
+        why = "could not be written (one name on this disk with paths in 2 trees)"
+        self.assertEqual(ck.skipped, [("A.JS", why)])
+        self.assertEqual(sources.not_covered(ck), [("case", APART.format(1, "A.js")), ("skipped", f"A.JS: {why}")])
+        # (a path not written was fetched again by its blob, failed again, and was said to be left out of the
+        # archive: export-ignore)
+        self.assertEqual([reason for reason, _ in ck.incomplete], ["case"])
+        self.assertEqual(len(self.net.seen), 3)                 # the commit, its archive, its tree
+
+    def test_names_windows_does_not_keep_as_given_are_not_written(self):
+        # (a device's name is the device, `a:b` writes a stream of `a`, a trailing dot or space is dropped: on Windows
+        # none is the file the commit has, so none is written, and the checkout is not read whole)
+        files = {"ok.js": b"1", "CON": b"2", "aux.txt": b"3", "lib/nul/x.js": b"4", "Com1.js": b"5", "a:b": b"6",
+                 "dot.": b"7", "lpt¹": b"8"}
+        with mock.patch.object(sources, "WINDOWS", True):
+            ck, trees = self.kept(files, check_tree=False)
+        self.assertEqual(trees, [{"ok.js": b"1"}])
+        self.assertEqual(dict(ck.skipped), {
+            "CON": "could not be written (a device's name, which Windows does not keep as given)",
+            "aux.txt": "could not be written (a device's name, which Windows does not keep as given)",
+            "lib/nul/x.js": "could not be written (a device's name, which Windows does not keep as given)",
+            "Com1.js": "could not be written (a device's name, which Windows does not keep as given)",
+            "a:b": "could not be written (a data stream's name, which Windows does not keep as given)",
+            "dot.": "could not be written (a name ending in a dot or a space, which Windows does not keep as given)",
+            "lpt¹": "could not be written (a device's name, which Windows does not keep as given)"})
+        self.assertEqual(len(sources.not_covered(ck)), 7)
+        ck, trees = self.kept({"CONTRIBUTING.md": b"1", "console.js": b"2", "nul.d/x": b"3"}, check_tree=False)
+        self.assertEqual(len(trees[0]), 3)                                   # (elsewhere, and names like them: kept)
+
+    def test_an_entry_again_is_written_over_its_own_file(self):
+        # (an archive's later entry of a path wins, as an extractor writes it, in the tree it went to; the reader
+        # names the pair: "dup")
+        _, (ck, trees) = self.on_both_disks({"a.js": b"first", "A.js": b"second"}, extra_names=["o-r-0123456/A.js"],
+                                            want={"a.js": b"first", "A.js": b"x"})
+        self.assertEqual(trees, [{"a.js": b"first"}, {"A.js": b"x"}])
+        self.assertIn(("dup", "A.js"), [a[:2] for a in ck.anomalies])
+
+    def test_a_file_in_the_way_of_a_folder_is_kept_apart_on_every_disk(self):
+        # (not something git makes: an archive that has a file `a` and a file `a/b.txt`)
+        (here, here_trees), (ck, trees) = self.on_both_disks({"a": b"file", "a/b.txt": b"under"}, tree=["a"],
+                                                                in_root=False)
+        self.assertEqual(here_trees, trees)
+        self.assertEqual(trees, [{"a": b"file"}, {"a/b.txt": b"under"}])
+        self.assertEqual(self.cases(ck), [("a/b.txt", "its folder a/ has the name of the archive's file a: kept "
+                                                      "apart and read at its own path")])
+        self.assertEqual(self.cases(here), self.cases(ck))
+        self.assertEqual((ck.skipped, sources.not_covered(ck)), ([], [("case", APART.format(1, "a/b.txt"))]))
+
+    def test_twin_trees_take_a_free_name_and_go_with_the_checkout(self):
+        disk = tempfile.mkdtemp(dir=self.tmp)
+        os.mkdir(os.path.join(disk, "out.lazaret-twin-1"))          # (a name taken beside the root: left alone)
+        files = {"a.js": b"1", "A.js": b"2"}
+        with folding_disk(disk):
+            ck = sources.checkout("github:o/r@v1", dest=os.path.join(disk, "out"), env={},
+                                  http=Net(gh_answers(files=files)))
+        self.assertEqual(ck.twins, [os.path.join(disk, "out.lazaret-twin-2")])
+        if os.name == "posix":                                      # (the commit's files, for this user alone)
+            self.assertEqual(stat.S_IMODE(os.stat(ck.twins[0]).st_mode), 0o700)
+        ck.cleanup()
+        self.assertEqual(sorted(os.listdir(disk)), ["out", "out.lazaret-twin-1"])     # (the root was the caller's)
+        with mock.patch.object(tempfile, "tempdir", disk), folding_disk(disk):
+            ck = sources.checkout("github:o/r@v1", env={}, http=Net(gh_answers(files=files)))
+        self.assertEqual(len(ck.twins), 1)
+        ck.cleanup()
+        self.assertEqual(sorted(os.listdir(disk)), ["out", "out.lazaret-twin-1"])
 
     def test_a_file_too_large_to_read_is_skipped_and_named(self):
         with mock.patch.object(repo, "MAX_MEMBER", 100):

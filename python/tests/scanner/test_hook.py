@@ -18,6 +18,7 @@ import unittest
 from unittest import mock
 
 from tests import _support
+from tests._folding_disk import folding_disk
 from lazaret import _cli
 from lazaret.scanner import _native, core, hook
 
@@ -190,6 +191,11 @@ class HookTests(unittest.TestCase):
         open(os.path.join(probe, "X"), "wb").close()
         if os.path.exists(os.path.join(probe, "x")):        # (a system whose names ignore case)
             self.assertIn(hook.why("collision"), out)
+        with folding_disk(tempfile.gettempdir()):           # (and on one that does, wherever this runs: MAC-TESTS)
+            code, out = self.check()
+        self.assertEqual(code, 1, out)
+        self.assertIn("  A.py\n    L1     BLOCKER  [S-TOKEN]", out)
+        self.assertIn("  a.py\n    L1     CRITICAL [SC-TRUNCATED] File not fully scanned: " + hook.why("collision"), out)
 
     def git_in(self, data, *args):
         return subprocess.run(["git", "-C", self.dir, *args], input=data.encode("utf-8"), check=True,

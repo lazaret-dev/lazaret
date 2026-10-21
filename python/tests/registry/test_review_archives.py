@@ -23,7 +23,6 @@ import gzip
 import io
 import lzma
 import os
-import shutil
 import subprocess
 import tarfile
 import tempfile
@@ -33,6 +32,7 @@ import zlib
 from unittest import mock
 
 from lazaret.registry import repo
+from tests import _support
 from tests.registry._review_support import (
     DECODE_EXEC_JS, DECODE_EXEC_PY, EXFIL_JS, hooks, issues, manifest, rules, scan_bytes,
     scan_wheel, tar_member, unicode_path, zip_entries, zipball)
@@ -56,16 +56,7 @@ def bad_checksum_tgz():
 
 
 def _node_tar():
-    node = shutil.which("node")
-    if not node:
-        return None, None
-    out = subprocess.run([node, "-e", "console.log(require.resolve('npm/package.json'))"],
-                         capture_output=True, text=True, env=dict(os.environ, NODE_PATH=os.path.join(
-                             os.path.dirname(os.path.dirname(os.path.realpath(node))), "lib", "node_modules")), encoding="utf-8", errors="replace")
-    if out.returncode != 0:
-        return node, None
-    tar = os.path.join(os.path.dirname(out.stdout.strip()), "node_modules", "tar")
-    return node, tar if os.path.isdir(tar) else None
+    return _support.npm_node_tar()                  # (npm's own, found through PATH: MAC-TESTS)
 
 
 class TarStructureTests(unittest.TestCase):

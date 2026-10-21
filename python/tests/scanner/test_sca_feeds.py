@@ -1178,7 +1178,6 @@ class CliTests(Feeds):
         self.assertIn("--update-bundle", err)
 
 
-@unittest.skipUnless(shutil.which("openssl"), "no openssl command to make the test's certificates with")
 class NativeFetchTests(unittest.TestCase):
     """fetch over the native transport, with each feed's own budget, against a local HTTPS server (as
     tests.scanner.test_nativenet's): F-13, an OSV export's budget past what the native transport carries, failed

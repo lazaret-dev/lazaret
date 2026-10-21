@@ -166,6 +166,12 @@ and each is written only if it is the blob the commit's tree names. A commit tha
 path that could not be fetched within the budget, a tree too large to list, an archive that hit a
 limit) is said after the report and makes the result `incomplete`; with `--ci` the exit status is then
 1 even when the gate passed, unless you pass `--accept-incomplete`. Submodules are named, not read.
+Paths that differ only in case or Unicode form are each read at their own path. On a disk that holds two
+such paths as one name (macOS's and Windows', by default) the second is written in a twin tree beside the
+checkout, given the commit's other files and scanned as the commit's own (said in the `source` block's
+anomalies), and the result is `incomplete`: two paths that are one name there are never side by side, so
+a rule that reads across files may not have seen them together. Scan such a commit on Linux, or on a
+case-sensitive volume, to read it whole. A file that cannot be written makes the result `incomplete` too.
 `GITHUB_TOKEN` and `GITLAB_TOKEN` (read-only; for private repositories and GitHub's rate limit) are read
 from the environment and sent to the API host only; `LAZARET_GITLAB_URL` names a GitLab instance other
 than gitlab.com (https only). Nothing in the repository is run. A ref that cannot be resolved or a

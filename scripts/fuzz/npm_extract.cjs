@@ -3,7 +3,11 @@
 // {"ok": bool, "error": message or null, "files": [[path, sha256, size], ...], "warnings": [[code, message], ...],
 // "tar": node-tar's version}.
 // Links are dropped and a .gitignore is written as .npmignore unless one was seen, as pacote does; the first
-// path part is stripped (strip: 1). LAZARET_NPM_DIR names npm's folder (default: beside this node's binary).
+// path part is stripped (strip: 1). LAZARET_NPM_DIR names npm's folder; by default it is the folder of the npm on PATH
+// (the one `npm install` runs: its bin/npm-cli.js, its links followed), else the one beside this node's binary.
+// (MAC-TESTS: Homebrew's node is Cellar/node/<version>/bin/node, the folder this node's binary is in once its links are
+// followed, with npm in HOMEBREW_PREFIX/lib/node_modules/npm and Cellar/node/<version>/libexec/lib/node_modules/npm:
+// neither was looked in, so on such a Mac this answered nothing and the fuzz target compared nothing.)
 'use strict'
 const fs = require('fs')
 const os = require('os')
@@ -11,11 +15,24 @@ const path = require('path')
 const crypto = require('crypto')
 const readline = require('readline')
 
+function npmOnPath () {
+  for (const dir of (process.env.PATH || '').split(path.delimiter)) {
+    if (!path.isAbsolute(dir)) continue
+    try {
+      const cli = fs.realpathSync(path.join(dir, 'npm'))
+      if (path.basename(cli) === 'npm-cli.js') return path.dirname(path.dirname(cli))
+    } catch {}
+  }
+  return null
+}
+
 function npmDir () {
   if (process.env.LAZARET_NPM_DIR) return process.env.LAZARET_NPM_DIR
-  const prefix = path.dirname(path.dirname(process.execPath))
-  for (const dir of [path.join(prefix, 'lib', 'node_modules', 'npm'), path.join(path.dirname(process.execPath), 'node_modules', 'npm')]) {
-    if (fs.existsSync(path.join(dir, 'node_modules', 'tar'))) return dir
+  const bin = path.dirname(process.execPath)
+  const prefix = path.dirname(bin)
+  for (const dir of [npmOnPath(), path.join(prefix, 'lib', 'node_modules', 'npm'),
+    path.join(prefix, 'libexec', 'lib', 'node_modules', 'npm'), path.join(bin, 'node_modules', 'npm')]) {
+    if (dir && fs.existsSync(path.join(dir, 'node_modules', 'tar'))) return dir
   }
   throw new Error('npm\'s folder not found: set LAZARET_NPM_DIR')
 }

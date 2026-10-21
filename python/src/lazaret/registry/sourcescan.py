@@ -177,15 +177,7 @@ def report_defaults(plan, commit, cwd):
     return front
 
 
-def not_covered(ck):
-    """What the commit holds that the scan did not read: the checkout's own
-    `incomplete`, and every file that could not be written. A file left out only
-    for its size is not here: a scan of a folder does not read one either."""
-    gaps = list(ck.incomplete)
-    for rel, why in ck.skipped:
-        if not why.startswith("larger than"):
-            gaps.append(("skipped", f"{rel}: {why}"))
-    return gaps
+not_covered = sources.not_covered          # (the checkout's: what a scan of it does not read)
 
 
 def repository_uri(src, env=None):
@@ -273,7 +265,8 @@ def main(argv=None, *, env=None, http=None):
         args = front + [ck.root if a is None else a for a in plan.argv]
         gaps = not_covered(ck)
         try:
-            code = core.main(args, source=source_block(plan.spec, ck, gaps, env))
+            code = core.main(args, source=source_block(plan.spec, ck, gaps, env), twins=ck.twins,
+                             overlaid=ck.overlaid)
         except SystemExit as exc:
             code = _exit_code(exc)
         if gaps:

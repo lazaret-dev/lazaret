@@ -4026,7 +4026,8 @@ def _apply_redaction(issues, got):
 
 
 def scan_project(root, exclude=(), include_deps=False, taint_config=None,
-                 redact_secrets=True, extra_issues=(), should_stop=None, shown=None):
+                 redact_secrets=True, extra_issues=(), should_stop=None, shown=None, allow_empty=False,
+                 merge_issues=(), extra_files=(), extra_configs=0, collected=None):
     """The complete project scan, shared by the CLI (main) and the MCP server:
     collect -> scan files -> manifests / binding.gyp -> what the project's own
     install hooks run (project_hook_checks) -> --deps' dependency checks ->
@@ -4060,6 +4061,19 @@ def scan_project(root, exclude=(), include_deps=False, taint_config=None,
     shown           optional dict (--show-secrets): filled with each finding's
                     flagged line as read, {(file, line): text}, for the
                     terminal alone (print_report); the result stays redacted
+    allow_empty     a root holding nothing to scan is not an error (a
+                    repository's checkout whose twin trees hold what is read:
+                    scan_twins)
+    merge_issues    findings of the same commit read in other trees (a
+                    repository checkout's twin trees: scan_twins), merged
+                    with this scan's by merge_findings before the grading
+    extra_files     files of the same commit read in other trees (each as
+                    `collected` gives it), counted in the metrics with this
+                    scan's own; extra_configs: how many config files they
+                    read
+    collected       optional dict: given the files this scan counted in its
+                    metrics ("files": [{path, content, lang, dep, …}]) and
+                    the paths of the config files it read ("configs")
 
     Returns the build_result() dict — project, scannedAt, pass, conditions,
     metrics, counts, ratings, supplyChain, crossFile, perFile, issues — plus
@@ -4088,7 +4102,7 @@ def scan_project(root, exclude=(), include_deps=False, taint_config=None,
                             _dedupe(get_taint_config_warnings() + flow_warnings))
         col = _collect(root, exclude, include_deps=include_deps)
         files, manifests, configs = col["files"], col["manifests"], col["configs"]
-        if not files and not manifests and not configs and not col["pth"] and not col["issues"]:
+        if not files and not manifests and not configs and not col["pth"] and not col["issues"] and not allow_empty:
             raise ScanTargetError(
                 f"nothing to scan under {_fs_display(root)}: no Python, JavaScript or "
                 f"SQL sources, package manifests or other files to check")
@@ -4202,8 +4216,13 @@ def scan_project(root, exclude=(), include_deps=False, taint_config=None,
         # the flow engine copies raw source lines into its snippets: give
         # them (and every scan_file finding) the file's own redaction
         redact_file_issues(numbered, files)
-        res = build_result(root, files, issues)
-        res["metrics"]["configFiles"] = checked
+        if merge_issues:
+            issues = merge_findings(issues, merge_issues)
+        res = build_result(root, files + list(extra_files), issues)
+        if collected is not None:
+            collected.setdefault("files", []).extend(files)
+            collected.setdefault("configs", []).extend(cf["path"] for cf in configs[:checked])
+        res["metrics"]["configFiles"] = checked + extra_configs
         res["warnings"] = warnings
         if stopped:
             res.update(incomplete=True, incompleteReason=stopped)
@@ -4741,20 +4760,22 @@ SCAN_EXAMPLES = """examples:
   lazaret-registry --help                   registry releases, watching, new GitHub repositories
 """
 
-def main(argv=None, source=None):
+def main(argv=None, source=None, twins=(), overlaid=None):
     """`lazaret` console entry point. argv defaults to sys.argv[1:]. Any
     uncaught exception becomes `error: internal: …` with exit 5 (review item
     4: a non-UTF-8 file name crashed the HTML writer with a traceback and
     exit 1 — indistinguishable from a failed gate). A closed stdout never
     stops the scan (see _PipeSafeStdout). `source`: the source block of a
-    `github:` or `gitlab:` scan (registry/sourcescan.py; set_source)."""
+    `github:` or `gitlab:` scan (registry/sourcescan.py; set_source);
+    `twins`, `overlaid`: its checkout's twin trees and the files each was
+    given of the commit's others (scan_twins)."""
     configure_stdio()
     real_stdout = sys.stdout
     guard = _PipeSafeStdout(real_stdout) if real_stdout is not None else None
     if guard is not None:
         sys.stdout = guard
     try:
-        return _main(argv, source)
+        return _main(argv, source, twins, overlaid)
     except (SystemExit, KeyboardInterrupt):
         raise
     except Exception as exc:
@@ -4796,7 +4817,61 @@ def set_source(res, source):
         res["incompleteReason"] = f"{res['incompleteReason']}; {why}" if res.get("incompleteReason") else why
 
 
-def _main(argv=None, source=None):
+def merge_findings(issues, more):
+    """`issues` and `more`, the findings of one commit read in two trees (a repository checkout's root and its twin
+    trees: scan_twins), each finding once: those of a (rule, file, line) come from the tree whose finding there is the
+    most severe, the first's on a tie. -> the merged list."""
+    def key(issue):
+        return issue.get("rule"), issue.get("file"), issue.get("line")
+
+    def worst(group):
+        return min(SEV_ORDER.get(i.get("sev"), len(SEV_ORDER)) for i in group)
+    have, extra = {}, {}
+    for n, issue in enumerate(issues):
+        have.setdefault(key(issue), []).append(n)
+    for issue in more:
+        extra.setdefault(key(issue), []).append(issue)
+    drop, add = set(), []
+    for k, group in extra.items():
+        if k not in have:
+            add.extend(group)
+        elif worst(group) < worst([issues[n] for n in have[k]]):
+            drop.update(have[k])
+            add.extend(group)
+    return [issue for n, issue in enumerate(issues) if n not in drop] + add
+
+
+def scan_twins(twins, exclude=(), include_deps=False, redact_secrets=True, shown=None, overlaid=None):
+    """The scans of a repository checkout's twin trees (registry/sources.py, MAC-TESTS): the paths of the commit that
+    the disk held as one name with another path, each tree holding them at their paths in the commit and scanned as
+    its own project, so that every rule that goes by path (a workflow, a package.json, an agent's settings) reads them
+    as the commit's own. Each tree was also given the commit's other files that it could hold (`overlaid`: {tree: those
+    paths}), so that what a rule reads across files is there: a finding in one of those is the root's again, or found
+    with more beside it, and merge_findings keeps it once. -> (the trees' findings, merged, at their paths in the
+    commit; {path: the tree its own file is in}; why a scan was not whole, [str]; how many trees held something to
+    read; what the trees hold of their own for the metrics, {"files": [file], "configs": how many config files}). A
+    tree holding nothing Lazaret reads adds nothing."""
+    issues, where, why, read, own = [], {}, [], 0, {"files": [], "configs": 0}
+    for twin in twins:
+        given, collected = (overlaid or {}).get(twin, set()), {}
+        try:
+            got = scan_project(twin, exclude, include_deps=include_deps, redact_secrets=redact_secrets, shown=shown,
+                               collected=collected)
+        except ScanTargetError:
+            continue
+        read += 1
+        own["files"].extend(f for f in collected.get("files", ()) if f.get("path") not in given)
+        own["configs"] += sum(1 for path in collected.get("configs", ()) if path not in given)
+        for issue in got["issues"]:
+            if isinstance(issue.get("file"), str) and issue["file"] not in given:
+                where.setdefault(issue["file"], twin)
+        issues = merge_findings(issues, got["issues"])
+        if got.get("incomplete"):
+            why.append(got.get("incompleteReason") or "the scan stopped early")
+    return issues, where, why, read, own
+
+
+def _main(argv=None, source=None, twins=(), overlaid=None):
     global REDACT_SECRETS, EXCERPT_WIDTH, SOURCE_SIZE_CAP
     ap = argparse.ArgumentParser(prog="lazaret", description="Lazaret — security & quality scanner for Python/JS projects.",
                                  epilog=SCAN_EXAMPLES, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -4924,12 +4999,20 @@ def _main(argv=None, source=None):
     # skipped-tree notes -> gate -> redaction; see scan_project). The taint
     # config above is already applied, so none is passed here.
     shown = {} if show_secrets_on(args.show_secrets) else None      # (the terminal's alone: never in the result)
+    twin_issues, twin_files, twin_why, twins_read, twin_own = scan_twins(
+        twins, args.exclude, include_deps=args.deps, redact_secrets=REDACT_SECRETS, shown=shown, overlaid=overlaid)
     try:
         res = scan_project(args.directory, args.exclude, include_deps=args.deps,
-                           redact_secrets=REDACT_SECRETS, extra_issues=taint_notes, shown=shown)
+                           redact_secrets=REDACT_SECRETS, extra_issues=taint_notes, shown=shown,
+                           allow_empty=twins_read > 0, merge_issues=twin_issues, extra_files=twin_own["files"],
+                           extra_configs=twin_own["configs"])
     except ScanTargetError as exc:
         print(f"error: {sanitize_term_line(exc)}", file=sys.stderr)
         sys.exit(EXIT_USAGE)
+    if twin_why:
+        why = "; ".join(twin_why)
+        res["incomplete"] = True
+        res["incompleteReason"] = f"{res['incompleteReason']}; {why}" if res.get("incompleteReason") else why
     for warning in res.get("warnings", ()):
         # audit H1: a warning can carry content parsed out of scanned files
         # (the flow engine raises on hostile input); sanitize it.
@@ -4939,7 +5022,7 @@ def _main(argv=None, source=None):
     if args.verify_secrets:
         # V-1 (John's decision 4): only when asked; each credential to its own provider, after a note that says where
         from lazaret.scanner import verifyscan
-        verifyscan.verify_findings(args.directory, res)
+        verifyscan.verify_findings(args.directory, res, roots=twin_files)
 
     # ---- SEAM (flow-sca): baseline block ---------------------------------
     if args.baseline:

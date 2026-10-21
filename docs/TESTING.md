@@ -101,8 +101,30 @@ Notes:
   problem; CI supplies what it can. The guard's integration tests run the real
   package managers against fake registries on 127.0.0.1 and skip a tool that
   isn't on PATH (CI's runners have npm and yarn 1, not always pnpm, Bun or
-  uv); `test_guard_yarn_bun.py` also covers private registries, each tool
-  reading its token from its own settings.
+  uv); `test_guard_private_registry.py` covers private registries, each tool
+  reading its token from its own settings. Those tests are split by tool into
+  modules of a few tests each (`test_guard_npm`, `_npm_lockfile`,
+  `_npm_resolve`, `_pnpm`, `_yarn`, `_bun`, `_private_registry`, `_python`,
+  `_pip_indexes`, `_uv`, `_uv_tool`, `_uv_project`; their cases and fake
+  registries in `_guard_support.py`), 4 to 12 s each on a quiet two-core
+  Linux machine: on a Mac, starting the tools and the guard's workers takes
+  longer, and the modules they were split from ran past 45 s there
+  (MAC-TESTS).
+- **macOS.** Its disk ignores case and Unicode form (`a.js` and `A.js` are
+  one file), its `/usr/bin/openssl` is LibreSSL, its temporary folder is
+  behind a link (`/var` is `/private/var`), and Homebrew's npm is not beside
+  the node its links lead to (`_support.npm_node_tar` finds npm's node-tar
+  through the npm on PATH). A test that writes a tree must not hold two
+  names that fold as one (`_dashboard_vm.cli_result` creates each file
+  exclusively, so such a tree is an error, not a smaller folder), or checks
+  the disk first and skips where it cannot hold them
+  (`_folding_disk.tells_names_apart`: the dashboard's `case twins` folder).
+  Code that writes such names is tested on a disk that folds names as
+  macOS's does (`tests/_folding_disk.py`, on any machine), as
+  `test_sources` and `test_checkout_twins` do for a repository's checkout
+  (the scans of the CLI and the registry, end to end: what this machine's
+  disk finds is found there too, and such a commit is INCOMPLETE there).
+  No test runs `openssl`: the certificates and keys are `tests/_pki.py`'s.
 - **npm side:** build the engine first (`cd js && npm run build`, again after
   any change under `rust/`; it needs Rust and `rustup target add
   wasm32-unknown-unknown`), then `node --test test/<file>.test.js`, or batch a
@@ -135,8 +157,10 @@ Notes:
   that fakes urllib's opener (`repo._OPENER`, `repo._module_opener`) asks for
   Python's transport: `@mock.patch.dict(os.environ, _support.PYTHON_TRANSPORT)`
   on the class. `tests.scanner.test_nativenet` runs the native client against
-  an HTTPS server Python's `ssl` serves on 127.0.0.1, with a root the `openssl`
-  command makes when the module starts (it skips without `openssl`), and
+  an HTTPS server Python's `ssl` serves on 127.0.0.1, with a root made when
+  the module starts (`tests/_pki.py`: ECDSA on P-256, signed with SHA-256, in
+  Python, the same on every machine; macOS's `openssl` is LibreSSL, whose
+  certificates Python and pratique refused: MAC-TESTS), and
   `cargo test -p lazaret-net` against pratique's own TLS 1.3 and HTTP/2
   test server. pratique's tests are its own (`cargo test --release -p
   pratique --lib` takes about 25 s after a 3-minute build, and its

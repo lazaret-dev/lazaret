@@ -5,7 +5,6 @@ server of Python's ssl, as tests.scanner.test_nativenet's."""
 
 import hashlib
 import os
-import shutil
 import ssl
 import tempfile
 import time
@@ -19,7 +18,6 @@ from lazaret.scanner import nativenet
 from tests.scanner.test_nativenet import NO_PROXY_ENV, make_pki, serve
 
 
-@unittest.skipUnless(shutil.which("openssl"), "no openssl command to make the test's certificates with")
 class GuardNativeFetchTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):

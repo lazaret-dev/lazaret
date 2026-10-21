@@ -85,12 +85,14 @@ def scan(files=(), paste=None, lang=None, html=HTML):
 
 
 def cli_result(files):
-    """lazaret.scanner.core's project scan of a directory holding `files` [(rel, bytes or text)]."""
+    """lazaret.scanner.core's project scan of a directory holding `files` [(rel, bytes or text)]. Each file is a new
+    one: two names a disk holds as one (`a.py` and `A.py` on macOS's and Windows' disks) are an error here, not a
+    folder holding fewer files than the page was given."""
     with tempfile.TemporaryDirectory() as root:
         for rel, data in files:
             path = os.path.join(root, *rel.split("/"))
             os.makedirs(os.path.dirname(path), exist_ok=True)
-            with open(path, "wb") as f:
+            with open(path, "xb") as f:
                 f.write(data.encode("utf-8") if isinstance(data, str) else data)
         return core.scan_project(root)
 

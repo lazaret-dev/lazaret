@@ -1,13 +1,13 @@
 """A stub provider for the secret-verification tests (0.1.9, V-1): one TLS server on 127.0.0.1 that answers as scripted for
 any of the providers' hosts, and a CONNECT proxy in front of it.
 
-The tests make no call to a real service. The server's certificate is made when a test class starts, with the `openssl`
-command (a throw-away root and a certificate for the providers' hosts under it, valid two days, in a temporary folder); where
-there is no `openssl` the tests that need the server are skipped. urllib's transport trusts the root and connects to the stub's
-port in place of 443; lazaret-net's, which connects to a host by its name, reaches it through the stub's CONNECT proxy, with
-the root as its trust anchor (`nativenet.configure_roots(stub.root)`, which the test class sets and puts back). Either way the
-host's name is what the certificate is checked for, so what is tested is the code a real call runs: https, the host checked,
-the headers, no redirect, the size and time limits.
+The tests make no call to a real service. The server's certificate is made when a test class starts (tests/_pki.py: a
+throw-away root and a certificate for the providers' hosts under it, valid two days, in a temporary folder, the same on every
+machine). urllib's transport trusts the root and connects to the stub's port in place of 443; lazaret-net's, which connects to
+a host by its name, reaches it through the stub's CONNECT proxy, with the root as its trust anchor
+(`nativenet.configure_roots(stub.root)`, which the test class sets and puts back). Either way the host's name is what the
+certificate is checked for, so what is tested is the code a real call runs: https, the host checked, the headers, no redirect,
+the size and time limits.
 
     stub = ProviderStub()           # (in setUpClass)
     stub.script["api.github.com", "/user"] = Answer(200, b'{"login": "octocat"}')
@@ -18,12 +18,10 @@ the headers, no redirect, the size and time limits.
 
 import collections
 import http.server
-import os
 import shutil
 import socket
 import socketserver
 import ssl
-import subprocess
 import tempfile
 import threading
 import time
@@ -31,6 +29,7 @@ import unittest
 
 from lazaret.scanner import secretverify as verify
 from lazaret.scanner import secretverify_http as http_mod
+from tests import _pki
 
 #: `headers`: lower-case names, the last of a name; `raw`: every field as it came, in order
 Seen = collections.namedtuple("Seen", "method host path headers body raw")
@@ -50,10 +49,6 @@ class Answer:
 def hosts():
     """The providers' hosts (the engine's table: secretverify.PROVIDERS)."""
     return sorted({p["host"] for p in verify.PROVIDERS})
-
-
-def have_openssl():
-    return shutil.which("openssl") is not None
 
 
 class _Handler(http.server.BaseHTTPRequestHandler):
@@ -191,24 +186,9 @@ class StubProxy:
 class ProviderStub:
     def __init__(self):
         self.dir = tempfile.mkdtemp(prefix="lazaret-stub-")
-        self.cafile, root_key = os.path.join(self.dir, "root.pem"), os.path.join(self.dir, "root.key")
-        self.cert, key = os.path.join(self.dir, "cert.pem"), os.path.join(self.dir, "key.pem")
-        with open(os.path.join(self.dir, "leaf.ext"), "w", encoding="ascii") as ext:
-            ext.write("subjectAltName=" + ",".join(f"DNS:{h}" for h in hosts()) + "\nbasicConstraints=critical,CA:FALSE\n"
-                      "keyUsage=critical,digitalSignature\nextendedKeyUsage=serverAuth\n")
-
-        def openssl(*args):
-            subprocess.run(["openssl", *args], check=True, capture_output=True, timeout=30, cwd=self.dir)
-
-        openssl("req", "-x509", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:prime256v1", "-nodes", "-keyout", root_key, "-out",
-                self.cafile, "-days", "2", "-subj", "/CN=lazaret-stub root", "-addext", "basicConstraints=critical,CA:TRUE",
-                "-addext", "keyUsage=critical,keyCertSign,cRLSign")
-        openssl("req", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:prime256v1", "-nodes", "-keyout", key, "-out", "leaf.csr",
-                "-subj", "/CN=lazaret-stub")
-        openssl("x509", "-req", "-in", "leaf.csr", "-CA", self.cafile, "-CAkey", root_key, "-CAcreateserial", "-out", self.cert,
-                "-days", "2", "-extfile", "leaf.ext")
-        with open(self.cafile, encoding="ascii") as f:
-            self.root = f.read()                          # (lazaret-net's trust anchor, for `native`)
+        pki = _pki.Pki(self.dir, dns=hosts(), ips=(), root_name="lazaret-stub root", server_name="lazaret-stub")
+        self.cafile, self.cert, key = pki.root, pki.cert, pki.key
+        self.root = pki.root_pem                          # (lazaret-net's trust anchor, for `native`)
         server_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         server_ctx.load_cert_chain(self.cert, key)
         self.script, self.requests, self.lock = {}, [], threading.Lock()

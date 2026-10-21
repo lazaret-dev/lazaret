@@ -1,6 +1,6 @@
 """The HTTPS transports of live secret verification (scanner/secretverify_http.py): lazaret-net's and urllib's, against a stub
-provider on 127.0.0.1 (no real service is called; the stub's certificates are made with `openssl`, and the tests that need the stub
-are skipped without it; lazaret-net's are skipped where the native transport is not available)."""
+provider on 127.0.0.1 (no real service is called; the stub's certificates are made when its class starts, tests/_pki.py;
+lazaret-net's tests are skipped where the native transport is not available)."""
 
 import datetime
 import hashlib
@@ -203,7 +203,6 @@ class ProxySettingsTests(unittest.TestCase):
             self.assertEqual(caught.exception.kind, "proxy")
 
 
-@unittest.skipUnless(vs.have_openssl(), "the stub provider needs the openssl command")
 class StubCase(unittest.TestCase):
     @classmethod
     def setUpClass(cls):

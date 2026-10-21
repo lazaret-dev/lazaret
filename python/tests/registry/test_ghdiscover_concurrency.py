@@ -30,7 +30,6 @@ import json
 import os
 import random
 import re
-import shutil
 import sqlite3
 import ssl
 import sys
@@ -792,10 +791,9 @@ class OneThreadTests(ConcurrencyCase):
         self.assertEqual(conn.threads, {threading.get_ident()})
 
 
-@unittest.skipUnless(shutil.which("openssl"), "no openssl command to make the test's certificates with")
 class TransportTests(unittest.TestCase):
     """The POST (sources._post, what Client.post sends GraphQL's calls through) from WIDTH threads at once, on each
-    transport, against a local HTTPS server (test_nativenet's root and certificate, made with openssl) that answers no
+    transport, against a local HTTPS server (test_nativenet's root and certificate, tests/_pki.py's) that answers no
     call until all WIDTH are in it: all in flight together, each on a connection of its own, each answered its own
     body. Python's server speaks HTTP/1.1; the native client's HTTP/2 streams from many threads are pratique's own
     tests'."""
@@ -805,6 +803,9 @@ class TransportTests(unittest.TestCase):
         from tests.scanner.test_nativenet import NO_PROXY_ENV, make_pki
         cls.tmp = tempfile.TemporaryDirectory()
         cls.root, cert, key = make_pki(cls.tmp.name)
+        trusted = os.path.join(cls.tmp.name, "trusted.pem")         # (urllib's roots: the test's alone)
+        with open(trusted, "w", encoding="ascii") as f:
+            f.write(cls.root)
         seen, together = [], threading.Barrier(WIDTH, timeout=WAIT)
 
         class Handler(http.server.BaseHTTPRequestHandler):
@@ -831,8 +832,7 @@ class TransportTests(unittest.TestCase):
         cls.server.socket = context.wrap_socket(cls.server.socket, server_side=True)
         threading.Thread(target=cls.server.serve_forever, daemon=True).start()
         cls.host = f"localhost:{cls.server.server_address[1]}"
-        cls.env = mock.patch.dict(os.environ, {**NO_PROXY_ENV, "SSL_CERT_FILE": os.path.join(cls.tmp.name, "ca.pem")},
-                                  clear=True)
+        cls.env = mock.patch.dict(os.environ, {**NO_PROXY_ENV, "SSL_CERT_FILE": trusted}, clear=True)
         cls.env.start()
 
     @classmethod

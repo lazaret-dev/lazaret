@@ -3,7 +3,7 @@ same stub provider over TLS on 127.0.0.1 (each through the stub's CONNECT proxy,
 SSL_CERT_FILE for the Python package's transports, NODE_EXTRA_CA_CERTS for node), and must report the same: each finding's
 rule, place, severity, type, message and `verified`, the `verification` block, the counts, the ratings, the gate and the exit
 code; and both must have asked each provider the same. No real service is called. Skipped without node and the npm engine's
-WebAssembly build, the native library, or `openssl`."""
+WebAssembly build or the native library."""
 
 import json
 import os
@@ -23,7 +23,6 @@ PYTHON_SRC = os.path.join(_support.REPO_ROOT, "python", "src")
 
 @unittest.skipUnless(NPM_READY, NPM_SKIP)
 @unittest.skipUnless(_native.available(), f"native engine not built ({_native.load_error()})")
-@unittest.skipUnless(vs.have_openssl(), "the stub provider needs the openssl command")
 class VerifyParityTests(unittest.TestCase):
     maxDiff = None
 

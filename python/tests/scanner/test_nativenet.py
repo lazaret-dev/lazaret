@@ -1,8 +1,8 @@
 """The native transport (0.1.9, NET-1): the native library's HTTPS client (rust/crates/lazaret-net, on pratique)
 from Python, against a local HTTPS server that Python's ssl serves with a root made for the test.
 
-The root and the server's certificate are made with the `openssl` command when the tests start (none is kept in the
-repository); without it, or without the native library's network layer, the tests skip. Python's server speaks
+The root and the server's certificate are made when the tests start (tests/_pki.py: the same on every machine,
+none kept in the repository); without the native library's network layer the tests skip. Python's server speaks
 HTTP/1.1 (the native client offers h2 and takes HTTP/1.1 when the server does not pick it; the HTTP/2 path is held by
 lazaret-net's own tests against pratique's server). Hosts are `localhost` on the server's port; nothing leaves the
 machine."""
@@ -14,10 +14,8 @@ import http.server
 import json
 import os
 import pathlib
-import shutil
 import socket
 import ssl
-import subprocess
 import tempfile
 import threading
 import types
@@ -29,28 +27,14 @@ from unittest import mock
 from lazaret.registry import guard, repo
 from lazaret.registry.ecosystems import base
 from lazaret.scanner import nativenet
-
-
-def _openssl(args, cwd):
-    subprocess.run(["openssl", *args], cwd=cwd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                   timeout=30)
+from tests import _pki
 
 
 def make_pki(folder):
     """(the root's PEM, the server's certificate file, its key file): a root, and a certificate for localhost and
-    127.0.0.1 under it, both for a day."""
-    ext = pathlib.Path(folder, "leaf.ext")
-    ext.write_text("subjectAltName=DNS:localhost,IP:127.0.0.1\nbasicConstraints=critical,CA:FALSE\n"
-                   "keyUsage=critical,digitalSignature\nextendedKeyUsage=serverAuth\n", encoding="ascii")
-    _openssl(["req", "-x509", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:P-256", "-nodes", "-keyout", "ca.key",
-              "-out", "ca.pem", "-days", "1", "-subj", "/CN=Lazaret test root",
-              "-addext", "basicConstraints=critical,CA:TRUE", "-addext", "keyUsage=critical,keyCertSign,cRLSign"], folder)
-    _openssl(["req", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:P-256", "-nodes", "-keyout", "leaf.key",
-              "-out", "leaf.csr", "-subj", "/CN=localhost"], folder)
-    _openssl(["x509", "-req", "-in", "leaf.csr", "-CA", "ca.pem", "-CAkey", "ca.key", "-CAcreateserial",
-              "-out", "leaf.pem", "-days", "1", "-extfile", "leaf.ext"], folder)
-    return (pathlib.Path(folder, "ca.pem").read_text(encoding="ascii"), os.path.join(folder, "leaf.pem"),
-            os.path.join(folder, "leaf.key"))
+    127.0.0.1 under it (tests/_pki.py)."""
+    pki = _pki.Pki(folder)
+    return pki.root_pem, pki.cert, pki.key
 
 
 @functools.lru_cache(maxsize=None)
@@ -195,7 +179,6 @@ def serve_old_tls():
 NO_PROXY_ENV = {k: v for k, v in os.environ.items() if k.lower() not in ("https_proxy", "http_proxy", "all_proxy")}
 
 
-@unittest.skipUnless(shutil.which("openssl"), "no openssl command to make the test's certificates with")
 class NativeTransportTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):

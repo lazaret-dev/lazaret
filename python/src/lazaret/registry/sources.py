@@ -65,7 +65,6 @@ from collections import namedtuple
 from lazaret.registry import pmsettings as _pm
 from lazaret.registry import repo as _repo
 from lazaret.scanner import core as _core
-from lazaret.scanner import engine as _engine
 from lazaret.scanner import nativenet as _net
 
 __all__ = ["SourceError", "Source", "Checkout", "parse_source", "checkout", "scanned_checkout",
@@ -620,6 +619,8 @@ class Checkout:
         self.incomplete = []      # (reason, detail): the commit was not read whole
         self.notes = []           # things worth saying that do not make it incomplete
         self.anomalies = []       # (kind, path, detail): what the archive did oddly
+        self.twins = []           # the twin trees beside the root (_Writer): each scanned as its own project
+        self.overlaid = {}        # twin tree -> the paths of the commit's other files it was given (_Writer.overlay)
         self.calls = []
 
     @property
@@ -631,8 +632,9 @@ class Checkout:
         return not self.incomplete
 
     def summary(self):
-        return {"source": self.spec, "commit": self.commit, "root": self.root, "files": self.files,
-                "bytes": self.bytes, "complete": self.complete, "incomplete": list(self.incomplete),
+        return {"source": self.spec, "commit": self.commit, "root": self.root, "twins": list(self.twins),
+                "files": self.files, "bytes": self.bytes, "complete": self.complete,
+                "incomplete": list(self.incomplete),
                 "skipped": [list(s) for s in self.skipped], "notes": list(self.notes),
                 "anomalies": [list(a) for a in self.anomalies]}
 
@@ -640,68 +642,289 @@ class Checkout:
         if self._tmp:
             shutil.rmtree(self._tmp, ignore_errors=True)
             self._tmp = None
+        for twin in self.twins:
+            shutil.rmtree(twin, ignore_errors=True)
+        self.twins, self.overlaid = [], {}
 
     def __repr__(self):
         return f"<Checkout {self.spec} {self.files} files>"
 
 
+def not_covered(ck):
+    """What the commit holds that a scan of its checkout does not read: the
+    checkout's own `incomplete`, and every file that could not be written. A
+    file left out only for its size is not here: a scan of a folder does not
+    read one either. `lazaret scan github:…` (sourcescan) and the registry's
+    repository scans (ghdiscover) both count these."""
+    gaps, seen = list(ck.incomplete), set()
+    for rel, why in ck.skipped:
+        gap = ("skipped", f"{rel}: {why}")
+        if not why.startswith("larger than") and gap not in seen:
+            seen.add(gap)
+            gaps.append(gap)
+    return gaps
+
+
+#: the twin trees a checkout may make beside its root (MAX_TWIN_TREES): a path the disk holds as one name with another
+#: path of the commit goes to the first of them where it can be written; one more such path is not written
+MAX_TWIN_TREES = 16
+
+#: the files the twin trees may be given of the commit's others, all trees together (_Writer.overlay): the files
+#: written times the twin trees; past it no tree is given any, and the scans read each twin tree's own files alone
+MAX_OVERLAY_FILES = 50_000
+
+#: a name Windows does not keep as given (`_windows_refuses`): a device's (CON, NUL, COM1, …, with any extension), an
+#: alternate data stream's (`name:stream`), one that ends in a dot or a space (the disk drops them)
+WINDOWS = os.name == "nt"
+_WINDOWS_DEVICES = re.compile(r"(?i)(CON|PRN|AUX|NUL|CONIN\$|CONOUT\$|(COM|LPT)[0-9\u00b9\u00b2\u00b3])")
+
+
+def _windows_refuses(part):
+    """Why Windows would not keep the path component `part` as it is, or None."""
+    if ":" in part:
+        return "a data stream's name"
+    if part.endswith((".", " ")):
+        return "a name ending in a dot or a space"
+    if _WINDOWS_DEVICES.fullmatch(part.split(".", 1)[0].rstrip(" ")):
+        return "a device's name"
+    return None
+
+
 class _Writer:
-    """Writes files under a checkout's root: by their canonical relative
-    path, never through a link, a path's case-fold collision kept apart
-    instead of overwritten. `written`: the relative paths written (as the
-    archive or the tree named them)."""
+    """Writes the files of a checkout by their real paths, never through a link
+    and never over a file written before (MAC-TESTS).
+
+    Every path is written under its own name in the checkout's root wherever
+    the disk lets it: each folder is made by this writer (`mkdir`, which fails
+    where anything is), each file is created where nothing is (O_EXCL). So on
+    a disk that tells names apart every path of the commit is in the root as
+    the commit has it. macOS's and Windows' disks take names that differ only
+    in case or Unicode form for one: there the second of `App.py` and `app.py`
+    (or a folder `lib/` beside a `Lib/` or a file `A`) is refused, and the path
+    is written whole, under its real name, in a twin tree beside the root
+    (`<root>.lazaret-twin-N`, the first of them where the disk takes it).
+    A twin tree holds the commit's paths as the root does, so the scan reads
+    each of its files at the commit's path, with the rules that go by path
+    (a workflow, a package.json, an agent's settings) as for the root's own
+    (`twins`: the scans read the root and each twin tree, each as its own
+    project, and report every finding at its path in the commit). Once all
+    is written, each twin tree is given every other file of the commit that
+    it can hold (`overlay`: a hard link, or a copy), so that what a rule
+    reads across files (a hook's script, a helper a tainted call goes into)
+    is there too; two paths that are one name on the disk still cannot be in
+    one tree, so a checkout with twin trees is not read whole (`apart`, a
+    gap in `incomplete`). The checkout's anomalies say which paths were kept
+    apart (`case`), one line each. A path that is refused in every twin tree
+    (more than MAX_TWIN_TREES names that are one), that the disk cannot hold
+    at all (a name too long, or one it refuses) or that Windows would not
+    keep as given (`_windows_refuses`), is not written: `skipped`, which
+    makes the checkout not read whole (`not_covered`). An archive entry whose
+    path was written before (the same path, twice) is written over its own
+    file: the later one wins, as an extractor writes it. `written`: the paths
+    written; `held`: the paths the archive held, written or not (no path of
+    these is fetched again); `kept`: the tree each written path is in (0 for
+    the root)."""
 
     def __init__(self, dest, ck):
-        self.root, self.ck = os.path.realpath(dest), ck
-        self.taken, self.written = {}, set()
+        self.root, self.ck = os.path.abspath(dest), ck
+        self.trees = [self.root]           # the root, then the twin trees made so far
+        self.made = [{""}]                 # each tree's folders made by this writer (the commit's paths)
+        self.refused = [{}]                # each tree's folders the disk refused -> why (one name with another there)
+        self.entries = [{}]                # each tree: folder -> {name: (the commit's path, a folder?)} made in it
+        self.folds = {}                    # a name -> its fold (repo.case_fold), asked only to name a twin
+        self.written, self.held, self.kept = set(), set(), {}
+        self.noted = set()
+
+    def _fold(self, name):
+        if name not in self.folds:
+            self.folds[name] = _repo.case_fold(name)
+        return self.folds[name]
+
+    def _why(self, k, folder, name, is_folder):
+        """Why the disk refused `name` in tree k's `folder` (a folder of the path being written when `is_folder`),
+        naming the commit's path it is one name with there: one of the same name (a file and a folder of one name,
+        which git does not make), one by the archive reader's fold, or a path written before (a name the disk folds
+        as the reader does not)."""
+        here = self.entries[k].get(folder, {})
+        what = f"its folder {folder + '/' if folder else ''}{name}/" if is_folder else None
+        if name in here:
+            path, other_is_folder = here[name]
+            other = f"the archive's {'folder' if other_is_folder else 'file'} {path}{'/' if other_is_folder else ''}"
+            return f"{what} has the name of {other}" if what else f"{other} has its name"
+        key = self._fold(name)
+        twin = next((f"{path}{'/' if other_is_folder else ''}" for other, (path, other_is_folder) in here.items()
+                     if self._fold(other) == key), "a path written before")
+        return f"{what} is one name on this disk with {twin}" if what else f"one name on this disk with {twin}"
+
+    def _tree(self, k):
+        """Tree k, made when first needed -> its root."""
+        while len(self.trees) <= k:
+            n = len(self.trees)
+            while True:
+                path = f"{self.root}.lazaret-twin-{n}"
+                try:
+                    os.mkdir(path, 0o700)
+                    break
+                except FileExistsError:
+                    n += 1
+            self.trees.append(path)
+            self.made.append({""})
+            self.refused.append({})
+            self.entries.append({})
+            self.ck.twins.append(path)
+        return self.trees[k]
+
+    def _note(self, rel, whys):
+        """Say that the commit's `rel` was kept apart in a twin tree: why each tree before it refused it."""
+        if rel in self.noted:
+            return
+        self.noted.add(rel)
+        detail = whys[0] + "".join(f"; in twin tree {j}, {why}" for j, why in enumerate(whys[1:], 1))
+        anomalies = self.ck.anomalies
+        # (the archive's reader names the pair too, as it reads it, and what an installer does with it, EG-4: one
+        # line, the reader's, and that this checkout kept both)
+        same = next((i for i, a in enumerate(anomalies) if a[0] == "case" and a[1] == rel), None)
+        if same is None:
+            anomalies.append(("case", rel, f"{detail}: kept apart and read at its own path"))
+        else:
+            anomalies[same] = ("case", rel, f"{anomalies[same][2]}; this checkout kept it apart and read it at its "
+                                            f"own path")
+
+    def _folders(self, k, parts):
+        """Make the folders of the commit's path `parts` in tree k -> None, or why the disk refused one of them."""
+        root, made, refused, entries = self.trees[k], self.made[k], self.refused[k], self.entries[k]
+        for i in range(1, len(parts)):
+            folder = "/".join(parts[:i])
+            if folder in made:
+                continue
+            if folder in refused:
+                return refused[folder]
+            parent = "/".join(parts[:i - 1])
+            try:
+                os.mkdir(os.path.join(root, *parts[:i]))
+            except (FileExistsError, NotADirectoryError):
+                refused[folder] = self._why(k, parent, parts[i - 1], is_folder=True)
+                return refused[folder]
+            made.add(folder)
+            entries.setdefault(parent, {})[parts[i - 1]] = (folder, True)
+        return None
+
+    def _place(self, k, parts):
+        """Make the commit's path `parts` in tree k: its folders, then the file, open for writing -> (the file, None),
+        or (None, why) where the disk refuses a name there (one name with another: the path goes to the next tree).
+        Raises OSError when the disk cannot hold the path at all."""
+        self._tree(k)
+        why = self._folders(k, parts)
+        if why is not None:
+            return None, why
+        folder, name = "/".join(parts[:-1]), parts[-1]
+        try:
+            out = open(os.path.join(self.trees[k], *parts), "xb")
+        except (FileExistsError, IsADirectoryError):
+            return None, self._why(k, folder, name, is_folder=False)
+        self.entries[k].setdefault(folder, {})[name] = ("/".join(parts), False)
+        return out, None
 
     def write(self, rel, raw):
         ck = self.ck
-        key = _engine.case_fold(rel, "NFC")                    # (on the engine's Unicode, BR-2)
-        out = rel
-        if key in self.taken and self.taken[key] != rel:
-            n = 1
-            while f"{rel}.lazaret-dup{n}" in self.written:
-                n += 1
-            out = f"{rel}.lazaret-dup{n}"
-            detail = f"differs from {self.taken[key]} only in case or form; kept as {out}"
-            # (the archive's reader names the pair too, as it reads it: one line, with where it was kept, EG-4)
-            same = next((i for i, a in enumerate(ck.anomalies) if a[0] == "case" and a[1] == rel), None)
-            if same is None:
-                ck.anomalies.append(("case", rel, detail))
-            else:
-                ck.anomalies[same] = ("case", rel, detail)
-        self.taken.setdefault(key, rel)
-        target = os.path.join(self.root, *out.split("/"))
-        if os.path.commonpath([self.root, os.path.realpath(os.path.dirname(target))]) != self.root:
+        self.held.add(rel)
+        parts = rel.split("/")
+        if any(p in ("", ".", "..") for p in parts):
             ck.skipped.append((rel, "outside the checkout"))
             return
+        refuses = next((why for why in map(_windows_refuses, parts) if why), None) if WINDOWS else None
+        if refuses:
+            ck.skipped.append((rel, f"could not be written ({refuses}, which Windows does not keep as given)"))
+            return
         try:
-            os.makedirs(os.path.dirname(target), exist_ok=True)
-            with open(target, "wb") as f:
-                f.write(raw)
+            if rel in self.kept:
+                out = open(os.path.join(self.trees[self.kept[rel]], *parts), "wb")    # (the file written for it before)
+                k = self.kept[rel]
+            else:
+                out, whys = None, []
+                for k in range(MAX_TWIN_TREES + 1):
+                    out, why = self._place(k, parts)
+                    if out is not None:
+                        break
+                    whys.append(why)
+                if out is None:
+                    ck.skipped.append((rel, f"could not be written (one name on this disk with paths in "
+                                            f"{MAX_TWIN_TREES + 1} trees)"))
+                    return
+                if whys:
+                    self._note(rel, whys)
+            with out:
+                out.write(raw)
         except (OSError, ValueError) as exc:
             ck.skipped.append((rel, f"could not be written ({type(exc).__name__})"))
             return
+        self.kept[rel] = k
         self.written.add(rel)
         ck.files += 1
         ck.bytes += len(raw)
 
+    def apart(self):
+        """The paths written in a twin tree, sorted."""
+        return sorted(rel for rel, k in self.kept.items() if k)
+
+    def overlay(self):
+        """Give each twin tree every other file of the commit that it can hold: the root's, then each other twin
+        tree's, each a hard link to the file written (a copy where the disk makes none), made only where nothing is
+        (O_EXCL, mkdir: a name that is one with the tree's own is left out), never through a link. Kept in
+        `ck.overlaid` ({twin tree: the paths given it}), which the scans leave out of what each tree holds of its
+        own. -> how many were given, or None when MAX_OVERLAY_FILES is less than the files times the twin trees."""
+        twins = len(self.trees) - 1
+        if not twins:
+            return 0
+        if len(self.kept) * twins > MAX_OVERLAY_FILES:
+            return None
+        order = sorted(self.kept.items(), key=lambda item: item[1])        # (the root's first; stable)
+        given = 0
+        for k in range(1, twins + 1):
+            got = self.ck.overlaid.setdefault(self.trees[k], set())
+            for rel, j in order:
+                parts = rel.split("/")
+                if j != k and self._folders(k, parts) is None and self._link(
+                        os.path.join(self.trees[j], *parts), os.path.join(self.trees[k], *parts)):
+                    got.add(rel)
+                    given += 1
+        return given
+
+    @staticmethod
+    def _link(src, dst):
+        """`dst` made as `src` (a file this writer wrote): a hard link, or a copy -> made (False: a name there)."""
+        try:
+            os.link(src, dst, follow_symlinks=False)
+            return True
+        except FileExistsError:
+            return False
+        except (OSError, NotImplementedError):              # (no hard links on this disk, or across these folders)
+            pass
+        try:
+            fd = os.open(src, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0))
+            with os.fdopen(fd, "rb") as inp, open(dst, "xb") as out:
+                shutil.copyfileobj(inp, out)
+            return True
+        except OSError:
+            return False
+
 
 def _write_members(members, writer):
     """Writes the files of `iter_archive`'s members (`_Writer`). -> the set
-    of relative paths written."""
+    of relative paths the archive held (written, or not for a reason the
+    tree's fetch cannot change: its size, the disk)."""
     ck = writer.ck
     for m in members:
         rel, size, raw, reason = m
         if reason == "member":
+            writer.held.add(rel)
             ck.skipped.append((rel, f"larger than {_repo.MAX_MEMBER // 1_000_000} MB, not read"))
             continue
         if reason:
             ck.incomplete.append((reason, m.detail or f"reading stopped at {rel}"))
             continue
         writer.write(rel, raw)
-    return writer.written
+    return writer.held
 
 
 def _blob_id(raw, size_of_id):
@@ -775,7 +998,7 @@ def checkout(spec, dest=None, *, env=None, http=None, check_tree=True):
         budget = _repo.Budget(deadline=time.monotonic() + _repo.SCAN_TIMEOUT)
         members = _repo.iter_archive(data, "tgz", "sdist", budget=budget, anomalies=ck.anomalies)
         writer = _Writer(ck.root, ck)
-        written = set(_write_members(members, writer))
+        held = set(_write_members(members, writer))
         if check_tree:
             paths, complete, notes = client.tree(src, commit)
             ck.notes.extend(notes)
@@ -787,7 +1010,7 @@ def checkout(spec, dest=None, *, env=None, http=None, check_tree=True):
                 rel = _repo.canonical_member_path("x/" + p, "sdist")[0]
                 if rel:
                     norm.setdefault(rel, (p, blob))
-            missing = sorted((rel, p, blob) for rel, (p, blob) in norm.items() if rel not in written)
+            missing = sorted((rel, p, blob) for rel, (p, blob) in norm.items() if rel not in held)
             if missing:
                 left, why = _fetch_missing(client, src, commit, missing, writer,
                                            deadline=time.monotonic() + MISSING_FILES_SECONDS)
@@ -801,6 +1024,18 @@ def checkout(spec, dest=None, *, env=None, http=None, check_tree=True):
                                                            f"archive (`export-ignore` in .gitattributes), and were not "
                                                            f"fetched on their own"
                                                            + (f" ({why})" if why else "") + f": {shown}"))
+        apart = writer.apart()
+        if apart:
+            # (MAC-TESTS: each twin tree is given the commit's other files, and still two paths that are one name on
+            # this disk are never in one tree, so what a rule reads across them is not seen: not read whole)
+            if writer.overlay() is None:
+                ck.notes.append(f"the twin trees were not given the commit's other files ({len(writer.kept)} files "
+                                f"in {len(ck.twins)} twin trees is more than {MAX_OVERLAY_FILES}): each is read alone")
+            shown = ", ".join(apart[:5]) + (f" and {len(apart) - 5} more" if len(apart) > 5 else "")
+            ck.incomplete.append(("case", f"{len(apart)} path(s) were kept apart from the commit's other files on "
+                                          f"this disk, each one name there with another path (names that differ only "
+                                          f"in case or Unicode form), so rules across files may not have seen them "
+                                          f"together: {shown}"))
     except BaseException:
         ck.cleanup()
         raise
@@ -810,8 +1045,9 @@ def checkout(spec, dest=None, *, env=None, http=None, check_tree=True):
 
 @contextlib.contextmanager
 def scanned_checkout(spec, **kw):
-    """`with scanned_checkout("github:o/r@v1") as ck:` scans `ck.root`; the
-    directory is removed on the way out."""
+    """`with scanned_checkout("github:o/r@v1") as ck:` scans `ck.root` and
+    each of `ck.twins` (core.scan_twins); the directories are removed on the
+    way out."""
     ck = checkout(spec, **kw)
     try:
         yield ck

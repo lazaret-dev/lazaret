@@ -45,14 +45,15 @@ class Recorder:
     was on disk at the time."""
 
     def __init__(self, result=0, exc=None):
-        self.result, self.exc, self.calls, self.sources = result, exc, [], []
+        self.result, self.exc, self.calls, self.sources, self.twins = result, exc, [], [], []
 
-    def __call__(self, argv=None, source=None):
+    def __call__(self, argv=None, source=None, twins=(), overlaid=None):
         root = next((a for a in argv if os.path.isdir(a) and os.path.basename(a).startswith(("github-", "gitlab-"))), None)
         listing = sorted(os.path.relpath(os.path.join(d, f), root).replace(os.sep, "/")
                          for d, _, fs in os.walk(root) for f in fs) if root else None
         self.calls.append((list(argv), root, listing))
         self.sources.append(source)
+        self.twins.append(list(twins))
         if self.exc:
             raise self.exc
         return self.result

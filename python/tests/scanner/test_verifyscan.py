@@ -1,6 +1,6 @@
 """`lazaret scan --verify-secrets` (scanner/verifyscan.py, V-1 stage 2; John's decision 4): a scan's secret findings asked about
 after the scan. A stand-in transport answers, and the last classes ask the stub provider over TLS on 127.0.0.1, over urllib and
-over lazaret-net (skipped without `openssl`, and lazaret-net's where the native transport is not available); no call reaches a
+over lazaret-net (lazaret-net's skipped where the native transport is not available); no call reaches a
 real service. The values are looked for in everything a verifying scan writes: none is there."""
 
 import contextlib
@@ -321,7 +321,6 @@ class CliTests(CliCase):
         self.assertIn("--verify-secrets", out.getvalue())
 
 
-@unittest.skipUnless(vs.have_openssl(), "the stub provider needs the openssl command")
 class StubCliTests(CliCase):
     """The same scan over TLS against the stub provider: each credential reaches its own provider's host, and only there."""
 

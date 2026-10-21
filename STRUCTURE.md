@@ -248,7 +248,7 @@ class IntegrationTests(unittest.TestCase):
 | `LAZARET_SAMPLES_DIR` | `tests/scanner/test_detection_corpus.py` | path to a checkout of `lazaret-samples` |
 | `LAZARET_BENCHMARK` | `tests/registry/test_benchmark.py` | any value; scans 21 real, legitimate npm and PyPI packages over the network and checks none is SUSPICIOUS and each matches its expected verdict |
 | `LAZARET_TEST_FEEDS` | `LiveFeedsTests` in `tests/scanner/test_sca_feeds.py` | any value; downloads the real OSV, CISA KEV and EPSS feeds and checks the bundle built from them (the rest of that file reads local copies, as a mirror would) |
-| `LAZARET_TEST_YARN_BERRY` | the yarn 2+ tests of `tests/registry/test_guard_yarn_bun.py` | the path of yarn 2+'s standalone `yarn.js` (`bin/yarn.js` of the `@yarnpkg/cli-dist` package); the guard's tests of npm, pnpm, yarn 1, Bun and uv run with whichever of those is on PATH, and skip the others |
+| `LAZARET_TEST_YARN_BERRY` | the yarn 2+ tests of `tests/registry/test_guard_yarn.py` and `test_guard_private_registry.py` | the path of yarn 2+'s standalone `yarn.js` (`bin/yarn.js` of the `@yarnpkg/cli-dist` package); the guard's tests of npm, pnpm, yarn 1, Bun and uv run with whichever of those is on PATH, and skip the others |
 
 Tests that depend on file permissions skip themselves when run as root, since root ignores directory permissions (the npm suite re-runs them under `unshare -U` where available).
 

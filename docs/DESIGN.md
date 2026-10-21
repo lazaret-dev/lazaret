@@ -1795,6 +1795,46 @@ the archive read by `repo.iter_archive` with its byte, file and time budgets,
 links resolved inside it rather than created; nothing run. `sourcescan`
 then runs the ordinary scan (`core.main`, every option) on the directory.
 
+Every path of the commit is written under its real name, and none over
+another (`sources._Writer`, MAC-TESTS). The writer makes each folder itself
+(`mkdir`) and creates each file where nothing is (`O_EXCL`), so on a disk
+that tells names apart the checkout is the commit's tree. macOS's and
+Windows' disks take paths that differ only in case or Unicode form for one
+name and refuse the second (`App.py` beside `app.py`, a folder `.github/`
+beside a file `.GITHUB`, `lib/` beside `Lib/`); that path is written whole,
+under its real name, in a twin tree beside the checkout
+(`<root>.lazaret-twin-N`, the first of at most `MAX_TWIN_TREES` where the
+disk takes it; `Checkout.twins`). Once everything is written, each twin tree
+is given every other file of the commit that it can hold (`overlay`: a hard
+link to the file written, or a copy, made only where nothing is; never
+through a link), so what a rule reads across files is beside it: the script
+a task or a hook runs, the helper a tainted call goes into, a lockfile.
+`MAX_OVERLAY_FILES` caps the files times the twin trees; past it each twin
+tree holds its own files alone. The scan reads each twin tree as its own
+project (`core.scan_twins`, for `core.main` and the registry's
+`ghdiscover`): its paths are the commit's, so the rules that go by path (a
+workflow under `.github/workflows/`, a `package.json`'s install hooks,
+`.vscode/tasks.json`, a `setup.py`) read it as the commit's own. Its
+findings join the root's at their paths in the commit, each once
+(`core.merge_findings`: by rule, file and line, the most severe), its own
+files count in the metrics, and `--verify-secrets` reads their lines in
+their own tree. Two paths that are one name on the disk are never in one
+tree, so a relation between them (`A.js` requiring `./a`) cannot be seen
+there: a checkout with a twin tree is not read whole (the `case` gap,
+naming the paths kept apart), INCOMPLETE for the CLI (unless
+`--accept-incomplete`) and the registry, SUSPICIOUS where a strong
+indicator is found all the same. On Linux a commit git made has no twin
+tree, and nothing of this applies. Each path kept apart is an anomaly
+(`case`) naming the path it is one name with, in each tree that refused
+it: the archive reader's fold (`repo.case_fold`) names it, the disk
+decides, so a disk that folds names some other way is held as well. A path
+that no twin tree can hold, that the disk cannot hold at all (a name too
+long, or one it refuses), or that Windows would not keep as given (a
+device's name, `name:stream`, a trailing dot or space), is `skipped`, and
+`sources.not_covered` makes it a part not read for both scans. The paths
+the archive held are not fetched again by their blobs, so such a path is
+never taken for one the archive left out.
+
 What an archive cannot show is looked for. `git archive` leaves out every
 path marked `export-ignore`, so a payload can sit in the commit and out of
 its tarball. The commit's tree is listed (one call on GitHub, pages on

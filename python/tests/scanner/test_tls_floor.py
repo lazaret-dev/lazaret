@@ -6,17 +6,15 @@ default does not lower Lazaret's; and a source check holds every urllib opener, 
 python/src to it.
 
 The server is local: Python's ssl speaking TLS 1.0 and 1.1 and nothing newer (OpenSSL's security level 0 allows it),
-with a root and a certificate the `openssl` command makes when the tests start. Those tests skip where the command is
-missing or this OpenSSL no longer speaks TLS 1.1. Nothing leaves the machine."""
+with a root and a certificate made when the tests start (tests/_pki.py). Those tests skip where this OpenSSL no longer
+speaks TLS 1.1. Nothing leaves the machine."""
 
 import ast
 import contextlib
 import os
 import pathlib
-import shutil
 import socket
 import ssl
-import subprocess
 import tempfile
 import threading
 import unittest
@@ -27,6 +25,7 @@ from unittest import mock
 
 from lazaret.registry import keepalive, repo
 from lazaret.scanner import nativenet, sca_feeds, secretverify_http
+from tests import _pki
 from tests.scanner.test_nativenet import NO_PROXY_ENV, Handler, Server
 
 SRC = pathlib.Path(__file__).resolve().parents[2] / "src" / "lazaret"
@@ -36,21 +35,9 @@ NAME = "api.lazaret.invalid"
 
 def make_pki(folder):
     """(the root's file, the server's certificate file, its key file): a root, and a certificate under it for
-    localhost, 127.0.0.1 and NAME, both for a day."""
-    def run(*args):
-        subprocess.run(["openssl", *args], cwd=folder, check=True, stdout=subprocess.DEVNULL,
-                       stderr=subprocess.DEVNULL, timeout=30)
-    pathlib.Path(folder, "leaf.ext").write_text(
-        f"subjectAltName=DNS:localhost,IP:127.0.0.1,DNS:{NAME}\nbasicConstraints=critical,CA:FALSE\n"
-        "keyUsage=critical,digitalSignature\nextendedKeyUsage=serverAuth\n", encoding="ascii")
-    run("req", "-x509", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:P-256", "-nodes", "-keyout", "ca.key",
-        "-out", "ca.pem", "-days", "1", "-subj", "/CN=Lazaret TLS floor test root",
-        "-addext", "basicConstraints=critical,CA:TRUE", "-addext", "keyUsage=critical,keyCertSign,cRLSign")
-    run("req", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:P-256", "-nodes", "-keyout", "leaf.key",
-        "-out", "leaf.csr", "-subj", "/CN=localhost")
-    run("x509", "-req", "-in", "leaf.csr", "-CA", "ca.pem", "-CAkey", "ca.key", "-CAcreateserial", "-out", "leaf.pem",
-        "-days", "1", "-extfile", "leaf.ext")
-    return tuple(os.path.join(folder, f) for f in ("ca.pem", "leaf.pem", "leaf.key"))
+    localhost, 127.0.0.1 and NAME (tests/_pki.py)."""
+    pki = _pki.Pki(folder, dns=("localhost", NAME), root_name="Lazaret TLS floor test root")
+    return pki.root, pki.cert, pki.key
 
 
 def _speak_old_versions(context):
@@ -83,7 +70,6 @@ def serve_old(cert, key):
     return server, server.server_address[1]
 
 
-@unittest.skipUnless(shutil.which("openssl"), "no openssl command to make the test's certificates with")
 class PythonTransportFloorTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):

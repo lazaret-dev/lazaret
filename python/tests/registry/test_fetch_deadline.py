@@ -470,7 +470,6 @@ class NormalTests(_Case):
             self.assertEqual(f.get(self.server.url + "/no-length", max_bytes=len(BODY)), BODY)
 
 
-@unittest.skipUnless(shutil.which("openssl"), "no openssl command to make the test's certificates with")
 class TlsTests(_Case):
     """Over TLS on Python's transport (the native one is set aside here). An SSL socket's pending read is woken by the
     watchdog too: dripped headers, which http.client reads in many calls, each waiting up to the socket's timeout,

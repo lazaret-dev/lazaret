@@ -3,8 +3,11 @@ the policy (--min-age, --allow-new, --trust, --block-warn), the verdict cache,
 fetching, the local PyPI index, the report and the `lazaret guard` command
 line; (0.1.8) yarn's and Bun's lockfiles, credentials on the wire, several
 indexes relayed at once, uv's tool command lines. No package manager and no
-network: test_guard_npm.py and test_guard_python.py run the real tools
-against fake registries; test_pmsettings.py reads their settings."""
+network: test_guard_npm.py, test_guard_python.py and their siblings (one
+module for a few of a tool's tests: _npm_lockfile, _npm_resolve, _pnpm,
+_yarn, _bun, _private_registry, _pip_indexes, _uv, _uv_tool, _uv_project)
+run the real tools against fake registries; test_pmsettings.py reads their
+settings."""
 
 import argparse
 import base64
