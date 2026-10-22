@@ -5,7 +5,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { scanFile, detectLang } from "../../src/scanner/scan.js";
-import { computeMetrics, worstSevRating, maintainabilityRating } from "../../src/scanner/metrics.js";
+import { computeMetrics } from "../../src/scanner/metrics.js";
 
 const scan = (name, content) =>
   scanFile({ name, content, lang: detectLang(name, content) }).map((i) => i.rule);
@@ -24,7 +24,7 @@ test("py: eval/exec, command injection, SQL injection", () => {
   assert.ok(scan("t.py", 'cur.execute("SELECT * FROM t WHERE i=" + uid)\n').includes("S-SQL-PY"));
 });
 
-test("py: sqlSinkScan catches template-variable SQL (G12)", () => {
+test("py: the SQL-sink pass catches template-variable SQL (G12)", () => {
   const src = [
     "q = 'SELECT * FROM t WHERE id = %s' % uid",
     "cur.execute(q)",
@@ -65,8 +65,13 @@ test("obfuscation: hex-hidden text and base64 blob flagged (SC-HEXSTR / SC-B64)"
   // escaped binary data (NUL bytes, UTF-8 sequences) is not obfuscation
   const binary = 'x = b"' + "\\x00\\xc3\\xa4".repeat(4) + '"\n';
   assert.ok(!scan("t.py", binary).includes("SC-HEXSTR"));
-  const b64 = 'x = "' + "A".repeat(250) + '"\n';   // 200+ consecutive base64 chars
+  const data = Buffer.from(Array.from({ length: 240 }, (_, i) => (i * 7919) % 256)).toString("base64");
+  const b64 = 'x = "' + data + '"\n';   // 200+ consecutive base64 chars that are data (G-5: not one class, not a period)
   assert.ok(scan("t.js", b64).includes("SC-B64"));
+  // G-5: hex digits alone are passed over up to 16,384, and reported past it (a payload written in hex)
+  const hexOf = (n) => Array.from({ length: Math.ceil(n / 2) }, (_, i) => ((i * 7919 + (i >> 8)) % 256).toString(16).padStart(2, "0")).join("").slice(0, n);
+  assert.ok(!scan("t.js", 'x = "' + hexOf(16384) + '"\n').includes("SC-B64"));
+  assert.ok(scan("t.js", 'x = "' + hexOf(16385) + '"\n').includes("SC-B64"));
 });
 
 test("entropy: high-entropy literal flagged (S-ENTROPY), placeholder skipped", () => {
@@ -143,12 +148,4 @@ test("computeMetrics: ncloc/comments/dupPct + files/depFiles", () => {
   assert.equal(m.dupPct, 100);   // two identical files: every window occurs twice
 });
 
-test("ratings: worst-severity mapping and maintainability bands", () => {
-  assert.equal(worstSevRating([{ type: "VULN", sev: "BLOCKER" }], ["VULN"]), "E");
-  assert.equal(worstSevRating([{ type: "VULN", sev: "CRITICAL" }], ["VULN"]), "D");
-  assert.equal(worstSevRating([{ type: "BUG", sev: "MAJOR" }], ["VULN"]), "A"); // filtered by type
-  assert.equal(worstSevRating([], ["VULN"]), "A");
-  assert.equal(maintainabilityRating([], 100), "A");
-  assert.equal(maintainabilityRating(new Array(25).fill({ type: "SMELL" }), 100), "D");  // 25/100 → D
-  assert.equal(maintainabilityRating(new Array(50).fill({ type: "SMELL" }), 100), "E"); // 50/100 → E
-});
+// (the ratings are the engine's since BR-7 step 4 (a): python/tests/architecture/test_result_engine.py)

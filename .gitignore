@@ -27,11 +27,16 @@ __pycache__/
 venv/
 python/dist/
 python/build/
+# the native engine an editable install builds (pip install -e python)
+python/src/lazaret/_native/
 *.egg-info/
 .pytest_cache/
 
 # repo tooling output
 /build/
+# lazaret-registry's state database where --db is not given (and SQLite's WAL files)
+lazaret-registry.db
+lazaret-registry.db-*
 
 # node
 node_modules/

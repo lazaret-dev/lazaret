@@ -26,7 +26,7 @@ import unittest
 
 from lazaret.scanner import _native
 
-MAX_DEPTH = 256                  # the parser's depth limit (jsparse::MAX_DEPTH)
+MAX_DEPTH = 384                  # the parser's depth limit (jsparse::MAX_DEPTH)
 
 
 class JsSyntaxError(Exception):

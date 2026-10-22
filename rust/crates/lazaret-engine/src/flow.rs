@@ -91,7 +91,8 @@ impl LiteralTest {
         let is_ff = |x: u32| x == c('f') || x == c('F');
         let is_rb = |x: u32| x == c('r') || x == c('R') || x == c('b') || x == c('B');
         let spans: Vec<(usize, usize)> = literal_spans(p, text)
-            .into_iter()
+            .iter()
+            .copied()
             .filter(|&(a, _)| {
                 text[a] != c('`') && !(a > 0 && is_ff(text[a - 1])) && !(a > 1 && is_ff(text[a - 2]) && is_rb(text[a - 1]))
             })
@@ -512,14 +513,226 @@ fn ld_defined(p: &Pack, text: &[u32], start: usize, end: usize) -> bool {
     word_ends_at(text, ld_word_before(text, start), &[u("def"), u("function")])
 }
 
+/// One of _DD_ASSIGN_RE's matches: the spans (start_of, end_of: -1 for a
+/// group that took no part) of its name and of its value.
+#[derive(Clone, Copy)]
+pub(crate) struct Assign {
+    name: (isize, isize),
+    value: (isize, isize),
+}
+
+impl Assign {
+    fn group<'t>(text: &'t [u32], (a, b): (isize, isize)) -> &'t [u32] {
+        if a < 0 {
+            &[]
+        } else {
+            &text[a as usize..b as usize]
+        }
+    }
+
+    /// m.group(1).unwrap_or(&[])
+    pub(crate) fn name<'t>(&self, text: &'t [u32]) -> &'t [u32] {
+        Self::group(text, self.name)
+    }
+
+    /// m.group(2).unwrap_or(&[])
+    pub(crate) fn value<'t>(&self, text: &'t [u32]) -> &'t [u32] {
+        Self::group(text, self.value)
+    }
+
+    /// m.start_of(1) as usize
+    pub(crate) fn name_start(&self) -> usize {
+        self.name.0 as usize
+    }
+
+    /// m.start_of(2) as usize
+    pub(crate) fn value_start(&self) -> usize {
+        self.value.0 as usize
+    }
+}
+
+/// _DD_ASSIGN_RE's first `_DD_MAX_ASSIGNS` matches in `text`, as
+/// finditer gives them. The follower, the secret endpoints and the command
+/// lines a shell is handed each read them of one text, so they are kept
+/// for the call while a gate is open for it.
+pub(crate) fn dd_assigns(p: &Pack, text: &[u32]) -> Vec<Assign> {
+    let max = p.usize("_DD_MAX_ASSIGNS");
+    crate::textgate::memo(text, "_DD_ASSIGN_RE matches", || {
+        let re = p.re("_DD_ASSIGN_RE");
+        if pystr::eq(&re.pattern, DD_ASSIGN_SRC) && re.flags == crate::pyre::UNICODE {
+            return dd_assigns_by_hand(text, max);
+        }
+        re.finditer(text)
+            .take(max)
+            .map(|m| Assign { name: (m.start_of(1), m.end_of(1)), value: (m.start_of(2), m.end_of(2)) })
+            .collect()
+    })
+}
+
+/// _DD_ASSIGN_RE as dd_assigns reads it: by hand (P-1), as NameTokens reads its pattern, for the pattern's search
+/// tried at every place of a long text cost a call's test some 40 M instructions over a large Python file (with
+/// another pattern in the pack, the pattern's matches).
+const DD_ASSIGN_SRC: &str = r"(?:(?<![^\n])|[;{]|=>)[ \t]*(?:(?:const|let|var)[ \t]+)?([A-Za-z_$][\w$]*)[ \t]*\+?=(?![=>])([^;\n]*)";
+
+/// [`DD_ASSIGN_SRC`]'s first `max` matches in `text`, as finditer gives them: at each place in turn, its three starts
+/// tried in order (a line's start, `;` or `{`, `=>`), then blanks, a `const`, `let` or `var` and blanks if the rest
+/// then matches (else none), a name, blanks, `=` or `+=` not followed by `=` or `>`, and the value up to a `;` or a
+/// line's end; the next search from the match's end. (Each repeat but the value's is followed by what it cannot hold,
+/// so the pattern's backtracking finds nothing its greedy reading misses.)
+fn dd_assigns_by_hand(text: &[u32], max: usize) -> Vec<Assign> {
+    let n = text.len();
+    let blank = |ch: u32| ch == c(' ') || ch == c('\t');
+    let word = |ch: u32| crate::unicode::is_word(ch) || ch == c('$');
+    let first = |ch: u32| ch < 128 && ((ch as u8).is_ascii_alphabetic() || ch == c('_') || ch == c('$'));
+    let blanks = |mut i: usize| {
+        while i < n && blank(text[i]) {
+            i += 1;
+        }
+        i
+    };
+    // the name from r: (its start, its end, the value's start, the value's end)
+    let named = |r: usize| -> Option<(usize, usize, usize, usize)> {
+        if r >= n || !first(text[r]) {
+            return None;
+        }
+        let mut e = r + 1;
+        while e < n && word(text[e]) {
+            e += 1;
+        }
+        let k = blanks(e);
+        let eq = if k + 1 < n && text[k] == c('+') && text[k + 1] == c('=') {
+            k + 1
+        } else if k < n && text[k] == c('=') {
+            k
+        } else {
+            return None;
+        };
+        let v = eq + 1;
+        if v < n && (text[v] == c('=') || text[v] == c('>')) {
+            return None;
+        }
+        let mut end = v;
+        while end < n && text[end] != c(';') && text[end] != c('\n') {
+            end += 1;
+        }
+        Some((r, e, v, end))
+    };
+    let rest = |q: usize| -> Option<(usize, usize, usize, usize)> {
+        let q = blanks(q);
+        for kw in ["const", "let", "var"] {
+            if pystr::starts_with(&text[q..], kw) {
+                let k = q + kw.len();
+                if k < n && blank(text[k]) {
+                    if let Some(m) = named(blanks(k)) {
+                        return Some(m);
+                    }
+                }
+                break;
+            }
+        }
+        named(q)
+    };
+    let mut out: Vec<Assign> = Vec::new();
+    let mut i = 0usize;
+    while i < n && out.len() < max {
+        // (to the next place a match can start: a line's start, a `;` or `{`, or a `=` that may start `=>`)
+        if i > 0 && text[i - 1] != c('\n') {
+            match crate::linre::literal::scan_by(text, i, n, |ch| ch == c('\n') || ch == c(';') || ch == c('{') || ch == c('=')) {
+                None => break,
+                Some(q) => i = if text[q] == c('\n') { q + 1 } else { q },
+            }
+            if i >= n {
+                break;
+            }
+        }
+        let ch = text[i];
+        let mut got = None;
+        if i == 0 || text[i - 1] == c('\n') {
+            got = rest(i);
+        }
+        if got.is_none() && (ch == c(';') || ch == c('{')) {
+            got = rest(i + 1);
+        }
+        if got.is_none() && ch == c('=') && i + 1 < n && text[i + 1] == c('>') {
+            got = rest(i + 2);
+        }
+        match got {
+            Some((a, b, v, end)) => {
+                out.push(Assign { name: (a as isize, b as isize), value: (v as isize, end as isize) });
+                i = end;
+            }
+            None => i += 1,
+        }
+    }
+    out
+}
+
+/// _LD_NAME_TOKEN_RE as the follower's names are read (`NameTokens` reads
+/// this pattern by hand, and only this one).
+const NAME_TOKEN_SRC: &str = r"(?:(?<=\.\.\.)|(?<![\w$.]))[A-Za-z_$][\w$]*";
+
+/// _LD_NAME_TOKEN_RE's matches in text[lo..hi], as its finditer_at gives
+/// them (start, end): the follower reads the names of every span it looks
+/// at, some hundred thousand in a bundle, so this pattern is read by hand.
+/// A name starts at a letter, `_` or `$` before which no word character,
+/// `$` or `.` stands (but `...` may: a spread), looking before `lo` as the
+/// pattern does, and runs through the word characters and `$` after it,
+/// up to `hi`. With another pattern in the pack, the pattern's matches.
+enum NameTokens<'t> {
+    Hand { text: &'t [u32], i: usize, hi: usize },
+    Pattern(crate::pyre::FindIter<'t>),
+}
+
+impl<'t> NameTokens<'t> {
+    fn of(p: &'t Pack, text: &'t [u32], lo: usize, hi: usize) -> NameTokens<'t> {
+        let re = p.re("_LD_NAME_TOKEN_RE");
+        if pystr::eq(&re.pattern, NAME_TOKEN_SRC) && re.flags == crate::pyre::UNICODE {
+            NameTokens::Hand { text, i: lo, hi: hi.min(text.len()) }
+        } else {
+            NameTokens::Pattern(re.finditer_at(text, lo as isize, hi as isize))
+        }
+    }
+}
+
+impl Iterator for NameTokens<'_> {
+    type Item = (usize, usize);
+
+    fn next(&mut self) -> Option<(usize, usize)> {
+        match self {
+            NameTokens::Pattern(it) => it.next().map(|m| (m.start(), m.end())),
+            NameTokens::Hand { text, i, hi } => {
+                let t: &[u32] = text;
+                let name_char = |ch: u32| crate::unicode::is_word(ch) || ch == c('$');
+                while *i < *hi {
+                    let at = *i;
+                    let ch = t[at];
+                    let first = ch < 128 && ((ch as u8).is_ascii_alphabetic() || ch == c('_') || ch == c('$'));
+                    let spread = at >= 3 && t[at - 3] == c('.') && t[at - 2] == c('.') && t[at - 1] == c('.');
+                    if !first || !(spread || at == 0 || !(name_char(t[at - 1]) || t[at - 1] == c('.'))) {
+                        *i += 1;
+                        continue;
+                    }
+                    let mut end = at + 1;
+                    while end < *hi && name_char(t[end]) {
+                        end += 1;
+                    }
+                    *i = end;
+                    return Some((at, end));
+                }
+                None
+            }
+        }
+    }
+}
+
 /// core._ld_names_in: the first name of `names` used in text[lo:hi] (not in a literal).
 fn ld_names_in(p: &Pack, text: &[u32], lo: usize, hi: usize, names: &HashSet<PyStr>, lit: &LiteralTest) -> Option<PyStr> {
     if names.is_empty() {
         return None;
     }
-    for m in p.re("_LD_NAME_TOKEN_RE").finditer_at(text, lo as isize, hi as isize) {
-        if names.contains(m.group0()) && !lit.at(m.start()) {
-            return Some(m.group0().to_vec());
+    for (a, b) in NameTokens::of(p, text, lo, hi) {
+        if names.contains(&text[a..b]) && !lit.at(a) {
+            return Some(text[a..b].to_vec());
         }
     }
     None
@@ -773,7 +986,7 @@ fn ld_sources(p: &Pack, text: &[u32], lit: &LiteralTest, outside: &HashSet<PyStr
                 } else {
                     pystr::concat(&[name, &u("("), first, &u(")")])
                 };
-                out.push((m.start(), m.end() + alen, m.end() as isize, "file", pystr::upto(&what, 60).to_vec()));
+                out.push((m.start(), m.end() + alen, m.end() as isize, "file", crate::jsflow::supply::shown_what(p, &what)));
             }
         }
     }
@@ -858,14 +1071,11 @@ pub fn local_data_sent_at(p: &Pack, text: &[u32]) -> Option<(usize, &'static str
     let not_names = p.strs("_LD_NOT_NAMES");
     let mut assigns: Vec<(PyStr, usize, usize)> = Vec::new(); // (name, start, end) of what is assigned
     let mut arrows: Vec<(PyStr, usize, usize)> = Vec::new(); // what an arrow or a lambda returns
-    for (k, m) in p.re("_DD_ASSIGN_RE").finditer(text).enumerate() {
-        if k >= max_assigns {
-            break;
-        }
-        if !lit.at(m.start_of(1) as usize) && !in_set(not_names, m.group(1).unwrap_or(&[])) {
-            let v = m.start_of(2) as usize;
+    for m in dd_assigns(p, text) {
+        if !lit.at(m.name_start()) && !in_set(not_names, m.name(text)) {
+            let v = m.value_start();
             let end = ld_statement_end(p, text, v);
-            let name = m.group(1).unwrap_or(&[]).to_vec();
+            let name = m.name(text).to_vec();
             if func_value.match_at(text, v as isize, end as isize).is_none() {
                 assigns.push((name, v, end));
             } else if let Some(body) = p.re("_LD_ARROW_BODY_RE").match_at(text, v as isize, end as isize) {
@@ -1228,7 +1438,6 @@ pub fn local_data_sent_at(p: &Pack, text: &[u32]) -> Option<(usize, &'static str
     };
     let not_in_address = p.strs("_LD_NOT_IN_ADDRESS");
     let whole = p.text("_LD_WHOLE_ENV");
-    let ident = p.re("_LD_NAME_TOKEN_RE");
     let method_call = p.re("_LD_METHOD_CALL_RE");
     let called_re = p.re("_LD_CALLED_RE");
     let member_read = p.re("_LD_MEMBER_READ_RE");
@@ -1247,9 +1456,9 @@ pub fn local_data_sent_at(p: &Pack, text: &[u32]) -> Option<(usize, &'static str
                 k += 1;
             }
             if !followed.is_empty() {
-                for m in ident.finditer_at(text, lo as isize, hi as isize) {
-                    let mut name: PyStr = m.group0().to_vec();
-                    let mut end = m.end();
+                for (start, m_end) in NameTokens::of(p, text, lo, hi) {
+                    let mut name: PyStr = text[start..m_end].to_vec();
+                    let mut end = m_end;
                     if in_set(receivers, &name) {
                         // a receiver's member: `this.x`; its method's call: `this.f()`
                         match first_member.match_at(text, end as isize, text.len() as isize) {
@@ -1273,13 +1482,13 @@ pub fn local_data_sent_at(p: &Pack, text: &[u32]) -> Option<(usize, &'static str
                         }
                     }
                     if let Some(got) = followed.get(&name) {
-                        if near(origins, long, near_span, &name, m.start())
+                        if near(origins, long, near_span, &name, start)
                             && (!address || loose || !not_in_addr(got.0) || got.1 == whole)
-                            && !lit.at(m.start())
-                            && !is_sealed(m.start())
+                            && !lit.at(start)
+                            && !is_sealed(start)
                             && (!called.contains(&name) || called_re.match_at(text, end as isize, text.len() as isize).is_some())
                             && (got.1 != whole || member_read.match_at(text, end as isize, text.len() as isize).is_none())
-                            && !ld_tested(p, text, m.start(), end)
+                            && !ld_tested(p, text, start, end)
                         {
                             return Some(got.clone());
                         }
@@ -1812,20 +2021,17 @@ pub fn secret_endpoint_at(p: &Pack, text: &[u32]) -> Option<(usize, PyStr)> {
     let plain_literal = p.re("_LD_PLAIN_LITERAL_RE");
     let mut values: HashMap<PyStr, PyStr> = HashMap::new(); // name -> the plain literal it is given
     let mut assigns: Vec<(PyStr, usize, usize)> = Vec::new();
-    for (k, m) in p.re("_DD_ASSIGN_RE").finditer(text).enumerate() {
-        if k >= max_assigns {
-            break;
-        }
-        let name = m.group(1).unwrap_or(&[]).to_vec();
-        if let Some(lit) = plain_literal.match_(pystr::strip(m.group(2).unwrap_or(&[]))) {
+    for m in dd_assigns(p, text) {
+        let name = m.name(text).to_vec();
+        if let Some(lit) = plain_literal.match_(pystr::strip(m.value(text))) {
             values.entry(name.clone()).or_insert_with(|| lit.group(2).unwrap_or(&[]).to_vec());
         }
-        let v = m.start_of(2) as usize;
+        let v = m.value_start();
         assigns.push((name, v, ld_statement_end(p, text, v)));
     }
     let url_re = p.re("_SE_URL_RE");
     let mut endpoints: Vec<(usize, PyStr)> = Vec::new(); // (start, host) of the literals that hold one
-    for (a, b) in literal_spans(p, text) {
+    for &(a, b) in literal_spans(p, text).iter() {
         if endpoints.len() >= se_max {
             break;
         }
@@ -1962,4 +2168,62 @@ pub fn secret_endpoint_at(p: &Pack, text: &[u32]) -> Option<(usize, PyStr)> {
     }
     let (at, host) = found.into_iter().min()?;
     Some((at, pystr::concat(&[&u("sends data to a webhook whose secret is written in the code ("), &host, &u(")")])))
+}
+
+#[cfg(test)]
+mod name_token_tests {
+    use super::*;
+
+    /// The assignments read by hand are the pattern's matches (P-1), whatever the text, at most `max` of them.
+    #[test]
+    fn assignments_by_hand_are_the_patterns_matches() {
+        let p = crate::pack::current();
+        let re = p.re("_DD_ASSIGN_RE");
+        assert!(pystr::eq(&re.pattern, DD_ASSIGN_SRC) && re.flags == crate::pyre::UNICODE, "the pack's pattern is the one read by hand");
+        let mut seed: u64 = 0x0DDA_5516_2026_1016;
+        let mut next = move |n: u64| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed % n
+        };
+        let pieces = [
+            "a", "Z", "_", "$", "9", "x1", "é", "ſ", "٣", "\u{2160}", " ", "\t", "\n", "\r", ";", "{", "}", "=", "==", "=>", "+=", "+",
+            "+==", ">", "const", "let", "var", "const ", "let\t", "var  ", "constx", "lets", ".", "(", "'", "\"", "-", "\u{2028}",
+        ];
+        for k in 0..20_000 {
+            let text: Vec<u32> = (0..next(30)).flat_map(|_| pieces[next(pieces.len() as u64) as usize].chars().map(|ch| ch as u32)).collect();
+            let max = if k % 7 == 0 { next(4) as usize } else { 5000 };
+            let want: Vec<(isize, isize, isize, isize)> =
+                re.finditer(&text).take(max).map(|m| (m.start_of(1), m.end_of(1), m.start_of(2), m.end_of(2))).collect();
+            let got: Vec<(isize, isize, isize, isize)> =
+                dd_assigns_by_hand(&text, max).iter().map(|a| (a.name.0, a.name.1, a.value.0, a.value.1)).collect();
+            assert_eq!(got, want, "{:?}", text.iter().map(|&ch| char::from_u32(ch).unwrap()).collect::<String>());
+        }
+    }
+
+    /// The names read by hand are the pattern's matches, for any text and
+    /// range (a range's start may have a name or a spread before it).
+    #[test]
+    fn names_by_hand_are_the_patterns_matches() {
+        let p = crate::pack::current();
+        let re = p.re("_LD_NAME_TOKEN_RE");
+        assert!(matches!(NameTokens::of(&p, &[], 0, 0), NameTokens::Hand { .. }), "the pack's pattern is the one read by hand");
+        let mut seed: u64 = 0x1234_5678_9ABC_DEF1;
+        let mut next = move |n: u64| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed % n
+        };
+        let pieces = ["a", "Z", "_", "$", "9", ".", "...", " ", "(", "\n", "é", "ſ", "x1", "..a", "٣", "\u{2160}", "=", "'"];
+        for _ in 0..3_000 {
+            let text: Vec<u32> = (0..next(40)).flat_map(|_| pieces[next(pieces.len() as u64) as usize].chars().map(|ch| ch as u32)).collect();
+            let lo = next(text.len() as u64 + 1) as usize;
+            let hi = lo + next((text.len() - lo) as u64 + 1) as usize;
+            let want: Vec<(usize, usize)> = re.finditer_at(&text, lo as isize, hi as isize).map(|m| (m.start(), m.end())).collect();
+            let got: Vec<(usize, usize)> = NameTokens::of(&p, &text, lo, hi).collect();
+            assert_eq!(got, want, "{:?} [{}, {})", crate::pystr::to_string(&text), lo, hi);
+        }
+    }
 }

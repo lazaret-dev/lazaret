@@ -4,11 +4,8 @@ literals of every kind, comments, regex literals and divisions, escapes and
 look-alike names, scanned by core and by the npm engine (its native engine,
 as WebAssembly, and its comment layout, the engine's lexers'), whose
 SC-HOMOGLYPH findings must agree (the lexers' literal spans and names_code /
-namesCode). The dashboard keeps its own comment lexer until it runs the
-engine (it reads a template's `${…}` and an f-string's fields as text, and
-some of this corpus's regex literals and divisions otherwise), so it is
-held to the CLI on the fixtures and the curated inputs of
-tests/scanner/test_review_dashboard_parity.py instead. The name corpus here
+namesCode). The dashboard runs the npm package's scan on the engine since
+BR-7 step 5 (until then it kept its own comment lexer). The name corpus here
 (curated lines and a seeded random corpus of names built from ASCII letters,
 every look-alike letter of the table, letters that are not look-alikes
 (Cyrillic, Greek alpha / nu / rho), NFKC compatibility forms (fullwidth,

@@ -125,6 +125,10 @@ pub struct Parser<'a> {
     /// INDENT or a DEDENT, an error its tokenizer raises further on takes
     /// its place (`error`)
     pub err_specific: bool,
+    /// the string token whose escapes Python cannot decode: Python decodes a
+    /// string as its parser takes the token, before its tokenizer reads the
+    /// next one, so the read stopped there whatever was read ahead (`error`)
+    pub decode_at: Option<usize>,
 }
 
 /// What a read ahead puts back.
@@ -187,6 +191,7 @@ impl<'a> Parser<'a> {
             ahead_checked: 0,
             unchecked_at: usize::MAX,
             err_specific: false,
+            decode_at: None,
         }
     }
 
@@ -248,7 +253,7 @@ impl<'a> Parser<'a> {
     /// failed, and an error no reading takes back as Err(where, why) — for
     /// a reading of Python's error pass that may raise its own errors and no
     /// other.
-    fn read_contained(&mut self, read: fn(&mut Self) -> R<Ex>) -> Result<Option<usize>, (u32, String)> {
+    pub(super) fn read_contained(&mut self, read: fn(&mut Self) -> R<Ex>) -> Result<Option<usize>, (u32, String)> {
         let saved = Saved {
             p: self.p,
             nodes: self.tree.nodes.len(),
@@ -323,7 +328,7 @@ impl<'a> Parser<'a> {
     /// never closed (neither, where the tokenizer stopped inside an
     /// f-string).
     pub fn error(&mut self) -> (u32, String) {
-        let reached = self.p_max.max(self.p);
+        let reached = self.decode_at.unwrap_or_else(|| self.p_max.max(self.p));
         if let Some(f) = &self.lex_fail {
             if f.tok <= reached {
                 return (f.line, f.reason.clone());
@@ -1537,6 +1542,13 @@ impl<'a> Parser<'a> {
             let next = self.tok();
             let fine = next.t == T::Op && (next.k == COMMA || next.k == COLON || (next.k == RPAR && in_parens));
             if !fine && !(next.t == T::Op && next.k == RPAR) {
+                // (an expression right after the target: Python's error pass
+                // reads the target as an expression — invalid_with_item's
+                // `expression 'as' expression` — and its error there is the
+                // one reported: `with a as b{k: v, w = x}`, at `w`)
+                if self.adjacent() && self.ahead == 0 && self.kind(t.n) != Kind::Starred {
+                    self.adjacent_expression(t)?;
+                }
                 return self.fail("invalid syntax");
             }
             vars = t.n;

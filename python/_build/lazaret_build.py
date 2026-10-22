@@ -100,13 +100,13 @@ METADATA = {
 # Deliberately empty: Lazaret has no runtime dependencies. Tested.
 REQUIRES_DIST: list[str] = []
 
-# Every wheel carries the native engine, and the sdist its source, part of
-# which is a Rust translation of CPython's regular expression engine and
-# shlex (rust/NOTICE), distributed under CPython's license: so each carries
-# CPython's LICENSE and the notice, as license files, and says so in its
-# license expression.
-NATIVE_LICENSE_EXPRESSION = "Apache-2.0 AND Python-2.0.1 AND Unicode-3.0"
-NATIVE_LICENSE_FILES = {"LICENSE-PYTHON": RUST / "LICENSE-PYTHON", "NOTICE": RUST / "NOTICE"}
+# Every wheel carries the native engine, and the sdist its source, with
+# its notice (rust/NOTICE): the engine is Lazaret's own work since P-16,
+# with Unicode data. The codec names the dashboard lists (what Python's
+# codecs answer to) are facts about Python, not CPython's code, so the
+# packages are Apache-2.0 AND Unicode-3.0, as the engine is.
+NATIVE_LICENSE_EXPRESSION = "Apache-2.0 AND Unicode-3.0"
+NATIVE_LICENSE_FILES = {"NOTICE": RUST / "NOTICE"}
 
 CONSOLE_SCRIPTS = {
     "lazaret": "lazaret._cli:main",
@@ -119,8 +119,19 @@ CONSOLE_SCRIPTS = {
 SDIST_TOP_FILES = ["pyproject.toml", "README.md", "LICENSE", "LICENSE-UNICODE"]
 # The Rust workspace in the sdist (under rust/): these files, and for each
 # crate under crates/ its Cargo.toml, src/**/*.rs and rules/*.json.
-RUST_TOP_FILES = ["Cargo.toml", "Cargo.lock", "LICENSE-PYTHON", "LICENSE-UNICODE", "NOTICE"]
+RUST_TOP_FILES = ["Cargo.toml", "Cargo.lock", "LICENSE-UNICODE", "NOTICE"]
 RUST_CRATE_DIRS = {"src": (".rs",), "rules": (".json",)}
+# pratique (taken into rust/crates as it is upstream: NET-1) also carries
+# its LICENSE and NOTICE, the test and example sources its manifest declares
+# (cargo reads every target of a manifest before it builds any) and the
+# Sigstore TUF root its tuf module builds in (roots/*.json), but not its test
+# data, its test vectors in src/, Mozilla's root store (roots/mozilla.pem, for
+# a feature Lazaret does not use) or its documents: the library is built from
+# the sdist, its tests are not.
+RUST_VENDORED = {"pratique": {"files": ("LICENSE", "NOTICE"),
+                              "dirs": {"tests": (".rs",), "examples": (".rs",), "roots": (".json",)},
+                              "skip_suffixes": {"src": (".txt",), "roots": (".pem",)},
+                              "skip_top": {"tests": {"data"}}}}
 # The oldest macOS a library built here supports (the release wheels' tags):
 # cargo is given it as MACOSX_DEPLOYMENT_TARGET.
 MACOS_MINIMUM = {"arm64": (11, 0), "x86_64": (10, 12)}
@@ -138,7 +149,7 @@ _SKIP_DIRS = {"__pycache__"}
 # Files packed with LF line endings whatever the checkout has (a Windows
 # checkout with core.autocrlf would otherwise change every member's bytes).
 _TEXT_SUFFIXES = (".py", ".sql", ".html", ".md", ".toml", ".txt", ".json", ".rs", ".lock")
-_TEXT_NAMES = frozenset({"LICENSE", "LICENSE-PYTHON", "LICENSE-UNICODE", "NOTICE", "PKG-INFO", "py.typed"})
+_TEXT_NAMES = frozenset({"LICENSE", "LICENSE-UNICODE", "NOTICE", "PKG-INFO", "py.typed"})
 # Zip "made by" system: 3 = Unix. zipfile defaults to 0 (MS-DOS) on Windows,
 # which would change every central-directory record there.
 _ZIP_CREATE_SYSTEM = 3
@@ -298,14 +309,16 @@ def _normalize(name: str, data: bytes) -> bytes:
 
 
 def _allowlisted(base: pathlib.Path, suffixes: tuple[str, ...], names=frozenset(),
-                 label: str = "", skip_top=frozenset()) -> list[pathlib.Path]:
+                 label: str = "", skip_top=frozenset(), skip_suffixes=()) -> list[pathlib.Path]:
     """Every allowlisted file under base, sorted by its POSIX relative path.
 
     Raises UnexpectedFilesError naming every other file: dotfiles and
     dot-directories (.env, .DS_Store, ._* AppleDouble twins, .x.swp), anything
     with another suffix (x.orig, core.py~, a stray .pyc outside __pycache__)
     and symlinks, which could pull in files from outside the tree.
-    `skip_top`: directories directly under base that are not walked."""
+    `skip_top`: directories directly under base that are not walked.
+    `skip_suffixes`: files that are left out without a word (a vendored
+    library's test vectors)."""
     ok: list[pathlib.Path] = []
     bad: list[str] = []
     for dirpath, dirnames, filenames in os.walk(base):      # never follows symlinks
@@ -323,6 +336,8 @@ def _allowlisted(base: pathlib.Path, suffixes: tuple[str, ...], names=frozenset(
                 bad.append(rel.as_posix() + " (not a regular file)")
             elif any(part.startswith(".") for part in rel.parts):
                 bad.append(rel.as_posix())
+            elif skip_suffixes and fn.endswith(skip_suffixes):
+                continue
             elif not (fn in names or fn.endswith(suffixes)):
                 bad.append(rel.as_posix())
             else:
@@ -361,9 +376,16 @@ def _rust_files() -> list[tuple[str, pathlib.Path]]:
         if not manifest.is_file() or manifest.is_symlink():
             raise RuntimeError(f"{manifest} is missing")
         out.append((f"crates/{crate.name}/Cargo.toml", manifest))
-        for sub, suffixes in RUST_CRATE_DIRS.items():
+        vendored = RUST_VENDORED.get(crate.name, {})
+        for name in vendored.get("files", ()):
+            if not (crate / name).is_file() or (crate / name).is_symlink():
+                raise RuntimeError(f"{crate / name} is missing")
+            out.append((f"crates/{crate.name}/{name}", crate / name))
+        for sub, suffixes in {**RUST_CRATE_DIRS, **vendored.get("dirs", {})}.items():
             if (crate / sub).is_dir():
-                for path in _allowlisted(crate / sub, suffixes, label=f"rust/crates/{crate.name}/{sub}"):
+                for path in _allowlisted(crate / sub, suffixes, label=f"rust/crates/{crate.name}/{sub}",
+                                         skip_top=vendored.get("skip_top", {}).get(sub, frozenset()),
+                                         skip_suffixes=vendored.get("skip_suffixes", {}).get(sub, ())):
                     out.append((path.relative_to(RUST).as_posix(), path))
     return sorted(out)
 
@@ -490,14 +512,37 @@ def build_editable(wheel_directory, config_settings=None, metadata_directory=Non
     """PEP 660: a wheel whose only payload is a .pth file pointing at src/.
     The native library (_native_payload) is written to src/lazaret/_native/,
     where lazaret.scanner._native finds it; after a change to the engine,
-    install again (or set LAZARET_NATIVE_LIB to a fresh build)."""
+    install again (or set LAZARET_NATIVE_LIB to a fresh build). The new
+    library replaces the old one as a new file (_replace_file)."""
     _platform, native = _native_payload()
     for arcname, data in native.items():
         target = SRC / arcname
         target.parent.mkdir(exist_ok=True)
-        target.write_bytes(data)
+        _replace_file(target, data)
     pth = f"__editable__.{NAME}-{version()}.pth"
     return _write_wheel(wheel_directory, {pth: (str(SRC) + "\n").encode("utf-8")}, "any")
+
+
+def _replace_file(target, data):
+    """Put `data` at `target` as a new file: written beside it under a
+    temporary name, then renamed over it. Never rewritten in place: macOS
+    keeps the code signature it read for a file, and on Apple silicon it
+    kills a process that loads a library whose bytes changed under that
+    file (a second `pip install -e` after the first one's library had been
+    loaded: "zsh: killed", "Python quit unexpectedly"). A failure leaves the
+    old library as it was, and no temporary file."""
+    tmp = target.with_name(f".{target.name}.{os.getpid()}.tmp")
+    try:
+        with open(tmp, "wb") as f:
+            f.write(data)
+        os.chmod(tmp, 0o644)
+        os.replace(tmp, target)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
 
 
 def build_sdist(sdist_directory, config_settings=None):

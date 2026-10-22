@@ -8,9 +8,10 @@ tests/scanner/test_jsparse.py pins node shapes; here:
   else JavaScript with JSX) and answers what `js_parse` does in it;
 * with `"spans": true` each node's `start` and `end` (code points) follow
   its `line` and nothing else changes, and `line` is the line of `start`;
-* every construct that nests is read 84 deep and is an error 257 deep (the
-  depth limit, MAX_DEPTH 256, counts nested statements, expressions and
-  types, some constructs two or three levels a step);
+* every construct that nests is read 126 deep and is an error 385 deep (the
+  depth limit, MAX_DEPTH 384 since JS-NEST, counts nested statements,
+  expressions and types, some constructs two or three levels a step: objects
+  read 126 deep, 84 at the old bound of 256, and blocks 384);
 * the answers kept from jsparse.py, which the parser was ported from: a
   parenthesized list that starts with a rest element (jsparse.py's
   KeyError: line 0), a chain of Flow's `?T` past Python's recursion limit
@@ -68,8 +69,10 @@ class NativeParseTests(unittest.TestCase):
         for name, path, make in cases.NESTINGS:
             with self.subTest(construct=name):
                 ts, jsx = cases.dialect(path)
-                self.assertTrue(cases.native_json(make(84), ts, jsx).startswith('{"type":"Program"'))
-                self.assertTrue(cases.native_json(make(257), ts, jsx).startswith('{"error":{"line":1,'))
+                # 126: the deepest the costliest constructs (three levels a step) read at 384, which 256 refused
+                # past 84; 385: one past the cheapest (one level a step)
+                self.assertTrue(cases.native_json(make(126), ts, jsx).startswith('{"type":"Program"'))
+                self.assertTrue(cases.native_json(make(385), ts, jsx).startswith('{"error":{"line":1,'))
 
     def test_the_answers_kept_from_jsparse_py(self):
         answers = {src: cases.native_json(src, *cases.dialect(path)) for path, src in cases.SNIPPETS}

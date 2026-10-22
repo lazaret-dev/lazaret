@@ -104,7 +104,7 @@ class TimeBudgetTests(unittest.TestCase):
         real = _native.call
 
         def failing(name, args=None, text=""):
-            if name == "batch":
+            if name == "batch" and args["calls"][0][0] == "scan_file":       # (the file's scan; the other steps answer)
                 return [{"error": "panic", "panic": True} for _ in args["calls"]]
             return real(name, args, text)
         with mock.patch.object(_native, "call", side_effect=failing):

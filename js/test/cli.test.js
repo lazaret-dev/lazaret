@@ -38,10 +38,25 @@ test("a bare non-directory argument is a usage error (exit 2)", () => {
 });
 
 test("lazaret guard points to the Python package (exit 2)", () => {
-  for (const argv of [["guard", "npm", "install", "express"], ["guard", "--plan", "pip", "install", "x"]]) {
+  for (const argv of [["guard", "npm", "install", "express"], ["guard", "--plan", "pip", "install", "x"],
+    ["guard", "cargo", "build"], ["guard", "code", "--install-extension", "ms-python.python"]]) {
     const r = capture(argv);
     assert.equal(r.code, 2);
     assert.match(r.err, /lazaret guard comes with the Python package: pip install lazaret/);
+  }
+});
+
+test("lazaret hook is the commit-time gate (hook.test.js): outside a repository it asks for files (exit 2)", async () => {
+  const d = mkdtempSync(join(tmpdir(), "lazaret-nohook-"));
+  try {
+    for (const argv of [["hook"], ["hook", "--staged"]]) {
+      const err = [];
+      const code = await run(argv, { cwd: d, out: () => {}, err: (s) => err.push(s), env: { ...process.env, PATH: "" } });
+      assert.equal(code, 2);
+      assert.deepEqual(err, ["error: not in a git repository: name the files to check"]);
+    }
+  } finally {
+    rmSync(d, { recursive: true, force: true });
   }
 });
 
@@ -57,7 +72,7 @@ test("check on clean project: exit 0, gate PASSED, JSON+HTML written", () => {
     writeFileSync(join(d, "app.py"), "def add(a, b):\n    return a + b\n");
     const r = capture(["check", d, "--no-html"]);
     assert.equal(r.code, 0);
-    assert.match(r.out, /Quality gate: PASSED/);
+    assert.match(r.out, /Quality gate: {2}PASSED /);
     const rep = JSON.parse(readFileSync(join(d, "lazaret-report.json"), "utf8"));
     assert.equal(Object.keys(rep)[0], "generatedBy");
     assert.equal(rep.generatedBy, "lazaret-cli-1");
@@ -80,7 +95,7 @@ test("check on vulnerable project: exit 0 without --ci, report records findings"
     // spec 10: only SC-MANIFEST-DEPTH forces a non-zero exit without --ci
     // (this test used to expect exit 1 for any CRITICAL SC- finding)
     assert.equal(r.code, 0);
-    assert.match(r.out, /Quality gate: FAILED/);
+    assert.match(r.out, /Quality gate: {2}FAILED /);
     const rep = JSON.parse(readFileSync(join(d, "lazaret-report.json"), "utf8"));
     assert.equal(rep.pass, false);
     assert.ok(rep.issues.some((i) => i.rule === "S-OSCMD-PY"));
@@ -169,10 +184,11 @@ test("--include-deps scans node_modules content (dep rules only)", () => {
   try {
     mkdirSync(join(d, "node_modules"), { recursive: true });
     writeFileSync(join(d, "app.py"), "x = 1\n");
-    // SC-B64: a supply-chain indicator (dep-rule) hidden in a dependency.
-    // eval() is NOT a dep rule, so it stays unreported in dep mode.
+    // SC-B64: a supply-chain indicator (dep-rule) hidden in a dependency (base64 of 240 bytes: a run of
+    // one letter is not data, G-5). eval() is NOT a dep rule, so it stays unreported in dep mode.
+    const blob = Buffer.from(Array.from({ length: 240 }, (_, i) => (i * 7919) % 256)).toString("base64");
     writeFileSync(join(d, "node_modules", "evil-pkg.js"),
-      'x = "' + "A".repeat(250) + '";\neval(userInput);\n');
+      'x = "' + blob + '";\neval(userInput);\n');
     const without = capture(["check", d, "--no-html", "--no-json", "--quiet"]);
     assert.equal(without.code, 0);
     const withDeps = capture(["check", d, "--no-html", "--quiet", "--include-deps", "--ci"]);

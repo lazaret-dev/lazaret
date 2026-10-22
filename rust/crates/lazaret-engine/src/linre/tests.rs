@@ -120,11 +120,9 @@ fn python_errors_are_errors() {
 #[test]
 fn refuses_with_a_reason() {
     let cases: &[(&str, &str)] = &[
-        (r"(['\x22])x\1", "backreference"),
-        (r"(?P<q>a)(?P=q)", "backreference"),
+        (r"(\w)x\1", "backreference"),
+        (r"(?P<q>ab)(?P=q)", "backreference"),
         (r"(a)?(?(1)b|c)", "conditional"),
-        (r"a(?=.*b)", "lookahead of unbounded width"),
-        (r"a(?!\s*\()", "lookahead of unbounded width"),
         (r"(a|)*", "empty string"),
         (r"(?:a*)+b", "empty string"),
         (r"(?=(a))a", "capturing group inside a positive lookaround"),
@@ -132,7 +130,7 @@ fn refuses_with_a_reason() {
         (r"a++", "possessive"),
         (r"\N{DIGIT ONE}", "character names"),
         (r"(?:a{1,2000}){1,2000}", "too large"),
-        (r"(?<=a{1001})b", "wider than 1000"),
+        (r"(?<=a{1001})b", "lookbehind wider than 1000"),
     ];
     for &(src, why) in cases {
         match Regex::compile(src, 0) {
@@ -143,8 +141,12 @@ fn refuses_with_a_reason() {
             Ok(_) => panic!("{:?} should be refused", src),
         }
     }
-    // a lookahead of bounded width, a fixed-width lookbehind: accepted
-    for src in [r"a(?=b{1,9}c)", r"a(?!\s{0,64}\()", r"(?<=ab|cd)e", r"(?<![\w$.]{2})x", r"x(?=(?:ab|c){1,3})"] {
+    // a lookahead of bounded width, a fixed-width lookbehind, a lookahead
+    // of unbounded width or wider than 1000 (memoized): accepted
+    for src in [
+        r"a(?=b{1,9}c)", r"a(?!\s{0,64}\()", r"(?<=ab|cd)e", r"(?<![\w$.]{2})x", r"x(?=(?:ab|c){1,3})", r"a(?=.*b)",
+        r"a(?!\s*\()", r"a(?=b{1001})", r"(?<=a(?=b*c))b",
+    ] {
         assert!(Regex::compile(src, 0).is_ok(), "{:?}", src);
     }
 }
@@ -536,4 +538,450 @@ fn the_budget_is_charged_what_the_automata_read() {
     assert!(runs.search(&text).is_none());
     assert!(crate::budget::exhausted());
     crate::budget::reset(crate::budget::DEFAULT_STEPS);
+}
+
+/// A search for a set of strings over a long open text goes by where the
+/// pairs of its characters stand (textgate's Bigrams); its answers are the
+/// scan's, for every range, set and text (each in turn: with the gate open,
+/// and with none, which scans).
+#[test]
+fn a_search_by_pairs_answers_as_the_scan_does() {
+    use super::literal::{Lit, LitSet};
+    let mut seed: u64 = 0x9E37_79B9_7F4A_7C15;
+    let mut next = move |n: u64| {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        seed % n
+    };
+    // a text of few characters (so that strings occur), with lines, a
+    // character past ASCII here and there, and a run of one character
+    let alphabet: Vec<u32> = "abcde =(.\n_".chars().map(|c| c as u32).chain([0x00E9]).collect();
+    let mut text: Vec<u32> = (0..70_000).map(|_| alphabet[next(alphabet.len() as u64) as usize]).collect();
+    for c in &mut text[30_000..30_400] {
+        *c = 'a' as u32;
+    }
+    let mut checked = 0;
+    for round in 0..60 {
+        // strings of 1 to 6 units, a unit of one character or of the case
+        // variants of a letter
+        let mut lits: Vec<Lit> = Vec::new();
+        for _ in 0..1 + next(6) {
+            let len = 1 + next(6) as usize;
+            let lit: Lit = (0..len)
+                .map(|_| {
+                    let c = alphabet[next(alphabet.len() as u64) as usize];
+                    if round % 3 == 0 && (c as u8 as char).is_ascii_lowercase() {
+                        vec![c, c - 32]
+                    } else {
+                        vec![c]
+                    }
+                })
+                .collect();
+            lits.push(lit);
+        }
+        let set = match LitSet::new(&lits) {
+            Some(s) => s,
+            None => continue,
+        };
+        for _ in 0..8 {
+            let from = next(text.len() as u64 - 5_000) as usize;
+            let end = from + 4_096 + next((text.len() - from - 4_096) as u64 + 1) as usize;
+            // a part of the text too (a slice starts elsewhere in it)
+            let part_lo = next(1_000) as usize;
+            let scanned = (set.find(&text, from, end), set.find(&text[part_lo..], from.saturating_sub(part_lo), end - part_lo));
+            let indexed = {
+                let _gate = crate::textgate::open(&text);
+                (set.find(&text, from, end), set.find(&text[part_lo..], from.saturating_sub(part_lo), end - part_lo))
+            };
+            assert_eq!(indexed, scanned, "round {} {:?} [{}, {})", round, set.describe(), from, end);
+            checked += 1;
+        }
+    }
+    assert!(checked > 200, "{}", checked);
+}
+
+
+// ------------------------------------------------- unbounded lookaheads
+
+/// linre's answers on a text, in a window: search, match, fullmatch, then
+/// finditer's matches (at most 300).
+fn answers(re: &Regex, text: &[u32], pos: isize, endpos: isize) -> Vec<View> {
+    let mut out = vec![view(re.search_at(text, pos, endpos)), view(re.match_at(text, pos, endpos)), view(re.fullmatch_at(text, pos, endpos))];
+    out.extend(re.finditer_at(text, pos, endpos).take(300).map(|m| view(Some(m))));
+    out
+}
+
+/// A digest of answers (FNV-1a over their numbers). The tests below hold
+/// linre to answers recorded from sre's own matcher (the backtracking
+/// matcher pyre held, until P-16's second part retired it) on the same
+/// seeded inputs: each test's digest is the one those answers gave.
+/// Python's `re` holds the same shapes in test_linre_e.py, where a
+/// difference shows.
+struct Digest(u64);
+
+impl Digest {
+    fn new() -> Digest {
+        Digest(0xcbf2_9ce4_8422_2325)
+    }
+
+    fn num(&mut self, x: i64) {
+        for b in x.to_le_bytes() {
+            self.0 ^= u64::from(b);
+            self.0 = self.0.wrapping_mul(0x0100_0000_01b3);
+        }
+    }
+
+    fn views(&mut self, vs: &[View]) {
+        self.num(vs.len() as i64);
+        for v in vs {
+            match v {
+                None => self.num(-7),
+                Some((a, b, last, groups)) => {
+                    for x in [*a, *b, *last, groups.len() as isize] {
+                        self.num(x as i64);
+                    }
+                    for &(x, y) in groups {
+                        self.num(x as i64);
+                        self.num(y as i64);
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// The digest a test recorded from sre's answers.
+fn recorded(name: &str, got: u64, want: u64) {
+    assert_eq!(got, want, "{}: linre's answers are not the ones recorded from sre's (test_linre_e.py compares them with re's)", name);
+}
+
+/// linre's answers on a text, in a window, into `d`; and the matchers'
+/// own agreement (`agree`: the public calls, the Pike VM alone, the
+/// backtracker alone).
+fn agree_recorded(src: &str, re: &Regex, text: &[u32], pos: isize, endpos: isize, d: &mut Digest) {
+    let _ = src;
+    agree(re, text, pos, endpos);
+    d.views(&answers(re, text, pos, endpos));
+}
+
+/// The shapes of the pack's lookaheads of unbounded width, and others.
+const UNBOUNDED_LOOKAHEADS: &[(&str, u32)] = &[
+    (r"\((?![^()]*\)\s*\{)", 0),
+    (r"yaml\.load\s*\((?!(?:(?!yaml\.load)[^)])*(?:SafeLoader|safe_load))", 0),
+    (r"a(?=.*b)", 0),
+    (r"a(?=.*b)", DOTALL),
+    (r"a(?!\s*\()", 0),
+    (r"\w+(?!\s*\()", 0),
+    (r"(?<![\w$])[A-Za-z_$][\w$]*(?![\w$])(?!\s*\()", 0),
+    (r#"\.(?:type\s*\()\s*["'](?![^"']*(?:html|xml|svg))"#, 0),
+    (r"x(?=[ab ]*b)", 0),
+    (r"(?=[a-z0-9_-]{3,}\.ey[a-z]{2})", 0),
+    (r"(\w+)(?=\s*=(?!=))", 0),
+    (r"(?:(?!ab)[a-c])*c", 0),
+    (r"a(?=(?:[^()]|\([^()]*\))*,\s*\{)", 0),
+    (r"EXEC(?:UTE)?\s*\(\s*@?\w+\s*\+|EXECUTE\s+IMMEDIATE\b(?:(?!EXECUTE\s+IMMEDIATE\b)[^;])*\|\|", IGNORECASE),
+    (r"npm_(?:package|config)_(?![\w]*(?:auth|token))\w*\Z", IGNORECASE),
+    (r"\bfoo\b(?![ \t]*=[^=])", 0),
+    (r"=[ \t]*(?=(?:async[ \t]+)?(?:function\b|\([^()]*\)[ \t]*=>|[A-Za-z_$][\w$]*[ \t]*=>))", 0),
+    (r"a(?=b*(?!c+d)e*)", 0),
+    (r"(?!x*(?=y*z))\w", 0),
+    (r"(?<=a(?=b*c))b", 0),
+    (r"(a)(?=(?:b|c)*d)", 0),
+    (r"^\s*(?!.*\bx\b)\w+$", MULTILINE),
+    (r"(?=.*?\d)(?=.*?[a-z])\w{3,}", 0),
+    (r"\b\w+\b(?=(?:\s+\w+){2,}\s*;)", 0),
+    (r"(?P<n>[a-c]+)(?!(?:\s|,)*\))", 0),
+];
+
+const LOOK_PIECES: &[&str] = &[
+    "a", "b", "c", "d", "e", "x", "y", "z", "_", "1", "-", " ", "  ", "\t", "\n", "(", ")", "{", "}", ",", ";", "=",
+    "==", "=>", "'", "\"", ".", "@", "+", "||", "html", "xml", "svg", "safe_load", "SafeLoader", "yaml.load(",
+    "EXECUTE", "IMMEDIATE", "exec(", "npm_package_", "npm_config_", "token", "auth", "foo", ".ey", ".eyJab",
+    "async", "function", "type(", ".type(", "ſ", "K", "é", "\u{10400}",
+];
+
+fn look_text(rng: &mut Rng, most: usize) -> Vec<u32> {
+    let n = rng.below(most + 1);
+    let mut t = Vec::new();
+    for _ in 0..n {
+        let piece = *rng.pick(LOOK_PIECES);
+        // (now and then a long run of one piece: what a walk crosses)
+        let times = if rng.below(12) == 0 { 1 + rng.below(40) } else { 1 };
+        for _ in 0..times {
+            t.extend(piece.chars().map(|c| c as u32));
+        }
+    }
+    t
+}
+
+/// `f` with the memoized lookaheads walked (as a search runs them until
+/// their walks have cost enough), then swept the first time each is tried
+/// (`looks::sweep`): the same answers both ways (`f`'s digest).
+fn walked_and_swept(mut f: impl FnMut(&mut Digest)) -> u64 {
+    let mut out = Vec::new();
+    for at_once in [false, true] {
+        super::looks::SWEEP_AT_ONCE.with(|s| s.set(at_once));
+        let mut d = Digest::new();
+        f(&mut d);
+        out.push(d.0);
+    }
+    super::looks::SWEEP_AT_ONCE.with(|s| s.set(false));
+    assert_eq!(out[0], out[1], "walked and swept, other answers");
+    out[0]
+}
+
+#[test]
+fn unbounded_lookaheads_answer_as_sre() {
+    let d = walked_and_swept(|d| {
+        let mut rng = Rng(20261004);
+        for &(src, flags) in UNBOUNDED_LOOKAHEADS {
+            let re = Regex::compile(src, flags).unwrap_or_else(|e| panic!("{:?}: {}", src, e));
+            for k in 0..400 {
+                let t = look_text(&mut rng, if k < 300 { 8 } else { 30 });
+                let n = t.len() as isize;
+                agree_recorded(src, &re, &t, 0, n, d);
+                if k % 4 == 0 {
+                    let a = rng.below(t.len() + 1) as isize;
+                    let b = rng.below(t.len() + 2) as isize;
+                    agree_recorded(src, &re, &t, a, b, d);
+                }
+            }
+        }
+    });
+    recorded("unbounded_lookaheads", d, 0xbcb5_466d_a0bb_673e);
+}
+
+/// A random pattern with lookaheads of unbounded width in it.
+fn random_lookahead_pattern(rng: &mut Rng, depth: usize) -> String {
+    const ATOMS: &[&str] = &["a", "b", "c", "x", ".", r"\w", r"\s", "[ab]", "[^a]", r"[^()]", r"\(", r"\)", " "];
+    let mut out = String::new();
+    for _ in 0..1 + rng.below(3) {
+        if depth > 0 && rng.below(3) == 0 {
+            let inner = random_lookahead_pattern(rng, depth - 1);
+            out.push_str(&match rng.below(4) {
+                0 => format!("(?={})", inner),
+                1 => format!("(?!{})", inner),
+                2 => format!("(?:{}|{})", inner, random_lookahead_pattern(rng, depth - 1)),
+                _ => format!("(?:{})", inner),
+            });
+        } else {
+            out.push_str(*rng.pick(ATOMS));
+        }
+        match rng.below(6) {
+            0 => out.push('*'),
+            1 => out.push('+'),
+            2 => out.push_str("*?"),
+            3 => out.push('?'),
+            _ => {}
+        }
+    }
+    out
+}
+
+#[test]
+fn random_unbounded_lookaheads_answer_as_sre() {
+    let d = walked_and_swept(|d| {
+        let mut rng = Rng(4242);
+        let mut compiled = 0;
+        for _ in 0..3000 {
+            let src = format!("{}(?{}{})", random_lookahead_pattern(&mut rng, 1), if rng.below(2) == 0 { "=" } else { "!" },
+                              random_lookahead_pattern(&mut rng, 2));
+            let re = match Regex::compile(&src, 0) {
+                Ok(re) => re,
+                Err(_) => continue,
+            };
+            compiled += 1;
+            for k in 0..8 {
+                let t = random_text(&mut rng, 7);
+                let n = t.len() as isize;
+                agree_recorded(&src, &re, &t, 0, n, d);
+                if k % 2 == 0 {
+                    let a = rng.below(t.len() + 1) as isize;
+                    let b = rng.below(t.len() + 2) as isize;
+                    agree_recorded(&src, &re, &t, a, b, d);
+                }
+            }
+        }
+        assert!(compiled > 1500, "{}", compiled);
+    });
+    recorded("random_unbounded_lookaheads", d, 0xc8c7_7a04_588c_69fc);
+}
+
+/// The memos (and sweeps) a finditer's searches share are about its own
+/// text: the next finditer, over another text in the same buffer (same
+/// address, same length), starts afresh with the pattern's pooled buffers.
+#[test]
+fn a_finditer_never_reads_what_was_learnt_of_another_text() {
+    walked_and_swept(|_| {
+        let re = Regex::compile(r"a(?![^b]*b)", 0).unwrap();
+        // a b at the end: every walk finds it, so nothing matches
+        let mut t = cps(&format!("{}b", "a ".repeat(200)));
+        assert_eq!(re.finditer(&t).count(), 0);
+        // the same buffer, the b made a c: no walk finds one, every a matches
+        let n = t.len();
+        t[n - 1] = 0x63;
+        let spans: Vec<(usize, usize)> = re.finditer(&t).map(|m| m.span()).collect();
+        assert_eq!(spans, (0..200).map(|k| (2 * k, 2 * k + 1)).collect::<Vec<_>>());
+    });
+}
+
+/// Lookaheads whose walks meet thousands of sets of threads (what the last
+/// dozen characters were): more than a memo keeps, so without the sweep
+/// each walk would go to the text's end. Both shapes, on texts of a's and
+/// b's: the same answers as sre's, and linear time.
+#[test]
+fn lookaheads_of_many_sets_are_swept() {
+    // (none of the bodies ever matches but the second's, at the text's end:
+    // each walk would go to the end)
+    let cases: &[&str] = &[r"a(?![ab]*a[ab]{12}c)", r"b(?=[ab]*b[ab]{10}a[ab]{2}$)", r"(?![ab]*?a[ab]{11}ac)[ab]"];
+    // random a's and b's, then a b and 13 a's (the second's body matches
+    // from every b)
+    let ab = |rng: &mut Rng, n: usize| -> Vec<u32> {
+        let mut t: Vec<u32> = (0..n).map(|_| if rng.below(2) == 0 { 0x61 } else { 0x62 }).collect();
+        t.extend(cps("baaaaaaaaaaaaa"));
+        t
+    };
+    let mut all = Digest::new();
+    for &src in cases {
+        let re = Regex::compile(src, 0).unwrap();
+        // (3,000 characters: the walks cost enough to be swept part of the
+        // way through a finditer)
+        let d = walked_and_swept(|d| {
+            let mut rng = Rng(77);
+            for _ in 0..3 {
+                let t = ab(&mut rng, 3000);
+                agree_recorded(src, &re, &t, 0, t.len() as isize, d);
+                agree_recorded(src, &re, &t, 1000, 2500, d);
+            }
+        });
+        all.num(d as i64);
+        let mut rng = Rng(78);
+        let (small, large) = (ab(&mut rng, 20_000), ab(&mut rng, 80_000));
+        let mut count = (0, 0);
+        let t1 = timed(|| count.0 = re.finditer(&small).count());
+        let t4 = timed(|| count.1 = re.finditer(&large).count());
+        assert!(count.0 > 1000 && count.1 > 3 * count.0, "{:?}: {:?}", src, count);
+        // (four times the text: about four times the work, never sixteen)
+        assert!(t4 < 8.0 * t1 + 0.05, "{:?}: {:.4}s for 20k, {:.4}s for 80k", src, t1, t4);
+        assert!(t4 < 2.0, "{:?} took {:.3}s", src, t4);
+    }
+    recorded("lookaheads_of_many_sets", all.0, 0xd567_2083_f902_9fe5);
+}
+
+/// Seconds a closure takes (the best of three).
+fn timed(mut f: impl FnMut()) -> f64 {
+    (0..3)
+        .map(|_| {
+            let t = std::time::Instant::now();
+            f();
+            t.elapsed().as_secs_f64()
+        })
+        .fold(f64::MAX, f64::min)
+}
+
+#[test]
+fn unbounded_lookaheads_stay_linear() {
+    // each of these, searched from every position (finditer) or matched at
+    // every position, would read the rest of the text at each: n² without
+    // the memo
+    let cases: &[(&str, &str, &str)] = &[
+        (r"\s(?!\s*\()", " ", "x"),
+        (r"x(?=[a ]*b)", "x a", "b"),
+        (r#"a(?![^"]*html)"#, "a", ""),
+        (r"a(?=(?:(?!zz)[a-y])*q)", "a", "q"),
+        (r"\((?![^()]*\)\s*\{)", "(", ""),
+        (r"(?:(?!ab)[a-c])*c", "a", "c"),
+    ];
+    for &(src, unit, tail) in cases {
+        let re = Regex::compile(src, 0).unwrap();
+        let make = |n: usize| {
+            let mut t = cps(&unit.repeat(n));
+            t.extend(cps(tail));
+            t
+        };
+        let (small, large) = (make(10_000), make(40_000));
+        let mut count = (0, 0);
+        let t1 = timed(|| count.0 = re.finditer(&small).count());
+        let t4 = timed(|| count.1 = re.finditer(&large).count());
+        assert!(count.1 >= count.0, "{:?}", src);
+        // (four times the text: about four times the work, never sixteen)
+        assert!(t4 < 8.0 * t1 + 0.02, "{:?}: {:.4}s for 10k, {:.4}s for 40k", src, t1, t4);
+        assert!(t4 < 2.0, "{:?} took {:.3}s", src, t4);
+        // a match at each position of one text, each walk on memos learnt
+        // by none of the others (each search starts afresh): linear per call
+        let one = make(20_000);
+        let t = std::time::Instant::now();
+        let _ = re.search(&one);
+        assert!(t.elapsed().as_secs_f64() < 1.0, "{:?}", src);
+    }
+}
+
+// ------------------------------------- backreferences to one character
+
+/// The pack's quote patterns' shapes, and others a one-character group's
+/// backreference makes: each run as branches, answering as sre.
+const CHAR_BACKREFS: &[(&str, u32)] = &[
+    (r#"(["'])([^"'\\\n]*)\1"#, 0),
+    (r#"\(\s*[rRuU]?(["'])(.*?)\1"#, 0),
+    (r#"[fFrRbBuU]{0,2}(["'`])([^"'`\n]*)\1\Z"#, 0),
+    (r#"(?<![\w$.])([A-Za-z_$][\w$]*)\s*\[\s*(["'])([^"'\\\n]*)\2\s*\]"#, 0),
+    (r#"^\s*([A-Za-z_$][\w$]*)\s*\[\s*(["'])([^"'\\\n]*)\2\s*\]\s*=(?![=>])"#, MULTILINE),
+    (r#"[fF]{0,2}(["'`])(?:https?)://[^"'`/\s?#]{0,20}?(?:\1\s*\+\s*([^\n+;,)]{1,20})|\$\{([^}\n]{1,20})\}|\{([^}\n]{1,20})\})"#, 0),
+    (r#"(?<![\w$.])(?P<obj>[A-Za-z_$][\w$]*)[ \t]*\.[ \t]*emit[ \t]*\([ \t]*(?P<q>['"`])(?P<event>[^'"`\n]{1,20})\2[ \t]*,"#, 0),
+    (r#"(?:\brequire\s*\(\s*|\bfrom\s+)(['"])(\.{1,2}/[^'"\n]+)\1"#, 0),
+    (r#"(?:(["'])x\1)*y"#, 0),
+    (r#"(["'])abc\1"#, IGNORECASE),
+    (r#"(['"])(?=\w*\1)"#, 0),
+    (r#"(?P<q>[-+])\d+(?P=q)"#, 0),
+    (r#"([ab])x\1"#, 0),
+    (r#"(['"])(?:a|\1b)+\1"#, 0),
+    (r#"(a)(["'])\2\1"#, 0),
+];
+
+/// Backreferences still refused: a cased character under IGNORECASE, a
+/// group of many characters or of more than one, a group that may not
+/// take part, one inside a repeat with its backreference outside it.
+const STILL_REFUSED: &[(&str, u32)] = &[
+    (r"([ab])x\1", IGNORECASE),
+    (r"(\w)x\1", 0),
+    (r"(xa)\1", 0),
+    (r"(?:(a)|b)\1", 0),
+    (r"(?:(a))*\1", 0),
+    (r"(a)?b\1", 0),
+];
+
+const BACKREF_PIECES: &[&str] = &[
+    "\"", "'", "`", "a", "b", "x", "y", "abc", "ABC", "1", "23", "-", "+", " ", "\t", "\n", "(", ")", "[", "]", "{",
+    "}", "${", "=", "==", ".", ",", ";", "r", "f", "\\", "https://", "http://h", "./", "../m", "require(", "from ",
+    "o.emit(", "_", "$", "ſ",
+];
+
+#[test]
+fn one_character_backreferences_answer_as_sre() {
+    let mut rng = Rng(9);
+    let mut d = Digest::new();
+    for &(src, flags) in CHAR_BACKREFS {
+        let re = Regex::compile(src, flags).unwrap_or_else(|e| panic!("{:?}: {}", src, e));
+        for k in 0..500 {
+            let n = rng.below(if k < 400 { 10 } else { 30 });
+            let mut t = Vec::new();
+            for _ in 0..n {
+                t.extend(rng.pick(BACKREF_PIECES).chars().map(|c| c as u32));
+            }
+            let len = t.len() as isize;
+            agree_recorded(src, &re, &t, 0, len, &mut d);
+            if k % 5 == 0 {
+                let a = rng.below(t.len() + 1) as isize;
+                agree_recorded(src, &re, &t, a, len, &mut d);
+            }
+        }
+    }
+    recorded("one_character_backreferences", d.0, 0xae4b_cc42_ed1c_2142);
+    for &(src, flags) in STILL_REFUSED {
+        match Regex::compile(src, flags) {
+            Err(e) => assert!(e.refused && e.msg.contains("backreference"), "{:?}: {}", src, e),
+            Ok(_) => panic!("{:?} should be refused", src),
+        }
+    }
 }

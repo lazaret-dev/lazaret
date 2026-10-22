@@ -1,0 +1,10 @@
+# agentdoc: 900 outputs, a hash per 100 (tests/architecture/_snapshots.py)
+7e00a0eebcb2b39e
+315c0cda8e3c8825
+5e8bfbca2c97856b
+6bc7f7303ea8d2c6
+5fe65d9d6e4659f4
+66e28eeb6d0cf26d
+ef68e42775c8f11f
+9ca202048f3d5c64
+f8973d2f9774a9d3

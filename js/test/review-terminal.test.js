@@ -31,7 +31,7 @@ test("hostile file names, messages and excerpts never reach the terminal raw", {
     assert.equal(code, 0, err.join("\n"));
     const text = out.join("\n");
     assert.doesNotMatch(text, CONTROL);
-    assert.match(text, /a·\]0;PWNED··\[2Jb\.js:1/);                        // the file name
+    assert.match(text, /^  a·\]0;PWNED··\[2Jb\.js$/m);                      // the file name
     assert.match(text, /eval\("·\[31mred"\)/);                            // the excerpt
     assert.ok(text.includes(String.raw`'node x.js \x1b]0;title\x07'`));      // the hook message (Python repr)
   } finally { rmSync(d, { recursive: true, force: true }); }

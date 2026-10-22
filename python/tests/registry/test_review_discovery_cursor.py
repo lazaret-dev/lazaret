@@ -94,7 +94,7 @@ class SqliteCursorTests(unittest.TestCase):
         with open(os.path.join(_support.PKG, "registry", "schema.sql"), encoding="utf-8") as fh:
             sql = fh.read()
         self.assertIn("CREATE TABLE IF NOT EXISTS discovery_cursors (", sql)
-        self.assertIn("ON packages, scans, discovery_cursors TO lazaret_app", sql)
+        self.assertIn("ON packages, scans, discovery_cursors, github_candidates TO lazaret_app", sql)
 
 
 class CursorConn(FakeConn):

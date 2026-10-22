@@ -1,6 +1,7 @@
 // Hex-escape decoding and private-key material. Mirrors the Python engine's
-// hex_hidden_text / _token_has_material cases (python/tests/registry/test_verdicts.py),
-// read through scanFile (the native engine reads the escapes).
+// hex_hidden_text cases (python/tests/registry/test_verdicts.py) and S-TOKEN-PEM's
+// (python/tests/scanner/test_private_key_material.py), read through scanFile (the
+// native engine reads the escapes).
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { scanFile } from "../../src/scanner/scan.js";
@@ -38,6 +39,51 @@ test("a PEM header constant is not a key; a header with key material is", () => 
   assert.ok(!rules('_PEM_BEGIN = b"-----BEGIN OPENSSH PRIVATE KEY-----"\n').some(([r]) => r === "S-TOKEN"));
   const key = "KEY = '''-----BEGIN RSA PRIVATE KEY-----\nMIIEpAIBAAKCAQEA0000000000000000000000000000000000000000000\n'''\n";
   assert.ok(rules(key).some(([r]) => r === "S-TOKEN"));
+});
+
+// S-TOKEN-PEM. Made-up keys, in pieces (tests/fixtures/README.md); BODY is 64 of base64's characters, mixed.
+const HEADER = "-----BEGIN " + "PRIVATE KEY-----", FOOTER = "-----END " + "PRIVATE KEY-----";
+const RSA_HEADER = "-----BEGIN RSA " + "PRIVATE KEY-----", RSA_FOOTER = "-----END RSA " + "PRIVATE KEY-----";
+const BODY = "MIIEvQIB" + "ADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQC7Zq8vN3pL0wX7rT2mK9sB";
+const AWS = "AKI" + "A" + "QWERTYUIOPASDFGH";
+// jose's check as a bundle has it, with long runs of base64's characters later on the same line
+const JOSE = `async function E(e,t,n){if("string"!=typeof e||0!==e.indexOf("${HEADER}"))throw new TypeError(`
+  + `'"pkcs8" must be PKCS#8 formatted string');return x(e)}var t="${BODY}",u="data:font/woff2;base64,${BODY.repeat(3)}";`;
+const tokenLines = (content, lang, path = `f.${lang}`) =>
+  scanFile({ name: path, path, content, lang }).filter((i) => i.rule === "S-TOKEN").map((i) => i.line);
+
+test("a library that checks a key's header holds no key", () => {
+  assert.deepEqual(tokenLines(JOSE + "\n", "js", "dist/extension.js"), []);
+  assert.deepEqual(tokenLines(`const HEADER = "${HEADER}"\nconst docs = "src/runtime/node/key/import/pkcs8/whatever/aaaaaaaa"\n`,
+    "js"), []);
+});
+
+test("a key right after its header is a key, and past one without, the line's other tokens are read", () => {
+  for (const [text, line] of [
+    [`KEY = "${HEADER}\\n${BODY}\\n${FOOTER}"\n`, 1],
+    [`k = "${HEADER}${BODY}${FOOTER}"\n`, 1],
+    [`KEY = """${RSA_HEADER}\n${BODY}\n${RSA_FOOTER}"""\n`, 1],
+    [`KEY = ("${HEADER}\\n"\n       "${BODY}\\n"\n       "${FOOTER}")\n`, 1],
+    [`KEY = "${HEADER}\\n" \\\n      "${BODY}\\n" \\\n      "${FOOTER}"\n`, 1],
+    [`$k = "${HEADER}\\n" .\n      "${BODY}\\n" .\n      "${FOOTER}";\n`, 1],
+    [`KEY = (\n    b"${HEADER}\\n"\n    b"${BODY}\\n"\n    b"${FOOTER}\\n"\n)\n`, 2],
+    [`KEY = [\n    "${RSA_HEADER}",\n    "${BODY}",\n    "${RSA_FOOTER}",\n]\n`, 2],
+    [`# ${HEADER}\n# ${BODY}\n# ${FOOTER}\n`, 1],
+    [`KEY = """${RSA_HEADER}\nProc-Type: 4,ENCRYPTED\nDEK-Info: AES-128-CBC,0123456789ABCDEF\n\n${BODY}\n${RSA_FOOTER}"""\n`, 1],
+    [`KEY = "${RSA_HEADER}\\nProc-Type: 4,ENCRYPTED\\nDEK-Info: AES-128-CBC,0123\\n"\n`, 1],
+  ]) assert.deepEqual(tokenLines(text, "py"), [line], text);
+  assert.deepEqual(tokenLines(`KEY = """${RSA_HEADER}\n\n\n${BODY}\n${RSA_FOOTER}"""\n`, "py"), []);
+  assert.deepEqual(tokenLines(`const k = \`${RSA_HEADER}\n${BODY}\n${RSA_FOOTER}\`;\nconst j = '${HEADER}\\n' +\n  '${BODY}';\n`,
+    "js"), [1, 4]);
+  assert.deepEqual(tokenLines(`x = "${HEADER}"; y = "${AWS}"\n`, "py"), [1]);
+  assert.deepEqual(tokenLines(JOSE + `var k="${AWS}";\n`, "js", "dist/x.js"), [1]);
+});
+
+test("a line of many headers is read in one walk", () => {
+  // 60,000 headers without their keys, then an AWS key (searching the line again from each header took over 45 s)
+  const t0 = Date.now();
+  assert.deepEqual(tokenLines(`a = 1;\n${`x="${HEADER}")x(`.repeat(60_000)}"${AWS}"\n`, "js", "dist/x.js"), [2]);
+  assert.ok(Date.now() - t0 < 10_000);
 });
 
 test("Windows line endings change nothing: nosec still suppresses", () => {

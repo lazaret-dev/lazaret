@@ -7,6 +7,2746 @@ This log starts at 0.1.6; for earlier releases see the git history and tags.
 The format is based on [Keep a Changelog](https://keepachangelog.com); the
 project is pre-1.0, so the 0.x API may still change.
 
+## [0.1.9] — 2026-10-10
+
+RA-6 (rule set 2.95.0) records deletion paths in the Python, JavaScript, Go and Rust models and reads shell deletion commands. Removing a home directory or its personal files, a filesystem/drive root, or repositories selected through recursive `.git` globs adds “deletes the user's files”: CRITICAL at install/build/import, MAJOR when found only in use-time code. Relative build/dist/fixture cleanup, created temporary directories and named application-cache subtrees are excluded. Unknown paths alone are not evidence of deletion of user files. The check is static; no target path is accessed.
+
+RA-6 follow-up (rule set 2.99.0) exempts fully literal paths at least two components below home outside protected personal-data and credential subtrees. This is a lexical path rule, not proof that a package owns a folder. Home itself, whole top-level home folders, roots/drives, repository deletion and unknown/globbed home paths still trigger. Protected paths include personal folders, cloud storage, browser profiles, Mail/Messages/Photos and credentials; their ancestors are protected too because deleting an ancestor deletes that data. Matching is case-insensitive independent of the scanning host. Dot components and separators are normalized before classification, and unknown components cannot disappear through `..` to gain the new exemption. The existing named-cache exemption retains precedence, including unknown descendants under a known owner; whole caches and unknown owners are not exempt. Unknown paths without an identified home/root/repository target remain outside this detector's evidence. Import-risk attribution preserves the deleting call's line when another call adds no finding. No filesystem paths are accessed and no cleanup is executed.
+
+Where the numbers stand (rerun October 10 on this engine: the benchmark's 516 malicious releases and 429
+popular packages are in-sample; the holdout is 745 other malicious releases of the same dataset, read only in
+aggregate):
+
+| | 0.1.9 | 0.1.8 |
+| --- | --- | --- |
+| Malicious releases SUSPICIOUS (in-sample) | 88.0% (454 of 516) | 87.0% (449) |
+| ... with the registry's dependency history (live registry data) | 91.3% (471) | 90.3% (466) |
+| ... SUSPICIOUS or WARN | 91.7% (473) | 91.1% (470) |
+| Holdout, SUSPICIOUS | 85.8% (639 of 745) | 85.4% (636) |
+| Holdout releases that share no code with the benchmark, SUSPICIOUS | 80.3% (399 of 497) | 79.5% (395) |
+| Popular packages SUSPICIOUS · SUSPICIOUS or WARN | none · 6.1% (26 of 429) | none · 7.2% (31) |
+| `lazaret guard`, end to end: malicious npm releases blocked (of 300) · popular (of 219) | 247 · none | 241 · none |
+| Fake credentials found · decoys flagged; BenchmarkPython; SCA advisories matched | 95% · 6; +0.22; 1,278 of 1,278 | the same |
+
+### Added
+
+- **Taint: a call followed into the helper it names (Q-4; the engine's, for both packages; rule set 2.100.0).** Project mode, Python. The intra-file pass read a call as text, so `param = x.get_param('id')` after
+  `x = Wrapper(request)` carried nothing: the receiver holds no request data, but `get_param` returns
+  `self.request.args.get(name)`. A helper defined in the file, or in another file of the project, that returns
+  untrusted data of its own (it reads the request, the command line…) now gets a summary — the pass's own reading of
+  its body: the categories what it returns is clean for (`html.escape` inside it still clears XSS) — and its calls
+  carry that data too: a module-level function (`f()`, `mod.f()`, `pkg.mod.f()`), a method through `self`, through a
+  name holding an instance made in the same function (`x = C(…)`, `x = mod.C(…)`), on an instance made in place
+  (`C(…).m()`) or on the class (`C.m()`, a staticmethod's or classmethod's). **Following only adds**: the call's text
+  is read as before and what the helper returns is put beside it, so nothing the text carries is ever taken away — a
+  helper returning a constant does not clear what it was given, however the helper is written or reached. A helper
+  the file defines twice, a property, a nested def, a name more than eight defs of a file have (`_HELPER_SAME_NAME`),
+  an import two of the project's files could be, and a helper that returns no untrusted data of its own add nothing.
+  Another file's helpers come from one engine call over the project's Python files before their scans
+  (`taint_helpers`: the imports resolved as the cross-file pass resolves them — `import a.b [as c]`,
+  `from [.]a import b [as c]`, a package's submodule — and the functions and classes a file calls summarized), each
+  file's scan given what it imports; a scan of a lone file reads the file's own helpers; when the call fails, both
+  packages warn and read each file with its own. Bounded: a chain is followed six deep, recursion is read as text
+  where it recurses, and a helper is read only when it may return a source and is called, within a few readings of
+  the file's own lines; a bound reached only leaves a call as its text. On BenchmarkPython 0.1 (its test sources not
+  read) the score goes from +0.575 to +0.614 (true positives 368 to 389 of 452: cmdi, ldapi, trustbound and xss all
+  found now; false positives 144 to 155 of 778); 60 findings are added and none removed, and on the two independent
+  reviews' 280 synthetic probes none that the pass reported before is lost. The recorded snapshot sets do not move. A
+  project scan of Lazaret's own Python takes about a sixth longer (0.86 to 1.02 s: its decoders and command-line
+  reads are sources, so its helpers are read); asyncio's and email's 0 to 4%.
+- **A crate's earlier releases yanked as it was published: SC-YANK-TO-PUSH (RA-10; the registry and the Cargo guard,
+  no rule-set change).** arrayref's attacker yanked the crate's earlier versions to push its users to the new ones
+  (Wiz): cargo takes no yanked version for a new resolution. A crate release whose publisher yanked two or more of
+  the crate's stable versions before it (by SemVer; pre-releases not counted), each still yanked, within a day of
+  its publication, either side, is now **SC-YANK-TO-PUSH (MAJOR)** — "its earlier releases were yanked as it was
+  published" — read from crates.io's version records (`/api/v1/crates/{name}/versions`: each version's
+  `audit_actions`, publish, yank and unyank, with the user and the time). It is compared as a weaker indicator is:
+  when the established predecessor's own publication came with no such yanks (the same records), it is
+  **SC-NEW-INDICATOR (CRITICAL)** and the release SUSPICIOUS; a maintainer who yanks that way as a habit stays
+  MAJOR. One yank — the broken release a fix replaces — is not it. The records are asked for only when the crate's
+  index (read for the release anyway) lists two or more earlier stable versions as yanked, so most crates cost no
+  request, and one that does costs one, paced at crates.io's one a second. In the registry scan of a crate, and in
+  the Cargo guard for a crate from crates.io's index in the 30-day window (the index it already reads for the
+  crate's publish time; settled and cached once read a day after publication; nothing under `cargo --offline`). An
+  API that does not answer is no finding, never an error of the scan. PyPI's yanks (PEP 592) carry no time in its
+  APIs, so they are not read.
+- **Compiled code new in a release, and extension releases compared with their predecessor (RA-13; the registry
+  and the guard, no rule-set change).** A release whose files ship compiled code — an ELF, Mach-O or PE file, or a
+  `.so`, `.pyd`, `.dylib`, `.dll`, `.node` or `.exe` whose bytes are not text — when its established predecessor's
+  files of the same kind ship none at all is now **SC-NEW-COMPILED-CODE (MAJOR)**, naming a few of the files, and
+  CRITICAL when the comparison finds an SC-NEW-INDICATOR too. It is asked of any release that is not SUSPICIOUS,
+  OK ones included (a wheel's binary is inventory, SC-BINARY INFO, so such a release was OK). Shai-Hulud's PyPI wave
+  (June 2026) gave pure-Python bioinformatics and ML packages native extensions (`ensmallen_*.abi3.so`) that run on
+  import; GlassWorm v2 (April 2026) published 73 Open VSX extensions benign and activated six through ordinary
+  updates that brought `.node` binaries and a downloader — 67 of the 73 would pass any one-time scan. Like with like:
+  a release's sdist is compared with its predecessor's sdist, a wheel with its wheels, a `.vsix` with its `.vsix`
+  files, so a pure-Python sdist beside platform wheels is normal; a predecessor's wheel tagged for a platform or an
+  ABI ships compiled code by its name (nothing of it is downloaded), so a package that always had platform wheels
+  adding another is not asked about. A scan result's files list their compiled code (`compiledCode`), and
+  `priorRelease` its comparison (`newCompiledCode`). And the comparison (SC-NEW-INDICATOR, and RA-13's) now covers
+  **Open VSX and the Visual Studio Marketplace** (`prior.ECOSYSTEMS`), by the version history SC-NEW-DEPENDENCY
+  already read for them (now read once for both): the established predecessor, `NOT_COMPARED` and the cache as for
+  npm, the predecessor's files resolved as the release's were (each Open VSX file checked against its SHA-256; the
+  Marketplace publishes none, so its files are scanned unverified, as the release's are). `lazaret guard <editor>
+  --update-extensions` (and `--install-extension`) compares an extension from its gallery in the 30-day window the
+  same way, and the npm, PyPI and Cargo guards compare an OK or WARN release whose file ships compiled code; the
+  verdict cache keeps each file's compiled code (a verdict cached without it is scanned again when a comparison
+  needs it). The cost: the history document and at most three of the predecessor's files, now for a release with
+  compiled code as well as a WARN one — none for a PyPI release whose predecessor has platform wheels. Not measured
+  on the popular set yet (owed: John).
+- **A look-alike package from a look-alike account (RA-9; the registry and the guard, no rule-set change).** When an
+  npm, PyPI or crates release's own name is one change from a popular package's (SC-TYPOSQUAT), its owners are now
+  compared with that package's: an owner whose name is one change from one of theirs, or differs only in its
+  separators, is **SC-PUBLISHER-LOOKALIKE (CRITICAL)**, "published by x, whose name imitates y, a maintainer of z".
+  Modeled on arrayref's `proc-macro1` (one change from `proc-macro2`), published by `dtolney` (one change from
+  `dtolnay`, proc-macro2's maintainer): one look-alike can be chance, two together are impersonation. The owners are
+  those of documents the scan already holds — npm's version document (`maintainers`, and `_npmUser` when it names an
+  account: a workflow's publish says "GitHub Actions"), PyPI's JSON `ownership` (its roles' users and its
+  organization) — and for a crate crates.io's owners API, asked only for a look-alike name and once a release (the
+  answer SC-NEW-DEPENDENCY reads, kept on the resolution). Never a finding: an owner the popular package has (the
+  maintainer's own sibling package — no finding at all then), an owner of any popular package (two real maintainers
+  with like names), a name of fewer than 5 letters and digits, or no owners named (offline, a document missing).
+  `popular_names.json` gains an `owners` section — account names only, lower-cased, sorted, one line a package, at
+  most 64 a package — for all 5,000 targets of each registry (4,983 npm, 4,998 PyPI, 5,000 crates, fetched Oct 17
+  by the new `scripts/fetch-target-owners.py` and written by `update-popular-names.py --owners`; 17 npm targets name
+  no maintainers, and PyPI's `ddtrace` document is over the 32 MB limit). `lazaret guard` compares them where it reads npm's packument (a release younger than `--min-age`) or
+  PyPI's JSON document (a lockfile with no upload time) anyway, adding no request; it reads no crate's owners.
+- **An action at a commit outside its repository, and a moved tag (RA-4; the action scan, no rule-set change).**
+  GitHub serves a fork's commit under the parent repository's name, and a tag of the parent can be moved onto one:
+  in May 2026 every tag of `actions-cool/issues-helper` (and 15 of `actions-cool/maintain-one-comment`) was moved to
+  an imposter commit put in through an attacker's fork, while workflows pinned to a SHA of the real history were
+  unaffected. `python -m lazaret.registry.actions` now asks of every action it resolves — pinned by a SHA or named by
+  a tag, a workflow's or a composite step's — whether one of the repository's own branches holds the commit
+  (GitHub's compare API: the default branch first, then release and version branches, `main` and `master`, the rest;
+  at most 9 compares a commit, its answers kept per repository and commit for the run). In none of them, every
+  branch compared, is **SC-ACTION-IMPOSTOR (CRITICAL)**: "the commit is not in owner/repo's branches: a commit from a
+  fork, reached through the repository's name". A check that could not finish (branches left past the budget, the
+  rate limit, the call budget, an API error) is reported as not checked (exit 3), never as the finding. A version
+  tag seen at another commit than when it was first seen is **SC-ACTION-TAG-MOVED**, now MAJOR, and CRITICAL when
+  the commit it moved to is in none of the branches; what was seen can be kept in the registry's database
+  (`--db DSN`, the new table `action_tags`) instead of the pin book file. Changed with it: a pin at a tag's tip is
+  no longer taken as the repository's (the tag may be what was moved), a tag off the branches is SC-ACTION-IMPOSTOR
+  instead of SC-ACTION-OFF-BRANCH (MAJOR; the id is gone), an incompletely checked pin is no longer
+  SC-ACTION-IMPOSTOR MAJOR but not checked, and the report lists the branch found to hold each commit (`branches`).
+  `LAZARET_NO_ACTION_BRANCHES=1` turns the branch check off. A release made by tagging a commit no branch holds now
+  reads as an impostor.
+- **A pin that names a tag object (RA-4 follow-up; the action scan, no rule-set change).** vercel/next.js pins
+  `actions/github-script@d746ffe…`, which is not a commit but the object of the annotated tag v9.0.0; GitHub Actions
+  runs the commit it tags (3a2844b…, on `main`). The compare API does not take the object for that commit, so the
+  scan compared it with 9 of the repository's 30 branches and said it was not settled, and the action's code was not
+  read either (the archive names the commit, not the pin); a `# v9.0.0` comment was SC-ACTION-PIN-MISMATCH. Now a
+  pin is asked about (`GET /repos/{o}/{r}/git/tags/{sha}`, one call) when the default branch's compare does not
+  hold it, before any other branch is listed or compared, and for every pinned SHA when the branch check is off
+  (`LAZARET_NO_ACTION_BRANCHES`) or stopped before it asked; a pin a branch holds is a commit and is never asked
+  about. A tag object is followed to its commit (nested ones too, at most 4), and that commit is checked in its
+  place: its branches (up to 9 compares of its own, after the pin's one with the default branch: 10 in all), its
+  `action.yml`, its code. The report says it once (a note, "pinned to the tag object v9.0.0 (…) of the commit …",
+  and `tag_objects`); a tag object of a commit in none of the branches is SC-ACTION-IMPOSTOR (CRITICAL) as any
+  other; the pin's comment is compared with the object's name (another name is SC-ACTION-PIN-MISMATCH), and the pin
+  book records the tag at its commit. GitHub not answering the call (an HTTP error other than 404, the network)
+  leaves the pin checked as a commit, as before, with a note: a fork's commit is still SC-ACTION-IMPOSTOR, and the
+  commit is called that only when GitHub shows it as itself. A 200 that cannot be followed to a commit (a tag of a
+  tree, a loop), the rate limit or the call budget leaves the use not checked (exit 3), never a finding and never a
+  pass: it is then in no `resolved`, and no pin-mismatch is said of it.
+- **A commit only one of its repository's version tags holds (FP-IMPOSTOR-TAG; RA-4 follow-up, the action scan, no
+  rule-set change).** John's run of Oct 18 over vercel/next.js's workflows had SC-ACTION-IMPOSTOR (CRITICAL) on
+  `mmastrac/mmm-matrix@3edd85c…`: none of its 5 branches holds the commit and it is no tag object, but the
+  lightweight tag v1.0.5 points to it, a release commit tagged and never merged (JavaScript actions often build
+  `dist/` only on the release commit). Now, for a commit every branch was compared with, none holds and GitHub
+  shows, and only then, the scan asks whether exactly one of the repository's own exact version tags (v4.1.0, not
+  v4 or latest; an annotated tag at the commit it tags) points to that commit: `GET /repos/{o}/{r}/tags`, one to
+  three calls (pages of 100), once per repository per command, out of the call budget (so with a tight
+  `--max-calls` a use further on may be left not checked where it was reported before). No such tag:
+  SC-ACTION-IMPOSTOR (CRITICAL) as before. Two or more version tags (annotated or lightweight) at that one commit
+  are the shape of tags moved onto one commit, as in actions-cool's, and stay SC-ACTION-IMPOSTOR whatever the pin
+  book says, with a note and the tags in the finding (`version_tags`, at most 10, and `version_tag_count`). Only
+  the tags read count: one version tag found while the listing did not reach every tag (a full last page) stays
+  CRITICAL, with a note that not every tag was read. The one tag, every tag read, and no SC-ACTION-TAG-ONLY mark on
+  its record from before the command (a first sighting, a record the tag's own use, a pin's comment or an accept
+  wrote, no pin book): **SC-ACTION-TAG-ONLY (MAJOR)**, "the commit is in none of owner/repo's branches …, but the
+  repository's own version tag v1.0.5, and no other, points to it", and the pin book marks the tag at the commit
+  (`tag_only`: the commit and the time). The mark, given at that commit before the command began: a note ("only the tag v1.0.5 of … holds …, none of its 5
+  branches: a release commit kept by its tag, seen at it since …") and no finding. The workflow files of one
+  command are one run: they share its start, the records as they were before it and the listings, so a record one
+  file's audit makes never lowers another's. It stays CRITICAL, with a note, where the tag was seen at another
+  commit or its move was not accepted, where a tag was moved onto the commit and the move accepted (the record keeps
+  the commit it moved from, `moved_from`; a mark given at another commit than the record's says the same of an
+  older version's accept, whose database update leaves the mark: `--accept-moved` silences SC-ACTION-TAG-MOVED,
+  never SC-ACTION-IMPOSTOR, and such a commit stays CRITICAL on every run until the tag's record is deleted by
+  hand, as the README shows for the pin book file, SQLite and Postgres),
+  where the listing failed or was refused (the rate limit, the call budget: the run then stops as before), and where
+  the tag's record could not be read or kept (the use is also incomplete, with the error's text). A pin that names
+  a tag object, and a use named by a tag (floating or not), are checked alike, by the commit that runs; a use whose
+  own tag the pin book found moved is CRITICAL as before, and nothing more is asked. `--accept-moved` takes the
+  tags' present commits as before, and lowers nothing in the run that accepts. The registry's database gains four
+  columns of `action_tags` for the marks (`tag_only`, `tag_only_sha`, `moved_from`, `moved_from_at`), added to an
+  older table when the Store opens it (two processes opening one older SQLite database at once both succeed: a
+  column the other added meanwhile is taken as there).
+- **TypeScript files read in their own dialect by the supply-chain tests (TS-STRIP; rule set 2.93.0).** The hosts
+  handed the engine a `.ts`, `.tsx`, `.mts` or `.cts` file's text alone, as JavaScript, and the supply-chain tree
+  (the data flow of the import-time, use-time and install-script tests, received code, a dropper, D-9's rewrites,
+  `scan_file`'s decoded-payload flow) read it as JavaScript first, then as TypeScript without JSX. No reading was
+  TypeScript with JSX, so a `.tsx` file with TypeScript's own syntax was refused by both — Vite's stock `main.tsx`
+  (`getElementById('root')!`), `as`, `satisfies`, generic arrows, `enum`, `useState<number[]>([])`, 18 of the 52
+  constructs the probe tried — and listed as JavaScript the parser could not read; and JavaScript first read a
+  `.ts` file's call given a type, `post<object>(url, process.env)`, as `(post < object) > (url, process.env)`, with
+  no call and no refusal: the tree found nothing, the text followers were not asked, and the same send without the
+  type is CRITICAL (also `axios.post<Resp>(…)`, `getJSON<string>(url).then(eval)`, `new Sender<object>(…)`; present
+  since F-12, Oct 9). Each call that reaches the tree now takes the file's dialect (the engine's `dialect`, `"ts"` or
+  `"tsx"`, from the file's name: `import_time_risk`, `install_script_risk`, `js_refusal`, `scan_file`,
+  `dep_file_issues`, the `*_tree` calls; `deps_script` from the target's name), and a TypeScript file is read as tsc
+  reads it, in that dialect alone. A JavaScript file, and a text whose file is not known, is read as before.
+  SC-UNPARSED-CODE and SC-NESTED-CODE name the files' language (TypeScript, or JavaScript or TypeScript), and their
+  advice for TypeScript is `tsc --noEmit --jsx preserve FILE` (Node does not run a `.tsx` file), not `node --check`.
+  Both packages (the npm package's `importTimeRisk` and `installScriptRisk` take the file's path; `jsDialect`,
+  `jsRefusal`). Not measured on the benchmark or the popular set (owed (John): a bench run).
+- **An inflated version number, the public tell of dependency confusion (RA-7; the registry, no rule-set change).**
+  A release with an inflated version — a major of 99 or more that is not a calendar version (a year from 1990 to the
+  year after it was published, as YYYY, YYYYMM or YYYYMMDD: 2024.x and 20240101 are left alone, 2099.x and
+  99991231.x are not), or a non-zero PyPI epoch (`1!0.0.1` outranks every version without one) — that is new to the
+  package is now **SC-VERSION-INFLATION (MAJOR)**. New to the package is judged on the versions published at or
+  before the release only, so the verdict does not change as later versions appear: the origin of the release's inflated line is the
+  latest inflated version up to it that is the package's first published version, or a jump of 50 majors or more
+  above the highest version published before it (or a new epoch). A squat's 99.0.0 and its 99.0.1 are both flagged;
+  a package that climbs 97, 98, 99 (chromedriver follows Chrome) is not, and one that climbs past 99 and later jumps
+  (130 to 9999) is flagged from the jump. Dependency confusion (Alex Birsan,
+  2021) shadows a private package with a public one of the same name at an outsized version so a misconfigured
+  resolver prefers it; Lazaret can't see the private package, so it reads the public anomaly against the package's
+  own version history (Xygeni reported npm packages published at 19999.x and 99.x through September 2026). The same
+  read reports a flood: more than twenty releases (five until John's discovery run of Oct 18 found that limit
+  flagging ordinary CI publishing), pre-releases not counted, published within a 24-hour span that includes the
+  release. The version history (npm's packument, PyPI's Simple API document, the crate's index file) is
+  read for every release that is not already SUSPICIOUS, so a publish-flood on normally-versioned packages is caught
+  too; a release scan reads each such document once, shared with SC-NEW-DEPENDENCY and the predecessor comparison
+  (SC-NEW-INDICATOR), so it adds a request only for a release neither of them read it for. The existing history
+  switches turn it off (`LAZARET_NO_PRIOR_RELEASE`, `LAZARET_NO_DEPENDENCY_HISTORY`). npm, PyPI and crates.
+- **A provenance repository taken over, and the Cargo guard comparing a crate with its predecessor (RA-5, RA-8;
+  the registry, no rule-set change).** When a release and the release before it both carry verified provenance
+  that names the *same* source-repository URL but a *different* immutable repository ID **and** a *different*
+  immutable owner (account) ID, the repository behind the name is another account's — a name a repository gave up
+  can be taken over by another account (npm's SlugFest, October 2026: Trusted Publishing matched repository names,
+  not IDs). This was reported as SC-PROVENANCE-REPO-CHANGED (MAJOR) with a message that showed two identical URLs;
+  it is now its own finding, **SC-PROVENANCE-REPO-TAKEOVER (CRITICAL)**, in the registry scan and in `lazaret
+  guard` (SUSPICIOUS, blocked), with a message that names both repository IDs and both owner IDs (RA-5). The same
+  URL with a new repository ID but the *same* owner ID — the owner deleting and recreating its own repository — or
+  without both owner IDs, stays SC-PROVENANCE-REPO-CHANGED (INFO, a repository of the same owner), as before. And
+  the Cargo guard now compares a WARN crate from crates.io with its established predecessor
+  (**SC-NEW-INDICATOR**), as the npm and PyPI guards already did — `check_crate` never called `with_prior`, though
+  `prior.ECOSYSTEMS` has held crates since the feature shipped; `priorRelease` appears in `--json` for crates too.
+  The predecessor's `.crate` is checked against the SHA-256 the index gives it (`cksum`) and its verdict cached
+  under that digest; a download that does not match is not compared (`notCompared`, the crate stays WARN) and
+  nothing of it is cached, as for npm and PyPI. Under `cargo --offline` no comparison is made (RA-8).
+- **Turning off TLS certificate verification, as a weaker install/build reason, and a Windows Script Host launcher
+  (RA-12, RA-11; the engine's, for both packages; rule set 2.92.0).** Install-script and build-script code that
+  disables TLS certificate verification is now a reason of the install-script test — a *weaker* one. A finding
+  whose only reason is it ("turns off TLS certificate verification") is **MAJOR** (WARN), not CRITICAL: a package
+  whose postinstall, `setup.py` or build script merely turns off certificate checks is a package to review, not an
+  exfil on its own, so one new engine function (`install_script_severity`, exposed as `core.install_script_severity`
+  and `installScriptSeverity`) decides the severity of every finding the install-script test makes — an install
+  hook and the scripts it runs, an sdist's `setup.py`, a build script or procedural macro, a start-up module, a
+  `.pth` line, what an editor's or agent's settings run, an agent doc — CRITICAL for any strong reason, MAJOR when
+  every reason is a weaker one (none for no reasons). A weaker reason never hides a strong one: what an editor's or
+  agent's settings run is followed past a command's or a file's cert-off to the files it runs (a folder-open task
+  `curl -k …; node evil.js` is CRITICAL for `evil.js`), and an install hook followed to its files (`--deps`, a
+  project's own hooks, the registry) names a file's cert-off in its MAJOR finding and is CRITICAL for a strong
+  reason in any of them. It is matched in code (comments blanked, in the lexer of the script's own language: its
+  extension, else its `#!` line — a `#!/bin/sh` script's or a `.cmd` file's `https://…` is not a JavaScript
+  comment, a batch file's `REM` and `::` lines are) in every language and the shell, and the constants
+  case-sensitively: Python (`verify=False`, `ssl._create_unverified_context`, `CERT_NONE`,
+  `check_hostname=False`), Node (`rejectUnauthorized: false`, `NODE_TLS_REJECT_UNAUTHORIZED=0`, `strictSSL: false`),
+  Go (`InsecureSkipVerify: true`), Rust (`danger_accept_invalid_certs(true)`), and `curl -k` / `--insecure`,
+  `wget --no-check-certificate`, `git -c http.sslVerify=false` (git's key in any case, as git reads it; or the
+  `git config … false` space form), `npm config set strict-ssl false`, `GIT_SSL_NO_VERIFY`. (Before, only a
+  project-mode SAST rule for a project's own Python saw it.) It is **not** an import-time reason: a library that
+  implements a `verify=False` option (urllib3, httpx, aiohttp, redis, docker …) is not an indicator when it is
+  merely imported. A Windows Script Host launcher — `wscript`, `cscript` or `mshta` launching a script — stays a
+  strong (CRITICAL) install reason ("runs a script with the Windows Script Host (…)", the launch alone, on one
+  line), mirroring the rundll32/regsvr32 one. It matches, in any case, only where the launcher runs: at a command's
+  start in shell text (a line's or a string's, after `;` `&&` `||` `|` `(` or `$(`, or after a wrapper such as
+  `cmd /c`, `start ""`, `call`, `powershell -c`, `Start-Process`), or as the program of an exec call in code
+  (`spawn('wscript', …)`, `subprocess.run(['cscript', …])`), with its options skipped and its argument on the same
+  line a `.vbs`/`.vbe`/`.js`/`.jse`/`.wsf`/`.wsh`/`.hta` file (any file after `//E:`) or, in code, not a literal —
+  `cp.exec('cscript ' + path.join(__dirname, 'x.vbs'))`, `` execSync(`cscript ${f}`) ``,
+  `subprocess.run(['wscript', p])`; not a name in prose (`run cscript setup.vbs to finish`), a comment, a LOLBin
+  list or a file named after one (`check-wscript.js`). Both are modeled on the proc-macro1 / arrayref build
+  script, whose four shapes (a client with certificate checks off, a host assembled from pieces, a dropped file run
+  with an argument, and the Windows Script Host launcher) are pinned by inert single-technique tests in the Rust
+  reader.
+- **A JavaScript file nested past the parser's bound is an indicator of its own where its code runs (JS-NEST; rule
+  set 2.91.0).** The parser's nesting bound (`MAX_DEPTH`) is raised by half, from 256 to 384 — no file of the popular
+  set or the benchmark reached the old bound, and the WebAssembly build on Node's main thread has room for about 2.5×
+  the new one. Deep nesting is the one kind of source V8 compiles that the parser still refuses, so a package file
+  refused *only* for nesting (its reason is "nesting too deep") by the install-script test or the import-time test —
+  code that runs when the package is installed or loaded — is now its own finding, **SC-NESTED-CODE** (MAJOR, an
+  indicator), split off from the INFO SC-UNPARSED-CODE inventory of files refused for other (usually broken) syntax.
+  Refused for nesting where its code may never run (a file only the use-time test reads: nothing the entry points
+  load reaches it), it stays in that inventory with its reason, since generated code nests that deep too (a
+  minifier's if-return chain of 378 ternaries, a deep data literal); a file several tests refused is judged by the
+  strongest. SC-NEW-INDICATOR does not compare SC-NESTED-CODE with the release before, as it does not a binary: a
+  release may well ship generated code anew.
+- **Agent skill and instruction files are read for what they tell the agent to do (RA-3; the engine's, for both
+  packages; rule set 2.90.0).** An AI agent reads a `SKILL.md`, `AGENTS.md`, `CLAUDE.md`, `CLAUDE.local.md`,
+  `GEMINI.md`, `.github/copilot-instructions.md`, `.github/instructions/**/*.instructions.md`,
+  `.claude/commands/**/*.md`, `.claude/agents/**/*.md`, `.cursorrules`, `.cursor/rules/**`, `.windsurfrules`,
+  `.windsurf/rules/**` or `.clinerules` (a file or a folder) as instructions and does what it says; a dependency that
+  ships one turns the agent into its installer, past a scanner that only reads code (the clawdhub / ClawHavoc
+  campaign, Snyk Feb 2026: a `SKILL.md` lured the agent to an external snippet that decoded base64 into a shell and
+  fetched a second stage from a raw IP, with a password-protected archive to hide the payload). The engine
+  (`agentdoc.rs`) now reads these files and reports one **SC-AGENT-SKILL** finding, nothing for a clean file: the
+  commands it tells the agent to run (fenced shell, PowerShell and cmd blocks, unlabeled and `text` blocks whatever
+  their lines look like, indented code blocks, inline code, and the text of HTML comments, each read with the
+  hook-command test, a block longer than that test reads in pieces cut at line ends), its fenced Python and
+  JavaScript/TypeScript blocks (the install-script test in their language), a script of the skill's own folder such
+  a command runs (with an interpreter and its flags, `uv run`, `. x.sh`/`source x.sh`, `./x.sh`, a bare
+  `scripts/x.sh`, after a `cd`; .sh, .py, .js/.ts, .ps1, .rb and .pl, followed and read as an install script in its
+  language), an install from a password-protected archive (a download and a stated password in one paragraph), a
+  paste or snippet host or a public raw IP as an install source (a loopback or private address is none), text
+  hidden from a human reader (invisible carrier characters, a run of zero-width characters, bidirectional
+  controls), and an order to send the conversation, the environment or credentials out (`.env` and `~/.ssh` too;
+  "do not send credentials …" is no order; CRITICAL with an address in the same paragraph). **Whose file it is
+  decides what it counts for:** a dependency's — a `--deps` tree's (`node_modules`, `site-packages`, a vendor tree),
+  or a member of a package the registry or the guard scans (npm, PyPI wheels and sdists, crates, VS Code extensions)
+  — is CRITICAL for a hostile shape and MAJOR for a weaker indicator, and fails the gate (a registry package is then
+  SUSPICIOUS); the project's own is INFO, listed with what was found but never failing `--ci`, `lazaret hook` or "No
+  supply-chain indicators" (a `CLAUDE.md` that installs rustup or Homebrew is its developers' own). A dependency's
+  skill that pipes a download into a shell is CRITICAL from an official installer's host too, as its install hook
+  would be. A `#!` first line does not make an agent file a script, a benign skill's `npm install` block is no
+  reason, and these files do not get the config credential pass (a `CLAUDE.md` example is no S-TOKEN; a
+  dependency's other config files are still not read). The MCP server's `scan_files` reads them too. Both packages
+  read this through the engine; `test_agent_skill.py` and `js/test/agent-skill.test.js` are the tests, with an
+  `agentdoc` snapshot set.
+- **Every new GitHub repository, and GH Archive's events (GH-SCAN-ALL; John, Oct 16: "build 1 and two").**
+  `discover --ecosystem github --resume` gets three options. `--github-archive` reads GH Archive's hourly files of
+  GitHub's public events (`data.gharchive.org`, some 70 MB an hour, no token, at most three hours a run, from a cursor
+  of its own; an hour not published yet is waited for, and passed over as a gap six hours on): a push to a candidate makes it ready without a content check,
+  and a repository made public, which GitHub's listing never shows, goes through the filters by its name.
+  `--github-scan-all` scans every new repository GH Archive sees get code, not only what a filter keeps: queued once
+  the listing has judged it (a campaign repository still reported and never downloaded, your excludes kept out, one
+  pushed before the listing reached it waiting until it does), the made-public ones too. `--max-scans N` caps a run's
+  scans (default 100 with scan-all): the filters' candidates first, then the newest of the queue, which keeps the
+  1,000 newest; the run says how many got code, were queued, scanned and skipped. A run that keeps nothing now says
+  so ("kept 0"), `list` sums scan-all's repositories up and names the scans that were not OK, `lazaret-registry
+  --help` and `lazaret --help` show examples (the npm package's `--help` too), and `.gitignore` leaves out
+  `lazaret-registry.db`, the state database without `--db`. New: `registry/ghevents.py`; the store's
+  `add_github_candidates`, `github_candidate_states`, `prune_github_candidates`; candidate states `queued`, `pending`
+  and `excluded` (no schema change).
+  After John's first scan-all run (an hour of GH Archive held 4,859 events, a known degradation since 2025): the
+  hourly files' source is a setting (`--github-events-url`, `LAZARET_GITHUB_EVENTS_URL`; OpenDigger's mirror,
+  `https://gharchive.open-digger.cn`, serves the same files) and a thin hour is said; a repository gone, made private
+  or empty before its scan (GitHub's 404 or 409) is counted, not an error that fails the run; an OK scan is one line
+  in the run's output, a scan that is not OK in full; a long run says on stderr where it is.
+- **Scan-all learns which new repositories got code from GitHub's GraphQL API (GH-SCAN-GQL; John, Oct 18).** His runs
+  of Oct 18: OpenDigger's mirror of GH Archive sent his Mac some 1.5 KB/s (a 335 MB hour), and GH Archive's hour
+  2026-10-17-4 held 6,044 events and no PushEvent or CreateEvent at all, so three hours of scan-all queued no
+  repository that got code (its 18 scans were all of repositories made public). Now each repository the listing gives
+  `--github-scan-all` that nothing kept is asked about by its node ID: `POST https://api.github.com/graphql`,
+  `nodes(ids: …)` for up to 100 at a time (`isEmpty`, `isFork`, `isPrivate`, `createdAt`, `pushedAt`, `diskUsage`, and
+  `rateLimit`), right after its listing page, and while it has no code again 1, 6, 24 and 72 hours after it was
+  listed, after the run's scans and before its listing: a quarter of the run's calls, and of its GraphQL time, for the
+  due ones listed longest ago, oldest first, the rest newest first. Code: queued as of when it arrived (`pushedAt`,
+  held between `createdAt` and now; the run's time when it is not known) and scanned from the next run on, as the
+  listing's finds are, so the scans take finds made when listed and finds made later by push time, neither starved
+  (`all: got code (GraphQL)`, the name GraphQL gives judged again for campaign markers and your excludes); empty:
+  asked again, and dropped when its last scheduled ask (72 hours) says so; a null repository a `NOT_FOUND` error
+  names, or one made private: dropped; each counted. A fork is queued once it was pushed to after it was made, as GH
+  Archive queued a fork only on a push. Fail closed: an error for a repository, a null one no error names, a field
+  missing (`pushedAt` too), of another type, out of range or another repository's, an error of the whole query, a
+  partial or longer answer, an HTTP error, a body over 1 MB or not JSON leave the repository waiting, to be asked
+  again however long that takes; it is never dropped or taken as empty for that, and the run says so. One GitHub
+  cannot answer about waits 1, 2, 4 … hours, at most 72, before its next ask (`fails`), never dropped for it. A call
+  of which nothing could be read is asked again in halves, level by level down to single repositories, so that one
+  whose node fails the whole query is found and made to wait and the rest of its batch answered; when two levels in a
+  row read no better, a call elsewhere, about a repository GitHub has answered about (this run, or an earlier one) or
+  else the newest rows due, tells GitHub failing from such repositories, and three such batches in a row whose control
+  calls fail too, or with none to make, three failed calls (HTTP, not JSON, over the budget) or 900 seconds end the
+  asking for the run, with nothing made to wait. The waiting set keeps the newest 500,000, and what it evicts is
+  counted and said on stderr. GraphQL's own rate limit (`rateLimit.remaining` or the header at 100, `RATE_LIMITED`, a
+  403 with no points left) stops the asking but not the listing; a secondary limit (a `Retry-After` on any answer, 200
+  included, an error about a secondary rate limit, a 429), counted over the token's REST and GraphQL calls alike,
+  stops the run as the REST limit does; REST's own limit stops REST's calls alone, so the asks go on after the scans
+  stopped on it, unless the refusal is a secondary limit (a `Retry-After`, or a 429 that does not say the requests are
+  spent). A header or a date not understood is unknown, never an error of the run (REST's rate-limit headers too). A
+  listing item without a node ID goes to the REST content checks, said on stderr. `--max-graphql-calls N` (default
+  4,000; with `--github-scan-all` only), apart from `--max-calls`. New: the store's `github_listed` table (made in an
+  older SQLite or Postgres database when it is opened; `schema.sql`), an older table given the columns added since
+  (`fails`, and `github_candidates.late_at`), written in repo_id order with its rows locked first on Postgres, and a
+  batch rolled back for a deadlock done again, so two runs at once on one database no longer deadlock;
+  `sources.Client.post` (the API host alone, the token with it, no redirect followed, a 1 MB budget and 60 seconds for
+  the whole call: the native transport's total timeout, or on urllib's F-07's deadline; the GETs are unchanged). Late
+  finds (John, Oct 20): a repository whose code a re-ask 6 hours or more after the listing found (the 6, 24 and 72
+  hours' asks) has a quarter of the queue's scans, rounded up, the first found first, since its push, hours old when
+  found, would lose the newest-push queue to every new hour's; the rest go newest push first, a share not used going
+  to the other; the queue keeps the 1,000 newest pushes and, apart, the 1,000 late finds found last. GH Archive stays
+  for the repositories made public, and its pushes still queue; a thin hour no longer points to the mirror as the fix.
+  The run's report says how many were asked about, had code, were empty, forks, gone or not answered, the calls and
+  the points left, the calls of which nothing could be read and who waits for it, the late finds queued, scanned and
+  left; `list` counts what waits.
+- **Scan-all's GraphQL calls several at once, paced to GitHub's CPU-time limit (GH-SCAN-GQL-SPEED; John, Oct 20).**
+  His profile of a real run: 907 s, 903.6 of them waiting for GitHub's answers; a call about 100 repositories some
+  3.5 s, GitHub's time linear in the repositories asked (25 ids 1.0 s, 50 ids 1.9 s), Lazaret's transport as fast as
+  urllib: the run's 900 GraphQL seconds asked some 250 calls (25,000 repositories) while a catch-up listing adds some
+  85,000 a run. `--graphql-seconds` (default 900, at most 3,600) is the GraphQL part's time in a run, on its wall
+  clock, the pacing's waits included, so a catch-up run can ask longer; the due share's quarter scales with it.
+  `--graphql-concurrency` (default 1, one at a time as before; at most 8) makes several calls at once: each call's
+  HTTP on a thread of its own (the standard library's), while the run goes on with the next batch or the listing's
+  next page; every answer is read and stored on the run's own thread, in the order the calls end, so SQLite and
+  Postgres are written from one thread as before. GitHub's secondary limits allow a token 60 seconds of GraphQL CPU
+  time per 60 seconds of real time, estimated by the calls' response times, which one call at a time of 3.5 s already
+  spends but cannot pass (its calls do not overlap): it is not paced (John's runs at some 60 s a minute never met the
+  limit; pacing them to 50 cost 16 to 30% of their calls). Several at once are paced: the run keeps their response
+  seconds over the last minute of its clock, with an estimate for the calls in flight and the call itself (the recent
+  median, or a call's time so far), at most 50 (a margin, as the REST listing shares GitHub's 90): some 14 calls a
+  minute at 3.5 s a call, so more at once help only while GitHub answers fast. A sudden slowdown of GitHub's can still
+  pass the limit, by up to the concurrency times GitHub's 10 s for a call, as calls in flight are estimated at the
+  median; GitHub answers that with a secondary limit, which stops the run cleanly. With several at once, Ctrl-C waits
+  for the calls in flight (each 60 s at most); a second Ctrl-C exits at once. Also with several at once: one call at a
+  time until an answer was read with GitHub's points left in it, and again after a failure, a rate limit, an answer of
+  which nothing could be read or GitHub's time limit, until the calls then in flight have ended, their answers stored
+  once, and a call started since was read; isolation and control calls one at a time, as before; the GraphQL seconds
+  measured while calls are in flight, not as the sum of the calls' times; `--max-graphql-calls` counting a call as it
+  starts; no call while GitHub's points left, less one for each call in flight, would be at the floor (100); failures
+  of calls in flight together counted as one of the three that stop the asking. A call GitHub ends at its own time
+  limit (a 502 or 504: its GraphQL API ends a call over 10 seconds; John saw two in ten heavier calls of some 8 s) is
+  asked again in halves, which end sooner, and counts as a failure only when a half fails too (a single row, or with
+  no halving, as before). The run's report adds the calls' wall clock of the seconds allowed, how many were made at
+  once, the pacing's waits and the calls GitHub ended at its time limit.
+- **`--show-secrets`: the credentials on the terminal, and nowhere else.** Every finding is redacted where it is made,
+  so a secret finding's line was a placeholder on the terminal too. `lazaret . --show-secrets`, `lazaret hook
+  --show-secrets` and `lazaret-registry scan --show-secrets` print each finding's flagged line as it was read, kept
+  apart from the result (`core.flagged_lines`, the npm package's `flaggedLines`): the JSON, HTML and SARIF reports,
+  the baseline, the registry's state DB and the MCP server's answers stay redacted. A registry scan keeps the lines
+  while the package's files are in hand; a version skipped as already scanned, and `report`, show the redacted lines.
+  It takes effect only when the output is a terminal: in a pipe, a file or a CI log, a note says the credentials stay
+  redacted.
+- **Security: agent configuration Lazaret did not read (RA-2; the engine's, for both packages; rule set 2.87.0).** An
+  AI agent's settings in a tree were read for the commands they run (SC-AUTORUN); what they send out, what they let
+  the agent do and Claude Code's plugins were not. Now: **SC-AGENT-ENDPOINT**, where a file sends data: a remote MCP
+  server (`url`, Windsurf's `serverUrl`, Gemini CLI's `httpUrl`; in `.mcp.json`, Cursor's, VS Code's and Gemini CLI's
+  settings and a plugin's), an HTTP hook (its input is the tool call or the prompt), an MCP bundle a plugin downloads,
+  and a model provider's base URL set in `env` to another host (`ANTHROPIC_BASE_URL` and the Bedrock, Vertex, Foundry
+  and AWS ones; the request and its credential go there), MAJOR; the rest listed (INFO), and MAJOR at a tunnel or a
+  data-capture service, a raw IP address, or plain http to another machine (a container's name or a .local one is the
+  local network's). **SC-AGENT-CONFIG**, what a file lets the agent do: permission prompts bypassed
+  (`permissions.defaultMode: bypassPermissions`), network-wide allow rules (a bare `Bash`, `Bash(*)`, `WebFetch`,
+  `WebFetch(domain:*)`, curl, wget, nc, ssh and the like with any arguments), every project MCP server approved
+  (`enableAllProjectMcpServers`), VS Code's `chat.tools.autoApprove`, and a hook that approves the agent's tool calls
+  itself (a PreToolUse hook's `permissionDecision: "allow"` or the older `decision: "approve"`, a PermissionRequest
+  hook's `behavior: "allow"`), MAJOR; plugin marketplaces and plugins a project adds (`extraKnownMarketplaces`,
+  `enabledPlugins`, a marketplace's catalog), INFO, MAJOR from an insecure URL. It is a setting, not an indicator: it
+  does not fail the gate's supply-chain condition (HARDENING_RULES). **SC-AUTORUN** reads Claude Code's plugins
+  (`.claude-plugin/plugin.json`: its hooks, MCP servers, language servers, monitors and subagent status line, inline
+  or in the files it names; `hooks/hooks.json`, `monitors/monitors.json`, `.lsp.json`; a marketplace's inline
+  entries), `${CLAUDE_PLUGIN_ROOT}` read as the plugin's folder, a hook's exec form (`args`), an MCP server's
+  `headersHelper`, `fileSuggestion` and `gcpAuthRefresh`; a command that runs a hidden file outside the repository
+  (`~/.cache/.x/run.js`, `/tmp/.x.sh`; a toolchain's own folder such as `~/.cargo/bin` aside) is MAJOR, and one that
+  writes the agent's permissions (its settings with allow rules, a mode or a folder's trust) CRITICAL. Measured on the
+  agent files of the 6,813 popular repositories (fetched as text; 2,215 files in 304 repositories): no new finding
+  above INFO on a project's own configuration but five SC-AGENT-CONFIG (nx's `enableAllProjectMcpServers`, swc's
+  `WebFetch`, crawl4ai's `Bash(curl:*)`, pure-rand's PreToolUse hook that approves every Bash call it does not
+  rewrite, a fixture of skillsaw's with `Bash`), and one CRITICAL in skillsaw's fixture of a malicious hooks file; no
+  gate changed.
+- **Security: a workflow that sends named secrets out, or searches the repository for credentials and sends what it
+  finds, is SC-WORKFLOW-EXFIL (RA-1; the engine's, for both packages; rule set 2.82.0).** GhostAction (August to
+  October 2026) committed workflows under the identities of the accounts it had stolen, some 30,000 repositories'
+  worth on October 8 and 9: the first wave named the secrets the repository's own workflows use
+  (`${{ secrets.VPS_HOST }}`, `VPS_SSH_KEY`, …) and sent them in one `curl -X POST -d` to a raw IP over plain HTTP;
+  the October wave checked out the whole history and sent what `grep` found in the tree and in `git log -p`.
+  SC-WORKFLOW-SECRETS read neither: it fires on `toJSON(secrets)` alone. Each step's script is now read as the shell
+  reads it, as far as the question needs (commands, pipes, redirections, here-documents, `$( … )`, variables, the
+  step's, job's and workflow's `env:`, the files a job's steps write; curl, wget, nc, socat, `/dev/tcp`, PowerShell's
+  `Invoke-WebRequest` and `Invoke-RestMethod`): a secret in a request's body, its query, a header that is not a
+  credential's or what the command reads from its input is sent; CRITICAL to plain HTTP, a raw IP address or a
+  data-capture service, or two secrets or more in one request, MAJOR otherwise; a search for credentials (`grep`, `rg`
+  or `git grep` of credential patterns, `git log -p`) whose output is sent, CRITICAL. Not counted: a secret sent as a
+  credential of the service (an Authorization or token header, `-u`, a token parameter, a login's or OAuth's fields
+  over https), one that is the address itself (a webhook kept secret), one sent over https to the host its name names
+  (`TELEGRAM_CHAT_ID` to api.telegram.org), and anything sent to the runner itself (localhost, a private address, a
+  service container). On the GitHub Actions workflows of the 6,813 repositories GH-NEW-REPOS compares new ones with
+  (popular packages' repositories, fetched as text; 23,202 files): no finding. The reader is the engine's
+  (`ci/exfil.rs`), written first in Python and held to it on 20,000 generated workflows (33,855 findings) and those
+  files: no difference. GitLab CI's reading follows once this is measured.
+- **Taint and rules for BenchmarkPython's five categories without one: trust boundary, LDAP and XPath injection, weak
+  randomness, cookies without the Secure flag (Q-2; rule set 2.80.0).** Project mode, Python. New sinks of the
+  intra-file taint pass: a value or a key put in the session (T-TRUST, MINOR, CWE-501: Flask's `session[k] = v`,
+  Django's `request.session`, `session.update(…)`), an LDAP search (T-LDAP, MAJOR, CWE-90: ldap3's `search`,
+  python-ldap's `search_s` and the like, in a file that imports `ldap3` or `ldap`, so that a regex's `search()` is
+  not one; `escape_filter_chars`, `escape_dn_chars`, `escape_rdn` and `filter_format` clear it) and an XPath
+  expression (T-XPATH, MAJOR, CWE-643: lxml's `.xpath()` and `XPath()`, elementpath's `select`, but not the
+  variables passed beside the expression, `tree.xpath("//u[@id=$id]", id=value)`; a value whose quotes are replaced,
+  as it is escaped for an XPath string, is clean for it). S-WEAKRAND (HOTSPOT, MINOR, CWE-330): a call of one of the
+  random module's generators on a line S-RANDOM does not take (Bandit's B311, Sonar's S2245). S-COOKIE (HOTSPOT,
+  MINOR, CWE-614), a project pass: `set_cookie` (Flask's, Django's, Starlette's, aiohttp's) given `secure=False` or
+  no `secure` at all, read over the lines of its call; one passing `**kwargs`, or a value that is an expression, is
+  left alone. On BenchmarkPython 0.1 (OWASP's scorer, as the audits run it; its test sources are not read) the score
+  is +0.541, from +0.215 (true positives 161 to 368 of 452, false positives 110 to 154 of 778): securecookie and
+  weakrand +1.00, ldapi +0.71, xpathi +0.41, trustbound +0.35, and with the taint fixes below xss +0.62, pathtraver
+  +0.48, redirect +0.33 (with S-XML below, xxe +0.65). Dependency scans read none of these, so the popular set is
+  unchanged.
+- **A PyPI release's requirements no module of it imports: SC-UNUSED-DEPENDENCY for wheels and sdists (D-5;
+  rule set 2.77.0).** npm's check (0.1.8) compared names; a distribution's name is not its import name
+  (beautifulsoup4 is bs4), so a requirement (not an extra's) is now used when one of the release's imports answers
+  for a name it is commonly imported as (its own; without `python-` or `py-`, a `-python`-like suffix or a `py`
+  prefix; a dotted import for each of its chains: `google.cloud.storage`) or another text quotes it (setup.py and
+  the other files that declare requirements are not read for that). PyPI's most-downloaded distributions are left
+  out. That reading is a guess, so it is INFO. A requirement the dependency history finds brand-new (7 to 30 days,
+  another account's) is read exactly: its latest release's smallest wheel, else sdist, is listed by the archive
+  reader (nothing is unpacked or run), and when the release imports none of the modules it makes importable (an
+  sdist of setup.py alone makes none) SC-NEW-DEPENDENCY is CRITICAL, "no module of this release imports"; MAJOR as
+  before otherwise. A stub distribution (`types-x`, `x-stubs`) is left out, as npm's `@types/`. The popular set's
+  404 PyPI files: none (their requirements are popular ones; without that, 148 requirements of 85 files, nearly
+  all distributions imported by other names: protobuf, proto-plus, grpcio, tzdata …).
+- **A release compared with its established predecessor: SC-NEW-INDICATOR (rule set 2.73.0; John, Oct 14: "if the
+  latest release has findings then we review the prior release vs it").** A registry scan of an npm, PyPI or
+  crates.io release whose files have weaker indicators only (it would be WARN) scans the release's established
+  predecessor, the newest release published at least a week before it (an attacker's own earlier release of the
+  day before is not one), as it scanned the release; a weaker indicator whose rule the predecessor had no finding of
+  is SC-NEW-INDICATOR, CRITICAL, so the release is SUSPICIOUS. A hijacked release is a change to an established
+  package: the Shai-Hulud worm gave each package it republished a postinstall script, a payload the scan need not
+  recognise. What a release may well ship anew (a binary, an opaque blob, a nested archive) is not compared, nor,
+  since rule set 2.86.0 (NEW-HOOK-FP; John, Oct 15: it stays MAJOR), an install hook the install-script test reads
+  clean: one that runs files of the package and nothing else, each read, none of them nor what they load with a
+  supply-chain finding of its own (the registry scan marks it `readClean`). A new hook with an indicator of its own is
+  still compared: one that runs a program of its own (`npx x`, `node-gyp`) or code inline, names a download or
+  evaluation tool, runs a file the package does not hold, or runs a script with a weaker finding. On the popular
+  set's 42 WARN releases, pnpm 12.8.1's new preinstall and postinstall (`node install.js`, against 11.27.1) were the
+  one finding; read clean, the release is WARN, and the 41 others are compared as they were (7 had every rule in
+  their predecessor). Best effort: a history over 16 MB (vite's packument is 39 MB), a registry that
+  doesn't answer, or a predecessor's file that doesn't check out is no finding, and the result's `priorRelease` says
+  what was compared. `LAZARET_NO_PRIOR_RELEASE=1` turns it off. `scripts/bench.py prior RUN MANIFEST OUT` measures it
+  on a run's WARN releases (`run` scans the files alone). `lazaret guard` runs it too, on a WARN release
+  from npm's or PyPI's public registry published in the last 30 days (the provenance check's window): such a
+  release is SUSPICIOUS and blocked, and the comparison is kept with the cached verdict.
+- **New GitHub repositories, found and filtered: `lazaret-registry discover --ecosystem github --resume` (GH-NEW-REPOS;
+  John's scope of Oct 14: every new public repository, filtered).** GitHub's `/repositories` lists every public
+  repository in the order it is created; discovery reads it from a cursor (the last repository ID, stored after each
+  page; the first run finds the newest repository) and keeps a repository the listing alone shows to be likely
+  hostile: a look-alike of a popular repository (an owner one change from its owner's, its separators changed, "-go"
+  and the like added: `shopsprint/decimal`), against the repositories of npm's and PyPI's 5,000 most-downloaded
+  packages and the Go modules on github.com (`popular_names.json`'s new "github" section,
+  `scripts/fetch-github-targets.py` and `update-popular-names.py --github`); a copy of a popular repository under
+  another owner with the original's description, when the names file carries GitHub's descriptions; a campaign marker
+  (`campaign_markers.json`: the Shai-Hulud worms' exfiltration repositories), reported when listed and never
+  downloaded; and your own patterns (`--github-filters FILE`). A candidate is checked for content 1, 6, 24 and 72
+  hours after it was listed, and dropped when still empty, deleted or made private; with `--scan` its default
+  branch's head is scanned as a project (`github:owner/repo` stored with the commit as its version), its verdict the
+  registry's over the supply-chain findings with a CI file's hardening check counted only at CRITICAL. `--max-calls`
+  (default 1,000) and GitHub's rate limit bound a run, which keeps its cursor and candidates for the next; `--ci`
+  fails on a SUSPICIOUS or INCOMPLETE scan or a campaign repository; `list` shows the candidates and `report
+  github:owner/repo` a scan; `lazaret-registry scan github:owner/repo` scans one. `GITHUB_TOKEN` is required. A
+  repository created private and made public later is not listed (GH Archive, phase 2).
+- **crates.io discovery: `lazaret-registry discover --ecosystem crates` (CRATES-DISCOVER; John, Oct 15: "Do
+  prioritize … crates.io discovery").** crates.io is one of `discover`'s default registries, with PyPI and npm, and of
+  the MCP tool's `discover_packages`. It reads crates.io's API list of crates by their last update (`sort=recent-updates`,
+  100 a page, each next page as the answer names it, one request a second as crates.io's crawler policy asks), newest
+  first: `--since` reads the window (down to `--limit` crates), and `--resume` reads back to the newest update the
+  previous run read (`discovery_cursors`, `crates`: the position in microseconds), at most 200 pages a run (20,000
+  crates, about two and a half days of crates.io; a day was 7,825 crates, 79 pages, 78 s). A walk that stops short of
+  where it should reach says which part it covered, and `--ci` fails the run: a list that runs back further than a
+  run reads is named as not checked and the next run starts from the newest; a page that fails keeps the cursor; a list
+  that cannot be read at all is not checked. Each crate is listed once, with the version it published last (the API's
+  `newest_version`, else `default_version`), and `--scan` scans `crates:name@version`. crates.io's first `--resume`
+  run reads the last hour unless `--since` is given (a week is some 55,000 crates), and a walk of more than five
+  pages says how far it has read on stderr as it goes (John's first run, Oct 15, sat silent for minutes).
+- **Platform wheels for musl Linux and Windows ARM64 (W-1).** `musllinux_1_2_x86_64` and `musllinux_1_2_aarch64`
+  (Alpine and other musl systems, musl 1.2 or later) and `win_arm64`, so pip installs the engine there without Rust,
+  where it compiled the sdist before (eight platform wheels in all). The musl libraries are built in PyPA's
+  musllinux_1_2 images and link musl's libc alone: their unwinder is linked in, since a minimal Alpine has no
+  libgcc_s. `check_native_library.py` checks a musllinux tag (musl's libc alone, no symbol versions), and `wheels.yml`
+  installs the musl wheels in those images.
+- **Live secrets: `lazaret scan --verify-secrets` and `npx lazaret --verify-secrets` (V-1; John's decisions 4 and 7).** After the scan, each secret
+  finding is asked about where a provider can say whether it is live: a GitHub, Slack, Stripe or npm token, an OpenAI
+  or Anthropic API key, or an AWS key pair (a key id and a secret key in the same file). Each credential goes to its
+  own provider alone, over HTTPS, in a call that only authenticates (GitHub's `GET /user`, Slack's `auth.test`, AWS
+  STS's `GetCallerIdentity`, signed with Signature Version 4), with no redirect followed; before the first call a note
+  on stderr says which providers will be asked and where each credential goes. A finding says what its provider said:
+  live (a BLOCKER vulnerability, with the account the provider names), rejected (kept as it was: revoke it anyway, the
+  history keeps it; only on the provider's own word, such as OpenAI's `invalid_api_key`, never a bare 401) or unknown
+  (kept, with the reason). Admin keys are asked at their admin APIs (V-3, below); Anthropic's OAuth tokens are
+  detected, not asked about. The JSON report gains
+  `verification` and each such finding `verified`; SARIF carries `verified` in a result's properties. Off by default;
+  any target can be verified (`github:` and `gitlab:` repositories too); the guard, the registry auditor, the MCP
+  server and the pre-commit hook never verify. A Google API key, a JWT, a private key or a database's password has no
+  provider to ask, and the report counts those. The value is never written anywhere: it is read again from the file,
+  in memory, for the call; the run's cache is keyed by its SHA-256. The provider table and the logic (which words of a
+  line are a credential and which provider's, each request, AWS's signature, reading an answer) are the engine's
+  (`secrets.rs`, the pack's `_VERIFY_PROVIDERS`), one copy for both packages; the Python package's call goes over
+  lazaret-net, the npm package's over Node's `https` (TLS 1.2 at least, `HTTPS_PROXY` through an http:// proxy's
+  CONNECT tunnel), and the two report alike (`test_js_parity_verify`).
+- **S-TOKEN knows npm's access tokens and OpenAI's and Anthropic's keys (V-2).** `npm_` and 36 letters and digits;
+  Anthropic's `sk-ant-` keys and tokens (an API key's `api03`, an admin key's `admin01`, an OAuth token's `oat01`…,
+  and since rule set 2.67.0 the Console's personal API keys, `sk-ant-usr-`, which the live checks found: S-TOKEN-USR;
+  then 40 to 200 characters); OpenAI's `sk-` keys (a project's `sk-proj-`, a service account's, an admin's or a
+  user's), which carry `T3BlbkFJ` in the middle; each a whole run of its characters. Such a key got only S-ENTROPY
+  (MAJOR), or S-SECRET by its variable's name, or nothing when neither applied; it is S-TOKEN (BLOCKER) now, in code
+  and in config files, and is redacted from every snippet line. With `--verify-secrets`, an npm token, an OpenAI key
+  and an Anthropic API key (`sk-ant-api03-` or `sk-ant-usr-`) are then asked about (the admin keys since V-3; the
+  OAuth tokens are not). The npm package and
+  the dashboard read them the same way (`test_js_parity_tokens`, and the dashboard's twin, held to core's pattern
+  match by match). Measured first: none of the formats is in the benchmark's 945 releases, the popular set's 1,205,
+  Part F's 4,620 or the installed Python and npm packages. The whole-run alternatives now start with their literal
+  (crates.io's too), so Python's `re` has a first character to look for: its token pattern takes about half the time
+  it took, with the three formats added. Rule set 2.48.0.
+- **`--verify-secrets` asks about admin keys, each at its admin API (V-3).** An OpenAI admin key (`sk-admin-`) is asked
+  at `GET /v1/organization/projects`, the Administration API's list; an Anthropic admin key (`sk-ant-admin01-`) at
+  `GET /v1/organizations/me`, which names the key's organization (the finding's account); a Claude Enterprise
+  Compliance Access Key (`sk-ant-api01-`) at `GET /v1/compliance/organizations`, read by the Compliance API's error
+  catalogue (a 403 `permission_error`, a key without the scope, and a 400 that says the API is not enabled for the
+  organization are a key Anthropic knows: live). Rejected, as for the API keys, only on the provider's own word
+  (`invalid_api_key`, `authentication_error`); any other refusal is unknown. A compliance call is in the
+  organization's Activity Feed, as any provider logs the call. Anthropic's OAuth tokens (`sk-ant-oat01-`) are still
+  only detected: Anthropic documents neither the prefix nor a call for them. Ten providers in the pack's
+  `_VERIFY_PROVIDERS`, both packages reading the one table; `scripts/verifylive` checks the three against real keys
+  (`LAZARET_VERIFY_OPENAI_ADMIN`, `LAZARET_VERIFY_ANTHROPIC_ADMIN`, `LAZARET_VERIFY_ANTHROPIC_COMPLIANCE`). What is
+  detected is unchanged: no rule set change.
+- **A dependency npm would fetch over plain http or from a raw IP address is a weaker indicator (D-14; rule set
+  2.68.0).** npm installs a dependency from wherever its spec says, a tarball or a git URL too. One given as a
+  plain-http URL (`http:`, `git+http:`) is fetched with no integrity check, and one at a raw IP address names no
+  registry and no domain; five of the benchmark's in-sample releases did this (D-1's reading). Such a dependency is
+  now SC-DEP-URL (MAJOR, so WARN in the registry): "Dependency "c" (optionalDependencies) is fetched from a raw IP
+  address (203.0.113.7): 'https://203.0.113.7/c.tgz'." A host is an IP address when it is bracketed (IPv6) or its last
+  label is a number, as the URL standard reads `https://3405803783/` and `https://0xcb.0.113.7/`; a `git+ssh` URL at
+  one counts too, and a credential in the URL is redacted. Read: a package's root manifest for the fields npm
+  installs from (dependencies, optionalDependencies, peerDependencies), in registry and guard scans and `--deps`;
+  a project's own manifests (the root's and every workspace's) for its devDependencies too. Not a nested manifest
+  npm never installs from (a fixture's), and not a VS Code extension's or an action's. Measured first: none of the
+  popular set's 801 npm releases has one, in 8,437 dependency specs, devDependencies included. PyPI refuses an upload
+  whose metadata names a direct URL, so npm's manifests alone are read. Both packages (`core.dependency_url_issues`,
+  `supplychain.js` `dependencyUrlIssues`); tests `test_dep_url` (10), `dep-url.test.js` and
+  `test_js_parity_dep_url`.
+- **Code written into another package's folder is a strong reason (D-9; rule set 2.56.0).** @dinzid04/libsignal-node
+  2.2.5 finds @whiskeysockets/baileys (`require.resolve('@whiskeysockets/baileys/package.json')`, or a path joined
+  from `node_modules`) and, a second after it is loaded, writes its own text over baileys's
+  `lib/Socket/newsletter.js`; it was OK. A code file (`.js`, `.cjs`, `.mjs`) written, copied or moved into another
+  package's folder, as the engine's JavaScript tree reads the path (`require.resolve('<pkg>…')`, an ES module's
+  `createRequire()` and `import.meta.resolve` too, or `node_modules` and the package's name among a joined path's
+  parts, through variables, a function's return and a list's items), is now "rewrites another package's code (the
+  package)": SC-IMPORT-RISK CRITICAL when the package is loaded, SC-INSTALL-HOOK CRITICAL in an install script. The
+  release's own package and its scope are its own code; a data file, a dot folder (`node_modules/.cache`) and a read
+  are not rewrites. Measured: on the benchmark only libsignal-node moves; the popular set is unchanged, and neither
+  the 20,422 JavaScript files of the npm packages installed here nor 43 packages that generate, patch or install code
+  (prisma, patch-package, husky, electron, next, nx, npm, pnpm, yarn, corepack, …) has one. Registry and guard scans,
+  and `--deps`.
+- **A package the code loads when the package is loaded, that package.json names only in devDependencies, is a weaker
+  indicator (D-13; rule set 2.53.0).** dotenv-express 17.4.3, a copy of dotenv, requires `environment-gate` at the top
+  of `lib/main.js` and calls it first in `config()`; its package.json lists `environment-gate` only in
+  devDependencies, which npm does not install for the package's users, and it was OK. Such a load is now
+  SC-DEV-DEPENDENCY (MAJOR, so WARN): a `require()` given a literal outside any function, class body and `try`
+  statement, an import or export-from declaration, or an `import()` outside any function, in what the package's main
+  entry and its commands reach, read on the engine's JavaScript tree (`js_loads`, new), of a package package.json
+  names only in devDependencies. Not in a subpath export, which runs when a user imports it by name
+  (@dev-blinq/cucumber-js 1.0.131, a fork of @cucumber/cucumber, exports `./lib/*`, its test helpers among them, which
+  load its test tools), nor in a type declaration. Not one of npm's 5,000 most-downloaded packages (es-abstract 1.24.2
+  loads `for-each`, which it lists only in devDependencies), one of the release's own scope, or Ember's own modules
+  (`@ember/*`, `@glimmer/*`, which the Ember app provides); nor a package no field of package.json names (a
+  framework's adapter loads the framework its user brings: `cypress/svelte` loads svelte). Measured first, on the
+  engine's tree: none of the popular set's 801 npm releases, the benchmark's 219 popular ones or the 1,623 npm
+  packages installed here has one. Registry and guard scans.
+- **A package manager's install at import time, of a package the release does not depend on, is a strong reason (D-12;
+  rule set 2.52.0).** crypto-hash-sdk 1.0.1 ran `npm uninstall prettier-sdk && npm install prettier-sdk` when it was
+  imported, hidden (no output, no window, any error swallowed), to fetch its payload past every check of the release
+  itself; it was WARN. Code that runs when a package is loaded and has npm, pnpm, yarn, bun or pip (or
+  `python -m pip`, `uv pip`) install a package the release's manifest does not name is now SC-IMPORT-RISK CRITICAL ("…
+  runs when the package is loaded, and it installs packages the release does not depend on", with the packages),
+  whether the command line is a string or a program and its arguments as a list (`spawn('npm', ['i', 'x'])`,
+  `[sys.executable, '-m', 'pip', 'install', 'x']`). The manifest is npm's package.json (the release's own name and its
+  dependencies of every kind), a wheel's METADATA or an sdist's PKG-INFO (Name and Requires-Dist, an extra's too,
+  names compared as pip compares them); an sdist whose PKG-INFO names no dependency is not judged (its setup.py may).
+  Not at install time (@swc/core's postinstall installs @swc/wasm when its native binding fails) nor when the
+  package's code is called (a command line tool installs plugins on demand), and not a package manager installing
+  itself. In Python, read from its tokens, an install in a function's body counts only where the module runs the
+  function when it is loaded (calls it, hands it on as `atexit.register(f)` does, or decorates it with
+  `@atexit.register`), and not under `if __name__ == "__main__":`: litellm 1.103.0 installs supabase, sentry_sdk or
+  slack_bolt when one of its integrations is set up and the package is missing, and stays OK. With every install
+  counted, as if no manifest named a package, none of the 30,241 Python and JavaScript files of the packages installed
+  here has one. Registry and guard scans, and `--deps` scans since D-12b (below).
+- **A workflow's actions are read at the commit they run (N-4).** `python -m
+  lazaret.registry.actions` now scans each action's own code, the archive the runner fetches for
+  the commit its `uses:` resolves to, as the runner runs it: a JavaScript action's `pre`, `main`
+  and `post` scripts and the modules they load (the import-time test), a composite action's steps
+  and the action's own scripts they run (a path built from `github.action_path`), a Docker
+  action's Dockerfile (base images not pinned to a digest, and the script its entrypoint runs, by
+  the Dockerfile's COPY lines), and the rest of the repository (the use-time test). Judged as CI
+  code: a named token sent to its service, a file uploaded or a package published is not counted;
+  a script fetched and run as it arrives is MAJOR, as in a workflow; the whole environment sent, a
+  decoded script written and run, a reverse shell are CRITICAL: the tj-actions/changed-files
+  release of March 2025 (a script kept in base64 in its `dist/index.js`, written to a file and run)
+  is CRITICAL at its commit. Each is a `code` finding with the scan's own rule;
+  code not read whole leaves the action incomplete (exit 3). `--no-code` skips it. An official
+  Docker image at a version tag is SC-ACTION-DOCKER-UNPINNED MINOR instead of MAJOR.
+- **Lazaret's own HTTPS client, the registry's default transport (NET-1).** pratique (called tiny_https until October 2026), a TLS 1.3
+  and HTTP library written on Rust's standard library alone (no dependencies, Apache-2.0), is in the
+  repository (`rust/crates/pratique`, taken from a commit of https://github.com/lazaret-dev/pratique by
+  `scripts/sync_pratique.py`, which records the commit and checks the copy against its recorded hashes). Two crates sit on
+  it: `lazaret-verify`, its pure part (signatures, certificate chains, transparency logs and
+  attestations: no I/O, no `unsafe`, usable by the engine and in WebAssembly), and `lazaret-net`,
+  the network layer the native library exports to Python (`lazaret_net_*`). `lazaret-registry`'s
+  and the registry modules' requests now go through it: each caller's rule is checked on the first
+  URL and on every redirect before anything connects (https only, the caller's hosts, a `*.` host
+  being one DNS label on the default port, no credentials in a URL, at most 2,048 printable ASCII
+  characters), with the caller's byte budget, timeouts and redirect limit. Connections are kept and
+  shared: documents go over HTTP/2 where the server offers it and downloads over HTTP/1.1, as
+  measured on the registries (`LAZARET_HTTP=2` or `1.1` picks one for everything). Against the real
+  registries, 200 npm documents fetched by 16 threads took 0.6 s instead of 8.3 s, and 100 npm
+  tarballs by 8 threads 0.4 s instead of 2.9 s. Trust anchors come from `SSL_CERT_FILE`, then the
+  system's CA bundle, then what Python's `ssl` loads (the system store on Windows); the proxy is
+  the one urllib would use. Python's urllib takes the request where the native library is missing,
+  for a proxy reached over TLS, and when `LAZARET_NETWORK=python` asks for it. Neither speaks anything older than
+  TLS 1.2: a server that speaks neither TLS 1.3 nor TLS 1.2 is refused. pratique has not had an independent review (its
+  README says so). The guard's https downloads and relays (any https host on a redirect where the
+  guard allows one), the `github:` and `gitlab:` sources and the SCA feeds' downloads go through
+  it too, credentials included (decision 14): a private registry's token or login, a URL's own
+  `user:password@`, `GITHUB_TOKEN` and `GITLAB_TOKEN` are given hop by hop by pratique's hop
+  hook, each to its own host (and path prefix) alone, as urllib's redirect hook gave them; the
+  URL's own login goes with the request and no redirect. A request that sets `Authorization`,
+  `Cookie`, `PRIVATE-TOKEN` or the like as a header is refused by the native layer, so none can
+  follow a redirect to another host. A secret being verified (V-1) goes over it too, given to its
+  provider's host alone and never on a redirect; plain http to a registry on this machine and a
+  credential outside printable ASCII stay on urllib. Building the native library now needs Rust
+  1.87 or later.
+- **The Go checksum database's answers are checked as the go command checks them (NET-1).** A
+  `go:` module's `h1:` hash comes from `sum.golang.org`'s lookup, and that answer is now verified
+  through pratique's pure part in the native library: the signature on the database's tree head
+  (the key Go pins), the head's agreement with the newest one the run has accepted, and the
+  record's place in the tree, proved from the database's tiles (a partial tile the database no
+  longer serves is read from the full one, as Go does). An answer that does not check out stops
+  the module (fail closed). Without the native library, the lookup is as good as the TLS that
+  brought it, as before.
+- **npm's and PyPI's provenance as findings (NET-1).** An npm release's attestations
+  (`dist.attestations`: npm's publish attestation and SLSA provenance) and each PyPI file's PEP 740
+  provenance are verified by the native library against Sigstore's trusted root and npm's keys
+  (shipped with the package), with the file's digest, and the release is compared with the one
+  before it: SC-PROVENANCE-INVALID (CRITICAL) for an attestation that is not about the file or
+  not signed by its signer's key; SC-PROVENANCE-DROPPED (MAJOR) when the release before had
+  provenance and this one has none, as with ultralytics 8.3.45 and 8.3.46;
+  SC-PROVENANCE-REPO-CHANGED (MAJOR) when it was built from another owner's repository (by the
+  repository's and owner's IDs, which a rename keeps; INFO for a repository of the same owner);
+  SC-PROVENANCE-UNCHECKED (INFO) for one that could not be checked for a reason that is not the
+  file's. On the popular set's 1,205 releases, one is WARN for it (why-is-node-running 3.2.2). The result's `provenance` says who built the release, and the
+  terminal shows it. `lazaret-registry` and the MCP tool, and the guard (below).
+  `LAZARET_NO_PROVENANCE=1` turns it off; `LAZARET_SIGSTORE_ROOT` and `LAZARET_NPM_KEYS` name
+  newer trust.
+- **The guard checks the provenance of a release published in the last 30 days (NET-1).** A package
+  from npm's or PyPI's public registry that the guard scans gets the registry's provenance check when
+  it was published less than 30 days ago (or when its publish time is not known), and the findings
+  join the scan's verdict: an attestation that does not hold for the file makes it SUSPICIOUS, so it is
+  blocked; a release with none of the provenance the release before it had, or with provenance from
+  another owner's repository, is WARN (`--block-warn` blocks it); `--json` says what the check found
+  (`provenance`), and the verdict cache keeps it. A hijacked release is found and taken down within
+  days as a rule, and the check reads the package's history (npm's abbreviated document, PyPI's
+  Simple API), so older releases are left out: measured on three npm projects (773 packages) and
+  three Python sets (179 releases), the window brings the check from 1,140 requests and 136 MB to
+  311 and 67 MB for npm, and from 313 and 80 MB to 122 and 47 MB for PyPI, and leaves out the two
+  benign releases the whole check flagged (pino 9.14.0 and annotated-doc 0.0.5, both older). A
+  private registry's packages are never named to the public one. `LAZARET_NO_PROVENANCE=1` turns it
+  off.
+- **`lazaret guard code --install-extension` (E-1's fifth part), and `code-insiders`, `codium`, `cursor`,
+  `windsurf`, `kiro` and `positron`.** The guard takes the version the editor would install, as VS Code
+  chooses it (an installed extension left alone unless `--force` or a version is given; else the newest
+  release, or with `--pre-release` or `@prerelease` the newest version, that has a file for the editor's
+  platform and whose `engines.vscode` takes the editor's VS Code version), and every extension it brings,
+  as the editor walks them (its `extensionDependencies` that are not installed, built-in ones counting as
+  installed, and its `extensionPack`'s members, each at the version the editor would take, and what those
+  bring). Each file comes from the registry the editor installs from (the Marketplace for VS Code, Open VSX
+  for the others, each Open VSX file checked against its published SHA-256; `--gallery` chooses), and is
+  scanned as `lazaret FILE.vsix` scans it, with `--min-age`, `--trust`, `--allow-new` and `--block-warn`,
+  and checked against the editor's gallery's list of malicious extensions (Microsoft's for the
+  Marketplace), which the editor does not apply to a file. Nothing is installed when anything is blocked
+  (or under `--plan`); otherwise the editor installs exactly those files (with
+  `--do-not-include-pack-dependencies` from VS Code 1.98 on; before that, each extension after what it
+  brings), and what it then lists as installed is compared with what was checked. A `.vsix` on the
+  command line is scanned and installed from the guard's copy. An extension installed from a file is
+  pinned by the editor, so it stays at the version checked. The npm package's `lazaret guard`, which points
+  to the Python package, now knows every tool the guard wraps (it knew npm, pnpm, pip and uv only, and
+  took `lazaret guard cargo build` for a scan of a folder).
+- **`lazaret guard code --update-extensions`, and the forks'.** It updates what the editor's own
+  `--update-extensions` would update (VS Code's code read for it, MIT), checked and installed as an
+  install is: each extension the editor lists that came from its gallery, to the newest version the
+  editor would take for it (its newest release, or its newest version when it follows pre-releases),
+  with what that version brings that is missing. Which extensions came from the gallery, and which
+  follow pre-releases, is what the editor recorded when it installed them (the profile's
+  `extensions.json`; with `--profile`, that profile's, found through the editor's `storage.json`, and
+  the default's for extensions installed in every profile). The editor asks its gallery by the
+  identifier it recorded, so an extension whose name the gallery now gives another (another
+  `extensionId`, read from Open VSX's VS Code gallery or the Marketplace) is left alone and said, when
+  the guard reads the gallery the editor's `product.json` names. One installed from a file (as the guard
+  installs) has no identifier until the editor's window matches it to the gallery by name; the guard
+  matches it by name too, so what it installed is updated by it. Under `--min-age` an update younger
+  than that is held back and the newest version old enough is taken when it is newer than the one
+  installed. Nothing is installed when anything is blocked, or when a lookup fails.
+- **The extension the editor installs in place of another, under the guard too (EG-7).** The gallery's
+  control list says which extensions the editor replaces (one migrated to its pre-release, a deprecated
+  one whose entry says to migrate, and the product's chat agent: VS Code installs Copilot Chat when
+  asked for Copilot). The guard installed the extension asked for, brought or updated; it now checks and
+  installs the replacement at its newest version, as the editor does, and says so. A `.vsix` given is
+  installed as itself, as the editor installs it.
+- **VS Code extensions named like a popular one's, and a release that brings a brand-new one (E-1's third
+  part).** An extension is named `publisher.name`, and anyone can create a publisher. Its identifier, or
+  one it brings (`extensionDependencies`, `extensionPack`), one change from a most-installed extension's of
+  another publisher, or its publisher one change from such an extension's publisher, its separators aside,
+  is SC-TYPOSQUAT (MAJOR), in `lazaret FILE.vsix`, `--extensions` and the registry's scans:
+  `juanbIanco.solidity` (a capital I for the l) cloned `juanblanco.solidity` on Open VSX in 2025, and
+  `juan-bianco.solidity-vlang` came next. Another publisher's extension of the same name (a fork, a build)
+  is not flagged, nor one of the extension's own publisher. The targets are the Visual Studio Marketplace's
+  1,000 most-installed extensions and Open VSX's 1,000 most downloaded, 1,568 in all (`popular_names.json`'s
+  `vscode`, from the registries' rankings of Oct 6); `scripts/fetch-top-extensions.py` saves both rankings,
+  and `update-popular-names.py --vscode` builds the list from them. No target is one change from another's
+  of another publisher, and of 200 extensions sampled from Open VSX's long tail, none is flagged. And a release on Open VSX or the
+  Marketplace is compared with the version published before it: an extension it brings that the one
+  before did not, first published less than 7 days earlier by another publisher, is SC-NEW-DEPENDENCY
+  (CRITICAL; MAJOR under 30 days), the way GlassWorm brought a malicious extension in through benign
+  ones' `extensionPack` in 2026 (Open VSX's query API and the Marketplace's gallery query give the
+  history; `LAZARET_NO_DEPENDENCY_HISTORY=1` turns it off).
+- **VS Code extensions in `lazaret-registry` (E-1's second part): `openvsx:namespace.name[@version]`
+  and `vscode:publisher.name[@version]`.** Every `.vsix` the version is published for, one per
+  target platform the editor installs, is downloaded and scanned as `lazaret FILE.vsix` scans
+  one; the worst platform decides. From Open VSX, each file is first checked against the
+  SHA-256 Open VSX publishes beside it (never scanned when it does not match:
+  SC-DIGEST-MISMATCH), and the result says whether the namespace is verified and who
+  published the version. From the Visual Studio Marketplace, the extension is resolved through
+  the gallery query VS Code sends (the latest release, as VS Code installs it, or the version
+  asked for), and the result says whether the publisher's domain is verified and how many
+  installs it has; the Marketplace publishes no digest, so its files are scanned unverified,
+  and the result says that too. Both say what the extension brings and what starts it with
+  the editor. The MCP server's `scan_package` takes both specs.
+- **VS Code extensions: `lazaret FILE.vsix` and `lazaret --extensions` (E-1's first part).**
+  An extension runs in the editor's extension host, Node with all of your access and no
+  sandbox. A `.vsix`, or an extension an editor has installed, is now read as the registry
+  reads an npm package, with the editor's rules for what runs and when: its `main` and
+  `browser` modules and what they load get the import-time test (SC-IMPORT-RISK, which says
+  when the editor starts them at every start: `*`, `onStartupFinished`); the rest of its code
+  gets the use-time test; `vscode:uninstall`, the one script VS Code runs (`node` and a file,
+  once the extension has been uninstalled), gets the install-hook test, and a command VS Code
+  would not run is listed only. npm's scripts, a bundled package's scripts and a `binding.gyp`
+  never run, so they are not hooks, and only the members VS Code writes into the
+  extension's folder are the extension's: every one whose name begins with `extension`, as
+  VS Code's zip reader names it. The extensions it brings (`extensionDependencies`, `extensionPack`) are
+  listed. `lazaret --extensions` scans what VS Code, VS Code Insiders, VSCodium, Cursor,
+  Windsurf, Kiro, Positron, code-server and the VS Code and Cursor servers have installed (and
+  the folder `VSCODE_EXTENSIONS` names), or the folders and `.vsix` files given; an installed
+  extension's folder reads as its `.vsix` does, and a link out of it is not followed
+  (INCOMPLETE). `--ci`, `--json`, `--quiet`. `scripts/bench.py` takes `vsix` releases. The
+  npm package does not scan extensions yet.
+- **For contributors: the Go and Rust benign sets (N-2).** The release gate's popular set
+  holds the 500 most-downloaded crates too (498: two are under licences it does not take),
+  pinned by version and sha256 as its npm and PyPI releases are, and
+  `scripts/popular/packaged.py` packs the Go modules and crates Ubuntu 24.04 packages (1,953
+  and 2,151, licence-checked) and Go's own `std`, `cmd` and vendored modules, each as its
+  registry serves it, for `scripts/bench.py`. None is SUSPICIOUS, and every WARN is read
+  (`docs/TESTING.md` §4). The Go and Rust malicious set is run offline.
+- **For contributors: the extensions' benign set (E-1's fourth part).**
+  `scripts/popular/popular.py` pins VS Code extensions from Open VSX too (`pin --top
+  0,0,0,N`): each one's newest release with a file for Linux x86-64, by the SHA-256 Open VSX
+  publishes and only under the licences the crates are taken under. `--top` now pins anew
+  only the ecosystems it is given a count for, and a redirect is followed only to https on
+  a registry's own host (`docs/TESTING.md` §4).
+- **For contributors: every benchmark set in one command, and `--jobs`.** `scripts/bench.py
+  run --jobs N` scans N releases at once, each in a worker process of the guard's pool, and
+  writes the records one job writes: a scan that ran out of time beside the others is
+  scanned again alone, and a finished run is in the manifest's order. `scripts/bench.py all
+  SETS.json` runs every set a sets file names (the benchmark, the holdout, the popular set,
+  the Go and Rust sets and any other), compares each with its last finished run and writes
+  the comparisons and a summary to the folder the file names; the holdout's in counts
+  only. It refuses an engine library built before the engine's sources last changed or
+  with another rule set (an editable install not rebuilt), labels each run with the commit,
+  and goes on where it stopped (`docs/TESTING.md` §4).
+- **For contributors: the benign sets fetched in parallel, over Lazaret's own client.**
+  `scripts/popular/popular.py fetch` and `pin` and `scripts/popular/packaged.py ubuntu` take
+  `--jobs N` (default 8) and fetch over Lazaret's native client where its engine library is
+  installed (connections kept alive and reused, the same host rule on every redirect), else
+  over urllib as before; crates.io's API and Open VSX keep their pace, and the pinned file
+  and the manifests are the same whatever N is. `packaged.py ubuntu --mirror URL` fetches
+  from an Ubuntu mirror, each `.deb` still checked against the pinned index. Measured on 130
+  of Ubuntu's packages: 79 s one at a time over urllib, 27 s with eight over the native
+  client (the downloads 62 s and 6 s), the manifests identical.
+- **For contributors: the benchmark's malicious releases and a holdout, rebuilt from
+  DataDog's dataset.** `scripts/datadog.py DATASET OUT` writes the manifests `bench.py`
+  runs from a clone of DataDog's malicious-software-packages-dataset. The measurements
+  restart at the dataset's commit of Oct 15, `0cf258a4` (the default): the benchmark drawn
+  as the audit drew its own (seed 20260928: 517 releases there), and a holdout of the shape
+  of Sept 30's, whose draw was not kept (seed 20261015: 300 npm and 300 PyPI
+  malicious-intent packages and 150 compromised npm releases), among the packages neither
+  the benchmark nor the audit's benchmark holds, since the detectors were written from the
+  audit's. `--commit b302ad0b` gives the audit's benchmark, the 516 releases this release's
+  figures were measured on. Each sample is read in memory from git (a blobless clone
+  fetches the samples drawn in one request) and written as its registry serves the
+  release, by the September harness's rules; a stopped run goes on where it stopped, and a
+  folder inside a checkout is refused (`docs/TESTING.md` §4). A sample zipped inside itself
+  is read from the zip inside: litellm 1.82.8's at `0cf258a4` had been written as an sdist
+  holding that zip, so the scans never saw the release (`bench.py misses` showed it). Each
+  record keeps the version of the release rules, and a run makes again the releases
+  recorded under older ones and says how many changed.
+- **For contributors: a set's misses described without their contents.** `scripts/bench.py
+  misses SETS.json NAME` scans again, in memory, each malicious release of the set's last
+  finished run that is not SUSPICIOUS and writes one line for each to
+  `REPORT/LABEL/NAME-misses.jsonl`: the run's verdict and this scan's with its reason, every
+  finding (rule, severity, file, line, message), the files as the scan read them (path,
+  size, text or binary), the unused dependencies, and the manifest's install hooks with
+  their commands and its dependencies with their ranges (npm), or its Name, Version and
+  Requires-Dist (PyPI), each value cut short. It writes no file's contents and no finding's
+  snippet, so the benchmark's misses can be read for stories in a session that never opens
+  a sample, and it refuses a set marked `aggregate_only` (the holdout) (`docs/TESTING.md` §4).
+- **Credentials in Go's and Rust's declarations, crates.io's tokens and a `.netrc`'s
+  passwords (G-4, R-4, N-12).** S-SECRET read `name = "…"` and `name: "…"`, so Go's
+  `apiKey := "…"` and `var password string = "…"` and Rust's `const API_KEY: &str = "…"`,
+  `static SECRET: &'static str = "…"` and `b"…"`/`r#"…"#` literals went unreported; they are
+  reported now, and so is a Python `b"…"`, `r"…"` or `rb"…"` literal given a credential's
+  name, which S-SECRET skipped too (TypeScript's `apiKey: string = "…"` and Python's
+  `password: str = "…"` annotations are still not read). crates.io's API tokens (`cio` and 32 letters and digits, a whole run: a `cio`
+  inside base64 is chance) are S-TOKEN, in code and in config files such as
+  `~/.cargo/credentials.toml`, and are redacted wherever a snippet would show one. A
+  `.netrc`'s (or `_netrc`'s) password tokens, `machine HOST login USER password PASS` with
+  blanks between them, are S-SECRET when the value looks like a credential, and never shown.
+  The npm package and the dashboard read them the same way. Rule set 2.33.0.
+- **Crate names like a popular crate's, and a crate release's brand-new dependencies (N-3's
+  second part).** A crate's name, or a crate its `Cargo.toml` depends on to build (its
+  `[dependencies]` and `[build-dependencies]`, per target too; not `[dev-dependencies]`,
+  never built for a user), one change from one of the 5,000 crates crates.io counts the
+  most downloads of in 90 days is SC-TYPOSQUAT (MAJOR), as npm's and PyPI's names are:
+  `proc-macro1` for `proc-macro2`, `rustdecimal` for `rust_decimal` (2022's CrateDepression
+  squat), `reqwset` for `reqwest`. Names are folded as crates.io folds them (case, and `_`
+  as `-`), so `serde_json` and `serde-json` are one name. The crates the lists know are
+  never flagged: the 20,000 with the most recent downloads, the 20,000 with the most
+  downloads of all time and the crates Debian packages. A `crates:` scan also compares the
+  release with the version crates.io published before it, from the sparse index alone (its
+  lines are in publishing order, each with its `pubtime`): a crate it adds as a normal or
+  build dependency, first published less than 7 days before the release, is
+  SC-NEW-DEPENDENCY (CRITICAL; MAJOR under 30 days), unless an owner of the release's crate
+  owns it too (crates.io's API, one request a second, as its crawler policy asks; when the
+  API doesn't answer, the finding names no owner). The list comes from crates.io's API
+  (`scripts/fetch-top-crates.py`, names only) and Ubuntu 24.04's source package indices;
+  `scripts/update-popular-names.py --crates` rebuilds it. **Measured** before each set was
+  added to the known names: Ubuntu's 2,317 packaged crates (8,186 dependencies) gave 7
+  findings; the crates ranked 15,001 to 20,000 by recent downloads, 84 of 5,000; the 3,366
+  of the all-time 20,000 outside the recent 20,000, 75 (21 of them gitoxide's renamed
+  `git-*` crates); the 2,000 newest crates (Oct 3 to 6, 2026), 9. The API pages no further
+  than 20,000 crates, so the long tail past both lists is unmeasured.
+- **A crate's Rust code is read for what it does (R-1, first part).** The engine had no
+  Rust detectors, so a crate's `.rs` code was never read and `lazaret guard cargo` and the
+  registry marked a crate INCOMPLETE. The engine now reads it, with the test that Python's
+  and JavaScript's code of the same moment gets: a build script and a procedural-macro
+  crate run on the machine that builds a dependent, so they get the install-script test,
+  every reason CRITICAL (`setup.py`'s analog); `#[ctor]`/`#[dtor]`, a `.init_array`-like
+  section, a `#[no_mangle] extern "C" fn main` and `#![no_main]` run before a binary's
+  `main`, so they get the import-time test; the rest runs when the crate is used, so it
+  gets the import-time test of which only the shapes no library needs count (SC-USE-RISK).
+  The reader evaluates the code rather than matching patterns over it: it follows the
+  crate's own functions, closures and methods and the strings they build (`format!`,
+  `concat!`, `+`, a constant, base64 or hex decoded, a byte slice read as UTF-8), and
+  records a process started (`std::process::Command`, read as a shell reads its line, with
+  `sh -c`/`cmd /c`/`powershell -Command` scripts pulled out), data sent (`std::net`,
+  reqwest, ureq, minreq, attohttpc, curl, raw sockets), a file written and then run or
+  loaded (`libloading`), and a name looked up (`ToSocketAddrs`, hickory/trust-dns, TXT
+  records included — the DNS-backdoor shape). `tests/`, `benches/` and `examples/` are
+  not read (a dependent never builds them). This is the engine side (`rs_crate`); nothing
+  calls it yet, so no scan's verdict changes. The install-script and import-time tests take
+  a crate's reading only when one is given, so Python's and JavaScript's answers are
+  unchanged (the benchmark and the popular set are identical). The Go reader and the
+  registry and guard wiring that clears the INCOMPLETE verdict follow. Before the Go
+  reader was built on it, the reader was reviewed line by line (Oct 4): input that made it
+  recurse without a bound (a chain of assignments, of `else if`s, of operators or of
+  method calls, a nested pattern or function type) stops at its bounds instead of
+  overflowing the stack, and its events and the text it copies are bounded; a build
+  script's payload many calls deep, or behind code that spends the reading's steps, is
+  read (every function of a build script or a procedural-macro crate is read, so is every
+  function a start-up function calls however deep, and a reading cut short is read by the
+  text test as well); `.unwrap()` on a response keeps the response; code under
+  `#[cfg(all(…, test))]` is a test's; and the reverse-shell and DNS-lookup signs ask what
+  the text detectors ask (a shell or an interpreter; a name built with a public domain).
+
+- **A Go module's code is read for what it does (G-1, first part).** Go runs nothing at
+  install, but a package's `init` functions and the initializers of its package-level
+  variables run when any program that imports it starts, and a cgo preamble's C with a
+  constructor runs then too: the engine now reads that code with the import-time test
+  (SC-IMPORT-RISK), and the rest of a module's code, a command's `main` included, with the
+  test of which only the strong reasons count (SC-USE-RISK). As the Rust reader does, it
+  evaluates the code rather than matching patterns: it follows a package's functions,
+  methods and closures across its files and into the module's other packages, every
+  function init code reaches by name however deep, and the strings the code builds (`+`,
+  `fmt.Sprintf`, `strings.Join`, a string array read by index, byte slices, base64 and hex,
+  a loop that decodes a byte slice), and records the processes started, the data sent, the
+  DNS lookups (TXT records too), the files written and run, and the plugins and DLLs
+  loaded. The documented techniques are found on inert samples: the 2025 typosquats'
+  `wget -O - … | /bin/bash &` built from a string array, and their Windows variant; a DNS
+  TXT record's command run by an init goroutine; a base64 command; a download written,
+  made executable and run; a fetched wiper script run; a reverse shell; a cgo constructor;
+  credentials and the whole environment sent. Go's standard library and the modules it
+  vendors give no finding. `//go:generate` and `//go:linkname` are listed, not judged; test
+  files, `testdata/`, `vendor/` and files built only for `ignore` are not read. This is the
+  engine side (`go_package`); nothing calls it yet, so no scan's verdict changes. A shell's
+  or cmd's script is now read command by command by both readers, so a file one command
+  writes and the next runs is seen.
+- **Look-alike Go module paths (N-3, Go).** A Go module's own path, or one its `go.mod`
+  requires, like a well-known module's is SC-TYPOSQUAT (MAJOR), as an npm or PyPI name is:
+  its owner one character from that module's owner (`github.com/shopsprint/decimal` for
+  `github.com/shopspring/decimal`), with its separators changed, or with a word like
+  `-go` added (`github.com/boltdb-go/bolt` for `github.com/boltdb/bolt`),
+  the repository the same; its host one character from the module's, the rest the same;
+  a gopkg.in name one character from one (`gopkg.in/yanl.v3`). Anyone can create an owner
+  on GitHub, and only its owner can add a repository to it, so the owner is where a
+  squatter differs. The well-known modules are the 4,893 that awesome-go lists (MIT) or
+  Debian packages (the `Go-Import-Path` of Ubuntu 24.04's indices, which carry Debian's Go
+  packages), compared lower-cased and without a major version: no registry publishes Go
+  downloads. An owner or host of one of them is never a look-alike, nor is a module of the
+  module's own owner, nor a two- or three-character owner with a repository shorter than
+  five (`lib/pq`); another owner's module of the same name is a fork, not flagged. Of the
+  4,893, two would be flagged without themselves (`pions/webrtc`, pion's old name, and
+  `gopkg.in/macaron.v1`, next to `macaroon.v1`); Go's own `go.mod` files and the modules it
+  vendors give none. The guard and the registry read the `go.mod` in a module zip's root;
+  `scripts/update-popular-names.py --go` rebuilds the list from local copies of its
+  sources.
+- **A Go module's and a crate's code is read where they are scanned (Part C, rule set 2.31.0).**
+  `lazaret guard go`, `lazaret guard cargo` and the registry's scans of a module zip or a
+  `.crate` hand its code to the engine's Go and Rust readers (above), and a module or a
+  crate is OK, WARN or SUSPICIOUS for what that code does: it was INCOMPLETE whatever it
+  held (SC-UNREAD-CODE, N-1), and passed by default. What a Go package's `init`
+  functions, package-level initializers and cgo constructors reach is SC-IMPORT-RISK; a
+  crate's build script and a procedural macro are SC-INSTALL-HOOK, CRITICAL, and a
+  `#[ctor]` SC-IMPORT-RISK; the strong reasons of the rest are SC-USE-RISK, read within
+  the same 24,000,000 characters as a package's JavaScript and Python. `//go:generate`
+  commands are listed (SC-GO-GENERATE, INFO). Every `.go` and `.rs` file gets the file
+  rules too, except test code no build of a dependent compiles (`*_test.go`, `testdata/`,
+  `vendor/`, a file named with `_` or `.` first; `tests/`, `benches/`, `examples/`), which
+  is not read at all: rivo/uniseg's line-break tests hold escaped URLs. A `.go` or `.rs` file
+  over `--max-source-bytes` makes the scan INCOMPLETE, and a module's cgo C files are kept
+  for the reader outside the text budget other files share. A module or a crate
+  over 300 million characters is INCOMPLETE: a reader holds all of it at once, and the call
+  now takes its text without copying each file (aws-sdk-go v1's 207 million characters
+  peak at 2.4 GB, from 3.0 GB). On Ubuntu 24.04's packaged Go modules and crates whose
+  licences allow reading them (1,953 and 2,120), none is SUSPICIOUS; 39 and 30 are WARN,
+  for base64 and hex constants, test vectors outside test folders, archives and binaries,
+  every one read; 2 are INCOMPLETE (Debian packs aws-sdk-go-v2's and azure-sdk-for-go's
+  modules as one tree). The npm and PyPI scans are unchanged.
+- **`lazaret-registry scan go:<module>[@version]` and `crates:<name>[@version]` (Part C).**
+  `add`, `scan`, `scan-all`, `report` and the MCP server's `scan_package` take Go modules
+  and crates as they take npm and PyPI packages. The registry modules resolve them (the
+  module proxy's `@latest` or `.info`; crates.io's sparse index, latest being the highest
+  version that is not yanked) and check the download before anything is scanned: a Go
+  module zip against the `h1:` hash the Go checksum database publishes, a `.crate` against
+  the SHA-256 its index lists, failing closed with SC-DIGEST-MISMATCH. Their fetches go
+  only to the module's own hosts (`proxy.golang.org`, `sum.golang.org`; `index.crates.io`,
+  `static.crates.io`), redirects included, through the registry's bounded, timed fetch.
+  `repo.SpecError`, `FetchError`, `DigestError` and `Resolution` are now the registry
+  modules' classes (X-2's first step). No `discover` and no SC-NEW-DEPENDENCY for them yet.
+- **`--deps` reads a Go `vendor/` and a `cargo vendor` tree (Part C).** A vendor directory
+  with a `modules.txt` (`go mod vendor`) holds the Go modules a build compiles, and one whose
+  crate directories hold a `.cargo-checksum.json` (`cargo vendor`) the crates; a `--deps`
+  scan, in both packages, reads them as the registry reads a module zip and a `.crate`: the
+  file rules on each `.go` and `.rs` file a build compiles, the engine's Go reader on each
+  module `vendor/modules.txt` lists (a file of none, with its package's directory, cgo's C
+  files included) and its Rust reader on each crate. What a Go package's `init` code
+  reaches is SC-IMPORT-RISK, a build script and a procedural macro SC-INSTALL-HOOK
+  (CRITICAL), the strong reasons of the rest SC-USE-RISK. A crate's `Cargo.toml` is read
+  by the engine (`cargo_layout`: TOML's tables, keys, strings and arrays, so a description
+  holding `[lib]` is not read as one), the same answer as the registry's reading on all
+  2,122 of Ubuntu's licence-checked crates. A `cargo vendor` tree is a dependency tree now:
+  without `--deps` it is pruned, as `node_modules` is, where it was read as the project's
+  own code.
+- **The Rust crate inside a PyPI sdist is read (Part C, N-17).** A maturin or
+  setuptools-rust sdist ships its crate (or a workspace of crates), and pip has cargo build
+  it when it installs the sdist: each directory of the sdist with a `Cargo.toml` is a crate,
+  a `.rs` file belongs to the nearest one above it, and each crate is read as a `.crate` is
+  (the file rules on every `.rs` file it builds; the Rust reader on the crate). Its build
+  script and procedural macros are SC-INSTALL-HOOK, CRITICAL, as `setup.py`'s code; a
+  `#[ctor]` runs when the extension module is loaded (SC-IMPORT-RISK); the strong reasons of
+  the rest are SC-USE-RISK, the sdist's crates sharing one use-time share. A crate's file
+  that could not be kept makes the sdist INCOMPLETE. Of 72 popular PyPI sdists with a crate
+  (permissive licences only), two more are WARN (a table of 200 digits; hex test vectors in
+  `#[test]` functions) and none SUSPICIOUS for its Rust; their scans took 28 s instead of 11.
+- **Where a run's time goes: `--timings`.** `lazaret-registry` and `lazaret guard` print on
+  stderr the seconds spent in the network, reading archives, the engine (by call: the
+  file scan, the import-time test, the cross-file follower, …), the package manager (the
+  guard) and the rest of the Python, with the calls each took; the guard puts the same
+  report in its `--json`. A scan with no `--timings` records nothing.
+- **The commit-time gate: `lazaret hook`.** It checks the files being committed, as they
+  are staged (read from git's index, so a partly staged file is checked as it will be
+  committed), with the project scan's rules, and fails on `--ci`'s security and
+  supply-chain conditions: no BLOCKER finding, no CRITICAL vulnerability, no supply-chain
+  indicator, no cross-file taint flow. Duplication and maintainability are not a
+  commit's business. With no file named it checks the staged files; pre-commit passes
+  the files being committed. A credential in a `.env`, an install hook that pipes a
+  download into a shell, or a workflow that sends out every repository secret stops
+  the commit. pre-commit runs it from a mirror repository,
+  github.com/lazaret-dev/lazaret-pre-commit, whose package pins the release, written
+  by `scripts/make_pre_commit_mirror.py` (`docs/RELEASING.md`). The npm package has the
+  same command (H-2): `npx lazaret hook` checks the same files and prints the same lines
+  (`js/src/hook.js`, held to the Python package's by `test_js_parity_hook.py`), runs
+  only git (`diff --cached`, `ls-files`, `cat-file`), the git `PATH` names by an absolute
+  path (`js/src/lib/programs.js`, the twin of `lazaret.scanner.programs`), and streams
+  the blobs to disk; the project scan both CLIs run is one function in the npm package
+  now (`js/src/project.js`).
+- **Commands written to a shell's startup file.** An install hook's command, or a script
+  it runs or starts, that writes a command that downloads or runs code (`curl … | sh`,
+  `nohup node …/agent.js &`) to `~/.bashrc`, `~/.zshrc`, `~/.profile`, fish's
+  `config.fish` or another shell's startup file, through the file API or the shell's
+  `>>` and `tee -a`, gets SC-INSTALL-HOOK CRITICAL: "adds a command to a shell's startup
+  file (.bashrc)". Every line there runs at every shell start. So does any command
+  written to a startup file the script names only in strings it decodes as it runs
+  (alinet 1.2.0 puts its own command first in the one its `$SHELL` reads). A variable,
+  an alias or a completion is not judged: CLIs add those, and @asyncapi/cli's
+  `postinstall` appends its completion script to the `.zshrc`.
+- **What three of the benchmark's misses showed.**
+  - The `request` client and its forks (`@cypress/request`, `postman-request`):
+    `request(options, cb)`, `request.get(url, cb)`, `.post`, `.put`, `.patch`, `.del`
+    and a client made with `request.defaults()` send and fetch as `axios` and `fetch`
+    do, and what their callbacks are given is received (react-svg-helper-fast 1.0.0
+    runs the code its server returns).
+  - A parameter whose default is the script's own address (`function load(opts =
+    options)`) is that address when the caller gives none. A default the caller's
+    values make is still the caller's.
+  - A member named by a constant (`x[N]` with `const N = 'post'`, a comma
+    expression's last value included) and `require()` of a constant name are read by
+    that name (react-zutils 1.0.1, once its XOR-hidden strings are decoded).
+
+  On the benchmark, 452 of 516 malicious releases are SUSPICIOUS, up from 449: alinet,
+  react-svg-helper-fast and react-zutils. The popular packages and the popular releases
+  are unchanged.
+- **A project's Go and Rust files are read.** `.go` and `.rs` files were classified by
+  their bytes, as any data file is, so a Go or Rust repository scanned as "0 files" and
+  passed whatever it held. Both packages now read them, with comments and strings as
+  each language reads them (Rust's nested block comments, raw strings in both, a
+  lifetime not a character): hardcoded credentials (S-SECRET, outside comments; it reads
+  `name = "…"` and `name: "…"`, not yet Go's `:=` or Rust's typed constants), token
+  formats (S-TOKEN, in comments too), Trojan Source characters (S-BIDI), TODO markers,
+  and the checks every text gets (hex-escaped text, invisible characters, base64 blobs,
+  high-entropy literals, long lines). The suppression markers work in their `//`
+  comments. The MCP server's `scan_files` takes them too. Not read yet: a package's Go
+  and Rust files (registry and guard scans) and a dependency tree's (`--deps`), until
+  the engine has its Go and Rust detectors. Their lines count in the metrics, but the
+  duplication measure is for Python, JavaScript and SQL: the gate's 10% was set on
+  those, and with its six-line windows Go's standard library measures 2 to 13% and
+  twenty popular crates 4 to 54%. On those crates and Go's standard library the scan
+  reports test keys and vectors, base64 test data and TODO markers.
+- **CI files' hardening, in project scans.** A project's GitHub Actions workflows get six
+  checks: an action, reusable workflow or image not pinned to a commit or a digest
+  (SC-WORKFLOW-UNPINNED), a `pull_request_target` job that checks out the pull request's
+  code (SC-WORKFLOW-PR-CHECKOUT), a build cache in a release workflow (SC-WORKFLOW-CACHE),
+  write permissions for every job or none set (SC-WORKFLOW-PERMISSIONS), a job that can
+  request an OIDC token and installs dependencies (SC-WORKFLOW-OIDC-INSTALL), and
+  `curl … | sh` (SC-WORKFLOW-PIPE-SHELL). Its GitLab CI files (`.gitlab-ci.yml`,
+  `*.gitlab-ci.yml`, a `.yml` under `.gitlab/`) get five: remote, project and component
+  includes not pinned (SC-GITLAB-INCLUDE), images without a digest (SC-GITLAB-IMAGE),
+  `curl … | sh` (SC-GITLAB-PIPE-SHELL), a merge request's text run as code
+  (SC-GITLAB-MR-TEXT), and a job with a publishing credential that installs
+  dependencies (SC-GITLAB-TOKEN-INSTALL). Both packages report them, as security
+  hotspots. Only a CRITICAL one fails the gate's supply-chain condition: a pull request's
+  code checked out by `pull_request_target`, or a file included over plain http.
+- **A repository at a commit: `lazaret scan github:owner/repo[@ref]` and
+  `gitlab:group/project[@ref]`.** The ref (a branch, a tag or a commit; none means the
+  default branch) is resolved to a commit, that commit's archive is read into a temporary
+  directory and scanned with every option a folder's scan takes, and the directory is
+  removed. The report names the commit: its `project` is `github:owner/repo@<sha>`, a
+  `source` block says what was read and what was not, the report files are named for it
+  and written to the current directory, and a SARIF report maps its root to the
+  repository at that commit (`versionControlProvenance`). Paths the archive leaves out
+  (`export-ignore` in `.gitattributes`, where many repositories put their tests and
+  `.github/`) are fetched one by one, each written only if it is the blob the commit's
+  tree names. A checkout not read whole is said after the report and marks the result
+  `incomplete`; with `--ci` it exits 1 even when the gate passed, unless
+  `--accept-incomplete`. `GITHUB_TOKEN` and `GITLAB_TOKEN` (read-only) go to the API host
+  only, and `LAZARET_GITLAB_URL` names a GitLab instance. Python package only.
+- **`lazaret guard go` and `lazaret guard cargo`.** The install guard for Go modules (`go
+  get`, `install`, `build`, `run`, `test`, `vet`, `list`, `mod download`, `mod tidy`) and
+  Cargo crates (`add`, `update`, `generate-lockfile`, `install`, `fetch`, `build`,
+  `check`, `test`, `run` and the rest that fetch). For Go, the guard runs a module proxy
+  on the machine for the one command, relays the proxies `GOPROXY` lists as the go
+  command does, and scans each module zip before the tool gets it; go still checks
+  `go.sum` and the checksum database, so what it accepts is what was scanned. For Cargo,
+  it resolves first, checks every crates.io crate in `Cargo.lock` against the lock's
+  checksum and scans it, and only then lets cargo fetch and build. Both take `--min-age`,
+  `--plan` and `--json`, put `go.mod`, `go.sum`, `Cargo.toml` and `Cargo.lock` back when
+  anything is blocked, and list what they could not check (a module go fetches straight
+  from its repository through `GOPRIVATE`, a crate from git or from a registry the guard
+  cannot read).
+- **A Go module or a crate is never OK while its code is not read.** Lazaret has no Go
+  or Rust detectors yet: `lazaret guard go` and `lazaret guard cargo` check a module's or
+  a crate's checksum, age and archive, and read its other files, but not what its `.go`
+  or `.rs` code does when it is built or used (init functions, package initializers and
+  cgo; a build script and procedural macros). Such a module or crate is INCOMPLETE, with
+  one SC-UNREAD-CODE finding that says how many files were not read, rather than OK. Test
+  code the build never compiles does not count (`*_test.go`, `testdata/`; a crate's
+  `tests/`, `benches/` and `examples/`). INCOMPLETE does not block an install unless
+  `--block-warn` is given; a strong finding still makes it SUSPICIOUS. npm and PyPI
+  releases are unchanged.
+- **Dependency scanning reads Go and Rust.** `lazaret-sca` inventories `go.mod` (with its
+  `replace` lines), `go.sum` for a module older than Go 1.17, `vendor/modules.txt`,
+  `Cargo.lock` and `Cargo.toml`, matched against OSV's `Go` and `crates.io` advisories
+  (`GO-`, `RUSTSEC-`), which `--update-bundle` now downloads. A bundle that does not carry
+  them (`osv:go`, `osv:crates`) fails the gate for a project that has Go or Rust
+  dependencies rather than reporting none. The standard library, the toolchain and
+  RustSec's `unmaintained` and `notice` advisories are not matched.
+- **An indexed CVE bundle.** `lazaret-sca --update-bundle --bundle-format index --bundle
+  cve-bundle.lzx` writes a file a scan reads only the parts of that it needs. On a
+  synthetic bundle the size of OSV's (120,000 advisories), opening it and matching 2,000
+  dependencies takes 0.2 s and 42 MB instead of 6.9 s and 640 MB, with the same matches in
+  the same order. `--bundle` takes either kind. Every part of the file is checked (its
+  length, checksums, layout and order), and a damaged one is exit 4, also when the damage
+  is found in the middle of matching. The JSON bundle stays the default.
+- **`lazaret guard --from-plan pip install …`.** Once pip's plan has been scanned, pip
+  installs the very files that were scanned, from a folder (`--no-index --find-links`),
+  instead of resolving and downloading again; each file is hashed again just before pip
+  runs and must be the one scanned. A plan with an sdist or a file too large to scan goes
+  through the guard's index as before, with a line saying why. On `requests`, `boto3` and
+  `pydantic` the guarded install took 13.5 s instead of 19.2 s (pip alone: 6.1 s).
+  Opt-in.
+- **`lazaret guard --keepalive`** (experimental): the guard's own requests reuse their
+  connections instead of opening a connection and a TLS session for each; redirects and
+  credentials follow the guard's rules as before. Off by default until it is measured on
+  a direct network: with `--timings`, the network lines count the connections made and
+  reused.
+- **What a workflow's actions point to, checked online.** `python -m
+  lazaret.registry.actions WORKFLOW…` asks GitHub about each `uses:`: a commit, pinned or
+  tagged, that none of its repository's branches holds, such as a fork's commit
+  (SC-ACTION-IMPOSTOR; as RA-4 above made it; SC-ACTION-TAG-ONLY, MAJOR, when exactly one of the
+  repository's own version tags holds it, FP-IMPOSTOR-TAG); a version tag that moved since it was first
+  seen (SC-ACTION-TAG-MOVED; what was seen is kept in `~/.cache/lazaret/actions-pins.json`);
+  a pin whose `# v1.2.3` comment names another commit
+  (SC-ACTION-PIN-MISMATCH); and, in the action's own `action.yml`, a Docker image without
+  a digest or composite steps not pinned (SC-ACTION-DOCKER-UNPINNED,
+  SC-ACTION-NESTED-UNPINNED). What it could not ask (GitHub's limit of 60 requests an hour
+  without `GITHUB_TOKEN`, a private repository) is reported as not checked. A project
+  scan does not run it.
+- **For contributors: Go and Rust readers in the engine, and the tools that hold them to
+  Go and rustc.** A Go parser (`goparse`), a port of `go/parser` that builds the same tree
+  as Go's own for the Go distribution's 10,368 files and about 430,000 mutants of them
+  (nesting is limited to 256, so one file of the distribution is refused), and a Rust item
+  reader (`rsparse`) that finds exactly the items `rustc` finds in the 7,468 files of 186
+  published crates. With them, the code that runs
+  without being called: `init` functions, package-variable initializers, cgo preambles,
+  `//go:linkname` and `//go:generate`; procedural macros, `#[ctor]` and `#[dtor]`,
+  load-time sections, a crate's entry point, a build script's `main`. Nothing uses them
+  yet: they are what the Go and Rust detectors will read. `scripts/goparse`,
+  `scripts/gooracle` and `scripts/rsparse` are the differential tools; `scripts/fuzz`
+  fuzzes the readers of untrusted input (34 targets: archives, XML, lockfiles, the
+  registry modules, the CVE bundle; weekly in `fuzz.yml`), and `scripts/profile` holds
+  the profile's scripts and a nightly check of the engine's time on eight pinned packages
+  (`perf.yml`; its budgets are set after a week of runs).
+
+### Changed
+
+- **Scan-all lists a repository's own workflow hygiene as INFO (SCANALL-HYGIENE; John's decision of Oct 21, "INFO
+  in scan-all only"; no rule-set change — Python registry code).** Scan-all reads random new repositories for hostile
+  ones; an action not pinned, a workflow's token permissions, a cache in a release and an OIDC token where
+  dependencies install (SC-WORKFLOW-UNPINNED, -PERMISSIONS, -CACHE, -OIDC-INSTALL) are the owner's configuration
+  risks, not signs of that. In a repository scan-all queued, such a finding at MAJOR or MINOR is now stored and
+  reported as INFO, its message ending "(scan-all: the owner's workflow configuration, MAJOR in a project scan:
+  listed, not counted)"; the scan's verdict reason, and an OK scan's line, say how many were listed as INFO, as the
+  owner's configuration. **No verdict changes:** these four are CI hardening checks, which a GitHub repository's
+  registry verdict has counted only at CRITICAL since GH-NEW-REPOS (Oct 14), and the engine grades none of them
+  CRITICAL; so `--ci`, the candidates' verdicts and `list` are as before, and a repository's WARN beside them was
+  always another rule's. What changes is the record: the stored findings and counts say what they are, and a tally of
+  the stored findings by severity no longer reads them as setting verdicts. Exactly these four, in scan-all's own
+  repositories: SC-WORKFLOW-PR-CHECKOUT (still SUSPICIOUS), SC-WORKFLOW-SECRETS and every other finding count as
+  before; a filter's candidate (look-alikes, copies, your patterns), `lazaret-registry scan github:`, `lazaret scan`
+  (and `lazaret scan github:`) and package scans grade the four as before. Scans stored before keep their findings
+  as stored: scan-all scans a repository once, and a rescan (`scan github:owner/repo@commit --rescan`) is not
+  scan-all.
+- **One reader of CI files, the engine's (BR-7, step 1).** GitHub Actions workflows (SC-WORKFLOW-*) and GitLab CI
+  files (SC-GITLAB-*) are read by the native engine for both packages (`rust/crates/lazaret-engine/src/ci/`, the
+  `ci_*` calls), where `scanner/ghworkflow.py` and `gitlabci.py` and their npm twins `js/src/lib/ghworkflow.js` and
+  `gitlabci.js` each read them until now; the rule texts are in the rule pack. Nothing found changes: the engine's
+  answers equal the Python modules' on every case of the three parity tests' corpora (outlines, findings, rules,
+  `uses:`, the line checks: 42,995 answers on 5,231 files and the helpers' cases) and on 23,202 real workflow files
+  of 6,813 repositories. The npm twins (1,248 lines) are gone, and the Python modules (1,258 lines) are 168 lines
+  that keep the names the package calls, over the engine. `test_js_parity_workflow_hardening`, `test_js_parity_gitlabci` and the YAML part of
+  `test_js_parity_persistence` gave way to `test_snapshot_ci` (their corpora, hashes recorded from the Python
+  modules) and `test_wasm_parity_ci`.
+- **One reader of editor and agent settings, the engine's (BR-7, step 2).** SC-AUTORUN's reading (which files make
+  a tool run commands, a JSON-with-comments reader that keeps lines, the commands each kind of file makes VS Code,
+  Claude Code, Cursor or Gemini CLI run) and its issues (each command judged by the install-script test and followed
+  into the files of the tree it runs) are the engine's for both packages (`rust/crates/lazaret-engine/src/autorun.rs`,
+  the `autorun_*` calls), where `scanner/autorun.py`, `core.autorun_issues` and their npm twins did it until now. The
+  engine reads no file: it names the files of the tree a command runs, and the package reads them and asks again. The
+  same answers as the Python's on the corpus the twins were held to (2,254 files read as each kind of settings file),
+  57 commands' folder variables and 1,500 settings trees over a tree of loaders, payloads and scripts (2,364 issues,
+  877 of them CRITICAL), with a reader and without. `js/src/lib/autorun.js` (432 lines) is gone, `autorun.py` is 102
+  lines over the engine (from 462), and `test_js_parity_persistence` keeps only its scan of a tree by both CLIs;
+  `test_snapshot_autorun` (hashes checked to be the Python's answers) and `test_wasm_parity_autorun` replace the rest.
+- **One reader of config and data files' credentials, the engine's, with its one redactor (BR-7, step 3).** A config
+  or data file's scan (S-TOKEN and S-SECRET's config form: a key = value pair, a URL with a password, a webhook, a
+  .netrc's password; the comments of each format, the suppression markers, the cap, and each snippet's lines
+  redacted) is the engine's for both packages (`rust/crates/lazaret-engine/src/config.rs`, the `scan_config` call,
+  which also asks for the files a settings file's commands run, as `autorun_issues` does), where
+  `scanner/configsecrets.py`, `core.scan_config_file`'s context and their npm twins did it until now. The same
+  answers as the Python's on 3,000 generated config files of every format (25,111 issues, with the snippets redacted
+  and without), 1,500 settings trees with the files they run, this repository's 299 config files and 23,202 real
+  workflow files (79,334 issues). A config file's scan is bounded by the engine's work budget like a source file's,
+  not by a 30-second clock (`core.SCAN_TIME_BUDGET` and the npm package's `setScanTimeBudget` export are gone; a file
+  that spends the budget is SC-TRUNCATED "reading it spent the engine's work budget", where it was "scan time budget
+  exceeded"), so a file gets the same findings on every machine; the dashboard keeps its own clock.
+  `configsecrets.py` is 137 lines (from 388) and `js/src/lib/configsecrets.js` 36 (from 293): which files are config
+  files, and the reader's checks for the tests over the `config_check` call. `test_snapshot_config` (hashes checked to
+  be the Python's answers) and `test_wasm_parity_config` hold the engine.
+- **One reader of manifests, the engine's (BR-7, step 3 b).** A package.json's install hooks (SC-INSTALL-HOOK) and
+  its dependencies from an insecure source (SC-DEP-URL), a binding.gyp's actions and command expansions, and the
+  manifests that cannot be read (SC-MANIFEST-DEPTH, SC-MANIFEST-UNPARSEABLE) are the engine's for both packages
+  (`rust/crates/lazaret-engine/src/manifest/`, the `scan_manifest` and `scan_gyp` calls), where core's
+  scan_manifest and scan_gyp and the npm package's supplychain.js did it until now. The engine reads a package.json
+  as `json.loads` does (`pyjson.rs`, CPython's C scanner) and a .gyp file as JSON or else as the Python literal gyp
+  reads (`pylit.rs`: `ast.literal_eval` on the engine's Python parser, which reads every `\N{…}` name and number
+  form Python reads), to Python's values (`pyval.rs`: equal keys, `str()` and `repr()`). The same answers as the
+  Python's, issue for issue with snippets and each hook's `cmd`, redacted and not, on 3,000 generated package.json
+  files (4,810 issues) and 2,500 gyp files (8,577 issues, more than are listed and past the walk's bound among
+  them), the 2,308 package.json and 11 gyp files of the packages installed on the build machine, and 4,600 cases of
+  the readers alone. `js/src/lib/pynames.js` is gone, `supplychain.js` is 175 lines (from 542) and `pyjson.js` 170
+  (from 511: the baseline's JSON reader stays); core is 475 lines shorter, `load_manifest` keeping the data the
+  registry's and --deps' decisions read (the npm package asks the engine for it, `manifest_data`). Where the readers
+  differed from the Python's on rare inputs, the engine follows the Python: a JSON `\u` escape that ends the text
+  (CPython 3.13: an unterminated string), any `\N{…}` name Python knows (the npm package took one outside its table
+  as U+FFFD). A too-large int added to an imaginary number in an expansion's argv list, which made core's scan_gyp
+  raise, leaves the command as written. A set's items stay in the order given (Python orders a set of str by a
+  per-run hash). `test_snapshot_manifest` (hashes checked to be the Python's answers) and `test_wasm_parity_manifest`
+  hold the engine.
+- **One redactor, the engine's (BR-7, step 3 c).** The findings the packages still build (an encoding note, the
+  package checks', the dependency follow's, a cap's note, the autorun and CI files' issues) are made and redacted by
+  the engine as it makes its own (`rust/crates/lazaret-engine/src/redact.rs`, the `issue_make` call: the ±2 lines
+  clipped around the match, a secret rule's flagged line the placeholder, the others' PEM blocks, credential patterns
+  and, with the file's lines, its entropy literals), and so are the sweep of a whole result before it is written
+  (`redact_issues`) and a file's redaction of the findings built outside its scan (`redact_file`), where core's
+  `mk_issue`, `redact_result`, `redact_file_issues` and `_redact_text` and the npm package's `issue.js` and `redact.js`
+  did it until now. A file's lines go to the engine once for all of its findings (`core.mk_issues`, `mkIssues`). The
+  same answers as the Python's on 2,326 generated files' findings, sweeps and redactions with redaction on and off,
+  60 generated projects and three of this repository's folders scanned whole (Python), and 12,000 cases and four
+  folders scanned whole through the npm package; the one difference is a Python string holding a UTF-16 surrogate
+  pair as two characters (only a `surrogatepass` decode makes one), which the engine reads as one, so a sweep's
+  placeholder for such a line counts one character less. `redact.js` is 123 lines (from 369: the token matcher, the
+  entropy test and the PEM reader are gone, and with them `test_js_parity_tokens`), and `redactResult` always clips
+  (it took the clipper as an argument). `test_snapshot_redact` (hashes checked to be the Python's answers) and
+  `test_wasm_parity_redact` hold the engine.
+- **One reader of binaries, bytecode and .pth files, the engine's (BR-7, step 3 d).** Whether a file's bytes are
+  text, a program or a transport stream, the SC-BINARY, SC-NESTED-ARCHIVE and SC-OPAQUE-BLOB findings of a file that
+  is not source, a program under a source file's name (SC-BINARY, CRITICAL), bytecode's SC-PYC-UNCHECKED and
+  SC-PYC-ORPHAN, and a .pth file's SC-PTH-EXEC are the engine's for both packages
+  (`rust/crates/lazaret-engine/src/binary.rs`: the `binary_check`, `binary_classify`, `binary_disguised`,
+  `pyc_issues` and `pth_issues` calls, a file's bytes handed over as latin-1 text), where core's `looks_binary`,
+  `classify_binary`, `disguised_binary`, `pyc_issues` and `pth_issues` and the npm package's `binary.js` and
+  `pth.js` did it until now; the signatures, limits and texts are in the rule pack. The same answers as the
+  Python's on 33,300 cases (byte samples of every signature, size and extension in each context, bytecode headers,
+  2,500 .pth files) and on 150 generated trees scanned whole, with --deps and without, and read as an npm tarball
+  and a wheel (3,309 issues); the npm package's the same answers as its own old code on 30,836 cases and 120 scans
+  of 60 generated trees (976 issues). The npm package's work budget (`setWorkBudget`) no longer bounds these calls,
+  as the Python package never asked them with one. `binary.js` is 88 lines (from 241), `pth.js` 20 (from 56), core
+  156 lines shorter.
+  `test_snapshot_binary` (hashes checked to be the Python's answers) and `test_wasm_parity_binary` hold the engine.
+- **--deps' decisions, the engine's (BR-7, step 3 e).** The follow of a dependency's install hooks and of a
+  project's own (to the files they run and the scripts those start: the escalation and its message, a hook too long
+  to follow, an agent a hook or a file it runs launches), npm's implicit node-gyp hook, which dependency files are a
+  web app's static assets, each installed package's names (D-12b, D-9c), the site-packages groups of the cross-file
+  follower, and the SC-IMPORT-RISK and SC-AGENT-HIJACK findings of a dependency's files are the engine's for both
+  packages (`rust/crates/lazaret-engine/src/deps.rs`: the `deps_hooks`, `deps_files`, `deps_script`,
+  `deps_targets`, `dep_file_issues`, `agent_issue` and `declared_names` calls), where core's `dependency_checks`,
+  `project_hook_checks` and their helpers and the npm package's `deps.js` made them until now; the registry asks
+  the engine for a release's declared names too. The packages keep file access: a call asks for what it needs to
+  know of the tree (whether a path is a file it may read, a manifest's text, what a file a hook runs does, what a
+  JavaScript file loads, a folder's entries or every file below it, a file's head) and is asked again with the
+  answers, as the settings reader is; a file a hook runs that the walk did not read is read, and scanned, by the
+  package. The same findings as the Python's on 140 trees put together from the dependency tests' fixtures, scanned
+  with --deps and without (280 scans, 3,036 issues), and the npm package's the same as its own old code's. Three
+  differences, all in the npm package's favour or none: on worker threads the npm package's import-time test is now
+  given each package's names, as on one thread and in the Python package (with two threads it answered otherwise on
+  46 of the 140 trees); a check that spends its work budget during a hook's follow makes the manifest SC-TRUNCATED
+  as running out of budget (the npm package said its scan failed); and a scan its time budget stops while the hooks
+  are being followed keeps none of the follow (it kept the hooks followed before the stop; the scan is incomplete
+  either way). core is 367 lines shorter, `deps.js` 632 lines (from 973; 220 of them the vendored modules' and
+  crates' readers, which stay). `test_snapshot_deps` and `test_wasm_parity_deps` hold the engine.
+- **The package readers' findings, the engine's (BR-7, step 3 f).** What the Go reader and the Rust reader answer for
+  a module or a crate becomes its findings in the engine (`rust/crates/lazaret-engine/src/readers.rs`: a build
+  script's and a procedural macro's SC-INSTALL-HOOK, the import-time test of what runs at start, SC-USE-RISK,
+  SC-GO-GENERATE): `go_package` and `rs_crate` add them to their answer when asked whose code it is ("module",
+  "crate", "sdist") with the files' names, where core's `package_reader_issues` and the npm package's
+  `packageReaderIssues` made them, for a --deps scan's vendored modules and crates and the registry's releases. The
+  same findings as the Python's on 498 readings (every one the reader tests make, and 400 put together from their
+  samples; 857 findings): no difference; the npm package's the same as its own old code. `test_snapshot_readers` and
+  `test_wasm_parity_readers` hold the engine.
+- **A scan's result, the engine's (BR-7, step 4 a).** The findings' order, the counts by type, the security,
+  reliability and maintainability ratings, the gate's six conditions and the gate, the supply-chain indicators,
+  cross-file flows and findings by file, and a project's duplication across its files are graded in the engine
+  (`rust/crates/lazaret-engine/src/result.rs`: the `result`, `regrade` and `project_metrics` calls), where core's
+  `build_result`, `regrade` and `compute_metrics` and the npm package's `buildResult`, `regrade` and `computeMetrics`
+  did it each in its own language. A package hands the engine each finding's rule, type, severity, file, line and a
+  Q-CAPPED note's count, and each file's line metrics, and gets back the findings' order and the grades; it keeps the
+  project's path and the time. `HARDENING_RULES` is the rule pack's. Gone: core's `worst_sev_rating`,
+  `maintainability_rating`, `COVERAGE_RULES` and `DUP_LANGS`, and the npm package's `worstSevRating` and
+  `maintainabilityRating` (no longer exported) and `metrics.js`' twins of them. The same results as core's code had
+  given (`test_result_engine`: that code kept as the reference, on 300 generated sets, every fixture folder's
+  findings, and 200 sets of metrics); `test_result_engine` also holds the WebAssembly build to the library.
+- **Decoding, the engine's, every codec Python has (BR-7, step 4 b; rule set 2.84.0).** A source file's bytes are
+  decoded as its interpreter reads them by the engine, for both packages (`rust/crates/lazaret-engine/src/decode/`:
+  the `decode_source`, `encoding_issues` and `decode` calls): the BOM and NUL sniff, PEP 263 coding cookies, and
+  every text codec Python has, as Python decodes it, where core decoded with Python's codecs and the npm package
+  with generated single-byte tables and the runtime's TextDecoder, and both read what npm could not decode exactly
+  as UTF-8, SC-TRUNCATED. So a cookie naming one of the CJK codecs TextDecoder lacks (EUC-JIS-2004, Shift_JIS-2004,
+  Big5-HKSCS, JOHAB, …), HZ, the ISO-2022 family or UTF-32 is now decoded and scanned as Python reads it (the rule
+  set changes for those files); idna, punycode and undefined, a `\N{name}` escape under unicode_escape, and a file
+  Python's decoder raises on are read as UTF-8 as before. The codecs' tables are read from Python's own decoders by
+  `scripts/make_codec_tables.py` (`generated/codecs.rs`: the same on Python 3.10 to 3.14), the decoders that read
+  them written from the RFCs and from what Python's decoders do; the engine grows by about 0.5 MiB (the WebAssembly
+  module 6.3 to 6.8 MB, 2.16 to 2.36 MB gzipped). Gone: core's `detect_encoding`, `_python_cookie`, `_normal_codec`,
+  `charmap_table`, `_decode_escapes`, `_text_is_plausible` and their tables (the generator keeps
+  `CODEC_ALIAS_EXTRAS`, `HOST_CODECS` and `CHARMAP_FIXES`), the npm package's `lib/codecs.js` and all of
+  `lib/encoding.js` but file names, and `fs.js`' `encodingIssues`; `decode_member` and `decodeMember` are one call.
+  Held to core's code as it was, decoding every codec with Python's codecs (`test_decode_engine`,
+  `test_decode_engine_codecs`), and the WebAssembly build to the library. The dashboard decodes as before until it
+  runs the engine (step 5).
+- **The dashboard runs the engine (BR-7, step 5; no rule set change).** The browser dashboard
+  (`lazaret/web/lazaret.html`) carried its own port of the project scanner in JavaScript, held to the CLI by tests
+  of its rules, tables and decoders, and it drifted all the same (no Go or Rust, the .pth check by a pattern, its own
+  comment lexer, secret tests and clock, decoding as npm did before step 4 b). It now runs the npm package's
+  collection, scan and grading on the engine itself: the page carries the engine built as WebAssembly (gzipped, in a
+  data block it never runs, with the engine's notices, `rust/NOTICE` and the Unicode License v3), and
+  `scripts/make_dashboard.py` builds it from `js/dashboard/` (the page, its input and output) and the npm modules it
+  imports, which therefore use nothing of Node's: `lib/collect.js` (what the collection does with each file it
+  meets, out of `lib/fs.js`), `scancollection.js` (the scan of a collection, out of `project.js`), `result.js` (the
+  grading, out of `report.js`) and `lib/wasmload.js` (where the engine comes from; the page has its own). So an
+  upload is collected as the CLI collects a directory's files: any file is taken, a `.pth` file gets the engine's
+  check (B-5), Go and Rust sources are read (N-14), binaries are classified, config files are read for credentials
+  and the cross-file passes run; the result is the CLI's for a directory holding the files, every field
+  (`test_review_dashboard_parity`), with the files and the time, and the export is marked `lazaret-dashboard-2`. The
+  page does not walk a directory, follow a `package.json`'s install hooks into the files they run, or read a file
+  over 2,000,000 bytes (it scans on the tab's thread: SC-TRUNCATED, as before). Its CSP allows `'wasm-unsafe-eval'`
+  besides the script's hash, and the engine compiles as the page opens (0.13 s in Chromium). The page grows from
+  0.33 MB to 3.3 MB (the engine: 2.36 MB gzipped, 3.1 MB in base64; the script shrinks from 314 KB to 143 KB).
+  Gone: the page's port (its rule tables, lexer, decoders, redaction and grading), `scripts/dashboard_csp.py`, the
+  dashboard's copies in `make_codec_tables.py` and `make_unicode_tables.py`, and the tests of the port
+  (`test_review_dashboard_engine`, `_lexing`, `_perf`, `_perf_regex`, `_tables`, and the dashboard halves of eleven
+  review tests): the page is the npm package's code, held by its tests.
+- **The reports' forms, the engine's (BR-7, step 4 c; no rule set change).** A scan's JSON, SARIF, HTML and terminal
+  forms were made by each package (core's `json_renderer`, `sarif_report` and `sarif_renderer`, `html_report` and
+  `print_report`; npm's `jsonReportChunks`, `sarifReport`, `htmlReportChunks` and `printReport`), and so were the
+  terminal's sanitizers (`sanitize_term`, `sanitize_term_line`, `safe_excerpt`, `issue_excerpt` and their npm twins;
+  `flow.py` kept a third `sanitize_term`). The engine makes them for both (`rust/crates/lazaret-engine/src/report.rs`:
+  the `term`, `issue_excerpt`, `report_json`, `report_items`, `sarif_*`, `html_*` and `text_*` calls), as core made
+  them, so the two packages now write the same bytes: the npm package's JSON report is Python's `json.dumps(…,
+  indent=2)`, every character outside ASCII a `\u` escape (it was JSON.stringify's), its HTML report core's page (it
+  was the JSON in a `<pre>`), and its terminal summary core's, colored on a terminal (it was a shorter one, the first
+  40 findings). Each form is made in pieces, a frame and its findings a batch at a time (at most 2,000, and 8 MiB of
+  them in the npm package), which the packages write as they come, so a report with a million findings is still
+  written. Without an engine the sanitizers map every character but printable ASCII to `·` (the CLIs say the engine
+  is missing). Held to core's code as it was, on generated results whose every text is hostile and on Windows' path
+  rules too, and the npm package's forms, on the WebAssembly build, to the Python package's, byte for byte
+  (`test_report_engine`). The engine grows by 0.1 MiB (WebAssembly 6.80 to 6.90 MB), and the dashboard, which
+  carries it, was rebuilt.
+- **Baselines, the engine's; a signed baseline accepts a reviewed supply-chain or cross-file finding (BR-7, step 4 d;
+  N-15; no rule set change).** core applied a baseline (`apply_baseline`, with the reports module's `fingerprint`,
+  `sign_fingerprints` and `verify_signature`) and the npm package its twin (`baseline.js` over `pyjson.js`, its
+  `json.loads`). The engine does it for both (`rust/crates/lazaret-engine/src/baseline.rs`: the
+  `baseline_fingerprints`, `baseline_sign` and `baseline_apply` calls): an entry's fingerprint of any value
+  `json.loads` makes, the HMAC-SHA256 signature, the baseline's bytes read as `open(encoding="utf-8")` and
+  `json.loads` read them (strict UTF-8, universal newlines, `json.loads`' own messages, its 4,300-digit limit on an
+  int), the trust rules of G17 and the shape checks, with the warnings' text. The packages keep whether the file is
+  one of their reports, where it is, its bytes, the key and the printing. Two answers changed: where core raised an
+  error the CLI did not catch (an int too large for a float, in a float's arithmetic; a signature whose value is not
+  ASCII), the entry is skipped, or the signature does not verify. The npm package's messages are now the Python
+  package's (a JSON error was "the baseline is not valid JSON"; the path is sanitized for the terminal). **N-15**
+  (John, Oct 15: "the baseline, with its HMAC"): supply-chain (`SC-*`) and cross-file (`X-*`) findings take no
+  suppression marker, so a reviewed `pull_request_target` workflow or install hook failed the gate for good. A
+  baseline whose signature verifies with `LAZARET_BASELINE_KEY` now accepts the ones it holds: they stay in the reports
+  (`"accepted": true`; in SARIF an `external` suppression, `accepted`; an "Accepted" badge in the HTML page) and in
+  the counts and ratings, the result gets `acceptedIssues` (the terminal and the page say how many), and the gate's
+  four conditions on findings are judged without them. A new finding of the same rule, a baseline without a key and
+  one that does not verify accept nothing. Held to core's code as it was on 500 generated baselines and 4,000
+  entries, and the npm package's `applyBaseline` to the Python package's (`test_baseline_engine`). Gone: core's and
+  the reports module's baseline code, npm's `pyjson.js` and its JSON and str() helpers.
+- **What a project scan's walk reads, the engine's (BR-7, step 4 e); in the registry, Rust's test files and a secret in
+  test code (rule set 2.85.0).** core's walk decided what each entry of a folder is to the scan and how each file it
+  meets is read (`_collect`, `_collect_file`, `_collect_config`, `_check_pycache`, `_dep_tree_kind` and the vendor
+  trees' kind and language, the coverage notes, configsecrets' `is_config_file` and `own_report`), and the npm package
+  its twin (`lib/fs.js` collectFiles and checkPycache, `lib/collect.js` collectEntry, `lib/configsecrets.js`). The
+  engine decides for both (`rust/crates/lazaret-engine/src/collect.rs`: `collect_dir`, `collect_file`,
+  `collect_pycache`, `collect_issue`, `collect_check`): a folder's entries in order, each read, skipped (`.git`, an
+  excluded name, a dependency tree without `--deps`), followed (with the dependency or vendor tree it belongs to) or
+  reported (a link, a special file, a folder seen twice), and each file's language, manifest, `.pth`, config or
+  binary reading, the size limits and what is read of it, asked again with the bytes it needs. The packages list
+  folders, read bytes, keep the folders they have seen and count a pruned tree; whether a manifest is a dependency's
+  is the engine's too. The npm package's walk now lists a folder in Python's order (by code point; it sorted by UTF-16
+  unit). Held to core's code as it was on 60 generated trees (links, named pipes, venvs, Go and cargo vendor trees,
+  `__pycache__` folders, files over the limits) and the npm package's walk to the Python package's
+  (`test_collect_engine`); the dashboard, which collects its uploads with the npm package's code, was rebuilt. The
+  registry's test code is the engine's as well (`test_paths`, `demote_tests`), with two changes from SECRET-FP's
+  leftovers: Rust's `tests.rs` and `*_test.rs` are test files, and a secret (`S-SECRET`, `S-TOKEN`) in test code no
+  entry point reaches is listed as INFO ("in test code: listed, not counted"), as a weaker supply-chain finding there
+  is (a secret never decided a verdict). Gone: core's and npm's collection tables and decisions, npm's
+  `isDependencyManifest` and `configsecrets.js` tables, the registry's `TEST_DIR_NAMES`, `_TEST_FILE_RE` and
+  `USE_RISK_SKIP_DIRS`.
+- **The commit-time gate's decisions, the engine's (BR-7, step 4 f; no rule set change).** `lazaret hook` decided in
+  each package which findings it prints (vulnerabilities of MAJOR and above, supply-chain indicators, cross-file
+  flows), which of the result's conditions it gates on, the lines it prints and its exit, what it does with each path
+  the commit holds (a regular file's staged blob, a link or a submodule not followed, a file the index does not hold
+  read from the disk) and why a file could not be read for the scan. The engine decides for both
+  (`rust/crates/lazaret-engine/src/gate.rs`: `gate_report`, `gate_source`, `gate_why`); the packages keep git, the copy
+  of what the commit holds into a temporary tree, the project scan of it and the printing. The npm package's hook now
+  colors its lines on a terminal, as the Python package's does. Held to hook.py's code as it was on 1,500 generated
+  results (`test_gate_engine`); the npm hook test's cases of what the gate shows moved to the engine's tests. Gone:
+  hook.py's `GATE`, `shown`, `git_form`, `COLLISION_WHY` and `UNPRINTED_WHY`, and hook.js' `GATE`, `shown`, `gitForm`
+  and its texts.
+- **The dashboard takes a folder, and walks it as `lazaret <folder>` does (BR-7, step 5 b; no rule set change).** The
+  page scanned only files picked one by one, without a walk, so a project could not be given to it as the CLI is
+  given one. "Upload a folder" now gives it the folder, which it walks on the npm package's walk: the walk's loop moved from `lib/fs.js` collectFiles to
+  `lib/collect.js` (`walkSteps`: each step in the walk's order, the engine's `collect_dir` deciding each entry;
+  `takeStep`: a file collected, a pruned tree counted, a `__pycache__` checked), which uses nothing of Node's, so the
+  CLI takes its steps on the disk and the page on the folder the browser gives it, reading only what the steps read.
+  Without `--deps`, as the CLI's default: a dependency's tree is counted (Q-SKIPPED-TREE), `.git` is never read, a
+  file the browser can't read is Q-UNREADABLE; CI files and an editor's settings are read by their paths, as the CLI
+  reads them. Held to the CLI on the fixture projects whole and on trees that reach each step
+  (`test_review_dashboard_parity`); the npm walk to the Python package's as before (`test_collect_engine`).
+- **Security: S-XML is a parser set to resolve external entities, not an import of xml.etree, xml.dom or xml.sax
+  (Q-3; rule set 2.80.0).** Since Python 3.7.1 none of them resolves an external entity unless told to, and Expat
+  2.4.1 refuses entity bombs, so the import flagged safe code: all 20 of BenchmarkPython's safe XXE cases (its 8 real
+  ones turn the feature on). S-XML ("XML external entities enabled", VULN, MAJOR, CWE-611) is now
+  `setFeature(feature_external_ges | feature_external_pes, True)` (or the feature's URL) and lxml's
+  `resolve_entities=True`. BenchmarkPython's XXE score: +0.65, from 0.00 (true positives 8 of 8, false positives
+  20 to 7 of 20, which turn the feature on too). S-RANDOM reads each of the random module's generators (`sample`,
+  `choices`, `uniform`, `shuffle`, `randbytes` … too), on a line naming a secret as before. The code-injection rule
+  is unchanged: S-EVAL-PY flags all 53 of BenchmarkPython's code-injection cases, 33 of them safe, and what keeps
+  those safe is a check of the value that does not make `eval` safe in general, so the taint pass does not read it
+  as a sanitizer (the progress log).
+
+- **The supply-chain model's tree on a bundle (P-17).** On fourteen benign files of 2.4 to 13.3 million
+  characters (monaco, plotly, notebook, jsdom), the tree took 110.3 s and now 25.8 s, the answers the same: a
+  reading that can answer nothing (a function cut, the iteration cap met, the budget spent: the file is the text
+  follower's then) stops at once instead of reading on to a fixpoint (monaco's TypeScript workers: 12 to 22 s, now
+  1.5 to 3 s), a callee's names are made once, dotted names are compared without being built, and the pass's own
+  maps hash with FxHash's multiply. The files it reads to the end are still about nine times the text follower (D-8
+  keeps the 2,000,000-character limit for now).
+- **An sdist's or a wheel's file that pip installs through `..` is CRITICAL (BR-4; rule set 2.71.0).** Such a
+  member (`pkg-1.0/x/../setup.py`, a wheel's `x/../evil.pth`) is read where pip writes it, as it was, and its
+  SC-ARCHIVE-PATH ("Archive path through '..'") is CRITICAL now, whatever the file holds: no packaging tool writes
+  one, and all it does is install a file under another name than a listing shows. A release with one is
+  SUSPICIOUS, which the guard blocks. A `..` that leaves the folder is MAJOR as before (pip refuses the archive), and
+  the other archive shapes stay MAJOR. None of the benchmark's, the popular set's, Part F's or extra43's releases
+  holds one (BR-4's measurement).
+- **SC-INSTALL-HOOK follows a project's own install hooks (decided October 14).** A project scan judged the
+  project's own install hook by its command only: `"preinstall": "node lib/setup.mjs"` was MAJOR for being there,
+  whatever `lib/setup.mjs` held, and only a dependency's hooks were followed into the files they run (`--deps`). The
+  tensorlake worm (Mini Shai-Hulud; tensorlake 0.5.144, published October 8 by the project's own release workflow)
+  committed exactly that hook to the project's own `typescript/package.json`, running an obfuscated loader committed
+  beside it. Now each install hook of every `package.json` that is not a dependency's — the root's and every nested
+  one's, `preinstall`, `install`, `postinstall` and the prepare family — is followed as a dependency's is: to the
+  files it runs (Node's resolution from the manifest's folder; regular files inside the scanned tree only, through no
+  link, and into no dependency tree without `--deps`) and the scripts those start with node or python (three starts
+  deep, 20 files). The hook is CRITICAL when one of them fails the install-script test (given the manifest's `name`
+  as the package's own, D-9c) or is obfuscated (five or more distinct `_0x` names, as SC-AUTORUN judges a file), the
+  test's reasons first: "Install hook runs lib/setup.mjs, which is obfuscated.", "Install hook runs tools/start.js,
+  which starts tools/second.js, which sends environment variables over the network (the whole environment)." A file
+  the walk does not read as source (a shell script, a `.dat`) is read for these tests and not scanned; one that can't
+  be read as text, and a hook longer than the follower reads, are SC-TRUNCATED, as in the dependency follow. A benign
+  hook keeps its severity (MAJOR, a harmless prepare-family hook INFO). Registry and guard scans are unchanged: they
+  followed a package's hooks already. Both packages (`core.project_hook_checks`, `deps.js` `projectHookChecks`); the
+  `--deps` tests' first-party `postinstall` (`node build.js`, which sends the environment out) is now CRITICAL in both.
+  Tests: `test_review_project_hooks` (8) and `review-project-hooks.test.js`, on inert stand-ins (an "obfuscated" file
+  that only names five `_0x` variables, `.invalid` hosts), and `test_js_parity_project_hooks` (the two CLIs, with and
+  without `--deps`).
+- **pratique's production server commit, f28b6d39: a stricter TLS client, and a proxy's login decoded (NET-1).**
+  `rust/crates/pratique` is pratique's `f28b6d39`. Most of the commit is the library's server, behind its `server`
+  feature, which no package of Lazaret's builds (only `lazaret-net`'s tests use it): the HTTP/1.1 and HTTP/2 server,
+  its runtime and ACME, a scanning proxy for package registries, and conformance testing (tlsfuzzer, testssl.sh). What
+  tlsfuzzer found holds for the client too. It now refuses two things RFC 8446 forbids that it took: a record whose
+  plaintext, padding included, is over the limit, and a record of another type inside a handshake message. Four that
+  it refused already now get the alert the RFC names: an empty alert, a KeyUpdate whose request is neither 0 nor 1, a
+  server Finished not the length of the hash, and a CertificateVerify in a scheme that does not go with the
+  certificate's key. Its HTTP/2 header decoder measures a reference to a large table entry before it copies it, so a
+  header block of such references (an "HPACK bomb") no longer costs memory past the list's limit. And it decodes a
+  proxy's login (`HTTPS_PROXY=http://u%40x:pw@proxy:3128` logs in as `u@x`), as urllib does. `nativenet`, which sends
+  a request to urllib when the two transports would read the proxy setting differently, decodes it too: requests
+  through such a proxy now go over the native transport, while a login the two decode differently (`%+1`, which
+  pratique reads as an escape) still sends them to urllib. The pure part gains two functions Lazaret does not call.
+- **pratique's commit of Oct 9: a connection the per-host limit closed under load (NET-1).** `rust/crates/pratique` is
+  pratique's `b2097695`. Its B-105: when a request waited for room under a host's connection limit, the client could
+  close an idle connection of the request's own kind, parked a moment before, to make room for a new one, so a busy
+  host got one connection more than the limit; such a connection is now the request's to use. The commit also brings
+  the library's server work (B-109 and B-110: constant-time signing keys, real certificates, stateless tickets, client
+  certificates), which Lazaret's network layer does not use: its client's only change is that it can answer a
+  server's request for a certificate with one it is given, which Lazaret never gives (it answers with none, as before).
+  The signing code is now part of the library's network build, unused by Lazaret. CI runs the library's connection
+  tests with the others again.
+- **The HTTPS/TLS library is pratique, taken from its repository (NET-1).** tiny_https is now pratique
+  (https://github.com/lazaret-dev/pratique, Apache-2.0). `rust/crates/pratique` is a commit of that repository:
+  `scripts/sync_pratique.py CHECKOUT [--rev REV]` takes the commit's files as git holds them and records the commit,
+  and `--verify` checks the copy as before. The library's NOTICE comes with it and ships in the sdist: two of its
+  crypto files follow BearSSL, whose MIT notice `rust/NOTICE` now carries for the native library, and its Mozilla
+  root store is under the Mozilla Public License 2.0 (a feature Lazaret does not use; no package carries it). The
+  commit also brings the library's B-103 and B-104, faster public-key and hash code with no interface Lazaret uses
+  changed: SHA-256 and SHA-512 on the CPU's SHA instructions where it has them (checked against the portable code
+  first), X25519's field and ladder and its key generation from a table of base-point multiples read whole at each
+  lookup, Ed25519 verification by signed windows, RSA's products a column at a time, ECDSA P-256's inverse and
+  point operations, X25519 and P-256 compiled a second time for BMI2 on x86-64 (chosen at run time), AES-GCM on
+  short messages and a cheaper GHASH reduction, and Poly1305 four blocks at a time with AVX2.
+- **A registry scan hands each file's text to the engine once (FE-1).** Each step that reads a file (the rules,
+  the import-time test, the scripts it starts, the agent check, the cross-file follower) sent its text again, in
+  a batch escaped into the call's JSON and read back on one thread before the batch's threads started, and the
+  content memo hashed it again for each step. The engine now keeps the texts a scan puts (`texts.put`: the raw
+  UTF-8, no JSON), every step names them by id, and the scan lets them go when it ends, however it ends; each
+  text's digest is worked out once; the agent check and the scripts a file starts are asked a batch at a time
+  (one call per file before), and Node's names for a path once per path. The store is bounded (1 GiB): past it,
+  a scan sends its texts with its calls, as before. On six large releases, each text now crosses once (most
+  crossed three to five times), the calls fall by 74 to 95% (monaco-editor's 11,972 to 1,811), the bytes sent by
+  71 to 80% (356 MB to 96 MB), a scan takes 7 to 17% less time (monaco-editor 19.6 s to 17.4 s, sympy 4.6 s to
+  4.0 s), and its peak memory is lower in five of the six (next 1,025 MB to 776 MB; prettier's rose, 254 MB to
+  278 MB).
+- **pratique's drop of Oct 8: connection set-up, timers, a scheduler, revocation and trust roots.** A new connection
+  now looks its host name up on a thread of its own, so the connect timeout bounds a slow resolver too, keeps the
+  answer 30 seconds, and races the addresses as RFC 8305's "Happy Eyeballs" says: an address family routed nowhere
+  costs a quarter of a second, not the connect timeout per address. Lazaret's requests get this as they are. The
+  drop's other additions are not used by Lazaret yet: a request scheduler (places in flight per host, a byte budget,
+  batches under one deadline, cancelled together), timers for asynchronous code, TLS 1.3 session resumption, OCSP
+  responders asked and the whole chain's revocation, certificate transparency for Fulcio's certificates, Sigstore's
+  trusted root through TUF, ECDSA P-521 and RSA-PSS, internationalized host names, Mozilla's root store (a feature)
+  and the operating systems' own stores, and faster encryption and public-key arithmetic. No interface Lazaret uses
+  changed. The library builds in Sigstore's TUF root (`roots/sigstore_tuf_root.json`), which the sync script now takes
+  and the sdist ships.
+- **pratique's drop of Oct 7: the security review's fixes.** Two rounds of outside review of its verification
+  path, triaged claim by claim against OpenSSL, Go's `crypto/x509` and Go's `note` package, and every confirmed
+  finding fixed with a test (the library's B-93 to B-96): a search for a certificate path that was exponential (now
+  at most 256 signature checks), a version 3 trust anchor without `basicConstraints` that could sign for anything,
+  names the reader skipped escaping a CA's name constraints (and directory-name constraints, which now refuse the
+  chain), a BOOLEAN `01` read as "not critical", a checksum-database lookup that answers a different question, and
+  a leap second in a certificate's time. No interface Lazaret uses changed. The library's brief for its
+  independent review (`SECURITY_REVIEW.md`) is kept with it now.
+- **A project scan is the engine's, whole (Q-1).** In a scan of your own files (`lazaret scan`, the MCP server's
+  scan, `lazaret-registry --full`) the engine read the rules, and then each package ran its own copy of the passes
+  that follow them: the SQL statements without WHERE, the intra-file taint, the SQL built from strings into
+  `execute()`, the function length and complexity, the suppression markers and the cap (1,700 lines of core and
+  1,500 of the npm package's `taint.js`, `sql.js`, `functions.js` and `scan.js`, held together by parity tests). They are
+  the engine's now (`project.rs`, `taint.rs`), one copy for both packages, with the same findings on every file
+  the scanner's tests, the recorded sets, Python's standard library and this repository hold. A taint
+  configuration (`--taint-config`, a trusted `.lazaret-taint.json`) goes with each call. The passes were bounded by
+  30 seconds of wall clock a file, so a slow machine could cut short a file a fast one read whole; they spend the
+  engine's work budget instead, and the same file gets the same findings on every machine (a file that spends it
+  is SC-TRUNCATED, as in dependency mode). `lazaret.scanner.frameworks` is retired (the engine's
+  `pyflow/frameworks.rs` decides for both taint passes). A scan of this repository's Python source (69 files) took
+  2.69 seconds and takes 1.07; twelve packages of Python's standard library (171 files), 2.79 and 1.01; the npm
+  package's source (31 files), 0.53 and 0.32 (best of three, a quiet machine).
+- **A project's metrics are the engine's (Q-1, step 4).** The lines of code, comment lines and duplication of a
+  project scan were worked out after it, each file lexed again in a second engine call and its lines walked in Python
+  (13 to 18% of a scan); the npm package lexed them with its own lexer. The engine gives each file's part
+  (`metrics.rs`: its comment and code lines, and each window of six lines of code keyed as before): to the Python
+  package from the scan's own reading of the file, so a project scan reads each file once, and to the npm package on
+  its own, in place of its lexer. Only the windows are compared across the files outside it. The metrics are the same,
+  held to the code this replaces on files built from every kind of comment, string, line ending and repeat, on this
+  repository and through project scans, in both packages. A scan of this repository's Python source takes 12% less
+  time (0.77 to 0.67 seconds), of Python's asyncio and email packages 15% less, of urllib3 23% less (best of three, in
+  one process).
+- **A project scan redacts the engine's findings once.** The sweep that gives findings built from a file's raw lines
+  the file's own redaction (the flows') took every finding of the engine's scans too, reading each file with a finding
+  again to redact what the engine had redacted when it built them. It takes the findings built outside the engine
+  alone now, as the npm package always has; the results are the same, every field of every finding, and a scan of this
+  repository's Python source takes 15% less time again.
+- **A config or data file's lines are read where a test can report.** S-TOKEN and S-SECRET's key-value test ran on
+  every line of a config or data file, in Python; one pass over the whole text now finds the lines either can report
+  on (a token's, or a credential-named key's before a separator, or a URL's), and the other lines of a large data file
+  are passed over. The same findings, on 4,726 files; the config files of this repository's Python source are scanned
+  in a third of the time.
+- **The native transport speaks TLS 1.2 to a server that speaks nothing newer (pratique's second drop of Oct
+  7).** `registry.npmjs.org` answers only TLS 1.2 from some networks, and its requests went through Python's
+  transport there. pratique now offers TLS 1.2 next to 1.3 under the rules Lazaret asked for: ECDHE with AEAD
+  suites only (no RSA key exchange, no CBC), the extended master secret required, the downgrade check of RFC
+  8446 that catches a TLS 1.3 server pushed down to 1.2, no renegotiation, compression or resumption, no SHA-1 in
+  signatures, and the certificate checks of 1.3. Every reply says which version it came over (`tls`). A server
+  that speaks neither version is refused (below). The drop's other additions (decoding compressed
+  bodies, a cookie jar, `Expect: 100-continue`) are opt-in and Lazaret asks for none of them; it also brings the
+  library's first run against real servers (52 real certificate chains, replayed offline in CI).
+- **Registry documents come compressed (gzip).** Metadata and API answers (a request whose budget is at most
+  64 MiB) ask for `gzip, deflate`, and the native transport decodes them with pratique's own inflate, held to the
+  request's byte budget once decoded and to 200 times their compressed size; a download (a tarball, a wheel, a
+  feed's archive) is still taken byte for byte as published. npm's packuments come 5 to 13 times smaller (vite's
+  39 MB as 4.6), PyPI's documents 4.5 to 5.7. Through a link capped at 100 Mbit/s, fourteen large documents took
+  3.6 s instead of 17.4 one at a time. From a data center with a very fast link to npm they took longer (2.9 to
+  4.6 s instead of 1.1 to 1.6), because npm's CDN compresses a full packument as it sends it:
+  `LAZARET_GZIP=0` turns compression off.
+- **Nothing older than TLS 1.2, on either transport.** A server that speaks neither TLS 1.3 nor TLS 1.2 was handed
+  from the native client to Python's transport, which refused it too on every Python Lazaret supports, but only
+  because Python's own default says so. Now the native client refuses it with an error that names the server
+  ("… speaks neither TLS 1.3 nor TLS 1.2, and Lazaret uses nothing older"), and every connection Python's transport
+  makes (the urllib openers, the kept-alive connections, secret verification) states TLS 1.2 as its minimum, so a
+  process that lowered Python's default does not lower Lazaret's. `SSL_CERT_FILE` and the rest of urllib's default
+  context are as before.
+- **The guard blocks a scan that could not read what a package can be made to hide (T-1, decision 9; rule set
+  2.47.0).** INCOMPLETE used to go through by default, so a package could pass by being slow to scan, or by
+  padding a payload past the size limit inside its file (16 KB of zip did it: the Go/Rust review's GO-1). The
+  guard now blocks an INCOMPLETE package when its scan ran out of time (scanned once more first; a time-out is
+  never cached), the engine could not finish reading it, code that runs or a source file was cut at a limit,
+  code that runs is bytecode (a bytenode `.jsc`, as the benchmark's @builderius/ai-builder 1.0.3 runs its
+  payload at install), or the archive could not be read whole; `--allow-incomplete` lets those through, and
+  `--trust` one package.
+  A download over the 200 MiB limit, or a program too large to read (a 16 MB native library a package names),
+  stays INCOMPLETE and goes through as before. The scan's result says why it is INCOMPLETE (`incomplete`).
+  Of the 1,205 popular releases, the one INCOMPLETE (`@img/sharp-libvips-linuxmusl-x64`, for its library)
+  still goes through.
+- **A release without the provenance the release before it had is blocked by the guard (decision 13).** It is
+  WARN, as a report says it, and blocked while it is newer than 30 days, as pnpm's `trustPolicy:
+  no-downgrade` fails such an install (ultralytics 8.3.45 and 8.3.46 were uploaded with a stolen token and had
+  none of the attestations the releases before them had); `--trust NAME` lets one through. Measured: one
+  benign drop among the 1,205 popular releases (why-is-node-running 3.2.2), and none within 30 days of
+  publishing across three npm projects and three Python sets (952 releases).
+- **Code received over the network and run out of sight says so too (GR-8's follow-up; rule set 2.44.0).**
+  In Go and Rust code, a shell or a program handed what a server sent and started with its window hidden,
+  no console or its output sent to null: "runs code it receives over the network, out of sight (no window,
+  or its output thrown away)". The reason's strength, and so every verdict, is as before.
+- **A program downloaded or decoded, then run out of sight, says so (GR-8; rule set 2.40.0).** The Go and
+  Rust readers note a process started with its window hidden or no console (`SysProcAttr.HideWindow`,
+  `CreationFlags` or Rust's `creation_flags` with `CREATE_NO_WINDOW` or `DETACHED_PROCESS`) or with its
+  output sent to null, and no reason used it. A file written and then run now says it: "downloads a file
+  and then runs it, out of sight (no window, or its output thrown away)", as evm-units' per-OS payload was
+  run in 2025. The reason's strength, and so every verdict, is as before.
+- **SC-B64 passes over files kept as data, and a shell reads what it decodes (N-4; rule set 2.39.0).** A
+  quoted base64 run that decodes to a whole WebAssembly module, a PNG, GIF or WebP image or a WAV
+  sound, read by the format's structure to its end (a module's sections in order with a code section,
+  an image's chunks or blocks, RIFF chunks; what a format carries beside its content at most half of
+  it), is data, not a payload: undici's HTTP parser, which every JavaScript action bundling the
+  Actions toolkit carries, es-module-lexer's and vite's WebAssembly, nltk's icons. A payload with a
+  format's header in front of it is still SC-B64. On the popular set, @vitest/mocker, es-module-lexer,
+  loader-utils, tsx and nltk go from WARN to OK. The dashboard's twin reads them the same way. And a
+  shell text, a hook's command or a command line code hands a shell now says what it does when a
+  pipeline decodes code and hands it to a shell or an interpreter (`echo … | base64 -d | bash`,
+  `xxd -r -p | sh`, `bash -c "$(… | base64 -d)"`: "pipes code it decodes into bash", a strong reason,
+  so CRITICAL in an install hook and at import time), and when a download is piped into an
+  interpreter that reads its script on stdin (`curl … | sudo python3`: "downloads a script and runs
+  it with python3"); the shell parser reads both through quotes and filters, where the old pattern
+  stopped at a `;` inside quotes. The reviewdog/action-setup release of March 2025 (its install.sh
+  decoded a script and piped it into bash) is CRITICAL at its commit.
+
+- **The guard scans in worker processes, with limits.** Every scan runs in a worker,
+  `--jobs 1` included, never in the process that downloads and talks to the package
+  manager. The archive goes to the worker as a file (mode 0600) and is hashed again
+  there; each worker has an address-space limit (`--worker-memory MB`, default 6144, on
+  Linux) and its share of the cores, and a CPU-time limit backs the scan's own deadline. A
+  worker that dies has the archives it held run again, each alone; one that kills its
+  worker again blocks its package as not checked (`--trust` lets it through). With
+  `--jobs 1`, six large archives took the guard's own peak memory from 2.15 GB to 0.22 GB
+  in the same time. `--no-isolate` scans in the guard's process, for a platform where
+  workers cannot start; the guard falls back to that by itself, and says so, when none
+  can.
+- **A release's files share the engine's answers.** A registry scan asks the engine once
+  about content several of a release's files hold (a wheel per platform, the sdist with
+  the same modules): a file's first pass, the import-time and use-time tests, the
+  scripts a script starts and the cross-file follower. A hit is the engine's own
+  answer, rebuilt for the member's path, so the findings and the verdict are the same;
+  an answer the engine could not finish is never kept. litellm 1.104.0 (an sdist and
+  seven wheels, 21,709 source files) scans in 21 s instead of 61 s on two cores, its
+  engine time from 50 s to 8.5 s. `LAZARET_NO_CACHE=1` turns it off. The guard scans
+  one archive at a time and keeps no memo.
+- **The import-time test is faster.** Its supply-chain model parsed each Python file
+  twice, once for the names that hold outside paths and once for the flow, and now
+  parses it once. Its tables of names answer most names without a comparison. A call's
+  text is lexed once, however many of its tests read the tokens. A list of strings to
+  find is scanned at its rarest characters. A search over a long text goes to the places
+  where its strings' character pairs stand, listed once per call, instead of scanning the
+  text again; on a bundle the scans had read it some 40 to 60 times. A search whose
+  matches all start with one of a few strings looks for them even where their
+  characters are common (each place is checked for a whole string before the matcher
+  tries it), one that could only look for a common first character runs its automaton
+  over the text instead of trying each place, and the automaton reads two characters a
+  round. The Python model reads a function again only when something its last reading
+  read has changed since (a summary, a class's attributes, a global, a closure's
+  variables, the environment the script stores); a reading it skips counts the steps the
+  last one took, so its budgets stop where they stopped. A callee's names are read once
+  per function, and a function's own nodes walked once; the parser's tokens are the
+  lexers' too; the models' own thread searches the text by the call's character pairs, as
+  the call does, and shares what both read (the literals' spans); a list of strings
+  whose characters are common in the text (`curl`, `host `, `ping`, … in a bundle) is
+  looked for by an automaton that reads each character once; the decoded view's copy of
+  the text gets character pairs of its own; a text's pairs and their places are read in
+  two passes where they took four; the assignments the data-flow test reads are read by
+  hand. Measured on the same harness before P-1 and now, in instructions per call on a
+  warm engine: litellm's `proxy_server.py` (0.82 MB) 1,546 M to 764 M, playwright-core's
+  `coreBundle.js` 5,815 M to 2,860 M and `utilsBundle.js` 8,580 M to 4,124 M: half or
+  less, with the same answers.
+- **SC-USE-RISK reads the same files on every machine.** Registry and guard scans read a
+  package's code that runs only when it is used, smallest files first, for at most 3
+  seconds per release file: a slower machine read less, and nothing said so. The bound
+  is now 24,000,000 characters per release file, which reads what 3 seconds read on two
+  cores at the same cost. A registry scan's result carries what was read (`useTime`:
+  files and characters, of how many, and the bound), in the JSON, the MCP server's answer
+  and a line of the summary when code was left unread (next 16.3.8: 32% of 74 million
+  characters).
+- **Every pattern runs in linear time.** linre, the engine's linear-time regex engine,
+  ran 616 of the rules' patterns in 0.1.8, and the port of CPython's backtracking
+  matcher the rest. It now runs every one of them, and every pattern the engine builds
+  as it scans, so no text can make a rule's pattern backtrack; a pattern it would not
+  run fails the tests. It runs lookaheads of any width (`(?!\s*\()`, the rest of an
+  argument list or a string), remembering what each one's walks found in a text, and a
+  backreference to a quote (`(["'])…\1`) as one branch per quote. A pattern that named
+  something twice (a loop's variable, a comprehension's, a string array accessor's
+  parameter) or counted further than a program holds (64 strings in a constant array,
+  a decoder call's 20,000 arguments) is written without it, and the engine checks the
+  match instead. Two read further than before: SC-EVAL-DECODER reads a decoder's whole
+  body (it stopped after 2,000 items), and a write to a shell's startup file reads
+  `open()`'s arguments up to the mode however many there are (it stopped after 300).
+  The other rewritten patterns answer as before: on the benchmark's 945 releases and
+  the 1,205 popular ones, every verdict and every finding is the same. Scans take as
+  long as before (the engine's five main calls on 1,500 installed files: 8.1 s, against
+  8.2 s), and playwright-core's two bundles 4% to 6% fewer instructions. The port of
+  CPython's backtracking matcher is retired, and with it the SRE library's notices in the
+  engine's license files (which left any use beyond CNRI's Python 1.6 license to Secret
+  Labs AB). A taint configuration's patterns must be ones linre runs: `--taint-config`
+  rejects one it does not (a conditional, an atomic group or a possessive repeat, a
+  repeat of what can match the empty string, a `\N{…}` escape), with the reason, as it
+  already rejected patterns that could backtrack. The registry's rule set is 2.28.0, so
+  stored verdicts are scanned again.
+- **The native engine is Lazaret's own work.** Its last translations of CPython code are
+  retired: the reading of a hook command's words is written from shlex's documentation
+  and held to Python's shlex (on the hooks corpus and 30,000 random commands), the
+  final-sigma rule of `str.lower()` follows the Unicode Standard's definition, and `re`'s
+  extra case equivalences are derived from Unicode's case mappings. Every answer is the
+  same. The engine's notice says what was CPython's. Its crates, the wheels, the sdist and
+  the npm package are `Apache-2.0 AND Unicode-3.0`, and none carries CPython's license
+  (`LICENSE-PYTHON`) any more: the codec names the npm package and the dashboard list, to
+  read a coding cookie as Python does, are what Python's codecs answer to, facts about
+  Python rather than CPython's code.
+
+### Fixed
+
+- **Security: a repository's scan reads every file of the commit at its own path, also where two paths differ only in
+  case, and on a disk that holds them as one name says it was not read whole (MAC-TESTS; no rule-set change).** `lazaret
+  scan github:…` / `gitlab:…` and the registry's GitHub scans (`discover --scan`, `--github-scan-all`) write the
+  commit's archive to a folder and scan the folder. Of two paths that differ only in case or Unicode form (`App.py` and
+  `app.py`, `Package.json` and `package.json`, `Lib/a.py` and `lib/A.py`), the checkout wrote the second as
+  `<path>.lazaret-dupN`, on every disk: a name no rule reads as the file it is, so a Python sink or an install hook in
+  it was not found and the result was OK. On macOS's and Windows' disks, which hold such paths as one name, it lost
+  more: of `Setup.py`, `setup.py` and `SETUP.PY` the third was written over the second, unread, while the anomalies said
+  both were kept; a folder beside a file of its name (`.github/` beside a file `.GITHUB`, `.vscode/` beside `.VSCODE`)
+  could not be made, so its workflows or tasks were not read (the result was incomplete, the paths said to be left out
+  of the archive: `export-ignore`); a folder beside its twin folder (`.github/` beside `.GitHub/`) was merged into it,
+  and its findings were reported at a path the commit does not have. Now every path is written under its own name
+  wherever the disk takes it (each folder made by the checkout, each file created where nothing is, `O_EXCL`), so on a
+  disk that tells the names apart (Linux's) the checkout is the commit's tree as it is and nothing else changes. Where
+  the disk refuses a name, the path is written whole, under its real name, in a twin tree beside the checkout; each twin
+  tree is given the commit's other files it can hold (hard links), and the scan reads it as the commit's own: its
+  workflows, `package.json`, editor settings and sources by their paths, with the scripts, hooks' targets and helpers
+  beside them, every finding reported once at its path in the commit. Two paths that are one name on such a disk are
+  still never side by side, so the scan of a commit that has such paths is INCOMPLETE there, naming them (SUSPICIOUS
+  where a strong indicator is found; `--accept-incomplete` leaves the CLI's exit status to the gate): scan it on Linux
+  or a case-sensitive volume to read it whole. Each path kept apart is a `case` anomaly naming the path it is one name
+  with. A path no twin tree can hold, one the disk refuses outright, or on Windows a name it would not keep as given (a
+  device's name, `name:stream`, a trailing dot or space) is a part not read, in the CLI and now in the registry's scans
+  too: INCOMPLETE, naming the path (it is no longer fetched again by its blob and called `export-ignore`). Found when
+  the suite's test of three such twins failed on a Mac (2 files of 3). Held end to end, on this machine's disk and on
+  one that folds names as macOS's does (simulated on Linux, `tests/_folding_disk.py`): the CLI's report and the
+  registry's result find a workflow's secrets, an install hook, an editor task that runs on open, a Python sink, a
+  task's or a hook's script beside a twin and a tainted call into a helper of the root, each at its path, and every
+  finding this machine's disk gives is given on the folding disk too (`test_checkout_twins`).
+
+- **The suite on a Mac (MAC-TESTS).** The TLS tests' certificates are made in Python (`tests/_pki.py`) and, for the npm
+  package's `verify-secrets.test.js`, with node:crypto: ECDSA on P-256 named, signed with SHA-256, the same on every
+  machine. They were made with the `openssl` on PATH, and macOS's (LibreSSL) wrote the EC keys' curve parameters out in
+  full and signed the server's certificate with a digest pratique does not read: Python's strict checks (3.13 and later)
+  refused the keys ("explicit ECC parameters"), pratique the certificate ("unsupported certificate signature algorithm")
+  and Node's TLS both ("UNSPECIFIED"), in 8 Python modules and `verify-secrets.test.js` (OpenSSL 3 given those defaults
+  on Linux fails the 9 files with the Mac's counts exactly). The PostgreSQL client's tests of a default client
+  certificate, an encrypted key and a TLS-terminating server made RSA keys with `openssl` too; `tests/_pki.py` makes
+  those as well (the encrypted key as OpenSSL 3 writes one: PKCS #8, PBES2, AES-256-CBC), and no test runs `openssl`
+  now. The guard's tests of the real tools are split by tool into twelve modules of a few tests each (`test_guard_npm`,
+  `_npm_lockfile`, `_npm_resolve`, `_pnpm`, `_yarn`, `_bun`, `_private_registry`, `_python`, `_pip_indexes`, `_uv`,
+  `_uv_tool`, `_uv_project`; no test removed): `test_guard_npm` and `test_guard_yarn_bun` ran past the 45 s a module
+  gets alone on a Mac. The `archive-npm-diff` fuzz target, `test_npm_tar_readers` and `test_review_archives` look for
+  npm's node-tar in the npm on PATH first (`tests/_support.npm_node_tar`): Homebrew's npm is not beside the node its
+  links lead to, so on such a Mac the target compared nothing and the tests' comparisons with npm skipped. The
+  dashboard's folder test held `z.py` beside `Z.py`, which a Mac's folder cannot: that pair is now a folder of its own,
+  compared where the disk holds both and skipped where it cannot.
+
+- **A download's deadline covers the whole request and holds while a read waits (F-07, the external review of Oct 18; no
+  rule-set change).** On Python's transport (urllib's, and the pool's with `--keepalive`; the native transport has its
+  own total timeout) `lazaret guard`'s deadline for one download (GR-3: 15 minutes, `LAZARET_GUARD_DOWNLOAD_SECONDS`)
+  began only once the response was open, so the connection, TLS, the redirects and the headers were outside it, and it
+  was checked only after `read(64 KiB)` or `read(1 MiB)` returned: a buffered read waits for all its bytes, and a
+  socket's timeout starts again with every byte, so a server that dripped its bytes kept a download going past it (the
+  review's: 100 bytes over a second, a 0.1 s deadline and a 0.2 s socket timeout: 1.007 s), and dripped headers or slow
+  redirects were not held at all. Now the deadline runs from before the request; every connection is made within the
+  time left and watched, and a watchdog shuts it down when the time is up, whatever call waits on it (TLS, the headers,
+  a read); each read of the body waits at most the time left and returns what has come (`read1`); an end of the body the
+  watchdog made is the deadline's error, never a download; and once the time is up no redirect is followed and no
+  connection made, not even its name looked up. `fetch` and `fetch_to_file` raise "the download took over N s" as before
+  (on the native transport too, which said "network error … total time limit"), and the Go proxy still removes what
+  `fetch_to_file` wrote and blocks the module (and leaves no partial zip whatever else stops its scan). A watchdog that
+  cannot start (no thread to be had) fails the download, as a FetchError. On 127.0.0.1 with a 0.2 s deadline and a 0.5 s
+  socket timeout, both paths: a body dripped over 2 s, 2.0 s -> 0.20 s; dripped headers (3.0 s), four hops each 0.15 s
+  late (0.6 s) or with dripped heads (4.3 s), downloads before -> errors at 0.20 s; a server that says nothing, the
+  socket timeout's 0.50 s -> 0.20 s; the review's shape 1.01 s -> 0.10 s; a 64 MiB download at full speed unchanged. The
+  native transport stopped at its own total timeout before and after (0.30 s with a 0.3 s deadline). The pool no longer
+  gives back a connection whose body ended short of its length, nor takes one the watchdog shut down for a stale one
+  (which cost the host's other idle connections). The relays that hand on a file as it comes (pip's and uv's, too large
+  to scan; Go toolchains) keep only their timeout for each read on Python's transport, as before.
+
+- **Security: nothing of the repository it scans runs in the GitHub Action, and no module of the project in
+  `lazaret guard`'s Pythons (F-01).** An external review's P1. The action ran `python -m venv`, `python -m pip install`
+  and `python -m lazaret` in the checkout it scans (a composite step's working directory), and `python -m` puts the
+  current directory first on `sys.path`. A pull request that added `venv.py`, `pip.py` or `lazaret.py` (or a
+  `sitecustomize.py`, a `usercustomize.py`), or a workflow's `PYTHONPATH` or `PYTHONUSERBASE` into the checkout, had its
+  code run by the action with the job's privileges, and could skip the scan. Now each step's shell starts without
+  `BASH_ENV` and `ENV` (`env -u BASH_ENV -u ENV bash --noprofile --norc -eo pipefail {0}`: bash reads `BASH_ENV` before
+  any script, `--norc` or not). The step drops a function of the environment's named as a command it runs, every
+  `PYTHON*` (and in the install step `PIP_*`) variable, Lazaret's native-library overrides (`LAZARET_NATIVE_LIB`, which
+  the loader takes the engine from, and `LAZARET_NATIVE_LIBRARY` and `LAZARET_WHEEL_PLATFORM`, which put a file's bytes
+  in the wheel in place of the engine the commit builds; still read outside the action) and every Rust variable that
+  picks a tool or adds flags (`CARGO`, `CARGO_*`, `RUSTC`, `RUSTC_WRAPPER`, `RUSTFLAGS`, `RUSTUP_TOOLCHAIN`…, in any
+  case: Windows reads them so; `CARGO_HOME` and `RUSTUP_HOME`, which find the toolchain, are kept), and runs from
+  `$RUNNER_TEMP`. `python3` and `cargo` are taken from `PATH` by their absolute path, and one in the workspace (a
+  folder of it, or a symlink into it, a tool cache installed there included, on purpose) is refused, as is a
+  `CARGO_HOME`, `RUSTUP_HOME` or `$RUNNER_TEMP` inside the workspace (anywhere else, `$RUNNER_TEMP` included, is
+  accepted); the backend is given that cargo, and the build `PATH` without the workspace's folders or relative
+  entries (rustc's linker). Every interpreter runs with `-I` (no current or script directory, `PYTHON*` variable or
+  user site directory on its path); pip runs with `--isolated` and `PIP_CONFIG_FILE` the null device, so it reads no configuration file
+  (`--isolated` alone still read `PIP_CONFIG_FILE` and the global ones, `XDG_CONFIG_DIRS`'s too, whose `[install]
+  target` or `no-build-isolation` would have been taken). A relative `path` is made absolute from `$GITHUB_WORKSPACE`.
+  `-I` alone was not enough: pip starts the build backend in a process of its own, without `-I`, and its environment
+  is the step's (the isolated build replaces only `PYTHONPATH`). The inputs, the `sarif` output and the gate's exit
+  code are unchanged, but for a UNC `sarif` (`\\host\share\r.sarif`), which was advertised as relative
+  (`./\\host\share\r.sarif`, a fault older than F-01) and is now advertised as given, as a drive letter's is.
+  What a step cannot undo is the environment it starts in: the calling workflow must not take environment
+  variables, `PATH` entries or tool paths from the checkout (README, "In CI").
+
+  The same class in the Pythons `lazaret guard` starts in the project it is run in: its question to the interpreter
+  uv installs for (`python -c "import sys, platform; …"`) imported a `platform.py` there, which ran and could name
+  another architecture for the wheels the guard checks; its scan workers and multiprocessing's resource tracker,
+  which start as `python -c '…'` in the project, imported a `multiprocessing/` of it, ran it, and left the pool
+  unable to start, so the guard scanned in its own process. The probe is now `python -I -c`. The command line's
+  scan pool (`WorkerPool(..., isolated=True)`, asked for by `guard.main`) starts its children with `-I` while it is
+  open: multiprocessing has no setting for a child's flags or working directory, so the standard library's
+  `multiprocessing.util._args_from_interpreter_flags` is stood in for by one that puts `-I` first, and the last such
+  pool to close puts it back if the stand-in (known by identity) is still in place. Another library's function in
+  place, before a pool opens or while one is open, starts nothing: the pool, a new executor of it or its next job is
+  refused (`FlagsReplaced`, and the guard scans in its own process), and that function is left where it is. That is
+  checked, not prevented: a replacement between the check and the start of a worker (in `submit`) or of the resource
+  tracker (as the executor is made) would start it without `-I`; Lazaret has no runtime dependencies, and nothing else
+  in the guard's process uses multiprocessing. close() lets go of the stand-in only once no executor is being made,
+  whatever the executor's constructor raised (an `OSError` is `Unavailable`, anything else is raised as it is), and an
+  executor made after close is ended without a job. A close in the middle of the first job, an archive's staging, a
+  scan or a scan run alone is the pool being closed (`Unavailable`: the guard scans in its own process), not a lost
+  worker or a missing file. A stand-in of the
+  pool's left in place after the last pool let go (another library's save and restore put it back) passes the flags
+  through unchanged, and a later pool takes it for the standard library's function it wraps. A library's own pool
+  changes nothing. The package managers the guard runs are their own commands (pip's puts its own folder on
+  `sys.path`, not the working directory), and the commit-time hook starts only git. Tests:
+  `tests/build/test_action_isolation.py` (new: both steps run as the runner runs them, with a real interpreter, in a checkout holding shadow modules, a user site `.pth` file, a `BASH_ENV` script and exported
+  functions, with the variables into it and a pip configuration of its, against a stand-in action pip builds offline;
+  no code of the checkout runs, the build is isolated and reads no configuration, the report is where the output
+  says, the gate's exit code passes through), `tests/build/test_action_backend.py` (new: the install step on this
+  repository's own `python/`, its native-library overrides and Rust variables pointing into the checkout: the real
+  backend goes to the engine's build with the cargo the step resolved, given none of them), `test_review_action.py`
+  (what the install step starts python3 and pip with, the refusals, the UNC report path), `test_guard.py`'s
+  `InterpreterProbeTests` and `test_scanpool.py`'s `WorkingFolderTests` (each in a process of its own: an unrelated
+  spawned child keeps its flags before and after an isolated pool, the standard library's function is back after
+  it, another library's is left alone, put there before or while a pool is open or wrapping the stand-in; a close
+  while the executor is being made or before its first job, timed with events: no job, the flags held until then; the
+  resource tracker's own command line has `-I`; a constructor that raises; a close during the first job, a scan or a
+  run alone; a stand-in put back after the last close), and its `ClosedPoolTests` and `CloseMidwayTests` (with a
+  stand-in executor).
+
+- **A tagged template call of a script's wrapper no longer crashes the engine (PANIC-TAGGED; rule set 2.98.0).** John's discovery run of Oct 18: `@epoch32/visage` 1.14.0's `dist/vite/index.js` made the engine panic
+  ("index out of bounds" in `jsparse/tree.rs`), so the release was INCOMPLETE with a CRITICAL SC-TRUNCATED; the npm
+  package's WASM build aborts on a panic. A tagged template (`` fn`…` ``) runs the function as a call does, and the
+  supply-chain model's readers of a wrapper of exec and of a script's `getEnv(name)` read the template's slot as the
+  call's argument list (a node's id as a list's). Older than RA-6, D-21 and D-22 (the same panic at DBG-STACK). They
+  now read a call's, a `new`'s and a tagged template's arguments alike (`sc_call_arg_text`): the tag's first
+  parameter is the template's strings, read as their text when the template is one piece, the others its
+  expressions — so `` getEnv`AWS_SECRET_ACCESS_KEY` `` reads that variable (JavaScript's key is the strings' text) and
+  `` run`whoami` `` runs `whoami` for a wrapper that makes text of its argument. And the tree's `list` gives no items,
+  never a panic, for an id that is no list in a release build (a debug build still stops on it).
+
+- **Conservative address-label comment filtering (D-22; rule set 2.97.0).**
+  Any self-source marker or file-reading capability marker preserves raw text, without requiring a literal
+  script filename. This includes unknown paths, aliases, assembled names and filesystem module access.
+  Python must pass the parser and model budgets before comments/docstrings can be blanked; failures retain raw
+  text. JavaScript retains function/class/method/literal source spans. These are bounded scanner checks,
+  not a claim that arbitrary runtime behavior has been proved absent. Regression cases cover the external
+  review's assembled filename, argv aliases and Python parse/lexer failures.
+
+- **Fetch fallback local checks retain unknown startup readings (D-21; rule set 2.96.0).**
+  The reader checks fallback arguments, writes in the current file and unused class methods. These checks
+  cannot exclude a `node -r` preload, `NODE_OPTIONS`, an earlier script or another package file replacing
+  `fetch`. All existing scan entry points therefore retain the old return/argument reading, including lone
+  files. Received data remains an additional possibility; the unused-Store false positive is not cleared.
+  Function-to-binding names are indexed once per module, avoiding a whole-file scan for each helper.
+  The regression test asserts the local-check branch is reached using a VM sink, without `eval` disabling it.
+
+- **Taint: a check of the parsed URL's host against a list guards an open redirect (Q-5; the engine's, for both
+  packages; rule set 2.94.0).** Project mode, Python. The allowlist guard read a check of the value
+  itself (`if url in ALLOWED:`), not of the host of the URL parsed from it, so a redirect behind
+  `if urlparse(url).netloc not in [...]: return …` was still T-REDIR. A check of the host —
+  `urlparse(url).netloc` (or `.hostname`, `urlsplit`, `urllib.parse.urlparse`), `parsed.netloc` for
+  `parsed = urlparse(url)`, `host` for `host = urlparse(url).netloc` — against a name, a list, a set or a tuple now
+  clears the URL for the redirect (only: the rest of it is still the request's): `in` for the `if`'s block when the
+  whole test needs it, `not in` after a block that leaves (`return`, `raise`, `abort(…)`) when the test holds
+  whenever it does (`… not in [...] or parsed.scheme not in (...)`). A substring test of the URL or of its host
+  (`'example.com' in url`, `url.startswith(…)`, `….netloc.endswith(…)`, `… in 'example.com'`), the `else` of an
+  `in` check, the block of a `not in` check, and a host parsed before the URL was assigned again clear nothing. On
+  BenchmarkPython 0.1 (its test sources not read) redirect goes from +0.33 to +0.81 (false positives 14 to 4 of 21,
+  true positives 13 of 13 kept) and the score from +0.541 to +0.575 (false positives 154 to 144 of 778); nothing
+  else moved there, nor in the recorded snapshot sets.
+- **A look-alike dependency that is itself an established package is INFO, not MAJOR (TYPO-ESTABLISHED; the
+  registry and `lazaret guard`, no rule-set change).** SC-TYPOSQUAT flagged every dependency one change from a
+  popular package's name that the known-name lists do not hold, so a real package below the lists' cut made its
+  dependents WARN: djotls 0.1.0 (two hours old) depends on the crate `roman` (Roman numerals for Djot's lists, first
+  published 2015, 13 versions), one change from `rowan`. Now, for a flagged dependency only, its own history is read
+  with one request — npm's packument, PyPI's Simple API, crates.io's sparse index file — and an established one (its
+  first version more than a year before the release, at least 3 versions, and on npm no new publisher: the account
+  that published its newest version published an earlier one) stays listed as INFO, its message saying why ("…; it
+  is an established package: first published 2015, 13 versions."); it makes no WARN, and the comparison with the
+  release before does not ask about it. PyPI and the crates index name no publisher per version, so a PyPI project or
+  a crate is judged by its age and versions alone. A new package, one with a new publisher, or a history that does
+  not come back (an error, the budget, offline) keeps the finding MAJOR, as before; so do the release's own name and
+  a dependency named like a Node built-in. Each history is read once a run, and nothing is read for a release with no
+  look-alike dependency, offline (`guard cargo --offline`), or with `LAZARET_NO_DEPENDENCY_HISTORY` or
+  `LAZARET_NO_LOOKALIKE_HISTORY` set. `scripts/bench.py lookalikes` reads a run's WARN releases with a look-alike
+  finding this way; the popular sets are not measured yet.
+- **S-SECRET no longer double-reports a PEM private key in source (N-24; the engine's, for both packages; rule
+  set 2.91.0).** A `private_key = "-----BEGIN ... PRIVATE KEY-----..."` assignment was reported by both S-TOKEN
+  (which reads PEM blocks) and S-SECRET; S-SECRET in source now skips a value that begins with a header S-TOKEN
+  reads (`-----BEGIN … PRIVATE KEY-----`), so it is reported once, as a token. A PGP private key block (`-----BEGIN
+  PGP PRIVATE KEY BLOCK-----`), which S-TOKEN does not read, is still S-SECRET's. (A value with a space is still
+  kept — a passphrase has them — which N-24 also settled; a secret in test code stays listed as INFO, as BR-7 step
+  4(e) set it.)
+- **WF-SECRETS-SCOPE: bulk secrets require positive clearance (rule set 2.89.0).**
+  SC-WORKFLOW-SECRETS is CRITICAL when the complete secrets value reaches a send, or when a reachable
+  send-capable step cannot be cleared. The old network pattern is retained as a starting set; opaque senders,
+  unmodeled hand-offs and unresolved upload paths do not silently become MAJOR. Sources are tracked separately
+  across environment overrides, files, GITHUB_ENV, step outputs and downstream job outputs. Workspace paths,
+  dot paths, glob prefixes and flow-form upload inputs are handled; named-credential and credential-sweep
+  exemptions no longer hide a bulk-secrets send. Distinct messages explain proved exposure and uncertainty.
+  Unrelated GETs/uploads, uploads before a write and properly shadowed values stay MAJOR. Literal jq key
+  extraction is distinguished from sending the complete object. Repository scripts/test runners remain outside
+  the workflow reader; their own code is scanned separately. Artifact exclusions are ignored conservatively.
+  Verification of the 23,202 workflow files from 6,813 repositories is **owed (John)**, not a measured result.
+  The inert held-value regression passes; the real pipecat result and benchmark/holdout runs remain owed.
+- **The engine's Python parser reports a string it cannot decode where Python does (found by `test_pyparse_native_b`
+  when GH-SCAN-ALL's new files changed its seeded mutations).** Python decodes a string's escapes as its parser takes
+  the token, before its tokenizer reads the next one; the engine took the token first, so a backslash after the
+  string (`"\U0001F60\", \U0001D41A`, a mutation of the repository's own test inputs) was its error, "unexpected
+  character after line continuation character", where Python reports the string's error, or, as its tokenizer then
+  reads the rest of the text, an open bracket from a line before as "never closed". The error's line is Python's now.
+- **A binding.gyp string of many unclosed command expansions is read in linear time and memory (GYP-SLOW).** An
+  unclosed expansion's command runs to the end of its string, and the reader copied every one before it read them up
+  to its bound (2,000,000 characters of commands, then SC-TRUNCATED): 20,000 of them in one string held 2.4 GB, and
+  took 1.4 s natively and 7 to 8 s in WebAssembly (14 s on a loaded machine, past `review-gyp.test.js`'s 15 s budget
+  with a build beside it). The reader now notes where each command is and copies only what it reads: 0.24 s and
+  52 MB natively, under a second in WebAssembly, and the same findings.
+- **A shell script's comments are not its commands (SH-COMMENT-FP; the engine's, for both packages; rule set
+  2.88.0).** The install-script test read a shell script whole, comments too, and the shell reader had no notion of a
+  comment: agent-sanitizer's `.claude/hooks/session-setup.sh` was SC-AUTORUN CRITICAL ("pipes a download into a
+  shell"), five hooks over, for the `curl … | sh` bootstrap a comment says it replaced. A shell script (a `#!` line
+  naming a shell, or a `.sh` file that does not read as code) is now read without its comments: from a `#` that
+  starts a word, outside quotes, a here-document's body and arithmetic, to the end of its line, its offsets and lines
+  kept. It is read whole, as before, when it reads its own file (`$0`, `$BASH_SOURCE` or a variable holding it, given
+  to a program that is not one that only names a path, such as `dirname` or `echo`, or read on standard input): its
+  comments may be what it runs. So is a text that does not read to its end (a quote or a here-document left open). A
+  hook's command line is read as it was.
+- **The supply-chain models spend their call's work budget (found in P-1).** A call's budget (4 billion steps of the
+  regex engines, then the file is SC-TRUNCATED) is its thread's, and each call sets it. The models run on a thread of
+  the engine's own, made once per calling thread and kept, whose budget was set when it was made and never again: every
+  call it ran spent from the same 4 billion steps, so in a long-lived process (a batch, the MCP server, a scan's
+  worker thread) its searches would, once those were spent, answer nothing without saying so, and the call reported
+  what was left. The thread now takes each call's budget and gives back what it left: what the models spend is the
+  call's, natively as in WebAssembly. No file of the corpora comes near the budget.
+- **The secret rules' false positives (SECRET-FP; the engine's, for both packages; rule set 2.83.0).** John's first
+  crates.io discovery run (Oct 15, 465 scans) had 30 S-SECRET and S-TOKEN BLOCKERs and 238 S-ENTROPY MAJORs, and every
+  one read was not a credential. In source code S-SECRET now tests its value as the config reader does: at least 8
+  characters, not a reference, URL or placeholder (`your-api-key`, `REPLACE-ME`, `…_CANARY`), not a name (words
+  joined by separators, `a.b.c` or `a::b::c`, CamelCase words), with blanks allowed (a passphrase has them); a `PWD`
+  that is the command or a Windows path is the working directory, any other `pwd` a password. S-TOKEN passes over a
+  token that says it is a sample (`EXAMPLE`, `FAKE`, `DUMMY`, `SAMPLE` in it), AWS's and jwt.io's documentation
+  samples, and a JWT whose signature is missing, shorter than 16 characters or a word. S-ENTROPY passes over a name
+  (few changes between lowercase, uppercase and digits, words joined or capitalised: `kernels-community/flash-attn2`,
+  `Win32_NetworkManagement_Ndis`, `CreateOAuth2TokenRequestBody`, `application/3gpp-…+json`), a run of 8 or more
+  characters in sequence (an alphabet), an Ethereum address (`0x` and 40 hex digits), the base64 of a JSON or XML
+  document, and a line that names a public key (`publicKey`, `PUBLIC_KEY`, `pubkey`; not `public` alone). The skip words (`example`, `dummy`, `mock`, `canary`, `made-up`, …) are matched as words, `exampleKey`
+  included, not inside others (`mockingbird`). On the run's 145 flagged lines, scanned again: S-SECRET 0 of 18,
+  S-TOKEN 0 of 12, S-ENTROPY 5 of 115 (three public keys without a name that says so, a generated name). On the
+  popular set's 1,703 releases (in-sample): S-SECRET 480 findings to 87, S-TOKEN 59 to 55 (AWS's and jwt.io's
+  samples), S-ENTROPY 8,208 to 582 (the `windows` crates' feature names were 6,290 of them). Random keys still found:
+  of 4,000 of each alphabet that S-ENTROPY flagged before, none of the 32-character base62 or 43-character base64
+  ones are passed over, 1 base64url one and 2 of the 2,620 20-character base62 ones. Not reported now, by choice:
+  a passphrase of words joined by dashes (`correct-horse-…`, a name to the test; the config reader has always passed
+  over it) and a password under 8 characters. The dashboard keeps its own secret tests until it runs the engine (BR-7
+  step 5).
+- **Security: what a JavaScript method keeps in a member of `this` is the instance's it is called on (D-3c; rule set
+  2.81.0).** D-3b left out what a method is given and puts into a container that is a member of `this`
+  (`record(d) { this.events.push(d); }`): put into every instance's member it held what every caller recorded, and in
+  monaco-editor's loader that joined unrelated flows. So `r.record(process.env)` then a send of `r.events`, of
+  `r.all()` (a method returning `this.events`), of `r` or by `r.flush()` (sending `this.events`) was not followed.
+  Now it is the method's summary: a call on a name puts what it gives there into that name and its member's
+  container, and a call on `this` (`this.record(d)` in another method) makes the caller keep its own parameter so;
+  every class's methods read `this` as their receiver, the value they are called on (B-3, for a class made in several
+  places only before), and a method that returns a member gives a call on a name what that name's member holds.
+  Another instance holds none of it, and a call on anything but a name (`this.recorder.record(…)`) puts it nowhere.
+  Measured: the four tree answers on the 21,786 JavaScript files of the npm packages installed here and on
+  monaco-editor 0.57.0's 1,603 are unchanged, and so is its scan; the popular set's 1,703 releases: no verdict and no
+  finding moved. Owed (John): the benchmark and holdout.
+
+- **Taint: an escaped quote in a Python literal, a `for` statement's targets, values put with `set()` and read with
+  `get()` (Q-2; rule set 2.80.0).** Project mode, Python. A literal holding an escaped quote (`'…[@id=\'' + name +
+  '\']'`) was read as ending there, and the next literal began at its real end, so `+ name +` was read as a string
+  and `name` went unseen. A `for` statement bound nothing: `for name in request.args.keys():` gave `name` no taint
+  (its targets are now bound to what it iterates over, as an assignment would). And a value put into an object with
+  `set()` (configparser's `set(section, option, value)`, a cache's) was not followed: the object takes its taint
+  now, followed by the literal keys (`conf.get('s', 'keyA')` stays clean after `conf.set('s', 'keyB', q)`), and a
+  dict's `get('k')` is read by its key as `d['k']` is.
+
+- **Security: what an extension's entry point requires from its own node_modules is load-time code (EG-6; rule set
+  2.79.0).** vsce packs the packages an extension ships into its `.vsix`, and Node resolves `require('dep')` to
+  `node_modules/dep` in the requiring file's folder or the nearest above it; the walk from `main` followed relative
+  requires alone, so a bundled package's code had the use-time test only (its strongest shapes) though it runs when
+  the editor activates the extension. A bare require or import is now followed into the archive's own node_modules (a
+  built-in module and `vscode` are no folder's; a package the archive does not hold is the registry's), for an
+  extension and for an npm package's bundleDependencies, which its tarball packs the same way; an archive without a
+  node_modules folder reads nothing more. The popular set's 1,703 releases: no verdict and no finding moved. Not
+  done: TypeScript loads a server plugin by name from every installed extension's node_modules, so one extension's
+  plugin name can load another's package.
+- **Security: code built around JS-Confuser's string concealing is CRITICAL for that alone (D-11; rule set
+  2.78.0; John: "seems like we would want that to be Critical").** As a string array the decoded view reads is,
+  install-time code built around one is CRITICAL and import-time code a strong reason: "hides its strings in one
+  long string it decodes as it runs (JS-Confuser's string concealing)", at its first decoder's line. An obfuscated
+  greeting at import is SUSPICIOUS now. The popular set's 1,703 releases: no verdict and no finding moved.
+- **Security: JS-Confuser's string concealing is read in the decoded view (D-11; rule set 2.76.0).** JS-Confuser 2
+  replaces each string of three characters or more with `F(start, length)`: a slice of one long string the file
+  holds, decoys around each piece, decoded with base91 over an alphabet each decoder shuffles. An exfiltration so
+  obfuscated hid `request`, `env` and its host from the install-script and import-time tests, and a release whose
+  main was one was OK; each call is now read as its string, without running anything (a decoder holds the 91
+  characters, each once, and calls `indexOf`; a retriever returns a decoder's call on the long string's slice; the
+  arguments are numbers, or items of a list of literals, which its "low" preset uses), so such a release is
+  SUSPICIOUS, "(in strings it decodes as it runs)". Its "medium" and "high" presets, which put the whole program in
+  a string `Function` runs, and JS-Confuser 1's string array are not read. The popular set's 1,703 releases: no
+  verdict and no finding moved.
+- **Two false positives the supply model's tree gave on benign bundles (D-20; rule set 2.75.0).** Files over
+  2,000,000 characters are the text followers' today, so neither showed; D-8's raised limit would have read them on
+  the tree. notebook 7.6.3's `notebook_core` bundle "runs code it receives over the network": JupyterLab's gettext
+  makes the plural forms its server sends a function, `Function('n', … + forms + …)`, once they pass
+  `^\s*nplurals\s*=\s*\d+\s*;\s*plural\s*=[\s\-?|&=!<>+*/%:;n0-9_()]+$`. After `if (!re.test(x)) throw` (or
+  `return`), x is clean for code when what the test lets through builds no string, reaches no property and opens
+  no block, and names at most one letter (`n`): a test that stops short of the end (gettext.js's), lets letters
+  through, or has a group, an alternation or `.` is not one, and a `RegExp(…)` is the global's unless a direct
+  `eval` or a `with` around the test could make it another name. inspect-ai 0.3.265's view bundle "reads files outside the package and sends them over the
+  network (/app-config)" and "contacts an address typical of data exfiltration (.onion)": the system folders
+  (`/app`, `/data`, `/etc` …) ended at `\b`, which holds before `-` and `.`, so the route `/app-config` was the
+  container's `/app`, and every response the view's API helper fetched a path under it, which a zip reader's
+  `readFile` then "read"; the `.onion` was linkify-it's comment, named once a send was found. A system folder now
+  ends at a separator, a quote or an interpolation, for the trees and the text followers alike (`_LD_FS_ROOT_RE`,
+  `_LD_ABSOLUTE_IN_RE`). The popular set's 1,703 releases: no verdict and no finding moved. A route under a
+  system folder (`/data/…`) would still be a path to the view's helper, whose fetch is a parameter's
+  (`customFetch ?? fetch`): its response holds what the call was given.
+- **Security: data a function hands to a callback it was given is followed (D-19; rule set 2.74.0).**
+  `function withEnv(cb) { cb(JSON.stringify(process.env)); }` then `withEnv((d) => fetch(u, { method: 'POST', body:
+  d }))` sends the whole environment, and a release that did so at import was OK: the supply model's tree, which
+  answers for every file it reads (under 2,000,000 characters), ran a built-in's callback (`forEach`, `then`) with
+  what it was given, but not a callback the script's own function calls. A parameter a function calls with values
+  now runs the function a caller gives there with them: a value the function was given itself is what the caller
+  gives it (`pass(data, cb)` calling `cb(x)`), and a callback handed on to another function carries it
+  (`outer(cb) { inner(cb); }`). The popular set's 1,703 releases: no verdict moved. Across modules the tree follows
+  no such send yet, with a callback or without one (D-7).
+- **Security: an npm tarball npm 10 unpacks otherwise than npm 11 is INCOMPLETE (BR-4, F-14; rule set 2.72.0).**
+  The check of an npm tarball against npm's own reading (F-10) followed node-tar 7.5, which npm 11 bundles; npm 10
+  (Node 22's) bundles node-tar 6.2, which refuses a `..` part by `/` alone, so on Linux and macOS
+  `package/..\x.js` is a file it writes and main can require, which npm 11 refuses and the scan never read: such a
+  release was WARN. It also takes a path's roots off before the first part (`C:x/index.js` is `x/index.js`,
+  `package/C:index.js` a file of that name). Each entry is now held to where both npms write it, and one either
+  writes elsewhere than the scan read it, or the scan did not extract, makes the archive INCOMPLETE, which the guard
+  refuses. The differential fuzz target predicts with the model of the node-tar it runs.
+- **The Actions check no longer fails on GitHub's own actions for the tools they ship.**
+  `python -m lazaret.registry.actions` found `actions/setup-node`'s `externals/7zr.exe` (7-Zip,
+  which it extracts Node with on Windows) as SC-BINARY, MAJOR, and exited 1 on Lazaret's own
+  `ci.yml` and `release.yml` (the live run of Oct 10). A binary in an action of `actions/` or
+  `github/` is MINOR now, as a version tag of theirs already was; in another's action it is
+  MAJOR, and a strong finding of their code is not lowered. The command exits 1 for a finding
+  of MAJOR or above; a MINOR one is listed and leaves the exit as it is.
+- **S-EXEC-JS took RegExp's `exec` for child_process's (rule set 2.69.0).** The rule flags `exec` and `execSync`
+  called with a command built at run time on any receiver but `this`, so a regex's own `exec` in a matching loop
+  (`while ((m = re.exec(s)))`) was a CRITICAL "Shell exec" in any package that matches text. A call on a regex is
+  left out now: a regex literal as the lexer reads one (`/…/g.exec(s)`), or a
+  name the file assigns a whole regex (a literal, `new RegExp(…)` or `RegExp(…)`, the expression ending there) and
+  nothing else. A name also assigned something else (`re = cp`, `re &&= cp`), a regex that is not the whole value
+  (`/x/ && cp`) and another object's member (`config.re`) still count, and so does every other receiver: where one
+  came from is not read, since another file can hand a script child_process (`require('./run').exec(cmd)`), so
+  `db.exec(sql + where)` is flagged as before. The engine's (`scanfile.rs`, both packages) and the dashboard's.
+  Lazaret's scan of its own repository: 13 fewer findings (5,120 to 5,107), none new. Of the 143 S-EXEC-JS findings
+  left, 122 are the test files' examples, in strings, and 21 are regexes the rule cannot tell from a name: made by a
+  function (the npm package's `pyRe(…)`) or passed in.
+
+- **X-CMD took a regex held in a property for a command (rule set 2.70.0).** The cross-file taint pass leaves
+  RegExp's `exec` out of the command sinks when it can prove the receiver is a regex, but it proved only a literal, a
+  `RegExp` constructor or a variable; a property was never a regex to it. vite 8.3.2 bundles convert-source-map, whose
+  `exports.commentRegex` is a getter that returns a regex literal, and a project scan of vite reported a CRITICAL
+  command injection from its dev server's `if-none-match` header to `exports.commentRegex.exec(comment)`. A property
+  is a regex now when every definition of it in the file is one (`o.p = /…/` or `new RegExp(…)`,
+  `Object.defineProperty(o, 'p', …)` with a getter that only returns one or a value that is one, or the object literal
+  `o` was made with), `o` is a parameter or a variable made once from an object literal, and every other reference
+  to `o` is a member access or another property's `defineProperty`: an object passed on, aliased, assigned through
+  a computed key or with another operator, or given to `Object.assign`, proves nothing. vite's scan loses that one
+  finding and nothing else. The engine's (`jsflow/eval.rs`, both packages).
+
+- **The Python parser put an error after a `with` item's target on the `with` line.** Python's error pass reads what
+  follows `as` as an expression too (`invalid_with_item`), so an expression right after the target is read and its
+  error is the one Python reports: `with a as b{k: v,` then `w = x}:` on the next line is "':' expected after
+  dictionary key" on that line, and `with (a as b c):` is "invalid syntax. Perhaps you forgot a comma?". The engine
+  said "invalid syntax" on the `with` line. Found by `test_pyparse_native_b`, whose seeded mutations of the
+  repository's own sources changed when GH-NEW-REPOS added files. Only a file Python cannot read is affected, and its
+  error's line reaches a report only as the taint pass's "syntax error at line N"; no verdict reads it, and the rule
+  set is unchanged. The engine's (`pyparse/parser.rs`, both packages).
+- **The npm package's guess at a file's language read a long run of line breaks in quadratic time (CodeQL).**
+  `scanFile` without a `lang` (the library API, and the dashboard's pasted code) guesses it from the content, and
+  the Python test's `^\s*` crossed line breaks, so each of a run of them rescanned the rest: 100,000 took about 9
+  seconds, a megabyte of blank lines hours, and a long `class` line with no colon the same. The test reads a line's
+  own leading blanks now, with the same answers (200,000 random texts compared). A project scan, which knows each
+  file's language from its name or its `#!` line, never took this path.
+- **A second `pip install -e ./python` could leave Python killed on a Mac with Apple silicon.** An editable install
+  wrote the new engine over the old library in place. macOS keeps the code signature it read for a file and kills a
+  process that loads a library whose bytes changed under it (`zsh: killed`, "Python quit unexpectedly"), so after an
+  engine change, the reinstall the docs ask for could break every command that loads the engine. The library is now
+  written beside the old one and renamed over it, a new file each time, and a failure leaves the old one as it was;
+  installing again mends an install the old way left killing Python.
+- **`git status` no longer lists `python/src/lazaret/_native/` after `pip install -e ./python`.** An editable install
+  compiles the engine and puts it there, where `lazaret.scanner._native` loads it, but `.gitignore` did not list the
+  directory, so the library showed as untracked, one `git add .` away from a commit. `.gitignore` lists it now, and the
+  source bundle (`scripts/make_bundle.py`) skips it as build output when it walks a tree without git; the wheel and the
+  sdist never packed it.
+- **Security: the JavaScript parser reads an assignment or an update to a call, and `let` as a name, as V8 does; a
+  registry scan lists the package files it could not read (JS-PARSE-STRICT; rule set 2.66.0).** The supply-chain
+  tests read a package's JavaScript on the engine's tree where the parser reads it, and on its text where it does not.
+  The parser refused some sources V8 compiles: an assignment or an update to a call (`f() = 1`, `f() += 1`, `f()++`,
+  `for (f() in x)`), which V8 compiles in scripts and modules and leaves to a ReferenceError when the line runs, and
+  `let` as a name before `in` or `instanceof` in a script (`for (let in x)`). One such line, even one that never runs
+  (`if (0) { f() = 1; }`), left the whole file to the text followers, and with it what only the tree answers: another
+  package's code rewritten (D-9), a program a dropper carves out of another file, the loads D-13 compares with
+  package.json, and in project mode the cross-file pass. The parser reads them now, and still refuses what V8 refuses
+  (`f() &&= 1`, `[f()] = []`, `new f() = 1`, `a?.b = 1`). Nesting stays bounded (127 nested arrays, 126 parentheses,
+  84 objects, 256 blocks), where V8 compiles 1,000 and more (the bound keeps the WebAssembly build within the stack
+  of Node's main thread, with room to spare). So a registry or guard scan now lists the package's JavaScript files that one
+  of its tests read and the parser refused, with each one's line and the parser's reason, in one SC-UNPARSED-CODE
+  finding (INFO: the verdict does not move); a TypeScript declaration, which nothing runs, is not listed. On the
+  popular set's and the benchmark's npm releases the parser refuses 11 of their 37,490 JavaScript files, and V8
+  refuses each of them too. Found reviewing F-12 (R48-6).
+- **`lazaret-registry scan openvsx:namespace.name` with no version scans the newest release, as the editors install it
+  (OVSX-LATEST).** It scanned what Open VSX's API calls latest, the newest version of either kind: redhat.vscode-yaml
+  was scanned as 1.25.2026100908, a nightly pre-release, where the Marketplace's module took the release (found by the
+  live checks). When the latest is a pre-release, the query API is read, newest first, for the newest release (at most
+  500 files, in pages of 50: each file of its answer carries up to a hundred of the versions' URLs); the pre-release
+  is taken only when there is none, and `registryInfo` says why (`preReleaseReason`, which the Marketplace's module
+  now gives too, and the text output prints). The guard, which chooses as the editor does, is unchanged.
+- **S-TOKEN took a private-key header with no key after it for a key (S-TOKEN-PEM; rule set 2.65.0).** The token
+  rule's private-key alternative is the header alone, and a header counted as a key when key material (40 or more of
+  base64's characters) was anywhere on its line or the next two. On a minified line, which runs on for megabytes, any
+  long run did: jose's `importPKCS8`, which checks a string by its header
+  (`pkcs8.indexOf('-----BEGIN PRIVATE KEY-----') !== 0`), made two BLOCKERs in the bundles of redhat.vscode-yaml
+  1.25.0 (found by the live checks), as it would in a project or a `--deps` scan of any bundle that holds it. Now the
+  key must begin right after its header: past what a string or a concatenation puts there (blanks, the escapes `\n`
+  `\r` `\t`, a backslash that ends the line, quotes and a string's prefix such as `b"` or `r#"`, `#`, `+`, `,` and
+  `.`) on the header's line, or at the start of the first of the next two lines that holds anything (a comment's marks
+  aside). An encrypted key's `Proc-Type:` counts as its key (on lines of its own, such a key was not reported: its key
+  lines come after the `DEK-Info` line and a blank one). And past a header without its key, the line's other tokens
+  are read, where the header hid them (an AWS key after one on a minified line was not reported). In the engine, the
+  dashboard, and the reading of config files on both sides (`configsecrets.key_follows`, `keyFollows`). A line that
+  holds many headers is read in one walk, each header's key looked for in place: the config files' reading searched
+  the rest of the line for each (over 45 seconds for a line of 60,000, a fifth of a second now).
+- **`lazaret-sca --update-bundle` failed wherever the native transport is used (F-13, NET-1).** The SCA's feeds go
+  over the native transport, each with its own byte budget, and an OSV export's was 4 GiB, past the 2 GiB the native
+  transport carries, which refused every export before it connected (`a budget of more than 2147483648 bytes`), so no
+  bundle could be made unless `LAZARET_NETWORK=python`. Found by the live checks. An OSV export's budget is now the
+  most the native transport carries (2 GiB, `nativenet.MAX_BODY`), and a request whose budget is past it goes to
+  urllib instead of failing (only `LAZARET_MAX_DOWNLOAD_BYTES` or `--max-download-bytes` past 2 GiB asks for one).
+- **Security: the JavaScript parser reads Annex B's HTML-like comments as V8 does, and TypeScript's `<!--` as tsc does
+  (F-12, X-1).** The supply-chain tests read a package's JavaScript on the engine's tree where the parser reads it, and
+  on its text where it does not. `<!--` (a line comment anywhere a token may begin) and `-->` (one where a line begins),
+  which V8 reads in a script (Node's CommonJS: a `.cjs`, and a `.js` whose package.json does not say
+  `"type": "module"`), were syntax errors, so a file that opened with `<!-- a banner` lost what only the tree answers:
+  another package's code rewritten (D-9), a program a dropper carves out of another file, the loads D-13 compares with
+  package.json, and in project mode the cross-file pass. JavaScript now reads both as V8 does (V8 refuses a module that
+  holds either, and Bun refuses `<!--`, so nothing a runtime runs is taken for a comment). TypeScript keeps `<!--` as
+  `<` `!` `--`, as tsc compiles it (`z = 5 <!--y, f()` calls `f`), and the supply-chain facts, which read a TypeScript
+  file's text as JavaScript first, read it as tsc does wherever the JavaScript reading took a `<!--` after code for a
+  comment. `-->` where a line begins is never code, and is a comment in either. Found by a hand-written probe checked
+  against V8 while X-1's `js-parse` fuzz target (the parser's robustness on any bytes) was written; V8 holds the parser
+  to a curated list in `test_jsparse_v8.py`. A parser fix, no rule change.
+- **Security: `lazaret hook` reads every file being committed (H-2's review of H-1).** A file committed in a
+  dependency's folder (`node_modules`, a virtualenv, a `vendor` folder with its marker) went unchecked: the hook
+  scanned the commit as `lazaret <dir>` does, which leaves those folders out without `--deps`. It scans as `--deps`
+  does now, so such a file is read as a dependency's (its supply-chain and secret rules): a GitHub Action's committed
+  `node_modules`, for one. And two names a commit holds could be one file in the hook's temporary tree, the
+  second written over the first, which then went unread: `a\b.py` over `a/b.py` anywhere (a backslash ends a
+  folder's name there, as on Windows), `a.py` over `A.py` on macOS and Windows; a file whose name is taken is
+  SC-TRUNCATED now, which fails the gate. When git stops before printing every blob, each one it did not print is
+  reported (those after the first went unmentioned, though the gate failed), an index entry that is not a blob no
+  longer puts the next file's reading out of step, and paths print as git writes them on every system.
+- **Security: a wheel's or an sdist's file that pip installs through `..` is read where pip writes it, and an sdist pip
+  unpacks otherwise than the registry is INCOMPLETE (BR-4, F-11; rule set 2.64.0).** pip resolves a member's `..`:
+  tarfile writes an sdist's `pkg-1.0/x/../setup.py` through the path, as setup.py, over the setup.py before it, and
+  pip's wheel installer writes `x/../evil.pth` as a .pth file at the top of site-packages. The registry refused such
+  a member as an unsafe path (MAJOR) and never read it, so a release whose setup.py or .pth file came in that way was
+  WARN, which the guard installs. Now the file is read where pip writes it and gets its own tests (that setup.py and
+  that .pth file are SUSPICIOUS), with an SC-ARCHIVE-PATH of its own; a `..` that leaves the folder is refused as
+  before (so does pip). pip also takes an sdist's top folder off only when every member has the same one, and
+  otherwise writes each member under its whole name, where the registry took the first folder off every name: such
+  an sdist, and one whose top folder is `.`, is corrupt, which the guard refuses. The archives build tools write
+  read the same both ways. The fuzz target is `archive-pip-diff`, against pip's own unpacking on each Python here.
+- **Security: an npm tarball that npm's tar reader reads differently from the registry's is INCOMPLETE (BR-4, F-10;
+  rule set 2.63.0).** npm unpacks a package with node-tar; the registry read the tarball with Python's tarfile alone,
+  and the two parse headers differently: a differential fuzzer that runs npm's own node-tar found tarballs from which npm
+  writes a file the scan never read (a ustar prefix field whose first byte is NUL and whose 131st is not: `/index.js` to
+  node-tar, so npm writes the package's main file, and a top-level `index.js`, which the registry dropped, to tarfile)
+  or read under another name (a pax global header's `path`, a regular file named as a directory, a file's header with a
+  link name, a pax value with a newline, `N` and `X` headers, a name that is not UTF-8, a NUL before a newline, a UNC
+  root written with backslashes). `registry/npmtar.py` models node-tar's reading and the registry feeds it the stream
+  tarfile reads: an entry npm writes that tarfile read at another place, under another name or not at all, or a header
+  node-tar finds invalid, makes the archive corrupt, which the guard refuses; a drive-relative root (`C:index.js`) is
+  taken off as node-tar does. Tarballs npm, yarn, pnpm, bun and git write read the same in both. The fuzz target is
+  `archive-npm-diff`.
+- **An archive member's name is case-folded on the engine's Unicode, the same on every Python (BR-2; rule set
+  2.62.0).** EG-4 compares members' names as macOS's and Windows' file systems do (NFD, then case-folded), and did it
+  with the host Python's `unicodedata`: Unicode 13.0 on Python 3.10, 14.0 or later on 3.11 and after, so the same
+  release could have a pair of names that differ only by case on one and none on the other (`xⰯ.js` and `xⱟ.js`,
+  Glagolitic's caudate chri, a pair from Unicode 14.0). The fold is the engine's now, on the Unicode 13.0 data its
+  NFKC reads (`str.casefold()` as 3.10 gives it): the registry's case pairs, the files an installer opens by name, and
+  the checkout writer's pairs.
+- **The report says which lines the duplication measure leaves out (N-13).** A project's Go and Rust files count in
+  its files and lines of code, and not in its duplication (six-line windows rate idiomatic Go and Rust as duplicated:
+  Go's standard library 2 to 13%, popular crates 4 to 54%), and the report did not say so. Its metrics now carry
+  `dupLeftOut`, the lines of code the measure leaves out, and both CLIs' summaries and the HTML report add "(N lines
+  of Go and Rust not measured)" to the duplication when there are any.
+- **A climb out of the script's own folder to a scoped package beside its own is that package's folder (D-9b; rule
+  set 2.61.0).** D-9 read another package's folder from `require.resolve` and from `node_modules` and a package's
+  name in a joined path; `path.join(__dirname, '..', '..', '@scope', 'name', …)` (from `__dirname`,
+  `path.dirname(__filename)` or `import.meta.dirname`) is now one too, so a code file written there is "rewrites
+  another package's code". An unscoped name after the climb is as likely one of the package's own folders (`lib`,
+  `src`), and is not read as another package's.
+- **A method reads `this` as the instance it is called on, in a class made in several places (B-3; rule set
+  2.60.0).** B-1 keeps the instances of a class made in several places apart (vite's MagicString), so what a call
+  on one instance gives a method is not put into the class's `this.x`, and what one method of an instance was given
+  reached nothing another method of that instance did with it: `r.setCode(t); r.run()`, where `run` evals
+  `this.c`, ran nothing received. A method of such a class now reads `this` as a parameter, the value it is called
+  on, which holds what the instance's methods were given, for what the method sends or runs through it: the code is
+  followed for `r`, through another method of its own too (`this.run()`), and not for another instance. What a
+  method returns or keeps of `this` stays with the instance, as before. A class made once is followed as before.
+- **A `--deps` scan gives the tests each installed package's names (D-12b, D-9c).** D-12's install at import of a
+  package the release does not depend on was judged in registry and guard scans, which know the release's manifest,
+  and not in a `--deps` scan, which gave the import-time test no names; and D-9's test, given no name, would read a
+  package's code written into its own folder (`require.resolve('<its name>/…')`) as another package's. Both
+  packages' `--deps` now give each installed package's names, as the registry gives a release's: an npm package's
+  package.json (the nearest `node_modules/<name>` or `node_modules/@scope/<name>`: its own name and the packages it
+  names, of every kind) to the import-time test, and its name as its own to that test and to its install scripts';
+  a Python distribution's, the Name and Requires-Dist of the `*.dist-info` whose RECORD lists the file's top-level
+  module or package. Where neither is known (no package.json, no RECORD), the tests read as before. Measured: both
+  CLIs' `--deps` over the npm trees installed here (29,400 dependency files) and the import-time test on the 535
+  files of 137 pip-installed distributions that name an install: no finding changed.
+- **What a JavaScript script puts into a member's container, the member holds (D-3b; rule set 2.59.0).** D-3 left
+  `o.list.push(x)`, `o.m.set(k, x)`, `this.items.push(x)` and `Object.assign(this.opts, …)` out: put into the object
+  that holds the member, as an assignment to a name's member is, what they were given reached every member read of
+  that object, and joined unrelated flows in vite's bundle. A member is now a container of its own: `this.items` (a
+  member of `this` is a binding already) and `o.list`, a binding beside `o`'s that `o.list` reads and the object's
+  other members do not. Into a member of `this`, what a method holds of its own parameters is not put: a recorder's
+  `this._events.push(new LoaderEvent(type, detail))` then held everything every caller recorded, and in
+  monaco-editor's loader that reached its check that eval runs (SC-USE-RISK CRITICAL). Not followed: the object sent
+  whole after a member's container is filled (`JSON.stringify(o)`), as before. Measured: the benchmark (945 releases),
+  the popular set (1,205, vite 8.3.2 and monaco-editor 0.57.0 among them), Part F's sets and the 43 packages that
+  generate, patch or install code are unchanged, and so are the tree's answers on the 20,422 JavaScript files of the
+  installed npm packages.
+- **A program named in another file, given the data as its arguments, runs none of it (D-17; rule set 2.58.0).** lerna
+  10.0.1 was SUSPICIOUS: `gitCheckout(dirtyManifests, …)` calls a function of another file of the package that runs
+  `exec("git", ["checkout", "--"].concat(files), execOpts)` (its wrapper of execa), and the cross-file follower, which
+  read each function's body with its strings blanked, took it for one that runs what it is given. Its received-code
+  test now reads the body's code, and an exec whose first argument is a literal, plain command line none of whose
+  words is a program that runs what it is given (an interpreter or a shell, a wrapper such as `env` or `sudo`, or one
+  that runs the command its arguments name, such as `xargs`, `timeout` or `npx`) runs none of the data after it. The
+  data as the program, or handed to an interpreter or such a program, is still found. Measured: lerna is OK, and the
+  benchmark and the popular set are unchanged; of the 43 packages that generate, patch or install code D-9 was measured
+  on, now a set of the gates, none is SUSPICIOUS (30 OK, 13 WARN).
+- **The environment held or copied, read by a member's name, is that member (D-16; rule set 2.57.0).** prisma
+  8.0.0-rc.21 was SUSPICIOUS: its `getApiBaseUrl(env = process.env)` reads `env.PRISMA_MANAGEMENT_API_URL`, and a
+  parameter's default, an object's member and a copy (`{ ...process.env }`, `Object.assign({}, process.env)`) kept no
+  mark of being process.env, so the member read as the whole environment, and the Management API's answers it reached
+  were sent in an address; its telemetry sender, which builds its event from a parameter given `{ env: process.env, …
+  }` (`env.platform`, `env.env.npm_config_user_agent`, `env.readProjectPackageJson()`), was next. A member of such a
+  value read by a variable's name (capitals, digits and underscores; `npm_*`; the proxies') is now that variable, as
+  `process.env.X` is; one with `env` in its name is still all of it; any other member is not the environment; and a
+  function that reads a parameter so, or calls a method of its own on it, gives its return and its sends none of the
+  environment a call hands it. The copy or the holder sent whole, and a parameter returned or sent whole, are still
+  the whole environment; a holder under another name, read by that name and sent (`{ data: process.env }`, then
+  `payload.data`), is no longer found. Measured: prisma and corepack are OK, the benchmark and the popular set
+  unchanged; of the 20,422 JavaScript files of the npm packages installed here, only Node's own corepack changes.
+- **A JSON file given require is parsed, not a module load (D-18; rule set 2.57.0).** corepack 0.36.0 was SUSPICIOUS:
+  it requires the package.json of the package manager it downloaded (`require(path.join(tmpFolder, 'package.json'))`),
+  which read as loading a module named by data it receives; and its env file's `{ env: <a copy of the environment>,
+  path }` made the caller's `localEnv?.path` the whole environment (D-16). A `require` whose argument ends in a
+  literal ending in `.json` is now no module load.
+- **A Python comprehension over the environment reads the lists its test names (B-6; rule set 2.55.0).**
+  `{k: v for k, v in os.environ.items() if any(p in k for p in PATTERNS)}` with `PATTERNS = ['TOKEN', 'SECRET']` read
+  as a selection of variables, so sending it had no finding; with the words written in the test it was the whole
+  environment, and the JavaScript model already read a named list (`patterns.some((p) => p.test(k))`). What the names
+  a test reads are given in its function or around it now counts as its text, so secret words there make the
+  comprehension the whole environment; a test of named prefixes (`PREFIXES = ('VITE_', 'APP_')`,
+  `k.startswith(PREFIXES)`) still selects.
+- **A download a JavaScript callback is given, written to a file and run, is a dropper's (D-2; rule set 2.54.0).**
+  `request.get(u, (e, r, body) => { fs.writeFileSync(p, body); exec('python3 ' + p); })` had no finding: neither had
+  https.get's response gathered in its `data` callback and written in its `end` one, nor one piped into
+  `fs.createWriteStream(p)` and run when the stream finishes, nor a helper that writes what it is given; only a
+  download awaited in the same function (`await fetch()`) was found. A function's summary now keeps the files a
+  parameter is written to, so the file is written when the client gives the callback the download (or code the script
+  decodes), and a helper's carries to the callback that calls it; a run of a file read before its write was known is
+  matched at the end. Each is now "downloads a script and runs it with Python" (CRITICAL), in install scripts and at
+  import time. A program downloaded and run stays an installer's, and a download kept but not run is nothing. The
+  benchmark, the popular set and the 20,422 JavaScript files of the npm packages installed here are unchanged.
+- **Code received in a callback and run from a variable outside it is followed (D-15; rule set 2.51.0).**
+  `let p; https.get(u, (res) => { let d = ''; res.on('data', (c) => { d += c; }); res.on('end', () => { p = d;
+  eval(p); }); })` had no finding on the JavaScript tree, which answers for a `.js` file (the text detector found
+  it): what `https.get`'s callback was given reached the variable of the `'end'` callback around it, and was lost
+  when put into one declared outside the callback, where the value cannot carry the callback's parameter. Such a
+  write is now in the callback's summary, as one of its own parameter is: when the callback is given the response,
+  the variable holds it. The send direction was followed already.
+- **What a JavaScript script puts into a container, the container holds (D-3; rule set 2.50.0).** The data flow on
+  the JavaScript tree followed a value into an array's `push` and `unshift` alone, so an install script or code run
+  at import that put the whole environment (or the host name, or a file's bytes) into a `FormData`, a `Map`, a `Set`
+  or a `URLSearchParams`, or `Object.assign`ed it into an object, and sent that, had no finding at all: the tree
+  answered, and the text follower, which reads `x.append(…)` and `x.add(…)`, answers only what the tree cannot read.
+  A container's `set`, `add`, `append`, `splice` (its items) and `fill` now put what they are given into it, and
+  `Object.assign`, `Object.defineProperty(ies)`, `Reflect.set` and `Reflect.defineProperty` into their first
+  argument, when it is a name, for what is sent, what is received and run and what is decoded and run alike;
+  Python's model had them. A member's container (`o.list.push(x)`, `this.items.push(x)`) came with D-3b (above).
+  Measured on the benchmark (945 releases) and the popular set (1,205): no verdict moved; one malicious
+  release's finding now names the upload its code builds (react-milton 19.1.1: the host name and files appended to a
+  `FormData`, CRITICAL as before).
+- **What a package's Python code imports is followed to the end (BR-5; rule set 2.49.0).** Which modules of a wheel
+  or an sdist get the import-time test (SC-IMPORT-RISK) is decided by following the imports of its top-level modules,
+  and which modules pip runs to install an sdist get the install-script test (SC-INSTALL-HOOK) by following
+  setup.py's. The walks stopped at 300 modules seen and at 200, so padding hid a module: a wheel whose
+  `x/__init__.py` imports 299 modules, one of which imports `x/evil.py` (the whole environment sent away), lost
+  evil.py's CRITICAL finding. Both walks now go to the end (what they hold is the archive's own files, and the scan's
+  deadline is checked as each module is read: past it the release is INCOMPLETE, as for every other step), and read
+  what they missed: each module of `import a, b` (the first alone was read), a statement after a `;` or a compound
+  statement's `:` (`try: import x`), a line a backslash continues, a parenthesized name list past 50 names or 2,000
+  characters or with a `)` in a comment, `from .import x` and `from x import(y)`; in setup.py's walk also the
+  packages above a module, the submodules a `from` names and, for an in-tree build backend, the `backend-path`
+  directories pip puts on `sys.path`; and in both a module named by a literal to `importlib.import_module()` (a
+  relative name against its package argument), `__import__()` or `runpy.run_module()`. A `--deps` project scan's
+  walk from an npm package's entry points, which decides which files in `static/`, `public/` or `_next/` are web
+  assets left out of the import-time test, stopped at 5,000 files (and read `exports` to 5,000 entry points); it goes
+  to the end too, in both packages. Measured on the benchmark's and the popular set's 830 PyPI releases, each scanned
+  as the guard scans it before and after: no verdict, finding or INCOMPLETE changes; 58 walks reach more modules
+  (20,244 modules in all to 40,953; 22 releases past 300, auth0-python 4,300); the scans take 7% longer in all (192.5
+  to 205.9 s), the most 3.6 s longer (google-cloud-aiplatform, 92 MB of Python: 6.3 to 9.9 s), the median not at all.
+- **An sdist's in-tree build backend is found on Python 3.10 too (BR-1).** On Python 3.10, which has no
+  tomllib, `[build-system]` was read with a regex that missed the backend in six of seven forms TOML allows
+  (a comment after the header, dotted keys, an inline table, quoted keys, an escape, a decoy section inside a
+  string), so the backend pip runs got no install-script test there. It is read with the TOML reader Lazaret
+  already has for 3.10, as tomllib reads it on 3.11 and later.
+- **`lazaret guard code` stands in for the editor's gallery only where it reads it (EG-8).** An editor
+  whose `product.json` names a gallery the guard doesn't read (a company's own) was looked up in the
+  public registry instead, with a note: `--install-extension NAME` and `--update-extensions` sent every
+  name asked for to that registry, private ones included, and `--update-extensions` installed a public
+  extension of the same name over an extension the private gallery had served (where the identifiers
+  could not be compared, it matched by name). Such an editor, or one whose `product.json` names no
+  gallery, is now refused unless `--gallery vscode|openvsx` says which registry to read for the
+  extensions you name, before any name is sent; `--update-extensions`, which asks for every extension
+  installed, runs only when the guard reads the editor's own gallery, and then always compares the
+  identifiers the editor recorded. VSCodium's gallery is also read from a `product.json` in its folder of
+  user data and from `VSCODE_GALLERY_SERVICE_URL` (and `VSCODE_GALLERY_CONTROL_URL`), as VSCodium applies
+  them; one that can't be read is refused. With no `product.json` found beside the command, the editor's
+  own default gallery is taken as its.
+- **Node tries each name under any case before the next, as macOS and Windows resolve it (EG-9; rule set
+  2.46.0).** `node Setup` tries `Setup`, `Setup.js`, then `Setup.json`; where case is ignored, `Setup.js`
+  opens `setup.js`, so that runs though `Setup.json` is there under its exact name. Lazaret tried every exact
+  name first, and read the data file as what runs. Each name is now tried exactly, then under any case,
+  before the next, and a folder's `package.json` under another case names its `main` too.
+- **The guard's provenance check (EG-10, EG-17).** A verdict was cached the same whether the provenance
+  check had run to the end or not, so a release scanned while the registry's answers couldn't be read
+  (or with `LAZARET_NO_PROVENANCE=1`) kept its unchecked verdict from the cache for good. The cache now
+  records whether the check ran to the end, and a verdict without it, for a release published in the
+  last 30 days, is scanned and checked again. A PyPI release whose wheel had no provenance and whose
+  sdist had was a provenance drop for the guard, which checks the one file pip takes; whether a release
+  has provenance is now the release's, as for the release before it and as `lazaret-registry` reads it.
+  And the pip and uv index checks a file's provenance after its bytes have left the scanner's byte
+  budget, so other downloads don't wait on those requests.
+- **The extension guard's smaller fixes (EG-11 to EG-16, EG-18).** An extension the gallery's list says
+  is malicious is blocked as itself, not replaced: the editor refuses it before it looks for a
+  replacement. A `deprecated` entry of the list now cancels a migration to a pre-release for the same
+  id, as VS Code builds the list (any value JavaScript takes as true, `{}` too). An extension brought
+  twice, once in place of another, is checked and installed once. `ID@VERSION` with a version the
+  Marketplace doesn't have fails, as in the editor, where it installed the replacement. An update of an
+  extension that follows pre-releases is installed with `--pre-release`, and one of an extension
+  installed in every profile without `--profile`, in the default profile where the editor keeps it
+  (with `--profile`, such an update did not take). A profile folder or `--user-data-dir` with a NUL in
+  it is an error, not a traceback.
+- **A `.vsix` is read by the names VS Code extracts, and a zip by the names its installer reads (the
+  review of Oct 7; rule set 2.41.0).** VS Code writes every entry of a `.vsix` whose name begins with
+  `extension` into the extension's folder, a `/` after it or not, so `extensionout/extension.js` is
+  installed as `out/extension.js`; Lazaret read only `extension/…`, and an extension that hid the file
+  its manifest starts that way scanned OK with the file unread. And VS Code's zip reader, like zipfile
+  from Python 3.12 (so pip there), takes an entry's name from its Info-ZIP Unicode Path field when the
+  field's checksum matches the header's name, which Lazaret on Python 3.10 and 3.11 did not read: an
+  entry could be scanned as `notes.txt` and installed as `x.pth` or as the extension's main file. Every
+  `.vsix` and zip entry is now read under the names its installer uses (both of a wheel's when pip's
+  versions differ), the same on every Python; a name that begins with `extension` and no `/`, and an
+  entry with two names, are SC-ARCHIVE-PATH (MAJOR); an archive zipfile from Python 3.12 refuses over a
+  bad field is INCOMPLETE; and `lazaret guard code` reads the manifest the editor checks and refuses a
+  file with more than one entry written as `package.json`.
+- **The guard's scan workers are gone when it is done (N-22).** Closing the worker pool ended its processes
+  and did not wait for them, so the interpreter waited at its exit for workers still starting up and for
+  their pools' threads: under load a test process outlived its time box that way. `close` now waits for
+  what it ended (5 seconds at most) and kills a worker still there.
+- **Archive paths that differ only by case are one file, as macOS and Windows install them (EG-4; rule set
+  2.42.0).** Their file systems ignore case and Unicode normalization, so an npm tarball, a wheel or a
+  `.vsix` holding `index.js` and then `INDEX.js` installs the second one's bytes as `index.js` there; Lazaret
+  read the main file as the first and the twin as a file nothing loads. Such a pair is now SC-ARCHIVE-DUP
+  (MAJOR), and the twin of a file that runs gets the import-time test too. None of the benchmark's, the
+  popular set's or Part F's releases holds such a pair.
+- **A file an installer opens by its name is read under any case, as macOS and Windows open it (EG-4's
+  leftover; rule set 2.45.0).** npm opens a package's `package.json` and `binding.gyp`, pip an sdist's
+  `setup.py` and `pyproject.toml`, VS Code an extension's `package.json`; where case and Unicode
+  normalization are ignored, `Package.json` is that file, whether it was written over a `package.json`
+  before it or is the only one. Lazaret read such a file as an ordinary one, so the install hook a
+  `Package.json` twin named and what its `main` named were not read as what runs. Now a root manifest's
+  case variant is read as the manifest too (its hooks, its entry points, an extension's `vscode:uninstall`),
+  a `Setup.py` is code pip runs, and a `PyProject.toml`'s build backend is too; and a path Node opens (a
+  hook's script, a `main`, a `require`) that names no member exactly is the member with its name under
+  another case, as there (`node Setup.js` runs `setup.js`). Of the benchmark's, the
+  popular set's and Part F's releases, one holds such a name, nested, where nothing opens it
+  (`pyarmor/examples/pybench/Setup.py`).
+- **The code an extension's contributions name is read as code that runs (EG-5; rule set 2.43.0).** VS
+  Code and the processes it starts run some of an extension's code without its `main` module: the
+  TypeScript server loads a `typescriptServerPlugins` package from every installed extension's
+  `node_modules` whenever a JavaScript or TypeScript file is open, whether or not the extension is
+  activated; a debug adapter's `program` starts with a debug session; a notebook renderer and a Markdown
+  preview script run in webviews. Lazaret gave those files the use-time test alone, which reports only
+  the strongest shapes, so a download-and-run in a TypeScript server plugin was OK. They are entry
+  points now, with the import-time test, and the finding says when each runs; a debug adapter's program
+  outside the extension's folder is SC-UNREAD-CODE, as `main` is.
+- **An extension whose `main` or `browser` names a file outside its folder is INCOMPLETE (EG-3).** VS
+  Code joins the entry to the extension's folder and runs the file wherever it is, with only a warning,
+  so an extension could start code from another extension's folder (a pack member's,
+  `../publisher.name-1.0.0/…`); Lazaret found no entry, and could call it OK with what it runs unread.
+  Such an entry is now SC-UNREAD-CODE (MAJOR), and the verdict INCOMPLETE.
+- **A file over the per-file download limit that its registry declares no size for is INCOMPLETE, not an
+  error (N-21).** A Go module's zip (the proxy declares no size before the download), a crate or an npm
+  tarball found over the 200 MiB limit as it came made `lazaret-registry scan` fail; it is now left out
+  as one declared over the limit is (SC-TRUNCATED, the verdict INCOMPLETE). The download's over-budget
+  error is a type of its own (`TooLarge`), not a message. `lazaret guard code` blocks such an extension:
+  it installs the files it scanned, and has none to install.
+- **`lazaret guard cargo` blocks a file in cargo's cache that is not the crate the lockfile names (GR-2).**
+  cargo checks a download against the index's checksum, but builds a `.crate` it finds in its cache as it
+  is, so a file put there (by anything that can write to `CARGO_HOME`) was built while the guard scanned the
+  registry's copy. A cached file of the crate in cargo's cache of that registry (`registry/cache/<host>-<hash>/`,
+  every hash cargo's versions have used; crates.io's sparse and git indexes) whose SHA-256 is not the
+  lockfile's now blocks, and the message names it.
+- **A `.netrc`'s anonymous-FTP password is not a credential (N-25).** S-SECRET reported the password of an
+  entry whose login is `anonymous` (or `ftp`), which by convention is an e-mail address
+  (`default login anonymous password jdoe@example.org`). It now leaves out every password of such an
+  entry, wherever its login sits in it, in both packages; any other entry's password is reported as before.
+- **The pip and uv relay sends a private index's credentials with a file too large to scan.** Such a file
+  is relayed to the tool unscanned (INCOMPLETE), and the relay made a request of its own without the
+  credentials of the file's URL, so a private index that wants them for its files refused it. It now
+  goes through the fetcher's request, as the scan's download does.
+- **The Go guard (and the pip and uv relay) holds at most 512 MiB of archives in memory at once (GR-4).** go asks
+  its proxy for about as many zips at once as the machine has cores, each up to 200 MiB, and
+  the guard read each whole to scan it, all at the same time. Zips are still fetched together
+  (to files), and are read and scanned within a budget of bytes held at once
+  (`LAZARET_GUARD_HOLD_MB`, default 512; a zip larger than it goes alone); module zips from
+  go's cache too, and the files the pip and uv relay serves (by the size the index declares).
+  Eight 40 MB zips asked for at once: 320 MB held at the peak before, 80 MB with a budget of
+  100 MB, in 2.2 s instead of 1.3 s.
+- **The rest of the cargo guard's review (GR-3).** The guard's own runs of cargo now take the
+  command's `-Z` flags, so that they resolve as the command will, and with nightly's
+  `--lockfile-path` the lock that is checked and put back is that one (it was Cargo.lock, and
+  cargo then built from a lock nothing had checked); `cargo install --lockfile-path` is
+  refused. A crate from a plain-http registry on another machine that only the lockfile
+  names, not cargo's settings, is not fetched (INCOMPLETE, not checked): the lockfile is the
+  project's. A download now stops after 15 minutes in all (`LAZARET_GUARD_DOWNLOAD_SECONDS`),
+  where a server sending a byte now and then kept it going for ever. Offline, an entry
+  without a checksum already asked the index nothing; a test now holds it.
+- **`lazaret guard --plan cargo …` runs none of the project's programs (GR-1).** When it
+  updates a lock, cargo asks the compiler its version, through the wrappers and the
+  compiler a project's `.cargo/config.toml` names (`build.rustc-wrapper`,
+  `build.rustc-workspace-wrapper`, `build.rustc`; checked with cargo 1.95), so a dry run
+  ran them. Under `--plan` the guard's cargo commands set them aside (`--config`), and
+  the compiler cargo finds by itself answers; without `--plan` the command runs as the
+  project configures it, as cargo would run it.
+- **The cloud's and the registries' credential files are credential stores (GR-7).** A
+  file read and sent is a harvest ("reads credentials or the whole environment and sends
+  data over the network", and an exfiltration service's address counts as where it went)
+  when the file is a credential store, and only an SSH key, `.git-credentials` and a
+  browser's storage were. Now, in every language, so are the cloud's and the
+  registries': `~/.aws/credentials`, `config` and the SSO cache, `~/.kube/config`,
+  `~/.docker/config.json`, gcloud's `credentials.db`, `access_tokens.db`,
+  `legacy_credentials` and `application_default_credentials.json`, Azure's token caches,
+  `.npmrc`, `.pypirc`, `.netrc`, cargo's `credentials`, the GitHub CLI's `hosts.yml`,
+  `.vault-token` and Terraform's `credentials.tfrc.json`, however the code writes the
+  path (joined with `path.join` or `os.path.join`, `Path.home() / '.aws' /
+  'credentials'`, concatenated or in a template). A path too long to show whole keeps
+  the end that names the store, as it is shown and graded. A public key, and a file
+  that holds no credential, are not stores. No release of the benchmark, the popular
+  set or the Go and Rust sets changes verdict. Rule set 2.38.0.
+- **A dependency's Rust test code is left out of the file rules (N-20).** What
+  `#[cfg(test)]` (or `cfg(all(…, test))`), `#[test]`, `#[bench]` or `#[tokio::test]` marks
+  in a crate's `src/` is compiled only for the crate's own tests, never into a dependent,
+  as its `tests/` folder and Go's `*_test.go` are not. The Rust reader already left it
+  out, but the file rules read it, and its test vectors and keys were WARNs. In registry
+  and guard scans and `--deps`, in both packages, a line whose text is all in such an
+  item, or every line of a file under its own `#![cfg(test)]`, gives no finding now; a
+  line that also holds other code, and a file the parser can't read whole, are read as
+  before, and a project's own tests are still read. WARN to OK: rustls among the popular
+  crates, and charset, dns-parser, mailparse and rustls among Ubuntu's. Rule set 2.37.0.
+- **An npm manifest inside a crate or a Go module is not npm's (N-18).** A `package.json`
+  or a `binding.gyp` in a crate or a Go module (an npm wrapper of a crate's binary, an
+  editor extension kept beside the code) was read for install hooks as an npm package's,
+  and a plain hook counted: 2 of the 30 WARNs of Ubuntu's crates (insta's,
+  tree-sitter-cli's). npm never installs a package from inside a crate or a module, so
+  those hooks, the implicit `node-gyp rebuild` of a crate's root `binding.gyp` among
+  them, are listed as INFO with that reason. A hostile command stays CRITICAL, and a hook
+  is still followed to the script it names, which counts when that script looks hostile
+  (a build script can run npm there). Rule set 2.36.0.
+- **SC-B64 passes over runs that are not base64 data, and an emoji's repeated
+  presentation selector is not SC-HIDDEN-UNICODE (G-5, N-23).** SC-B64 reported any
+  quoted run of 200 base64 characters or more, and in Go and Rust code most such runs
+  are not data: Go's `stringer` name tables (letters alone), big numbers and test
+  vectors (digits alone, or hex digits, after `0x` or not) and test strings that
+  repeat a short period. It was the rule behind 24 of the 39 WARNs of Ubuntu's Go
+  modules and 11 of the 30 of its crates. Base64 of 150 bytes or more mixes letters
+  and digits and does not repeat itself, so a run of one class of characters up to
+  16,384 long and a period of up to 64 characters repeated are passed over, and a run
+  after them on the line that can be data is still reported. A longer run of one class
+  is reported as before: that is what a payload written in hex is (three of the
+  benchmark's malicious PyPI releases carry one of 270,000 hex digits or more; the
+  longest run of the benign sets is 9,327 digits). SC-HIDDEN-UNICODE took an emoji's
+  presentation selector written twice (U+2622 and U+FE0F twice, in the aes crate) for
+  a run of selectors carrying data; one selector repeated up to four times carries
+  none, and GlassWorm's encoding, a run of many different selectors, is still found.
+  WARN to OK: 12 of Ubuntu's Go modules and 8 of its crates, 3 of the popular crates
+  (aes, aws-lc-rs, crc), Go's vendored x/tools, 4 popular npm and PyPI releases
+  (monaco-editor, prettier, modal, notebook) and one benign release of the benchmark
+  (google-adk); no malicious verdict moves. `stringer` tables of mixed case
+  (`AttrSiblingAttrLocation…`) and base64 that is data (keys, certificates, test
+  messages) are still SC-B64. The npm package (the engine) and the dashboard read both
+  the same way. Rule set 2.35.0.
+- **A library declared `crate-type = ["proc-macro"]` is a procedural macro.** Cargo builds
+  a library whose crate types hold `"proc-macro"` as a procedural macro, whatever
+  `proc-macro` says, and runs it inside the compiler of every crate that uses it (checked
+  with cargo 1.95). The readers of a crate's `Cargo.toml` (registry and guard scans, and
+  `--deps`) read only `proc-macro`, so the functions of such a crate that its
+  `#[proc_macro]` entry points do not reach were read as code that runs when called
+  (SC-USE-RISK, strong reasons only), not as build-time code. Both readers read
+  `crate-type` now, and the Rust reader takes a crate with a `#[proc_macro]` function as a
+  procedural-macro crate whatever its manifest says (rustc builds such a function in no
+  other kind of crate). No crate of the Go and Rust benign sets uses that spelling. Rule
+  set 2.34.0.
+- **Code read back from the file itself, in Python, is read on the tree (N-19).** rumdl
+  0.2.78, a popular PyPI package, was SUSPICIOUS for two maintainer scripts: each gives
+  argparse its docstring as the usage text and runs `gh` with arguments
+  (`subprocess.run(["gh", *args])`). The text follower behind "runs code it reads back
+  from its own file" follows names across a whole file, so it took `main()`'s `args` for
+  `run_gh`'s parameter of that name, and gh's arguments for code run. A Python text is now
+  read on its tree, as its sends and its received code are: what it reads back from
+  itself (`open(__file__)`, `Path(__file__).read_text()`, `__doc__`, its loader's source,
+  a data file shipped with it, read or named by a path) is followed through its scopes and
+  calls to what each call runs (`exec`, a shell, an interpreter's `-c`); a program given
+  it as arguments or input runs that program, and a parser of a usage text
+  (`argparse.ArgumentParser`, `optparse`, `docopt`) gives the command line, not the text.
+  A text the tree can't read, and JavaScript, keep the text follower. Rule set 2.32.0, so
+  stored verdicts are scanned again.
+- **A download piped into a shell named by its path.** The install-script and
+  import-time tests read `curl … | sh` and `wget … | bash`, but not a shell named by its
+  path: `wget -O - … | /bin/bash &` (the 2025 Go typosquats' command), `| /usr/bin/env
+  sh` or `| sudo /usr/local/bin/zsh`. They are now, in every language's tests (rule set
+  2.30.0, so stored verdicts are scanned again).
+- **The Go/Rust review (Oct 4): the guard checks what cargo and go use, and its own
+  folders, servers and programs are the user's.** A review of the 0.1.9 Go and Rust
+  work (`lazaret guard go` and `cargo`, the registry's Go and crates modules, the SCA
+  inventory; `audits/lazaret-go-rust-code-review-2026-10-04.md` in the project) found
+  ways around the guard; each is fixed with a test that failed before it:
+  - **A crate's files in tar entries of an unusual type** (a device, a FIFO, a type
+    letter tar does not know) were left out unread, and cargo unpacks them as regular
+    files: a crate could carry its `build.rs` so and scan OK. They are read as files, as
+    cargo and pip read them, and are SC-ARCHIVE-TYPE (MAJOR); an npm tarball's are still
+    skipped, as npm skips them. The registry's rule set is 2.29.0, so stored verdicts are
+    scanned again.
+  - **The guard's scratch projects were in the shared `/tmp`** (`cargo install`, yarn 1,
+    `npm install -g`, `go --plan`), where cargo, rustup, yarn, npm and go read settings
+    from the folders above: another user's `rust-toolchain.toml` or `.cargo/config.toml`
+    there ran their program. They are in a folder of the user's own
+    (`LAZARET_GUARD_SCRATCH`, else the cache folder), a workspace of their own, and the
+    package managers run from the user's folder.
+  - **`guard cargo`:** `cargo install` built another graph than the one checked (its
+    features, `--vers`, a release published meanwhile): it installs `NAME@=VERSION` with
+    the features asked for. A crate cargo had unpacked already was never checked; every
+    crate the lock names is. cargo's configuration is read as cargo reads it
+    (`.cargo/config` first, `include`, `--config`, `[registries]`); a source the guard
+    cannot read, a registry that asks for credentials and a git crate are INCOMPLETE,
+    not a note, so `--block-warn` blocks them; the build runs with `--locked`; an
+    ambiguous published lock blocks; a crate unpacked but not checked is named even when
+    the build fails; and "response over" is a typed error, not words in a message.
+  - **`guard go`:** the local proxy served anyone on the machine, with the user's proxy
+    credentials: it answers only a secret path of the run's and its own `Host`, and only
+    the checksum-database paths go asks for. A zip over 200 MiB was fetched again,
+    unscanned, for go: it is fetched once, to a file, and those bytes are go's. Modules
+    go takes from its module cache, or from their repositories (`GONOPROXY`), were never
+    scanned and the run said nothing: they are listed (`go mod download -json`) and
+    scanned where go keeps them, before a build, test, run or install and after a get or
+    a tidy; a vendored build says it is not checked. `go env` no longer downloads a
+    toolchain (`GOTOOLCHAIN=local`); `-C` after `mod download`, `-modfile` in `GOFLAGS`
+    and a program's own arguments are read as go reads them; `GONOPROXY` alone says
+    which modules come from a repository; a release whose time is unknown is said, and
+    blocked under `--block-warn` (cargo's too).
+  - **Programs are looked up in `PATH`'s absolute folders only**, never the current one:
+    on Windows, a project's `go.exe` or `npm.cmd`, or a repository's `git.exe` for
+    `lazaret hook`, ran in the real tool's place.
+  - **`lazaret-sca`:** the modules of a `go.work` and the members of a Cargo workspace
+    without a lock are read, and a `go.mod` or `Cargo.lock` below the root that nothing
+    reads is counted in a warning. An entry with no version from a lock or the build (a
+    git crate beside a crates.io one, the original of a module a fork replaces) is kept
+    as unknown; only a manifest's range gives way to a known version. go.mod's quoted
+    paths are read with Go's escapes, a version too long to read is an unknown, and the
+    lines not read are counted. go.sum gives every version with a zip hash, its modules
+    get go.mod's replacements, and a module go.sum shows replaced is unknown. An unused
+    replacement in `vendor/modules.txt` is not a module. A bundle dates each ecosystem's
+    advisories, and one whose newest is over 30 days old is no source of them, so the
+    coverage condition fails rather than pass on a stopped mirror. go.mod's replacements
+    are looked up rather than read through (20,000 of each took 12 s).
+- **`lazaret-sca` and hostile manifests**, found by the new fuzzers: a NUL byte in a
+  requirements file's `-r` path raised an error out of the inventory; a TOML file nested
+  too deeply raised `RecursionError` past every reader that catches parse errors (the
+  inventory, the guard's `uv.lock` reader, the package managers' settings); a `setup.py`
+  with an invalid escape printed a `SyntaxWarning`.
+- **The guard took a cut-off answer for a whole one.** A body shorter than its
+  `Content-Length` was read as a shorter page; it is an error now.
+- **Nine popular packages are no longer SUSPICIOUS.** 0.1.8 gave the verdict to vite
+  8.3.2, vitest 5.0.3, monaco-editor 0.57.0, future 1.0.0, sympy 1.14.0, ipython 9.17.1
+  and kubernetes 36.0.3, and 0.1.7 already to coverage 7.16.2 and numba 0.68.0, so
+  the guard blocked them. Each was a reading that took a library's ordinary code for
+  a dropper's:
+  - A library's loader that fetches an address it is given or works out (Monaco's
+    module loader, vitest's module runner) is not downloading code of its own: an
+    address is the script's own when it is text the script writes (a literal, a
+    template, a constant built from them, an item of a list of them), local data, or a
+    global the page or another file defines (`axios.get(src)`, as before), and its
+    caller doesn't give it (an item of a list it is given is the caller's). An object
+    is no address: TypeScript's emit passes Monaco's loader a namespace, not a URL.
+  - What a server is sent is received (its request handler's arguments, its
+    `request`, `connection`, `upgrade` and `data` events); the server itself, its
+    address and options, and what a framework keeps beside it are not.
+  - A Node module's objects are Node's: `createHash('sha1').update(key)` no longer
+    reaches a bundle's own `update()` methods by name (vite's MagicString), and
+    `createRequire()` makes a require, through a bundler's `__require` wrapper too, so
+    the modules loaded with it are known.
+  - The instances of a class made in several places are each its own container: what
+    one instance's methods are given stays with that instance (every MagicString of
+    vite's plugins shared every other's members). What the class's methods read
+    themselves is still every instance's.
+  - A loop that selects the environment's variables by a test of their names (vite's
+    `loadEnv`) reads a selection, not the whole environment, as `.filter()` and a
+    comprehension's test already did, unless the test excludes some or names secrets;
+    what the names a JavaScript test reads are given counts as its text (a stealer's
+    list of `/TOKEN/i`, `/SECRET/i` patterns). An object given `os.environ` and read by
+    a constant name (kubernetes' in-cluster config, future's urllib backport) reads
+    that one variable.
+  - A list's reversal (`names[::-1]`: sympy's `lambdify`, IPython's completer)
+    reorders items and decodes nothing; a string's still decodes.
+  - SC-PTH-EXEC judges a .pth file's `import` line by what its code does: CRITICAL
+    when it executes or decodes a payload, reaches the network or starts another
+    program (what no library does at every interpreter start: the worms' .pth files
+    download Bun and start it), or does what the install-script and import-time tests
+    look for, MAJOR otherwise. `exec('…')` of a plain literal (coverage's
+    `a1_coverage.pth`) is judged by the literal's code; a literal in escapes is still a
+    payload. The dashboard's twin, which has no engine, still reads a line by its
+    pattern alone.
+  - `__doc__=` as a keyword argument (numba's jitclass) is not a read of the file's own
+    docstring.
+  - The cross-file follower seeds a file only with the environment variables another
+    file writes: vite's bundle writes and reads `process.env.BROWSER` itself.
+
+  The registry's rule set is 2.27.0, so stored verdicts are scanned again.
+
 ## [0.1.8] — 2026-10-03
 
 0.1.8 is two rounds of work, released together. Part 1 is the Rust-first

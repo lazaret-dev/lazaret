@@ -28,6 +28,8 @@ import xmlrpc.client
 from unittest import mock
 
 from lazaret.registry import repo
+from lazaret.registry.ecosystems import crates as crates_module
+from tests.registry.test_discover_crates import FakeCrates, crates_api
 
 UTC = datetime.timezone.utc
 NOW = datetime.datetime(2026, 9, 26, 17, 47, 30, tzinfo=UTC)
@@ -119,13 +121,14 @@ class ResumeCase(unittest.TestCase):
         d = tempfile.TemporaryDirectory()
         self.addCleanup(d.cleanup)
         self.db = os.path.join(d.name, "state.db")
-        self.pypi, self.npm = FakePypi(), FakeNpm()
+        self.pypi, self.npm, self.crates = FakePypi(), FakeNpm(), FakeCrates()
 
     def run_cli(self, *argv, at=NOW, patches=()):
         with contextlib.ExitStack() as stack:
             stack.enter_context(mock.patch.object(repo, "_now", return_value=at))
             stack.enter_context(mock.patch.object(repo, "_fetch", side_effect=self.pypi))
             stack.enter_context(mock.patch.object(repo, "http_json", side_effect=self.npm))
+            stack.enter_context(crates_api(self.crates))
             for p in patches:
                 stack.enter_context(p)
             stack.enter_context(mock.patch("sys.argv", ["lazaret-registry", "discover", *argv,
@@ -378,16 +381,20 @@ class NpmResumeTests(ResumeCase):
 
 
 class CliResumeTests(ResumeCase):
-    def test_both_registries_and_a_limit_per_registry(self):
+    def test_every_registry_and_a_limit_per_registry(self):
         self.seed("pypi", 1000)
         self.seed("npm", 500)
+        self.seed("crates", crates_module.micros(NOW), NOW)
         self.pypi.changelog = [release(1000 + i, f"proj-{i}", "1.0", i) for i in range(1, 4)]
         self.npm.add(501, 503, 30)
+        self.crates.rows = [(f"crate-{i}", later(10 * i), "0.1.0", None) for i in range(1, 4)]
         code, out, err = self.run_cli("--resume", "--limit", "2", at=later(60))
         self.assertEqual(code, 0)
-        self.assertEqual(sorted(self.listed(out)), ["npm:p501@1.0.0", "npm:p502@1.0.0",
+        self.assertEqual(sorted(self.listed(out)), ["crates:crate-1@0.1.0", "crates:crate-2@0.1.0",
+                                                   "npm:p501@1.0.0", "npm:p502@1.0.0",
                                                    "pypi:proj-1@1.0", "pypi:proj-2@1.0"])
-        self.assertEqual((self.cursor("pypi")[0], self.cursor("npm")[0]), ("1002", "502"))
+        self.assertEqual((self.cursor("pypi")[0], self.cursor("npm")[0], self.cursor("crates")[0]),
+                         ("1002", "502", str(crates_module.micros(later(20)))))
 
     def test_scan_gets_every_release_and_the_cursor_waits_for_it(self):
         self.seed("pypi", 1000)
