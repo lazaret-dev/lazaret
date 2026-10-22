@@ -1723,6 +1723,25 @@ wrapper-validation action fails a build whose jar matches none, so the engine ch
 - SC-GRADLE-WRAPPER is not compared with a predecessor's (`prior.NOT_COMPARED`, as SC-BINARY): a release that moves
   to a Gradle newer than the list is not a new indicator.
 
+#### A compiled artifact by its bytes (FP-BINARY-BY-NAME, 0.1.9)
+
+SC-BINARY's description comes from a file's bytes: a program's magic (`EXEC_MAGIC`; in text, a DEX's whole magic;
+0xCAFEBABE a universal Mach-O or a Java class by the number after it), a Windows executable's `MZ` in bytes that look
+binary, or a compiled artifact's name (`COMPILED_EXTS`) unless the whole file is text (`binary::whole_text`, the
+review of Oct 27). Text throughout means: read whole, to the size limit (`classify_more` asks for the whole file,
+`Need`, when its first bytes are text; a file over the limit keeps the name's finding), no NUL byte, no window of 2 KB
+(`_LOOKS_SAMPLE`, overlapping by half) that looks binary (`looks_binary`), not an ar archive's text headers
+(`COMPILED_TEXT_MAGIC`, a static library or an import library), and for a format read from its end, no zip
+end-of-central-directory record (`PK\x05\x06`) in the last 65,557 bytes of a `.jar`, `.war`, `.ear` or `.apk`
+(`ZIP_READ_EXTS`: a Spring Boot executable jar is a shell launcher, then the zip, which `java -jar` finds from its end)
+and no UDIF trailer (`koly`) in a `.dmg`'s last 512. The registry classifies a member read whole only when its first
+2 KB look binary, so a name there seldom made text binary (a gap filed on its own: FP-BINARY-BY-NAME's review); the
+project scan, `--deps`, the npm CLI and the GitHub scan route classified every file that is not source, so text named
+`.node`, `.so`, `.dll` or `.class` was SC-BINARY there. The rule's other names, audited: `CONTAINER_DOCUMENT_EXTS`
+(`.docx`, `.odg`, `.epub`, …) are quiet only when their bytes are their container's, a zip's local header (gzip for
+`.svgz` and `.dia`: `CONTAINER_GZIP_EXTS`), else judged as any file (`container_bytes`); `.ts`, `.mts`, `.m2ts` are
+read as transport streams only when their bytes are one; a model file's extension is a hint its bytes must confirm.
+
 ### e. Registry auditing (`lazaret.registry`) and SCA
 
 `lazaret-registry` fetches and audits an npm/PyPI artifact with the same rule

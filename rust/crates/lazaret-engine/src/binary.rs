@@ -95,9 +95,25 @@ fn has(p: &Pack, name: &str, s: &[u32]) -> bool {
     p.strs(name).iter().any(|x| x.as_slice() == s)
 }
 
-/// What a program's first bytes say it is (EXEC_MAGIC), or None.
-fn program(p: &Pack, header: &[u8]) -> Option<PyStr> {
-    pairs(p, "EXEC_MAGIC").iter().find(|(sig, _)| header.starts_with(sig)).map(|(_, d)| d.clone())
+/// What a program's first bytes say it is (EXEC_MAGIC), or None (FP-BINARY-BY-NAME: `binary`, whether the file's
+/// bytes are binary). `dex\n` begins text too: in text, a DEX file's whole magic is needed (`dex\n`, three digits, a
+/// NUL). 0xCAFEBABE is a universal Mach-O when the number after it is an architecture count (1 to 44), a Java class
+/// when it is a class file's version (major 45 or more), else either.
+fn program(p: &Pack, header: &[u8], binary: bool) -> Option<PyStr> {
+    let (sig, desc) = pairs(p, "EXEC_MAGIC").iter().find(|(sig, _)| header.starts_with(sig))?;
+    if sig.as_slice() == b"dex\n" && !binary {
+        let whole = header.len() >= 8 && header[4..7].iter().all(u8::is_ascii_digit) && header[7] == 0;
+        return whole.then(|| desc.clone());
+    }
+    if sig.as_slice() == b"\xca\xfe\xba\xbe" && header.len() >= 8 {
+        let n = u32::from_be_bytes([header[4], header[5], header[6], header[7]]);
+        return Some(match n {
+            1..=44 => p.text("_MACHO_FAT_DESC"),
+            _ if (n & 0xffff) >= 45 => p.text("_JAVA_CLASS_DESC"),
+            _ => desc.clone(),
+        });
+    }
+    Some(desc.clone())
 }
 
 /// os.path.splitext(path)[1] and os.path.basename(path), with "\\" a separator too where `windows`.
@@ -252,13 +268,32 @@ pub fn classify_more(p: &Pack, path: &[u32], data: &[u8], size: u64, context: &s
     }
     let header = &data[..data.len().min(512)];
     let ext = pystr::lower(&ext_and_base(path, windows).0);
-    let is_bin = looks_binary(p, &data[..data.len().min(p.usize("_LOOKS_SAMPLE"))]);
-    let mut desc = program(p, header);
+    let sample = &data[..data.len().min(p.usize("_LOOKS_SAMPLE"))];
+    let is_bin = looks_binary(p, sample);
+    // FP-BINARY-BY-NAME: bytes that are binary look binary or hold a NUL byte (no text does)
+    let binary = is_bin || sample.contains(&0);
+    let mut desc = program(p, header, binary);
     if desc.is_none() && is_bin && header.starts_with(b"MZ") {
         desc = Some(p.text("_PE_DESC"));
     }
+    // a compiled artifact's name counts unless the whole file is text (FP-BINARY-BY-NAME: a Dockerfile named
+    // `Dockerfile.node` is; the review of Oct 27: a jar after a launcher script is not): bytes that are binary, an ar
+    // archive's (whose headers are text: COMPILED_TEXT_MAGIC), or a file not read whole keep it
     if desc.is_none() && has(p, "COMPILED_EXTS", &ext) {
-        desc = Some(pystr::u(&format!("compiled artifact ({})", pystr::to_string(&ext))));
+        let text_head = !binary && !sigs(p, "COMPILED_TEXT_MAGIC").iter().any(|s| header.starts_with(s));
+        let whole = match more {
+            More::Whole(w) => Some(w),
+            _ if data.len() as u64 == size => Some(data),
+            _ => None,
+        };
+        let text = text_head && match whole {
+            Some(w) => whole_text(p, w, &ext),
+            None if matches!(more, More::Ask) => return Classified::Need,
+            None => false,
+        };
+        if !text {
+            desc = Some(pystr::u(&format!("compiled artifact ({})", pystr::to_string(&ext))));
+        }
     }
     if let Some(desc) = desc {
         if context == "wheel" {
@@ -276,7 +311,9 @@ pub fn classify_more(p: &Pack, path: &[u32], data: &[u8], size: u64, context: &s
         let msg = format(&r.msg, &[("where", s(&where_)), ("desc", s(&desc))]);
         return Classified::Issue(file_issue(r, msg));
     }
-    if has(p, "CONTAINER_DOCUMENT_EXTS", &ext) {
+    // a document that is a container (an Office or OpenDocument file, an EPUB: a zip; an SVGZ: gzip) is quiet when
+    // its bytes are that container's (the review of Oct 27: not by its name alone)
+    if has(p, "CONTAINER_DOCUMENT_EXTS", &ext) && container_bytes(p, &ext, header) {
         return Classified::Quiet;
     }
     if header.get(257..262) == Some(b"ustar") {
@@ -352,6 +389,39 @@ pub fn classify_more(p: &Pack, path: &[u32], data: &[u8], size: u64, context: &s
     Classified::Issue(file_issue(r, msg))
 }
 
+/// Whether a file named as a compiled artifact is text through and through (FP-BINARY-BY-NAME, the review of Oct
+/// 27): no NUL byte, no window of _LOOKS_SAMPLE bytes (overlapping by half) that looks binary; a format read from its
+/// end (ZIP_READ_EXTS: a jar, a Spring Boot launcher script before it) with no zip end-of-central-directory record in
+/// its last 65,557 bytes, a disk image (.dmg) with no UDIF trailer (`koly`) in its last 512.
+fn whole_text(p: &Pack, w: &[u8], ext: &[u32]) -> bool {
+    if w.contains(&0) {
+        return false;
+    }
+    let span = p.usize("_LOOKS_SAMPLE").max(2);
+    let mut start = 0;
+    while start < w.len() {
+        if looks_binary(p, &w[start..(start + span).min(w.len())]) {
+            return false;
+        }
+        start += span / 2;
+    }
+    let tail = &w[w.len().saturating_sub(65_557)..];
+    if has(p, "ZIP_READ_EXTS", ext) && tail.windows(4).any(|x| x == b"PK\x05\x06") {
+        return false;
+    }
+    !(pystr::eq(ext, ".dmg") && w.len() >= 512 && w[w.len() - 512..].starts_with(b"koly"))
+}
+
+/// A container document's first bytes are its container's: gzip for CONTAINER_GZIP_EXTS (`.svgz`, `.dia`), a zip's
+/// local header for the rest.
+fn container_bytes(p: &Pack, ext: &[u32], header: &[u8]) -> bool {
+    if has(p, "CONTAINER_GZIP_EXTS", ext) {
+        header.starts_with(b"\x1f\x8b")
+    } else {
+        header.starts_with(b"PK\x03\x04")
+    }
+}
+
 /// S-SECRET for a keystore read to its end (FP-OPAQUE-MEDIA): BLOCKER when it holds a private or secret key in the
 /// clear part of its structure, MAJOR when its entries are encrypted whole (it may hold one), INFO for certificates
 /// alone.
@@ -384,10 +454,10 @@ fn keystore_issue(p: &Pack, k: &crate::media::keystore::Keystore) -> Value {
 /// source code; else None.
 pub fn disguised(p: &Pack, path: &[u32], data: &[u8], windows: bool) -> Option<Value> {
     let header = &data[..data.len().min(512)];
-    let desc = program(p, header).or_else(|| header.starts_with(b"MZ").then(|| p.text("_PE_DESC")))?;
     if !looks_binary(p, &data[..data.len().min(p.usize("DISGUISE_SAMPLE_BYTES"))]) {
         return None;
     }
+    let desc = program(p, header, true).or_else(|| header.starts_with(b"MZ").then(|| p.text("_PE_DESC")))?;
     let base = ext_and_base(path, windows).1;
     let r = RuleText::of(p, "_BIN_DISGUISED_RULE");
     let msg = format(&r.msg, &[("base", s(&base)), ("desc", s(&desc))]);
@@ -397,7 +467,7 @@ pub fn disguised(p: &Pack, path: &[u32], data: &[u8], windows: bool) -> Option<V
 /// The registry's _native_program: a program the system loads (EXEC_MAGIC, a PE), binary bytes only.
 pub fn native_program(p: &Pack, raw: &[u8]) -> bool {
     looks_binary(p, &raw[..raw.len().min(p.usize("_LOOKS_SAMPLE"))])
-        && (program(p, raw).is_some() || raw.starts_with(b"MZ"))
+        && (program(p, raw, true).is_some() || raw.starts_with(b"MZ"))
 }
 
 /// core.pyc_issues: SC-PYC-UNCHECKED for an unchecked-hash .pyc (PEP 552: flags 0b01 after the magic's "\r\n"),
@@ -745,6 +815,26 @@ mod tests {
         assert_eq!(ext_and_base(&u("a\\b.so"), true), (u(".so"), u("b.so")));
         assert_eq!(byte_entropy(&[7u8; 10], false), 0.0);
         assert!((byte_entropy(&(0..=255).collect::<Vec<u8>>(), false) - 8.0).abs() < 1e-12);
+        // a compiled artifact by its bytes, not its name (FP-BINARY-BY-NAME)
+        let desc = |path: &str, data: &[u8]| {
+            classify(&p, &u(path), data, data.len() as u64, "repo", false, false)
+                .map(|v| pystr::to_string(v.as_arr().unwrap()[4].as_str().unwrap()))
+        };
+        assert_eq!(desc("Dockerfile.node", b"FROM node:22\nCMD [\"node\"]\n"), None);
+        assert_eq!(desc("libc.so", b"/* GNU ld script */\nGROUP ( libc.so.6 )\n"), None);
+        assert_eq!(desc("x.dex", b"dex\nnot one\n"), None);
+        // binary bytes keep what they had: a NUL is no text's, `dex\n` before binary bytes is a DEX as before
+        assert!(desc("app.jsc", &b"\x00\x01bytenode\x02".repeat(10)).unwrap().contains("(.jsc)"));
+        assert!(desc("x.bin", b"dex\n\xed\xbf\x00\x01\x02\x03").unwrap().contains("Android DEX"));
+        assert!(desc("x.txt", b"dex\nsome text and a NUL\x00 then text").unwrap().contains("Android DEX"));
+        assert!(desc("x.node", b"\x00\x01\x02\x03junk\x00\x00").unwrap().ends_with("compiled artifact (.node)."));
+        assert!(desc("libx.a", b"!<arch>\n//                                              ").unwrap().contains("(.a)"));
+        assert!(desc("classes.dex", b"dex\n035\x00\x01\x02").unwrap().contains("Android DEX"));
+        assert!(desc("A.class", b"\xca\xfe\xba\xbe\x00\x00\x00\x3d\x00\x14").unwrap().contains("Java .class bytecode"));
+        assert!(desc("tool", b"\xca\xfe\xba\xbe\x00\x00\x00\x02\x01\x00").unwrap().contains("Mach-O universal binary"));
+        assert!(desc("odd", b"\xca\xfe\xba\xbe\x00\x00\x00\x00").unwrap().contains("Mach-O universal binary or Java"));
+        assert!(desc("M.pcm", b"\xcf\xfa\xed\xfe\x0c\x00\x00\x01\x00\x00\x00\x00\x01\x00\x00\x00").unwrap()
+            .contains("Mach-O 64-bit binary"));
         let elf = classify(&p, &u("x/a.bin"), b"\x7fELF\x02\x01\x01\x00", 900, "npm", false, false).unwrap();
         assert_eq!(elf.as_arr().unwrap()[0], Value::Str(u("SC-BINARY")));
         assert!(classify(&p, &u("x/a.bin"), b"\x7fELF", 9, "wheel", false, false).is_some());
@@ -756,6 +846,73 @@ mod tests {
         let pth = pth_issues(&p, &u("x\r\n# n\x0cimport os\nimport sys; exec('1')\n"), true, false);
         assert_eq!(pth.len(), 2);
         assert_eq!(pth[0].as_arr().unwrap()[8], Value::Int(2));
+    }
+
+    #[test]
+    fn a_compiled_name_is_dropped_only_for_a_file_that_is_text_throughout() {
+        // (FP-BINARY-BY-NAME, the review of Oct 27: a Spring Boot executable jar is a launcher script, then the zip)
+        let p = crate::pack::current();
+        let u = pystr::u;
+        let rule = |path: &str, data: &[u8], size: u64, more: More| -> String {
+            match classify_more(&p, &u(path), &data[..data.len().min(8192)], size, "repo", false, false, more) {
+                Classified::Issue(v) => pystr::to_string(v.as_arr().unwrap()[0].as_str().unwrap()),
+                Classified::Quiet => "quiet".into(),
+                Classified::Need => "need".into(),
+                _ => "other".into(),
+            }
+        };
+        let whole = |path: &str, data: &[u8]| rule(path, data, data.len() as u64, More::Whole(data));
+        let launcher = b"#!/bin/bash\n# a launch script\nexec java -jar \"$0\" \"$@\"\n".repeat(200);
+        assert!(launcher.len() > 8192);
+        // text throughout: quiet, once the whole file is read; asked first
+        assert_eq!(rule("app.jar", &launcher, launcher.len() as u64, More::Ask), "need");
+        assert_eq!(whole("app.jar", &launcher), "quiet");
+        assert_eq!(whole("Dockerfile.node", &launcher), "quiet");
+        // not read whole (over the limit, or first bytes alone): the name keeps SC-BINARY
+        assert_eq!(rule("app.jar", &launcher, launcher.len() as u64 + 1, More::No), "SC-BINARY");
+        assert_eq!(rule("app.jar", &launcher, 1 << 30, More::Walked(&crate::media::Walked::Unknown)), "SC-BINARY");
+        // binary bytes past the first 2 KB: a NUL, a window that looks binary, a zip's end record in a jar's last
+        // 65,557 bytes, a disk image's trailer
+        for tail in [&b"PK\x03\x04\x14\x00\x00\x00"[..], &[0xffu8; 2048][..]] {
+            let jar = [launcher.as_slice(), tail, b"\nmore text\n"].concat();
+            assert_eq!(whole("app.jar", &jar), "SC-BINARY");
+            assert_eq!(whole("x.node", &jar), "SC-BINARY");
+        }
+        let eocd = [launcher.as_slice(), b"PK\x05\x06abcdefghijklmnopqr"].concat();
+        for name in ["app.jar", "app.war", "app.ear", "app.apk"] {
+            assert_eq!(whole(name, &eocd), "SC-BINARY", "{name}");
+        }
+        assert_eq!(whole("x.node", &eocd), "quiet");
+        let far = [eocd.as_slice(), &b"text\n".repeat(14_000)].concat();
+        assert_eq!(whole("app.jar", &far), "quiet");
+        let koly = [launcher.as_slice(), b"koly", &[b'x'; 508]].concat();
+        assert_eq!(whole("disk.dmg", &koly), "SC-BINARY");
+        assert_eq!(whole("disk.dmg", &[launcher.as_slice(), &[b'x'; 512]].concat()), "quiet");
+        // an ar archive's text headers keep it
+        let ar = [&b"!<arch>\n"[..], &launcher].concat();
+        assert_eq!(whole("libx.a", &ar), "SC-BINARY");
+    }
+
+    #[test]
+    fn a_container_document_is_quiet_in_its_containers_bytes() {
+        // (the review of Oct 27: not by its name alone)
+        let p = crate::pack::current();
+        let u = pystr::u;
+        let mut x = 0x2545_f491_4f6c_dd1du64;
+        let noise: Vec<u8> = (0..8192).map(|_| { x ^= x << 13; x ^= x >> 7; x ^= x << 17; (x >> 24) as u8 }).collect();
+        let rule = |path: &str, data: &[u8]| {
+            classify(&p, &u(path), data, data.len() as u64, "repo", false, false)
+                .map(|v| pystr::to_string(v.as_arr().unwrap()[0].as_str().unwrap()))
+        };
+        let zip = [&b"PK\x03\x04"[..], &noise].concat();
+        let gz = [&b"\x1f\x8b\x08\x00"[..], &noise].concat();
+        assert_eq!(rule("a.docx", &zip), None);
+        assert_eq!(rule("a.svgz", &gz), None);
+        assert_eq!(rule("a.docx", &noise).as_deref(), Some("SC-OPAQUE-BLOB"));
+        // (a zip named .svgz is no SVGZ: an archive in the package)
+        assert_eq!(rule("a.svgz", &zip).as_deref(), Some("SC-NESTED-ARCHIVE"));
+        assert_eq!(rule("a.svgz", &noise).as_deref(), Some("SC-OPAQUE-BLOB"));
+        assert_eq!(rule("a.xlsx", &[&b"7z\xbc\xaf\x27\x1c"[..], &noise].concat()).as_deref(), Some("SC-NESTED-ARCHIVE"));
     }
 
     /// A .pth file read in chunks of `size` bytes (and an empty last one, as a host reads to its end) -> its kept

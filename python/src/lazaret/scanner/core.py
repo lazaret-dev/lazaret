@@ -1624,7 +1624,7 @@ def is_suppressed(issue, lines, lang=None, dep=False):
 
 COMPILED_EXTS = {".so", ".pyd", ".dll", ".dylib", ".node", ".a", ".lib", ".o",
                  ".obj", ".exe", ".pyc", ".pyo", ".class", ".wasm",
-                 ".dex", ".jar", ".msi", ".dmg",
+                 ".dex", ".jar", ".war", ".ear", ".apk", ".msi", ".dmg",
                  ".jsc"}              # V8 bytecode (bytenode): JavaScript no one can read
 #: MPEG transport stream video (a camera's AVCHD .mts): the extensions it shares
 #: with TypeScript (.ts, .mts), and Blu-ray's .m2ts
@@ -1706,7 +1706,8 @@ def classify_binary(path, data, size, context, whole=None, walked=None, props=_N
     """Return a supply-chain issue dict for a suspicious non-source file (a list
     of two for a keystore that is an opaque blob too), or None:
     SC-BINARY for an executable or a compiled artifact (by its magic bytes, or
-    its extension: inventory in a wheel, a capability to review elsewhere),
+    its extension when its bytes are binary, FP-BINARY-BY-NAME: inventory in a
+    wheel, a capability to review elsewhere),
     SC-NESTED-ARCHIVE for an archive inside the package, SC-OPAQUE-BLOB for a
     high-entropy binary blob; nothing for an image or document file. The
     engine's (BR-7 step 3 d: binary.rs).

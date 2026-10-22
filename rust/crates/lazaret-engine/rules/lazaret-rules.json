@@ -1,6 +1,6 @@
 {
  "format": 1,
- "rule_set": "2.109.0",
+ "rule_set": "2.110.0",
  "source": "lazaret.scanner.core, extracted by scripts/make_rust_tables.py \u2014 do not edit",
  "values": {
   "ALWAYS_PRUNE_DIRS": {
@@ -96,11 +96,13 @@
   "COMPILED_EXTS": {
    "set": [
     ".a",
+    ".apk",
     ".class",
     ".dex",
     ".dll",
     ".dmg",
     ".dylib",
+    ".ear",
     ".exe",
     ".jar",
     ".jsc",
@@ -113,7 +115,18 @@
     ".pyd",
     ".pyo",
     ".so",
+    ".war",
     ".wasm"
+   ]
+  },
+  "COMPILED_TEXT_MAGIC": {
+   "list": [
+    {
+     "value": "!<arch>\n"
+    },
+    {
+     "value": "!<thin>\n"
+    }
    ]
   },
   "CONFIG_EXTS": {
@@ -212,6 +225,12 @@
     ".vsdx",
     ".xlsx",
     ".xmind"
+   ]
+  },
+  "CONTAINER_GZIP_EXTS": {
+   "set": [
+    ".dia",
+    ".svgz"
    ]
   },
   "COVERAGE_RULES": {
@@ -6914,6 +6933,14 @@
      "value": ".go"
     }
    }
+  },
+  "ZIP_READ_EXTS": {
+   "set": [
+    ".apk",
+    ".ear",
+    ".jar",
+    ".war"
+   ]
   },
   "_AGENTDOC_ARCHIVE_RE": {
    "flags": "i",
@@ -14796,6 +14823,9 @@
    "flags": "",
    "re": "[\"'](?!(?:127|0|255)\\.)((?:(?:25[0-5]|2[0-4]\\d|1?\\d?\\d)\\.){3}(?:25[0-5]|2[0-4]\\d|1?\\d?\\d))[\"']"
   },
+  "_JAVA_CLASS_DESC": {
+   "value": "Java .class bytecode"
+  },
   "_JC_TECHNIQUE_REASON": {
    "value": "hides its strings in one long string it decodes as it runs (JS-Confuser's string concealing)"
   },
@@ -16551,6 +16581,9 @@
   },
   "_LOOKS_SAMPLE": {
    "value": 2048
+  },
+  "_MACHO_FAT_DESC": {
+   "value": "Mach-O universal binary (macOS)"
   },
   "_MANIFEST_WRITE_RE": {
    "flags": "",

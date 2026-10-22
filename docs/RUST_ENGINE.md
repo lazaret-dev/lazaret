@@ -411,7 +411,15 @@ rust/
                              keystore's); the formats no walker reads keep their first-bytes
                              exemption (`UNWALKED_MAGIC`); FP-GRADLE-WRAPPER: a Gradle wrapper
                              jar asks for itself whole and its properties (`More::Wrapper`,
-                             `Classified::Wrapper`) and is judged by gradle/
+                             `Classified::Wrapper`) and is judged by gradle/;
+                             FP-BINARY-BY-NAME: a compiled artifact's name (`COMPILED_EXTS`) is
+                             dropped only when the whole file is text, read to the cap
+                             (`whole_text`: no NUL, no binary window anywhere; a zip's end
+                             record keeps a `.jar`, `.war`, `.ear` or `.apk`, a `koly` trailer a
+                             `.dmg`), never for an ar archive's (`COMPILED_TEXT_MAGIC`); in text,
+                             a DEX's whole magic; 0xCAFEBABE a universal Mach-O or a Java class
+                             by the number after it; a container document is quiet only in its
+                             container's bytes (`container_bytes`)
     src/gradle/              a Gradle wrapper jar judged by Gradle's published wrapper checksums
                              (0.1.9, FP-GRADLE-WRAPPER): `mod.rs` (`wrapper_path`; `judge`: the
                              jar's SHA-256 against GRADLE_WRAPPER_CHECKSUMS, quiet, CRITICAL or,

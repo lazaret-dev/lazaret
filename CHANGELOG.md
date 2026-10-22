@@ -2008,6 +2008,35 @@ aggregate):
   dashboard's folder test held `z.py` beside `Z.py`, which a Mac's folder cannot: that pair is now a folder of its own,
   compared where the disk holds both and skipped where it cannot.
 
+- **A file is a compiled binary by its bytes, not its name (FP-BINARY-BY-NAME; rule set 2.110.0).**
+  John's corrected fp-tally: `toanle88/Agentic`'s `examples/sandbox/Dockerfile.node` was SC-BINARY (MAJOR: WARN),
+  "Executable/compiled binary in the source tree: compiled artifact (.node)": a text Dockerfile, called a Node addon
+  by its extension. A name in `COMPILED_EXTS` (`.node`, `.so`, `.dll`, `.exe`, `.class`, `.jar`, `.a`, …) now stops
+  making a file a compiled artifact only when the whole file is text, read to the size limit (the review of Oct 27: a
+  Spring Boot executable jar is a launcher script, then the zip): no NUL byte and no 2 KB window anywhere that looks
+  binary, and for a format read from its end, no zip end-of-central-directory record in a `.jar`'s, `.war`'s,
+  `.ear`'s or `.apk`'s last 65,557 bytes (`ZIP_READ_EXTS`; `.war`, `.ear` and `.apk` join `COMPILED_EXTS`: a zip so
+  named was SC-NESTED-ARCHIVE MAJOR, now SC-BINARY MAJOR) and no UDIF trailer (`koly`) ending a `.dmg`. A file over
+  the limit, binary bytes, or an ar archive's (a static library, whose member headers are text:
+  `COMPILED_TEXT_MAGIC`) keep it; text is read as what it is (a Dockerfile as config). A document that is a container
+  (`CONTAINER_DOCUMENT_EXTS`: an Office or OpenDocument file, an EPUB, an SVGZ) is quiet only when its bytes are its
+  container's (a zip's local header; gzip for `.svgz` and `.dia`, `CONTAINER_GZIP_EXTS`), else judged as any file
+  (random bytes named `.docx` were quiet). A program's own bytes (`EXEC_MAGIC`: ELF, Mach-O, PE, WebAssembly, DEX, 0xCAFEBABE) are
+  one whatever its name, as before; in text a DEX now needs its whole magic (`dex\n`, three digits, a NUL: text may
+  begin `dex\n`; binary bytes after `dex\n` keep "Android DEX bytecode"), and 0xCAFEBABE is told apart by the number
+  after it: a universal Mach-O's architecture count (`_MACHO_FAT_DESC`) or a Java class's version (`_JAVA_CLASS_DESC`;
+  either, as before, when it is neither). Binary bytes under such a name keep SC-BINARY. `binbandit/native`'s `….pcm`
+  stays "Mach-O 64-bit binary", a description only its first bytes give (0xFEEDFACF; `.pcm` is no compiled artifact's
+  name): clang writes a precompiled module as a Mach-O object file when module debugging is on (`-gmodules`, which
+  passes `-fmodule-format=obj`; clang 18 here writes 0xFEEDFACF, MH_OBJECT, its AST in `__CLANG,__clangast`), a raw
+  `CPCH` file otherwise. Measured by route (project scan, `--deps`, the npm CLI and its `--deps`, the registry's
+  sdist, wheel and npm tarball, the GitHub scan route; native and WebAssembly alike): the tally's `Dockerfile.node`, a
+  GNU ld script named `.so` and text beginning `dex\n` named `.dex`, SC-BINARY MAJOR (the GitHub route WARN) → quiet
+  (OK); the registry left them quiet before and after. Still SC-BINARY MAJOR: an ELF and random bytes named `.node`, a
+  Mach-O object named `.pcm` (`binbandit/native`'s shape), a universal Mach-O, a Java class (now described as "Java
+  .class bytecode"), an ar archive whose first 2 KB read as text (in the routes that look at it), a jar or a disk
+  image whose first 2 KB are text (a launcher script before a jar's zip, text before binary bytes), a text file
+  named so past the size limit. A name alone was never enough for a file that is text throughout.
 - **A Gradle wrapper jar is judged by Gradle's published wrapper checksums (FP-GRADLE-WRAPPER, John's decision of Oct
   21: "Yes, check checksums"; rule set 2.109.0).** SC-BINARY (MAJOR) reported every
   `gradle/wrapper/gradle-wrapper.jar`, which nearly every Gradle project commits; John's fp-tally over 261 GitHub
